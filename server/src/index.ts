@@ -7,12 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
+import type { DeviceSnapshot } from './snapshot.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 import { computeTotals, startOfLocalDayMs } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { isConfigured } from './notify.js';
 import { getDayForecast, computeDegradation } from './analytics.js';
+import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
@@ -112,6 +114,124 @@ app.get<{ Querystring: { sn?: string } }>('/api/metrics', async (req, reply) => 
 app.get('/api/forecast', async () => getDayForecast(store.get().devices, recorder, (m) => app.log.info(m)));
 
 app.get('/api/degradation', async () => computeDegradation(store.get().devices, recorder));
+
+/**
+ * Flat key-value snapshot for Home Assistant REST sensors. One HTTP call
+ * returns every metric we expose as an HA entity (`configuration.yaml`
+ * snippet is in DOCS.md). Cached forecast + degradation are reused, so
+ * HA can poll this every 30s without hammering the recorder.
+ */
+app.get('/api/ha-state', async () => {
+  const snap = store.get();
+  const devices = Object.values(snap.devices);
+  type DpuDev = DeviceSnapshot & { projection: DpuProjection };
+  type Shp2Dev = DeviceSnapshot & { projection: Shp2Projection };
+
+  const dpus = (devices as DpuDev[]).filter((d) => d.online && d.projection?.kind === 'dpu');
+  const shp2 = (devices as Shp2Dev[]).find((d) => d.projection?.kind === 'shp2');
+
+  // Power flow — sum across the online DPUs.
+  let fleetPv = 0, fleetIn = 0, fleetOut = 0;
+  for (const d of dpus) {
+    fleetPv += d.projection.pvTotalWatts ?? 0;
+    fleetIn += d.projection.totalInWatts ?? 0;
+    fleetOut += d.projection.totalOutWatts ?? 0;
+  }
+
+  // Grid import — only count AC-in on SHP2-bound DPUs. A spare DPU plugged
+  // into a wall outlet for self-charging does NOT make the house grid-tied.
+  let acIn = 0;
+  if (shp2) {
+    const sourceSns = new Set(
+      shp2.projection.sources.map((s) => s.sn).filter((s): s is string => !!s),
+    );
+    const gridDpus = sourceSns.size > 0 ? dpus.filter((d) => sourceSns.has(d.sn)) : dpus;
+    for (const d of gridDpus) acIn += d.projection.acInWatts ?? 0;
+  }
+
+  // Panel load = sum of SHP2 circuit watts.
+  let panelLoad = 0;
+  if (shp2) for (const c of shp2.projection.circuits) panelLoad += c.watts ?? 0;
+
+  // Cached projections (internally cached ~30min — cheap to call per-request).
+  const fc = await getDayForecast(snap.devices, recorder, () => {});
+  const deg = computeDegradation(snap.devices, recorder);
+
+  // Soonest projected EOL = the pack with the fewest years left.
+  const projecting = deg.packs.filter((p) => p.status === 'projecting');
+  type Pack = (typeof projecting)[number];
+  const soonest = projecting.reduce<Pack | null>(
+    (best, p) => (best == null || (p.yearsToEol ?? 1e9) < (best.yearsToEol ?? 1e9) ? p : best),
+    null,
+  );
+  const peerOutliers = projecting.filter((p) => p.peerOutlier);
+  const eolLabel = (p: Pack | null) =>
+    p == null
+      ? null
+      : p.coreNum != null
+        ? `Core ${p.coreNum} · Pack ${p.packNum}`
+        : `${p.device} · Pack ${p.packNum}`;
+
+  // Alert counts split by source × severity.
+  const alerts = snap.alerts ?? [];
+  const cnt = (src: 'threshold' | 'learned', sev: 'critical' | 'warning' | 'info') =>
+    alerts.filter(
+      (a) => (src === 'learned' ? a.source === 'learned' : a.source !== 'learned') && a.severity === sev,
+    ).length;
+
+  // SHP2 backup pool stats — round Wh→kWh to one decimal, null-safe.
+  const kwh1 = (wh: number | null | undefined) => (wh == null ? null : Math.round(wh / 100) / 10);
+
+  return {
+    generated_at: snap.generatedAt,
+
+    // Power flow (watts, integers)
+    fleet_pv_watts: Math.round(fleetPv),
+    fleet_total_in_watts: Math.round(fleetIn),
+    fleet_total_out_watts: Math.round(fleetOut),
+    fleet_battery_net_watts: Math.round(fleetOut - fleetIn), // positive = discharging
+    panel_load_watts: Math.round(panelLoad),
+    ac_import_watts: Math.round(acIn),
+    off_grid: acIn < 5,
+
+    // Battery — SHP2 backup pool
+    backup_pool_percent: shp2?.projection.backupBatPercent ?? null,
+    backup_reserve_percent: shp2?.projection.backupReserveSoc ?? null,
+    backup_full_capacity_kwh: kwh1(shp2?.projection.backupFullCapWh),
+    backup_remaining_kwh: kwh1(shp2?.projection.backupRemainWh),
+    backup_charge_minutes: shp2?.projection.backupChargeTimeMin ?? null,
+    backup_discharge_minutes: shp2?.projection.backupDischargeTimeMin ?? null,
+
+    // Forecast (cached ~30min)
+    forecast_pv_next_24h_kwh: Math.round(fc.forecastPvWhNext24 / 100) / 10,
+    typical_pv_per_day_kwh: Math.round(fc.typicalPvWhPerDay / 100) / 10,
+    projected_low_soc_percent: fc.minProjectedSoc,
+    projected_low_soc_at: fc.minProjectedSocTs,
+    forecast_history_days: fc.historyDays,
+    forecast_has_weather: fc.hasWeather,
+    soiling_drop_percent: fc.soiling?.dropPct ?? null,
+
+    // Degradation (cached ~30min)
+    degradation_packs_total: deg.packs.length,
+    degradation_packs_projecting: projecting.length,
+    degradation_soonest_eol_years: soonest?.yearsToEol ?? null,
+    degradation_soonest_eol_date: soonest?.eolDate ?? null,
+    degradation_soonest_eol_pack: eolLabel(soonest),
+    degradation_peer_outliers: peerOutliers.length,
+
+    // Alerts (split by engine source and severity)
+    alert_critical_count: cnt('threshold', 'critical'),
+    alert_warning_count: cnt('threshold', 'warning'),
+    alert_info_count: cnt('threshold', 'info'),
+    learned_critical_count: cnt('learned', 'critical'),
+    learned_warning_count: cnt('learned', 'warning'),
+    learned_info_count: cnt('learned', 'info'),
+
+    // Connectivity
+    fleet_devices_total: devices.length,
+    fleet_devices_online: devices.filter((d) => d.online).length,
+  };
+});
 
 app.get('/api/notify/status', async () => {
   const cfg = monitor.getConfig();
