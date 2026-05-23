@@ -33,3 +33,33 @@ jobs:
       - name: tsc --noEmit
         working-directory: ${{ matrix.project }}
         run: ./node_modules/.bin/tsc --noEmit -p tsconfig.json
+
+  docker-smoke:
+    # Build the Home Assistant add-on container (amd64 only) on every push/PR.
+    # Catches Dockerfile regressions before they reach the Pi. Buildx cache
+    # in GitHub Actions cache cuts subsequent runs to ~1–2 minutes.
+    name: Dockerfile smoke build (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: false
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21
+            BUILD_ARCH=amd64
+            BUILD_DATE=ci
+            BUILD_DESCRIPTION=EcoFlow Panel (smoke)
+            BUILD_NAME=EcoFlow Panel
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=ci
+          cache-from: type=gha,scope=docker-smoke
+          cache-to: type=gha,mode=max,scope=docker-smoke

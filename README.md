@@ -22,9 +22,10 @@ For a Pi running Home Assistant OS or Supervised:
    ```
 3. In Home Assistant: **Settings → Add-ons → Add-on Store**, click the ⋮ menu
    → **Reload**. **EcoFlow Panel** appears under "Local add-ons".
-4. **Install** (HA Supervisor builds the container on the Pi — takes a few
-   minutes the first time). Then open **Configuration** and paste your
-   EcoFlow IoT Open API keys (get them at
+4. **Install** — HA Supervisor pulls the pre-built image from GHCR (seconds,
+   not minutes — see [Releasing a new version](#releasing-a-new-version) for
+   the build pipeline). Then open **Configuration** and paste your EcoFlow
+   IoT Open API keys (get them at
    <https://developer.ecoflow.com> → IoT Open Platform → User Information).
 5. (Optional) adjust `FORECAST_LAT` / `FORECAST_LON` to your location, and
    configure a push channel (ntfy / Pushover / webhook).
@@ -106,25 +107,50 @@ launchctl unload ~/Library/LaunchAgents/com.ericpaschal.ecoflow-panel.plist
 
 ## Releasing a new version
 
-Two GitHub Actions live under `.github/workflows/`:
+Three GitHub Actions live under `.github/workflows/`:
 
-- **`ci.yml`** — type-checks `server/` and `web/` on every push to `main`
-  and on every PR.
-- **`release.yml`** — manual one-click release. From the repo on GitHub:
-  **Actions → Release → Run workflow** → choose `patch` / `minor` / `major`
-  (or paste an explicit `version`). Optionally paste release notes
-  (markdown); leave empty to auto-generate them from the commit log since
-  the previous tag. The workflow then:
-  1. Bumps `version:` in `config.yaml`.
-  2. Prepends a section to `CHANGELOG.md`.
-  3. Commits `Release vX.Y.Z`, tags `vX.Y.Z`, pushes both.
-  4. Creates a GitHub Release.
+- **`ci.yml`** — on every push to `main` and on every PR:
+  - type-checks `server/` and `web/`
+  - builds the add-on container (amd64, cached) as a Dockerfile smoke test
+- **`release.yml`** — manual one-click "cut a release." From the repo on
+  GitHub: **Actions → Release → Run workflow** → choose
+  `patch` / `minor` / `major` (or paste an explicit `version`). Optionally
+  paste markdown release notes; leave empty to auto-generate them from the
+  commit log since the previous tag. The workflow bumps `version:` in
+  `config.yaml`, prepends a section to `CHANGELOG.md`, commits
+  `Release vX.Y.Z`, tags `vX.Y.Z`, and pushes both.
+- **`images.yml`** — triggered automatically by the tag push. In parallel,
+  builds amd64 + aarch64 images via buildx + QEMU and pushes them to GHCR
+  as `:vX.Y.Z` and `:latest`. Once both arch builds succeed, it extracts
+  the version's CHANGELOG section and creates the GitHub Release. **The
+  GitHub Release appearing on the repo is your "go ahead and update"
+  signal** — at that point the pre-built image is ready to pull.
 
 Then on the Pi:
 ```bash
 cd /addons/ecoflow-panel && git pull
 ```
-Home Assistant detects the new `version:` and surfaces an **Update** button.
+Home Assistant detects the bumped `version:` in `config.yaml`, surfaces
+an **Update** button, and pulls the pre-built image from GHCR (seconds,
+not minutes).
+
+### One-time setup after the first `images.yml` run
+
+Open <https://github.com/tesseractAZ?tab=packages>. Two new packages appear:
+
+- `amd64-ecoflow-panel`
+- `aarch64-ecoflow-panel`
+
+Open each → **Package settings** → **Change visibility** → **Public**.
+HA Supervisor needs anonymous pulls to install. This is a one-time flip;
+future versions inherit the visibility.
+
+### Dependency PRs
+
+Dependabot is configured (`.github/dependabot.yml`) to open weekly PRs
+on Monday morning (Phoenix time) for `server/` and `web/` npm packages,
+GitHub Actions versions, and the Dockerfile base images — grouped by
+production vs development to keep the PR list short.
 
 ## What's shipped
 

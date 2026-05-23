@@ -157,29 +157,24 @@ jobs:
           git push origin HEAD:main
           git push origin "v${NEXT}"
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEXT: ${{ steps.ver.outputs.next }}
-          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
-        run: |
-          set -euo pipefail
-          gh release create "v${NEXT}" \
-            --title "v${NEXT}" \
-            --notes-file "${NOTES_FILE}"
-
       - name: Summary
         env:
           NEXT: ${{ steps.ver.outputs.next }}
         run: |
           {
-            echo "## ✅ Released v${NEXT}"
+            echo "## 🏷️  Tagged v${NEXT}"
             echo
-            echo "On your Pi:"
+            echo "The tag push has kicked off **\`images.yml\`** to build and publish"
+            echo "amd64 + aarch64 images to GHCR. When that workflow finishes (~5–10 min"
+            echo "with cold cache), it will create the GitHub Release for v${NEXT}."
+            echo "**The Release appearing on GitHub is the \"go ahead and update\" signal.**"
+            echo
+            echo "Once it's up, on your Pi:"
             echo
             echo '```bash'
             echo "cd /addons/ecoflow-panel && git pull"
             echo '```'
             echo
-            echo "Home Assistant will detect the bumped \`version:\` and surface an Update button."
+            echo "Home Assistant will detect the bumped \`version:\` in \`config.yaml\` and"
+            echo "surface an **Update** button that pulls the pre-built image."
           } >> "$GITHUB_STEP_SUMMARY"

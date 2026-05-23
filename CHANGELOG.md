@@ -3,6 +3,35 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.2.0 — 2026-05-22
+
+### Distribution
+- **Pre-built multi-arch images on GHCR** (aarch64 + amd64). Installing this
+  version on the Pi pulls a ready-made image instead of building the
+  container from source — install time drops from minutes to seconds, and
+  the Pi stops having to do `npm ci` over a slow connection.
+- `config.yaml` now declares
+  `image: ghcr.io/tesseractaz/{arch}-ecoflow-panel`; HA Supervisor substitutes
+  `{arch}` with the host's CPU architecture.
+
+### CI / release pipeline
+- **Docker smoke build in CI** (`ci.yml`) — every push and PR builds the
+  container (amd64, cached) so a broken Dockerfile is caught before it
+  reaches the Pi.
+- **Split release flow** — `release.yml` cuts the tag and pushes; the new
+  `images.yml` workflow takes over on tag push, builds + pushes amd64 and
+  aarch64 images to GHCR in parallel, then creates the GitHub Release. **The
+  Release appearing on GitHub is now the "go ahead and update" signal.**
+- **Dependabot** configured for npm (server + web), GitHub Actions, and the
+  Dockerfile base images — weekly Monday PRs, grouped by production /
+  development to cut PR noise.
+
+### Notes
+- One-time setup after the first `images.yml` run: open
+  <https://github.com/tesseractAZ?tab=packages>, find `amd64-ecoflow-panel` and
+  `aarch64-ecoflow-panel`, and change each from Private → Public so HA
+  Supervisor can pull anonymously.
+
 ## 0.1.0 — 2026-05-22
 
 Initial Home Assistant add-on release. Packages the existing EcoFlow Panel app

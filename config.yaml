@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.1.0"
+version: "0.2.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -9,6 +9,9 @@ url: https://github.com/tesseractAZ/ecoflow-panel
 arch:
   - aarch64
   - amd64
+# Pre-built multi-arch images on GHCR — built and pushed by .github/workflows/images.yml.
+# HA Supervisor substitutes {arch} with the host's CPU arch (aarch64, amd64, …).
+image: ghcr.io/tesseractaz/{arch}-ecoflow-panel
 startup: services
 boot: auto
 stage: experimental

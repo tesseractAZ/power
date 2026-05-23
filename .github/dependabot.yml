@@ -1,0 +1,64 @@
+version: 2
+
+# Weekly Monday morning PRs (your local Phoenix time), grouped by production
+# vs development to keep the PR list short.
+
+updates:
+  # ── npm: server (Fastify, MQTT, etc.) ────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Phoenix
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(server)"
+    groups:
+      production:
+        dependency-type: production
+      development:
+        dependency-type: development
+
+  # ── npm: web (Vite/React/Tailwind) ───────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Phoenix
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(web)"
+    groups:
+      production:
+        dependency-type: production
+      development:
+        dependency-type: development
+
+  # ── GitHub Actions: action versions in .github/workflows ─────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Phoenix
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # ── Docker: Dockerfile FROM lines ────────────────────────────────────────
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Phoenix
+    commit-message:
+      prefix: "deps(docker)"

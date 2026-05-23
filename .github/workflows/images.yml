@@ -1,0 +1,193 @@
+name: Publish images
+
+# Build + push multi-arch Docker images to GHCR on tag push, then cut the
+# GitHub Release that announces the version is fully installable.
+#
+# Flow:
+#   1. On `v*.*.*` tag push (or manual workflow_dispatch for a re-run), build
+#      amd64 + aarch64 in parallel via buildx + QEMU.
+#   2. Each image is pushed to ghcr.io/<owner>/{arch}-ecoflow-panel as both
+#      :{version} and :latest. HA Supervisor pulls these instead of building
+#      on the Pi.
+#   3. Once both arch builds succeed, extract the version's CHANGELOG section
+#      and create the GitHub Release with it. The Release appearing = "go
+#      ahead and update the Pi."
+#
+# First-time setup: after the very first push, open
+# <https://github.com/tesseractAZ?tab=packages> and toggle each of the two new
+# packages from Private → Public so HA can pull them anonymously.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to (re)build, without leading v (e.g. 0.2.0)"
+        type: string
+        required: true
+
+permissions:
+  contents: write   # GitHub Release creation
+  packages: write   # GHCR push
+
+jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.version }}" ]]; then
+            v="${{ inputs.version }}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$v' (expected X.Y.Z)"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "📦 Publishing v$v"
+
+  build:
+    name: Build & push (${{ matrix.arch }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            platform: linux/arm64
+            base: ghcr.io/home-assistant/aarch64-base:3.21
+          - arch: amd64
+            platform: linux/amd64
+            base: ghcr.io/home-assistant/amd64-base:3.21
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase repo owner (GHCR requires it)
+        id: owner
+        run: |
+          echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" \
+            >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.arch }}-ecoflow-panel:${{ needs.resolve.outputs.version }}
+            ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.arch }}-ecoflow-panel:latest
+          build-args: |
+            BUILD_FROM=${{ matrix.base }}
+            BUILD_ARCH=${{ matrix.arch }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            BUILD_DESCRIPTION=EcoFlow Panel
+            BUILD_NAME=EcoFlow Panel
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=${{ needs.resolve.outputs.version }}
+          cache-from: type=gha,scope=ecoflow-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ecoflow-${{ matrix.arch }}
+
+  release:
+    name: Cut GitHub Release
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Skip if Release already exists
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ needs.resolve.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release ${{ needs.resolve.outputs.tag }} already exists; skipping create"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract notes from CHANGELOG.md
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          NEXT: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > /tmp/notes.md
+          import os, re
+          version = os.environ["NEXT"]
+          with open("CHANGELOG.md") as f:
+              content = f.read()
+          # Match the "## <version> …" header through end of section (next "## " or EOF)
+          pattern = re.compile(
+              rf"^## {re.escape(version)}\b.*?(?=^## |\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          m = pattern.search(content)
+          if m:
+              # Strip the header line itself; print the body.
+              body = m.group(0).split("\n", 1)[1].strip()
+              print(body)
+          else:
+              print("_(see CHANGELOG.md)_")
+          PY
+          echo "── notes preview ────────────────────────────"
+          cat /tmp/notes.md
+          echo "─────────────────────────────────────────────"
+
+      - name: Create GitHub Release
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ needs.resolve.outputs.tag }}" \
+            --title "${{ needs.resolve.outputs.tag }}" \
+            --notes-file /tmp/notes.md
+
+      - name: Summary
+        env:
+          V: ${{ needs.resolve.outputs.version }}
+        run: |
+          {
+            echo "## ✅ v${V} published"
+            echo
+            echo "Pre-built images:"
+            echo
+            echo "- \`ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/aarch64-ecoflow-panel:${V}\`"
+            echo "- \`ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/amd64-ecoflow-panel:${V}\`"
+            echo
+            echo "On your Pi:"
+            echo
+            echo '```bash'
+            echo "cd /addons/ecoflow-panel && git pull"
+            echo '```'
+            echo
+            echo "Home Assistant detects the new version and surfaces an **Update** button."
+          } >> "$GITHUB_STEP_SUMMARY"
