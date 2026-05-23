@@ -1,0 +1,20 @@
+# Every change auto-requests review from the owner — including Dependabot PRs,
+# which respect CODEOWNERS so the weekly batch lands in your review queue.
+# Syntax reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+*                           @tesseractAZ
+
+# Surface scope-specific ownership in PR descriptions so a future contributor
+# (or future-you, six months from now) can see at a glance which subsystem a
+# change touches. With a single owner today these are functionally the same
+# as the catch-all above; they're here to grow gracefully.
+
+/server/                    @tesseractAZ
+/web/                       @tesseractAZ
+/server/src/analytics.ts    @tesseractAZ
+/server/src/telnet/         @tesseractAZ
+/.github/                   @tesseractAZ
+/config.yaml                @tesseractAZ
+/Dockerfile                 @tesseractAZ
+/build.yaml                 @tesseractAZ
+/rootfs/                    @tesseractAZ
