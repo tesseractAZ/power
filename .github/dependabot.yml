@@ -1,7 +1,11 @@
 version: 2
 
 # Weekly Monday morning PRs (your local Phoenix time), grouped by production
-# vs development to keep the PR list short.
+# vs development to keep the PR list short. Major version bumps are
+# intentionally ignored — those need deliberate migrations (breaking
+# changes, API renames, build-tool rewrites) and shouldn't auto-merge.
+# When a major bump is genuinely wanted, open it manually or temporarily
+# drop the ignore rule below.
 
 updates:
   # ── npm: server (Fastify, MQTT, etc.) ────────────────────────────────────
@@ -20,6 +24,9 @@ updates:
         dependency-type: production
       development:
         dependency-type: development
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # ── npm: web (Vite/React/Tailwind) ───────────────────────────────────────
   - package-ecosystem: npm
@@ -37,6 +44,9 @@ updates:
         dependency-type: production
       development:
         dependency-type: development
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # ── GitHub Actions: action versions in .github/workflows ─────────────────
   - package-ecosystem: github-actions
@@ -51,6 +61,9 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # ── Docker: Dockerfile FROM lines ────────────────────────────────────────
   - package-ecosystem: docker
@@ -62,3 +75,6 @@ updates:
       timezone: America/Phoenix
     commit-message:
       prefix: "deps(docker)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
