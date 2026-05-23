@@ -3,6 +3,22 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.2.3 — 2026-05-22
+
+Runtime fix for the start crash loop.
+
+- `config.yaml`: added `init: false`. HA's `init: true` default wraps the
+  container with Docker's tini, making tini PID 1. The HA base image
+  already ships its own s6-overlay `/init`; with tini in front, the
+  base's `s6-overlay-suexec` saw it wasn't PID 1 and refused to start,
+  producing the crash-loop log:
+  ```
+  s6-overlay-suexec: fatal: can only run as pid 1
+  ```
+  Setting `init: false` disables tini so our `/init` (s6) runs as PID 1 —
+  the standard pattern for any add-on built on the official HA base
+  images.
+
 ## 0.2.2 — 2026-05-22
 
 Schema fix for the Configuration → Save flow.
