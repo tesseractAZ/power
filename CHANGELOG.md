@@ -3,6 +3,20 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.2.2 — 2026-05-22
+
+Schema fix for the Configuration → Save flow.
+
+- `config.yaml`: relaxed the schema for `NOTIFY_NTFY_SERVER` and
+  `NOTIFY_WEBHOOK_URL` from `url?` to `str?`. Voluptuous (HA's schema
+  validator) treats `url?` as "may be absent **or** a valid URL" — but
+  both fields ship with empty defaults that only get filled when the
+  matching `NOTIFY_CHANNEL` is in use. With the strict `url?` type, the
+  first **Save** always failed with `Failed to save: expected a URL.
+  Got {…}` (voluptuous dumps the whole options dict instead of the
+  failing path). The runtime notify code validates each URL at the
+  moment it actually uses the channel, so the schema relaxation is safe.
+
 ## 0.2.1 — 2026-05-22
 
 Patch fix for two issues that hit on the first `v0.2.0` push.

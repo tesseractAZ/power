@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.2.1"
+version: "0.2.2"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -52,8 +52,14 @@ schema:
   NOTIFY_CHANNEL: list(none|ntfy|pushover|webhook)
   NOTIFY_MIN_SEVERITY: list(warning|critical)
   NOTIFY_RESOLVED: bool
-  NOTIFY_NTFY_SERVER: "url?"
+  # The two URL-looking fields below intentionally use `str?` instead of
+  # `url?`. HA's voluptuous schema treats `url?` as "may be absent" — but if
+  # present with an empty default it rejects the save. Both fields ship with
+  # an empty default (only filled when the matching NOTIFY_CHANNEL is used),
+  # so they'd block Save on first install. The runtime notify code validates
+  # the URL at the moment it actually uses the channel.
+  NOTIFY_NTFY_SERVER: "str?"
   NOTIFY_NTFY_TOPIC: "str?"
   NOTIFY_PUSHOVER_TOKEN: "password?"
   NOTIFY_PUSHOVER_USER: "password?"
-  NOTIFY_WEBHOOK_URL: "url?"
+  NOTIFY_WEBHOOK_URL: "str?"
