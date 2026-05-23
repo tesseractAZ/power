@@ -34,7 +34,7 @@ if bashio::config.true 'TELNET_ENABLED'; then
 else
   export TELNET_ENABLED=0
 fi
-export TELNET_HOST=0.0.0.0
+export TELNET_HOST=::
 export TELNET_PORT="$(bashio::config 'TELNET_PORT')"
 
 # ── Push notifications ───────────────────────────────────────────────────────

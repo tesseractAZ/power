@@ -3,6 +3,23 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.3.1 — 2026-05-23
+
+Patch fix for the telnet TUI over `homeassistant.local`.
+
+- **Telnet binds dual-stack** — changed the `TELNET_HOST` default from
+  `0.0.0.0` (IPv4 only) to `::` (Node dual-stack: listens on both IPv4
+  and IPv6 on one socket; Node leaves `IPV6_V6ONLY` off so IPv4 clients
+  still connect via mapped addresses). macOS resolves
+  `homeassistant.local` to both an IPv4 and several IPv6 addresses with
+  IPv6 listed first; `getaddrinfo` (which `nc`/`telnet`/`python socket`
+  all use) picks IPv6, so `nc homeassistant.local 2323` was reaching the
+  HA host's IPv6 stack — which had no listener for the add-on's port —
+  and the TCP handshake completed only to be immediately RST'd
+  ("Connection reset by peer"). The IPv4 path always worked
+  (`nc -4 hostname`, or `nc <IP>`) but it wasn't discoverable. With `::`,
+  both protocols land on the same telnet listener.
+
 ## 0.3.0 — 2026-05-23
 
 ### Features

@@ -18,9 +18,14 @@ export const config = {
   forecastLat: Number(process.env.FORECAST_LAT ?? 33.4484),
   forecastLon: Number(process.env.FORECAST_LON ?? -112.074),
   // Telnet control-room TUI — a menu-driven terminal view of the whole fleet.
+  // Default host is `::` (Node dual-stack — accepts both IPv4 and IPv6 on one
+  // socket; Node does NOT set IPV6_V6ONLY, so IPv4 still works via mapped
+  // addresses). Listening only on `0.0.0.0` would silently break clients that
+  // resolve `homeassistant.local` to its IPv6 address (which macOS does by
+  // default) — they'd connect to the host's IPv6 stack and get a TCP RST.
   telnet: {
     enabled: process.env.TELNET_ENABLED !== '0',
-    host: process.env.TELNET_HOST ?? '0.0.0.0',
+    host: process.env.TELNET_HOST ?? '::',
     port: Number(process.env.TELNET_PORT ?? 2323),
   },
 };
