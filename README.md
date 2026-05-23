@@ -166,15 +166,19 @@ production vs development to keep the PR list short.
   Predictive Insights tab, per-pack capacity-fade → end-of-life projection
   with confidence band + fleet peer comparison, cleared-anomalies log,
   glossary hover tooltips on every metric label.
-- **Phase 6** — Home Assistant add-on packaging (this repo, multi-arch).
+- **Phase 6** — Home Assistant add-on packaging (this repo, multi-arch
+  GHCR images, one-click release pipeline, Dependabot).
+- **Phase 7** — Home Assistant entities integration via `/api/ha-state` —
+  ~13 sensors + 1 binary_sensor surfaced through HA's `rest:` integration
+  (backup pool %, panel load, AC import, off-grid status, forecast,
+  soonest-EOL, alert counts, peer outliers). See `DOCS.md` →
+  "Home Assistant entities" for the copy-pasteable `configuration.yaml`
+  snippet and example automations.
 
 ## Roadmap
 
 - **WAVE 2 / Smart Generator schemas** — proper projections when those come
   online.
 - **Per-circuit kWh history** — multi-day comparison on the circuit modal.
-- **HA service integration** — surface key panel sensors (backup %, projected
-  low SoC, soonest EOL) as Home Assistant entities so they can drive
-  automations.
-- **Pre-built multi-arch images via GHCR** — skip the on-Pi container build
-  for faster installs.
+- **MQTT discovery for HA entities** — auto-register sensors via HA's MQTT
+  Discovery so users don't have to paste a YAML snippet at all.
