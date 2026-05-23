@@ -16,7 +16,7 @@ ARG BUILD_VERSION
 # ─── Stage 1 — build the web bundle ──────────────────────────────────────────
 # Uses Docker Hub's multi-arch node:22-alpine; HA Supervisor's build runs on
 # the target arch so we never cross-compile.
-FROM node:22-alpine AS webbuilder
+FROM node:26-alpine AS webbuilder
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci
@@ -25,7 +25,7 @@ RUN npm run build
 
 
 # ─── Stage 2 — install server deps (tsx is runtime, not just dev) ────────────
-FROM node:22-alpine AS serverdeps
+FROM node:26-alpine AS serverdeps
 WORKDIR /build/server
 COPY server/package.json server/package-lock.json* ./
 RUN npm ci
