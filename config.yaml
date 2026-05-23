@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.2.2"
+version: "0.2.3"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -15,6 +15,13 @@ image: ghcr.io/tesseractaz/{arch}-ecoflow-panel
 startup: services
 boot: auto
 stage: experimental
+# HA's `init: true` default wraps the container with Docker's tini, making
+# tini PID 1. The HA base image already ships its own s6-overlay init at
+# /init; with tini in front, s6-overlay-suexec sees it isn't PID 1 and
+# refuses to start (crash loop with "fatal: can only run as pid 1"). Turn
+# tini off so our /init (s6) runs as PID 1 — the standard pattern for any
+# add-on built on the official HA base images.
+init: false
 ports:
   8787/tcp: 8787
   2323/tcp: 2323
