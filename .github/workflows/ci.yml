@@ -1,0 +1,35 @@
+name: CI
+
+# Type-check both projects on every push and PR. Cheap insurance that no
+# broken commit lands on main and gets installed onto the Pi.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    name: Type-check ${{ matrix.project }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [server, web]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+
+      - name: Install
+        working-directory: ${{ matrix.project }}
+        run: npm ci
+
+      - name: tsc --noEmit
+        working-directory: ${{ matrix.project }}
+        run: ./node_modules/.bin/tsc --noEmit -p tsconfig.json

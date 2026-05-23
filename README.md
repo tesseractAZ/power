@@ -104,6 +104,28 @@ tail -f data/launchd.out.log data/launchd.err.log
 launchctl unload ~/Library/LaunchAgents/com.ericpaschal.ecoflow-panel.plist
 ```
 
+## Releasing a new version
+
+Two GitHub Actions live under `.github/workflows/`:
+
+- **`ci.yml`** — type-checks `server/` and `web/` on every push to `main`
+  and on every PR.
+- **`release.yml`** — manual one-click release. From the repo on GitHub:
+  **Actions → Release → Run workflow** → choose `patch` / `minor` / `major`
+  (or paste an explicit `version`). Optionally paste release notes
+  (markdown); leave empty to auto-generate them from the commit log since
+  the previous tag. The workflow then:
+  1. Bumps `version:` in `config.yaml`.
+  2. Prepends a section to `CHANGELOG.md`.
+  3. Commits `Release vX.Y.Z`, tags `vX.Y.Z`, pushes both.
+  4. Creates a GitHub Release.
+
+Then on the Pi:
+```bash
+cd /addons/ecoflow-panel && git pull
+```
+Home Assistant detects the new `version:` and surfaces an **Update** button.
+
 ## What's shipped
 
 - **Phase 1** — REST polling, WebSocket push, React/Tailwind dashboard.

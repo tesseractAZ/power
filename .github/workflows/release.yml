@@ -1,0 +1,185 @@
+name: Release
+
+# One-click release pipeline.
+#
+# Trigger from GitHub: Actions → Release → "Run workflow". The workflow:
+#   1. Computes the next version (semver bump or explicit override)
+#   2. Refuses if the new tag already exists, so re-runs are idempotent
+#   3. Builds release notes (from your `notes` input, or auto-generated from the
+#      commit log since the previous tag)
+#   4. Bumps `version:` in `config.yaml` and prepends a section to `CHANGELOG.md`
+#   5. Commits "Release vX.Y.Z", tags vX.Y.Z, pushes both
+#   6. Creates a GitHub Release with the same notes
+#
+# Home Assistant Supervisor on your Pi notices the new `version:` in
+# `config.yaml` after `git pull` and surfaces an Update button on the add-on.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (used when 'version' is empty)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "Explicit version, e.g. 0.2.0 — overrides 'bump'"
+        type: string
+        required: false
+      notes:
+        description: "Release notes (markdown). Leave empty to auto-generate from the commit log."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Cut release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: ver
+        run: |
+          set -euo pipefail
+          current=$(grep -E '^version:' config.yaml \
+            | sed -E 's/version:[[:space:]]*"?([^"#]+)"?.*/\1/' \
+            | tr -d '[:space:]')
+          if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not parse current version from config.yaml (got '$current')"
+            exit 1
+          fi
+
+          if [[ -n "${{ inputs.version }}" ]]; then
+            next="${{ inputs.version }}"
+          else
+            IFS='.' read -r maj min pat <<< "$current"
+            case "${{ inputs.bump }}" in
+              major) next="$((maj + 1)).0.0" ;;
+              minor) next="${maj}.$((min + 1)).0" ;;
+              patch) next="${maj}.${min}.$((pat + 1))" ;;
+              *) echo "::error::Unknown bump '${{ inputs.bump }}'"; exit 1 ;;
+            esac
+          fi
+
+          if [[ ! "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid next version '$next' (expected X.Y.Z)"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null 2>&1; then
+            echo "::error::Tag v${next} already exists"
+            exit 1
+          fi
+
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "📦 Releasing v${current} → v${next}"
+
+      - name: Build release notes
+        id: notes
+        env:
+          USER_NOTES: ${{ inputs.notes }}
+          PREV: ${{ steps.ver.outputs.current }}
+        run: |
+          set -euo pipefail
+          notes_file=$(mktemp)
+          if [[ -n "${USER_NOTES}" ]]; then
+            printf '%s\n' "${USER_NOTES}" > "${notes_file}"
+          else
+            prev_tag="v${PREV}"
+            if git rev-parse -q --verify "refs/tags/${prev_tag}" >/dev/null 2>&1; then
+              {
+                echo "Changes since ${prev_tag}:"
+                echo
+                git log --no-merges --pretty='- %s' "${prev_tag}..HEAD"
+              } > "${notes_file}"
+            else
+              echo "_(see commit history for details — no previous tag found at ${prev_tag})_" > "${notes_file}"
+            fi
+          fi
+          echo "notes_file=${notes_file}" >> "$GITHUB_OUTPUT"
+          echo "── notes preview ────────────────────────────"
+          cat "${notes_file}"
+          echo "─────────────────────────────────────────────"
+
+      - name: Update config.yaml + CHANGELOG.md
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          # config.yaml: replace the version: line
+          sed -i.bak -E 's/^version:[[:space:]]*"?[^"#]+"?/version: "'"$NEXT"'"/' config.yaml
+          rm -f config.yaml.bak
+
+          # CHANGELOG.md: prepend a new section before the most recent version section
+          python3 - <<'PY'
+          import os, re, datetime
+          version = os.environ["NEXT"]
+          today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+          with open(os.environ["NOTES_FILE"]) as f:
+              notes = f.read().strip() or "_(see commit history for details)_"
+
+          with open("CHANGELOG.md", "r") as f:
+              content = f.read()
+          new_section = f"## {version} — {today}\n\n{notes}\n\n"
+          m = re.search(r"^## \d", content, re.MULTILINE)
+          if m:
+              content = content[:m.start()] + new_section + content[m.start():]
+          else:
+              content = content.rstrip() + "\n\n" + new_section
+          with open("CHANGELOG.md", "w") as f:
+              f.write(content)
+          PY
+
+          echo "── config.yaml version line ─────────────────"
+          grep '^version:' config.yaml
+          echo "── CHANGELOG.md head ────────────────────────"
+          head -25 CHANGELOG.md
+          echo "─────────────────────────────────────────────"
+
+      - name: Commit, tag, push
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add config.yaml CHANGELOG.md
+          git commit -m "Release v${NEXT}"
+          git tag -a "v${NEXT}" -m "Release v${NEXT}"
+          git push origin HEAD:main
+          git push origin "v${NEXT}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ steps.ver.outputs.next }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          gh release create "v${NEXT}" \
+            --title "v${NEXT}" \
+            --notes-file "${NOTES_FILE}"
+
+      - name: Summary
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          {
+            echo "## ✅ Released v${NEXT}"
+            echo
+            echo "On your Pi:"
+            echo
+            echo '```bash'
+            echo "cd /addons/ecoflow-panel && git pull"
+            echo '```'
+            echo
+            echo "Home Assistant will detect the bumped \`version:\` and surface an Update button."
+          } >> "$GITHUB_STEP_SUMMARY"
