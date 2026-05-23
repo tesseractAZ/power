@@ -3,6 +3,33 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.3.0 — 2026-05-23
+
+### Features
+
+- **Home Assistant entities integration** — new `/api/ha-state` endpoint
+  returns a flat key-value JSON designed for HA's `rest:` integration. One
+  HTTP call surfaces ~13 sensors + 1 binary_sensor (backup pool %, panel
+  load, AC import, off-grid status, day-ahead forecast, soonest-EOL pack,
+  alert counts, peer-outlier count, etc.). Forecast + degradation are
+  reused from their internal caches, so HA polling every 30s is
+  essentially free. See `DOCS.md` → "Home Assistant entities" for the
+  copy-pasteable `configuration.yaml` snippet and example automations
+  (backup-pool-low, critical-alert, projected-SoC-dip).
+
+### Chores
+
+- `dependabot.yml`: ignore major version bumps. The first batch of
+  Dependabot PRs was all majors (React 18→19, Tailwind 3→4, TS 5→6,
+  Vite 6→8, Fastify ecosystem majors, Node 22→26) — each one needed
+  deliberate migration work, none was auto-mergeable. All seven closed;
+  going forward only minor/patch updates auto-PR.
+
+- README: moved "HA service integration" from Roadmap to Phase 7
+  (shipped). Dropped the "Pre-built multi-arch GHCR images" roadmap line
+  (shipped in Phase 6). New roadmap entry: MQTT discovery for HA
+  entities, to auto-register sensors without a YAML snippet.
+
 ## 0.2.3 — 2026-05-22
 
 Runtime fix for the start crash loop.
