@@ -1,0 +1,532 @@
+import { useEffect, useState } from 'react';
+import {
+  AreaChart,
+  Area,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from 'recharts';
+import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
+
+// Array configuration: each equipped DPU has a 10-panel high-voltage string and
+// a 4-panel low-voltage string; all panels are 400 W. Spare DPUs have no array.
+const HV_PANELS = 10;
+const LV_PANELS = 4;
+const PANEL_W = 400;
+const PANELS_PER_DPU = HV_PANELS + LV_PANELS;
+import { fmtTemp, fmtW, fmtWh } from '../format';
+import { sortDevices } from '../sort';
+import { SolarResponseCard } from '../cards/SolarResponseCard';
+
+const DPU_COLORS = ['#0e7490', '#15803d', '#d97706', '#7c3aed'];
+
+interface SummaryResp {
+  fleet: {
+    pvWh: number;
+    coverage: number;
+  };
+  devices: Array<{
+    sn: string;
+    deviceName: string;
+    metrics: Record<string, { wh: number; samples: number; coverageMs: number; totalMs: number }>;
+  }>;
+}
+
+interface Point {
+  ts: number;
+  value: number;
+}
+
+export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot> }) {
+  const list = sortDevices(Object.values(devices));
+  const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const onlineDpus = dpus.filter((d) => d.online && d.projection);
+
+  // DPUs with a solar array = the SHP2-bound Cores; the spares have none.
+  const shp2 = list.find((d) => d.projection?.kind === 'shp2');
+  const arraySns = new Set<string>(
+    shp2?.projection?.kind === 'shp2'
+      ? (shp2.projection as Shp2Projection).sources.map((s) => s.sn).filter((sn): sn is string => !!sn)
+      : [],
+  );
+  const totalPanels = (arraySns.size || onlineDpus.length) * PANELS_PER_DPU;
+
+  // Current fleet PV
+  const pvNow = onlineDpus.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
+  const pvHighNow = onlineDpus.reduce((s, d) => s + (d.projection.pvHighWatts ?? 0), 0);
+  const pvLowNow = onlineDpus.reduce((s, d) => s + (d.projection.pvLowWatts ?? 0), 0);
+
+  const [summary, setSummary] = useState<SummaryResp | null>(null);
+  const [peakToday, setPeakToday] = useState<{ value: number; ts: number } | null>(null);
+  const [pvSeries, setPvSeries] = useState<Record<string, Point[]>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        // Summary for today's kWh
+        const sumR = await fetch('/api/summary/today');
+        const sumJ = (await sumR.json()) as SummaryResp;
+        if (!cancelled) setSummary(sumJ);
+
+        // 24h PV per DPU
+        const dayStart = new Date();
+        dayStart.setHours(0, 0, 0, 0);
+        const since = dayStart.getTime();
+        const next: Record<string, Point[]> = {};
+        let peakVal = 0;
+        let peakTs = 0;
+        await Promise.all(
+          onlineDpus.map(async (d) => {
+            const r = await fetch(`/api/history?sn=${d.sn}&metric=pv_total&since=${since}&bucket=60`);
+            const j = (await r.json()) as { points: Point[] };
+            next[d.sn] = j.points;
+          }),
+        );
+        // Compute fleet peak by summing across DPUs at each timestamp (best effort)
+        const allTs = new Set<number>();
+        for (const pts of Object.values(next)) for (const p of pts) allTs.add(p.ts);
+        for (const ts of allTs) {
+          let sum = 0;
+          for (const sn of Object.keys(next)) {
+            const pt = next[sn].find((p) => p.ts === ts);
+            if (pt) sum += pt.value;
+          }
+          if (sum > peakVal) {
+            peakVal = sum;
+            peakTs = ts;
+          }
+        }
+        if (!cancelled) {
+          setPvSeries(next);
+          setPeakToday(peakVal > 0 ? { value: peakVal, ts: peakTs } : null);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    load();
+    const t = window.setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [onlineDpus.map((d) => d.sn).join(',')]);
+
+  // Merge series for chart
+  const mergedSeries = (() => {
+    const all = new Set<number>();
+    for (const pts of Object.values(pvSeries)) for (const p of pts) all.add(p.ts);
+    const sortedTs = Array.from(all).sort((a, b) => a - b);
+    const lastBy: Record<string, number | null> = {};
+    for (const d of onlineDpus) lastBy[d.sn] = null;
+    return sortedTs.map((ts) => {
+      const row: Record<string, number | string | null> = { ts };
+      let total = 0;
+      for (const d of onlineDpus) {
+        const pts = pvSeries[d.sn] ?? [];
+        const pt = pts.find((p) => p.ts === ts);
+        if (pt) lastBy[d.sn] = pt.value;
+        row[d.deviceName] = lastBy[d.sn];
+        total += lastBy[d.sn] ?? 0;
+      }
+      row['Fleet total'] = total;
+      return row;
+    });
+  })();
+
+  return (
+    <div className="space-y-4">
+      {/* Fleet summary */}
+      <div className="card">
+        <div className="card-title flex items-center justify-between">
+          <span>Solar overview</span>
+          <span className="text-xs text-muted normal-case tracking-normal">
+            {totalPanels} panels · {PANEL_W} W each · {HV_PANELS} HV + {LV_PANELS} LV per DPU
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <SummaryTile label="Producing now" value={fmtW(pvNow)} accent="text-warn" sub={`HV ${fmtW(pvHighNow)} · LV ${fmtW(pvLowNow)}`} />
+          <SummaryTile
+            label="Today"
+            value={summary ? fmtWh(summary.fleet.pvWh) : '—'}
+            accent="text-warn"
+            sub={summary ? `${(summary.fleet.coverage * 100).toFixed(0)}% measured` : ''}
+          />
+          <SummaryTile
+            label="Peak today"
+            value={peakToday ? fmtW(peakToday.value) : '—'}
+            sub={peakToday ? `at ${new Date(peakToday.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'no peak yet'}
+          />
+          <SummaryTile label="HV channels" value={`${onlineDpus.length}`} sub="high-voltage MPPT" />
+          <SummaryTile label="LV channels" value={`${onlineDpus.length}`} sub="low-voltage MPPT" />
+        </div>
+      </div>
+
+      {/* Flow diagram */}
+      <FlowDiagram dpus={onlineDpus} arraySns={arraySns} totalPanels={totalPanels} />
+
+      {/* 24h chart */}
+      <div className="card">
+        <div className="card-title flex items-center justify-between">
+          <span>Solar production (today)</span>
+          <span className="text-xs text-muted normal-case tracking-normal">1-min buckets</span>
+        </div>
+        <div style={{ width: '100%', height: 280 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={mergedSeries} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+              <defs>
+                {onlineDpus.map((d, i) => (
+                  <linearGradient id={`gpv-${d.sn}`} key={d.sn} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={DPU_COLORS[i % DPU_COLORS.length]} stopOpacity={0.5} />
+                    <stop offset="100%" stopColor={DPU_COLORS[i % DPU_COLORS.length]} stopOpacity={0} />
+                  </linearGradient>
+                ))}
+              </defs>
+              <CartesianGrid stroke="#c4cad3" strokeDasharray="3 3" />
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                tick={{ fill: '#586474', fontSize: 10 }}
+                tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              />
+              <YAxis tick={{ fill: '#586474', fontSize: 10 }} width={56} unit=" W" />
+              <Tooltip
+                contentStyle={{ background: '#ffffff', border: '1px solid #9aa3b0', borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: '#586474' }}
+                labelFormatter={(t) => new Date(t as number).toLocaleString()}
+                formatter={(v) => (typeof v === 'number' ? `${Math.round(v)} W` : v)}
+              />
+              <Legend wrapperStyle={{ fontSize: 11, color: '#586474' }} />
+              {onlineDpus.map((d, i) => (
+                <Area
+                  key={d.sn}
+                  type="monotone"
+                  dataKey={d.deviceName}
+                  stroke={DPU_COLORS[i % DPU_COLORS.length]}
+                  fill={`url(#gpv-${d.sn})`}
+                  strokeWidth={1.5}
+                  isAnimationActive={false}
+                  connectNulls
+                  stackId={undefined}
+                />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Learned array response model */}
+      <SolarResponseCard />
+
+      {/* Per-DPU detail */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {onlineDpus.map((d) => (
+          <DpuSolarCard key={d.sn} d={d} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FlowDiagram({
+  dpus,
+  arraySns,
+  totalPanels,
+}: {
+  dpus: Array<DeviceSnapshot & { projection: DpuProjection }>;
+  arraySns: Set<string>;
+  totalPanels: number;
+}) {
+  const W = 900;
+  const ROW_H = 128;
+  const TOP = 56;
+  const H = TOP + dpus.length * ROW_H + 36;
+
+  // Animation period: faster = more watts
+  const period = (w: number) => {
+    if (w < 5) return 0;
+    return Math.max(0.6, Math.min(8, 1500 / Math.max(w, 50)));
+  };
+  const strokeW = (w: number) => Math.min(8, Math.max(1.2, Math.log10(Math.max(10, w)) * 1.6));
+
+  // A DPU has a solar array when it's an SHP2 source; if the SHP2 binding is
+  // unknown, treat every DPU as array-equipped.
+  const hasArray = (sn: string) => arraySns.size === 0 || arraySns.has(sn);
+
+  const COL_PANELS = 80;
+  const COL_DPU = 600;
+  const COL_BAT = 800;
+
+  // Panel-glyph geometry — the HV string draws as a 5 × 2 block and the LV
+  // string as a single row of 4, each grouped beside its MPPT channel line.
+  const CELL_W = 13;
+  const CELL_H = 9;
+  const HV_COLS = 5;
+  const PANELS_X = 28;
+  const LINE_START_X = 132;
+
+  return (
+    <div className="card">
+      <div className="card-title">Solar power flow</div>
+      {/* No maxHeight cap — let the SVG render at full width-scale so the
+          labels stay legible; the card scrolls for a tall fleet. */}
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+        <defs>
+          <style>{`@keyframes pvflow { to { stroke-dashoffset: -32; } }`}</style>
+          <symbol id="sun" viewBox="-12 -12 24 24">
+            <circle cx="0" cy="0" r="6" fill="#d97706" />
+            {Array.from({ length: 8 }).map((_, i) => {
+              const a = (i * Math.PI) / 4;
+              return (
+                <line
+                  key={i}
+                  x1={Math.cos(a) * 8}
+                  y1={Math.sin(a) * 8}
+                  x2={Math.cos(a) * 11}
+                  y2={Math.sin(a) * 11}
+                  stroke="#d97706"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+              );
+            })}
+          </symbol>
+          <symbol id="panel" viewBox="0 0 20 14">
+            <rect x="0.5" y="0.5" width="19" height="13" fill="#d8dde3" stroke="#8b94a3" strokeWidth="1" rx="1.5" />
+            {[1, 2, 3].map((i) => (
+              <line key={`v${i}`} x1={i * 5} y1="0.5" x2={i * 5} y2="13.5" stroke="#8b94a3" strokeWidth="0.5" />
+            ))}
+            {[1, 2].map((i) => (
+              <line key={`h${i}`} x1="0.5" y1={(i * 14) / 3} x2="19.5" y2={(i * 14) / 3} stroke="#8b94a3" strokeWidth="0.5" />
+            ))}
+          </symbol>
+        </defs>
+
+        {/* Sun + panels */}
+        <use href="#sun" x={COL_PANELS - 32} y={26} width="30" height="30" />
+        <text x={COL_PANELS + 6} y={36} fill="#d97706" fontSize="14" fontFamily="ui-sans-serif" fontWeight="700">
+          {totalPanels} panels · {PANEL_W} W each
+        </text>
+
+        {dpus.map((d, i) => {
+          const p = d.projection;
+          const yMid = TOP + i * ROW_H + ROW_H / 2;
+          const hvW = p.pvHighWatts ?? 0;
+          const lvW = p.pvLowWatts ?? 0;
+          const totalW = p.pvTotalWatts ?? 0;
+          const arrayed = hasArray(d.sn);
+
+          return (
+            <g key={d.sn}>
+              {arrayed ? (
+                <>
+                  {/* HV string — 10 panels in a 5 × 2 block straddling the HV line */}
+                  {Array.from({ length: HV_PANELS }).map((_, n) => (
+                    <use
+                      key={`hv${n}`}
+                      href="#panel"
+                      x={PANELS_X + (n % HV_COLS) * CELL_W}
+                      y={yMid - 32 + Math.floor(n / HV_COLS) * CELL_H}
+                      width={CELL_W - 2}
+                      height={CELL_H - 2}
+                    />
+                  ))}
+                  {/* LV string — 4 panels in a single row on the LV line */}
+                  {Array.from({ length: LV_PANELS }).map((_, n) => (
+                    <use
+                      key={`lv${n}`}
+                      href="#panel"
+                      x={PANELS_X + n * CELL_W}
+                      y={yMid + 24 - (CELL_H - 2) / 2}
+                      width={CELL_W - 2}
+                      height={CELL_H - 2}
+                    />
+                  ))}
+
+                  {/* HV channel line */}
+                  <FlowSegment
+                    x1={LINE_START_X}
+                    y1={yMid - 24}
+                    x2={COL_DPU - 10}
+                    y2={yMid - 24}
+                    watts={hvW}
+                    color="#d97706"
+                    period={period(hvW)}
+                    strokeW={strokeW(hvW)}
+                  />
+                  <text x={LINE_START_X + 22} y={yMid - 34} fill="#d97706" fontSize="14" fontWeight="700" fontFamily="ui-monospace">
+                    HV: {fmtW(hvW)}
+                  </text>
+                  <text x={LINE_START_X + 22} y={yMid - 11} fill="#586474" fontSize="11" fontFamily="ui-monospace">
+                    {p.pvHighVolts?.toFixed(0) ?? '—'} V · {p.pvHighAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptHvTemp)} · {HV_PANELS} × {PANEL_W} W
+                  </text>
+
+                  {/* LV channel line */}
+                  <FlowSegment
+                    x1={LINE_START_X}
+                    y1={yMid + 24}
+                    x2={COL_DPU - 10}
+                    y2={yMid + 24}
+                    watts={lvW}
+                    color="#c2410c"
+                    period={period(lvW)}
+                    strokeW={strokeW(lvW)}
+                  />
+                  <text x={LINE_START_X + 22} y={yMid + 38} fill="#c2410c" fontSize="14" fontWeight="700" fontFamily="ui-monospace">
+                    LV: {fmtW(lvW)}
+                  </text>
+                  <text x={LINE_START_X + 22} y={yMid + 53} fill="#586474" fontSize="11" fontFamily="ui-monospace">
+                    {p.pvLowVolts?.toFixed(0) ?? '—'} V · {p.pvLowAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptLvTemp)} · {LV_PANELS} × {PANEL_W} W
+                  </text>
+                </>
+              ) : (
+                /* Spare DPU — no PV array wired in */
+                <text x={PANELS_X} y={yMid + 4} fill="#9aa3b0" fontSize="12" fontStyle="italic">
+                  spare core · no PV array
+                </text>
+              )}
+
+              {/* DPU node */}
+              <rect x={COL_DPU} y={yMid - 32} width={150} height={64} rx={6} fill="#ffffff" stroke="#0e7490" strokeOpacity={0.9} strokeWidth={1.5} />
+              <text x={COL_DPU + 12} y={yMid - 15} fill="#586474" fontSize="11" fontWeight="600" letterSpacing="0.08em" style={{ textTransform: 'uppercase' }}>{d.deviceName}</text>
+              <text x={COL_DPU + 12} y={yMid + 9} fill="#0e7490" fontSize="21" fontWeight="700" fontFamily="ui-monospace">
+                {fmtW(totalW)}
+              </text>
+              <text x={COL_DPU + 12} y={yMid + 25} fill="#586474" fontSize="10">total in</text>
+
+              {/* DPU → battery */}
+              <FlowSegment
+                x1={COL_DPU + 150}
+                y1={yMid}
+                x2={COL_BAT}
+                y2={yMid}
+                watts={totalW}
+                color="#0e7490"
+                period={period(totalW)}
+                strokeW={strokeW(totalW)}
+              />
+            </g>
+          );
+        })}
+
+        {/* Battery cluster (right) */}
+        <rect x={COL_BAT} y={TOP - 12} width={92} height={dpus.length * ROW_H + 24} rx={6} fill="#ffffff" stroke="#15803d" strokeOpacity={0.9} strokeWidth={1.5} />
+        <text x={COL_BAT + 46} y={TOP + 8} textAnchor="middle" fill="#586474" fontSize="11" fontWeight="600" letterSpacing="0.08em" style={{ textTransform: 'uppercase' }}>batteries</text>
+        <text x={COL_BAT + 46} y={TOP + (dpus.length * ROW_H) / 2 + 14} textAnchor="middle" fill="#15803d" fontSize="26" fontWeight="700">
+          ⚡
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+function FlowSegment({
+  x1, y1, x2, y2, watts, color, period, strokeW,
+}: { x1: number; y1: number; x2: number; y2: number; watts: number; color: string; period: number; strokeW: number }) {
+  const cx = (x1 + x2) / 2;
+  const d = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+  return (
+    <g>
+      <path d={d} fill="none" stroke={color} strokeOpacity={0.35} strokeWidth={strokeW} />
+      {period > 0 && (
+        <path
+          d={d}
+          fill="none"
+          stroke={color}
+          strokeWidth={strokeW}
+          strokeDasharray="6 10"
+          strokeLinecap="round"
+          style={{ animation: `pvflow ${period}s linear infinite` }}
+        />
+      )}
+    </g>
+  );
+}
+
+function DpuSolarCard({ d }: { d: DeviceSnapshot & { projection: DpuProjection } }) {
+  const p = d.projection;
+  return (
+    <div className="card">
+      <div className="flex items-start justify-between mb-3">
+        <div>
+          <div className="text-xs text-muted">{d.productName}</div>
+          <div className="text-lg font-semibold">{d.deviceName}</div>
+          <div className="text-[10px] font-mono text-muted/80">{d.sn}</div>
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] text-muted">PV total</div>
+          <div className="text-xl font-semibold tabular-nums text-warn">{fmtW(p.pvTotalWatts)}</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <MpptChannelTile
+          label="HV MPPT"
+          watts={p.pvHighWatts}
+          volts={p.pvHighVolts}
+          amps={p.pvHighAmps}
+          temp={p.mpptHvTemp}
+          errCode={p.pvHighErrCode}
+          accent="#d97706"
+        />
+        <MpptChannelTile
+          label="LV MPPT"
+          watts={p.pvLowWatts}
+          volts={p.pvLowVolts}
+          amps={p.pvLowAmps}
+          temp={p.mpptLvTemp}
+          errCode={p.pvLowErrCode}
+          accent="#c2410c"
+        />
+      </div>
+    </div>
+  );
+}
+
+function MpptChannelTile({
+  label, watts, volts, amps, temp, errCode, accent,
+}: {
+  label: string;
+  watts: number | null;
+  volts: number | null;
+  amps: number | null;
+  temp: number | null;
+  errCode: number | null;
+  accent: string;
+}) {
+  // Effective resistance (V / A) for the operating point — interesting metric for power tracking
+  const ohms = volts != null && amps != null && amps > 0.05 ? volts / amps : null;
+  const computed = volts != null && amps != null ? volts * amps : null;
+  return (
+    <div className="bg-panel2/60 border border-line rounded-xl p-3">
+      <div className="flex items-baseline justify-between mb-1">
+        <span className="text-xs uppercase tracking-widest" style={{ color: accent }}>{label}</span>
+        {(errCode ?? 0) !== 0 && <span className="badge badge-bad text-[10px]">err {errCode}</span>}
+      </div>
+      <div className="text-2xl font-semibold tabular-nums mb-1" style={{ color: accent }}>{fmtW(watts)}</div>
+      <div className="grid grid-cols-1 gap-y-1 text-xs">
+        <div className="kv"><span className="kv-k">Voltage</span><span className="kv-v">{volts?.toFixed(1) ?? '—'} V</span></div>
+        <div className="kv"><span className="kv-k">Current</span><span className="kv-v">{amps?.toFixed(2) ?? '—'} A</span></div>
+        <div className="kv"><span className="kv-k">V × A</span><span className="kv-v">{computed != null ? `${computed.toFixed(0)} W` : '—'}</span></div>
+        <div className="kv"><span className="kv-k">MPPT temp</span><span className="kv-v">{fmtTemp(temp)}</span></div>
+        <div className="kv"><span className="kv-k">String Ω</span><span className="kv-v">{ohms != null ? `${ohms.toFixed(1)} Ω` : '—'}</span></div>
+        <div className="kv"><span className="kv-k">Error code</span><span className="kv-v">{errCode ?? 0}</span></div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryTile({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: string }) {
+  return (
+    <div className="bg-panel2/60 border border-line rounded-xl p-3">
+      <div className="text-[10px] uppercase tracking-widest text-muted">{label}</div>
+      <div className={`text-2xl font-semibold mt-1 tabular-nums ${accent ?? ''}`}>{value}</div>
+      {sub && <div className="text-[10px] text-muted mt-1 truncate">{sub}</div>}
+    </div>
+  );
+}

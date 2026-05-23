@@ -1,0 +1,57 @@
+#!/usr/bin/with-contenv bashio
+# ==============================================================================
+# EcoFlow Panel — s6 service runner.
+# Translates the add-on's Options (Configuration tab in HA) into the env vars
+# the Node server expects, then execs npm start.
+# ==============================================================================
+set -e
+
+# ── Required EcoFlow API credentials ─────────────────────────────────────────
+export ECOFLOW_ACCESS_KEY="$(bashio::config 'ECOFLOW_ACCESS_KEY')"
+export ECOFLOW_SECRET_KEY="$(bashio::config 'ECOFLOW_SECRET_KEY')"
+export ECOFLOW_API_HOST="$(bashio::config 'ECOFLOW_API_HOST')"
+
+if bashio::var.is_empty "${ECOFLOW_ACCESS_KEY}" || bashio::var.is_empty "${ECOFLOW_SECRET_KEY}"; then
+  bashio::log.fatal "ECOFLOW_ACCESS_KEY and ECOFLOW_SECRET_KEY must be set in"
+  bashio::log.fatal "the add-on Configuration tab. Set them and restart."
+  # sleep then exit so HA doesn't restart-loop us into the log
+  sleep 30
+  exit 1
+fi
+
+# ── Server + persistence ─────────────────────────────────────────────────────
+export PORT=8787
+export HOST=0.0.0.0
+export DB_PATH=/data/ecoflow.db
+export WEB_DIST_PATH=/app/web/dist
+export LOG_LEVEL="$(bashio::config 'LOG_LEVEL')"
+export FORECAST_LAT="$(bashio::config 'FORECAST_LAT')"
+export FORECAST_LON="$(bashio::config 'FORECAST_LON')"
+
+# ── Telnet "control-room" TUI ────────────────────────────────────────────────
+if bashio::config.true 'TELNET_ENABLED'; then
+  export TELNET_ENABLED=1
+else
+  export TELNET_ENABLED=0
+fi
+export TELNET_HOST=0.0.0.0
+export TELNET_PORT="$(bashio::config 'TELNET_PORT')"
+
+# ── Push notifications ───────────────────────────────────────────────────────
+export NOTIFY_CHANNEL="$(bashio::config 'NOTIFY_CHANNEL')"
+export NOTIFY_MIN_SEVERITY="$(bashio::config 'NOTIFY_MIN_SEVERITY')"
+if bashio::config.true 'NOTIFY_RESOLVED'; then
+  export NOTIFY_RESOLVED=1
+else
+  export NOTIFY_RESOLVED=0
+fi
+export NOTIFY_NTFY_SERVER="$(bashio::config 'NOTIFY_NTFY_SERVER')"
+export NOTIFY_NTFY_TOPIC="$(bashio::config 'NOTIFY_NTFY_TOPIC')"
+export NOTIFY_PUSHOVER_TOKEN="$(bashio::config 'NOTIFY_PUSHOVER_TOKEN')"
+export NOTIFY_PUSHOVER_USER="$(bashio::config 'NOTIFY_PUSHOVER_USER')"
+export NOTIFY_WEBHOOK_URL="$(bashio::config 'NOTIFY_WEBHOOK_URL')"
+
+bashio::log.info "Starting EcoFlow Panel on :${PORT} (telnet :${TELNET_PORT}, db ${DB_PATH})…"
+
+cd /app/server
+exec npm start

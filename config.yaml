@@ -1,0 +1,56 @@
+name: EcoFlow Panel
+version: "0.1.0"
+slug: ecoflow_panel
+description: >-
+  Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
+  Delta Pro Ultras, EV charger; learned anomaly detection, day-ahead
+  forecasting, and per-pack capacity-fade → end-of-life projection.
+url: https://github.com/tesseractAZ/ecoflow-panel
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+stage: experimental
+ports:
+  8787/tcp: 8787
+  2323/tcp: 2323
+ports_description:
+  8787/tcp: Web dashboard + REST API + WebSocket
+  2323/tcp: Telnet "control-room" TUI (no auth — keep on a trusted LAN)
+map:
+  - data:rw
+options:
+  ECOFLOW_ACCESS_KEY: ""
+  ECOFLOW_SECRET_KEY: ""
+  ECOFLOW_API_HOST: https://api-a.ecoflow.com
+  LOG_LEVEL: info
+  FORECAST_LAT: 33.4484
+  FORECAST_LON: -112.074
+  TELNET_ENABLED: true
+  TELNET_PORT: 2323
+  NOTIFY_CHANNEL: none
+  NOTIFY_MIN_SEVERITY: warning
+  NOTIFY_RESOLVED: true
+  NOTIFY_NTFY_SERVER: https://ntfy.sh
+  NOTIFY_NTFY_TOPIC: ""
+  NOTIFY_PUSHOVER_TOKEN: ""
+  NOTIFY_PUSHOVER_USER: ""
+  NOTIFY_WEBHOOK_URL: ""
+schema:
+  ECOFLOW_ACCESS_KEY: password
+  ECOFLOW_SECRET_KEY: password
+  ECOFLOW_API_HOST: url
+  LOG_LEVEL: list(trace|debug|info|warn|error|fatal)
+  FORECAST_LAT: float
+  FORECAST_LON: float
+  TELNET_ENABLED: bool
+  TELNET_PORT: port
+  NOTIFY_CHANNEL: list(none|ntfy|pushover|webhook)
+  NOTIFY_MIN_SEVERITY: list(warning|critical)
+  NOTIFY_RESOLVED: bool
+  NOTIFY_NTFY_SERVER: "url?"
+  NOTIFY_NTFY_TOPIC: "str?"
+  NOTIFY_PUSHOVER_TOKEN: "password?"
+  NOTIFY_PUSHOVER_USER: "password?"
+  NOTIFY_WEBHOOK_URL: "url?"

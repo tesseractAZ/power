@@ -1,0 +1,262 @@
+import { useEffect, useState } from 'react';
+import type { Alert, Severity, ClearedAlert } from '../types';
+import { alertCounts } from '../alerts';
+import { fmtRel, fmtMins } from '../format';
+import { SEV_META, SubjectBoxes } from '../cards/AlertParts';
+
+interface NotifyStatus {
+  channel: string;
+  configured: boolean;
+  minSeverity: string;
+  notifyResolved: boolean;
+  ntfyServer?: string;
+  ntfyTopic?: string;
+  tracked: number;
+  sentSinceStart: number;
+}
+
+export function AlertsPanel({ alerts }: { alerts: Alert[] }) {
+  const counts = alertCounts(alerts);
+  const actionable = alerts.filter((a) => a.severity !== 'info');
+
+  return (
+    <div className="space-y-4">
+      {/* Summary */}
+      <div className="card">
+        <div className="card-title flex items-center justify-between">
+          <span>System alerts</span>
+          <span className="text-xs text-muted normal-case tracking-normal">{alerts.length} item(s) flagged</span>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <CountTile label="Critical" value={counts.critical} accent={counts.critical > 0 ? 'text-bad' : 'text-muted'} />
+          <CountTile label="Warnings" value={counts.warning} accent={counts.warning > 0 ? 'text-warn' : 'text-muted'} />
+          <CountTile label="Informational" value={counts.info} accent="text-muted" />
+        </div>
+        {actionable.length === 0 && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-ok">
+            <span className="h-2 w-2 rounded-full bg-ok inline-block" />
+            All systems nominal — no critical or warning conditions across the fleet.
+          </div>
+        )}
+      </div>
+
+      {/* Grouped by severity */}
+      {(['critical', 'warning', 'info'] as Severity[]).map((sev) => {
+        const group = alerts.filter((a) => a.severity === sev);
+        if (group.length === 0) return null;
+        const meta = SEV_META[sev];
+        return (
+          <div key={sev} className="card">
+            <div className="card-title flex items-center gap-2">
+              <span className={`h-2 w-2 rounded-full ${meta.dot} inline-block`} />
+              <span>{meta.label}</span>
+              <span className="text-muted normal-case tracking-normal">({group.length})</span>
+            </div>
+            <div className="space-y-2">
+              {group.map((a) => (
+                <AlertRow key={a.id} alert={a} meta={meta} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      <ClearedAlertsCard />
+    </div>
+  );
+}
+
+/* Recently-cleared log — the history of alerts that have come and gone. */
+function ClearedAlertsCard() {
+  const [cleared, setCleared] = useState<ClearedAlert[]>([]);
+  useEffect(() => {
+    let live = true;
+    const load = async () => {
+      try {
+        const r = await fetch('/api/alerts/history');
+        if (r.ok && live) {
+          const j = (await r.json()) as { cleared: ClearedAlert[] };
+          setCleared(j.cleared ?? []);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    load();
+    const t = window.setInterval(load, 30_000);
+    return () => {
+      live = false;
+      window.clearInterval(t);
+    };
+  }, []);
+
+  return (
+    <div className="card">
+      <div className="card-title flex items-center justify-between">
+        <span>Recently cleared</span>
+        <span className="text-xs text-muted normal-case tracking-normal">{cleared.length} logged this session</span>
+      </div>
+      {cleared.length === 0 ? (
+        <div className="text-sm text-muted leading-relaxed">
+          No alerts have been raised and cleared since the server started. As conditions come and
+          go, each is logged here — threshold and learned alike — with how long it lasted.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {cleared.map((ce, i) => (
+            <ClearedRow key={`${ce.alert.id}-${ce.clearedAt}-${i}`} ce={ce} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClearedRow({ ce }: { ce: ClearedAlert }) {
+  const a = ce.alert;
+  return (
+    <div className="flex items-stretch gap-3 bg-panel2/40 border border-line rounded-lg p-3">
+      <SubjectBoxes alert={a} />
+      <div className="flex-1 min-w-0 flex flex-col justify-center">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="text-sm font-medium">{a.title}</span>
+          <span className="badge badge-muted text-[10px]">{a.category}</span>
+          {a.source === 'learned' && (
+            <span className="badge text-[10px] bg-accent/15 text-accent border-accent/30">learned</span>
+          )}
+          <span className="badge badge-ok text-[10px]">cleared</span>
+          {a.coreNum == null && <span className="text-[10px] text-muted">{a.device}</span>}
+        </div>
+        <div className="text-xs text-muted mt-1 leading-relaxed">{a.detail}</div>
+        <div className="text-[11px] text-muted mt-1.5">
+          raised {fmtRel(ce.raisedAt)} · cleared {fmtRel(ce.clearedAt)} · lasted{' '}
+          {fmtMins(ce.durationMs / 60000)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NotificationCard() {
+  const [status, setStatus] = useState<NotifyStatus | null>(null);
+  const [testState, setTestState] = useState<'idle' | 'sending' | 'ok' | 'fail'>('idle');
+  const [testMsg, setTestMsg] = useState('');
+
+  const load = async () => {
+    try {
+      const r = await fetch('/api/notify/status');
+      if (r.ok) setStatus(await r.json());
+    } catch {
+      /* ignore */
+    }
+  };
+  useEffect(() => {
+    load();
+    const t = window.setInterval(load, 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const sendTest = async () => {
+    setTestState('sending');
+    setTestMsg('');
+    try {
+      const r = await fetch('/api/notify/test', { method: 'POST' });
+      const j = await r.json();
+      if (j.ok) {
+        setTestState('ok');
+        setTestMsg('Test notification sent.');
+      } else {
+        setTestState('fail');
+        setTestMsg(j.error ?? 'Failed to send.');
+      }
+    } catch (e: any) {
+      setTestState('fail');
+      setTestMsg(String(e?.message ?? e));
+    }
+    setTimeout(() => setTestState('idle'), 6000);
+  };
+
+  return (
+    <div className="card">
+      <div className="card-title flex items-center justify-between">
+        <span>Push notifications</span>
+        {status && (
+          <span className={`badge ${status.configured ? 'badge-ok' : 'badge-muted'}`}>
+            {status.channel === 'none' ? 'disabled' : status.configured ? `${status.channel} · ready` : `${status.channel} · not configured`}
+          </span>
+        )}
+      </div>
+      {!status ? (
+        <div className="text-sm text-muted">Loading…</div>
+      ) : status.channel === 'none' ? (
+        <div className="text-sm text-muted leading-relaxed">
+          Notifications are off. To enable: set <code className="text-accent">NOTIFY_CHANNEL=ntfy</code> in
+          <code className="text-accent"> server/.env</code>, install the ntfy app, subscribe to your topic, and restart the server.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <Field label="Channel" value={status.channel} />
+            <Field label="Min severity" value={status.minSeverity} />
+            <Field label="Resolved alerts" value={status.notifyResolved ? 'notified' : 'muted'} />
+            <Field label="Sent this session" value={String(status.sentSinceStart)} />
+          </div>
+          {status.channel === 'ntfy' && status.ntfyTopic && (
+            <div className="text-[11px] text-muted mb-3 leading-relaxed">
+              Subscribe in the ntfy app to topic <code className="text-accent">{status.ntfyTopic}</code>
+              {status.ntfyServer && status.ntfyServer !== 'https://ntfy.sh' ? ` on ${status.ntfyServer}` : ' on ntfy.sh'}.
+            </div>
+          )}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={sendTest}
+              disabled={testState === 'sending'}
+              className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-50"
+            >
+              {testState === 'sending' ? 'sending…' : 'Send test notification'}
+            </button>
+            {testMsg && (
+              <span className={`text-xs ${testState === 'ok' ? 'text-ok' : testState === 'fail' ? 'text-bad' : 'text-muted'}`}>
+                {testMsg}
+              </span>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-panel2/60 border border-line rounded-lg p-2">
+      <div className="text-[10px] uppercase tracking-widest text-muted">{label}</div>
+      <div className="text-sm font-medium mt-0.5 capitalize">{value}</div>
+    </div>
+  );
+}
+
+function AlertRow({ alert, meta }: { alert: Alert; meta: (typeof SEV_META)[Severity] }) {
+  return (
+    <div className={`flex items-stretch gap-3 bg-panel2/50 border ${meta.ring} rounded-lg p-3`}>
+      <SubjectBoxes alert={alert} />
+      <div className="flex-1 min-w-0 flex flex-col justify-center">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="text-sm font-medium">{alert.title}</span>
+          <span className="badge badge-muted text-[10px]">{alert.category}</span>
+          {alert.coreNum == null && <span className="text-[10px] text-muted">{alert.device}</span>}
+        </div>
+        <div className="text-xs text-muted mt-1 leading-relaxed">{alert.detail}</div>
+      </div>
+    </div>
+  );
+}
+
+function CountTile({ label, value, accent }: { label: string; value: number; accent: string }) {
+  return (
+    <div className="bg-panel2/60 border border-line rounded-xl p-3 text-center">
+      <div className={`text-3xl font-bold tabular-nums ${accent}`}>{value}</div>
+      <div className="text-[10px] uppercase tracking-widest text-muted mt-1">{label}</div>
+    </div>
+  );
+}
