@@ -1,5 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
+# Build-time ARGs that participate in FROM substitutions or cross-stage usage
+# must be declared in the global scope (before any FROM). They still need to
+# be re-declared inside the stages that consume them in RUN / LABEL / ENV —
+# global ARGs are only visible to FROM lines.
+ARG BUILD_FROM
+ARG BUILD_ARCH
+ARG BUILD_DATE
+ARG BUILD_DESCRIPTION
+ARG BUILD_NAME
+ARG BUILD_REF
+ARG BUILD_REPOSITORY
+ARG BUILD_VERSION
+
 # ─── Stage 1 — build the web bundle ──────────────────────────────────────────
 # Uses Docker Hub's multi-arch node:22-alpine; HA Supervisor's build runs on
 # the target arch so we never cross-compile.
@@ -19,7 +32,6 @@ RUN npm ci
 
 
 # ─── Stage 3 — Home Assistant add-on runtime ─────────────────────────────────
-ARG BUILD_FROM
 # hadolint ignore=DL3006
 FROM ${BUILD_FROM}
 
@@ -45,7 +57,8 @@ RUN chmod a+x /etc/services.d/ecoflow-panel/run
 # Web + API; telnet TUI
 EXPOSE 8787 2323
 
-# Add-on metadata
+# Add-on metadata — re-declare the ARGs we need inside this stage so LABEL
+# can substitute them.
 ARG BUILD_ARCH
 ARG BUILD_DATE
 ARG BUILD_DESCRIPTION

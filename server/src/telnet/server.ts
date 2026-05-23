@@ -341,7 +341,10 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     draw(s);
     s.timer = setInterval(() => draw(s), 1000);
 
-    socket.on('data', (d) => onData(s, d));
+    // node:net never delivers strings on a socket without setEncoding(); the
+    // @types/node ≥ 22.19 union of `string | Buffer` is a theoretical-only
+    // possibility for our setup, so coerce to keep the inner signature tight.
+    socket.on('data', (d) => onData(s, d as Buffer));
     socket.on('close', () => endSession(s));
     socket.on('error', () => endSession(s));
   });

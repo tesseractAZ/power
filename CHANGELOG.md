@@ -3,6 +3,26 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.2.1 — 2026-05-22
+
+Patch fix for two issues that hit on the first `v0.2.0` push.
+
+- **Dockerfile multi-stage ARG**: moved `ARG BUILD_FROM` (and the other
+  `BUILD_*` args) to the **global scope** (above every `FROM`) so the
+  runtime stage's `FROM ${BUILD_FROM}` substitutes correctly. Declared
+  inside the previous stage, `BUILD_FROM` was scoped to that stage and
+  evaluated to empty in the runtime `FROM`, so the docker smoke build
+  (CI) and `Publish images` (on tag) both failed instantly with
+  `ERROR: failed to build: failed to solve: base name (${BUILD_FROM})
+  should not be blank`.
+- **`server/src/telnet/server.ts`**: cast the socket `data` event payload
+  to `Buffer` at the call site. `@types/node` ≥ 22.19 narrowed the event
+  payload to `string | Buffer`, and the inner `onData(data: Buffer)`
+  signature rejected the union. (Local working tree had `@types/node@22.10`
+  cached, so it only surfaced when CI's fresh `npm ci` pulled the latest
+  patch.) The runtime never sets a socket encoding, so the cast is
+  type-only — no behavior change.
+
 ## 0.2.0 — 2026-05-22
 
 ### Distribution
