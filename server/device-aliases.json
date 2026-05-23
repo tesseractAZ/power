@@ -1,0 +1,6 @@
+{
+  "_comment": "Local device-name overrides, keyed by serial number. Takes precedence over the name EcoFlow's API returns. Edit and restart the server to apply.",
+  "aliases": {
+    "Y711ZAB59G9P0090": "Core 5"
+  }
+}

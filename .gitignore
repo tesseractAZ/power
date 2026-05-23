@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# build artifacts
+dist/
+web/dist/
+server/dist/
+*.tsbuildinfo
+
+# env / secrets — never commit
+.env
+.env.local
+.env.production
+
+# logs
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# local data (SQLite recorder + per-run scratch)
+data/
+tmp/
+.tmp/
+
+# Claude session/scratch (kept local)
+.claude/

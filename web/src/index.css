@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body { color: #1b2027; }
+
+/* Instrument panels — squared, crisply bordered, light faces. */
+.card { @apply bg-panel border border-line rounded-lg p-4 shadow-sm; }
+.card-title { @apply text-xs uppercase tracking-widest text-muted font-semibold mb-2; }
+.kv { @apply flex items-baseline justify-between text-sm; }
+.kv-k { @apply text-muted; }
+.kv-v { @apply font-mono tabular-nums font-semibold; } /* dark ink inherited from body */
+
+.badge { @apply text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border font-semibold; }
+.badge-ok { @apply bg-ok/15 text-ok border-ok/40; }
+.badge-warn { @apply bg-warn/15 text-warn border-warn/40; }
+.badge-bad { @apply bg-bad/15 text-bad border-bad/40; }
+.badge-muted { @apply bg-muted/15 text-muted border-muted/40; }
+
+/* Readout bars — recessed track, solid status fill. */
+.bar { @apply h-2 w-full bg-panel2 rounded-sm overflow-hidden border border-line/50; }
+.bar > div { @apply h-full transition-all duration-500; }
