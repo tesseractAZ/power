@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { FleetDegradation, PackDegradation, DegradeStatus } from '../types';
+import type { FleetDegradation, PackDegradation, DegradeStatus, RoundTripEfficiency } from '../types';
 
 /**
  * Battery degradation — per-pack capacity-fade → end-of-life projection.
@@ -51,18 +51,22 @@ function median(xs: number[]): number | null {
 
 export function DegradationCard() {
   const [deg, setDeg] = useState<FleetDegradation | null>(null);
+  const [rte, setRte] = useState<RoundTripEfficiency | null>(null);
   const [err, setErr] = useState(false);
 
   useEffect(() => {
     let live = true;
     const load = async () => {
       try {
-        const r = await fetch('/api/degradation');
+        const [rD, rR] = await Promise.all([
+          fetch('/api/degradation'),
+          fetch('/api/round-trip-efficiency'),
+        ]);
         if (!live) return;
-        if (r.ok) {
-          setDeg(await r.json());
-          setErr(false);
-        } else setErr(true);
+        if (rD.ok) setDeg(await rD.json());
+        if (rR.ok) setRte(await rR.json());
+        if (!rD.ok && !rR.ok) setErr(true);
+        else setErr(false);
       } catch {
         if (live) setErr(true);
       }
@@ -112,7 +116,7 @@ export function DegradationCard() {
         and every pack's fade rate is compared against the fleet to flag one wearing abnormally fast.
       </p>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         <Tile
           label="Packs projecting"
           value={`${projecting.length} / ${deg.packs.length}`}
@@ -138,6 +142,22 @@ export function DegradationCard() {
               : 'capacity not reported'
           }
           accent={capPct != null ? (capPct < 90 ? 'text-warn' : 'text-ok') : undefined}
+        />
+        <Tile
+          label="Round-trip eff."
+          value={rte?.efficiencyPct != null ? `${rte.efficiencyPct.toFixed(1)}%` : '—'}
+          sub={
+            rte != null && rte.daysWithData > 0
+              ? `${rte.daysWithData}/${rte.windowDays}-day rolling · healthy ≈ 95–97%`
+              : 'gathering data — needs charge/discharge cycles'
+          }
+          accent={
+            rte?.efficiencyPct != null
+              ? rte.efficiencyPct < 90
+                ? 'text-warn'
+                : 'text-ok'
+              : undefined
+          }
         />
       </div>
 
@@ -318,6 +338,24 @@ function PackDetail({ p }: { p: PackDegradation }) {
     {
       label: 'Fit confidence',
       value: p.r2 != null ? `R² ${p.r2.toFixed(2)} · ${p.samples} pts · ${p.dataSpanDays} d` : '—',
+    },
+    {
+      label: 'Avg pack temp',
+      value: p.avgPackTempC != null ? `${p.avgPackTempC.toFixed(1)} °C` : '—',
+    },
+    {
+      label: 'Fade @ 25 °C',
+      value:
+        p.fadePctPerYearAt25C != null
+          ? `${p.fadePctPerYearAt25C.toFixed(1)} %/yr`
+          : '—',
+    },
+    {
+      label: 'Cool 5 °C → +yr',
+      value:
+        p.coolingBenefitYears != null
+          ? `+${p.coolingBenefitYears.toFixed(1)} yr`
+          : '—',
     },
   ];
   return (

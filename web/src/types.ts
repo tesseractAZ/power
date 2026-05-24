@@ -290,7 +290,44 @@ export interface PackDegradation {
   projectedCyclesAtEol: number | null;
   peerFadeRatio: number | null;
   peerOutlier: boolean;
+  avgPackTempC: number | null;
+  arrheniusFactor: number | null;
+  fadePctPerYearAt25C: number | null;
+  coolingBenefitYears: number | null;
   summary: string;
+}
+
+export interface RunwayProjection {
+  generatedAt: number;
+  backupRemainingKwh: number | null;
+  backupReserveKwh: number | null;
+  backupFullKwh: number | null;
+  recentLoadWatts: number;
+  hoursToReserve: number | null;
+  hoursToEmpty: number | null;
+  reserveAtMs: number | null;
+  emptyAtMs: number | null;
+  forecastPvUsedKwh: number;
+  loadHorizonKwh: number;
+  horizonHours: number;
+  unavailable: string | null;
+}
+
+export interface RoundTripDay {
+  date: string;
+  chargedKwh: number;
+  dischargedKwh: number;
+  efficiencyPct: number | null;
+}
+
+export interface RoundTripEfficiency {
+  generatedAt: number;
+  windowDays: number;
+  daysWithData: number;
+  totalChargedKwh: number;
+  totalDischargedKwh: number;
+  efficiencyPct: number | null;
+  perDay: RoundTripDay[];
 }
 
 export interface FleetDegradation {

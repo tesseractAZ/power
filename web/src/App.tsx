@@ -3,6 +3,7 @@ import { useSnapshot } from './useSnapshot';
 import { EnergyFlow } from './cards/EnergyFlow';
 import { TodaySummary } from './cards/TodaySummary';
 import { ForecastCard } from './cards/ForecastCard';
+import { RunwayCard } from './cards/RunwayCard';
 import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
 import type { Shp2Projection } from './types';
 import { Shp2Card } from './cards/Shp2Card';
@@ -170,7 +171,8 @@ export default function App() {
         <PredictiveInsights alerts={learnedAlerts} />
       ) : (
         <>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        {snapshot && <RunwayCard />}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start mt-4">
           {snapshot && <EnergyFlow devices={snapshot.devices} />}
           <TodaySummary />
           <ForecastCard />

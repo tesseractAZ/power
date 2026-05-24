@@ -3,6 +3,58 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.5.0 — 2026-05-23
+
+### Features — Battery longevity v2
+
+- **Temperature-corrected SoH fade (Arrhenius).** Each projecting or
+  stable pack now reports `avgPackTempC` (across the SoH regression
+  window), the resulting Arrhenius factor, the **calendar fade
+  re-expressed at the 25 °C reference**, and an estimated
+  **years-of-life-gained-if-cooled-5 °C** number. Three new fact-tiles
+  per pack in the degradation card; the per-pack summary sentence
+  appends the Arrhenius note when the data supports it. Direct answer
+  to "would moving these to a cooler garage save me X years?" for
+  Phoenix-class climates.
+
+- **Round-trip efficiency, rolling 7-day.** Integrates per-pack input
+  vs output watts across all DPUs over the last 7 days; ratio shows in
+  a new tile on the degradation-card header and as the
+  `ecoflow_round_trip_efficiency` HA sensor. Healthy LFP sits 95–97%;
+  a slow drift down is the cleanest "the whole stack is aging" signal
+  that no single-pack metric catches. Cached 5 min.
+
+### Features — Operational
+
+- **Live off-grid runway.** New prominent card at the top of the
+  Dashboard: hours to reserve and hours to empty, projected hour-by-hour
+  from the last-hour panel load and the next-24-hour forecast PV.
+  Headline colour shifts **red < 4h / amber < 12h / neutral ≥ 12h**.
+  Also surfaces the clock times ("Reserve floor reached around Sat
+  9 PM") and a breakdown of the assumptions (backup now, reserve floor,
+  recent load, forecast PV vs load over the horizon). Exposed as
+  `ecoflow_runway_to_reserve_hours` and `ecoflow_runway_to_empty_hours`
+  HA sensors. Cached 60 s.
+
+### API
+
+- **`/api/runway`** — RunwayProjection.
+- **`/api/round-trip-efficiency?days=N`** — RoundTripEfficiency (days
+  capped 1–30, default 7).
+- **`/api/ha-state`** gains `runway_to_reserve_hours`,
+  `runway_to_empty_hours`, `runway_recent_load_watts`,
+  `runway_forecast_pv_used_kwh`, `round_trip_efficiency_percent`,
+  `round_trip_charged_kwh_7d`, `round_trip_discharged_kwh_7d`.
+
+### Docs / roadmap
+
+- DOCS.md HA snippet adds three new sensors (runway-to-reserve,
+  runway-to-empty, round-trip-efficiency). Total: 17 sensors + 1
+  binary_sensor.
+- README roadmap expanded to a multi-release plan (v0.6.0 anomaly
+  engine v2, v0.7.0 sharper forecasts, v0.8.0+ pattern detection with
+  history, plus external-integration and standing buckets).
+
 ## 0.4.0 — 2026-05-23
 
 ### Features
