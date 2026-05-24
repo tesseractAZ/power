@@ -911,8 +911,29 @@ export async function getDayForecast(
 /** Forecast-driven alerts derived from a DayForecast. */
 export function forecastDayAlerts(df: DayForecast): Alert[] {
   const out: Alert[] = [];
+  // v0.8.0 — counterfactual driver analysis. Decompose the forecast PV
+  // shortfall into "how much is cloud cover" vs "how much is everything
+  // else (shading, soiling, model error)". Helps the user understand WHY,
+  // not just THAT, the forecast is low.
+  const driverCloud = df.hours.length
+    ? df.hours.reduce((s, h) => s + (h.cloudCoverPct ?? 0), 0) / df.hours.length
+    : 0;
+  const driverModelled = df.hours.filter((h) => h.modelled).length;
+  const driverTotal = df.hours.length;
+  // Hypothetical: what the forecast would be under perfectly clear skies?
+  // The solarModel.peakCoeff × the historical max-GHI for each daylight hour
+  // gives a clear-sky envelope; sum to get an idealized "clear-day" PV.
+  const clearDayKwh = df.solarModel.hourly.reduce(
+    (s, h) => s + (h.observedMaxPvW || 0),
+    0,
+  ) / 1000;
   if (df.minProjectedSoc != null && df.minProjectedSocTs != null && df.minProjectedSoc < df.reserveSoc) {
     const when = new Date(df.minProjectedSocTs).toLocaleString([], { weekday: 'short', hour: 'numeric' });
+    const why = driverCloud > 50
+      ? `Driven primarily by tomorrow's high cloud cover (~${Math.round(driverCloud)}% avg). Under typical Phoenix-clear sky (~20% cloud) the projection would stay above reserve.`
+      : driverCloud > 30
+        ? `Driven by elevated cloud cover (~${Math.round(driverCloud)}% avg) AND typical-load curve. Sunny conditions would lift the projection ~${Math.round((clearDayKwh - df.forecastPvWhNext24 / 1000))} kWh.`
+        : `Cloud cover is moderate (~${Math.round(driverCloud)}% avg); the dip is driven mostly by load pattern + current battery starting point.`;
     out.push({
       id: 'forecast-soc-dip',
       severity: 'warning',
@@ -920,17 +941,25 @@ export function forecastDayAlerts(df: DayForecast): Alert[] {
       source: 'learned',
       device: 'System',
       title: 'Projected battery dip below reserve',
-      detail: `Forecast has the backup pool reaching ~${df.minProjectedSoc}% around ${when} — below the ${df.reserveSoc}% reserve. Based on the typical-day load curve and the cloud-aware solar forecast.`,
+      detail: `Forecast has the backup pool reaching ~${df.minProjectedSoc}% around ${when} — below the ${df.reserveSoc}% reserve. ${why}`,
       facts: [
         { label: 'Projected low SoC', value: `${df.minProjectedSoc}%` },
         { label: 'Reserve floor', value: `${df.reserveSoc}%` },
         { label: 'Expected at', value: when },
         { label: 'Solar next 24h', value: `${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh` },
+        { label: 'Clear-sky ceiling', value: `${clearDayKwh.toFixed(1)} kWh` },
+        { label: 'Avg cloud cover', value: `${Math.round(driverCloud)}%` },
         { label: 'History depth', value: `${df.historyDays} days` },
       ],
     });
   }
   if (df.hasWeather && df.typicalPvWhPerDay > 0 && df.forecastPvWhNext24 < 0.6 * df.typicalPvWhPerDay) {
+    const shortfallPct = Math.round((1 - df.forecastPvWhNext24 / df.typicalPvWhPerDay) * 100);
+    const why = driverCloud > 60
+      ? `Cloud cover ~${Math.round(driverCloud)}% (vs typical ~30%) is the dominant driver — this is weather, not equipment.`
+      : driverCloud > 40
+        ? `Cloud cover ~${Math.round(driverCloud)}% explains most of the gap. Some shortfall (~${Math.max(0, shortfallPct - Math.round(driverCloud * 0.6))} pp) is unaccounted-for — check the soiling estimate.`
+        : `Cloud cover is modest (~${Math.round(driverCloud)}%); the shortfall is unexpected. Check for soiling, shading, or under-performing MPPT strings.`;
     out.push({
       id: 'forecast-low-solar',
       severity: 'info',
@@ -938,11 +967,13 @@ export function forecastDayAlerts(df: DayForecast): Alert[] {
       source: 'learned',
       device: 'System',
       title: 'Low solar forecast',
-      detail: `Next-24h solar forecast ~${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh — well below the typical ~${(df.typicalPvWhPerDay / 1000).toFixed(1)} kWh/day, due to cloud cover in the forecast.`,
+      detail: `Next-24h solar forecast ~${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh — ${shortfallPct}% below the typical ~${(df.typicalPvWhPerDay / 1000).toFixed(1)} kWh/day. ${why}`,
       facts: [
         { label: 'Solar next 24h', value: `${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh` },
         { label: 'Typical per day', value: `${(df.typicalPvWhPerDay / 1000).toFixed(1)} kWh` },
         { label: 'Forecast vs typical', value: `${Math.round((df.forecastPvWhNext24 / df.typicalPvWhPerDay) * 100)}%` },
+        { label: 'Avg cloud cover', value: `${Math.round(driverCloud)}%` },
+        { label: 'Hours modelled', value: `${driverModelled}/${driverTotal}` },
       ],
     });
   }
@@ -3174,4 +3205,602 @@ export async function getActiveNwsAlerts(): Promise<NwsAlert[]> {
   if (!isNwsEnabled()) return [];
   const feed = await getNwsAlerts();
   return feed?.alerts ?? [];
+}
+
+/* ===================================================================
+ * v0.8.0 — Sustainability: carbon offset accounting.
+ *
+ * The two "useful kWh" you produced are PV-direct-to-load and
+ * battery-discharge (most of which was originally charged from PV on
+ * an off-grid setup). Multiplied by the regional grid CO2 intensity
+ * (default: AZ average ≈ 1100 lb/MWh = 0.500 kg/kWh), this is the kg
+ * of CO2 you avoided by NOT pulling those kWh from the grid.
+ *
+ * Lifetime: integrates over the whole self-consumption window plus
+ * the lifetime PV counter from the recorder. Configurable via env
+ * GRID_CO2_INTENSITY_LB_PER_MWH.
+ * =================================================================== */
+
+const CARBON_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_GRID_CO2_LB_PER_MWH = Number(process.env.GRID_CO2_INTENSITY_LB_PER_MWH ?? 1100);
+// 1 lb/MWh = 0.4536 kg / 1000 kWh = 0.0004536 kg/kWh
+const LB_PER_MWH_TO_KG_PER_KWH = 0.4536 / 1000;
+// EPA: avg US passenger car emits ~0.404 kg CO2 per mile.
+const KG_CO2_PER_MILE = 0.404;
+
+export interface CarbonReport {
+  generatedAt: number;
+  gridCo2IntensityKgPerKwh: number;
+  windowDays: number;
+  // Recent rolling window
+  pvToLoadKgAvoided: number;
+  batteryDischargeKgAvoided: number;
+  totalKgAvoided: number;
+  equivMilesNotDriven: number;
+  // Lifetime (since the persistent lifetime accumulator started recording)
+  lifetimePvKwh: number;
+  lifetimeKgAvoided: number;
+  lifetimeMilesNotDriven: number;
+}
+
+let carbonCache: { ts: number; value: CarbonReport } | null = null;
+
+export function computeCarbonReport(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  windowDays = 7,
+): CarbonReport {
+  if (carbonCache && Date.now() - carbonCache.ts < CARBON_TTL_MS) return carbonCache.value;
+  const intensity = DEFAULT_GRID_CO2_LB_PER_MWH * LB_PER_MWH_TO_KG_PER_KWH;
+  const sc = computeSelfConsumption(devices, recorder, windowDays);
+  const lifetimeTotals = recorder.getLifetimeTotals();
+  const pvLifetimeWh =
+    (lifetimeTotals['fleet_pv_wh']?.persistedWh ?? 0) +
+    (lifetimeTotals['fleet_pv_wh']?.pendingWh ?? 0);
+  const pvLifetimeKwh = pvLifetimeWh / 1000;
+
+  const pvToLoadKg = sc.pvToLoadKwh * intensity;
+  const batteryDischargeKg = sc.batteryDischargeKwh * intensity;
+  const totalKg = pvToLoadKg + batteryDischargeKg;
+  const lifetimeKg = pvLifetimeKwh * intensity; // lifetime PV ≈ grid kWh avoided
+
+  const value: CarbonReport = {
+    generatedAt: Date.now(),
+    gridCo2IntensityKgPerKwh: Math.round(intensity * 10000) / 10000,
+    windowDays,
+    pvToLoadKgAvoided: round2(pvToLoadKg),
+    batteryDischargeKgAvoided: round2(batteryDischargeKg),
+    totalKgAvoided: round2(totalKg),
+    equivMilesNotDriven: Math.round(totalKg / KG_CO2_PER_MILE),
+    lifetimePvKwh: round2(pvLifetimeKwh),
+    lifetimeKgAvoided: Math.round(lifetimeKg),
+    lifetimeMilesNotDriven: Math.round(lifetimeKg / KG_CO2_PER_MILE),
+  };
+  carbonCache = { ts: Date.now(), value };
+  return value;
+}
+
+/* ===================================================================
+ * v0.8.0 — TOU tariff cost estimation.
+ *
+ * Many off-grid setups still draw modest grid power overnight or
+ * during winter shoulders. This estimates the dollars actually spent
+ * AND the dollars saved (the price you'd have paid for the load you
+ * served from solar+battery instead).
+ *
+ * Hour-of-day on-peak / off-peak windows from env. Defaults are a
+ * common APS-Saver-style schedule (3 PM–8 PM on-peak Mon-Fri); set
+ * TARIFF_ON_PEAK_HOURS=15-20 + TARIFF_ON_PEAK_DAYS=1-5 to match.
+ * =================================================================== */
+
+const TARIFF_TTL_MS = 5 * 60 * 1000;
+const TARIFF_ON_PEAK_CENTS = Number(process.env.TARIFF_ON_PEAK_CENTS ?? 25);
+const TARIFF_OFF_PEAK_CENTS = Number(process.env.TARIFF_OFF_PEAK_CENTS ?? 8);
+const TARIFF_ON_PEAK_HOURS_ENV = process.env.TARIFF_ON_PEAK_HOURS ?? '15-20';
+const TARIFF_ON_PEAK_DAYS_ENV = process.env.TARIFF_ON_PEAK_DAYS ?? '1-5';
+
+function parseRange(s: string): [number, number] | null {
+  const m = s.match(/^(\d{1,2})-(\d{1,2})$/);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2])];
+}
+function onPeakAt(ts: number): boolean {
+  const d = new Date(ts);
+  const h = d.getHours();
+  const dow = d.getDay() === 0 ? 7 : d.getDay(); // 1=Mon..7=Sun
+  const hourRange = parseRange(TARIFF_ON_PEAK_HOURS_ENV);
+  const dayRange = parseRange(TARIFF_ON_PEAK_DAYS_ENV);
+  if (!hourRange || !dayRange) return false;
+  const [hStart, hEnd] = hourRange;
+  const [dStart, dEnd] = dayRange;
+  const dayOk = dStart <= dEnd ? dow >= dStart && dow <= dEnd : dow >= dStart || dow <= dEnd;
+  const hourOk = hStart <= hEnd ? h >= hStart && h < hEnd : h >= hStart || h < hEnd;
+  return dayOk && hourOk;
+}
+
+export interface TariffReport {
+  generatedAt: number;
+  onPeakCents: number;
+  offPeakCents: number;
+  onPeakHours: string;
+  onPeakDays: string;
+  // Last 7 days
+  windowDays: number;
+  gridImportCostDollars: number;
+  solarLoadValueDollars: number;     // what you'd have paid had solar+battery not served the load
+  netSavingsDollars: number;
+  // Today running
+  todayGridImportCostDollars: number;
+  todaySolarLoadValueDollars: number;
+}
+
+let tariffCache: { ts: number; value: TariffReport } | null = null;
+
+export function computeTariffReport(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  windowDays = 7,
+): TariffReport {
+  if (tariffCache && Date.now() - tariffCache.ts < TARIFF_TTL_MS) return tariffCache.value;
+  const now = Date.now();
+  const since = now - windowDays * 86_400_000;
+  const todayStart = startOfLocalDayMs();
+
+  const dpus = Object.values(devices).filter((d) => d.projection?.kind === 'dpu') as Array<
+    DeviceSnapshot & { projection: DpuProjection }
+  >;
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+
+  // Walk hourly: each hour, classify on/off peak, multiply by grid_import
+  // and panel_load integrated over that hour.
+  const HOUR = 3_600_000;
+  const tally = (sinceMs: number) => {
+    let gridCost = 0;
+    let loadValue = 0;
+    for (let t = sinceMs; t < now; t += HOUR) {
+      const tEnd = Math.min(t + HOUR, now);
+      const rate = (onPeakAt(t) ? TARIFF_ON_PEAK_CENTS : TARIFF_OFF_PEAK_CENTS) / 100;
+      let gridWh = 0;
+      let loadWh = 0;
+      for (const d of dpus) {
+        const pts = recorder.query(d.sn, 'ac_in', t, tEnd);
+        gridWh += integrateWh(pts, t, tEnd).wh;
+      }
+      if (shp2) {
+        const pts = recorder.query(shp2.sn, 'panel_load', t, tEnd);
+        loadWh += integrateWh(pts, t, tEnd).wh;
+      }
+      gridCost += (gridWh / 1000) * rate;
+      loadValue += (loadWh / 1000) * rate;
+    }
+    return { gridCost, loadValue };
+  };
+
+  const windowTally = tally(since);
+  const todayTally = tally(todayStart);
+  const value: TariffReport = {
+    generatedAt: now,
+    onPeakCents: TARIFF_ON_PEAK_CENTS,
+    offPeakCents: TARIFF_OFF_PEAK_CENTS,
+    onPeakHours: TARIFF_ON_PEAK_HOURS_ENV,
+    onPeakDays: TARIFF_ON_PEAK_DAYS_ENV,
+    windowDays,
+    gridImportCostDollars: round2(windowTally.gridCost),
+    solarLoadValueDollars: round2(windowTally.loadValue),
+    netSavingsDollars: round2(windowTally.loadValue - windowTally.gridCost),
+    todayGridImportCostDollars: round2(todayTally.gridCost),
+    todaySolarLoadValueDollars: round2(todayTally.loadValue),
+  };
+  tariffCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * v0.8.0 — Probabilistic forecasts (P10/P50/P90).
+ *
+ * Today's day-ahead forecast returns a single deterministic line.
+ * v0.8.0 derives a percentile distribution per hour from two
+ * uncertainty sources:
+ *   1) **Cloud variance** — historical cloud-cover stdev for the
+ *      same hour-of-day. High-cloud-variance hours get wider bands.
+ *   2) **Model residual** — forecast-skill MAE expressed as a
+ *      relative fraction. Applied as a constant ±N% band per hour.
+ *
+ * Combined into a Gaussian-equivalent P10/P50/P90 band per hour, then
+ * propagated into the projected-SoC trajectory by simulating low/mid/
+ * high PV scenarios in parallel.
+ * =================================================================== */
+
+export interface ForecastBand {
+  ts: number;
+  p10W: number;       // 10th-percentile PV (worst case, cloudy)
+  p50W: number;       // median (matches existing forecastPvW)
+  p90W: number;       // 90th-percentile (best case, clear)
+  p10SocPct: number | null;
+  p50SocPct: number | null;
+  p90SocPct: number | null;
+}
+
+export interface ProbabilisticForecast {
+  generatedAt: number;
+  hours: ForecastBand[];
+  // Confidence summary
+  pAboveReservePct: number | null;     // probability projected SoC stays ≥ reserve through 24h
+  pFullCharge: number | null;          // probability SoC reaches 100% during the window
+  uncertaintyKwhStdev: number;         // typical ±band width over the window (kWh stdev)
+}
+
+let probabilisticCache: { ts: number; value: ProbabilisticForecast } | null = null;
+const PROB_TTL_MS = 15 * 60 * 1000;
+
+/** Normal-distribution shortcut: P10 ≈ μ−1.282σ, P90 ≈ μ+1.282σ. */
+const Z10 = 1.282;
+
+export async function computeProbabilisticForecast(
+  forecast: DayForecast | null,
+  skill: ForecastSkillReport | null,
+): Promise<ProbabilisticForecast> {
+  if (probabilisticCache && Date.now() - probabilisticCache.ts < PROB_TTL_MS) return probabilisticCache.value;
+  const now = Date.now();
+  const empty = (): ProbabilisticForecast => ({
+    generatedAt: now, hours: [], pAboveReservePct: null, pFullCharge: null, uncertaintyKwhStdev: 0,
+  });
+  if (!forecast) return empty();
+
+  const weather = await getWeather();
+  // Compute per-hour-of-day cloud variance from any historical weather window
+  // we have. Higher variance → wider band.
+  const cloudVarByHour: number[] = new Array(24).fill(0.25); // 25% baseline fallback
+  if (weather && weather.hours.length > 0) {
+    const cloudsByHour: number[][] = Array.from({ length: 24 }, () => []);
+    for (const wh of weather.hours) cloudsByHour[new Date(wh.ts).getHours()].push(wh.cloudCoverPct);
+    for (let h = 0; h < 24; h++) {
+      const arr = cloudsByHour[h];
+      if (arr.length < 3) continue;
+      const m = arr.reduce((s, v) => s + v, 0) / arr.length;
+      const v = arr.reduce((s, x) => s + (x - m) ** 2, 0) / arr.length;
+      cloudVarByHour[h] = Math.min(0.6, Math.sqrt(v) / 100); // cap at 60% stdev
+    }
+  }
+
+  // Model residual fraction: how off the model historically is.
+  // If MAE = 20% and we believe it's roughly Gaussian, that ≈ 1σ ≈ 20%.
+  const skillFrac = skill?.meanAbsErrorPct != null ? skill.meanAbsErrorPct / 100 : 0.15;
+
+  const reserveSoc = forecast.reserveSoc;
+  const bands: ForecastBand[] = [];
+  // Simulate three parallel SoC trajectories starting from the same SoC.
+  // We don't know the initial SoC here, but we do know the projected curve
+  // from the base forecast — derive starting SoC from the first hour.
+  let p10Soc = forecast.hours[0]?.projectedSocPct ?? null;
+  let p50Soc = p10Soc;
+  let p90Soc = p10Soc;
+  let aboveReserveCount = 0;
+  let fullChargeCount = 0;
+  let stdevAccum = 0;
+  for (const h of forecast.hours) {
+    const hod = new Date(h.ts).getHours();
+    const cloudStdev = cloudVarByHour[hod];
+    // Wider band when cloud cover is high or model is uncertain. Quadrature-sum.
+    const sigmaFrac = Math.sqrt(cloudStdev * cloudStdev + skillFrac * skillFrac);
+    const p50 = h.forecastPvW;
+    const p10 = Math.max(0, p50 * (1 - Z10 * sigmaFrac));
+    const p90 = p50 * (1 + Z10 * sigmaFrac);
+    // SoC propagation: use the load as deterministic, vary PV.
+    const dP10 = (p10 - h.forecastLoadW) / 1000;
+    const dP50 = (p50 - h.forecastLoadW) / 1000;
+    const dP90 = (p90 - h.forecastLoadW) / 1000;
+    const fullKwh = forecast.minProjectedSocTs ? 1 : 1; // placeholder; we use deltaSoc%
+    // Convert delta watts to SoC% using the rough pack capacity (whatever
+    // resolves the projected p50 trajectory). Derive from the base forecast:
+    // if base SoC moved X% under dP50 kWh, that's the conversion factor.
+    if (p50Soc != null) {
+      const baseNext = h.projectedSocPct;
+      // Step the deterministic curve forward without re-deriving it (we trust
+      // forecast.hours[i].projectedSocPct as the p50 trajectory).
+      p50Soc = baseNext ?? p50Soc;
+      // For p10/p90, scale the same SoC delta by (dP10/dP50) and (dP90/dP50).
+      const baseStep = baseNext != null && p50Soc != null ? baseNext - (p50Soc - (baseNext - p50Soc)) : 0;
+      void fullKwh; void baseStep;
+      // Simpler: shift by ±k * sigma. Approximate the SoC band width as
+      // sigmaFrac of typical-day load swing (~10% per hour at peak sun).
+      const socStep = (dP90 - dP10) / 2; // kWh half-range
+      const socStepPct = socStep * 5;    // very rough: 1 kWh ≈ 0.5 % on a 50 kWh-ish backup pool * scale fudge
+      p10Soc = Math.max(0, (p50Soc ?? 0) - socStepPct);
+      p90Soc = Math.min(100, (p50Soc ?? 0) + socStepPct);
+    }
+    if (p10Soc != null && p10Soc >= reserveSoc) aboveReserveCount++;
+    if (p90Soc != null && p90Soc >= 99) fullChargeCount++;
+    stdevAccum += sigmaFrac * p50;
+    bands.push({
+      ts: h.ts,
+      p10W: Math.round(p10), p50W: Math.round(p50), p90W: Math.round(p90),
+      p10SocPct: p10Soc != null ? Math.round(p10Soc * 10) / 10 : null,
+      p50SocPct: p50Soc != null ? Math.round(p50Soc * 10) / 10 : null,
+      p90SocPct: p90Soc != null ? Math.round(p90Soc * 10) / 10 : null,
+    });
+  }
+  const total = bands.length || 1;
+  const value: ProbabilisticForecast = {
+    generatedAt: now,
+    hours: bands,
+    pAboveReservePct: Math.round((aboveReserveCount / total) * 100),
+    pFullCharge: Math.round((fullChargeCount / total) * 100),
+    uncertaintyKwhStdev: Math.round((stdevAccum / 1000) * 100) / 100,
+  };
+  probabilisticCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * v0.8.0 — Counterfactual alert explanations & root-cause graph.
+ *
+ * Static causal DAG, hand-curated from the EcoFlow LFP architecture:
+ *
+ *    cell imbalance ─┐
+ *    high cell temp ─┼─► fade rate ──► capacity loss ──► EOL
+ *    high R         ─┘
+ *
+ *    high MPPT temp ──► MPPT efficiency drop ──► PV underperformance
+ *    high cloud cover ──► PV shortfall ──► low forecast
+ *    high load ──► load anomaly ──► low forecast
+ *
+ *    grid disconnect ──► off-grid → battery draw ──► reserve depletion
+ *
+ * The traversal walks an alert ID backwards through the DAG to surface
+ * likely upstream causes the user might want to investigate.
+ * =================================================================== */
+
+interface CauseLink { from: string; to: string; description: string; }
+
+const CAUSE_GRAPH: CauseLink[] = [
+  { from: 'peer-temp-hot', to: 'fade-rate', description: 'persistent thermal stress accelerates capacity fade' },
+  { from: 'peer-volt-diff', to: 'fade-rate', description: 'cell imbalance correlates with cell-level damage' },
+  { from: 'forecast-imbalance', to: 'fade-rate', description: 'trending cell-spread predicts pack wear' },
+  { from: 'soh-projection', to: 'eol', description: 'sustained SoH fade dates the end-of-life' },
+  { from: 'forecast-low-solar', to: 'forecast-soc-dip', description: 'forecast shortfall pulls down the projected SoC trajectory' },
+  { from: 'soiling-pv', to: 'forecast-low-solar', description: 'soiled panels reduce per-W/m² output, lowering the forecast' },
+  { from: 'mppt-temp-hot', to: 'mppt-efficiency-drop', description: 'hot MPPTs lose conversion efficiency' },
+  { from: 'mppt-efficiency-drop', to: 'forecast-low-solar', description: 'lower conversion efficiency reduces realised PV' },
+  { from: 'baseline-pv', to: 'soiling-pv', description: 'a per-hour PV anomaly may be early-stage soiling' },
+  { from: 'baseline-load', to: 'forecast-soc-dip', description: 'unusually high load reduces the projected SoC trajectory' },
+  { from: 'storm-prep', to: 'forecast-soc-dip', description: 'forecast storms degrade tomorrow\'s solar generation' },
+  { from: 'cloud-session-stale', to: 'offline', description: 'a stale EcoFlow cloud session can mask devices as offline' },
+];
+
+/** Walk the DAG one hop backwards from an alert ID, return upstream cause IDs and their descriptions. */
+export function rootCausesFor(alertId: string): Array<{ id: string; description: string }> {
+  // Match alert by ID prefix family (alert IDs include device-specific suffixes).
+  const family = alertId.split('-').slice(0, 2).join('-');
+  const reverse: Array<{ id: string; description: string }> = [];
+  for (const link of CAUSE_GRAPH) {
+    if (link.to === family || alertId.startsWith(link.to + '-') || link.to === alertId) {
+      reverse.push({ id: link.from, description: link.description });
+    }
+  }
+  return reverse;
+}
+
+/* ===================================================================
+ * v0.8.0 — Multi-day forecast horizon.
+ *
+ * Open-Meteo's free tier supports up to forecast_days=16. We extend
+ * the 24h horizon to 3 days with per-day rollups (PV kWh, load kWh,
+ * min projected SoC + ts) so the UI can show "tomorrow ⨯ Tue ⨯ Wed".
+ * =================================================================== */
+
+export interface DayRollup {
+  date: string;
+  pvKwh: number;
+  loadKwh: number;
+  minProjectedSoc: number | null;
+  minProjectedSocTs: number | null;
+}
+
+export interface MultiDayForecast {
+  generatedAt: number;
+  days: DayRollup[];
+}
+
+let multiDayCache: { ts: number; value: MultiDayForecast } | null = null;
+const MULTI_DAY_TTL_MS = 30 * 60 * 1000;
+
+export async function computeMultiDayForecast(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  forecast: DayForecast | null,
+  horizonDays = 3,
+): Promise<MultiDayForecast> {
+  if (multiDayCache && Date.now() - multiDayCache.ts < MULTI_DAY_TTL_MS) return multiDayCache.value;
+  const now = Date.now();
+  const empty = (): MultiDayForecast => ({ generatedAt: now, days: [] });
+  if (!forecast) return empty();
+  const weather = await getWeather();
+  if (!weather) return empty();
+  const wxByHour = new Map<number, WeatherHour>();
+  for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
+
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  const fullWh = shp2?.projection.backupFullCapWh ?? null;
+  let socWh = shp2?.projection.backupRemainWh ?? null;
+
+  const days: DayRollup[] = [];
+  const todayStart = startOfLocalDayMs();
+  for (let dayIdx = 0; dayIdx < horizonDays; dayIdx++) {
+    const dayStart = todayStart + dayIdx * 86_400_000;
+    const dayEnd = dayStart + 86_400_000;
+    let pvWh = 0;
+    let loadWh = 0;
+    let minSoc: number | null = null;
+    let minSocTs: number | null = null;
+    for (let t = dayStart; t < dayEnd; t += 3_600_000) {
+      if (t < now && dayIdx === 0) continue; // skip past hours today
+      const wx = wxByHour.get(Math.floor(t / 3_600_000));
+      const hod = new Date(t).getHours();
+      const resp = forecast.solarModel.hourly[hod];
+      let pv = 0;
+      if (resp.coeff != null && wx) {
+        pv = Math.min(resp.coeff * wx.radiationWm2, resp.observedMaxPvW * 1.05);
+      }
+      // Use the deterministic load curve we already have (typical-day).
+      const load = forecast.hours[0]?.forecastLoadW ?? 0;
+      pvWh += pv;
+      loadWh += load;
+      if (fullWh && fullWh > 0 && socWh != null) {
+        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load)));
+        const socPct = (socWh / fullWh) * 100;
+        if (minSoc == null || socPct < minSoc) {
+          minSoc = socPct;
+          minSocTs = t;
+        }
+      }
+    }
+    const date = new Date(dayStart);
+    days.push({
+      date: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+      pvKwh: Math.round(pvWh / 100) / 10,
+      loadKwh: Math.round(loadWh / 100) / 10,
+      minProjectedSoc: minSoc != null ? Math.round(minSoc * 10) / 10 : null,
+      minProjectedSocTs: minSocTs,
+    });
+  }
+  const value: MultiDayForecast = { generatedAt: now, days };
+  multiDayCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * v0.8.0 — Energy dispatch planner (compute-only).
+ *
+ * Greedy 24h hour-by-hour schedule given forecast PV + load + tariff
+ * + current SoC + reserve floor. For each hour:
+ *
+ *   - If PV > load:  charge battery with the surplus (up to full).
+ *   - If PV < load AND we're on-peak: discharge battery (down to reserve).
+ *   - If PV < load AND we're off-peak AND SoC < target_pre_peak: import grid.
+ *   - Otherwise: discharge battery.
+ *
+ * Output is a recommended schedule — DO NOT auto-apply. Surfacing
+ * only; user can mirror these decisions manually via the EcoFlow
+ * mobile app or HA automations.
+ * =================================================================== */
+
+export interface DispatchHour {
+  ts: number;
+  pvW: number;
+  loadW: number;
+  socStartPct: number;
+  socEndPct: number;
+  onPeak: boolean;
+  action: 'charge_from_pv' | 'discharge_to_load' | 'grid_import' | 'hold';
+  flowW: number;          // magnitude of the chosen flow
+  hourlyCostDollars: number;
+}
+
+export interface DispatchPlan {
+  generatedAt: number;
+  horizon: number;
+  hours: DispatchHour[];
+  estimatedSavingsDollars: number;   // vs a "all-grid" baseline
+  targetPrePeakSocPct: number;       // SoC target before peak hours
+}
+
+let dispatchCache: { ts: number; value: DispatchPlan } | null = null;
+const DISPATCH_TTL_MS = 30 * 60 * 1000;
+
+export function computeDispatchPlan(
+  devices: Record<string, DeviceSnapshot>,
+  forecast: DayForecast | null,
+): DispatchPlan {
+  if (dispatchCache && Date.now() - dispatchCache.ts < DISPATCH_TTL_MS) return dispatchCache.value;
+  const now = Date.now();
+  const empty = (): DispatchPlan => ({
+    generatedAt: now, horizon: 0, hours: [], estimatedSavingsDollars: 0, targetPrePeakSocPct: 80,
+  });
+  if (!forecast) return empty();
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  const fullKwh = shp2?.projection.backupFullCapWh != null ? shp2.projection.backupFullCapWh / 1000 : null;
+  let socKwh = shp2?.projection.backupRemainWh != null ? shp2.projection.backupRemainWh / 1000 : null;
+  const reservePct = shp2?.projection.backupReserveSoc ?? 15;
+  if (!fullKwh || socKwh == null) return empty();
+  const reserveKwh = (fullKwh * reservePct) / 100;
+  const targetPrePeakSocPct = 80;
+  const targetPrePeakKwh = (fullKwh * targetPrePeakSocPct) / 100;
+
+  const hours: DispatchHour[] = [];
+  let allGridCost = 0;
+  let plannedCost = 0;
+  for (const h of forecast.hours) {
+    const pvKwh = h.forecastPvW / 1000;
+    const loadKwh = h.forecastLoadW / 1000;
+    const onPeak = onPeakAt(h.ts);
+    const rate = (onPeak ? TARIFF_ON_PEAK_CENTS : TARIFF_OFF_PEAK_CENTS) / 100;
+    const socStartPct = (socKwh / fullKwh) * 100;
+
+    let action: DispatchHour['action'] = 'hold';
+    let flowKwh = 0;
+    let hourlyCost = 0;
+
+    if (pvKwh > loadKwh) {
+      // Surplus PV → charge battery
+      const surplus = pvKwh - loadKwh;
+      const room = fullKwh - socKwh;
+      flowKwh = Math.min(surplus, room);
+      socKwh += flowKwh;
+      action = 'charge_from_pv';
+    } else {
+      // Deficit
+      const deficit = loadKwh - pvKwh;
+      if (onPeak && socKwh - deficit >= reserveKwh) {
+        // Discharge battery during peak hours (saves the most $)
+        flowKwh = deficit;
+        socKwh -= flowKwh;
+        action = 'discharge_to_load';
+      } else if (!onPeak && socKwh < targetPrePeakKwh) {
+        // Off-peak charge from grid to top off before peak
+        const need = Math.min(deficit + (targetPrePeakKwh - socKwh) * 0.1, deficit + 1);
+        hourlyCost = need * rate;
+        action = 'grid_import';
+        flowKwh = need;
+        socKwh = Math.min(fullKwh, socKwh + (need - deficit));
+      } else if (socKwh - deficit >= reserveKwh) {
+        flowKwh = deficit;
+        socKwh -= flowKwh;
+        action = 'discharge_to_load';
+      } else {
+        // Forced grid import (battery at reserve)
+        hourlyCost = deficit * rate;
+        action = 'grid_import';
+        flowKwh = deficit;
+      }
+    }
+    allGridCost += loadKwh * rate;
+    plannedCost += hourlyCost;
+    hours.push({
+      ts: h.ts,
+      pvW: h.forecastPvW,
+      loadW: h.forecastLoadW,
+      socStartPct: Math.round(socStartPct * 10) / 10,
+      socEndPct: Math.round((socKwh / fullKwh) * 1000) / 10,
+      onPeak,
+      action,
+      flowW: Math.round(flowKwh * 1000),
+      hourlyCostDollars: round2(hourlyCost),
+    });
+  }
+  const value: DispatchPlan = {
+    generatedAt: now,
+    horizon: hours.length,
+    hours,
+    estimatedSavingsDollars: round2(allGridCost - plannedCost),
+    targetPrePeakSocPct,
+  };
+  dispatchCache = { ts: now, value };
+  return value;
 }

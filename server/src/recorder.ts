@@ -53,8 +53,8 @@ export interface Recorder {
   close: () => void;
   /** Force a lifetime-rollup tick (used by tests / on shutdown). */
   rollupLifetime: () => void;
-  /** Snapshot of all five lifetime counters, including pending integral. */
-  getLifetimeTotals: () => Record<LifetimeMetricKey, LifetimeTotals>;
+  /** Snapshot of every lifetime counter (fleet + per-circuit). Keys are the metric_key strings. */
+  getLifetimeTotals: () => Record<string, LifetimeTotals>;
 }
 
 export function createRecorder(store: SnapshotStore, log: (m: string) => void): Recorder {
@@ -254,6 +254,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     'fleet_battery_charge_wh',
     'fleet_battery_discharge_wh',
   ] as const;
+  // v0.8.0 — per-circuit watt-integrated lifetime counters. Dynamic key
+  // shape `circuit_<chNum>_wh` populated from buildContributors using
+  // each SHP2 circuit's `ch${ch}_w` watt metric. Pruning of raw samples
+  // can't decrement these; same watermark guarantees as the fleet keys.
 
   const readLifetime = (key: string): { wh: number; ts: number } => {
     const r = lifetimeReadStmt.get(key) as { wh: number; last_integrated_ts: number } | undefined;
@@ -292,9 +296,27 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         }
       } else if (p.kind === 'shp2') {
         out.fleet_load_wh.push({ sn: d.sn, metric: 'panel_load' });
+        // v0.8.0 — one lifetime key per circuit so each appears as an HA
+        // Energy Dashboard "Individual device".
+        for (const c of (p as Shp2Projection).circuits ?? []) {
+          const key = `circuit_${c.ch}_wh`;
+          out[key] = [{ sn: d.sn, metric: `ch${c.ch}_w` }];
+        }
       }
     }
     return out;
+  };
+
+  /** Resolve the active list of lifetime keys (fixed fleet keys + dynamic per-circuit). */
+  const allLifetimeKeys = (snap: FleetSnapshot): string[] => {
+    const keys: string[] = [...LIFETIME_KEYS];
+    const shp2 = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2');
+    if (shp2 && shp2.projection?.kind === 'shp2') {
+      for (const c of (shp2.projection as Shp2Projection).circuits ?? []) {
+        keys.push(`circuit_${c.ch}_wh`);
+      }
+    }
+    return keys;
   };
 
   /**
@@ -344,8 +366,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     const snap = store.get();
     const contributors = buildContributors(snap);
 
-    // Watt-integrated metrics
-    for (const key of ['fleet_pv_wh', 'fleet_load_wh', 'fleet_grid_import_wh'] as const) {
+    // Watt-integrated metrics — fleet + per-circuit keys.
+    const wattKeys = Object.keys(contributors); // fleet_pv/load/grid + circuit_<N>
+    for (const key of wattKeys) {
       const prev = readLifetime(key);
       // On first run (ts === 0) start the watermark 60 s back so we don't try
       // to integrate the whole history (which would be huge and rotational).
@@ -358,8 +381,8 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         addedWh += r.wh;
       }
       // Negative values are physically impossible for the metrics we track
-      // (PV / load / grid-in); clamp to zero so a transient sign flip from a
-      // bad sample can't decrement the lifetime counter.
+      // (PV / load / grid-in / circuits); clamp to zero so a transient sign
+      // flip from a bad sample can't decrement the lifetime counter.
       if (addedWh < 0) addedWh = 0;
       writeLifetime(key, prev.wh + addedWh, now);
     }
@@ -386,13 +409,14 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     catch (e: any) { log(`recorder: lifetime initial rollup failed ${e?.message ?? e}`); }
   }, 30_000).unref();
 
-  /** Snapshot of all five counters, including the live integral past the watermark. */
-  const getLifetimeTotals = (): Record<LifetimeMetricKey, LifetimeTotals> => {
+  /** Snapshot of every counter (fleet + per-circuit), including live integral past the watermark. */
+  const getLifetimeTotals = (): Record<string, LifetimeTotals> => {
     const now = Date.now();
     const snap = store.get();
     const contributors = buildContributors(snap);
-    const out = {} as Record<LifetimeMetricKey, LifetimeTotals>;
-    for (const key of LIFETIME_KEYS) {
+    const out: Record<string, LifetimeTotals> = {};
+    const allKeys = allLifetimeKeys(snap);
+    for (const key of allKeys) {
       const prev = readLifetime(key);
       const watermark = prev.ts === 0 ? now : prev.ts;
       let pendingWh = 0;

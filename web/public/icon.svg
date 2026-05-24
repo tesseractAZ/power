@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- EcoFlow Panel PWA icon. Dark slate background with a teal/amber
+       sun-over-battery glyph matching the dashboard theme. v0.8.0. -->
+  <rect width="512" height="512" rx="96" fill="#0b1014" />
+  <!-- Sun -->
+  <circle cx="256" cy="180" r="68" fill="#fbbf24" />
+  <g stroke="#fbbf24" stroke-width="14" stroke-linecap="round" fill="none">
+    <line x1="256" y1="76" x2="256" y2="100" />
+    <line x1="256" y1="260" x2="256" y2="284" />
+    <line x1="152" y1="180" x2="176" y2="180" />
+    <line x1="336" y1="180" x2="360" y2="180" />
+    <line x1="183" y1="107" x2="200" y2="124" />
+    <line x1="312" y1="236" x2="329" y2="253" />
+    <line x1="329" y1="107" x2="312" y2="124" />
+    <line x1="200" y1="236" x2="183" y2="253" />
+  </g>
+  <!-- Battery -->
+  <rect x="120" y="320" width="272" height="120" rx="20" fill="none" stroke="#22d3ee" stroke-width="14" />
+  <rect x="392" y="356" width="20" height="48" rx="6" fill="#22d3ee" />
+  <rect x="138" y="340" width="80" height="80" rx="6" fill="#22d3ee" />
+  <rect x="226" y="340" width="80" height="80" rx="6" fill="#22d3ee" />
+  <rect x="314" y="340" width="62" height="80" rx="6" fill="#22d3ee" opacity="0.4" />
+</svg>

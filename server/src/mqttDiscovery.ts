@@ -9,6 +9,8 @@ import {
   computeRoundTripEfficiency,
   computeClipping,
   computeSelfConsumption,
+  computeCarbonReport,
+  computeTariffReport,
 } from './analytics.js';
 
 /**
@@ -34,7 +36,7 @@ const DEVICE_INFO = {
   name: 'EcoFlow Panel',
   model: 'SHP2 + Delta Pro Ultra fleet dashboard',
   manufacturer: 'EcoFlow Panel (add-on)',
-  sw_version: '0.7.6',
+  sw_version: '0.8.0',
 };
 
 const STATE_TOPIC = 'ecoflow_panel/state';
@@ -49,6 +51,7 @@ interface SensorConfig {
   unit_of_measurement?: string;
   icon?: string;
   value_template: string;
+  entity_category?: 'diagnostic' | 'config';
 }
 
 const SENSORS: SensorConfig[] = [
@@ -75,7 +78,7 @@ const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_round_trip_efficiency', name: 'EcoFlow Round-Trip Efficiency', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-sync-outline', value_template: '{{ value_json.round_trip_efficiency_percent }}' },
   // Clipping
   { unique_id: 'ecoflow_pv_clipped_kwh_today', name: 'EcoFlow PV Clipped Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_clipped_kwh_today }}' },
-  { unique_id: 'ecoflow_pv_array_peak_watts', name: 'EcoFlow PV Array Peak', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.pv_array_peak_watts }}' },
+  { unique_id: 'ecoflow_pv_array_peak_watts', name: 'EcoFlow PV Array Peak', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.pv_array_peak_watts }}', entity_category: 'diagnostic' },
   // Self-consumption (v0.7.5)
   { unique_id: 'ecoflow_solar_fraction_of_load', name: 'EcoFlow Solar Fraction of Load', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power', value_template: '{{ value_json.solar_fraction_of_load_percent }}' },
   { unique_id: 'ecoflow_direct_use_ratio', name: 'EcoFlow PV Direct Use Ratio', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.direct_use_ratio_percent }}' },
@@ -93,6 +96,14 @@ const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_grid_import_lifetime_kwh', name: 'EcoFlow Grid Import', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.grid_import_lifetime_kwh }}' },
   { unique_id: 'ecoflow_battery_charge_lifetime_kwh', name: 'EcoFlow Battery Energy In', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-charging', value_template: '{{ value_json.battery_charge_lifetime_kwh }}' },
   { unique_id: 'ecoflow_battery_discharge_lifetime_kwh', name: 'EcoFlow Battery Energy Out', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-arrow-down', value_template: '{{ value_json.battery_discharge_lifetime_kwh }}' },
+
+  // ─── v0.8.0 sustainability + tariff ──────────────────────────────────────
+  { unique_id: 'ecoflow_carbon_kg_avoided_7d', name: 'EcoFlow CO2 Avoided (7d)', state_class: 'measurement', unit_of_measurement: 'kg', icon: 'mdi:leaf', value_template: '{{ value_json.carbon_kg_avoided_7d }}' },
+  { unique_id: 'ecoflow_carbon_lifetime_kg', name: 'EcoFlow CO2 Avoided Lifetime', state_class: 'total_increasing', unit_of_measurement: 'kg', icon: 'mdi:leaf', value_template: '{{ value_json.carbon_lifetime_kg_avoided }}' },
+  { unique_id: 'ecoflow_carbon_lifetime_miles', name: 'EcoFlow Equivalent Miles Not Driven', state_class: 'total_increasing', unit_of_measurement: 'mi', icon: 'mdi:car-electric', value_template: '{{ value_json.carbon_lifetime_miles_not_driven }}' },
+  { unique_id: 'ecoflow_tariff_today_cost', name: 'EcoFlow Grid Cost Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash', value_template: '{{ value_json.tariff_today_grid_cost_dollars }}' },
+  { unique_id: 'ecoflow_tariff_today_saved', name: 'EcoFlow Solar Value Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-plus', value_template: '{{ value_json.tariff_today_solar_value_dollars }}' },
+  { unique_id: 'ecoflow_tariff_savings_7d', name: 'EcoFlow Net Savings (7d)', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-check', value_template: '{{ value_json.tariff_net_savings_7d_dollars }}' },
 ];
 
 const BINARY_SENSORS = [
@@ -162,6 +173,35 @@ export async function startMqttDiscovery(
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
     }
+    // v0.8.0 — publish one Energy-Dashboard sensor per SHP2 circuit so each
+    // appears as an "Individual device" under HA's Energy Dashboard. Built
+    // dynamically from the current snapshot's circuit list (auto-adapts if
+    // the user adds/removes SHP2 circuits later).
+    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    if (shp2 && shp2.projection?.kind === 'shp2') {
+      const circuits = (shp2.projection as Shp2Projection).circuits ?? [];
+      for (const c of circuits) {
+        const uniqueId = `ecoflow_circuit_${c.ch}_lifetime_kwh`;
+        const name = `EcoFlow ${c.name || `Circuit ${c.ch}`} Energy`;
+        const topic = `${prefix}/sensor/${uniqueId}/config`;
+        const cfg = {
+          unique_id: uniqueId,
+          name,
+          state_topic: STATE_TOPIC,
+          availability_topic: AVAILABILITY_TOPIC,
+          payload_available: 'online',
+          payload_not_available: 'offline',
+          device_class: 'energy',
+          state_class: 'total_increasing',
+          unit_of_measurement: 'kWh',
+          icon: 'mdi:transmission-tower',
+          value_template: `{{ value_json.circuit_${c.ch}_lifetime_kwh }}`,
+          device: DEVICE_INFO,
+        };
+        client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
+      }
+      log(`mqtt-discovery: published ${circuits.length} per-circuit lifetime sensors`);
+    }
     client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 });
     log(`mqtt-discovery: published ${SENSORS.length} sensor configs + ${BINARY_SENSORS.length} binary_sensor configs to ${url} (prefix=${prefix})`);
   };
@@ -194,8 +234,10 @@ export async function startMqttDiscovery(
     const clipping = await computeClipping(snap.devices, recorder, fc);
     const sc = computeSelfConsumption(snap.devices, recorder);
     const lifetime = recorder.getLifetimeTotals();
-    const lifetimeKwh = (k: keyof typeof lifetime) =>
-      Math.round(((lifetime[k].persistedWh + lifetime[k].pendingWh) / 1000) * 1000) / 1000;
+    const lifetimeKwh = (k: string) =>
+      lifetime[k] ? Math.round(((lifetime[k].persistedWh + lifetime[k].pendingWh) / 1000) * 1000) / 1000 : null;
+    const carbon = computeCarbonReport(snap.devices, recorder);
+    const tariff = computeTariffReport(snap.devices, recorder);
 
     const projecting = deg.packs.filter((p) => p.status === 'projecting');
     const soonest = projecting.reduce<typeof projecting[number] | null>(
@@ -233,6 +275,21 @@ export async function startMqttDiscovery(
       grid_import_lifetime_kwh: lifetimeKwh('fleet_grid_import_wh'),
       battery_charge_lifetime_kwh: lifetimeKwh('fleet_battery_charge_wh'),
       battery_discharge_lifetime_kwh: lifetimeKwh('fleet_battery_discharge_wh'),
+      // v0.8.0 — per-circuit lifetime + carbon + tariff
+      ...Object.fromEntries(
+        Object.keys(lifetime)
+          .filter((k) => k.startsWith('circuit_'))
+          .map((k) => [
+            `circuit_${k.match(/^circuit_(\d+)_wh$/)?.[1]}_lifetime_kwh`,
+            lifetimeKwh(k),
+          ]),
+      ),
+      carbon_kg_avoided_7d: carbon.totalKgAvoided,
+      carbon_lifetime_kg_avoided: carbon.lifetimeKgAvoided,
+      carbon_lifetime_miles_not_driven: carbon.lifetimeMilesNotDriven,
+      tariff_today_grid_cost_dollars: tariff.todayGridImportCostDollars,
+      tariff_today_solar_value_dollars: tariff.todaySolarLoadValueDollars,
+      tariff_net_savings_7d_dollars: tariff.netSavingsDollars,
       alert_critical_count: cnt('threshold', 'critical'),
       alert_warning_count: cnt('threshold', 'warning'),
       learned_warning_count: cnt('learned', 'warning'),

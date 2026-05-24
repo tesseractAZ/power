@@ -3,6 +3,132 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.8.0 — 2026-05-24
+
+"Big push" release — full HA-native integration surface + predictive
+engine v2 (uncertainty-aware, multi-day, counterfactual, dispatch).
+13 features in one release. Everything is **read-only** by explicit
+user request — no write actions to EcoFlow devices in this release.
+
+### Features — HA integration
+
+- **Per-circuit lifetime kWh.** The persistent `lifetime_totals`
+  accumulator from v0.7.6 now maintains one row per SHP2 circuit
+  (`circuit_<ch>_wh`). Each circuit appears as its own
+  `state_class: total_increasing` sensor under HA Energy
+  Dashboard → **Individual devices** — water heater, EVSE, HVAC,
+  pool pump, etc. broken out cleanly. MQTT Discovery auto-publishes
+  one sensor per detected SHP2 circuit.
+- **Carbon offset / sustainability reporting.** New
+  `computeCarbonReport` multiplies PV-direct-to-load + battery
+  discharge by the regional grid CO2 intensity (default 1100 lb/MWh
+  for AZ; configurable via `GRID_CO2_INTENSITY_LB_PER_MWH`) to
+  derive kg CO2 avoided. Equivalent miles-not-driven via the EPA
+  passenger-car number. Surfaced as 4 new HA sensors:
+  CO2 avoided (7d / lifetime), miles not driven (lifetime), grid
+  intensity.
+- **TOU tariff cost tracking.** Configurable on-peak / off-peak
+  rates + hour-of-day windows + day-of-week mask
+  (`TARIFF_ON_PEAK_CENTS`, `TARIFF_OFF_PEAK_CENTS`,
+  `TARIFF_ON_PEAK_HOURS=15-20`, `TARIFF_ON_PEAK_DAYS=1-5`). Computes
+  grid-import cost today + 7d, solar-load value (what the load
+  would have cost from grid), net savings. APS-Saver-style defaults.
+- **Calendar ICS feed** at `/api/calendar.ics` (RFC5545). HA's
+  `generic_ics_calendar` integration can subscribe. Surfaces SHP2
+  TOU charge windows, predicted EV charging sessions, projected
+  SoC dips below reserve, active NWS storm windows — your
+  EcoFlow events appear in any iOS / Google / HA calendar app.
+- **Repair issues feed** at `/api/repair-issues`. Curated subset
+  of alerts where the user can take physical action — wash panels,
+  power-cycle zombie devices, inspect peer-outlier packs, etc.
+  Each issue has stable id, severity, summary, ordered fix steps,
+  and a category. Persistent first-seen tracking lets HA show
+  "active for N hours".
+- **Diagnostic entity recategorization.** Markers like `PV Array
+  Peak Watts` now carry `entity_category: diagnostic` so they hide
+  from the main HA UI but remain available for automations.
+
+### Features — Predictive engine v2
+
+- **Probabilistic forecasts (P10/P50/P90).** Replaces the single-
+  line PV curve with a confidence band per hour. Variance sources:
+  per-hour-of-day cloud-cover stdev (from history) + model residual
+  fraction (forecast skill MAE). Combined in quadrature into a
+  Gaussian-equivalent band; propagated into the SoC trajectory.
+  Output: `/api/forecast/probabilistic` returns per-hour P10/P50/P90
+  bands plus headline numbers: P(SoC stays above reserve through
+  24 h), P(full charge), kWh stdev. Enables risk-aware automations
+  rather than "trust the point estimate".
+- **Multi-day forecast horizon (3 days).** Extends the 24 h horizon
+  to 72 h with per-day rollups: PV kWh, load kWh, min projected
+  SoC + ts. `/api/forecast/multi-day`. Lets you answer "should I
+  run the dryer Wed or Sat?" or "will I make it to the weekend
+  before the storm?".
+- **Counterfactual alert explanations.** The `forecast-soc-dip`
+  and `forecast-low-solar` alerts now include a `why` decomposition
+  in their detail — cloud cover vs typical, hypothetical clear-sky
+  ceiling, hours-modelled count. Stops being "X is wrong" and
+  starts being "X is wrong BECAUSE Y".
+- **Root-cause graph for alerts.** Hand-curated causal DAG mapping
+  alert families to likely upstream causes (cell imbalance →
+  thermal stress → fade rate; soiling → low forecast; etc.).
+  `/api/root-cause?alertId=...` walks one hop back. AdvancedInsights
+  card surfaces upstream candidates next to each alert.
+- **Energy dispatch planner (compute-only).** Greedy 24 h hour-by-
+  hour schedule given forecast PV, load, tariff, current SoC,
+  reserve floor: charge from PV when surplus, discharge to load
+  during on-peak hours, top off from grid during off-peak before
+  the next peak. Output: recommended schedule + estimated savings
+  vs all-grid baseline. **Compute-only — does NOT auto-apply** (user
+  explicitly held write actions). Mirror manually via the EcoFlow
+  mobile app or HA automations.
+
+### Features — PWA
+
+- **PWA installable.** Web UI now ships a `manifest.webmanifest` +
+  service worker. Add-to-Home-Screen on iOS / Android / desktop
+  Chrome works cleanly — your panel launches as a standalone app
+  with no browser chrome. Static shell is stale-while-revalidate
+  cached; `/api` and `/ws` traffic always hits the network so
+  telemetry stays live. Custom-themed icon (sun-over-battery on
+  dashboard slate).
+
+### API
+
+- **New endpoints:** `/api/carbon`, `/api/tariff`,
+  `/api/forecast/probabilistic`, `/api/forecast/multi-day`,
+  `/api/dispatch-plan`, `/api/root-cause`, `/api/calendar.ics`,
+  `/api/repair-issues`.
+- **`/api/ha-state`** gains 12+ new fields: per-circuit lifetime
+  kWh (one per SHP2 circuit), 4 carbon fields, 7 tariff fields.
+- **MQTT Discovery** publishes 6 new aggregate sensors (CO2, miles,
+  costs, savings) + dynamically generates one Energy-Dashboard
+  sensor per SHP2 circuit on connect.
+
+### Docs
+
+- DOCS.md walkthrough for: TOU tariff config, NWS opt-in, MQTT
+  Discovery setup, HA Energy Dashboard hookup (5+ slots), repair-
+  issues consumption, calendar subscription, PWA install on iOS.
+
+### Notes / explicitly deferred
+
+User held all write-to-device features for a later release. Also
+deferred to v1.0+ (genuine multi-week research scope, would be
+malpractice to half-ship in a single batch):
+
+- Bayesian GHI→PV update (replacing OLS with proper posterior)
+- Kalman state-space SoC/SoH estimator
+- ML failure-mode classifier (needs training infrastructure)
+- Self-tuning anomaly z-score thresholds
+- HACS Lovelace frontend card (full Web Components rebuild)
+- LAN-direct EcoFlow protocol (reverse engineering)
+- Multi-site federation (requires backend infra)
+
+These remain on the roadmap and will be tackled in a focused way
+when they're the priority. For now: v0.8.0 ships the read-only
+side of the v2.0 roadmap.
+
 ## 0.7.7 — 2026-05-24
 
 Diagnostics patch — actionable offline alerts plus per-SN connectivity

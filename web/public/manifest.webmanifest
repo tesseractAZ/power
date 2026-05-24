@@ -1,0 +1,19 @@
+{
+  "name": "EcoFlow Panel",
+  "short_name": "EcoFlow",
+  "description": "Local control-room dashboard for an EcoFlow off-grid home — live telemetry, predictive insights, and HA Energy Dashboard integration.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1014",
+  "theme_color": "#0b1014",
+  "categories": ["utilities", "productivity"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

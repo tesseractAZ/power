@@ -57,6 +57,11 @@ A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 | `MQTT_DISCOVERY_PORT` | `1883` | Broker port. |
 | `MQTT_DISCOVERY_USER`, `MQTT_DISCOVERY_PASS` | — | Broker credentials. |
 | `MQTT_DISCOVERY_PREFIX` | `homeassistant` | HA's discovery topic prefix; don't change unless you have. |
+| `GRID_CO2_INTENSITY_LB_PER_MWH` | `1100` | Regional grid carbon intensity. Default ≈ AZ average. Used to compute CO2 avoided. Look up your state's value at eia.gov/electricity/. (v0.8.0) |
+| `TARIFF_ON_PEAK_CENTS` | `25` | Your utility's on-peak rate in ¢/kWh. (v0.8.0) |
+| `TARIFF_OFF_PEAK_CENTS` | `8` | Off-peak rate in ¢/kWh. (v0.8.0) |
+| `TARIFF_ON_PEAK_HOURS` | `15-20` | Local hour range that counts as on-peak, e.g. APS-Saver `15-20` (3 PM – 8 PM). Wraps past midnight if start > end. (v0.8.0) |
+| `TARIFF_ON_PEAK_DAYS` | `1-5` | Day-of-week range that counts as on-peak (1=Mon … 7=Sun). Most utilities exclude weekends. (v0.8.0) |
 
 ## Persistence
 
@@ -377,6 +382,84 @@ How the counters survive add-on restarts and pruning:
 
 If you use MQTT Discovery (set `MQTT_DISCOVERY_ENABLED: true`), all five
 sensors auto-register and the YAML snippet isn't needed.
+
+### v0.8.0 — More HA integration recipes
+
+**Per-circuit Individual devices (Energy Dashboard).** When MQTT Discovery
+is enabled, every SHP2 circuit auto-publishes a
+`sensor.ecoflow_<name>_energy` total_increasing sensor. Wire each into
+**Settings → Dashboards → Energy → Individual devices** to see water
+heater / EVSE / HVAC / etc. broken out under your home consumption.
+
+**Carbon offset card.** Drop a Lovelace gauge / glance card with:
+
+```yaml
+type: glance
+title: Solar impact
+entities:
+  - entity: sensor.ecoflow_co2_avoided_lifetime
+  - entity: sensor.ecoflow_equivalent_miles_not_driven
+  - entity: sensor.ecoflow_co2_avoided_7d
+```
+
+**TOU cost card.** Track what you're spending vs saving:
+
+```yaml
+type: entities
+title: Energy economics (TOU)
+entities:
+  - entity: sensor.ecoflow_grid_cost_today
+  - entity: sensor.ecoflow_solar_value_today
+  - entity: sensor.ecoflow_net_savings_7d
+```
+
+**Calendar subscription (v0.8.0).** Add `/api/calendar.ics` to HA's
+`generic_ics_calendar` integration:
+
+```yaml
+generic_ics_calendar:
+  - name: EcoFlow Forecasts
+    url: "http://<your-ha-host>:8787/api/calendar.ics"
+    days_to_fetch: 7
+```
+
+Events that appear: forecast SoC dips, predicted EV charging windows,
+SHP2 TOU charge windows, active NWS storm windows. Read-only — no auto-
+actions are triggered.
+
+**Repair issues feed.** `/api/repair-issues` returns a curated list of
+actionable maintenance items (panel wash, peer-outlier pack, MPPT
+drift, zombie device). Each has stable id, severity, summary, ordered
+fix-steps. Build a Markdown card:
+
+```yaml
+type: markdown
+title: EcoFlow Repairs
+content: |
+  {% set issues = state_attr('sensor.ecoflow_repair_issues', 'issues') %}
+  {% if issues and issues|length > 0 %}
+  {% for i in issues %}
+  - **{{ i.title }}** ({{ i.severity }}) — {{ i.summary }}
+  {% endfor %}
+  {% else %}
+  No active repair issues. ✅
+  {% endif %}
+```
+
+(For this you'd add a REST sensor with the full JSON response in
+`attributes`; example in the "Full field reference" section below.)
+
+**PWA install (v0.8.0).** On iPhone: open `http://homeassistant.local:8787`
+in Safari → Share → **Add to Home Screen**. The shell launches as a
+standalone app with no browser chrome. On Android Chrome: tap **⋮ → Install
+App**. On desktop Chrome / Edge: address-bar install icon.
+
+**Probabilistic forecast + dispatch plan.** Power-user automations can
+read `/api/forecast/probabilistic` to gate decisions on confidence (e.g.
+"only delay laundry if P(reserve hold) > 70%"). `/api/dispatch-plan`
+returns the recommended hour-by-hour grid-vs-battery schedule —
+compute-only; mirror manually via the EcoFlow mobile app if you want
+to apply it.
 
 ### Example automations
 

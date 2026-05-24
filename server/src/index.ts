@@ -32,10 +32,19 @@ import {
   computeAmbientThermalForecast,
   computeConfidenceSnapshot,
   getActiveNwsAlerts,
+  // v0.8.0 additions
+  computeCarbonReport,
+  computeTariffReport,
+  computeProbabilisticForecast,
+  computeMultiDayForecast,
+  computeDispatchPlan,
+  rootCausesFor,
 } from './analytics.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
+import { buildCalendarIcs } from './calendar.js';
+import { computeRepairIssues } from './repairIssues.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -237,6 +246,65 @@ app.get('/api/incidents', async () => ({ incidents: monitor.incidents() }));
 
 app.get('/api/alert-telemetry', async () => ({ telemetry: monitor.telemetry() }));
 
+// v0.8.0 — sustainability, tariff, probabilistic forecasts, multi-day,
+// dispatch planner, calendar, repair issues
+app.get<{ Querystring: { days?: string } }>('/api/carbon', async (req) => {
+  const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7));
+  return computeCarbonReport(store.get().devices, recorder, days);
+});
+
+app.get<{ Querystring: { days?: string } }>('/api/tariff', async (req) => {
+  const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7));
+  return computeTariffReport(store.get().devices, recorder, days);
+});
+
+app.get('/api/forecast/probabilistic', async () => {
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  const skill = await computeForecastSkill(store.get().devices, recorder, fc);
+  return computeProbabilisticForecast(fc, skill);
+});
+
+app.get<{ Querystring: { days?: string } }>('/api/forecast/multi-day', async (req) => {
+  const days = Math.max(1, Math.min(7, Number(req.query.days ?? 3) || 3));
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  return computeMultiDayForecast(store.get().devices, recorder, fc, days);
+});
+
+app.get('/api/dispatch-plan', async () => {
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  return computeDispatchPlan(store.get().devices, fc);
+});
+
+app.get('/api/root-cause', async (req) => {
+  const id = (req.query as any).alertId as string | undefined;
+  if (!id) return { causes: [] };
+  return { causes: rootCausesFor(id) };
+});
+
+app.get('/api/calendar.ics', async (req, reply) => {
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  const ev = computeEvWindowPrediction(store.get().devices, recorder);
+  const nws = await getActiveNwsAlerts();
+  const ics = buildCalendarIcs({ devices: store.get().devices, forecast: fc, evWindow: ev, nwsAlerts: nws });
+  reply
+    .header('Content-Type', 'text/calendar; charset=utf-8')
+    .header('Content-Disposition', 'inline; filename="ecoflow-panel.ics"');
+  return ics;
+});
+
+app.get('/api/repair-issues', async () => {
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  const skill = await computeForecastSkill(store.get().devices, recorder, fc);
+  return computeRepairIssues({
+    devices: store.get().devices,
+    alerts: store.get().alerts ?? [],
+    degradation: computeDegradation(store.get().devices, recorder),
+    soiling: await computeSoilingDecomposition(store.get().devices, recorder),
+    equipmentHealth: computeEquipmentHealth(store.get().devices, recorder),
+    forecastSkill: skill,
+  });
+});
+
 /**
  * Flat key-value snapshot for Home Assistant REST sensors. One HTTP call
  * returns every metric we expose as an HA entity (`configuration.yaml`
@@ -283,8 +351,11 @@ app.get('/api/ha-state', async () => {
   const clipping = await computeClipping(snap.devices, recorder, fc);
   const selfCons = computeSelfConsumption(snap.devices, recorder);
   const lifetime = recorder.getLifetimeTotals();
-  const lifetimeKwh = (k: keyof typeof lifetime) =>
-    Math.round(((lifetime[k].persistedWh + lifetime[k].pendingWh) / 1000) * 1000) / 1000;
+  const lifetimeKwh = (k: string) =>
+    lifetime[k] ? Math.round(((lifetime[k].persistedWh + lifetime[k].pendingWh) / 1000) * 1000) / 1000 : null;
+  // v0.8.0 additions
+  const carbon = computeCarbonReport(snap.devices, recorder);
+  const tariff = computeTariffReport(snap.devices, recorder);
 
   // Soonest projected EOL = the pack with the fewest years left.
   const projecting = deg.packs.filter((p) => p.status === 'projecting');
@@ -390,6 +461,33 @@ app.get('/api/ha-state', async () => {
     grid_import_lifetime_kwh: lifetimeKwh('fleet_grid_import_wh'),
     battery_charge_lifetime_kwh: lifetimeKwh('fleet_battery_charge_wh'),
     battery_discharge_lifetime_kwh: lifetimeKwh('fleet_battery_discharge_wh'),
+
+    // Per-circuit lifetime kWh (v0.8.0) — one row per SHP2 circuit, each
+    // appears as an HA Energy Dashboard "Individual device". Dynamic field
+    // names: circuit_<ch>_lifetime_kwh.
+    ...Object.fromEntries(
+      Object.keys(lifetime)
+        .filter((k) => k.startsWith('circuit_'))
+        .map((k) => {
+          const ch = k.match(/^circuit_(\d+)_wh$/)?.[1];
+          return [`circuit_${ch}_lifetime_kwh`, lifetimeKwh(k)];
+        }),
+    ),
+
+    // Sustainability — carbon offset / equivalent miles avoided (v0.8.0)
+    carbon_kg_avoided_7d: carbon.totalKgAvoided,
+    carbon_lifetime_kg_avoided: carbon.lifetimeKgAvoided,
+    carbon_lifetime_miles_not_driven: carbon.lifetimeMilesNotDriven,
+    carbon_grid_intensity_kg_per_kwh: carbon.gridCo2IntensityKgPerKwh,
+
+    // TOU tariff cost tracking (v0.8.0)
+    tariff_grid_import_cost_7d_dollars: tariff.gridImportCostDollars,
+    tariff_solar_load_value_7d_dollars: tariff.solarLoadValueDollars,
+    tariff_net_savings_7d_dollars: tariff.netSavingsDollars,
+    tariff_today_grid_cost_dollars: tariff.todayGridImportCostDollars,
+    tariff_today_solar_value_dollars: tariff.todaySolarLoadValueDollars,
+    tariff_on_peak_cents: tariff.onPeakCents,
+    tariff_off_peak_cents: tariff.offPeakCents,
 
     // Connectivity
     fleet_devices_total: devices.length,
