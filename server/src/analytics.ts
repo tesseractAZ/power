@@ -3,6 +3,7 @@ import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.j
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
 import { getWeather, type WeatherHour } from './weather.js';
+import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -929,6 +930,11 @@ export interface PackDegradation {
   // Fleet context
   peerFadeRatio: number | null;         // this pack's fade ÷ fleet median fade
   peerOutlier: boolean;                 // fading abnormally fast for its peer group
+  // Arrhenius temperature-corrected fade (v0.5.0)
+  avgPackTempC: number | null;          // pack temp avg across the SoH window
+  arrheniusFactor: number | null;       // 2^((avgTemp − 25)/10) — fade-acceleration factor
+  fadePctPerYearAt25C: number | null;   // fade normalized to the 25 °C reference
+  coolingBenefitYears: number | null;   // extra service-years if avg pack temp dropped by 5 °C
   summary: string;                      // one-line plain-language verdict
 }
 
@@ -985,6 +991,10 @@ function analysePack(
     projectedCyclesAtEol: null,
     peerFadeRatio: null,
     peerOutlier: false,
+    avgPackTempC: null,
+    arrheniusFactor: null,
+    fadePctPerYearAt25C: null,
+    coolingBenefitYears: null,
     ...extra,
   });
 
@@ -1010,6 +1020,16 @@ function analysePack(
   const cycFit = linregress(recorder.query(d.sn, `pack${pk.num}_cycles`, since, now, DEGRADE_BUCKET_SEC));
   const cyclesPerYear =
     cycFit && cycFit.slopePerMs > 0 ? round1(cycFit.slopePerMs * YEAR_MS) : null;
+
+  // Pack-temperature average over the same window. LFP capacity-fade roughly
+  // doubles per 10 °C above the 25 °C reference, so we use this to compute an
+  // Arrhenius acceleration factor and a temperature-corrected fade rate.
+  const tempPts = recorder.query(d.sn, `pack${pk.num}_temp`, since, now, DEGRADE_BUCKET_SEC);
+  const tempVals = tempPts.map((p) => p.value).filter((v) => Number.isFinite(v));
+  const avgPackTempC =
+    tempVals.length > 0 ? tempVals.reduce((s, v) => s + v, 0) / tempVals.length : null;
+  const arrheniusFactor =
+    avgPackTempC != null ? Math.pow(2, (avgPackTempC - 25) / 10) : null;
 
   // Trend not yet trustworthy → "learning": preliminary numbers, no dated EOL.
   if (!fit || spanMs < EOL_MIN_SPAN_MS || fit.r2 < EOL_MIN_R2) {
@@ -1044,7 +1064,13 @@ function analysePack(
       r2: round2(fit.r2),
       dataSpanDays: spanDays,
       samples: sohPts.length,
-      summary,
+      avgPackTempC: avgPackTempC != null ? round1(avgPackTempC) : null,
+      arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
+      summary:
+        summary +
+        (avgPackTempC != null
+          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C across the window.`
+          : ''),
     });
   }
 
@@ -1071,6 +1097,31 @@ function analysePack(
     yearsToEolHigh != null
       ? ` (range ${round1(yearsToEolLow)}–${round1(yearsToEolHigh)} yr, ±1σ)`
       : ` (at least ${round1(yearsToEolLow)} yr)`;
+
+  // Arrhenius temperature correction — what the calendar-fade would be at the
+  // 25 °C reference, and how many extra years cooling 5 °C would buy.
+  const COOLING_DELTA_C = 5;
+  const fadePctPerYearAt25C =
+    arrheniusFactor != null && arrheniusFactor > 0
+      ? round2(fadePctPerYear / arrheniusFactor)
+      : null;
+  let coolingBenefitYears: number | null = null;
+  if (arrheniusFactor != null && avgPackTempC != null) {
+    const cooledFactor = Math.pow(2, (avgPackTempC - COOLING_DELTA_C - 25) / 10);
+    const cooledFade = fadePctPerYear * (cooledFactor / arrheniusFactor);
+    if (cooledFade >= 0.01) {
+      const cooledYearsToEol = headroom / cooledFade;
+      const delta = cooledYearsToEol - yearsToEol;
+      if (delta > 0.05) coolingBenefitYears = round1(delta);
+    }
+  }
+  const arrheniusNote =
+    avgPackTempC != null && fadePctPerYearAt25C != null && coolingBenefitYears != null
+      ? ` Avg pack temp ${Math.round(avgPackTempC)} °C → Arrhenius-equivalent to ~${fadePctPerYearAt25C} %/yr at 25 °C; cooling the cells ${COOLING_DELTA_C} °C would extend service life by ~${coolingBenefitYears} years.`
+      : avgPackTempC != null
+        ? ` Avg pack temp ${Math.round(avgPackTempC)} °C across the window.`
+        : '';
+
   return mk({
     status: 'projecting',
     fadePctPerYear: round2(fadePctPerYear),
@@ -1085,7 +1136,11 @@ function analysePack(
     yearsToEolHigh: yearsToEolHigh != null ? round1(yearsToEolHigh) : null,
     eolDate: Math.round(eolDate),
     projectedCyclesAtEol,
-    summary: `SoH ${currentSoh.toFixed(1)}% fading ~${fadePctPerYear.toFixed(1)}%/yr — projected to reach the ${EOL_SOH}% end-of-life mark around ${new Date(eolDate).getFullYear()}, about ${round1(yearsToEol)} years out${rangeNote}.`,
+    avgPackTempC: avgPackTempC != null ? round1(avgPackTempC) : null,
+    arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
+    fadePctPerYearAt25C,
+    coolingBenefitYears,
+    summary: `SoH ${currentSoh.toFixed(1)}% fading ~${fadePctPerYear.toFixed(1)}%/yr — projected to reach the ${EOL_SOH}% end-of-life mark around ${new Date(eolDate).getFullYear()}, about ${round1(yearsToEol)} years out${rangeNote}.${arrheniusNote}`,
   });
 }
 
@@ -1144,5 +1199,220 @@ export function computeDegradation(
 
   const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, packs };
   if (dpus.length > 0) degradationCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Live off-grid runway — hours until the backup pool hits reserve and
+ * empty, given the last-hour load and the next-24h forecast PV.
+ * =================================================================== */
+
+const RUNWAY_LOAD_WINDOW_MS = 60 * 60 * 1000;   // average load over the last hour
+const RUNWAY_HORIZON_HOURS = 24;
+const RUNWAY_TTL_MS = 60 * 1000;                // recompute at most once per minute
+
+export interface RunwayProjection {
+  generatedAt: number;
+  backupRemainingKwh: number | null;
+  backupReserveKwh: number | null;
+  backupFullKwh: number | null;
+  recentLoadWatts: number;
+  hoursToReserve: number | null;
+  hoursToEmpty: number | null;
+  reserveAtMs: number | null;
+  emptyAtMs: number | null;
+  forecastPvUsedKwh: number;
+  loadHorizonKwh: number;
+  horizonHours: number;
+  unavailable: string | null;
+}
+
+let runwayCache: { ts: number; value: RunwayProjection } | null = null;
+
+const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjection> = {}): RunwayProjection => ({
+  generatedAt: now,
+  backupRemainingKwh: null,
+  backupReserveKwh: null,
+  backupFullKwh: null,
+  recentLoadWatts: 0,
+  hoursToReserve: null,
+  hoursToEmpty: null,
+  reserveAtMs: null,
+  emptyAtMs: null,
+  forecastPvUsedKwh: 0,
+  loadHorizonKwh: 0,
+  horizonHours: 0,
+  unavailable: reason,
+  ...extra,
+});
+
+/** Project hour-by-hour: backup state ± (forecast PV − recent load) per hour;
+ *  record when the trajectory crosses the reserve floor and zero. */
+export function computeRunway(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  forecast: DayForecast | null,
+): RunwayProjection {
+  if (runwayCache && Date.now() - runwayCache.ts < RUNWAY_TTL_MS) return runwayCache.value;
+  const now = Date.now();
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  if (!shp2 || shp2.projection.backupRemainWh == null || shp2.projection.backupFullCapWh == null) {
+    return emptyRunway(now, 'SHP2 backup-pool capacity not yet reported');
+  }
+
+  const backupRemainingKwh = shp2.projection.backupRemainWh / 1000;
+  const backupFullKwh = shp2.projection.backupFullCapWh / 1000;
+  const reservePct = shp2.projection.backupReserveSoc ?? 15;
+  const backupReserveKwh = (backupFullKwh * reservePct) / 100;
+
+  // Recent load — average SHP2 panel_load over the last hour. (Loads wired
+  // directly to a DPU AC outlet bypass SHP2 and won't appear here; on this
+  // setup that's just the EVSE on Core 4, which only runs occasionally.)
+  const loadPts = recorder.query(shp2.sn, 'panel_load', now - RUNWAY_LOAD_WINDOW_MS, now);
+  if (loadPts.length < 2) {
+    return emptyRunway(now, 'panel-load history insufficient — wait a few minutes', {
+      backupRemainingKwh: round2(backupRemainingKwh),
+      backupReserveKwh: round2(backupReserveKwh),
+      backupFullKwh: round2(backupFullKwh),
+    });
+  }
+  const loadAvgWatts = loadPts.reduce((s, p) => s + p.value, 0) / loadPts.length;
+
+  const pvByHour: number[] = [];
+  if (forecast) {
+    for (const h of forecast.hours.slice(0, RUNWAY_HORIZON_HOURS)) {
+      pvByHour.push((h.forecastPvW ?? 0) / 1000);
+    }
+  }
+  while (pvByHour.length < RUNWAY_HORIZON_HOURS) pvByHour.push(0);
+
+  let stateKwh = backupRemainingKwh;
+  let hoursToReserve: number | null = null;
+  let hoursToEmpty: number | null = null;
+  const loadKwhPerHour = loadAvgWatts / 1000;
+  let totalForecastPv = 0;
+  let totalLoad = 0;
+  for (let h = 0; h < RUNWAY_HORIZON_HOURS; h++) {
+    const pvKwh = pvByHour[h];
+    totalForecastPv += pvKwh;
+    totalLoad += loadKwhPerHour;
+    const delta = pvKwh - loadKwhPerHour;
+    const nextState = stateKwh + delta;
+    if (hoursToReserve == null && stateKwh > backupReserveKwh && nextState <= backupReserveKwh) {
+      const frac = delta < 0 ? (stateKwh - backupReserveKwh) / -delta : 1;
+      hoursToReserve = h + Math.min(1, Math.max(0, frac));
+    }
+    if (hoursToEmpty == null && stateKwh > 0 && nextState <= 0) {
+      const frac = delta < 0 ? stateKwh / -delta : 1;
+      hoursToEmpty = h + Math.min(1, Math.max(0, frac));
+    }
+    stateKwh = Math.max(0, nextState);
+  }
+
+  const value: RunwayProjection = {
+    generatedAt: now,
+    backupRemainingKwh: round2(backupRemainingKwh),
+    backupReserveKwh: round2(backupReserveKwh),
+    backupFullKwh: round2(backupFullKwh),
+    recentLoadWatts: Math.round(loadAvgWatts),
+    hoursToReserve: hoursToReserve != null ? round1(hoursToReserve) : null,
+    hoursToEmpty: hoursToEmpty != null ? round1(hoursToEmpty) : null,
+    reserveAtMs: hoursToReserve != null ? Math.round(now + hoursToReserve * 3_600_000) : null,
+    emptyAtMs: hoursToEmpty != null ? Math.round(now + hoursToEmpty * 3_600_000) : null,
+    forecastPvUsedKwh: round2(totalForecastPv),
+    loadHorizonKwh: round2(totalLoad),
+    horizonHours: RUNWAY_HORIZON_HOURS,
+    unavailable: null,
+  };
+  runwayCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Round-trip efficiency — energy retrieved from packs ÷ energy stored
+ * into packs, over a rolling 7-day window. Healthy LFP ≈ 95–97 %; a
+ * slow drift down is the cleanest "the whole stack is aging" signal.
+ * Uses per-pack input/output integrals so PV-direct passthrough doesn't
+ * contaminate the ratio. Cached ~5 min.
+ * =================================================================== */
+
+const RTE_TTL_MS = 5 * 60 * 1000;
+
+export interface RoundTripDay {
+  date: string;
+  chargedKwh: number;
+  dischargedKwh: number;
+  efficiencyPct: number | null;
+}
+
+export interface RoundTripEfficiency {
+  generatedAt: number;
+  windowDays: number;
+  daysWithData: number;
+  totalChargedKwh: number;
+  totalDischargedKwh: number;
+  efficiencyPct: number | null;
+  perDay: RoundTripDay[];
+}
+
+let rteCache: { ts: number; key: string; value: RoundTripEfficiency } | null = null;
+
+export function computeRoundTripEfficiency(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  windowDays = 7,
+): RoundTripEfficiency {
+  const key = `d${windowDays}`;
+  if (rteCache && rteCache.key === key && Date.now() - rteCache.ts < RTE_TTL_MS) return rteCache.value;
+  const now = Date.now();
+  const todayStart = startOfLocalDayMs();
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  const localDateStr = (ms: number): string => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+
+  const perDay: RoundTripDay[] = [];
+  let totalCharged = 0;
+  let totalDischarged = 0;
+  for (let i = windowDays - 1; i >= 0; i--) {
+    const dayStart = todayStart - i * 86_400_000;
+    const dayEnd = i === 0 ? now : dayStart + 86_400_000;
+    let chargedKwh = 0;
+    let dischargedKwh = 0;
+    for (const d of dpus) {
+      for (const pk of d.projection.packs) {
+        const inPts = recorder.query(d.sn, `pack${pk.num}_in`, dayStart, dayEnd);
+        const outPts = recorder.query(d.sn, `pack${pk.num}_out`, dayStart, dayEnd);
+        chargedKwh += integrateWh(inPts, dayStart, dayEnd).wh / 1000;
+        dischargedKwh += integrateWh(outPts, dayStart, dayEnd).wh / 1000;
+      }
+    }
+    totalCharged += chargedKwh;
+    totalDischarged += dischargedKwh;
+    const dayEff = chargedKwh > 0.5 ? (dischargedKwh / chargedKwh) * 100 : null;
+    perDay.push({
+      date: localDateStr(dayStart),
+      chargedKwh: round2(chargedKwh),
+      dischargedKwh: round2(dischargedKwh),
+      efficiencyPct: dayEff != null ? Math.round(dayEff * 10) / 10 : null,
+    });
+  }
+  const effPct = totalCharged > 1 ? (totalDischarged / totalCharged) * 100 : null;
+  const value: RoundTripEfficiency = {
+    generatedAt: now,
+    windowDays,
+    daysWithData: perDay.filter((d) => d.efficiencyPct != null).length,
+    totalChargedKwh: round2(totalCharged),
+    totalDischargedKwh: round2(totalDischarged),
+    efficiencyPct: effPct != null ? Math.round(effPct * 10) / 10 : null,
+    perDay,
+  };
+  if (dpus.length > 0) rteCache = { ts: now, key, value };
   return value;
 }

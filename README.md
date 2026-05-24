@@ -177,8 +177,75 @@ production vs development to keep the PR list short.
 
 ## Roadmap
 
-- **WAVE 2 / Smart Generator schemas** — proper projections when those come
-  online.
-- **Per-circuit kWh history** — multi-day comparison on the circuit modal.
-- **MQTT discovery for HA entities** — auto-register sensors via HA's MQTT
-  Discovery so users don't have to paste a YAML snippet at all.
+Grouped by planned release. Each item leverages existing code paths or
+introduces a small new integration; nothing requires a wholesale rebuild.
+
+### v0.6.0 — Anomaly engine v2
+
+- **Per-circuit baseline anomaly** — same robust median + MAD + modified-z
+  the peer-anomaly engine uses, applied per-circuit per hour-of-day.
+  Catches "fridge running 3 kW for 6 hours" patterns.
+- **Alert clustering ("incidents")** — group simultaneous related alerts
+  (HV MPPT temp warning + HV efficiency drop + Core 3 hot cells) into one
+  "Core 3 thermal cascade" incident with one notification, not three.
+- **Internal-resistance trending** — derive `dV/dI ≈ effective R` from
+  current-snapshot pack/cell voltages while a known load is flowing.
+  Rising R leads SoH decay by months — earliest mechanical wear signal.
+- **Inverter clipping quantifier** — when forecast GHI is high but PV
+  flatlines at observed peak, sum the "kWh lost to clipping" daily.
+
+### v0.7.0 — Sharper forecasts
+
+- **Day-of-week load model** — split the typical-day load curve by
+  weekday vs weekend (or full hour-of-week matrix). Weekday morning is
+  not Sunday morning.
+- **Forecast-skill calibration** — per-day predicted vs actual PV → bias
+  factor; correct future forecasts. Phoenix monsoon clouds are notoriously
+  hard for global models.
+- **Ambient-coupled thermal forecast** — regress pack temp against
+  outdoor temp + load → predict "Core 3 Pack 2 will hit 108 °F tomorrow
+  at 3 PM" before it happens.
+- **Per-pack coulombic efficiency** — discharge mAh ÷ charge mAh per
+  cycle. Healthy LFP ≥ 99.9 %; drops are an early per-pack signal.
+
+### v0.8.0+ — Needs accumulated history
+
+- **Shade-event detection** — mid-hour PV dropouts that don't track cloud
+  cover, same hour-of-day across many days = physical obstruction.
+- **Soiling decomposition** — split today's drop% by hour-of-day and per
+  DPU. Tells you whether to wash everything or just the east-facing run.
+- **String-mismatch / per-DPU underperformance** — compare each DPU's
+  per-panel watts to the fleet median for the same hour.
+- **EV-charging window prediction** — detect the recurring "Tuesday
+  evening ~7 kW for ~2 h" pattern, fold into the day-ahead load
+  forecast.
+- **Charge-curve fingerprinting** — compare today's V/SoC plateau shape
+  against a baseline laid down in the first weeks of recording. Catches
+  aging that SoH lags on by months.
+
+### External / infrastructure
+
+- **NWS storm-preparedness signal** — pull alerts.weather.gov for your
+  zip; recommend pre-charging to 100 % before forecast storms.
+- **Thermal-event counter** — cumulative count of times each pack
+  crossed each temperature threshold; multiplies the EOL projection
+  as a "this pack has had a hard life" indicator.
+- **MPPT efficiency drift + inverter standby losses** — V·I vs reported
+  W per MPPT (trend), and idle AC-out residual (trend). Earliest
+  electronics-wear signals.
+- **Confidence trends** — R² over time per projection. Tells you
+  whether to trust the new forecast more than last week's.
+- **Notification timing intelligence** — suppress overnight
+  low-severity alerts that the forecast clearly self-resolves by sunrise;
+  batch into a morning summary.
+- **Alert-action telemetry** — track which alerts get cleared vs which
+  persist; auto-downgrade chronically ignored ones.
+- **Self-consumption ratio** — % of PV that hit the load vs went to
+  battery vs (when grid-tied) exported.
+- **MQTT discovery for HA entities** — auto-register sensors via HA's
+  MQTT Discovery so users don't have to paste a YAML snippet.
+
+### Standing
+
+- **WAVE 2 / Smart Generator schemas** — proper projections when those
+  come online via the EcoFlow IoT Open API.

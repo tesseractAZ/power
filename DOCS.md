@@ -183,6 +183,28 @@ rest:
         state_class: measurement
         icon: mdi:weather-dust
 
+      # v0.5.0 — off-grid runway + round-trip efficiency
+      - name: "EcoFlow Runway to Reserve"
+        unique_id: ecoflow_runway_to_reserve_hours
+        value_template: "{{ value_json.runway_to_reserve_hours }}"
+        unit_of_measurement: "h"
+        state_class: measurement
+        icon: mdi:timer-sand
+
+      - name: "EcoFlow Runway to Empty"
+        unique_id: ecoflow_runway_to_empty_hours
+        value_template: "{{ value_json.runway_to_empty_hours }}"
+        unit_of_measurement: "h"
+        state_class: measurement
+        icon: mdi:timer-off
+
+      - name: "EcoFlow Round-Trip Efficiency"
+        unique_id: ecoflow_round_trip_efficiency
+        value_template: "{{ value_json.round_trip_efficiency_percent }}"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:battery-sync-outline
+
     binary_sensor:
       - name: "EcoFlow Off-Grid"
         unique_id: ecoflow_off_grid

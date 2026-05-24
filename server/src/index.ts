@@ -13,7 +13,7 @@ import { createRecorder } from './recorder.js';
 import { computeTotals, startOfLocalDayMs, circuitHistoryByDay } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { isConfigured } from './notify.js';
-import { getDayForecast, computeDegradation } from './analytics.js';
+import { getDayForecast, computeDegradation, computeRunway, computeRoundTripEfficiency } from './analytics.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
 
@@ -138,6 +138,16 @@ app.get('/api/forecast', async () => getDayForecast(store.get().devices, recorde
 
 app.get('/api/degradation', async () => computeDegradation(store.get().devices, recorder));
 
+app.get('/api/runway', async () => {
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  return computeRunway(store.get().devices, recorder, fc);
+});
+
+app.get<{ Querystring: { days?: string } }>('/api/round-trip-efficiency', async (req) => {
+  const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7));
+  return computeRoundTripEfficiency(store.get().devices, recorder, days);
+});
+
 /**
  * Flat key-value snapshot for Home Assistant REST sensors. One HTTP call
  * returns every metric we expose as an HA entity (`configuration.yaml`
@@ -179,6 +189,8 @@ app.get('/api/ha-state', async () => {
   // Cached projections (internally cached ~30min — cheap to call per-request).
   const fc = await getDayForecast(snap.devices, recorder, () => {});
   const deg = computeDegradation(snap.devices, recorder);
+  const runway = computeRunway(snap.devices, recorder, fc);
+  const rte = computeRoundTripEfficiency(snap.devices, recorder);
 
   // Soonest projected EOL = the pack with the fewest years left.
   const projecting = deg.packs.filter((p) => p.status === 'projecting');
@@ -249,6 +261,17 @@ app.get('/api/ha-state', async () => {
     learned_critical_count: cnt('learned', 'critical'),
     learned_warning_count: cnt('learned', 'warning'),
     learned_info_count: cnt('learned', 'info'),
+
+    // Runway — live off-grid projection (v0.5.0)
+    runway_to_reserve_hours: runway.hoursToReserve,
+    runway_to_empty_hours: runway.hoursToEmpty,
+    runway_recent_load_watts: runway.recentLoadWatts,
+    runway_forecast_pv_used_kwh: runway.forecastPvUsedKwh,
+
+    // Round-trip efficiency — 7-day rolling (v0.5.0)
+    round_trip_efficiency_percent: rte.efficiencyPct,
+    round_trip_charged_kwh_7d: rte.totalChargedKwh,
+    round_trip_discharged_kwh_7d: rte.totalDischargedKwh,
 
     // Connectivity
     fleet_devices_total: devices.length,
