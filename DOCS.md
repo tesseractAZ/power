@@ -49,6 +49,14 @@ A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 | `NOTIFY_NTFY_SERVER`, `NOTIFY_NTFY_TOPIC` | — | ntfy server + private topic. |
 | `NOTIFY_PUSHOVER_TOKEN`, `NOTIFY_PUSHOVER_USER` | — | Pushover credentials. |
 | `NOTIFY_WEBHOOK_URL` | — | Generic JSON POST. |
+| `NOTIFY_QUIET_HOURS` | `22-06` | Local-hour window during which warning + info alerts are queued for the morning digest (critical always goes through). `""` disables. (v0.7.5) |
+| `NOTIFY_DIGEST_HOUR` | `7` | Local hour to fire the morning digest of queued alerts. (v0.7.5) |
+| `NWS_ENABLED` | `0` | Set `1` to fetch active US NWS alerts for the configured coords; severe events generate "pre-charge before storm" warnings. (v0.7.5) |
+| `MQTT_DISCOVERY_ENABLED` | `0` | Set `1` to publish HA MQTT Discovery topics — every sensor below auto-appears in HA without the YAML snippet. Requires the env vars below. (v0.7.5) |
+| `MQTT_DISCOVERY_HOST` | — | Hostname of an MQTT broker reachable from the add-on (e.g. `core-mosquitto`). |
+| `MQTT_DISCOVERY_PORT` | `1883` | Broker port. |
+| `MQTT_DISCOVERY_USER`, `MQTT_DISCOVERY_PASS` | — | Broker credentials. |
+| `MQTT_DISCOVERY_PREFIX` | `homeassistant` | HA's discovery topic prefix; don't change unless you have. |
 
 ## Persistence
 
@@ -228,6 +236,61 @@ rest:
         unit_of_measurement: "h"
         state_class: measurement
         icon: mdi:clock-alert-outline
+
+      # v0.7.5 — self-consumption (7-day rolling)
+      - name: "EcoFlow Solar Fraction of Load"
+        unique_id: ecoflow_solar_fraction_of_load
+        value_template: "{{ value_json.solar_fraction_of_load_percent }}"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:solar-power
+
+      - name: "EcoFlow PV Direct-Use Ratio"
+        unique_id: ecoflow_direct_use_ratio
+        value_template: "{{ value_json.direct_use_ratio_percent }}"
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:transmission-tower-import
+
+      - name: "EcoFlow PV Generated 7d"
+        unique_id: ecoflow_pv_kwh_7d
+        value_template: "{{ value_json.pv_kwh_7d }}"
+        unit_of_measurement: "kWh"
+        state_class: measurement
+        device_class: energy
+        icon: mdi:solar-panel
+
+      - name: "EcoFlow Load 7d"
+        unique_id: ecoflow_load_kwh_7d
+        value_template: "{{ value_json.load_kwh_7d }}"
+        unit_of_measurement: "kWh"
+        state_class: measurement
+        device_class: energy
+        icon: mdi:home-lightning-bolt
+
+      - name: "EcoFlow Battery Charged 7d"
+        unique_id: ecoflow_battery_charge_kwh_7d
+        value_template: "{{ value_json.battery_charge_kwh_7d }}"
+        unit_of_measurement: "kWh"
+        state_class: measurement
+        device_class: energy
+        icon: mdi:battery-charging
+
+      - name: "EcoFlow Battery Discharged 7d"
+        unique_id: ecoflow_battery_discharge_kwh_7d
+        value_template: "{{ value_json.battery_discharge_kwh_7d }}"
+        unit_of_measurement: "kWh"
+        state_class: measurement
+        device_class: energy
+        icon: mdi:battery-arrow-down
+
+      - name: "EcoFlow Grid Import 7d"
+        unique_id: ecoflow_grid_import_kwh_7d
+        value_template: "{{ value_json.grid_import_kwh_7d }}"
+        unit_of_measurement: "kWh"
+        state_class: measurement
+        device_class: energy
+        icon: mdi:transmission-tower
 
     binary_sensor:
       - name: "EcoFlow Off-Grid"

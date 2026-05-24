@@ -4,6 +4,7 @@ import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
 import { getWeather, type WeatherHour } from './weather.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
+import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -1548,6 +1549,1436 @@ export function computeRoundTripEfficiency(
 }
 
 /* ===================================================================
+ * Shade event detection (v0.7.5).
+ *
+ * The learned GHI→PV model says "this hour, with this much sun, the
+ * array should produce X". A shaded panel doesn't break that — it
+ * just contributes a recurring shortfall at the same hour-of-day,
+ * every day, regardless of cloud cover. We scan clear-sky hours (low
+ * cloud, real GHI) across history, compute predicted vs actual per
+ * hour-of-day, and flag any hour whose median shortfall sits past a
+ * threshold AND has accumulated over many days — that's a physical
+ * obstruction, not weather variance.
+ *
+ * Cached 30 min. Fleet-level (combined PV) since per-DPU shade is the
+ * province of computeStringMismatch.
+ * =================================================================== */
+
+const SHADE_TTL_MS = 30 * 60 * 1000;
+const SHADE_MIN_CLEAR_DAYS = 5;
+const SHADE_DROP_THRESHOLD = 0.18;   // ≥ 18% under model = "shaded"
+const SHADE_OBSERVE_HISTORY_MS = 45 * 24 * 60 * 60 * 1000;
+
+export interface ShadeHour {
+  hour: number;             // 0-23 local
+  observedW: number;        // median observed PV across clear-sky days
+  expectedW: number;        // median predicted PV across the same days
+  shortfallPct: number;     // (expected − observed) / expected × 100
+  clearDays: number;        // distinct clear-sky days contributing
+}
+
+export interface ShadeReport {
+  generatedAt: number;
+  hours: ShadeHour[];
+  estTotalKwhPerYear: number;  // rough annualised shortfall summed across shaded hours
+}
+
+let shadeCache: { ts: number; value: ShadeReport } | null = null;
+
+export async function computeShadeReport(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): Promise<ShadeReport> {
+  if (shadeCache && Date.now() - shadeCache.ts < SHADE_TTL_MS) return shadeCache.value;
+  const now = Date.now();
+  const since = now - SHADE_OBSERVE_HISTORY_MS;
+  const empty = (): ShadeReport => ({ generatedAt: now, hours: [], estTotalKwhPerYear: 0 });
+
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  if (dpus.length === 0) return empty();
+
+  const weather = await getWeather();
+  if (!weather) return empty();
+  const wxByHourEpoch = new Map<number, WeatherHour>();
+  for (const wh of weather.hours) wxByHourEpoch.set(Math.floor(wh.ts / 3_600_000), wh);
+
+  // Fleet hourly PV
+  const fleetPvByEpoch = new Map<number, number>();
+  for (const d of dpus) {
+    const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
+    for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
+  }
+
+  // Per hour-of-day: collect (predicted, observed) pairs across clear-sky hours.
+  const byHour: Array<Array<{ predicted: number; observed: number; day: string }>> =
+    Array.from({ length: 24 }, () => []);
+  // Build a quick GHI-keyed model: for each hour-of-day, the best (largest)
+  // ratio of observed PV to GHI on a clear day = the "no-shade" reference.
+  // We approximate predicted from the cleanest day's response.
+  const clearByHour: Map<number, Array<{ coeff: number }>> = new Map();
+  for (const [he, pv] of fleetPvByEpoch) {
+    const wx = wxByHourEpoch.get(he);
+    if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
+    const hod = new Date(he * 3_600_000).getHours();
+    const arr = clearByHour.get(hod) ?? [];
+    arr.push({ coeff: pv / wx.radiationWm2 });
+    clearByHour.set(hod, arr);
+  }
+  const refCoeffByHour = new Map<number, number>();
+  for (const [h, arr] of clearByHour) {
+    if (arr.length < 3) continue;
+    // 90th-percentile coeff = the "clean / unshaded" benchmark for this hour
+    const sorted = arr.map((p) => p.coeff).sort((a, b) => a - b);
+    const p90 = sorted[Math.floor(sorted.length * 0.9)] ?? sorted[sorted.length - 1];
+    refCoeffByHour.set(h, p90);
+  }
+
+  for (const [he, pv] of fleetPvByEpoch) {
+    const wx = wxByHourEpoch.get(he);
+    if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
+    const hod = new Date(he * 3_600_000).getHours();
+    const ref = refCoeffByHour.get(hod);
+    if (ref == null) continue;
+    const predicted = ref * wx.radiationWm2;
+    const day = new Date(he * 3_600_000).toDateString();
+    byHour[hod].push({ predicted, observed: pv, day });
+  }
+
+  const hours: ShadeHour[] = [];
+  let annualKwhShortfall = 0;
+  for (let h = 0; h < 24; h++) {
+    const pairs = byHour[h];
+    const days = new Set(pairs.map((p) => p.day));
+    if (days.size < SHADE_MIN_CLEAR_DAYS) continue;
+    const obsMed = median(pairs.map((p) => p.observed));
+    const predMed = median(pairs.map((p) => p.predicted));
+    if (predMed < 100) continue;
+    const shortfall = (predMed - obsMed) / predMed;
+    if (shortfall < SHADE_DROP_THRESHOLD) continue;
+    hours.push({
+      hour: h,
+      observedW: Math.round(obsMed),
+      expectedW: Math.round(predMed),
+      shortfallPct: Math.round(shortfall * 1000) / 10,
+      clearDays: days.size,
+    });
+    annualKwhShortfall += ((predMed - obsMed) / 1000) * 365;
+  }
+
+  const value: ShadeReport = {
+    generatedAt: now,
+    hours,
+    estTotalKwhPerYear: Math.round(annualKwhShortfall),
+  };
+  shadeCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Soiling decomposition (v0.7.5) — extends the fleet-wide soiling
+ * estimate with a per-DPU breakdown and a per-hour shape. Lets the
+ * user answer "do I wash everything, or just the east-facing run?"
+ * Cached 30 min.
+ * =================================================================== */
+
+const SOILING_DECOMP_TTL_MS = 30 * 60 * 1000;
+
+export interface SoilingPerDevice {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  dropPct: number | null;
+  cleanDays: number;
+  recentCoeff: number | null;
+  baselineCoeff: number | null;
+}
+
+export interface SoilingDecomposition {
+  generatedAt: number;
+  perDevice: SoilingPerDevice[];
+  perHour: Array<{ hour: number; dropPct: number; samples: number }>;
+}
+
+let soilingDecompCache: { ts: number; value: SoilingDecomposition } | null = null;
+
+export async function computeSoilingDecomposition(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): Promise<SoilingDecomposition> {
+  if (soilingDecompCache && Date.now() - soilingDecompCache.ts < SOILING_DECOMP_TTL_MS) {
+    return soilingDecompCache.value;
+  }
+  const now = Date.now();
+  const since = now - 60 * 24 * 60 * 60 * 1000;
+  const empty = (): SoilingDecomposition => ({ generatedAt: now, perDevice: [], perHour: [] });
+  const weather = await getWeather();
+  if (!weather) return empty();
+  const wxByHour = new Map<number, WeatherHour>();
+  for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
+
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  const perDevice: SoilingPerDevice[] = [];
+  for (const d of dpus) {
+    const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
+    const est = computeSoiling(pvE, wxByHour);
+    perDevice.push({
+      sn: d.sn,
+      device: d.deviceName,
+      coreNum: dpuNum(d.deviceName),
+      dropPct: est?.dropPct ?? null,
+      cleanDays: est?.cleanDays ?? 0,
+      recentCoeff: est?.recentCoeff != null ? round2(est.recentCoeff) : null,
+      baselineCoeff: est?.baselineCoeff != null ? round2(est.baselineCoeff) : null,
+    });
+  }
+
+  // Per-hour shape — fleet-level, similar logic but bucketed by hour-of-day.
+  const fleetPvE = new Map<number, number>();
+  for (const d of dpus) {
+    const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
+    for (const [he, pv] of pvE) fleetPvE.set(he, (fleetPvE.get(he) ?? 0) + pv);
+  }
+  const recentMs = 7 * 24 * 60 * 60 * 1000;
+  const byHour: Array<{ baseline: number[]; recent: number[] }> =
+    Array.from({ length: 24 }, () => ({ baseline: [], recent: [] }));
+  for (const [he, pv] of fleetPvE) {
+    const wx = wxByHour.get(he);
+    if (!wx || wx.cloudCoverPct > 25 || wx.radiationWm2 < 250) continue;
+    const coeff = pv / wx.radiationWm2;
+    if (!Number.isFinite(coeff) || coeff <= 0) continue;
+    const ts = he * 3_600_000;
+    const hod = new Date(ts).getHours();
+    if (ts >= now - recentMs) byHour[hod].recent.push(coeff);
+    else byHour[hod].baseline.push(coeff);
+  }
+  const perHour = [];
+  for (let h = 0; h < 24; h++) {
+    const { baseline, recent } = byHour[h];
+    if (baseline.length < 3 || recent.length < 1) continue;
+    const base = Math.max(...baseline);
+    const rec = median(recent);
+    const drop = base > 0 ? ((base - rec) / base) * 100 : 0;
+    perHour.push({
+      hour: h,
+      dropPct: Math.round(drop * 10) / 10,
+      samples: baseline.length + recent.length,
+    });
+  }
+
+  const value: SoilingDecomposition = { generatedAt: now, perDevice, perHour };
+  if (dpus.length > 0) soilingDecompCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * String mismatch / per-DPU underperformance (v0.7.5).
+ *
+ * Same robust median+MAD test as the peer-anomaly engine, but applied
+ * to per-DPU PV output relative to the fleet median at the same
+ * hour-of-day. A persistently low DPU is either a shaded panel, a
+ * failed optimizer, or string mismatch — all worth surfacing.
+ * Cached 15 min.
+ * =================================================================== */
+
+const STRING_MISMATCH_TTL_MS = 15 * 60 * 1000;
+
+export interface DeviceProductionRatio {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  recentMedianW: number | null;
+  fleetMedianW: number | null;
+  ratio: number | null;          // device / fleet
+  modifiedZ: number | null;
+  outlier: boolean;
+  samples: number;
+}
+
+export interface StringMismatchReport {
+  generatedAt: number;
+  devices: DeviceProductionRatio[];
+}
+
+let stringMismatchCache: { ts: number; value: StringMismatchReport } | null = null;
+
+export function computeStringMismatch(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): StringMismatchReport {
+  if (stringMismatchCache && Date.now() - stringMismatchCache.ts < STRING_MISMATCH_TTL_MS) {
+    return stringMismatchCache.value;
+  }
+  const now = Date.now();
+  const since = now - 14 * 24 * 60 * 60 * 1000;
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  // Per-DPU per-hour median PV.
+  const perDevicePerHour = new Map<string, number[]>(); // sn → 24-bucket medians (averaged)
+  const fleetPerHour: number[][] = Array.from({ length: 24 }, () => []);
+  for (const d of dpus) {
+    const buckets: number[][] = Array.from({ length: 24 }, () => []);
+    for (const p of recorder.query(d.sn, 'pv_total', since, now)) {
+      // Only consider daytime samples — night samples are zero and would skew the median.
+      const h = new Date(p.ts).getHours();
+      if (p.value < 100) continue;
+      buckets[h].push(p.value);
+    }
+    const meds = buckets.map((b) => (b.length ? median(b) : 0));
+    perDevicePerHour.set(d.sn, meds);
+    for (let h = 0; h < 24; h++) if (meds[h] > 0) fleetPerHour[h].push(meds[h]);
+  }
+
+  // For each device, compute the ratio of its hourly median to the fleet median
+  // for the same hour, then average across daytime hours.
+  const ratios: DeviceProductionRatio[] = [];
+  const deviceAvgRatios: number[] = [];
+  for (const d of dpus) {
+    const meds = perDevicePerHour.get(d.sn) ?? [];
+    const ratioSamples: number[] = [];
+    let deviceMedW = 0, fleetMedW = 0, hoursWithFleet = 0;
+    for (let h = 0; h < 24; h++) {
+      if (meds[h] <= 0 || fleetPerHour[h].length < 2) continue;
+      const fleetMed = median(fleetPerHour[h]);
+      if (fleetMed <= 0) continue;
+      ratioSamples.push(meds[h] / fleetMed);
+      deviceMedW += meds[h]; fleetMedW += fleetMed; hoursWithFleet++;
+    }
+    const ratio = ratioSamples.length ? median(ratioSamples) : null;
+    ratios.push({
+      sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+      recentMedianW: hoursWithFleet > 0 ? Math.round(deviceMedW / hoursWithFleet) : null,
+      fleetMedianW: hoursWithFleet > 0 ? Math.round(fleetMedW / hoursWithFleet) : null,
+      ratio: ratio != null ? round2(ratio) : null,
+      modifiedZ: null, outlier: false,
+      samples: ratioSamples.length,
+    });
+    if (ratio != null) deviceAvgRatios.push(ratio);
+  }
+  if (deviceAvgRatios.length >= 3) {
+    const med = median(deviceAvgRatios);
+    const m = mad(deviceAvgRatios, med);
+    for (const r of ratios) {
+      if (r.ratio == null) continue;
+      const z = m > 0 ? Math.abs((0.6745 * (r.ratio - med)) / m) : 0;
+      r.modifiedZ = round2(z);
+      if (r.ratio < med && z >= Z_INFO) r.outlier = true;
+    }
+  }
+  const value: StringMismatchReport = { generatedAt: now, devices: ratios };
+  if (dpus.length > 0) stringMismatchCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * EV-charging window prediction (v0.7.5).
+ *
+ * Scans SHP2 paired-circuit history for recurring high-power sessions
+ * — "the EVSE pulls ~7 kW for ~2 h every Tuesday evening". Looks for
+ * sustained periods above a power floor, buckets by weekday + start-
+ * hour, requires N recurrences over the window before reporting.
+ * Output is consumed by getDayForecast to lift tomorrow's load curve
+ * during predicted EV charging windows. Cached 1 h.
+ * =================================================================== */
+
+const EV_WINDOW_TTL_MS = 60 * 60 * 1000;
+const EV_WINDOW_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
+const EV_WINDOW_MIN_WATTS = 2000;     // above this counts as a "charging" sample
+const EV_WINDOW_MIN_DURATION_MS = 30 * 60 * 1000; // sustained ≥ 30 min
+const EV_WINDOW_MIN_RECURRENCES = 3;  // need ≥3 weeks of the same pattern
+
+interface EvSessionRaw {
+  startTs: number;
+  endTs: number;
+  avgWatts: number;
+  energyKwh: number;
+}
+
+export interface EvSessionPattern {
+  sn: string;
+  circuit: number;
+  dayOfWeek: number;        // 0=Sun
+  startHour: number;
+  typicalDurationHours: number;
+  typicalWatts: number;
+  recurrences: number;
+  energyKwh: number;        // typical per-session
+}
+
+export interface EvWindowPrediction {
+  generatedAt: number;
+  sessionsObserved: number;
+  patterns: EvSessionPattern[];
+  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number }>;
+}
+
+let evWindowCache: { ts: number; value: EvWindowPrediction } | null = null;
+
+function extractEvSessions(points: Array<{ ts: number; value: number }>): EvSessionRaw[] {
+  if (points.length < 2) return [];
+  const out: EvSessionRaw[] = [];
+  let inSession = false;
+  let sessStart = 0;
+  let sessLastTs = 0;
+  let energyWhAcc = 0;
+  let wattsAcc = 0;
+  let wattsCount = 0;
+  let prevTs: number | null = null;
+  let prevW: number | null = null;
+  for (const p of points) {
+    if (p.value >= EV_WINDOW_MIN_WATTS) {
+      if (!inSession) {
+        inSession = true;
+        sessStart = p.ts;
+        energyWhAcc = 0;
+        wattsAcc = 0;
+        wattsCount = 0;
+      }
+      if (prevTs != null && prevW != null) {
+        const dtH = (p.ts - prevTs) / 3_600_000;
+        energyWhAcc += ((prevW + p.value) / 2) * dtH;
+      }
+      wattsAcc += p.value;
+      wattsCount++;
+      sessLastTs = p.ts;
+    } else if (inSession) {
+      // End of a session — accept only if it ran long enough.
+      if (sessLastTs - sessStart >= EV_WINDOW_MIN_DURATION_MS) {
+        out.push({
+          startTs: sessStart,
+          endTs: sessLastTs,
+          avgWatts: wattsCount > 0 ? wattsAcc / wattsCount : 0,
+          energyKwh: energyWhAcc / 1000,
+        });
+      }
+      inSession = false;
+    }
+    prevTs = p.ts;
+    prevW = p.value;
+  }
+  if (inSession && sessLastTs - sessStart >= EV_WINDOW_MIN_DURATION_MS) {
+    out.push({
+      startTs: sessStart,
+      endTs: sessLastTs,
+      avgWatts: wattsCount > 0 ? wattsAcc / wattsCount : 0,
+      energyKwh: energyWhAcc / 1000,
+    });
+  }
+  return out;
+}
+
+export function computeEvWindowPrediction(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): EvWindowPrediction {
+  if (evWindowCache && Date.now() - evWindowCache.ts < EV_WINDOW_TTL_MS) return evWindowCache.value;
+  const now = Date.now();
+  const since = now - EV_WINDOW_HISTORY_MS;
+
+  const sessions: Array<EvSessionRaw & { sn: string; circuit: number }> = [];
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  if (shp2) {
+    for (const pc of shp2.projection.pairedCircuits) {
+      const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, since, now);
+      for (const s of extractEvSessions(pts)) {
+        sessions.push({ ...s, sn: shp2.sn, circuit: pc.primaryCh });
+      }
+    }
+  }
+
+  // Bucket by (sn, circuit, dayOfWeek, startHour) and count recurrences.
+  const groups = new Map<string, { records: typeof sessions; }>();
+  for (const s of sessions) {
+    const d = new Date(s.startTs);
+    const key = `${s.sn}|${s.circuit}|${d.getDay()}|${d.getHours()}`;
+    const g = groups.get(key) ?? { records: [] };
+    g.records.push(s);
+    groups.set(key, g);
+  }
+  const patterns: EvSessionPattern[] = [];
+  for (const [key, g] of groups) {
+    if (g.records.length < EV_WINDOW_MIN_RECURRENCES) continue;
+    const [sn, chS, dowS, hrS] = key.split('|');
+    const durHours = median(g.records.map((r) => (r.endTs - r.startTs) / 3_600_000));
+    const watts = median(g.records.map((r) => r.avgWatts));
+    const kwh = median(g.records.map((r) => r.energyKwh));
+    patterns.push({
+      sn,
+      circuit: Number(chS),
+      dayOfWeek: Number(dowS),
+      startHour: Number(hrS),
+      typicalDurationHours: round1(durHours),
+      typicalWatts: Math.round(watts),
+      recurrences: g.records.length,
+      energyKwh: round1(kwh),
+    });
+  }
+
+  // Project forward 24 h: any pattern whose (DoW, hour) falls in the window
+  // becomes an upcoming session.
+  const upcoming: EvWindowPrediction['upcomingNext24h'] = [];
+  for (let h = 0; h < 24; h++) {
+    const ts = now + h * 3_600_000;
+    const d = new Date(ts);
+    const dow = d.getDay();
+    const hr = d.getHours();
+    for (const p of patterns) {
+      if (p.dayOfWeek === dow && p.startHour === hr) {
+        upcoming.push({ ts, durationHours: p.typicalDurationHours, watts: p.typicalWatts, dayOfWeek: dow });
+      }
+    }
+  }
+
+  const value: EvWindowPrediction = {
+    generatedAt: now,
+    sessionsObserved: sessions.length,
+    patterns,
+    upcomingNext24h: upcoming,
+  };
+  evWindowCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Charge-curve fingerprinting (v0.7.5).
+ *
+ * During a full-charge cycle the pack voltage rises through a
+ * characteristic V-vs-SoC plateau shape. The plateau drifts as the
+ * cells age — often visible months before SoH does. We record the
+ * voltage at SoC checkpoints (40 / 60 / 80 / 95 %) on every full
+ * charge and compare today's most-recent fingerprints against a
+ * "fresh" baseline laid down in the earliest weeks of recording.
+ *
+ * Cached 1 h.
+ * =================================================================== */
+
+const CHARGE_CURVE_TTL_MS = 60 * 60 * 1000;
+const CHARGE_CURVE_HISTORY_MS = 200 * 24 * 60 * 60 * 1000;
+const CHARGE_CHECKPOINTS = [40, 60, 80, 95];
+const CHARGE_CHECKPOINT_TOLERANCE_PCT = 1.5; // record V whenever SoC is within ±this of a checkpoint
+const CHARGE_BASELINE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000; // first 14 days = baseline
+
+export interface ChargeCurvePack {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  packNum: number;
+  checkpoints: Array<{
+    soc: number;
+    baselineV: number | null;
+    recentV: number | null;
+    driftMv: number | null;       // (recent − baseline) × 1000
+    baselineSamples: number;
+    recentSamples: number;
+  }>;
+  // Mean absolute drift across checkpoints — single-number summary
+  meanDriftMv: number | null;
+  status: 'baseline' | 'tracking' | 'no-data';
+}
+
+export interface ChargeCurveReport {
+  generatedAt: number;
+  packs: ChargeCurvePack[];
+}
+
+let chargeCurveCache: { ts: number; value: ChargeCurveReport } | null = null;
+
+export function computeChargeCurveFingerprint(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): ChargeCurveReport {
+  if (chargeCurveCache && Date.now() - chargeCurveCache.ts < CHARGE_CURVE_TTL_MS) return chargeCurveCache.value;
+  const now = Date.now();
+  const since = now - CHARGE_CURVE_HISTORY_MS;
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  const packs: ChargeCurvePack[] = [];
+  for (const d of dpus) {
+    for (const pk of d.projection.packs) {
+      const socPts = recorder.query(d.sn, `pack${pk.num}_soc`, since, now);
+      const vMaxPts = recorder.query(d.sn, `pack${pk.num}_vol_max_mv`, since, now);
+      const inPts = recorder.query(d.sn, `pack${pk.num}_in`, since, now);
+      if (socPts.length < 50 || vMaxPts.length < 50) {
+        packs.push({
+          sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), packNum: pk.num,
+          checkpoints: CHARGE_CHECKPOINTS.map((soc) => ({
+            soc, baselineV: null, recentV: null, driftMv: null,
+            baselineSamples: 0, recentSamples: 0,
+          })),
+          meanDriftMv: null, status: 'no-data',
+        });
+        continue;
+      }
+      // Snap V and IN to nearest SoC sample.
+      let vi = 0, ii = 0;
+      const enriched: Array<{ ts: number; soc: number; vMv: number; inW: number }> = [];
+      for (const s of socPts) {
+        while (vi + 1 < vMaxPts.length && Math.abs(vMaxPts[vi + 1].ts - s.ts) < Math.abs(vMaxPts[vi].ts - s.ts)) vi++;
+        while (ii + 1 < inPts.length && Math.abs(inPts[ii + 1].ts - s.ts) < Math.abs(inPts[ii].ts - s.ts)) ii++;
+        const v = vMaxPts[vi];
+        const i = inPts[ii];
+        if (!v) continue;
+        enriched.push({ ts: s.ts, soc: s.value, vMv: v.value, inW: i?.value ?? 0 });
+      }
+      // For each checkpoint, collect baseline (first window) and recent (last 14d) V samples
+      // taken DURING ACTIVE CHARGE (inW > 100 to avoid resting voltage).
+      const baselineCutoff = since + CHARGE_BASELINE_WINDOW_MS;
+      const recentCutoff = now - 14 * 24 * 60 * 60 * 1000;
+      const checkpointResults = CHARGE_CHECKPOINTS.map((target) => {
+        const baseline: number[] = [];
+        const recent: number[] = [];
+        for (const e of enriched) {
+          if (Math.abs(e.soc - target) > CHARGE_CHECKPOINT_TOLERANCE_PCT) continue;
+          if (e.inW < 100) continue;
+          if (e.ts <= baselineCutoff) baseline.push(e.vMv);
+          else if (e.ts >= recentCutoff) recent.push(e.vMv);
+        }
+        const baselineV = baseline.length >= 3 ? median(baseline) : null;
+        const recentV = recent.length >= 3 ? median(recent) : null;
+        const driftMv = baselineV != null && recentV != null
+          ? Math.round((recentV - baselineV))
+          : null;
+        return {
+          soc: target,
+          baselineV: baselineV != null ? Math.round(baselineV) : null,
+          recentV: recentV != null ? Math.round(recentV) : null,
+          driftMv,
+          baselineSamples: baseline.length,
+          recentSamples: recent.length,
+        };
+      });
+      const drifts = checkpointResults.map((c) => c.driftMv).filter((d): d is number => d != null);
+      const meanDriftMv = drifts.length
+        ? Math.round(drifts.reduce((s, v) => s + Math.abs(v), 0) / drifts.length)
+        : null;
+      const status: ChargeCurvePack['status'] =
+        meanDriftMv != null ? 'tracking' : checkpointResults.some((c) => c.baselineSamples >= 3) ? 'baseline' : 'no-data';
+      packs.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), packNum: pk.num,
+        checkpoints: checkpointResults,
+        meanDriftMv,
+        status,
+      });
+    }
+  }
+  const value: ChargeCurveReport = { generatedAt: now, packs };
+  if (dpus.length > 0) chargeCurveCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Internal-resistance trending (v0.7.5).
+ *
+ * dV/dI ≈ effective internal resistance. Take pairs of (V, I) samples
+ * spaced ≤ 60 s apart with a meaningful ΔI; the slope is the pack's
+ * effective resistance. Aggregate to a per-pack milliohm number, trend
+ * over time. Rising R precedes SoH decay by months on LFP.
+ *
+ * Pack voltage isn't recorded today (pack-voltage is the SHP2-bus
+ * voltage at the inverter), so we derive R at the inverter-bus level:
+ * use the DPU's `bat_vol` and `bat_amp` series. That gives ONE R per
+ * DPU — not per pack — but it's a real, rising-R signal.
+ *
+ * Cached 30 min.
+ * =================================================================== */
+
+const IR_TTL_MS = 30 * 60 * 1000;
+const IR_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
+const IR_DELTA_I_MIN_A = 5;     // require ≥ 5 A change for a clean dV/dI
+const IR_DELTA_T_MAX_MS = 60_000;
+
+export interface InternalResistanceDevice {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  recentMilliohms: number | null;
+  baselineMilliohms: number | null;
+  trendMilliohmsPerMonth: number | null;
+  samples: number;
+  status: 'tracking' | 'learning' | 'no-data';
+}
+
+export interface InternalResistanceReport {
+  generatedAt: number;
+  devices: InternalResistanceDevice[];
+}
+
+let irCache: { ts: number; value: InternalResistanceReport } | null = null;
+
+export function computeInternalResistance(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): InternalResistanceReport {
+  if (irCache && Date.now() - irCache.ts < IR_TTL_MS) return irCache.value;
+  const now = Date.now();
+  const since = now - IR_HISTORY_MS;
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  const out: InternalResistanceDevice[] = [];
+  for (const d of dpus) {
+    const vPts = recorder.query(d.sn, 'bat_vol', since, now);
+    const aPts = recorder.query(d.sn, 'bat_amp', since, now);
+    if (vPts.length < 30 || aPts.length < 30) {
+      out.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+        recentMilliohms: null, baselineMilliohms: null, trendMilliohmsPerMonth: null,
+        samples: 0, status: 'no-data',
+      });
+      continue;
+    }
+    // Snap V and A on common timestamps.
+    let ai = 0;
+    const series: Array<{ ts: number; v: number; a: number }> = [];
+    for (const v of vPts) {
+      while (ai + 1 < aPts.length && Math.abs(aPts[ai + 1].ts - v.ts) < Math.abs(aPts[ai].ts - v.ts)) ai++;
+      const a = aPts[ai];
+      if (!a) continue;
+      if (Math.abs(a.ts - v.ts) > 30_000) continue;
+      series.push({ ts: v.ts, v: v.value, a: a.value });
+    }
+    // Pairs with significant ΔI: ΔV / ΔI = R (volts / amps). Convert to mΩ.
+    const rSamples: Array<{ ts: number; rMilli: number }> = [];
+    for (let i = 1; i < series.length; i++) {
+      const a = series[i - 1];
+      const b = series[i];
+      if (b.ts - a.ts > IR_DELTA_T_MAX_MS) continue;
+      const dI = b.a - a.a;
+      if (Math.abs(dI) < IR_DELTA_I_MIN_A) continue;
+      const dV = b.v - a.v;
+      const r = (dV / dI) * 1000; // mΩ
+      if (!Number.isFinite(r)) continue;
+      // R must be positive (V drops as current draw rises) and within a sane LFP band.
+      const rAbs = Math.abs(r);
+      if (rAbs < 1 || rAbs > 500) continue;
+      rSamples.push({ ts: b.ts, rMilli: rAbs });
+    }
+    if (rSamples.length < 10) {
+      out.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+        recentMilliohms: null, baselineMilliohms: null, trendMilliohmsPerMonth: null,
+        samples: rSamples.length, status: 'learning',
+      });
+      continue;
+    }
+    const recentCutoff = now - 7 * 24 * 60 * 60 * 1000;
+    const recent = rSamples.filter((p) => p.ts >= recentCutoff).map((p) => p.rMilli);
+    const baseline = rSamples.slice(0, Math.max(10, Math.floor(rSamples.length * 0.3))).map((p) => p.rMilli);
+    const fit = linregress(rSamples.map((p) => ({ ts: p.ts, value: p.rMilli })));
+    out.push({
+      sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+      recentMilliohms: recent.length ? round2(median(recent)) : null,
+      baselineMilliohms: baseline.length ? round2(median(baseline)) : null,
+      trendMilliohmsPerMonth: fit ? round2(fit.slopePerMs * 30 * 86_400_000) : null,
+      samples: rSamples.length, status: 'tracking',
+    });
+  }
+  const value: InternalResistanceReport = { generatedAt: now, devices: out };
+  if (dpus.length > 0) irCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Forecast-skill calibration (v0.7.5).
+ *
+ * We never actually persisted yesterday's forecast, but the learned
+ * solarModel coefficient × historical GHI IS a hindcast — apply the
+ * model to the past 7 days of GHI to derive "what the model would
+ * have predicted" and compare with what actually happened. Reports
+ * mean absolute error, bias, and per-day breakdown — and exposes a
+ * bias factor (sum(actual) / sum(predicted)) that callers can apply
+ * to today's forecast as a correction.
+ *
+ * Cached 1 h.
+ * =================================================================== */
+
+const FORECAST_SKILL_TTL_MS = 60 * 60 * 1000;
+
+export interface ForecastSkillDay {
+  date: string;
+  predictedKwh: number;
+  actualKwh: number;
+  errorKwh: number;
+  errorPct: number | null;
+}
+
+export interface ForecastSkillReport {
+  generatedAt: number;
+  days: ForecastSkillDay[];
+  meanAbsErrorKwh: number | null;
+  meanAbsErrorPct: number | null;
+  biasFactor: number | null;       // sum(actual) / sum(predicted), or null if predicted ≈ 0
+  windowDays: number;
+}
+
+let forecastSkillCache: { ts: number; value: ForecastSkillReport } | null = null;
+
+export async function computeForecastSkill(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  forecast: DayForecast | null,
+  windowDays = 7,
+): Promise<ForecastSkillReport> {
+  if (forecastSkillCache && Date.now() - forecastSkillCache.ts < FORECAST_SKILL_TTL_MS) return forecastSkillCache.value;
+  const now = Date.now();
+  const emptyVal = (): ForecastSkillReport => ({
+    generatedAt: now, days: [], meanAbsErrorKwh: null, meanAbsErrorPct: null,
+    biasFactor: null, windowDays,
+  });
+  if (!forecast) return emptyVal();
+  const weather = await getWeather();
+  if (!weather) return emptyVal();
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  if (dpus.length === 0) return emptyVal();
+
+  // Hindcast: model.coeff[h] × GHI(h) for each past hour → predicted W.
+  // Integrate hourly across each past day. Compare with actual hourly PV avg.
+  const wxByHourEpoch = new Map<number, WeatherHour>();
+  for (const wh of weather.hours) wxByHourEpoch.set(Math.floor(wh.ts / 3_600_000), wh);
+
+  const todayStart = startOfLocalDayMs();
+  const days: ForecastSkillDay[] = [];
+  let totalPred = 0, totalAct = 0, errSum = 0, errCount = 0;
+  for (let i = windowDays; i >= 1; i--) {
+    const dayStart = todayStart - i * 86_400_000;
+    const dayEnd = dayStart + 86_400_000;
+    let predWh = 0, actWh = 0;
+    for (let h = 0; h < 24; h++) {
+      const hourStart = dayStart + h * 3_600_000;
+      const he = Math.floor(hourStart / 3_600_000);
+      const wx = wxByHourEpoch.get(he);
+      const hod = new Date(hourStart).getHours();
+      const resp = forecast.solarModel.hourly[hod];
+      if (wx && resp.coeff != null) predWh += resp.coeff * wx.radiationWm2;
+      let act = 0;
+      for (const d of dpus) {
+        const pts = recorder.query(d.sn, 'pv_total', hourStart, hourStart + 3_600_000);
+        if (pts.length === 0) continue;
+        act += pts.reduce((s, p) => s + p.value, 0) / pts.length;
+      }
+      actWh += act;
+    }
+    const predKwh = predWh / 1000;
+    const actKwh = actWh / 1000;
+    const errKwh = predKwh - actKwh;
+    const errPct = actKwh > 0.5 ? Math.round((errKwh / actKwh) * 1000) / 10 : null;
+    const date = new Date(dayStart);
+    days.push({
+      date: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+      predictedKwh: round2(predKwh),
+      actualKwh: round2(actKwh),
+      errorKwh: round2(errKwh),
+      errorPct: errPct,
+    });
+    if (predKwh > 0.5 && actKwh > 0.5) {
+      totalPred += predKwh; totalAct += actKwh;
+      errSum += Math.abs(errKwh); errCount++;
+    }
+  }
+  const mae = errCount > 0 ? errSum / errCount : null;
+  const meanActual = errCount > 0 ? totalAct / errCount : 0;
+  const value: ForecastSkillReport = {
+    generatedAt: now, days,
+    meanAbsErrorKwh: mae != null ? round2(mae) : null,
+    meanAbsErrorPct: mae != null && meanActual > 0.5 ? Math.round((mae / meanActual) * 1000) / 10 : null,
+    biasFactor: totalPred > 0.5 ? round2(totalAct / totalPred) : null,
+    windowDays,
+  };
+  if (dpus.length > 0) forecastSkillCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Ambient-coupled thermal forecast (v0.7.5).
+ *
+ * Pack temperature drives degradation. It follows ambient temp +
+ * heat-dissipation from charging/discharging. Regress per-pack temp
+ * against (outdoor temp, recent load) → predict peak pack temp for
+ * the next 24 h. Outdoor temp comes from Open-Meteo's hourly
+ * tempC forecast. Cached 1 h.
+ * =================================================================== */
+
+const AMBIENT_THERMAL_TTL_MS = 60 * 60 * 1000;
+const AMBIENT_THERMAL_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
+const AMBIENT_THERMAL_MIN_PAIRS = 30;
+
+export interface AmbientThermalPack {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  packNum: number;
+  ambientCoeff: number | null;     // °C pack per °C ambient
+  loadCoeff: number | null;        // °C pack per kW load
+  intercept: number | null;
+  r2: number | null;
+  samples: number;
+  predictedPeak24hC: number | null;
+  predictedPeakAtMs: number | null;
+}
+
+export interface AmbientThermalReport {
+  generatedAt: number;
+  packs: AmbientThermalPack[];
+}
+
+let ambientThermalCache: { ts: number; value: AmbientThermalReport } | null = null;
+
+/** Two-variable least-squares: y = β0 + β1·x1 + β2·x2. Returns null on near-singular. */
+function lstsq2(rows: Array<{ x1: number; x2: number; y: number }>): { b0: number; b1: number; b2: number; r2: number } | null {
+  const n = rows.length;
+  if (n < AMBIENT_THERMAL_MIN_PAIRS) return null;
+  let sx1 = 0, sx2 = 0, sy = 0, sx1x1 = 0, sx2x2 = 0, sx1x2 = 0, sx1y = 0, sx2y = 0;
+  for (const r of rows) {
+    sx1 += r.x1; sx2 += r.x2; sy += r.y;
+    sx1x1 += r.x1 * r.x1; sx2x2 += r.x2 * r.x2; sx1x2 += r.x1 * r.x2;
+    sx1y += r.x1 * r.y; sx2y += r.x2 * r.y;
+  }
+  // Normal equations: [n sx1 sx2; sx1 sx1x1 sx1x2; sx2 sx1x2 sx2x2] · β = [sy; sx1y; sx2y]
+  const A = [
+    [n, sx1, sx2],
+    [sx1, sx1x1, sx1x2],
+    [sx2, sx1x2, sx2x2],
+  ];
+  const b = [sy, sx1y, sx2y];
+  // Gaussian elimination, 3×3.
+  for (let i = 0; i < 3; i++) {
+    let pivot = i;
+    for (let j = i + 1; j < 3; j++) if (Math.abs(A[j][i]) > Math.abs(A[pivot][i])) pivot = j;
+    if (Math.abs(A[pivot][i]) < 1e-9) return null;
+    if (pivot !== i) { [A[i], A[pivot]] = [A[pivot], A[i]]; [b[i], b[pivot]] = [b[pivot], b[i]]; }
+    for (let j = i + 1; j < 3; j++) {
+      const f = A[j][i] / A[i][i];
+      for (let k = i; k < 3; k++) A[j][k] -= f * A[i][k];
+      b[j] -= f * b[i];
+    }
+  }
+  const beta = [0, 0, 0];
+  for (let i = 2; i >= 0; i--) {
+    let s = b[i];
+    for (let j = i + 1; j < 3; j++) s -= A[i][j] * beta[j];
+    beta[i] = s / A[i][i];
+  }
+  // Compute r²
+  const yMean = sy / n;
+  let ssTot = 0, ssRes = 0;
+  for (const r of rows) {
+    const yHat = beta[0] + beta[1] * r.x1 + beta[2] * r.x2;
+    ssTot += (r.y - yMean) ** 2;
+    ssRes += (r.y - yHat) ** 2;
+  }
+  const r2 = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 0;
+  return { b0: beta[0], b1: beta[1], b2: beta[2], r2 };
+}
+
+export async function computeAmbientThermalForecast(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): Promise<AmbientThermalReport> {
+  if (ambientThermalCache && Date.now() - ambientThermalCache.ts < AMBIENT_THERMAL_TTL_MS) return ambientThermalCache.value;
+  const now = Date.now();
+  const since = now - AMBIENT_THERMAL_HISTORY_MS;
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const empty = (): AmbientThermalReport => ({ generatedAt: now, packs: [] });
+  if (dpus.length === 0) return empty();
+
+  const weather = await getWeather();
+  if (!weather) return empty();
+  const ambientByHe = new Map<number, number>();
+  for (const wh of weather.hours) ambientByHe.set(Math.floor(wh.ts / 3_600_000), wh.tempC);
+
+  const packs: AmbientThermalPack[] = [];
+  for (const d of dpus) {
+    // Use total_in + total_out as a proxy for "thermal-generating duty".
+    const tinPts = recorder.query(d.sn, 'total_in', since, now);
+    const toutPts = recorder.query(d.sn, 'total_out', since, now);
+    const tinByHe = new Map<number, number[]>();
+    const toutByHe = new Map<number, number[]>();
+    for (const p of tinPts) {
+      const he = Math.floor(p.ts / 3_600_000);
+      const arr = tinByHe.get(he) ?? [];
+      arr.push(p.value); tinByHe.set(he, arr);
+    }
+    for (const p of toutPts) {
+      const he = Math.floor(p.ts / 3_600_000);
+      const arr = toutByHe.get(he) ?? [];
+      arr.push(p.value); toutByHe.set(he, arr);
+    }
+    for (const pk of d.projection.packs) {
+      const tPts = recorder.query(d.sn, `pack${pk.num}_temp`, since, now);
+      const tByHe = new Map<number, number[]>();
+      for (const p of tPts) {
+        const he = Math.floor(p.ts / 3_600_000);
+        const arr = tByHe.get(he) ?? [];
+        arr.push(p.value); tByHe.set(he, arr);
+      }
+      const rows: Array<{ x1: number; x2: number; y: number }> = [];
+      for (const [he, tArr] of tByHe) {
+        const amb = ambientByHe.get(he);
+        if (amb == null) continue;
+        const tinArr = tinByHe.get(he) ?? [];
+        const toutArr = toutByHe.get(he) ?? [];
+        const loadW = (tinArr.length ? mean(tinArr) : 0) + (toutArr.length ? mean(toutArr) : 0);
+        rows.push({ x1: amb, x2: loadW / 1000, y: mean(tArr) });
+      }
+      const fit = lstsq2(rows);
+      let predictedPeak: number | null = null;
+      let predictedPeakAt: number | null = null;
+      if (fit) {
+        // Predict next 24 h using forecast ambient + most-recent average load.
+        const recentLoad = (mean(tinPts.slice(-24).map((p) => p.value)) +
+                            mean(toutPts.slice(-24).map((p) => p.value))) / 1000;
+        for (const wh of weather.hours) {
+          if (wh.ts < now || wh.ts > now + 24 * 3_600_000) continue;
+          const pred = fit.b0 + fit.b1 * wh.tempC + fit.b2 * recentLoad;
+          if (predictedPeak == null || pred > predictedPeak) {
+            predictedPeak = pred;
+            predictedPeakAt = wh.ts;
+          }
+        }
+      }
+      packs.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), packNum: pk.num,
+        ambientCoeff: fit ? round2(fit.b1) : null,
+        loadCoeff: fit ? round2(fit.b2) : null,
+        intercept: fit ? round2(fit.b0) : null,
+        r2: fit ? round2(fit.r2) : null,
+        samples: rows.length,
+        predictedPeak24hC: predictedPeak != null ? round1(predictedPeak) : null,
+        predictedPeakAtMs: predictedPeakAt,
+      });
+    }
+  }
+  const value: AmbientThermalReport = { generatedAt: now, packs };
+  if (dpus.length > 0) ambientThermalCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * Confidence trend (v0.7.5).
+ *
+ * R² across the panel's projections (SoH fade, ambient-thermal,
+ * GHI→PV) collected at this snapshot. A week-over-week increasing R²
+ * means "trust this week's projections more than last week's". This
+ * one is computed on demand from current state — no caching needed.
+ * =================================================================== */
+
+export interface ConfidenceSnapshot {
+  generatedAt: number;
+  degradationMedianR2: number | null;
+  solarModelMedianR2: number | null;
+  thermalMedianR2: number | null;
+  forecastSkillBiasFactor: number | null;
+  forecastSkillMaePct: number | null;
+}
+
+export function computeConfidenceSnapshot(
+  degradation: FleetDegradation,
+  forecast: DayForecast | null,
+  thermal: AmbientThermalReport,
+  skill: ForecastSkillReport,
+): ConfidenceSnapshot {
+  const degR2s = degradation.packs
+    .map((p) => p.r2)
+    .filter((r): r is number => r != null);
+  const solarR2s = forecast
+    ? forecast.solarModel.hourly.map((h) => h.r2).filter((r) => r > 0)
+    : [];
+  const thermalR2s = thermal.packs.map((p) => p.r2).filter((r): r is number => r != null);
+  return {
+    generatedAt: Date.now(),
+    degradationMedianR2: degR2s.length ? round2(median(degR2s)) : null,
+    solarModelMedianR2: solarR2s.length ? round2(median(solarR2s)) : null,
+    thermalMedianR2: thermalR2s.length ? round2(median(thermalR2s)) : null,
+    forecastSkillBiasFactor: skill.biasFactor,
+    forecastSkillMaePct: skill.meanAbsErrorPct,
+  };
+}
+
+/* ===================================================================
+ * Self-consumption ratio (v0.7.5) — what fraction of generated PV
+ * actually does household work (powering the load directly, or
+ * charging the battery to feed the load later). On an off-grid setup
+ * with no export path the answer is structurally 100% as long as
+ * production ≤ demand+headroom; the more useful number is the
+ * breakdown: kWh-direct-to-load, kWh-to-battery, kWh-from-battery, and
+ * grid-imported kWh — and the "solar fraction of load" (% of household
+ * consumption that was met by solar, directly or via battery).
+ * Rolling 7-day window by default. Cached 5 min.
+ * =================================================================== */
+
+const SELF_CONSUMPTION_TTL_MS = 5 * 60 * 1000;
+
+export interface SelfConsumption {
+  generatedAt: number;
+  windowDays: number;
+  pvKwh: number;           // total PV generated across the fleet
+  loadKwh: number;         // total household consumption (panel load + DPU AC-out passthrough)
+  batteryChargeKwh: number;
+  batteryDischargeKwh: number;
+  gridImportKwh: number;
+  pvToLoadKwh: number;     // estimate: PV that went straight to load (PV − battery-charge − export)
+  pvToBatteryKwh: number;  // estimate: PV that charged the battery
+  solarFractionOfLoadPct: number | null; // (pvToLoad + batteryDischarge) ÷ loadKwh
+  directUseRatioPct: number | null;      // pvToLoad ÷ pvKwh
+}
+
+let selfConsumptionCache: { ts: number; key: string; value: SelfConsumption } | null = null;
+
+export function computeSelfConsumption(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  windowDays = 7,
+): SelfConsumption {
+  const key = `d${windowDays}`;
+  if (selfConsumptionCache && selfConsumptionCache.key === key && Date.now() - selfConsumptionCache.ts < SELF_CONSUMPTION_TTL_MS) {
+    return selfConsumptionCache.value;
+  }
+  const now = Date.now();
+  const since = now - windowDays * 86_400_000;
+  const list = Object.values(devices);
+  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
+    DeviceSnapshot & { projection: DpuProjection }
+  >;
+
+  let pvKwh = 0, batteryChargeKwh = 0, batteryDischargeKwh = 0, gridImportKwh = 0;
+  for (const d of dpus) {
+    pvKwh += integrateWh(recorder.query(d.sn, 'pv_total', since, now), since, now).wh / 1000;
+    gridImportKwh += integrateWh(recorder.query(d.sn, 'ac_in', since, now), since, now).wh / 1000;
+    for (const pk of d.projection.packs) {
+      batteryChargeKwh += integrateWh(recorder.query(d.sn, `pack${pk.num}_in`, since, now), since, now).wh / 1000;
+      batteryDischargeKwh += integrateWh(recorder.query(d.sn, `pack${pk.num}_out`, since, now), since, now).wh / 1000;
+    }
+  }
+  const loadKwh = shp2
+    ? integrateWh(recorder.query(shp2.sn, 'panel_load', since, now), since, now).wh / 1000
+    : 0;
+
+  // Charge fed by PV is what the PV produced beyond what went to load — the rest
+  // came from grid. On an off-grid system gridImportKwh ≈ 0 and PV ≈ load+charge.
+  const pvToBatteryKwh = Math.max(0, batteryChargeKwh - gridImportKwh);
+  const pvToLoadKwh = Math.max(0, pvKwh - pvToBatteryKwh);
+  const solarToLoadKwh = pvToLoadKwh + batteryDischargeKwh;
+  const value: SelfConsumption = {
+    generatedAt: now,
+    windowDays,
+    pvKwh: round2(pvKwh),
+    loadKwh: round2(loadKwh),
+    batteryChargeKwh: round2(batteryChargeKwh),
+    batteryDischargeKwh: round2(batteryDischargeKwh),
+    gridImportKwh: round2(gridImportKwh),
+    pvToLoadKwh: round2(pvToLoadKwh),
+    pvToBatteryKwh: round2(pvToBatteryKwh),
+    solarFractionOfLoadPct: loadKwh > 0.5 ? Math.round((solarToLoadKwh / loadKwh) * 1000) / 10 : null,
+    directUseRatioPct: pvKwh > 0.5 ? Math.round((pvToLoadKwh / pvKwh) * 1000) / 10 : null,
+  };
+  if (dpus.length > 0) selfConsumptionCache = { ts: now, key, value };
+  return value;
+}
+
+/* ===================================================================
+ * Thermal-event counter (v0.7.5) — cumulative count of times each
+ * pack crossed each elevated-temperature threshold (96°F / 113°F /
+ * 131°F). Rising-edge only — sustained heat counts as one event, not
+ * one per sample. Multiplies the EOL projection as a "hard life"
+ * indicator: 200 events at 131°F is a lot more damage than 200 at
+ * 96°F, even if the SoH regression looks the same.
+ *
+ * Scans the full per-pack temperature history. Cached 30 min.
+ * =================================================================== */
+
+const THERMAL_EVENT_TTL_MS = 30 * 60 * 1000;
+const THERMAL_EVENT_HISTORY_MS = 400 * 24 * 60 * 60 * 1000;
+const THERMAL_THRESHOLD_C_INFO = (96 - 32) / 1.8;   // ≈ 35.6 °C
+const THERMAL_THRESHOLD_C_WARN = (113 - 32) / 1.8;  // 45 °C
+const THERMAL_THRESHOLD_C_CRIT = (131 - 32) / 1.8;  // 55 °C
+const THERMAL_HYSTERESIS_C = 1.5; // must fall back this far before re-arming
+
+export interface ThermalEventCounts {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  packNum: number;
+  warmEvents: number;       // crossings above 96 °F
+  hotEvents: number;        // crossings above 113 °F
+  overheatEvents: number;   // crossings above 131 °F
+  warmHours: number;        // total hours spent above 96 °F
+  hotHours: number;
+  overheatHours: number;
+  dataSpanDays: number;
+  hardLifeScore: number;    // 1×warm + 4×hot + 16×overheat events, per year
+}
+
+export interface FleetThermalEvents {
+  generatedAt: number;
+  packs: ThermalEventCounts[];
+}
+
+let thermalEventsCache: { ts: number; value: FleetThermalEvents } | null = null;
+
+export function computeThermalEvents(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): FleetThermalEvents {
+  if (thermalEventsCache && Date.now() - thermalEventsCache.ts < THERMAL_EVENT_TTL_MS) {
+    return thermalEventsCache.value;
+  }
+  const now = Date.now();
+  const since = now - THERMAL_EVENT_HISTORY_MS;
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  const packs: ThermalEventCounts[] = [];
+  for (const d of dpus) {
+    for (const pk of d.projection.packs) {
+      const pts = recorder.query(d.sn, `pack${pk.num}_temp`, since, now);
+      if (pts.length === 0) {
+        packs.push({
+          sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+          packNum: pk.num, warmEvents: 0, hotEvents: 0, overheatEvents: 0,
+          warmHours: 0, hotHours: 0, overheatHours: 0, dataSpanDays: 0, hardLifeScore: 0,
+        });
+        continue;
+      }
+      let warmEvents = 0, hotEvents = 0, overheatEvents = 0;
+      let warmMs = 0, hotMs = 0, overheatMs = 0;
+      let warmArmed = true, hotArmed = true, overheatArmed = true;
+      let prevTs: number | null = null;
+      let prevTemp: number | null = null;
+      for (const p of pts) {
+        // Rising-edge with hysteresis: a sustained high spell counts as ONE
+        // event; the threshold "re-arms" once temp falls THERMAL_HYSTERESIS_C
+        // back below the trigger.
+        if (warmArmed && p.value >= THERMAL_THRESHOLD_C_INFO) { warmEvents++; warmArmed = false; }
+        if (!warmArmed && p.value < THERMAL_THRESHOLD_C_INFO - THERMAL_HYSTERESIS_C) warmArmed = true;
+        if (hotArmed && p.value >= THERMAL_THRESHOLD_C_WARN) { hotEvents++; hotArmed = false; }
+        if (!hotArmed && p.value < THERMAL_THRESHOLD_C_WARN - THERMAL_HYSTERESIS_C) hotArmed = true;
+        if (overheatArmed && p.value >= THERMAL_THRESHOLD_C_CRIT) { overheatEvents++; overheatArmed = false; }
+        if (!overheatArmed && p.value < THERMAL_THRESHOLD_C_CRIT - THERMAL_HYSTERESIS_C) overheatArmed = true;
+        // Time-above-threshold — credit the gap between this sample and the
+        // last to whichever band the previous reading sat in.
+        if (prevTs != null && prevTemp != null) {
+          const dt = p.ts - prevTs;
+          if (prevTemp >= THERMAL_THRESHOLD_C_INFO) warmMs += dt;
+          if (prevTemp >= THERMAL_THRESHOLD_C_WARN) hotMs += dt;
+          if (prevTemp >= THERMAL_THRESHOLD_C_CRIT) overheatMs += dt;
+        }
+        prevTs = p.ts; prevTemp = p.value;
+      }
+      const spanMs = pts[pts.length - 1].ts - pts[0].ts;
+      const spanDays = Math.max(1, spanMs / 86_400_000);
+      // Hard-life score, normalized per-year — useful as a peer-compare lens
+      // even when packs have different recording histories.
+      const hardLifeScore = ((warmEvents + 4 * hotEvents + 16 * overheatEvents) / spanDays) * 365;
+      packs.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), packNum: pk.num,
+        warmEvents, hotEvents, overheatEvents,
+        warmHours: Math.round(warmMs / 3_600_000),
+        hotHours: Math.round(hotMs / 3_600_000),
+        overheatHours: Math.round(overheatMs / 3_600_000),
+        dataSpanDays: round1(spanDays),
+        hardLifeScore: Math.round(hardLifeScore * 10) / 10,
+      });
+    }
+  }
+  const value: FleetThermalEvents = { generatedAt: now, packs };
+  if (dpus.length > 0) thermalEventsCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * MPPT efficiency drift + inverter standby loss (v0.7.5).
+ *
+ * Each MPPT reports both DC-side (V × A) and AC-side (W) — the ratio
+ * is the conversion efficiency. Healthy MPPTs sit 96–99%; a sustained
+ * drop is earliest-detectable electronics aging. Computed per-DPU per-
+ * string (HV + LV) as a 7-day average plus a regression slope.
+ *
+ * Inverter standby loss: ac_out residual when PV is dark and load
+ * is near zero — the inverter's own idle draw. Trended week-over-week.
+ * =================================================================== */
+
+const MPPT_EFF_TTL_MS = 10 * 60 * 1000;
+
+export interface MpptString {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  string: 'HV' | 'LV';
+  recentEffPct: number | null;     // median ratio over the recent window
+  baselineEffPct: number | null;   // median ratio over the earliest 30% of history
+  driftPctPts: number | null;      // recent − baseline (positive = healthy/improving, negative = drift)
+  samples: number;
+  spanDays: number;
+}
+
+export interface InverterStandby {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  idleWatts: number | null;       // recent median ac_out when PV<20W and panel-load<20W
+  baselineIdleWatts: number | null;
+  trendWattsPerWeek: number | null;
+  samples: number;
+}
+
+export interface EquipmentHealth {
+  generatedAt: number;
+  mpptStrings: MpptString[];
+  inverterStandby: InverterStandby[];
+}
+
+let equipmentHealthCache: { ts: number; value: EquipmentHealth } | null = null;
+
+function ratioSeries(
+  recorder: Recorder,
+  sn: string,
+  watts: string, volts: string, amps: string,
+  since: number, now: number,
+): Array<{ ts: number; eff: number }> {
+  const wPts = recorder.query(sn, watts, since, now);
+  if (wPts.length === 0) return [];
+  // Build map ts→{v, a}
+  const vPts = recorder.query(sn, volts, since, now);
+  const aPts = recorder.query(sn, amps, since, now);
+  // Snap V and A to nearest W timestamp (within 60s) using two-pointer merge.
+  const out: Array<{ ts: number; eff: number }> = [];
+  let vi = 0, ai = 0;
+  for (const w of wPts) {
+    while (vi + 1 < vPts.length && Math.abs(vPts[vi + 1].ts - w.ts) < Math.abs(vPts[vi].ts - w.ts)) vi++;
+    while (ai + 1 < aPts.length && Math.abs(aPts[ai + 1].ts - w.ts) < Math.abs(aPts[ai].ts - w.ts)) ai++;
+    const v = vPts[vi];
+    const a = aPts[ai];
+    if (!v || !a) continue;
+    if (Math.abs(v.ts - w.ts) > 60_000 || Math.abs(a.ts - w.ts) > 60_000) continue;
+    const dc = v.value * a.value;
+    if (dc < 50) continue; // ignore near-dark; ratio is dominated by noise
+    if (w.value < 20) continue;
+    const eff = (w.value / dc) * 100;
+    if (eff < 50 || eff > 105) continue; // clamp pathological / measurement-aligned outliers
+    out.push({ ts: w.ts, eff });
+  }
+  return out;
+}
+
+export function computeEquipmentHealth(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): EquipmentHealth {
+  if (equipmentHealthCache && Date.now() - equipmentHealthCache.ts < MPPT_EFF_TTL_MS) {
+    return equipmentHealthCache.value;
+  }
+  const now = Date.now();
+  const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
+  const BASELINE_MS = 60 * 24 * 60 * 60 * 1000;
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  const mpptStrings: MpptString[] = [];
+  for (const d of dpus) {
+    for (const [name, w, v, a] of [
+      ['HV', 'pv_high', 'pv_high_v', 'pv_high_a'],
+      ['LV', 'pv_low', 'pv_low_v', 'pv_low_a'],
+    ] as Array<['HV' | 'LV', string, string, string]>) {
+      const series = ratioSeries(recorder, d.sn, w, v, a, now - BASELINE_MS, now);
+      if (series.length < 20) {
+        mpptStrings.push({
+          sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), string: name,
+          recentEffPct: null, baselineEffPct: null, driftPctPts: null,
+          samples: series.length, spanDays: 0,
+        });
+        continue;
+      }
+      const spanMs = series[series.length - 1].ts - series[0].ts;
+      const recent = series.filter((p) => p.ts >= now - RECENT_MS).map((p) => p.eff);
+      const earliestCount = Math.max(10, Math.floor(series.length * 0.3));
+      const baseline = series.slice(0, earliestCount).map((p) => p.eff);
+      const recentEff = recent.length ? median(recent) : null;
+      const baselineEff = baseline.length ? median(baseline) : null;
+      mpptStrings.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), string: name,
+        recentEffPct: recentEff != null ? round2(recentEff) : null,
+        baselineEffPct: baselineEff != null ? round2(baselineEff) : null,
+        driftPctPts: recentEff != null && baselineEff != null ? round2(recentEff - baselineEff) : null,
+        samples: series.length,
+        spanDays: round1(spanMs / 86_400_000),
+      });
+    }
+  }
+
+  // Inverter standby: ac_out when PV is dark (<20W) and panel_load is dark.
+  // Snap on the AC-out series; check PV at the same ts (within 60s).
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  const inverterStandby: InverterStandby[] = [];
+  for (const d of dpus) {
+    const baselineSince = now - BASELINE_MS;
+    const aoPts = recorder.query(d.sn, 'ac_out', baselineSince, now);
+    const pvPts = recorder.query(d.sn, 'pv_total', baselineSince, now);
+    const loadPts = shp2 ? recorder.query(shp2.sn, 'panel_load', baselineSince, now) : [];
+    if (aoPts.length === 0) {
+      inverterStandby.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+        idleWatts: null, baselineIdleWatts: null, trendWattsPerWeek: null, samples: 0,
+      });
+      continue;
+    }
+    const idleSeries: Array<{ ts: number; w: number }> = [];
+    let pvi = 0, li = 0;
+    for (const ao of aoPts) {
+      while (pvi + 1 < pvPts.length && Math.abs(pvPts[pvi + 1].ts - ao.ts) < Math.abs(pvPts[pvi].ts - ao.ts)) pvi++;
+      while (li + 1 < loadPts.length && Math.abs(loadPts[li + 1].ts - ao.ts) < Math.abs(loadPts[li].ts - ao.ts)) li++;
+      const pv = pvPts[pvi]?.value ?? 0;
+      const load = loadPts[li]?.value ?? 0;
+      if (pv < 20 && load < 20 && ao.value > 0 && ao.value < 200) {
+        idleSeries.push({ ts: ao.ts, w: ao.value });
+      }
+    }
+    if (idleSeries.length < 10) {
+      inverterStandby.push({
+        sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+        idleWatts: null, baselineIdleWatts: null, trendWattsPerWeek: null, samples: idleSeries.length,
+      });
+      continue;
+    }
+    const recent = idleSeries.filter((p) => p.ts >= now - RECENT_MS).map((p) => p.w);
+    const baseline = idleSeries.slice(0, Math.max(5, Math.floor(idleSeries.length * 0.3))).map((p) => p.w);
+    const fit = linregress(idleSeries.map((p) => ({ ts: p.ts, value: p.w })));
+    inverterStandby.push({
+      sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
+      idleWatts: recent.length ? round1(median(recent)) : null,
+      baselineIdleWatts: baseline.length ? round1(median(baseline)) : null,
+      trendWattsPerWeek: fit ? round2(fit.slopePerMs * 604_800_000) : null,
+      samples: idleSeries.length,
+    });
+  }
+
+  const value: EquipmentHealth = { generatedAt: now, mpptStrings, inverterStandby };
+  if (dpus.length > 0) equipmentHealthCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
  * Inverter clipping quantifier (v0.6.0).
  *
  * On bluebird-clear summer days the arrays can produce more DC than the
@@ -1669,4 +3100,78 @@ export async function computeClipping(
   };
   clippingCache = { ts: now, value };
   return value;
+}
+
+/* ===================================================================
+ * NWS storm-preparedness signal (v0.7.5).
+ *
+ * Pulls active alerts.weather.gov alerts within ~50 mi of the panel's
+ * configured coordinates and emits a learned-warning to pre-charge to
+ * 100% before forecast severe weather. Off by default — opt in with
+ * NWS_ENABLED=1 (US-only).
+ * =================================================================== */
+
+const STORM_PREP_TTL_MS = 10 * 60 * 1000;
+const STORM_SEVERE_EVENTS = new Set([
+  'Tornado Warning',
+  'Tornado Watch',
+  'Severe Thunderstorm Warning',
+  'Severe Thunderstorm Watch',
+  'Winter Storm Warning',
+  'Blizzard Warning',
+  'Ice Storm Warning',
+  'High Wind Warning',
+  'Hurricane Warning',
+  'Hurricane Watch',
+  'Tropical Storm Warning',
+  'Tropical Storm Watch',
+  'Flash Flood Warning',
+  'Excessive Heat Warning',
+]);
+
+let stormPrepCache: { ts: number; value: Alert[] } | null = null;
+
+export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>): Promise<Alert[]> {
+  if (!isNwsEnabled()) return [];
+  if (stormPrepCache && Date.now() - stormPrepCache.ts < STORM_PREP_TTL_MS) return stormPrepCache.value;
+  const feed = await getNwsAlerts();
+  if (!feed || feed.alerts.length === 0) {
+    stormPrepCache = { ts: Date.now(), value: [] };
+    return [];
+  }
+  const out: Alert[] = [];
+  for (const a of feed.alerts) {
+    const severe = STORM_SEVERE_EVENTS.has(a.event) || a.severity === 'Severe' || a.severity === 'Extreme';
+    if (!severe) continue;
+    const sev: Alert['severity'] = a.severity === 'Extreme' || a.urgency === 'Immediate' ? 'critical' : 'warning';
+    const onsetDate = a.onset ? new Date(a.onset) : null;
+    const whenStr = onsetDate
+      ? onsetDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })
+      : 'soon';
+    out.push({
+      id: `storm-${a.id || a.event}`.replace(/[^a-zA-Z0-9-]/g, '_').slice(0, 96),
+      severity: sev,
+      category: 'Grid',
+      source: 'learned',
+      device: 'System',
+      title: `${a.event} — pre-charge recommended`,
+      detail: `NWS has issued a ${a.event} for ${a.areaDesc ?? 'your area'} ${whenStr}. Charge the backup pool to 100% before onset so grid loss leaves you in a strong position. ${a.headline ?? ''}`,
+      facts: [
+        { label: 'Event', value: a.event },
+        { label: 'Severity', value: a.severity },
+        { label: 'Urgency', value: a.urgency },
+        { label: 'Onset', value: onsetDate ? onsetDate.toLocaleString() : '—' },
+        { label: 'Expires', value: a.expires ? new Date(a.expires).toLocaleString() : '—' },
+        { label: 'Area', value: a.areaDesc ?? '—' },
+      ],
+    });
+  }
+  stormPrepCache = { ts: Date.now(), value: out };
+  return out;
+}
+
+export async function getActiveNwsAlerts(): Promise<NwsAlert[]> {
+  if (!isNwsEnabled()) return [];
+  const feed = await getNwsAlerts();
+  return feed?.alerts ?? [];
 }

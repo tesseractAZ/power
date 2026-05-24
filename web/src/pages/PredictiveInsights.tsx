@@ -3,6 +3,7 @@ import { SEV_META, SubjectBoxes, sevRank } from '../cards/AlertParts';
 import { alertCounts } from '../alerts';
 import { ForecastDetail } from '../cards/ForecastDetail';
 import { DegradationCard } from '../cards/DegradationCard';
+import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 
 /**
  * Predictive Insights — the learned-anomaly + forecast engine, shown in full
@@ -56,6 +57,8 @@ export function PredictiveInsights({ alerts }: { alerts: Alert[] }) {
       <DegradationCard />
 
       <ForecastDetail />
+
+      <AdvancedInsightsCard />
     </div>
   );
 }
