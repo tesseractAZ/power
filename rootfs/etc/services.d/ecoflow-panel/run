@@ -21,7 +21,7 @@ fi
 
 # ── Server + persistence ─────────────────────────────────────────────────────
 export PORT=8787
-export HOST=0.0.0.0
+export HOST=::
 export DB_PATH=/data/ecoflow.db
 export WEB_DIST_PATH=/app/web/dist
 export LOG_LEVEL="$(bashio::config 'LOG_LEVEL')"
