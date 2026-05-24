@@ -3,6 +3,56 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.7.7 — 2026-05-24
+
+Diagnostics patch — actionable offline alerts plus per-SN connectivity
+logging so the next "why is X offline" investigation is one log grep,
+not a code spelunk.
+
+### Features
+
+- **Cloud-session-stale alert.** Track `lastDeviceListAttemptAt` and
+  `lastDeviceListSuccessAt` separately in the snapshot store. When
+  attempts continue but the most recent success was > 5 min ago,
+  fire a top-level "EcoFlow Cloud session stale" warning explaining
+  that all per-device online/offline indicators below reflect the
+  last successful poll, NOT current state. Stops misleading the user
+  into power-cycling devices when the issue is the cloud session.
+- **Enriched offline-device alert.** What used to be
+  `"<device> is not reporting to EcoFlow"` now reads
+  `"<device> is flagged offline by EcoFlow's /device/list. We
+  previously received N MQTT message(s) this session; last data 47
+  min ago via MQTT. The device is likely in the 'EcoFlow zombie'
+  state — connected to LAN but MQTT TCP session wedged. Power-cycle
+  the device to force a clean reconnect."` Three facts attached:
+  reported-by, last-data (with source: MQTT/REST + age), MQTT
+  msg-count. Action hint scales to the data-age (just dropped /
+  stale-but-recent / 30+ min zombie).
+- **Per-SN state-transition logging.** `setDeviceList` and
+  `setDeviceOnline` (in `snapshot.ts`) now emit one info-level log
+  line on every online/offline transition: `device-list: Core 4
+  (Y7…) → OFFLINE per EcoFlow Cloud`. First-sight inaugural state
+  is also logged. Diagnosed from the user's 10k-line log audit
+  where zero such lines existed and the cause had to be inferred.
+- **Periodic fleet-status dump.** Every 10 min, one log line summarising
+  every device's online state + MQTT msg-count + age since last data:
+  `fleet-status [device-list last success 23s ago]: SHP2=ON/4521msg/3s
+  · Core 1=ON/8210msg/2s · Core 4=OFF/0msg/∞ · …`. Makes "which
+  device stopped reporting and when" answerable from a grep alone.
+
+### Notes
+
+- No new env vars; nothing to configure. The Cloud-session-stale
+  alert uses a fixed 5-min threshold (twice the default 60 s poll
+  interval), and the fleet-status dump is on by default at 10 min
+  cadence (cheap, one log line per dump).
+- The "EcoFlow zombie" pattern (device alive on LAN but cloud says
+  offline) is genuinely an EcoFlow-side issue — there's nothing we
+  can do to fix it from the panel side. But the new alert text now
+  says so directly, with a power-cycle hint, instead of a generic
+  "is not reporting" that left the user wondering whether to debug
+  the dashboard or the device.
+
 ## 0.7.6 — 2026-05-24
 
 Patch + feature — full **Home Assistant Energy Dashboard** integration.

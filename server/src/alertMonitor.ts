@@ -294,8 +294,24 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     } catch (e: any) {
       log(`storm-prep: ${e?.message ?? e}`);
     }
+    // v0.7.7 — build the connectivity context the alerts engine uses to
+    // enrich offline/stale alerts with last-data timestamps + source.
+    const perDevice = new Map<string, { lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number }>();
+    for (const d of Object.values(snap.devices)) {
+      perDevice.set(d.sn, {
+        lastMqttAt: store.lastMqttAtBySn.get(d.sn),
+        lastSource: store.lastSourceBySn.get(d.sn),
+        mqttCount: store.mqttMsgCountBySn.get(d.sn) ?? 0,
+      });
+    }
+    const connectivity = {
+      lastDeviceListAttemptAt: store.lastDeviceListAttemptAt,
+      lastDeviceListSuccessAt: store.lastDeviceListSuccessAt,
+      perDevice,
+    };
+
     const alerts = [
-      ...computeAlerts(snap.devices),
+      ...computeAlerts(snap.devices, connectivity),
       ...computeLearnedAlerts(snap.devices),
       ...computeBaselineAlerts(snap.devices, recorder),
       ...computeForecastAlerts(snap.devices, recorder),

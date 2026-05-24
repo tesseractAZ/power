@@ -94,10 +94,69 @@ function dpuNum(name: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-export function computeAlerts(devices: Record<string, DeviceSnapshot>): Alert[] {
+/**
+ * Connectivity context for the alerts engine (v0.7.7) — lets the offline-
+ * device alert tell you when we last actually heard from EcoFlow Cloud about
+ * a device, and lets us surface a "cloud session stale" alert when the REST
+ * `/device/list` poll itself has stopped succeeding (in that case the per-
+ * device `online` flags can't be trusted).
+ */
+export interface ConnectivityContext {
+  lastDeviceListAttemptAt: number;   // 0 = never attempted
+  lastDeviceListSuccessAt: number;   // 0 = never succeeded
+  perDevice: Map<string, { lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number }>;
+}
+
+/** Format an age in ms as the most natural short human string. */
+function fmtAge(ms: number): string {
+  if (ms < 0 || !Number.isFinite(ms)) return '∞';
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m} min`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} h`;
+  return `${Math.round(h / 24)} d`;
+}
+
+// `/device/list` polls every 60 s by default; if we haven't had a successful
+// poll in 5 min the session is genuinely stale and any "online: 0" we're
+// showing is unreliable.
+const CLOUD_SESSION_STALE_MS = 5 * 60 * 1000;
+
+export function computeAlerts(
+  devices: Record<string, DeviceSnapshot>,
+  connectivity?: ConnectivityContext,
+): Alert[] {
   const out: Alert[] = [];
   const list = Object.values(devices);
   const now = Date.now();
+
+  // v0.7.7 — cloud-session-stale check. If we haven't had a successful
+  // /device/list response in CLOUD_SESSION_STALE_MS, the per-device online
+  // flags we're displaying are last-known values, not current state. Tell
+  // the user we don't actually know whether anything is offline right now
+  // — that's the actual diagnosis, not "your panel is offline".
+  if (connectivity) {
+    const successAt = connectivity.lastDeviceListSuccessAt;
+    const attemptAt = connectivity.lastDeviceListAttemptAt;
+    if (attemptAt > 0 && (successAt === 0 || now - successAt > CLOUD_SESSION_STALE_MS)) {
+      const sinceSuccess = successAt === 0 ? '∞' : fmtAge(now - successAt);
+      out.push({
+        id: 'cloud-session-stale',
+        severity: 'warning',
+        category: 'Connectivity',
+        device: 'EcoFlow Cloud',
+        title: 'EcoFlow Cloud session stale',
+        detail: `Haven't received a fresh /device/list response in ${sinceSuccess}. Per-device online/offline indicators below reflect the last successful poll, NOT current state. Most likely an EcoFlow Cloud or network blip; usually self-recovers within a few minutes.`,
+        facts: [
+          { label: 'Last successful poll', value: sinceSuccess + ' ago' },
+          { label: 'Last attempt', value: attemptAt > 0 ? fmtAge(now - attemptAt) + ' ago' : 'never' },
+          { label: 'Threshold', value: fmtAge(CLOUD_SESSION_STALE_MS) },
+        ],
+      });
+    }
+  }
 
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<DeviceSnapshot & { projection: DpuProjection }>;
   const shp2 = list.find((d) => d.projection?.kind === 'shp2') as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
@@ -118,9 +177,51 @@ export function computeAlerts(devices: Record<string, DeviceSnapshot>): Alert[] 
     if (!d.online) {
       const isCore = d.productName.toLowerCase().includes('delta pro ultra');
       const isPanel = d.productName.toLowerCase().includes('smart home panel');
-      out.push({ id: `offline-${d.sn}`, severity: isCore || isPanel ? 'warning' : 'info', category: 'Connectivity', device: d.deviceName, title: 'Device offline', detail: `${d.deviceName} is not reporting to EcoFlow.`, coreNum: isCore ? dpuNum(d.deviceName) : null });
+      // v0.7.7 — enrich the offline alert with WHEN we last actually heard
+      // from the device and via which channel. A 47-min gap with last data
+      // via MQTT looks very different from "never connected since boot".
+      const conn = connectivity?.perDevice.get(d.sn);
+      const lastDataAt = conn?.lastMqttAt ?? d.lastUpdated ?? 0;
+      const lastSource = conn?.lastSource ?? 'rest';
+      const facts: Array<{ label: string; value: string }> = [
+        { label: 'Reported by', value: 'EcoFlow Cloud /device/list' },
+        { label: 'Last data', value: lastDataAt > 0 ? `${fmtAge(now - lastDataAt)} ago (${lastSource.toUpperCase()})` : 'no data this session' },
+        { label: 'MQTT msg count', value: conn?.mqttCount != null ? String(conn.mqttCount) : '—' },
+      ];
+      // Append a one-line action hint matched to the most likely cause.
+      const ageMin = lastDataAt > 0 ? (now - lastDataAt) / 60_000 : Infinity;
+      const hint =
+        ageMin > 30
+          ? ' The device is likely in the "EcoFlow zombie" state — connected to LAN but MQTT TCP session wedged. Power-cycle the device to force a clean reconnect.'
+          : ageMin > 5
+            ? ' Data is stale but recent — the cloud session may catch up on its own. Wait a few minutes; if it persists, power-cycle.'
+            : ' Just dropped — likely a brief blip. Will re-evaluate.';
+      out.push({
+        id: `offline-${d.sn}`,
+        severity: isCore || isPanel ? 'warning' : 'info',
+        category: 'Connectivity',
+        device: d.deviceName,
+        title: 'Device offline (per EcoFlow Cloud)',
+        detail: `${d.deviceName} is flagged offline by EcoFlow's /device/list. ${conn?.mqttCount && conn.mqttCount > 0 ? `We previously received ${conn.mqttCount} MQTT message(s) this session; last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.` : 'No telemetry received this session.'}${hint}`,
+        coreNum: isCore ? dpuNum(d.deviceName) : null,
+        facts,
+      });
     } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {
-      out.push({ id: `stale-${d.sn}`, severity: 'warning', category: 'Connectivity', device: d.deviceName, title: 'Telemetry stale', detail: `No update for ${Math.round((now - d.lastUpdated) / 60000)} min — last telemetry is old.`, coreNum: d.productName.toLowerCase().includes('delta pro ultra') ? dpuNum(d.deviceName) : null });
+      const conn = connectivity?.perDevice.get(d.sn);
+      out.push({
+        id: `stale-${d.sn}`,
+        severity: 'warning',
+        category: 'Connectivity',
+        device: d.deviceName,
+        title: 'Telemetry stale',
+        detail: `${d.deviceName} is flagged online by EcoFlow but no fresh telemetry for ${fmtAge(now - d.lastUpdated)}. ${conn?.lastMqttAt ? `Last MQTT msg ${fmtAge(now - conn.lastMqttAt)} ago.` : ''}`,
+        coreNum: d.productName.toLowerCase().includes('delta pro ultra') ? dpuNum(d.deviceName) : null,
+        facts: [
+          { label: 'Last telemetry', value: `${fmtAge(now - d.lastUpdated)} ago` },
+          { label: 'Last source', value: conn?.lastSource?.toUpperCase() ?? 'unknown' },
+          { label: 'MQTT msg count', value: conn?.mqttCount != null ? String(conn.mqttCount) : '—' },
+        ],
+      });
     }
   }
 
