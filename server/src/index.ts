@@ -19,9 +19,23 @@ import {
   computeRunway,
   computeRoundTripEfficiency,
   computeClipping,
+  computeSelfConsumption,
+  computeThermalEvents,
+  computeEquipmentHealth,
+  computeShadeReport,
+  computeSoilingDecomposition,
+  computeStringMismatch,
+  computeEvWindowPrediction,
+  computeChargeCurveFingerprint,
+  computeInternalResistance,
+  computeForecastSkill,
+  computeAmbientThermalForecast,
+  computeConfidenceSnapshot,
+  getActiveNwsAlerts,
 } from './analytics.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
+import { startMqttDiscovery } from './mqttDiscovery.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -159,6 +173,50 @@ app.get('/api/clipping', async () => {
   return computeClipping(store.get().devices, recorder, fc);
 });
 
+// v0.7.5 — new analytics endpoints
+app.get<{ Querystring: { days?: string } }>('/api/self-consumption', async (req) => {
+  const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7));
+  return computeSelfConsumption(store.get().devices, recorder, days);
+});
+
+app.get('/api/thermal-events', async () => computeThermalEvents(store.get().devices, recorder));
+
+app.get('/api/equipment-health', async () => computeEquipmentHealth(store.get().devices, recorder));
+
+app.get('/api/shade-report', async () => computeShadeReport(store.get().devices, recorder));
+
+app.get('/api/soiling-decomposition', async () => computeSoilingDecomposition(store.get().devices, recorder));
+
+app.get('/api/string-mismatch', async () => computeStringMismatch(store.get().devices, recorder));
+
+app.get('/api/ev-window-prediction', async () => computeEvWindowPrediction(store.get().devices, recorder));
+
+app.get('/api/charge-curve', async () => computeChargeCurveFingerprint(store.get().devices, recorder));
+
+app.get('/api/internal-resistance', async () => computeInternalResistance(store.get().devices, recorder));
+
+app.get<{ Querystring: { days?: string } }>('/api/forecast-skill', async (req) => {
+  const days = Math.max(1, Math.min(14, Number(req.query.days ?? 7) || 7));
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  return computeForecastSkill(store.get().devices, recorder, fc, days);
+});
+
+app.get('/api/ambient-thermal-forecast', async () => computeAmbientThermalForecast(store.get().devices, recorder));
+
+app.get('/api/confidence', async () => {
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  const deg = computeDegradation(store.get().devices, recorder);
+  const thermal = await computeAmbientThermalForecast(store.get().devices, recorder);
+  const skill = await computeForecastSkill(store.get().devices, recorder, fc);
+  return computeConfidenceSnapshot(deg, fc, thermal, skill);
+});
+
+app.get('/api/nws-alerts', async () => ({ alerts: await getActiveNwsAlerts() }));
+
+app.get('/api/incidents', async () => ({ incidents: monitor.incidents() }));
+
+app.get('/api/alert-telemetry', async () => ({ telemetry: monitor.telemetry() }));
+
 /**
  * Flat key-value snapshot for Home Assistant REST sensors. One HTTP call
  * returns every metric we expose as an HA entity (`configuration.yaml`
@@ -203,6 +261,7 @@ app.get('/api/ha-state', async () => {
   const runway = computeRunway(snap.devices, recorder, fc);
   const rte = computeRoundTripEfficiency(snap.devices, recorder);
   const clipping = await computeClipping(snap.devices, recorder, fc);
+  const selfCons = computeSelfConsumption(snap.devices, recorder);
 
   // Soonest projected EOL = the pack with the fewest years left.
   const projecting = deg.packs.filter((p) => p.status === 'projecting');
@@ -291,6 +350,15 @@ app.get('/api/ha-state', async () => {
     pv_array_peak_watts: clipping.arrayPeakW,
     pv_hours_at_peak_today: clipping.hoursAtPeak,
 
+    // Self-consumption — 7-day rolling (v0.7.5)
+    pv_kwh_7d: selfCons.pvKwh,
+    load_kwh_7d: selfCons.loadKwh,
+    battery_charge_kwh_7d: selfCons.batteryChargeKwh,
+    battery_discharge_kwh_7d: selfCons.batteryDischargeKwh,
+    grid_import_kwh_7d: selfCons.gridImportKwh,
+    solar_fraction_of_load_percent: selfCons.solarFractionOfLoadPct,
+    direct_use_ratio_percent: selfCons.directUseRatioPct,
+
     // Connectivity
     fleet_devices_total: devices.length,
     fleet_devices_online: devices.filter((d) => d.online).length,
@@ -368,6 +436,17 @@ if (config.telnet.enabled) {
   }
 }
 
+// HA MQTT Discovery — opt-in. When wired to the user's HA MQTT broker, every
+// sensor we expose auto-registers under the "EcoFlow Panel" device with no
+// YAML edit required. Falls back silently when the feature is disabled.
+let stopMqttDiscovery: (() => void) | null = null;
+try {
+  const discoveryHandle = await startMqttDiscovery(store, recorder, (m) => app.log.info(m));
+  stopMqttDiscovery = discoveryHandle.stop;
+} catch (e: any) {
+  app.log.error(`mqtt-discovery: failed to start: ${e?.message ?? e}`);
+}
+
 await app.listen({ host: config.host, port: config.port });
 app.log.info(`EcoFlow panel API listening on http://${config.host}:${config.port}`);
 
@@ -377,6 +456,7 @@ const shutdown = async () => {
   stopMqtt?.();
   monitor.stop();
   stopTelnet?.();
+  stopMqttDiscovery?.();
   recorder.close();
   await app.close();
   process.exit(0);

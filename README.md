@@ -180,60 +180,19 @@ production vs development to keep the PR list short.
 Grouped by planned release. Each item leverages existing code paths or
 introduces a small new integration; nothing requires a wholesale rebuild.
 
-### v0.7.0 — Anomaly engine v2 (continued)
+### Shipped through v0.7.5
 
-- **Alert clustering ("incidents")** — group simultaneous related alerts
-  (HV MPPT temp warning + HV efficiency drop + Core 3 hot cells) into one
-  "Core 3 thermal cascade" incident with one notification, not three.
-- **Internal-resistance trending** — derive `dV/dI ≈ effective R` from
-  current-snapshot pack/cell voltages while a known load is flowing.
-  Rising R leads SoH decay by months — earliest mechanical wear signal.
-
-### v0.7.0 — Sharper forecasts
-
-- **Forecast-skill calibration** — per-day predicted vs actual PV → bias
-  factor; correct future forecasts. Phoenix monsoon clouds are notoriously
-  hard for global models.
-- **Ambient-coupled thermal forecast** — regress pack temp against
-  outdoor temp + load → predict "Core 3 Pack 2 will hit 108 °F tomorrow
-  at 3 PM" before it happens.
-
-### v0.8.0+ — Needs accumulated history
-
-- **Shade-event detection** — mid-hour PV dropouts that don't track cloud
-  cover, same hour-of-day across many days = physical obstruction.
-- **Soiling decomposition** — split today's drop% by hour-of-day and per
-  DPU. Tells you whether to wash everything or just the east-facing run.
-- **String-mismatch / per-DPU underperformance** — compare each DPU's
-  per-panel watts to the fleet median for the same hour.
-- **EV-charging window prediction** — detect the recurring "Tuesday
-  evening ~7 kW for ~2 h" pattern, fold into the day-ahead load
-  forecast.
-- **Charge-curve fingerprinting** — compare today's V/SoC plateau shape
-  against a baseline laid down in the first weeks of recording. Catches
-  aging that SoH lags on by months.
-
-### External / infrastructure
-
-- **NWS storm-preparedness signal** — pull alerts.weather.gov for your
-  zip; recommend pre-charging to 100 % before forecast storms.
-- **Thermal-event counter** — cumulative count of times each pack
-  crossed each temperature threshold; multiplies the EOL projection
-  as a "this pack has had a hard life" indicator.
-- **MPPT efficiency drift + inverter standby losses** — V·I vs reported
-  W per MPPT (trend), and idle AC-out residual (trend). Earliest
-  electronics-wear signals.
-- **Confidence trends** — R² over time per projection. Tells you
-  whether to trust the new forecast more than last week's.
-- **Notification timing intelligence** — suppress overnight
-  low-severity alerts that the forecast clearly self-resolves by sunrise;
-  batch into a morning summary.
-- **Alert-action telemetry** — track which alerts get cleared vs which
-  persist; auto-downgrade chronically ignored ones.
-- **Self-consumption ratio** — % of PV that hit the load vs went to
-  battery vs (when grid-tied) exported.
-- **MQTT discovery for HA entities** — auto-register sensors via HA's
-  MQTT Discovery so users don't have to paste a YAML snippet.
+The full roadmap from v0.7.0, v0.8.0+, and external/infrastructure
+shipped in **v0.7.5** — see [CHANGELOG.md](CHANGELOG.md) for the
+17-feature breakdown. Highlights: alert clustering ("incidents"),
+internal-resistance trending, forecast-skill calibration,
+ambient-coupled thermal forecast, shade-event detection, soiling
+decomposition, string-mismatch detection, EV-window prediction,
+charge-curve fingerprinting, NWS storm-prep, thermal-event counter,
+MPPT efficiency drift + inverter standby losses, confidence trends,
+quiet-hours + morning-digest notifications, alert-action telemetry,
+self-consumption ratio, and full MQTT Discovery so HA users skip
+the YAML snippet entirely.
 
 ### Standing
 

@@ -3,6 +3,158 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.7.5 — 2026-05-24
+
+The "drain the roadmap" release. Every remaining roadmap item from
+v0.7.0 + v0.8.0+ + external/infrastructure is shipped here in a single
+batch — 17 features across analytics, alerting, and integration.
+Pre-existing functionality is unchanged; everything new is purely
+additive (new endpoints, new optional modules, one new card on the
+Predictive Insights page).
+
+### Features — Anomaly engine v2 (finish)
+
+- **Alert clustering ("incidents").** Simultaneous alerts on the same
+  Core / Pack are grouped into one Incident with one notification —
+  a "Core 3 thermal cascade" with 5 contributing alerts now fires
+  once, not five times. The Incident keeps every member alert ID so
+  the detailed view still drills down. Exposed via new
+  `/api/incidents` and surfaced in the v0.7.5 Advanced Insights card.
+- **Internal-resistance trending.** `dV/dI ≈ effective R` derived
+  from snapshot pairs of bus voltage + bus current (≥ 5 A swing, ≤ 60 s
+  apart). Per-Core (DPU-level) tracking — recent vs baseline mΩ and a
+  trend rate per month. Rising R precedes SoH decay by months on LFP.
+  `/api/internal-resistance`.
+
+### Features — Sharper forecasts
+
+- **Forecast-skill calibration.** Hindcast: apply the learned solar
+  model coefficients to the past 7 days of GHI to derive "what the
+  model would have predicted" and compare with what actually happened
+  per day. Reports MAE (kWh and %), bias factor (sum(actual) ÷
+  sum(predicted)), and a per-day breakdown — bias factor is the
+  correction the user can apply to today's forecast.
+  `/api/forecast-skill`.
+- **Ambient-coupled thermal forecast.** Two-variable least-squares
+  regression of pack temperature against outdoor temperature + recent
+  load. Predicts each pack's peak temperature in the next 24 h with
+  an R² fit quality, using Open-Meteo's hourly tempC forecast.
+  Surfaces "Core 3 Pack 2 will hit 108 °F tomorrow at 3 PM" before
+  it happens. `/api/ambient-thermal-forecast`.
+
+### Features — Insights requiring accumulated history
+
+- **Shade-event detection.** Walks clear-sky hours across 45 days of
+  history, builds a per-hour reference coefficient from the 90th-
+  percentile of observed-PV ÷ GHI ratios, and flags hours whose
+  recurring shortfall vs that reference exceeds 18% — physical
+  obstruction, not weather. Annualised kWh-loss estimate.
+  `/api/shade-report`.
+- **Soiling decomposition.** Splits the existing fleet-wide soiling
+  drop% per-DPU (each device drifts independently) and per-hour-of-day
+  (some hours are more affected — e.g. east-facing morning sun).
+  Answers "wash everything vs just the east-facing run?". `/api/soiling-decomposition`.
+- **String mismatch / per-DPU production.** Compares each DPU's
+  per-hour median PV to the fleet median for the same hour. Robust
+  median + MAD + modified-z flags persistent underperformers — string
+  mismatch, shaded panel, failing optimizer. `/api/string-mismatch`.
+- **EV-charging window prediction.** Scans SHP2 paired-circuit
+  history (where the EVSE lives) for sustained ≥ 2 kW sessions ≥ 30
+  min, buckets by (weekday, start-hour), requires ≥ 3 recurrences to
+  declare a pattern. Projects next 24 h. `/api/ev-window-prediction`.
+- **Charge-curve fingerprinting.** Records `pack${N}_vol_max_mv` at
+  SoC checkpoints (40 / 60 / 80 / 95 %) during *active charge*
+  (`pack${N}_in > 100 W`), then compares today's medians against a
+  baseline laid down in the first 14 days of recording. Mean drift in
+  mV per pack — catches aging that SoH lags by months. `/api/charge-curve`.
+
+### Features — External / infrastructure
+
+- **NWS storm-preparedness signal.** Opt-in (`NWS_ENABLED=1`,
+  US-only). Pulls active alerts.weather.gov alerts within ~50 mi of
+  the configured forecast coordinates. Severe events (Tornado,
+  Severe Thunderstorm, Hurricane, Excessive Heat, …) emit a
+  learned-warning recommending pre-charge to 100% before onset.
+  `/api/nws-alerts`.
+- **Thermal-event counter.** Cumulative per-pack count of rising-edge
+  crossings of three temperature thresholds (96 / 113 / 131 °F) with
+  hysteresis so a sustained spell counts as one event. Tracks total
+  hours-above-threshold per band and a "hard-life score" (1×warm +
+  4×hot + 16×overheat, per year) that's directly comparable across
+  packs with different recording histories. `/api/thermal-events`.
+- **MPPT efficiency drift + inverter standby losses.** Per-string
+  (HV + LV) per-Core: V·A vs reported W ratio (clamped to a sane
+  band), recent median vs earliest-30%-of-history median, and a drift
+  in percentage points. Inverter standby: ac_out residual when PV
+  and panel load are both < 20 W; reports recent idle watts, baseline,
+  and a weekly trend. Both in `/api/equipment-health`.
+- **Confidence trends.** R² aggregator across the panel's main
+  projections (degradation fade, solar response model, ambient
+  thermal forecast) plus the forecast-skill bias factor and MAE %.
+  Single endpoint snapshot: `/api/confidence`.
+- **Notification timing intelligence.** Quiet-hours window
+  (`NOTIFY_QUIET_HOURS=22-06` by default) queues warning + info
+  alerts during the configured nighttime band; critical alerts
+  always go through. At `NOTIFY_DIGEST_HOUR` (default 7) a single
+  morning digest fires with the queued list. No more
+  "you have 12 notifications about a brief cloud blip at 3 AM".
+- **Alert-action telemetry.** Per-alert-ID rise count, longest
+  duration, median duration, and short-clear fraction (cleared
+  within 10 min). Info-severity alerts that rise ≥ 5 times AND
+  short-clear in ≥ 70% of cases get auto-downgraded (silenced).
+  `/api/alert-telemetry`.
+- **Self-consumption ratio.** Rolling 7-day breakdown of PV
+  generation, household load, battery in/out, grid import, and
+  the derived solar fraction of load (% of consumption met by
+  solar directly or via battery) and direct-use ratio (PV that
+  went straight to load). `/api/self-consumption`.
+- **MQTT discovery for HA entities.** Opt-in
+  (`MQTT_DISCOVERY_ENABLED=1` + `MQTT_DISCOVERY_HOST`). Connects to
+  the user's HA MQTT broker (e.g. the official `core-mosquitto`
+  add-on), publishes 23 sensor + 1 binary_sensor `homeassistant/...`
+  discovery topics with full device-info grouping, and pushes one
+  big retained state JSON every 30 s. Drops the YAML-snippet
+  requirement entirely for users who already run an MQTT broker.
+
+### API
+
+Fifteen new endpoints — one per feature surface:
+`/api/self-consumption`, `/api/thermal-events`,
+`/api/equipment-health`, `/api/shade-report`,
+`/api/soiling-decomposition`, `/api/string-mismatch`,
+`/api/ev-window-prediction`, `/api/charge-curve`,
+`/api/internal-resistance`, `/api/forecast-skill`,
+`/api/ambient-thermal-forecast`, `/api/confidence`,
+`/api/nws-alerts`, `/api/incidents`, `/api/alert-telemetry`.
+
+`/api/ha-state` gains 7 new fields covering self-consumption.
+
+### UI
+
+- New **AdvancedInsightsCard** added to the bottom of the
+  Predictive Insights page — one section per analytics family,
+  hides sections that have nothing to show yet. Fetches 14
+  endpoints on a 60 s interval.
+
+### Docs
+
+- `DOCS.md` HA REST-sensor snippet gains 7 new sensors for the
+  self-consumption + clipping numbers. Includes an MQTT-discovery
+  setup note covering the opt-in env vars.
+- README roadmap collapses: every v0.7.0, v0.8.0+, and
+  external/infrastructure item is now shipped. Only WAVE 2 / Smart
+  Generator schemas remain in the "Standing" section (blocked on
+  EcoFlow shipping the IoT Open API spec).
+
+### Notes
+
+- Every new analytics function is **off the hot path** (cached
+  5 – 60 min) and **silently degrades** when its prerequisites are
+  missing (no weather, no history, no MQTT broker). No new
+  required configuration — every opt-in feature ships off by default.
+- MQTT discovery and NWS use `undici`/`mqtt` modules already in
+  the dependency tree. No new runtime dependencies.
+
 ## 0.6.0 — 2026-05-24
 
 Half-the-roadmap batch — four learned-analytics features tightened

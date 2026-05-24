@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.6.0"
+version: "0.7.5"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -47,6 +47,16 @@ options:
   NOTIFY_PUSHOVER_TOKEN: ""
   NOTIFY_PUSHOVER_USER: ""
   NOTIFY_WEBHOOK_URL: ""
+  # v0.7.5 — quiet-hours digest + NWS storm-prep + MQTT Discovery (all opt-in)
+  NOTIFY_QUIET_HOURS: "22-06"
+  NOTIFY_DIGEST_HOUR: 7
+  NWS_ENABLED: false
+  MQTT_DISCOVERY_ENABLED: false
+  MQTT_DISCOVERY_HOST: ""
+  MQTT_DISCOVERY_PORT: 1883
+  MQTT_DISCOVERY_USER: ""
+  MQTT_DISCOVERY_PASS: ""
+  MQTT_DISCOVERY_PREFIX: homeassistant
 schema:
   ECOFLOW_ACCESS_KEY: password
   ECOFLOW_SECRET_KEY: password
@@ -70,3 +80,12 @@ schema:
   NOTIFY_PUSHOVER_TOKEN: "password?"
   NOTIFY_PUSHOVER_USER: "password?"
   NOTIFY_WEBHOOK_URL: "str?"
+  NOTIFY_QUIET_HOURS: "str?"
+  NOTIFY_DIGEST_HOUR: int(0,23)?
+  NWS_ENABLED: bool
+  MQTT_DISCOVERY_ENABLED: bool
+  MQTT_DISCOVERY_HOST: "str?"
+  MQTT_DISCOVERY_PORT: port
+  MQTT_DISCOVERY_USER: "str?"
+  MQTT_DISCOVERY_PASS: "password?"
+  MQTT_DISCOVERY_PREFIX: "str?"

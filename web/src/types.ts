@@ -375,3 +375,256 @@ export interface CircuitHistory {
     minDay: CircuitDayTotal | null;
   };
 }
+
+// v0.7.5 — advanced analytics surfaces
+export interface SelfConsumption {
+  generatedAt: number;
+  windowDays: number;
+  pvKwh: number;
+  loadKwh: number;
+  batteryChargeKwh: number;
+  batteryDischargeKwh: number;
+  gridImportKwh: number;
+  pvToLoadKwh: number;
+  pvToBatteryKwh: number;
+  solarFractionOfLoadPct: number | null;
+  directUseRatioPct: number | null;
+}
+
+export interface ThermalEventCounts {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  packNum: number;
+  warmEvents: number;
+  hotEvents: number;
+  overheatEvents: number;
+  warmHours: number;
+  hotHours: number;
+  overheatHours: number;
+  dataSpanDays: number;
+  hardLifeScore: number;
+}
+
+export interface FleetThermalEvents {
+  generatedAt: number;
+  packs: ThermalEventCounts[];
+}
+
+export interface MpptString {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  string: 'HV' | 'LV';
+  recentEffPct: number | null;
+  baselineEffPct: number | null;
+  driftPctPts: number | null;
+  samples: number;
+  spanDays: number;
+}
+
+export interface InverterStandby {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  idleWatts: number | null;
+  baselineIdleWatts: number | null;
+  trendWattsPerWeek: number | null;
+  samples: number;
+}
+
+export interface EquipmentHealth {
+  generatedAt: number;
+  mpptStrings: MpptString[];
+  inverterStandby: InverterStandby[];
+}
+
+export interface ShadeHour {
+  hour: number;
+  observedW: number;
+  expectedW: number;
+  shortfallPct: number;
+  clearDays: number;
+}
+
+export interface ShadeReport {
+  generatedAt: number;
+  hours: ShadeHour[];
+  estTotalKwhPerYear: number;
+}
+
+export interface SoilingPerDevice {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  dropPct: number | null;
+  cleanDays: number;
+  recentCoeff: number | null;
+  baselineCoeff: number | null;
+}
+
+export interface SoilingDecomposition {
+  generatedAt: number;
+  perDevice: SoilingPerDevice[];
+  perHour: Array<{ hour: number; dropPct: number; samples: number }>;
+}
+
+export interface DeviceProductionRatio {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  recentMedianW: number | null;
+  fleetMedianW: number | null;
+  ratio: number | null;
+  modifiedZ: number | null;
+  outlier: boolean;
+  samples: number;
+}
+
+export interface StringMismatchReport {
+  generatedAt: number;
+  devices: DeviceProductionRatio[];
+}
+
+export interface EvSessionPattern {
+  sn: string;
+  circuit: number;
+  dayOfWeek: number;
+  startHour: number;
+  typicalDurationHours: number;
+  typicalWatts: number;
+  recurrences: number;
+  energyKwh: number;
+}
+
+export interface EvWindowPrediction {
+  generatedAt: number;
+  sessionsObserved: number;
+  patterns: EvSessionPattern[];
+  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number }>;
+}
+
+export interface ChargeCurvePack {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  packNum: number;
+  checkpoints: Array<{
+    soc: number;
+    baselineV: number | null;
+    recentV: number | null;
+    driftMv: number | null;
+    baselineSamples: number;
+    recentSamples: number;
+  }>;
+  meanDriftMv: number | null;
+  status: 'baseline' | 'tracking' | 'no-data';
+}
+
+export interface ChargeCurveReport {
+  generatedAt: number;
+  packs: ChargeCurvePack[];
+}
+
+export interface InternalResistanceDevice {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  recentMilliohms: number | null;
+  baselineMilliohms: number | null;
+  trendMilliohmsPerMonth: number | null;
+  samples: number;
+  status: 'tracking' | 'learning' | 'no-data';
+}
+
+export interface InternalResistanceReport {
+  generatedAt: number;
+  devices: InternalResistanceDevice[];
+}
+
+export interface ForecastSkillDay {
+  date: string;
+  predictedKwh: number;
+  actualKwh: number;
+  errorKwh: number;
+  errorPct: number | null;
+}
+
+export interface ForecastSkillReport {
+  generatedAt: number;
+  days: ForecastSkillDay[];
+  meanAbsErrorKwh: number | null;
+  meanAbsErrorPct: number | null;
+  biasFactor: number | null;
+  windowDays: number;
+}
+
+export interface AmbientThermalPack {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  packNum: number;
+  ambientCoeff: number | null;
+  loadCoeff: number | null;
+  intercept: number | null;
+  r2: number | null;
+  samples: number;
+  predictedPeak24hC: number | null;
+  predictedPeakAtMs: number | null;
+}
+
+export interface AmbientThermalReport {
+  generatedAt: number;
+  packs: AmbientThermalPack[];
+}
+
+export interface ConfidenceSnapshot {
+  generatedAt: number;
+  degradationMedianR2: number | null;
+  solarModelMedianR2: number | null;
+  thermalMedianR2: number | null;
+  forecastSkillBiasFactor: number | null;
+  forecastSkillMaePct: number | null;
+}
+
+export interface NwsAlert {
+  id: string;
+  event: string;
+  severity: string;
+  certainty: string;
+  urgency: string;
+  onset: string | null;
+  expires: string | null;
+  headline: string | null;
+  description: string | null;
+  instruction: string | null;
+  areaDesc: string | null;
+}
+
+export interface Incident {
+  id: string;
+  severity: Severity;
+  scope: 'pack' | 'core' | 'category' | 'system';
+  coreNum: number | null;
+  packNum: number | null;
+  category: string;
+  title: string;
+  device: string;
+  alertCount: number;
+  alertIds: string[];
+  topAlertTitle: string;
+  detail: string;
+}
+
+export interface AlertActionStats {
+  alertId: string;
+  title: string;
+  severity: Severity;
+  category: string;
+  riseCount: number;
+  medianDurationMs: number;
+  longestDurationMs: number;
+  shortClearsCount: number;
+  downgradedSilenced: boolean;
+  lastSeenAt: number | null;
+}

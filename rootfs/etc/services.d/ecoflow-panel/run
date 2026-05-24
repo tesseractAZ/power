@@ -51,6 +51,29 @@ export NOTIFY_PUSHOVER_TOKEN="$(bashio::config 'NOTIFY_PUSHOVER_TOKEN')"
 export NOTIFY_PUSHOVER_USER="$(bashio::config 'NOTIFY_PUSHOVER_USER')"
 export NOTIFY_WEBHOOK_URL="$(bashio::config 'NOTIFY_WEBHOOK_URL')"
 
+# ── v0.7.5 quiet-hours digest ────────────────────────────────────────────────
+export NOTIFY_QUIET_HOURS="$(bashio::config 'NOTIFY_QUIET_HOURS')"
+export NOTIFY_DIGEST_HOUR="$(bashio::config 'NOTIFY_DIGEST_HOUR')"
+
+# ── v0.7.5 NWS storm-preparedness (opt-in, US-only) ──────────────────────────
+if bashio::config.true 'NWS_ENABLED'; then
+  export NWS_ENABLED=1
+else
+  export NWS_ENABLED=0
+fi
+
+# ── v0.7.5 HA MQTT Discovery (opt-in) ────────────────────────────────────────
+if bashio::config.true 'MQTT_DISCOVERY_ENABLED'; then
+  export MQTT_DISCOVERY_ENABLED=1
+else
+  export MQTT_DISCOVERY_ENABLED=0
+fi
+export MQTT_DISCOVERY_HOST="$(bashio::config 'MQTT_DISCOVERY_HOST')"
+export MQTT_DISCOVERY_PORT="$(bashio::config 'MQTT_DISCOVERY_PORT')"
+export MQTT_DISCOVERY_USER="$(bashio::config 'MQTT_DISCOVERY_USER')"
+export MQTT_DISCOVERY_PASS="$(bashio::config 'MQTT_DISCOVERY_PASS')"
+export MQTT_DISCOVERY_PREFIX="$(bashio::config 'MQTT_DISCOVERY_PREFIX')"
+
 bashio::log.info "Starting EcoFlow Panel on :${PORT} (telnet :${TELNET_PORT}, db ${DB_PATH})…"
 
 cd /app/server
