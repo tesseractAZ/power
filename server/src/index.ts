@@ -13,7 +13,13 @@ import { createRecorder } from './recorder.js';
 import { computeTotals, startOfLocalDayMs, circuitHistoryByDay } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { isConfigured } from './notify.js';
-import { getDayForecast, computeDegradation, computeRunway, computeRoundTripEfficiency } from './analytics.js';
+import {
+  getDayForecast,
+  computeDegradation,
+  computeRunway,
+  computeRoundTripEfficiency,
+  computeClipping,
+} from './analytics.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
 
@@ -148,6 +154,11 @@ app.get<{ Querystring: { days?: string } }>('/api/round-trip-efficiency', async 
   return computeRoundTripEfficiency(store.get().devices, recorder, days);
 });
 
+app.get('/api/clipping', async () => {
+  const fc = await getDayForecast(store.get().devices, recorder, () => {});
+  return computeClipping(store.get().devices, recorder, fc);
+});
+
 /**
  * Flat key-value snapshot for Home Assistant REST sensors. One HTTP call
  * returns every metric we expose as an HA entity (`configuration.yaml`
@@ -191,6 +202,7 @@ app.get('/api/ha-state', async () => {
   const deg = computeDegradation(snap.devices, recorder);
   const runway = computeRunway(snap.devices, recorder, fc);
   const rte = computeRoundTripEfficiency(snap.devices, recorder);
+  const clipping = await computeClipping(snap.devices, recorder, fc);
 
   // Soonest projected EOL = the pack with the fewest years left.
   const projecting = deg.packs.filter((p) => p.status === 'projecting');
@@ -272,6 +284,12 @@ app.get('/api/ha-state', async () => {
     round_trip_efficiency_percent: rte.efficiencyPct,
     round_trip_charged_kwh_7d: rte.totalChargedKwh,
     round_trip_discharged_kwh_7d: rte.totalDischargedKwh,
+
+    // Inverter clipping — kWh lost today because the arrays produced more
+    // DC than the hardware could pass through (v0.6.0).
+    pv_clipped_kwh_today: clipping.todayKwh,
+    pv_array_peak_watts: clipping.arrayPeakW,
+    pv_hours_at_peak_today: clipping.hoursAtPeak,
 
     // Connectivity
     fleet_devices_total: devices.length,

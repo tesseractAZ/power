@@ -3,6 +3,78 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.6.0 — 2026-05-24
+
+Half-the-roadmap batch — four learned-analytics features tightened
+around battery longevity, day-ahead forecasting accuracy, and
+identifying solar capacity left on the table.
+
+### Features — Anomaly engine v2
+
+- **Per-circuit baseline anomaly detection.** Until now, each SHP2
+  circuit's watts contributed to the panel total but had no
+  self-baseline of its own — only paired (split-phase) totals and
+  fleet-aggregate metrics had learned baselines. v0.6.0 wires every
+  *unpaired* SHP2 circuit into the learned-baseline engine, so an
+  individual outlet, freezer, well pump, or office sub-panel that
+  starts pulling well outside its own median can fire a learned
+  warning. Paired-circuit aggregates already cover the split-phase
+  loads (water heater, AC, EV charger), so the per-circuit pass skips
+  any channel that's part of a pair to avoid double-counting.
+
+### Features — Forecasting accuracy
+
+- **Day-of-week-aware load curve.** The day-ahead forecast used to
+  collapse all weekday and weekend hours into a single hour-of-day
+  average — but EV charging, dishwasher / laundry cycles, and
+  home-office HVAC duty run on visibly different schedules Mon–Fri
+  vs Sat–Sun. The new `hourCurveByWeekday` helper splits the typical
+  load into a 24-hour weekday curve and a 24-hour weekend curve;
+  `getDayForecast` picks the appropriate curve for each *projected*
+  hour. Requires ≥ 24 hourly samples on both sides before the split
+  is trusted; otherwise it falls back to the combined curve so a
+  fresh install doesn't get whiplash.
+
+### Features — Battery longevity v3
+
+- **Per-pack coulombic efficiency.** Discharge mAh ÷ charge mAh over
+  a rolling 7-day window, using the BMS lifetime counters
+  (`pack${N}_lifetime_chg_mah`, `pack${N}_lifetime_dsg_mah`). Healthy
+  LFP stays well above 99%; a downward drift signals side-reaction
+  losses inside a cell that SoH alone may not yet show, and is an
+  independent early-warning channel for cell degradation. Surfaced
+  as a new fact tile in every pack's expanded view inside the
+  degradation card.
+
+### Features — Solar capacity
+
+- **Inverter clipping quantifier.** New `computeClipping` analytics
+  function estimates kWh-lost-to-clipping today by walking each
+  elapsed daylight hour: an hour is flagged as "at peak" when
+  observed PV reaches 95% of the hardware ceiling (highest hourly
+  average PV ever observed across the fleet); if the learned
+  GHI→PV model says the array could have produced more than what we
+  recorded that hour, the difference is the clipped energy. Sum
+  across the day → kWh lost to clipping today. The current hour is
+  prorated by elapsed fraction. Cached 5 min.
+
+### API
+
+- **`/api/clipping`** — `ClippingEstimate` (today-kWh-lost,
+  per-hour breakdown, array peak watts, hours-at-peak).
+- **`/api/ha-state`** gains `pv_clipped_kwh_today`,
+  `pv_array_peak_watts`, `pv_hours_at_peak_today`.
+
+### Docs / roadmap
+
+- DOCS.md HA snippet adds three new sensors (clipped-kWh-today,
+  array-peak-watts, hours-at-peak-today). Total: 20 sensors + 1
+  binary_sensor.
+- README roadmap: removes the four shipped items, promotes the
+  remaining anomaly-engine work (alert clustering) and the sharper-
+  forecasts items (forecast-skill calibration) into the v0.7.0
+  bucket.
+
 ## 0.5.1 — 2026-05-23
 
 Patch fix — web UI / API now binds dual-stack, mirroring v0.3.1's telnet fix.

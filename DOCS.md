@@ -205,6 +205,30 @@ rest:
         state_class: measurement
         icon: mdi:battery-sync-outline
 
+      # v0.6.0 — inverter clipping (kWh of solar lost to the hardware ceiling)
+      - name: "EcoFlow PV Clipped Today"
+        unique_id: ecoflow_pv_clipped_kwh_today
+        value_template: "{{ value_json.pv_clipped_kwh_today }}"
+        unit_of_measurement: "kWh"
+        state_class: total_increasing
+        device_class: energy
+        icon: mdi:solar-power-variant-outline
+
+      - name: "EcoFlow PV Array Peak"
+        unique_id: ecoflow_pv_array_peak_watts
+        value_template: "{{ value_json.pv_array_peak_watts }}"
+        unit_of_measurement: "W"
+        state_class: measurement
+        device_class: power
+        icon: mdi:chart-bell-curve
+
+      - name: "EcoFlow PV Hours At Peak Today"
+        unique_id: ecoflow_pv_hours_at_peak_today
+        value_template: "{{ value_json.pv_hours_at_peak_today }}"
+        unit_of_measurement: "h"
+        state_class: measurement
+        icon: mdi:clock-alert-outline
+
     binary_sensor:
       - name: "EcoFlow Off-Grid"
         unique_id: ecoflow_off_grid

@@ -294,7 +294,23 @@ export interface PackDegradation {
   arrheniusFactor: number | null;
   fadePctPerYearAt25C: number | null;
   coolingBenefitYears: number | null;
+  coulombicEffPct: number | null;
   summary: string;
+}
+
+export interface ClippingHour {
+  hour: number;
+  observedW: number;
+  modelW: number | null;
+  clippedW: number;
+}
+
+export interface ClippingEstimate {
+  generatedAt: number;
+  todayKwh: number;
+  perHour: ClippingHour[];
+  arrayPeakW: number;
+  hoursAtPeak: number;
 }
 
 export interface RunwayProjection {

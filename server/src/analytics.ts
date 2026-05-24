@@ -203,6 +203,33 @@ function buildBaselineTargets(devices: Record<string, DeviceSnapshot>): Baseline
       for (const pc of sp.pairedCircuits) {
         targets.push({ sn: d.sn, metric: `pair${pc.primaryCh}_w`, device: d.deviceName, label: `${pc.name} load`, category: 'SHP2', coreNum: null, packNum: null, live: pc.watts, floor: 500, transform: (x) => x, fmt: wattFmt });
       }
+      // v0.6.0 — per-circuit baseline anomaly. Skip circuits already covered
+      // by a paired-circuit aggregate target. Same robust median+MAD test
+      // against each circuit's own hour-of-day history; catches operational
+      // anomalies like "fridge running 3 kW for 6 h when typical is 200 W"
+      // without per-circuit thresholds.
+      const pairedChs = new Set<number>();
+      for (const pc of sp.pairedCircuits) {
+        pairedChs.add(pc.primaryCh);
+        if (pc.secondaryCh != null) pairedChs.add(pc.secondaryCh);
+      }
+      for (const c of sp.circuits) {
+        if (pairedChs.has(c.ch)) continue;
+        if (c.watts == null) continue;
+        targets.push({
+          sn: d.sn,
+          metric: `ch${c.ch}_w`,
+          device: d.deviceName,
+          label: `${c.name || `Circuit ${c.ch}`} load`,
+          category: 'SHP2',
+          coreNum: null,
+          packNum: null,
+          live: c.watts,
+          floor: 500,
+          transform: (x) => x,
+          fmt: wattFmt,
+        });
+      }
     }
   }
   return targets;
@@ -563,6 +590,54 @@ function hourCurve(
   };
 }
 
+/**
+ * Day-of-week-aware hourly curve. Returns separate 24-hour profiles for
+ * weekdays (Mon–Fri) and weekends (Sat–Sun) so forecasts pick up the obvious
+ * pattern that EV charging / HVAC duty / appliances run on a different
+ * schedule when nobody's at work. Falls back to the combined curve when
+ * either bucket is too thin to trust.
+ */
+function hourCurveByWeekday(
+  recorder: Recorder,
+  sn: string,
+  metric: string,
+  sinceMs: number,
+  nowMs: number,
+): { weekday: number[]; weekend: number[]; combined: number[]; spanMs: number; weekdaySamples: number; weekendSamples: number } {
+  const pts = recorder.query(sn, metric, sinceMs, nowMs);
+  const weekdayBuckets: number[][] = Array.from({ length: 24 }, () => []);
+  const weekendBuckets: number[][] = Array.from({ length: 24 }, () => []);
+  const combinedBuckets: number[][] = Array.from({ length: 24 }, () => []);
+  let weekdaySamples = 0;
+  let weekendSamples = 0;
+  for (const p of pts) {
+    const d = new Date(p.ts);
+    const h = d.getHours();
+    const dow = d.getDay(); // 0 = Sun, 6 = Sat
+    combinedBuckets[h].push(p.value);
+    if (dow === 0 || dow === 6) {
+      weekendBuckets[h].push(p.value);
+      weekendSamples++;
+    } else {
+      weekdayBuckets[h].push(p.value);
+      weekdaySamples++;
+    }
+  }
+  const combined = combinedBuckets.map((b) => mean(b));
+  // If a bucket has no samples for a given hour, fall back to the combined
+  // hour — keeps the curve continuous when one weekday/weekend group is thin.
+  const weekday = weekdayBuckets.map((b, h) => (b.length ? mean(b) : combined[h]));
+  const weekend = weekendBuckets.map((b, h) => (b.length ? mean(b) : combined[h]));
+  return {
+    weekday,
+    weekend,
+    combined,
+    spanMs: pts.length > 1 ? pts[pts.length - 1].ts - pts[0].ts : 0,
+    weekdaySamples,
+    weekendSamples,
+  };
+}
+
 /** Average a PV metric into hourly buckets keyed by hour-epoch (floor(ts/1h)). */
 function pvHourlyByEpoch(
   recorder: Recorder,
@@ -701,9 +776,26 @@ export async function getDayForecast(
     for (let h = 0; h < 24; h++) pvCurve[h] += curve[h];
     pvSpan = Math.max(pvSpan, spanMs);
   }
+  // v0.6.0 — separate weekday vs weekend load curves. EV charging,
+  // dishwasher, laundry, and home-office HVAC duty all run on visibly
+  // different schedules; collapsing them into a single 24h average blurs
+  // both. Fall back to the combined curve when a bucket is too thin.
   const loadRes = shp2
-    ? hourCurve(recorder, shp2.sn, 'panel_load', since, now)
-    : { curve: new Array(24).fill(0), spanMs: 0 };
+    ? hourCurveByWeekday(recorder, shp2.sn, 'panel_load', since, now)
+    : {
+        weekday: new Array(24).fill(0),
+        weekend: new Array(24).fill(0),
+        combined: new Array(24).fill(0),
+        spanMs: 0,
+        weekdaySamples: 0,
+        weekendSamples: 0,
+      };
+  // Need at least ~24 weekday and ~24 weekend hourly samples to trust the
+  // split (one rep of every hour); otherwise project from the combined curve.
+  const WEEKDAY_MIN_SAMPLES = 24;
+  const useSplitLoad =
+    loadRes.weekdaySamples >= WEEKDAY_MIN_SAMPLES &&
+    loadRes.weekendSamples >= WEEKDAY_MIN_SAMPLES;
   const historyDays = Math.max(pvSpan, loadRes.spanMs) / 86_400_000;
 
   const weather = await getWeather(log);
@@ -769,7 +861,13 @@ export async function getDayForecast(
       const basePv = pvCurve[clock];
       pv = cloud != null ? basePv * Math.max(0.1, Math.min(1.3, (1 - (0.75 * cloud) / 100) / clearnessHist)) : basePv;
     }
-    const load = loadRes.curve[clock];
+    // Day-of-week-aware load: pick weekday vs weekend curve for the projected
+    // hour. Mon–Fri at 5pm looks nothing like Sat at 5pm in this house.
+    const projDow = new Date(ts).getDay();
+    const isWeekend = projDow === 0 || projDow === 6;
+    const load = useSplitLoad
+      ? (isWeekend ? loadRes.weekend[clock] : loadRes.weekday[clock])
+      : loadRes.combined[clock];
     pvSum += pv;
     let socPct: number | null = null;
     if (fullWh && fullWh > 0 && socWh != null) {
@@ -935,6 +1033,10 @@ export interface PackDegradation {
   arrheniusFactor: number | null;       // 2^((avgTemp − 25)/10) — fade-acceleration factor
   fadePctPerYearAt25C: number | null;   // fade normalized to the 25 °C reference
   coolingBenefitYears: number | null;   // extra service-years if avg pack temp dropped by 5 °C
+  // Coulombic efficiency (v0.6.0) — discharge mAh ÷ charge mAh from the
+  // pack's lifetime counters across a recent window. Healthy LFP ≈ 99.5+%;
+  // a falling number is an early sign of side-reaction losses inside a cell.
+  coulombicEffPct: number | null;
   summary: string;                      // one-line plain-language verdict
 }
 
@@ -995,6 +1097,7 @@ function analysePack(
     arrheniusFactor: null,
     fadePctPerYearAt25C: null,
     coolingBenefitYears: null,
+    coulombicEffPct: null,
     ...extra,
   });
 
@@ -1031,6 +1134,30 @@ function analysePack(
   const arrheniusFactor =
     avgPackTempC != null ? Math.pow(2, (avgPackTempC - 25) / 10) : null;
 
+  // Coulombic efficiency — discharged mAh ÷ charged mAh across a recent
+  // window using the BMS lifetime counters. Both are monotone-rising
+  // counters, so Δ(end − start) over the window is the energy moved in/out
+  // during that period. Healthy LFP cells stay well above 99%; a downward
+  // drift means side reactions are consuming charge that doesn't come back
+  // out, an early sign of cell degradation that fade-by-SoH alone misses.
+  const CE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+  const ceSince = now - CE_WINDOW_MS;
+  const chgPts = recorder.query(d.sn, `pack${pk.num}_lifetime_chg_mah`, ceSince, now);
+  const dsgPts = recorder.query(d.sn, `pack${pk.num}_lifetime_dsg_mah`, ceSince, now);
+  let coulombicEffPct: number | null = null;
+  if (chgPts.length >= 2 && dsgPts.length >= 2) {
+    const chgDelta = chgPts[chgPts.length - 1].value - chgPts[0].value;
+    const dsgDelta = dsgPts[dsgPts.length - 1].value - dsgPts[0].value;
+    // Require meaningful throughput in the window (≥ ~1 kWh worth of mAh on
+    // a single 102.4V string ≈ 10k mAh) — tiny deltas produce noisy ratios.
+    if (chgDelta >= 10_000 && dsgDelta > 0) {
+      const ratio = (dsgDelta / chgDelta) * 100;
+      // Clamp to a sane band — counter resets or topology quirks otherwise
+      // dump a >120% or negative number into the UI.
+      if (ratio >= 50 && ratio <= 110) coulombicEffPct = round2(ratio);
+    }
+  }
+
   // Trend not yet trustworthy → "learning": preliminary numbers, no dated EOL.
   if (!fit || spanMs < EOL_MIN_SPAN_MS || fit.r2 < EOL_MIN_R2) {
     return mk({
@@ -1041,6 +1168,7 @@ function analysePack(
       r2: fit ? round2(fit.r2) : null,
       dataSpanDays: spanDays,
       samples: sohPts.length,
+      coulombicEffPct,
       summary: `Gathering data — ${spanDays} day(s) recorded; a dated end-of-life projection needs a longer, cleaner SoH trend (have R² ${fit ? fit.r2.toFixed(2) : '—'}, need ≥ ${EOL_MIN_R2}).`,
     });
   }
@@ -1066,6 +1194,7 @@ function analysePack(
       samples: sohPts.length,
       avgPackTempC: avgPackTempC != null ? round1(avgPackTempC) : null,
       arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
+      coulombicEffPct,
       summary:
         summary +
         (avgPackTempC != null
@@ -1140,6 +1269,7 @@ function analysePack(
     arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
     fadePctPerYearAt25C,
     coolingBenefitYears,
+    coulombicEffPct,
     summary: `SoH ${currentSoh.toFixed(1)}% fading ~${fadePctPerYear.toFixed(1)}%/yr — projected to reach the ${EOL_SOH}% end-of-life mark around ${new Date(eolDate).getFullYear()}, about ${round1(yearsToEol)} years out${rangeNote}.${arrheniusNote}`,
   });
 }
@@ -1414,5 +1544,129 @@ export function computeRoundTripEfficiency(
     perDay,
   };
   if (dpus.length > 0) rteCache = { ts: now, key, value };
+  return value;
+}
+
+/* ===================================================================
+ * Inverter clipping quantifier (v0.6.0).
+ *
+ * On bluebird-clear summer days the arrays can produce more DC than the
+ * MPPT charge controllers + inverter can handle, and the system simply
+ * caps the output at its hardware ceiling — "clipping". The energy that
+ * SHOULD have arrived but couldn't is silently lost.
+ *
+ * This estimates how much by walking each elapsed daylight hour today:
+ *   - hardware ceiling     ← highest hourly-average PV ever observed
+ *   - observed PV (hour)   ← average pv_total summed across DPUs
+ *   - "would-have" PV       ← learned-coefficient × actual GHI from weather
+ *
+ * An hour is flagged as "at peak" when the observed PV reaches 95% of the
+ * ceiling. If the model thinks the array could have produced more than
+ * what we recorded during that hour, the difference is the clipped energy
+ * for that hour. Sum across the day → kWh-lost-to-clipping today.
+ * =================================================================== */
+
+export interface ClippingHour {
+  hour: number;           // 0-23 local hour-of-day
+  observedW: number;      // fleet-total average PV that hour
+  modelW: number | null;  // what the learned model says the array could have made
+  clippedW: number;       // modelW − observedW (when at peak and modelW > observedW)
+}
+
+export interface ClippingEstimate {
+  generatedAt: number;
+  todayKwh: number;       // kWh lost to clipping so far today
+  perHour: ClippingHour[];
+  arrayPeakW: number;     // hardware ceiling — highest hourly PV ever observed
+  hoursAtPeak: number;    // hours today where observed PV ≥ 0.95 × ceiling
+}
+
+const CLIPPING_TTL_MS = 5 * 60 * 1000;
+const CLIPPING_PEAK_FRAC = 0.95;        // "at peak" threshold relative to the ceiling
+let clippingCache: { ts: number; value: ClippingEstimate } | null = null;
+
+/** Estimate kWh lost to inverter clipping so far today. Cached ~5 min. */
+export async function computeClipping(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  forecast: DayForecast | null,
+): Promise<ClippingEstimate> {
+  if (clippingCache && Date.now() - clippingCache.ts < CLIPPING_TTL_MS) {
+    return clippingCache.value;
+  }
+  const now = Date.now();
+  const empty = (): ClippingEstimate => ({
+    generatedAt: now,
+    todayKwh: 0,
+    perHour: [],
+    arrayPeakW: 0,
+    hoursAtPeak: 0,
+  });
+  if (!forecast) return empty();
+
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  if (dpus.length === 0) return empty();
+
+  const arrayPeakW = Math.max(0, ...forecast.solarModel.hourly.map((h) => h.observedMaxPvW));
+  if (arrayPeakW <= 0) return empty();
+
+  // Today's per-hour GHI lives in the weather cache (Open-Meteo returns the
+  // past 3 days alongside the forecast). getWeather() is cached and cheap.
+  const weather = await getWeather();
+  if (!weather) return empty();
+  const wxByHour = new Map<number, WeatherHour>();
+  for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
+
+  const todayStart = startOfLocalDayMs();
+  const perHour: ClippingHour[] = [];
+  let clippedKwh = 0;
+  let hoursAtPeak = 0;
+  for (let h = 0; h < 24; h++) {
+    const hourStart = todayStart + h * 3_600_000;
+    if (hourStart >= now) break;
+    const hourEnd = Math.min(hourStart + 3_600_000, now);
+    let observedW = 0;
+    let totalPts = 0;
+    for (const d of dpus) {
+      const p = recorder.query(d.sn, 'pv_total', hourStart, hourEnd);
+      if (p.length === 0) continue;
+      observedW += p.reduce((s, x) => s + x.value, 0) / p.length;
+      totalPts += p.length;
+    }
+    if (totalPts === 0) continue;
+    const wx = wxByHour.get(Math.floor(hourStart / 3_600_000));
+    const hod = new Date(hourStart).getHours();
+    const resp = forecast.solarModel.hourly[hod];
+    let modelW: number | null = null;
+    if (wx && resp.coeff != null && wx.radiationWm2 > DAYLIGHT_GHI) {
+      modelW = resp.coeff * wx.radiationWm2;
+    }
+    const atPeak = observedW >= CLIPPING_PEAK_FRAC * arrayPeakW;
+    let clippedW = 0;
+    if (atPeak && modelW != null && modelW > observedW) {
+      clippedW = modelW - observedW;
+      // Partial-hour at the current hour: weight by the elapsed fraction.
+      const elapsedHrs = (hourEnd - hourStart) / 3_600_000;
+      clippedKwh += (clippedW / 1000) * elapsedHrs;
+    }
+    if (atPeak) hoursAtPeak++;
+    perHour.push({
+      hour: hod,
+      observedW: Math.round(observedW),
+      modelW: modelW != null ? Math.round(modelW) : null,
+      clippedW: Math.round(clippedW),
+    });
+  }
+
+  const value: ClippingEstimate = {
+    generatedAt: now,
+    todayKwh: Math.round(clippedKwh * 100) / 100,
+    perHour,
+    arrayPeakW: Math.round(arrayPeakW),
+    hoursAtPeak,
+  };
+  clippingCache = { ts: now, value };
   return value;
 }

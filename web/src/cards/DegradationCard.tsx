@@ -357,6 +357,13 @@ function PackDetail({ p }: { p: PackDegradation }) {
           ? `+${p.coolingBenefitYears.toFixed(1)} yr`
           : '—',
     },
+    {
+      // Coulombic efficiency — discharge mAh ÷ charge mAh across the last
+      // ~7 days. Healthy LFP stays well above 99%; a drift down signals
+      // side-reaction losses inside the cell that SoH alone may not yet show.
+      label: 'Coulombic eff.',
+      value: p.coulombicEffPct != null ? `${p.coulombicEffPct.toFixed(2)}%` : '—',
+    },
   ];
   return (
     <div

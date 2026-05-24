@@ -180,33 +180,23 @@ production vs development to keep the PR list short.
 Grouped by planned release. Each item leverages existing code paths or
 introduces a small new integration; nothing requires a wholesale rebuild.
 
-### v0.6.0 — Anomaly engine v2
+### v0.7.0 — Anomaly engine v2 (continued)
 
-- **Per-circuit baseline anomaly** — same robust median + MAD + modified-z
-  the peer-anomaly engine uses, applied per-circuit per hour-of-day.
-  Catches "fridge running 3 kW for 6 hours" patterns.
 - **Alert clustering ("incidents")** — group simultaneous related alerts
   (HV MPPT temp warning + HV efficiency drop + Core 3 hot cells) into one
   "Core 3 thermal cascade" incident with one notification, not three.
 - **Internal-resistance trending** — derive `dV/dI ≈ effective R` from
   current-snapshot pack/cell voltages while a known load is flowing.
   Rising R leads SoH decay by months — earliest mechanical wear signal.
-- **Inverter clipping quantifier** — when forecast GHI is high but PV
-  flatlines at observed peak, sum the "kWh lost to clipping" daily.
 
 ### v0.7.0 — Sharper forecasts
 
-- **Day-of-week load model** — split the typical-day load curve by
-  weekday vs weekend (or full hour-of-week matrix). Weekday morning is
-  not Sunday morning.
 - **Forecast-skill calibration** — per-day predicted vs actual PV → bias
   factor; correct future forecasts. Phoenix monsoon clouds are notoriously
   hard for global models.
 - **Ambient-coupled thermal forecast** — regress pack temp against
   outdoor temp + load → predict "Core 3 Pack 2 will hit 108 °F tomorrow
   at 3 PM" before it happens.
-- **Per-pack coulombic efficiency** — discharge mAh ÷ charge mAh per
-  cycle. Healthy LFP ≥ 99.9 %; drops are an early per-pack signal.
 
 ### v0.8.0+ — Needs accumulated history
 
