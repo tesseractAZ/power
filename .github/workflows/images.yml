@@ -59,22 +59,33 @@ jobs:
   build:
     name: Build & push (${{ matrix.arch }})
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Each arch builds on its NATIVE host. GitHub started offering free
+          # Linux ARM64 runners for public repos in Jan 2025, so we skip the
+          # QEMU emulation path entirely. Previously aarch64 ran on amd64
+          # hosts via QEMU, which routinely stretched the build to 30–60 min
+          # when GitHub's runner pool was busy (50+ min on v0.7.6 + v0.7.7).
+          # Native runners hold steady around 3 min and match amd64.
           - arch: aarch64
             platform: linux/arm64
             base: ghcr.io/home-assistant/aarch64-base:3.21
+            runner: ubuntu-24.04-arm
           - arch: amd64
             platform: linux/amd64
             base: ghcr.io/home-assistant/amd64-base:3.21
+            runner: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.tag }}
 
+      # QEMU stays so the workflow degrades gracefully if a native runner is
+      # unavailable (buildx falls back to emulation). On a matched native
+      # runner, this is effectively a sub-second no-op.
       - uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
