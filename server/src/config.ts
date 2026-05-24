@@ -11,7 +11,12 @@ export const config = {
   secretKey: need('ECOFLOW_SECRET_KEY'),
   apiHost: process.env.ECOFLOW_API_HOST ?? 'https://api-a.ecoflow.com',
   port: Number(process.env.PORT ?? 8787),
-  host: process.env.HOST ?? '127.0.0.1',
+  // `::` makes Fastify listen dual-stack (IPv4 + IPv6 on one socket; Node
+  // does NOT set IPV6_V6ONLY). `0.0.0.0` is IPv4 only — clients that resolve
+  // a hostname to its IPv6 address (which macOS does by default for `.local`)
+  // hit the host's IPv6 stack with no listener and the connection is RST'd.
+  // Same fix as v0.3.1 applied to the telnet bind.
+  host: process.env.HOST ?? '::',
   dbPath: process.env.DB_PATH ?? '../data/ecoflow.db',
   logLevel: process.env.LOG_LEVEL ?? 'info',
   // Location for solar weather forecasting (defaults to Phoenix, AZ).

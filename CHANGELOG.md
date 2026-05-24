@@ -3,6 +3,20 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.5.1 — 2026-05-23
+
+Patch fix — web UI / API now binds dual-stack, mirroring v0.3.1's telnet fix.
+
+- `config.ts` + run script: changed the Fastify `HOST` default from
+  `0.0.0.0` (IPv4 only) to `::` (Node dual-stack). macOS resolves
+  `homeassistant.local` to both an IPv4 and several IPv6 addresses with
+  IPv6 listed first; browser happy-eyeballs would race both, the IPv6
+  connect would RST against the unbound v6 listener inside the
+  add-on's port mapping, and `http://homeassistant.local:8787/` would
+  stall or fail. Verified `curl -6 http://homeassistant.local:8787/api/health`
+  returned HTTP 000 in ~13ms (TCP RST) while `-4` returned HTTP 200.
+  With `::`, both protocols land on the same Fastify listener.
+
 ## 0.5.0 — 2026-05-23
 
 ### Features — Battery longevity v2
