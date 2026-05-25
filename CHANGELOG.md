@@ -3,6 +3,67 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.33 — 2026-05-25
+
+**Elevated permissions + Piper auto-setup.** v0.9.32 surfaced that
+Piper-add-on-running ≠ Piper-TTS-visible: the Wyoming Protocol
+integration also has to be added in HA Settings → Devices & Services
+to bridge the add-on to a `tts.piper` entity. the operator green-lit
+elevating permissions so we can do that step (and similar future
+plumbing) automatically.
+
+### Permission bump (requires user re-approval in HA)
+
+`config.yaml` now requests:
+
+```yaml
+hassio_api: true
+hassio_role: manager
+```
+
+When you update the add-on, **Home Assistant will prompt you to
+re-approve the new permissions** before starting it. The role
+`manager` lets us:
+
+- List installed add-ons (so we can verify Piper is actually running
+  before bridging it)
+- Drive the Core config-flow API to add integrations (Wyoming Protocol
+  → tts.piper, future engines, etc.)
+
+We do NOT install/uninstall add-ons in code without an explicit user
+action — every Supervisor call goes through a named endpoint.
+
+### New: `POST /api/broadcast/setup-piper`
+
+Adds the Wyoming Protocol integration that bridges the Piper add-on
+to a `tts.piper` entity. After running this, the EcoFlow Panel will
+detect Piper in `availableEngines` and the operator's `BROADCAST_TTS_SERVICE:
+"piper"` config will resolve correctly.
+
+```bash
+curl -X POST http://homeassistant.local:8787/api/broadcast/setup-piper
+# {"ok": true, "created": true, "title": "Piper",
+#  "message": "Wyoming integration added. The tts.piper entity should
+#   appear within a few seconds. Re-test the broadcast to see Piper
+#   in the engine list."}
+```
+
+Defaults to `host=core-piper, port=10200` (the add-on's standard
+Wyoming exposure). Override via `?host=...&port=...`.
+
+Idempotent: if a matching Wyoming entry already exists, returns
+`alreadyConfigured: true` and does nothing.
+
+### New: `GET /api/admin/addons`
+
+Lists every installed Supervisor add-on with state + version. Used by
+the setup-piper flow to verify the Piper add-on is running before
+bridging it.
+
+### Tests
+
+159 pass (was 120). the operator added more in parallel.
+
 ## 0.9.32 — 2026-05-25
 
 **TTS diagnostic + better entity match.** the operator installed Piper after

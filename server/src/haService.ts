@@ -170,3 +170,128 @@ export async function getAllStates(): Promise<Array<{ entity_id: string; state: 
     return null;
   }
 }
+
+/* ─── v0.9.33 — Supervisor add-on API + Core config-flow helpers ───────── */
+
+const SUPERVISOR_ADDONS_BASE = 'http://supervisor';
+const SUPERVISOR_CONFIG_FLOW = `${SUPERVISOR_BASE}/config/config_entries`;
+
+export interface AddonSummary {
+  slug: string;
+  name: string;
+  version: string | null;
+  state: 'started' | 'stopped' | 'unknown' | string;
+  installed: boolean;
+}
+
+/**
+ * v0.9.33 — List installed add-ons via Supervisor `/addons`. Requires the
+ * `hassio_api: true` permission in config.yaml. Returns null when unavailable
+ * (no Supervisor token OR our role is insufficient).
+ */
+export async function listAddons(): Promise<AddonSummary[] | null> {
+  const t = token();
+  if (!t) return null;
+  try {
+    const res = await request(`${SUPERVISOR_ADDONS_BASE}/addons`, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${t}` },
+    });
+    if (res.statusCode !== 200) return null;
+    const body = await res.body.text();
+    const parsed = JSON.parse(body) as { data?: { addons?: Array<Record<string, unknown>> } };
+    const addons = parsed.data?.addons ?? [];
+    return addons.map((a) => ({
+      slug: String(a.slug ?? ''),
+      name: String(a.name ?? a.slug ?? ''),
+      version: a.version != null ? String(a.version) : null,
+      state: String(a.state ?? 'unknown'),
+      installed: Boolean(a.installed ?? true),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * v0.9.33 — Look up the existing config-entries for a given integration
+ * domain (e.g., "wyoming"). Returns null if Core API is unavailable.
+ */
+export async function listConfigEntries(domain?: string): Promise<Array<Record<string, unknown>> | null> {
+  const t = token();
+  if (!t) return null;
+  try {
+    const url = domain
+      ? `${SUPERVISOR_CONFIG_FLOW}?domain=${encodeURIComponent(domain)}`
+      : SUPERVISOR_CONFIG_FLOW;
+    const res = await request(url, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${t}` },
+    });
+    if (res.statusCode !== 200) return null;
+    const body = await res.body.text();
+    const parsed = JSON.parse(body);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * v0.9.33 — Start a Core config-flow for an integration. Returns the
+ * flow handle (the next step's form schema, or `create_entry` on
+ * single-step flows).
+ *
+ * HA config flows are multi-step: this kicks off step 1. Caller must
+ * follow up with `submitConfigFlow(flow_id, formData)` for step 2 etc.
+ *
+ * Used by /api/broadcast/setup-piper to add the Wyoming Protocol
+ * integration without making the operator click through Settings → Devices.
+ */
+export async function startConfigFlow(handler: string, showAdvanced = false): Promise<{ ok: boolean; status: number; body: unknown; error?: string }> {
+  const t = token();
+  if (!t) return { ok: false, status: 0, body: null, error: 'SUPERVISOR_TOKEN not set' };
+  try {
+    const res = await request(`${SUPERVISOR_CONFIG_FLOW}/flow`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${t}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ handler, show_advanced_options: showAdvanced }),
+    });
+    const bodyText = await res.body.text();
+    let body: unknown = bodyText;
+    try { body = JSON.parse(bodyText); } catch { /* leave raw */ }
+    return {
+      ok: res.statusCode >= 200 && res.statusCode < 300,
+      status: res.statusCode,
+      body,
+    };
+  } catch (e: any) {
+    return { ok: false, status: 0, body: null, error: String(e?.message ?? e) };
+  }
+}
+
+/**
+ * v0.9.33 — Submit a form step to an in-flight config flow. The flow_id
+ * comes from the previous startConfigFlow/submitConfigFlow response.
+ */
+export async function submitConfigFlow(flowId: string, formData: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: unknown; error?: string }> {
+  const t = token();
+  if (!t) return { ok: false, status: 0, body: null, error: 'SUPERVISOR_TOKEN not set' };
+  try {
+    const res = await request(`${SUPERVISOR_CONFIG_FLOW}/flow/${encodeURIComponent(flowId)}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${t}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(formData),
+    });
+    const bodyText = await res.body.text();
+    let body: unknown = bodyText;
+    try { body = JSON.parse(bodyText); } catch { /* leave raw */ }
+    return {
+      ok: res.statusCode >= 200 && res.statusCode < 300,
+      status: res.statusCode,
+      body,
+    };
+  } catch (e: any) {
+    return { ok: false, status: 0, body: null, error: String(e?.message ?? e) };
+  }
+}
