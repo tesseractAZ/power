@@ -10,11 +10,13 @@
  * of the data.
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useSnapshot } from '../useSnapshot';
 import { DeltaShield } from './components/DeltaShield';
 import { StationBar, type StationId } from './components/StationBar';
-import { stardate, shipDesignation, alertLevelFromCounts } from './utils';
+import { SoundControl } from './components/SoundControl';
+import { stardate, shipDesignation, alertLevelFromCounts, type AlertLevel } from './utils';
+import { useSound } from './useSound';
 import { MainViewer } from './stations/MainViewer';
 import { Conn } from './stations/Conn';
 import { Engineering } from './stations/Engineering';
@@ -26,12 +28,70 @@ import { ThemeToggle } from '../components/ThemeToggle';
 export function StarfleetBridge() {
   const { snapshot, conn } = useSnapshot();
   const [station, setStation] = useState<StationId>('cmd');
+  const { engine } = useSound();
 
   const alerts = snapshot?.alerts ?? [];
   const crit = alerts.filter((a) => a.severity === 'critical').length;
   const warn = alerts.filter((a) => a.severity === 'warning').length;
   const level = alertLevelFromCounts(crit, warn);
   const ship = shipDesignation();
+
+  /* v0.9.17 — Audible bridge alerts.
+   *
+   * We fire sounds on CONDITION TRANSITIONS, not continuously. The
+   * previous level is tracked in a ref so we can compare frame-to-frame.
+   * Sounds chosen for each transition:
+   *
+   *   ANY  → red   → Red Alert klaxon (TMP two-tone square cycle)
+   *   green → yellow → Yellow Alert bell
+   *   red/yellow → green → all-clear ascending chime
+   *
+   * The first render initializes prevLevel without firing — we don't
+   * want to klaxon someone who arrives on a page that's already RED.
+   * That's what `firstRender` guards.
+   *
+   * NEW CRIT WHILE ALREADY RED: the count is tracked, and a *higher*
+   * critical count triggers another klaxon (someone should know a new
+   * alarm fired). Going from 3 crit to 2 crit (one cleared) does not.
+   */
+  const prevLevelRef = useRef<AlertLevel | null>(null);
+  const prevCritRef = useRef<number>(0);
+  const firstRenderRef = useRef<boolean>(true);
+  useEffect(() => {
+    const prev = prevLevelRef.current;
+    const prevCrit = prevCritRef.current;
+    if (firstRenderRef.current) {
+      // Don't fire on first render — just record where we landed.
+      prevLevelRef.current = level;
+      prevCritRef.current = crit;
+      firstRenderRef.current = false;
+      return;
+    }
+    if (prev !== level) {
+      if (level === 'red') engine.playRedAlert();
+      else if (level === 'yellow' && prev !== 'red') engine.playYellowAlert();
+      else if (level === 'green') {
+        engine.stopRedAlert();
+        engine.playAllClear();
+      }
+    } else if (level === 'red' && crit > prevCrit) {
+      // Same alert level (RED) but a NEW critical alarm just appeared.
+      engine.playRedAlert(2); // shorter re-alert
+    }
+    prevLevelRef.current = level;
+    prevCritRef.current = crit;
+  }, [level, crit, engine]);
+
+  /* Station-change chirp — fires on every tab switch (very low volume,
+   * tactile feedback). Initial render is silent. */
+  const prevStationRef = useRef<StationId | null>(null);
+  const onChangeStation = useCallback((id: StationId) => {
+    setStation(id);
+    if (prevStationRef.current !== null) {
+      engine.playStationChirp();
+    }
+    prevStationRef.current = id;
+  }, [engine]);
 
   return (
     <div className="sf-bridge">
@@ -60,6 +120,7 @@ export function StarfleetBridge() {
                 color: level === 'red' ? '#c4242a' : level === 'yellow' ? '#a8581a' : '#3a5018',
               }}>{level === 'red' ? 'RED' : level === 'yellow' ? 'YELLOW' : 'GREEN'}</div>
             </div>
+            <SoundControl />
             <ThemeToggle />
           </div>
         </div>
@@ -69,7 +130,7 @@ export function StarfleetBridge() {
       <div className="max-w-[1800px] mx-auto">
         <StationBar
           active={station}
-          onChange={setStation}
+          onChange={onChangeStation}
           flags={{
             tac: crit > 0 || warn > 0 ? 'alert' : undefined,
           }}

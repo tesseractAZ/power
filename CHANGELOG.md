@@ -3,6 +3,67 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.17 — 2026-05-25
+
+**Starfleet bridge gets audio.** TMP-era alert klaxons, chimes, and UI
+tones — synthesized at runtime with the Web Audio API. No sample files
+shipped (zero licensing entanglement, +0 KB to the asset bundle beyond
+the synthesis code itself).
+
+### Sound design
+
+Each sound is generated from primitive oscillators + envelopes,
+modeled on what the actual TMP-era bridge would play:
+
+| Trigger | Sound | Synthesis |
+|---|---|---|
+| **GREEN/YELLOW → RED** transition | **Red Alert klaxon** | Square wave, 440 Hz / 660 Hz two-tone alternation, ~250 ms each, 3 cycles (~1.5 s). Sharp attack/release for the "tinny urgent" character |
+| **GREEN → YELLOW** transition | **Yellow Alert bell** | Sine bell tones, 880 → 660 Hz descending, soft attack + exponential decay |
+| **RED/YELLOW → GREEN** transition | **All-clear chime** | Three-tone ascending sine sweep, A4 → D5 → A5, gentle bell envelope |
+| **New crit while already RED** | **Re-alert** (short klaxon) | 2 cycles instead of 3 — operator gets a fresh poke when a *new* alarm appears |
+| **Station tab switch** | **Computer chirp** | 50 ms square pulse at 1200 Hz, 12% gain — tactile feedback only |
+
+### How the user enables it
+
+Browsers block `AudioContext` until the user has clicked something on
+the page, so the SoundControl chip starts in **UNARMED** state with
+the label `◐ ARM AUDIO` (warm amber). One click arms it; the chip
+flips to `◈ AUDIO` (tan) — bridge sounds are now live. Subsequent
+clicks toggle mute (`◊ MUTE`, dim grey). A small volume slider drops
+out on hover.
+
+Mute preference + volume both persist to localStorage, so the user's
+choice survives reload.
+
+### Transition logic, not continuous
+
+Alarm sounds fire on **condition transitions**, not on every snapshot
+tick. Going from RED back to GREEN plays the all-clear once. Going
+from RED 3 → RED 2 (one alarm cleared while still RED) plays nothing.
+A *new* critical alert appearing during an existing RED state plays
+a shorter re-alert klaxon.
+
+First-render is silent — joining a page that's already RED won't
+greet you with a klaxon.
+
+### Architecture
+
+- `web/src/starfleet/sound.ts` — `StarfleetSoundEngine` class. Owns
+  the lazily-constructed `AudioContext`, master gain, mute/volume
+  state, and the running red-alert handle. Singleton via
+  `getSoundEngine()`.
+- `web/src/starfleet/useSound.ts` — React hook subscribing to the
+  engine's state notifications.
+- `web/src/starfleet/components/SoundControl.tsx` — header chip
+  rendering UNARMED / ARMED+ON / ARMED+MUTED states with hover-
+  volume.
+- `StarfleetBridge.tsx` — wires `useEffect` watchers for level + crit
+  count to trigger appropriate sounds on transitions; station-change
+  chirps run through the existing tab callback.
+
+Default + Babylon 5 themes unaffected (the entire `starfleet/`
+directory ships in the lazy chunk).
+
 ## 0.9.16 — 2026-05-25
 
 TUI flicker fix. Reported from Termius (macOS): on the ALM screen the
