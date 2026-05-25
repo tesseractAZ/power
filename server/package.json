@@ -9,7 +9,8 @@
     "discover": "tsx src/cli/discover.ts",
     "probe": "tsx src/cli/probe.ts",
     "probe-specific": "tsx src/cli/probeSpecific.ts",
-    "test": "node --import tsx --test \"test/**/*.test.ts\""
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "train-pack-risk": "tsx scripts/train-pack-risk.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
