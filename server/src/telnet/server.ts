@@ -77,6 +77,12 @@ interface Session {
    *  immediately after the current frame finishes so user input still feels
    *  instant without ever overlapping writes. */
   drawPending: boolean;
+  /** v0.9.16 — hash of the last successfully-written frame body. When the
+   *  next render produces the same body, we skip the socket write entirely.
+   *  This drops Termius bandwidth on screens that don't change between ticks
+   *  (e.g. ALM with 5 stable alarms) from ~3 KB/s to 0 — and removes the
+   *  flicker that was visible on terminals without mode-2026 sync support. */
+  lastFrameHash: string;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -308,20 +314,45 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
           degradation: computeDegradation(store.get().devices, recorder),
         });
       }
-      // v0.9.5 — wrap each frame in:
-      //   BEGIN_SYNC      → terminal buffers all output, no partial render
-      //   CLEAR_SCREEN+HOME → start from a known empty state (eliminates
-      //                       leftover characters from prior frames when
-      //                       this frame is shorter / narrower)
-      //   …content…
-      //   END_SYNC        → terminal flips atomically to the new frame
-      let out = BEGIN_SYNC + HIDE_CURSOR + CLEAR_SCREEN + CURSOR_HOME;
+      // v0.9.5 — wrap each frame in synchronized-output escapes so terminals
+      // that support mode 2026 (Kitty, recent iTerm2, recent WezTerm, Windows
+      // Terminal) buffer all output and flip atomically. Terminals that don't
+      // support it (Termius, older iTerm2, plain xterm) treat the escapes as
+      // no-ops and apply each subsequent escape live.
+      //
+      // v0.9.16 — fix flicker on non-mode-2026 terminals:
+      //   • Build the FRAME BODY (without sync escapes) and hash it.
+      //   • If the new body is byte-identical to the previous one, skip the
+      //     socket write entirely — Termius sees zero bytes, zero repaint
+      //     work. The 1 Hz draw timer keeps firing, so any change reaches
+      //     the wire within ~1 s of happening.
+      //   • Drop CLEAR_SCREEN. The combination of CURSOR_HOME at the top,
+      //     per-line CLEAR_EOL, and trailing CLEAR_BELOW already covers
+      //     every transition cleanly — and crucially does NOT produce a
+      //     visible blank-and-repaint on Termius. The "INFO" flash on the
+      //     ALM screen was a side effect of the per-tick blank.
+      let body = HIDE_CURSOR + CURSOR_HOME;
       for (let i = 0; i < lines.length; i++) {
-        out += lines[i] + CLEAR_EOL;
-        if (i < lines.length - 1) out += '\r\n';
+        body += lines[i] + CLEAR_EOL;
+        if (i < lines.length - 1) body += '\r\n';
       }
-      out += CLEAR_BELOW + END_SYNC;
-      safeWrite(s, out);
+      body += CLEAR_BELOW;
+
+      // Cheap stable hash of the body. The body is typically ~2-4 KB and
+      // already a UTF-8 string, so a 32-bit FNV-1a is plenty discriminative
+      // and avoids pulling in node:crypto on the hot path.
+      let hash = 2166136261;
+      for (let i = 0; i < body.length; i++) {
+        hash ^= body.charCodeAt(i);
+        hash = (hash * 16777619) >>> 0;
+      }
+      const hashStr = hash.toString(36);
+      if (hashStr === s.lastFrameHash) {
+        // Identical frame — no wire write, no terminal work, no flicker.
+        return;
+      }
+      s.lastFrameHash = hashStr;
+      safeWrite(s, BEGIN_SYNC + body + END_SYNC);
     } finally {
       s.drawing = false;
       // Honor a pending redraw queued during this frame.
@@ -494,6 +525,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       timer: null,
       drawing: false,
       drawPending: false,
+      lastFrameHash: '',
     };
     sessions.add(s);
     log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${sessions.size} active)`);
