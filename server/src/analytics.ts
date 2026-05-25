@@ -519,6 +519,9 @@ export interface ForecastHour {
   ghiWm2: number | null;
   projectedSocPct: number | null;
   modelled: boolean; // true = used the learned response model; false = fallback
+  // v0.9.3 — predicted EV-charging load lifted from computeEvWindowPrediction
+  // and folded into the load curve. 0 when no EV session is predicted.
+  predictedEvLoadW?: number;
 }
 
 export interface HourResponse {
@@ -843,6 +846,24 @@ export async function getDayForecast(
   let minSoc: number | null = null;
   let minSocTs: number | null = null;
   let pvSum = 0;
+
+  // v0.9.3 — lift predicted EV-charging sessions into the load curve. The
+  // EVSE window-prediction pattern detector already runs separately; this
+  // just folds its upcoming-24h forecast into each hour the session covers.
+  // Build a per-hour-epoch map of predicted EV watts (constant across each
+  // session's `durationHours` from the session start). When two predicted
+  // sessions overlap (rare but possible if multiple EVs / circuits), they
+  // sum.
+  const evPredictions = computeEvWindowPrediction(devices, recorder);
+  const evByHourEpoch = new Map<number, number>();
+  for (const sess of evPredictions.upcomingNext24h) {
+    const wholeHours = Math.max(1, Math.ceil(sess.durationHours));
+    for (let i = 0; i < wholeHours; i++) {
+      const heKey = Math.floor((sess.ts + i * 3_600_000) / 3_600_000);
+      evByHourEpoch.set(heKey, (evByHourEpoch.get(heKey) ?? 0) + sess.watts);
+    }
+  }
+
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
     const clock = new Date(ts).getHours();
@@ -866,9 +887,16 @@ export async function getDayForecast(
     // hour. Mon–Fri at 5pm looks nothing like Sat at 5pm in this house.
     const projDow = new Date(ts).getDay();
     const isWeekend = projDow === 0 || projDow === 6;
-    const load = useSplitLoad
+    const baseLoad = useSplitLoad
       ? (isWeekend ? loadRes.weekend[clock] : loadRes.weekday[clock])
       : loadRes.combined[clock];
+    // v0.9.3 — add any predicted EV-charging session that covers this hour.
+    // The historical load curve already includes PAST EV sessions, but for
+    // FUTURE hours we don't want the day-of-week average to flatten a known
+    // recurring spike. The EV predictor surfaces those spikes; we add them
+    // explicitly here for hours where one is predicted.
+    const evLoad = evByHourEpoch.get(Math.floor(ts / 3_600_000)) ?? 0;
+    const load = baseLoad + evLoad;
     pvSum += pv;
     let socPct: number | null = null;
     if (fullWh && fullWh > 0 && socWh != null) {
@@ -887,6 +915,7 @@ export async function getDayForecast(
       ghiWm2: ghi == null ? null : Math.round(ghi),
       projectedSocPct: socPct == null ? null : Math.round(socPct * 10) / 10,
       modelled,
+      predictedEvLoadW: evLoad > 0 ? Math.round(evLoad) : undefined,
     });
   }
 
@@ -1069,6 +1098,16 @@ export interface PackDegradation {
   // pack's lifetime counters across a recent window. Healthy LFP ≈ 99.5+%;
   // a falling number is an early sign of side-reaction losses inside a cell.
   coulombicEffPct: number | null;
+  // v0.9.3 — Kalman side-by-side projection. Same SoH history fed through
+  // the constant-velocity Kalman filter from v0.9.0. OLS remains the
+  // canonical projection (above fields) so this is purely additional data
+  // for side-by-side comparison. When kalmanYearsToEol diverges from
+  // yearsToEol the user should weight more recent data more heavily.
+  kalmanSmoothedSoh: number | null;
+  kalmanFadePctPerYear: number | null;
+  kalmanFadeStdevPctPerYear: number | null;  // posterior stdev of drift
+  kalmanYearsToEol: number | null;
+  kalmanEolDate: number | null;
   summary: string;                      // one-line plain-language verdict
 }
 
@@ -1130,6 +1169,11 @@ function analysePack(
     fadePctPerYearAt25C: null,
     coolingBenefitYears: null,
     coulombicEffPct: null,
+    kalmanSmoothedSoh: null,
+    kalmanFadePctPerYear: null,
+    kalmanFadeStdevPctPerYear: null,
+    kalmanYearsToEol: null,
+    kalmanEolDate: null,
     ...extra,
   });
 
@@ -1166,6 +1210,34 @@ function analysePack(
   const arrheniusFactor =
     avgPackTempC != null ? Math.pow(2, (avgPackTempC - 25) / 10) : null;
 
+  // v0.9.3 — Kalman side-by-side projection. Same SoH history fed through
+  // the constant-velocity filter from v0.9.0. OLS remains the canonical
+  // projection (above); this is parallel data for comparison. The Kalman
+  // smoothed SoH is generally less noise-sensitive than a freshly-fit
+  // OLS slope on a short window, and the posterior stdev is a tighter
+  // uncertainty estimate than the t-statistic CI.
+  const kf = kalmanFilterSoh(sohPts);
+  let kalmanFadePctPerYear: number | null = null;
+  let kalmanFadeStdevPctPerYear: number | null = null;
+  let kalmanSmoothedSoh: number | null = null;
+  let kalmanYearsToEol: number | null = null;
+  let kalmanEolDate: number | null = null;
+  if (kf) {
+    // Kalman returns drift as %/yr where negative = SoH fading. Convert to
+    // a positive "fade rate %/yr" to match the OLS convention used above.
+    kalmanFadePctPerYear = kf.driftPerYear != null ? round2(-kf.driftPerYear) : null;
+    kalmanFadeStdevPctPerYear = kf.driftPerYearStdev != null ? round2(kf.driftPerYearStdev) : null;
+    kalmanSmoothedSoh = kf.smoothedSoh != null ? round2(kf.smoothedSoh) : null;
+    if (kalmanSmoothedSoh != null && kalmanFadePctPerYear != null && kalmanFadePctPerYear > 0.1) {
+      const headroom = kalmanSmoothedSoh - EOL_SOH;
+      const yrs = headroom / kalmanFadePctPerYear;
+      if (yrs > 0 && yrs <= EOL_MAX_YEARS) {
+        kalmanYearsToEol = round1(yrs);
+        kalmanEolDate = Math.round(now + yrs * YEAR_MS);
+      }
+    }
+  }
+
   // Coulombic efficiency — discharged mAh ÷ charged mAh across a recent
   // window using the BMS lifetime counters. Both are monotone-rising
   // counters, so Δ(end − start) over the window is the energy moved in/out
@@ -1201,6 +1273,11 @@ function analysePack(
       dataSpanDays: spanDays,
       samples: sohPts.length,
       coulombicEffPct,
+      kalmanSmoothedSoh,
+      kalmanFadePctPerYear,
+      kalmanFadeStdevPctPerYear,
+      kalmanYearsToEol,
+      kalmanEolDate,
       summary: `Gathering data — ${spanDays} day(s) recorded; a dated end-of-life projection needs a longer, cleaner SoH trend (have R² ${fit ? fit.r2.toFixed(2) : '—'}, need ≥ ${EOL_MIN_R2}).`,
     });
   }
@@ -1227,6 +1304,11 @@ function analysePack(
       avgPackTempC: avgPackTempC != null ? round1(avgPackTempC) : null,
       arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
       coulombicEffPct,
+      kalmanSmoothedSoh,
+      kalmanFadePctPerYear,
+      kalmanFadeStdevPctPerYear,
+      kalmanYearsToEol,
+      kalmanEolDate,
       summary:
         summary +
         (avgPackTempC != null
@@ -1302,6 +1384,11 @@ function analysePack(
     fadePctPerYearAt25C,
     coolingBenefitYears,
     coulombicEffPct,
+    kalmanSmoothedSoh,
+    kalmanFadePctPerYear,
+    kalmanFadeStdevPctPerYear,
+    kalmanYearsToEol,
+    kalmanEolDate,
     summary: `SoH ${currentSoh.toFixed(1)}% fading ~${fadePctPerYear.toFixed(1)}%/yr — projected to reach the ${EOL_SOH}% end-of-life mark around ${new Date(eolDate).getFullYear()}, about ${round1(yearsToEol)} years out${rangeNote}.${arrheniusNote}`,
   });
 }
