@@ -17,7 +17,7 @@
  *      Google Fonts when that theme is first selected.
  */
 
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 
 /* ─── 1. Chart color resolvers ─────────────────────────────────────────── */
 
@@ -157,16 +157,56 @@ export function applyTheme(id: ThemeId) {
   }
 }
 
-/** React hook — current theme + setter. Persists to localStorage. */
+/* ─── v0.9.17 — singleton theme store ──────────────────────────────────
+ *
+ * Earlier versions made `useTheme` a plain `useState` hook. Each component
+ * that called it got its OWN state instance, so when `ThemeToggle`'s
+ * `setActive('starfleet')` fired, the App component's separate useTheme
+ * instance never saw the change — the CSS palette swapped (via the
+ * side-effect `applyTheme` call) but the `if (theme === 'starfleet')`
+ * branch in App.tsx kept returning false. Result: the normal dashboard
+ * stayed mounted under a Starfleet-colored palette instead of the
+ * StarfleetBridge component swapping in.
+ *
+ * Fix: hold the active theme in a module-level singleton + maintain a Set
+ * of subscribers. Every `useTheme()` consumer subscribes via
+ * `useSyncExternalStore`, so an update from any caller re-renders every
+ * subscriber consistently. Apply-side-effects (CSS attribute, font load,
+ * localStorage persist) run exactly once per change inside the setter,
+ * not per subscriber. */
+
+let currentTheme: ThemeId = getStoredTheme();
+const subscribers = new Set<() => void>();
+
+function setThemeGlobal(id: ThemeId) {
+  if (id === currentTheme) return;
+  currentTheme = id;
+  applyTheme(id);
+  try {
+    window.localStorage.setItem(STORAGE_KEY, id);
+  } catch { /* private mode or quota — non-fatal */ }
+  subscribers.forEach((fn) => fn());
+}
+
+function subscribe(fn: () => void): () => void {
+  subscribers.add(fn);
+  return () => { subscribers.delete(fn); };
+}
+
+function getSnapshot(): ThemeId {
+  return currentTheme;
+}
+
+/** Snapshot for SSR. We don't actually SSR, but useSyncExternalStore wants it. */
+function getServerSnapshot(): ThemeId {
+  return DEFAULT_THEME;
+}
+
+/**
+ * React hook — current theme + setter. State is shared across every
+ * consumer, so a flip in `<ThemeToggle>` re-renders `<App>` too.
+ */
 export function useTheme(): [ThemeId, (id: ThemeId) => void] {
-  const [theme, setTheme] = useState<ThemeId>(getStoredTheme);
-
-  useEffect(() => {
-    applyTheme(theme);
-    try {
-      window.localStorage.setItem(STORAGE_KEY, theme);
-    } catch { /* private mode or quota — non-fatal */ }
-  }, [theme]);
-
-  return [theme, setTheme];
+  const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  return [theme, setThemeGlobal];
 }

@@ -3,6 +3,55 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.22 — 2026-05-25
+
+Hotfix — **the Starfleet UI never actually rendered**. Selecting
+"Starfleet" in the header toggle swapped the CSS palette (so the page
+went dark + amber) but the dashboard layout stayed mounted underneath
+it. The StarfleetBridge component never appeared.
+
+### Root cause #1 — useTheme wasn't a shared store
+
+`useTheme()` was a plain `useState` hook. Each call (one in `App`, one
+in `ThemeToggle`) created its **own** state instance. When
+`ThemeToggle.setActive('starfleet')` fired, only `ThemeToggle`
+re-rendered. App's separate `useTheme` instance still saw
+`theme === 'default'`, so its `if (theme === 'starfleet') return
+<StarfleetBridge/>` branch stayed false. The CSS side-effect (data-theme
+attribute swap, font load) did fire because `applyTheme()` was called
+from `ThemeToggle`'s useEffect — but the component tree never swapped.
+
+Fix: theme state is now a module-level singleton with a Set of
+subscribers. Every `useTheme()` consumer subscribes via
+`useSyncExternalStore`, so an update from any caller re-renders every
+subscriber consistently. CSS + localStorage side-effects run exactly
+once per change inside the setter.
+
+### Root cause #2 — App.tsx Rules-of-Hooks violation
+
+App's early return for the Starfleet branch sat above a long list of
+other hooks (useSnapshot, useState×3, useEffect, etc.). With the
+singleton fix above, switching themes now actually triggers App to
+re-render — and the hook count differs between the two branches,
+throwing **"Rendered fewer hooks than expected"**. Split App into a
+thin theme router that calls only useTheme + mounts either
+`StarfleetBridge` or the new `NormalApp` component (which owns all the
+original hooks). Each subtree's hook ordering is stable across its own
+re-renders.
+
+### Effect
+
+- Clicking **Starfleet** in the theme toggle now actually mounts the
+  StarfleetBridge component.
+- Flipping back to Default / Babylon 5 cleanly unmounts the bridge
+  and remounts the regular dashboard.
+- No hooks-mismatch warnings in the console.
+
+### Verification
+
+- Vite build clean, no new chunks.
+- 68 server tests still pass.
+
 ## 0.9.21 — 2026-05-25
 
 **Diagnostic hotfix:** when a Home Assistant service call fails, surface

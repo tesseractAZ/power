@@ -39,10 +39,20 @@ const PageFallback = () => (
   </div>
 );
 
+/**
+ * v0.9.17 — App is now a thin theme router. The previous shape called
+ * many hooks AFTER an early-return that fired when theme === 'starfleet',
+ * which violated React's Rules of Hooks: switching themes mid-session
+ * threw "Rendered fewer / more hooks than expected" because the hook
+ * count differed between branches.
+ *
+ * Now App calls exactly one hook (useTheme) and mounts/unmounts the
+ * appropriate subtree as a whole. NormalApp owns all of the original
+ * hooks; StarfleetBridge owns its own. Each subtree's hook ordering is
+ * stable across its own re-renders, and React safely tears one down +
+ * mounts the other when the user flips themes.
+ */
 export default function App() {
-  // v0.9.14 — the Starfleet theme uses a wholly separate UI tree. If the
-  // user has selected it, render the bridge and bail before touching any
-  // of the existing tab/page state. Default + B5 share this tree.
   const [theme] = useTheme();
   if (theme === 'starfleet') {
     return (
@@ -51,7 +61,10 @@ export default function App() {
       </Suspense>
     );
   }
+  return <NormalApp />;
+}
 
+function NormalApp() {
   const { snapshot, conn } = useSnapshot();
   const devices = snapshot ? Object.values(snapshot.devices) : [];
   const [showHistory, setShowHistory] = useState(false);
