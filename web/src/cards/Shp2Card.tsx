@@ -3,7 +3,7 @@ import type { DeviceSnapshot, Shp2Circuit, Shp2PairedCircuit, Shp2Projection } f
 import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
 import { Sparkline } from '../charts/Sparkline';
 import { CircuitModal } from '../components/CircuitModal';
-import { RebootButton } from '../components/RebootButton';
+import { RefreshCloudButton } from '../components/RefreshCloudButton';
 
 export function Shp2Card({ d }: { d: DeviceSnapshot & { projection?: Shp2Projection } }) {
   const p = d.projection;
@@ -21,7 +21,7 @@ export function Shp2Card({ d }: { d: DeviceSnapshot & { projection?: Shp2Project
         </div>
         <div className="flex flex-col items-end gap-1">
           <span className={`badge ${d.online ? 'badge-ok' : 'badge-bad'}`}>{d.online ? 'online' : 'offline'}</span>
-          <RebootButton sn={d.sn} deviceLabel={d.deviceName} />
+          <RefreshCloudButton sn={d.sn} deviceLabel={d.deviceName} />
         </div>
       </div>
 

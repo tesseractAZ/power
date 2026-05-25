@@ -2,22 +2,13 @@ import { ecoflow } from './rest.js';
 import { appendWriteLog, type WriteOutcome } from '../writeLog.js';
 
 /**
- * v0.9.6 — high-level write helpers.
+ * High-level write helpers.
  *
  * `sendCommand()` in rest.ts is the raw POST primitive; this module wraps
  * it with per-action shape constants, rate-limiting, and audit logging.
- *
- * Important honesty note: the SHP2 reboot command is NOT officially
- * documented in EcoFlow's published IoT Open API. The cmd shape below
- * uses the **best-guess pattern** observed across other SHP2 control
- * messages (`cmdSet=11` for platform commands), with `cmdId=17` borrowed
- * from analogous ESP-32 firmware-reboot conventions. If the EcoFlow API
- * returns an error code, the audit log captures it and the UI surfaces
- * "rebooting…" turned into "EcoFlow rejected the command — try the debug
- * /api/device/send-command endpoint to discover the right cmdId."
- *
- * Once we discover the correct command empirically, swap the constant
- * below and ship a patch release.
+ * Originally introduced in v0.9.6 (with a best-guess reboot command),
+ * pivoted in v0.9.10 to a documented no-op cloud-presence refresh after
+ * empirical probing confirmed reboot is not in the public API.
  */
 
 /** Per-(action,sn) rate-limit window. Each entry tracks the last-allowed ts. */
@@ -97,22 +88,39 @@ async function runCommand(action: string, req: CommandRequest): Promise<CommandR
   }
 }
 
-/* ─── SHP2 reboot ─────────────────────────────────────────────────────── */
-
-export const REBOOT_COOLDOWN_MS = 5 * 60 * 1000;
+/* ─── SHP2 cloud-presence refresh ─────────────────────────────────────── */
 
 /**
- * Send the SHP2 reboot command. See the file-level note — the exact cmd
- * shape is a best-guess. Returns the EcoFlow response untouched so the
- * UI can show the truth (success → countdown timer; failure → "EcoFlow
- * rejected: code X message Y. Use /api/device/send-command to probe.").
+ * v0.9.10 — the v0.9.6 reboot button was retired here. Empirical probing
+ * (see scripts/probe-shp2-reboot-direct.ts + CHANGELOG entries) showed
+ * that SHP2 reboot is not exposed in EcoFlow's public IoT API: PD303_REBOOT,
+ * PD303_APP_REBOOT, PD303_SYS_REBOOT, and the DPU-style cmdSet/cmdId shapes
+ * all return error 8524 "invalid parameter." Reboot only exists via the
+ * mobile app's private MQTT protobuf channel (cmdFunc=12).
+ *
+ * What we ARE able to do — and what actually solves the original "EcoFlow
+ * zombie" problem (cloud says offline, LAN says online) — is a documented
+ * **no-op write** that forces a round-trip through EcoFlow's cloud,
+ * causing it to refresh its presence state for the device. The cheapest
+ * such write is re-sending the current `backupReserveSoc` value: no state
+ * actually changes, but the device + cloud both acknowledge the message.
+ *
+ * Cooldown is dropped from 5 min (reboot recovery time) to 30 s — this
+ * action takes ~200 ms with no service disruption.
  */
-export async function rebootShp2(req: Omit<CommandRequest, 'body'>): Promise<CommandResult> {
-  if (!checkAndReserve('reboot-shp2', req.sn, { cooldownMs: REBOOT_COOLDOWN_MS })) {
-    const remaining = cooldownRemainingMs('reboot-shp2', req.sn, REBOOT_COOLDOWN_MS);
+export const REFRESH_COOLDOWN_MS = 30 * 1000;
+
+export interface RefreshCloudRequest extends Omit<CommandRequest, 'body'> {
+  /** Current backupReserveSoc to round-trip back (caller reads it from the snapshot). */
+  currentReserveSoc: number;
+}
+
+export async function refreshShp2CloudPresence(req: RefreshCloudRequest): Promise<CommandResult> {
+  if (!checkAndReserve('refresh-cloud', req.sn, { cooldownMs: REFRESH_COOLDOWN_MS })) {
+    const remaining = cooldownRemainingMs('refresh-cloud', req.sn, REFRESH_COOLDOWN_MS);
     appendWriteLog({
       ts: Date.now(),
-      action: 'reboot-shp2', sn: req.sn,
+      action: 'refresh-cloud', sn: req.sn,
       source: req.source,
       outcome: 'failure',
       code: 'rate-limited',
@@ -121,16 +129,26 @@ export async function rebootShp2(req: Omit<CommandRequest, 'body'>): Promise<Com
     return {
       outcome: 'failure',
       code: 'rate-limited',
-      message: `Wait ${Math.round(remaining / 1000)}s before rebooting this device again.`,
+      message: `Wait ${Math.round(remaining / 1000)}s before refreshing again.`,
       durationMs: 0,
       rateLimited: true,
     };
   }
-  // Best-guess SHP2 reboot command. Refer to the file-level comment.
-  return runCommand('reboot-shp2', {
+  // Sanity bound — backupReserveSoc is documented to live in [10, 50].
+  // If the snapshot is stale/missing we'd rather fail loudly than write
+  // a garbage value back to the panel.
+  if (!Number.isInteger(req.currentReserveSoc) || req.currentReserveSoc < 10 || req.currentReserveSoc > 50) {
+    return {
+      outcome: 'failure',
+      code: 'no-reserve-soc',
+      message: `Can't refresh: current backupReserveSoc (${req.currentReserveSoc}) is out of range. Snapshot may be stale.`,
+      durationMs: 0,
+    };
+  }
+  return runCommand('refresh-cloud', {
     sn: req.sn,
     source: req.source,
-    body: { cmdSet: 11, cmdId: 17, params: {} },
+    body: { cmdCode: 'PD303_APP_SET', params: { backupReserveSoc: req.currentReserveSoc } },
   });
 }
 

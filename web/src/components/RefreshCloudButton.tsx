@@ -2,21 +2,23 @@ import { useEffect, useState } from 'react';
 import { apiUrl } from '../api';
 
 /**
- * v0.9.6 — Reboot SHP2 button + confirmation modal.
+ * v0.9.10 — "Refresh cloud presence" button. Replaces the v0.9.6 reboot
+ * button after empirical probing proved SHP2 reboot isn't exposed by
+ * EcoFlow's public IoT API (see scripts/probe-shp2-reboot-direct.ts).
  *
- * First user-facing WRITE action. Stays cautious:
+ * What it actually does: POSTs a documented no-op write that re-sends
+ * the panel's CURRENT `backupReserveSoc` value back to itself. The
+ * panel acknowledges the write through EcoFlow's cloud, which un-sticks
+ * the "online on LAN but cloud says offline" zombie state that was the
+ * original motivation for a reboot button.
  *
- *   - Always behind a confirmation modal (explicit consent — modifying the
- *     device).
- *   - Disables itself for the server-side cooldown window (5 min) after
- *     each press, even if the click was a tab away.
- *   - Polls /api/device/reboot-cooldown on mount so a button rendered on
- *     a fresh page-load reflects any active cooldown from a previous tab.
- *   - Surfaces failure responses honestly — when EcoFlow rejects the
- *     command shape, the UI says so instead of pretending it succeeded.
+ * Safe to use at any time — no device state changes, no service
+ * interruption. ~200 ms round-trip. 30-second cooldown to keep us
+ * polite to EcoFlow's API.
  *
- * Designed to be reused for future write actions (boost reserve, skip EV,
- * etc.) — just clone with different label/action/cooldown.
+ * Same general design as the original RebootButton: confirmation modal,
+ * server-enforced cooldown reflected in the disabled state, honest
+ * surfacing of EcoFlow API responses.
  */
 
 interface CooldownState {
@@ -24,7 +26,7 @@ interface CooldownState {
   cooldownMs: number;
 }
 
-interface RebootResponse {
+interface RefreshResponse {
   ok: boolean;
   code?: string;
   message?: string;
@@ -33,18 +35,17 @@ interface RebootResponse {
   cooldownRemainingMs?: number;
 }
 
-export function RebootButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceLabel?: string }) {
+export function RefreshCloudButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceLabel?: string }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cooldown, setCooldown] = useState<CooldownState>({ remainingMs: 0, cooldownMs: 0 });
-  const [lastResult, setLastResult] = useState<RebootResponse | null>(null);
+  const [lastResult, setLastResult] = useState<RefreshResponse | null>(null);
 
-  // Poll cooldown on mount + every 5s while a cooldown is active.
   useEffect(() => {
     let live = true;
     const fetchCooldown = async () => {
       try {
-        const r = await fetch(apiUrl(`api/device/reboot-cooldown?sn=${encodeURIComponent(sn)}`));
+        const r = await fetch(apiUrl(`api/device/refresh-cloud-cooldown?sn=${encodeURIComponent(sn)}`));
         if (!r.ok) return;
         const j = await r.json();
         if (!live) return;
@@ -74,14 +75,10 @@ export function RebootButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceL
     setBusy(true);
     setConfirming(false);
     try {
-      // v0.9.7 — the reboot endpoint takes its SN from the URL path and
-      // expects NO body. Setting Content-Type: application/json with no body
-      // makes Fastify's JSON parser reject the request (FST_ERR_CTP_EMPTY_JSON_BODY).
-      // Drop the header — fetch sends none by default for bodiless POSTs.
-      const r = await fetch(apiUrl(`api/device/reboot/${encodeURIComponent(sn)}`), {
+      const r = await fetch(apiUrl(`api/device/refresh-cloud/${encodeURIComponent(sn)}`), {
         method: 'POST',
       });
-      const j = (await r.json()) as RebootResponse;
+      const j = (await r.json()) as RefreshResponse;
       setLastResult(j);
       if (typeof j.cooldownRemainingMs === 'number') {
         setCooldown((c) => ({ ...c, remainingMs: j.cooldownRemainingMs! }));
@@ -93,9 +90,9 @@ export function RebootButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceL
     }
   };
 
-  const cooldownLabel = cooldown.remainingMs > 0
-    ? `Reboot ${deviceLabel} (cooldown ${Math.ceil(cooldown.remainingMs / 1000)}s)`
-    : `Reboot ${deviceLabel}`;
+  const label = cooldown.remainingMs > 0
+    ? `Refresh cloud (${Math.ceil(cooldown.remainingMs / 1000)}s)`
+    : 'Refresh cloud';
 
   return (
     <>
@@ -104,24 +101,24 @@ export function RebootButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceL
         disabled={busy || !cooledDown}
         onClick={() => setConfirming(true)}
         className={`badge text-[10px] ${
-          busy || !cooledDown ? 'badge-muted opacity-60 cursor-not-allowed' : 'badge-warn hover:bg-warn/25'
+          busy || !cooledDown ? 'badge-muted opacity-60 cursor-not-allowed' : 'badge-ok hover:bg-ok/25'
         }`}
         title={cooledDown
-          ? `Send a reboot command to ${deviceLabel}. Cools down ~${Math.round(cooldown.cooldownMs / 60_000)} min after each use.`
-          : `Wait ${Math.ceil(cooldown.remainingMs / 1000)} s before rebooting again.`
+          ? `Force ${deviceLabel} to round-trip a no-op write through EcoFlow's cloud. Useful when the cloud says "offline" but the device is on your LAN. 30-second cooldown.`
+          : `Wait ${Math.ceil(cooldown.remainingMs / 1000)} s before refreshing again.`
         }
       >
-        {busy ? 'rebooting…' : cooldownLabel}
+        {busy ? 'refreshing…' : label}
       </button>
 
       {lastResult && !lastResult.ok && (
-        <div className="text-[10px] text-bad mt-1 leading-tight" title="The EcoFlow API returned an error. The command shape may need adjusting — see /api/device/send-command in DOCS.">
+        <div className="text-[10px] text-bad mt-1 leading-tight" title="The EcoFlow API returned an error.">
           ✕ {lastResult.message ?? 'failed'} {lastResult.code ? `(${lastResult.code})` : ''}
         </div>
       )}
-      {lastResult?.ok && cooldown.remainingMs > 0 && (
+      {lastResult?.ok && (
         <div className="text-[10px] text-ok mt-1 leading-tight">
-          ✓ Reboot sent — device will be unreachable for ~60 s.
+          ✓ Cloud refreshed.
         </div>
       )}
 
@@ -135,15 +132,16 @@ export function RebootButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceL
             className="bg-panel border border-line rounded-lg p-5 max-w-md w-full"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="text-base font-semibold mb-2">Reboot {deviceLabel}?</div>
+            <div className="text-base font-semibold mb-2">Refresh {deviceLabel} cloud presence?</div>
             <p className="text-sm text-muted mb-1 leading-relaxed">
-              This sends the EcoFlow reboot command to <span className="font-mono text-xs">{sn}</span>.
-              The device will be unreachable for ~60 seconds — the dashboard will show it offline
-              briefly, then reconnect on its own.
+              Sends a no-op write to <span className="font-mono text-xs">{sn}</span>
+              {' '}— specifically, re-sends the current backup-reserve % back to itself, which
+              forces a round-trip through EcoFlow's cloud without changing any state on the panel.
             </p>
             <p className="text-xs text-muted leading-relaxed">
-              Safe to use when the device is in the "EcoFlow zombie" state (cloud says offline but
-              the device is on your LAN). Use sparingly otherwise. Audit-logged.
+              Use when the dashboard or the EcoFlow app says the panel is offline but it's actually
+              working on your LAN ("EcoFlow zombie" state). The earlier "Reboot SHP2" button was
+              removed in v0.9.10 — reboot isn't in EcoFlow's public IoT API. Audit-logged.
             </p>
             <div className="flex justify-end gap-2 mt-4">
               <button
@@ -155,10 +153,10 @@ export function RebootButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceL
               </button>
               <button
                 type="button"
-                className="badge badge-warn"
+                className="badge badge-ok"
                 onClick={onConfirm}
               >
-                Reboot {deviceLabel}
+                Refresh cloud
               </button>
             </div>
           </div>

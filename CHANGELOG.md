@@ -3,6 +3,60 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.10 — 2026-05-25
+
+The reboot button (v0.9.6) is retired and replaced with a **"Refresh
+cloud"** button that actually works — and actually addresses the
+problem reboot was meant to fix (the "EcoFlow zombie" state: cloud
+says offline, device is alive on your LAN).
+
+### Why the change
+
+Empirical probing through the v0.9.9 debug-send-command surface
+proved that **SHP2 reboot is not exposed in EcoFlow's public IoT
+API**. Every candidate cmdCode (`PD303_REBOOT`, `PD303_APP_REBOOT`,
+`PD303_SYS_REBOOT`, `PD303_APP_SET` with `reboot: 1`) was rejected
+with error 8524 ("invalid parameter") or 1008 ("request fail").
+Reboot only exists through the mobile app's private MQTT protobuf
+channel (cmdFunc=12), which is out of scope here.
+
+But — the probe also confirmed a documented working write:
+`{ cmdCode: "PD303_APP_SET", params: { backupReserveSoc: <current> } }`.
+Re-sending the *current* reserve value back to the device is a true
+no-op (no state change), but it round-trips through EcoFlow's cloud
+and forces the cloud to refresh the device's presence state. That's
+exactly what's needed to un-stick the zombie state.
+
+### Changes
+
+- **Server**: `rebootShp2()` → `refreshShp2CloudPresence()`. Reads
+  the current `backupReserveSoc` from the SHP2 snapshot, sends it
+  back through `ecoflow.sendCommand`. Refuses if the value is
+  outside [10, 50] (defends against a stale snapshot writing
+  garbage). Cooldown shortened 5 min → 30 s.
+
+- **Endpoints**: `/api/device/reboot/:sn` → `/api/device/refresh-cloud/:sn`,
+  `/api/device/reboot-cooldown` → `/api/device/refresh-cloud-cooldown`.
+  Returns the same shape as before so the UI changes are minimal.
+
+- **Web**: `RebootButton.tsx` → `RefreshCloudButton.tsx`. New label
+  "Refresh cloud", new green badge style (no longer destructive),
+  confirmation modal copy updated, success message switched from
+  "device unreachable for ~60 s" to "Cloud refreshed."
+
+- **Audit log**: action name `reboot-shp2` → `refresh-cloud`. Old
+  entries in `/data/writes.log` retain their original action name.
+
+### Not changed
+
+- The write-command framework (per-action rate limiting, audit log,
+  honest failure surfacing) — still the right shape for future
+  documented write actions (boost reserve, EPS mode toggle,
+  per-circuit on/off, etc.).
+- `scripts/probe-shp2-reboot-direct.ts` + `scripts/probe-shp2-reboot.sh`
+  remain in the repo as reference + future-probe tooling.
+- 66 tests still pass.
+
 ## 0.9.9 — 2026-05-25
 
 Diagnostic plumbing — the v0.9.6 reboot button errored EcoFlow API code

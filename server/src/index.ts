@@ -52,12 +52,12 @@ import { getWeather } from './weather.js';
 import { computePackRiskV2 } from './ml.js';
 import { startCacheWarmer } from './cacheWarmer.js';
 import {
-  rebootShp2,
+  refreshShp2CloudPresence,
   debugSendCommand,
   isWriteDebugEnabled,
   checkWriteDebugToken,
   cooldownRemainingMs,
-  REBOOT_COOLDOWN_MS,
+  REFRESH_COOLDOWN_MS,
 } from './ecoflow/commands.js';
 import { tailWriteLog } from './writeLog.js';
 
@@ -307,24 +307,39 @@ app.get('/api/incidents', async () => ({ incidents: monitor.incidents() }));
 
 app.get('/api/alert-telemetry', async () => ({ telemetry: monitor.telemetry() }));
 
-/* ─── v0.9.6 — WRITE-side actions ──────────────────────────────────────
+/* ─── v0.9.10 — WRITE-side actions ─────────────────────────────────────
  *
- * First write action: reboot the SHP2. The EcoFlow Open API command shape
- * for SHP2 reboot is not officially documented; we ship the best-guess
- * pattern. Failures are surfaced honestly so users can probe via the
- * /api/device/send-command debug endpoint if their firmware uses a
- * different shape. Every write is rate-limited + audit-logged. */
-
-app.post<{ Params: { sn: string } }>('/api/device/reboot/:sn', async (req, reply) => {
+ * Cloud-presence refresh for SHP2. Replaces the v0.9.6 reboot button —
+ * empirical probing (scripts/probe-shp2-reboot-direct.ts) proved SHP2
+ * reboot isn't exposed in the public IoT API. The cheapest documented
+ * action that round-trips through EcoFlow's cloud is a no-op write
+ * (re-send the current backupReserveSoc), which is enough to un-stick
+ * the "zombie online" state the reboot was originally meant to address.
+ * Every write is rate-limited + audit-logged.
+ */
+app.post<{ Params: { sn: string } }>('/api/device/refresh-cloud/:sn', async (req, reply) => {
   const sn = req.params.sn;
-  // Verify the SN actually exists in the fleet to prevent forwarding writes
-  // to arbitrary serials that aren't ours (defense-in-depth).
   if (!sn || !store.get().devices[sn]) {
     reply.code(404);
     return { error: 'unknown sn' };
   }
-  const result = await rebootShp2({
+  // Pull the current backupReserveSoc from the SHP2 projection — we round-trip
+  // this exact value so the write is a true no-op (no state change on the panel).
+  const proj = store.get().devices[sn]?.projection;
+  const currentReserveSoc =
+    proj && proj.kind === 'shp2' ? proj.backupReserveSoc : null;
+  if (currentReserveSoc == null) {
+    reply.code(409);
+    return {
+      ok: false,
+      code: 'no-snapshot',
+      message:
+        'No current backupReserveSoc available for this device. Wait for the next polling cycle and retry.',
+    };
+  }
+  const result = await refreshShp2CloudPresence({
     sn,
+    currentReserveSoc,
     source: {
       ip: req.ip,
       ua: req.headers['user-agent']?.toString(),
@@ -337,18 +352,18 @@ app.post<{ Params: { sn: string } }>('/api/device/reboot/:sn', async (req, reply
     message: result.message,
     durationMs: result.durationMs,
     rateLimited: !!result.rateLimited,
-    cooldownRemainingMs: cooldownRemainingMs('reboot-shp2', sn, REBOOT_COOLDOWN_MS),
+    cooldownRemainingMs: cooldownRemainingMs('refresh-cloud', sn, REFRESH_COOLDOWN_MS),
   };
 });
 
 /** Read-only view of write cooldowns so the UI can disable buttons until ready. */
-app.get<{ Querystring: { sn?: string } }>('/api/device/reboot-cooldown', async (req) => {
+app.get<{ Querystring: { sn?: string } }>('/api/device/refresh-cloud-cooldown', async (req) => {
   const sn = req.query.sn;
   if (!sn) return { error: 'sn required' };
   return {
     sn,
-    cooldownMs: REBOOT_COOLDOWN_MS,
-    remainingMs: cooldownRemainingMs('reboot-shp2', sn, REBOOT_COOLDOWN_MS),
+    cooldownMs: REFRESH_COOLDOWN_MS,
+    remainingMs: cooldownRemainingMs('refresh-cloud', sn, REFRESH_COOLDOWN_MS),
   };
 });
 
