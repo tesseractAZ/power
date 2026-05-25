@@ -3,6 +3,26 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.21 — 2026-05-25
+
+**Diagnostic hotfix:** when a Home Assistant service call fails, surface
+HA's actual error message instead of just the HTTP status code.
+
+Discovered while debugging the first real broadcast: HA returned 500
+on `media_player.play_media`, our error message was the useless
+`"play_media: HA returned 500"`. HA itself returns a JSON body like
+`{"message":"unable to fetch http://..."}` on every failure — we just
+weren't reading it. Now we do, and the error becomes immediately
+actionable (in this case it surfaces the audio-URL-unreachable cause
+that the user has to fix by setting `BROADCAST_AUDIO_BASE` to HA's
+direct IP instead of `homeassistant.local`).
+
+Single-file change in `server/src/haService.ts` — `callHaService`
+parses the response body on non-2xx, extracts `.message` if present,
+and appends `: <detail>` to the error string. Applies to every helper
+that goes through `callHaService` — discovery, broadcast, future
+service-call paths.
+
 ## 0.9.20 — 2026-05-25
 
 **Hotfix:** add the missing `homeassistant_api: true` flag to

@@ -71,7 +71,20 @@ export async function callHaService(
     if (res.statusCode >= 200 && res.statusCode < 300) {
       return { ok: true, status: res.statusCode, body };
     }
-    return { ok: false, status: res.statusCode, error: `HA returned ${res.statusCode}`, body };
+    // v0.9.21 — surface HA's actual error message instead of just the
+    // status code. HA typically returns a JSON body like
+    // {"message":"Service not found"} or
+    // {"message":"unable to fetch http://homeassistant.local:8787/audio/..."}
+    // The body is the actionable signal — the status code alone is useless.
+    let detail = '';
+    try {
+      const parsed = JSON.parse(body) as { message?: string };
+      if (parsed.message) detail = `: ${parsed.message}`;
+    } catch {
+      // Not JSON — include the first 200 chars of the raw body.
+      if (body) detail = `: ${body.slice(0, 200)}`;
+    }
+    return { ok: false, status: res.statusCode, error: `HA returned ${res.statusCode}${detail}`, body };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }
