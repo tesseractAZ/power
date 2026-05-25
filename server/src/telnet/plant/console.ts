@@ -127,7 +127,9 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
       ...fmtW(Math.abs(batNet)),
       state: 'normal',
       quality: dpuQual,
-      flags: batNet > 5 ? 'A/L/N · DCH' : batNet < -5 ? 'A/L/N · CHG' : 'A/L/N · IDL',
+      // v0.9.33 — flags column is 8 chars wide; previous 'A/L/N · DCH' (11)
+      // was silently truncated mid-word ('A/L/N · D'). Just show direction.
+      flags: batNet > 5 ? 'DCH' : batNet < -5 ? 'CHG' : 'IDLE',
     }, W),
     renderTagRow({
       tag: 'GRID.AC.P',
@@ -223,15 +225,25 @@ function renderMimic(
   out.push(padEnd(pvLabel, colW) + '  ' + busTop + '  ' + battLabel);
 
   // ─ row 2: flow arrow → BUS ← flow arrow ──────────────────────────
+  // v0.9.33 — bus side-wall width was off-by-one. The walls (║) on rows 2
+  // and 3 must land in the same visible column as the corner chars (╗/╝)
+  // on rows 1 and 4, otherwise the box draws with a visible jog. Visible
+  // layout of one side row: ║ + ' ' + label + padding + ║ — must total
+  // colW chars. So padding = colW - 3 - label.length (was colW - 4 -
+  // label.length, which produced colW-1 total).
   const arrowPv = c.yellow(MIMIC.arrowR + MIMIC.h.repeat(2));
-  const busLeft = c.cyanB(MIMIC.dv) + ' ' + c.whiteB('MAIN BUS') + ' '.repeat(Math.max(0, colW - 4 - 'MAIN BUS'.length)) + c.cyanB(MIMIC.dv);
+  const busLeftLabel = 'MAIN BUS';
+  const busLeft = c.cyanB(MIMIC.dv) + ' ' + c.whiteB(busLeftLabel) +
+    ' '.repeat(Math.max(0, colW - 3 - busLeftLabel.length)) + c.cyanB(MIMIC.dv);
   const arrowBatt = batNet > 5 ? c.yellow(MIMIC.arrowL + MIMIC.h.repeat(2)) :
                     batNet < -5 ? c.green(MIMIC.arrowR + MIMIC.h.repeat(2)) :
                     c.grey('═══');
   out.push(padEnd('  ' + arrowPv + '─' + MIMIC.tDown, colW) + '  ' + busLeft + '  ' + arrowBatt + '─' + MIMIC.tDown);
 
   // ─ row 3: voltage / freq label ───────────────────────────────────
-  const busMid = c.cyanB(MIMIC.dv) + ' ' + c.green('240V · 60.00 Hz') + ' '.repeat(Math.max(0, colW - 4 - '240V · 60.00 Hz'.length)) + c.cyanB(MIMIC.dv);
+  const busMidLabel = '240V · 60.00 Hz';
+  const busMid = c.cyanB(MIMIC.dv) + ' ' + c.green(busMidLabel) +
+    ' '.repeat(Math.max(0, colW - 3 - busMidLabel.length)) + c.cyanB(MIMIC.dv);
   out.push(padEnd(' '.repeat(colW), colW) + '  ' + busMid + '  ' + padEnd(' '.repeat(colW), colW));
 
   // ─ row 4: GRID ←→ BUS → LOADS ───────────────────────────────────

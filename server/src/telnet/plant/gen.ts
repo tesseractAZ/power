@@ -116,7 +116,16 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
   out.push('');
 
   /* ── per-pack table ────────────────────────────────────────────── */
-  out.push(divider(`PACKS — ↑/↓ select  ·  Pack ${view.genPack + 1}/${p.packs.length || 5}`, W));
+  // v0.9.33 — was `p.packs.length || 5`, which lied about the count when no
+  // pack data had been received yet (showed "1/5" on a freshly-discovered
+  // DPU whose first BMS payload hadn't landed). Show the true count, and
+  // if it's zero, emit a "no pack data yet" line in place of the table.
+  const packCount = p.packs.length;
+  out.push(divider(`PACKS — ↑/↓ select  ·  Pack ${packCount > 0 ? view.genPack + 1 : 0}/${packCount}`, W));
+  if (packCount === 0) {
+    out.push(c.grey('  No pack data received yet — waiting for first BMS payload.'));
+    return out;
+  }
   // Compact tabular pack rows:  # SOC  TEMP   V       CYC   CAP%   STATE
   const headers = ['PK', 'SOC', 'TEMP', 'V.PACK', 'CYC', 'SOH%', 'STATE'];
   out.push('  ' + c.grey([

@@ -39,8 +39,12 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
 
   /* ── feeders table — paired-aware ─────────────────────────────── */
   out.push(divider('FEEDERS — paired circuits aggregated', W));
+  // v0.9.33 — data rows have a leading "<sp><state-glyph><sp>" (3 visible
+  // chars) before the first column. The header used to use "  " (2 chars),
+  // which shifted every header column one space LEFT of where the data
+  // landed. The fix: 3-space header prefix to match the glyph's column.
   const headers = ['CH', 'NAME', 'BRK', 'V', 'P', 'A', 'LOAD%', 'STATE'];
-  out.push('  ' + c.grey([
+  out.push('   ' + c.grey([
     padEnd(headers[0], 6),
     padEnd(headers[1], 22),
     padStart(headers[2], 5),

@@ -25,8 +25,14 @@ export function renderPv(view: PlantView, data: PlantData): string[] {
 
   /* ── array summary ────────────────────────────────────────────── */
   out.push(divider('PV ARRAY — FLEET TOTAL', W));
-  const peakHv = 12000; // 10 HV strings × 1200W theoretical headroom — used for gauge scaling
-  const peakLv = 4000;  // 4 LV strings × 1000W theoretical headroom
+  // v0.9.33 — was hard-coded 12000 / 4000 (assumed a 10-HV+4-LV string
+  // fleet). Each DPU has ONE HV MPPT (nameplate ~1600 W) and ONE LV MPPT
+  // (~1000 W). Scale by the actual number of online DPUs so the gauge is
+  // meaningful regardless of fleet size. Fall back to safe minimums.
+  const PER_DPU_HV_W = 1600;
+  const PER_DPU_LV_W = 1000;
+  const peakHv = Math.max(PER_DPU_HV_W, dpus.length * PER_DPU_HV_W);
+  const peakLv = Math.max(PER_DPU_LV_W, dpus.length * PER_DPU_LV_W);
   const peakTot = peakHv + peakLv;
   out.push(padEnd('  ' + c.grey('TOTAL PV ') + c.whiteB(fmtKw(totalPv)) + '  ' +
     gauge((totalPv / peakTot) * 100, Math.max(20, Math.min(48, W - 36)), 'yellow') +
