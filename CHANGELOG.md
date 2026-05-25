@@ -3,6 +3,102 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.13 — 2026-05-25
+
+Major TUI overhaul. The telnet console (`nc homeassistant.local 2323`)
+now boots into a **mode chooser**: pick one of two operator consoles.
+The original SUMMARY UI is preserved unchanged; a brand-new
+**PLANT OPERATOR** interface ships alongside it, modeled on real
+industrial SCADA / HMI conventions.
+
+### Mode chooser
+
+On connect, the user sees an LCD-style brand block and two side-by-side
+option cards:
+
+- **[1] PLANT OPERATOR** — SCADA · gauges · alarms · trends
+- **[2] SUMMARY** — narrative · headlines · forecast (the original UI)
+
+Press `1`, `2`, or use `←/→ + ENTER` to pick. `TAB` from any in-console
+view returns to the chooser, so the user can flip between consoles
+without disconnecting.
+
+### Plant Operator interface
+
+Designed for the operator who wants every number and the state of every
+switch on one screen. The visual language is borrowed from real
+control rooms — power-grid SCADA (GE iFIX, ABB Symphony), marine
+engine control rooms (Kongsberg K-Chief), oil-rig HMIs (Honeywell
+Experion).
+
+**Conventions a plant operator expects on sight:**
+
+- **Tag-based naming** for every measurement: `BUS.MAIN.V`,
+  `BUS.MAIN.HZ`, `GEN.3.SOC`, `GEN.3.PV.HV.P`, `LD.CH22.P`,
+  `BATT.SOC`, `BATT.P.NET`, `GRID.AC.P`, `LD.PANEL.P`. Same tag
+  resolves to the same value everywhere — no prose substitutes.
+- **Strict color discipline:**
+  - **GREEN** — in-service, value within operating band
+  - **WHITE** — unqualified numeric value
+  - **YELLOW** — warning band, attention required
+  - **RED** — alarm / trip / out-of-band, action required
+  - **CYAN** — manual / bypassed / setpoint marker
+  - **MAGENTA** — communication failure with field device
+  - **GREY/DIM** — out of service / not configured
+- **Quality flags** per tag (G/S/B/U — Good/Stale/Bad/Uncertain) so
+  the operator distinguishes a measured 0 from a stale cache from a
+  comm failure.
+- **Status flags** per device (`A/L/N` = Auto/Local/Normal) shown
+  next to every tag row.
+- **Alarm banner** at the top, newest unack'd alarm dominant, counts
+  by severity right-justified.
+- **Mimic-style power flow diagram** with bus bars in double-line,
+  flow arrows indicating direction of energy transfer.
+- **Banded bar gauges** with green/yellow/red color zones — the pip
+  position shows both the absolute value and where it sits in the
+  operating envelope.
+- **8-character mini-sparklines** (trend strips) — straight off any
+  modern HMI tag faceplate.
+
+### Six Plant screens
+
+1. **CONSOLE** (default) — bridge view: status header, alarm banner,
+   mimic power flow, headline tag list, battery pool with banded SOC
+   gauge + runtime projections.
+2. **GEN** — generator (DPU) detail. Per-machine nameplate, AC out V/Hz,
+   PV HV/LV inputs, runtime minutes, system error bitfield, per-pack
+   table with SOC/temp/voltage/cycles/SOH. `←/→` rotate the selected
+   generator; `↑/↓` cycle the highlighted pack (gauges expand under it).
+3. **BUS** — SHP2 main bus + feeder breakers. Paired (split-phase)
+   circuits aggregated. Per-feeder breaker rating, instantaneous
+   watts, derived amps, load % with band-colored gauge.
+4. **PV** — solar arrays as inputs. Fleet-total + per-MPPT V/I/P with
+   HV/LV array headroom gauges, forecast vs. realized strip, soiling
+   indicator when detected.
+5. **ALM** — alarm console. Newest first, scrollable, full categorical
+   labels. `↑/↓` to scroll.
+6. **TRD** — trend strips for headline tags. 60-min window in 1-min
+   buckets, auto-scaled per tag, range shown alongside.
+
+### Architecture
+
+- New directory `server/src/telnet/plant/` with `scada.ts` (visual
+  vocabulary — tag rows, gauges, banners, headers), `data.ts` (snapshot
+  → tag-list adapter), `chooser.ts` (mode select), and one file per
+  Plant screen (`console.ts`, `gen.ts`, `bus.ts`, `pv.ts`, `alm.ts`,
+  `trd.ts`).
+- Session now carries `mode: 'chooser' | 'plant' | 'summary'`; the
+  draw loop dispatches by mode. Per-mode state (selected screen,
+  cursor positions, scroll offsets) is independent.
+- Telnet input parser now recognizes TAB (0x09) as a key event so it
+  can be bound to "return to chooser".
+- Summary mode is *bit-identical* to v0.9.12 — no risk to existing
+  workflows.
+
+No new tests yet for the renderers (they're highly visual and
+producer-side; manual smoke testing recommended via
+`nc homeassistant.local 2323`). 68 server tests still pass.
+
 ## 0.9.12 — 2026-05-25
 
 Fixes a long-standing cache-warmer no-op bug surfaced by careful log

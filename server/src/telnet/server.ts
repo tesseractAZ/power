@@ -19,6 +19,10 @@ import { getDayForecast, computeDegradation } from '../analytics.js';
 import type { DayForecast } from '../analytics.js';
 import { renderScreen, SCREENS, getDpus } from './screens.js';
 import type { ScreenId, SessionView } from './screens.js';
+import { renderPlant, PLANT_SCREENS } from './plant/index.js';
+import type { PlantScreenId, PlantView } from './plant/index.js';
+import { renderChooser, defaultChooserState } from './plant/chooser.js';
+import type { ChooserState } from './plant/chooser.js';
 import {
   HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN, CURSOR_HOME, CLEAR_EOL, CLEAR_BELOW, RESET,
   ENTER_ALT_BUFFER, EXIT_ALT_BUFFER, BEGIN_SYNC, END_SYNC,
@@ -38,14 +42,31 @@ const OPT_NAWS = 31;
 
 type InputEvent = { type: 'key'; key: string } | { type: 'naws'; w: number; h: number };
 
+/**
+ * v0.9.13 — session mode. On connect we show the chooser; the user picks
+ * a console with [1] (Plant Operator) or [2] (Summary). TAB from any
+ * non-chooser view returns to the chooser.
+ */
+type SessionMode = 'chooser' | 'plant' | 'summary';
+
 interface Session {
   socket: Socket;
   width: number;
   height: number;
+  mode: SessionMode;
+  /** SUMMARY mode state (legacy screens). */
   screen: ScreenId;
   battDpu: number;
   battPack: number;
   alertScroll: number;
+  /** PLANT mode state. */
+  plantScreen: PlantScreenId;
+  plantGenSel: number;
+  plantGenPack: number;
+  plantAlmScroll: number;
+  plantConnectedAt: number;
+  /** CHOOSER mode state. */
+  chooser: ChooserState;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
   /** v0.9.5 — true while a frame is being written; prevents overlapping draws
@@ -151,6 +172,12 @@ function parseInput(buf: Buffer): { events: InputEvent[]; rest: Buffer } {
       i += 1;
       continue;
     }
+    if (b === 9) {
+      // v0.9.13 — TAB key returns to the mode chooser.
+      events.push({ type: 'key', key: 'tab' });
+      i += 1;
+      continue;
+    }
     if (b >= 32 && b < 127) {
       events.push({ type: 'key', key: String.fromCharCode(b) });
       i += 1;
@@ -172,6 +199,8 @@ export interface TelnetServerOptions {
 export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
   const { store, recorder, host, port, log } = opts;
   const sessions = new Set<Session>();
+  // v0.9.13 — captured once at server start so Plant header can show SYS.UPTIME.
+  const serverStartedAt = Date.now();
 
   // Shared, periodically-refreshed data caches — the energy integration and
   // weather forecast are too heavy to run on every 1 s render.
@@ -239,22 +268,46 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     s.drawing = true;
     s.drawPending = false;
     try {
-      const sv: SessionView = {
-        width: s.width,
-        height: s.height,
-        screen: s.screen,
-        battDpu: s.battDpu,
-        battPack: s.battPack,
-        alertScroll: s.alertScroll,
-      };
-      // computeDegradation is internally cached (~30 min), so calling it per
-      // render is cheap — the work runs at most twice an hour.
-      const lines = renderScreen(sv, {
-        snap: store.get(),
-        totals,
-        forecast,
-        degradation: computeDegradation(store.get().devices, recorder),
-      });
+      let lines: string[];
+      if (s.mode === 'chooser') {
+        s.chooser.width = s.width;
+        s.chooser.height = s.height;
+        lines = renderChooser(s.chooser);
+      } else if (s.mode === 'plant') {
+        const pv: PlantView = {
+          width: s.width,
+          height: s.height,
+          screen: s.plantScreen,
+          genSel: s.plantGenSel,
+          genPack: s.plantGenPack,
+          almScroll: s.plantAlmScroll,
+          connectedAt: s.plantConnectedAt,
+        };
+        lines = renderPlant(pv, {
+          snap: store.get(),
+          totals,
+          forecast,
+          degradation: computeDegradation(store.get().devices, recorder),
+          serverStartedAt,
+        }, { recorder });
+      } else {
+        const sv: SessionView = {
+          width: s.width,
+          height: s.height,
+          screen: s.screen,
+          battDpu: s.battDpu,
+          battPack: s.battPack,
+          alertScroll: s.alertScroll,
+        };
+        // computeDegradation is internally cached (~30 min), so calling it per
+        // render is cheap — the work runs at most twice an hour.
+        lines = renderScreen(sv, {
+          snap: store.get(),
+          totals,
+          forecast,
+          degradation: computeDegradation(store.get().devices, recorder),
+        });
+      }
       // v0.9.5 — wrap each frame in:
       //   BEGIN_SYNC      → terminal buffers all output, no partial render
       //   CLEAR_SCREEN+HOME → start from a known empty state (eliminates
@@ -304,7 +357,72 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
 
   /** Apply a key to session state. Returns true if a redraw is warranted. */
   const applyKey = (s: Session, key: string): boolean => {
-    // Number keys 1..7 switch screens.
+    /* ── chooser mode ────────────────────────────────────────────── */
+    if (s.mode === 'chooser') {
+      if (key === '1') {
+        s.mode = 'plant';
+        s.plantScreen = 'console';
+        s.plantConnectedAt = Date.now();
+        return true;
+      }
+      if (key === '2') {
+        s.mode = 'summary';
+        s.screen = 'overview';
+        return true;
+      }
+      if (key === 'left' || key === 'right') {
+        s.chooser.highlight = s.chooser.highlight === 0 ? 1 : 0;
+        return true;
+      }
+      if (key === 'enter') {
+        if (s.chooser.highlight === 0) {
+          s.mode = 'plant';
+          s.plantScreen = 'console';
+          s.plantConnectedAt = Date.now();
+        } else {
+          s.mode = 'summary';
+          s.screen = 'overview';
+        }
+        return true;
+      }
+      return false;
+    }
+
+    /* ── universal: TAB returns to chooser ──────────────────────── */
+    if (key === '\t' || key === 'tab') {
+      s.mode = 'chooser';
+      return true;
+    }
+
+    /* ── plant mode ─────────────────────────────────────────────── */
+    if (s.mode === 'plant') {
+      if (key.length === 1 && key >= '1' && key <= String(PLANT_SCREENS.length)) {
+        const next = PLANT_SCREENS[Number(key) - 1];
+        if (next !== s.plantScreen) {
+          s.plantScreen = next;
+          s.plantAlmScroll = 0;
+        }
+        return true;
+      }
+      if (key === 'up' || key === 'down' || key === 'left' || key === 'right') {
+        if (s.plantScreen === 'gen') {
+          const count = Math.max(1, getDpus(store.get()).length);
+          if (key === 'left') s.plantGenSel = (s.plantGenSel - 1 + count) % count;
+          else if (key === 'right') s.plantGenSel = (s.plantGenSel + 1) % count;
+          else if (key === 'up') s.plantGenPack = (s.plantGenPack + 4) % 5;
+          else if (key === 'down') s.plantGenPack = (s.plantGenPack + 1) % 5;
+          return true;
+        }
+        if (s.plantScreen === 'alm') {
+          if (key === 'up') s.plantAlmScroll = Math.max(0, s.plantAlmScroll - 1);
+          else if (key === 'down') s.plantAlmScroll += 1;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /* ── summary mode (legacy, unchanged) ───────────────────────── */
     if (key.length === 1 && key >= '1' && key <= String(SCREENS.length)) {
       const next = SCREENS[Number(key) - 1];
       if (next !== s.screen) {
@@ -361,10 +479,17 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       socket,
       width: 80,
       height: 24,
+      mode: 'chooser',
       screen: 'overview',
       battDpu: 0,
       battPack: 0,
       alertScroll: 0,
+      plantScreen: 'console',
+      plantGenSel: 0,
+      plantGenPack: 0,
+      plantAlmScroll: 0,
+      plantConnectedAt: Date.now(),
+      chooser: defaultChooserState(80, 24),
       inbuf: Buffer.alloc(0),
       timer: null,
       drawing: false,

@@ -1,0 +1,84 @@
+/**
+ * TRD screen — trend strips for the headline tags.
+ *
+ * Each tag gets a row: tag name, latest value, then a 60-char sparkline
+ * built from the last hour of recorder samples (one bucket per minute).
+ * Designed to look like the strip-recorder chart on an old SCADA HMI.
+ */
+
+import { c, padEnd, padStart, truncate, BOX } from '../ansi.js';
+import { divider, trendStrip, stateGlyph } from './scada.js';
+import {
+  getDpus, getShp2, fmtW, fmtPct, fmtVolt,
+  socState, deviceQuality, sum,
+} from './data.js';
+import type { PlantData, PlantView } from './types.js';
+import type { Recorder } from '../../recorder.js';
+
+// The render dispatcher will inject the recorder. Keeping the read at call-site
+// would tightly couple this file to the server; instead the dispatcher wraps
+// the recorder and passes it via a renderer arg in `index.ts`.
+export interface TrdContext {
+  recorder: Recorder;
+}
+
+export function renderTrd(view: PlantView, data: PlantData, ctx: TrdContext): string[] {
+  const W = view.width;
+  const out: string[] = [];
+  const sparkW = Math.max(20, Math.min(80, W - 40));
+  const sinceMs = Date.now() - 60 * 60 * 1000;          // last 60 min
+
+  out.push(divider('TRENDS — last 60 minutes (1-min buckets)', W));
+  out.push(c.grey('  most recent value on the right; auto-scaled per tag'));
+  out.push('');
+
+  const tags: Array<{ tag: string; metricSn: string; metric: string; unit: string }> = [];
+  const shp2 = getShp2(data);
+  if (shp2) {
+    tags.push({ tag: 'BATT.SOC',     metricSn: shp2.sn, metric: 'backup_pct',  unit: '%' });
+    tags.push({ tag: 'LD.PANEL.P',   metricSn: shp2.sn, metric: 'panel_load',  unit: 'W' });
+  }
+  const dpus = getDpus(data).filter((d) => d.online);
+  for (let i = 0; i < dpus.length; i++) {
+    const d = dpus[i];
+    tags.push({ tag: `GEN.${i + 1}.PV.P`,  metricSn: d.sn, metric: 'pv_total', unit: 'W' });
+    tags.push({ tag: `GEN.${i + 1}.P.OUT`, metricSn: d.sn, metric: 'ac_out',  unit: 'W' });
+  }
+
+  for (const t of tags) {
+    const pts = ctx.recorder.query(t.metricSn, t.metric, sinceMs, Date.now(), 60);
+    const series = pts.map((p) => p.value);
+    const latest = series.length > 0 ? series[series.length - 1] : null;
+    const lo = series.length ? Math.min(...series) : 0;
+    const hi = series.length ? Math.max(...series) : 0;
+
+    const tagStr = c.whiteB(padEnd(t.tag, 16));
+    const latestStr = latest == null
+      ? c.grey(padStart('—', 9))
+      : c.whiteB(padStart(formatVal(latest, t.unit), 9)) + c.grey(' ' + padEnd(t.unit, 3));
+    const rangeStr = series.length
+      ? c.grey(`[${formatVal(lo, t.unit)}…${formatVal(hi, t.unit)} ${t.unit}]`)
+      : c.grey('[no data]');
+    const trend = trendStrip(series, sparkW);
+    const trendStyled = c.cyan(trend);
+
+    out.push(`  ${tagStr} ${latestStr}   ${trendStyled}`);
+    out.push(`  ${c.grey(' '.repeat(16))} ${rangeStr}`);
+  }
+
+  if (tags.length === 0) {
+    out.push(c.grey('  No tags available — waiting for first telemetry.'));
+  }
+
+  return out;
+}
+
+function formatVal(v: number, unit: string): string {
+  if (unit === 'W') {
+    if (Math.abs(v) >= 1000) return `${(v / 1000).toFixed(2)}k`;
+    return `${Math.round(v)}`;
+  }
+  if (unit === '%') return v.toFixed(1);
+  if (unit === 'V') return v.toFixed(1);
+  return v.toFixed(2);
+}
