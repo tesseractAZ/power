@@ -3,6 +3,18 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.20 — 2026-05-25
+
+**Hotfix:** add the missing `homeassistant_api: true` flag to
+`config.yaml`. Without it, `SUPERVISOR_TOKEN` is granted but doesn't
+have permission to hit `http://supervisor/core/api/*` — every
+broadcast attempt and every `GET /api/broadcast/discover` call
+returned `SUPERVISOR_TOKEN missing or HA unreachable`.
+
+This is the standard add-on opt-in for Core REST API access. Adding
+it unlocks the entire v0.9.18 + v0.9.19 broadcast feature set against
+the real HA instance.
+
 ## 0.9.19 — 2026-05-25
 
 **Speaker discovery for v0.9.18 broadcasts.** The previous release
