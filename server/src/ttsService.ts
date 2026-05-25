@@ -95,12 +95,18 @@ export async function detectTtsEntities(): Promise<TtsEntity[]> {
   for (const s of all) {
     if (!s.entity_id.startsWith('tts.')) continue;
     const id = s.entity_id.toLowerCase();
+    const attrs = s.attributes ?? {};
+    // v0.9.32 — also check the integration / engine attribute. Piper via
+    // Wyoming exposes itself with attrs like `engine: "piper"` even when
+    // the entity_id is something generic like `tts.home_assistant`.
+    const engineAttr = String((attrs as Record<string, unknown>).engine ?? '').toLowerCase();
+    const friendly = String((attrs as Record<string, unknown>).friendly_name ?? s.entity_id).toLowerCase();
     let flavor: TtsEntity['flavor'] = 'other';
-    if (id.includes('piper')) flavor = 'piper';
-    else if (id.includes('cloud') || id.includes('home_assistant_cloud') || id.includes('nabu')) flavor = 'cloud';
-    else if (id.includes('google')) flavor = 'google';
-    else if (id.includes('elevenlabs')) flavor = 'elevenlabs';
-    else if (id.includes('edge')) flavor = 'edge';
+    if (id.includes('piper') || engineAttr.includes('piper') || friendly.includes('piper') || friendly.includes('wyoming')) flavor = 'piper';
+    else if (id.includes('cloud') || id.includes('home_assistant_cloud') || id.includes('nabu') || engineAttr.includes('cloud')) flavor = 'cloud';
+    else if (id.includes('google') || engineAttr.includes('google')) flavor = 'google';
+    else if (id.includes('elevenlabs') || engineAttr.includes('elevenlabs')) flavor = 'elevenlabs';
+    else if (id.includes('edge') || engineAttr.includes('edge')) flavor = 'edge';
     entities.push({
       entity_id: s.entity_id,
       friendly_name: String((s.attributes ?? {}).friendly_name ?? s.entity_id),
@@ -108,6 +114,78 @@ export async function detectTtsEntities(): Promise<TtsEntity[]> {
     });
   }
   return entities;
+}
+
+/**
+ * v0.9.32 — Diagnostic dump for the /api/broadcast/tts-debug endpoint.
+ *
+ * Field testing of v0.9.31 against Eric's Home Assistant turned up only
+ * `tts.cloud_say` even though Piper add-on was running. The likely cause
+ * is the Wyoming Protocol integration hadn't been added in HA, so no
+ * `tts.*` entity was published. This endpoint returns the raw evidence
+ * so we can confirm vs guess.
+ */
+export interface TtsDebugInfo {
+  supervised: boolean;
+  /** All services in the `tts` domain from HA's service catalog. */
+  ttsServices: string[];
+  /** Every entity whose entity_id starts with `tts.` — raw shape. */
+  ttsEntities: Array<{
+    entity_id: string;
+    state: string;
+    attributes: Record<string, unknown>;
+  }>;
+  /** Computed engine list after our flavor+dedup logic. */
+  detectedEngines: TtsEngine[];
+  /** Helpful guidance for common gotchas. */
+  hints: string[];
+}
+
+export async function getTtsDebug(): Promise<TtsDebugInfo> {
+  const hints: string[] = [];
+  const cat = await getServiceCatalog();
+  if (!cat) {
+    return {
+      supervised: false,
+      ttsServices: [],
+      ttsEntities: [],
+      detectedEngines: [],
+      hints: ['Not supervised (SUPERVISOR_TOKEN missing). Run as a HA add-on.'],
+    };
+  }
+  const ttsDomain = cat.find((c) => c.domain === 'tts');
+  const ttsServices = ttsDomain ? Object.keys(ttsDomain.services) : [];
+  const all = await getAllStates();
+  const ttsEntities = (all ?? []).filter((s) => s.entity_id.startsWith('tts.')).map((s) => ({
+    entity_id: s.entity_id,
+    state: s.state,
+    attributes: s.attributes ?? {},
+  }));
+  const detectedEngines = await detectTtsEngines();
+
+  // Heuristic hints — emit one per missing-piece we can detect.
+  if (ttsServices.length === 0) {
+    hints.push('No tts.* services exposed. Check Home Assistant logs for TTS integration errors.');
+  }
+  if (!ttsServices.includes('speak')) {
+    hints.push('tts.speak (the unified service) is missing. Are you on HA 2023.0+? Modern TTS uses this.');
+  }
+  if (ttsEntities.length === 0) {
+    hints.push('No tts.* ENTITIES found. If Piper add-on is running, you also need: Settings → Devices & services → Add Integration → "Wyoming Protocol" → host=core-piper, port=10200. This creates the tts.piper entity.');
+  }
+  const hasPiper = ttsEntities.some((e) => e.entity_id.toLowerCase().includes('piper') || String(e.attributes.engine ?? '').toLowerCase().includes('piper'));
+  const hasCloud = ttsEntities.some((e) => e.entity_id.toLowerCase().includes('cloud') || e.entity_id.toLowerCase().includes('nabu'));
+  if (!hasPiper && !hasCloud && ttsEntities.length === 0) {
+    hints.push('Recommended local TTS engines to install (HA → Settings → Add-ons → Add-on Store):');
+    hints.push('  • Piper (Wyoming) — best for off-grid alerts, neural quality, fast');
+    hints.push('  • OpenedAI Speech — local OpenAI-API-compatible TTS');
+    hints.push('  • Mimic 3 — Mycroft\'s local TTS (less actively maintained)');
+  }
+  if (detectedEngines.length === 1 && detectedEngines[0].service === 'tts.cloud_say') {
+    hints.push('Only HA Cloud detected — broadcast TTS depends on internet and Nabu Casa uptime. Install Piper for an off-grid fallback.');
+  }
+
+  return { supervised: true, ttsServices, ttsEntities, detectedEngines, hints };
 }
 
 /**

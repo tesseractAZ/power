@@ -19,6 +19,8 @@ import { isConfigured } from './notify.js';
 import { generateAudioAssets } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
 import { getAllStates } from './haService.js';
+// v0.9.32 — TTS debug dump for /api/broadcast/tts-debug
+import { getTtsDebug } from './ttsService.js';
 // v0.9.25 — feedback-loop foundation
 import { appendAlertOutcome, tailAlertOutcomes, computeFamilyStats, type AlertOutcome } from './alertOutcomes.js';
 import { getSnapshot, dropSnapshot } from './featureSnapshot.js';
@@ -1201,6 +1203,20 @@ app.get('/api/broadcast/tts-services', async (req, reply) => {
       green: 'All clear. All stations report normal.',
     },
   }, 30);
+});
+
+/**
+ * v0.9.32 — TTS debug dump. Returns the raw service catalog + tts.* entities
+ * + computed engine list so we can diagnose why a particular engine isn't
+ * showing up. (Specifically: Eric installed Piper but it didn't appear in
+ * availableEngines on v0.9.31 — needed the Wyoming Protocol integration.)
+ *
+ * Includes heuristic hints for common gotchas.
+ */
+app.get('/api/broadcast/tts-debug', async (_req, reply) => {
+  const dbg = await getTtsDebug();
+  if (!dbg.supervised) reply.code(503);
+  return dbg;
 });
 
 /**

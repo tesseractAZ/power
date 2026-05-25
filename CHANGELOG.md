@@ -3,6 +3,64 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.32 — 2026-05-25
+
+**TTS diagnostic + better entity match.** Eric installed Piper after
+v0.9.31 but it didn't appear in `availableEngines` — only `tts.cloud_say`
+showed up. The likely cause is the Wyoming Protocol integration hadn't
+been added in HA, so no `tts.*` entity was published. We can't tell that
+from the panel state alone, so add a debug endpoint.
+
+### New: `GET /api/broadcast/tts-debug`
+
+Returns the raw evidence so we can diagnose-not-guess:
+
+```json
+{
+  "supervised": true,
+  "ttsServices": ["cloud_say", "speak", ...],   // from /services catalog
+  "ttsEntities": [                              // from /states, filtered
+    { "entity_id": "tts.home_assistant_cloud", "state": "...", "attributes": {...} }
+  ],
+  "detectedEngines": [...],                     // our computed list
+  "hints": [
+    "No tts.* ENTITIES found. If Piper add-on is running, you also need:
+     Settings → Devices & services → Add Integration → 'Wyoming Protocol' →
+     host=core-piper, port=10200. This creates the tts.piper entity."
+  ]
+}
+```
+
+The `hints` array surfaces the most common gotchas based on what's missing
+— specifically: missing Wyoming integration, missing tts.speak, only Cloud
+detected (no off-grid fallback).
+
+### Better Piper detection
+
+v0.9.31 only matched `tts.*` entities whose `entity_id` contained
+"piper". v0.9.32 ALSO checks the `engine` attribute and the
+`friendly_name` — Wyoming-bridged Piper instances sometimes expose
+as `tts.home_assistant` with `engine: "piper"` in attrs, which we now
+catch.
+
+### Notes on installing more local TTS engines
+
+The add-on cannot install other HA add-ons programmatically — that
+requires `hassio_api: true` + admin role, which we don't have. Eric
+asked about other options; recommended in priority order for an
+off-grid alert system:
+
+1. **Piper (Wyoming)** — already installed; if not yet visible, add
+   the Wyoming Protocol integration as above. Best neural quality
+   among local options.
+2. **OpenedAI Speech** — local, OpenAI-API-compatible TTS server.
+   Available in the HACS Add-on Store or as a Docker container.
+3. **Mimic 3** — Mycroft's local TTS. Older, less maintained, but
+   small footprint.
+
+After installing any of these, hit `/api/broadcast/tts-debug` to
+confirm the new entity is visible to the panel.
+
 ## 0.9.31 — 2026-05-25
 
 **TTS fixes from v0.9.30 live testing.** Hitting the v0.9.30 endpoints
