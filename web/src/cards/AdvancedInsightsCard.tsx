@@ -37,6 +37,7 @@ export function AdvancedInsightsCard() {
   const [conf, setConf] = useState<ConfidenceSnapshot | null>(null);
   const [nws, setNws] = useState<NwsAlert[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [ensemble, setEnsemble] = useState<{ sourcesCount: number; avgDisagreementPct: number; enrichedHourCount: number; hourCount: number } | null>(null);
 
   useEffect(() => {
     const fetchAll = () => {
@@ -55,6 +56,12 @@ export function AdvancedInsightsCard() {
         ['/api/confidence', setConf],
         ['/api/nws-alerts', (j) => setNws(j.alerts ?? [])],
         ['/api/incidents', (j) => setIncidents(j.incidents ?? [])],
+        ['/api/weather/ensemble', (j) => setEnsemble(j.error ? null : {
+          sourcesCount: j.sourcesCount,
+          avgDisagreementPct: j.avgDisagreementPct,
+          enrichedHourCount: j.enrichedHourCount,
+          hourCount: j.hourCount,
+        })],
       ];
       for (const [url, setter] of endpoints) {
         fetch(url).then((r) => r.json()).then(setter).catch(() => {});
@@ -119,6 +126,22 @@ export function AdvancedInsightsCard() {
             <Tile label="Solar fraction" value={sc.solarFractionOfLoadPct != null ? `${sc.solarFractionOfLoadPct}%` : '—'} />
             <Tile label="Direct use" value={sc.directUseRatioPct != null ? `${sc.directUseRatioPct}%` : '—'} />
           </div>
+        </Section>
+      )}
+
+      {ensemble && ensemble.sourcesCount > 1 && (
+        <Section title="Weather ensemble" subtitle="Open-Meteo + NWS NDFD cloud-cover blend">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Tile label="Sources" value={`${ensemble.sourcesCount}`} sub={`enriched ${ensemble.enrichedHourCount}/${ensemble.hourCount} h`} />
+            <Tile label="Avg disagreement" value={`${ensemble.avgDisagreementPct.toFixed(1)}%`} sub="|Open-Meteo − NWS|" />
+            <Tile label="Status" value={ensemble.avgDisagreementPct > 15 ? 'wide bands' : 'tight bands'} sub="forecast confidence" />
+            <Tile label="Coverage" value={`${Math.round((ensemble.enrichedHourCount / Math.max(1, ensemble.hourCount)) * 100)}%`} sub="ensemble overlap" />
+          </div>
+          <p className="text-[11px] text-muted mt-2 leading-relaxed">
+            High disagreement (&gt; 15%) widens P10/P90 forecast bands — sources don't agree, so the
+            point estimate has more uncertainty than usual. Phoenix monsoon clouds are where this
+            matters most.
+          </p>
         </Section>
       )}
 

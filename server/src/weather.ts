@@ -1,18 +1,28 @@
 import { request } from 'undici';
 import { config } from './config.js';
+import { getNwsHourlyCloud, isNwsEnabled } from './nws.js';
 
 /**
- * Open-Meteo weather client — free, no API key, no account.
- * Pulls hourly cloud cover + shortwave (solar) radiation for the recent past
- * and the next ~2 days, used to turn the historical "typical day" PV curve
- * into a cloud-aware forecast.
+ * Weather forecast client. Open-Meteo is the primary source (free, no key,
+ * provides cloud cover + shortwave GHI + temperature). v0.9.2 adds NWS NDFD
+ * as a second cloud-cover source for an ensemble — Phoenix monsoon clouds
+ * are notoriously hard for any single global model, so blending two
+ * independent forecasts tightens the median AND lets us widen the
+ * probabilistic forecast bands when sources disagree (the disagreement
+ * itself is a useful uncertainty signal).
+ *
+ * NWS doesn't expose shortwave radiation directly, so GHI still comes from
+ * Open-Meteo. NWS contributes only the cloud-cover ensemble.
  */
 
 export interface WeatherHour {
-  ts: number;            // UTC epoch ms
-  cloudCoverPct: number; // 0-100
-  radiationWm2: number;  // shortwave (GHI), W/m²
+  ts: number;                    // UTC epoch ms
+  cloudCoverPct: number;         // 0-100 (ensemble median when 2 sources)
+  radiationWm2: number;          // shortwave (GHI), W/m² — from Open-Meteo
   tempC: number;
+  // v0.9.2 — ensemble metadata
+  ensembleSources?: number;      // 1 if Open-Meteo only, 2 if NWS also available
+  ensembleDisagreementPct?: number; // |Open-Meteo cloud − NWS cloud| (0-100); undefined if 1 source
 }
 
 export interface WeatherForecast {
@@ -20,6 +30,9 @@ export interface WeatherForecast {
   lat: number;
   lon: number;
   hours: WeatherHour[];
+  // v0.9.2 ensemble summary
+  ensembleSourcesCount?: number;     // 1 or 2
+  ensembleAvgDisagreement?: number;  // mean |diff| across overlapping hours
 }
 
 let cache: WeatherForecast | null = null;
@@ -47,9 +60,56 @@ export async function getWeather(log: (m: string) => void = () => {}): Promise<W
       cloudCoverPct: cc[i] ?? 0,
       radiationWm2: sw[i] ?? 0,
       tempC: tp[i] ?? 0,
+      ensembleSources: 1, // overridden by getEnsembleWeather if NWS is also available
     }));
-    cache = { fetchedAt: Date.now(), lat, lon, hours };
-    log(`weather: fetched ${hours.length}h forecast for ${lat},${lon}`);
+    // v0.9.2 — fold in NWS cloud cover when available (US-only, opt-in via
+    // NWS_ENABLED=1). The ensemble enriches each hour's `cloudCoverPct`
+    // toward the mean of the two sources AND reports per-hour disagreement
+    // so downstream callers (probabilistic forecast) can widen bands when
+    // sources disagree — disagreement is a real uncertainty signal in
+    // Phoenix monsoon weather.
+    if (isNwsEnabled()) {
+      try {
+        const nws = await getNwsHourlyCloud(log);
+        if (nws && nws.hours.length > 0) {
+          const nwsByHourEpoch = new Map<number, number>();
+          for (const h of nws.hours) {
+            nwsByHourEpoch.set(Math.floor(h.ts / 3_600_000), h.cloudCoverPct);
+          }
+          let disagreementSum = 0;
+          let overlapCount = 0;
+          for (const h of hours) {
+            const he = Math.floor(h.ts / 3_600_000);
+            const nwsCloud = nwsByHourEpoch.get(he);
+            if (nwsCloud == null) continue;
+            const diff = Math.abs(h.cloudCoverPct - nwsCloud);
+            // Replace cloud cover with the ensemble mean.
+            h.cloudCoverPct = (h.cloudCoverPct + nwsCloud) / 2;
+            h.ensembleSources = 2;
+            h.ensembleDisagreementPct = Math.round(diff);
+            disagreementSum += diff;
+            overlapCount++;
+          }
+          if (overlapCount > 0) {
+            const avgDisagree = Math.round((disagreementSum / overlapCount) * 10) / 10;
+            log(`weather: ensembled ${overlapCount}h with NWS (avg cloud-cover disagreement ${avgDisagree}%)`);
+          }
+        }
+      } catch (e: any) {
+        log(`weather: NWS ensemble augment failed (${e?.message ?? e}) — continuing with Open-Meteo only`);
+      }
+    }
+    // Ensemble summary stats
+    const enriched = hours.filter((h) => (h.ensembleSources ?? 1) > 1);
+    const ensembleSourcesCount = enriched.length > 0 ? 2 : 1;
+    const ensembleAvgDisagreement =
+      enriched.length > 0
+        ? Math.round(
+            (enriched.reduce((s, h) => s + (h.ensembleDisagreementPct ?? 0), 0) / enriched.length) * 10,
+          ) / 10
+        : 0;
+    cache = { fetchedAt: Date.now(), lat, lon, hours, ensembleSourcesCount, ensembleAvgDisagreement };
+    log(`weather: fetched ${hours.length}h forecast for ${lat},${lon}${ensembleSourcesCount > 1 ? ` (ensemble: ${enriched.length}/${hours.length}h enriched)` : ''}`);
     return cache;
   } catch (e: any) {
     log(`weather: fetch failed (${e?.message ?? e}) — forecast will fall back to history only`);

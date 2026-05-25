@@ -3,6 +3,61 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.2 — 2026-05-24
+
+Multi-source weather ensemble — Phoenix-specific value.
+
+### Feature
+
+- **NWS NDFD as a second cloud-cover source.** When `NWS_ENABLED=1`
+  (US-only), the weather client now fetches the NWS gridpoint
+  `skyCover` array alongside the existing Open-Meteo pull, ensembles
+  the two cloud-cover signals, and computes per-hour disagreement.
+  Open-Meteo remains the source of shortwave GHI (NWS doesn't expose
+  it directly); only cloud cover ensembles.
+
+  Two-step NWS fetch: `/points/{lat},{lon}` → `{office, gridX, gridY}`
+  (24 h cache), then `/gridpoints/{office}/{x},{y}` (2 h cache). The
+  `skyCover.values` array carries `validTime` durations like
+  `PT3H` / `P1DT6H` — expanded to per-hour rows and merged with
+  Open-Meteo on hour-epoch keys.
+
+- **Disagreement widens the probabilistic forecast bands.** The
+  v0.8.0 probabilistic forecast combines cloud variance + model
+  residual in quadrature. v0.9.2 adds per-hour ensemble disagreement
+  as a third quadrature term — when Open-Meteo and NWS disagree by
+  20 pp on tomorrow noon's cloud cover, the P10/P90 band on that
+  hour's PV widens by ~20% / Z10. **Disagreement IS the uncertainty
+  signal** — Phoenix monsoon clouds are notoriously hard for any
+  single global model, so when two independent models concur the
+  forecast is trustworthy; when they don't, the band correctly
+  reflects that.
+
+### API
+
+- **`/api/weather/ensemble`** — returns the full hourly forecast
+  with per-hour `ensembleSources` (1 or 2) + `disagreementPct`.
+  Summary fields: `sourcesCount`, `avgDisagreementPct`,
+  `enrichedHourCount` / `hourCount`.
+
+### UI
+
+- New **"Weather ensemble"** section in the Advanced Insights card:
+  source count, average disagreement, status indicator
+  (tight bands / wide bands), and ensemble-coverage percentage.
+  Hidden when only one source is active (NWS disabled or
+  unreachable).
+
+### Notes
+
+- US-only — NWS doesn't cover other countries. Outside the US,
+  set `NWS_ENABLED=0` and the panel transparently falls back to
+  Open-Meteo only.
+- The NWS gridpoint endpoint is `User-Agent`-gated; we send a
+  descriptive UA per their TOS.
+- Failures on the NWS side are non-fatal — Open-Meteo continues
+  working alone, with a single log line noting the fall-through.
+
 ## 0.9.1 — 2026-05-24
 
 Hotfix — actually ship the HACS card source committed in v0.9.0.

@@ -48,6 +48,7 @@ import { startTelnetServer } from './telnet/server.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
+import { getWeather } from './weather.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -244,6 +245,30 @@ app.get('/api/confidence', async () => {
 });
 
 app.get('/api/nws-alerts', async () => ({ alerts: await getActiveNwsAlerts() }));
+
+// v0.9.2 — weather ensemble (Open-Meteo + NWS NDFD when enabled). Returns
+// the underlying forecast with per-hour ensembleSources + disagreement
+// metadata so consumers can see WHY the bands are wider on hours with
+// high inter-source disagreement.
+app.get('/api/weather/ensemble', async () => {
+  const w = await getWeather((m) => app.log.info(m));
+  if (!w) return { error: 'no weather available' };
+  return {
+    fetchedAt: w.fetchedAt,
+    lat: w.lat, lon: w.lon,
+    sourcesCount: w.ensembleSourcesCount ?? 1,
+    avgDisagreementPct: w.ensembleAvgDisagreement ?? 0,
+    hourCount: w.hours.length,
+    enrichedHourCount: w.hours.filter((h) => (h.ensembleSources ?? 1) > 1).length,
+    hours: w.hours.map((h) => ({
+      ts: h.ts,
+      cloudCoverPct: h.cloudCoverPct,
+      radiationWm2: h.radiationWm2,
+      ensembleSources: h.ensembleSources ?? 1,
+      disagreementPct: h.ensembleDisagreementPct ?? null,
+    })),
+  };
+});
 
 app.get('/api/incidents', async () => ({ incidents: monitor.incidents() }));
 

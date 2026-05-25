@@ -3466,6 +3466,18 @@ export async function computeProbabilisticForecast(
       cloudVarByHour[h] = Math.min(0.6, Math.sqrt(v) / 100); // cap at 60% stdev
     }
   }
+  // v0.9.2 — per-hour ensemble disagreement (Open-Meteo vs NWS cloud cover)
+  // is a direct uncertainty signal: when the two sources disagree by 20pp
+  // on tomorrow's cloud cover, our forecast confidence band should widen
+  // proportionally. Key by hour-epoch and apply per-hour.
+  const disagreeByHourEpoch = new Map<number, number>();
+  if (weather) {
+    for (const wh of weather.hours) {
+      if (wh.ensembleDisagreementPct != null) {
+        disagreeByHourEpoch.set(Math.floor(wh.ts / 3_600_000), wh.ensembleDisagreementPct);
+      }
+    }
+  }
 
   // Model residual fraction: how off the model historically is.
   // If MAE = 20% and we believe it's roughly Gaussian, that ≈ 1σ ≈ 20%.
@@ -3485,8 +3497,15 @@ export async function computeProbabilisticForecast(
   for (const h of forecast.hours) {
     const hod = new Date(h.ts).getHours();
     const cloudStdev = cloudVarByHour[hod];
-    // Wider band when cloud cover is high or model is uncertain. Quadrature-sum.
-    const sigmaFrac = Math.sqrt(cloudStdev * cloudStdev + skillFrac * skillFrac);
+    // v0.9.2 — fold per-hour ensemble disagreement into the band. When
+    // Open-Meteo and NWS disagree by N pp on cloud cover, treat that as an
+    // additional N/100 fraction of PV uncertainty (proportional contribution).
+    const disagreementFrac = (disagreeByHourEpoch.get(Math.floor(h.ts / 3_600_000)) ?? 0) / 100;
+    // Wider band when cloud cover varies historically AND when the ensemble
+    // disagrees AND when the model itself is biased. Quadrature-sum.
+    const sigmaFrac = Math.sqrt(
+      cloudStdev * cloudStdev + skillFrac * skillFrac + disagreementFrac * disagreementFrac,
+    );
     const p50 = h.forecastPvW;
     const p10 = Math.max(0, p50 * (1 - Z10 * sigmaFrac));
     const p90 = p50 * (1 + Z10 * sigmaFrac);
