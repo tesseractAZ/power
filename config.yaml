@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.9.32"
+version: "0.9.33"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -46,6 +46,15 @@ map:
 # is not granted access to /core/api/* endpoints — every broadcast
 # returns "SUPERVISOR_TOKEN missing or HA unreachable".
 homeassistant_api: true
+# v0.9.33 — Supervisor API access at "manager" role. Granted explicitly
+# by the user so we can:
+#   - List installed add-ons (POST-install Piper visibility checks)
+#   - Auto-bridge integrations via Core config-flow (Wyoming Protocol →
+#     Piper TTS without making the user click through Settings UI)
+# We do NOT install/uninstall add-ons in code without explicit user
+# action — every Supervisor call goes through a named endpoint.
+hassio_api: true
+hassio_role: manager
 options:
   ECOFLOW_ACCESS_KEY: ""
   ECOFLOW_SECRET_KEY: ""

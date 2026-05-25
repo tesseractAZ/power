@@ -21,6 +21,13 @@ import { startBroadcastMonitor } from './broadcast.js';
 import { getAllStates } from './haService.js';
 // v0.9.32 — TTS debug dump for /api/broadcast/tts-debug
 import { getTtsDebug } from './ttsService.js';
+// v0.9.33 — Supervisor add-on + Core config-flow helpers
+import {
+  listAddons,
+  listConfigEntries,
+  startConfigFlow,
+  submitConfigFlow,
+} from './haService.js';
 // v0.9.25 — feedback-loop foundation
 import { appendAlertOutcome, tailAlertOutcomes, computeFamilyStats, type AlertOutcome } from './alertOutcomes.js';
 import { getSnapshot, dropSnapshot } from './featureSnapshot.js';
@@ -1218,6 +1225,119 @@ app.get('/api/broadcast/tts-debug', async (_req, reply) => {
   if (!dbg.supervised) reply.code(503);
   return dbg;
 });
+
+/**
+ * v0.9.33 — List installed Supervisor add-ons. Requires `hassio_api: true`
+ * + role `manager` (added in v0.9.33). Used to verify the Piper add-on
+ * is actually running before we attempt to bridge it via Wyoming Protocol.
+ */
+app.get('/api/admin/addons', async (_req, reply) => {
+  const addons = await listAddons();
+  if (!addons) {
+    reply.code(503);
+    return {
+      ok: false,
+      error: 'Supervisor add-on API unavailable. Add-on may lack hassio_api permission (was added in v0.9.33). After updating, the user must reapprove the add-on permissions in Home Assistant → Settings → Add-ons → EcoFlow Panel.',
+    };
+  }
+  return { ok: true, count: addons.length, addons };
+});
+
+/**
+ * v0.9.33 — Auto-setup the Wyoming Protocol integration for Piper.
+ *
+ * v0.9.31-32 testing established that installing the Piper add-on isn't
+ * enough — HA also needs the Wyoming Protocol integration to bridge to
+ * it, which exposes the `tts.piper` entity. Without this, the panel sees
+ * only `tts.cloud_say` and the spoken alert depends entirely on Nabu
+ * Casa uptime (which 500'd twice during testing).
+ *
+ * This endpoint:
+ *   1. Checks if a Wyoming config-entry already exists for this host+port.
+ *   2. If yes → returns "already configured".
+ *   3. If no → kicks off the Core config flow, submits host+port form data,
+ *      and reports the result.
+ *
+ * Defaults to host=`core-piper`, port=10200 — the add-on's standard
+ * Wyoming exposure. Override via query params for non-standard setups.
+ */
+app.post<{ Querystring: { host?: string; port?: string } }>(
+  '/api/broadcast/setup-piper',
+  async (req, reply) => {
+    const host = req.query.host ?? 'core-piper';
+    const port = Number(req.query.port ?? 10200);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      reply.code(400);
+      return { ok: false, error: `invalid port: ${req.query.port}` };
+    }
+
+    // 1. Check for an existing Wyoming entry that already matches.
+    const existing = await listConfigEntries('wyoming');
+    if (existing) {
+      const match = existing.find((e) => {
+        const data = e.data as Record<string, unknown> | undefined;
+        return data && data.host === host && Number(data.port) === port;
+      });
+      if (match) {
+        return {
+          ok: true,
+          alreadyConfigured: true,
+          entry: match,
+          message: `Wyoming integration for ${host}:${port} already exists. Restart the add-on to refresh TTS detection.`,
+        };
+      }
+    }
+
+    // 2. Start the config flow for `wyoming`.
+    const startRes = await startConfigFlow('wyoming');
+    if (!startRes.ok) {
+      reply.code(startRes.status >= 400 ? startRes.status : 502);
+      return {
+        ok: false,
+        error: `Could not start Wyoming config flow: HTTP ${startRes.status} ${startRes.error ?? ''}. If status is 403, the add-on may lack hassio_api permission — reapprove the add-on permissions in Home Assistant → Settings → Add-ons → EcoFlow Panel.`,
+        body: startRes.body,
+      };
+    }
+    const flow = startRes.body as { flow_id?: string; type?: string; errors?: unknown };
+    if (!flow.flow_id) {
+      reply.code(502);
+      return { ok: false, error: 'config flow response missing flow_id', body: flow };
+    }
+    if (flow.type === 'create_entry') {
+      // Single-step flow auto-completed.
+      return { ok: true, autoCompleted: true, entry: flow };
+    }
+
+    // 3. Submit step 1 (host + port).
+    const submitRes = await submitConfigFlow(flow.flow_id, { host, port });
+    if (!submitRes.ok) {
+      reply.code(submitRes.status >= 400 ? submitRes.status : 502);
+      return {
+        ok: false,
+        error: `Wyoming flow submission failed: HTTP ${submitRes.status} ${submitRes.error ?? ''}`,
+        body: submitRes.body,
+      };
+    }
+    const final = submitRes.body as { type?: string; title?: string; errors?: unknown };
+    if (final.type === 'create_entry') {
+      return {
+        ok: true,
+        created: true,
+        title: final.title,
+        message: 'Wyoming integration added. The tts.piper entity should appear within a few seconds. Re-test the broadcast to see Piper in the engine list.',
+      };
+    }
+    // Flow returned another step (unusual for Wyoming) — return the form
+    // so the caller can complete it.
+    return {
+      ok: false,
+      requiresMoreSteps: true,
+      flow_id: flow.flow_id,
+      step: final,
+      message: 'Wyoming config flow returned another step. Check Home Assistant logs.',
+    };
+  },
+);
 
 /**
  * v0.9.19 — discover every media_player entity HA knows about so the
