@@ -67,6 +67,21 @@ import { tailWriteLog } from './writeLog.js';
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
 
 const app = Fastify({ logger: { level: config.logLevel } });
+// v0.9.7 — defense in depth: accept empty-body POSTs even when the client
+// (wrongly) sets Content-Type: application/json. Without this Fastify
+// rejects with FST_ERR_CTP_EMPTY_JSON_BODY — which broke the first
+// build of the reboot button. The right client fix is to omit the header
+// for bodiless POSTs (already done in RebootButton.tsx), but treating an
+// empty JSON body as `{}` is a safer default for every future POST.
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+  const s = (body as string).trim();
+  if (s === '') return done(null, {});
+  try {
+    done(null, JSON.parse(s));
+  } catch (e) {
+    done(e as Error, undefined);
+  }
+});
 await app.register(cors, { origin: true });
 await app.register(websocket);
 

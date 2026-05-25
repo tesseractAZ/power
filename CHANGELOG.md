@@ -3,6 +3,27 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.7 — 2026-05-25
+
+Hotfix — the v0.9.6 reboot button errored
+`FST_ERR_CTP_EMPTY_JSON_BODY` on click.
+
+### Bug fix
+
+- **Reboot button no longer sends `Content-Type: application/json`
+  with an empty body.** Fastify's strict JSON parser rejects this
+  combination. The endpoint takes its SN from the URL path and
+  expects no body, so the header was wrong from the start. Fix:
+  drop the header — fetch sends none by default for bodiless POSTs.
+- **Defense in depth on the server side.** Added a custom Fastify
+  content-type parser that treats an empty JSON body as `{}`
+  instead of erroring. Any future bodiless POST handler still works
+  even if a client (wrongly) sets `Content-Type: application/json`.
+
+The reboot still ships with the best-guess EcoFlow cmd shape from
+v0.9.6 (`cmdSet=11`, `cmdId=17`); if EcoFlow rejects, the error now
+surfaces from EcoFlow rather than from Fastify.
+
 ## 0.9.6 — 2026-05-25
 
 First WRITE-side action: reboot the SHP2 from the dashboard. Carefully

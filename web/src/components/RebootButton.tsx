@@ -74,9 +74,12 @@ export function RebootButton({ sn, deviceLabel = 'SHP2' }: { sn: string; deviceL
     setBusy(true);
     setConfirming(false);
     try {
+      // v0.9.7 — the reboot endpoint takes its SN from the URL path and
+      // expects NO body. Setting Content-Type: application/json with no body
+      // makes Fastify's JSON parser reject the request (FST_ERR_CTP_EMPTY_JSON_BODY).
+      // Drop the header — fetch sends none by default for bodiless POSTs.
       const r = await fetch(apiUrl(`api/device/reboot/${encodeURIComponent(sn)}`), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
       });
       const j = (await r.json()) as RebootResponse;
       setLastResult(j);
