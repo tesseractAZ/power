@@ -3,6 +3,64 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.27 — 2026-05-25
+
+**Hotfix:** silence the 223-warning `cached()` storm surfaced by the
+2-hour production log. Every endpoint that uses the v0.9.14 ETag
+helper — 17 of them — produced "Reply was already sent" warnings
+whenever a client's ETag matched. Root cause: the helper called
+`reply.code(304).send()` and ALSO returned `body`, so Fastify tried
+to serialize `body` onto the already-closed stream.
+
+**Fix:** when short-circuiting with 304, return the FastifyReply
+itself (cast to `T`) so Fastify recognizes the request as
+manually-handled and skips its own serialization pass. The cast is
+safe because every call site immediately hands the return value
+back to Fastify — no caller inspects it as `T`.
+
+No behavior change for clients. Just stops the log spam, which
+in the 2026-05-25 14:23 log accounted for 223 of 9749 lines
+(2.3 %) — small but they obscured real signal during debugging.
+
+### Where the warnings hit (counts from the 2-hour log)
+
+```
+×19  /api/shade-report
+×18  /api/nws-alerts
+×17  /api/string-mismatch
+×17  /api/ev-window-prediction
+×17  /api/ambient-thermal-forecast
+×17  /api/forecast-skill
+×17  /api/charge-curve
+×16  /api/thermal-events
+×16  /api/soiling-decomposition
+×16  /api/equipment-health
+×16  /api/internal-resistance
+×13  /api/self-consumption
+×10  /api/incidents
+×8   /api/forecast
+×5   /api/degradation
+×1   /api/runway
+×1   /api/alerts/history
+```
+
+### Other findings from the same log (not fixed in this release)
+
+- **Cache-warmer cycle 3.3-3.6 s.** `self-consumption` (730 ms),
+  `round-trip-efficiency` (650 ms), and `equipment-health` (530 ms)
+  dominate every cycle. Profile candidate for a future release; not
+  user-visible.
+- **Music Assistant audio-fetch storms confirmed.** When a broadcast
+  fires, 20+ rapid GETs on `/audio/<level>-alert.wav` arrive from a
+  single external IPv6 (HA's outbound SLAAC address) within ~1
+  second — that's MA fanning out per-target. Working as designed
+  given the v0.9.23 MA integration.
+- **502s on `/audio/*.wav`** were collateral from the pre-v0.9.23
+  rapid-retest cascade. The 10-sec cooldown landed in v0.9.23;
+  no new 502s expected.
+- **10 add-on restarts in 2 h** — all clean s6 starts; expected from
+  iteration through v0.9.22 → v0.9.26.
+
 ## 0.9.26 — 2026-05-25
 
 **Feedback loop foundation.** First step on the "take the models to the

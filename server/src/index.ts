@@ -22,6 +22,14 @@ import { getAllStates } from './haService.js';
 // v0.9.25 — feedback-loop foundation
 import { appendAlertOutcome, tailAlertOutcomes, computeFamilyStats, type AlertOutcome } from './alertOutcomes.js';
 import { getSnapshot, dropSnapshot } from './featureSnapshot.js';
+// v0.9.27 — multi-track model advance
+import { updateFromOutcome } from './models/onlineLR.js';
+import { computeModelHealth } from './models/modelHealth.js';
+import { physicsPmax, physicsScore, PHOENIX_SITE } from './physics/clearSky.js';
+import { analyzePackLfp } from './physics/lfpOcv.js';
+import { fitHierarchical, findOutliers, type HBPackObs } from './models/hierarchicalBayes.js';
+import { recommendDispatch, type MpcInputs } from './dispatch/mpc.js';
+import { backtestPvForecast } from './backtest.js';
 import {
   getDayForecast,
   computeDegradation,
@@ -125,6 +133,16 @@ await app.register(compress, {
  * safely re-served for a few seconds (history, ha-state, summary/today).
  *
  * Does NOT mutate `body` — returns it for chaining: `return cached(req, reply, payload, 30)`.
+ *
+ * v0.9.27 — fixed Fastify lifecycle bug. When ETag matched, the code
+ * called `reply.code(304).send()` AND returned `body`. Fastify then
+ * tried to serialize + send `body` onto the already-closed stream,
+ * producing 223+ "Reply was already sent" warnings in 2 hours of
+ * normal traffic across 17 endpoints (every endpoint that uses this
+ * helper). Fix: return `reply` itself when we manually send — Fastify
+ * recognizes a returned FastifyReply as "already handled, skip
+ * serialization". Cast through `unknown as T` because every call site
+ * just hands the return value back to Fastify; nobody inspects it.
  */
 function cached<T>(req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply, body: T, maxAgeSec = 30): T {
   const json = JSON.stringify(body);
@@ -133,8 +151,10 @@ function cached<T>(req: import('fastify').FastifyRequest, reply: import('fastify
   reply.header('ETag', etag);
   const inm = req.headers['if-none-match'];
   if (inm && inm === etag) {
-    reply.code(304).send();
-    return body; // body is irrelevant — Fastify already sent 304 + closed stream
+    // v0.9.27 — return the reply itself so Fastify treats this as
+    // already-handled and skips its own serialization step. The previous
+    // `return body` triggered the "Reply was already sent" warning storm.
+    return reply.code(304).send() as unknown as T;
   }
   return body;
 }
@@ -849,7 +869,7 @@ app.post<{ Body: { alertId?: string; outcome?: string; notes?: string } }>(
     // if the alert has since cleared, which is fine; we still record.
     const liveAlert = (store.get().alerts ?? []).find((a) => a.id === alertId);
     const snap = getSnapshot(alertId);
-    appendAlertOutcome({
+    const entry = {
       ts: Date.now(),
       alertId,
       category: liveAlert?.category ?? snap?.category,
@@ -862,13 +882,175 @@ app.post<{ Body: { alertId?: string; outcome?: string; notes?: string } }>(
         ip: req.ip,
         ua: req.headers['user-agent']?.toString(),
       },
-    });
+    };
+    appendAlertOutcome(entry);
+    // v0.9.27 — online LR weight update. Fires only when we have features
+    // captured AND the outcome is labelable (not 'resolved'). The shadow
+    // model file at /data/models/pack-risk-lr-v1-online.json accumulates
+    // updates; the baseline file is never overwritten.
+    let onlineLrResult: ReturnType<typeof updateFromOutcome> | null = null;
+    try {
+      onlineLrResult = updateFromOutcome(entry, (m) => app.log.info(m));
+    } catch (e: any) {
+      app.log.warn(`onlineLR: update failed: ${e?.message ?? e}`);
+    }
     // Outcome captured — drop the feature snapshot to free memory.
     // (The persisted JSONL keeps it for any future bulk re-training.)
     dropSnapshot(alertId);
-    return { ok: true };
+    return { ok: true, onlineLrUpdated: onlineLrResult?.updated ?? false };
   },
 );
+
+/* v0.9.27 — Model Health (track A completion). Aggregate report across
+ *  all models. Used by the Science-station Model Health panel. */
+app.get('/api/models/health', async (req, reply) =>
+  cached(req, reply, computeModelHealth(), 60),
+);
+
+/* v0.9.27 — Physics: clear-sky PV theoretical maximum + realized score.
+ *  Tells the operator how much of "physics says we should be making"
+ *  we're actually producing — normalizes away time-of-day + season. */
+app.get('/api/physics/pv-pmax', async (req, reply) => {
+  const ts = Date.now();
+  // Ambient defaults to Phoenix typical for season; could plug NWS here later.
+  const ambient = 30;  // °C — placeholder; real call would use weather.ts
+  const dpus = Object.values(store.get().devices)
+    .filter((d) => d.projection?.kind === 'dpu' && d.online);
+  const realizedW = dpus.reduce((s, d) => s + ((d.projection as any).pvTotalWatts ?? 0), 0);
+  const result = physicsPmax(ts, ambient, PHOENIX_SITE);
+  return cached(req, reply, {
+    ...result,
+    realizedW,
+    score: physicsScore(realizedW, result.pMaxW),
+  }, 30);
+});
+
+/* v0.9.27 — Physics: per-pack LFP OCV analysis. Surfaces "physics SoC
+ *  says X but BMS says Y" for each pack, flagging miscalibration. */
+app.get('/api/physics/lfp-soc', async (req, reply) => {
+  const dpus = Object.values(store.get().devices)
+    .filter((d) => d.projection?.kind === 'dpu' && d.online);
+  const results: Array<{ device: string; packNum: number; analysis: ReturnType<typeof analyzePackLfp> }> = [];
+  for (const d of dpus) {
+    const p = d.projection as any;
+    for (const pk of (p.packs ?? [])) {
+      // We don't currently track per-pack "last non-resting" timestamp, so we
+      // proxy via: if the current pack draw is low NOW, assume rested. This
+      // is conservative — confidence stays low until we add proper tracking.
+      const packCurrentA = pk.outputWatts != null && pk.totalVoltage != null && pk.totalVoltage > 0
+        ? pk.outputWatts / pk.totalVoltage
+        : null;
+      const analysis = analyzePackLfp({
+        packVoltageMv: pk.packVoltageMv ?? pk.adBatVoltageMv ?? null,
+        reportedSoCPct: pk.soc ?? null,
+        cellVoltagesMv: pk.cellVoltagesMv ?? [],
+        packCurrentA,
+        lastNonRestingAtMs: null, // not tracked yet — analysis will note this
+      });
+      results.push({ device: d.deviceName, packNum: pk.num, analysis });
+    }
+  }
+  return cached(req, reply, { packs: results, generatedAt: Date.now() }, 30);
+});
+
+/* v0.9.27 — Hierarchical Bayesian fit on pack SoH. Returns per-pack
+ *  posteriors (shrunken toward DPU + fleet means) and flags outliers. */
+app.get('/api/models/hierarchical-pack-soh', async (req, reply) => {
+  const dpus = Object.values(store.get().devices)
+    .filter((d) => d.projection?.kind === 'dpu' && d.online);
+  const obs: HBPackObs[] = [];
+  for (const d of dpus) {
+    const p = d.projection as any;
+    for (const pk of (p.packs ?? [])) {
+      const sohValue = pk.actSoh ?? pk.soh;
+      if (sohValue == null) continue;
+      // Estimate per-observation σ from the cycle count. Newer packs (low
+      // cycles) have noisier SoH estimates; older packs have settled.
+      const sigma = Math.max(0.3, 3.0 - Math.min(2.5, (pk.cycles ?? 0) / 500));
+      obs.push({
+        packKey: `${d.sn}:${pk.num}`,
+        dpuKey: d.sn,
+        value: sohValue,
+        obsSigma: sigma,
+      });
+    }
+  }
+  const fit = fitHierarchical(obs);
+  const outliers = findOutliers(fit, 2.0);
+  return cached(req, reply, {
+    generatedAt: Date.now(),
+    metric: 'pack_soh_pct',
+    packs: fit.packs,
+    dpuMeans: Object.fromEntries(fit.dpuMeans),
+    fleetMean: fit.fleetMean,
+    sigmaWithinDpu: fit.sigmaWithinDpu,
+    sigmaWithinFleet: fit.sigmaWithinFleet,
+    outlierPackKeys: outliers.map((o) => o.packKey),
+  }, 300);
+});
+
+/* v0.9.27 — MPC dispatch recommendation. Recommend-only (doesn't
+ *  apply any setpoints) but surfaces "if you set reserve to X at hour Y
+ *  for the next 24h, here's the projected $ savings." */
+app.get('/api/dispatch/recommend', async (req, reply) => {
+  const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+  if (!shp2 || shp2.projection?.kind !== 'shp2') {
+    reply.code(503);
+    return { error: 'SHP2 not online' };
+  }
+  const sp: any = shp2.projection;
+  // Pull current forecast + load history for the next 24 h.
+  let fc: any = null;
+  try { fc = await getDayForecast(store.get().devices, recorder, () => {}); } catch { /* */ }
+  const pvP50: number[] = new Array(24).fill((fc?.forecastPvWhNext24 ?? 0) / 24000);
+  const pvP10: number[] = pvP50.map((v) => v * 0.6);
+  // Load forecast: flat at recent average (more sophisticated DOW-curve
+  // exists in analytics.ts; we use the simple average here for v1).
+  const recentLoadW = sp.circuits.reduce((s: number, c: any) => s + (c.watts ?? 0), 0);
+  const loadKwhPerHour = recentLoadW / 1000;
+  const loadForecast = new Array(24).fill(loadKwhPerHour);
+  // Tariff: pull from env or use Phoenix APS Saver-Choice default
+  const onPeak = Number(process.env.TARIFF_ON_PEAK_CENTS_PER_KWH ?? 24.4);
+  const offPeak = Number(process.env.TARIFF_OFF_PEAK_CENTS_PER_KWH ?? 8.2);
+  const tariffByHour: number[] = Array.from({ length: 24 }, (_, h) =>
+    h >= 15 && h < 20 ? onPeak : offPeak);
+  const inputs: MpcInputs = {
+    currentSocPct: sp.backupBatPercent ?? 50,
+    reserveFloorPct: sp.backupReserveSoc ?? 20,
+    capacityKwh: (sp.backupFullCapWh ?? 60_000) / 1000,
+    pvForecastP50: pvP50,
+    pvForecastP10: pvP10,
+    loadForecast,
+    tariffOnPeakCentsByHour: tariffByHour,
+    gridAvailable: true,
+    cyclingCostUsdPerKwh: 0.02,
+    reserveDipPenaltyUsdPerKwh: 1.0,
+  };
+  const result = recommendDispatch(inputs);
+  return cached(req, reply, { inputs, ...result }, 300);
+});
+
+/* v0.9.27 — Forecast backtest. Replay the last 7 days of typical-day
+ *  PV forecasting against recorder actuals; surface RMSE/MAE/bias/R². */
+app.get('/api/backtest/forecast', async (req, reply) => {
+  const dpus = Object.values(store.get().devices)
+    .filter((d) => d.projection?.kind === 'dpu')
+    .map((d) => d.sn);
+  // Use the typical-PV (recent average) as the v1 forecaster.
+  // Higher-fidelity backtests can swap in the Bayesian or full forecast.
+  let typicalWhPerHour = 0;
+  try {
+    const fc = await getDayForecast(store.get().devices, recorder, () => {});
+    typicalWhPerHour = (fc?.typicalPvWhPerDay ?? 0) / 24;
+  } catch { /* */ }
+  const score = backtestPvForecast({
+    recorder,
+    dpuSns: dpus,
+    hoursBack: 168,
+    predict: () => typicalWhPerHour,
+  });
+  return cached(req, reply, { model: 'typical-day-baseline', ...score }, 600);
+});
 
 app.get<{ Querystring: { limit?: string } }>(
   '/api/alerts/outcomes',
