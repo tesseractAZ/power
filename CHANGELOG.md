@@ -3,6 +3,115 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.18 — 2026-05-25
+
+**Ship-wide audible broadcasts.** v0.9.17 added Starfleet alert sounds
+to the operator's browser. But operators aren't always at their
+station — so this release pushes the same alert klaxons to every
+HomePod + Sonos speaker throughout the property, via Home Assistant's
+`media_player` service.
+
+### How it works
+
+We're already an HA add-on, so we get `SUPERVISOR_TOKEN` for free —
+that grants REST access to HA Core at `http://supervisor/core/api`.
+We use that to call `media_player.play_media`, `media_player.volume_set`,
+optional `tts.SERVICE`, and `sonos.snapshot` / `sonos.restore` so we
+don't trample existing music.
+
+On startup we synthesize four TMP-authentic WAV files from primitive
+oscillators (no samples shipped, zero licensing entanglement):
+
+- **`red-alert.wav`** — 6 cycles of 440/660 Hz square-wave alternation
+  (~3 s). Higher cycle count than the in-browser version because
+  speakers are typically further from the listener.
+- **`yellow-alert.wav`** — 880 → 660 Hz descending sine bell
+- **`all-clear.wav`** — A4 → D5 → A5 ascending sine sweep
+- **`boatswain.wav`** — the iconic two-tone sweep that PRECEDES any
+  shipwide verbal address ("Captain to the bridge…") — plays only
+  when TTS is configured
+
+WAVs live at `/data/audio/` and are served via Fastify static at
+`/audio/*.wav`. Speakers stream from there.
+
+### Broadcast policy
+
+The same transition-driven logic as the in-browser sounds, but with
+physical-speaker etiquette baked in:
+
+- Fires on **condition transitions**, not per-tick (GREEN→RED, etc.)
+- A **new** critical alert while already RED fires a shorter re-alert
+- **First-tick is silent** — joining an already-RED state at boot
+  doesn't klaxon the house
+- **Min severity gate** (default `critical`) — yellow alerts don't
+  broadcast unless explicitly enabled
+- **Quiet hours** suppress warning/info; critical bypasses
+- **Sonos snapshot/restore** wraps each broadcast so music resumes
+- **Volume override** applied via `media_player.volume_set` before
+  play, so a sleepy speaker doesn't no-op the alert
+
+### Optional verbal announcement
+
+If `BROADCAST_TTS_SERVICE` is set (e.g. `tts.google_translate_say`,
+`tts.cloud_say`, `tts.piper`), each broadcast plays:
+1. Boatswain whistle (pre-announcement chime)
+2. Klaxon
+3. TTS situational message ("Red alert. Critical condition,
+   <alert title>")
+
+Klaxon-only mode (no TTS) ships zero verbal noise, matching the
+ambient-alarm style some operators prefer.
+
+### Test surface
+
+- `POST /api/broadcast/test` body `{ level: "red" | "yellow" | "green" }`
+  fires a test transmission (bypasses all gates)
+- `GET /api/broadcast/status` returns config + last-broadcast outcome
+- **OPS station in the Starfleet bridge** now has a "SHIPWIDE INTERCOM"
+  panel with three one-tap test buttons (RED ALERT / YELLOW ALERT /
+  ALL CLEAR), config snapshot, and last-broadcast outcome. Operators
+  can verify the klaxon chain weekly without waiting for a real alarm.
+
+### Configuration
+
+All knobs in the HA add-on Configuration tab, all opt-in:
+
+```
+BROADCAST_ENABLED: true
+BROADCAST_TARGETS: "media_player.living_room, media_player.kitchen,
+                    media_player.master_homepod"
+BROADCAST_AUDIO_BASE: "http://homeassistant.local:8787"
+BROADCAST_VOLUME: 0.6
+BROADCAST_MIN_SEVERITY: critical
+BROADCAST_QUIET_HOURS: "22-06"
+BROADCAST_TTS_SERVICE: "tts.google_translate_say"
+BROADCAST_TTS_LANGUAGE: en-US
+BROADCAST_SONOS_RESTORE: true
+```
+
+### Architecture
+
+- `server/src/audioAssets.ts` — WAV synthesis, Buffer-based RIFF
+  writer, idempotent generation to `/data/audio/`
+- `server/src/haService.ts` — `callHaService(domain, service, data)`
+  via Supervisor REST + `SUPERVISOR_TOKEN`. Returns `{ ok }` instead
+  of throwing so the broadcast loop never crashes on a HA glitch.
+- `server/src/broadcast.ts` — env-driven config, `startBroadcastMonitor()`
+  with 10 s tick polling alerts for condition transitions
+- `server/src/index.ts` — generates audio at startup, registers
+  `/audio/*` static route, starts monitor, exposes test + status endpoints
+- `web/src/starfleet/components/BroadcastPanel.tsx` — the OPS-station
+  test panel
+- `rootfs/etc/services.d/ecoflow-panel/run` — exports all `BROADCAST_*`
+  env vars from add-on Configuration
+
+### Tests
+
+`broadcast.test.ts` covers config parsing (env-var → struct), condition
+derivation (alerts → green/yellow/red), and end-to-end audio asset
+synthesis (writes WAVs, validates RIFF headers, idempotence). 76
+server tests total (68 → 76), all pass.
+
 ## 0.9.17 — 2026-05-25
 
 **Starfleet bridge gets audio.** TMP-era alert klaxons, chimes, and UI

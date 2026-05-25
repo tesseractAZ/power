@@ -12,6 +12,7 @@
 
 import { BridgePanel } from '../components/BridgePanel';
 import { JellybeanArray, type JellybeanCell } from '../components/JellybeanArray';
+import { BroadcastPanel } from '../components/BroadcastPanel';
 import { stardate } from '../utils';
 import type { FleetSnapshot, DeviceSnapshot } from '../../types';
 
@@ -37,6 +38,9 @@ export function Ops({ snapshot }: { snapshot: FleetSnapshot | null }) {
   const onlineCount = devices.filter((d) => d.online).length;
 
   return (
+    <div className="space-y-3">
+    {/* === Shipwide intercom test (v0.9.18) ====================== */}
+    <BroadcastPanel />
     <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-3">
       {/* === Subsystem (device) status ================================ */}
       <BridgePanel title="SUBSYSTEM STATUS · FLEET INVENTORY" subtitle={`${onlineCount} / ${devices.length} ONLINE`} dept="ops">
@@ -72,6 +76,7 @@ export function Ops({ snapshot }: { snapshot: FleetSnapshot | null }) {
           </div>
         </div>
       </BridgePanel>
+    </div>
     </div>
   );
 }

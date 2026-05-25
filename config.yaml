@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.9.17"
+version: "0.9.18"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -73,6 +73,33 @@ options:
   # Leave empty in normal operation. Requires the same value in the
   # `x-write-debug-token` header on every call.
   WRITE_DEBUG_TOKEN: ""
+  # v0.9.18 — ship-wide audible broadcast to HomePod / Sonos via HA's
+  # media_player service. Off by default; set ENABLED=true and at
+  # least one target entity ID to opt in.
+  BROADCAST_ENABLED: false
+  # Comma-separated media_player entity IDs. e.g.:
+  #   media_player.living_room, media_player.kitchen, media_player.master_homepod
+  BROADCAST_TARGETS: ""
+  # URL the speakers will fetch the klaxon WAVs from. Must be reachable
+  # from the speakers on the LAN. Default uses mDNS — set to your HA
+  # Pi's IP (http://192.168.x.x:8787) if mDNS is flaky on your network.
+  BROADCAST_AUDIO_BASE: "http://homeassistant.local:8787"
+  BROADCAST_VOLUME: 0.5
+  # Min alarm severity that triggers a broadcast.
+  BROADCAST_MIN_SEVERITY: critical
+  # Quiet hours suppress warning/info broadcasts. Critical always fires.
+  BROADCAST_QUIET_HOURS: "22-06"
+  # Optional verbal TTS announcement after the klaxon. Leave empty to
+  # play klaxon only. Set to your HA TTS service name, e.g.:
+  #   tts.google_translate_say   (built-in, no key needed)
+  #   tts.cloud_say              (Home Assistant Cloud / Nabu Casa)
+  #   tts.piper                  (local Piper add-on)
+  BROADCAST_TTS_SERVICE: ""
+  BROADCAST_TTS_LANGUAGE: en-US
+  # Sonos-specific: snapshot the current state before broadcasting and
+  # restore it after, so a music session resumes. Leave on unless you
+  # see odd behavior.
+  BROADCAST_SONOS_RESTORE: true
 schema:
   ECOFLOW_ACCESS_KEY: password
   ECOFLOW_SECRET_KEY: password
@@ -106,3 +133,12 @@ schema:
   MQTT_DISCOVERY_PASS: "password?"
   MQTT_DISCOVERY_PREFIX: "str?"
   WRITE_DEBUG_TOKEN: "password?"
+  BROADCAST_ENABLED: bool
+  BROADCAST_TARGETS: "str?"
+  BROADCAST_AUDIO_BASE: "str?"
+  BROADCAST_VOLUME: float
+  BROADCAST_MIN_SEVERITY: list(critical|warning)
+  BROADCAST_QUIET_HOURS: "str?"
+  BROADCAST_TTS_SERVICE: "str?"
+  BROADCAST_TTS_LANGUAGE: "str?"
+  BROADCAST_SONOS_RESTORE: bool

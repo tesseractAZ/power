@@ -82,6 +82,30 @@ if bashio::config.has_value 'WRITE_DEBUG_TOKEN'; then
   bashio::log.warning "WRITE_DEBUG_TOKEN is SET — POST /api/device/send-command is enabled."
 fi
 
+# v0.9.18 — ship-wide audible broadcast to HomePod / Sonos.
+if bashio::config.true 'BROADCAST_ENABLED'; then
+  export BROADCAST_ENABLED=true
+else
+  export BROADCAST_ENABLED=false
+fi
+export BROADCAST_TARGETS="$(bashio::config 'BROADCAST_TARGETS')"
+export BROADCAST_AUDIO_BASE="$(bashio::config 'BROADCAST_AUDIO_BASE')"
+export BROADCAST_VOLUME="$(bashio::config 'BROADCAST_VOLUME')"
+export BROADCAST_MIN_SEVERITY="$(bashio::config 'BROADCAST_MIN_SEVERITY')"
+export BROADCAST_QUIET_HOURS="$(bashio::config 'BROADCAST_QUIET_HOURS')"
+export BROADCAST_TTS_SERVICE="$(bashio::config 'BROADCAST_TTS_SERVICE')"
+export BROADCAST_TTS_LANGUAGE="$(bashio::config 'BROADCAST_TTS_LANGUAGE')"
+if bashio::config.true 'BROADCAST_SONOS_RESTORE'; then
+  export BROADCAST_SONOS_RESTORE=true
+else
+  export BROADCAST_SONOS_RESTORE=false
+fi
+if bashio::config.true 'BROADCAST_ENABLED'; then
+  bashio::log.info "broadcast: enabled (targets: $BROADCAST_TARGETS)"
+fi
+# SUPERVISOR_TOKEN is provided automatically by the HA Supervisor —
+# no need to export it manually. The Node process inherits it.
+
 bashio::log.info "Starting EcoFlow Panel on :${PORT} (telnet :${TELNET_PORT}, db ${DB_PATH})…"
 
 cd /app/server

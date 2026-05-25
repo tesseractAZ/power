@@ -15,6 +15,9 @@ import { createRecorder } from './recorder.js';
 import { computeTotals, startOfLocalDayMs, circuitHistoryByDay } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { isConfigured } from './notify.js';
+// v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
+import { generateAudioAssets } from './audioAssets.js';
+import { startBroadcastMonitor } from './broadcast.js';
 import {
   getDayForecast,
   computeDegradation,
@@ -151,6 +154,18 @@ if (existsSync(webDist)) {
 } else {
   app.log.info(`web: no built bundle at ${webDist} (dev mode — Vite at :5173)`);
 }
+
+// v0.9.18 — synthesise the Starfleet alert klaxon WAVs at startup and
+// serve them at /audio/*. HomePod / Sonos stream these URLs when we
+// broadcast condition transitions via Home Assistant's media_player.
+const audioDir = resolve(process.env.DATA_DIR ?? '/data', 'audio');
+await generateAudioAssets(audioDir, (m) => app.log.info(m));
+await app.register(fastifyStatic, {
+  root: audioDir,
+  prefix: '/audio/',
+  decorateReply: false,
+  wildcard: false,
+});
 
 const store = new SnapshotStore();
 const recorder = createRecorder(store, (m) => app.log.info(m));
@@ -866,10 +881,54 @@ try {
 // 5 min the next /api/ha-state caller paid ~1.8s rebuilding everything).
 const cacheWarmer = startCacheWarmer(store, recorder, (m) => app.log.info(m));
 
+// v0.9.18 — Ship-wide audible broadcast. Listens for alert-condition
+// transitions (green/yellow/red) and pushes Starfleet klaxon WAVs to
+// configured HomePod / Sonos media_player entities via HA service calls.
+// Off unless BROADCAST_ENABLED=true and at least one target is set.
+const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m));
+
 // Diagnostics: per-task warm timings + alert-monitor stats.
 app.get('/api/cache-warmer/status', async () => ({
   timings: cacheWarmer.lastTimings(),
 }));
+
+/* v0.9.18 — broadcast diagnostic + manual test endpoints.
+ *
+ * GET  /api/broadcast/status — current config snapshot + last broadcast
+ * POST /api/broadcast/test   — fire a test broadcast (bypasses all gates)
+ *   body: { level?: "red" | "yellow" | "green" }   (default "red")
+ */
+app.get('/api/broadcast/status', async () => {
+  const s = broadcast.status();
+  const cfg = broadcast.config();
+  return {
+    ...s,
+    config: {
+      enabled: cfg.enabled,
+      targets: cfg.targets,
+      audioBase: cfg.audioBase,
+      volume: cfg.volume,
+      minSeverity: cfg.minSeverity,
+      quietHours: cfg.quietHours,
+      ttsService: cfg.ttsService,
+      sonosRestore: cfg.sonosRestore,
+    },
+  };
+});
+
+app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
+  '/api/broadcast/test',
+  async (req, reply) => {
+    const level = req.body?.level ?? 'red';
+    if (!['red', 'yellow', 'green'].includes(level)) {
+      reply.code(400);
+      return { ok: false, error: 'level must be red, yellow, or green' };
+    }
+    const r = await broadcast.test(level);
+    if (!r.ok) reply.code(502);
+    return r;
+  },
+);
 
 await app.listen({ host: config.host, port: config.port });
 app.log.info(`EcoFlow panel API listening on http://${config.host}:${config.port}`);
@@ -882,6 +941,7 @@ const shutdown = async () => {
   stopTelnet?.();
   stopMqttDiscovery?.();
   cacheWarmer.stop();
+  broadcast.stop();
   recorder.close();
   await app.close();
   process.exit(0);
