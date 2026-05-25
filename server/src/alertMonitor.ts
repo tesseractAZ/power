@@ -54,7 +54,13 @@ export interface AlertActionStats {
   medianDurationMs: number;
   longestDurationMs: number;
   shortClearsCount: number;          // resolved within 10 min — likely auto-resolve / transient
-  downgradedSilenced: boolean;       // auto-downgrade decision
+  downgradedSilenced: boolean;       // info-tier silencing (v0.7.5: rises ≥5 + short-clear ≥70%)
+  /** v0.9.3 — warning→info demotion (warning rises a lot AND mostly short-clears). */
+  warningDemotedToInfo: boolean;
+  /** v0.9.3 — chronic-noise silencing (alert rises a lot AND user almost never clears it). */
+  chronicNoiseSilenced: boolean;
+  /** v0.9.3 — count of times the alert cleared but our debounce window meant we treated it as a "rise that never cleared" (excluded from shortClearsCount). */
+  neverClearedCount: number;
   lastSeenAt: number | null;
 }
 
@@ -212,8 +218,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
   const DIGEST_HOUR = Number(process.env.NOTIFY_DIGEST_HOUR ?? 7);
   const SHORT_CLEAR_MS = 10 * 60 * 1000;          // resolved within 10 min = transient
-  const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before auto-downgrade
+  const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
   const DOWNGRADE_SHORT_FRAC = 0.7;               // ≥ 70% of rises clear within SHORT_CLEAR_MS
+  // v0.9.3 — extended self-tuning rules
+  const DEMOTE_WARN_MIN_RISES = 10;               // need ≥ 10 rises before demoting warning→info
+  const DEMOTE_WARN_SHORT_FRAC = 0.8;             // ≥ 80% short-clear → demote (stricter than info silencing)
+  const CHRONIC_NOISE_MIN_RISES = 10;             // need ≥ 10 rises before chronic-noise silencing
+  const CHRONIC_NOISE_LONG_MS = 4 * 60 * 60 * 1000; // "long" = persists ≥ 4 hours
+  const CHRONIC_NOISE_NEVER_CLEAR_FRAC = 0.5;     // ≥ 50% of rises stayed alive past CHRONIC_NOISE_LONG_MS without user clearing
 
   const updateTelemetry = (alertId: string, duration: number, alert: Alert) => {
     let t = telemetry.get(alertId);
@@ -221,7 +233,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       t = {
         alertId, title: alert.title, severity: alert.severity, category: alert.category,
         riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
-        downgradedSilenced: false, lastSeenAt: null,
+        downgradedSilenced: false, warningDemotedToInfo: false, chronicNoiseSilenced: false,
+        neverClearedCount: 0, lastSeenAt: null,
       };
     }
     t.riseCount++;
@@ -231,7 +244,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     t.medianDurationMs = t.medianDurationMs === 0 ? duration : Math.round((t.medianDurationMs + duration) / 2);
     if (duration > t.longestDurationMs) t.longestDurationMs = duration;
     if (duration <= SHORT_CLEAR_MS) t.shortClearsCount++;
-    // Auto-downgrade: info-severity alerts that recur a lot and always clear fast
+    if (duration >= CHRONIC_NOISE_LONG_MS) t.neverClearedCount++;
+
+    // Rule 1 (v0.7.5): info-severity alerts that recur a lot and always clear fast → silence
     if (
       t.severity === 'info' &&
       t.riseCount >= DOWNGRADE_MIN_RISES &&
@@ -239,25 +254,54 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     ) {
       t.downgradedSilenced = true;
     }
+    // Rule 2 (v0.9.3): warning-severity alerts that mostly short-clear → demote to info
+    // (still surface in the UI; just stop firing notifications at warning priority).
+    if (
+      t.severity === 'warning' &&
+      t.riseCount >= DEMOTE_WARN_MIN_RISES &&
+      t.shortClearsCount / t.riseCount >= DEMOTE_WARN_SHORT_FRAC
+    ) {
+      t.warningDemotedToInfo = true;
+    }
+    // Rule 3 (v0.9.3): chronic-noise — alert persists a long time but the user
+    // never actually acts on it. The condition exists but the user has
+    // accepted it (e.g. a freezer with weird draw that they know about). Stop
+    // notifying since they're not going to do anything; alert still shows.
+    // Applies to any severity below critical (critical always notifies).
+    if (
+      t.severity !== 'critical' &&
+      t.riseCount >= CHRONIC_NOISE_MIN_RISES &&
+      t.neverClearedCount / t.riseCount >= CHRONIC_NOISE_NEVER_CLEAR_FRAC
+    ) {
+      t.chronicNoiseSilenced = true;
+    }
     telemetry.set(alertId, t);
   };
 
   const dispatch = async (alert: Alert, kind: 'new' | 'resolved') => {
     if (!isConfigured(cfg)) return;
     const t = telemetry.get(alert.id);
-    if (t?.downgradedSilenced) return;
+    // v0.7.5 silencing or v0.9.3 chronic-noise silencing — skip notify entirely.
+    if (t?.downgradedSilenced || t?.chronicNoiseSilenced) return;
+    // v0.9.3 warning→info demotion — alert still notifies but at info priority
+    // (no [CRITICAL] prefix, lower ntfy priority). The decision applies only
+    // to new alerts, not resolved-cleared notifications.
+    const effectiveSeverity: Severity =
+      t?.warningDemotedToInfo && alert.severity === 'warning' && kind === 'new'
+        ? 'info'
+        : alert.severity;
     const title =
       kind === 'resolved'
         ? `Resolved: ${alert.title}`
-        : `${alert.severity === 'critical' ? '[CRITICAL] ' : ''}${alert.title}`;
+        : `${effectiveSeverity === 'critical' ? '[CRITICAL] ' : ''}${alert.title}`;
     try {
       await sendNotification(cfg, {
         title: `EcoFlow · ${title}`,
         body: kind === 'resolved' ? `${alert.detail}\n\n(condition cleared)` : alert.detail,
-        severity: kind === 'resolved' ? 'resolved' : alert.severity,
+        severity: kind === 'resolved' ? 'resolved' : effectiveSeverity,
       });
       sentSinceStart++;
-      log(`notify: sent "${title}" via ${cfg.channel}`);
+      log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune)` : ''}`);
     } catch (e: any) {
       log(`notify: send failed — ${e?.message ?? e}`);
     }

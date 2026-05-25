@@ -3,6 +3,69 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.3 — 2026-05-24
+
+Backlog ship — four small-but-valuable items drained from the
+deferred follow-up list.
+
+### Features
+
+- **EVSE window prediction → load forecast.** The
+  `computeEvWindowPrediction` pattern detector (v0.7.5) surfaces
+  recurring EV-charging sessions but they were previously only used
+  for the Predictive Insights display. v0.9.3 lifts them into
+  `getDayForecast`'s load curve — for each upcoming session in
+  `upcomingNext24h`, its `watts` are added to the matching forecast
+  hour. The day-of-week-aware historical curve would otherwise
+  flatten a known recurring spike (e.g. "every Tuesday 7pm"); now
+  the spike shows up explicitly in tomorrow's forecast. New
+  `predictedEvLoadW` field per `ForecastHour` shows which hours got
+  an EV bump and by how much.
+
+- **Kalman side-by-side EOL in `analysePack`.** The Kalman filter
+  from v0.9.0 now runs alongside the OLS regression in the per-pack
+  degradation pipeline. OLS remains the canonical projection (no
+  behavior change for existing consumers); the new fields
+  `kalmanSmoothedSoh`, `kalmanFadePctPerYear`,
+  `kalmanFadeStdevPctPerYear`, `kalmanYearsToEol`, `kalmanEolDate`
+  ride alongside on every `PackDegradation` record. Lets you compare
+  the two projections on real data — when Kalman and OLS diverge,
+  the noise/sample-window assumptions are different and the user
+  should weight recent data more heavily.
+
+- **Extended self-tuning auto-downgrade.** v0.7.5 added an info-tier
+  silencing rule (info alerts that rise ≥ 5× with ≥ 70%
+  short-clear get silenced). v0.9.3 adds two more:
+  - **Warning → info demotion**: warning alerts that rise ≥ 10× with
+    ≥ 80% short-clear get demoted to info severity. They still
+    surface in the UI but at lower notification priority.
+  - **Chronic-noise silencing**: any non-critical alert that rises
+    ≥ 10× and persists ≥ 4 h on ≥ 50% of rises (i.e. the user knows
+    about it and isn't clearing it) gets silenced. The condition still
+    shows in the UI; just stops firing notifications.
+
+  Both decisions surface as new `warningDemotedToInfo` /
+  `chronicNoiseSilenced` flags on the existing
+  `/api/alert-telemetry` endpoint.
+
+### Docs
+
+- **README roadmap refresh.** Reflects everything shipped through
+  v0.9.3, plus an explicit **Held until requested** section listing
+  the write-side controls you've deferred and a **Genuinely
+  deferred (research-grade)** section explaining what's blocked on
+  multi-week effort or missing data.
+
+### Tests
+
+- 48 server tests still passing.
+
+### Notes
+
+- No new env vars, no schema changes, no breaking changes.
+- The Kalman side-by-side projection adds five fields per pack;
+  consumers that don't know about them ignore them naturally.
+
 ## 0.9.2 — 2026-05-24
 
 Multi-source weather ensemble — Phoenix-specific value.

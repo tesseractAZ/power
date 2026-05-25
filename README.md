@@ -177,22 +177,79 @@ production vs development to keep the PR list short.
 
 ## Roadmap
 
-Grouped by planned release. Each item leverages existing code paths or
-introduces a small new integration; nothing requires a wholesale rebuild.
+### Shipped through v0.9.3
 
-### Shipped through v0.7.5
+The original roadmap (v0.7.0 / v0.8.0+ / external + infrastructure) and
+two follow-on series (predictive-engine v2, polish + tests) are all
+shipped. Highlights — see [CHANGELOG.md](CHANGELOG.md) for the per-
+release breakdown:
 
-The full roadmap from v0.7.0, v0.8.0+, and external/infrastructure
-shipped in **v0.7.5** — see [CHANGELOG.md](CHANGELOG.md) for the
-17-feature breakdown. Highlights: alert clustering ("incidents"),
-internal-resistance trending, forecast-skill calibration,
-ambient-coupled thermal forecast, shade-event detection, soiling
-decomposition, string-mismatch detection, EV-window prediction,
-charge-curve fingerprinting, NWS storm-prep, thermal-event counter,
-MPPT efficiency drift + inverter standby losses, confidence trends,
-quiet-hours + morning-digest notifications, alert-action telemetry,
-self-consumption ratio, and full MQTT Discovery so HA users skip
-the YAML snippet entirely.
+**Predictive engine** — peer-comparison anomaly, self-baseline anomaly,
+day-ahead forecast (cloud-aware + day-of-week-aware load + 3-day horizon
++ P10/P50/P90 probabilistic bands + counterfactual cloud-cover
+explanations + multi-source weather ensemble with NWS NDFD), per-pack
+SoH degradation (Arrhenius + coulombic eff + Kalman side-by-side),
+PackRiskScore (heuristic v1), shade detection, soiling decomposition,
+string-mismatch, EV window prediction + load-curve folding, thermal-
+event counter, MPPT efficiency drift, alert clustering, root-cause
+graph, energy dispatch planner, forecast skill calibration, Bayesian
+recursive GHI→PV updates with credible intervals.
+
+**HA integration** — REST sensors, MQTT Discovery (22+ entities), HA
+Energy Dashboard (5 lifetime kWh counters + per-circuit Individual
+devices), per-circuit lifetime accumulators, carbon offset reporting,
+TOU tariff cost tracking, calendar ICS feed, repair issues feed,
+diagnostic entity categorization, NWS storm-prep alerts, HACS Lovelace
+"stats" card.
+
+**Notifications** — ntfy / Pushover / webhook, quiet-hours +
+morning-digest, alert telemetry with three-tier self-tuning
+auto-downgrade (info-silencing, warning→info demotion, chronic-noise
+silencing).
+
+**Plumbing** — Node 22 + Fastify + node:sqlite + tsx, native ARM64 CI
+build pipeline (1m 30s end-to-end), 48-test CI gate that blocks bad
+releases, PWA-installable web UI with route-level code splitting
+(60 kB initial JS), persistent lifetime energy accumulator that
+survives recorder pruning + restarts, telnet TUI for terminal monitoring,
+per-SN connectivity logging, EcoFlow-zombie detection with actionable
+fix steps in offline alerts.
+
+### Held until requested
+
+The following are **read-only by design**. The panel doesn't modify the
+EcoFlow devices it observes. When you're ready to make it bi-directional
+these are the candidates:
+
+- Boost backup reserve switch (storm mode)
+- Quiet-hours notification override toggle
+- Skip next predicted EV charging window
+- Force pack rebalance button
+- Per-circuit on/off
+- Auto-apply the recommended dispatch plan
+- Live SHP2 strategy adjustment (mode, reserve, TOU windows)
+
+### Genuinely deferred (research-grade)
+
+Each is multi-week effort or blocked on data the deployment doesn't yet
+generate:
+
+- **Trained ML failure-mode classifier** — replaces the heuristic
+  `PackRiskScore` with a gradient-boosted model. Needs a labeled
+  pack-failure dataset, which only accumulates as deployments age and
+  packs hit EOL. Shipping infrastructure (feature engineering, API
+  shape, drop-in replacement target) is already in place.
+- **LAN-direct EcoFlow protocol** — eliminates the "EcoFlow Cloud
+  zombie" failure mode by reading telemetry from the SHP2 / DPUs
+  directly over the local network. Multi-week reverse engineering on
+  the wire format.
+- **Multi-site federation** — anonymized fleet comparison across
+  installs ("your fade rate is 0.8× peer median across N installs").
+  Needs server infrastructure + opt-in plumbing + privacy review.
+- **Full HACS dashboard rewrite** — re-implement the entire React UI
+  as Lit/Web Components inside HA. Marginal benefit over the PWA;
+  multi-week port. The current "stats card" covers the highest-value
+  HA-side use cases.
 
 ### Standing
 
