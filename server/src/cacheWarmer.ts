@@ -14,6 +14,7 @@ import {
   computeProbabilisticForecast,
   computeMultiDayForecast,
   computeAmbientThermalForecast,
+  resetHaStateShortLivedCaches,
 } from './analytics.js';
 
 /**
@@ -29,6 +30,15 @@ import {
  * Pre-warmer fix: call all of them in the background every WARM_INTERVAL_MS
  * (4 min, just inside the 5-min TTL window). When a real request arrives,
  * every cache is warm and the response is <5ms.
+ *
+ * v0.9.11 — log analysis showed the spikes were still happening every
+ * ~5 min in production. Root cause: each `compute*` function's cache
+ * check returns the cached value WITHOUT updating its timestamp when
+ * the cache is still warm, so the 4-min warmer never actually refreshes
+ * a 5-min cache — it just reads it. The cache then expires 5 min after
+ * the original cold compute, leaving a 1-3 min cold window every cycle.
+ * Fix: call resetHaStateShortLivedCaches() at the start of each warm
+ * cycle, forcing the subsequent computes to do real work + restamp `ts`.
  *
  * Errors in one function don't stop the rest — each is wrapped so a
  * transient weather-API failure doesn't block carbon/tariff warming.
@@ -77,6 +87,10 @@ export function startCacheWarmer(
       return;
     }
     try {
+      // v0.9.11 — clear the short-TTL caches so the subsequent computes
+      // actually do the work instead of returning still-warm values
+      // without restamping `ts`. See the file-level note for the bug.
+      resetHaStateShortLivedCaches();
       // Two-pass strategy: forecast/degradation/RTE/clipping first because
       // several downstream functions consume them; then everything else.
       const fc = await getDayForecast(devices, recorder, () => {});

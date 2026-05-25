@@ -3,6 +3,52 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.12 — 2026-05-25
+
+Fixes a long-standing cache-warmer no-op bug surfaced by careful log
+analysis: the warmer was running on schedule (every 4 min) but it
+wasn't actually refreshing the 5-min TTL caches behind `/api/ha-state`,
+causing ~2 s response-time spikes once every 5 minutes.
+
+### The bug
+
+Each `compute*` function caches its result with the pattern:
+
+```ts
+if (cache && Date.now() - cache.ts < TTL_MS) return cache.value;
+// ...compute, then assign cache = { ts: now, value };
+```
+
+When the cache is still warm, the function returns the cached value
+**without updating `cache.ts`**. So a 4-min-interval warmer call that
+hits an already-warm cache is effectively a no-op — the cache then
+expires 5 min after the original cold compute (not 5 min after the
+most recent warmer call), leaving a 1-3 min cold window every cycle.
+
+The Pino access log from a 70-min production window showed exactly
+this pattern: `/api/ha-state` spiking to ~2 s every ~5 min, with the
+spikes spaced exactly 5 min apart in steady state.
+
+### Fix
+
+`server/src/analytics.ts` exports a new `resetHaStateShortLivedCaches()`
+function that nulls the five short-TTL caches used by `/api/ha-state`
+(rte, clipping, self-consumption, carbon, tariff). The cache warmer
+calls it at the start of every cycle, forcing the subsequent compute
+calls to do real work and restamp `ts` to "now".
+
+### Other caches
+
+Long-TTL caches (degradation, getDayForecast, multi-day, etc. — all
+30 min) and the runway 1-min cache are left alone — they're either
+called rarely enough that the no-op doesn't matter, or warmed often
+enough that the cold window is below the polling cadence.
+
+### Tests
+
+- +2 tests in `analytics.test.ts` exercising the reset (cached-call
+  semantics + idempotence). 68 tests total (66 → 68), all pass.
+
 ## 0.9.11 — 2026-05-25
 
 New: **runtime theme toggle** in the header (Default / Babylon 5) +

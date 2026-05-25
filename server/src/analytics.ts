@@ -4416,3 +4416,30 @@ export function computePackRiskScores(
   if (dpus.length > 0) riskCache = { ts: now, value };
   return value;
 }
+
+/* ===================================================================
+ * v0.9.11 — cache-warmer support.
+ *
+ * The short-TTL caches (5 min) used by /api/ha-state — RTE, clipping,
+ * self-consumption, carbon, tariff — follow the standard pattern:
+ *
+ *   if (cache && !expired) return cache.value;   // cache.ts NOT updated
+ *   ...compute, then assign cache = { ts: now, value };
+ *
+ * That means a cache-warmer call hitting a still-warm cache returns
+ * cached without refreshing `ts`. The TTL still expires 5 min after
+ * the original cold-compute, leaving a 1-3 min cold window before the
+ * next 4-min warm cycle actually does the work.
+ *
+ * Fix: the warmer calls this resetter at the start of each cycle,
+ * which nulls the caches so the subsequent compute calls are guaranteed
+ * to actually do the work and re-stamp `ts` to "now". TTL-management
+ * for the cached values themselves is unchanged.
+ * =================================================================== */
+export function resetHaStateShortLivedCaches(): void {
+  rteCache = null;
+  selfConsumptionCache = null;
+  clippingCache = null;
+  carbonCache = null;
+  tariffCache = null;
+}
