@@ -72,7 +72,19 @@ export function Conn({ snapshot }: { snapshot: FleetSnapshot | null }) {
           <Field label="HEADING" value={heading} large />
           <Field label="VELOCITY" value={`${fmtKW(Math.abs(batNetW))} kW`} large />
           <Field label="WARP FACTOR" value={warpFactor(batNetW)} large />
-          <Field label="DURATION" value={runway?.hoursToReserve != null ? `${runway.hoursToReserve.toFixed(1)} HR` : '— HR'} large />
+          <Field
+            label="DURATION"
+            /* v0.9.24 — charging fleets always have null hoursToReserve, which
+             * displayed as "— HR" giving the operator no useful information.
+             * When net is negative (charging) we say so explicitly. */
+            value={
+              runway?.hoursToReserve != null
+                ? `${runway.hoursToReserve.toFixed(1)} HR`
+                : batNetW < -5 ? 'CHARGING'
+                : '— HR'
+            }
+            large
+          />
         </div>
         <div className="mt-4 pt-3 border-t border-[#5a4520]">
           <div className="sf-label mb-2">FLIGHT RECORDER · SUMMARY</div>
@@ -114,13 +126,29 @@ export function Conn({ snapshot }: { snapshot: FleetSnapshot | null }) {
         <div className="mt-3 pt-3 border-t border-[#5a4520] text-center">
           <div className="sf-label mb-1">E.T.A. CALCULATIONS</div>
           <div className="grid grid-cols-2 gap-3">
+            {/* v0.9.24 — when the battery is charging both runway values are
+             * null, which previously rendered as "∞ HR" — technically correct
+             * but unhelpful. Show "CHARGING" instead so the operator knows
+             * the system is actively recovering. */}
             <div>
               <div className="sf-label" style={{ color: '#c4242a' }}>TO RESERVE FLOOR</div>
-              <div className="sf-readout sf-readout-md">{runway?.hoursToReserve != null ? runway.hoursToReserve.toFixed(1) : '∞'}<span className="sf-readout-unit">HR</span></div>
+              <div className="sf-readout sf-readout-md">
+                {runway?.hoursToReserve != null
+                  ? <>{runway.hoursToReserve.toFixed(1)}<span className="sf-readout-unit">HR</span></>
+                  : batNetW < -5
+                    ? <span style={{ color: '#6fb854' }}>CHARGING</span>
+                    : <>∞<span className="sf-readout-unit">HR</span></>}
+              </div>
             </div>
             <div>
               <div className="sf-label" style={{ color: '#e89c40' }}>TO ZERO BANK</div>
-              <div className="sf-readout sf-readout-md">{runway?.hoursToEmpty != null ? runway.hoursToEmpty.toFixed(1) : '∞'}<span className="sf-readout-unit">HR</span></div>
+              <div className="sf-readout sf-readout-md">
+                {runway?.hoursToEmpty != null
+                  ? <>{runway.hoursToEmpty.toFixed(1)}<span className="sf-readout-unit">HR</span></>
+                  : batNetW < -5
+                    ? <span style={{ color: '#6fb854' }}>CHARGING</span>
+                    : <>∞<span className="sf-readout-unit">HR</span></>}
+              </div>
             </div>
           </div>
         </div>

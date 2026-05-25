@@ -15,8 +15,14 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       // Vite runs the proxy server-side, so the backend can stay on localhost.
-      '/api': 'http://127.0.0.1:8787',
-      '/ws': { target: 'ws://127.0.0.1:8787', ws: true },
+      // v0.9.17-dev — overridable via VITE_API_TARGET so the dev server can
+      // be pointed at the deployed HA Pi (`homeassistant.local:8787`) for
+      // in-browser debugging. Default keeps the original `127.0.0.1`.
+      '/api': process.env.VITE_API_TARGET || 'http://127.0.0.1:8787',
+      '/ws': {
+        target: (process.env.VITE_API_TARGET || 'http://127.0.0.1:8787').replace(/^http/, 'ws'),
+        ws: true,
+      },
     },
   },
   build: {

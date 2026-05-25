@@ -4,19 +4,28 @@
  */
 
 /**
- * TMP-era stardate. The Star Trek franchise has had several formulae;
- * the TNG-onward convention (year offset × 1000 + day-of-year fraction)
- * gives the densest, most "computer-readable" stardate so we use it.
- * Result format: `XXXXX.X` (e.g. `78145.7`).
+ * TMP-era stardate.
+ *
+ * v0.9.24 — the previous formula anchored to the TNG era (year 2364 =
+ * stardate 41000) and went deeply negative for present-day calendar
+ * dates (e.g. mid-2026 produced `-296603.8`). The bridge UI is
+ * explicitly TMP-era (1979 film), so we anchor to TMP-style stardates
+ * instead: the actual film opens at STARDATE 7411.4. We treat current
+ * calendar year as ~7000 and slide forward by ~100 per real year +
+ * 1000 × day-fraction within the year, giving a stable 4-digit
+ * `XXXX.X` readout in the TMP range that visibly ticks across the day.
+ *
+ * Result format: `XXXX.X` (e.g. `7341.6`).
  */
 export function stardate(now = new Date()): string {
-  // Anchor: TNG epoch begins ~stardate 41000 on 2364-01-01.
-  // sd = 41000 + (year - 2364) × 1000 + (dayOfYear / daysInYear) × 1000
+  const TMP_ANCHOR_YEAR = 2026; // year that maps to base stardate
+  const BASE_SD = 7000;
+  const PER_YEAR = 100;
   const year = now.getFullYear();
   const start = new Date(year, 0, 1).getTime();
   const end = new Date(year + 1, 0, 1).getTime();
   const dayFrac = (now.getTime() - start) / (end - start);
-  const sd = 41000 + (year - 2364) * 1000 + dayFrac * 1000;
+  const sd = BASE_SD + (year - TMP_ANCHOR_YEAR) * PER_YEAR + dayFrac * 1000;
   return sd.toFixed(1);
 }
 

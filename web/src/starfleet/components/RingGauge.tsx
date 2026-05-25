@@ -149,8 +149,11 @@ export function RingGauge({
       )}
       {centerUnit && (
         <text
+          /* v0.9.24 — moved from cy + 0.16 to cy + 0.24 because the big
+           * centerNumber + its glow drop-shadow overlapped the unit text,
+           * leaving "PERCENT" only half-visible behind the "61.0". */
           x={cx}
-          y={cy + size * 0.16}
+          y={cy + size * 0.24}
           textAnchor="middle"
           fontFamily="Antonio, Bahnschrift, sans-serif"
           fontWeight="700"
