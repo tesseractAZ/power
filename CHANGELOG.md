@@ -3,6 +3,59 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.34 — 2026-05-25
+
+**TUI rendering bug-bash.** Comprehensive audit + test coverage for the
+Plant Operator telnet TUI. Built a synthetic 4-DPU + 1-SHP2 fixture
+and a per-screen invariant checker (visible width ≤ terminal width,
+no `undefined` / `NaN` literals, no `[object Object]` leaks), then
+fixed every screen that didn't pass.
+
+### Bugs fixed
+
+- **CONSOLE — MIMIC bus walls were misaligned.** Rows 2 and 3 of the
+  power-flow box (the side walls with "MAIN BUS" and "240V · 60.00 Hz"
+  labels) computed their right-wall position with `colW - 4 -
+  label.length` spaces of padding, which produced `colW - 1` visible
+  chars total — one column NARROWER than the top (`╔═══╗`) and bottom
+  (`╚═══╝`) rows at `colW`. The box drew with a visible jog on the
+  right side. Fixed to `colW - 3 - label.length`. Walls now line up
+  vertically on every row.
+- **CONSOLE — BATT.P.NET flag silently truncated.** Row passed
+  `'A/L/N · DCH'` (11 chars) into the 8-char `flags` column, which
+  truncated mid-word to `'A/L/N · D'` — operator couldn't tell DCH
+  from CHG from IDLE. Replaced with the bare 3-4 char status code
+  (`DCH` / `CHG` / `IDLE`) that fits the column budget.
+- **BUS — feeders table columns shifted right on every data row.**
+  Header used 2-space leading prefix (`"  "`), data rows used
+  `" <state-glyph> "` (3 visible chars). Every data column landed one
+  column right of its header label. Fixed by widening the header prefix
+  to 3 spaces.
+- **GEN — false "Pack 1/5" before BMS data lands.** Divider used
+  `p.packs.length || 5` so a freshly-discovered DPU with zero packs
+  read yet still claimed "5 packs" in the title. Now shows the actual
+  count (0) and substitutes a "waiting for first BMS payload" message
+  in place of the empty table.
+- **PV — fleet PV gauges hard-coded for a 10-HV+4-LV string fleet.**
+  Gauge would never reach 100% on Eric's 4-DPU fleet (one HV + one LV
+  MPPT each = 4+4 strings, not 10+4). Now scales to `dpus.length ×
+  per-MPPT nameplate` (1600 W HV / 1000 W LV per DPU), with safe
+  per-DPU minima.
+
+### Tests
+
+- **New `server/test/tui.test.ts`** (160 tests total, was 159). Every
+  Plant screen is rendered at three terminal shapes (80×24, 100×40,
+  200×60), three fleet shapes (full / empty / no-SHP2), plus targeted
+  edge cases:
+  - Out-of-range `genSel` clamped without crashing
+  - Many alerts with scroll offset
+  - `sysErrCode` set without crashing
+  - Mode chooser at narrow/wide widths, with each option highlighted
+- **Per-bug regression tests** for each of the four fixes above, so a
+  future refactor that re-introduces a column-misalignment or width-
+  overflow fails CI before shipping.
+
 ## 0.9.33 — 2026-05-25
 
 **Elevated permissions + Piper auto-setup.** v0.9.32 surfaced that
