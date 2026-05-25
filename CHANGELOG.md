@@ -3,6 +3,21 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.1 — 2026-05-24
+
+Hotfix — actually ship the HACS card source committed in v0.9.0.
+
+### Bug fix
+
+- **`.gitignore` was eating `lovelace/dist/`.** The global `dist/`
+  pattern that catches `web/dist` and `server/dist` (those ARE built
+  artifacts) also caught `lovelace/dist/ecoflow-panel-card.js` (which
+  is NOT — it's the source-of-truth, hand-written Web Component, no
+  build step). v0.9.0's commit dropped the card silently. HACS would
+  find `hacs.json` + `README.md` but `404` on the card itself.
+- **Fix:** added `!lovelace/dist/` exception to `.gitignore`, committed
+  the missing file. HACS install now works end-to-end.
+
 ## 0.9.0 — 2026-05-24
 
 **Predictive Engine v2.5.** Three previously-deferred research-grade
