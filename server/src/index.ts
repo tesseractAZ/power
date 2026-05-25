@@ -19,6 +19,9 @@ import { isConfigured } from './notify.js';
 import { generateAudioAssets } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
 import { getAllStates } from './haService.js';
+// v0.9.25 — feedback-loop foundation
+import { appendAlertOutcome, tailAlertOutcomes, computeFamilyStats, type AlertOutcome } from './alertOutcomes.js';
+import { getSnapshot, dropSnapshot } from './featureSnapshot.js';
 import {
   getDayForecast,
   computeDegradation,
@@ -819,6 +822,64 @@ app.post('/api/notify/test', async (_req, reply) => {
 
 app.get('/api/alerts/history', async (req, reply) =>
   cached(req, reply, { cleared: monitor.history() }, 30),
+);
+
+/* v0.9.25 — feedback-loop endpoints.
+ *
+ *   POST /api/alerts/outcome   submit operator verdict on an alert
+ *   GET  /api/alerts/outcomes  recent submissions (debug + audit)
+ *   GET  /api/alerts/outcomes/stats   per-family precision + counts
+ *
+ * No auth on these — same security model as the rest of the panel
+ * (lives behind HA Ingress or the LAN-only port). The submitting
+ * operator's IP + UA are recorded for audit. */
+app.post<{ Body: { alertId?: string; outcome?: string; notes?: string } }>(
+  '/api/alerts/outcome',
+  async (req, reply) => {
+    const { alertId, outcome, notes } = req.body ?? {};
+    if (!alertId || typeof alertId !== 'string') {
+      reply.code(400);
+      return { ok: false, error: 'alertId required' };
+    }
+    if (!outcome || !['ack', 'dismiss', 'failed', 'resolved'].includes(outcome)) {
+      reply.code(400);
+      return { ok: false, error: 'outcome must be one of: ack, dismiss, failed, resolved' };
+    }
+    // Find the live alert (for category/severity context) — might not exist
+    // if the alert has since cleared, which is fine; we still record.
+    const liveAlert = (store.get().alerts ?? []).find((a) => a.id === alertId);
+    const snap = getSnapshot(alertId);
+    appendAlertOutcome({
+      ts: Date.now(),
+      alertId,
+      category: liveAlert?.category ?? snap?.category,
+      severity: liveAlert?.severity ?? snap?.severity,
+      outcome: outcome as AlertOutcome,
+      notes: notes && typeof notes === 'string' ? notes.slice(0, 500) : undefined,
+      features: snap?.features,
+      alertFiredAt: snap?.ts,
+      source: {
+        ip: req.ip,
+        ua: req.headers['user-agent']?.toString(),
+      },
+    });
+    // Outcome captured — drop the feature snapshot to free memory.
+    // (The persisted JSONL keeps it for any future bulk re-training.)
+    dropSnapshot(alertId);
+    return { ok: true };
+  },
+);
+
+app.get<{ Querystring: { limit?: string } }>(
+  '/api/alerts/outcomes',
+  async (req, reply) => {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit ?? 50) || 50));
+    return cached(req, reply, { entries: tailAlertOutcomes(limit) }, 15);
+  },
+);
+
+app.get('/api/alerts/outcomes/stats', async (req, reply) =>
+  cached(req, reply, { families: computeFamilyStats() }, 60),
 );
 
 app.get('/ws', { websocket: true }, (socket) => {

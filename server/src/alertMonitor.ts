@@ -9,6 +9,8 @@ import {
   stormPrepAlerts,
 } from './analytics.js';
 import { loadNotifyConfig, sendNotification, isConfigured, type NotifyConfig } from './notify.js';
+// v0.9.25 — feedback-loop snapshot capture at first fire.
+import { captureSnapshot, extractFeatures } from './featureSnapshot.js';
 import type { Recorder } from './recorder.js';
 
 /**
@@ -374,6 +376,23 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     for (const a of alerts) {
       const existing = tracked.get(a.id);
       if (!existing) {
+        // v0.9.25 — snapshot the feature vector at first fire so future
+        // online-learning code can replay the model inputs that produced
+        // this alert. Failure is silent: missing snapshots only mean the
+        // outcome record won't carry features.
+        try {
+          const features = extractFeatures(a, snap);
+          if (features) {
+            captureSnapshot({
+              alertId: a.id,
+              ts: now,
+              features,
+              category: a.category,
+              severity: a.severity,
+              title: a.title,
+            }, log);
+          }
+        } catch { /* ignore — never block alert dispatch on snapshot */ }
         tracked.set(a.id, { alert: a, firstSeen: now, notified: firstRun });
         continue;
       }

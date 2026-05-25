@@ -3,6 +3,7 @@ import type { Alert, Severity, ClearedAlert } from '../types';
 import { alertCounts } from '../alerts';
 import { fmtRel, fmtMins } from '../format';
 import { SEV_META, SubjectBoxes } from '../cards/AlertParts';
+import { AlertOutcomeButtons } from '../components/AlertOutcomeButtons';
 import { apiUrl } from '../api';
 
 interface NotifyStatus {
@@ -248,6 +249,10 @@ function AlertRow({ alert, meta }: { alert: Alert; meta: (typeof SEV_META)[Sever
           {alert.coreNum == null && <span className="text-[10px] text-muted">{alert.device}</span>}
         </div>
         <div className="text-xs text-muted mt-1 leading-relaxed">{alert.detail}</div>
+        {/* v0.9.25 — feedback-loop: operator verdict feeds the labeled dataset */}
+        <div className="mt-2">
+          <AlertOutcomeButtons alertId={alert.id} variant="default" />
+        </div>
       </div>
     </div>
   );

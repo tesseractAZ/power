@@ -3,6 +3,68 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.26 — 2026-05-25
+
+**Feedback loop foundation.** First step on the "take the models to the
+next level" track (option A). Captures operator verdicts on every alert
+so we accumulate the **labeled dataset** required to verify any model
+change. Without ground truth we can't tell good models from bad ones —
+this release is the prerequisite for everything that follows.
+
+### How it works
+
+1. **Snapshot at fire time.** When `alertMonitor.ts` flags a NEW alert,
+   `featureSnapshot.ts` captures the relevant inputs RIGHT THEN — pack
+   temp / SoC / IR / MPPT volts / panel load / etc., per alert category.
+   Stored both in an in-memory LRU (500 entries) and persisted to
+   `/data/feature-snapshots.jsonl` so a restart doesn't lose in-flight
+   alert context.
+
+2. **Operator verdict.** The Default Alerts page + the Starfleet
+   Tactical station now render three small buttons per alert:
+   - **✓ Real** — acknowledge; this was a true positive
+   - **✕ False** — dismiss as false alarm; don't trust this type as
+     much going forward
+   - **🔧 Failed** — strong positive: this alert preceded an actual
+     hardware failure
+
+3. **Outcome log.** `POST /api/alerts/outcome` writes a JSON-Lines
+   entry to `/data/alert-outcomes.jsonl` including the captured feature
+   vector, time-to-action, category, severity, notes, source IP+UA.
+   Append-only — labels are forever.
+
+4. **Per-family stats.** `GET /api/alerts/outcomes/stats` rolls outcomes
+   up by alert family (`pack-hot`, `cell-imbalance`, …) and computes
+   precision + median time-to-action. Sorted noisiest-first.
+
+### Roadmap (future releases continuing the A → B → … track)
+
+- Online LR weight updates from outcomes (SGD on the captured features)
+- "Model health" panel in Science station showing P/R per model
+- Drift detection (PSI / KS-test against a reference distribution)
+- B track: optimal-dispatch MPC + closed-loop reserve floor
+
+### New endpoints
+
+```
+POST /api/alerts/outcome    { alertId, outcome, notes? }
+GET  /api/alerts/outcomes   recent submissions, limit ≤ 500
+GET  /api/alerts/outcomes/stats   per-family precision + time-to-action
+```
+
+### New files
+
+```
+server/src/alertOutcomes.ts        outcome capture, persistence, stats
+server/src/featureSnapshot.ts      fire-time feature capture + extractors
+server/test/alertOutcomes.test.ts  +5 tests covering familyOf, append/tail, P/R
+web/src/components/AlertOutcomeButtons.tsx   default + starfleet variants
+```
+
+### Tests
+
+82 server tests (77 → 82). Web build clean.
+
 ## 0.9.25 — 2026-05-25
 
 Starfleet UI bug-bash. Live in-browser debugging via the built-in

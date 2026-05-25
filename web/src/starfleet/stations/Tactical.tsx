@@ -12,6 +12,7 @@
  */
 
 import { BridgePanel } from '../components/BridgePanel';
+import { AlertOutcomeButtons } from '../../components/AlertOutcomeButtons';
 import type { FleetSnapshot } from '../../types';
 import type { Alert } from '../../types';
 
@@ -80,6 +81,10 @@ export function Tactical({ snapshot }: { snapshot: FleetSnapshot | null }) {
                       <div style={{ color: '#f4e8c8', fontFamily: 'Antonio, sans-serif', fontWeight: 700, fontSize: 13 }}>{a.title}</div>
                       {a.detail && <div className="sf-label mt-0.5" style={{ fontSize: 10, textTransform: 'none', letterSpacing: '0.04em' }}>{a.detail}</div>}
                       {a.device && <div className="sf-label mt-0.5" style={{ fontSize: 9 }}>SOURCE · {a.device.toUpperCase()}</div>}
+                      {/* v0.9.25 — operator verdict feeds the supervised-learning dataset */}
+                      <div className="mt-1">
+                        <AlertOutcomeButtons alertId={a.id} variant="starfleet" />
+                      </div>
                     </div>
                   </div>
                 );
