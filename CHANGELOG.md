@@ -3,6 +3,47 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.16 — 2026-05-25
+
+TUI flicker fix. Reported from Termius (macOS): on the ALM screen the
+word "INFO" appeared to flash every second, and the whole screen visibly
+refreshed once per second even when no data had changed.
+
+### Root cause
+
+The v0.9.5 frame protocol wrapped every redraw in mode-2026 synchronized
+output escapes (`ESC [?2026h` / `ESC [?2026l`). Terminals that support
+mode 2026 (Kitty, recent iTerm2/WezTerm, Windows Terminal) buffer the
+whole frame and flip atomically — invisible to the user. Termius (and
+older xterm-derivatives) treat the escapes as unrecognized no-ops and
+apply each subsequent escape live. The first escape in each frame was
+`CLEAR_SCREEN` — so the user saw a 1 Hz blank-and-repaint cycle. The
+cyan "INFO" badge on the ALM screen drew the eye because it's the
+brightest token on the row that got freshly painted.
+
+### Fixes
+
+- **Drop `CLEAR_SCREEN` from the per-frame protocol.** `CURSOR_HOME` at
+  the top + per-line `CLEAR_EOL` + trailing `CLEAR_BELOW` already
+  covers every transition cleanly without producing a visible blank.
+  Sync-mode-supporting terminals were quietly relying on the same
+  logic anyway.
+- **Skip the socket write when the new frame is byte-identical** to
+  the previous one. Inline FNV-1a (32-bit) hash on the rendered body,
+  cached per-session. Identical → no wire bytes, no terminal repaint,
+  no flicker. The 1 Hz draw timer keeps firing so real changes reach
+  the wire within ~1 s.
+
+### Effect
+
+- Termius and other non-mode-2026 terminals: per-second flicker is
+  gone; the "INFO" flash is gone.
+- Mode-2026 terminals: unchanged user-visible behavior, identical
+  bytes-on-wire when content changes, zero bytes when it doesn't.
+- All screens benefit (CONSOLE, GEN, BUS, PV, ALM, TRD, SUMMARY).
+
+68 tests pass.
+
 ## 0.9.15 — 2026-05-25
 
 New **Starfleet** web theme — modeled strictly on the bridge of the
