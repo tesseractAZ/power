@@ -51,6 +51,15 @@ import { computeRepairIssues } from './repairIssues.js';
 import { getWeather } from './weather.js';
 import { computePackRiskV2 } from './ml.js';
 import { startCacheWarmer } from './cacheWarmer.js';
+import {
+  rebootShp2,
+  debugSendCommand,
+  isWriteDebugEnabled,
+  checkWriteDebugToken,
+  cooldownRemainingMs,
+  REBOOT_COOLDOWN_MS,
+} from './ecoflow/commands.js';
+import { tailWriteLog } from './writeLog.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -275,6 +284,94 @@ app.get('/api/weather/ensemble', async () => {
 app.get('/api/incidents', async () => ({ incidents: monitor.incidents() }));
 
 app.get('/api/alert-telemetry', async () => ({ telemetry: monitor.telemetry() }));
+
+/* ─── v0.9.6 — WRITE-side actions ──────────────────────────────────────
+ *
+ * First write action: reboot the SHP2. The EcoFlow Open API command shape
+ * for SHP2 reboot is not officially documented; we ship the best-guess
+ * pattern. Failures are surfaced honestly so users can probe via the
+ * /api/device/send-command debug endpoint if their firmware uses a
+ * different shape. Every write is rate-limited + audit-logged. */
+
+app.post<{ Params: { sn: string } }>('/api/device/reboot/:sn', async (req, reply) => {
+  const sn = req.params.sn;
+  // Verify the SN actually exists in the fleet to prevent forwarding writes
+  // to arbitrary serials that aren't ours (defense-in-depth).
+  if (!sn || !store.get().devices[sn]) {
+    reply.code(404);
+    return { error: 'unknown sn' };
+  }
+  const result = await rebootShp2({
+    sn,
+    source: {
+      ip: req.ip,
+      ua: req.headers['user-agent']?.toString(),
+    },
+  });
+  if (result.outcome !== 'success') reply.code(result.rateLimited ? 429 : 502);
+  return {
+    ok: result.outcome === 'success',
+    code: result.code,
+    message: result.message,
+    durationMs: result.durationMs,
+    rateLimited: !!result.rateLimited,
+    cooldownRemainingMs: cooldownRemainingMs('reboot-shp2', sn, REBOOT_COOLDOWN_MS),
+  };
+});
+
+/** Read-only view of write cooldowns so the UI can disable buttons until ready. */
+app.get<{ Querystring: { sn?: string } }>('/api/device/reboot-cooldown', async (req) => {
+  const sn = req.query.sn;
+  if (!sn) return { error: 'sn required' };
+  return {
+    sn,
+    cooldownMs: REBOOT_COOLDOWN_MS,
+    remainingMs: cooldownRemainingMs('reboot-shp2', sn, REBOOT_COOLDOWN_MS),
+  };
+});
+
+/** Debug surface for empirically discovering undocumented EcoFlow commands.
+ *  Off unless WRITE_DEBUG_TOKEN is set; requires the token in the
+ *  `x-write-debug-token` header. Audit-logged like any other write. */
+app.post<{ Body: { sn?: string; body?: Record<string, unknown> } }>(
+  '/api/device/send-command',
+  async (req, reply) => {
+    if (!isWriteDebugEnabled()) {
+      reply.code(403);
+      return { error: 'write-debug disabled (set WRITE_DEBUG_TOKEN env to enable)' };
+    }
+    const provided = req.headers['x-write-debug-token']?.toString();
+    if (!checkWriteDebugToken(provided)) {
+      reply.code(401);
+      return { error: 'invalid or missing x-write-debug-token header' };
+    }
+    const body = req.body;
+    if (!body || !body.sn || typeof body.body !== 'object') {
+      reply.code(400);
+      return { error: 'expected { sn, body: { cmdSet, cmdId, params } }' };
+    }
+    if (!store.get().devices[body.sn]) {
+      reply.code(404);
+      return { error: 'unknown sn' };
+    }
+    const result = await debugSendCommand({
+      sn: body.sn,
+      body: body.body,
+      source: {
+        ip: req.ip,
+        ua: req.headers['user-agent']?.toString(),
+      },
+    });
+    if (result.outcome !== 'success') reply.code(502);
+    return result;
+  },
+);
+
+/** Last N audit-log entries. Useful for the UI to show "last writes". */
+app.get<{ Querystring: { limit?: string } }>('/api/writes/log', async (req) => {
+  const limit = Math.max(1, Math.min(500, Number(req.query.limit ?? 50) || 50));
+  return { entries: tailWriteLog(limit) };
+});
 
 // v0.8.0 — sustainability, tariff, probabilistic forecasts, multi-day,
 // dispatch planner, calendar, repair issues

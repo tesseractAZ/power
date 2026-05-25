@@ -60,4 +60,20 @@ export const ecoflow = {
   getQuotaSpecific: (sn: string, quotas: string[]) =>
     call<Record<string, unknown>>('POST', '/iot-open/sign/device/quota', { sn, params: { quotas } }),
   getMqttCertification: () => call<MqttCertification>('GET', '/iot-open/sign/certification'),
+  /**
+   * v0.9.6 — WRITE-side: send an arbitrary command to a device.
+   *
+   * The EcoFlow IoT Open API uses POST `/iot-open/sign/device/quota` for
+   * BOTH reads (when body contains `params.quotas`) and writes (when body
+   * contains `cmdSet`/`cmdId` or `moduleType`/`operateType`). This helper
+   * is the write entry point — it forwards the body as-is so callers can
+   * try whatever command shape the EcoFlow docs (or empirical probing)
+   * suggest for their specific device family.
+   *
+   * Returns the raw `data` field of the EcoFlow response. The signing
+   * `call()` already throws on non-zero `code` so the caller doesn't
+   * need to inspect for failure beyond catching.
+   */
+  sendCommand: (sn: string, body: Record<string, unknown>) =>
+    call<unknown>('PUT', '/iot-open/sign/device/quota', { sn, ...body }),
 };

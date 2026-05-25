@@ -3,6 +3,76 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.6 — 2026-05-25
+
+First WRITE-side action: reboot the SHP2 from the dashboard. Carefully
+scoped — confirmation modal, 5-min cooldown, full audit log, honest
+disclosure when the EcoFlow API rejects the command.
+
+### Features
+
+- **Reboot SHP2 button** on the Shp2Card header. Click → confirmation
+  modal ("Reboot SHP2? Dashboard will be unavailable for ~60 s") →
+  POST `/api/device/reboot/:sn` → 5-min cooldown countdown shown on
+  the button. Success message inline; failure message includes the
+  exact EcoFlow API error code so the user knows what to investigate.
+
+- **Generic write-command framework** (`server/src/ecoflow/commands.ts`
+  + `ecoflow.sendCommand()` in `rest.ts`). Foundation for every future
+  write action (boost reserve, skip EV, force rebalance, per-circuit
+  on/off, etc.). Each write action gets:
+  - Per-(action, sn) rate-limit reservation.
+  - Audit-log entry with timestamp, params, source IP, source UA,
+    EcoFlow response code, wall-time duration, and outcome.
+  - Honest pass-through of the EcoFlow API response — no swallowing
+    of error codes.
+
+- **Audit log** (`server/src/writeLog.ts`). Append-only JSON Lines at
+  `/data/writes.log`, surviving add-on restarts. Tail accessible via
+  `GET /api/writes/log?limit=N` for the UI to surface recent writes.
+  Override the path with `WRITE_LOG_PATH` env var (used by tests).
+
+- **Debug `/api/device/send-command` endpoint** for empirically
+  discovering undocumented EcoFlow command shapes. Off unless
+  `WRITE_DEBUG_TOKEN` env var is set; requires the token in the
+  `x-write-debug-token` header. Audit-logged like every other write.
+  Useful for probing the right `cmdSet`/`cmdId` for future write
+  actions before hardcoding them.
+
+### API
+
+- `POST /api/device/reboot/:sn` — reboot a device. 5-min cooldown.
+- `GET /api/device/reboot-cooldown?sn=X` — remaining cooldown ms.
+- `POST /api/device/send-command` — debug-mode arbitrary write.
+- `GET /api/writes/log?limit=N` — tail the audit log (newest first).
+
+### Honest scope note about the SHP2 reboot command
+
+The EcoFlow IoT Open API does **not** publicly document the SHP2
+reboot command. v0.9.6 ships with the best-guess pattern
+(`cmdSet=11`, `cmdId=17`, `params={}`) — `cmdSet=11` is the
+platform-level command set for the SHP2 family; `cmdId=17` is
+borrowed from analogous ESP-32 firmware-reboot conventions.
+
+If the EcoFlow API rejects the command, the UI surfaces the error
+code (e.g. `6004 unsupported command`). To discover the correct
+shape empirically, set `WRITE_DEBUG_TOKEN=...` in the add-on
+config, then POST to `/api/device/send-command` with different
+shapes until one returns `code: 0`. Hardcode the working command
+in `commands.ts` for the next release.
+
+### Tests
+
+- **4 new tests** for the audit log (append + tail round-trip,
+  limit, non-existent file). Total **63/63 server tests passing**.
+
+### Held-list status
+
+Six write actions remain on the held list — boost reserve, quiet-
+hours override, skip EV window, force pack rebalance, per-circuit
+on/off, auto-apply dispatch plan. Each is now a small follow-up
+(framework done) when you're ready.
+
 ## 0.9.5 — 2026-05-25
 
 Three focused improvements driven by real-world usage: a perf fix,
