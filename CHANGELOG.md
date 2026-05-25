@@ -3,6 +3,96 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.4 — 2026-05-25
+
+Trained ML inference framework + a multi-tab HACS dashboard card.
+Both items honestly scoped — the constraints I cited when deferring
+them (no labeled failure data; full-PWA port is multi-week) don't
+fully go away, but useful things ship anyway.
+
+### Features — Trained ML risk scoring
+
+- **`server/src/ml.ts`** — full ML inference pipeline:
+  - Feature extractor (`extractFeatures`) producing a 6-feature
+    vector per pack with stable ordering (peer-fade ratio, R trend,
+    coulombic eff, thermal hard-life, charge-curve drift, capacity
+    fade rate). Same normalizations as the v0.9.0 heuristic.
+  - **Logistic regression** with sigmoid + cross-entropy loss + L2
+    regularization. `predictRisk()` returns probability + 0-100 score
+    + per-feature contributions (interpretability — sums to the
+    logit input).
+  - **Isolation-forest-lite novelty detector** — Mahalanobis-style
+    distance from the fleet centroid in feature space. Unsupervised
+    (NO labels needed) — surfaces packs whose feature vector is
+    unusual vs the fleet. Genuine new signal beyond what the
+    heuristic captures.
+  - Model file format: JSON (`data/models/pack-risk-lr-v1.json`)
+    with `{ version, trainedAt, samples, weights, bias, source,
+    finalLoss, notes }`. Cached at runtime (5 min); written by
+    `scripts/train-pack-risk.ts`.
+  - **Built-in baseline** ships pre-fitted — the panel works out of
+    the box even before you run the trainer.
+
+- **`server/scripts/train-pack-risk.ts`** — fits the LR via gradient
+  descent. Reads `data/labels.csv` if present (format: `sn,packNum,
+  failed_at_ts`, one row per failed pack) and trains on real labels;
+  otherwise distills from the heuristic (score > 50 = positive
+  class). Model version flips from `lr-heuristic-baseline-v1` to
+  `lr-labeled-v1` when real labels exist. Run via
+  `npm run train-pack-risk`.
+
+- **`/api/pack-risk/v2`** — surfaces all three signals side-by-side
+  per pack: **heuristic** (v0.9.0 hand-tuned weights),
+  **trained** (LR with learned weights), **novelty** (unsupervised
+  outlier score). Plus a **composite** = average of all three.
+  Sorted by composite desc — most-at-risk first. Response includes
+  `featureImportances` (|weight| × stdev across fleet — surfaces
+  what the model actually relies on, which can differ from my
+  hand-tuned weights).
+
+### Features — HACS multi-tab dashboard card
+
+- **`lovelace/dist/ecoflow-panel-dashboard.js`** — a second Lovelace
+  card (alongside the v0.9.0 stats card). Vanilla Web Component
+  with built-in tab navigation:
+  - **Dashboard** — solar / load / backup / battery-net tiles +
+    per-DPU compact tiles + alert summary
+  - **Battery** — packs-tracked / peer-outliers / soonest-EOL tiles +
+    composite ML risk bar chart for top 8 packs
+  - **Forecast** — next-24h PV / min-projected-SoC / history-depth
+    tiles + 24-hour CSS-bar mini-chart (no chart-lib dep) with day/
+    night colour distinction
+  - **Alerts** — full active alerts list with severity colour-coding
+- Both cards register as separate HACS custom-cards in the same
+  plugin repo. README walks installation for either or both.
+
+### Tests
+
+- **11 new tests** for the ML pipeline: feature normalization
+  boundaries, healthy/bad pack score bounds, contributions-sum-to-
+  logit invariant, gradient-descent convergence on a trivially-
+  separable dataset, novelty detector on homogeneous + outlier
+  fleets. Total **59/59 server tests passing**.
+
+### Honest scope notes
+
+- **No real failure labels exist.** The trained model is technically
+  trained, but its labels come from the heuristic — it won't beat
+  the heuristic on prediction. The infrastructure is the real
+  deliverable: when actual failures accumulate (months/years out),
+  drop labels into the CSV, run `npm run train-pack-risk`, the API
+  serves the new model with zero code changes.
+- **The novelty detector is real unsupervised ML** and works today
+  with no labels. It's a genuinely new signal — a pack can be
+  "low risk" by the heuristic but score high novelty (its feature
+  vector is unusual) and that's worth surfacing.
+- **The dashboard card is NOT the full PWA.** Rich SVG flow diagrams,
+  interactive 24h charts (vs the CSS bars here), per-cell voltage
+  tables, strategy configuration UI stay in the PWA. Both cards
+  link to the PWA via an "Open full dashboard" button. A genuine
+  port of the full React app to Web Components is still multi-week
+  and was not in scope here.
+
 ## 0.9.3 — 2026-05-24
 
 Backlog ship — four small-but-valuable items drained from the

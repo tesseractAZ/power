@@ -49,6 +49,7 @@ import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
 import { getWeather } from './weather.js';
+import { computePackRiskV2 } from './ml.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -334,6 +335,21 @@ app.get('/api/pack-risk', async () => {
   const ir = computeInternalResistance(store.get().devices, recorder);
   const cc = computeChargeCurveFingerprint(store.get().devices, recorder);
   return computePackRiskScores(store.get().devices, deg, therm, ir, cc);
+});
+
+// v0.9.4 — trained ML risk scoring. Surfaces three side-by-side signals
+// per pack: heuristic (v0.9.0), trained logistic regression, unsupervised
+// novelty. Composite = mean of the three. modelVersion is honest about
+// whether real labels exist (lr-labeled-v1) vs heuristic-distilled
+// (lr-heuristic-baseline-v1). When real failures accumulate, drop a CSV
+// into data/labels.csv and run `npm run train-pack-risk`.
+app.get('/api/pack-risk/v2', async () => {
+  const deg = computeDegradation(store.get().devices, recorder);
+  const therm = computeThermalEvents(store.get().devices, recorder);
+  const ir = computeInternalResistance(store.get().devices, recorder);
+  const cc = computeChargeCurveFingerprint(store.get().devices, recorder);
+  const heur = computePackRiskScores(store.get().devices, deg, therm, ir, cc);
+  return computePackRiskV2(store.get().devices, heur.packs, deg, therm, ir, cc);
 });
 
 app.get('/api/repair-issues', async () => {
