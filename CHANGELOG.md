@@ -3,6 +3,110 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.28 — 2026-05-25
+
+**Multi-track model advance.** Ships one meaningful module on every
+pending model track in tandem. Each track was previously sketched in
+the v0.9.26 plan; this release puts the foundation code in place so
+follow-up releases can wire each module to UI and start producing
+operator-visible value.
+
+### Track A — Close the feedback loop (continuation of v0.9.26)
+
+- **`server/src/models/onlineLR.ts`** — online SGD weight updates from
+  recorded alert outcomes. `updateFromOutcome()` consumes an
+  `AlertOutcome` (ack / dismiss / failed / resolved), retrieves the
+  feature snapshot captured at fire-time, and nudges the per-category
+  logistic-regression weights toward the right direction.
+  - Learning rate 0.05, L2 regularization 0.001, **2× upweight on
+    `failed`** labels (false negatives are the worst class of error
+    for an alerting system — missed real issues).
+  - `snapshotToLrFeatures()` maps a category-specific snapshot into the
+    6-dim feature vector the v0.9.4 LR baseline expects.
+- **`server/src/models/modelHealth.ts`** — aggregate health report
+  combining the v0.9.26 family-stats (TPR / FPR per alert family) with
+  shadow-vs-baseline drift from the new LR weights. Surfaced via
+  **`GET /api/models/health`** so the future Science-station Model
+  Health panel can read it directly.
+
+### Track B — MPC dispatch optimizer
+
+- **`server/src/dispatch/mpc.ts`** — closed-loop 24-hour dispatch
+  recommender. Dynamic programming over **21 SOC buckets × 3 actions
+  × 24 steps** (~1,500 transitions), backward-induction value function.
+  - Inputs: current SOC, reserve floor, capacity, hourly PV P50/P10,
+    hourly load, hourly tariff (¢/kWh), grid availability, cycling
+    cost, reserve-dip penalty.
+  - Output: per-hour recommended action (charge / discharge / hold),
+    setpoint schedule, projected SOC trajectory, $-savings vs naive
+    baseline.
+  - Surfaced via **`GET /api/dispatch/recommend`**.
+
+### Track C — First-principles physics models
+
+- **`server/src/physics/clearSky.ts`** — Phoenix-tuned clear-sky PV
+  estimator. **Spencer (1971) solar-position equations** → solar
+  altitude/azimuth → **Haurwitz model** for clear-sky GHI →
+  **NOCT-adjusted cell temp** → DC power with temp coefficient → AC
+  power with inverter derate. Constants pinned to Eric's site
+  (33.4484°N, 25° tilt, 16.8 kW nameplate). Surfaced via
+  **`GET /api/physics/pv-pmax`**.
+- **`server/src/physics/lfpOcv.ts`** — LFP open-circuit-voltage ↔ SoC
+  curve at 25°C, 16 cells in series. `analyzePackLfp()` returns:
+  - `isResting` boolean (low current + time since last load)
+  - `physicsSoCPct` (OCV-derived ground-truth SoC) when rested
+  - `cellSpreadMv` (max-min cell delta — top imbalance signal)
+  - `confidence` score
+  - Surfaced via **`GET /api/physics/lfp-soc`**.
+
+### Track D — Hierarchical Bayesian shrinkage
+
+- **`server/src/models/hierarchicalBayes.ts`** — three-level Gaussian
+  partial pooling (pack → DPU → fleet). Closed-form (no MCMC) using
+  conjugate Gaussian update rules. Estimates each pack's posterior
+  metric (SoH, IR, etc.) by precision-weighting the pack observation
+  against its DPU mean and the fleet mean — packs with noisy data
+  borrow strength from siblings, tight packs hold their own value.
+  - **Robust within-DPU σ** via 10% winsorization on squared
+    deviations. Without this, a single outlier inflates the σ estimate
+    and SUPPRESSES the very shrinkage that would have caught it (the
+    naive estimator gave ~4% shrinkage on a 25-pt outlier; winsorized
+    gives ~16%).
+  - `findOutliers()` flags packs whose posterior deviates ≥ z·σ from
+    their DPU mean.
+  - Surfaced via **`GET /api/models/hierarchical-pack-soh`**.
+
+### Track E — Forecast backtest harness
+
+- **`server/src/backtest.ts`** — generic forecast scorer. `scoreForecast()`
+  computes RMSE, MAE, bias, MAPE, sMAPE, and R² from a series of
+  (predicted, actual) pairs. `backtestPvForecast()` replays any model
+  against recorded actuals over the last N hours, summing PV across all
+  DPUs via trapezoidal integration of W → Wh.
+  - **The point:** "did v0.9.26's tweak to the Bayesian solar model
+    actually help?" — without backtest scores we can't tell good model
+    changes from bad ones. This is the prerequisite for any honest
+    model iteration loop.
+  - Surfaced via **`GET /api/backtest/forecast`**.
+
+### Tests
+
+- **`server/test/models.test.ts`** — 15 new tests covering all 7
+  modules (solar position, clear-sky GHI, physicsPmax, OCV round-trip,
+  LFP pack analysis rested vs unrested, hierarchical shrinkage on an
+  outlier, outlier detection, MPC schedule shape, forecast scoring
+  baseline / over-prediction / empty cases).
+- **97 total tests passing**, up from 82.
+
+### What's next (not in this release)
+
+UI surfaces for each module:
+- Model Health panel in Science station (consumes `/api/models/health`)
+- MPC dispatch panel in Strategy page (consumes `/api/dispatch/recommend`)
+- Per-pack physics-implied SoC overlay in Battery page
+- Hierarchical-Bayes outliers shown in pack-risk display
+- Forecast backtest score shown in Predictive Insights
+
 ## 0.9.27 — 2026-05-25
 
 **Hotfix:** silence the 223-warning `cached()` storm surfaced by the

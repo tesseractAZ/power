@@ -1,0 +1,217 @@
+/**
+ * v0.9.27 — Online LR weight updates from operator outcomes.
+ *
+ * Track A continuation: every time an outcome arrives WITH a feature
+ * snapshot, take ONE SGD step on the pack-risk LR weights. This is the
+ * thing that makes "ML cargo cult" into "ML that's actually learning":
+ *
+ *   1. Operator's outcome (ack/dismiss/failed) maps to a binary label
+ *   2. Snapshotted features (captured at alert-fire time) replay the
+ *      exact inputs the model saw when it predicted
+ *   3. SGD step nudges the weights in the direction that would have
+ *      predicted the true label better next time
+ *
+ * Mapping to binary labels:
+ *   - "ack"     → 1.0   (true positive — the alert was real)
+ *   - "failed"  → 1.0   (extra-strong true positive)
+ *   - "dismiss" → 0.0   (false positive — model was wrong)
+ *   - "resolved"→ skip  (ambiguous — condition cleared, unclear what it meant)
+ *
+ * The "failed" labels get an effective sample weight of 2× so they
+ * pull the model harder (we really want to catch real failures).
+ *
+ * **Why pack-risk?** Most other models (forecast, baseline, peer-
+ * comparison) aren't differentiable in the same way — they're either
+ * statistical (Bayesian/Kalman, which update implicitly via their own
+ * mechanisms) or heuristic. Pack-risk LR is the only model in the
+ * codebase that benefits directly from labeled-data SGD.
+ *
+ * The features captured in featureSnapshot.ts are alert-category-
+ * specific (pack_temp_c, pack_soc, etc.) and don't directly match the
+ * 6 LR feature names (peerFadeRatio, rTrend, …). We do a best-effort
+ * **mapping** in `updateFromOutcome()` — if we can construct a usable
+ * feature vector from the snapshot we apply the SGD step; otherwise we
+ * record the outcome for future bulk retraining but skip the live update.
+ */
+
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { config } from '../config.js';
+import { FEATURE_NAMES, type FeatureName, type LrModel } from '../ml.js';
+import type { AlertOutcome, AlertOutcomeEntry } from '../alertOutcomes.js';
+
+const MODEL_PATH = resolve(process.cwd(), config.dbPath, '..', 'models', 'pack-risk-lr-v1.json');
+const SHADOW_PATH = resolve(process.cwd(), config.dbPath, '..', 'models', 'pack-risk-lr-v1-online.json');
+
+/** Learning rate. Conservative — we get maybe a few outcomes/day so we
+ *  want each one to nudge the model perceptibly but not catastrophically. */
+const LEARNING_RATE = 0.05;
+/** L2 regularization to prevent any single noisy outcome from blowing weights. */
+const L2 = 0.001;
+/** Weight given to "failed" labels (vs "ack"=1.0, "dismiss"=1.0). */
+const FAILED_LABEL_WEIGHT = 2.0;
+
+/**
+ * Best-effort projection from category-specific snapshot features to the
+ * normalized 6-dim LR feature vector. Returns null if we can't construct
+ * a usable vector (e.g. forecast alerts have no thermal features).
+ *
+ * Each LR feature has a "natural" mapping from one or more snapshot
+ * features. When the snapshot is missing the source, that LR feature
+ * defaults to 0 (the model's mean). This is conservative — missing
+ * features pull the score toward "average risk" rather than spiking it.
+ */
+function snapshotToLrFeatures(snapshot: Record<string, number> | undefined): Record<FeatureName, number> | null {
+  if (!snapshot) return null;
+
+  // For thermal alerts, we have pack_temp_c, max_cell_temp_c, board_temp_c.
+  // For battery alerts, we have pack_soc, pack_soh, pack_cycles, pack_vol_diff_mv.
+  // We don't have peerFadeRatio or rTrend in the snapshots (those are
+  // per-pack derived metrics computed elsewhere), so we approximate.
+
+  const out = {} as Record<FeatureName, number>;
+  // peerFadeRatio — how badly this pack lags peers. Best proxy: vol_diff (mV imbalance).
+  out.peerFadeRatio = snapshot['pack_vol_diff_mv'] != null
+    ? Math.min(1, snapshot['pack_vol_diff_mv'] / 100)  // 100 mV ≈ severe → 1.0
+    : 0;
+  // rTrend — internal resistance trending up. Proxy via temperature delta
+  // from mean (hot packs imply rising IR).
+  out.rTrend = snapshot['pack_temp_c'] != null
+    ? Math.max(0, Math.min(1, (snapshot['pack_temp_c'] - 30) / 30))   // 30→60°C maps 0→1
+    : 0;
+  // coulombicEffPct — drift below 100%. We don't capture this in snapshots
+  // currently, so default to 0 (no signal).
+  out.coulombicEffPct = 0;
+  // hardLifeScore — pack age / cycles. cycles >2000 ≈ end-of-life.
+  out.hardLifeScore = snapshot['pack_cycles'] != null
+    ? Math.min(1, snapshot['pack_cycles'] / 2000)
+    : 0;
+  // ccDriftMv — cell voltage spread. Already in mV, normalize to 100mV scale.
+  out.ccDriftMv = snapshot['pack_vol_diff_mv'] != null
+    ? Math.min(1, snapshot['pack_vol_diff_mv'] / 100)
+    : 0;
+  // fadePctPerYear — long-term degradation. Use SoH (100 − soh) as proxy.
+  out.fadePctPerYear = snapshot['pack_soh'] != null
+    ? Math.min(1, Math.max(0, (100 - snapshot['pack_soh']) / 25))   // 75% SoH → 1.0
+    : 0;
+  return out;
+}
+
+/** Sigmoid (numerically stable). */
+function sigmoid(x: number): number {
+  if (x >= 0) { const z = Math.exp(-x); return 1 / (1 + z); }
+  const z = Math.exp(x); return z / (1 + z);
+}
+
+/** Load the current model (shadow first, fall back to base). */
+function loadCurrent(): LrModel {
+  // Prefer the online-shadow model — it's a copy of the base updated by
+  // online learning. We never overwrite the base file, so bulk retraining
+  // (from buildTrainingData → trainLrModel) can still produce a clean
+  // baseline anytime.
+  if (existsSync(SHADOW_PATH)) {
+    try { return JSON.parse(readFileSync(SHADOW_PATH, 'utf-8')) as LrModel; } catch { /* fall through */ }
+  }
+  if (existsSync(MODEL_PATH)) {
+    try { return JSON.parse(readFileSync(MODEL_PATH, 'utf-8')) as LrModel; } catch { /* fall through */ }
+  }
+  // No file at all — use the in-code default (same shape as ml.ts's DEFAULT_MODEL,
+  // but we re-import to avoid circular). Caller imports the actual default.
+  return {
+    version: 'lr-online-shadow-init',
+    trainedAt: 0,
+    samples: 0,
+    source: 'heuristic-distilled',
+    weights: {
+      peerFadeRatio: 1.5, rTrend: 0.9, coulombicEffPct: 0.9,
+      hardLifeScore: 0.9, ccDriftMv: 0.6, fadePctPerYear: 1.2,
+    },
+    bias: -2.5,
+    finalLoss: 0,
+  };
+}
+
+/** Persist the shadow model after each SGD step. */
+function saveShadow(model: LrModel): void {
+  mkdirSync(dirname(SHADOW_PATH), { recursive: true });
+  writeFileSync(SHADOW_PATH, JSON.stringify(model, null, 2));
+}
+
+/**
+ * Take ONE SGD step on the pack-risk LR weights from a single outcome.
+ *
+ *   loss   = -(y log(p) + (1-y) log(1-p))    (binary cross-entropy)
+ *   dL/dw  = (p - y) × x   (per weight)
+ *   w     -= η × (p - y) × x + η × L2 × w
+ *
+ * Returns the updated model. Idempotent for "resolved" or feature-less
+ * outcomes — those just return the current model unchanged.
+ */
+export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) => void = () => {}): {
+  updated: boolean;
+  prevLogit: number;
+  newLogit: number;
+  label: number | null;
+  reason?: string;
+} {
+  // Skip ambiguous outcomes — no label to learn from.
+  if (outcome.outcome === 'resolved') {
+    return { updated: false, prevLogit: 0, newLogit: 0, label: null, reason: 'resolved (ambiguous)' };
+  }
+  // Only apply to alerts that have a feature snapshot we can use.
+  const lrFeatures = snapshotToLrFeatures(outcome.features);
+  if (!lrFeatures) {
+    return { updated: false, prevLogit: 0, newLogit: 0, label: null, reason: 'no features captured' };
+  }
+
+  const label = outcomeLabel(outcome.outcome);
+  const sampleWeight = outcome.outcome === 'failed' ? FAILED_LABEL_WEIGHT : 1.0;
+
+  const model = loadCurrent();
+  let logit = model.bias;
+  for (const name of FEATURE_NAMES) {
+    logit += (model.weights[name] ?? 0) * (lrFeatures[name] ?? 0);
+  }
+  const prob = sigmoid(logit);
+  const error = (prob - label) * sampleWeight;
+
+  // Per-weight update.
+  const newWeights = { ...model.weights } as Record<FeatureName, number>;
+  for (const name of FEATURE_NAMES) {
+    const w = newWeights[name] ?? 0;
+    const x = lrFeatures[name] ?? 0;
+    const grad = error * x + L2 * w;
+    newWeights[name] = w - LEARNING_RATE * grad;
+  }
+  // Bias update (no regularization on bias).
+  const newBias = model.bias - LEARNING_RATE * error;
+
+  const updated: LrModel = {
+    ...model,
+    weights: newWeights,
+    bias: newBias,
+    trainedAt: Date.now(),
+    samples: model.samples + 1,
+    source: 'labeled',
+    notes: `online-updated from outcome ${outcome.alertId} (${outcome.outcome}, label=${label}) at ${new Date().toISOString()}`,
+  };
+  saveShadow(updated);
+
+  let newLogit = updated.bias;
+  for (const name of FEATURE_NAMES) {
+    newLogit += (updated.weights[name] ?? 0) * (lrFeatures[name] ?? 0);
+  }
+
+  log(`onlineLR: outcome=${outcome.outcome} label=${label} prob=${prob.toFixed(3)} logit=${logit.toFixed(3)}→${newLogit.toFixed(3)} (samples=${updated.samples})`);
+  return { updated: true, prevLogit: logit, newLogit, label };
+}
+
+function outcomeLabel(outcome: AlertOutcome): number {
+  return outcome === 'dismiss' ? 0 : 1; // ack + failed → real
+}
+
+/** Read-only access to the current shadow model — used by the model
+ *  health endpoint to show "online has diverged from baseline by N%". */
+export function loadShadowModel(): LrModel {
+  return loadCurrent();
+}
