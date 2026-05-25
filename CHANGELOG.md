@@ -3,6 +3,35 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.8.2 — 2026-05-24
+
+Patch — fix the CI test job from v0.8.1.
+
+### Bug fix
+
+- **CI: provide dummy ECOFLOW credentials to the test job.** v0.8.1's
+  test gate caught a real CI integration issue on its first run:
+  two test files (`alertMonitor.test.ts`, `analytics.test.ts`)
+  transitively import `src/config.ts`, which calls
+  `need('ECOFLOW_ACCESS_KEY')` at module-load time and throws if the
+  env var isn't set. Locally `.env` provides them; CI doesn't.
+  Fix: set `ECOFLOW_ACCESS_KEY=test-access-key` /
+  `ECOFLOW_SECRET_KEY=test-secret-key` in the test job env. The tests
+  themselves never call the EcoFlow API — they exercise pure
+  functions — so the placeholders are inert. **All 36 tests now pass
+  in CI.**
+- **TODO (future):** refactor `config.ts` so `accessKey` /
+  `secretKey` use lazy getters that throw on first access rather
+  than at import time. Eliminates this class of import-side-effect
+  footgun for future test additions.
+
+### Validation
+
+- v0.8.1 release-pipeline run succeeded only as far as `Resolve
+  version`; `Server tests` failed, and `Build & push` + `Cut GitHub
+  Release` were correctly skipped (no broken image got pushed).
+  Behaves exactly as the gate was designed.
+
 ## 0.8.1 — 2026-05-24
 
 Polish patch — security fix, bundle splitting, and the first
