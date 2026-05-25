@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.9.29"
+version: "0.9.30"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -96,11 +96,15 @@ options:
   BROADCAST_MIN_SEVERITY: critical
   # Quiet hours suppress warning/info broadcasts. Critical always fires.
   BROADCAST_QUIET_HOURS: "22-06"
-  # Optional verbal TTS announcement after the klaxon. Leave empty to
-  # play klaxon only. Set to your HA TTS service name, e.g.:
-  #   tts.google_translate_say   (built-in, no key needed)
-  #   tts.cloud_say              (Home Assistant Cloud / Nabu Casa)
-  #   tts.piper                  (local Piper add-on)
+  # v0.9.30 — TTS announcement after the klaxon. Leave EMPTY to
+  # auto-detect — the add-on probes HA's service catalog on startup and
+  # picks the best engine available, preferring local/off-grid-safe:
+  #   1. tts.piper                 (local, free, off-grid OK — install
+  #                                 the Piper add-on; strongly recommended)
+  #   2. tts.cloud_say             (Home Assistant Cloud / Nabu Casa)
+  #   3. tts.google_translate_say  (free, needs internet)
+  #   4. tts.elevenlabs_say        (premium voices, per-char billed)
+  # Set explicitly to override the auto-pick:
   BROADCAST_TTS_SERVICE: ""
   BROADCAST_TTS_LANGUAGE: en-US
   # Sonos-specific: snapshot the current state before broadcasting and

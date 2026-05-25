@@ -3,6 +3,94 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.30 — 2026-05-25
+
+**Broadcast audio sync + TTS.** Field-log analysis (the `2026-05-25T22:51`
+operator log) confirmed a pathology in the v0.9.18-23 broadcast pipeline:
+on a single red-alert, audio actually played at WILDLY different
+wall-clock times across the 6 speakers — HomePod at ~t+2s, Sonos at
+~t+0.3s, thermostat speakers at t+35s, and one HomePod re-queued the
+buffer at **t+5 minutes** (!). Even Music Assistant's `play_announcement`
+can't truly cross-sync different audio protocols.
+
+This release fixes the root cause and adds proper TTS so operators
+hear what the alert is instead of guessing from the klaxon tone.
+
+### New: protocol-aware staggered firing
+
+- **`server/src/speakerProfiles.ts`** — Infers each speaker's transport
+  protocol from entity_id + HA attrs (HomePod = AirPlay, Sonos = native,
+  thermostats = Cast). Each protocol gets an empirical buffer estimate
+  (AirPlay 2000 ms, Cast 1000 ms, Sonos 300 ms). Groups speakers by
+  protocol, then computes per-group fire offsets so the **slowest
+  group fires first** — by the time the fast group fires, the slow
+  group is just hitting its buffer flush. Net effect: every speaker
+  STARTS PLAYING within ~300 ms wall-clock of every other.
+- Cached per 5 min — speakers don't change protocol mid-day. Forced
+  refresh on each test broadcast.
+
+### New: TTS auto-detection + rich spoken alerts
+
+- **`server/src/ttsService.ts`** — Auto-detects every TTS engine HA
+  exposes, ranked by suitability for an off-grid alert system:
+  1. **Piper** (local, free, off-grid-safe) — preferred
+  2. **HA Cloud (Nabu Casa)** — fast, high quality, subscription
+  3. **ElevenLabs** — premium, per-char billed
+  4. **Google Translate Say** — free, needs internet
+  5. **Microsoft Edge TTS**, **tts.speak**
+- `BROADCAST_TTS_SERVICE` still honored when set; empty → auto-pick.
+- **Rich message synthesis from Alert struct**: Severity prefix +
+  category + Core/pack location + title + 1-sentence detail + ack tag.
+  Critical alerts get a 2-second repeat — empirical fix for "the
+  operator was mid-conversation when the klaxon hit and missed it."
+- TTS-friendly normalization: `%` → " percent", `SoC` → "state of
+  charge", `MPPT` → "M P P T", `HV` → "high voltage", etc.
+- `cache: true` on every TTS call — same message replays instantly.
+
+### Pipeline changes
+
+- `runBroadcast()` is now a **staggered orchestrator**:
+  1. Group cfg.targets by inferred protocol.
+  2. Fire each group at its scheduled `fireAtMs` (slowest first).
+  3. After klaxon settle (3.5 s for red, 1.8 s for yellow/green),
+     speak the TTS message to ALL targets if engine + message present.
+  4. Schedule Sonos snapshot-restore wrapping the full window.
+- `runBroadcastMA` / `runBroadcastMP` are now per-group helpers, no
+  longer doing TTS themselves (orchestrator owns that). Both accept a
+  `targets` subset.
+
+### New endpoints + diagnostics
+
+- **`GET /api/broadcast/tts-services`** — what's installed, what's
+  auto-picked, sample messages for each level. Backs the picker UI.
+- **`GET /api/broadcast/status`** + **`/api/broadcast/discover`** —
+  augmented with `speakerGroups[]` (protocol, bufferMs, targets,
+  fireAtMs), `ttsEngine`, `ttsAvailable`, `lastSpokenMessage`.
+
+### Tests
+
+- **`server/test/audioSync.test.ts`** — 20 new tests covering protocol
+  detection (HomePod / Sonos / Cast / thermostat / Echo / unknown),
+  group staggering math, and `buildAlertMessage` output for red /
+  yellow / green with priority ordering across categories.
+- **117 total tests passing**, up from 97.
+
+### What the operator notices
+
+- Klaxons land **at the same wall-clock time** (±300 ms) across HomePod,
+  Sonos, and thermostat speakers — no more "echo bounce" delay.
+- After the klaxon: a clear English announcement names the category,
+  device, and what's wrong. Critical alerts get a repeat.
+- If Piper is installed, all of it is local — broadcasts work in
+  full grid-down conditions.
+
+### Recommended setup for this release
+
+Install the **Piper TTS add-on** (HA → Settings → Add-ons → Piper)
+and the auto-detect path will pick it up on next add-on restart. No
+config change needed — `BROADCAST_TTS_SERVICE` empty is fine. Confirm
+via `curl http://homeassistant.local:8787/api/broadcast/tts-services`.
+
 ## 0.9.29 — 2026-05-25
 
 **Cache-warmer perf.** Field-log analysis on a 4-DPU fleet showed warmer
