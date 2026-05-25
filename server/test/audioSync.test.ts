@@ -43,6 +43,24 @@ test('inferProtocol — thermostat speakers map to cast', () => {
   assert.equal(inferProtocol('media_player.guest_hallway_thermostat', {}), 'cast');
 });
 
+test('inferProtocol — v0.9.31: soundbar entities map to sonos (Beam/Arc/Ray)', () => {
+  assert.equal(inferProtocol('media_player.family_room_soundbar_2', {}), 'sonos');
+  assert.equal(inferProtocol('media_player.sonos_arc', {}), 'sonos');
+});
+
+test('inferProtocol — v0.9.31: MA provider attr is authoritative', () => {
+  // Even if entity name says "soundbar", MA-reported provider trumps it.
+  assert.equal(inferProtocol('media_player.foo', { provider: 'sonos' }), 'sonos');
+  assert.equal(inferProtocol('media_player.foo', { provider: 'airplay' }), 'airplay');
+  assert.equal(inferProtocol('media_player.foo', { provider: 'chromecast' }), 'cast');
+});
+
+test('inferProtocol — v0.9.31: device currently playing AirPlay reports as airplay', () => {
+  // Sonos device showing AirPlay as its current source → treat as airplay
+  // for staggering since its current playback path IS airplay.
+  assert.equal(inferProtocol('media_player.unknown_speaker', { source: 'AirPlay' }), 'airplay');
+});
+
 test('inferProtocol — google/nest map to cast', () => {
   assert.equal(inferProtocol('media_player.nest_mini_kitchen', {}), 'cast');
   assert.equal(inferProtocol('media_player.google_home_office', {}), 'cast');

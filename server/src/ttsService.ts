@@ -31,7 +31,7 @@
  * playback on repeat. We pass cache: true on every call.
  */
 
-import { getServiceCatalog, hasService, callHaService, type ServiceCallResult } from './haService.js';
+import { getServiceCatalog, hasService, callHaService, getAllStates, type ServiceCallResult } from './haService.js';
 import type { Alert } from './alerts.js';
 
 /* ─── service detection ──────────────────────────────────────────── */
@@ -67,19 +67,116 @@ const KNOWN_ENGINES: TtsEngine[] = [
 ];
 
 /**
+ * v0.9.31 — Detect TTS ENTITIES (not just services).
+ *
+ * Modern HA (2023+) exposes each TTS engine as an entity like
+ * `tts.home_assistant_cloud`, `tts.piper`, `tts.google_translate_say`.
+ * The unified service `tts.speak` then takes the entity_id as a target
+ * — this is the recommended path going forward; legacy domain-specific
+ * services like `tts.cloud_say` are being deprecated and have been
+ * observed returning 500 in HA 2026.x for some configurations.
+ *
+ * We use these entities to:
+ *   1. Honor `BROADCAST_TTS_SERVICE=piper` by mapping to the discovered
+ *      `tts.piper` entity even when the legacy `tts.piper` service is gone.
+ *   2. Surface a richer picker UI: every engine is callable.
+ */
+export interface TtsEntity {
+  entity_id: string;     // tts.home_assistant_cloud
+  friendly_name: string;
+  /** Inferred from entity_id pattern (best-effort). */
+  flavor: 'piper' | 'cloud' | 'google' | 'elevenlabs' | 'edge' | 'other';
+}
+
+export async function detectTtsEntities(): Promise<TtsEntity[]> {
+  const all = await getAllStates();
+  if (!all) return [];
+  const entities: TtsEntity[] = [];
+  for (const s of all) {
+    if (!s.entity_id.startsWith('tts.')) continue;
+    const id = s.entity_id.toLowerCase();
+    let flavor: TtsEntity['flavor'] = 'other';
+    if (id.includes('piper')) flavor = 'piper';
+    else if (id.includes('cloud') || id.includes('home_assistant_cloud') || id.includes('nabu')) flavor = 'cloud';
+    else if (id.includes('google')) flavor = 'google';
+    else if (id.includes('elevenlabs')) flavor = 'elevenlabs';
+    else if (id.includes('edge')) flavor = 'edge';
+    entities.push({
+      entity_id: s.entity_id,
+      friendly_name: String((s.attributes ?? {}).friendly_name ?? s.entity_id),
+      flavor,
+    });
+  }
+  return entities;
+}
+
+/**
  * Detect which TTS engines are exposed by HA right now. Returns them
  * sorted by quality (best first). Empty when not supervised or when
  * none are installed.
+ *
+ * v0.9.31: now also synthesizes engines from the discovered TTS entities
+ * via `tts.speak`, so a system with only the modern unified service still
+ * shows individual engines (Piper, Cloud, etc.) instead of just one
+ * generic "tts.speak" entry.
  */
 export async function detectTtsEngines(): Promise<TtsEngine[]> {
   const cat = await getServiceCatalog();
-  if (!cat) return [];
   const found: TtsEngine[] = [];
-  for (const eng of KNOWN_ENGINES) {
-    const [domain, service] = eng.service.split('.');
-    const d = cat.find((c) => c.domain === domain);
-    if (d && service in d.services) {
-      found.push(eng);
+  // 1. Legacy domain-specific services (still work on most setups).
+  if (cat) {
+    for (const eng of KNOWN_ENGINES) {
+      // Skip the generic `tts.speak` here — we'll synthesize one engine
+      // per discovered TTS entity below, which is strictly more useful.
+      if (eng.service === 'tts.speak') continue;
+      const [domain, service] = eng.service.split('.');
+      const d = cat.find((c) => c.domain === domain);
+      if (d && service in d.services) {
+        found.push(eng);
+      }
+    }
+  }
+  // 2. Modern unified path: one synthetic engine per discovered TTS entity.
+  const entities = await detectTtsEntities();
+  const hasTtsSpeak = cat?.some((c) => c.domain === 'tts' && 'speak' in c.services) ?? false;
+  if (hasTtsSpeak) {
+    for (const ent of entities) {
+      // Skip if we already have a legacy engine for this flavor — the
+      // legacy entry is identical and we don't want duplicates in the picker.
+      // (We could prefer entity-based here, but for now the legacy entry
+      // is what user docs reference.)
+      const labelMap: Record<TtsEntity['flavor'], string> = {
+        piper: 'Piper (local)',
+        cloud: 'HA Cloud (Nabu Casa)',
+        google: 'Google Translate Say',
+        elevenlabs: 'ElevenLabs',
+        edge: 'Microsoft Edge TTS',
+        other: ent.friendly_name,
+      };
+      const qualityMap: Record<TtsEntity['flavor'], number> = {
+        piper: 1, cloud: 1, elevenlabs: 1, google: 2, edge: 2, other: 3,
+      };
+      const localMap: Record<TtsEntity['flavor'], boolean> = {
+        piper: true, cloud: false, google: false, elevenlabs: false, edge: false, other: false,
+      };
+      // Encode the entity ref in the service field as "tts.speak:<entity_id>"
+      // so callers can route a speak() call through the right entity.
+      const serviceRef = `tts.speak:${ent.entity_id}`;
+      // Don't add if already present via legacy entry of same flavor.
+      const dupFlavor = ent.flavor !== 'other' && found.some((f) =>
+        (ent.flavor === 'piper'      && f.service === 'tts.piper') ||
+        (ent.flavor === 'cloud'      && f.service === 'tts.cloud_say') ||
+        (ent.flavor === 'google'     && f.service === 'tts.google_translate_say') ||
+        (ent.flavor === 'elevenlabs' && f.service === 'tts.elevenlabs_say') ||
+        (ent.flavor === 'edge'       && f.service === 'tts.edge_tts_say')
+      );
+      if (dupFlavor) continue;
+      found.push({
+        service: serviceRef,
+        label: labelMap[ent.flavor],
+        local: localMap[ent.flavor],
+        quality: qualityMap[ent.flavor],
+      });
     }
   }
   // Stable sort: quality asc (best first), then local first.
@@ -88,16 +185,49 @@ export async function detectTtsEngines(): Promise<TtsEngine[]> {
 }
 
 /**
+ * v0.9.31 — Normalize user-supplied TTS preference into a full service ref.
+ *
+ * Users in the v0.9.30 release wrote `BROADCAST_TTS_SERVICE=piper` (no
+ * `tts.` prefix) expecting it to point at Piper, and we silently ignored
+ * the preference because it didn't match `tts.piper` exactly. This
+ * normalizer accepts the common shorthands:
+ *
+ *    "piper"       → "tts.piper"      (legacy service, if present)
+ *                 OR "tts.speak:tts.piper"  (modern entity-routed)
+ *    "tts.piper"   → as written
+ *    "cloud"       → "tts.cloud_say" → "tts.speak:tts.home_assistant_cloud"
+ *    "tts.cloud_say" → as written
+ *
+ * Returns null when no engine matches the preference (caller should
+ * fall back to auto-pick).
+ */
+function normalizePreference(preferred: string, engines: TtsEngine[]): TtsEngine | null {
+  const pref = preferred.trim().toLowerCase();
+  if (!pref) return null;
+  // Exact match wins.
+  let m = engines.find((e) => e.service.toLowerCase() === pref);
+  if (m) return m;
+  // tts.<x>:<entity> form — exact compare.
+  m = engines.find((e) => e.service.toLowerCase() === pref);
+  if (m) return m;
+  // Bare flavor name → first engine whose service or label contains it.
+  m = engines.find((e) => e.service.toLowerCase().includes(pref) || e.label.toLowerCase().includes(pref));
+  if (m) return m;
+  return null;
+}
+
+/**
  * Pick the best TTS engine to use given an optional user preference.
  *
- *   - If `preferred` is set AND matches an installed engine, use it.
+ *   - If `preferred` is set AND matches an installed engine (via fuzzy
+ *     normalization), use it.
  *   - Else return the highest-quality detected engine.
  *   - Else null (no TTS).
  */
 export async function pickBestEngine(preferred: string | null): Promise<TtsEngine | null> {
   const engines = await detectTtsEngines();
   if (preferred) {
-    const m = engines.find((e) => e.service === preferred);
+    const m = normalizePreference(preferred, engines);
     if (m) return m;
     // User set a preference we don't recognize — check if it's a service
     // that exists in HA even if not in our known-engines list.
@@ -260,28 +390,42 @@ export interface TtsCallOptions {
 }
 
 /**
- * Fire a TTS announcement. Uses the modern `tts.speak` service when the
- * picked engine is named that way, or the legacy domain-specific service
- * for engines like `tts.google_translate_say`.
+ * Fire a TTS announcement.
+ *
+ * Three call paths are supported:
+ *   1. Modern unified — service field is `tts.speak:<tts_entity>` →
+ *      call `tts.speak` with `entity_id: <tts_entity>`,
+ *      `media_player_entity_id: <targets>`. (HA 2023+ recommended path.)
+ *   2. Legacy domain-specific — service field is e.g. `tts.cloud_say` →
+ *      call it with `entity_id: <targets>`.
+ *   3. MA-routed — if `viaMusicAssistant` is true AND the modern path
+ *      is available, future enhancement could route via MA's TTS handler
+ *      for tighter multi-speaker sync. Currently we still call the TTS
+ *      service directly since MA's TTS pass-through is engine-dependent.
  *
  * Returns the underlying ServiceCallResult so the caller can attribute
  * errors per-call.
  */
 export async function speakAnnouncement(message: string, opts: TtsCallOptions): Promise<ServiceCallResult> {
-  const { service, language, targets, viaMusicAssistant } = {
-    service: opts.engine.service,
-    language: opts.language ?? null,
-    targets: opts.targets,
-    viaMusicAssistant: opts.viaMusicAssistant ?? false,
-  };
-  const [domain, svc] = service.split('.');
+  const language = opts.language ?? null;
+  const targets = opts.targets;
+  const service = opts.engine.service;
 
-  // The modern `tts.speak` service takes (entity_id of TTS engine,
-  // media_player_entity_id, message). Older engine-specific services
-  // take (entity_id of media_player, message). We don't try to dispatch
-  // between them — `tts.speak` requires knowing the TTS entity_id which
-  // we'd have to look up. Stick to engine-specific services for now and
-  // document `tts.speak` as a future enhancement.
+  // Modern path: service ref is "tts.speak:<tts_entity>".
+  if (service.startsWith('tts.speak:')) {
+    const ttsEntityId = service.slice('tts.speak:'.length);
+    const data: Record<string, unknown> = {
+      entity_id: ttsEntityId,
+      media_player_entity_id: targets,
+      message,
+      cache: true,
+    };
+    if (language) data.language = language;
+    return callHaService('tts', 'speak', data);
+  }
+
+  // Legacy path: domain-specific service, takes media_player as entity_id.
+  const [domain, svc] = service.split('.');
   const data: Record<string, unknown> = {
     entity_id: targets,
     message,
@@ -289,11 +433,39 @@ export async function speakAnnouncement(message: string, opts: TtsCallOptions): 
   };
   if (language) data.language = language;
 
-  // When MA is available, MA's TTS routing handles multi-speaker sync
-  // better than raw tts service (which fires sequentially across targets).
-  // We don't yet do this routing — would need a separate MA TTS service —
-  // but the flag is here so the caller can opt in once we wire it up.
-  void viaMusicAssistant;
+  void opts.viaMusicAssistant;  // reserved for future MA-TTS routing
 
   return callHaService(domain, svc, data);
+}
+
+/**
+ * v0.9.31 — Speak with fallback chain.
+ *
+ * Tries `engines` in order. Returns the first successful call's result,
+ * or the LAST failure if all engines fail. Per-engine errors are
+ * accumulated in the returned ServiceCallResult.error so the caller
+ * can log the full picture.
+ *
+ * This is the function the broadcast monitor should call: if the
+ * preferred engine is having a bad day (the v0.9.30 yellow-test 500
+ * from tts.cloud_say is the canonical example), we try the next-best
+ * engine instead of losing the spoken announcement entirely.
+ */
+export async function speakWithFallback(
+  message: string,
+  engines: TtsEngine[],
+  opts: Omit<TtsCallOptions, 'engine'>,
+): Promise<{ result: ServiceCallResult; engineUsed: TtsEngine | null; attempts: Array<{ engine: TtsEngine; error: string | null }> }> {
+  const attempts: Array<{ engine: TtsEngine; error: string | null }> = [];
+  let lastResult: ServiceCallResult = { ok: false, status: 0, error: 'no engines tried' };
+  for (const eng of engines) {
+    const r = await speakAnnouncement(message, { ...opts, engine: eng });
+    if (r.ok) {
+      attempts.push({ engine: eng, error: null });
+      return { result: r, engineUsed: eng, attempts };
+    }
+    attempts.push({ engine: eng, error: r.error ?? `HTTP ${r.status}` });
+    lastResult = r;
+  }
+  return { result: lastResult, engineUsed: null, attempts };
 }

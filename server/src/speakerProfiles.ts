@@ -60,13 +60,31 @@ export function inferProtocol(entityId: string, attrs: Record<string, unknown>):
   const platform = String(attrs.platform ?? '').toLowerCase();
   const model = String((attrs as Record<string, unknown>).model ?? '').toLowerCase();
   const sourceList = Array.isArray(attrs.source_list) ? attrs.source_list.join(' ').toLowerCase() : '';
+  const source = String((attrs as Record<string, unknown>).source ?? '').toLowerCase();
   const dt = String((attrs as Record<string, unknown>).device_class ?? '').toLowerCase();
+  // v0.9.31 — MA exposes the underlying speaker's "provider" attribute.
+  // Read that explicitly for the most reliable protocol hint.
+  const maProvider = String((attrs as Record<string, unknown>).provider ?? '').toLowerCase();
+  const supportedFeatures = Number((attrs as Record<string, unknown>).supported_features ?? 0);
+  void supportedFeatures;
+
+  // MA-provided protocol hint is the most authoritative.
+  if (maProvider === 'sonos') return 'sonos';
+  if (maProvider === 'airplay' || maProvider === 'apple_homepod' || maProvider === 'homepod') return 'airplay';
+  if (maProvider === 'chromecast' || maProvider === 'cast' || maProvider === 'google_cast') return 'cast';
 
   if (id.includes('sonos') || platform === 'sonos' || sourceList.includes('sonos')) return 'sonos';
+  // v0.9.31 — Sonos Beam/Arc/Ray soundbars often surface as `*_soundbar*`
+  // entities (not `*_sonos*`). The user's `family_room_soundbar_2` entity
+  // was misclassified as `cast` in v0.9.30. Match common soundbar naming
+  // patterns when we don't have a stronger hint.
+  if (id.includes('soundbar') || id.includes('sonos_arc') || id.includes('sonos_beam') || id.includes('sonos_ray')) return 'sonos';
   if (id.includes('homepod') || platform === 'homepod' || /homepod/.test(model) || id.includes('apple_tv') || platform === 'apple_tv') return 'airplay';
+  // v0.9.31 — currently-playing AirPlay = device speaks AirPlay even if not
+  // a HomePod. Treat as airplay for staggering purposes.
+  if (source === 'airplay') return 'airplay';
   // Ecobee/Nest thermostats expose themselves as `media_player.*_thermostat`
-  // and use Cast under the hood. Sonos arc soundbars also use Cast under the
-  // hood for some controls but they're tagged as `sonos` so they go above.
+  // and use Cast under the hood.
   if (platform === 'cast' || id.includes('chromecast') || id.includes('thermostat') || id.includes('nest') || id.includes('google') || id.includes('cast') || dt === 'speaker') return 'cast';
   if (platform === 'alexa_media' || id.includes('echo') || id.includes('alexa')) return 'echo';
   if (platform === 'androidtv' || id.includes('androidtv') || id.includes('android_tv')) return 'androidtv';

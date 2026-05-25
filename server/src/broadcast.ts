@@ -63,7 +63,7 @@ import {
   detectTtsEngines,
   pickBestEngine,
   buildAlertMessage,
-  speakAnnouncement,
+  speakWithFallback,
   type TtsEngine,
 } from './ttsService.js';
 
@@ -437,19 +437,36 @@ export function startBroadcastMonitor(
     // We wait klaxon-duration (~3 sec for red, ~1.5 for yellow/green)
     // before speaking so the operator isn't trying to parse speech over
     // a beeping klaxon.
+    //
+    // v0.9.31 — use speakWithFallback: if the preferred engine 500s, try
+    // the next-best detected engine instead of dropping the announcement.
+    // Field log showed tts.cloud_say returning 500 intermittently in
+    // v0.9.30; this makes the TTS path resilient to single-engine flakes.
     const klaxonSettleMs = level === 'red' ? 3500 : 1800;
     if (message && ttsEngine) {
       await sleep(klaxonSettleMs);
-      const tRes = await speakAnnouncement(message, {
+      // Build the engine list: preferred first, then the rest of the
+      // detected engines as fallbacks. Skip duplicates.
+      const engineChain: TtsEngine[] = [ttsEngine];
+      for (const e of ttsAvailable) {
+        if (!engineChain.find((x) => x.service === e.service)) engineChain.push(e);
+      }
+      const tRes = await speakWithFallback(message, engineChain, {
         targets: cfg.targets,
-        engine: ttsEngine,
         language: cfg.ttsLanguage,
         viaMusicAssistant: backend === 'music_assistant',
       });
-      if (!tRes.ok) {
-        errors.push(`tts(${ttsEngine.service}): ${tRes.error ?? tRes.status}`);
+      if (!tRes.result.ok) {
+        for (const a of tRes.attempts) {
+          errors.push(`tts(${a.engine.service}): ${a.error}`);
+        }
       } else {
         lastSpokenMessage = message;
+        // If the preferred engine failed but a fallback succeeded, log
+        // it loudly so the user knows their configured engine has issues.
+        if (tRes.engineUsed && tRes.engineUsed.service !== ttsEngine.service) {
+          log(`broadcast: TTS fell back from ${ttsEngine.service} to ${tRes.engineUsed.service} (preferred returned ${tRes.attempts[0].error})`);
+        }
       }
     }
 

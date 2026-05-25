@@ -3,6 +3,61 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.31 — 2026-05-25
+
+**TTS fixes from v0.9.30 live testing.** Hitting the v0.9.30 endpoints
+against the production HA surfaced three real issues, all addressed
+here:
+
+1. **`BROADCAST_TTS_SERVICE=piper` was silently ignored.** The auto-pick
+   fell through to `tts.cloud_say` because we required the full
+   `tts.piper` service name. Now: fuzzy-normalize the user's preference
+   ("piper" → "tts.piper" or "tts.speak:tts.piper" if discovered as
+   an entity). Bare flavor names ("piper", "cloud", "elevenlabs") all
+   work.
+
+2. **TTS 500 from one engine kills the whole spoken announcement.**
+   Yellow-alert test returned `tts(tts.cloud_say): 500 Server got itself
+   in trouble`. New **`speakWithFallback()`** tries each detected engine
+   in order — first success wins, last failure reported. Logs loudly
+   when fallback triggers so the user knows their configured engine has
+   issues.
+
+3. **Modern `tts.speak` path now supported.** HA 2023+ recommends
+   `tts.speak` with `entity_id: tts.home_assistant_cloud` (or any TTS
+   entity). The legacy `tts.cloud_say` etc. are being deprecated and
+   are the ones returning 500. We now detect TTS ENTITIES via
+   `getAllStates()` and route through the modern unified service when
+   available. Engine refs like `tts.speak:tts.piper` are first-class.
+
+### Other fixes
+
+- **`family_room_soundbar_2` was misclassified as `cast`.** Now matches
+  Sonos by `soundbar` / `sonos_arc` / `sonos_beam` / `sonos_ray`
+  entity patterns. Also reads MA's `provider` attribute (authoritative
+  when present) and the live `source` attribute (treats currently-
+  playing-AirPlay devices as airplay for staggering).
+
+### What this means in practice
+
+If you have Piper installed but only see `tts.cloud_say` and `tts.speak`
+in the available engines list, the new entity detection should pick up
+`tts.piper` as a speakable entity and you can set:
+
+```
+BROADCAST_TTS_SERVICE: piper
+```
+
+and v0.9.31 will route it correctly.
+
+If Nabu Casa's `tts.cloud_say` 500s again, the broadcast falls back to
+the next-best engine instead of going silent.
+
+### Tests
+
+3 new tests in `audioSync.test.ts`: soundbar→sonos, MA provider attr,
+currently-playing-AirPlay source detection. **120 total pass** (was 117).
+
 ## 0.9.30 — 2026-05-25
 
 **Broadcast audio sync + TTS.** Field-log analysis (the `2026-05-25T22:51`
