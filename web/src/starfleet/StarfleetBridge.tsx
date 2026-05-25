@@ -10,7 +10,7 @@
  * of the data.
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { Component, useEffect, useRef, useState, useCallback, type ReactNode } from 'react';
 import { useSnapshot } from '../useSnapshot';
 import { DeltaShield } from './components/DeltaShield';
 import { StationBar, type StationId } from './components/StationBar';
@@ -93,18 +93,38 @@ export function StarfleetBridge() {
     prevStationRef.current = id;
   }, [engine]);
 
+  // v0.9.24 — derived footer status line. Reflects actual socket + alert
+  // state instead of the previous always-"ALL DUTY STATIONS REPORTING".
+  const footerStatus =
+    conn !== 'open' ? 'SUBSPACE LINK · DEGRADED' :
+    level === 'red' ? 'RED ALERT · DAMAGE CONTROL ENGAGED' :
+    level === 'yellow' ? 'YELLOW ALERT · CONDITION ELEVATED' :
+    'ALL DUTY STATIONS REPORTING';
+
   return (
     <div className="sf-bridge">
-      {/* === Header banner (tan/jellybean console look) =============== */}
+      {/*
+        === Header banner (tan/jellybean console look) ===
+        v0.9.24 — `flex-wrap` so the right-side cluster (stardate / registry
+        / condition / sound / theme) can move to a second line on narrower
+        viewports instead of cropping off the theme toggle. `min-w-0` on
+        the ship-id column so it shrinks gracefully rather than pushing
+        the right cluster off-screen.
+      */}
       <header className="sf-header">
-        <div className="max-w-[1800px] mx-auto px-4 py-3 flex items-center gap-4">
+        <div className="max-w-[1800px] mx-auto px-4 py-3 flex items-center gap-4 flex-wrap">
           <DeltaShield size={48} color="#1a120a" glow={false} />
-          <div className="flex flex-col">
-            <div style={{ fontSize: 10, letterSpacing: '0.35em', fontWeight: 700 }}>{ship.prefix}</div>
-            <div style={{ fontFamily: 'Antonio, sans-serif', fontWeight: 700, fontSize: 22, letterSpacing: '0.12em', lineHeight: 1.1 }}>{ship.name}</div>
-            <div style={{ fontSize: 10, letterSpacing: '0.18em', opacity: 0.75 }}>{ship.cls}</div>
+          <div className="flex flex-col min-w-0 flex-1" style={{ minWidth: 220 }}>
+            {/* The prefix used to be one very long string ("UNITED FEDERATION
+             * OF PLANETS · STARFLEET COMMAND") that letter-spacing puffed up
+             * to wrap on three lines. Split it into two declared lines and
+             * mark each `nowrap`. */}
+            <div style={{ fontSize: 9, letterSpacing: '0.32em', fontWeight: 700, whiteSpace: 'nowrap' }}>UNITED FEDERATION OF PLANETS</div>
+            <div style={{ fontSize: 9, letterSpacing: '0.32em', fontWeight: 700, whiteSpace: 'nowrap', opacity: 0.8 }}>STARFLEET COMMAND</div>
+            <div style={{ fontFamily: 'Antonio, sans-serif', fontWeight: 700, fontSize: 22, letterSpacing: '0.12em', lineHeight: 1.1, whiteSpace: 'nowrap' }}>{ship.name}</div>
+            <div style={{ fontSize: 10, letterSpacing: '0.18em', opacity: 0.75, whiteSpace: 'nowrap' }}>{ship.cls}</div>
           </div>
-          <div className="ml-auto flex items-center gap-6">
+          <div className="ml-auto flex items-center gap-6 flex-shrink-0 flex-wrap justify-end">
             <div className="text-right">
               <div style={{ fontSize: 9, letterSpacing: '0.3em', fontWeight: 700 }}>STARDATE</div>
               <div style={{ fontFamily: 'Antonio, sans-serif', fontWeight: 700, fontSize: 22, lineHeight: 1 }}>{stardate()}</div>
@@ -137,7 +157,13 @@ export function StarfleetBridge() {
         />
       </div>
 
-      {/* === Active station content =================================== */}
+      {/*
+        === Active station content ===
+        v0.9.24 — error boundary keyed on `station` so a thrown station
+        (e.g. the Science crash before this release) renders an in-place
+        panel instead of taking down the entire bridge. Switching tabs
+        resets the boundary.
+      */}
       <main className="max-w-[1800px] mx-auto px-4 pb-8">
         {!snapshot ? (
           <div className="sf-panel text-center py-12">
@@ -145,17 +171,56 @@ export function StarfleetBridge() {
             <div className="sf-label mt-3">SOCKET: {conn}</div>
           </div>
         ) : (
-          <StationContent station={station} snapshot={snapshot} />
+          <StationErrorBoundary stationKey={station}>
+            <StationContent station={station} snapshot={snapshot} />
+          </StationErrorBoundary>
         )}
       </main>
 
       {/* === Footer === */}
       <footer className="max-w-[1800px] mx-auto px-4 py-3 flex items-center justify-between text-xs" style={{ borderTop: '1px solid #5a4520', color: '#8c7a5c' }}>
-        <span style={{ fontFamily: 'Antonio, sans-serif', letterSpacing: '0.2em' }}>STARFLEET INTERFACE · TMP-ERA · ALL DUTY STATIONS REPORTING</span>
+        <span style={{ fontFamily: 'Antonio, sans-serif', letterSpacing: '0.2em' }}>STARFLEET INTERFACE · TMP-ERA · {footerStatus}</span>
         <span style={{ fontFamily: 'Share Tech Mono', letterSpacing: '0.15em' }}>SOCK · {conn.toUpperCase()}</span>
       </footer>
     </div>
   );
+}
+
+/**
+ * v0.9.24 — Station-level error boundary. Without this, a thrown render
+ * inside Science / Conn / etc. propagates up through `<Suspense>` and
+ * leaves the user with a fully blank screen. Now they see the bridge
+ * chrome + a TMP-styled "MALFUNCTION" panel they can click off of.
+ *
+ * Re-keys on the station id so flipping tabs resets the boundary —
+ * otherwise once a station errors, even other stations behind the same
+ * boundary instance would be marked "broken".
+ */
+class StationErrorBoundary extends Component<{ stationKey: string; children: ReactNode }, { err: Error | null }> {
+  state = { err: null as Error | null };
+  static getDerivedStateFromError(err: Error) { return { err }; }
+  componentDidUpdate(prev: { stationKey: string }) {
+    if (prev.stationKey !== this.props.stationKey && this.state.err) {
+      this.setState({ err: null });
+    }
+  }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div className="sf-panel" style={{ borderColor: '#c4242a', padding: '2rem' }}>
+        <div className="sf-label" style={{ color: '#c4242a', fontSize: 12, marginBottom: 8 }}>● STATION MALFUNCTION</div>
+        <div style={{ fontFamily: 'Antonio, sans-serif', fontSize: 18, color: '#f4e8c8' }}>
+          {String(this.props.stationKey).toUpperCase()} CONSOLE OFFLINE
+        </div>
+        <div className="sf-label" style={{ fontSize: 10, marginTop: 8, color: '#8c7a5c', whiteSpace: 'pre-wrap' }}>
+          {this.state.err?.message ?? 'unknown fault'}
+        </div>
+        <div className="sf-label" style={{ fontSize: 10, marginTop: 12, color: '#8c7a5c' }}>
+          SELECT ANOTHER DUTY STATION OR RELOAD THE INTERFACE.
+        </div>
+      </div>
+    );
+  }
 }
 
 function StationContent({ station, snapshot }: { station: StationId; snapshot: any }) {

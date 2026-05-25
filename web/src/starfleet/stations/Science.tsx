@@ -23,8 +23,25 @@ interface ForecastData {
   soiling?: { dropPct: number | null; cleanDays: number };
 }
 
+/**
+ * Shape returned by /api/pack-risk/v2 (the trained-ML endpoint).
+ * The tier + composite score live nested under `heuristic` and on the
+ * pack root respectively — Science previously declared a flat shape
+ * (`p.tier`, `p.score0to100`) which crashed `.toFixed()` when the real
+ * data arrived. v0.9.24 — match the actual server response.
+ */
+interface PackRiskV2Pack {
+  device: string;
+  packNum: number;
+  sn?: string;
+  coreNum?: number;
+  composite0to100: number;
+  heuristic?: { tier: string; score0to100: number };
+  trained?: { score0to100: number; modelSource?: string };
+  novelty?: { score0to100: number };
+}
 interface PackRiskData {
-  packs?: Array<{ device: string; packNum: number; tier: string; score0to100: number }>;
+  packs?: PackRiskV2Pack[];
 }
 
 export function Science({ snapshot }: { snapshot: FleetSnapshot | null }) {
@@ -116,21 +133,28 @@ export function Science({ snapshot }: { snapshot: FleetSnapshot | null }) {
               <span>REACTOR · PACK</span><span className="text-right">TIER</span><span className="text-right">SCORE</span><span className="text-right">STATUS</span>
             </div>
             {risk.packs.slice(0, 10).map((p, i) => {
+              // v0.9.24 — tier lives on `heuristic`, score lives on the pack
+              // root as `composite0to100`. Defensive defaults so a future
+              // schema shift can't take down the whole bridge again.
+              const tier = p.heuristic?.tier ?? 'unknown';
+              const score = typeof p.composite0to100 === 'number' ? p.composite0to100
+                : typeof p.heuristic?.score0to100 === 'number' ? p.heuristic.score0to100
+                : null;
               const tierColor =
-                p.tier === 'critical' ? '#c4242a' :
-                p.tier === 'elevated' ? '#e89c40' :
-                p.tier === 'moderate' ? '#e2c44c' :
-                p.tier === 'low' ? '#6fb854' : '#8c7a5c';
+                tier === 'critical' ? '#c4242a' :
+                tier === 'elevated' ? '#e89c40' :
+                tier === 'moderate' ? '#e2c44c' :
+                tier === 'low' ? '#6fb854' : '#8c7a5c';
               const tierName =
-                p.tier === 'critical' ? 'RED' :
-                p.tier === 'elevated' ? 'AMBER' :
-                p.tier === 'moderate' ? 'YELLOW' :
-                p.tier === 'low' ? 'GREEN' : '— —';
+                tier === 'critical' ? 'RED' :
+                tier === 'elevated' ? 'AMBER' :
+                tier === 'moderate' ? 'YELLOW' :
+                tier === 'low' ? 'GREEN' : '— —';
               return (
                 <div key={i} className="grid grid-cols-[1fr_80px_80px_70px] gap-2 items-center px-1 py-1" style={{ borderBottom: '1px dashed rgba(192,158,96,0.15)' }}>
                   <span style={{ color: '#f4e8c8', fontFamily: 'Antonio, sans-serif' }}>{p.device} · PACK {p.packNum}</span>
                   <span className="text-right sf-readout" style={{ color: tierColor, fontSize: 12 }}>{tierName}</span>
-                  <span className="text-right sf-readout" style={{ fontSize: 12 }}>{p.score0to100.toFixed(0)}<span className="sf-readout-unit">%</span></span>
+                  <span className="text-right sf-readout" style={{ fontSize: 12 }}>{score != null ? score.toFixed(0) : '— —'}<span className="sf-readout-unit">%</span></span>
                   <span className="text-right">
                     <span className="sf-jellybean" style={{ ['--jb-color' as any]: tierColor }} />
                   </span>

@@ -3,6 +3,72 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.25 — 2026-05-25
+
+Starfleet UI bug-bash. Live in-browser debugging via the built-in
+preview surfaced six independent issues — the worst of which crashed
+the entire bridge when the user clicked SCIENCE.
+
+### Fixes
+
+- **Science station no longer crashes.** `/api/pack-risk/v2` returns
+  `composite0to100` + nested `heuristic.tier`/`heuristic.score0to100`,
+  but Science was declared against the v1 flat shape (`p.tier`,
+  `p.score0to100`). When the real response landed, `p.score0to100.toFixed()`
+  threw `Cannot read properties of undefined (reading 'toFixed')` and
+  propagated up through `<Suspense>` to blank the entire page. Adapted
+  the type + access pattern to v2, added defensive `?? '— —'` fallbacks
+  throughout the pack-risk table.
+
+- **Station error boundary.** Even with the Science fix, any future
+  bug in any other station would have the same blank-the-whole-bridge
+  failure mode. Added a class-based `StationErrorBoundary` that wraps
+  every station, keyed on the active station id. A thrown station now
+  renders a TMP-styled "STATION MALFUNCTION" panel with the error
+  message; switching to another station resets the boundary.
+
+- **STARDATE was negative.** The original formula anchored to the TNG
+  era (year 2364 = stardate 41000); for present-day calendar dates
+  (mid-2026) it produced `-296603.8`. Re-anchored to TMP-era: 2026 maps
+  to ~7000 (the actual TMP film opened at STARDATE 7411.4), +100 per
+  real year, + 1000 × day-fraction. Now reads `7396.2` — positive,
+  plausible, in-genre.
+
+- **Header layout fits.** The ship-id column used a single very long
+  prefix string ("UNITED FEDERATION OF PLANETS · STARFLEET COMMAND")
+  that letter-spacing puffed up to wrap on three lines, and the right-
+  side cluster (stardate / registry / condition / sound / theme) was
+  cropping the theme toggle off the right edge of the viewport. Split
+  the prefix into two declared `nowrap` lines, added `flex-wrap` +
+  `flex-shrink-0` so the right cluster moves to a second row on
+  narrower viewports instead of clipping.
+
+- **Ring gauge center label no longer hidden behind the number.** The
+  `centerUnit` text (e.g. "PERCENT") sat at `cy + size * 0.16` — close
+  enough to the big `centerNumber` text + drop-shadow glow to be half-
+  covered by it. Moved to `cy + size * 0.24` so it sits clearly below.
+
+- **Footer reflects real state.** Previously always said "ALL DUTY
+  STATIONS REPORTING" regardless of socket or alert level. Now derives:
+  - socket not open → "SUBSPACE LINK · DEGRADED"
+  - red alert → "RED ALERT · DAMAGE CONTROL ENGAGED"
+  - yellow alert → "YELLOW ALERT · CONDITION ELEVATED"
+  - otherwise → "ALL DUTY STATIONS REPORTING"
+
+- **CONN "DURATION — HR" / "TO RESERVE FLOOR ∞ HR" while charging.**
+  When the fleet is charging, both `hoursToReserve` and `hoursToEmpty`
+  are null (battery isn't depleting toward anything). Previously the
+  Field showed "— HR" / "∞ HR" — technically correct but unhelpful.
+  Now shows green "CHARGING" when net battery is < −5 W, falls back
+  to the prior copy otherwise.
+
+### Verification
+
+- Confirmed in-browser against the live HA Pi backend via the dev
+  preview. Clicked through every station — none crash, all render,
+  data populates within ~1 s of mount.
+- Typecheck clean, Vite build clean.
+
 ## 0.9.23 — 2026-05-25
 
 **Music Assistant broadcast path.** Detailed log analysis of v0.9.22's
