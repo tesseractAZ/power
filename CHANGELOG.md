@@ -3,6 +3,73 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.23 — 2026-05-25
+
+**Music Assistant broadcast path.** Detailed log analysis of v0.9.22's
+first real broadcast revealed the cause of the inter-speaker delay
+the user reported: nearly all configured `media_player` entities are
+**proxied through Music Assistant** (visible in the discover output
+— "Music Assistant Queue" source on family-room soundbar, garage,
+both thermostats, and HomePod). Music Assistant intercepts every
+`media_player.play_media` call, transcodes the WAV per speaker, and
+**streams to each device individually** — explaining both the 7 s
+broadcast duration and the audible gap between rooms.
+
+Music Assistant has a purpose-built **`play_announcement`** service
+designed for exactly this — it plays SIMULTANEOUSLY across all
+targets, returns immediately, and handles volume override + restore
+atomically. This release switches to it when available.
+
+### Backend auto-detection
+
+On startup (and on each test) the broadcast monitor queries HA's
+service catalog (`GET /core/api/services`) and checks for
+`music_assistant.play_announcement`. If found, it routes broadcasts
+through MA. Otherwise it falls back to the v0.9.18 `media_player.play_media`
+path (still works fine for non-MA setups).
+
+### New config option
+
+`BROADCAST_USE_MUSIC_ASSISTANT: auto | music_assistant | media_player`
+(default `auto`). Force one path or the other if the auto-detection
+makes the wrong call.
+
+### Test-endpoint cooldown
+
+Rapid test clicks during v0.9.22 debugging produced the cascading
+**502 responses** seen in the log — each retry collided with the
+in-flight MA stream and overwhelmed its queue. v0.9.23 adds a
+**10-second cooldown** to `POST /api/broadcast/test`. The UI
+disables the buttons + shows a countdown when the cooldown is
+active. Live alert-triggered broadcasts are not affected.
+
+### Successful broadcasts now logged
+
+Previously only errors were logged. Each broadcast now logs:
+
+```
+broadcast: red via music_assistant → ok in 184ms (6 target(s))
+```
+
+vs. the old serial path:
+
+```
+broadcast: red via media_player → ok in 6995ms (6 target(s))
+```
+
+The duration is the single best diagnostic — < 500 ms means MA
+fired; > 3 s means we're on the slow path.
+
+### BroadcastPanel UI
+
+The OPS-station panel now shows a `BROADCAST PATH` row indicating
+which service is in use (`◉ MUSIC ASSISTANT` vs `◐ MEDIA PLAYER`)
+plus the cooldown timer on the test buttons.
+
+### Tests
+
+77 server tests (76 → 77, +1 covering the new env-parse).
+
 ## 0.9.22 — 2026-05-25
 
 Hotfix — **the Starfleet UI never actually rendered**. Selecting
