@@ -51,6 +51,21 @@ import type { SnapshotStore } from './snapshot.js';
 import type { Alert } from './alerts.js';
 import { callHaService, isSupervised, hasService } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
+// v0.9.29 — protocol-aware grouping + TTS auto-detection
+import {
+  profileTargets,
+  groupByProtocol,
+  scheduleStagger,
+  type SpeakerProfile,
+  type SpeakerGroup,
+} from './speakerProfiles.js';
+import {
+  detectTtsEngines,
+  pickBestEngine,
+  buildAlertMessage,
+  speakAnnouncement,
+  type TtsEngine,
+} from './ttsService.js';
 
 export type BroadcastBackend = 'auto' | 'music_assistant' | 'media_player';
 
@@ -142,6 +157,14 @@ export interface BroadcastStatus {
   musicAssistantAvailable: boolean;
   /** v0.9.23 — ms until the test endpoint will accept another call. 0 = ready. */
   testCooldownRemainingMs: number;
+  /** v0.9.29 — protocol-grouped target view, used by the discover UI + diagnostics. */
+  speakerGroups: Array<{ protocol: string; bufferMs: number; targets: string[]; fireAtMs: number }>;
+  /** v0.9.29 — TTS engine currently in use (auto-picked or user-configured). */
+  ttsEngine: { service: string; label: string; local: boolean } | null;
+  /** v0.9.29 — every TTS engine detected in HA (for the picker UI). */
+  ttsAvailable: Array<{ service: string; label: string; local: boolean }>;
+  /** v0.9.29 — last broadcast's spoken message (debug surface). */
+  lastSpokenMessage: string | null;
 }
 
 /** v0.9.23 — cooldown on the test endpoint. Rapid retests during
@@ -166,6 +189,14 @@ export function startBroadcastMonitor(
   let lastBackend: BroadcastStatus['lastBackend'] = null;
   let lastTestAt = 0;
   let musicAssistantAvailable = false;
+  // v0.9.29 — speaker grouping + TTS state
+  let speakerGroups: SpeakerGroup[] = [];
+  let cachedProfiles: SpeakerProfile[] = [];
+  let cachedProfilesAt = 0;
+  let ttsEngine: TtsEngine | null = null;
+  let ttsAvailable: TtsEngine[] = [];
+  let lastSpokenMessage: string | null = null;
+  const PROFILE_CACHE_MS = 5 * 60 * 1000; // refresh profiles every 5 min
 
   const supervised = isSupervised();
   if (!supervised) {
@@ -205,7 +236,57 @@ export function startBroadcastMonitor(
       log('broadcast: music_assistant not detected, using media_player.play_media');
     }
   };
-  void detectMusicAssistant();
+
+  /** v0.9.29 — Auto-detect TTS engines available in HA. Preference order
+   *  is encoded in ttsService.ts (Piper > Cloud > Google > ElevenLabs).
+   *  If the user set BROADCAST_TTS_SERVICE explicitly we honor it; else
+   *  we auto-pick the highest-quality available engine, defaulting to
+   *  Piper which is local (off-grid safe) and free. */
+  const detectTts = async () => {
+    if (!supervised) {
+      ttsEngine = null;
+      ttsAvailable = [];
+      return;
+    }
+    ttsAvailable = await detectTtsEngines();
+    ttsEngine = await pickBestEngine(cfg.ttsService);
+    if (ttsEngine) {
+      const src = cfg.ttsService === ttsEngine.service ? 'configured' : 'auto-picked';
+      log(`broadcast: TTS engine ${src}: ${ttsEngine.label} (${ttsEngine.service})${ttsEngine.local ? ' [local/off-grid OK]' : ''}`);
+    } else if (cfg.ttsService) {
+      log(`broadcast: BROADCAST_TTS_SERVICE=${cfg.ttsService} not available; spoken alerts disabled`);
+    } else if (ttsAvailable.length === 0) {
+      log('broadcast: no TTS engines detected (install Piper add-on for local TTS — strongly recommended for off-grid)');
+    }
+  };
+
+  /** v0.9.29 — Refresh speaker protocol profiles. Cached to avoid
+   *  hammering HA's /states on every broadcast — speakers don't change
+   *  protocol mid-day. Forced refresh after config changes or every 5 min. */
+  const refreshSpeakerGroups = async (force = false) => {
+    if (!supervised) {
+      speakerGroups = [];
+      cachedProfiles = [];
+      return;
+    }
+    const stale = Date.now() - cachedProfilesAt > PROFILE_CACHE_MS;
+    if (!force && !stale && cachedProfiles.length === cfg.targets.length) return;
+    cachedProfiles = await profileTargets(cfg.targets);
+    cachedProfilesAt = Date.now();
+    speakerGroups = groupByProtocol(cachedProfiles);
+    if (speakerGroups.length > 0) {
+      const groupSummary = speakerGroups
+        .map((g) => `${g.protocol}×${g.targets.length} (${g.bufferMs}ms)`)
+        .join(', ');
+      log(`broadcast: speaker groups (fire-first → last): ${groupSummary}`);
+    }
+  };
+
+  void (async () => {
+    await detectMusicAssistant();
+    await detectTts();
+    await refreshSpeakerGroups(true);
+  })();
 
   const inQuiet = (): boolean => {
     if (!cfg.quietHours) return false;
@@ -235,40 +316,22 @@ export function startBroadcastMonitor(
    * convert before sending. The TTS is appended as a SECOND announcement
    * because play_announcement plays one URL per call.
    */
-  const runBroadcastMA = async (level: ConditionLevel, message: string | null): Promise<{ ok: boolean; errors: string[] }> => {
+  const runBroadcastMA = async (
+    level: ConditionLevel,
+    targets: string[],
+  ): Promise<{ ok: boolean; errors: string[] }> => {
     const errors: string[] = [];
     const wav = `${cfg.audioBase}/audio/${level === 'red' ? 'red-alert' : level === 'yellow' ? 'yellow-alert' : 'all-clear'}.wav`;
     const announceVolume = Math.round(cfg.volume * 100);
 
-    // 1. Main klaxon. use_pre_announce=false because the WAV itself is the alert tone.
+    // Main klaxon. use_pre_announce=false because the WAV itself is the alert tone.
     const r = await callHaService('music_assistant', 'play_announcement', {
-      entity_id: cfg.targets,
+      entity_id: targets,
       url: wav,
       use_pre_announce: false,
       announce_volume: announceVolume,
     });
-    if (!r.ok) errors.push(`music_assistant.play_announcement: ${r.error ?? r.status}`);
-
-    // 2. Optional TTS announcement, queued as a second announcement that
-    //    fires after the klaxon clears. MA handles the gap timing internally.
-    if (cfg.ttsService && message && r.ok) {
-      // Brief gap so MA finishes the klaxon-announce volume-restore cycle
-      // before we hit it again with another announce. (MA queues but
-      // overlapping announces can clip the start.)
-      await sleep(level === 'red' ? 3500 : 1500);
-      // For TTS via MA we go through the configured TTS service, which is
-      // its own world (some integrations support announce, others don't).
-      // Simpler: render TTS via the underlying tts service directly to the
-      // MA-registered players; MA passes through.
-      const [domain, service] = cfg.ttsService.split('.');
-      const data: Record<string, unknown> = {
-        entity_id: cfg.targets,
-        message,
-      };
-      if (cfg.ttsLanguage) data.language = cfg.ttsLanguage;
-      const tRes = await callHaService(domain, service, data);
-      if (!tRes.ok) errors.push(`tts: ${tRes.error ?? tRes.status}`);
-    }
+    if (!r.ok) errors.push(`music_assistant.play_announcement (${targets.length}): ${r.error ?? r.status}`);
 
     return { ok: errors.length === 0, errors };
   };
@@ -278,102 +341,144 @@ export function startBroadcastMonitor(
    * Used when Music Assistant isn't available or the user has forced
    * BROADCAST_USE_MUSIC_ASSISTANT=false. Same behavior as v0.9.18-22.
    */
-  const runBroadcastMP = async (level: ConditionLevel, message: string | null): Promise<{ ok: boolean; errors: string[] }> => {
+  const runBroadcastMP = async (
+    level: ConditionLevel,
+    targets: string[],
+  ): Promise<{ ok: boolean; errors: string[] }> => {
     const errors: string[] = [];
     const wav = `${cfg.audioBase}/audio/${level === 'red' ? 'red-alert' : level === 'yellow' ? 'yellow-alert' : 'all-clear'}.wav`;
-    const boatswain = `${cfg.audioBase}/audio/boatswain.wav`;
 
-    const sonosTargets = cfg.targets.filter((t) => t.includes('sonos') || /\bsonos\b/i.test(t));
+    const sonosTargets = targets.filter((t) => t.includes('sonos') || /\bsonos\b/i.test(t));
     if (cfg.sonosRestore && sonosTargets.length > 0) {
       const r = await callHaService('sonos', 'snapshot', { entity_id: sonosTargets, with_group: true });
       if (!r.ok) errors.push(`sonos.snapshot: ${r.error ?? r.status}`);
     }
 
     const volRes = await callHaService('media_player', 'volume_set', {
-      entity_id: cfg.targets,
+      entity_id: targets,
       volume_level: cfg.volume,
     });
-    if (!volRes.ok) errors.push(`volume_set: ${volRes.error ?? volRes.status}`);
-
-    if (cfg.ttsService && message) {
-      const bRes = await callHaService('media_player', 'play_media', {
-        entity_id: cfg.targets,
-        media_content_id: boatswain,
-        media_content_type: 'music',
-        announce: true,
-      });
-      if (!bRes.ok) errors.push(`boatswain: ${bRes.error ?? bRes.status}`);
-      await sleep(1500);
-    }
+    if (!volRes.ok) errors.push(`volume_set (${targets.length}): ${volRes.error ?? volRes.status}`);
 
     const kRes = await callHaService('media_player', 'play_media', {
-      entity_id: cfg.targets,
+      entity_id: targets,
       media_content_id: wav,
       media_content_type: 'music',
       announce: true,
     });
-    if (!kRes.ok) errors.push(`play_media: ${kRes.error ?? kRes.status}`);
+    if (!kRes.ok) errors.push(`play_media (${targets.length}): ${kRes.error ?? kRes.status}`);
 
-    if (cfg.ttsService && message) {
-      await sleep(level === 'red' ? 3500 : 1500);
-      const [domain, service] = cfg.ttsService.split('.');
-      const data: Record<string, unknown> = {
-        entity_id: cfg.targets,
-        message,
-      };
-      if (cfg.ttsLanguage) data.language = cfg.ttsLanguage;
-      const tRes = await callHaService(domain, service, data);
-      if (!tRes.ok) errors.push(`tts: ${tRes.error ?? tRes.status}`);
-    }
-
-    if (cfg.sonosRestore && sonosTargets.length > 0) {
-      const settleMs = (cfg.ttsService && message ? 8000 : (level === 'red' ? 3500 : 1500));
-      await sleep(settleMs);
-      const r = await callHaService('sonos', 'restore', { entity_id: sonosTargets, with_group: true });
-      if (!r.ok) errors.push(`sonos.restore: ${r.error ?? r.status}`);
-    }
+    // Sonos restore is scheduled by the orchestrator after the spoken
+    // announcement (if any) finishes — see runBroadcast() below.
 
     return { ok: errors.length === 0, errors };
   };
 
-  /** Dispatcher — picks the right backend and runs it. */
-  const runBroadcast = async (level: ConditionLevel, message: string | null): Promise<{ ok: boolean; errors: string[]; backend: 'music_assistant' | 'media_player' }> => {
+  /** Schedule a Sonos snapshot-restore pair around the broadcast window. */
+  const scheduleSonosRestore = async (targets: string[], settleMs: number): Promise<string[]> => {
+    const errors: string[] = [];
+    const sonosTargets = targets.filter((t) => t.includes('sonos') || /\bsonos\b/i.test(t));
+    if (!cfg.sonosRestore || sonosTargets.length === 0) return errors;
+    await sleep(settleMs);
+    const r = await callHaService('sonos', 'restore', { entity_id: sonosTargets, with_group: true });
+    if (!r.ok) errors.push(`sonos.restore: ${r.error ?? r.status}`);
+    return errors;
+  };
+
+  /**
+   * v0.9.29 — Staggered orchestrator. Walks the protocol-grouped speaker list
+   * in fire-first order (longest buffer first) and dispatches one group
+   * per scheduled fireAtMs offset. Net effect: all speakers BEGIN PLAYING
+   * within ~300 ms of each other in wall-clock time, even though the API
+   * calls happen over a 1-2 second window.
+   *
+   * Then, after the klaxon settles (~3 sec), fires a TTS announcement of
+   * the spoken `message` if one was provided and a TTS engine is available.
+   *
+   * Falls back to a single all-targets call when grouping is unavailable
+   * (no HA, no profile cache yet, etc.).
+   */
+  const runBroadcast = async (
+    level: ConditionLevel,
+    message: string | null,
+  ): Promise<{ ok: boolean; errors: string[]; backend: 'music_assistant' | 'media_player' }> => {
     if (!supervised) {
       return { ok: false, errors: ['not supervised'], backend: 'media_player' };
     }
     if (cfg.targets.length === 0) {
       return { ok: false, errors: ['no targets configured'], backend: 'media_player' };
     }
+    await refreshSpeakerGroups();
     const backend = pickBackend();
     const t0 = Date.now();
-    const r = backend === 'music_assistant'
-      ? await runBroadcastMA(level, message)
-      : await runBroadcastMP(level, message);
-    const dt = Date.now() - t0;
-    if (r.ok) {
-      log(`broadcast: ${level} via ${backend} → ok in ${dt}ms (${cfg.targets.length} target(s))`);
-    } else {
-      log(`broadcast: ${level} via ${backend} → errors in ${dt}ms: ${r.errors.join('; ')}`);
+    const errors: string[] = [];
+
+    // Decide grouping. When we have valid groups (>1), stagger them.
+    // When we only have one group (or no groups), fire all at once.
+    const groups = speakerGroups.length > 0 ? speakerGroups : [{
+      protocol: 'unknown' as const,
+      bufferMs: 1000,
+      targets: cfg.targets,
+    }];
+    const schedule = scheduleStagger(groups);
+
+    // Fire each group at its scheduled offset. Promise.all coordinates
+    // the per-group setTimeout fires; individual group results land
+    // independently. We await all so error reporting is complete.
+    await Promise.all(schedule.map(async ({ group, fireAtMs }) => {
+      if (fireAtMs > 0) await sleep(fireAtMs);
+      const r = backend === 'music_assistant'
+        ? await runBroadcastMA(level, group.targets)
+        : await runBroadcastMP(level, group.targets);
+      if (!r.ok) errors.push(...r.errors.map((e) => `[${group.protocol}] ${e}`));
+    }));
+
+    // After the klaxon: fire TTS announcement if available + requested.
+    // We wait klaxon-duration (~3 sec for red, ~1.5 for yellow/green)
+    // before speaking so the operator isn't trying to parse speech over
+    // a beeping klaxon.
+    const klaxonSettleMs = level === 'red' ? 3500 : 1800;
+    if (message && ttsEngine) {
+      await sleep(klaxonSettleMs);
+      const tRes = await speakAnnouncement(message, {
+        targets: cfg.targets,
+        engine: ttsEngine,
+        language: cfg.ttsLanguage,
+        viaMusicAssistant: backend === 'music_assistant',
+      });
+      if (!tRes.ok) {
+        errors.push(`tts(${ttsEngine.service}): ${tRes.error ?? tRes.status}`);
+      } else {
+        lastSpokenMessage = message;
+      }
     }
-    return { ...r, backend };
+
+    // Sonos snapshot-restore wraps the whole window for the MP path.
+    if (backend === 'media_player') {
+      const settleMs = (message && ttsEngine ? 8000 : klaxonSettleMs);
+      const sErrors = await scheduleSonosRestore(cfg.targets, settleMs);
+      errors.push(...sErrors);
+    }
+
+    const dt = Date.now() - t0;
+    const groupSummary = groups.map((g) => `${g.protocol}×${g.targets.length}`).join('+');
+    if (errors.length === 0) {
+      log(`broadcast: ${level} via ${backend} → ok in ${dt}ms (${groupSummary}${ttsEngine && message ? `, +tts ${ttsEngine.service}` : ''})`);
+    } else {
+      log(`broadcast: ${level} via ${backend} → ${errors.length} error(s) in ${dt}ms: ${errors.join('; ')}`);
+    }
+    return { ok: errors.length === 0, errors, backend };
   };
 
   /**
-   * Build a short situational TTS message for the given condition.
+   * v0.9.29 — Build a clear, hearable TTS announcement from the current
+   * alert set. Returns null when no TTS engine is available. Critical
+   * alerts get an "Acknowledge at console" tag + a brief repeat — the
+   * pre-v0.9.29 version was a single short sentence that was easy to miss.
    */
   const messageFor = (level: ConditionLevel, alerts: Alert[]): string | null => {
-    if (!cfg.ttsService) return null;
-    if (level === 'red') {
-      const crit = alerts.find((a) => a.severity === 'critical');
-      const what = crit ? `, ${crit.title}` : '';
-      return `Red alert. Red alert. Critical condition${what}.`;
-    }
-    if (level === 'yellow') {
-      const warn = alerts.find((a) => a.severity === 'warning');
-      const what = warn ? `, ${warn.title}` : '';
-      return `Yellow alert. Caution${what}.`;
-    }
-    return 'All clear. All stations report normal.';
+    if (!ttsEngine) return null;
+    return buildAlertMessage(level, alerts);
   };
 
   /* ── tick ─── periodic check for condition transitions */
@@ -431,14 +536,16 @@ export function startBroadcastMonitor(
         };
       }
       lastTestAt = Date.now();
-      // Re-detect MA on every test in case the user installed it between
-      // checks. Cheap — single HA service-catalog GET.
+      // Re-detect MA + TTS + refresh groups on every test — cheap, and the
+      // user may have installed Piper or rearranged speakers since startup.
       await detectMusicAssistant();
+      await detectTts();
+      await refreshSpeakerGroups(true);
       const message =
-        level === 'red' ? 'Test broadcast. Red alert klaxon. This is only a test.' :
+        level === 'red' ? 'Test broadcast. Red alert klaxon. This is only a test. Repeat. Red alert. This is only a test.' :
         level === 'yellow' ? 'Test broadcast. Yellow alert chime. This is only a test.' :
         'Test broadcast. All clear chime. This is only a test.';
-      const r = await runBroadcast(level, cfg.ttsService ? message : null);
+      const r = await runBroadcast(level, ttsEngine ? message : null);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       lastOutcome = r.ok ? 'success' : 'partial';
@@ -451,18 +558,31 @@ export function startBroadcastMonitor(
       };
     },
     config: () => cfg,
-    status: () => ({
-      supervised,
-      enabled: cfg.enabled,
-      targetCount: cfg.targets.length,
-      lastBroadcastAt,
-      lastLevel,
-      lastOutcome,
-      lastErrors,
-      lastBackend,
-      musicAssistantAvailable,
-      testCooldownRemainingMs: Math.max(0, lastTestAt + TEST_COOLDOWN_MS - Date.now()),
-    }),
+    status: () => {
+      const schedule = scheduleStagger(speakerGroups);
+      return {
+        supervised,
+        enabled: cfg.enabled,
+        targetCount: cfg.targets.length,
+        lastBroadcastAt,
+        lastLevel,
+        lastOutcome,
+        lastErrors,
+        lastBackend,
+        musicAssistantAvailable,
+        testCooldownRemainingMs: Math.max(0, lastTestAt + TEST_COOLDOWN_MS - Date.now()),
+        // v0.9.29
+        speakerGroups: schedule.map(({ group, fireAtMs }) => ({
+          protocol: group.protocol,
+          bufferMs: group.bufferMs,
+          targets: group.targets,
+          fireAtMs,
+        })),
+        ttsEngine: ttsEngine ? { service: ttsEngine.service, label: ttsEngine.label, local: ttsEngine.local } : null,
+        ttsAvailable: ttsAvailable.map((e) => ({ service: e.service, label: e.label, local: e.local })),
+        lastSpokenMessage,
+      };
+    },
     stop: () => {
       stopped = true;
       clearInterval(tickInterval);

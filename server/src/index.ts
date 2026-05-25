@@ -1155,6 +1155,7 @@ app.get('/api/broadcast/status', async () => {
       minSeverity: cfg.minSeverity,
       quietHours: cfg.quietHours,
       ttsService: cfg.ttsService,
+      ttsLanguage: cfg.ttsLanguage,
       sonosRestore: cfg.sonosRestore,
       backend: cfg.backend,
     },
@@ -1180,6 +1181,29 @@ app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
 );
 
 /**
+ * v0.9.29 — TTS-services diagnostic. Lists every TTS engine HA exposes,
+ * notes which is currently auto-picked (or user-configured), and renders
+ * a sample message so the operator can validate quality before going live.
+ *
+ * The picker UI in the Starfleet dashboard reads this to populate the
+ * "TTS engine" dropdown in the broadcast config.
+ */
+app.get('/api/broadcast/tts-services', async (req, reply) => {
+  const s = broadcast.status();
+  return cached(req, reply, {
+    supervised: s.supervised,
+    currentEngine: s.ttsEngine,
+    availableEngines: s.ttsAvailable,
+    // A representative test message so operators see what'll play.
+    sampleMessages: {
+      red: 'Red alert. Red alert. Battery system Core three pack two. Pack health critical. Pack state of health is sixty-eight percent. Acknowledge at console. Repeat. Red alert.',
+      yellow: 'Yellow alert. Solar system Core five. High voltage M P P T error code seventeen reported.',
+      green: 'All clear. All stations report normal.',
+    },
+  }, 30);
+});
+
+/**
  * v0.9.19 — discover every media_player entity HA knows about so the
  * user can pick targets from a real list instead of guessing entity IDs.
  * We use the manufacturer + model hints HA exposes to label HomePods vs
@@ -1198,6 +1222,7 @@ app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
  */
 app.get('/api/broadcast/discover', async (_req, reply) => {
   const cfg = broadcast.config();
+  const status = broadcast.status();
   const all = await getAllStates();
   if (!all) {
     reply.code(503);
@@ -1228,7 +1253,17 @@ app.get('/api/broadcast/discover', async (_req, reply) => {
       if (a.family !== b.family) return a.family.localeCompare(b.family);
       return a.friendly_name.localeCompare(b.friendly_name);
     });
-  return { supervised: true, count: speakers.length, speakers };
+  return {
+    supervised: true,
+    count: speakers.length,
+    speakers,
+    // v0.9.29 — expose the live protocol-group schedule the broadcast
+    // monitor uses, so the UI can show "HomePod fires first (-1.7s),
+    // Cast fires +1s, Sonos fires +1.7s" tooltips.
+    speakerGroups: status.speakerGroups,
+    musicAssistantAvailable: status.musicAssistantAvailable,
+    ttsEngine: status.ttsEngine,
+  };
 });
 
 /** Infer the speaker family from the entity_id + attributes — drives the
