@@ -1,24 +1,29 @@
 /** @type {import('tailwindcss').Config} */
+// v0.9.11 — color tokens point at CSS variables (defined in src/index.css)
+// so themes can be swapped at runtime via `[data-theme="..."]` without a
+// rebuild. The `<alpha-value>` placeholder is required for utilities like
+// `bg-panel/40` to keep working — Tailwind injects the chosen alpha into
+// the rgb() expression at use-site.
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        // Light industrial HMI / control-room palette.
-        bg: '#c2c8d0', // console grey (behind panels)
-        panel: '#eef0f3', // instrument-face (cards)
-        panel2: '#dfe3e8', // recessed tiles / bar tracks
-        line: '#9aa3b0', // panel seams / borders
-        ink: '#1b2027', // primary text + readouts
-        muted: '#586474', // secondary labels
-        accent: '#0e7490', // instrument cyan
-        ok: '#15803d', // status green
-        warn: '#b45309', // status amber
-        bad: '#b91c1c', // status red
+        bg: 'rgb(var(--color-bg) / <alpha-value>)',
+        panel: 'rgb(var(--color-panel) / <alpha-value>)',
+        panel2: 'rgb(var(--color-panel2) / <alpha-value>)',
+        line: 'rgb(var(--color-line) / <alpha-value>)',
+        ink: 'rgb(var(--color-ink) / <alpha-value>)',
+        muted: 'rgb(var(--color-muted) / <alpha-value>)',
+        accent: 'rgb(var(--color-accent) / <alpha-value>)',
+        ok: 'rgb(var(--color-ok) / <alpha-value>)',
+        warn: 'rgb(var(--color-warn) / <alpha-value>)',
+        bad: 'rgb(var(--color-bad) / <alpha-value>)',
       },
       fontFamily: {
-        sans: ['ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono: ['ui-monospace', 'SF Mono', 'monospace'],
+        // CSS variables let the B5 theme swap fonts without touching JSX.
+        sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'SF Mono', 'monospace'],
       },
     },
   },

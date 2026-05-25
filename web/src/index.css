@@ -2,15 +2,73 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root { height: 100%; }
-body { color: #1b2027; }
+/* ─────────────────────────────────────────────────────────────────────────
+ * v0.9.11 — Theme system.
+ *
+ * Color tokens live as space-separated R G B triples (so Tailwind's
+ * `rgb(var(...) / <alpha-value>)` pattern can inject alpha values per
+ * use-site, keeping `bg-panel/40` etc. working).
+ *
+ * Add a new theme by:
+ *   1. Declaring all `--color-*` and `--font-*` variables under a new
+ *      `[data-theme="x"]` selector.
+ *   2. Adding the theme to `THEMES` in src/theme.ts.
+ *   3. (Optional) Adding theme-scoped chrome at the bottom of this file
+ *      (e.g. bracket corners, scanlines).
+ * ───────────────────────────────────────────────────────────────────── */
 
-/* Instrument panels — squared, crisply bordered, light faces. */
-.card { @apply bg-panel border border-line rounded-lg p-4 shadow-sm; }
+:root, [data-theme="default"] {
+  /* Light industrial HMI / control-room palette (original v0.1+). */
+  --color-bg: 194 200 208;       /* #c2c8d0  console grey */
+  --color-panel: 238 240 243;    /* #eef0f3  instrument-face */
+  --color-panel2: 223 227 232;   /* #dfe3e8  recessed tile */
+  --color-line: 154 163 176;     /* #9aa3b0  panel seam */
+  --color-ink: 27 32 39;         /* #1b2027  primary text */
+  --color-muted: 88 100 116;     /* #586474  secondary label */
+  --color-accent: 14 116 144;    /* #0e7490  instrument cyan */
+  --color-ok: 21 128 61;         /* #15803d  status green */
+  --color-warn: 180 83 9;        /* #b45309  status amber */
+  --color-bad: 185 28 28;        /* #b91c1c  status red */
+
+  --font-sans: ui-sans-serif;
+  --font-mono: ui-monospace;
+}
+
+[data-theme="b5"] {
+  /* Babylon 5 — Earthforce / Babylon Station system UI.
+   *
+   * Inspired by BabCom panels, ISN broadcasts, EAS Hyperion bridge
+   * consoles, and the station-wide identicode displays. The signature
+   * elements: deep-space background, bright station cyan for frames +
+   * primary readouts, EarthForce amber for highlights, phosphor green
+   * for nominal status, magenta-red for alerts. */
+  --color-bg: 2 6 17;            /* #020611  deep space */
+  --color-panel: 10 20 40;       /* #0a1428  panel face */
+  --color-panel2: 5 12 28;       /* #050c1c  recessed track */
+  --color-line: 30 136 196;      /* #1e88c4  station cyan */
+  --color-ink: 168 233 255;      /* #a8e9ff  cyan-white readout */
+  --color-muted: 90 122 140;     /* #5a7a8c  dim cyan label */
+  --color-accent: 255 180 59;    /* #ffb43b  EAS amber */
+  --color-ok: 58 255 122;        /* #3aff7a  phosphor green */
+  --color-warn: 255 140 31;      /* #ff8c1f  amber alert */
+  --color-bad: 255 40 96;        /* #ff2860  magenta-red */
+
+  --font-sans: 'Orbitron', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Share Tech Mono', ui-monospace, 'SF Mono', monospace;
+}
+
+html, body, #root { height: 100%; }
+body {
+  background-color: rgb(var(--color-bg));
+  color: rgb(var(--color-ink));
+}
+
+/* Instrument panels — squared, crisply bordered. */
+.card { @apply bg-panel border border-line rounded-lg p-4 shadow-sm relative; }
 .card-title { @apply text-xs uppercase tracking-widest text-muted font-semibold mb-2; }
 .kv { @apply flex items-baseline justify-between text-sm; }
 .kv-k { @apply text-muted; }
-.kv-v { @apply font-mono tabular-nums font-semibold; } /* dark ink inherited from body */
+.kv-v { @apply font-mono tabular-nums font-semibold; }
 
 .badge { @apply text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border font-semibold; }
 .badge-ok { @apply bg-ok/15 text-ok border-ok/40; }
@@ -21,3 +79,77 @@ body { color: #1b2027; }
 /* Readout bars — recessed track, solid status fill. */
 .bar { @apply h-2 w-full bg-panel2 rounded-sm overflow-hidden border border-line/50; }
 .bar > div { @apply h-full transition-all duration-500; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Theme-scoped chrome — only applies when its [data-theme=...] is active.
+ * ───────────────────────────────────────────────────────────────────── */
+
+/* B5: bracket-corner panel decorations. Two pseudo-elements per card.
+   Each draws an L-shaped cyan bracket in opposite corners, evoking the
+   "data window" framing used throughout Babylon 5's system displays.
+   Also: glow on cyan readouts, square corners (B5 had no roundness),
+   tighter tracking on labels. */
+[data-theme="b5"] .card {
+  border-radius: 0;
+  border-width: 1px;
+  box-shadow:
+    inset 0 0 0 1px rgb(var(--color-panel) / 0.5),
+    0 0 0 1px rgb(var(--color-line) / 0.2);
+}
+[data-theme="b5"] .card::before,
+[data-theme="b5"] .card::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: rgb(var(--color-line));
+  border-style: solid;
+  pointer-events: none;
+}
+[data-theme="b5"] .card::before {
+  top: -1px;
+  left: -1px;
+  border-width: 2px 0 0 2px;
+}
+[data-theme="b5"] .card::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 2px 2px 0;
+}
+
+/* B5: badges are squared off + slightly more opaque so they read like
+   the lozenge status pills used in EAS bridge displays. */
+[data-theme="b5"] .badge {
+  border-radius: 0;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+/* B5: bars are squared off, with a faint cyan line on top for the
+   "scribed scale" look. */
+[data-theme="b5"] .bar {
+  border-radius: 0;
+  border-color: rgb(var(--color-line) / 0.7);
+}
+
+/* B5: primary headings + KV values get the phosphor glow used on
+   station consoles — tiny, never overwhelming. */
+[data-theme="b5"] h1,
+[data-theme="b5"] h2,
+[data-theme="b5"] h3 {
+  text-shadow: 0 0 6px rgb(var(--color-line) / 0.45);
+  letter-spacing: 0.04em;
+}
+[data-theme="b5"] .kv-v {
+  text-shadow: 0 0 4px rgb(var(--color-ink) / 0.4);
+}
+
+/* B5: body background gets a very subtle starfield-haze gradient so the
+   deep-space feel doesn't look like a flat black slab. Static (no anim)
+   to stay calm at a glance. */
+[data-theme="b5"] body {
+  background-image:
+    radial-gradient(ellipse at 20% 0%, rgb(30 136 196 / 0.08), transparent 60%),
+    radial-gradient(ellipse at 80% 100%, rgb(255 180 59 / 0.05), transparent 55%);
+  background-attachment: fixed;
+}

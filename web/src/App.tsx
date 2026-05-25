@@ -12,6 +12,7 @@ import { alertCounts } from './alerts';
 import { sortDevices } from './sort';
 import { fmtRel } from './format';
 import { SERIES_PALETTE } from './theme';
+import { ThemeToggle } from './components/ThemeToggle';
 import { installGlossaryTooltips } from './glossary';
 
 // v0.8.1 — route-level code splitting. Each non-default page becomes its own
@@ -165,6 +166,8 @@ export default function App() {
           >
             {conn === 'open' ? 'live' : conn === 'connecting' ? 'linking' : 'offline'}
           </span>
+          {/* v0.9.11 — theme picker (Default / Babylon 5). */}
+          <ThemeToggle />
         </div>
       </header>
 

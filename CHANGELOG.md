@@ -3,6 +3,61 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.11 — 2026-05-25
+
+New: **runtime theme toggle** in the header (Default / Babylon 5) +
+a B5-inspired skin that conforms to the system UI seen across the
+series — deep-space navy panels with bright station-cyan frames,
+EarthForce amber highlights, phosphor-green for nominal status, and
+magenta-red for alerts. Cards get the signature bracket-corner
+"data window" framing, badges go square-edged like EAS console
+status pills, and primary readouts pick up a faint phosphor glow.
+
+### Features
+
+- **`ThemeToggle`** in the page header (next to the live-link badge).
+  Two-button pill — "Default" / "Babylon 5". Selection persists to
+  localStorage and is applied synchronously in `main.tsx` before
+  React mounts, so there's no "default theme flash" on reload when
+  Babylon 5 is selected.
+
+- **Babylon 5 theme** (`[data-theme="b5"]` in `src/index.css`):
+  - **Palette** — deep navy bg (`#020611`), station cyan borders
+    (`#1e88c4`), cyan-white readouts (`#a8e9ff`), EAS amber accent
+    (`#ffb43b`), phosphor green OK (`#3aff7a`), magenta-red BAD
+    (`#ff2860`). Chosen against on-screen references from BabCom,
+    ISN, and Hyperion bridge displays.
+  - **Typography** — Orbitron for sans, Share Tech Mono for mono.
+    Lazy-loaded from Google Fonts only when the B5 theme is active.
+  - **Chrome** — squared corners everywhere (B5 had no roundness),
+    L-shaped cyan bracket decorations on `.card`, tighter
+    tracking + bolder weight on `.badge`, subtle starfield-haze
+    gradient on the body background, faint glow on headings + KV
+    values.
+
+### Architecture
+
+- Tailwind color tokens refactored from static hex to CSS variables
+  (`rgb(var(--color-X) / <alpha-value>)`). All existing utilities
+  like `bg-panel/40` keep working — only the *source* of the colors
+  changed, not how components reference them.
+
+- Chart-color exports (`UI`, `CHART`) in `theme.ts` rewritten as
+  CSS-variable-backed proxies, so recharts components re-color
+  automatically on theme switch via React's normal re-render flow
+  (no chart-by-chart refactor needed).
+
+- `HUES` and `SERIES_PALETTE` remain static — those are *semantic*
+  hues (solar=amber, battery=cyan, etc.) and read fine on both
+  themes.
+
+### Adding a new theme later
+
+1. New `[data-theme="x"]` block in `src/index.css` declaring all
+   `--color-*` + `--font-*` variables.
+2. Add to the `THEMES` array in `src/theme.ts`.
+3. (Optional) Theme-scoped chrome at the bottom of `index.css`.
+
 ## 0.9.10 — 2026-05-25
 
 The reboot button (v0.9.6) is retired and replaced with a **"Refresh
