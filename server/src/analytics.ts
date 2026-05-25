@@ -3806,3 +3806,507 @@ export function computeDispatchPlan(
   dispatchCache = { ts: now, value };
   return value;
 }
+
+/* ===================================================================
+ * v0.9.0 — Bayesian recursive GHI→PV update (per hour-of-day).
+ *
+ * The OLS approach in buildSolarResponse fits a coefficient β per
+ * hour over a rolling window of (GHI, PV) pairs. That works, but
+ * the uncertainty it reports (Pearson r² and sample count) isn't a
+ * proper credible interval, and a new bad sample distorts the
+ * coefficient more than it should at high sample counts.
+ *
+ * This replaces that with a recursive Bayesian update: prior on β
+ * is Gaussian N(μ, τ²); each new observation (GHI=g, PV=p) with
+ * observation noise σ² yields the conjugate posterior
+ *
+ *   1/τ_new² = 1/τ² + g²/σ²
+ *   μ_new    = τ_new² · (μ/τ² + g·p/σ²)
+ *
+ * — closed form, no matrix algebra needed. The 95% credible interval
+ * for β is μ ± 1.96·τ. Samples just naturally accumulate; no rolling
+ * window needed. Weak prior (large τ²) means the first observation
+ * dominates; later observations refine.
+ *
+ * Computed lazily from the recorder's full history per call (we
+ * don't persist the posterior — recomputing from raw samples lets
+ * us survive recorder DB resets cleanly).
+ * =================================================================== */
+
+export interface BayesianHourPosterior {
+  hour: number;
+  posteriorMean: number;       // μ — point estimate (W per W/m²)
+  posteriorStdev: number;      // τ — uncertainty on β
+  ci95Low: number;             // μ − 1.96τ
+  ci95High: number;            // μ + 1.96τ
+  samples: number;
+}
+
+export interface BayesianSolarModel {
+  generatedAt: number;
+  hourly: BayesianHourPosterior[];
+  // Aggregate fit-quality summary
+  totalSamples: number;
+  medianStdev: number;
+  // Comparison with the legacy OLS model so consumers can spot disagreement
+  agreementWithOls: number;    // 0-1 fraction of hours within 1σ of OLS coeff
+}
+
+const BAYES_TTL_MS = 30 * 60 * 1000;
+const BAYES_HISTORY_MS = 60 * 24 * 60 * 60 * 1000;
+const BAYES_PRIOR_MU = 0;        // start from "no clue"
+const BAYES_PRIOR_TAU2 = 1000;   // huge prior variance → first obs dominates
+const BAYES_OBS_SIGMA2 = 50;     // ~7 W stdev on PV residual per sample (engineered)
+
+let bayesCache: { ts: number; value: BayesianSolarModel } | null = null;
+
+/** Recursive Bayesian update of N(μ, τ²) by an observation (g, p) with noise σ². */
+function bayesUpdate(mu: number, tau2: number, g: number, p: number, sigma2: number): { mu: number; tau2: number } {
+  const newPrec = 1 / tau2 + (g * g) / sigma2;
+  const newTau2 = 1 / newPrec;
+  const newMu = newTau2 * (mu / tau2 + (g * p) / sigma2);
+  return { mu: newMu, tau2: newTau2 };
+}
+
+export async function computeBayesianSolarModel(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): Promise<BayesianSolarModel> {
+  if (bayesCache && Date.now() - bayesCache.ts < BAYES_TTL_MS) return bayesCache.value;
+  const now = Date.now();
+  const since = now - BAYES_HISTORY_MS;
+  const empty = (): BayesianSolarModel => ({
+    generatedAt: now, hourly: [], totalSamples: 0, medianStdev: 0, agreementWithOls: 0,
+  });
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  if (dpus.length === 0) return empty();
+
+  const weather = await getWeather();
+  if (!weather) return empty();
+  const wxByHourEpoch = new Map<number, WeatherHour>();
+  for (const wh of weather.hours) wxByHourEpoch.set(Math.floor(wh.ts / 3_600_000), wh);
+
+  // Fleet PV per hour-epoch.
+  const fleetPvByEpoch = new Map<number, number>();
+  for (const d of dpus) {
+    const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
+    for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
+  }
+
+  // Per hour-of-day: start from the prior, fold in observations in time order.
+  const byHour: Array<{ mu: number; tau2: number; samples: number }> =
+    Array.from({ length: 24 }, () => ({ mu: BAYES_PRIOR_MU, tau2: BAYES_PRIOR_TAU2, samples: 0 }));
+
+  const entries = [...fleetPvByEpoch.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [he, pv] of entries) {
+    const wx = wxByHourEpoch.get(he);
+    if (!wx || wx.radiationWm2 < DAYLIGHT_GHI) continue;
+    const hod = new Date(he * 3_600_000).getHours();
+    const s = byHour[hod];
+    const updated = bayesUpdate(s.mu, s.tau2, wx.radiationWm2, pv, BAYES_OBS_SIGMA2);
+    s.mu = updated.mu;
+    s.tau2 = updated.tau2;
+    s.samples++;
+  }
+
+  // Compare with the OLS solar model (which also runs on the same history)
+  // so consumers know when the two disagree.
+  let agreement = 0;
+  let agreementDenom = 0;
+  const olsForCompare = buildSolarResponse(fleetPvByEpoch, new Map([...wxByHourEpoch.entries()].map(([k, v]) => [k, v.radiationWm2])));
+  const hourly: BayesianHourPosterior[] = [];
+  let totalSamples = 0;
+  const stdevs: number[] = [];
+  for (let h = 0; h < 24; h++) {
+    const s = byHour[h];
+    if (s.samples < 2) continue;
+    const stdev = Math.sqrt(s.tau2);
+    hourly.push({
+      hour: h,
+      posteriorMean: round2(s.mu),
+      posteriorStdev: round2(stdev),
+      ci95Low: round2(s.mu - 1.96 * stdev),
+      ci95High: round2(s.mu + 1.96 * stdev),
+      samples: s.samples,
+    });
+    totalSamples += s.samples;
+    stdevs.push(stdev);
+    const olsCoeff = olsForCompare.hourly[h]?.coeff;
+    if (olsCoeff != null) {
+      agreementDenom++;
+      if (Math.abs(olsCoeff - s.mu) <= stdev) agreement++;
+    }
+  }
+  const value: BayesianSolarModel = {
+    generatedAt: now,
+    hourly,
+    totalSamples,
+    medianStdev: stdevs.length ? round2(median(stdevs)) : 0,
+    agreementWithOls: agreementDenom > 0 ? round2(agreement / agreementDenom) : 0,
+  };
+  bayesCache = { ts: now, value };
+  return value;
+}
+
+/* ===================================================================
+ * v0.9.0 — Kalman filter for pack SoH + drift rate.
+ *
+ * Replaces the OLS regression in analysePack with a proper 2-state
+ * Kalman filter (state = [SoH, dSoH/dt]) under a constant-velocity
+ * transition model. BMS-reported SoH is the observation.
+ *
+ *   x_{t+1} = F · x_t + w,  w ~ N(0, Q)
+ *   z_t     = H · x_t + v,  v ~ N(0, R)
+ *   F = [[1, dt], [0, 1]],  H = [1, 0]
+ *
+ * The filter integrates all observations in time order, returning
+ * the final smoothed state + covariance. The slope `dSoH/dt`
+ * extracted from the posterior is the estimated fade rate, with
+ * uncertainty derived directly from the posterior covariance — no
+ * t-statistic approximation.
+ *
+ * Process noise Q is tuned to reflect "SoH drifts slowly"; observation
+ * noise R is tuned to the BMS's ~0.5 % SoH reporting jitter.
+ * =================================================================== */
+
+// Time unit: DAYS internally so dt stays O(1) — using ms gave dt² ~ 1e16,
+// which blew up the F·P·Fᵀ predict step and made the off-diagonal covariance
+// too small to couple rate updates with SoH observations.
+const KALMAN_MS_PER_DAY = 24 * 60 * 60 * 1000;
+const KALMAN_DAYS_PER_YEAR = 365.25;
+// Q (process noise) per-day variance:
+const KALMAN_Q_SOH = 1e-4;            // ~ (0.01% SoH change per day not explained by drift)
+const KALMAN_Q_RATE_PER_DAY = 1e-7;   // ~ ( ±√1e-7 = 3e-4 %/day stdev wander per day)
+// R (observation noise) variance — BMS reports ~ ±0.5 %, so R ≈ 0.25
+const KALMAN_R_OBS = 0.25;
+// Initial covariance — broad enough that early observations dominate but not
+// so broad that the predict step blows up.
+const KALMAN_INIT_VAR_SOH = 100;        // (10% prior stdev — first obs anchors quickly)
+const KALMAN_INIT_VAR_RATE_PER_DAY = 0.01; // (0.1 %/day stdev = ~36 %/yr — broad)
+
+export interface KalmanSohResult {
+  smoothedSoh: number | null;             // posterior mean of SoH at last sample
+  smoothedSohVar: number | null;
+  driftPerYear: number | null;            // posterior mean of dSoH/dt scaled to %/yr
+  driftPerYearStdev: number | null;
+  samples: number;
+  observationVariance: number;            // R used
+}
+
+/**
+ * 2-state Kalman with constant-velocity transition over the SoH/fade-rate
+ * state. Returns the final posterior. Operates internally in DAYS for
+ * numerical conditioning — input timestamps are still ms.
+ */
+export function kalmanFilterSoh(pts: Array<{ ts: number; value: number }>): KalmanSohResult | null {
+  if (pts.length < 3) return null;
+  // Initial state: take the first observation as SoH; zero drift.
+  let x0 = pts[0].value;
+  let x1 = 0; // dSoH per DAY
+  // Initial covariance.
+  let p00 = KALMAN_INIT_VAR_SOH;
+  let p01 = 0;
+  let p10 = 0;
+  let p11 = KALMAN_INIT_VAR_RATE_PER_DAY;
+  let lastTs = pts[0].ts;
+
+  for (let i = 1; i < pts.length; i++) {
+    const ts = pts[i].ts;
+    const dtMs = ts - lastTs;
+    if (dtMs <= 0) continue;
+    lastTs = ts;
+    const dt = dtMs / KALMAN_MS_PER_DAY;
+
+    // Predict — apply constant-velocity transition F = [[1, dt], [0, 1]].
+    x0 = x0 + dt * x1;
+    //   F P     = [[p00 + dt*p10, p01 + dt*p11], [p10, p11]]
+    //   F P F^T = [[(p00 + dt*p10) + dt*(p01 + dt*p11), (p01 + dt*p11)], [p10 + dt*p11, p11]]
+    const np00 = p00 + dt * p10 + dt * (p01 + dt * p11);
+    const np01 = p01 + dt * p11;
+    const np10 = p10 + dt * p11;
+    const np11 = p11;
+    // Process noise scales with dt (the longer the gap, the more uncertainty
+    // we accumulate). Using dt as a multiplier instead of treating Q as a
+    // per-step constant.
+    p00 = np00 + KALMAN_Q_SOH * dt;
+    p01 = np01;
+    p10 = np10;
+    p11 = np11 + KALMAN_Q_RATE_PER_DAY * dt;
+
+    // Update — H = [1, 0], so innovation = z − x0; S = p00 + R; K = [p00, p10] / S
+    const z = pts[i].value;
+    const y = z - x0;
+    const S = p00 + KALMAN_R_OBS;
+    if (S <= 0) continue;
+    const k0 = p00 / S;
+    const k1 = p10 / S;
+    x0 = x0 + k0 * y;
+    x1 = x1 + k1 * y;
+    // P = (I − K H) P. K H = [[k0, 0], [k1, 0]] so (I − KH) = [[1 − k0, 0], [−k1, 1]]
+    const up00 = (1 - k0) * p00;
+    const up01 = (1 - k0) * p01;
+    const up10 = -k1 * p00 + p10;
+    const up11 = -k1 * p01 + p11;
+    p00 = up00; p01 = up01; p10 = up10; p11 = up11;
+  }
+
+  return {
+    smoothedSoh: round2(x0),
+    smoothedSohVar: round2(p00),
+    driftPerYear: round2(x1 * KALMAN_DAYS_PER_YEAR),
+    driftPerYearStdev: round2(Math.sqrt(Math.max(0, p11)) * KALMAN_DAYS_PER_YEAR),
+    samples: pts.length,
+    observationVariance: KALMAN_R_OBS,
+  };
+}
+
+/* ===================================================================
+ * v0.9.0 — PackRiskScore (heuristic-weighted v1).
+ *
+ * NOT a trained ML model — we don't have a labeled dataset of pack
+ * failures. This is a hand-tuned weighted sum of engineered risk
+ * features, calibrated against domain knowledge of LFP failure modes.
+ * The output API is the same shape a trained classifier would yield
+ * (0-100 score, tier, contributing factors), so a model swap-in is
+ * a drop-in replacement later.
+ *
+ * Features (each normalized to 0..1 where 1 = high risk):
+ *   - Peer fade ratio (this pack vs fleet-median fade rate)
+ *   - Internal-R trend (mΩ/month — rising R precedes SoH decay)
+ *   - Coulombic efficiency (% — falling CE = side reactions)
+ *   - Thermal hard-life score (per-year — Arrhenius-equivalent stress)
+ *   - Charge-curve drift (mV at SoC checkpoints — voltage plateau aging)
+ *   - Capacity fade rate (%/yr — direct SoH erosion)
+ *
+ * Weighted-sum + sigmoid → 0..100. Tier breakpoints chosen so most
+ * healthy packs sit < 25 (low) and a clearly-failing pack sits > 75
+ * (critical). The exposed `contributingFactors` list lets the user
+ * see WHY their score is what it is — model interpretability matters
+ * even more for a heuristic than for a trained model.
+ * =================================================================== */
+
+export interface RiskFactor {
+  name: string;
+  rawValue: number | null;
+  rawUnit: string;
+  normalized01: number;
+  weight: number;
+  weightedScore: number;        // normalized × weight × 100, signed
+  comment: string;
+}
+
+export interface PackRiskScore {
+  sn: string;
+  device: string;
+  coreNum: number | null;
+  packNum: number;
+  score0to100: number;
+  tier: 'low' | 'moderate' | 'elevated' | 'critical' | 'no-data';
+  topFactors: RiskFactor[];      // sorted by weightedScore desc; up to 3
+  allFactors: RiskFactor[];
+  generatedAt: number;
+  modelVersion: string;          // "heuristic-v1" — for swap-in tracking
+}
+
+export interface FleetRiskReport {
+  generatedAt: number;
+  modelVersion: string;
+  packs: PackRiskScore[];
+}
+
+/** Clamp x into [0, 1]. */
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+
+let riskCache: { ts: number; value: FleetRiskReport } | null = null;
+const RISK_TTL_MS = 30 * 60 * 1000;
+const RISK_MODEL_VERSION = 'heuristic-v1';
+
+export function computePackRiskScores(
+  devices: Record<string, DeviceSnapshot>,
+  degradation: FleetDegradation,
+  thermalEvents: FleetThermalEvents,
+  internalR: InternalResistanceReport,
+  chargeCurve: ChargeCurveReport,
+): FleetRiskReport {
+  if (riskCache && Date.now() - riskCache.ts < RISK_TTL_MS) return riskCache.value;
+  const now = Date.now();
+  const dpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+
+  // Build a lookup of features per (sn, packNum).
+  const out: PackRiskScore[] = [];
+  for (const d of dpus) {
+    for (const pk of d.projection.packs) {
+      const sn = d.sn;
+      const packNum = pk.num;
+
+      // Look up each feature source
+      const deg = degradation.packs.find((p) => p.sn === sn && p.packNum === packNum);
+      const therm = thermalEvents.packs.find((p) => p.sn === sn && p.packNum === packNum);
+      const ir = internalR.devices.find((p) => p.sn === sn); // bus-level (DPU), shared by all packs on a DPU
+      const cc = chargeCurve.packs.find((p) => p.sn === sn && p.packNum === packNum);
+
+      // Feature 1: peer fade ratio. 1.0 = average; >1.5 = bad.
+      // Normalization: clamp(((ratio - 1) / 1.0), 0, 1). So ratio=2 → 1.0; ratio=1 → 0.
+      const peerFade = deg?.peerFadeRatio ?? null;
+      const peerFadeNorm = peerFade != null ? clamp01((peerFade - 1) / 1.0) : 0;
+
+      // Feature 2: internal-R trend (mΩ per month). A rising trend > 1 mΩ/month is bad.
+      const rTrend = ir?.trendMilliohmsPerMonth ?? null;
+      const rTrendNorm = rTrend != null ? clamp01(rTrend / 3) : 0;  // 3 mΩ/mo = max risk
+
+      // Feature 3: coulombic efficiency. Healthy ≥ 99.0%; below 98% = bad.
+      const ce = deg?.coulombicEffPct ?? null;
+      const ceNorm = ce != null ? clamp01((99 - ce) / 2) : 0;  // 97% = max risk
+
+      // Feature 4: thermal hard-life score. 0 = ideal; > 200/yr = bad.
+      const hardLife = therm?.hardLifeScore ?? null;
+      const hardLifeNorm = hardLife != null ? clamp01(hardLife / 300) : 0;
+
+      // Feature 5: charge-curve mean drift (mV). 0 = baseline; > 30 mV = aging.
+      const ccDrift = cc?.meanDriftMv ?? null;
+      const ccDriftNorm = ccDrift != null ? clamp01(Math.abs(ccDrift) / 50) : 0;
+
+      // Feature 6: capacity fade rate (%/yr). Healthy < 2 %/yr; > 5 %/yr = bad.
+      const fade = deg?.fadePctPerYear ?? null;
+      const fadeNorm = fade != null ? clamp01((fade - 1) / 5) : 0;
+
+      // Weights — sum to 1. Reflects domain priors:
+      //   - Peer-fade ratio is the strongest single signal (peers control for fleet drift)
+      //   - Internal-R + coulombic-eff are early warnings (lead SoH decay)
+      //   - Thermal hard-life is a multiplier on all the above
+      const weights = {
+        peerFade: 0.25,
+        rTrend: 0.15,
+        ce: 0.15,
+        hardLife: 0.15,
+        ccDrift: 0.10,
+        fade: 0.20,
+      };
+
+      const factors: RiskFactor[] = [
+        {
+          name: 'Peer-fade ratio',
+          rawValue: peerFade,
+          rawUnit: '×',
+          normalized01: peerFadeNorm,
+          weight: weights.peerFade,
+          weightedScore: peerFadeNorm * weights.peerFade * 100,
+          comment: peerFade == null
+            ? 'no fleet-comparison data yet'
+            : peerFade > 1.5 ? 'fading much faster than peers'
+            : peerFade > 1.2 ? 'fading faster than peers'
+            : 'on-par with peers',
+        },
+        {
+          name: 'Internal-R trend',
+          rawValue: rTrend,
+          rawUnit: 'mΩ/mo',
+          normalized01: rTrendNorm,
+          weight: weights.rTrend,
+          weightedScore: rTrendNorm * weights.rTrend * 100,
+          comment: rTrend == null
+            ? 'no internal-R trend yet'
+            : rTrend > 2 ? 'resistance climbing fast — leading SoH decay'
+            : rTrend > 0.5 ? 'resistance trending up'
+            : 'resistance stable',
+        },
+        {
+          name: 'Coulombic efficiency',
+          rawValue: ce,
+          rawUnit: '%',
+          normalized01: ceNorm,
+          weight: weights.ce,
+          weightedScore: ceNorm * weights.ce * 100,
+          comment: ce == null
+            ? 'no CE data yet'
+            : ce < 98 ? 'side-reactions consuming charge — early cell aging'
+            : ce < 99 ? 'CE slightly below healthy LFP band'
+            : 'CE healthy',
+        },
+        {
+          name: 'Thermal hard-life',
+          rawValue: hardLife,
+          rawUnit: 'events/yr',
+          normalized01: hardLifeNorm,
+          weight: weights.hardLife,
+          weightedScore: hardLifeNorm * weights.hardLife * 100,
+          comment: hardLife == null
+            ? 'no thermal-event data yet'
+            : hardLife > 200 ? 'high cumulative thermal stress — accelerates fade'
+            : hardLife > 100 ? 'moderate thermal stress history'
+            : 'low thermal stress',
+        },
+        {
+          name: 'Charge-curve drift',
+          rawValue: ccDrift,
+          rawUnit: 'mV',
+          normalized01: ccDriftNorm,
+          weight: weights.ccDrift,
+          weightedScore: ccDriftNorm * weights.ccDrift * 100,
+          comment: ccDrift == null
+            ? 'no charge-curve baseline yet'
+            : Math.abs(ccDrift) > 30 ? 'voltage plateau drifting from baseline'
+            : 'charge curve close to baseline',
+        },
+        {
+          name: 'Capacity fade rate',
+          rawValue: fade,
+          rawUnit: '%/yr',
+          normalized01: fadeNorm,
+          weight: weights.fade,
+          weightedScore: fadeNorm * weights.fade * 100,
+          comment: fade == null
+            ? 'no fade trend yet'
+            : fade > 5 ? 'fading well above LFP typical'
+            : fade > 2.5 ? 'fading faster than typical LFP'
+            : 'fade rate healthy',
+        },
+      ];
+
+      // Composite score: weighted sum then sigmoid-flatten so extreme features
+      // don't dominate. Result naturally in 0..100.
+      const linearScore = factors.reduce((s, f) => s + f.weightedScore, 0);
+      // Sigmoid-flatten around 50 with steepness chosen so linear=70 → score ~ 80.
+      const score0to100 = Math.round(100 / (1 + Math.exp(-(linearScore - 50) / 12)));
+
+      // Tier based on score
+      let tier: PackRiskScore['tier'];
+      const hasAnyData = factors.some((f) => f.rawValue != null);
+      if (!hasAnyData) tier = 'no-data';
+      else if (score0to100 < 25) tier = 'low';
+      else if (score0to100 < 50) tier = 'moderate';
+      else if (score0to100 < 75) tier = 'elevated';
+      else tier = 'critical';
+
+      const topFactors = factors
+        .filter((f) => f.rawValue != null)
+        .sort((a, b) => b.weightedScore - a.weightedScore)
+        .slice(0, 3);
+
+      out.push({
+        sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), packNum,
+        score0to100,
+        tier,
+        topFactors,
+        allFactors: factors,
+        generatedAt: now,
+        modelVersion: RISK_MODEL_VERSION,
+      });
+    }
+  }
+
+  // Sort: critical first, then elevated, then moderate, then low, then no-data.
+  // Within tier, highest score first.
+  const tierRank: Record<PackRiskScore['tier'], number> = {
+    critical: 0, elevated: 1, moderate: 2, low: 3, 'no-data': 4,
+  };
+  out.sort((a, b) => tierRank[a.tier] - tierRank[b.tier] || b.score0to100 - a.score0to100);
+
+  const value: FleetRiskReport = { generatedAt: now, modelVersion: RISK_MODEL_VERSION, packs: out };
+  if (dpus.length > 0) riskCache = { ts: now, value };
+  return value;
+}

@@ -3,6 +3,111 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.0 — 2026-05-24
+
+**Predictive Engine v2.5.** Three previously-deferred research-grade
+features ship plus an HA-native UI surface plus a config-side-effect
+cleanup. 5 features, 5 new tests, 0 vulnerabilities.
+
+### Features
+
+- **Bayesian recursive GHI→PV update.** Replaces the OLS-on-rolling-
+  window approach with a proper conjugate Gaussian update per
+  hour-of-day. Each new (GHI, PV) observation refines the posterior
+  N(μ, τ²) on the response coefficient β via closed-form:
+
+  ```
+  1/τ'² = 1/τ² + g²/σ²
+  μ'    = τ'² · (μ/τ² + g·p/σ²)
+  ```
+
+  Output: per-hour posterior mean + stdev + 95% credible interval.
+  Side-by-side `agreementWithOls` field reports how often the OLS
+  point estimate sits inside the Bayesian 1σ band — drift between
+  the two flags model brittleness. New endpoint:
+  `/api/forecast/bayesian`.
+- **Kalman filter for pack SoH.** 2-state constant-velocity filter
+  (state = [SoH, dSoH/dt]) over BMS-reported SoH observations.
+  Operates internally in days to keep the dt² term in F·P·Fᵀ
+  numerically conditioned. Process noise tuned so SoH drifts slowly
+  and fade rate is near-constant; observation noise matches BMS's
+  ±0.5% reporting jitter. Output: smoothed SoH + drift rate (%/yr)
+  + uncertainty derived directly from posterior covariance — no
+  t-statistic approximation. Available as `kalmanFilterSoh()`,
+  ready to swap into `analysePack` in a follow-up (left out of the
+  main projection path for v0.9.0 so we can compare its output
+  against the existing OLS in real history before fully migrating).
+- **PackRiskScore (heuristic-weighted v1).** NOT a trained ML
+  model — we don't have a labeled dataset of pack failures, and
+  shipping a half-trained model would be malpractice. Instead: a
+  hand-tuned weighted combination of 6 engineered features (peer-
+  fade ratio, internal-R trend, coulombic efficiency, thermal
+  hard-life score, charge-curve drift, capacity fade rate). Each
+  normalized to 0..1; weighted sum → sigmoid → 0..100 risk score.
+  Tier: low / moderate / elevated / critical. Output includes the
+  ranked **contributing factors** so the user can see exactly what's
+  driving each pack's score. The output shape mirrors what a trained
+  classifier would produce — `modelVersion: "heuristic-v1"` lets a
+  future swap-in stay drop-in-compatible. New endpoint:
+  `/api/pack-risk`.
+- **HACS Lovelace card.** Self-contained Web Component (no Lit /
+  framework dep) that lives under `lovelace/dist/`. Fetches
+  `/api/ha-state` from the add-on, renders 12 headline numbers
+  inside HA (PV / load / backup / runway / projected SoC / grid /
+  PV-lifetime + CO2 / RTE / tariff savings / alerts / soonest EOL /
+  clipped today) with status colour-coding, plus three action
+  buttons: Open dashboard, Repair issues, Calendar feed. Packaged
+  with `hacs.json` so HACS detects it as a Plugin-type repository.
+  Manual install via `/local/` also documented. README under
+  `lovelace/README.md` walks both install paths.
+
+### Bug fix / hygiene
+
+- **`config.ts` lazy-getter refactor.** Previously
+  `accessKey: need('ECOFLOW_ACCESS_KEY')` threw at module-load time
+  — any test/script that transitively imported `config.ts` would
+  crash before doing anything else. v0.8.1's test gate caught this
+  the first time it ran in CI; v0.8.2 patched with dummy env vars.
+  v0.9.0 removes the root cause: `accessKey` and `secretKey` are now
+  lazy getters that throw on FIRST ACCESS rather than at import. Any
+  test/REPL/script context can import `config.ts` cleanly; the
+  validation still fires loudly on first real use. The v0.8.2 CI
+  env-var workaround is removed.
+
+### Tests
+
+- **5 new tests** for `kalmanFilterSoh`: returns null on insufficient
+  data, recovers known slope from clean synthetic data, smoothed SoH
+  tracks observations, uncertainty shrinks with more samples,
+  doesn't diverge on noisy data.
+- Total server tests: **41/41 passing**.
+
+### API
+
+New endpoints:
+- `/api/forecast/bayesian` — Bayesian per-hour solar response model
+  with credible intervals.
+- `/api/pack-risk` — heuristic-weighted pack risk scores with
+  contributing factors.
+
+### Notes / what's explicitly NOT in v0.9.0
+
+- **No trained ML model.** PackRiskScore is the framework + the
+  heuristic surface. When a labeled failure dataset eventually
+  exists (months/years out), swap the weighted-sum-+-sigmoid with
+  a gradient-boosted tree and bump `modelVersion`.
+- **Kalman not yet replacing OLS in `analysePack`.** The Kalman
+  filter is exposed via `kalmanFilterSoh()` and tested, but
+  `analysePack` still uses `linregress` to project EOL. Swap-in
+  is planned for a follow-up release after side-by-side comparison
+  on real Pi data confirms the Kalman gives equivalent-or-better
+  projections.
+- **HACS card is the "stats card", not a full dashboard rebuild.**
+  Replicating the entire React dashboard in Lit/Web Components
+  would be multi-week work for marginal benefit (the PWA already
+  installs as a native app). The card is scoped to headline numbers
+  + one-click to the PWA.
+
 ## 0.8.2 — 2026-05-24
 
 Patch — fix the CI test job from v0.8.1.

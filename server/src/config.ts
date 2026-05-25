@@ -1,14 +1,42 @@
 import 'dotenv/config';
 
-function need(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
+/**
+ * Runtime configuration. v0.9.0 refactor — secret env vars now use lazy
+ * getters that throw on first ACCESS rather than at module-load time.
+ * Previously `accessKey: need('ECOFLOW_ACCESS_KEY')` threw the moment
+ * any file in the codebase imported `config.ts` — even tests or scripts
+ * that never call the EcoFlow API. (v0.8.1's CI test gate caught this
+ * the first time it ran; v0.8.2 patched it with dummy CI env vars.)
+ *
+ * Lazy getters fix the root cause: import-side-effect safe, validation
+ * still fires loudly on first real use, no production behavior change.
+ */
+
+function lazyRequired(name: string): { get value(): string } {
+  let cached: string | undefined;
+  return {
+    get value(): string {
+      if (cached !== undefined) return cached;
+      const v = process.env[name];
+      if (!v) throw new Error(`Missing required env var: ${name}`);
+      cached = v;
+      return cached;
+    },
+  };
 }
 
+const _accessKey = lazyRequired('ECOFLOW_ACCESS_KEY');
+const _secretKey = lazyRequired('ECOFLOW_SECRET_KEY');
+
 export const config = {
-  accessKey: need('ECOFLOW_ACCESS_KEY'),
-  secretKey: need('ECOFLOW_SECRET_KEY'),
+  /** Throws on first access if ECOFLOW_ACCESS_KEY isn't set. */
+  get accessKey(): string {
+    return _accessKey.value;
+  },
+  /** Throws on first access if ECOFLOW_SECRET_KEY isn't set. */
+  get secretKey(): string {
+    return _secretKey.value;
+  },
   apiHost: process.env.ECOFLOW_API_HOST ?? 'https://api-a.ecoflow.com',
   port: Number(process.env.PORT ?? 8787),
   // `::` makes Fastify listen dual-stack (IPv4 + IPv6 on one socket; Node

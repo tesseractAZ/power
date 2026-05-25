@@ -39,6 +39,9 @@ import {
   computeMultiDayForecast,
   computeDispatchPlan,
   rootCausesFor,
+  // v0.9.0 additions — Bayesian + Kalman + risk score
+  computeBayesianSolarModel,
+  computePackRiskScores,
 } from './analytics.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
@@ -293,6 +296,19 @@ app.get('/api/calendar.ics', async (req, reply) => {
     // level cache was removed in v0.8.1 since it was effectively unkeyed.
     .header('Cache-Control', 'public, max-age=300');
   return ics;
+});
+
+// v0.9.0 — Bayesian solar model + Pack Risk Scores
+app.get('/api/forecast/bayesian', async () => {
+  return computeBayesianSolarModel(store.get().devices, recorder);
+});
+
+app.get('/api/pack-risk', async () => {
+  const deg = computeDegradation(store.get().devices, recorder);
+  const therm = computeThermalEvents(store.get().devices, recorder);
+  const ir = computeInternalResistance(store.get().devices, recorder);
+  const cc = computeChargeCurveFingerprint(store.get().devices, recorder);
+  return computePackRiskScores(store.get().devices, deg, therm, ir, cc);
 });
 
 app.get('/api/repair-issues', async () => {

@@ -74,15 +74,10 @@ jobs:
         run: npm ci
       - name: Run server tests
         working-directory: server
-        # Dummy creds so config.ts's import-time validation passes. The tests
-        # themselves never call the EcoFlow API — they exercise pure functions
-        # — but `src/config.ts` throws on module load if these aren't set, and
-        # several test files transitively import it via analytics → weather →
-        # config. Long-term fix: make config.ts lazy (getters); for now,
-        # placeholders unblock CI without changing production behavior.
-        env:
-          ECOFLOW_ACCESS_KEY: test-access-key
-          ECOFLOW_SECRET_KEY: test-secret-key
+        # Note: v0.9.0 refactored config.ts to use lazy getters, so the
+        # ECOFLOW_ACCESS_KEY / ECOFLOW_SECRET_KEY env vars are no longer
+        # required at module-load time. The CI env-var workaround that
+        # v0.8.2 needed is no longer necessary.
         run: npm test
       - name: tsc --noEmit (server)
         working-directory: server
