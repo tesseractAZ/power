@@ -79,8 +79,8 @@ function qualifies(sev: Severity, min: Severity): boolean {
   return sevRank[sev] <= sevRank[min];
 }
 
-/** Parse "22-06" into [22, 6]; "" / invalid → null (feature off). */
-function parseQuietHours(s: string): [number, number] | null {
+/** Parse "22-06" into [22, 6]; "" / invalid → null (feature off). Exported for tests. */
+export function parseQuietHours(s: string): [number, number] | null {
   const m = s.match(/^(\d{1,2})-(\d{1,2})$/);
   if (!m) return null;
   const start = Number(m[1]);
@@ -89,7 +89,8 @@ function parseQuietHours(s: string): [number, number] | null {
   return [start, end];
 }
 
-function inQuietWindow(now: Date, window: [number, number]): boolean {
+/** Exported for tests. */
+export function inQuietWindow(now: Date, window: [number, number]): boolean {
   const h = now.getHours();
   const [start, end] = window;
   if (start === end) return false;
@@ -98,8 +99,8 @@ function inQuietWindow(now: Date, window: [number, number]): boolean {
   return h >= start || h < end;
 }
 
-/** Cluster alerts by (Core, Pack) or by Category-on-Core thermal cascade. */
-function buildIncidents(alerts: Alert[]): Incident[] {
+/** Cluster alerts by (Core, Pack) or by Category-on-Core thermal cascade. Exported for tests. */
+export function buildIncidents(alerts: Alert[]): Incident[] {
   const byPack = new Map<string, Alert[]>();   // "core{N}.pack{M}"
   const byCore = new Map<number, Alert[]>();
   const orphans: Alert[] = [];

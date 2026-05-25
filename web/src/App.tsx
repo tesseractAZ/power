@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { useSnapshot } from './useSnapshot';
 import { EnergyFlow } from './cards/EnergyFlow';
 import { TodaySummary } from './cards/TodaySummary';
@@ -8,18 +8,31 @@ import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
 import type { Shp2Projection } from './types';
 import { Shp2Card } from './cards/Shp2Card';
 import { SmallDeviceCard } from './cards/SmallDeviceCard';
-import { TrendChart } from './charts/TrendChart';
-import { ThermalPanel } from './pages/ThermalPanel';
-import { SolarPanel } from './pages/SolarPanel';
-import { EvsePanel } from './pages/EvsePanel';
-import { StrategyPanel } from './pages/StrategyPanel';
-import { AlertsPanel } from './pages/AlertsPanel';
-import { PredictiveInsights } from './pages/PredictiveInsights';
 import { alertCounts } from './alerts';
 import { sortDevices } from './sort';
 import { fmtRel } from './format';
 import { SERIES_PALETTE } from './theme';
 import { installGlossaryTooltips } from './glossary';
+
+// v0.8.1 — route-level code splitting. Each non-default page becomes its own
+// chunk; recharts (~300 kB minified) is vendor-chunked separately via the
+// Vite config. The Dashboard remains the eagerly-loaded landing page so the
+// first paint is fast. TrendChart is also lazy since recharts only needs to
+// land when the user toggles "show history".
+const ThermalPanel = lazy(() => import('./pages/ThermalPanel').then((m) => ({ default: m.ThermalPanel })));
+const SolarPanel = lazy(() => import('./pages/SolarPanel').then((m) => ({ default: m.SolarPanel })));
+const EvsePanel = lazy(() => import('./pages/EvsePanel').then((m) => ({ default: m.EvsePanel })));
+const StrategyPanel = lazy(() => import('./pages/StrategyPanel').then((m) => ({ default: m.StrategyPanel })));
+const AlertsPanel = lazy(() => import('./pages/AlertsPanel').then((m) => ({ default: m.AlertsPanel })));
+const PredictiveInsights = lazy(() => import('./pages/PredictiveInsights').then((m) => ({ default: m.PredictiveInsights })));
+const TrendChart = lazy(() => import('./charts/TrendChart').then((m) => ({ default: m.TrendChart })));
+
+const PageFallback = () => (
+  <div className="card flex items-center gap-2 text-sm text-muted">
+    <span className="h-2 w-2 rounded-full bg-accent inline-block animate-pulse" />
+    Loading view…
+  </div>
+);
 
 export default function App() {
   const { snapshot, conn } = useSnapshot();
@@ -157,18 +170,15 @@ export default function App() {
 
       {!snapshot ? (
         <div className="card">Waiting for first snapshot…</div>
-      ) : tab === 'thermal' ? (
-        <ThermalPanel devices={snapshot.devices} />
-      ) : tab === 'solar' ? (
-        <SolarPanel devices={snapshot.devices} />
-      ) : tab === 'evse' ? (
-        <EvsePanel devices={snapshot.devices} />
-      ) : tab === 'strategy' ? (
-        <StrategyPanel devices={snapshot.devices} />
-      ) : tab === 'alerts' ? (
-        <AlertsPanel alerts={thresholdAlerts} />
-      ) : tab === 'predictive' ? (
-        <PredictiveInsights alerts={learnedAlerts} />
+      ) : tab !== 'dashboard' ? (
+        <Suspense fallback={<PageFallback />}>
+          {tab === 'thermal' && <ThermalPanel devices={snapshot.devices} />}
+          {tab === 'solar' && <SolarPanel devices={snapshot.devices} />}
+          {tab === 'evse' && <EvsePanel devices={snapshot.devices} />}
+          {tab === 'strategy' && <StrategyPanel devices={snapshot.devices} />}
+          {tab === 'alerts' && <AlertsPanel alerts={thresholdAlerts} />}
+          {tab === 'predictive' && <PredictiveInsights alerts={learnedAlerts} />}
+        </Suspense>
       ) : (
         <>
         {snapshot && <RunwayCard />}
@@ -178,32 +188,36 @@ export default function App() {
           <ForecastCard />
 
           {showHistory && shp2 && (
-            <TrendChart
-              title="Backup pool & panel load (24h)"
-              windowMs={24 * 60 * 60 * 1000}
-              bucketSec={60}
-              unit=""
-              series={[
-                { sn: shp2.sn, metric: 'backup_pct', label: 'Backup %', color: SERIES_PALETTE[0] },
-                { sn: shp2.sn, metric: 'panel_load', label: 'Panel W', color: SERIES_PALETTE[2] },
-              ]}
-            />
+            <Suspense fallback={<PageFallback />}>
+              <TrendChart
+                title="Backup pool & panel load (24h)"
+                windowMs={24 * 60 * 60 * 1000}
+                bucketSec={60}
+                unit=""
+                series={[
+                  { sn: shp2.sn, metric: 'backup_pct', label: 'Backup %', color: SERIES_PALETTE[0] },
+                  { sn: shp2.sn, metric: 'panel_load', label: 'Panel W', color: SERIES_PALETTE[2] },
+                ]}
+              />
+            </Suspense>
           )}
 
           {showHistory && dpus.filter((d) => d.online).length > 0 && (
-            <TrendChart
-              title="DPU output & PV (24h)"
-              windowMs={24 * 60 * 60 * 1000}
-              bucketSec={60}
-              unit="W"
-              series={dpus.filter((d) => d.online).flatMap((d, i) => {
-                const color = SERIES_PALETTE[i % SERIES_PALETTE.length];
-                return [
-                  { sn: d.sn, metric: 'total_out', label: `${d.deviceName} out`, color },
-                  { sn: d.sn, metric: 'pv_total', label: `${d.deviceName} PV`, color, dashed: true },
-                ];
-              })}
-            />
+            <Suspense fallback={<PageFallback />}>
+              <TrendChart
+                title="DPU output & PV (24h)"
+                windowMs={24 * 60 * 60 * 1000}
+                bucketSec={60}
+                unit="W"
+                series={dpus.filter((d) => d.online).flatMap((d, i) => {
+                  const color = SERIES_PALETTE[i % SERIES_PALETTE.length];
+                  return [
+                    { sn: d.sn, metric: 'total_out', label: `${d.deviceName} out`, color },
+                    { sn: d.sn, metric: 'pv_total', label: `${d.deviceName} PV`, color, dashed: true },
+                  ];
+                })}
+              />
+            </Suspense>
           )}
 
           {shp2 && <Shp2Card d={shp2 as any} />}

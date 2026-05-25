@@ -56,9 +56,32 @@ jobs:
           echo "tag=v$v" >> "$GITHUB_OUTPUT"
           echo "📦 Publishing v$v"
 
+  test:
+    name: Server tests
+    needs: resolve
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install server deps
+        working-directory: server
+        run: npm ci
+      - name: Run server tests
+        working-directory: server
+        run: npm test
+      - name: tsc --noEmit (server)
+        working-directory: server
+        run: npx tsc --noEmit
+
   build:
     name: Build & push (${{ matrix.arch }})
-    needs: resolve
+    needs: [resolve, test]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

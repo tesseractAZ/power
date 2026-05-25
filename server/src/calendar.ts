@@ -13,13 +13,12 @@ import type { NwsAlert } from './nws.js';
  * sessions, forecast SoC dips below reserve, active NWS storm
  * windows. Read-only — purely informational.
  *
- * Cached briefly to avoid recomputing on every HA-poll. The events
- * themselves are short-horizon (next 72 h), so the cache TTL is
- * intentionally shorter than the data-source TTLs.
+ * Caching is intentionally HTTP-layer (Cache-Control: max-age) rather
+ * than function-level. The function-level cache pattern would need to
+ * be keyed on input shape to invalidate when the underlying forecast
+ * / NWS / EV-prediction changed — but those sources already cache
+ * internally, so a fresh build per request is cheap.
  */
-
-const CAL_TTL_MS = 5 * 60 * 1000;
-let calendarCache: { ts: number; ics: string } | null = null;
 
 /** RFC5545 line-folding (DTSTART, DTEND, DESCRIPTION lines must wrap at 75 chars). */
 function fold(line: string): string {
@@ -97,7 +96,6 @@ export interface CalendarSources {
 }
 
 export function buildCalendarIcs(src: CalendarSources): string {
-  if (calendarCache && Date.now() - calendarCache.ts < CAL_TTL_MS) return calendarCache.ics;
   const events: CalEvent[] = [];
 
   // SoC dip below reserve — single event at the projected dip time.
@@ -169,7 +167,5 @@ export function buildCalendarIcs(src: CalendarSources): string {
     });
   }
 
-  const ics = emit(events);
-  calendarCache = { ts: Date.now(), ics };
-  return ics;
+  return emit(events);
 }

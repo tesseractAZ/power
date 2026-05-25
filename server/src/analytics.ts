@@ -3299,12 +3299,14 @@ const TARIFF_OFF_PEAK_CENTS = Number(process.env.TARIFF_OFF_PEAK_CENTS ?? 8);
 const TARIFF_ON_PEAK_HOURS_ENV = process.env.TARIFF_ON_PEAK_HOURS ?? '15-20';
 const TARIFF_ON_PEAK_DAYS_ENV = process.env.TARIFF_ON_PEAK_DAYS ?? '1-5';
 
-function parseRange(s: string): [number, number] | null {
+/** Exported for tests. */
+export function parseRange(s: string): [number, number] | null {
   const m = s.match(/^(\d{1,2})-(\d{1,2})$/);
   if (!m) return null;
   return [Number(m[1]), Number(m[2])];
 }
-function onPeakAt(ts: number): boolean {
+/** Exported for tests. */
+export function onPeakAt(ts: number): boolean {
   const d = new Date(ts);
   const h = d.getHours();
   const dow = d.getDay() === 0 ? 7 : d.getDay(); // 1=Mon..7=Sun

@@ -288,7 +288,10 @@ app.get('/api/calendar.ics', async (req, reply) => {
   const ics = buildCalendarIcs({ devices: store.get().devices, forecast: fc, evWindow: ev, nwsAlerts: nws });
   reply
     .header('Content-Type', 'text/calendar; charset=utf-8')
-    .header('Content-Disposition', 'inline; filename="ecoflow-panel.ics"');
+    .header('Content-Disposition', 'inline; filename="ecoflow-panel.ics"')
+    // HTTP-layer cache (HA's generic_ics_calendar honors this). Function-
+    // level cache was removed in v0.8.1 since it was effectively unkeyed.
+    .header('Cache-Control', 'public, max-age=300');
   return ics;
 });
 

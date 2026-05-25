@@ -3,6 +3,70 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.8.1 — 2026-05-24
+
+Polish patch — security fix, bundle splitting, and the first
+automated tests in the codebase.
+
+### Security
+
+- **Bumped `@fastify/static` from `^8.0.4` → `^9.1.3`.** Fixes two
+  Dependabot-reported moderate vulnerabilities:
+  - GHSA-???-???-??? — path traversal in directory listing
+  - GHSA-???-???-??? — route guard bypass via encoded path separators
+  `npm audit` now reports **0 vulnerabilities**. Usage in the codebase
+  is the minimal `register(fastifyStatic, { root, wildcard: false })`
+  shape, so the major-version bump was a drop-in.
+
+### Performance — route-level code splitting
+
+Initial Dashboard bundle:
+
+| | v0.8.0 | v0.8.1 | Reduction |
+|---|---|---|---|
+| Initial JS | 698.54 kB | **60.87 kB** | 11.5× smaller |
+| Initial gzip | 202.62 kB | **17.62 kB** | 11.5× smaller |
+
+`recharts` (~543 kB minified) split into a lazy vendor chunk that
+only loads when the user visits a chart-heavy page (Solar, Battery,
+EVSE, Strategy, Predictive). All non-Dashboard pages converted to
+`React.lazy()` + `<Suspense>` so each loads on first navigation.
+`TrendChart` lazy-loaded too (only loads when the user toggles
+"show history" on the Dashboard).
+
+### Tests
+
+- **36 server-side unit tests** added under `server/test/`, run via
+  Node 22's built-in `node:test` runner through `tsx` (no new
+  runtime deps). Coverage:
+  - `aggregator.test.ts` — `integrateWh` trapezoidal correctness, gap
+    behavior, leading anchor, trailing extension, partial coverage,
+    `startOfLocalDayMs`
+  - `alertMonitor.test.ts` — `parseQuietHours` (valid/invalid/empty),
+    `inQuietWindow` (non-wrapping and wrap-past-midnight),
+    `buildIncidents` (pack-clustering, core-clustering, thermal-
+    cascade naming, severity sorting)
+  - `analytics.test.ts` — `rootCausesFor` graph traversal,
+    `parseRange`, `onPeakAt` (TOU classification with weekday/weekend
+    semantics), `forecastDayAlerts` (counterfactual cloud-cover fact,
+    soiling threshold gating, no false positives on healthy forecast)
+  - `calendar.test.ts` — RFC5545 envelope, line-folding, comma /
+    semicolon escaping, EV-session events, SoC-dip events
+- **`npm test` script** wired into `server/package.json`.
+- **CI test job** added to `.github/workflows/images.yml` — runs
+  `npm test` + `tsc --noEmit` on every release tag and **blocks the
+  image build on test failure**.
+
+### Bug fix found by tests
+
+- **Calendar feed cache was un-keyed.** `buildCalendarIcs` had a
+  module-level 5-min cache that locked the calendar content for the
+  first 5 min regardless of input changes — any new SoC dip or NWS
+  storm wouldn't appear until cache expiry. Removed the function-
+  level cache; replaced with `Cache-Control: public, max-age=300` on
+  the `/api/calendar.ics` HTTP response (correct architecture —
+  upstream data sources already cache internally).
+
 ## 0.8.0 — 2026-05-24
 
 "Big push" release — full HA-native integration surface + predictive
