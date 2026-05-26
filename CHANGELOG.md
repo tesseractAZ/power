@@ -3,6 +3,22 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.42 — 2026-05-26
+
+**Opus polish: Pack Vitals column order.** In v0.9.40 the Pack Vitals
+constellation grouped columns by DPU SN in fleet-snapshot enumeration
+order — i.e. whatever order MQTT happened to deliver. Result: Core 3
+might land left of Core 1, etc.
+
+Fixed by sorting the column array by the trailing integer in each DPU's
+device name ("Core 5" → 5), mirroring the canonical numeric ordering
+already used everywhere else in the app (see `web/src/sort.ts`). Columns
+now read **Core 1 · Core 2 · Core 3 · Core 4** left-to-right.
+
+Single change in `web/src/opus/components/PackVitals.tsx`; local
+`trailingNum` helper duplicated from `sort.ts` to keep the Opus skin
+self-contained.
+
 ## 0.9.41 — 2026-05-26
 
 **TTS via Music Assistant announce.** v0.9.38-39 failed to make TTS
