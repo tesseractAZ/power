@@ -162,7 +162,7 @@ jobs:
       # works fine BEFORE the user sets up CodeNotary, and starts signing
       # automatically the next push after they do.
       #
-      # `build.yaml` declares the expected signer (eric@phs-az.com); the
+      # `build.yaml` declares the expected signer (epaschal@outlook.com); the
       # secrets must match that identity. HA Supervisor verifies the
       # signature on pull — a mismatch aborts the install.
       - name: Check CodeNotary secrets
@@ -177,8 +177,8 @@ jobs:
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "CodeNotary secrets MISSING — skipping signing. To enable:"
-            echo "  1. Register CodeNotary at https://www.codenotary.io with eric@phs-az.com"
-            echo "  2. Add CN_USER (= eric@phs-az.com) and CN_PASSWORD secrets"
+            echo "  1. Register CodeNotary at https://www.codenotary.io with epaschal@outlook.com"
+            echo "  2. Add CN_USER (= epaschal@outlook.com) and CN_PASSWORD secrets"
             echo "     at https://github.com/${{ github.repository }}/settings/secrets/actions"
           fi
 

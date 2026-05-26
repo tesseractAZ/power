@@ -32,14 +32,14 @@ labels:
 #
 # Setup required (one-time):
 #   1. Register CodeNotary account at https://www.codenotary.io with
-#      eric@phs-az.com.
+#      epaschal@outlook.com.
 #   2. Add GitHub repo secrets:
-#        CN_USER     = eric@phs-az.com
+#        CN_USER     = epaschal@outlook.com
 #        CN_PASSWORD = <your CodeNotary password>
 #      via https://github.com/tesseractAZ/ecoflow-panel/settings/secrets/actions
 #   3. Next release will sign automatically. The CI step is gated on
 #      both secrets being present, so until step 2 lands the workflow
 #      skips signing without failing.
 codenotary:
-  signer: eric@phs-az.com
+  signer: epaschal@outlook.com
   base_image: notary@home-assistant.io

@@ -3,6 +3,28 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.46 — 2026-05-26
+
+**CodeNotary signer email correction.** Updates `build.yaml`'s
+`codenotary.signer` from `eric@phs-az.com` to **`epaschal@outlook.com`**
+— Eric registered the CodeNotary account with his GitHub login email
+(epaschal@outlook.com), so the signer field has to match exactly. If
+the field and the actual signature identity disagree, HA Supervisor
+refuses to install.
+
+Same change applied to the workflow's logging strings so the
+"skipping signing" hint shows the right email.
+
+### Action needed (still one-time)
+
+1. CodeNotary account at https://www.codenotary.io with
+   **epaschal@outlook.com** — done per Eric.
+2. **GitHub repo secrets** at
+   https://github.com/tesseractAZ/ecoflow-panel/settings/secrets/actions:
+   - `CN_USER` = `epaschal@outlook.com`
+   - `CN_PASSWORD` = your CodeNotary password
+3. Next push signs automatically.
+
 ## 0.9.45 — 2026-05-26
 
 **CodeNotary image signing infrastructure.** Wires up the second +1
