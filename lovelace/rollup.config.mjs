@@ -19,6 +19,10 @@ const cardBundles = [
   { input: 'src/cards/alerts-card.ts', output: 'dist/ecoflow-alerts-card.js', name: 'EcoflowAlertsCard' },
   { input: 'src/cards/battery-card.ts', output: 'dist/ecoflow-battery-card.js', name: 'EcoflowBatteryCard' },
   { input: 'src/cards/solar-card.ts', output: 'dist/ecoflow-solar-card.js', name: 'EcoflowSolarCard' },
+  // v0.9.54 — second-wave ports of items originally deferred as PWA-only.
+  { input: 'src/cards/strategy-card.ts', output: 'dist/ecoflow-strategy-card.js', name: 'EcoflowStrategyCard' },
+  { input: 'src/cards/insights-card.ts', output: 'dist/ecoflow-insights-card.js', name: 'EcoflowInsightsCard' },
+  { input: 'src/cards/circuit-card.ts', output: 'dist/ecoflow-circuit-card.js', name: 'EcoflowCircuitCard' },
 ].map(({ input, output, name }) => ({
   input,
   output: {

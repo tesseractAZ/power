@@ -3,6 +3,84 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.54 — 2026-05-26
+
+**HACS PR7 + PR8 + PR9: the originally-deferred cards land too.**
+Lovelace bumped to **1.1.0**. The "stays PWA-only" deferred items
+from v0.9.53's scoping plan all ported in parallel by background
+agents. Total card count goes from 4 → **7 modern Lit cards**.
+
+### `<ecoflow-strategy-card>` (PR7, 53 KB minified, 844 lines)
+
+Read-only display of SHP2 strategy state — backup reserve floors,
+mid-priority discharge floor, smart-backup mode, circuit priorities
+with breaker amps, charge schedule (TOU window), and dispatch
+recommendations from `/api/dispatch-plan`. Editing TOU + priorities
+still happens in add-on options or the EcoFlow app; this card makes
+the current state visible inside Lovelace.
+
+### `<ecoflow-insights-card>` (PR8, 63 KB minified, 1117 lines)
+
+The heaviest card — 15 sections, 15 HTTP endpoints, mirrors the
+React `AdvancedInsightsCard` surface:
+
+active incidents · NWS alerts · self-consumption · weather ensemble ·
+confidence · thermal events · equipment health · shade events · soiling
+decomposition · string mismatch · EV-charging windows · charge-curve
+drift · internal resistance · forecast skill (with 7-day sparkline) ·
+ambient thermal forecast
+
+Top-3 sections auto-expanded; rest collapse with Show/Hide toggle.
+Each section independently stale-flagged on fetch fail. Default
+`refresh_seconds: 60` matches the slow-data nature of these endpoints.
+
+### `<ecoflow-circuit-card>` (PR9, 49 KB minified, 620 lines)
+
+Per-circuit drill-down replacing the React modal UX (modals are
+awkward in Lovelace). Requires `circuit: <N>` config (1-12 = SHP2
+channel). Renders live W + 24h sparkline (2-min buckets) + 30-day
+kWh/cost rollup + paired split-phase combined view (for 240V loads).
+
+`setConfig` validates the circuit number and throws inline; Lovelace
+catches and shows the error in its YAML editor. Default cost
+`$0.17/kWh` (Phoenix APS residential) — overrideable via
+`cost_per_kwh:` config.
+
+### Integration
+
+- `rollup.config.mjs` — 3 new entries appended; all 7 cards build
+- `dev/index.html` — all 7 cards mounted, share single WS
+- `README.md` — 3 new cards documented in table + per-card section
+  with YAML config snippets
+- Bumped `lovelace/package.json` to **1.1.0**
+
+### Final card inventory
+
+```
+ecoflow-fleet-card.js       60 KB   Dashboard (PR3)
+ecoflow-alerts-card.js      52 KB   Alerts + Predictive (PR4)
+ecoflow-battery-card.js     52 KB   Battery + degradation (PR5)
+ecoflow-solar-card.js       58 KB   Solar + forecast (PR6)
+ecoflow-strategy-card.js    53 KB   SHP2 strategy (PR7)        ✨ NEW
+ecoflow-insights-card.js    63 KB   15-section advanced (PR8)   ✨ NEW
+ecoflow-circuit-card.js     49 KB   Per-circuit drill (PR9)     ✨ NEW
+─────────────────────────────────────
+                            387 KB  total across 7 cards
+ecoflow-panel-card.js       12 KB   Legacy (compat)
+ecoflow-panel-dashboard.js  21 KB   Legacy (compat)
+```
+
+### What's REALLY left in the PWA
+
+Just **`EvsePanel`** remains React-only — single-EVSE setup is
+better served by HA's native Energy card or the EcoFlow app.
+
+### Port timing
+
+Original scope: "marginal benefit over PWA, multi-week port."
+Actual delivery: 9 PRs across 6 versions (v0.9.49 → v0.9.54), ~3
+hours wall-clock via parallel background agents.
+
 ## 0.9.53 — 2026-05-26
 
 **HACS Lit port PR5 + PR6: battery + solar cards. FEATURE COMPLETE.**

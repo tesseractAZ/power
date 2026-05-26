@@ -34,10 +34,19 @@
     <ecoflow-battery-card></ecoflow-battery-card>
     <h2>Solar</h2>
     <ecoflow-solar-card></ecoflow-solar-card>
+    <h2>Strategy</h2>
+    <ecoflow-strategy-card></ecoflow-strategy-card>
+    <h2>Advanced Insights</h2>
+    <ecoflow-insights-card></ecoflow-insights-card>
+    <h2>Circuit Drill-Down (Pool Pump, channel 10)</h2>
+    <ecoflow-circuit-card></ecoflow-circuit-card>
     <script type="module" src="../dist/ecoflow-fleet-card.js"></script>
     <script type="module" src="../dist/ecoflow-alerts-card.js"></script>
     <script type="module" src="../dist/ecoflow-battery-card.js"></script>
     <script type="module" src="../dist/ecoflow-solar-card.js"></script>
+    <script type="module" src="../dist/ecoflow-strategy-card.js"></script>
+    <script type="module" src="../dist/ecoflow-insights-card.js"></script>
+    <script type="module" src="../dist/ecoflow-circuit-card.js"></script>
     <script>
       // Both bundles are IIFE — wait until the element is upgraded then
       // setConfig(). The whenDefined() path covers slow upgrades; the
@@ -71,6 +80,22 @@
           type: 'custom:ecoflow-solar-card',
           host: 'http://homeassistant.local:8787',
           title: 'EcoFlow Solar',
+        });
+        setup('ecoflow-strategy-card', {
+          type: 'custom:ecoflow-strategy-card',
+          host: 'http://homeassistant.local:8787',
+          title: 'EcoFlow Strategy',
+        });
+        setup('ecoflow-insights-card', {
+          type: 'custom:ecoflow-insights-card',
+          host: 'http://homeassistant.local:8787',
+          title: 'EcoFlow Advanced Insights',
+        });
+        setup('ecoflow-circuit-card', {
+          type: 'custom:ecoflow-circuit-card',
+          host: 'http://homeassistant.local:8787',
+          title: 'EcoFlow Circuit Drill-Down',
+          circuit: 10,  // PR9 requires circuit number — example: Pool Pump on ch10
         });
       });
     </script>

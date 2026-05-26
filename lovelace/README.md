@@ -1,9 +1,9 @@
 # EcoFlow Panel — Lovelace cards
 
 HACS plugin that ships Lovelace cards for the **EcoFlow Panel**
-add-on. Five Lit-based cards (v1.0.0) plus the original two legacy
-cards. Pick one or use several — all the new cards share a single
-WebSocket connection to the add-on per host.
+add-on. **Seven Lit-based cards** (v1.1.0) plus the original two
+legacy cards. Pick one or use several — all the new cards share a
+single WebSocket connection to the add-on per host.
 
 | Card | When to use |
 |---|---|
@@ -117,6 +117,58 @@ title: Alerts
 refresh_seconds: 30
 ```
 
+### `ecoflow-strategy-card`
+
+Read-only display of SHP2 strategy state: backup reserve floors,
+mid-priority discharge floor, smart-backup mode, circuit priorities
++ breaker amps, charge schedule (TOU window), and dispatch
+recommendations from `/api/dispatch-plan`. Editing TOU and priorities
+still happens in the add-on options or the EcoFlow app — this card
+makes the current state visible inside Lovelace.
+
+```yaml
+type: custom:ecoflow-strategy-card
+host: http://homeassistant.local:8787
+title: Strategy
+refresh_seconds: 30
+```
+
+### `ecoflow-insights-card`
+
+The heaviest card — 15 sections mirroring the React `AdvancedInsightsCard`:
+active incidents, NWS alerts, self-consumption, weather ensemble,
+confidence, thermal events, equipment health (MPPT + inverter idle),
+shade events, soiling decomposition, string mismatch, EV-charging
+windows, charge-curve drift, internal resistance, forecast skill
+(with 7-day sparkline), ambient thermal forecast.
+
+Top-3 sections auto-expanded; the rest collapse with a Show/Hide
+button. 15 HTTP endpoints, each independently stale-flagged on fail.
+
+```yaml
+type: custom:ecoflow-insights-card
+host: http://homeassistant.local:8787
+title: Advanced Insights
+refresh_seconds: 60
+```
+
+### `ecoflow-circuit-card`
+
+Per-circuit drill-down. **Requires** a `circuit:` option (1-12,
+matching SHP2 channel numbers). Renders the channel's live W, a
+24-hour sparkline at 2-min resolution, a 30-day kWh + cost rollup
+(default `$0.17/kWh`, Phoenix APS residential), and combined
+split-phase totals if the channel is paired (e.g. 240V EV charger).
+
+```yaml
+type: custom:ecoflow-circuit-card
+host: http://homeassistant.local:8787
+title: Pool Pump
+circuit: 10
+cost_per_kwh: 0.17  # optional; default 0.17
+refresh_seconds: 60
+```
+
 ## Manual install (no HACS)
 
 1. Download `dist/ecoflow-<card>-card.js` (one per card you want)
@@ -132,7 +184,7 @@ refresh_seconds: 30
 ```bash
 cd lovelace
 npm install
-npm run build       # writes dist/ecoflow-{fleet,alerts,battery,solar}-card.js + test bundle
+npm run build       # writes dist/ecoflow-{fleet,alerts,battery,solar,strategy,insights,circuit}-card.js + test bundle
 npm run type-check  # tsc --noEmit
 ```
 
@@ -170,10 +222,10 @@ by a card don't bloat its output. Per-card minified sizes (terser):
 
 | Card | dist/ size |
 |---|---|
-| `ecoflow-fleet-card.js` | ~60 KB |
-| `ecoflow-alerts-card.js` | ~52 KB |
-| `ecoflow-battery-card.js` | ~62 KB |
-| `ecoflow-solar-card.js` | ~52 KB |
+| `ecoflow-fleet-card.js` | ~58 KB |
+| `ecoflow-alerts-card.js` | ~51 KB |
+| `ecoflow-battery-card.js` | ~51 KB |
+| `ecoflow-solar-card.js` | ~56 KB |
 
 ## Legacy cards (`ecoflow-panel-card`, `ecoflow-panel-dashboard`)
 

@@ -590,13 +590,10 @@ export class EcoflowSolarCard extends EcoflowCardBase {
     let chart: TemplateResult;
     let confidenceBadge: TemplateResult | symbol = nothing;
     if (prob && prob.hours.length > 0) {
-      const p90Pts: ChartPoint[] = prob.hours.map((h) => ({ ts: h.ts, value: h.p90W }));
-      const p50Pts: ChartPoint[] = prob.hours.map((h) => ({ ts: h.ts, value: h.p50W }));
-      // P10 is rendered as a "hole" underneath — we cheat the area helper by
-      // overlaying a panel-coloured area at the P10 level over the P90 area.
-      // Hand-roll the SVG instead to layer cleanly: P90 area, P10 mask area,
-      // P50 line. forecastChart() doesn't natively do bands so we use it for
-      // the P90 background and overlay the rest below.
+      // Render a hand-rolled SVG that layers a P10–P90 band (filled area)
+      // beneath the P50 median line. forecastChart() in shared/charts.ts
+      // covers the single-series case; a true confidence band needs the
+      // bespoke renderer below.
       chart = this.renderProbForecastChart(prob);
       const widthKwh = prob.uncertaintyKwhStdev;
       const above = prob.pAboveReservePct;
