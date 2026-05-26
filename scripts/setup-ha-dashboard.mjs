@@ -19,9 +19,17 @@
  *   1. Verifies the chosen RESOURCE_BASE serves a real JS bundle for each
  *      of the 7 cards. Refuses to proceed if not — otherwise the
  *      dashboard would render "Custom element doesn't exist".
- *   2. Adds Lovelace resources for any of the 7 cards that aren't already
- *      registered at the same URL. Existing resources at different URLs
- *      are left alone (won't double-register or clobber).
+ *   2. Adds Lovelace resources for the 7 cards. Every URL is built with a
+ *      unique `?cb=<timestamp>` query string per script run so that
+ *      re-running forces HA, Safari, and HA's service worker to refetch
+ *      the bundle even when the logical path hasn't changed. We learned
+ *      the hard way in v0.9.56 setup: migrating from add-on URLs to
+ *      jsdelivr URLs at the same path left Safari serving the previous
+ *      bundle from cache, and re-registering at an identical URL didn't
+ *      invalidate it. Resources matching one of our slugs but not the
+ *      current cache-busted URL are deleted before the new ones are
+ *      created — so each run effectively re-registers all 7. Override
+ *      with `CACHE_BUST=<string>` for deterministic tests.
  *   3. Creates a storage-mode dashboard at url_path=ecoflow with sidebar
  *      entry "EcoFlow" / mdi:home-battery. Re-running is safe — if the
  *      dashboard already exists the create step is skipped, and the
@@ -39,6 +47,7 @@
  *   RESOURCE_BASE=https://cdn.jsdelivr.net/gh/tesseractAZ/ecoflow-panel@v0.9.55/lovelace/dist
  *   DASHBOARD_PATH=ecoflow
  *   DASHBOARD_TITLE=EcoFlow
+ *   CACHE_BUST=<string>  # override the ?cb= value (default: Date.now())
  *
  * No external deps beyond the `ws` already in server/node_modules.
  */
@@ -55,6 +64,11 @@ const RESOURCE_BASE = process.env.RESOURCE_BASE ?? `${ADDON_HOST}/lovelace`;
 // HA's lovelace/dashboards/create requires a hyphen in url_path. Use one.
 const DASHBOARD_PATH = process.env.DASHBOARD_PATH ?? 'ecoflow-dashboard';
 const DASHBOARD_TITLE = process.env.DASHBOARD_TITLE ?? 'EcoFlow';
+// Per-run cache buster appended to every registered resource URL. Forces
+// HA, Safari, and HA's service worker to refetch the bundle even when the
+// logical URL hasn't changed (see header comment for the v0.9.56 trap).
+// Env override keeps tests deterministic.
+const CACHE_BUST = process.env.CACHE_BUST ?? String(Date.now());
 
 if (!HA_TOKEN) {
   console.error('FATAL: HA_TOKEN env var required (long-lived access token)');
@@ -160,12 +174,16 @@ async function verifyCards() {
 async function ensureResources(ws) {
   console.log('\nReconciling Lovelace resources…');
   const existing = await send(ws, { type: 'lovelace/resources' });
-  const wanted = new Set(CARDS.map(({ slug }) => `${RESOURCE_BASE}/${slug}.js`));
+  const wanted = new Set(
+    CARDS.map(({ slug }) => `${RESOURCE_BASE}/${slug}.js?cb=${CACHE_BUST}`),
+  );
   // A registered resource is "ours" if its URL ends with `/ecoflow-<one of
-  // our slugs>.js`, regardless of host. Anything matching that pattern but
-  // not pointing at the current RESOURCE_BASE is a leftover from a previous
-  // setup (e.g. an earlier jsdelivr install before migrating to the add-on
-  // self-serve) and gets deleted before we register the new ones.
+  // our slugs>.js` (with or without a query string), regardless of host.
+  // Anything matching that pattern but not pointing at the current wanted
+  // URL is a leftover — either from a previous setup (e.g. an earlier
+  // jsdelivr install before migrating to the add-on self-serve) or from a
+  // prior run with a different `?cb=` value. Either way it gets deleted
+  // before we register the new ones, which is also how we cache-bust.
   const ourSlugs = new Set(CARDS.map(({ slug }) => slug));
   const slugFromUrl = (url) => {
     const m = url.match(/\/([a-z0-9-]+)\.js(?:\?.*)?$/);
@@ -305,6 +323,7 @@ async function saveConfig(ws) {
   console.log(`HA WebSocket → ws://${HA_HOST}/api/websocket`);
   console.log(`Add-on host → ${ADDON_HOST}  (data: snapshot, WS stream, history)`);
   console.log(`Resource base → ${RESOURCE_BASE}  (card JS modules)`);
+  console.log(`Cache buster → ?cb=${CACHE_BUST}  (forces refetch on this run)`);
 
   const cardsOk = await verifyCards();
   if (!cardsOk) {

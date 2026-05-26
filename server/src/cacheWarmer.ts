@@ -156,7 +156,7 @@ export function startCacheWarmer(
         return computeRepairIssues({
           devices: snap.devices,
           alerts: snap.alerts ?? [],
-          degradation: computeDegradation(devices, recorder),
+          degradation: await computeDegradation(devices, recorder),
           soiling: await computeSoilingDecomposition(devices, recorder),
           equipmentHealth: computeEquipmentHealth(devices, recorder),
           forecastSkill: skill,

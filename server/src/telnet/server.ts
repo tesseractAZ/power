@@ -16,7 +16,7 @@ import type { Recorder } from '../recorder.js';
 import { computeTotals, startOfLocalDayMs } from '../aggregator.js';
 import type { FleetEnergyTotals } from '../aggregator.js';
 import { getDayForecast, computeDegradation } from '../analytics.js';
-import type { DayForecast } from '../analytics.js';
+import type { DayForecast, FleetDegradation } from '../analytics.js';
 import { renderScreen, SCREENS, getDpus } from './screens.js';
 import type { ScreenId, SessionView } from './screens.js';
 import { renderPlant, PLANT_SCREENS } from './plant/index.js';
@@ -212,8 +212,14 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
   // weather forecast are too heavy to run on every 1 s render.
   let totals: FleetEnergyTotals | null = null;
   let forecast: DayForecast | null = null;
+  // v0.9.50 — computeDegradation became async (yields the event loop between
+  // packs) so it can no longer be called inline from the sync `draw()`. Mirror
+  // the forecast pattern: refresh on a timer, hand the latest cached value to
+  // each render. The underlying analytics cache is 30 min anyway.
+  let degradation: FleetDegradation | null = null;
   let stopped = false;
   let forecastTimer: NodeJS.Timeout | null = null;
+  let degradationTimer: NodeJS.Timeout | null = null;
 
   const storeReady = () => Object.keys(store.get().devices).length > 0;
 
@@ -249,9 +255,32 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     }, delayMs);
   };
 
+  // Async-aware degradation refresh — same self-scheduling shape as forecast.
+  // computeDegradation's internal cache is 30 min, so a 5 min poll is the
+  // right balance: we get a fresh value soon after each cache expiry while
+  // staying inside the analytics layer's intended cadence.
+  const refreshDegradation = async (): Promise<boolean> => {
+    if (!storeReady()) return false;
+    try {
+      degradation = await computeDegradation(store.get().devices, recorder);
+      return true;
+    } catch (e: any) {
+      log(`telnet: degradation refresh failed: ${e?.message ?? e}`);
+      return false;
+    }
+  };
+  const scheduleDegradation = (delayMs: number) => {
+    degradationTimer = setTimeout(async () => {
+      if (stopped) return;
+      const good = await refreshDegradation();
+      if (!stopped) scheduleDegradation(good ? 5 * 60_000 : 30_000);
+    }, delayMs);
+  };
+
   refreshTotals();
   const totalsTimer = setInterval(refreshTotals, 15_000);
   scheduleForecast(2_000);
+  scheduleDegradation(3_000);
 
   const safeWrite = (s: Session, data: string | Buffer) => {
     try {
@@ -293,7 +322,10 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
           snap: store.get(),
           totals,
           forecast,
-          degradation: computeDegradation(store.get().devices, recorder),
+          // v0.9.50 — read from the timer-refreshed cache instead of calling
+          // the now-async computeDegradation inline. Empty placeholder until
+          // the first refresh lands (a few seconds after server start).
+          degradation: degradation ?? { generatedAt: Date.now(), eolSoh: 80, packs: [] },
           serverStartedAt,
         }, { recorder });
       } else {
@@ -305,13 +337,14 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
           battPack: s.battPack,
           alertScroll: s.alertScroll,
         };
-        // computeDegradation is internally cached (~30 min), so calling it per
-        // render is cheap — the work runs at most twice an hour.
+        // v0.9.50 — computeDegradation went async to yield between packs,
+        // so we read from the timer-refreshed cache instead of calling it
+        // inline. Empty placeholder until the first refresh lands.
         lines = renderScreen(sv, {
           snap: store.get(),
           totals,
           forecast,
-          degradation: computeDegradation(store.get().devices, recorder),
+          degradation: degradation ?? { generatedAt: Date.now(), eolSoh: 80, packs: [] },
         });
       }
       // v0.9.5 — wrap each frame in synchronized-output escapes so terminals
@@ -561,6 +594,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       stopped = true;
       clearInterval(totalsTimer);
       if (forecastTimer) clearTimeout(forecastTimer);
+      if (degradationTimer) clearTimeout(degradationTimer);
       for (const s of [...sessions]) endSession(s);
       server.close();
     },

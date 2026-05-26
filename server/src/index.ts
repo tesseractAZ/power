@@ -333,7 +333,7 @@ app.get('/api/forecast', async (req, reply) =>
 );
 
 app.get('/api/degradation', async (req, reply) =>
-  cached(req, reply, computeDegradation(store.get().devices, recorder), 60),
+  cached(req, reply, await computeDegradation(store.get().devices, recorder), 60),
 );
 
 app.get('/api/runway', async (req, reply) => {
@@ -422,7 +422,7 @@ app.get('/api/ambient-thermal-forecast', async (req, reply) =>
 
 app.get('/api/confidence', async (req, reply) => {
   const fc = await getDayForecast(store.get().devices, recorder, () => {});
-  const deg = computeDegradation(store.get().devices, recorder);
+  const deg = await computeDegradation(store.get().devices, recorder);
   const thermal = await computeAmbientThermalForecast(store.get().devices, recorder);
   const skill = await computeForecastSkill(store.get().devices, recorder, fc);
   return cached(req, reply, computeConfidenceSnapshot(deg, fc, thermal, skill), 60);
@@ -622,7 +622,7 @@ app.get('/api/forecast/bayesian', async (req, reply) =>
 );
 
 app.get('/api/pack-risk', async (req, reply) => {
-  const deg = computeDegradation(store.get().devices, recorder);
+  const deg = await computeDegradation(store.get().devices, recorder);
   const therm = computeThermalEvents(store.get().devices, recorder);
   const ir = computeInternalResistance(store.get().devices, recorder);
   const cc = computeChargeCurveFingerprint(store.get().devices, recorder);
@@ -636,7 +636,7 @@ app.get('/api/pack-risk', async (req, reply) => {
 // (lr-heuristic-baseline-v1). When real failures accumulate, drop a CSV
 // into data/labels.csv and run `npm run train-pack-risk`.
 app.get('/api/pack-risk/v2', async (req, reply) => {
-  const deg = computeDegradation(store.get().devices, recorder);
+  const deg = await computeDegradation(store.get().devices, recorder);
   const therm = computeThermalEvents(store.get().devices, recorder);
   const ir = computeInternalResistance(store.get().devices, recorder);
   const cc = computeChargeCurveFingerprint(store.get().devices, recorder);
@@ -650,7 +650,7 @@ app.get('/api/repair-issues', async (req, reply) => {
   return cached(req, reply, computeRepairIssues({
     devices: store.get().devices,
     alerts: store.get().alerts ?? [],
-    degradation: computeDegradation(store.get().devices, recorder),
+    degradation: await computeDegradation(store.get().devices, recorder),
     soiling: await computeSoilingDecomposition(store.get().devices, recorder),
     equipmentHealth: computeEquipmentHealth(store.get().devices, recorder),
     forecastSkill: skill,
@@ -697,7 +697,7 @@ app.get('/api/ha-state', async (req, reply) => {
 
   // Cached projections (internally cached ~30min — cheap to call per-request).
   const fc = await getDayForecast(snap.devices, recorder, () => {});
-  const deg = computeDegradation(snap.devices, recorder);
+  const deg = await computeDegradation(snap.devices, recorder);
   const runway = computeRunway(snap.devices, recorder, fc);
   const rte = computeRoundTripEfficiency(snap.devices, recorder);
   const clipping = await computeClipping(snap.devices, recorder, fc);

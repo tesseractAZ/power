@@ -59,6 +59,12 @@ export async function callHaService(
   if (!t) return { ok: false, error: 'SUPERVISOR_TOKEN not set (running outside Home Assistant?)' };
   const url = `${SUPERVISOR_BASE}/services/${domain}/${service}`;
   try {
+    // v0.9.57 — cap stalled HA service calls. Without these, a hung
+    // integration (e.g. Piper waiting on Wyoming) blocks the whole
+    // broadcast pipeline for tens of seconds because undici's default
+    // is ~5 min. Real HA service calls are sub-second; 5s headers /
+    // 10s body covers the slow ones (snapshots, big media calls)
+    // without hiding actual hangs.
     const res = await request(url, {
       method: 'POST',
       headers: {
@@ -66,6 +72,8 @@ export async function callHaService(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(data),
+      headersTimeout: 5000,
+      bodyTimeout: 10000,
     });
     const body = await res.body.text();
     if (res.statusCode >= 200 && res.statusCode < 300) {
@@ -218,6 +226,10 @@ export async function ttsGetUrl(
   };
   if (language) body.language = language;
   try {
+    // v0.9.57 — render timeout. Piper on a Pi takes ~1-3s for a short
+    // utterance; Cloud TTS is sub-second. 4s headers / 8s body lets
+    // slow Piper renders complete but bails on a hung integration so
+    // the engine fallback chain in broadcast.ts can move to Cloud.
     const res = await request(`${SUPERVISOR_BASE}/tts_get_url`, {
       method: 'POST',
       headers: {
@@ -225,6 +237,8 @@ export async function ttsGetUrl(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      headersTimeout: 4000,
+      bodyTimeout: 8000,
     });
     const bodyText = await res.body.text();
     if (res.statusCode !== 200) {

@@ -72,7 +72,7 @@
 
       (async () => {
         for (const { tag } of CARDS) {
-          const url = `/dist/${tag}.js`;
+          const url = `https://cdn.jsdelivr.net/gh/tesseractAZ/ecoflow-panel@v0.9.56/lovelace/dist/${tag}.js`;
           try {
             await loadScript(url);
             row(`✓ loaded ${tag}.js`, true);

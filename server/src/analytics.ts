@@ -1185,7 +1185,19 @@ function analysePack(
     ...extra,
   });
 
-  const sohPts = recorder.query(d.sn, `pack${pk.num}_soh`, since, now, DEGRADE_BUCKET_SEC);
+  // v0.9.50 — batch the three bucketed pack metrics (soh / cycles / temp)
+  // into a single SQL round-trip. `node:sqlite` is fully synchronous, so
+  // each separate `recorder.query()` blocks the event loop while it runs.
+  // Across the user's ~20 packs the per-pack 3 calls add up to ~60 blocking
+  // queries per cache-warmer cycle; queryMulti collapses that to ~20.
+  const packMetrics = recorder.queryMulti(
+    d.sn,
+    [`pack${pk.num}_soh`, `pack${pk.num}_cycles`, `pack${pk.num}_temp`],
+    since,
+    now,
+    DEGRADE_BUCKET_SEC,
+  );
+  const sohPts = packMetrics.get(`pack${pk.num}_soh`) ?? [];
   const spanMs = sohPts.length > 1 ? sohPts[sohPts.length - 1].ts - sohPts[0].ts : 0;
   const spanDays = round1(spanMs / 86_400_000);
 
@@ -1204,14 +1216,14 @@ function analysePack(
   const fadeUncertaintyPct = fit ? fit.slopeStdErrPerMs * YEAR_MS : null;
 
   // Parallel cycle-count regression → usage intensity.
-  const cycFit = linregress(recorder.query(d.sn, `pack${pk.num}_cycles`, since, now, DEGRADE_BUCKET_SEC));
+  const cycFit = linregress(packMetrics.get(`pack${pk.num}_cycles`) ?? []);
   const cyclesPerYear =
     cycFit && cycFit.slopePerMs > 0 ? round1(cycFit.slopePerMs * YEAR_MS) : null;
 
   // Pack-temperature average over the same window. LFP capacity-fade roughly
   // doubles per 10 °C above the 25 °C reference, so we use this to compute an
   // Arrhenius acceleration factor and a temperature-corrected fade rate.
-  const tempPts = recorder.query(d.sn, `pack${pk.num}_temp`, since, now, DEGRADE_BUCKET_SEC);
+  const tempPts = packMetrics.get(`pack${pk.num}_temp`) ?? [];
   const tempVals = tempPts.map((p) => p.value).filter((v) => Number.isFinite(v));
   const avgPackTempC =
     tempVals.length > 0 ? tempVals.reduce((s, v) => s + v, 0) / tempVals.length : null;
@@ -1254,8 +1266,16 @@ function analysePack(
   // out, an early sign of cell degradation that fade-by-SoH alone misses.
   const CE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
   const ceSince = now - CE_WINDOW_MS;
-  const chgPts = recorder.query(d.sn, `pack${pk.num}_lifetime_chg_mah`, ceSince, now);
-  const dsgPts = recorder.query(d.sn, `pack${pk.num}_lifetime_dsg_mah`, ceSince, now);
+  // v0.9.50 — same batching reasoning: lifetime chg + dsg counters share
+  // (sn, window, no-bucket) so one queryMulti collapses the pair.
+  const lifetimeMetrics = recorder.queryMulti(
+    d.sn,
+    [`pack${pk.num}_lifetime_chg_mah`, `pack${pk.num}_lifetime_dsg_mah`],
+    ceSince,
+    now,
+  );
+  const chgPts = lifetimeMetrics.get(`pack${pk.num}_lifetime_chg_mah`) ?? [];
+  const dsgPts = lifetimeMetrics.get(`pack${pk.num}_lifetime_dsg_mah`) ?? [];
   let coulombicEffPct: number | null = null;
   if (chgPts.length >= 2 && dsgPts.length >= 2) {
     const chgDelta = chgPts[chgPts.length - 1].value - chgPts[0].value;
@@ -1404,11 +1424,19 @@ function analysePack(
 let degradationCache: { ts: number; value: FleetDegradation } | null = null;
 
 /** Per-pack capacity-fade → end-of-life projection, with fleet peer comparison.
- *  Cached ~30 min (the underlying SoH trend moves on a scale of weeks). */
-export function computeDegradation(
+ *  Cached ~30 min (the underlying SoH trend moves on a scale of weeks).
+ *
+ *  v0.9.50 — async so we can yield the event loop after every pack. Each
+ *  `analysePack` issues a handful of synchronous `node:sqlite` queries that
+ *  block the loop for tens of ms; across the user's ~20 packs the
+ *  uninterrupted run starves other cache-warmer tasks (runway / RTE / HTTP
+ *  handlers) running on the same turn. A `setImmediate` yield per pack lets
+ *  those interleave, which is what the cache-warmer's `Promise.all` design
+ *  actually wanted in the first place. */
+export async function computeDegradation(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
-): FleetDegradation {
+): Promise<FleetDegradation> {
   if (degradationCache && Date.now() - degradationCache.ts < DEGRADE_REPORT_TTL_MS) {
     return degradationCache.value;
   }
@@ -1418,10 +1446,16 @@ export function computeDegradation(
     (d) => d.projection?.kind === 'dpu',
   ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
 
-  // Pass 1 — regress and project every pack independently.
+  // Pass 1 — regress and project every pack independently. Yield to the
+  // event loop after each pack so concurrent work (other cache-warmer
+  // tasks, HTTP handlers, the telnet draw loop) isn't starved while we
+  // grind through the full fleet.
   const packs: PackDegradation[] = [];
   for (const d of dpus) {
-    for (const pk of d.projection.packs) packs.push(analysePack(d, pk, recorder, since, now));
+    for (const pk of d.projection.packs) {
+      packs.push(analysePack(d, pk, recorder, since, now));
+      await new Promise<void>((r) => setImmediate(r));
+    }
   }
 
   // Pass 2 — fleet peer comparison: which pack is wearing fast for its group.

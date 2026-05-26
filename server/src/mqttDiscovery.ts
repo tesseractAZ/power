@@ -228,7 +228,7 @@ export async function startMqttDiscovery(
     if (shp2) for (const c of shp2.projection.circuits) panelLoad += c.watts ?? 0;
 
     const fc = await getDayForecast(snap.devices, recorder, () => {});
-    const deg = computeDegradation(snap.devices, recorder);
+    const deg = await computeDegradation(snap.devices, recorder);
     const runway = computeRunway(snap.devices, recorder, fc);
     const rte = computeRoundTripEfficiency(snap.devices, recorder);
     const clipping = await computeClipping(snap.devices, recorder, fc);

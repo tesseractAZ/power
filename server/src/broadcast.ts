@@ -503,7 +503,12 @@ export function startBroadcastMonitor(
             externalBaseUrl: cfg.haExternalUrl,
             announceVolume: announceVolumePct,
           });
-          if (!r.ok && r.status === 500) {
+          // v0.9.57 — retry covers two failure shapes:
+          //   status 500 = MA play_announcement raced against a busy queue
+          //   status 0   = ttsGetUrl itself failed (Piper render hang, voice
+          //                not configured, etc.) — speakViaMusicAssistant
+          //                returns status 0 in that path
+          if (!r.ok && (r.status === 500 || r.status === 0)) {
             await sleep(2000);
             r = await speakViaMusicAssistant(message, {
               engine: eng,
@@ -545,7 +550,11 @@ export function startBroadcastMonitor(
         lastSpokenMessage = message;
         actualEngineUsed = usedEngine;
         if (usedEngine && usedEngine.service !== ttsEngine.service) {
-          log(`broadcast: TTS fell back from ${ttsEngine.service} to ${usedEngine.service}`);
+          // v0.9.57 — surface why the preferred engine failed. Previously
+          // this just said "fell back" with no reason; the attemptErrors
+          // detail is the only signal the user has to fix Piper / Cloud.
+          const why = attemptErrors.length ? ` (${attemptErrors.join('; ')})` : '';
+          log(`broadcast: TTS fell back from ${ttsEngine.service} to ${usedEngine.service}${why}`);
         }
       } else {
         errors.push(...attemptErrors);

@@ -40,6 +40,14 @@ import { getAllStates } from './haService.js';
  * This Set tracks which entity_ids we've already complained about so
  * the log isn't repeated every cycle. Module-level, cleared on
  * process restart.
+ *
+ * v0.9.57 — `inferProtocol` no longer returns 'unknown' (it now
+ * defaults to 'cast'), so the `protocol === 'unknown'` gate in
+ * `profileTargets` never fires this helper from that path. Kept
+ * because (a) it's small and (b) any future code path that surfaces
+ * a non-inferred speaker can still call it for diagnostic value.
+ * If we add such a path, also bypass the `protocol === 'unknown'`
+ * check that currently guards the only call site.
  */
 const _loggedUnknownEntities = new Set<string>();
 function _logUnknownOnce(entityId: string, attrs: Record<string, unknown>, logger: (m: string) => void): void {
@@ -54,7 +62,8 @@ function _logUnknownOnce(entityId: string, attrs: Record<string, unknown>, logge
     source: (attrs as Record<string, unknown>).source ?? null,
     device_class: (attrs as Record<string, unknown>).device_class ?? null,
   };
-  logger(`speakerProfiles: entity ${entityId} fell into 'unknown' bucket — hint=${JSON.stringify(hint)}`);
+  const allKeys = Object.keys(attrs);
+  logger(`speakerProfiles: entity ${entityId} fell into 'unknown' bucket — hint=${JSON.stringify(hint)} attrKeys=${JSON.stringify(allKeys)}`);
 }
 
 /** Speaker protocol families we know how to handle. */
@@ -117,7 +126,13 @@ export function inferProtocol(entityId: string, attrs: Record<string, unknown>):
   if (platform === 'cast' || id.includes('chromecast') || id.includes('thermostat') || id.includes('nest') || id.includes('google') || id.includes('cast') || dt === 'speaker') return 'cast';
   if (platform === 'alexa_media' || id.includes('echo') || id.includes('alexa')) return 'echo';
   if (platform === 'androidtv' || id.includes('androidtv') || id.includes('android_tv')) return 'androidtv';
-  return 'unknown';
+  // v0.9.57 — default to 'cast' for entities that can't be otherwise
+  // classified. defaultBufferMs already treats unknown identically to
+  // cast (1000ms), so the label `unknown` provided no signal — it just
+  // produced noisy `unknown×N` groups in broadcast logs and an unknown
+  // bucket in the per-entity diagnostic. Chromecast/Google Cast is the
+  // most common protocol for un-tagged HA media_player entities.
+  return 'cast';
 }
 
 /** Default buffer per protocol. Sized by empirical measurement in the

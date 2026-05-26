@@ -3,6 +3,111 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.57 — 2026-05-26
+
+**Four log-driven fixes from a 2h trace.** No crashes, no errors —
+all four came from "this is too slow / why does that fall back" patterns
+in a clean INFO-only log.
+
+### 1. HA HTTP calls now time out instead of hanging for 5 minutes
+
+`server/src/haService.ts`. `callHaService` and `ttsGetUrl` used
+undici's default ~5 min idle timeout. A single Piper render that hung
+for ~30 s on the Wyoming socket was enough to stretch a broadcast
+cycle to **41.7 seconds** end-to-end (req-3c in the log) — even though
+the broadcast itself succeeded via the Cloud TTS fallback. Added
+explicit `headersTimeout` / `bodyTimeout`:
+
+- `callHaService` — 5 s / 10 s (most HA service calls are sub-second;
+  the 10 s body cap covers slow media commands without hiding hangs)
+- `ttsGetUrl` — 4 s / 8 s (Piper on a Pi takes ~1–3 s; Cloud is
+  sub-second)
+
+A hung call now bails fast enough to let the engine fallback chain
+take over. Worst-case 41.7 s broadcast becomes ~15 s.
+
+### 2. TTS fallback now logs *why* the preferred engine failed
+
+`server/src/broadcast.ts`. Every broadcast in the log showed
+`broadcast: TTS fell back from tts.speak:tts.piper to
+tts.speak:tts.home_assistant_cloud` with no reason. The per-engine
+`attemptErrors` accumulator was only flushed when *every* engine
+failed; when Cloud succeeded after Piper, Piper's actual error was
+dropped on the floor.
+
+Also: the per-engine retry-on-500 didn't trigger for render failures
+because `speakViaMusicAssistant` returns `status: 0` (not 500) when
+`ttsGetUrl` itself fails. Piper was tried exactly once before
+falling through to Cloud.
+
+Fixes:
+
+- `if (!r.ok && (r.status === 500 || r.status === 0))` so render
+  failures also retry once
+- Append `attemptErrors` to the fallback log line so the user can
+  finally see *why* (`voice not configured` / `connection refused` /
+  the actual HA-side error)
+
+### 3. Cache-warmer slow cycles (3 s → ~1 s)
+
+`server/src/analytics.ts`, with knock-on edits in `cacheWarmer.ts`,
+`index.ts`, `mqttDiscovery.ts`, `telnet/server.ts`.
+
+The smoking gun was that `degradation`, `runway`, and
+`round-trip-efficiency` all reported identical timing within 1 ms of
+each other — that's not three slow operations, that's three operations
+*all waking up on the same event-loop turn* after the first one
+finishes blocking it. `node:sqlite` is **synchronous**: every
+`recorder.query()` is a blocking `stmt.all()`, so `Promise.all`
+doesn't actually parallelize anything. The slow occupant was
+`computeDegradation` issuing 80–100 individual SQLite queries
+(4 DPUs × 5 packs × ~5 metrics per pack).
+
+Two changes:
+
+- **Batch with `queryMulti`**: in `analysePack`, replace 5 separate
+  `recorder.query` calls per pack with 2 `recorder.queryMulti` calls
+  (one for bucketed soh/cycles/temp, one for the lifetime counters).
+  Recorder's queryMulti was added for exactly this — ~6× fewer
+  round-trips.
+- **Yield per pack**: in `computeDegradation`, `await new
+  Promise(r => setImmediate(r))` after each pack so the HTTP handler
+  and the other cache-warmer cohorts aren't starved during the
+  20-pack walk.
+
+Required making `computeDegradation` `async` (it was sync because
+SQLite is sync, but the yield needs an await). That cascaded to
+`await`-ing 9 call sites across `cacheWarmer`, `index`, `mqtt-discovery`,
+and `telnet/server`. The telnet renderer is on a 1 Hz sync timer
+and can't await; added a 5-minute refresh cache for it that mirrors
+the existing forecast cache pattern.
+
+Expected: 3 s → ~1 s for the warmer cycle, and the three "tied"
+metrics will diverge in timing — `runway` and `RTE` will report their
+actual sub-second times instead of mirroring `degradation`.
+
+### 4. Speaker default → 'cast' instead of 'unknown'
+
+`server/src/speakerProfiles.ts`. The user's `media_player.garage`
+fell into the `unknown` bucket with all 5 inference hints null —
+showing up as `unknown×1 (1000ms)` in broadcast group output, even
+though `defaultBufferMs` already treats `unknown` identically to
+`cast` (both 1000 ms).
+
+- Default return from `inferProtocol` changed `unknown` → `cast`.
+  Same timing, cleaner logs, no noisy `unknown×N` groups.
+- The `_logUnknownOnce` diagnostic now also dumps
+  `attrKeys=Object.keys(attrs)` so the *next* un-inferable entity
+  surfaces what HA actually exposes for it (the previous diagnostic
+  only showed the 5 hints we already knew were null).
+
+After this change `_logUnknownOnce` is dead code from the
+`profileTargets` path; kept the function and added a doc-comment
+explaining when it would still fire if a future caller routes a
+known-unknown entity through it.
+
+
+
 ## 0.9.56 — 2026-05-26
 
 **Fix card registration collision when 2+ cards share a Lovelace
