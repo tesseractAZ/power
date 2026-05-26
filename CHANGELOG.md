@@ -3,6 +3,55 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.44 — 2026-05-26
+
+**AppArmor profile.** Add `apparmor.txt` at the repo root. Home
+Assistant Supervisor auto-loads it as the LSM profile for the add-on
+container — expected to bump the HA security rating by +1, and
+provides defense-in-depth: even if a Fastify endpoint is exploited
+(the v0.9.6 write-command framework or v0.9.32 TTS debug surface),
+the attacker is confined to the file/network/capability set the
+profile grants.
+
+### Allowed (everything the add-on actually needs)
+
+- Node 22 + npm + s6-overlay init system + bashio
+- Fastify HTTP + WebSocket + telnet (ports 8787, 2323)
+- SQLite recorder.db + WAL/shm/JSONL under `/data`
+- Outbound HTTPS to api-a.ecoflow.com, Open-Meteo, NWS, Nabu Casa TTS
+- Inbound HTTP from HA Core + LAN (HomePods/Sonos fetching audio)
+- Outbound `http://supervisor/*` for Supervisor + Core APIs (broadcast,
+  TTS proxy, config-flow, add-on management)
+- Standard /dev entries (null, urandom, tty for s6 logging)
+
+### Denied (defense-in-depth)
+
+- `sys_admin`, `sys_module`, `sys_rawio`, `sys_ptrace`, `sys_boot`,
+  `sys_time`, `mac_admin`, `mac_override` capabilities
+- Reading `/etc/shadow`, `/etc/gshadow`, `/root/**`, `/etc/ssh/**`
+- Writing to `/proc/sys/**`, `/sys/**`, `/proc/sysrq-trigger`,
+  `/sys/kernel/**`, `/sys/firmware/**`
+- `mount`, `umount`, `pivot_root`, `remount` — no container escapes
+- `ptrace` — no peeking at other processes
+
+### Why not also sign + downgrade hassio_role?
+
+Considered for this release but skipped:
+- **Image signing (codenotary)** — would require setting up CN_USER /
+  CN_PASSWORD secrets in the GitHub repo + workflow changes. Worth
+  doing but separate work; tracked for a future release.
+- **Downgrade `hassio_role: manager` → `default`** — would lose the
+  `/api/admin/addons` + auto setup-piper / reset-piper endpoints. The
+  blast-radius reduction is real but the convenience loss for
+  diagnosing Piper issues is meaningful right now.
+
+### Validating after install
+
+If the add-on fails to start with this version, the most likely
+cause is an AppArmor denial. Check the host's `/var/log/audit/audit.log`
+for `type=AVC` entries, find the denied operation, and we'll add the
+corresponding rule to `apparmor.txt`.
+
 ## 0.9.43 — 2026-05-26
 
 **Long MA settle + Piper reset endpoint.** v0.9.41 production testing
