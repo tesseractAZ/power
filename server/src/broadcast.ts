@@ -440,19 +440,26 @@ export function startBroadcastMonitor(
 
     // After the klaxon: fire TTS announcement if available + requested.
     //
-    // v0.9.39 — explicit MA-release before TTS. v0.9.38 testing showed
-    // that even with a 7.5-sec wait, TTS via tts.speak STILL returned 500
-    // after MA's klaxon — but Cloud TTS standalone (test-tts endpoint,
-    // ~60 sec post-broadcast) reliably returned 200. Conclusion: MA isn't
-    // releasing the speakers on its own settle timeline; we have to force
-    // a release by calling `media_player.media_stop`. That kicks MA off
-    // the speaker's active session and lets `tts.speak` acquire them.
+    // v0.9.43 — wait long enough for MA's klaxon announce to fully
+    // complete its queue before firing a second play_announcement for
+    // TTS. v0.9.41 testing (RED broadcast) showed:
+    //   - tts-via-MA(tts.speak:tts.home_assistant_cloud): 500
+    // even though standalone Cloud TTS worked. MA was rejecting the
+    // SECOND play_announcement because its first one (klaxon) hadn't
+    // fully completed its queue/restore cycle yet. The 3.5s wait from
+    // v0.9.39-41 wasn't enough.
     //
-    // Klaxon settle reduced back from 7.5s → 3.5s (red) / 1.8s (yellow):
-    // since we now explicitly release after the wait, we don't need extra
-    // padding for MA's "hopeful" cleanup window. Total broadcast cycle
-    // stays roughly the same (~10s for red) but reliability improves.
-    const klaxonSettleMs = level === 'red' ? 3500 : 1800;
+    // Empirical: MA's announce service holds the queue for ~5-7 sec
+    // after the audio finishes (volume restore + speaker re-acquire).
+    // For a 3-sec red klaxon, we need ~8 sec total wait so MA has
+    // released the queue before our second announce hits. For the 1.5-sec
+    // yellow/green klaxons, 5 sec is sufficient.
+    const klaxonSettleMs = level === 'red' ? 8000 : 5000;
+    // v0.9.43 — track the engine actually used (vs configured preferred)
+    // so the success log message reports truth instead of the preferred
+    // engine when fallback kicked in.
+    let actualEngineUsed: TtsEngine | null = null;
+
     if (message && ttsEngine) {
       await sleep(klaxonSettleMs);
 
@@ -480,15 +487,29 @@ export function startBroadcastMonitor(
 
       if (backend === 'music_assistant') {
         // Try each engine via MA-routed path first.
+        // v0.9.43 — retry each engine once on 500 with a 2-sec wait, in
+        // case MA's klaxon-announce queue still hadn't released. Same
+        // pattern as speakWithFallback's per-engine retry but tuned for
+        // MA's slower settle window.
         for (const eng of engineChain) {
           if (!eng.service.startsWith('tts.speak:')) continue;
-          const r = await speakViaMusicAssistant(message, {
+          let r = await speakViaMusicAssistant(message, {
             engine: eng,
             targets: cfg.targets,
             language: cfg.ttsLanguage,
             externalBaseUrl: cfg.haExternalUrl,
             announceVolume: announceVolumePct,
           });
+          if (!r.ok && r.status === 500) {
+            await sleep(2000);
+            r = await speakViaMusicAssistant(message, {
+              engine: eng,
+              targets: cfg.targets,
+              language: cfg.ttsLanguage,
+              externalBaseUrl: cfg.haExternalUrl,
+              announceVolume: announceVolumePct,
+            });
+          }
           if (r.ok) {
             spoken = true;
             usedEngine = eng;
@@ -519,6 +540,7 @@ export function startBroadcastMonitor(
 
       if (spoken) {
         lastSpokenMessage = message;
+        actualEngineUsed = usedEngine;
         if (usedEngine && usedEngine.service !== ttsEngine.service) {
           log(`broadcast: TTS fell back from ${ttsEngine.service} to ${usedEngine.service}`);
         }
@@ -537,7 +559,10 @@ export function startBroadcastMonitor(
     const dt = Date.now() - t0;
     const groupSummary = groups.map((g) => `${g.protocol}×${g.targets.length}`).join('+');
     if (errors.length === 0) {
-      log(`broadcast: ${level} via ${backend} → ok in ${dt}ms (${groupSummary}${ttsEngine && message ? `, +tts ${ttsEngine.service}` : ''})`);
+      // v0.9.43 — report the engine that ACTUALLY spoke, not just the
+      // configured preferred engine (which may have failed and fallen back).
+      const ttsLabel = actualEngineUsed ? actualEngineUsed.service : ttsEngine?.service ?? null;
+      log(`broadcast: ${level} via ${backend} → ok in ${dt}ms (${groupSummary}${ttsLabel && message ? `, +tts ${ttsLabel}` : ''})`);
     } else {
       log(`broadcast: ${level} via ${backend} → ${errors.length} error(s) in ${dt}ms: ${errors.join('; ')}`);
     }

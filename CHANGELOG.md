@@ -3,6 +3,56 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.43 — 2026-05-26
+
+**Long MA settle + Piper reset endpoint.** v0.9.41 production testing
+turned up two more issues:
+
+### Issue 1: MA's second play_announcement (TTS) hits too soon after the first (klaxon)
+
+Field log showed (RED broadcast):
+```
+tts-via-MA(tts.speak:tts.home_assistant_cloud): HA returned 500
+```
+
+Even though standalone Cloud TTS worked when tested 30 sec later.
+
+The 3.5-sec klaxon settle wait wasn't enough. MA holds its announce
+queue for ~5-7 sec after the audio WAV ends (volume restore +
+speaker re-acquire). The TTS `play_announcement` was colliding with
+the still-running klaxon cleanup.
+
+**Fix:** klaxon settle bumped 3.5→**8.0s** for red, 1.8→**5.0s** for
+yellow/green. Also added retry-on-500 in the MA-routed loop (one
+2-sec retry per engine before falling back to the next).
+
+### Issue 2: Piper voice metadata never loaded into HA
+
+Field log + entity inspection showed `tts.piper` exists but has
+empty attributes — no `voice`, no `engine`, no `supported_languages`.
+Eric has a voice configured in the Piper add-on settings, but the
+Wyoming Protocol integration that bridges Piper→HA never picked it
+up. Most likely cause: the integration was added BEFORE the voice
+was configured and cached the empty state.
+
+**New endpoint:** `POST /api/broadcast/reset-piper` — lists Wyoming
+config-entries for the Piper host, deletes them, then re-runs the
+v0.9.33 setup flow. After this, the Wyoming integration re-pulls
+Piper's voice list on fresh connect.
+
+```bash
+curl -X POST http://homeassistant.local:8787/api/broadcast/reset-piper
+# Wait 5 sec
+curl http://homeassistant.local:8787/api/broadcast/tts-debug
+# tts.piper should now have voice + engine attrs
+```
+
+### Bonus: fix misleading log message
+
+The v0.9.41 broadcast success log claimed `+tts tts.speak:tts.piper`
+even when Piper had failed and Cloud spoke via fallback. Now reports
+the ENGINE THAT ACTUALLY SPOKE, not the configured preferred.
+
 ## 0.9.42 — 2026-05-26
 
 **Opus polish: Pack Vitals column order.** In v0.9.40 the Pack Vitals
