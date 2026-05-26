@@ -31,7 +31,7 @@
  * playback on repeat. We pass cache: true on every call.
  */
 
-import { getServiceCatalog, hasService, callHaService, getAllStates, type ServiceCallResult } from './haService.js';
+import { getServiceCatalog, hasService, callHaService, getAllStates, ttsGetUrl, type ServiceCallResult } from './haService.js';
 import type { Alert } from './alerts.js';
 
 /* ─── service detection ──────────────────────────────────────────── */
@@ -522,6 +522,62 @@ export async function speakAnnouncement(message: string, opts: TtsCallOptions): 
   void opts.viaMusicAssistant;  // reserved for future MA-TTS routing
 
   return callHaService(domain, svc, data);
+}
+
+/**
+ * v0.9.40 — Speak via Music Assistant's `play_announcement`.
+ *
+ * The full pipeline:
+ *   1. Render the TTS message to a URL via HA's `/api/tts_get_url`.
+ *   2. Pass that URL to `music_assistant.play_announcement` — same path
+ *      MA uses to play the klaxon, so MA "owns" all audio output and
+ *      there's no contention with the speaker session.
+ *
+ * This is the workaround for the v0.9.39 failure where MA owned the
+ * speakers and `tts.speak` couldn't acquire them after a klaxon.
+ *
+ * The `engine.service` field must be `tts.speak:<entity>` form (modern
+ * path) — we need the entity ID to render via tts_get_url. Legacy
+ * service-only engines (e.g. `tts.cloud_say`) can't go through this
+ * path; the caller should fall back to `speakAnnouncement` for those.
+ *
+ * Returns the underlying ServiceCallResult from `music_assistant.play_announcement`
+ * (the URL render + play step). If render fails, status=0 and error
+ * describes "render failed".
+ */
+export async function speakViaMusicAssistant(
+  message: string,
+  opts: TtsCallOptions & { externalBaseUrl?: string | null; announceVolume?: number | null },
+): Promise<ServiceCallResult & { ttsUrl?: string }> {
+  const { engine, targets, language, externalBaseUrl, announceVolume } = opts;
+  // Only the modern entity-based engines work — we need the entity ID
+  // to render TTS without binding to a media_player.
+  if (!engine.service.startsWith('tts.speak:')) {
+    return {
+      ok: false,
+      status: 0,
+      error: `speakViaMusicAssistant requires tts.speak:<entity> engine; got "${engine.service}"`,
+    };
+  }
+  const ttsEntityId = engine.service.slice('tts.speak:'.length);
+  const rendered = await ttsGetUrl(ttsEntityId, message, language ?? null, externalBaseUrl ?? null);
+  if (!rendered) {
+    return {
+      ok: false,
+      status: 0,
+      error: `tts_get_url returned null for engine ${ttsEntityId}`,
+    };
+  }
+  // Play the rendered URL via MA. use_pre_announce: false because TTS
+  // doesn't need a chime — the message itself is the announcement.
+  const data: Record<string, unknown> = {
+    entity_id: targets,
+    url: rendered.url,
+    use_pre_announce: false,
+  };
+  if (announceVolume != null) data.announce_volume = announceVolume;
+  const playRes = await callHaService('music_assistant', 'play_announcement', data);
+  return { ...playRes, ttsUrl: rendered.url };
 }
 
 /**

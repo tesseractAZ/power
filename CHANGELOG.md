@@ -3,6 +3,64 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.41 — 2026-05-26
+
+**TTS via Music Assistant announce.** v0.9.38-39 failed to make TTS
+work after MA's klaxon because MA-managed speakers stay bound to MA's
+session — `tts.speak` couldn't acquire them no matter how long we
+waited or whether we called `media_player.media_stop` first (MA just
+re-grabs them). Eric chose the right path: keep MA, route the TTS
+through MA's own announcement service.
+
+### The pipeline now
+
+```
+t=0      airplay (HomePods) klaxon via music_assistant.play_announcement
+t=1000   cast group klaxon
+t=1700   sonos klaxon
+t≈4500   klaxon settle complete
+         tts_get_url(tts.piper, message) → /api/tts_proxy/<hash>.mp3
+         → http://homeassistant.local:8123/api/tts_proxy/<hash>.mp3
+t≈5000   music_assistant.play_announcement(url=rendered TTS URL)
+t≈5500   spoken alert audible on all speakers
+```
+
+MA owns all audio output. No contention with speaker session.
+
+### New helpers
+
+- **`haService.ts → ttsGetUrl(engineEntityId, message, language, externalBaseUrl)`** —
+  calls HA's `/api/tts_get_url` endpoint to render TTS to a file URL
+  WITHOUT playing it. Returns the absolute URL the speaker should fetch
+  (relative path prefixed with the configured HA base URL).
+- **`ttsService.ts → speakViaMusicAssistant(message, opts)`** —
+  renders TTS via `ttsGetUrl`, then plays the resulting URL via
+  `music_assistant.play_announcement`. Same path, same volume override,
+  same multi-target sync.
+
+### New config
+
+- **`BROADCAST_HA_EXTERNAL_URL`** — base URL of HA Core for TTS proxy
+  URLs sent to speakers. Default `http://homeassistant.local:8123`.
+  Override if your HA runs on a different host/port.
+
+### Fallback chain unchanged
+
+If the MA-routed path fails (e.g., TTS render returns null), the
+broadcast falls through to the original `speakWithFallback` path
+(direct `tts.speak` / legacy service). Belt-and-suspenders.
+
+### Removed in v0.9.41
+
+- The v0.9.39 `media_player.media_stop` hack is gone — no longer
+  needed since MA stays in the loop the whole time.
+
+### What you'll hear
+
+A red broadcast now plays klaxon (3 sec, all speakers in sync) →
+brief pause → spoken alert in Piper's voice (if Piper has a model
+loaded) or Cloud's voice (if not). All via MA, no failures.
+
 ## 0.9.40 — 2026-05-26
 
 **Project Genesis — the Opus skin.** Wholly new web UI option alongside

@@ -171,6 +171,75 @@ export async function getAllStates(): Promise<Array<{ entity_id: string; state: 
   }
 }
 
+/* ─── v0.9.40 — TTS-render-to-URL helper ──────────────────────────────── */
+
+export interface TtsUrlResult {
+  /** The full URL (including HA base) the speaker should fetch. */
+  url: string;
+  /** The relative path returned by HA (e.g., `/api/tts_proxy/<hash>.mp3`). */
+  path: string;
+}
+
+/**
+ * v0.9.40 — Render TTS to a URL via HA's `/api/tts_get_url` endpoint
+ * WITHOUT playing it. The returned URL can then be passed to
+ * `music_assistant.play_announcement` (or any other audio-playing
+ * service) — this bypasses the `tts.speak` → `media_player` direct
+ * binding that conflicts with MA's speaker ownership.
+ *
+ * Background: Eric's setup has MA-managed speakers. After MA plays
+ * the klaxon, the speakers remain in MA's session. `tts.speak`
+ * subsequently hangs trying to acquire them. By rendering TTS to a
+ * URL and playing via MA's own `play_announcement`, we avoid the
+ * conflict entirely — MA always owns the speakers, MA always plays.
+ *
+ * Returns null if HA doesn't accept the request (engine not found,
+ * not supervised, etc.). The caller should fall back to the direct
+ * `tts.speak` path in that case.
+ */
+export async function ttsGetUrl(
+  engineEntityId: string,
+  message: string,
+  language: string | null = null,
+  externalBaseUrl: string | null = null,
+): Promise<TtsUrlResult | null> {
+  const t = token();
+  if (!t) return null;
+  const body: Record<string, unknown> = {
+    engine_id: engineEntityId,
+    message,
+    cache: true,
+  };
+  if (language) body.language = language;
+  try {
+    const res = await request(`${SUPERVISOR_BASE}/tts_get_url`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${t}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.statusCode !== 200) return null;
+    const bodyText = await res.body.text();
+    const parsed = JSON.parse(bodyText) as { url?: string; path?: string };
+    if (!parsed.url) return null;
+    // Decide the absolute URL the speaker will fetch.
+    //   - `parsed.url` from HA is relative ("/api/tts_proxy/<hash>.mp3")
+    //   - We prefix with the external HA URL so LAN speakers can fetch it.
+    //   - If `externalBaseUrl` is provided, use that. Otherwise fall back to
+    //     the canonical `http://homeassistant.local:8123` (HA's default).
+    const base = (externalBaseUrl ?? 'http://homeassistant.local:8123').replace(/\/$/, '');
+    const relativePath = parsed.url.startsWith('/') ? parsed.url : `/${parsed.url}`;
+    return {
+      url: `${base}${relativePath}`,
+      path: parsed.path ?? relativePath,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /* ─── v0.9.33 — Supervisor add-on API + Core config-flow helpers ───────── */
 
 const SUPERVISOR_ADDONS_BASE = 'http://supervisor';

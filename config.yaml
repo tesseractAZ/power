@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.9.40"
+version: "0.9.41"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -129,6 +129,13 @@ options:
   # per-speaker delay), handles volume override + restore atomically, and
   # bypasses the music queue. Recommended when MA is installed.
   BROADCAST_USE_MUSIC_ASSISTANT: auto
+  # v0.9.40 — Base URL of Home Assistant Core (for TTS proxy URLs sent
+  # to speakers). Leave empty to use the default
+  # `http://homeassistant.local:8123`. Set explicitly if your HA
+  # instance is on a different host or port. The path
+  # `/api/tts_proxy/<hash>.mp3` is appended automatically when we
+  # render TTS and hand the URL to Music Assistant.
+  BROADCAST_HA_EXTERNAL_URL: ""
 schema:
   ECOFLOW_ACCESS_KEY: password
   ECOFLOW_SECRET_KEY: password
@@ -172,3 +179,4 @@ schema:
   BROADCAST_TTS_LANGUAGE: "str?"
   BROADCAST_SONOS_RESTORE: bool
   BROADCAST_USE_MUSIC_ASSISTANT: list(auto|music_assistant|media_player|true|false)
+  BROADCAST_HA_EXTERNAL_URL: "str?"

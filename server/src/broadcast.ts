@@ -64,6 +64,7 @@ import {
   pickBestEngine,
   buildAlertMessage,
   speakWithFallback,
+  speakViaMusicAssistant,
   type TtsEngine,
 } from './ttsService.js';
 
@@ -81,6 +82,9 @@ export interface BroadcastConfig {
   sonosRestore: boolean;
   /** v0.9.23 — which HA service path to use. 'auto' picks MA if installed. */
   backend: BroadcastBackend;
+  /** v0.9.40 — Base URL of HA Core (for TTS proxy URLs sent to speakers).
+   *  Defaults to http://homeassistant.local:8123 when unset. */
+  haExternalUrl: string | null;
 }
 
 export function loadBroadcastConfig(): BroadcastConfig {
@@ -105,6 +109,7 @@ export function loadBroadcastConfig(): BroadcastConfig {
     ttsLanguage: emptyToNull(process.env.BROADCAST_TTS_LANGUAGE),
     sonosRestore: process.env.BROADCAST_SONOS_RESTORE !== 'false',
     backend,
+    haExternalUrl: emptyToNull(process.env.BROADCAST_HA_EXTERNAL_URL),
   };
 }
 
@@ -450,44 +455,75 @@ export function startBroadcastMonitor(
     const klaxonSettleMs = level === 'red' ? 3500 : 1800;
     if (message && ttsEngine) {
       await sleep(klaxonSettleMs);
-      // v0.9.39 — Force-release MA's grip on the speakers before TTS.
-      // MA's play_announcement leaves each speaker bound to MA's queue;
-      // tts.speak then hangs trying to acquire them and eventually 500s.
-      // `media_player.media_stop` kicks the speaker out of MA's session.
-      // We don't bail on errors here — `media_stop` is best-effort and
-      // some speakers (HomePod under AirPlay 2) may not need it.
-      if (backend === 'music_assistant') {
-        const stopRes = await callHaService('media_player', 'media_stop', {
-          entity_id: cfg.targets,
-        });
-        if (!stopRes.ok) {
-          log(`broadcast: media_stop returned ${stopRes.status} (continuing)`);
-        }
-        // Short pause to let the stop propagate before TTS attempts.
-        await sleep(800);
-      }
-      // Build the engine list: preferred first, then the rest of the
-      // detected engines as fallbacks. Skip duplicates.
+
+      // v0.9.40 — MA-routed TTS path. The previous v0.9.39 fix
+      // (`media_stop` before `tts.speak`) didn't work because
+      // MA-managed speakers stay bound to MA's session even after a
+      // media_stop — MA immediately re-acquires them. The fix is to
+      // route the TTS THROUGH MA: render the message to an MP3 URL
+      // via HA's `tts_get_url`, then play that URL via the same
+      // `music_assistant.play_announcement` service we used for the
+      // klaxon. MA owns all audio output, no contention.
+      //
+      // Only the modern `tts.speak:<entity>` engines support URL
+      // rendering. Legacy engines (e.g., `tts.cloud_say`) fall back
+      // to the direct `tts.speak`/legacy path via `speakWithFallback`.
       const engineChain: TtsEngine[] = [ttsEngine];
       for (const e of ttsAvailable) {
         if (!engineChain.find((x) => x.service === e.service)) engineChain.push(e);
       }
-      const tRes = await speakWithFallback(message, engineChain, {
-        targets: cfg.targets,
-        language: cfg.ttsLanguage,
-        viaMusicAssistant: backend === 'music_assistant',
-      });
-      if (!tRes.result.ok) {
-        for (const a of tRes.attempts) {
-          errors.push(`tts(${a.engine.service}): ${a.error}`);
+      const announceVolumePct = Math.round(cfg.volume * 100);
+
+      let spoken = false;
+      let usedEngine: TtsEngine | null = null;
+      const attemptErrors: string[] = [];
+
+      if (backend === 'music_assistant') {
+        // Try each engine via MA-routed path first.
+        for (const eng of engineChain) {
+          if (!eng.service.startsWith('tts.speak:')) continue;
+          const r = await speakViaMusicAssistant(message, {
+            engine: eng,
+            targets: cfg.targets,
+            language: cfg.ttsLanguage,
+            externalBaseUrl: cfg.haExternalUrl,
+            announceVolume: announceVolumePct,
+          });
+          if (r.ok) {
+            spoken = true;
+            usedEngine = eng;
+            if (r.ttsUrl) log(`broadcast: TTS via MA ok (engine=${eng.service}, url=${r.ttsUrl})`);
+            break;
+          }
+          attemptErrors.push(`tts-via-MA(${eng.service}): ${r.error ?? r.status}`);
+        }
+      }
+
+      if (!spoken) {
+        // Fallback: direct tts.speak / legacy service path with retry.
+        // Still useful for legacy engines or when render-to-URL failed.
+        const tRes = await speakWithFallback(message, engineChain, {
+          targets: cfg.targets,
+          language: cfg.ttsLanguage,
+          viaMusicAssistant: backend === 'music_assistant',
+        });
+        if (tRes.result.ok) {
+          spoken = true;
+          usedEngine = tRes.engineUsed;
+        } else {
+          for (const a of tRes.attempts) {
+            attemptErrors.push(`tts(${a.engine.service}): ${a.error}`);
+          }
+        }
+      }
+
+      if (spoken) {
+        lastSpokenMessage = message;
+        if (usedEngine && usedEngine.service !== ttsEngine.service) {
+          log(`broadcast: TTS fell back from ${ttsEngine.service} to ${usedEngine.service}`);
         }
       } else {
-        lastSpokenMessage = message;
-        // If the preferred engine failed but a fallback succeeded, log
-        // it loudly so the user knows their configured engine has issues.
-        if (tRes.engineUsed && tRes.engineUsed.service !== ttsEngine.service) {
-          log(`broadcast: TTS fell back from ${ttsEngine.service} to ${tRes.engineUsed.service} (preferred returned ${tRes.attempts[0].error})`);
-        }
+        errors.push(...attemptErrors);
       }
     }
 
