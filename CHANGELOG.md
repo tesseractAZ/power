@@ -3,6 +3,43 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.39 — 2026-05-26
+
+**MA-release before TTS.** v0.9.38 testing established that even a
+7.5-sec wait between klaxon and TTS wasn't enough — both engines still
+returned 500. But a standalone Cloud test ~60 sec later (with idle
+speakers) reliably returned 200.
+
+Conclusion: MA isn't releasing the speakers on its own timeline; we
+have to force a release. v0.9.39 calls `media_player.media_stop` after
+the klaxon settles, which kicks each speaker out of MA's queue and
+lets `tts.speak` acquire it.
+
+### Pipeline now
+
+```
+t=0 ms      airplay (HomePods) klaxon starts
+t=1000 ms   cast group klaxon starts
+t=1700 ms   sonos klaxon starts
+t≈3500 ms   klaxon WAVs settling
+t≈5000 ms   ← klaxon settle complete (red: +3.5s, was +7.5s in v0.9.38)
+            media_player.media_stop fires on all 6 speakers
+t≈5800 ms   stop propagated (800ms)
+t≈6000 ms   TTS attempt 1 on first engine in chain
+t≈7500 ms   spoken alert audible on all speakers
+```
+
+Klaxon settle reduced back from 7.5s → 3.5s for red (1.8s for yellow/
+green) since we don't need a "hopeful" cleanup window anymore. Net
+broadcast cycle stays ~10 sec for critical alerts.
+
+### Why media_stop is best-effort
+
+We log on failure but don't bail. HomePods under AirPlay 2 may not
+need the release (AirPlay handles ownership differently). Sonos and
+Cast almost always do. The TTS path is robust enough that
+incidental media_stop failures don't break the spoken alert.
+
 ## 0.9.38 — 2026-05-26
 
 **Klaxon → TTS timing fix.** v0.9.37 production testing turned up a

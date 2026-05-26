@@ -434,25 +434,38 @@ export function startBroadcastMonitor(
     }));
 
     // After the klaxon: fire TTS announcement if available + requested.
-    // v0.9.38 — increased settle time from 3500ms → 7500ms for red, 1800ms →
-    // 4500ms for yellow/green. Production testing (v0.9.37) showed that
-    // even when TTS engines worked standalone (verified via test-tts), they
-    // returned 500 when called RIGHT after MA's klaxon announcement. The
-    // root cause: MA's play_announcement holds the speakers in announcement-
-    // mode for several seconds after the audio WAV ends (queue restore +
-    // volume restore + per-protocol cleanup). Hitting tts.speak during this
-    // window collides with MA's cleanup → HA returns 500.
     //
-    // Empirical: 7.5 sec covers the MA settle window for AirPlay/Sonos/Cast
-    // groups in our 6-speaker setup. The user might briefly hear the klaxon
-    // ending before the spoken announcement starts — preferable to losing
-    // the spoken announcement entirely.
+    // v0.9.39 — explicit MA-release before TTS. v0.9.38 testing showed
+    // that even with a 7.5-sec wait, TTS via tts.speak STILL returned 500
+    // after MA's klaxon — but Cloud TTS standalone (test-tts endpoint,
+    // ~60 sec post-broadcast) reliably returned 200. Conclusion: MA isn't
+    // releasing the speakers on its own settle timeline; we have to force
+    // a release by calling `media_player.media_stop`. That kicks MA off
+    // the speaker's active session and lets `tts.speak` acquire them.
     //
-    // v0.9.31 — use speakWithFallback: if the preferred engine 500s, try
-    // the next-best detected engine instead of dropping the announcement.
-    const klaxonSettleMs = level === 'red' ? 7500 : 4500;
+    // Klaxon settle reduced back from 7.5s → 3.5s (red) / 1.8s (yellow):
+    // since we now explicitly release after the wait, we don't need extra
+    // padding for MA's "hopeful" cleanup window. Total broadcast cycle
+    // stays roughly the same (~10s for red) but reliability improves.
+    const klaxonSettleMs = level === 'red' ? 3500 : 1800;
     if (message && ttsEngine) {
       await sleep(klaxonSettleMs);
+      // v0.9.39 — Force-release MA's grip on the speakers before TTS.
+      // MA's play_announcement leaves each speaker bound to MA's queue;
+      // tts.speak then hangs trying to acquire them and eventually 500s.
+      // `media_player.media_stop` kicks the speaker out of MA's session.
+      // We don't bail on errors here — `media_stop` is best-effort and
+      // some speakers (HomePod under AirPlay 2) may not need it.
+      if (backend === 'music_assistant') {
+        const stopRes = await callHaService('media_player', 'media_stop', {
+          entity_id: cfg.targets,
+        });
+        if (!stopRes.ok) {
+          log(`broadcast: media_stop returned ${stopRes.status} (continuing)`);
+        }
+        // Short pause to let the stop propagate before TTS attempts.
+        await sleep(800);
+      }
       // Build the engine list: preferred first, then the rest of the
       // detected engines as fallbacks. Skip duplicates.
       const engineChain: TtsEngine[] = [ttsEngine];
