@@ -27,6 +27,7 @@ import {
   listConfigEntries,
   startConfigFlow,
   submitConfigFlow,
+  deleteConfigEntry,
 } from './haService.js';
 // v0.9.25 — feedback-loop foundation
 import { appendAlertOutcome, tailAlertOutcomes, computeFamilyStats, type AlertOutcome } from './alertOutcomes.js';
@@ -1316,6 +1317,67 @@ app.get('/api/admin/addons', async (_req, reply) => {
  * Defaults to host=`core-piper`, port=10200 — the add-on's standard
  * Wyoming exposure. Override via query params for non-standard setups.
  */
+/**
+ * v0.9.43 — Wipe + re-add the Wyoming Protocol integration.
+ *
+ * v0.9.41 diagnosed the operator's tts.piper entity as empty (no voice metadata
+ * pulled from Piper) — the Wyoming integration was likely added BEFORE
+ * he configured a voice in the Piper add-on, and it cached the empty
+ * state. tts.speak then 500s because HA has no voice to render with.
+ *
+ * This endpoint:
+ *   1. Lists all wyoming config-entries
+ *   2. Deletes any whose data.host matches the Piper add-on hostname
+ *   3. Re-runs the v0.9.33 setup-piper flow to re-add cleanly
+ *
+ * After this, the Wyoming integration will re-pull Piper's voice list
+ * on connect — assuming the operator has saved a voice in Piper add-on config.
+ */
+app.post<{ Querystring: { host?: string; port?: string } }>(
+  '/api/broadcast/reset-piper',
+  async (req, reply) => {
+    const host = req.query.host ?? 'core-piper';
+    const port = Number(req.query.port ?? 10200);
+    const existing = await listConfigEntries('wyoming');
+    if (!existing) {
+      reply.code(503);
+      return { ok: false, error: 'Could not list Wyoming config entries (hassio_api access?)' };
+    }
+    const matching = existing.filter((e) => {
+      const data = e.data as Record<string, unknown> | undefined;
+      return data && data.host === host && (port === 0 || Number(data.port) === port);
+    });
+    const deleted: Array<{ entry_id: string; ok: boolean; error?: string }> = [];
+    for (const entry of matching) {
+      const entryId = String((entry as Record<string, unknown>).entry_id ?? '');
+      if (!entryId) continue;
+      const d = await deleteConfigEntry(entryId);
+      deleted.push({ entry_id: entryId, ok: d.ok, error: d.error });
+    }
+    // Now re-add via the v0.9.33 setup flow.
+    const startRes = await startConfigFlow('wyoming');
+    if (!startRes.ok) {
+      reply.code(502);
+      return { ok: false, deleted, error: `re-add flow failed: ${startRes.error ?? startRes.status}`, body: startRes.body };
+    }
+    const flow = startRes.body as { flow_id?: string; type?: string };
+    if (!flow.flow_id || flow.type === 'create_entry') {
+      return { ok: true, deleted, recreated: flow };
+    }
+    const submitRes = await submitConfigFlow(flow.flow_id, { host, port });
+    if (!submitRes.ok) {
+      reply.code(502);
+      return { ok: false, deleted, error: `submit failed: ${submitRes.error ?? submitRes.status}`, body: submitRes.body };
+    }
+    return {
+      ok: true,
+      deleted,
+      recreated: submitRes.body,
+      message: `Removed ${deleted.length} stale Wyoming entry/entries and re-added for ${host}:${port}. Wait a few sec, then check /api/broadcast/tts-debug — tts.piper should now have voice attrs.`,
+    };
+  },
+);
+
 app.post<{ Querystring: { host?: string; port?: string } }>(
   '/api/broadcast/setup-piper',
   async (req, reply) => {

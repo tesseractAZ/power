@@ -343,6 +343,33 @@ export async function startConfigFlow(handler: string, showAdvanced = false): Pr
  * v0.9.33 — Submit a form step to an in-flight config flow. The flow_id
  * comes from the previous startConfigFlow/submitConfigFlow response.
  */
+/**
+ * v0.9.43 — Delete a Core config-entry by its entry_id. Used by
+ * `/api/broadcast/reset-piper` to wipe out a broken Wyoming Protocol
+ * integration so it can be re-added cleanly (re-pulling voice metadata
+ * from Piper on connect).
+ */
+export async function deleteConfigEntry(entryId: string): Promise<{ ok: boolean; status: number; body?: unknown; error?: string }> {
+  const t = token();
+  if (!t) return { ok: false, status: 0, error: 'SUPERVISOR_TOKEN not set' };
+  try {
+    const res = await request(`${SUPERVISOR_CONFIG_FLOW}/entry/${encodeURIComponent(entryId)}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${t}` },
+    });
+    const bodyText = await res.body.text();
+    let body: unknown = bodyText;
+    try { body = JSON.parse(bodyText); } catch { /* leave raw */ }
+    return {
+      ok: res.statusCode >= 200 && res.statusCode < 300,
+      status: res.statusCode,
+      body,
+    };
+  } catch (e: any) {
+    return { ok: false, status: 0, error: String(e?.message ?? e) };
+  }
+}
+
 export async function submitConfigFlow(flowId: string, formData: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: unknown; error?: string }> {
   const t = token();
   if (!t) return { ok: false, status: 0, body: null, error: 'SUPERVISOR_TOKEN not set' };
