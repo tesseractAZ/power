@@ -3,6 +3,41 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.55 — 2026-05-26
+
+**Serve the Lovelace card bundles directly from the add-on.**
+
+The HACS install path needs an extra HACS install + a custom-repo
+add + a download click per dashboard refresh. v0.9.55 short-circuits
+that for users who don't want HACS just to get the cards: the add-on
+now serves its own `lovelace/dist/` over HTTP at
+`http://<host>:8787/lovelace/<card>.js`, with CORS already wide-open
+(echoed via `@fastify/cors` `origin: true`). Add the URL as a Lovelace
+resource and the card loads.
+
+- **Dockerfile**: new `COPY lovelace/dist ./lovelace/dist` so the
+  prebuilt minified bundles land in the image at `/app/lovelace/dist/`.
+  No extra Node build pass — the bundles are committed to git.
+- **server**: new static route `/lovelace/*` mounted via `@fastify/static`
+  alongside the existing `/audio/` route. Resolves relative to
+  `server/dist/` in local dev (`../../lovelace/dist`); container path
+  is `/app/lovelace/dist`. Override with `LOVELACE_DIST_PATH` env var.
+- **HACS still works**: this is purely additive. The existing HACS
+  install (`/hacsfiles/EcoFlow-Panel-Card/<card>.js`) is unchanged.
+  Pick one URL style per dashboard.
+
+### Lovelace resource URLs after this release
+
+| Card | URL |
+|---|---|
+| Fleet | `http://homeassistant.local:8787/lovelace/ecoflow-fleet-card.js` |
+| Alerts | `http://homeassistant.local:8787/lovelace/ecoflow-alerts-card.js` |
+| Battery | `http://homeassistant.local:8787/lovelace/ecoflow-battery-card.js` |
+| Solar | `http://homeassistant.local:8787/lovelace/ecoflow-solar-card.js` |
+| Strategy | `http://homeassistant.local:8787/lovelace/ecoflow-strategy-card.js` |
+| Insights | `http://homeassistant.local:8787/lovelace/ecoflow-insights-card.js` |
+| Circuit | `http://homeassistant.local:8787/lovelace/ecoflow-circuit-card.js` |
+
 ## 0.9.54 — 2026-05-26
 
 **HACS PR7 + PR8 + PR9: the originally-deferred cards land too.**

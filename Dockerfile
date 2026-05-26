@@ -49,6 +49,11 @@ WORKDIR /app
 COPY server/ ./server/
 COPY --from=serverdeps /build/server/node_modules ./server/node_modules
 COPY --from=webbuilder /build/web/dist ./web/dist
+# v0.9.55 — bundle the prebuilt HACS Lovelace cards so the add-on can
+# serve them at `/lovelace/*` for dashboards that aren't using HACS.
+# These are committed to git in `lovelace/dist/` so this stage doesn't
+# need a Node build pass for the cards.
+COPY lovelace/dist ./lovelace/dist
 
 # s6 service runner — bashio translates HA Options into env vars at start time.
 COPY rootfs/ /
