@@ -3,6 +3,29 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.50 — 2026-05-26
+
+**Lovelace devDep: serialize-javascript override (CVE fix).** The
+v0.9.49 HACS PR1 scaffolding pulled in `@rollup/plugin-terser@0.4.4`
+which transitively depends on the vulnerable `serialize-javascript@6.0.2`.
+Dependabot opened two alerts immediately on the v0.9.49 commit:
+
+- **HIGH (GHSA / RCE)** — `serialize-javascript` is vulnerable to RCE
+  via `RegExp.flags` + `Date.prototype.toISOString()`
+- **MEDIUM (DoS)** — CPU exhaustion via crafted array-like objects
+
+These are build-time-only — `serialize-javascript` doesn't ship in the
+runtime add-on image — but the build server runs untrusted JS via
+`npm install` and `rollup`, so the theoretical exploit path is real.
+
+**Fix:** add an npm `overrides` block in `lovelace/package.json`
+forcing `serialize-javascript` to `^7.0.5` across the dep tree. The
+top-level `@rollup/plugin-terser@0.4.4` doesn't actually need the
+old API; npm's resolver substitutes the newer version cleanly.
+
+Verified `npm install` reports `found 0 vulnerabilities` and
+`npm run build` still produces a working `dist/ecoflow-fleet-card.js`.
+
 ## 0.9.49 — 2026-05-26
 
 **Production-log triage: cascade fix, TTS diagnostics, cache parallelize.**
