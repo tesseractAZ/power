@@ -24,6 +24,14 @@
  * close the loop and actually issue the writes.
  */
 
+/**
+ * Per-hour tariff fallback (¢/kWh) when `tariffOnPeakCentsByHour[h]` is missing
+ * or undefined. Defaults to the operator's APS flat rate of 17 ¢/kWh; override with
+ * `TARIFF_FLAT_CENTS_PER_KWH` to match the env-driven default used by
+ * `index.ts` and the canonical tariff constants in `analytics.ts` (v0.9.58+).
+ */
+const TARIFF_FALLBACK_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
+
 export interface MpcInputs {
   /** Now-SoC, %. */
   currentSocPct: number;
@@ -168,7 +176,7 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
     const hourOfDay = (new Date().getHours() + h) % 24;
     const pv = inputs.pvForecastP50[h] ?? 0;
     const load = inputs.loadForecast[h] ?? 0;
-    const tariffUsdPerKwh = (inputs.tariffOnPeakCentsByHour[hourOfDay] ?? 12) / 100;
+    const tariffUsdPerKwh = (inputs.tariffOnPeakCentsByHour[hourOfDay] ?? TARIFF_FALLBACK_CENTS) / 100;
     for (const [socStart, cell] of fwd) {
       for (const action of actions) {
         const newReserve = Math.max(0, Math.min(50, inputs.reserveFloorPct + action.deltaPct));
@@ -230,7 +238,7 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
     const hourOfDay = (new Date().getHours() + h) % 24;
     const pv = inputs.pvForecastP50[h] ?? 0;
     const load = inputs.loadForecast[h] ?? 0;
-    const tariffUsdPerKwh = (inputs.tariffOnPeakCentsByHour[hourOfDay] ?? 12) / 100;
+    const tariffUsdPerKwh = (inputs.tariffOnPeakCentsByHour[hourOfDay] ?? TARIFF_FALLBACK_CENTS) / 100;
     const sim = simulateHour(
       s.socStart, pv, load, s.reserve, inputs.capacityKwh,
       inputs.gridAvailable, tariffUsdPerKwh,
@@ -263,7 +271,7 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
     const hourOfDay = (new Date().getHours() + h) % 24;
     const pv = inputs.pvForecastP50[h] ?? 0;
     const load = inputs.loadForecast[h] ?? 0;
-    const tariffUsdPerKwh = (inputs.tariffOnPeakCentsByHour[hourOfDay] ?? 12) / 100;
+    const tariffUsdPerKwh = (inputs.tariffOnPeakCentsByHour[hourOfDay] ?? TARIFF_FALLBACK_CENTS) / 100;
     const sim = simulateHour(
       baselineSoc, pv, load, inputs.reserveFloorPct, inputs.capacityKwh,
       inputs.gridAvailable, tariffUsdPerKwh,

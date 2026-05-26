@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { config } from './config.js';
 import type {
@@ -198,8 +198,33 @@ export function predictRisk(
 /* ─── Model loading + caching ────────────────────────────────────────── */
 
 const MODEL_PATH = resolve(process.cwd(), config.dbPath, '..', 'models', 'pack-risk-lr-v1.json');
+/**
+ * v0.9.58 — Online-shadow model path. Mirrors the constant in
+ * `models/onlineLR.ts` (kept in sync by convention — both files write
+ * to/read from the same on-disk artifact). When SGD-updates fire on
+ * /api/alerts/outcome, `onlineLR.updateFromOutcome` writes here.
+ *
+ * Until v0.9.58 the shadow was decorative — only `models/modelHealth.ts`
+ * read it (to compute drift stats for the dashboard). Predictions
+ * continued to use the frozen baseline, so operator outcomes changed the
+ * `/api/models/health` numbers but moved ZERO predictions. We now wire
+ * the shadow into `loadModel` so `computePackRiskV2` actually consumes
+ * the online-updated weights.
+ *
+ * v0.9.59 follow-up: add an auto-downgrade gate that falls back to the
+ * baseline when the shadow has drifted too far (e.g. a string of
+ * "dismiss" verdicts crashes the trained score to ~0). Tracked separately.
+ */
+const SHADOW_PATH = resolve(process.cwd(), config.dbPath, '..', 'models', 'pack-risk-lr-v1-online.json');
 let modelCache: LrModel | null = null;
 let modelCacheLoadedAt = 0;
+/** mtime (ms) of whichever file was used to populate `modelCache`. Lets
+ *  us invalidate the cache the moment the shadow gets written on disk,
+ *  rather than waiting MODEL_CACHE_TTL_MS for the SGD update to land. */
+let modelCacheSourceMtimeMs = 0;
+/** Which file backed the current cache entry — used by the freshness
+ *  check below to know which path to stat. */
+let modelCacheSourcePath: string | null = null;
 const MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /** Built-in default model — used when no trained model file exists yet. */
@@ -224,21 +249,96 @@ const DEFAULT_MODEL: LrModel = {
   notes: 'Built-in baseline; run scripts/train-pack-risk.ts to fit weights to your data.',
 };
 
+/** mtime helper — returns 0 when the file is missing or unreadable. */
+function safeMtimeMs(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Load the LR model used by `computePackRiskV2`.
+ *
+ * v0.9.58 fallback chain (highest → lowest priority):
+ *   1. Online-shadow file at SHADOW_PATH — written by
+ *      `onlineLR.updateFromOutcome` on every operator verdict (ack /
+ *      dismiss / failed). When present, it IS the current model.
+ *   2. Trained baseline at MODEL_PATH — produced by
+ *      `scripts/train-pack-risk.ts`. Frozen until the operator re-runs
+ *      training; the shadow diverges from this via SGD.
+ *   3. Built-in DEFAULT_MODEL — the in-code baseline, used when neither
+ *      file exists (fresh install).
+ *
+ * Cache invalidation: a normal TTL alone is too slow — an operator can
+ * click "dismiss" and refresh the panel inside MODEL_CACHE_TTL_MS, and
+ * they'd expect to see the trained-score budge. We also stat the source
+ * file's mtime and invalidate the cache the instant it moves. (statSync
+ * is fast on local FS — a few microseconds.) Cheaper than reparsing the
+ * JSON on every call.
+ *
+ * NOTE (v0.9.58 known caveat → v0.9.59): there's no drift-gate yet. If a
+ * string of "dismiss" verdicts pulls the shadow weights toward zero, the
+ * trained score will crash and stay there until someone re-runs training
+ * or deletes the shadow file. v0.9.59 will add an auto-downgrade that
+ * detects pathological drift (e.g. shadow.bias swings > 3σ from baseline)
+ * and falls back to the baseline until manual intervention.
+ */
 export function loadModel(): LrModel {
-  if (modelCache && Date.now() - modelCacheLoadedAt < MODEL_CACHE_TTL_MS) return modelCache;
-  if (existsSync(MODEL_PATH)) {
+  // Determine which file SHOULD back the model right now (shadow wins).
+  // Re-check this every call — a fresh shadow may have been written
+  // since the last load.
+  const shadowExists = existsSync(SHADOW_PATH);
+  const baselineExists = existsSync(MODEL_PATH);
+  const sourcePath = shadowExists ? SHADOW_PATH : baselineExists ? MODEL_PATH : null;
+  const sourceMtime = sourcePath ? safeMtimeMs(sourcePath) : 0;
+
+  // Cache hit only when: (a) the cached source still wins the fallback
+  // chain, (b) its file hasn't been rewritten under us, and (c) the TTL
+  // hasn't elapsed.
+  if (
+    modelCache &&
+    modelCacheSourcePath === sourcePath &&
+    modelCacheSourceMtimeMs === sourceMtime &&
+    Date.now() - modelCacheLoadedAt < MODEL_CACHE_TTL_MS
+  ) {
+    return modelCache;
+  }
+
+  // Try the source file (shadow if present, else baseline).
+  if (sourcePath) {
     try {
-      const raw = readFileSync(MODEL_PATH, 'utf8');
+      const raw = readFileSync(sourcePath, 'utf8');
       const m = JSON.parse(raw) as LrModel;
       modelCache = m;
       modelCacheLoadedAt = Date.now();
+      modelCacheSourcePath = sourcePath;
+      modelCacheSourceMtimeMs = sourceMtime;
       return m;
     } catch {
-      // Fall through to default
+      // Parse/IO failure — if we were attempting the shadow, fall back
+      // to baseline; if baseline failed too, fall through to default.
+      if (sourcePath === SHADOW_PATH && baselineExists) {
+        try {
+          const raw = readFileSync(MODEL_PATH, 'utf8');
+          const m = JSON.parse(raw) as LrModel;
+          modelCache = m;
+          modelCacheLoadedAt = Date.now();
+          modelCacheSourcePath = MODEL_PATH;
+          modelCacheSourceMtimeMs = safeMtimeMs(MODEL_PATH);
+          return m;
+        } catch {
+          // fall through to default
+        }
+      }
     }
   }
+
   modelCache = DEFAULT_MODEL;
   modelCacheLoadedAt = Date.now();
+  modelCacheSourcePath = null;
+  modelCacheSourceMtimeMs = 0;
   return DEFAULT_MODEL;
 }
 
@@ -247,6 +347,8 @@ export function saveModel(model: LrModel): void {
   writeFileSync(MODEL_PATH, JSON.stringify(model, null, 2), 'utf8');
   modelCache = null;
   modelCacheLoadedAt = 0;
+  modelCacheSourcePath = null;
+  modelCacheSourceMtimeMs = 0;
 }
 
 /* ─── Training (heuristic-distilled, or labeled when CSV exists) ─────── */

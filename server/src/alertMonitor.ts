@@ -397,9 +397,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         continue;
       }
       existing.alert = a;
+      // v0.9.58 — critical alerts bypass debounce on the notify path. A brief
+      // critical condition that fires and clears in <60s would otherwise be
+      // silently swallowed. Warning/info still debounce to avoid noisy
+      // flapping (a short blip isn't worth interrupting for); a brief critical
+      // is exactly the kind of thing the user wants to know about.
+      const debounceMs = a.severity === 'critical' ? 0 : DEBOUNCE_MS;
       if (
         !existing.notified &&
-        now - existing.firstSeen >= DEBOUNCE_MS &&
+        now - existing.firstSeen >= debounceMs &&
         qualifies(a.severity, cfg.minSeverity)
       ) {
         existing.notified = true;

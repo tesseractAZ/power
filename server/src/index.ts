@@ -1044,9 +1044,15 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
   const recentLoadW = sp.circuits.reduce((s: number, c: any) => s + (c.watts ?? 0), 0);
   const loadKwhPerHour = recentLoadW / 1000;
   const loadForecast = new Array(24).fill(loadKwhPerHour);
-  // Tariff: pull from env or use Phoenix APS Saver-Choice default
-  const onPeak = Number(process.env.TARIFF_ON_PEAK_CENTS_PER_KWH ?? 24.4);
-  const offPeak = Number(process.env.TARIFF_OFF_PEAK_CENTS_PER_KWH ?? 8.2);
+  // Tariff: the operator's APS plan is flat $0.17/kWh (no TOU). Default both peak
+  // and off-peak to TARIFF_FLAT_CENTS_PER_KWH (17 ¢ default), but still
+  // honor the legacy TARIFF_ON_PEAK_CENTS_PER_KWH / TARIFF_OFF_PEAK_CENTS_PER_KWH
+  // overrides so a TOU-plan user can split them back out without code change.
+  // Canonical tariff constants live in analytics.ts; v0.9.58 keeps them in
+  // sync via the shared TARIFF_FLAT_CENTS_PER_KWH env var.
+  const flatCents = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
+  const onPeak = Number(process.env.TARIFF_ON_PEAK_CENTS_PER_KWH ?? flatCents);
+  const offPeak = Number(process.env.TARIFF_OFF_PEAK_CENTS_PER_KWH ?? flatCents);
   const tariffByHour: number[] = Array.from({ length: 24 }, (_, h) =>
     h >= 15 && h < 20 ? onPeak : offPeak);
   const inputs: MpcInputs = {

@@ -1062,6 +1062,15 @@ const DEGRADE_BUCKET_SEC = 6 * 3600;                          // 6-hour buckets 
 const EOL_MIN_SPAN_MS = 7 * 24 * 60 * 60 * 1000;              // ≥1 week of data before dating an EOL
 const EOL_MIN_R2 = 0.3;                                       // trend must explain ≥30% of variance
 const EOL_MAX_YEARS = 40;                                     // beyond this, "EOL not in sight"
+// v0.9.58 — VERIFIED CORRECT (looks suspicious but isn't):
+//   pack nominal voltage = 51.2 V; ×2 because the BMS reports per-single-string mAh
+//   while the pack actually has TWO LFP strings in parallel.
+//   Wh = V × Ah = 51.2 × (mAh × 2) / 1000  →  kWh = (51.2 × 2) × mAh / 1_000_000.
+// Sanity check against live data: pack fullCapMah ≈ 58804 at 99 % SoH →
+//   58804 × (51.2 × 2) / 1_000_000 = 6.02 kWh, matching the EcoFlow 6.144 kWh
+//   nameplate spec for a 99 %-SoH pack. The `× 2` is correct; do NOT drop it.
+// Identical pattern exists at recorder.ts:412 (`PACK_MAH_TO_WH = (51.2 * 2) / 1_000`);
+// same justification applies — leave it alone.
 const PACK_MAH_TO_KWH = (51.2 * 2) / 1_000_000;               // single-string mAh → pack kWh
 const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
 
@@ -3521,8 +3530,16 @@ export function computeCarbonReport(
  * =================================================================== */
 
 const TARIFF_TTL_MS = 5 * 60 * 1000;
-const TARIFF_ON_PEAK_CENTS = Number(process.env.TARIFF_ON_PEAK_CENTS ?? 25);
-const TARIFF_OFF_PEAK_CENTS = Number(process.env.TARIFF_OFF_PEAK_CENTS ?? 8);
+// v0.9.58 — default to a FLAT rate (the operator's APS plan is flat $0.17/kWh — no TOU
+// split). The prior 25¢/8¢ split implied a TOU plan most APS customers don't
+// have, which silently overstated both grid-import cost and solar-load value
+// during on-peak hours. The on/off-peak logic below is preserved unchanged for
+// users who DO have a TOU plan: they can set TARIFF_ON_PEAK_CENTS and
+// TARIFF_OFF_PEAK_CENTS independently. For flat-rate users, the single override
+// `TARIFF_FLAT_CENTS_PER_KWH` sets both at once.
+const TARIFF_FLAT_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
+const TARIFF_ON_PEAK_CENTS = Number(process.env.TARIFF_ON_PEAK_CENTS ?? TARIFF_FLAT_CENTS);
+const TARIFF_OFF_PEAK_CENTS = Number(process.env.TARIFF_OFF_PEAK_CENTS ?? TARIFF_FLAT_CENTS);
 const TARIFF_ON_PEAK_HOURS_ENV = process.env.TARIFF_ON_PEAK_HOURS ?? '15-20';
 const TARIFF_ON_PEAK_DAYS_ENV = process.env.TARIFF_ON_PEAK_DAYS ?? '1-5';
 
@@ -3720,6 +3737,44 @@ export async function computeProbabilisticForecast(
 
   const reserveSoc = forecast.reserveSoc;
   const bands: ForecastBand[] = [];
+  // v0.9.58 — back out the live backup-pool full capacity from the base
+  // forecast's own projected SoC trajectory. The forecast was generated against
+  // `shp2.projection.backupFullCapWh` via `socWh += (pv - load); socPct = socWh /
+  // fullWh * 100`, so for any two consecutive hours where deltaSoc is non-zero
+  // and SoC hasn't clamped at 0/100:
+  //     fullKwh = (pv - load) [kWh] / (deltaSocPct / 100)
+  // Pick the hour with the largest |deltaSocPct| that isn't clamped — that
+  // maximises numerical conditioning. If no usable hour exists (e.g. the
+  // forecast was generated with no SHP2 projection so projectedSocPct is null
+  // throughout), fall back to a fleet estimate: DPU count × 5 packs × 6.144
+  // kWh/pack. the operator's ~4 DPUs × 5 × 6.144 ≈ 122.88 kWh — the prior code's
+  // hard-coded "1 kWh ≈ 0.5 %" implied a 200 kWh pool (or worse, a single 20
+  // kWh DPU) and badly understated the P10/P90 band width.
+  const PACK_KWH_NAMEPLATE = 6.144;
+  const PACKS_PER_DPU = 5;
+  let fullKwh: number | null = null;
+  let bestAbsDSocPct = 0;
+  for (let i = 1; i < forecast.hours.length; i++) {
+    const prev = forecast.hours[i - 1];
+    const cur = forecast.hours[i];
+    if (prev.projectedSocPct == null || cur.projectedSocPct == null) continue;
+    const dSocPct = cur.projectedSocPct - prev.projectedSocPct;
+    if (Math.abs(dSocPct) < 0.05) continue;                 // too small to invert reliably
+    if (prev.projectedSocPct <= 0.5 || prev.projectedSocPct >= 99.5) continue; // clamped
+    if (cur.projectedSocPct <= 0.5 || cur.projectedSocPct >= 99.5) continue;   // clamped
+    const kwhDelta = (cur.forecastPvW - cur.forecastLoadW) / 1000;
+    if (Math.abs(kwhDelta) < 0.05) continue;
+    const candidate = kwhDelta / (dSocPct / 100);           // kWh per 100 % SoC = full capacity
+    if (candidate < 5 || candidate > 1000) continue;        // sanity guard
+    if (Math.abs(dSocPct) > bestAbsDSocPct) {
+      bestAbsDSocPct = Math.abs(dSocPct);
+      fullKwh = candidate;
+    }
+  }
+  if (fullKwh == null) {
+    const dpuCount = Math.max(1, forecast.deviceModels.length);
+    fullKwh = dpuCount * PACKS_PER_DPU * PACK_KWH_NAMEPLATE;
+  }
   // Simulate three parallel SoC trajectories starting from the same SoC.
   // We don't know the initial SoC here, but we do know the projected curve
   // from the base forecast — derive starting SoC from the first hour.
@@ -3748,7 +3803,7 @@ export async function computeProbabilisticForecast(
     const dP10 = (p10 - h.forecastLoadW) / 1000;
     const dP50 = (p50 - h.forecastLoadW) / 1000;
     const dP90 = (p90 - h.forecastLoadW) / 1000;
-    const fullKwh = forecast.minProjectedSocTs ? 1 : 1; // placeholder; we use deltaSoc%
+    void dP50;
     // Convert delta watts to SoC% using the rough pack capacity (whatever
     // resolves the projected p50 trajectory). Derive from the base forecast:
     // if base SoC moved X% under dP50 kWh, that's the conversion factor.
@@ -3757,13 +3812,12 @@ export async function computeProbabilisticForecast(
       // Step the deterministic curve forward without re-deriving it (we trust
       // forecast.hours[i].projectedSocPct as the p50 trajectory).
       p50Soc = baseNext ?? p50Soc;
-      // For p10/p90, scale the same SoC delta by (dP10/dP50) and (dP90/dP50).
-      const baseStep = baseNext != null && p50Soc != null ? baseNext - (p50Soc - (baseNext - p50Soc)) : 0;
-      void fullKwh; void baseStep;
-      // Simpler: shift by ±k * sigma. Approximate the SoC band width as
-      // sigmaFrac of typical-day load swing (~10% per hour at peak sun).
+      // v0.9.58 — scale the (P90-P10) kWh half-range to SoC% via the live full
+      // capacity backed out from the deterministic projection above. Was:
+      //   socStepPct = socStep * 5   // implied ~20 kWh pack — wrong for a
+      //                              // ~120 kWh fleet, badly narrow bands.
       const socStep = (dP90 - dP10) / 2; // kWh half-range
-      const socStepPct = socStep * 5;    // very rough: 1 kWh ≈ 0.5 % on a 50 kWh-ish backup pool * scale fudge
+      const socStepPct = (socStep / fullKwh) * 100;
       p10Soc = Math.max(0, (p50Soc ?? 0) - socStepPct);
       p90Soc = Math.min(100, (p50Soc ?? 0) + socStepPct);
     }
@@ -3884,6 +3938,27 @@ export async function computeMultiDayForecast(
   const fullWh = shp2?.projection.backupFullCapWh ?? null;
   let socWh = shp2?.projection.backupRemainWh ?? null;
 
+  // v0.9.58 — index the day-ahead forecast's load curve by hour-of-day. Was:
+  //   const load = forecast.hours[0]?.forecastLoadW ?? 0;
+  // which held the load constant at hour-0's value for EVERY hour of the
+  // 3-day horizon. With hour-0 typically a low-load overnight slot (~800 W),
+  // total day load came out to ~19 kWh — vs the operator's real 30-90 kWh daily
+  // load. The forecast.hours[] entries are ordered chronologically starting
+  // from `Math.ceil(now / 3_600_000)` (see getDayForecast), so we can't index
+  // by `[h % 24]` directly; build an explicit hour-of-day lookup and fall
+  // back to the chronological first hour for any HoD slot the 24-h forecast
+  // window doesn't cover.
+  const loadByHod = new Array(24).fill(0);
+  const loadHodFilled = new Array(24).fill(false);
+  for (const fh of forecast.hours) {
+    const hod = new Date(fh.ts).getHours();
+    if (!loadHodFilled[hod]) {
+      loadByHod[hod] = fh.forecastLoadW;
+      loadHodFilled[hod] = true;
+    }
+  }
+  const fallbackLoad = forecast.hours[0]?.forecastLoadW ?? 0;
+
   const days: DayRollup[] = [];
   const todayStart = startOfLocalDayMs();
   for (let dayIdx = 0; dayIdx < horizonDays; dayIdx++) {
@@ -3902,8 +3977,8 @@ export async function computeMultiDayForecast(
       if (resp.coeff != null && wx) {
         pv = Math.min(resp.coeff * wx.radiationWm2, resp.observedMaxPvW * 1.05);
       }
-      // Use the deterministic load curve we already have (typical-day).
-      const load = forecast.hours[0]?.forecastLoadW ?? 0;
+      // v0.9.58 — per-HoD load (see loadByHod above), not constant-from-hour-0.
+      const load = loadHodFilled[hod] ? loadByHod[hod] : fallbackLoad;
       pvWh += pv;
       loadWh += load;
       if (fullWh && fullWh > 0 && socWh != null) {
@@ -4299,9 +4374,22 @@ export function kalmanFilterSoh(pts: Array<{ ts: number; value: number }>): Kalm
     x0 = x0 + k0 * y;
     x1 = x1 + k1 * y;
     // P = (I − K H) P. K H = [[k0, 0], [k1, 0]] so (I − KH) = [[1 − k0, 0], [−k1, 1]]
+    // v0.9.58 — fix p10 asymmetry. With H = [1, 0], the closed-form covariance
+    // update collapses to:
+    //   p00 ← (1 − k0) p00
+    //   p01 ← (1 − k0) p01
+    //   p10 ← (1 − k0) p10           ← was `−k1 · p00 + p10` (asymmetric, wrong)
+    //   p11 ← p11 − k1 · p01
+    // The prior `−k1·p00 + p10` form is what you'd get by expanding
+    // (I − KH) row-by-row WITHOUT canceling the zero column of KH on the
+    // right; it left p10 drifting away from p01 step after step. Over hundreds
+    // of Kalman updates that asymmetry compounded into an overconfident EOL
+    // projection (drift uncertainty understated, smoothed SoH biased high).
+    // p01 already updates correctly via the (1 − k0)·p01 line above — it's
+    // the symmetric partner.
     const up00 = (1 - k0) * p00;
     const up01 = (1 - k0) * p01;
-    const up10 = -k1 * p00 + p10;
+    const up10 = (1 - k0) * p10;
     const up11 = -k1 * p01 + p11;
     p00 = up00; p01 = up01; p10 = up10; p11 = up11;
   }

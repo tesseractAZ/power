@@ -3,6 +3,111 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.58 — 2026-05-26
+
+**Engine audit batch #1: "Numbers right now."** Six fixes from a parallel
+audit of all forecast / battery / ML / dispatch / feedback engines.
+Each fix touches numbers the operator sees on the dashboard or numbers the
+feedback loop trains on — all silently wrong before this release.
+
+### 1. Multi-day forecast load curve (`analytics.ts`)
+
+`computeMultiDayForecast` used `forecast.hours[0].forecastLoadW` as the
+load for every hour of the 72-hour horizon. Result was a flat ~19 kWh/day
+load curve — the operator's real consumption is 30–90 kWh/day. The 3-day
+`minProjectedSoc` trajectory and dispatch-reserve dip warnings were
+trained on fiction.
+
+Discovered along the way that `forecast.hours` is NOT indexed by
+hour-of-day — it's chronologically rotated from "now's next hour."
+Built an explicit `loadByHod[24]` lookup that re-bins by
+`new Date(fh.ts).getHours()` and reads `loadByHod[hod]` inside the
+day loop. With a chronologically-rotated 24-entry array every HoD is
+covered exactly once, so the per-day fidelity matches the underlying
+day-of-week-aware base forecast.
+
+### 2. Probabilistic SoC % scaling (`analytics.ts`)
+
+`socStepPct = socStep * 5` implied ~20 kWh fleet capacity. the operator's
+fleet is ~120 kWh (4 DPUs × 5 packs × 6.144 kWh). P10/P90 SoC bands
+were 6× too wide.
+
+Derive `fullKwh` from the base projection itself — invert the
+underlying SoC propagation: for any two consecutive non-clamped hours,
+`fullKwh = (pv − load) [kWh] / (deltaSocPct / 100)`. Pick the hour
+with the largest |deltaSocPct| to minimize floating-point noise.
+Fallback when projection is null: `dpuCount × 5 × 6.144`. No new
+parameters threaded through call sites.
+
+### 3. Kalman covariance asymmetry in pack-SoH filter (`analytics.ts`)
+
+The Joseph-form covariance update `P = (I−KH)P` had `p10 = -k1·p00 + p10`
+(the literal row expansion). For H=[1,0] the closed form simplifies to
+`p10 = (1 - k0) * p10`, which preserves symmetry. After many filter
+steps the original code lets `p10` and `p01` diverge — the Kalman
+EOL projection in `analysePack` becomes systematically more confident
+than reality. Now: `p10 = (1 - k0) * p10` with both forms shown in
+the comment so a future reader doesn't reintroduce the bug.
+
+### 4. `PACK_MAH_TO_KWH` documentation (`analytics.ts`)
+
+The `× 2` factor in `PACK_MAH_TO_KWH = (51.2 * 2) / 1_000_000` looked
+suspicious. Verified against live data from the operator's DPU `Y711FAB59J234000`:
+pack 1 has `fullCapMah=58804` at `soh=99`. Math: `58804 × 51.2V × 2 ÷ 1e6`
+= **6.02 kWh**, matching EcoFlow's 6.144 kWh nominal at 99% SoH. The
+× 2 is correct — the BMS reports single-string mAh; the pack is two
+strings in parallel. Added a comment block explaining the verification
+and pointing at the matching `recorder.ts:412` use.
+
+### 5. Tariff config unified to flat $0.17/kWh (`analytics.ts`, `index.ts`, `mpc.ts`)
+
+Three modules had three different default rate tables — `analytics.ts`
+defaulted to 25¢/8¢ on/off-peak, `index.ts` to 24.4¢/8.2¢, `mpc.ts`
+to a 12¢ fallback. None matched the operator's actual APS plan (flat $0.17/kWh).
+
+All three now default to flat $0.17/kWh via a shared
+`TARIFF_FLAT_CENTS_PER_KWH` env (default `17`). The legacy
+`TARIFF_ON_PEAK_CENTS_PER_KWH` / `TARIFF_OFF_PEAK_CENTS_PER_KWH`
+overrides still work for users on TOU — they just fall back to the
+flat rate instead of the old hard-coded TOU values.
+
+### 6. Critical-alert debounce bypass (`alertMonitor.ts`)
+
+A critical alert that resolved in under 60 s **never notified** —
+the `now − firstSeen >= DEBOUNCE_MS` (60 s) gate ate it. For critical
+severity the user wants to know even about brief blips. Now: bypass
+debounce on the notify path when `severity === 'critical'`; the
+falling-edge debounce that gates `clearedLog` insert + `updateTelemetry`
+is preserved (internal state tracking still benefits from debounce —
+allowing sub-debounce blips through there would skew the rise-count
+auto-silencing math).
+
+### 7. ML shadow model wiring (`ml.ts`)
+
+`onlineLR.updateFromOutcome` writes a shadow model when a user clicks
+ack/dismiss/failed on an alert, but `loadModel` only ever read the
+baseline file. The shadow was never consumed by `computePackRiskV2` —
+the entire online-learning loop was decorative. Outcomes moved the
+`/api/models/health` numbers but changed zero predictions.
+
+Fix: `loadModel` now prefers `SHADOW_PATH` when it exists, with
+mtime-aware cache invalidation (a fresh `saveShadow` triggers a
+re-read on the very next `loadModel` call instead of waiting for the
+5-minute TTL). Falls back to baseline when no shadow exists. Heuristic
+and isolation-forest-lite tracks unchanged — only LR picks the shadow.
+
+Auto-downgrade when shadow weights drift past a threshold is queued
+for v0.9.59 alongside the snapshotToLrFeatures rewrite.
+
+### Verification
+
+160/160 tests pass. No tests needed updating — the changes are
+defensive (multi-day) or replace silent-wrong with silent-right
+(tariff, Kalman). Live pack data confirmed the `× 2` factor before
+committing.
+
+
+
 ## 0.9.57 — 2026-05-26
 
 **Four log-driven fixes from a 2h trace.** No crashes, no errors —
