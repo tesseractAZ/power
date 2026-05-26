@@ -1,16 +1,40 @@
 # EcoFlow Panel — Lovelace cards
 
-This HACS plugin ships **two** Lovelace cards for your **EcoFlow Panel**
-add-on. Pick one or use both:
+This HACS plugin ships Lovelace cards for your **EcoFlow Panel**
+add-on. Pick one or use several:
 
 | Card | When to use |
 |---|---|
 | `custom:ecoflow-panel-card` | Compact stats glance — 12 headline numbers in a single panel |
 | `custom:ecoflow-panel-dashboard` (v0.9.4) | Multi-tab interface — Dashboard / Battery / Forecast / Alerts |
+| `custom:ecoflow-fleet-card` (early dev) | First card in the new Lit-based rewrite — scaffold only |
 
 For the deepest analytics (interactive charts, per-cell voltage,
 strategy config) the PWA at `:8787` remains the full surface — both
 cards have an **Open full dashboard** button.
+
+## Lit-based cards (in development)
+
+A new generation of cards is being built on [Lit](https://lit.dev),
+written in TypeScript, sharing a single WebSocket connection to the
+add-on per host. They live under `src/` and build into `dist/` via
+Rollup. The first card, `custom:ecoflow-fleet-card`, currently renders
+only a placeholder — the snapshot store is stubbed and full data
+plumbing arrives in a follow-up. The legacy
+`custom:ecoflow-panel-card` and `custom:ecoflow-panel-dashboard`
+remain the production cards and are unaffected by the new build.
+
+Building locally:
+
+```bash
+cd lovelace
+npm install
+npm run build       # writes dist/ecoflow-fleet-card.js
+npm run type-check  # tsc --noEmit
+```
+
+Built bundles are committed to `dist/` so HACS can serve them
+directly without a build step on the user's machine.
 
 ## Stats card (`custom:ecoflow-panel-card`)
 

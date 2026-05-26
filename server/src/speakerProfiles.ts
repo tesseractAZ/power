@@ -28,6 +28,35 @@
 
 import { getAllStates } from './haService.js';
 
+/**
+ * v0.9.49 — One-shot "unknown protocol" diagnostic log.
+ *
+ * Log analyst found `airplay×2 (2000ms), unknown×1 (1000ms), cast×2
+ * (1000ms), sonos×1 (300ms)` in a recent broadcast cycle. The
+ * `unknown×1` group still fires (treated as cast for stagger math),
+ * but we have no idea which entity is in it — could be a misnamed
+ * speaker we could tune via `inferProtocol`.
+ *
+ * This Set tracks which entity_ids we've already complained about so
+ * the log isn't repeated every cycle. Module-level, cleared on
+ * process restart.
+ */
+const _loggedUnknownEntities = new Set<string>();
+function _logUnknownOnce(entityId: string, attrs: Record<string, unknown>, logger: (m: string) => void): void {
+  if (_loggedUnknownEntities.has(entityId)) return;
+  _loggedUnknownEntities.add(entityId);
+  // Trim attrs to the ones inferProtocol consults — keeps the log
+  // line short while giving enough info to add a new heuristic.
+  const hint = {
+    platform: attrs.platform ?? null,
+    model: (attrs as Record<string, unknown>).model ?? null,
+    provider: (attrs as Record<string, unknown>).provider ?? null,
+    source: (attrs as Record<string, unknown>).source ?? null,
+    device_class: (attrs as Record<string, unknown>).device_class ?? null,
+  };
+  logger(`speakerProfiles: entity ${entityId} fell into 'unknown' bucket — hint=${JSON.stringify(hint)}`);
+}
+
 /** Speaker protocol families we know how to handle. */
 export type SpeakerProtocol =
   | 'airplay'      // HomePod, Apple TV, AirPort Express → 2 sec buffer
@@ -110,7 +139,10 @@ export function defaultBufferMs(protocol: SpeakerProtocol): number {
  * inferred from the entity_id alone — accurate enough for our naming
  * conventions but missing the model/platform hints.
  */
-export async function profileTargets(targets: string[]): Promise<SpeakerProfile[]> {
+export async function profileTargets(
+  targets: string[],
+  logger: (m: string) => void = () => {},
+): Promise<SpeakerProfile[]> {
   const all = await getAllStates();
   const lookup = new Map<string, Record<string, unknown>>();
   if (all) {
@@ -119,6 +151,13 @@ export async function profileTargets(targets: string[]): Promise<SpeakerProfile[
   return targets.map((entity_id) => {
     const attrs = lookup.get(entity_id) ?? {};
     const protocol = inferProtocol(entity_id, attrs);
+    // v0.9.49 — One-shot diagnostic when a speaker doesn't match any
+    // known protocol pattern. Helps operators tune inferProtocol over
+    // time; surfaced the `family_room_soundbar_2` misclassification in
+    // v0.9.31 (fixed by adding a soundbar pattern). Stagger math still
+    // works (treats unknown as ~1000 ms buffer) so the broadcast itself
+    // is unaffected — this is purely informational.
+    if (protocol === 'unknown') _logUnknownOnce(entity_id, attrs, logger);
     const friendly = String(attrs.friendly_name ?? entity_id.replace(/^media_player\./, ''));
     return {
       entity_id,

@@ -178,6 +178,8 @@ export interface TtsUrlResult {
   url: string;
   /** The relative path returned by HA (e.g., `/api/tts_proxy/<hash>.mp3`). */
   path: string;
+  /** When the call failed, a human-readable diagnostic (HTTP status + body.message). */
+  error?: string;
 }
 
 /**
@@ -193,18 +195,22 @@ export interface TtsUrlResult {
  * URL and playing via MA's own `play_announcement`, we avoid the
  * conflict entirely — MA always owns the speakers, MA always plays.
  *
- * Returns null if HA doesn't accept the request (engine not found,
- * not supervised, etc.). The caller should fall back to the direct
- * `tts.speak` path in that case.
+ * v0.9.49 — Returns `{ error }` instead of `null` on failure so the
+ * caller can distinguish "no SUPERVISOR_TOKEN" vs "engine_id not
+ * found" vs "HA returned 500". Log analyst found every Piper render
+ * silently returned null with no clue why; users had no diagnostic
+ * path. Now the orchestrator surfaces the upstream error verbatim.
  */
 export async function ttsGetUrl(
   engineEntityId: string,
   message: string,
   language: string | null = null,
   externalBaseUrl: string | null = null,
-): Promise<TtsUrlResult | null> {
+): Promise<TtsUrlResult> {
   const t = token();
-  if (!t) return null;
+  if (!t) {
+    return { url: '', path: '', error: 'SUPERVISOR_TOKEN not set (not supervised)' };
+  }
   const body: Record<string, unknown> = {
     engine_id: engineEntityId,
     message,
@@ -220,10 +226,28 @@ export async function ttsGetUrl(
       },
       body: JSON.stringify(body),
     });
-    if (res.statusCode !== 200) return null;
     const bodyText = await res.body.text();
+    if (res.statusCode !== 200) {
+      // v0.9.49 — Surface HA's actual error. Same pattern as v0.9.21
+      // callHaService — body is typically {"message":"..."}; if not
+      // JSON, include first 200 chars of raw response.
+      let detail = '';
+      try {
+        const parsed = JSON.parse(bodyText) as { message?: string };
+        if (parsed.message) detail = `: ${parsed.message}`;
+      } catch {
+        if (bodyText) detail = `: ${bodyText.slice(0, 200)}`;
+      }
+      return {
+        url: '',
+        path: '',
+        error: `tts_get_url returned ${res.statusCode}${detail} (engine_id=${engineEntityId})`,
+      };
+    }
     const parsed = JSON.parse(bodyText) as { url?: string; path?: string };
-    if (!parsed.url) return null;
+    if (!parsed.url) {
+      return { url: '', path: '', error: `tts_get_url 200 but no url in response body (engine_id=${engineEntityId})` };
+    }
     // Decide the absolute URL the speaker will fetch.
     //   - `parsed.url` from HA is relative ("/api/tts_proxy/<hash>.mp3")
     //   - We prefix with the external HA URL so LAN speakers can fetch it.
@@ -235,8 +259,8 @@ export async function ttsGetUrl(
       url: `${base}${relativePath}`,
       path: parsed.path ?? relativePath,
     };
-  } catch {
-    return null;
+  } catch (e: any) {
+    return { url: '', path: '', error: `tts_get_url threw: ${String(e?.message ?? e)}` };
   }
 }
 

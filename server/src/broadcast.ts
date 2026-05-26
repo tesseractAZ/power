@@ -276,7 +276,10 @@ export function startBroadcastMonitor(
     }
     const stale = Date.now() - cachedProfilesAt > PROFILE_CACHE_MS;
     if (!force && !stale && cachedProfiles.length === cfg.targets.length) return;
-    cachedProfiles = await profileTargets(cfg.targets);
+    // v0.9.49 — pass the broadcast logger through so profileTargets can
+    // emit a one-shot diagnostic for any speaker that falls into the
+    // 'unknown' bucket. Helps tune inferProtocol heuristics over time.
+    cachedProfiles = await profileTargets(cfg.targets, log);
     cachedProfilesAt = Date.now();
     speakerGroups = groupByProtocol(cachedProfiles);
     if (speakerGroups.length > 0) {
@@ -580,7 +583,29 @@ export function startBroadcastMonitor(
     return buildAlertMessage(level, alerts);
   };
 
-  /* ── tick ─── periodic check for condition transitions */
+  /* ── tick ─── periodic check for condition transitions
+   *
+   * v0.9.49 — in-flight guard. The pre-v0.9.49 tick had two bugs that
+   * compounded into a self-DDoS:
+   *
+   *   1. No in-flight check. tick() ran every 10s but the average
+   *      broadcast takes 20-50s (klaxon + 8s settle + TTS + restore).
+   *      A new condition transition arriving during an in-flight call
+   *      queued a second `runBroadcast` in parallel.
+   *
+   *   2. prevLevel/prevCrit updated AFTER `await runBroadcast`. So if
+   *      6 alerts fired 10s apart, every tick from #1 onward still saw
+   *      `newCrit > prevCrit` and queued another broadcast. The log
+   *      analyst found 6 condition transitions → 6 cascading
+   *      runBroadcasts that took 191s → 364s each (MA queue
+   *      contention compounded), 7-minute total cascade where no
+   *      broadcast actually reached the speakers.
+   *
+   * Fix: bail immediately when a broadcast is in-flight, AND update
+   * the prev-state BEFORE awaiting. The second arrival now becomes a
+   * no-op (we've already noted the transition).
+   */
+  let tickInFlight = false;
   const tick = async () => {
     if (stopped) return;
     cfg = loadBroadcastConfig(); // re-read each tick so config changes apply without restart
@@ -597,24 +622,41 @@ export function startBroadcastMonitor(
     if (!transitioned && !newCrit) {
       return;
     }
+    // v0.9.49 — Snapshot the transition state FIRST, so a second
+    // arrival during an in-flight broadcast doesn't re-fire. The whole
+    // point of "transition" detection is "since the last time we noted
+    // it" — once we've noted it, that's the new baseline regardless of
+    // whether the actual broadcast succeeds.
+    prevLevel = level;
+    prevCrit = crit;
     // Severity gate.
-    if (!cfg.enabled) { prevLevel = level; prevCrit = crit; return; }
-    if (level === 'yellow' && cfg.minSeverity === 'critical') { prevLevel = level; prevCrit = crit; return; }
+    if (!cfg.enabled) return;
+    if (level === 'yellow' && cfg.minSeverity === 'critical') return;
     // Quiet-hours gate — critical always fires.
     if (level !== 'red' && inQuiet()) {
       log(`broadcast: ${level} suppressed by quiet hours`);
-      prevLevel = level; prevCrit = crit; return;
+      return;
     }
-    log(`broadcast: condition ${prevLevel} → ${level}${newCrit ? ' (new crit)' : ''}, ${cfg.targets.length} target(s)`);
-    const message = messageFor(level, alerts);
-    const result = await runBroadcast(level, message);
-    lastBroadcastAt = Date.now();
-    lastLevel = level;
-    lastOutcome = result.ok ? 'success' : 'partial';
-    lastErrors = result.errors;
-    lastBackend = result.backend;
-    prevLevel = level;
-    prevCrit = crit;
+    // v0.9.49 — in-flight guard. Skip if a broadcast is still running;
+    // we've already updated prevLevel/prevCrit so the next tick won't
+    // re-fire for this transition either.
+    if (tickInFlight) {
+      log(`broadcast: ${level} skipped — previous broadcast still in flight`);
+      return;
+    }
+    tickInFlight = true;
+    try {
+      log(`broadcast: condition transition → ${level}${newCrit ? ' (new crit)' : ''}, ${cfg.targets.length} target(s)`);
+      const message = messageFor(level, alerts);
+      const result = await runBroadcast(level, message);
+      lastBroadcastAt = Date.now();
+      lastLevel = level;
+      lastOutcome = result.ok ? 'success' : 'partial';
+      lastErrors = result.errors;
+      lastBackend = result.backend;
+    } finally {
+      tickInFlight = false;
+    }
   };
 
   const tickInterval = setInterval(() => { tick().catch((e) => log(`broadcast: tick failed: ${e?.message ?? e}`)); }, 10_000);

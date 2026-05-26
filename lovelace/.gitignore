@@ -1,0 +1,6 @@
+node_modules/
+# dist/ files are checked in for HACS distribution.
+# Legacy hand-written files dist/ecoflow-panel-card.js and
+# dist/ecoflow-panel-dashboard.js MUST stay committed and untouched
+# by the rollup build (the build only writes ecoflow-fleet-card.js
+# and other Lit cards added later).

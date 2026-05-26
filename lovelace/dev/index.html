@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>EcoFlow Card Dev Harness</title>
+    <style>
+      body {
+        font: 14px sans-serif;
+        background: #f5f5f5;
+        padding: 20px;
+        max-width: 600px;
+        margin: 0 auto;
+      }
+      /* Shim ha-card outside Home Assistant so the dev harness renders something visible. */
+      ha-card {
+        display: block;
+        background: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>EcoFlow Card Dev</h1>
+    <p>Loads dist/ecoflow-fleet-card.js for local testing.</p>
+    <ecoflow-fleet-card></ecoflow-fleet-card>
+    <script type="module" src="../dist/ecoflow-fleet-card.js"></script>
+    <script>
+      // The bundle is IIFE — register the custom element synchronously on load.
+      // Assign config after the element is upgraded.
+      window.addEventListener('load', () => {
+        const el = document.querySelector('ecoflow-fleet-card');
+        if (el && typeof el.setConfig === 'function') {
+          el.setConfig({
+            type: 'custom:ecoflow-fleet-card',
+            host: 'http://homeassistant.local:8787',
+            title: 'EcoFlow Fleet',
+          });
+        } else {
+          // Custom element not upgraded yet — wait for it.
+          customElements.whenDefined('ecoflow-fleet-card').then(() => {
+            const e = document.querySelector('ecoflow-fleet-card');
+            e.setConfig({
+              type: 'custom:ecoflow-fleet-card',
+              host: 'http://homeassistant.local:8787',
+              title: 'EcoFlow Fleet',
+            });
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

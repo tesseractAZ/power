@@ -101,38 +101,56 @@ export function startCacheWarmer(
       // actually do the work instead of returning still-warm values
       // without restamping `ts`. See the file-level note for the bug.
       resetHaStateShortLivedCaches();
-      // Two-pass strategy: forecast/degradation/RTE/clipping first because
-      // several downstream functions consume them; then everything else.
+      // v0.9.49 — Parallelized: the previous serial sequence was 21
+      // `await safe(...)` calls in a chain. Log analyst measured slow
+      // cycles dominated by 3 offenders (self-consumption ~1100ms,
+      // round-trip-efficiency ~1100ms, charge-curve ~500ms) running
+      // back-to-back. None of them have data-flow dependencies on each
+      // other beyond `fc` / `skill` / `devices` / `recorder`, all of
+      // which are computed before the parallel block. Promise.all
+      // collapses the ~3-4s cycle to ~1.2s (limited by the slowest
+      // individual function).
+      //
+      // Three sequential checkpoints remain because they DO have data
+      // dependencies:
+      //   - fc                  (input to runway + clipping + multi-day + skill + probabilistic)
+      //   - skill               (depends on fc; input to probabilistic-forecast)
+      //   - repair-issues       (consumes degradation + soiling + equipment-health + skill)
       const fc = await getDayForecast(devices, recorder, () => {});
-      await safe('degradation', () => computeDegradation(devices, recorder));
-      await safe('runway', () => computeRunway(devices, recorder, fc));
-      await safe('round-trip-efficiency', () => computeRoundTripEfficiency(devices, recorder));
-      await safe('clipping', () => computeClipping(devices, recorder, fc));
-      await safe('self-consumption', () => computeSelfConsumption(devices, recorder));
-      await safe('carbon', () => computeCarbonReport(devices, recorder));
-      await safe('tariff', () => computeTariffReport(devices, recorder));
-      await safe('multi-day', () => computeMultiDayForecast(devices, recorder, fc));
-      await safe('bayesian-solar', () => computeBayesianSolarModel(devices, recorder));
-      // forecast-skill is async + depends on getDayForecast result
       const skill = await computeForecastSkill(devices, recorder, fc);
-      await safe('probabilistic-forecast', () => computeProbabilisticForecast(fc, skill));
-      await safe('ambient-thermal', () => computeAmbientThermalForecast(devices, recorder));
-      // v0.9.14 — extended coverage: every "predictive insights"-tab endpoint
-      // benefits from being pre-warm so its first fetch from a fresh page-load
-      // hits <5 ms instead of recomputing. None of these are slow on their
-      // own, but pre-warming amortizes them across all viewers.
-      await safe('thermal-events', () => computeThermalEvents(devices, recorder));
-      await safe('equipment-health', () => computeEquipmentHealth(devices, recorder));
-      await safe('shade-report', () => computeShadeReport(devices, recorder));
-      await safe('soiling-decomposition', () => computeSoilingDecomposition(devices, recorder));
-      await safe('string-mismatch', () => computeStringMismatch(devices, recorder));
-      await safe('ev-window-prediction', () => computeEvWindowPrediction(devices, recorder));
-      await safe('charge-curve', () => computeChargeCurveFingerprint(devices, recorder));
-      await safe('internal-resistance', () => computeInternalResistance(devices, recorder));
-      // computeRepairIssues takes a pre-assembled context: it merges already-
-      // warmed signals (degradation, soiling, equipment-health, forecast-skill)
-      // into a unified "things to fix" list. Re-using the warmed caches here
-      // keeps the build cheap.
+
+      // First parallel cohort: every function that only needs
+      // (devices, recorder) and optionally (fc, skill). All independent.
+      await Promise.all([
+        safe('degradation', () => computeDegradation(devices, recorder)),
+        safe('runway', () => computeRunway(devices, recorder, fc)),
+        safe('round-trip-efficiency', () => computeRoundTripEfficiency(devices, recorder)),
+        safe('clipping', () => computeClipping(devices, recorder, fc)),
+        safe('self-consumption', () => computeSelfConsumption(devices, recorder)),
+        safe('carbon', () => computeCarbonReport(devices, recorder)),
+        safe('tariff', () => computeTariffReport(devices, recorder)),
+        safe('multi-day', () => computeMultiDayForecast(devices, recorder, fc)),
+        safe('bayesian-solar', () => computeBayesianSolarModel(devices, recorder)),
+        safe('probabilistic-forecast', () => computeProbabilisticForecast(fc, skill)),
+        safe('ambient-thermal', () => computeAmbientThermalForecast(devices, recorder)),
+        // v0.9.14 — extended coverage: every "predictive insights"-tab endpoint
+        // benefits from being pre-warm so its first fetch from a fresh page-load
+        // hits <5 ms instead of recomputing.
+        safe('thermal-events', () => computeThermalEvents(devices, recorder)),
+        safe('equipment-health', () => computeEquipmentHealth(devices, recorder)),
+        safe('shade-report', () => computeShadeReport(devices, recorder)),
+        safe('soiling-decomposition', () => computeSoilingDecomposition(devices, recorder)),
+        safe('string-mismatch', () => computeStringMismatch(devices, recorder)),
+        safe('ev-window-prediction', () => computeEvWindowPrediction(devices, recorder)),
+        safe('charge-curve', () => computeChargeCurveFingerprint(devices, recorder)),
+        safe('internal-resistance', () => computeInternalResistance(devices, recorder)),
+        safe('summary-today', () => computeTotals(store, recorder, startOfLocalDayMs(), Date.now())),
+      ]);
+
+      // repair-issues runs AFTER the parallel cohort because it
+      // re-derives degradation / soiling / equipment-health internally;
+      // running it concurrently would race the shared caches. Keep it
+      // last so it pulls already-warm values.
       await safe('repair-issues', async () => {
         const snap = store.get();
         return computeRepairIssues({
@@ -144,7 +162,6 @@ export function startCacheWarmer(
           forecastSkill: skill,
         });
       });
-      await safe('summary-today', () => computeTotals(store, recorder, startOfLocalDayMs(), Date.now()));
       const totalMs = Date.now() - t0;
       // Log only when cycle is unusually slow (>3s) — otherwise this would
       // flood the log every 4 min with healthy timings. With v0.9.14's
@@ -158,8 +175,27 @@ export function startCacheWarmer(
     }
   };
 
-  // Kick off first cycle ~10s after boot so the snapshot has populated.
-  setTimeout(() => warmNow(), 10_000).unref();
+  // v0.9.49 — Kick off first cycle as soon as the snapshot has any
+  // devices populated, rather than the fixed 10s wait. Log analyst
+  // measured cold-start `/api/ha-state` at 6.6-7.0s on first hit after
+  // every restart, because the cache-warmer's 10s grace period meant
+  // the first /api/ha-state call had nothing pre-computed and had to
+  // build from scratch. Polling every 250ms with a 30s ceiling
+  // captures the common case (snapshot lands within 1-2s of MQTT
+  // connect) while still guarding against a stuck/empty snapshot.
+  const FIRST_WARM_POLL_MS = 250;
+  const FIRST_WARM_DEADLINE_MS = 30_000;
+  const firstWarmStartedAt = Date.now();
+  const firstWarmTimer = setInterval(() => {
+    if (stopped) { clearInterval(firstWarmTimer); return; }
+    const hasDevices = Object.keys(store.get().devices).length > 0;
+    const expired = Date.now() - firstWarmStartedAt > FIRST_WARM_DEADLINE_MS;
+    if (hasDevices || expired) {
+      clearInterval(firstWarmTimer);
+      void warmNow();
+    }
+  }, FIRST_WARM_POLL_MS);
+  (firstWarmTimer as any).unref?.();
   const timer = setInterval(() => warmNow(), WARM_INTERVAL_MS);
   timer.unref();
 

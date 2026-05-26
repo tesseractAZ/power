@@ -561,11 +561,15 @@ export async function speakViaMusicAssistant(
   }
   const ttsEntityId = engine.service.slice('tts.speak:'.length);
   const rendered = await ttsGetUrl(ttsEntityId, message, language ?? null, externalBaseUrl ?? null);
-  if (!rendered) {
+  // v0.9.49 — propagate the real diagnostic from haService instead of
+  // collapsing to "returned null". Distinguishes "Piper unconfigured"
+  // (HA 500 with "no voice") vs "engine_id not found" (HA 400) vs
+  // "not supervised" (no token) — all of which used to look identical.
+  if (rendered.error || !rendered.url) {
     return {
       ok: false,
       status: 0,
-      error: `tts_get_url returned null for engine ${ttsEntityId}`,
+      error: rendered.error || `tts_get_url returned empty url for engine ${ttsEntityId}`,
     };
   }
   // Play the rendered URL via MA. use_pre_announce: false because TTS

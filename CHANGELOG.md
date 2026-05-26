@@ -3,6 +3,130 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.49 — 2026-05-26
+
+**Production-log triage: cascade fix, TTS diagnostics, cache parallelize.**
+Full log analysis of `2026-05-26T03-42-49.276Z.log` (10K lines, 110 min,
+6 restarts) surfaced one HIGH-severity bug and three LOW-severity
+improvements. Plus a parallel-track HACS Lit-port PR1 (scaffolding).
+
+### HIGH: Broadcast cascade self-DDoS (`broadcast.ts`)
+
+Six condition transitions arriving 10 sec apart at 19:47:13-19:48:03
+queued **six parallel `runBroadcast` calls** that each took **191-364
+seconds**. Total cascade: ~7 minutes during which no broadcast reached
+the speakers. Music Assistant's queue contention compounded each
+subsequent call.
+
+Two bugs:
+1. `tick()` had no in-flight guard. A 30+ sec broadcast was running
+   when the next 10-sec tick fired and queued a second one.
+2. `prevLevel`/`prevCrit` updated AFTER `await runBroadcast(...)`. So
+   every tick during the in-flight period still saw `newCrit > prevCrit`
+   and queued ANOTHER broadcast. Self-feedback loop.
+
+**Fix:** snapshot the transition state FIRST (before the await), and
+add a `tickInFlight` boolean guard that bails immediately when a
+broadcast is still running. The "we've already noted this transition"
+semantic is preserved even when the actual broadcast fails — exactly
+what transition-detection means.
+
+### HIGH: `ttsGetUrl` swallowed all errors as `null` (`haService.ts`)
+
+Every Piper TTS attempt produced `tts-via-MA(tts.speak:tts.piper):
+tts_get_url returned null for engine tts.piper` with **zero
+diagnostic info** — users couldn't tell if Wyoming was down, the voice
+model was missing, HA returned 500, or it timed out. The v0.9.43
+reset-piper endpoint was added to handle the most common case but
+nobody knew when to invoke it.
+
+**Fix:** `ttsGetUrl` now returns `TtsUrlResult` with optional `error`
+field. The orchestrator propagates the upstream `res.statusCode` +
+`body.message` verbatim. Same defensive parsing as `callHaService`
+(v0.9.21) — JSON body if present, else first 200 chars of raw
+response. Errors are distinguishable:
+
+```
+tts_get_url returned 500: Voice not found (engine_id=tts.piper)
+tts_get_url returned 400: Unknown engine_id (engine_id=tts.foo)
+tts_get_url threw: ECONNREFUSED
+```
+
+### LOW: Cache-warmer serial bottleneck (`cacheWarmer.ts`)
+
+21 `await safe(...)` calls in a chain. Log analyst measured 3-4 sec
+cycles dominated by 3 offenders running back-to-back
+(`self-consumption ~1100ms`, `round-trip-efficiency ~1100ms`,
+`charge-curve ~500ms`). None had data dependencies on each other —
+they all consumed `fc` / `skill` / `devices` / `recorder`, computed
+before the parallel block.
+
+**Fix:** `Promise.all` 20 of 21 functions. Sequential checkpoints
+remain only for the two with real dependencies: `getDayForecast` →
+`forecast-skill` (skill needs fc), and `repair-issues` (consumes
+already-warmed degradation/soiling/equipment-health/skill). Expected
+cycle time drops 3-4s → ~1.2s (gated by slowest individual function).
+
+### LOW: Cold-start `/api/ha-state` 6.6-7.0s (`cacheWarmer.ts`)
+
+First `/api/ha-state` after every restart took 6.6-7.0 sec because the
+cache-warmer waited a fixed 10s after boot before its first cycle —
+and the user's first dashboard load typically lands inside that window.
+
+**Fix:** poll the snapshot store every 250 ms until `devices` is
+non-empty (typically 1-2 sec after MQTT connect), then fire `warmNow()`
+immediately. 30-sec ceiling guards against a stuck/empty snapshot.
+
+### LOW: "Unknown protocol" speaker diagnostic (`speakerProfiles.ts`)
+
+Log showed `airplay×2, unknown×1, cast×2, sonos×1` — one speaker fell
+outside the inferred protocols. Stagger math still works (treats
+`unknown` as ~1000 ms buffer) but nobody could tell WHICH speaker
+needed a heuristic added.
+
+**Fix:** one-shot log when a speaker hits the `unknown` branch:
+
+```
+speakerProfiles: entity media_player.foo fell into 'unknown' bucket
+  — hint={"platform":null,"model":null,"provider":null,"source":"AirPlay",...}
+```
+
+Module-level Set deduplicates so the same entity only complains once
+per process lifetime.
+
+### Parallel track: HACS Lit-port PR1 — scaffolding
+
+User wants a multi-week Lit rewrite of the React PWA, distributed as
+HACS cards. PR1 lays the foundation under `lovelace/`:
+
+- `package.json` + `tsconfig.json` + `rollup.config.mjs` (Lit 3 +
+  Rollup 4 + per-card IIFE bundles, terser in production)
+- `src/shared/` — `api.ts`, `types.ts` (copied verbatim from
+  `web/src/types.ts`), `format.ts`, `snapshot-store.ts` (PR1 stub —
+  real WS lands in PR2), `theme.css.ts` (maps `--ef-*` tokens to HA's
+  `--primary-color` etc.), `base-card.ts` (`EcoflowCardBase`
+  LitElement with `setConfig` + store subscribe lifecycle)
+- `src/cards/fleet-card.ts` — `<ecoflow-fleet-card>` hello-world
+  registered in `window.customCards`
+- `dev/index.html` — local browser harness
+
+Legacy `lovelace/dist/ecoflow-panel-card.js` and
+`ecoflow-panel-dashboard.js` (vanilla HTMLElement, 2024) preserved
+unchanged for backward compatibility. New `dist/ecoflow-fleet-card.js`
+ships alongside.
+
+**Tests:** 160 server tests pass (no change from v0.9.48).
+
+### What's next
+
+- PR2 (shared infra): full WS reconnect, primitives, glossary directive
+- PR3 (fleet card): EnergyFlow / Runway / Forecast / Today / DPU /
+  SHP2 tiles — covers ~70% of daily-glance value
+- PR4 (alerts card), PR5 (battery card), PR6 (solar card + cleanup)
+
+Tracked as tasks #195-#199. Estimated 100-150 engineer-hours total
+across the 5 remaining PRs.
+
 ## 0.9.48 — 2026-05-26
 
 **Back out CodeNotary signing (vcn project is dead).** v0.9.47 tried
