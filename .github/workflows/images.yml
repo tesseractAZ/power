@@ -148,8 +148,12 @@ jobs:
             BUILD_REF=${{ github.sha }}
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_VERSION=${{ needs.resolve.outputs.version }}
+          # v0.9.37 — ignore-error=true so a flaky GHA cache backend doesn't
+          # fail the build. Observed 2026-05-26 00:25-00:40 UTC: every push
+          # failed with "error writing layer blob: failed to reserve cache"
+          # blocking 3 consecutive releases (v0.9.35, v0.9.36, ...).
           cache-from: type=gha,scope=ecoflow-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=ecoflow-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ecoflow-${{ matrix.arch }},ignore-error=true
 
   release:
     name: Cut GitHub Release
