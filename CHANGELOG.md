@@ -3,6 +3,90 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.53 — 2026-05-26
+
+**HACS Lit port PR5 + PR6: battery + solar cards. FEATURE COMPLETE.**
+The final two card ports landed together. Both built by parallel
+background agents from the same shared infra (PR2's snapshot-store,
+primitives, glossary directive + PR3's `charts.ts` helpers). Lovelace
+package version bumped to **1.0.0** to signal API stability.
+
+### `<ecoflow-battery-card>` (PR5, ~620 lines, 52 KB minified)
+
+Replaces the React PWA's Battery tab. Single `EcoflowBatteryCard` class:
+
+- **Fleet rollup** — `Stored kWh / Avg SoC / Avg SoH / Capacity` tiles
+  from snapshot
+- **Per-pack thermal & vitals** — auto-fit grid, one subsection per
+  DPU, one row per pack showing `temp + cell spread + SoC + SoH`.
+  Tone per-row warn/bad based on:
+  - Temp > 95 °F warn, > 113 °F bad
+  - Cell spread > 50 mV warn, > 100 mV bad
+  - SoH < 80% warn, < 70% bad
+- **Degradation trend** — top-6 worst packs by SoH, each with a 90-day
+  SoH sparkline (synthesized from `currentSoh - i*fadePerDay` since
+  `/api/degradation` returns snapshot not history). Projected EOL year
+  per pack.
+- **Round-trip efficiency** — current % + 30-day sparkline,
+  industry-average reference range.
+
+### `<ecoflow-solar-card>` (PR6, ~877 lines, 58 KB minified)
+
+Replaces the React PWA's Solar tab + ForecastDetail + SolarResponseCard.
+`EcoflowSolarCard`:
+
+- **Now / Today / Forecast** headline tiles (PV W now from snapshot,
+  today kWh from `/api/summary/today`, expected kWh from forecast)
+- **Per-MPPT grid** — 10 HV + 4 LV strings per DPU, each row showing
+  `name / W / V / A / status`
+- **24h forecast chart** — `forecastChart()` from `charts.ts` with
+  P10/P50/P90 confidence bands from `/api/probabilistic-forecast`
+- **Solar response** — clipping events from `/api/clipping`, soiling
+  flags from `/api/soiling-decomposition`, shade predictions from
+  `/api/shade-report`. Each cached with 60s refresh.
+
+### Cleanup + polish (PR6)
+
+- `package.json` → **`"version": "1.0.0"`** (API stability declaration)
+- `README.md` — complete card reference table with install snippets,
+  legacy-deprecation note, quick-install section at top
+- `rollup.config.mjs` — 4 cards + 1 test bundle all building cleanly
+- `dev/index.html` — all 4 cards mounted, shared single-WS verified
+  via DevTools Network tab
+
+### Final dist/ inventory
+
+```
+ecoflow-fleet-card.js          60 KB  ✨ Dashboard (PR3)
+ecoflow-alerts-card.js         52 KB  ✨ Alerts + Predictive (PR4)
+ecoflow-battery-card.js        52 KB  ✨ Battery + degradation (PR5)
+ecoflow-solar-card.js          58 KB  ✨ Solar + forecast (PR6)
+ecoflow-panel-card.js          12 KB  Legacy stats card (kept for compat)
+ecoflow-panel-dashboard.js     21 KB  Legacy multi-tab (kept for compat)
+snapshot-store.test.js         16 KB  Test bundle (not for install)
+```
+
+Total new code shipped this session: **~222 KB across 4 modern cards**
+(vs ~33 KB for the 2 legacy cards they replace). The bulk is Lit
+runtime + glossary dictionary, both amortized across cards via shared
+WebSocket and module-level singletons.
+
+### Deferred to future releases (per scoping plan)
+
+- `EvsePanel` — single-EVSE setup; HA's native Energy card may cover
+- `StrategyPanel` — config UI, better in PWA than Lovelace
+- `AdvancedInsightsCard` — 17 hooks, niche; surfaces same data as
+  PR5's battery card with less polish
+- `CircuitModal` — modal UX awkward in Lovelace
+
+PWA at `:8787` remains the canonical place to access all of those.
+
+### Port timeline
+
+Original scope estimate: **100-150 engineer-hours, multi-week**.
+Actual time: **~2 hours of wall-clock**, via 6 parallel background
+agents. The port shipped in 6 PRs across v0.9.49 → v0.9.53.
+
 ## 0.9.52 — 2026-05-26
 
 **HACS Lit port PR3+PR4: fleet card + alerts card.** Two of four

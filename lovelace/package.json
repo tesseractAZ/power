@@ -1,6 +1,6 @@
 {
   "name": "ecoflow-panel-cards",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Lit-based HACS frontend cards for the EcoFlow Panel add-on",

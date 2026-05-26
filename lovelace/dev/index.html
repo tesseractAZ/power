@@ -30,8 +30,14 @@
     <ecoflow-fleet-card></ecoflow-fleet-card>
     <h2>Alerts</h2>
     <ecoflow-alerts-card></ecoflow-alerts-card>
+    <h2>Battery</h2>
+    <ecoflow-battery-card></ecoflow-battery-card>
+    <h2>Solar</h2>
+    <ecoflow-solar-card></ecoflow-solar-card>
     <script type="module" src="../dist/ecoflow-fleet-card.js"></script>
     <script type="module" src="../dist/ecoflow-alerts-card.js"></script>
+    <script type="module" src="../dist/ecoflow-battery-card.js"></script>
+    <script type="module" src="../dist/ecoflow-solar-card.js"></script>
     <script>
       // Both bundles are IIFE — wait until the element is upgraded then
       // setConfig(). The whenDefined() path covers slow upgrades; the
@@ -55,6 +61,16 @@
           type: 'custom:ecoflow-alerts-card',
           host: 'http://homeassistant.local:8787',
           title: 'EcoFlow Alerts',
+        });
+        setup('ecoflow-battery-card', {
+          type: 'custom:ecoflow-battery-card',
+          host: 'http://homeassistant.local:8787',
+          title: 'EcoFlow Battery',
+        });
+        setup('ecoflow-solar-card', {
+          type: 'custom:ecoflow-solar-card',
+          host: 'http://homeassistant.local:8787',
+          title: 'EcoFlow Solar',
         });
       });
     </script>

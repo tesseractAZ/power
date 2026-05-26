@@ -17,6 +17,8 @@ const isDev = process.env.NODE_ENV === 'development';
 const cardBundles = [
   { input: 'src/cards/fleet-card.ts', output: 'dist/ecoflow-fleet-card.js', name: 'EcoflowFleetCard' },
   { input: 'src/cards/alerts-card.ts', output: 'dist/ecoflow-alerts-card.js', name: 'EcoflowAlertsCard' },
+  { input: 'src/cards/battery-card.ts', output: 'dist/ecoflow-battery-card.js', name: 'EcoflowBatteryCard' },
+  { input: 'src/cards/solar-card.ts', output: 'dist/ecoflow-solar-card.js', name: 'EcoflowSolarCard' },
 ].map(({ input, output, name }) => ({
   input,
   output: {
