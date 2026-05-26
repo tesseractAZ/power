@@ -27,7 +27,10 @@ interface PackVitalsProps {
 
 export function PackVitals({ snapshot }: PackVitalsProps) {
   const packs = useMemo(() => allPacks(snapshot), [snapshot]);
-  // Group by DPU SN (stable order: insertion order in fleet snapshot).
+  // Group by DPU SN, then sort columns numerically by "Core N" trailing number.
+  // v0.9.42 — previously cared only about packs-within-DPU order, so the column
+  // sequence was whatever order the snapshot enumerator yielded (MQTT report
+  // order). the operator noted he wants Core 1, Core 2, Core 3, Core 4 left-to-right.
   const byDpu = useMemo(() => {
     const map = new Map<string, ReturnType<typeof allPacks>>();
     for (const p of packs) {
@@ -35,9 +38,18 @@ export function PackVitals({ snapshot }: PackVitalsProps) {
       if (!arr) { arr = []; map.set(p.dpuSn, arr); }
       arr.push(p);
     }
-    // Sort packs within each DPU by num.
+    // Sort packs within each DPU by pack number.
     for (const arr of map.values()) arr.sort((a, b) => a.packNum - b.packNum);
-    return Array.from(map.entries());
+    // Sort the DPU columns themselves by trailing integer in the device name
+    // ("Core 5" → 5). Falls back to alphabetical when no number is present.
+    return Array.from(map.entries()).sort(([, a], [, b]) => {
+      const na = trailingNum(a[0]?.dpuName ?? '');
+      const nb = trailingNum(b[0]?.dpuName ?? '');
+      if (na != null && nb != null) return na - nb;
+      if (na != null) return -1;
+      if (nb != null) return 1;
+      return (a[0]?.dpuName ?? '').localeCompare(b[0]?.dpuName ?? '');
+    });
   }, [packs]);
 
   // Aggregate stats for the header.
@@ -170,4 +182,11 @@ function LegendDot({ color, label }: { color: string; label: string }) {
       <div className="text-xs" style={{ color: 'rgb(var(--color-muted))' }}>{label}</div>
     </div>
   );
+}
+
+/** Extract a trailing integer from a device name ("Core 5" → 5). Mirrors
+ *  the helper in src/sort.ts so the Opus skin stays self-contained. */
+function trailingNum(name: string): number | null {
+  const m = name.match(/(\d+)\s*$/);
+  return m ? Number(m[1]) : null;
 }
