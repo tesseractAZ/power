@@ -12,3 +12,34 @@ labels:
   org.opencontainers.image.description: Local dashboard + control-room TUI for an EcoFlow off-grid home
   org.opencontainers.image.source: https://github.com/tesseractAZ/ecoflow-panel
   org.opencontainers.image.licenses: MIT
+
+# v0.9.45 — CodeNotary image signing.
+#
+# Home Assistant Supervisor verifies the published image was signed by
+# the identity in `signer` (a CodeNotary account email) before pulling +
+# running. Provides supply-chain integrity: a hijacked GHCR token alone
+# can't ship a backdoored image — the attacker would also need to forge
+# a signature against this identity, which requires CN_USER+CN_PASSWORD.
+#
+# `base_image` declares the identity that signed the FROM image. HA's
+# official base images are signed by notary@home-assistant.io, so that
+# value is fixed.
+#
+# `signer` is the identity that signs THIS add-on's image. Must match
+# the CodeNotary account whose credentials live in the CN_USER /
+# CN_PASSWORD GitHub secrets. To change later: update this field +
+# update the GitHub secrets to match.
+#
+# Setup required (one-time):
+#   1. Register CodeNotary account at https://www.codenotary.io with
+#      redacted@example.com.
+#   2. Add GitHub repo secrets:
+#        CN_USER     = redacted@example.com
+#        CN_PASSWORD = <your CodeNotary password>
+#      via https://github.com/tesseractAZ/ecoflow-panel/settings/secrets/actions
+#   3. Next release will sign automatically. The CI step is gated on
+#      both secrets being present, so until step 2 lands the workflow
+#      skips signing without failing.
+codenotary:
+  signer: redacted@example.com
+  base_image: notary@home-assistant.io

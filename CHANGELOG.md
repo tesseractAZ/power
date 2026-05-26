@@ -3,6 +3,54 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.45 — 2026-05-26
+
+**CodeNotary image signing infrastructure.** Wires up the second +1
+rating bump from the security audit (after v0.9.44's AppArmor). Adds:
+
+- `codenotary:` block in `build.yaml` declaring `redacted@example.com` as
+  the signer and `notary@home-assistant.io` as the base-image signer.
+- A signing step in `.github/workflows/images.yml` that runs `vcn
+  notarize` on both the `:version` and `:latest` tags for each arch.
+- Step is **gated on `CN_USER` + `CN_PASSWORD` secrets being present**
+  — until you set them, the workflow logs a friendly "skipping signing"
+  message and proceeds. Once secrets land, the next push signs.
+
+### What HA Supervisor does with this
+
+On every add-on install + update, HA verifies that the image was signed
+by the identity declared in `build.yaml`'s `codenotary.signer`. If the
+signature is missing or made by a different identity, HA refuses to
+install — supply-chain attack mitigation.
+
+Concretely: even if someone steals your GHCR token and pushes a
+backdoored image, they can't forge a valid CodeNotary signature
+without also stealing `CN_PASSWORD`. HA detects the mismatch and
+aborts the install.
+
+### One-time setup (you, not the workflow)
+
+1. **Create CodeNotary account:**
+   - https://www.codenotary.io → sign up with `redacted@example.com`
+2. **Add GitHub repo secrets:**
+   - https://github.com/tesseractAZ/ecoflow-panel/settings/secrets/actions
+   - `CN_USER` = `redacted@example.com`
+   - `CN_PASSWORD` = your CodeNotary password
+3. **Next push triggers signing** — the workflow logs `vcn notarize
+   ... succeeded` for each arch. HA install rating bumps another +1.
+
+### Expected rating progression
+
+- v0.9.43 and earlier: **~6** (3 deductions for APIs + no protections)
+- v0.9.44 (apparmor): **~7** (+1 for AppArmor profile)
+- v0.9.45 (after you configure CN secrets): **~8** (+1 for signing)
+
+### Cost note
+
+CodeNotary's free tier covers OSS use through their community ledger.
+Verify current pricing at codenotary.io before signing up — they've
+pivoted product offerings a few times.
+
 ## 0.9.44 — 2026-05-26
 
 **AppArmor profile.** Add `apparmor.txt` at the repo root. Home

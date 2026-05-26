@@ -130,6 +130,7 @@ jobs:
             >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v5
+        id: build
         with:
           context: .
           file: ./Dockerfile
@@ -154,6 +155,54 @@ jobs:
           # blocking 3 consecutive releases (v0.9.35, v0.9.36, ...).
           cache-from: type=gha,scope=ecoflow-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=ecoflow-${{ matrix.arch }},ignore-error=true
+
+      # v0.9.45 — CodeNotary image signing. Gated on both CN_USER and
+      # CN_PASSWORD secrets being present in the GitHub repo. If either
+      # is missing, the step is skipped without failing — so the workflow
+      # works fine BEFORE the user sets up CodeNotary, and starts signing
+      # automatically the next push after they do.
+      #
+      # `build.yaml` declares the expected signer (redacted@example.com); the
+      # secrets must match that identity. HA Supervisor verifies the
+      # signature on pull — a mismatch aborts the install.
+      - name: Check CodeNotary secrets
+        id: cn_check
+        env:
+          CN_USER: ${{ secrets.CN_USER }}
+          CN_PASSWORD: ${{ secrets.CN_PASSWORD }}
+        run: |
+          if [ -n "$CN_USER" ] && [ -n "$CN_PASSWORD" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "CodeNotary secrets present — will sign images."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "CodeNotary secrets MISSING — skipping signing. To enable:"
+            echo "  1. Register CodeNotary at https://www.codenotary.io with redacted@example.com"
+            echo "  2. Add CN_USER (= redacted@example.com) and CN_PASSWORD secrets"
+            echo "     at https://github.com/${{ github.repository }}/settings/secrets/actions"
+          fi
+
+      - name: Sign image with CodeNotary
+        if: steps.cn_check.outputs.configured == 'true'
+        env:
+          VCN_USER: ${{ secrets.CN_USER }}
+          VCN_PASSWORD: ${{ secrets.CN_PASSWORD }}
+          VCN_NOTARIZATION_PASSWORD: ${{ secrets.CN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          IMG_VER="ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.arch }}-ecoflow-panel:${{ needs.resolve.outputs.version }}"
+          IMG_LATEST="ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.arch }}-ecoflow-panel:latest"
+          for IMG in "$IMG_VER" "$IMG_LATEST"; do
+            echo "::group::vcn notarize $IMG"
+            docker run --rm \
+              -e VCN_USER -e VCN_PASSWORD -e VCN_NOTARIZATION_PASSWORD \
+              -e DOCKER_CONFIG=/tmp/docker \
+              -v "$HOME/.docker:/tmp/docker:ro" \
+              codenotary/vcn:latest \
+              notarize --silent --output json "docker://$IMG" \
+              | tee "/tmp/vcn-$(basename "$IMG").json"
+            echo "::endgroup::"
+          done
 
   release:
     name: Cut GitHub Release
