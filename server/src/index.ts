@@ -20,7 +20,7 @@ import { generateAudioAssets } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
 import { getAllStates } from './haService.js';
 // v0.9.32 — TTS debug dump for /api/broadcast/tts-debug
-import { getTtsDebug } from './ttsService.js';
+import { getTtsDebug, speakAnnouncement, detectTtsEngines } from './ttsService.js';
 // v0.9.33 — Supervisor add-on + Core config-flow helpers
 import {
   listAddons,
@@ -1225,6 +1225,61 @@ app.get('/api/broadcast/tts-debug', async (_req, reply) => {
   if (!dbg.supervised) reply.code(503);
   return dbg;
 });
+
+/**
+ * v0.9.35 — Diagnostic TTS test endpoint. Fires a TTS announcement at the
+ * chosen engine + targets WITHOUT klaxon/staggering/Sonos-restore wrapping,
+ * so we can isolate which engine + which targets are causing 500s.
+ *
+ * v0.9.34 testing surfaced both Piper (tts.speak:tts.piper) AND legacy
+ * Cloud (tts.cloud_say) returning identical 500 "Server got itself in
+ * trouble" with the full 6-speaker target list. This endpoint lets us
+ * test:
+ *   - One engine at a time (is one specific engine broken?)
+ *   - One target at a time (is one specific speaker rejecting?)
+ *   - Single-target combinations to find the smallest reproducer
+ *
+ * Body:
+ *   { engine: "tts.cloud_say" | "tts.speak:tts.piper",  // empty = first available
+ *     targets: ["media_player.homepod", ...],
+ *     message: "test message" }
+ *
+ * Returns the raw service-call result so we can see HA's exact error.
+ */
+app.post<{ Body: { engine?: string; targets?: string[]; message?: string; language?: string } }>(
+  '/api/broadcast/test-tts',
+  async (req, reply) => {
+    const targets = Array.isArray(req.body?.targets) && req.body!.targets.length > 0
+      ? req.body!.targets
+      : broadcast.config().targets;
+    const message = req.body?.message || 'Diagnostic test. This is only a test.';
+    const language = req.body?.language || broadcast.config().ttsLanguage || undefined;
+    const engineRef = req.body?.engine;
+    const engines = await detectTtsEngines();
+    if (engines.length === 0) {
+      reply.code(503);
+      return { ok: false, error: 'no TTS engines detected' };
+    }
+    const engine = engineRef
+      ? engines.find((e) => e.service === engineRef) ?? { service: engineRef, label: engineRef, local: false, quality: 99 }
+      : engines[0];
+
+    const result = await speakAnnouncement(message, {
+      engine,
+      targets,
+      language,
+    });
+    if (!result.ok) reply.code(502);
+    return {
+      ok: result.ok,
+      engine: { service: engine.service, label: engine.label },
+      targets,
+      messageLength: message.length,
+      message,
+      result,
+    };
+  },
+);
 
 /**
  * v0.9.33 — List installed Supervisor add-ons. Requires `hassio_api: true`
