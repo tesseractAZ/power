@@ -18,5 +18,8 @@
     "rollup": "^4.28.1",
     "tslib": "^2.8.1",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5"
   }
 }
