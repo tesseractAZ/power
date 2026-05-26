@@ -26,6 +26,22 @@ import { config } from './config.js';
 import type { Alert } from './alerts.js';
 import type { FleetSnapshot, DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
+import type { Recorder } from './recorder.js';
+// v0.9.59 — capture the REAL LR feature vector (same code path ml.ts /
+// computePackRiskV2 uses for inference) at alert fire time so the online
+// learner trains on the same inputs the model saw — not on a proxy
+// reconstructed at training time from generic snapshot fields.
+import {
+  extractFeatures as extractMlFeatures,
+  FEATURE_NAMES,
+  type FeatureName,
+} from './ml.js';
+import {
+  computeDegradation,
+  computeThermalEvents,
+  computeInternalResistance,
+  computeChargeCurveFingerprint,
+} from './analytics.js';
 
 const PATH = process.env.FEATURE_SNAPSHOTS_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'feature-snapshots.jsonl');
@@ -33,13 +49,27 @@ const PATH = process.env.FEATURE_SNAPSHOTS_PATH
 const MAX_IN_MEMORY = 500;
 const HYDRATE_BYTES = 256 * 1024; // re-read last 256 KB at boot
 
-interface SnapshotRecord {
+export interface SnapshotRecord {
   alertId: string;
   ts: number;
+  /** Alert-category-specific generic features (pack_temp_c, pack_soc, etc.).
+   *  Used for diagnostics and as a fallback when lrFeatures is absent. */
   features: Record<string, number>;
   category?: string;
   severity?: string;
   title?: string;
+  /**
+   * v0.9.59 — Normalized LR feature vector captured AT alert fire time.
+   * Same shape (and same code path) as ml.ts FEATURE_NAMES, so
+   * onlineLR.snapshotToLrFeatures can consume them with no remapping.
+   *
+   * Only populated for pack-level alerts (where alert.packNum is set).
+   * For SHP2/EVSE/system-level alerts, this is null and onlineLR falls
+   * back to its proxy logic (which already correctly returns null and
+   * skips the SGD update — the training pipeline skips no-features
+   * outcomes anyway).
+   */
+  lrFeatures?: Record<FeatureName, number> | null;
 }
 
 // LRU keyed by alertId. Insertion order is age — Map iterates in insertion order.
@@ -206,4 +236,65 @@ export function extractFeatures(alert: Alert, snap: FleetSnapshot): Record<strin
     common['snapshot_at_ms'] = Date.now();
   }
   return common;
+}
+
+/* ─── v0.9.59 LR feature capture ─────────────────────────────────── */
+
+/**
+ * v0.9.59 — Capture the REAL normalized LR feature vector for a pack-
+ * level alert at fire time. Reuses the same `extractFeatures` from
+ * ml.ts that `computePackRiskV2` calls for inference, so we train on
+ * the same inputs the model actually saw.
+ *
+ * Returns null when:
+ *   - The alert has no packNum (system / EVSE / SHP2 alerts — those
+ *     don't drive the pack-risk LR, so there's nothing to train).
+ *   - We can't resolve the alert's device to a serial in the snapshot
+ *     (offline / dropped device — the analytics functions wouldn't
+ *     yield a vector either).
+ *
+ * `computeDegradation` is async because its history pull from the
+ * recorder can hit disk; the other three are sync. All four have
+ * internal TTL caches (~60s) so in steady state every call here is
+ * a hash lookup. We swallow errors and return null rather than
+ * blocking the alert dispatch — a missing LR feature vector just
+ * means the SGD update is skipped (same fallback path that was used
+ * pre-v0.9.59).
+ */
+export async function captureLrFeatures(
+  alert: Alert,
+  snap: FleetSnapshot,
+  recorder: Recorder,
+): Promise<Record<FeatureName, number> | null> {
+  // Pack-level only. system/EVSE/SHP2 alerts have no LR feature signal.
+  if (alert.packNum == null) return null;
+  // Resolve the device serial — alert.device is the friendly name; we
+  // need the SN to key into the analytics outputs.
+  const devices = Object.values(snap.devices);
+  const dev = devices.find((d) => d.sn === alert.device || d.deviceName === alert.device);
+  if (!dev || dev.projection?.kind !== 'dpu') return null;
+
+  try {
+    const [degradation, thermalEvents, internalR, chargeCurve] = await Promise.all([
+      computeDegradation(snap.devices, recorder),
+      Promise.resolve(computeThermalEvents(snap.devices, recorder)),
+      Promise.resolve(computeInternalResistance(snap.devices, recorder)),
+      Promise.resolve(computeChargeCurveFingerprint(snap.devices, recorder)),
+    ]);
+    const fv = extractMlFeatures(
+      dev.sn,
+      alert.packNum,
+      degradation,
+      thermalEvents,
+      internalR,
+      chargeCurve,
+    );
+    // Return the normalized vector — that's exactly what onlineLR consumes.
+    // Coerce to a plain Record so JSON.stringify round-trips cleanly.
+    const out = {} as Record<FeatureName, number>;
+    for (const n of FEATURE_NAMES) out[n] = fv.normalized[n] ?? 0;
+    return out;
+  } catch {
+    return null;
+  }
 }

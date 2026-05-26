@@ -42,6 +42,14 @@ export interface AlertOutcomeEntry {
    *  Captured by featureSnapshot.ts. Letting future model-training code
    *  replay the exact inputs that produced this alert. */
   features?: Record<string, number>;
+  /**
+   * v0.9.59 — Normalized LR feature vector at alert-fire time (when the
+   * alert is pack-level and `extractFeatures` could resolve the pack).
+   * onlineLR.snapshotToLrFeatures prefers these over reconstructing
+   * from `features` — they're the actual values the model SAW, not a
+   * proxy derived after the fact.
+   */
+  lrFeatures?: Record<string, number> | null;
   /** When the alert was first observed (so we can compute time-to-action). */
   alertFiredAt?: number;
   /** Source of the submission. */

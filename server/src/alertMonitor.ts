@@ -10,7 +10,17 @@ import {
 } from './analytics.js';
 import { loadNotifyConfig, sendNotification, isConfigured, type NotifyConfig } from './notify.js';
 // v0.9.25 — feedback-loop snapshot capture at first fire.
-import { captureSnapshot, extractFeatures } from './featureSnapshot.js';
+// v0.9.59 — also capture the real normalized LR feature vector for
+// pack-level alerts (was previously reconstructed from generic snapshot
+// fields at training time, which produced garbage proxies — see audit).
+import { captureSnapshot, extractFeatures, captureLrFeatures } from './featureSnapshot.js';
+// v0.9.59 — rollups use family keys (so a condition spread across 5 packs
+// aggregates as one family for threshold purposes).
+import { familyOf } from './alertOutcomes.js';
+// v0.9.59 — persist telemetry events so rise/short-clear/long-active
+// counts survive restarts. Without this the auto-silencing rules can
+// effectively never fire on a panel that gets occasional restarts.
+import { appendTelemetryEvent, readRecentTelemetry } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
 
 /**
@@ -46,8 +56,21 @@ export interface ClearedAlert {
   durationMs: number;
 }
 
-/** Cumulative rise/duration stats for a single alert ID, used by auto-downgrade. */
+/**
+ * Cumulative rise/duration stats for an alert FAMILY, used by auto-downgrade.
+ *
+ * v0.9.59 — keyed by `familyOf(alertId)` rather than full alertId. A
+ * condition that spreads across packs (e.g. "pack-hot" on packs 1/2/3)
+ * now aggregates into one rollup, so the rise-count thresholds (chronic
+ * noise: ≥10 rises) can actually fire instead of being spread across
+ * multiple keys that each individually never hit 10. `alertId` on the
+ * stats object retains an EXEMPLAR id from the most-recently-seen alert
+ * — useful for the UI/API but no longer a primary key.
+ */
 export interface AlertActionStats {
+  /** v0.9.59 — primary key. e.g. `pack-hot`, `cell-imbalance`, `mppt-hot`. */
+  familyKey: string;
+  /** Exemplar alertId from the most recent member of the family (back-compat field). */
   alertId: string;
   title: string;
   severity: Severity;
@@ -229,25 +252,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const CHRONIC_NOISE_LONG_MS = 4 * 60 * 60 * 1000; // "long" = persists ≥ 4 hours
   const CHRONIC_NOISE_NEVER_CLEAR_FRAC = 0.5;     // ≥ 50% of rises stayed alive past CHRONIC_NOISE_LONG_MS without user clearing
 
-  const updateTelemetry = (alertId: string, duration: number, alert: Alert) => {
-    let t = telemetry.get(alertId);
-    if (!t) {
-      t = {
-        alertId, title: alert.title, severity: alert.severity, category: alert.category,
-        riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
-        downgradedSilenced: false, warningDemotedToInfo: false, chronicNoiseSilenced: false,
-        neverClearedCount: 0, lastSeenAt: null,
-      };
-    }
-    t.riseCount++;
-    t.lastSeenAt = Date.now();
-    // Online median via incremental approximation; for the simple use-case the
-    // running EWMA on duration is enough to drive a downgrade decision.
-    t.medianDurationMs = t.medianDurationMs === 0 ? duration : Math.round((t.medianDurationMs + duration) / 2);
-    if (duration > t.longestDurationMs) t.longestDurationMs = duration;
-    if (duration <= SHORT_CLEAR_MS) t.shortClearsCount++;
-    if (duration >= CHRONIC_NOISE_LONG_MS) t.neverClearedCount++;
-
+  /**
+   * Re-evaluate auto-silencing rules for a family rollup after its counters
+   * change. Pulled out so the boot-time replay and the live-event path share
+   * the same logic (otherwise a panel restart would reset silencing decisions
+   * that the persisted log says should still hold).
+   */
+  const evaluateSilencingRules = (t: AlertActionStats) => {
     // Rule 1 (v0.7.5): info-severity alerts that recur a lot and always clear fast → silence
     if (
       t.severity === 'info' &&
@@ -277,12 +288,154 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     ) {
       t.chronicNoiseSilenced = true;
     }
-    telemetry.set(alertId, t);
+  };
+
+  /**
+   * Fetch or seed the family-keyed rollup for an alert.
+   *
+   * v0.9.59 — rollup keys switched from full alertId to familyOf(alertId).
+   * The exemplar `alertId`, `title`, `severity`, `category` fields track the
+   * most recent member of the family — they're descriptive metadata, not
+   * primary keys.
+   */
+  const getOrSeedRollup = (alert: Alert): AlertActionStats => {
+    const familyKey = familyOf(alert.id);
+    let t = telemetry.get(familyKey);
+    if (!t) {
+      t = {
+        familyKey,
+        alertId: alert.id, title: alert.title, severity: alert.severity, category: alert.category,
+        riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
+        downgradedSilenced: false, warningDemotedToInfo: false, chronicNoiseSilenced: false,
+        neverClearedCount: 0, lastSeenAt: null,
+      };
+      telemetry.set(familyKey, t);
+    } else {
+      // Always carry forward the freshest exemplar — useful for the UI's
+      // "what was the last instance of this family" affordance.
+      t.alertId = alert.id;
+      t.title = alert.title;
+      t.severity = alert.severity;
+      t.category = alert.category;
+    }
+    return t;
+  };
+
+  /**
+   * Record a "rise" event for an alert. v0.9.59 — split out from the
+   * combined-counter pattern that lived in updateTelemetry so we can
+   * persist the EVENT as it happens (writes one JSONL line) rather than
+   * persisting it lazily at clear time (which loses partial state when
+   * we restart mid-alert).
+   */
+  const recordRise = (alert: Alert, ts: number) => {
+    const t = getOrSeedRollup(alert);
+    t.riseCount++;
+    t.lastSeenAt = ts;
+    evaluateSilencingRules(t);
+    appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'rise', ts });
+  };
+
+  /**
+   * Record a duration-bearing event (shortClear or longActive) at the
+   * moment the alert clears. We always trigger one of the two depending
+   * on how long the alert was alive.
+   *
+   *   - duration ≤ SHORT_CLEAR_MS  → 'shortClear' (transient / auto-resolve)
+   *   - duration ≥ CHRONIC_NOISE_LONG_MS → 'longActive' (user never acted)
+   *
+   * A duration in between gets no event — it was a "real" alert that the
+   * system cleared on its own time but not quickly enough to count as
+   * noise and not slowly enough to count as chronic. The rollup still
+   * tracks medianDurationMs / longestDurationMs from the rise count.
+   */
+  const recordClear = (alert: Alert, duration: number, ts: number) => {
+    const t = getOrSeedRollup(alert);
+    // Online median via incremental approximation; for the simple use-case the
+    // running EWMA on duration is enough to drive a downgrade decision.
+    t.medianDurationMs = t.medianDurationMs === 0 ? duration : Math.round((t.medianDurationMs + duration) / 2);
+    if (duration > t.longestDurationMs) t.longestDurationMs = duration;
+    if (duration <= SHORT_CLEAR_MS) {
+      t.shortClearsCount++;
+      appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'shortClear', ts, durationMs: duration });
+    }
+    if (duration >= CHRONIC_NOISE_LONG_MS) {
+      t.neverClearedCount++;
+      appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'longActive', ts, durationMs: duration });
+    }
+    t.lastSeenAt = ts;
+    evaluateSilencingRules(t);
+  };
+
+  /**
+   * v0.9.59 — Hydrate the in-memory rollup from the persisted JSONL on
+   * boot. Counters re-derive from event replay (cheap given the 30-day
+   * window cap); silencing rules are re-evaluated as the rollup grows.
+   *
+   * One known soft-spot: when replaying we don't have the live Alert
+   * object (with severity/category/title) for events whose alert no
+   * longer exists. We seed a placeholder rollup from the first event's
+   * familyKey/alertId and let it get overwritten with real metadata the
+   * first time the alert fires post-boot. Until then the rollup carries
+   * counts but `severity` defaults to 'info' so silencing rules behave
+   * conservatively (least aggressive silencing).
+   */
+  const replayPersistedTelemetry = () => {
+    const events = readRecentTelemetry();
+    if (events.length === 0) return;
+    let n = 0;
+    for (const e of events) {
+      // Defensive shape check — guards against schema drift.
+      if (!e.familyKey || !e.alertId || !e.event) continue;
+      let t = telemetry.get(e.familyKey);
+      if (!t) {
+        t = {
+          familyKey: e.familyKey,
+          alertId: e.alertId, title: e.familyKey, severity: 'info',
+          // Category is unknown from replay; the live path overwrites this
+          // the first time the alert fires again post-boot.
+          category: 'Battery' as Alert['category'],
+          riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
+          downgradedSilenced: false, warningDemotedToInfo: false, chronicNoiseSilenced: false,
+          neverClearedCount: 0, lastSeenAt: null,
+        };
+        telemetry.set(e.familyKey, t);
+      }
+      switch (e.event) {
+        case 'rise':
+          t.riseCount++;
+          break;
+        case 'shortClear':
+          t.shortClearsCount++;
+          if (e.durationMs != null) {
+            t.medianDurationMs = t.medianDurationMs === 0 ? e.durationMs : Math.round((t.medianDurationMs + e.durationMs) / 2);
+            if (e.durationMs > t.longestDurationMs) t.longestDurationMs = e.durationMs;
+          }
+          break;
+        case 'longActive':
+          t.neverClearedCount++;
+          if (e.durationMs != null) {
+            t.medianDurationMs = t.medianDurationMs === 0 ? e.durationMs : Math.round((t.medianDurationMs + e.durationMs) / 2);
+            if (e.durationMs > t.longestDurationMs) t.longestDurationMs = e.durationMs;
+          }
+          break;
+      }
+      t.lastSeenAt = e.ts;
+      n++;
+    }
+    // Re-evaluate silencing on every family after replay finishes —
+    // single pass is fine since each evaluate is O(1).
+    for (const t of telemetry.values()) evaluateSilencingRules(t);
+    log(`alert-telemetry: replayed ${n} events across ${telemetry.size} families`);
   };
 
   const dispatch = async (alert: Alert, kind: 'new' | 'resolved') => {
     if (!isConfigured(cfg)) return;
-    const t = telemetry.get(alert.id);
+    // v0.9.59 — silencing is now family-keyed so a single noisy condition
+    // spread across multiple packs aggregates correctly. The decision
+    // still operates per-alert (we silence THIS alert's notification),
+    // but the threshold for the decision comes from the family rollup.
+    const t = telemetry.get(familyOf(alert.id));
     // v0.7.5 silencing or v0.9.3 chronic-noise silencing — skip notify entirely.
     if (t?.downgradedSilenced || t?.chronicNoiseSilenced) return;
     // v0.9.3 warning→info demotion — alert still notifies but at info priority
@@ -380,9 +533,20 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // online-learning code can replay the model inputs that produced
         // this alert. Failure is silent: missing snapshots only mean the
         // outcome record won't carry features.
+        //
+        // v0.9.59 — also capture the REAL normalized LR feature vector
+        // for pack-level alerts (was being reconstructed from generic
+        // features at training time, which proxied rTrend off pack
+        // temperature — meaning Phoenix summer would train every pack
+        // as "high risk" from ambient heat). Now stored alongside the
+        // generic features so onlineLR can read them back directly.
         try {
           const features = extractFeatures(a, snap);
           if (features) {
+            // captureLrFeatures returns null for non-pack alerts (SHP2,
+            // EVSE, system) — those skip the SGD update anyway, so the
+            // null is correct and not lossy.
+            const lrFeatures = await captureLrFeatures(a, snap, recorder);
             captureSnapshot({
               alertId: a.id,
               ts: now,
@@ -390,9 +554,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
               category: a.category,
               severity: a.severity,
               title: a.title,
+              lrFeatures,
             }, log);
           }
         } catch { /* ignore — never block alert dispatch on snapshot */ }
+        // v0.9.59 — record the rise in the family rollup and persist it.
+        // Previously rise counts were only incremented at clear time,
+        // which made the chronic-noise rule blind to permanently-active
+        // alerts (they never cleared, so never got counted).
+        recordRise(a, now);
         tracked.set(a.id, { alert: a, firstSeen: now, notified: firstRun });
         continue;
       }
@@ -441,13 +611,25 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       if (duration >= DEBOUNCE_MS) {
         clearedLog.unshift({ alert: t.alert, raisedAt: t.firstSeen, clearedAt: now, durationMs: duration });
         if (clearedLog.length > 200) clearedLog.pop();
-        updateTelemetry(id, duration, t.alert);
+        // v0.9.59 — records shortClear / longActive events into the family rollup
+        // and appends them to the persisted telemetry log.
+        recordClear(t.alert, duration, now);
       }
       tracked.delete(id);
     }
 
     firstRun = false;
   };
+
+  // v0.9.59 — hydrate the in-memory telemetry rollup from the persisted
+  // JSONL log BEFORE the first evaluate(). Otherwise the first eval cycle
+  // could miss silencing decisions that prior runs had already established
+  // (e.g. a chronic-noise alert that fired before restart would re-notify).
+  try {
+    replayPersistedTelemetry();
+  } catch (e: any) {
+    log(`alert-telemetry: replay failed — ${e?.message ?? e}`);
+  }
 
   evaluate().catch((e) => log(`alert-monitor: ${e?.message ?? e}`));
   const timer = setInterval(() => {

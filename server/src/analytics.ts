@@ -5,6 +5,7 @@ import type { Recorder } from './recorder.js';
 import { getWeather, type WeatherHour } from './weather.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
+import { PHOENIX_SITE } from './physics/clearSky.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -2400,6 +2401,25 @@ const IR_TTL_MS = 30 * 60 * 1000;
 const IR_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const IR_DELTA_I_MIN_A = 5;     // require ≥ 5 A change for a clean dV/dI
 const IR_DELTA_T_MAX_MS = 60_000;
+// v0.9.59 — steady-state windowing. A clean dV/dI sample needs the bus to be
+// in a quiet operating point on BOTH sides of the step — otherwise we're
+// measuring a transient (motor inrush, MPPT chase after a cloud, inverter
+// load-step) and the "resistance" we compute is dominated by the slew
+// dynamics, not the pack's actual cell + interconnect Ohmic loss.
+//
+// Heuristic: for each candidate (V,A) pair (i, i+1), scan all samples within
+// the prior 5 s ending at i and the following 5 s starting at i+1. If any
+// consecutive |dA|/Δt within either window exceeds IR_STEADY_DIDT_MAX_A_PER_S,
+// reject the pair as transient. This filters out the very class of step
+// events that contaminate the trend most badly (a 30-day median is robust
+// against a single outlier but a single noisy day still walks the line).
+const IR_STEADY_WINDOW_MS = 5_000;
+const IR_STEADY_DIDT_MAX_A_PER_S = 1;
+// Tightened sanity band: > 100 mΩ is a failed pack (not a measurement worth
+// median-aging into the trend); < 2 mΩ is below the resolution of the
+// inverter-bus dV/dI signal. Was [1, 500] mΩ — let through bus-noise.
+const IR_R_MIN_MILLI = 2;
+const IR_R_MAX_MILLI = 100;
 
 export interface InternalResistanceDevice {
   sn: string;
@@ -2452,6 +2472,29 @@ export function computeInternalResistance(
       if (Math.abs(a.ts - v.ts) > 30_000) continue;
       series.push({ ts: v.ts, v: v.value, a: a.value });
     }
+    // v0.9.59 — steady-state check. Walks from the anchor sample backwards
+    // (or forwards) collecting consecutive snaps within `windowMs` and
+    // verifies every adjacent |dA|/Δt under the slew bound. Returns false
+    // if any pair in the window busts the bound (i.e. the bus was moving).
+    // Empty windows count as steady (rare edge case at series ends — better
+    // to keep the sample than discard at endpoints).
+    const steadyOn = (anchorIdx: number, direction: -1 | 1): boolean => {
+      const anchorTs = series[anchorIdx].ts;
+      let j = anchorIdx;
+      let prev = series[anchorIdx];
+      while (true) {
+        const next = series[j + direction];
+        if (!next) return true;                // ran off the end → call it steady
+        if (Math.abs(next.ts - anchorTs) > IR_STEADY_WINDOW_MS) return true; // out of window
+        const dtSec = Math.abs(next.ts - prev.ts) / 1000;
+        if (dtSec > 0) {
+          const slew = Math.abs(next.a - prev.a) / dtSec;
+          if (slew >= IR_STEADY_DIDT_MAX_A_PER_S) return false;
+        }
+        prev = next;
+        j += direction;
+      }
+    };
     // Pairs with significant ΔI: ΔV / ΔI = R (volts / amps). Convert to mΩ.
     const rSamples: Array<{ ts: number; rMilli: number }> = [];
     for (let i = 1; i < series.length; i++) {
@@ -2460,12 +2503,18 @@ export function computeInternalResistance(
       if (b.ts - a.ts > IR_DELTA_T_MAX_MS) continue;
       const dI = b.a - a.a;
       if (Math.abs(dI) < IR_DELTA_I_MIN_A) continue;
+      // v0.9.59 — reject pairs where either endpoint sits inside a transient.
+      // The whole point of this filter is that a 5 A step is a real IR signal
+      // only if the bus was quiet before AND after — otherwise we're aging
+      // inverter dynamics into our resistance trend.
+      if (!steadyOn(i - 1, -1)) continue;
+      if (!steadyOn(i, +1)) continue;
       const dV = b.v - a.v;
       const r = (dV / dI) * 1000; // mΩ
       if (!Number.isFinite(r)) continue;
       // R must be positive (V drops as current draw rises) and within a sane LFP band.
       const rAbs = Math.abs(r);
-      if (rAbs < 1 || rAbs > 500) continue;
+      if (rAbs < IR_R_MIN_MILLI || rAbs > IR_R_MAX_MILLI) continue;
       rSamples.push({ ts: b.ts, rMilli: rAbs });
     }
     if (rSamples.length < 10) {
@@ -3784,6 +3833,10 @@ export async function computeProbabilisticForecast(
   let aboveReserveCount = 0;
   let fullChargeCount = 0;
   let stdevAccum = 0;
+  // v0.9.59 — anchor the horizon to the first forecast hour so the band-widening
+  // multiplier below grows monotonically across the window regardless of when
+  // the forecast was generated relative to wall-clock `now`.
+  const forecastStartTs = forecast.hours[0]?.ts ?? now;
   for (const h of forecast.hours) {
     const hod = new Date(h.ts).getHours();
     const cloudStdev = cloudVarByHour[hod];
@@ -3793,9 +3846,22 @@ export async function computeProbabilisticForecast(
     const disagreementFrac = (disagreeByHourEpoch.get(Math.floor(h.ts / 3_600_000)) ?? 0) / 100;
     // Wider band when cloud cover varies historically AND when the ensemble
     // disagrees AND when the model itself is biased. Quadrature-sum.
-    const sigmaFrac = Math.sqrt(
+    const baseSigmaFrac = Math.sqrt(
       cloudStdev * cloudStdev + skillFrac * skillFrac + disagreementFrac * disagreementFrac,
     );
+    // v0.9.59 — widen the band with horizon. The base sigmaFrac above is
+    // entirely "what-time-of-day-is-it" structure; it gives hour-24 the same
+    // band as hour-1 even though further-out forecasts are physically less
+    // certain (atmospheric chaos compounds with time). Multiply by a sqrt-
+    // shaped horizon factor: an h-hours-out forecast carries roughly
+    // sqrt(1 + h/24) more uncertainty than the immediate one. Hour 0 stays
+    // at 1.0×; hour 24 widens by ~1.41×; a 48-hour horizon by ~1.73×. The
+    // sqrt scaling (rather than linear) is the right shape for a random-
+    // walk-of-clouds process — variance grows linearly with time, stdev as
+    // sqrt(time).
+    const horizonHours = Math.max(0, (h.ts - forecastStartTs) / 3_600_000);
+    const horizonFactor = Math.sqrt(1 + horizonHours / 24);
+    const sigmaFrac = baseSigmaFrac * horizonFactor;
     const p50 = h.forecastPvW;
     const p10 = Math.max(0, p50 * (1 - Z10 * sigmaFrac));
     const p90 = p50 * (1 + Z10 * sigmaFrac);
@@ -4185,7 +4251,24 @@ const BAYES_TTL_MS = 30 * 60 * 1000;
 const BAYES_HISTORY_MS = 60 * 24 * 60 * 60 * 1000;
 const BAYES_PRIOR_MU = 0;        // start from "no clue"
 const BAYES_PRIOR_TAU2 = 1000;   // huge prior variance → first obs dominates
-const BAYES_OBS_SIGMA2 = 50;     // ~7 W stdev on PV residual per sample (engineered)
+// v0.9.59 — observation noise re-derived from the actual fleet PV signal scale.
+// The v0.9.0 placeholder (σ² = 50 → σ ≈ 7 W stdev) was off by ~2.5 orders of
+// magnitude relative to the real signal (0..16,800 W nameplate). At σ ≈ 7 W
+// each new observation effectively pins the posterior to itself: the
+// information weight g²/σ² for a daylight GHI of 500 W/m² becomes 500²/50 = 5 000,
+// which swamps any prior precision in a single update and collapses the
+// posterior onto the latest sample. That defeats the whole point of the
+// recursive Bayesian filter.
+//
+// Physical re-tune: pick σ as a fixed FRACTION of nameplate, on the theory
+// that a "typical" daylight-hour PV residual (modeled minus measured) is a
+// few percent to ~10% of peak — clouds, soiling, thermal derate, MPPT
+// imperfections. 10% of the operator's 16.8 kW array → σ ≈ 1 680 W → σ² ≈ 2.82e6.
+// Same g=500 W/m² update now contributes precision 500²/2.82e6 ≈ 0.089, so
+// the prior (1/1000 = 0.001) is overwritten over dozens of observations
+// rather than a single one. That's how the filter is meant to behave.
+const BAYES_OBS_SIGMA2 = (0.10 * PHOENIX_SITE.pNamplate) ** 2;
+// ≈ 2.82e6 for the operator's ~16.8 kWp; σ ≈ 1 680 W (10% of peak PV output).
 
 let bayesCache: { ts: number; value: BayesianSolarModel } | null = null;
 
@@ -4309,7 +4392,29 @@ const KALMAN_DAYS_PER_YEAR = 365.25;
 const KALMAN_Q_SOH = 1e-4;            // ~ (0.01% SoH change per day not explained by drift)
 const KALMAN_Q_RATE_PER_DAY = 1e-7;   // ~ ( ±√1e-7 = 3e-4 %/day stdev wander per day)
 // R (observation noise) variance — BMS reports ~ ±0.5 %, so R ≈ 0.25
-const KALMAN_R_OBS = 0.25;
+// v0.9.59 — corrected for bucket-averaged inputs. `analysePack` feeds the
+// filter pack-SoH samples that have already been averaged over 6-hour buckets
+// (DEGRADE_BUCKET_SEC = 21 600 s, see line ~1061) by the SQL GROUP BY in
+// recorder.queryMulti — each "sample" passed to kalmanFilterSoh is therefore
+// the mean of ~360 raw 60-second observations (6 h × 60 min / 1 min per sample).
+//
+// For independent observations the variance of the mean shrinks by 1/N, so
+// the true variance of each bucket-averaged sample is ~0.25 / 360 ≈ 7e-4 —
+// roughly 350× smaller than the raw-observation R. In practice the raw
+// samples within a bucket are NOT fully independent (the BMS-reported SoH
+// only changes meaningfully across cycles, not seconds), so the effective
+// variance reduction is much less than the theoretical bound.
+//
+// We use R = 0.05 — 5× smaller than the raw R, deliberately conservative
+// versus the 350× theoretical floor. This gives the filter the extra
+// confidence it deserves on bucket-averaged inputs (driftPerYearStdev now
+// shrinks proportionally as more buckets arrive) without trusting the
+// inputs so much that a single noisy bucket whip-saws the smoothed SoH.
+//
+// The alternative — feeding raw 60-second points + R = 0.25 — would be
+// strictly more correct but a much larger refactor (60-day raw history for
+// ~20 packs is ~17 M rows per pass, vs. ~480 buckets today). Deferred.
+const KALMAN_R_OBS = 0.05;
 // Initial covariance — broad enough that early observations dominate but not
 // so broad that the predict step blows up.
 const KALMAN_INIT_VAR_SOH = 100;        // (10% prior stdev — first obs anchors quickly)

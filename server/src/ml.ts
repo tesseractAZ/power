@@ -15,6 +15,8 @@ import type {
 } from './analytics.js';
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection } from './ecoflow/project.js';
+import { loadShadowModel } from './models/onlineLR.js';
+import { computeFamilyStats } from './alertOutcomes.js';
 
 /**
  * v0.9.4 — ML inference framework for pack-failure risk.
@@ -580,6 +582,102 @@ export interface PackRiskV2Report {
   /** Learned feature importances (|weight| × stdev across the fleet). Surfaces what the model actually relies on. */
   featureImportances: Array<{ name: FeatureName; importance: number; weight: number }>;
   packs: PackRiskV2Entry[];
+  /**
+   * v0.9.59 — Auto-downgrade gate state. When `degraded === true`, the
+   * trained track has been pinned to the heuristic score (per-pack) because
+   * either the shadow LR has drifted too far from the baseline or the
+   * alert-family precision is too low to trust the trained predictions.
+   * Optional so existing consumers don't break.
+   */
+  degraded?: boolean;
+  degradeReason?: 'drift' | 'precision' | 'drift+precision';
+  /** Debug payload for /api/models/health so the dashboard can surface
+   *  the exact numbers that drove the gate decision. */
+  gateDecision?: {
+    driftL2: number | null;
+    overallPrecision: number | null;
+    threshold: number;
+    minPrecision: number;
+    degraded: boolean;
+  };
+}
+
+/**
+ * v0.9.59 — Auto-downgrade gate. Decides whether the trained LR track
+ * is currently trustworthy. Mirrors the math in `models/modelHealth.ts`
+ * but inlined here to avoid a ml.ts ↔ modelHealth.ts ↔ ml.ts import cycle
+ * (modelHealth.ts already imports `loadModel` and `FEATURE_NAMES`).
+ *
+ * Trigger conditions:
+ *   - `driftL2 > PACK_RISK_DRIFT_THRESHOLD` (default 2.0). Set when the
+ *     shadow weights have wandered far from the trained baseline — usually
+ *     a sign that a string of `dismiss` outcomes has pushed the model
+ *     toward predicting 0 for everything.
+ *   - `overallPrecision < PACK_RISK_MIN_PRECISION` (default 0.4). Set when
+ *     the alert families with operator verdicts are running mostly-false-positive,
+ *     so the model fitting against them is learning bad signal.
+ *
+ * Cold-start handling: when the shadow file doesn't exist yet, the in-code
+ * defaults make `driftL2 === 0` (well below threshold) and `overallPrecision`
+ * is `null` (no decided alerts) — neither condition fires, so we don't degrade.
+ * Same for a healthy steady-state.
+ */
+function computeGateDecision(model: LrModel): {
+  driftL2: number | null;
+  overallPrecision: number | null;
+  threshold: number;
+  minPrecision: number;
+  degraded: boolean;
+  reason?: 'drift' | 'precision' | 'drift+precision';
+} {
+  const threshold = Number(process.env.PACK_RISK_DRIFT_THRESHOLD ?? 2.0);
+  const minPrecision = Number(process.env.PACK_RISK_MIN_PRECISION ?? 0.4);
+
+  // Drift: L2 distance between shadow and the model currently in use as
+  // "baseline" — same calc as computeModelHealth() but inlined.
+  let driftL2: number | null = null;
+  try {
+    const shadow = loadShadowModel();
+    let l2sq = 0;
+    for (const name of FEATURE_NAMES) {
+      const b = model.weights[name] ?? 0;
+      const s = shadow.weights[name] ?? 0;
+      const d = s - b;
+      l2sq += d * d;
+    }
+    const biasDelta = shadow.bias - model.bias;
+    l2sq += biasDelta * biasDelta;
+    driftL2 = Math.sqrt(l2sq);
+  } catch {
+    // If shadow can't be loaded for any reason, treat drift as unknown
+    // (null) — don't degrade on missing data.
+    driftL2 = null;
+  }
+
+  // Precision across alert families with decided outcomes.
+  let overallPrecision: number | null = null;
+  try {
+    const families = computeFamilyStats();
+    let totalReal = 0;
+    let totalDecided = 0;
+    for (const f of families) {
+      const real = f.ack + f.failed;
+      const decided = real + f.dismiss;
+      totalReal += real;
+      totalDecided += decided;
+    }
+    overallPrecision = totalDecided > 0 ? totalReal / totalDecided : null;
+  } catch {
+    overallPrecision = null;
+  }
+
+  const driftBad = driftL2 != null && driftL2 > threshold;
+  const precBad = overallPrecision != null && overallPrecision < minPrecision;
+  const degraded = driftBad || precBad;
+  const reason: 'drift' | 'precision' | 'drift+precision' | undefined =
+    driftBad && precBad ? 'drift+precision' : driftBad ? 'drift' : precBad ? 'precision' : undefined;
+
+  return { driftL2, overallPrecision, threshold, minPrecision, degraded, reason };
 }
 
 export function computePackRiskV2(
@@ -591,6 +689,7 @@ export function computePackRiskV2(
   chargeCurve: ChargeCurveReport,
 ): PackRiskV2Report {
   const model = loadModel();
+  const gate = computeGateDecision(model);
   const dpus = Object.values(devices).filter(
     (d) => d.projection?.kind === 'dpu',
   ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
@@ -629,8 +728,15 @@ export function computePackRiskV2(
     if (!heur) continue;
     const pred = predictRisk(f, model);
     const nov = noveltyByKey.get(`${f.sn}|${f.packNum}`);
+    // v0.9.59 — When the auto-downgrade gate fires, pin the trained track
+    // to the heuristic score so the composite (mean of three) doesn't
+    // crater silently. The `degraded` flag on the report tells the
+    // dashboard to surface why. We still expose the raw `pred.probability`
+    // and `pred.contributions` for debug visibility — only the score that
+    // feeds the composite is overridden.
+    const trainedScore = gate.degraded ? heur.score0to100 : pred.score0to100;
     const composite = Math.round(
-      (heur.score0to100 + pred.score0to100 + (nov?.novelty0to100 ?? 0)) / 3,
+      (heur.score0to100 + trainedScore + (nov?.novelty0to100 ?? 0)) / 3,
     );
     packs.push({
       sn: f.sn,
@@ -643,7 +749,7 @@ export function computePackRiskV2(
         topFactors: heur.topFactors,
       },
       trained: {
-        score0to100: pred.score0to100,
+        score0to100: trainedScore,
         probability: Math.round(pred.probability * 1000) / 1000,
         contributions: pred.contributions,
         modelVersion: model.version,
@@ -669,5 +775,14 @@ export function computePackRiskV2(
     modelFinalLoss: model.finalLoss,
     featureImportances,
     packs,
+    degraded: gate.degraded,
+    degradeReason: gate.reason,
+    gateDecision: {
+      driftL2: gate.driftL2,
+      overallPrecision: gate.overallPrecision,
+      threshold: gate.threshold,
+      minPrecision: gate.minPrecision,
+      degraded: gate.degraded,
+    },
   };
 }

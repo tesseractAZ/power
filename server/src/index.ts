@@ -912,6 +912,10 @@ app.post<{ Body: { alertId?: string; outcome?: string; notes?: string } }>(
       outcome: outcome as AlertOutcome,
       notes: notes && typeof notes === 'string' ? notes.slice(0, 500) : undefined,
       features: snap?.features,
+      // v0.9.59 — also thread through the captured LR feature vector
+      // (populated for pack-level alerts; null/undefined for system /
+      // SHP2 / EVSE alerts where the pack-risk LR doesn't apply).
+      lrFeatures: snap?.lrFeatures,
       alertFiredAt: snap?.ts,
       source: {
         ip: req.ip,
@@ -1037,13 +1041,46 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
   // Pull current forecast + load history for the next 24 h.
   let fc: any = null;
   try { fc = await getDayForecast(store.get().devices, recorder, () => {}); } catch { /* */ }
-  const pvP50: number[] = new Array(24).fill((fc?.forecastPvWhNext24 ?? 0) / 24000);
-  const pvP10: number[] = pvP50.map((v) => v * 0.6);
-  // Load forecast: flat at recent average (more sophisticated DOW-curve
-  // exists in analytics.ts; we use the simple average here for v1).
-  const recentLoadW = sp.circuits.reduce((s: number, c: any) => s + (c.watts ?? 0), 0);
-  const loadKwhPerHour = recentLoadW / 1000;
-  const loadForecast = new Array(24).fill(loadKwhPerHour);
+  // v0.9.59 — feed the MPC the actual per-hour PV+load curve from the
+  // day-ahead forecast instead of flat-filling with the 24 h mean. Without
+  // the diurnal signal the planner can't distinguish midday charging from
+  // evening discharge, so TOU arbitrage was impossible. Pull the P10
+  // (pessimistic) PV band from the probabilistic forecast so the planner
+  // can use a risk-averse PV envelope when sizing pre-peak imports.
+  // Fall back to flat-fill only if no forecast hours are available.
+  const recentLoadW = (sp.circuits ?? []).reduce(
+    (s: number, c: any) => s + (c.watts ?? 0), 0,
+  );
+  const fallbackLoadKwh = recentLoadW / 1000;
+  const fallbackPvKwh = (fc?.forecastPvWhNext24 ?? 0) / 24000;
+  const fcHours: any[] = Array.isArray(fc?.hours) ? fc.hours : [];
+  // Pull the probabilistic band so we have a real P10 PV envelope.
+  let probHours: any[] = [];
+  try {
+    if (fc) {
+      const skill = await computeForecastSkill(store.get().devices, recorder, fc);
+      const prob = await computeProbabilisticForecast(fc, skill);
+      probHours = Array.isArray(prob?.hours) ? prob.hours : [];
+    }
+  } catch { /* probabilistic is optional — fall through */ }
+  const pvP50: number[] = new Array(24).fill(fallbackPvKwh);
+  const pvP10: number[] = new Array(24).fill(fallbackPvKwh * 0.6);
+  const loadForecast: number[] = new Array(24).fill(fallbackLoadKwh);
+  for (let i = 0; i < 24; i++) {
+    const fh = fcHours[i];
+    if (fh) {
+      pvP50[i] = (fh.forecastPvW ?? 0) / 1000;
+      loadForecast[i] = (fh.forecastLoadW ?? 0) / 1000;
+    }
+    const pb = probHours[i];
+    if (pb) {
+      pvP10[i] = (pb.p10W ?? pvP50[i] * 1000 * 0.7) / 1000;
+    } else if (fh) {
+      // No probabilistic band for this hour — synthesize a conservative
+      // 70% P50 floor so the risk-averse branch still has something to bite.
+      pvP10[i] = pvP50[i] * 0.7;
+    }
+  }
   // Tariff: the operator's APS plan is flat $0.17/kWh (no TOU). Default both peak
   // and off-peak to TARIFF_FLAT_CENTS_PER_KWH (17 ¢ default), but still
   // honor the legacy TARIFF_ON_PEAK_CENTS_PER_KWH / TARIFF_OFF_PEAK_CENTS_PER_KWH

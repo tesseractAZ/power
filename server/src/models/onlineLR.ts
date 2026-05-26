@@ -52,35 +52,71 @@ const L2 = 0.001;
 const FAILED_LABEL_WEIGHT = 2.0;
 
 /**
- * Best-effort projection from category-specific snapshot features to the
- * normalized 6-dim LR feature vector. Returns null if we can't construct
- * a usable vector (e.g. forecast alerts have no thermal features).
+ * Build the normalized 6-dim LR feature vector for an outcome.
  *
- * Each LR feature has a "natural" mapping from one or more snapshot
- * features. When the snapshot is missing the source, that LR feature
- * defaults to 0 (the model's mean). This is conservative — missing
- * features pull the score toward "average risk" rather than spiking it.
+ * v0.9.59 — PREFER `outcome.lrFeatures` (the REAL normalized vector
+ * captured at alert fire time via featureSnapshot.captureLrFeatures,
+ * which routes through ml.ts's extractFeatures — same code path that
+ * `computePackRiskV2` uses for inference). When the captured vector
+ * is present we use it verbatim; the training inputs then match the
+ * inference inputs exactly. No proxy reconstruction.
+ *
+ * Fallback path (lower fidelity) — only used for historical snapshots
+ * captured BEFORE v0.9.59, where `outcome.lrFeatures` was never written:
+ * project the category-specific snapshot features to LR features as
+ * best we can. This proxy is known-bad for two cases the audit called
+ * out:
+ *
+ *   - rTrend was proxied via pack temperature, so a Phoenix summer
+ *     would train the model to predict "every pack high risk" from
+ *     ambient heat alone.
+ *   - coulombicEffPct always defaulted to 0 (no source in the snapshot),
+ *     wasting one of the six dimensions.
+ *
+ * Both bugs are FIXED by the captured-vector path. The fallback stays
+ * around only to keep historical outcomes (pre-v0.9.59) replayable.
+ *
+ * Returns null when we can't construct a usable vector at all (e.g.
+ * non-pack alert with no captured vector AND no usable proxy fields).
  */
-function snapshotToLrFeatures(snapshot: Record<string, number> | undefined): Record<FeatureName, number> | null {
+function snapshotToLrFeatures(
+  snapshot: Record<string, number> | undefined,
+  capturedLrFeatures?: Record<string, number> | null,
+): Record<FeatureName, number> | null {
+  // v0.9.59 preferred path — use the real captured vector when present.
+  if (capturedLrFeatures && typeof capturedLrFeatures === 'object') {
+    const out = {} as Record<FeatureName, number>;
+    let hasAny = false;
+    for (const name of FEATURE_NAMES) {
+      const v = capturedLrFeatures[name];
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        out[name] = v;
+        hasAny = true;
+      } else {
+        out[name] = 0;
+      }
+    }
+    if (hasAny) return out;
+    // capturedLrFeatures was an empty object — fall through to proxy logic.
+  }
+
   if (!snapshot) return null;
 
-  // For thermal alerts, we have pack_temp_c, max_cell_temp_c, board_temp_c.
-  // For battery alerts, we have pack_soc, pack_soh, pack_cycles, pack_vol_diff_mv.
-  // We don't have peerFadeRatio or rTrend in the snapshots (those are
-  // per-pack derived metrics computed elsewhere), so we approximate.
-
+  // Pre-v0.9.59 proxy fallback. Known to be lossy — see the audit notes
+  // above. We keep it ONLY so historical outcomes captured before the
+  // captured-vector path landed still produce a usable training signal.
   const out = {} as Record<FeatureName, number>;
   // peerFadeRatio — how badly this pack lags peers. Best proxy: vol_diff (mV imbalance).
   out.peerFadeRatio = snapshot['pack_vol_diff_mv'] != null
     ? Math.min(1, snapshot['pack_vol_diff_mv'] / 100)  // 100 mV ≈ severe → 1.0
     : 0;
   // rTrend — internal resistance trending up. Proxy via temperature delta
-  // from mean (hot packs imply rising IR).
+  // from mean (hot packs imply rising IR). KNOWN-BAD in summer climates.
   out.rTrend = snapshot['pack_temp_c'] != null
     ? Math.max(0, Math.min(1, (snapshot['pack_temp_c'] - 30) / 30))   // 30→60°C maps 0→1
     : 0;
   // coulombicEffPct — drift below 100%. We don't capture this in snapshots
-  // currently, so default to 0 (no signal).
+  // currently, so default to 0 (no signal). KNOWN-BAD; wastes a feature.
   out.coulombicEffPct = 0;
   // hardLifeScore — pack age / cycles. cycles >2000 ≈ end-of-life.
   out.hardLifeScore = snapshot['pack_cycles'] != null
@@ -158,8 +194,10 @@ export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) =
   if (outcome.outcome === 'resolved') {
     return { updated: false, prevLogit: 0, newLogit: 0, label: null, reason: 'resolved (ambiguous)' };
   }
-  // Only apply to alerts that have a feature snapshot we can use.
-  const lrFeatures = snapshotToLrFeatures(outcome.features);
+  // v0.9.59 — prefer the LR feature vector captured at alert-fire time
+  // (real model inputs); fall back to proxy reconstruction only for
+  // historical outcomes that pre-date the captured-vector path.
+  const lrFeatures = snapshotToLrFeatures(outcome.features, outcome.lrFeatures);
   if (!lrFeatures) {
     return { updated: false, prevLogit: 0, newLogit: 0, label: null, reason: 'no features captured' };
   }

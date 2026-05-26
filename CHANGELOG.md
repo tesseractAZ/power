@@ -3,6 +3,137 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.59 — 2026-05-26
+
+**Engine audit batch #2: "Models actually learn."** Seven follow-up
+fixes that turn the model + feedback infrastructure from decorative
+into actually functional. Each component now does what its name
+implied it was doing.
+
+### 1. Bayesian solar observation noise — physical scale (`analytics.ts`)
+
+`BAYES_OBS_SIGMA2` was hard-coded to `50` (~7 W stdev). For a 0–16,800 W
+PV signal that's so tight every observation annihilates the prior —
+posterior collapses to single-sample anchoring. Now derived from
+`PHOENIX_SITE.pNamplate`: `(0.10 × 16800)² = 2.82e6`, i.e. ~10% of
+peak. Posterior bands now widen and narrow with the actual residual
+variance instead of pretending the model is omniscient.
+
+### 2. Probabilistic forecast bands widen with horizon (`analytics.ts`)
+
+`sigmaFrac` was constant across all 24 hours — hour 24 had the same
+P10/P90 width as hour 1, despite physics. Multiplied by
+`sqrt(1 + horizonHours / 24)` so hour 24 ≈ 1.41× wider than hour 1,
+hour 48 ≈ 1.73× wider. Anchored on `forecast.hours[0].ts` so the
+multiplier grows monotonically regardless of when "now" lands
+relative to the forecast.
+
+### 3. Kalman R re-tuned for bucketed input (`analytics.ts`)
+
+`KALMAN_R_OBS = 0.25` was correct for raw observations, but `analysePack`
+feeds the filter 6-hour-bucketed averages. Bucket-averaging shrinks
+observation variance by ~360× (60 samples/min × 6 h ≈ 360 samples per
+bucket), but they're not fully independent — settled on `0.05` (5×
+smaller, deliberately conservative). The Kalman trend stops chasing
+bucket-internal noise as if it were raw signal.
+
+### 4. Internal-resistance steady-state windowing (`analytics.ts`)
+
+`computeInternalResistance` used adjacent (V, A) snaps with `|dI| ≥ 5A`
+as IR samples — exactly what a motor inrush or cloudburst looks like.
+30-day median dampens but a single noisy day still biases the trend.
+
+Now: both endpoints of every (V, A) pair must be **steady-state**.
+Steady = `|dI/dt| < 1 A/s` across a 5-second window on both sides.
+Plus sanity-band tightened from `[1, 500] mΩ` to `[2, 100] mΩ` —
+above 100 mΩ is a failed pack, not a measurement to be aged.
+
+### 5. Auto-downgrade gate for the ML pack-risk model (`ml.ts`)
+
+The audit found `computeModelHealth().totalDriftL2` was computed but
+nothing consumed it. After v0.9.58 wired the shadow model into
+predictions, a string of `dismiss` outcomes could push the LR
+divergent and silently crater predictions across the fleet.
+
+New `computeGateDecision()` checks `totalDriftL2` (default threshold
+2.0, env `PACK_RISK_DRIFT_THRESHOLD`) and `overallPrecision` (default
+min 0.4, env `PACK_RISK_MIN_PRECISION`). When degraded, the LR track
+is pinned to the heuristic score so the composite (mean of three
+tracks) doesn't crater. Response now includes `degraded: boolean`,
+`degradeReason: 'drift' | 'precision' | 'drift+precision'`, and
+`gateDecision: {...}` for debug surfaces.
+
+Cold-start safe: missing shadow returns drift=0; zero outcomes returns
+precision=null; either path leaves `degraded=false`. Inlined math
+instead of calling `computeModelHealth` directly to avoid circular
+import (`ml.ts → modelHealth.ts → ml.ts`).
+
+### 6. Feedback infra rebuild (`alertMonitor.ts`, `featureSnapshot.ts`, `onlineLR.ts`, `alertOutcomes.ts`, new `alertTelemetry.ts`)
+
+Three intertwined fixes:
+
+**(a) Real feature snapshots at alert fire time.** `snapshotToLrFeatures`
+was inventing `coulombicEffPct=0` always and proxying `rTrend` via
+pack temp — Phoenix summer thermals were training "every pack
+high-risk" purely from climate. Now `featureSnapshot.captureSnapshot`
+calls a new exported `captureLrFeatures()` that runs `ml.extractFeatures()`
+at the rising-edge of a pack-level alert and persists the real
+6-dimensional vector on the snapshot record. Historical outcomes
+without this data still use the proxy (with KNOWN-BAD comments), but
+all NEW outcomes train on truth.
+
+**(b) Persisted alert telemetry.** Rise counts, short-clear fractions,
+mean-active-duration were all in-memory only — chronic-noise rules
+reset on every restart. New `alertTelemetry.ts` JSONL module (path
+`data/alert-telemetry.jsonl`) persists every rise / short-clear /
+long-active event. On `startAlertMonitor`, replays the last 30 days
+(capped at 4 MB tail read) into the in-memory rollup before the first
+`evaluate()` call. Counters survive restart; replayed-only families
+seeded with `info` / `Battery` placeholders that get overwritten on
+first live fire.
+
+**(c) Family-rollup keying.** Telemetry was keyed by full `alertId`
+(includes device SN + pack num), so a noisy condition spread across
+5 packs couldn't accumulate to the chronic-noise threshold because no
+single packId got 10 rises. Now keyed by `familyOf(alertId)` (reused
+from alertOutcomes.ts — strips device serial + pack number), with the
+exemplar alertId preserved for human-readable logs. The action stays
+per-alert (silencing a single noisy pack); only the threshold math is
+per-family. Combined with restart-survival in (b), chronic-noise
+auto-silencing now actually works on a multi-pack fleet over multi-day
+windows.
+
+6 new tests in `alertTelemetry.test.ts`: append + round-trip,
+durationMs persistence, 30-day window filter, JSONL parseability.
+
+### 7. MPC dispatch — diurnal curve + real arbitrage actions (`dispatch/mpc.ts`, `index.ts`)
+
+The MPC was driven by `pvP50 = new Array(24).fill(forecastPvWhNext24 / 24000)`
+— a flat-fill mean. The whole point of TOU optimization is to know
+when PV is high vs when tariff is high; a flat forecast destroys both
+signals. Compounding: the action set was only `±` reserve floor,
+which can't actually express "discharge during on-peak" or "charge
+from grid off-peak" — so even with a real forecast the planner
+couldn't do arbitrage.
+
+Now:
+- `index.ts:/api/dispatch/recommend` feeds the MPC `fc.hours.map(h => h.forecastPvW / 1000)` and same for load — the actual diurnal curve. `pvP10` pulled from `computeProbabilisticForecast` for risk-averse planning.
+- Action set expanded from 3 → 6: `lower`, `maintain`, `raise` (legacy reserve-floor levers) plus `dischargeMax` (push at C-rate during on-peak), `chargeFromGrid` (pull off-peak energy into battery), `idleHold` (neither — let PV/load balance naturally).
+- Cost function now includes optional `gridExportCreditUsd` (env `MPC_EXPORT_TARIFF`, default 0 = net-metering off) and uses round-trip efficiency (`MPC_ROUND_TRIP_EFFICIENCY=0.9`) + C-rate cap (`MPC_MAX_C_RATE=0.25`).
+- New `degradeReason: 'flat-forecast' | 'no-tou-spread' | null` field. With the operator's flat $0.17 tariff (v0.9.58), the planner now correctly returns `degradeReason: 'no-tou-spread'` and `expectedSavingsUsd: 0` — instead of producing garbage savings numbers from imaginary spread.
+- `startHour = new Date().getHours()` cached once instead of called 3× across the DP (was drifting one slot on hour-boundary crossings).
+
+### Verification
+
+- 166/166 tests pass (160 baseline + 6 new alertTelemetry tests)
+- 4 parallel agents, all reported their own typecheck + tests clean
+- Final combined state: zero TS errors, all tests green
+- Files touched: analytics.ts, ml.ts, dispatch/mpc.ts, alertMonitor.ts,
+  featureSnapshot.ts, alertOutcomes.ts, index.ts, models/onlineLR.ts,
+  + new alertTelemetry.ts + new alertTelemetry.test.ts
+
+
+
 ## 0.9.58 — 2026-05-26
 
 **Engine audit batch #1: "Numbers right now."** Six fixes from a parallel
