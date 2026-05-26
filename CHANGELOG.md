@@ -3,6 +3,45 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.35 — 2026-05-25
+
+**TTS diagnostic + prefer modern path.** v0.9.34 testing after the
+Piper auto-setup revealed BOTH engines returning identical 500 "Server
+got itself in trouble" — Piper (`tts.speak:tts.piper`) and Cloud
+(`tts.cloud_say`) failed the same way. That points away from
+engine-specific bugs and toward something in how we're calling them
+or which targets we're sending.
+
+### New: `POST /api/broadcast/test-tts`
+
+Diagnostic harness — fires a single TTS announcement at chosen engine
++ targets WITHOUT klaxon/staggering/Sonos-restore wrapping. Lets us
+test combinations to find the smallest reproducer:
+
+```bash
+# Test Piper on one speaker
+curl -X POST http://homeassistant.local:8787/api/broadcast/test-tts \
+  -H "Content-Type: application/json" \
+  -d '{"engine":"tts.speak:tts.piper","targets":["media_player.homepod"],"message":"hello world"}'
+
+# Test legacy Cloud on all targets
+curl -X POST http://homeassistant.local:8787/api/broadcast/test-tts \
+  -H "Content-Type: application/json" \
+  -d '{"engine":"tts.cloud_say","message":"hello world"}'
+```
+
+Returns the raw HA service-call response so we can see the exact error
+text instead of the wrapped 500.
+
+### Prefer modern over legacy
+
+v0.9.31-34 detection logic SKIPPED modern entity-based engines when
+a same-flavor legacy engine was already present. That kept us on the
+deprecated `tts.cloud_say` even though `tts.speak:tts.home_assistant_cloud`
+would have routed through the better-maintained unified path. v0.9.35
+flips the priority: when a modern entity exists, the legacy entry is
+REMOVED in favor of `tts.speak:<entity>`.
+
 ## 0.9.34 — 2026-05-25
 
 **TUI rendering bug-bash.** Comprehensive audit + test coverage for the

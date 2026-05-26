@@ -215,14 +215,14 @@ export async function detectTtsEngines(): Promise<TtsEngine[]> {
     }
   }
   // 2. Modern unified path: one synthetic engine per discovered TTS entity.
+  // v0.9.35 — PREFER modern over legacy. v0.9.30 had legacy `tts.cloud_say`
+  // returning 500s in production; the modern `tts.speak:tts.home_assistant_cloud`
+  // path uses the same engine but a different HA endpoint that's better
+  // maintained. Drop the legacy entry when a matching modern entity exists.
   const entities = await detectTtsEntities();
   const hasTtsSpeak = cat?.some((c) => c.domain === 'tts' && 'speak' in c.services) ?? false;
   if (hasTtsSpeak) {
     for (const ent of entities) {
-      // Skip if we already have a legacy engine for this flavor — the
-      // legacy entry is identical and we don't want duplicates in the picker.
-      // (We could prefer entity-based here, but for now the legacy entry
-      // is what user docs reference.)
       const labelMap: Record<TtsEntity['flavor'], string> = {
         piper: 'Piper (local)',
         cloud: 'HA Cloud (Nabu Casa)',
@@ -240,15 +240,23 @@ export async function detectTtsEngines(): Promise<TtsEngine[]> {
       // Encode the entity ref in the service field as "tts.speak:<entity_id>"
       // so callers can route a speak() call through the right entity.
       const serviceRef = `tts.speak:${ent.entity_id}`;
-      // Don't add if already present via legacy entry of same flavor.
-      const dupFlavor = ent.flavor !== 'other' && found.some((f) =>
-        (ent.flavor === 'piper'      && f.service === 'tts.piper') ||
-        (ent.flavor === 'cloud'      && f.service === 'tts.cloud_say') ||
-        (ent.flavor === 'google'     && f.service === 'tts.google_translate_say') ||
-        (ent.flavor === 'elevenlabs' && f.service === 'tts.elevenlabs_say') ||
-        (ent.flavor === 'edge'       && f.service === 'tts.edge_tts_say')
-      );
-      if (dupFlavor) continue;
+      // v0.9.35 — REMOVE matching legacy entry instead of skipping the
+      // modern one. Modern tts.speak path is better maintained; legacy
+      // engine-specific services are deprecated and have been observed
+      // returning 500s in HA 2026.x.
+      const legacyServiceForFlavor: Record<TtsEntity['flavor'], string | null> = {
+        piper: 'tts.piper',
+        cloud: 'tts.cloud_say',
+        google: 'tts.google_translate_say',
+        elevenlabs: 'tts.elevenlabs_say',
+        edge: 'tts.edge_tts_say',
+        other: null,
+      };
+      const legacyService = legacyServiceForFlavor[ent.flavor];
+      if (legacyService) {
+        const idx = found.findIndex((f) => f.service === legacyService);
+        if (idx >= 0) found.splice(idx, 1);
+      }
       found.push({
         service: serviceRef,
         label: labelMap[ent.flavor],
