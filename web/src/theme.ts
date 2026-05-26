@@ -114,6 +114,11 @@ export const THEMES = [
     name: 'Starfleet',
     description: 'USS Enterprise NCC-1701 refit bridge (Star Trek: The Motion Picture). New layout, new stations, new chrome — not a re-skin.',
   },
+  {
+    id: 'opus' as const,
+    name: 'Opus',
+    description: 'Project Genesis — Apple-aesthetic Living World view. Deep cosmic black, glassmorphism, organic gradients, hero typography. Data feels alive.',
+  },
 ];
 
 export type ThemeId = (typeof THEMES)[number]['id'];

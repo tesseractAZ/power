@@ -96,6 +96,55 @@
   --sf-console-tan-dim:  #8a7250;
 }
 
+[data-theme="opus"] {
+  /* v0.9.40 — Project Genesis, "Opus" skin.
+   *
+   * Concept: Genesis = life from lifelessness. The data — power flowing,
+   * batteries breathing, panels generating — should feel ALIVE. Apple-
+   * aesthetic chassis: deep cosmic black, hairline borders, glassmorphism,
+   * generous whitespace, hero typography. Then organic gradients + spring
+   * motion give the system a heartbeat.
+   *
+   * Palette is restrained on purpose. One blue-green "life" hue
+   * (#34D399), one cosmic teal (#06B6D4) for accent, solar gold for PV,
+   * storage violet for batteries, warm amber for warning, only-when-
+   * needed coral for critical. Everything else is monochrome black with
+   * white text at 95/65/38% opacity for hierarchy. */
+  --color-bg: 6 8 14;            /* #06080e  cosmic black with hint of indigo */
+  --color-panel: 16 19 28;       /* #10131c  glass panel base (gets blur on top) */
+  --color-panel2: 11 13 20;      /* #0b0d14  panel recess */
+  --color-line: 80 90 110;       /* #505a6e  hairline border (low opacity in use) */
+  --color-ink: 242 246 252;      /* #f2f6fc  primary text */
+  --color-muted: 138 148 168;    /* #8a94a8  secondary text */
+  --color-accent: 52 211 153;    /* #34d399  Genesis life-green (emerald 400) */
+  --color-ok: 110 231 183;       /* #6ee7b7  emerald 300, less saturated nominal */
+  --color-warn: 251 191 36;      /* #fbbf24  amber 400 */
+  --color-bad: 248 113 113;      /* #f87171  coral 400 (only when truly critical) */
+
+  --font-sans: 'SF Pro Display', -apple-system, BlinkMacSystemFont, ui-sans-serif, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, 'Menlo', 'Cascadia Code', monospace;
+
+  /* Opus-specific tokens used by .opus-* classes / inline styles. */
+  --opus-life-1:   #34d399;        /* Genesis green */
+  --opus-life-2:   #6ee7b7;        /* light emerald */
+  --opus-life-3:   #064e3b;        /* deep emerald (gradient bottom) */
+  --opus-cosmic:   #06b6d4;        /* cosmic teal accent */
+  --opus-cosmic-2: #67e8f9;        /* light cyan */
+  --opus-solar:    #fbbf24;        /* amber 400 — PV source */
+  --opus-solar-2:  #fcd34d;        /* amber 300 light */
+  --opus-storage:  #a78bfa;        /* violet 400 — batteries */
+  --opus-storage-2:#c4b5fd;        /* violet 300 light */
+  --opus-load:     #f472b6;        /* pink 400 — house loads */
+  --opus-grid:     #94a3b8;        /* slate 400 — grid (when present) */
+
+  /* Glass tokens. opus-glass = backdrop blur + barely-visible white tint. */
+  --opus-glass-bg:     rgba(20, 24, 34, 0.55);
+  --opus-glass-border: rgba(255, 255, 255, 0.06);
+  --opus-glass-hover:  rgba(255, 255, 255, 0.04);
+  --opus-radial-1:     rgba(52, 211, 153, 0.08);  /* life-green halo */
+  --opus-radial-2:     rgba(6, 182, 212, 0.05);   /* cosmic teal halo */
+}
+
 html, body, #root { height: 100%; }
 body {
   background-color: rgb(var(--color-bg));
@@ -490,4 +539,174 @@ body {
   min-height: 100vh;
   background: transparent;
   color: var(--color-ink);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * v0.9.40 — Opus / Project Genesis chrome.
+ *
+ * Apple-aesthetic UI: deep cosmic backdrop with two faint radial halos
+ * (one Genesis-green, one cosmic-teal) for atmosphere; everything sits on
+ * a glassmorphism layer with backdrop-blur + hairline borders. Hero
+ * typography uses light weight for big numerals; section labels are tight
+ * tracked uppercase for editorial feel.
+ * ───────────────────────────────────────────────────────────────────── */
+
+[data-theme="opus"] body {
+  background:
+    radial-gradient(ellipse 80% 50% at 12% 10%, var(--opus-radial-1) 0%, transparent 60%),
+    radial-gradient(ellipse 70% 60% at 92% 88%, var(--opus-radial-2) 0%, transparent 60%),
+    rgb(var(--color-bg));
+  background-attachment: fixed;
+  font-feature-settings: 'cv11', 'ss03';  /* SF Pro stylistic alternates if available */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* The glass panel — the visual atom of the whole skin. */
+.opus-glass {
+  background: var(--opus-glass-bg);
+  border: 1px solid var(--opus-glass-border);
+  border-radius: 16px;
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+    0 24px 48px -24px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+.opus-glass-hover { transition: background 240ms ease, border-color 240ms ease, transform 280ms cubic-bezier(0.16, 1, 0.3, 1); }
+.opus-glass-hover:hover { background: var(--opus-glass-hover); border-color: rgba(255, 255, 255, 0.10); }
+
+/* Hero numerals — generously sized, light-weight, tabular */
+.opus-numeral {
+  font-family: var(--font-sans);
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+  font-weight: 200;
+  letter-spacing: -0.04em;
+  color: rgb(var(--color-ink));
+  line-height: 1;
+}
+.opus-numeral-sm { font-size: 28px; }
+.opus-numeral-md { font-size: 48px; }
+.opus-numeral-lg { font-size: 72px; }
+.opus-numeral-xl { font-size: 108px; }
+
+.opus-numeral-unit {
+  font-size: 0.35em;
+  margin-left: 0.12em;
+  font-weight: 400;
+  color: rgb(var(--color-muted));
+  letter-spacing: 0;
+}
+
+.opus-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-weight: 600;
+  color: rgb(var(--color-muted));
+}
+
+.opus-eyebrow {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  font-weight: 700;
+  color: var(--opus-life-1);
+}
+
+/* Subtle "breathing" pulse for live data. Used by the central energy
+   sphere + system-status dot. 8-second cycle keeps it ambient, not
+   distracting. */
+@keyframes opus-breathe {
+  0%, 100% { opacity: 0.92; transform: scale(1); }
+  50%      { opacity: 1;    transform: scale(1.015); }
+}
+.opus-breathe { animation: opus-breathe 8s ease-in-out infinite; }
+
+/* Orbital particle motion — used in the LivingWorld sphere. Each particle
+   gets a different animation-delay so they form a continuous stream rather
+   than firing in lockstep. */
+@keyframes opus-orbit {
+  from { transform: rotate(0deg) translateX(var(--r, 60px)) rotate(0deg); }
+  to   { transform: rotate(360deg) translateX(var(--r, 60px)) rotate(-360deg); }
+}
+.opus-orbit-particle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor, 0 0 16px currentColor;
+  animation: opus-orbit var(--dur, 12s) linear infinite;
+}
+
+/* "Flow line" — animated dashed line for power flows in System Map.
+   Stroke offset animates to create the impression of energy moving. */
+@keyframes opus-flow {
+  to { stroke-dashoffset: -24; }
+}
+.opus-flow-line {
+  stroke-dasharray: 8 4;
+  animation: opus-flow 1.6s linear infinite;
+}
+
+/* Pack vitals dot — small breathing circle, color = health. */
+.opus-pack-dot {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+  transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.opus-pack-dot::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  opacity: 0.25;
+  animation: opus-breathe 6s ease-in-out infinite;
+}
+.opus-pack-dot:hover { transform: scale(1.6); }
+
+/* Outlier halo — for packs flagged by hierarchical Bayes outlier detection. */
+.opus-pack-outlier::before {
+  content: '';
+  position: absolute;
+  inset: -12px;
+  border-radius: 50%;
+  border: 1px dashed var(--opus-solar);
+  animation: opus-breathe 3s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* macOS-dock-style bottom bar. */
+.opus-dock {
+  background: rgba(10, 12, 18, 0.7);
+  border: 1px solid var(--opus-glass-border);
+  border-radius: 22px;
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  padding: 10px 16px;
+  box-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.06) inset,
+    0 16px 48px -16px rgba(0, 0, 0, 0.7);
+}
+
+/* Section nav — pill segmented control */
+.opus-pill-group { display: inline-flex; gap: 4px; padding: 4px; background: rgba(255,255,255,0.04); border: 1px solid var(--opus-glass-border); border-radius: 999px; }
+.opus-pill { padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600; color: rgb(var(--color-muted)); transition: all 200ms ease; cursor: pointer; }
+.opus-pill:hover { color: rgb(var(--color-ink)); }
+.opus-pill-active { background: rgba(255,255,255,0.08); color: rgb(var(--color-ink)); box-shadow: 0 1px 0 0 rgba(255,255,255,0.08) inset; }
+
+[data-theme="opus"] .opus-bridge {
+  min-height: 100vh;
+  color: rgb(var(--color-ink));
+  font-family: var(--font-sans);
 }
