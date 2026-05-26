@@ -166,21 +166,29 @@ test('circuitHistoryByDay — metric override uses pair${primaryCh}_w for paired
 });
 
 test('circuitHistoryByDay — paired metric integrates to combined kWh', () => {
-  // Build a single in-progress day where pair10_w sits at 2000 W (~Pool Pump
-  // running on both legs) for an hour starting at local midnight. Expected
-  // result for that day's running total: ~2 kWh, with one >0-coverage day.
+  // Build a 1-hour window of data at 2000 W (~Pool Pump on both legs) for
+  // YESTERDAY at midnight → 1 AM. We request days=2 so days[0] is yesterday
+  // (with the data) and days[1] is today (empty).
+  //
+  // v0.9.36 — Using yesterday avoids the "test runs between UTC midnight and
+  // 1 AM" failure where today's data window is clipped by `now`, producing
+  // partial integration (e.g. 0.899 kWh instead of 2.0). The CI failure on
+  // 2026-05-26 00:25 UTC was exactly this — the v0.9.35 release was blocked
+  // because of timing.
   const todayStart = startOfLocalDayMs();
+  const yesterdayStart = todayStart - 86_400_000;
   const oneHour = 60 * 60_000;
   const fiveMin = 5 * 60_000;
   const pts: Array<{ ts: number; value: number }> = [];
-  for (let t = todayStart; t <= todayStart + oneHour; t += fiveMin) {
+  for (let t = yesterdayStart; t <= yesterdayStart + oneHour; t += fiveMin) {
     pts.push({ ts: t, value: 2000 });
   }
   const rec = mockRecorder({ pair10_w: pts });
-  const h = circuitHistoryByDay(rec, 'SN', 10, 1, 'pair10_w');
-  assert.equal(h.days.length, 1);
+  const h = circuitHistoryByDay(rec, 'SN', 10, 2, 'pair10_w');
+  assert.equal(h.days.length, 2);
+  // days[0] = yesterday (has the data), days[1] = today (empty).
   // ~2 kWh from 2000 W × 1 h. Allow ±0.05 kWh for rounding + clock drift.
-  assert.ok(Math.abs(h.days[0].kwh - 2) < 0.05, `expected ~2 kWh, got ${h.days[0].kwh}`);
+  assert.ok(Math.abs(h.days[0].kwh - 2) < 0.05, `expected yesterday ~2 kWh, got ${h.days[0].kwh}`);
   assert.equal(h.days[0].peakW, 2000);
   assert.equal(h.ch, 10); // still keyed by primary leg
 });

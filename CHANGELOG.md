@@ -3,6 +3,35 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.36 — 2026-05-26
+
+**Hotfix: unblock v0.9.35 image publish.** v0.9.35's image never made it
+to GHCR because a pre-existing flaky test in `aggregator.test.ts` failed
+in CI. The release was pushed at 2026-05-25 23:25 UTC and CI ran at
+00:25 UTC — exactly inside the failure window for the flaky test.
+
+The test built 1 hour of synthetic data starting at "today's local
+midnight" and expected ~2 kWh integration. But `circuitHistoryByDay`
+caps the integration window at `now`, so when CI happened to run
+between 00:00 and 01:00 UTC, only the portion BEFORE `now` was
+integrated → ~0.9 kWh instead of 2.0. The reported error
+`expected ~2 kWh, got 0.899` corresponds to test-time ≈ 00:27 UTC,
+which matches the CI clock exactly.
+
+**Fix:** the test now uses YESTERDAY's midnight as its data window
+anchor and requests 2 days of history. Day 0 (yesterday) always has
+its full 24-hour window available, so integration is deterministic
+regardless of UTC clock-time.
+
+This unblocks the GHCR image publish for the v0.9.35 broadcast/TTS
+diagnostic work, which was the actual content the user was waiting for.
+
+### Same content as v0.9.35
+
+- `POST /api/broadcast/test-tts` diagnostic endpoint
+- Modern `tts.speak:<entity>` path preferred over deprecated legacy
+  `tts.cloud_say` when both available
+
 ## 0.9.35 — 2026-05-25
 
 **TTS diagnostic + prefer modern path.** v0.9.34 testing after the
