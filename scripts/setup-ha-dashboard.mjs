@@ -171,20 +171,33 @@ async function ensureResources(ws) {
     const m = url.match(/\/([a-z0-9-]+)\.js(?:\?.*)?$/);
     return m && ourSlugs.has(m[1]) ? m[1] : null;
   };
-  const stale = existing.filter((r) => slugFromUrl(r.url) && !wanted.has(r.url));
+  // Stale = wrong URL OR right URL but wrong res_type. We register IIFE
+  // bundles as `js` (see below); anything marked `module` is from a prior
+  // script version and gets replaced.
+  const stale = existing.filter(
+    (r) => slugFromUrl(r.url) && (!wanted.has(r.url) || r.type !== 'js'),
+  );
   for (const r of stale) {
     await send(ws, { type: 'lovelace/resources/delete', resource_id: r.id });
-    console.log(`  - deleted stale  ${r.url}`);
+    console.log(`  - deleted stale  ${r.url}  (type=${r.type})`);
   }
-  const already = new Set(existing.filter((r) => wanted.has(r.url)).map((r) => r.url));
+  // Re-fetch after deletes so `already` reflects what's left.
+  const existingAfter = stale.length ? await send(ws, { type: 'lovelace/resources' }) : existing;
+  const already = new Set(
+    existingAfter.filter((r) => wanted.has(r.url) && r.type === 'js').map((r) => r.url),
+  );
   for (const url of wanted) {
     if (already.has(url)) {
       console.log(`  · already present  ${url}`);
       continue;
     }
+    // IIFE bundles (rollup `format: 'iife'`) should be loaded as classic
+    // scripts. Loading them as `module` works in some browsers but trips
+    // Safari's stricter module CORS path and surfaces as "Configuration
+    // error" on the card without a useful console message.
     const created = await send(ws, {
       type: 'lovelace/resources/create',
-      res_type: 'module',
+      res_type: 'js',
       url,
     });
     console.log(`  + created  ${url}  (id=${created.id ?? '?'})`);
