@@ -3,6 +3,27 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.37 — 2026-05-26
+
+**Hotfix: GHA buildx cache reliability.** v0.9.35-36 image publishes
+all failed with `error writing layer blob: failed to reserve cache`
+from the GitHub Actions cache backend, blocking shipment of the
+v0.9.35 TTS diagnostic endpoint.
+
+The GHA cache service was rejecting writes for a sustained window
+(observed 00:25-00:40 UTC). `docker/build-push-action` treats
+`cache-to` write failures as fatal by default, so the whole publish
+job died even though the image itself built cleanly.
+
+**Fix:** added `ignore-error=true` to all `cache-to: type=gha` lines
+in `images.yml` and `ci.yml`. Cache writes now best-effort —
+failures log a warning, the build proceeds. Cache reads (`cache-from`)
+still work; they just hit cold-cache occasionally when the previous
+write was skipped.
+
+This unblocks v0.9.35 + v0.9.36 content shipping (TTS diagnostic
+endpoint, modern path preference, flaky midnight test fix).
+
 ## 0.9.36 — 2026-05-26
 
 **Hotfix: unblock v0.9.35 image publish.** v0.9.35's image never made it

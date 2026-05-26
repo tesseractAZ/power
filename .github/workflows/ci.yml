@@ -61,5 +61,6 @@ jobs:
             BUILD_REF=${{ github.sha }}
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_VERSION=ci
+          # v0.9.37 — ignore-error=true so a flaky GHA cache doesn't fail the smoke build.
           cache-from: type=gha,scope=docker-smoke
-          cache-to: type=gha,mode=max,scope=docker-smoke
+          cache-to: type=gha,mode=max,scope=docker-smoke,ignore-error=true
