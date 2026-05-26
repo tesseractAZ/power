@@ -3,6 +3,44 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.47 — 2026-05-26
+
+**Fix: install vcn natively (CodeNotary signing on aarch64).** v0.9.46
+landed the CN secrets and the workflow ran the signing step — but it
+crashed:
+
+```
+WARNING: The requested image's platform (linux/amd64) does not match
+the detected host platform (linux/arm64/v8)
+SIGSEGV: segmentation violation
+```
+
+The `codenotary/vcn:latest` Docker image is **amd64-only**. On our
+`ubuntu-24.04-arm` GitHub runner (where the aarch64 add-on image
+builds), Docker fell back to QEMU emulation and the Go binary
+segfaulted in `netpoll_epoll.go:165` immediately on startup. amd64
+side of the matrix probably would have worked, but the matrix
+fail-fast killed it.
+
+**Fix:** install vcn directly as a native binary per-arch. CodeNotary
+ships static `linux-amd64` and `linux-arm64` binaries on their GitHub
+releases page (v0.9.13 — confusingly the same version number as
+this add-on's release).
+
+```yaml
+- name: Install vcn
+  run: |
+    case "$(uname -m)" in
+      x86_64)  VCN_ARCH=amd64 ;;
+      aarch64) VCN_ARCH=arm64 ;;
+    esac
+    curl -fsSL -o /tmp/vcn \
+      "https://github.com/codenotary/vcn/releases/download/v0.9.13/vcn-v0.9.13-linux-${VCN_ARCH}-static"
+    sudo install -m 0755 /tmp/vcn /usr/local/bin/vcn
+```
+
+No more Docker emulation, no more SIGSEGV.
+
 ## 0.9.46 — 2026-05-26
 
 **CodeNotary signer email correction.** Updates `build.yaml`'s

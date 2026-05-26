@@ -182,6 +182,27 @@ jobs:
             echo "     at https://github.com/${{ github.repository }}/settings/secrets/actions"
           fi
 
+      # v0.9.47 — Install vcn natively per-arch. The previous version used
+      # `docker run codenotary/vcn:latest` which only publishes an amd64
+      # image; on our aarch64 runner (ubuntu-24.04-arm) Docker fell back
+      # to QEMU emulation and the Go binary SIGSEGV'd in netpoll on
+      # startup. CodeNotary ships native arm64/amd64 binaries on their
+      # GitHub releases page, so install one directly.
+      - name: Install vcn
+        if: steps.cn_check.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)  VCN_ARCH=amd64 ;;
+            aarch64) VCN_ARCH=arm64 ;;
+            *) echo "Unsupported arch: $(uname -m)"; exit 1 ;;
+          esac
+          VCN_VERSION=v0.9.13
+          curl -fsSL -o /tmp/vcn \
+            "https://github.com/codenotary/vcn/releases/download/${VCN_VERSION}/vcn-${VCN_VERSION}-linux-${VCN_ARCH}-static"
+          sudo install -m 0755 /tmp/vcn /usr/local/bin/vcn
+          vcn --version
+
       - name: Sign image with CodeNotary
         if: steps.cn_check.outputs.configured == 'true'
         env:
@@ -190,17 +211,14 @@ jobs:
           VCN_NOTARIZATION_PASSWORD: ${{ secrets.CN_PASSWORD }}
         run: |
           set -euo pipefail
+          # Authenticate to CodeNotary (writes session token to ~/.vcn).
+          vcn login
           IMG_VER="ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.arch }}-ecoflow-panel:${{ needs.resolve.outputs.version }}"
           IMG_LATEST="ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.arch }}-ecoflow-panel:latest"
           for IMG in "$IMG_VER" "$IMG_LATEST"; do
             echo "::group::vcn notarize $IMG"
-            docker run --rm \
-              -e VCN_USER -e VCN_PASSWORD -e VCN_NOTARIZATION_PASSWORD \
-              -e DOCKER_CONFIG=/tmp/docker \
-              -v "$HOME/.docker:/tmp/docker:ro" \
-              codenotary/vcn:latest \
-              notarize --silent --output json "docker://$IMG" \
-              | tee "/tmp/vcn-$(basename "$IMG").json"
+            vcn notarize --silent --output json "docker://$IMG" \
+              | tee "/tmp/vcn-$(basename "$IMG" | tr ':' '-').json"
             echo "::endgroup::"
           done
 
