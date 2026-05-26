@@ -3,6 +3,10 @@
 **/dist
 **/web/dist
 **/server/dist
+# v0.9.55 — keep the prebuilt HACS card bundles in the build context.
+# `**/dist` above would have excluded these; Docker honours later negations.
+!lovelace/dist
+!lovelace/dist/**
 **/.git
 **/.gitignore
 **/.env
