@@ -3,6 +3,97 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.40 — 2026-05-26
+
+**Project Genesis — the Opus skin.** Wholly new web UI option alongside
+Default, Babylon 5, and Starfleet. Genesis = life from lifelessness:
+the household energy system rendered as something alive — breathing,
+flowing, gathering, spending. Apple-aesthetic chassis: deep cosmic
+black, glassmorphism panels, hero typography, organic radial gradients.
+
+Pick it in the theme switcher (top-right of any view): **Opus**.
+
+### Visual language
+
+- **Cosmic black backdrop** with two faint radial halos (Genesis green,
+  cosmic teal) for atmosphere — never distracting, always present.
+- **Glass panels** (`opus-glass`) — backdrop-blur 20px + saturate 150%,
+  hairline borders at 6% white, inner highlight + outer shadow.
+- **Hero typography** — SF Pro Display, light weight (200), tabular
+  numerals, large sizes (48-108pt) for the metrics that matter, tiny
+  uppercase tracked eyebrows for labels.
+- **Restrained palette**:
+  - Genesis green (#34D399) — life, healthy state
+  - Cosmic teal (#06B6D4) — accent, "now" indicators
+  - Solar gold (#FBBF24) — PV generation, warnings
+  - Storage violet (#A78BFA) — batteries
+  - Pink coral (#F472B6) — house loads
+  - Critical red (#F87171) — only when truly critical
+- **Breathing animations** — 8-sec slow pulse on key live elements;
+  particles orbit the central sphere with stagger so they form
+  continuous streams.
+
+### New components
+
+- **`opus/components/LivingWorld.tsx`** — the centerpiece. Animated
+  emerald sphere with three orbital particle streams (solar gold inbound,
+  storage violet bidirectional, load pink outbound). Particle counts
+  scale with actual watts so a sunny noon shows a dense stream and a
+  cloudy morning shows a trickle. The sphere's SoC arc (0°-360°)
+  encodes fleet state of charge.
+- **`opus/components/PackVitals.tsx`** — 20-pack constellation. Each
+  pack a breathing dot color-coded by SoH and size-boosted by activity.
+  4 DPU columns × 5 pack rows. Hover any dot for full details (SoC,
+  SoH, temp, cycles, cell spread, in/out watts).
+- **`opus/components/ForecastCanvas.tsx`** — 24-hour stacked-area chart
+  (PV gold + Load pink + SoC dashed emerald). Linear gradient fills,
+  fine grid, "now" hairline. Hits `/api/forecast` with 5-min refresh.
+- **`opus/components/SystemMap.tsx`** — hand-illustrated schematic of
+  the whole installation. Custom SVG nodes (sun, battery stack, house,
+  EV charger, smart panel) connected by animated flow lines whose
+  dasharray motion direction = active energy flow. No icon font, no
+  stock SVGs — every shape drawn for this purpose.
+- **`opus/components/AlertSurface.tsx`** — quiet by default. When no
+  alerts, shows centered emerald checkmark with halo (the "All Clear"
+  graphic). When alerts exist, lists them as glassmorphic rows with
+  color-coded severity dots, category, location (Core/pack), title,
+  detail.
+- **`opus/components/StatusDock.tsx`** — macOS-dock-style bar pinned
+  bottom-center. Live status pills: CONN, MA, TTS (local vs cloud
+  badge), speaker count, wall clock. Hover for tooltip details.
+
+### Navigation
+
+Single landing page (Home) covers everything operators usually need —
+Living World hero + Alerts + Forecast + Pack Vitals — in a thoughtfully
+paced vertical scroll. Floating segmented control in the header opens
+focused deep-dives:
+
+- **Home** — the calm overview
+- **Health** — Pack Vitals + Alerts only
+- **Forecast** — 24h outlook in detail
+- **Map** — System schematic
+
+### Theme registration
+
+Added `opus` to `THEMES` in `web/src/theme.ts`. Selectable from the
+existing `ThemeToggle` chip (which iterates THEMES — automatic). CSS
+variables live under `[data-theme="opus"]` in `index.css` alongside
+the existing default / b5 / starfleet blocks.
+
+### Bundle impact
+
+OpusBridge: 30.83 kB JS (8.26 kB gzipped). Lazy-loaded — only ships
+when the user selects Opus. Default/B5 users pay zero cost.
+
+### Acknowledgement
+
+> "In Project Genesis, look at all that has been done in every aspect
+> of the project, and imagine a completely new web GUI taking in the
+> totality of the project and what's relevant to the user."
+
+You bet.
+
 ## 0.9.39 — 2026-05-26
 
 **MA-release before TTS.** v0.9.38 testing established that even a

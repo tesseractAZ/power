@@ -18,6 +18,9 @@ import { installGlossaryTooltips } from './glossary';
 // component tree (not a re-skin of these tabs). Lazy-loaded so it
 // doesn't ship in the Default/B5 bundle.
 const StarfleetBridge = lazy(() => import('./starfleet/StarfleetBridge').then((m) => ({ default: m.StarfleetBridge })));
+// v0.9.40 — Project Genesis / Opus theme. Apple-aesthetic Living World
+// view. Lazy-loaded same as Starfleet.
+const OpusBridge = lazy(() => import('./opus/OpusBridge').then((m) => ({ default: m.OpusBridge })));
 
 // v0.8.1 — route-level code splitting. Each non-default page becomes its own
 // chunk; recharts (~300 kB minified) is vendor-chunked separately via the
@@ -58,6 +61,13 @@ export default function App() {
     return (
       <Suspense fallback={<PageFallback />}>
         <StarfleetBridge />
+      </Suspense>
+    );
+  }
+  if (theme === 'opus') {
+    return (
+      <Suspense fallback={<PageFallback />}>
+        <OpusBridge />
       </Suspense>
     );
   }
