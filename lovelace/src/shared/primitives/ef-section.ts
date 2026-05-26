@@ -1,5 +1,5 @@
 import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { property } from 'lit/decorators.js';
 import { themeCss } from '../theme.css.js';
 
 /**
@@ -7,8 +7,10 @@ import { themeCss } from '../theme.css.js';
  * Smaller than a full `ha-card`; meant to group several `<ef-tile>`s or
  * other content inside a single card. The header slot accepts trailing
  * widgets (e.g. a "show more" link or status badge).
+ *
+ * Registered manually via `customElements.define` with an idempotent guard
+ * (see ef-badge.ts for the rationale).
  */
-@customElement('ef-section')
 export class EfSection extends LitElement {
   @property() title = '';
 
@@ -64,4 +66,8 @@ declare global {
   interface HTMLElementTagNameMap {
     'ef-section': EfSection;
   }
+}
+
+if (!customElements.get('ef-section')) {
+  customElements.define('ef-section', EfSection);
 }

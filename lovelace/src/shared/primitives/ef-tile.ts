@@ -1,5 +1,5 @@
 import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { property } from 'lit/decorators.js';
 import { themeCss } from '../theme.css.js';
 
 /**
@@ -8,8 +8,12 @@ import { themeCss } from '../theme.css.js';
  *   - default: optional supplementary content (badges, sublines)
  *   - `label`: replace the label entirely (e.g. to wrap with `glossary(...)`)
  *   - `value`: replace the value (e.g. to add color or formatting wrappers)
+ *
+ * Registered manually via `customElements.define` with an idempotent guard
+ * (see ef-badge.ts for the rationale — each card bundle includes its own
+ * copy of this module, so the second-and-later bundles would throw a
+ * `NotSupportedError` if `@customElement` were used).
  */
-@customElement('ef-tile')
 export class EfTile extends LitElement {
   @property() label = '';
   @property() value: string | number = '';
@@ -73,4 +77,8 @@ declare global {
   interface HTMLElementTagNameMap {
     'ef-tile': EfTile;
   }
+}
+
+if (!customElements.get('ef-tile')) {
+  customElements.define('ef-tile', EfTile);
 }

@@ -3,6 +3,53 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.56 — 2026-05-26
+
+**Fix card registration collision when 2+ cards share a Lovelace
+dashboard.** Symptom in HA: "Configuration error" on every tab after
+the first; only the first card to load actually renders.
+
+Root cause: each per-card IIFE bundle (fleet, battery, solar, alerts,
+strategy, insights, circuit) had its own tree-shaken copy of the
+shared primitives `<ef-badge>`, `<ef-tile>`, `<ef-section>`. Those
+primitives used Lit's `@customElement(name)` decorator, which calls
+`customElements.define(name, ctor)` *unconditionally*. When the
+second bundle loaded, the decorator threw
+`NotSupportedError: name "ef-badge" has already been used` during
+top-level IIFE execution — killing the IIFE before the card's own
+`customElements.define('ecoflow-X-card', …)` ran. The custom element
+was never registered, and Lovelace surfaced the failure as the
+generic "Configuration error" tile with nothing useful in the console.
+
+Reproduced cold from a clean browser via Claude Preview against the
+live add-on: only the first-loaded card registered; subsequent six
+all failed with `NotSupportedError` at the primitive define call.
+
+### Fix
+
+Replace `@customElement(name)` with an explicit idempotent
+registration at the bottom of each primitive module:
+
+```ts
+if (!customElements.get('ef-badge')) {
+  customElements.define('ef-badge', EfBadge);
+}
+```
+
+Applied to all three primitives (`ef-badge`, `ef-tile`, `ef-section`).
+Card files keep `@customElement` since each card's tag is unique to
+its bundle — no collision possible. Bundles rebuilt.
+
+### Caveat: stale resource cache
+
+If you applied earlier versions of the dashboard, your browser may
+have cached the broken bundle. After updating to v0.9.56, do a hard
+refresh (Cmd-Shift-R / Ctrl-Shift-R) so Lovelace re-fetches the new
+bundle. The Lovelace `resource_id` doesn't change so no re-registration
+is needed.
+
+
+
 ## 0.9.55 — 2026-05-26
 
 **Serve the Lovelace card bundles directly from the add-on.**

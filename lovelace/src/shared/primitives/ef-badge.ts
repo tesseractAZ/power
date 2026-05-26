@@ -1,5 +1,5 @@
 import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { property } from 'lit/decorators.js';
 import { themeCss } from '../theme.css.js';
 
 /**
@@ -7,12 +7,16 @@ import { themeCss } from '../theme.css.js';
  * status pills (connection state, alert counts, etc.). Text is slotted so
  * callers can include icons or other inline elements alongside the label.
  *
- * The element is registered as a side-effect of importing this module —
- * each card that uses it imports the file once and the registry de-dupes.
+ * Registration uses a manual idempotent `customElements.define` rather
+ * than the `@customElement` decorator. Each per-card bundle (fleet, battery,
+ * solar, …) has its own copy of this module tree-shaken in; when HA loads
+ * the second bundle the decorator would throw `NotSupportedError: name
+ * "ef-badge" has already been used`, killing the IIFE before the card's
+ * own `customElements.define` runs. The if-guard makes the second-and-later
+ * bundles no-op the registration.
  */
 export type EfBadgeTone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
 
-@customElement('ef-badge')
 export class EfBadge extends LitElement {
   @property({ reflect: true }) tone: EfBadgeTone = 'neutral';
 
@@ -59,4 +63,8 @@ declare global {
   interface HTMLElementTagNameMap {
     'ef-badge': EfBadge;
   }
+}
+
+if (!customElements.get('ef-badge')) {
+  customElements.define('ef-badge', EfBadge);
 }
