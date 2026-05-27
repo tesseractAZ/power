@@ -3,6 +3,108 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.62 — 2026-05-26
+
+**Three follow-up fixes from the v0.9.61 audit findings.** Two real bug
+fixes + one clarification of v0.9.58's actually-a-no-op Kalman change.
+
+### Fix #1 — Drift gate now actually compares shadow vs baseline (`ml.ts`)
+
+v0.9.59's `computeGateDecision()` was supposed to auto-downgrade
+PackRiskV2 when the LR shadow model drifted far from baseline
+(`totalDriftL2 > 2.0`). v0.9.61's test backfill caught that the
+**drift branch was structurally unreachable** through the public
+`computePackRiskV2` API: both `loadModel()` and `computeGateDecision()`
+internally called `loadShadowModel()` (which prefers shadow over
+baseline), so when a shadow file existed, both ends WERE the same
+shadow object and `driftL2` was always 0. Only the precision branch
+could ever fire end-to-end.
+
+Fix: new `loadBaselineModelOnly()` helper reads `MODEL_PATH` directly
+via `existsSync` + `readFileSync`, bypassing the shadow-preference
+logic. `computeGateDecision` now uses `loadBaselineModelOnly()` for
+the baseline side and `loadShadowModel()` for the shadow side. The
+`_model` arg is now ignored (renamed with leading underscore +
+JSDoc note) — kept for call-site API stability.
+
+Cold start (shadow exists but no baseline yet — operator never ran
+`npm run train`): `driftL2` is set to `0` rather than `null`. Drift
+treated as "unknown / cannot measure", gate stays open, precision
+branch decides. This is the correct conservative behavior.
+
+3 new tests in `ml-feedback.test.ts` lock in the fix:
+- "drift compares shadow vs on-disk baseline (not arg)" — passes a
+  drifted shape AS the `_model` arg, asserts drift is still 0
+  (proves arg is ignored).
+- "no on-disk baseline (only shadow) → drift treated as 0" — cold
+  start edge case.
+- "drift gate fires end-to-end via on-disk baseline vs shadow" — the
+  end-to-end-through-public-API guarantee. Wipes outcomes so precision
+  is null, writes a drifted shadow + baseline, asserts
+  `report.degraded === true` and `report.degradeReason === 'drift'`.
+
+### Fix #2 — EV-window detector now tolerates ±30 min jitter (`analytics.ts`)
+
+`computeEvWindowPrediction` grouped historical sessions by exact
+`getHours()` of start time, so jittered sessions at 17:55 / 18:02 /
+17:57 / 18:05 split across hour-17 and hour-18 buckets and never
+reached the `EV_WINDOW_MIN_RECURRENCES=3` threshold. Real-world EV
+start times jitter ±10-20 min around the user's actual habit.
+
+Fix: round to nearest hour boundary before bucketing. Sessions with
+minute ≥ 30 roll forward, minute < 30 stay. The bucket key now reads
+`getDay()` + `getHours()` from the rounded `Date` (handles late-night
+day-rollover and DST correctly because we add 3,600,000 ms to the
+epoch then re-read fields). Documented in a 13-line v0.9.62 comment
+block. Edge case: exactly :30 rolls UP (`>= 30` is inclusive).
+
+Flipped the dispatch test that was pinning the broken behavior to
+assert the new correct behavior. Test now asserts that 4 jittered
+sessions around 18:00 all aggregate into the hour-18 bucket and
+emit a recurring pattern. Pinned-broken-behavior test name updated:
+`audit-flagged hour-boundary split (combined)` →
+`round-to-nearest-hour aggregates jittered sessions (v0.9.62)`.
+
+#### Out-of-scope follow-ups discovered during this fix
+
+- **Day-of-week jitter still drops patterns silently.** Recurrence is
+  keyed by `(sn, circuit, dayOfWeek, startHour)`, so a user who
+  charges at 18:00 after work but on Mon/Tue/Wed (rarely the same
+  day 3 weeks running) still doesn't get a pattern emitted. The
+  hour-jitter fix only addresses one axis.
+- **`EV_WINDOW_HISTORY_MS = 30 days` is too short** for the 3-recurrence
+  threshold to fire reliably in production. Should probably be ≥ 60
+  days. The test mock recorder ignores `since` so the test still
+  exercises the bucketing logic, but real-world the history window
+  is the binding constraint.
+
+Both are worth a future task.
+
+### Fix #3 (informational, not code) — v0.9.58 Kalman "asymmetry fix" footnote
+
+v0.9.58 described `p10 = -k1·p00 + p10` → `p10 = (1-k0)·p10` as
+fixing a "covariance asymmetry bug causing systematically overconfident
+EOL projection." v0.9.61's regression-guard test (`battery.test.ts`)
+showed that the two expressions are **algebraically identical** when
+`H=[1,0]`: `-k1·p00 + p10 = -(p10/S)·p00 + p10 = p10·(1 - p00/S) = (1-k0)·p10`.
+Pre-v0.9.58 code kept `|p10 - p01| ≈ 8.67e-19` (pure double-precision
+noise). So the EOL projection was not actually overconfident from
+this issue — the v0.9.58 change was a clarity improvement, not a
+correctness fix. The v0.9.61 test pins the algebraic equivalence so
+a future *actually* asymmetric update fails CI.
+
+This is informational only — no code change in v0.9.62. Just flagging
+in the CHANGELOG so a future contributor reading the v0.9.58 entry
+doesn't assume there was a real bug they could regress.
+
+### Verification
+
+`npx tsc --noEmit` → zero errors. `node --test --import tsx test/*.test.ts` →
+**270/270 pass** (was 267; +3 new from Fix #1, the EV-window test was
+flipped not added).
+
+
+
 ## 0.9.61 — 2026-05-26
 
 **Test backfill — 101 new tests, 166 → 267.** The v0.9.58-v0.9.60

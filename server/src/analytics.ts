@@ -2200,10 +2200,24 @@ export function computeEvWindowPrediction(
   }
 
   // Bucket by (sn, circuit, dayOfWeek, startHour) and count recurrences.
+  //
+  // v0.9.62 fix (audit finding from v0.9.61): real-world EV start times
+  // jitter ±10-20 min around the user's habitual time. The previous
+  // implementation used `d.getHours()` directly, so sessions at 17:55 and
+  // 18:05 landed in different hour buckets — neither reached the
+  // EV_WINDOW_MIN_RECURRENCES=3 threshold and no pattern was emitted.
+  //
+  // Fix: round the start time to the nearest hour boundary
+  // (minutes >= 30 ⇒ +1 hour, else current hour). Exactly :30 rounds UP to
+  // the next hour, matching standard "round half up" semantics. When the
+  // rounding pushes past 23:59, dayOfWeek advances too (handled by feeding
+  // the rounded timestamp back through Date).
   const groups = new Map<string, { records: typeof sessions; }>();
   for (const s of sessions) {
     const d = new Date(s.startTs);
-    const key = `${s.sn}|${s.circuit}|${d.getDay()}|${d.getHours()}`;
+    const roundedHourBoundaryMs = s.startTs + (d.getMinutes() >= 30 ? 1 : 0) * 3_600_000;
+    const rd = new Date(roundedHourBoundaryMs);
+    const key = `${s.sn}|${s.circuit}|${rd.getDay()}|${rd.getHours()}`;
     const g = groups.get(key) ?? { records: [] };
     g.records.push(s);
     groups.set(key, g);

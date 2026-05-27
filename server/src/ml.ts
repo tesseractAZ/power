@@ -353,6 +353,25 @@ export function saveModel(model: LrModel): void {
   modelCacheSourceMtimeMs = 0;
 }
 
+/**
+ * v0.9.62 — Read the on-disk baseline (MODEL_PATH) directly, bypassing the
+ * shadow-preference logic in `loadModel()`. Used by `computeGateDecision`
+ * to get a *true* baseline reference for drift comparison against the
+ * shadow. Not cached — drift checks are infrequent and we want the freshest
+ * baseline content if the operator just re-ran training.
+ *
+ * Returns `null` when MODEL_PATH doesn't exist or fails to parse — caller
+ * treats that as "no baseline to compare against" (drift is unknown, not 0).
+ */
+function loadBaselineModelOnly(): LrModel | null {
+  if (!existsSync(MODEL_PATH)) return null;
+  try {
+    return JSON.parse(readFileSync(MODEL_PATH, 'utf8')) as LrModel;
+  } catch {
+    return null;
+  }
+}
+
 /* ─── Training (heuristic-distilled, or labeled when CSV exists) ─────── */
 
 const LABELS_PATH = resolve(process.cwd(), config.dbPath, '..', 'labels.csv');
@@ -621,8 +640,14 @@ export interface PackRiskV2Report {
  * defaults make `driftL2 === 0` (well below threshold) and `overallPrecision`
  * is `null` (no decided alerts) — neither condition fires, so we don't degrade.
  * Same for a healthy steady-state.
+ *
+ * v0.9.62 — `model` parameter is now ignored for the drift calculation; we
+ * always read the on-disk baseline (MODEL_PATH) directly via
+ * `loadBaselineModelOnly()`. See the inline comment in the drift block for
+ * why the previous shadow-vs-`model` comparison was a no-op end-to-end.
+ * The parameter is retained to preserve the call-site API.
  */
-export function computeGateDecision(model: LrModel): {
+export function computeGateDecision(_model: LrModel): {
   driftL2: number | null;
   overallPrecision: number | null;
   threshold: number;
@@ -633,21 +658,41 @@ export function computeGateDecision(model: LrModel): {
   const threshold = Number(process.env.PACK_RISK_DRIFT_THRESHOLD ?? 2.0);
   const minPrecision = Number(process.env.PACK_RISK_MIN_PRECISION ?? 0.4);
 
-  // Drift: L2 distance between shadow and the model currently in use as
-  // "baseline" — same calc as computeModelHealth() but inlined.
+  // Drift: L2 distance between shadow and the on-disk baseline.
+  //
+  // v0.9.62 — Previously this compared `shadow` to the `model` argument.
+  // But `computePackRiskV2` passes `loadModel()` as that arg, and
+  // `loadModel()` prefers the shadow file when present → both sides ended
+  // up being the same shadow object → drift L2 was always 0 → the drift
+  // branch was unreachable end-to-end. (Only the precision branch could
+  // actually trigger via the public API.) Now we read MODEL_PATH directly
+  // via `loadBaselineModelOnly()` so the comparison is shadow-vs-baseline,
+  // which is what the gate is supposed to detect.
+  //
+  // Cold-start handling: if MODEL_PATH doesn't exist (operator never ran
+  // training, only the in-code default and the shadow exist), there is no
+  // true baseline to compare against — drift is set to 0 (the correct
+  // "no comparison possible" answer, not a degradation signal).
   let driftL2: number | null = null;
   try {
-    const shadow = loadShadowModel();
-    let l2sq = 0;
-    for (const name of FEATURE_NAMES) {
-      const b = model.weights[name] ?? 0;
-      const s = shadow.weights[name] ?? 0;
-      const d = s - b;
-      l2sq += d * d;
+    const baseline = loadBaselineModelOnly();
+    if (baseline === null) {
+      // No on-disk baseline → no meaningful drift to report. Treat as 0
+      // so the gate stays open; precision branch can still fire.
+      driftL2 = 0;
+    } else {
+      const shadow = loadShadowModel();
+      let l2sq = 0;
+      for (const name of FEATURE_NAMES) {
+        const b = baseline.weights[name] ?? 0;
+        const s = shadow.weights[name] ?? 0;
+        const d = s - b;
+        l2sq += d * d;
+      }
+      const biasDelta = shadow.bias - baseline.bias;
+      l2sq += biasDelta * biasDelta;
+      driftL2 = Math.sqrt(l2sq);
     }
-    const biasDelta = shadow.bias - model.bias;
-    l2sq += biasDelta * biasDelta;
-    driftL2 = Math.sqrt(l2sq);
   } catch {
     // If shadow can't be loaded for any reason, treat drift as unknown
     // (null) — don't degrade on missing data.

@@ -165,13 +165,17 @@ test('computeGateDecision — cold-start (no shadow, no outcomes) is NOT degrade
 
 test('computeGateDecision — drift > threshold fires "drift" reason', () => {
   resetModelFiles();
-  // Write a shadow with bias deliberately pushed far from baseline.
-  // baseline.bias = -2.5; shadow.bias = -10 → bias delta = -7.5; L2 ≥ 7.5
-  // which is well over the 2.0 default threshold.
+  // v0.9.62 — Drift is now computed as L2 between the on-disk shadow and
+  // the on-disk baseline (MODEL_PATH), so both files must exist for the
+  // drift branch to engage. Write a baseline at bias=-2.5 and a shadow
+  // with bias deliberately pushed to -10 → bias delta = -7.5 → L2 ≥ 7.5,
+  // well over the 2.0 default threshold.
+  writeFileSync(MODEL_PATH, JSON.stringify({ ...makeBaseline(), version: 'baseline-drift' }));
   const driftedShadow = { ...makeBaseline(), version: 'shadow-drifted', bias: -10 };
   writeFileSync(SHADOW_PATH, JSON.stringify(driftedShadow));
   // Force a fresh load so the in-process module-level cache (if any) is
   // bypassed: touch with a far-future mtime.
+  touchFile(MODEL_PATH, Date.now() + 300_000);
   touchFile(SHADOW_PATH, Date.now() + 300_000);
 
   const gate = ml.computeGateDecision(makeBaseline());
@@ -183,10 +187,13 @@ test('computeGateDecision — drift > threshold fires "drift" reason', () => {
 
 test('computeGateDecision — env override for PACK_RISK_DRIFT_THRESHOLD widens the gate', () => {
   resetModelFiles();
-  // Same drifted shadow as the previous test (L2 ≈ 7.5), but raise the
-  // threshold to 100 so it should NOT fire.
+  // Same shape as the previous test (L2 ≈ 7.5), but raise the threshold
+  // to 100 so it should NOT fire. v0.9.62: both MODEL_PATH and SHADOW_PATH
+  // must exist for the drift comparison to engage.
+  writeFileSync(MODEL_PATH, JSON.stringify({ ...makeBaseline(), version: 'baseline-drift-2' }));
   const driftedShadow = { ...makeBaseline(), version: 'shadow-drifted-2', bias: -10 };
   writeFileSync(SHADOW_PATH, JSON.stringify(driftedShadow));
+  touchFile(MODEL_PATH, Date.now() + 360_000);
   touchFile(SHADOW_PATH, Date.now() + 360_000);
 
   const prev = process.env.PACK_RISK_DRIFT_THRESHOLD;
@@ -201,6 +208,51 @@ test('computeGateDecision — env override for PACK_RISK_DRIFT_THRESHOLD widens 
   }
 });
 
+test('computeGateDecision — v0.9.62: drift compares shadow vs on-disk baseline (not arg)', () => {
+  // Regression guard for the v0.9.62 fix. Previously `computeGateDecision`
+  // compared the shadow to the `model` argument passed in. Since
+  // `computePackRiskV2` calls `loadModel()` (shadow-preferred) and passes
+  // that as the arg, both ends were the same shadow object → driftL2 was
+  // always 0 → drift branch unreachable end-to-end.
+  //
+  // Post-fix behavior: drift always compares shadow on disk vs baseline on
+  // disk, regardless of what's passed in `_model`. Prove it: pass a `model`
+  // that LOOKS LIKE the shadow on disk (would produce drift=0 under the
+  // old logic), and assert drift is nonzero because the baseline on disk
+  // differs.
+  resetModelFiles();
+  writeFileSync(MODEL_PATH, JSON.stringify({ ...makeBaseline(), version: 'baseline-on-disk' }));
+  const driftedShadow = { ...makeBaseline(), version: 'shadow-on-disk', bias: -10 };
+  writeFileSync(SHADOW_PATH, JSON.stringify(driftedShadow));
+  touchFile(MODEL_PATH, Date.now() + 400_000);
+  touchFile(SHADOW_PATH, Date.now() + 400_000);
+
+  // Pass the drifted shadow AS the model arg. Under the old logic this
+  // would have made drift = 0 (shadow vs shadow). Under v0.9.62 the arg
+  // is ignored and drift is computed against the on-disk baseline at -2.5.
+  const gate = ml.computeGateDecision(driftedShadow);
+  assert.ok(gate.driftL2 !== null && gate.driftL2 > 2.0,
+    `v0.9.62 should ignore _model arg and compare on-disk shadow vs baseline; got drift=${gate.driftL2}`);
+  assert.equal(gate.degraded, true, 'drift > 2.0 must degrade');
+  assert.equal(gate.reason, 'drift');
+});
+
+test('computeGateDecision — no on-disk baseline (only shadow) → drift treated as 0', () => {
+  // Cold-start edge case: operator has never run training, so MODEL_PATH
+  // doesn't exist, but the shadow has accumulated SGD updates. We have no
+  // "true baseline" to compare against — the gate treats drift as 0 (the
+  // correct "no comparison possible" answer) so it stays open and lets
+  // the precision branch decide on its own.
+  resetModelFiles();
+  // Shadow only, with bias deliberately far from any reasonable baseline.
+  writeFileSync(SHADOW_PATH, JSON.stringify({ ...makeBaseline(), version: 'shadow-orphan', bias: -10 }));
+  touchFile(SHADOW_PATH, Date.now() + 440_000);
+
+  const gate = ml.computeGateDecision(makeBaseline());
+  assert.equal(gate.driftL2, 0, 'missing baseline → drift defaults to 0, not null');
+  assert.equal(gate.degraded, false, 'no baseline + no decided outcomes → gate stays open');
+});
+
 /* ─── computePackRiskV2 — degraded gate pins trained → heuristic ─────── */
 
 test('computePackRiskV2 — degraded gate pins trained score to heuristic per pack', () => {
@@ -208,13 +260,10 @@ test('computePackRiskV2 — degraded gate pins trained score to heuristic per pa
   // Force the gate to fire by seeding alert-outcomes that all-dismiss
   // ("false-positive" verdicts) → overall precision = 0 < 0.4 threshold.
   //
-  // Note: drift-based degradation can NOT be exercised through this
-  // public surface in the current v0.9.59 implementation — `loadModel()`
-  // prefers the shadow file, and `computeGateDecision` then compares
-  // that loaded model (already the shadow) to `loadShadowModel()`, so
-  // drift is structurally 0. We test the drift branch directly in the
-  // `computeGateDecision — drift > threshold` case above. Here we use
-  // the precision branch which IS reachable end-to-end.
+  // v0.9.62: the drift branch IS also reachable end-to-end now (see the
+  // dedicated drift-through-computePackRiskV2 test below). Here we use
+  // the precision branch because it's the simplest way to force degraded
+  // mode without seeding both MODEL_PATH and SHADOW_PATH.
   const outcomesPath = process.env.ALERT_OUTCOMES_PATH!;
   // Wipe any prior content from earlier tests.
   if (existsSync(outcomesPath)) rmSync(outcomesPath);
@@ -298,6 +347,93 @@ test('computePackRiskV2 — degraded gate pins trained score to heuristic per pa
     'degraded gate must pin trained → heuristic',
   );
   assert.equal(entry.trained.score0to100, 60);
+});
+
+test('computePackRiskV2 — v0.9.62: drift gate fires end-to-end via on-disk baseline vs shadow', () => {
+  // v0.9.62 regression guard. The drift branch of the auto-downgrade gate
+  // is supposed to fire when shadow weights have wandered far from the
+  // trained baseline. Prior to v0.9.62 this was structurally impossible
+  // via the public `computePackRiskV2` surface (both sides of the L2 calc
+  // resolved to the same shadow object). Now that baseline is read
+  // directly from MODEL_PATH, the drift branch IS reachable end-to-end.
+  resetModelFiles();
+  // Seed both files with a deliberate drift: baseline at bias=-2.5,
+  // shadow at bias=-10 → L2 ≥ 7.5 ≫ 2.0 default threshold.
+  writeFileSync(MODEL_PATH, JSON.stringify({ ...makeBaseline(), version: 'baseline-e2e' }));
+  writeFileSync(
+    SHADOW_PATH,
+    JSON.stringify({ ...makeBaseline(), version: 'shadow-e2e-drifted', bias: -10 }),
+  );
+  touchFile(MODEL_PATH, Date.now() + 500_000);
+  touchFile(SHADOW_PATH, Date.now() + 500_000);
+  // Wipe alert outcomes so precision is null and ONLY the drift branch
+  // can drive the degraded verdict — proves the drift path is live.
+  const outcomesPath = process.env.ALERT_OUTCOMES_PATH!;
+  if (existsSync(outcomesPath)) rmSync(outcomesPath);
+
+  const heuristic = [{
+    sn: 'TESTSN2',
+    device: 'TestDev2',
+    coreNum: 1,
+    packNum: 1,
+    score0to100: 42,
+    tier: 'attention' as const,
+    topFactors: [],
+  }];
+  const devices = {
+    TESTSN2: {
+      sn: 'TESTSN2',
+      deviceName: 'TestDev2',
+      productName: 'Delta Pro Ultra',
+      online: true,
+      lastUpdated: Date.now(),
+      projection: {
+        kind: 'dpu' as const,
+        soc: 50,
+        packCount: 1,
+        packs: [{
+          num: 1, soc: 50, soh: 95, actSoh: null, inputWatts: null, outputWatts: null,
+          temp: 25, cycles: 100, remainTimeMin: null, packSn: 'TESTPACK2',
+          designCapMah: null, fullCapMah: null, remainCapMah: null,
+          accuChgMah: null, accuDsgMah: null, cellTemps: [], mosTemps: [], ptcTemps: [],
+          hwBoardTemp: null, curResTemp: null, minCellTemp: null, maxCellTemp: null,
+          minMosTemp: null, maxMosTemp: null, cellVoltagesMv: [],
+          minCellVoltageMv: null, maxCellVoltageMv: null, maxVolDiffMv: null,
+          balanceState: null, packVoltageMv: null, adBatVoltageMv: null, ocvMv: null,
+        }],
+        pvHighWatts: null, pvLowWatts: null, pvTotalWatts: null, pvHighVolts: null,
+        pvHighAmps: null, pvLowVolts: null, pvLowAmps: null, pvHighErrCode: null,
+        pvLowErrCode: null, acInWatts: null, acOutWatts: null, acOutFreq: null,
+        acOutVol: null, batVol: null, batAmp: null, totalInWatts: null, totalOutWatts: null,
+        remainTimeMin: null, mpptHvTemp: null, mpptLvTemp: null,
+        splitPhase: { L11: null, L12: null, L14: null, L21: null, L22: null },
+        sysErrCode: null, emsParaVolMaxMv: null, emsParaVolMinMv: null,
+        chgMaxSoc: null, dsgMinSoc: null,
+      },
+    },
+  };
+  const degradation = { packs: [], generatedAt: 0 } as any;
+  const thermalEvents = { packs: [], generatedAt: 0 } as any;
+  const internalR = { devices: [], generatedAt: 0 } as any;
+  const chargeCurve = { packs: [], generatedAt: 0 } as any;
+
+  const report = ml.computePackRiskV2(
+    devices as any,
+    heuristic,
+    degradation,
+    thermalEvents,
+    internalR,
+    chargeCurve,
+  );
+  assert.equal(report.degraded, true, 'drift > 2.0 must fire degraded mode end-to-end');
+  assert.equal(report.degradeReason, 'drift', 'reason must be drift (precision is null)');
+  assert.ok(
+    report.gateDecision!.driftL2 !== null && report.gateDecision!.driftL2 > 2.0,
+    `drift must be measurable and over threshold; got ${report.gateDecision!.driftL2}`,
+  );
+  assert.equal(report.gateDecision!.overallPrecision, null, 'no outcomes seeded → null');
+  // Pin: trained should equal heuristic since gate degraded.
+  assert.equal(report.packs[0].trained.score0to100, report.packs[0].heuristic.score0to100);
 });
 
 /* ─── snapshotToLrFeatures — captured wins over proxy ────────────────── */

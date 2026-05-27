@@ -295,21 +295,23 @@ test('computeStringMismatch — flags an underperforming DPU vs peers', () => {
  * happy-path (sessions extracted, weekly pattern detected) AND the audit-
  * flagged hour-boundary behavior in a single combined scenario. */
 
-test('computeEvWindowPrediction — recurring pattern detected AND audit-flagged hour-boundary split (combined)', () => {
-  // 6 weekly EV-charging sessions, jittered around two different start hours.
-  //   Group A (4 sessions, all at hour 18): meets the ≥ 3-recurrence
-  //     threshold → MUST produce a pattern. typicalWatts ~ 7000.
-  //   Group B (3 sessions split across hour 17 (2) + hour 18 (1), at
-  //     the SAME weekday): the 30-60 min hour-boundary issue. With current
-  //     code (exact-hour bucketing), hour 17 alone has only 2 entries →
-  //     NO pattern from this bucket. Hour 18 gets only Group A's 4
-  //     entries + Group B's 1 = 5; still one pattern from hour 18.
+test('computeEvWindowPrediction — round-to-nearest-hour aggregates jittered sessions (v0.9.62)', () => {
+  // 7 weekly EV-charging sessions, jittered around two start hours on
+  // two different weekdays.
+  //   Group A (4 sessions, all at exactly 18:00 on weekday-A): obviously
+  //     meets the ≥ 3-recurrence threshold → produces a pattern.
+  //     typicalWatts ~ 7000.
+  //   Group B (3 sessions on weekday-B, jittered ±5 min around 18:00):
+  //     17:55, 18:02, 17:57. Under the v0.9.61 bucketing (exact getHours()),
+  //     these split 2/1 across hour-17 and hour-18 and neither sub-bucket
+  //     reached 3 recurrences — no Group-B pattern was emitted.
+  //     Under the v0.9.62 round-to-nearest-hour rule
+  //     (minutes >= 30 ⇒ +1 hour, else stay): 17:55→18, 18:02→18,
+  //     17:57→18. All 3 land in hour-18 on weekday-B → meets the
+  //     threshold → pattern emitted.
   //
-  // Net assertion: sessions > 0 (real sessions exist), AND exactly ONE
-  // pattern (the hour-18 one), proving the hour-boundary split prevents
-  // the hour-17 sub-bucket from being detected as a recurrence.
-  // A future fix that adds 30-60 min tolerance would emit MORE patterns
-  // (the hour-17 bucket gets merged into the hour-18 bucket).
+  // This test pins the v0.9.62 fix: BOTH Group-A and Group-B should produce
+  // a recurring pattern, with their respective weekdays distinct.
 
   const devices = fakeShp2({
     backupFullCapWh: 60_000, backupRemainWh: 30_000,
@@ -371,27 +373,38 @@ test('computeEvWindowPrediction — recurring pattern detected AND audit-flagged
     `typicalWatts should be ~7000, got ${groupAPattern!.typicalWatts}`,
   );
 
-  // AUDIT: any sub-bucket whose recurrences < 3 is silently dropped. With
-  // the current exact-hour bucket, the Group-B jittered sessions split
-  // across hour 17 and hour 18, and the hour-17 sub-bucket alone won't
-  // reach 3 recurrences. So no pattern with startHour=17 should be
-  // emitted today. When the 30-60 min tolerance fix lands, hour-17 would
-  // merge with hour-18 and this assertion should be flipped.
-  const hour17Pattern = r.patterns.find((p) => p.startHour === 17 && p.dayOfWeek === groupAPattern!.dayOfWeek);
-  // groupBJitter contains 2 negative values (sessions push into hour 17) on
-  // a different weekday from Group A — so the dayOfWeek check above
-  // doesn't directly apply. But independently: no hour-17 sub-bucket on
-  // any weekday alone reaches 3.
+  // v0.9.62 FIX: with round-to-nearest-hour bucketing, Group-B's three
+  // jittered sessions (17:55, 18:02, 17:57) all collapse into hour-18 on
+  // weekday-B. That sub-bucket now reaches 3 recurrences → a Group-B
+  // pattern at startHour=18 on a DIFFERENT weekday from Group A must be
+  // emitted. Two distinct (dayOfWeek, startHour=18) patterns total.
+  const hour18Patterns = r.patterns.filter((p) => p.startHour === 18);
+  assert.ok(
+    hour18Patterns.length >= 2,
+    `expected ≥2 startHour=18 patterns (Group A + Group B on different ` +
+    `weekdays) after v0.9.62 round-to-nearest-hour fix, got ` +
+    `${hour18Patterns.length}: ${JSON.stringify(hour18Patterns.map((p) => ({ dow: p.dayOfWeek, hr: p.startHour, n: p.recurrences })))}`,
+  );
+  const groupBPattern = r.patterns.find(
+    (p) => p.startHour === 18 && p.dayOfWeek !== groupAPattern!.dayOfWeek,
+  );
+  assert.ok(
+    groupBPattern,
+    'expected a Group-B pattern at startHour=18 on a weekday different from Group A',
+  );
+  assert.ok(
+    groupBPattern!.recurrences >= 3,
+    `Group-B pattern should have ≥3 recurrences (the 3 jittered sessions), got ${groupBPattern!.recurrences}`,
+  );
+
+  // No hour-17 pattern should leak through: every jittered session rounds
+  // forward to hour-18, so no hour-17 sub-bucket exists on any weekday.
   const anyHour17 = r.patterns.find((p) => p.startHour === 17);
   assert.equal(
     anyHour17,
     undefined,
-    'CURRENT BEHAVIOR (audit-flagged): hour-boundary split keeps the ' +
-    'hour-17 sub-bucket below the recurrence threshold. When 30-60 min ' +
-    'tolerance is added, this assertion should change to expect a pattern.',
+    'round-to-nearest-hour should push all 17:55/17:57 sessions to hour 18',
   );
-  // (Quiet the unused-var lint — hour17Pattern is documented for clarity.)
-  void hour17Pattern;
 });
 
 /* ─── computeEquipmentHealth ─────────────────────────────────────────── */
