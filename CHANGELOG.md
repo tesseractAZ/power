@@ -3,6 +3,116 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.65 — 2026-05-27
+
+**Two independent work streams shipping together** (v0.9.64's MPC fix
++ v0.9.65's no-cloud-TTS controls). Both landed clean in parallel
+agents; one tag and one CI run keeps the release cadence sane.
+
+### A. Hard "no Cloud TTS, ever" mode (the v0.9.65 work)
+
+For off-grid setups: the operator explicitly does not want TTS to ever hit
+HA Cloud. Two complementary user controls now enforce that:
+
+**New option `BROADCAST_TTS_REQUIRE_LOCAL: bool` (default `false`).**
+When `true`, auto-pick filters TTS engines to ONLY those marked
+`local: true` (currently Piper; future-proof for other on-device
+engines). If no local engine is available, broadcasts skip TTS
+entirely (klaxon only) instead of silently falling back to Cloud.
+Log: `"broadcast: TTS skipped — REQUIRE_LOCAL=true and no local
+engine available"`.
+
+**Explicit `BROADCAST_TTS_SERVICE` pin now disables fallback chain.**
+Before v0.9.65: pinning `BROADCAST_TTS_SERVICE: tts.speak:tts.piper`
+made Piper the *preferred* engine but the chain still appended other
+detected engines (often Cloud) as fallback. After v0.9.65: an
+explicit pin produces a single-element chain. If the pinned engine
+fails at runtime, broadcast records the failure and falls through
+to klaxon-only. Log: `"broadcast: TTS engine pinned via
+BROADCAST_TTS_SERVICE=<svc> — fallback chain disabled"`.
+
+Defense-in-depth: `buildEngineChain()` filters out non-local engines
+from the auto-pick chain even when there's no pin (so a future change
+that accidentally includes Cloud in `ttsAvailable` can't slip through).
+A third diagnostic log fires if a user pins a non-local engine with
+REQUIRE_LOCAL=true: `"broadcast: TTS skipped — REQUIRE_LOCAL=true but
+pinned engine <svc> is non-local"`.
+
+The `/api/broadcast/test-tts` diagnostic endpoint is intentionally
+left ungated — it's an operator-driven debug tool that takes an
+explicit engine in the request body. Not a silent fallback.
+
+19 new tests in `server/test/tts-no-cloud.test.ts`:
+- 6 `pickEngine` tests covering the REQUIRE_LOCAL filter matrix
+- 9 `buildEngineChain` tests covering pin/REQUIRE_LOCAL combinations,
+  edge cases (empty-string pin, two local engines, log diagnostics)
+- 4 `loadBroadcastConfig` tests covering env-var parsing (default
+  false, "true", "1", "false")
+
+Files: `server/src/ttsService.ts` (added `pickEngineFromList()` helper,
+threaded `requireLocal` through `pickBestEngine`), `server/src/broadcast.ts`
+(added `requireLocalTts` to `BroadcastConfig`, extracted `buildEngineChain()`
+helper at file bottom), `config.yaml` (declared option + schema entry).
+
+### B. MPC dispatch action set now actually selects new actions (v0.9.64 work, bundled)
+
+The v0.9.59 expanded action set (`dischargeMax`, `chargeFromGrid`,
+`idleHold`) was wired into the candidate set but the DP optimizer
+never selected any of them — under extreme TOU (50¢/1¢) + 8 kWh/h
+on-peak load + low SoC, `recommendDispatch` returned `grid=0` and
+`battery=0` for all 24 hours and picked only `raise`/`lower`.
+`expectedSavingsUsd` reported 5.76 but the plan was a no-op.
+
+Root cause in `server/src/dispatch/mpc.ts`: the `simulateHour()`
+function didn't actually translate the action's `batteryFlowFrac`
+into kWh moved. The `dischargeMax`/`chargeFromGrid` actions had
+correct flow fractions, but the simulator only updated SoC from
+the passive load/PV balance and never applied the explicit
+battery-flow component. So selecting `dischargeMax` produced the
+same SoC trajectory as `idleHold` → DP couldn't distinguish them →
+ties broke to the legacy actions.
+
+Fix: `simulateHour` now computes intentional battery flow as
+`flowKwh = capacityKwh × batteryFlowFrac`, clamped by SoC bounds
+(reserve floor for discharge, 100% ceiling for charge), then adds
+it to the SoC delta + adjusts grid flow correspondingly. Round-trip
+efficiency applied to charge-from-grid (off-peak → battery → on-peak
+load) so the DP correctly accounts for the loss.
+
+The previously-skipped regression-guard test at `dispatch.test.ts:570`
+is now unskipped and asserts that under TOU + load + low-SoC,
+`dischargeMax` or `chargeFromGrid` appears at least once in the
+24-hour plan. With the fix: `chargeFromGrid` selected at hour 17
+(planner pre-charges from grid to handle remaining on-peak load).
+
+Side note discovered along the way: the DP discretizes SoC into 5%
+buckets (3 kWh per bucket on a 60 kWh fleet), which loses fidelity
+on hours with sub-bucket flow. Not a v0.9.65 fix; flagged for a future
+refinement if anyone ever needs finer planning granularity.
+
+Doesn't affect users on flat tariffs — `degradeReason: 'no-tou-spread'`
+still short-circuits the planner per v0.9.59. So no behavior change
+for the operator until he ever goes back on TOU.
+
+### Verification
+
+`npx tsc --noEmit` → zero errors. `node --test --import tsx test/*.test.ts`
+→ **300/300 pass / 0 skip / 0 fail** (was 281 at v0.9.63; +19 new from
+A, plus the previously-skipped MPC test now unskipped and passing).
+
+### Immediate user action (now safe to set without losing audibility)
+
+EcoFlow Panel Configuration → set:
+```yaml
+BROADCAST_TTS_SERVICE: tts.speak:tts.piper    # pin = single-element chain
+BROADCAST_TTS_LANGUAGE: en_US                  # Piper wants underscore
+BROADCAST_TTS_REQUIRE_LOCAL: true              # belt-and-suspenders
+```
+Save → Restart. With all three set, your broadcasts go Piper-only;
+if Piper ever breaks, klaxon-only — never Cloud.
+
+
+
 ## 0.9.63 — 2026-05-26
 
 **TTS language-format retry — Wyoming/Cloud format mismatch.**

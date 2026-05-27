@@ -172,16 +172,40 @@ const ACTIONS: ActionDef[] = [
  * Simulate one hour given a starting SoC + PV + load + reserve setpoint
  * + intended battery flow. Returns the ending SoC + the cost components.
  *
- * Cost model (v0.9.59):
+ * Energy balance (v0.9.64):
+ *   PV + grid_import + battery_discharge = load + battery_charge + grid_export
+ *
+ * The `batteryFlowFrac` action controls **deliberate** battery flow (in
+ * addition to whatever the natural PV/load imbalance would do):
+ *   - `idleHold`/`maintain`/`raise`/`lower` (flow = 0): battery acts passively
+ *     — absorbs PV surplus into storage, supplies load shortfall from storage
+ *     down to the reserve floor, and grid covers any remaining gap.
+ *   - `chargeFromGrid` (flow > 0): on top of passive PV absorption, pull extra
+ *     grid kWh into the battery so it's pre-charged for an upcoming on-peak
+ *     window. Grid import = (load shortfall after PV) + (explicit charge).
+ *   - `dischargeMax` (flow < 0): deliberately drain the battery toward the
+ *     load. The discharged kWh first displaces load (reducing grid imports);
+ *     only if the requested discharge exceeds the load shortfall would the
+ *     remainder export, so we cap the actual discharge at `loadShortfall`
+ *     (we don't deliberately export-for-no-credit). C-rate, reserve floor,
+ *     and physical SoC bounds are all enforced.
+ *
+ * Pre-v0.9.64 the simulator used `endEnergy = start + (pv - load) + flow`,
+ * which double-counted the load against both passive battery drain AND the
+ * explicit flow — so a `dischargeMax` selected during a load peak silently
+ * dropped 15 kWh of battery energy without reducing grid import (the reserve
+ * clamp re-imported it from grid). The DP correctly never picked the action
+ * because it only saw downside. See test/dispatch.test.ts:563.
+ *
+ * Cost model:
  *   import_kwh × tariff
  * + cycle_kwh × cycling_cost
  * + reserve_dip_kwh × dip_penalty
  * − export_kwh × export_tariff             (credit, may be 0)
  *
- * Discharging the battery to displace load is implicitly cheaper because
- * the import_kwh term shrinks; we don't double-count an explicit "savings"
- * line. The optimizer naturally prefers schedules where on-peak hours see
- * discharge (low gridKwh × high tariff) and off-peak hours see charge.
+ * `cycleKwh` is the total energy moved through the cells this hour
+ * (charge + discharge, not their net), so round-tripping is correctly
+ * penalized twice for cycling.
  */
 function simulateHour(
   startSocPct: number,
@@ -199,57 +223,83 @@ function simulateHour(
   const startEnergyKwh = (startSocPct / 100) * capacityKwh;
   const reserveEnergyKwh = (reservePct / 100) * capacityKwh;
 
-  // Net surplus from PV minus load (positive = excess solar).
-  const netSurplusKwh = pvKwh - loadKwh;
+  // Natural PV/load balance — PV serves load first.
+  const pvToLoadKwh = Math.min(pvKwh, loadKwh);
+  const pvSurplusKwh = pvKwh - pvToLoadKwh;        // >= 0 (excess PV)
+  const loadShortfallKwh = loadKwh - pvToLoadKwh;  // >= 0 (load not yet met)
 
-  // Desired battery flow this hour as kWh (positive = charge, negative = discharge).
-  // Cap against the C-rate envelope.
+  // Deliberate battery flow this hour as kWh (positive = charge from grid,
+  // negative = discharge to load). Capped against the C-rate envelope.
   const maxFlowKwh = MAX_C_RATE * capacityKwh;
-  let desiredFlowKwh = Math.max(-maxFlowKwh, Math.min(maxFlowKwh, batteryFlowFrac * capacityKwh));
+  const requestedFlowKwh = Math.max(-maxFlowKwh, Math.min(maxFlowKwh, batteryFlowFrac * capacityKwh));
 
-  // Bound by physical SoC envelope.
-  if (startEnergyKwh + desiredFlowKwh < 0) desiredFlowKwh = -startEnergyKwh;
-  if (startEnergyKwh + desiredFlowKwh > capacityKwh) desiredFlowKwh = capacityKwh - startEnergyKwh;
-  // Don't discharge below reserve floor on purpose (the dip penalty handles
-  // accidental drops from load demand; intentional discharge stops at the
-  // floor so dischargeMax doesn't blow past it on its own).
-  if (desiredFlowKwh < 0 && startEnergyKwh + desiredFlowKwh < reserveEnergyKwh) {
-    desiredFlowKwh = Math.min(0, reserveEnergyKwh - startEnergyKwh);
-  }
-
-  // Energy bookkeeping: end SoC absorbs net surplus + battery flow.
-  let endEnergyKwh = startEnergyKwh + netSurplusKwh + desiredFlowKwh;
+  let batteryChargeKwh = 0;
+  let batteryDischargeKwh = 0;
   let gridKwh = 0;
   let exportKwh = 0;
 
-  // If we'd go below reserve and grid is available, pull from grid to
-  // hold reserve (legacy behaviour kept for safety).
-  if (endEnergyKwh < reserveEnergyKwh && gridAvailable) {
-    const shortfall = reserveEnergyKwh - endEnergyKwh;
-    gridKwh += shortfall;
-    endEnergyKwh = reserveEnergyKwh;
+  if (requestedFlowKwh > 0) {
+    // chargeFromGrid: extra grid import lifts the battery above whatever
+    // PV surplus already provides. Cap at remaining capacity.
+    const roomKwh = Math.max(0, capacityKwh - startEnergyKwh);
+    const pvIntoBattery = Math.min(pvSurplusKwh, roomKwh);
+    const remainingRoom = roomKwh - pvIntoBattery;
+    const explicitCharge = gridAvailable ? Math.min(requestedFlowKwh, remainingRoom) : 0;
+    batteryChargeKwh = pvIntoBattery + explicitCharge;
+    exportKwh = pvSurplusKwh - pvIntoBattery;
+    // Grid covers the unmet load + the explicit charge into the battery.
+    gridKwh = (gridAvailable ? loadShortfallKwh : 0) + explicitCharge;
+  } else if (requestedFlowKwh < 0) {
+    // dischargeMax: deliberately drain the battery toward load. Bounded by
+    // available headroom above reserve and by the load shortfall (we don't
+    // deliberately export for no credit; PV surplus is the only export path).
+    const headroomAboveReserveKwh = Math.max(0, startEnergyKwh - reserveEnergyKwh);
+    const wantedDischargeKwh = -requestedFlowKwh;
+    const actualDischargeKwh = Math.min(wantedDischargeKwh, headroomAboveReserveKwh, loadShortfallKwh);
+    batteryDischargeKwh = actualDischargeKwh;
+    // Any PV surplus tops up battery first (subject to remaining room AFTER
+    // the discharge), then exports.
+    const roomAfterDischargeKwh = Math.max(0, capacityKwh - (startEnergyKwh - actualDischargeKwh));
+    const pvIntoBattery = Math.min(pvSurplusKwh, roomAfterDischargeKwh);
+    batteryChargeKwh = pvIntoBattery;
+    exportKwh = pvSurplusKwh - pvIntoBattery;
+    // Grid covers whatever load the battery didn't.
+    const remainingLoadKwh = loadShortfallKwh - actualDischargeKwh;
+    gridKwh = gridAvailable ? remainingLoadKwh : 0;
+  } else {
+    // Passive mode (legacy raise/maintain/lower/idleHold): PV surplus charges
+    // the battery, load shortfall discharges the battery to the reserve floor,
+    // grid fills the rest.
+    const roomKwh = Math.max(0, capacityKwh - startEnergyKwh);
+    const pvIntoBattery = Math.min(pvSurplusKwh, roomKwh);
+    batteryChargeKwh = pvIntoBattery;
+    exportKwh = pvSurplusKwh - pvIntoBattery;
+    const headroomAboveReserveKwh = Math.max(0, startEnergyKwh - reserveEnergyKwh);
+    const passiveDischargeKwh = Math.min(loadShortfallKwh, headroomAboveReserveKwh);
+    batteryDischargeKwh = passiveDischargeKwh;
+    const remainingLoadKwh = loadShortfallKwh - passiveDischargeKwh;
+    gridKwh = gridAvailable ? remainingLoadKwh : 0;
   }
 
-  // A positive desiredFlowKwh (charge-from-grid) directly imports that
-  // energy from the grid above what PV/load already pulled.
-  if (desiredFlowKwh > 0 && gridAvailable) {
-    gridKwh += desiredFlowKwh;
-  }
+  let endEnergyKwh = startEnergyKwh + batteryChargeKwh - batteryDischargeKwh;
 
-  // Cap at capacity (excess solar exported / clipped).
+  // Off-grid safety net: when grid is unavailable and load couldn't be met
+  // from PV+battery, the planner can't physically import — but the energy
+  // imbalance has to land somewhere. Treat the unmet load as a reserve dip
+  // (penalized below) and floor the battery at zero.
+  if (endEnergyKwh < 0) endEnergyKwh = 0;
   if (endEnergyKwh > capacityKwh) {
-    exportKwh = endEnergyKwh - capacityKwh;
+    exportKwh += endEnergyKwh - capacityKwh;
     endEnergyKwh = capacityKwh;
   }
 
-  // Cycle energy is the absolute change.
-  const cycleKwh = Math.abs(endEnergyKwh - startEnergyKwh);
+  // Cycle energy = total kWh moved through cells (charge + discharge).
+  const cycleKwh = batteryChargeKwh + batteryDischargeKwh;
 
-  // Penalty for dipping below reserve.
-  let dipPenalty = 0;
-  if (endEnergyKwh < reserveEnergyKwh) {
-    dipPenalty = (reserveEnergyKwh - endEnergyKwh) * reserveDipPenaltyUsdPerKwh;
-  }
+  // Reserve dip = end energy below floor (e.g. off-grid case above).
+  const dipPenalty = endEnergyKwh < reserveEnergyKwh
+    ? (reserveEnergyKwh - endEnergyKwh) * reserveDipPenaltyUsdPerKwh
+    : 0;
 
   const cost =
     gridKwh * tariffUsdPerKwh

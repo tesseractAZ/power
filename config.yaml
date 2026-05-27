@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.9.63"
+version: "0.9.65"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -113,9 +113,21 @@ options:
   #   2. tts.cloud_say             (Home Assistant Cloud / Nabu Casa)
   #   3. tts.google_translate_say  (free, needs internet)
   #   4. tts.elevenlabs_say        (premium voices, per-char billed)
-  # Set explicitly to override the auto-pick:
+  # Set explicitly to override the auto-pick. v0.9.65 — pinning an engine
+  # now DISABLES the fallback chain: if the pinned engine fails, the
+  # broadcast records the error and falls through to klaxon-only (no
+  # silent jump to whatever other engine was detected).
   BROADCAST_TTS_SERVICE: ""
   BROADCAST_TTS_LANGUAGE: en-US
+  # v0.9.65 — Hard "no Cloud TTS, ever" mode for off-grid setups.
+  # When true, TTS is restricted to local engines (Piper today; any
+  # future on-device engine that ships with `local: true`). If no local
+  # engine is available, broadcasts skip TTS entirely (klaxon only)
+  # instead of falling back to Cloud TTS. Recommended for off-grid
+  # setups where Cloud TTS requires internet — every Cloud call during
+  # a real outage is silent, and that's the opposite of what you want
+  # mid-alarm.
+  BROADCAST_TTS_REQUIRE_LOCAL: false
   # Sonos-specific: snapshot the current state before broadcasting and
   # restore it after, so a music session resumes. Leave on unless you
   # see odd behavior.
@@ -177,6 +189,7 @@ schema:
   BROADCAST_QUIET_HOURS: "str?"
   BROADCAST_TTS_SERVICE: "str?"
   BROADCAST_TTS_LANGUAGE: "str?"
+  BROADCAST_TTS_REQUIRE_LOCAL: bool
   BROADCAST_SONOS_RESTORE: bool
   BROADCAST_USE_MUSIC_ASSISTANT: list(auto|music_assistant|media_player|true|false)
   BROADCAST_HA_EXTERNAL_URL: "str?"

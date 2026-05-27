@@ -560,17 +560,14 @@ test('recommendDispatch — REGRESSION GUARD v0.9.59: real TOU spread → degrad
   assert.ok(r.expectedSavingsUsd >= 0, 'expectedSavingsUsd should be ≥ 0 with a real TOU spread');
 });
 
-// v0.9.63 — SKIPPED pending v0.9.64 fix. Under extreme TOU (50¢/1¢) +
-// sustained 8 kWh/h on-peak load + low SoC, recommendDispatch returns
-// grid=0/bat=0 across all 24 hours and selects only raise/lower —
-// dischargeMax/chargeFromGrid/idleHold are declared in the action set
-// (v0.9.59) but never selected by the DP. The plan is effectively a no-op
-// even though expectedSavingsUsd reports 5.76. Bug doesn't affect users
-// on flat tariffs (planner short-circuits with degradeReason='no-tou-spread')
-// but blocks any real TOU arbitrage. Follow-up: trace the DP cost function
-// and verify the new actions appear in the candidate set + that their
-// cost-delta is actually negative under arbitrage conditions.
-test.skip('recommendDispatch — REGRESSION GUARD v0.9.59: action set includes the new chargeFromGrid / dischargeMax actions', () => {
+// v0.9.64 — fixed. The pre-v0.9.64 simulator double-counted load against
+// passive battery drain and the explicit `desiredFlowKwh`, so dischargeMax
+// silently dropped battery energy without reducing grid imports (the reserve
+// clamp re-imported the kWh from grid). The DP correctly avoided the action.
+// Rewrote `simulateHour` to use a proper energy-balance model: PV serves load
+// first; chargeFromGrid imports extra grid kWh into the battery; dischargeMax
+// uses battery to displace load (capped at load shortfall). See mpc.ts header.
+test('recommendDispatch — REGRESSION GUARD v0.9.59: action set includes the new chargeFromGrid / dischargeMax actions', () => {
   // v0.9.59 expanded the MPC action set from 3 → 6 (added dischargeMax,
   // chargeFromGrid, idleHold). Verify the new actions are actually
   // available to the planner and appear in the chosen schedule under a

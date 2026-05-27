@@ -303,26 +303,86 @@ function normalizePreference(preferred: string, engines: TtsEngine[]): TtsEngine
 }
 
 /**
+ * v0.9.65 — Pure pick logic, separated for testability.
+ *
+ * Given a list of detected engines and a preference, returns the engine
+ * to use (or null). Honors `requireLocal` by filtering the candidate
+ * pool to engines where `local === true` BEFORE matching preference.
+ *
+ * Behavior matrix:
+ *
+ *   | preferred set | requireLocal | result                                       |
+ *   |---------------|--------------|----------------------------------------------|
+ *   | yes, matches  | false        | matched engine (existing behavior)           |
+ *   | yes, matches  | true         | matched engine IFF it's local; else null     |
+ *   | yes, no match | false        | null (caller may try the unknown-svc escape) |
+ *   | yes, no match | true         | null (escape hatch disabled — can't prove    |
+ *   |               |              |   locality of an unknown service)            |
+ *   | no            | false        | engines[0] (highest quality)                 |
+ *   | no            | true         | first local engine; null if none             |
+ *
+ * Separated from `pickBestEngine` (which still pulls from HA via
+ * `detectTtsEngines`) so the v0.9.65 filtering rules can be unit-tested
+ * without standing up a fake HA supervisor.
+ */
+export function pickEngineFromList(
+  engines: TtsEngine[],
+  preferred: string | null,
+  requireLocal = false,
+): TtsEngine | null {
+  const pool = requireLocal ? engines.filter((e) => e.local) : engines;
+  if (preferred && preferred.trim().length > 0) {
+    const m = normalizePreference(preferred, pool);
+    if (m) return m;
+    return null;  // caller handles the unknown-service escape hatch (cloud-allowed mode only)
+  }
+  return pool[0] ?? null;
+}
+
+/**
  * Pick the best TTS engine to use given an optional user preference.
  *
  *   - If `preferred` is set AND matches an installed engine (via fuzzy
  *     normalization), use it.
  *   - Else return the highest-quality detected engine.
  *   - Else null (no TTS).
+ *
+ * v0.9.65 — `requireLocal` gates Cloud TTS hard.
+ *   When true:
+ *     - The candidate pool is filtered to engines where `local === true`
+ *       BEFORE preference matching. Preference still wins inside that
+ *       narrowed pool — so `BROADCAST_TTS_SERVICE=tts.piper` + REQUIRE_LOCAL=true
+ *       still picks Piper, but `BROADCAST_TTS_SERVICE=tts.cloud_say` +
+ *       REQUIRE_LOCAL=true returns null (caller must skip TTS, NOT fall
+ *       back to anything cloud).
+ *     - The "unknown service preference" escape hatch is also disabled
+ *       — an unrecognized preference gets `local: false` by default and
+ *       we will NOT assume it's local. If the user has a local engine we
+ *       don't know about, they need to teach our KNOWN_ENGINES list.
+ *     - Returns null when no local engine is detected — caller (broadcast
+ *       orchestrator) is responsible for falling through to klaxon-only.
+ *
+ * The off-grid use case: the operator's home runs without internet for stretches.
+ * Cloud TTS silently failing back to Nabu Casa during an alarm is exactly
+ * the failure mode REQUIRE_LOCAL is built to prevent.
  */
-export async function pickBestEngine(preferred: string | null): Promise<TtsEngine | null> {
-  const engines = await detectTtsEngines();
-  if (preferred) {
-    const m = normalizePreference(preferred, engines);
-    if (m) return m;
-    // User set a preference we don't recognize — check if it's a service
-    // that exists in HA even if not in our known-engines list.
+export async function pickBestEngine(
+  preferred: string | null,
+  requireLocal = false,
+): Promise<TtsEngine | null> {
+  const all = await detectTtsEngines();
+  const picked = pickEngineFromList(all, preferred, requireLocal);
+  if (picked) return picked;
+  // v0.9.65 — the unknown-service escape hatch only runs in cloud-allowed
+  // mode. With REQUIRE_LOCAL on we can't verify the locality of an unknown
+  // service, so we refuse rather than risk a Cloud fallback in disguise.
+  if (preferred && preferred.trim().length > 0 && !requireLocal) {
     const [domain, service] = preferred.split('.');
     if (domain && service && await hasService(domain, service)) {
       return { service: preferred, label: preferred, local: false, quality: 3 };
     }
   }
-  return engines[0] ?? null;
+  return null;
 }
 
 /* ─── message synthesis ──────────────────────────────────────────── */

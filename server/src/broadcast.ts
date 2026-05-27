@@ -85,6 +85,15 @@ export interface BroadcastConfig {
   /** v0.9.40 — Base URL of HA Core (for TTS proxy URLs sent to speakers).
    *  Defaults to http://homeassistant.local:8123 when unset. */
   haExternalUrl: string | null;
+  /** v0.9.65 — Hard "no Cloud TTS, ever" mode. When true:
+   *    - Auto-pick considers ONLY engines with `local: true` (just Piper today).
+   *    - If no local engine is detected, TTS is disabled entirely for
+   *      broadcasts — klaxon fires, no spoken message, no Cloud fallback.
+   *    - Unknown user-set TTS services are refused (we can't prove they're
+   *      local). Use the known Piper service ref to be safe.
+   *  Built for the off-grid scenario where Cloud TTS isn't just slow —
+   *  it's silent during a 12-hour internet outage and the alarm goes mute. */
+  requireLocalTts: boolean;
 }
 
 export function loadBroadcastConfig(): BroadcastConfig {
@@ -110,6 +119,7 @@ export function loadBroadcastConfig(): BroadcastConfig {
     sonosRestore: process.env.BROADCAST_SONOS_RESTORE !== 'false',
     backend,
     haExternalUrl: emptyToNull(process.env.BROADCAST_HA_EXTERNAL_URL),
+    requireLocalTts: process.env.BROADCAST_TTS_REQUIRE_LOCAL === 'true' || process.env.BROADCAST_TTS_REQUIRE_LOCAL === '1',
   };
 }
 
@@ -246,7 +256,12 @@ export function startBroadcastMonitor(
    *  is encoded in ttsService.ts (Piper > Cloud > Google > ElevenLabs).
    *  If the user set BROADCAST_TTS_SERVICE explicitly we honor it; else
    *  we auto-pick the highest-quality available engine, defaulting to
-   *  Piper which is local (off-grid safe) and free. */
+   *  Piper which is local (off-grid safe) and free.
+   *
+   *  v0.9.65 — when `requireLocalTts` is true, the candidate pool is
+   *  restricted to local engines BEFORE selection. If no local engine
+   *  is available, ttsEngine stays null and broadcasts skip the spoken
+   *  message entirely (klaxon only) — no silent Cloud fallback. */
   const detectTts = async () => {
     if (!supervised) {
       ttsEngine = null;
@@ -254,10 +269,12 @@ export function startBroadcastMonitor(
       return;
     }
     ttsAvailable = await detectTtsEngines();
-    ttsEngine = await pickBestEngine(cfg.ttsService);
+    ttsEngine = await pickBestEngine(cfg.ttsService, cfg.requireLocalTts);
     if (ttsEngine) {
       const src = cfg.ttsService === ttsEngine.service ? 'configured' : 'auto-picked';
       log(`broadcast: TTS engine ${src}: ${ttsEngine.label} (${ttsEngine.service})${ttsEngine.local ? ' [local/off-grid OK]' : ''}`);
+    } else if (cfg.requireLocalTts && !ttsAvailable.some((e) => e.local)) {
+      log('broadcast: TTS skipped — REQUIRE_LOCAL=true and no local engine available');
     } else if (cfg.ttsService) {
       log(`broadcast: BROADCAST_TTS_SERVICE=${cfg.ttsService} not available; spoken alerts disabled`);
     } else if (ttsAvailable.length === 0) {
@@ -478,10 +495,11 @@ export function startBroadcastMonitor(
       // Only the modern `tts.speak:<entity>` engines support URL
       // rendering. Legacy engines (e.g., `tts.cloud_say`) fall back
       // to the direct `tts.speak`/legacy path via `speakWithFallback`.
-      const engineChain: TtsEngine[] = [ttsEngine];
-      for (const e of ttsAvailable) {
-        if (!engineChain.find((x) => x.service === e.service)) engineChain.push(e);
-      }
+      const engineChain = buildEngineChain(ttsEngine, ttsAvailable, {
+        pinnedService: cfg.ttsService,
+        requireLocal: cfg.requireLocalTts,
+        log,
+      });
       const announceVolumePct = Math.round(cfg.volume * 100);
 
       let spoken = false;
@@ -742,4 +760,73 @@ export function startBroadcastMonitor(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * v0.9.65 — Construct the per-broadcast TTS engine fallback chain.
+ *
+ * The chain semantics underwent two changes in v0.9.65, both born of
+ * the same realization: the v0.9.63 "auto-pick + walk the rest" chain
+ * silently routed around Piper failures into Cloud TTS, defeating the
+ * whole reason the user installed Piper.
+ *
+ *   1. **Explicit pin disables fallback.** When `pinnedService` is
+ *      non-empty (the user typed something into BROADCAST_TTS_SERVICE),
+ *      the chain is exactly one element: the resolved primary engine.
+ *      Pinning is a clear "use THIS and nothing else" signal — if it
+ *      fails, the broadcast records the failure and falls through to
+ *      klaxon-only. No surprise jumps to whatever else is detected.
+ *
+ *   2. **REQUIRE_LOCAL filters the chain too.** When `requireLocal` is
+ *      true, any non-local engine is dropped from the chain — both at
+ *      auto-pick (handled in pickBestEngine upstream) AND here, where
+ *      the rest of `ttsAvailable` is appended. Even if Piper is somehow
+ *      missing from `ttsAvailable` but Cloud is present, the chain stays
+ *      empty rather than appending Cloud. Defense in depth against the
+ *      core failure mode (Piper broken → silent Cloud fallback).
+ *
+ * Default behavior (both flags off) is unchanged from v0.9.63:
+ * primary first, then every other detected engine deduped by service.
+ *
+ * Returns the chain. Empty chain → caller skips TTS, falls through to
+ * klaxon-only (which is the right behavior; never invent a Cloud call).
+ */
+export interface EngineChainOpts {
+  /** Non-empty BROADCAST_TTS_SERVICE → chain contains only `primary`. */
+  pinnedService: string | null;
+  /** REQUIRE_LOCAL=true → drop non-local engines from the chain entirely. */
+  requireLocal: boolean;
+  /** Optional logger for the v0.9.65 "pinned" / "filtered" diagnostics. */
+  log?: (m: string) => void;
+}
+
+export function buildEngineChain(
+  primary: TtsEngine,
+  available: TtsEngine[],
+  opts: EngineChainOpts,
+): TtsEngine[] {
+  const { pinnedService, requireLocal, log } = opts;
+  const pinned = pinnedService != null && pinnedService.trim().length > 0;
+  if (pinned) {
+    // v0.9.65 — pinning means "use THIS engine, period". The fallback
+    // chain is intentionally a single element. If it fails, the
+    // orchestrator surfaces the failure (and klaxon already fired).
+    if (requireLocal && !primary.local) {
+      // Belt-and-suspenders: REQUIRE_LOCAL + a non-local pin is a
+      // contradiction. Refuse rather than honoring the pin — the user's
+      // newer / stronger signal is REQUIRE_LOCAL.
+      log?.(`broadcast: TTS skipped — REQUIRE_LOCAL=true but pinned engine ${primary.service} is non-local`);
+      return [];
+    }
+    log?.(`broadcast: TTS engine pinned via BROADCAST_TTS_SERVICE=${primary.service} — fallback chain disabled`);
+    return [primary];
+  }
+  // Auto-pick path: primary first, then every other detected engine.
+  const chain: TtsEngine[] = [primary];
+  for (const e of available) {
+    if (chain.find((x) => x.service === e.service)) continue;
+    if (requireLocal && !e.local) continue;
+    chain.push(e);
+  }
+  return chain;
 }
