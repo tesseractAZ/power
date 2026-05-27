@@ -98,6 +98,15 @@ export interface MpcInputs {
   cyclingCostUsdPerKwh: number;
   /** Big penalty for reserve dip ($/kWh below reserve). */
   reserveDipPenaltyUsdPerKwh: number;
+  /**
+   * v0.9.67 — wall-clock anchor for tariff hour-of-day indexing. Defaults to
+   * `Date.now()`. Inject a fixed ms timestamp for deterministic tests — the
+   * planner's optimum shifts based on where on-peak hours fall in the 24-hour
+   * DP horizon, which is anchored at `new Date(nowMs).getHours()`. CI runs in
+   * UTC; local dev in user TZ; without this they pick different optima and
+   * regression tests flake (see dispatch.test.ts:570 history).
+   */
+  nowMs?: number;
 }
 
 export interface MpcStep {
@@ -349,7 +358,8 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
   // actions) iterations; if we keep re-reading `new Date().getHours()` we can
   // straddle a wall-clock boundary mid-DP and silently mis-align tariff lookups
   // by one slot. Cache → reuse in both the forward pass and the reconstruction.
-  const startHour = new Date().getHours();
+  // v0.9.67 — also accept `inputs.nowMs` to make this deterministic in tests.
+  const startHour = new Date(inputs.nowMs ?? Date.now()).getHours();
 
   const exportTariffUsdPerKwh = EXPORT_TARIFF_CENTS / 100;
 
