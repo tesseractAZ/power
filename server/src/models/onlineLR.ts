@@ -79,7 +79,7 @@ const FAILED_LABEL_WEIGHT = 2.0;
  * Returns null when we can't construct a usable vector at all (e.g.
  * non-pack alert with no captured vector AND no usable proxy fields).
  */
-function snapshotToLrFeatures(
+export function snapshotToLrFeatures(
   snapshot: Record<string, number> | undefined,
   capturedLrFeatures?: Record<string, number> | null,
 ): Record<FeatureName, number> | null {

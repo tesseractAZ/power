@@ -3,11 +3,12 @@ import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import compress from '@fastify/compress';
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
+import { createAuth } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { DeviceSnapshot } from './snapshot.js';
 import { startMqtt } from './ecoflow/mqtt.js';
@@ -136,42 +137,21 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body,
  *   - `/api/alerts/outcome` is intentionally left open (user-feedback).
  */
 
-/** Origins the dashboard is expected to be loaded from. Used by both
- *  CORS and the same-origin check in requireWriteAuth. */
-const PANEL_SAME_ORIGINS = new Set<string>([
-  `http://${config.host}:${config.port}`,
-  `https://${config.host}:${config.port}`,
-  `http://homeassistant.local:${config.port}`,
-  `https://homeassistant.local:${config.port}`,
-  `http://localhost:${config.port}`,
-  `https://localhost:${config.port}`,
-  `http://127.0.0.1:${config.port}`,
-  `https://127.0.0.1:${config.port}`,
-]);
-
-/** HA dashboard origins we expect Lovelace cards / browsers to come from.
- *  Both explicit hostnames + LAN-IP HA hosts (192.168.x.x:8123 etc.). */
-const HA_DASHBOARD_ORIGINS = new Set<string>([
-  'http://homeassistant.local:8123',
-  'https://homeassistant.local:8123',
-  'http://homeassistant:8123',
-  'https://homeassistant:8123',
-  'http://homeassistant.local:8787',
-  'https://homeassistant.local:8787',
-]);
-
-/** Matches a LAN-style HA host like 192.168.1.5:8123 or 10.0.0.4:8123 or
- *  a `*.local:8123` hostname. Kept deliberately narrow — we DON'T want
- *  to match arbitrary internet origins. */
-const LAN_ORIGIN_RE =
-  /^https?:\/\/(?:(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|[a-zA-Z0-9-]+\.local):(?:8123|8787)$/;
-
-function isAllowedOrigin(origin: string): boolean {
-  if (PANEL_SAME_ORIGINS.has(origin)) return true;
-  if (HA_DASHBOARD_ORIGINS.has(origin)) return true;
-  if (LAN_ORIGIN_RE.test(origin)) return true;
-  return false;
-}
+/**
+ * v0.9.60 — Write-auth gate (extracted to ./auth.ts for unit-testability).
+ *
+ * `createAuth` builds the same-origin allow-list, runs the token-bootstrap
+ * I/O, and returns the Fastify preHandler used by every gated route.
+ * Behavior identical to the pre-extract inlined block; see auth.ts for
+ * the full per-condition rationale.
+ */
+const auth = createAuth({
+  host: config.host,
+  port: config.port,
+  log: { info: (m) => app.log.info(m), warn: (m) => app.log.warn(m) },
+});
+const WRITE_TOKEN_PATH = auth.tokenPath;
+const requireWriteAuth = auth.requireWriteAuth;
 
 await app.register(cors, {
   // Callback form: same-origin requests (no Origin header) get echoed
@@ -179,96 +159,8 @@ await app.register(cors, {
   // Origin matches our allowlist. Anything else gets NO
   // Access-Control-Allow-Origin header, so the browser blocks the
   // response from JS.
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);  // same-origin, curl, server-side
-    if (isAllowedOrigin(origin)) return cb(null, true);
-    return cb(null, false);
-  },
+  origin: auth.corsOriginCallback,
 });
-
-/* ─── write-auth token bootstrap ──────────────────────────────────────
- * Read PANEL_WRITE_TOKEN from env; auto-generate + persist if missing.
- * Stored mode-0600 at `${DATA_DIR}/panel-write-token.txt` so it survives
- * restarts and is readable only by the add-on user. */
-const dataDir = process.env.DATA_DIR ?? '/data';
-const WRITE_TOKEN_PATH = resolve(dataDir, 'panel-write-token.txt');
-
-function loadOrCreateWriteToken(): string {
-  const envTok = process.env.PANEL_WRITE_TOKEN;
-  if (envTok && envTok.length >= 16) return envTok;
-  try {
-    if (existsSync(WRITE_TOKEN_PATH)) {
-      const t = readFileSync(WRITE_TOKEN_PATH, 'utf8').trim();
-      if (t.length >= 16) return t;
-    }
-  } catch { /* fall through to regenerate */ }
-  const fresh = randomUUID();
-  try {
-    mkdirSync(dirname(WRITE_TOKEN_PATH), { recursive: true });
-    writeFileSync(WRITE_TOKEN_PATH, fresh + '\n', { mode: 0o600 });
-    try { chmodSync(WRITE_TOKEN_PATH, 0o600); } catch { /* best-effort */ }
-    app.log.info(
-      `panel: write-token auto-generated and saved to ${WRITE_TOKEN_PATH} — ` +
-      `required for write endpoints from cross-origin clients`,
-    );
-  } catch (e: any) {
-    app.log.warn(
-      `panel: could not persist write-token to ${WRITE_TOKEN_PATH}: ` +
-      `${e?.message ?? e}. Token still active in memory for this run.`,
-    );
-  }
-  return fresh;
-}
-
-const PANEL_WRITE_TOKEN = loadOrCreateWriteToken();
-const PANEL_WRITE_TOKEN_BUF = Buffer.from(PANEL_WRITE_TOKEN, 'utf8');
-
-/** Constant-time string compare; safe for unequal lengths. */
-function tokenEquals(provided: string): boolean {
-  const b = Buffer.from(provided, 'utf8');
-  if (b.length !== PANEL_WRITE_TOKEN_BUF.length) {
-    // Hash-compare against scratch so timing stays length-independent.
-    const scratch = Buffer.alloc(PANEL_WRITE_TOKEN_BUF.length);
-    timingSafeEqual(PANEL_WRITE_TOKEN_BUF, scratch);
-    return false;
-  }
-  return timingSafeEqual(PANEL_WRITE_TOKEN_BUF, b);
-}
-
-/**
- * Fastify preHandler that enforces write authentication on POST/PUT/DELETE
- * routes (and admin GETs). A request passes if ANY of the following hold:
- *   - `X-Ingress-Path` header is set (HA Ingress strips/sets this, and
- *     ingress requests are already authenticated by HA's session).
- *   - The `Origin` header matches one of our allow-listed same-origin
- *     dashboard URLs (covers the React UI fetching its own backend).
- *   - The `X-Panel-Write-Token` header equals the bootstrap token
- *     (constant-time compare).
- * Otherwise → 401.
- */
-function requireWriteAuth(
-  req: import('fastify').FastifyRequest,
-  reply: import('fastify').FastifyReply,
-  done: (err?: Error) => void,
-): void {
-  // 1. HA Ingress — header is set by Supervisor, can't be forged from outside.
-  if (req.headers['x-ingress-path']) return done();
-
-  // 2. Same-origin: browser sends Origin on cross-origin fetches AND on
-  //    same-origin non-GET fetches in modern browsers. If the dashboard is
-  //    loaded from one of our own origins, the Origin will be a panel origin.
-  const origin = req.headers.origin?.toString();
-  if (origin && PANEL_SAME_ORIGINS.has(origin)) return done();
-
-  // 3. Explicit token.
-  const provided = req.headers['x-panel-write-token']?.toString();
-  if (provided && tokenEquals(provided)) return done();
-
-  reply.code(401).send({
-    error: 'write-auth-required',
-    hint: 'set X-Panel-Write-Token header or use HA ingress',
-  });
-}
 // v0.9.14 — permessage-deflate on WebSocket frames. SnapshotStore pushes
 // the full snapshot on every change (~50-150 KB raw JSON for a 13-device
 // fleet); with PMD enabled, that compresses to ~10-30 KB per frame. Saves

@@ -3,6 +3,78 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.61 — 2026-05-26
+
+**Test backfill — 101 new tests, 166 → 267.** The v0.9.58-v0.9.60
+work rewrote significant parts of the model + auth code with zero
+unit coverage backing the changes. This release adds regression
+guards for every meaningful rewrite, plus extracts the write-auth
+middleware into a separate testable module.
+
+### New test files
+
+- `test/forecast.test.ts` (17 tests) — `bayesUpdate`, `computeProbabilisticForecast`, `computeMultiDayForecast`, `computeForecastSkill`, `computeAmbientThermalForecast`. Regression guards: v0.9.58 multi-day per-HoD load lookup, v0.9.58 SoC % scaling against fleet capacity, v0.9.59 horizon-widening (hour-24 spread ≈ √2 × hour-0 spread), v0.9.59 Bayes σ² recalibration.
+- `test/battery.test.ts` (14 tests) — `kalmanFilterSoh`, `computeInternalResistance`, `computeChargeCurveFingerprint`, `computeThermalEvents`, `computeDegradation`, `PACK_MAH_TO_KWH`. Regression guards: v0.9.58 Kalman covariance symmetry, v0.9.59 R-tuning for bucketed input, v0.9.59 IR steady-state windowing rejects motor-inrush spikes, coulombic-eff counter-reset guard.
+- `test/dispatch.test.ts` (29 tests) — `computeRunway`, `computeClipping`, `computeSelfConsumption`, `computeShadeReport`, `computeSoilingDecomposition`, `computeStringMismatch`, `computeEvWindowPrediction`, `computeEquipmentHealth`, `computeCarbonReport`, `computeTariffReport`, `computeDispatchPlan`, `recommendDispatch`. Regression guards: v0.9.58 tariff defaults to flat $0.17/kWh, v0.9.59 MPC `degradeReason: 'no-tou-spread'` for flat tariff, v0.9.59 6-action set selection under TOU spread, v0.9.59 P10 risk-averse path.
+- `test/ml-feedback.test.ts` (19 tests) — `loadModel` shadow-preferred-over-baseline with mtime cache invalidation, `computeGateDecision` drift/precision thresholds, `computePackRiskV2` composite-pin-on-degraded, `snapshotToLrFeatures` captured-vs-proxy preference, `captureLrFeatures` real 6-D vector at fire-time.
+- `test/auth.test.ts` (22 tests) — `requireWriteAuth` end-to-end via Fastify `inject()`: ingress / same-origin / token / 401 paths, LAN-origin regex matrix, token persistence semantics (mode 0600, disk reload, env override).
+
+### Refactor: extract `auth.ts` from `index.ts`
+
+The v0.9.60 write-auth middleware was inlined in `index.ts` (~340
+new lines). Extracted to `server/src/auth.ts` (~250 lines) for
+testability via Fastify `inject()`. `index.ts` now does
+`createAuth({host, port, log})` and uses the returned preHandler
+identically. Zero behavior change in production; large readability win
+(`index.ts` slimmed by 146 lines).
+
+### Three findings flagged for follow-up (NOT fixed here — would be v0.9.62)
+
+1. **v0.9.58 Kalman "asymmetry fix" was an algebraic no-op.** Both
+   expressions `-k1·p00 + p10` and `(1-k0)·p10` are identical when
+   H=[1,0]: `-k1·p00 + p10 = -(p10/S)·p00 + p10 = p10·(1 - p00/S) = (1-k0)·p10`.
+   Empirically: pre-v0.9.58 code kept `|p10 - p01| ≈ 8.67e-19` (pure
+   double-precision noise). So the EOL projection was NOT systematically
+   overconfident from this bug — it was a clarity improvement. The new
+   test pins algebraic equivalence so a future *actual* asymmetric
+   update fails CI. Worth noting in case a future contributor reads
+   the v0.9.58 changelog and assumes there was a real bug.
+
+2. **v0.9.59 auto-downgrade drift branch is structurally unreachable
+   through `computePackRiskV2`.** Both `loadModel()` and
+   `computeGateDecision()` internally call `loadShadowModel()` — so
+   when a shadow file exists, both ends ARE the same shadow object
+   and `totalDriftL2` is always 0. Only the precision branch
+   (`overallPrecision < 0.4`) can actually fire end-to-end through
+   `computePackRiskV2`. The drift branch IS testable in isolation
+   (called with an explicit baseline arg), which is what the unit
+   test does. **Real bug** worth a v0.9.62 fix: `computeGateDecision`
+   should compare shadow vs *baseline*, not shadow vs shadow.
+
+3. **EV window 30-60 min tolerance bug pinned.** Sessions jittered
+   around an hour boundary (17:55, 18:02, 17:57, …) get bucketed by
+   exact `getHours()`, so sub-hour-bucket recurrences never reach
+   `EV_WINDOW_MIN_RECURRENCES=3` and no pattern is emitted. Audit
+   flagged this. Test now asserts the current (broken) behavior —
+   when the tolerance fix lands, the assertion will need to flip.
+
+### Module-cache hostility to testing
+
+Several engines have module-scoped singletons keyed only by time
+(`evWindowCache`, `runwayCache`, `clippingCache`, `tariffCache`,
+`carbonCache`, etc.) — once a test populates the cache, subsequent
+tests in the same process get the cached value regardless of inputs.
+Worked around via careful test ordering and added explicit
+`resetForecastCachesForTesting()` + `setWeatherCacheForTesting()`
+seams where needed. A `resetAllAnalyticsCaches()` test-only export
+would clean this up; deferred to a future cleanup.
+
+### Verification
+
+`npx tsc --noEmit` → zero errors. `node --test --import tsx test/*.test.ts` → 267/267 pass.
+
+
+
 ## 0.9.60 — 2026-05-26
 
 **Security batch: write-auth + CSRF protection + send-command lockdown.**

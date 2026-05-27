@@ -36,9 +36,31 @@ export interface WeatherForecast {
 }
 
 let cache: WeatherForecast | null = null;
+let testForceMode: 'unset' | 'value' | 'null' = 'unset';
 const TTL_MS = 2 * 60 * 60 * 1000; // 2h — weather forecasts don't move minute-to-minute
 
+/**
+ * Test-only seam: pin (or clear) the value getWeather() returns so tests
+ * can run the weather-dependent analytics functions (multi-day forecast,
+ * ambient thermal, forecast skill, Bayesian solar model) deterministically
+ * without hitting the network. Pass a WeatherForecast to install it; pass
+ * null to force getWeather() to return null without attempting a fetch.
+ */
+export function setWeatherCacheForTesting(value: WeatherForecast | null): void {
+  cache = value;
+  testForceMode = value == null ? 'null' : 'value';
+}
+
+/** Test-only seam: release the forced override so getWeather() resumes
+ *  normal cache-then-fetch behavior. */
+export function clearWeatherTestOverride(): void {
+  cache = null;
+  testForceMode = 'unset';
+}
+
 export async function getWeather(log: (m: string) => void = () => {}): Promise<WeatherForecast | null> {
+  if (testForceMode === 'null') return null;
+  if (testForceMode === 'value') return cache;
   if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache;
 
   const { forecastLat: lat, forecastLon: lon } = config;

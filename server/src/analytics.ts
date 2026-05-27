@@ -4267,13 +4267,13 @@ const BAYES_PRIOR_TAU2 = 1000;   // huge prior variance → first obs dominates
 // Same g=500 W/m² update now contributes precision 500²/2.82e6 ≈ 0.089, so
 // the prior (1/1000 = 0.001) is overwritten over dozens of observations
 // rather than a single one. That's how the filter is meant to behave.
-const BAYES_OBS_SIGMA2 = (0.10 * PHOENIX_SITE.pNamplate) ** 2;
+export const BAYES_OBS_SIGMA2 = (0.10 * PHOENIX_SITE.pNamplate) ** 2;
 // ≈ 2.82e6 for Eric's ~16.8 kWp; σ ≈ 1 680 W (10% of peak PV output).
 
 let bayesCache: { ts: number; value: BayesianSolarModel } | null = null;
 
 /** Recursive Bayesian update of N(μ, τ²) by an observation (g, p) with noise σ². */
-function bayesUpdate(mu: number, tau2: number, g: number, p: number, sigma2: number): { mu: number; tau2: number } {
+export function bayesUpdate(mu: number, tau2: number, g: number, p: number, sigma2: number): { mu: number; tau2: number } {
   const newPrec = 1 / tau2 + (g * g) / sigma2;
   const newTau2 = 1 / newPrec;
   const newMu = newTau2 * (mu / tau2 + (g * p) / sigma2);
@@ -4783,4 +4783,14 @@ export function resetHaStateShortLivedCaches(): void {
   clippingCache = null;
   carbonCache = null;
   tariffCache = null;
+}
+
+/** Test-only seam: clear forecast-related caches so each test starts cold. */
+export function resetForecastCachesForTesting(): void {
+  probabilisticCache = null;
+  multiDayCache = null;
+  forecastSkillCache = null;
+  bayesCache = null;
+  ambientThermalCache = null;
+  dispatchCache = null;
 }

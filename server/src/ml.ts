@@ -622,7 +622,7 @@ export interface PackRiskV2Report {
  * is `null` (no decided alerts) — neither condition fires, so we don't degrade.
  * Same for a healthy steady-state.
  */
-function computeGateDecision(model: LrModel): {
+export function computeGateDecision(model: LrModel): {
   driftL2: number | null;
   overallPrecision: number | null;
   threshold: number;
