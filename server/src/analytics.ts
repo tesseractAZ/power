@@ -781,11 +781,20 @@ export async function getDayForecast(
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
+  // v0.9.76 — only DPUs wired into the SHP2 contribute PV to the home.
+  // Spare cores may have panels for bench-charging but their PV doesn't
+  // reach the home power bus, so they shouldn't inflate forecasts that
+  // drive runway / MPC / projected SoC / clipping detection.
+  // `homeDpus` is used for fleet PV sums; `dpus` stays for per-device
+  // diagnostic models below (the operator still wants spare-array visibility
+  // per-Core, just not contaminating the fleet model).
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
 
   // Typical-day fleet PV curve (fallback when the model lacks an hour) + load curve.
   const pvCurve = new Array(24).fill(0);
   let pvSpan = 0;
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     const { curve, spanMs } = hourCurve(recorder, d.sn, 'pv_total', since, now);
     for (let h = 0; h < 24; h++) pvCurve[h] += curve[h];
     pvSpan = Math.max(pvSpan, spanMs);
@@ -825,11 +834,16 @@ export async function getDayForecast(
 
   // Learn each array's GHI→PV response from history — whole-inverter and per
   // MPPT string (HV / LV), which can face different directions.
+  // v0.9.76 — fleetPvByEpoch sums ONLY home-connected DPUs (drives the
+  // solarModel used by forecast/runway/MPC). deviceModels still iterates
+  // every DPU so spares get per-Core diagnostics on the Solar page.
   const fleetPvByEpoch = new Map<number, number>();
   const deviceModels: DeviceSolarModel[] = [];
   for (const d of dpus) {
     const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
-    for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
+    if (isShp2Connected(d.sn, connected)) {
+      for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
+    }
     deviceModels.push({
       sn: d.sn,
       device: d.deviceName,
@@ -1712,8 +1726,14 @@ export function computeRoundTripEfficiency(
   const fullEnd = now;
   // For each (sn, pack), pull in + out series once at 60 s bucketing.
   // batched queryMulti: one SQL call returns both metrics for the pack.
+  // v0.9.76 — RTE is "the home's battery round-trip efficiency". Spare
+  // cores cycle differently (storage SoC, bench top-ups) and contaminate
+  // both numerator and discharge denominator. Pre-fix: 88.8 % live;
+  // healthy band per the header comment is 95-97 %.
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
   const packSeries = new Map<string, { in: Array<{ ts: number; value: number }>; out: Array<{ ts: number; value: number }> }>();
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     const metricsNeeded: string[] = [];
     for (const pk of d.projection.packs) {
       metricsNeeded.push(`pack${pk.num}_in`, `pack${pk.num}_out`);
@@ -1735,7 +1755,7 @@ export function computeRoundTripEfficiency(
     const dayEnd = i === 0 ? now : dayStart + 86_400_000;
     let chargedKwh = 0;
     let dischargedKwh = 0;
-    for (const d of dpus) {
+    for (const d of homeDpus) {
       for (const pk of d.projection.packs) {
         const s = packSeries.get(`${d.sn}|${pk.num}`);
         if (!s) continue;
@@ -1823,9 +1843,16 @@ export async function computeShadeReport(
   const wxByHourEpoch = new Map<number, WeatherHour>();
   for (const wh of weather.hours) wxByHourEpoch.set(Math.floor(wh.ts / 3_600_000), wh);
 
-  // Fleet hourly PV
+  // Fleet hourly PV — v0.9.76 restricts to SHP2-connected DPUs. Shade
+  // detection projects "annual kWh shortfall to the home"; including a
+  // spare's bench-charge PV would either deflate the model (spare
+  // reports 0 W → fleet under-shoots clear-sky) or inflate observed
+  // (spare with panels → fleet over-reports baseline), both of which
+  // throw off the shade-shortfall projection.
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
   const fleetPvByEpoch = new Map<number, number>();
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
     for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
   }
@@ -1957,8 +1984,12 @@ export async function computeSoilingDecomposition(
   }
 
   // Per-hour shape — fleet-level, similar logic but bucketed by hour-of-day.
+  // v0.9.76 — `perDevice` above keeps every DPU (spare-array diagnostics).
+  // `perHour` is fleet-level and only home-connected DPUs should contribute.
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
   const fleetPvE = new Map<number, number>();
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
     for (const [he, pv] of pvE) fleetPvE.set(he, (fleetPvE.get(he) ?? 0) + pv);
   }
@@ -2045,6 +2076,15 @@ export function computeStringMismatch(
   // a typical 10 s sample interval). Drops the per-metric rowcount on a
   // 14-day window by ~30× — from ~100 k raw rows per DPU to ~4 k bucketed,
   // and from 4 × 100 k JS objects materialized per cycle to 4 × 4 k.
+  // v0.9.76 — string-mismatch baseline (fleet hourly median) uses only
+  // SHP2-connected DPUs. Same pattern as v0.9.75's computeDegradation
+  // peer-baseline fix: a spare's odd PV profile (storage trickle,
+  // bench charge from a different panel angle) was structurally able
+  // to bias the median that connected Cores are compared against.
+  // Today's spares report 0 W (no panels), so the `meds[h] > 0` guard
+  // accidentally filtered them out — fix is now explicit + defensive
+  // against future spare configurations.
+  const connected = shp2ConnectedDpuSns(devices);
   const perDevicePerHour = new Map<string, number[]>(); // sn → 24-bucket medians (averaged)
   const fleetPerHour: number[][] = Array.from({ length: 24 }, () => []);
   for (const d of dpus) {
@@ -2057,7 +2097,13 @@ export function computeStringMismatch(
     }
     const meds = buckets.map((b) => (b.length ? median(b) : 0));
     perDevicePerHour.set(d.sn, meds);
-    for (let h = 0; h < 24; h++) if (meds[h] > 0) fleetPerHour[h].push(meds[h]);
+    // Only home-connected DPUs build the fleet-median baseline; spare
+    // DPUs still get evaluated against that baseline below (so a spare
+    // with anomalously different output still surfaces as an outlier
+    // — mirroring computeDegradation's v0.9.75 pattern).
+    if (isShp2Connected(d.sn, connected)) {
+      for (let h = 0; h < 24; h++) if (meds[h] > 0) fleetPerHour[h].push(meds[h]);
+    }
   }
 
   // For each device, compute the ratio of its hourly median to the fleet median
@@ -2963,8 +3009,16 @@ export function computeSelfConsumption(
   // index once per device and emits already-grouped rows, which we sort
   // into per-metric arrays in a single linear pass through the result set.
   const ANALYTICS_BUCKET_SEC = 60;
+  // v0.9.76 — sum PV / charge / discharge / grid-import over SHP2-connected
+  // DPUs only. The denominator (loadKwh) is SHP2 panel_load — intrinsically
+  // home-only — so the numerator MUST match scope or the ratio is wrong.
+  // Pre-fix bug: solarFractionOfLoadPct came out 127 % (physically impossible)
+  // because spare-Core PV + bench-charge cycles inflated the home numerator
+  // against the home-only load denominator.
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
   let pvKwh = 0, batteryChargeKwh = 0, batteryDischargeKwh = 0, gridImportKwh = 0;
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     const metricsNeeded = ['pv_total', 'ac_in'];
     for (const pk of d.projection.packs) {
       metricsNeeded.push(`pack${pk.num}_in`, `pack${pk.num}_out`);
@@ -3371,6 +3425,13 @@ export async function computeClipping(
     (d) => d.projection?.kind === 'dpu',
   ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
   if (dpus.length === 0) return empty();
+  // v0.9.76 — clipping is "home array hit inverter ceiling". Use only
+  // SHP2-connected DPUs so a spare with bench panels doesn't either
+  // inflate `observedW` (false-negative clipping) or pollute the
+  // `arrayPeakW` ceiling derived from the now-also-filtered solar model.
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  if (homeDpus.length === 0) return empty();
 
   const arrayPeakW = Math.max(0, ...forecast.solarModel.hourly.map((h) => h.observedMaxPvW));
   if (arrayPeakW <= 0) return empty();
@@ -3391,7 +3452,7 @@ export async function computeClipping(
   // the within-minute average, which matters more for accuracy than the
   // arithmetic mean of raw 10-second readings).
   const dpuPvByHour: Map<string, number[][]> = new Map(); // sn → 24 arrays of bucket values
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     const pts = recorder.query(d.sn, 'pv_total', todayStart, now, 60);
     const hourBuckets: number[][] = Array.from({ length: 24 }, () => []);
     for (const p of pts) {
@@ -3689,8 +3750,15 @@ export function computeTariffReport(
   // self-filter to the hour window in O(n) over a single 10 k-row
   // bucketed array, which is well-cached in V8 and runs in microseconds.
   const HOUR = 3_600_000;
+  // v0.9.76 — only count grid-import on SHP2-connected DPUs. A spare core
+  // charging from a wall outlet shows up in ac_in but isn't house grid
+  // usage. Without this filter the on-peak cost dollars include spare-Core
+  // bench-charging — small today ($0.40 live) but the bug is real and
+  // grows if Cores 4/5 see heavier wall charging.
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
   const dpuAcInSeries = new Map<string, Array<{ ts: number; value: number }>>();
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     dpuAcInSeries.set(d.sn, recorder.query(d.sn, 'ac_in', since, now, 60));
   }
   const loadSeries = shp2 ? recorder.query(shp2.sn, 'panel_load', since, now, 60) : [];
@@ -3703,7 +3771,7 @@ export function computeTariffReport(
       const rate = (onPeakAt(t) ? TARIFF_ON_PEAK_CENTS : TARIFF_OFF_PEAK_CENTS) / 100;
       let gridWh = 0;
       let loadWh = 0;
-      for (const d of dpus) {
+      for (const d of homeDpus) {
         gridWh += integrateWh(dpuAcInSeries.get(d.sn) ?? [], t, tEnd).wh;
       }
       if (shp2) {
@@ -4334,9 +4402,13 @@ export async function computeBayesianSolarModel(
   const wxByHourEpoch = new Map<number, WeatherHour>();
   for (const wh of weather.hours) wxByHourEpoch.set(Math.floor(wh.ts / 3_600_000), wh);
 
-  // Fleet PV per hour-epoch.
+  // Fleet PV per hour-epoch. v0.9.76 — Bayesian posterior is the
+  // home's GHI→PV response; including a spare's bench-charge PV would
+  // bias the prior shift away from what the connected arrays produce.
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
   const fleetPvByEpoch = new Map<number, number>();
-  for (const d of dpus) {
+  for (const d of homeDpus) {
     const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
     for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
   }

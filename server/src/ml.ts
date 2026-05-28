@@ -17,6 +17,7 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection } from './ecoflow/project.js';
 import { loadShadowModel } from './models/onlineLR.js';
 import { computeFamilyStats } from './alertOutcomes.js';
+import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
 
 /**
  * v0.9.4 — ML inference framework for pack-failure risk.
@@ -510,25 +511,43 @@ export interface NoveltyResult {
  * from the fleet mean (scaled by the max distance in the fleet, so
  * the worst-novelty pack always scores 100 and others scale linearly).
  */
-export function computeNovelty(features: FeatureVector[]): NoveltyResult[] {
+/**
+ * v0.9.76 — accepts an optional `baseline` pool of feature vectors that
+ * define the centroid + per-feature stdev. When omitted, falls back to
+ * the scoring set itself (legacy behavior). The split exists so callers
+ * can pass SHP2-connected packs only as the baseline while still scoring
+ * every pack — same pattern as computeDegradation's v0.9.75 peer-pool
+ * fix, applied to novelty here. Without this, a spare core's 10 packs
+ * dominate the centroid mass and compress the spread, then home-pack
+ * anomalies look extreme against an artificially deflated cloud.
+ *
+ * Live evidence pre-fix: Core 1 Pack 4 scored novelty=100 while 24 other
+ * packs sat at novelty=4 — the maxDist scaling was dominated by one
+ * away-from-spare-cluster pack instead of one truly anomalous one.
+ */
+export function computeNovelty(
+  features: FeatureVector[],
+  baseline?: FeatureVector[],
+): NoveltyResult[] {
   if (features.length === 0) return [];
-  const n = features.length;
+  const baselineSet = baseline && baseline.length > 0 ? baseline : features;
+  const nBase = baselineSet.length;
   const dim = FEATURE_NAMES.length;
-  // Centroid (mean per feature)
+  // Centroid (mean per feature) — from the baseline pool.
   const mean = new Array(dim).fill(0);
-  for (const f of features) {
+  for (const f of baselineSet) {
     for (let j = 0; j < dim; j++) mean[j] += f.normalized[FEATURE_NAMES[j]];
   }
-  for (let j = 0; j < dim; j++) mean[j] /= n;
-  // Per-feature stdev for Mahalanobis-style scaling
+  for (let j = 0; j < dim; j++) mean[j] /= nBase;
+  // Per-feature stdev for Mahalanobis-style scaling — also from baseline.
   const stdev = new Array(dim).fill(0);
-  for (const f of features) {
+  for (const f of baselineSet) {
     for (let j = 0; j < dim; j++) {
       const d = f.normalized[FEATURE_NAMES[j]] - mean[j];
       stdev[j] += d * d;
     }
   }
-  for (let j = 0; j < dim; j++) stdev[j] = Math.sqrt(stdev[j] / Math.max(1, n - 1));
+  for (let j = 0; j < dim; j++) stdev[j] = Math.sqrt(stdev[j] / Math.max(1, nBase - 1));
 
   // Distance for each pack
   const raw = features.map((f) => {
@@ -746,9 +765,19 @@ export function computePackRiskV2(
       features.push(extractFeatures(d.sn, pk.num, degradation, thermalEvents, internalR, chargeCurve));
     }
   }
-  // Novelty needs the full fleet to compute centroid+stdev
+  // v0.9.76 — Score every pack, but build the centroid+stdev from
+  // SHP2-connected packs only. Spare cores (4 & 5) carry idle/zero-load
+  // feature signatures that dragged the cluster mean down and compressed
+  // the spread pre-fix, making a healthy home pack score novelty=100
+  // simply because it sat outside the spare-cluster cloud. Same
+  // "filter the baseline, score everyone" pattern as
+  // computeDegradation's v0.9.75 peer-pool fix.
+  const connected = shp2ConnectedDpuSns(devices);
+  const baselineFeatures = features.filter((f) => isShp2Connected(f.sn, connected));
   const noveltyByKey = new Map<string, NoveltyResult>();
-  for (const n of computeNovelty(features)) noveltyByKey.set(`${n.sn}|${n.packNum}`, n);
+  for (const n of computeNovelty(features, baselineFeatures)) {
+    noveltyByKey.set(`${n.sn}|${n.packNum}`, n);
+  }
 
   // Per-feature importance: |weight| × per-feature stdev across fleet.
   // The weight alone is misleading (a feature can be high-weighted but
