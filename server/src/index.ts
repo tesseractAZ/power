@@ -48,6 +48,7 @@ import {
   computeRunway,
   computeRoundTripEfficiency,
   computeClipping,
+  computeCurtailment,
   computeSelfConsumption,
   computeThermalEvents,
   computeEquipmentHealth,
@@ -462,6 +463,15 @@ app.get('/api/clipping', async (req, reply) => {
   const fc = await getDayForecast(store.get().devices, recorder, () => {});
   return cached(req, reply, computeClipping(store.get().devices, recorder, fc), 60);
 });
+
+// v0.9.77 — SoC-saturation curtailment (distinct from inverter clipping).
+// Surfaces "PV being rejected at the panels because batteries are full".
+// The engine handles its own 1-min cache; this Fastify wrapper adds the
+// standard hash-etag + 60s Cache-Control treatment used by every other
+// analytics endpoint, so dashboards re-poll without re-shipping bytes.
+app.get('/api/curtailment', async (req, reply) =>
+  cached(req, reply, computeCurtailment(store.get().devices, recorder), 60),
+);
 
 // v0.7.6 — lifetime energy counters for HA Energy Dashboard.
 // Each entry: { persistedWh, pendingWh, watermarkMs } — live total = persistedWh + pendingWh.
@@ -929,6 +939,7 @@ app.get('/api/ha-state', async (req, reply) => {
   const runway = computeRunway(snap.devices, recorder, fc);
   const rte = computeRoundTripEfficiency(snap.devices, recorder);
   const clipping = await computeClipping(snap.devices, recorder, fc);
+  const curtailment = await computeCurtailment(snap.devices, recorder);
   const selfCons = computeSelfConsumption(snap.devices, recorder);
   const lifetime = recorder.getLifetimeTotals();
   const lifetimeKwh = (k: string) =>
@@ -1023,6 +1034,16 @@ app.get('/api/ha-state', async (req, reply) => {
     pv_clipped_kwh_today: clipping.todayKwh,
     pv_array_peak_watts: clipping.arrayPeakW,
     pv_hours_at_peak_today: clipping.hoursAtPeak,
+
+    // v0.9.77 — SoC-saturation curtailment. Distinct from inverter clipping:
+    // here the panels could produce more but batteries are full and home
+    // load is below PV. The MPPTs throttle to match (load + standby) and
+    // the rest is rejected at the array. Surface state + Wh + cumulative.
+    pv_curtailment_active: curtailment.active,
+    pv_curtailment_surplus_watts: curtailment.currentSurplusW,
+    pv_curtailment_kwh_today: curtailment.todayKwh,
+    pv_curtailment_kwh_7d: curtailment.recent7dKwh,
+    pv_curtailment_inactive_reason: curtailment.inactiveReason,
 
     // Self-consumption — 7-day rolling (v0.7.5)
     pv_kwh_7d: selfCons.pvKwh,

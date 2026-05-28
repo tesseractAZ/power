@@ -82,6 +82,10 @@ export const SENSORS: SensorConfig[] = [
   // Clipping
   { unique_id: 'ecoflow_pv_clipped_kwh_today', name: 'EcoFlow PV Clipped Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_clipped_kwh_today }}' },
   { unique_id: 'ecoflow_pv_array_peak_watts', name: 'EcoFlow PV Array Peak', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.pv_array_peak_watts }}', entity_category: 'diagnostic' },
+  // v0.9.77 — SoC-saturation curtailment ("batteries full, panels throttled")
+  { unique_id: 'ecoflow_pv_curtailment_surplus_watts', name: 'EcoFlow PV Curtailment Surplus', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:solar-power-variant', value_template: '{{ value_json.pv_curtailment_surplus_watts }}' },
+  { unique_id: 'ecoflow_pv_curtailment_kwh_today', name: 'EcoFlow PV Curtailed Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_today }}' },
+  { unique_id: 'ecoflow_pv_curtailment_kwh_7d', name: 'EcoFlow PV Curtailed 7d', device_class: 'energy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_7d }}' },
   // Self-consumption (v0.7.5)
   { unique_id: 'ecoflow_solar_fraction_of_load', name: 'EcoFlow Solar Fraction of Load', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power', value_template: '{{ value_json.solar_fraction_of_load_percent }}' },
   { unique_id: 'ecoflow_direct_use_ratio', name: 'EcoFlow PV Direct Use Ratio', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.direct_use_ratio_percent }}' },
@@ -111,6 +115,10 @@ export const SENSORS: SensorConfig[] = [
 
 export const BINARY_SENSORS = [
   { unique_id: 'ecoflow_off_grid', name: 'EcoFlow Off-Grid', device_class: 'connectivity', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
+  // v0.9.77 — fires when the system is actively curtailing PV (batteries
+  // full + home load < expected PV). HA can trigger automations off this
+  // — e.g. "if curtailing for 10 min then turn pool pump on full speed."
+  { unique_id: 'ecoflow_pv_curtailment_active', name: 'EcoFlow PV Curtailment Active', device_class: 'power', icon: 'mdi:solar-power-variant', value_template: '{{ "ON" if value_json.pv_curtailment_active else "OFF" }}' },
 ];
 
 /**

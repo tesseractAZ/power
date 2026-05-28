@@ -3,6 +3,154 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.77 — 2026-05-28
+
+**Big push on solar curtailment + EnergyFlow diagram filter.**
+
+The EnergyFlow card at the top of the dashboard was still adding the
+two spare DPUs (Cores 4 and 5, sitting idle until the second SHP2
+lands) into the headline PV / battery / SoC numbers. v0.9.74-76
+filtered every analytics engine and MQTT entity but missed the
+diagram. Closed now via the same `shp2ConnectedDpuSns` helper the
+server-side filtering already uses — the diagram now reports the home
+energy flow, with spare counts noted as `(+N spare)` after the DPU
+count so the cores aren't invisible, just out of the headline rollup.
+
+The bigger ship is a new **solar curtailment** engine — the second
+half of v0.6.0's `computeClipping` story.
+
+Two distinct ways the system can lose energy to physics:
+
+1. **Inverter clipping** (already in v0.6.0): the array produces more
+   DC than the MPPT + inverter can pass through. Hardware ceiling.
+2. **SoC-saturation curtailment** (new): batteries are already full
+   AND home load is below PV. The DPUs throttle their MPPTs to match
+   (load + standby) and the rest is rejected at the panels. Soft
+   ceiling — different mechanism, different remediation.
+
+### Engine
+
+In `server/src/analytics.ts`:
+
+- New `computeCurtailment(devices, recorder)` returning a rich
+  `CurtailmentReport`: current state (active/inactive + reason),
+  current surplus W, today's lost kWh, past-7-day lost kWh, hour-of-
+  day histogram, opportunistic-load suggestions.
+- Detection chains the existing Bayesian solar posterior + Open-Meteo
+  GHI. Expected PV at the current hour = `μ[hour] × GHI`. Curtailment
+  fires when **all five** hold:
+  - mean SoC across SHP2-connected DPUs ≥ 96%
+  - fleet PV ≥ 200 W (panels actually producing)
+  - GHI ≥ 100 W/m² (real daylight)
+  - posterior for this hour has ≥3 samples (model is trustworthy)
+  - the gap between expected and actual ≥ 300 W
+  - AND actual PV is roughly matched to home load (within a 2× factor
+    of load > 100 W) — the guard that distinguishes curtailment from
+    "the model is wrong" or "a cloud just passed."
+- Historical walk: today's per-hour totals + past-7-day totals. Days
+  within Open-Meteo's `past_days=3` window are weather-verified;
+  older days fall back to a stricter heuristic-only path.
+- 1-minute cache (matches dashboard polling).
+
+### Wire-up
+
+- `/api/curtailment` Fastify endpoint, ETag-cached.
+- `/api/ha-state` carries `pv_curtailment_active`,
+  `pv_curtailment_surplus_watts`, `pv_curtailment_kwh_today`,
+  `pv_curtailment_kwh_7d`, `pv_curtailment_inactive_reason`.
+- MQTT Discovery publishes:
+  - `binary_sensor.ecoflow_pv_curtailment_active` (HA automations can
+    trigger off this — see "Opportunistic loads" below for what to
+    wire next)
+  - `sensor.ecoflow_pv_curtailment_surplus` (W, `device_class: power`)
+  - `sensor.ecoflow_pv_curtailment_today_kwh` (kWh,
+    `state_class: total_increasing` so HA's Energy dashboard treats
+    it as a counter)
+  - `sensor.ecoflow_pv_curtailment_7d_kwh`
+- Pre-warmed by the cache-warmer, so the dashboard tile's first paint
+  is <5 ms.
+
+### Alert
+
+- New `pv-curtailment-active` learned-info alert. Severity is `info`
+  (this isn't a fault — the panel is working perfectly, you just have
+  nowhere to put the energy). Detail line names the current surplus,
+  today's lost kWh, and which opportunistic loads would fit. Fires
+  through the standard `computeCurtailmentAlerts` → alert monitor
+  pipeline, so the debounce and notification routing match every
+  other alert.
+
+### Opportunistic loads — foundation for automation
+
+The report ships with a hard-coded list of loads tuned for the operator's
+Phoenix setup: pool pump on high (1.8 kW), dehumidifier (0.7 kW), AC
+pre-cool (3.5 kW), water heater (4.5 kW), EV charging at full rate
+(7.2 kW). Each entry carries a `fitsInSurplus` boolean — true when the
+current curtailment surplus ≥ that load's estimated draw. The
+dashboard tile highlights the fitting loads in green so it's
+immediately obvious what could absorb the surplus.
+
+This release is **informational only**: the report's
+`haServiceHint` field is null on every load. The next phase will wire
+HA service calls into each entry (pool pump speed select, EVSE
+amperage adjust, water-heater relay) so the panel can act on
+curtailment instead of just naming it. The binary_sensor entity above
+is the bridge — HA automations can already use it as a trigger
+("when curtailment_active stays ON for 10 min, turn pool pump on
+high"); the next release brings that logic in-add-on so the user
+doesn't have to author the automations.
+
+### UI
+
+- New `CurtailmentCard` on the dashboard, sized to match `TodaySummary`
+  and `ForecastCard`. Two modes:
+  - **Active**: amber surplus value (e.g. `~5000 W`), one-liner
+    explaining the current state (SoC / actual / expected / GHI /
+    load), green-highlighted opportunistic loads that fit.
+  - **Inactive**: muted state with a one-sentence reason (`soc-too-
+    low`, `small-gap`, etc.) so the absence of curtailment is
+    intelligible, not just empty.
+- Per-hour histogram of the past 7 days underneath, so the user can
+  see when this typically happens (Phoenix midday is the obvious peak).
+- Today + 7-day kWh tiles always visible.
+
+### EnergyFlow filter
+
+`web/src/cards/EnergyFlow.tsx`: filter `dpus` to SHP2-connected via
+the shared `shp2ConnectedDpuSns` helper. PV / battery / SoC numbers
+now match the analytics engines + HA Energy dashboard + lifetime
+counters. Battery node subtitle shows `(2 DPU, +2 spare)` when
+spares are present so the spares aren't invisible — just out of the
+home rollup.
+
+### Tests
+
+10 new boundary cases in `server/test/curtailment.test.ts` covering:
+- SoC-too-low → inactive
+- PV-too-low → inactive
+- No-daylight / GHI under floor → inactive
+- Bayesian model lacks samples → inactive
+- Small gap (expected ≈ actual) → inactive
+- PV exceeds load (energy flowing through, not curtailing) → inactive
+- Active path: surplus computed correctly + reason `null`
+- Opportunistic-load `fitsInSurplus` math (5 kW surplus: pool, dehumid,
+  pre-cool, water-htr fit; EV doesn't)
+- DPU-only setup (no SHP2): inactive with `no-shp2` reason
+
+Two new test seams: `setBayesianModelForTesting` and `curtailmentCache`
+inclusion in `resetForecastCachesForTesting`. **All 318 tests pass**
+(308 before + 10 new).
+
+### Files touched
+
+`server/src/analytics.ts`, `server/src/index.ts`,
+`server/src/alertMonitor.ts`, `server/src/cacheWarmer.ts`,
+`server/src/mqttDiscovery.ts`,
+`web/src/cards/EnergyFlow.tsx`, `web/src/cards/CurtailmentCard.tsx`
+(new), `web/src/App.tsx`, `web/src/types.ts`,
+`server/test/curtailment.test.ts` (new), `CHANGELOG.md`,
+`config.yaml`.
+
 ## 0.9.76 — 2026-05-28
 
 **SHP2 membership filter — round 3. Closes the analytics-engine and

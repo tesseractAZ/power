@@ -313,6 +313,56 @@ export interface ClippingEstimate {
   hoursAtPeak: number;
 }
 
+// v0.9.77 — SoC-saturation curtailment report from /api/curtailment.
+export interface OpportunisticLoad {
+  id: string;
+  name: string;
+  estimatedW: number;
+  category: 'pool' | 'ev' | 'water' | 'hvac' | 'other';
+  description: string;
+  fitsInSurplus: boolean;
+  haServiceHint: string | null;
+}
+export interface CurtailmentHour {
+  hour: number;
+  surplusW: number;
+  curtailedKwh: number;
+  socAvg: number;
+  pvActualW: number;
+  pvExpectedW: number;
+  loadW: number;
+  weatherVerified: boolean;
+}
+export interface CurtailmentReport {
+  generatedAt: number;
+  active: boolean;
+  currentSurplusW: number;
+  current: {
+    socAvg: number;
+    pvActualW: number;
+    pvExpectedW: number | null;
+    loadW: number;
+    ghiWm2: number | null;
+    bayesianSamples: number;
+  };
+  inactiveReason:
+    | null
+    | 'soc-too-low'
+    | 'pv-too-low'
+    | 'no-daylight'
+    | 'no-model'
+    | 'small-gap'
+    | 'pv-exceeds-load'
+    | 'no-shp2'
+    | 'no-home-dpus';
+  todayKwh: number;
+  todayHours: CurtailmentHour[];
+  recent7dKwh: number;
+  recent7dHoursCount: number;
+  hourlyHistogram: Array<{ hour: number; avgSurplusW: number; samples: number }>;
+  opportunisticLoads: OpportunisticLoad[];
+}
+
 export interface RunwayProjection {
   generatedAt: number;
   backupRemainingKwh: number | null;

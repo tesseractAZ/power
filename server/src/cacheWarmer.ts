@@ -8,6 +8,7 @@ import {
   computeClipping,
   computeSelfConsumption,
   computeCarbonReport,
+  computeCurtailment,
   computeTariffReport,
   computeForecastSkill,
   computeBayesianSolarModel,
@@ -126,6 +127,10 @@ export function startCacheWarmer(
         safe('runway', () => computeRunway(devices, recorder, fc)),
         safe('round-trip-efficiency', () => computeRoundTripEfficiency(devices, recorder)),
         safe('clipping', () => computeClipping(devices, recorder, fc)),
+        // v0.9.77 — curtailment depends on Bayesian + weather (both already
+        // primed in this cohort). Pre-warming it keeps the dashboard tile's
+        // first paint under 5ms instead of paying the ~250ms posterior walk.
+        safe('curtailment', () => computeCurtailment(devices, recorder)),
         safe('self-consumption', () => computeSelfConsumption(devices, recorder)),
         safe('carbon', () => computeCarbonReport(devices, recorder)),
         safe('tariff', () => computeTariffReport(devices, recorder)),

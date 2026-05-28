@@ -2,7 +2,7 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
-import { getWeather, type WeatherHour } from './weather.js';
+import { getWeather, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
@@ -3514,6 +3514,478 @@ export async function computeClipping(
 }
 
 /* ===================================================================
+ * Solar curtailment / SoC-saturation detection (v0.9.77).
+ *
+ * Distinct from `computeClipping` (which catches the inverter HARDWARE
+ * ceiling). Curtailment here is the OPPOSITE situation: batteries are
+ * already full, home load is low, so the DPUs throttle their MPPTs to
+ * match (load + standby losses). The panels could produce more, but
+ * there's nowhere for the energy to go — it gets rejected at the array.
+ *
+ * The signal is observable but indirect — we never see the curtailed
+ * watts directly. The chain of reasoning:
+ *   1. Bayesian model (computeBayesianSolarModel) gives expected PV per
+ *      W/m² of GHI for each hour-of-day, learned from historical
+ *      clear-sky observations against the SHP2-connected arrays.
+ *   2. Open-Meteo gives current GHI.
+ *   3. Expected PV now = μ[hour] × GHI.
+ *   4. If actual PV is well below expected AND SoC is near 100% AND
+ *      actual PV ≈ home load (panels matched to load) → that gap is the
+ *      curtailed surplus.
+ *
+ * Sensitivity to wrong attribution:
+ *   - A cloud band dropping GHI mid-hour will briefly satisfy (actual
+ *     << expected) without curtailment. The match-load check filters
+ *     this: under cloud, PV drops below load, batteries start
+ *     discharging, SoC slips off 100%. So the "SoC ≥ 96 AND PV matched
+ *     to load" guard keeps us from labeling clouds as curtailment.
+ *   - At sunrise the Bayesian μ for early hours is noisy (low sample
+ *     count, small denominator from low-GHI observations). We require
+ *     the per-hour posterior to have ≥3 samples before trusting it.
+ *
+ * Lifetime kWh: this version computes today's kWh by walking today's
+ * past hours with weather data, and 7-day kWh by walking the past 7
+ * daylight hours of each day. Open-Meteo retains 3 days of history in
+ * the past_days=3 query (see weather.ts), so days 1-3 are weather-
+ * verified and days 4-7 fall back to the heuristic (SoC ≥ 96% AND PV
+ * matched to load AND solar should be high for this hour of day).
+ *
+ * Opportunistic loads: the report includes a static list of loads the
+ * user could activate to absorb surplus. v0.9.77 ships an informational
+ * list; future versions will hook into HA service calls (pool pump max
+ * speed, EV charging trigger, etc.) so the panel can ACT on curtailment
+ * instead of just naming it. The static list comes with sensible
+ * Phoenix-home defaults; override planned via config.yaml in a later
+ * release.
+ * =================================================================== */
+
+export interface OpportunisticLoad {
+  id: string;
+  name: string;
+  estimatedW: number;
+  category: 'pool' | 'ev' | 'water' | 'hvac' | 'other';
+  description: string;
+  /** True when current surplus ≥ estimatedW. */
+  fitsInSurplus: boolean;
+  /** Implementation hint for future HA automation; null until wired. */
+  haServiceHint: string | null;
+}
+
+export interface CurtailmentHour {
+  hour: number;           // 0-23 local hour-of-day
+  surplusW: number;       // mean curtailed power in this hour
+  curtailedKwh: number;   // surplusW × hour fraction we walked
+  socAvg: number;         // mean SoC across home DPUs during this hour
+  pvActualW: number;
+  pvExpectedW: number;
+  loadW: number;
+  weatherVerified: boolean; // true when GHI was available for the hour
+}
+
+export interface CurtailmentReport {
+  generatedAt: number;
+  /** Is the system actively curtailing right now? */
+  active: boolean;
+  /** Current surplus estimate (W). 0 when not active. */
+  currentSurplusW: number;
+  /** Live state at compute time. */
+  current: {
+    socAvg: number;
+    pvActualW: number;
+    pvExpectedW: number | null;
+    loadW: number;
+    ghiWm2: number | null;
+    bayesianSamples: number;   // posterior samples for the current hour
+  };
+  /** Reason curtailment is NOT firing right now (null when active). */
+  inactiveReason:
+    | null
+    | 'soc-too-low'
+    | 'pv-too-low'
+    | 'no-daylight'
+    | 'no-model'
+    | 'small-gap'
+    | 'pv-exceeds-load'
+    | 'no-shp2'
+    | 'no-home-dpus';
+  /** Today's curtailment so far (per hour walked + total kWh). */
+  todayKwh: number;
+  todayHours: CurtailmentHour[];
+  /** Past 7 days of curtailment (weather-verified where possible). */
+  recent7dKwh: number;
+  recent7dHoursCount: number;
+  /** Hour-of-day histogram across the past 7 days — useful for siting
+   *  opportunistic loads (run pool pump from 10-14 if that's the cluster). */
+  hourlyHistogram: Array<{ hour: number; avgSurplusW: number; samples: number }>;
+  /** Loads we suggest to absorb the surplus. */
+  opportunisticLoads: OpportunisticLoad[];
+}
+
+const CURTAIL_TTL_MS = 60 * 1000;            // 1 min — short, real-time tile
+const CURTAIL_SOC_MIN_PCT = 96;              // batteries "full enough"
+const CURTAIL_MIN_PV_W = 200;                // panels actually producing
+const CURTAIL_MIN_SURPLUS_W = 300;           // meaningful gap before we call it curtailment
+const CURTAIL_MIN_GHI_WM2 = 100;             // daylight floor
+const CURTAIL_MIN_BAYES_SAMPLES = 3;         // require posterior support
+// Curtailment match-load check: when truly throttling, PV ≈ load + standby
+// (~50 W per online DPU baseline). PV > load × this factor disqualifies.
+const CURTAIL_PV_MATCH_LOAD_FACTOR = 2.0;
+const CURTAIL_HISTORY_DAYS = 7;
+
+// Phoenix off-grid home opportunistic loads. Estimated wattages are
+// based on the operator's setup (~16.8 kWp array, pool pump on a SHP2 circuit,
+// EVSE Level-2, electric tank heater). Update via config in a later rev.
+const DEFAULT_OPPORTUNISTIC_LOADS: Omit<OpportunisticLoad, 'fitsInSurplus' | 'haServiceHint'>[] = [
+  { id: 'pool_pump_high',
+    name: 'Pool pump (max speed)',
+    estimatedW: 1800,
+    category: 'pool',
+    description: 'Run pool pump on high — increases filter turnover and skimmer reach. Already a SHP2 circuit, future automation can step it through speed presets.' },
+  { id: 'dehumidifier',
+    name: 'Dehumidifier',
+    estimatedW: 700,
+    category: 'hvac',
+    description: 'Reduces moisture load the AC has to remove later — banks comfort into the building envelope.' },
+  { id: 'ac_precool',
+    name: 'AC pre-cool (-5°F)',
+    estimatedW: 3500,
+    category: 'hvac',
+    description: 'Drop the thermostat ~5°F now to bank thermal mass for evening hours when SoC is dropping.' },
+  { id: 'water_heater',
+    name: 'Electric water heater',
+    estimatedW: 4500,
+    category: 'water',
+    description: 'Resistive tank element — heats a tank of water that holds 4-6 hours of latent capacity.' },
+  { id: 'ev_charge_full',
+    name: 'EV charge (full rate)',
+    estimatedW: 7200,
+    category: 'ev',
+    description: 'Switch EVSE to max amperage. Largest single sink available and stores well for off-peak driving.' },
+];
+
+let curtailmentCache: { ts: number; value: CurtailmentReport } | null = null;
+
+/** Resolve the GHI at the current local hour from the weather cache. */
+function currentHourGhi(weather: WeatherForecast | null, now: number): number | null {
+  if (!weather) return null;
+  const hourEpoch = Math.floor(now / 3_600_000);
+  const wh = weather.hours.find((h) => Math.floor(h.ts / 3_600_000) === hourEpoch);
+  return wh ? wh.radiationWm2 : null;
+}
+
+/**
+ * Predict expected PV (W) from the Bayesian posterior given an hour-of-day
+ * and current GHI. Returns null when the posterior doesn't have enough
+ * support to be trusted.
+ */
+function predictExpectedPv(
+  bayes: BayesianSolarModel,
+  hourOfDay: number,
+  ghiWm2: number,
+): { w: number; samples: number } | null {
+  const post = bayes.hourly.find((h) => h.hour === hourOfDay);
+  if (!post || post.samples < CURTAIL_MIN_BAYES_SAMPLES) return null;
+  return { w: post.posteriorMean * ghiWm2, samples: post.samples };
+}
+
+/** Estimate kWh lost to SoC-saturation curtailment. Cached 1 min. */
+export async function computeCurtailment(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): Promise<CurtailmentReport> {
+  if (curtailmentCache && Date.now() - curtailmentCache.ts < CURTAIL_TTL_MS) {
+    return curtailmentCache.value;
+  }
+  const now = Date.now();
+  const empty: CurtailmentReport = {
+    generatedAt: now,
+    active: false,
+    currentSurplusW: 0,
+    current: { socAvg: 0, pvActualW: 0, pvExpectedW: null, loadW: 0, ghiWm2: null, bayesianSamples: 0 },
+    inactiveReason: 'no-home-dpus',
+    todayKwh: 0,
+    todayHours: [],
+    recent7dKwh: 0,
+    recent7dHoursCount: 0,
+    hourlyHistogram: [],
+    opportunisticLoads: DEFAULT_OPPORTUNISTIC_LOADS.map((o) => ({
+      ...o, fitsInSurplus: false, haServiceHint: null,
+    })),
+  };
+
+  const allDpus = Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu',
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  if (allDpus.length === 0) return empty;
+  const connected = shp2ConnectedDpuSns(devices);
+  const homeDpus = allDpus.filter((d) => isShp2Connected(d.sn, connected));
+  if (homeDpus.length === 0) return empty;
+  const shp2 = Object.values(devices).find(
+    (d) => d.projection?.kind === 'shp2',
+  ) as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
+  if (!shp2) {
+    curtailmentCache = { ts: now, value: { ...empty, inactiveReason: 'no-shp2' } };
+    return curtailmentCache.value;
+  }
+
+  // 1) Live state. The expensive cached calls (weather, Bayesian) run in
+  // parallel — both are usually already warm from the cache-warmer.
+  const [weather, bayes] = await Promise.all([
+    getWeather(),
+    computeBayesianSolarModel(devices, recorder),
+  ]);
+
+  const socAvg = homeDpus.reduce((s, d) => s + (d.projection.soc ?? 0), 0) / homeDpus.length;
+  const pvActualW = homeDpus.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
+  const loadW = shp2.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0);
+  const ghi = currentHourGhi(weather, now);
+  const hod = new Date(now).getHours();
+  const expected = ghi != null && ghi >= CURTAIL_MIN_GHI_WM2 ? predictExpectedPv(bayes, hod, ghi) : null;
+
+  let active = false;
+  let currentSurplusW = 0;
+  let inactiveReason: CurtailmentReport['inactiveReason'] = null;
+  if (socAvg < CURTAIL_SOC_MIN_PCT) inactiveReason = 'soc-too-low';
+  else if (pvActualW < CURTAIL_MIN_PV_W) inactiveReason = 'pv-too-low';
+  else if (ghi == null || ghi < CURTAIL_MIN_GHI_WM2) inactiveReason = 'no-daylight';
+  else if (expected == null) inactiveReason = 'no-model';
+  else {
+    const gap = expected.w - pvActualW;
+    if (gap < CURTAIL_MIN_SURPLUS_W) inactiveReason = 'small-gap';
+    else if (loadW > 100 && pvActualW > loadW * CURTAIL_PV_MATCH_LOAD_FACTOR) {
+      // PV is meaningfully ABOVE load → it's actually feeding the load or
+      // marginally charging — not curtailing. Only matters when load isn't
+      // ~0 (nighttime base load); a near-zero loadW would make the ratio
+      // useless, so we require loadW > 100W to trigger this disqualifier.
+      inactiveReason = 'pv-exceeds-load';
+    } else {
+      active = true;
+      currentSurplusW = Math.round(gap);
+    }
+  }
+
+  // 2) Today's per-hour walk using weather data + Bayesian model.
+  const todayStart = startOfLocalDayMs();
+  const todayHours: CurtailmentHour[] = [];
+  let todayKwh = 0;
+  for (let h = 0; h < 24; h++) {
+    const hourStart = todayStart + h * 3_600_000;
+    if (hourStart >= now) break;
+    const hourEnd = Math.min(hourStart + 3_600_000, now);
+    const sample = await sampleCurtailmentHour(
+      homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h,
+    );
+    if (sample) {
+      todayHours.push(sample);
+      todayKwh += sample.curtailedKwh;
+    }
+  }
+
+  // 3) Past 7-day walk. Days within Open-Meteo's past_days window are
+  // weather-verified; older days use the heuristic-only path inside
+  // sampleCurtailmentHour (signaled by weatherVerified=false).
+  const recent7dHours: CurtailmentHour[] = [];
+  let recent7dKwh = 0;
+  const ONE_DAY = 24 * 3_600_000;
+  for (let d = 1; d <= CURTAIL_HISTORY_DAYS; d++) {
+    const dayStart = todayStart - d * ONE_DAY;
+    for (let h = 0; h < 24; h++) {
+      const hourStart = dayStart + h * 3_600_000;
+      const hourEnd = hourStart + 3_600_000;
+      const sample = await sampleCurtailmentHour(
+        homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h,
+      );
+      if (sample) {
+        recent7dHours.push(sample);
+        recent7dKwh += sample.curtailedKwh;
+      }
+    }
+  }
+
+  // 4) Hour-of-day histogram across the past 7 days + today.
+  const histAccum = Array.from({ length: 24 }, () => ({ sumW: 0, n: 0 }));
+  for (const sample of [...todayHours, ...recent7dHours]) {
+    if (sample.surplusW <= 0) continue;
+    const bucket = histAccum[sample.hour];
+    bucket.sumW += sample.surplusW;
+    bucket.n++;
+  }
+  const hourlyHistogram = histAccum.map((b, hour) => ({
+    hour,
+    avgSurplusW: b.n > 0 ? Math.round(b.sumW / b.n) : 0,
+    samples: b.n,
+  }));
+
+  // 5) Opportunistic-load suggestions sized against current surplus.
+  const opportunisticLoads: OpportunisticLoad[] = DEFAULT_OPPORTUNISTIC_LOADS.map((o) => ({
+    ...o,
+    fitsInSurplus: currentSurplusW >= o.estimatedW,
+    haServiceHint: null, // Phase 2 — wire to HA service.call here.
+  }));
+
+  const report: CurtailmentReport = {
+    generatedAt: now,
+    active,
+    currentSurplusW,
+    current: {
+      socAvg: Math.round(socAvg * 10) / 10,
+      pvActualW: Math.round(pvActualW),
+      pvExpectedW: expected ? Math.round(expected.w) : null,
+      loadW: Math.round(loadW),
+      ghiWm2: ghi != null ? Math.round(ghi) : null,
+      bayesianSamples: expected?.samples ?? 0,
+    },
+    inactiveReason,
+    todayKwh: Math.round(todayKwh * 100) / 100,
+    todayHours,
+    recent7dKwh: Math.round(recent7dKwh * 100) / 100,
+    recent7dHoursCount: recent7dHours.length,
+    hourlyHistogram,
+    opportunisticLoads,
+  };
+  curtailmentCache = { ts: now, value: report };
+  return report;
+}
+
+/**
+ * Walk one historical hour and decide whether it was curtailing.
+ * Returns null when conditions for curtailment weren't met in this hour.
+ *
+ * - Weather-verified path: GHI ≥ daylight + Bayesian μ has support →
+ *   expected PV is real; surplus = expected − actual when SoC ≥ 96 + PV
+ *   matched to load.
+ * - Heuristic-only path: weather missing (older than Open-Meteo's
+ *   past_days window) → assume curtailment ONLY when SoC ≥ 96 + PV
+ *   actually = load (within tolerance) + actual PV ≥ MIN_PV. Surplus is
+ *   estimated as μ[hour] × (typical clear-sky GHI for that hour). This
+ *   is more conservative than weather-verified — false negatives are
+ *   acceptable, false positives are not.
+ */
+async function sampleCurtailmentHour(
+  homeDpus: Array<DeviceSnapshot & { projection: DpuProjection }>,
+  shp2: DeviceSnapshot & { projection: Shp2Projection },
+  recorder: Recorder,
+  weather: WeatherForecast | null,
+  bayes: BayesianSolarModel,
+  hourStart: number,
+  hourEnd: number,
+  hourOfDay: number,
+): Promise<CurtailmentHour | null> {
+  const meanInWindow = (sn: string, metric: string): number | null => {
+    const pts = recorder.query(sn, metric, hourStart, hourEnd, 60);
+    if (pts.length === 0) return null;
+    return pts.reduce((s, p) => s + p.value, 0) / pts.length;
+  };
+
+  // SoC: mean across home DPUs over the hour.
+  const socs = homeDpus.map((d) => meanInWindow(d.sn, 'soc')).filter((v): v is number => v != null);
+  if (socs.length === 0) return null;
+  const socAvg = socs.reduce((s, v) => s + v, 0) / socs.length;
+  if (socAvg < CURTAIL_SOC_MIN_PCT) return null;
+
+  // PV: sum across home DPUs.
+  const pvs = homeDpus.map((d) => meanInWindow(d.sn, 'pv_total')).filter((v): v is number => v != null);
+  if (pvs.length < homeDpus.length / 2) return null;  // need at least half the home cores reporting
+  const pvActualW = pvs.reduce((s, v) => s + v, 0);
+  if (pvActualW < CURTAIL_MIN_PV_W) return null;
+
+  // Load: panel_load from the SHP2 over the hour.
+  const loadW = meanInWindow(shp2.sn, 'panel_load') ?? 0;
+
+  // Weather-verified path?
+  const wh = weather?.hours.find(
+    (h) => Math.floor(h.ts / 3_600_000) === Math.floor(hourStart / 3_600_000),
+  );
+  let expectedW: number | null = null;
+  let weatherVerified = false;
+  if (wh && wh.radiationWm2 >= CURTAIL_MIN_GHI_WM2) {
+    const e = predictExpectedPv(bayes, hourOfDay, wh.radiationWm2);
+    if (e) { expectedW = e.w; weatherVerified = true; }
+  }
+  if (expectedW == null) {
+    // Heuristic-only: only count when PV ≈ load (panels throttled to match).
+    // Without weather we don't know how clear the day was. The Bayesian μ
+    // multiplied by the *historical* typical clear-sky GHI for this hour
+    // gives a conservative ceiling on what we'd have produced.
+    if (loadW < 100 || pvActualW > loadW * CURTAIL_PV_MATCH_LOAD_FACTOR) return null;
+    const post = bayes.hourly.find((h) => h.hour === hourOfDay);
+    if (!post || post.samples < CURTAIL_MIN_BAYES_SAMPLES) return null;
+    // Approximate typical clear-sky GHI from posteriorMean's inverse:
+    // we know μ_W_per_GHI; the observed daily peak PV history implies a
+    // typical GHI. Hard-cap at 900 W/m² (Phoenix mid-summer clear-sky
+    // ceiling) — over-estimating surplus on a cloudy day is the failure
+    // mode we're guarding against.
+    expectedW = Math.min(post.posteriorMean * 900, post.posteriorMean * 1000);
+  }
+
+  // Weather-verified disqualifier: PV meaningfully exceeds load → not curtailing.
+  if (weatherVerified && loadW > 100 && pvActualW > loadW * CURTAIL_PV_MATCH_LOAD_FACTOR) return null;
+
+  const surplusW = expectedW - pvActualW;
+  if (surplusW < CURTAIL_MIN_SURPLUS_W) return null;
+
+  const elapsedHrs = (hourEnd - hourStart) / 3_600_000;
+  const curtailedKwh = (surplusW / 1000) * elapsedHrs;
+
+  return {
+    hour: hourOfDay,
+    surplusW: Math.round(surplusW),
+    curtailedKwh: Math.round(curtailedKwh * 1000) / 1000,
+    socAvg: Math.round(socAvg * 10) / 10,
+    pvActualW: Math.round(pvActualW),
+    pvExpectedW: Math.round(expectedW),
+    loadW: Math.round(loadW),
+    weatherVerified,
+  };
+}
+
+/**
+ * Emit a single learned-info alert when curtailment is active. The alert
+ * stays on `info` severity (the panel is healthy; we just have nowhere to
+ * put the energy) and includes a fact-line with the magnitude + the
+ * opportunistic loads that would fit. The alert monitor's debounce
+ * handles flapping (a fast-moving cloud shouldn't fire/clear in seconds).
+ */
+export async function computeCurtailmentAlerts(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): Promise<{ id: string; severity: 'info'; category: 'Solar'; device: string; title: string; detail: string; source: 'learned'; facts: Array<{ label: string; value: string }> }[]> {
+  try {
+    const r = await computeCurtailment(devices, recorder);
+    if (!r.active) return [];
+    const fits = r.opportunisticLoads.filter((o) => o.fitsInSurplus);
+    const fitsLine = fits.length === 0
+      ? 'None of the configured opportunistic loads fit this surplus.'
+      : `Could absorb with: ${fits.map((o) => `${o.name} (${(o.estimatedW / 1000).toFixed(1)} kW)`).join(', ')}.`;
+    return [{
+      id: 'pv-curtailment-active',
+      severity: 'info',
+      category: 'Solar',
+      device: 'System',
+      title: 'Solar curtailment — batteries full',
+      detail:
+        `Estimated ${r.currentSurplusW} W of PV is being rejected at the panels: ` +
+        `batteries at ${r.current.socAvg}% SoC, arrays producing ${r.current.pvActualW} W ` +
+        `(expected ${r.current.pvExpectedW} W at ${r.current.ghiWm2} W/m² GHI). ${fitsLine} ` +
+        `Today's lost-to-curtailment estimate: ${r.todayKwh.toFixed(2)} kWh.`,
+      source: 'learned',
+      facts: [
+        { label: 'Surplus', value: `${r.currentSurplusW} W` },
+        { label: 'SoC', value: `${r.current.socAvg}%` },
+        { label: 'PV actual', value: `${r.current.pvActualW} W` },
+        { label: 'PV expected', value: `${r.current.pvExpectedW ?? '—'} W` },
+        { label: 'GHI', value: r.current.ghiWm2 != null ? `${r.current.ghiWm2} W/m²` : '—' },
+        { label: 'Today lost', value: `${r.todayKwh.toFixed(2)} kWh` },
+        { label: 'Past 7d lost', value: `${r.recent7dKwh.toFixed(2)} kWh` },
+        { label: 'Opportunistic fit', value: fits.length === 0 ? 'none' : fits.map((o) => o.name).join(', ') },
+      ],
+    }];
+  } catch {
+    return [];
+  }
+}
+
+/* ===================================================================
  * NWS storm-preparedness signal (v0.7.5).
  *
  * Pulls active alerts.weather.gov alerts within ~50 mi of the panel's
@@ -4899,4 +5371,11 @@ export function resetForecastCachesForTesting(): void {
   bayesCache = null;
   ambientThermalCache = null;
   dispatchCache = null;
+  curtailmentCache = null;
+}
+
+/** Test-only seam: pin a Bayesian model into the cache so computeCurtailment
+ *  can be exercised without a full recorder + weather walk. */
+export function setBayesianModelForTesting(value: BayesianSolarModel | null): void {
+  bayesCache = value ? { ts: Date.now(), value } : null;
 }

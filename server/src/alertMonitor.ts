@@ -4,6 +4,7 @@ import {
   computeLearnedAlerts,
   computeBaselineAlerts,
   computeForecastAlerts,
+  computeCurtailmentAlerts,
   getDayForecast,
   forecastDayAlerts,
   stormPrepAlerts,
@@ -494,6 +495,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     } catch (e: any) {
       log(`storm-prep: ${e?.message ?? e}`);
     }
+    // v0.9.77 — SoC-saturation curtailment alert. Returns 0 or 1 entries;
+    // its severity is `info` (not a fault) and its content carries the
+    // "you have X kW of headroom — could absorb with pool pump etc." copy.
+    let curtailment: Alert[] = [];
+    try {
+      curtailment = await computeCurtailmentAlerts(snap.devices, recorder);
+    } catch (e: any) {
+      log(`curtailment-alert: ${e?.message ?? e}`);
+    }
     // v0.7.7 — build the connectivity context the alerts engine uses to
     // enrich offline/stale alerts with last-data timestamps + source.
     const perDevice = new Map<string, { lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number }>();
@@ -517,6 +527,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       ...computeForecastAlerts(snap.devices, recorder),
       ...forecastDay,
       ...stormPrep,
+      ...curtailment,
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     store.setAlerts(alerts);
     currentIncidents = buildIncidents(alerts);

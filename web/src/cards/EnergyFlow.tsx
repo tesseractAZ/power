@@ -1,5 +1,6 @@
 import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
 import { fmtPct, fmtW } from '../format';
+import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 
 interface Props {
   devices: Record<string, DeviceSnapshot>;
@@ -7,12 +8,26 @@ interface Props {
 
 export function EnergyFlow({ devices }: Props) {
   const list = Object.values(devices);
-  const dpus = list.filter((d) => d.projection?.kind === 'dpu' && d.online) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const allDpus = list.filter((d) => d.projection?.kind === 'dpu' && d.online) as Array<DeviceSnapshot & { projection: DpuProjection }>;
   const shp2 = list.find((d) => d.projection?.kind === 'shp2') as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
 
+  // v0.9.77 — the headline diagram is the HOME energy flow. Spare DPUs
+  // (Cores 4 & 5 — currently bench-charging or sitting idle until the
+  // second SHP2 lands) are not part of the home's PV / battery / SoC
+  // story, even when they're online. Filter them out via the same
+  // SHP2-membership helper the analytics engines + MQTT discovery use
+  // (server-side: server/src/shp2Membership.ts). The diagram now
+  // mirrors what the HA Energy Dashboard and lifetime counters show.
+  // When the SHP2 hasn't been observed yet (cold boot), fall back to
+  // every online DPU so the diagram isn't empty.
+  const connected = shp2ConnectedDpuSns(devices);
+  const dpus = connected.size > 0 ? allDpus.filter((d) => isShp2Connected(d.sn, connected)) : allDpus;
+
   const pv = dpus.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
-  // "Grid-tied" means the HOUSE is on grid — AC input on an SHP2-bound DPU. A
-  // spare DPU plugged into a wall to self-charge must not flip the whole system.
+  // acIn is computed from the same connected set (the SHP2's sources
+  // ARE the home-connected DPUs by definition), so the previous
+  // sourceSns calculation is now redundant — kept as a defensive
+  // fallback for the cold-boot path above.
   const sourceSns = new Set(
     (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
@@ -72,7 +87,7 @@ export function EnergyFlow({ devices }: Props) {
         {/* Battery node (big) */}
         <Node
           {...Battery}
-          title={`Batteries (${dpus.length} DPU)`}
+          title={`Batteries (${dpus.length} DPU${connected.size > 0 && allDpus.length > dpus.length ? `, +${allDpus.length - dpus.length} spare` : ''})`}
           subtitle={batNet > 5 ? `▼ ${fmtW(batNet)} discharging` : batNet < -5 ? `▲ ${fmtW(-batNet)} charging` : 'idle'}
           value={fmtPct(soc, 1)}
           big

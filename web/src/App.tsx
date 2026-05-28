@@ -4,6 +4,7 @@ import { EnergyFlow } from './cards/EnergyFlow';
 import { TodaySummary } from './cards/TodaySummary';
 import { ForecastCard } from './cards/ForecastCard';
 import { RunwayCard } from './cards/RunwayCard';
+import { CurtailmentCard } from './cards/CurtailmentCard';
 import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
 import type { Shp2Projection } from './types';
 import { Shp2Card } from './cards/Shp2Card';
@@ -228,6 +229,10 @@ function NormalApp() {
           {snapshot && <EnergyFlow devices={snapshot.devices} />}
           <TodaySummary />
           <ForecastCard />
+          {/* v0.9.77 — solar curtailment surface. Sits next to TodaySummary
+              so the "lost kWh today" reading is one glance away from the
+              "delivered kWh today" reading on TodaySummary. */}
+          <CurtailmentCard />
 
           {showHistory && shp2 && (
             <Suspense fallback={<PageFallback />}>
