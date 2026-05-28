@@ -256,7 +256,16 @@ await app.register(fastifyStatic, {
 // into a separate cache dir. Served at /audio-render/* so the WAVs the
 // renderer creates are distinct from the per-level klaxon files (which
 // the renderer reads as inputs).
+//
+// v0.9.71 — fastify-static refuses to register the route when `root`
+// doesn't exist at registration time. The /data/audio-render/ dir is
+// only populated on first broadcast, so without a pre-mkdir the static
+// handler silently disabled itself and every URL served 404. Make the
+// dir up-front so the route is always wired even before the first
+// render writes anything.
 const audioRenderDir = resolve(process.env.DATA_DIR ?? '/data', 'audio-render');
+const { mkdirSync } = await import('node:fs');
+mkdirSync(audioRenderDir, { recursive: true });
 await app.register(fastifyStatic, {
   root: audioRenderDir,
   prefix: '/audio-render/',

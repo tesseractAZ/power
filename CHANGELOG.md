@@ -3,6 +3,32 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.71 — 2026-05-28
+
+**Fix: `/audio-render/` route silently 404'd on first start.**
+
+v0.9.70 introduced a separate cache dir for combined klaxon+TTS WAVs
+(`/data/audio-render/`) and registered a fastify-static handler for it.
+But fastify-static refuses to bind to a non-existent `root` directory
+— it logs a warning and treats every request to the prefix as a normal
+404. The render code created the dir lazily on first write, but by then
+the static route was already a no-op.
+
+End-to-end symptom on the operator's first v0.9.70 test:
+  1. TTS rendered fine (Wyoming round-trip 612 ms, 271 KB WAV cached)
+  2. MA's `play_announcement` got the URL
+  3. MA fetched `http://homeassistant.local:8787/audio-render/<hash>.wav`
+  4. Panel returned 404 (route never bound)
+  5. MA returned 500 to the panel
+  6. Broadcast logged "partial" — klaxon never even started
+
+Fix: `mkdirSync(audioRenderDir, { recursive: true })` immediately
+before the fastify-static register call. The dir always exists at
+registration time, fastify-static binds the route, and the WAVs we
+write into it are served at the URL MA expects.
+
+No other behavior change. Same pipeline as v0.9.70.
+
 ## 0.9.70 — 2026-05-28
 
 **Broadcast / TTS subsystem rewrite — Wyoming-direct + airport chimes
