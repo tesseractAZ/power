@@ -3,6 +3,118 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.70 — 2026-05-28
+
+**Broadcast / TTS subsystem rewrite — Wyoming-direct + airport chimes
++ single MA call.**
+
+Two-year history of TTS pain in this codebase: v0.9.18 added klaxon
+broadcasts via `media_player.play_media`. v0.9.23 layered Music
+Assistant in for simultaneous playback. v0.9.30-v0.9.49 added TTS,
+then accumulated retry logic, settle timers, MA re-acquire workarounds,
+and a four-step engine fallback chain. v0.9.63 added an `en-US` ↔
+`en_US` toggle when Wyoming's POSIX format clashed with HA Cloud's
+BCP47. v0.9.65 added pin-disables-fallback to stop the silent
+Piper-→-Cloud surprise. v0.9.68 finally cleaned the entity duplicates
+that the multi-path broadcast had been papering over.
+
+Then HA 2026.6.0b0's supervisor proxy started returning 500 + headers-
+timeouts on `tts_get_url`. The same call from a Bearer LLAT directly
+to HA Core worked fine. The route the panel was forced to take (panel
+→ SUPERVISOR_TOKEN → supervisor proxy → HA Core → tts_speak → MA →
+speaker) had so many moving parts that diagnosis hit a wall.
+
+### The rewrite
+
+`server/src/broadcast.ts` shrunk from 832 lines to ~330. The flow is
+now one pipeline call:
+
+```
+alert transition
+  → audioRenderer.renderAnnouncement(level, message)
+      ├── render TTS via Wyoming direct → core-piper:10200 (TCP)
+      ├── concat klaxon WAV + TTS WAV → single combined WAV
+      └── cache at /data/audio-render/<sha1>.wav, serve at /audio-render/*
+  → ONE music_assistant.play_announcement call with all targets + URL
+  → done
+```
+
+No settle timers. No two-phase klaxon-then-TTS. No protocol-aware
+speaker bucketing. No backend selector. No engine fallback chain. The
+WAV is rendered once, cached forever (until 7-day TTL prune), served
+from a local route, and played simultaneously across every target by
+MA's native multi-target play_announcement.
+
+### New files
+
+- `server/src/wyomingTts.ts` — Wyoming Protocol TCP client. Sends a
+  `synthesize` event, reassembles `audio-chunk` payloads into a WAV.
+  Handles connect-refused, RST, timeout, server-side `error` events,
+  premature close, empty audio. 100 lines, no HA dependency.
+- `server/src/audioRenderer.ts` — orchestrates klaxon-load → Wyoming-
+  render → concat → cache. SHA1(version || level || message) cache
+  key. Atomic tmp→rename writes. WAV format validation rejects
+  mismatched sample rates rather than producing silent corruption.
+
+### New chimes
+
+`server/src/audioAssets.ts` replaces the v0.9.18 TMP-era square-wave
+klaxons with airport-PA-style bell chimes:
+
+- **Red alert**: 3-note descending Am arpeggio (C5 → A4 → F4), bell
+  timbre with 4 harmonics, repeated once. ~3.0 s. Conveys "this needs
+  your attention" without the abrasive square-wave urgency. Same
+  forward energy as a BART arrival tone, heavier descending pattern.
+- **Yellow alert**: Classic 2-note PA bing-bong (E5 → C5), bell timbre.
+  Single iteration. ~1.4 s.
+- **All-clear**: Ascending C-major triad (C5 → E5 → G5), bell timbre.
+  ~1.3 s.
+
+`AUDIO_ASSETS_VERSION = 2` triggers automatic regeneration on first
+v0.9.70 startup — users don't need to manually wipe `/data/audio/`.
+
+### Removed
+
+- `server/src/speakerProfiles.ts` (unused — no more protocol bucketing)
+- `BROADCAST_USE_MUSIC_ASSISTANT` env var (MA is the only path)
+- `BROADCAST_SONOS_RESTORE` env var (MA's play_announcement handles it)
+- `BROADCAST_TTS_SERVICE` / `BROADCAST_TTS_LANGUAGE` /
+  `BROADCAST_TTS_REQUIRE_LOCAL` (Wyoming is the only TTS engine, always
+  local, no language toggle in the hot path)
+- `BROADCAST_HA_EXTERNAL_URL` (tts_proxy is no longer in the path)
+- `/api/broadcast/tts-services` (engine picker — only one engine now)
+- `/api/broadcast/tts-debug` (HA TTS catalog dump — irrelevant)
+- `/api/broadcast/test-tts` (engine isolation — only one path now;
+  `/api/broadcast/test` covers it)
+- `buildEngineChain()` + 19 tts-no-cloud tests for the fallback chain
+- All `await sleep(klaxonSettleMs)` / 5–8 sec settle windows
+
+### Added env vars
+
+- `BROADCAST_WYOMING_HOST` (default `core-piper` — the standard
+  hostname inside HA's add-on bridge network)
+- `BROADCAST_WYOMING_PORT` (default `10200`)
+- `BROADCAST_WYOMING_VOICE` (default empty → use Piper add-on's
+  configured voice; override for per-broadcast voice selection)
+
+### Test additions
+
+`server/test/wyomingTts.test.ts` (10 tests) and
+`server/test/audioRenderer.test.ts` (12 tests) cover the new modules
+with a mock Wyoming TCP server so CI doesn't need a real Piper. Sum:
+316 tests (was 311 in v0.9.69).
+
+### What stays in the broadcast policy
+
+Preserved verbatim from v0.9.18-v0.9.69:
+
+- Fires on CONDITION TRANSITIONS, not per-tick
+- First-render is silent
+- Min severity gates
+- Quiet hours suppress warning/info; critical always fires
+- Test endpoint cooldown (10 s)
+- In-flight guard against cascade
+
 ## 0.9.69 — 2026-05-27
 
 **MQTT v5 everywhere — no more reliance on broker backward-compat.**

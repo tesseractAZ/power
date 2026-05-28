@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.9.69"
+version: "0.9.70"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -105,49 +105,18 @@ options:
   BROADCAST_MIN_SEVERITY: critical
   # Quiet hours suppress warning/info broadcasts. Critical always fires.
   BROADCAST_QUIET_HOURS: "22-06"
-  # v0.9.30 — TTS announcement after the klaxon. Leave EMPTY to
-  # auto-detect — the add-on probes HA's service catalog on startup and
-  # picks the best engine available, preferring local/off-grid-safe:
-  #   1. tts.piper                 (local, free, off-grid OK — install
-  #                                 the Piper add-on; strongly recommended)
-  #   2. tts.cloud_say             (Home Assistant Cloud / Nabu Casa)
-  #   3. tts.google_translate_say  (free, needs internet)
-  #   4. tts.elevenlabs_say        (premium voices, per-char billed)
-  # Set explicitly to override the auto-pick. v0.9.65 — pinning an engine
-  # now DISABLES the fallback chain: if the pinned engine fails, the
-  # broadcast records the error and falls through to klaxon-only (no
-  # silent jump to whatever other engine was detected).
-  BROADCAST_TTS_SERVICE: ""
-  BROADCAST_TTS_LANGUAGE: en-US
-  # v0.9.65 — Hard "no Cloud TTS, ever" mode for off-grid setups.
-  # When true, TTS is restricted to local engines (Piper today; any
-  # future on-device engine that ships with `local: true`). If no local
-  # engine is available, broadcasts skip TTS entirely (klaxon only)
-  # instead of falling back to Cloud TTS. Recommended for off-grid
-  # setups where Cloud TTS requires internet — every Cloud call during
-  # a real outage is silent, and that's the opposite of what you want
-  # mid-alarm.
-  BROADCAST_TTS_REQUIRE_LOCAL: false
-  # Sonos-specific: snapshot the current state before broadcasting and
-  # restore it after, so a music session resumes. Leave on unless you
-  # see odd behavior.
-  BROADCAST_SONOS_RESTORE: true
-  # v0.9.23 — backend selection for broadcast service calls.
-  #   auto             — use music_assistant.play_announcement when MA is
-  #                      installed in HA, else fall back to media_player.play_media
-  #   music_assistant  — force MA path (will fail if MA isn't installed)
-  #   media_player     — never use MA, always use media_player.play_media
-  # MA's announce service plays SIMULTANEOUSLY across all targets (no
-  # per-speaker delay), handles volume override + restore atomically, and
-  # bypasses the music queue. Recommended when MA is installed.
-  BROADCAST_USE_MUSIC_ASSISTANT: auto
-  # v0.9.40 — Base URL of Home Assistant Core (for TTS proxy URLs sent
-  # to speakers). Leave empty to use the default
-  # `http://homeassistant.local:8123`. Set explicitly if your HA
-  # instance is on a different host or port. The path
-  # `/api/tts_proxy/<hash>.mp3` is appended automatically when we
-  # render TTS and hand the URL to Music Assistant.
-  BROADCAST_HA_EXTERNAL_URL: ""
+  # v0.9.70 — Wyoming Protocol server (Piper TTS) location. The default
+  # `core-piper` hostname routes to HA's official Piper add-on inside
+  # the supervisor's network. Override only if you're running Piper on
+  # an external host. Port 10200 is Piper's standard Wyoming port.
+  BROADCAST_WYOMING_HOST: core-piper
+  BROADCAST_WYOMING_PORT: 10200
+  # v0.9.70 — optional Piper voice override (e.g. "en_US-amy-medium",
+  # "en_US-ryan-low", "en_GB-alan-low"). Leave empty to use whatever
+  # voice you've configured in the Piper add-on's own options. The list
+  # of available voices is published by Piper at startup and visible in
+  # the Piper add-on log.
+  BROADCAST_WYOMING_VOICE: ""
 schema:
   ECOFLOW_ACCESS_KEY: password
   ECOFLOW_SECRET_KEY: password
@@ -187,9 +156,6 @@ schema:
   BROADCAST_VOLUME: float
   BROADCAST_MIN_SEVERITY: list(critical|warning)
   BROADCAST_QUIET_HOURS: "str?"
-  BROADCAST_TTS_SERVICE: "str?"
-  BROADCAST_TTS_LANGUAGE: "str?"
-  BROADCAST_TTS_REQUIRE_LOCAL: bool
-  BROADCAST_SONOS_RESTORE: bool
-  BROADCAST_USE_MUSIC_ASSISTANT: list(auto|music_assistant|media_player|true|false)
-  BROADCAST_HA_EXTERNAL_URL: "str?"
+  BROADCAST_WYOMING_HOST: "str?"
+  BROADCAST_WYOMING_PORT: port
+  BROADCAST_WYOMING_VOICE: "str?"
