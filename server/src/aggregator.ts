@@ -6,6 +6,7 @@
 
 import { Recorder } from './recorder.js';
 import { SnapshotStore } from './snapshot.js';
+import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
 
 export interface EnergyTotals {
   sn: string;
@@ -214,6 +215,15 @@ export function computeTotals(
   const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, coverage: 0 };
   const coverageAccum: number[] = [];
 
+  // v0.9.76 — only SHP2-connected DPUs contribute to fleet.pvWh /
+  // .acOutWh / .batteryNetWh, matching the /api/ha-state + MQTT
+  // Discovery filter. Spare cores' samples are still recorded into
+  // `devices[]` for per-device diagnostics but skipped from the fleet
+  // rollup — mirrors v0.9.74's recorder.ts contributor filter so
+  // `/api/summary/today` (which powers the HA Today card) agrees with
+  // the lifetime counters.
+  const connected = shp2ConnectedDpuSns(snap.devices);
+
   for (const d of Object.values(snap.devices)) {
     const p = d.projection;
     if (!p) continue;
@@ -228,13 +238,19 @@ export function computeTotals(
     };
 
     if (p.kind === 'dpu') {
-      fleet.pvWh += ingest('pv_total');
-      fleet.acOutWh += ingest('ac_out');
+      // Always populate per-device metrics (used by the per-device list).
+      const pvWh = ingest('pv_total');
+      const acOutWh = ingest('ac_out');
       ingest('total_in');
       ingest('total_out');
       const totalOut = metrics['total_out']?.wh ?? 0;
       const totalIn = metrics['total_in']?.wh ?? 0;
-      fleet.batteryNetWh += totalOut - totalIn;
+      // Only home-connected DPUs contribute to the fleet rollup.
+      if (isShp2Connected(d.sn, connected)) {
+        fleet.pvWh += pvWh;
+        fleet.acOutWh += acOutWh;
+        fleet.batteryNetWh += totalOut - totalIn;
+      }
     } else if (p.kind === 'shp2') {
       fleet.panelLoadWh += ingest('panel_load');
     } else {

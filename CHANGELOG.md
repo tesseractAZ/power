@@ -3,6 +3,105 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.76 — 2026-05-28
+
+**SHP2 membership filter — round 3. Closes the analytics-engine and
+ML-novelty gaps that v0.9.74/0.9.75 left unfiltered. Live trigger
+that surfaced this: `/api/self-consumption` returning
+`solarFractionOfLoadPct: 127` — physically impossible. PV / charge /
+discharge sums were including all 5 cores while the load denominator
+was already SHP2-only (it comes from the SHP2 itself). Result was
+"home consumed 127% solar," which is the same arithmetic shape as
+"the spare cores look productive in fleet rollups even though they
+have no panels." Same fix pattern as v0.9.74/0.9.75, applied to the
+engines and ML novelty detector that still summed unfiltered.**
+
+### Engines re-pointed at the SHP2-connected pool
+
+In `server/src/analytics.ts`:
+
+- `getDayForecast` — `pvCurve` and `fleetPvByEpoch` (the GHI→PV
+  history that anchors the day-ahead forecast). Spare cores' zero-PV
+  hours were diluting average yield and depressing the multi-day
+  forecast.
+- `computeSelfConsumption` — numerator (PV charge + discharge load
+  served) now matches the SHP2-only denominator. **127% → physical
+  bounds restored.**
+- `computeRoundTripEfficiency` — `packSeries` for fleet RTE only
+  includes home packs. Spare packs that occasionally trickle-charge
+  at storage SoC were polluting the ratio.
+- `computeTariffReport` — grid-import accounting filtered. Spare
+  cores can't pull household load, so any AC-in they show is
+  storage-maintenance, not tariff cost.
+- `computeShadeReport` — `fleetPvByEpoch` filtered. Shade events are
+  detected by sudden PV drops relative to a clear-sky baseline;
+  including idle cores raised the noise floor and hid mild shading.
+- `computeSoilingDecomposition` — `perHour` PV series filtered.
+  Soiling estimation depends on small percent drifts; spare-core
+  noise washed out the signal.
+- `computeStringMismatch` — `fleetPerHour` baseline pool filtered.
+  String-mismatch detection compares each MPPT against the fleet
+  median; the median was dragged toward zero by spare cores.
+- `computeClipping` — `homeDpus` (the candidate set for clipping
+  detection) filtered. Spare cores can't clip — they have no panels —
+  so they never should have been considered.
+- `computeBayesianSolarModel` — `fleetPvByEpoch` (the GHI vs PV
+  pairs that feed the Bayesian update) filtered. The model was
+  learning a partly-fictitious irradiance-response curve from spare
+  cores that always reported zero.
+
+### `server/src/aggregator.ts` `computeTotals`
+
+The Today / week / month rollups (`/api/totals/*`, drives the
+HA Today card via the SHP2-connected source). Per-device metrics
+still recorded for every DPU (diagnostics intact). Only the fleet
+`pvWh / acOutWh / batteryNetWh` sum is restricted to SHP2-connected,
+which makes the totals card agree with the lifetime counters from
+v0.9.74's recorder filter. Before this fix, the integrated daily
+total and the persisted lifetime counter could diverge by ~67%
+(the ratio of 5-DPU fleet vs 3-DPU connected fleet).
+
+### `server/src/ml.ts` `computeNovelty` + `computePackRiskV2`
+
+The novelty detector (isolation-forest-lite) computes per-pack
+distance from a fleet centroid, normalized by per-feature stdev.
+Pre-fix: centroid and stdev came from all 25 packs (5 cores × 5
+packs). Spare-core packs sit at storage SoC with no thermal events,
+no cycling, no fade — they form a tight cluster near the origin.
+That cluster pulled the centroid down and compressed the stdev,
+making any home pack with even mild aging signature score
+**novelty=100** simply because it lived outside the spare cluster.
+
+Live evidence pre-fix: Core 1 Pack 4 scored novelty=100 while 24
+other packs sat at novelty=4 — the maxDist scaling was dominated by
+one home-vs-spare-cluster pack, not a truly anomalous one.
+
+The function now accepts an optional `baseline` argument; when
+present, centroid + stdev are computed from that pool while every
+input pack is still *scored*. Score-everyone-but-baseline-from-home
+mirrors the v0.9.75 `computeDegradation` peer-pool fix.
+
+`computePackRiskV2` builds the baseline as the SHP2-connected subset
+of `features` and passes it through. Spare packs still appear in the
+report (so Eric retains visibility into their fade trends), but
+their novelty is judged against the home cluster — the cluster that
+matters for "which pack is unusual relative to what's keeping the
+house running."
+
+### Tests
+
+Server suite: 308/308 green. No tests needed updating — the
+`computeNovelty` signature change is backward-compatible
+(optional second argument), and the existing test exercises the
+no-baseline path.
+
+`computeNovelty` deserves new tests asserting "spare pollution"
+behaviour explicitly (a vector with high stdev injected at one
+sn should drag maxDist up). Filed mentally for v0.10.x test
+backfill — for the live-bug fix today, the integration evidence
+(self-consumption % returns to physically-bounded value) is the
+verification.
+
 ## 0.9.75 — 2026-05-28
 
 **SHP2 membership filter — round 2. Closes out the 4 deferred items
