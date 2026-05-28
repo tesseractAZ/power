@@ -3,6 +3,35 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.72 — 2026-05-28
+
+**Fix: MA `play_announcement` is synchronous, needs a much longer
+timeout than the generic 5 s `callHaService` cap.**
+
+v0.9.71 fixed the `/audio-render/` 404 bug, but the next test surfaced
+a different failure mode: `music_assistant.play_announcement: Headers
+Timeout Error`. The audio was actually playing — verified by direct
+service call from curl, which transitioned all 5 media_player targets
+to `state=playing` — but it took 9.46 seconds for MA to return. The
+panel had a 5 s headers / 10 s body timeout on every `callHaService`
+call (added in v0.9.57 to keep hung integrations from stalling
+broadcasts), so the call aborted before MA finished committing the
+announcement to its queue across all 5 speakers.
+
+Root cause: MA's `play_announcement` waits until the announce has
+been QUEUED AND STARTED on every target before returning. That's
+~1-2 seconds per target for HomePod / Sonos / Cast over LAN.
+5 targets × ~2 s = 9 s. The 5 s cap was tuned for sub-second HA
+service calls, not for MA's synchronous-fan-out announce path.
+
+Fix in `haService.ts`: detect `music_assistant.play_announcement`
+specifically and bump its timeouts to 30 s headers / 45 s body.
+Every other HA call keeps the tight 5 s / 10 s caps so a genuinely
+hung integration still surfaces fast.
+
+Same v0.9.70 pipeline — Wyoming-direct TTS + single MA announce —
+just with MA's actual response time accommodated.
+
 ## 0.9.71 — 2026-05-28
 
 **Fix: `/audio-render/` route silently 404'd on first start.**

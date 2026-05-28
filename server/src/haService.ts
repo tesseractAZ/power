@@ -58,13 +58,20 @@ export async function callHaService(
   const t = token();
   if (!t) return { ok: false, error: 'SUPERVISOR_TOKEN not set (running outside Home Assistant?)' };
   const url = `${SUPERVISOR_BASE}/services/${domain}/${service}`;
+  // v0.9.57 — cap stalled HA service calls so a hung integration doesn't
+  //   block the broadcast pipeline indefinitely (undici default is ~5 min).
+  // v0.9.72 — Music Assistant's `play_announcement` is a synchronous
+  //   service that doesn't return until the announce has been queued AND
+  //   started on every target — measured at ~9 s for a 5-speaker, 271-KB
+  //   combined-WAV announcement. The previous 5 s / 10 s cap aborted
+  //   every broadcast with "Headers Timeout" even though the audio was
+  //   playing on the speakers (verified end-to-end via the same call
+  //   from curl with 30 s timeout). Bump MA's announce path to 30 s /
+  //   45 s. Everything else stays tight to keep hangs visible.
+  const isMaAnnounce = domain === 'music_assistant' && service === 'play_announcement';
+  const headersTimeoutMs = isMaAnnounce ? 30_000 : 5000;
+  const bodyTimeoutMs = isMaAnnounce ? 45_000 : 10_000;
   try {
-    // v0.9.57 — cap stalled HA service calls. Without these, a hung
-    // integration (e.g. Piper waiting on Wyoming) blocks the whole
-    // broadcast pipeline for tens of seconds because undici's default
-    // is ~5 min. Real HA service calls are sub-second; 5s headers /
-    // 10s body covers the slow ones (snapshots, big media calls)
-    // without hiding actual hangs.
     const res = await request(url, {
       method: 'POST',
       headers: {
@@ -72,8 +79,8 @@ export async function callHaService(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(data),
-      headersTimeout: 5000,
-      bodyTimeout: 10000,
+      headersTimeout: headersTimeoutMs,
+      bodyTimeout: bodyTimeoutMs,
     });
     const body = await res.body.text();
     if (res.statusCode >= 200 && res.statusCode < 300) {
