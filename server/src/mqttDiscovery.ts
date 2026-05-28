@@ -1,4 +1,6 @@
 import mqtt, { MqttClient } from 'mqtt';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import type { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { Recorder } from './recorder.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
@@ -43,7 +45,7 @@ const STATE_TOPIC = 'ecoflow_panel/state';
 const AVAILABILITY_TOPIC = 'ecoflow_panel/availability';
 const PUBLISH_INTERVAL_MS = 30 * 1000;
 
-interface SensorConfig {
+export interface SensorConfig {
   unique_id: string;
   name: string;
   device_class?: string;
@@ -54,7 +56,7 @@ interface SensorConfig {
   entity_category?: 'diagnostic' | 'config';
 }
 
-const SENSORS: SensorConfig[] = [
+export const SENSORS: SensorConfig[] = [
   // Power flow
   { unique_id: 'ecoflow_fleet_pv_watts', name: 'EcoFlow Fleet PV', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.fleet_pv_watts }}' },
   { unique_id: 'ecoflow_panel_load_watts', name: 'EcoFlow Panel Load', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.panel_load_watts }}' },
@@ -106,9 +108,47 @@ const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_tariff_savings_7d', name: 'EcoFlow Net Savings (7d)', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-check', value_template: '{{ value_json.tariff_net_savings_7d_dollars }}' },
 ];
 
-const BINARY_SENSORS = [
+export const BINARY_SENSORS = [
   { unique_id: 'ecoflow_off_grid', name: 'EcoFlow Off-Grid', device_class: 'connectivity', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
 ];
+
+/**
+ * Legacy unique_id scheme cleanup (MQTT_DISCOVERY_DEDUP_VERSION = 1).
+ *
+ * Background: an earlier version of this file double-prefixed unique_ids
+ * with the device identifier (`ecoflow_panel_ecoflow_*`). When the
+ * current scheme (`ecoflow_*`, no double prefix) shipped, HA kept the
+ * old entities live because nothing told it the old `unique_id`s were
+ * gone — discovery is keyed on `unique_id`, so a new unique_id reads as
+ * a new entity, not a rename. Result: HA's registry holds BOTH flavors
+ * of every sensor (61 entities, ~half duplicates), with the orphans
+ * still updating from the same retained `state` topic.
+ *
+ * Fix: on startup, publish an empty payload to every legacy discovery
+ * topic with retain=true. HA treats an empty retained config as
+ * "entity removed" and cleans the registry on next restart. Gated by a
+ * marker file so the pass only runs once per install.
+ *
+ * If a future scheme change happens, bump `MQTT_DISCOVERY_DEDUP_VERSION`
+ * and add the new round of legacy IDs to `legacyUniqueIdsFor`.
+ */
+export const MQTT_DISCOVERY_DEDUP_VERSION = 1;
+const DEDUP_FLAG_BASENAME = `mqtt-discovery-dedup-v${MQTT_DISCOVERY_DEDUP_VERSION}.flag`;
+
+/**
+ * Return every legacy `unique_id` that maps to the current `unique_id`.
+ *
+ * Today: the only legacy form is the old `ecoflow_panel_<current_uid>`
+ * double-prefix scheme — HA inherits `device.identifiers[0]` as a
+ * unique_id prefix when the discovery payload sets `has_entity_name`
+ * (or, in older releases, unconditionally). Since
+ * `ecoflow_panel_<current>` can never equal `<current>` (string length
+ * strictly grows), this is always safe to clear without risking the
+ * live entity.
+ */
+export function legacyUniqueIdsFor(currentUniqueId: string): string[] {
+  return [`ecoflow_panel_${currentUniqueId}`];
+}
 
 export interface MqttDiscoveryHandle {
   stop: () => void;
@@ -147,6 +187,48 @@ export async function startMqttDiscovery(
 
   let published = false;
   let timer: NodeJS.Timeout | null = null;
+
+  // One-time cleanup: clear retained discovery configs for legacy unique_ids
+  // left in HA by previous releases (see `legacyUniqueIdsFor` comment).
+  const dedupFlagPath = resolve(process.env.DATA_DIR ?? '/data', DEDUP_FLAG_BASENAME);
+  const clearLegacyDiscovery = () => {
+    if (existsSync(dedupFlagPath)) return;
+    let cleared = 0;
+    const clearTopic = (topic: string) => {
+      // Empty retained payload tells HA "this discovery is gone" — the
+      // entity gets removed from the registry on the next HA restart.
+      client.publish(topic, '', { retain: true, qos: 0 });
+      cleared += 1;
+    };
+    for (const s of SENSORS) {
+      for (const legacy of legacyUniqueIdsFor(s.unique_id)) {
+        clearTopic(`${prefix}/sensor/${legacy}/config`);
+      }
+    }
+    for (const s of BINARY_SENSORS) {
+      for (const legacy of legacyUniqueIdsFor(s.unique_id)) {
+        clearTopic(`${prefix}/binary_sensor/${legacy}/config`);
+      }
+    }
+    // Per-circuit lifetime sensors — same legacy double-prefix scheme.
+    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    if (shp2 && shp2.projection?.kind === 'shp2') {
+      for (const c of (shp2.projection as Shp2Projection).circuits ?? []) {
+        for (const legacy of legacyUniqueIdsFor(`ecoflow_circuit_${c.ch}_lifetime_kwh`)) {
+          clearTopic(`${prefix}/sensor/${legacy}/config`);
+        }
+      }
+    }
+    try {
+      mkdirSync(dirname(dedupFlagPath), { recursive: true });
+      writeFileSync(dedupFlagPath, `${new Date().toISOString()}\n`);
+    } catch (e: any) {
+      // Marker file write failed — log but don't fail the connection. Worst
+      // case the cleanup runs again next startup (idempotent retained-clear).
+      log(`mqtt-discovery: dedup marker write failed (${e?.message ?? e}); cleanup may repeat`);
+    }
+    log(`mqtt-discovery: cleared ${cleared} legacy discovery configs (v${MQTT_DISCOVERY_DEDUP_VERSION} dedup pass)`);
+  };
 
   const publishDiscovery = () => {
     for (const s of SENSORS) {
@@ -310,6 +392,9 @@ export async function startMqttDiscovery(
   client.on('connect', () => {
     log(`mqtt-discovery: connected to ${url}`);
     if (!published) {
+      // Clear legacy unique_ids FIRST so HA processes the removal alongside
+      // the (re)publish of the canonical configs in the same session.
+      clearLegacyDiscovery();
       publishDiscovery();
       published = true;
     }

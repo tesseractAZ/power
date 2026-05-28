@@ -3,6 +3,89 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.68 — 2026-05-27
+
+**Entity-duplication audit and dedup defenses.** the operator reported 61
+ecoflow entities in HA, ~half of them duplicates of the same metric.
+Investigated end-to-end across HA's registry + this codebase.
+
+### Real root cause (not a code bug — a configuration overlap)
+
+The duplicates are NOT from two MQTT publish paths. They're from
+**two entirely different HA integrations** publishing the same metrics:
+- **REST sensors** (`platform=rest`) — from `DOCS.md` examples that
+  users pasted into `configuration.yaml` before MQTT Discovery existed.
+  Entity IDs like `sensor.ecoflow_backup_pool` (no device association).
+- **MQTT Discovery** (`platform=mqtt`) — published by this add-on
+  when `MQTT_DISCOVERY_ENABLED=true`. Device-scoped, so HA auto-prefixes
+  entity IDs to `sensor.ecoflow_panel_ecoflow_backup_pool`.
+
+Both write to HA's entity registry with different `unique_id` values
+(`ecoflow_backup_pool_percent` vs `ecoflow_backup_pool`), so HA treats
+them as separate entities even though they update from the same data.
+
+### Fix for users
+
+`DOCS.md` now opens the entity-publishing section with a "pick ONE"
+warning and renamed the existing REST block to "REST sensors (legacy
+path)". Users who enabled MQTT Discovery should delete the `rest:`
+block from `configuration.yaml` and restart HA. The MQTT entities are
+the going-forward canonical surface.
+
+### Defense in depth — MQTT discovery dedup infrastructure
+
+Independently of the REST overlap above, added a one-time orphan
+sweep + a regression-guard test in case the MQTT `unique_id` scheme
+ever changes in the future (it hasn't yet, but it's the kind of
+change that historically leaves orphans behind).
+
+`server/src/mqttDiscovery.ts`:
+- New `MQTT_DISCOVERY_DEDUP_VERSION = 1` constant + `legacyUniqueIdsFor()`
+  helper that maps each current `unique_id` to the hypothetical
+  double-prefixed `ecoflow_panel_<uid>` form. Today returns the
+  speculative legacy uid; if a future scheme change happens, bump the
+  version + extend the mapping to cover the new round.
+- `clearLegacyDiscovery()` runs once per dedup-version (gated by a
+  marker file at `${DATA_DIR}/mqtt-discovery-dedup-v1.flag`). Publishes
+  empty retained payloads to `homeassistant/sensor/<legacy_uid>/config`
+  for every current uid's legacy form. HA reads empty retained config
+  as "entity removed" and prunes the orphan on its next restart.
+  Idempotent — re-running is safe.
+- `SENSORS` + `BINARY_SENSORS` + `SensorConfig` are now `export`ed so
+  tests can read the catalog directly.
+
+`server/test/mqttDiscovery.test.ts` (new — 9 tests):
+- **`unique_id` uniqueness** within `SENSORS` and `BINARY_SENSORS`
+- **canonical scheme conformance** — rejects any `unique_id` starting
+  with `ecoflow_panel_ecoflow_` (the historical-mistake double prefix)
+- **`value_json` field uniqueness** — guards against two sensors
+  reading the same JSON field with different unique_ids
+- **`legacyUniqueIdsFor` helper** — returns expected legacy uids; does
+  NOT collide with the current canonical form
+
+### What I cleaned up on the operator's HA via API (one-shot)
+
+- Deleted stale Wyoming "Speech-to-Phrase" integration entry (was
+  `not_loaded`, unrelated to TTS, dangling for weeks).
+- Wyoming integration registry now shows just "Piper" (loaded).
+
+### Other duplicate observations (flagged for user review, not touched)
+
+- Device registry: `Family Room Soundbar` (Arc Ultra) × 2,
+  `Garage` (HomePod Mini) × 2, `Patio Speakers` (Amp) × 2 — likely
+  Sonos + AirPlay or HomeKit Controller paths to the same physical
+  speaker. User should verify in Settings → Devices and delete the
+  unused path.
+- Config entries: `apple_tv` × 4, `mobile_app` × 3, `switch_as_x` × 16
+  — these are all distinct devices/conversions, NOT duplicates.
+
+### Tests
+
+`npx tsc --noEmit` → zero errors. `node --test --import tsx test/*.test.ts`
+→ **309/309 pass / 0 skip / 0 fail** (300 baseline + 9 new).
+
+
+
 ## 0.9.67 — 2026-05-27
 
 **Deterministic MPC tests via `MpcInputs.nowMs` injection.**

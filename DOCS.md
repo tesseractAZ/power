@@ -85,6 +85,20 @@ EcoFlow MQTT  ──live telemetry────┘
 
 ## Home Assistant entities
 
+**Pick ONE path — REST sensors below OR MQTT Discovery (recommended,
+described in the [MQTT Discovery](#mqtt-discovery-recommended) section).
+Don't enable both.** If both are active you'll see every metric twice
+in HA: once as `sensor.ecoflow_*` (REST, no device association) and
+once as `sensor.ecoflow_panel_ecoflow_*` (MQTT, with device auto-prefix
+on the entity_id). They update from the same data — the duplication is
+purely a registry-level artifact of HA seeing two `unique_id`s for the
+same metric. To clean up after enabling MQTT Discovery, delete this
+`rest:` block from `configuration.yaml`, then restart HA.
+
+---
+
+### REST sensors (legacy path)
+
 The add-on exposes a flat key-value endpoint at `/api/ha-state` that's
 designed for HA's [`rest:` integration](https://www.home-assistant.io/integrations/rest/).
 One HTTP call returns everything worth surfacing as an HA sensor — live
