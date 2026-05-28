@@ -87,6 +87,9 @@ function buildDevices(opts: {
   dpuSocPct: number;
   dpuPvWatts: number;
   shp2LoadWatts: number;
+  /** Configured charge ceiling (chgMaxSoc). Omit → null (engine falls
+   *  back to the 96% legacy constant). */
+  chgMaxSocPct?: number;
 }): Record<string, DeviceSnapshot> {
   const dpuSn = 'DPU-HOME-1';
   const dpu: DeviceSnapshot = {
@@ -109,6 +112,8 @@ function buildDevices(opts: {
       mpptHvTemp: 30, mpptLvTemp: 30,
       sysErrCode: 0, pvHighErrCode: 0, pvLowErrCode: 0,
       emsParaVolMinMv: 47_500, emsParaVolMaxMv: 56_000,
+      chgMaxSoc: opts.chgMaxSocPct ?? null,
+      dsgMinSoc: null,
       packs: [],
     } as any,
   } as any;
@@ -231,6 +236,70 @@ test('curtailment — ACTIVE when SoC high + PV matched to load + meaningful gap
   assert.equal(r.current.pvExpectedW, 7000);
   assert.equal(r.current.pvActualW, 2000);
   assert.equal(r.current.socAvg, 99);
+});
+
+test('curtailment — variable ceiling: ACTIVE at 79% SoC when charge limit is 80%', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(syntheticWeatherNow(700));
+  setBayesianModelForTesting(mockBayes(10)); // expected 7000 W
+  // The KEY case the operator flagged: batteries set to charge to 80%, sitting at
+  // 79%. The old hardcoded 96% threshold would call this "soc-too-low" and
+  // NEVER fire — missing real curtailment. With the ceiling at 80 and the
+  // 2% margin, the saturation threshold is 78, so 79 ≥ 78 → curtailing.
+  const devices = buildDevices({ dpuSocPct: 79, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 80 });
+  const r = await computeCurtailment(devices, emptyRecorder());
+  assert.equal(r.active, true, 'curtailment fires at 79% when ceiling is 80%');
+  assert.equal(r.inactiveReason, null);
+  assert.equal(r.currentSurplusW, 5000);
+  assert.equal(r.current.chargeCeilingPct, 80);
+  assert.equal(r.current.saturationThresholdPct, 78);
+});
+
+test('curtailment — variable ceiling: INACTIVE at 70% SoC when charge limit is 80%', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(syntheticWeatherNow(700));
+  setBayesianModelForTesting(mockBayes(10));
+  // Same 80% ceiling, but SoC is 70 — still 8% of headroom below the
+  // saturation threshold (78), so the pool is actively absorbing charge.
+  // Not curtailing.
+  const devices = buildDevices({ dpuSocPct: 70, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 80 });
+  const r = await computeCurtailment(devices, emptyRecorder());
+  assert.equal(r.active, false);
+  assert.equal(r.inactiveReason, 'soc-too-low');
+  assert.equal(r.current.chargeCeilingPct, 80);
+  assert.equal(r.current.saturationThresholdPct, 78);
+});
+
+test('curtailment — Storm Guard raises ceiling to 100: 90% SoC no longer counts as full', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(syntheticWeatherNow(700));
+  setBayesianModelForTesting(mockBayes(10));
+  // Storm Guard / outage-prep pushed the ceiling to 100. At 90% SoC the
+  // pool still has 10% of headroom to absorb charge before it tops out,
+  // so we should NOT report curtailment — the panels aren't being
+  // throttled yet. Threshold = 100 - 2 = 98; 90 < 98 → inactive.
+  const devices = buildDevices({ dpuSocPct: 90, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 100 });
+  const r = await computeCurtailment(devices, emptyRecorder());
+  assert.equal(r.active, false);
+  assert.equal(r.inactiveReason, 'soc-too-low');
+  assert.equal(r.current.chargeCeilingPct, 100);
+  assert.equal(r.current.saturationThresholdPct, 98);
+});
+
+test('curtailment — no chgMaxSoc reported falls back to 96% legacy threshold', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(syntheticWeatherNow(700));
+  setBayesianModelForTesting(mockBayes(10));
+  // chgMaxSocPct omitted → projection.chgMaxSoc is null → fall back to the
+  // legacy 96% constant (saturation threshold 96). At 95% SoC that's still
+  // below threshold → inactive. This preserves pre-v0.9.77.1 behavior for
+  // setups that don't surface the ceiling.
+  const devices = buildDevices({ dpuSocPct: 95, dpuPvWatts: 2000, shp2LoadWatts: 1800 });
+  const r = await computeCurtailment(devices, emptyRecorder());
+  assert.equal(r.active, false);
+  assert.equal(r.inactiveReason, 'soc-too-low');
+  assert.equal(r.current.chargeCeilingPct, null);
+  assert.equal(r.current.saturationThresholdPct, 96);
 });
 
 test('curtailment — opportunistic loads marked as "fits" iff surplus ≥ estimatedW', async () => {

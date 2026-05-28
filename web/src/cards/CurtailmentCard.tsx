@@ -114,6 +114,7 @@ export function CurtailmentCard() {
 }
 
 function ActiveBody({ r, fits }: { r: CurtailmentReport; fits: any[] }) {
+  const ceiling = r.current.chargeCeilingPct;
   return (
     <div className="mt-2">
       <div className="text-3xl font-bold text-amber-700 font-mono">
@@ -123,12 +124,24 @@ function ActiveBody({ r, fits }: { r: CurtailmentReport; fits: any[] }) {
         rejected at the panels right now
       </div>
       <div className="mt-2 text-xs text-muted leading-relaxed">
-        Batteries at <span className="font-mono">{r.current.socAvg}%</span> SoC,
+        Batteries{' '}
+        {ceiling != null ? (
+          <>at their <span className="font-mono">{ceiling}%</span> charge limit (</>
+        ) : (
+          'at '
+        )}
+        <span className="font-mono">{r.current.socAvg}%</span>
+        {ceiling != null ? ') SoC' : ' SoC'},{' '}
         arrays producing <span className="font-mono">{r.current.pvActualW} W</span>{' '}
         of <span className="font-mono">{r.current.pvExpectedW ?? '—'} W</span> expected
         at <span className="font-mono">{r.current.ghiWm2 ?? '—'} W/m²</span> GHI.{' '}
         Home load <span className="font-mono">{r.current.loadW} W</span>.
       </div>
+      {ceiling != null && ceiling < 100 && (
+        <div className="mt-1 text-xs text-muted italic">
+          Raising the charge limit or enabling Storm Guard would absorb more before curtailing.
+        </div>
+      )}
       {fits.length > 0 && (
         <div className="mt-2 text-xs text-emerald-800">
           Could absorb with: {fits.map((o) => o.name).join(', ')}.
@@ -139,12 +152,16 @@ function ActiveBody({ r, fits }: { r: CurtailmentReport; fits: any[] }) {
 }
 
 function InactiveBody({ r }: { r: CurtailmentReport }) {
-  const reason = inactiveReasonText(r.inactiveReason);
+  const reason = inactiveReasonText(r.inactiveReason, r.current.chargeCeilingPct);
+  const ceiling = r.current.chargeCeilingPct;
   return (
     <div className="mt-2 text-xs text-muted leading-relaxed">
       <div>{reason}</div>
       <div className="mt-1">
-        SoC <span className="font-mono">{r.current.socAvg}%</span>,
+        SoC <span className="font-mono">{r.current.socAvg}%</span>
+        {ceiling != null && (
+          <> / <span className="font-mono">{ceiling}%</span> limit</>
+        )},
         PV <span className="font-mono">{r.current.pvActualW} W</span>
         {r.current.pvExpectedW != null && (
           <> of <span className="font-mono">{r.current.pvExpectedW} W</span> expected</>
@@ -155,9 +172,13 @@ function InactiveBody({ r }: { r: CurtailmentReport }) {
   );
 }
 
-function inactiveReasonText(reason: CurtailmentReport['inactiveReason']): string {
+function inactiveReasonText(
+  reason: CurtailmentReport['inactiveReason'],
+  ceiling: number | null,
+): string {
+  const limitPhrase = ceiling != null ? `${ceiling}% charge limit` : 'configured charge limit';
   switch (reason) {
-    case 'soc-too-low': return 'Batteries below the 96% saturation threshold — every watt is being absorbed.';
+    case 'soc-too-low': return `Batteries below the ${limitPhrase} — every watt is being absorbed.`;
     case 'pv-too-low': return 'PV is too low to matter right now.';
     case 'no-daylight': return 'Outside meaningful daylight — no curtailment possible.';
     case 'no-model': return 'Bayesian solar posterior doesn\'t yet have enough samples for this hour. Will fill in as the day progresses.';

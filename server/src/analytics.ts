@@ -3596,6 +3596,13 @@ export interface CurtailmentReport {
     loadW: number;
     ghiWm2: number | null;
     bayesianSamples: number;   // posterior samples for the current hour
+    /** Configured charge ceiling (mean chgMaxSoc across home DPUs), or
+     *  null when no DPU reports one. This is the SoC the pool charges to
+     *  — Storm Guard raises it to 100, normal mode sits lower. */
+    chargeCeilingPct: number | null;
+    /** SoC at/above which we treat the pool as saturated = ceiling − margin
+     *  (or the fallback constant when ceiling is null). */
+    saturationThresholdPct: number;
   };
   /** Reason curtailment is NOT firing right now (null when active). */
   inactiveReason:
@@ -3622,7 +3629,6 @@ export interface CurtailmentReport {
 }
 
 const CURTAIL_TTL_MS = 60 * 1000;            // 1 min — short, real-time tile
-const CURTAIL_SOC_MIN_PCT = 96;              // batteries "full enough"
 const CURTAIL_MIN_PV_W = 200;                // panels actually producing
 const CURTAIL_MIN_SURPLUS_W = 300;           // meaningful gap before we call it curtailment
 const CURTAIL_MIN_GHI_WM2 = 100;             // daylight floor
@@ -3631,6 +3637,51 @@ const CURTAIL_MIN_BAYES_SAMPLES = 3;         // require posterior support
 // (~50 W per online DPU baseline). PV > load × this factor disqualifies.
 const CURTAIL_PV_MATCH_LOAD_FACTOR = 2.0;
 const CURTAIL_HISTORY_DAYS = 7;
+
+// v0.9.78 — the "battery full" threshold is NOT a fixed 96%. EcoFlow
+// DPUs charge to a *configured ceiling* (`chgMaxSoc`) that's well below
+// 100% in normal operation (the operator runs his packs to a setting, not full).
+// Storm Guard / outage-prep raises that ceiling to 100% — and because it
+// does so by changing `chgMaxSoc` itself, reading the field live means we
+// automatically track whatever mode is active without needing a separate
+// storm-guard flag. Curtailment begins when SoC reaches the ceiling
+// (charge current → 0, excess PV rejected), so the saturation threshold
+// is `ceiling − margin`. The margin catches the approach + measurement
+// jitter; the PV-matched-to-load guard downstream is what actually
+// prevents false positives during bulk charge.
+const CURTAIL_SATURATION_MARGIN_PCT = 2;     // how far below the ceiling counts as "saturated"
+// Only used when NO DPU reports a ceiling (field missing / cold boot).
+// Mirrors the pre-v0.9.78 hardcoded behavior so a setup that doesn't
+// surface chgMaxSoc still gets sensible "near full" detection.
+const CURTAIL_SOC_FALLBACK_PCT = 96;
+
+/**
+ * Effective charge ceiling (%) for the home pool: mean of the
+ * SHP2-connected DPUs' configured `chgMaxSoc`. Returns null when no DPU
+ * reports one. Mean (not min) is the physically correct pool aggregate —
+ * we compare it against mean SoC, and the pool is "saturated" only when
+ * the average has reached the average ceiling (i.e. every DPU is at its
+ * own limit). In the common case all DPUs share one ceiling, so mean =
+ * that value.
+ */
+function homeChargeCeilingPct(
+  homeDpus: Array<DeviceSnapshot & { projection: DpuProjection }>,
+): number | null {
+  const ceilings = homeDpus
+    .map((d) => d.projection.chgMaxSoc)
+    .filter((v): v is number => v != null && v > 0);
+  if (ceilings.length === 0) return null;
+  return ceilings.reduce((s, v) => s + v, 0) / ceilings.length;
+}
+
+/** The SoC at/above which the pool is treated as saturated (curtailment
+ *  can begin). Derived from the live ceiling minus the approach margin,
+ *  falling back to the legacy constant when no ceiling is reported. */
+function saturationThresholdPct(ceiling: number | null): number {
+  return ceiling != null
+    ? Math.max(0, ceiling - CURTAIL_SATURATION_MARGIN_PCT)
+    : CURTAIL_SOC_FALLBACK_PCT;
+}
 
 // Phoenix off-grid home opportunistic loads. Estimated wattages are
 // based on the operator's setup (~16.8 kWp array, pool pump on a SHP2 circuit,
@@ -3701,7 +3752,7 @@ export async function computeCurtailment(
     generatedAt: now,
     active: false,
     currentSurplusW: 0,
-    current: { socAvg: 0, pvActualW: 0, pvExpectedW: null, loadW: 0, ghiWm2: null, bayesianSamples: 0 },
+    current: { socAvg: 0, pvActualW: 0, pvExpectedW: null, loadW: 0, ghiWm2: null, bayesianSamples: 0, chargeCeilingPct: null, saturationThresholdPct: CURTAIL_SOC_FALLBACK_PCT },
     inactiveReason: 'no-home-dpus',
     todayKwh: 0,
     todayHours: [],
@@ -3741,11 +3792,16 @@ export async function computeCurtailment(
   const ghi = currentHourGhi(weather, now);
   const hod = new Date(now).getHours();
   const expected = ghi != null && ghi >= CURTAIL_MIN_GHI_WM2 ? predictExpectedPv(bayes, hod, ghi) : null;
+  // v0.9.78 — saturation threshold tracks the live configured charge
+  // ceiling, NOT a fixed 96%. A pool set to charge to 80% curtails at 80;
+  // Storm Guard raising the ceiling to 100 pushes the threshold up with it.
+  const chargeCeiling = homeChargeCeilingPct(homeDpus);
+  const socThreshold = saturationThresholdPct(chargeCeiling);
 
   let active = false;
   let currentSurplusW = 0;
   let inactiveReason: CurtailmentReport['inactiveReason'] = null;
-  if (socAvg < CURTAIL_SOC_MIN_PCT) inactiveReason = 'soc-too-low';
+  if (socAvg < socThreshold) inactiveReason = 'soc-too-low';
   else if (pvActualW < CURTAIL_MIN_PV_W) inactiveReason = 'pv-too-low';
   else if (ghi == null || ghi < CURTAIL_MIN_GHI_WM2) inactiveReason = 'no-daylight';
   else if (expected == null) inactiveReason = 'no-model';
@@ -3773,7 +3829,7 @@ export async function computeCurtailment(
     if (hourStart >= now) break;
     const hourEnd = Math.min(hourStart + 3_600_000, now);
     const sample = await sampleCurtailmentHour(
-      homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h,
+      homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h, chargeCeiling,
     );
     if (sample) {
       todayHours.push(sample);
@@ -3793,7 +3849,7 @@ export async function computeCurtailment(
       const hourStart = dayStart + h * 3_600_000;
       const hourEnd = hourStart + 3_600_000;
       const sample = await sampleCurtailmentHour(
-        homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h,
+        homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h, chargeCeiling,
       );
       if (sample) {
         recent7dHours.push(sample);
@@ -3834,6 +3890,8 @@ export async function computeCurtailment(
       loadW: Math.round(loadW),
       ghiWm2: ghi != null ? Math.round(ghi) : null,
       bayesianSamples: expected?.samples ?? 0,
+      chargeCeilingPct: chargeCeiling != null ? Math.round(chargeCeiling) : null,
+      saturationThresholdPct: Math.round(socThreshold),
     },
     inactiveReason,
     todayKwh: Math.round(todayKwh * 100) / 100,
@@ -3852,14 +3910,21 @@ export async function computeCurtailment(
  * Returns null when conditions for curtailment weren't met in this hour.
  *
  * - Weather-verified path: GHI ≥ daylight + Bayesian μ has support →
- *   expected PV is real; surplus = expected − actual when SoC ≥ 96 + PV
- *   matched to load.
+ *   expected PV is real; surplus = expected − actual when SoC reached the
+ *   charge ceiling + PV matched to load.
  * - Heuristic-only path: weather missing (older than Open-Meteo's
- *   past_days window) → assume curtailment ONLY when SoC ≥ 96 + PV
- *   actually = load (within tolerance) + actual PV ≥ MIN_PV. Surplus is
- *   estimated as μ[hour] × (typical clear-sky GHI for that hour). This
- *   is more conservative than weather-verified — false negatives are
- *   acceptable, false positives are not.
+ *   past_days window) → assume curtailment ONLY when SoC reached the
+ *   ceiling + PV actually = load (within tolerance) + actual PV ≥ MIN_PV.
+ *   Surplus is estimated as μ[hour] × (typical clear-sky GHI for that
+ *   hour). This is more conservative than weather-verified — false
+ *   negatives are acceptable, false positives are not.
+ *
+ * v0.9.78 — the saturation threshold is the *configured* charge ceiling,
+ * not a fixed 96%. We prefer the per-hour recorded `chg_max_soc` (so a
+ * day when Storm Guard pushed the ceiling to 100 is judged against 100,
+ * and a normal-mode day against e.g. 80), and fall back to the live
+ * `currentCeiling` when no historical ceiling was recorded for that hour
+ * (e.g. hours before v0.9.78 started recording the metric).
  */
 async function sampleCurtailmentHour(
   homeDpus: Array<DeviceSnapshot & { projection: DpuProjection }>,
@@ -3870,6 +3935,7 @@ async function sampleCurtailmentHour(
   hourStart: number,
   hourEnd: number,
   hourOfDay: number,
+  currentCeiling: number | null,
 ): Promise<CurtailmentHour | null> {
   const meanInWindow = (sn: string, metric: string): number | null => {
     const pts = recorder.query(sn, metric, hourStart, hourEnd, 60);
@@ -3881,7 +3947,18 @@ async function sampleCurtailmentHour(
   const socs = homeDpus.map((d) => meanInWindow(d.sn, 'soc')).filter((v): v is number => v != null);
   if (socs.length === 0) return null;
   const socAvg = socs.reduce((s, v) => s + v, 0) / socs.length;
-  if (socAvg < CURTAIL_SOC_MIN_PCT) return null;
+
+  // Per-hour charge ceiling: prefer the recorded chg_max_soc (averaged
+  // across the home DPUs that reported it this hour), else the live
+  // ceiling, else the legacy fallback. This makes the threshold track the
+  // mode that was actually in effect during the historical hour.
+  const recordedCeilings = homeDpus
+    .map((d) => meanInWindow(d.sn, 'chg_max_soc'))
+    .filter((v): v is number => v != null && v > 0);
+  const hourCeiling = recordedCeilings.length > 0
+    ? recordedCeilings.reduce((s, v) => s + v, 0) / recordedCeilings.length
+    : currentCeiling;
+  if (socAvg < saturationThresholdPct(hourCeiling)) return null;
 
   // PV: sum across home DPUs.
   const pvs = homeDpus.map((d) => meanInWindow(d.sn, 'pv_total')).filter((v): v is number => v != null);
@@ -3957,21 +4034,31 @@ export async function computeCurtailmentAlerts(
     const fitsLine = fits.length === 0
       ? 'None of the configured opportunistic loads fit this surplus.'
       : `Could absorb with: ${fits.map((o) => `${o.name} (${(o.estimatedW / 1000).toFixed(1)} kW)`).join(', ')}.`;
+    // The "full" point is the configured charge ceiling, not 100%. Word the
+    // alert so it's clear the batteries are at their *limit*, not at 100%.
+    const ceiling = r.current.chargeCeilingPct;
+    const ceilingPhrase = ceiling != null
+      ? `at their ${ceiling}% charge limit`
+      : 'full';
     return [{
       id: 'pv-curtailment-active',
       severity: 'info',
       category: 'Solar',
       device: 'System',
-      title: 'Solar curtailment — batteries full',
+      title: `Solar curtailment — batteries ${ceilingPhrase}`,
       detail:
         `Estimated ${r.currentSurplusW} W of PV is being rejected at the panels: ` +
-        `batteries at ${r.current.socAvg}% SoC, arrays producing ${r.current.pvActualW} W ` +
+        `batteries ${ceilingPhrase} (${r.current.socAvg}% SoC), arrays producing ${r.current.pvActualW} W ` +
         `(expected ${r.current.pvExpectedW} W at ${r.current.ghiWm2} W/m² GHI). ${fitsLine} ` +
-        `Today's lost-to-curtailment estimate: ${r.todayKwh.toFixed(2)} kWh.`,
+        `Today's lost-to-curtailment estimate: ${r.todayKwh.toFixed(2)} kWh. ` +
+        (ceiling != null && ceiling < 100
+          ? `Raising the charge limit (or enabling Storm Guard) would let the pool absorb more before curtailing.`
+          : ''),
       source: 'learned',
       facts: [
         { label: 'Surplus', value: `${r.currentSurplusW} W` },
         { label: 'SoC', value: `${r.current.socAvg}%` },
+        { label: 'Charge limit', value: ceiling != null ? `${ceiling}%` : 'unknown' },
         { label: 'PV actual', value: `${r.current.pvActualW} W` },
         { label: 'PV expected', value: `${r.current.pvExpectedW ?? '—'} W` },
         { label: 'GHI', value: r.current.ghiWm2 != null ? `${r.current.ghiWm2} W/m²` : '—' },

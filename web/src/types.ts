@@ -344,6 +344,8 @@ export interface CurtailmentReport {
     loadW: number;
     ghiWm2: number | null;
     bayesianSamples: number;
+    chargeCeilingPct: number | null;
+    saturationThresholdPct: number;
   };
   inactiveReason:
     | null

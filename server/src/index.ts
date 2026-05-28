@@ -1044,6 +1044,9 @@ app.get('/api/ha-state', async (req, reply) => {
     pv_curtailment_kwh_today: curtailment.todayKwh,
     pv_curtailment_kwh_7d: curtailment.recent7dKwh,
     pv_curtailment_inactive_reason: curtailment.inactiveReason,
+    // The configured charge ceiling (chgMaxSoc) — the SoC the pool fills
+    // to before curtailment can begin. Storm Guard raises it to 100.
+    pv_curtailment_charge_ceiling_pct: curtailment.current.chargeCeilingPct,
 
     // Self-consumption — 7-day rolling (v0.7.5)
     pv_kwh_7d: selfCons.pvKwh,

@@ -203,6 +203,13 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         push('bat_amp', dpu.batAmp);
         push('mppt_hv_temp', dpu.mpptHvTemp);
         push('mppt_lv_temp', dpu.mpptLvTemp);
+        // v0.9.78 — record the configured charge ceiling so the
+        // curtailment engine can judge each historical hour against the
+        // ceiling that was actually in effect (Storm Guard raises it to
+        // 100; normal mode sits lower). Slow-changing setting, but the
+        // recorder's change-detection only writes when it moves, so this
+        // costs ~nothing in steady state.
+        push('chg_max_soc', dpu.chgMaxSoc);
         for (const pk of dpu.packs) {
           push(`pack${pk.num}_soc`, pk.soc);
           push(`pack${pk.num}_temp`, pk.temp);

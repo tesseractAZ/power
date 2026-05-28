@@ -3,6 +3,74 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.78 — 2026-05-28
+
+**Curtailment threshold now tracks the configured charge ceiling, not a
+fixed 96%.**
+
+Follow-up to v0.9.77's curtailment engine. The original code hardcoded
+the "batteries full" threshold at 96% SoC — wrong for the operator's setup. The
+DPUs don't charge to 100% in normal operation; they charge to a
+*configured ceiling* (`chgMaxSoc`) that's often well below full, and
+Storm Guard / outage-prep raises that ceiling to 100% for the duration.
+Curtailment begins when SoC reaches **that** ceiling (charge current →
+0, excess PV rejected at the panels), wherever it's set.
+
+The bug this fixes: a pool configured to charge to, say, 80% hits 80%,
+stops accepting charge, and starts curtailing — but the v0.9.77 engine
+would see 80% < 96% and report `soc-too-low`, **never firing**. The
+entire feature was blind to curtailment on any system not run to ~full.
+
+### The fix
+
+`chgMaxSoc` is already projected on every DPU (raw
+`hs_yj751_pd_app_set_info_addr.chgMaxSoc`) — no new parsing needed.
+Because Storm Guard works by *raising that field to 100*, reading it
+live automatically tracks whatever mode is active; there's no separate
+storm-guard flag to detect.
+
+- New helpers in `analytics.ts`: `homeChargeCeilingPct` (mean
+  `chgMaxSoc` across SHP2-connected DPUs) and `saturationThresholdPct`
+  (`ceiling − 2% margin`, falling back to the legacy 96% only when no
+  DPU reports a ceiling).
+- Live detection compares mean SoC against the dynamic threshold
+  instead of the constant.
+- `chgMaxSoc` is now recorded as the `chg_max_soc` metric, so the 7-day
+  historical walk judges each past hour against the ceiling that was
+  actually in effect then (a Storm-Guard day vs. a normal day). Per-hour
+  recorded ceiling is preferred; falls back to the live ceiling, then
+  the constant.
+- The report's `current` block carries `chargeCeilingPct` +
+  `saturationThresholdPct`.
+- Surfaced in `/api/ha-state` as `pv_curtailment_charge_ceiling_pct`
+  and as a new MQTT diagnostic sensor
+  `sensor.ecoflow_charge_ceiling` (%).
+
+### UX changes
+
+- The alert now reads "batteries at their 80% charge limit" instead of
+  "batteries full", carries a `Charge limit` fact, and — when the
+  ceiling is below 100 — adds a hint that raising the limit (or enabling
+  Storm Guard) would let the pool absorb more before curtailing.
+- The dashboard card shows the charge limit alongside SoC in both
+  active and inactive states (`SoC 79% / 80% limit`).
+
+### Tests
+
+4 new cases in `curtailment.test.ts` (322 total, all pass):
+- **ACTIVE at 79% SoC when the limit is 80%** — the exact case the old
+  threshold missed.
+- INACTIVE at 70% with an 80% limit (real headroom remaining).
+- Storm-Guard ceiling of 100 → 90% SoC is no longer "full".
+- No `chgMaxSoc` reported → falls back to the 96% legacy threshold.
+
+### Files touched
+
+`server/src/analytics.ts`, `server/src/recorder.ts`,
+`server/src/index.ts`, `server/src/mqttDiscovery.ts`,
+`web/src/cards/CurtailmentCard.tsx`, `web/src/types.ts`,
+`server/test/curtailment.test.ts`, `CHANGELOG.md`, `config.yaml`.
+
 ## 0.9.77 — 2026-05-28
 
 **Big push on solar curtailment + EnergyFlow diagram filter.**
