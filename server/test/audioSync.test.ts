@@ -1,130 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  inferProtocol,
-  defaultBufferMs,
-  groupByProtocol,
-  scheduleStagger,
-  type SpeakerProfile,
-} from '../src/speakerProfiles.js';
 import { buildAlertMessage } from '../src/ttsService.js';
 import type { Alert } from '../src/alerts.js';
 
 /**
- * v0.9.29 — audio sync + TTS tests.
+ * v0.9.29 / v0.9.70 — TTS alert-message tests.
  *
- * Networked TTS calls (callHaService) are tested manually via the live
- * /api/broadcast/test endpoint against a real HA. These unit tests cover
- * the pure functions:
+ * Pre-v0.9.70 this file ALSO tested the speakerProfiles.ts helpers
+ * (inferProtocol, defaultBufferMs, groupByProtocol, scheduleStagger).
+ * Those went away in v0.9.70's broadcast rewrite — the new pipeline
+ * fires one MA play_announcement to every target at once, no protocol
+ * bucketing or per-group stagger. The 11 tests for that machinery were
+ * removed alongside `server/src/speakerProfiles.ts`.
  *
- *   - inferProtocol / defaultBufferMs: entity → protocol mapping
- *   - groupByProtocol / scheduleStagger: protocol → fire-schedule
- *   - buildAlertMessage: alert → spoken sentence
+ * What stays: buildAlertMessage. It's still the spoken-text formatter
+ * the broadcast monitor calls, and it does meaningful normalization
+ * (SoH → "state of health", % → percent, MPPT → "M P P T", etc.) that
+ * matters whether the engine is Wyoming/Piper or Cloud — keep tests.
  */
 
-/* ─── protocol detection ─────────────────────────────────────────── */
-
-test('inferProtocol — HomePod by entity name', () => {
-  assert.equal(inferProtocol('media_player.homepod', {}), 'airplay');
-  assert.equal(inferProtocol('media_player.kitchen_homepod', {}), 'airplay');
-});
-
-test('inferProtocol — HomePod by model attribute', () => {
-  assert.equal(inferProtocol('media_player.foo', { model: 'HomePod' }), 'airplay');
-});
-
-test('inferProtocol — Sonos by entity name', () => {
-  assert.equal(inferProtocol('media_player.family_room_sonos', {}), 'sonos');
-  assert.equal(inferProtocol('media_player.living_room_sonos_arc', {}), 'sonos');
-});
-
-test('inferProtocol — thermostat speakers map to cast', () => {
-  assert.equal(inferProtocol('media_player.hallway_thermostat', {}), 'cast');
-  assert.equal(inferProtocol('media_player.guest_hallway_thermostat', {}), 'cast');
-});
-
-test('inferProtocol — v0.9.31: soundbar entities map to sonos (Beam/Arc/Ray)', () => {
-  assert.equal(inferProtocol('media_player.family_room_soundbar_2', {}), 'sonos');
-  assert.equal(inferProtocol('media_player.sonos_arc', {}), 'sonos');
-});
-
-test('inferProtocol — v0.9.31: MA provider attr is authoritative', () => {
-  // Even if entity name says "soundbar", MA-reported provider trumps it.
-  assert.equal(inferProtocol('media_player.foo', { provider: 'sonos' }), 'sonos');
-  assert.equal(inferProtocol('media_player.foo', { provider: 'airplay' }), 'airplay');
-  assert.equal(inferProtocol('media_player.foo', { provider: 'chromecast' }), 'cast');
-});
-
-test('inferProtocol — v0.9.31: device currently playing AirPlay reports as airplay', () => {
-  // Sonos device showing AirPlay as its current source → treat as airplay
-  // for staggering since its current playback path IS airplay.
-  assert.equal(inferProtocol('media_player.unknown_speaker', { source: 'AirPlay' }), 'airplay');
-});
-
-test('inferProtocol — google/nest map to cast', () => {
-  assert.equal(inferProtocol('media_player.nest_mini_kitchen', {}), 'cast');
-  assert.equal(inferProtocol('media_player.google_home_office', {}), 'cast');
-});
-
-test('inferProtocol — Echo by entity name or platform', () => {
-  assert.equal(inferProtocol('media_player.echo_dot_bedroom', {}), 'echo');
-  assert.equal(inferProtocol('media_player.foo', { platform: 'alexa_media' }), 'echo');
-});
-
-// v0.9.57 — un-inferable entities now default to 'cast' instead of 'unknown'.
-// defaultBufferMs already treated unknown as cast (both 1000 ms) — the rename
-// just stops the noisy `unknown×N` groups in broadcast logs.
-test('inferProtocol — un-inferable entity defaults to cast', () => {
-  assert.equal(inferProtocol('media_player.mystery_box', {}), 'cast');
-});
-
-test('defaultBufferMs — airplay > cast > sonos', () => {
-  assert.ok(defaultBufferMs('airplay') > defaultBufferMs('cast'));
-  assert.ok(defaultBufferMs('cast') > defaultBufferMs('sonos'));
-});
-
-/* ─── grouping + staggering ──────────────────────────────────────── */
-
-test('groupByProtocol — collapses targets of same protocol into one group', () => {
-  const profiles: SpeakerProfile[] = [
-    { entity_id: 'media_player.homepod_a',     friendly_name: 'A', protocol: 'airplay', bufferMs: 2000 },
-    { entity_id: 'media_player.homepod_b',     friendly_name: 'B', protocol: 'airplay', bufferMs: 2000 },
-    { entity_id: 'media_player.sonos_soundbar', friendly_name: 'C', protocol: 'sonos',   bufferMs: 300 },
-  ];
-  const groups = groupByProtocol(profiles);
-  assert.equal(groups.length, 2);
-  // Longest buffer first.
-  assert.equal(groups[0].protocol, 'airplay');
-  assert.equal(groups[0].targets.length, 2);
-  assert.equal(groups[1].protocol, 'sonos');
-  assert.equal(groups[1].targets.length, 1);
-});
-
-test('scheduleStagger — longest-buffer group fires at 0, faster groups at +delta', () => {
-  const groups = [
-    { protocol: 'airplay' as const, bufferMs: 2000, targets: ['media_player.hp1', 'media_player.hp2'] },
-    { protocol: 'cast' as const,    bufferMs: 1000, targets: ['media_player.cast1'] },
-    { protocol: 'sonos' as const,   bufferMs: 300,  targets: ['media_player.sonos1'] },
-  ];
-  const sched = scheduleStagger(groups);
-  assert.equal(sched.length, 3);
-  assert.equal(sched[0].fireAtMs, 0,    'airplay fires immediately');
-  assert.equal(sched[1].fireAtMs, 1000, 'cast fires +1000ms (so it starts at 2000ms wall-clock just like airplay)');
-  assert.equal(sched[2].fireAtMs, 1700, 'sonos fires +1700ms (starts at 2000ms wall-clock)');
-});
-
-test('scheduleStagger — single group fires at 0', () => {
-  const groups = [{ protocol: 'sonos' as const, bufferMs: 300, targets: ['media_player.x'] }];
-  const sched = scheduleStagger(groups);
-  assert.equal(sched.length, 1);
-  assert.equal(sched[0].fireAtMs, 0);
-});
-
-test('scheduleStagger — empty input → empty schedule', () => {
-  assert.deepEqual(scheduleStagger([]), []);
-});
-
-/* ─── message building ───────────────────────────────────────────── */
+/* ─── buildAlertMessage — alert → spoken sentence ────────────────── */
 
 test('buildAlertMessage — green → all clear', () => {
   const m = buildAlertMessage('green', []);
@@ -146,8 +41,8 @@ test('buildAlertMessage — red with critical alert names category + repeats', (
   assert.match(m, /Red alert/);
   assert.match(m, /Battery system/);
   assert.match(m, /Core three pack two/);
-  assert.match(m, /state of health/);  // SoH → state of health
-  assert.match(m, /percent/);          // % → percent
+  assert.match(m, /state of health/);
+  assert.match(m, /percent/);
   assert.match(m, /Acknowledge at console/);
   assert.match(m, /Repeat/);
 });
@@ -163,9 +58,9 @@ test('buildAlertMessage — yellow expands MPPT / HV', () => {
   assert.match(m, /Yellow alert/);
   assert.match(m, /Solar system/);
   assert.match(m, /Core five/);
-  assert.match(m, /high voltage/);  // HV → high voltage
-  assert.match(m, /M P P T/);       // MPPT → M P P T (spelled)
-  assert.doesNotMatch(m, /Repeat/, 'warning shouldn\'t repeat');
+  assert.match(m, /high voltage/);
+  assert.match(m, /M P P T/);
+  assert.doesNotMatch(m, /Repeat/, "warning shouldn't repeat");
 });
 
 test('buildAlertMessage — red without alerts still says red alert', () => {
@@ -180,7 +75,6 @@ test('buildAlertMessage — Battery > Solar in priority order', () => {
     { id: 'b', severity: 'critical', category: 'Battery', device: 'core 3', title: 'Battery problem', detail: 'd', coreNum: 3 },
   ];
   const m = buildAlertMessage('red', alerts);
-  // Battery alert should be the one featured.
   assert.match(m, /Battery problem/);
   assert.doesNotMatch(m, /Solar problem/);
 });

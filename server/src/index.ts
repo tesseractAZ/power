@@ -240,14 +240,26 @@ if (existsSync(webDist)) {
   app.log.info(`web: no built bundle at ${webDist} (dev mode — Vite at :5173)`);
 }
 
-// v0.9.18 — synthesise the Starfleet alert klaxon WAVs at startup and
-// serve them at /audio/*. HomePod / Sonos stream these URLs when we
-// broadcast condition transitions via Home Assistant's media_player.
+// v0.9.18 — synthesise the alert klaxon WAVs at startup and serve them
+// at /audio/*. HomePod / Sonos stream these URLs when we broadcast
+// condition transitions through Music Assistant.
 const audioDir = resolve(process.env.DATA_DIR ?? '/data', 'audio');
 await generateAudioAssets(audioDir, (m) => app.log.info(m));
 await app.register(fastifyStatic, {
   root: audioDir,
   prefix: '/audio/',
+  decorateReply: false,
+  wildcard: false,
+});
+
+// v0.9.70 — combined klaxon + TTS announcements are rendered on demand
+// into a separate cache dir. Served at /audio-render/* so the WAVs the
+// renderer creates are distinct from the per-level klaxon files (which
+// the renderer reads as inputs).
+const audioRenderDir = resolve(process.env.DATA_DIR ?? '/data', 'audio-render');
+await app.register(fastifyStatic, {
+  root: audioRenderDir,
+  prefix: '/audio-render/',
   decorateReply: false,
   wildcard: false,
 });
@@ -1389,11 +1401,17 @@ try {
 // 5 min the next /api/ha-state caller paid ~1.8s rebuilding everything).
 const cacheWarmer = startCacheWarmer(store, recorder, (m) => app.log.info(m));
 
-// v0.9.18 — Ship-wide audible broadcast. Listens for alert-condition
-// transitions (green/yellow/red) and pushes Starfleet klaxon WAVs to
-// configured HomePod / Sonos media_player entities via HA service calls.
+// v0.9.18 / v0.9.70 — Ship-wide audible broadcast. Listens for alert-
+// condition transitions (green/yellow/red) and pushes a combined
+// klaxon + TTS WAV (rendered on demand by audioRenderer.ts via
+// Wyoming-direct to Piper) to every configured speaker through Music
+// Assistant's play_announcement service.
 // Off unless BROADCAST_ENABLED=true and at least one target is set.
-const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m));
+const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
+  klaxonDir: audioDir,
+  cacheDir: audioRenderDir,
+  cacheUrlPath: '/audio-render',
+});
 
 // Diagnostics: per-task warm timings + alert-monitor stats.
 app.get('/api/cache-warmer/status', async () => ({
@@ -1418,10 +1436,14 @@ app.get('/api/broadcast/status', async () => {
       volume: cfg.volume,
       minSeverity: cfg.minSeverity,
       quietHours: cfg.quietHours,
-      ttsService: cfg.ttsService,
-      ttsLanguage: cfg.ttsLanguage,
-      sonosRestore: cfg.sonosRestore,
-      backend: cfg.backend,
+      // v0.9.70 — Wyoming is the canonical TTS path now. No engine
+      // selector / fallback chain / language toggle / Sonos restore —
+      // all that lived in v0.9.18-v0.9.69's broadcast complexity that
+      // got removed when MA + Wyoming-direct replaced the tts_get_url
+      // + media_player + per-protocol stagger machinery.
+      wyomingHost: cfg.wyomingHost,
+      wyomingPort: cfg.wyomingPort,
+      wyomingVoice: cfg.wyomingVoice,
     },
   };
 });
@@ -1445,102 +1467,18 @@ app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
   },
 );
 
-/**
- * v0.9.29 — TTS-services diagnostic. Lists every TTS engine HA exposes,
- * notes which is currently auto-picked (or user-configured), and renders
- * a sample message so the operator can validate quality before going live.
- *
- * The picker UI in the Starfleet dashboard reads this to populate the
- * "TTS engine" dropdown in the broadcast config.
- */
-app.get('/api/broadcast/tts-services', async (req, reply) => {
-  const s = broadcast.status();
-  return cached(req, reply, {
-    supervised: s.supervised,
-    currentEngine: s.ttsEngine,
-    availableEngines: s.ttsAvailable,
-    // A representative test message so operators see what'll play.
-    sampleMessages: {
-      red: 'Red alert. Red alert. Battery system Core three pack two. Pack health critical. Pack state of health is sixty-eight percent. Acknowledge at console. Repeat. Red alert.',
-      yellow: 'Yellow alert. Solar system Core five. High voltage M P P T error code seventeen reported.',
-      green: 'All clear. All stations report normal.',
-    },
-  }, 30);
-});
-
-/**
- * v0.9.32 — TTS debug dump. Returns the raw service catalog + tts.* entities
- * + computed engine list so we can diagnose why a particular engine isn't
- * showing up. (Specifically: Eric installed Piper but it didn't appear in
- * availableEngines on v0.9.31 — needed the Wyoming Protocol integration.)
- *
- * Includes heuristic hints for common gotchas.
- */
-app.get(
-  '/api/broadcast/tts-debug',
-  { preHandler: requireWriteAuth },
-  async (_req, reply) => {
-    const dbg = await getTtsDebug();
-    if (!dbg.supervised) reply.code(503);
-    return dbg;
-  },
-);
-
-/**
- * v0.9.35 — Diagnostic TTS test endpoint. Fires a TTS announcement at the
- * chosen engine + targets WITHOUT klaxon/staggering/Sonos-restore wrapping,
- * so we can isolate which engine + which targets are causing 500s.
- *
- * v0.9.34 testing surfaced both Piper (tts.speak:tts.piper) AND legacy
- * Cloud (tts.cloud_say) returning identical 500 "Server got itself in
- * trouble" with the full 6-speaker target list. This endpoint lets us
- * test:
- *   - One engine at a time (is one specific engine broken?)
- *   - One target at a time (is one specific speaker rejecting?)
- *   - Single-target combinations to find the smallest reproducer
- *
- * Body:
- *   { engine: "tts.cloud_say" | "tts.speak:tts.piper",  // empty = first available
- *     targets: ["media_player.homepod", ...],
- *     message: "test message" }
- *
- * Returns the raw service-call result so we can see HA's exact error.
- */
-app.post<{ Body: { engine?: string; targets?: string[]; message?: string; language?: string } }>(
-  '/api/broadcast/test-tts',
-  { preHandler: requireWriteAuth },
-  async (req, reply) => {
-    const targets = Array.isArray(req.body?.targets) && req.body!.targets.length > 0
-      ? req.body!.targets
-      : broadcast.config().targets;
-    const message = req.body?.message || 'Diagnostic test. This is only a test.';
-    const language = req.body?.language || broadcast.config().ttsLanguage || undefined;
-    const engineRef = req.body?.engine;
-    const engines = await detectTtsEngines();
-    if (engines.length === 0) {
-      reply.code(503);
-      return { ok: false, error: 'no TTS engines detected' };
-    }
-    const engine = engineRef
-      ? engines.find((e) => e.service === engineRef) ?? { service: engineRef, label: engineRef, local: false, quality: 99 }
-      : engines[0];
-
-    const result = await speakAnnouncement(message, {
-      engine,
-      targets,
-      language,
-    });
-    if (!result.ok) reply.code(502);
-    return {
-      ok: result.ok,
-      engine: { service: engine.service, label: engine.label },
-      targets,
-      messageLength: message.length,
-      message,
-      result,
-    };
-  },
-);
+// v0.9.70 — removed endpoints that pre-dated the Wyoming-direct rewrite:
+//   - /api/broadcast/tts-services (engine picker + sample messages)
+//     was the v0.9.29 multi-engine picker UI. v0.9.70 only uses Wyoming.
+//   - /api/broadcast/tts-debug (raw service catalog dump) was the
+//     v0.9.32 "why doesn't Piper appear" diagnostic. Wyoming-direct
+//     bypasses HA's TTS service catalog entirely.
+//   - /api/broadcast/test-tts (engine + target isolation) was the
+//     v0.9.35 surgical test for which engine 500s. The full-pipeline
+//     /api/broadcast/test covers this now since there's only one path.
+// The /api/broadcast/setup-piper + /api/broadcast/reset-piper endpoints
+// stay — they're still useful for first-time Wyoming integration setup
+// even though the broadcast path no longer routes through HA's TTS layer.
 
 /**
  * v0.9.33 — List installed Supervisor add-ons. Requires `hassio_api: true`
@@ -1772,12 +1710,10 @@ app.get('/api/broadcast/discover', { preHandler: requireWriteAuth }, async (_req
     supervised: true,
     count: speakers.length,
     speakers,
-    // v0.9.29 — expose the live protocol-group schedule the broadcast
-    // monitor uses, so the UI can show "HomePod fires first (-1.7s),
-    // Cast fires +1s, Sonos fires +1.7s" tooltips.
-    speakerGroups: status.speakerGroups,
+    // v0.9.70 — speakerGroups + ttsEngine dropped (no more protocol
+    // bucketing, no more multi-engine picker — Wyoming is the path).
     musicAssistantAvailable: status.musicAssistantAvailable,
-    ttsEngine: status.ttsEngine,
+    wyomingReachable: status.wyomingReachable,
   };
 });
 

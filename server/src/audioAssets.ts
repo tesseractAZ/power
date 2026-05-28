@@ -62,7 +62,7 @@ function buildWavBuffer(samples: Int16Array): Buffer {
 /* ─── synth primitives ────────────────────────────────────────────── */
 
 interface ToneSpec {
-  kind: 'square' | 'sine';
+  kind: 'square' | 'sine' | 'bell';
   /** Hertz. */
   freq: number;
   /** Frequency at end of segment (for glides). Defaults to `freq`. */
@@ -77,6 +77,16 @@ interface ToneSpec {
   releaseSec?: number;
   /** Exponential decay across the segment (for bell tones). */
   bellDecay?: boolean;
+  /** v0.9.70 — bell-tone harmonic mix. Defaults to [1, 0.5, 0.25, 0.125]
+   * (fundamental + 2x + 3x + 4x with halving amplitudes — the canonical
+   * struck-bell timbre). Override with [1] for a pure sine, or [1, 0.4]
+   * for a softer "phone chime" tone. Only applies when kind='bell'. */
+  harmonics?: number[];
+  /** v0.9.70 — exponential decay constant (smaller = faster decay). For
+   * 'bell' kind, this controls the strike-decay shape. Defaults to
+   * durSec * 0.55 — longer than the v0.9.18 0.35 to give an airport-PA
+   * "ring out" feel instead of a sharp attack-and-die. */
+  decaySec?: number;
 }
 
 interface Segment {
@@ -109,21 +119,22 @@ function addTone(buf: Float32Array, startSec: number, t: ToneSpec): void {
   const endSample = Math.min(buf.length, startSample + totalSamples);
   const attackSamples = Math.floor(attack * SAMPLE_RATE);
   const releaseSamples = Math.floor(release * SAMPLE_RATE);
+  const decaySec = t.decaySec ?? (t.durSec * 0.55);
+  // v0.9.70 — bell harmonics (additive synthesis for proper struck-bell timbre)
+  const harmonics = t.harmonics ?? [1.0, 0.5, 0.25, 0.125];
 
-  let phase = 0;
   for (let i = startSample, k = 0; i < endSample; i++, k++) {
     // Frequency for this sample (linear glide if endFreq differs).
     const frac = k / totalSamples;
     const f = t.endFreq != null ? t.freq + (t.endFreq - t.freq) * frac : t.freq;
-    const dPhase = (2 * Math.PI * f) / SAMPLE_RATE;
-    phase += dPhase;
+    const tSec = k / SAMPLE_RATE;
 
     // Gain envelope.
     let env: number;
-    if (t.bellDecay) {
-      // Sharp attack + exponential decay (e^-k·t).
-      const tSec = k / SAMPLE_RATE;
-      env = t.gain * (1 - Math.exp(-tSec / 0.005)) * Math.exp(-tSec / (t.durSec * 0.35));
+    if (t.bellDecay || t.kind === 'bell') {
+      // Sharp attack + exponential decay (e^-k·t). v0.9.70 longer decay
+      // (default 0.55*dur vs old 0.35) for an airport-PA ring-out.
+      env = t.gain * (1 - Math.exp(-tSec / 0.005)) * Math.exp(-tSec / decaySec);
     } else if (k < attackSamples) {
       env = t.gain * (k / attackSamples);
     } else if (k > totalSamples - releaseSamples) {
@@ -133,9 +144,29 @@ function addTone(buf: Float32Array, startSec: number, t: ToneSpec): void {
     }
 
     // Waveform.
-    const sample = t.kind === 'square'
-      ? (phase % (2 * Math.PI) < Math.PI ? 1 : -1)
-      : Math.sin(phase);
+    let sample: number;
+    if (t.kind === 'square') {
+      // Square wave via phase modulo (no harmonics)
+      const phase = 2 * Math.PI * f * tSec;
+      sample = phase % (2 * Math.PI) < Math.PI ? 1 : -1;
+    } else if (t.kind === 'bell') {
+      // v0.9.70 — additive bell. Sum of sines at integer multiples of
+      // the fundamental, each scaled by its harmonic gain. The mix in
+      // `harmonics` defines the timbre (default = canonical struck bell:
+      // fundamental + 2nd + 3rd + 4th at 1.0 / 0.5 / 0.25 / 0.125).
+      let s = 0;
+      let weightSum = 0;
+      for (let h = 0; h < harmonics.length; h++) {
+        const hGain = harmonics[h];
+        if (hGain === 0) continue;
+        s += hGain * Math.sin(2 * Math.PI * f * (h + 1) * tSec);
+        weightSum += hGain;
+      }
+      sample = weightSum > 0 ? s / weightSum : 0;
+    } else {
+      // Pure sine
+      sample = Math.sin(2 * Math.PI * f * tSec);
+    }
     buf[i] += sample * env;
   }
 }
@@ -143,48 +174,93 @@ function addTone(buf: Float32Array, startSec: number, t: ToneSpec): void {
 /* ─── asset definitions ───────────────────────────────────────────── */
 
 /**
- * Red Alert — TMP klaxon. Two-tone square wave alternating between
- * 440 Hz / 660 Hz at 250 ms each, 6 cycles total (3 seconds). Higher
- * cycle count than the in-browser version because speakers are usually
- * further from the listener; we want to be confident the user heard it.
+ * Red Alert — v0.9.70 airport-PA "attention now" chime.
+ *
+ * Three-note descending struck-bell arpeggio (C5 → A4 → F4 — a Am
+ * descending triad), repeated once after a brief gap. Bell timbre via
+ * additive harmonics. The descending minor-flavor pattern conveys
+ * seriousness without the abrasive square-wave urgency of the old TMP
+ * klaxon. Two iterations total ensures the listener catches it even if
+ * distracted on the first ring.
+ *
+ * Designed to feel like "ladies and gentlemen, the captain has turned
+ * on the seatbelt sign" — calm but firm. Same forward energy as a BART
+ * 3-note arrival tone, just with a heavier descending pattern to signal
+ * "this needs your attention" instead of "your stop is next."
+ *
+ * Total ~3.0 sec, comfortably below the 5-sec settle window MA needs
+ * between back-to-back play_announcement calls.
  */
 function redAlertSegments(): { segs: Segment[]; totalSec: number } {
   const segs: Segment[] = [];
-  const stepSec = 0.25;
-  const cycles = 6;
-  for (let i = 0; i < cycles; i++) {
-    const t = i * 2 * stepSec;
-    segs.push({ startSec: t,            spec: { kind: 'square', freq: 440, durSec: stepSec, gain: 0.55, attackSec: 0.003, releaseSec: 0.006 } });
-    segs.push({ startSec: t + stepSec,  spec: { kind: 'square', freq: 660, durSec: stepSec, gain: 0.55, attackSec: 0.003, releaseSec: 0.006 } });
+  // C5, A4, F4 — Am descending arpeggio
+  const notes = [
+    { freq: 523.25, gain: 0.55 },
+    { freq: 440.00, gain: 0.55 },
+    { freq: 349.23, gain: 0.55 },
+  ];
+  const noteDur = 0.42;
+  const noteStep = 0.32;       // notes overlap slightly for legato feel
+  const iterations = 2;
+  const iterGap = 0.45;        // gap between full arpeggio iterations
+  const iterDur = notes.length * noteStep + (noteDur - noteStep);
+  for (let it = 0; it < iterations; it++) {
+    const itOffset = it * (iterDur + iterGap);
+    notes.forEach((n, idx) => {
+      segs.push({
+        startSec: itOffset + idx * noteStep,
+        spec: {
+          kind: 'bell',
+          freq: n.freq,
+          durSec: noteDur,
+          gain: n.gain,
+          decaySec: 0.55,
+          // Airport-PA "fuller" bell with strong 2nd harmonic.
+          harmonics: [1.0, 0.55, 0.30, 0.15],
+        },
+      });
+    });
   }
-  return { segs, totalSec: cycles * 2 * stepSec + 0.1 };
+  const totalSec = iterations * iterDur + (iterations - 1) * iterGap + 0.5;
+  return { segs, totalSec };
 }
 
 /**
- * Yellow Alert — descending two-tone bell. Sine waves with exponential
- * decay, 880 → 660 Hz. Single ring (no cycle).
+ * Yellow Alert — v0.9.70 classic two-note PA "bing-bong" chime.
+ *
+ * Descending major 3rd (E5 → C5) with bell timbre. The pattern most
+ * people associate with "next, an announcement" — public-address tone
+ * that gets attention without urgency. Single iteration; this is a
+ * notice, not an alarm.
+ *
+ * Slight overlap on the two notes for that bound-together "bing-bong"
+ * feel rather than two distinct pings.
  */
 function yellowAlertSegments(): { segs: Segment[]; totalSec: number } {
   return {
     segs: [
-      { startSec: 0.00, spec: { kind: 'sine', freq: 880, durSec: 0.45, gain: 0.55, bellDecay: true } },
-      { startSec: 0.25, spec: { kind: 'sine', freq: 660, durSec: 0.80, gain: 0.55, bellDecay: true } },
+      { startSec: 0.00, spec: { kind: 'bell', freq: 659.25, durSec: 0.50, gain: 0.55, decaySec: 0.50, harmonics: [1.0, 0.45, 0.20] } }, // E5
+      { startSec: 0.32, spec: { kind: 'bell', freq: 523.25, durSec: 0.85, gain: 0.55, decaySec: 0.65, harmonics: [1.0, 0.45, 0.20] } }, // C5
     ],
-    totalSec: 1.2,
+    totalSec: 1.4,
   };
 }
 
 /**
- * All Clear — three-tone ascending sweep, A4 → D5 → A5. Calm + positive.
+ * All Clear — v0.9.70 ascending C-major arpeggio resolution.
+ *
+ * Three-note rising major triad (C5 → E5 → G5). Bright, positive,
+ * resolves the tension of a prior alert. Bell timbre matches the other
+ * alerts for a consistent sonic family.
  */
 function allClearSegments(): { segs: Segment[]; totalSec: number } {
   return {
     segs: [
-      { startSec: 0.00, spec: { kind: 'sine', freq: 440, durSec: 0.30, gain: 0.45, bellDecay: true } },
-      { startSec: 0.16, spec: { kind: 'sine', freq: 587, durSec: 0.30, gain: 0.45, bellDecay: true } },
-      { startSec: 0.32, spec: { kind: 'sine', freq: 880, durSec: 0.55, gain: 0.45, bellDecay: true } },
+      { startSec: 0.00, spec: { kind: 'bell', freq: 523.25, durSec: 0.35, gain: 0.50, decaySec: 0.45, harmonics: [1.0, 0.40, 0.20] } }, // C5
+      { startSec: 0.22, spec: { kind: 'bell', freq: 659.25, durSec: 0.35, gain: 0.50, decaySec: 0.45, harmonics: [1.0, 0.40, 0.20] } }, // E5
+      { startSec: 0.44, spec: { kind: 'bell', freq: 783.99, durSec: 0.70, gain: 0.50, decaySec: 0.60, harmonics: [1.0, 0.40, 0.20] } }, // G5
     ],
-    totalSec: 1.0,
+    totalSec: 1.3,
   };
 }
 
@@ -209,10 +285,38 @@ function boatswainSegments(): { segs: Segment[]; totalSec: number } {
 export const AUDIO_ASSETS = ['red-alert', 'yellow-alert', 'all-clear', 'boatswain'] as const;
 export type AudioAssetId = (typeof AUDIO_ASSETS)[number];
 
-/** Write all assets to `outDir`. Idempotent — only writes files that don't already exist. */
+/**
+ * v0.9.70 — bumped from 1 (the implicit version of all v0.9.18-v0.9.69
+ * synthesis) to 2 when the airport-style chimes replaced the TMP square
+ * waves + sine bells. The marker file at `${outDir}/.assets-version`
+ * stores the version that produced the WAVs on disk; if it doesn't
+ * match this constant, generateAudioAssets() force-regenerates so the
+ * new tones reach the speakers without manual `/data/audio` cleanup.
+ *
+ * Bump this whenever a synthesis param changes (frequencies, envelopes,
+ * harmonics, timings). The cache is per-version so old WAVs are
+ * replaced atomically rather than coexisting.
+ */
+export const AUDIO_ASSETS_VERSION = 2;
+
+/** Write all assets to `outDir`. Regenerates if the on-disk version is stale. */
 export async function generateAudioAssets(outDir: string, log: (m: string) => void): Promise<void> {
   if (!existsSync(outDir)) {
     await mkdir(outDir, { recursive: true });
+  }
+  // v0.9.70 — version-gated regeneration. Read the marker; if it doesn't
+  // match, treat every existing WAV as stale.
+  const versionMarker = resolve(outDir, '.assets-version');
+  let onDiskVersion = 0;
+  if (existsSync(versionMarker)) {
+    try {
+      const { readFile } = await import('node:fs/promises');
+      onDiskVersion = parseInt((await readFile(versionMarker, 'utf8')).trim(), 10) || 0;
+    } catch { /* ignore — treat as version 0 */ }
+  }
+  const stale = onDiskVersion !== AUDIO_ASSETS_VERSION;
+  if (stale && onDiskVersion > 0) {
+    log(`audioAssets: version ${onDiskVersion} on disk, regenerating for v${AUDIO_ASSETS_VERSION}`);
   }
   const defs: Record<AudioAssetId, () => { segs: Segment[]; totalSec: number }> = {
     'red-alert':    redAlertSegments,
@@ -222,7 +326,7 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
   };
   for (const id of AUDIO_ASSETS) {
     const path = resolve(outDir, `${id}.wav`);
-    if (existsSync(path)) continue;
+    if (!stale && existsSync(path)) continue;
     const { segs, totalSec } = defs[id]();
     const samples = renderSegments(segs, totalSec);
     const wav = buildWavBuffer(samples);
@@ -230,16 +334,22 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
     await writeFile(path, wav);
     log(`audioAssets: wrote ${id}.wav (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
   }
+  if (stale) {
+    await writeFile(versionMarker, String(AUDIO_ASSETS_VERSION) + '\n');
+  } else if (!existsSync(versionMarker)) {
+    // First-ever generation — record version so future bumps detect change.
+    await writeFile(versionMarker, String(AUDIO_ASSETS_VERSION) + '\n');
+  }
 }
 
-/** Force-regenerate (used when synthesis params change between versions). */
+/** Force-regenerate (used by tests / explicit "reset audio" trigger). */
 export async function regenerateAudioAssets(outDir: string, log: (m: string) => void): Promise<void> {
+  const { unlink } = await import('node:fs/promises');
   for (const id of AUDIO_ASSETS) {
     const path = resolve(outDir, `${id}.wav`);
-    if (existsSync(path)) {
-      const { unlink } = await import('node:fs/promises');
-      await unlink(path);
-    }
+    if (existsSync(path)) await unlink(path);
   }
+  const versionMarker = resolve(outDir, '.assets-version');
+  if (existsSync(versionMarker)) await unlink(versionMarker);
   return generateAudioAssets(outDir, log);
 }
