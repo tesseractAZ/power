@@ -3,6 +3,33 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.73 — 2026-05-28
+
+**Fix: `/audio-render/` only served files that existed at addon startup;
+runtime-written files 404'd.**
+
+v0.9.72 made the yellow broadcast work — but red broadcast still failed
+with MA 500. Diagnosis: v0.9.71's mkdirSync fix correctly created the
+cache dir before fastify-static's register call, but the register call
+itself used `wildcard: false`. In that mode, fastify-static enumerates
+the root directory at registration time and creates an explicit route
+per file. New files written by the renderer at runtime are invisible —
+fastify-static doesn't see them.
+
+Why yellow appeared to work: the yellow WAV was rendered under v0.9.70
+when the cache dir was first created. By the time v0.9.71 / v0.9.72
+started up and ran fastify-static's enumeration, the yellow file was
+already on disk, so it got a route. The red WAV rendered fresh during
+v0.9.72 testing had no route.
+
+Fix: `wildcard: true` (fastify-static's default). Each request resolves
+the path on demand, so any file present in the cache dir at request
+time gets served — exactly the contract a dynamic cache dir needs.
+
+The /audio/ klaxon route can stay at `wildcard: false` because those
+files ARE generated at startup (audioAssets.ts) before fastify-static
+registers. /audio-render/ is the one that needed wildcard:true.
+
 ## 0.9.72 — 2026-05-28
 
 **Fix: MA `play_announcement` is synchronous, needs a much longer

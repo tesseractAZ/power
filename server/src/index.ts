@@ -258,11 +258,21 @@ await app.register(fastifyStatic, {
 // the renderer reads as inputs).
 //
 // v0.9.71 — fastify-static refuses to register the route when `root`
-// doesn't exist at registration time. The /data/audio-render/ dir is
-// only populated on first broadcast, so without a pre-mkdir the static
-// handler silently disabled itself and every URL served 404. Make the
-// dir up-front so the route is always wired even before the first
-// render writes anything.
+// doesn't exist at registration time. mkdirSync up-front so the route
+// is always wired even before the first render writes anything.
+//
+// v0.9.73 — wildcard MUST be true here (unlike /audio/* above).
+// fastify-static's wildcard:false mode ENUMERATES files at registration
+// time and registers an explicit route per file. New files written at
+// runtime aren't visible. That's fine for /audio/ (klaxons generated at
+// startup, set in stone after), but FATAL for /audio-render/ where the
+// whole point is rendering files on demand. v0.9.70-v0.9.72 all 404'd
+// every newly-rendered announcement — the only files that served were
+// ones that happened to already exist on disk before startup. Yellow
+// "worked" only because it was rendered under v0.9.70 and survived to
+// v0.9.71 startup, when wildcard:false enumerated it. Red rendered
+// fresh under v0.9.72 was invisible. wildcard:true does on-demand path
+// resolution per request — the correct mode for a dynamic cache dir.
 const audioRenderDir = resolve(process.env.DATA_DIR ?? '/data', 'audio-render');
 const { mkdirSync } = await import('node:fs');
 mkdirSync(audioRenderDir, { recursive: true });
@@ -270,7 +280,7 @@ await app.register(fastifyStatic, {
   root: audioRenderDir,
   prefix: '/audio-render/',
   decorateReply: false,
-  wildcard: false,
+  wildcard: true,
 });
 
 // v0.9.55 — serve the HACS Lovelace card bundles directly from the
