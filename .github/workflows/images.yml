@@ -113,11 +113,17 @@ jobs:
       # QEMU stays so the workflow degrades gracefully if a native runner is
       # unavailable (buildx falls back to emulation). On a matched native
       # runner, this is effectively a sub-second no-op.
-      - uses: docker/setup-qemu-action@v3
+      # v0.9.77 — bumped docker/* actions to Node-24 majors (v4 / v7). GitHub
+      # is forcing Node 24 as the default runtime on June 2 2026 and removing
+      # Node 20 entirely on Sep 16 2026; the previous @v3 / @v5 pins all ran
+      # on Node 20 and were emitting deprecation warnings on every build.
+      # No input-API changes for our usage — these majors are pure runtime
+      # upgrades plus internal ESM refactors.
+      - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -129,7 +135,7 @@ jobs:
           echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" \
             >> "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v7
         id: build
         with:
           context: .
