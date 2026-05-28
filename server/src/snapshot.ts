@@ -298,7 +298,21 @@ export function startPollLoop(store: SnapshotStore, intervalMs: number, log: (ms
         const lastAt = store.lastMqttAtBySn.get(d.sn);
         const count = store.mqttMsgCountBySn.get(d.sn) ?? 0;
         const ageS = lastAt ? Math.round((now - lastAt) / 1000) : -1;
-        parts.push(`${d.deviceName}=${d.online ? 'ON' : 'OFF'}/${count}msg/${ageS < 0 ? '∞' : ageS + 's'}`);
+        // v0.9.75 — devices that EcoFlow Cloud reports as ON but that have
+        // NEVER produced an MQTT message (count=0, lastAt=null, ageS=-1)
+        // are unrepresented on the MQTT bus — typically EVSE / Smart
+        // Generator / spare-Core accessories where the OpenAPI doesn't
+        // push `_quota`. Rendering them as `ON/0msg/∞` looked like a
+        // delivery bug. `API-online/no-MQTT` makes the state explicit.
+        let status: string;
+        if (!d.online) {
+          status = 'OFF';
+        } else if (count === 0 && ageS < 0) {
+          status = 'API-online/no-MQTT';
+        } else {
+          status = `ON/${count}msg/${ageS < 0 ? '∞' : ageS + 's'}`;
+        }
+        parts.push(`${d.deviceName}=${status}`);
       }
       const sinceList = store.lastDeviceListSuccessAt > 0
         ? `${Math.round((now - store.lastDeviceListSuccessAt) / 1000)}s ago`

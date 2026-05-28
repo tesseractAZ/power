@@ -3,6 +3,7 @@ import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.j
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
 import { getWeather, type WeatherHour } from './weather.js';
+import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
@@ -1471,14 +1472,33 @@ export async function computeDegradation(
   // Pass 2 — fleet peer comparison: which pack is wearing fast for its group.
   // Robust median + MAD, modified z-score — the same test the peer-anomaly
   // engine uses. Needs ≥3 packs with a real fade trend to form a peer group.
+  //
+  // v0.9.75 — restrict the peer-median baseline to SHP2-connected packs.
+  // Spare cores (Eric's Cores 4 + 5) cycle very differently from the home-
+  // serving cores: they may sit at storage SoC for months, charge once on
+  // the bench, etc. Letting their fade rates into the baseline drags the
+  // fleet median in the wrong direction and either suppresses legitimate
+  // outlier flags (if spare's fade is high) or causes false-positive
+  // flags on healthy connected packs (if spare's fade is low).
+  //
+  // Per-pack analysis (Pass 1 above) still runs for every pack including
+  // spares — Eric still wants visibility into the spare hardware's
+  // calendar fade. The only change is which packs DEFINE the baseline
+  // that any single pack gets compared against.
+  const connected = shp2ConnectedDpuSns(devices);
   const projecting = packs.filter(
     (p): p is PackDegradation & { fadePctPerYear: number } =>
       p.status === 'projecting' && p.fadePctPerYear != null,
   );
-  if (projecting.length >= 3) {
-    const rates = projecting.map((p) => p.fadePctPerYear);
+  const baselinePool = projecting.filter((p) => p.sn == null || isShp2Connected(p.sn, connected));
+  if (baselinePool.length >= 3) {
+    const rates = baselinePool.map((p) => p.fadePctPerYear);
     const med = median(rates);
     const m = mad(rates, med);
+    // Tag outliers across ALL projecting packs (including spares) against
+    // the connected-only baseline. That way a spare pack with abnormal
+    // fade still shows up as peerOutlier=true — useful operator info even
+    // though the spare isn't powering the home today.
     for (const p of projecting) {
       p.peerFadeRatio = med > 0 ? round2(p.fadePctPerYear / med) : null;
       const z = m > 0 ? Math.abs((0.6745 * (p.fadePctPerYear - med)) / m) : 0;

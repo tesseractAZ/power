@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import type { DeviceSnapshot, DpuPack, DpuProjection, Shp2Projection } from '../types';
 import { cToF, fmtPct, fmtW, fmtWh, fmtMins } from '../format';
 import { sortDevices } from '../sort';
+import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 
 // DPU pack capacity is reported in single-string mAh. Each pack is 16S2P at
 // 51.2 V nominal, so Wh = mAh × 51.2 V × 2 strings / 1000.
@@ -169,7 +170,7 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
 
   return (
     <div className="space-y-4">
-      <SummaryStrip dpus={dpus} />
+      <SummaryStrip dpus={dpus} devices={devices} />
 
       {/* Pack matrix */}
       <div className="card">
@@ -340,8 +341,24 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
   );
 }
 
-/* ---- Condensed fleet summary strip ---- */
-function SummaryStrip({ dpus }: { dpus: Array<DeviceSnapshot & { projection?: DpuProjection }> }) {
+/* ---- Condensed backup-pool battery summary strip ----
+ *
+ * v0.9.75 — was "fleet battery summary," counting every pack across
+ * every DPU on the EcoFlow account. For Eric's 3-of-5-connected setup
+ * that overstated total capacity by ~67% (a 5-DPU sum claims ~150 kWh
+ * when only ~90 kWh is wired to the home). Now restricted to packs in
+ * SHP2-connected DPUs; the label reflects the scope. Hot-pack / spread
+ * extremes are also computed from the connected pool — a thermal
+ * anomaly on a spare bench unit isn't the home's problem to flag here.
+ */
+function SummaryStrip({
+  dpus,
+  devices,
+}: {
+  dpus: Array<DeviceSnapshot & { projection?: DpuProjection }>;
+  devices: Record<string, DeviceSnapshot>;
+}) {
+  const connectedSns = shp2ConnectedDpuSns(devices);
   let packs = 0;
   let socSum = 0;
   let sohSum = 0;
@@ -352,6 +369,7 @@ function SummaryStrip({ dpus }: { dpus: Array<DeviceSnapshot & { projection?: Dp
   let worstSpread: { mv: number; tag: string } | null = null;
   for (const d of dpus) {
     if (!d.online || !d.projection) continue;
+    if (!isShp2Connected(d.sn, connectedSns)) continue;
     for (const pk of d.projection.packs) {
       packs++;
       if (pk.soc != null) socSum += pk.soc;
@@ -372,8 +390,8 @@ function SummaryStrip({ dpus }: { dpus: Array<DeviceSnapshot & { projection?: Dp
   return (
     <div className="card">
       <div className="card-title flex items-center justify-between">
-        <span>Fleet battery summary</span>
-        <span className="text-xs text-muted normal-case tracking-normal">{packs} packs live</span>
+        <span>Backup-pool battery summary</span>
+        <span className="text-xs text-muted normal-case tracking-normal">{packs} packs live (SHP2-connected only)</span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <Tile label="Avg SoC" value={packs ? fmtPct(socSum / packs, 0) : '—'} accent="text-accent" />

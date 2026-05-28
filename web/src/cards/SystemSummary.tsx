@@ -1,24 +1,34 @@
 import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
 import { fmtMins, fmtPct, fmtW, fmtWh, socColor } from '../format';
+import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 
 export function SystemSummary({ devices }: { devices: Record<string, DeviceSnapshot> }) {
   const list = Object.values(devices);
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<DeviceSnapshot & { projection: DpuProjection }>;
   const shp2 = list.find((d) => d.projection?.kind === 'shp2') as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
 
+  // v0.9.75 — match the server-side filter applied in /api/ha-state and
+  // MQTT Discovery: only DPUs wired into the SHP2 contribute to fleet
+  // totals. The fleet PV / inverter-out / battery-net tiles previously
+  // summed every DPU on the account and inflated the home's apparent
+  // power flow by the spare cores' share. avg-SoC was the worst offender
+  // — a spare core sitting at storage SoC (50 %) on the bench dragged
+  // the home's true "available reserve" down by ~10 % when included.
+  const connectedSns = shp2ConnectedDpuSns(devices);
   const onlineDpus = dpus.filter((d) => d.online && d.projection);
-  const pvTotal = onlineDpus.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
-  const acOutTotal = onlineDpus.reduce((s, d) => s + (d.projection.acOutWatts ?? 0), 0);
-  const acInTotal = onlineDpus.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
-  const batWattsTotal = onlineDpus.reduce(
+  const connectedOnline = onlineDpus.filter((d) => isShp2Connected(d.sn, connectedSns));
+  const pvTotal = connectedOnline.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
+  const acOutTotal = connectedOnline.reduce((s, d) => s + (d.projection.acOutWatts ?? 0), 0);
+  const acInTotal = connectedOnline.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
+  const batWattsTotal = connectedOnline.reduce(
     (s, d) => s + ((d.projection.totalOutWatts ?? 0) - (d.projection.totalInWatts ?? 0)),
     0,
   );
 
   const avgSoc =
-    onlineDpus.length === 0
+    connectedOnline.length === 0
       ? null
-      : onlineDpus.reduce((s, d) => s + (d.projection.soc ?? 0), 0) / onlineDpus.length;
+      : connectedOnline.reduce((s, d) => s + (d.projection.soc ?? 0), 0) / connectedOnline.length;
 
   const circuitLoad = shp2?.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0) ?? null;
 
@@ -28,11 +38,11 @@ export function SystemSummary({ devices }: { devices: Record<string, DeviceSnaps
         <span>Energy flow</span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <Tile label="Solar (PV)" value={fmtW(pvTotal)} accent="text-warn" sub="42 panels" />
+        <Tile label="Solar (PV)" value={fmtW(pvTotal)} accent="text-warn" sub={`${connectedOnline.length} connected DPU${connectedOnline.length === 1 ? '' : 's'}`} />
         <Tile
           label="Batteries"
           value={fmtPct(avgSoc, 1)}
-          sub={`${onlineDpus.length}/${dpus.length} DPU online · ${onlineDpus.reduce((s, d) => s + d.projection.packs.length, 0)} packs`}
+          sub={`${connectedOnline.length}/${onlineDpus.length} connected · ${connectedOnline.reduce((s, d) => s + d.projection.packs.length, 0)} packs`}
           accent="text-accent"
           progress={avgSoc ?? undefined}
         />

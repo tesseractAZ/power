@@ -55,6 +55,29 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
   );
   const totalPanels = (arraySns.size || onlineDpus.length) * PANELS_PER_DPU;
 
+  // v0.9.75 — defensive log for the "Core 3 LV showed no data" report.
+  // If SHP2 hasn't loaded into the snapshot yet (cold boot, brief
+  // restart, websocket reconnect) `arraySns` is empty and every
+  // productive Core renders as "spare core · no PV array" until the
+  // snapshot re-populates. That looked like "Core 3 has no data" to
+  // Eric. Surface a one-time console warning whenever this state is
+  // hit so the next occurrence is one DevTools tab away from diagnosis
+  // instead of another round of agent-driven log archaeology.
+  if (arraySns.size === 0 && onlineDpus.length > 0) {
+    // Suppress on first render (the snapshot may still be loading);
+    // only warn if we've seen SHP2 data before in this session.
+    const seenShp2 = (window as unknown as { __seenShp2?: boolean }).__seenShp2;
+    if (seenShp2) {
+      console.warn(
+        '[SolarPanel] arraySns is empty but', onlineDpus.length,
+        'DPU(s) are online. Every Core will render as "spare" until the SHP2 source list re-populates.',
+        'This is the failure mode from the v0.9.74 audit; may indicate a stale snapshot or SHP2 went briefly offline.',
+      );
+    }
+  } else if (shp2) {
+    (window as unknown as { __seenShp2?: boolean }).__seenShp2 = true;
+  }
+
   // Current fleet PV
   const pvNow = onlineDpus.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
   const pvHighNow = onlineDpus.reduce((s, d) => s + (d.projection.pvHighWatts ?? 0), 0);

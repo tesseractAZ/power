@@ -3,6 +3,97 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.75 — 2026-05-28
+
+**SHP2 membership filter — round 2. Closes out the 4 deferred items
+from v0.9.74.**
+
+v0.9.74 fixed the server-side fleet aggregations (HA Energy Dashboard
+totals, MQTT Discovery payloads, `/api/ha-state`). v0.9.75 finishes
+the job: degradation peer baseline, web-side dashboard tiles, fleet-
+status log clarity, and a defensive log for the "Core 3 LV no data"
+stale-snapshot race.
+
+### 1. `analytics.ts` `computeDegradation` — peer baseline filter
+
+Per-pack fade analysis (Pass 1) still runs for every pack including
+spares — Eric still wants visibility into spare hardware's calendar
+fade. What changes: the fleet-median rate that defines the "peer
+group" baseline (used to flag outliers via robust median + MAD
+modified z-score) now uses only SHP2-connected packs. Spare-core
+fade rates (often abnormal because they sit at storage SoC for
+months and rarely cycle) were dragging the baseline in unpredictable
+directions, either suppressing legitimate outlier flags or causing
+false positives.
+
+Tagging logic unchanged: any projecting pack with z ≥ Z_INFO above
+the connected-pool median still gets `peerOutlier: true`, including
+spare packs. Just the comparison reference is now home-relevant.
+
+### 2. Web mirror `web/src/shp2Membership.ts`
+
+Literal copy of the server-side helper (same semantics, same
+fallback). React side now has a single source of truth for "which
+DPUs contribute to fleet totals."
+
+### 3. `web/src/cards/SystemSummary.tsx` — main page Energy flow card
+
+Solar (PV) / Inverter out / Grid in / Battery net tiles now sum
+SHP2-connected DPUs only. Avg-SoC tile is the most user-visible: a
+spare core sitting at storage SoC (50%) was dragging the home's
+"available reserve" down by ~10% when included. Sub-line on Batteries
+tile now reads `N/M connected · P packs` so it's obvious which scope
+the average represents. Solar tile sub-line shows connected DPU
+count instead of the hardcoded "42 panels."
+
+### 4. `web/src/pages/ThermalPanel.tsx` `SummaryStrip` — battery tab
+
+Re-labeled "Fleet battery summary" → "Backup-pool battery summary"
+with `(SHP2-connected only)` qualifier. Capacity (kWh), avg SoC,
+avg SoH, hottest pack, worst cell spread, and balancing-cell count
+all now computed from connected packs only. The 150 kWh capacity
+claim (5-DPU sum) is now ~90 kWh (3-DPU connected reality) for
+Eric's setup.
+
+### 5. `web/src/pages/SolarPanel.tsx` — defensive log
+
+Tonight's "Core 3 LV showed no data" stale-snapshot race: if the
+SHP2 source list hasn't loaded into the snapshot during a brief
+window (cold boot, websocket reconnect, container restart),
+`arraySns` is empty and every productive Core renders as "spare core ·
+no PV array" until the snapshot re-populates. Now logs a
+`console.warn` the moment this state is detected (gated on
+"have we ever seen SHP2 data this session" so first-render isn't
+noisy). One DevTools tab away from diagnosing future occurrences.
+
+### 6. `server/src/snapshot.ts` fleet-status line — clarity
+
+Devices that are EcoFlow-API-online but have never produced an MQTT
+message (EVSE / Smart Generator / spare-Core accessories where the
+OpenAPI doesn't push `_quota`) used to render as `ON/0msg/∞`, which
+looked like a delivery bug. Now: `API-online/no-MQTT`. State change
+is explicit, the noise stops.
+
+### Tests
+
+Server suite: 308/308 green (no test changes — the helper tests from
+v0.9.74 cover the contract that the new callers depend on).
+
+### Combined v0.9.74 + v0.9.75 impact
+
+| Surface | Pre-v0.9.74 | Post |
+|---|---|---|
+| HA Energy Dashboard PV / battery lifetime kWh | 5-DPU sum (overstated 40-67%) | SHP2-connected only |
+| HA Energy Dashboard / MQTT live tiles | 5-DPU sum | SHP2-connected only |
+| `/api/ha-state` fleet_*_watts | 5-DPU sum | SHP2-connected only |
+| Web Energy flow card | 5-DPU sum | SHP2-connected only |
+| Battery tab "fleet battery summary" tile (capacity / avg SoC / hottest) | 5-DPU sum | SHP2-connected only, re-labeled |
+| Degradation peer baseline (computeDegradation) | All projecting packs | SHP2-connected projecting packs |
+| Stale-snapshot "Core X no data" mystery | Silent | console.warn surfaces it |
+| Fleet-status log API-online + no-MQTT devices | `ON/0msg/∞` | `API-online/no-MQTT` |
+| `/api/version` | 404 | `{ version, builtAt, ref }` |
+| recorder.ts "wrote N samples" per-tick | ~44 lines/min (88% of log) | once-per-minute heartbeat |
+
 ## 0.9.74 — 2026-05-28
 
 **SHP2 membership filter for fleet aggregations + log review fixes.**
