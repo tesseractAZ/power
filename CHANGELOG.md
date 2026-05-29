@@ -3,6 +3,63 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.79 — 2026-05-28
+
+**Solar-page MPPT channel states + taper-aware curtailment detection.**
+
+Two fixes prompted by a report that the LV MPPT was "not reporting
+correctly." Investigation showed it was reporting *correctly* — the LV
+string produced ~900-1060 W all day and dropped to 0 only as the pack
+filled (SoC 88→90% with a 100% ceiling), because the DPU sheds the LV
+input first when it starts curtailing. Two real issues surfaced from
+that.
+
+### 1. Solar page: explicit channel states
+
+A channel showing 134 V / 0 A / 0 W read like a malfunction. Each MPPT
+tile now carries a state badge derived from V/A/errCode:
+
+- **producing** — drawing current (amps above the 0.1 A floor)
+- **idle** — string voltage present but ~0 A → "lit but not harvesting,
+  battery full / curtailing" (the LV-shed case)
+- **no sun** — no meaningful voltage (night / deep shade / disconnected)
+- **fault** — error code present
+
+The idle state adds an inline caption so a 0 W reading with live voltage
+no longer looks broken. (`web/src/pages/SolarPanel.tsx`.)
+
+### 2. Curtailment detection is now taper-aware
+
+v0.9.78 set the saturation threshold at `ceiling − 2%`, so with a 100%
+ceiling it only fired at SoC ≥ 98. But PV shedding begins earlier, in the
+CV/absorption taper — the operator's LV string was fully shed at SoC 90. The
+threshold is now `ceiling − 10%` (a taper band), so detection catches the
+real onset:
+
+- ceiling 100 → fires at SoC ≥ 90 (was 98)
+- ceiling 80 → fires at SoC ≥ 70 (was 78)
+- no ceiling reported → assume 100 → threshold 90
+
+The downstream guards still prevent false positives: the expected-vs-
+actual PV gap must exceed 300 W (so we only fire when PV is genuinely
+being rejected, not merely tapering into a battery that's still
+absorbing), and the PV-matched-to-load check rejects bulk-charge hours.
+Replaces `CURTAIL_SATURATION_MARGIN_PCT` (2) + `CURTAIL_SOC_FALLBACK_PCT`
+(96) with a single `CURTAIL_TAPER_BAND_PCT` (10).
+
+### Tests
+
+`curtailment.test.ts` updated for the taper band (323 total, all pass).
+New/changed cases: ACTIVE at 72% with an 80% ceiling, INACTIVE at 65%,
+**Storm Guard ceiling 100 + SoC 90 now detected** (the live state that
+v0.9.78 missed), SoC 85 still below the band, and the no-ceiling →
+assume-100 → threshold-90 fallback.
+
+### Files touched
+
+`server/src/analytics.ts`, `web/src/pages/SolarPanel.tsx`,
+`server/test/curtailment.test.ts`, `CHANGELOG.md`, `config.yaml`.
+
 ## 0.9.78 — 2026-05-28
 
 **Curtailment threshold now tracks the configured charge ceiling, not a

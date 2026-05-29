@@ -512,6 +512,36 @@ function DpuSolarCard({ d }: { d: DeviceSnapshot & { projection: DpuProjection }
   );
 }
 
+/**
+ * Classify an MPPT channel's operating state from V/A/errCode so the tile
+ * can explain a 0 W reading instead of looking broken (v0.9.79).
+ *
+ *  - fault     — error code present
+ *  - producing — drawing current (amps above the noise floor)
+ *  - idle      — string voltage present but ~0 A. The panels are wired and
+ *                showing open-circuit voltage, but the MPPT isn't harvesting.
+ *                Almost always means the battery is full/curtailing and the
+ *                DPU has backed off this input (it sheds the LV string first).
+ *  - dark      — no meaningful voltage: night, deep shade, or disconnected.
+ */
+const CH_VOLT_PRESENT = 10;   // V — above this the string is "connected/lit"
+const CH_AMP_FLOOR = 0.1;     // A — below this we treat current as zero
+
+type ChannelState = 'fault' | 'producing' | 'idle' | 'dark';
+function channelState(volts: number | null, amps: number | null, errCode: number | null): ChannelState {
+  if ((errCode ?? 0) !== 0) return 'fault';
+  if (amps != null && amps > CH_AMP_FLOOR) return 'producing';
+  if (volts != null && volts > CH_VOLT_PRESENT) return 'idle';
+  return 'dark';
+}
+
+const CHANNEL_BADGE: Record<ChannelState, { label: string; cls: string; note: string | null }> = {
+  producing: { label: 'producing', cls: 'badge-ok', note: null },
+  idle:      { label: 'idle', cls: 'badge-warn', note: 'String lit but not harvesting — battery full / curtailing.' },
+  dark:      { label: 'no sun', cls: 'badge-muted', note: null },
+  fault:     { label: 'fault', cls: 'badge-bad', note: null },
+};
+
 function MpptChannelTile({
   label, watts, volts, amps, temp, errCode, accent,
 }: {
@@ -526,14 +556,20 @@ function MpptChannelTile({
   // Effective resistance (V / A) for the operating point — interesting metric for power tracking
   const ohms = volts != null && amps != null && amps > 0.05 ? volts / amps : null;
   const computed = volts != null && amps != null ? volts * amps : null;
+  const state = channelState(volts, amps, errCode);
+  const badge = CHANNEL_BADGE[state];
   return (
     <div className="bg-panel2/60 border border-line rounded-xl p-3">
       <div className="flex items-baseline justify-between mb-1">
         <span className="text-xs uppercase tracking-widest" style={{ color: accent }}>{label}</span>
-        {(errCode ?? 0) !== 0 && <span className="badge badge-bad text-[10px]">err {errCode}</span>}
+        <span className={`badge ${badge.cls} text-[10px]`} title={badge.note ?? undefined}>
+          {state === 'fault' ? `err ${errCode}` : badge.label}
+        </span>
       </div>
-      <div className="text-2xl font-semibold tabular-nums mb-1" style={{ color: accent }}>{fmtW(watts)}</div>
-      <div className="grid grid-cols-1 gap-y-1 text-xs">
+      <div className="text-2xl font-semibold tabular-nums" style={{ color: accent }}>{fmtW(watts)}</div>
+      {/* Explain a 0 W reading inline so it doesn't read as a malfunction. */}
+      {badge.note && <div className="text-[10px] text-muted mb-1 leading-snug">{badge.note}</div>}
+      <div className="grid grid-cols-1 gap-y-1 text-xs mt-1">
         <div className="kv"><span className="kv-k">Voltage</span><span className="kv-v">{volts?.toFixed(1) ?? '—'} V</span></div>
         <div className="kv"><span className="kv-k">Current</span><span className="kv-v">{amps?.toFixed(2) ?? '—'} A</span></div>
         <div className="kv"><span className="kv-k">V × A</span><span className="kv-v">{computed != null ? `${computed.toFixed(0)} W` : '—'}</span></div>

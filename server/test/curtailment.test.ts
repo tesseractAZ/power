@@ -147,10 +147,11 @@ function withFreshState() {
   clearWeatherTestOverride();
 }
 
-test('curtailment — inactive when SoC below the 96% saturation threshold', async () => {
+test('curtailment — inactive when SoC below the taper-band saturation threshold', async () => {
   withFreshState();
   setWeatherCacheForTesting(syntheticWeatherNow(700));
   setBayesianModelForTesting(mockBayes(10)); // 10 W per W/m² → 7000 W expected
+  // No ceiling reported → assume 100, threshold = 90. SoC 75 < 90 → inactive.
   const devices = buildDevices({ dpuSocPct: 75, dpuPvWatts: 2000, shp2LoadWatts: 1500 });
   const r = await computeCurtailment(devices, emptyRecorder());
   assert.equal(r.active, false);
@@ -238,68 +239,80 @@ test('curtailment — ACTIVE when SoC high + PV matched to load + meaningful gap
   assert.equal(r.current.socAvg, 99);
 });
 
-test('curtailment — variable ceiling: ACTIVE at 79% SoC when charge limit is 80%', async () => {
+test('curtailment — variable ceiling: ACTIVE at 72% SoC when charge limit is 80%', async () => {
   withFreshState();
   setWeatherCacheForTesting(syntheticWeatherNow(700));
   setBayesianModelForTesting(mockBayes(10)); // expected 7000 W
-  // The KEY case the operator flagged: batteries set to charge to 80%, sitting at
-  // 79%. The old hardcoded 96% threshold would call this "soc-too-low" and
-  // NEVER fire — missing real curtailment. With the ceiling at 80 and the
-  // 2% margin, the saturation threshold is 78, so 79 ≥ 78 → curtailing.
-  const devices = buildDevices({ dpuSocPct: 79, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 80 });
+  // The KEY case the operator flagged: batteries set to charge to 80%, in the taper
+  // band. The old hardcoded 96% threshold would call this "soc-too-low" and
+  // NEVER fire. With the ceiling at 80 and the 10-pt taper band, the
+  // threshold is 70, so 72 ≥ 70 → curtailing (shedding has begun).
+  const devices = buildDevices({ dpuSocPct: 72, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 80 });
   const r = await computeCurtailment(devices, emptyRecorder());
-  assert.equal(r.active, true, 'curtailment fires at 79% when ceiling is 80%');
+  assert.equal(r.active, true, 'curtailment fires at 72% when ceiling is 80%');
   assert.equal(r.inactiveReason, null);
   assert.equal(r.currentSurplusW, 5000);
   assert.equal(r.current.chargeCeilingPct, 80);
-  assert.equal(r.current.saturationThresholdPct, 78);
+  assert.equal(r.current.saturationThresholdPct, 70);
 });
 
-test('curtailment — variable ceiling: INACTIVE at 70% SoC when charge limit is 80%', async () => {
+test('curtailment — variable ceiling: INACTIVE at 65% SoC when charge limit is 80%', async () => {
   withFreshState();
   setWeatherCacheForTesting(syntheticWeatherNow(700));
   setBayesianModelForTesting(mockBayes(10));
-  // Same 80% ceiling, but SoC is 70 — still 8% of headroom below the
-  // saturation threshold (78), so the pool is actively absorbing charge.
-  // Not curtailing.
-  const devices = buildDevices({ dpuSocPct: 70, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 80 });
+  // Same 80% ceiling, but SoC is 65 — below the taper band (threshold 70),
+  // so the pool is still bulk-charging and absorbing PV. Not curtailing.
+  const devices = buildDevices({ dpuSocPct: 65, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 80 });
   const r = await computeCurtailment(devices, emptyRecorder());
   assert.equal(r.active, false);
   assert.equal(r.inactiveReason, 'soc-too-low');
   assert.equal(r.current.chargeCeilingPct, 80);
-  assert.equal(r.current.saturationThresholdPct, 78);
+  assert.equal(r.current.saturationThresholdPct, 70);
 });
 
-test('curtailment — Storm Guard raises ceiling to 100: 90% SoC no longer counts as full', async () => {
+test('curtailment — taper-aware: Storm Guard ceiling 100, 90% SoC IS detected (the real-world onset)', async () => {
   withFreshState();
   setWeatherCacheForTesting(syntheticWeatherNow(700));
   setBayesianModelForTesting(mockBayes(10));
-  // Storm Guard / outage-prep pushed the ceiling to 100. At 90% SoC the
-  // pool still has 10% of headroom to absorb charge before it tops out,
-  // so we should NOT report curtailment — the panels aren't being
-  // throttled yet. Threshold = 100 - 2 = 98; 90 < 98 → inactive.
+  // Storm Guard / outage-prep pushed the ceiling to 100. This is exactly the
+  // live state from the operator's fleet: SoC 90, ceiling 100, LV string already
+  // shed. The v0.9.78 margin-of-2 (threshold 98) MISSED this; the v0.9.79
+  // taper band (threshold 90) catches it. 90 ≥ 90 → curtailing.
   const devices = buildDevices({ dpuSocPct: 90, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 100 });
+  const r = await computeCurtailment(devices, emptyRecorder());
+  assert.equal(r.active, true, 'taper-onset curtailment detected at SoC 90 with a 100% ceiling');
+  assert.equal(r.inactiveReason, null);
+  assert.equal(r.current.chargeCeilingPct, 100);
+  assert.equal(r.current.saturationThresholdPct, 90);
+});
+
+test('curtailment — taper-aware: SoC 85 with a 100% ceiling is still below the band', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(syntheticWeatherNow(700));
+  setBayesianModelForTesting(mockBayes(10));
+  // 100% ceiling, threshold 90. SoC 85 < 90 → still bulk-charging, no
+  // shedding yet. Guards against firing too early in the absorption phase.
+  const devices = buildDevices({ dpuSocPct: 85, dpuPvWatts: 2000, shp2LoadWatts: 1800, chgMaxSocPct: 100 });
   const r = await computeCurtailment(devices, emptyRecorder());
   assert.equal(r.active, false);
   assert.equal(r.inactiveReason, 'soc-too-low');
-  assert.equal(r.current.chargeCeilingPct, 100);
-  assert.equal(r.current.saturationThresholdPct, 98);
+  assert.equal(r.current.saturationThresholdPct, 90);
 });
 
-test('curtailment — no chgMaxSoc reported falls back to 96% legacy threshold', async () => {
+test('curtailment — no chgMaxSoc reported assumes 100% ceiling → threshold 90', async () => {
   withFreshState();
   setWeatherCacheForTesting(syntheticWeatherNow(700));
   setBayesianModelForTesting(mockBayes(10));
-  // chgMaxSocPct omitted → projection.chgMaxSoc is null → fall back to the
-  // legacy 96% constant (saturation threshold 96). At 95% SoC that's still
-  // below threshold → inactive. This preserves pre-v0.9.77.1 behavior for
-  // setups that don't surface the ceiling.
-  const devices = buildDevices({ dpuSocPct: 95, dpuPvWatts: 2000, shp2LoadWatts: 1800 });
+  // chgMaxSocPct omitted → projection.chgMaxSoc is null → the engine assumes
+  // a 100% ceiling (EcoFlow default) and applies the 10-pt band → threshold
+  // 90. SoC 85 < 90 → inactive. chargeCeilingPct stays null (we report what
+  // we actually read, not the assumption).
+  const devices = buildDevices({ dpuSocPct: 85, dpuPvWatts: 2000, shp2LoadWatts: 1800 });
   const r = await computeCurtailment(devices, emptyRecorder());
   assert.equal(r.active, false);
   assert.equal(r.inactiveReason, 'soc-too-low');
   assert.equal(r.current.chargeCeilingPct, null);
-  assert.equal(r.current.saturationThresholdPct, 96);
+  assert.equal(r.current.saturationThresholdPct, 90);
 });
 
 test('curtailment — opportunistic loads marked as "fits" iff surplus ≥ estimatedW', async () => {

@@ -3644,16 +3644,22 @@ const CURTAIL_HISTORY_DAYS = 7;
 // Storm Guard / outage-prep raises that ceiling to 100% — and because it
 // does so by changing `chgMaxSoc` itself, reading the field live means we
 // automatically track whatever mode is active without needing a separate
-// storm-guard flag. Curtailment begins when SoC reaches the ceiling
-// (charge current → 0, excess PV rejected), so the saturation threshold
-// is `ceiling − margin`. The margin catches the approach + measurement
-// jitter; the PV-matched-to-load guard downstream is what actually
-// prevents false positives during bulk charge.
-const CURTAIL_SATURATION_MARGIN_PCT = 2;     // how far below the ceiling counts as "saturated"
-// Only used when NO DPU reports a ceiling (field missing / cold boot).
-// Mirrors the pre-v0.9.78 hardcoded behavior so a setup that doesn't
-// surface chgMaxSoc still gets sensible "near full" detection.
-const CURTAIL_SOC_FALLBACK_PCT = 96;
+// storm-guard flag.
+//
+// v0.9.79 — curtailment doesn't begin AT the ceiling, it begins in the
+// CV/absorption taper BELOW it. As the LFP packs approach full, charge
+// acceptance falls and the DPU backs off its MPPTs to match (load +
+// dwindling charge current) — shedding the LV string first. Live evidence
+// from the operator's Core 3 (ceiling 100): the LV MPPT held ~900-1060 W all day,
+// then collapsed 698 W → 0 W as SoC climbed 88 → 90 %, while HV only
+// throttled partially. So real PV rejection starts ~10 % below the
+// ceiling, not 2 %. The saturation threshold is therefore `ceiling − band`
+// with a 10-point taper band. The downstream guards still prevent false
+// positives: the expected-vs-actual gap must exceed MIN_SURPLUS_W (so we
+// only fire when PV is genuinely being rejected, not merely tapering into
+// a battery that's still absorbing), and the PV-matched-to-load check
+// rejects bulk-charge hours where PV >> load.
+const CURTAIL_TAPER_BAND_PCT = 10;   // SoC band below the ceiling where shedding begins
 
 /**
  * Effective charge ceiling (%) for the home pool: mean of the
@@ -3674,13 +3680,14 @@ function homeChargeCeilingPct(
   return ceilings.reduce((s, v) => s + v, 0) / ceilings.length;
 }
 
-/** The SoC at/above which the pool is treated as saturated (curtailment
- *  can begin). Derived from the live ceiling minus the approach margin,
- *  falling back to the legacy constant when no ceiling is reported. */
+/** The SoC at/above which the pool enters the charge-taper band where PV
+ *  shedding begins (curtailment can occur): `ceiling − taper band`. When no
+ *  ceiling is reported we assume 100 (the EcoFlow default), so the fallback
+ *  threshold is 90 — consistent with the taper-aware model rather than the
+ *  old fixed 96. */
 function saturationThresholdPct(ceiling: number | null): number {
-  return ceiling != null
-    ? Math.max(0, ceiling - CURTAIL_SATURATION_MARGIN_PCT)
-    : CURTAIL_SOC_FALLBACK_PCT;
+  const eff = ceiling != null && ceiling > 0 ? ceiling : 100;
+  return Math.max(0, eff - CURTAIL_TAPER_BAND_PCT);
 }
 
 // Phoenix off-grid home opportunistic loads. Estimated wattages are
@@ -3752,7 +3759,7 @@ export async function computeCurtailment(
     generatedAt: now,
     active: false,
     currentSurplusW: 0,
-    current: { socAvg: 0, pvActualW: 0, pvExpectedW: null, loadW: 0, ghiWm2: null, bayesianSamples: 0, chargeCeilingPct: null, saturationThresholdPct: CURTAIL_SOC_FALLBACK_PCT },
+    current: { socAvg: 0, pvActualW: 0, pvExpectedW: null, loadW: 0, ghiWm2: null, bayesianSamples: 0, chargeCeilingPct: null, saturationThresholdPct: saturationThresholdPct(null) },
     inactiveReason: 'no-home-dpus',
     todayKwh: 0,
     todayHours: [],
