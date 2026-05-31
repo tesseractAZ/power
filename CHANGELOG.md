@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.10.3 — 2026-05-31
+
+**Housekeeping release — no functional change from v0.10.2.**
+
+Rolls the deployed image forward onto the cleaned-up source tree (README/DOCS
+refreshed for the v0.10 worker architecture; source-comment cleanup; one
+test-fixture IP genericized). Runtime behaviour is identical to v0.10.2 — the
+analytics worker, the watchdog fix, and every engine are unchanged. 341 tests
+pass, tsc clean.
+
 ## 0.10.2 — 2026-05-31
 
 **Hotfix #2: load the worker via a .mjs bootstrap that registers tsx's loader.**
