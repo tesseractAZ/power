@@ -30,7 +30,7 @@ export function PackVitals({ snapshot }: PackVitalsProps) {
   // Group by DPU SN, then sort columns numerically by "Core N" trailing number.
   // v0.9.42 — previously cared only about packs-within-DPU order, so the column
   // sequence was whatever order the snapshot enumerator yielded (MQTT report
-  // order). the operator noted he wants Core 1, Core 2, Core 3, Core 4 left-to-right.
+  // order). the desired order is Core 1, Core 2, Core 3, Core 4 left-to-right.
   const byDpu = useMemo(() => {
     const map = new Map<string, ReturnType<typeof allPacks>>();
     for (const p of packs) {

@@ -94,18 +94,20 @@ cd ../server && npm start     # Fastify serves /api + /ws + the built web on :87
 
 ### Auto-start on Mac login (launchd)
 
-A LaunchAgent plist is included at `launchd/com.tesseractAZ.ecoflow-panel.plist`.
-It auto-starts the backend (Vite is a dev-time concern; for "always-on" use
-`npm run build` and let Fastify serve `web/dist`).
+A LaunchAgent plist template is included at `launchd/com.local.ecoflow-panel.plist`.
+**Edit the `/ABSOLUTE/PATH/TO/ecoflow-panel` placeholders to your clone's absolute
+path first** (run `pwd` from the repo root). It auto-starts the backend (Vite is a
+dev-time concern; for "always-on" use `npm run build` and let Fastify serve
+`web/dist`).
 
 ```bash
-cp launchd/com.tesseractAZ.ecoflow-panel.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.tesseractAZ.ecoflow-panel.plist
+cp launchd/com.local.ecoflow-panel.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.local.ecoflow-panel.plist
 launchctl list | grep ecoflow
 tail -f data/launchd.out.log data/launchd.err.log
 
 # Stop / uninstall
-launchctl unload ~/Library/LaunchAgents/com.tesseractAZ.ecoflow-panel.plist
+launchctl unload ~/Library/LaunchAgents/com.local.ecoflow-panel.plist
 ```
 
 ## Releasing a new version
@@ -181,13 +183,31 @@ production vs development to keep the PR list short.
 
 ## Roadmap
 
-### Shipped through v0.9.68
+### Shipped through v0.10.2
 
 The original roadmap (v0.7.0 / v0.8.0+ / external + infrastructure) and
 multiple follow-on series (predictive-engine v2, polish + tests, HACS
 Lovelace cards, security hardening, broadcast/TTS robustness, engine
 audit + test backfill) are all shipped. Highlights — see
 [CHANGELOG.md](CHANGELOG.md) for the per-release breakdown:
+
+**Off-thread analytics (v0.10.0–v0.10.2)** — `node:sqlite` is synchronous, so
+every heavy history scan now runs on a dedicated **worker thread**; the main
+event loop never blocks on a multi-second query. The main thread keeps the
+sole write connection (MQTT ingestion + lifetime rollup); a read-only worker
+connection to the same WAL DB serves every report + raw query and self-warms
+its caches. Benchmark: a 25-scan workload that froze the main loop ~1066 ms
+on-thread holds main-loop lag to ~34 ms on the worker (31.7×). This ended a
+Supervisor-watchdog restart loop — the add-on had been restarting ~every
+40 min whenever a health probe coincided with a synchronous scan.
+
+**Solar curtailment + self-consumption (v0.9.76–v0.9.84)** — detects when PV
+is rejected at the panels because batteries are full and home load is below
+solar input, judged against the *configured* charge ceiling (`chgMaxSoc`,
+which Storm Guard / mode changes move), and surfaces the headroom you could
+absorb (e.g. run the pool pump). Self-consumption energy integrals are
+memoized per-calendar-day (completed days are immutable), cutting the rolling
+7-day recompute cost ~7×.
 
 **Predictive engine** — peer-comparison anomaly, self-baseline anomaly,
 day-ahead forecast (cloud-aware + day-of-week-aware load + 3-day horizon
@@ -213,7 +233,7 @@ auto-downgrade (info-silencing, warning→info demotion, chronic-noise
 silencing).
 
 **Plumbing** — Node 22 + Fastify + node:sqlite + tsx, native ARM64 CI
-build pipeline (1m 30s end-to-end), 309-test CI gate that blocks bad
+build pipeline (1m 30s end-to-end), 341-test CI gate that blocks bad
 releases, PWA-installable web UI with route-level code splitting
 (60 kB initial JS), persistent lifetime energy accumulator that
 survives recorder pruning + restarts, telnet TUI for terminal monitoring,
@@ -246,7 +266,7 @@ couldn't distinguish them from `idleHold` and never selected them.
 
 **Engine audit + test backfill (v0.9.58, v0.9.59, v0.9.61, v0.9.67,
 v0.9.68)** — 14 correctness fixes across Kalman, Bayes, MPC, and
-EV-window engines; 309-test suite gating every release; MPC test
+EV-window engines; 341-test suite gating every release; MPC test
 determinism via injectable `nowMs`; MQTT Discovery dedup with
 regression-guard tests.
 
@@ -311,4 +331,4 @@ generate:
        (`media_player.state == playing` → fire next), and
     4. Replaces the TTS engine-pick fallback chain with a small
        provider interface tested against Piper / Cloud / Google in
-       isolation. Bundle the cleanup as a single ~v0.10 release.
+       isolation. Bundle the cleanup as a single focused release.

@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Optional macOS LaunchAgent to auto-start the backend on login.
+  Replace /ABSOLUTE/PATH/TO with the absolute path to your clone of this repo
+  (run `pwd` from the repo root), then see README → "Auto-start on Mac login".
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.tesseractAZ.ecoflow-panel</string>
+    <string>com.local.ecoflow-panel</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -12,7 +17,7 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/tesseractAZ/Downloads/Claude/ecoflow-panel/server</string>
+    <string>/ABSOLUTE/PATH/TO/ecoflow-panel/server</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -35,9 +40,9 @@
     <integer>30</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/tesseractAZ/Downloads/Claude/ecoflow-panel/data/launchd.out.log</string>
+    <string>/ABSOLUTE/PATH/TO/ecoflow-panel/data/launchd.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/tesseractAZ/Downloads/Claude/ecoflow-panel/data/launchd.err.log</string>
+    <string>/ABSOLUTE/PATH/TO/ecoflow-panel/data/launchd.err.log</string>
 </dict>
 </plist>

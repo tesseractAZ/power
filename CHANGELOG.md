@@ -1350,7 +1350,7 @@ refinement if anyone ever needs finer planning granularity.
 
 Doesn't affect users on flat tariffs — `degradeReason: 'no-tou-spread'`
 still short-circuits the planner per v0.9.59. So no behavior change
-for the operator until he ever goes back on TOU.
+for the user until TOU is ever re-enabled.
 
 ### Verification
 
@@ -1617,7 +1617,7 @@ would clean this up; deferred to a future cleanup.
 
 **Security batch: write-auth + CSRF protection + send-command lockdown.**
 Three findings from a parallel security audit, all defense-in-depth
-against LAN-side attackers. the operator's add-on is on a trusted LAN today;
+against LAN-side attackers. The operator's add-on is on a trusted LAN today;
 none of these were being exploited. But "trusted LAN" stops being
 trusted the moment one IoT device on the network turns hostile.
 
@@ -1880,7 +1880,7 @@ day-of-week-aware base forecast.
 
 ### 2. Probabilistic SoC % scaling (`analytics.ts`)
 
-`socStepPct = socStep * 5` implied ~20 kWh fleet capacity. the operator's
+`socStepPct = socStep * 5` implied ~20 kWh fleet capacity. The operator's
 fleet is ~120 kWh (4 DPUs × 5 packs × 6.144 kWh). P10/P90 SoC bands
 were 6× too wide.
 
@@ -2691,9 +2691,9 @@ No more Docker emulation, no more SIGSEGV.
 ## 0.9.46 — 2026-05-26
 
 **CodeNotary signer email correction.** Updates `build.yaml`'s
-`codenotary.signer` from `redacted@example.com` to **`redacted@example.com`**
-— the operator registered the CodeNotary account with his GitHub login email
-(redacted@example.com), so the signer field has to match exactly. If
+`codenotary.signer` from `<old-email>` to **`<your-email>`**
+— the CodeNotary account was registered with the GitHub login email
+(<your-email>), so the signer field has to match exactly. If
 the field and the actual signature identity disagree, HA Supervisor
 refuses to install.
 
@@ -2703,10 +2703,10 @@ Same change applied to the workflow's logging strings so the
 ### Action needed (still one-time)
 
 1. CodeNotary account at https://www.codenotary.io with
-   **redacted@example.com** — done per the operator.
+   **<your-email>** — done per the operator.
 2. **GitHub repo secrets** at
    https://github.com/tesseractAZ/ecoflow-panel/settings/secrets/actions:
-   - `CN_USER` = `redacted@example.com`
+   - `CN_USER` = `<your-email>`
    - `CN_PASSWORD` = your CodeNotary password
 3. Next push signs automatically.
 
@@ -2715,7 +2715,7 @@ Same change applied to the workflow's logging strings so the
 **CodeNotary image signing infrastructure.** Wires up the second +1
 rating bump from the security audit (after v0.9.44's AppArmor). Adds:
 
-- `codenotary:` block in `build.yaml` declaring `redacted@example.com` as
+- `codenotary:` block in `build.yaml` declaring `<old-email>` as
   the signer and `notary@home-assistant.io` as the base-image signer.
 - A signing step in `.github/workflows/images.yml` that runs `vcn
   notarize` on both the `:version` and `:latest` tags for each arch.
@@ -2738,10 +2738,10 @@ aborts the install.
 ### One-time setup (you, not the workflow)
 
 1. **Create CodeNotary account:**
-   - https://www.codenotary.io → sign up with `redacted@example.com`
+   - https://www.codenotary.io → sign up with `<old-email>`
 2. **Add GitHub repo secrets:**
    - https://github.com/tesseractAZ/ecoflow-panel/settings/secrets/actions
-   - `CN_USER` = `redacted@example.com`
+   - `CN_USER` = `<old-email>`
    - `CN_PASSWORD` = your CodeNotary password
 3. **Next push triggers signing** — the workflow logs `vcn notarize
    ... succeeded` for each arch. HA install rating bumps another +1.
@@ -2879,7 +2879,7 @@ self-contained.
 work after MA's klaxon because MA-managed speakers stay bound to MA's
 session — `tts.speak` couldn't acquire them no matter how long we
 waited or whether we called `media_player.media_stop` first (MA just
-re-grabs them). the operator chose the right path: keep MA, route the TTS
+re-grabs them). The operator chose the right path: keep MA, route the TTS
 through MA's own announcement service.
 
 ### The pipeline now
@@ -3257,7 +3257,7 @@ fixed every screen that didn't pass.
 **Elevated permissions + Piper auto-setup.** v0.9.32 surfaced that
 Piper-add-on-running ≠ Piper-TTS-visible: the Wyoming Protocol
 integration also has to be added in HA Settings → Devices & Services
-to bridge the add-on to a `tts.piper` entity. the operator green-lit
+to bridge the add-on to a `tts.piper` entity. The operator green-lit
 elevating permissions so we can do that step (and similar future
 plumbing) automatically.
 
@@ -3311,7 +3311,7 @@ bridging it.
 
 ### Tests
 
-159 pass (was 120). the operator added more in parallel.
+159 pass (was 120). The operator added more in parallel.
 
 ## 0.9.32 — 2026-05-25
 
@@ -3356,7 +3356,7 @@ catch.
 ### Notes on installing more local TTS engines
 
 The add-on cannot install other HA add-ons programmatically — that
-requires `hassio_api: true` + admin role, which we don't have. the operator
+requires `hassio_api: true` + admin role, which we don't have. The operator
 asked about other options; recommended in priority order for an
 off-grid alert system:
 

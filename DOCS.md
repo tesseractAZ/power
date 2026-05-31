@@ -96,6 +96,18 @@ EcoFlow MQTT  ──live telemetry────┘
                                                                   forecast, EOL
 ```
 
+**Analytics worker (v0.10.0).** `node:sqlite` is synchronous, so a multi-second
+history scan would block the Node event loop — and intermittently starve the
+HTTP port enough to trip HA's add-on watchdog into a restart. So every heavy
+read runs on a dedicated **worker thread**: the main thread keeps the single
+write connection (MQTT ingestion + the lifetime-energy rollup), and the worker
+opens a read-only connection to the same WAL database to serve every analytics
+report and raw history query, self-warming its result caches. The main thread
+proxies report requests over `worker_threads` messaging and never blocks on a
+query (benchmark: ~1066 ms main-loop freeze on-thread → ~34 ms via the worker).
+Source: `server/src/analyticsWorker.ts` + `analyticsClient.ts` +
+`readRecorder.ts` + `reports.ts`.
+
 ## Home Assistant entities
 
 The add-on can publish ~22 sensors + 1 binary_sensor into Home Assistant.

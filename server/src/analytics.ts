@@ -3776,7 +3776,7 @@ const CURTAIL_HISTORY_DAYS = 7;
 
 // v0.9.78 — the "battery full" threshold is NOT a fixed 96%. EcoFlow
 // DPUs charge to a *configured ceiling* (`chgMaxSoc`) that's well below
-// 100% in normal operation (the operator runs his packs to a setting, not full).
+// 100% in normal operation (the packs run to a configured ceiling, not full).
 // Storm Guard / outage-prep raises that ceiling to 100% — and because it
 // does so by changing `chgMaxSoc` itself, reading the field live means we
 // automatically track whatever mode is active without needing a separate
@@ -4600,7 +4600,7 @@ export async function computeProbabilisticForecast(
   // maximises numerical conditioning. If no usable hour exists (e.g. the
   // forecast was generated with no SHP2 projection so projectedSocPct is null
   // throughout), fall back to a fleet estimate: DPU count × 5 packs × 6.144
-  // kWh/pack. the operator's ~4 DPUs × 5 × 6.144 ≈ 122.88 kWh — the prior code's
+  // kWh/pack. The operator's ~4 DPUs × 5 × 6.144 ≈ 122.88 kWh — the prior code's
   // hard-coded "1 kWh ≈ 0.5 %" implied a 200 kWh pool (or worse, a single 20
   // kWh DPU) and badly understated the P10/P90 band width.
   const PACK_KWH_NAMEPLATE = 6.144;
