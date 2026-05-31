@@ -3,6 +3,29 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.10.1 — 2026-05-31
+
+**Hotfix: register tsx in the analytics worker thread (container crash-loop).**
+
+v0.10.0's worker came up clean in macOS dev but crash-looped in the HA add-on
+container with `Unknown file extension ".ts" for analyticsWorker.ts`. tsx's
+ESM loader auto-propagates into worker threads on macOS (the worker inherits
+the parent's execArgv) but NOT in the container, where the server starts via
+`npm start` → `tsx src/index.ts`. The worker exited (code 1) and respawned
+every 1s, so every analytics endpoint returned 500 (live telemetry, MQTT
+ingestion, and recording were unaffected — those never touch the worker, and
+the async crash-loop didn't block the main loop, so no watchdog restart).
+
+Fix: spawn the Worker with `execArgv: ['--import', 'tsx']` (the tsx-documented
+worker_threads pattern). tsx is a runtime dependency, so the bare specifier
+resolves from node_modules in both dev and the container. Verified with the
+real worker locally; this is the only change.
+
+Lesson logged: the macOS spike that "proved" the worker loads under tsx used
+*plain* `new Worker(url)` and passed by inheriting execArgv — which masked the
+container's different propagation behavior. The empirical proof must match the
+production invocation, not just the dev one.
+
 ## 0.10.0 — 2026-05-31
 
 **Analytics moved to a worker thread — the main event loop never blocks on SQLite again. Ends the watchdog restart loop.**
