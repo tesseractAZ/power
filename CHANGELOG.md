@@ -3,6 +3,35 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.9.83 — 2026-05-31
+
+**Self-consumption query coarsened 60s→300s — clears the last slow-cycle.**
+
+Direct HA log pull after v0.9.82 showed the stagger worked (slow cycles
+3× less frequent, every 12 min instead of every 4, and smaller ~3.5s vs
+~5s) but did NOT fully eliminate them: the one cycle where
+**self-consumption** resets still tripped the >3s slow-cycle log at ~3.5s.
+(My earlier "definitively eliminated" call was premature — the verify
+window was too short to catch the SC-reset cycle. Corrected.)
+
+self-consumption is the single heaviest every-cycle function: 12 metrics
+× ~10k 60s-buckets × 3 home DPUs ≈ 360k rows transferred + integrated
+per call, ~3.5s on the Pi's slow disk. Coarsening its query bucket to
+300s returns 5× fewer rows. Benchmark (3.1M-row DB) measured **1.8×
+faster** (the raw-row SQL scan dominates, so the bucket only shrinks the
+output + integrate cost — not 5×) with a **0.003%** change to every kWh
+total, far inside the 0.1% rounding already applied. ~3.5s → ~1.9s, under
+the log threshold even on the worst observed cycle (4.1s → ~2.3s). 5-min
+resolution is standard for a 7-day rolling energy aggregate.
+
+This is a reduction, not elimination, of the block — SC is still ~1.9s
+every 12 min. Fully eliminating the event-loop stall would need a 5-min
+rollup table or moving the recorder off the main thread (a larger change,
+deferred).
+
+One-line change (`ANALYTICS_BUCKET_SEC` in computeSelfConsumption);
+333 tests pass, tsc clean.
+
 ## 0.9.82 — 2026-05-31
 
 **Cache-warmer slow cycles, fixed properly this time (benchmark-verified).**

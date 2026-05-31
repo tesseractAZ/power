@@ -3058,7 +3058,18 @@ export function computeSelfConsumption(
   // one queryMulti per device. The query planner walks the (sn, metric, ts)
   // index once per device and emits already-grouped rows, which we sort
   // into per-metric arrays in a single linear pass through the result set.
-  const ANALYTICS_BUCKET_SEC = 60;
+  //
+  // v0.9.83 — 300 s bucket (was 60). Live logs proved self-consumption is the
+  // single heaviest every-cycle function — ~3.5 s on the Pi's slow disk (12
+  // metrics × ~10 k 60 s-buckets × 3 home DPUs ≈ 360 k rows transferred +
+  // integrated), the lone cycle still tripping the >3 s slow-cycle log after
+  // the v0.9.82 stagger. Coarsening to 300 s returns 5× fewer rows; benchmark
+  // (3.1 M-row DB) measured 1.8× faster (the SQL scan of raw rows dominates,
+  // so the bucket only shrinks the output+integrate cost) with a 0.003 %
+  // change to every kWh total — far inside the 0.1 % rounding. 3.5 s → ~1.9 s
+  // pushes it under the log threshold. 5-min resolution is standard for a
+  // 7-day rolling energy aggregate.
+  const ANALYTICS_BUCKET_SEC = 300;
   // v0.9.76 — sum PV / charge / discharge / grid-import over SHP2-connected
   // DPUs only. The denominator (loadKwh) is SHP2 panel_load — intrinsically
   // home-only — so the numerator MUST match scope or the ratio is wrong.
