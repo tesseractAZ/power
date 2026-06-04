@@ -334,7 +334,13 @@ export async function startMqttDiscovery(
       const topic = `${prefix}/switch/${uniqueId}/config`;
       const cfg = {
         unique_id: uniqueId,
-        name: `EcoFlow Alarms — ${meta.label} (${meta.isa})`,
+        // v0.11.1 — explicit object_id → a clean entity_id
+        // (switch.ecoflow_alarms_critical_p1) instead of HA deriving a verbose
+        // one from the name. The name drops the redundant "EcoFlow" prefix:
+        // HA prepends the device name ("EcoFlow Panel"), so the friendly name
+        // reads "EcoFlow Panel Alarms — Critical (P1)" — not doubled.
+        object_id: `ecoflow_alarms_${p}_${meta.isa.toLowerCase()}`,
+        name: `Alarms — ${meta.label} (${meta.isa})`,
         state_topic: alertSwitchStateTopic(p),
         command_topic: alertSwitchCommandTopic(p),
         availability_topic: AVAILABILITY_TOPIC,

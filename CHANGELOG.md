@@ -3,6 +3,21 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.11.1 — 2026-06-04
+
+**Polish: clean entity_ids + friendly names for the alarm-priority HA switches.**
+
+The four `switch.ecoflow_alerts_<priority>` MQTT-discovery entities (added in
+0.11.0) now publish an explicit `object_id`, so Home Assistant assigns a clean
+entity_id — `switch.ecoflow_alarms_critical_p1` / `_high_p2` / `_medium_p3` /
+`_low_p4` — instead of deriving a verbose one from the entity name. The entity
+name also drops its redundant "EcoFlow" prefix (HA already prepends the device
+name "EcoFlow Panel"), so the friendly name reads "EcoFlow Panel Alarms —
+Critical (P1)" rather than the doubled "EcoFlow Panel EcoFlow Alarms — …". No
+behaviour change; the per-priority toggles and two-way sync are unchanged. The
+53 existing sensor entity_ids are intentionally left as-is to avoid breaking
+dashboards/automations that reference them.
+
 ## 0.11.0 — 2026-06-04
 
 **Industrial alarm-priority taxonomy (ISA-18.2 / IEC 62682) + an Alert Settings page to silence annunciation per priority, the chime sounding twice, and per-priority announcement preview — mirrored as HA switches.**
