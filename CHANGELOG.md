@@ -3,6 +3,28 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.11.3 — 2026-06-04
+
+**Fix: blank dashboard on the Opus theme (a stale `speakerGroups` read) + a top-level error boundary.**
+
+The Opus theme's `StatusDock` read `bcast.speakerGroups.length` from
+`/api/broadcast/status`, but the server dropped `speakerGroups` back in v0.9.70
+(the protocol-bucketing broadcast path was removed). So once broadcast status
+loaded, `bcast.speakerGroups` was `undefined`, `.length` threw, and with no
+error boundary the thrown render unmounted the **entire** React tree → a blank
+page. It only showed on the **Opus theme** (which renders StatusDock) once
+broadcast data arrived — which is why it looked browser-specific and survived
+cache clears. Fixes:
+- `speakerGroups` is now optional in the type and guarded with optional chaining
+  at the use-site, so its absence renders nothing instead of crashing.
+- Added a top-level **ErrorBoundary** around `<App>`: any future render error
+  now shows a readable message + stack + Reload button instead of silently
+  white-screening the whole dashboard.
+
+(Diagnosed by driving Safari directly and reading the live JS console — the prior
+service-worker/cache work in 0.11.2 was a real hardening improvement but was not
+this bug.)
+
 ## 0.11.2 — 2026-06-04
 
 **Fix: blank dashboard in Safari (and any browser) after a redeploy — a stale service-worker cache.**

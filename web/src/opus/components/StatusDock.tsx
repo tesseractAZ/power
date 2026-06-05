@@ -23,7 +23,12 @@ interface BroadcastStatus {
   ttsEngine: { service: string; label: string; local: boolean } | null;
   lastBroadcastAt: number | null;
   lastOutcome: string | null;
-  speakerGroups: Array<{ protocol: string; targets: string[] }>;
+  // v0.11.3 — optional: the server dropped `speakerGroups` in v0.9.70 (the
+  // protocol-bucketing broadcast path was removed), so /api/broadcast/status
+  // no longer includes it. Marked optional + guarded at the use-site below so
+  // the Opus StatusDock doesn't read `.length` off undefined and crash the
+  // whole bridge (which white-screened the dashboard on the Opus theme).
+  speakerGroups?: Array<{ protocol: string; targets: string[] }>;
 }
 
 export function StatusDock({ conn }: StatusDockProps) {
@@ -67,7 +72,7 @@ export function StatusDock({ conn }: StatusDockProps) {
         label={bcast?.ttsEngine ? (bcast.ttsEngine.local ? 'TTS·LOCAL' : 'TTS·CLOUD') : 'TTS·NONE'}
         tooltip={bcast?.ttsEngine?.label ?? 'No TTS engine'}
       />
-      {bcast && bcast.speakerGroups.length > 0 && (
+      {bcast?.speakerGroups && bcast.speakerGroups.length > 0 && (
         <DockPill
           color="var(--opus-cosmic)"
           label={`${bcast.speakerGroups.reduce((s, g) => s + g.targets.length, 0)} SPK`}

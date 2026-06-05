@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import './index.css';
 import { applyTheme, getStoredTheme } from './theme';
+import { ErrorBoundary } from './ErrorBoundary';
 
 // v0.9.11 — apply the user's saved theme BEFORE React mounts so there's no
 // "default theme flash" while the bundle hydrates. The same value is then
@@ -11,6 +12,8 @@ applyTheme(getStoredTheme());
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );
