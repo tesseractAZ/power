@@ -3,6 +3,33 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.12.1 — 2026-06-04
+
+**Fix: a configurable lead-in silence is now prepended to every broadcast/alarm announcement, so all speakers can sync up before the chime.**
+
+The audible announcements began with the chime the instant the stream opened —
+giving slower speakers no time to spin up. Two symptoms shared that one root
+cause: AirPlay streams take the longest to establish, so with zero lead-in the
+chime's start was **clipped** on every speaker, and the **slowest AirPlay
+device** finished negotiating only *after* the short clip had already ended.
+That last part is why the **Ecobee hallway thermostats** — valid, announce-
+capable Music Assistant AirPlay players, same `supported_features` + announce
+bit as the working HomePod/garage — appeared to miss announcements entirely:
+they weren't the wrong integration, they were just still completing their
+stream handshake when the audio was already over.
+
+- A configurable amount of **digital silence** (default **1 s**) is now
+  prepended to the front of the rendered announcement WAV, before the first
+  chime — on both the chime+TTS and chime-only paths. Every speaker, AirPlay
+  especially, now has time to establish its stream before any meaningful audio
+  plays.
+- New add-on option **`BROADCAST_LEAD_SILENCE_MS`** (default `1000`, range
+  `0`–`5000`). Set `0` to disable; raise toward `1500`–`2000` if a very slow
+  AirPlay speaker still clips.
+- The lead silence is **part of the rendered WAV and the render cache key**, so
+  changing the value re-renders the announcement audio automatically (no manual
+  cache clear). `RENDER_VERSION` bumped `1` → `2`.
+
 ## 0.12.0 — 2026-06-04
 
 **New: an AUDIBLE, escalating-priority alarm when the SHP2 backup pool runs down — plus a recharts console-warning fix.**

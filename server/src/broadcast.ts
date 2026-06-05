@@ -100,6 +100,10 @@ export interface BroadcastConfig {
   /** v0.9.70 — optional Piper voice override (e.g. "en_US-amy-medium").
    *  Empty → use Piper add-on's configured default voice. */
   wyomingVoice: string | null;
+  /** v0.12.1 — ms of silence prepended to each announcement so multi-room /
+   *  AirPlay speakers can sync up before the chime (fixes clipped starts and
+   *  slow AirPlay devices missing the announcement). 0 disables. */
+  leadSilenceMs: number;
 }
 
 export function loadBroadcastConfig(): BroadcastConfig {
@@ -118,7 +122,16 @@ export function loadBroadcastConfig(): BroadcastConfig {
     wyomingHost: process.env.BROADCAST_WYOMING_HOST || 'core-piper',
     wyomingPort: Number(process.env.BROADCAST_WYOMING_PORT) || 10200,
     wyomingVoice: emptyToNull(process.env.BROADCAST_WYOMING_VOICE),
+    leadSilenceMs: clampLeadSilenceMs(process.env.BROADCAST_LEAD_SILENCE_MS),
   };
+}
+
+/** v0.12.1 — lead-in silence (ms), default 1000, clamped to 0–5000. Non-numeric
+ *  or empty → the 1000 ms default. */
+function clampLeadSilenceMs(raw: string | undefined): number {
+  const n = raw == null || raw.trim() === '' ? 1000 : Number(raw);
+  if (!Number.isFinite(n)) return 1000;
+  return Math.max(0, Math.min(5000, Math.round(n)));
 }
 
 function emptyToNull(s: string | undefined): string | null {
@@ -329,6 +342,7 @@ export function startBroadcastMonitor(
       wyomingHost: cfg.wyomingHost,
       wyomingPort: cfg.wyomingPort,
       wyomingVoice: cfg.wyomingVoice ?? undefined,
+      leadSilenceMs: cfg.leadSilenceMs, // v0.12.1 — speakers sync before the chime
       log,
     });
     lastRender = {
@@ -509,6 +523,7 @@ export function startBroadcastMonitor(
         wyomingHost: cfg.wyomingHost,
         wyomingPort: cfg.wyomingPort,
         wyomingVoice: cfg.wyomingVoice ?? undefined,
+        leadSilenceMs: cfg.leadSilenceMs, // v0.12.1 — speakers sync before the chime
         log,
       });
       lastRender = {

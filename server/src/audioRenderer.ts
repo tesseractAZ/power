@@ -8,11 +8,24 @@
  *
  * Layout:
  *
- *     ┌───────────────────────┬────────────────────────────────────┐
- *     │ klaxon × N (default 2) │ piper TTS rendering of the message │
- *     └───────────────────────┴────────────────────────────────────┘
- *      ~1.4 s (yellow/green)   ~0.5–6 s depending on message length
- *      ~3.0 s (red), × N       (N = getChimeRepeat(), part of cache key)
+ *     ┌─────────────┬───────────────────────┬────────────────────────────────────┐
+ *     │ lead-in gap │ klaxon × N (default 2) │ piper TTS rendering of the message │
+ *     └─────────────┴───────────────────────┴────────────────────────────────────┘
+ *      ~1.0 s silent  ~1.4 s (yellow/green)   ~0.5–6 s depending on message length
+ *      (default)      ~3.0 s (red), × N       (N = getChimeRepeat(), part of cache key)
+ *
+ * Why the lead-in gap (v0.12.1):
+ *
+ *   - Multi-room players — AirPlay devices especially (e.g. Ecobee
+ *     thermostats exposed as Music Assistant AirPlay players) — take a
+ *     beat to establish the audio stream when an announcement starts. With
+ *     no lead-in, the first fraction of the chime is clipped on every
+ *     speaker, and the SLOWEST device can still be negotiating when a short
+ *     clip ends → it plays nothing at all and seems to "miss" the alert.
+ *   - Prepending leadSilenceMs of digital silence (zero-filled PCM, frame-
+ *     aligned to the WAV format) gives every speaker time to sync up before
+ *     any meaningful audio. It is part of the cache key, so changing the
+ *     amount re-renders automatically. leadSilenceMs = 0 disables it.
  *
  * Why combine into one WAV instead of two play_announcement calls:
  *
@@ -52,8 +65,9 @@ import { resolve, basename } from 'node:path';
 import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
 import { getChimeRepeat } from './alertSettings.js';
 
-/** Bump when the render pipeline changes in a way that invalidates the cache. */
-export const RENDER_VERSION = 1;
+/** Bump when the render pipeline changes in a way that invalidates the cache.
+ *  v2 (v0.12.1): the optional lead-in silence is now part of every render. */
+export const RENDER_VERSION = 2;
 
 export type AnnouncementLevel = 'red' | 'yellow' | 'green';
 
@@ -71,6 +85,13 @@ export interface RenderOptions {
   wyomingPort: number;
   /** Optional Piper voice override (e.g. "en_US-amy-medium"). */
   wyomingVoice?: string;
+  /**
+   * v0.12.1 — milliseconds of digital silence to prepend before the first
+   * chime, so multi-room/AirPlay speakers can establish their stream before
+   * any audible audio (fixes the clipped start + slow AirPlay devices missing
+   * the announcement). Part of the cache key. Default/undefined → 0 (no lead-in).
+   */
+  leadSilenceMs?: number;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
 }
@@ -104,6 +125,22 @@ const KLAXON_FOR_LEVEL: Record<AnnouncementLevel, string> = {
 };
 
 /**
+ * v0.12.1 — a frame-aligned, zero-filled PCM buffer of `leadMs` milliseconds of
+ * silence at the given WAV format. Zeros are mid-scale (true silence) for signed
+ * PCM, so no DSP is needed. Frame size = channels × bytes-per-sample, so the
+ * length is rounded to a whole number of frames — otherwise the downstream
+ * byte-splice would misalign every following sample. Returns an empty buffer for
+ * leadMs ≤ 0 or a degenerate format.
+ */
+function makeSilencePcm(header: WavHeader, leadMs: number): Buffer {
+  if (leadMs <= 0 || header.rate <= 0 || header.width <= 0 || header.channels <= 0) {
+    return Buffer.alloc(0);
+  }
+  const frames = Math.round((header.rate * leadMs) / 1000);
+  return Buffer.alloc(frames * header.channels * header.width);
+}
+
+/**
  * Render (or fetch from cache) the combined announcement WAV. Returns
  * the basename to serve via the panel's HTTP static route.
  */
@@ -115,11 +152,15 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // key — changing the repeat count must invalidate any previously cached file.
   const chimeRepeat = Math.max(1, getChimeRepeat());
 
-  // Cache key derivation: stable for the same (version, level, message, repeat).
-  // Null message hashes distinctly from empty string so klaxon-only and
-  // empty-spoken-message don't share a cache slot. The repeat count is part of
-  // the key so bumping it (or the settings change) busts the cache.
-  const keyInput = `v${RENDER_VERSION}|${level}|x${chimeRepeat}|${message ?? '<null>'}`;
+  // v0.12.1 — lead-in silence (ms) prepended before the first chime. Resolved
+  // once so it's part of both the rendered audio AND the cache key.
+  const leadMs = Math.max(0, Math.round(opts.leadSilenceMs ?? 0));
+
+  // Cache key derivation: stable for the same (version, level, message, repeat,
+  // lead silence). Null message hashes distinctly from empty string so klaxon-
+  // only and empty-spoken-message don't share a cache slot. The repeat count
+  // and lead-in are part of the key so changing either busts the cache.
+  const keyInput = `v${RENDER_VERSION}|${level}|x${chimeRepeat}|s${leadMs}|${message ?? '<null>'}`;
   const hash = createHash('sha1').update(keyInput).digest('hex').slice(0, 16);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
@@ -154,11 +195,14 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   if (!message || message.trim().length === 0) {
     try {
       await mkdir(cacheDir, { recursive: true });
+      // v0.12.1 — prepend the lead-in silence and repeat the chime. When
+      // leadMs == 0 && chimeRepeat == 1 this is byte-identical to the klaxon WAV.
+      const silence = makeSilencePcm(klaxonHeader, leadMs);
       let klaxonOnly = klaxonWav;
-      if (chimeRepeat > 1) {
+      if (silence.length > 0 || chimeRepeat > 1) {
         const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
-        const repeatedPcm = Buffer.concat(Array<Buffer>(chimeRepeat).fill(klaxonPcm));
-        klaxonOnly = pcmToWav(repeatedPcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
+        const pcm = Buffer.concat([silence, ...Array<Buffer>(chimeRepeat).fill(klaxonPcm)]);
+        klaxonOnly = pcmToWav(pcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
       }
       await writeFile(outPath, klaxonOnly);
       return { ok: true, filename, sizeBytes: klaxonOnly.length, fromCache: false };
@@ -195,12 +239,14 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     };
   }
 
-  // Concat PCM data, rebuild header. v0.11.0 — the chime plays chimeRepeat
-  // times (default 2) before the spoken TTS, so the operator hears the klaxon
-  // twice then the announcement.
+  // Concat PCM data, rebuild header. v0.12.1 — a lead-in silence is prepended
+  // so speakers can sync before audio; then (v0.11.0) the chime plays chimeRepeat
+  // times (default 2) before the spoken TTS, so the operator hears a brief gap,
+  // the klaxon twice, then the announcement.
   const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
   const ttsPcm = ttsResult.wav.subarray(ttsHeader.dataOffset, ttsHeader.dataOffset + ttsHeader.dataLength);
-  const combinedPcm = Buffer.concat([...Array<Buffer>(chimeRepeat).fill(klaxonPcm), ttsPcm]);
+  const silence = makeSilencePcm(klaxonHeader, leadMs);
+  const combinedPcm = Buffer.concat([silence, ...Array<Buffer>(chimeRepeat).fill(klaxonPcm), ttsPcm]);
   const combined = pcmToWav(combinedPcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
 
   // Write atomically (tmp → rename) so a half-written file never serves.
@@ -295,10 +341,16 @@ export async function pruneRenderCache(cacheDir: string, maxAgeMs: number, log: 
  * cache). Defaults to the live getChimeRepeat() so callers/tests that don't
  * pass it match what renderAnnouncement() would produce.
  */
-export function renderCacheKey(level: AnnouncementLevel, message: string | null, chimeRepeat?: number): string {
+export function renderCacheKey(
+  level: AnnouncementLevel,
+  message: string | null,
+  chimeRepeat?: number,
+  leadSilenceMs?: number,
+): string {
   const repeat = Math.max(1, chimeRepeat ?? getChimeRepeat());
+  const leadMs = Math.max(0, Math.round(leadSilenceMs ?? 0));
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|s${leadMs}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }

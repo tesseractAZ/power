@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.12.0"
+version: "0.12.1"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -101,6 +101,11 @@ options:
   # Pi's IP (http://192.168.x.x:8787) if mDNS is flaky on your network.
   BROADCAST_AUDIO_BASE: "http://homeassistant.local:8787"
   BROADCAST_VOLUME: 0.5
+  # v0.12.1 — milliseconds of silence prepended to every broadcast/alarm
+  # announcement so all speakers (AirPlay/Ecobee especially, which are slow
+  # to establish a stream) can sync up before the chime — fixes the clipped
+  # start and AirPlay devices that otherwise miss the beginning. 0 disables.
+  BROADCAST_LEAD_SILENCE_MS: 1000
   # Min alarm severity that triggers a broadcast.
   BROADCAST_MIN_SEVERITY: critical
   # Quiet hours suppress warning/info broadcasts. Critical always fires.
@@ -159,6 +164,7 @@ schema:
   BROADCAST_TARGETS: "str?"
   BROADCAST_AUDIO_BASE: "str?"
   BROADCAST_VOLUME: float
+  BROADCAST_LEAD_SILENCE_MS: int(0,5000)?
   BROADCAST_MIN_SEVERITY: list(critical|warning)
   BROADCAST_QUIET_HOURS: "str?"
   BROADCAST_WYOMING_HOST: "str?"

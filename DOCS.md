@@ -67,6 +67,7 @@ A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 | `BROADCAST_MIN_SEVERITY` | `critical` | Minimum alert severity that triggers a broadcast (`critical` or `warning`). |
 | `BROADCAST_QUIET_HOURS` | `22-06` | Local-hour window that suppresses warning/info broadcasts. Critical always fires. |
 | `BROADCAST_VOLUME` | `0.5` | Speaker volume (0.0–1.0) during the broadcast. |
+| `BROADCAST_LEAD_SILENCE_MS` | `1000` | Milliseconds of digital silence prepended to the front of every announcement WAV, before the first chime, so all speakers — AirPlay especially — finish spinning up their stream before any meaningful audio plays. `0` disables; raise toward `1500`–`2000` if a very slow AirPlay speaker still clips. Part of the render cache key, so changing it re-renders automatically. (v0.12.1) |
 | `BROADCAST_AUDIO_BASE` | `http://homeassistant.local:8787` | URL the speakers fetch the klaxon WAVs from. Override to your HA IP if mDNS is flaky. |
 | `BROADCAST_USE_MUSIC_ASSISTANT` | `auto` | `auto` / `music_assistant` / `media_player`. MA's `play_announcement` plays simultaneously across targets + handles volume restore atomically; `auto` uses it when installed. (v0.9.23) |
 | `BROADCAST_SONOS_RESTORE` | `true` | Snapshot Sonos state before broadcasting + restore after, so a music session resumes. |
@@ -674,6 +675,20 @@ Whichever you set, the add-on retries the call with the toggled
 separator on HTTP 500, then with no `language` argument at all.
 This is invisible — you don't need to know which engine wants which
 format.
+
+**Lead-in silence (v0.12.1).** Every announcement WAV begins with a short
+stretch of digital silence (`BROADCAST_LEAD_SILENCE_MS`, default **1000 ms**)
+before the first chime. Multi-room and AirPlay targets don't start playing the
+instant you call them — they have to negotiate and spin up the stream first,
+and AirPlay devices take the longest. With no lead-in, the chime's start gets
+**clipped** on every speaker, and the slowest AirPlay device can finish its
+handshake only *after* a short clip has already ended — so it appears to get no
+announcement at all. The leading silence gives every speaker time to sync up
+before any meaningful audio plays. Set `0` to disable; if a particularly slow
+AirPlay speaker (e.g. an Ecobee thermostat acting as a Music Assistant AirPlay
+player) still clips, raise it toward **1500–2000 ms**. The silence is baked
+into the rendered WAV and folded into the render cache key, so changing the
+value re-renders the audio automatically.
 
 **Debug + test endpoints:**
 

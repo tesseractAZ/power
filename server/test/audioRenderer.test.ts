@@ -281,6 +281,104 @@ test('pruneRenderCache — removes files older than maxAge, keeps fresh', async 
   }
 });
 
+// v0.12.1 — lead-in silence: prepended before the first chime so multi-room /
+// AirPlay speakers can sync before any audio. Frame-aligned zero PCM, folded
+// into the cache key.
+
+/** Bytes of silence for a given format + ms — mirrors makeSilencePcm(). */
+function silenceBytes(rate: number, width: number, channels: number, ms: number): number {
+  return Math.round((rate * ms) / 1000) * channels * width;
+}
+
+test('renderCacheKey — lead-in silence is part of the key', () => {
+  const base = renderCacheKey('red', 'hello', 2, 0);
+  assert.equal(base, renderCacheKey('red', 'hello', 2, 0), 'same lead → same key');
+  assert.notEqual(base, renderCacheKey('red', 'hello', 2, 1000), 'different lead → different key');
+  // default (undefined) lead resolves to 0, matching an explicit 0
+  assert.equal(renderCacheKey('red', 'hello', 2), renderCacheKey('red', 'hello', 2, 0));
+});
+
+test('renderAnnouncement — leadSilenceMs prepends frame-aligned silence (klaxon-only)', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  try {
+    writeKlaxon(klaxonDir, 'yellow-alert.wav', 22050, 2, 1, 1000);
+    const r = await renderAnnouncement({
+      level: 'yellow', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1, // would refuse — proves no Wyoming call
+      leadSilenceMs: 1000, log: () => {},
+    });
+    assert.equal(r.ok, true, `render failed: ${r.error}`);
+    const N = getChimeRepeat();
+    const sil = silenceBytes(22050, 2, 1, 1000); // 22050 frames × 2 bytes = 44100
+    assert.equal(r.sizeBytes, 44 + sil + N * 1000);
+    // The prepended region must be actual digital silence (all zeros).
+    const wav = readFileSync(resolve(cacheDir, r.filename!));
+    const h = parseWavHeader(wav);
+    assert.equal(h.ok, true);
+    assert.equal(h.dataLength, sil + N * 1000);
+    const lead = wav.subarray(h.dataOffset, h.dataOffset + sil);
+    assert.ok(lead.every((b) => b === 0), 'lead-in region should be all-zero PCM');
+  } finally {
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test('renderAnnouncement — leadSilenceMs prepends silence ahead of klaxon+TTS', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  writeKlaxon(klaxonDir, 'red-alert.wav', 22050, 2, 1, 500);
+  const ttsPcm = Buffer.alloc(800);
+  for (let i = 0; i < 800; i++) ttsPcm[i] = ((i * 11) & 0xff) || 1; // non-zero so the zero-check is meaningful
+  const mock = await startMockWyoming(22050, 2, 1, ttsPcm);
+  try {
+    const r = await renderAnnouncement({
+      level: 'red', message: 'hello', klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: mock.port,
+      leadSilenceMs: 500, log: () => {},
+    });
+    assert.equal(r.ok, true, `render failed: ${r.error}`);
+    const N = getChimeRepeat();
+    const sil = silenceBytes(22050, 2, 1, 500); // 11025 frames × 2 = 22050 bytes
+    assert.equal(r.sizeBytes, 44 + sil + N * 500 + 800);
+    const wav = readFileSync(resolve(cacheDir, r.filename!));
+    const h = parseWavHeader(wav);
+    assert.equal(h.dataLength, sil + N * 500 + 800);
+    const lead = wav.subarray(h.dataOffset, h.dataOffset + sil);
+    assert.ok(lead.every((b) => b === 0), 'lead-in region should be all-zero PCM');
+    // The klaxon+TTS region following the silence must carry signal (not all zero).
+    const body = wav.subarray(h.dataOffset + sil);
+    assert.ok(body.some((b) => b !== 0), 'klaxon+TTS should follow the silence');
+  } finally {
+    mock.server.close();
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test('renderAnnouncement — leadSilenceMs 0 vs undefined are the same cache file', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  try {
+    writeKlaxon(klaxonDir, 'red-alert.wav', 22050, 2, 1, 300);
+    const r0 = await renderAnnouncement({
+      level: 'red', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1, leadSilenceMs: 0, log: () => {},
+    });
+    const rU = await renderAnnouncement({
+      level: 'red', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1, log: () => {}, // leadSilenceMs undefined → 0
+    });
+    assert.equal(r0.ok, true);
+    assert.equal(rU.ok, true);
+    assert.equal(r0.filename, rU.filename, 'leadSilenceMs:0 and undefined must share a cache slot');
+  } finally {
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
 test('cachedRenderPath — strict filename format check (no path traversal)', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'cache-'));
   try {
