@@ -50,6 +50,20 @@ const LEARNING_RATE = 0.05;
 const L2 = 0.001;
 /** Weight given to "failed" labels (vs "ack"=1.0, "dismiss"=1.0). */
 const FAILED_LABEL_WEIGHT = 2.0;
+/**
+ * v0.13.2 — Online bias is clamped to within this band of the on-disk
+ * BASELINE bias. Defense-in-depth on top of v0.13.0's degenerate-feature
+ * guard: even a legitimate stream of one-sided y=1 labels (every alert
+ * ack'd, never dismissed) drives `bias -= η·(p−1)` monotonically upward.
+ * Bounding it to ±1.0 of baseline keeps the online model from walking its
+ * intercept unboundedly while still allowing real, data-driven adaptation
+ * (a logit shift of 1.0 already moves a 50% prediction to ~73%). The weight
+ * vector and the inference path are untouched — we only bound the bias.
+ */
+const BIAS_CLAMP = 1.0;
+/** In-code fallback baseline bias — mirrors ml.ts's DEFAULT_MODEL.bias. Used
+ *  only when no on-disk baseline model exists to read the bias from. */
+const DEFAULT_BASELINE_BIAS = -2.5;
 
 /**
  * Build the normalized 6-dim LR feature vector for an outcome.
@@ -167,6 +181,22 @@ function loadCurrent(): LrModel {
   };
 }
 
+/**
+ * v0.13.2 — Read the BASELINE bias (the on-disk, never-online-updated base
+ * model at MODEL_PATH). This is the anchor for the bias clamp — NOT the
+ * shadow, which may already carry accumulated online drift. Falls back to
+ * the in-code default when the base model file is absent or unreadable.
+ */
+function loadBaselineBias(): number {
+  if (existsSync(MODEL_PATH)) {
+    try {
+      const base = JSON.parse(readFileSync(MODEL_PATH, 'utf-8')) as LrModel;
+      if (typeof base.bias === 'number' && Number.isFinite(base.bias)) return base.bias;
+    } catch { /* fall through to default */ }
+  }
+  return DEFAULT_BASELINE_BIAS;
+}
+
 /** Persist the shadow model after each SGD step. */
 function saveShadow(model: LrModel): void {
   mkdirSync(dirname(SHADOW_PATH), { recursive: true });
@@ -242,7 +272,15 @@ export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) =
     newWeights[name] = w - LEARNING_RATE * grad;
   }
   // Bias update (no regularization on bias).
-  const newBias = model.bias - LEARNING_RATE * error;
+  // v0.13.2 — clamp the post-step bias to within ±BIAS_CLAMP of the on-disk
+  // baseline bias (defense-in-depth: a stream of one-sided y=1 labels can't
+  // walk the intercept unboundedly). The weights above are untouched.
+  const baselineBias = loadBaselineBias();
+  const rawBias = model.bias - LEARNING_RATE * error;
+  const newBias = Math.min(
+    baselineBias + BIAS_CLAMP,
+    Math.max(baselineBias - BIAS_CLAMP, rawBias),
+  );
 
   const updated: LrModel = {
     ...model,

@@ -3,6 +3,32 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.13.2 — 2026-06-07
+
+**Alert hygiene & self-tuning fixes from the 7-day audit (batch 3 of 4).**
+
+- **Auto-demote can finally fire.** Short-clear telemetry only counted alerts that
+  outlived the 60 s debounce window, so the most transient flaps (the ones that
+  *should* trigger demotion) were never counted — structurally capping every noisy
+  family below the 0.8 short-clear fraction needed to auto-demote. Every cleared rise
+  is now accounted; a chronically-flapping family demotes itself within hours.
+- **Peer-outlier SoC alerts stop flapping** (they fired 1103× in the audit window,
+  clearing in 2–5 min on normal parallel-pack rebalancing). The learned peer-SoC floor
+  is raised 5% → 8%, the MAD-zero shortcut no longer forces a bare floor-cross straight
+  to a warning, and the learned peer path now requires ≥3 consecutive cycles (~60 s
+  sustained) before emitting — the hysteresis it previously lacked. The baseline
+  dpu-imbalance / vdiff families (v0.9.80 `sustained` gate) are untouched, so real
+  imbalance still surfaces.
+- **Alert "time-to-action" is honest now.** Continuously-active off-grid states
+  (offline, grid-offgrid) were reporting 9–13 *days* of "response time" because the
+  fired-at timestamp never refreshed. Those persistent families now return `null`
+  instead of a meaningless number.
+- **Online-model bias is bounded** to ±1.0 of the on-disk baseline — defense-in-depth
+  on top of v0.13.0's degenerate-feature guard, so one-sided labels can never walk the
+  bias unboundedly.
+- Tests: short-clear accounting, peer-SoC floor/hysteresis, continuously-active
+  time-to-action null, online-bias clamp.
+
 ## 0.13.1 — 2026-06-07
 
 **Forecasting & solar-data fixes from the 7-day audit (batch 2 of 4).**

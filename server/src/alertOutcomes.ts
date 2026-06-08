@@ -151,6 +151,25 @@ export interface AlertFamilyStats {
  * thin extra `-N` (pack number) at the very end stay in the family
  * because it has no uppercase, but stripped device serials drop out.
  */
+/**
+ * v0.13.2 — Families whose underlying condition is CONTINUOUSLY-ACTIVE /
+ * persistent rather than a transient event. For these, `alertFiredAt` is
+ * stamped once at the first-ever fire and never refreshed, so
+ * `ts - alertFiredAt` measures how long the (still-true) condition has
+ * EXISTED, not how quickly the operator responded. The 7-day audit (P2-6)
+ * saw `medianTimeToActionMs` of 9.44 days for `offline` and 13.18 days for
+ * `grid-offgrid` — pure condition-age, not response latency. We exclude
+ * these from the time-to-action metric (return null) rather than report a
+ * meaningless number; null is the honest answer for a permanently-true
+ * condition. Transient families (soc-low, ems-volt, pack-hot, …) re-arm on
+ * each fresh fire, so their alertFiredAt tracks the real event start and the
+ * metric stays meaningful.
+ */
+const PERSISTENT_FAMILIES = new Set<string>([
+  'offline',
+  'grid-offgrid',
+]);
+
 export function familyOf(alertId: string): string {
   const parts = alertId.split('-');
   const familyParts: string[] = [];
@@ -193,7 +212,12 @@ export function computeFamilyStats(): AlertFamilyStats[] {
     const decidedCount = ack + failed + dismiss;
     const precision = decidedCount > 0 ? realCount / decidedCount : null;
     ttas.sort((a, b) => a - b);
-    const medianTTA = ttas.length ? ttas[Math.floor(ttas.length / 2)] : null;
+    // v0.13.2 — null out time-to-action for continuously-active families:
+    // their alertFiredAt is the condition's first-ever fire, so the delta is
+    // condition-age, not operator response time (audit P2-6).
+    const medianTTA = PERSISTENT_FAMILIES.has(family)
+      ? null
+      : (ttas.length ? ttas[Math.floor(ttas.length / 2)] : null);
     out.push({
       family,
       total: arr.length,

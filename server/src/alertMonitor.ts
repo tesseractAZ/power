@@ -92,7 +92,7 @@ export interface AlertActionStats {
   warningDemotedToInfo: boolean;
   /** v0.9.3 — chronic-noise silencing (alert rises a lot AND user almost never clears it). */
   chronicNoiseSilenced: boolean;
-  /** v0.9.3 — count of times the alert cleared but our debounce window meant we treated it as a "rise that never cleared" (excluded from shortClearsCount). */
+  /** v0.9.3 — count of "longActive" clears: the alert stayed alive past CHRONIC_NOISE_LONG_MS (4h) before clearing, i.e. the user effectively let it persist. Drives the chronic-noise rule. (v0.13.2 — every clear is now counted in telemetry regardless of the debounce window; sub-debounce flaps land in shortClearsCount, not here.) */
   neverClearedCount: number;
   lastSeenAt: number | null;
 }
@@ -652,13 +652,23 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       if (t.notified && cfg.notifyResolved && qualifies(t.alert.severity, cfg.minSeverity)) {
         await dispatch(t.alert, 'resolved');
       }
+      // v0.13.2 — account EVERY cleared rise in telemetry, not just clears that
+      // outlived the debounce window. The old code only called recordClear when
+      // `duration >= DEBOUNCE_MS`, so a sub-60s flap bumped riseCount (at first
+      // fire) but NEVER incremented shortClearsCount — structurally capping the
+      // short-clear fraction below DEMOTE_WARN_SHORT_FRAC and making auto-demote
+      // unreachable for the very families that flap fastest. A <60s clear is the
+      // MOST transient outcome and is exactly what shortClear should capture.
+      // The visible-history push stays gated by duration (a 5s blip isn't worth
+      // surfacing in the cleared-alert UI), but telemetry counts the clear.
       if (duration >= DEBOUNCE_MS) {
         clearedLog.unshift({ alert: t.alert, raisedAt: t.firstSeen, clearedAt: now, durationMs: duration });
         if (clearedLog.length > 200) clearedLog.pop();
-        // v0.9.59 — records shortClear / longActive events into the family rollup
-        // and appends them to the persisted telemetry log.
-        recordClear(t.alert, duration, now);
       }
+      // v0.9.59 — records shortClear / longActive events into the family rollup
+      // and appends them to the persisted telemetry log.
+      // v0.13.2 — moved out of the debounce-gated block (see above).
+      recordClear(t.alert, duration, now);
       tracked.delete(id);
     }
 

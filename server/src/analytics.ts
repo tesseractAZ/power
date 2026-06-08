@@ -91,15 +91,64 @@ const PEER_METRICS: PeerMetric[] = [
     key: 'soc',
     label: 'state of charge',
     category: 'Battery',
-    floor: 5,
+    // v0.13.2 — raised 5 → 8. Normal parallel-pack rebalancing scatters
+    // SoC by 5-6% during/after a charge or discharge cycle; the old 5%
+    // floor caught that routine spread as an "outlier", which (combined
+    // with the MAD-zero shortcut below) flapped 1103× over a 7-day audit,
+    // clearing in 2-9 min each time. 8% sits above normal rebalance noise.
+    floor: 8,
     get: (pk) => pk.soc,
     fmt: (v) => `${Math.round(v)}%`,
   },
 ];
 
+/**
+ * v0.13.2 — hysteresis for the learned peer-outlier path.
+ *
+ * The learned path had NO debounce/hysteresis of its own (unlike the
+ * baseline dpu-imbalance/vdiff families, which use the v0.9.80 'sustained'
+ * gate). Combined with the MAD-zero shortcut, a single cycle past the floor
+ * with zero peer scatter fired a warning that cleared minutes later — the
+ * peer-SoC family flapped 1103× over a 7-day audit. We now require the same
+ * outlier to persist for >=3 consecutive eval cycles (~60s at the 20s cadence)
+ * before EMITTING. A key that misses a cycle resets to zero, so a normal
+ * rebalance blip never accumulates to the emit threshold.
+ *
+ * Keyed per (metric.key, sn, packNum). State lives at module scope because
+ * computeLearnedAlerts is called fresh each eval cycle.
+ */
+const PEER_HIT_EMIT_MIN = 3;
+const peerHitCounts = new Map<string, number>();
+
+/** v0.13.2 — exported for tests. The smallest unit of the hysteresis gate:
+ * bump the consecutive-hit count for `key` and report whether it has reached
+ * the emit threshold (>=3 consecutive cycles). Callers must also call
+ * `prunePeerHitCounts` once per cycle to reset keys that did NOT hit. */
+export function bumpPeerHit(key: string): { count: number; emit: boolean } {
+  const count = (peerHitCounts.get(key) ?? 0) + 1;
+  peerHitCounts.set(key, count);
+  return { count, emit: count >= PEER_HIT_EMIT_MIN };
+}
+
+/** v0.13.2 — drop any peer-hit key NOT in `seen` this cycle, so a condition
+ * that lapses for even one cycle has to re-earn its >=3 consecutive hits. */
+export function prunePeerHitCounts(seen: Set<string>): void {
+  for (const key of peerHitCounts.keys()) {
+    if (!seen.has(key)) peerHitCounts.delete(key);
+  }
+}
+
+/** v0.13.2 — test seam: clear all hysteresis state between test cases. */
+export function _resetPeerHitCounts(): void {
+  peerHitCounts.clear();
+}
+
 /** Phase 1 learned alerts: per-DPU pack peer comparison. */
 export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): Alert[] {
   const out: Alert[] = [];
+  // v0.13.2 — keys that crossed the floor+z gate THIS cycle. Used to advance
+  // the consecutive-hit hysteresis and to prune lapsed keys afterward.
+  const seenHits = new Set<string>();
   const dpus = Object.values(devices).filter(
     (d) => d.online && d.projection?.kind === 'dpu',
   ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
@@ -123,9 +172,25 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         if (absDev < metric.floor) continue; // within normal scatter — ignore
 
         // Modified z-score; when MAD is ~0 (siblings identical) a past-floor
-        // deviation is itself the signal, so treat it as at least Z_WARN.
-        const z = m > 0 ? Math.abs((0.6745 * (v - med)) / m) : Z_WARN;
+        // deviation is itself the signal.
+        // v0.13.2 — MAD-zero fallback Z_WARN → Z_INFO. With zero peer scatter,
+        // ANY deviation past the floor was forced to z=Z_WARN=5 and emitted as
+        // a *warning*; a bare floor-cross with no sibling spread isn't strong
+        // enough for warning. Starting it at Z_INFO makes it surface as INFO
+        // (still visible) until real scatter pushes the true z-score up.
+        const z = m > 0 ? Math.abs((0.6745 * (v - med)) / m) : Z_INFO;
         if (z < Z_INFO) continue;
+
+        // v0.13.2 — hysteresis: this pack crossed the gate, but the learned
+        // path lacks the baseline 'sustained' protection. Require >=3
+        // consecutive cycles before emitting so normal rebalance transients
+        // (which clear within a cycle or two) never reach the user. The
+        // baseline dpu-imbalance/vdiff families are untouched — this gate
+        // lives only on the peer-outlier path.
+        const hitKey = `${metric.key}-${d.sn}-${pk.num}`;
+        seenHits.add(hitKey);
+        const gate = bumpPeerHit(hitKey);
+        if (!gate.emit) continue;
 
         const severity = z >= Z_WARN ? 'warning' : 'info';
         const dir = v > med ? 'higher than' : 'lower than';
@@ -150,6 +215,9 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
       }
     }
   }
+  // v0.13.2 — reset hysteresis for any (metric,sn,pack) that did NOT cross the
+  // gate this cycle, so a lapsed condition must re-earn its 3 consecutive hits.
+  prunePeerHitCounts(seenHits);
   return out;
 }
 
@@ -605,7 +673,8 @@ export interface DayForecast {
   // Sums to typicalPvWhPerDay. Exposed so the forecast backtest can use a diurnal
   // baseline (night≈0, noon≈peak) via diurnalBaselinePredictor() instead of a flat
   // typicalPvWhPerDay/24 — the flat line scored R²≈0 against real diurnal PV (P3-4).
-  typicalPvCurveWhPerHour: number[];
+  // Optional: getDayForecast always sets it; consumers fall back to a flat curve.
+  typicalPvCurveWhPerHour?: number[];
   minProjectedSoc: number | null;
   minProjectedSocTs: number | null;
   solarModel: SolarResponseModel;       // fleet-wide learned response
@@ -3513,6 +3582,16 @@ export interface InverterStandby {
   samples: number;
 }
 
+/**
+ * v0.13.1 — median register-consistency ratio (W vs V·A), capped at 100%.
+ * The per-sample gate in ratioSeries already drops >100.5%, but the median can
+ * still land at 100.x from rounding — and a >100% headline reads as a broken
+ * "efficiency". Returns null for an empty input. Pure + exported for testing.
+ */
+export function cappedMedianEffPct(effs: number[]): number | null {
+  return effs.length ? Math.min(100, median(effs)) : null;
+}
+
 export interface EquipmentHealth {
   generatedAt: number;
   mpptStrings: MpptString[];
@@ -3606,13 +3685,13 @@ export function computeEquipmentHealth(
       const recent = series.filter((p) => p.ts >= now - RECENT_MS).map((p) => p.eff);
       const earliestCount = Math.max(10, Math.floor(series.length * 0.3));
       const baseline = series.slice(0, earliestCount).map((p) => p.eff);
-      // v0.13.1 — cap the rendered median at 100%. Even with the per-sample
-      // 100.5 gate above, the median can land at 100.x from rounding; this is a
-      // register-consistency ratio, so a >100% headline reads as broken. The
-      // drift (recent − baseline) is computed from the CAPPED medians so the
-      // alert threshold (-3pp) still keys off a self-consistent series.
-      const recentEff = recent.length ? Math.min(100, median(recent)) : null;
-      const baselineEff = baseline.length ? Math.min(100, median(baseline)) : null;
+      // v0.13.1 — cap the rendered median at 100% (see cappedMedianEffPct).
+      // Even with the per-sample 100.5 gate above, the median can land at 100.x
+      // from rounding; this is a register-consistency ratio, so a >100% headline
+      // reads as broken. The drift (recent − baseline) is computed from the
+      // CAPPED medians so the alert threshold (-3pp) keys off a consistent series.
+      const recentEff = cappedMedianEffPct(recent);
+      const baselineEff = cappedMedianEffPct(baseline);
       mpptStrings.push({
         sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), string: name,
         recentEffPct: recentEff != null ? round2(recentEff) : null,
