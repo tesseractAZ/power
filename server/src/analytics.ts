@@ -1214,7 +1214,13 @@ const DEGRADE_REPORT_TTL_MS = 30 * 60 * 1000;
 // is byte-for-byte identical (no rows beyond 30 days exist to regress).
 const DEGRADE_REPORT_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;   // = recorder RETAIN_MS
 const DEGRADE_BUCKET_SEC = 6 * 3600;                          // 6-hour buckets — de-noise SoH jitter
-const EOL_MIN_SPAN_MS = 7 * 24 * 60 * 60 * 1000;              // ≥1 week of data before dating an EOL
+// v0.14.2 — require ≥3 weeks of trend before DATING a multi-year EOL. A 17-day
+// window produced a false-precise "0.9 yr / EOL 2027" projection from a steep
+// 19.6 %/yr fade at r² 0.46 — extrapolating a multi-year trend from half a month.
+// Below this span the pack stays in "learning" (fade rate + Arrhenius still
+// shown, just no dated EOL) until enough history accrues to date it credibly.
+const EOL_MIN_SPAN_DAYS = 21;
+const EOL_MIN_SPAN_MS = EOL_MIN_SPAN_DAYS * 24 * 60 * 60 * 1000;
 const EOL_MIN_R2 = 0.3;                                       // trend must explain ≥30% of variance
 const EOL_MAX_YEARS = 40;                                     // beyond this, "EOL not in sight"
 // v0.9.58 — VERIFIED CORRECT (looks suspicious but isn't):
@@ -1486,7 +1492,7 @@ function analysePack(
       kalmanYearsToEol,
       kalmanEolDate,
       summary:
-        `Gathering data — ${spanDays} day(s) recorded; a dated end-of-life projection needs a longer, cleaner SoH trend (have R² ${fit ? fit.r2.toFixed(2) : '—'}, need ≥ ${EOL_MIN_R2}).` +
+        `Gathering data — ${spanDays} day(s) recorded; a dated end-of-life projection needs ≥ ${EOL_MIN_SPAN_DAYS} days of trend at R² ≥ ${EOL_MIN_R2} (have ${spanDays} d, R² ${fit ? fit.r2.toFixed(2) : '—'}).` +
         (avgPackTempC != null
           ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs a 25 °C reference` : ''}.`
           : ''),
@@ -3641,7 +3647,13 @@ export function computeSelfConsumption(
  * =================================================================== */
 
 const THERMAL_EVENT_TTL_MS = 30 * 60 * 1000;
-const THERMAL_EVENT_HISTORY_MS = 400 * 24 * 60 * 60 * 1000;
+// v0.14.2 — cap at the recorder's 30-day retention (recorder.ts RETAIN_MS), like
+// DEGRADE_REPORT_HISTORY_MS. The samples table is pruned to 30 days, so the old
+// 400-day window scanned ~370 days of empty index range per pack every cache
+// cycle on the synchronous SQLite store — the same dead-range scan the
+// degradation path was fixed for in v0.9.80. Output is identical (no rows older
+// than 30 days exist to count).
+const THERMAL_EVENT_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const THERMAL_THRESHOLD_C_INFO = (96 - 32) / 1.8;   // ≈ 35.6 °C
 const THERMAL_THRESHOLD_C_WARN = (113 - 32) / 1.8;  // 45 °C
 const THERMAL_THRESHOLD_C_CRIT = (131 - 32) / 1.8;  // 55 °C
