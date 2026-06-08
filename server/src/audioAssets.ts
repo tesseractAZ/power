@@ -280,10 +280,89 @@ function boatswainSegments(): { segs: Segment[]; totalSec: number } {
   };
 }
 
+/* ─── v0.13.0/power-plant pack — industrial annunciator tones ──────────
+ *
+ * The "airport" pack above (melodic struck-bell arpeggios) is friendly but
+ * does NOT follow process/power-plant alarm conventions, where priority is
+ * conveyed by CADENCE as much as pitch (ISA-18.2 / EEMUA-191): a continuous
+ * fast warble = emergency, a slow pulse = caution, a single soft chime =
+ * advisory. This pack implements that 3-tier annunciator language so the
+ * operator can identify severity by ear without looking. Selected via the
+ * BROADCAST_CHIME_PACK option (default "powerplant").
+ *
+ * Mapping to the existing klaxon levels (red/yellow/green from
+ * klaxonLevelForPriority): red = Critical/High emergency, yellow = Medium
+ * caution, green = Low advisory / return-to-normal.
+ */
+
+/** Critical/High — general-emergency electronic siren: fast hi/lo square
+ *  warble (~4 alternations/sec), penetrating, ~2.6 s. "Drop everything." */
+function ppRedAlertSegments(): { segs: Segment[]; totalSec: number } {
+  const segs: Segment[] = [];
+  const hi = 880, lo = 587, seg = 0.12;
+  const n = Math.round(2.64 / seg);
+  for (let i = 0; i < n; i++) {
+    segs.push({
+      startSec: i * seg,
+      spec: { kind: 'square', freq: i % 2 ? lo : hi, durSec: seg + 0.01, gain: 0.45, attackSec: 0.004, releaseSec: 0.004 },
+    });
+  }
+  return { segs, totalSec: n * seg + 0.12 };
+}
+
+/** Medium — caution: slow intermittent single tone (~1.5 Hz), softer sine,
+ *  620 Hz, 3 beeps, ~1.9 s. Clearly a notice, not an emergency. */
+function ppYellowAlertSegments(): { segs: Segment[]; totalSec: number } {
+  const segs: Segment[] = [];
+  const on = 0.20, period = 0.62, n = 3;
+  for (let i = 0; i < n; i++) {
+    segs.push({ startSec: i * period, spec: { kind: 'sine', freq: 620, durSec: on, gain: 0.5, attackSec: 0.01, releaseSec: 0.05 } });
+  }
+  return { segs, totalSec: (n - 1) * period + on + 0.4 };
+}
+
+/** Low / return-to-normal — advisory: soft descending bell double-chime
+ *  (~660→554 Hz minor third), gentle, ~1.0 s. Subdued "for awareness". */
+function ppAllClearSegments(): { segs: Segment[]; totalSec: number } {
+  return {
+    segs: [
+      { startSec: 0.00, spec: { kind: 'bell', freq: 659.25, durSec: 0.32, gain: 0.4, decaySec: 0.4, harmonics: [1, 0.4, 0.15] } },
+      { startSec: 0.26, spec: { kind: 'bell', freq: 554.37, durSec: 0.55, gain: 0.4, decaySec: 0.55, harmonics: [1, 0.4, 0.15] } },
+    ],
+    totalSec: 1.0,
+  };
+}
+
 /* ─── public API ──────────────────────────────────────────────────── */
 
 export const AUDIO_ASSETS = ['red-alert', 'yellow-alert', 'all-clear', 'boatswain'] as const;
 export type AudioAssetId = (typeof AUDIO_ASSETS)[number];
+
+/** Chime sound packs. "powerplant" (default) = ISA-18.2 industrial annunciator
+ *  cadences; "airport" = the v0.9.70 melodic struck-bell PA chimes. */
+export type ChimePack = 'powerplant' | 'airport';
+
+/** Resolve the active pack from the BROADCAST_CHIME_PACK option (default powerplant). */
+export function selectedChimePack(): ChimePack {
+  return process.env.BROADCAST_CHIME_PACK === 'airport' ? 'airport' : 'powerplant';
+}
+
+/** Per-pack synthesis. Same asset ids/filenames; only the waveform differs, so
+ *  the broadcast/render pipeline is unchanged — switching packs just re-synthesizes. */
+const CHIME_PACKS: Record<ChimePack, Record<AudioAssetId, () => { segs: Segment[]; totalSec: number }>> = {
+  airport: {
+    'red-alert': redAlertSegments,
+    'yellow-alert': yellowAlertSegments,
+    'all-clear': allClearSegments,
+    'boatswain': boatswainSegments,
+  },
+  powerplant: {
+    'red-alert': ppRedAlertSegments,
+    'yellow-alert': ppYellowAlertSegments,
+    'all-clear': ppAllClearSegments,
+    'boatswain': boatswainSegments,
+  },
+};
 
 /**
  * v0.9.70 — bumped from 1 (the implicit version of all v0.9.18-v0.9.69
@@ -297,33 +376,31 @@ export type AudioAssetId = (typeof AUDIO_ASSETS)[number];
  * harmonics, timings). The cache is per-version so old WAVs are
  * replaced atomically rather than coexisting.
  */
-export const AUDIO_ASSETS_VERSION = 2;
+export const AUDIO_ASSETS_VERSION = 3;
 
 /** Write all assets to `outDir`. Regenerates if the on-disk version is stale. */
 export async function generateAudioAssets(outDir: string, log: (m: string) => void): Promise<void> {
   if (!existsSync(outDir)) {
     await mkdir(outDir, { recursive: true });
   }
-  // v0.9.70 — version-gated regeneration. Read the marker; if it doesn't
-  // match, treat every existing WAV as stale.
+  // v0.9.70 — version-gated regeneration. v0.13.0 — the marker now also carries
+  // the active chime PACK (e.g. "3:powerplant"), so switching BROADCAST_CHIME_PACK
+  // regenerates the WAVs on next boot just like a synthesis-param bump.
+  const pack = selectedChimePack();
+  const wantMarker = `${AUDIO_ASSETS_VERSION}:${pack}`;
   const versionMarker = resolve(outDir, '.assets-version');
-  let onDiskVersion = 0;
+  let onDiskMarker = '';
   if (existsSync(versionMarker)) {
     try {
       const { readFile } = await import('node:fs/promises');
-      onDiskVersion = parseInt((await readFile(versionMarker, 'utf8')).trim(), 10) || 0;
-    } catch { /* ignore — treat as version 0 */ }
+      onDiskMarker = (await readFile(versionMarker, 'utf8')).trim();
+    } catch { /* ignore — treat as empty (stale) */ }
   }
-  const stale = onDiskVersion !== AUDIO_ASSETS_VERSION;
-  if (stale && onDiskVersion > 0) {
-    log(`audioAssets: version ${onDiskVersion} on disk, regenerating for v${AUDIO_ASSETS_VERSION}`);
+  const stale = onDiskMarker !== wantMarker;
+  if (stale && onDiskMarker) {
+    log(`audioAssets: marker "${onDiskMarker}" on disk, regenerating for "${wantMarker}"`);
   }
-  const defs: Record<AudioAssetId, () => { segs: Segment[]; totalSec: number }> = {
-    'red-alert':    redAlertSegments,
-    'yellow-alert': yellowAlertSegments,
-    'all-clear':    allClearSegments,
-    'boatswain':    boatswainSegments,
-  };
+  const defs = CHIME_PACKS[pack];
   for (const id of AUDIO_ASSETS) {
     const path = resolve(outDir, `${id}.wav`);
     if (!stale && existsSync(path)) continue;
@@ -332,13 +409,10 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
     const wav = buildWavBuffer(samples);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, wav);
-    log(`audioAssets: wrote ${id}.wav (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
+    log(`audioAssets: wrote ${id}.wav [${pack}] (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
   }
-  if (stale) {
-    await writeFile(versionMarker, String(AUDIO_ASSETS_VERSION) + '\n');
-  } else if (!existsSync(versionMarker)) {
-    // First-ever generation — record version so future bumps detect change.
-    await writeFile(versionMarker, String(AUDIO_ASSETS_VERSION) + '\n');
+  if (stale || !existsSync(versionMarker)) {
+    await writeFile(versionMarker, wantMarker + '\n');
   }
 }
 

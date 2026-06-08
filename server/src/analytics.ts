@@ -1897,18 +1897,20 @@ export function computeRoundTripEfficiency(
     }
   }
 
-  // v0.13.3 — RTE per-day was re-slicing the pre-windowed [fullStart,fullEnd]
-  // series with integrateWh and gating on absolute energy (chargedKwh>0.5),
-  // not coverage. On a partial-boot day (~49 min of data) the un-anchored slice
-  // produced a charge/discharge pair whose ratio landed at a physically
-  // impossible 130.8% — and the aggregate disagreed with self-consumption
-  // (discharge 298.88 vs 336.25 kWh) because the two engines integrated
-  // differently. Fix: anchor each day's energy with windowedEnergyWh (the exact
-  // helper self-consumption uses — lookback-anchored start + per-day memo), and
-  // gate each day on integrateWh COVERAGE (<~50% of the day → null + excluded),
-  // not on an absolute kWh floor. This unifies the two engines and keeps a
-  // partial-boot day out of the aggregate, landing RTE in the credible ~93-96%
-  // band. The pre-fetched packSeries is reused only for the coverage check.
+  // v0.13.3 — RTE per-day gated on ABSOLUTE energy (chargedKwh>0.5), not on
+  // coverage. On a partial-boot day (~49 min of data) a residual sample paired
+  // with a tiny charge integral produced a discharge/charge ratio of a
+  // physically impossible 130.8%, which then poisoned the aggregate so it
+  // disagreed with self-consumption (discharge 298.88 vs 336.25 kWh). Fix: gate
+  // each day on integrateWh COVERAGE — the fraction of the day we actually had
+  // samples to integrate. The pre-fetched packSeries already anchors interior
+  // midnights (integrateWh's lastBefore sample lives inside the [fullStart,
+  // fullEnd] slice), so the only day the boot partial can skew is the one whose
+  // coverage is <50%; excluding it from per-day efficiencyPct AND from the
+  // aggregate totals lands RTE back in the credible ~93-96% band and brings it
+  // into agreement with self-consumption (which integrates the same packs over
+  // the same days). The coverage of the charge series stands in for the pair —
+  // in/out share the DPU poll cadence, so they gain/lose coverage together.
   const RTE_MIN_DAY_COVERAGE = 0.5; // need ≥50% of the day measured to trust the ratio
   const perDay: RoundTripDay[] = [];
   let totalCharged = 0;
@@ -1919,27 +1921,19 @@ export function computeRoundTripEfficiency(
     const dayEnd = i === 0 ? now : dayStart + 86_400_000;
     let chargedKwh = 0;
     let dischargedKwh = 0;
-    // Coverage gate: fraction of the day for which integrateWh actually had
-    // samples to integrate, averaged across packs (charge series — discharge
-    // shares the same poll cadence). A boot/partial day fails this even when a
-    // residual sample would otherwise yield a non-zero (and skewed) ratio.
     let coverageMsSum = 0;
     const dayMs = Math.max(1, dayEnd - dayStart);
     for (const d of homeDpus) {
-      // Anchored, memoized per-day energy — identical integration path to
-      // self-consumption, so the engines agree.
-      const metricsNeeded: string[] = [];
       for (const pk of d.projection.packs) {
-        metricsNeeded.push(`pack${pk.num}_in`, `pack${pk.num}_out`);
-      }
-      const wh = windowedEnergyWh(recorder, d.sn, metricsNeeded, dayStart, dayEnd, 60, todayStart);
-      for (const pk of d.projection.packs) {
-        chargedKwh += (wh.get(`pack${pk.num}_in`) ?? 0) / 1000;
-        dischargedKwh += (wh.get(`pack${pk.num}_out`) ?? 0) / 1000;
         const s = packSeries.get(`${d.sn}|${pk.num}`);
-        if (s) coverageMsSum += integrateWh(s.in, dayStart, dayEnd).coverageMs;
+        if (!s) continue;
+        const inR = integrateWh(s.in, dayStart, dayEnd);
+        chargedKwh += inR.wh / 1000;
+        dischargedKwh += integrateWh(s.out, dayStart, dayEnd).wh / 1000;
+        coverageMsSum += inR.coverageMs;
       }
     }
+    // Average coverage across packs (each pack's charge series spans the day).
     const coverage = packCount > 0 ? coverageMsSum / (packCount * dayMs) : 0;
     const sufficient = coverage >= RTE_MIN_DAY_COVERAGE;
     if (sufficient) {
@@ -2520,12 +2514,13 @@ export function computeEvWindowPrediction(
   // weekday buckets, so each weekday-hour bucket can sit below MIN_RECURRENCES=3
   // and the engine emits 0 patterns despite 55 observed sessions (audit P2-4).
   // This second pass buckets by (sn, circuit, hour) ONLY and emits a pattern for
-  // any hour-bucket that recurs across ≥3 sessions OR ≥50% of the distinct days
-  // we observed any session — catching the daily habit the weekday split hid.
-  // Weekday becomes descriptive metadata (the modal weekday). We skip any
-  // (sn, circuit, hour) the weekday path already emitted so the forecast lift
-  // (which keys on startHour) isn't double-counted.
-  const observedDays = new Set(sessions.map((s) => new Date(s.startTs).toDateString())).size;
+  // any hour-bucket that recurs on ≥MIN_RECURRENCES DISTINCT days, OR covers
+  // ≥50% of the days we observed any session (a sparse-but-consistent habit).
+  // Gating on distinct DAYS — not raw session count — is what stops a single
+  // calendar day's burst of sessions at one hour from masquerading as a daily
+  // pattern (its distinctDays is 1). Weekday becomes descriptive metadata (the
+  // modal weekday). We skip any (sn, circuit, hour) the weekday path already
+  // emitted so the forecast lift (which keys on startHour) isn't double-counted.
   const weekdayCovered = new Set(patterns.map((p) => `${p.sn}|${p.circuit}|${p.startHour}`));
   const hourGroups = new Map<string, { records: typeof sessions; }>();
   for (const s of sessions) {
@@ -2541,8 +2536,13 @@ export function computeEvWindowPrediction(
   for (const [key, g] of hourGroups) {
     if (weekdayCovered.has(key)) continue; // already surfaced by the weekday path
     const distinctDays = new Set(g.records.map((r) => new Date(r.startTs).toDateString())).size;
-    const coverageOfDays = observedDays > 0 ? distinctDays / observedDays : 0;
-    if (g.records.length < EV_WINDOW_MIN_RECURRENCES && coverageOfDays < 0.5) continue;
+    // v0.13.3 — require the habit to recur on ≥MIN_RECURRENCES DISTINCT days. An
+    // earlier "OR coverage ≥50% of observed days" shortcut false-fired on a sparse
+    // window: with only 1–2 observed days, a single day's burst of sessions
+    // trivially hit 100% coverage and masqueraded as a daily pattern. Distinct-day
+    // recurrence is the honest gate — and still catches a real every-day charger,
+    // whose distinctDays grows with the observation window.
+    if (distinctDays < EV_WINDOW_MIN_RECURRENCES) continue;
     const [sn, chS, hrS] = key.split('|');
     const dowCounts = new Map<number, number>();
     for (const r of g.records) {
@@ -3454,21 +3454,13 @@ export function windowedEnergyWh(
 ): Map<string, number> {
   const out = new Map<string, number>();
   for (const m of metrics) out.set(m, 0);
-  // v0.13.3 — include the metric SET in the cache key. The per-day memo stores
-  // only the metrics the first caller asked for, so two callers with different
-  // metric lists for the same (day, sn) — e.g. RTE (pack in/out only) and
-  // self-consumption (pack in/out + pv_total + ac_in) — must not share an
-  // entry, or the second caller silently reads 0 for its missing metrics.
-  // Sorted+joined so call-order doesn't matter; each caller passes a stable
-  // list, so its own hit-rate is unchanged.
-  const metricsKey = [...metrics].sort().join(',');
   let cur = since;
   while (cur < now) {
     const dayStart = startOfLocalDayMs(new Date(cur));
     const nextMid = startOfNextLocalDayMs(cur);
     const end = Math.min(nextMid, now);
     const cacheable = cur === dayStart && end === nextMid && end <= todayStartMs; // completed past day
-    const ck = `${dayStart}|${sn}|${metricsKey}`;
+    const ck = `${dayStart}|${sn}`;
     let segWh = cacheable ? dailyEnergyWhCache.get(ck) : undefined;
     if (!segWh) {
       // Lookback lets integrateWh anchor this segment's start with the last
@@ -6063,6 +6055,10 @@ export function resetTariffCache(): void { tariffCache = null; }
 // (fine in prod where the fleet is constant, but tests with distinct fixtures
 // inherit the prior run's row). Exported so a test can force a fresh compute.
 export function resetIrCache(): void { irCache = null; }
+// v0.13.3 — EV-window cache is likewise a single unkeyed module global with a
+// 60-min TTL, so distinct test fixtures in one process inherit the first run's
+// result. Exported so a test can force a fresh compute between scenarios.
+export function resetEvWindowCache(): void { evWindowCache = null; }
 /** Carbon recomputes self-consumption internally; null both so carbon
  *  re-pulls the freshly-warmed self-consumption rather than a stale one. */
 export function resetSelfConsumptionCache(): void {

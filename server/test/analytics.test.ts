@@ -266,22 +266,24 @@ function fakeDpuFleet(numDpus = 4, packsPerDpu = 5): Record<string, DeviceSnapsh
   return out;
 }
 
-test('computeRoundTripEfficiency — batched per device-day-segment via windowedEnergyWh (v0.13.3)', () => {
+test('computeRoundTripEfficiency — single batched fetch per DPU + coverage-gated days (v0.13.3)', () => {
   resetHaStateShortLivedCaches();
   const rec = mockRecorder();
   const devices = fakeDpuFleet(4, 5);
   computeRoundTripEfficiency(devices, rec);
-  // v0.13.3 — RTE now anchors each day with windowedEnergyWh (the SAME path as
-  // computeSelfConsumption) so cross-midnight discharge is counted correctly and
-  // partial-boot days are coverage-gated — fixing the impossible 130.8%/34.9%
-  // per-day values and reconciling RTE with self-consumption. That means one
-  // batched queryMulti per device-day-segment (all metrics in one call), NOT a
-  // per-metric query(). Budget mirrors self-consumption: 4 DPUs × ≤8 segments.
+  // v0.13.3 — RTE still does ONE batched queryMulti per DPU over the full window
+  // (the pre-fetched packSeries already anchors interior midnights via
+  // integrateWh's lastBefore sample), but now COVERAGE-GATES each day: a day with
+  // <50% measured coverage (e.g. a 49-min partial-boot day) is set to null and
+  // excluded from the aggregate. That removes the physically impossible
+  // 130.8%/34.9% per-day values and reconciles the aggregate with
+  // self-consumption — WITHOUT the O(days × dpus) refetch. Budget stays ≤1
+  // queryMulti per DPU; never the per-metric query() path.
   assert.ok(
-    rec.queryMultiCount > 0 && rec.queryMultiCount <= 4 * 9,
-    `RTE batched per device-segment (${rec.queryMultiCount} queryMulti ≤ 36)`,
+    rec.queryMultiCount > 0 && rec.queryMultiCount <= 4,
+    `RTE made ${rec.queryMultiCount} queryMulti calls; budget is ≤ 4 (one per DPU)`,
   );
-  assert.equal(rec.queryCount, 0, 'RTE uses the batched queryMulti path, not per-metric query()');
+  assert.equal(rec.queryCount, 0, 'RTE should not use the per-metric query() path');
 });
 
 test('computeSelfConsumption — batched per device-segment + day-memoized warm reuse', () => {

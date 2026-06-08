@@ -3,6 +3,22 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.13.4 — 2026-06-07
+
+**New: power-plant annunciator chime pack (ISA-18.2 industrial alarm sounds).**
+
+- The alarm chimes broadcast to your speakers now follow **power-plant control-room
+  annunciator conventions** (ISA-18.2 / EEMUA-191), where priority is conveyed by
+  **cadence** as much as pitch so severity is identifiable by ear:
+  - **Critical / High** → a fast hi/lo electronic **warble** (general-emergency siren)
+  - **Medium** → a slow **pulsed** caution tone
+  - **Low / return-to-normal** → a soft descending **advisory** chime
+- Selectable via the new **`BROADCAST_CHIME_PACK`** option (`powerplant` default, or
+  `airport` for the previous melodic struck-bell PA chimes). The pack is folded into the
+  audio-asset version marker, so switching it regenerates the speaker WAVs on next
+  restart — no manual cache clearing. The chime pipeline (lead-in silence, per-priority
+  klaxon selection, TTS) is otherwise unchanged.
+
 ## 0.13.3 — 2026-06-07
 
 **Health-engine correctness & cosmetics from the 7-day audit (batch 4 of 4).**
