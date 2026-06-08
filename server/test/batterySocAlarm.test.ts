@@ -28,12 +28,25 @@ function makeAlarm(onCross: (t: SocThreshold) => void) {
 test('BATTERY_SOC_THRESHOLDS — pcts and escalating priorities', () => {
   assert.deepEqual(
     BATTERY_SOC_THRESHOLDS.map((t) => t.pct),
-    [40, 30, 20, 15, 10, 8, 4, 2],
+    [50, 40, 30, 20, 15, 10, 8, 4, 2],
   );
   assert.deepEqual(
     BATTERY_SOC_THRESHOLDS.map((t) => t.priority),
-    ['low', 'low', 'medium', 'medium', 'high', 'high', 'critical', 'critical'],
+    ['low', 'low', 'low', 'medium', 'medium', 'high', 'high', 'critical', 'critical'],
   );
+});
+
+test('v0.14.0 — 50% advisory fires on a downward crossing (booted above 50)', () => {
+  const fired: { pct: number; priority: string }[] = [];
+  const alarm = makeAlarm((t) => fired.push({ pct: t.pct, priority: t.priority }));
+  alarm.update(60); // boot above 50 → 50 is armed
+  alarm.update(49); // cross down through 50 only
+  assert.deepEqual(fired, [{ pct: 50, priority: 'low' }]);
+  // Booting AT 49 must NOT retroactively fire 50.
+  const fired2: number[] = [];
+  const alarm2 = makeAlarm((t) => fired2.push(t.pct));
+  alarm2.update(49);
+  assert.deepEqual(fired2, []);
 });
 
 test('fresh alarm — only the 40 threshold crossed, no re-fire on repeat', () => {
@@ -87,7 +100,9 @@ test('hysteresis — a value hovering on a boundary does not re-arm/chatter', ()
 });
 
 test('activeSocBand — lowest threshold currently crossed', () => {
-  assert.equal(activeSocBand(50), null); // above the top threshold
+  assert.equal(activeSocBand(51), null); // above the top threshold (now 50)
+  assert.equal(activeSocBand(50)?.pct, 50); // 50 ≤ 50 → the new top band
+  assert.equal(activeSocBand(45)?.pct, 50); // 45 ≤ 50, > 40
   assert.equal(activeSocBand(18)?.pct, 20); // 18 ≤ 20, > 15
   assert.equal(activeSocBand(1)?.pct, 2); // 1 ≤ 2 (the lowest band)
 });

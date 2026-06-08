@@ -14,7 +14,7 @@ import {
   divider, renderTagRow, gauge, bandedGauge, stateGlyph,
 } from './scada.js';
 import {
-  getDpus, fmtW, fmtPct, fmtTempF, fmtVolt, fmtWh,
+  getDpus, fmtW, fmtPct, fmtTempF, fmtWh,
   socState, tempState, deviceQuality, dpuFlags,
 } from './data.js';
 import type { PlantData, PlantView } from './types.js';
@@ -69,8 +69,11 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
   }, W));
   out.push(renderTagRow({
     tag: `GEN.${idx + 1}.AC.OUT.V`,
-    ...fmtVolt(p.acOutVol),
-    state: p.acOutVol == null ? 'comm' : (Math.abs((p.acOutVol / 1000) - 240) > 10 ? 'warn' : 'normal'),
+    // acOutVol is already in volts (~240.3), so display it directly — do NOT
+    // run it through fmtVolt(), which is a millivolt formatter (÷1000).
+    value: p.acOutVol != null ? p.acOutVol.toFixed(1) : '—',
+    unit: 'V',
+    state: p.acOutVol == null ? 'comm' : (Math.abs(p.acOutVol - 240) > 10 ? 'warn' : 'normal'),
     quality: qual,
     flags,
   }, W));

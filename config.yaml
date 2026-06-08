@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.13.7"
+version: "0.14.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -133,6 +133,15 @@ options:
   # the broadcast speakers, with rising priority (Low→Medium→High→Critical),
   # and respects the per-priority toggles on the Alert Settings page.
   BATTERY_SOC_ALARM_ENABLED: true
+  # v0.14.0 — projection-depletion audible alarm. Announces (escalating
+  # Low→Medium→High→Critical) when the 24h off-grid runway projection shows the
+  # backup pool reaching its reserve floor — or empty — before solar recovers, so
+  # load can be shed early. Distinct from the SoC-threshold ladder above (which
+  # only fires once the pool has already fallen). Re-announces at most every
+  # REANNOUNCE_MIN minutes while the projection persists; Low/Medium tiers respect
+  # quiet hours, High/Critical always annunciate.
+  BATTERY_RUNWAY_ALARM_ENABLED: true
+  BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: 60
 schema:
   ECOFLOW_ACCESS_KEY: password
   ECOFLOW_SECRET_KEY: password
@@ -178,3 +187,5 @@ schema:
   BROADCAST_WYOMING_PORT: port
   BROADCAST_WYOMING_VOICE: "str?"
   BATTERY_SOC_ALARM_ENABLED: bool
+  BATTERY_RUNWAY_ALARM_ENABLED: bool
+  BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: int(5,720)?

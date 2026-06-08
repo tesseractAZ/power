@@ -154,7 +154,13 @@ export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; c
   // before counting crit/warn. Their audible is the dedicated announce() path,
   // so excluding them here keeps the condition-transition broadcast from
   // double-chiming the same SoC crossing.
-  const counted = alerts.filter((a) => !a.id.startsWith('backup-soc'));
+  // v0.14.0 — also drop the on-screen runway depletion alert (`forecast-runtime-*`):
+  // its audible is now the dedicated runwayAlarm.announce() path, so excluding it
+  // here keeps the condition-transition broadcast from double-chiming the same
+  // projected depletion (mirrors the backup-soc exclusion above).
+  const counted = alerts.filter(
+    (a) => !a.id.startsWith('backup-soc') && !a.id.startsWith('forecast-runtime'),
+  );
   const crit = counted.filter((a) => a.severity === 'critical').length;
   const warn = counted.filter((a) => a.severity === 'warning').length;
   const level: ConditionLevel = crit > 0 ? 'red' : warn > 0 ? 'yellow' : 'green';
@@ -587,6 +593,15 @@ export function startBroadcastMonitor(
       try {
         cfg = loadBroadcastConfig();
         if (!cfg.enabled) return { ok: false, error: 'broadcast disabled' };
+        // v0.14.0 — quiet-hours gate for the advisory/caution tiers. Low and
+        // Medium (e.g. the 50/40% SoC advisories and the reserve-runway caution)
+        // stay silent during quiet hours; High and Critical (near-empty SoC,
+        // projected-empty runway) always annunciate so a genuine overnight
+        // emergency still wakes the operator. Previously announce() bypassed
+        // inQuiet() entirely, so a 2am 40% crossing chimed at full volume.
+        if ((priority === 'low' || priority === 'medium') && inQuiet()) {
+          return { ok: false, error: 'suppressed: quiet hours (low/medium tier)' };
+        }
         const level = klaxonLevelForPriority(priority);
         const r = await runBroadcast(level, message);
         lastBroadcastAt = Date.now();

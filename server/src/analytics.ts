@@ -1760,21 +1760,32 @@ export function computeRunway(
   const loadAvgWatts = loadPts.reduce((s, p) => s + p.value, 0) / loadPts.length;
 
   const pvByHour: number[] = [];
+  const loadByHour: number[] = [];
   if (forecast) {
     for (const h of forecast.hours.slice(0, RUNWAY_HORIZON_HOURS)) {
       pvByHour.push((h.forecastPvW ?? 0) / 1000);
+      // v0.14.0 — drive the depletion sim with the forecast's per-hour load curve
+      // (the same diurnal / day-of-week shape getDayForecast feeds into
+      // projectedSocPct) instead of a single flat trailing-hour average. The
+      // trailing average over-weights transient bursts (a recent EVSE/AC spike can
+      // make it ~2× the real draw), which produced an alarming hoursToEmpty that
+      // flatly contradicted the forecast's own never-empty projection for the same
+      // horizon. Fall back to the trailing-hour average only when a forecast hour
+      // carries no modelled load.
+      loadByHour.push((Number.isFinite(h.forecastLoadW) ? h.forecastLoadW : loadAvgWatts) / 1000);
     }
   }
   while (pvByHour.length < RUNWAY_HORIZON_HOURS) pvByHour.push(0);
+  while (loadByHour.length < RUNWAY_HORIZON_HOURS) loadByHour.push(loadAvgWatts / 1000);
 
   let stateKwh = backupRemainingKwh;
   let hoursToReserve: number | null = null;
   let hoursToEmpty: number | null = null;
-  const loadKwhPerHour = loadAvgWatts / 1000;
   let totalForecastPv = 0;
   let totalLoad = 0;
   for (let h = 0; h < RUNWAY_HORIZON_HOURS; h++) {
     const pvKwh = pvByHour[h];
+    const loadKwhPerHour = loadByHour[h];
     totalForecastPv += pvKwh;
     totalLoad += loadKwhPerHour;
     const delta = pvKwh - loadKwhPerHour;
