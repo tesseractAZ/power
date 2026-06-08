@@ -787,10 +787,15 @@ export class EcoflowBatteryCard extends EcoflowCardBase {
 }
 
 // Register in HA's custom-cards catalog so it shows up in the card picker.
-(window as unknown as { customCards?: unknown[] }).customCards =
-  (window as unknown as { customCards?: unknown[] }).customCards || [];
-(window as unknown as { customCards: unknown[] }).customCards.push({
-  type: 'ecoflow-battery-card',
-  name: 'EcoFlow Battery Card',
-  description: 'Fleet thermal + degradation + round-trip efficiency for EcoFlow batteries',
-});
+// v0.13.7 — idempotent guard (matches circuit/insights/solar) so a second
+// bundle import can't double-register this card in HA's picker.
+type CustomCardEntry = { type: string; name?: string; description?: string };
+const w = window as unknown as { customCards?: CustomCardEntry[] };
+w.customCards = w.customCards || [];
+if (!w.customCards.some((c) => c.type === 'ecoflow-battery-card')) {
+  w.customCards.push({
+    type: 'ecoflow-battery-card',
+    name: 'EcoFlow Battery Card',
+    description: 'Fleet thermal + degradation + round-trip efficiency for EcoFlow batteries',
+  });
+}

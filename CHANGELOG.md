@@ -3,6 +3,29 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.13.7 — 2026-06-07
+
+**HA 2026.6 hardening — docs for the new Energy-Dashboard battery state-of-charge
+badge, idempotent card registration across the whole Lovelace bundle, and
+`expire_after` on live MQTT sensors.** A full review of the 2026.6 release found
+zero breaking impacts (all breaking changes are Python-integration-only; the add-on
+ships its own MQTT v5 client), so this is consistency + opportunity work.
+
+- **Energy Dashboard battery SoC (docs).** 2026.6 added an optional state-of-charge
+  (%) field to the Energy Dashboard's battery source. The add-on's
+  `sensor.ecoflow_backup_pool` is already the exact shape HA wants (`device_class:
+  battery`, `%`, `state_class: measurement`) — `DOCS.md` and `README.md` now point
+  to it for the badge. No code change required.
+- **Idempotent card registration.** `alerts`, `battery`, `fleet`, and `strategy`
+  cards now guard `window.customCards.push` with a `some((c) => c.type === …)` check,
+  matching `circuit`/`insights`/`solar`. A second bundle import can no longer
+  double-list a card in HA's card picker (all 7 cards now consistent).
+- **`expire_after` on live MQTT sensors.** Live-measurement and binary-status
+  discovery configs now set `expire_after: 120` (4× the 30 s publish interval) so a
+  stalled publisher surfaces as `unavailable` instead of a frozen last value. The
+  `total_increasing` lifetime-energy and per-circuit sensors are deliberately
+  **excluded** — expiring a long-term-statistics source would gap HA Energy history.
+
 ## 0.13.6 — 2026-06-07
 
 **Reconciles the audit's novelty fix to the documented chi-square parameterization,

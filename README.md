@@ -222,7 +222,9 @@ recursive GHI→PV updates with credible intervals.
 
 **HA integration** — REST sensors, MQTT Discovery (22+ entities), HA
 Energy Dashboard (5 lifetime kWh counters + per-circuit Individual
-devices), per-circuit lifetime accumulators, carbon offset reporting,
+devices, plus the 2026.6 battery state-of-charge badge via
+`sensor.ecoflow_backup_pool`), per-circuit lifetime accumulators,
+carbon offset reporting,
 TOU tariff cost tracking, calendar ICS feed, repair issues feed,
 diagnostic entity categorization, NWS storm-prep alerts, HACS Lovelace
 "stats" card.

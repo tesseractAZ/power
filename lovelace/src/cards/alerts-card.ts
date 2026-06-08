@@ -709,10 +709,15 @@ function withoutKey<K, V>(m: Map<K, V>, k: K): Map<K, V> {
 }
 
 // Register in HA's custom-cards catalog so it shows up in the card picker.
-(window as unknown as { customCards?: unknown[] }).customCards =
-  (window as unknown as { customCards?: unknown[] }).customCards || [];
-(window as unknown as { customCards: unknown[] }).customCards.push({
-  type: 'ecoflow-alerts-card',
-  name: 'EcoFlow Alerts Card',
-  description: 'Active + cleared alerts, predictive insights and notification controls',
-});
+// v0.13.7 — idempotent guard (matches circuit/insights/solar) so a second
+// bundle import can't double-register this card in HA's picker.
+type CustomCardEntry = { type: string; name?: string; description?: string };
+const w = window as unknown as { customCards?: CustomCardEntry[] };
+w.customCards = w.customCards || [];
+if (!w.customCards.some((c) => c.type === 'ecoflow-alerts-card')) {
+  w.customCards.push({
+    type: 'ecoflow-alerts-card',
+    name: 'EcoFlow Alerts Card',
+    description: 'Active + cleared alerts, predictive insights and notification controls',
+  });
+}

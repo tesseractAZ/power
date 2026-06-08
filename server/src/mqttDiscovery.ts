@@ -50,6 +50,14 @@ const DEVICE_INFO = {
 const STATE_TOPIC = 'ecoflow_panel/state';
 const AVAILABILITY_TOPIC = 'ecoflow_panel/availability';
 const PUBLISH_INTERVAL_MS = 30 * 1000;
+// v0.13.7 — seconds after which HA marks a sensor unavailable if its state
+// stops updating. ~4× the publish interval, so a single slow tick won't trip
+// it but a genuinely stalled publisher (the mqtt client stays connected while
+// publishState silently no-ops) surfaces as `unavailable` instead of a frozen
+// last value. Applied ONLY to live-measurement sensors — NEVER to the
+// `total_increasing` lifetime-energy / per-circuit sensors, since an expiring
+// long-term-statistics source would create gaps in the HA Energy dashboard.
+const EXPIRE_AFTER_S = 120;
 
 // v0.11.0 — per-priority alarm on/off switch topics. Each ISA priority gets a
 // dedicated state + command topic under the same `ecoflow_panel` base prefix
@@ -278,6 +286,9 @@ export async function startMqttDiscovery(
         availability_topic: AVAILABILITY_TOPIC,
         payload_available: 'online',
         payload_not_available: 'offline',
+        // v0.13.7 — expire live measurements, but never the total_increasing
+        // energy sources (would gap HA Energy history).
+        ...(s.state_class !== 'total_increasing' ? { expire_after: EXPIRE_AFTER_S } : {}),
         device: DEVICE_INFO,
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
@@ -290,6 +301,8 @@ export async function startMqttDiscovery(
         availability_topic: AVAILABILITY_TOPIC,
         payload_available: 'online',
         payload_not_available: 'offline',
+        // v0.13.7 — binary status entities are live (never total_increasing).
+        expire_after: EXPIRE_AFTER_S,
         device: DEVICE_INFO,
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });

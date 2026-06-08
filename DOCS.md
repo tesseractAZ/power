@@ -408,6 +408,17 @@ rest:
         device_class: energy
         icon: mdi:battery-arrow-down
 
+      # ─── HA 2026.6 — battery state-of-charge badge ────────────────────────
+      # 2026.6 added an optional state-of-charge (%) sensor to the Energy
+      # Dashboard's battery source, shown as a battery badge at the top of the
+      # Energy panel. After adding the battery (Energy In = "Battery Energy In",
+      # Energy Out = "Battery Energy Out" above), set its NEW state-of-charge
+      # field to the EcoFlow backup-pool % sensor — already the exact shape HA
+      # wants (device_class: battery, %, state_class: measurement):
+      #   • MQTT discovery (zero YAML): `sensor.ecoflow_backup_pool`
+      #   • or the REST sensor `sensor.ecoflow_backup_pool_percent` (defined above)
+      # 2026.6 also lets you give the Grid/Solar/Battery sources custom names.
+
     binary_sensor:
       - name: "EcoFlow Off-Grid"
         unique_id: ecoflow_off_grid

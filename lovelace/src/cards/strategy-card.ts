@@ -835,10 +835,15 @@ export class EcoflowStrategyCard extends EcoflowCardBase {
 }
 
 // Register in HA's custom-cards catalog so it shows up in the card picker.
-(window as unknown as { customCards?: unknown[] }).customCards =
-  (window as unknown as { customCards?: unknown[] }).customCards || [];
-(window as unknown as { customCards: unknown[] }).customCards.push({
-  type: 'ecoflow-strategy-card',
-  name: 'EcoFlow Strategy Card',
-  description: 'SHP2 load-shed priorities, TOU schedule and dispatch recommendations (read-only)',
-});
+// v0.13.7 — idempotent guard (matches circuit/insights/solar) so a second
+// bundle import can't double-register this card in HA's picker.
+type CustomCardEntry = { type: string; name?: string; description?: string };
+const w = window as unknown as { customCards?: CustomCardEntry[] };
+w.customCards = w.customCards || [];
+if (!w.customCards.some((c) => c.type === 'ecoflow-strategy-card')) {
+  w.customCards.push({
+    type: 'ecoflow-strategy-card',
+    name: 'EcoFlow Strategy Card',
+    description: 'SHP2 load-shed priorities, TOU schedule and dispatch recommendations (read-only)',
+  });
+}
