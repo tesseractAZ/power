@@ -3,6 +3,24 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.14.2 — 2026-06-08
+
+**The last two audit leftovers — both one-line constant fixes in `analytics.ts`.**
+
+- **Short-window EOL projections no longer dated with false precision.** Raised the
+  minimum SoH-trend span for a *dated* end-of-life projection from 7 → **21 days**
+  (`EOL_MIN_SPAN_MS`). A 17-day window was producing a confident "0.9 yr / EOL 2027"
+  from a steep 19.6 %/yr fade at r² 0.46 — extrapolating a multi-year trend from half
+  a month. Packs under 3 weeks of history now stay in **"learning"** (fade rate +
+  Arrhenius still shown, no dated EOL) until the trend is credible; the learning
+  summary now states the span *and* R² requirements.
+- **Thermal-event history window aligned to the 30-day recorder retention.**
+  `THERMAL_EVENT_HISTORY_MS` was **400 days** while the samples table is pruned to 30,
+  so `computeThermalEvents` scanned ~370 days of empty index range per pack every
+  cache cycle on the synchronous SQLite store — the same dead-range scan the
+  degradation path was fixed for in v0.9.80. Now 30 days; output is identical (no
+  rows older than 30 days exist to count), with less wasted scan range.
+
 ## 0.14.1 — 2026-06-08
 
 **The three deferred accuracy fixes from the v0.14.0 audit.** All in `analytics.ts`,
