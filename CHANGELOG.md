@@ -3,6 +3,33 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.13.3 — 2026-06-07
+
+**Health-engine correctness & cosmetics from the 7-day audit (batch 4 of 4).**
+
+- **Round-trip efficiency is physically sane.** The per-day figures (130.8% / 34.9%)
+  were integration artifacts — the builder re-sliced a pre-windowed series with no
+  cross-midnight anchor and gated on absolute energy, so a 49-minute partial-boot day
+  read 130.8%. RTE now anchors each day with the same `windowedEnergyWh` path as
+  self-consumption and nulls out days with <50% coverage, reconciling the two reports
+  (~93–96%, the credible band).
+- **EV charge-window learner now finds patterns.** It bucketed by weekday+hour, so a
+  daily 6 pm charge spread across 6 weekday buckets and never reached the 3-recurrence
+  threshold (55 sessions → 0 patterns). It now buckets by hour-of-day, clustering a
+  daily charger within a week.
+- **Backtest baseline has real skill.** The predictor was a flat constant
+  (`typicalPvWhPerDay/24`) applied to night and noon alike, scoring R²≈0. It now uses a
+  24-slot diurnal curve (`curve[hourOfDay]`, night≈0 / noon≈peak).
+- **Novelty score no longer pins the worst pack to exactly 100** (it divided by the
+  in-sample max); it now maps an absolute Mahalanobis centroid distance.
+- **Internal-resistance** reports an honest `insufficient-cadence` status (it can't be
+  measured from a 10–60 s polled series) instead of implying it's still converging.
+- **Status/coverage fields** added so healthy cold-start engines (shade, string-mismatch)
+  don't read as "broken"; clipping now iterates home DPUs only.
+- **GHI persistence hardened** with a periodic refresh tick so it works even when no
+  dashboard is open (previously rode the `/api/weather/ensemble` endpoint).
+- *(Also completes v0.13.2's short-clear accounting refactor — `classifyClearDuration`.)*
+
 ## 0.13.2 — 2026-06-07
 
 **Alert hygiene & self-tuning fixes from the 7-day audit (batch 3 of 4).**

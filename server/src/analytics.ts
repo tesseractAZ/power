@@ -1897,25 +1897,56 @@ export function computeRoundTripEfficiency(
     }
   }
 
+  // v0.13.3 — RTE per-day was re-slicing the pre-windowed [fullStart,fullEnd]
+  // series with integrateWh and gating on absolute energy (chargedKwh>0.5),
+  // not coverage. On a partial-boot day (~49 min of data) the un-anchored slice
+  // produced a charge/discharge pair whose ratio landed at a physically
+  // impossible 130.8% — and the aggregate disagreed with self-consumption
+  // (discharge 298.88 vs 336.25 kWh) because the two engines integrated
+  // differently. Fix: anchor each day's energy with windowedEnergyWh (the exact
+  // helper self-consumption uses — lookback-anchored start + per-day memo), and
+  // gate each day on integrateWh COVERAGE (<~50% of the day → null + excluded),
+  // not on an absolute kWh floor. This unifies the two engines and keeps a
+  // partial-boot day out of the aggregate, landing RTE in the credible ~93-96%
+  // band. The pre-fetched packSeries is reused only for the coverage check.
+  const RTE_MIN_DAY_COVERAGE = 0.5; // need ≥50% of the day measured to trust the ratio
   const perDay: RoundTripDay[] = [];
   let totalCharged = 0;
   let totalDischarged = 0;
+  const packCount = homeDpus.reduce((n, d) => n + d.projection.packs.length, 0);
   for (let i = windowDays - 1; i >= 0; i--) {
     const dayStart = todayStart - i * 86_400_000;
     const dayEnd = i === 0 ? now : dayStart + 86_400_000;
     let chargedKwh = 0;
     let dischargedKwh = 0;
+    // Coverage gate: fraction of the day for which integrateWh actually had
+    // samples to integrate, averaged across packs (charge series — discharge
+    // shares the same poll cadence). A boot/partial day fails this even when a
+    // residual sample would otherwise yield a non-zero (and skewed) ratio.
+    let coverageMsSum = 0;
+    const dayMs = Math.max(1, dayEnd - dayStart);
     for (const d of homeDpus) {
+      // Anchored, memoized per-day energy — identical integration path to
+      // self-consumption, so the engines agree.
+      const metricsNeeded: string[] = [];
       for (const pk of d.projection.packs) {
+        metricsNeeded.push(`pack${pk.num}_in`, `pack${pk.num}_out`);
+      }
+      const wh = windowedEnergyWh(recorder, d.sn, metricsNeeded, dayStart, dayEnd, 60, todayStart);
+      for (const pk of d.projection.packs) {
+        chargedKwh += (wh.get(`pack${pk.num}_in`) ?? 0) / 1000;
+        dischargedKwh += (wh.get(`pack${pk.num}_out`) ?? 0) / 1000;
         const s = packSeries.get(`${d.sn}|${pk.num}`);
-        if (!s) continue;
-        chargedKwh += integrateWh(s.in, dayStart, dayEnd).wh / 1000;
-        dischargedKwh += integrateWh(s.out, dayStart, dayEnd).wh / 1000;
+        if (s) coverageMsSum += integrateWh(s.in, dayStart, dayEnd).coverageMs;
       }
     }
-    totalCharged += chargedKwh;
-    totalDischarged += dischargedKwh;
-    const dayEff = chargedKwh > 0.5 ? (dischargedKwh / chargedKwh) * 100 : null;
+    const coverage = packCount > 0 ? coverageMsSum / (packCount * dayMs) : 0;
+    const sufficient = coverage >= RTE_MIN_DAY_COVERAGE;
+    if (sufficient) {
+      totalCharged += chargedKwh;
+      totalDischarged += dischargedKwh;
+    }
+    const dayEff = sufficient && chargedKwh > 0.5 ? (dischargedKwh / chargedKwh) * 100 : null;
     perDay.push({
       date: localDateStr(dayStart),
       chargedKwh: round2(chargedKwh),
@@ -1968,6 +1999,13 @@ export interface ShadeHour {
 
 export interface ShadeReport {
   generatedAt: number;
+  // v0.13.3 — disambiguate "no shade found" from "couldn't look". An empty
+  // hours[] with status 'healthy' means we had enough clear-sky history and
+  // found no obstructed hour (the normal, good outcome). status
+  // 'insufficient-data' means we bailed before the analysis (no DPUs, no
+  // weather, or too few clear-sky days) — the empty list says nothing about
+  // shade. UI should read 'healthy' as a green check, not a broken engine.
+  status: 'healthy' | 'insufficient-data';
   hours: ShadeHour[];
   estTotalKwhPerYear: number;  // rough annualised shortfall summed across shaded hours
 }
@@ -1981,7 +2019,10 @@ export async function computeShadeReport(
   if (shadeCache && Date.now() - shadeCache.ts < SHADE_TTL_MS) return shadeCache.value;
   const now = Date.now();
   const since = now - SHADE_OBSERVE_HISTORY_MS;
-  const empty = (): ShadeReport => ({ generatedAt: now, hours: [], estTotalKwhPerYear: 0 });
+  // v0.13.3 — early bail-outs (no DPUs / no weather) are 'insufficient-data':
+  // we couldn't run the analysis, so an empty hours[] must NOT read as "no
+  // shade". The populated path below returns 'healthy'.
+  const empty = (): ShadeReport => ({ generatedAt: now, status: 'insufficient-data', hours: [], estTotalKwhPerYear: 0 });
 
   const dpus = Object.values(devices).filter(
     (d) => d.projection?.kind === 'dpu',
@@ -2065,6 +2106,9 @@ export async function computeShadeReport(
 
   const value: ShadeReport = {
     generatedAt: now,
+    // We ran the full clear-sky analysis; an empty hours[] here means no hour
+    // crossed the shade threshold — a healthy array, not missing data.
+    status: 'healthy',
     hours,
     estTotalKwhPerYear: Math.round(annualKwhShortfall),
   };
@@ -2186,6 +2230,7 @@ export async function computeSoilingDecomposition(
  * =================================================================== */
 
 const STRING_MISMATCH_TTL_MS = 15 * 60 * 1000;
+const STRING_MISMATCH_WINDOW_DAYS = 14;
 
 export interface DeviceProductionRatio {
   sn: string;
@@ -2196,11 +2241,17 @@ export interface DeviceProductionRatio {
   ratio: number | null;          // device / fleet
   modifiedZ: number | null;
   outlier: boolean;
-  samples: number;
+  // v0.13.3 — renamed `samples` → `hourBuckets`. This count is the number of
+  // hour-of-day buckets (0-23) where BOTH this device and the fleet had a
+  // daytime median to compare — NOT a raw sample count. "samples:14" read as
+  // "only 14 readings" when it actually meant up to 14 daylight hours over the
+  // full window. windowDays (below) supplies the missing denominator.
+  hourBuckets: number;
 }
 
 export interface StringMismatchReport {
   generatedAt: number;
+  windowDays: number;   // v0.13.3 — span the per-device hourBuckets were drawn from
   devices: DeviceProductionRatio[];
 }
 
@@ -2214,7 +2265,7 @@ export function computeStringMismatch(
     return stringMismatchCache.value;
   }
   const now = Date.now();
-  const since = now - 14 * 24 * 60 * 60 * 1000;
+  const since = now - STRING_MISMATCH_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const dpus = Object.values(devices).filter(
     (d) => d.projection?.kind === 'dpu',
   ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
@@ -2278,7 +2329,7 @@ export function computeStringMismatch(
       fleetMedianW: hoursWithFleet > 0 ? Math.round(fleetMedW / hoursWithFleet) : null,
       ratio: ratio != null ? round2(ratio) : null,
       modifiedZ: null, outlier: false,
-      samples: ratioSamples.length,
+      hourBuckets: ratioSamples.length, // v0.13.3 — hour-of-day buckets compared, not raw samples
     });
     if (ratio != null) deviceAvgRatios.push(ratio);
   }
@@ -2292,7 +2343,7 @@ export function computeStringMismatch(
       if (r.ratio < med && z >= Z_INFO) r.outlier = true;
     }
   }
-  const value: StringMismatchReport = { generatedAt: now, devices: ratios };
+  const value: StringMismatchReport = { generatedAt: now, windowDays: STRING_MISMATCH_WINDOW_DAYS, devices: ratios };
   if (dpus.length > 0) stringMismatchCache = { ts: now, value };
   return value;
 }
@@ -2415,6 +2466,15 @@ export function computeEvWindowPrediction(
     }
   }
 
+  // Round each session's start to the nearest hour boundary once, up front —
+  // both the weekday bucketing (below) and the v0.13.3 daily detector key off
+  // it. (minutes >= 30 ⇒ +1 hour, else current hour.)
+  const roundedHourOf = (startTs: number): { dow: number; hr: number } => {
+    const d = new Date(startTs);
+    const rd = new Date(startTs + (d.getMinutes() >= 30 ? 1 : 0) * 3_600_000);
+    return { dow: rd.getDay(), hr: rd.getHours() };
+  };
+
   // Bucket by (sn, circuit, dayOfWeek, startHour) and count recurrences.
   //
   // v0.9.62 fix (audit finding from v0.9.61): real-world EV start times
@@ -2430,10 +2490,8 @@ export function computeEvWindowPrediction(
   // the rounded timestamp back through Date).
   const groups = new Map<string, { records: typeof sessions; }>();
   for (const s of sessions) {
-    const d = new Date(s.startTs);
-    const roundedHourBoundaryMs = s.startTs + (d.getMinutes() >= 30 ? 1 : 0) * 3_600_000;
-    const rd = new Date(roundedHourBoundaryMs);
-    const key = `${s.sn}|${s.circuit}|${rd.getDay()}|${rd.getHours()}`;
+    const { dow, hr } = roundedHourOf(s.startTs);
+    const key = `${s.sn}|${s.circuit}|${dow}|${hr}`;
     const g = groups.get(key) ?? { records: [] };
     g.records.push(s);
     groups.set(key, g);
@@ -2457,18 +2515,83 @@ export function computeEvWindowPrediction(
     });
   }
 
-  // Project forward 24 h: any pattern whose (DoW, hour) falls in the window
-  // becomes an upcoming session.
+  // v0.13.3 — PARALLEL daily detector. The weekday+hour buckets above miss a
+  // *daily* charger: a 6pm-every-day habit spreads its sessions across all 7
+  // weekday buckets, so each weekday-hour bucket can sit below MIN_RECURRENCES=3
+  // and the engine emits 0 patterns despite 55 observed sessions (audit P2-4).
+  // This second pass buckets by (sn, circuit, hour) ONLY and emits a pattern for
+  // any hour-bucket that recurs across ≥3 sessions OR ≥50% of the distinct days
+  // we observed any session — catching the daily habit the weekday split hid.
+  // Weekday becomes descriptive metadata (the modal weekday). We skip any
+  // (sn, circuit, hour) the weekday path already emitted so the forecast lift
+  // (which keys on startHour) isn't double-counted.
+  const observedDays = new Set(sessions.map((s) => new Date(s.startTs).toDateString())).size;
+  const weekdayCovered = new Set(patterns.map((p) => `${p.sn}|${p.circuit}|${p.startHour}`));
+  const hourGroups = new Map<string, { records: typeof sessions; }>();
+  for (const s of sessions) {
+    const { hr } = roundedHourOf(s.startTs);
+    const key = `${s.sn}|${s.circuit}|${hr}`;
+    const g = hourGroups.get(key) ?? { records: [] };
+    g.records.push(s);
+    hourGroups.set(key, g);
+  }
+  // `dailyHourKeys` records (sn|circuit|hour) buckets that fired as a DAILY
+  // habit — these project on every day of the forecast (not just one weekday).
+  const dailyHourKeys = new Set<string>();
+  for (const [key, g] of hourGroups) {
+    if (weekdayCovered.has(key)) continue; // already surfaced by the weekday path
+    const distinctDays = new Set(g.records.map((r) => new Date(r.startTs).toDateString())).size;
+    const coverageOfDays = observedDays > 0 ? distinctDays / observedDays : 0;
+    if (g.records.length < EV_WINDOW_MIN_RECURRENCES && coverageOfDays < 0.5) continue;
+    const [sn, chS, hrS] = key.split('|');
+    const dowCounts = new Map<number, number>();
+    for (const r of g.records) {
+      const { dow } = roundedHourOf(r.startTs);
+      dowCounts.set(dow, (dowCounts.get(dow) ?? 0) + 1);
+    }
+    let modalDow = 0, modalCount = -1;
+    for (const [dow, c] of dowCounts) if (c > modalCount) { modalDow = dow; modalCount = c; }
+    const durHours = median(g.records.map((r) => (r.endTs - r.startTs) / 3_600_000));
+    const watts = median(g.records.map((r) => r.avgWatts));
+    const kwh = median(g.records.map((r) => r.energyKwh));
+    dailyHourKeys.add(key);
+    patterns.push({
+      sn,
+      circuit: Number(chS),
+      dayOfWeek: modalDow,
+      startHour: Number(hrS),
+      typicalDurationHours: round1(durHours),
+      typicalWatts: Math.round(watts),
+      recurrences: g.records.length,
+      energyKwh: round1(kwh),
+    });
+  }
+
+  // Project forward 24 h. v0.13.3 — two projection rules, deduped per future
+  // hour so a given hour is lifted at most once (the consumer SUMS watts across
+  // overlapping sessions, so a double-emit would double the EV load):
+  //   • Weekday-keyed patterns keep their original semantics — they fire only on
+  //     the matching (dayOfWeek, hour). A Tuesday-only charger still lifts only
+  //     Tuesdays.
+  //   • Daily-detector patterns fire on the matching hour EVERY day, so a daily
+  //     charger lifts tomorrow regardless of weekday.
+  // When both could fire for the same future hour we take the larger watts.
   const upcoming: EvWindowPrediction['upcomingNext24h'] = [];
   for (let h = 0; h < 24; h++) {
     const ts = now + h * 3_600_000;
     const d = new Date(ts);
     const dow = d.getDay();
     const hr = d.getHours();
+    let best: EvSessionPattern | null = null;
     for (const p of patterns) {
-      if (p.dayOfWeek === dow && p.startHour === hr) {
-        upcoming.push({ ts, durationHours: p.typicalDurationHours, watts: p.typicalWatts, dayOfWeek: dow });
-      }
+      if (p.startHour !== hr) continue;
+      const isDaily = dailyHourKeys.has(`${p.sn}|${p.circuit}|${p.startHour}`);
+      const applies = isDaily || p.dayOfWeek === dow;
+      if (!applies) continue;
+      if (best == null || p.typicalWatts > best.typicalWatts) best = p;
+    }
+    if (best) {
+      upcoming.push({ ts, durationHours: best.typicalDurationHours, watts: best.typicalWatts, dayOfWeek: dow });
     }
   }
 
@@ -2640,7 +2763,14 @@ export function computeChargeCurveFingerprint(
 const IR_TTL_MS = 30 * 60 * 1000;
 const IR_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const IR_DELTA_I_MIN_A = 5;     // require ≥ 5 A change for a clean dV/dI
-const IR_DELTA_T_MAX_MS = 60_000;
+// v0.13.3 — widened 60_000 → 120_000. At a 10-60 s poll cadence the old bound
+// sat right on the poll boundary, so most adjacent pairs fell outside it and
+// produced 0 samples. 120 s admits one-poll-apart pairs at the slow end of the
+// cadence. NOTE: this is a mild improvement, NOT a fix — dV/dI over 10-120 s is
+// dominated by OCV/SoC drift, not the pack's Ohmic R, so this engine cannot
+// truly converge from a polled series. Honest reporting (insufficient-cadence,
+// below) does the rest; real IR needs high-rate capture (deferred).
+const IR_DELTA_T_MAX_MS = 120_000;
 // v0.9.59 — steady-state windowing. A clean dV/dI sample needs the bus to be
 // in a quiet operating point on BOTH sides of the step — otherwise we're
 // measuring a transient (motor inrush, MPPT chase after a cloud, inverter
@@ -2676,7 +2806,12 @@ export interface InternalResistanceDevice {
   baselineMilliohms: number | null;
   trendMilliohmsPerMonth: number | null;
   samples: number;
-  status: 'tracking' | 'learning' | 'no-data';
+  // v0.13.3 — 'insufficient-cadence' is the HONEST terminal state: we have raw
+  // V/A history but the 10-60 s poll cadence yields no clean dV/dI pairs, so
+  // this will never converge at the current sampling rate. Distinct from
+  // 'learning' (has some samples, accumulating toward the ≥10 threshold) so the
+  // UI stops showing a perpetual spinner for a measurement that can't complete.
+  status: 'tracking' | 'learning' | 'insufficient-cadence' | 'no-data';
 }
 
 export interface InternalResistanceReport {
@@ -2743,11 +2878,16 @@ export function computeInternalResistance(
       }
     };
     // Pairs with significant ΔI: ΔV / ΔI = R (volts / amps). Convert to mΩ.
+    // v0.13.3 — track how many adjacent pairs were even close enough in time to
+    // be a candidate. If almost none are (the poll cadence is wider than
+    // IR_DELTA_T_MAX_MS), the engine is cadence-starved, not "learning".
     const rSamples: Array<{ ts: number; rMilli: number }> = [];
+    let pairsWithinCadence = 0;
     for (let i = 1; i < series.length; i++) {
       const a = series[i - 1];
       const b = series[i];
       if (b.ts - a.ts > IR_DELTA_T_MAX_MS) continue;
+      pairsWithinCadence++;
       const dI = b.a - a.a;
       if (Math.abs(dI) < IR_DELTA_I_MIN_A) continue;
       // v0.9.59 — reject pairs where either endpoint sits inside a transient.
@@ -2765,10 +2905,21 @@ export function computeInternalResistance(
       rSamples.push({ ts: b.ts, rMilli: rAbs });
     }
     if (rSamples.length < 10) {
+      // v0.13.3 — honest stopgap. We have ≥30 raw V/A samples (else 'no-data'
+      // above), but too few clean dV/dI pairs. If the poll cadence itself
+      // starves the candidate set — fewer than a handful of adjacent pairs even
+      // landed within IR_DELTA_T_MAX_MS — this will NOT converge at the current
+      // sampling rate, so report 'insufficient-cadence' rather than a perpetual
+      // 'learning' that never finishes. (Real IR needs high-rate capture, which
+      // is deferred to a future release.) If pairs WERE within cadence but got
+      // rejected as transient/out-of-band, we're genuinely still accumulating →
+      // keep 'learning'.
+      const IR_MIN_CANDIDATE_PAIRS = 5;
+      const status = pairsWithinCadence < IR_MIN_CANDIDATE_PAIRS ? 'insufficient-cadence' : 'learning';
       out.push({
         sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
         recentMilliohms: null, baselineMilliohms: null, trendMilliohmsPerMonth: null,
-        samples: rSamples.length, status: 'learning',
+        samples: rSamples.length, status,
       });
       continue;
     }
@@ -3303,13 +3454,21 @@ export function windowedEnergyWh(
 ): Map<string, number> {
   const out = new Map<string, number>();
   for (const m of metrics) out.set(m, 0);
+  // v0.13.3 — include the metric SET in the cache key. The per-day memo stores
+  // only the metrics the first caller asked for, so two callers with different
+  // metric lists for the same (day, sn) — e.g. RTE (pack in/out only) and
+  // self-consumption (pack in/out + pv_total + ac_in) — must not share an
+  // entry, or the second caller silently reads 0 for its missing metrics.
+  // Sorted+joined so call-order doesn't matter; each caller passes a stable
+  // list, so its own hit-rate is unchanged.
+  const metricsKey = [...metrics].sort().join(',');
   let cur = since;
   while (cur < now) {
     const dayStart = startOfLocalDayMs(new Date(cur));
     const nextMid = startOfNextLocalDayMs(cur);
     const end = Math.min(nextMid, now);
     const cacheable = cur === dayStart && end === nextMid && end <= todayStartMs; // completed past day
-    const ck = `${dayStart}|${sn}`;
+    const ck = `${dayStart}|${sn}|${metricsKey}`;
     let segWh = cacheable ? dailyEnergyWhCache.get(ck) : undefined;
     if (!segWh) {
       // Lookback lets integrateWh anchor this segment's start with the last
@@ -3870,7 +4029,12 @@ export async function computeClipping(
     const hourEnd = Math.min(hourStart + 3_600_000, now);
     let observedW = 0;
     let totalPts = 0;
-    for (const d of dpus) {
+    // v0.13.3 — iterate homeDpus, not dpus. dpuPvByHour is only populated for
+    // SHP2-connected DPUs (above), so a spare DPU's lookup already returned []
+    // and contributed nothing — but iterating dpus mis-stated the intent and
+    // would silently start summing a spare's PV the moment dpuPvByHour grew to
+    // cover it. Mirror the v0.9.76 spare-isolation scope explicitly.
+    for (const d of homeDpus) {
       const bucket = dpuPvByHour.get(d.sn)?.[h] ?? [];
       if (bucket.length === 0) continue;
       observedW += bucket.reduce((s, x) => s + x, 0) / bucket.length;

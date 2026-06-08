@@ -27,6 +27,7 @@ import {
   computeProbabilisticForecast,
   computeMultiDayForecast,
   computeBayesianSolarModel,
+  diurnalBaselinePredictor,
 } from './analytics.js';
 import { computeTotals, circuitHistoryByDay } from './aggregator.js';
 import { backtestPvForecast } from './backtest.js';
@@ -70,6 +71,10 @@ export interface ReportArgs {
   dpuSns?: string[];
   hoursBack?: number;
   typicalWhPerHour?: number;
+  /** v0.13.1 — 24-slot hour-of-day PV curve (Wh/h) for the diurnal baseline
+   *  predictor; when present the backtest uses curve[hourOfDay] instead of the
+   *  flat typicalWhPerHour scalar (fixes the R²≈0 flat-constant baseline). */
+  typicalPvCurveWhPerHour?: number[];
 }
 
 const devicesOf = (ctx: ReportCtx): Record<string, DeviceSnapshot> => ctx.snapshot.devices;
@@ -124,13 +129,18 @@ const BUILDERS: Record<string, Builder> = {
   bayesianSolar: (ctx) => computeBayesianSolarModel(devicesOf(ctx), ctx.recorder),
   totals: (ctx, a) => computeTotals(shimStore(ctx), ctx.recorder, a.sinceMs ?? 0, a.untilMs ?? Date.now()),
   circuitHistory: (ctx, a) => circuitHistoryByDay(ctx.recorder, a.sn ?? '', a.ch ?? 0, a.days ?? 7, a.metric),
-  // The endpoint's predictor is a constant (() => typicalWhPerHour); we can't
-  // postMessage a function, so the worker reconstructs it from the scalar.
+  // v0.13.1 — we can't postMessage a function, so the worker reconstructs the
+  // predictor from args: a 24-slot diurnal curve (curve[hourOfDay], night≈0 /
+  // noon≈peak) when present, else the legacy flat scalar. The flat constant is
+  // why the backtest scored R²≈0 — it predicted the same Wh for night and noon.
   backtest: (ctx, a) => backtestPvForecast({
     recorder: ctx.recorder,
     dpuSns: a.dpuSns ?? [],
     hoursBack: a.hoursBack ?? 168,
-    predict: () => a.typicalWhPerHour ?? 0,
+    predict:
+      a.typicalPvCurveWhPerHour && a.typicalPvCurveWhPerHour.length === 24
+        ? diurnalBaselinePredictor(a.typicalPvCurveWhPerHour)
+        : () => a.typicalWhPerHour ?? 0,
   }),
 };
 

@@ -50,6 +50,27 @@ import { priorityOf, priorityMeta } from './alertPriority.js';
 const EVAL_INTERVAL_MS = Number(process.env.ALERT_EVAL_MS ?? 20_000);
 const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
 
+// v0.13.2 — clear-duration thresholds hoisted to module scope so the
+// classification is a single pure function shared by recordClear and tests.
+const SHORT_CLEAR_MS = 10 * 60 * 1000;            // resolved within 10 min = transient
+const CHRONIC_NOISE_LONG_MS = 4 * 60 * 60 * 1000; // "long" = persists ≥ 4 hours
+
+/**
+ * v0.13.2 — classify a cleared alert's lifetime into the telemetry buckets.
+ * Pure and exported so the short-clear accounting invariant is directly
+ * testable (P1-3): a sub-debounce (<60s) flap is the MOST transient clear
+ * and MUST count as a shortClear — the bug was that such clears were skipped
+ * entirely (recordClear was gated on duration ≥ DEBOUNCE_MS), so the
+ * short-clear fraction could never reach DEMOTE_WARN_SHORT_FRAC and
+ * auto-demote could never fire.
+ */
+export function classifyClearDuration(durationMs: number): { shortClear: boolean; longActive: boolean } {
+  return {
+    shortClear: durationMs <= SHORT_CLEAR_MS,
+    longActive: durationMs >= CHRONIC_NOISE_LONG_MS,
+  };
+}
+
 interface TrackedAlert {
   alert: Alert;
   firstSeen: number;
@@ -250,15 +271,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
 
   const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
   const DIGEST_HOUR = Number(process.env.NOTIFY_DIGEST_HOUR ?? 7);
-  const SHORT_CLEAR_MS = 10 * 60 * 1000;          // resolved within 10 min = transient
   const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
   const DOWNGRADE_SHORT_FRAC = 0.7;               // ≥ 70% of rises clear within SHORT_CLEAR_MS
   // v0.9.3 — extended self-tuning rules
   const DEMOTE_WARN_MIN_RISES = 10;               // need ≥ 10 rises before demoting warning→info
   const DEMOTE_WARN_SHORT_FRAC = 0.8;             // ≥ 80% short-clear → demote (stricter than info silencing)
   const CHRONIC_NOISE_MIN_RISES = 10;             // need ≥ 10 rises before chronic-noise silencing
-  const CHRONIC_NOISE_LONG_MS = 4 * 60 * 60 * 1000; // "long" = persists ≥ 4 hours
   const CHRONIC_NOISE_NEVER_CLEAR_FRAC = 0.5;     // ≥ 50% of rises stayed alive past CHRONIC_NOISE_LONG_MS without user clearing
+  // v0.13.2 — SHORT_CLEAR_MS / CHRONIC_NOISE_LONG_MS now live at module scope
+  // (shared with the pure classifyClearDuration helper).
 
   /**
    * Re-evaluate auto-silencing rules for a family rollup after its counters
@@ -363,11 +384,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // running EWMA on duration is enough to drive a downgrade decision.
     t.medianDurationMs = t.medianDurationMs === 0 ? duration : Math.round((t.medianDurationMs + duration) / 2);
     if (duration > t.longestDurationMs) t.longestDurationMs = duration;
-    if (duration <= SHORT_CLEAR_MS) {
+    // v0.13.2 — single source of truth for the short/long classification.
+    const { shortClear, longActive } = classifyClearDuration(duration);
+    if (shortClear) {
       t.shortClearsCount++;
       appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'shortClear', ts, durationMs: duration });
     }
-    if (duration >= CHRONIC_NOISE_LONG_MS) {
+    if (longActive) {
       t.neverClearedCount++;
       appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'longActive', ts, durationMs: duration });
     }

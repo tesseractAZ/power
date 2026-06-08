@@ -58,6 +58,7 @@ import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
 import { getWeather } from './weather.js';
+import type { WeatherForecast } from './weather.js';
 import { computePackRiskV2 } from './ml.js';
 import { initAnalyticsClient } from './analyticsClient.js';
 import {
@@ -550,6 +551,17 @@ app.get('/api/nws-alerts', async (req, reply) =>
 // the underlying forecast with per-hour ensembleSources + disagreement
 // metadata so consumers can see WHY the bands are wider on hours with
 // high inter-source disagreement.
+// v0.13.3 — map weather hours to recorder GHI rows. Pure + exported so both the
+// /api/weather/ensemble handler and the periodic persistence tick (below) share
+// one mapping, and it's unit-testable without a recorder or HTTP server.
+export function weatherGhiRows(w: WeatherForecast): Array<{ epochMs: number; radiationWm2: number; cloudCoverPct: number }> {
+  return w.hours.map((h) => ({
+    epochMs: h.ts,
+    radiationWm2: h.radiationWm2,
+    cloudCoverPct: h.cloudCoverPct,
+  }));
+}
+
 app.get('/api/weather/ensemble', async () => {
   const w = await getWeather((m) => app.log.info(m));
   if (!w) return { error: 'no weather available' };
@@ -561,13 +573,7 @@ app.get('/api/weather/ensemble', async () => {
   // (cached or fresh) fetch is cheap and never duplicates rows.
   if (recorder && w.hours.length > 0) {
     try {
-      recorder.recordWeatherGhi(
-        w.hours.map((h) => ({
-          epochMs: h.ts,
-          radiationWm2: h.radiationWm2,
-          cloudCoverPct: h.cloudCoverPct,
-        })),
-      );
+      recorder.recordWeatherGhi(weatherGhiRows(w));
     } catch (e: any) {
       app.log.warn(`weather: GHI persistence failed (${e?.message ?? e}) — live forecast unaffected`);
     }
@@ -1393,11 +1399,22 @@ app.get('/api/backtest/forecast', async (req, reply) => {
   // Use the typical-PV (recent average) as the v1 forecaster.
   // Higher-fidelity backtests can swap in the Bayesian or full forecast.
   let typicalWhPerHour = 0;
+  // v0.13.3 — P3-4: prefer the 24-slot diurnal curve over the flat
+  // typicalPvWhPerDay/24 scalar. The flat predictor returns the same Wh at 2am
+  // and noon, so it has ~no correlation with real diurnal PV (measured
+  // r2≈-0.0006). v0.13.1 exposed typicalPvCurveWhPerHour on the forecast report
+  // (night≈0, noon≈peak); pass it through so the backtest builds a diurnal
+  // baseline via diurnalBaselinePredictor(curve)[hourOfDay] and scores a real R².
+  // typicalWhPerHour stays as a back-comp fallback for builders without the curve.
+  let typicalPvCurveWhPerHour: number[] | undefined;
   try {
     const fc: any = await analytics.report('forecast');
     typicalWhPerHour = (fc?.typicalPvWhPerDay ?? 0) / 24;
+    typicalPvCurveWhPerHour = fc?.typicalPvCurveWhPerHour;
   } catch { /* */ }
-  const score = await analytics.report('backtest', { dpuSns: dpus, hoursBack: 168, typicalWhPerHour });
+  const score = await analytics.report('backtest', {
+    dpuSns: dpus, hoursBack: 168, typicalWhPerHour, typicalPvCurveWhPerHour,
+  });
   return cached(req, reply, { model: 'typical-day-baseline', ...score }, 600);
 });
 
@@ -1425,6 +1442,29 @@ app.get('/ws', { websocket: true }, (socket) => {
 });
 
 const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m));
+
+// v0.13.3 — periodic GHI persistence. v0.13.1 only persisted the weather
+// irradiance series from the /api/weather/ensemble HTTP handler, so GHI rows
+// (which back forecast-skill days 4-7 and the soiling estimator) only landed
+// when a dashboard was open. This tick calls getWeather() + recordWeatherGhi()
+// on a ~45-min cadence so GHI persists reliably headless too. getWeather has a
+// 2h in-memory cache, so most ticks are a cheap cache hit; recordWeatherGhi is
+// change-detected + idempotent, so re-persisting the same rows never dupes.
+const GHI_PERSIST_INTERVAL_MS = 45 * 60_000;
+const ghiPersistTick = setInterval(() => {
+  void (async () => {
+    try {
+      const w = await getWeather((m) => app.log.debug(m));
+      if (recorder && w && w.hours.length > 0) {
+        recorder.recordWeatherGhi(weatherGhiRows(w));
+        app.log.debug(`weather: periodic GHI persistence (${w.hours.length} hours)`);
+      }
+    } catch (e: any) {
+      app.log.debug(`weather: periodic GHI persistence skipped (${e?.message ?? e})`);
+    }
+  })();
+}, GHI_PERSIST_INTERVAL_MS);
+ghiPersistTick.unref();
 
 // MQTT is best-effort; if it fails, REST polling still works.
 // v0.10.4 — start with indefinite retry-with-backoff. A transient DNS
@@ -1930,6 +1970,7 @@ app.log.info(`EcoFlow panel API listening on http://${config.host}:${config.port
 const shutdown = async () => {
   app.log.info('shutting down');
   stopPoll();
+  clearInterval(ghiPersistTick);
   stopMqtt?.();
   monitor.stop();
   stopTelnet?.();
