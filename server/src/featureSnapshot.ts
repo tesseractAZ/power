@@ -65,10 +65,16 @@ export interface SnapshotRecord {
    * onlineLR.snapshotToLrFeatures can consume them with no remapping.
    *
    * Only populated for pack-level alerts (where alert.packNum is set).
-   * For SHP2/EVSE/system-level alerts, this is null and onlineLR falls
-   * back to its proxy logic (which already correctly returns null and
-   * skips the SGD update — the training pipeline skips no-features
-   * outcomes anyway).
+   * For SHP2/EVSE/system-level alerts, this is null.
+   *
+   * v0.13.0 — earlier comment claimed onlineLR's proxy fallback "returns
+   * null and skips the SGD update" for non-pack alerts. That was WRONG: the
+   * proxy reads pack_* keys that are absent from system snapshots and so
+   * yields an ALL-ZERO vector, not null. With x=0 only the bias moved, so
+   * every non-pack outcome silently inflated the pack-risk baseline (audit
+   * P0-2). The outcome is still PERSISTED to alert-outcomes.jsonl for audit,
+   * but onlineLR.updateFromOutcome now refuses to train on a degenerate
+   * (all-zero / NaN) vector — category mismatch, no pack signal to learn.
    */
   lrFeatures?: Record<FeatureName, number> | null;
 }

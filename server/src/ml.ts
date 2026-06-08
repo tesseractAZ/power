@@ -231,7 +231,7 @@ let modelCacheSourcePath: string | null = null;
 const MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /** Built-in default model — used when no trained model file exists yet. */
-const DEFAULT_MODEL: LrModel = {
+export const DEFAULT_MODEL: LrModel = {
   version: 'lr-heuristic-baseline-v1-builtin',
   trainedAt: 0,
   samples: 0,
@@ -363,8 +363,14 @@ export function saveModel(model: LrModel): void {
  *
  * Returns `null` when MODEL_PATH doesn't exist or fails to parse — caller
  * treats that as "no baseline to compare against" (drift is unknown, not 0).
+ *
+ * v0.13.0 — exported so `models/modelHealth.ts` can resolve a TRUE baseline
+ * for its shadow-vs-baseline drift report. It previously called `loadModel()`,
+ * which prefers the shadow file → baseline and shadow were the same object →
+ * every weightDelta was 0 and onlineSamples was 0, even after real online
+ * updates had run. This is the baseline-only read both call sites need.
  */
-function loadBaselineModelOnly(): LrModel | null {
+export function loadBaselineModelOnly(): LrModel | null {
   if (!existsSync(MODEL_PATH)) return null;
   try {
     return JSON.parse(readFileSync(MODEL_PATH, 'utf8')) as LrModel;

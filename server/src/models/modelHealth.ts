@@ -15,7 +15,7 @@
 
 import { computeFamilyStats } from '../alertOutcomes.js';
 import { loadShadowModel } from './onlineLR.js';
-import { loadModel as loadBaseLrModel } from '../ml.js';
+import { loadBaselineModelOnly, DEFAULT_MODEL } from '../ml.js';
 import { FEATURE_NAMES } from '../ml.js';
 
 export interface ModelHealthReport {
@@ -30,6 +30,15 @@ export interface ModelHealthReport {
     totalDriftL2: number;
     /** Samples seen since last full retrain. */
     onlineSamples: number;
+    /**
+     * v0.13.0 — Online samples that ACTUALLY moved the weights (any
+     * |Δw| > EPSILON between baseline and shadow). When online updates run
+     * but the shadow ends up identical to the baseline — the P0-2 no-op
+     * regression — this reads 0 while `onlineSamples` still shows the raw
+     * counter, making the no-op visible instead of silently "13 updates,
+     * 0 drift". Equals `onlineSamples` in the healthy case.
+     */
+    effectiveOnlineSamples: number;
   };
   alertFamilies: ReturnType<typeof computeFamilyStats>;
   /** Total alerts with operator verdicts. */
@@ -38,21 +47,35 @@ export interface ModelHealthReport {
   overallPrecision: number | null;
 }
 
+/** Below this magnitude a weight delta is treated as "no movement" — guards
+ *  against float noise counting as real drift in effectiveOnlineSamples. */
+const DELTA_EPSILON = 1e-9;
+
 export function computeModelHealth(): ModelHealthReport {
-  const baseline = loadBaseLrModel();
+  // v0.13.0 — Resolve a TRUE baseline. Previously this called `loadModel()`,
+  // which PREFERS the shadow file (pack-risk-lr-v1-online.json) when it exists
+  // — so `baseline` and `shadow` were the SAME on-disk artifact, every
+  // weightDelta was 0, and onlineSamples was 0 even after real online updates
+  // had run. `loadBaselineModelOnly()` reads MODEL_PATH (the frozen baseline)
+  // directly; when no trained baseline exists yet we fall back to the in-code
+  // DEFAULT_MODEL rather than the shadow, so the comparison stays honest.
+  const baseline = loadBaselineModelOnly() ?? DEFAULT_MODEL;
   const shadow = loadShadowModel();
   const weightDeltas: Record<string, number> = {};
   let l2sq = 0;
+  let movedDeltas = 0;
   for (const name of FEATURE_NAMES) {
     const b = baseline.weights[name] ?? 0;
     const s = shadow.weights[name] ?? 0;
     const d = s - b;
     weightDeltas[name] = d;
     l2sq += d * d;
+    if (Math.abs(d) > DELTA_EPSILON) movedDeltas++;
   }
   const biasDelta = shadow.bias - baseline.bias;
   weightDeltas['_bias'] = biasDelta;
   l2sq += biasDelta * biasDelta;
+  if (Math.abs(biasDelta) > DELTA_EPSILON) movedDeltas++;
 
   const families = computeFamilyStats();
   let totalReal = 0;
@@ -85,6 +108,12 @@ export function computeModelHealth(): ModelHealthReport {
       weightDeltas,
       totalDriftL2: Math.sqrt(l2sq),
       onlineSamples: Math.max(0, shadow.samples - baseline.samples),
+      // v0.13.0 — honest count: the raw online-sample delta, but only when
+      // SOMETHING actually moved. If every weight (and bias) is within
+      // EPSILON of the baseline, no online learning took effect regardless of
+      // what the counter claims, so report 0 — surfacing a P0-2-style no-op.
+      effectiveOnlineSamples:
+        movedDeltas > 0 ? Math.max(0, shadow.samples - baseline.samples) : 0,
     },
     alertFamilies: families,
     labeledAlertCount: labeledCount,

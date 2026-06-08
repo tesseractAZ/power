@@ -46,6 +46,43 @@ export interface LifetimeTotals {
   watermarkMs: number;
 }
 
+// v0.13.0 — per-pack lifetime baseline (absolute factory-register snapshot
+// captured the first time a (sn, packNum) pair is seen). Home totals use
+// the DELTA from this baseline, not the absolute register. See
+// computeBmsBatteryTotals / packDeltaWh.
+export interface PackBaseline {
+  /** accuChgMah at first sight of this pack. */
+  chgMah: number;
+  /** accuDsgMah at first sight of this pack. */
+  dsgMah: number;
+}
+
+/**
+ * v0.13.0 — pure baseline-subtraction math (exported for unit testing).
+ *
+ * Convert one pack's BMS lifetime registers into the home-relative Wh that
+ * have flowed since `base` was captured. Returns 0 for a missing register
+ * (BMS readback dropout) or a missing baseline (caller hasn't captured one
+ * yet). Deltas are floored at 0 so a register that reads BELOW its baseline
+ * — only possible from a corrupt/rolled-back BMS read — can't decrement the
+ * home counter. Because both registers are re-zeroed at the same instant,
+ * `dsgWh ≤ chgWh` holds whenever the underlying deltas do, so the RTE clamp
+ * downstream stops firing on healthy data.
+ */
+export function packDeltaWh(
+  pk: { accuChgMah: number | null; accuDsgMah: number | null },
+  base: PackBaseline | undefined,
+  mahToWh: number,
+): { chgWh: number; dsgWh: number } {
+  if (!base) return { chgWh: 0, dsgWh: 0 };
+  const chgDelta = pk.accuChgMah != null ? pk.accuChgMah - base.chgMah : 0;
+  const dsgDelta = pk.accuDsgMah != null ? pk.accuDsgMah - base.dsgMah : 0;
+  return {
+    chgWh: Math.max(0, chgDelta) * mahToWh,
+    dsgWh: Math.max(0, dsgDelta) * mahToWh,
+  };
+}
+
 export interface Recorder {
   insertSnapshot: (snap: FleetSnapshot) => void;
   query: (sn: string, metric: string, sinceMs: number, untilMs: number, bucketSec?: number) => Array<{ ts: number; value: number }>;
@@ -439,6 +476,39 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
    * BMS readback hiccup doesn't drop the count).
    */
   const PACK_MAH_TO_WH = (51.2 * 2) / 1_000;   // 102.4 V × Ah = Wh; 1000 mAh = 1 Ah
+
+  // v0.13.0 — per-pack baseline capture. The accu* registers are FACTORY-
+  // lifetime counters: packs ship with accuDsgMah > accuChgMah from bench
+  // cycling, so summing the ABSOLUTE values gave a permanent discharge-
+  // favoring offset (~44→121 kWh in the audit window). That made lifetime
+  // discharge always exceed charge, tripping the clamp below 926× and
+  // flat-lining HA's discharge tile. Fix: subtract a per-(sn,packNum)
+  // baseline captured once at install so DELTAS — the energy that's
+  // actually flowed since we started watching — drive the home totals.
+  // Both counters zero at install, so discharge ≤ charge holds naturally.
+  const packBaseKey = (sn: string, packNum: number, kind: 'chg' | 'dsg') =>
+    `pack_base_${sn}_${packNum}_${kind}`;
+  const bmsBaselines: Map<string, PackBaseline> = new Map();
+  const loadPackBaseline = (sn: string, packNum: number): PackBaseline | undefined => {
+    const cacheKey = `${sn}|${packNum}`;
+    const cached = bmsBaselines.get(cacheKey);
+    if (cached) return cached;
+    const chg = readLifetime(packBaseKey(sn, packNum, 'chg'));
+    const dsg = readLifetime(packBaseKey(sn, packNum, 'dsg'));
+    // ts === 0 on both means no baseline has been persisted yet.
+    if (chg.ts === 0 && dsg.ts === 0) return undefined;
+    const base: PackBaseline = { chgMah: chg.wh, dsgMah: dsg.wh };
+    bmsBaselines.set(cacheKey, base);
+    return base;
+  };
+  const savePackBaseline = (sn: string, packNum: number, base: PackBaseline) => {
+    const now = Date.now();
+    writeLifetime(packBaseKey(sn, packNum, 'chg'), base.chgMah, now);
+    writeLifetime(packBaseKey(sn, packNum, 'dsg'), base.dsgMah, now);
+    bmsBaselines.set(`${sn}|${packNum}`, base);
+    log(`recorder: v0.13.0 captured BMS baseline sn=${sn} pack=${packNum} baseChg=${base.chgMah.toFixed(0)}mAh baseDsg=${base.dsgMah.toFixed(0)}mAh`);
+  };
+
   const computeBmsBatteryTotals = (snap: FleetSnapshot): { chargeWh: number; dischargeWh: number } => {
     let chargeWh = 0;
     let dischargeWh = 0;
@@ -457,8 +527,17 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       if (d.projection?.kind !== 'dpu') continue;
       if (sourceSns.size > 0 && !sourceSns.has(d.sn)) continue;
       for (const pk of (d.projection as DpuProjection).packs) {
-        if (pk.accuChgMah != null) chargeWh += pk.accuChgMah * PACK_MAH_TO_WH;
-        if (pk.accuDsgMah != null) dischargeWh += pk.accuDsgMah * PACK_MAH_TO_WH;
+        // v0.13.0 — a newly-seen pack (install, pack-swap, hot-add)
+        // captures its own baseline lazily so its absolute factory
+        // offset never leaks into the home totals.
+        let base = loadPackBaseline(d.sn, pk.num);
+        if (!base && (pk.accuChgMah != null || pk.accuDsgMah != null)) {
+          base = { chgMah: pk.accuChgMah ?? 0, dsgMah: pk.accuDsgMah ?? 0 };
+          savePackBaseline(d.sn, pk.num, base);
+        }
+        const { chgWh, dsgWh } = packDeltaWh(pk, base, PACK_MAH_TO_WH);
+        chargeWh += chgWh;
+        dischargeWh += dsgWh;
       }
     }
     return { chargeWh, dischargeWh };
@@ -495,11 +574,58 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     }
   }
 
+  // v0.13.0 — one-time re-zero to per-pack baselines.
+  //
+  // Before this, computeBmsBatteryTotals summed the ABSOLUTE accu* factory
+  // registers. DPU packs ship with accuDsgMah > accuChgMah (bench cycling),
+  // so the home discharge total permanently exceeded charge — the RTE clamp
+  // below fired on every rollup (926× in the 7-day audit) and pinned HA's
+  // discharge tile. Re-zeroing math now lives in packDeltaWh; this block
+  // performs the install-time capture exactly once, gated by a marker file
+  // like the v0.9.74 one above so it never re-runs.
+  //
+  // We (a) capture each currently-visible pack's baseline from the live
+  // snapshot and (b) reset the surfaced fleet battery counters to 0 so the
+  // freshly-zeroed deltas drive them from here on. HA treats the one-time
+  // drop as a meter reset (state_class: total_increasing); every subsequent
+  // day's delta is correct. Packs not visible right now capture their
+  // baseline lazily on first sight (see computeBmsBatteryTotals).
+  const BMS_BASELINE_FLAG = resolve(dirname(dbPath), '.bms-baseline-v1.flag');
+  if (!existsSync(BMS_BASELINE_FLAG)) {
+    log('recorder: v0.13.0 first run — capturing per-pack BMS baselines and re-zeroing fleet battery counters');
+    try {
+      const snap = store.get();
+      for (const d of Object.values(snap.devices)) {
+        if (d.projection?.kind !== 'dpu') continue;
+        for (const pk of (d.projection as DpuProjection).packs) {
+          if (pk.accuChgMah == null && pk.accuDsgMah == null) continue;
+          if (loadPackBaseline(d.sn, pk.num)) continue; // already captured
+          savePackBaseline(d.sn, pk.num, { chgMah: pk.accuChgMah ?? 0, dsgMah: pk.accuDsgMah ?? 0 });
+        }
+      }
+    } catch (e: any) {
+      log(`recorder: v0.13.0 baseline capture deferred (snapshot not ready: ${e?.message ?? e}) — packs baseline lazily on first sight`);
+    }
+    for (const key of ['fleet_battery_charge_wh', 'fleet_battery_discharge_wh']) {
+      writeLifetime(key, 0, Date.now());
+    }
+    try {
+      mkdirSync(dirname(BMS_BASELINE_FLAG), { recursive: true });
+      writeFileSync(BMS_BASELINE_FLAG, `baselined at ${new Date().toISOString()}\n`, { mode: 0o644 });
+    } catch (e: any) {
+      log(`recorder: could not write baseline marker ${BMS_BASELINE_FLAG}: ${e?.message ?? e} (next boot will re-capture — non-fatal but noisy)`);
+    }
+  }
+
   // Track the highest BMS lifetime ever observed across this process so a
   // momentary readback dropout (BMS returns 0 / null mid-poll) doesn't
   // appear as a "battery emptied" event to HA's Energy Dashboard.
   let bmsChargeFloor = 0;
   let bmsDischargeFloor = 0;
+  // v0.13.0 — last-warned clamp state so identical clamps go silent (see the
+  // RTE guard in rollupLifetime). Starts false: the first clamp, if any,
+  // warns once; the WARN only re-fires after the clamp releases and re-trips.
+  let bmsClampActive = false;
   // Seed the floors from whatever was last persisted (a fresh process must
   // not regress the persisted Wh number; HA reads that with state_class:
   // total_increasing and would treat a step-down as a reset).
@@ -554,12 +680,25 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // the charge value. Floors stay intact (monotonicity preserved); we only
     // clamp the written-out number and WARN so the data-quality issue stays
     // visible without HA's Energy tiles contradicting themselves.
+    //
+    // v0.13.0 — with per-pack baselines in place this clamp is now a
+    // last-resort guard, not the steady state. RATE-LIMIT its WARN to once
+    // per state transition (clamping↔not-clamping): the old code logged on
+    // every rollup, so a single stuck condition spewed 288 identical lines/
+    // day (926× across the audit window). We only emit when the clamp state
+    // actually changes.
     let chargeOut = bmsChargeFloor;
     let dischargeOut = bmsDischargeFloor;
-    if (dischargeOut > chargeOut) {
-      log(`recorder: WARN clamping lifetime battery discharge ${dischargeOut.toFixed(0)} Wh to charge ${chargeOut.toFixed(0)} Wh (RTE > 100% is impossible; raw floors charge=${bmsChargeFloor.toFixed(0)} discharge=${bmsDischargeFloor.toFixed(0)})`);
+    const clamping = dischargeOut > chargeOut;
+    if (clamping) {
+      if (!bmsClampActive) {
+        log(`recorder: WARN clamping lifetime battery discharge ${dischargeOut.toFixed(0)} Wh to charge ${chargeOut.toFixed(0)} Wh (RTE > 100% is impossible; raw floors charge=${bmsChargeFloor.toFixed(0)} discharge=${bmsDischargeFloor.toFixed(0)})`);
+      }
       dischargeOut = chargeOut;
+    } else if (bmsClampActive) {
+      log(`recorder: lifetime battery discharge ≤ charge again — clamp released (charge=${chargeOut.toFixed(0)} discharge=${dischargeOut.toFixed(0)} Wh)`);
     }
+    bmsClampActive = clamping;
     writeLifetime('fleet_battery_charge_wh', chargeOut, now);
     writeLifetime('fleet_battery_discharge_wh', dischargeOut, now);
   };

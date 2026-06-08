@@ -202,6 +202,26 @@ export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) =
     return { updated: false, prevLogit: 0, newLogit: 0, label: null, reason: 'no features captured' };
   }
 
+  // v0.13.0 — degenerate-feature guard. A non-pack outcome (system / SHP2 /
+  // EVSE family — no packNum, no captured lrFeatures) collapses to an
+  // all-zero proxy vector. With x=0 the gradient `error*x + L2*w` loses its
+  // data term and ONLY the bias moves, so each such outcome silently
+  // inflates the pack-risk baseline without any discrimination (audit P0-2:
+  // 13 system-level labels walked the baseline 2.5%→12.9%, weightDeltas all
+  // exactly 0). Skip the SGD step entirely when the vector carries no usable
+  // signal — all features zero, or any NaN/Inf that would poison the weights.
+  let anyNonZero = false;
+  for (const name of FEATURE_NAMES) {
+    const x = lrFeatures[name] ?? 0;
+    if (!Number.isFinite(x)) {
+      return { updated: false, prevLogit: 0, newLogit: 0, label: null, reason: 'degenerate-features' };
+    }
+    if (x !== 0) anyNonZero = true;
+  }
+  if (!anyNonZero) {
+    return { updated: false, prevLogit: 0, newLogit: 0, label: null, reason: 'degenerate-features' };
+  }
+
   const label = outcomeLabel(outcome.outcome);
   const sampleWeight = outcome.outcome === 'failed' ? FAILED_LABEL_WEIGHT : 1.0;
 

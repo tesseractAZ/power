@@ -3,6 +3,32 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.13.0 — 2026-06-07
+
+**Data-integrity fixes from the 7-day real-world performance audit (batch 1 of 4).**
+
+- **Fixed the corrupted/frozen Home Assistant lifetime *discharge* tile.** Delta Pro
+  Ultra packs ship with their absolute BMS `accuDsgMah` > `accuChgMah` (factory/bench
+  cycling), so summing the absolute registers made home lifetime discharge permanently
+  exceed charge — tripping the "RTE > 100% impossible" clamp **926×** over the audit
+  window and pinning HA's discharge counter flat. The recorder now captures a per-pack
+  baseline once at install (`.bms-baseline-v1.flag`, mirroring the v0.9.74 SHP2 reset)
+  and accumulates the *delta* since baseline, so discharge ≤ charge holds naturally.
+  Lifetime counters re-zero once (HA treats it as a meter reset); every subsequent
+  day's delta is correct. The clamp stays as a last-resort guard but its WARN is now
+  rate-limited to once per state transition (was ~288 identical lines/day).
+- **Fixed the online pack-risk model "learning" nothing.** System-level alert outcomes
+  (soc-low, offline, …) carry no `packNum`, so they produced all-zero feature vectors;
+  the SGD step then moved only the bias (+0.044 each step), walking every pack's baseline
+  risk 2.5% → 12.9% with zero ability to discriminate. `updateFromOutcome` now refuses to
+  train on a degenerate (all-zero / NaN / Inf) feature vector.
+- **Fixed `models/health` reporting "0 online updates."** It loaded the shadow model for
+  *both* the baseline and shadow comparison, so all weight deltas were zero by
+  construction. It now reads the true on-disk baseline (`loadBaselineModelOnly`), and adds
+  an `effectiveOnlineSamples` counter so a future no-op regression is visible.
+- Tests: per-pack baseline math (discharge ≤ charge with discharge-favoring registers),
+  degenerate-feature guard, and true-baseline model-health resolution.
+
 ## 0.12.1 — 2026-06-04
 
 **Fix: a configurable lead-in silence is now prepended to every broadcast/alarm announcement, so all speakers can sync up before the chime.**
