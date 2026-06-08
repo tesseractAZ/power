@@ -360,21 +360,36 @@ export interface StatusHeader {
 export function statusHeader(h: StatusHeader, width: number): string {
   const now = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
-  const ts = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`;
+  // Compressed to date + HH:MM (was HH:MM:SS) — dropping seconds reclaims the
+  // 3 cols that previously pushed the MODE value off the 80-col line.
+  const ts = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`;
 
-  const left =
-    c.cyanB('▎') + c.whiteB(' ' + h.station) +
-    c.grey('  │  ') + c.grey('TS ') + c.white(ts);
+  // Tightened separators (was "  │  ", 5 cols → " │ ", 3 cols) and dropped the
+  // redundant "TS " label so the full line fits in 80 with the MODE value intact.
+  const tsPart = c.grey(' │ ') + c.white(ts);   // " │ 2026-…"
   const mid = c.grey('UP ') + c.white(h.uptime);
+  // MODE leads the right segment so the operator always sees ISLANDED vs
+  // GRID-TIED — at 80 cols it must never be the truncated tail. The OPR seat
+  // is low-value and trails MODE, so it (not MODE) is the first thing to go.
   const right =
     c.grey('MODE ') + STATE_COLOR[h.modeState](h.mode) +
-    (h.operator ? c.grey('  │  OPR ') + c.white(h.operator) : '');
+    (h.operator ? c.grey(' │ OPR ') + c.white(h.operator) : '');
 
-  // Stretch with gaps between left/mid/right.
-  const gap1 = Math.max(1, Math.floor((width - visLen(left) - visLen(mid) - visLen(right)) / 2));
-  const gap2 = Math.max(1, width - visLen(left) - visLen(mid) - visLen(right) - gap1);
-  if (gap1 + gap2 < 2) return truncate(`${left}  ${mid}  ${right}`, width);
-  return left + ' '.repeat(gap1) + mid + ' '.repeat(gap2) + right;
+  // Priority: the right block (UP + MODE) and the timestamp are kept intact;
+  // only the station label is shortened if the line would overrun `width`.
+  const rightBlock = mid + '  ' + right;            // "UP …   MODE …"
+  const fixedW = 2 /*▎ + space*/ + visLen(tsPart) + 2 /*min gap*/ + visLen(rightBlock);
+  const stationBudget = width - fixedW;
+  if (stationBudget < 1) {
+    // Pathological narrow terminal — keep MODE, drop the rest.
+    return truncate(right, width);
+  }
+  const stationFit = h.station.length <= stationBudget
+    ? h.station
+    : truncate(h.station, stationBudget);
+  const left = c.cyanB('▎') + c.whiteB(' ' + stationFit) + tsPart;
+  const gap = Math.max(2, width - visLen(left) - visLen(rightBlock));
+  return left + ' '.repeat(gap) + rightBlock;
 }
 
 /* ─── footer — hotkey legend with current screen highlighted ──────────── */

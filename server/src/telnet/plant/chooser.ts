@@ -145,9 +145,13 @@ function optionCard(
   // Rule.
   lines.push(border(BOX.v) + c.grey(' '.repeat(2) + '─'.repeat(inner - 4) + '  ') + border(BOX.v));
 
-  // Body lines.
+  // Body lines — word-wrap to the inner content width (inner minus the 2-col
+  // indent) so long sentences flow to the next line instead of being hard-
+  // clipped mid-word at the box wall.
   for (const body of opt.lines) {
-    lines.push(border(BOX.v) + padEnd('  ' + c.grey(body), inner) + border(BOX.v));
+    for (const wrapped of wrapText(body, inner - 2)) {
+      lines.push(border(BOX.v) + padEnd('  ' + c.grey(wrapped), inner) + border(BOX.v));
+    }
   }
   // Indicator at bottom if highlighted.
   if (highlighted) {
@@ -157,6 +161,36 @@ function optionCard(
   }
   lines.push(bot);
   return lines;
+}
+
+/**
+ * Word-wrap a plain (un-coloured) string to lines no wider than `width`.
+ * Mirrors the private helper in ../screens.ts (which isn't exported). An empty
+ * input yields a single empty line so paragraph spacers survive the wrap.
+ */
+function wrapText(s: string, width: number): string[] {
+  const w = Math.max(8, width);
+  const lines: string[] = [];
+  let cur = '';
+  for (let word of s.split(/\s+/).filter(Boolean)) {
+    while (word.length > w) {
+      // Hard-break a word that cannot fit on a line by itself.
+      if (cur) {
+        lines.push(cur);
+        cur = '';
+      }
+      lines.push(word.slice(0, w));
+      word = word.slice(w);
+    }
+    if (!cur) cur = word;
+    else if (cur.length + 1 + word.length <= w) cur += ' ' + word;
+    else {
+      lines.push(cur);
+      cur = word;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [''];
 }
 
 /** Convenience — initial chooser state, defaulting to PLANT OPERATOR. */

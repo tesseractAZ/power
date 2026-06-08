@@ -2,7 +2,7 @@
  * v0.12.0 — Backup-pool state-of-charge (SoC) audible alarm.
  *
  * Fires an escalating audible announcement each time the SHP2 backup pool SoC
- * crosses DOWN through a threshold: 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %, with
+ * crosses DOWN through a threshold: 50 / 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %, with
  * the alarm PRIORITY rising as the reserve gets lower (Low → Medium → High →
  * Critical). One announcement per downward crossing — not once per tick — with
  * hysteresis so a value hovering on a boundary doesn't chatter, and persisted
@@ -37,6 +37,7 @@ export interface SocThreshold {
  * for 40/30/20/15/10/8/4/2 % with "increased priority as capacity gets lowest".
  */
 export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
+  { pct: 50, priority: 'low' },
   { pct: 40, priority: 'low' },
   { pct: 30, priority: 'low' },
   { pct: 20, priority: 'medium' },

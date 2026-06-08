@@ -83,3 +83,12 @@ LABEL \
     org.opencontainers.image.revision="${BUILD_REF}" \
     org.opencontainers.image.created="${BUILD_DATE}" \
     org.opencontainers.image.licenses="MIT"
+
+# v0.14.0 — promote the build metadata to runtime ENV so /api/version reports the
+# real release instead of "dev". These were ARG-only (consumed by LABEL above) and
+# therefore absent from the running process's environment, so process.env.BUILD_VERSION
+# was always undefined → the version endpoint, GUI/TUI footer and support diagnostics
+# all read "dev" on every published image.
+ENV BUILD_VERSION=${BUILD_VERSION} \
+    BUILD_DATE=${BUILD_DATE} \
+    BUILD_REF=${BUILD_REF}

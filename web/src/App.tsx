@@ -125,7 +125,7 @@ function NormalApp() {
 
   return (
     <div className="min-h-full p-4 md:p-6 max-w-[1800px] mx-auto">
-      <header className="flex items-center justify-between mb-4">
+      <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">EcoFlow Home Energy</h1>
           <div className="text-xs text-muted">
@@ -133,41 +133,41 @@ function NormalApp() {
             updated {fmtRel(snapshot?.generatedAt ?? null)}
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs">
-          <div className="flex bg-panel border border-line rounded-lg overflow-hidden">
+        <div className="flex items-center gap-2 text-xs min-w-0">
+          <div className="flex bg-panel border border-line rounded-lg overflow-x-auto max-w-full">
             <button
               onClick={() => setTab('dashboard')}
-              className={`px-3 py-1 transition-colors ${tab === 'dashboard' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'dashboard' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
               Dashboard
             </button>
             <button
               onClick={() => setTab('solar')}
-              className={`px-3 py-1 transition-colors ${tab === 'solar' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'solar' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
               Solar
             </button>
             <button
               onClick={() => setTab('thermal')}
-              className={`px-3 py-1 transition-colors ${tab === 'thermal' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'thermal' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
               Battery
             </button>
             <button
               onClick={() => setTab('evse')}
-              className={`px-3 py-1 transition-colors ${tab === 'evse' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'evse' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
               Charger
             </button>
             <button
               onClick={() => setTab('strategy')}
-              className={`px-3 py-1 transition-colors ${tab === 'strategy' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'strategy' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
               Strategy
             </button>
             <button
               onClick={() => setTab('alerts')}
-              className={`px-3 py-1 transition-colors flex items-center gap-1.5 ${tab === 'alerts' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap flex items-center gap-1.5 ${tab === 'alerts' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
               Alerts
               {alertBadgeCount > 0 && (
@@ -182,14 +182,14 @@ function NormalApp() {
             </button>
             <button
               onClick={() => setTab('alert-settings')}
-              className={`px-3 py-1 transition-colors ${tab === 'alert-settings' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'alert-settings' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
               title="Turn alarm annunciation on/off per ISA priority, set the chime repeat, and preview announcements."
             >
               Alert Settings
             </button>
             <button
               onClick={() => setTab('predictive')}
-              className={`px-3 py-1 transition-colors flex items-center gap-1.5 ${tab === 'predictive' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap flex items-center gap-1.5 ${tab === 'predictive' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
               Predictive
               {predictiveBadgeCount > 0 && (

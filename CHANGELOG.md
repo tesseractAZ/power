@@ -3,6 +3,56 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.14.0 — 2026-06-08
+
+**Battery-runway audible alarms + a 6-agent validation audit of the live system.**
+Adds the two audible warnings requested (50% advisory + a forecast-driven
+"will-run-out-before-solar" alarm), fixes the runway model that would have made the
+latter cry wolf, and clears the highest-value bugs a full telemetry/GUI/TUI audit
+surfaced. (Also carries the v0.13.7 work, which was built but never deployed.)
+
+**New — battery alarms**
+- **50% SoC advisory.** Added `{50%, Low}` to the top of the SoC alarm ladder
+  (now 50/40/30/20/15/10/8/4/2). Single soft advisory chime on each downward cross
+  of 50%; booting at ≤50% does not retro-fire it.
+- **Projection-depletion alarm (`runwayAlarm.ts`).** Rides the 24h off-grid runway
+  projection and announces — escalating Low→Medium→High→Critical — when the pool is
+  forecast to reach its **reserve floor** (or empty) *before solar recovers*, so you
+  can shed load while the pool is still healthy rather than only once the SoC ladder
+  has already fallen. Re-announces at most hourly while it persists, re-arms on
+  recovery, persists across restarts. New options `BATTERY_RUNWAY_ALARM_ENABLED`,
+  `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN`.
+
+**Fixes (from the audit)**
+- **Runway load model** (`computeRunway`) now uses the forecast's per-hour load curve
+  instead of a flat 1h-trailing average. The trailing average over-weighted transient
+  EVSE/AC bursts (~2× real draw), producing a false `hoursToEmpty` that contradicted
+  the forecast's own never-empty projection — and would have made the new alarm fire
+  constantly while charging. The runway and the forecast SoC trough now derive from one
+  shared load model.
+- **Quiet-hours gate for advisory chimes.** `broadcast.announce()` previously bypassed
+  quiet hours; Low/Medium tiers (50/40% advisories, reserve-runway caution) now stay
+  silent 22:00–06:00 while High/Critical still annunciate.
+- **Web top-menu overflow.** The 8-tab nav was a non-wrapping flex row with
+  `overflow-hidden` that clipped the rightmost tabs (Predictive/Settings) on narrow
+  viewports (HA Ingress iframe, tablet, phone). Now scrolls horizontally + the header
+  stacks responsively, so every tab stays reachable.
+- **TUI GEN AC voltage** showed "0.241 V" (a 1000× unit error formatting volts through
+  a millivolt formatter) and a spurious ▲ warn glyph — fixed across all Core GEN tabs.
+- **TUI SCADA header** no longer truncates away the MODE value (ISLANDED/GRID-TIED) at
+  80 cols; **mode-chooser** card text word-wraps instead of clipping mid-word.
+- **`/api/version`** now reports the real release instead of `"dev"` — the Dockerfile
+  promotes `BUILD_VERSION`/`BUILD_DATE`/`BUILD_REF` to runtime `ENV` (they were
+  ARG-only, used by `LABEL` but never exported to the process).
+
+**Audit notes** — validated healthy: probabilistic forecast ordering, lifetime-energy
+monotonicity, novelty mapping, alert ISA-priority mapping, self-tuning, cache-warmer
+cadence, MQTT flow, audio wiring. Known issues queued for a follow-up (reported, not yet
+fixed): round-trip-efficiency understated on net-charge days (~79.6% vs ~95.8% true),
+P90 PV band uncapped above array peak, BMS SoH >100% unclamped, steep EOL projections
+from <3-week windows, thermal-event history window vs 30-day retention, and Wyoming TTS
+unproven on the current boot.
+
 ## 0.13.7 — 2026-06-07
 
 **HA 2026.6 hardening — docs for the new Energy-Dashboard battery state-of-charge

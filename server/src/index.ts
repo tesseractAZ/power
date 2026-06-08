@@ -75,6 +75,7 @@ import { getAlertSettings, updateAlertSettings, isPriorityEnabled } from './aler
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from './alertPriority.js';
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage } from './batterySocAlarm.js';
+import { createRunwayAlarm } from './runwayAlarm.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -1558,6 +1559,36 @@ store.on('change', (snap: FleetSnapshot) => {
   const soc = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection.backupBatPercent : null;
   batterySocAlarm.update(soc);
 });
+
+// v0.14.0 — projection-depletion audible alarm. Rides the off-grid runway
+// projection (forecast PV − forecast load over 24h): announces, with escalating
+// priority, when the pool is projected to reach its reserve floor (or empty)
+// before solar recovers — so load can be shed while the pool is still healthy,
+// rather than only once the SoC ladder has already fallen to 50/40/30%. Polled
+// (not store-driven) because the runway is an analytics-worker report; a 2-min
+// cadence is far finer than the hourly re-announce throttle and the report is
+// cached. Honours the same per-priority Alert-Settings toggles as the SoC alarm.
+const runwayAlarmEnabled = process.env.BATTERY_RUNWAY_ALARM_ENABLED !== 'false';
+const runwayAlarm = createRunwayAlarm({
+  onTrigger: (priority, message) => {
+    if (!isPriorityEnabled(priority)) return;
+    void broadcast.announce(priority, message);
+  },
+  log: (m) => app.log.info(m),
+});
+if (runwayAlarmEnabled) {
+  const runwayAlarmTick = setInterval(() => {
+    void (async () => {
+      try {
+        const r = await analytics.report('runway');
+        runwayAlarm.update(r);
+      } catch (e: any) {
+        app.log.debug(`runway-alarm: poll skipped (${e?.message ?? e})`);
+      }
+    })();
+  }, 2 * 60 * 1000);
+  runwayAlarmTick.unref();
+}
 
 // Diagnostics: the analytics worker is the cache warmer now (self-warming
 // inside a worker thread). Endpoint kept for backward-compat.
