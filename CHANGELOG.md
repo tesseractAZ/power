@@ -3,6 +3,31 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.14.1 — 2026-06-08
+
+**The three deferred accuracy fixes from the v0.14.0 audit.** All in `analytics.ts`,
+all surfaced as visibly-wrong dashboard numbers.
+
+- **Round-trip efficiency** no longer understated on net-charge days. `computeRoundTripEfficiency`
+  summed every sufficiently-covered day, so a bulk-fill day (e.g. 72 kWh in / 25 kWh
+  out = 35%) was counted as if it were a round trip and dragged the headline to
+  **79.8%** vs the **~96%** the balanced days actually run at. Now only genuine
+  round-trip days (discharge/charge ratio in **0.80–1.05**) count toward the per-day
+  number and the aggregate; net-fill / net-drain days are still listed with their
+  kWh but carry no `efficiencyPct`.
+- **P90 PV band capped** at the array's clear-sky ceiling. `getDayForecast` now
+  exposes `pvCeilingW` (max `observedMaxPvW × 1.05` across modelled hours) and
+  `computeProbabilisticForecast` clamps P90 to it — previously P90 was unbounded,
+  yielding a physically-impossible peak of **~14 kW** against the array's observed
+  **~10.85 kW** (P50 was already capped, P10 floored at 0).
+- **SoH clamped to 100%** for display + EOL headroom. A freshly-calibrated BMS can
+  report **>100%** (e.g. 100.6%), which read oddly and inflated the end-of-life
+  headroom. The fade *slope* still comes from the regressed history, so only the
+  current value is capped.
+
+Tests: +1 (RTE excludes a full-coverage bulk-fill day). Verified live before/after:
+the RTE sensor read 79.8% on 0.14.0.
+
 ## 0.14.0 — 2026-06-08
 
 **Battery-runway audible alarms + a 6-agent validation audit of the live system.**

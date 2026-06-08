@@ -147,6 +147,41 @@ test('computeRoundTripEfficiency — never reports a physically-impossible >100%
   assert.equal(rte.daysWithData, 0, 'two partial-coverage days both gated out');
 });
 
+/* ─── v0.14.1: RTE balanced-day (round-trip) filter ──────────────────── */
+
+test('computeRoundTripEfficiency — a full-coverage net-charge (bulk-fill) day is excluded', () => {
+  resetRteCache();
+  const todayStart = startOfLocalDayMs();
+  const DAY = 86_400_000;
+  const fillDayStart = todayStart - 2 * DAY; // bulk-fill: pool ends much higher
+  const balDayStart = todayStart - 1 * DAY; // genuine round trip
+  // Bulk-fill day: FULL 24h coverage, but charge 2000 W vs discharge 700 W →
+  // ratio 0.35. That's not an efficiency (the pool just filled up), so it must be
+  // excluded rather than dragging the aggregate toward 35% (the real-world bug
+  // that showed RTE 79.8% vs the ~96% the balanced days actually run at).
+  const fillIn = flat(fillDayStart, DAY, 2000);
+  const fillOut = flat(fillDayStart, DAY, 700);
+  // Balanced day: charge 1000 W, discharge 960 W → ratio 0.96 (a real round trip).
+  const balIn = flat(balDayStart, DAY, 1000);
+  const balOut = flat(balDayStart, DAY, 960);
+  const series = {
+    pack1_in: [...fillIn, ...balIn],
+    pack1_out: [...fillOut, ...balOut],
+  };
+  const rte = computeRoundTripEfficiency(oneDpuOnePack(), recorderFor(series), 3);
+
+  const fill = rte.perDay.find((d) => d.chargedKwh > d.dischargedKwh * 2);
+  assert.ok(fill, 'bulk-fill day present');
+  assert.equal(fill!.efficiencyPct, null, 'a net-charge day is not a round trip → null efficiency');
+
+  // Only the balanced day counts; the aggregate reflects ~96%, not the ~35% fill day.
+  assert.equal(rte.daysWithData, 1, 'only the balanced round-trip day counts');
+  assert.ok(
+    rte.efficiencyPct != null && rte.efficiencyPct > 90 && rte.efficiencyPct <= 100,
+    `aggregate should reflect the balanced day (~96%), got ${rte.efficiencyPct}`,
+  );
+});
+
 /* ─── P2-4: EV daily-charger detection ───────────────────────────────── */
 
 /** Minimal SHP2 device with one paired circuit. */

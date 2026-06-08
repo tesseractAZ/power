@@ -675,6 +675,11 @@ export interface DayForecast {
   // typicalPvWhPerDay/24 — the flat line scored R²≈0 against real diurnal PV (P3-4).
   // Optional: getDayForecast always sets it; consumers fall back to a flat curve.
   typicalPvCurveWhPerHour?: number[];
+  // v0.14.1 — the array's clear-sky PV ceiling (W): the max over the day's
+  // modelled hours of observedMaxPvW × 1.05. The probabilistic P90 band is clamped
+  // to this so the best-case band can't exceed what the panels can physically
+  // produce. Undefined when no hour was equipment-modelled (fallback curve only).
+  pvCeilingW?: number;
   minProjectedSoc: number | null;
   minProjectedSocTs: number | null;
   solarModel: SolarResponseModel;       // fleet-wide learned response
@@ -991,6 +996,7 @@ export async function getDayForecast(
   let minSoc: number | null = null;
   let minSocTs: number | null = null;
   let pvSum = 0;
+  let pvCeilingW = 0; // v0.14.1 — clear-sky array ceiling (max observedMaxPvW × 1.05)
 
   // v0.9.3 — lift predicted EV-charging sessions into the load curve. The
   // EVSE window-prediction pattern detector already runs separately; this
@@ -1021,7 +1027,9 @@ export async function getDayForecast(
     let modelled = false;
     if (resp.coeff != null && ghi != null) {
       // Equipment-tuned: learned response × forecast sunlight, capped at observed peak.
-      pv = Math.min(resp.coeff * ghi, resp.observedMaxPvW * 1.05);
+      const hourCeil = resp.observedMaxPvW * 1.05;
+      pv = Math.min(resp.coeff * ghi, hourCeil);
+      if (hourCeil > pvCeilingW) pvCeilingW = hourCeil; // v0.14.1 — track clear-sky ceiling for P90 clamp
       modelled = true;
     } else {
       // Fallback: typical-day curve × cloud derate.
@@ -1073,6 +1081,7 @@ export async function getDayForecast(
     forecastPvWhNext24: Math.round(pvSum),
     typicalPvWhPerDay: Math.round(pvCurve.reduce((a, b) => a + b, 0)),
     typicalPvCurveWhPerHour: pvCurve.map((w) => Math.round(w)), // v0.13.1 — for diurnal backtest baseline
+    pvCeilingW: pvCeilingW > 0 ? Math.round(pvCeilingW) : undefined, // v0.14.1 — P90 clamp
     minProjectedSoc: minSoc == null ? null : Math.round(minSoc * 10) / 10,
     minProjectedSocTs: minSocTs,
     solarModel,
@@ -1291,7 +1300,12 @@ function analysePack(
   since: number,
   now: number,
 ): PackDegradation {
-  const currentSoh = pk.actSoh ?? pk.soh;
+  // v0.14.1 — clamp displayed/projected SoH to 100%. A freshly-calibrated BMS can
+  // report >100% (e.g. 100.6%), which reads oddly on the dashboard and inflates the
+  // EOL headroom. SoH is bounded by definition; the fade SLOPE still comes from the
+  // regressed history (sohPts below), so only the current value + headroom are capped.
+  const rawSoh = pk.actSoh ?? pk.soh;
+  const currentSoh = rawSoh == null ? null : Math.min(100, rawSoh);
   const currentCapacityKwh = pk.fullCapMah != null ? pk.fullCapMah * PACK_MAH_TO_KWH : null;
   const designCapacityKwh = pk.designCapMah != null ? pk.designCapMah * PACK_MAH_TO_KWH : null;
   const throughputMah = pk.accuDsgMah ?? pk.accuChgMah;
@@ -1923,6 +1937,19 @@ export function computeRoundTripEfficiency(
   // the same days). The coverage of the charge series stands in for the pair —
   // in/out share the DPU poll cadence, so they gain/lose coverage together.
   const RTE_MIN_DAY_COVERAGE = 0.5; // need ≥50% of the day measured to trust the ratio
+  // v0.14.1 — RTE is only meaningful on days that are an actual round trip (the
+  // pool returns near its starting SoC). On a net-charge / bulk-fill day the pool
+  // ends much higher than it started, so dischargedKwh << chargedKwh and the
+  // ratio (e.g. 25/72 = 35%) isn't an efficiency at all — it just measures how
+  // much of the day's charge stayed in the battery. Including those days dragged
+  // the headline to ~80% vs the ~95–96% the balanced days actually show. A
+  // genuine LFP round trip lands at ~0.95 (discharge ≈ charge − losses); require
+  // the day's discharge/charge ratio to sit in a plausible round-trip band before
+  // it counts toward the per-day number or the aggregate. Net-fill (<0.80) and
+  // net-drain / anomalous (>1.05) days are excluded from the efficiency (they're
+  // still listed with their charged/discharged kWh, just no efficiencyPct).
+  const RTE_ROUNDTRIP_MIN_FRAC = 0.8;
+  const RTE_ROUNDTRIP_MAX_FRAC = 1.05;
   const perDay: RoundTripDay[] = [];
   let totalCharged = 0;
   let totalDischarged = 0;
@@ -1947,11 +1974,16 @@ export function computeRoundTripEfficiency(
     // Average coverage across packs (each pack's charge series spans the day).
     const coverage = packCount > 0 ? coverageMsSum / (packCount * dayMs) : 0;
     const sufficient = coverage >= RTE_MIN_DAY_COVERAGE;
-    if (sufficient) {
+    // v0.14.1 — only genuine round-trip days count toward the efficiency.
+    const ratio = chargedKwh > 0.5 ? dischargedKwh / chargedKwh : null;
+    const roundTrip =
+      ratio != null && ratio >= RTE_ROUNDTRIP_MIN_FRAC && ratio <= RTE_ROUNDTRIP_MAX_FRAC;
+    const include = sufficient && roundTrip;
+    if (include) {
       totalCharged += chargedKwh;
       totalDischarged += dischargedKwh;
     }
-    const dayEff = sufficient && chargedKwh > 0.5 ? (dischargedKwh / chargedKwh) * 100 : null;
+    const dayEff = include ? ratio! * 100 : null;
     perDay.push({
       date: localDateStr(dayStart),
       chargedKwh: round2(chargedKwh),
@@ -5106,7 +5138,13 @@ export async function computeProbabilisticForecast(
     const sigmaFrac = baseSigmaFrac * horizonFactor;
     const p50 = h.forecastPvW;
     const p10 = Math.max(0, p50 * (1 - Z10 * sigmaFrac));
-    const p90 = p50 * (1 + Z10 * sigmaFrac);
+    // v0.14.1 — clamp the best-case band to the array's clear-sky ceiling so P90
+    // can't exceed what the panels can physically produce. P50 is already capped
+    // upstream at observedMaxPvW×1.05 and P10 is floored at 0, but P90 was
+    // unbounded — yielding a peak ~14 kW vs the array's observed ~10.85 kW.
+    const pvCeil = forecast.pvCeilingW ?? 0;
+    const p90raw = p50 * (1 + Z10 * sigmaFrac);
+    const p90 = pvCeil > 0 ? Math.min(p90raw, pvCeil) : p90raw;
     // SoC propagation: use the load as deterministic, vary PV.
     const dP10 = (p10 - h.forecastLoadW) / 1000;
     const dP50 = (p50 - h.forecastLoadW) / 1000;
