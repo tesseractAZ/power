@@ -8,6 +8,7 @@ import {
   BINARY_SENSORS,
   legacyUniqueIdsFor,
   MQTT_DISCOVERY_DEDUP_VERSION,
+  planCircuitDiscovery,
 } from '../src/mqttDiscovery.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -177,3 +178,80 @@ for (const relPath of MQTT_SOURCE_FILES) {
     }
   });
 }
+
+/**
+ * v0.15.1 — Per-SHP2-circuit discovery planner (`planCircuitDiscovery`).
+ *
+ * Background: the per-circuit Energy-Dashboard sensors used to be published
+ * exactly once, inside the MQTT `connect` handler, gated on the SHP2 circuit
+ * list already being present in the in-memory snapshot at that instant. Because
+ * the first device poll is fire-and-forget, a boot where the broker connect won
+ * the race against the first poll published ZERO of the 12 per-circuit configs
+ * and never retried (observed on the post-migration boot). The publish/skip/
+ * clear decision now lives in this pure function, driven by the recurring state
+ * loop. These tests pin: (1) a fresh set publishes everything, (2) an unchanged
+ * set yields a stable signature so the caller can no-op, (3) a changed set gets
+ * a new signature and clears configs for circuits that disappeared.
+ */
+
+const PREFIX = 'homeassistant';
+
+test('planCircuitDiscovery: fresh set publishes one well-formed config per circuit, clears none', () => {
+  const plan = planCircuitDiscovery(PREFIX, [], [
+    { ch: 1, name: 'Kitchen' },
+    { ch: 2, name: 'EVSE' },
+  ]);
+  assert.equal(plan.clear.length, 0, 'nothing to clear on a fresh publish');
+  assert.equal(plan.publish.length, 2, 'one config per circuit');
+  const first = plan.publish[0];
+  assert.equal(first.topic, 'homeassistant/sensor/ecoflow_circuit_1_lifetime_kwh/config');
+  assert.equal(first.cfg.unique_id, 'ecoflow_circuit_1_lifetime_kwh');
+  assert.equal(first.cfg.name, 'EcoFlow Kitchen Energy');
+  assert.equal(first.cfg.device_class, 'energy');
+  assert.equal(first.cfg.state_class, 'total_increasing'); // → no expire_after, never goes unavailable
+  assert.equal(first.cfg.value_template, '{{ value_json.circuit_1_lifetime_kwh }}');
+  assert.ok(first.cfg.device, 'every config carries the shared device block so entities group together');
+});
+
+test('planCircuitDiscovery: unnamed circuit falls back to "Circuit N"', () => {
+  const plan = planCircuitDiscovery(PREFIX, [], [{ ch: 7 }]);
+  assert.equal(plan.publish[0].cfg.name, 'EcoFlow Circuit 7 Energy');
+});
+
+test('planCircuitDiscovery: identical circuit set → identical signature (caller no-ops, no churn)', () => {
+  const circuits = [{ ch: 1, name: 'A' }, { ch: 2, name: 'B' }];
+  const a = planCircuitDiscovery(PREFIX, [], circuits);
+  const b = planCircuitDiscovery(PREFIX, [1, 2], circuits);
+  assert.equal(a.sig, b.sig, 'same channels+names produce the same change-latch key');
+  assert.equal(b.clear.length, 0, 'no orphans when the set is unchanged');
+});
+
+test('planCircuitDiscovery: a renamed circuit changes the signature (re-publishes the friendly name)', () => {
+  const before = planCircuitDiscovery(PREFIX, [], [{ ch: 1, name: 'Old Name' }]);
+  const after = planCircuitDiscovery(PREFIX, [1], [{ ch: 1, name: 'New Name' }]);
+  assert.notEqual(before.sig, after.sig, 'a rename must re-assert the config');
+  assert.equal(after.publish[0].cfg.name, 'EcoFlow New Name Energy');
+});
+
+test('planCircuitDiscovery: a removed circuit is cleared and the signature changes', () => {
+  const plan = planCircuitDiscovery(PREFIX, [1, 2, 3], [
+    { ch: 1, name: 'A' },
+    { ch: 2, name: 'B' },
+  ]);
+  assert.deepEqual(plan.clear, ['homeassistant/sensor/ecoflow_circuit_3_lifetime_kwh/config']);
+  assert.equal(plan.publish.length, 2, 'remaining circuits still published');
+  const prev = planCircuitDiscovery(PREFIX, [], [
+    { ch: 1, name: 'A' }, { ch: 2, name: 'B' }, { ch: 3, name: 'C' },
+  ]);
+  assert.notEqual(plan.sig, prev.sig, 'dropping a circuit changes the latch key');
+});
+
+test('planCircuitDiscovery: empty circuit list publishes nothing and clears all previously-published channels', () => {
+  const plan = planCircuitDiscovery(PREFIX, [4, 5], []);
+  assert.equal(plan.sig, '', 'no circuits → empty signature');
+  assert.equal(plan.publish.length, 0);
+  assert.deepEqual(plan.clear, [
+    'homeassistant/sensor/ecoflow_circuit_4_lifetime_kwh/config',
+    'homeassistant/sensor/ecoflow_circuit_5_lifetime_kwh/config',
+  ]);
+});
