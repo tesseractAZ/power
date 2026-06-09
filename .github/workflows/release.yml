@@ -1,18 +1,23 @@
 name: Release
 
-# One-click release pipeline.
+# One-click release pipeline (ruleset-compatible).
 #
 # Trigger from GitHub: Actions → Release → "Run workflow". The workflow:
 #   1. Computes the next version (semver bump or explicit override)
 #   2. Refuses if the new tag already exists, so re-runs are idempotent
 #   3. Builds release notes (from your `notes` input, or auto-generated from the
 #      commit log since the previous tag)
-#   4. Bumps `version:` in `config.yaml` and prepends a section to `CHANGELOG.md`
-#   5. Commits "Release vX.Y.Z", tags vX.Y.Z, pushes both
-#   6. Creates a GitHub Release with the same notes
+#   4. Bumps `version:` in `ecoflow_panel/config.yaml` and prepends a CHANGELOG section
+#   5. Opens a `release/vX.Y.Z` PR and enables auto-merge
 #
-# Home Assistant Supervisor on your Pi notices the new `version:` in
-# `config.yaml` after `git pull` and surfaces an Update button on the add-on.
+# The `main` branch is protected by the `BranchAuth` ruleset (PR + verified
+# signatures + CodeQL), so this workflow can't push to main directly — it goes
+# through a PR. The squash-merge commit is GitHub-signed, satisfying the rules.
+# Once the PR merges, `tag-release.yml` creates the tag and `images.yml` builds +
+# publishes the GHCR images and cuts the GitHub Release.
+#
+# Home Assistant (the add-on repository) reads the bumped `version:` from
+# `config.yaml` on main and surfaces a native Update button once the image is up.
 
 on:
   workflow_dispatch:
@@ -34,6 +39,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write   # open + auto-merge the release PR
 
 jobs:
   release:
@@ -144,37 +150,74 @@ jobs:
           head -25 ecoflow_panel/CHANGELOG.md
           echo "─────────────────────────────────────────────"
 
-      - name: Commit, tag, push
+      # The `main` branch is governed by the `BranchAuth` ruleset, which forbids
+      # a direct push from github-actions[bot] (requires a PR + verified
+      # signatures + CodeQL). So instead of pushing the bump straight to main,
+      # we open a PR from a release branch and let it auto-merge. The branch
+      # commit below is unsigned, but that is fine: it never lands on main
+      # directly — the SQUASH-merge commit is authored by GitHub's web-flow key
+      # (signature-verified), which satisfies the `required_signatures` rule.
+      # Tagging + the image build happen post-merge in `tag-release.yml`.
+      - name: Open release PR (auto-merge)
         env:
           NEXT: ${{ steps.ver.outputs.next }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          branch="release/v${NEXT}"
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
           git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md
           git commit -m "Release v${NEXT}"
-          git tag -a "v${NEXT}" -m "Release v${NEXT}"
-          git push origin HEAD:main
-          git push origin "v${NEXT}"
+          git push --force-with-lease origin "$branch"
+
+          body_file="$(mktemp)"
+          {
+            echo "Automated release of **v${NEXT}** — bumps \`ecoflow_panel/config.yaml\` and prepends the CHANGELOG."
+            echo
+            echo "Merging this (squash) lands a GitHub-signed commit on \`main\`, which satisfies the \`BranchAuth\` ruleset. On merge, **\`tag-release.yml\`** tags \`v${NEXT}\` and triggers **\`images.yml\`** to build/publish the GHCR images and cut the GitHub Release."
+            echo
+            echo "---"
+            echo
+            echo "### Release notes"
+            echo
+            cat "${NOTES_FILE}"
+          } > "$body_file"
+
+          pr_url="$(gh pr create --base main --head "$branch" \
+            --title "Release v${NEXT}" --body-file "$body_file")"
+          echo "Opened ${pr_url}"
+
+          # Auto-merge lands it as soon as required checks (and any required
+          # review) pass. Degrade gracefully if repo auto-merge is disabled —
+          # the PR can still be merged by hand.
+          if gh pr merge "$pr_url" --squash --auto --delete-branch; then
+            echo "auto_merge=enabled" >> "$GITHUB_OUTPUT" || true
+          else
+            echo "::notice::Auto-merge could not be enabled — merge ${pr_url} manually to finish the release."
+          fi
+          echo "PR_URL=${pr_url}" >> "$GITHUB_ENV"
 
       - name: Summary
         env:
           NEXT: ${{ steps.ver.outputs.next }}
         run: |
           {
-            echo "## 🏷️  Tagged v${NEXT}"
+            echo "## 🚀 Release v${NEXT} prepared"
             echo
-            echo "The tag push has kicked off **\`images.yml\`** to build and publish"
-            echo "amd64 + aarch64 images to GHCR. When that workflow finishes (~5–10 min"
-            echo "with cold cache), it will create the GitHub Release for v${NEXT}."
-            echo "**The Release appearing on GitHub is the \"go ahead and update\" signal.**"
+            echo "A release PR was opened with **auto-merge** enabled: ${PR_URL:-(see PR list)}"
             echo
-            echo "Once it's up, on your Pi:"
+            echo "What happens next, automatically:"
             echo
-            echo '```bash'
-            echo "cd /addons/ecoflow-panel && git pull"
-            echo '```'
+            echo "1. The PR merges (as a signature-verified squash commit) once required checks — and any required review — pass."
+            echo "2. **\`tag-release.yml\`** fires on the merge: it tags \`v${NEXT}\` and dispatches **\`images.yml\`**."
+            echo "3. **\`images.yml\`** builds + publishes the amd64 + aarch64 GHCR images and creates the GitHub Release for v${NEXT}."
             echo
-            echo "Home Assistant will detect the bumped \`version:\` in \`config.yaml\` and"
-            echo "surface an **Update** button that pulls the pre-built image."
+            echo "**The Release appearing on GitHub is the \"go ahead and update\" signal.** Then in Home Assistant:"
+            echo
+            echo "**Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, open **EcoFlow Panel**, and click **Update**."
+            echo
+            echo "> If auto-merge is disabled on the repo, just click **Merge** on the PR above — steps 2–3 still run automatically."
           } >> "$GITHUB_STEP_SUMMARY"
