@@ -69,6 +69,14 @@ import { getChimeRepeat } from './alertSettings.js';
  *  v2 (v0.12.1): the optional lead-in silence is now part of every render. */
 export const RENDER_VERSION = 3;
 
+/** v0.15.4 — hard ceiling on the chime-repeat count at the allocation site.
+ *  getChimeRepeat() is already clamped to ≤4 by alertSettings; this is a
+ *  belt-and-suspenders bound (well above that max) so the Buffer arrays built
+ *  from it can never allocate without limit, even if the upstream clamp changes.
+ *  Applied identically in renderAnnouncement and renderCacheKey so the rendered
+ *  audio and the predicted cache filename stay in lock-step. */
+const MAX_CHIME_REPEAT = 8;
+
 export type AnnouncementLevel = 'red' | 'yellow' | 'green';
 
 export interface RenderOptions {
@@ -157,7 +165,13 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // v0.11.0 — chime repeats getChimeRepeat() times (default 2) before the TTS.
   // Resolve N once here so it's part of both the rendered audio AND the cache
   // key — changing the repeat count must invalidate any previously cached file.
-  const chimeRepeat = Math.max(1, getChimeRepeat());
+  // v0.15.4 — re-assert a hard upper bound at the point of use. getChimeRepeat()
+  // is already clamped to ≤4 by clampChime(), but bounding locally guarantees the
+  // Array(chimeRepeat[*announceRepeat]) allocations below can never grow unbounded
+  // even if that distant clamp regresses — defense-in-depth on the alert path
+  // (and a recognised resource-exhaustion sanitizer). The cap is well above the
+  // settings max, so it never changes real behaviour or the cache key.
+  const chimeRepeat = Math.max(1, Math.min(MAX_CHIME_REPEAT, Math.round(getChimeRepeat())));
   // v0.15.4 — repeat the whole (chime + spoken message) block N times so a missed
   // first annunciation gets a second pass. Clamped 1..3; part of the cache key.
   const announceRepeat = Math.max(1, Math.min(3, Math.round(opts.announceRepeat ?? 1)));
@@ -365,7 +379,10 @@ export function renderCacheKey(
   leadSilenceMs?: number,
   announceRepeat?: number,
 ): string {
-  const repeat = Math.max(1, chimeRepeat ?? getChimeRepeat());
+  // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
+  // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
+  // space without limit.
+  const repeat = Math.max(1, Math.min(MAX_CHIME_REPEAT, Math.round(chimeRepeat ?? getChimeRepeat())));
   // v0.15.4 — announce-repeat (whole chime+message block) is part of the key.
   const annRepeat = Math.max(1, Math.min(3, Math.round(announceRepeat ?? 1)));
   const leadMs = Math.max(0, Math.round(leadSilenceMs ?? 0));

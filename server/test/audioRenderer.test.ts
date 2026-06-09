@@ -412,6 +412,34 @@ test('renderCacheKey — announceRepeat is part of the key', () => {
   assert.equal(renderCacheKey('red', 'hi', 2, 0), renderCacheKey('red', 'hi', 2, 0, 1));
 });
 
+// v0.15.4 — resource-exhaustion guard (CodeQL js/resource-exhaustion). The chime
+// repeat feeds Array(chimeRepeat[*announceRepeat]) allocations, so it MUST be
+// bounded at the point of use. getChimeRepeat() already clamps to ≤4, but the
+// renderer/cache-key re-assert a hard ceiling (MAX_CHIME_REPEAT = 8) so an absurd
+// value can never grow the buffer — or the key space — without limit. We pin the
+// behaviour via the cache key (the same clamp the renderer applies).
+test('renderCacheKey — chimeRepeat is bounded at the allocation ceiling (no unbounded growth)', () => {
+  // Two absurd values collapse to the same key → the value is being clamped, not
+  // used raw (a raw value would make these differ).
+  assert.equal(
+    renderCacheKey('red', 'hi', 9999, 0, 1),
+    renderCacheKey('red', 'hi', 10000, 0, 1),
+    'huge chimeRepeat values must clamp to the same ceiling',
+  );
+  // The clamped huge value equals the key at the documented ceiling (8)…
+  assert.equal(
+    renderCacheKey('red', 'hi', 9999, 0, 1),
+    renderCacheKey('red', 'hi', 8, 0, 1),
+    'clamped value must equal the key at MAX_CHIME_REPEAT (8)',
+  );
+  // …and is distinct from a below-ceiling value, so the cap is a ceiling, not a floor.
+  assert.notEqual(
+    renderCacheKey('red', 'hi', 8, 0, 1),
+    renderCacheKey('red', 'hi', 4, 0, 1),
+    'below-ceiling repeat values must still be distinguished',
+  );
+});
+
 test('renderAnnouncement — announceRepeat repeats the chime block + busts the cache (klaxon-only)', async () => {
   const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));

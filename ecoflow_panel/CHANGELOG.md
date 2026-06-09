@@ -13,7 +13,8 @@ The ecobee thermostat speakers were dropping Music Assistant's set-volume → pl
 - **`BROADCAST_ANNOUNCE_VOLUME` (default `"off"`).** `"off"`/`"none"`/`"standing"` omit `announce_volume` from the service call entirely, so MA plays at the device's standing volume and skips the flaky set/restore — set the ecobee speaker loud device-side once. A number (0–100) pins an explicit announce volume; empty falls back to `BROADCAST_VOLUME × 100`.
 - **`BROADCAST_ANNOUNCE_RETRIES` (default 1)** retries a failed announce call (1500 ms apart), and **`BROADCAST_USE_PRE_ANNOUNCE` (default false)** controls MA's pre-announce chime.
 - Targeting is unchanged: only the entities in `BROADCAST_TARGETS` (the two ecobees on this site) receive announcements.
-- 459/459 server tests pass (new coverage for the four config knobs + the announceRepeat cache-key/PCM-length invariants).
+- **Hardening:** re-assert a hard upper bound on the chime-repeat count at the buffer-allocation site (`MAX_CHIME_REPEAT`). It was already clamped to ≤4 by the alert-settings layer, but bounding it locally where `Array(chimeRepeat)` is built closes a resource-exhaustion path (flagged by CodeQL `js/resource-exhaustion`) so the alert renderer stays safe even if that upstream clamp ever regresses. Behaviour-preserving — the cap is well above the settings max.
+- 460/460 server tests pass (new coverage for the four config knobs, the announceRepeat cache-key/PCM-length invariants, and the chime-repeat allocation ceiling).
 
 ## 0.15.3 — 2026-06-09
 
