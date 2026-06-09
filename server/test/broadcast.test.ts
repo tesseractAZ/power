@@ -181,3 +181,41 @@ test('probeService — failed catalog fetch yields "unknown", not "absent"', asy
     else process.env.SUPERVISOR_TOKEN = prev;
   }
 });
+
+/* ===================================================================
+ * v0.15.4 — ecobee announcement reliability knobs. The ecobee thermostat
+ * speakers drop Music Assistant's set-volume→play→restore dance, so we add
+ * four config levers: BROADCAST_REPEAT (play the chime+TTS block twice so a
+ * missed first annunciation is caught), BROADCAST_ANNOUNCE_VOLUME ("off"
+ * omits announce_volume entirely → MA plays at the device's standing volume,
+ * skipping the flaky volume restore), BROADCAST_USE_PRE_ANNOUNCE, and
+ * BROADCAST_ANNOUNCE_RETRIES. This pins their parse + clamp + fallback rules.
+ * =================================================================== */
+test('loadBroadcastConfig — v0.15.4 repeat / announce-volume / pre-announce / retries', () => {
+  const saved = { ...process.env };
+  try {
+    process.env.BROADCAST_REPEAT = '2';
+    process.env.BROADCAST_ANNOUNCE_VOLUME = 'off';
+    process.env.BROADCAST_USE_PRE_ANNOUNCE = 'true';
+    process.env.BROADCAST_ANNOUNCE_RETRIES = '2';
+    const cfg = loadBroadcastConfig();
+    assert.equal(cfg.repeat, 2);
+    assert.equal(cfg.announceVolume, null, "'off' must omit announce_volume (play at standing volume)");
+    assert.equal(cfg.usePreAnnounce, true);
+    assert.equal(cfg.announceRetries, 2);
+    process.env.BROADCAST_ANNOUNCE_VOLUME = '80';
+    assert.equal(loadBroadcastConfig().announceVolume, 80, 'explicit number → that volume');
+    delete process.env.BROADCAST_ANNOUNCE_VOLUME;
+    process.env.BROADCAST_VOLUME = '0.5';
+    assert.equal(loadBroadcastConfig().announceVolume, 50, 'empty → BROADCAST_VOLUME × 100');
+    delete process.env.BROADCAST_REPEAT;
+    assert.equal(loadBroadcastConfig().repeat, 2, 'default repeat = 2');
+    process.env.BROADCAST_REPEAT = '9';
+    assert.equal(loadBroadcastConfig().repeat, 3, 'repeat clamps to 3');
+    delete process.env.BROADCAST_USE_PRE_ANNOUNCE;
+    assert.equal(loadBroadcastConfig().usePreAnnounce, false, 'pre-announce defaults off');
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});

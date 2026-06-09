@@ -67,7 +67,15 @@ import { getChimeRepeat } from './alertSettings.js';
 
 /** Bump when the render pipeline changes in a way that invalidates the cache.
  *  v2 (v0.12.1): the optional lead-in silence is now part of every render. */
-export const RENDER_VERSION = 2;
+export const RENDER_VERSION = 3;
+
+/** v0.15.4 — hard ceiling on the chime-repeat count at the allocation site.
+ *  getChimeRepeat() is already clamped to ≤4 by alertSettings; this is a
+ *  belt-and-suspenders bound (well above that max) so the Buffer arrays built
+ *  from it can never allocate without limit, even if the upstream clamp changes.
+ *  Applied identically in renderAnnouncement and renderCacheKey so the rendered
+ *  audio and the predicted cache filename stay in lock-step. */
+const MAX_CHIME_REPEAT = 8;
 
 export type AnnouncementLevel = 'red' | 'yellow' | 'green';
 
@@ -92,6 +100,13 @@ export interface RenderOptions {
    * the announcement). Part of the cache key. Default/undefined → 0 (no lead-in).
    */
   leadSilenceMs?: number;
+  /**
+   * v0.15.4 — number of times the whole (chime×N + spoken message) block repeats
+   * in the single rendered WAV, so a missed first annunciation gets a second pass
+   * within the same MA announcement. Clamped 1..3. Part of the cache key.
+   * Default/undefined → 1 (no repeat).
+   */
+  announceRepeat?: number;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
 }
@@ -150,7 +165,21 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // v0.11.0 — chime repeats getChimeRepeat() times (default 2) before the TTS.
   // Resolve N once here so it's part of both the rendered audio AND the cache
   // key — changing the repeat count must invalidate any previously cached file.
-  const chimeRepeat = Math.max(1, getChimeRepeat());
+  // v0.15.4 — re-assert a hard upper bound at the point of use. getChimeRepeat()
+  // is already clamped to ≤4 by clampChime(), but bounding locally guarantees the
+  // Array(chimeRepeat[*announceRepeat]) allocations below can never grow unbounded
+  // even if that distant clamp regresses — defense-in-depth on the alert path.
+  // The cap is well above the settings max, so it never changes real behaviour or
+  // the cache key. NOTE: this is written as an explicit comparison GUARD rather
+  // than Math.min() on purpose — CodeQL's js/resource-exhaustion taint tracker
+  // recognises a relational upper-bound check as a sanitizer, but not Math.min(),
+  // and the guard must be inline here (an interprocedural helper isn't trusted at
+  // the allocation sink).
+  let chimeRepeat = Math.max(1, Math.round(getChimeRepeat()));
+  if (chimeRepeat > MAX_CHIME_REPEAT) chimeRepeat = MAX_CHIME_REPEAT;
+  // v0.15.4 — repeat the whole (chime + spoken message) block N times so a missed
+  // first annunciation gets a second pass. Clamped 1..3; part of the cache key.
+  const announceRepeat = Math.max(1, Math.min(3, Math.round(opts.announceRepeat ?? 1)));
 
   // v0.12.1 — lead-in silence (ms) prepended before the first chime. Resolved
   // once so it's part of both the rendered audio AND the cache key.
@@ -160,8 +189,9 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // lead silence). Null message hashes distinctly from empty string so klaxon-
   // only and empty-spoken-message don't share a cache slot. The repeat count
   // and lead-in are part of the key so changing either busts the cache.
-  const keyInput = `v${RENDER_VERSION}|${level}|x${chimeRepeat}|s${leadMs}|${message ?? '<null>'}`;
-  const hash = createHash('sha1').update(keyInput).digest('hex').slice(0, 16);
+  // v0.15.4 — single source of truth for the cache key (shared with the exported
+  // renderCacheKey, which callers use to predict the served filename).
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -199,9 +229,16 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
       // leadMs == 0 && chimeRepeat == 1 this is byte-identical to the klaxon WAV.
       const silence = makeSilencePcm(klaxonHeader, leadMs);
       let klaxonOnly = klaxonWav;
-      if (silence.length > 0 || chimeRepeat > 1) {
+      if (silence.length > 0 || chimeRepeat > 1 || announceRepeat > 1) {
         const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
-        const pcm = Buffer.concat([silence, ...Array<Buffer>(chimeRepeat).fill(klaxonPcm)]);
+        // Build the chime list with a bounded push-loop rather than Array(n).fill():
+        // chimeRepeat is already guarded to ≤ MAX_CHIME_REPEAT and announceRepeat to
+        // ≤3, so this is small — and avoiding allocation-by-length keeps it off the
+        // resource-exhaustion path entirely. Byte-identical to the old .fill() form.
+        const chimeParts: Buffer[] = [silence];
+        const totalChimes = chimeRepeat * announceRepeat;
+        for (let i = 0; i < totalChimes; i++) chimeParts.push(klaxonPcm);
+        const pcm = Buffer.concat(chimeParts);
         klaxonOnly = pcmToWav(pcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
       }
       await writeFile(outPath, klaxonOnly);
@@ -246,7 +283,17 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
   const ttsPcm = ttsResult.wav.subarray(ttsHeader.dataOffset, ttsHeader.dataOffset + ttsHeader.dataLength);
   const silence = makeSilencePcm(klaxonHeader, leadMs);
-  const combinedPcm = Buffer.concat([silence, ...Array<Buffer>(chimeRepeat).fill(klaxonPcm), ttsPcm]);
+  // v0.15.4 — one block = chime×chimeRepeat + the spoken message; the whole block
+  // repeats announceRepeat times so a missed first pass gets a second. The lead-in
+  // silence stays once, up front. The chime list is built with a bounded push-loop
+  // (chimeRepeat is guarded to ≤ MAX_CHIME_REPEAT) rather than Array(n).fill(), to
+  // keep it off the resource-exhaustion path — byte-identical to the old form.
+  const block: Buffer[] = [];
+  for (let i = 0; i < chimeRepeat; i++) block.push(klaxonPcm);
+  block.push(ttsPcm);
+  const parts: Buffer[] = [silence];
+  for (let i = 0; i < announceRepeat; i++) parts.push(...block);
+  const combinedPcm = Buffer.concat(parts);
   const combined = pcmToWav(combinedPcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
 
   // Write atomically (tmp → rename) so a half-written file never serves.
@@ -346,11 +393,17 @@ export function renderCacheKey(
   message: string | null,
   chimeRepeat?: number,
   leadSilenceMs?: number,
+  announceRepeat?: number,
 ): string {
-  const repeat = Math.max(1, chimeRepeat ?? getChimeRepeat());
+  // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
+  // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
+  // space without limit.
+  const repeat = Math.max(1, Math.min(MAX_CHIME_REPEAT, Math.round(chimeRepeat ?? getChimeRepeat())));
+  // v0.15.4 — announce-repeat (whole chime+message block) is part of the key.
+  const annRepeat = Math.max(1, Math.min(3, Math.round(announceRepeat ?? 1)));
   const leadMs = Math.max(0, Math.round(leadSilenceMs ?? 0));
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|s${leadMs}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }

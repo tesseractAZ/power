@@ -397,3 +397,76 @@ test('cachedRenderPath — strict filename format check (no path traversal)', ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// v0.15.4 — announceRepeat: the entire chime+TTS block is rendered N times into
+// ONE cached WAV, so a single (reliable) Music Assistant announce call replays
+// the whole annunciation. This catches a missed first pass on the ecobee
+// speakers without a second flaky service call. announceRepeat folds into the
+// cache key so repeat=1 and repeat=2 never alias.
+
+test('renderCacheKey — announceRepeat is part of the key', () => {
+  const base = renderCacheKey('red', 'hi', 2, 0, 1);
+  assert.equal(base, renderCacheKey('red', 'hi', 2, 0, 1), 'same announceRepeat → same key');
+  assert.notEqual(base, renderCacheKey('red', 'hi', 2, 0, 2), 'different announceRepeat → different key');
+  // default (undefined) announceRepeat resolves to 1, matching an explicit 1
+  assert.equal(renderCacheKey('red', 'hi', 2, 0), renderCacheKey('red', 'hi', 2, 0, 1));
+});
+
+// v0.15.4 — resource-exhaustion guard (CodeQL js/resource-exhaustion). The chime
+// repeat feeds Array(chimeRepeat[*announceRepeat]) allocations, so it MUST be
+// bounded at the point of use. getChimeRepeat() already clamps to ≤4, but the
+// renderer/cache-key re-assert a hard ceiling (MAX_CHIME_REPEAT = 8) so an absurd
+// value can never grow the buffer — or the key space — without limit. We pin the
+// behaviour via the cache key (the same clamp the renderer applies).
+test('renderCacheKey — chimeRepeat is bounded at the allocation ceiling (no unbounded growth)', () => {
+  // Two absurd values collapse to the same key → the value is being clamped, not
+  // used raw (a raw value would make these differ).
+  assert.equal(
+    renderCacheKey('red', 'hi', 9999, 0, 1),
+    renderCacheKey('red', 'hi', 10000, 0, 1),
+    'huge chimeRepeat values must clamp to the same ceiling',
+  );
+  // The clamped huge value equals the key at the documented ceiling (8)…
+  assert.equal(
+    renderCacheKey('red', 'hi', 9999, 0, 1),
+    renderCacheKey('red', 'hi', 8, 0, 1),
+    'clamped value must equal the key at MAX_CHIME_REPEAT (8)',
+  );
+  // …and is distinct from a below-ceiling value, so the cap is a ceiling, not a floor.
+  assert.notEqual(
+    renderCacheKey('red', 'hi', 8, 0, 1),
+    renderCacheKey('red', 'hi', 4, 0, 1),
+    'below-ceiling repeat values must still be distinguished',
+  );
+});
+
+test('renderAnnouncement — announceRepeat repeats the chime block + busts the cache (klaxon-only)', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  try {
+    writeKlaxon(klaxonDir, 'all-clear.wav', 22050, 2, 1, 200);
+    const N = getChimeRepeat();
+    const r1 = await renderAnnouncement({
+      level: 'green', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1, // would refuse — proves no Wyoming call
+      announceRepeat: 1, log: () => {},
+    });
+    const r2 = await renderAnnouncement({
+      level: 'green', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1,
+      announceRepeat: 2, log: () => {},
+    });
+    assert.equal(r1.ok, true, `render failed: ${r1.error}`);
+    assert.equal(r2.ok, true, `render failed: ${r2.error}`);
+    assert.notEqual(r1.filename, r2.filename, 'announceRepeat must bust the cache');
+    // klaxon-only path: dataLength = chimeRepeat × announceRepeat × pcmLength
+    assert.equal(r1.sizeBytes, 44 + N * 200);
+    assert.equal(r2.sizeBytes, 44 + N * 2 * 200);
+    const h1 = parseWavHeader(readFileSync(resolve(cacheDir, r1.filename!)));
+    const h2 = parseWavHeader(readFileSync(resolve(cacheDir, r2.filename!)));
+    assert.equal(h2.dataLength, 2 * h1.dataLength, 'announceRepeat=2 is exactly twice the PCM of =1');
+  } finally {
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
