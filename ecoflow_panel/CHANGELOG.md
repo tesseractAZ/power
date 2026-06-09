@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.7 — 2026-06-09
+
+Broadcast: announcement plays at **`BROADCAST_VOLUME`** + a silence gap between repeats.
+
+Two operator-requested tweaks to the ecobee announcement:
+
+- **The announcement now sets the speakers to `BROADCAST_VOLUME` by default.** `BROADCAST_ANNOUNCE_VOLUME` now defaults to **empty**, which means "use `BROADCAST_VOLUME × 100`" — so with `BROADCAST_VOLUME: 1` the ecobees are set to 100% for the announcement. (Previously the default was `"off"`, which played at each speaker's standing volume.) The `"off"`/`"none"`/`"standing"` sentinel is still available for anyone who prefers to skip Music Assistant's volume set/restore. **If you previously had `BROADCAST_ANNOUNCE_VOLUME` set to `off`, clear it (or set it to `100`) to get the new behavior.**
+- **`BROADCAST_REPEAT_GAP_MS` (default 1500 ms)** inserts a silence gap *between* the repeated passes, so you hear the message conclude, a pause, then it repeat — instead of the two passes running together. Only applies when `BROADCAST_REPEAT > 1`; folded into the render cache key (`RENDER_VERSION` 3→4).
+- 463/463 server tests pass (new coverage for the gap in the cache key + exact inserted-silence length, and the `repeatGapMs` config default/clamp).
+
 ## 0.15.6 — 2026-06-09
 
 Remove the **Starfleet** web theme (codebase simplification — second of two theme removals).

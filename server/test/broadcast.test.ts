@@ -219,3 +219,28 @@ test('loadBroadcastConfig — v0.15.4 repeat / announce-volume / pre-announce / 
     Object.assign(process.env, saved);
   }
 });
+
+/* ===================================================================
+ * v0.15.7 — inter-repeat silence gap. A configurable pause is inserted between
+ * the repeated annunciation passes so the operator can hear the message finish
+ * and start again rather than the two passes running together. Default 1500 ms,
+ * clamped 0..5000.
+ * =================================================================== */
+test('loadBroadcastConfig — v0.15.7 repeatGapMs default + clamp', () => {
+  const saved = { ...process.env };
+  try {
+    delete process.env.BROADCAST_REPEAT_GAP_MS;
+    assert.equal(loadBroadcastConfig().repeatGapMs, 1500, 'default inter-repeat gap = 1500 ms');
+    process.env.BROADCAST_REPEAT_GAP_MS = '800';
+    assert.equal(loadBroadcastConfig().repeatGapMs, 800, 'explicit value honored');
+    process.env.BROADCAST_REPEAT_GAP_MS = '99999';
+    assert.equal(loadBroadcastConfig().repeatGapMs, 5000, 'clamps to 5000');
+    process.env.BROADCAST_REPEAT_GAP_MS = '-5';
+    assert.equal(loadBroadcastConfig().repeatGapMs, 0, 'clamps to 0 (no gap)');
+    process.env.BROADCAST_REPEAT_GAP_MS = '';
+    assert.equal(loadBroadcastConfig().repeatGapMs, 1500, 'empty → default 1500');
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});

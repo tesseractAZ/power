@@ -470,3 +470,50 @@ test('renderAnnouncement — announceRepeat repeats the chime block + busts the 
     rmSync(cacheDir, { recursive: true, force: true });
   }
 });
+
+// v0.15.7 — inter-repeat silence gap: between the repeated passes we insert
+// repeatGapMs of silence so the listener can tell the message ended and is
+// repeating. Folded into the cache key; for announceRepeat=2 exactly ONE gap is
+// inserted (between the two blocks), so it adds exactly gapBytes to the PCM.
+test('renderCacheKey — repeatGapMs is part of the key', () => {
+  const base = renderCacheKey('red', 'hi', 2, 0, 2, 0);
+  assert.equal(base, renderCacheKey('red', 'hi', 2, 0, 2, 0), 'same gap → same key');
+  assert.notEqual(base, renderCacheKey('red', 'hi', 2, 0, 2, 500), 'different gap → different key');
+  // default (undefined) gap resolves to 0
+  assert.equal(renderCacheKey('red', 'hi', 2, 0, 2), renderCacheKey('red', 'hi', 2, 0, 2, 0));
+});
+
+test('renderAnnouncement — repeatGapMs inserts one silence gap between two passes (klaxon-only)', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  try {
+    writeKlaxon(klaxonDir, 'all-clear.wav', 22050, 2, 1, 200);
+    const N = getChimeRepeat();
+    const noGap = await renderAnnouncement({
+      level: 'green', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1, // would refuse — proves no Wyoming call
+      announceRepeat: 2, repeatGapMs: 0, log: () => {},
+    });
+    const withGap = await renderAnnouncement({
+      level: 'green', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1,
+      announceRepeat: 2, repeatGapMs: 500, log: () => {},
+    });
+    assert.equal(noGap.ok, true, `render failed: ${noGap.error}`);
+    assert.equal(withGap.ok, true, `render failed: ${withGap.error}`);
+    assert.notEqual(noGap.filename, withGap.filename, 'repeatGapMs must bust the cache');
+    const gapBytes = silenceBytes(22050, 2, 1, 500); // 11025 frames × 2 = 22050 bytes
+    // announceRepeat=2 → two blocks of (N × 200) PCM + exactly ONE gap between them.
+    assert.equal(noGap.sizeBytes, 44 + N * 2 * 200);
+    assert.equal(withGap.sizeBytes, 44 + N * 2 * 200 + gapBytes);
+    // The gap region must be actual silence: locate it right after the first block.
+    const wav = readFileSync(resolve(cacheDir, withGap.filename!));
+    const h = parseWavHeader(wav);
+    const firstBlockBytes = N * 200;
+    const gapRegion = wav.subarray(h.dataOffset + firstBlockBytes, h.dataOffset + firstBlockBytes + gapBytes);
+    assert.ok(gapRegion.every((b) => b === 0), 'inter-repeat gap must be all-zero PCM');
+  } finally {
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
