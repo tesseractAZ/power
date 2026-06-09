@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.2 — 2026-06-09
+
+Intelligent load-shedding ADVISOR (Phase 1) + off-grid MPC fixes.
+
+The add-on now reads HA device state + SHP2 circuit watts, decomposes the load, and recommends which allowlisted loads to shed to extend the off-grid runway (with an upper-bound counterfactual). Advisory-only — the operator's own HA automations actuate off the new MQTT entities (load_shed_recommended + count/watts + runway_to_reserve_if_shed_hours) and GET /api/load-shedding/status. Opt-in and allowlist-only (empty by default).
+
+Off-grid fixes: the dispatch optimizer no longer assumes an impossible grid backstop (gridAvailable defaults false), and cycle cost now reflects live round-trip efficiency so an aging pack favors shedding over deep-cycling.
+
+New config: GRID_AVAILABLE, LOAD_SHEDDING_ADVISORY_ENABLED, LOAD_SHEDDING_SHED_ENTITIES, LOAD_SHEDDING_RUNWAY_THRESHOLD_H, LOAD_SHEDDING_RESTORE_MARGIN_H.
+
 ## 0.15.1 — 2026-06-09
 
 **Fix: per-circuit SHP2 Energy-Dashboard sensors now publish deterministically.**
