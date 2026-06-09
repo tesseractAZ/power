@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.5 — 2026-06-09
+
+Remove the **Opus** web theme (codebase simplification — first of two theme removals).
+
+The experimental "Opus / Project Genesis" web theme is dropped to slim the bundle and reduce surface area for testing. The Default and Babylon 5 themes are unchanged, and the Starfleet theme stays for now (removed separately in the next release).
+
+- Delete `web/src/opus/` (OpusBridge + its components/utils), the `opus` entry in the theme registry, the App-level theme branch + lazy import, and all `[data-theme="opus"]` / `.opus-*` CSS (221 lines).
+- The theme picker auto-updates (it iterates the theme registry), so no toggle change was needed.
+- Net effect: the Opus JS chunk (~31 kB) no longer ships and the global CSS shrinks from 39.3 → 33.0 kB. No server/back-end changes; broadcast + alert behaviour is untouched.
+
 ## 0.15.4 — 2026-06-09
 
 Ecobee announcement reliability + repeat (audible broadcast).

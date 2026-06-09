@@ -9,8 +9,8 @@ interface State {
  *
  * Before this existed, a render error in ANY component unmounted the entire
  * React tree → a blank white page, with the cause only visible in the dev
- * console. (A stale `bcast.speakerGroups.length` read in the Opus StatusDock
- * white-screened the whole dashboard for exactly this reason.) Now a stray
+ * console. (A stale `bcast.speakerGroups.length` read in a status component
+ * once white-screened the whole dashboard for exactly this reason.) Now a stray
  * crash shows a readable message + the stack + a Reload button, instead of a
  * silent blank — so a single bad component can never take the whole panel down
  * invisibly again.
