@@ -91,7 +91,9 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_backup_remaining_kwh', name: 'EcoFlow Backup Remaining', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_remaining_kwh }}' },
   { unique_id: 'ecoflow_backup_full_capacity_kwh', name: 'EcoFlow Backup Capacity', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_full_capacity_kwh }}' },
   // Forecast
-  { unique_id: 'ecoflow_forecast_pv_next_24h_kwh', name: 'EcoFlow Forecast PV Next 24h', device_class: 'energy', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.forecast_pv_next_24h_kwh }}' },
+  // v0.15.3 — no device_class: a forecast/rolling kWh is a `measurement` (goes up
+  // AND down); device_class energy forces total/total_increasing → HA rejects it.
+  { unique_id: 'ecoflow_forecast_pv_next_24h_kwh', name: 'EcoFlow Forecast PV Next 24h', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.forecast_pv_next_24h_kwh }}' },
   { unique_id: 'ecoflow_projected_low_soc', name: 'EcoFlow Projected Low SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-low', value_template: '{{ value_json.projected_low_soc_percent }}' },
   { unique_id: 'ecoflow_soiling_drop_percent', name: 'EcoFlow Solar Soiling', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:weather-dust', value_template: '{{ value_json.soiling_drop_percent }}' },
   // Degradation
@@ -108,7 +110,8 @@ export const SENSORS: SensorConfig[] = [
   // v0.9.77 — SoC-saturation curtailment ("batteries full, panels throttled")
   { unique_id: 'ecoflow_pv_curtailment_surplus_watts', name: 'EcoFlow PV Curtailment Surplus', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:solar-power-variant', value_template: '{{ value_json.pv_curtailment_surplus_watts }}' },
   { unique_id: 'ecoflow_pv_curtailment_kwh_today', name: 'EcoFlow PV Curtailed Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_today }}' },
-  { unique_id: 'ecoflow_pv_curtailment_kwh_7d', name: 'EcoFlow PV Curtailed 7d', device_class: 'energy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_7d }}' },
+  // v0.15.3 — measurement (rolling 7-day window goes up and down) → no device_class energy.
+  { unique_id: 'ecoflow_pv_curtailment_kwh_7d', name: 'EcoFlow PV Curtailed 7d', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_7d }}' },
   { unique_id: 'ecoflow_charge_ceiling', name: 'EcoFlow Charge Ceiling', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-100', value_template: '{{ value_json.pv_curtailment_charge_ceiling_pct }}', entity_category: 'diagnostic' },
   // Self-consumption (v0.7.5)
   { unique_id: 'ecoflow_solar_fraction_of_load', name: 'EcoFlow Solar Fraction of Load', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power', value_template: '{{ value_json.solar_fraction_of_load_percent }}' },
@@ -454,7 +457,7 @@ export async function startMqttDiscovery(
     if (shp2) for (const c of shp2.projection.circuits) panelLoad += c.watts ?? 0;
 
     const analytics = getAnalytics();
-    const [fc, deg, runway, rte, clipping, sc, carbon, tariff] = await Promise.all([
+    const [fc, deg, runway, rte, clipping, sc, carbon, tariff, curtailment] = await Promise.all([
       analytics.report('forecast'),
       analytics.report('degradation'),
       analytics.report('runway'),
@@ -463,6 +466,12 @@ export async function startMqttDiscovery(
       analytics.report('selfConsumption'),
       analytics.report('carbon'),
       analytics.report('tariff'),
+      // v0.15.3 — the curtailment report was never fetched here, so the five
+      // pv_curtailment_* sensors (added v0.9.77) referenced value_json keys that
+      // buildState never emitted → permanent "unknown" + a template warning every
+      // publish. Wiring it lights them up (and gives HA automations a real
+      // pv_curtailment_active signal for opportunistic/deferrable loads).
+      analytics.report('curtailment'),
     ]);
     const lifetime = recorder.getLifetimeTotals();
     const lifetimeKwh = (k: string) =>
@@ -498,6 +507,12 @@ export async function startMqttDiscovery(
       round_trip_efficiency_percent: rte.efficiencyPct,
       pv_clipped_kwh_today: clipping.todayKwh,
       pv_array_peak_watts: clipping.arrayPeakW,
+      // v0.15.3 — curtailment (batteries full → PV throttled). Previously absent.
+      pv_curtailment_active: !!curtailment.active,
+      pv_curtailment_surplus_watts: Math.round(curtailment.currentSurplusW ?? 0),
+      pv_curtailment_kwh_today: curtailment.todayKwh ?? null,
+      pv_curtailment_kwh_7d: curtailment.recent7dKwh ?? null,
+      pv_curtailment_charge_ceiling_pct: curtailment.current?.chargeCeilingPct ?? null,
       solar_fraction_of_load_percent: sc.solarFractionOfLoadPct,
       direct_use_ratio_percent: sc.directUseRatioPct,
       pv_lifetime_kwh: lifetimeKwh('fleet_pv_wh'),

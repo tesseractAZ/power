@@ -255,3 +255,41 @@ test('planCircuitDiscovery: empty circuit list publishes nothing and clears all 
     'homeassistant/sensor/ecoflow_circuit_5_lifetime_kwh/config',
   ]);
 });
+
+/**
+ * v0.15.3 — buildState ↔ SENSORS contract guard.
+ *
+ * Background: HA's MQTT discovery is keyed on `value_template` strings, which are
+ * opaque to the type system. The five pv_curtailment_* sensors (v0.9.77)
+ * referenced `value_json.*` keys that buildState() never emitted — so they sat at
+ * "unknown" for months and logged a template warning on every publish. This test
+ * statically asserts every `value_json.X` a sensor references is actually a key
+ * buildState (or the advisoryStateFields spread) returns, so the next forgotten
+ * wiring fails CI instead of silently shipping a dead entity.
+ */
+test('mqtt-discovery: every value_json key a sensor references is emitted by buildState', () => {
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(__dir, '../src/mqttDiscovery.ts'), 'utf8');
+  const advisorSrc = readFileSync(resolve(__dir, '../src/loadShedAdvisor.ts'), 'utf8');
+
+  // Referenced keys, excluding the dynamically-published per-circuit family
+  // (circuit_<n>_lifetime_kwh, emitted via an Object.fromEntries spread).
+  const referenced = [...new Set([...src.matchAll(/value_json\.([a-z0-9_]+)/g)].map((m) => m[1]))]
+    .filter((k) => !k.startsWith('circuit_'));
+
+  // Emitted keys: property names inside buildState()'s return literal …
+  const bsStart = src.indexOf('const buildState');
+  const retStart = src.indexOf('return {', bsStart);
+  const retEnd = src.indexOf('\n    };', retStart);
+  assert.ok(bsStart >= 0 && retStart > bsStart && retEnd > retStart, 'could not locate buildState return block');
+  const emitted = new Set(
+    [...src.slice(retStart, retEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)].map((m) => m[1]),
+  );
+  // … plus the keys spread in from advisoryStateFields().
+  const advStart = advisorSrc.indexOf('return {', advisorSrc.indexOf('function advisoryStateFields'));
+  const advEnd = advisorSrc.indexOf('};', advStart);
+  for (const m of advisorSrc.slice(advStart, advEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+
+  const missing = referenced.filter((k) => !emitted.has(k)).sort();
+  assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);
+});
