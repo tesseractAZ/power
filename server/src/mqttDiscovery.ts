@@ -20,6 +20,7 @@ import {
 // entities and the per-priority alarm counts as sensors.
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, priorityOf, type AlarmPriority } from './alertPriority.js';
 import { getAlertSettings, updateAlertSettings, onAlertSettingsChange } from './alertSettings.js';
+import { advisoryStateFields, getLatestAdvisory } from './loadShedAdvisor.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -141,6 +142,14 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_tariff_today_cost', name: 'EcoFlow Grid Cost Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash', value_template: '{{ value_json.tariff_today_grid_cost_dollars }}' },
   { unique_id: 'ecoflow_tariff_today_saved', name: 'EcoFlow Solar Value Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-plus', value_template: '{{ value_json.tariff_today_solar_value_dollars }}' },
   { unique_id: 'ecoflow_tariff_savings_7d', name: 'EcoFlow Net Savings (7d)', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-check', value_template: '{{ value_json.tariff_net_savings_7d_dollars }}' },
+
+  // ─── v0.15.2 load-shedding advisory (read + advise; HA automations actuate) ─
+  // The advisor recommends which allowlisted loads to shed when runway is low,
+  // with an upper-bound counterfactual. Gate your HA automations on these:
+  // e.g. "if load_shed_recommended ON for 5 min then turn off switch.pool_pump".
+  { unique_id: 'ecoflow_runway_to_reserve_if_shed_hours', name: 'EcoFlow Runway to Reserve (if shed)', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-sand-complete', value_template: '{{ value_json.runway_to_reserve_if_shed_hours }}' },
+  { unique_id: 'ecoflow_load_shed_recommended_count', name: 'EcoFlow Load-Shed Recommended Count', state_class: 'measurement', icon: 'mdi:power-plug-off', value_template: '{{ value_json.load_shed_recommended_count }}' },
+  { unique_id: 'ecoflow_load_shed_recommended_watts', name: 'EcoFlow Load-Shed Recommended Watts', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:power-plug-off-outline', value_template: '{{ value_json.load_shed_recommended_watts }}' },
 ];
 
 export const BINARY_SENSORS = [
@@ -149,6 +158,10 @@ export const BINARY_SENSORS = [
   // full + home load < expected PV). HA can trigger automations off this
   // — e.g. "if curtailing for 10 min then turn pool pump on full speed."
   { unique_id: 'ecoflow_pv_curtailment_active', name: 'EcoFlow PV Curtailment Active', device_class: 'power', icon: 'mdi:solar-power-variant', value_template: '{{ "ON" if value_json.pv_curtailment_active else "OFF" }}' },
+  // v0.15.2 — ON when the load-shed advisor recommends shedding ≥1 load to
+  // extend runway. The operator's HA automations actuate off this (advisory
+  // model); the add-on never toggles a load itself.
+  { unique_id: 'ecoflow_load_shed_recommended', name: 'EcoFlow Load Shed Recommended', device_class: 'power', icon: 'mdi:power-plug-off', value_template: '{{ "ON" if value_json.load_shed_recommended else "OFF" }}' },
 ];
 
 /**
@@ -515,6 +528,9 @@ export async function startMqttDiscovery(
       alert_medium_count: priorityCount('medium'),
       alert_low_count: priorityCount('low'),
       fleet_devices_online: devices.filter((d) => d.online).length,
+      // v0.15.2 — load-shed advisory signals (recommendation + counterfactual)
+      // for HA automations to gate on. Latest is computed on the advisor tick.
+      ...advisoryStateFields(getLatestAdvisory()),
     };
   };
 

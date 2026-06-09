@@ -142,6 +142,26 @@ options:
   # quiet hours, High/Critical always annunciate.
   BATTERY_RUNWAY_ALARM_ENABLED: true
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: 60
+  # v0.15.2 — off-grid honesty: whether the site has grid import available. MUST
+  # be false for an islanded off-grid system, so the dispatch optimizer stops
+  # assuming an impossible grid backstop. Set true only if you are grid-tied.
+  GRID_AVAILABLE: false
+  # v0.15.2 — intelligent load-shedding ADVISOR (Phase 1: read + advise, no
+  # actuation). When the runway projection drops below the threshold, it
+  # recommends which allowlisted loads to shed (with a counterfactual runway) and
+  # publishes the recommendation as HA entities — your OWN HA automations decide
+  # whether to act. The add-on never toggles a load itself.
+  LOAD_SHEDDING_ADVISORY_ENABLED: true
+  # Allowlist of sheddable loads (empty = advisory inactive, the safe default).
+  # Comma-separated  entity_id:priority:label:estimated_watts[:shp2_circuit]
+  # priority 1 = shed first (least important). Example:
+  #   switch.irrigation:1:Irrigation:200,switch.pool_pump:2:Pool pump:400:5
+  LOAD_SHEDDING_SHED_ENTITIES: ""
+  # Hours-to-reserve at/below which the advisor starts recommending shedding.
+  LOAD_SHEDDING_RUNWAY_THRESHOLD_H: 4.0
+  # Extra hours above the threshold the (counterfactual) runway must reach before
+  # a shed is no longer recommended — anti-flap margin.
+  LOAD_SHEDDING_RESTORE_MARGIN_H: 2.0
 schema:
   ECOFLOW_ACCESS_KEY: password
   ECOFLOW_SECRET_KEY: password
@@ -189,3 +209,8 @@ schema:
   BATTERY_SOC_ALARM_ENABLED: bool
   BATTERY_RUNWAY_ALARM_ENABLED: bool
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: int(5,720)?
+  GRID_AVAILABLE: bool
+  LOAD_SHEDDING_ADVISORY_ENABLED: bool
+  LOAD_SHEDDING_SHED_ENTITIES: "str?"
+  LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float
+  LOAD_SHEDDING_RESTORE_MARGIN_H: float

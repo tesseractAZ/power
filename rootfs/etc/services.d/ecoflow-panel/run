@@ -105,6 +105,21 @@ export BROADCAST_USE_MUSIC_ASSISTANT="$(bashio::config 'BROADCAST_USE_MUSIC_ASSI
 if bashio::config.true 'BROADCAST_ENABLED'; then
   bashio::log.info "broadcast: enabled (targets: $BROADCAST_TARGETS)"
 fi
+# v0.15.2 — off-grid honesty + intelligent load-shedding ADVISOR (read + advise;
+# HA automations actuate). GRID_AVAILABLE must be false for an islanded site.
+if bashio::config.true 'GRID_AVAILABLE'; then
+  export GRID_AVAILABLE=true
+else
+  export GRID_AVAILABLE=false
+fi
+if bashio::config.true 'LOAD_SHEDDING_ADVISORY_ENABLED'; then
+  export LOAD_SHEDDING_ADVISORY_ENABLED=true
+else
+  export LOAD_SHEDDING_ADVISORY_ENABLED=false
+fi
+export LOAD_SHEDDING_SHED_ENTITIES="$(bashio::config 'LOAD_SHEDDING_SHED_ENTITIES')"
+export LOAD_SHEDDING_RUNWAY_THRESHOLD_H="$(bashio::config 'LOAD_SHEDDING_RUNWAY_THRESHOLD_H')"
+export LOAD_SHEDDING_RESTORE_MARGIN_H="$(bashio::config 'LOAD_SHEDDING_RESTORE_MARGIN_H')"
 # SUPERVISOR_TOKEN is provided automatically by the HA Supervisor —
 # no need to export it manually. The Node process inherits it.
 

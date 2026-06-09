@@ -76,6 +76,9 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage } from './batterySocAlarm.js';
 import { createRunwayAlarm } from './runwayAlarm.js';
+import { createLoadShedAdvisor } from './loadShedAdvisor.js';
+import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
+import * as haStateCache from './haStateCache.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -1375,6 +1378,26 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
   const offPeak = Number(process.env.TARIFF_OFF_PEAK_CENTS_PER_KWH ?? flatCents);
   const tariffByHour: number[] = Array.from({ length: 24 }, (_, h) =>
     h >= 15 && h < 20 ? onPeak : offPeak);
+  // v0.15.2 — off-grid honesty fix. The hardcoded gridAvailable:true let the
+  // optimizer "assume away" reserve dips via grid imports that physically don't
+  // exist on this islanded site, producing dangerously optimistic plans. Default
+  // false; a grid-tied user opts back in with GRID_AVAILABLE=true.
+  const gridAvailable = process.env.GRID_AVAILABLE === 'true';
+  // v0.15.2 — feed LIVE round-trip efficiency into the per-cycle cost: as the
+  // pack ages and RTE drops, each round-trip wastes more real energy, so the DP
+  // should increasingly prefer shedding/deferring over deep-cycling. Cost = base
+  // wear + marginal energy loss valued at the flat tariff. Falls back to the
+  // legacy 0.02 constant until RTE has enough coverage to report.
+  let cyclingCostUsdPerKwh = 0.02;
+  try {
+    const rte: any = await analytics.report('roundTripEfficiency');
+    const effFrac = rte?.efficiencyPct != null ? rte.efficiencyPct / 100 : null;
+    if (effFrac != null && effFrac > 0 && effFrac <= 1) {
+      const baseWear = Number(process.env.CYCLING_BASE_WEAR_USD_PER_KWH ?? 0.015);
+      cyclingCostUsdPerKwh =
+        Math.round((baseWear + (1 - effFrac) * (flatCents / 100)) * 10_000) / 10_000;
+    }
+  } catch { /* RTE is optional — keep the legacy default */ }
   const inputs: MpcInputs = {
     currentSocPct: sp.backupBatPercent ?? 50,
     reserveFloorPct: sp.backupReserveSoc ?? 20,
@@ -1383,8 +1406,8 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
     pvForecastP10: pvP10,
     loadForecast,
     tariffOnPeakCentsByHour: tariffByHour,
-    gridAvailable: true,
-    cyclingCostUsdPerKwh: 0.02,
+    gridAvailable,
+    cyclingCostUsdPerKwh,
     reserveDipPenaltyUsdPerKwh: 1.0,
   };
   const result = recommendDispatch(inputs);
@@ -1589,6 +1612,54 @@ if (runwayAlarmEnabled) {
   }, 2 * 60 * 1000);
   runwayAlarmTick.unref();
 }
+
+// v0.15.2 — Intelligent load-shedding ADVISOR (Phase 1: read + advise, NO
+// actuation). Reads the runway projection + live HA device state (haStateCache)
+// + SHP2 circuit watts, decomposes the load, and recommends which loads to shed
+// to extend runway (with an upper-bound counterfactual). The recommendation is
+// surfaced at GET /api/load-shedding/status and as MQTT entities, so the
+// operator's own HA automations can act on it. The add-on never toggles a load.
+const loadShedAdvisoryEnabled = process.env.LOAD_SHEDDING_ADVISORY_ENABLED !== 'false';
+initShedRegistry((m) => app.log.info(m));
+const loadShedAdvisor = createLoadShedAdvisor({
+  getCandidates: getShedCandidates,
+  haEntity: (id) => haStateCache.getCachedEntity(id),
+  shp2CircuitWatts: (ch) => {
+    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    const circuits: any[] =
+      shp2 && shp2.projection?.kind === 'shp2' ? ((shp2.projection as any).circuits ?? []) : [];
+    const c = circuits.find((x) => x?.ch === ch);
+    return c && typeof c.watts === 'number' ? c.watts : null;
+  },
+  thresholdHours: () => Number(process.env.LOAD_SHEDDING_RUNWAY_THRESHOLD_H ?? 4.0),
+  restoreMarginHours: () => Number(process.env.LOAD_SHEDDING_RESTORE_MARGIN_H ?? 2.0),
+});
+if (loadShedAdvisoryEnabled) {
+  const loadShedTick = setInterval(() => {
+    void (async () => {
+      try {
+        // No allowlisted loads (the default) → nothing to advise on; skip the
+        // HA state poll entirely so opted-out installs pay zero overhead.
+        if (getShedCandidates().length === 0) return;
+        await haStateCache.refreshIfStale();
+        const r = await analytics.report('runway');
+        loadShedAdvisor.update(r);
+      } catch (e: any) {
+        app.log.debug(`load-shed: advisory tick skipped (${e?.message ?? e})`);
+      }
+    })();
+  }, 2 * 60 * 1000);
+  loadShedTick.unref();
+}
+
+// Read-only advisory status. No auth: it exposes no secrets and actuates nothing.
+app.get('/api/load-shedding/status', async () => ({
+  enabled: loadShedAdvisoryEnabled,
+  mode: 'advisory',
+  candidatesConfigured: getShedCandidates().length,
+  haStateCacheAgeMs: haStateCache.getCacheAgeMs(),
+  advisory: loadShedAdvisor.getStatus(),
+}));
 
 // Diagnostics: the analytics worker is the cache warmer now (self-warming
 // inside a worker thread). Endpoint kept for backward-compat.
