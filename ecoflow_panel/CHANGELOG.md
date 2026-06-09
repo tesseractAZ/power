@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.3 — 2026-06-09
+
+MQTT discovery audit fixes (found by auditing HA's logs after the rebuild).
+
+- Wire the curtailment report into the MQTT state: the five pv_curtailment_* sensors (surplus W, kWh today, kWh 7d, charge ceiling, and the pv_curtailment_active binary) were referenced but never emitted by buildState, so they sat at 'unknown' and logged a template warning on every publish. They now report real values — and the deferrable-load / opportunistic automations finally get a pv_curtailment_active signal to gate on.
+- Drop invalid device_class:energy from forecast_pv_next_24h_kwh and pv_curtailment_kwh_7d (HA rejects energy + measurement), silencing the 'impossible state class' warnings.
+- Add a contract test asserting every value_json key a sensor references is actually emitted by buildState.
+
 ## 0.15.2 — 2026-06-09
 
 Intelligent load-shedding ADVISOR (Phase 1) + off-grid MPC fixes.
