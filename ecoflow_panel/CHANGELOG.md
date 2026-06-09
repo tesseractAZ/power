@@ -3,6 +3,18 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.6 — 2026-06-09
+
+Remove the **Starfleet** web theme (codebase simplification — second of two theme removals).
+
+With Opus gone in v0.15.5, the Star Trek "Starfleet bridge" theme is now removed too, leaving **Default** and **Babylon 5** as the only web themes. This further slims the bundle and removes the largest alternate-theme component tree from the test surface.
+
+- Delete `web/src/starfleet/` (18 files: `StarfleetBridge` + stations + components + `sound.ts` + `useSound.ts`).
+- Remove the `starfleet` theme-registry entry, the `applyTheme` Starfleet font-loader, the `App.tsx` lazy import + theme branch (App is now a thin wrapper around the dashboard), and all `[data-theme="starfleet"]` / `.sf-*` CSS (340 lines).
+- Collapse `AlertOutcomeButtons` to its single (default) styling — the `variant: 'starfleet'` path and its `dim()` helper are gone; the Alerts page caller drops the now-defunct `variant` prop.
+- Tidy now-stale comments that referenced the deleted theme (the broadcast `audioAssets.ts` klaxon/boatswain **synthesis is unchanged** — it just no longer points at the removed `starfleet/sound.ts`).
+- Net effect: the Starfleet JS chunk (~60 kB) no longer ships and global CSS shrinks 33.0 → 25.5 kB. No server/back-end behaviour change; 460/460 server tests pass.
+
 ## 0.15.5 — 2026-06-09
 
 Remove the **Opus** web theme (codebase simplification — first of two theme removals).

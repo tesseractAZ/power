@@ -269,7 +269,7 @@ function AlertRow({ alert, meta }: { alert: Alert; meta: PriorityMeta }) {
         <div className="text-xs text-muted mt-1 leading-relaxed">{alert.detail}</div>
         {/* v0.9.25 — feedback-loop: operator verdict feeds the labeled dataset */}
         <div className="mt-2">
-          <AlertOutcomeButtons alertId={alert.id} variant="default" />
+          <AlertOutcomeButtons alertId={alert.id} />
         </div>
       </div>
     </div>
