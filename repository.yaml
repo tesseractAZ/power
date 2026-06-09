@@ -1,0 +1,11 @@
+# Home Assistant add-on repository manifest.
+#
+# Adding this repo's URL under Settings → Add-ons → Add-on Store → ⋮ →
+# Repositories makes "EcoFlow Panel" (in ./ecoflow_panel) installable as a
+# first-class store add-on. Home Assistant then manages it natively — the Update
+# button pulls the new prebuilt GHCR image when `version:` in
+# ecoflow_panel/config.yaml bumps — with no local-folder git workflow and none of
+# the local+image "hybrid" update friction.
+name: EcoFlow Panel
+url: https://github.com/tesseractAZ/ecoflow-panel
+maintainer: tesseractAZ <epaschal@outlook.com>

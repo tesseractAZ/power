@@ -3,6 +3,19 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.0 — 2026-06-08
+
+**Repackaged as a proper Home Assistant add-on repository — no functional change.**
+The add-on metadata (`config.yaml`, `apparmor.txt`, `DOCS.md`, `CHANGELOG.md`) now
+lives in `./ecoflow_panel/` with a `repository.yaml` at the repo root, so this can be
+added in HA under **Settings → Add-ons → Add-on Store → ⋮ → Repositories** and
+installed as a first-class store add-on. That **eliminates the local-add-on + prebuilt-
+image "hybrid"** whose update path was unreliable (stale update entity, "no update
+available" / "it is image-based" errors): Home Assistant now manages updates natively —
+the **Update button pulls the new GHCR image** when this `version:` bumps, with no
+git-on-Pi workflow. The image itself is byte-identical to 0.14.2 (source, Dockerfile and
+CI build are unchanged; only the metadata moved).
+
 ## 0.14.2 — 2026-06-08
 
 **The last two audit leftovers — both one-line constant fixes in `analytics.ts`.**

@@ -198,7 +198,7 @@ jobs:
           python3 - <<'PY' > /tmp/notes.md
           import os, re
           version = os.environ["NEXT"]
-          with open("CHANGELOG.md") as f:
+          with open("ecoflow_panel/CHANGELOG.md") as f:
               content = f.read()
           # Match the "## <version> …" header through end of section (next "## " or EOF)
           pattern = re.compile(
