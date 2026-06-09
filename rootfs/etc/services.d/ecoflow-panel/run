@@ -93,6 +93,7 @@ export BROADCAST_AUDIO_BASE="$(bashio::config 'BROADCAST_AUDIO_BASE')"
 export BROADCAST_VOLUME="$(bashio::config 'BROADCAST_VOLUME')"
 # v0.15.4 — announcement reliability/repeat knobs (ecobee-friendly)
 export BROADCAST_REPEAT="$(bashio::config 'BROADCAST_REPEAT')"
+export BROADCAST_REPEAT_GAP_MS="$(bashio::config 'BROADCAST_REPEAT_GAP_MS')"
 export BROADCAST_ANNOUNCE_VOLUME="$(bashio::config 'BROADCAST_ANNOUNCE_VOLUME')"
 export BROADCAST_ANNOUNCE_RETRIES="$(bashio::config 'BROADCAST_ANNOUNCE_RETRIES')"
 if bashio::config.true 'BROADCAST_USE_PRE_ANNOUNCE'; then

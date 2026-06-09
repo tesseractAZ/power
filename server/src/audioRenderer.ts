@@ -66,8 +66,10 @@ import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
 import { getChimeRepeat } from './alertSettings.js';
 
 /** Bump when the render pipeline changes in a way that invalidates the cache.
- *  v2 (v0.12.1): the optional lead-in silence is now part of every render. */
-export const RENDER_VERSION = 3;
+ *  v2 (v0.12.1): the optional lead-in silence is now part of every render.
+ *  v3 (v0.15.4): announce-repeat folded into the key.
+ *  v4 (v0.15.7): inter-repeat silence gap folded into the key. */
+export const RENDER_VERSION = 4;
 
 /** v0.15.4 — hard ceiling on the chime-repeat count at the allocation site.
  *  getChimeRepeat() is already clamped to ≤4 by alertSettings; this is a
@@ -107,6 +109,13 @@ export interface RenderOptions {
    * Default/undefined → 1 (no repeat).
    */
   announceRepeat?: number;
+  /**
+   * v0.15.7 — milliseconds of digital silence inserted BETWEEN the repeated
+   * (chime + spoken message) blocks, so the listener can hear the message
+   * conclude and start again rather than the two passes running together. Only
+   * applies when announceRepeat > 1. Part of the cache key. Default/undefined → 0.
+   */
+  repeatGapMs?: number;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
 }
@@ -184,6 +193,9 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // v0.12.1 — lead-in silence (ms) prepended before the first chime. Resolved
   // once so it's part of both the rendered audio AND the cache key.
   const leadMs = Math.max(0, Math.round(opts.leadSilenceMs ?? 0));
+  // v0.15.7 — silence (ms) inserted between repeated blocks so the repeat is
+  // audibly distinct. Only meaningful when announceRepeat > 1. Part of the key.
+  const repeatGapMs = Math.max(0, Math.round(opts.repeatGapMs ?? 0));
 
   // Cache key derivation: stable for the same (version, level, message, repeat,
   // lead silence). Null message hashes distinctly from empty string so klaxon-
@@ -191,7 +203,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // and lead-in are part of the key so changing either busts the cache.
   // v0.15.4 — single source of truth for the cache key (shared with the exported
   // renderCacheKey, which callers use to predict the served filename).
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat);
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -231,13 +243,16 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
       let klaxonOnly = klaxonWav;
       if (silence.length > 0 || chimeRepeat > 1 || announceRepeat > 1) {
         const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
-        // Build the chime list with a bounded push-loop rather than Array(n).fill():
-        // chimeRepeat is already guarded to ≤ MAX_CHIME_REPEAT and announceRepeat to
-        // ≤3, so this is small — and avoiding allocation-by-length keeps it off the
-        // resource-exhaustion path entirely. Byte-identical to the old .fill() form.
+        // v0.15.7 — emit announceRepeat blocks of chimeRepeat chimes, with a
+        // silence gap between blocks so a repeat is audibly separated. Bounded
+        // push-loops (chimeRepeat ≤ MAX_CHIME_REPEAT, announceRepeat ≤ 3) keep
+        // this off the resource-exhaustion path.
+        const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
         const chimeParts: Buffer[] = [silence];
-        const totalChimes = chimeRepeat * announceRepeat;
-        for (let i = 0; i < totalChimes; i++) chimeParts.push(klaxonPcm);
+        for (let r = 0; r < announceRepeat; r++) {
+          if (r > 0 && gap.length > 0) chimeParts.push(gap);
+          for (let c = 0; c < chimeRepeat; c++) chimeParts.push(klaxonPcm);
+        }
         const pcm = Buffer.concat(chimeParts);
         klaxonOnly = pcmToWav(pcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
       }
@@ -288,11 +303,17 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // silence stays once, up front. The chime list is built with a bounded push-loop
   // (chimeRepeat is guarded to ≤ MAX_CHIME_REPEAT) rather than Array(n).fill(), to
   // keep it off the resource-exhaustion path — byte-identical to the old form.
+  // v0.15.7 — a silence gap (repeatGapMs) is inserted between blocks so the
+  // listener can tell the message ended and is repeating.
   const block: Buffer[] = [];
   for (let i = 0; i < chimeRepeat; i++) block.push(klaxonPcm);
   block.push(ttsPcm);
+  const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
   const parts: Buffer[] = [silence];
-  for (let i = 0; i < announceRepeat; i++) parts.push(...block);
+  for (let i = 0; i < announceRepeat; i++) {
+    if (i > 0 && gap.length > 0) parts.push(gap);
+    parts.push(...block);
+  }
   const combinedPcm = Buffer.concat(parts);
   const combined = pcmToWav(combinedPcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
 
@@ -394,6 +415,7 @@ export function renderCacheKey(
   chimeRepeat?: number,
   leadSilenceMs?: number,
   announceRepeat?: number,
+  repeatGapMs?: number,
 ): string {
   // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
   // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
@@ -402,8 +424,10 @@ export function renderCacheKey(
   // v0.15.4 — announce-repeat (whole chime+message block) is part of the key.
   const annRepeat = Math.max(1, Math.min(3, Math.round(announceRepeat ?? 1)));
   const leadMs = Math.max(0, Math.round(leadSilenceMs ?? 0));
+  // v0.15.7 — inter-repeat silence gap is part of the key.
+  const gapMs = Math.max(0, Math.round(repeatGapMs ?? 0));
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }
