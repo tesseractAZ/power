@@ -189,6 +189,60 @@ export function legacyUniqueIdsFor(currentUniqueId: string): string[] {
   return [`ecoflow_panel_${currentUniqueId}`];
 }
 
+export interface CircuitDiscoveryPlan {
+  /** Change-latch key: identical circuit set (channel + name) → identical sig. */
+  sig: string;
+  /** Per-circuit discovery configs to (re)publish. */
+  publish: { topic: string; cfg: Record<string, unknown> }[];
+  /** Retained config topics to clear for circuits that have disappeared. */
+  clear: string[];
+}
+
+/**
+ * v0.15.1 — Pure planning for per-SHP2-circuit Energy-Dashboard discovery.
+ * Extracted from the runtime closure so the publish/skip/clear decision — the
+ * part the original one-shot-connect path got wrong (it computed the circuit
+ * list once, at broker-connect, before the first poll had populated it, and
+ * never retried) — is unit-testable without a live MQTT client or store.
+ *
+ * Given the channels we last published and the current circuit list, returns a
+ * signature (compare against the last one to decide whether anything changed),
+ * the configs to (re)publish, and the config topics to clear for circuits that
+ * are no longer present.
+ */
+export function planCircuitDiscovery(
+  prefix: string,
+  prevChannels: number[],
+  circuits: { ch: number; name?: string | null }[],
+): CircuitDiscoveryPlan {
+  const sig = circuits.map((c) => `${c.ch}:${c.name ?? ''}`).join('|');
+  const current = new Set(circuits.map((c) => c.ch));
+  const clear = prevChannels
+    .filter((ch) => !current.has(ch))
+    .map((ch) => `${prefix}/sensor/ecoflow_circuit_${ch}_lifetime_kwh/config`);
+  const publish = circuits.map((c) => {
+    const uniqueId = `ecoflow_circuit_${c.ch}_lifetime_kwh`;
+    return {
+      topic: `${prefix}/sensor/${uniqueId}/config`,
+      cfg: {
+        unique_id: uniqueId,
+        name: `EcoFlow ${c.name || `Circuit ${c.ch}`} Energy`,
+        state_topic: STATE_TOPIC,
+        availability_topic: AVAILABILITY_TOPIC,
+        payload_available: 'online',
+        payload_not_available: 'offline',
+        device_class: 'energy',
+        state_class: 'total_increasing',
+        unit_of_measurement: 'kWh',
+        icon: 'mdi:transmission-tower',
+        value_template: `{{ value_json.circuit_${c.ch}_lifetime_kwh }}`,
+        device: DEVICE_INFO,
+      } as Record<string, unknown>,
+    };
+  });
+  return { sig, publish, clear };
+}
+
 export interface MqttDiscoveryHandle {
   stop: () => void;
   client: MqttClient | null;
@@ -307,35 +361,11 @@ export async function startMqttDiscovery(
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
     }
-    // v0.8.0 — publish one Energy-Dashboard sensor per SHP2 circuit so each
-    // appears as an "Individual device" under HA's Energy Dashboard. Built
-    // dynamically from the current snapshot's circuit list (auto-adapts if
-    // the user adds/removes SHP2 circuits later).
-    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
-    if (shp2 && shp2.projection?.kind === 'shp2') {
-      const circuits = (shp2.projection as Shp2Projection).circuits ?? [];
-      for (const c of circuits) {
-        const uniqueId = `ecoflow_circuit_${c.ch}_lifetime_kwh`;
-        const name = `EcoFlow ${c.name || `Circuit ${c.ch}`} Energy`;
-        const topic = `${prefix}/sensor/${uniqueId}/config`;
-        const cfg = {
-          unique_id: uniqueId,
-          name,
-          state_topic: STATE_TOPIC,
-          availability_topic: AVAILABILITY_TOPIC,
-          payload_available: 'online',
-          payload_not_available: 'offline',
-          device_class: 'energy',
-          state_class: 'total_increasing',
-          unit_of_measurement: 'kWh',
-          icon: 'mdi:transmission-tower',
-          value_template: `{{ value_json.circuit_${c.ch}_lifetime_kwh }}`,
-          device: DEVICE_INFO,
-        };
-        client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
-      }
-      log(`mqtt-discovery: published ${circuits.length} per-circuit lifetime sensors`);
-    }
+    // v0.8.0 — per-SHP2-circuit Energy-Dashboard sensors are published from
+    // publishCircuitDiscovery(), driven by the recurring publishState() loop
+    // rather than this one-shot connect path. The circuit list only exists once
+    // the first poll populates the snapshot, which can land AFTER the broker
+    // connect (a startup race) — see publishCircuitDiscovery() below.
     // v0.11.0 — per-ISA-priority alarm on/off switches. Each mirrors the
     // matching `priorityEnabled[p]` flag in alertSettings. optimistic=false so
     // HA reflects the actual reported state_topic value (the server is the
@@ -488,8 +518,37 @@ export async function startMqttDiscovery(
     };
   };
 
+  // v0.15.1 — Per-SHP2-circuit discovery, decoupled from the one-shot connect.
+  // The circuit list only exists once the first REST poll populates the snapshot,
+  // which can race AFTER the broker `connect` fires (observed: a boot where the
+  // connect beat the first poll published 0 of 12 per-circuit configs). Driving
+  // this from the recurring publishState() loop guarantees the configs are
+  // asserted as soon as the SHP2 projection appears, re-asserted if the circuit
+  // set changes, and orphaned configs for removed circuits are cleared. The
+  // `sig` latch makes every steady-state tick a no-op (no churn, no log spam).
+  let circuitDiscoverySig: string | null = null;
+  let publishedCircuitChannels: number[] = [];
+  const publishCircuitDiscovery = () => {
+    if (!client.connected) return;
+    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    if (!shp2 || shp2.projection?.kind !== 'shp2') return; // no projection yet — retry next tick
+    const circuits = (shp2.projection as Shp2Projection).circuits ?? [];
+    const plan = planCircuitDiscovery(prefix, publishedCircuitChannels, circuits);
+    if (plan.sig === circuitDiscoverySig) return; // this exact circuit set already asserted
+    for (const topic of plan.clear) client.publish(topic, '', { retain: true, qos: 0 });
+    for (const { topic, cfg } of plan.publish) {
+      client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
+    }
+    circuitDiscoverySig = plan.sig;
+    publishedCircuitChannels = circuits.map((c) => c.ch);
+    log(`mqtt-discovery: published ${plan.publish.length} per-circuit lifetime sensors`);
+  };
+
   const publishState = async () => {
     if (!client.connected) return;
+    // Assert/refresh the dynamic per-circuit discovery configs before the state
+    // payload, so HA has the entity definitions in hand when the values land.
+    publishCircuitDiscovery();
     try {
       const state = await buildState(store.get());
       client.publish(STATE_TOPIC, JSON.stringify(state), { retain: true, qos: 0 });
