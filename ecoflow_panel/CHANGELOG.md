@@ -3,6 +3,18 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.1 — 2026-06-09
+
+**Fix: per-circuit SHP2 Energy-Dashboard sensors now publish deterministically.**
+Previously the 12 per-circuit lifetime sensors were published once on MQTT connect,
+gated on the SHP2 circuit list already being present in the snapshot — a startup race
+that could publish zero of them when the broker connect beat the first device poll
+(surfaced by the post-migration log audit). They now publish from the recurring state
+loop: asserted as soon as the SHP2 projection appears, re-asserted on a circuit
+rename/add, and the retained config is cleared for any circuit that disappears.
+Internals: extracted a pure `planCircuitDiscovery()` (functional core / imperative
+shell) covered by 6 new regression tests. 436/436 server tests pass.
+
 ## 0.15.0 — 2026-06-08
 
 **Repackaged as a proper Home Assistant add-on repository — no functional change.**
