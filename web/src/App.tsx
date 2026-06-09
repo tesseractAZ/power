@@ -12,13 +12,9 @@ import { SmallDeviceCard } from './cards/SmallDeviceCard';
 import { alertCounts } from './alerts';
 import { sortDevices } from './sort';
 import { fmtRel } from './format';
-import { SERIES_PALETTE, useTheme } from './theme';
+import { SERIES_PALETTE } from './theme';
 import { ThemeToggle } from './components/ThemeToggle';
 import { installGlossaryTooltips } from './glossary';
-// v0.9.14 — Starfleet interface is rendered by a wholly separate
-// component tree (not a re-skin of these tabs). Lazy-loaded so it
-// doesn't ship in the Default/B5 bundle.
-const StarfleetBridge = lazy(() => import('./starfleet/StarfleetBridge').then((m) => ({ default: m.StarfleetBridge })));
 
 // v0.8.1 — route-level code splitting. Each non-default page becomes its own
 // chunk; recharts (~300 kB minified) is vendor-chunked separately via the
@@ -45,27 +41,12 @@ const PageFallback = () => (
 );
 
 /**
- * v0.9.17 — App is now a thin theme router. The previous shape called
- * many hooks AFTER an early-return that fired when theme === 'starfleet',
- * which violated React's Rules of Hooks: switching themes mid-session
- * threw "Rendered fewer / more hooks than expected" because the hook
- * count differed between branches.
- *
- * Now App calls exactly one hook (useTheme) and mounts/unmounts the
- * appropriate subtree as a whole. NormalApp owns all of the original
- * hooks; StarfleetBridge owns its own. Each subtree's hook ordering is
- * stable across its own re-renders, and React safely tears one down +
- * mounts the other when the user flips themes.
+ * v0.15.6 — the Default / Babylon 5 dashboard is the only UI now; the
+ * alternate Starfleet and Opus themes were removed. App is a thin wrapper
+ * around NormalApp, which owns all the dashboard's hooks and state. (The CSS
+ * palette still swaps between Default and B5 via the data-theme attribute.)
  */
 export default function App() {
-  const [theme] = useTheme();
-  if (theme === 'starfleet') {
-    return (
-      <Suspense fallback={<PageFallback />}>
-        <StarfleetBridge />
-      </Suspense>
-    );
-  }
   return <NormalApp />;
 }
 

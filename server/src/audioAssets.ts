@@ -1,9 +1,8 @@
 /**
  * v0.9.18 — server-side WAV synthesis for ship-wide audible broadcasts.
  *
- * The Starfleet web UI plays TMP-era alert sounds via the Web Audio API
- * (good for the operator at the screen). But operators are not always
- * at their station — so we also need to push the same sounds to
+ * Alert annunciations (klaxons + the boatswain chime) need to reach
+ * operators who aren't sitting at the dashboard — so we push the sounds to
  * HomePods + Sonos throughout the property.
  *
  * Speakers can't synthesize on the fly; they need URLs to stream. This
@@ -11,9 +10,6 @@
  * them to /data/audio/, and the Fastify server exposes them via a
  * static route. Home Assistant's `media_player.play_media` service
  * then tells each Sonos / HomePod to stream the right URL.
- *
- * The synthesis parameters match `web/src/starfleet/sound.ts` so the
- * speaker audio matches what the operator hears in the browser.
  *
  * WAV format: PCM, 16-bit signed little-endian, 22050 Hz mono. Most
  * Sonos + HomePod firmwares stream this without resampling artifacts;
@@ -265,7 +261,7 @@ function allClearSegments(): { segs: Segment[]; totalSec: number } {
 }
 
 /**
- * Boatswain whistle — the classic Starfleet shipwide-announcement chime
+ * Boatswain whistle — the classic shipwide-announcement chime
  * that PRECEDES any verbal address ("Captain to the bridge"). Two-tone
  * pure sine sweep up, hold, then down.
  */

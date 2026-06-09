@@ -109,11 +109,6 @@ export const THEMES = [
     name: 'Babylon 5',
     description: 'Earthforce / Babylon Station system UI — deep navy + station cyan + amber accents.',
   },
-  {
-    id: 'starfleet' as const,
-    name: 'Starfleet',
-    description: 'USS Enterprise NCC-1701 refit bridge (Star Trek: The Motion Picture). New layout, new stations, new chrome — not a re-skin.',
-  },
 ];
 
 export type ThemeId = (typeof THEMES)[number]['id'];
@@ -144,29 +139,15 @@ export function applyTheme(id: ThemeId) {
       'https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap';
     document.head.appendChild(link);
   }
-  // v0.9.14 — Starfleet (TMP era) fonts. Antonio for Eurostile-feel
-  // (geometric extended sans for headers/labels), Saira Condensed for
-  // body, Share Tech Mono for monospaced numeric readouts.
-  if (id === 'starfleet' && !document.getElementById('theme-starfleet-fonts')) {
-    const link = document.createElement('link');
-    link.id = 'theme-starfleet-fonts';
-    link.rel = 'stylesheet';
-    link.href =
-      'https://fonts.googleapis.com/css2?family=Antonio:wght@400;700&family=Saira+Condensed:wght@400;600&family=Share+Tech+Mono&display=swap';
-    document.head.appendChild(link);
-  }
 }
 
 /* ─── v0.9.17 — singleton theme store ──────────────────────────────────
  *
  * Earlier versions made `useTheme` a plain `useState` hook. Each component
  * that called it got its OWN state instance, so when `ThemeToggle`'s
- * `setActive('starfleet')` fired, the App component's separate useTheme
- * instance never saw the change — the CSS palette swapped (via the
- * side-effect `applyTheme` call) but the `if (theme === 'starfleet')`
- * branch in App.tsx kept returning false. Result: the normal dashboard
- * stayed mounted under a Starfleet-colored palette instead of the
- * StarfleetBridge component swapping in.
+ * `setActive(...)` fired, other `useTheme` consumers never saw the change —
+ * the CSS palette swapped (via the side-effect `applyTheme` call) but any
+ * component branching on the active theme kept reading its own stale copy.
  *
  * Fix: hold the active theme in a module-level singleton + maintain a Set
  * of subscribers. Every `useTheme()` consumer subscribes via
