@@ -48,7 +48,7 @@ jobs:
         id: ver
         run: |
           set -euo pipefail
-          current=$(grep -E '^version:' config.yaml \
+          current=$(grep -E '^version:' ecoflow_panel/config.yaml \
             | sed -E 's/version:[[:space:]]*"?([^"#]+)"?.*/\1/' \
             | tr -d '[:space:]')
           if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -115,8 +115,8 @@ jobs:
         run: |
           set -euo pipefail
           # config.yaml: replace the version: line
-          sed -i.bak -E 's/^version:[[:space:]]*"?[^"#]+"?/version: "'"$NEXT"'"/' config.yaml
-          rm -f config.yaml.bak
+          sed -i.bak -E 's/^version:[[:space:]]*"?[^"#]+"?/version: "'"$NEXT"'"/' ecoflow_panel/config.yaml
+          rm -f ecoflow_panel/config.yaml.bak
 
           # CHANGELOG.md: prepend a new section before the most recent version section
           python3 - <<'PY'
@@ -126,7 +126,7 @@ jobs:
           with open(os.environ["NOTES_FILE"]) as f:
               notes = f.read().strip() or "_(see commit history for details)_"
 
-          with open("CHANGELOG.md", "r") as f:
+          with open("ecoflow_panel/CHANGELOG.md", "r") as f:
               content = f.read()
           new_section = f"## {version} — {today}\n\n{notes}\n\n"
           m = re.search(r"^## \d", content, re.MULTILINE)
@@ -134,14 +134,14 @@ jobs:
               content = content[:m.start()] + new_section + content[m.start():]
           else:
               content = content.rstrip() + "\n\n" + new_section
-          with open("CHANGELOG.md", "w") as f:
+          with open("ecoflow_panel/CHANGELOG.md", "w") as f:
               f.write(content)
           PY
 
           echo "── config.yaml version line ─────────────────"
-          grep '^version:' config.yaml
+          grep '^version:' ecoflow_panel/config.yaml
           echo "── CHANGELOG.md head ────────────────────────"
-          head -25 CHANGELOG.md
+          head -25 ecoflow_panel/CHANGELOG.md
           echo "─────────────────────────────────────────────"
 
       - name: Commit, tag, push
@@ -151,7 +151,7 @@ jobs:
           set -euo pipefail
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add config.yaml CHANGELOG.md
+          git add ecoflow_panel/config.yaml ecoflow_panel/CHANGELOG.md
           git commit -m "Release v${NEXT}"
           git tag -a "v${NEXT}" -m "Release v${NEXT}"
           git push origin HEAD:main

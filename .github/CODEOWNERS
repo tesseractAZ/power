@@ -14,7 +14,7 @@
 /server/src/analytics.ts    @tesseractAZ
 /server/src/telnet/         @tesseractAZ
 /.github/                   @tesseractAZ
-/config.yaml                @tesseractAZ
+/ecoflow_panel/config.yaml                @tesseractAZ
 /Dockerfile                 @tesseractAZ
 /build.yaml                 @tesseractAZ
 /rootfs/                    @tesseractAZ
