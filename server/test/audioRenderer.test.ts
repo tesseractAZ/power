@@ -397,3 +397,48 @@ test('cachedRenderPath — strict filename format check (no path traversal)', ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// v0.15.4 — announceRepeat: the entire chime+TTS block is rendered N times into
+// ONE cached WAV, so a single (reliable) Music Assistant announce call replays
+// the whole annunciation. This catches a missed first pass on the ecobee
+// speakers without a second flaky service call. announceRepeat folds into the
+// cache key so repeat=1 and repeat=2 never alias.
+
+test('renderCacheKey — announceRepeat is part of the key', () => {
+  const base = renderCacheKey('red', 'hi', 2, 0, 1);
+  assert.equal(base, renderCacheKey('red', 'hi', 2, 0, 1), 'same announceRepeat → same key');
+  assert.notEqual(base, renderCacheKey('red', 'hi', 2, 0, 2), 'different announceRepeat → different key');
+  // default (undefined) announceRepeat resolves to 1, matching an explicit 1
+  assert.equal(renderCacheKey('red', 'hi', 2, 0), renderCacheKey('red', 'hi', 2, 0, 1));
+});
+
+test('renderAnnouncement — announceRepeat repeats the chime block + busts the cache (klaxon-only)', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  try {
+    writeKlaxon(klaxonDir, 'all-clear.wav', 22050, 2, 1, 200);
+    const N = getChimeRepeat();
+    const r1 = await renderAnnouncement({
+      level: 'green', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1, // would refuse — proves no Wyoming call
+      announceRepeat: 1, log: () => {},
+    });
+    const r2 = await renderAnnouncement({
+      level: 'green', message: null, klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: 1,
+      announceRepeat: 2, log: () => {},
+    });
+    assert.equal(r1.ok, true, `render failed: ${r1.error}`);
+    assert.equal(r2.ok, true, `render failed: ${r2.error}`);
+    assert.notEqual(r1.filename, r2.filename, 'announceRepeat must bust the cache');
+    // klaxon-only path: dataLength = chimeRepeat × announceRepeat × pcmLength
+    assert.equal(r1.sizeBytes, 44 + N * 200);
+    assert.equal(r2.sizeBytes, 44 + N * 2 * 200);
+    const h1 = parseWavHeader(readFileSync(resolve(cacheDir, r1.filename!)));
+    const h2 = parseWavHeader(readFileSync(resolve(cacheDir, r2.filename!)));
+    assert.equal(h2.dataLength, 2 * h1.dataLength, 'announceRepeat=2 is exactly twice the PCM of =1');
+  } finally {
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});

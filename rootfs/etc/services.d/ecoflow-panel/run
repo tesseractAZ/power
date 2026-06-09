@@ -91,6 +91,15 @@ fi
 export BROADCAST_TARGETS="$(bashio::config 'BROADCAST_TARGETS')"
 export BROADCAST_AUDIO_BASE="$(bashio::config 'BROADCAST_AUDIO_BASE')"
 export BROADCAST_VOLUME="$(bashio::config 'BROADCAST_VOLUME')"
+# v0.15.4 — announcement reliability/repeat knobs (ecobee-friendly)
+export BROADCAST_REPEAT="$(bashio::config 'BROADCAST_REPEAT')"
+export BROADCAST_ANNOUNCE_VOLUME="$(bashio::config 'BROADCAST_ANNOUNCE_VOLUME')"
+export BROADCAST_ANNOUNCE_RETRIES="$(bashio::config 'BROADCAST_ANNOUNCE_RETRIES')"
+if bashio::config.true 'BROADCAST_USE_PRE_ANNOUNCE'; then
+  export BROADCAST_USE_PRE_ANNOUNCE=true
+else
+  export BROADCAST_USE_PRE_ANNOUNCE=false
+fi
 export BROADCAST_MIN_SEVERITY="$(bashio::config 'BROADCAST_MIN_SEVERITY')"
 export BROADCAST_QUIET_HOURS="$(bashio::config 'BROADCAST_QUIET_HOURS')"
 export BROADCAST_TTS_SERVICE="$(bashio::config 'BROADCAST_TTS_SERVICE')"

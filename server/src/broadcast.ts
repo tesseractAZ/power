@@ -104,6 +104,17 @@ export interface BroadcastConfig {
    *  AirPlay speakers can sync up before the chime (fixes clipped starts and
    *  slow AirPlay devices missing the announcement). 0 disables. */
   leadSilenceMs: number;
+  /** v0.15.4 — repeat the whole (chime + spoken message) block N times per
+   *  announcement so a missed first pass gets a second. Clamped 1..3. */
+  repeat: number;
+  /** v0.15.4 — announce volume 0..100, or null to OMIT announce_volume entirely
+   *  (play at the speaker's standing volume). Omitting it avoids MA's
+   *  set→play→restore dance, which ecobee speakers handle unreliably. */
+  announceVolume: number | null;
+  /** v0.15.4 — MA's pre-announce tone; can "wake" a sleepy ecobee speaker. */
+  usePreAnnounce: boolean;
+  /** v0.15.4 — retry the play_announcement call on an actual failure (0..3). */
+  announceRetries: number;
 }
 
 export function loadBroadcastConfig(): BroadcastConfig {
@@ -123,7 +134,31 @@ export function loadBroadcastConfig(): BroadcastConfig {
     wyomingPort: Number(process.env.BROADCAST_WYOMING_PORT) || 10200,
     wyomingVoice: emptyToNull(process.env.BROADCAST_WYOMING_VOICE),
     leadSilenceMs: clampLeadSilenceMs(process.env.BROADCAST_LEAD_SILENCE_MS),
+    repeat: clampIntEnv(process.env.BROADCAST_REPEAT, 2, 1, 3),
+    announceVolume: resolveAnnounceVolume(
+      process.env.BROADCAST_ANNOUNCE_VOLUME,
+      clamp01(Number(process.env.BROADCAST_VOLUME ?? 0.5)),
+    ),
+    usePreAnnounce: process.env.BROADCAST_USE_PRE_ANNOUNCE === 'true' || process.env.BROADCAST_USE_PRE_ANNOUNCE === '1',
+    announceRetries: clampIntEnv(process.env.BROADCAST_ANNOUNCE_RETRIES, 1, 0, 3),
   };
+}
+
+/** v0.15.4 — clamp an integer env to [lo,hi]; empty/non-numeric → def. */
+function clampIntEnv(raw: string | undefined, def: number, lo: number, hi: number): number {
+  const n = raw == null || raw.trim() === '' ? def : Number(raw);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(lo, Math.min(hi, Math.round(n)));
+}
+
+/** v0.15.4 — announce volume: 'off'/'none'/'standing' → null (omit announce_volume,
+ *  play at the speaker's standing level — more reliable on ecobees); a 0..100
+ *  number → that; empty → fallback (BROADCAST_VOLUME × 100). */
+function resolveAnnounceVolume(raw: string | undefined, fallbackVol01: number): number | null {
+  const v = (raw ?? '').trim().toLowerCase();
+  if (v === 'off' || v === 'none' || v === 'standing') return null;
+  if (v !== '' && Number.isFinite(Number(v))) return Math.max(0, Math.min(100, Math.round(Number(v))));
+  return Math.round(fallbackVol01 * 100);
 }
 
 /** v0.12.1 — lead-in silence (ms), default 1000, clamped to 0–5000. Non-numeric
@@ -327,6 +362,32 @@ export function startBroadcastMonitor(
   };
 
   /**
+   * v0.15.4 — issue the Music-Assistant announcement to all configured targets,
+   * honoring the announce-volume mode (omit when null → play at the speaker's
+   * standing volume, which is more reliable on ecobee speakers) and the optional
+   * pre-announce wake tone, with up to cfg.announceRetries retries on an actual
+   * call failure. Targets are always exactly cfg.targets (BROADCAST_TARGETS).
+   */
+  const playAnnounce = async (url: string): Promise<{ ok: boolean; error?: string }> => {
+    const params: Record<string, unknown> = {
+      entity_id: cfg.targets,
+      url,
+      use_pre_announce: cfg.usePreAnnounce,
+    };
+    if (cfg.announceVolume != null) params.announce_volume = cfg.announceVolume;
+    let last: { ok: boolean; error?: string; status?: number } = { ok: false, error: 'no attempt' };
+    for (let attempt = 0; attempt <= cfg.announceRetries; attempt++) {
+      last = await callHaService('music_assistant', 'play_announcement', params);
+      if (last.ok) return { ok: true };
+      if (attempt < cfg.announceRetries) {
+        log(`broadcast: play_announcement failed (attempt ${attempt + 1}/${cfg.announceRetries + 1}), retrying — ${last.error ?? last.status}`);
+        await new Promise((res) => setTimeout(res, 1500));
+      }
+    }
+    return { ok: false, error: `${last.error ?? last.status}` };
+  };
+
+  /**
    * Single broadcast: render → one MA call. No staggering, no settles.
    */
   const runBroadcast = async (
@@ -349,6 +410,7 @@ export function startBroadcastMonitor(
       wyomingPort: cfg.wyomingPort,
       wyomingVoice: cfg.wyomingVoice ?? undefined,
       leadSilenceMs: cfg.leadSilenceMs, // v0.12.1 — speakers sync before the chime
+      announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second
       log,
     });
     lastRender = {
@@ -372,15 +434,9 @@ export function startBroadcastMonitor(
 
     // 2. Single MA play_announcement to every target.
     const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
-    const announceVolume = Math.round(cfg.volume * 100);
-    const call = await callHaService('music_assistant', 'play_announcement', {
-      entity_id: cfg.targets,
-      url,
-      use_pre_announce: false,
-      announce_volume: announceVolume,
-    });
+    const call = await playAnnounce(url);
     if (!call.ok) {
-      errors.push(`music_assistant.play_announcement: ${call.error ?? call.status}`);
+      errors.push(`music_assistant.play_announcement: ${call.error}`);
     }
 
     if (message) lastSpokenMessage = message;
@@ -530,6 +586,7 @@ export function startBroadcastMonitor(
         wyomingPort: cfg.wyomingPort,
         wyomingVoice: cfg.wyomingVoice ?? undefined,
         leadSilenceMs: cfg.leadSilenceMs, // v0.12.1 — speakers sync before the chime
+        announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second
         log,
       });
       lastRender = {
@@ -564,17 +621,11 @@ export function startBroadcastMonitor(
       }
       await detectMusicAssistant();
       const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
-      const announceVolume = Math.round(cfg.volume * 100);
-      const call = await callHaService('music_assistant', 'play_announcement', {
-        entity_id: cfg.targets,
-        url,
-        use_pre_announce: false,
-        announce_volume: announceVolume,
-      });
+      const call = await playAnnounce(url);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       if (!call.ok) {
-        const err = `music_assistant.play_announcement: ${call.error ?? call.status}`;
+        const err = `music_assistant.play_announcement: ${call.error}`;
         lastOutcome = 'partial';
         lastErrors = [err];
         return { ok: false, spokenText, audioPath, played: 'speakers', error: err };
