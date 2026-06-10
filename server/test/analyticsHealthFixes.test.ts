@@ -18,8 +18,11 @@ import assert from 'node:assert/strict';
 import {
   computeRoundTripEfficiency,
   computeEvWindowPrediction,
+  computeSelfConsumption,
   resetRteCache,
   resetEvWindowCache,
+  resetSelfConsumptionCache,
+  resetDailyEnergyCache,
   runwayHoursForPublish,
   RUNWAY_NO_DEPLETION_SENTINEL_H,
 } from '../src/analytics.js';
@@ -290,4 +293,74 @@ test('runwayHoursForPublish — null + healthy → sentinel; null + unavailable 
   // which now uniquely means data-loss.
   assert.equal(runwayHoursForPublish(null, 'SHP2 backup-pool capacity not yet reported'), null);
   assert.equal(runwayHoursForPublish(null, 'panel-load history insufficient — wait a few minutes'), null);
+});
+
+/* ───────────────────────────────────────────────────────────────────────
+ * v0.15.13 — boot-partial fleet must not latch the self-consumption cache.
+ * Observed live after the v0.15.12 restart: the warm-up compute ran with one
+ * polled DPU and no SHP2 yet, cached loadKwh=0 / partial pvKwh under the bare
+ * `dpus.length > 0` guard, and served it for the full TTL. The guard now
+ * requires a structurally complete fleet (≥1 DPU AND the SHP2): an incomplete
+ * snapshot may be returned, but never cached.
+ * ─────────────────────────────────────────────────────────────────────── */
+
+/** Recorder that counts queryMulti calls and returns empty series. */
+function countingRecorder(): Recorder & { queryMultiCount: number } {
+  let queryMultiCount = 0;
+  return {
+    insertSnapshot: () => {},
+    query: () => [],
+    queryMulti: (_sn: string, metrics: string[]) => {
+      queryMultiCount++;
+      const m = new Map<string, Array<{ ts: number; value: number }>>();
+      for (const k of metrics) m.set(k, []);
+      return m;
+    },
+    listMetrics: () => [],
+    close: () => {},
+    rollupLifetime: () => {},
+    getLifetimeTotals: () => ({}),
+    get queryMultiCount() { return queryMultiCount; },
+  } as unknown as Recorder & { queryMultiCount: number };
+}
+
+function shp2Snap(sn = 'SN-SC-SHP2'): Record<string, DeviceSnapshot> {
+  return {
+    [sn]: {
+      sn,
+      deviceName: 'Smart Home Panel 2',
+      online: true,
+      lastSeenMs: Date.now(),
+      projection: {
+        kind: 'shp2',
+        pairedCircuits: [],
+        circuits: [],
+        // shp2ConnectedDpuSns reads .sources to decide fleet membership.
+        sources: [{ isConnected: true, sn: 'SN-SC-DPU' }],
+      } as any,
+    } as unknown as DeviceSnapshot,
+  };
+}
+
+test('selfConsumption cache — DPU-only boot snapshot is returned but never latched', () => {
+  resetSelfConsumptionCache();
+  resetDailyEnergyCache();
+  const rec = countingRecorder();
+  const dpuOnly = oneDpuOnePack('SN-SC-DPU');           // a DPU is present, the SHP2 is not
+  computeSelfConsumption(dpuOnly, rec);
+  const afterCold = rec.queryMultiCount;
+  assert.ok(afterCold > 0, 'cold compute must hit the recorder');
+  computeSelfConsumption(dpuOnly, rec);                 // a latched cache would serve this with 0 new queries
+  assert.ok(rec.queryMultiCount > afterCold, 'partial-fleet result must not be served from cache');
+});
+
+test('selfConsumption cache — complete fleet (DPU + SHP2) is cached as before', () => {
+  resetSelfConsumptionCache();
+  resetDailyEnergyCache();
+  const rec = countingRecorder();
+  const full = { ...oneDpuOnePack('SN-SC-DPU'), ...shp2Snap() };
+  computeSelfConsumption(full, rec);
+  const cold = rec.queryMultiCount;
+  computeSelfConsumption(full, rec);
+  assert.equal(rec.queryMultiCount, cold, 'complete-fleet result is served from cache (TTL hit, zero new queries)');
 });
