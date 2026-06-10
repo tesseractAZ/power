@@ -104,8 +104,11 @@ function NormalApp() {
             updated {fmtRel(snapshot?.generatedAt ?? null)}
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs min-w-0">
-          <div className="flex bg-panel border border-line rounded-lg overflow-x-auto max-w-full">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {/* v0.15.9 — the tab pill WRAPS (was overflow-x-auto, which silently
+              scroll-hid Strategy/Alerts/Settings/Predictive on narrow widths / the
+              HA ingress sidebar). Wrapping keeps every tab reachable. */}
+          <div className="flex flex-wrap bg-panel border border-line rounded-lg max-w-full">
             <button
               onClick={() => setTab('dashboard')}
               className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'dashboard' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}

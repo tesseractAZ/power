@@ -85,7 +85,14 @@ export function renderChooser(s: ChooserState): string[] {
     },
   ];
 
-  const cardW = 38;
+  // v0.15.9 — cardW 38→40. The description source lines run up to 35 visible
+  // chars, but at width 38 the body content area is inner-2 = 34, so wrapText
+  // re-wrapped those lines and orphaned their last word ("…who" / "wants" on its
+  // own line), and 34-char lines hit content == inner exactly and dropped the
+  // right border. At 40 the content area is 36 ≥ every source line, so each fits
+  // with a guaranteed trailing pad — no orphan wrap, no border drop. Still stacks
+  // (not side-by-side) on an 80-col terminal, matching prior behaviour.
+  const cardW = 40;
   const gap = 4;
   const sideBySide = W >= cardW * 2 + gap + 4;
 

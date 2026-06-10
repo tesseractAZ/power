@@ -16,7 +16,7 @@ export function ThemeToggle() {
 
   return (
     <div
-      className="flex bg-panel border border-line rounded-lg overflow-hidden"
+      className="flex shrink-0 bg-panel border border-line rounded-lg overflow-hidden"
       title="Switch UI theme"
     >
       {THEMES.map((t) => {
@@ -26,7 +26,7 @@ export function ThemeToggle() {
             key={t.id}
             type="button"
             onClick={() => setActive(t.id as ThemeId)}
-            className={`px-2 py-1 text-[11px] transition-colors ${
+            className={`px-2 py-1 text-[11px] whitespace-nowrap transition-colors ${
               selected ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'
             }`}
             title={t.description}
