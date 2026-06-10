@@ -20,6 +20,8 @@ import {
   computeEvWindowPrediction,
   resetRteCache,
   resetEvWindowCache,
+  runwayHoursForPublish,
+  RUNWAY_NO_DEPLETION_SENTINEL_H,
 } from '../src/analytics.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
@@ -264,4 +266,28 @@ test('computeEvWindowPrediction — no spurious pattern from a single one-off cl
 
   const r = computeEvWindowPrediction(shp2WithCircuit(7), recorderFor({ pair7_w: series }));
   assert.equal(r.patterns.length, 0, 'a one-off single-day cluster must not become a recurring pattern');
+});
+
+/* ───────────────────────────────────────────────────────────────────────
+ * v0.15.11 — runway publish sentinel (BUG-2). On a net-charging horizon the sim
+ * never crosses reserve, so hoursTo* are legitimately null — but bare null →
+ * HA 'unknown', indistinguishable from a telemetry outage on an islanded home.
+ * runwayHoursForPublish() emits a finite sentinel for the healthy-no-depletion
+ * case (unavailable === null) and keeps null only for a genuine outage.
+ * ─────────────────────────────────────────────────────────────────────── */
+test('runwayHoursForPublish — real value passes through unchanged', () => {
+  assert.equal(runwayHoursForPublish(8.8, null), 8.8);
+  assert.equal(runwayHoursForPublish(0, null), 0, 'a real 0 is not the no-data case');
+  assert.equal(runwayHoursForPublish(12.3, 'panel-load history insufficient'), 12.3);
+});
+
+test('runwayHoursForPublish — null + healthy → sentinel; null + unavailable → null', () => {
+  // Net-charging / no depletion in the horizon, projection healthy → sentinel,
+  // so HA shows a big finite number instead of 'unknown'.
+  assert.equal(runwayHoursForPublish(null, null), RUNWAY_NO_DEPLETION_SENTINEL_H);
+  assert.ok(RUNWAY_NO_DEPLETION_SENTINEL_H >= 999, 'sentinel must read as "off the chart"');
+  // Genuine outage (unavailable reason set) → keep null so HA shows unknown,
+  // which now uniquely means data-loss.
+  assert.equal(runwayHoursForPublish(null, 'SHP2 backup-pool capacity not yet reported'), null);
+  assert.equal(runwayHoursForPublish(null, 'panel-load history insufficient — wait a few minutes'), null);
 });

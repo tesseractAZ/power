@@ -15,6 +15,7 @@ import {
   computeSelfConsumption,
   computeCarbonReport,
   computeTariffReport,
+  runwayHoursForPublish,
 } from './analytics.js';
 // v0.11.0 — mirror the per-ISA-priority alarm on/off toggles as HA switch
 // entities and the per-priority alarm counts as sensors.
@@ -502,8 +503,10 @@ export async function startMqttDiscovery(
       soiling_drop_percent: fc.soiling?.dropPct ?? null,
       degradation_soonest_eol_years: soonest?.yearsToEol ?? null,
       degradation_peer_outliers: projecting.filter((p) => p.peerOutlier).length,
-      runway_to_reserve_hours: runway.hoursToReserve,
-      runway_to_empty_hours: runway.hoursToEmpty,
+      // v0.15.11 — sentinel (not bare null) when net-charging, so the MQTT
+      // sensors don't read HA 'unknown' (which must mean data-loss only).
+      runway_to_reserve_hours: runwayHoursForPublish(runway.hoursToReserve, runway.unavailable),
+      runway_to_empty_hours: runwayHoursForPublish(runway.hoursToEmpty, runway.unavailable),
       round_trip_efficiency_percent: rte.efficiencyPct,
       pv_clipped_kwh_today: clipping.todayKwh,
       pv_array_peak_watts: clipping.arrayPeakW,
