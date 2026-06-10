@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.9 — 2026-06-09
+
+Display fixes — web menu clipping + telnet chooser border (found by visual testing).
+
+- **Web header no longer clips the menu on narrow widths / the HA ingress sidebar.** The tab pill was `overflow-x-auto`, which silently *scroll-hid* Strategy / Alerts / Alert Settings / Predictive (and hard-clipped the "Babylon 5" theme button to just "B") whenever the viewport was narrower than the full tab row — exactly what happens in the HA sidebar iframe or a small window. The header controls row and the tab pill now **wrap** instead of scroll/clip, and the theme toggle keeps its natural width. Verified at 572 px: all 8 tabs + both theme buttons on-screen, zero horizontal clipping.
+- **Telnet mode-chooser cards no longer drop their right border or orphan words.** The card body content area (`inner-2`) was 1 char narrower than the longest description line (35 ch), so `wrapText` re-wrapped those lines (orphaning the last word onto its own line) and 34-char lines hit `content == inner` exactly and dropped the closing box-vertical. Card width 38→40 gives a 36-char content area that fits every line with a guaranteed trailing pad. Still stacks on an 80-col terminal.
+- 464/464 server tests pass.
+
 ## 0.15.8 — 2026-06-09
 
 Broadcast: advisory alarms are now **yellow** (not green), announce config is visible in `/api/broadcast/status`, and the volume path is pinned to a single source of truth.
