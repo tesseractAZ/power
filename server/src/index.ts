@@ -1683,6 +1683,16 @@ app.get('/api/broadcast/status', async () => {
       targets: cfg.targets,
       audioBase: cfg.audioBase,
       volume: cfg.volume,
+      // v0.15.8 — surface the RESOLVED announcement knobs so the operator can
+      // verify what actually takes effect (e.g. that announceVolume resolved to
+      // 100 with BROADCAST_VOLUME:1 + a blank BROADCAST_ANNOUNCE_VOLUME). null
+      // announceVolume = "off"/standing (announce_volume omitted from the call).
+      announceVolume: cfg.announceVolume,
+      repeat: cfg.repeat,
+      repeatGapMs: cfg.repeatGapMs,
+      leadSilenceMs: cfg.leadSilenceMs,
+      usePreAnnounce: cfg.usePreAnnounce,
+      announceRetries: cfg.announceRetries,
       minSeverity: cfg.minSeverity,
       quietHours: cfg.quietHours,
       // v0.9.70 — Wyoming is the canonical TTS path now. No engine

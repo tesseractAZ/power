@@ -221,6 +221,38 @@ test('loadBroadcastConfig — v0.15.4 repeat / announce-volume / pre-announce / 
 });
 
 /* ===================================================================
+ * v0.15.8 — volume conflict-proofing. The announcement volume must be a SINGLE
+ * source of truth: announce_volume, derived from BROADCAST_VOLUME when the
+ * BROADCAST_ANNOUNCE_VOLUME override is blank. There is no competing volume_set
+ * in the MA path. This pins the operator's exact config (BROADCAST_VOLUME=1,
+ * announce-volume blank) resolving to a clean 100, with no other knob involved.
+ * =================================================================== */
+test('loadBroadcastConfig — BROADCAST_VOLUME=1 + blank announce-volume → announceVolume 100', () => {
+  const saved = { ...process.env };
+  try {
+    process.env.BROADCAST_VOLUME = '1';
+    delete process.env.BROADCAST_ANNOUNCE_VOLUME; // blank → follow BROADCAST_VOLUME
+    const cfg = loadBroadcastConfig();
+    assert.equal(cfg.announceVolume, 100, 'blank announce-volume + BROADCAST_VOLUME=1 → exactly 100');
+    // The only volume knob in play is announceVolume; cfg.volume is just its source.
+    assert.equal(cfg.volume, 1);
+    // Explicit "" behaves identically to unset.
+    process.env.BROADCAST_ANNOUNCE_VOLUME = '';
+    assert.equal(loadBroadcastConfig().announceVolume, 100, 'empty string → also 100');
+    // A literal "null" (a bashio quirk for an unset optional) must NOT be read as
+    // "off" — it still falls back to BROADCAST_VOLUME × 100.
+    process.env.BROADCAST_ANNOUNCE_VOLUME = 'null';
+    assert.equal(loadBroadcastConfig().announceVolume, 100, "'null' falls back to BROADCAST_VOLUME × 100");
+    // And the explicit standing-volume sentinel still omits announce_volume.
+    process.env.BROADCAST_ANNOUNCE_VOLUME = 'off';
+    assert.equal(loadBroadcastConfig().announceVolume, null, "'off' still omits announce_volume");
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+/* ===================================================================
  * v0.15.7 — inter-repeat silence gap. A configurable pause is inserted between
  * the repeated annunciation passes so the operator can hear the message finish
  * and start again rather than the two passes running together. Default 1500 ms,

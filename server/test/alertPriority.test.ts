@@ -38,11 +38,13 @@ test('ranks — 0..3 ascending in canonical order', () => {
   });
 });
 
-test('klaxonLevelForPriority — critical & high → red, medium → yellow, low → green', () => {
+test('klaxonLevelForPriority — critical & high → red, medium & low → yellow (never green)', () => {
   assert.equal(klaxonLevelForPriority('critical'), 'red');
   assert.equal(klaxonLevelForPriority('high'), 'red');
   assert.equal(klaxonLevelForPriority('medium'), 'yellow');
-  assert.equal(klaxonLevelForPriority('low'), 'green');
+  // v0.15.8 — 'low' is now yellow (caution), NOT green (all-clear). A low advisory
+  // is still actionable, so it must not play the recovery/all-clear chime.
+  assert.equal(klaxonLevelForPriority('low'), 'yellow');
 });
 
 test('priorityAnnouncementPrefix — critical prefix mentions Critical', () => {
