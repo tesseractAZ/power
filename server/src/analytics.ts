@@ -1422,7 +1422,11 @@ function analysePack(
     // a positive "fade rate %/yr" to match the OLS convention used above.
     kalmanFadePctPerYear = kf.driftPerYear != null ? round2(-kf.driftPerYear) : null;
     kalmanFadeStdevPctPerYear = kf.driftPerYearStdev != null ? round2(kf.driftPerYearStdev) : null;
-    kalmanSmoothedSoh = kf.smoothedSoh != null ? round2(kf.smoothedSoh) : null;
+    // v0.15.12 — clamp to nameplate like currentSoh: fresh packs measure a
+    // hair over design capacity, and the unclamped smoother published
+    // 100.45/100.56 beside a clamped currentSoh=100. The EOL headroom math
+    // below uses the clamped value too — a ≤0.6 % haircut on a fresh pack.
+    kalmanSmoothedSoh = kf.smoothedSoh != null ? Math.min(100, round2(kf.smoothedSoh)) : null;
     if (kalmanSmoothedSoh != null && kalmanFadePctPerYear != null && kalmanFadePctPerYear > 0.1) {
       const headroom = kalmanSmoothedSoh - EOL_SOH;
       const yrs = headroom / kalmanFadePctPerYear;
@@ -3495,7 +3499,7 @@ export interface SelfConsumption {
   gridImportKwh: number;
   pvToLoadKwh: number;     // estimate: PV that went straight to load (PV − battery-charge − export)
   pvToBatteryKwh: number;  // estimate: PV that charged the battery
-  solarFractionOfLoadPct: number | null; // (pvToLoad + batteryDischarge) ÷ loadKwh
+  solarFractionOfLoadPct: number | null; // (loadKwh − gridImportKwh) ÷ loadKwh — share of load not served by grid import
   directUseRatioPct: number | null;      // pvToLoad ÷ pvKwh
 }
 

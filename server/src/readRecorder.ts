@@ -71,13 +71,37 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     return stmt;
   };
 
-  const noopLifetime: Record<string, LifetimeTotals> = {};
+  // v0.15.12 — real lifetime totals from the persisted accumulator table.
+  // This was a `{}` stub, which silently zeroed every lifetime-derived value
+  // computed on the worker (carbon_lifetime_kg_avoided / miles_not_driven
+  // published 0 while pv_lifetime_kwh in the same payload showed 889 kWh).
+  // The worker can't reproduce the main thread's live `pendingWh` integral
+  // (it has no snapshot store), but the persisted watermark lags by at most
+  // one rollup interval — negligible against a forever-accumulating total —
+  // so report persistedWh and let pendingWh be 0.
+  // Prepared lazily: on a brand-new DB the writer hasn't created the table
+  // yet, and an eager prepare() would throw at construction.
+  let lifetimeStmt: ReturnType<typeof db.prepare> | null = null;
+  const getLifetimeTotals = (): Record<string, LifetimeTotals> => {
+    const out: Record<string, LifetimeTotals> = {};
+    try {
+      lifetimeStmt ??= db.prepare(`SELECT metric_key, wh, last_integrated_ts FROM lifetime_totals`);
+      const rows = lifetimeStmt.all() as Array<{ metric_key: string; wh: number; last_integrated_ts: number }>;
+      for (const r of rows) {
+        out[r.metric_key] = { persistedWh: r.wh, pendingWh: 0, watermarkMs: r.last_integrated_ts };
+      }
+    } catch {
+      // Table absent before the writer's first rollup — same observable
+      // behavior as the historical stub (empty totals).
+    }
+    return out;
+  };
 
   return {
     // ── write path: stubbed (worker never writes) ──
     insertSnapshot: () => {},
     rollupLifetime: () => {},
-    getLifetimeTotals: () => noopLifetime,
+    getLifetimeTotals,
     recordWeatherGhi: () => {}, // v0.13.1 — write path; the read-only worker never writes
     // ── read path: real ──
     query: (sn, metric, sinceMs, untilMs, bucketSec) => {

@@ -52,13 +52,20 @@ export function translateDpuMqtt(
         if (typeof bp.remainTime === 'number') out[`${base}remainTime`] = bp.remainTime;
         if (typeof bp.bpErrCode === 'number') out[`${base}errCode`] = bp.bpErrCode;
         if (typeof bp.bpPwr === 'number') {
-          // Convention from EcoFlow firmware: positive bpPwr = discharging (out),
-          // negative = charging (in). Translate to REST's two-field shape.
-          if (bp.bpPwr >= 0) {
-            out[`${base}outputWatts`] = bp.bpPwr;
+          // Convention from EcoFlow firmware: NEGATIVE bpPwr = discharging (out),
+          // positive = charging (in). Validated live (v0.15.12) three ways on an
+          // off-grid discharging fleet: every pack reported negative bpPwr while
+          // (a) per-pack SoC fell fleet-wide, (b) the same core's cmdId 2 showed
+          // bmsOutputWatts≈Σ|bpPwr| with bmsInputWatts=0, and (c) cmdId 28's
+          // native fields showed outputWatts=|bpPwr|. The original mapping was
+          // inverted (inferred from a charging-only trace), which made
+          // fleet_battery_net_watts flap sign against cmdId 28/REST writes and
+          // violate conservation by ~4 kW. Translate to REST's two-field shape.
+          if (bp.bpPwr <= 0) {
+            out[`${base}outputWatts`] = Math.abs(bp.bpPwr); // abs, not negation: −0 must publish as 0
             out[`${base}inputWatts`] = 0;
           } else {
-            out[`${base}inputWatts`] = -bp.bpPwr;
+            out[`${base}inputWatts`] = bp.bpPwr;
             out[`${base}outputWatts`] = 0;
           }
         }

@@ -3,6 +3,21 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.12 — 2026-06-10
+
+Battery-flow sign fix + the remaining adversarially-verified anomaly fixes.
+
+- **Per-pack battery flow had an inverted sign on the MQTT path (the real BUG-4).** The cmdId 4 `bpPwr` translate mapped positive → discharging — backwards. Proven live three independent ways on the off-grid discharging fleet: every pack reported *negative* `bpPwr` while (a) per-pack SoC fell fleet-wide (70→63 / 68→64 / 62→58 over 2 h), (b) the same core's cmdId 2 read `bmsOutputWatts≈Σ|bpPwr|` with `bmsInputWatts=0`, and (c) cmdId 28's native fields read `outputWatts=|bpPwr|`. Because cmdId 28/REST write the *correct* shape into the same keys, the merged per-pack values flapped between correct and inverted — `fleet_battery_net_watts` published −1348 (charging) while conservation required ≈ +2.7 kW discharging, and the 7-day battery charge/discharge integrals were inflated on **both** sides. The mapping is now negative = discharging. (Earlier "offline Core halves battery_net" theory: refuted — all devices were online during the live capture.)
+- **Lifetime CO₂ avoided / miles-not-driven no longer publish 0.** The analytics worker's read-only recorder stubbed `getLifetimeTotals()` to `{}`, zeroing the lifetime carbon sensors while `pv_lifetime_kwh=889` sat in the same payload. The worker now reads the persisted `lifetime_totals` table directly (lags the live integral by at most one rollup interval — negligible on a forever-accumulating total).
+- **Pack-risk model no longer ingests immature fade noise.** A fresh pack 18 days in showed `fadePctPerYear=22.1` of early-fit slope (status `learning`, below the degradation engine's own ≥21-day/R² gate) and got ranked the fleet's most-at-risk pack. `fadePctPerYear`/`peerFadeRatio` features are now null (neutral) unless the fit is mature (`status === 'projecting'`).
+- **`backup_charge_minutes` is gated on flow direction** — no more "1.7 h to full" displayed while the fleet is discharging; the inapplicable timer publishes null (±50 W deadband keeps both during idle).
+- **`kalmanSmoothedSoh` clamped to 100** (was publishing 100.45/100.56 beside a clamped `currentSoh=100`).
+- **`modelFinalLoss` is now a real prequential log-loss** (EMA over per-sample cross-entropy at each online step) instead of a hardcoded 0 that read as a perfect-fit training loss.
+- Stale `solarFractionOfLoadPct` doc comment corrected to the implemented formula.
+- 473/473 server tests pass (7 new: bpPwr convention incl. the exact live trace, worker lifetime totals, fade maturity gate, real loss).
+
+> Note: per-pack watts recorded **before** this release mix correct and inverted samples (whichever source last wrote). 7-day battery charge/discharge stats fully self-heal as the window rolls forward. Remaining known items: power-cycle Cores 4/5 when convenient (EcoFlow-cloud "zombie" state), and lifetime grid/charge/discharge counters read lower than their 7-day windows until the v0.13.0-reset accumulators outgrow the window (~1 week) — cosmetic, monotonic, Energy-Dashboard-safe.
+
 ## 0.15.11 — 2026-06-10
 
 Data-accuracy fixes from a deep anomaly hunt (8-agent sweep of every computed surface).

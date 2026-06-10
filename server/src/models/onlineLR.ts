@@ -282,6 +282,18 @@ export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) =
     Math.max(baselineBias - BIAS_CLAMP, rawBias),
   );
 
+  // v0.15.12 — finalLoss was a hardcoded 0 inherited from the shadow-init
+  // template and never recomputed, publishing as a (misleadingly perfect)
+  // training loss. Track the real prequential log-loss instead: the
+  // cross-entropy of each sample against the PRE-update model, smoothed
+  // with an EMA (~10-sample horizon). Seeds from the first online step.
+  const PRED_EPS = 1e-7;
+  const pClamped = Math.min(1 - PRED_EPS, Math.max(PRED_EPS, prob));
+  const sampleLoss = -(label * Math.log(pClamped) + (1 - label) * Math.log(1 - pClamped));
+  const LOSS_EMA = 0.9;
+  const newFinalLoss =
+    model.finalLoss > 0 ? LOSS_EMA * model.finalLoss + (1 - LOSS_EMA) * sampleLoss : sampleLoss;
+
   const updated: LrModel = {
     ...model,
     weights: newWeights,
@@ -289,6 +301,7 @@ export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) =
     trainedAt: Date.now(),
     samples: model.samples + 1,
     source: 'labeled',
+    finalLoss: Math.round(newFinalLoss * 10000) / 10000,
     notes: `online-updated from outcome ${outcome.alertId} (${outcome.outcome}, label=${label}) at ${new Date().toISOString()}`,
   };
   saveShadow(updated);
