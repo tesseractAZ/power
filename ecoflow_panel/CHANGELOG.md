@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.10 — 2026-06-09
+
+Broadcast-delivery + analytics-memo robustness (from the data-validation pass).
+
+- **Raise the Music Assistant `play_announcement` timeout (75 s headers / 120 s body, was 30/45).** The v0.15.4 *repeat* renders the whole annunciation into one ~2.2 MB / ~24 s WAV — much larger than the 271 KB the old 30 s cap was sized for. On slow ecobee speakers MA didn't return response headers within 30 s, so a real alarm logged `partial` with "Headers Timeout Error" even though the audio likely played. The larger ceiling lets a long repeated announcement to slow targets complete instead of aborting partial.
+- **Harden the daily-energy memo key (`windowedEnergyWh`).** The per-day cache was keyed only by `(day, sn)`, omitting the requested metric set — so a call for metric set A could return a cached map missing set B's metrics, silently resolving them to 0. The two current callers use distinct SNs so it isn't triggered today, but it's a latent correctness trap; the key now pins the metric set.
+- 464/464 server tests pass.
+
 ## 0.15.9 — 2026-06-09
 
 Display fixes — web menu clipping + telnet chooser border (found by visual testing).

@@ -3509,7 +3509,13 @@ export function windowedEnergyWh(
     const nextMid = startOfNextLocalDayMs(cur);
     const end = Math.min(nextMid, now);
     const cacheable = cur === dayStart && end === nextMid && end <= todayStartMs; // completed past day
-    const ck = `${dayStart}|${sn}`;
+    // v0.15.10 — the memo key MUST include the requested metric set. Keyed only
+    // by (day, sn), a call with metric set A would return a cached Map missing
+    // the metrics of a later call with set B for the same (day, sn) → those
+    // metrics silently resolve to 0. Currently the two callers use distinct SNs
+    // so it isn't triggered, but this is a latent correctness trap; pin the
+    // metrics dimension so it can never collide.
+    const ck = `${dayStart}|${sn}|${[...metrics].sort().join(',')}`;
     let segWh = cacheable ? dailyEnergyWhCache.get(ck) : undefined;
     if (!segWh) {
       // Lookback lets integrateWh anchor this segment's start with the last
