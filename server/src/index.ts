@@ -51,6 +51,7 @@ import {
   computeDispatchPlan,
   rootCausesFor,
   computePackRiskScores,
+  runwayHoursForPublish,
 } from './analytics.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
@@ -1053,9 +1054,11 @@ app.get('/api/ha-state', async (req, reply) => {
     learned_warning_count: cnt('learned', 'warning'),
     learned_info_count: cnt('learned', 'info'),
 
-    // Runway — live off-grid projection (v0.5.0)
-    runway_to_reserve_hours: runway.hoursToReserve,
-    runway_to_empty_hours: runway.hoursToEmpty,
+    // Runway — live off-grid projection (v0.5.0). v0.15.11 — null hours on a
+    // net-charging horizon publish a sentinel (not bare null → HA 'unknown') so
+    // a healthy ">24 h" reading is distinguishable from a real telemetry outage.
+    runway_to_reserve_hours: runwayHoursForPublish(runway.hoursToReserve, runway.unavailable),
+    runway_to_empty_hours: runwayHoursForPublish(runway.hoursToEmpty, runway.unavailable),
     runway_recent_load_watts: runway.recentLoadWatts,
     runway_forecast_pv_used_kwh: runway.forecastPvUsedKwh,
 

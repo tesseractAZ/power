@@ -1745,6 +1745,23 @@ const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjectio
   ...extra,
 });
 
+/** v0.15.11 — sentinel hours for a runway sensor that is HEALTHY but projects NO
+ *  depletion within the horizon (net-charging / sunny forecast). hoursToReserve/
+ *  Empty are legitimately null there, but publishing bare null makes HA render
+ *  'unknown' — indistinguishable from a telemetry outage on an islanded home.
+ *  Publish a large finite sentinel for the healthy-no-depletion case so 'unknown'
+ *  uniquely means data-loss; automations comparing `runway < threshold` still
+ *  correctly read "plenty of runway". When the projection is genuinely
+ *  unavailable (no data), keep null so HA shows unknown. */
+export const RUNWAY_NO_DEPLETION_SENTINEL_H = 999;
+export function runwayHoursForPublish(
+  hours: number | null,
+  unavailable: string | null,
+): number | null {
+  if (hours != null) return hours;
+  return unavailable == null ? RUNWAY_NO_DEPLETION_SENTINEL_H : null;
+}
+
 /** Project hour-by-hour: backup state ± (forecast PV − recent load) per hour;
  *  record when the trajectory crosses the reserve floor and zero. */
 export function computeRunway(
@@ -1770,14 +1787,33 @@ export function computeRunway(
   // directly to a DPU AC outlet bypass SHP2 and won't appear here; on this
   // setup that's just the EVSE on Core 4, which only runs occasionally.)
   const loadPts = recorder.query(shp2.sn, 'panel_load', now - RUNWAY_LOAD_WINDOW_MS, now);
-  if (loadPts.length < 2) {
-    return emptyRunway(now, 'panel-load history insufficient — wait a few minutes', {
-      backupRemainingKwh: round2(backupRemainingKwh),
-      backupReserveKwh: round2(backupReserveKwh),
-      backupFullKwh: round2(backupFullKwh),
-    });
+  let loadAvgWatts: number;
+  if (loadPts.length >= 2) {
+    loadAvgWatts = loadPts.reduce((s, p) => s + p.value, 0) / loadPts.length;
+  } else {
+    // v0.15.8/v0.15.11 — a sparse post-restart recorder window (< 2 persisted
+    // panel_load samples in the last hour) used to return emptyRunway → the
+    // runway sensors went null → HA 'unknown' → (after the 120 s expire_after)
+    // 'unavailable', flapping for ~1 h while the window refilled. On an islanded
+    // home that masquerades as a telemetry outage. Fall back, in order, to: the
+    // LIVE SHP2 panel load (sum of circuit watts, available from MQTT
+    // immediately), a single recent recorded sample, or the last good
+    // recentLoadWatts — so the sensors stay numeric. Only give up if none exists.
+    const liveLoadWatts = (shp2.projection.circuits ?? []).reduce((s, c) => s + (c.watts ?? 0), 0);
+    const fallback =
+      liveLoadWatts > 0 ? liveLoadWatts
+        : loadPts.length === 1 ? loadPts[0].value
+          : (runwayCache?.value.recentLoadWatts ?? 0) > 0 ? runwayCache!.value.recentLoadWatts
+            : null;
+    if (fallback == null || !Number.isFinite(fallback) || fallback <= 0) {
+      return emptyRunway(now, 'panel-load history insufficient — wait a few minutes', {
+        backupRemainingKwh: round2(backupRemainingKwh),
+        backupReserveKwh: round2(backupReserveKwh),
+        backupFullKwh: round2(backupFullKwh),
+      });
+    }
+    loadAvgWatts = fallback;
   }
-  const loadAvgWatts = loadPts.reduce((s, p) => s + p.value, 0) / loadPts.length;
 
   const pvByHour: number[] = [];
   const loadByHour: number[] = [];
@@ -4615,7 +4651,10 @@ async function sampleCurtailmentHour(
     // typical GHI. Hard-cap at 900 W/m² (Phoenix mid-summer clear-sky
     // ceiling) — over-estimating surplus on a cloudy day is the failure
     // mode we're guarding against.
-    expectedW = Math.min(post.posteriorMean * 900, post.posteriorMean * 1000);
+    // v0.15.11 — was Math.min(μ*900, μ*1000), which for any positive μ is just
+    // μ*900 (the *1000 operand was dead, leftover from a refactor). Write the
+    // intent directly: the 900 W/m² hard cap.
+    expectedW = post.posteriorMean * 900;
   }
 
   // Weather-verified disqualifier: PV meaningfully exceeds load → not curtailing.
@@ -4843,7 +4882,16 @@ export function computeCarbonReport(
     lifetimeKgAvoided: Math.round(lifetimeKg),
     lifetimeMilesNotDriven: Math.round(lifetimeKg / KG_CO2_PER_MILE),
   };
-  carbonCache = { ts: Date.now(), value };
+  // v0.15.11 — do NOT poison-cache zeros. When the snapshot is transiently empty
+  // (no DPUs/SHP2 — e.g. a Core in the EcoFlow "zombie" offline state) every
+  // integral sums to 0; caching that serves 0 for the full TTL even after data
+  // recovers. Match the sibling engines (selfConsumption/RTE/degradation): only
+  // cache a device-present result, otherwise return the (uncached) zero so the
+  // next tick recomputes from real data.
+  const hasDevices = Object.values(devices).some(
+    (d) => d.projection?.kind === 'dpu' || d.projection?.kind === 'shp2',
+  );
+  if (hasDevices) carbonCache = { ts: Date.now(), value };
   return value;
 }
 
@@ -4988,7 +5036,10 @@ export function computeTariffReport(
     todayGridImportCostDollars: round2(todayTally.gridCost),
     todaySolarLoadValueDollars: round2(todayTally.loadValue),
   };
-  tariffCache = { ts: now, value };
+  // v0.15.11 — don't poison-cache zeros on a transient empty snapshot (Core in
+  // EcoFlow "zombie" state → no DPUs/SHP2 → every $ integral is 0). Match the
+  // sibling engines: only cache a device-present result.
+  if (dpus.length > 0 || shp2 != null) tariffCache = { ts: now, value };
   return value;
 }
 

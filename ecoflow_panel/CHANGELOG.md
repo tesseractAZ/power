@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.11 — 2026-06-10
+
+Data-accuracy fixes from a deep anomaly hunt (8-agent sweep of every computed surface).
+
+- **Carbon + tariff no longer poison-cache zeros.** `computeCarbonReport` / `computeTariffReport` cached their result *unconditionally*. When a recompute landed on a transient empty snapshot (a Core in the EcoFlow "zombie" offline state → no DPUs/SHP2), every integral summed to 0 and that 0 was served for the full 15-min TTL — so `carbon_kg_avoided_7d`, `tariff_solar_load_value_7d_dollars`, and `tariff_net_savings_7d_dollars` flipped to 0 and stuck, even though their input (`/api/self-consumption`) stayed correct. They now only cache a device-present result (matching every sibling engine), so a transient empty moment is returned but never latched.
+- **Off-grid runway sensors stop masquerading as a telemetry outage.** (a) After a restart, a sparse `panel_load` history window returned `emptyRunway` → the runway sensors went null → HA `unknown` → (after `expire_after`) `unavailable`, flapping for ~1 h. They now fall back to the **live** SHP2 panel load (or the last good value) and keep computing, so they stay numeric. (b) On a net-charging horizon the depletion sim legitimately never crosses reserve (`hoursTo* = null`); publishing bare null rendered as `unknown`, indistinguishable from a real outage. A finite sentinel is now published for the healthy "> horizon / no-depletion" case, so `unknown` uniquely means data-loss. The audible runway alarm was never affected.
+- **Curtailment clear-sky cap:** removed a dead `Math.min(μ·900, μ·1000)` (always `μ·900`) and wrote the 900 W/m² cap directly.
+- 466/466 server tests pass (new coverage for the runway publish sentinel).
+
+> Reported but **not** blind-changed (need device action / a design call, not a rushed edit to this critical system): the **Core 4 & Core 5 "zombie" offline** state (the root trigger for the poison-cache + a halved `fleet_battery_net_watts` while they're offline — power-cycle to clear); the `battery_net` per-pack sum being a deliberate v0.10.4 DC-flow choice; and lifetime CO₂/miles reading 0 (the worker's read-only recorder stubs `getLifetimeTotals`).
+
 ## 0.15.10 — 2026-06-09
 
 Broadcast-delivery + analytics-memo robustness (from the data-validation pass).
