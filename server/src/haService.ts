@@ -66,11 +66,18 @@ export async function callHaService(
   //   combined-WAV announcement. The previous 5 s / 10 s cap aborted
   //   every broadcast with "Headers Timeout" even though the audio was
   //   playing on the speakers (verified end-to-end via the same call
-  //   from curl with 30 s timeout). Bump MA's announce path to 30 s /
-  //   45 s. Everything else stays tight to keep hangs visible.
+  //   from curl with 30 s timeout). Everything else stays tight to keep
+  //   hangs visible.
+  // v0.15.10 — the v0.15.4 repeat (BROADCAST_REPEAT=2) + inter-repeat gap
+  //   render the whole annunciation into ONE WAV that is now ~2.2 MB / ~24 s
+  //   of audio (vs the 271 KB the 30 s cap was sized for). On slow ecobee
+  //   speakers MA didn't return headers within 30 s → the broadcast logged
+  //   `partial` with "Headers Timeout Error" even though the audio likely
+  //   played. Raise the announce ceiling to 75 s / 120 s so a long repeated
+  //   announcement to slow targets completes rather than aborting partial.
   const isMaAnnounce = domain === 'music_assistant' && service === 'play_announcement';
-  const headersTimeoutMs = isMaAnnounce ? 30_000 : 5000;
-  const bodyTimeoutMs = isMaAnnounce ? 45_000 : 10_000;
+  const headersTimeoutMs = isMaAnnounce ? 75_000 : 5000;
+  const bodyTimeoutMs = isMaAnnounce ? 120_000 : 10_000;
   try {
     const res = await request(url, {
       method: 'POST',
