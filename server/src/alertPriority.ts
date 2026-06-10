@@ -112,15 +112,21 @@ export function comparePriority(a: AlarmPriority, b: AlarmPriority): number {
 
 /**
  * Klaxon/condition level for the audible broadcast.
- * Critical + High both warrant the urgent ("red") klaxon; Medium the
- * cautionary ("yellow") chime; Low the soft ("green") tone. Returns the
- * same string literals as broadcast.ts ConditionLevel (kept un-imported to
- * avoid an import cycle).
+ * Critical + High both warrant the urgent ("red") klaxon; Medium + Low get the
+ * cautionary ("yellow") chime. Returns the same string literals as broadcast.ts
+ * ConditionLevel (kept un-imported to avoid an import cycle).
+ *
+ * v0.15.8 — 'low' was previously mapped to 'green'. But green is the all-clear /
+ * condition-recovery chime, so a 'low' advisory (e.g. "reduce consumption —
+ * projected to reach reserve in ~8 h") played the all-clear tone, which reads as
+ * "everything's fine" rather than "take action." Every actionable alarm priority
+ * now gets at least the caution chime; green is reserved for genuine recovery
+ * (which comes from the conditionFromAlerts path, not from a priority). The spoken
+ * message still differentiates ("Advisory…" vs "High priority alarm…").
  */
 export function klaxonLevelForPriority(p: AlarmPriority): 'red' | 'yellow' | 'green' {
   if (p === 'critical' || p === 'high') return 'red';
-  if (p === 'medium') return 'yellow';
-  return 'green';
+  return 'yellow'; // medium + low → caution
 }
 
 /**

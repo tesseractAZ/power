@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.8 — 2026-06-09
+
+Broadcast: advisory alarms are now **yellow** (not green), announce config is visible in `/api/broadcast/status`, and the volume path is pinned to a single source of truth.
+
+- **Advisory alarms no longer play the all-clear chime.** `low`-priority alarms (e.g. "reduce consumption — projected to reach reserve in ~8 h") mapped to the **green** klaxon, which is the all-clear / condition-recovery tone — so an actionable advisory sounded like "everything's fine." Every actionable alarm priority now plays at least the **yellow** (caution) chime; green is reserved for genuine recovery. The spoken message still carries the exact priority ("Advisory…" vs "High priority alarm…"), so nothing is lost — only the misleading chime.
+- **`GET /api/broadcast/status` now reports the resolved announce knobs** — `announceVolume`, `repeat`, `repeatGapMs`, `leadSilenceMs`, `usePreAnnounce`, `announceRetries` — so you can confirm what actually takes effect (e.g. that `announceVolume` resolved to `100` with `BROADCAST_VOLUME: 1` and a blank `BROADCAST_ANNOUNCE_VOLUME`).
+- **Volume conflict-proofing:** verified (and pinned with a test) that the announcement volume is a single source of truth — `announce_volume` derived from `BROADCAST_VOLUME` when the override is blank, with no competing `media_player.volume_set` in the Music Assistant path. `BROADCAST_VOLUME: 1` + blank → exactly `100`.
+- 464/464 server tests pass.
+
 ## 0.15.7 — 2026-06-09
 
 Broadcast: announcement plays at **`BROADCAST_VOLUME`** + a silence gap between repeats.
