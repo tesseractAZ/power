@@ -406,7 +406,19 @@ test('computeBaselineAlerts — genuinely stuck-on circuit DOES flag (sustained)
  * =================================================================== */
 test('resetRteCache clears RTE but leaves self-consumption warm (stagger isolation)', () => {
   const rec = mockRecorder();
-  const fleet = fakeDpuFleet();
+  // v0.15.13 — SC only caches a structurally complete fleet (≥1 DPU AND the
+  // SHP2), so the warm-cache fixture needs an SHP2 alongside the DPUs.
+  const fleet: Record<string, DeviceSnapshot> = {
+    ...fakeDpuFleet(),
+    SHP: {
+      sn: 'SHP', deviceName: 'Smart Panel', productName: 'Smart Home Panel 2',
+      online: true, lastUpdated: Date.now(),
+      projection: {
+        kind: 'shp2', pairedCircuits: [], circuits: [],
+        sources: [{ isConnected: true, sn: 'SN-DPU-0' }, { isConnected: true, sn: 'SN-DPU-1' }, { isConnected: true, sn: 'SN-DPU-2' }, { isConnected: true, sn: 'SN-DPU-3' }],
+      },
+    } as unknown as DeviceSnapshot,
+  };
   resetHaStateShortLivedCaches();
   computeSelfConsumption(fleet, rec);          // warm SC
   computeRoundTripEfficiency(fleet, rec);      // warm RTE

@@ -3677,7 +3677,13 @@ export function computeSelfConsumption(
     solarFractionOfLoadPct: loadKwh > 0.5 ? Math.max(0, Math.round(((loadKwh - gridImportKwh) / loadKwh) * 1000) / 10) : null,
     directUseRatioPct: pvKwh > 0.5 ? Math.round((pvToLoadKwh / pvKwh) * 1000) / 10 : null,
   };
-  if (dpus.length > 0) selfConsumptionCache = { ts: now, key, value };
+  // v0.15.13 — require a structurally complete fleet (≥1 DPU AND the SHP2)
+  // before caching. The v0.15.11-era guard accepted any DPU, but during the
+  // post-restart warm a snapshot with one polled DPU and no SHP2 yet computed
+  // loadKwh=0 / partial pvKwh and served it for the full TTL (observed live
+  // after the v0.15.12 update: loadKwh=0, pvKwh=184 of 527). An incomplete
+  // snapshot may be returned, but never latched.
+  if (dpus.length > 0 && shp2 != null) selfConsumptionCache = { ts: now, key, value };
   return value;
 }
 
@@ -4892,10 +4898,15 @@ export function computeCarbonReport(
   // recovers. Match the sibling engines (selfConsumption/RTE/degradation): only
   // cache a device-present result, otherwise return the (uncached) zero so the
   // next tick recomputes from real data.
-  const hasDevices = Object.values(devices).some(
-    (d) => d.projection?.kind === 'dpu' || d.projection?.kind === 'shp2',
-  );
-  if (hasDevices) carbonCache = { ts: Date.now(), value };
+  // v0.15.13 — require BOTH kinds (was `some(dpu || shp2)`): during the
+  // post-restart warm a single polled DPU satisfied the v0.15.11 guard while
+  // the SHP2 was still absent, latching a partial-fleet carbon figure for the
+  // TTL. An incomplete snapshot may be returned, but never latched.
+  const deviceList = Object.values(devices);
+  const fleetComplete =
+    deviceList.some((d) => d.projection?.kind === 'dpu') &&
+    deviceList.some((d) => d.projection?.kind === 'shp2');
+  if (fleetComplete) carbonCache = { ts: Date.now(), value };
   return value;
 }
 
@@ -5043,7 +5054,10 @@ export function computeTariffReport(
   // v0.15.11 — don't poison-cache zeros on a transient empty snapshot (Core in
   // EcoFlow "zombie" state → no DPUs/SHP2 → every $ integral is 0). Match the
   // sibling engines: only cache a device-present result.
-  if (dpus.length > 0 || shp2 != null) tariffCache = { ts: now, value };
+  // v0.15.13 — `&&`, not `||`: tariff needs PV (DPUs) and load (SHP2); a
+  // boot-partial snapshot with only one of them computes a misleading figure
+  // (observed: net_savings −$4.36 from grid-import cost with no solar value).
+  if (dpus.length > 0 && shp2 != null) tariffCache = { ts: now, value };
   return value;
 }
 

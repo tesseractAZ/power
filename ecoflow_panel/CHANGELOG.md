@@ -3,6 +3,13 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.13 — 2026-06-10
+
+Boot-partial fleet must never latch the 7-day report caches (live-verified gap in the v0.15.11 guards).
+
+- Observed live immediately after the v0.15.12 update restart: the warm-up compute ran while only one DPU had been polled and the SHP2 wasn't projected yet, so self-consumption cached `loadKwh=0` / partial `pvKwh` (184 of 527), tariff cached a negative "net savings" (grid cost with no solar value), and carbon followed — all served for the full TTL even though every later request had the complete fleet. The v0.15.11 guards required only *some* device; they now require a **structurally complete fleet** (≥1 DPU **and** the SHP2) before caching self-consumption, carbon, or tariff. An incomplete snapshot may still be returned once, but is never latched.
+- 475/475 server tests pass (2 new: partial fleet never cached, complete fleet still cached; stagger-isolation fixture gained an SHP2 to match the new guard semantics).
+
 ## 0.15.12 — 2026-06-10
 
 Battery-flow sign fix + the remaining adversarially-verified anomaly fixes.
