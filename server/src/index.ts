@@ -1026,8 +1026,13 @@ app.get('/api/ha-state', async (req, reply) => {
     backup_reserve_percent: shp2?.projection.backupReserveSoc ?? null,
     backup_full_capacity_kwh: kwh1(shp2?.projection.backupFullCapWh),
     backup_remaining_kwh: kwh1(shp2?.projection.backupRemainWh),
-    backup_charge_minutes: shp2?.projection.backupChargeTimeMin ?? null,
-    backup_discharge_minutes: shp2?.projection.backupDischargeTimeMin ?? null,
+    // v0.15.12 — the SHP2 reports both timers regardless of flow direction;
+    // publishing both showed "1.7 h to full" while the fleet was discharging.
+    // Gate each on the (now correctly-signed) per-pack battery net: >+50 W =
+    // discharging → charge timer inapplicable; <−50 W = charging → discharge
+    // timer inapplicable; the ±50 W deadband publishes both (idle/ambiguous).
+    backup_charge_minutes: fleetBatteryNet > 50 ? null : (shp2?.projection.backupChargeTimeMin ?? null),
+    backup_discharge_minutes: fleetBatteryNet < -50 ? null : (shp2?.projection.backupDischargeTimeMin ?? null),
 
     // Forecast (cached ~30min)
     forecast_pv_next_24h_kwh: Math.round(fc.forecastPvWhNext24 / 100) / 10,

@@ -122,13 +122,21 @@ export function extractFeatures(
   const cc: ChargeCurvePack | undefined =
     chargeCurve.packs.find((p) => p.sn === sn && p.packNum === packNum);
 
+  // v0.15.12 — fade features are only meaningful once the degradation fit is
+  // mature. The degradation engine itself gates its EOL projection on
+  // status==='projecting' (≥21 days of trend at adequate R²), but these
+  // features previously consumed the raw early-fit slope: a fresh pack 18
+  // days in showed fadePctPerYear=22.1 %/yr of fit noise and got ranked the
+  // fleet's most-at-risk pack. Treat immature fade as unknown (null), which
+  // normalizeFeature maps to the neutral 0.
+  const fadeMature = deg?.status === 'projecting';
   const values: Record<FeatureName, number | null> = {
-    peerFadeRatio: deg?.peerFadeRatio ?? null,
+    peerFadeRatio: fadeMature ? (deg?.peerFadeRatio ?? null) : null,
     rTrend: ir?.trendMilliohmsPerMonth ?? null,
     coulombicEffPct: deg?.coulombicEffPct ?? null,
     hardLifeScore: therm?.hardLifeScore ?? null,
     ccDriftMv: cc?.meanDriftMv ?? null,
-    fadePctPerYear: deg?.fadePctPerYear ?? null,
+    fadePctPerYear: fadeMature ? (deg?.fadePctPerYear ?? null) : null,
   };
   const normalized = Object.fromEntries(
     FEATURE_NAMES.map((n) => [n, normalizeFeature(n, values[n])]),
