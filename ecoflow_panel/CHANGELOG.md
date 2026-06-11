@@ -3,6 +3,13 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.17 — 2026-06-10
+
+Runway sim anchored to the observed load (caught live during tonight's discharge).
+
+- **The depletion sim's near-term hours now take a decaying `max()` blend of the OBSERVED load into the day-of-week curve** (`RUNWAY_BLEND_HOURS = 4`: weights 1 → 0.75 → 0.5 → 0.25). The v0.14.0 curve change fixed transient-spike alarmism, but it also let the sim ignore a *sustained* real load far above the modelled hour. Observed live tonight (Jun 10, June-heat evening): the house drew 5–9 kW against a ~3 kW modelled hour, and the post-restart recompute flipped "reserve in 6 h" → "no depletion in horizon" (999), muting the escalating runway alarms while the pool fell ~5 %/h. With the anchor, a sustained overload pulls the projected crossing earlier (test: 21 h → ≈11 h); a lighter-than-modelled day is unchanged (`max()` never adds optimism), and a brief burst still can't dominate the far horizon (it decays out by hour 4). Safety note: the actual-SoC threshold klaxons (10/8/4/2 %) were never affected — this restores the *early-warning* tier.
+- New `resetRunwayCache()` test seam. 485/485 server tests pass (2 new).
+
 ## 0.15.16 — 2026-06-10
 
 Spoken announcements lead with the alert type.

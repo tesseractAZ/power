@@ -13,6 +13,7 @@ import {
   computeTariffReport,
   computeDispatchPlan,
   resetHaStateShortLivedCaches,
+  resetRunwayCache,
   type DayForecast,
 } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
@@ -147,6 +148,54 @@ test('computeRunway — discharge prediction with reserve floor', () => {
   assert.ok(
     r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
     `expected hoursToReserve ~21, got ${r.hoursToReserve}`,
+  );
+});
+
+/* v0.15.17 — the sim's near-term hours are anchored to the OBSERVED load.
+ * The v0.14.0 forecast-curve change let the sim ignore a SUSTAINED real load
+ * far above the modelled hour (live: 5–9 kW June-heat evenings vs a ~3 kW
+ * curve → "no depletion" while the pool fell 5 %/h, muting the escalating
+ * runway alarms). The first RUNWAY_BLEND_HOURS take a decaying max() blend
+ * of the observed average into the curve. */
+
+function runwayForecast(loadW: number): DayForecast {
+  return emptyForecast({
+    hours: Array.from({ length: 24 }, (_, i) => ({
+      ts: Date.now() + i * 3_600_000,
+      forecastPvW: 0,
+      forecastLoadW: loadW,
+    })) as any,
+  });
+}
+
+test('computeRunway — sustained observed load above the curve pulls the crossing earlier', () => {
+  resetRunwayCache();
+  const now = Date.now();
+  // Observed: steady 5 kW. Curve: 1 kW. Pool: 30 of 60 kWh, 15 % reserve (9 kWh) → 21 kWh usable.
+  const loadPts = Array.from({ length: 60 }, (_, i) => ({ ts: now - (60 - i) * 60_000, value: 5000 }));
+  const devices = fakeShp2({ backupFullCapWh: 60_000, backupRemainWh: 30_000, backupReserveSoc: 15 });
+  const r = computeRunway(devices, mockRecorder({ panel_load: loadPts }), runwayForecast(1000));
+  assert.equal(r.unavailable, null);
+  // Blended hours: max(1, 5·w + 1·(1−w)) = 5, 4, 3, 2 kWh → 14 kWh by hour 4,
+  // then the 1 kWh/h curve: reserve (7 kWh later) at ≈ 11 h — NOT the curve-only 21 h.
+  assert.ok(r.hoursToReserve != null, 'crossing must be detected');
+  assert.ok(
+    r.hoursToReserve! >= 10 && r.hoursToReserve! <= 12.5,
+    `expected hoursToReserve ≈ 11 with the observed-load anchor, got ${r.hoursToReserve}`,
+  );
+});
+
+test('computeRunway — lighter-than-modelled observed load never increases optimism', () => {
+  resetRunwayCache();
+  const now = Date.now();
+  // Observed: 500 W (below the 1 kW curve). max() keeps the curve → ~21 h unchanged.
+  const loadPts = Array.from({ length: 60 }, (_, i) => ({ ts: now - (60 - i) * 60_000, value: 500 }));
+  const devices = fakeShp2({ backupFullCapWh: 60_000, backupRemainWh: 30_000, backupReserveSoc: 15 });
+  const r = computeRunway(devices, mockRecorder({ panel_load: loadPts }), runwayForecast(1000));
+  assert.equal(r.unavailable, null);
+  assert.ok(
+    r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
+    `curve must still rule when observed < modelled, got ${r.hoursToReserve}`,
   );
 });
 
