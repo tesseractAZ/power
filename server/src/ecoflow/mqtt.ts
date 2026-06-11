@@ -140,7 +140,7 @@ export async function startMqtt(store: SnapshotStore, log: (msg: string) => void
     const sn = parts[3];
     const kind = parts[4];
     if (!sn || !kind) return;
-    // Temp debug: log first byte+topic for EVSE specifically
+    // Env-gated trace: log topic + payload preview for one SN (ECOFLOW_TRACE_SN)
     if (process.env.ECOFLOW_TRACE_SN && sn === process.env.ECOFLOW_TRACE_SN) {
       log(`mqtt-trace ${sn} topic=${topic} bytes=${payload.length} preview=${payload.toString('utf8').slice(0, 400)}`);
     }

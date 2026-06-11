@@ -16,7 +16,10 @@ import { c, BOX, padEnd, padStart, truncate, center, lr, bar, visLen } from './a
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
 import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '../alertPriority.js';
 
-export const SCREENS = ['overview', 'devices', 'solar', 'battery', 'shp2', 'charger', 'strategy', 'alerts', 'predictive'] as const;
+// v0.15.15 — the CHARGER screen was removed with the web Charger tab: the EVSE
+// is app-only (no API/MQTT telemetry) and its host DPU (Core 4) is an offline
+// spare, so the screen could only ever render dead/absent data.
+export const SCREENS = ['overview', 'devices', 'solar', 'battery', 'shp2', 'strategy', 'alerts', 'predictive'] as const;
 export type ScreenId = (typeof SCREENS)[number];
 const SCREEN_LABEL: Record<ScreenId, string> = {
   overview: 'OVERVIEW',
@@ -24,7 +27,6 @@ const SCREEN_LABEL: Record<ScreenId, string> = {
   solar: 'SOLAR',
   battery: 'BATTERY',
   shp2: 'SHP2',
-  charger: 'CHARGER',
   strategy: 'STRATEGY',
   alerts: 'ALERTS',
   predictive: 'PREDICTIVE',
@@ -35,7 +37,6 @@ const SCREEN_SHORT: Record<ScreenId, string> = {
   solar: 'SOL',
   battery: 'BAT',
   shp2: 'SHP',
-  charger: 'CHG',
   strategy: 'STR',
   alerts: 'ALR',
   predictive: 'PRD',
@@ -297,8 +298,6 @@ function renderBody(sv: SessionView, data: RenderData, w: number, h: number): st
       return bodyBattery(sv, data, w);
     case 'shp2':
       return bodyShp2(sv, data, w, h);
-    case 'charger':
-      return bodyCharger(data, w);
     case 'strategy':
       return bodyStrategy(data);
     case 'alerts':
@@ -792,58 +791,6 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
 
   const head = [c.cyanB('SMART HOME PANEL 2') + c.grey('   ' + shp2.sn), rule(w)];
   return head.concat(paginate(body.map((l) => [l]), sv.alertScroll, Math.max(2, h - 2)));
-}
-
-/* ───────────────────────── CHARGER ───────────────────────── */
-
-function bodyCharger(data: RenderData, w: number): string[] {
-  const dpus = getDpus(data.snap);
-  const core4 = dpus.find((d) => dpuNumber(d.deviceName) === 4);
-  const shp2 = getShp2(data.snap);
-  const L: string[] = [];
-  L.push(c.cyanB('EV CHARGER') + c.dim('   monitored via Core 4 AC output — the EVSE itself is app-only'));
-  L.push(rule(w));
-
-  const acOut = core4?.projection?.acOutWatts ?? null;
-  const charging = acOut != null && acOut > 500;
-  L.push(
-    '  ' +
-      field('Status', charging ? c.greenB(`CHARGING  ${fmtW(acOut)}`) : c.grey('IDLE — no charge draw detected')),
-  );
-  if (core4 && core4.projection) {
-    const p = core4.projection;
-    L.push(
-      '  ' +
-        field('Core 4 AC out', c.whiteB(fmtW(p.acOutWatts))) +
-        c.grey('   ') +
-        c.white(padEnd(p.acOutVol != null ? `${p.acOutVol.toFixed(1)} V` : '—', 10)) +
-        c.white(p.acOutFreq != null ? `${p.acOutFreq.toFixed(1)} Hz` : '—'),
-    );
-    L.push(
-      '  ' +
-        field('Core 4 host', paint(socColor(p.soc), `SoC ${fmtPct(p.soc)}`) + c.grey(`   out ${fmtW(p.totalOutWatts)}  ·  in ${fmtW(p.totalInWatts)}`)),
-    );
-  } else {
-    L.push('  ' + c.grey('Core 4 telemetry unavailable.'));
-  }
-  L.push('');
-  L.push(c.cyanB('SHP2 GARAGE CIRCUITS') + c.dim('   the EVSE feeds the garage subpanel'));
-  if (shp2) {
-    for (const ch of [5, 7]) {
-      const cir = shp2.projection.circuits.find((x) => x.ch === ch);
-      if (!cir) continue;
-      L.push(
-        '  ' +
-          c.grey(`ch${ch}  `) +
-          cell(c.white(cir.name), 24) +
-          cell(c.whiteB(fmtW(cir.watts)), 11) +
-          c.grey(cir.setAmp != null ? `${cir.setAmp} A breaker` : ''),
-      );
-    }
-  } else {
-    L.push('  ' + c.grey('SHP2 not available.'));
-  }
-  return L;
 }
 
 /* ───────────────────────── STRATEGY ───────────────────────── */

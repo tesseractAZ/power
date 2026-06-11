@@ -86,7 +86,7 @@ def('error code|direct errors|shp2 errors', 'Device-reported error code — 0 me
 def('charging power', 'Power the EV charger is drawing, over the last 24 hours.');
 def('sessions today', 'Charging sessions detected today — a sustained draw above 1 kW.');
 def('host dpu|dpu battery', 'The Delta Pro Ultra the EV charger is wired to — that DPU’s AC output equals the charging draw.');
-def('direct telemetry|direct evse telemetry', 'Raw data straight from the device over MQTT, rather than inferred.');
+def('direct telemetry', 'Raw data straight from the device over MQTT, rather than inferred.');
 
 /* ── Forecast & learned ── */
 def('solar next 24 h|solar next 24h', 'Projected solar production, from the cloud forecast run through your learned array model.');

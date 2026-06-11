@@ -146,6 +146,7 @@ test('renderAnnouncement — klaxon + TTS combined into one WAV (PCM lengths sum
       cacheDir,
       wyomingHost: '127.0.0.1',
       wyomingPort: mock.port,
+      chimeGapMs: 0, // v0.15.15 — gap tested separately; 0 keeps the PCM-sum check exact
       log: () => {},
     });
     assert.equal(r.ok, true, `render failed: ${r.error}`);
@@ -336,7 +337,7 @@ test('renderAnnouncement — leadSilenceMs prepends silence ahead of klaxon+TTS'
     const r = await renderAnnouncement({
       level: 'red', message: 'hello', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port,
-      leadSilenceMs: 500, log: () => {},
+      leadSilenceMs: 500, chimeGapMs: 0, log: () => {},
     });
     assert.equal(r.ok, true, `render failed: ${r.error}`);
     const N = getChimeRepeat();
@@ -513,6 +514,76 @@ test('renderAnnouncement — repeatGapMs inserts one silence gap between two pas
     const gapRegion = wav.subarray(h.dataOffset + firstBlockBytes, h.dataOffset + firstBlockBytes + gapBytes);
     assert.ok(gapRegion.every((b) => b === 0), 'inter-repeat gap must be all-zero PCM');
   } finally {
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+/* ─── v0.15.15 — post-chime silence gap (chime → pause → spoken message) ───
+ * A chimeGapMs of digital silence (default 1000) sits between the chime group
+ * and the TTS inside every repeated block, so the chime fully decays before
+ * the announcement begins. Klaxon-only renders are unaffected (nothing follows
+ * the chime). The gap folds into the cache key so 0 and 1000 never alias. */
+
+test('renderCacheKey — chimeGapMs is part of the key; undefined defaults to 1000', () => {
+  const base = renderCacheKey('red', 'hi', 2, 0, 1, 0, 1000);
+  assert.equal(base, renderCacheKey('red', 'hi', 2, 0, 1, 0, 1000), 'same gap → same key');
+  assert.notEqual(base, renderCacheKey('red', 'hi', 2, 0, 1, 0, 0), 'different gap → different key');
+  // default (undefined) resolves to 1000, matching an explicit 1000
+  assert.equal(renderCacheKey('red', 'hi', 2, 0, 1, 0), base);
+});
+
+test('renderAnnouncement — chimeGapMs inserts all-zero silence between chime and TTS', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  writeKlaxon(klaxonDir, 'red-alert.wav', 22050, 2, 1, 500);
+  const ttsPcm = Buffer.alloc(800);
+  for (let i = 0; i < 800; i++) ttsPcm[i] = ((i * 11) & 0xff) || 1; // non-zero TTS body
+  const mock = await startMockWyoming(22050, 2, 1, ttsPcm);
+  try {
+    const r = await renderAnnouncement({
+      level: 'red', message: 'hello', klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: mock.port,
+      chimeGapMs: 1000, log: () => {},
+    });
+    assert.equal(r.ok, true, `render failed: ${r.error}`);
+    const N = getChimeRepeat();
+    const gap = silenceBytes(22050, 2, 1, 1000); // 22050 frames × 2 bytes = 44100
+    assert.equal(r.sizeBytes, 44 + N * 500 + gap + 800);
+    // The region between the chime group and the TTS must be true digital silence.
+    const wav = readFileSync(resolve(cacheDir, r.filename!));
+    const h = parseWavHeader(wav);
+    assert.equal(h.ok, true);
+    assert.equal(h.dataLength, N * 500 + gap + 800);
+    const gapRegion = wav.subarray(h.dataOffset + N * 500, h.dataOffset + N * 500 + gap);
+    assert.ok(gapRegion.every((b) => b === 0), 'post-chime gap should be all-zero PCM');
+    const tts = wav.subarray(h.dataOffset + N * 500 + gap);
+    assert.ok(tts.some((b) => b !== 0), 'TTS should follow the gap');
+  } finally {
+    mock.server.close();
+    rmSync(klaxonDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test('renderAnnouncement — default chimeGap (1s) applies when option omitted', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klaxon-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  writeKlaxon(klaxonDir, 'yellow-alert.wav', 22050, 2, 1, 500);
+  const ttsPcm = Buffer.alloc(600);
+  for (let i = 0; i < 600; i++) ttsPcm[i] = ((i * 7) & 0xff) || 1;
+  const mock = await startMockWyoming(22050, 2, 1, ttsPcm);
+  try {
+    const r = await renderAnnouncement({
+      level: 'yellow', message: 'heads up', klaxonDir, cacheDir,
+      wyomingHost: '127.0.0.1', wyomingPort: mock.port, log: () => {},
+    });
+    assert.equal(r.ok, true, `render failed: ${r.error}`);
+    const N = getChimeRepeat();
+    const gap = silenceBytes(22050, 2, 1, 1000);
+    assert.equal(r.sizeBytes, 44 + N * 500 + gap + 600, 'omitted chimeGapMs must default to 1000ms');
+  } finally {
+    mock.server.close();
     rmSync(klaxonDir, { recursive: true, force: true });
     rmSync(cacheDir, { recursive: true, force: true });
   }

@@ -110,6 +110,9 @@ export interface BroadcastConfig {
   /** v0.15.7 — silence (ms) inserted between the repeated blocks so the repeat
    *  is audibly distinct. Only applies when repeat > 1. Clamped 0..5000. */
   repeatGapMs: number;
+  /** v0.15.15 — silence (ms) after the chime group, before the spoken message,
+   *  so the chime decays before the announcement begins. Clamped 0..5000. */
+  chimeGapMs: number;
   /** v0.15.4 — announce volume 0..100, or null to OMIT announce_volume entirely
    *  (play at the speaker's standing volume). Omitting it avoids MA's
    *  set→play→restore dance, which ecobee speakers handle unreliably. */
@@ -139,6 +142,7 @@ export function loadBroadcastConfig(): BroadcastConfig {
     leadSilenceMs: clampLeadSilenceMs(process.env.BROADCAST_LEAD_SILENCE_MS),
     repeat: clampIntEnv(process.env.BROADCAST_REPEAT, 2, 1, 3),
     repeatGapMs: clampIntEnv(process.env.BROADCAST_REPEAT_GAP_MS, 1500, 0, 5000),
+    chimeGapMs: clampIntEnv(process.env.BROADCAST_CHIME_GAP_MS, 1000, 0, 5000),
     announceVolume: resolveAnnounceVolume(
       process.env.BROADCAST_ANNOUNCE_VOLUME,
       clamp01(Number(process.env.BROADCAST_VOLUME ?? 0.5)),
@@ -416,6 +420,7 @@ export function startBroadcastMonitor(
       leadSilenceMs: cfg.leadSilenceMs, // v0.12.1 — speakers sync before the chime
       announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second
       repeatGapMs: cfg.repeatGapMs, // v0.15.7 — silence between repeats so the repeat is audible
+      chimeGapMs: cfg.chimeGapMs, // v0.15.15 — pause after the chime before the spoken message
       log,
     });
     lastRender = {
@@ -592,7 +597,8 @@ export function startBroadcastMonitor(
         wyomingVoice: cfg.wyomingVoice ?? undefined,
         leadSilenceMs: cfg.leadSilenceMs, // v0.12.1 — speakers sync before the chime
         announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second
-      repeatGapMs: cfg.repeatGapMs, // v0.15.7 — silence between repeats so the repeat is audible
+        repeatGapMs: cfg.repeatGapMs, // v0.15.7 — silence between repeats so the repeat is audible
+        chimeGapMs: cfg.chimeGapMs, // v0.15.15 — pause after the chime before the spoken message
         log,
       });
       lastRender = {

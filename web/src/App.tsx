@@ -23,7 +23,6 @@ import { installGlossaryTooltips } from './glossary';
 // land when the user toggles "show history".
 const ThermalPanel = lazy(() => import('./pages/ThermalPanel').then((m) => ({ default: m.ThermalPanel })));
 const SolarPanel = lazy(() => import('./pages/SolarPanel').then((m) => ({ default: m.SolarPanel })));
-const EvsePanel = lazy(() => import('./pages/EvsePanel').then((m) => ({ default: m.EvsePanel })));
 const StrategyPanel = lazy(() => import('./pages/StrategyPanel').then((m) => ({ default: m.StrategyPanel })));
 const AlertsPanel = lazy(() => import('./pages/AlertsPanel').then((m) => ({ default: m.AlertsPanel })));
 // v0.11.0 — Alert Settings: per-priority annunciation on/off + chime + preview.
@@ -55,7 +54,7 @@ function NormalApp() {
   const devices = snapshot ? Object.values(snapshot.devices) : [];
   const [showHistory, setShowHistory] = useState(false);
   const [tab, setTab] = useState<
-    'dashboard' | 'solar' | 'thermal' | 'evse' | 'strategy' | 'alerts' | 'alert-settings' | 'predictive'
+    'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-settings' | 'predictive'
   >('dashboard');
   const sorted = sortDevices(devices);
 
@@ -128,12 +127,6 @@ function NormalApp() {
               Battery
             </button>
             <button
-              onClick={() => setTab('evse')}
-              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'evse' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
-            >
-              Charger
-            </button>
-            <button
               onClick={() => setTab('strategy')}
               className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'strategy' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
@@ -202,7 +195,6 @@ function NormalApp() {
         <Suspense fallback={<PageFallback />}>
           {tab === 'thermal' && <ThermalPanel devices={snapshot.devices} />}
           {tab === 'solar' && <SolarPanel devices={snapshot.devices} />}
-          {tab === 'evse' && <EvsePanel devices={snapshot.devices} />}
           {tab === 'strategy' && <StrategyPanel devices={snapshot.devices} />}
           {tab === 'alerts' && <AlertsPanel alerts={thresholdAlerts} />}
           {tab === 'alert-settings' && <AlertSettingsPanel />}

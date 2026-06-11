@@ -68,8 +68,9 @@ import { getChimeRepeat } from './alertSettings.js';
 /** Bump when the render pipeline changes in a way that invalidates the cache.
  *  v2 (v0.12.1): the optional lead-in silence is now part of every render.
  *  v3 (v0.15.4): announce-repeat folded into the key.
- *  v4 (v0.15.7): inter-repeat silence gap folded into the key. */
-export const RENDER_VERSION = 4;
+ *  v4 (v0.15.7): inter-repeat silence gap folded into the key.
+ *  v5 (v0.15.15): post-chime silence gap (chime → pause → spoken message). */
+export const RENDER_VERSION = 5;
 
 /** v0.15.4 — hard ceiling on the chime-repeat count at the allocation site.
  *  getChimeRepeat() is already clamped to ≤4 by alertSettings; this is a
@@ -116,6 +117,13 @@ export interface RenderOptions {
    * applies when announceRepeat > 1. Part of the cache key. Default/undefined → 0.
    */
   repeatGapMs?: number;
+  /**
+   * v0.15.15 — milliseconds of digital silence inserted AFTER the chime group,
+   * before the spoken message, so the chime decays and the announcement starts
+   * cleanly instead of riding the chime's tail. Applies inside every repeated
+   * block. Part of the cache key. Default/undefined → 1000.
+   */
+  chimeGapMs?: number;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
 }
@@ -196,6 +204,8 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // v0.15.7 — silence (ms) inserted between repeated blocks so the repeat is
   // audibly distinct. Only meaningful when announceRepeat > 1. Part of the key.
   const repeatGapMs = Math.max(0, Math.round(opts.repeatGapMs ?? 0));
+  // v0.15.15 — silence (ms) after the chime group, before the spoken message.
+  const chimeGapMs = Math.max(0, Math.round(opts.chimeGapMs ?? 1000));
 
   // Cache key derivation: stable for the same (version, level, message, repeat,
   // lead silence). Null message hashes distinctly from empty string so klaxon-
@@ -203,7 +213,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // and lead-in are part of the key so changing either busts the cache.
   // v0.15.4 — single source of truth for the cache key (shared with the exported
   // renderCacheKey, which callers use to predict the served filename).
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs);
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -305,8 +315,13 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // keep it off the resource-exhaustion path — byte-identical to the old form.
   // v0.15.7 — a silence gap (repeatGapMs) is inserted between blocks so the
   // listener can tell the message ended and is repeating.
+  // v0.15.15 — a post-chime gap (chimeGapMs, default 1 s) sits between the
+  // chime group and the spoken message so the chime fully decays before the
+  // announcement begins.
   const block: Buffer[] = [];
   for (let i = 0; i < chimeRepeat; i++) block.push(klaxonPcm);
+  const chimeGap = makeSilencePcm(klaxonHeader, chimeGapMs);
+  if (chimeGap.length > 0) block.push(chimeGap);
   block.push(ttsPcm);
   const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
   const parts: Buffer[] = [silence];
@@ -416,6 +431,7 @@ export function renderCacheKey(
   leadSilenceMs?: number,
   announceRepeat?: number,
   repeatGapMs?: number,
+  chimeGapMs?: number,
 ): string {
   // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
   // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
@@ -426,8 +442,10 @@ export function renderCacheKey(
   const leadMs = Math.max(0, Math.round(leadSilenceMs ?? 0));
   // v0.15.7 — inter-repeat silence gap is part of the key.
   const gapMs = Math.max(0, Math.round(repeatGapMs ?? 0));
+  // v0.15.15 — post-chime silence gap is part of the key.
+  const cgMs = Math.max(0, Math.round(chimeGapMs ?? 1000));
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }

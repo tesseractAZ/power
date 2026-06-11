@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.15 — 2026-06-10
+
+Charger screen removed (the EVSE passes no telemetry) + a breath between chime and announcement.
+
+- **Charger screens removed — web tab and TUI `CHARGER` screen.** The EVSE is app-only (error 1006 on every API path, never publishes MQTT), and its host DPU (Core 4) is an offline spare — so the screen could only ever render dead or absent data. Full impact sweep: the web `Charger` tab, `EvsePanel.tsx`, and the TUI screen (menu entry, `CHG` rail label, renderer) are gone; the dead `direct evse telemetry` glossary alias was trimmed. **Kept intentionally:** the EVSE still appears as an app-only tile in the Dashboard's device grid (it exists, it just has no API); the EV-charging-window predictor and its Predictive-Insights section stay — they learn from real SHP2 garage-circuit history, not the dead EVSE API, and feed the load forecast; the dispatch planner's "EVSE to max amperage" advisory action stays (it's a real manual lever even without telemetry). No server endpoints were EVSE-specific (the panel used generic `/api/history` + `/api/debug/raw`).
+- **One second of silence after the alert chime.** New `BROADCAST_CHIME_GAP_MS` (default 1000, clamp 0–5000): digital silence between the chime group and the spoken message inside every repeated block, so the chime fully decays before the announcement begins. Sequence is now: lead-in silence → chime ×N → **1 s pause** → message → repeat-gap → (block again). Folded into the render cache key (`RENDER_VERSION` 4→5, old cached WAVs regenerate automatically); surfaced in `/api/broadcast/status`. Klaxon-only renders unchanged.
+- 483/483 server tests pass (3 new: gap key-folding, all-zero gap region between chime and TTS, default-on behavior).
+
 ## 0.15.14 — 2026-06-10
 
 Lifetime-energy micro-dip clamp (from the 20-hour log analysis incl. the HA Core log).

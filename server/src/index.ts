@@ -1698,6 +1698,7 @@ app.get('/api/broadcast/status', async () => {
       announceVolume: cfg.announceVolume,
       repeat: cfg.repeat,
       repeatGapMs: cfg.repeatGapMs,
+      chimeGapMs: cfg.chimeGapMs,
       leadSilenceMs: cfg.leadSilenceMs,
       usePreAnnounce: cfg.usePreAnnounce,
       announceRetries: cfg.announceRetries,
