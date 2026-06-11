@@ -3,6 +3,24 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.18 — 2026-06-10
+
+All remaining log-audit defects corrected + the cheap wins, in one pass.
+
+**Defects corrected**
+- **Verified broadcast delivery.** Three broadcasts were silently swallowed during HA/MA restart windows while the panel logged success ("ok in 20–34 ms" — no audio can play that fast). `runBroadcast` now: (a) pre-flights the target `media_player` entities and defers when ALL are unavailable; (b) treats any sub-2 s "ok" as **unverified** (a real MA announcement blocks 17–34 s) and re-dispatches; (c) retries deferred/failed broadcasts at 30 s / 90 s / 180 s; (d) reports all of it honestly in `lastOutcome`/`lastErrors`.
+- **Broadcast status survives restarts** — the last-broadcast summary (when/what/outcome/spoken text) persists to `/data/broadcast-last.json` and rehydrates on boot, so "what played last" is answerable right after the restarts that most need auditing.
+- **The morning digest can no longer vanish silently.** New `NOTIFY_CHANNEL: ha` delivers as Home Assistant **persistent notifications** (zero setup, visible in the HA UI + companion app). When the digest fires with queued alerts and no channel configured, it now logs a loud WARNING naming the count instead of dropping 58 warnings without a trace. Digest lines now carry device identity ("Cell imbalance (Core 3 pack 2)").
+- **At/below the reserve floor now classifies as CRITICAL.** The old ladder de-escalated to "high — reserve in 18.8 h" while the pool sat pinned at the 10 % floor (the 18.8 h was the rising-then-recrossing figure). The floor condition also gets its own spoken message ("Backup pool is at the reserve floor…") instead of a stale projection phrase.
+- **Post-boot warm-up artifacts gated**: a null projection within 3 min of boot no longer re-arms the runway alarm (all 4 spurious "projection recovered" events were 100–140 s after boots); analytics requests retry once on timeout (every analytics 500 in 50 h was within ~2.5 min of a boot); the "—h" placeholder is gone from alarm log lines.
+- **Load-shed composition flags phantom candidates** — entities missing from HA or stuck unavailable (the dead front-patio light) now carry `available: false` instead of silently counting.
+
+**Cheap wins**
+- **Log diet**: per-request logging (78 % of journald volume) is off; only errors (≥400) and slow (>1 s) requests log. fastify's benign "stream closed prematurely" INFO lines (media players aborting WAV range-requests) are dropped at the logger.
+- **The cooldown poll is gone**: the refresh-cloud button fetched the cooldown every 5 s (~17k requests/day, the single noisiest endpoint) for a value that only changes when pressed; it now fetches once per mount and counts down locally.
+
+487/487 server tests pass (2 new floor-critical tests; re-arm tests pin the warm-up seam).
+
 ## 0.15.17 — 2026-06-10
 
 Runway sim anchored to the observed load (caught live during tonight's discharge).

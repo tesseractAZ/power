@@ -98,6 +98,19 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
       }
     });
 
+  // v0.15.18 — one retry on timeout. Every analytics 500 in the 50 h log
+  // window fell inside ~2.5 min of a boot (cold worker, first heavy 7-day
+  // scans), and a single retry rides out the warm-up instead of surfacing a
+  // transient 500 to dashboards and internal feeds.
+  const requestWithRetry = <T>(payload: Record<string, unknown>): Promise<T> =>
+    request<T>(payload).catch((e: unknown) => {
+      if (e instanceof Error && e.message.includes('timed out') && !stopped) {
+        log(`analytics: '${String(payload.kind)}${payload.name ? ':' + String(payload.name) : ''}' timed out — retrying once`);
+        return request<T>(payload);
+      }
+      throw e;
+    });
+
   const pushTimer = setInterval(() => {
     if (!dirty || !lastSnapshot) return;
     dirty = false;
@@ -106,10 +119,10 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
   (pushTimer as any).unref?.();
 
   return {
-    report: <T = any>(name: string, args?: ReportArgs) => request<T>({ kind: 'report', name, args: args ?? {} }),
+    report: <T = any>(name: string, args?: ReportArgs) => requestWithRetry<T>({ kind: 'report', name, args: args ?? {} }),
     query: (sn, metric, sinceMs, untilMs, bucketSec) =>
-      request({ kind: 'query', sn, metric, sinceMs, untilMs, bucketSec }),
-    listMetrics: (sn) => request({ kind: 'listMetrics', sn }),
+      requestWithRetry({ kind: 'query', sn, metric, sinceMs, untilMs, bucketSec }),
+    listMetrics: (sn) => requestWithRetry({ kind: 'listMetrics', sn }),
     pushSnapshot: (snap) => { lastSnapshot = snap; dirty = true; },
     stop: () => {
       stopped = true;

@@ -6,7 +6,7 @@ import type { Severity } from './alerts.js';
  * and a generic JSON webhook. Channel + credentials come from env.
  */
 
-export type NotifyChannel = 'ntfy' | 'pushover' | 'webhook' | 'none';
+export type NotifyChannel = 'ntfy' | 'pushover' | 'webhook' | 'ha' | 'none';
 
 export interface NotifyConfig {
   channel: NotifyChannel;
@@ -48,6 +48,11 @@ export function isConfigured(cfg: NotifyConfig): boolean {
       return !!cfg.pushoverToken && !!cfg.pushoverUser;
     case 'webhook':
       return !!cfg.webhookUrl;
+    // v0.15.18 — 'ha' posts a Home Assistant persistent notification through
+    // the Supervisor proxy. Zero external accounts; visible in the HA UI and
+    // mirrored to the companion app. Needs only the supervised environment.
+    case 'ha':
+      return !!process.env.SUPERVISOR_TOKEN;
     default:
       return false;
   }
@@ -122,6 +127,27 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
     });
     if (res.statusCode >= 300) {
       throw new Error(`Webhook returned HTTP ${res.statusCode}`);
+    }
+    return;
+  }
+
+  if (cfg.channel === 'ha') {
+    // v0.15.18 — persistent_notification.create via the Supervisor's Core API
+    // proxy. A stable per-severity notification_id means repeated sends update
+    // in place instead of stacking unbounded cards in the HA UI.
+    const token = process.env.SUPERVISOR_TOKEN;
+    if (!token) throw new Error('SUPERVISOR_TOKEN not set (not running supervised)');
+    const res = await request('http://supervisor/core/api/services/persistent_notification/create', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: msg.title,
+        message: msg.body,
+        notification_id: `ecoflow_panel_${msg.severity}`,
+      }),
+    });
+    if (res.statusCode >= 300) {
+      throw new Error(`HA persistent_notification returned HTTP ${res.statusCode}`);
     }
     return;
   }
