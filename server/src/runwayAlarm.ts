@@ -31,7 +31,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
-import type { AlarmPriority } from './alertPriority.js';
+import { type AlarmPriority, priorityAnnouncementPrefix } from './alertPriority.js';
 
 /** The subset of RunwayProjection this alarm consumes. */
 export interface RunwayAlarmInput {
@@ -74,8 +74,10 @@ export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority)
     return `High priority alarm. Backup pool projected to deplete in about ${Math.max(1, Math.round(he))} hours before solar recovers. Reduce load now.`;
   }
   const h = hr != null ? Math.max(1, Math.round(hr)) : null;
-  const tail = priority === 'medium' ? 'Medium priority alarm.' : 'Advisory.';
-  return `Backup pool projected to reach reserve in about ${h} hours at the forecast load. ${tail} Reduce consumption to preserve reserve until solar generates more.`;
+  // v0.15.16 — the alert type leads so the listener hears the severity before
+  // the detail (the critical/high paths above already announce it first).
+  const prefix = priorityAnnouncementPrefix(priority);
+  return `${prefix} Backup pool projected to reach reserve in about ${h} hours at the forecast load. Reduce consumption to preserve reserve until solar generates more.`;
 }
 
 interface PersistState {

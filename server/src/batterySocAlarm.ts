@@ -23,7 +23,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
-import { type AlarmPriority, priorityMeta } from './alertPriority.js';
+import { type AlarmPriority, priorityAnnouncementPrefix } from './alertPriority.js';
 
 export interface SocThreshold {
   /** SoC percent at/below which (on the way down) this alarm fires. */
@@ -52,14 +52,13 @@ export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
  *  it — stops a value sitting exactly on a boundary from chattering. */
 const REARM_MARGIN_PCT = 2;
 
-/** The spoken message for a crossing, e.g. "Backup pool at 20 percent. Medium priority alarm." */
+/** The spoken message for a crossing, e.g. "Medium priority alarm. Backup pool at 20 percent."
+ *  v0.15.16 — the alert type leads so the listener hears the severity before
+ *  the detail (matches buildAlertMessage and the runway critical/high paths). */
 export function socAlarmMessage(t: SocThreshold): string {
-  const label = priorityMeta(t.priority).label;
-  const tail =
-    t.priority === 'critical'
-      ? 'Critical alarm. Critical alarm. Restore charge immediately.'
-      : `${label} priority alarm.`;
-  return `Backup pool at ${t.pct} percent. ${tail}`;
+  const prefix = priorityAnnouncementPrefix(t.priority);
+  const tail = t.priority === 'critical' ? ' Restore charge immediately.' : '';
+  return `${prefix} Backup pool at ${t.pct} percent.${tail}`;
 }
 
 /**
