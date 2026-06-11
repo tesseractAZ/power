@@ -35,6 +35,10 @@ export interface LoadCompositionEntry {
   priority: number;
   /** true=on, false=off, null=HA state not readable. */
   currentlyOn: boolean | null;
+  /** v0.15.18 — false when the entity is missing from HA or reports
+   *  unavailable/unknown (e.g. a dead device still on the allowlist), so the
+   *  operator can see a phantom candidate instead of silently counting it. */
+  available: boolean;
   measuredWatts: number | null;
   source: 'shp2_circuit' | 'ha_power_sensor' | 'estimated' | 'unknown';
   flaggedKeyword: string | null;
@@ -110,7 +114,12 @@ export function buildLoadComposition(
 ): LoadCompositionEntry[] {
   return candidates.map((c) => {
     const ha = haEntity(c.entityId);
-    const currentlyOn = ha ? isOnState(ha.state) : null;
+    // v0.15.18 — an entity missing from HA or stuck unavailable/unknown is a
+    // phantom candidate (observed: a dead patio light on the priority-1 list).
+    // It can never be shed (currentlyOn stays false/null below), but flagging
+    // it explicitly surfaces the rot to the operator.
+    const available = ha != null && ha.state !== 'unavailable' && ha.state !== 'unknown';
+    const currentlyOn = ha && available ? isOnState(ha.state) : null;
     let measuredWatts: number | null = null;
     let source: LoadCompositionEntry['source'] = 'unknown';
     if (c.shp2Ch != null) {
@@ -133,6 +142,7 @@ export function buildLoadComposition(
       label: c.label,
       priority: c.priority,
       currentlyOn,
+      available,
       measuredWatts,
       source,
       flaggedKeyword: c.flaggedKeyword,

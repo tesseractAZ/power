@@ -20,7 +20,9 @@ let seq = 0;
 function makeAlarm(onTrigger: (priority: string) => void, reannounceMs = 60 * 60 * 1000) {
   const statePath = join(tmpdir(), `runway-${process.pid}-${Date.now()}-${seq++}.json`);
   tmpPaths.push(statePath);
-  return createRunwayAlarm({ onTrigger: (p) => onTrigger(p), statePath, reannounceMs });
+  // rearmWarmupMs: 0 — tests run inside the real 3-min post-boot window, so
+  // the v0.15.18 warm-up gate must be disabled to exercise re-arm behavior.
+  return createRunwayAlarm({ onTrigger: (p) => onTrigger(p), statePath, reannounceMs, rearmWarmupMs: 0 });
 }
 
 const proj = (over: Partial<RunwayAlarmInput>): RunwayAlarmInput => ({
@@ -101,4 +103,24 @@ test.after(() => {
       /* best effort */
     }
   }
+});
+
+/* ─── v0.15.18 — at/below the reserve floor is CRITICAL ──────────────── */
+
+test('classifyRunway — at/below the reserve floor → critical regardless of horizon math', () => {
+  // Observed Jun 10 00:51 local: pool pinned at the 10% floor, yet the ladder
+  // said "high — reserve in 18.8h" (the rising-then-crossing figure).
+  const atFloor = proj({ hoursToReserve: 18.8, hoursToEmpty: 4.3, backupRemainingKwh: 9.2, backupReserveKwh: 9.22 });
+  assert.equal(classifyRunway(atFloor), 'critical');
+  // Above the floor, the normal ladder applies (empty in 4.3h → high).
+  const above = proj({ hoursToReserve: 18.8, hoursToEmpty: 4.3, backupRemainingKwh: 20, backupReserveKwh: 9.22 });
+  assert.equal(classifyRunway(above), 'high');
+});
+
+test('runwayAlarmMessage — floor condition speaks the actual state, not a stale projection', () => {
+  const atFloor = proj({ hoursToReserve: 18.8, hoursToEmpty: 4.3, backupRemainingKwh: 9.2, backupReserveKwh: 9.22 });
+  const msg = runwayAlarmMessage(atFloor, 'critical');
+  assert.match(msg, /^Critical alarm\. Critical alarm\./);
+  assert.match(msg, /reserve floor/);
+  assert.doesNotMatch(msg, /projected/);
 });

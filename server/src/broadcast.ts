@@ -65,9 +65,12 @@
  *   - In-flight guard: tickInFlight blocks a second concurrent broadcast.
  */
 
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { SnapshotStore } from './snapshot.js';
 import type { Alert } from './alerts.js';
-import { callHaService, isSupervised, probeService } from './haService.js';
+import { config } from './config.js';
+import { callHaService, isSupervised, probeService, getEntityState } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
 import { renderAnnouncement, pruneRenderCache } from './audioRenderer.js';
 import { buildAlertMessage } from './ttsService.js';
@@ -313,6 +316,57 @@ export function startBroadcastMonitor(
     filename: null, sizeBytes: null, ttsRenderMs: null, fromCache: null, error: null,
   };
 
+  // v0.15.18 — the last-broadcast summary survives restarts. Before this,
+  // every deploy blanked lastBroadcastAt/lastOutcome/lastSpokenMessage, so
+  // "what played last and did it work" was unanswerable right after the
+  // restarts that most need auditing.
+  const STATUS_PATH = resolve(process.cwd(), config.dbPath, '..', 'broadcast-last.json');
+  const persistStatus = () => {
+    try {
+      writeFileSync(
+        STATUS_PATH,
+        JSON.stringify({ lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender }),
+      );
+    } catch { /* best-effort */ }
+  };
+  try {
+    const s = JSON.parse(readFileSync(STATUS_PATH, 'utf8')) as Partial<{
+      lastBroadcastAt: number; lastLevel: ConditionLevel; lastOutcome: BroadcastStatus['lastOutcome'];
+      lastErrors: string[]; lastSpokenMessage: string; lastRender: BroadcastStatus['lastRender'];
+    }>;
+    lastBroadcastAt = s.lastBroadcastAt ?? null;
+    lastLevel = s.lastLevel ?? null;
+    lastOutcome = s.lastOutcome ?? null;
+    lastErrors = Array.isArray(s.lastErrors) ? s.lastErrors : [];
+    lastSpokenMessage = s.lastSpokenMessage ?? null;
+    if (s.lastRender) lastRender = s.lastRender;
+  } catch { /* first boot / no prior state */ }
+
+  // v0.15.18 — single-slot deferred retry for broadcasts that could not be
+  // verified (targets unavailable during an HA/MA restart, MA call failure,
+  // or a "completed" too fast for any audio to have played). A new genuine
+  // broadcast supersedes the pending retry.
+  let retryTimer: NodeJS.Timeout | null = null;
+  let retryAttempt = 0;
+  const RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
+  const scheduleBroadcastRetry = (level: ConditionLevel, message: string | null, reason: string) => {
+    if (retryAttempt >= RETRY_DELAYS_MS.length) {
+      log(`broadcast: giving up after ${retryAttempt} deferred retries (${reason})`);
+      retryAttempt = 0;
+      return;
+    }
+    const delay = RETRY_DELAYS_MS[retryAttempt];
+    retryAttempt += 1;
+    if (retryTimer) clearTimeout(retryTimer);
+    log(`broadcast: ${reason} — deferred retry ${retryAttempt}/${RETRY_DELAYS_MS.length} in ${Math.round(delay / 1000)}s`);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (stopped) return;
+      void runBroadcast(level, message);
+    }, delay);
+    (retryTimer as { unref?: () => void }).unref?.();
+  };
+
   const supervised = isSupervised();
   if (!supervised) {
     log('broadcast: SUPERVISOR_TOKEN not set; running outside HA, broadcasts disabled');
@@ -442,22 +496,52 @@ export function startBroadcastMonitor(
     }
     wyomingReachable = message ? true : wyomingReachable; // only "proved" by a TTS render
 
-    // 2. Single MA play_announcement to every target.
+    // 2. v0.15.18 — pre-flight: during HA/MA restart windows the media_player
+    // entities briefly deregister; HA then ACCEPTS play_announcement and
+    // silently drops it (3 confirmed swallowed broadcasts, each "ok" in
+    // 20-34 ms). Verify at least one target is registered and available
+    // before dispatching; otherwise defer and retry.
+    const states = await Promise.all(cfg.targets.map((t) => getEntityState(t)));
+    const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
+    if (usable === 0) {
+      errors.push('all broadcast targets unavailable (HA/MA restarting?)');
+      scheduleBroadcastRetry(level, message, 'all broadcast targets unavailable');
+      lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
+      persistStatus();
+      log(`broadcast: ${level} deferred — ${errors[0]}`);
+      return { ok: false, errors };
+    }
+
+    // 3. Single MA play_announcement to every target.
     const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
     const call = await playAnnounce(url);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
+      scheduleBroadcastRetry(level, message, 'play_announcement failed after in-call retries');
     }
 
     if (message) lastSpokenMessage = message;
 
     const dt = Date.now() - t0;
+    // v0.15.18 — a real MA announcement blocks until playback completes
+    // (observed 17-34 s). A sub-2 s "ok" means HA returned without playing
+    // (entity registered but its player not ready) — treat as unverified
+    // and re-dispatch rather than report a success no one heard.
+    if (call.ok && dt < 2000) {
+      errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
+      scheduleBroadcastRetry(level, message, `suspiciously fast completion (${dt}ms)`);
+    }
+    if (call.ok && errors.length === 0) retryAttempt = 0; // verified success resets the deferred-retry budget
     const renderTag = r.fromCache ? 'cached' : `rendered+${r.ttsRenderMs}ms`;
     if (errors.length === 0) {
       log(`broadcast: ${level} → ok in ${dt}ms (${cfg.targets.length} targets, ${renderTag}, ${r.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
     } else {
       log(`broadcast: ${level} → ${errors.length} error(s) in ${dt}ms: ${errors.join('; ')}`);
     }
+    lastBroadcastAt = Date.now(); lastLevel = level;
+    lastOutcome = errors.length === 0 ? 'success' : 'partial';
+    lastErrors = errors;
+    persistStatus();
     return { ok: errors.length === 0, errors };
   };
 

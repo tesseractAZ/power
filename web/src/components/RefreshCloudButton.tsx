@@ -55,9 +55,13 @@ export function RefreshCloudButton({ sn, deviceLabel = 'SHP2' }: { sn: string; d
         });
       } catch { /* ignore — cooldown is optional UX */ }
     };
+    // v0.15.18 — fetch ONCE per mount; the 1 s local ticker below carries the
+    // countdown. The old 5 s re-poll was the single noisiest request on the
+    // server (~17k requests/day across open dashboards) for a value that only
+    // changes when the user presses the button — and the action response
+    // already returns the fresh cooldown.
     fetchCooldown();
-    const t = window.setInterval(fetchCooldown, 5000);
-    return () => { live = false; window.clearInterval(t); };
+    return () => { live = false; };
   }, [sn]);
 
   // Tick the displayed cooldown locally every second so the countdown is smooth.

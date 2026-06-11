@@ -39,6 +39,10 @@ export interface RunwayAlarmInput {
   hoursToReserve: number | null;
   hoursToEmpty: number | null;
   unavailable: string | null;
+  /** v0.15.18 — present on RunwayProjection; lets the classifier recognise
+   *  "already AT/below the reserve floor" as its own (critical) condition. */
+  backupRemainingKwh?: number | null;
+  backupReserveKwh?: number | null;
 }
 
 /** Default re-announce cadence for a persisting projection (minutes → ms). */
@@ -47,13 +51,33 @@ export const RUNWAY_ALARM_REANNOUNCE_MS =
 
 const RANK: Record<AlarmPriority, number> = { low: 1, medium: 2, high: 3, critical: 4 };
 
+// v0.15.18 — warm-up window in which a null projection must NOT re-arm the
+// alarm (post-boot projections are computed from half-warm inputs).
+const PROCESS_START_MS = Date.now();
+const REARM_WARMUP_MS = 3 * 60 * 1000;
+
 /**
  * Map a runway projection to an alarm priority, or null when no depletion is
  * projected within the horizon. EMPTY (hoursToEmpty) escalates harder than
  * RESERVE (hoursToReserve) because empty is the harder failure.
  */
+/** True when the pool is currently AT or below its reserve floor. */
+export function belowReserveFloor(p: RunwayAlarmInput): boolean {
+  return (
+    p.backupRemainingKwh != null &&
+    p.backupReserveKwh != null &&
+    p.backupReserveKwh > 0 &&
+    p.backupRemainingKwh <= p.backupReserveKwh
+  );
+}
+
 export function classifyRunway(p: RunwayAlarmInput): AlarmPriority | null {
   if (p.unavailable != null) return null;
+  // v0.15.18 — being AT/below the reserve floor is the emergency this ladder
+  // exists for (the SHP2 cuts non-backup circuits there), yet the old ranking
+  // DE-escalated to 'high' once the crossing was behind us (observed Jun 10
+  // 00:51 local: "high — reserve in 18.8h" while pinned at the 10 % floor).
+  if (belowReserveFloor(p)) return 'critical';
   const he = p.hoursToEmpty;
   const hr = p.hoursToReserve;
   if (he != null && he <= 3) return 'critical';
@@ -67,6 +91,11 @@ export function classifyRunway(p: RunwayAlarmInput): AlarmPriority | null {
 export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority): string {
   const he = p.hoursToEmpty;
   const hr = p.hoursToReserve;
+  // v0.15.18 — at/below the reserve floor the "projected in N hours" framing is
+  // wrong (it already happened); speak the actual condition and the actions.
+  if (priority === 'critical' && belowReserveFloor(p)) {
+    return 'Critical alarm. Critical alarm. Backup pool is at the reserve floor. Non-backup circuits may lose power. Shed load or start the generator.';
+  }
   if (priority === 'critical' && he != null) {
     return `Critical alarm. Critical alarm. Backup pool projected empty in about ${Math.max(1, Math.round(he))} hours before solar recovers. Shed load immediately.`;
   }
@@ -103,6 +132,9 @@ export interface RunwayAlarmOptions {
   reannounceMs?: number;
   /** Override the persistence path (tests). */
   statePath?: string;
+  /** v0.15.18 — override the post-boot warm-up window during which a null
+   *  projection must NOT re-arm the alarm (tests pass 0). */
+  rearmWarmupMs?: number;
   /** Optional logger. */
   log?: (msg: string) => void;
 }
@@ -130,6 +162,7 @@ function saveState(path: string, s: PersistState): void {
 export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
   const path = opts.statePath ?? STATE_PATH;
   const reannounceMs = opts.reannounceMs ?? RUNWAY_ALARM_REANNOUNCE_MS;
+  const rearmWarmupMs = opts.rearmWarmupMs ?? REARM_WARMUP_MS;
   const log = opts.log ?? (() => {});
   const persisted = loadState(path);
   let announcedPriority: AlarmPriority | null = persisted?.announcedPriority ?? null;
@@ -145,6 +178,12 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
       if (desired == null) {
         // Projection recovered (or unavailable) → re-arm so the next genuine
         // descent announces fresh.
+        // v0.15.18 — NOT during process warm-up: every "projection recovered —
+        // re-armed" in the 50 h log window fired 100–140 s after a boot, on a
+        // projection computed from a half-warm forecast, wiping the persisted
+        // announce state so the next tick re-announced an unchanged condition.
+        // A genuine recovery survives past the warm-up window.
+        if (Date.now() - PROCESS_START_MS < rearmWarmupMs) return;
         if (announcedPriority != null) {
           announcedPriority = null;
           lastAnnouncedAt = null;
@@ -159,9 +198,14 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
       const stale = lastAnnouncedAt != null && now - lastAnnouncedAt >= reannounceMs;
 
       if (entering || escalated || stale) {
-        log(
-          `runway-alarm: ${desired} — reserve in ${p.hoursToReserve ?? '—'}h / empty in ${p.hoursToEmpty ?? '—'}h`,
-        );
+        // v0.15.18 — only mention figures that exist ("empty in —h" read like
+        // a rendering bug and leaked into copied/pasted reports).
+        const figs = [
+          p.hoursToReserve != null ? `reserve in ${p.hoursToReserve}h` : null,
+          p.hoursToEmpty != null ? `empty in ${p.hoursToEmpty}h` : null,
+          belowReserveFloor(p) ? 'AT RESERVE FLOOR' : null,
+        ].filter(Boolean);
+        log(`runway-alarm: ${desired} — ${figs.join(' / ') || 'no horizon figures'}`);
         try {
           opts.onTrigger(desired, runwayAlarmMessage(p, desired));
         } catch (e: any) {

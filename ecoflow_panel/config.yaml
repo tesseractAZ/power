@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.15.17"
+version: "0.15.18"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -64,6 +64,8 @@ options:
   FORECAST_LON: -112.074
   TELNET_ENABLED: true
   TELNET_PORT: 2323
+  # v0.15.18 — "ha" delivers as Home Assistant persistent notifications (zero
+  # setup, visible in the HA UI + companion app). ntfy/pushover/webhook remain.
   NOTIFY_CHANNEL: none
   NOTIFY_MIN_SEVERITY: warning
   NOTIFY_RESOLVED: true
@@ -193,7 +195,7 @@ schema:
   FORECAST_LON: float
   TELNET_ENABLED: bool
   TELNET_PORT: port
-  NOTIFY_CHANNEL: list(none|ntfy|pushover|webhook)
+  NOTIFY_CHANNEL: list(none|ntfy|pushover|webhook|ha)
   NOTIFY_MIN_SEVERITY: list(warning|critical)
   NOTIFY_RESOLVED: bool
   # The two URL-looking fields below intentionally use `str?` instead of
