@@ -1713,6 +1713,9 @@ export async function computeDegradation(
 const RUNWAY_LOAD_WINDOW_MS = 60 * 60 * 1000;   // average load over the last hour
 const RUNWAY_HORIZON_HOURS = 24;
 const RUNWAY_TTL_MS = 60 * 1000;                // recompute at most once per minute
+// v0.15.17 — how many leading sim hours are anchored to the observed load
+// (decaying max() blend into the day-of-week curve; see computeRunway).
+const RUNWAY_BLEND_HOURS = 4;
 
 export interface RunwayProjection {
   generatedAt: number;
@@ -1731,6 +1734,9 @@ export interface RunwayProjection {
 }
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
+
+/** Test/bench seam. */
+export function resetRunwayCache(): void { runwayCache = null; }
 
 const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjection> = {}): RunwayProjection => ({
   generatedAt: now,
@@ -1837,6 +1843,22 @@ export function computeRunway(
   }
   while (pvByHour.length < RUNWAY_HORIZON_HOURS) pvByHour.push(0);
   while (loadByHour.length < RUNWAY_HORIZON_HOURS) loadByHour.push(loadAvgWatts / 1000);
+
+  // v0.15.17 — anchor the sim's near-term hours to the OBSERVED load. The
+  // day-of-week curve (v0.14.0) prevents transient-spike alarmism, but it also
+  // let the sim ignore a SUSTAINED real load far above the modelled curve:
+  // observed live (Jun 10, June-heat evening) the house drew 5–9 kW against a
+  // ~3 kW modelled hour, and a post-restart recompute flipped "reserve in 6 h"
+  // to "no depletion in horizon" — muting the escalating runway alarms while
+  // the pool fell ~5 %/h. Each of the first RUNWAY_BLEND_HOURS takes at least
+  // a decaying blend of the observed average into the curve (max(), so a
+  // lighter-than-modelled day never becomes MORE optimistic, and a brief
+  // burst still cannot dominate the far horizon — it decays out by hour 4).
+  const loadAvgKw = loadAvgWatts / 1000;
+  for (let h = 0; h < RUNWAY_BLEND_HOURS && h < loadByHour.length; h++) {
+    const w = 1 - h / RUNWAY_BLEND_HOURS; // 1, .75, .5, .25
+    loadByHour[h] = Math.max(loadByHour[h], loadAvgKw * w + loadByHour[h] * (1 - w));
+  }
 
   let stateKwh = backupRemainingKwh;
   let hoursToReserve: number | null = null;
