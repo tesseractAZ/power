@@ -54,6 +54,30 @@ export interface LifetimeTotals {
   watermarkMs: number;
 }
 
+/**
+ * v0.15.14 — lifetime micro-dip clamp (pure, testable core).
+ *
+ * The live total (persisted + pending) is re-estimated on every call, so it
+ * can dip a few Wh below the previously emitted total (rollup persistence vs
+ * live trapezoid rounding). HA `total_increasing` sensors interpret ANY
+ * decrease as a meter reset, so those micro-dips registered as phantom
+ * Energy-Dashboard resets. Returns the pendingWh to emit: held so the total
+ * never dips by ≤ maxDipWh, while a larger drop (a genuine operator reset,
+ * e.g. the v0.13.0 re-zero) passes through untouched so reset semantics work.
+ */
+export function clampLifetimeDip(
+  prevEmittedTotalWh: number | undefined,
+  persistedWh: number,
+  pendingWh: number,
+  maxDipWh = 50,
+): number {
+  if (prevEmittedTotalWh == null) return pendingWh;
+  const total = persistedWh + pendingWh;
+  const dip = prevEmittedTotalWh - total;
+  if (dip > 0 && dip <= maxDipWh) return prevEmittedTotalWh - persistedWh;
+  return pendingWh;
+}
+
 // v0.13.0 — per-pack lifetime baseline (absolute factory-register snapshot
 // captured the first time a (sn, packNum) pair is seen). Home totals use
 // the DELTA from this baseline, not the absolute register. See
@@ -734,6 +758,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     catch (e: any) { log(`recorder: lifetime initial rollup failed ${e?.message ?? e}`); }
   }, 30_000).unref();
 
+  // v0.15.14 — last emitted total per key, for the jitter clamp below.
+  const lifetimeEmitHighWater = new Map<string, number>();
+
   /** Snapshot of every counter (fleet + per-circuit), including live integral past the watermark. */
   const getLifetimeTotals = (): Record<string, LifetimeTotals> => {
     const now = Date.now();
@@ -760,6 +787,20 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         }
         if (pendingWh < 0) pendingWh = 0;
       }
+      // v0.15.14 — micro-dip clamp. The live `pendingWh` trapezoid estimate is
+      // re-derived each call, so consecutive totals can dip by a few Wh (e.g.
+      // a rollup persisting slightly less than the previous live estimate).
+      // HA's `total_increasing` sensors read any decrease as a meter RESET, so
+      // 1-6 Wh of jitter produced phantom Energy-Dashboard resets ("state is
+      // not strictly increasing", 21× in the HA core log). Hold the previous
+      // total across small dips; a LARGE drop is a genuine operator reset
+      // (v0.13.0 re-zero) and must pass through unclamped.
+      pendingWh = clampLifetimeDip(
+        lifetimeEmitHighWater.get(key),
+        prev.wh,
+        pendingWh,
+      );
+      lifetimeEmitHighWater.set(key, prev.wh + pendingWh);
       out[key] = { persistedWh: prev.wh, pendingWh, watermarkMs: watermark };
     }
     return out;

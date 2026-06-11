@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.14 — 2026-06-10
+
+Lifetime-energy micro-dip clamp (from the 20-hour log analysis incl. the HA Core log).
+
+- **Phantom Energy-Dashboard resets eliminated.** HA's Recorder logged 21× "state class `total_increasing`, but its state is not strictly increasing" on the per-circuit/fleet lifetime energy sensors — each triggered by a 1–6 Wh dip (e.g. 81.429 → 81.423 kWh). Root cause: the live `pendingWh` trapezoid estimate is re-derived on every `getLifetimeTotals()` call, so after a rollup persists, the next emitted total can land a few Wh below the previous one; HA reads *any* decrease on `total_increasing` as a meter reset. `getLifetimeTotals` now holds the previously emitted total across dips ≤ 50 Wh (estimation jitter), while larger drops (a genuine operator re-zero, e.g. v0.13.0) pass through untouched so reset semantics still work.
+- 480/480 server tests pass (5 new for the pure clamp helper).
+
+> 20h-analysis notes (no code change needed): the pv_curtailment/load-shed template-warning storm (4,881×) and the `forecast_pv_next_24h` state-class warnings in the HA log all **predate v0.15.3** — zero occurrences in the last 20 h. The "stream closed prematurely" INFO lines are fastify logging media players aborting WAV range-requests (3-4 per successful broadcast) — benign. Remaining HA-side items are outside this add-on: Music Assistant WS reconnects (4×/20 h, self-healing), and a Nabu Casa subscription-expired notice.
+
 ## 0.15.13 — 2026-06-10
 
 Boot-partial fleet must never latch the 7-day report caches (live-verified gap in the v0.15.11 guards).
