@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.16 — 2026-06-10
+
+Spoken announcements lead with the alert type.
+
+- **Every spoken message now opens with its alert type/priority**, so the listener knows the severity before the details — even if they only catch the first words from another room. The main alert path (`buildAlertMessage`) and the runway critical/high messages already did this; three composers didn't and were reordered:
+  - SoC alarm: ~~"Backup pool at 20 percent. Medium priority alarm."~~ → **"Medium priority alarm. Backup pool at 20 percent."**
+  - Runway medium/low: ~~"Backup pool projected to reach reserve in about 9 hours… Advisory. Reduce consumption…"~~ → **"Low priority advisory. Backup pool projected to reach reserve in about 9 hours… Reduce consumption…"** (also adopts the standard ISA vocabulary instead of the bare "Advisory.")
+  - Test broadcast: ~~"Test broadcast. Medium priority alarm. This is only a test."~~ → **"Medium priority alarm. Test broadcast. This is only a test."** — a test now rehearses exactly what a real announcement sounds like.
+- New renders pick up the wording automatically (the message text is part of the audio cache key). 483/483 server tests pass.
+
 ## 0.15.15 — 2026-06-10
 
 Charger screen removed (the EVSE passes no telemetry) + a breath between chime and announcement.

@@ -548,9 +548,11 @@ export function startBroadcastMonitor(
       // v0.11.0 — test announcements use the same ISA priority vocabulary as
       // real alarms (was the colour-named "Red alert"/"Yellow alert").
       const message =
-        level === 'red' ? `Test broadcast. ${priorityAnnouncementPrefix('critical')} This is only a test.` :
-        level === 'yellow' ? `Test broadcast. ${priorityAnnouncementPrefix('medium')} This is only a test.` :
-        'Test broadcast. All clear. This is only a test.';
+        // v0.15.16 — the alert type leads, mirroring real announcements, so a
+        // test rehearses exactly what the operator will hear in earnest.
+        level === 'red' ? `${priorityAnnouncementPrefix('critical')} Test broadcast. This is only a test.` :
+        level === 'yellow' ? `${priorityAnnouncementPrefix('medium')} Test broadcast. This is only a test.` :
+        'All clear. Test broadcast. This is only a test.';
       const r = await runBroadcast(level, message);
       lastBroadcastAt = Date.now();
       lastLevel = level;
