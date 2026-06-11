@@ -506,8 +506,28 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   };
 
   const dispatchDigest = async () => {
-    if (!isConfigured(cfg) || quietQueue.length === 0) return;
-    const lines = quietQueue.map((a) => `• [${a.severity}] ${a.title}`);
+    if (quietQueue.length === 0) return;
+    // v0.15.18 — the digest used to vanish without a trace when no channel was
+    // configured: 58 queued warnings (incl. 17× cell-imbalance) dropped over
+    // 50 h with nothing in the log. Now it says so, loudly, once per digest.
+    if (!isConfigured(cfg)) {
+      log(
+        `notify: WARNING — morning digest has ${quietQueue.length} queued alert(s) but no notify ` +
+          `channel is configured (NOTIFY_CHANNEL=${cfg.channel}). Set NOTIFY_CHANNEL to ` +
+          `"ha" (HA persistent notification, zero setup), ntfy, pushover, or webhook to receive them. Dropping queue.`,
+      );
+      quietQueue.length = 0;
+      return;
+    }
+    // v0.15.18 — include device identity so a digest line is actionable on its
+    // own ("Cell imbalance" alone can't say WHICH of 15 packs).
+    const lines = quietQueue.map((a) => {
+      const loc =
+        a.coreNum != null
+          ? ` (Core ${a.coreNum}${a.packNum != null ? ` pack ${a.packNum}` : ''})`
+          : '';
+      return `• [${a.severity}] ${a.title}${loc}`;
+    });
     try {
       await sendNotification(cfg, {
         title: `EcoFlow · Morning digest (${quietQueue.length} alert${quietQueue.length === 1 ? '' : 's'})`,

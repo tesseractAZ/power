@@ -86,7 +86,36 @@ import * as haStateCache from './haStateCache.js';
 // after broker disconnects.
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
 
-const app = Fastify({ logger: { level: config.logLevel } });
+// v0.15.18 — log diet. Per-request logging was 78 % of journald volume
+// (~31k lines / 50 h: 'incoming request' + 'request completed' for every
+// dashboard/HACS-card poll), drowning the lines that matter. Request logging
+// is off; an onResponse hook below logs only errors (≥400) and slow (>1 s)
+// requests. The pino logMethod hook drops fastify's INFO 'stream closed
+// prematurely' (media players aborting WAV range-requests — 3-4 per
+// successful broadcast, fastify/lib/reply.js, benign by definition).
+const app = Fastify({
+  disableRequestLogging: true,
+  logger: {
+    level: config.logLevel,
+    hooks: {
+      logMethod(args: unknown[], method: (...a: unknown[]) => void) {
+        for (const a of args) {
+          if (typeof a === 'string' && a.includes('stream closed prematurely')) return;
+        }
+        method.apply(this, args as never);
+      },
+    },
+  },
+});
+app.addHook('onResponse', (req, reply, done) => {
+  const ms = Math.round((reply as { elapsedTime?: number }).elapsedTime ?? 0);
+  if (reply.statusCode >= 400) {
+    req.log.warn({ url: req.url, statusCode: reply.statusCode, ms }, 'request error');
+  } else if (ms > 1000) {
+    req.log.info({ url: req.url, statusCode: reply.statusCode, ms }, 'slow request');
+  }
+  done();
+});
 // v0.9.7 — defense in depth: accept empty-body POSTs even when the client
 // (wrongly) sets Content-Type: application/json. Without this Fastify
 // rejects with FST_ERR_CTP_EMPTY_JSON_BODY — which broke the first
