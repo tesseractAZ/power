@@ -22,6 +22,9 @@ import {
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, priorityOf, type AlarmPriority } from './alertPriority.js';
 import { getAlertSettings, updateAlertSettings, onAlertSettingsChange } from './alertSettings.js';
 import { advisoryStateFields, getLatestAdvisory } from './loadShedAdvisor.js';
+// v0.15.19 — lighting energy posture (runway-driven; see lightingPosture.ts).
+import { lightingPostureTracker } from './lightingPosture.js';
+import { belowReserveFloor } from './runwayAlarm.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -154,6 +157,14 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_runway_to_reserve_if_shed_hours', name: 'EcoFlow Runway to Reserve (if shed)', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-sand-complete', value_template: '{{ value_json.runway_to_reserve_if_shed_hours }}' },
   { unique_id: 'ecoflow_load_shed_recommended_count', name: 'EcoFlow Load-Shed Recommended Count', state_class: 'measurement', icon: 'mdi:power-plug-off', value_template: '{{ value_json.load_shed_recommended_count }}' },
   { unique_id: 'ecoflow_load_shed_recommended_watts', name: 'EcoFlow Load-Shed Recommended Watts', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:power-plug-off-outline', value_template: '{{ value_json.load_shed_recommended_watts }}' },
+
+  // ─── v0.15.19 lighting energy posture (publish-only; HA automations actuate) ─
+  // One runway-derived enum (surplus|normal|conserve|amber|red|critical) the
+  // home's lighting keys off. Escalation is immediate; de-escalation holds
+  // 15 min (lightingPosture.ts). Gate consumers in HA behind
+  // input_boolean.lighting_postures_enabled — the add-on never toggles a light.
+  { unique_id: 'ecoflow_lighting_posture', name: 'EcoFlow Lighting Posture', icon: 'mdi:lightbulb-auto', value_template: '{{ value_json.lighting_posture }}' },
+  { unique_id: 'ecoflow_lighting_posture_reason', name: 'EcoFlow Lighting Posture Reason', icon: 'mdi:information-outline', entity_category: 'diagnostic', value_template: '{{ value_json.lighting_posture_reason }}' },
 ];
 
 export const BINARY_SENSORS = [
@@ -489,7 +500,22 @@ export async function startMqttDiscovery(
     // v0.11.0 — per-ISA-priority counts via priorityOf (severity+source → P1..P4).
     const priorityCount = (p: AlarmPriority) => alerts.filter((a) => priorityOf(a) === p).length;
     const kwh1 = (wh: number | null | undefined) => (wh == null ? null : Math.round(wh / 100) / 10);
+    // v0.15.19 — lighting posture: the runway model's forward question ("will
+    // we reach sunrise above reserve?") distilled into one enum that HA
+    // automations key on (heartbeat pulse, dimmer ceilings, exterior policy).
+    // Escalations apply immediately; de-escalations hold 15 min (hysteresis
+    // lives in the shared tracker).
+    const posture = lightingPostureTracker.update({
+      belowReserveFloor: belowReserveFloor(runway as Parameters<typeof belowReserveFloor>[0]),
+      hoursToReserve: (runway as { hoursToReserve: number | null }).hoursToReserve,
+      dawnMinSocPct: fc.minProjectedSoc,
+      reservePct: shp2?.projection.backupReserveSoc ?? null,
+      curtailmentActive: !!(curtailment as { active?: boolean }).active,
+      nowMs: Date.now(),
+    });
     return {
+      lighting_posture: posture.posture,
+      lighting_posture_reason: posture.reason,
       fleet_pv_watts: Math.round(fleetPv),
       panel_load_watts: Math.round(panelLoad),
       ac_import_watts: Math.round(acIn),

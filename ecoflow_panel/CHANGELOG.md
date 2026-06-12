@@ -3,6 +3,22 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.19 — 2026-06-11
+
+Intelligent lighting, Phase 1: the **lighting energy posture** sensor.
+
+- **New MQTT sensor `EcoFlow Lighting Posture`** — a single runway-derived enum the home's lighting automations key off: `surplus | normal | conserve | amber | red | critical`. Driven by the *forward* question ("will we reach sunrise above reserve?") rather than raw SoC — a 45 % pool at 21:00 with a clear forecast is fine; the same pool at 01:00 drawing 8 kW is not:
+  - `critical` — pool at/below the reserve floor right now (same condition as the v0.15.18 floor alarm)
+  - `red` — projected reserve crossing ≤ 4 h away
+  - `amber` — a crossing anywhere in the horizon, or projected dawn minimum grazing reserve + 5 %
+  - `conserve` — projected dawn minimum getting thin (< 35 %)
+  - `surplus` — PV curtailment active (energy going unharvested; run freely)
+  - `normal` — dawn minimum comfortably above reserve
+- **Asymmetric hysteresis**: escalation applies immediately (safety first); de-escalation only after the calmer posture has held **15 minutes**, so a cloud edge or compressor cycle can't make the house breathe up and down. A companion diagnostic sensor publishes the human-readable reason ("reserve crossing in 3.2h").
+- **Publish-only by design.** The add-on never toggles a light. Actuation lives in Home Assistant automations gated by `input_boolean.lighting_postures_enabled` (one switch disables the whole system). Shipping alongside this release, in HA: a *heartbeat pulse* automation (on escalation to amber/red/critical, every lit dimmer dips −25 % and recovers, twice — the house itself tells you capacity is falling) and an *exterior policy* automation (decorative exterior lighting drops at `conserve`+).
+
+500/500 server tests pass (13 new: posture ladder bands, floor precedence, hysteresis hold/flap-reset, surplus↔normal swap).
+
 ## 0.15.18 — 2026-06-10
 
 All remaining log-audit defects corrected + the cheap wins, in one pass.
