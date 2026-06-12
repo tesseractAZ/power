@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
 import { computeAlerts, type Alert, type Severity } from './alerts.js';
 import {
@@ -258,6 +261,47 @@ export interface AlertMonitor {
   telemetry: () => AlertActionStats[];
 }
 
+/* ─── v0.15.21 — notified-state persistence across restarts ──────────────
+ * The startup-seed (`notified: firstRun`) only protects alerts visible on the
+ * FIRST tick. Learned/analytics alerts take ~1–2 min to warm after a boot, so
+ * an alert that was active-and-notified before a restart looked like a fresh
+ * rise once analytics warmed — observed Jun 12: the same "[Medium] Projected
+ * battery dip below reserve" push re-sent 100 s after a restart. Persist the
+ * notified set so a restart never re-pushes a still-active alert. */
+
+/** Entries older than this are dropped at load (the event is long over). */
+export const NOTIFY_STATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Learned alerts absent during this post-boot window are warm-up, not
+ *  recovery — hold their falling edge so a restart can't emit a premature
+ *  "Resolved" (observed 25 s after a boot, before analytics had warmed). */
+export const LEARNED_RESOLVE_GRACE_MS = 10 * 60 * 1000;
+
+export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string, number> {
+  const out = new Map<string, number>();
+  try {
+    if (!existsSync(path)) return out;
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    const cutoff = nowMs - NOTIFY_STATE_MAX_AGE_MS;
+    for (const [id, at] of Object.entries(raw)) {
+      if (typeof at === 'number' && at > cutoff) out.set(id, at);
+    }
+  } catch {
+    /* corrupt → start fresh */
+  }
+  return out;
+}
+
+export function saveNotifiedState(path: string, state: Map<string, number>): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(state)));
+    renameSync(tmp, path);
+  } catch {
+    /* best effort — losing this just risks one duplicate push after a crash */
+  }
+}
+
 export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log: (m: string) => void): AlertMonitor {
   let cfg = loadNotifyConfig();
   const tracked = new Map<string, TrackedAlert>();
@@ -268,6 +312,16 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   let sentSinceStart = 0;
   let firstRun = true;
   let lastDigestHour = -1;
+  const monitorStartMs = Date.now();
+
+  // v0.15.21 — notified-state persistence (see loadNotifiedState above).
+  const notifyStatePath =
+    process.env.NOTIFY_STATE_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'notify-state.json');
+  const persistedNotified = loadNotifiedState(notifyStatePath);
+  if (persistedNotified.size > 0) {
+    log(`notify: rehydrated ${persistedNotified.size} already-notified alert(s) from ${notifyStatePath}`);
+  }
+  const persistNotified = () => saveNotifiedState(notifyStatePath, persistedNotified);
 
   const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
   const DIGEST_HOUR = Number(process.env.NOTIFY_DIGEST_HOUR ?? 7);
@@ -650,7 +704,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // which made the chronic-noise rule blind to permanently-active
         // alerts (they never cleared, so never got counted).
         recordRise(a, now);
-        tracked.set(a.id, { alert: a, firstSeen: now, notified: firstRun });
+        // v0.15.21 — an alert already pushed before the last restart must not
+        // re-push when analytics warm-up makes it "rise" again post-boot.
+        const notifiedBeforeRestart = persistedNotified.has(a.id);
+        if (notifiedBeforeRestart && !firstRun) {
+          log(`notify: "${a.title}" was already notified before restart — suppressing duplicate`);
+        }
+        tracked.set(a.id, { alert: a, firstSeen: now, notified: firstRun || notifiedBeforeRestart });
         continue;
       }
       existing.alert = a;
@@ -666,6 +726,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         qualifies(a.severity, cfg.minSeverity)
       ) {
         existing.notified = true;
+        // v0.15.21 — record the push durably so a restart can't repeat it
+        // (queued-for-digest counts: the digest path will deliver it once).
+        persistedNotified.set(a.id, now);
+        persistNotified();
         // Quiet hours: critical always goes; warning/info gets queued for digest.
         const quiet = QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW);
         if (quiet && a.severity !== 'critical') {
@@ -691,6 +755,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // Falling edges — condition cleared
     for (const [id, t] of [...tracked.entries()]) {
       if (currentIds.has(id)) continue;
+      // v0.15.21 — learned/analytics alerts take ~1–2 min to warm after a
+      // boot; absence in the early ticks is warm-up, not recovery. Hold the
+      // falling edge through the grace window (the entry stays tracked and
+      // re-evaluates next tick) so a restart can't fire a premature
+      // "Resolved" — a genuine clear still resolves once the window passes.
+      if (t.alert.source === 'learned' && now - monitorStartMs < LEARNED_RESOLVE_GRACE_MS) continue;
       const duration = now - t.firstSeen;
       if (t.notified && cfg.notifyResolved && qualifies(t.alert.severity, cfg.minSeverity)) {
         await dispatch(t.alert, 'resolved');
@@ -713,6 +783,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // v0.13.2 — moved out of the debounce-gated block (see above).
       recordClear(t.alert, duration, now);
       tracked.delete(id);
+      // v0.15.21 — the event is over; forget its notified-state so a future
+      // genuine re-rise notifies again.
+      if (persistedNotified.delete(id)) persistNotified();
     }
 
     firstRun = false;

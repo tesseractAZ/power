@@ -185,6 +185,64 @@ test('computeRunway — sustained observed load above the curve pulls the crossi
   );
 });
 
+/* v0.15.21 — runway integrity fixes from the Jun 12 24h log review. */
+
+test('computeRunway — predicted EV sessions do NOT drive depletion alarms (false-red guard)', () => {
+  resetRunwayCache();
+  const now = Date.now();
+  // Observed: steady 1 kW. Curve: 1 kW base + a predicted 5 kW EV session in
+  // every hour (forecastLoadW carries base+EV, predictedEvLoadW marks the EV
+  // share — exactly how getDayForecast emits it). Pool: 30/60 kWh, 9 reserve.
+  // Pre-fix the sim believed 6 kW/h → crossing ≈ 3.5 h (the observed Jun 12
+  // 02:18Z false red). Post-fix the EV layer is stripped → ≈ 21 h.
+  const loadPts = Array.from({ length: 60 }, (_, i) => ({ ts: now - (60 - i) * 60_000, value: 1000 }));
+  const devices = fakeShp2({ backupFullCapWh: 60_000, backupRemainWh: 30_000, backupReserveSoc: 15 });
+  const fc = emptyForecast({
+    hours: Array.from({ length: 24 }, (_, i) => ({
+      ts: now + i * 3_600_000,
+      forecastPvW: 0,
+      forecastLoadW: 6000,
+      predictedEvLoadW: 5000,
+    })) as any,
+  });
+  const r = computeRunway(devices, mockRecorder({ panel_load: loadPts }), fc);
+  assert.equal(r.unavailable, null);
+  assert.ok(
+    r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
+    `speculative EV load must not pull the crossing in, got ${r.hoursToReserve}`,
+  );
+});
+
+test('computeRunway — degenerate (all-zero) load curve falls back to observed load, flagged', () => {
+  resetRunwayCache();
+  const now = Date.now();
+  // The post-boot worker race: every forecastLoadW is a finite 0. Pre-fix the
+  // sim trusted "the house draws 0 W" beyond the 4 blended anchor hours and
+  // published the healthy-no-depletion sentinel during a genuine deficit
+  // (observed live: 999 for 35–90 min after every restart). Post-fix the whole
+  // horizon runs on the observed 1 kW → crossing ≈ 21 h, and the projection
+  // carries loadModelDegraded for diagnostics.
+  const loadPts = Array.from({ length: 60 }, (_, i) => ({ ts: now - (60 - i) * 60_000, value: 1000 }));
+  const devices = fakeShp2({ backupFullCapWh: 60_000, backupRemainWh: 30_000, backupReserveSoc: 15 });
+  const r = computeRunway(devices, mockRecorder({ panel_load: loadPts }), runwayForecast(0));
+  assert.equal(r.unavailable, null);
+  assert.equal(r.loadModelDegraded, true);
+  assert.ok(r.hoursToReserve != null, 'a crossing MUST be projected on a degenerate curve + real load');
+  assert.ok(
+    r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
+    `expected ~21 h on the observed load, got ${r.hoursToReserve}`,
+  );
+});
+
+test('computeRunway — a real (plausible) curve is not flagged as degraded', () => {
+  resetRunwayCache();
+  const now = Date.now();
+  const loadPts = Array.from({ length: 60 }, (_, i) => ({ ts: now - (60 - i) * 60_000, value: 5000 }));
+  const devices = fakeShp2({ backupFullCapWh: 60_000, backupRemainWh: 30_000, backupReserveSoc: 15 });
+  const r = computeRunway(devices, mockRecorder({ panel_load: loadPts }), runwayForecast(1000));
+  assert.equal(r.loadModelDegraded, false);
+});
+
 test('computeRunway — lighter-than-modelled observed load never increases optimism', () => {
   resetRunwayCache();
   const now = Date.now();

@@ -112,3 +112,57 @@ test('buildIncidents — sorted by severity (critical first), then by alertCount
   assert.equal(inc[0].severity, 'critical');
   assert.equal(inc[0].alertCount, 2);
 });
+
+/* ─── v0.15.21 — notified-state persistence across restarts ──────────── */
+
+import { loadNotifiedState, saveNotifiedState, NOTIFY_STATE_MAX_AGE_MS } from '../src/alertMonitor.js';
+import { writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const tmpPaths: string[] = [];
+let seq = 0;
+function tmpState(): string {
+  const p = join(tmpdir(), `notify-state-${process.pid}-${seq++}.json`);
+  tmpPaths.push(p);
+  return p;
+}
+
+test('notify-state — round-trips notified alerts across a "restart"', () => {
+  const path = tmpState();
+  const now = Date.now();
+  const state = new Map([['forecast-runtime-dip', now - 60_000], ['soc-low-20', now - 5_000]]);
+  saveNotifiedState(path, state);
+  const loaded = loadNotifiedState(path, now);
+  assert.equal(loaded.size, 2);
+  assert.equal(loaded.get('forecast-runtime-dip'), now - 60_000);
+});
+
+test('notify-state — stale entries (> 24 h) are dropped at load', () => {
+  const path = tmpState();
+  const now = Date.now();
+  saveNotifiedState(path, new Map([
+    ['old-event', now - NOTIFY_STATE_MAX_AGE_MS - 1000],
+    ['fresh-event', now - 1000],
+  ]));
+  const loaded = loadNotifiedState(path, now);
+  assert.equal(loaded.size, 1);
+  assert.ok(loaded.has('fresh-event'));
+});
+
+test('notify-state — corrupt or missing files seed fresh, never throw', () => {
+  const missing = loadNotifiedState(join(tmpdir(), 'definitely-not-here.json'));
+  assert.equal(missing.size, 0);
+  const path = tmpState();
+  writeFileSync(path, '{broken json');
+  assert.equal(loadNotifiedState(path).size, 0);
+  const path2 = tmpState();
+  writeFileSync(path2, JSON.stringify({ weird: 'not-a-number' }));
+  assert.equal(loadNotifiedState(path2).size, 0);
+});
+
+test.after(() => {
+  for (const p of tmpPaths) {
+    try { rmSync(p, { force: true }); } catch { /* best effort */ }
+  }
+});

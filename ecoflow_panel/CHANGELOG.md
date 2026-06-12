@@ -3,6 +3,22 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.21 — 2026-06-11
+
+Runway integrity — every defect from the Jun 12 24-hour log review, corrected.
+
+**The false red (02:18Z) — speculative EV load no longer drives alarms.**
+The forecast folds the EV window-predictor's "the car usually charges tonight" sessions into its load curve (right for the planning/SoC view). The runway sim treated that speculation as **certain** load — on a night the Tesla never plugged in, the modelled draw roughly doubled (base ~5 kW + predicted EV ~6.9 kW) and the household got a false red voice alarm plus a 9.5-minute false red lighting posture. `computeRunway` now strips the `predictedEvLoadW` layer: depletion alarms are evidence-based. If the car IS charging, the observed-load anchor (v0.15.17) carries the real draw within one 60-second recompute.
+
+**The post-restart "999 / no depletion" blindness — two-layer fix.**
+After every restart the analytics worker could race the recorder and build the day forecast from ZERO `panel_load` rows; the sim then trusted a finite-but-empty load curve ("the house draws 0 W") and published the healthy-no-depletion sentinel for 35–90 minutes during a genuine overnight deficit — on Jun 12 this even de-escalated the lighting posture and auto-released the conservation event mid-night. Now: (1) a forecast whose load curve came back empty is **never cached** (rebuilt next call once the recorder is warm); (2) `computeRunway` has a degenerate-curve guard — a curve averaging under 50 W is data failure, and the whole horizon runs on the observed load instead (flagged as `loadModelDegraded` in `/api/runway`).
+
+**The silently-cleared alarm.** The runway-alarm re-arm warm-up widens 3 → 10 minutes: review evidence showed "projection recovered — re-armed" firing 4+ minutes after boots on those degenerate-curve 999s, wiping an active high alarm mid-event.
+
+**Restart notification churn.** The notified-alert set now persists to `/data/notify-state.json`: an alert that was already pushed before a restart can't re-push when analytics warm-up makes it "rise" again (observed: duplicate "[Medium] Projected battery dip" 100 s post-boot), and learned alerts absent during the first 10 minutes after boot are warm-up, not recovery — no more premature "Resolved" 25 s into a boot. Entries expire after 24 h; clears still forget state so genuine re-rises notify.
+
+511/511 server tests pass (6 new: phantom-EV guard, degenerate-curve fallback + flag, plausible-curve non-flag, notify-state round-trip/staleness/corruption).
+
 ## 0.15.20 — 2026-06-11
 
 Lighting posture survives restarts (caught live on the first evening).

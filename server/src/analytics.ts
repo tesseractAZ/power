@@ -1088,7 +1088,15 @@ export async function getDayForecast(
     deviceModels,
     soiling: weather ? computeSoiling(fleetPvByEpoch, wxByHour) : null,
   };
-  if (dpus.length > 0 && historyDays > 0) dayForecastCache = { ts: now, value };
+  // v0.15.21 — never CACHE a forecast whose load curve came back empty: the
+  // post-boot analytics worker can race the recorder and read zero panel_load
+  // rows, and a cached all-zero curve then starves computeRunway (and the SoC
+  // projection) for the full 30-min TTL — observed live as 35–90 min of
+  // "999 / no depletion" runway blindness after every restart. Serve the value
+  // (callers still get PV/weather) but rebuild on the next request.
+  const loadCurveEmpty = !!shp2 && loadRes.spanMs === 0;
+  if (loadCurveEmpty) log('forecast: load curve empty (recorder not warm?) — NOT caching, will rebuild next call');
+  if (dpus.length > 0 && historyDays > 0 && !loadCurveEmpty) dayForecastCache = { ts: now, value };
   return value;
 }
 
@@ -1716,6 +1724,10 @@ const RUNWAY_TTL_MS = 60 * 1000;                // recompute at most once per mi
 // v0.15.17 — how many leading sim hours are anchored to the observed load
 // (decaying max() blend into the day-of-week curve; see computeRunway).
 const RUNWAY_BLEND_HOURS = 4;
+// v0.15.21 — a forecast load curve averaging below this is data failure (an
+// occupied home idles ≥ ~300 W), not a real model. See the degenerate-curve
+// guard in computeRunway.
+const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 
 export interface RunwayProjection {
   generatedAt: number;
@@ -1731,6 +1743,9 @@ export interface RunwayProjection {
   loadHorizonKwh: number;
   horizonHours: number;
   unavailable: string | null;
+  /** v0.15.21 — true when the forecast load curve was implausibly empty and the
+   *  whole horizon ran on the observed load instead (post-boot worker race). */
+  loadModelDegraded: boolean;
 }
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
@@ -1752,6 +1767,7 @@ const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjectio
   loadHorizonKwh: 0,
   horizonHours: 0,
   unavailable: reason,
+  loadModelDegraded: false,
   ...extra,
 });
 
@@ -1838,11 +1854,37 @@ export function computeRunway(
       // flatly contradicted the forecast's own never-empty projection for the same
       // horizon. Fall back to the trailing-hour average only when a forecast hour
       // carries no modelled load.
-      loadByHour.push((Number.isFinite(h.forecastLoadW) ? h.forecastLoadW : loadAvgWatts) / 1000);
+      // v0.15.21 — strip the PREDICTED-EV layer from the alarm path. The forecast
+      // folds computeEvWindowPrediction's speculative sessions into forecastLoadW
+      // (right for the planning/SoC view) — but this sim treated "the car usually
+      // charges tonight" as certain load, roughly DOUBLING the modelled draw on
+      // nights the EV never plugged in (observed live Jun 12 02:18Z: base ~5 kW +
+      // predicted EV ~6.9 kW → a false red voice alarm to the household). If the
+      // car IS charging, the observed-load anchor below carries the real draw and
+      // the 60 s recompute keeps it current; depletion ALARMS stay evidence-based.
+      loadByHour.push(
+        (Number.isFinite(h.forecastLoadW)
+          ? Math.max(0, h.forecastLoadW - (h.predictedEvLoadW ?? 0))
+          : loadAvgWatts) / 1000,
+      );
     }
   }
   while (pvByHour.length < RUNWAY_HORIZON_HOURS) pvByHour.push(0);
   while (loadByHour.length < RUNWAY_HORIZON_HOURS) loadByHour.push(loadAvgWatts / 1000);
+
+  const loadAvgKw = loadAvgWatts / 1000;
+
+  // v0.15.21 — degenerate-curve guard. A post-boot analytics worker can race
+  // the recorder and build the day forecast from ZERO panel_load rows: every
+  // forecastLoadW comes back a finite 0, the sim trusts "the house draws 0 W",
+  // and the projection publishes the healthy-no-depletion sentinel during a
+  // genuine overnight deficit (observed live: 999 for 35–90 min after each
+  // restart while the pool fell ~5 %/h, with only the 4 blended anchor hours
+  // carrying any load). No real occupied home averages < 50 W — treat such a
+  // curve as data failure and run the whole horizon on the observed load.
+  const curveMeanKw = loadByHour.reduce((a, b) => a + b, 0) / loadByHour.length;
+  const loadModelDegraded = curveMeanKw < LOAD_CURVE_MIN_PLAUSIBLE_KW;
+  if (loadModelDegraded) loadByHour.fill(loadAvgKw);
 
   // v0.15.17 — anchor the sim's near-term hours to the OBSERVED load. The
   // day-of-week curve (v0.14.0) prevents transient-spike alarmism, but it also
@@ -1854,7 +1896,6 @@ export function computeRunway(
   // a decaying blend of the observed average into the curve (max(), so a
   // lighter-than-modelled day never becomes MORE optimistic, and a brief
   // burst still cannot dominate the far horizon — it decays out by hour 4).
-  const loadAvgKw = loadAvgWatts / 1000;
   for (let h = 0; h < RUNWAY_BLEND_HOURS && h < loadByHour.length; h++) {
     const w = 1 - h / RUNWAY_BLEND_HOURS; // 1, .75, .5, .25
     loadByHour[h] = Math.max(loadByHour[h], loadAvgKw * w + loadByHour[h] * (1 - w));
@@ -1897,6 +1938,7 @@ export function computeRunway(
     loadHorizonKwh: round2(totalLoad),
     horizonHours: RUNWAY_HORIZON_HOURS,
     unavailable: null,
+    loadModelDegraded,
   };
   runwayCache = { ts: now, value };
   return value;

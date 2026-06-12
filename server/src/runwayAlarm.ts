@@ -53,8 +53,13 @@ const RANK: Record<AlarmPriority, number> = { low: 1, medium: 2, high: 3, critic
 
 // v0.15.18 — warm-up window in which a null projection must NOT re-arm the
 // alarm (post-boot projections are computed from half-warm inputs).
+// v0.15.21 — widened 3 → 10 min: the Jun 12 review caught "projection
+// recovered — re-armed" lines 4+ min after boots, on 999-sentinel projections
+// built from a degenerate post-boot load curve (an active high alarm was
+// silently cleared mid-event). The curve guard in computeRunway removes the
+// cause; this covers the first forecast-cache cycle as belt-and-braces.
 const PROCESS_START_MS = Date.now();
-const REARM_WARMUP_MS = 3 * 60 * 1000;
+const REARM_WARMUP_MS = 10 * 60 * 1000;
 
 /**
  * Map a runway projection to an alarm priority, or null when no depletion is
