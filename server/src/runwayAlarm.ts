@@ -117,7 +117,18 @@ export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority)
 interface PersistState {
   announcedPriority: AlarmPriority | null;
   lastAnnouncedAt: number | null;
+  /** v0.15.22 — when the classification first went calmer than the announced
+   *  tier (null = it hasn't). Persisted so a restart resumes the hold. */
+  calmerSinceMs?: number | null;
 }
+
+/** v0.15.22 — a calmer classification must hold this long before the latch
+ *  steps down. Without it, a projection hovering at a tier boundary (observed
+ *  Jun 12: hoursToEmpty oscillating around the 3.0 h critical threshold while
+ *  the EV charged) flapped critical→high→critical, and every re-cross
+ *  re-announced the SAME critical message — the household heard it 4+ times
+ *  in under an hour. Escalations are unaffected (always immediate). */
+export const ALARM_DEESCALATE_HOLD_MS = 10 * 60 * 1000;
 
 const STATE_PATH =
   process.env.BATTERY_RUNWAY_ALARM_PATH ??
@@ -140,6 +151,8 @@ export interface RunwayAlarmOptions {
   /** v0.15.18 — override the post-boot warm-up window during which a null
    *  projection must NOT re-arm the alarm (tests pass 0). */
   rearmWarmupMs?: number;
+  /** v0.15.22 — override the de-escalation hold (tests). */
+  deescalateHoldMs?: number;
   /** Optional logger. */
   log?: (msg: string) => void;
 }
@@ -168,12 +181,14 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
   const path = opts.statePath ?? STATE_PATH;
   const reannounceMs = opts.reannounceMs ?? RUNWAY_ALARM_REANNOUNCE_MS;
   const rearmWarmupMs = opts.rearmWarmupMs ?? REARM_WARMUP_MS;
+  const deescalateHoldMs = opts.deescalateHoldMs ?? ALARM_DEESCALATE_HOLD_MS;
   const log = opts.log ?? (() => {});
   const persisted = loadState(path);
   let announcedPriority: AlarmPriority | null = persisted?.announcedPriority ?? null;
   let lastAnnouncedAt: number | null = persisted?.lastAnnouncedAt ?? null;
+  let calmerSinceMs: number | null = persisted?.calmerSinceMs ?? null;
 
-  const persist = () => saveState(path, { announcedPriority, lastAnnouncedAt });
+  const persist = () => saveState(path, { announcedPriority, lastAnnouncedAt, calmerSinceMs });
 
   return {
     update(p) {
@@ -192,6 +207,7 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
         if (announcedPriority != null) {
           announcedPriority = null;
           lastAnnouncedAt = null;
+          calmerSinceMs = null;
           persist();
           log('runway-alarm: projection recovered — re-armed');
         }
@@ -218,11 +234,25 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
         }
         announcedPriority = desired;
         lastAnnouncedAt = now;
+        calmerSinceMs = null;
         persist();
       } else if (RANK[desired] < RANK[announcedPriority!]) {
-        // De-escalated but still in the band — track the lower priority (without
-        // re-announcing) so a later rise is correctly detected as an escalation.
-        announcedPriority = desired;
+        // v0.15.22 — de-escalate the latch only after the calmer tier has HELD.
+        // The old immediate step-down meant a projection hovering at a tier
+        // boundary (critical↔high around hoursToEmpty = 3.0 h) re-announced the
+        // same message on every re-cross. A genuine de-escalation (held the
+        // full window) still steps down, so a later real rise re-announces.
+        if (calmerSinceMs == null) {
+          calmerSinceMs = now;
+          persist();
+        } else if (now - calmerSinceMs >= deescalateHoldMs) {
+          announcedPriority = desired;
+          calmerSinceMs = null;
+          persist();
+        }
+      } else if (calmerSinceMs != null) {
+        // Back at the announced tier — the calm didn't hold; reset its clock.
+        calmerSinceMs = null;
         persist();
       }
     },
