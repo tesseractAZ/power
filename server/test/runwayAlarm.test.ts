@@ -77,13 +77,41 @@ test('re-arms on recovery, announces fresh on re-entry', () => {
   assert.deepEqual(fired, ['low', 'low']);
 });
 
-test('de-escalation is silent but tracked, so the next rise re-announces', () => {
+/* v0.15.22 — tier-boundary flapping must not repeat announcements. Observed
+ * live Jun 12: hoursToEmpty hovering around the 3.0 h critical threshold
+ * flapped critical↔high, and every re-cross re-announced the same critical
+ * message (the household heard it 4+ times in under an hour). The latch now
+ * de-escalates only after the calmer tier HOLDS deescalateHoldMs. */
+
+test('boundary flap within the hold window does NOT re-announce', () => {
   const fired: string[] = [];
-  const a = makeAlarm((p) => fired.push(p));
+  const statePath = join(tmpdir(), `runway-${process.pid}-${Date.now()}-${seq++}.json`);
+  tmpPaths.push(statePath);
+  const a = createRunwayAlarm({
+    onTrigger: (p) => fired.push(p), statePath, rearmWarmupMs: 0,
+    deescalateHoldMs: 10 * 60_000,
+  });
   a.update(proj({ generatedAt: 0, hoursToReserve: 1, hoursToEmpty: 2 })); // critical
-  a.update(proj({ generatedAt: 5 * 60_000, hoursToReserve: 20 })); // de-escalate to low → silent
+  a.update(proj({ generatedAt: 2 * 60_000, hoursToReserve: 2, hoursToEmpty: 3.1 })); // dips to high — hold starts
+  a.update(proj({ generatedAt: 4 * 60_000, hoursToReserve: 1.9, hoursToEmpty: 2.9 })); // back to critical — NO re-announce
+  a.update(proj({ generatedAt: 6 * 60_000, hoursToReserve: 2, hoursToEmpty: 3.1 })); // dips again
+  a.update(proj({ generatedAt: 8 * 60_000, hoursToReserve: 1.8, hoursToEmpty: 2.8 })); // back again
+  assert.deepEqual(fired, ['critical'], 'flapping at the tier boundary must announce exactly once');
+});
+
+test('a genuine de-escalation (held past the window) is tracked, so the next rise re-announces', () => {
+  const fired: string[] = [];
+  const statePath = join(tmpdir(), `runway-${process.pid}-${Date.now()}-${seq++}.json`);
+  tmpPaths.push(statePath);
+  const a = createRunwayAlarm({
+    onTrigger: (p) => fired.push(p), statePath, rearmWarmupMs: 0,
+    deescalateHoldMs: 10 * 60_000,
+  });
+  a.update(proj({ generatedAt: 0, hoursToReserve: 1, hoursToEmpty: 2 })); // critical
+  a.update(proj({ generatedAt: 5 * 60_000, hoursToReserve: 20 })); // calm begins (low)
+  a.update(proj({ generatedAt: 16 * 60_000, hoursToReserve: 20 })); // held 11 min → latch steps to low, silent
   assert.deepEqual(fired, ['critical']);
-  a.update(proj({ generatedAt: 10 * 60_000, hoursToReserve: 1, hoursToEmpty: 2 })); // re-escalate → critical
+  a.update(proj({ generatedAt: 20 * 60_000, hoursToReserve: 1, hoursToEmpty: 2 })); // genuine re-escalation
   assert.deepEqual(fired, ['critical', 'critical']);
 });
 

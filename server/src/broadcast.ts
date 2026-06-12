@@ -367,6 +367,26 @@ export function startBroadcastMonitor(
     (retryTimer as { unref?: () => void }).unref?.();
   };
 
+  // v0.15.22 — alarm-storm gates. The Jun 12 EV-charging-on-33% event fired 5
+  // audible broadcasts in 50 min from THREE independent sources (runway alarm,
+  // SoC alarm, alert pipeline); overlapping 30-70 s MA announcements then
+  // wedged Music Assistant into HTTP 500s and the household heard the same
+  // critical message 4+ times. Two gates, both bypassed by a genuine
+  // ESCALATION (a level higher than the last thing that actually played):
+  //   - identical spoken message within SAME_MESSAGE_GAP_MS → suppressed
+  //     (tier-boundary flapping repeats the exact same text);
+  //   - any same-or-lower level within SAME_LEVEL_GAP_MS → suppressed
+  //     (at most one non-escalating voice alarm per gap).
+  // Gates key off the last VERIFIED playback, so failed/unverified dispatches
+  // never block their own retries. Test/preview paths bypass (deliberate).
+  const SAME_LEVEL_GAP_MS = 2 * 60 * 1000;
+  const SAME_MESSAGE_GAP_MS = 10 * 60 * 1000;
+  const LEVEL_RANK: Record<ConditionLevel, number> = { green: 0, yellow: 1, red: 2 };
+  let lastPlayedAt = 0;
+  let lastPlayedLevel: ConditionLevel | null = null;
+  let lastPlayedMessage: string | null = null;
+  let stormSuppressedCount = 0;
+
   const supervised = isSupervised();
   if (!supervised) {
     log('broadcast: SUPERVISOR_TOKEN not set; running outside HA, broadcasts disabled');
@@ -452,12 +472,31 @@ export function startBroadcastMonitor(
   /**
    * Single broadcast: render → one MA call. No staggering, no settles.
    */
-  const runBroadcast = async (
+  const runBroadcastInner = async (
     level: ConditionLevel,
     message: string | null,
+    bypassStormGate: boolean,
   ): Promise<{ ok: boolean; errors: string[] }> => {
     if (!supervised) return { ok: false, errors: ['not supervised'] };
     if (cfg.targets.length === 0) return { ok: false, errors: ['no targets configured'] };
+
+    // v0.15.22 — storm gates (see constants above). Escalations always play.
+    if (!bypassStormGate && lastPlayedAt > 0) {
+      const since = Date.now() - lastPlayedAt;
+      const escalation = lastPlayedLevel == null || LEVEL_RANK[level] > LEVEL_RANK[lastPlayedLevel];
+      if (!escalation) {
+        if (message != null && message === lastPlayedMessage && since < SAME_MESSAGE_GAP_MS) {
+          stormSuppressedCount += 1;
+          log(`broadcast: ${level} suppressed — identical message played ${Math.round(since / 1000)}s ago (storm gate)`);
+          return { ok: false, errors: ['suppressed: identical message within gap'] };
+        }
+        if (since < SAME_LEVEL_GAP_MS) {
+          stormSuppressedCount += 1;
+          log(`broadcast: ${level} suppressed — last ${lastPlayedLevel} played ${Math.round(since / 1000)}s ago (storm gate)`);
+          return { ok: false, errors: ['suppressed: same-or-lower level within gap'] };
+        }
+      }
+    }
 
     const errors: string[] = [];
     const t0 = Date.now();
@@ -531,7 +570,14 @@ export function startBroadcastMonitor(
       errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
       scheduleBroadcastRetry(level, message, `suspiciously fast completion (${dt}ms)`);
     }
-    if (call.ok && errors.length === 0) retryAttempt = 0; // verified success resets the deferred-retry budget
+    if (call.ok && errors.length === 0) {
+      retryAttempt = 0; // verified success resets the deferred-retry budget
+      // v0.15.22 — storm gates key off VERIFIED playback only, so a failed or
+      // unverified dispatch never blocks its own deferred retries.
+      lastPlayedAt = Date.now();
+      lastPlayedLevel = level;
+      lastPlayedMessage = message;
+    }
     const renderTag = r.fromCache ? 'cached' : `rendered+${r.ttsRenderMs}ms`;
     if (errors.length === 0) {
       log(`broadcast: ${level} → ok in ${dt}ms (${cfg.targets.length} targets, ${renderTag}, ${r.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
@@ -543,6 +589,25 @@ export function startBroadcastMonitor(
     lastErrors = errors;
     persistStatus();
     return { ok: errors.length === 0, errors };
+  };
+
+  // v0.15.22 — single-flight: every broadcast (runway alarm, SoC alarm, alert
+  // pipeline, retries, tests) is serialized through one promise chain. A real
+  // MA announcement blocks 30-70 s; three sources firing within minutes used
+  // to OVERLAP play_announcement calls, which wedged Music Assistant into
+  // HTTP 500s ("Server got itself in trouble", observed Jun 12 04:12Z). Now
+  // a second request simply waits for the first playback to finish — and by
+  // then the storm gates above usually (correctly) absorb it.
+  let broadcastChain: Promise<unknown> = Promise.resolve();
+  const runBroadcast = (
+    level: ConditionLevel,
+    message: string | null,
+    bypassStormGate = false,
+  ): Promise<{ ok: boolean; errors: string[] }> => {
+    const run = () => runBroadcastInner(level, message, bypassStormGate);
+    const p = broadcastChain.then(run, run);
+    broadcastChain = p.catch(() => undefined);
+    return p;
   };
 
   const messageFor = (level: ConditionLevel, alerts: Alert[]): string | null => {
@@ -637,7 +702,8 @@ export function startBroadcastMonitor(
         level === 'red' ? `${priorityAnnouncementPrefix('critical')} Test broadcast. This is only a test.` :
         level === 'yellow' ? `${priorityAnnouncementPrefix('medium')} Test broadcast. This is only a test.` :
         'All clear. Test broadcast. This is only a test.';
-      const r = await runBroadcast(level, message);
+      // bypassStormGate — a test is operator-initiated and must always play.
+      const r = await runBroadcast(level, message, true);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       lastOutcome = r.ok ? 'success' : 'partial';

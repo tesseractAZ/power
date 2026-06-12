@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.22 — 2026-06-11
+
+Alarm-storm fix — same message no longer repeats 4+ times (caught live during tonight's real EV-charging-on-33% event).
+
+- **Tier-boundary flap silenced.** The runway-alarm latch de-escalated instantly, so a projection hovering at a tier boundary (tonight: `hoursToEmpty` oscillating around the 3.0 h critical threshold while the EV charged at 10 kW) flapped critical→high→critical — and every re-cross re-announced the SAME critical message. The latch now steps down only after the calmer tier holds **10 minutes** (escalations remain instant); a genuine de-escalation still re-arms the next rise.
+- **Broadcast storm gates.** Three independent audible sources (runway alarm, SoC alarm, alert pipeline) fired 5 broadcasts in 50 minutes. Two gates now apply, both bypassed by a genuine escalation: an identical spoken message within 10 min is suppressed, and any same-or-lower level within 2 min is suppressed. Gates key off *verified playback*, so failed dispatches never block their own retries; the operator test button bypasses.
+- **Single-flight announcements.** Overlapping `play_announcement` calls (each blocks 30–70 s) wedged Music Assistant into HTTP 500s ("Server got itself in trouble", 04:12Z). All broadcasts now serialize through one queue — MA gets exactly one announcement at a time.
+
+512/512 server tests pass (boundary-flap announces exactly once; held de-escalation re-arms re-announcement).
+
 ## 0.15.21 — 2026-06-11
 
 Runway integrity — every defect from the Jun 12 24-hour log review, corrected.
