@@ -26,6 +26,10 @@
  * Home Assistant — this module only ever computes and publishes.
  */
 
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { config } from './config.js';
+
 export type LightingPosture = 'surplus' | 'normal' | 'conserve' | 'amber' | 'red' | 'critical';
 
 /** Severity rank for hysteresis (surplus ranks WITH normal — it is not a
@@ -101,16 +105,75 @@ export interface PostureTracker {
   reset(): void;
 }
 
+/* ─── v0.15.20 — persistence across restarts ─────────────────────────────
+ * The tracker was process-local, so an add-on restart mid-event flapped the
+ * published posture (amber → normal-on-a-half-warm-forecast → amber within a
+ * couple of minutes; observed live Jun 11 19:28 local). The HA consumers are
+ * escalation-edge-triggered, so a flap fires a spurious restore-then-reclamp
+ * (and a heartbeat pulse) at the family. Persisting {posture, changedAtMs,
+ * calmerSinceMs} means a restart resumes the HELD posture: a half-warm calmer
+ * reading is just a de-escalation candidate that has to survive the 15-min
+ * hold — by which time the forecast is warm and the flap never reaches HA. */
+interface PersistedPosture {
+  posture: LightingPosture;
+  reason: string;
+  changedAtMs: number;
+  calmerSinceMs: number | null;
+  savedAtMs: number;
+}
+
+/** Persisted state older than this is discarded (the event is likely over). */
+export const PERSIST_MAX_AGE_MS = 60 * 60 * 1000;
+
+function loadPersisted(path: string): PersistedPosture | null {
+  try {
+    if (!existsSync(path)) return null;
+    const s = JSON.parse(readFileSync(path, 'utf8')) as PersistedPosture;
+    if (typeof s?.posture !== 'string' || !(s.posture in POSTURE_RANK)) return null;
+    if (typeof s.savedAtMs !== 'number' || Date.now() - s.savedAtMs > PERSIST_MAX_AGE_MS) return null;
+    return s;
+  } catch {
+    return null; // corrupt → start fresh
+  }
+}
+
+function savePersisted(path: string, s: Omit<PersistedPosture, 'savedAtMs'>): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ ...s, savedAtMs: Date.now() } satisfies PersistedPosture));
+    renameSync(tmp, path);
+  } catch {
+    /* best effort — losing this just risks one restart flap */
+  }
+}
+
 /**
  * Stateful wrapper adding the asymmetric hysteresis: escalations apply on the
  * next update; de-escalations only after the calmer raw posture has held for
- * `holdMs`.
+ * `holdMs`. With a `statePath` the tracker survives restarts (writes only on
+ * posture changes and hold-window transitions, not every tick — SD-card diet).
  */
-export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS): PostureTracker {
+export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS, statePath?: string): PostureTracker {
   let current: PostureResult | null = null;
   let changedAtMs = 0;
   /** When the raw posture first went calmer than `current` (null = it hasn't). */
   let calmerSinceMs: number | null = null;
+
+  if (statePath != null) {
+    const persisted = loadPersisted(statePath);
+    if (persisted != null) {
+      current = { posture: persisted.posture, reason: persisted.reason };
+      changedAtMs = persisted.changedAtMs;
+      calmerSinceMs = persisted.calmerSinceMs;
+    }
+  }
+
+  const persist = () => {
+    if (statePath != null && current != null) {
+      savePersisted(statePath, { ...current, changedAtMs, calmerSinceMs });
+    }
+  };
 
   return {
     update(i) {
@@ -119,23 +182,35 @@ export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS): PostureTracke
         current = raw;
         changedAtMs = i.nowMs;
         calmerSinceMs = null;
+        persist();
       } else if (POSTURE_RANK[raw.posture] > POSTURE_RANK[current.posture]) {
         // Escalate immediately.
         current = raw;
         changedAtMs = i.nowMs;
         calmerSinceMs = null;
+        persist();
       } else if (POSTURE_RANK[raw.posture] < POSTURE_RANK[current.posture]) {
+        const startedHold = calmerSinceMs == null;
         if (calmerSinceMs == null) calmerSinceMs = i.nowMs;
         if (i.nowMs - calmerSinceMs >= holdMs) {
           current = raw;
           changedAtMs = i.nowMs;
           calmerSinceMs = null;
+          persist();
+        } else if (startedHold) {
+          // Hold the sterner posture (original reason); record the hold start
+          // so a restart mid-hold resumes the countdown instead of resetting it.
+          persist();
         }
-        // else: hold the sterner posture, but keep its original reason.
       } else {
         // Same rank — adopt the fresh reason (and normal↔surplus swaps freely).
+        // The reason refreshes every tick, so don't write it to disk each time;
+        // a same-rank swap (normal↔surplus) does change the posture → persist.
+        const swapped = raw.posture !== current.posture;
+        const holdCleared = calmerSinceMs != null;
         current = raw;
         calmerSinceMs = null;
+        if (swapped || holdCleared) persist();
       }
       return { ...current, changedAtMs };
     },
@@ -147,5 +222,10 @@ export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS): PostureTracke
   };
 }
 
+/** Where the process-wide tracker persists (mirrors runwayAlarm's pattern). */
+const STATE_PATH =
+  process.env.LIGHTING_POSTURE_STATE_PATH ??
+  resolve(process.cwd(), config.dbPath, '..', 'lighting-posture.json');
+
 /** Process-wide tracker — the MQTT publisher and /api/ha-state share one. */
-export const lightingPostureTracker: PostureTracker = createPostureTracker();
+export const lightingPostureTracker: PostureTracker = createPostureTracker(DEESCALATE_HOLD_MS, STATE_PATH);

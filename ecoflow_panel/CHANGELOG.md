@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.20 — 2026-06-11
+
+Lighting posture survives restarts (caught live on the first evening).
+
+- **The posture tracker now persists** `{posture, changedAtMs, calmerSinceMs}` to `/data/lighting-posture.json` (same pattern as the runway alarm). The v0.15.19 tracker was process-local, so an add-on restart mid-event flapped the published posture — observed live Jun 11 19:28: restart → `normal` on a half-warm forecast → back to `amber` 30 s later. The HA-side consumers are escalation-edge-triggered, so a mid-event flap would fire a spurious restore-then-reclamp (and a heartbeat pulse) at the household. With persistence, a restart resumes the HELD posture: the half-warm calm is just a de-escalation candidate that must survive the 15-minute hold — by which time the forecast is warm again and the flap never reaches HA. The de-escalation countdown itself also survives restarts (mid-hold `calmerSinceMs` is restored).
+- Persisted state older than 1 h is discarded (event long over); corrupt/unknown files seed fresh; same-rank reason refreshes don't rewrite the file every tick (SD-card diet — writes happen only on posture changes and hold-window transitions).
+- 505/505 server tests pass (5 new persistence tests).
+
 ## 0.15.19 — 2026-06-11
 
 Intelligent lighting, Phase 1: the **lighting energy posture** sensor.
