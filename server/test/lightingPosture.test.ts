@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   rawPosture,
   createPostureTracker,
   DEESCALATE_HOLD_MS,
+  PERSIST_MAX_AGE_MS,
   type PostureInputs,
 } from '../src/lightingPosture.js';
 
@@ -134,4 +138,82 @@ test('tracker — reset() forgets state so the next update seeds fresh', () => {
   t.reset();
   // Without reset this calm reading would still be inside the hold window.
   assert.equal(t.update(inputs({ dawnMinSocPct: 60, nowMs: MIN })).posture, 'normal');
+});
+
+/* ─── v0.15.20 — persistence across restarts ─────────────────────────── */
+
+const tmpPaths: string[] = [];
+let seq = 0;
+function tmpState(): string {
+  const p = join(tmpdir(), `posture-${process.pid}-${seq++}.json`);
+  tmpPaths.push(p);
+  return p;
+}
+
+test('persistence — a restart resumes the held posture (no flap on half-warm calm)', () => {
+  const path = tmpState();
+  const now = Date.now(); // persistence freshness uses wall-clock
+  const t1 = createPostureTracker(DEESCALATE_HOLD_MS, path);
+  assert.equal(t1.update(inputs({ hoursToReserve: 9, dawnMinSocPct: 12, nowMs: now })).posture, 'amber');
+  // "Restart": a fresh tracker on the same path, fed the half-warm 'normal'
+  // the live system produced — it must stay amber (de-escalation hold).
+  const t2 = createPostureTracker(DEESCALATE_HOLD_MS, path);
+  assert.equal(t2.update(inputs({ dawnMinSocPct: 60, nowMs: now + 2 * MIN })).posture, 'amber');
+  // Once the calm has genuinely held, it relaxes as usual.
+  assert.equal(
+    t2.update(inputs({ dawnMinSocPct: 60, nowMs: now + 2 * MIN + DEESCALATE_HOLD_MS })).posture,
+    'normal',
+  );
+});
+
+test('persistence — the de-escalation countdown survives a restart mid-hold', () => {
+  const path = tmpState();
+  const now = Date.now();
+  const t1 = createPostureTracker(DEESCALATE_HOLD_MS, path);
+  t1.update(inputs({ hoursToReserve: 3, nowMs: now })); // red
+  t1.update(inputs({ dawnMinSocPct: 60, nowMs: now + 5 * MIN })); // calm begins (persisted)
+  const t2 = createPostureTracker(DEESCALATE_HOLD_MS, path);
+  // 15 min after the calm BEGAN — not after the restart — it relaxes.
+  assert.equal(
+    t2.update(inputs({ dawnMinSocPct: 60, nowMs: now + 5 * MIN + DEESCALATE_HOLD_MS })).posture,
+    'normal',
+  );
+});
+
+test('persistence — stale state (> 1 h) is discarded; tracker seeds fresh', () => {
+  const path = tmpState();
+  writeFileSync(path, JSON.stringify({
+    posture: 'critical', reason: 'old event', changedAtMs: 0, calmerSinceMs: null,
+    savedAtMs: Date.now() - PERSIST_MAX_AGE_MS - 1,
+  }));
+  const t = createPostureTracker(DEESCALATE_HOLD_MS, path);
+  assert.equal(t.update(inputs({ dawnMinSocPct: 60, nowMs: Date.now() })).posture, 'normal');
+});
+
+test('persistence — corrupt or unknown-posture state is discarded', () => {
+  const path = tmpState();
+  writeFileSync(path, '{not json');
+  const t = createPostureTracker(DEESCALATE_HOLD_MS, path);
+  assert.equal(t.update(inputs({ dawnMinSocPct: 60, nowMs: Date.now() })).posture, 'normal');
+  const path2 = tmpState();
+  writeFileSync(path2, JSON.stringify({ posture: 'panic', reason: 'x', changedAtMs: 0, calmerSinceMs: null, savedAtMs: Date.now() }));
+  const t2 = createPostureTracker(DEESCALATE_HOLD_MS, path2);
+  assert.equal(t2.update(inputs({ dawnMinSocPct: 60, nowMs: Date.now() })).posture, 'normal');
+});
+
+test('persistence — same-rank reason refreshes do NOT rewrite the file each tick', () => {
+  const path = tmpState();
+  const now = Date.now();
+  const t = createPostureTracker(DEESCALATE_HOLD_MS, path);
+  t.update(inputs({ hoursToReserve: 9, dawnMinSocPct: 12, nowMs: now })); // amber, persisted
+  const before = readFileSync(path, 'utf8');
+  t.update(inputs({ hoursToReserve: 8.5, dawnMinSocPct: 12, nowMs: now + MIN })); // same rank, new reason
+  const after = readFileSync(path, 'utf8');
+  assert.equal(before, after);
+});
+
+test.after(() => {
+  for (const p of tmpPaths) {
+    try { rmSync(p, { force: true }); } catch { /* best effort */ }
+  }
 });
