@@ -75,6 +75,7 @@ import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
 import { renderAnnouncement, pruneRenderCache, type AnnouncementLevel } from './audioRenderer.js';
 import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage } from './ttsService.js';
+import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate + per-priority preview.
 // A priority turned off on the Alert Settings page must never trigger the
 // chime/broadcast, so we filter silenced-priority alerts out before deriving
@@ -133,11 +134,20 @@ export function loadBroadcastConfig(): BroadcastConfig {
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0 && s.startsWith('media_player.'));
+  // v0.18.0 — the env vars set the BASELINE; the /data runtime override (set
+  // live from the UI) wins when present. We re-read it here on every call, and
+  // loadBroadcastConfig is itself re-read each tick + per broadcast, so a UI
+  // change takes effect within one tick with no restart.
+  const envEnabled = process.env.BROADCAST_ENABLED === 'true' || process.env.BROADCAST_ENABLED === '1';
+  const envVolume = clamp01(Number(process.env.BROADCAST_VOLUME ?? 0.5));
+  const ov = getBroadcastRuntimeConfig();
+  const enabled = ov.enabled != null ? ov.enabled : envEnabled;
+  const volume = ov.volume != null ? clamp01(ov.volume) : envVolume;
   return {
-    enabled: process.env.BROADCAST_ENABLED === 'true' || process.env.BROADCAST_ENABLED === '1',
+    enabled,
     targets,
     audioBase: (process.env.BROADCAST_AUDIO_BASE || 'http://homeassistant.local:8787').replace(/\/$/, ''),
-    volume: clamp01(Number(process.env.BROADCAST_VOLUME ?? 0.5)),
+    volume,
     minSeverity: (process.env.BROADCAST_MIN_SEVERITY ?? 'critical') === 'warning' ? 'warning' : 'critical',
     quietHours: parseQuietHours(process.env.BROADCAST_QUIET_HOURS ?? ''),
     wyomingHost: process.env.BROADCAST_WYOMING_HOST || 'core-piper',
@@ -147,10 +157,12 @@ export function loadBroadcastConfig(): BroadcastConfig {
     repeat: clampIntEnv(process.env.BROADCAST_REPEAT, 2, 1, 3),
     repeatGapMs: clampIntEnv(process.env.BROADCAST_REPEAT_GAP_MS, 1500, 0, 5000),
     chimeGapMs: clampIntEnv(process.env.BROADCAST_CHIME_GAP_MS, 1000, 0, 5000),
-    announceVolume: resolveAnnounceVolume(
-      process.env.BROADCAST_ANNOUNCE_VOLUME,
-      clamp01(Number(process.env.BROADCAST_VOLUME ?? 0.5)),
-    ),
+    // CRITICAL: announceVolume (0..100) is what actually reaches the speakers —
+    // cfg.volume is never sent. Feed the EFFECTIVE (override-aware) volume into
+    // the announce-volume resolver so the UI slider is audible. An explicit
+    // BROADCAST_ANNOUNCE_VOLUME (a number or 'off'/'standing') still wins, by
+    // design — that advanced reliability override pins the announce volume.
+    announceVolume: resolveAnnounceVolume(process.env.BROADCAST_ANNOUNCE_VOLUME, volume),
     usePreAnnounce: process.env.BROADCAST_USE_PRE_ANNOUNCE === 'true' || process.env.BROADCAST_USE_PRE_ANNOUNCE === '1',
     announceRetries: clampIntEnv(process.env.BROADCAST_ANNOUNCE_RETRIES, 1, 0, 3),
   };
@@ -308,6 +320,13 @@ export function startBroadcastMonitor(
   opts: BroadcastMonitorOpts,
 ): BroadcastMonitor {
   let cfg = loadBroadcastConfig();
+  // v0.18.0 — keep the closure `cfg` coherent the instant a runtime override is
+  // written (updateBroadcastRuntimeConfig notifies synchronously), so
+  // broadcast.config() — consumed by /api/broadcast/config + /api/broadcast/
+  // status — reflects a UI enable/volume toggle immediately, not at the next
+  // ~10s tick. The audible path already reloads per tick/broadcast; this is for
+  // read coherence.
+  const offRuntimeConfig = onBroadcastRuntimeConfigChange(() => { cfg = loadBroadcastConfig(); });
   let prevLevel: ConditionLevel | null = null;
   let prevCrit = 0;
   let firstTick = true;
@@ -371,6 +390,18 @@ export function startBroadcastMonitor(
     retryTimer = setTimeout(() => {
       retryTimer = null;
       if (stopped) return;
+      // v0.18.0 — a deferred retry is an AUTOMATIC condition-transition
+      // broadcast, so it must honour the same enable gate as tick(). With
+      // BROADCAST_ENABLED now live-mutable from the UI, an operator who disables
+      // broadcasts must not hear a retry that was armed before they disabled.
+      // (test()/preview() are explicit operator actions and intentionally
+      // bypass this — they call runBroadcast directly, not via this timer.)
+      cfg = loadBroadcastConfig();
+      if (!cfg.enabled) {
+        log('broadcast: deferred retry cancelled — broadcasts disabled');
+        retryAttempt = 0;
+        return;
+      }
       void runBroadcast(level, message);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
@@ -871,6 +902,7 @@ export function startBroadcastMonitor(
       stopped = true;
       clearInterval(tickInterval);
       clearInterval(pruneInterval);
+      offRuntimeConfig();
     },
   };
 }

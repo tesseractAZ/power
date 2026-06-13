@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.18.0 — 2026-06-13
+
+Live broadcast controls — turn audible broadcasts on/off and set their volume without an add-on restart (backend). The on-page controls land in the upcoming unified Alert Console.
+
+- **Runtime override, env stays the baseline.** The add-on options (`BROADCAST_ENABLED` / `BROADCAST_VOLUME`) still set the boot default; a new `/data` override (set live from the UI) wins at runtime and persists across restarts. Mirrors the existing alert-settings layer exactly (atomic temp+rename writes, in-memory cache). Because the broadcast config is re-read every ~10 s tick and per broadcast, a change takes effect within one tick — no restart.
+- **Volume that actually changes the volume.** The override is fed into the announce-volume the speakers actually receive (not just the abstract master level), so the slider is audible. An explicit `BROADCAST_ANNOUNCE_VOLUME` (a pinned number, or `off`/`standing` for the ecobee-reliability mode) still wins — the API surfaces both so the UI can disclose when the slider is informational.
+- **Disable means disable — including in-flight retries.** A runtime disable stops new condition-transition broadcasts within one tick, and now also **cancels a pending deferred retry** (the 30/90/180 s verification-retry from v0.15.18) that was armed before the operator disabled — so you can't silence broadcasts and still hear one fire minutes later. Explicit Test/Preview actions intentionally still work while disabled.
+- **New endpoints:** `GET /api/broadcast/config` (effective + override + env baseline) and `PUT /api/broadcast/config` (write-gated + rate-limited). The storm gates, single-flight, quiet-hours, and the broadcast target scope are untouched.
+
+556/556 server tests pass (8 new, incl. the critical "volume override reaches announceVolume" and the change-notification coherence checks). Adversarially reviewed (two lenses) → ship after fixing the deferred-retry gate + response-coherence + a non-object-body guard.
+
 ## 0.17.0 — 2026-06-13
 
 Built-in tone library — 16 named, selectable system chimes (backend). Lays the groundwork for picking the best alert tone per level; the picker UI lands in a follow-up.
