@@ -124,6 +124,25 @@ export interface RenderOptions {
    * block. Part of the cache key. Default/undefined → 1000.
    */
   chimeGapMs?: number;
+  /**
+   * v0.15.23 — absolute path to the chime WAV to prepend, OVERRIDING the
+   * built-in klaxon at klaxonDir/KLAXON_FOR_LEVEL[level]. The operator's Alert
+   * Console assigns a custom tone per level (chimeConfig.resolveChime). The
+   * file MUST be the renderer's format (22050/16/mono — chimeStore normalizes
+   * every upload to it). When the custom file is unreadable, the renderer
+   * FALLS BACK to the built-in klaxon for the level rather than failing the
+   * whole announcement (never a silent alarm). Undefined → built-in klaxon.
+   */
+  chimePath?: string;
+  /**
+   * v0.15.23 — cache-key identity for the resolved chime. The render cache key
+   * keys off `level`, not the chime file, so a tone swap would serve a STALE
+   * render without this. Pass BUILTIN_CHIME_TAG for the klaxon (component
+   * omitted → byte-identical to pre-feature keys) or the custom tone's content
+   * id otherwise. MUST match what chimeConfig.resolveChime returns alongside
+   * chimePath, so the rendered audio and the cache key stay in lock-step.
+   */
+  chimeTag?: string;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
 }
@@ -150,11 +169,18 @@ interface WavHeader {
   dataLength: number;
 }
 
-const KLAXON_FOR_LEVEL: Record<AnnouncementLevel, string> = {
+export const KLAXON_FOR_LEVEL: Record<AnnouncementLevel, string> = {
   red: 'red-alert.wav',
   yellow: 'yellow-alert.wav',
   green: 'all-clear.wav',
 };
+
+/** v0.15.23 — cache-key tag for the built-in klaxon. A single fixed literal so
+ *  builtin cache keys are BYTE-IDENTICAL to the pre-feature key string (the tag
+ *  component is omitted entirely for this value — see renderCacheKey), giving
+ *  zero cache churn for operators who never assign a custom tone. Kept in sync
+ *  with chimeConfig.BUILTIN_TAG (duplicated here to avoid an import cycle). */
+export const BUILTIN_CHIME_TAG = 'builtin';
 
 /**
  * v0.12.1 — a frame-aligned, zero-filled PCM buffer of `leadMs` milliseconds of
@@ -213,7 +239,11 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // and lead-in are part of the key so changing either busts the cache.
   // v0.15.4 — single source of truth for the cache key (shared with the exported
   // renderCacheKey, which callers use to predict the served filename).
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs);
+  // v0.15.23 — resolve the chime (custom tone or built-in klaxon) + its cache
+  // tag. The tag is folded into the key so swapping a tone busts the cache; the
+  // built-in tag is OMITTED from the key so default users see zero cache churn.
+  const chimeTag = opts.chimeTag ?? BUILTIN_CHIME_TAG;
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -227,13 +257,26 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     }
   }
 
-  // Load klaxon
-  const klaxonPath = resolve(klaxonDir, KLAXON_FOR_LEVEL[level]);
+  // Load the chime. v0.15.23 — a custom tone (opts.chimePath) overrides the
+  // built-in klaxon, but a read failure FALLS BACK to the built-in for the
+  // level rather than failing the announcement — a missing/corrupt tone must
+  // never silence an alarm on a live power system.
+  const builtinPath = resolve(klaxonDir, KLAXON_FOR_LEVEL[level]);
+  const klaxonPath = opts.chimePath ?? builtinPath;
   let klaxonWav: Buffer;
   try {
     klaxonWav = await readFile(klaxonPath);
   } catch (e: any) {
-    return { ok: false, error: `klaxon read failed: ${e?.message ?? e}` };
+    if (opts.chimePath && klaxonPath !== builtinPath) {
+      log(`audioRenderer: custom chime unreadable (${e?.message ?? e}) — falling back to built-in klaxon`);
+      try {
+        klaxonWav = await readFile(builtinPath);
+      } catch (e2: any) {
+        return { ok: false, error: `klaxon read failed (builtin fallback): ${e2?.message ?? e2}` };
+      }
+    } else {
+      return { ok: false, error: `klaxon read failed: ${e?.message ?? e}` };
+    }
   }
   const klaxonHeader = parseWavHeader(klaxonWav);
   if (!klaxonHeader.ok) {
@@ -432,6 +475,7 @@ export function renderCacheKey(
   announceRepeat?: number,
   repeatGapMs?: number,
   chimeGapMs?: number,
+  chimeTag?: string,
 ): string {
   // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
   // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
@@ -444,8 +488,15 @@ export function renderCacheKey(
   const gapMs = Math.max(0, Math.round(repeatGapMs ?? 0));
   // v0.15.15 — post-chime silence gap is part of the key.
   const cgMs = Math.max(0, Math.round(chimeGapMs ?? 1000));
+  // v0.15.23 — custom-chime identity. The component is OMITTED for the built-in
+  // klaxon (BUILTIN_CHIME_TAG) so default users' keys are byte-identical to the
+  // pre-feature string (zero cache churn); a custom tone's content id makes the
+  // key distinct so swapping a tone re-renders. Applied identically here and at
+  // the renderAnnouncement call site (both pass opts.chimeTag ?? BUILTIN_CHIME_TAG).
+  const tag = chimeTag ?? BUILTIN_CHIME_TAG;
+  const tagPart = tag === BUILTIN_CHIME_TAG ? '' : `|k${tag}`;
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }

@@ -72,7 +72,8 @@ import type { Alert } from './alerts.js';
 import { config } from './config.js';
 import { callHaService, isSupervised, probeService, getEntityState } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
-import { renderAnnouncement, pruneRenderCache } from './audioRenderer.js';
+import { renderAnnouncement, pruneRenderCache, type AnnouncementLevel } from './audioRenderer.js';
+import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage } from './ttsService.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate + per-priority preview.
 // A priority turned off on the Alert Settings page must never trigger the
@@ -501,11 +502,17 @@ export function startBroadcastMonitor(
     const errors: string[] = [];
     const t0 = Date.now();
 
-    // 1. Render combined announcement WAV (cache-aware).
+    // 1. Render combined announcement WAV (cache-aware). v0.15.23 — resolve the
+    // operator-assigned chime for this level (custom tone or built-in klaxon);
+    // resolveChime falls back to the built-in when a custom file is missing.
+    const chime = resolveChime(level as AnnouncementLevel, opts.klaxonDir);
+    if (chime.fellBack) log(`broadcast: assigned custom chime for ${level} missing — using built-in klaxon`);
     const r = await renderAnnouncement({
       level,
       message,
       klaxonDir: opts.klaxonDir,
+      chimePath: chime.path,
+      chimeTag: chime.tag,
       cacheDir: opts.cacheDir,
       wyomingHost: cfg.wyomingHost,
       wyomingPort: cfg.wyomingPort,
@@ -739,10 +746,16 @@ export function startBroadcastMonitor(
       // 1. Render combined klaxon + TTS WAV (cache-aware), exactly like
       //    runBroadcast. This works even when broadcasts are disabled / no
       //    targets are configured — a browser-target preview never touches MA.
+      // v0.15.23 — preview must audition the SAME chime real broadcasts use,
+      // so resolve it here too (otherwise a preview plays the built-in while a
+      // real alarm plays the custom tone).
+      const previewChime = resolveChime(level as AnnouncementLevel, opts.klaxonDir);
       const r = await renderAnnouncement({
         level,
         message: spokenText,
         klaxonDir: opts.klaxonDir,
+        chimePath: previewChime.path,
+        chimeTag: previewChime.tag,
         cacheDir: opts.cacheDir,
         wyomingHost: cfg.wyomingHost,
         wyomingPort: cfg.wyomingPort,

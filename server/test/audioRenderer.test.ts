@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { createServer, type Server, type Socket } from 'node:net';
 import { Buffer } from 'node:buffer';
-import { renderAnnouncement, renderCacheKey, parseWavHeader, pruneRenderCache, cachedRenderPath } from '../src/audioRenderer.js';
+import { renderAnnouncement, renderCacheKey, parseWavHeader, pruneRenderCache, cachedRenderPath, BUILTIN_CHIME_TAG, KLAXON_FOR_LEVEL } from '../src/audioRenderer.js';
 import { getChimeRepeat } from '../src/alertSettings.js'; // v0.11.0 — klaxon repeats getChimeRepeat()× before TTS
 import { pcmToWav } from '../src/wyomingTts.js';
 
@@ -586,5 +586,78 @@ test('renderAnnouncement — default chimeGap (1s) applies when option omitted',
     mock.server.close();
     rmSync(klaxonDir, { recursive: true, force: true });
     rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+/* ─── v0.15.23 — custom-chime cache key + chimePath override (Alert Console) ─ */
+
+function tinyWav(freq: number, frames = 200): Buffer {
+  const pcm = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i++) pcm.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / 22050) * 20000), i * 2);
+  return pcmToWav(pcm, 22050, 2, 1);
+}
+
+test('renderCacheKey — builtin tag is BYTE-IDENTICAL to the pre-feature key (zero churn)', () => {
+  const noTag = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000);
+  const builtin = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  assert.equal(builtin, noTag, 'BUILTIN_CHIME_TAG must omit the tag component → unchanged keys for default users');
+});
+
+test('renderCacheKey — a custom chime tag busts the cache', () => {
+  const builtin = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  const custom = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, 'abc1230000000000');
+  assert.notEqual(custom, builtin, 'a custom tone id must produce a distinct key');
+  // Two different custom tones differ from each other too.
+  assert.notEqual(custom, renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, 'def4560000000000'));
+});
+
+test('renderAnnouncement ↔ renderCacheKey lock-step for a custom chime (klaxon-only path)', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klax-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  const chimeDir = mkdtempSync(resolve(tmpdir(), 'tone-'));
+  try {
+    // Built-in klaxons + a custom tone, both in the renderer's format.
+    for (const f of Object.values(KLAXON_FOR_LEVEL)) writeFileSync(resolve(klaxonDir, f), tinyWav(440));
+    const customPath = resolve(chimeDir, 'custom.wav');
+    writeFileSync(customPath, tinyWav(880));
+    const tag = 'feedface12345678';
+
+    // message:null → klaxon-only (no Wyoming needed). The returned filename MUST
+    // equal renderCacheKey(...) with the SAME tag — the lock-step the critic required.
+    const r = await renderAnnouncement({
+      level: 'red', message: null, klaxonDir, cacheDir,
+      chimePath: customPath, chimeTag: tag,
+      wyomingHost: 'unused', wyomingPort: 0, log: () => {},
+    });
+    assert.ok(r.ok, r.error);
+    const expected = renderCacheKey('red', null, getChimeRepeat(), 0, 1, 0, 1000, tag) + '.wav';
+    assert.equal(r.filename, expected, 'rendered filename must match the predicted cache key for the custom tag');
+
+    // A different tag → different filename (cache actually busts on swap).
+    const r2 = await renderAnnouncement({
+      level: 'red', message: null, klaxonDir, cacheDir,
+      chimePath: customPath, chimeTag: BUILTIN_CHIME_TAG,
+      wyomingHost: 'unused', wyomingPort: 0, log: () => {},
+    });
+    assert.notEqual(r2.filename, r.filename);
+  } finally {
+    for (const d of [klaxonDir, cacheDir, chimeDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('renderAnnouncement — a missing custom chime FALLS BACK to the built-in klaxon (never silent)', async () => {
+  const klaxonDir = mkdtempSync(resolve(tmpdir(), 'klax-'));
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
+  try {
+    for (const f of Object.values(KLAXON_FOR_LEVEL)) writeFileSync(resolve(klaxonDir, f), tinyWav(440));
+    const r = await renderAnnouncement({
+      level: 'red', message: null, klaxonDir, cacheDir,
+      chimePath: resolve(klaxonDir, 'does-not-exist.wav'), chimeTag: 'missing0000000000',
+      wyomingHost: 'unused', wyomingPort: 0, log: () => {},
+    });
+    assert.ok(r.ok, 'a missing custom chime must still render (built-in fallback), not fail');
+    assert.ok((r.sizeBytes ?? 0) > 44, 'fallback produced real audio');
+  } finally {
+    for (const d of [klaxonDir, cacheDir]) rmSync(d, { recursive: true, force: true });
   }
 });
