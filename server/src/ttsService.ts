@@ -294,9 +294,9 @@ function normalizePreference(preferred: string, engines: TtsEngine[]): TtsEngine
   // Exact match wins.
   let m = engines.find((e) => e.service.toLowerCase() === pref);
   if (m) return m;
-  // tts.<x>:<entity> form — exact compare.
-  m = engines.find((e) => e.service.toLowerCase() === pref);
-  if (m) return m;
+  // v0.20.0 — removed a dead duplicate of the exact-match block above (same
+  // predicate, so it could never match anything the first check didn't already
+  // return). The bare-flavor includes-fallback below is unchanged.
   // Bare flavor name → first engine whose service or label contains it.
   m = engines.find((e) => e.service.toLowerCase().includes(pref) || e.label.toLowerCase().includes(pref));
   if (m) return m;

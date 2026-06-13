@@ -200,20 +200,27 @@ export async function renderWyomingTts(opts: WyomingTtsOptions): Promise<Wyoming
  * the same sample format or concat is a no-go).
  */
 export function pcmToWav(pcm: Buffer, rate: number, width: number, channels: number): Buffer {
-  const header = Buffer.alloc(44);
+  // v0.20.0 — one allocation: write the 44-byte header directly into the output
+  // buffer and copy the PCM after it, instead of allocating a header + concat
+  // (which copies the full payload a second time). allocUnsafe is safe here —
+  // all 44 header bytes are written explicitly below and bytes 44.. are filled
+  // by pcm.copy, so nothing uninitialized is ever returned. Byte-identical to
+  // the prior Buffer.concat([header, pcm]) (all field writes are explicit LE).
+  const out = Buffer.allocUnsafe(44 + pcm.length);
   let o = 0;
-  header.write('RIFF', o); o += 4;
-  header.writeUInt32LE(36 + pcm.length, o); o += 4;
-  header.write('WAVE', o); o += 4;
-  header.write('fmt ', o); o += 4;
-  header.writeUInt32LE(16, o); o += 4;                              // subchunk1 size
-  header.writeUInt16LE(1, o); o += 2;                               // PCM format
-  header.writeUInt16LE(channels, o); o += 2;
-  header.writeUInt32LE(rate, o); o += 4;
-  header.writeUInt32LE(rate * channels * width, o); o += 4;         // byte rate
-  header.writeUInt16LE(channels * width, o); o += 2;                // block align
-  header.writeUInt16LE(width * 8, o); o += 2;                       // bits per sample
-  header.write('data', o); o += 4;
-  header.writeUInt32LE(pcm.length, o);
-  return Buffer.concat([header, pcm]);
+  out.write('RIFF', o); o += 4;
+  out.writeUInt32LE(36 + pcm.length, o); o += 4;
+  out.write('WAVE', o); o += 4;
+  out.write('fmt ', o); o += 4;
+  out.writeUInt32LE(16, o); o += 4;                              // subchunk1 size
+  out.writeUInt16LE(1, o); o += 2;                               // PCM format
+  out.writeUInt16LE(channels, o); o += 2;
+  out.writeUInt32LE(rate, o); o += 4;
+  out.writeUInt32LE(rate * channels * width, o); o += 4;         // byte rate
+  out.writeUInt16LE(channels * width, o); o += 2;                // block align
+  out.writeUInt16LE(width * 8, o); o += 2;                       // bits per sample
+  out.write('data', o); o += 4;
+  out.writeUInt32LE(pcm.length, o);
+  pcm.copy(out, 44);
+  return out;
 }
