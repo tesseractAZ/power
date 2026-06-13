@@ -33,7 +33,7 @@ import { createHash } from 'node:crypto';
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, statSync,
 } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { pcmToWav } from './wyomingTts.js';
 
 /** The renderer's fixed PCM format (audioAssets.ts SAMPLE_RATE/BITS/CHANNELS). */
@@ -215,11 +215,27 @@ function writeManifest(m: Record<string, ChimeMeta>): void {
 
 const ID_RE = /^[a-f0-9]{16}$/;
 
-/** A stored chime's absolute path, or null if the id is malformed/absent. */
-export function chimePath(id: string): string | null {
+/**
+ * Resolve a chime id to its absolute on-disk path — the SINGLE seam every
+ * user-supplied id must pass through before touching the filesystem. Two
+ * independent guards: (1) the id must be exactly 16 lowercase hex chars
+ * (no separators, no `.`, no traversal can survive); (2) the resolved path
+ * must still be contained within CHIMES_DIR. The containment check is
+ * redundant given (1) but makes the no-escape guarantee explicit and is the
+ * form static analysers recognise as a path-injection sanitizer. Returns null
+ * for any malformed id or (defensively) any path that would escape the dir.
+ */
+function chimeFilePath(id: string): string | null {
   if (!ID_RE.test(id)) return null;
   const p = resolve(CHIMES_DIR, `${id}.wav`);
-  return existsSync(p) ? p : null;
+  if (p !== `${CHIMES_DIR}${sep}${id}.wav` || !p.startsWith(CHIMES_DIR + sep)) return null;
+  return p;
+}
+
+/** A stored chime's absolute path, or null if the id is malformed/absent. */
+export function chimePath(id: string): string | null {
+  const p = chimeFilePath(id);
+  return p && existsSync(p) ? p : null;
 }
 
 export function listChimes(): ChimeMeta[] {
@@ -247,9 +263,13 @@ export function saveChime(buf: Buffer, originalName: string, nowMs = Date.now())
   const norm = normalizeToTarget(buf);
   if (!norm.ok || !norm.wav || !norm.pcm) return { ok: false, error: norm.error ?? 'normalization failed' };
 
+  // id is the content hash (always 16 hex chars) — route it through the SAME
+  // guarded resolver as user-supplied ids so every write path is uniform.
   const id = createHash('sha1').update(norm.pcm).digest('hex').slice(0, 16);
+  const path = chimeFilePath(id);
+  if (path == null) return { ok: false, error: 'internal: bad chime id' };
   const manifest = readManifest();
-  const existing = manifest[id] != null && existsSync(resolve(CHIMES_DIR, `${id}.wav`));
+  const existing = manifest[id] != null && existsSync(path);
   if (!existing && listChimes().length >= MAX_CHIME_COUNT) {
     return { ok: false, error: `library full (max ${MAX_CHIME_COUNT} tones) — delete one first` };
   }
@@ -281,9 +301,9 @@ export function saveChime(buf: Buffer, originalName: string, nowMs = Date.now())
 
 /** Delete a stored chime + its manifest entry. Returns true if anything removed. */
 export function deleteChime(id: string): boolean {
-  if (!ID_RE.test(id)) return false;
+  const path = chimeFilePath(id);
+  if (path == null) return false; // malformed/traversal id — nothing to delete
   let removed = false;
-  const path = resolve(CHIMES_DIR, `${id}.wav`);
   if (existsSync(path)) { try { rmSync(path); removed = true; } catch { /* ignore */ } }
   const manifest = readManifest();
   if (manifest[id] != null) { delete manifest[id]; writeManifest(manifest); removed = true; }

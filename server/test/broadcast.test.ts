@@ -69,6 +69,40 @@ test('loadBroadcastConfig — defaults are safe (disabled, no targets)', () => {
   }
 });
 
+test('loadBroadcastConfig — SCOPE GUARD: only well-formed media_player.* targets survive', () => {
+  // The audible-broadcast scope guarantee: a notice may ONLY play on the
+  // entities listed in BROADCAST_TARGETS. Parsing drops blanks, whitespace,
+  // and anything not prefixed `media_player.` — so a typo or an injected
+  // non-media_player entity can never become a broadcast endpoint.
+  const prev = { ...process.env };
+  try {
+    process.env.BROADCAST_TARGETS =
+      ' media_player.kitchen , , media_player.master_homepod ,switch.pool_pump, light.porch ,, media_player.guest_thermostat ';
+    const cfg = loadBroadcastConfig();
+    assert.deepEqual(cfg.targets, [
+      'media_player.kitchen',
+      'media_player.master_homepod',
+      'media_player.guest_thermostat',
+    ], 'only trimmed media_player.* entries are admitted — no out-of-scope endpoints');
+    assert.ok(!cfg.targets.some((t) => !t.startsWith('media_player.')), 'no non-media_player target can leak in');
+  } finally {
+    process.env = prev;
+  }
+});
+
+test('loadBroadcastConfig — SCOPE GUARD: garbage/empty BROADCAST_TARGETS yields zero targets (never a wildcard)', () => {
+  const prev = { ...process.env };
+  try {
+    for (const raw of ['', '   ', ',,,', 'all', 'media_player', 'kitchen', 'group.all_speakers']) {
+      process.env.BROADCAST_TARGETS = raw;
+      const cfg = loadBroadcastConfig();
+      assert.equal(cfg.targets.length, 0, `"${raw}" must produce NO targets, not a fan-out`);
+    }
+  } finally {
+    process.env = prev;
+  }
+});
+
 test('loadBroadcastConfig — v0.9.70 Wyoming env overrides take effect', () => {
   const prev = { ...process.env };
   try {
