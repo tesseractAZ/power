@@ -19,7 +19,7 @@
 
 import { writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, sep } from 'node:path';
 
 /* ─── WAV writer ──────────────────────────────────────────────────── */
 
@@ -329,6 +329,211 @@ function ppAllClearSegments(): { segs: Segment[]; totalSec: number } {
   };
 }
 
+/* ─── v0.17.0 named built-in tone library ──────────────────────────────
+ *
+ * A fixed library of short, distinct, SELECTABLE chime tones (separate from
+ * the 4 level klaxons above). The operator can assign any of these to a level
+ * via the Alert Console ({ kind: 'named', id } in chimeConfig). They are
+ * SYNTHESIZED ONCE at startup into /data/audio/<id>.wav (same 22050/16/mono
+ * format as the klaxons, so the render byte-splice is unaffected) and served
+ * for preview by the existing wildcard:false /audio/ static route — they're
+ * written before that route enumerates at registration.
+ *
+ * IMMUTABILITY CONTRACT: a tone id is a permanent identity for one sound. The
+ * render-cache tag for a named tone is `b:<id>` (see chimeConfig.resolveChime),
+ * which has NO version component — so to CHANGE a sound, ship a NEW id and
+ * deprecate the old one; never edit an existing builder's waveform in place
+ * (that would serve stale cached renders). Adding/removing tones is fine.
+ *
+ * These tones are PACK-INDEPENDENT (unlike the 4 klaxons, whose bytes vary with
+ * BROADCAST_CHIME_PACK): their synthesis is fixed, which keeps `b:<id>` a
+ * correct cache tag regardless of the active pack.
+ */
+
+const C5 = 523.25, D5 = 587.33, E5 = 659.25, F5 = 698.46, G5 = 783.99;
+const C6 = 1046.5, E6 = 1318.5;
+
+const NAMED_TONE_BUILDERS: Record<string, () => { segs: Segment[]; totalSec: number }> = {
+  // Single struck-bell ping — bright, brief acknowledgement.
+  'ping-single': () => ({
+    segs: [{ startSec: 0, spec: { kind: 'bell', freq: C6, durSec: 0.42, gain: 0.55, decaySec: 0.35, harmonics: [1, 0.4] } }],
+    totalSec: 0.55,
+  }),
+  // Two quick high pings.
+  'ping-double': () => ({
+    segs: [
+      { startSec: 0.00, spec: { kind: 'bell', freq: E6, durSec: 0.28, gain: 0.5, decaySec: 0.22, harmonics: [1, 0.3] } },
+      { startSec: 0.18, spec: { kind: 'bell', freq: E6, durSec: 0.30, gain: 0.5, decaySec: 0.24, harmonics: [1, 0.3] } },
+    ],
+    totalSec: 0.6,
+  }),
+  // Full C-major triad struck together — a warm chord.
+  'triad-bell': () => ({
+    segs: [
+      { startSec: 0, spec: { kind: 'bell', freq: C5, durSec: 0.85, gain: 0.30, decaySec: 0.6, harmonics: [1, 0.4, 0.2] } },
+      { startSec: 0, spec: { kind: 'bell', freq: E5, durSec: 0.85, gain: 0.30, decaySec: 0.6, harmonics: [1, 0.4, 0.2] } },
+      { startSec: 0, spec: { kind: 'bell', freq: G5, durSec: 0.85, gain: 0.30, decaySec: 0.6, harmonics: [1, 0.4, 0.2] } },
+    ],
+    totalSec: 0.95,
+  }),
+  // Rising chirp — quick upward sine glide.
+  'chirp-rise': () => ({
+    segs: [{ startSec: 0, spec: { kind: 'sine', freq: 500, endFreq: 1500, durSec: 0.35, gain: 0.5, attackSec: 0.01, releaseSec: 0.05 } }],
+    totalSec: 0.45,
+  }),
+  // Descending sweep — downward sine glide.
+  'sweep-down': () => ({
+    segs: [{ startSec: 0, spec: { kind: 'sine', freq: 1400, endFreq: 400, durSec: 0.5, gain: 0.5, attackSec: 0.01, releaseSec: 0.05 } }],
+    totalSec: 0.6,
+  }),
+  // Fast warble — urgent emergency-style two-tone square alternation.
+  'warble-fast': () => {
+    const segs: Segment[] = [];
+    const a = 1000, b = 1320, seg = 0.08, n = 6;
+    for (let i = 0; i < n; i++) {
+      segs.push({ startSec: i * seg, spec: { kind: 'square', freq: i % 2 ? b : a, durSec: seg + 0.005, gain: 0.4, attackSec: 0.003, releaseSec: 0.003 } });
+    }
+    return { segs, totalSec: n * seg + 0.06 };
+  },
+  // Slow pulse — two measured caution beeps.
+  'pulse-slow': () => {
+    const segs: Segment[] = [];
+    const on = 0.18, period = 0.45, n = 2;
+    for (let i = 0; i < n; i++) {
+      segs.push({ startSec: i * period, spec: { kind: 'sine', freq: 700, durSec: on, gain: 0.5, attackSec: 0.01, releaseSec: 0.05 } });
+    }
+    return { segs, totalSec: (n - 1) * period + on + 0.1 };
+  },
+  // Soft knock — two muted low taps.
+  'knock-soft': () => ({
+    segs: [
+      { startSec: 0.00, spec: { kind: 'square', freq: 180, durSec: 0.05, gain: 0.4, attackSec: 0.002, releaseSec: 0.03 } },
+      { startSec: 0.14, spec: { kind: 'square', freq: 180, durSec: 0.05, gain: 0.4, attackSec: 0.002, releaseSec: 0.03 } },
+    ],
+    totalSec: 0.3,
+  }),
+  // Marimba run — four woody ascending struck notes.
+  'marimba-run': () => {
+    const notes = [C5, D5, E5, G5];
+    const step = 0.10;
+    return {
+      segs: notes.map((f, i) => ({ startSec: i * step, spec: { kind: 'bell' as const, freq: f, durSec: 0.25, gain: 0.5, decaySec: 0.18, harmonics: [1, 0.25] } })),
+      totalSec: (notes.length - 1) * step + 0.35,
+    };
+  },
+  // Gong — deep, long, slow-decaying low bell.
+  'gong': () => ({
+    segs: [{ startSec: 0, spec: { kind: 'bell', freq: 130.8, durSec: 1.2, gain: 0.6, decaySec: 0.9, harmonics: [1, 0.6, 0.4, 0.3, 0.2] } }],
+    totalSec: 1.3,
+  }),
+  // Sonar ping — single tone with a long exponential ring-out and slight droop.
+  'sonar-ping': () => ({
+    segs: [{ startSec: 0, spec: { kind: 'sine', freq: 1200, endFreq: 1180, durSec: 0.5, gain: 0.5, bellDecay: true, decaySec: 0.4 } }],
+    totalSec: 0.6,
+  }),
+  // Alarm buzz — harsh sustained square, no soft edges.
+  'buzz-alarm': () => ({
+    segs: [{ startSec: 0, spec: { kind: 'square', freq: 440, durSec: 0.5, gain: 0.45, attackSec: 0, releaseSec: 0.01 } }],
+    totalSec: 0.6,
+  }),
+  // Chime cascade — five descending struck bells.
+  'cascade': () => {
+    const notes = [G5, F5, E5, D5, C5];
+    const step = 0.08;
+    return {
+      segs: notes.map((f, i) => ({ startSec: i * step, spec: { kind: 'bell' as const, freq: f, durSec: 0.3, gain: 0.45, decaySec: 0.24, harmonics: [1, 0.35] } })),
+      totalSec: (notes.length - 1) * step + 0.4,
+    };
+  },
+  // Two-tone doorbell — the classic "ding-dong".
+  'doorbell': () => ({
+    segs: [
+      { startSec: 0.00, spec: { kind: 'bell', freq: E5, durSec: 0.5, gain: 0.5, decaySec: 0.4, harmonics: [1, 0.4] } },
+      { startSec: 0.30, spec: { kind: 'bell', freq: C5, durSec: 0.7, gain: 0.5, decaySec: 0.55, harmonics: [1, 0.4] } },
+    ],
+    totalSec: 1.1,
+  }),
+  // Klaxon honk — two short low square honks.
+  'klaxon-honk': () => ({
+    segs: [
+      { startSec: 0.00, spec: { kind: 'square', freq: 350, durSec: 0.22, gain: 0.45, attackSec: 0.005, releaseSec: 0.02 } },
+      { startSec: 0.30, spec: { kind: 'square', freq: 350, durSec: 0.22, gain: 0.45, attackSec: 0.005, releaseSec: 0.02 } },
+    ],
+    totalSec: 0.6,
+  }),
+  // Rising triad — three ascending struck notes resolving upward.
+  'triad-up': () => {
+    const notes = [C5, E5, G5];
+    const step = 0.12;
+    return {
+      segs: notes.map((f, i) => ({ startSec: i * step, spec: { kind: 'bell' as const, freq: f, durSec: 0.32, gain: 0.45, decaySec: 0.28, harmonics: [1, 0.3] } })),
+      totalSec: (notes.length - 1) * step + 0.4,
+    };
+  },
+};
+
+/** One selectable built-in tone (id is permanent; displayName feeds the UI dropdown). */
+export interface BuiltinTone { id: string; displayName: string }
+
+/**
+ * The named built-in tone catalog — the single source of truth for which tones
+ * exist, their display names, and the order shown in the dropdown. Keys MUST
+ * match NAMED_TONE_BUILDERS exactly (asserted at startup). Ids are permanent
+ * (see the immutability contract above).
+ */
+export const BUILTIN_TONES: readonly BuiltinTone[] = [
+  { id: 'ping-single', displayName: 'Single Ping' },
+  { id: 'ping-double', displayName: 'Double Ping' },
+  { id: 'triad-bell', displayName: 'Triad Bell' },
+  { id: 'triad-up', displayName: 'Rising Triad' },
+  { id: 'marimba-run', displayName: 'Marimba Run' },
+  { id: 'cascade', displayName: 'Chime Cascade' },
+  { id: 'doorbell', displayName: 'Two-Tone Doorbell' },
+  { id: 'chirp-rise', displayName: 'Rising Chirp' },
+  { id: 'sweep-down', displayName: 'Descending Sweep' },
+  { id: 'sonar-ping', displayName: 'Sonar Ping' },
+  { id: 'pulse-slow', displayName: 'Slow Pulse (caution)' },
+  { id: 'warble-fast', displayName: 'Fast Warble (emergency)' },
+  { id: 'buzz-alarm', displayName: 'Alarm Buzz' },
+  { id: 'klaxon-honk', displayName: 'Klaxon Honk' },
+  { id: 'knock-soft', displayName: 'Soft Knock' },
+  { id: 'gong', displayName: 'Gong' },
+];
+
+/** Format gate for a named-tone id — a lowercase slug, never a 16-hex custom id. */
+export const BUILTIN_TONE_ID_RE = /^[a-z][a-z0-9-]{1,30}$/;
+
+const BUILTIN_TONE_IDS: ReadonlySet<string> = new Set(BUILTIN_TONES.map((t) => t.id));
+
+// Fail loudly at module load if the catalog and the synth builders drift apart
+// (a future edit adding a BUILTIN_TONES entry without its NAMED_TONE_BUILDERS
+// fn). Better a refused deploy than a catalog tone that writes no WAV, is
+// accepted by updateChimeConfig, and silently resolves to the klaxon at render.
+for (const t of BUILTIN_TONES) {
+  if (!NAMED_TONE_BUILDERS[t.id]) {
+    throw new Error(`audioAssets: built-in tone '${t.id}' is in the catalog but has no synth builder`);
+  }
+}
+
+/** True iff `id` names a tone in the built-in catalog. */
+export function isBuiltinTone(id: string): boolean {
+  return BUILTIN_TONE_IDS.has(id);
+}
+
+/**
+ * Resolve a named built-in tone to its on-disk WAV path, or null when the id
+ * isn't in the catalog, escapes `audioDir`, or the file isn't present. Mirrors
+ * chimeStore.chimeFilePath's containment guarantee; callers fall back to the
+ * level klaxon on null so a missing tone never silences an alarm.
+ */
+export function builtinTonePath(id: string, audioDir: string): string | null {
+  if (!isBuiltinTone(id)) return null;
+  const p = resolve(audioDir, `${id}.wav`);
+  const base = audioDir.endsWith(sep) ? audioDir : audioDir + sep;
+  if (!p.startsWith(base) || !existsSync(p)) return null;
+  return p;
+}
+
 /* ─── public API ──────────────────────────────────────────────────── */
 
 export const AUDIO_ASSETS = ['red-alert', 'yellow-alert', 'all-clear', 'boatswain'] as const;
@@ -371,8 +576,13 @@ const CHIME_PACKS: Record<ChimePack, Record<AudioAssetId, () => { segs: Segment[
  * Bump this whenever a synthesis param changes (frequencies, envelopes,
  * harmonics, timings). The cache is per-version so old WAVs are
  * replaced atomically rather than coexisting.
+ *
+ * v0.17.0 — bumped 3 → 4 when the named built-in tone library (BUILTIN_TONES)
+ * was added: the bump forces an existing /data/audio to regenerate so the new
+ * <id>.wav tones appear without manual cleanup. The 4 legacy klaxon ids and
+ * their waveforms are unchanged (only re-written, byte-identically).
  */
-export const AUDIO_ASSETS_VERSION = 3;
+export const AUDIO_ASSETS_VERSION = 4;
 
 /** Write all assets to `outDir`. Regenerates if the on-disk version is stale. */
 export async function generateAudioAssets(outDir: string, log: (m: string) => void): Promise<void> {
@@ -407,6 +617,19 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
     await writeFile(path, wav);
     log(`audioAssets: wrote ${id}.wav [${pack}] (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
   }
+  // v0.17.0 — the named built-in tone library, written alongside the klaxons
+  // (pack-independent: same bytes regardless of BROADCAST_CHIME_PACK).
+  for (const tone of BUILTIN_TONES) {
+    const path = resolve(outDir, `${tone.id}.wav`);
+    if (!stale && existsSync(path)) continue;
+    const builder = NAMED_TONE_BUILDERS[tone.id];
+    if (!builder) { log(`audioAssets: WARN no synth builder for built-in tone ${tone.id}`); continue; }
+    const { segs, totalSec } = builder();
+    const samples = renderSegments(segs, totalSec);
+    const wav = buildWavBuffer(samples);
+    await writeFile(path, wav);
+    log(`audioAssets: wrote ${tone.id}.wav (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
+  }
   if (stale || !existsSync(versionMarker)) {
     await writeFile(versionMarker, wantMarker + '\n');
   }
@@ -417,6 +640,10 @@ export async function regenerateAudioAssets(outDir: string, log: (m: string) => 
   const { unlink } = await import('node:fs/promises');
   for (const id of AUDIO_ASSETS) {
     const path = resolve(outDir, `${id}.wav`);
+    if (existsSync(path)) await unlink(path);
+  }
+  for (const tone of BUILTIN_TONES) {
+    const path = resolve(outDir, `${tone.id}.wav`);
     if (existsSync(path)) await unlink(path);
   }
   const versionMarker = resolve(outDir, '.assets-version');

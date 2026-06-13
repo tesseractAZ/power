@@ -4,7 +4,8 @@
  * Mirrors alertSettings.ts exactly (in-memory cache + atomic write + listeners),
  * but stores the operator's per-LEVEL chime assignment:
  *   red (Critical) / yellow (Warning) / green (Advisory) →
- *     { kind: 'builtin' }              — the synthesized klaxon pack (default)
+ *     { kind: 'builtin' }              — the level's synthesized klaxon (default)
+ *     { kind: 'named', id }            — a named built-in tone (v0.17.0 library)
  *     { kind: 'custom', id }           — an uploaded tone from chimeStore
  *
  * GRANULARITY — per LEVEL, not per ISA priority. The renderer + every announce
@@ -31,6 +32,7 @@ import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { KLAXON_FOR_LEVEL, type AnnouncementLevel } from './audioRenderer.js';
 import { chimePath } from './chimeStore.js';
+import { isBuiltinTone, builtinTonePath, BUILTIN_TONE_ID_RE } from './audioAssets.js';
 
 export const CHIME_LEVELS: AnnouncementLevel[] = ['red', 'yellow', 'green'];
 
@@ -39,7 +41,10 @@ export const CHIME_LEVELS: AnnouncementLevel[] = ['red', 'yellow', 'green'];
  *  pre-feature key string — see audioRenderer.renderCacheKey. */
 export const BUILTIN_TAG = 'builtin';
 
-export type ChimeAssignment = { kind: 'builtin' } | { kind: 'custom'; id: string };
+export type ChimeAssignment =
+  | { kind: 'builtin' }
+  | { kind: 'named'; id: string }
+  | { kind: 'custom'; id: string };
 
 export interface ChimeConfig {
   assignments: Record<AnnouncementLevel, ChimeAssignment>;
@@ -58,10 +63,16 @@ function defaults(): ChimeConfig {
   };
 }
 
-/** Coerce one assignment, dropping anything malformed back to builtin. */
+/** Coerce one assignment, dropping anything malformed back to builtin. Validates
+ *  FORMAT only (like the custom 16-hex check) — catalog/existence membership is
+ *  enforced at WRITE time in updateChimeConfig, and resolveChime falls back to
+ *  the klaxon at render time if a named/custom tone has since gone missing. */
 function sanitizeAssignment(raw: any): ChimeAssignment {
   if (raw && raw.kind === 'custom' && typeof raw.id === 'string' && /^[a-f0-9]{16}$/.test(raw.id)) {
     return { kind: 'custom', id: raw.id };
+  }
+  if (raw && raw.kind === 'named' && typeof raw.id === 'string' && BUILTIN_TONE_ID_RE.test(raw.id)) {
+    return { kind: 'named', id: raw.id };
   }
   return { kind: 'builtin' };
 }
@@ -127,6 +138,10 @@ export function updateChimeConfig(
       rejected.push(`${lvl}: unknown tone id ${clean.id}`);
       continue; // keep the existing assignment
     }
+    if (clean.kind === 'named' && !isBuiltinTone(clean.id)) {
+      rejected.push(`${lvl}: unknown built-in tone ${clean.id}`);
+      continue; // keep the existing assignment
+    }
     next.assignments[lvl] = clean;
   }
   next.updatedAt = Date.now();
@@ -164,23 +179,34 @@ export function revertAssignmentsFor(id: string, source = 'delete'): boolean {
 export interface ResolvedChime {
   /** Absolute path to the WAV the renderer should prepend. */
   path: string;
-  /** Cache-key tag — BUILTIN_TAG for the klaxon, else the custom tone's id. */
+  /** Cache-key tag — BUILTIN_TAG for the klaxon, `b:<id>` for a named built-in
+   *  tone, else the custom tone's content id. Always distinct per sound. */
   tag: string;
-  /** True when a custom assignment was requested but its file was missing. */
+  /** True when a named/custom assignment was requested but its file was missing. */
   fellBack: boolean;
 }
 
 /**
  * Resolve the chime for a level to a concrete file + cache tag. Falls back to
- * the builtin klaxon (in `klaxonDir`) when the assignment is builtin OR when a
- * custom tone's file is missing. The returned tag ALWAYS matches the returned
- * path, so the render cache can never serve a stale tone for a swapped id.
+ * the builtin klaxon (in `klaxonDir`) when the assignment is the level default,
+ * OR when a named/custom tone's file is missing. The returned tag ALWAYS matches
+ * the returned path, so the render cache can never serve a stale tone for a
+ * swapped id.
+ *
+ * Cache tags: BUILTIN_TAG ('builtin', OMITTED from the cache key so default
+ * users see zero churn) | `b:<id>` for a named built-in tone | the 16-hex
+ * content id for a custom upload. All three are mutually distinct (the colon
+ * can't appear in a hex id, and 'b:…' is never the bare 'builtin' sentinel).
  */
 export function resolveChime(level: AnnouncementLevel, klaxonDir: string): ResolvedChime {
   const builtin = (): ResolvedChime => ({
     path: resolve(klaxonDir, KLAXON_FOR_LEVEL[level]), tag: BUILTIN_TAG, fellBack: false,
   });
   const a = getChimeConfig().assignments[level];
+  if (a.kind === 'named') {
+    const p = builtinTonePath(a.id, klaxonDir);
+    return p == null ? { ...builtin(), fellBack: true } : { path: p, tag: `b:${a.id}`, fellBack: false };
+  }
   if (a.kind !== 'custom') return builtin();
   const p = chimePath(a.id);
   if (p == null) return { ...builtin(), fellBack: true };

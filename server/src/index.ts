@@ -18,7 +18,7 @@ import { startOfLocalDayMs } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { isConfigured } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
-import { generateAudioAssets } from './audioAssets.js';
+import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
 import { getAllStates } from './haService.js';
 // v0.9.32 — TTS debug dump for /api/broadcast/tts-debug
@@ -1925,6 +1925,9 @@ function chimeConsoleResponse() {
     levelLabels: { red: 'Critical', yellow: 'Warning', green: 'Advisory' } as Record<AnnouncementLevel, string>,
     assignments: cfg.assignments,
     chimes: listChimes(),
+    // v0.17.0 — the named built-in tone library, selectable per level alongside
+    // the level default and uploads. Preview each at /audio/<id>.wav.
+    builtinTones: BUILTIN_TONES,
     updatedAt: cfg.updatedAt,
     maxUploadBytes: MAX_UPLOAD_BYTES,
   };

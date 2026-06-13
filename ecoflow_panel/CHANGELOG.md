@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.17.0 — 2026-06-13
+
+Built-in tone library — 16 named, selectable system chimes (backend). Lays the groundwork for picking the best alert tone per level; the picker UI lands in a follow-up.
+
+- **16 new synthesized tones**, each a short, distinct sound built from the existing tone-synthesis primitives and written once at startup to `/data/audio/<id>.wav` (same 22050 Hz / 16-bit / mono format as the klaxons): Single/Double Ping, Triad Bell, Rising Triad, Marimba Run, Chime Cascade, Two-Tone Doorbell, Rising Chirp, Descending Sweep, Sonar Ping, Slow Pulse (caution), Fast Warble (emergency), Alarm Buzz, Klaxon Honk, Soft Knock, and Gong.
+- **Three-way per-level tone assignment.** A level can now be set to its default klaxon (`builtin`), one of the named built-in tones (`named`), or an uploaded custom tone (`custom`). The API (`/api/chimes`, `/api/chime-config`) now returns the catalog (`builtinTones`) so a picker can list every option; each tone is previewable at `/audio/<id>.wav`.
+- **Cache-correct + fail-safe by construction.** Each named tone carries a distinct render-cache tag (`b:<id>`) that can never collide with the default-klaxon sentinel or an uploaded tone's content id, so swapping tones always re-renders correctly and the default path stays byte-identical (zero cache churn). A named tone whose file is missing — or an id removed from a future catalog — falls back to the level klaxon, never a silent alarm. Named-tone ids are permanent (immutable-by-contract), and a catalog/builder mismatch fails the deploy loudly rather than degrading silently.
+- The 4 existing level klaxons (and the powerplant/airport packs) are **byte-identical** — only re-written by the asset-version bump (3 → 4) that regenerates `/data/audio` so the new tones appear.
+
+The picker is exposed in the UI in the upcoming unified Alert Console (v0.19.0); until then the tones are reachable via the API. 548/548 server tests pass (7 new: catalog integrity, 3-way resolution, missing-tone klaxon fallback, and cache-tag distinctness). Adversarially reviewed (two lenses) → ship.
+
 ## 0.16.4 — 2026-06-13
 
 Zombie-alert gate: designated bench spares (Core 4 / Core 5) no longer chime, push, or raise the broadcast condition when they go offline.
