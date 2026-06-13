@@ -73,6 +73,7 @@ import {
 import { appendWriteLog, tailWriteLog } from './writeLog.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 alarm-priority Alert Settings + preview.
 import { getAlertSettings, updateAlertSettings, isPriorityEnabled } from './alertSettings.js';
+import { getBroadcastRuntimeConfig, updateBroadcastRuntimeConfig } from './broadcastRuntimeConfig.js';
 // v0.15.23 — Alert Console: operator-uploaded chime tones + per-level assignment.
 import {
   CHIMES_DIR, MAX_UPLOAD_BYTES, listChimes, saveChime, deleteChime,
@@ -1806,6 +1807,67 @@ app.get('/api/broadcast/status', async () => {
     },
   };
 });
+
+// v0.18.0 — live broadcast enable + volume, mutable from the UI without a
+// restart. The env (BROADCAST_ENABLED / BROADCAST_VOLUME) is the boot baseline;
+// a /data override (set here) wins at runtime and persists. The response
+// surfaces effective / override / envBaseline so the UI can show default-vs-
+// overridden and disclose when an env-pinned BROADCAST_ANNOUNCE_VOLUME makes the
+// volume slider audibly inert.
+const broadcastConfigRateLimit = makeRateLimiter(30, 60_000);
+function broadcastConfigResponse() {
+  const cfg = broadcast.config();              // effective (override already merged in loadBroadcastConfig)
+  const ov = getBroadcastRuntimeConfig();      // the /data override (null fields = deferring to env)
+  const envEnabled = process.env.BROADCAST_ENABLED === 'true' || process.env.BROADCAST_ENABLED === '1';
+  const envVolRaw = Number(process.env.BROADCAST_VOLUME ?? 0.5);
+  const envVolume = Number.isFinite(envVolRaw) ? Math.max(0, Math.min(1, envVolRaw)) : 0.5;
+  const announceVolumePinned = (process.env.BROADCAST_ANNOUNCE_VOLUME ?? '').trim().length > 0;
+  return {
+    enabled: cfg.enabled,
+    volume: cfg.volume,
+    announceVolume: cfg.announceVolume,
+    // When true, BROADCAST_ANNOUNCE_VOLUME pins the announce volume and the
+    // master slider is informational only (no audible effect).
+    announceVolumePinned,
+    source: ov.source,
+    updatedAt: ov.updatedAt,
+    override: { enabled: ov.enabled, volume: ov.volume }, // null = deferring to env
+    envBaseline: { enabled: envEnabled, volume: envVolume },
+  };
+}
+
+// GET — current effective broadcast enable/volume + override + env baseline. NO
+// auth: read-only and non-sensitive (matches /api/broadcast/status).
+app.get('/api/broadcast/config', async () => broadcastConfigResponse());
+
+// PUT — set or clear the runtime enable/volume override. Write-gated + rate
+// limited (touches /data). A field present sets it (boolean/number overrides
+// env; explicit null clears back to the env baseline); an absent field is
+// unchanged.
+app.put<{ Body: { enabled?: boolean | null; volume?: number | null } }>(
+  '/api/broadcast/config',
+  { preHandler: [requireWriteAuth, broadcastConfigRateLimit] },
+  async (req) => {
+    // Guard the body SHAPE before the `in` operator — the raw JSON parser passes
+    // primitives through, and `'enabled' in 42` throws. A non-object body is a
+    // no-op patch (the response still echoes the current effective config).
+    const body: { enabled?: boolean | null; volume?: number | null } =
+      req.body && typeof req.body === 'object' ? req.body : {};
+    const patch: { enabled?: boolean | null; volume?: number | null } = {};
+    if ('enabled' in body) patch.enabled = body.enabled;
+    if ('volume' in body) patch.volume = body.volume;
+    const next = updateBroadcastRuntimeConfig(patch, 'web');
+    appendWriteLog({
+      ts: Date.now(),
+      action: 'broadcast-config',
+      sn: '', // global, not device-specific
+      params: { enabled: next.enabled, volume: next.volume },
+      source: { ip: req.ip, ua: req.headers['user-agent']?.toString() },
+      outcome: 'success',
+    });
+    return broadcastConfigResponse();
+  },
+);
 
 app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
   '/api/broadcast/test',
