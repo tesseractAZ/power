@@ -1,0 +1,246 @@
+name: EcoFlow Panel
+version: "0.16.3"
+slug: ecoflow_panel
+description: >-
+  Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
+  Delta Pro Ultras; learned anomaly detection, day-ahead forecasting, and
+  per-pack capacity-fade → end-of-life projection.
+url: https://github.com/tesseractAZ/ecoflow-panel
+arch:
+  - aarch64
+  - amd64
+# Pre-built multi-arch images on GHCR — built and pushed by .github/workflows/images.yml.
+# HA Supervisor substitutes {arch} with the host's CPU arch (aarch64, amd64, …).
+image: ghcr.io/tesseractaz/{arch}-ecoflow-panel
+startup: services
+boot: auto
+stage: experimental
+# HA's `init: true` default wraps the container with Docker's tini, making
+# tini PID 1. The HA base image already ships its own s6-overlay init at
+# /init; with tini in front, s6-overlay-suexec sees it isn't PID 1 and
+# refuses to start (crash loop with "fatal: can only run as pid 1"). Turn
+# tini off so our /init (s6) runs as PID 1 — the standard pattern for any
+# add-on built on the official HA base images.
+init: false
+ports:
+  8787/tcp: 8787
+  2323/tcp: 2323
+ports_description:
+  8787/tcp: Web dashboard + REST API + WebSocket
+  2323/tcp: Telnet "control-room" TUI (no auth — keep on a trusted LAN)
+# v0.9.5 — HA Ingress: makes the panel appear as a sidebar item inside
+# Home Assistant (visible in the HA mobile app), authenticated through
+# HA's normal session. Same server, same port — HA's hassio_ingress
+# reverse-proxies in. Direct LAN access on :8787 still works.
+ingress: true
+ingress_port: 8787
+panel_icon: mdi:home-battery
+panel_title: EcoFlow Panel
+panel_admin: false
+map:
+  - data:rw
+# v0.9.20 — request access to Home Assistant's Core REST API so the
+# add-on can call media_player.play_media (HomePod/Sonos broadcasts),
+# enumerate media_player entities for the SHIPWIDE INTERCOM discovery
+# panel, and check entity states. Without this flag SUPERVISOR_TOKEN
+# is not granted access to /core/api/* endpoints — every broadcast
+# returns "SUPERVISOR_TOKEN missing or HA unreachable".
+homeassistant_api: true
+# v0.9.33 — Supervisor API access at "manager" role. Granted explicitly
+# by the user so we can:
+#   - List installed add-ons (POST-install Piper visibility checks)
+#   - Auto-bridge integrations via Core config-flow (Wyoming Protocol →
+#     Piper TTS without making the user click through Settings UI)
+# We do NOT install/uninstall add-ons in code without explicit user
+# action — every Supervisor call goes through a named endpoint.
+hassio_api: true
+hassio_role: manager
+options:
+  ECOFLOW_ACCESS_KEY: ""
+  ECOFLOW_SECRET_KEY: ""
+  ECOFLOW_API_HOST: https://api-a.ecoflow.com
+  LOG_LEVEL: info
+  FORECAST_LAT: 33.4484
+  FORECAST_LON: -112.074
+  TELNET_ENABLED: true
+  TELNET_PORT: 2323
+  # v0.15.18 — "ha" delivers as Home Assistant persistent notifications (zero
+  # setup, visible in the HA UI + companion app). ntfy/pushover/webhook remain.
+  NOTIFY_CHANNEL: none
+  NOTIFY_MIN_SEVERITY: warning
+  NOTIFY_RESOLVED: true
+  NOTIFY_NTFY_SERVER: https://ntfy.sh
+  NOTIFY_NTFY_TOPIC: ""
+  NOTIFY_PUSHOVER_TOKEN: ""
+  NOTIFY_PUSHOVER_USER: ""
+  NOTIFY_WEBHOOK_URL: ""
+  # v0.7.5 — quiet-hours digest + NWS storm-prep + MQTT Discovery (all opt-in)
+  NOTIFY_QUIET_HOURS: "22-06"
+  NOTIFY_DIGEST_HOUR: 7
+  NWS_ENABLED: false
+  MQTT_DISCOVERY_ENABLED: false
+  MQTT_DISCOVERY_HOST: ""
+  MQTT_DISCOVERY_PORT: 1883
+  MQTT_DISCOVERY_USER: ""
+  MQTT_DISCOVERY_PASS: ""
+  MQTT_DISCOVERY_PREFIX: homeassistant
+  # v0.9.9 — set this to a non-empty secret to enable the diagnostic
+  # POST /api/device/send-command endpoint, used to probe undocumented
+  # EcoFlow commands (e.g. SHP2 reboot — there's no documented public
+  # reboot, so anyone who wants one has to discover the shape empirically).
+  # Leave empty in normal operation. Requires the same value in the
+  # `x-write-debug-token` header on every call.
+  WRITE_DEBUG_TOKEN: ""
+  # v0.9.18 — ship-wide audible broadcast to HomePod / Sonos via HA's
+  # media_player service. Off by default; set ENABLED=true and at
+  # least one target entity ID to opt in.
+  BROADCAST_ENABLED: false
+  # Comma-separated media_player entity IDs. e.g.:
+  #   media_player.living_room, media_player.kitchen, media_player.master_homepod
+  BROADCAST_TARGETS: ""
+  # URL the speakers will fetch the klaxon WAVs from. Must be reachable
+  # from the speakers on the LAN. Default uses mDNS — set to your HA
+  # Pi's IP (http://192.168.x.x:8787) if mDNS is flaky on your network.
+  BROADCAST_AUDIO_BASE: "http://homeassistant.local:8787"
+  BROADCAST_VOLUME: 0.5
+  # v0.12.1 — milliseconds of silence prepended to every broadcast/alarm
+  # announcement so all speakers (AirPlay/Ecobee especially, which are slow
+  # to establish a stream) can sync up before the chime — fixes the clipped
+  # start and AirPlay devices that otherwise miss the beginning. 0 disables.
+  BROADCAST_LEAD_SILENCE_MS: 1000
+  # v0.15.4 — repeat the whole (chime + spoken message) block N times per
+  # announcement so a missed first pass gets a second. 1 = once, 2 = repeat once.
+  BROADCAST_REPEAT: 2
+  # v0.15.7 — silence (ms) inserted between the repeated blocks so the repeat is
+  # audibly distinct (you hear the message finish, a pause, then it again). Only
+  # applies when BROADCAST_REPEAT > 1. 0 disables.
+  BROADCAST_REPEAT_GAP_MS: 1500
+  # v0.15.15 — silence (ms) inserted AFTER the alert chime, before the spoken
+  # message, so the chime fully decays before the announcement begins. 0 disables.
+  BROADCAST_CHIME_GAP_MS: 1000
+  # v0.15.4/v0.15.7 — announce volume the speaker is set to FOR the announcement.
+  # Empty (default) = BROADCAST_VOLUME × 100, so the announcement plays at your
+  # BROADCAST_VOLUME level (the requested behavior). A number 0-100 forces that
+  # exact level. "off"/"none"/"standing" OMITS announce_volume entirely so the
+  # speaker plays at whatever standing volume it already has (skips Music
+  # Assistant's set→restore step — useful if a speaker mishandles it).
+  BROADCAST_ANNOUNCE_VOLUME: ""
+  # v0.15.4 — Music Assistant's pre-announce tone before the message; can help
+  # "wake" a sleepy ecobee speaker so it doesn't clip the start.
+  BROADCAST_USE_PRE_ANNOUNCE: false
+  # v0.15.4 — retry the announcement on an actual call failure (0-3).
+  BROADCAST_ANNOUNCE_RETRIES: 1
+  # v0.13.4 — alarm chime sound pack. "powerplant" (default) = ISA-18.2
+  # industrial control-room annunciator cadences (emergency warble / caution
+  # pulse / advisory chime — priority by rhythm, not just pitch). "airport" =
+  # the older melodic struck-bell PA chimes. Changing this regenerates the
+  # speaker WAVs on next add-on restart.
+  BROADCAST_CHIME_PACK: powerplant
+  # Min alarm severity that triggers a broadcast.
+  BROADCAST_MIN_SEVERITY: critical
+  # Quiet hours suppress warning/info broadcasts. Critical always fires.
+  BROADCAST_QUIET_HOURS: "22-06"
+  # v0.9.70 — Wyoming Protocol server (Piper TTS) location. The default
+  # `core-piper` hostname routes to HA's official Piper add-on inside
+  # the supervisor's network. Override only if you're running Piper on
+  # an external host. Port 10200 is Piper's standard Wyoming port.
+  BROADCAST_WYOMING_HOST: core-piper
+  BROADCAST_WYOMING_PORT: 10200
+  # v0.9.70 — optional Piper voice override (e.g. "en_US-amy-medium",
+  # "en_US-ryan-low", "en_GB-alan-low"). Leave empty to use whatever
+  # voice you've configured in the Piper add-on's own options. The list
+  # of available voices is published by Piper at startup and visible in
+  # the Piper add-on log.
+  BROADCAST_WYOMING_VOICE: ""
+  # v0.12.0 — audible escalating alarm when the SHP2 backup pool crosses
+  # DOWN through 40/30/20/15/10/8/4/2 %. Plays the chime + a spoken level on
+  # the broadcast speakers, with rising priority (Low→Medium→High→Critical),
+  # and respects the per-priority toggles on the Alert Settings page.
+  BATTERY_SOC_ALARM_ENABLED: true
+  # v0.14.0 — projection-depletion audible alarm. Announces (escalating
+  # Low→Medium→High→Critical) when the 24h off-grid runway projection shows the
+  # backup pool reaching its reserve floor — or empty — before solar recovers, so
+  # load can be shed early. Distinct from the SoC-threshold ladder above (which
+  # only fires once the pool has already fallen). Re-announces at most every
+  # REANNOUNCE_MIN minutes while the projection persists; Low/Medium tiers respect
+  # quiet hours, High/Critical always annunciate.
+  BATTERY_RUNWAY_ALARM_ENABLED: true
+  BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: 60
+  # v0.15.2 — off-grid honesty: whether the site has grid import available. MUST
+  # be false for an islanded off-grid system, so the dispatch optimizer stops
+  # assuming an impossible grid backstop. Set true only if you are grid-tied.
+  GRID_AVAILABLE: false
+  # v0.15.2 — intelligent load-shedding ADVISOR (Phase 1: read + advise, no
+  # actuation). When the runway projection drops below the threshold, it
+  # recommends which allowlisted loads to shed (with a counterfactual runway) and
+  # publishes the recommendation as HA entities — your OWN HA automations decide
+  # whether to act. The add-on never toggles a load itself.
+  LOAD_SHEDDING_ADVISORY_ENABLED: true
+  # Allowlist of sheddable loads (empty = advisory inactive, the safe default).
+  # Comma-separated  entity_id:priority:label:estimated_watts[:shp2_circuit]
+  # priority 1 = shed first (least important). Example:
+  #   switch.irrigation:1:Irrigation:200,switch.pool_pump:2:Pool pump:400:5
+  LOAD_SHEDDING_SHED_ENTITIES: ""
+  # Hours-to-reserve at/below which the advisor starts recommending shedding.
+  LOAD_SHEDDING_RUNWAY_THRESHOLD_H: 4.0
+  # Extra hours above the threshold the (counterfactual) runway must reach before
+  # a shed is no longer recommended — anti-flap margin.
+  LOAD_SHEDDING_RESTORE_MARGIN_H: 2.0
+schema:
+  ECOFLOW_ACCESS_KEY: password
+  ECOFLOW_SECRET_KEY: password
+  ECOFLOW_API_HOST: url
+  LOG_LEVEL: list(trace|debug|info|warn|error|fatal)
+  FORECAST_LAT: float
+  FORECAST_LON: float
+  TELNET_ENABLED: bool
+  TELNET_PORT: port
+  NOTIFY_CHANNEL: list(none|ntfy|pushover|webhook|ha)
+  NOTIFY_MIN_SEVERITY: list(warning|critical)
+  NOTIFY_RESOLVED: bool
+  # The two URL-looking fields below intentionally use `str?` instead of
+  # `url?`. HA's voluptuous schema treats `url?` as "may be absent" — but if
+  # present with an empty default it rejects the save. Both fields ship with
+  # an empty default (only filled when the matching NOTIFY_CHANNEL is used),
+  # so they'd block Save on first install. The runtime notify code validates
+  # the URL at the moment it actually uses the channel.
+  NOTIFY_NTFY_SERVER: "str?"
+  NOTIFY_NTFY_TOPIC: "str?"
+  NOTIFY_PUSHOVER_TOKEN: "password?"
+  NOTIFY_PUSHOVER_USER: "password?"
+  NOTIFY_WEBHOOK_URL: "str?"
+  NOTIFY_QUIET_HOURS: "str?"
+  NOTIFY_DIGEST_HOUR: int(0,23)?
+  NWS_ENABLED: bool
+  MQTT_DISCOVERY_ENABLED: bool
+  MQTT_DISCOVERY_HOST: "str?"
+  MQTT_DISCOVERY_PORT: port
+  MQTT_DISCOVERY_USER: "str?"
+  MQTT_DISCOVERY_PASS: "password?"
+  MQTT_DISCOVERY_PREFIX: "str?"
+  WRITE_DEBUG_TOKEN: "password?"
+  BROADCAST_ENABLED: bool
+  BROADCAST_TARGETS: "str?"
+  BROADCAST_AUDIO_BASE: "str?"
+  BROADCAST_VOLUME: float
+  BROADCAST_LEAD_SILENCE_MS: int(0,5000)?
+  BROADCAST_REPEAT: int(1,3)?
+  BROADCAST_REPEAT_GAP_MS: int(0,5000)?
+  BROADCAST_CHIME_GAP_MS: int(0,5000)?
+  BROADCAST_ANNOUNCE_VOLUME: "str?"
+  BROADCAST_USE_PRE_ANNOUNCE: bool
+  BROADCAST_ANNOUNCE_RETRIES: int(0,3)?
+  BROADCAST_CHIME_PACK: list(powerplant|airport)?
+  BROADCAST_MIN_SEVERITY: list(critical|warning)
+  BROADCAST_QUIET_HOURS: "str?"
+  BROADCAST_WYOMING_HOST: "str?"
+  BROADCAST_WYOMING_PORT: port
+  BROADCAST_WYOMING_VOICE: "str?"
+  BATTERY_SOC_ALARM_ENABLED: bool
+  BATTERY_RUNWAY_ALARM_ENABLED: bool
+  BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: int(5,720)?
+  GRID_AVAILABLE: bool
+  LOAD_SHEDDING_ADVISORY_ENABLED: bool
+  LOAD_SHEDDING_SHED_ENTITIES: "str?"
+  LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float
+  LOAD_SHEDDING_RESTORE_MARGIN_H: float
