@@ -193,6 +193,35 @@ const auth = createAuth({
 const WRITE_TOKEN_PATH = auth.tokenPath;
 const requireWriteAuth = auth.requireWriteAuth;
 
+/**
+ * v0.16.1 — minimal in-process fixed-window rate limiter (no dependency).
+ * Applied AFTER requireWriteAuth on the filesystem-touching write endpoints
+ * (chime upload/delete/config). These are operator-only (ingress/same-origin)
+ * and already bounded by chimeStore's 2 MB / 20-file caps, but a fixed cap also
+ * bounds CPU (WAV normalization) and disk churn if a compromised same-origin
+ * session floods them — and addresses CodeQL js/missing-rate-limiting. Shared
+ * bucket across the chime write routes; 30 writes/minute is ample for a human.
+ */
+function makeRateLimiter(maxPerWindow: number, windowMs: number) {
+  let windowStart = 0;
+  let count = 0;
+  return (
+    _req: import('fastify').FastifyRequest,
+    reply: import('fastify').FastifyReply,
+    done: (err?: Error) => void,
+  ): void => {
+    const now = Date.now();
+    if (now - windowStart >= windowMs) { windowStart = now; count = 0; }
+    count += 1;
+    if (count > maxPerWindow) {
+      reply.code(429).send({ ok: false, error: 'rate limited — too many writes, slow down' });
+      return; // reply sent; do NOT call done() (request is handled)
+    }
+    done();
+  };
+}
+const chimeWriteRateLimit = makeRateLimiter(30, 60_000);
+
 await app.register(cors, {
   // Callback form: same-origin requests (no Origin header) get echoed
   // through unchanged; cross-origin requests are accepted only if the
@@ -1910,7 +1939,7 @@ app.get('/api/chime-config', async () => ({ ok: true, ...chimeConsoleResponse() 
 // under a content-addressed id (no client filename ever touches a path).
 app.post<{ Querystring: { name?: string } }>(
   '/api/chimes',
-  { preHandler: requireWriteAuth },
+  { preHandler: [requireWriteAuth, chimeWriteRateLimit] },
   async (req, reply) => {
     const buf = req.body as Buffer | undefined;
     if (!Buffer.isBuffer(buf) || buf.length === 0) {
@@ -1939,7 +1968,7 @@ app.post<{ Querystring: { name?: string } }>(
 // (an assignment can never dangle at a missing file).
 app.delete<{ Params: { id: string } }>(
   '/api/chimes/:id',
-  { preHandler: requireWriteAuth },
+  { preHandler: [requireWriteAuth, chimeWriteRateLimit] },
   async (req, reply) => {
     const id = req.params.id;
     const revertedAssignments = revertAssignmentsFor(id);
@@ -1963,7 +1992,7 @@ app.delete<{ Params: { id: string } }>(
 // Assign tones per level. Rejects ids that don't exist (keeps prior value).
 app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignment>> } }>(
   '/api/chime-config',
-  { preHandler: requireWriteAuth },
+  { preHandler: [requireWriteAuth, chimeWriteRateLimit] },
   async (req, reply) => {
     const patch = req.body?.assignments ?? {};
     const { rejected } = updateChimeConfig(patch, 'web');

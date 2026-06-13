@@ -3,6 +3,19 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.16.1 — 2026-06-12
+
+Security/quality pass on the Alert Console push + a broadcast-scope guard.
+
+Triaged the GitHub code-scanning + Dependabot alerts the Alert Console push generated, and hardened the audible-broadcast scope:
+
+- **Path-injection (CodeQL `js/path-injection`, chimeStore.ts) — hardened.** Every user-supplied chime id now passes through one guarded resolver (`chimeFilePath`): it must be exactly 16 lowercase hex chars AND the resolved path must stay within `/data/chimes`. The id regex already made traversal impossible, but the explicit containment check makes the no-escape guarantee unmistakable (and clears the alert). All file ops (read/delete/write) route through it.
+- **Missing rate-limiting (CodeQL `js/missing-rate-limiting`) — addressed.** The chime upload/delete/config-write endpoints now sit behind a small in-process fixed-window limiter (30 writes/min, no new dependency) on top of the existing ingress/same-origin write-auth and the 2 MB / 20-file caps — bounding CPU (WAV normalization) and disk churn from a compromised same-origin session.
+- **Dependabot — esbuild 0.28.0 → 0.28.1** (dev-only, build-time; `npm audit` now clean). The web bundle's esbuild (0.25.x) is outside the advisory range — unaffected.
+- **Broadcast-scope guarantee, now test-locked.** Audited the whole broadcast path: a notice can only ever play on the entities in `BROADCAST_TARGETS` — `loadBroadcastConfig` drops blanks and anything not prefixed `media_player.`, an empty list is explicitly blocked before any Music Assistant call (no "empty → all speakers" fan-out), and `play_announcement` is always called with exactly `cfg.targets`. There is no `play_media`, wildcard, or all-speakers path anywhere. Two new regression tests pin this so a future edit can't widen the scope.
+
+532/532 server tests pass (4 new: 2 broadcast-scope guards + the strengthened chime path-traversal rejection). Pre-existing CodeQL findings (test-harness temp files, atomic-write TOCTOU false positives, unpinned CI actions) are unchanged and out of scope for this push.
+
 ## 0.16.0 — 2026-06-12
 
 Alert Console — the control panel for your alarm tones (UI for v0.15.23).
