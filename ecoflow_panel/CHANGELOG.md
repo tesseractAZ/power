@@ -3,6 +3,21 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.19.0 — 2026-06-13
+
+Unified Alert Console — the separate **Alert Settings** and **Alert Console** tabs are now one page, and it surfaces everything the v0.16.4–v0.18.0 backend work added.
+
+The single **Alert Console** tab now has, top to bottom:
+
+- **Audible broadcasts** (new) — an on/off toggle and a volume slider that take effect **live, no restart** (the v0.18.0 runtime config). The add-on options remain the boot default; flipping these sets a saved override, with a "Reset to add-on default" action and a clear note when the volume is pinned by `BROADCAST_ANNOUNCE_VOLUME`.
+- **Annunciation** — the per-ISA-priority on/off switches, the chime-repeat stepper, the per-priority Preview (browser or speakers), and the **Critical-silence confirm** (silencing P1 still requires a deliberate confirm and shows a persistent banner) — all carried over intact.
+- **Tone per alert level** — each level (Critical/Warning/Advisory) can now be set to its default klaxon, **one of 16 built-in tones** (v0.17.0), or one of your uploads, each previewable in-browser. A new **Built-in tones** strip lets you audition every system tone before assigning it.
+- **Tone library** — upload / preview / delete your own .wav tones (unchanged).
+
+Three independent settings objects back the page (annunciation, tones, broadcast), each saved to its own endpoint, so one save can never clobber another. All audio previews and saves are HA-ingress-relative. Adversarially reviewed (two lenses) → ship. tsc clean, web bundle builds.
+
+This completes the Alert Console v2 project (zombie-gate → tone library → runtime broadcast config → unified page).
+
 ## 0.18.0 — 2026-06-13
 
 Live broadcast controls — turn audible broadcasts on/off and set their volume without an add-on restart (backend). The on-page controls land in the upcoming unified Alert Console.
