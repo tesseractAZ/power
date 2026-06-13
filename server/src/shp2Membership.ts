@@ -74,3 +74,28 @@ export function isShp2Connected(sn: string, connected: Set<string>): boolean {
   if (connected.size === 0) return true;
   return connected.has(sn);
 }
+
+/**
+ * v0.16.4 — Designated bench spares (Core 4 + Core 5).
+ *
+ * These two DPUs are intentionally kept powered down and are NOT wired into
+ * the home's SHP2. Their EcoFlow-Cloud "offline" / stale-telemetry state is an
+ * EXPECTED steady state — not an event — so the connectivity alert for them is
+ * emitted non-annunciating (visible in the UI, but no chime / push / broadcast;
+ * see alerts.ts). This is the single source of truth for "designated bench
+ * spare," replacing the duplicated `EXCLUDED_SPARE_SNS` that previously lived in
+ * repairIssues.ts.
+ *
+ * Why an explicit SN allowlist (not the dynamic isConnected membership) is the
+ * SAFETY FLOOR for the zombie gate: a genuine home core (1/2/3) — even one that
+ * is faulted or unplugged and has therefore dropped out of the SHP2's
+ * `isConnected` sources — must NEVER have its real offline alarm muted. Because
+ * a home core's SN is never in this set, it can never be misclassified as a
+ * spare. Pair this floor with a POSITIVE connected-source check
+ * (`shp2ConnectedDpuSns(...).has(sn)`) to re-arm a spare the moment it is wired
+ * into an SHP2 and starts reporting as a connected source.
+ */
+export const SPARE_DPU_SNS: ReadonlySet<string> = new Set([
+  'Y711ZABA9H3T0489', // Core 4
+  'Y711ZAB59G9P0090', // Core 5
+]);

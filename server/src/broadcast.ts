@@ -205,8 +205,16 @@ export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; c
   // its audible is now the dedicated runwayAlarm.announce() path, so excluding it
   // here keeps the condition-transition broadcast from double-chiming the same
   // projected depletion (mirrors the backup-soc exclusion above).
+  // v0.16.4 — alerts explicitly flagged non-annunciating (annunciate === false,
+  // e.g. an expected-offline bench spare) stay visible in the UI but must never
+  // raise the broadcast condition level. Drop them before counting crit/warn so
+  // they can't trigger a chime/broadcast — same intent as the backup-soc /
+  // forecast-runtime exclusions above.
   const counted = alerts.filter(
-    (a) => !a.id.startsWith('backup-soc') && !a.id.startsWith('forecast-runtime'),
+    (a) =>
+      a.annunciate !== false &&
+      !a.id.startsWith('backup-soc') &&
+      !a.id.startsWith('forecast-runtime'),
   );
   const crit = counted.filter((a) => a.severity === 'critical').length;
   const warn = counted.filter((a) => a.severity === 'warning').length;

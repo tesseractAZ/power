@@ -450,7 +450,10 @@ export function buildAlertMessage(level: 'red' | 'yellow' | 'green', alerts: Ale
  *  by category importance (Battery > Solar > SHP2 > Grid > Thermal). */
 function pickPrimaryAlert(alerts: Alert[], level: 'red' | 'yellow'): Alert | null {
   const targetSeverity = level === 'red' ? 'critical' : 'warning';
-  const candidates = alerts.filter((a) => a.severity === targetSeverity);
+  // v0.16.4 — never feature a non-annunciating alert (annunciate === false, e.g.
+  // an expected-offline bench spare) in the spoken message: it must not be heard
+  // even when a genuine alert triggers the broadcast it would otherwise share.
+  const candidates = alerts.filter((a) => a.severity === targetSeverity && a.annunciate !== false);
   if (candidates.length === 0) return null;
   const catRank: Record<string, number> = {
     Battery: 1, SHP2: 2, Solar: 3, Grid: 4, Thermal: 5, Connectivity: 6,

@@ -1,6 +1,7 @@
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { activeSocBand, socAlertSeverity } from './batterySocAlarm.js';
+import { shp2ConnectedDpuSns, SPARE_DPU_SNS } from './shp2Membership.js';
 
 /**
  * System-wide alerts engine — the single source of truth. The web UI renders
@@ -30,6 +31,17 @@ export interface Alert {
   packNum?: number | null;
   /** Structured statistical breakdown — populated for learned alerts. */
   facts?: AlertFact[];
+  /**
+   * v0.16.4 — annunciation gate. `false` = this condition stays VISIBLE in
+   * snapshot.alerts (the UI still renders it) but must never produce an audible
+   * broadcast, a push notification, or raise the broadcast condition level.
+   * `undefined`/`true` = annunciate normally. Used for expected-steady-state
+   * conditions like a designated bench spare reporting offline. Mirrors the
+   * "never hide an active alarm, only mute it" pattern (v0.11.0). The two
+   * annunciation channels honour it: broadcast.conditionFromAlerts (audible) and
+   * alertMonitor's rising-edge router (push, above the quiet-hours digest queue).
+   */
+  annunciate?: boolean;
 }
 
 const cToF = (c: number) => c * 1.8 + 32;
@@ -190,10 +202,24 @@ export function computeAlerts(
     out.push({ id: 'grid-offgrid', severity: 'info', category: 'Grid', device: 'System', title: 'Running off-grid', detail: 'No grid import detected — fully on solar + batteries.' });
   }
 
+  // v0.16.4 — designated bench spares (Core 4/5) are intentionally kept powered
+  // down and are NOT wired into the SHP2, so their EcoFlow-offline / stale state
+  // is an EXPECTED steady state, not an event. Such a DPU's connectivity alert
+  // is emitted non-annunciating (visible in the UI, but no chime/push/condition
+  // raise — see the offline/stale branches below). The SPARE_DPU_SNS allowlist
+  // is the safety FLOOR: a real home core (1/2/3) is never in it, so even a
+  // faulted/unplugged home core — which drops out of the SHP2's connected
+  // sources — still annunciates its genuine offline alarm. The positive
+  // connected-source check re-arms a spare the moment it's wired into an SHP2.
+  const shp2Connected = shp2ConnectedDpuSns(devices);
+  const isExpectedOfflineSpare = (sn: string): boolean =>
+    SPARE_DPU_SNS.has(sn) && !shp2Connected.has(sn);
+
   for (const d of list) {
     if (!d.online) {
       const isCore = d.productName.toLowerCase().includes('delta pro ultra');
       const isPanel = d.productName.toLowerCase().includes('smart home panel');
+      const spare = isCore && isExpectedOfflineSpare(d.sn);
       // v0.7.7 — enrich the offline alert with WHEN we last actually heard
       // from the device and via which channel. A 47-min gap with last data
       // via MQTT looks very different from "never connected since boot".
@@ -215,29 +241,39 @@ export function computeAlerts(
             : ' Just dropped — likely a brief blip. Will re-evaluate.';
       out.push({
         id: `offline-${d.sn}`,
-        severity: isCore || isPanel ? 'warning' : 'info',
+        // A designated bench spare offline is expected, not a warning, and is
+        // marked non-annunciating so it never chimes/pushes/raises the condition.
+        severity: spare ? 'info' : isCore || isPanel ? 'warning' : 'info',
         category: 'Connectivity',
         device: d.deviceName,
-        title: 'Device offline (per EcoFlow Cloud)',
-        detail: `${d.deviceName} is flagged offline by EcoFlow's /device/list. ${conn?.mqttCount && conn.mqttCount > 0 ? `We previously received ${conn.mqttCount} MQTT message(s) this session; last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.` : 'No telemetry received this session.'}${hint}`,
+        title: spare ? 'Bench spare offline (expected)' : 'Device offline (per EcoFlow Cloud)',
+        detail: spare
+          ? `${d.deviceName} is a designated bench spare — kept powered down and not wired into the SHP2 — so EcoFlow Cloud reporting it offline is expected and not actionable. It will alarm normally once it's connected to an SHP2.`
+          : `${d.deviceName} is flagged offline by EcoFlow's /device/list. ${conn?.mqttCount && conn.mqttCount > 0 ? `We previously received ${conn.mqttCount} MQTT message(s) this session; last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.` : 'No telemetry received this session.'}${hint}`,
         coreNum: isCore ? dpuNum(d.deviceName) : null,
         facts,
+        ...(spare ? { annunciate: false } : {}),
       });
     } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {
       const conn = connectivity?.perDevice.get(d.sn);
+      const isCore = d.productName.toLowerCase().includes('delta pro ultra');
+      const spare = isCore && isExpectedOfflineSpare(d.sn);
       out.push({
         id: `stale-${d.sn}`,
-        severity: 'warning',
+        severity: spare ? 'info' : 'warning',
         category: 'Connectivity',
         device: d.deviceName,
-        title: 'Telemetry stale',
-        detail: `${d.deviceName} is flagged online by EcoFlow but no fresh telemetry for ${fmtAge(now - d.lastUpdated)}. ${conn?.lastMqttAt ? `Last MQTT msg ${fmtAge(now - conn.lastMqttAt)} ago.` : ''}`,
-        coreNum: d.productName.toLowerCase().includes('delta pro ultra') ? dpuNum(d.deviceName) : null,
+        title: spare ? 'Bench spare telemetry idle (expected)' : 'Telemetry stale',
+        detail: spare
+          ? `${d.deviceName} is a designated bench spare not wired into the SHP2; intermittent or absent telemetry is expected. It will alarm normally once it's connected to an SHP2.`
+          : `${d.deviceName} is flagged online by EcoFlow but no fresh telemetry for ${fmtAge(now - d.lastUpdated)}. ${conn?.lastMqttAt ? `Last MQTT msg ${fmtAge(now - conn.lastMqttAt)} ago.` : ''}`,
+        coreNum: isCore ? dpuNum(d.deviceName) : null,
         facts: [
           { label: 'Last telemetry', value: `${fmtAge(now - d.lastUpdated)} ago` },
           { label: 'Last source', value: conn?.lastSource?.toUpperCase() ?? 'unknown' },
           { label: 'MQTT msg count', value: conn?.mqttCount != null ? String(conn.mqttCount) : '—' },
         ],
+        ...(spare ? { annunciate: false } : {}),
       });
     }
   }
