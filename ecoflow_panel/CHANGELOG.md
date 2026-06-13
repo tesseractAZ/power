@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.16.3 — 2026-06-12
+
+Hotfix: restore the add-on manifest. The v0.16.2 merge inadvertently truncated `config.yaml` to empty (a botched local git recovery during the security-alert pass). This restores the full manifest verbatim from v0.16.1 — all options, schema, ports, and permissions — with the version bumped to 0.16.3. No functional or behavioral change; purely the manifest contents. Code (v0.16.2 prototype-pollution hardening) is unaffected and retained.
+
 ## 0.16.2 — 2026-06-12
 
 Follow-up to the security pass: prototype-pollution hardening on the chime manifest.
