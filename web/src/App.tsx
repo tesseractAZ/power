@@ -25,10 +25,9 @@ const ThermalPanel = lazy(() => import('./pages/ThermalPanel').then((m) => ({ de
 const SolarPanel = lazy(() => import('./pages/SolarPanel').then((m) => ({ default: m.SolarPanel })));
 const StrategyPanel = lazy(() => import('./pages/StrategyPanel').then((m) => ({ default: m.StrategyPanel })));
 const AlertsPanel = lazy(() => import('./pages/AlertsPanel').then((m) => ({ default: m.AlertsPanel })));
-// v0.11.0 — Alert Settings: per-priority annunciation on/off + chime + preview.
-const AlertSettingsPanel = lazy(() =>
-  import('./pages/AlertSettingsPanel').then((m) => ({ default: m.AlertSettingsPanel })),
-);
+// v0.19.0 — the unified Alert Console (broadcast master + per-priority
+// annunciation + per-level tones + library) replaced the separate Alert
+// Settings + Alert Console tabs.
 const AlertConsolePanel = lazy(() =>
   import('./pages/AlertConsolePanel').then((m) => ({ default: m.AlertConsolePanel })),
 );
@@ -57,7 +56,7 @@ function NormalApp() {
   const devices = snapshot ? Object.values(snapshot.devices) : [];
   const [showHistory, setShowHistory] = useState(false);
   const [tab, setTab] = useState<
-    'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-settings' | 'alert-console' | 'predictive'
+    'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-console' | 'predictive'
   >('dashboard');
   const sorted = sortDevices(devices);
 
@@ -151,16 +150,9 @@ function NormalApp() {
               )}
             </button>
             <button
-              onClick={() => setTab('alert-settings')}
-              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'alert-settings' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
-              title="Turn alarm annunciation on/off per ISA priority, set the chime repeat, and preview announcements."
-            >
-              Alert Settings
-            </button>
-            <button
               onClick={() => setTab('alert-console')}
               className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'alert-console' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
-              title="Upload your own alarm tones and assign one to prepend each alert level."
+              title="Broadcast on/off + volume, per-priority annunciation, and the tone for each alert level (built-in or your own)."
             >
               Alert Console
             </button>
@@ -207,7 +199,6 @@ function NormalApp() {
           {tab === 'solar' && <SolarPanel devices={snapshot.devices} />}
           {tab === 'strategy' && <StrategyPanel devices={snapshot.devices} />}
           {tab === 'alerts' && <AlertsPanel alerts={thresholdAlerts} />}
-          {tab === 'alert-settings' && <AlertSettingsPanel />}
           {tab === 'alert-console' && <AlertConsolePanel />}
           {tab === 'predictive' && <PredictiveInsights alerts={learnedAlerts} />}
         </Suspense>
