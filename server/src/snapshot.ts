@@ -59,6 +59,21 @@ export class SnapshotStore extends EventEmitter {
   // get silent no-op behavior by default. (The MQTT entry point also wires it.)
   private logger: (msg: string) => void = () => {};
 
+  /**
+   * v0.20.0 — monotonic per-emit sequence, bumped on every 'change' emit. Lets
+   * the WS layer serialize the snapshot frame ONCE per emit and reuse the same
+   * bytes across all connected clients (a 50-150 KB JSON.stringify otherwise
+   * runs once per client per change). Keyed on a counter, NOT generatedAt,
+   * because `snap` is mutated in place (stable reference) and two emits can
+   * share a millisecond under sub-second MQTT bursts — a counter can't collide.
+   */
+  frameSeq = 0;
+
+  override emit(event: string | symbol, ...args: any[]): boolean {
+    if (event === 'change') this.frameSeq++;
+    return super.emit(event, ...args);
+  }
+
   setLogger(log: (msg: string) => void) {
     this.logger = log;
   }

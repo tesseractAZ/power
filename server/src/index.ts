@@ -1554,11 +1554,25 @@ app.get('/api/alerts/outcomes/stats', async (req, reply) =>
   cached(req, reply, { families: computeFamilyStats() }, 60),
 );
 
+// v0.20.0 — serialize the snapshot frame once per emit and share it across all
+// WS clients. The store hands the SAME `snap` reference to every listener within
+// one synchronous emit, and `store.frameSeq` is bumped once per emit, so caching
+// on frameSeq yields byte-identical frames per emit with one JSON.stringify
+// instead of one-per-client. (store.get() === the emitted `snap`.)
+let wsFrameSeq = -1;
+let wsFrameStr = '';
+function snapshotFrame(): string {
+  if (store.frameSeq !== wsFrameSeq) {
+    wsFrameStr = JSON.stringify({ type: 'snapshot', data: store.get() });
+    wsFrameSeq = store.frameSeq;
+  }
+  return wsFrameStr;
+}
 app.get('/ws', { websocket: true }, (socket) => {
-  socket.send(JSON.stringify({ type: 'snapshot', data: store.get() }));
-  const onChange = (snap: any) => {
+  socket.send(snapshotFrame());
+  const onChange = () => {
     if (socket.readyState === socket.OPEN) {
-      socket.send(JSON.stringify({ type: 'snapshot', data: snap }));
+      socket.send(snapshotFrame());
     }
   };
   store.on('change', onChange);

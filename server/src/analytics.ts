@@ -2816,9 +2816,13 @@ export function computeChargeCurveFingerprint(
   const packs: ChargeCurvePack[] = [];
   for (const d of dpus) {
     for (const pk of d.projection.packs) {
-      const socPts = recorder.query(d.sn, `pack${pk.num}_soc`, since, now);
-      const vMaxPts = recorder.query(d.sn, `pack${pk.num}_vol_max_mv`, since, now);
-      const inPts = recorder.query(d.sn, `pack${pk.num}_in`, since, now);
+      // v0.20.0 — one round-trip instead of three (same ts-ASC per-metric rows).
+      const byMetric = recorder.queryMulti(
+        d.sn, [`pack${pk.num}_soc`, `pack${pk.num}_vol_max_mv`, `pack${pk.num}_in`], since, now,
+      );
+      const socPts = byMetric.get(`pack${pk.num}_soc`) ?? [];
+      const vMaxPts = byMetric.get(`pack${pk.num}_vol_max_mv`) ?? [];
+      const inPts = byMetric.get(`pack${pk.num}_in`) ?? [];
       if (socPts.length < 50 || vMaxPts.length < 50) {
         packs.push({
           sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName), packNum: pk.num,
@@ -2987,8 +2991,11 @@ export function computeInternalResistance(
 
   const out: InternalResistanceDevice[] = [];
   for (const d of dpus) {
-    const vPts = recorder.query(d.sn, 'bat_vol', since, now);
-    const aPts = recorder.query(d.sn, 'bat_amp', since, now);
+    // v0.20.0 — one round-trip instead of two (queryMulti returns the same
+    // ts-ASC rows per metric; the V/A snapping depends only on that ordering).
+    const byMetric = recorder.queryMulti(d.sn, ['bat_vol', 'bat_amp'], since, now);
+    const vPts = byMetric.get('bat_vol') ?? [];
+    const aPts = byMetric.get('bat_amp') ?? [];
     if (vPts.length < 30 || aPts.length < 30) {
       out.push({
         sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),

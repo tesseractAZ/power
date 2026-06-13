@@ -247,14 +247,15 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
-  // Cache hit short-circuit.
-  if (existsSync(outPath)) {
-    try {
-      const st = await stat(outPath);
-      return { ok: true, filename, sizeBytes: st.size, fromCache: true };
-    } catch {
-      // stat failed somehow — fall through to re-render
-    }
+  // Cache hit short-circuit. v0.20.0 — a single async stat (which yields both
+  // existence and size) replaces the prior synchronous existsSync + stat; ENOENT
+  // throws into the catch, so the fall-through-to-render behavior is unchanged
+  // and the event loop is no longer blocked on the common cache-hit path.
+  try {
+    const st = await stat(outPath);
+    return { ok: true, filename, sizeBytes: st.size, fromCache: true };
+  } catch {
+    // not cached (or unstattable) → fall through to re-render
   }
 
   // Load the chime. v0.15.23 — a custom tone (opts.chimePath) overrides the

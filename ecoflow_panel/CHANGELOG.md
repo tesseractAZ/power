@@ -3,6 +3,19 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.20.0 — 2026-06-13
+
+Performance pass — hot-path CPU/allocation/IO wins from a multi-agent audit. **Every change is provably behaviour-preserving** (identical computed and persisted values); the audit's value-touching ideas were deliberately deferred, not applied.
+
+- **WebSocket frame serialized once per change, not once per client.** With more than one dashboard/HACS-card open, a single MQTT-driven change previously ran `JSON.stringify` on the 50–150 KB snapshot once per connected client; it now serializes once per change and reuses the bytes. Keyed on a new per-emit counter (not a timestamp) so sub-second bursts can't collide — pinned by 3 new tests.
+- **Audio render: one less blocking syscall + one less full-payload copy.** The cache-hit path drops a synchronous `existsSync` (a single async `stat` already yields existence + size), and `pcmToWav` writes the header directly into a single output buffer instead of allocating + concatenating (which copied the audio a second time). Byte-identical WAVs.
+- **Analytics: fewer SQLite round-trips.** Internal-resistance and charge-curve fingerprinting now batch their per-DPU / per-pack reads into one `queryMulti` (the same ts-ASC rows as before), matching the pattern already used elsewhere.
+- **Dead-code:** removed a duplicate exact-match branch in the TTS engine picker.
+
+What was **intentionally not touched** (flagged by the audit as could-move-a-computed-value, routed to a deliberate decision instead): the backtest/forecast-skill N+1 loops (a batch rewrite must replicate the recorder's inclusive-boundary double-counting or it changes a forecast score), the backtest prediction-vs-actual scope, the `/api/debug` flatten cache, and all hardened broadcast/alert/recorder/membership paths. The data-integrity auditor verified the bpPwr sign convention, the spare-core fleet-exclusion across all 14 sum sites, the lifetime accumulators, and the runway guards are all intact.
+
+559/559 server tests pass (3 new). No behaviour or value change for any device, alert, or counter.
+
 ## 0.19.0 — 2026-06-13
 
 Unified Alert Console — the separate **Alert Settings** and **Alert Console** tabs are now one page, and it surfaces everything the v0.16.4–v0.18.0 backend work added.
