@@ -43,6 +43,24 @@ test('conditionFromAlerts — any critical → red (regardless of warnings)', ()
   assert.equal(r.warn, 1);
 });
 
+test('conditionFromAlerts — v0.16.4: annunciate:false alerts do NOT raise the condition', () => {
+  // An expected-offline bench spare is emitted with annunciate:false. It must
+  // stay out of the crit/warn counts so it can never trigger a chime/broadcast,
+  // while a genuine (annunciating) warning alongside it still raises the level.
+  const muted = conditionFromAlerts([
+    { id: 'offline-SPARE', severity: 'warning', category: 'Connectivity', device: 'Core 4', title: 't', detail: 'd', annunciate: false },
+  ] as any);
+  assert.equal(muted.level, 'green', 'a non-annunciating warning must not turn the condition yellow');
+  assert.equal(muted.warn, 0);
+
+  const mixed = conditionFromAlerts([
+    { id: 'offline-SPARE', severity: 'warning', category: 'Connectivity', device: 'Core 4', title: 't', detail: 'd', annunciate: false },
+    { id: 'offline-CORE1', severity: 'warning', category: 'Connectivity', device: 'Core 1', title: 't', detail: 'd' },
+  ] as any);
+  assert.equal(mixed.level, 'yellow', 'a real annunciating warning still raises the condition');
+  assert.equal(mixed.warn, 1, 'only the annunciating alert is counted');
+});
+
 test('loadBroadcastConfig — defaults are safe (disabled, no targets)', () => {
   // Clear any env in the test context.
   const prev = { ...process.env };

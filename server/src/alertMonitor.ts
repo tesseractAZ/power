@@ -714,6 +714,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         continue;
       }
       existing.alert = a;
+      // v0.16.4 — non-annunciating alerts (annunciate === false, e.g. an
+      // expected-offline bench spare) stay tracked + visible in snapshot.alerts
+      // but must never push or queue a notification. Gate HERE, above the
+      // quiet-hours split, so the morning digest queue can't leak them either.
+      // The falling-edge "Resolved" path is gated separately below (a boot can
+      // seed `notified:true` for an already-present alert, so the rising-edge
+      // gate alone isn't sufficient there).
+      if (a.annunciate === false) continue;
       // v0.9.58 — critical alerts bypass debounce on the notify path. A brief
       // critical condition that fires and clears in <60s would otherwise be
       // silently swallowed. Warning/info still debounce to avoid noisy
@@ -762,7 +770,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // "Resolved" — a genuine clear still resolves once the window passes.
       if (t.alert.source === 'learned' && now - monitorStartMs < LEARNED_RESOLVE_GRACE_MS) continue;
       const duration = now - t.firstSeen;
-      if (t.notified && cfg.notifyResolved && qualifies(t.alert.severity, cfg.minSeverity)) {
+      // v0.16.4 — defense-in-depth: a non-annunciating alert (annunciate:false,
+      // e.g. an expected-offline bench spare) must not emit a "Resolved" push
+      // either, even if a boot seeded its `notified` flag true. The current
+      // spare is info-severity (so qualifies() already returns false), but this
+      // keeps the mute correct for any future warning/critical annunciate:false.
+      if (t.notified && t.alert.annunciate !== false && cfg.notifyResolved && qualifies(t.alert.severity, cfg.minSeverity)) {
         await dispatch(t.alert, 'resolved');
       }
       // v0.13.2 — account EVERY cleared rise in telemetry, not just clears that

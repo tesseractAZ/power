@@ -3,6 +3,20 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.16.4 — 2026-06-13
+
+Zombie-alert gate: designated bench spares (Core 4 / Core 5) no longer chime, push, or raise the broadcast condition when they go offline.
+
+Cores 4 and 5 are kept powered down and aren't wired into the SHP2, so EcoFlow Cloud flagging them "offline" — or their telemetry going idle — is an expected steady state, not an event. Their connectivity alert was needlessly driving the condition to yellow and firing the audible broadcast + push notification.
+
+- **Mute, don't hide.** The spare's offline / stale-telemetry alert is still **emitted and visible** in the UI (at `info` severity with honest "designated bench spare — expected" copy), but is flagged non-annunciating: no chime, no push, and it no longer counts toward the broadcast condition level. This follows the established "never hide an active condition, only mute it" pattern (v0.11.0).
+- **The safety floor is an explicit allowlist, not a dynamic membership test.** Muting requires the device's SN to be in the known bench-spare allowlist (`SPARE_DPU_SNS`) **and** to not currently report as a connected SHP2 source. A genuine home core (1/2/3) is never in the allowlist, so even one that is **faulted or unplugged** — and has therefore dropped out of the SHP2's connected-source set — still annunciates its real offline alarm. Silently muting one real core-down alarm on an off-grid home is the failure this gate is specifically built to avoid.
+- **Auto re-arm.** The moment a spare is wired into an SHP2 and reports as a connected source, it begins annunciating offline again automatically (the positive connected-source check), with no code change.
+- **Single source of truth.** The bench-spare SN list now lives in one place (`shp2Membership.ts`); `repairIssues.ts` (which already suppressed the spares' "power-cycle" repair card) was migrated onto it, removing the duplicated hardcoded set.
+- **All four annunciation paths honour the flag** — broadcast condition, the spoken TTS message, the push notification (gated above the quiet-hours digest queue so the morning digest can't leak it), and the falling-edge "Resolved" push — verified by an adversarial two-lens review.
+
+541/541 server tests pass (8 new: 7 zombie-gate cases incl. the faulted-home-core safety case + a broadcast-condition regression). No change to default behaviour for any non-spare device.
+
 ## 0.16.3 — 2026-06-12
 
 Hotfix: restore the add-on manifest. The v0.16.2 merge inadvertently truncated `config.yaml` to empty (a botched local git recovery during the security-alert pass). This restores the full manifest verbatim from v0.16.1 — all options, schema, ports, and permissions — with the version bumped to 0.16.3. No functional or behavioral change; purely the manifest contents. Code (v0.16.2 prototype-pollution hardening) is unaffected and retained.

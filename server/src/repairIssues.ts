@@ -2,6 +2,7 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection, DpuProjection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { FleetDegradation, SoilingDecomposition, EquipmentHealth, ForecastSkillReport } from './analytics.js';
+import { SPARE_DPU_SNS } from './shp2Membership.js';
 
 /**
  * Actionable maintenance items surfaced as repair issues.
@@ -44,7 +45,8 @@ const firstSeenById = new Map<string, number>();
 // powered down, so their EcoFlow-offline state is expected — not actionable.
 // Suppress zombie-offline repair cards for these SNs to stop false-positive
 // "power-cycle / reseat Ethernet" warnings.
-const EXCLUDED_SPARE_SNS = new Set(['Y711ZABA9H3T0489', 'Y711ZAB59G9P0090']);
+// v0.16.4 — the spare-SN allowlist now lives in shp2Membership.ts as the single
+// source of truth (shared with the connectivity-alert zombie gate in alerts.ts).
 
 function track(id: string, now: number): number {
   let ts = firstSeenById.get(id);
@@ -72,7 +74,7 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
   for (const d of Object.values(ctx.devices)) {
     if (!d.online) {
       // v0.10.4 — skip intentionally-offline bench spares (Core4, Core5).
-      if (EXCLUDED_SPARE_SNS.has(d.sn)) continue;
+      if (SPARE_DPU_SNS.has(d.sn)) continue;
       const id = `zombie-${d.sn}`;
       out.push({
         id,
