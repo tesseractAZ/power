@@ -3,6 +3,19 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.16.0 — 2026-06-12
+
+Alert Console — the control panel for your alarm tones (UI for v0.15.23).
+
+A new **Alert Console** tab lets you centrally administer alert-notification audio:
+
+- **Upload your own alarm sounds** (.wav) into a tone library — shown with duration, size, and source format. Tones are normalized to the speaker format automatically on upload, so a 44.1 kHz stereo file just works.
+- **Assign a tone per alert level** — Critical (red) / Warning (yellow) / Advisory (green) — to prepend that level's spoken announcement in place of the built-in chime. Each row has a one-click in-browser **Preview**.
+- **Delete** a tone (any level using it auto-reverts to the built-in chime), and see which levels each tone is in use on.
+- **Read-only central view** of your notification processing — broadcasts on/off, speaker count, Music Assistant status, volume, repeat, min severity, quiet hours — with a clear warning when audible broadcasts are currently disabled.
+
+Everything is ingress-relative (works in the HA sidebar and on the LAN) and uses the same write-auth as the rest of the panel — no extra setup. The 4 ISA priorities collapse to the 3 audio levels exactly as the rest of the alert pipeline already does, so what you assign is what plays. The existing Alert Settings page (per-priority enable + chime repeat + Preview) is unchanged and sits beside the Console.
+
 ## 0.15.23 — 2026-06-12
 
 Alert Console, backend — upload your own alarm tones and assign one per alert level.

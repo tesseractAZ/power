@@ -29,6 +29,9 @@ const AlertsPanel = lazy(() => import('./pages/AlertsPanel').then((m) => ({ defa
 const AlertSettingsPanel = lazy(() =>
   import('./pages/AlertSettingsPanel').then((m) => ({ default: m.AlertSettingsPanel })),
 );
+const AlertConsolePanel = lazy(() =>
+  import('./pages/AlertConsolePanel').then((m) => ({ default: m.AlertConsolePanel })),
+);
 const PredictiveInsights = lazy(() => import('./pages/PredictiveInsights').then((m) => ({ default: m.PredictiveInsights })));
 const TrendChart = lazy(() => import('./charts/TrendChart').then((m) => ({ default: m.TrendChart })));
 
@@ -54,7 +57,7 @@ function NormalApp() {
   const devices = snapshot ? Object.values(snapshot.devices) : [];
   const [showHistory, setShowHistory] = useState(false);
   const [tab, setTab] = useState<
-    'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-settings' | 'predictive'
+    'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-settings' | 'alert-console' | 'predictive'
   >('dashboard');
   const sorted = sortDevices(devices);
 
@@ -155,6 +158,13 @@ function NormalApp() {
               Alert Settings
             </button>
             <button
+              onClick={() => setTab('alert-console')}
+              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'alert-console' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
+              title="Upload your own alarm tones and assign one to prepend each alert level."
+            >
+              Alert Console
+            </button>
+            <button
               onClick={() => setTab('predictive')}
               className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap flex items-center gap-1.5 ${tab === 'predictive' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
             >
@@ -198,6 +208,7 @@ function NormalApp() {
           {tab === 'strategy' && <StrategyPanel devices={snapshot.devices} />}
           {tab === 'alerts' && <AlertsPanel alerts={thresholdAlerts} />}
           {tab === 'alert-settings' && <AlertSettingsPanel />}
+          {tab === 'alert-console' && <AlertConsolePanel />}
           {tab === 'predictive' && <PredictiveInsights alerts={learnedAlerts} />}
         </Suspense>
       ) : (
