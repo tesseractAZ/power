@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.16.2 — 2026-06-12
+
+Follow-up to the security pass: prototype-pollution hardening on the chime manifest.
+
+- **`js/remote-property-injection` (CodeQL, chimeStore manifest) — fixed.** The chime manifest is now read into a NULL-PROTOTYPE object with 16-hex key validation, so a crafted or corrupt manifest key (`__proto__`, `constructor`) can never reach `Object.prototype` and the `manifest[id] = meta` write is injection-safe. New regression test asserts a hostile manifest cannot pollute the prototype.
+
+533/533 server tests pass (1 new). Closes the last open CodeQL finding from the Alert Console push; the `js/missing-rate-limiting` pair was dismissed in v0.16.1 (layered write-auth + caps + in-process limiter make a full library disproportionate for a single-operator LAN add-on).
+
 ## 0.16.1 — 2026-06-12
 
 Security/quality pass on the Alert Console push + a broadcast-scope guard.

@@ -200,10 +200,21 @@ export function normalizeToTarget(buf: Buffer): { ok: boolean; error?: string; w
 /* ─── manifest ────────────────────────────────────────────────────────────── */
 
 function readManifest(): Record<string, ChimeMeta> {
+  // v0.16.2 — NULL-PROTOTYPE object + 16-hex key validation on read. The
+  // manifest is keyed by chime ids, some derived from user uploads; a crafted
+  // or corrupt key (e.g. "__proto__"/"constructor") can never reach the Object
+  // prototype here, and a later `manifest[id] = meta` write is injection-safe
+  // (prototype-pollution defense, clears js/remote-property-injection).
+  const out: Record<string, ChimeMeta> = Object.create(null);
   try {
-    if (existsSync(MANIFEST)) return JSON.parse(readFileSync(MANIFEST, 'utf8')) as Record<string, ChimeMeta>;
-  } catch { /* corrupt → rebuild from disk below */ }
-  return {};
+    if (existsSync(MANIFEST)) {
+      const parsed = JSON.parse(readFileSync(MANIFEST, 'utf8')) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(parsed)) {
+        if (ID_RE.test(k) && v != null && typeof v === 'object') out[k] = v as ChimeMeta;
+      }
+    }
+  } catch { /* corrupt → empty */ }
+  return out;
 }
 
 function writeManifest(m: Record<string, ChimeMeta>): void {

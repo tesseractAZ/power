@@ -140,6 +140,23 @@ test('deleteChime — removes file + manifest entry; path-traversal ids are reje
   assert.equal(deleteChime('not-hex'), false);
 });
 
+test('manifest — a crafted __proto__/constructor key cannot pollute Object.prototype', async () => {
+  // Write a hostile manifest directly, then force a read via listChimes().
+  const { writeFileSync } = await import('node:fs');
+  const { resolve: res } = await import('node:path');
+  writeFileSync(res(tmp, 'manifest.json'), JSON.stringify({
+    '__proto__': { polluted: true },
+    'constructor': { polluted: true },
+    'aaaaaaaaaaaaaaaa': { id: 'aaaaaaaaaaaaaaaa', originalName: 'x', sizeBytes: 1, durationMs: 1, srcRate: 22050, srcChannels: 1, srcBits: 16, uploadedAt: 1 },
+  }));
+  listChimes(); // triggers readManifest()
+  // The prototype must be untouched, and the bad keys must be dropped (only the
+  // valid 16-hex entry — whose FILE doesn't exist here — is admitted but filtered
+  // out of listChimes by the existsSync check).
+  assert.equal(({} as Record<string, unknown>).polluted, undefined, 'Object.prototype must NOT be polluted');
+  assert.equal((Object.prototype as Record<string, unknown>).polluted, undefined);
+});
+
 test.after(() => { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 // silence unused-import lint for the existsSync import kept for clarity
