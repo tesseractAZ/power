@@ -3,6 +3,21 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.15.23 — 2026-06-12
+
+Alert Console, backend — upload your own alarm tones and assign one per alert level.
+
+The operator can now replace the built-in synthesized klaxon that PREPENDS each spoken alert with a tone of their own, assigned per audio level: **Critical (red) / Warning (yellow) / Advisory (green)**. This release lands the server side (API + storage + audio pipeline); the control-panel UI follows in the next release. New endpoints, all gated by the same ingress/same-origin write-auth and audit-logged: `POST /api/chimes` (upload a WAV), `GET /api/chimes`, `DELETE /api/chimes/:id`, `GET|PUT /api/chime-config`. Uploaded tones serve at `/chimes/<id>.wav` for in-browser preview.
+
+Design notes (this sits on the audible-alert path of a live off-grid home, so safety dominated every choice):
+- **Per LEVEL, not per ISA priority.** Every render path resolves to one of the 3 audio levels (the 4 ISA priorities already collapse to these). A per-priority scheme would be honoured only on the priority-aware announce path and silently collapse to level elsewhere — the same alarm could then play different tones depending on which path fired it.
+- **Uploads are normalized on ingest** to the renderer's exact format (22050 Hz / 16-bit / mono) — downmix + linear-resample + requantize, one-time and unit-tested — so a 44.1 kHz stereo file just works. No new runtime dependency: the raw WAV is the request body (no multipart lib), and the bytes never grow the image.
+- **A bad or deleted tone can never silence an alarm.** Render falls back to the built-in klaxon for the level if a custom file is missing/unreadable; deleting a tone auto-reverts any level using it back to built-in; ids are server-generated content hashes (no client filename ever touches a path). Caps: ≤2 MB/file, ≤20 files, ≤15 s.
+- **Cache correctness pinned.** The render cache keyed off `level`, not the chime file, so a tone swap would have served a stale render. The resolved tone's content id is now folded into the cache key — and OMITTED for the built-in default, so operators who never assign a tone get byte-identical keys and zero cache churn. A lock-step test asserts the rendered filename matches the predicted key.
+- **No interaction with the v0.15.22 storm gates / single-flight** (chimes don't change the message or level the gates key off). Audition a newly-assigned tone via Preview or Test-on-speakers — both bypass the gates — never by re-firing a live alarm.
+
+530/530 server tests pass (18 new: format normalization across 8/16/24/32-bit + stereo, caps, content-addressing, builtin no-op, custom resolution + missing-file fallback, cache-key lock-step).
+
 ## 0.15.22 — 2026-06-11
 
 Alarm-storm fix — same message no longer repeats 4+ times (caught live during tonight's real EV-charging-on-33% event).

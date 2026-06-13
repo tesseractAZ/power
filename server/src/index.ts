@@ -73,6 +73,15 @@ import {
 import { appendWriteLog, tailWriteLog } from './writeLog.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 alarm-priority Alert Settings + preview.
 import { getAlertSettings, updateAlertSettings, isPriorityEnabled } from './alertSettings.js';
+// v0.15.23 — Alert Console: operator-uploaded chime tones + per-level assignment.
+import {
+  CHIMES_DIR, MAX_UPLOAD_BYTES, listChimes, saveChime, deleteChime,
+} from './chimeStore.js';
+import {
+  getChimeConfig, updateChimeConfig, revertAssignmentsFor, CHIME_LEVELS,
+  type ChimeAssignment,
+} from './chimeConfig.js';
+import type { AnnouncementLevel } from './audioRenderer.js';
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from './alertPriority.js';
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage } from './batterySocAlarm.js';
@@ -131,6 +140,16 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body,
     done(e as Error, undefined);
   }
 });
+// v0.15.23 — Alert Console chime upload. Accept the raw WAV bytes as the request
+// body (no @fastify/multipart dependency — keeps the add-on offline-lean). The
+// per-parser bodyLimit caps memory; chimeStore re-validates + normalizes. The
+// display filename rides in the ?name= query string, NEVER in a path. A
+// dedicated content type keeps this parser off the JSON path entirely.
+app.addContentTypeParser(
+  ['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave', 'application/octet-stream'],
+  { parseAs: 'buffer', bodyLimit: MAX_UPLOAD_BYTES },
+  (_req, body, done) => done(null, body),
+);
 /* ─── v0.9.62 — defense-in-depth security hardening ──────────────────
  *
  * the operator's add-on lives on a trusted LAN behind HA Ingress, so today no
@@ -300,6 +319,20 @@ mkdirSync(audioRenderDir, { recursive: true });
 await app.register(fastifyStatic, {
   root: audioRenderDir,
   prefix: '/audio-render/',
+  decorateReply: false,
+  wildcard: true,
+});
+
+// v0.15.23 — Alert Console: serve operator-uploaded chime tones for IN-BROWSER
+// preview at /chimes/<id>.wav. Same shape as /audio-render/: decorateReply
+// FALSE (only the first static register may own reply.sendFile) and wildcard
+// TRUE (tones are written at runtime; wildcard:false enumerates at registration
+// and 404s new files until restart — the exact /audio-render pitfall above).
+// mkdirSync up-front so fastify-static registers even before the first upload.
+mkdirSync(CHIMES_DIR, { recursive: true });
+await app.register(fastifyStatic, {
+  root: CHIMES_DIR,
+  prefix: '/chimes/',
   decorateReply: false,
   wildcard: true,
 });
@@ -1845,6 +1878,106 @@ app.post<{ Body: { priority?: AlarmPriority; target?: 'browser' | 'speakers' } }
       reply.code(isCooldown ? 429 : 502);
     }
     return r;
+  },
+);
+
+/* ─── v0.15.23 Alert Console — chime tone library + per-level assignment ───
+ * Upload your own alarm tones (POST /api/chimes, raw WAV body) and assign one
+ * per level (PUT /api/chime-config). The tone PREPENDS the spoken message in
+ * place of the synthesized klaxon. All gated by requireWriteAuth (ingress /
+ * same-origin), audit-logged, and normalized + validated by chimeStore. A bad
+ * or deleted tone degrades to the built-in klaxon (chimeConfig.resolveChime),
+ * never a silent alarm. Browser preview plays /chimes/<id>.wav directly. */
+function chimeConsoleResponse() {
+  const cfg = getChimeConfig();
+  return {
+    levels: CHIME_LEVELS,
+    // UI labels for the 3 audio levels (the 4 ISA priorities collapse to these).
+    levelLabels: { red: 'Critical', yellow: 'Warning', green: 'Advisory' } as Record<AnnouncementLevel, string>,
+    assignments: cfg.assignments,
+    chimes: listChimes(),
+    updatedAt: cfg.updatedAt,
+    maxUploadBytes: MAX_UPLOAD_BYTES,
+  };
+}
+
+// List uploaded tones + current per-level assignments (read-only).
+app.get('/api/chimes', async () => ({ ok: true, ...chimeConsoleResponse() }));
+app.get('/api/chime-config', async () => ({ ok: true, ...chimeConsoleResponse() }));
+
+// Upload a tone — raw WAV bytes in the body, display name in ?name=. chimeStore
+// validates the RIFF/WAVE header, normalizes to 22050/16/mono, and stores it
+// under a content-addressed id (no client filename ever touches a path).
+app.post<{ Querystring: { name?: string } }>(
+  '/api/chimes',
+  { preHandler: requireWriteAuth },
+  async (req, reply) => {
+    const buf = req.body as Buffer | undefined;
+    if (!Buffer.isBuffer(buf) || buf.length === 0) {
+      reply.code(400);
+      return { ok: false, error: 'expected a WAV file body (set Content-Type: audio/wav)' };
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name : 'tone.wav';
+    const res = saveChime(buf, name);
+    if (!res.ok) {
+      reply.code(400);
+      return { ok: false, error: res.error };
+    }
+    appendWriteLog({
+      ts: Date.now(),
+      action: 'chime-upload',
+      sn: '',
+      params: { id: res.meta!.id, name: res.meta!.originalName, bytes: res.meta!.sizeBytes, durationMs: res.meta!.durationMs },
+      source: { ip: req.ip, ua: req.headers['user-agent']?.toString() },
+      outcome: 'success',
+    });
+    return { ok: true, chime: res.meta, ...chimeConsoleResponse() };
+  },
+);
+
+// Delete a tone — reverts any level currently assigned to it back to built-in
+// (an assignment can never dangle at a missing file).
+app.delete<{ Params: { id: string } }>(
+  '/api/chimes/:id',
+  { preHandler: requireWriteAuth },
+  async (req, reply) => {
+    const id = req.params.id;
+    const revertedAssignments = revertAssignmentsFor(id);
+    const removed = deleteChime(id);
+    if (!removed) {
+      reply.code(404);
+      return { ok: false, error: 'tone not found' };
+    }
+    appendWriteLog({
+      ts: Date.now(),
+      action: 'chime-delete',
+      sn: '',
+      params: { id, revertedAssignments },
+      source: { ip: req.ip, ua: req.headers['user-agent']?.toString() },
+      outcome: 'success',
+    });
+    return { ok: true, ...chimeConsoleResponse() };
+  },
+);
+
+// Assign tones per level. Rejects ids that don't exist (keeps prior value).
+app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignment>> } }>(
+  '/api/chime-config',
+  { preHandler: requireWriteAuth },
+  async (req, reply) => {
+    const patch = req.body?.assignments ?? {};
+    const { rejected } = updateChimeConfig(patch, 'web');
+    appendWriteLog({
+      ts: Date.now(),
+      action: 'chime-config',
+      sn: '',
+      params: { assignments: getChimeConfig().assignments, rejected },
+      source: { ip: req.ip, ua: req.headers['user-agent']?.toString() },
+      outcome: rejected.length ? 'failure' : 'success',
+      message: rejected.length ? rejected.join('; ') : undefined,
+    });
+    if (rejected.length) reply.code(422);
+    return { ok: rejected.length === 0, rejected, ...chimeConsoleResponse() };
   },
 );
 
