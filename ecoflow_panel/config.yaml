@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.22.0"
+version: "0.23.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -138,8 +138,18 @@ options:
   BROADCAST_CHIME_PACK: powerplant
   # Min alarm severity that triggers a broadcast.
   BROADCAST_MIN_SEVERITY: critical
-  # Quiet hours suppress warning/info broadcasts. Critical always fires.
+  # Quiet hours (local "HH-HH") suppress lower-priority broadcasts. Whether
+  # CRITICAL also breaks through is governed by CRITICAL_BREAKS_QUIET_HOURS below.
   BROADCAST_QUIET_HOURS: "22-06"
+  # v0.23.0 — may CRITICAL alerts break through quiet hours? Default false ⇒
+  # quiet hours silence EVERY tier (critical included): the alert still shows
+  # on-screen immediately and the push is delivered in the 07:00 morning digest,
+  # but nothing chimes or pushes overnight. Set true to be woken for genuine
+  # emergencies. (Applies to BOTH the push and the audible/broadcast channels.)
+  # Note: the grid-aware floor downgrade already prevents a backup-pool floor
+  # crossing from being critical while the grid is backstopping, so those never
+  # wake you regardless of this flag.
+  CRITICAL_BREAKS_QUIET_HOURS: false
   # v0.9.70 — Wyoming Protocol server (Piper TTS) location. The default
   # `core-piper` hostname routes to HA's official Piper add-on inside
   # the supervisor's network. Override only if you're running Piper on
@@ -162,14 +172,28 @@ options:
   # backup pool reaching its reserve floor — or empty — before solar recovers, so
   # load can be shed early. Distinct from the SoC-threshold ladder above (which
   # only fires once the pool has already fallen). Re-announces at most every
-  # REANNOUNCE_MIN minutes while the projection persists; Low/Medium tiers respect
-  # quiet hours, High/Critical always annunciate.
+  # REANNOUNCE_MIN minutes while the projection persists. Low/Medium tiers always
+  # respect quiet hours; High/Critical break through ONLY if
+  # CRITICAL_BREAKS_QUIET_HOURS is true (default false). Grid-aware: a floor
+  # crossing while the grid is backstopping is a low advisory, not an emergency.
   BATTERY_RUNWAY_ALARM_ENABLED: true
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: 60
   # v0.15.2 — off-grid honesty: whether the site has grid import available. MUST
   # be false for an islanded off-grid system, so the dispatch optimizer stops
   # assuming an impossible grid backstop. Set true only if you are grid-tied.
   GRID_AVAILABLE: false
+  # v0.23.0 — OPTIONAL Home Assistant entity that reports whether the utility
+  # grid is energized. Makes the backup-pool floor alarm grid-aware: when the
+  # grid is present, the pool reaching its ~10% reserve floor just transfers to
+  # mains (a non-event), so the floor alarm is downgraded from a CRITICAL
+  # emergency to an on-screen advisory. When the grid is NOT present (or this is
+  # unset / unavailable / unknown), the floor stays CRITICAL — the safe default.
+  # Point it at a binary_sensor / input_boolean (on = grid present) or a grid
+  # VOLTAGE sensor (>50 = present). The add-on also auto-confirms "grid present"
+  # whenever it sees real grid import, and re-escalates back to critical if a
+  # declared grid is not actually carrying the load at the floor. Empty = rely on
+  # GRID_AVAILABLE (and live import) only.
+  GRID_PRESENCE_ENTITY: ""
   # v0.15.2 — intelligent load-shedding ADVISOR (Phase 1: read + advise, no
   # actuation). When the runway projection drops below the threshold, it
   # recommends which allowlisted loads to shed (with a counterfactual runway) and
@@ -233,6 +257,7 @@ schema:
   BROADCAST_CHIME_PACK: list(powerplant|airport)?
   BROADCAST_MIN_SEVERITY: list(critical|warning)
   BROADCAST_QUIET_HOURS: "str?"
+  CRITICAL_BREAKS_QUIET_HOURS: bool
   BROADCAST_WYOMING_HOST: "str?"
   BROADCAST_WYOMING_PORT: port
   BROADCAST_WYOMING_VOICE: "str?"
@@ -240,6 +265,7 @@ schema:
   BATTERY_RUNWAY_ALARM_ENABLED: bool
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: int(5,720)?
   GRID_AVAILABLE: bool
+  GRID_PRESENCE_ENTITY: "str?"
   LOAD_SHEDDING_ADVISORY_ENABLED: bool
   LOAD_SHEDDING_SHED_ENTITIES: "str?"
   LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float

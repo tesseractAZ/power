@@ -87,6 +87,7 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage } from './batterySocAlarm.js';
 import { createRunwayAlarm } from './runwayAlarm.js';
+import { liveGridBackstop, gridPresenceEntityId, downgradePriorityForGrid } from './gridState.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
@@ -1688,10 +1689,32 @@ const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
 
 // v0.12.0 — backup-pool SoC audible alarm (40/30/20/15/10/8/4/2%, escalating priority).
 const socAlarmEnabled = process.env.BATTERY_SOC_ALARM_ENABLED !== 'false';
+// v0.23.0 — the grid-backstop snapshot for the CURRENT tick, recomputed once per
+// store change (with a fresh HA cache when a grid entity is configured) and read
+// by onCross — so the audible downgrade decision uses the same grid state as the
+// on-screen alerts.ts path (no stale-cache divergence).
+let socGridForTick = liveGridBackstop({});
+// v0.23.0 — thresholds whose audible was grid-downgraded to a low advisory:
+// pct → the TRUE (high/critical) priority. The SoC ladder is one-shot per
+// downward crossing, so if the grid stops backstopping while the pool is still
+// in a downgraded band, the dedicated audible would otherwise NEVER re-fire
+// (fail-silent). We re-escalate it from the tick below.
+const socDowngraded = new Map<number, AlarmPriority>();
 const batterySocAlarm = createBatterySocAlarm({
   onCross: (t) => {
-    if (!isPriorityEnabled(t.priority)) return;        // honour the Alert Settings annunciation toggles
-    void broadcast.announce(t.priority, socAlarmMessage(t));
+    // Grid-aware: when the grid is backstopping the home, a low pool is a
+    // non-event (the SHP2 transfers to mains at the floor), so the emergency
+    // tiers (high/critical — the ≤10% bands) collapse to a low advisory. Off-grid
+    // (the safe default) keeps the original priority.
+    const priority = downgradePriorityForGrid(t.priority, socGridForTick.backstopping);
+    const onGrid = priority !== t.priority;
+    if (onGrid) socDowngraded.set(t.pct, t.priority);
+    else socDowngraded.delete(t.pct);
+    if (!isPriorityEnabled(priority)) return;          // honour the Alert Settings annunciation toggles
+    const message = onGrid
+      ? `Advisory. Backup pool at ${t.pct} percent — drawing from grid power, no action needed.`
+      : socAlarmMessage(t);
+    void broadcast.announce(priority, message);
   },
   log: (m) => app.log.info(m),
 });
@@ -1699,7 +1722,37 @@ store.on('change', (snap: FleetSnapshot) => {
   if (!socAlarmEnabled) return;
   const shp2 = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2');
   const soc = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection.backupBatPercent : null;
-  batterySocAlarm.update(soc);
+  void (async () => {
+    // Keep the grid-presence entity fresh (TTL-gated) so onCross + the
+    // re-escalation below see live grid state. Assign + update run synchronously
+    // after the await, so onCross reads exactly the grid computed for this tick.
+    if (gridPresenceEntityId()) {
+      try {
+        await haStateCache.refreshIfStale();
+      } catch {
+        /* cold/stale cache ⇒ resolves to off-grid (safe) */
+      }
+    }
+    socGridForTick = liveGridBackstop(snap.devices);
+    batterySocAlarm.update(soc); // fires onCross synchronously, reading socGridForTick
+    // Re-escalate a previously grid-downgraded crossing if the grid is no longer
+    // backstopping while the pool is still at/below that threshold — closes the
+    // one-shot fail-silent window on a grid drop.
+    if (soc != null && socDowngraded.size > 0) {
+      for (const [pct, truePriority] of [...socDowngraded]) {
+        if (soc > pct) {
+          socDowngraded.delete(pct); // climbed back out of the band
+          continue;
+        }
+        if (!socGridForTick.backstopping) {
+          socDowngraded.delete(pct);
+          if (isPriorityEnabled(truePriority)) {
+            void broadcast.announce(truePriority, socAlarmMessage({ pct, priority: truePriority }));
+          }
+        }
+      }
+    }
+  })();
 });
 
 // v0.14.0 — projection-depletion audible alarm. Rides the off-grid runway
@@ -1722,14 +1775,44 @@ if (runwayAlarmEnabled) {
   const runwayAlarmTick = setInterval(() => {
     void (async () => {
       try {
+        // v0.23.0 — keep the grid-presence entity fresh (TTL-gated + coalesced)
+        // so the floor classifier sees live grid state, then resolve the
+        // backstop from the current snapshot and pass it into the alarm.
+        if (gridPresenceEntityId()) {
+          try {
+            await haStateCache.refreshIfStale();
+          } catch {
+            /* best effort — a cold/stale cache resolves to NOT present (safe) */
+          }
+        }
         const r = await analytics.report('runway');
-        runwayAlarm.update(r);
+        runwayAlarm.update(r, liveGridBackstop(store.get().devices));
       } catch (e: any) {
         app.log.debug(`runway-alarm: poll skipped (${e?.message ?? e})`);
       }
     })();
   }, 2 * 60 * 1000);
   runwayAlarmTick.unref();
+}
+
+// v0.23.0 — one-time boot advisory: an ISLANDED site (no grid backstop) with
+// quiet hours configured and CRITICAL_BREAKS_QUIET_HOURS off means a genuine
+// overnight off-grid emergency (backup floor, projected-empty) will NOT chime or
+// push until the morning digest. The default is deliberately quiet, but make the
+// trade-off explicit so an off-grid operator can opt back in if they want it.
+{
+  const offGrid = process.env.GRID_AVAILABLE !== 'true' && gridPresenceEntityId() === '';
+  const critBreaks =
+    process.env.CRITICAL_BREAKS_QUIET_HOURS === 'true' || process.env.CRITICAL_BREAKS_QUIET_HOURS === '1';
+  const quietConfigured =
+    (process.env.NOTIFY_QUIET_HOURS ?? '').trim() !== '' || (process.env.BROADCAST_QUIET_HOURS ?? '').trim() !== '';
+  if (offGrid && quietConfigured && !critBreaks) {
+    app.log.warn(
+      'config: off-grid site + quiet hours + CRITICAL_BREAKS_QUIET_HOURS=false — genuine overnight ' +
+        'battery/floor emergencies will be HELD until the morning digest (no chime/push). ' +
+        'Set CRITICAL_BREAKS_QUIET_HOURS=true to be woken for critical alerts.',
+    );
+  }
 }
 
 // v0.15.2 — Intelligent load-shedding ADVISOR (Phase 1: read + advise, NO
@@ -1797,6 +1880,9 @@ app.get('/api/broadcast/status', async () => {
   const cfg = broadcast.config();
   return {
     ...s,
+    // v0.23.0 — live grid-backstop state, so the operator can see whether the
+    // floor alarms are currently in their downgraded (grid present) posture.
+    grid: liveGridBackstop(store.get().devices),
     config: {
       enabled: cfg.enabled,
       targets: cfg.targets,
@@ -1815,6 +1901,8 @@ app.get('/api/broadcast/status', async () => {
       announceRetries: cfg.announceRetries,
       minSeverity: cfg.minSeverity,
       quietHours: cfg.quietHours,
+      // v0.23.0 — whether critical alerts break through quiet hours (opt-in).
+      criticalBreakThrough: cfg.criticalBreakThrough,
       // v0.9.70 — Wyoming is the canonical TTS path now. No engine
       // selector / fallback chain / language toggle / Sonos restore —
       // all that lived in v0.9.18-v0.9.69's broadcast complexity that
