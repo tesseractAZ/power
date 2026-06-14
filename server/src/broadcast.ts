@@ -99,6 +99,10 @@ export interface BroadcastConfig {
   volume: number;
   minSeverity: 'critical' | 'warning';
   quietHours: [number, number] | null;
+  /** v0.23.0 — when true, critical broadcasts (red condition / high+critical
+   *  audible tiers) break through quiet hours; default false ⇒ quiet hours
+   *  silence EVERY tier overnight. */
+  criticalBreakThrough: boolean;
   /** v0.9.70 — Wyoming server location for TTS rendering. */
   wyomingHost: string;
   wyomingPort: number;
@@ -150,6 +154,8 @@ export function loadBroadcastConfig(): BroadcastConfig {
     volume,
     minSeverity: (process.env.BROADCAST_MIN_SEVERITY ?? 'critical') === 'warning' ? 'warning' : 'critical',
     quietHours: parseQuietHours(process.env.BROADCAST_QUIET_HOURS ?? ''),
+    criticalBreakThrough:
+      process.env.CRITICAL_BREAKS_QUIET_HOURS === 'true' || process.env.CRITICAL_BREAKS_QUIET_HOURS === '1',
     wyomingHost: process.env.BROADCAST_WYOMING_HOST || 'core-piper',
     wyomingPort: Number(process.env.BROADCAST_WYOMING_PORT) || 10200,
     wyomingVoice: emptyToNull(process.env.BROADCAST_WYOMING_VOICE),
@@ -188,8 +194,14 @@ function resolveAnnounceVolume(raw: string | undefined, fallbackVol01: number): 
 /** v0.12.1 — lead-in silence (ms), default 1000, clamped to 0–5000. Non-numeric
  *  or empty → the 1000 ms default. */
 function clampLeadSilenceMs(raw: string | undefined): number {
-  const n = raw == null || raw.trim() === '' ? 1000 : Number(raw);
-  if (!Number.isFinite(n)) return 1000;
+  // v0.23.0 — default raised 1000 → 1500 ms. Music Assistant 2.9 reworked the
+  // AirPlay RAOP sync / flow-stream buffering (#3637), starting the first
+  // audible frame sooner, so 1000 ms no longer fully covers slow AirPlay
+  // receivers (ecobee) and the chime's leading edge was getting clipped. 1500 ms
+  // restores the margin; the knob is now also tunable (BROADCAST_LEAD_SILENCE_MS
+  // is exported by the run-script as of v0.23.0).
+  const n = raw == null || raw.trim() === '' ? 1500 : Number(raw);
+  if (!Number.isFinite(n)) return 1500;
   return Math.max(0, Math.min(5000, Math.round(n)));
 }
 
@@ -222,10 +234,16 @@ export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; c
   // raise the broadcast condition level. Drop them before counting crit/warn so
   // they can't trigger a chime/broadcast — same intent as the backup-soc /
   // forecast-runtime exclusions above.
+  // v0.23.0 — also drop 'shp2-below-reserve'. Its audible at the reserve floor is
+  // the dedicated, grid-aware runwayAlarm.announce() path; and its severity now
+  // FLIPS critical↔info with grid backstopping (alerts.ts). Counting it here would
+  // make a grid transition raise/clear the broadcast condition and fire a spurious
+  // red (or all-clear green) chime for a state change the runway alarm already owns.
   const counted = alerts.filter(
     (a) =>
       a.annunciate !== false &&
       !a.id.startsWith('backup-soc') &&
+      !a.id.startsWith('shp2-below-reserve') &&
       !a.id.startsWith('forecast-runtime'),
   );
   const crit = counted.filter((a) => a.severity === 'critical').length;
@@ -690,7 +708,11 @@ export function startBroadcastMonitor(
     prevCrit = crit;
     if (!cfg.enabled) return;
     if (level === 'yellow' && cfg.minSeverity === 'critical') return;
-    if (level !== 'red' && inQuiet()) {
+    // v0.23.0 — yellow/green always respect quiet hours. red (a critical
+    // condition) breaks through ONLY when the operator opted in; default OFF ⇒
+    // red is also suppressed overnight (the alert stays visible on-screen, and
+    // the push path queues it for the morning digest).
+    if (inQuiet() && !(level === 'red' && cfg.criticalBreakThrough)) {
       log(`broadcast: ${level} suppressed by quiet hours`);
       return;
     }
@@ -862,12 +884,17 @@ export function startBroadcastMonitor(
         if (!cfg.enabled) return { ok: false, error: 'broadcast disabled' };
         // v0.14.0 — quiet-hours gate for the advisory/caution tiers. Low and
         // Medium (e.g. the 50/40% SoC advisories and the reserve-runway caution)
-        // stay silent during quiet hours; High and Critical (near-empty SoC,
-        // projected-empty runway) always annunciate so a genuine overnight
-        // emergency still wakes the operator. Previously announce() bypassed
-        // inQuiet() entirely, so a 2am 40% crossing chimed at full volume.
-        if ((priority === 'low' || priority === 'medium') && inQuiet()) {
-          return { ok: false, error: 'suppressed: quiet hours (low/medium tier)' };
+        // stay silent during quiet hours.
+        // v0.23.0 — High and Critical (near-empty SoC, projected-empty runway)
+        // now break through ONLY when the operator opted in via
+        // CRITICAL_BREAKS_QUIET_HOURS. Default OFF ⇒ every tier is held overnight
+        // (the on-screen alert still shows and the morning digest carries the
+        // push), so a genuine overnight emergency does not wake the household
+        // unless they asked it to.
+        const tierBreaksThrough =
+          (priority === 'high' || priority === 'critical') && cfg.criticalBreakThrough;
+        if (inQuiet() && !tierBreaksThrough) {
+          return { ok: false, error: 'suppressed: quiet hours' };
         }
         const level = klaxonLevelForPriority(priority);
         const r = await runBroadcast(level, message);

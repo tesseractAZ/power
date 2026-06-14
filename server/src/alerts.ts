@@ -156,6 +156,11 @@ const CLOUD_SESSION_STALE_MS = 5 * 60 * 1000;
 export function computeAlerts(
   devices: Record<string, DeviceSnapshot>,
   connectivity?: ConnectivityContext,
+  /** v0.23.0 — when the grid is backstopping the home, a backup pool at/below
+   *  the reserve floor merely transfers to mains, so the reserve alerts are
+   *  downgraded from critical to an on-screen advisory. Omitted ⇒ treat as
+   *  off-grid (reserve alerts stay critical — the safe default). */
+  grid?: { backstopping: boolean; reason?: string },
 ): Alert[] {
   const out: Alert[] = [];
   const list = Object.values(devices);
@@ -375,7 +380,20 @@ export function computeAlerts(
     const reserve = sp.backupReserveSoc ?? 15;
     if (sp.backupBatPercent != null) {
       if (sp.backupBatPercent < reserve) {
-        out.push({ id: 'shp2-below-reserve', severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Backup below reserve', detail: `Backup pool ${sp.backupBatPercent}% is under the ${reserve}% reserve floor.` });
+        // v0.23.0 — when the grid is backstopping the home, the pool sitting at
+        // its reserve floor just transfers to mains; downgrade critical → info
+        // (still visible) so it doesn't push/chime as an emergency.
+        const onGrid = grid?.backstopping === true;
+        out.push({
+          id: 'shp2-below-reserve',
+          severity: onGrid ? 'info' : 'critical',
+          category: 'SHP2',
+          device: shp2.deviceName,
+          title: onGrid ? 'Backup at reserve — on grid' : 'Backup below reserve',
+          detail: onGrid
+            ? `Backup pool ${sp.backupBatPercent}% is at/under the ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+            : `Backup pool ${sp.backupBatPercent}% is under the ${reserve}% reserve floor.`,
+        });
       } else if (sp.backupBatPercent < reserve + 10) {
         out.push({ id: 'shp2-near-reserve', severity: 'warning', category: 'SHP2', device: shp2.deviceName, title: 'Backup approaching reserve', detail: `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor.` });
       }
@@ -412,7 +430,12 @@ export function computeAlerts(
   const soc = socShp2?.projection.backupBatPercent ?? null;
   const band = activeSocBand(soc);
   if (band !== null && soc != null) {
-    const { severity, source } = socAlertSeverity(band.priority);
+    // v0.23.0 — grid backstopping ⇒ a low pool is a non-event; collapse the
+    // emergency tiers (high/critical) to a low advisory so this on-screen alert
+    // tracks the (also-downgraded) audible SoC alarm in lockstep.
+    const onGridEmergency =
+      grid?.backstopping === true && (band.priority === 'critical' || band.priority === 'high');
+    const { severity, source } = socAlertSeverity(onGridEmergency ? 'low' : band.priority);
     out.push({
       id: `backup-soc-${band.pct}`,
       severity,
@@ -420,7 +443,9 @@ export function computeAlerts(
       category: 'Battery',
       device: 'SHP2 backup pool',
       title: `Backup pool low — ${Math.round(soc)}%`,
-      detail: `Backup reserve at ${Math.round(soc)}%, at or below the ${band.pct}% ${band.priority}-priority threshold.`,
+      detail: onGridEmergency
+        ? `Backup reserve at ${Math.round(soc)}%, at/below the ${band.pct}% threshold — drawing from grid power, no action needed.`
+        : `Backup reserve at ${Math.round(soc)}%, at or below the ${band.pct}% ${band.priority}-priority threshold.`,
     });
   }
 

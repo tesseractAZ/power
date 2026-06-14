@@ -76,13 +76,36 @@ export function belowReserveFloor(p: RunwayAlarmInput): boolean {
   );
 }
 
-export function classifyRunway(p: RunwayAlarmInput): AlarmPriority | null {
+/** v0.23.0 — grid-backstop context for the floor classifier (see gridState.ts).
+ *  Omitted ⇒ treat as off-grid (the safe default: floor stays critical). */
+export interface GridContext {
+  /** Grid is energized (will carry the load when the pool reaches the floor). */
+  present: boolean;
+  /** Grid is actively backstopping NOW (carrying the load at the floor). */
+  backstopping: boolean;
+}
+
+export function classifyRunway(p: RunwayAlarmInput, grid?: GridContext): AlarmPriority | null {
   if (p.unavailable != null) return null;
   // v0.15.18 — being AT/below the reserve floor is the emergency this ladder
   // exists for (the SHP2 cuts non-backup circuits there), yet the old ranking
   // DE-escalated to 'high' once the crossing was behind us (observed Jun 10
   // 00:51 local: "high — reserve in 18.8h" while pinned at the 10 % floor).
-  if (belowReserveFloor(p)) return 'critical';
+  if (belowReserveFloor(p)) {
+    // v0.23.0 — at the floor it's only a non-event if the grid is actually
+    // CARRYING the load (backstopping). Grid declared-but-not-carrying (pool
+    // still discharging) or off-grid keeps the critical: that is the genuine
+    // "no backstop at the floor" emergency.
+    if (grid?.backstopping) return 'low';
+    return 'critical';
+  }
+  // v0.23.0 — not yet at the floor. If the grid is actually BACKSTOPPING it will
+  // carry the load once the pool reaches the floor, so a projected descent to
+  // reserve / empty is not an emergency — stay silent on the audible (the
+  // on-screen "approaching reserve" alert still shows). A grid that is merely
+  // DECLARED present but not carrying (backstopping=false), or off-grid, keeps
+  // the full ladder so a genuine fast depletion still annunciates.
+  if (grid?.backstopping) return null;
   const he = p.hoursToEmpty;
   const hr = p.hoursToReserve;
   if (he != null && he <= 3) return 'critical';
@@ -93,9 +116,14 @@ export function classifyRunway(p: RunwayAlarmInput): AlarmPriority | null {
 }
 
 /** The spoken message for a projection at a given priority. */
-export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority): string {
+export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority, grid?: GridContext): string {
   const he = p.hoursToEmpty;
   const hr = p.hoursToReserve;
+  // v0.23.0 — at the floor WITH the grid backstopping, the pool reaching reserve
+  // just transfers to mains; speak a calm advisory, not the shed/generator call.
+  if (belowReserveFloor(p) && grid?.backstopping) {
+    return 'Advisory. Backup pool reached the reserve floor. Now drawing from grid power; no action needed.';
+  }
   // v0.15.18 — at/below the reserve floor the "projected in N hours" framing is
   // wrong (it already happened); speak the actual condition and the actions.
   if (priority === 'critical' && belowReserveFloor(p)) {
@@ -135,8 +163,10 @@ const STATE_PATH =
   resolve(process.cwd(), config.dbPath, '..', 'runway-alarm.json');
 
 export interface RunwayAlarm {
-  /** Feed the latest runway projection. Fires onTrigger per the escalation rules. */
-  update(p: RunwayAlarmInput): void;
+  /** Feed the latest runway projection. Fires onTrigger per the escalation rules.
+   *  v0.23.0 — pass the live grid-backstop context so a floor crossing is only
+   *  critical when the grid is NOT carrying the load. */
+  update(p: RunwayAlarmInput, grid?: GridContext): void;
   /** Current persisted state — exposed for tests/diagnostics. */
   state(): PersistState;
 }
@@ -191,8 +221,8 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
   const persist = () => saveState(path, { announcedPriority, lastAnnouncedAt, calmerSinceMs });
 
   return {
-    update(p) {
-      const desired = classifyRunway(p);
+    update(p, grid) {
+      const desired = classifyRunway(p, grid);
       const now = p.generatedAt;
 
       if (desired == null) {
@@ -228,7 +258,7 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
         ].filter(Boolean);
         log(`runway-alarm: ${desired} — ${figs.join(' / ') || 'no horizon figures'}`);
         try {
-          opts.onTrigger(desired, runwayAlarmMessage(p, desired));
+          opts.onTrigger(desired, runwayAlarmMessage(p, desired, grid));
         } catch (e: any) {
           log(`runway-alarm: onTrigger error: ${e?.message ?? e}`);
         }
@@ -257,7 +287,7 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
       }
     },
     state() {
-      return { announcedPriority, lastAnnouncedAt };
+      return { announcedPriority, lastAnnouncedAt, calmerSinceMs };
     },
   };
 }

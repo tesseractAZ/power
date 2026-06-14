@@ -108,7 +108,13 @@ function renderSegments(segs: Segment[], totalSec: number): Int16Array {
 }
 
 function addTone(buf: Float32Array, startSec: number, t: ToneSpec): void {
-  const attack = t.attackSec ?? 0.005;
+  // v0.23.0 — floor the attack so a tone never jumps to full scale on sample 0.
+  // A zero-attack square/sine (e.g. 'buzz-alarm', attackSec:0) produced a hard
+  // 0→peak DC step — an audible click that read as a "clipped" tone start once
+  // the v0.17.0 short named tones became selectable per level. A ~4 ms ramp is
+  // still percussively sharp but removes the discontinuity. (Bells use their own
+  // exponential attack in the envelope below and are unaffected by this floor.)
+  const attack = Math.max(0.004, t.attackSec ?? 0.005);
   const release = t.releaseSec ?? 0.02;
   const startSample = Math.floor(startSec * SAMPLE_RATE);
   const totalSamples = Math.floor(t.durSec * SAMPLE_RATE);
@@ -581,8 +587,21 @@ const CHIME_PACKS: Record<ChimePack, Record<AudioAssetId, () => { segs: Segment[
  * was added: the bump forces an existing /data/audio to regenerate so the new
  * <id>.wav tones appear without manual cleanup. The 4 legacy klaxon ids and
  * their waveforms are unchanged (only re-written, byte-identically).
+ * v0.23.0 — bumped 4 → 5: addTone now floors the onset attack (~4 ms) to kill a
+ * sample-0 click on zero-attack tones that read as a clipped tone start; the
+ * bump regenerates /data/audio so the softened tones replace the clicky ones.
  */
-export const AUDIO_ASSETS_VERSION = 4;
+export const AUDIO_ASSETS_VERSION = 5;
+
+/** v0.23.0 — write a WAV atomically (tmp → rename) so a deploy/boot interrupted
+ *  mid-write can never leave a torn/short <id>.wav that the renderer would embed
+ *  into a (cached) combined announcement as a clipped tone. */
+async function writeWavAtomic(path: string, data: Buffer): Promise<void> {
+  const { rename } = await import('node:fs/promises');
+  const tmp = `${path}.tmp`;
+  await writeFile(tmp, data);
+  await rename(tmp, path);
+}
 
 /** Write all assets to `outDir`. Regenerates if the on-disk version is stale. */
 export async function generateAudioAssets(outDir: string, log: (m: string) => void): Promise<void> {
@@ -614,7 +633,7 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
     const samples = renderSegments(segs, totalSec);
     const wav = buildWavBuffer(samples);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, wav);
+    await writeWavAtomic(path, wav);
     log(`audioAssets: wrote ${id}.wav [${pack}] (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
   }
   // v0.17.0 — the named built-in tone library, written alongside the klaxons
@@ -627,7 +646,7 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
     const { segs, totalSec } = builder();
     const samples = renderSegments(segs, totalSec);
     const wav = buildWavBuffer(samples);
-    await writeFile(path, wav);
+    await writeWavAtomic(path, wav);
     log(`audioAssets: wrote ${tone.id}.wav (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
   }
   if (stale || !existsSync(versionMarker)) {

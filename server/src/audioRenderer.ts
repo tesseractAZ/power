@@ -64,13 +64,19 @@ import { existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
 import { getChimeRepeat } from './alertSettings.js';
+import { AUDIO_ASSETS_VERSION } from './audioAssets.js';
 
 /** Bump when the render pipeline changes in a way that invalidates the cache.
  *  v2 (v0.12.1): the optional lead-in silence is now part of every render.
  *  v3 (v0.15.4): announce-repeat folded into the key.
  *  v4 (v0.15.7): inter-repeat silence gap folded into the key.
- *  v5 (v0.15.15): post-chime silence gap (chime → pause → spoken message). */
-export const RENDER_VERSION = 5;
+ *  v5 (v0.15.15): post-chime silence gap (chime → pause → spoken message).
+ *  v6 (v0.23.0): one-time flush of every combined render after the tone-onset
+ *      fix (softened named-tone attacks), so any stale/short cached clip from
+ *      the v0.17.0 tone rebuild is re-rendered with the corrected tones. The
+ *      audio-asset version is ALSO folded into named/custom keys below so a
+ *      future asset regeneration auto-invalidates dependent combined renders. */
+export const RENDER_VERSION = 6;
 
 /** v0.15.4 — hard ceiling on the chime-repeat count at the allocation site.
  *  getChimeRepeat() is already clamped to ≤4 by alertSettings; this is a
@@ -495,7 +501,12 @@ export function renderCacheKey(
   // key distinct so swapping a tone re-renders. Applied identically here and at
   // the renderAnnouncement call site (both pass opts.chimeTag ?? BUILTIN_CHIME_TAG).
   const tag = chimeTag ?? BUILTIN_CHIME_TAG;
-  const tagPart = tag === BUILTIN_CHIME_TAG ? '' : `|k${tag}`;
+  // v0.23.0 — for a named/custom tone, also key on AUDIO_ASSETS_VERSION so a
+  // future tone-asset regeneration (a builder/envelope change) invalidates the
+  // dependent combined render instead of silently serving a stale/clipped clip.
+  // The builtin klaxon still OMITS the component (zero cache churn for the
+  // default; the RENDER_VERSION bump above already flushes it once).
+  const tagPart = tag === BUILTIN_CHIME_TAG ? '' : `|k${tag}|a${AUDIO_ASSETS_VERSION}`;
   return createHash('sha1')
     .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}|${message ?? '<null>'}`)
     .digest('hex')
