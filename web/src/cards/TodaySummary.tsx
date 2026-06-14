@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { fmtWh } from '../format';
 import { apiUrl } from '../api';
 
@@ -22,7 +22,10 @@ interface SummaryResp {
   };
 }
 
-export function TodaySummary() {
+// v0.22.0 — zero-prop card: memo makes it immune to App's ~1 Hz snapshot
+// re-renders. Its data only changes on its own 60 s poll, so the parent push
+// never needs to re-render it.
+export const TodaySummary = memo(function TodaySummary() {
   const [data, setData] = useState<SummaryResp | null>(null);
 
   useEffect(() => {
@@ -62,7 +65,7 @@ export function TodaySummary() {
       </div>
     </div>
   );
-}
+});
 
 function Tile({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: string }) {
   return (

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import type { RunwayProjection } from '../types';
 import { apiUrl } from '../api';
 
@@ -7,7 +7,9 @@ import { apiUrl } from '../api';
  * Projects the backup pool hour-by-hour from the last-hour load and the
  * next-24-hour forecast PV, surfacing hours-to-reserve and hours-to-empty.
  */
-export function RunwayCard() {
+// v0.22.0 — zero-prop card: memo makes it immune to App's ~1 Hz snapshot
+// re-renders; its data refreshes on its own 60 s poll.
+export const RunwayCard = memo(function RunwayCard() {
   const [runway, setRunway] = useState<RunwayProjection | null>(null);
   const [err, setErr] = useState(false);
 
@@ -139,7 +141,7 @@ export function RunwayCard() {
       )}
     </div>
   );
-}
+});
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (

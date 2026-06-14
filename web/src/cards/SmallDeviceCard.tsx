@@ -1,7 +1,10 @@
+import { memo } from 'react';
 import type { DeviceSnapshot, GenericProjection } from '../types';
 import { fmtPct, fmtTemp, fmtW, socColor } from '../format';
 
-export function SmallDeviceCard({ d }: { d: DeviceSnapshot & { projection?: GenericProjection } }) {
+// v0.22.0 — memo skips re-renders when App re-renders without a new snapshot;
+// App's useMemo keeps each `d` reference stable across those renders.
+export const SmallDeviceCard = memo(function SmallDeviceCard({ d }: { d: DeviceSnapshot & { projection?: GenericProjection } }) {
   const p = d.projection;
   return (
     <div className="card">
@@ -35,7 +38,7 @@ export function SmallDeviceCard({ d }: { d: DeviceSnapshot & { projection?: Gene
       )}
     </div>
   );
-}
+});
 
 /**
  * EcoFlow's IoT Open API only exposes telemetry for Delta Pro Ultra and the SHP2.

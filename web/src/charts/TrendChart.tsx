@@ -74,10 +74,23 @@ export function TrendChart({
 
   // Merge series onto a shared timeline, taking the per-series last-known value.
   const merged = useMemo(() => {
+    // v0.22.0 — pre-index each series by ts so the row build is O(rows × series)
+    // instead of O(rows × series × points): the old `pts.find(p => p.ts === ts)`
+    // was a fresh linear scan for every cell. First-write-wins on a duplicate ts
+    // mirrors Array.find exactly (it returns the first match), and probing by
+    // key PRESENCE — `idx.has(ts)`, not the value — reproduces `if (pt)` even for
+    // a hypothetical undefined value. So the merged rows are byte-for-byte the
+    // same and the rendered chart is unchanged.
     const all = new Set<number>();
+    const indexBySeries: Record<string, Map<number, number>> = {};
     for (const s of series) {
-      const pts = dataBySeries[`${s.sn}|${s.metric}`] ?? [];
-      for (const p of pts) all.add(p.ts);
+      const key = `${s.sn}|${s.metric}`;
+      const idx = new Map<number, number>();
+      for (const p of dataBySeries[key] ?? []) {
+        all.add(p.ts);
+        if (!idx.has(p.ts)) idx.set(p.ts, p.value);
+      }
+      indexBySeries[key] = idx;
     }
     const sortedTs = Array.from(all).sort((a, b) => a - b);
     const lastBy: Record<string, number | null> = {};
@@ -86,9 +99,8 @@ export function TrendChart({
       const row: Record<string, number | string | null> = { ts };
       for (const s of series) {
         const key = `${s.sn}|${s.metric}`;
-        const pts = dataBySeries[key] ?? [];
-        const pt = pts.find((p) => p.ts === ts);
-        if (pt) lastBy[key] = pt.value;
+        const idx = indexBySeries[key];
+        if (idx.has(ts)) lastBy[key] = idx.get(ts)!;
         row[s.label] = lastBy[key];
       }
       return row;

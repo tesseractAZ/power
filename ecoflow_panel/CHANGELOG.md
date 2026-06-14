@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.22.0 — 2026-06-13
+
+Frontend render-performance pass (the third deferred item from v0.20.0's audit). No behaviour, data, or layout changes — purely how fast the dashboard paints and how often cards re-render.
+
+- **recharts (≈400 kB) is finally off the first-paint critical path — and a latent bundling bug from v0.8.1 is fixed.** The old `manualChunks: { recharts: ['recharts'] }` was an active footgun: naming recharts as a chunk root made Rollup sweep recharts' *own* dependencies into that chunk too — including **react-dom**. The 543 kB "recharts" chunk actually contained React, so the entry had to eagerly import the whole thing just to paint, and `index.html` modulepreloaded it on every load. The chart-deferral that chunk was *meant* to provide never happened. Replaced with a function-form split that pins React to its own eager `react-vendor` chunk (so it can't be absorbed) and leaves recharts a pure leaf reached only through lazy chart chunks. **First-paint transfer drops from ~183 kB → ~66 kB gzipped**; recharts (~116 kB gz) now streams in on demand when a chart first mounts.
+- **All eager recharts consumers on the dashboard are now lazy.** New `LazySparkline` wrapper (`React.lazy` around the recharts sparkline) for the DPU/SHP2 cards; `ForecastCard` and the click-to-open `CircuitModal` are lazy too. These were the static import edges that kept recharts on the critical path — closing them is what lets the new chunk split actually defer it. Each has a height-matched / same-origin fallback so there's no layout shift when the chart swaps in.
+- **Dashboard cards memoized.** Zero-prop cards that fetch their own data on a slow poll (Today / Off-grid runway / Curtailment / Forecast) were re-rendering on *every* ~1 Hz WebSocket snapshot push even though their data only changes every 60 s / 15 min; `React.memo` makes them immune to parent re-renders. The DPU / SHP2 / small-device cards are memoized too, and `App` now memoizes its derived views (`devices`/`sorted`/alert partitions/`shp2`/`dpus`/`dpuViaShp2`) so those props keep stable references across non-snapshot re-renders (tab / theme / show-history toggles) — which is what makes the card memo effective. The "other devices" partition also switched from an O(n) `Array.includes` to an O(1) `Set`.
+- **TrendChart merge is O(rows × series) instead of O(rows × series × points), bit-identically.** The 24 h history chart rebuilt each row with a fresh `Array.find` linear scan per cell; it now pre-indexes each series into a `Map<ts, value>` (first-write-wins, mirroring `Array.find`; presence-probed so an undefined value behaves identically). The merged rows — and the rendered chart — are byte-for-byte unchanged.
+
+Verified: `tsc --noEmit` clean; production build inspected to confirm recharts is no longer modulepreloaded or statically imported by the entry chunk (only the lazy chart chunks import it), and that react-dom moved out of the recharts chunk into `react-vendor`. No server changes (562/562 tests still apply); no change to any computed value, alert, or broadcast path.
+
 ## 0.21.0 — 2026-06-13
 
 Forecast-backtest: a worker-blocking performance fix **and** a metric-scope correctness fix (the two deferred items from v0.20.0's audit).

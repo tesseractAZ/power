@@ -26,25 +26,44 @@ export default defineConfig({
     },
   },
   build: {
-    // v0.8.1 — manual chunk split. recharts is the single biggest dep
-    // (~300 kB minified) and is only used by chart-heavy cards. Pulling
-    // it into its own vendor chunk lets the initial Dashboard skip it
-    // entirely; React.lazy() on the routes loads it on first nav to
-    // a page that needs it.
+    // v0.22.0 — manual chunk split, function form.
+    //
+    // The old object form `manualChunks: { recharts: ['recharts'] }` was an
+    // active footgun: naming recharts as a chunk root made Rollup sweep recharts'
+    // OWN dependencies into that chunk too — including react-dom. The entry then
+    // had to statically import the 540 kB "recharts" chunk just to get React, so
+    // recharts sat on the first-paint critical path on every load (verified: the
+    // 543 kB chunk contained react-dom, and index.html modulepreloaded it).
+    //
+    // The function form fixes that by pinning React to its OWN eager chunk so it
+    // can't be absorbed. recharts is then a pure leaf reached only through the
+    // lazy chart chunks (LazySparkline / lazy ForecastCard / lazy CircuitModal /
+    // lazy TrendChart / lazy pages), so it loads on demand when a chart first
+    // mounts and never blocks first paint.
     rollupOptions: {
       output: {
-        // React itself stays in the main chunk (it's needed for first paint).
-        // Only recharts gets its own split — it's the single biggest dep
-        // (~540 kB minified, ~163 kB gzipped) and is only used by chart-heavy
-        // pages, which are now lazy-loaded.
-        manualChunks: {
-          recharts: ['recharts'],
+        manualChunks(id) {
+          // React core stays eager (first paint needs it). Its own stable chunk
+          // also means app-code changes don't bust React's long-term cache.
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler|react-is)[\\/]/.test(id)) {
+            return 'react-vendor';
+          }
+          // recharts + its charting deps (d3-*, victory-vendor, react-smooth,
+          // etc). NOT React — that's the whole point. One deferred chunk so a
+          // chart mount is a single request, off the first-paint path.
+          if (
+            /[\\/]node_modules[\\/](recharts|recharts-scale|react-smooth|d3-[^\\/]+|victory-vendor|internmap|robust-predicates|delaunator|decimal\.js-light|fast-equals)[\\/]/.test(
+              id,
+            )
+          ) {
+            return 'recharts';
+          }
         },
       },
     },
-    // recharts is the only chunk over the default 500 kB warning; that one is
-    // legitimately on its lazy-load critical path so we bump the threshold to
-    // 600 kB instead of churning over it.
+    // recharts is the only chunk over the default 500 kB warning; it is now
+    // genuinely off the critical path (lazy), so bump the threshold to 600 kB
+    // instead of churning over it.
     chunkSizeWarningLimit: 600,
   },
 });

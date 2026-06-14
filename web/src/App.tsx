@@ -1,8 +1,7 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useSnapshot } from './useSnapshot';
 import { EnergyFlow } from './cards/EnergyFlow';
 import { TodaySummary } from './cards/TodaySummary';
-import { ForecastCard } from './cards/ForecastCard';
 import { RunwayCard } from './cards/RunwayCard';
 import { CurtailmentCard } from './cards/CurtailmentCard';
 import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
@@ -33,6 +32,11 @@ const AlertConsolePanel = lazy(() =>
 );
 const PredictiveInsights = lazy(() => import('./pages/PredictiveInsights').then((m) => ({ default: m.PredictiveInsights })));
 const TrendChart = lazy(() => import('./charts/TrendChart').then((m) => ({ default: m.TrendChart })));
+// v0.22.0 — ForecastCard is the last eager recharts consumer on the dashboard.
+// Lazy-loading it (alongside LazySparkline in the DPU/SHP2 cards) is what
+// finally keeps the ~540 kB recharts chunk OUT of the entry bundle: the
+// dashboard shell + non-chart data paint first, charts stream in a beat later.
+const ForecastCard = lazy(() => import('./cards/ForecastCard').then((m) => ({ default: m.ForecastCard })));
 
 const PageFallback = () => (
   <div className="card flex items-center gap-2 text-sm text-muted">
@@ -53,47 +57,67 @@ export default function App() {
 
 function NormalApp() {
   const { snapshot, conn } = useSnapshot();
-  const devices = snapshot ? Object.values(snapshot.devices) : [];
   const [showHistory, setShowHistory] = useState(false);
   const [tab, setTab] = useState<
     'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-console' | 'predictive'
   >('dashboard');
-  const sorted = sortDevices(devices);
 
   // Attach glossary hover tooltips to every matching label across the app.
   useEffect(() => installGlossaryTooltips(), []);
 
+  // v0.22.0 — memoize every derived view keyed on `snapshot`. The WS pushes a
+  // fresh snapshot ~1×/sec; on those, these recompute (data changed). But on a
+  // re-render that DOESN'T change `snapshot` (tab/theme/history toggles), each
+  // memo returns the SAME array/Map/object reference, so the memo'd cards below
+  // see unchanged props and skip re-rendering entirely.
+  const devices = useMemo(() => (snapshot ? Object.values(snapshot.devices) : []), [snapshot]);
+  const sorted = useMemo(() => sortDevices(devices), [devices]);
+
   const alerts = snapshot?.alerts ?? [];
-  const thresholdAlerts = alerts.filter((a) => a.source !== 'learned');
-  const learnedAlerts = alerts.filter((a) => a.source === 'learned');
-  const thresholdCounts = alertCounts(thresholdAlerts);
-  const learnedCounts = alertCounts(learnedAlerts);
+  const thresholdAlerts = useMemo(() => alerts.filter((a) => a.source !== 'learned'), [alerts]);
+  const learnedAlerts = useMemo(() => alerts.filter((a) => a.source === 'learned'), [alerts]);
+  const thresholdCounts = useMemo(() => alertCounts(thresholdAlerts), [thresholdAlerts]);
+  const learnedCounts = useMemo(() => alertCounts(learnedAlerts), [learnedAlerts]);
   const alertBadgeCount = thresholdCounts.critical + thresholdCounts.warning;
   const predictiveBadgeCount = learnedCounts.critical + learnedCounts.warning;
 
-  const shp2 = sorted.find((d) => d.projection?.kind === 'shp2');
-  const dpus = sorted.filter((d) => d.productName.toLowerCase().includes('delta pro ultra'));
+  const shp2 = useMemo(() => sorted.find((d) => d.projection?.kind === 'shp2'), [sorted]);
+  const dpus = useMemo(
+    () => sorted.filter((d) => d.productName.toLowerCase().includes('delta pro ultra')),
+    [sorted],
+  );
+  // O(1) membership for the "others" partition below (was dpus.includes(d), O(n)).
+  const dpuSet = useMemo(() => new Set(dpus), [dpus]);
   // "Other devices" — everything that isn't the SHP2 or a DPU. Offline ones sort
   // to the end (stable sort preserves the compareDevices order within each group).
-  const others = sorted
-    .filter((d) => d !== shp2 && !dpus.includes(d))
-    .sort((a, b) => Number(b.online) - Number(a.online));
+  const others = useMemo(
+    () =>
+      sorted
+        .filter((d) => d !== shp2 && !dpuSet.has(d))
+        .sort((a, b) => Number(b.online) - Number(a.online)),
+    [sorted, shp2, dpuSet],
+  );
 
   // Build a DPU-SN → SHP2-derived data map so we can fall back when a DPU's own
   // cloud connection is offline. The SHP2 reports its bound DPUs' overall state
   // (battery %, contributed watts, AC-open, temp, errors) via its wired link.
-  const dpuViaShp2 = new Map<string, DpuViaShp2>();
-  if (shp2?.projection?.kind === 'shp2') {
-    const sp = shp2.projection as Shp2Projection;
-    sp.sources.forEach((source, i) => {
-      if (!source.sn) return;
-      const w = sp.sourceWatts[i];
-      // chWatt is reported as negative when the source is contributing power to SHP2.
-      // Flip sign so positive = discharging (consistent with the rest of the UI).
-      const liveWatts = typeof w === 'number' ? -w : null;
-      dpuViaShp2.set(source.sn, { source, liveWatts, shp2Sn: shp2.sn });
-    });
-  }
+  // Memoized on `shp2` so each DpuViaShp2 value keeps a stable reference across
+  // non-snapshot re-renders — that is what lets the memo'd DpuCard actually skip.
+  const dpuViaShp2 = useMemo(() => {
+    const m = new Map<string, DpuViaShp2>();
+    if (shp2?.projection?.kind === 'shp2') {
+      const sp = shp2.projection as Shp2Projection;
+      sp.sources.forEach((source, i) => {
+        if (!source.sn) return;
+        const w = sp.sourceWatts[i];
+        // chWatt is reported as negative when the source is contributing power to SHP2.
+        // Flip sign so positive = discharging (consistent with the rest of the UI).
+        const liveWatts = typeof w === 'number' ? -w : null;
+        m.set(source.sn, { source, liveWatts, shp2Sn: shp2.sn });
+      });
+    }
+    return m;
+  }, [shp2]);
 
   return (
     <div className="min-h-full p-4 md:p-6 max-w-[1800px] mx-auto">
@@ -208,7 +232,12 @@ function NormalApp() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start mt-4">
           {snapshot && <EnergyFlow devices={snapshot.devices} />}
           <TodaySummary />
-          <ForecastCard />
+          {/* v0.22.0 — ForecastCard is lazy (recharts off the entry chunk). The
+              fallback is col-span-full like the card itself, so the lazy chunk
+              resolving causes no layout shift. */}
+          <Suspense fallback={<div className="card col-span-full text-sm text-muted">Loading forecast…</div>}>
+            <ForecastCard />
+          </Suspense>
           {/* v0.9.77 — solar curtailment surface. Sits next to TodaySummary
               so the "lost kWh today" reading is one glance away from the
               "delivered kWh today" reading on TodaySummary. */}
