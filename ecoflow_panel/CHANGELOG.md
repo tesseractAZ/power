@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.21.0 — 2026-06-13
+
+Forecast-backtest: a worker-blocking performance fix **and** a metric-scope correctness fix (the two deferred items from v0.20.0's audit).
+
+- **Perf (bit-identical) — batched the backtest's per-hour query loops.** The forecast backtest (`/api/backtest/forecast`) and the forecast-skill hindcast issued ONE SQLite query per hour per DPU — ~1000 synchronous reads per cold recompute that blocked the analytics worker for the whole burst. Both now fetch each DPU's full `pv_total` series once and slice each hour in memory. The slice uses inclusive both-ends bounds that reproduce the recorder's query semantics exactly (a sample on an hour boundary still counts in both adjacent hours), so the integration is unchanged and the scores are **bit-for-bit identical** — pinned by a new parity test that runs the old per-hour loop and the new batched path on the same synthetic data (boundaries, >10-min gaps, sparse hours) and asserts deep-equal scores.
+- **Correctness — the backtest now scores like-for-like.** The backtest summed *actual* PV over EVERY DPU while the *predictor* (the typical-PV curve + solar model) is built only from SHP2-connected home DPUs (v0.9.76). On a fleet with spare bench cores that have panels, this scored a home-only prediction against a home+spares actual — a structural bias in the reported R² / bias / MAE. Actuals are now scoped to the same SHP2-connected home DPUs as the prediction. **This changes the published backtest numbers** (they become correct). For the operator's current setup — spares kept offline, so they record no PV — the numbers are unchanged in practice; the fix prevents a latent bias if a spare ever bench-charges with panels while reporting.
+
+562/562 server tests pass (3 new: the backtest batch-parity proof). `tsc` clean. No change to any persisted counter, alert, or broadcast path.
+
 ## 0.20.0 — 2026-06-13
 
 Performance pass — hot-path CPU/allocation/IO wins from a multi-agent audit. **Every change is provably behaviour-preserving** (identical computed and persisted values); the audit's value-touching ideas were deliberately deferred, not applied.

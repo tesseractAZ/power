@@ -1517,8 +1517,13 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
 /* v0.9.27 — Forecast backtest. Replay the last 7 days of typical-day
  *  PV forecasting against recorder actuals; surface RMSE/MAE/bias/R². */
 app.get('/api/backtest/forecast', async (req, reply) => {
+  // v0.21.0 — score actuals over the SAME scope as the predictor: SHP2-connected
+  // home DPUs only (the typical-PV curve is built from home DPUs — v0.9.76).
+  // Summing actuals over spare bench cores too biased the reported R²/bias/MAE
+  // on a fleet with spare panels.
+  const connected = shp2ConnectedDpuSns(store.get().devices);
   const dpus = Object.values(store.get().devices)
-    .filter((d) => d.projection?.kind === 'dpu')
+    .filter((d) => d.projection?.kind === 'dpu' && isShp2Connected(d.sn, connected))
     .map((d) => d.sn);
   // Use the typical-PV (recent average) as the v1 forecaster.
   // Higher-fidelity backtests can swap in the Bayesian or full forecast.
