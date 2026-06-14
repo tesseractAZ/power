@@ -1,6 +1,8 @@
+import { memo } from 'react';
 import type { DeviceSnapshot, DpuProjection, Shp2EnergySource } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
-import { Sparkline } from '../charts/Sparkline';
+// v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
+import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 
 export interface DpuViaShp2 {
   source: Shp2EnergySource;
@@ -16,7 +18,11 @@ export interface DpuViaShp2 {
  *  - Per-pack tiles: 5 packs always; live data when direct, "no data" placeholder otherwise
  *  - SHP2 view section: always shown for SHP2-bound DPUs (cross-reference + history fallback)
  */
-export function DpuCard({
+// v0.22.0 — memo skips re-renders when the parent (App) re-renders without a
+// new snapshot (tab/theme/history toggles). On an actual WS push `d`/`viaShp2`
+// are fresh references, so the card still re-renders with new data — App's
+// useMemo keeps those references stable across non-snapshot renders.
+export const DpuCard = memo(function DpuCard({
   d,
   viaShp2,
 }: {
@@ -118,7 +124,7 @@ export function DpuCard({
       {viaShp2 && <Shp2ViewSection viaShp2={viaShp2} />}
     </div>
   );
-}
+});
 
 function Header({
   d,

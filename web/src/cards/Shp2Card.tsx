@@ -1,11 +1,21 @@
-import { useState } from 'react';
+import { lazy, memo, Suspense, useState } from 'react';
 import type { DeviceSnapshot, Shp2Circuit, Shp2PairedCircuit, Shp2Projection } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
-import { Sparkline } from '../charts/Sparkline';
-import { CircuitModal } from '../components/CircuitModal';
+// v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
+import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { RefreshCloudButton } from '../components/RefreshCloudButton';
 
-export function Shp2Card({ d }: { d: DeviceSnapshot & { projection?: Shp2Projection } }) {
+// v0.22.0 — CircuitModal pulls in recharts (its 24 h circuit chart). It only
+// renders when the user clicks a circuit tile, so a STATIC import here would
+// drag the whole recharts chunk into the entry bundle for a view nobody has
+// opened yet. Lazy-loading it defers that chunk until the first modal open —
+// this is the last eager recharts edge on the dashboard's static graph.
+const CircuitModal = lazy(() =>
+  import('../components/CircuitModal').then((m) => ({ default: m.CircuitModal })),
+);
+
+// v0.22.0 — memo skips parent-driven re-renders that don't change `d`.
+export const Shp2Card = memo(function Shp2Card({ d }: { d: DeviceSnapshot & { projection?: Shp2Projection } }) {
   const p = d.projection;
   // v0.9.8 — track both the leg (for breaker/single-leg fields) and the pair
   // (for combined 240 V chart + kWh history) when the user clicks a paired tile.
@@ -162,13 +172,15 @@ export function Shp2Card({ d }: { d: DeviceSnapshot & { projection?: Shp2Project
       )}
 
       {selected && p && (
-        <CircuitModal
-          sn={d.sn}
-          circuit={selected.circuit}
-          pair={selected.pair}
-          onClose={() => setSelected(null)}
-        />
+        <Suspense fallback={null}>
+          <CircuitModal
+            sn={d.sn}
+            circuit={selected.circuit}
+            pair={selected.pair}
+            onClose={() => setSelected(null)}
+          />
+        </Suspense>
       )}
     </div>
   );
-}
+});

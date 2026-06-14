@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import type { CurtailmentReport } from '../types';
 import { apiUrl } from '../api';
 
@@ -16,7 +16,9 @@ import { apiUrl } from '../api';
  * Re-polls every 60s — matches the server's curtailment cache TTL so
  * we're not duplicating work.
  */
-export function CurtailmentCard() {
+// v0.22.0 — zero-prop card: memo makes it immune to App's ~1 Hz snapshot
+// re-renders; it re-polls on its own 60 s timer (matches server cache TTL).
+export const CurtailmentCard = memo(function CurtailmentCard() {
   const [r, setR] = useState<CurtailmentReport | null>(null);
   const [err, setErr] = useState(false);
 
@@ -111,7 +113,7 @@ export function CurtailmentCard() {
       </div>
     </div>
   );
-}
+});
 
 function ActiveBody({ r, fits }: { r: CurtailmentReport; fits: any[] }) {
   const ceiling = r.current.chargeCeilingPct;
