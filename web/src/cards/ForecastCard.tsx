@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import {
   ComposedChart,
   Area,
@@ -19,7 +19,9 @@ import { apiUrl } from '../api';
  * Day-ahead forecast card: cloud-aware solar prediction, typical-day load, and
  * the resulting projected battery SoC trajectory for the next 24 hours.
  */
-export function ForecastCard() {
+// v0.22.0 — zero-prop card, lazy-loaded by App so its recharts import stays
+// off the entry chunk; memo also keeps it immune to App's snapshot re-renders.
+export const ForecastCard = memo(function ForecastCard() {
   const [fc, setFc] = useState<DayForecast | null>(null);
 
   useEffect(() => {
@@ -142,7 +144,7 @@ export function ForecastCard() {
       )}
     </div>
   );
-}
+});
 
 function Tile({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: string }) {
   return (
