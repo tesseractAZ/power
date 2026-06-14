@@ -57,7 +57,8 @@ export default function App() {
 
 function NormalApp() {
   const { snapshot, conn } = useSnapshot();
-  const [showHistory, setShowHistory] = useState(false);
+  // v0.23.0 — show the 24 h history charts by default on the dashboard.
+  const [showHistory, setShowHistory] = useState(true);
   const [tab, setTab] = useState<
     'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-console' | 'predictive'
   >('dashboard');
@@ -196,14 +197,19 @@ function NormalApp() {
               )}
             </button>
           </div>
-          {tab === 'dashboard' && (
-            <button
-              onClick={() => setShowHistory((v) => !v)}
-              className="badge badge-muted hover:bg-muted/20 transition-colors"
-            >
-              {showHistory ? 'hide history' : 'show history'}
-            </button>
-          )}
+          {/* v0.23.0 — keep the toggle MOUNTED on every tab (invisible + inert
+              off-dashboard) so its slot is always reserved and the header no
+              longer reflows/shifts when switching tabs. */}
+          <button
+            onClick={() => setShowHistory((v) => !v)}
+            aria-hidden={tab !== 'dashboard'}
+            tabIndex={tab === 'dashboard' ? 0 : -1}
+            className={`badge badge-muted hover:bg-muted/20 transition-colors ${
+              tab === 'dashboard' ? '' : 'invisible pointer-events-none'
+            }`}
+          >
+            {showHistory ? 'hide history' : 'show history'}
+          </button>
           <span
             className={`badge ${conn === 'open' ? 'badge-ok' : conn === 'connecting' ? 'badge-warn' : 'badge-bad'}`}
             title="Live data link to the server (WebSocket). LIVE = real-time telemetry is streaming; LINKING = (re)connecting; OFFLINE = no link, readings may be stale."

@@ -103,15 +103,26 @@ else
 fi
 export BROADCAST_MIN_SEVERITY="$(bashio::config 'BROADCAST_MIN_SEVERITY')"
 export BROADCAST_QUIET_HOURS="$(bashio::config 'BROADCAST_QUIET_HOURS')"
-export BROADCAST_TTS_SERVICE="$(bashio::config 'BROADCAST_TTS_SERVICE')"
-export BROADCAST_TTS_LANGUAGE="$(bashio::config 'BROADCAST_TTS_LANGUAGE')"
-if bashio::config.true 'BROADCAST_SONOS_RESTORE'; then
-  export BROADCAST_SONOS_RESTORE=true
+# v0.23.0 — opt-in: critical alerts break through quiet hours (push + audible).
+# Default false ⇒ quiet hours silence every tier (alert still shows on-screen +
+# morning digest). Shared by alertMonitor (push) and broadcast (audible).
+if bashio::config.true 'CRITICAL_BREAKS_QUIET_HOURS'; then
+  export CRITICAL_BREAKS_QUIET_HOURS=true
 else
-  export BROADCAST_SONOS_RESTORE=false
+  export CRITICAL_BREAKS_QUIET_HOURS=false
 fi
-# v0.9.23 — MA backend selection
-export BROADCAST_USE_MUSIC_ASSISTANT="$(bashio::config 'BROADCAST_USE_MUSIC_ASSISTANT')"
+# v0.23.0 — these were declared in config.yaml options/schema but never exported
+# here, so the HA Configuration-tab knobs were DEAD (the server only ever saw its
+# code defaults). Lead-silence especially matters: Music Assistant 2.9's faster
+# AirPlay RAOP start needs a longer lead-in to avoid clipping the chime's start.
+# (Removed the stale BROADCAST_TTS_SERVICE/TTS_LANGUAGE/SONOS_RESTORE/
+# USE_MUSIC_ASSISTANT exports — those options no longer exist in config.yaml.)
+export BROADCAST_LEAD_SILENCE_MS="$(bashio::config 'BROADCAST_LEAD_SILENCE_MS')"
+export BROADCAST_CHIME_GAP_MS="$(bashio::config 'BROADCAST_CHIME_GAP_MS')"
+export BROADCAST_CHIME_PACK="$(bashio::config 'BROADCAST_CHIME_PACK')"
+export BROADCAST_WYOMING_HOST="$(bashio::config 'BROADCAST_WYOMING_HOST')"
+export BROADCAST_WYOMING_PORT="$(bashio::config 'BROADCAST_WYOMING_PORT')"
+export BROADCAST_WYOMING_VOICE="$(bashio::config 'BROADCAST_WYOMING_VOICE')"
 if bashio::config.true 'BROADCAST_ENABLED'; then
   bashio::log.info "broadcast: enabled (targets: $BROADCAST_TARGETS)"
 fi
@@ -122,6 +133,23 @@ if bashio::config.true 'GRID_AVAILABLE'; then
 else
   export GRID_AVAILABLE=false
 fi
+# v0.23.0 — optional HA entity reporting real grid presence (grid-aware floor).
+export GRID_PRESENCE_ENTITY="$(bashio::config 'GRID_PRESENCE_ENTITY')"
+# v0.23.0 — wire the battery-alarm enable toggles + re-announce cadence to env.
+# These were declared in config.yaml but never exported here, so the HA toggles
+# were dead and the server only ever saw its code defaults (both enabled). Now
+# the Configuration-tab switches actually take effect.
+if bashio::config.true 'BATTERY_SOC_ALARM_ENABLED'; then
+  export BATTERY_SOC_ALARM_ENABLED=true
+else
+  export BATTERY_SOC_ALARM_ENABLED=false
+fi
+if bashio::config.true 'BATTERY_RUNWAY_ALARM_ENABLED'; then
+  export BATTERY_RUNWAY_ALARM_ENABLED=true
+else
+  export BATTERY_RUNWAY_ALARM_ENABLED=false
+fi
+export BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN="$(bashio::config 'BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN')"
 if bashio::config.true 'LOAD_SHEDDING_ADVISORY_ENABLED'; then
   export LOAD_SHEDDING_ADVISORY_ENABLED=true
 else

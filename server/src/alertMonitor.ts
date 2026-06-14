@@ -33,6 +33,8 @@ import { getAnalytics } from './analyticsClient.js';
 // alert stays visible in snapshot.alerts).
 import { isPriorityEnabled } from './alertSettings.js';
 import { priorityOf, priorityMeta } from './alertPriority.js';
+import * as haStateCache from './haStateCache.js';
+import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 
 /**
  * Watches the fleet, attaches computed alerts to the snapshot, and pushes a
@@ -78,6 +80,11 @@ interface TrackedAlert {
   alert: Alert;
   firstSeen: number;
   notified: boolean;
+  /** v0.23.0 — severity at which this alert was last dispatched to the push
+   *  channel, so a later ESCALATION (e.g. shp2-below-reserve flipping info →
+   *  critical when the grid drops out at the reserve floor) re-notifies instead
+   *  of being silently swallowed by an already-true `notified`. */
+  notifiedSeverity?: Severity;
 }
 
 /** A historical record of an alert that was raised and later cleared. */
@@ -324,6 +331,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const persistNotified = () => saveNotifiedState(notifyStatePath, persistedNotified);
 
   const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
+  // v0.23.0 — opt-in: when true, critical alerts break through quiet hours and
+  // push immediately (today's behaviour). Default false ⇒ critical is ALSO held
+  // for the morning digest during quiet hours, so the night stays truly quiet.
+  const CRITICAL_BREAKS_QUIET =
+    process.env.CRITICAL_BREAKS_QUIET_HOURS === 'true' || process.env.CRITICAL_BREAKS_QUIET_HOURS === '1';
   const DIGEST_HOUR = Number(process.env.NOTIFY_DIGEST_HOUR ?? 7);
   const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
   const DOWNGRADE_SHORT_FRAC = 0.7;               // ≥ 70% of rises clear within SHORT_CLEAR_MS
@@ -585,7 +597,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     try {
       await sendNotification(cfg, {
         title: `EcoFlow · Morning digest (${quietQueue.length} alert${quietQueue.length === 1 ? '' : 's'})`,
-        body: `Held during overnight quiet hours:\n\n${lines.join('\n')}\n\n(Critical alerts are always delivered immediately.)`,
+        body: `Held during overnight quiet hours:\n\n${lines.join('\n')}\n\n${
+          CRITICAL_BREAKS_QUIET
+            ? '(Critical alerts break through immediately; the items above are warning/info.)'
+            : '(Every tier — including critical — was held overnight. Set CRITICAL_BREAKS_QUIET_HOURS=true to be woken for critical emergencies.)'
+        }`,
         severity: 'info',
       });
       sentSinceStart++;
@@ -650,8 +666,21 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       log(`alert-signals: baseline/forecast failed — ${e?.message ?? e}`);
     }
 
+    // v0.23.0 — grid-backstop context for the reserve/floor alerts. Keep the HA
+    // state cache warm when a grid-presence entity is configured (TTL-gated +
+    // coalesced, so this is cheap), then resolve from the live snapshot. When no
+    // entity is configured this resolves from GRID_AVAILABLE + live import only.
+    if (gridPresenceEntityId()) {
+      try {
+        await haStateCache.refreshIfStale();
+      } catch {
+        /* best effort — a stale/empty cache resolves to NOT present (safe) */
+      }
+    }
+    const grid = liveGridBackstop(snap.devices);
+
     const alerts = [
-      ...computeAlerts(snap.devices, connectivity),
+      ...computeAlerts(snap.devices, connectivity, grid),
       ...computeLearnedAlerts(snap.devices),
       ...baselineAlerts,
       ...forecastAlerts,
@@ -710,7 +739,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         if (notifiedBeforeRestart && !firstRun) {
           log(`notify: "${a.title}" was already notified before restart — suppressing duplicate`);
         }
-        tracked.set(a.id, { alert: a, firstSeen: now, notified: firstRun || notifiedBeforeRestart });
+        tracked.set(a.id, {
+          alert: a,
+          firstSeen: now,
+          notified: firstRun || notifiedBeforeRestart,
+          notifiedSeverity: firstRun || notifiedBeforeRestart ? a.severity : undefined,
+        });
         continue;
       }
       existing.alert = a;
@@ -728,19 +762,35 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // flapping (a short blip isn't worth interrupting for); a brief critical
       // is exactly the kind of thing the user wants to know about.
       const debounceMs = a.severity === 'critical' ? 0 : DEBOUNCE_MS;
+      // v0.23.0 — re-notify when a PERSISTENT alert ESCALATES above the severity
+      // it was last dispatched at. The motivating case: shp2-below-reserve flips
+      // info→critical when the grid drops out at the reserve floor; without this
+      // the `notified` flag swallows the upgrade and the push channel stays
+      // silent on a genuine emergency. Escalation bypasses debounce (like a fresh
+      // critical) so the upgrade is immediate.
+      const escalated =
+        existing.notified &&
+        existing.notifiedSeverity != null &&
+        sevRank[a.severity] < sevRank[existing.notifiedSeverity];
+      const escDebounceMs = escalated && a.severity === 'critical' ? 0 : debounceMs;
       if (
-        !existing.notified &&
-        now - existing.firstSeen >= debounceMs &&
+        (!existing.notified || escalated) &&
+        now - existing.firstSeen >= escDebounceMs &&
         qualifies(a.severity, cfg.minSeverity)
       ) {
         existing.notified = true;
+        existing.notifiedSeverity = a.severity;
         // v0.15.21 — record the push durably so a restart can't repeat it
         // (queued-for-digest counts: the digest path will deliver it once).
         persistedNotified.set(a.id, now);
         persistNotified();
-        // Quiet hours: critical always goes; warning/info gets queued for digest.
+        // Quiet hours: warning/info is always queued for the morning digest.
+        // v0.23.0 — critical breaks through ONLY when CRITICAL_BREAKS_QUIET_HOURS
+        // is opted in; default OFF ⇒ critical is also queued (surfaces at the
+        // 07:00 digest, still visible on-screen meanwhile) so nights stay quiet.
         const quiet = QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW);
-        if (quiet && a.severity !== 'critical') {
+        const breaksThrough = a.severity === 'critical' && CRITICAL_BREAKS_QUIET;
+        if (quiet && !breaksThrough) {
           quietQueue.push(a);
           log(`notify: queued for morning digest — "${a.title}" (severity ${a.severity})`);
         } else {
