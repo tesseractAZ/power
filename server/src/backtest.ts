@@ -112,19 +112,49 @@ export interface PvBacktestInputs {
   /** Function that, given a target ms-timestamp, returns the model's
    *  predicted total-fleet PV (Wh) for the HOUR STARTING at that ts. */
   predict: (hourStartMs: number) => number;
+  /** v0.21.0 — inject "now" for deterministic tests; defaults to Date.now(). */
+  nowMs?: number;
+}
+
+/**
+ * v0.21.0 — inclusive [startMs, endMs] slice of a ts-ASC points array. Mirrors
+ * the recorder's `ts >= ? AND ts <= ?` bounds EXACTLY (both ends inclusive), so
+ * a sample landing on an hour boundary appears in BOTH adjacent windows — the
+ * same behaviour as issuing one query per window. Lets callers fetch a whole
+ * series once and bucket it in memory while staying bit-identical to the prior
+ * one-query-per-bucket loops. Binary-searched: O(log n) per window.
+ */
+export function sliceByTsInclusive<T extends { ts: number }>(pts: T[], startMs: number, endMs: number): T[] {
+  let lo = 0, hi = pts.length;
+  while (lo < hi) { const m = (lo + hi) >>> 1; if (pts[m].ts < startMs) lo = m + 1; else hi = m; }
+  const start = lo;
+  hi = pts.length;
+  while (lo < hi) { const m = (lo + hi) >>> 1; if (pts[m].ts <= endMs) lo = m + 1; else hi = m; }
+  return pts.slice(start, lo);
 }
 
 export function backtestPvForecast(inputs: PvBacktestInputs): BacktestScore {
   const hoursBack = inputs.hoursBack ?? 168;
-  const now = Date.now();
+  const now = inputs.nowMs ?? Date.now();
   const data: ForecastDatum[] = [];
+  // v0.21.0 — fetch each DPU's full pv_total series ONCE over the whole window,
+  // then slice each hour from it in memory. The old loop issued one SQLite query
+  // per hour per DPU (~hoursBack × DPUs ≈ 1000 synchronous calls per cold hit
+  // that blocked the analytics worker). sliceByTsInclusive reproduces the
+  // recorder's inclusive bounds exactly, so the trapezoidal integration below is
+  // byte-for-byte unchanged and the score is bit-identical (pinned by a test).
+  const windowStart = now - hoursBack * 3_600_000;
+  const seriesBySn = new Map<string, Array<{ ts: number; value: number }>>();
+  for (const sn of inputs.dpuSns) {
+    seriesBySn.set(sn, inputs.recorder.query(sn, 'pv_total', windowStart, now));
+  }
   for (let h = hoursBack; h >= 1; h--) {
     const hourStartMs = now - h * 3_600_000;
     const hourEndMs = hourStartMs + 3_600_000;
     // Sum actual PV across all DPUs for this hour from the recorder.
     let actualWh = 0;
     for (const sn of inputs.dpuSns) {
-      const pts = inputs.recorder.query(sn, 'pv_total', hourStartMs, hourEndMs);
+      const pts = sliceByTsInclusive(seriesBySn.get(sn) ?? [], hourStartMs, hourEndMs);
       if (pts.length < 2) continue;
       // Trapezoidal integration of W → Wh
       for (let i = 1; i < pts.length; i++) {

@@ -4,6 +4,7 @@ import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
 import { getWeather, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
+import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
@@ -3253,8 +3254,15 @@ export async function computeForecastSkill(
   if (!forecast) return emptyVal();
   const weather = await getWeather();
   if (!weather) return emptyVal();
+  // v0.21.0 — scope the actuals to SHP2-connected home DPUs, matching the
+  // predictor (the solar model + typical-PV curve are built from home DPUs
+  // only — v0.9.76). The hindcast previously summed actual PV over EVERY DPU
+  // including bench spares, biasing the skill metric on a fleet with spare
+  // panels. (No-op when no SHP2 is observed: isShp2Connected returns true for
+  // all, so the empty-membership fallback keeps every DPU.)
+  const connected = shp2ConnectedDpuSns(devices);
   const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
+    (d) => d.projection?.kind === 'dpu' && isShp2Connected(d.sn, connected),
   ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
   if (dpus.length === 0) return emptyVal();
 
@@ -3269,6 +3277,16 @@ export async function computeForecastSkill(
   const windowStart = todayStart - windowDays * 86_400_000;
   const ghiRows = recorder.query('weather', 'ghi_wm2', windowStart, now, 3600);
   const ghiByEpoch = buildGhiByEpoch(ghiRows, weather.hours);
+
+  // v0.21.0 — fetch each DPU's full pv_total series ONCE for the whole hindcast
+  // window, then slice each hour in memory (was one SQLite query per hour per
+  // DPU = windowDays×24×DPUs synchronous calls per cold recompute). The
+  // inclusive slice reproduces the recorder's bounds, so the per-hour mean
+  // below is bit-identical.
+  const pvBySn = new Map<string, Array<{ ts: number; value: number }>>();
+  for (const d of dpus) {
+    pvBySn.set(d.sn, recorder.query(d.sn, 'pv_total', windowStart, todayStart));
+  }
 
   const days: ForecastSkillDay[] = [];
   let totalPred = 0, totalAct = 0, errSum = 0, errCount = 0;
@@ -3289,7 +3307,7 @@ export async function computeForecastSkill(
       if (ghi != null && resp.coeff != null) predWh += resp.coeff * ghi;
       let act = 0;
       for (const d of dpus) {
-        const pts = recorder.query(d.sn, 'pv_total', hourStart, hourStart + 3_600_000);
+        const pts = sliceByTsInclusive(pvBySn.get(d.sn) ?? [], hourStart, hourStart + 3_600_000);
         if (pts.length === 0) continue;
         act += pts.reduce((s, p) => s + p.value, 0) / pts.length;
       }
