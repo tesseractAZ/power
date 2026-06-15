@@ -25,7 +25,7 @@ const tmpRoot = mkdtempSync(resolve(tmpdir(), 'panel-auth-test-'));
 delete process.env.PANEL_WRITE_TOKEN;
 delete process.env.DATA_DIR;
 
-const { createAuth, tokenEquals, isAllowedOrigin, buildSameOrigins, LAN_ORIGIN_RE } =
+const { createAuth, tokenEquals, isAllowedOrigin, buildSameOrigins, LAN_ORIGIN_RE, isSupervisorSource } =
   await import('../src/auth.js');
 
 /** Build a Fastify instance with the supplied auth wired in as a
@@ -132,19 +132,62 @@ test('requireWriteAuth — allow same-origin', async () => {
   }
 });
 
-test('requireWriteAuth — allow HA Ingress (X-Ingress-Path header)', async () => {
+test('requireWriteAuth — allow HA Ingress (X-Ingress-Path from the Supervisor)', async () => {
   const auth = freshAuth('case-ingress');
   const app = buildApp(auth);
   try {
     const res = await app.inject({
       method: 'POST',
       url: '/test/write',
+      // Genuine ingress: Supervisor sets the header AND the TCP peer is the
+      // hassio-network Supervisor address.
+      remoteAddress: '172.30.32.2',
       headers: { 'x-ingress-path': '/api/hassio_ingress/abc123def456' },
     });
     assert.equal(res.statusCode, 200);
   } finally {
     await app.close();
   }
+});
+
+test('requireWriteAuth — REJECT a forged X-Ingress-Path from a LAN client', async () => {
+  // The hardening: a malicious device on the directly-published :8787 port can
+  // set X-Ingress-Path, but its TCP source is its real LAN IP, not the
+  // Supervisor — so the ingress bypass must NOT fire.
+  const auth = freshAuth('case-ingress-forged');
+  const app = buildApp(auth);
+  try {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test/write',
+      remoteAddress: '192.168.6.58',
+      headers: { 'x-ingress-path': '/api/hassio_ingress/abc123def456' },
+    });
+    assert.equal(res.statusCode, 401);
+  } finally {
+    await app.close();
+  }
+});
+
+/* ─── isSupervisorSource (ingress-source pin) ───────────────────────── */
+
+test('isSupervisorSource — Supervisor hassio-net addresses (incl. IPv6-mapped)', () => {
+  assert.equal(isSupervisorSource('172.30.32.2'), true);
+  assert.equal(isSupervisorSource('::ffff:172.30.32.2'), true);
+  assert.equal(isSupervisorSource('172.30.33.1'), true); // /23 covers .32 and .33
+  assert.equal(isSupervisorSource('::ffff:172.30.33.250'), true);
+});
+
+test('isSupervisorSource — direct-LAN / external / empty are NOT the Supervisor', () => {
+  assert.equal(isSupervisorSource('192.168.6.58'), false);
+  assert.equal(isSupervisorSource('::ffff:192.168.1.50'), false);
+  assert.equal(isSupervisorSource('10.0.0.4'), false);
+  assert.equal(isSupervisorSource('172.30.34.1'), false); // outside the /23
+  assert.equal(isSupervisorSource('172.17.0.1'), false); // default docker bridge, not hassio
+  assert.equal(isSupervisorSource('8.8.8.8'), false);
+  assert.equal(isSupervisorSource(undefined), false);
+  assert.equal(isSupervisorSource(null), false);
+  assert.equal(isSupervisorSource(''), false);
 });
 
 test('requireWriteAuth — allow valid token', async () => {

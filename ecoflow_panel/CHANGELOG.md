@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.24.0 — 2026-06-15
+
+Write-auth hardening, backed by an adversarially-verified security audit. No new config; no change for legitimate clients (ingress, the same-origin dashboard, and token-bearing scripts all keep working).
+
+- **The HA-Ingress write-auth bypass is now pinned to the Supervisor source IP.** `requireWriteAuth` accepted any request carrying an `X-Ingress-Path` header as authenticated ingress. But the add-on publishes `:8787` directly on the LAN, so any LAN client could *forge* that header (a bare `curl -H "x-ingress-path: /x"`) and reach every write endpoint — fire broadcasts, toggle config, upload chimes, refresh cloud presence. Fixed: the ingress bypass now also requires the request's TCP peer to be the Supervisor's hassio-network address (172.30.32.0/23). `trustProxy` is off, so `req.ip` is the unspoofable socket peer — verified live that genuine ingress presents `172.30.32.2` while a direct-LAN request presents its real client IP. New `isSupervisorSource()` helper + 3 regression tests (forged-from-LAN → 401, genuine-Supervisor → 200, IP matrix incl. IPv4-mapped IPv6).
+- **Security audit (5 classes, adversarially verified): no other reachable issues.** Authn/authz, command/argument injection (the EcoFlow device-command framework + debug send-command), path traversal (chime upload + static serving), SSRF / outbound-request injection (HA service calls, weather, TTS URL building), and secret handling (EcoFlow keys, HA token, write-token) were each reviewed and every candidate finding was refuted under adversarial re-verification. Matches the v0.9.60/v0.9.62 hardening posture.
+- **Note on the directly-published `:8787`.** Writes on the direct LAN port still rest on a same-origin `Origin` check, which a non-browser LAN client can also forge — this is the same documented "trusted-LAN" tier as the no-auth telnet TUI on `:2323`. The real CSRF surface (a malicious *website* in your browser) remains closed: it cannot forge `Origin` or `X-Ingress-Path`. For full lockdown, run the panel ingress-only (remove the `ports:` mapping).
+
+582/582 server tests pass (3 new auth cases). `tsc` clean. No behavioural change to the dashboard, broadcast pipeline, or any persisted state — purely a tightened auth gate.
+
 ## 0.23.1 — 2026-06-14
 
 Safety hardening for the v0.23.0 grid-aware floor alarm, from an adversarial review. All three fixes close paths where a real off-grid emergency could be wrongly silenced; none changes behaviour when the grid genuinely is backstopping. No new config.
