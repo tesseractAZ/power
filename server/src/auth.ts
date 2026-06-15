@@ -72,6 +72,27 @@ export function isAllowedOrigin(origin: string, sameOrigins: Set<string>): boole
   return false;
 }
 
+/**
+ * True when the request's TCP peer is the HA Supervisor (the hassio docker
+ * network, 172.30.32.0/23). Genuine Ingress traffic ALWAYS originates from the
+ * Supervisor; a request arriving on the directly-published :8787 LAN port
+ * presents the real client IP instead (verified live: ingress → 172.30.32.2,
+ * direct-LAN → the client's 192.168.x address).
+ *
+ * Because the Fastify server runs with trustProxy OFF, `req.ip` is the raw,
+ * unspoofable socket peer — not a client-supplied X-Forwarded-For. So this lets
+ * `requireWriteAuth` honor the (otherwise trivially forgeable) X-Ingress-Path
+ * header ONLY when the request genuinely came through the Supervisor, closing
+ * the LAN-forge bypass.
+ */
+export function isSupervisorSource(ip: string | undefined | null): boolean {
+  if (!ip) return false;
+  // Node reports IPv4-mapped IPv6 as ::ffff:172.30.32.2 — normalize it.
+  const v4 = ip.startsWith('::ffff:') ? ip.slice('::ffff:'.length) : ip;
+  // hassio supervisor network 172.30.32.0/23 → 172.30.32.* and 172.30.33.*
+  return /^172\.30\.3[23]\.\d{1,3}$/.test(v4);
+}
+
 /* ─── token bootstrap ─────────────────────────────────────────────── */
 
 export interface TokenLogger {
@@ -187,8 +208,12 @@ export function createAuth(opts: AuthOptions): Auth {
     reply: FastifyReply,
     done: (err?: Error) => void,
   ): void => {
-    // 1. HA Ingress — header is set by Supervisor, can't be forged from outside.
-    if (req.headers['x-ingress-path']) return done();
+    // 1. HA Ingress — the Supervisor sets X-Ingress-Path. That header ALONE is
+    //    forgeable by anything that can reach the directly-published :8787 LAN
+    //    port, so we additionally pin the TCP source to the Supervisor network
+    //    (req.ip is the unspoofable socket peer; trustProxy is off). Both must
+    //    hold for the ingress bypass.
+    if (req.headers['x-ingress-path'] && isSupervisorSource(req.ip)) return done();
 
     // 2. Same-origin: the dashboard fetching its own backend.
     const origin = req.headers.origin?.toString();
