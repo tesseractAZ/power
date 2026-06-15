@@ -45,6 +45,13 @@ export const GRID_IMPORT_WATTS = 5;
  *  sensor as GRID_PRESENCE_ENTITY (it flips off when the grid drops). For the
  *  islanded operator (declared=false) this constant is never consulted. */
 export const POOL_DISCHARGE_WATTS = 50;
+/** v0.23.0 — a configured grid-presence entity older than this (ms) is treated
+ *  as UNKNOWN, not its last-known value. When HA is unreachable (Pi reboot /
+ *  network partition / token expiry — exactly when the grid may be down), a
+ *  failed refresh leaves the cache frozen; replaying a stale "on" is the one
+ *  false "grid is fine" the safety posture forbids. 120 s ≈ 4× the 30 s cache
+ *  TTL and 6× the 20 s alert-eval refresh, so a healthy system never trips it. */
+export const GRID_ENTITY_MAX_AGE_MS = 120_000;
 
 export interface GridBackstop {
   /** Grid is energized (present) per the best available signal. */
@@ -65,9 +72,17 @@ export interface GridBackstop {
 
 /**
  * Sum AC-input watts across the SHP2-bound DPU cores (the house's grid path).
- * Mirrors the off-grid detector in alerts.ts EXACTLY: a spare DPU plugged into
- * a wall to self-charge must NOT register as house grid power, so we scope to
- * the SHP2's connected source SNs when known.
+ * A spare DPU plugged into a wall to self-charge must NOT register as house grid
+ * power, so we scope STRICTLY to the SHP2's connected source SNs.
+ *
+ * v0.23.0 safety fix: unlike the cosmetic off-grid detector in alerts.ts (which
+ * falls back to summing ALL DPUs when source SNs are unknown), the backstop
+ * decision must NOT do that. If the SHP2's source SNs are unavailable (e.g. a
+ * partial /quota/all that returns the backup SoC subtree but omits the pd303_mc
+ * source subtree), summing all DPUs would let a wall-charging spare's acIn
+ * masquerade as house grid import and wrongly downgrade a real off-grid floor
+ * emergency. With no source identity we therefore report 0 import — the resolver
+ * then treats the grid as NOT live unless separately declared.
  */
 export function computeGridImportWatts(devices: Record<string, DeviceSnapshot>): number {
   const list = Object.values(devices);
@@ -80,8 +95,11 @@ export function computeGridImportWatts(devices: Record<string, DeviceSnapshot>):
   const sourceSns = new Set(
     (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
+  // No SHP2 source identity → cannot attribute import to the house grid path →
+  // fail safe to 0 (never let an unscoped DPU sum silence a floor emergency).
+  if (sourceSns.size === 0) return 0;
   return dpus
-    .filter((d) => d.online && (sourceSns.size === 0 || sourceSns.has(d.sn)))
+    .filter((d) => d.online && sourceSns.has(d.sn))
     .reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
 }
 
@@ -114,6 +132,10 @@ export interface GridBackstopInput {
   gridEntityConfigured: boolean;
   /** GRID_AVAILABLE standing declaration — the coarse fallback when no entity. */
   gridAvailableFallback: boolean;
+  /** v0.23.0 — the cached entity is older than GRID_ENTITY_MAX_AGE_MS (HA
+   *  unreachable). A stale entity is treated as UNKNOWN (not its frozen value)
+   *  so a stale "on" can't silence a real outage. */
+  gridEntityStale?: boolean;
 }
 
 /** Pure resolver — unit-testable; no env / cache reads. */
@@ -123,7 +145,10 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
 
   // Declared presence: a configured entity is authoritative (unknown ⇒ NOT
   // declared, the safe default); otherwise fall back to GRID_AVAILABLE.
-  const entityPresent = input.gridEntityConfigured ? interpretGridEntity(input.gridEntity) : undefined;
+  // v0.23.0 — a STALE configured entity (HA unreachable) is treated as UNKNOWN,
+  // never its frozen last value, so it cannot replay a false "grid is fine".
+  const entityUsable = input.gridEntityConfigured && !input.gridEntityStale;
+  const entityPresent = entityUsable ? interpretGridEntity(input.gridEntity) : undefined;
   const declared = input.gridEntityConfigured
     ? entityPresent === true
     : input.gridAvailableFallback;
@@ -162,11 +187,17 @@ export function gridPresenceEntityId(): string {
 
 export function liveGridBackstop(devices: Record<string, DeviceSnapshot>): GridBackstop {
   const entityId = gridPresenceEntityId();
+  // v0.23.0 — getCacheAgeMs reports the age since the last SUCCESSFUL HA fetch
+  // (a failed refresh does not advance it), so it's the right staleness signal:
+  // if HA has been unreachable beyond the bound, the cached entity is treated as
+  // UNKNOWN rather than replaying a frozen last value.
+  const stale = entityId.length > 0 && haStateCache.getCacheAgeMs() > GRID_ENTITY_MAX_AGE_MS;
   return resolveGridBackstop({
     devices,
     gridEntity: entityId ? haStateCache.getCachedEntity(entityId) : null,
     gridEntityConfigured: entityId.length > 0,
     gridAvailableFallback: process.env.GRID_AVAILABLE === 'true',
+    gridEntityStale: stale,
   });
 }
 

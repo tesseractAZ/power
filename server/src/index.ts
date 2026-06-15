@@ -1738,6 +1738,17 @@ store.on('change', (snap: FleetSnapshot) => {
     // Re-escalate a previously grid-downgraded crossing if the grid is no longer
     // backstopping while the pool is still at/below that threshold — closes the
     // one-shot fail-silent window on a grid drop.
+    //
+    // NOTE (do not "fix" as fail-silent): this store 'change' handler is NOT
+    // driven only by SHP2 MQTT telemetry. SnapshotStore.setDeviceList() emits
+    // 'change' UNCONDITIONALLY on every REST poll tick (snapshot.ts:174, via
+    // refreshAll → setDeviceList, driven by startPollLoop every POLL_INTERVAL_MS,
+    // default 60s — index.ts:98/1588), and that same poll refreshes acInWatts /
+    // backupBatPercent / chargeWattPower via getQuotaAll; the grid-presence HA
+    // entity is refreshed independently just above (haStateCache.refreshIfStale).
+    // So this re-escalation self-heals on the ~60s REST cadence even under a
+    // TOTAL MQTT stall — the poll loop is the de facto timer that closes the
+    // grid-drop window; it does not depend on fresh SHP2 MQTT telemetry.
     if (soc != null && socDowngraded.size > 0) {
       for (const [pct, truePriority] of [...socDowngraded]) {
         if (soc > pct) {

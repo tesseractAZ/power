@@ -205,6 +205,13 @@ export async function getAllStates(): Promise<Array<{ entity_id: string; state: 
     const res = await request(`${SUPERVISOR_BASE}/states`, {
       method: 'GET',
       headers: { 'Authorization': `Bearer ${t}` },
+      // v0.23.0 — bound the request so a hung HA Supervisor can't stall callers.
+      // getAllStates now runs inside the 20 s alert-eval loop (grid-presence
+      // refresh) and the load-shed tick; without a timeout undici waits ~5 min on
+      // a wedged socket. On timeout undici throws → caught below → returns null →
+      // the grid resolver falls back to its safe default (grid NOT present).
+      headersTimeout: 4000,
+      bodyTimeout: 8000,
     });
     if (res.statusCode !== 200) return null;
     const body = await res.body.text();

@@ -16,10 +16,12 @@ import { ThemeToggle } from './components/ThemeToggle';
 import { installGlossaryTooltips } from './glossary';
 
 // v0.8.1 — route-level code splitting. Each non-default page becomes its own
-// chunk; recharts (~300 kB minified) is vendor-chunked separately via the
-// Vite config. The Dashboard remains the eagerly-loaded landing page so the
-// first paint is fast. TrendChart is also lazy since recharts only needs to
-// land when the user toggles "show history".
+// chunk; recharts (~540 kB) is vendor-chunked separately via the Vite config.
+// The Dashboard remains the eagerly-loaded landing page so the first paint is
+// fast. TrendChart stays lazy purely to keep recharts OUT of the entry chunk —
+// v0.23.0 note: history defaults ON now, so the dashboard requests the (lazy)
+// TrendChart/recharts chunk a beat after first paint rather than on toggle;
+// the entry chunk stays lean either way.
 const ThermalPanel = lazy(() => import('./pages/ThermalPanel').then((m) => ({ default: m.ThermalPanel })));
 const SolarPanel = lazy(() => import('./pages/SolarPanel').then((m) => ({ default: m.SolarPanel })));
 const StrategyPanel = lazy(() => import('./pages/StrategyPanel').then((m) => ({ default: m.StrategyPanel })));

@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.23.1 — 2026-06-14
+
+Safety hardening for the v0.23.0 grid-aware floor alarm, from an adversarial review. All three fixes close paths where a real off-grid emergency could be wrongly silenced; none changes behaviour when the grid genuinely is backstopping. No new config.
+
+- **Grid import is no longer attributable to a wall-charging spare.** `computeGridImportWatts` (the backstop's "is the grid drawing power" signal) used to fall back to summing AC-input across ALL online DPUs when the SHP2's source SNs were unknown (e.g. a partial `/quota/all` that returns the backup SoC subtree but omits the source subtree). A bench spare self-charging from a wall outlet could then masquerade as house grid import and downgrade a genuine at-floor emergency. It now fails safe to 0 import without SHP2 source identity (the cosmetic "Running off-grid" display alert keeps its own looser detector).
+- **A stale HA grid-presence entity is treated as UNKNOWN, not its frozen value.** When Home Assistant is unreachable (Pi reboot / network partition / token expiry — exactly when the grid may be down), a failed state refresh left the cache frozen, so a stale "grid on" could replay as live presence and silence a real outage. The resolver now ignores a `GRID_PRESENCE_ENTITY` reading older than 120 s (`getCacheAgeMs`) and falls back to the safe off-grid default.
+- **The HA-state fetch is now time-bounded.** `getAllStates()` (run inside the 20 s alert-eval grid refresh and the load-shed tick) had no undici timeout; a wedged Supervisor socket could stall alerting ~5 min. Added 4 s/8 s header/body timeouts → on timeout it returns null → the grid resolver falls back to off-grid (safe).
+- Docs/cosmetic: removed four broadcast options from DOCS that were dropped in v0.9.70 (`BROADCAST_TTS_SERVICE`/`TTS_LANGUAGE`/`SONOS_RESTORE`/`USE_MUSIC_ASSISTANT`); bumped the documented `BROADCAST_LEAD_SILENCE_MS` default to 1500 (Music Assistant 2.9's faster AirPlay start needs the longer lead-in); refreshed a stale lazy-loading comment now that history shows by default. Documented that the SoC re-escalation handler is also driven by the 60 s REST poll (so it is not MQTT-dependent — prevents a recurring false review flag).
+
+579/579 server tests pass (2 new grid-safety cases). `tsc` clean (server + web). No change to any persisted counter, the broadcast pipeline, or — when the grid is truly backstopping — alarm output.
+
 ## 0.23.0 — 2026-06-14
 
 Grid-aware backup-floor alerting, a quiet-hours master switch, the chime-clipping fix, and two dashboard niceties. **Read the migration notes** — the overnight critical-alert default changes.
