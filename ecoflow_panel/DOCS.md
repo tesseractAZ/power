@@ -74,13 +74,8 @@ A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 | `BROADCAST_ANNOUNCE_VOLUME` | _(empty)_ | Volume the speaker is set to **for** the announcement. **Empty (default) → `BROADCAST_VOLUME × 100`**, so the announcement plays at your `BROADCAST_VOLUME` level (e.g. `BROADCAST_VOLUME: 1` → 100%). A number `0`–`100` pins an exact level. `off`/`none`/`standing` **omit** `announce_volume` entirely so MA plays at whatever standing volume the speaker already has (skips MA's set/restore step — use only if a speaker mishandles it). (v0.15.4, default changed v0.15.7) |
 | `BROADCAST_USE_PRE_ANNOUNCE` | `false` | Whether Music Assistant plays its own pre-announce chime before the message. Off by default since the add-on renders its own klaxon. (v0.15.4) |
 | `BROADCAST_ANNOUNCE_RETRIES` | `1` | Retries (0–3) for a failed `play_announcement` call, 1500 ms apart. (v0.15.4) |
-| `BROADCAST_LEAD_SILENCE_MS` | `1000` | Milliseconds of digital silence prepended to the front of every announcement WAV, before the first chime, so all speakers — AirPlay especially — finish spinning up their stream before any meaningful audio plays. `0` disables; raise toward `1500`–`2000` if a very slow AirPlay speaker still clips. Part of the render cache key, so changing it re-renders automatically. (v0.12.1) |
+| `BROADCAST_LEAD_SILENCE_MS` | `1500` | Milliseconds of digital silence prepended to the front of every announcement WAV, before the first chime, so all speakers — AirPlay especially — finish spinning up their stream before any meaningful audio plays. `0` disables; raise toward `1500`–`2000` if a very slow AirPlay speaker still clips. Part of the render cache key, so changing it re-renders automatically. (v0.12.1; default raised 1000→1500 in v0.23.0 — Music Assistant 2.9's faster AirPlay RAOP start needs a longer lead-in to avoid clipping the chime's start.) |
 | `BROADCAST_AUDIO_BASE` | `http://homeassistant.local:8787` | URL the speakers fetch the klaxon WAVs from. Override to your HA IP if mDNS is flaky. |
-| `BROADCAST_USE_MUSIC_ASSISTANT` | `auto` | `auto` / `music_assistant` / `media_player`. MA's `play_announcement` plays simultaneously across targets + handles volume restore atomically; `auto` uses it when installed. (v0.9.23) |
-| `BROADCAST_SONOS_RESTORE` | `true` | Snapshot Sonos state before broadcasting + restore after, so a music session resumes. |
-| `BROADCAST_TTS_SERVICE` | _(auto)_ | Pin a specific TTS engine, e.g. `tts.speak:tts.piper`. Explicit pin **disables** the fallback chain — failure → klaxon only, never silent fallback. (v0.9.65) |
-| `BROADCAST_TTS_LANGUAGE` | `en-US` | Locale string. The add-on auto-retries `en-US` ↔ `en_US` ↔ no-language on HTTP 500 to handle the Wyoming/Cloud format mismatch. (v0.9.63) |
-| `BROADCAST_TTS_REQUIRE_LOCAL` | `false` | Set `true` to restrict TTS to local engines (Piper). No local engine → klaxon only, never Cloud fallback. Recommended for off-grid setups where Cloud TTS would silently fail during the outage you're broadcasting about. (v0.9.65) |
 | `BROADCAST_HA_EXTERNAL_URL` | _(empty)_ | HA Core base URL used to build `tts_proxy` URLs for speakers. Leave empty for `http://homeassistant.local:8123`. (v0.9.40) |
 | `WRITE_DEBUG_TOKEN` | _(empty)_ | Set to a non-empty secret to unlock `POST /api/device/send-command` for probing undocumented EcoFlow commands. Requires `x-write-debug-token` header on every call. Leave empty in normal operation. (v0.9.9) |
 
@@ -676,9 +671,7 @@ an alert transitions to critical. Off by default; opt in with
 ```yaml
 BROADCAST_ENABLED: true
 BROADCAST_TARGETS: "media_player.living_room, media_player.kitchen"
-BROADCAST_USE_MUSIC_ASSISTANT: auto    # uses MA if installed
-BROADCAST_TTS_REQUIRE_LOCAL: true      # restrict to Piper
-BROADCAST_TTS_SERVICE: ""              # leave empty for auto-pick
+BROADCAST_LEAD_SILENCE_MS: 1500        # raise if a slow AirPlay speaker clips the chime start
 ```
 
 This requires HA's **Piper** add-on (Wyoming Protocol). The panel

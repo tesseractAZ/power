@@ -112,3 +112,24 @@ test('downgradePriorityForGrid collapses emergency tiers only when backstopping'
   assert.equal(downgradePriorityForGrid('critical', false), 'critical');
   assert.equal(downgradePriorityForGrid('high', false), 'high');
 });
+
+test('SHP2 with unknown (all-null) source SNs must NOT count a wall-charging spare as grid import', () => {
+  // Real off-grid: SHP2 source SNs missing (partial /quota/all), pool discharging,
+  // a spare DPU self-charging at 1500 W. The spare must NOT mask the emergency.
+  const devices = fleet(shp2([null, null], -2000), dpu('SPARE', 1500));
+  assert.equal(computeGridImportWatts(devices), 0, 'no source identity ⇒ 0 import, not the spare 1500 W');
+  const g = resolveGridBackstop({ devices, ...NO_DECL });
+  assert.equal(g.importLive, false);
+  assert.equal(g.present, false);
+  assert.equal(g.backstopping, false, 'genuine off-grid floor emergency stays critical');
+});
+
+test('a STALE configured grid entity is treated as UNKNOWN, never its frozen value', () => {
+  const devices = fleet(shp2(['A'], 7200), dpu('A', 0));
+  const fresh = resolveGridBackstop({ devices, gridEntity: { state: 'on' } as any, gridEntityConfigured: true, gridAvailableFallback: false });
+  assert.equal(fresh.declared, true, 'fresh on → present');
+  const stale = resolveGridBackstop({ devices, gridEntity: { state: 'on' } as any, gridEntityConfigured: true, gridAvailableFallback: false, gridEntityStale: true });
+  assert.equal(stale.declared, false, 'stale on must NOT declare grid present (HA unreachable ⇒ unknown)');
+  assert.equal(stale.present, false);
+  assert.equal(stale.backstopping, false);
+});
