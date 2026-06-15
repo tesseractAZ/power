@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { conditionFromAlerts, loadBroadcastConfig } from '../src/broadcast.js';
+import { conditionFromAlerts, loadBroadcastConfig, announceVolumeLevel } from '../src/broadcast.js';
 import { generateAudioAssets } from '../src/audioAssets.js';
 import { mkdtempSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -273,11 +273,17 @@ test('loadBroadcastConfig — v0.15.4 repeat / announce-volume / pre-announce / 
 });
 
 /* ===================================================================
- * v0.15.8 — volume conflict-proofing. The announcement volume must be a SINGLE
- * source of truth: announce_volume, derived from BROADCAST_VOLUME when the
- * BROADCAST_ANNOUNCE_VOLUME override is blank. There is no competing volume_set
- * in the MA path. This pins the operator's exact config (BROADCAST_VOLUME=1,
- * announce-volume blank) resolving to a clean 100, with no other knob involved.
+ * v0.15.8 — volume conflict-proofing. The announcement volume is a SINGLE
+ * source of truth: announceVolume (0..100), derived from BROADCAST_VOLUME when
+ * the BROADCAST_ANNOUNCE_VOLUME override is blank. This pins the operator's
+ * exact config (BROADCAST_VOLUME=1, announce-volume blank) resolving to a clean
+ * 100, with no other knob involved.
+ *
+ * v0.24.1 UPDATE — there IS now a pre-announce media_player.volume_set, but it is
+ * NOT a competing source: it carries the SAME announceVolume value (see
+ * announceVolumeLevel below), applied to the device standing volume so RAOP/
+ * ecobee speakers that ignore announce_volume still play at the configured
+ * loudness. One value, two knobs — the single-source-of-truth invariant holds.
  * =================================================================== */
 test('loadBroadcastConfig — BROADCAST_VOLUME=1 + blank announce-volume → announceVolume 100', () => {
   const saved = { ...process.env };
@@ -302,6 +308,26 @@ test('loadBroadcastConfig — BROADCAST_VOLUME=1 + blank announce-volume → ann
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
     Object.assign(process.env, saved);
   }
+});
+
+/* ===================================================================
+ * v0.24.1 — pre-announce standing-volume pin. announceVolumeLevel maps the
+ * announceVolume (0..100) to the device volume_level (0..1) that the broadcast
+ * sets BEFORE play_announcement, so a speaker that ignores announce_volume (the
+ * re-paired ecobee AirPlay receivers, whose standing volume drifted to 0.2)
+ * still plays at the configured loudness. null ('standing'/'off') leaves the
+ * speaker untouched — the manual-volume escape hatch.
+ * =================================================================== */
+test('announceVolumeLevel — 0..100 announceVolume maps to 0..1 device level; null passes through', () => {
+  assert.equal(announceVolumeLevel(65), 0.65);
+  assert.equal(announceVolumeLevel(100), 1);
+  assert.equal(announceVolumeLevel(0), 0);
+  assert.equal(announceVolumeLevel(90), 0.9);
+  // null = the 'standing'/'off' escape hatch → don't touch the speaker volume.
+  assert.equal(announceVolumeLevel(null), null);
+  // defensive clamp (announceVolume is already 0..100, but never emit out-of-range).
+  assert.equal(announceVolumeLevel(150), 1);
+  assert.equal(announceVolumeLevel(-10), 0);
 });
 
 /* ===================================================================
