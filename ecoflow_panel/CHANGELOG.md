@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.24.1 — 2026-06-15
+
+Fixes extremely quiet alert audio after the ecobee thermostats were re-paired from Apple Home to HA's local HomeKit integration.
+
+- **The broadcast now pins each target's standing (device) volume from config before every announcement.** Root cause: re-provisioning the ecobees' AirPlay-2 receivers through HA (instead of Apple Home) reset their **standing volume to ~0.2 (20%)**. RAOP/AirPlay speakers — ecobees especially — handle Music Assistant's `announce_volume` set→play→restore unreliably and fall back to that standing volume, so alerts played at ~20% no matter what `announce_volume` said. `play_announcement` is now preceded by a `media_player.volume_set` to `announceVolume/100` on the targets (best-effort — a failure never blocks the alert; skipped when announce-volume is the `'standing'`/`'off'` escape hatch). This makes `BROADCAST_VOLUME` authoritative on these speakers.
+- **Consistency with the v0.15.8 "single source of truth" invariant:** this is *not* a competing volume source — the pre-announce `volume_set` carries the **same** `announceVolume` value that is sent as `announce_volume` (one value, two knobs), so there's no conflict. New `announceVolumeLevel()` helper + unit test pin the 0..100 → 0..1 mapping and the null escape-hatch.
+- Operator note: the live broadcast volume was raised 0.65 → **0.9** (your confirmed level); adjust anytime from the Alert Console slider.
+
+583/583 server tests pass (1 new). `tsc` clean. Pure broadcast-path change — no other behaviour affected.
+
 ## 0.24.0 — 2026-06-15
 
 Write-auth hardening, backed by an adversarially-verified security audit. No new config; no change for legitimate clients (ingress, the same-origin dashboard, and token-bearing scripts all keep working).

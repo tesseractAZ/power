@@ -191,6 +191,17 @@ function resolveAnnounceVolume(raw: string | undefined, fallbackVol01: number): 
   return Math.round(fallbackVol01 * 100);
 }
 
+/** v0.24.1 — the device standing-volume (0..1) to pin before an announcement,
+ *  derived from the SAME announceVolume (0..100) that is sent as announce_volume.
+ *  null (the 'standing'/'off' escape hatch) → don't touch the speaker volume.
+ *  This is not a competing volume source — both knobs carry one value — it just
+ *  guarantees RAOP/ecobee speakers that ignore announce_volume still play at the
+ *  configured loudness instead of a drifted-low standing volume. */
+export function announceVolumeLevel(announceVolume: number | null): number | null {
+  if (announceVolume == null) return null;
+  return Math.max(0, Math.min(1, announceVolume / 100));
+}
+
 /** v0.12.1 — lead-in silence (ms), default 1000, clamped to 0–5000. Non-numeric
  *  or empty → the 1000 ms default. */
 function clampLeadSilenceMs(raw: string | undefined): number {
@@ -509,6 +520,22 @@ export function startBroadcastMonitor(
    * call failure. Targets are always exactly cfg.targets (BROADCAST_TARGETS).
    */
   const playAnnounce = async (url: string): Promise<{ ok: boolean; error?: string }> => {
+    // v0.24.1 — pin each target's STANDING volume from config BEFORE announcing.
+    // RAOP/AirPlay speakers (ecobee in particular) handle MA's announce_volume
+    // set→play→restore unreliably and fall back to their standing volume — which
+    // can silently drift low (re-provisioning an ecobee's AirPlay receiver resets
+    // it to ~0.2, e.g. after moving it from Apple Home to HA). Setting the standing
+    // volume here makes BROADCAST_VOLUME authoritative regardless of whether the
+    // speaker honors announce_volume. Best-effort: a volume_set failure never
+    // blocks the announcement. Skipped when announce volume is 'standing'/'off'
+    // (the explicit manual-volume escape hatch → leave the speaker as-is).
+    const standingLevel = announceVolumeLevel(cfg.announceVolume);
+    if (standingLevel != null && cfg.targets.length > 0) {
+      const vr = await callHaService('media_player', 'volume_set', { entity_id: cfg.targets, volume_level: standingLevel });
+      if (!vr.ok) log(`broadcast: pre-announce volume_set to ${standingLevel} failed (continuing) — ${vr.error ?? vr.status}`);
+      else await new Promise((res) => setTimeout(res, 300)); // let RAOP apply before the stream
+    }
+
     const params: Record<string, unknown> = {
       entity_id: cfg.targets,
       url,
