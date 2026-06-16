@@ -21,8 +21,6 @@ import { isConfigured } from './notify.js';
 import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
 import { getAllStates } from './haService.js';
-// v0.9.32 — TTS debug dump for /api/broadcast/tts-debug
-import { getTtsDebug, speakAnnouncement, detectTtsEngines } from './ttsService.js';
 // v0.9.33 — Supervisor add-on + Core config-flow helpers
 import {
   listAddons,
