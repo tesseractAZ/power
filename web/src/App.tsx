@@ -3,7 +3,6 @@ import { useSnapshot } from './useSnapshot';
 import { EnergyFlow } from './cards/EnergyFlow';
 import { TodaySummary } from './cards/TodaySummary';
 import { RunwayCard } from './cards/RunwayCard';
-import { CurtailmentCard } from './cards/CurtailmentCard';
 import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
 import type { Shp2Projection } from './types';
 import { Shp2Card } from './cards/Shp2Card';
@@ -246,10 +245,6 @@ function NormalApp() {
           <Suspense fallback={<div className="card col-span-full text-sm text-muted">Loading forecast…</div>}>
             <ForecastCard />
           </Suspense>
-          {/* v0.9.77 — solar curtailment surface. Sits next to TodaySummary
-              so the "lost kWh today" reading is one glance away from the
-              "delivered kWh today" reading on TodaySummary. */}
-          <CurtailmentCard />
 
           {showHistory && shp2 && (
             <Suspense fallback={<PageFallback />}>
@@ -257,10 +252,12 @@ function NormalApp() {
                 title="Backup pool & panel load (24h)"
                 windowMs={24 * 60 * 60 * 1000}
                 bucketSec={60}
-                unit=""
+                unit="W"
                 series={[
-                  { sn: shp2.sn, metric: 'backup_pct', label: 'Backup %', color: SERIES_PALETTE[0] },
-                  { sn: shp2.sn, metric: 'panel_load', label: 'Panel W', color: SERIES_PALETTE[2] },
+                  // v0.24.2 — Panel W (left, watts) + Backup % (right, 0–100). The %
+                  // gets its own axis so it's not flattened against the kW load.
+                  { sn: shp2.sn, metric: 'panel_load', label: 'Panel W', color: SERIES_PALETTE[2], unit: 'W' },
+                  { sn: shp2.sn, metric: 'backup_pct', label: 'Backup %', color: SERIES_PALETTE[0], axis: 'right', unit: '%' },
                 ]}
               />
             </Suspense>
