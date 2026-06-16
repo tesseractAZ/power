@@ -3,6 +3,18 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.24.5 — 2026-06-15
+
+Small dead-code cleanup — the follow-up items surfaced during the v0.24.3/0.24.4 audit. Behavior-preserving; no runtime change.
+
+- **Removed the dead chime-config pub/sub.** `chimeConfig.ts` exported `onChimeConfigChange(fn)` (a subscribe seam) backed by a module-level `listeners` Set, and `updateChimeConfig` / `revertAssignmentsFor` each looped over that Set to notify subscribers after a write. But **nothing ever subscribed** (`listeners.add` was reachable only through the zero-caller `onChimeConfigChange`), so the Set was always empty and both notify loops were guaranteed no-ops. Removed the export, the Set, the `Listener` type, and the two emit loops — provably behavior-preserving (an always-empty loop body never ran).
+- **Removed four dead exports**, each with zero references repo-wide (including tests): `entityExists` (haService — `getEntityState` stays, it's still used by `broadcast.ts`), `priorityFromSeverity` (alertPriority — the live `priorityOf` is unaffected), the `LifetimeMetricKey` type (recorder — the lifetime accumulator uses string literals directly), and `libraryBytes` (chimeStore — labelled a "test seam" but no test referenced it; the test was removed in an earlier pass).
+- **Trimmed three now-orphaned imports** that those removals left behind: `readdirSync` + `statSync` (chimeStore) and the `Severity` type (alertPriority). Confirmed the sibling imports (`existsSync`, `resolve`, `Alert`) are still used.
+
+Each removal was confirmed by a precise external-reference sweep; `tsc` passing on **both** server and web is the sound proof that nothing live referenced the removed code. 586/586 server tests pass (unchanged). No change to the broadcast pipeline, chime resolution, alert priorities, lifetime accounting, or any persisted state.
+
+> Not included: the glossary `MutationObserver` re-scan throttle that was surfaced alongside these. That one is a *behavioral* perf refinement, not dead code, so it warrants its own before/after measurement rather than riding along in a cleanup release.
+
 ## 0.24.4 — 2026-06-15
 
 Dead-code removal: the orphaned TTS engine-detection / selection / invocation subsystem in `ttsService.ts`. Behavior-preserving — the live broadcast path is untouched and every rendered alert sounds exactly the same.
