@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.24.2 — 2026-06-15
+
+Dashboard tidy-up + a real chart-plotting fix.
+
+- **Fixed the "Backup pool & panel load (24h)" chart.** Both series shared a single Y axis, but one is a **percent (0–100)** and the other is **watts (thousands)** — so the Backup % line was flattened into an unreadable sliver pinned to the x-axis. `TrendChart` now supports a **dual Y axis** (a series can opt into `axis:'right'` with its own unit); Panel W scales on the left axis, Backup % on the right (0–100), and tooltips show each series' own unit. Verified live against real history (the % line now sweeps its full range). The sibling "DPU output & PV" chart (both watts) and `ForecastCard` (already dual-axis) were unaffected; an audit of every other chart (CircuitModal, SolarPanel, SolarResponseCard, sparklines) found no other unit-mismatch issues.
+- **Moved the Solar curtailment card to the Solar page.** It now lives under "Array sunlight response", grouped with the rest of the solar surfaces, instead of on the main dashboard.
+- **Removed the "Opportunistic loads" section** from the curtailment card (the suggested-loads list and the "could absorb with…" line). The card now focuses on the curtailment reading itself: live surplus, today/7-day lost kWh, and the "when this happens" histogram.
+
+`tsc` clean (server + web); production web build clean. Frontend-only — no backend/data change.
+
 ## 0.24.1 — 2026-06-15
 
 Fixes extremely quiet alert audio after the ecobee thermostats were re-paired from Apple Home to HA's local HomeKit integration.

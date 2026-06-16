@@ -18,6 +18,13 @@ interface Series {
   color: string;
   /** Render as a dashed line — used to pair a related metric with a solid one. */
   dashed?: boolean;
+  /** v0.24.2 — which Y axis to scale against. Default 'left'. Put a series with
+   *  a DIFFERENT unit/magnitude (e.g. a 0–100 % alongside a kW load) on 'right'
+   *  so it gets its own axis instead of being squashed flat on the shared one. */
+  axis?: 'left' | 'right';
+  /** v0.24.2 — per-series unit for the tooltip + that series' axis label.
+   *  Falls back to the chart-level `unit`. */
+  unit?: string;
 }
 
 interface Point {
@@ -107,6 +114,14 @@ export function TrendChart({
     });
   }, [series, dataBySeries]);
 
+  // v0.24.2 — dual-axis support: any series tagged axis:'right' gets its own
+  // right-hand Y axis so a small-magnitude series (e.g. 0–100 %) isn't flattened
+  // against a large one (e.g. kW) sharing one scale. The right axis takes that
+  // series' unit; tooltips show each series' own unit.
+  const hasRight = series.some((s) => s.axis === 'right');
+  const rightUnit = series.find((s) => s.axis === 'right')?.unit ?? unit;
+  const unitFor = (label: string) => series.find((s) => s.label === label)?.unit ?? unit;
+
   return (
     <div className="card col-span-full">
       <div className="card-title">{title}</div>
@@ -133,17 +148,30 @@ export function TrendChart({
               tick={{ fill: '#586474', fontSize: 10 }}
               tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             />
-            <YAxis tick={{ fill: '#586474', fontSize: 10 }} width={48} unit={unit ? ` ${unit}` : ''} />
+            <YAxis yAxisId="left" tick={{ fill: '#586474', fontSize: 10 }} width={48} unit={unit ? ` ${unit}` : ''} />
+            {hasRight && (
+              <YAxis
+                yAxisId="right"
+                orientation="right"
+                tick={{ fill: '#586474', fontSize: 10 }}
+                width={44}
+                unit={rightUnit ? ` ${rightUnit}` : ''}
+              />
+            )}
             <Tooltip
               contentStyle={{ background: '#ffffff', border: '1px solid #9aa3b0', borderRadius: 8, fontSize: 12 }}
               labelStyle={{ color: '#586474' }}
               labelFormatter={(t) => new Date(t as number).toLocaleString()}
-              formatter={(v) => (typeof v === 'number' ? `${Math.round(v * 10) / 10}${unit ? ` ${unit}` : ''}` : v)}
+              formatter={(v, name) => {
+                const u = unitFor(String(name));
+                return typeof v === 'number' ? `${Math.round(v * 10) / 10}${u ? ` ${u}` : ''}` : v;
+              }}
             />
             <Legend wrapperStyle={{ fontSize: 11, color: '#586474' }} />
             {series.map((s, i) => (
               <Area
                 key={i}
+                yAxisId={s.axis ?? 'left'}
                 type="monotone"
                 dataKey={s.label}
                 stroke={s.color}

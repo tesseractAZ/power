@@ -20,6 +20,7 @@ const PANELS_PER_DPU = HV_PANELS + LV_PANELS;
 import { fmtTemp, fmtW, fmtWh } from '../format';
 import { sortDevices } from '../sort';
 import { SolarResponseCard } from '../cards/SolarResponseCard';
+import { CurtailmentCard } from '../cards/CurtailmentCard';
 import { apiUrl } from '../api';
 
 const DPU_COLORS = ['#0e7490', '#15803d', '#d97706', '#7c3aed'];
@@ -248,6 +249,10 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
 
       {/* Learned array response model */}
       <SolarResponseCard />
+
+      {/* Solar curtailment — energy thrown away when batteries are full and home
+          load can't absorb the PV. Lives on the Solar page (v0.24.2). */}
+      <CurtailmentCard />
 
       {/* Per-DPU detail */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

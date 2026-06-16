@@ -54,7 +54,6 @@ export const CurtailmentCard = memo(function CurtailmentCard() {
     );
   }
 
-  const fits = r.opportunisticLoads.filter((o) => o.fitsInSurplus);
   const headerColor = r.active ? 'badge-warn' : 'badge-ok';
   const headerLabel = r.active ? 'curtailing now' : 'not curtailing';
 
@@ -70,7 +69,7 @@ export const CurtailmentCard = memo(function CurtailmentCard() {
       </div>
 
       {r.active ? (
-        <ActiveBody r={r} fits={fits} />
+        <ActiveBody r={r} />
       ) : (
         <InactiveBody r={r} />
       )}
@@ -88,34 +87,11 @@ export const CurtailmentCard = memo(function CurtailmentCard() {
       {r.hourlyHistogram.some((b) => b.samples > 0) && (
         <Histogram histogram={r.hourlyHistogram} />
       )}
-
-      <div className="mt-3">
-        <div className="text-xs uppercase tracking-wider text-muted mb-1">
-          Opportunistic loads
-          {r.active && fits.length > 0 && (
-            <span className="ml-1 text-emerald-700">— {fits.length} fit now</span>
-          )}
-        </div>
-        <div className="space-y-1">
-          {r.opportunisticLoads.map((o) => (
-            <div
-              key={o.id}
-              className={`flex items-center justify-between text-xs px-2 py-1 rounded border ${
-                o.fitsInSurplus ? 'border-emerald-300 bg-emerald-50' : 'border-stone-200 bg-stone-50'
-              }`}
-              title={o.description}
-            >
-              <span className="font-medium">{o.name}</span>
-              <span className="font-mono">{(o.estimatedW / 1000).toFixed(1)} kW</span>
-            </div>
-          ))}
-        </div>
-      </div>
     </div>
   );
 });
 
-function ActiveBody({ r, fits }: { r: CurtailmentReport; fits: any[] }) {
+function ActiveBody({ r }: { r: CurtailmentReport }) {
   const ceiling = r.current.chargeCeilingPct;
   return (
     <div className="mt-2">
@@ -142,11 +118,6 @@ function ActiveBody({ r, fits }: { r: CurtailmentReport; fits: any[] }) {
       {ceiling != null && ceiling < 100 && (
         <div className="mt-1 text-xs text-muted italic">
           Raising the charge limit or enabling Storm Guard would absorb more before curtailing.
-        </div>
-      )}
-      {fits.length > 0 && (
-        <div className="mt-2 text-xs text-emerald-800">
-          Could absorb with: {fits.map((o) => o.name).join(', ')}.
         </div>
       )}
     </div>
