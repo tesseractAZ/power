@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.24.4 — 2026-06-15
+
+Dead-code removal: the orphaned TTS engine-detection / selection / invocation subsystem in `ttsService.ts`. Behavior-preserving — the live broadcast path is untouched and every rendered alert sounds exactly the same.
+
+- **Removed the entire dead TTS-engine subsystem.** Back in v0.9.70 the broadcast pipeline was rewritten to "Wyoming-direct": alert audio is rendered through Wyoming (`audioRenderer.ts`) and played via a single `music_assistant.play_announcement`, **bypassing HA's TTS service catalog entirely**. That rewrite removed the three endpoints (`/api/broadcast/tts-debug`, `/tts-services`, `/test-tts`) that consumed the engine-detection code — but the code itself was never deleted. It has been dead ever since. This release removes the whole orphaned island: `speakWithFallback`, `speakAnnouncement`, `speakViaMusicAssistant`, `pickBestEngine`, `pickEngineFromList`, `detectTtsEngines`, `detectTtsEntities`, `getTtsDebug`, `normalizePreference`, the `KNOWN_ENGINES` table, and the `TtsEngine`/`TtsEntity`/`TtsDebugInfo`/`TtsCallOptions` types — plus the dead `ttsService` import in `index.ts`. `ttsService.ts` drops from 700 to 171 lines.
+- **What stays:** `buildAlertMessage` (the alert → spoken-sentence formatter) and its private helpers — the **only** live export, consumed by `broadcast.ts` and pinned by 6 unit tests. Its code is byte-identical; the module header now documents the history so the removal doesn't read as a mystery.
+- **How it was verified.** An adversarial multi-agent pass (5 independent lenses: direct/aliased calls, dynamic/re-export dispatch, the live broadcast/alert wiring, tests/scripts/cross-package, and a dedicated keep-functions lens) failed to find any production reachability for the removed set. A precise external-reference sweep then confirmed `buildAlertMessage` is the sole externally-referenced symbol. `tsc` (a sound whole-program reference check) passing on both server and web is the proof that nothing live pointed at the removed code.
+- **Note:** `haService.ttsGetUrl` is now production-unreachable too (its only caller was `speakViaMusicAssistant`), but it is **deliberately retained** — it keeps a 9-test language-retry contract (v0.9.63) and is trivially re-wireable. No change there.
+
+586/586 server tests pass (unchanged — no test referenced any removed symbol). `tsc` clean (server + web). No change to any rendered alert message, the broadcast/Wyoming pipeline, persisted state, or any endpoint.
+
 ## 0.24.3 — 2026-06-15
 
 Code-optimization pass from a comprehensive multi-agent audit. Both changes are **behaviour-preserving** — same numbers, same pixels — so there is no migration and nothing to re-verify operationally. On a mature codebase the audit (34 agents, adversarial verification that rejected every speculative finding) surfaced only these two real, provable wins; that low yield is the point — churn was not introduced where it couldn't be proven safe.
