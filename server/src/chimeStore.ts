@@ -31,7 +31,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, statSync,
+  existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { pcmToWav } from './wyomingTts.js';
@@ -325,14 +325,4 @@ export function deleteChime(id: string): boolean {
 function sanitizeName(name: string): string {
   const base = (name || 'tone.wav').replace(/[/\\]/g, '_').replace(/[^\w.\- ]/g, '').trim();
   return (base.length ? base : 'tone.wav').slice(0, 80);
-}
-
-/** Test seam — total bytes used by the library. */
-export function libraryBytes(): number {
-  if (!existsSync(CHIMES_DIR)) return 0;
-  let total = 0;
-  for (const f of readdirSync(CHIMES_DIR)) {
-    if (f.endsWith('.wav')) { try { total += statSync(resolve(CHIMES_DIR, f)).size; } catch { /* race */ } }
-  }
-  return total;
 }

@@ -27,7 +27,7 @@
  * this file at web/src/alertPriority.ts — keep them in lockstep).
  */
 
-import type { Alert, Severity } from './alerts.js';
+import type { Alert } from './alerts.js';
 
 /** ISA-18.2 priority ids, most-severe first. Stable machine identifiers. */
 export type AlarmPriority = 'critical' | 'high' | 'medium' | 'low';
@@ -86,15 +86,6 @@ export function priorityOf(alert: Pick<Alert, 'severity' | 'source'>): AlarmPrio
   if (alert.severity === 'critical') return 'critical';
   if (alert.severity === 'warning') return alert.source === 'learned' ? 'medium' : 'high';
   return 'low';
-}
-
-/**
- * Coarser map from a bare severity (no source) → priority. `warning` collapses
- * to High because that is the more conservative (higher) of its two homes.
- * Used where only the severity is in hand (e.g. notify priority maps).
- */
-export function priorityFromSeverity(s: Severity): AlarmPriority {
-  return s === 'critical' ? 'critical' : s === 'warning' ? 'high' : 'low';
 }
 
 export function priorityMeta(p: AlarmPriority): AlarmPriorityMeta {

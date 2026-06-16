@@ -133,11 +133,6 @@ export async function getEntityState(entityId: string): Promise<{ state: string;
   }
 }
 
-/** Whether the given entity ID actually exists in HA. Useful at startup. */
-export async function entityExists(entityId: string): Promise<boolean> {
-  return (await getEntityState(entityId)) !== null;
-}
-
 /**
  * v0.9.23 — fetch the HA service catalog. Used to detect whether
  * Music Assistant is installed (presence of music_assistant.play_announcement)

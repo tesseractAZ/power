@@ -38,12 +38,6 @@ const WEATHER_CLOUD_METRIC = 'cloud_pct'; // cloud cover, %
  * The watt-based metrics we track (PV / panel-load / AC-in) are integrated
  * from the samples table. Battery in/out has authoritative lifetime mAh
  * counters from the BMS — those go straight in without integration. */
-export type LifetimeMetricKey =
-  | 'fleet_pv_wh'
-  | 'fleet_load_wh'
-  | 'fleet_grid_import_wh'
-  | 'fleet_battery_charge_wh'   // sourced from BMS lifetime counters
-  | 'fleet_battery_discharge_wh';
 
 export interface LifetimeTotals {
   /** Persisted accumulator (Wh). Increments forever. */

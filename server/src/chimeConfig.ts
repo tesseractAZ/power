@@ -1,7 +1,7 @@
 /**
  * chimeConfig.ts — which tone prepends each alert level (v0.15.23 / Alert Console).
  *
- * Mirrors alertSettings.ts exactly (in-memory cache + atomic write + listeners),
+ * Mirrors alertSettings.ts (in-memory cache + atomic write),
  * but stores the operator's per-LEVEL chime assignment:
  *   red (Critical) / yellow (Warning) / green (Advisory) →
  *     { kind: 'builtin' }              — the level's synthesized klaxon (default)
@@ -88,8 +88,6 @@ function sanitize(raw: any, source: string): ChimeConfig {
 }
 
 let cache: ChimeConfig | null = null;
-type Listener = (c: ChimeConfig) => void;
-const listeners = new Set<Listener>();
 
 export function getChimeConfig(): ChimeConfig {
   if (cache) return cache;
@@ -105,11 +103,6 @@ export function getChimeConfig(): ChimeConfig {
   return cache;
 }
 
-export function onChimeConfigChange(fn: Listener): () => void {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
-
 function persist(c: ChimeConfig): void {
   try { mkdirSync(dirname(PATH), { recursive: true }); } catch { /* best effort */ }
   const tmp = `${PATH}.tmp`;
@@ -119,8 +112,8 @@ function persist(c: ChimeConfig): void {
 
 /**
  * Apply a partial per-level assignment update, persist atomically, refresh the
- * in-memory cache (so the next render sees it without a disk read), and notify
- * listeners. A 'custom' assignment to an id that does not exist on disk is
+ * in-memory cache (so the next render sees it without a disk read). A 'custom'
+ * assignment to an id that does not exist on disk is
  * rejected (kept as the prior value) — the caller should surface that. Returns
  * the new resolved config.
  */
@@ -148,7 +141,6 @@ export function updateChimeConfig(
   next.source = source;
   cache = next;
   persist(next);
-  for (const fn of listeners) { try { fn(next); } catch { /* never break a write */ } }
   return { config: next, rejected };
 }
 
@@ -172,7 +164,6 @@ export function revertAssignmentsFor(id: string, source = 'delete'): boolean {
   next.source = source;
   cache = next;
   persist(next);
-  for (const fn of listeners) { try { fn(next); } catch { /* ignore */ } }
   return true;
 }
 
