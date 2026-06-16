@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AreaChart,
   Area,
@@ -141,27 +141,41 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
     };
   }, [onlineDpus.map((d) => d.sn).join(',')]);
 
-  // Merge series for chart
-  const mergedSeries = (() => {
+  // Merge series for chart. v0.24.3 — memoized (was a bare render-body IIFE that
+  // re-ran on every ~1 Hz snapshot re-render of the Solar tab) + a ts-indexed Map
+  // per DPU to drop the inner O(points) `.find`, mirroring TrendChart.tsx's
+  // v0.22.0 fix. Byte-for-byte identical: first-write-wins on a duplicate ts ==
+  // Array.find's first match, and `idx.has(ts)` reproduces `if (pt)` (key
+  // presence, not value, so a 0 still carries). Keyed on pvSeries + a
+  // (sn|deviceName) signature — deviceName is mutable and the row keys + recharts
+  // dataKey/gradient depend on it, so a rename must invalidate the memo.
+  const deviceSig = onlineDpus.map((d) => `${d.sn}|${d.deviceName}`).join(',');
+  const mergedSeries = useMemo(() => {
     const all = new Set<number>();
     for (const pts of Object.values(pvSeries)) for (const p of pts) all.add(p.ts);
     const sortedTs = Array.from(all).sort((a, b) => a - b);
+    const idxBySn: Record<string, Map<number, number>> = {};
+    for (const d of onlineDpus) {
+      const idx = new Map<number, number>();
+      for (const p of pvSeries[d.sn] ?? []) if (!idx.has(p.ts)) idx.set(p.ts, p.value);
+      idxBySn[d.sn] = idx;
+    }
     const lastBy: Record<string, number | null> = {};
     for (const d of onlineDpus) lastBy[d.sn] = null;
     return sortedTs.map((ts) => {
       const row: Record<string, number | string | null> = { ts };
       let total = 0;
       for (const d of onlineDpus) {
-        const pts = pvSeries[d.sn] ?? [];
-        const pt = pts.find((p) => p.ts === ts);
-        if (pt) lastBy[d.sn] = pt.value;
+        const idx = idxBySn[d.sn];
+        if (idx.has(ts)) lastBy[d.sn] = idx.get(ts)!;
         row[d.deviceName] = lastBy[d.sn];
         total += lastBy[d.sn] ?? 0;
       }
       row['Fleet total'] = total;
       return row;
     });
-  })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pvSeries, deviceSig]);
 
   return (
     <div className="space-y-4">

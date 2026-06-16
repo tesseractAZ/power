@@ -4695,8 +4695,25 @@ async function sampleCurtailmentHour(
   hourOfDay: number,
   currentCeiling: number | null,
 ): Promise<CurtailmentHour | null> {
+  // v0.24.3 — batch each home DPU's three per-hour metrics (soc, chg_max_soc,
+  // pv_total) into ONE recorder.queryMulti instead of three separate query()
+  // calls. queryMulti is the established batched-equivalent primitive (9 other
+  // analytics call sites) and, with the IDENTICAL [hourStart, hourEnd, 60]
+  // bounds, returns byte-identical per-metric buckets — so every mean below is
+  // unchanged; it just cuts ~13 synchronous SQLite round-trips/hour to ~5 in the
+  // analytics worker. Deliberately stays PER-HOUR (not a cross-hour prefetch):
+  // slicing bucketed series is NOT byte-identical at the inclusive hour boundary
+  // (see backtest.ts:119), and curtailment kWh must stay exact.
+  const dpuMetrics = new Map<string, Map<string, Array<{ ts: number; value: number }>>>();
+  for (const d of homeDpus) {
+    dpuMetrics.set(d.sn, recorder.queryMulti(d.sn, ['soc', 'chg_max_soc', 'pv_total'], hourStart, hourEnd, 60));
+  }
   const meanInWindow = (sn: string, metric: string): number | null => {
-    const pts = recorder.query(sn, metric, hourStart, hourEnd, 60);
+    // Home DPUs are served from the batched map (queryMulti returns an empty
+    // array, never undefined, for a no-data metric); the SHP2's panel_load
+    // (a different SN) falls through to a single query. `?? ` only fires on a
+    // genuinely-absent SN/metric, so an empty array still correctly yields null.
+    const pts = dpuMetrics.get(sn)?.get(metric) ?? recorder.query(sn, metric, hourStart, hourEnd, 60);
     if (pts.length === 0) return null;
     return pts.reduce((s, p) => s + p.value, 0) / pts.length;
   };
