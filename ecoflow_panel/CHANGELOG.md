@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.24.3 — 2026-06-15
+
+Code-optimization pass from a comprehensive multi-agent audit. Both changes are **behaviour-preserving** — same numbers, same pixels — so there is no migration and nothing to re-verify operationally. On a mature codebase the audit (34 agents, adversarial verification that rejected every speculative finding) surfaced only these two real, provable wins; that low yield is the point — churn was not introduced where it couldn't be proven safe.
+
+- **Solar page no longer recomputes the production chart on every snapshot tick.** `SolarPanel` rebuilt its merged per-DPU `mergedSeries` in a bare render-body IIFE, so the full O(days × DPUs) merge re-ran on each ~1 Hz live re-render of the Solar tab even when the underlying 24 h history hadn't changed. It is now `useMemo`-ized, keyed on the history series plus a `(sn|deviceName)` signature (so a device rename still invalidates), and the inner per-timestamp `Array.find` was replaced with a ts-indexed `Map` — mirroring the v0.22.0 `TrendChart` fix. Byte-for-byte identical output: first-write-wins on a duplicate timestamp equals `Array.find`'s first match, and `Map.has(ts)` reproduces the old `if (point)` key-presence test (so a genuine `0` W still carries). Verified live against the Pi — the chart renders pixel-identical (three per-DPU areas, correct diurnal curve).
+- **Curtailment backtest batches its per-hour DB reads.** `sampleCurtailmentHour` issued three separate `recorder.query()` calls per home DPU per hour (soc / chg_max_soc / pv_total). Each DPU's three metrics now go through one `recorder.queryMulti()` — the already-proven batched-equivalent primitive used at 9 other analytics call sites — collapsing 3 round-trips to 1 per DPU-hour. A new equivalence test (`recorderQueryMultiEquivalence`) pins the exact invariant this relies on: `queryMulti(sn, metrics, a, b, bucket).get(m)` is data-identical to `query(sn, m, a, b, bucket)` for both bucketed and raw reads, across an inclusive hour boundary with sub-minute cadence and same-bucket averaging. The audit's more aggressive cross-hour prefetch suggestion was **deliberately rejected** — it is *not* byte-identical at the inclusive hour boundary (a boundary sample double-counts differently under per-hour vs. prefetch slicing), exactly the v0.21.0 backtest trap; the SHP2 `panel_load` read is left as a single query for the same reason.
+
+586/586 server tests pass (3 new equivalence cases). `tsc` clean (server + web). No change to any rendered value, persisted counter, forecast/backtest score, or the broadcast pipeline — purely how the work is computed.
+
 ## 0.24.2 — 2026-06-15
 
 Dashboard tidy-up + a real chart-plotting fix.
