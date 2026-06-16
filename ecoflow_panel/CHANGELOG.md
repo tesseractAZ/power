@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.24.6 — 2026-06-15
+
+A small, measured frontend refinement — the last of the audit follow-ups. Honest framing up front: the gain is minor on desktop; this is mostly a worst-case bound for slower phones/tablets.
+
+- **Throttled the glossary tooltip rescan.** `installGlossaryTooltips` attaches `title=` hovers by scanning the DOM whenever it mutates. The old code coalesced rescans per animation frame (`requestAnimationFrame`); it now bounds them to **at most one rescan per second**, trailing-guaranteed (sustained churn can't starve it, and a settled burst always gets a final scan; a mutation after idle still scans near-immediately). **Measured first** on the live dashboard (1851 DOM nodes): the body churns ~31 `childList` mutations/sec under the 1 Hz snapshot re-render, but the rAF coalescing already collapsed that to **~2 rescans/sec at ~0.7 ms each = ~1.4 ms/sec** — already cheap. The throttle takes that to **~1/sec** (~0.7 ms/sec saved on this hardware; a larger relative cut on slower mobile CPUs). Verified live that tooltips still attach and persist under 49 s of sustained churn (every probed term kept its title).
+- **Trade-off:** newly-rendered content can wait up to ~1 s for its hover tooltip instead of one frame. Imperceptible for a `title=` that only appears on hover.
+
+`tsc` clean (server + web); 586/586 server tests pass (frontend-only change, no server-test surface). No change to any rendered value or behavior beyond the rescan cadence.
+
 ## 0.24.5 — 2026-06-15
 
 Small dead-code cleanup — the follow-up items surfaced during the v0.24.3/0.24.4 audit. Behavior-preserving; no runtime change.
