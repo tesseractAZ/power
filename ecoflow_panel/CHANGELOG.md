@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.28.0 — 2026-06-18
+
+Degradation-model integrity: reject BMS SoH **recalibration steps** masquerading as fade trends. One guard fixes a cluster of four log-analysis findings that all trace to the same root cause.
+
+- **A BMS recalibration step is no longer read as capacity fade.** A fleet-wide BMS SoH recalibration shows up as a long flat run then a 1–2-sample cliff; OLS fits that staircase as a *confident* slope (its R² reflects only the segment geometry, and the slope's sign is just the step direction). The model trusted span + R² alone, so on the operator's fleet this produced: a near-new 96.7%-SoH pack projected to **"replace in 0.7 yr" at 23.6%/yr fade** (a down-step), an equal-magnitude up-step pack read as **"stable — no measurable fade"**, a fabricated **2.02× peer-fade ratio** that drove 25 of the pack-risk points, and a confidence **median-R² of 0.36** that was pure recalibration geometry. New `sohStepDominated()` guard detects the staircase (< 3 distinct values, or a flat run > 70% of samples, or ≤ 3 transitions all in the final 20% of the window) and routes such packs to **`learning`** with null fade / R² / EOL (Kalman projection suppressed too). They neither project a dated EOL, read as "stable", seed the peer-fade baseline (its pool is `status === 'projecting'`), nor pollute the median-R² (which filters null) — and re-arm automatically once a genuine multi-point trend accumulates past the step. 6 unit tests pin the live pack shapes (both step directions) and confirm a real gradual/noisy fade still projects.
+
+592/592 server tests pass (6 new). `tsc` clean. No change to a pack with a genuine measurable fade trend; only recalibration-artifact projections are withheld until they're trustworthy.
+
 ## 0.27.0 — 2026-06-18
 
 Data-integrity fix from the 7-day log analysis: the lifetime round-trip-efficiency invariant.

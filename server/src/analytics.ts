@@ -1325,6 +1325,44 @@ export interface FleetDegradation {
 const round1 = (x: number) => Math.round(x * 10) / 10;
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
+/**
+ * v0.28.0 — detect a SoH series that is one or two flat segments joined by a BMS
+ * RECALIBRATION step rather than a genuine fade trend. A fleet-wide BMS SoH
+ * recalibration shows up as a long flat run then a 1–2-sample cliff; OLS fits
+ * that staircase as a CONFIDENT slope (its r² reflects only the segment geometry,
+ * and the slope's SIGN is just the step direction), so any fade rate / dated EOL
+ * / r² derived from it is an artifact — a down-step fabricated a "replace in
+ * 0.7 yr", an equal up-step read as "stable, no fade", and the synchronized fleet
+ * step inflated both the peer-fade baseline and the confidence median-r².
+ * Returns true (→ route to 'learning', suppress the projection) when ANY holds:
+ *   • < 3 distinct values (no resolution for a trend);
+ *   • the largest contiguous flat run covers > 70% of samples (long-flat-then-step);
+ *   • the ≤ 3 step transitions all fall in the final 20% of the window (terminal recal).
+ * Re-arms automatically once a real multi-point trend accumulates past the step.
+ */
+export function sohStepDominated(pts: Array<{ ts: number; value: number }>): boolean {
+  if (pts.length < 4) return true;
+  const vals = pts.map((p) => p.value);
+  const EPS = 0.01; // SoH resolution ~0.01 %
+  const distinct = new Set(vals.map((v) => Math.round(v * 100))).size;
+  if (distinct < 3) return true;
+  let maxRun = 1;
+  let run = 1;
+  const transitions: number[] = [];
+  for (let i = 1; i < vals.length; i++) {
+    if (Math.abs(vals[i] - vals[i - 1]) < EPS) {
+      run++;
+      if (run > maxRun) maxRun = run;
+    } else {
+      run = 1;
+      transitions.push(i);
+    }
+  }
+  if (maxRun / vals.length > 0.7) return true;
+  if (transitions.length > 0 && transitions.length <= 3 && transitions[0] >= vals.length * 0.8) return true;
+  return false;
+}
+
 /** Regress one pack's SoH history and project it to end-of-life. */
 function analysePack(
   d: DeviceSnapshot & { projection: DpuProjection },
@@ -1498,6 +1536,37 @@ function analysePack(
       // artifact, so we drop it rather than alarm on a phantom.
       if (ratio >= 90 && ratio <= 100.5) coulombicEffPct = round2(ratio);
     }
+  }
+
+  // v0.28.0 — reject a BMS-recalibration staircase BEFORE it can drive a fade /
+  // dated EOL / r² / peer-fade. Route to 'learning' with NULL fade + NULL r² so it
+  // neither projects a false EOL, reads as "stable: no fade", seeds the peer-fade
+  // baseline (the pool filters status==='projecting'), nor pollutes the confidence
+  // median-r² (degR2s filters non-null). Suppress the Kalman EOL too (same
+  // artifact). Thermal/Arrhenius context stays visible.
+  if (sohStepDominated(sohPts)) {
+    return mk({
+      status: 'learning',
+      fadePctPerYear: null,
+      fadeUncertaintyPct: null,
+      cyclesPerYear,
+      r2: null,
+      dataSpanDays: spanDays,
+      samples: sohPts.length,
+      avgPackTempC: avgPackTempC != null ? round1(avgPackTempC) : null,
+      arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
+      coulombicEffPct,
+      kalmanSmoothedSoh,
+      kalmanFadePctPerYear: null,
+      kalmanFadeStdevPctPerYear,
+      kalmanYearsToEol: null,
+      kalmanEolDate: null,
+      summary:
+        `SoH history looks like a BMS recalibration step on otherwise-flat data, not a measurable fade trend — holding off on a dated end-of-life projection until a real multi-point trend accumulates.` +
+        (avgPackTempC != null
+          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 25 °C` : ''}.`
+          : ''),
+    });
   }
 
   // Trend not yet trustworthy → "learning": preliminary numbers, no dated EOL.
