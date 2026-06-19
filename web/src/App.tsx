@@ -88,6 +88,39 @@ function NormalApp() {
     () => sorted.filter((d) => d.productName.toLowerCase().includes('delta pro ultra')),
     [sorted],
   );
+  // v0.25.0 — stabilize the two TrendChart `series` props. They were fresh array
+  // literals every render, which DEFEATED TrendChart's merge memo (keyed on series
+  // identity) and forced a full 24h-chart rebuild + recharts reconcile on every
+  // ~1 Hz snapshot tick. Memoize on the underlying identity so the series rebuild
+  // only when they actually change (a DPU on/offline/rename, or the SHP2 SN).
+  const shp2TrendSeries = useMemo(
+    () =>
+      shp2
+        ? [
+            // v0.24.2 — Panel W (left, watts) + Backup % (right axis, 0–100) so the
+            // % isn't flattened against the kW load.
+            { sn: shp2.sn, metric: 'panel_load', label: 'Panel W', color: SERIES_PALETTE[2], unit: 'W' },
+            { sn: shp2.sn, metric: 'backup_pct', label: 'Backup %', color: SERIES_PALETTE[0], axis: 'right' as const, unit: '%' },
+          ]
+        : [],
+    [shp2?.sn],
+  );
+  const onlineDpus = dpus.filter((d) => d.online);
+  // Key the DPU series on the online-DPU identity + name + order (palette index is
+  // positional) so it rebuilds only when a DPU goes on/offline or is renamed.
+  const onlineDpuSig = onlineDpus.map((d) => `${d.sn}|${d.deviceName}`).join(',');
+  const dpuTrendSeries = useMemo(
+    () =>
+      onlineDpus.flatMap((d, i) => {
+        const color = SERIES_PALETTE[i % SERIES_PALETTE.length];
+        return [
+          { sn: d.sn, metric: 'total_out', label: `${d.deviceName} out`, color },
+          { sn: d.sn, metric: 'pv_total', label: `${d.deviceName} PV`, color, dashed: true },
+        ];
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [onlineDpuSig],
+  );
   // O(1) membership for the "others" partition below (was dpus.includes(d), O(n)).
   const dpuSet = useMemo(() => new Set(dpus), [dpus]);
   // "Other devices" — everything that isn't the SHP2 or a DPU. Offline ones sort
@@ -253,30 +286,19 @@ function NormalApp() {
                 windowMs={24 * 60 * 60 * 1000}
                 bucketSec={60}
                 unit="W"
-                series={[
-                  // v0.24.2 — Panel W (left, watts) + Backup % (right, 0–100). The %
-                  // gets its own axis so it's not flattened against the kW load.
-                  { sn: shp2.sn, metric: 'panel_load', label: 'Panel W', color: SERIES_PALETTE[2], unit: 'W' },
-                  { sn: shp2.sn, metric: 'backup_pct', label: 'Backup %', color: SERIES_PALETTE[0], axis: 'right', unit: '%' },
-                ]}
+                series={shp2TrendSeries}
               />
             </Suspense>
           )}
 
-          {showHistory && dpus.filter((d) => d.online).length > 0 && (
+          {showHistory && onlineDpus.length > 0 && (
             <Suspense fallback={<PageFallback />}>
               <TrendChart
                 title="DPU output & PV (24h)"
                 windowMs={24 * 60 * 60 * 1000}
                 bucketSec={60}
                 unit="W"
-                series={dpus.filter((d) => d.online).flatMap((d, i) => {
-                  const color = SERIES_PALETTE[i % SERIES_PALETTE.length];
-                  return [
-                    { sn: d.sn, metric: 'total_out', label: `${d.deviceName} out`, color },
-                    { sn: d.sn, metric: 'pv_total', label: `${d.deviceName} PV`, color, dashed: true },
-                  ];
-                })}
+                series={dpuTrendSeries}
               />
             </Suspense>
           )}
