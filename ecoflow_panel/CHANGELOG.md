@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.33.0 — 2026-06-18
+
+Telemetry-correctness fix from the live-state plausibility audit (adversarially verified): the DPU whole-unit battery current was badly under-read.
+
+- **DPU `batAmp` now reflects the real whole-unit battery current.** The raw `hs_yj751_pd_backend_addr.batAmp` register reads only a fraction of the true current — live, all three online Delta Pro Ultra cores showed a ~104.7 V stack drawing only **~3–7 A** while delivering **~1900–2985 W** of AC with no PV/AC-in (the battery was the sole source), i.e. the register under-read by **~4–7×** (and the ratio varied with load, so it isn't a clean per-pack divisor). The per-pack `inputWatts`/`outputWatts` are accurate — they sum to the unit's AC output — so the whole-unit DC current is now derived as **Σ(inputWatts) − Σ(outputWatts) ÷ batVol** (charging → positive, discharging → negative, matching the register's sign), falling back to the raw register only when pack power or `batVol` is unavailable. This is the `bat_amp` series the **internal-resistance trend model** reads, so the under-read register had been inflating estimated pack resistance by the same factor; the corrected current makes that estimate physically meaningful. One-time discontinuity in the `bat_amp` history at deploy as it steps to the correct magnitude.
+
+625/625 server tests pass (6 new — discharge/charge derivation, mixed-null packs, register fallback, divide-by-zero guard, idle→0 A). `tsc` clean. Found by extending verification beyond logs into live API state.
+
 ## 0.32.0 — 2026-06-18
 
 Degradation-model integrity, round 2 — caught during the live post-deploy verification sweep. The v0.28.0 step guard fixed the *clean-staircase* recalibration shape; this fixes the *shallow-noisy-decline* shape it missed.
