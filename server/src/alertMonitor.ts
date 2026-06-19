@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
 import { computeAlerts, type Alert, type Severity } from './alerts.js';
+import { SPARE_DPU_SNS, shp2ConnectedDpuSns } from './shp2Membership.js';
 import {
   computeLearnedAlerts,
   computeBaselineAlerts,
@@ -688,6 +689,25 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       ...stormPrep,
       ...curtailment,
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
+    // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
+    // into the SHP2) is online for diagnostics but must NEVER chime/push. v0.16.4
+    // only gated the offline/stale branches; the learned/forecast/baseline emitters
+    // had no membership filter, so a spare's peer-*/forecast-imbalance/baseline
+    // alerts went out live. Stamp annunciate:false on every alert whose id carries
+    // an expected-offline-spare SN (idempotent with the per-emitter threshold gate
+    // in alerts.ts). Keeps the alert visible in the UI; auto-re-arms the instant the
+    // spare is wired into an SHP2 (shp2ConnectedDpuSns then includes it).
+    {
+      const connectedSns = shp2ConnectedDpuSns(snap.devices);
+      const mutedSpares = [...SPARE_DPU_SNS].filter((sn) => !connectedSns.has(sn));
+      if (mutedSpares.length > 0) {
+        for (const a of alerts) {
+          if (a.annunciate !== false && mutedSpares.some((sn) => a.id.includes(sn))) {
+            a.annunciate = false;
+          }
+        }
+      }
+    }
     store.setAlerts(alerts);
     currentIncidents = buildIncidents(alerts);
 
