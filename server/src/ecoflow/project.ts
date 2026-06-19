@@ -287,6 +287,11 @@ export interface Shp2Projection {
   pairedCircuits: Shp2PairedCircuit[];
   sources: Shp2EnergySource[];
   sourceWatts: number[];
+  /** v0.34.0 — total grid power into the home at the SHP2 main (wattInfo.gridWatt).
+   *  The authoritative whole-home grid import. DPU `ac_in` only captures grid that
+   *  charges the DPUs, missing grid that serves home loads directly through the
+   *  panel — which is why home load didn't reconcile against PV + DPU-ac_in grid. */
+  gridWatt: number | null;
   strategy: Shp2Strategy;
 }
 
@@ -452,6 +457,7 @@ export function projectShp2(q: Quota): Shp2Projection {
     pairedCircuits,
     sources,
     sourceWatts,
+    gridWatt: num(q, 'wattInfo.gridWatt'),
     strategy: projectShp2Strategy(q),
   };
 }
