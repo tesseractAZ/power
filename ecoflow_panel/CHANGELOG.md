@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.30.0 — 2026-06-18
+
+Two more 7-day log-analysis fixes: silence high-volume warning churn the band rules missed, and leave a durable trace when telemetry silently stops.
+
+- **High-volume warning churn is now auto-silenced (Rule 4).** The three existing auto-silencing rules key on the *cumulative* short-clear fraction, which a few early slow clears can drag below the 0.70/0.80 cutoff even when every recent clear is fast — so two warning families that notify on every transient rise slipped through: `vdiff-warn` (short-frac 0.68, 3-min median) and `dpu-pvh-err` (0.63, 1.3-min median) both sit 0.12–0.17 below the demote cutoff. A new pure-rate guard demotes a warning to info (or silences an info) when it's unambiguously **high-volume** (≥ 150 rises over the replay window, ~>100/week) **and low-persistence** (≤ 20% long-active — it self-clears, so it's churn, not a standing condition). Critical is never gated; the 150-rise floor keeps infrequent warnings the operator acts on (e.g. `soc-low`) well clear. The alert stays **on-screen** either way — only its notification priority drops. The four silencing rules were extracted from a closure into the exported, pure `applySilencingRules()`, backfilling unit coverage they never had.
+- **A silent telemetry blackout now leaves a durable, queryable trace.** The recorder writes only in response to a store `change` event, so nothing fires when upstream telemetry *stops* — a 132-min MQTT stall in the 7-day window wrote zero rows and left zero trace, discoverable only by scanning `/api/history` for missing buckets. The recorder now tracks the last home-device insert (spares excluded, so a bench unit can't mask a home-feed stall) and, when writes resume after a silence > 15 min (3× the 5-min heartbeat), persists a bounded `telemetry-gap` marker (start/end/duration) to `telemetry-gaps.json`, logs a `⚠ TELEMETRY GAP` line, and surfaces it at the new **`/api/telemetry-gaps`** endpoint. No synthetic samples are written — that would corrupt the byte-identical history + energy integration; only a marker is recorded.
+
+608/608 server tests pass (11 new — 8 silencing-rule cases incl. the Rule 4 boundaries, 3 gap-predicate cases). `tsc` clean. No change to genuine alarms or to existing silencing decisions; the new rule only adds demotions for unambiguous churn, and the gap detector is observe-only.
+
 ## 0.29.0 — 2026-06-18
 
 Alarm-noise and observability fixes from the 7-day log analysis: stop the cell-imbalance **critical** chime from storming during routine BMS balancing, and surface the broadcast storm-gate counter.

@@ -103,6 +103,7 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     rollupLifetime: () => {},
     getLifetimeTotals,
     recordWeatherGhi: () => {}, // v0.13.1 — write path; the read-only worker never writes
+    telemetryGaps: () => [],    // v0.30.0 — gaps are detected on the write path; /api/telemetry-gaps uses the main recorder
     // ── read path: real ──
     query: (sn, metric, sinceMs, untilMs, bucketSec) => {
       if (!bucketSec || bucketSec <= 0) {
