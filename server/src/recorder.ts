@@ -797,6 +797,28 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       lifetimeEmitHighWater.set(key, prev.wh + pendingWh);
       out[key] = { persistedWh: prev.wh, pendingWh, watermarkMs: watermark };
     }
+    // v0.27.0 — enforce RTE ≤ 100% on the EMITTED total, not just the persisted
+    // floor. rollupLifetime() clamps discharge≤charge on the persisted floor, but
+    // the loop above re-derives pendingWh independently from the RAW BMS reading
+    // (max(0, liveBmsWh − persisted)); the raw BMS discharge runs above the raw
+    // charge (factory bench-cycling skew), so discharge gets a live pending while
+    // charge gets 0 — re-surfacing an impossible discharge > charge (102.6% RTE)
+    // on HA's total_increasing tile even though the floor was clamped. Clamp the
+    // emitted discharge total DOWN to the emitted charge total; the persisted
+    // floor is untouched. charge is monotonic within a session (clampLifetimeDip),
+    // so the clamped discharge is too; the session high-water resets on restart,
+    // so the one-time downward correction of the previously-inflated value passes
+    // through (a single, intended HA reset to a physical value).
+    const chargeOut = out['fleet_battery_charge_wh'];
+    const dischargeOut = out['fleet_battery_discharge_wh'];
+    if (chargeOut && dischargeOut) {
+      const chargeTotal = chargeOut.persistedWh + chargeOut.pendingWh;
+      const dischargeTotal = dischargeOut.persistedWh + dischargeOut.pendingWh;
+      if (dischargeTotal > chargeTotal) {
+        dischargeOut.pendingWh = Math.max(0, chargeTotal - dischargeOut.persistedWh);
+        lifetimeEmitHighWater.set('fleet_battery_discharge_wh', dischargeOut.persistedWh + dischargeOut.pendingWh);
+      }
+    }
     return out;
   };
 

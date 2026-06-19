@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.27.0 — 2026-06-18
+
+Data-integrity fix from the 7-day log analysis: the lifetime round-trip-efficiency invariant.
+
+- **Lifetime discharge can no longer exceed lifetime charge (RTE ≤ 100%).** The HA Energy tile `ecoflow_battery_discharge_lifetime_kwh` was surfacing **509.3 kWh discharged vs 496.5 kWh charged = 102.6% round-trip efficiency** — physically impossible (a battery can't deliver more than it stored). Root cause: `rollupLifetime()` enforces discharge ≤ charge on the *persisted floor*, but `getLifetimeTotals()` re-derives the live `pendingWh` **independently** from the raw BMS counters, and the raw BMS discharge runs above the raw charge (a factory bench-cycling skew — 14/15 packs report `accuDsg > accuChg`). So discharge picked up a live pending while charge's stayed at 0, re-inflating the surfaced total past the clamped floor. Fixed by clamping the *emitted* discharge total down to the emitted charge total across all three surfacing paths (`/api/lifetime-energy`, `/api/snapshot`, MQTT discovery); the persisted floor and monotonicity are untouched (charge is monotone within a session, so the clamped discharge is too). One intended one-time downward correction of the previously-inflated value when this first deploys.
+
+586/586 server tests pass; `tsc` clean. The persisted accumulators and the charge counter are unchanged; only the impossible discharge overshoot is clamped.
+
 ## 0.26.0 — 2026-06-18
 
 Alert-correctness fixes from a 7-day operational log analysis (multi-agent, adversarially verified — 14 real defects found, 6 "looks-wrong-but-correct" cleared). This release lands the three alarm-noise fixes; the model/forecast and data-integrity batches follow.
@@ -11,7 +19,7 @@ Alert-correctness fixes from a 7-day operational log analysis (multi-agent, adve
 - **MPPT-temperature alerts roll up per string instead of into one bucket.** The id was `mppt-<SN>-<HV|LV MPPT>` and `familyOf()` stops at the first uppercase token (the SN), collapsing every device × HV/LV string × severity into a single bare `mppt` family — so a spare's info-MPPT churn shared an auto-silence rollup with a home core's real warning/critical. The id is now `mppt-<hv|lv>-temp-<SN>`, yielding correct per-channel families `mppt-hv-temp` / `mppt-lv-temp` (regression test added).
 - **Runtime forecast can no longer render "14h 60m".** The hours/minutes split floored the hour and rounded the remainder *independently*, so a fractional hour ≥ 59.5/60 produced `mins=60` with no carry (live: "Projected runtime ≈ 14h 60m to reserve"). Both fields now derive from one rounding (`totalMin = round(h*60)`), so it rolls to "15h 0m".
 
-587/587 server tests pass (1 new). `tsc` clean. No change to genuine home-core alarms; only spare annunciation, MPPT family rollup, and one cosmetic time string.
+586/586 server tests pass (new `familyOf` MPPT cases added to the existing test). `tsc` clean. No change to genuine home-core alarms; only spare annunciation, MPPT family rollup, and one cosmetic time string.
 
 ## 0.25.0 — 2026-06-18
 
