@@ -17,6 +17,11 @@ test('familyOf — strips trailing device serial', () => {
   assert.equal(familyOf('cell-imbalance-Y711ZABA9H3T0489'), 'cell-imbalance');
   // Lowercase suffix should NOT be stripped — only ALL-CAPS serial-looking blocks.
   assert.equal(familyOf('simple-id'), 'simple-id');
+  // v0.26.0 — MPPT temp alerts now carry the lowercase channel slug BEFORE the SN
+  // (mppt-<hv|lv>-temp-<SN>-<sev>) so each string rolls up to its own family
+  // instead of collapsing every device+string+severity into a bare 'mppt'.
+  assert.equal(familyOf('mppt-hv-temp-Y711ZAB59G9P0090-info'), 'mppt-hv-temp');
+  assert.equal(familyOf('mppt-lv-temp-Y711ZAB59GBC0314-critical'), 'mppt-lv-temp');
 });
 
 test('appendAlertOutcome + tail — round-trips a single entry', () => {

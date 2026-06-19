@@ -307,11 +307,17 @@ export function computeAlerts(
       out.push({ id: `dpu-pvl-err-${d.sn}`, severity: 'warning', category: 'Solar', device: d.deviceName, title: 'LV MPPT error code', detail: `${d.deviceName} LV solar input reports error code ${p.pvLowErrCode} while producing ${p.pvLowWatts?.toFixed(0)} W (${p.pvLowVolts?.toFixed(0)} V, ${p.pvLowAmps?.toFixed(1)} A).` });
     }
 
-    for (const [label, c] of [
-      ['HV MPPT', p.mpptHvTemp],
-      ['LV MPPT', p.mpptLvTemp],
+    for (const [label, slug, c] of [
+      ['HV MPPT', 'hv', p.mpptHvTemp],
+      ['LV MPPT', 'lv', p.mpptLvTemp],
     ] as const) {
-      const a = tempAlert({ idBase: `mppt-${d.sn}-${label}`, device: d.deviceName, label: `${d.deviceName} ${label}`, tempC: c, band: MPPT_TEMP });
+      // v0.26.0 — channel slug ('hv'/'lv') BEFORE the SN and lowercase, so
+      // familyOf() (which stops at the first uppercase token = the SN) yields
+      // per-channel families `mppt-hv-temp` / `mppt-lv-temp` instead of collapsing
+      // every device+string+severity into one bare `mppt` rollup — which had
+      // pooled a spare's info-MPPT noise against a home core's warning/critical
+      // for the auto-silence decision. Human label unchanged ('HV/LV MPPT').
+      const a = tempAlert({ idBase: `mppt-${slug}-temp-${d.sn}`, device: d.deviceName, label: `${d.deviceName} ${label}`, tempC: c, band: MPPT_TEMP });
       if (a) out.push(a);
     }
 
@@ -373,6 +379,17 @@ export function computeAlerts(
       for (let i = packStart; i < out.length; i++) out[i].packNum = pk.num;
     }
     for (let i = dpuStart; i < out.length; i++) out[i].coreNum = coreNum;
+    // v0.26.0 — a bench spare (in SPARE_DPU_SNS, not wired into the SHP2) stays
+    // online for diagnostics but must NEVER chime/push. The v0.16.4 gate only
+    // covered the offline/stale branches; stamp annunciate:false on everything
+    // this online spare just emitted (dpu-err, mppt-*, vdiff-*, soh-*, soc-low,
+    // temp-*, ems-volt, imbalance). Stays visible on-screen; auto-re-arms once
+    // it's wired into an SHP2 (shp2ConnectedDpuSns then includes it).
+    if (isExpectedOfflineSpare(d.sn)) {
+      for (let i = dpuStart; i < out.length; i++) {
+        if (out[i].annunciate !== false) out[i].annunciate = false;
+      }
+    }
   }
 
   if (shp2?.online && shp2.projection) {

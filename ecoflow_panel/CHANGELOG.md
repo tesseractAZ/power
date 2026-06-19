@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.26.0 — 2026-06-18
+
+Alert-correctness fixes from a 7-day operational log analysis (multi-agent, adversarially verified — 14 real defects found, 6 "looks-wrong-but-correct" cleared). This release lands the three alarm-noise fixes; the model/forecast and data-integrity batches follow.
+
+- **Bench spares no longer chime or push.** The v0.16.4 spare gate (`annunciate:false` for a DPU in `SPARE_DPU_SNS` not wired into the SHP2) was only applied on the offline/stale branches — the learned, forecast, baseline, AND threshold emitters had no membership filter, so a spare's `peer-*` / `forecast-imbalance` / `mppt-*` / `vdiff-*` alerts went out **live at warning** (the log showed `forecast-imbalance` on a spare firing 36×). Added a central gate in the alert monitor that stamps `annunciate:false` on every alert whose id carries an expected-offline-spare SN, plus a per-emitter stamp on the threshold path. The alerts stay **visible** on the dashboard (like the offline branch) but never chime/push, and auto-re-arm the instant a spare is wired into an SHP2.
+- **MPPT-temperature alerts roll up per string instead of into one bucket.** The id was `mppt-<SN>-<HV|LV MPPT>` and `familyOf()` stops at the first uppercase token (the SN), collapsing every device × HV/LV string × severity into a single bare `mppt` family — so a spare's info-MPPT churn shared an auto-silence rollup with a home core's real warning/critical. The id is now `mppt-<hv|lv>-temp-<SN>`, yielding correct per-channel families `mppt-hv-temp` / `mppt-lv-temp` (regression test added).
+- **Runtime forecast can no longer render "14h 60m".** The hours/minutes split floored the hour and rounded the remainder *independently*, so a fractional hour ≥ 59.5/60 produced `mins=60` with no carry (live: "Projected runtime ≈ 14h 60m to reserve"). Both fields now derive from one rounding (`totalMin = round(h*60)`), so it rolls to "15h 0m".
+
+587/587 server tests pass (1 new). `tsc` clean. No change to genuine home-core alarms; only spare annunciation, MPPT family rollup, and one cosmetic time string.
+
 ## 0.25.0 — 2026-06-18
 
 Behavior-preserving performance pass — the 3 confirmed wins from a fresh multi-agent optimization audit (17 candidates, 11 rejected as micro-churn, 2 deferred as needing human-gated cache design). Same numbers, same pixels.
