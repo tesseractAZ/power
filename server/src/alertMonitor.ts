@@ -129,6 +129,80 @@ export interface AlertActionStats {
   lastSeenAt: number | null;
 }
 
+/**
+ * Auto-silencing rules for a family rollup, applied after its counters change.
+ * Pure + exported so the boot-time replay pass and the live-event path share
+ * one implementation (a panel restart must not reset silencing the persisted
+ * log says should still hold) — and so the rules are unit-testable in isolation.
+ * Mutates the three boolean flags on `t` in place. Critical severity is never
+ * silenced or demoted: it must always push.
+ */
+export function applySilencingRules(t: AlertActionStats): void {
+  const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
+  const DOWNGRADE_SHORT_FRAC = 0.7;               // ≥ 70% of rises clear within SHORT_CLEAR_MS
+  // v0.9.3 — extended self-tuning rules
+  const DEMOTE_WARN_MIN_RISES = 10;               // need ≥ 10 rises before demoting warning→info
+  const DEMOTE_WARN_SHORT_FRAC = 0.8;             // ≥ 80% short-clear → demote (stricter than info silencing)
+  const CHRONIC_NOISE_MIN_RISES = 10;             // need ≥ 10 rises before chronic-noise silencing
+  const CHRONIC_NOISE_NEVER_CLEAR_FRAC = 0.5;     // ≥ 50% of rises stayed alive past CHRONIC_NOISE_LONG_MS without user clearing
+  // v0.30.0 — pure high-volume rate guard (Rule 4). The band rules (1/2) key on
+  // the *cumulative* short-clear fraction, which a handful of early slow clears
+  // can drag below the 0.70/0.80 cutoff even when every recent clear is fast —
+  // so a family that churn-notifies on every transient rise slips through. The
+  // 7-day log showed two warning families doing exactly this: vdiff-warn
+  // (short-frac 0.68, 3-min median) and dpu-pvh-err (0.63, 1.3-min median) sit
+  // 0.12–0.17 below DEMOTE_WARN_SHORT_FRAC yet pushed on every rise. Demote/
+  // silence regardless of clear-band when a family is unambiguously high-volume
+  // AND low-persistence (it clears on its own, so it's churn, not a standing
+  // condition). The 150-rise floor keeps genuinely infrequent warnings the
+  // operator acts on (e.g. soc-low) well clear of the gate.
+  const HI_VOLUME_MIN_RISES = 150;                // ~>100/week of replay-window rises = churn
+  const HI_VOLUME_MAX_NEVER_CLEAR_FRAC = 0.2;     // ≤ 20% long-active ⇒ transient, not a standing condition
+
+  // Rule 1 (v0.7.5): info-severity alerts that recur a lot and always clear fast → silence
+  if (
+    t.severity === 'info' &&
+    t.riseCount >= DOWNGRADE_MIN_RISES &&
+    t.shortClearsCount / t.riseCount >= DOWNGRADE_SHORT_FRAC
+  ) {
+    t.downgradedSilenced = true;
+  }
+  // Rule 2 (v0.9.3): warning-severity alerts that mostly short-clear → demote to info
+  // (still surface in the UI; just stop firing notifications at warning priority).
+  if (
+    t.severity === 'warning' &&
+    t.riseCount >= DEMOTE_WARN_MIN_RISES &&
+    t.shortClearsCount / t.riseCount >= DEMOTE_WARN_SHORT_FRAC
+  ) {
+    t.warningDemotedToInfo = true;
+  }
+  // Rule 3 (v0.9.3): chronic-noise — alert persists a long time but the user
+  // never actually acts on it. The condition exists but the user has accepted
+  // it (e.g. a freezer with weird draw that they know about). Stop notifying
+  // since they're not going to do anything; alert still shows. Applies to any
+  // severity below critical (critical always notifies).
+  if (
+    t.severity !== 'critical' &&
+    t.riseCount >= CHRONIC_NOISE_MIN_RISES &&
+    t.neverClearedCount / t.riseCount >= CHRONIC_NOISE_NEVER_CLEAR_FRAC
+  ) {
+    t.chronicNoiseSilenced = true;
+  }
+  // Rule 4 (v0.30.0): high-volume churn that the band rules miss. A family
+  // firing very often whose alerts almost always self-clear is transient noise
+  // regardless of the exact short-clear fraction. Warning → demote to info
+  // (warningDemotedToInfo → info priority, still on-screen); info → silence
+  // (downgradedSilenced → skip dispatch, still on-screen). Critical never gated.
+  if (
+    t.severity !== 'critical' &&
+    t.riseCount >= HI_VOLUME_MIN_RISES &&
+    t.neverClearedCount / t.riseCount <= HI_VOLUME_MAX_NEVER_CLEAR_FRAC
+  ) {
+    if (t.severity === 'warning') t.warningDemotedToInfo = true;
+    else t.downgradedSilenced = true;
+  }
+}
+
 export interface Incident {
   id: string;
   severity: Severity;
@@ -338,53 +412,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const CRITICAL_BREAKS_QUIET =
     process.env.CRITICAL_BREAKS_QUIET_HOURS === 'true' || process.env.CRITICAL_BREAKS_QUIET_HOURS === '1';
   const DIGEST_HOUR = Number(process.env.NOTIFY_DIGEST_HOUR ?? 7);
-  const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
-  const DOWNGRADE_SHORT_FRAC = 0.7;               // ≥ 70% of rises clear within SHORT_CLEAR_MS
-  // v0.9.3 — extended self-tuning rules
-  const DEMOTE_WARN_MIN_RISES = 10;               // need ≥ 10 rises before demoting warning→info
-  const DEMOTE_WARN_SHORT_FRAC = 0.8;             // ≥ 80% short-clear → demote (stricter than info silencing)
-  const CHRONIC_NOISE_MIN_RISES = 10;             // need ≥ 10 rises before chronic-noise silencing
-  const CHRONIC_NOISE_NEVER_CLEAR_FRAC = 0.5;     // ≥ 50% of rises stayed alive past CHRONIC_NOISE_LONG_MS without user clearing
-  // v0.13.2 — SHORT_CLEAR_MS / CHRONIC_NOISE_LONG_MS now live at module scope
-  // (shared with the pure classifyClearDuration helper).
-
-  /**
-   * Re-evaluate auto-silencing rules for a family rollup after its counters
-   * change. Pulled out so the boot-time replay and the live-event path share
-   * the same logic (otherwise a panel restart would reset silencing decisions
-   * that the persisted log says should still hold).
-   */
-  const evaluateSilencingRules = (t: AlertActionStats) => {
-    // Rule 1 (v0.7.5): info-severity alerts that recur a lot and always clear fast → silence
-    if (
-      t.severity === 'info' &&
-      t.riseCount >= DOWNGRADE_MIN_RISES &&
-      t.shortClearsCount / t.riseCount >= DOWNGRADE_SHORT_FRAC
-    ) {
-      t.downgradedSilenced = true;
-    }
-    // Rule 2 (v0.9.3): warning-severity alerts that mostly short-clear → demote to info
-    // (still surface in the UI; just stop firing notifications at warning priority).
-    if (
-      t.severity === 'warning' &&
-      t.riseCount >= DEMOTE_WARN_MIN_RISES &&
-      t.shortClearsCount / t.riseCount >= DEMOTE_WARN_SHORT_FRAC
-    ) {
-      t.warningDemotedToInfo = true;
-    }
-    // Rule 3 (v0.9.3): chronic-noise — alert persists a long time but the user
-    // never actually acts on it. The condition exists but the user has
-    // accepted it (e.g. a freezer with weird draw that they know about). Stop
-    // notifying since they're not going to do anything; alert still shows.
-    // Applies to any severity below critical (critical always notifies).
-    if (
-      t.severity !== 'critical' &&
-      t.riseCount >= CHRONIC_NOISE_MIN_RISES &&
-      t.neverClearedCount / t.riseCount >= CHRONIC_NOISE_NEVER_CLEAR_FRAC
-    ) {
-      t.chronicNoiseSilenced = true;
-    }
-  };
+  // Auto-silencing thresholds + the four rules now live at module scope as the
+  // pure, exported applySilencingRules() so the boot-time replay pass and the
+  // live-event path share one tested implementation (a panel restart must not
+  // reset silencing the persisted log says should still hold). v0.30.0.
+  const evaluateSilencingRules = applySilencingRules;
 
   /**
    * Fetch or seed the family-keyed rollup for an alert.

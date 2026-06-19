@@ -582,6 +582,20 @@ app.get('/api/lifetime-energy', async (req, reply) => {
   }, 15);
 });
 
+// v0.30.0 — telemetry-gap markers: a durable, queryable record of any home-feed
+// blackout the recorder detected (see recorder.detectTelemetryGap). A silent
+// upstream stall now shows up as an incident here instead of only being
+// discoverable by scanning /api/history for missing buckets.
+app.get('/api/telemetry-gaps', async (req, reply) => {
+  const gaps = recorder.telemetryGaps();
+  return cached(req, reply, {
+    generated_at: Date.now(),
+    count: gaps.length,
+    longest_gap_min: Math.round(gaps.reduce((m, g) => Math.max(m, g.durationMs), 0) / 60_000),
+    gaps,
+  }, 30);
+});
+
 // v0.7.5 — new analytics endpoints (all cached v0.9.14)
 app.get<{ Querystring: { days?: string } }>('/api/self-consumption', async (req, reply) => {
   const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7));

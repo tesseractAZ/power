@@ -1,10 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
+import { SPARE_DPU_SNS } from './shp2Membership.js';
 
 interface MetricSample {
   sn: string;
@@ -15,6 +16,28 @@ interface MetricSample {
 const MIN_INTERVAL_MS = 10_000;   // never record same metric more than once / 10s
 const MAX_INTERVAL_MS = 300_000;  // heartbeat: record at least every 5 min even if unchanged
 const VALUE_EPSILON = 0.5;        // ignore wiggle smaller than this (watts/percent)
+
+/**
+ * v0.30.0 — a persisted record of a telemetry blackout: a stretch where the
+ * recorder wrote NO home-device samples for far longer than the heartbeat,
+ * meaning upstream telemetry stalled (an MQTT session drop / broker reconnect,
+ * or the process being down). All fields are ms epochs.
+ */
+export interface TelemetryGap {
+  startMs: number;     // last home-device sample before the silence
+  endMs: number;       // first home-device sample after the silence
+  durationMs: number;  // endMs − startMs
+  detectedAt: number;  // == endMs (when the gap was recognised)
+}
+
+/**
+ * Pure gap predicate. A gap counts only when there was a prior insert
+ * (`lastInsertMs > 0`, so the very first boot write never trips it) and the
+ * silence exceeds the threshold. Separate + exported so it's unit-testable.
+ */
+export function detectTelemetryGap(lastInsertMs: number, nowMs: number, thresholdMs: number): boolean {
+  return lastInsertMs > 0 && nowMs - lastInsertMs > thresholdMs;
+}
 
 // v0.13.1 — pseudo-device + metric names for the persisted weather-irradiance
 // series (the durable GHI backfill, see recordWeatherGhi). Stored under SN
@@ -126,6 +149,10 @@ export interface Recorder {
     bucketSec?: number,
   ) => Map<string, Array<{ ts: number; value: number }>>;
   listMetrics: (sn: string) => string[];
+  /** v0.30.0 — durable record of detected telemetry blackouts (home-feed
+   * silences longer than the heartbeat). Bounded ring, persisted across
+   * restarts; surfaced at /api/telemetry-gaps. */
+  telemetryGaps: () => TelemetryGap[];
   /** v0.13.1 — persist hourly weather irradiance (GHI) + cloud cover under
    * the pseudo-device SN "weather" so the historical series survives beyond
    * the 2h in-memory weather cache / 7-day fetch window. Change-detected and
@@ -208,12 +235,45 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     return Math.abs(value - prev.value) >= VALUE_EPSILON;
   }
 
+  // v0.30.0 — telemetry-gap detection. record() runs ONLY in response to a
+  // store 'change' event; nothing fires when upstream telemetry STOPS. So a
+  // silent blackout (one 132-min MQTT stall in the 7-day log) wrote zero rows
+  // and left zero trace — only discoverable by scanning /api/history. Track the
+  // last HOME-device insert (spares are excluded so a bench unit can't mask a
+  // home-feed stall) and, when writes resume after a long silence, persist a
+  // durable marker (NOT synthetic samples — those would corrupt the
+  // byte-identical history + energy integration). Surfaced at /api/telemetry-gaps.
+  const GAP_THRESHOLD_MS = 3 * MAX_INTERVAL_MS;   // 15 min — comfortably above the 5-min heartbeat
+  const GAPS_MAX = 50;                            // bounded persisted ring
+  const gapsPath = resolve(dirname(dbPath), 'telemetry-gaps.json');
+  let lastHomeInsertTs = 0;
+  const telemetryGapsLog: TelemetryGap[] = (() => {
+    try {
+      const arr = JSON.parse(readFileSync(gapsPath, 'utf8'));
+      return Array.isArray(arr) ? (arr as TelemetryGap[]).slice(-GAPS_MAX) : [];
+    } catch { return []; }
+  })();
+
+  function recordTelemetryGap(startMs: number, endMs: number) {
+    const gap: TelemetryGap = { startMs, endMs, durationMs: endMs - startMs, detectedAt: endMs };
+    telemetryGapsLog.push(gap);
+    if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
+    try {
+      writeFileSync(gapsPath, JSON.stringify(telemetryGapsLog), { mode: 0o644 });
+    } catch (e: any) {
+      log(`recorder: failed to persist telemetry gap (${e?.message ?? e})`);
+    }
+    const mins = Math.round(gap.durationMs / 60_000);
+    log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}); writes resumed`);
+  }
+
   function record(samples: MetricSample[]) {
     if (samples.length === 0) return;
     const now = Date.now();
     const tx = db.prepare('BEGIN');
     tx.run();
     let written = 0;
+    let sawHomeInsert = false;
     try {
       for (const s of samples) {
         if (typeof s.value !== 'number' || !Number.isFinite(s.value)) continue;
@@ -221,11 +281,20 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         insert.run(now, s.sn, s.metric, s.value);
         last.set(`${s.sn}|${s.metric}`, { ts: now, value: s.value });
         written++;
+        if (!SPARE_DPU_SNS.has(s.sn)) sawHomeInsert = true;
       }
       db.prepare('COMMIT').run();
     } catch (e) {
       db.prepare('ROLLBACK').run();
       throw e;
+    }
+    // v0.30.0 — fleet telemetry-gap heartbeat. A home-device write just landed;
+    // if the previous home write was long ago, telemetry was silent in between.
+    if (sawHomeInsert) {
+      if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
+        recordTelemetryGap(lastHomeInsertTs, now);
+      }
+      lastHomeInsertTs = now;
     }
     // v0.9.74 — silence per-tick chatter. The previous "wrote N samples"
     // line fired every 10 s under normal load (~44 lines/min, ~88 % of
@@ -909,6 +978,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       return out;
     },
     listMetrics: (sn) => (metricsStmt.all(sn) as Array<{ metric: string }>).map((r) => r.metric),
+    telemetryGaps: () => telemetryGapsLog.slice(),
     recordWeatherGhi,
     close: () => {
       clearInterval(lifetimeTimer);
