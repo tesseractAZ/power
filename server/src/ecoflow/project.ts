@@ -16,6 +16,34 @@ const str = (q: Quota, k: string): string | null => {
   return v == null ? null : String(v);
 };
 
+/**
+ * v0.33.0 — derive a Delta Pro Ultra's WHOLE-UNIT battery DC current from its
+ * per-pack power. The `hs_yj751_pd_backend_addr.batAmp` register reads only a
+ * fraction of the true current (live: ~3–7 A while the packs were delivering
+ * ~28 A worth of AC; the ratio isn't even a clean per-pack divisor, so it can't
+ * just be scaled). The per-pack `inputWatts`/`outputWatts` ARE accurate — they
+ * sum to the unit's AC output — so net battery DC power = Σ(inputWatts) −
+ * Σ(outputWatts) and batAmp = that ÷ batVol. Sign matches the register: charging
+ * (input dominant) → positive, discharging → negative. Falls back to the raw
+ * register only when pack power or batVol is unavailable. This is the series the
+ * internal-resistance model reads (`bat_amp`), which the under-read register was
+ * skewing ~4–7×.
+ */
+export function deriveWholeUnitBatAmp(
+  packInOut: Array<{ inputWatts: number | null; outputWatts: number | null }>,
+  batVol: number | null,
+  fallbackAmp: number | null,
+): number | null {
+  let netW = 0;
+  let have = false;
+  for (const p of packInOut) {
+    if (p.inputWatts != null) { netW += p.inputWatts; have = true; }
+    if (p.outputWatts != null) { netW -= p.outputWatts; have = true; }
+  }
+  if (have && batVol != null && batVol > 1) return Math.round((netW / batVol) * 100) / 100;
+  return fallbackAmp;
+}
+
 export interface DpuPack {
   num: number;
   soc: number | null;
@@ -157,7 +185,9 @@ export function projectDpu(q: Quota): DpuProjection {
     acOutFreq: num(q, 'hs_yj751_pd_backend_addr.acOutFreq'),
     acOutVol: num(q, 'hs_yj751_pd_backend_addr.outAc5p8Vol'),
     batVol: num(q, 'hs_yj751_pd_backend_addr.batVol'),
-    batAmp: num(q, 'hs_yj751_pd_backend_addr.batAmp'),
+    // v0.33.0 — whole-unit current derived from per-pack power; the raw
+    // hs_yj751_pd_backend_addr.batAmp register under-reads by ~4–7×.
+    batAmp: deriveWholeUnitBatAmp(packs, num(q, 'hs_yj751_pd_backend_addr.batVol'), num(q, 'hs_yj751_pd_backend_addr.batAmp')),
     totalInWatts: num(q, 'hs_yj751_pd_appshow_addr.wattsInSum'),
     totalOutWatts: num(q, 'hs_yj751_pd_appshow_addr.wattsOutSum'),
     remainTimeMin: num(q, 'hs_yj751_pd_appshow_addr.remainTime'),
