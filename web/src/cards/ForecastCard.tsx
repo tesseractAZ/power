@@ -14,6 +14,7 @@ import {
 import type { DayForecast } from '../types';
 import { fmtPct, fmtW } from '../format';
 import { apiUrl } from '../api';
+import { CHART, HUES, UI } from '../theme';
 
 /**
  * Day-ahead forecast card: cloud-aware solar prediction, typical-day load, and
@@ -101,23 +102,23 @@ export const ForecastCard = memo(function ForecastCard() {
               <ComposedChart data={fc!.hours} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="fcPv" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#d97706" stopOpacity={0.45} />
-                    <stop offset="100%" stopColor="#d97706" stopOpacity={0} />
+                    <stop offset="0%" stopColor={HUES.solar} stopOpacity={0.45} />
+                    <stop offset="100%" stopColor={HUES.solar} stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="#c4cad3" strokeDasharray="3 3" />
+                <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
                   type="number"
                   domain={['dataMin', 'dataMax']}
-                  tick={{ fill: '#586474', fontSize: 10 }}
+                  tick={{ fill: CHART.axis, fontSize: 10 }}
                   tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: 'numeric' })}
                 />
-                <YAxis yAxisId="w" tick={{ fill: '#586474', fontSize: 10 }} width={52} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
-                <YAxis yAxisId="soc" orientation="right" domain={[0, 100]} tick={{ fill: '#586474', fontSize: 10 }} width={38} unit="%" />
+                <YAxis yAxisId="w" tick={{ fill: CHART.axis, fontSize: 10 }} width={52} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
+                <YAxis yAxisId="soc" orientation="right" domain={[0, 100]} tick={{ fill: CHART.axis, fontSize: 10 }} width={38} unit="%" />
                 <Tooltip
-                  contentStyle={{ background: '#ffffff', border: '1px solid #9aa3b0', borderRadius: 8, fontSize: 12 }}
-                  labelStyle={{ color: '#586474' }}
+                  contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: CHART.axis }}
                   labelFormatter={(t) => new Date(t as number).toLocaleString([], { weekday: 'short', hour: 'numeric' })}
                   formatter={(v, name) =>
                     name === 'Projected SoC'
@@ -127,11 +128,11 @@ export const ForecastCard = memo(function ForecastCard() {
                       : v
                   }
                 />
-                <Legend wrapperStyle={{ fontSize: 11, color: '#586474' }} />
-                <ReferenceLine yAxisId="soc" y={fc!.reserveSoc} stroke="#b91c1c" strokeDasharray="4 4" strokeOpacity={0.7} />
-                <Area yAxisId="w" type="monotone" dataKey="forecastPvW" name="Solar" stroke="#d97706" fill="url(#fcPv)" strokeWidth={1.5} isAnimationActive={false} />
-                <Line yAxisId="w" type="monotone" dataKey="forecastLoadW" name="Load" stroke="#0e7490" strokeWidth={1.5} dot={false} isAnimationActive={false} />
-                <Line yAxisId="soc" type="monotone" dataKey="projectedSocPct" name="Projected SoC" stroke="#15803d" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
+                <Legend wrapperStyle={{ fontSize: 11, color: CHART.axis }} />
+                <ReferenceLine yAxisId="soc" y={fc!.reserveSoc} stroke={UI.bad} strokeDasharray="4 4" strokeOpacity={0.7} />
+                <Area yAxisId="w" type="monotone" dataKey="forecastPvW" name="Solar" stroke={HUES.solar} fill="url(#fcPv)" strokeWidth={1.5} isAnimationActive={false} />
+                <Line yAxisId="w" type="monotone" dataKey="forecastLoadW" name="Load" stroke={HUES.battery} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line yAxisId="soc" type="monotone" dataKey="projectedSocPct" name="Projected SoC" stroke={HUES.soc} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
               </ComposedChart>
             </ResponsiveContainer>
           </div>

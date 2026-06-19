@@ -22,8 +22,9 @@ import { sortDevices } from '../sort';
 import { SolarResponseCard } from '../cards/SolarResponseCard';
 import { CurtailmentCard } from '../cards/CurtailmentCard';
 import { apiUrl } from '../api';
+import { CHART, HUES } from '../theme';
 
-const DPU_COLORS = ['#0e7490', '#15803d', '#d97706', '#7c3aed'];
+const DPU_COLORS = [HUES.battery, HUES.soc, HUES.solar, HUES.violet];
 
 interface SummaryResp {
   fleet: {
@@ -227,22 +228,22 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
                   </linearGradient>
                 ))}
               </defs>
-              <CartesianGrid stroke="#c4cad3" strokeDasharray="3 3" />
+              <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
               <XAxis
                 dataKey="ts"
                 type="number"
                 domain={['dataMin', 'dataMax']}
-                tick={{ fill: '#586474', fontSize: 10 }}
+                tick={{ fill: CHART.axis, fontSize: 10 }}
                 tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               />
-              <YAxis tick={{ fill: '#586474', fontSize: 10 }} width={56} unit=" W" />
+              <YAxis tick={{ fill: CHART.axis, fontSize: 10 }} width={56} unit=" W" />
               <Tooltip
-                contentStyle={{ background: '#ffffff', border: '1px solid #9aa3b0', borderRadius: 8, fontSize: 12 }}
-                labelStyle={{ color: '#586474' }}
+                contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: CHART.axis }}
                 labelFormatter={(t) => new Date(t as number).toLocaleString()}
                 formatter={(v) => (typeof v === 'number' ? `${Math.round(v)} W` : v)}
               />
-              <Legend wrapperStyle={{ fontSize: 11, color: '#586474' }} />
+              <Legend wrapperStyle={{ fontSize: 11, color: CHART.axis }} />
               {onlineDpus.map((d, i) => (
                 <Area
                   key={d.sn}
@@ -324,7 +325,7 @@ function FlowDiagram({
         <defs>
           <style>{`@keyframes pvflow { to { stroke-dashoffset: -32; } }`}</style>
           <symbol id="sun" viewBox="-12 -12 24 24">
-            <circle cx="0" cy="0" r="6" fill="#d97706" />
+            <circle cx="0" cy="0" r="6" fill={HUES.solar} />
             {Array.from({ length: 8 }).map((_, i) => {
               const a = (i * Math.PI) / 4;
               return (
@@ -334,7 +335,7 @@ function FlowDiagram({
                   y1={Math.sin(a) * 8}
                   x2={Math.cos(a) * 11}
                   y2={Math.sin(a) * 11}
-                  stroke="#d97706"
+                  stroke={HUES.solar}
                   strokeWidth="2"
                   strokeLinecap="round"
                 />
@@ -354,7 +355,7 @@ function FlowDiagram({
 
         {/* Sun + panels */}
         <use href="#sun" x={COL_PANELS - 32} y={26} width="30" height="30" />
-        <text x={COL_PANELS + 6} y={36} fill="#d97706" fontSize="14" fontFamily="ui-sans-serif" fontWeight="700">
+        <text x={COL_PANELS + 6} y={36} fill={HUES.solar} fontSize="14" fontFamily="ui-sans-serif" fontWeight="700">
           {totalPanels} panels · {PANEL_W} W each
         </text>
 
@@ -400,14 +401,14 @@ function FlowDiagram({
                     x2={COL_DPU - 10}
                     y2={yMid - 24}
                     watts={hvW}
-                    color="#d97706"
+                    color={HUES.solar}
                     period={period(hvW)}
                     strokeW={strokeW(hvW)}
                   />
-                  <text x={LINE_START_X + 22} y={yMid - 34} fill="#d97706" fontSize="14" fontWeight="700" fontFamily="ui-monospace">
+                  <text x={LINE_START_X + 22} y={yMid - 34} fill={HUES.solar} fontSize="14" fontWeight="700" fontFamily="ui-monospace">
                     HV: {fmtW(hvW)}
                   </text>
-                  <text x={LINE_START_X + 22} y={yMid - 11} fill="#586474" fontSize="11" fontFamily="ui-monospace">
+                  <text x={LINE_START_X + 22} y={yMid - 11} fill={CHART.axis} fontSize="11" fontFamily="ui-monospace">
                     {p.pvHighVolts?.toFixed(0) ?? '—'} V · {p.pvHighAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptHvTemp)} · {HV_PANELS} × {PANEL_W} W
                   </text>
 
@@ -425,24 +426,24 @@ function FlowDiagram({
                   <text x={LINE_START_X + 22} y={yMid + 38} fill="#c2410c" fontSize="14" fontWeight="700" fontFamily="ui-monospace">
                     LV: {fmtW(lvW)}
                   </text>
-                  <text x={LINE_START_X + 22} y={yMid + 53} fill="#586474" fontSize="11" fontFamily="ui-monospace">
+                  <text x={LINE_START_X + 22} y={yMid + 53} fill={CHART.axis} fontSize="11" fontFamily="ui-monospace">
                     {p.pvLowVolts?.toFixed(0) ?? '—'} V · {p.pvLowAmps?.toFixed(1) ?? '—'} A · {fmtTemp(p.mpptLvTemp)} · {LV_PANELS} × {PANEL_W} W
                   </text>
                 </>
               ) : (
                 /* Spare DPU — no PV array wired in */
-                <text x={PANELS_X} y={yMid + 4} fill="#9aa3b0" fontSize="12" fontStyle="italic">
+                <text x={PANELS_X} y={yMid + 4} fill={CHART.tooltipBorder} fontSize="12" fontStyle="italic">
                   spare core · no PV array
                 </text>
               )}
 
               {/* DPU node */}
-              <rect x={COL_DPU} y={yMid - 32} width={150} height={64} rx={6} fill="#ffffff" stroke="#0e7490" strokeOpacity={0.9} strokeWidth={1.5} />
-              <text x={COL_DPU + 12} y={yMid - 15} fill="#586474" fontSize="11" fontWeight="600" letterSpacing="0.08em" style={{ textTransform: 'uppercase' }}>{d.deviceName}</text>
-              <text x={COL_DPU + 12} y={yMid + 9} fill="#0e7490" fontSize="21" fontWeight="700" fontFamily="ui-monospace">
+              <rect x={COL_DPU} y={yMid - 32} width={150} height={64} rx={6} fill={CHART.tooltipBg} stroke={HUES.battery} strokeOpacity={0.9} strokeWidth={1.5} />
+              <text x={COL_DPU + 12} y={yMid - 15} fill={CHART.axis} fontSize="11" fontWeight="600" letterSpacing="0.08em" style={{ textTransform: 'uppercase' }}>{d.deviceName}</text>
+              <text x={COL_DPU + 12} y={yMid + 9} fill={HUES.battery} fontSize="21" fontWeight="700" fontFamily="ui-monospace">
                 {fmtW(totalW)}
               </text>
-              <text x={COL_DPU + 12} y={yMid + 25} fill="#586474" fontSize="10">total in</text>
+              <text x={COL_DPU + 12} y={yMid + 25} fill={CHART.axis} fontSize="10">total in</text>
 
               {/* DPU → battery */}
               <FlowSegment
@@ -451,7 +452,7 @@ function FlowDiagram({
                 x2={COL_BAT}
                 y2={yMid}
                 watts={totalW}
-                color="#0e7490"
+                color={HUES.battery}
                 period={period(totalW)}
                 strokeW={strokeW(totalW)}
               />
@@ -460,9 +461,9 @@ function FlowDiagram({
         })}
 
         {/* Battery cluster (right) */}
-        <rect x={COL_BAT} y={TOP - 12} width={92} height={dpus.length * ROW_H + 24} rx={6} fill="#ffffff" stroke="#15803d" strokeOpacity={0.9} strokeWidth={1.5} />
-        <text x={COL_BAT + 46} y={TOP + 8} textAnchor="middle" fill="#586474" fontSize="11" fontWeight="600" letterSpacing="0.08em" style={{ textTransform: 'uppercase' }}>batteries</text>
-        <text x={COL_BAT + 46} y={TOP + (dpus.length * ROW_H) / 2 + 14} textAnchor="middle" fill="#15803d" fontSize="26" fontWeight="700">
+        <rect x={COL_BAT} y={TOP - 12} width={92} height={dpus.length * ROW_H + 24} rx={6} fill={CHART.tooltipBg} stroke={HUES.soc} strokeOpacity={0.9} strokeWidth={1.5} />
+        <text x={COL_BAT + 46} y={TOP + 8} textAnchor="middle" fill={CHART.axis} fontSize="11" fontWeight="600" letterSpacing="0.08em" style={{ textTransform: 'uppercase' }}>batteries</text>
+        <text x={COL_BAT + 46} y={TOP + (dpus.length * ROW_H) / 2 + 14} textAnchor="middle" fill={HUES.soc} fontSize="26" fontWeight="700">
           ⚡
         </text>
       </svg>
@@ -517,7 +518,7 @@ function DpuSolarCard({ d }: { d: DeviceSnapshot & { projection: DpuProjection }
           amps={p.pvHighAmps}
           temp={p.mpptHvTemp}
           errCode={p.pvHighErrCode}
-          accent="#d97706"
+          accent={HUES.solar}
         />
         <MpptChannelTile
           label="LV MPPT"

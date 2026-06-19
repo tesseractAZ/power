@@ -11,10 +11,11 @@ import {
 } from 'recharts';
 import type { DayForecast, SolarResponseModel } from '../types';
 import { apiUrl } from '../api';
+import { CHART, HUES, UI } from '../theme';
 
 const fmtHour = (h: number) => (h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`);
-const INV_COLORS = ['#0e7490', '#15803d', '#d97706', '#7c3aed', '#db2777'];
-const STR_COLORS = ['#0e7490', '#3aa6c2', '#15803d', '#4d9e63', '#d97706', '#ca8a04', '#7c3aed', '#9b87e0'];
+const INV_COLORS = [HUES.battery, HUES.soc, HUES.solar, HUES.violet, HUES.pink];
+const STR_COLORS = [HUES.battery, '#3aa6c2', HUES.soc, '#4d9e63', HUES.solar, '#ca8a04', HUES.violet, '#9b87e0'];
 
 interface Series {
   key: string;
@@ -61,7 +62,7 @@ export function SolarResponseCard() {
   if (fleetReady(fleet)) {
     if (mode === 'inverter') {
       series = [
-        { key: 'Fleet', model: fleet!, color: '#1b2027', width: 2.5 },
+        { key: 'Fleet', model: fleet!, color: UI.ink, width: 2.5 },
         ...dpuModels
           .filter((d) => d.model.peakCoeff > 0)
           .map((d, i) => ({ key: d.device, model: d.model, color: INV_COLORS[i % INV_COLORS.length], width: 1.5 })),
@@ -145,19 +146,19 @@ export function SolarResponseCard() {
                 the first layout pass; the wrapper's fixed px height is unchanged. */}
             <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={260}>
               <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="#c4cad3" strokeDasharray="3 3" />
-                <XAxis dataKey="label" tick={{ fill: '#586474', fontSize: 10 }} />
+                <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
+                <XAxis dataKey="label" tick={{ fill: CHART.axis, fontSize: 10 }} />
                 <YAxis
-                  tick={{ fill: '#586474', fontSize: 10 }}
+                  tick={{ fill: CHART.axis, fontSize: 10 }}
                   width={44}
-                  label={{ value: 'W per W/m²', angle: -90, position: 'insideLeft', fill: '#586474', fontSize: 10 }}
+                  label={{ value: 'W per W/m²', angle: -90, position: 'insideLeft', fill: CHART.axis, fontSize: 10 }}
                 />
                 <Tooltip
-                  contentStyle={{ background: '#ffffff', border: '1px solid #9aa3b0', borderRadius: 8, fontSize: 12 }}
-                  labelStyle={{ color: '#586474' }}
+                  contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: CHART.axis }}
                   formatter={(v) => (typeof v === 'number' ? `${v.toFixed(1)} W per W/m²` : '—')}
                 />
-                <Legend wrapperStyle={{ fontSize: 11, color: '#586474' }} />
+                <Legend wrapperStyle={{ fontSize: 11, color: CHART.axis }} />
                 {series.map((s) => (
                   <Line
                     key={s.key}

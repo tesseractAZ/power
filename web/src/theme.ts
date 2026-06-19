@@ -64,26 +64,25 @@ const UI_FALLBACK = {
   ok: '#15803d',
   warn: '#b45309',
   bad: '#b91c1c',
+  elev: '#ffffff', // v0.36.0 — raised surface (flow-diagram node box). #fff default, dark panel in B5.
 } as const;
 
 export const UI: Readonly<typeof UI_FALLBACK> = cssVarProxy('--color-', UI_FALLBACK);
 
 /** Structural chart colors (gridlines, axes, tooltip). */
 export const CHART = {
-  get grid() { return cssVarRgb('--color-panel2', '#c4cad3'); },
+  // v0.36.0 — dedicated --chart-* vars whose Default values equal the historical
+  // literals (#c4cad3 / #ffffff), so the Default theme is unchanged while B5
+  // supplies dark variants.
+  get grid() { return cssVarRgb('--chart-grid', '#c4cad3'); },
   get axis() { return UI.muted; },
-  get tooltipBg() { return cssVarRgb('--color-panel', '#ffffff'); },
+  get tooltipBg() { return cssVarRgb('--chart-tooltip-bg', '#ffffff'); },
   get tooltipBorder() { return UI.line; },
 } as const;
 
-/**
- * Semantic series hues — tuned to read on the original light panel.
- * Kept static for now: amber/cyan/teal etc. read reasonably on both
- * themes, and re-skinning every series per theme is a bigger lift.
- * (Solar = amber, battery = cyan, load = teal stays meaningful.)
- */
-export const HUES = {
-  solar: '#d97706',  // amber-600
+/** Fallbacks = the original static hues (also the exact Default-theme values). */
+const HUES_FALLBACK = {
+  solar: '#d97706',   // amber-600
   battery: '#0e7490', // cyan-700
   load: '#0f766e',    // teal-700
   soc: '#15803d',     // green-700
@@ -93,8 +92,29 @@ export const HUES = {
   amber: '#b45309',
 } as const;
 
-/** Palette for multi-series charts (per-DPU / per-string lines). */
-export const SERIES_PALETTE = ['#0e7490', '#15803d', '#b45309', '#7c3aed', '#db2777', '#0f766e'];
+/**
+ * v0.36.0 — semantic series hues, now THEME-AWARE (resolve from `--hue-*` CSS
+ * vars). Default values match the originals exactly; B5 brightens them so chart
+ * series read on the dark station palette instead of the muted light-theme tones.
+ * (Solar = amber, battery = blue, load = cyan, soc = green stays meaningful.)
+ */
+export const HUES: Readonly<typeof HUES_FALLBACK> = cssVarProxy('--hue-', HUES_FALLBACK);
+
+/**
+ * Palette for multi-series charts (per-DPU / per-string lines). v0.36.0 — a Proxy
+ * over the theme-aware HUES so each index resolves per active theme. The default
+ * order reproduces the original ['#0e7490','#15803d','#b45309','#7c3aed','#db2777',
+ * '#0f766e'] exactly, and the `SERIES_PALETTE[i]` / `.length` call-site API is
+ * unchanged.
+ */
+export const SERIES_PALETTE: readonly string[] = new Proxy([] as string[], {
+  get(_t, key) {
+    const order = [HUES.battery, HUES.soc, HUES.amber, HUES.violet, HUES.pink, HUES.load];
+    if (key === 'length') return order.length;
+    if (typeof key === 'string' && /^\d+$/.test(key)) return order[Number(key)];
+    return (order as unknown as Record<PropertyKey, unknown>)[key];
+  },
+});
 
 /* ─── 2. Runtime theme switcher ────────────────────────────────────────── */
 

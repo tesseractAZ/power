@@ -4,6 +4,7 @@ import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { RefreshCloudButton } from '../components/RefreshCloudButton';
+import { HUES } from '../theme';
 
 // v0.22.0 — CircuitModal pulls in recharts (its 24 h circuit chart). It only
 // renders when the user clicks a circuit tile, so a STATIC import here would
@@ -48,11 +49,11 @@ export const Shp2Card = memo(function Shp2Card({ d }: { d: DeviceSnapshot & { pr
             <div className="bar mt-2"><div className={socColor(p.backupBatPercent)} style={{ width: `${p.backupBatPercent ?? 0}%` }} /></div>
             <div className="mt-3">
               <div className="text-[10px] text-muted">Backup % (1h)</div>
-              <Sparkline sn={d.sn} metric="backup_pct" color="#0e7490" height={36} />
+              <Sparkline sn={d.sn} metric="backup_pct" color={HUES.battery} height={36} />
             </div>
             <div className="mt-2">
               <div className="text-[10px] text-muted">Panel load (1h)</div>
-              <Sparkline sn={d.sn} metric="panel_load" color="#15803d" height={36} />
+              <Sparkline sn={d.sn} metric="panel_load" color={HUES.soc} height={36} />
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1">
@@ -131,7 +132,7 @@ export const Shp2Card = memo(function Shp2Card({ d }: { d: DeviceSnapshot & { pr
                         <div className="bar mt-1.5"><div className={active ? 'bg-ok' : 'bg-muted'} style={{ width: `${pct}%` }} /></div>
                         <div className="mt-2">
                           <div className="text-[9px] uppercase tracking-wider text-muted/70 mb-0.5">last hour</div>
-                          <Sparkline sn={d.sn} metric={histMetric} color={active ? '#15803d' : '#586474'} height={32} />
+                          <Sparkline sn={d.sn} metric={histMetric} color={active ? HUES.soc : HUES.grid} height={32} />
                         </div>
                       </button>
                     );

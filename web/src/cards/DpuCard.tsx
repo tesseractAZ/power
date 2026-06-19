@@ -3,6 +3,7 @@ import type { DeviceSnapshot, DpuProjection, Shp2EnergySource } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
+import { HUES } from '../theme';
 
 export interface DpuViaShp2 {
   source: Shp2EnergySource;
@@ -58,9 +59,9 @@ export const DpuCard = memo(function DpuCard({
           <div>
             <div className="text-[10px] text-muted">SoC (1h){!directOk && viaShp2 ? ' · via SHP2' : ''}</div>
             {directOk ? (
-              <Sparkline sn={d.sn} metric="soc" color="#0e7490" />
+              <Sparkline sn={d.sn} metric="soc" color={HUES.battery} />
             ) : viaShp2 ? (
-              <Sparkline sn={viaShp2.shp2Sn} metric={`src${slot}_pct`} color="#0e7490" />
+              <Sparkline sn={viaShp2.shp2Sn} metric={`src${slot}_pct`} color={HUES.battery} />
             ) : (
               <div className="text-[10px] text-muted" style={{ height: 40 }}>no data</div>
             )}
@@ -68,9 +69,9 @@ export const DpuCard = memo(function DpuCard({
           <div>
             <div className="text-[10px] text-muted">Output (1h){!directOk && viaShp2 ? ' · via SHP2' : ''}</div>
             {directOk ? (
-              <Sparkline sn={d.sn} metric="total_out" color="#15803d" />
+              <Sparkline sn={d.sn} metric="total_out" color={HUES.soc} />
             ) : viaShp2 ? (
-              <Sparkline sn={viaShp2.shp2Sn} metric={`src${slot}_w`} color="#15803d" />
+              <Sparkline sn={viaShp2.shp2Sn} metric={`src${slot}_w`} color={HUES.soc} />
             ) : (
               <div className="text-[10px] text-muted" style={{ height: 40 }}>no data</div>
             )}
@@ -225,11 +226,11 @@ function Shp2ViewSection({ viaShp2 }: { viaShp2: DpuViaShp2 }) {
       <div className="grid grid-cols-2 gap-2">
         <div>
           <div className="text-[10px] text-muted">SoC (1h) · via SHP2</div>
-          <Sparkline sn={shp2Sn} metric={`src${slot}_pct`} color="#7c3aed" />
+          <Sparkline sn={shp2Sn} metric={`src${slot}_pct`} color={HUES.violet} />
         </div>
         <div>
           <div className="text-[10px] text-muted">Contribution (1h) · via SHP2</div>
-          <Sparkline sn={shp2Sn} metric={`src${slot}_w`} color="#7c3aed" />
+          <Sparkline sn={shp2Sn} metric={`src${slot}_w`} color={HUES.violet} />
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
 import { fmtPct, fmtW } from '../format';
 import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
+import { HUES, UI } from '../theme';
 
 interface Props {
   devices: Record<string, DeviceSnapshot>;
@@ -74,16 +75,16 @@ export function EnergyFlow({ devices }: Props) {
         </defs>
 
         {/* PV → Battery */}
-        <FlowLine from={[Solar.x + Solar.w, Solar.y + Solar.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={pv} color="#d97706" period={period(pv)} strokeW={strokeW(pv)} label="solar" />
+        <FlowLine from={[Solar.x + Solar.w, Solar.y + Solar.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={pv} color={HUES.solar} period={period(pv)} strokeW={strokeW(pv)} label="solar" />
         {/* Grid ↔ Battery */}
-        <FlowLine from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={acIn} color="#586474" period={period(acIn)} strokeW={strokeW(acIn)} label="grid" />
+        <FlowLine from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={acIn} color={HUES.grid} period={period(acIn)} strokeW={strokeW(acIn)} label="grid" />
         {/* Battery → Loads (use load if available, fallback acOut) */}
-        <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={Math.max(load, acOut)} color="#15803d" period={period(Math.max(load, acOut))} strokeW={strokeW(Math.max(load, acOut))} label="ac-out" />
+        <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={Math.max(load, acOut)} color={HUES.soc} period={period(Math.max(load, acOut))} strokeW={strokeW(Math.max(load, acOut))} label="ac-out" />
 
         {/* Solar node */}
-        <Node {...Solar} title="Solar" subtitle="42 panels" value={fmtW(pv)} icon="☀" accent="#d97706" />
+        <Node {...Solar} title="Solar" subtitle="42 panels" value={fmtW(pv)} icon="☀" accent={HUES.solar} />
         {/* Grid node */}
-        <Node {...Grid} title="Grid" subtitle={offGrid ? 'islanded' : 'imported'} value={fmtW(acIn)} icon="⌁" accent={offGrid ? '#586474' : '#0e7490'} />
+        <Node {...Grid} title="Grid" subtitle={offGrid ? 'islanded' : 'imported'} value={fmtW(acIn)} icon="⌁" accent={offGrid ? HUES.grid : HUES.battery} />
         {/* Battery node (big) */}
         <Node
           {...Battery}
@@ -94,7 +95,7 @@ export function EnergyFlow({ devices }: Props) {
           accent={socAccent(soc)}
         />
         {/* Loads node */}
-        <Node {...Loads} title="Loads" subtitle={`${shp2?.projection.circuits.filter((c) => (c.watts ?? 0) > 1).length ?? 0} circuits`} value={fmtW(load)} icon="⌂" accent="#15803d" />
+        <Node {...Loads} title="Loads" subtitle={`${shp2?.projection.circuits.filter((c) => (c.watts ?? 0) > 1).length ?? 0} circuits`} value={fmtW(load)} icon="⌂" accent={HUES.soc} />
       </svg>
     </div>
   );
@@ -125,9 +126,9 @@ function Node({
 }) {
   return (
     <g>
-      <rect x={x} y={y} width={w} height={h} rx={6} fill="#ffffff" stroke={accent} strokeOpacity={0.9} strokeWidth={1.5} />
-      <text x={x + 12} y={y + 18} fill="#586474" fontSize="10" fontFamily="ui-sans-serif" letterSpacing="0.1em" style={{ textTransform: 'uppercase' }}>{title}</text>
-      <text x={x + 12} y={y + h - 10} fill="#586474" fontSize="10" fontFamily="ui-sans-serif">{subtitle ?? ''}</text>
+      <rect x={x} y={y} width={w} height={h} rx={6} fill={UI.elev} stroke={accent} strokeOpacity={0.9} strokeWidth={1.5} />
+      <text x={x + 12} y={y + 18} fill={UI.muted} fontSize="10" fontFamily="ui-sans-serif" letterSpacing="0.1em" style={{ textTransform: 'uppercase' }}>{title}</text>
+      <text x={x + 12} y={y + h - 10} fill={UI.muted} fontSize="10" fontFamily="ui-sans-serif">{subtitle ?? ''}</text>
       <text x={x + w - 12} y={y + h / 2 + (big ? 8 : 6)} textAnchor="end" fill={accent} fontSize={big ? 28 : 18} fontWeight="700" fontFamily="ui-sans-serif">
         {value}
       </text>
@@ -188,7 +189,7 @@ function FlowLine({
           fontSize="12"
           fontFamily="ui-monospace"
           fontWeight="700"
-          stroke="#eef0f3"
+          stroke={UI.panel}
           strokeWidth={4}
           style={{ paintOrder: 'stroke' }}
         >
@@ -200,8 +201,8 @@ function FlowLine({
 }
 
 function socAccent(soc: number | null) {
-  if (soc == null) return '#586474';
-  if (soc >= 50) return '#15803d';
-  if (soc >= 25) return '#d97706';
-  return '#b91c1c';
+  if (soc == null) return HUES.grid;
+  if (soc >= 50) return HUES.soc;
+  if (soc >= 25) return HUES.solar;
+  return UI.bad;
 }

@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.35.0 — 2026-06-19
+
+Babylon 5 theme audit + fix: charts and the energy-flow diagram now render correctly on the dark station palette. Fonts, cards, badges, KV readouts, and the temperature matrix were already correct; the chart/SVG components were the gap.
+
+- **The chart + flow-diagram colors are now theme-aware.** Audited the B5 theme live and found the recharts/SVG components hardcoded **light-theme literals** that the theme system never reached — so under B5 they stayed "light": the energy-flow node boxes (SOLAR / BATTERIES / LOADS / GRID on the Dashboard, and the CORE / BATTERIES panels on Solar) rendered **solid white** (`fill="#ffffff"`), chart **tooltips had white backgrounds**, gridlines were light grey (`#c4cad3`), and series used the muted light-theme palette. Introduced theme-scoped CSS variables (`--color-elev`, `--chart-grid`, `--chart-tooltip-bg`, and eight `--hue-*`) and routed all ten chart/flow components (`EnergyFlow`, `TrendChart`, `CircuitModal`, `ForecastCard`, `SolarResponseCard`, `SolarPanel`, `CurtailmentCard`, `DpuCard`, `Shp2Card`, `Sparkline`) through the resolvers in `theme.ts` (`UI`/`CHART`/`HUES`/`SERIES_PALETTE`). Under B5 the boxes are now dark panels with glowing accent borders, tooltips/gridlines are dark, and series read as bright station-cyan/blue, phosphor green and EAS amber. **The Default theme is byte-identical** — every variable's Default value equals the exact pre-existing literal — so only B5 changes.
+- **Fonts confirmed correct.** Both webfonts (Orbitron headings, Share Tech Mono readouts) load, headings carry the cyan phosphor glow, and the wide display font causes no clipping (verified across the Battery pack matrix and KV tiles).
+
+`tsc` clean (web), production build succeeds. Verified live in both themes: B5 charts/flow now dark-correct, Default unchanged. (The companion data-gated energy-reconciliation formula switch becomes v0.36.0 once `grid_home_w` accumulates a full window.)
+
 ## 0.34.0 — 2026-06-18
 
 Energy-accounting reconciliation, step 1 of 2 — instrument the missing grid term. The live-state audit found home **load didn't reconcile** with counted sources (~4–10% gap), the self-consumption balance left ~74 kWh unattributed, and carbon **over-credited the battery** by ~24% — all one root cause: the reports used DPU `ac_in` (grid that *charges the DPUs*) as "grid import," missing grid that serves home loads **directly through the SHP2**.

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { LineChart, Line, ResponsiveContainer, YAxis } from 'recharts';
 import { apiUrl } from '../api';
+import { HUES } from '../theme';
 
 interface Point {
   ts: number;
@@ -18,7 +19,7 @@ export interface SparklineProps {
   maxY?: number;
 }
 
-export function Sparkline({ sn, metric, windowMs = 60 * 60 * 1000, refreshMs = 30_000, color = '#0e7490', height = 40, minY, maxY }: SparklineProps) {
+export function Sparkline({ sn, metric, windowMs = 60 * 60 * 1000, refreshMs = 30_000, color = HUES.battery, height = 40, minY, maxY }: SparklineProps) {
   const [points, setPoints] = useState<Point[]>([]);
   const mountedRef = useRef(true);
 

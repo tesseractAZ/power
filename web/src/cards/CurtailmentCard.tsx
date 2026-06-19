@@ -1,6 +1,7 @@
 import { memo, useEffect, useState } from 'react';
 import type { CurtailmentReport } from '../types';
 import { apiUrl } from '../api';
+import { HUES } from '../theme';
 
 /**
  * Solar curtailment surface (v0.9.77) — "energy you're throwing away
@@ -190,7 +191,7 @@ function Histogram({ histogram }: { histogram: CurtailmentReport['hourlyHistogra
               className="flex-1 rounded-t"
               style={{
                 height: `${h}px`,
-                backgroundColor: b.samples === 0 ? '#e5e7eb' : isMidday ? '#d97706' : '#f59e0b',
+                backgroundColor: b.samples === 0 ? '#e5e7eb' : isMidday ? HUES.solar : '#f59e0b',
                 opacity: b.samples === 0 ? 0.3 : 1,
               }}
               title={`${String(b.hour).padStart(2, '0')}:00 — ${b.samples} samples, avg ${b.avgSurplusW} W`}

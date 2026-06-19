@@ -32,6 +32,22 @@
   --color-high: 234 88 12;       /* #ea580c  orange (High / P2) */
   --color-info: 37 99 235;       /* #2563eb  blue (Low / P4) */
 
+  /* v0.36.0 — chart + flow-diagram colors. These Default values are the exact
+     pre-theming literals, so the Default theme is byte-identical; the
+     [data-theme="b5"] block re-skins them for the dark palette. Consumed via the
+     CHART / HUES / SERIES_PALETTE / UI.elev resolvers in theme.ts. */
+  --color-elev: 255 255 255;        /* #ffffff  raised surface (flow-diagram node box) */
+  --chart-grid: 196 202 211;        /* #c4cad3  chart gridlines */
+  --chart-tooltip-bg: 255 255 255;  /* #ffffff  chart tooltip background */
+  --hue-solar: 217 119 6;           /* #d97706 */
+  --hue-battery: 14 116 144;        /* #0e7490 */
+  --hue-load: 15 118 110;           /* #0f766e */
+  --hue-soc: 21 128 61;             /* #15803d */
+  --hue-grid: 88 100 116;           /* #586474 */
+  --hue-violet: 124 58 237;         /* #7c3aed */
+  --hue-pink: 219 39 119;           /* #db2777 */
+  --hue-amber: 180 83 9;            /* #b45309 */
+
   --font-sans: ui-sans-serif;
   --font-mono: ui-monospace;
 }
@@ -56,6 +72,21 @@
   --color-bad: 255 40 96;        /* #ff2860  magenta-red (Critical / P1) */
   --color-high: 255 122 31;      /* #ff7a1f  hot orange (High / P2) */
   --color-info: 80 180 255;      /* #50b4ff  station blue (Low / P4) */
+
+  /* v0.36.0 — chart + flow-diagram colors, re-skinned for the dark station
+     palette so recharts gridlines/tooltips and the energy-flow node boxes stop
+     rendering as light-theme white. */
+  --color-elev: 8 18 38;            /* raised panel face (node box) */
+  --chart-grid: 22 48 74;           /* dim station-cyan gridline */
+  --chart-tooltip-bg: 10 20 40;     /* panel face */
+  --hue-solar: 255 180 59;          /* EAS amber */
+  --hue-battery: 80 180 255;        /* station blue */
+  --hue-load: 56 220 220;           /* bright cyan */
+  --hue-soc: 58 255 122;            /* phosphor green */
+  --hue-grid: 120 140 160;          /* dim blue-grey */
+  --hue-violet: 167 139 250;        /* lightened violet */
+  --hue-pink: 244 114 182;          /* lightened pink */
+  --hue-amber: 255 150 60;          /* hot amber */
 
   --font-sans: 'Orbitron', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Share Tech Mono', ui-monospace, 'SF Mono', monospace;

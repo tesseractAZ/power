@@ -15,6 +15,7 @@ import {
 import { fmtW, fmtWh } from '../format';
 import type { Shp2Circuit, Shp2PairedCircuit, CircuitHistory, CircuitDayTotal } from '../types';
 import { apiUrl } from '../api';
+import { CHART, HUES } from '../theme';
 
 interface Point {
   ts: number;
@@ -146,26 +147,26 @@ export function CircuitModal({
             <AreaChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
               <defs>
                 <linearGradient id="gradCircuit" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#15803d" stopOpacity={0.5} />
-                  <stop offset="100%" stopColor="#15803d" stopOpacity={0} />
+                  <stop offset="0%" stopColor={HUES.soc} stopOpacity={0.5} />
+                  <stop offset="100%" stopColor={HUES.soc} stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid stroke="#c4cad3" strokeDasharray="3 3" />
+              <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
               <XAxis
                 dataKey="ts"
                 type="number"
                 domain={['dataMin', 'dataMax']}
-                tick={{ fill: '#586474', fontSize: 10 }}
+                tick={{ fill: CHART.axis, fontSize: 10 }}
                 tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               />
-              <YAxis tick={{ fill: '#586474', fontSize: 10 }} width={48} unit=" W" />
+              <YAxis tick={{ fill: CHART.axis, fontSize: 10 }} width={48} unit=" W" />
               <Tooltip
-                contentStyle={{ background: '#ffffff', border: '1px solid #9aa3b0', borderRadius: 8, fontSize: 12 }}
-                labelStyle={{ color: '#586474' }}
+                contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: CHART.axis }}
                 labelFormatter={(t) => new Date(t as number).toLocaleString()}
                 formatter={(v) => (typeof v === 'number' ? `${Math.round(v)} W` : v)}
               />
-              <Area type="monotone" dataKey="value" stroke="#15803d" fill="url(#gradCircuit)" strokeWidth={1.5} isAnimationActive={false} />
+              <Area type="monotone" dataKey="value" stroke={HUES.soc} fill="url(#gradCircuit)" strokeWidth={1.5} isAnimationActive={false} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
@@ -201,20 +202,20 @@ function HistorySection({ history }: { history: CircuitHistory | null }) {
         {/* v0.12.0 — minWidth={0}/minHeight: same modal 0-size guard as above. */}
         <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={180}>
           <BarChart data={history.days} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke="#c4cad3" strokeDasharray="3 3" vertical={false} />
+            <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" vertical={false} />
             <XAxis
               dataKey="date"
-              tick={{ fill: '#586474', fontSize: 10 }}
+              tick={{ fill: CHART.axis, fontSize: 10 }}
               tickFormatter={(s: string) => dayLabel(s)}
               interval={0}
             />
-            <YAxis tick={{ fill: '#586474', fontSize: 10 }} width={48} unit=" kWh" />
+            <YAxis tick={{ fill: CHART.axis, fontSize: 10 }} width={48} unit=" kWh" />
             <Tooltip content={<BarTooltip />} cursor={{ fill: 'rgba(154,163,176,0.1)' }} />
             <Bar dataKey="kwh" isAnimationActive={false} radius={[3, 3, 0, 0]}>
               {history.days.map((d) => (
                 <Cell
                   key={d.date}
-                  fill={d.isToday ? '#0e7490' : d.date === peakDate ? '#d97706' : '#15803d'}
+                  fill={d.isToday ? HUES.battery : d.date === peakDate ? HUES.solar : HUES.soc}
                   fillOpacity={d.coverageMs > 0 ? 1 : 0.25}
                 />
               ))}
@@ -222,12 +223,12 @@ function HistorySection({ history }: { history: CircuitHistory | null }) {
             {history.summary.avgKwh > 0 && (
               <ReferenceLine
                 y={history.summary.avgKwh}
-                stroke="#9aa3b0"
+                stroke={CHART.tooltipBorder}
                 strokeDasharray="4 4"
                 label={{
                   value: `avg ${history.summary.avgKwh.toFixed(2)} kWh`,
                   position: 'right',
-                  fill: '#586474',
+                  fill: CHART.axis,
                   fontSize: 10,
                 }}
               />

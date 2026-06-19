@@ -10,6 +10,7 @@ import {
   Legend,
 } from 'recharts';
 import { apiUrl } from '../api';
+import { CHART } from '../theme';
 
 interface Series {
   sn: string;
@@ -140,34 +141,34 @@ export function TrendChart({
                 </linearGradient>
               ))}
             </defs>
-            <CartesianGrid stroke="#c4cad3" strokeDasharray="3 3" />
+            <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
             <XAxis
               dataKey="ts"
               type="number"
               domain={['dataMin', 'dataMax']}
-              tick={{ fill: '#586474', fontSize: 10 }}
+              tick={{ fill: CHART.axis, fontSize: 10 }}
               tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             />
-            <YAxis yAxisId="left" tick={{ fill: '#586474', fontSize: 10 }} width={48} unit={unit ? ` ${unit}` : ''} />
+            <YAxis yAxisId="left" tick={{ fill: CHART.axis, fontSize: 10 }} width={48} unit={unit ? ` ${unit}` : ''} />
             {hasRight && (
               <YAxis
                 yAxisId="right"
                 orientation="right"
-                tick={{ fill: '#586474', fontSize: 10 }}
+                tick={{ fill: CHART.axis, fontSize: 10 }}
                 width={44}
                 unit={rightUnit ? ` ${rightUnit}` : ''}
               />
             )}
             <Tooltip
-              contentStyle={{ background: '#ffffff', border: '1px solid #9aa3b0', borderRadius: 8, fontSize: 12 }}
-              labelStyle={{ color: '#586474' }}
+              contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
+              labelStyle={{ color: CHART.axis }}
               labelFormatter={(t) => new Date(t as number).toLocaleString()}
               formatter={(v, name) => {
                 const u = unitFor(String(name));
                 return typeof v === 'number' ? `${Math.round(v * 10) / 10}${u ? ` ${u}` : ''}` : v;
               }}
             />
-            <Legend wrapperStyle={{ fontSize: 11, color: '#586474' }} />
+            <Legend wrapperStyle={{ fontSize: 11, color: CHART.axis }} />
             {series.map((s, i) => (
               <Area
                 key={i}
