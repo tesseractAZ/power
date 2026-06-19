@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.29.0 — 2026-06-18
+
+Alarm-noise and observability fixes from the 7-day log analysis: stop the cell-imbalance **critical** chime from storming during routine BMS balancing, and surface the broadcast storm-gate counter.
+
+- **Cell-imbalance alerts no longer chime/push while the BMS is actively balancing.** The `vdiff-crit` threshold (cell spread ≥ 50 mV) is **instantaneous** — no hysteresis, 0 ms debounce, and critical alerts are exempt from every auto-silencing rule — so a brief balancing-driven spread excursion pushed a CRITICAL chime on every rise. The 7-day log showed **67 vdiff-crit rises, 69% cleared in under 10 minutes (3-min median)**, all coinciding with the BMS's own cell-balancing housekeeping (the pack also emits a `balancing` info alert at the same time). A spread excursion *while the BMS is balancing* is expected behaviour, not a fault: the alert now stays **visible** on the dashboard (with "BMS is actively balancing the cells." appended) but is stamped `annunciate:false`, so it never chimes or pushes during balancing. A genuine sustained imbalance persists past the balancing window and re-fires annunciating. Same gate applies to `vdiff-warn`. 5 unit tests pin both directions (balancing → muted, not-balancing → annunciates, sub-threshold → no alert).
+- **The broadcast storm-suppression counter is now surfaced.** `stormSuppressedCount` — how many broadcasts the cooldown/duplicate gate has swallowed (an identical message, or a same-or-lower level, within the cooldown window) — was tracked internally but never exposed. It's now part of `BroadcastStatus` (visible at `/api/broadcast/status`) so audible suppression is observable. Escalations always bypass the gate, so a genuinely new critical is never counted here; the counter resets on restart.
+
+597/597 server tests pass (5 new). `tsc` clean (server + web). No change to a genuine sustained imbalance alarm or to broadcast behaviour — only balancing-window annunciation is gated, and one previously-hidden counter is now readable.
+
 ## 0.28.0 — 2026-06-18
 
 Degradation-model integrity: reject BMS SoH **recalibration steps** masquerading as fade trends. One guard fixes a cluster of four log-analysis findings that all trace to the same root cause.

@@ -349,10 +349,20 @@ export function computeAlerts(
       const balancing = pk.balanceState != null && pk.balanceState !== 0;
       if (pk.maxVolDiffMv != null) {
         const balanceNote = balancing ? ' BMS is actively balancing the cells.' : '';
+        // v0.29.0 — the static vdiff-crit threshold is INSTANTANEOUS with no
+        // hysteresis, and critical alerts get 0 ms debounce + are exempt from all
+        // auto-silencing — so a 50 mV transient pushed a CRITICAL chime on every
+        // rise (live: 67 rises, 69% cleared < 10 min, 3-min median, coinciding
+        // with benign BMS cell-balancing). A brief spread excursion WHILE the BMS
+        // is actively balancing is expected housekeeping, not a fault: keep the
+        // alert VISIBLE (dashboard still shows it, with the balancing note) but mark
+        // it annunciate:false so it never chimes/pushes during balancing. A genuine
+        // sustained imbalance persists past balancing and re-fires annunciating.
+        const annun = balancing ? { annunciate: false } : {};
         if (pk.maxVolDiffMv >= VOL_DIFF_CRIT_MV) {
-          out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${VOL_DIFF_CRIT_MV} mV).${balanceNote}` });
+          out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${VOL_DIFF_CRIT_MV} mV).${balanceNote}`, ...annun });
         } else if (pk.maxVolDiffMv >= VOL_DIFF_WARN_MV) {
-          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning ≥ ${VOL_DIFF_WARN_MV} mV).${balanceNote}` });
+          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning ≥ ${VOL_DIFF_WARN_MV} mV).${balanceNote}`, ...annun });
         }
       }
       if (balancing) {

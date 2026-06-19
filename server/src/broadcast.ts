@@ -314,6 +314,12 @@ export interface BroadcastStatus {
   wyomingReachable: boolean | null;
   testCooldownRemainingMs: number;
   lastSpokenMessage: string | null;
+  /** v0.29.0 — cumulative count of broadcasts the storm gate suppressed (an
+   *  identical message, or a same-or-lower level, within the cooldown). Resets on
+   *  restart; surfaced for operability so audible suppression is observable from
+   *  /api/broadcast/status. Escalations always bypass the gate, so a genuinely new
+   *  critical is never counted here. */
+  stormSuppressedCount: number;
   /** v0.9.70 — diagnostic from the most recent render. */
   lastRender: {
     filename: string | null;
@@ -950,6 +956,7 @@ export function startBroadcastMonitor(
       wyomingReachable,
       testCooldownRemainingMs: Math.max(0, lastTestAt + TEST_COOLDOWN_MS - Date.now()),
       lastSpokenMessage,
+      stormSuppressedCount,
       lastRender: { ...lastRender },
     }),
     stop: () => {
