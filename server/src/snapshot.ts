@@ -197,8 +197,19 @@ export class SnapshotStore extends EventEmitter {
   mergeDeviceQuota(sn: string, partial: Record<string, unknown>, source: 'rest' | 'mqtt' = 'mqtt') {
     const cur = this.snap.devices[sn];
     if (!cur) return;
-    const prev = this.rawBySn.get(sn) ?? {};
-    const merged = { ...prev, ...partial };
+    // v0.25.0 — merge the delta IN PLACE instead of cloning the whole raw map.
+    // The raw map is large (5 packs × cell-temp/voltage arrays + ~hundreds of
+    // keys); `partial` is tiny (one cmdId's fields). `{...prev,...partial}` used
+    // to re-allocate the entire map on every ~1 Hz MQTT delta — pure GC churn.
+    // IMMUTABILITY CONTRACT: this raw map is now mutated in place, so callers
+    // must NOT retain a reference expecting it to stay frozen. Safe for every
+    // current consumer: `partial` is always a freshly-built object (never aliases
+    // prev); mqtt.ts reads getRaw() BEFORE this merge; projectByProduct rebuilds
+    // a fresh projection below; the WS frame is JSON-stringified per frameSeq;
+    // the analytics worker gets a structuredClone via postMessage. Do not add a
+    // lazy consumer that holds this reference across merges.
+    const merged = this.rawBySn.get(sn) ?? {};
+    Object.assign(merged, partial);
     this.rawBySn.set(sn, merged);
     cur.projection = projectByProduct(cur.productName, merged);
     cur.raw = INCLUDE_RAW ? merged : undefined;

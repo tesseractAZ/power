@@ -768,15 +768,11 @@ function hourCurveByWeekday(
   };
 }
 
-/** Average a PV metric into hourly buckets keyed by hour-epoch (floor(ts/1h)). */
-function pvHourlyByEpoch(
-  recorder: Recorder,
-  sn: string,
-  metric: string,
-  sinceMs: number,
-  nowMs: number,
-): Map<number, number> {
-  const pts = recorder.query(sn, metric, sinceMs, nowMs, HOUR_CURVE_BUCKET_SEC);
+/** Average an already-fetched bucketed PV series into hourly buckets keyed by
+ *  hour-epoch (floor(ts/1h)). Split out of pvHourlyByEpoch (v0.25.0) so a caller
+ *  that batched several metrics through ONE queryMulti can reuse this without a
+ *  second query — the bucketing is byte-identical to the single-query path. */
+function pvHourlyFromPts(pts: Array<{ ts: number; value: number }>): Map<number, number> {
   const buckets = new Map<number, number[]>();
   for (const p of pts) {
     const he = Math.floor(p.ts / 3_600_000);
@@ -787,6 +783,17 @@ function pvHourlyByEpoch(
   const out = new Map<number, number>();
   for (const [he, vs] of buckets) out.set(he, mean(vs));
   return out;
+}
+
+/** Average a PV metric into hourly buckets keyed by hour-epoch (floor(ts/1h)). */
+function pvHourlyByEpoch(
+  recorder: Recorder,
+  sn: string,
+  metric: string,
+  sinceMs: number,
+  nowMs: number,
+): Map<number, number> {
+  return pvHourlyFromPts(recorder.query(sn, metric, sinceMs, nowMs, HOUR_CURVE_BUCKET_SEC));
 }
 
 /**
@@ -967,7 +974,14 @@ export async function getDayForecast(
   const fleetPvByEpoch = new Map<number, number>();
   const deviceModels: DeviceSolarModel[] = [];
   for (const d of dpus) {
-    const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
+    // v0.25.0 — one queryMulti for all three PV metrics over the IDENTICAL
+    // (sn, since, now, HOUR_CURVE_BUCKET_SEC) window instead of three separate
+    // recorder.query round-trips. queryMulti is the proven batched-equivalent
+    // primitive (byte-identical bucketed SQL — see recorderQueryMultiEquivalence
+    // test); pv_total is fetched once and reused for the fleet sum + the model,
+    // and the fleetPvByEpoch accumulation order is unchanged (dpus order, pv_total).
+    const pvM = recorder.queryMulti(d.sn, ['pv_total', 'pv_high', 'pv_low'], since, now, HOUR_CURVE_BUCKET_SEC);
+    const pvE = pvHourlyFromPts(pvM.get('pv_total') ?? []);
     if (isShp2Connected(d.sn, connected)) {
       for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
     }
@@ -975,8 +989,8 @@ export async function getDayForecast(
       sn: d.sn,
       device: d.deviceName,
       model: buildSolarResponse(pvE, ghiByEpoch),
-      hv: buildSolarResponse(pvHourlyByEpoch(recorder, d.sn, 'pv_high', since, now), ghiByEpoch),
-      lv: buildSolarResponse(pvHourlyByEpoch(recorder, d.sn, 'pv_low', since, now), ghiByEpoch),
+      hv: buildSolarResponse(pvHourlyFromPts(pvM.get('pv_high') ?? []), ghiByEpoch),
+      lv: buildSolarResponse(pvHourlyFromPts(pvM.get('pv_low') ?? []), ghiByEpoch),
     });
   }
   const solarModel = buildSolarResponse(fleetPvByEpoch, ghiByEpoch);

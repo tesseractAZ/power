@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.25.0 — 2026-06-18
+
+Behavior-preserving performance pass — the 3 confirmed wins from a fresh multi-agent optimization audit (17 candidates, 11 rejected as micro-churn, 2 deferred as needing human-gated cache design). Same numbers, same pixels.
+
+- **Solar-model fit batches its per-DPU PV reads.** `getDayForecast` issued three separate `recorder.query()` round-trips per DPU (`pv_total` / `pv_high` / `pv_low`) over the identical window; they now go through one `recorder.queryMulti()` (the proven byte-identical batched primitive — pinned by `recorderQueryMultiEquivalence`), with `pv_total` fetched once and reused for the fleet sum + the model. The `fleetPvByEpoch` accumulation order is unchanged, so the forecast/runway/MPC inputs are bit-identical. ~3× fewer SQLite calls per cold recompute in the analytics worker.
+- **The 24h history charts stop rebuilding every second.** `TrendChart`'s row-merge memo (v0.22.0) was being *defeated*: its `series` prop arrived as a fresh array literal on every ~1 Hz snapshot re-render, so the memo never cached and recharts re-reconciled the full ~1440-point chart once a second instead of once a minute. The two dashboard charts' `series` are now `useMemo`-stabilized (keyed on SHP2 SN / the online-DPU identity+name+order), restoring the memo. Presentation-only; the rendered chart is identical.
+- **No more full raw-map clone on every MQTT delta.** `mergeDeviceQuota` (the ~1 Hz live-update path) shallow-cloned the entire flattened DPU raw map (`{...prev, ...partial}` — hundreds of keys) just to apply a tiny delta. It now merges in place via `Object.assign`; verified safe for every consumer (`partial` never aliases `prev`; the projection is rebuilt fresh; the WS frame is stringified per-frame; the worker gets a structuredClone) and documented with an immutability contract so no future lazy reader reintroduces the aliasing hazard.
+
+586/586 server tests pass; `tsc` clean (server + web). No change to any rendered value, persisted counter, forecast/backtest score, or alarm output.
+
 ## 0.24.6 — 2026-06-15
 
 A small, measured frontend refinement — the last of the audit follow-ups. Honest framing up front: the gain is minor on desktop; this is mostly a worst-case bound for slower phones/tablets.
