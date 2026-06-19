@@ -576,6 +576,10 @@ app.get('/api/lifetime-energy', async (req, reply) => {
     pv_lifetime_kwh: live('fleet_pv_wh'),
     load_lifetime_kwh: live('fleet_load_wh'),
     grid_import_lifetime_kwh: live('fleet_grid_import_wh'),
+    // v0.34.0 — total whole-home grid import metered at the SHP2 main. The
+    // grid_import figure above counts only grid that charged the DPUs; this is the
+    // authoritative total (accumulates from deploy — there is no historical back-fill).
+    grid_to_home_lifetime_kwh: live('fleet_grid_home_wh'),
     battery_charge_lifetime_kwh: live('fleet_battery_charge_wh'),
     battery_discharge_lifetime_kwh: live('fleet_battery_discharge_wh'),
     details: totals,

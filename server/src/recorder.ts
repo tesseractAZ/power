@@ -384,6 +384,11 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
           push(`ch${c.ch}_w`, c.watts);
         }
         push('panel_load', panelLoad);
+        // v0.34.0 — total grid power into the home at the SHP2 main. Distinct from
+        // DPU ac_in (grid charging the DPUs): this captures grid that serves home
+        // loads DIRECTLY through the panel, the term the self-consumption/carbon
+        // energy balance was missing.
+        push('grid_home_w', shp.gridWatt);
         // Paired (split-phase 240V) load totals — the canonical wattage for each "circuit"
         for (const pc of shp.pairedCircuits) {
           if (pc.watts != null) push(`pair${pc.primaryCh}_w`, pc.watts);
@@ -500,6 +505,12 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     'fleet_pv_wh',
     'fleet_load_wh',
     'fleet_grid_import_wh',
+    // v0.34.0 — total whole-home grid import metered at the SHP2 main
+    // (grid_home_w = wattInfo.gridWatt). The existing fleet_grid_import_wh
+    // (DPU ac_in) only counts grid charging the DPUs; this is the authoritative
+    // total that makes the home-load energy balance close. Kept additive so the
+    // existing HA Energy Dashboard grid counter is undisturbed.
+    'fleet_grid_home_wh',
     'fleet_battery_charge_wh',
     'fleet_battery_discharge_wh',
   ] as const;
@@ -526,6 +537,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       fleet_pv_wh: [],
       fleet_load_wh: [],
       fleet_grid_import_wh: [],
+      fleet_grid_home_wh: [], // v0.34.0 — SHP2-metered total home grid import
     };
     const devices = Object.values(snap.devices);
     const shp2 = devices.find((d) => d.projection?.kind === 'shp2');
@@ -549,6 +561,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         }
       } else if (p.kind === 'shp2') {
         out.fleet_load_wh.push({ sn: d.sn, metric: 'panel_load' });
+        // v0.34.0 — total home grid import metered at the SHP2 main (the term the
+        // self-consumption / carbon balance was missing). Integrated like the
+        // other watt metrics; gridWatt ≥ 0 so the accumulator is monotone.
+        out.fleet_grid_home_wh.push({ sn: d.sn, metric: 'grid_home_w' });
         // v0.8.0 — one lifetime key per circuit so each appears as an HA
         // Energy Dashboard "Individual device".
         for (const c of (p as Shp2Projection).circuits ?? []) {

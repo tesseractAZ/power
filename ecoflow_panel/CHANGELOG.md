@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.34.0 — 2026-06-18
+
+Energy-accounting reconciliation, step 1 of 2 — instrument the missing grid term. The live-state audit found home **load didn't reconcile** with counted sources (~4–10% gap), the self-consumption balance left ~74 kWh unattributed, and carbon **over-credited the battery** by ~24% — all one root cause: the reports used DPU `ac_in` (grid that *charges the DPUs*) as "grid import," missing grid that serves home loads **directly through the SHP2**.
+
+- **The SHP2's own total-grid meter is now captured.** Probing the live SHP2 quota found `wattInfo.gridWatt` — the authoritative whole-home grid power at the panel main (corroborated live: load 4900 W = DPU output 4903 W + grid 0 W balances exactly). It's now projected as `gridWatt`, recorded as the `grid_home_w` metric, accumulated into a new **`fleet_grid_home_wh`** lifetime counter (additive — the existing `fleet_grid_import_wh` HA Energy counter is untouched, so no dashboard discontinuity), and surfaced as `gridToHomeKwh` on `/api/self-consumption` and `grid_to_home_lifetime_kwh` on `/api/lifetime-energy`.
+- **Why the formula switch is deferred (honest note).** `grid_home_w` is a brand-new series with no historical back-fill, so it reads ~0 until it accumulates. Switching the `solarFractionOfLoadPct` and carbon-offset formulas to it *today* would bias them to ~100% solar / inflated CO₂ for the rolling window while the series fills in — strictly worse. So this release **instruments and surfaces** the true grid term without changing those formulas; once a full window of `grid_home_w` has accumulated (~a few days of grid use), a follow-up (v0.35.0) flips the formulas to it and the load energy balance closes. No safety-, alarm-, or runway-facing behaviour is affected — this is reporting accuracy only.
+
+625/625 server tests pass; `tsc` clean (the `bat_amp`-style derivation logic in v0.33.0 carries the unit coverage; this release is additive plumbing verified live — `grid_home_w` records, and the new fields surface on both endpoints).
+
 ## 0.33.0 — 2026-06-18
 
 Telemetry-correctness fix from the live-state plausibility audit (adversarially verified): the DPU whole-unit battery current was badly under-read.

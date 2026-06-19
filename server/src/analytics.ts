@@ -3736,7 +3736,12 @@ export interface SelfConsumption {
   loadKwh: number;         // total household consumption (panel load + DPU AC-out passthrough)
   batteryChargeKwh: number;
   batteryDischargeKwh: number;
-  gridImportKwh: number;
+  gridImportKwh: number;   // DPU ac_in — grid that CHARGED the DPUs (a subset of total home grid)
+  /** v0.34.0 — total whole-home grid import metered at the SHP2 main (grid_home_w
+   *  = wattInfo.gridWatt). Unlike gridImportKwh (DPU ac_in), this captures grid
+   *  that serves home loads directly through the panel — the term that closes the
+   *  load energy balance. Reads ~0 until the new metric accumulates history. */
+  gridToHomeKwh: number;
   pvToLoadKwh: number;     // estimate: PV that went straight to load (PV − battery-charge − export)
   pvToBatteryKwh: number;  // estimate: PV that charged the battery
   solarFractionOfLoadPct: number | null; // (loadKwh − gridImportKwh) ÷ loadKwh — share of load not served by grid import
@@ -3891,9 +3896,16 @@ export function computeSelfConsumption(
       batteryDischargeKwh += (wh.get(`pack${pk.num}_out`) ?? 0) / 1000;
     }
   }
-  const loadKwh = shp2
-    ? (windowedEnergyWh(recorder, shp2.sn, ['panel_load'], since, now, ANALYTICS_BUCKET_SEC, todayStart).get('panel_load') ?? 0) / 1000
-    : 0;
+  const shp2Wh = shp2
+    ? windowedEnergyWh(recorder, shp2.sn, ['panel_load', 'grid_home_w'], since, now, ANALYTICS_BUCKET_SEC, todayStart)
+    : new Map<string, number>();
+  const loadKwh = (shp2Wh.get('panel_load') ?? 0) / 1000;
+  // v0.34.0 — total whole-home grid import (SHP2 main). Surfaced now; the
+  // solarFraction / carbon formulas KEEP using the legacy DPU-ac_in figure until
+  // grid_home_w accumulates a full window of history (there's no back-fill for a
+  // brand-new metric, and switching immediately would bias those KPIs to ~100%
+  // solar / inflated CO₂ while the new series reads ~0). Switch is a follow-up.
+  const gridToHomeKwh = (shp2Wh.get('grid_home_w') ?? 0) / 1000;
 
   // Charge fed by PV is what the PV produced beyond what went to load — the rest
   // came from grid. On an off-grid system gridImportKwh ≈ 0 and PV ≈ load+charge.
@@ -3907,6 +3919,7 @@ export function computeSelfConsumption(
     batteryChargeKwh: round2(batteryChargeKwh),
     batteryDischargeKwh: round2(batteryDischargeKwh),
     gridImportKwh: round2(gridImportKwh),
+    gridToHomeKwh: round2(gridToHomeKwh),
     pvToLoadKwh: round2(pvToLoadKwh),
     pvToBatteryKwh: round2(pvToBatteryKwh),
     // v0.10.4 — solar fraction = share of load NOT met by grid import.
