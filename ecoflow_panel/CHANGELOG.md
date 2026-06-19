@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.32.0 — 2026-06-18
+
+Degradation-model integrity, round 2 — caught during the live post-deploy verification sweep. The v0.28.0 step guard fixed the *clean-staircase* recalibration shape; this fixes the *shallow-noisy-decline* shape it missed.
+
+- **A near-new pack can no longer be projected to a dated end-of-life from quantization noise.** The live fleet showed device `Y711FAB59J234000` packs 2 & 3 at **98.6 % / 98.8 % SoH** projected to "replace in ~1.2–1.5 years" at **12–16 %/yr fade**. Pulling the raw history showed why: their SoH moved only **~0.3–0.5 pt across the whole 27-day window**, smeared over 5 BMS-quantized values — enough distinct values to dodge `sohStepDominated`, so OLS fit that ~1-pt wobble (r² 0.43–0.53, above the 0.30 floor) as a confident fade and dated an EOL. You cannot extrapolate an ~18-pt decline-to-EOL from a ~1-pt observed signal. New `sohSignalBelowFloor()` guard measures the **net observed decline** as mean(first quartile) − mean(last quartile) — robust to a lone quantization spike or an up-then-down wiggle — and holds the pack at **`learning`** (null fade / R² / EOL; Kalman EOL suppressed) until that net decline clears the **1.5-pt** quantization-noise floor (~3 BMS steps). A genuine multi-point decline still projects; the existing 6 step-guard cases are unaffected. **Net effect on the operator's fleet: 2 → 0 dated EOLs — correct, since every pack reads ≥ 96.7 % SoH and none has shed enough real capacity to date a replacement.**
+
+619/619 server tests pass (7 new — both live pack shapes, a flat wobble, an up-step, too-few samples, and two genuine-fade negatives that must still project). `tsc` clean. No change to a pack with a real measurable decline; only noise-floor projections are withheld until trustworthy.
+
 ## 0.31.0 — 2026-06-18
 
 The final two 7-day log-analysis fixes — both about state that should survive a restart. This closes out all 14 defects from the analysis.

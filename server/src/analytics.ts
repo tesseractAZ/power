@@ -1249,6 +1249,13 @@ const DEGRADE_BUCKET_SEC = 6 * 3600;                          // 6-hour buckets 
 const EOL_MIN_SPAN_DAYS = 21;
 const EOL_MIN_SPAN_MS = EOL_MIN_SPAN_DAYS * 24 * 60 * 60 * 1000;
 const EOL_MIN_R2 = 0.3;                                       // trend must explain ≥30% of variance
+// v0.32.0 — minimum net SoH decline (percentage points) actually OBSERVED across
+// the window before a dated EOL is trustworthy. The BMS reports SoH quantized in
+// ~0.5-pt steps, so a near-new pack can "wobble" ~1 pt across a month purely from
+// recalibration/quantization, which OLS happily fits as a confident multi-%/yr
+// fade. You cannot extrapolate an ~18-pt decline-to-EOL from a ~1-pt signal; this
+// floor (~3 quantization steps) holds such packs at "learning". See sohSignalBelowFloor.
+const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
 const EOL_MAX_YEARS = 40;                                     // beyond this, "EOL not in sight"
 // v0.9.58 — VERIFIED CORRECT (looks suspicious but isn't):
 //   pack nominal voltage = 51.2 V; ×2 because the BMS reports per-single-string mAh
@@ -1361,6 +1368,29 @@ export function sohStepDominated(pts: Array<{ ts: number; value: number }>): boo
   if (maxRun / vals.length > 0.7) return true;
   if (transitions.length > 0 && transitions.length <= 3 && transitions[0] >= vals.length * 0.8) return true;
   return false;
+}
+
+/**
+ * v0.32.0 — companion to sohStepDominated for the OTHER recalibration-artifact
+ * shape: a shallow, multi-step decline whose total observed signal is below the
+ * BMS SoH quantization-noise floor. sohStepDominated catches the clean staircase
+ * (few distinct values / one terminal cliff); this catches the case where SoH is
+ * smeared across enough quantized values to look like a gentle trend but has only
+ * moved a fraction of a percent overall.
+ *
+ * Net decline is measured as mean(first quartile) − mean(last quartile), which is
+ * robust to a lone quantization spike and to an up-then-down wiggle (a genuine
+ * fade shows a sustained early→late drop; noise does not). Returns true when that
+ * net drop is below SOH_MIN_OBSERVED_DROP_PTS — i.e. there isn't enough real
+ * signal to date an end-of-life, regardless of the OLS r².
+ */
+export function sohSignalBelowFloor(pts: Array<{ ts: number; value: number }>): boolean {
+  if (pts.length < 4) return true;
+  const vals = pts.map((p) => p.value);
+  const q = Math.max(1, Math.floor(vals.length / 4));
+  const firstMean = vals.slice(0, q).reduce((a, b) => a + b, 0) / q;
+  const lastMean = vals.slice(-q).reduce((a, b) => a + b, 0) / q;
+  return firstMean - lastMean < SOH_MIN_OBSERVED_DROP_PTS;
 }
 
 /** Regress one pack's SoH history and project it to end-of-life. */
@@ -1563,6 +1593,40 @@ function analysePack(
       kalmanEolDate: null,
       summary:
         `SoH history looks like a BMS recalibration step on otherwise-flat data, not a measurable fade trend — holding off on a dated end-of-life projection until a real multi-point trend accumulates.` +
+        (avgPackTempC != null
+          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 25 °C` : ''}.`
+          : ''),
+    });
+  }
+
+  // v0.32.0 — the SECOND recalibration-artifact shape sohStepDominated misses: a
+  // shallow multi-step decline whose net observed signal is below the BMS SoH
+  // quantization-noise floor. Live: device Y711FAB59J234000 packs 2 & 3 read
+  // 98.6 % / 98.8 % SoH but moved only ~0.3–0.5 pt across the 27-day window (SoH
+  // smeared over 5 quantized values), which OLS fit as a confident 12–16 %/yr fade
+  // → a false "replace in ~1.2 yr" on two near-new packs. A fleet this new (all
+  // packs ≥ 96.7 % SoH) should have NO dated EOLs yet. Hold at 'learning' (null
+  // fade/EOL — does not seed the peer-fade pool or pollute the median-r²) until a
+  // real multi-point decline clears the noise floor.
+  if (sohSignalBelowFloor(sohPts)) {
+    return mk({
+      status: 'learning',
+      fadePctPerYear: null,
+      fadeUncertaintyPct: null,
+      cyclesPerYear,
+      r2: null,
+      dataSpanDays: spanDays,
+      samples: sohPts.length,
+      avgPackTempC: avgPackTempC != null ? round1(avgPackTempC) : null,
+      arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
+      coulombicEffPct,
+      kalmanSmoothedSoh,
+      kalmanFadePctPerYear: null,
+      kalmanFadeStdevPctPerYear,
+      kalmanYearsToEol: null,
+      kalmanEolDate: null,
+      summary:
+        `SoH has moved only a fraction of a percent across the recorded window — below the BMS recalibration/quantization noise floor — so a dated end-of-life would be extrapolating from noise. Holding at "learning" until a clear multi-point decline accumulates.` +
         (avgPackTempC != null
           ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 25 °C` : ''}.`
           : ''),
