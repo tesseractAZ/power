@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.31.0 — 2026-06-18
+
+The final two 7-day log-analysis fixes — both about state that should survive a restart. This closes out all 14 defects from the analysis.
+
+- **Alert-family metadata now survives a restart (no more stuck "info" placeholders).** The telemetry JSONL persists only `{familyKey, alertId, event, ts, durationMs}` — not the human title/severity/category — so on boot, any family that hadn't re-fired since the last restart was seeded with `title = familyKey` and `severity = 'info'` placeholders (live: **24 families** stuck showing their raw id and a wrong "info" severity in the UI). The placeholder severity was also a latent foot-gun: the post-replay batch silencing pass ran against `'info'` instead of the family's real severity. Fixed with a tiny per-family metadata sidecar (`alert-family-meta.json`) — upserted (change-detected, so it's a no-op write on the hot path) whenever a live alert is seen, and loaded **before** replay so each rollup boots with its true title/severity/category. The 24 stuck titles heal, and the batch pass sees real severities.
+- **Repair-issue "first seen" timestamps now survive a restart.** The repair feed's `firstSeenAt` map (which drives "active for N hours") lived only in memory, so every deploy/restart reset every repair to `firstSeenAt = now` — making the age read ~0 right after a restart. It's now persisted to a small `repair-first-seen.json` sidecar, loaded at boot and rewritten when a brand-new repair id is first tracked, so the displayed age reflects the real start of the condition. (Distinct repair ids are bounded by device × issue-type, so the file stays small.)
+
+612/612 server tests pass (4 new — the family-meta sidecar round-trip + change-detection; the repair first-seen fix shares the identical JSON-sidecar load/persist pattern and is covered by `tsc` + the existing repair-issues suite). `tsc` clean. Both changes are additive persistence — no change to which alerts fire, which silence, or which repairs surface.
+
 ## 0.30.0 — 2026-06-18
 
 Two more 7-day log-analysis fixes: silence high-volume warning churn the band rules missed, and leave a durable trace when telemetry silently stops.

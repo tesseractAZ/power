@@ -25,7 +25,7 @@ import { familyOf } from './alertOutcomes.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
-import { appendTelemetryEvent, readRecentTelemetry } from './alertTelemetry.js';
+import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
@@ -446,6 +446,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       t.severity = alert.severity;
       t.category = alert.category;
     }
+    // v0.31.0 — persist this family's real metadata so a post-restart replay
+    // seeds the rollup with a true title/severity/category instead of the
+    // familyKey/'info'/'Battery' placeholder. Change-detected ⇒ a no-op write
+    // on the steady-state hot path.
+    upsertFamilyMeta(familyKey, { title: alert.title, severity: alert.severity, category: alert.category });
     return t;
   };
 
@@ -513,18 +518,26 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const replayPersistedTelemetry = () => {
     const events = readRecentTelemetry();
     if (events.length === 0) return;
+    const familyMeta = loadFamilyMeta(); // v0.31.0 — real title/severity/category, if the sidecar knows this family
     let n = 0;
     for (const e of events) {
       // Defensive shape check — guards against schema drift.
       if (!e.familyKey || !e.alertId || !e.event) continue;
       let t = telemetry.get(e.familyKey);
       if (!t) {
+        // v0.31.0 — prefer the persisted sidecar metadata so the rollup boots
+        // with the family's true title/severity/category; the old
+        // familyKey/'info'/'Battery' placeholders are only the fallback for a
+        // family the sidecar has never seen (e.g. first boot after upgrade).
+        // Real severity here also keeps the post-replay batch silencing pass
+        // from running against a wrong 'info' default.
+        const meta = familyMeta[e.familyKey];
         t = {
           familyKey: e.familyKey,
-          alertId: e.alertId, title: e.familyKey, severity: 'info',
-          // Category is unknown from replay; the live path overwrites this
-          // the first time the alert fires again post-boot.
-          category: 'Battery' as Alert['category'],
+          alertId: e.alertId,
+          title: meta?.title ?? e.familyKey,
+          severity: (meta?.severity as Severity) ?? 'info',
+          category: (meta?.category as Alert['category']) ?? ('Battery' as Alert['category']),
           riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
           downgradedSilenced: false, warningDemotedToInfo: false, chronicNoiseSilenced: false,
           neverClearedCount: 0, lastSeenAt: null,

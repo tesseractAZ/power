@@ -3,6 +3,9 @@ import type { Shp2Projection, DpuProjection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { FleetDegradation, SoilingDecomposition, EquipmentHealth, ForecastSkillReport } from './analytics.js';
 import { SPARE_DPU_SNS } from './shp2Membership.js';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { config } from './config.js';
 
 /**
  * Actionable maintenance items surfaced as repair issues.
@@ -38,8 +41,37 @@ export interface RepairIssuesReport {
 }
 
 // Persistent "first-seen" map so the repair issue's age survives multiple
-// fetches. Reset only when the issue clears.
-const firstSeenById = new Map<string, number>();
+// fetches. v0.31.0 — and now across process restarts too: previously this lived
+// only in memory, so every deploy/restart reset every repair's firstSeenAt to
+// "now", making "active for N hours" always read ~0 right after a restart. It's
+// loaded from a small JSON sidecar at boot and rewritten whenever a brand-new id
+// is first tracked. (Distinct repair ids are bounded by device × issue-type, so
+// the file stays small; entries are not age-pruned because firstSeenAt is the
+// start of a possibly-long-running condition.)
+const FIRST_SEEN_PATH = process.env.REPAIR_FIRST_SEEN_PATH
+  ?? resolve(process.cwd(), config.dbPath, '..', 'repair-first-seen.json');
+
+function loadFirstSeen(): Array<[string, number]> {
+  try {
+    if (!existsSync(FIRST_SEEN_PATH)) return [];
+    const obj = JSON.parse(readFileSync(FIRST_SEEN_PATH, 'utf-8'));
+    if (obj && typeof obj === 'object') {
+      return Object.entries(obj).filter(([, v]) => typeof v === 'number') as Array<[string, number]>;
+    }
+  } catch { /* best effort — a corrupt sidecar just resets ages */ }
+  return [];
+}
+
+const firstSeenById = new Map<string, number>(loadFirstSeen());
+
+function persistFirstSeen(): void {
+  try {
+    mkdirSync(dirname(FIRST_SEEN_PATH), { recursive: true });
+    writeFileSync(FIRST_SEEN_PATH, JSON.stringify(Object.fromEntries(firstSeenById)));
+  } catch (e: any) {
+    console.error(`repairIssues: first-seen persist failed: ${e?.message ?? e}`);
+  }
+}
 
 // v0.10.4 — known OFFLINE BENCH SPARES (Core4, Core5) are intentionally kept
 // powered down, so their EcoFlow-offline state is expected — not actionable.
@@ -53,6 +85,7 @@ function track(id: string, now: number): number {
   if (ts == null) {
     ts = now;
     firstSeenById.set(id, ts);
+    persistFirstSeen(); // v0.31.0 — survive restarts so "active for N hours" is real
   }
   return ts;
 }
