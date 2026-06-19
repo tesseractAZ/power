@@ -488,8 +488,12 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
         if (hoursToReserve < 6) severity = 'warning';
         else if (hoursToReserve <= 18) severity = 'info';
         if (severity) {
-          const hrs = Math.floor(hoursToReserve);
-          const mins = Math.round((hoursToReserve - hrs) * 60);
+          // v0.26.0 — derive hrs+mins from ONE rounding so a fractional hour
+          // ≥ 59.5/60 carries into the hour instead of rendering "14h 60m"
+          // (the old independent floor + round produced mins=60 with no carry).
+          const totalMin = Math.round(hoursToReserve * 60);
+          const hrs = Math.floor(totalMin / 60);
+          const mins = totalMin % 60;
           out.push({
             id: `forecast-runtime-${shp2.sn}`,
             severity,
