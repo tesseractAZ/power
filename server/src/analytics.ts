@@ -3744,7 +3744,7 @@ export interface SelfConsumption {
   gridToHomeKwh: number;
   pvToLoadKwh: number;     // estimate: PV that went straight to load (PV − battery-charge − export)
   pvToBatteryKwh: number;  // estimate: PV that charged the battery
-  solarFractionOfLoadPct: number | null; // (loadKwh − gridImportKwh) ÷ loadKwh — share of load not served by grid import
+  solarFractionOfLoadPct: number | null; // (loadKwh − whole-home grid) ÷ loadKwh, where whole-home grid = max(gridToHomeKwh, gridImportKwh) — share of load not served by grid import
   directUseRatioPct: number | null;      // pvToLoad ÷ pvKwh
 }
 
@@ -3900,12 +3900,19 @@ export function computeSelfConsumption(
     ? windowedEnergyWh(recorder, shp2.sn, ['panel_load', 'grid_home_w'], since, now, ANALYTICS_BUCKET_SEC, todayStart)
     : new Map<string, number>();
   const loadKwh = (shp2Wh.get('panel_load') ?? 0) / 1000;
-  // v0.34.0 — total whole-home grid import (SHP2 main). Surfaced now; the
-  // solarFraction / carbon formulas KEEP using the legacy DPU-ac_in figure until
-  // grid_home_w accumulates a full window of history (there's no back-fill for a
-  // brand-new metric, and switching immediately would bias those KPIs to ~100%
-  // solar / inflated CO₂ while the new series reads ~0). Switch is a follow-up.
+  // v0.34.0 — total whole-home grid import (SHP2 main). This is the authoritative
+  // superset: it captures grid that serves home loads directly through the panel,
+  // not just grid that charged the DPUs (ac_in). There's no back-fill, so on a
+  // fresh install (or any window before v0.34.0) it reads ~0 until grid_home_w
+  // accumulates history.
   const gridToHomeKwh = (shp2Wh.get('grid_home_w') ?? 0) / 1000;
+  // Coalesced grid figure for the solarFraction / carbon KPIs. Whole-home grid
+  // (gridToHomeKwh) is the correct superset and is ≥ the DPU-ac_in subset
+  // (gridImportKwh) whenever grid_home_w is populated, so max() picks the correct
+  // whole-home value when present; when grid_home_w has no data yet (fresh install /
+  // pre-v0.34.0 window) gridToHomeKwh is 0 and max() falls back to the legacy
+  // gridImportKwh — never undercounting and needing no 7-day history gate.
+  const gridForFraction = Math.max(gridToHomeKwh, gridImportKwh);
 
   // Charge fed by PV is what the PV produced beyond what went to load — the rest
   // came from grid. On an off-grid system gridImportKwh ≈ 0 and PV ≈ load+charge.
@@ -3927,7 +3934,7 @@ export function computeSelfConsumption(
     // transited the battery (counted at charge AND again at discharge),
     // yielding an impossible 104.5% while importing 76 kWh of grid. The
     // grid-displacement form caps at 100% by construction.
-    solarFractionOfLoadPct: loadKwh > 0.5 ? Math.max(0, Math.round(((loadKwh - gridImportKwh) / loadKwh) * 1000) / 10) : null,
+    solarFractionOfLoadPct: loadKwh > 0.5 ? Math.max(0, Math.round(((loadKwh - gridForFraction) / loadKwh) * 1000) / 10) : null,
     directUseRatioPct: pvKwh > 0.5 ? Math.round((pvToLoadKwh / pvKwh) * 1000) / 10 : null,
   };
   // v0.15.13 — require a structurally complete fleet (≥1 DPU AND the SHP2)
@@ -5140,11 +5147,14 @@ export function computeCarbonReport(
     (lifetimeTotals['fleet_pv_wh']?.pendingWh ?? 0);
   const pvLifetimeKwh = pvLifetimeWh / 1000;
 
-  // v0.10.4 — CO2 avoided = the grid you DIDN'T pull = (load − gridImport).
+  // v0.10.4 — CO2 avoided = the grid you DIDN'T pull = (load − whole-home grid).
   // Prior `pvToLoad + batteryDischarge` double-counted PV that cycled through
   // the battery (~23% overstatement / ~50 kg). Cap the battery-served
   // component to the remainder so the parts still sum to the honest total.
-  const gridDisplacedKwh = Math.max(0, sc.loadKwh - sc.gridImportKwh);
+  // Whole-home grid = max(gridToHomeKwh, gridImportKwh): the SHP2 main figure
+  // when it has history, falling back to the DPU-ac_in subset on fresh installs
+  // (gridToHomeKwh ~0) so we never undercount grid and overstate displacement.
+  const gridDisplacedKwh = Math.max(0, sc.loadKwh - Math.max(sc.gridToHomeKwh, sc.gridImportKwh));
   const totalKg = gridDisplacedKwh * intensity;
   const pvToLoadKg = Math.min(sc.pvToLoadKwh * intensity, totalKg);
   const batteryDischargeKg = Math.max(0, totalKg - pvToLoadKg);

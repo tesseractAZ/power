@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.39.0 — 2026-06-20
+
+- **Solar fraction + carbon-avoided now use the whole-home grid figure, with NO data-gate.** `solarFractionOfLoadPct` and the carbon `gridDisplacedKwh` used `gridImportKwh` (DPU `ac_in`), which undercounts grid (misses grid serving home loads directly through the SHP2 main). They now use `max(gridToHomeKwh, gridImportKwh)` — the authoritative SHP2-main whole-home grid (`grid_home_w`) when it has history, falling back to DPU ac-in when it doesn't. This removes the previously-planned 7-day `grid_home_w` accumulation gate, so the corrected figures apply IMMEDIATELY on existing AND fresh installs (no delay, no cliff) and never undercount vs. before. (+3 tests, 643/643.)
+
 ## 0.38.0 — 2026-06-20
 
 - **Fix the "<circuit> load unusual for the hour" alert flapping.** This per-hour self-baseline load anomaly tripped every time an AC compressor cycled on (load spike vs the learned hourly baseline) and self-resolved minutes later — ~116 fire/resolve notifications over 58h (72% of all immediate alerts), burying real signal. alertMonitor now gates ONLY this family with a sustained-duration requirement: the anomaly must persist `BASELINE_LOAD_SUSTAIN_MS` (default 8 min) before the immediate notify, with a matching `BASELINE_LOAD_RESOLVE_DWELL_MS` (default 8 min) dwell before resolving. A normal compressor cycle no longer alerts; a genuinely sustained anomaly (stuck/faulted circuit) still surfaces. Other alert families' debounce unchanged; critical alerts still bypass. (+7 tests, 640/640.)
