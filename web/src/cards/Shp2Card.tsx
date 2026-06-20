@@ -1,6 +1,6 @@
 import { lazy, memo, Suspense, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { DeviceSnapshot, Shp2Circuit, Shp2PairedCircuit, Shp2Projection } from '../types';
+import type { DeviceSnapshot, GridBackstop, Shp2Circuit, Shp2PairedCircuit, Shp2Projection } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
@@ -9,26 +9,16 @@ import { HUES, UI } from '../theme';
 
 // v0.36.0 — the SHP2 IS the grid interconnect: grid is a BACKSTOP it taps
 // automatically when the backup pool hits its reserve floor (or for rebalancing).
-// The server attaches a GridBackstop (gridState.ts) + a top-level `off_grid` flag
-// onto the SHP2 device snapshot. The web `DeviceSnapshot` type doesn't declare
-// these yet, so we read them defensively off the runtime payload via a local
-// view (mirrors server/src/gridState.ts GridBackstop). Three operator-facing
-// states, in priority order:
+// v0.37.0 — the server attaches the GridBackstop (gridState.ts) + an `off_grid`
+// flag onto the SHP2 DEVICE snapshot (snapshotForClient), and `DeviceSnapshot`
+// now declares both, so we read them off `d.grid`/`d.off_grid` with the shared
+// `GridBackstop` type — no local shim. Three operator-facing states, in priority
+// order:
 //   (1) ACTIVE   — grid carrying the home right now (homeGridWatts>0, or DPU
 //                  ac_in importWatts>0): show as a live source → "Grid X.X kW → home".
 //   (2) STANDBY  — grid present/declared but not needed (battery/PV covering):
 //                  "Grid: available (backstop)".
 //   (3) ISLANDED — grid not present: "Off-grid".
-interface GridBackstopView {
-  present?: boolean;
-  backstopping?: boolean;
-  importLive?: boolean;
-  declared?: boolean;
-  importWatts?: number;
-  homeGridWatts?: number;
-  reason?: string;
-}
-
 type GridStatus =
   | { state: 'active'; homeWatts: number; importWatts: number; reason?: string }
   | { state: 'standby'; reason?: string }
@@ -36,7 +26,7 @@ type GridStatus =
   | { state: 'unknown' };
 
 function resolveGridStatus(
-  grid: GridBackstopView | undefined,
+  grid: GridBackstop | undefined,
   offGrid: boolean | undefined,
 ): GridStatus {
   // Off-grid is authoritative: an islanded SHP2 has no grid to tap.
@@ -58,7 +48,7 @@ function resolveGridStatus(
   return { state: 'unknown' };
 }
 
-function GridStatusLine({ d }: { d: DeviceSnapshot & { grid?: GridBackstopView; off_grid?: boolean } }) {
+function GridStatusLine({ d }: { d: DeviceSnapshot }) {
   const status = resolveGridStatus(d.grid, d.off_grid);
   if (status.state === 'unknown') return null;
 
@@ -132,7 +122,7 @@ const CircuitModal = lazy(() =>
 export const Shp2Card = memo(function Shp2Card({
   d,
 }: {
-  d: DeviceSnapshot & { projection?: Shp2Projection; grid?: GridBackstopView; off_grid?: boolean };
+  d: DeviceSnapshot & { projection?: Shp2Projection };
 }) {
   const p = d.projection;
   // v0.9.8 — track both the leg (for breaker/single-leg fields) and the pair

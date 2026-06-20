@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.37.1 — 2026-06-20
+
+- **Grid-supply plumbing:** the SHP2 device snapshot now carries its own `grid` (GridBackstop) + `off_grid`, attached server-side in `snapshotForClient()` (immutably — HA-state + `/api/broadcast/status` stay byte-identical). The SHP2 card reads them directly and dropped its local type shim; `DeviceSnapshot` gained `grid?`/`off_grid?` on both server and web. Cleanup on top of v0.37.0.
+
 ## 0.37.0 — 2026-06-20
 
 UI refresh — grid-supply visibility (GUI + TUI) + dashboard/Solar layout.

@@ -396,7 +396,15 @@ const store = new SnapshotStore();
 function snapshotForClient(): FleetSnapshot {
   const s = store.get();
   const grid = liveGridBackstop(s.devices);
-  return { ...s, grid, off_grid: !grid.present };
+  const off_grid = !grid.present;
+  // Attach the grid backstop onto the SHP2 device too, so device-scoped
+  // consumers (Shp2Card) get it directly off `devices[shp2sn]`. IMMUTABLE:
+  // shallow-copy the devices map + the one SHP2 device so we never mutate the
+  // objects inside store.get() (the HA-state + /api/broadcast/status consumers
+  // read raw store.get() and must stay byte-identical).
+  const shp2 = Object.values(s.devices).find((d) => d.projection?.kind === 'shp2');
+  const devices = shp2 ? { ...s.devices, [shp2.sn]: { ...shp2, grid, off_grid } } : s.devices;
+  return { ...s, devices, grid, off_grid };
 }
 const recorder = createRecorder(store, (m) => app.log.info(m));
 // v0.10.0 — analytics worker. Every heavy history scan (the cache-warmer's
