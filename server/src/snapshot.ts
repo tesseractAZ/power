@@ -26,6 +26,11 @@ export interface DeviceSnapshot {
   lastError?: string;
   projection?: Projection;
   raw?: Record<string, unknown>; // included only if SNAPSHOT_INCLUDE_RAW=1
+  // v0.37.0 — the SHP2 device carries its own grid backstop + off_grid flag for
+  // device-scoped clients (Shp2Card). Attached immutably by snapshotForClient();
+  // inline-imported to avoid a snapshot.ts ↔ gridState.ts top-level cycle.
+  grid?: import('./gridState.js').GridBackstop;
+  off_grid?: boolean;
 }
 
 export interface FleetSnapshot {

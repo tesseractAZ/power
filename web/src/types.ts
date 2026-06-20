@@ -170,6 +170,10 @@ export interface DeviceSnapshot {
   lastUpdated: number;
   lastError?: string;
   projection?: Projection;
+  // v0.37.0 — the SHP2 device carries its own grid backstop + off_grid flag,
+  // attached server-side by snapshotForClient(). GridBackstop is defined below.
+  grid?: GridBackstop;
+  off_grid?: boolean;
 }
 
 export type Severity = 'critical' | 'warning' | 'info';

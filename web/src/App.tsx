@@ -260,7 +260,7 @@ function NormalApp() {
 
           {/* OVERVIEW REORDER — the SHP2 card and the active/online DPU cards sit
               directly under the Today summary section. */}
-          {shp2 && <Shp2Card d={{ ...(shp2 as any), grid: snapshot.grid, off_grid: snapshot.off_grid }} />}
+          {shp2 && <Shp2Card d={shp2 as any} />}
           {dpus.map((d) => (
             <DpuCard key={d.sn} d={d as any} viaShp2={dpuViaShp2.get(d.sn)} />
           ))}
