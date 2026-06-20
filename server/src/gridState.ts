@@ -36,6 +36,13 @@ import type { AlarmPriority } from './alertPriority.js';
 
 /** acIn at/above this (W) is positive proof the grid is energized AND drawing. */
 export const GRID_IMPORT_WATTS = 5;
+/** v0.36.0 — SHP2-metered whole-home grid power (wattInfo.gridWatt) at/above this
+ *  (W) is positive proof the grid is energized AND carrying home load. This is the
+ *  path the DPU acIn sum MISSES: grid that serves home loads directly through the
+ *  panel without charging the DPUs (e.g. the SHP2 backstopping at the reserve
+ *  floor). 25 W clears standby/measurement noise while still catching any real
+ *  backstop (an at-floor transfer pulls kW). */
+export const HOME_GRID_IMPORT_WATTS = 25;
 /** chargeWattPower below −this (W) ⇒ the backup pool is net-discharging.
  *  Live telemetry confirms positive = charging (observed +7200 W while SoC rose).
  *  The negative = discharging direction is ASSUMED, not yet verified against a
@@ -64,8 +71,10 @@ export interface GridBackstop {
   importLive: boolean;
   /** Declared present via the HA entity or GRID_AVAILABLE (not via live import). */
   declared: boolean;
-  /** The grid import (W) observed on SHP2-bound cores. */
+  /** The grid import (W) observed on SHP2-bound cores (DPU ac_in path). */
   importWatts: number;
+  /** v0.36.0 — SHP2 main-line grid power into the home (W) (wattInfo.gridWatt). */
+  homeGridWatts: number;
   /** Human-readable reason, for status payloads / logs / alert detail. */
   reason: string;
 }
@@ -104,6 +113,30 @@ export function computeGridImportWatts(devices: Record<string, DeviceSnapshot>):
 }
 
 /**
+ * v0.36.0 — SHP2-metered whole-home grid power (wattInfo.gridWatt). This is the
+ * SHP2's OWN authoritative measurement of grid power into the home; it captures
+ * grid that serves home loads directly through the panel — the path
+ * computeGridImportWatts (DPU ac_in only) misses. Unlike the DPU sum it needs NO
+ * source-SN scoping (it is the SHP2's single main-line figure, not a per-DPU sum),
+ * so there is no wall-charging-spare ambiguity to guard against.
+ *
+ * This closes the gap where an at-floor grid backstop was invisible to the
+ * resolver: e.g. 2026-06-20 the SHP2 pulled +32.7 kWh of grid to carry the home
+ * overnight at the 10% reserve floor while DPU ac_in read 0 — real, measured grid
+ * flow the resolver could not see, leaving the floor downgrade leaning on the
+ * declared toggle + the best-effort chargeWattPower discharge guard instead.
+ * Only POSITIVE flow counts (gridWatt ≥ 0 by construction; a non-positive or
+ * non-finite reading contributes nothing — never fabricates grid presence).
+ */
+export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): number {
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  const w = shp2?.projection.gridWatt ?? null;
+  return w != null && Number.isFinite(w) && w > 0 ? w : 0;
+}
+
+/**
  * Interpret a Home Assistant grid-presence entity state into present(true) /
  * absent(false) / unknown(null). Supports the realistic entity kinds:
  *   - binary_sensor / input_boolean / switch: on/true/home/connected/closed → present
@@ -136,12 +169,24 @@ export interface GridBackstopInput {
    *  unreachable). A stale entity is treated as UNKNOWN (not its frozen value)
    *  so a stale "on" can't silence a real outage. */
   gridEntityStale?: boolean;
+  /** v0.36.0 — the SHP2 backup pool is AT (or within a hair of) its reserve
+   *  floor. When true, a merely-DECLARED grid with NO measured flow on either
+   *  path is NOT trusted to backstop (a stale "grid available" toggle must not
+   *  mute a real at-floor outage). Away from the floor this is false and a
+   *  flow-less declaration remains a valid backstop (grid available, not yet
+   *  needed). Resolved from the SHP2 SoC vs backupReserveSoc in liveGridBackstop. */
+  atReserveFloor?: boolean;
 }
 
 /** Pure resolver — unit-testable; no env / cache reads. */
 export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   const importWatts = computeGridImportWatts(input.devices);
-  const importLive = importWatts >= GRID_IMPORT_WATTS;
+  const homeGridWatts = computeHomeGridWatts(input.devices);
+  // Grid flow is proven LIVE by EITHER measured path: DPU ac_in (grid charging the
+  // SHP2-bound DPUs) or the SHP2 main gridWatt (grid serving home loads directly).
+  // Either at/above its threshold is positive, unambiguous proof the grid is
+  // energized AND carrying — independent of the declared toggle.
+  const importLive = importWatts >= GRID_IMPORT_WATTS || homeGridWatts >= HOME_GRID_IMPORT_WATTS;
 
   // Declared presence: a configured entity is authoritative (unknown ⇒ NOT
   // declared, the safe default); otherwise fall back to GRID_AVAILABLE.
@@ -163,19 +208,32 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
     | undefined;
   const cwp = shp2?.projection.chargeWattPower ?? null;
   const poolDischarging = cwp != null && cwp < -POOL_DISCHARGE_WATTS;
-  const backstopping = importLive || (declared && !poolDischarging);
+  // v0.36.0 floor-hardening: AT the reserve floor, a merely-DECLARED grid with
+  // NO measured flow on EITHER path (DPU ac_in AND SHP2 gridWatt both below
+  // threshold) must NOT backstop — a stale "grid available" toggle must not mute
+  // a real at-floor outage. This is FLOOR-ONLY: away from the floor (or with any
+  // measured flow, or with live import) a flow-less declaration stays a valid
+  // backstop (grid available, simply not yet needed), so the pre-floor
+  // grid-available downgrade is preserved.
+  const anyMeasuredFlow = importWatts > 0 || homeGridWatts > 0;
+  const floorWithoutFlow = !!input.atReserveFloor && !anyMeasuredFlow;
+  const backstopping = importLive || (declared && !poolDischarging && !floorWithoutFlow);
 
   const reason = importLive
-    ? `live grid import ${Math.round(importWatts)} W`
+    ? importWatts >= GRID_IMPORT_WATTS
+      ? `live grid import ${Math.round(importWatts)} W (DPU ac-in)`
+      : `live home-grid ${Math.round(homeGridWatts)} W (SHP2 main)`
     : declared
-      ? poolDischarging
-        ? 'grid declared present but backup pool still discharging — not backstopping'
-        : 'grid declared present'
+      ? floorWithoutFlow
+        ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
+        : poolDischarging
+          ? 'grid declared present but backup pool still discharging — not backstopping'
+          : 'grid declared present'
       : input.gridEntityConfigured
         ? 'grid entity reports not present (or unknown)'
         : 'off-grid (no grid declared, no import)';
 
-  return { present, backstopping, importLive, declared, importWatts, reason };
+  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, reason };
 }
 
 /** Live wrapper: reads GRID_PRESENCE_ENTITY / GRID_AVAILABLE from env and the
@@ -192,12 +250,28 @@ export function liveGridBackstop(devices: Record<string, DeviceSnapshot>): GridB
   // if HA has been unreachable beyond the bound, the cached entity is treated as
   // UNKNOWN rather than replaying a frozen last value.
   const stale = entityId.length > 0 && haStateCache.getCacheAgeMs() > GRID_ENTITY_MAX_AGE_MS;
+  // v0.36.0 — derive whether the SHP2 backup pool is at (or within a hair of) its
+  // reserve floor, so the resolver can apply the floor-hardening (a flow-less
+  // declared grid is not trusted to backstop AT the floor). +1.5% slack absorbs
+  // SoC quantisation / sample jitter so we don't oscillate right at the boundary.
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  const backupFullCapWh = shp2?.projection.backupFullCapWh ?? null;
+  const backupRemainWh = shp2?.projection.backupRemainWh ?? null;
+  const socPct =
+    backupFullCapWh != null && backupFullCapWh > 0 && backupRemainWh != null
+      ? (backupRemainWh / backupFullCapWh) * 100
+      : null;
+  const reserveSoc = shp2?.projection.backupReserveSoc ?? null;
+  const atReserveFloor = socPct != null && reserveSoc != null && socPct <= reserveSoc + 1.5;
   return resolveGridBackstop({
     devices,
     gridEntity: entityId ? haStateCache.getCachedEntity(entityId) : null,
     gridEntityConfigured: entityId.length > 0,
     gridAvailableFallback: process.env.GRID_AVAILABLE === 'true',
     gridEntityStale: stale,
+    atReserveFloor,
   });
 }
 

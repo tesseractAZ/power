@@ -139,6 +139,7 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_pv_lifetime_kwh', name: 'EcoFlow PV Production', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power', value_template: '{{ value_json.pv_lifetime_kwh }}' },
   { unique_id: 'ecoflow_load_lifetime_kwh', name: 'EcoFlow Home Consumption', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:home-lightning-bolt', value_template: '{{ value_json.load_lifetime_kwh }}' },
   { unique_id: 'ecoflow_grid_import_lifetime_kwh', name: 'EcoFlow Grid Import', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.grid_import_lifetime_kwh }}' },
+  { unique_id: 'ecoflow_grid_to_home_lifetime_kwh', name: 'EcoFlow Grid To Home', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:home-lightning-bolt-outline', value_template: '{{ value_json.grid_to_home_lifetime_kwh }}' },
   { unique_id: 'ecoflow_battery_charge_lifetime_kwh', name: 'EcoFlow Battery Energy In', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-charging', value_template: '{{ value_json.battery_charge_lifetime_kwh }}' },
   { unique_id: 'ecoflow_battery_discharge_lifetime_kwh', name: 'EcoFlow Battery Energy Out', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-arrow-down', value_template: '{{ value_json.battery_discharge_lifetime_kwh }}' },
 
@@ -547,6 +548,7 @@ export async function startMqttDiscovery(
       pv_lifetime_kwh: lifetimeKwh('fleet_pv_wh'),
       load_lifetime_kwh: lifetimeKwh('fleet_load_wh'),
       grid_import_lifetime_kwh: lifetimeKwh('fleet_grid_import_wh'),
+      grid_to_home_lifetime_kwh: lifetimeKwh('fleet_grid_home_wh'),
       battery_charge_lifetime_kwh: lifetimeKwh('fleet_battery_charge_wh'),
       battery_discharge_lifetime_kwh: lifetimeKwh('fleet_battery_discharge_wh'),
       // v0.8.0 — per-circuit lifetime + carbon + tariff

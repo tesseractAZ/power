@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.36.0 — 2026-06-20
+
+Grid-backstop resolver now sees the whole-home grid path, closing the gap where a grid carrying home loads at the reserve floor was invisible to the floor/runway/SoC alarm logic.
+
+- **The grid-backstop resolver now recognizes the SHP2 whole-home grid path (`wattInfo.gridWatt`), not just DPU `ac_in`.** A grid backstop that carries home loads at the reserve floor is now seen as MEASURED grid flow, so the floor/runway/SoC alarm downgrade is grounded in real flow instead of the declared toggle + best-effort discharge guard.
+- **Floor-hardening.** At the reserve floor, a declared grid with NO measured flow on either path now stays critical (a stale "grid available" toggle can no longer mute a real at-floor outage). Away from the floor, an available-but-unused grid is unchanged.
+- **New HA sensor `sensor.ecoflow_panel_ecoflow_grid_to_home`** (`grid_to_home` lifetime kWh) — the SHP2 home-grid backstop is now visible (previously only DPU-`ac_in` `grid_import` was published).
+- The data-gated `solarFraction`/carbon formula flip remains deferred to a later release.
+
 ## 0.35.0 — 2026-06-19
 
 Babylon 5 theme audit + fix: charts and the energy-flow diagram now render correctly on the dark station palette. Fonts, cards, badges, KV readouts, and the temperature matrix were already correct; the chart/SVG components were the gap.
