@@ -56,6 +56,49 @@ import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 const EVAL_INTERVAL_MS = Number(process.env.ALERT_EVAL_MS ?? 20_000);
 const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
 
+// v0.37.0 — sustained-duration gate for the per-circuit load-anomaly family
+// ("<Circuit> load unusual for the hour"). The detector already requires the
+// excursion to hold for BASELINE_SUSTAINED_MS (30 min) of *history samples*
+// before it emits the alert at all — but that gate is satisfied a few minutes
+// into a normal AC compressor cycle (the recent real-time samples all sit on
+// the same side of the off-state median), so the alert STILL surfaces here and
+// then self-resolves when the compressor cycles off. Net effect (verified in a
+// 58 h log): this one family fired/resolved 116× — 72% of all immediate
+// notifications — as compressors cycled, burying genuinely-actionable alerts.
+//
+// The standard notify debounce (DEBOUNCE_MS, 60 s) is far too short to ride
+// through a 4–24 min compressor cycle, so these trip the immediate "[Medium]"
+// + "Resolved:" pair on every cycle. We give THIS family (only) a much longer
+// fire debounce so the anomaly must PERSIST across the whole gate before the
+// first push, plus a matching resolve dwell so a brief dip back to baseline
+// (compressor momentarily off) doesn't emit a premature "Resolved:". A real
+// stuck/faulted circuit holds well past the gate and still surfaces; a normal
+// compressor cycle clears inside it and never notifies. Other alert families
+// are untouched. Both windows are env-tunable, following the house pattern.
+const BASELINE_LOAD_SUSTAIN_MS = Number(process.env.BASELINE_LOAD_SUSTAIN_MS ?? 8 * 60_000);
+const BASELINE_LOAD_RESOLVE_DWELL_MS = Number(process.env.BASELINE_LOAD_RESOLVE_DWELL_MS ?? 8 * 60_000);
+
+/**
+ * v0.37.0 — does this alert belong to the per-circuit load-anomaly family that
+ * needs the sustained-duration notify gate? Matches the learned self-baseline
+ * load-circuit anomalies only (ids `baseline-ch{N}_w-{SN}` /
+ * `baseline-pair{N}_w-{SN}`, all `source: 'learned'`). Thermal/SoC baselines
+ * (`baseline-pack{N}_temp-…`, `baseline-mppt_*`) and every other family keep
+ * the normal 60 s debounce + immediate resolve. Exported for tests.
+ */
+export function isSustainGatedLoadAnomaly(alert: Pick<Alert, 'id' | 'source'>): boolean {
+  return alert.source === 'learned' && /^baseline-(ch\d+|pair\d+)_w-/.test(alert.id);
+}
+
+/**
+ * v0.37.0 — the fire debounce for an alert: the long sustain window for the
+ * gated load-anomaly family, else the standard debounce. Critical alerts keep
+ * their 0 ms bypass (handled by the caller). Pure + exported for tests.
+ */
+export function notifyDebounceMsFor(alert: Pick<Alert, 'id' | 'source'>): number {
+  return isSustainGatedLoadAnomaly(alert) ? BASELINE_LOAD_SUSTAIN_MS : DEBOUNCE_MS;
+}
+
 // v0.13.2 — clear-duration thresholds hoisted to module scope so the
 // classification is a single pure function shared by recordClear and tests.
 const SHORT_CLEAR_MS = 10 * 60 * 1000;            // resolved within 10 min = transient
@@ -86,6 +129,13 @@ interface TrackedAlert {
    *  critical when the grid drops out at the reserve floor) re-notifies instead
    *  of being silently swallowed by an already-true `notified`. */
   notifiedSeverity?: Severity;
+  /** v0.37.0 — first eval tick at which this alert went absent, for the
+   *  resolve-dwell gate on the sustained load-anomaly family. The tracked
+   *  entry is held (not resolved) until it has been continuously absent for
+   *  BASELINE_LOAD_RESOLVE_DWELL_MS, so a compressor briefly cycling off
+   *  mid-anomaly doesn't emit a premature "Resolved:". Reset to undefined if
+   *  the alert reappears before the dwell elapses. */
+  clearedSince?: number;
 }
 
 /** A historical record of an alert that was raised and later cleared. */
@@ -813,6 +863,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         continue;
       }
       existing.alert = a;
+      // v0.37.0 — the alert is present again this tick, so cancel any pending
+      // resolve-dwell countdown (a sustained load-anomaly that briefly dipped
+      // back to baseline and recovered must not resolve).
+      existing.clearedSince = undefined;
       // v0.16.4 — non-annunciating alerts (annunciate === false, e.g. an
       // expected-offline bench spare) stay tracked + visible in snapshot.alerts
       // but must never push or queue a notification. Gate HERE, above the
@@ -826,7 +880,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // silently swallowed. Warning/info still debounce to avoid noisy
       // flapping (a short blip isn't worth interrupting for); a brief critical
       // is exactly the kind of thing the user wants to know about.
-      const debounceMs = a.severity === 'critical' ? 0 : DEBOUNCE_MS;
+      // v0.37.0 — the sustained load-anomaly family ("<Circuit> load unusual
+      // for the hour") gets a much longer fire debounce so a normal AC
+      // compressor cycle (a few minutes) clears inside the window and never
+      // pushes; only an anomaly that PERSISTS past BASELINE_LOAD_SUSTAIN_MS
+      // surfaces. Critical still bypasses (these are never critical, but the
+      // ordering keeps that invariant explicit).
+      const debounceMs = a.severity === 'critical' ? 0 : notifyDebounceMsFor(a);
       // v0.23.0 — re-notify when a PERSISTENT alert ESCALATES above the severity
       // it was last dispatched at. The motivating case: shp2-below-reserve flips
       // info→critical when the grid drops out at the reserve floor; without this
@@ -884,6 +944,23 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // re-evaluates next tick) so a restart can't fire a premature
       // "Resolved" — a genuine clear still resolves once the window passes.
       if (t.alert.source === 'learned' && now - monitorStartMs < LEARNED_RESOLVE_GRACE_MS) continue;
+      // v0.37.0 — resolve-dwell for the sustained load-anomaly family. A
+      // genuinely-sustained anomaly can momentarily dip back under the floor
+      // (compressor cycling within a fault, sample jitter); without a dwell
+      // that single absent tick would emit a "Resolved:" and the next present
+      // tick would re-fire — recreating the flap on the clear side. Hold the
+      // entry until it has been continuously absent for the dwell. If it
+      // reappears first, the rising-edge path clears `clearedSince` and the
+      // countdown restarts. (An alert that never reached the sustained-fire
+      // threshold has `notified === false`, so the resolve dispatch below is a
+      // no-op for it regardless — no "Resolved:" without a matching fire.)
+      if (isSustainGatedLoadAnomaly(t.alert)) {
+        if (t.clearedSince == null) {
+          t.clearedSince = now;
+          continue; // start the dwell; re-evaluate next tick
+        }
+        if (now - t.clearedSince < BASELINE_LOAD_RESOLVE_DWELL_MS) continue; // still dwelling
+      }
       const duration = now - t.firstSeen;
       // v0.16.4 — defense-in-depth: a non-annunciating alert (annunciate:false,
       // e.g. an expected-offline bench spare) must not emit a "Resolved" push

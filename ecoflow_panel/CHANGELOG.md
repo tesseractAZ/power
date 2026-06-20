@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.38.0 — 2026-06-20
+
+- **Fix the "<circuit> load unusual for the hour" alert flapping.** This per-hour self-baseline load anomaly tripped every time an AC compressor cycled on (load spike vs the learned hourly baseline) and self-resolved minutes later — ~116 fire/resolve notifications over 58h (72% of all immediate alerts), burying real signal. alertMonitor now gates ONLY this family with a sustained-duration requirement: the anomaly must persist `BASELINE_LOAD_SUSTAIN_MS` (default 8 min) before the immediate notify, with a matching `BASELINE_LOAD_RESOLVE_DWELL_MS` (default 8 min) dwell before resolving. A normal compressor cycle no longer alerts; a genuinely sustained anomaly (stuck/faulted circuit) still surfaces. Other alert families' debounce unchanged; critical alerts still bypass. (+7 tests, 640/640.)
+
 ## 0.37.1 — 2026-06-20
 
 - **Grid-supply plumbing:** the SHP2 device snapshot now carries its own `grid` (GridBackstop) + `off_grid`, attached server-side in `snapshotForClient()` (immutably — HA-state + `/api/broadcast/status` stay byte-identical). The SHP2 card reads them directly and dropped its local type shim; `DeviceSnapshot` gained `grid?`/`off_grid?` on both server and web. Cleanup on top of v0.37.0.
