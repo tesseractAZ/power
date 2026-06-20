@@ -201,10 +201,25 @@ export interface ClearedAlert {
   durationMs: number;
 }
 
+// v0.36.0 — mirrors the server's GridBackstop (server/src/gridState.ts),
+// surfaced on the fleet snapshot as `snapshot.grid`. The dashboard cards
+// (EnergyFlow, Shp2Card) render a 3-state grid-supply indicator from it.
+export interface GridBackstop {
+  present: boolean;
+  backstopping: boolean;
+  importLive: boolean;
+  declared: boolean;
+  importWatts: number;
+  homeGridWatts: number;
+  reason: string;
+}
+
 export interface FleetSnapshot {
   generatedAt: number;
   devices: Record<string, DeviceSnapshot>;
   alerts?: Alert[];
+  grid?: GridBackstop;
+  off_grid?: boolean;
 }
 
 export interface ForecastHour {

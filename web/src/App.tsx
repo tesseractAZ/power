@@ -58,8 +58,6 @@ export default function App() {
 
 function NormalApp() {
   const { snapshot, conn } = useSnapshot();
-  // v0.23.0 — show the 24 h history charts by default on the dashboard.
-  const [showHistory, setShowHistory] = useState(true);
   const [tab, setTab] = useState<
     'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-console' | 'predictive'
   >('dashboard');
@@ -231,19 +229,6 @@ function NormalApp() {
               )}
             </button>
           </div>
-          {/* v0.23.0 — keep the toggle MOUNTED on every tab (invisible + inert
-              off-dashboard) so its slot is always reserved and the header no
-              longer reflows/shifts when switching tabs. */}
-          <button
-            onClick={() => setShowHistory((v) => !v)}
-            aria-hidden={tab !== 'dashboard'}
-            tabIndex={tab === 'dashboard' ? 0 : -1}
-            className={`badge badge-muted hover:bg-muted/20 transition-colors ${
-              tab === 'dashboard' ? '' : 'invisible pointer-events-none'
-            }`}
-          >
-            {showHistory ? 'hide history' : 'show history'}
-          </button>
           <span
             className={`badge ${conn === 'open' ? 'badge-ok' : conn === 'connecting' ? 'badge-warn' : 'badge-bad'}`}
             title="Live data link to the server (WebSocket). LIVE = real-time telemetry is streaming; LINKING = (re)connecting; OFFLINE = no link, readings may be stale."
@@ -270,8 +255,16 @@ function NormalApp() {
         <>
         {snapshot && <RunwayCard />}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start mt-4">
-          {snapshot && <EnergyFlow devices={snapshot.devices} />}
+          {snapshot && <EnergyFlow devices={snapshot.devices} grid={snapshot.grid} />}
           <TodaySummary />
+
+          {/* OVERVIEW REORDER — the SHP2 card and the active/online DPU cards sit
+              directly under the Today summary section. */}
+          {shp2 && <Shp2Card d={{ ...(shp2 as any), grid: snapshot.grid, off_grid: snapshot.off_grid }} />}
+          {dpus.map((d) => (
+            <DpuCard key={d.sn} d={d as any} viaShp2={dpuViaShp2.get(d.sn)} />
+          ))}
+
           {/* v0.22.0 — ForecastCard is lazy (recharts off the entry chunk). The
               fallback is col-span-full like the card itself, so the lazy chunk
               resolving causes no layout shift. */}
@@ -279,7 +272,7 @@ function NormalApp() {
             <ForecastCard />
           </Suspense>
 
-          {showHistory && shp2 && (
+          {shp2 && (
             <Suspense fallback={<PageFallback />}>
               <TrendChart
                 title="Backup pool & panel load (24h)"
@@ -291,7 +284,7 @@ function NormalApp() {
             </Suspense>
           )}
 
-          {showHistory && onlineDpus.length > 0 && (
+          {onlineDpus.length > 0 && (
             <Suspense fallback={<PageFallback />}>
               <TrendChart
                 title="DPU output & PV (24h)"
@@ -302,11 +295,6 @@ function NormalApp() {
               />
             </Suspense>
           )}
-
-          {shp2 && <Shp2Card d={shp2 as any} />}
-          {dpus.map((d) => (
-            <DpuCard key={d.sn} d={d as any} viaShp2={dpuViaShp2.get(d.sn)} />
-          ))}
         </div>
 
         {others.length > 0 && (

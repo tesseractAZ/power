@@ -15,6 +15,12 @@ import type { Alert } from '../alerts.js';
 import { c, BOX, padEnd, padStart, truncate, center, lr, bar, visLen } from './ansi.js';
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
 import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '../alertPriority.js';
+// v0.36.0 — the SHP2 is the grid interconnect; grid is a BACKSTOP tapped
+// automatically when the pool hits its reserve floor (or for rebalancing). The
+// resolver gives us three states to surface: ACTIVE (grid carrying the home now),
+// AVAILABLE (present/declared but on standby), and OFF-GRID (islanded). homeGridWatts
+// (SHP2 main) catches the backstop path that DPU ac_in import alone is blind to.
+import { liveGridBackstop } from '../gridState.js';
 
 // v0.15.15 — the CHARGER screen was removed with the web Charger tab: the EVSE
 // is app-only (no API/MQTT telemetry) and its host DPU (Core 4) is an offline
@@ -161,17 +167,27 @@ function getShp2(snap: FleetSnapshot): Shp2Dev | undefined {
   return Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2') as Shp2Dev | undefined;
 }
 
-/** House AC import — AC input on SHP2-bound DPUs only. A spare DPU self-charging
- *  off a wall outlet must not register as the house being grid-tied. */
-function gridAcInWatts(snap: FleetSnapshot): number {
-  const shp2 = getShp2(snap);
-  const dpus = getDpus(snap).filter((d) => d.online && d.projection);
-  const sourceSns = new Set(
-    (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
-  );
-  const grid = sourceSns.size > 0 ? dpus.filter((d) => sourceSns.has(d.sn)) : dpus;
-  return sum(grid, (d) => d.projection!.acInWatts);
+/** v0.36.0 — classify the grid into the three operator-facing states using the
+ *  GridBackstop resolver (homeGridWatts = SHP2 main grid into the home; importWatts
+ *  = DPU ac_in). `active` carries the live carrying-power (the SHP2 main backstop
+ *  preferred, falling back to DPU ac_in import) so the caller can render the flow. */
+type GridState = 'active' | 'standby' | 'islanded';
+interface GridStatus {
+  state: GridState;
+  /** Watts the grid is carrying into the home, when active (else 0). */
+  watts: number;
+  reason: string;
 }
+function gridStatus(snap: FleetSnapshot): GridStatus {
+  const g = liveGridBackstop(snap.devices);
+  if (!g.present) return { state: 'islanded', watts: 0, reason: g.reason };
+  // Any measured flow on either path ⇒ the grid is carrying the home right now.
+  const watts = g.homeGridWatts > 0 ? g.homeGridWatts : g.importWatts;
+  if (watts > 0) return { state: 'active', watts, reason: g.reason };
+  // Present/declared but no measured flow — the backstop is on standby.
+  return { state: 'standby', watts: 0, reason: g.reason };
+}
+
 function sortedDevices(snap: FleetSnapshot): DeviceSnapshot[] {
   return Object.values(snap.devices).sort((a, b) => {
     const rank = (d: DeviceSnapshot) =>
@@ -244,20 +260,26 @@ function statusLine(data: RenderData, w: number): string {
   const { snap } = data;
   const dpus = getDpus(snap).filter((d) => d.online && d.projection);
   const shp2 = getShp2(snap);
-  const acIn = gridAcInWatts(snap);
   const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
   const totIn = sum(dpus, (d) => d.projection!.totalInWatts);
   const totOut = sum(dpus, (d) => d.projection!.totalOutWatts);
   const batNet = totOut - totIn;
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const backup = shp2?.projection.backupBatPercent ?? null;
-  const offGrid = acIn < 5;
+  // v0.36.0 — three grid states from the backstop resolver, not just off-grid vs tied.
+  const grid = gridStatus(snap);
   const alerts = snap.alerts ?? [];
   // v0.11.0 — count by the 4-tier ISA priority instead of raw severity.
   const pc = prioCounts(alerts);
 
   const seg: string[] = [];
-  seg.push(offGrid ? c.yellowB('OFF-GRID') : c.greenB('GRID-TIED'));
+  seg.push(
+    grid.state === 'islanded'
+      ? c.yellowB('OFF-GRID')
+      : grid.state === 'active'
+        ? c.greenB('GRID ' + fmtW(grid.watts) + ' →')
+        : c.cyan('GRID standby'),
+  );
   seg.push(c.grey('BACKUP ') + paint(socColor(backup), fmtPct(backup)));
   seg.push(c.grey('PV ') + c.yellow(fmtW(pv)));
   seg.push(c.grey('LOAD ') + c.white(fmtW(load)));
@@ -315,21 +337,26 @@ function bodyOverview(data: RenderData): string[] {
   const shp2 = getShp2(snap);
   const allDev = Object.values(snap.devices);
   const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
-  const acIn = gridAcInWatts(snap);
   const totIn = sum(dpus, (d) => d.projection!.totalInWatts);
   const totOut = sum(dpus, (d) => d.projection!.totalOutWatts);
   const batNet = totOut - totIn;
   const soc = avg(dpus.map((d) => d.projection!.soc));
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const activeCircuits = shp2 ? shp2.projection.circuits.filter((cir) => (cir.watts ?? 0) > 1).length : 0;
-  const offGrid = acIn < 5;
+  // v0.36.0 — the SHP2 is the grid interconnect; grid backstops the home (active),
+  // sits available on standby, or is islanded. Surface all three, not just off-grid.
+  const grid = gridStatus(snap);
 
   const L: string[] = [];
   L.push(c.cyanB('ENERGY FLOW'));
   L.push('  ' + field('Solar', bar(pv / 12000, 16, 'yellow') + ' ' + c.whiteB(fmtW(pv))));
-  L.push(
-    '  ' + field('Grid', offGrid ? c.grey('islanded — no import') : c.white(fmtW(acIn))),
-  );
+  const gridVal =
+    grid.state === 'islanded'
+      ? c.grey('off-grid — islanded')
+      : grid.state === 'active'
+        ? c.green('▲ backstop ') + c.whiteB(fmtW(grid.watts)) + c.grey(' → home')
+        : c.cyan('available') + c.grey('  (standby/backstop)');
+  L.push('  ' + field('Grid', gridVal));
   const netLbl =
     batNet > 5 ? c.yellow(`▼ discharging ${fmtW(batNet)}`) : batNet < -5 ? c.green(`▲ charging ${fmtW(-batNet)}`) : c.grey('idle');
   L.push('  ' + field('Battery', bar((soc ?? 0) / 100, 16, socColor(soc) === 'red' ? 'red' : socColor(soc) === 'yellow' ? 'yellow' : 'green') + ' ' + paint(socColor(soc), fmtPct(soc, 0)) + '  ' + netLbl));
@@ -726,6 +753,38 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
   const nameFor = (sn: string | null) => (sn ? (dpus.find((d) => d.sn === sn)?.deviceName ?? sn) : '—');
 
   const body: string[] = [];
+
+  // v0.36.0 — the SHP2 is the grid interconnect; the grid is a BACKSTOP tapped
+  // automatically when the pool hits its reserve floor (or for rebalancing).
+  // Surface the three states (active backstop / available standby / islanded)
+  // from the resolver, then the underlying measured watts on both grid paths.
+  const grid = liveGridBackstop(data.snap.devices);
+  const state: GridState = !grid.present
+    ? 'islanded'
+    : grid.homeGridWatts > 0 || grid.importWatts > 0
+      ? 'active'
+      : 'standby';
+  body.push(c.cyanB('GRID SUPPLY') + c.grey('   SHP2 is the grid interconnect'));
+  const statusVal =
+    state === 'islanded'
+      ? c.yellowB('OFF-GRID — islanded')
+      : state === 'active'
+        ? c.greenB('▲ BACKSTOPPING') +
+          c.grey(' — grid carrying ') +
+          c.whiteB(fmtW(grid.homeGridWatts > 0 ? grid.homeGridWatts : grid.importWatts)) +
+          c.grey(' → home')
+        : c.cyan('AVAILABLE') + c.grey(' — standby (battery/PV covering)');
+  body.push('  ' + field('Status', statusVal, 14));
+  body.push(
+    ...statGrid(
+      [
+        ['Home grid', `${fmtW(grid.homeGridWatts)}`],
+        ['DPU import', `${fmtW(grid.importWatts)}`],
+        ['Present', grid.present ? (grid.importLive ? 'yes (live)' : grid.declared ? 'yes (declared)' : 'yes') : 'no'],
+      ],
+      w,
+    ),
+  );
 
   body.push(c.cyanB('BACKUP POOL'));
   body.push(

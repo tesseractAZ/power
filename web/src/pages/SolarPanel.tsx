@@ -209,6 +209,13 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
       {/* Flow diagram */}
       <FlowDiagram dpus={onlineDpus} arraySns={arraySns} totalPanels={totalPanels} />
 
+      {/* Per-DPU detail */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {onlineDpus.map((d) => (
+          <DpuSolarCard key={d.sn} d={d} />
+        ))}
+      </div>
+
       {/* 24h chart */}
       <div className="card">
         <div className="card-title flex items-center justify-between">
@@ -268,13 +275,6 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
       {/* Solar curtailment — energy thrown away when batteries are full and home
           load can't absorb the PV. Lives on the Solar page (v0.24.2). */}
       <CurtailmentCard />
-
-      {/* Per-DPU detail */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {onlineDpus.map((d) => (
-          <DpuSolarCard key={d.sn} d={d} />
-        ))}
-      </div>
     </div>
   );
 }

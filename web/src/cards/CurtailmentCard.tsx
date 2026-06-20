@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react';
 import type { CurtailmentReport } from '../types';
 import { apiUrl } from '../api';
-import { HUES } from '../theme';
+import { HUES, UI } from '../theme';
 
 /**
  * Solar curtailment surface (v0.9.77) — "energy you're throwing away
@@ -166,7 +166,7 @@ function inactiveReasonText(
 
 function Stat({ label, value, subtitle }: { label: string; value: string; subtitle?: string }) {
   return (
-    <div className="border rounded px-2 py-1 bg-stone-50">
+    <div className="border rounded px-2 py-1" style={{ backgroundColor: UI.elev }}>
       <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
       <div className="text-sm font-mono">{value}</div>
       {subtitle && <div className="text-[10px] text-muted">{subtitle}</div>}
@@ -191,7 +191,7 @@ function Histogram({ histogram }: { histogram: CurtailmentReport['hourlyHistogra
               className="flex-1 rounded-t"
               style={{
                 height: `${h}px`,
-                backgroundColor: b.samples === 0 ? '#e5e7eb' : isMidday ? HUES.solar : '#f59e0b',
+                backgroundColor: b.samples === 0 ? UI.panel2 : isMidday ? HUES.solar : '#f59e0b',
                 opacity: b.samples === 0 ? 0.3 : 1,
               }}
               title={`${String(b.hour).padStart(2, '0')}:00 — ${b.samples} samples, avg ${b.avgSurplusW} W`}

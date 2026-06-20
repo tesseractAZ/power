@@ -392,6 +392,12 @@ if (existsSync(lovelaceDist)) {
 }
 
 const store = new SnapshotStore();
+/** v0.36.0 — snapshot the dashboard/TUI consume, augmented with the live grid backstop. */
+function snapshotForClient(): FleetSnapshot {
+  const s = store.get();
+  const grid = liveGridBackstop(s.devices);
+  return { ...s, grid, off_grid: !grid.present };
+}
 const recorder = createRecorder(store, (m) => app.log.info(m));
 // v0.10.0 — analytics worker. Every heavy history scan (the cache-warmer's
 // reports + each /api/* analytics endpoint) runs on the worker's event loop
@@ -403,7 +409,7 @@ const recorder = createRecorder(store, (m) => app.log.info(m));
 const analytics = initAnalyticsClient(resolve(process.cwd(), config.dbPath), (m) => app.log.info(m));
 store.on('change', (snap) => analytics.pushSnapshot(snap));
 
-app.get('/api/snapshot', async () => store.get());
+app.get('/api/snapshot', async () => snapshotForClient());
 app.get('/api/health', async () => ({ ok: true, generatedAt: store.get().generatedAt }));
 
 /**
@@ -1585,7 +1591,7 @@ let wsFrameSeq = -1;
 let wsFrameStr = '';
 function snapshotFrame(): string {
   if (store.frameSeq !== wsFrameSeq) {
-    wsFrameStr = JSON.stringify({ type: 'snapshot', data: store.get() });
+    wsFrameStr = JSON.stringify({ type: 'snapshot', data: snapshotForClient() });
     wsFrameSeq = store.frameSeq;
   }
   return wsFrameStr;

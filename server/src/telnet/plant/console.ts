@@ -31,6 +31,15 @@ import type { AlarmState } from './scada.js';
 // v0.11.0 — the alarm banner is keyed on the 4-tier ISA-18.2 / IEC 62682
 // priority (Critical/High/Medium/Low) instead of the raw severity.
 import { priorityOf, comparePriority, type AlarmPriority } from '../../alertPriority.js';
+// v0.36.0 — the SHP2 is the grid interconnect; the grid is a BACKSTOP tapped
+// automatically when the pool hits its reserve floor. The resolver gives three
+// states to surface: ACTIVE (grid carrying the home now, via homeGridWatts — the
+// SHP2 main backstop path — or DPU ac_in import), AVAILABLE (present/declared but
+// on standby), and OFF-GRID (islanded).
+import { liveGridBackstop } from '../../gridState.js';
+
+/** v0.36.0 — the three operator-facing grid states (see import note above). */
+type GridState = 'active' | 'standby' | 'islanded';
 
 export function renderConsole(view: PlantView, data: PlantData): string[] {
   const W = view.width;
@@ -47,13 +56,28 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   const load = shp2
     ? sum(shp2.projection.circuits, (cir) => cir.watts)
     : sum(dpus, (d) => d.projection.acOutWatts);
-  const offGrid = acIn < 5;
+  // v0.36.0 — three grid states from the backstop resolver, not just off-grid vs
+  // tied. `gridWatts` is what the grid carries into the home when active (the SHP2
+  // main backstop path, falling back to the DPU ac_in import sum).
+  const grid = liveGridBackstop(data.snap.devices);
+  const gridState: GridState = !grid.present
+    ? 'islanded'
+    : grid.homeGridWatts > 0 || grid.importWatts > 0
+      ? 'active'
+      : 'standby';
+  const gridWatts = grid.homeGridWatts > 0 ? grid.homeGridWatts : grid.importWatts;
+  const offGrid = gridState === 'islanded';
 
   /* ── 1. status header ─────────────────────────────────────────────── */
+  // MODE conveys all three states: ISLANDED / GRID BACKSTOP / GRID STANDBY.
+  // Islanded reads as a normal operating posture (off-grid plant by design);
+  // an active backstop is the noteworthy transfer; standby is nominal-manual.
+  const modeText = gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'GRID BACKSTOP' : 'GRID STANDBY';
+  const modeState: AlarmState = gridState === 'islanded' ? 'normal' : gridState === 'active' ? 'warn' : 'manual';
   out.push(statusHeader({
     station: 'ECOFLOW · SITE 01 · OFF-GRID PLANT',
-    mode: offGrid ? 'ISLANDED' : 'GRID-TIED',
-    modeState: offGrid ? 'normal' : 'manual',
+    mode: modeText,
+    modeState,
     uptime: uptime(data.serverStartedAt),
     operator: 'eric@local',
   }, W));
@@ -86,7 +110,7 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   /* ── 3. mimic-style power-flow diagram ────────────────────────────── */
   out.push(divider('MIMIC — POWER FLOW', W));
   out.push('');
-  out.push(...renderMimic(pv, batNet, acIn, load, soc, offGrid, W));
+  out.push(...renderMimic(pv, batNet, gridWatts, load, soc, gridState, W));
   out.push('');
 
   /* ── 4. headline tag rows ─────────────────────────────────────────── */
@@ -136,6 +160,17 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
       // v0.9.33 — flags column is 8 chars wide; previous 'A/L/N · DCH' (11)
       // was silently truncated mid-word ('A/L/N · D'). Just show direction.
       flags: batNet > 5 ? 'DCH' : batNet < -5 ? 'CHG' : 'IDLE',
+    }, W),
+    // GRID.HOME.P — SHP2 main grid into the home (wattInfo.gridWatt): the
+    // authoritative whole-home backstop path, previously invisible to the TUI.
+    // GRID.AC.P below stays the DPU ac_in import path (grid charging the DPUs).
+    renderTagRow({
+      tag: 'GRID.HOME.P',
+      ...fmtW(grid.homeGridWatts),
+      state: gridState === 'islanded' ? 'oos' : gridState === 'active' ? 'normal' : 'comm',
+      quality: shp2 ? deviceQuality(shp2) : 'bad',
+      // 8-char flags column: BACKSTOP (8) / STANDBY (7) / ISLANDED (8) all fit.
+      flags: gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'BACKSTOP' : 'STANDBY',
     }, W),
     renderTagRow({
       tag: 'GRID.AC.P',
@@ -214,10 +249,10 @@ function fmtMinutes(m: number): string {
 function renderMimic(
   pv: number,
   batNet: number,
-  acIn: number,
+  gridWatts: number,
   load: number,
   soc: number | null | undefined,
-  offGrid: boolean,
+  gridState: GridState,
   width: number,
 ): string[] {
   const out: string[] = [];
@@ -253,7 +288,15 @@ function renderMimic(
   out.push(padEnd(' '.repeat(colW), colW) + '  ' + busMid + '  ' + padEnd(' '.repeat(colW), colW));
 
   // ─ row 4: GRID ←→ BUS → LOADS ───────────────────────────────────
-  const gridLabel = `⌁ ${c.cyan('GRID')}  ` + (offGrid ? c.grey('islanded') : c.whiteB(formatPower(acIn)));
+  // Three states: ACTIVE backstop (carrying the home now) → power + feed arrow;
+  // AVAILABLE → grey "standby"; ISLANDED → grey "islanded".
+  const gridValue =
+    gridState === 'islanded'
+      ? c.grey('islanded')
+      : gridState === 'active'
+        ? c.whiteB(formatPower(gridWatts)) + c.green(' ' + MIMIC.arrowR)
+        : c.cyan('standby');
+  const gridLabel = `⌁ ${c.cyan('GRID')}  ` + gridValue;
   const busBot = c.cyanB(MIMIC.dbl + MIMIC.dh.repeat(colW - 2) + MIMIC.dbr);
   const loadLabel = `${MIMIC.meter} ${c.cyan('LD')}  ` + c.whiteB(formatPower(load)) + c.grey('  feeders');
   out.push(padEnd(gridLabel, colW) + '  ' + busBot + '  ' + loadLabel);

@@ -32,6 +32,11 @@ export interface FleetSnapshot {
   generatedAt: number;
   devices: Record<string, DeviceSnapshot>;
   alerts?: Alert[]; // computed fleet-wide alerts (set by the alert monitor)
+  // v0.36.0 — the live grid backstop the dashboard/TUI consume. Inline-imported
+  // so no top-level import is added (avoids a snapshot.ts ↔ gridState.ts cycle,
+  // since gridState.ts already imports DeviceSnapshot from here).
+  grid?: import('./gridState.js').GridBackstop;
+  off_grid?: boolean;
 }
 
 const INCLUDE_RAW = process.env.SNAPSHOT_INCLUDE_RAW === '1';

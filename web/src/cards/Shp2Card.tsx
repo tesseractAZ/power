@@ -1,10 +1,121 @@
 import { lazy, memo, Suspense, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { DeviceSnapshot, Shp2Circuit, Shp2PairedCircuit, Shp2Projection } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { RefreshCloudButton } from '../components/RefreshCloudButton';
-import { HUES } from '../theme';
+import { HUES, UI } from '../theme';
+
+// v0.36.0 — the SHP2 IS the grid interconnect: grid is a BACKSTOP it taps
+// automatically when the backup pool hits its reserve floor (or for rebalancing).
+// The server attaches a GridBackstop (gridState.ts) + a top-level `off_grid` flag
+// onto the SHP2 device snapshot. The web `DeviceSnapshot` type doesn't declare
+// these yet, so we read them defensively off the runtime payload via a local
+// view (mirrors server/src/gridState.ts GridBackstop). Three operator-facing
+// states, in priority order:
+//   (1) ACTIVE   — grid carrying the home right now (homeGridWatts>0, or DPU
+//                  ac_in importWatts>0): show as a live source → "Grid X.X kW → home".
+//   (2) STANDBY  — grid present/declared but not needed (battery/PV covering):
+//                  "Grid: available (backstop)".
+//   (3) ISLANDED — grid not present: "Off-grid".
+interface GridBackstopView {
+  present?: boolean;
+  backstopping?: boolean;
+  importLive?: boolean;
+  declared?: boolean;
+  importWatts?: number;
+  homeGridWatts?: number;
+  reason?: string;
+}
+
+type GridStatus =
+  | { state: 'active'; homeWatts: number; importWatts: number; reason?: string }
+  | { state: 'standby'; reason?: string }
+  | { state: 'islanded'; reason?: string }
+  | { state: 'unknown' };
+
+function resolveGridStatus(
+  grid: GridBackstopView | undefined,
+  offGrid: boolean | undefined,
+): GridStatus {
+  // Off-grid is authoritative: an islanded SHP2 has no grid to tap.
+  if (offGrid === true || grid?.present === false) {
+    return { state: 'islanded', reason: grid?.reason };
+  }
+  if (!grid) return { state: 'unknown' };
+  const homeWatts = grid.homeGridWatts ?? 0;
+  const importWatts = grid.importWatts ?? 0;
+  // ACTIVE NOW — grid is carrying the home (SHP2 main backstop) or charging the
+  // DPUs (ac_in). Either measured flow means the grid is being tapped right now.
+  if (homeWatts > 0 || importWatts > 0 || grid.importLive) {
+    return { state: 'active', homeWatts, importWatts, reason: grid.reason };
+  }
+  // Present/declared but no measured flow → grid is there as a standby backstop.
+  if (grid.present || grid.declared) {
+    return { state: 'standby', reason: grid.reason };
+  }
+  return { state: 'unknown' };
+}
+
+function GridStatusLine({ d }: { d: DeviceSnapshot & { grid?: GridBackstopView; off_grid?: boolean } }) {
+  const status = resolveGridStatus(d.grid, d.off_grid);
+  if (status.state === 'unknown') return null;
+
+  // Theme-aware colors: grid identity hue for the live/standby states, the card's
+  // bad token for an islanded home. cssVar (UI.*) keeps B5 (dark) correct.
+  const dotStyle = (color: string) => ({
+    width: 8,
+    height: 8,
+    borderRadius: 9999,
+    background: color,
+    flex: '0 0 auto',
+  });
+
+  let dot: string;
+  let label: ReactNode;
+  let detail: string | undefined;
+
+  if (status.state === 'active') {
+    dot = HUES.grid;
+    // Prefer the SHP2 main-line home power (the new backstop path); fall back to
+    // the DPU ac_in import when only that is flowing.
+    const flowWatts = status.homeWatts > 0 ? status.homeWatts : status.importWatts;
+    const kw = (flowWatts / 1000).toFixed(1);
+    label = (
+      <span>
+        <span className="font-semibold" style={{ color: UI.ink }}>Grid {kw} kW</span>
+        <span style={{ color: UI.muted }}> → home</span>
+      </span>
+    );
+    detail = status.homeWatts > 0 ? 'backstopping the home now' : 'charging the cores (ac-in)';
+  } else if (status.state === 'standby') {
+    dot = HUES.grid;
+    label = (
+      <span style={{ color: UI.muted }}>
+        Grid: <span className="font-medium" style={{ color: UI.ink }}>available</span> (standby backstop)
+      </span>
+    );
+    detail = 'connected, not needed — battery/PV covering';
+  } else {
+    // islanded
+    dot = UI.bad;
+    label = <span className="font-semibold" style={{ color: UI.bad }}>Off-grid (islanded)</span>;
+    detail = 'no grid — running on battery + PV';
+  }
+
+  return (
+    <div
+      className="mt-2 flex items-center gap-2 rounded-md px-2.5 py-1.5"
+      style={{ background: UI.panel2, border: `1px solid ${UI.line}` }}
+      title={status.reason}
+    >
+      <span style={dotStyle(dot)} />
+      <span className="text-sm leading-tight">{label}</span>
+      {detail ? <span className="text-[10px] ml-auto text-right" style={{ color: UI.muted }}>{detail}</span> : null}
+    </div>
+  );
+}
 
 // v0.22.0 — CircuitModal pulls in recharts (its 24 h circuit chart). It only
 // renders when the user clicks a circuit tile, so a STATIC import here would
@@ -16,7 +127,13 @@ const CircuitModal = lazy(() =>
 );
 
 // v0.22.0 — memo skips parent-driven re-renders that don't change `d`.
-export const Shp2Card = memo(function Shp2Card({ d }: { d: DeviceSnapshot & { projection?: Shp2Projection } }) {
+// v0.36.0 — the SHP2 snapshot also carries the grid-backstop view (`grid`) and a
+// top-level `off_grid` flag, surfaced here as the grid-interconnect status line.
+export const Shp2Card = memo(function Shp2Card({
+  d,
+}: {
+  d: DeviceSnapshot & { projection?: Shp2Projection; grid?: GridBackstopView; off_grid?: boolean };
+}) {
   const p = d.projection;
   // v0.9.8 — track both the leg (for breaker/single-leg fields) and the pair
   // (for combined 240 V chart + kWh history) when the user clicks a paired tile.
@@ -35,6 +152,10 @@ export const Shp2Card = memo(function Shp2Card({ d }: { d: DeviceSnapshot & { pr
           <RefreshCloudButton sn={d.sn} deviceLabel={d.deviceName} />
         </div>
       </div>
+
+      {/* v0.36.0 — grid interconnect status: the SHP2 connects the grid and taps
+          it as a backstop when the backup pool needs it. ACTIVE / STANDBY / ISLANDED. */}
+      <GridStatusLine d={d} />
 
       {!p ? (
         <div className="text-sm text-muted">No telemetry yet.</div>

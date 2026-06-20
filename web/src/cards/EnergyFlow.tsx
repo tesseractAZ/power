@@ -3,11 +3,48 @@ import { fmtPct, fmtW } from '../format';
 import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 import { HUES, UI } from '../theme';
 
-interface Props {
-  devices: Record<string, DeviceSnapshot>;
+/**
+ * v0.36.0 — theme-aware fonts for SVG <text>. The B5 theme swaps `--font-sans`
+ * → Orbitron and `--font-mono` → Share Tech Mono under [data-theme="b5"]
+ * (src/index.css); the Default theme resolves them to ui-sans-serif /
+ * ui-monospace, so referencing the CSS var stays byte-identical on Default
+ * while letting B5 re-skin. Hardcoding "ui-sans-serif"/"ui-monospace" here
+ * (as the old core-kW label did) bypasses that swap and clashes with the rest
+ * of the B5 chrome — so all flow labels route through these vars instead.
+ */
+const FONT_SANS = 'var(--font-sans)';
+const FONT_MONO = 'var(--font-mono)';
+
+/**
+ * v0.36.0 — the SHP2 grid backstop, mirrored from the server's GridBackstop
+ * (server/src/gridState.ts) and surfaced on the fleet snapshot as `snapshot.grid`.
+ * Optional here so the card degrades gracefully (legacy DPU-acIn-only view) on a
+ * cold snapshot that predates the field. The SHP2 is the grid interconnect; the
+ * grid is a BACKSTOP that is tapped automatically at the reserve floor / for
+ * rebalancing. Three states the flow renders:
+ *   (1) ACTIVE   — homeGridWatts>0 (or importWatts>0): grid carrying the home now.
+ *   (2) STANDBY  — present/declared but homeGridWatts≈0: there, not yet needed.
+ *   (3) OFF-GRID — present false: islanded.
+ */
+export interface GridBackstop {
+  present: boolean;
+  backstopping: boolean;
+  importLive: boolean;
+  declared: boolean;
+  /** Grid charging the DPUs (DPU ac_in path), W. */
+  importWatts: number;
+  /** SHP2 main-line grid power into the home (wattInfo.gridWatt), W. */
+  homeGridWatts: number;
+  reason?: string;
 }
 
-export function EnergyFlow({ devices }: Props) {
+interface Props {
+  devices: Record<string, DeviceSnapshot>;
+  /** v0.36.0 — SHP2 grid backstop (snapshot.grid). Absent on a cold snapshot. */
+  grid?: GridBackstop;
+}
+
+export function EnergyFlow({ devices, grid }: Props) {
   const list = Object.values(devices);
   const allDpus = list.filter((d) => d.projection?.kind === 'dpu' && d.online) as Array<DeviceSnapshot & { projection: DpuProjection }>;
   const shp2 = list.find((d) => d.projection?.kind === 'shp2') as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
@@ -40,7 +77,36 @@ export function EnergyFlow({ devices }: Props) {
   const batNet = totalOut - totalIn; // > 0 = discharging
   const soc = dpus.length === 0 ? null : dpus.reduce((s, d) => s + (d.projection.soc ?? 0), 0) / dpus.length;
   const load = shp2?.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0) ?? acOut;
-  const offGrid = acIn < 5;
+
+  // ── v0.36.0 — 3-state grid supply model ─────────────────────────────────
+  // The SHP2 is the grid interconnect; the grid is a BACKSTOP, tapped
+  // automatically at the reserve floor / for rebalancing. The OLD diagram only
+  // knew off-grid vs DPU-acIn import and was blind to the home-grid backstop
+  // (the SHP2 carrying the home directly through the panel without charging the
+  // DPUs). `snapshot.grid.homeGridWatts` exposes that path now.
+  //
+  // homeGridWatts (SHP2 main) is the authoritative live "grid → home" flow;
+  // importWatts (DPU ac_in) is grid charging the DPUs. Either > 0 ⇒ grid ACTIVE.
+  // When the snapshot predates the field, fall back to the legacy acIn signal so
+  // the card still renders a sensible (import-only) view.
+  const homeGridW = grid?.homeGridWatts ?? 0;
+  const gridImportW = grid?.importWatts ?? acIn;
+  // The kW figure to show on the grid→home flow when active: prefer the SHP2
+  // main-line measurement (the home backstop), else the DPU-charging import.
+  const gridSupplyW = homeGridW > 0 ? homeGridW : gridImportW;
+
+  // State resolution. With `grid` present, trust its present/declared flags;
+  // otherwise derive from the legacy acIn threshold (matches the old offGrid<5).
+  const gridActive = grid
+    ? homeGridW > 0 || gridImportW >= 5
+    : acIn >= 5;
+  const gridPresent = grid ? grid.present || grid.declared : acIn >= 5;
+  // (1) ACTIVE/BACKSTOPPING, (2) AVAILABLE/STANDBY, (3) OFF-GRID (islanded).
+  const gridState: 'active' | 'standby' | 'off' = gridActive
+    ? 'active'
+    : gridPresent
+      ? 'standby'
+      : 'off';
 
   // SVG geometry
   const W = 720;
@@ -63,7 +129,13 @@ export function EnergyFlow({ devices }: Props) {
       <div className="card-title flex items-center justify-between">
         <span>Energy flow</span>
         <span className="flex items-center gap-2 normal-case tracking-normal text-xs text-muted">
-          {offGrid ? <span className="badge badge-warn">off-grid</span> : <span className="badge badge-ok">grid-tied</span>}
+          {gridState === 'off' ? (
+            <span className="badge badge-warn">off-grid</span>
+          ) : gridState === 'active' ? (
+            <span className="badge badge-ok">grid active</span>
+          ) : (
+            <span className="badge badge-ok">grid standby</span>
+          )}
         </span>
       </div>
 
@@ -76,15 +148,36 @@ export function EnergyFlow({ devices }: Props) {
 
         {/* PV → Battery */}
         <FlowLine from={[Solar.x + Solar.w, Solar.y + Solar.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={pv} color={HUES.solar} period={period(pv)} strokeW={strokeW(pv)} label="solar" />
-        {/* Grid ↔ Battery */}
-        <FlowLine from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={acIn} color={HUES.grid} period={period(acIn)} strokeW={strokeW(acIn)} label="grid" />
+        {/* Grid → Home (backstop). v0.36.0 — three states:
+            (1) ACTIVE: animated grid→battery flow labelled with the live kW the
+                SHP2 is pulling to carry the home (homeGridWatts) or to charge
+                the DPUs (importWatts).
+            (2) STANDBY: a faint, un-animated connector — grid is there but the
+                battery/PV is covering, so it is NOT a live source.
+            (3) OFF-GRID: omit the flow entirely (islanded). */}
+        {gridState === 'active' ? (
+          <FlowLine from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={gridSupplyW} color={HUES.grid} period={period(gridSupplyW)} strokeW={strokeW(gridSupplyW)} label="grid" />
+        ) : gridState === 'standby' ? (
+          <StandbyLink from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} color={HUES.grid} />
+        ) : null}
         {/* Battery → Loads (use load if available, fallback acOut) */}
         <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={Math.max(load, acOut)} color={HUES.soc} period={period(Math.max(load, acOut))} strokeW={strokeW(Math.max(load, acOut))} label="ac-out" />
 
         {/* Solar node */}
         <Node {...Solar} title="Solar" subtitle="42 panels" value={fmtW(pv)} icon="☀" accent={HUES.solar} />
-        {/* Grid node */}
-        <Node {...Grid} title="Grid" subtitle={offGrid ? 'islanded' : 'imported'} value={fmtW(acIn)} icon="⌁" accent={offGrid ? HUES.grid : HUES.battery} />
+        {/* Grid node — 3-state subtitle + value:
+            active → live kW into the home; standby → "standby" backstop;
+            off → "islanded". The amber/accent treatment is reserved for the
+            ACTIVE state so a backstopping grid reads as a live source. */}
+        <Node
+          {...Grid}
+          title="Grid"
+          subtitle={gridState === 'active' ? 'backstopping' : gridState === 'standby' ? 'standby / backstop' : 'islanded'}
+          value={gridState === 'active' ? fmtW(gridSupplyW) : gridState === 'standby' ? 'available' : 'off'}
+          icon="⌁"
+          accent={gridState === 'active' ? HUES.battery : HUES.grid}
+          dim={gridState !== 'active'}
+        />
         {/* Battery node (big) */}
         <Node
           {...Battery}
@@ -112,6 +205,7 @@ function Node({
   icon,
   accent,
   big = false,
+  dim = false,
 }: {
   x: number;
   y: number;
@@ -123,18 +217,54 @@ function Node({
   icon?: string;
   accent: string;
   big?: boolean;
+  /** Render the node muted (standby / off-grid) so it doesn't read as live. */
+  dim?: boolean;
 }) {
   return (
-    <g>
-      <rect x={x} y={y} width={w} height={h} rx={6} fill={UI.elev} stroke={accent} strokeOpacity={0.9} strokeWidth={1.5} />
-      <text x={x + 12} y={y + 18} fill={UI.muted} fontSize="10" fontFamily="ui-sans-serif" letterSpacing="0.1em" style={{ textTransform: 'uppercase' }}>{title}</text>
-      <text x={x + 12} y={y + h - 10} fill={UI.muted} fontSize="10" fontFamily="ui-sans-serif">{subtitle ?? ''}</text>
-      <text x={x + w - 12} y={y + h / 2 + (big ? 8 : 6)} textAnchor="end" fill={accent} fontSize={big ? 28 : 18} fontWeight="700" fontFamily="ui-sans-serif">
+    <g opacity={dim ? 0.6 : 1}>
+      <rect x={x} y={y} width={w} height={h} rx={6} fill={UI.elev} stroke={accent} strokeOpacity={dim ? 0.5 : 0.9} strokeWidth={1.5} strokeDasharray={dim ? '4 4' : undefined} />
+      <text x={x + 12} y={y + 18} fill={UI.muted} fontSize="10" fontFamily={FONT_SANS} letterSpacing="0.1em" style={{ textTransform: 'uppercase' }}>{title}</text>
+      <text x={x + 12} y={y + h - 10} fill={UI.muted} fontSize="10" fontFamily={FONT_SANS}>{subtitle ?? ''}</text>
+      {/* The central core/value readout — uses the theme MONO var (Share Tech
+          Mono in B5) so it matches the rest of the B5 flow chrome instead of the
+          old hardcoded ui-sans-serif that clashed with the dark station UI. */}
+      <text x={x + w - 12} y={y + h / 2 + (big ? 8 : 6)} textAnchor="end" fill={accent} fontSize={big ? 28 : 18} fontWeight="700" fontFamily={FONT_MONO}>
         {value}
       </text>
       {icon && (
-        <text x={x + 12} y={y + h / 2 + 8} fill={accent} fontSize={big ? 26 : 22} fontFamily="ui-sans-serif">{icon}</text>
+        <text x={x + 12} y={y + h / 2 + 8} fill={accent} fontSize={big ? 26 : 22} fontFamily={FONT_SANS}>{icon}</text>
       )}
+    </g>
+  );
+}
+
+/**
+ * v0.36.0 — a faint, un-animated connector for the grid STANDBY state: the grid
+ * interconnect is present and available but the battery/PV is covering the home,
+ * so it is NOT a live flow. Visually distinct from FlowLine (no moving dashes,
+ * lower opacity) so a backstop-on-standby never reads as imported power.
+ */
+function StandbyLink({ from, to, color }: { from: [number, number]; to: [number, number]; color: string }) {
+  const [x1, y1] = from;
+  const [x2, y2] = to;
+  const cx = (x1 + x2) / 2;
+  const d = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+  return (
+    <g>
+      <path d={d} fill="none" stroke={color} strokeOpacity={0.22} strokeWidth={1.5} strokeDasharray="2 6" />
+      <text
+        x={(x1 + x2) / 2}
+        y={(y1 + y2) / 2 - 11}
+        textAnchor="middle"
+        fill={color}
+        fontSize="11"
+        fontFamily={FONT_SANS}
+        stroke={UI.panel}
+        strokeWidth={4}
+        style={{ paintOrder: 'stroke' }}
+      >
+        standby
+      </text>
     </g>
   );
 }
@@ -187,7 +317,7 @@ function FlowLine({
           textAnchor="middle"
           fill={color}
           fontSize="12"
-          fontFamily="ui-monospace"
+          fontFamily={FONT_MONO}
           fontWeight="700"
           stroke={UI.panel}
           strokeWidth={4}

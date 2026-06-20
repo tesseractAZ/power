@@ -3,6 +3,15 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.37.0 — 2026-06-20
+
+UI refresh — grid-supply visibility (GUI + TUI) + dashboard/Solar layout.
+
+- **Removed the Hide/Show History toggle** — the 24h history charts always render.
+- **Overview reorder** — the SHP2 card + active DPU cards now sit directly under the Today summary.
+- **Solar page** — LV/HV per-DPU MPPT detail moved up under the flow/overview section; fixed Curtailment-card white backgrounds on the B5 theme; the core-kW flow label now uses the theme font (Orbitron / Share Tech Mono on B5).
+- **Grid-supply understanding (GUI + TUI)** — the SHP2 is shown as the grid interconnect that taps grid as a backstop when needed. EnergyFlow, the SHP2 card, and the TUI now distinguish ACTIVE (grid carrying the home — kW shown), AVAILABLE (standby backstop), and OFF-GRID (islanded), driven by the v0.36.0 grid-backstop resolver. The client snapshot now carries `grid` + `off_grid`.
+
 ## 0.36.0 — 2026-06-20
 
 Grid-backstop resolver now sees the whole-home grid path, closing the gap where a grid carrying home loads at the reserve floor was invisible to the floor/runway/SoC alarm logic.
