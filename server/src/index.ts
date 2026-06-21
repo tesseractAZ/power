@@ -1142,7 +1142,10 @@ app.get('/api/ha-state', async (req, reply) => {
     fleet_battery_net_watts: Math.round(fleetBatteryNet), // v0.10.4 per-pack; positive = discharging
     panel_load_watts: Math.round(panelLoad),
     ac_import_watts: Math.round(acIn),
-    off_grid: acIn < 5,
+    // v0.40.0 — resolve via the grid-presence resolver, not `acIn < 5` (DPU ac_in is ~0 on
+    // a PV/battery-covered home → falsely pinned off-grid 24/7). Matches /api/snapshot's
+    // off_grid (snapshotForClient) and the alarm engine's grid-presence view.
+    off_grid: !liveGridBackstop(snap.devices).present,
 
     // Battery — SHP2 backup pool
     backup_pool_percent: shp2?.projection.backupBatPercent ?? null,

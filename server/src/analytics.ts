@@ -3744,8 +3744,18 @@ export interface SelfConsumption {
   gridToHomeKwh: number;
   pvToLoadKwh: number;     // estimate: PV that went straight to load (PV − battery-charge − export)
   pvToBatteryKwh: number;  // estimate: PV that charged the battery
-  solarFractionOfLoadPct: number | null; // (loadKwh − whole-home grid) ÷ loadKwh, where whole-home grid = max(gridToHomeKwh, gridImportKwh) — share of load not served by grid import
+  solarFractionOfLoadPct: number | null; // (loadKwh − gridForKpiKwh) ÷ loadKwh — share of load not served by grid; null when grid can't be trusted (see gridForKpiKwh)
   directUseRatioPct: number | null;      // pvToLoad ÷ pvKwh
+  /** v0.40.0 — the coverage-GATED grid term used for solarFraction & carbon:
+   *  max(gridToHomeKwh, gridImportKwh) when grid_home_w covers the load window;
+   *  null when an SHP2 home's grid_home_w hasn't accumulated enough history yet
+   *  (so the KPIs read "unknown" rather than an impossible value); gridImportKwh on
+   *  a DPU-only install with no SHP2 main. */
+  gridForKpiKwh: number | null;
+  /** v0.40.0 — grid_home_w measured coverage as a fraction of panel_load coverage
+   *  over the window (0..1). Below GRID_HOME_MIN_COVERAGE the whole-home grid term
+   *  is not trusted. */
+  gridHomeCoverageFrac: number;
 }
 
 let selfConsumptionCache: { ts: number; key: string; value: SelfConsumption } | null = null;
@@ -3825,6 +3835,13 @@ export function windowedEnergyWh(
 
 /** Test/bench seam: clear the per-day energy memo. */
 export function resetDailyEnergyCache(): void { dailyEnergyWhCache.clear(); }
+
+/** v0.40.0 — minimum grid_home_w coverage (as a fraction of panel_load coverage over
+ *  the window) required before the whole-home grid term is trusted for the
+ *  solarFraction / carbon KPIs. The grid term is differenced against load, so it must be
+ *  measured wherever load is; below this the metric spans only part of the load window
+ *  and its integral undercounts grid, inflating the KPIs. */
+const GRID_HOME_MIN_COVERAGE = 0.9;
 
 export function computeSelfConsumption(
   devices: Record<string, DeviceSnapshot>,
@@ -3906,13 +3923,37 @@ export function computeSelfConsumption(
   // fresh install (or any window before v0.34.0) it reads ~0 until grid_home_w
   // accumulates history.
   const gridToHomeKwh = (shp2Wh.get('grid_home_w') ?? 0) / 1000;
-  // Coalesced grid figure for the solarFraction / carbon KPIs. Whole-home grid
-  // (gridToHomeKwh) is the correct superset and is ≥ the DPU-ac_in subset
-  // (gridImportKwh) whenever grid_home_w is populated, so max() picks the correct
-  // whole-home value when present; when grid_home_w has no data yet (fresh install /
-  // pre-v0.34.0 window) gridToHomeKwh is 0 and max() falls back to the legacy
-  // gridImportKwh — never undercounting and needing no 7-day history gate.
-  const gridForFraction = Math.max(gridToHomeKwh, gridImportKwh);
+  // v0.40.0 — COVERAGE GATE (corrects the v0.39.0 "no gate needed" assumption).
+  // integrateWh reports a metric's partial integral as a full-window total — the
+  // pre-instrumentation span just counts as 0 Wh. grid_home_w was instrumented in
+  // v0.34.0 with NO back-fill, so for ~7 days after the update it covers only the TAIL
+  // of the window while panel_load covers all of it → the grid term is a gross undercount
+  // and solarFraction / carbon come out impossibly inflated (observed live 2026-06-21:
+  // solar_fraction_of_load = 91.8 %, vs a ~46 % PV/load ceiling). max() cannot rescue
+  // this — both args undercount. Gate on grid_home_w coverage RELATIVE TO panel_load
+  // coverage (not the raw window): the grid term is differenced against load, so it must
+  // be measured wherever load is. This passes a genuinely-short-but-complete history (and
+  // test fixtures), and only trips during the instrument-ramp asymmetry that causes the bug.
+  let gridHomeCoverageFrac = 0;
+  if (shp2) {
+    const cov = recorder.queryMulti(
+      shp2.sn, ['panel_load', 'grid_home_w'], since - DAILY_ENERGY_LOOKBACK_MS, now, ANALYTICS_BUCKET_SEC,
+    );
+    const loadCovMs = integrateWh(cov.get('panel_load') ?? [], since, now).coverageMs;
+    const gridCovMs = integrateWh(cov.get('grid_home_w') ?? [], since, now).coverageMs;
+    gridHomeCoverageFrac = loadCovMs > 0 ? Math.min(1, gridCovMs / loadCovMs) : 0;
+  }
+  const gridHomeTrusted = !!shp2 && gridHomeCoverageFrac >= GRID_HOME_MIN_COVERAGE;
+  // Grid term for the grid-displacement KPIs (solarFraction, carbon):
+  //  • SHP2 home + grid_home_w covers the load window → whole-home superset max(…).
+  //  • SHP2 home + grid_home_w does NOT yet cover it → null: this home's grid flows
+  //    through the SHP2 main, which the DPU ac_in is structurally blind to, so without
+  //    grid_home_w we cannot honestly measure grid — publish unknown over a wrong number.
+  //  • No SHP2 (DPU-only install) → ac_in IS the grid measure (loadKwh≈0 there anyway).
+  const gridForKpiKwh: number | null =
+    !shp2 ? gridImportKwh
+      : gridHomeTrusted ? Math.max(gridToHomeKwh, gridImportKwh)
+        : null;
 
   // Charge fed by PV is what the PV produced beyond what went to load — the rest
   // came from grid. On an off-grid system gridImportKwh ≈ 0 and PV ≈ load+charge.
@@ -3934,8 +3975,13 @@ export function computeSelfConsumption(
     // transited the battery (counted at charge AND again at discharge),
     // yielding an impossible 104.5% while importing 76 kWh of grid. The
     // grid-displacement form caps at 100% by construction.
-    solarFractionOfLoadPct: loadKwh > 0.5 ? Math.max(0, Math.round(((loadKwh - gridForFraction) / loadKwh) * 1000) / 10) : null,
+    // v0.40.0 — null when gridForKpiKwh is untrusted (grid_home_w ramp on an SHP2 home).
+    solarFractionOfLoadPct: (loadKwh > 0.5 && gridForKpiKwh != null)
+      ? Math.max(0, Math.round(((loadKwh - gridForKpiKwh) / loadKwh) * 1000) / 10)
+      : null,
     directUseRatioPct: pvKwh > 0.5 ? Math.round((pvToLoadKwh / pvKwh) * 1000) / 10 : null,
+    gridForKpiKwh: gridForKpiKwh != null ? round2(gridForKpiKwh) : null,
+    gridHomeCoverageFrac: Math.round(gridHomeCoverageFrac * 1000) / 1000,
   };
   // v0.15.13 — require a structurally complete fleet (≥1 DPU AND the SHP2)
   // before caching. The v0.15.11-era guard accepted any DPU, but during the
@@ -5120,11 +5166,12 @@ export interface CarbonReport {
   generatedAt: number;
   gridCo2IntensityKgPerKwh: number;
   windowDays: number;
-  // Recent rolling window
-  pvToLoadKgAvoided: number;
-  batteryDischargeKgAvoided: number;
-  totalKgAvoided: number;
-  equivMilesNotDriven: number;
+  // Recent rolling window. v0.40.0 — null when the whole-home grid term isn't trusted
+  // yet (grid_home_w ramp on an SHP2 home); the lifetime fields below are unaffected.
+  pvToLoadKgAvoided: number | null;
+  batteryDischargeKgAvoided: number | null;
+  totalKgAvoided: number | null;
+  equivMilesNotDriven: number | null;
   // Lifetime (since the persistent lifetime accumulator started recording)
   lifetimePvKwh: number;
   lifetimeKgAvoided: number;
@@ -5151,23 +5198,25 @@ export function computeCarbonReport(
   // Prior `pvToLoad + batteryDischarge` double-counted PV that cycled through
   // the battery (~23% overstatement / ~50 kg). Cap the battery-served
   // component to the remainder so the parts still sum to the honest total.
-  // Whole-home grid = max(gridToHomeKwh, gridImportKwh): the SHP2 main figure
-  // when it has history, falling back to the DPU-ac_in subset on fresh installs
-  // (gridToHomeKwh ~0) so we never undercount grid and overstate displacement.
-  const gridDisplacedKwh = Math.max(0, sc.loadKwh - Math.max(sc.gridToHomeKwh, sc.gridImportKwh));
-  const totalKg = gridDisplacedKwh * intensity;
-  const pvToLoadKg = Math.min(sc.pvToLoadKwh * intensity, totalKg);
-  const batteryDischargeKg = Math.max(0, totalKg - pvToLoadKg);
+  // v0.40.0 — reuse the COVERAGE-GATED grid term from self-consumption. When the SHP2
+  // whole-home grid metric (grid_home_w) doesn't yet span the load window, gridForKpiKwh
+  // is null and we cannot honestly compute grid displaced → null the WINDOW carbon rather
+  // than overstate it ~1.7× (the lifetime figures below derive from lifetime PV and are
+  // unaffected). Mirrors the solarFractionOfLoadPct gate.
+  const gridDisplacedKwh = sc.gridForKpiKwh != null ? Math.max(0, sc.loadKwh - sc.gridForKpiKwh) : null;
+  const totalKg = gridDisplacedKwh != null ? gridDisplacedKwh * intensity : null;
+  const pvToLoadKg = totalKg != null ? Math.min(sc.pvToLoadKwh * intensity, totalKg) : null;
+  const batteryDischargeKg = totalKg != null && pvToLoadKg != null ? Math.max(0, totalKg - pvToLoadKg) : null;
   const lifetimeKg = pvLifetimeKwh * intensity; // lifetime PV ≈ grid kWh avoided
 
   const value: CarbonReport = {
     generatedAt: Date.now(),
     gridCo2IntensityKgPerKwh: Math.round(intensity * 10000) / 10000,
     windowDays,
-    pvToLoadKgAvoided: round2(pvToLoadKg),
-    batteryDischargeKgAvoided: round2(batteryDischargeKg),
-    totalKgAvoided: round2(totalKg),
-    equivMilesNotDriven: Math.round(totalKg / KG_CO2_PER_MILE),
+    pvToLoadKgAvoided: pvToLoadKg != null ? round2(pvToLoadKg) : null,
+    batteryDischargeKgAvoided: batteryDischargeKg != null ? round2(batteryDischargeKg) : null,
+    totalKgAvoided: totalKg != null ? round2(totalKg) : null,
+    equivMilesNotDriven: totalKg != null ? Math.round(totalKg / KG_CO2_PER_MILE) : null,
     lifetimePvKwh: round2(pvLifetimeKwh),
     lifetimeKgAvoided: Math.round(lifetimeKg),
     lifetimeMilesNotDriven: Math.round(lifetimeKg / KG_CO2_PER_MILE),

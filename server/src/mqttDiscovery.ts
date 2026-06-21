@@ -25,6 +25,7 @@ import { advisoryStateFields, getLatestAdvisory } from './loadShedAdvisor.js';
 // v0.15.19 — lighting energy posture (runway-driven; see lightingPosture.ts).
 import { lightingPostureTracker } from './lightingPosture.js';
 import { belowReserveFloor } from './runwayAlarm.js';
+import { liveGridBackstop } from './gridState.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -169,7 +170,10 @@ export const SENSORS: SensorConfig[] = [
 ];
 
 export const BINARY_SENSORS = [
-  { unique_id: 'ecoflow_off_grid', name: 'EcoFlow Off-Grid', device_class: 'connectivity', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
+  // v0.40.0 — no device_class: 'connectivity' here. That class means ON=connected, which
+  // INVERTS this sensor's meaning (off_grid=true → ON would read as "connected"). A plain
+  // binary sensor keeps ON=off-grid unambiguous; the tower-off icon conveys state.
+  { unique_id: 'ecoflow_off_grid', name: 'EcoFlow Off-Grid', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
   // v0.9.77 — fires when the system is actively curtailing PV (batteries
   // full + home load < expected PV). HA can trigger automations off this
   // — e.g. "if curtailing for 10 min then turn pool pump on full speed."
@@ -521,7 +525,12 @@ export async function startMqttDiscovery(
       panel_load_watts: Math.round(panelLoad),
       ac_import_watts: Math.round(acIn),
       fleet_battery_net_watts: Math.round(fleetBatteryNet),
-      off_grid: acIn < 5,
+      // v0.40.0 — resolve off-grid via the grid-presence resolver (GRID_PRESENCE_ENTITY +
+      // SHP2 gridWatt + DPU ac_in), NOT `acIn < 5`. On a PV/battery-covered home DPU ac_in
+      // is structurally ~0, so the old test pinned this sensor to off-grid 24/7 even while
+      // the operator's grid toggle was ON and the SHP2 backstopped the home from grid. This
+      // now matches the alarm engine's view (which kept critical=0 through the floor drain).
+      off_grid: !liveGridBackstop(snap.devices).present,
       backup_pool_percent: shp2?.projection.backupBatPercent ?? null,
       backup_remaining_kwh: kwh1(shp2?.projection.backupRemainWh),
       backup_full_capacity_kwh: kwh1(shp2?.projection.backupFullCapWh),
