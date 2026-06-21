@@ -187,7 +187,10 @@ export function AdvancedInsightsCard() {
                 <div key={`${s.sn}-${s.string}`} className="text-xs flex items-baseline gap-2 py-0.5">
                   <span className="w-24 shrink-0">Core {s.coreNum} {s.string}</span>
                   <span className="font-mono tabular-nums">{s.recentEffPct}% / base {s.baselineEffPct}%</span>
-                  <span className={`text-[10px] ${(s.driftPctPts ?? 0) < -1 ? 'text-warn' : 'text-muted'}`}>
+                  {/* v0.41.0 — warn-color at the SAME threshold the repair-issue alert fires
+                       (repairIssues.ts MPPT drift gate = −3 pp), not −1, so the color can't
+                       imply a problem the alert engine doesn't act on. */}
+                  <span className={`text-[10px] ${(s.driftPctPts ?? 0) < -3 ? 'text-warn' : 'text-muted'}`}>
                     {s.driftPctPts != null ? (s.driftPctPts >= 0 ? '+' : '') + s.driftPctPts : ''}
                   </span>
                 </div>

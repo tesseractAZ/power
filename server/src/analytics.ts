@@ -456,19 +456,47 @@ function linregress(pts: Array<{ ts: number; value: number }>): LinFit | null {
   return { slopePerMs: slope, intercept, r2, n, slopeStdErrPerMs };
 }
 
-let forecastCache: { ts: number; alerts: Alert[] } | null = null;
+let forecastCache: { ts: number; alerts: Alert[]; depletionGate: boolean } | null = null;
+/** Test seam — clear the forecast-alert cache so successive scenarios recompute. */
+export function resetForecastAlertsCache(): void { forecastCache = null; }
 
 /** Phase 3 learned alerts: runtime forecast + degradation projections. Cached ~10 min. */
-export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, recorder: Recorder): Alert[] {
-  if (forecastCache && Date.now() - forecastCache.ts < FORECAST_TTL_MS) {
-    return forecastCache.alerts;
-  }
-  const out: Alert[] = [];
-  const now = Date.now();
+export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, recorder: Recorder, forecast?: DayForecast): Alert[] {
   const list = Object.values(devices);
   const shp2 = list.find((d) => d.online && d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
+  // v0.41.0 — the runtime depletion alert is gated on whether the diurnal day-forecast
+  // ALSO projects reaching the reserve floor, so the emitted alert set now depends on
+  // `forecast`. The time-based cache therefore has to key on that gate too: without it, a
+  // call within the TTL carrying a different forecast (or `undefined`) would return alerts
+  // computed under the PREVIOUS forecast and wrongly suppress/emit the runtime alert
+  // (flagged in the v0.41.0 Copilot review). We key on the gate BOOLEAN — not the raw
+  // minProjectedSoc — so the cache still survives the per-cycle forecast jitter and only
+  // invalidates when the depletion verdict actually flips.
+  const reserveForGate = shp2?.projection.backupReserveSoc ?? 15;
+  // v0.41.0 (Copilot follow-up) — compare against the forecast's OWN reserve floor when it
+  // carries one: `minProjectedSoc` was projected relative to `forecast.reserveSoc` (see
+  // getDayForecast, which sets reserveSoc = backupReserveSoc ?? 15). Falling back to the live
+  // SHP2 reserve keeps the gate self-consistent even if a caller passes a forecast that
+  // doesn't exactly match the current SHP2 snapshot (stale/synthetic inputs). The comparison
+  // is STRICTLY below reserve (`<`) — matching getDayForecast's own depletion alert
+  // (`df.minProjectedSoc < df.reserveSoc`); a projection that merely touches the floor must
+  // NOT flip this gate while the forecast card still reads "stays above the reserve floor"
+  // (that exact-boundary mismatch would re-introduce the cross-card contradiction this fixes).
+  const diurnalConfirmsDepletion =
+    forecast != null &&
+    forecast.minProjectedSoc != null &&
+    forecast.minProjectedSoc < (forecast.reserveSoc ?? reserveForGate);
+  if (
+    forecastCache &&
+    forecastCache.depletionGate === diurnalConfirmsDepletion &&
+    Date.now() - forecastCache.ts < FORECAST_TTL_MS
+  ) {
+    return forecastCache.alerts;
+  }
+  const out: Alert[] = [];
+  const now = Date.now();
   const dpus = list.filter((d) => d.online && d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
@@ -482,7 +510,16 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
       const pctPerHour = fit.slopePerMs * 3_600_000;
       const reserve = sp.backupReserveSoc ?? 15;
       const cur = sp.backupBatPercent;
-      if (cur != null && pctPerHour < -0.05 && cur > reserve) {
+      // v0.41.0 — gate the trailing-3h runtime alert on the DEPLETION-AWARE diurnal
+      // forecast (`diurnalConfirmsDepletion`, computed above so it can also key the
+      // cache). The flat trailing-decline extrapolation projects a false overnight
+      // depletion (it ignores dawn solar recovery); only surface this alert when the
+      // hour-by-hour PV-minus-load forecast ALSO projects reaching the reserve floor.
+      // (Audit fix: removed the "reserve at 3 AM" / bogus "implied draw" false positive
+      // that contradicted /api/runway hoursToReserve=null on the same page.)
+      // NB: `reserve` here == `reserveForGate` above (same SHP2 reserve) — kept local for
+      // the alert content (hoursToReserve / detail text).
+      if (cur != null && pctPerHour < -0.05 && cur > reserve && diurnalConfirmsDepletion) {
         const hoursToReserve = (cur - reserve) / -pctPerHour;
         let severity: 'warning' | 'info' | null = null;
         if (hoursToReserve < 6) severity = 'warning';
@@ -604,7 +641,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
     }
   }
 
-  if (Object.values(devices).some((d) => d.projection)) forecastCache = { ts: now, alerts: out };
+  if (Object.values(devices).some((d) => d.projection)) forecastCache = { ts: now, alerts: out, depletionGate: diurnalConfirmsDepletion };
   return out;
 }
 
@@ -645,7 +682,7 @@ export interface HourResponse {
 
 export interface SolarResponseModel {
   hourly: HourResponse[];   // length 24
-  peakCoeff: number;        // best coefficient across the day (reference for shading %)
+  peakCoeff: number;        // best (r²/sample-gated) hourly coefficient — diagnostic headline only
   pairCount: number;        // total (GHI, PV) hourly pairs the fit used
   historyDays: number;
 }
@@ -848,7 +885,10 @@ function buildSolarResponse(
     }
     // r² is only meaningful with ≥3 points (2 points always fit a line perfectly).
     const r2 = day.length >= 3 && vg > 0 && vp > 0 ? (cov * cov) / (vg * vp) : 0;
-    if (coeff > peakCoeff) peakCoeff = coeff;
+    // v0.41.0 — only a well-fit, multi-sample hour may set the headline peak coeff.
+    // Low-GHI dawn hours produce numerically unstable PV/GHI slopes (e.g. an r²≈0.02,
+    // GHI≈25 W/m² hour falsely winning "peak") that mislabel a south array as east-facing.
+    if (r2 >= 0.2 && day.length >= 3 && coeff > peakCoeff) peakCoeff = coeff;
     hourly.push({ hour: h, coeff, r2, samples: day.length, observedMaxPvW: Math.round(observedMax) });
   }
   const historyDays = maxEpoch > minEpoch ? (maxEpoch - minEpoch) / 24 : 0;
@@ -1131,9 +1171,8 @@ export function forecastDayAlerts(df: DayForecast): Alert[] {
     : 0;
   const driverModelled = df.hours.filter((h) => h.modelled).length;
   const driverTotal = df.hours.length;
-  // Hypothetical: what the forecast would be under perfectly clear skies?
-  // The solarModel.peakCoeff × the historical max-GHI for each daylight hour
-  // gives a clear-sky envelope; sum to get an idealized "clear-day" PV.
+  // Clear-sky PV envelope: sum each daylight hour's observed-max PV (the cleanest
+  // recorded output for that hour-of-day) into an idealized "clear-day" total.
   const clearDayKwh = df.solarModel.hourly.reduce(
     (s, h) => s + (h.observedMaxPvW || 0),
     0,
@@ -1564,7 +1603,10 @@ function analysePack(
       // values like Core 3's 101%+. 100.5% tolerates counter rounding; a true
       // <90% would be a hard fault — but it's far more often a counter-reset
       // artifact, so we drop it rather than alarm on a phantom.
-      if (ratio >= 90 && ratio <= 100.5) coulombicEffPct = round2(ratio);
+      // v0.41.0 — clamp to the physical 100% ceiling: coulombic efficiency cannot
+      // exceed 100% (you can't discharge more than you charged). The 100.5% admission
+      // band still tolerates counter rounding, but the displayed value never reads >100%.
+      if (ratio >= 90 && ratio <= 100.5) coulombicEffPct = Math.min(100, round2(ratio));
     }
   }
 
@@ -2555,6 +2597,8 @@ export interface StringMismatchReport {
 }
 
 let stringMismatchCache: { ts: number; value: StringMismatchReport } | null = null;
+/** Test seam — clear the string-mismatch cache so successive scenarios recompute. */
+export function resetStringMismatchCache(): void { stringMismatchCache = null; }
 
 export function computeStringMismatch(
   devices: Record<string, DeviceSnapshot>,
@@ -2586,7 +2630,6 @@ export function computeStringMismatch(
   // against future spare configurations.
   const connected = shp2ConnectedDpuSns(devices);
   const perDevicePerHour = new Map<string, number[]>(); // sn → 24-bucket medians (averaged)
-  const fleetPerHour: number[][] = Array.from({ length: 24 }, () => []);
   for (const d of dpus) {
     const buckets: number[][] = Array.from({ length: 24 }, () => []);
     for (const p of recorder.query(d.sn, 'pv_total', since, now, 300)) {
@@ -2597,13 +2640,6 @@ export function computeStringMismatch(
     }
     const meds = buckets.map((b) => (b.length ? median(b) : 0));
     perDevicePerHour.set(d.sn, meds);
-    // Only home-connected DPUs build the fleet-median baseline; spare
-    // DPUs still get evaluated against that baseline below (so a spare
-    // with anomalously different output still surfaces as an outlier
-    // — mirroring computeDegradation's v0.9.75 pattern).
-    if (isShp2Connected(d.sn, connected)) {
-      for (let h = 0; h < 24; h++) if (meds[h] > 0) fleetPerHour[h].push(meds[h]);
-    }
   }
 
   // For each device, compute the ratio of its hourly median to the fleet median
@@ -2615,8 +2651,21 @@ export function computeStringMismatch(
     const ratioSamples: number[] = [];
     let deviceMedW = 0, fleetMedW = 0, hoursWithFleet = 0;
     for (let h = 0; h < 24; h++) {
-      if (meds[h] <= 0 || fleetPerHour[h].length < 2) continue;
-      const fleetMed = median(fleetPerHour[h]);
+      if (meds[h] <= 0) continue;
+      // v0.41.0 — LEAVE-ONE-OUT fleet median: compare this device to the median of the
+      // OTHER home-connected DPUs for this hour, never including itself. The old
+      // all-devices median (which counted the device) mechanically pulled every ratio
+      // toward 1.0 and is degenerate with only 2 reporting cores (median([a,b])=(a+b)/2).
+      // Spare/offline DPUs are still EVALUATED against the connected baseline (their own
+      // output isn't part of it) — mirroring computeDegradation's v0.9.75 pattern.
+      const others: number[] = [];
+      for (const o of dpus) {
+        if (o.sn === d.sn || !isShp2Connected(o.sn, connected)) continue;
+        const om = perDevicePerHour.get(o.sn)?.[h];
+        if (om != null && om > 0) others.push(om);
+      }
+      if (others.length < 1) continue; // need ≥1 OTHER connected DPU to compare against
+      const fleetMed = median(others);
       if (fleetMed <= 0) continue;
       ratioSamples.push(meds[h] / fleetMed);
       deviceMedW += meds[h]; fleetMedW += fleetMed; hoursWithFleet++;
