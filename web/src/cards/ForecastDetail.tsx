@@ -22,14 +22,29 @@ function tsHour(ts: number): string {
   return fmtHour(new Date(ts).getHours());
 }
 
-/** Hour-of-day with the strongest learned response coefficient. */
+/** Hour-of-day with the strongest WELL-FIT learned response coefficient. */
 function peakResponse(m: SolarResponseModel): HourResponse | null {
   let best: HourResponse | null = null;
   for (const h of m.hourly) {
-    if (h.coeff == null) continue;
+    // v0.41.0 — gate on fit quality + sample count (mirrors the backend peakCoeff gate).
+    // Low-GHI dawn hours yield numerically unstable PV/GHI slopes that otherwise falsely
+    // win "peak" and mislabel a south-facing array as east-facing.
+    if (h.coeff == null || h.r2 < 0.2 || h.samples < 3) continue;
     if (!best || h.coeff > (best.coeff ?? -1)) best = h;
   }
   return best;
+}
+
+/** Production-weighted centroid hour — the robust orientation signal: Σ(hour·peakPV) / Σ(peakPV). */
+function productionCentroidHour(m: SolarResponseModel): number | null {
+  let num = 0, den = 0;
+  for (const h of m.hourly) {
+    if (h.observedMaxPvW > 0) {
+      num += h.hour * h.observedMaxPvW;
+      den += h.observedMaxPvW;
+    }
+  }
+  return den > 0 ? num / den : null;
 }
 
 /** Plain-language array orientation implied by the peak-response hour. */
@@ -172,6 +187,13 @@ function ModelCard({ fc }: { fc: DayForecast }) {
   const m = fc.solarModel;
   const daylight = m.hourly.filter((h) => h.coeff != null || h.observedMaxPvW > 0);
   const fleetPeak = peakResponse(m);
+  const centroidHour = productionCentroidHour(m);
+  // v0.41.0 (Copilot follow-up) — centroidHour ∈ [0,23], but Math.round can spill to 24
+  // (e.g. 23.6 → 24). fmtHour() wraps that to "12 AM" and orientation(24) returns a
+  // "west-facing" label → a contradictory "Peak output around 12 AM — west-facing". Clamp
+  // the rounded hour into [0,23] before formatting/classifying.
+  const centroidHourRounded =
+    centroidHour != null ? Math.min(23, Math.max(0, Math.round(centroidHour))) : null;
 
   return (
     <div className="card">
@@ -183,7 +205,14 @@ function ModelCard({ fc }: { fc: DayForecast }) {
         array size, orientation, inverter clipping and time-of-day shading. Built from{' '}
         <span className="text-ink font-medium">{m.pairCount}</span> hourly (GHI, PV) pairs over{' '}
         <span className="text-ink font-medium">{m.historyDays.toFixed(1)} days</span>; peak
-        coefficient <span className="text-ink font-medium">{m.peakCoeff.toFixed(1)} W per W/m²</span>.
+        coefficient{' '}
+        {/* v0.41.0 (Copilot follow-up) — render the GATED peak (fleetPeak = peakResponse(m),
+            r²/sample-gated) not raw m.peakCoeff: the backend gate can legitimately leave
+            peakCoeff at 0 on thin early history while the table still shows raw coefficients,
+            which would make a "0.0 W per W/m²" headline contradict the rows below it. */}
+        <span className="text-ink font-medium">
+          {fleetPeak ? `${fleetPeak.coeff!.toFixed(1)} W per W/m²` : 'still calibrating'}
+        </span>.
       </p>
 
       <SoilingNote fc={fc} />
@@ -219,10 +248,12 @@ function ModelCard({ fc }: { fc: DayForecast }) {
 
       <div className="text-xs uppercase tracking-widest text-muted mb-1.5">Panel-position inference</div>
       <div className="space-y-1.5 text-sm">
-        {fleetPeak ? (
+        {centroidHourRounded != null ? (
           <Inference
             label="Fleet"
-            detail={`Strongest response at ${fmtHour(fleetPeak.hour)} (${fleetPeak.coeff!.toFixed(1)} W per W/m²) — ${orientation(fleetPeak.hour)}.`}
+            detail={`Peak output around ${fmtHour(centroidHourRounded)} — ${orientation(centroidHourRounded)}${
+              fleetPeak ? ` (strongest learned response ${fleetPeak.coeff!.toFixed(1)} W per W/m² at ${fmtHour(fleetPeak.hour)})` : ''
+            }.`}
           />
         ) : (
           <div className="text-muted">Not enough recorded PV yet to infer array orientation.</div>
@@ -256,10 +287,19 @@ function DeviceInference({ dm }: { dm: DeviceSolarModel }) {
   const hv = peakResponse(dm.hv);
   const lv = peakResponse(dm.lv);
   if (!whole && !hv && !lv) {
+    // v0.41.0 (Copilot follow-up) — peakResponse() now returns null both when there's no
+    // PV at all AND when PV exists but no hour clears the r²/sample fit gate. Don't claim
+    // "No recorded PV" in the latter case: productionCentroidHour() keys off observedMaxPvW
+    // (raw production, fit-independent), so it tells the two apart truthfully.
+    const hasPv = productionCentroidHour(dm.model) != null;
     return (
       <Inference
         label={dm.device}
-        detail="No recorded PV — offline gaps or an unwired spare; orientation can't be inferred yet."
+        detail={
+          hasPv
+            ? 'PV recorded, but the GHI→PV response is still calibrating — not enough well-fit hours to infer orientation yet.'
+            : "No recorded PV — offline gaps or an unwired spare; orientation can't be inferred yet."
+        }
         muted
       />
     );
