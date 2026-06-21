@@ -188,6 +188,12 @@ function ModelCard({ fc }: { fc: DayForecast }) {
   const daylight = m.hourly.filter((h) => h.coeff != null || h.observedMaxPvW > 0);
   const fleetPeak = peakResponse(m);
   const centroidHour = productionCentroidHour(m);
+  // v0.41.0 (Copilot follow-up) — centroidHour ∈ [0,23], but Math.round can spill to 24
+  // (e.g. 23.6 → 24). fmtHour() wraps that to "12 AM" and orientation(24) returns a
+  // "west-facing" label → a contradictory "Peak output around 12 AM — west-facing". Clamp
+  // the rounded hour into [0,23] before formatting/classifying.
+  const centroidHourRounded =
+    centroidHour != null ? Math.min(23, Math.max(0, Math.round(centroidHour))) : null;
 
   return (
     <div className="card">
@@ -235,10 +241,10 @@ function ModelCard({ fc }: { fc: DayForecast }) {
 
       <div className="text-xs uppercase tracking-widest text-muted mb-1.5">Panel-position inference</div>
       <div className="space-y-1.5 text-sm">
-        {centroidHour != null ? (
+        {centroidHourRounded != null ? (
           <Inference
             label="Fleet"
-            detail={`Peak output around ${fmtHour(Math.round(centroidHour))} — ${orientation(Math.round(centroidHour))}${
+            detail={`Peak output around ${fmtHour(centroidHourRounded)} — ${orientation(centroidHourRounded)}${
               fleetPeak ? ` (strongest learned response ${fleetPeak.coeff!.toFixed(1)} W per W/m² at ${fmtHour(fleetPeak.hour)})` : ''
             }.`}
           />
