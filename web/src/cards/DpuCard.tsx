@@ -159,7 +159,7 @@ function Header({
 }
 
 function DirectGrid({ p }: { p: DpuProjection | undefined }) {
-  const v = (val: string | number | null | undefined, fmt = (x: any) => String(x)) =>
+  const v = (val: string | number | null | undefined, fmt = (x: string | number) => String(x)) =>
     p == null || val == null ? '—' : fmt(val);
   return (
     <div className="grid grid-cols-2 gap-x-4 gap-y-1 mb-3 text-sm">

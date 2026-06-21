@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
-import { computeAlerts, type Alert, type Severity } from './alerts.js';
-import { SPARE_DPU_SNS, shp2ConnectedDpuSns } from './shp2Membership.js';
+import { computeAlerts, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
+import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare } from './shp2Membership.js';
 import {
   computeLearnedAlerts,
   computeBaselineAlerts,
@@ -268,7 +268,7 @@ export interface Incident {
   detail: string;                    // formatted summary
 }
 
-const sevRank: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
+const sevRank = SEVERITY_ORDER;
 
 function qualifies(sev: Severity, min: Severity): boolean {
   return sevRank[sev] <= sevRank[min];
@@ -794,7 +794,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // spare is wired into an SHP2 (shp2ConnectedDpuSns then includes it).
     {
       const connectedSns = shp2ConnectedDpuSns(snap.devices);
-      const mutedSpares = [...SPARE_DPU_SNS].filter((sn) => !connectedSns.has(sn));
+      const mutedSpares = [...SPARE_DPU_SNS].filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
       if (mutedSpares.length > 0) {
         for (const a of alerts) {
           if (a.annunciate !== false && mutedSpares.some((sn) => a.id.includes(sn))) {

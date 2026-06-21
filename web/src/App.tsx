@@ -4,7 +4,7 @@ import { EnergyFlow } from './cards/EnergyFlow';
 import { TodaySummary } from './cards/TodaySummary';
 import { RunwayCard } from './cards/RunwayCard';
 import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
-import type { Shp2Projection } from './types';
+import type { DeviceSnapshot, DpuProjection, GenericProjection, Shp2Projection } from './types';
 import { Shp2Card } from './cards/Shp2Card';
 import { SmallDeviceCard } from './cards/SmallDeviceCard';
 import { alertCounts } from './alerts';
@@ -260,9 +260,9 @@ function NormalApp() {
 
           {/* OVERVIEW REORDER — the SHP2 card and the active/online DPU cards sit
               directly under the Today summary section. */}
-          {shp2 && <Shp2Card d={shp2 as any} />}
+          {shp2 && <Shp2Card d={shp2 as DeviceSnapshot & { projection?: Shp2Projection }} />}
           {dpus.map((d) => (
-            <DpuCard key={d.sn} d={d as any} viaShp2={dpuViaShp2.get(d.sn)} />
+            <DpuCard key={d.sn} d={d as DeviceSnapshot & { projection?: DpuProjection }} viaShp2={dpuViaShp2.get(d.sn)} />
           ))}
 
           {/* v0.22.0 — ForecastCard is lazy (recharts off the entry chunk). The
@@ -304,7 +304,7 @@ function NormalApp() {
             </div>
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
               {others.map((d) => (
-                <SmallDeviceCard key={d.sn} d={d as any} />
+                <SmallDeviceCard key={d.sn} d={d as DeviceSnapshot & { projection?: GenericProjection }} />
               ))}
             </div>
           </div>
