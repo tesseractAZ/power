@@ -5,8 +5,8 @@ Delta Pro Ultra inverters, Delta/River 3 Plus UPS units, EV charger). Talks to
 the EcoFlow IoT Open API (HMAC-SHA256-signed REST polling + MQTT live
 telemetry), persists per-metric history to SQLite, and serves a React
 dashboard with learned anomaly detection, day-ahead forecasting, and per-pack
-capacity-fade → end-of-life projection. Also publishes 22+ entities into
-Home Assistant via MQTT Discovery, ships 9 Lit-based HACS Lovelace cards,
+capacity-fade → end-of-life projection. Also publishes 50+ entities into
+Home Assistant via MQTT Discovery, ships 7 Lit-based HACS Lovelace cards,
 and includes a klaxon/TTS broadcast subsystem with off-grid (no-Cloud-TTS)
 mode.
 
@@ -31,7 +31,7 @@ For a Pi running Home Assistant OS or Supervised:
    IoT Open API keys (get them at
    <https://developer.ecoflow.com> → IoT Open Platform → User Information).
 5. (Optional) adjust `FORECAST_LAT` / `FORECAST_LON` to your location, and
-   configure a push channel (ntfy / Pushover / webhook).
+   configure a push channel (ntfy / Pushover / webhook / HA notifications).
 6. **Start**. Dashboard: `http://<homeassistant-IP>:8787/`. Telnet TUI:
    `nc <homeassistant-IP> 2323`.
 
@@ -167,28 +167,31 @@ production vs development to keep the PR list short.
 - **Phase 4** — Learned alerting engine: peer-comparison anomalies, per-sensor
   self-baseline, runtime + capacity-fade forecasting, equipment-tuned solar
   response model, day-ahead PV/load/SoC forecast, PV soiling detection.
-- **Phase 5** — Control-room telnet TUI (9 screens, NAWS-adaptive),
+- **Phase 5** — Control-room telnet TUI (8 screens, NAWS-adaptive),
   Predictive Insights tab, per-pack capacity-fade → end-of-life projection
   with confidence band + fleet peer comparison, cleared-anomalies log,
   glossary hover tooltips on every metric label.
 - **Phase 6** — Home Assistant add-on packaging (this repo, multi-arch
   GHCR images, one-click release pipeline, Dependabot).
 - **Phase 7** — Home Assistant entities via **MQTT Discovery** —
-  22+ sensors + 1 binary_sensor auto-registered under one "EcoFlow Panel"
-  device (backup pool %, panel load, AC import, off-grid status, day-ahead
-  forecast, soonest-EOL, alert counts, peer outliers, per-circuit lifetime
-  kWh, etc.). Energy Dashboard wiring is plug-and-play. The legacy
-  REST-sensor YAML approach still works for existing installs but is
-  deprecated as of v0.9.68. See `DOCS.md` → "Home Assistant entities".
+  ~48 sensors + 3 binary_sensors (plus 4 per-priority alarm switches and
+  per-circuit Energy sensors)
+  auto-registered under one "EcoFlow Panel" device (backup pool %, panel
+  load, whole-home grid import, off-grid status, day-ahead forecast,
+  soonest-EOL, alert counts, peer outliers, per-circuit lifetime kWh,
+  etc.). Energy Dashboard wiring is plug-and-play. The legacy REST-sensor
+  YAML approach still works for existing installs but is deprecated as of
+  v0.9.68. See `DOCS.md` → "Home Assistant entities".
 
 ## Roadmap
 
-### Shipped through v0.10.2
+### Shipped through v0.51.0
 
 The original roadmap (v0.7.0 / v0.8.0+ / external + infrastructure) and
 multiple follow-on series (predictive-engine v2, polish + tests, HACS
 Lovelace cards, security hardening, broadcast/TTS robustness, engine
-audit + test backfill) are all shipped. Highlights — see
+audit + test backfill, and the v0.41.0–v0.47.0 page-by-page accuracy
+audits) are all shipped. Highlights — see
 [CHANGELOG.md](CHANGELOG.md) for the per-release breakdown:
 
 **Off-thread analytics (v0.10.0–v0.10.2)** — `node:sqlite` is synchronous, so
@@ -220,30 +223,59 @@ event counter, MPPT efficiency drift, alert clustering, root-cause
 graph, energy dispatch planner, forecast skill calibration, Bayesian
 recursive GHI→PV updates with credible intervals.
 
-**HA integration** — REST sensors, MQTT Discovery (22+ entities), HA
-Energy Dashboard (5 lifetime kWh counters + per-circuit Individual
-devices, plus the 2026.6 battery state-of-charge badge via
-`sensor.ecoflow_backup_pool`), per-circuit lifetime accumulators,
-carbon offset reporting,
-TOU tariff cost tracking, calendar ICS feed, repair issues feed,
-diagnostic entity categorization, NWS storm-prep alerts, HACS Lovelace
-"stats" card.
+**HA integration** — REST sensors, MQTT Discovery (50+ entities), HA
+Energy Dashboard (6 lifetime kWh counters — PV, home consumption, grid
+import, battery in/out + a diagnostic grid-to-battery-charge subset —
+plus per-circuit Individual devices, and the 2026.6 battery
+state-of-charge badge via `sensor.ecoflow_backup_pool`), per-circuit
+lifetime accumulators, carbon offset reporting, TOU tariff cost tracking,
+calendar ICS feed, repair issues feed, diagnostic entity categorization,
+NWS storm-prep alerts, HACS Lovelace "stats" card.
 
-**Notifications** — ntfy / Pushover / webhook, quiet-hours +
+**Grid wiring (v0.44.0 / v0.48.0)** — wire HA Energy → Grid consumption to
+`sensor.ecoflow_grid_to_home_lifetime_kwh` ("EcoFlow Grid Import (Home)",
+the whole-home SHP2 `gridWatt` meter). Do **not** wire the older
+`sensor.ecoflow_grid_import_lifetime_kwh` — it was renamed "EcoFlow Grid
+to Battery Charge", marked `entity_category: diagnostic`, and is only the
+DPU `ac_in` battery-charge subset (near-zero on a solar-charged home).
+v0.48.0 adds `grid_home_watts` ("EcoFlow Grid Power (Home)") so the Energy
+Dashboard's live power-flow preview reads whole-home grid power, not DPU
+`ac_in`.
+
+**Lifetime battery energy (v0.45.0 / v0.48.0)** — Battery Energy In and
+Battery Energy Out are **independent** coulomb counters (`accuChgMah` /
+`accuDsgMah`, baseline-subtracted per pack since v0.13.0); discharge
+legitimately exceeding charge over a net-discharge window is **normal and
+correct** — the old "discharge ≤ charge" invariant clamp was removed as a
+category error. A read-only `/api/debug/battery-lifetime` endpoint exposes
+the raw floors and the per-pack breakdown. The counters no longer freeze
+when one core goes cloud-offline (last-known per-pack contribution is held
+across the gap), with a self-healing recorder-history backfill for a core
+that was already offline at deploy.
+
+**Notifications** — ntfy / Pushover / webhook / HA persistent
+notifications (the `ha` channel, v0.15.18), quiet-hours +
 morning-digest, alert telemetry with three-tier self-tuning
 auto-downgrade (info-silencing, warning→info demotion, chronic-noise
 silencing).
 
 **Plumbing** — Node 22 + Fastify + node:sqlite + tsx, native ARM64 CI
-build pipeline (1m 30s end-to-end), 341-test CI gate that blocks bad
-releases, PWA-installable web UI with route-level code splitting
+build pipeline (1m 30s end-to-end), a 740+-test server CI gate that blocks
+bad releases, PWA-installable web UI with route-level code splitting
 (60 kB initial JS), persistent lifetime energy accumulator that
 survives recorder pruning + restarts, telnet TUI for terminal monitoring,
-per-SN connectivity logging, EcoFlow cloud-offline detection with actionable
-fix steps in offline alerts.
+per-SN connectivity logging, EcoFlow cloud-offline detection with an
+actionable power-cycle remedy in offline alerts. v0.49.0 reframed the
+offline wording: a device offline >30 min is described as having "lost its
+EcoFlow cloud (enhanced) connection" rather than asserting an
+unverifiable LAN/MQTT-wedged diagnosis. v0.50.0 quieted the
+request log (5xx → warn, 4xx → debug, slow >1s → info) and persists the
+per-circuit emit high-water so per-circuit Energy sensors stay monotone
+across restarts.
 
-**HACS Lovelace cards (v0.9.50–v0.9.55)** — 9 Lit-based cards (fleet,
-alerts, battery, solar, strategy, insights, circuit, broadcast, stats)
+**HACS Lovelace cards (v0.9.50–v0.9.55)** — 7 Lit-based cards (fleet,
+alerts, battery, solar, strategy, insights, circuit) plus the two original
+legacy bundles (`ecoflow-panel-card`, `ecoflow-panel-dashboard`, frozen),
 served directly from the add-on at
 `http://homeassistant.local:8787/lovelace/<card>.js`. Add as Lovelace
 resources without HACS, or install via HACS — both URLs work.
@@ -255,11 +287,13 @@ generated at `/data/panel-write-token.txt`, mode 0600). The
 `send-command` debug path adds constant-time token compare, per-SN
 cooldown, `cmdSet` allow-list, and payload-shape caps.
 
-**Broadcast / TTS robustness (v0.9.63, v0.9.65)** — TTS language-format
-retry chain (`en-US` → `en_US` → no-language) auto-recovers from the
-Wyoming/Cloud format mismatch; new `BROADCAST_TTS_REQUIRE_LOCAL`
-option enforces no-Cloud-TTS for off-grid setups; explicit
-`BROADCAST_TTS_SERVICE` pin now disables the fallback chain.
+**Broadcast / TTS (v0.9.70)** — TTS is now a single always-local engine:
+Wyoming Protocol → Piper, wired via `BROADCAST_WYOMING_HOST`
+(default `core-piper`) / `BROADCAST_WYOMING_PORT` (10200) /
+`BROADCAST_WYOMING_VOICE`. This replaced the earlier multi-engine
+fallback chain — the old `BROADCAST_TTS_SERVICE` / `BROADCAST_TTS_LANGUAGE`
+/ `BROADCAST_TTS_REQUIRE_LOCAL` options were dropped (no Cloud TTS path
+remains, so off-grid setups are local by construction).
 
 **MPC dispatch fix (v0.9.64)** — `simulateHour()` now actually applies
 the explicit battery-flow component for `dischargeMax`,
@@ -268,9 +302,21 @@ couldn't distinguish them from `idleHold` and never selected them.
 
 **Engine audit + test backfill (v0.9.58, v0.9.59, v0.9.61, v0.9.67,
 v0.9.68)** — 14 correctness fixes across Kalman, Bayes, MPC, and
-EV-window engines; 341-test suite gating every release; MPC test
-determinism via injectable `nowMs`; MQTT Discovery dedup with
-regression-guard tests.
+EV-window engines; a growing server suite (now 740+) gating every
+release; MPC test determinism via injectable `nowMs`; MQTT Discovery
+dedup with regression-guard tests.
+
+**Page accuracy audits (v0.41.0–v0.47.0)** — multi-agent, source-traced,
+live-recomputed audits of each UI surface, each finding adversarially
+verified before inclusion: Predictive Insights (v0.41.0), Battery
+(v0.42.0), Alerts + Solar (v0.43.0), the deferred energy/grid follow-ups
+(v0.44.0, incl. the HA Energy grid-import re-wire), Dashboard / EnergyFlow
+(v0.46.0), and Strategy (v0.47.0, incl. shed-order direction verified
+against the live SHP2). The TUI overhaul (v0.51.0) brought the telnet
+screens in line with these accuracy changes (per-pack battery-net, a
+lifetime-energy section, whole-home grid vs DPU-charge separation, and
+honest cloud-offline/held wording with a regression test pinning the
+reframed offline language).
 
 **Entity registry hygiene (v0.9.68)** — REST sensors path deprecated.
 MQTT Discovery is the canonical surface, with a one-shot retained-empty

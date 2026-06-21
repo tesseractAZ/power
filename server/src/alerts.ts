@@ -1,7 +1,7 @@
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { activeSocBand, socAlertSeverity } from './batterySocAlarm.js';
-import { shp2ConnectedDpuSns, SPARE_DPU_SNS } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared } from './shp2Membership.js';
 
 /**
  * System-wide alerts engine — the single source of truth. The web UI renders
@@ -92,7 +92,7 @@ const PACK_IMBALANCE_WARN_PCT = 15;
 const STALE_MS = 3 * 60 * 1000;
 const CIRCUIT_BREAKER_WARN_FRAC = 0.9;
 
-const order: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
+export const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
 
 function classifyTemp(tempC: number, band: TempBand): Severity | null {
   const f = cToF(tempC);
@@ -241,15 +241,21 @@ export function computeAlerts(
   // faulted/unplugged home core — which drops out of the SHP2's connected
   // sources — still annunciates its genuine offline alarm. The positive
   // connected-source check re-arms a spare the moment it's wired into an SHP2.
+  // v0.52.0 — compute the connected-source Set ONCE, then delegate each
+  // membership check to the shared shp2Membership.isExpectedOfflineSpare,
+  // passing the Set so no per-call rescan of `devices` happens at the hot
+  // sites below. Behavior is identical to the former local closure
+  // (`SPARE_DPU_SNS.has(sn) && !shp2Connected.has(sn)`).
   const shp2Connected = shp2ConnectedDpuSns(devices);
   const isExpectedOfflineSpare = (sn: string): boolean =>
-    SPARE_DPU_SNS.has(sn) && !shp2Connected.has(sn);
+    isExpectedOfflineSpareShared(sn, shp2Connected);
 
   for (const d of list) {
+    const isCore = d.productName.toLowerCase().includes('delta pro ultra');
+    const spare = isCore && isExpectedOfflineSpare(d.sn);
+    const coreNum = isCore ? dpuNum(d.deviceName) : null;
     if (!d.online) {
-      const isCore = d.productName.toLowerCase().includes('delta pro ultra');
       const isPanel = d.productName.toLowerCase().includes('smart home panel');
-      const spare = isCore && isExpectedOfflineSpare(d.sn);
       // v0.7.7 — enrich the offline alert with WHEN we last actually heard
       // from the device and via which channel. A 47-min gap with last data
       // via MQTT looks very different from "never connected since boot".
@@ -280,14 +286,12 @@ export function computeAlerts(
         detail: spare
           ? `${d.deviceName} is a designated bench spare — kept powered down and not wired into the SHP2 — so EcoFlow Cloud reporting it offline is expected and not actionable. It will alarm normally once it's connected to an SHP2.`
           : `${d.deviceName} is flagged offline by EcoFlow's /device/list. ${conn?.mqttCount && conn.mqttCount > 0 ? `We previously received ${conn.mqttCount} MQTT message(s) this session; last data ${fmtAge(now - lastDataAt)} ago via ${lastSource.toUpperCase()}.` : 'No telemetry received this session.'}${hint}`,
-        coreNum: isCore ? dpuNum(d.deviceName) : null,
+        coreNum,
         facts,
         ...(spare ? { annunciate: false } : {}),
       });
     } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {
       const conn = connectivity?.perDevice.get(d.sn);
-      const isCore = d.productName.toLowerCase().includes('delta pro ultra');
-      const spare = isCore && isExpectedOfflineSpare(d.sn);
       out.push({
         id: `stale-${d.sn}`,
         severity: spare ? 'info' : 'warning',
@@ -297,7 +301,7 @@ export function computeAlerts(
         detail: spare
           ? `${d.deviceName} is a designated bench spare not wired into the SHP2; intermittent or absent telemetry is expected. It will alarm normally once it's connected to an SHP2.`
           : `${d.deviceName} is flagged online by EcoFlow but no fresh telemetry for ${fmtAge(now - d.lastUpdated)}. ${conn?.lastMqttAt ? `Last MQTT msg ${fmtAge(now - conn.lastMqttAt)} ago.` : ''}`,
-        coreNum: isCore ? dpuNum(d.deviceName) : null,
+        coreNum,
         facts: [
           { label: 'Last telemetry', value: `${fmtAge(now - d.lastUpdated)} ago` },
           { label: 'Last source', value: conn?.lastSource?.toUpperCase() ?? 'unknown' },
@@ -535,7 +539,7 @@ export function computeAlerts(
     });
   }
 
-  return out.sort((a, b) => order[a.severity] - order[b.severity] || a.category.localeCompare(b.category));
+  return out.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.category.localeCompare(b.category));
 }
 
 export function alertCounts(alerts: Alert[]): Record<Severity, number> {

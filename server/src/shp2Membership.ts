@@ -38,7 +38,7 @@
  */
 
 import type { DeviceSnapshot } from './snapshot.js';
-import type { Shp2Projection } from './ecoflow/project.js';
+import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 
 /**
  * Return the set of DPU SNs that are physically wired into the SHP2 —
@@ -101,6 +101,33 @@ export const SPARE_DPU_SNS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * v0.52.0 — single source of truth for "this SN is a designated bench spare
+ * whose EcoFlow-offline state is the EXPECTED steady state" (so its
+ * connectivity / learned / forecast alerts are emitted non-annunciating).
+ *
+ * True iff: the SN is in the SPARE_DPU_SNS safety floor AND it is NOT currently
+ * a connected SHP2 source. The positive connected-source check (the `!has`
+ * below) is what re-arms a spare the instant it is wired into an SHP2 and starts
+ * reporting as a connected source — exactly mirroring the gate that previously
+ * lived as a local closure in alerts.ts and the `mutedSpares` list in
+ * alertMonitor.ts.
+ *
+ * Overloaded so a hot loop (alerts.ts) can pass an already-computed connected
+ * Set and avoid rescanning `devices` per call, while a one-shot caller can pass
+ * the raw devices Record and let the helper resolve membership once.
+ */
+export function isExpectedOfflineSpare(sn: string, connected: Set<string>): boolean;
+export function isExpectedOfflineSpare(sn: string, devices: Record<string, DeviceSnapshot>): boolean;
+export function isExpectedOfflineSpare(
+  sn: string,
+  connectedOrDevices: Set<string> | Record<string, DeviceSnapshot>,
+): boolean {
+  const connected =
+    connectedOrDevices instanceof Set ? connectedOrDevices : shp2ConnectedDpuSns(connectedOrDevices);
+  return SPARE_DPU_SNS.has(sn) && !connected.has(sn);
+}
+
+/**
  * v0.40.1 — a connected SHP2 source slot whose underlying DPU is itself
  * EcoFlow-cloud-offline (its OWN telemetry is stale), even though the SHP2 still
  * reports the slot as connected and counts its battery in the backup pool.
@@ -130,4 +157,78 @@ export function isSourceDpuStale(
   if (SPARE_DPU_SNS.has(source.sn)) return false;
   const dpu = devices[source.sn];
   return dpu != null && dpu.online === false;
+}
+
+/**
+ * v0.52.0 — the SHP2 device (the home's grid interconnect), or undefined.
+ * VERBATIM `Object.values(devices).find((d) => d.projection?.kind === 'shp2')`
+ * that was repeated at ~5 index.ts call sites. Callers keep any post-find
+ * `&& d.projection?.kind === 'shp2'` re-narrow as-is.
+ */
+export function findShp2(
+  devices: Record<string, DeviceSnapshot>,
+): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {
+  return Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+}
+
+/**
+ * v0.52.0 — the currently-ONLINE DPU cores. VERBATIM
+ * `Object.values(devices).filter((d) => d.projection?.kind === 'dpu' && d.online)`
+ * repeated at ~4 index.ts call sites. NOTE the `&& d.online` predicate — this is
+ * the live-fleet selector, distinct from analytics' all-DPUs membership filter.
+ */
+export function onlineDpus(
+  devices: Record<string, DeviceSnapshot>,
+): Array<DeviceSnapshot & { projection: DpuProjection }> {
+  return Object.values(devices).filter(
+    (d) => d.projection?.kind === 'dpu' && d.online,
+  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+}
+
+/**
+ * v0.52.0 — the live fleet power-flow aggregate, shared by the REST
+ * `/api/ha-state` handler (index.ts) and the MQTT-discovery `buildState`
+ * (mqttDiscovery.ts), which previously kept two BYTE-IDENTICAL copies of this
+ * loop in hand-maintained sync (the "match /api/ha-state" comment).
+ *
+ * Returns RAW, un-rounded sums — both call sites apply their own `Math.round`
+ * at emission, and the raw `fleetBatteryNet` feeds the ±50 W charge/discharge
+ * timer gates, so rounding MUST stay at the call sites. Pure over `devices`
+ * only (no analytics/recorder access).
+ *
+ * Membership: only ONLINE DPUs that are SHP2-connected sources contribute to
+ * fleet PV / in / out / ac_in / battery-net (spares can't reach the home bus);
+ * panelLoad is the sum of the SHP2's circuit watts. Each value is computed
+ * exactly as the former inline loops did (same `?? 0` order, per-pack
+ * out−in net, circuit-watt sum).
+ */
+export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
+  fleetPv: number;
+  fleetIn: number;
+  fleetOut: number;
+  acIn: number;
+  fleetBatteryNet: number;
+  panelLoad: number;
+} {
+  const dpus = onlineDpus(devices);
+  const shp2 = findShp2(devices);
+  const connected = shp2ConnectedDpuSns(devices);
+  const gridDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+
+  let fleetPv = 0, fleetIn = 0, fleetOut = 0, acIn = 0, fleetBatteryNet = 0;
+  for (const d of gridDpus) {
+    fleetPv += d.projection.pvTotalWatts ?? 0;
+    fleetIn += d.projection.totalInWatts ?? 0;
+    fleetOut += d.projection.totalOutWatts ?? 0;
+    acIn += d.projection.acInWatts ?? 0;
+    // v0.10.4 — battery net from PER-PACK flow, not DPU throughput.
+    for (const pk of d.projection.packs) fleetBatteryNet += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
+  }
+
+  let panelLoad = 0;
+  if (shp2) for (const c of shp2.projection.circuits) panelLoad += c.watts ?? 0;
+
+  return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad };
 }
