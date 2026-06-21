@@ -273,7 +273,7 @@ export const Shp2Card = memo(function Shp2Card({
                 {s.dpuStale ? (
                   <div
                     className="mt-1"
-                    title="The SHP2 still counts this slot's battery in the backup pool, and the pool capacity stays accurate (the SHP2 measures it directly). The slot's DPU is reporting offline to the EcoFlow cloud, so its own per-DPU telemetry is stale."
+                    title="The SHP2 still counts this slot's battery in the backup pool, and the pool capacity stays accurate (the SHP2 measures it directly). The slot's DPU is marked offline (last-known EcoFlow-cloud state), so its own per-DPU telemetry is stale."
                   >
                     <span className="badge badge-warn text-[10px]">⚠ DPU telemetry stale · battery still counted</span>
                   </div>
