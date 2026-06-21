@@ -99,6 +99,9 @@ export interface Shp2EnergySource {
   emsBatTemp: number | null;
   hwConnect: boolean;
   errorCodeNum: number | null;
+  /** v0.40.1 — observability only: SHP2 still counts this slot's battery, but its
+   *  underlying DPU is itself cloud-offline (stale telemetry). Capacity unaffected. */
+  dpuStale?: boolean;
 }
 
 export interface Shp2Projection {

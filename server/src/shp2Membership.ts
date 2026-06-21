@@ -99,3 +99,32 @@ export const SPARE_DPU_SNS: ReadonlySet<string> = new Set([
   'Y711ZABA9H3T0489', // Core 4
   'Y711ZAB59G9P0090', // Core 5
 ]);
+
+/**
+ * v0.40.1 — a connected SHP2 source slot whose underlying DPU is itself
+ * EcoFlow-cloud-offline (its OWN telemetry is stale), even though the SHP2 still
+ * reports the slot as connected and counts its battery in the backup pool.
+ *
+ * OBSERVABILITY ONLY — does NOT change any capacity or alarm math. The backup
+ * pool (backupFullCapWh / backupRemainWh / backupBatPercent) is read straight
+ * from the SHP2's own aggregate quota (`backupIncreInfo.*`), NOT summed from
+ * per-slot data, so it stays correct and fresh while the SHP2 is online,
+ * regardless of any DPU's cloud link. We deliberately do NOT subtract a stale
+ * slot from the pool: the battery is physically wired and contributing, and the
+ * reserve-floor alarm derives from that capacity (gridState.ts) — dropping it
+ * would falsely LOWER the reserve % and could FALSE-ESCALATE the floor alarm. A
+ * genuinely UNPLUGGED core drops out of the SHP2's `isConnected` on its own.
+ *
+ * True iff: the slot is connected, maps to a known DPU device that is currently
+ * offline, and is not a designated bench spare (whose offline state is an
+ * EXPECTED steady state, never flagged — mirrors the zombie-alert gating).
+ */
+export function isSourceDpuStale(
+  source: { isConnected: boolean; sn: string | null },
+  devices: Record<string, DeviceSnapshot>,
+): boolean {
+  if (!source.isConnected || !source.sn) return false;
+  if (SPARE_DPU_SNS.has(source.sn)) return false;
+  const dpu = devices[source.sn];
+  return dpu != null && dpu.online === false;
+}

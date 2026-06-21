@@ -270,6 +270,14 @@ export const Shp2Card = memo(function Shp2Card({
                     {s.isConnected ? (s.isAcOpen ? 'active' : 'connected') : 'disconnected'}
                   </span>
                 </div>
+                {s.dpuStale ? (
+                  <div
+                    className="mt-1"
+                    title="The SHP2 still counts this slot's battery in the backup pool, and the pool capacity stays accurate (the SHP2 measures it directly). The slot's DPU is reporting offline to the EcoFlow cloud, so its own per-DPU telemetry is stale."
+                  >
+                    <span className="badge badge-warn text-[10px]">⚠ DPU telemetry stale · battery still counted</span>
+                  </div>
+                ) : null}
                 <div className="flex items-baseline justify-between mt-2">
                   <span className="text-2xl font-bold tabular-nums">{fmtPct(s.batteryPercentage)}</span>
                   <span className="text-xs text-muted">
