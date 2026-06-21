@@ -55,7 +55,8 @@ export interface DpuPack {
   cycles: number | null;
   remainTimeMin: number | null;
   packSn: string | null;
-  // Capacity (single-string mAh — multiply by ~51.2 V to get Wh)
+  // Capacity (single-string mAh). Each pack is 32S1P (~104 V nominal; 32 series
+  // cells whose mV sum to packVoltageMv). Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024.
   designCapMah: number | null;
   fullCapMah: number | null;
   remainCapMah: number | null;
@@ -72,7 +73,7 @@ export interface DpuPack {
   minMosTemp: number | null;
   maxMosTemp: number | null;
   // Per-cell voltage detail (millivolts — UI converts to V).
-  // DPU packs report 32 cells (16S2P configuration treated as 32 measurement points).
+  // DPU packs report 32 cells (32S1P: 32 series cells whose mV sum to packVoltageMv).
   cellVoltagesMv: number[];
   minCellVoltageMv: number | null;
   maxCellVoltageMv: number | null;

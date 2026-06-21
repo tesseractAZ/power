@@ -70,7 +70,9 @@ type ColorKey = 'red' | 'yellow' | 'green' | 'cyan' | 'grey' | 'white';
 
 /* ───────────────────────── formatting ───────────────────────── */
 
-const MAH_TO_WH = (51.2 * 2) / 1000;
+// Each pack is 32S1P (~104 V nominal; 32 series cells whose mV sum to packVoltageMv).
+// fullCap is single-string mAh; Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024.
+const MAH_TO_WH = (32 * 3.2) / 1000;   // = 0.1024 Wh/mAh (was (51.2 * 2)/1000, same value)
 const cToF = (x: number) => (x * 9) / 5 + 32;
 
 function fmtTemp(x: number | null | undefined): string {
