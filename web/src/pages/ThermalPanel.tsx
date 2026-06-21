@@ -14,7 +14,7 @@ const mahToWh = (mah: number | null | undefined) => (mah == null ? null : mah * 
 
 /* Thermal bands (°F) for LFP cells / supporting electronics. */
 const COLD_F = 60;
-const WARM_F = 95;
+const WARM_F = 104; // v0.43.0 — match alerts.ts CELL_TEMP.infoF (104°F) so the cell plate's amber tier mirrors the alarm engine (was 95, the one band that didn't mirror)
 const HOT_F = 113;
 const OVER_F = 131;
 

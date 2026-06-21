@@ -54,7 +54,7 @@ export function AlertsPanel({ alerts }: { alerts: Alert[] }) {
         {actionable.length === 0 && (
           <div className="mt-3 flex items-center gap-2 text-sm text-ok">
             <span className="h-2 w-2 rounded-full bg-ok inline-block" />
-            All systems nominal — no Critical, High, or Medium conditions across the fleet.
+            All systems nominal — no Critical or High conditions across the fleet.
           </div>
         )}
       </div>
