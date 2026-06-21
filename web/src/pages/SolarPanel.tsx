@@ -60,6 +60,10 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
   // still has its 10 HV + 4 LV strings physically installed. Same `|| onlineDpus.length`
   // fallback so it degrades gracefully on cold boot before the SHP2 sources populate.
   const equippedCores = arraySns.size || onlineDpus.length;
+  // v0.43.0 (Copilot follow-up) — count ONLINE *equipped* (SHP2-bound) cores, so the
+  // "· N offline" suffix isn't understated by an online bench spare (which is in
+  // onlineDpus but not arraySns). When membership is unknown (no SHP2), all online count.
+  const equippedOnline = arraySns.size > 0 ? onlineDpus.filter((d) => arraySns.has(d.sn)).length : onlineDpus.length;
   const totalPanels = equippedCores * PANELS_PER_DPU;
 
   // v0.9.75 — defensive log for the "Core 3 LV showed no data" report.
@@ -206,8 +210,8 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
             value={peakToday ? fmtW(peakToday.value) : '—'}
             sub={peakToday ? `at ${new Date(peakToday.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'no peak yet'}
           />
-          <SummaryTile label="HV channels" value={`${equippedCores}`} sub={equippedCores > onlineDpus.length ? `high-voltage MPPT · ${equippedCores - onlineDpus.length} offline` : 'high-voltage MPPT'} />
-          <SummaryTile label="LV channels" value={`${equippedCores}`} sub={equippedCores > onlineDpus.length ? `low-voltage MPPT · ${equippedCores - onlineDpus.length} offline` : 'low-voltage MPPT'} />
+          <SummaryTile label="HV channels" value={`${equippedCores}`} sub={equippedCores > equippedOnline ? `high-voltage MPPT · ${equippedCores - equippedOnline} offline` : 'high-voltage MPPT'} />
+          <SummaryTile label="LV channels" value={`${equippedCores}`} sub={equippedCores > equippedOnline ? `low-voltage MPPT · ${equippedCores - equippedOnline} offline` : 'low-voltage MPPT'} />
         </div>
       </div>
 
