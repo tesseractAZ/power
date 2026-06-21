@@ -72,9 +72,16 @@ export function EnergyFlow({ devices, grid }: Props) {
   const gridDpus = sourceSns.size > 0 ? dpus.filter((d) => sourceSns.has(d.sn)) : dpus;
   const acIn = gridDpus.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
   const acOut = dpus.reduce((s, d) => s + (d.projection.acOutWatts ?? 0), 0);
-  const totalIn = dpus.reduce((s, d) => s + (d.projection.totalInWatts ?? 0), 0);
-  const totalOut = dpus.reduce((s, d) => s + (d.projection.totalOutWatts ?? 0), 0);
-  const batNet = totalOut - totalIn; // > 0 = discharging
+  // v0.46.0 — battery net from PER-PACK flow, not DPU throughput, mirroring the
+  // server's fleet_battery_net_watts (server/src/index.ts:1108). total_in/out are
+  // DPU THROUGHPUT (PV+grid in / AC out), NOT battery-cell flow — using
+  // `totalOut − totalIn` overstated the charge/discharge magnitude. Pack out =
+  // discharge, pack in = charge; net positive = discharging. Same `dpus` set the
+  // battery node already iterates (home-connected DPUs, or all online on cold boot).
+  const batNet = dpus.reduce(
+    (s, d) => s + d.projection.packs.reduce((p, pk) => p + ((pk.outputWatts ?? 0) - (pk.inputWatts ?? 0)), 0),
+    0,
+  ); // > 0 = discharging
   const soc = dpus.length === 0 ? null : dpus.reduce((s, d) => s + (d.projection.soc ?? 0), 0) / dpus.length;
   const load = shp2?.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0) ?? acOut;
 
@@ -161,7 +168,7 @@ export function EnergyFlow({ devices, grid }: Props) {
           <StandbyLink from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} color={HUES.grid} />
         ) : null}
         {/* Battery → Loads (use load if available, fallback acOut) */}
-        <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={Math.max(load, acOut)} color={HUES.soc} period={period(Math.max(load, acOut))} strokeW={strokeW(Math.max(load, acOut))} label="ac-out" />
+        <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={Math.max(load, acOut)} color={HUES.soc} period={period(Math.max(load, acOut))} strokeW={strokeW(Math.max(load, acOut))} label="load" />
 
         {/* Solar node */}
         <Node {...Solar} title="Solar" subtitle="42 panels" value={fmtW(pv)} icon="☀" accent={HUES.solar} />

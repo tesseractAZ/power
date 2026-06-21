@@ -100,6 +100,14 @@ export const RunwayCard = memo(function RunwayCard() {
         </div>
       )}
 
+      {/* v0.46.0 — surface the server's loadModelDegraded caveat: when the load
+          forecast curve is degenerate (post-restart) the whole horizon falls back
+          to a flat observed-load estimate, a lower-fidelity number rendered
+          identically to a healthy projection. Observability only. */}
+      {runway.loadModelDegraded && (
+        <div className="text-xs text-warn mb-3 -mt-1">load model degraded — flat-load estimate</div>
+      )}
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         <Stat
           label="Backup now"

@@ -3,6 +3,19 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.46.0 — 2026-06-21
+
+**Dashboard accuracy audit — 7 fixes (3 med, 4 low).** A multi-agent audit traced every dashboard tile/number display → API → server → raw device data and recomputed each against the live add-on; every finding was adversarially verified before inclusion.
+
+- **[MED] EnergyFlow battery charge/discharge rate now uses per-pack flow, not DPU throughput.** The flow diagram computed battery net as `Σ totalOutWatts − Σ totalInWatts` — DPU *throughput* (PV+grid in / AC out), not battery cell flow — overstating the rate (live: it showed ~4329 W charging vs the true 3832 W). Now `Σ (pack.outputWatts − pack.inputWatts)` over the same membership, mirroring the server's `fleet_battery_net_watts` (the exact correction the server made in v0.10.4, finally ported to the card). Matches `/api/ha-state` and the HA Energy battery tiles.
+- **[MED] SystemSummary 'Battery net' tile — same throughput→pack-flow fix** (the card isn't currently mounted on the dashboard, but the tile is now correct should it be).
+- **[MED] SystemSummary 'Grid in' tile no longer mislabels DPU ac_in as the home grid.** It read DPU `acInWatts` (grid charging the DPUs) but was captioned as the home grid / off-grid indicator — the same scope error as the v0.44.0 grid-import fix. It now sources whole-home grid from `shp2.projection.gridWatt` and resolves off-grid from the grid **resolver** (`snapshot.grid`), not `acIn < 5`; when `gridWatt` is unavailable it falls back to an honest "DPU AC-in" label rather than claiming it's the home grid.
+- **[LOW] EnergyFlow Battery→Loads arrow label** `ac-out` → `load` (the rendered value is the home panel load, not DPU AC-out).
+- **[LOW] RunwayCard surfaces the `loadModelDegraded` caveat.** The server flags when the runway used a degraded flat-load estimate (post-restart degenerate forecast curve); the card now shows a "load model degraded — flat-load estimate" caption in that state instead of rendering the lower-fidelity hours identically to a healthy projection.
+- **[LOW] Web `Shp2Projection` type gains `gridWatt`** (was emitted by the server, missing from the web type — type-truthfulness + enables the Grid-in fix).
+- **[LOW] ForecastCard caption** is now conditional on `hasWeather`: it describes the equipment-tuned GHI-response model when cloud-aware (instead of always describing the typical-day fallback).
+- Web `tsc -b + vite build` clean; no server changes.
+
 ## 0.45.0 — 2026-06-21
 
 **Lifetime battery charge/discharge counters — fix the "charge == discharge" pin and the offline-freeze.** Live-diagnosed: `/api/lifetime-energy` reported `battery_charge_lifetime_kwh == battery_discharge_lifetime_kwh` exactly (573.815 each, implied RTE 100%), and HA's Energy Dashboard battery in/out read 0 kWh today. Two independent root causes, both confirmed against the live BMS registers, with the fix design **adversarially verified** (the first-pass "reset both counters" idea was rejected for corrupting the healthy charge counter — see below).

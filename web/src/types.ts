@@ -114,6 +114,10 @@ export interface Shp2Projection {
   backupDischargeTimeMin: number | null;
   backupReserveSoc: number | null;
   chargeWattPower: number | null;
+  /** v0.34.0 — total whole-home grid power into the home at the SHP2 main
+   *  (wattInfo.gridWatt). The authoritative grid-import figure; DPU `acInWatts`
+   *  only captures grid that charges the DPUs, not grid serving home loads directly. */
+  gridWatt: number | null;
   circuits: Shp2Circuit[];
   pairedCircuits: Shp2PairedCircuit[];
   sources: Shp2EnergySource[];
@@ -408,6 +412,10 @@ export interface RunwayProjection {
   loadHorizonKwh: number;
   horizonHours: number;
   unavailable: string | null;
+  /** v0.15.21 (web surfaced v0.46.0) — true when the forecast load curve was
+   *  implausibly empty and the whole horizon fell back to a flat observed-load
+   *  estimate (post-restart worker race). Lower-fidelity than a healthy projection. */
+  loadModelDegraded?: boolean;
 }
 
 export interface RoundTripDay {
