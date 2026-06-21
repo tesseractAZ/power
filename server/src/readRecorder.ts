@@ -96,12 +96,23 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     }
     return out;
   };
+  // v0.40.3 — persisted lifetime keys, snapshot-independent (see Recorder.listLifetimeKeys).
+  let lifetimeKeysStmt: ReturnType<typeof db.prepare> | null = null;
+  const listLifetimeKeys = (): string[] => {
+    try {
+      lifetimeKeysStmt ??= db.prepare(`SELECT metric_key FROM lifetime_totals`);
+      return (lifetimeKeysStmt.all() as Array<{ metric_key: string }>).map((r) => r.metric_key);
+    } catch {
+      return [];
+    }
+  };
 
   return {
     // ── write path: stubbed (worker never writes) ──
     insertSnapshot: () => {},
     rollupLifetime: () => {},
     getLifetimeTotals,
+    listLifetimeKeys,
     recordWeatherGhi: () => {}, // v0.13.1 — write path; the read-only worker never writes
     telemetryGaps: () => [],    // v0.30.0 — gaps are detected on the write path; /api/telemetry-gaps uses the main recorder
     // ── read path: real ──
