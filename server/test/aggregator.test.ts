@@ -287,3 +287,39 @@ test('computeTotals — degenerate zero-width window ⇒ pvCoverage falls back t
   assert.equal(r.fleet.coverage, 0, 'degenerate window ⇒ all-metric coverage 0');
   assert.equal(r.fleet.pvCoverage, r.fleet.coverage, 'degenerate guard ⇒ pvCoverage === coverage');
 });
+
+test('computeTotals — a non-SHP2-connected spare DPU does NOT dilute pvCoverage (Copilot #88)', () => {
+  // fleet.pvWh counts only SHP2-connected DPUs; pvCoverage must use the SAME
+  // membership. A bench spare with sparse pv_total would otherwise drag the
+  // Solar "% measured" tile down below the real (connected) array's coverage.
+  const since = startOfLocalDayMs() - ONE_HOUR;
+  const until = startOfLocalDayMs();
+  const dense = evenSamples(since, until, FIVE_MIN, 1000);                 // ~1.0 coverage
+  const half = evenSamples(since, since + ONE_HOUR / 2, FIVE_MIN, 1000);   // ~0.5 coverage
+  // Per-SN recorder: connected 'SN-HOME' has dense pv_total; spare 'SN-SPARE' half.
+  const rec = {
+    insertSnapshot() {}, listMetrics() { return ['pv_total']; }, close() {},
+    rollupLifetime() {}, getLifetimeTotals() { return {}; },
+    query(sn: string, metric: string, s: number, u: number) {
+      const pts = metric === 'pv_total' ? (sn === 'SN-SPARE' ? half : dense) : [];
+      return pts.filter((p) => p.ts >= s && p.ts <= u);
+    },
+  } as unknown as Recorder;
+  // SHP2 lists ONLY SN-HOME as a source ⇒ SN-SPARE is a non-connected bench spare.
+  const store = {
+    get: () => ({
+      devices: {
+        'SN-HOME': { sn: 'SN-HOME', deviceName: 'Core 1', online: true, projection: { kind: 'dpu', packs: [] } },
+        'SN-SPARE': { sn: 'SN-SPARE', deviceName: 'Core 5', online: true, projection: { kind: 'dpu', packs: [] } },
+        SHP2: { sn: 'SHP2', deviceName: 'SHP2', online: true, projection: { kind: 'shp2', sources: [{ sn: 'SN-HOME', isConnected: true }], pairedCircuits: [] } },
+      },
+    }),
+  } as unknown as SnapshotStore;
+  const r = computeTotals(store, rec, since, until);
+  // pvCoverage must track ONLY the connected core's dense pv_total (~1.0), NOT
+  // the mean with the spare's 0.5 (which would land ~0.75).
+  assert.ok(
+    r.fleet.pvCoverage > 0.98,
+    `pvCoverage ${r.fleet.pvCoverage} must reflect only the SHP2-connected core (~1.0), not be diluted by the spare`,
+  );
+});
