@@ -581,7 +581,15 @@ function pvString(
 function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
   const dpus = getDpus(data.snap);
   if (dpus.length === 0) return [c.grey('No Delta Pro Ultra units discovered.')];
-  const di = Math.max(0, Math.min(sv.battDpu, dpus.length - 1));
+  let di = Math.max(0, Math.min(sv.battDpu, dpus.length - 1));
+  // v0.51.0 — if the selected DPU has no packs reporting (the default index 0 is
+  // Core 1, which is cloud-offline), open the per-pack grid on the first DPU that
+  // IS reporting so the screen shows real data instead of an all-"absent" grid.
+  // The offline core is still surfaced in the FLEET BATT / offline-freeze header.
+  if ((dpus[di].projection?.packs?.length ?? 0) === 0) {
+    const firstLive = dpus.findIndex((d) => (d.projection?.packs?.length ?? 0) > 0);
+    if (firstLive >= 0) di = firstLive;
+  }
   const dpu = dpus[di];
   const packs = dpu.projection?.packs ?? [];
   const pi = Math.max(0, Math.min(sv.battPack, 4));
@@ -874,7 +882,7 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
       [
         ['Home grid', `${fmtW(p.gridWatt ?? grid.homeGridWatts)}`],
         ['DPU charge', `${fmtW(grid.importWatts)}`],
-        ['Present', grid.present ? (grid.importLive ? 'yes (live)' : grid.declared ? 'yes (declared)' : 'yes') : 'no'],
+        ['Present', grid.present ? (grid.importLive ? 'live' : grid.declared ? 'declared' : 'yes') : 'no'],
       ],
       w,
     ),
