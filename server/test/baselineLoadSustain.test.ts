@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// v0.37.0 — sustained-duration notify gate for the per-circuit load-anomaly
+// v0.38.0 — sustained-duration notify gate for the per-circuit load-anomaly
 // family ("<Circuit> load unusual for the hour"). In a verified 58 h log this
 // one family fired/resolved 116× — 72% of all immediate notifications — because
 // a normal AC compressor cycle (a few minutes) cleared the standard 60 s notify

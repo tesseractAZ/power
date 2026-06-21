@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.40.4 — 2026-06-21
+
+- **Doc-accuracy cleanup (addresses prior GitHub Copilot review notes).** No behavior change. (1) Corrected the `alertMonitor.ts` sustained-load-anomaly JSDoc/inline version tags + its test header from `v0.37.0` to `v0.38.0` (the release the feature actually shipped in) — keeps `git`/grep provenance consistent with the changelog. (2) Reworded the `dpuStale` user-facing SHP2-card tooltip and the `isSourceDpuStale` docstring from "is reporting offline to the EcoFlow cloud" / "currently offline" to "marked offline (last-known cloud state)", since the flag is derived from `DeviceSnapshot.online` (last-known, can lag a stale `/device/list` session) and is a best-effort hint, not an authoritative real-time cloud-presence signal.
+
 ## 0.40.3 — 2026-06-21
 
 - **Actually fix the `circuit_N_lifetime_kwh` startup race (completes v0.40.2).** A GitHub Copilot re-review of v0.40.2 caught that the "union with persisted accumulators" was sourced from `Object.keys(recorder.getLifetimeTotals())` — but `getLifetimeTotals()`'s key set is snapshot-gated (`allLifetimeKeys` only appends `circuit_<ch>_wh` keys when the current snapshot has an SHP2 with circuits). So before the first poll populated the snapshot, the union still emitted **no** per-circuit keys, and the prior run's retained HA sensors could still hit the template warning at startup — exactly the case v0.40.2 claimed to cover. Added `Recorder.listLifetimeKeys()` (reads the `lifetime_totals` table directly, snapshot-independent — implemented on both the main and read-only worker recorders) and switched the MQTT state payload to union the live circuits with **that**. New integration test proves `listLifetimeKeys()` surfaces a persisted `circuit_<ch>_wh` key with an empty snapshot where `getLifetimeTotals()` does not. (+1 integration test; full suite 661/661.)

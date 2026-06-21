@@ -56,7 +56,7 @@ import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 const EVAL_INTERVAL_MS = Number(process.env.ALERT_EVAL_MS ?? 20_000);
 const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
 
-// v0.37.0 — sustained-duration gate for the per-circuit load-anomaly family
+// v0.38.0 — sustained-duration gate for the per-circuit load-anomaly family
 // ("<Circuit> load unusual for the hour"). The detector already requires the
 // excursion to hold for BASELINE_SUSTAINED_MS (30 min) of *history samples*
 // before it emits the alert at all — but that gate is satisfied a few minutes
@@ -79,7 +79,7 @@ const BASELINE_LOAD_SUSTAIN_MS = Number(process.env.BASELINE_LOAD_SUSTAIN_MS ?? 
 const BASELINE_LOAD_RESOLVE_DWELL_MS = Number(process.env.BASELINE_LOAD_RESOLVE_DWELL_MS ?? 8 * 60_000);
 
 /**
- * v0.37.0 — does this alert belong to the per-circuit load-anomaly family that
+ * v0.38.0 — does this alert belong to the per-circuit load-anomaly family that
  * needs the sustained-duration notify gate? Matches the learned self-baseline
  * load-circuit anomalies only (ids `baseline-ch{N}_w-{SN}` /
  * `baseline-pair{N}_w-{SN}`, all `source: 'learned'`). Thermal/SoC baselines
@@ -91,7 +91,7 @@ export function isSustainGatedLoadAnomaly(alert: Pick<Alert, 'id' | 'source'>): 
 }
 
 /**
- * v0.37.0 — the fire debounce for an alert: the long sustain window for the
+ * v0.38.0 — the fire debounce for an alert: the long sustain window for the
  * gated load-anomaly family, else the standard debounce. Critical alerts keep
  * their 0 ms bypass (handled by the caller). Pure + exported for tests.
  */
@@ -129,7 +129,7 @@ interface TrackedAlert {
    *  critical when the grid drops out at the reserve floor) re-notifies instead
    *  of being silently swallowed by an already-true `notified`. */
   notifiedSeverity?: Severity;
-  /** v0.37.0 — first eval tick at which this alert went absent, for the
+  /** v0.38.0 — first eval tick at which this alert went absent, for the
    *  resolve-dwell gate on the sustained load-anomaly family. The tracked
    *  entry is held (not resolved) until it has been continuously absent for
    *  BASELINE_LOAD_RESOLVE_DWELL_MS, so a compressor briefly cycling off
@@ -863,7 +863,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         continue;
       }
       existing.alert = a;
-      // v0.37.0 — the alert is present again this tick, so cancel any pending
+      // v0.38.0 — the alert is present again this tick, so cancel any pending
       // resolve-dwell countdown (a sustained load-anomaly that briefly dipped
       // back to baseline and recovered must not resolve).
       existing.clearedSince = undefined;
@@ -880,7 +880,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // silently swallowed. Warning/info still debounce to avoid noisy
       // flapping (a short blip isn't worth interrupting for); a brief critical
       // is exactly the kind of thing the user wants to know about.
-      // v0.37.0 — the sustained load-anomaly family ("<Circuit> load unusual
+      // v0.38.0 — the sustained load-anomaly family ("<Circuit> load unusual
       // for the hour") gets a much longer fire debounce so a normal AC
       // compressor cycle (a few minutes) clears inside the window and never
       // pushes; only an anomaly that PERSISTS past BASELINE_LOAD_SUSTAIN_MS
@@ -944,7 +944,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // re-evaluates next tick) so a restart can't fire a premature
       // "Resolved" — a genuine clear still resolves once the window passes.
       if (t.alert.source === 'learned' && now - monitorStartMs < LEARNED_RESOLVE_GRACE_MS) continue;
-      // v0.37.0 — resolve-dwell for the sustained load-anomaly family. A
+      // v0.38.0 — resolve-dwell for the sustained load-anomaly family. A
       // genuinely-sustained anomaly can momentarily dip back under the floor
       // (compressor cycling within a fault, sample jitter); without a dwell
       // that single absent tick would emit a "Resolved:" and the next present

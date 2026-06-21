@@ -115,9 +115,12 @@ export const SPARE_DPU_SNS: ReadonlySet<string> = new Set([
  * would falsely LOWER the reserve % and could FALSE-ESCALATE the floor alarm. A
  * genuinely UNPLUGGED core drops out of the SHP2's `isConnected` on its own.
  *
- * True iff: the slot is connected, maps to a known DPU device that is currently
- * offline, and is not a designated bench spare (whose offline state is an
- * EXPECTED steady state, never flagged — mirrors the zombie-alert gating).
+ * True iff: the slot is connected, maps to a known DPU device that is marked offline
+ * (its `DeviceSnapshot.online` is the LAST-KNOWN cloud state, which can lag a stale
+ * EcoFlow `/device/list` session — so `dpuStale` is a best-effort hint, not an
+ * authoritative real-time cloud-presence signal), and is not a designated bench spare
+ * (whose offline state is an EXPECTED steady state, never flagged — mirrors the
+ * zombie-alert gating).
  */
 export function isSourceDpuStale(
   source: { isConnected: boolean; sn: string | null },
