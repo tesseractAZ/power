@@ -107,11 +107,25 @@ test('activeSocBand — lowest threshold currently crossed', () => {
   assert.equal(activeSocBand(1)?.pct, 2); // 1 ≤ 2 (the lowest band)
 });
 
-test('socAlertSeverity — derives the (severity, source) for each priority', () => {
-  assert.deepEqual(socAlertSeverity('medium'), { severity: 'warning', source: 'learned' });
+test('socAlertSeverity — derives the (severity, source, priority) for each priority', () => {
+  // v0.44.0 — these are REAL measured crossings: always source='threshold', and
+  // the ISA tier is carried in the explicit `priority` field (Medium no longer
+  // fakes source='learned').
+  assert.deepEqual(socAlertSeverity('medium'), {
+    severity: 'warning',
+    source: 'threshold',
+    priority: 'medium',
+  });
   assert.equal(socAlertSeverity('high').source, 'threshold');
+  assert.equal(socAlertSeverity('high').priority, 'high');
   assert.equal(socAlertSeverity('critical').severity, 'critical');
+  assert.equal(socAlertSeverity('critical').source, 'threshold');
   assert.equal(socAlertSeverity('low').severity, 'info');
+  assert.equal(socAlertSeverity('low').priority, 'low');
+  // Every tier must be source='threshold' now — none route to the Predictive page.
+  for (const p of ['critical', 'high', 'medium', 'low'] as const) {
+    assert.equal(socAlertSeverity(p).source, 'threshold');
+  }
 });
 
 test('socAlarmMessage — speaks the pct and band', () => {

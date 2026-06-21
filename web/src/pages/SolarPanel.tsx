@@ -30,12 +30,12 @@ interface SummaryResp {
   fleet: {
     pvWh: number;
     coverage: number;
+    // PV-only coverage (`pv_total`), added server-side in v0.44.0; the Solar
+    // "% measured" tile binds to this so it reflects PV — not battery/grid/load/
+    // temps, which the all-metric `coverage` averaged in. Optional so an older
+    // server during dev falls back to `coverage` instead of breaking.
+    pvCoverage?: number;
   };
-  devices: Array<{
-    sn: string;
-    deviceName: string;
-    metrics: Record<string, { wh: number; samples: number; coverageMs: number; totalMs: number }>;
-  }>;
 }
 
 interface Point {
@@ -154,11 +154,18 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
   // Merge series for chart. v0.24.3 — memoized (was a bare render-body IIFE that
   // re-ran on every ~1 Hz snapshot re-render of the Solar tab) + a ts-indexed Map
   // per DPU to drop the inner O(points) `.find`, mirroring TrendChart.tsx's
-  // v0.22.0 fix. Byte-for-byte identical: first-write-wins on a duplicate ts ==
-  // Array.find's first match, and `idx.has(ts)` reproduces `if (pt)` (key
-  // presence, not value, so a 0 still carries). Keyed on pvSeries + a
-  // (sn|deviceName) signature — deviceName is mutable and the row keys + recharts
-  // dataKey/gradient depend on it, so a rename must invalidate the memo.
+  // v0.22.0 fix. Keyed on pvSeries + a (sn|deviceName) signature — deviceName is
+  // mutable and the row keys + recharts dataKey/gradient depend on it, so a
+  // rename must invalidate the memo.
+  //
+  // v0.44.0 — a bucket where a DPU has NO sample now emits `null` for that DPU
+  // (a true gap recharts breaks the line through) instead of carrying its last
+  // value forward. The history endpoint omits empty buckets, so the old
+  // carry-forward painted a flat line across a per-DPU data gap whenever a
+  // SIBLING DPU still had a sample at that timestamp — reading as steady
+  // production when there was actually no data. The fleet total now sums only
+  // the DPUs present at each bucket (an absent DPU contributes nothing rather
+  // than a stale value).
   const deviceSig = onlineDpus.map((d) => `${d.sn}|${d.deviceName}`).join(',');
   const mergedSeries = useMemo(() => {
     const all = new Set<number>();
@@ -170,16 +177,14 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
       for (const p of pvSeries[d.sn] ?? []) if (!idx.has(p.ts)) idx.set(p.ts, p.value);
       idxBySn[d.sn] = idx;
     }
-    const lastBy: Record<string, number | null> = {};
-    for (const d of onlineDpus) lastBy[d.sn] = null;
     return sortedTs.map((ts) => {
       const row: Record<string, number | string | null> = { ts };
       let total = 0;
       for (const d of onlineDpus) {
         const idx = idxBySn[d.sn];
-        if (idx.has(ts)) lastBy[d.sn] = idx.get(ts)!;
-        row[d.deviceName] = lastBy[d.sn];
-        total += lastBy[d.sn] ?? 0;
+        const v = idx.has(ts) ? idx.get(ts)! : null;
+        row[d.deviceName] = v;
+        total += v ?? 0;
       }
       row['Fleet total'] = total;
       return row;
@@ -203,7 +208,7 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
             label="Today"
             value={summary ? fmtWh(summary.fleet.pvWh) : '—'}
             accent="text-warn"
-            sub={summary ? `${(summary.fleet.coverage * 100).toFixed(0)}% measured` : ''}
+            sub={summary ? `${((summary.fleet.pvCoverage ?? summary.fleet.coverage) * 100).toFixed(0)}% measured` : ''}
           />
           <SummaryTile
             label="Peak today"
@@ -269,7 +274,9 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
                   fill={`url(#gpv-${d.sn})`}
                   strokeWidth={1.5}
                   isAnimationActive={false}
-                  connectNulls
+                  /* v0.44.0 — do NOT connectNulls: a null is a genuine per-DPU
+                     data gap (no sample in that bucket), so the area should break
+                     there rather than bridge across it as if production continued. */
                   stackId={undefined}
                 />
               ))}
@@ -622,7 +629,7 @@ function MpptChannelTile({
       <div className="grid grid-cols-1 gap-y-1 text-xs mt-1">
         <div className="kv"><span className="kv-k">Voltage</span><span className="kv-v">{volts?.toFixed(1) ?? '—'} V</span></div>
         <div className="kv"><span className="kv-k">Current</span><span className="kv-v">{amps?.toFixed(2) ?? '—'} A</span></div>
-        <div className="kv"><span className="kv-k">V × A</span><span className="kv-v">{computed != null ? `${computed.toFixed(0)} W` : '—'}</span></div>
+        <div className="kv"><span className="kv-k">V × A</span><span className="kv-v">{fmtW(computed)}</span></div>
         <div className="kv"><span className="kv-k">MPPT temp</span><span className="kv-v">{fmtTemp(temp)}</span></div>
         <div className="kv"><span className="kv-k">String Ω</span><span className="kv-v">{ohms != null ? `${ohms.toFixed(1)} Ω` : '—'}</span></div>
         <div className="kv"><span className="kv-k">Error code</span><span className="kv-v">{errCode ?? 0}</span></div>

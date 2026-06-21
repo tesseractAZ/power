@@ -25,6 +25,7 @@ export interface FleetEnergyTotals {
     panelLoadWh: number;
     batteryNetWh: number; // positive = net discharged
     coverage: number;     // 0..1 fraction of window covered (averaged across active metrics)
+    pvCoverage: number;   // 0..1 fraction of window covered, PV metric (`pv_total`) ONLY — for the Solar-page "% measured" tile
   };
 }
 
@@ -212,8 +213,14 @@ export function computeTotals(
 ): FleetEnergyTotals {
   const snap = store.get();
   const devices: EnergyTotals[] = [];
-  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, coverage: 0 };
+  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, coverage: 0, pvCoverage: 0 };
   const coverageAccum: number[] = [];
+  // v0.44.0 — PV-only coverage for the Solar-page "% measured" tile. The fleet
+  // PV rollup is keyed on the per-DPU `pv_total` series of SHP2-CONNECTED DPUs
+  // only (see the isShp2Connected block below), so this accumulates pv_total
+  // coverage under that same membership — NOT grid/load/battery/temps (which
+  // would dilute a PV-specific number), and NOT bench spares (no array).
+  const pvCoverageAccum: number[] = [];
 
   // v0.9.76 — only SHP2-connected DPUs contribute to fleet.pvWh /
   // .acOutWh / .batteryNetWh, matching the /api/ha-state + MQTT
@@ -233,7 +240,12 @@ export function computeTotals(
       const pts = recorder.query(d.sn, metric, sinceMs, untilMs);
       const r = integrateWh(pts, sinceMs, untilMs);
       metrics[metric] = r;
-      if (r.totalMs > 0) coverageAccum.push(r.coverageMs / r.totalMs);
+      if (r.totalMs > 0) {
+        coverageAccum.push(r.coverageMs / r.totalMs);
+        // NOTE: PV coverage is NOT accumulated here — it's gated on SHP2
+        // membership below (mirroring fleet.pvWh), so a bench spare's pv_total
+        // can't dilute the Solar "% measured" tile.
+      }
       return r.wh;
     };
 
@@ -257,6 +269,12 @@ export function computeTotals(
         fleet.pvWh += pvWh;
         fleet.acOutWh += acOutWh;
         fleet.batteryNetWh += packDischargeWh - packChargeWh;
+        // v0.44.0 — PV coverage tracks the SAME membership as fleet.pvWh: only
+        // SHP2-connected DPUs. A bench spare (no array, possibly 0 pv_total
+        // samples) must not dilute the Solar "% measured" tile that annotates
+        // the connected-only PV energy.
+        const pvR = metrics['pv_total'];
+        if (pvR && pvR.totalMs > 0) pvCoverageAccum.push(pvR.coverageMs / pvR.totalMs);
       }
     } else if (p.kind === 'shp2') {
       fleet.panelLoadWh += ingest('panel_load');
@@ -275,5 +293,10 @@ export function computeTotals(
   }
 
   fleet.coverage = coverageAccum.length === 0 ? 0 : coverageAccum.reduce((s, v) => s + v, 0) / coverageAccum.length;
+  // No PV metric / no expected PV samples → fall back to the all-metric coverage
+  // (itself 0 in the fully-degenerate empty-window case) rather than emitting NaN.
+  fleet.pvCoverage = pvCoverageAccum.length === 0
+    ? fleet.coverage
+    : pvCoverageAccum.reduce((s, v) => s + v, 0) / pvCoverageAccum.length;
   return { sinceMs, untilMs, devices, fleet };
 }

@@ -81,8 +81,16 @@ export const ALARM_PRIORITY_META: Record<AlarmPriority, AlarmPriorityMeta> = {
   },
 };
 
-/** Derive the ISA priority for an alert from its severity + source. */
-export function priorityOf(alert: Pick<Alert, 'severity' | 'source'>): AlarmPriority {
+/**
+ * Derive the ISA priority for an alert.
+ *
+ * v0.44.0 — an explicit `priority` field wins when present (set by producers
+ * like the backup-pool reserve bands that need ISA Medium for a REAL measured
+ * threshold crossing, without faking source='learned'). Otherwise fall back to
+ * the legacy severity+source heuristic.
+ */
+export function priorityOf(alert: Pick<Alert, 'severity' | 'source' | 'priority'>): AlarmPriority {
+  if (alert.priority) return alert.priority;
   if (alert.severity === 'critical') return 'critical';
   if (alert.severity === 'warning') return alert.source === 'learned' ? 'medium' : 'high';
   return 'low';

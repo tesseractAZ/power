@@ -26,6 +26,14 @@ export interface Alert {
   detail: string;
   /** 'threshold' = static rule (default); 'learned' = anomaly/forecast engine. */
   source?: 'threshold' | 'learned';
+  /**
+   * v0.44.0 — explicit ISA priority/tier. When present, priorityOf() reads this
+   * FIRST and skips the severity+source heuristic. Lets a REAL measured
+   * threshold crossing reach ISA Medium without faking source='learned' (which
+   * would route it onto the Predictive page and mislabel it in cleared history).
+   * Omit it and the legacy severity+source derivation still applies.
+   */
+  priority?: 'critical' | 'high' | 'medium' | 'low';
   /** Subject identity — Core (DPU) number, then pack number, when scoped to one. */
   coreNum?: number | null;
   packNum?: number | null;
@@ -487,17 +495,37 @@ export function computeAlerts(
     | undefined;
   const soc = socShp2?.projection.backupBatPercent ?? null;
   const band = activeSocBand(soc);
-  if (band !== null && soc != null) {
+  // v0.44.0 — dedup: the shp2-near-reserve / shp2-below-reserve pair above
+  // (grid-aware) already owns the soc < reserve+10 window. Suppress the
+  // backup-soc band push inside that window so the reserve story has ONE
+  // on-screen producer; only emit the band alert ABOVE it. The shp2 pair fully
+  // covers the suppressed window (near = reserve..reserve+10, below = <reserve),
+  // so no reserve condition is dropped. Use the SAME reserve default as that
+  // block (sp.backupReserveSoc ?? 15). The audible SoC alarm ladder is
+  // untouched — this only gates the on-screen mirror.
+  const socReserve = socShp2?.projection.backupReserveSoc ?? 15;
+  // v0.44.0 — only treat the window as "covered" when the shp2-near/below pair is
+  // actually ELIGIBLE to emit, i.e. the SHP2 is ONLINE (that pair is gated on
+  // `shp2?.online` at line ~430). When the SHP2 is cloud-offline its projection —
+  // hence `soc` — is still preserved by the snapshot store, but the pair does NOT
+  // fire; suppressing the band too would drop the low-SoC reserve alert entirely.
+  // Gating here keeps the band as the fallback on a faulted/offline SHP2.
+  const coveredByShp2Pair = socShp2?.online === true && soc != null && soc < socReserve + 10;
+  if (band !== null && soc != null && !coveredByShp2Pair) {
     // v0.23.0 — grid backstopping ⇒ a low pool is a non-event; collapse the
     // emergency tiers (high/critical) to a low advisory so this on-screen alert
     // tracks the (also-downgraded) audible SoC alarm in lockstep.
     const onGridEmergency =
       grid?.backstopping === true && (band.priority === 'critical' || band.priority === 'high');
-    const { severity, source } = socAlertSeverity(onGridEmergency ? 'low' : band.priority);
+    // v0.44.0 — source is always 'threshold' now; the explicit ISA `priority`
+    // (spread below) is what reaches Medium, so reserve bands show on the
+    // operational Alerts page and read correctly in cleared history.
+    const { severity, source, priority } = socAlertSeverity(onGridEmergency ? 'low' : band.priority);
     out.push({
       id: `backup-soc-${band.pct}`,
       severity,
       source,
+      priority,
       category: 'Battery',
       device: 'SHP2 backup pool',
       title: `Backup pool low — ${Math.round(soc)}%`,

@@ -76,24 +76,33 @@ export function activeSocBand(socPct: number | null | undefined): SocThreshold |
 }
 
 /**
- * The (severity, source) to stamp on the on-screen alert so that the web/TUI's
- * priorityOf(severity, source) derives the SAME ISA priority as the audible
- * alarm — giving all four tiers (Low/Medium/High/Critical) from this one alert.
- * (Medium is only reachable as warning+learned, hence the source choice.)
+ * The (severity, source, priority) to stamp on the on-screen alert so that the
+ * web/TUI's priorityOf() derives the SAME ISA priority as the audible alarm —
+ * giving all four tiers (Low/Medium/High/Critical) from this one alert.
+ *
+ * v0.44.0 — these reserve-band crossings are REAL measured threshold crossings,
+ * so they are always source='threshold' (they belong on the operational Alerts
+ * page, not the Predictive/learned page, and the cleared-history badge must not
+ * mislabel them "learned"). The Medium tier used to ride source='learned' purely
+ * so priorityOf mapped warning+learned → Medium; that conflated a measurement
+ * with a forecast. Instead we carry an EXPLICIT ISA `priority` field that
+ * priorityOf reads first, so Medium stays reachable without faking the source.
+ * Reserve source='learned' for genuine forecasts (forecast-… / baseline-… ids).
  */
 export function socAlertSeverity(priority: AlarmPriority): {
   severity: 'critical' | 'warning' | 'info';
-  source: 'threshold' | 'learned';
+  source: 'threshold';
+  priority: AlarmPriority;
 } {
   switch (priority) {
     case 'critical':
-      return { severity: 'critical', source: 'threshold' }; // → Critical (P1)
+      return { severity: 'critical', source: 'threshold', priority: 'critical' }; // → Critical (P1)
     case 'high':
-      return { severity: 'warning', source: 'threshold' }; // → High (P2)
+      return { severity: 'warning', source: 'threshold', priority: 'high' }; // → High (P2)
     case 'medium':
-      return { severity: 'warning', source: 'learned' }; // → Medium (P3)
+      return { severity: 'warning', source: 'threshold', priority: 'medium' }; // → Medium (P3) via explicit field
     case 'low':
-      return { severity: 'info', source: 'threshold' }; // → Low (P4)
+      return { severity: 'info', source: 'threshold', priority: 'low' }; // → Low (P4)
   }
 }
 

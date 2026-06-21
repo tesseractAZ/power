@@ -2288,7 +2288,18 @@ export function computeRoundTripEfficiency(
       totalCharged += chargedKwh;
       totalDischarged += dischargedKwh;
     }
-    const dayEff = include ? ratio! * 100 : null;
+    // v0.44.0 — clamp the SURFACED per-day efficiency to ≤100%. The integration
+    // (trapezoidal `integrateWh`, with the day boundary SHARED as a sample
+    // endpoint — verified no interval is double-counted across the inclusive
+    // [dayStart, dayEnd] bounds) is correct, but the round-trip band above
+    // intentionally admits days up to RTE_ROUNDTRIP_MAX_FRAC (1.05) so a genuine
+    // round trip whose last charge/discharge interval is still in-flight at the
+    // window edge isn't discarded. You can't get more energy OUT of a battery
+    // than you put IN, so the published number must never exceed 100%: clamp it
+    // here (and on the aggregate below). This is a display backstop on top of a
+    // correct integral — `ratio` can legitimately sit a hair over 1.0 from a
+    // partial edge interval; we report 100.0, not the impossible 103%.
+    const dayEff = include ? Math.min(100, ratio! * 100) : null;
     perDay.push({
       date: localDateStr(dayStart),
       chargedKwh: round2(chargedKwh),
@@ -2296,7 +2307,14 @@ export function computeRoundTripEfficiency(
       efficiencyPct: dayEff != null ? Math.round(dayEff * 10) / 10 : null,
     });
   }
-  const effPct = totalCharged > 1 ? (totalDischarged / totalCharged) * 100 : null;
+  // v0.44.0 — aggregate RTE = energy_out / energy_in over the window, in (0,100]%.
+  // Guard zero/near-zero charge → null (never Infinity/NaN), and clamp ≤100% for
+  // the same reason as the per-day value: the summed per-day ratios (each in the
+  // 0.8..1.05 band) can roll up just over unity, which is physically impossible
+  // to PUBLISH. The integration fix isn't needed here (it was already correct);
+  // this clamp is the legitimate backstop for the in-flight-edge-interval case.
+  const effPct =
+    totalCharged > 1 ? Math.min(100, (totalDischarged / totalCharged) * 100) : null;
   const value: RoundTripEfficiency = {
     generatedAt: now,
     windowDays,

@@ -13,17 +13,6 @@ import {
 import { AlertOutcomeButtons } from '../components/AlertOutcomeButtons';
 import { apiUrl } from '../api';
 
-interface NotifyStatus {
-  channel: string;
-  configured: boolean;
-  minSeverity: string;
-  notifyResolved: boolean;
-  ntfyServer?: string;
-  ntfyTopic?: string;
-  tracked: number;
-  sentSinceStart: number;
-}
-
 export function AlertsPanel({ alerts }: { alerts: Alert[] }) {
   const counts = priorityCounts(alerts);
   // "Actionable" = anything above the advisory (Low / P4) tier.
@@ -152,106 +141,6 @@ function ClearedRow({ ce }: { ce: ClearedAlert }) {
           {fmtMins(ce.durationMs / 60000)}
         </div>
       </div>
-    </div>
-  );
-}
-
-function NotificationCard() {
-  const [status, setStatus] = useState<NotifyStatus | null>(null);
-  const [testState, setTestState] = useState<'idle' | 'sending' | 'ok' | 'fail'>('idle');
-  const [testMsg, setTestMsg] = useState('');
-
-  const load = async () => {
-    try {
-      const r = await fetch(apiUrl('api/notify/status'));
-      if (r.ok) setStatus(await r.json());
-    } catch {
-      /* ignore */
-    }
-  };
-  useEffect(() => {
-    load();
-    const t = window.setInterval(load, 30_000);
-    return () => window.clearInterval(t);
-  }, []);
-
-  const sendTest = async () => {
-    setTestState('sending');
-    setTestMsg('');
-    try {
-      const r = await fetch(apiUrl('api/notify/test'), { method: 'POST' });
-      const j = await r.json();
-      if (j.ok) {
-        setTestState('ok');
-        setTestMsg('Test notification sent.');
-      } else {
-        setTestState('fail');
-        setTestMsg(j.error ?? 'Failed to send.');
-      }
-    } catch (e: any) {
-      setTestState('fail');
-      setTestMsg(String(e?.message ?? e));
-    }
-    setTimeout(() => setTestState('idle'), 6000);
-  };
-
-  return (
-    <div className="card">
-      <div className="card-title flex items-center justify-between">
-        <span>Push notifications</span>
-        {status && (
-          <span className={`badge ${status.configured ? 'badge-ok' : 'badge-muted'}`}>
-            {status.channel === 'none' ? 'disabled' : status.configured ? `${status.channel} · ready` : `${status.channel} · not configured`}
-          </span>
-        )}
-      </div>
-      {!status ? (
-        <div className="text-sm text-muted">Loading…</div>
-      ) : status.channel === 'none' ? (
-        <div className="text-sm text-muted leading-relaxed">
-          Notifications are off. To enable: set <code className="text-accent">NOTIFY_CHANNEL=ntfy</code> in
-          <code className="text-accent"> server/.env</code>, install the ntfy app, subscribe to your topic, and restart the server.
-        </div>
-      ) : (
-        <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-            <Field label="Channel" value={status.channel} />
-            <Field label="Min severity" value={status.minSeverity} />
-            <Field label="Resolved alerts" value={status.notifyResolved ? 'notified' : 'muted'} />
-            <Field label="Sent this session" value={String(status.sentSinceStart)} />
-          </div>
-          {status.channel === 'ntfy' && status.ntfyTopic && (
-            <div className="text-[11px] text-muted mb-3 leading-relaxed">
-              Subscribe in the ntfy app to topic <code className="text-accent">{status.ntfyTopic}</code>
-              {status.ntfyServer && status.ntfyServer !== 'https://ntfy.sh' ? ` on ${status.ntfyServer}` : ' on ntfy.sh'}.
-            </div>
-          )}
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={sendTest}
-              disabled={testState === 'sending'}
-              className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-50"
-            >
-              {testState === 'sending' ? 'sending…' : 'Send test notification'}
-            </button>
-            {testMsg && (
-              <span className={`text-xs ${testState === 'ok' ? 'text-ok' : testState === 'fail' ? 'text-bad' : 'text-muted'}`}>
-                {testMsg}
-              </span>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-panel2/60 border border-line rounded-lg p-2">
-      <div className="text-[10px] uppercase tracking-widest text-muted">{label}</div>
-      <div className="text-sm font-medium mt-0.5 capitalize">{value}</div>
     </div>
   );
 }

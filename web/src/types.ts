@@ -194,6 +194,13 @@ export interface Alert {
   title: string;
   detail: string;
   source?: 'threshold' | 'learned';
+  /**
+   * v0.44.0 — explicit ISA priority/tier. When present, priorityOf() reads this
+   * FIRST and skips the severity+source heuristic (keeps it in lockstep with the
+   * server). Lets a real measured threshold crossing reach ISA Medium without
+   * faking source='learned'.
+   */
+  priority?: 'critical' | 'high' | 'medium' | 'low';
   /** Subject identity — Core (DPU) number, then pack number, when scoped to one. */
   coreNum?: number | null;
   packNum?: number | null;
