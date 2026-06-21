@@ -53,10 +53,10 @@ function tempCellClass(c: number | null | undefined): string {
  * must read OK, not HOT (its alarm info threshold is 131 °F). Cells (and the
  * battery-adjacent SHP2 EMS sensor) keep the dedicated cell band, which carries a
  * cold tint cells care about and electronics don't. */
-const SENSOR_BANDS_F: Record<'mos' | 'board' | 'shunt' | 'mppt', { info: number; warn: number; crit: number }> = {
+const SENSOR_BANDS_F: Record<'mos' | 'board' | 'shunt' | 'mppt', { info: number; warn: number; crit?: number }> = {
   mos: { info: 104, warn: 131, crit: 149 },
   board: { info: 113, warn: 140, crit: 158 },
-  shunt: { info: 113, warn: 140, crit: 140 }, // alerts.ts SHUNT has no crit; treat ≥warn as the top band
+  shunt: { info: 113, warn: 140 }, // alerts.ts SHUNT_TEMP has NO critical — its top severity is "warning" at ≥140°F
   mppt: { info: 131, warn: 149, crit: 167 },
 };
 function tempClassFor(kind: 'cell' | 'ems' | 'mos' | 'board' | 'shunt' | 'mppt', c: number | null | undefined): string {
@@ -64,7 +64,7 @@ function tempClassFor(kind: 'cell' | 'ems' | 'mos' | 'board' | 'shunt' | 'mppt',
   if (kind === 'cell' || kind === 'ems') return tempCellClass(c);
   const f = cToF(c);
   const b = SENSOR_BANDS_F[kind];
-  if (f >= b.crit) return BAND.crit;
+  if (b.crit != null && f >= b.crit) return BAND.crit; // a sensor with no crit band (shunt) never renders red
   if (f >= b.warn) return BAND.hot;
   if (f >= b.info) return BAND.warm;
   return BAND.ok;
@@ -451,7 +451,9 @@ function SummaryStrip({
   const poolCapKwh = shp2?.projection.backupFullCapWh != null ? shp2.projection.backupFullCapWh / 1000 : perPackCapKwh;
   const poolSocPct = shp2?.projection.backupBatPercent ?? (socN ? socSum / socN : null);
   const avgSoh = sohN ? sohSum / sohN : null;
-  const degraded = designMah > 0 ? (1 - fullMah / designMah) * 100 : null;
+  // Floored like the per-pack tile: summed fullCap can exceed summed design after a fleet
+  // BMS recalibration, which would otherwise render an impossible "-x% degraded" at the pool.
+  const degraded = designMah > 0 ? Math.max(0, (1 - fullMah / designMah) * 100) : null;
   const staleNote = staleCores.length
     ? `incl. ${staleCores.map((d) => d.deviceName).join(', ')} (wired, cloud-stale)`
     : undefined;
