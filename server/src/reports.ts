@@ -100,7 +100,12 @@ const BUILDERS: Record<string, Builder> = {
   curtailment: (ctx) => computeCurtailment(devicesOf(ctx), ctx.recorder),
   curtailmentAlerts: (ctx) => computeCurtailmentAlerts(devicesOf(ctx), ctx.recorder),
   baselineAlerts: (ctx) => computeBaselineAlerts(devicesOf(ctx), ctx.recorder),
-  forecastAlerts: (ctx) => computeForecastAlerts(devicesOf(ctx), ctx.recorder),
+  forecastAlerts: async (ctx) => {
+    // v0.41.0 — pass the depletion-aware day forecast so computeForecastAlerts can gate
+    // the trailing-3h runtime alert on it (suppresses the false overnight depletion).
+    const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
+    return computeForecastAlerts(devicesOf(ctx), ctx.recorder, fc);
+  },
   selfConsumption: (ctx, a) => computeSelfConsumption(devicesOf(ctx), ctx.recorder, a.days ?? 7),
   carbon: (ctx, a) => computeCarbonReport(devicesOf(ctx), ctx.recorder, a.days ?? 7),
   tariff: (ctx, a) => computeTariffReport(devicesOf(ctx), ctx.recorder, a.days ?? 7),
