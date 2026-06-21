@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.48.0 — 2026-06-21
+
+**Deferred energy follow-ups — make the v0.45.0 lifetime fix self-heal, + a home-grid power sensor.**
+
+- **[Fixed] Battery counters now unfreeze for a core that was already cloud-offline at deploy.** v0.45.0's offline-freeze fix can only hold what it has *seen*; on first boot with Core 1 already offline, there was no held value for it, so the live 2-core sum stayed below the boot-seeded floor and the counters stayed frozen (HA Battery in/out = 0 today) — the discharge deficit couldn't surface until Core 1 reconnected. v0.48.0 adds a one-time-per-pack **backfill from recorder history**: for an SHP2-connected pack that's absent this snapshot, has a persisted baseline, but no held value, it reconstructs the last-known contribution from the recorder's last-recorded `pack{N}_lifetime_chg_mah`/`_dsg_mah` (minus the v0.13.0 baseline) and persists it (`pack_lastwh_*`), so the existing offline-carry includes it and the counters advance immediately. The backfill is mutate-path-only (the read-only debug endpoint never writes), runs at most once per pack, never sums directly (it only persists — the carry loop does the summing, so no double-count), and never touches a non-SHP2-connected spare. +1 test. The `/api/debug/battery-lifetime` per-pack rows gain a `backfilledFromHistory` flag.
+- **[New] `EcoFlow Grid Power (Home)` sensor** (`grid_home_watts`, device_class power) — the live SHP2-main grid power (`gridWatt`), the power complement of the v0.44.0 `grid_to_home` lifetime-energy sensor. Lets the HA Energy Dashboard grid power-flow preview read whole-home grid power instead of DPU `ac_in`.
+- Server suite 701 → 702; web build clean.
+
 ## 0.47.0 — 2026-06-21
 
 **Strategy page accuracy audit — 7 fixes (3 med, 4 low), with the shed-order direction verified against live data.** A multi-agent audit traced every Strategy tile/decode (reserve SoCs, circuit shed-order, TOU charge schedule) to source and recomputed against the live SHP2; each finding was adversarially verified.

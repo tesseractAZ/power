@@ -205,6 +205,9 @@ export interface BatteryLifetimeDebug {
     chgWh: number;
     dsgWh: number;
     heldFromLastKnown: boolean;
+    /** v0.48.0 — true when this pack's held value was reconstructed from recorder
+     *  register history this rollup (offline-at-deploy backfill), not a live sighting. */
+    backfilledFromHistory: boolean;
   }>;
   /** sourceSns members whose packs are absent this snapshot but carried via held last-known. */
   offlineHeldMembers: string[];
@@ -747,6 +750,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       chgWh: number;
       dsgWh: number;
       heldFromLastKnown: boolean;
+      backfilledFromHistory: boolean;
     }>;
     offlineHeldMembers: string[];
   } => {
@@ -778,6 +782,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       chgWh: number;
       dsgWh: number;
       heldFromLastKnown: boolean;
+      backfilledFromHistory: boolean;
     }> = [];
     // Keys passing the filter THIS snapshot (fresh delta path) — used to avoid
     // double-counting them via the held-offline carry below.
@@ -853,6 +858,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
             chgWh: newHeld.chgWh,
             dsgWh: newHeld.dsgWh,
             heldFromLastKnown: false,
+            backfilledFromHistory: false,
           });
         } else {
           // Present in the snapshot but fails the filter (spare, or no baseline/
@@ -869,8 +875,64 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
             chgWh: 0,
             dsgWh: 0,
             heldFromLastKnown: false,
+            backfilledFromHistory: false,
           });
         }
+      }
+    }
+
+    // v0.48.0 — offline-at-deploy backfill (MUTATE PATH ONLY). When v0.45.0
+    // deployed with a member core ALREADY cloud-offline, that core's packs were
+    // absent from every snapshot AND never got a pack_lastwh_* row (the held
+    // hold is only written on a live sighting). It DID, however, get a v0.13.0
+    // pack_base_* baseline (captured pre-deploy) plus recorded
+    // pack{N}_lifetime_chg_mah/_dsg_mah register history. Without a held value
+    // the offline-carry loop below skips it, so the live 2-core sum stays below
+    // the boot-seeded floor and BOTH counters freeze. We reconstruct each such
+    // pack's held delta ONCE from its LAST recorded register, persist it via
+    // savePackLastWh, and let the EXISTING carry loop do the summing (we do NOT
+    // add it to chargeWh/dischargeWh here — that would double-count). Guards:
+    //   • mutate path only (read-only debug must never backfill or write);
+    //   • current sourceSns member only (never a spare — isHomeMember);
+    //   • pack ABSENT from this snapshot (not in passedThisSnapshot — a present
+    //     pack already owns the fresh path / its own hold);
+    //   • NO existing held value (not in bmsLastPackWh, no persisted
+    //     pack_lastwh_* row) — so it runs at most once per pack; afterwards the
+    //     pack_lastwh_* row exists and the carry loop / monotone hold own it.
+    const backfilledThisCall = new Set<string>();
+    if (opts.mutate) {
+      const BACKFILL_WINDOW_MS = 40 * 24 * 60 * 60 * 1000; // ~40 days of register history
+      const nowMs = Date.now();
+      for (const baseKey of listLifetimeKeys()) {
+        // Discover pack baselines via their _chg key; the _dsg key is the same pack.
+        const m = baseKey.match(/^pack_base_(.+)_(\d+)_chg$/);
+        if (!m) continue;
+        const sn = m[1];
+        const num = Number(m[2]);
+        const cacheKey = `${sn}|${num}`;
+        // Member-only (never a spare), absent this snapshot, and not already held.
+        if (!isHomeMember(sn)) continue;
+        if (passedThisSnapshot.has(cacheKey)) continue;
+        if (bmsLastPackWh.has(cacheKey)) continue;
+        if (loadPackLastWh(sn, num)) continue; // also populates bmsLastPackWh; harmless
+        const base = loadPackBaseline(sn, num);
+        if (!base) continue; // no baseline → nothing to subtract from
+        // Last recorded register values before this pack went offline.
+        const chgPts = queryStmt.all(sn, `pack${num}_lifetime_chg_mah`, nowMs - BACKFILL_WINDOW_MS, nowMs) as Array<{ ts: number; value: number }>;
+        const dsgPts = queryStmt.all(sn, `pack${num}_lifetime_dsg_mah`, nowMs - BACKFILL_WINDOW_MS, nowMs) as Array<{ ts: number; value: number }>;
+        if (chgPts.length === 0 && dsgPts.length === 0) continue; // no history → skip
+        const lastChgMah = chgPts.length ? chgPts[chgPts.length - 1].value : null;
+        const lastDsgMah = dsgPts.length ? dsgPts[dsgPts.length - 1].value : null;
+        if (lastChgMah == null && lastDsgMah == null) continue; // registers null → skip
+        const held = {
+          chgWh: lastChgMah != null ? Math.max(0, lastChgMah - base.chgMah) * PACK_MAH_TO_WH : 0,
+          dsgWh: lastDsgMah != null ? Math.max(0, lastDsgMah - base.dsgMah) * PACK_MAH_TO_WH : 0,
+        };
+        // PERSIST the held value only — the carry loop below sums it this same
+        // rollup (cacheKey is now in bmsLastPackWh + has a pack_lastwh_* row).
+        savePackLastWh(sn, num, held);
+        backfilledThisCall.add(cacheKey);
+        log(`recorder: v0.48.0 backfilled offline-at-deploy hold sn=${sn} pack=${num} from history (lastChg=${lastChgMah ?? 'null'}mAh lastDsg=${lastDsgMah ?? 'null'}mAh base=${base.chgMah.toFixed(0)}/${base.dsgMah.toFixed(0)} → held=${held.chgWh.toFixed(0)}/${held.dsgWh.toFixed(0)} Wh)`);
       }
     }
 
@@ -916,6 +978,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         chgWh: held.chgWh,
         dsgWh: held.dsgWh,
         heldFromLastKnown: true,
+        backfilledFromHistory: backfilledThisCall.has(cacheKey),
       });
     }
 

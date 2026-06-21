@@ -91,6 +91,12 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_panel_load_watts', name: 'EcoFlow Panel Load', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.panel_load_watts }}' },
   { unique_id: 'ecoflow_ac_import_watts', name: 'EcoFlow AC Import', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.ac_import_watts }}' },
   { unique_id: 'ecoflow_fleet_battery_net_watts', name: 'EcoFlow Battery Net', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.fleet_battery_net_watts }}' },
+  // v0.48.0 — whole-home grid POWER at the SHP2 main (wattInfo.gridWatt). The
+  // power complement of the grid_to_home lifetime energy sensor (v0.44.0). The HA
+  // Energy Dashboard grid power_config.stat_rate currently points at DPU ac_in
+  // (grid charging the DPUs); this exposes total home grid so the operator can
+  // rewire the flow preview to it.
+  { unique_id: 'ecoflow_grid_home_watts', name: 'EcoFlow Grid Power (Home)', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:transmission-tower', value_template: '{{ value_json.grid_home_watts }}' },
   // SHP2 backup pool
   { unique_id: 'ecoflow_backup_pool', name: 'EcoFlow Backup Pool', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', value_template: '{{ value_json.backup_pool_percent }}' },
   { unique_id: 'ecoflow_backup_remaining_kwh', name: 'EcoFlow Backup Remaining', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_remaining_kwh }}' },
@@ -575,6 +581,10 @@ export async function startMqttDiscovery(
       panel_load_watts: Math.round(panelLoad),
       ac_import_watts: Math.round(acIn),
       fleet_battery_net_watts: Math.round(fleetBatteryNet),
+      // v0.48.0 — whole-home grid POWER at the SHP2 main (wattInfo.gridWatt), the
+      // power complement of the grid_to_home lifetime energy sensor. Null-safe: the
+      // sensor reads HA 'unknown' when the SHP2 projection has no gridWatt yet.
+      grid_home_watts: shp2?.projection.gridWatt != null ? Math.round(shp2.projection.gridWatt) : null,
       // v0.40.0 — resolve off-grid via the grid-presence resolver (GRID_PRESENCE_ENTITY +
       // SHP2 gridWatt + DPU ac_in), NOT `acIn < 5`. On a PV/battery-covered home DPU ac_in
       // is structurally ~0, so the old test pinned this sensor to off-grid 24/7 even while
