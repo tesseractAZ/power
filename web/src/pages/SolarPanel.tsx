@@ -55,7 +55,16 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
       ? (shp2.projection as Shp2Projection).sources.map((s) => s.sn).filter((sn): sn is string => !!sn)
       : [],
   );
-  const totalPanels = (arraySns.size || onlineDpus.length) * PANELS_PER_DPU;
+  // v0.43.0 — array TOPOLOGY (panel + HV/LV channel counts) is driven by the equipped
+  // SHP2-bound Cores, NOT live connectivity: a cloud-offline-but-wired Core (e.g. Core 1)
+  // still has its 10 HV + 4 LV strings physically installed. Same `|| onlineDpus.length`
+  // fallback so it degrades gracefully on cold boot before the SHP2 sources populate.
+  const equippedCores = arraySns.size || onlineDpus.length;
+  // v0.43.0 (Copilot follow-up) — count ONLINE *equipped* (SHP2-bound) cores, so the
+  // "· N offline" suffix isn't understated by an online bench spare (which is in
+  // onlineDpus but not arraySns). When membership is unknown (no SHP2), all online count.
+  const equippedOnline = arraySns.size > 0 ? onlineDpus.filter((d) => arraySns.has(d.sn)).length : onlineDpus.length;
+  const totalPanels = equippedCores * PANELS_PER_DPU;
 
   // v0.9.75 — defensive log for the "Core 3 LV showed no data" report.
   // If SHP2 hasn't loaded into the snapshot yet (cold boot, brief
@@ -201,8 +210,8 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
             value={peakToday ? fmtW(peakToday.value) : '—'}
             sub={peakToday ? `at ${new Date(peakToday.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'no peak yet'}
           />
-          <SummaryTile label="HV channels" value={`${onlineDpus.length}`} sub="high-voltage MPPT" />
-          <SummaryTile label="LV channels" value={`${onlineDpus.length}`} sub="low-voltage MPPT" />
+          <SummaryTile label="HV channels" value={`${equippedCores}`} sub={equippedCores > equippedOnline ? `high-voltage MPPT · ${equippedCores - equippedOnline} offline` : 'high-voltage MPPT'} />
+          <SummaryTile label="LV channels" value={`${equippedCores}`} sub={equippedCores > equippedOnline ? `low-voltage MPPT · ${equippedCores - equippedOnline} offline` : 'low-voltage MPPT'} />
         </div>
       </div>
 
@@ -356,7 +365,16 @@ function FlowDiagram({
         {/* Sun + panels */}
         <use href="#sun" x={COL_PANELS - 32} y={26} width="30" height="30" />
         <text x={COL_PANELS + 6} y={36} fill={HUES.solar} fontSize="14" fontFamily="ui-sans-serif" fontWeight="700">
-          {totalPanels} panels · {PANEL_W} W each
+          {/* v0.43.0 — the diagram draws a row per ONLINE equipped Core, but the
+              installed nameplate (totalPanels) counts ALL equipped Cores incl. any
+              cloud-offline one. When fewer are drawn than installed, say so explicitly
+              instead of captioning "42 panels" above 28 glyphs. */}
+          {(() => {
+            const shown = dpus.filter((d) => hasArray(d.sn)).length * PANELS_PER_DPU;
+            return shown < totalPanels
+              ? `${totalPanels} installed · ${shown} shown · ${PANEL_W} W each`
+              : `${totalPanels} panels · ${PANEL_W} W each`;
+          })()}
         </text>
 
         {dpus.map((d, i) => {

@@ -77,7 +77,10 @@ export function SubjectBoxes({ alert }: { alert: Alert }) {
     return (
       <div className="flex gap-1.5 shrink-0">
         <NumBox label="Core" value={alert.coreNum} priority={priority} />
-        <NumBox label="Pack" value={alert.packNum ?? null} priority={priority} />
+        {/* v0.43.0 — render the Pack box only for pack-scoped alerts. Core-scoped
+            alerts (offline-*, DPU-level) were showing a phantom "Pack —" implying a
+            pack scope that doesn't exist (live on every offline core). */}
+        {alert.packNum != null && <NumBox label="Pack" value={alert.packNum} priority={priority} />}
       </div>
     );
   }

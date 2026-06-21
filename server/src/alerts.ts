@@ -159,8 +159,11 @@ export function computeAlerts(
   /** v0.23.0 — when the grid is backstopping the home, a backup pool at/below
    *  the reserve floor merely transfers to mains, so the reserve alerts are
    *  downgraded from critical to an on-screen advisory. Omitted ⇒ treat as
-   *  off-grid (reserve alerts stay critical — the safe default). */
-  grid?: { backstopping: boolean; reason?: string },
+   *  off-grid (reserve alerts stay critical — the safe default).
+   *  v0.43.0 — also carries `present` (the GridBackstop resolver's grid-availability
+   *  signal) so the off-grid alert can use the same source of truth as
+   *  binary_sensor.off_grid / /api/ha-state instead of the obsolete acIn<5 heuristic. */
+  grid?: { present?: boolean; backstopping: boolean; reason?: string },
 ): Alert[] {
   const out: Alert[] = [];
   const list = Object.values(devices);
@@ -200,11 +203,25 @@ export function computeAlerts(
   const sourceSns = new Set(
     (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
+  // Only SHP2-bound cores count as grid import. When the source set is unknown
+  // (no SHP2 observed yet) count NONE — a wall-charging spare must never suppress
+  // the off-grid advisory, and acIn=0 keeps the safe "off-grid" default (v0.43.0,
+  // Copilot review). Note this `acIn` path is the FALLBACK only — when the grid
+  // resolver is supplied (always, in production) the off-grid decision uses
+  // `grid.present` and never reaches here.
   const acIn = dpus
-    .filter((d) => d.online && (sourceSns.size === 0 || sourceSns.has(d.sn)))
+    .filter((d) => d.online && sourceSns.has(d.sn))
     .reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
-  if (acIn < 5) {
-    out.push({ id: 'grid-offgrid', severity: 'info', category: 'Grid', device: 'System', title: 'Running off-grid', detail: 'No grid import detected — fully on solar + batteries.' });
+  // v0.43.0 — off-grid detection now uses the grid-presence RESOLVER (the same
+  // `present` signal driving binary_sensor.off_grid and /api/ha-state since v0.40.0),
+  // not the obsolete DPU acIn<5 sum. acIn reads 0 whenever PV/battery covers DPU
+  // charging EVEN WHILE the grid carries home load directly through the SHP2 main, so
+  // the old heuristic fired "Running off-grid" 24/7 on a grid-tied home (a live false
+  // alert). When `present` is supplied we trust it; when grid is omitted entirely we
+  // fall back to acIn<5 (and the safe default stays "off-grid" → alert visible).
+  const offGrid = grid?.present === true ? false : grid?.present === false ? true : acIn < 5;
+  if (offGrid) {
+    out.push({ id: 'grid-offgrid', severity: 'info', category: 'Grid', device: 'System', title: 'Running off-grid', detail: 'No grid connection detected — home running on solar + batteries.' });
   }
 
   // v0.16.4 — designated bench spares (Core 4/5) are intentionally kept powered
@@ -422,7 +439,21 @@ export function computeAlerts(
             : `Backup pool ${sp.backupBatPercent}% is under the ${reserve}% reserve floor.`,
         });
       } else if (sp.backupBatPercent < reserve + 10) {
-        out.push({ id: 'shp2-near-reserve', severity: 'warning', category: 'SHP2', device: shp2.deviceName, title: 'Backup approaching reserve', detail: `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor.` });
+        // v0.43.0 — grid-aware, mirroring shp2-below-reserve above: while the grid
+        // backstops the home, approaching the reserve floor merely transfers to mains,
+        // so downgrade warning → info (still visible, no chime/push). A real outage
+        // (grid absent ⇒ backstopping false) keeps it 'warning'.
+        const onGrid = grid?.backstopping === true;
+        out.push({
+          id: 'shp2-near-reserve',
+          severity: onGrid ? 'info' : 'warning',
+          category: 'SHP2',
+          device: shp2.deviceName,
+          title: 'Backup approaching reserve',
+          detail: onGrid
+            ? `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor — grid is backstopping, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+            : `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor.`,
+        });
       }
     }
     for (const s of sp.sources) {
