@@ -12,11 +12,13 @@
  *   - **OCV vs reported SoC mismatch**: BMS-reported SoC drifting from
  *     physics-implied SoC under resting conditions → SoH miscalibration
  *
- * We embed the canonical 16-cell LFP discharge curve as a small lookup
- * table (16 V endpoints; intermediate via linear interpolation). The
- * curve is for a single cell at 25°C resting (no load). At pack level,
- * the DPU runs 16 cells in series — 51.2 V nominal, 48.0 V min,
- * 57.6 V max — so we scale by 16 for pack-level comparison.
+ * We embed the canonical single-cell LFP discharge curve as a small
+ * lookup table (21 SoC points; intermediate via linear interpolation).
+ * The curve is for a single cell at 25°C resting (no load). At pack
+ * level, the DPU pack is 32S1P — 32 cells in series — ~102.4 V nominal
+ * (32 × 3.2 V), ~96 V min, ~115 V max — so we scale by 32 for
+ * pack-level comparison. (Live packs read packVoltageMv ≈ 104425 with
+ * 32 per-cell mV entries whose sum equals the pack voltage.)
  *
  * Note: this curve is for STATIC (rested) conditions. Under load, the
  * IR drop adds 50-200 mV depending on current, so a "rested" SoC
@@ -55,7 +57,7 @@ const LFP_OCV_TABLE_25C: Array<[number, number]> = [
   [100,  3.55],
 ];
 
-const CELLS_IN_SERIES = 16;        // DPU pack architecture
+const CELLS_IN_SERIES = 32;        // DPU pack is 32S1P (~102.4 V nominal = 32 × 3.2 V)
 const RESTING_CURRENT_THRESHOLD_A = 0.5;
 const RESTING_AGE_MIN_MS = 10 * 60 * 1000;  // 10 minutes idle
 

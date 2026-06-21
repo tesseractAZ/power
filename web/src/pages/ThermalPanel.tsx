@@ -5,9 +5,11 @@ import { cToF, fmtPct, fmtW, fmtWh, fmtMins } from '../format';
 import { sortDevices } from '../sort';
 import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 
-// DPU pack capacity is reported in single-string mAh. Each pack is 16S2P at
-// 51.2 V nominal, so Wh = mAh × 51.2 V × 2 strings / 1000.
-const MAH_TO_WH = (51.2 * 2) / 1000;
+// DPU pack capacity is reported in single-string mAh. Each pack is 32S1P (~104 V
+// nominal — 32 series LFP cells at ~3.2 V whose mV sum to packVoltageMv), so
+// Wh = mAh × 32 × 3.2 V / 1000 = mAh × 0.1024. (32 × 3.2 == 51.2 × 2; the constant
+// is unchanged — only the old "16S2P / 51.2 V × 2 strings" description was wrong.)
+const MAH_TO_WH = (32 * 3.2) / 1000;
 const mahToWh = (mah: number | null | undefined) => (mah == null ? null : mah * MAH_TO_WH);
 
 /* Thermal bands (°F) for LFP cells / supporting electronics. */
@@ -44,6 +46,29 @@ function tempCellClass(c: number | null | undefined): string {
   if (f >= COLD_F) return BAND.ok;
   return BAND.cool;
 }
+
+/* Per-sensor thermal bands (°F) — MIRROR server/src/alerts.ts so the UI plate
+ * color equals the alarm engine's verdict on the same reading. Supporting
+ * electronics run hotter than cells by design, so a normal ~50 °C (122 °F) MPPT
+ * must read OK, not HOT (its alarm info threshold is 131 °F). Cells (and the
+ * battery-adjacent SHP2 EMS sensor) keep the dedicated cell band, which carries a
+ * cold tint cells care about and electronics don't. */
+const SENSOR_BANDS_F: Record<'mos' | 'board' | 'shunt' | 'mppt', { info: number; warn: number; crit: number }> = {
+  mos: { info: 104, warn: 131, crit: 149 },
+  board: { info: 113, warn: 140, crit: 158 },
+  shunt: { info: 113, warn: 140, crit: 140 }, // alerts.ts SHUNT has no crit; treat ≥warn as the top band
+  mppt: { info: 131, warn: 149, crit: 167 },
+};
+function tempClassFor(kind: 'cell' | 'ems' | 'mos' | 'board' | 'shunt' | 'mppt', c: number | null | undefined): string {
+  if (c == null) return BAND.none;
+  if (kind === 'cell' || kind === 'ems') return tempCellClass(c);
+  const f = cToF(c);
+  const b = SENSOR_BANDS_F[kind];
+  if (f >= b.crit) return BAND.crit;
+  if (f >= b.warn) return BAND.hot;
+  if (f >= b.info) return BAND.warm;
+  return BAND.ok;
+}
 function socCellClass(v: number | null | undefined): string {
   if (v == null) return BAND.none;
   if (v >= 50) return BAND.ok;
@@ -79,6 +104,12 @@ function fmtF(c: number | null | undefined): string {
 function fmtVolt(mv: number | null | undefined): string {
   if (mv == null) return '—';
   return mv > 10000 ? `${(mv / 1000).toFixed(1)} V` : `${(mv / 1000).toFixed(3)} V`;
+}
+/** Single SoH formatter shared by the matrix cell AND the detail tile so the same
+ *  pack never renders two different numbers. One decimal keeps an above-nameplate
+ *  reading visible (e.g. 100.4%) rather than collapsing to a bare "100%". */
+function fmtSoh(v: number): string {
+  return `${v.toFixed(1)}%`;
 }
 
 /* ---- Matrix metric definitions ---- */
@@ -122,7 +153,7 @@ const METRICS: MetricDef[] = [
     key: 'soh',
     label: 'State of health',
     get: (pk) => pk.actSoh ?? pk.soh,
-    fmt: (v) => `${v.toFixed(1)}%`,
+    fmt: (v) => fmtSoh(v),
     cell: sohCellClass,
     legend: [
       { label: '< 75%', cls: BAND.crit },
@@ -170,7 +201,7 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
 
   return (
     <div className="space-y-4">
-      <SummaryStrip dpus={dpus} devices={devices} />
+      <SummaryStrip dpus={dpus} devices={devices} shp2={shp2} />
 
       {/* Pack matrix */}
       <div className="card">
@@ -199,10 +230,13 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
               {dpus.map((d) => (
                 <div
                   key={d.sn}
-                  className="flex items-center justify-center gap-1.5 min-w-0 text-xs uppercase tracking-widest text-muted"
+                  className={`flex flex-col items-center justify-center min-w-0 text-xs uppercase tracking-widest text-muted ${d.online ? '' : 'opacity-60'}`}
                 >
-                  <span className={`h-2 w-2 rounded-full shrink-0 ${d.online ? 'bg-ok' : 'bg-bad'}`} />
-                  <span className="truncate" title={d.deviceName}>{d.deviceName}</span>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className={`h-2 w-2 rounded-full shrink-0 ${d.online ? 'bg-ok' : 'bg-bad'}`} />
+                    <span className="truncate" title={d.deviceName}>{d.deviceName}</span>
+                  </div>
+                  {!d.online && <span className="text-[10px] text-bad normal-case tracking-normal">offline</span>}
                 </div>
               ))}
             </div>
@@ -239,6 +273,8 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
                         disabled={!pk}
                         onClick={() => setSelected({ sn: d.sn, num })}
                         className={`relative border rounded-md py-2.5 px-1 text-center transition-all ${def.cell(raw)} ${
+                          d.online ? '' : 'opacity-50'
+                        } ${
                           isSel
                             ? 'ring-2 ring-accent ring-offset-1 ring-offset-panel'
                             : pk
@@ -293,12 +329,12 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
                   <Readout
                     label="MPPT HV"
                     value={fmtF(selDpu.projection.mpptHvTemp)}
-                    cls={tempCellClass(selDpu.projection.mpptHvTemp)}
+                    cls={tempClassFor('mppt', selDpu.projection.mpptHvTemp)}
                   />
                   <Readout
                     label="MPPT LV"
                     value={fmtF(selDpu.projection.mpptLvTemp)}
-                    cls={tempCellClass(selDpu.projection.mpptLvTemp)}
+                    cls={tempClassFor('mppt', selDpu.projection.mpptLvTemp)}
                   />
                 </>
               )}
@@ -327,10 +363,18 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
             {shp2.projection.sources.map((s) => {
               const dpu = dpus.find((d) => d.sn === s.sn);
               return (
-                <div key={s.slot} className={`border rounded-md p-3 ${tempCellClass(s.emsBatTemp)}`}>
+                <div key={s.slot} className={`relative border rounded-md p-3 ${tempClassFor('ems', s.emsBatTemp)} ${s.dpuStale ? 'opacity-60' : ''}`}>
                   <div className="text-xs uppercase tracking-widest opacity-70">Slot {s.slot}</div>
                   <div className="text-sm font-medium truncate">{dpu?.deviceName ?? s.sn ?? '—'}</div>
                   <div className="text-2xl font-semibold tabular-nums mt-1">{fmtF(s.emsBatTemp)}</div>
+                  {s.dpuStale && (
+                    <span
+                      className="absolute top-1.5 right-1.5 text-[10px] uppercase tracking-wide bg-warn/30 text-ink border border-warn/60 rounded px-1.5 py-0.5"
+                      title="Core is cloud-offline; its battery is still wired and counted in the pool capacity above."
+                    >
+                      stale
+                    </span>
+                  )}
                 </div>
               );
             })}
@@ -354,14 +398,16 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
 function SummaryStrip({
   dpus,
   devices,
+  shp2,
 }: {
   dpus: Array<DeviceSnapshot & { projection?: DpuProjection }>;
   devices: Record<string, DeviceSnapshot>;
+  shp2?: DeviceSnapshot & { projection: Shp2Projection };
 }) {
   const connectedSns = shp2ConnectedDpuSns(devices);
   let packs = 0;
-  let socSum = 0;
-  let sohSum = 0;
+  let socSum = 0, socN = 0;
+  let sohSum = 0, sohN = 0;
   let fullMah = 0;
   let designMah = 0;
   let balancing = 0;
@@ -372,9 +418,12 @@ function SummaryStrip({
     if (!isShp2Connected(d.sn, connectedSns)) continue;
     for (const pk of d.projection.packs) {
       packs++;
-      if (pk.soc != null) socSum += pk.soc;
+      // Per-metric counters: a present-but-null pack must NOT dilute the average. A
+      // partial MQTT report (soc/soh absent) would otherwise deflate the headline because
+      // the denominator counted it while the numerator didn't.
+      if (pk.soc != null) { socSum += pk.soc; socN++; }
       const soh = pk.actSoh ?? pk.soh;
-      if (soh != null) sohSum += soh;
+      if (soh != null) { sohSum += soh; sohN++; }
       if (pk.fullCapMah != null) fullMah += pk.fullCapMah;
       if (pk.designCapMah != null) designMah += pk.designCapMah;
       if (pk.balanceState != null && pk.balanceState !== 0) balancing += countSetBits(pk.balanceState);
@@ -384,19 +433,45 @@ function SummaryStrip({
         worstSpread = { mv: pk.maxVolDiffMv, tag: `${d.deviceName} P${pk.num}` };
     }
   }
-  const capNowKwh = (fullMah * MAH_TO_WH) / 1000;
+
+  // Core membership: every SHP2-connected DPU vs the subset currently reporting fresh
+  // per-pack telemetry. A connected core that's cloud-offline (e.g. a wired core whose
+  // WiFi dropped) is still backing the home — its energy lives in the SHP2 aggregate, so
+  // it must not silently vanish from the pool headline.
+  const connectedDpus = dpus.filter((d) => isShp2Connected(d.sn, connectedSns));
+  const reportingCores = connectedDpus.filter((d) => d.online && d.projection).length;
+  const staleCores = connectedDpus.filter((d) => !(d.online && d.projection));
+
+  // Capacity + pool SoC come from the SHP2's OWN aggregate (backupFullCapWh/backupBatPercent)
+  // when present — it counts the whole wired pool including a cloud-stale core, so the
+  // headline doesn't collapse ~33% the instant one core's WiFi drops. The per-pack sum is
+  // only a no-SHP2 fallback (spare-only fleets). Degradation/hottest/spread/balancing stay
+  // per-pack over the reporting cores (you can't read a stale core's live cell data anyway).
+  const perPackCapKwh = (fullMah * MAH_TO_WH) / 1000;
+  const poolCapKwh = shp2?.projection.backupFullCapWh != null ? shp2.projection.backupFullCapWh / 1000 : perPackCapKwh;
+  const poolSocPct = shp2?.projection.backupBatPercent ?? (socN ? socSum / socN : null);
+  const avgSoh = sohN ? sohSum / sohN : null;
   const degraded = designMah > 0 ? (1 - fullMah / designMah) * 100 : null;
+  const staleNote = staleCores.length
+    ? `incl. ${staleCores.map((d) => d.deviceName).join(', ')} (wired, cloud-stale)`
+    : undefined;
 
   return (
     <div className="card">
       <div className="card-title flex items-center justify-between">
         <span>Backup-pool battery summary</span>
-        <span className="text-xs text-muted normal-case tracking-normal">{packs} packs live (SHP2-connected only)</span>
+        <span className="text-xs text-muted normal-case tracking-normal">
+          {packs} packs · {reportingCores}/{connectedDpus.length} cores reporting
+        </span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <Tile label="Avg SoC" value={packs ? fmtPct(socSum / packs, 0) : '—'} accent="text-accent" />
-        <Tile label="Avg SoH" value={packs ? fmtPct(sohSum / packs, 1) : '—'} accent={sohAccent(packs ? sohSum / packs : null)} />
-        <Tile label="Capacity" value={`${capNowKwh.toFixed(1)} kWh`} sub={degraded != null ? `${degraded.toFixed(2)}% degraded` : undefined} />
+        <Tile label="Avg SoC" value={poolSocPct != null ? fmtPct(poolSocPct, 0) : '—'} accent="text-accent" />
+        <Tile label="Avg SoH" value={avgSoh != null ? fmtPct(avgSoh, 1) : '—'} accent={sohAccent(avgSoh)} />
+        <Tile
+          label="Capacity"
+          value={`${poolCapKwh.toFixed(1)} kWh`}
+          sub={[degraded != null ? `${degraded.toFixed(2)}% degraded` : null, staleNote].filter(Boolean).join(' · ') || undefined}
+        />
         <Tile label="Hottest pack" value={fmtF(hottest?.c)} sub={hottest?.tag} accent={hottest && cToF(hottest.c) >= HOT_F ? 'text-warn' : undefined} />
         <Tile
           label="Worst cell spread"
@@ -436,12 +511,12 @@ function PackDetail({ pk }: { pk: DpuPack }) {
             value={fmtW(pk.outputWatts)}
             cls={pk.outputWatts != null && pk.outputWatts > 1 ? BAND.ok : BAND.info}
           />
-          <Readout label="Rep temp" value={fmtF(pk.temp)} cls={tempCellClass(pk.temp)} />
-          <Readout label="Cell max" value={fmtF(pk.maxCellTemp)} cls={tempCellClass(pk.maxCellTemp)} />
-          <Readout label="Cell min" value={fmtF(pk.minCellTemp)} cls={tempCellClass(pk.minCellTemp)} />
-          <Readout label="Board" value={fmtF(pk.hwBoardTemp)} cls={tempCellClass(pk.hwBoardTemp)} />
-          <Readout label="Shunt" value={fmtF(pk.curResTemp)} cls={tempCellClass(pk.curResTemp)} />
-          <Readout label="MOS max" value={fmtF(pk.maxMosTemp)} cls={tempCellClass(pk.maxMosTemp)} />
+          <Readout label="Rep temp" value={fmtF(pk.temp)} cls={tempClassFor('cell', pk.temp)} />
+          <Readout label="Cell max" value={fmtF(pk.maxCellTemp)} cls={tempClassFor('cell', pk.maxCellTemp)} />
+          <Readout label="Cell min" value={fmtF(pk.minCellTemp)} cls={tempClassFor('cell', pk.minCellTemp)} />
+          <Readout label="Board" value={fmtF(pk.hwBoardTemp)} cls={tempClassFor('board', pk.hwBoardTemp)} />
+          <Readout label="Shunt" value={fmtF(pk.curResTemp)} cls={tempClassFor('shunt', pk.curResTemp)} />
+          <Readout label="MOS max" value={fmtF(pk.maxMosTemp)} cls={tempClassFor('mos', pk.maxMosTemp)} />
           <Readout label="Pack volt" value={fmtVolt(pk.packVoltageMv)} cls={BAND.info} />
           <Readout label="Open-circuit" value={fmtVolt(pk.ocvMv)} cls={BAND.info} />
           <Readout label="Cell mean" value={meanMv != null ? `${(meanMv / 1000).toFixed(3)} V` : '—'} cls={BAND.info} />
@@ -462,15 +537,15 @@ function PackDetail({ pk }: { pk: DpuPack }) {
       <div className="space-y-3">
         <div>
           <SectionLabel>Cell temperatures · {pk.cellTemps.length}</SectionLabel>
-          <SensorGrid values={pk.cellTemps} prefix="C" />
+          <SensorGrid values={pk.cellTemps} prefix="C" kind="cell" />
         </div>
         <div>
           <SectionLabel>MOSFET temperatures · {pk.mosTemps.length}</SectionLabel>
-          <SensorGrid values={pk.mosTemps} prefix="M" />
+          <SensorGrid values={pk.mosTemps} prefix="M" kind="mos" />
         </div>
         <div>
           <SectionLabel>PTC heater temperatures · {pk.ptcTemps.length}</SectionLabel>
-          <SensorGrid values={pk.ptcTemps} prefix="P" />
+          <SensorGrid values={pk.ptcTemps} prefix="P" kind="ptc" />
         </div>
       </div>
 
@@ -492,9 +567,12 @@ function PackHealthRow({ pk }: { pk: DpuPack }) {
   const fullWh = mahToWh(pk.fullCapMah);
   const designWh = mahToWh(pk.designCapMah);
   const remainWh = mahToWh(pk.remainCapMah);
+  // Floor at 0: a freshly-calibrated pack can read full-cap slightly ABOVE nameplate
+  // (actSoh > 100), which made this go negative ("-0.44% degraded") next to a "100%"
+  // SoH tile — a self-contradiction. Capacity can still exceed design; degradation can't.
   const degradationPct =
     pk.designCapMah != null && pk.fullCapMah != null && pk.designCapMah > 0
-      ? (1 - pk.fullCapMah / pk.designCapMah) * 100
+      ? Math.max(0, (1 - pk.fullCapMah / pk.designCapMah) * 100)
       : null;
   const chgWh = mahToWh(pk.accuChgMah);
   const dsgWh = mahToWh(pk.accuDsgMah);
@@ -507,7 +585,7 @@ function PackHealthRow({ pk }: { pk: DpuPack }) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Tile
           label="State of health"
-          value={sohValue != null ? `${sohValue.toFixed(sohValue >= 100 ? 0 : 2)}%` : '—'}
+          value={sohValue != null ? fmtSoh(sohValue) : '—'}
           accent={sohAccent(sohValue)}
           sub={degradationPct != null ? `${degradationPct.toFixed(2)}% degraded` : undefined}
           small
@@ -515,7 +593,7 @@ function PackHealthRow({ pk }: { pk: DpuPack }) {
         <Tile
           label="Cycles"
           value={pk.cycles != null ? `${pk.cycles}` : '—'}
-          sub={cyclesEquivFromChg != null ? `≈ ${cyclesEquivFromChg.toFixed(1)} equiv` : undefined}
+          sub={cyclesEquivFromChg != null ? `≈ ${cyclesEquivFromChg.toFixed(1)} full-cycles (charge throughput)` : undefined}
           small
         />
         <Tile
@@ -593,12 +671,14 @@ function countSetBits(n: number): number {
   return c;
 }
 
-function SensorGrid({ values, prefix }: { values: number[]; prefix: string }) {
+function SensorGrid({ values, prefix, kind }: { values: number[]; prefix: string; kind: 'cell' | 'mos' | 'ptc' }) {
   if (values.length === 0) return <div className="text-sm text-muted">no data</div>;
   return (
     <ReadoutGrid>
       {values.map((c, i) => (
-        <Readout key={i} label={`${prefix}${i + 1}`} value={fmtF(c)} cls={tempCellClass(c)} />
+        // PTC heaters run hot by design (they warm the pack), so there's no
+        // good/bad threshold — show them neutral. Cells/MOSFETs use their own bands.
+        <Readout key={i} label={`${prefix}${i + 1}`} value={fmtF(c)} cls={kind === 'ptc' ? BAND.info : tempClassFor(kind, c)} />
       ))}
     </ReadoutGrid>
   );

@@ -1296,16 +1296,17 @@ const EOL_MIN_R2 = 0.3;                                       // trend must expl
 // floor (~3 quantization steps) holds such packs at "learning". See sohSignalBelowFloor.
 const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
 const EOL_MAX_YEARS = 40;                                     // beyond this, "EOL not in sight"
-// v0.9.58 — VERIFIED CORRECT (looks suspicious but isn't):
-//   pack nominal voltage = 51.2 V; ×2 because the BMS reports per-single-string mAh
-//   while the pack actually has TWO LFP strings in parallel.
-//   Wh = V × Ah = 51.2 × (mAh × 2) / 1000  →  kWh = (51.2 × 2) × mAh / 1_000_000.
+// v0.42.0 — pack mAh → kWh conversion. Each DPU pack is 32S1P (~104 V nominal;
+//   32 series cells whose mV sum to packVoltageMv). fullCap is single-string mAh.
+//   Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024  →  kWh = (32 × 3.2) × mAh / 1_000_000.
+//   (Numerically identical to the old (51.2 × 2) form — both equal 0.1024 — but the
+//   "two 51.2 V strings in parallel" derivation was WRONG; the pack is one 32-cell string.)
 // Sanity check against live data: pack fullCapMah ≈ 58804 at 99 % SoH →
-//   58804 × (51.2 × 2) / 1_000_000 = 6.02 kWh, matching the EcoFlow 6.144 kWh
-//   nameplate spec for a 99 %-SoH pack. The `× 2` is correct; do NOT drop it.
-// Identical pattern exists at recorder.ts:412 (`PACK_MAH_TO_WH = (51.2 * 2) / 1_000`);
-// same justification applies — leave it alone.
-const PACK_MAH_TO_KWH = (51.2 * 2) / 1_000_000;               // single-string mAh → pack kWh
+//   58804 × (32 × 3.2) / 1_000_000 = 6.02 kWh, matching the EcoFlow 6.144 kWh
+//   nameplate spec for a 99 %-SoH pack.
+// Identical constant exists at recorder.ts (`PACK_MAH_TO_WH = (32 * 3.2) / 1_000`) and
+// telnet/screens.ts (`MAH_TO_WH`); same value, same derivation.
+const PACK_MAH_TO_KWH = (32 * 3.2) / 1_000_000;               // single-string mAh → pack kWh
 const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
 
 export type DegradeStatus = 'projecting' | 'stable' | 'learning' | 'no-data';
