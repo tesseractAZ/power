@@ -64,6 +64,15 @@ test('forecast-runtime alert SUPPRESSED when no forecast is supplied (defensive)
   assert.equal(hasRuntimeAlert(alerts), false, 'no depletion confirmation available → do not emit');
 });
 
+test('forecast-runtime gate is STRICTLY below reserve — touching the floor exactly does not fire (matches the forecast card)', () => {
+  // getDayForecast's own depletion alert uses `minProjectedSoc < reserveSoc`. The runtime
+  // gate must use the same strict comparison, or at the exact boundary the forecast card
+  // reads "stays above the reserve floor" while this alert fires → cross-card contradiction.
+  resetForecastAlertsCache();
+  const alerts = computeForecastAlerts(shp2Draining(), decliningRecorder(), fc(10)); // == reserve (10)
+  assert.equal(hasRuntimeAlert(alerts), false, 'minProjectedSoc == reserve → not strictly below → suppressed');
+});
+
 test('forecast-runtime cache keys on the depletion verdict — a warm suppress-cache must not block a real fire (v0.41.0 Copilot)', () => {
   // The ~10-min cache is time-based; the runtime alert now depends on `forecast`. Without
   // keying the cache on the depletion gate, a call carrying a suppressing forecast caches

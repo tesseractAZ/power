@@ -205,7 +205,14 @@ function ModelCard({ fc }: { fc: DayForecast }) {
         array size, orientation, inverter clipping and time-of-day shading. Built from{' '}
         <span className="text-ink font-medium">{m.pairCount}</span> hourly (GHI, PV) pairs over{' '}
         <span className="text-ink font-medium">{m.historyDays.toFixed(1)} days</span>; peak
-        coefficient <span className="text-ink font-medium">{m.peakCoeff.toFixed(1)} W per W/m²</span>.
+        coefficient{' '}
+        {/* v0.41.0 (Copilot follow-up) — render the GATED peak (fleetPeak = peakResponse(m),
+            r²/sample-gated) not raw m.peakCoeff: the backend gate can legitimately leave
+            peakCoeff at 0 on thin early history while the table still shows raw coefficients,
+            which would make a "0.0 W per W/m²" headline contradict the rows below it. */}
+        <span className="text-ink font-medium">
+          {fleetPeak ? `${fleetPeak.coeff!.toFixed(1)} W per W/m²` : 'still calibrating'}
+        </span>.
       </p>
 
       <SoilingNote fc={fc} />

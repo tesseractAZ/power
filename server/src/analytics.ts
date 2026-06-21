@@ -477,14 +477,17 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
   const reserveForGate = shp2?.projection.backupReserveSoc ?? 15;
   // v0.41.0 (Copilot follow-up) — compare against the forecast's OWN reserve floor when it
   // carries one: `minProjectedSoc` was projected relative to `forecast.reserveSoc` (see
-  // getDayForecast, which sets reserveSoc = backupReserveSoc ?? 15 and tests the same
-  // `minProjectedSoc < reserveSoc` for its own depletion alert). Falling back to the live
+  // getDayForecast, which sets reserveSoc = backupReserveSoc ?? 15). Falling back to the live
   // SHP2 reserve keeps the gate self-consistent even if a caller passes a forecast that
-  // doesn't exactly match the current SHP2 snapshot (stale/synthetic inputs).
+  // doesn't exactly match the current SHP2 snapshot (stale/synthetic inputs). The comparison
+  // is STRICTLY below reserve (`<`) — matching getDayForecast's own depletion alert
+  // (`df.minProjectedSoc < df.reserveSoc`); a projection that merely touches the floor must
+  // NOT flip this gate while the forecast card still reads "stays above the reserve floor"
+  // (that exact-boundary mismatch would re-introduce the cross-card contradiction this fixes).
   const diurnalConfirmsDepletion =
     forecast != null &&
     forecast.minProjectedSoc != null &&
-    forecast.minProjectedSoc <= (forecast.reserveSoc ?? reserveForGate);
+    forecast.minProjectedSoc < (forecast.reserveSoc ?? reserveForGate);
   if (
     forecastCache &&
     forecastCache.depletionGate === diurnalConfirmsDepletion &&
