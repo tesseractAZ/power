@@ -21,6 +21,7 @@ import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '.
 // AVAILABLE (present/declared but on standby), and OFF-GRID (islanded). homeGridWatts
 // (SHP2 main) catches the backstop path that DPU ac_in import alone is blind to.
 import { liveGridBackstop } from '../gridState.js';
+import { isSourceDpuStale } from '../shp2Membership.js';
 
 // v0.15.15 — the CHARGER screen was removed with the web Charger tab: the EVSE
 // is app-only (no API/MQTT telemetry) and its host DPU (Core 4) is an offline
@@ -816,6 +817,9 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
     ),
   );
   for (const s of p.sources) {
+    // v0.40.1 — the SHP2 still counts this slot's battery, but its DPU is itself
+    // cloud-offline (stale telemetry). Observability note only; capacity unchanged.
+    const dpuStale = isSourceDpuStale(s, data.snap.devices);
     const link = !s.isConnected ? c.grey('empty') : s.hwConnect ? c.green('linked') : c.yellow('no hw link');
     body.push(
       '  ' +
@@ -828,7 +832,8 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
         cell(link, 13) +
         cell(s.isAcOpen ? c.green('open') : c.grey('closed'), 9) +
         cell(c.white(s.ratePower != null ? `${s.ratePower} W` : '—'), 10) +
-        paint(tempColor(s.emsBatTemp), fmtTemp(s.emsBatTemp)),
+        paint(tempColor(s.emsBatTemp), fmtTemp(s.emsBatTemp)) +
+        (dpuStale ? c.yellow('  ⚠ DPU telemetry stale (battery still counted)') : ''),
     );
   }
 

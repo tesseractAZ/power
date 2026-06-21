@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { createAuth } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { DeviceSnapshot, FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale } from './shp2Membership.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 import { startOfLocalDayMs } from './aggregator.js';
@@ -403,7 +403,29 @@ function snapshotForClient(): FleetSnapshot {
   // objects inside store.get() (the HA-state + /api/broadcast/status consumers
   // read raw store.get() and must stay byte-identical).
   const shp2 = Object.values(s.devices).find((d) => d.projection?.kind === 'shp2');
-  const devices = shp2 ? { ...s.devices, [shp2.sn]: { ...shp2, grid, off_grid } } : s.devices;
+  // v0.40.1 — annotate each SHP2 source slot with `dpuStale` (the slot is counted
+  // by the SHP2 but its underlying DPU is itself cloud-offline). OBSERVABILITY ONLY:
+  // does NOT touch backup-pool capacity (SHP2-aggregate, stays authoritative) or the
+  // floor alarm. Immutable, so the raw store the HA-state/broadcast paths read is
+  // untouched. The TUI computes the same flag inline via isSourceDpuStale.
+  const shp2Enriched =
+    shp2 && shp2.projection?.kind === 'shp2'
+      ? {
+          ...shp2,
+          grid,
+          off_grid,
+          projection: {
+            ...shp2.projection,
+            sources: shp2.projection.sources.map((src) => ({
+              ...src,
+              dpuStale: isSourceDpuStale(src, s.devices),
+            })),
+          },
+        }
+      : shp2
+        ? { ...shp2, grid, off_grid }
+        : undefined;
+  const devices = shp2Enriched ? { ...s.devices, [shp2!.sn]: shp2Enriched } : s.devices;
   return { ...s, devices, grid, off_grid };
 }
 const recorder = createRecorder(store, (m) => app.log.info(m));

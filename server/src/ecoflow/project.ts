@@ -241,6 +241,11 @@ export interface Shp2EnergySource {
   emsBatTemp: number | null;
   hwConnect: boolean;
   errorCodeNum: number | null;
+  /** v0.40.1 — OBSERVABILITY ONLY (set by snapshotForClient / read inline by the
+   *  TUI via isSourceDpuStale): the SHP2 still counts this slot's battery in the
+   *  backup pool, but the slot's underlying DPU is itself cloud-offline (its own
+   *  telemetry is stale). Does NOT affect backup-capacity or the floor alarm. */
+  dpuStale?: boolean;
 }
 
 export interface Shp2ChargeWindow {
