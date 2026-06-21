@@ -211,6 +211,11 @@ test('planCircuitDiscovery: fresh set publishes one well-formed config per circu
   assert.equal(first.cfg.state_class, 'total_increasing'); // → no expire_after, never goes unavailable
   assert.equal(first.cfg.value_template, '{{ value_json.circuit_1_lifetime_kwh }}');
   assert.ok(first.cfg.device, 'every config carries the shared device block so entities group together');
+  // v0.52.0 — guard the shared AVAILABILITY_BASE triple so a future drop of a base
+  // key fails CI (the circuit site is one of the four ...AVAILABILITY_BASE spreads).
+  assert.equal(first.cfg.availability_topic, 'ecoflow_panel/availability');
+  assert.equal(first.cfg.payload_available, 'online');
+  assert.equal(first.cfg.payload_not_available, 'offline');
 });
 
 test('planCircuitDiscovery: unnamed circuit falls back to "Circuit N"', () => {

@@ -4,8 +4,9 @@ import { dirname, resolve } from 'node:path';
 import type { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics } from './analyticsClient.js';
-import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
+import type { Shp2Projection } from './ecoflow/project.js';
+import { aggregateFleetFlow } from './shp2Membership.js';
+import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import {
   getDayForecast,
   computeDegradation,
@@ -55,6 +56,18 @@ const DEVICE_INFO = {
 
 const STATE_TOPIC = 'ecoflow_panel/state';
 const AVAILABILITY_TOPIC = 'ecoflow_panel/availability';
+// v0.52.0 — the availability triple repeated verbatim in all four discovery-cfg
+// literals (SENSORS / BINARY_SENSORS / switch / planCircuitDiscovery). Spread as
+// `...AVAILABILITY_BASE` at the SAME position the three keys occupied so the
+// serialized JSON key order — and thus the retained MQTT payload bytes — is
+// byte-identical. `device: DEVICE_INFO` is intentionally NOT folded in here: it
+// sits at the END of each cfg (after expire_after / device_class / icon / etc.),
+// so bundling it would move it ahead of those keys and change the payload bytes.
+const AVAILABILITY_BASE = {
+  availability_topic: AVAILABILITY_TOPIC,
+  payload_available: 'online',
+  payload_not_available: 'offline',
+} as const;
 const PUBLISH_INTERVAL_MS = 30 * 1000;
 // v0.13.7 — seconds after which HA marks a sensor unavailable if its state
 // stops updating. ~4× the publish interval, so a single slow tick won't trip
@@ -275,9 +288,7 @@ export function planCircuitDiscovery(
         unique_id: uniqueId,
         name: `EcoFlow ${c.name || `Circuit ${c.ch}`} Energy`,
         state_topic: STATE_TOPIC,
-        availability_topic: AVAILABILITY_TOPIC,
-        payload_available: 'online',
-        payload_not_available: 'offline',
+        ...AVAILABILITY_BASE,
         device_class: 'energy',
         state_class: 'total_increasing',
         unit_of_measurement: 'kWh',
@@ -426,9 +437,7 @@ export async function startMqttDiscovery(
       const cfg = {
         ...s,
         state_topic: STATE_TOPIC,
-        availability_topic: AVAILABILITY_TOPIC,
-        payload_available: 'online',
-        payload_not_available: 'offline',
+        ...AVAILABILITY_BASE,
         // v0.13.7 — expire live measurements, but never the total_increasing
         // energy sources (would gap HA Energy history).
         ...(s.state_class !== 'total_increasing' ? { expire_after: EXPIRE_AFTER_S } : {}),
@@ -441,9 +450,7 @@ export async function startMqttDiscovery(
       const cfg = {
         ...s,
         state_topic: STATE_TOPIC,
-        availability_topic: AVAILABILITY_TOPIC,
-        payload_available: 'online',
-        payload_not_available: 'offline',
+        ...AVAILABILITY_BASE,
         // v0.13.7 — binary status entities are live (never total_increasing).
         expire_after: EXPIRE_AFTER_S,
         device: DEVICE_INFO,
@@ -475,9 +482,7 @@ export async function startMqttDiscovery(
         name: `Alarms — ${meta.label} (${meta.isa})`,
         state_topic: alertSwitchStateTopic(p),
         command_topic: alertSwitchCommandTopic(p),
-        availability_topic: AVAILABILITY_TOPIC,
-        payload_available: 'online',
-        payload_not_available: 'offline',
+        ...AVAILABILITY_BASE,
         payload_on: SWITCH_ON,
         payload_off: SWITCH_OFF,
         optimistic: false,
@@ -505,29 +510,15 @@ export async function startMqttDiscovery(
 
   const buildState = async (snap: FleetSnapshot): Promise<Record<string, unknown>> => {
     const devices = Object.values(snap.devices);
-    type DpuDev = typeof devices[number] & { projection: DpuProjection };
     type Shp2Dev = typeof devices[number] & { projection: Shp2Projection };
-    const dpus = (devices as DpuDev[]).filter((d) => d.online && d.projection?.kind === 'dpu');
     const shp2 = (devices as Shp2Dev[]).find((d) => d.projection?.kind === 'shp2');
 
     // v0.9.74 — match /api/ha-state: spare cores (not in SHP2 sources)
     // can't deliver energy to the home, so they don't count toward
     // fleet PV / total-in / total-out / battery-net or grid-import.
-    const connected = shp2ConnectedDpuSns(snap.devices);
-    const gridDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
-
-    let fleetPv = 0, fleetIn = 0, fleetOut = 0, acIn = 0, fleetBatteryNet = 0;
-    for (const d of gridDpus) {
-      fleetPv += d.projection.pvTotalWatts ?? 0;
-      fleetIn += d.projection.totalInWatts ?? 0;
-      fleetOut += d.projection.totalOutWatts ?? 0;
-      acIn += d.projection.acInWatts ?? 0;
-      // v0.10.4 — battery net from per-pack flow, not total_in/out throughput
-      // (which = PV+grid in / AC out, overstating battery net ~1.7×).
-      for (const pk of d.projection.packs) fleetBatteryNet += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
-    }
-    let panelLoad = 0;
-    if (shp2) for (const c of shp2.projection.circuits) panelLoad += c.watts ?? 0;
+    // v0.52.0 — the loop that derived these is now aggregateFleetFlow, shared
+    // VERBATIM with /api/ha-state (raw sums; each surface rounds at emission).
+    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
 
     const analytics = getAnalytics();
     const [fc, deg, runway, rte, clipping, sc, carbon, tariff, curtailment] = await Promise.all([
@@ -547,20 +538,13 @@ export async function startMqttDiscovery(
       analytics.report('curtailment'),
     ]);
     const lifetime = recorder.getLifetimeTotals();
-    const lifetimeKwh = (k: string) =>
-      lifetime[k] ? Math.round(((lifetime[k].persistedWh + lifetime[k].pendingWh) / 1000) * 1000) / 1000 : null;
-    const projecting = (deg as import('./analytics.js').FleetDegradation).packs.filter((p) => p.status === 'projecting');
-    const soonest = projecting.reduce<typeof projecting[number] | null>(
-      (best, p) => (best == null || (p.yearsToEol ?? 1e9) < (best.yearsToEol ?? 1e9) ? p : best),
-      null,
-    );
+    const lifetimeKwh = makeLifetimeKwh(lifetime);
+    const { projecting, soonest } = soonestProjecting((deg as import('./analytics.js').FleetDegradation).packs);
 
     const alerts = snap.alerts ?? [];
-    const cnt = (src: 'threshold' | 'learned', sev: 'critical' | 'warning' | 'info') =>
-      alerts.filter((a) => (src === 'learned' ? a.source === 'learned' : a.source !== 'learned') && a.severity === sev).length;
+    const cnt = makeAlertCounter(alerts);
     // v0.11.0 — per-ISA-priority counts via priorityOf (severity+source → P1..P4).
     const priorityCount = (p: AlarmPriority) => alerts.filter((a) => priorityOf(a) === p).length;
-    const kwh1 = (wh: number | null | undefined) => (wh == null ? null : Math.round(wh / 100) / 10);
     // v0.15.19 — lighting posture: the runway model's forward question ("will
     // we reach sunrise above reserve?") distilled into one enum that HA
     // automations key on (heartbeat pulse, dimmer ceilings, exterior policy).

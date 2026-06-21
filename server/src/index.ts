@@ -10,10 +10,11 @@ import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { createAuth } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
-import type { DeviceSnapshot, FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale } from './shp2Membership.js';
+import type { FleetSnapshot } from './snapshot.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus } from './shp2Membership.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
+import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { isConfigured } from './notify.js';
@@ -51,7 +52,6 @@ import {
   computePackRiskScores,
   runwayHoursForPublish,
 } from './analytics.js';
-import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { startTelnetServer } from './telnet/server.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
@@ -404,7 +404,7 @@ function snapshotForClient(): FleetSnapshot {
   // shallow-copy the devices map + the one SHP2 device so we never mutate the
   // objects inside store.get() (the HA-state + /api/broadcast/status consumers
   // read raw store.get() and must stay byte-identical).
-  const shp2 = Object.values(s.devices).find((d) => d.projection?.kind === 'shp2');
+  const shp2 = findShp2(s.devices);
   // v0.40.1 — annotate each SHP2 source slot with `dpuStale` (the slot is counted
   // by the SHP2 but its underlying DPU is itself cloud-offline). OBSERVABILITY ONLY:
   // does NOT touch backup-pool capacity (SHP2-aggregate, stays authoritative) or the
@@ -716,10 +716,9 @@ app.get('/api/nws-alerts', async (req, reply) =>
 // the underlying forecast with per-hour ensembleSources + disagreement
 // metadata so consumers can see WHY the bands are wider on hours with
 // high inter-source disagreement.
-// v0.13.3 — map weather hours to recorder GHI rows. Pure + exported so both the
-// /api/weather/ensemble handler and the periodic persistence tick (below) share
-// one mapping, and it's unit-testable without a recorder or HTTP server.
-export function weatherGhiRows(w: WeatherForecast): Array<{ epochMs: number; radiationWm2: number; cloudCoverPct: number }> {
+// v0.13.3 — map weather hours to recorder GHI rows. Pure helper shared by the
+// /api/weather/ensemble handler and the periodic persistence tick (below).
+function weatherGhiRows(w: WeatherForecast): Array<{ epochMs: number; radiationWm2: number; cloudCoverPct: number }> {
   return w.hours.map((h) => ({
     epochMs: h.ts,
     radiationWm2: h.radiationWm2,
@@ -1096,36 +1095,16 @@ app.get('/api/repair-issues', async (req, reply) => {
 app.get('/api/ha-state', async (req, reply) => {
   const snap = store.get();
   const devices = Object.values(snap.devices);
-  type DpuDev = DeviceSnapshot & { projection: DpuProjection };
-  type Shp2Dev = DeviceSnapshot & { projection: Shp2Projection };
-
-  const dpus = (devices as DpuDev[]).filter((d) => d.online && d.projection?.kind === 'dpu');
-  const shp2 = (devices as Shp2Dev[]).find((d) => d.projection?.kind === 'shp2');
+  const shp2 = findShp2(snap.devices);
 
   // v0.9.74 — only SHP2-bound DPUs count toward fleet totals. Spare cores
   // (here, the operator's Cores 4 + 5) inflate every "fleet PV / battery net /
   // total in / total out" reading because their energy can't actually
   // reach the home power bus. The previous code summed all 5 cores and
   // overstated the home's available capacity by ~40%.
-  const connected = shp2ConnectedDpuSns(snap.devices);
-  const gridDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
-
-  let fleetPv = 0, fleetIn = 0, fleetOut = 0, acIn = 0, fleetBatteryNet = 0;
-  for (const d of gridDpus) {
-    fleetPv += d.projection.pvTotalWatts ?? 0;
-    fleetIn += d.projection.totalInWatts ?? 0;
-    fleetOut += d.projection.totalOutWatts ?? 0;
-    acIn += d.projection.acInWatts ?? 0;
-    // v0.10.4 — battery net from PER-PACK flow, not DPU throughput.
-    // total_in/out = PV+grid in / AC out (throughput), NOT battery flow —
-    // using `totalOut − totalIn` overstated "battery net" ~1.7×. Pack
-    // in = charge, pack out = discharge; net positive = discharging.
-    for (const pk of d.projection.packs) fleetBatteryNet += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
-  }
-
-  // Panel load = sum of SHP2 circuit watts.
-  let panelLoad = 0;
-  if (shp2) for (const c of shp2.projection.circuits) panelLoad += c.watts ?? 0;
+  // v0.52.0 — the per-pack fleet flow loop is shared with mqttDiscovery's
+  // buildState via aggregateFleetFlow (raw, un-rounded sums; rounded at emission).
+  const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
 
   // Cached projections (internally cached ~30min — cheap to call per-request).
   const [fc, deg, runway, rte, clipping, curtailment, selfCons, carbon, tariff] = await Promise.all([
@@ -1140,17 +1119,12 @@ app.get('/api/ha-state', async (req, reply) => {
     analytics.report('tariff'),
   ]);
   const lifetime = recorder.getLifetimeTotals();
-  const lifetimeKwh = (k: string) =>
-    lifetime[k] ? Math.round(((lifetime[k].persistedWh + lifetime[k].pendingWh) / 1000) * 1000) / 1000 : null;
+  const lifetimeKwh = makeLifetimeKwh(lifetime);
   // v0.8.0 additions — carbon + tariff fetched in the Promise.all above.
 
   // Soonest projected EOL = the pack with the fewest years left.
-  const projecting = (deg as import('./analytics.js').FleetDegradation).packs.filter((p) => p.status === 'projecting');
+  const { projecting, soonest } = soonestProjecting((deg as import('./analytics.js').FleetDegradation).packs);
   type Pack = (typeof projecting)[number];
-  const soonest = projecting.reduce<Pack | null>(
-    (best, p) => (best == null || (p.yearsToEol ?? 1e9) < (best.yearsToEol ?? 1e9) ? p : best),
-    null,
-  );
   const peerOutliers = projecting.filter((p) => p.peerOutlier);
   const eolLabel = (p: Pack | null) =>
     p == null
@@ -1161,13 +1135,7 @@ app.get('/api/ha-state', async (req, reply) => {
 
   // Alert counts split by source × severity.
   const alerts = snap.alerts ?? [];
-  const cnt = (src: 'threshold' | 'learned', sev: 'critical' | 'warning' | 'info') =>
-    alerts.filter(
-      (a) => (src === 'learned' ? a.source === 'learned' : a.source !== 'learned') && a.severity === sev,
-    ).length;
-
-  // SHP2 backup pool stats — round Wh→kWh to one decimal, null-safe.
-  const kwh1 = (wh: number | null | undefined) => (wh == null ? null : Math.round(wh / 100) / 10);
+  const cnt = makeAlertCounter(alerts);
 
   const payload = {
     generated_at: snap.generatedAt,
@@ -1411,8 +1379,7 @@ app.get('/api/physics/pv-pmax', async (req, reply) => {
   const ts = Date.now();
   // Ambient defaults to Phoenix typical for season; could plug NWS here later.
   const ambient = 30;  // °C — placeholder; real call would use weather.ts
-  const dpus = Object.values(store.get().devices)
-    .filter((d) => d.projection?.kind === 'dpu' && d.online);
+  const dpus = onlineDpus(store.get().devices);
   const realizedW = dpus.reduce((s, d) => s + ((d.projection as any).pvTotalWatts ?? 0), 0);
   const result = physicsPmax(ts, ambient, PHOENIX_SITE);
   return cached(req, reply, {
@@ -1425,8 +1392,7 @@ app.get('/api/physics/pv-pmax', async (req, reply) => {
 /* v0.9.27 — Physics: per-pack LFP OCV analysis. Surfaces "physics SoC
  *  says X but BMS says Y" for each pack, flagging miscalibration. */
 app.get('/api/physics/lfp-soc', async (req, reply) => {
-  const dpus = Object.values(store.get().devices)
-    .filter((d) => d.projection?.kind === 'dpu' && d.online);
+  const dpus = onlineDpus(store.get().devices);
   const results: Array<{ device: string; packNum: number; analysis: ReturnType<typeof analyzePackLfp> }> = [];
   for (const d of dpus) {
     const p = d.projection as any;
@@ -1453,8 +1419,7 @@ app.get('/api/physics/lfp-soc', async (req, reply) => {
 /* v0.9.27 — Hierarchical Bayesian fit on pack SoH. Returns per-pack
  *  posteriors (shrunken toward DPU + fleet means) and flags outliers. */
 app.get('/api/models/hierarchical-pack-soh', async (req, reply) => {
-  const dpus = Object.values(store.get().devices)
-    .filter((d) => d.projection?.kind === 'dpu' && d.online);
+  const dpus = onlineDpus(store.get().devices);
   const obs: HBPackObs[] = [];
   for (const d of dpus) {
     const p = d.projection as any;
@@ -1490,7 +1455,7 @@ app.get('/api/models/hierarchical-pack-soh', async (req, reply) => {
  *  apply any setpoints) but surfaces "if you set reserve to X at hour Y
  *  for the next 24h, here's the projected $ savings." */
 app.get('/api/dispatch/recommend', async (req, reply) => {
-  const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+  const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') {
     reply.code(503);
     return { error: 'SHP2 not online' };
@@ -1790,7 +1755,7 @@ const batterySocAlarm = createBatterySocAlarm({
 });
 store.on('change', (snap: FleetSnapshot) => {
   if (!socAlarmEnabled) return;
-  const shp2 = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2');
+  const shp2 = findShp2(snap.devices);
   const soc = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection.backupBatPercent : null;
   void (async () => {
     // Keep the grid-presence entity fresh (TTL-gated) so onCross + the
@@ -1908,7 +1873,7 @@ const loadShedAdvisor = createLoadShedAdvisor({
   getCandidates: getShedCandidates,
   haEntity: (id) => haStateCache.getCachedEntity(id),
   shp2CircuitWatts: (ch) => {
-    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    const shp2 = findShp2(store.get().devices);
     const circuits: any[] =
       shp2 && shp2.projection?.kind === 'shp2' ? ((shp2.projection as any).circuits ?? []) : [];
     const c = circuits.find((x) => x?.ch === ch);

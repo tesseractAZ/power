@@ -183,6 +183,25 @@ export interface Recorder {
   batteryLifetimeDebug: () => BatteryLifetimeDebug;
 }
 
+/** v0.45.0 — per-pack lifetime in/out detail, shared by batteryLifetimeDebug()
+ *  and the internal computeBmsBatteryDetail() return shape. */
+interface PackLifetimeDetail {
+  sn: string;
+  num: number;
+  present: boolean;
+  passesFilter: boolean;
+  baselineChgMah: number | null;
+  baselineDsgMah: number | null;
+  accuChgMah: number | null;
+  accuDsgMah: number | null;
+  chgWh: number;
+  dsgWh: number;
+  heldFromLastKnown: boolean;
+  /** v0.48.0 — true when this pack's held value was reconstructed from recorder
+   *  register history this rollup (offline-at-deploy backfill), not a live sighting. */
+  backfilledFromHistory: boolean;
+}
+
 /** v0.45.0 — shape of recorder.batteryLifetimeDebug() (read-only diagnostics). */
 export interface BatteryLifetimeDebug {
   rawChargeFloorWh: number;
@@ -193,22 +212,7 @@ export interface BatteryLifetimeDebug {
   discharge: { persistedWh: number; pendingWh: number };
   /** max(0, rawDischargeFloor − rawChargeFloor): what the removed clamp would have shaved. */
   deficitWh: number;
-  packs: Array<{
-    sn: string;
-    num: number;
-    present: boolean;
-    passesFilter: boolean;
-    baselineChgMah: number | null;
-    baselineDsgMah: number | null;
-    accuChgMah: number | null;
-    accuDsgMah: number | null;
-    chgWh: number;
-    dsgWh: number;
-    heldFromLastKnown: boolean;
-    /** v0.48.0 — true when this pack's held value was reconstructed from recorder
-     *  register history this rollup (offline-at-deploy backfill), not a live sighting. */
-    backfilledFromHistory: boolean;
-  }>;
+  packs: PackLifetimeDetail[];
   /** sourceSns members whose packs are absent this snapshot but carried via held last-known. */
   offlineHeldMembers: string[];
 }
@@ -263,7 +267,6 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   }
 
   const insert = db.prepare(`INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)`);
-  const insertMany = db.prepare(`INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)`);
 
   // Last-recorded state per (sn,metric) for dedupe
   type Last = { ts: number; value: number };
@@ -617,6 +620,18 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
    * fleet-level lifetime metric. Filters by topology (grid-tied DPUs only
    * for AC-in; SHP2-only for panel_load).
    */
+  // v0.52.0 — the SHP2 `sources` SN set (home-fleet membership), used by both
+  // buildContributors (lifetime-key contributor wiring) and
+  // computeBmsBatteryDetail (per-pack home-member filter). LITERAL copy of the
+  // former inline derivation: keep the `?? []`, the `.map((s) => s.sn)`, the
+  // `.filter((s): s is string => !!s)`, and the `new Set<string>()` fallback exact.
+  const sourceSnsOf = (snap: FleetSnapshot): Set<string> => {
+    const shp2 = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2');
+    return shp2
+      ? new Set(((shp2.projection as Shp2Projection).sources ?? []).map((s) => s.sn).filter((s): s is string => !!s))
+      : new Set<string>();
+  };
+
   const buildContributors = (snap: FleetSnapshot): Record<string, Array<{ sn: string; metric: string }>> => {
     const out: Record<string, Array<{ sn: string; metric: string }>> = {
       fleet_pv_wh: [],
@@ -625,10 +640,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       fleet_grid_home_wh: [], // v0.34.0 — SHP2-metered total home grid import
     };
     const devices = Object.values(snap.devices);
-    const shp2 = devices.find((d) => d.projection?.kind === 'shp2');
-    const sourceSns = shp2
-      ? new Set(((shp2.projection as Shp2Projection).sources ?? []).map((s) => s.sn).filter((s): s is string => !!s))
-      : new Set<string>();
+    const sourceSns = sourceSnsOf(snap);
     for (const d of devices) {
       const p = d.projection;
       if (!p) continue;
@@ -775,20 +787,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   ): {
     chargeWh: number;
     dischargeWh: number;
-    packs: Array<{
-      sn: string;
-      num: number;
-      present: boolean;
-      passesFilter: boolean;
-      baselineChgMah: number | null;
-      baselineDsgMah: number | null;
-      accuChgMah: number | null;
-      accuDsgMah: number | null;
-      chgWh: number;
-      dsgWh: number;
-      heldFromLastKnown: boolean;
-      backfilledFromHistory: boolean;
-    }>;
+    packs: PackLifetimeDetail[];
     offlineHeldMembers: string[];
   } => {
     // v0.9.74 — only SHP2-connected packs count toward the home's lifetime
@@ -797,30 +796,14 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // filter the HA Energy Dashboard "battery charged / discharged" tile was
     // ~67% overstated for setups with spare cores.
     const devices = Object.values(snap.devices);
-    const shp2 = devices.find((d) => d.projection?.kind === 'shp2');
-    const sourceSns = shp2
-      ? new Set(((shp2.projection as Shp2Projection).sources ?? []).map((s) => s.sn).filter((s): s is string => !!s))
-      : new Set<string>();
+    const sourceSns = sourceSnsOf(snap);
     // v0.45.0 — "is this pack a home-fleet member?" uses the EXACT same predicate
     // as the live sum: a DPU passing the sourceSns filter. The empty-set fallback
     // (DPU-only setups / SHP2 not yet seen) matches the live sum's behavior. A
     // pack that fails this is a spare — never held, never resurrected.
     const isHomeMember = (sn: string) => sourceSns.size === 0 || sourceSns.has(sn);
 
-    const packs: Array<{
-      sn: string;
-      num: number;
-      present: boolean;
-      passesFilter: boolean;
-      baselineChgMah: number | null;
-      baselineDsgMah: number | null;
-      accuChgMah: number | null;
-      accuDsgMah: number | null;
-      chgWh: number;
-      dsgWh: number;
-      heldFromLastKnown: boolean;
-      backfilledFromHistory: boolean;
-    }> = [];
+    const packs: PackLifetimeDetail[] = [];
     // Keys passing the filter THIS snapshot (fresh delta path) — used to avoid
     // double-counting them via the held-offline carry below.
     const passedThisSnapshot = new Set<string>();

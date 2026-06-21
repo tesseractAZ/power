@@ -223,17 +223,21 @@ by a card don't bloat its output. Per-card minified sizes (terser):
 | Card | dist/ size |
 |---|---|
 | `ecoflow-fleet-card.js` | ~58 KB |
-| `ecoflow-alerts-card.js` | ~51 KB |
+| `ecoflow-alerts-card.js` | ~53 KB |
 | `ecoflow-battery-card.js` | ~51 KB |
 | `ecoflow-solar-card.js` | ~56 KB |
+| `ecoflow-strategy-card.js` | ~52 KB |
+| `ecoflow-insights-card.js` | ~62 KB |
+| `ecoflow-circuit-card.js` | ~48 KB |
 
 ## Legacy cards (`ecoflow-panel-card`, `ecoflow-panel-dashboard`)
 
-These two are the original React-era bundles, kept in `dist/` for
-backward compatibility so existing dashboards don't break when v1.0.0
-ships. They are **frozen** — no new features land in them — and will
-be **removed in v1.1.0**. Migrate to `ecoflow-fleet-card` (the
-direct replacement for `ecoflow-panel-dashboard`) when convenient.
+These two are the original React-era bundles, still shipped in
+`dist/` for backward compatibility so existing dashboards don't
+break. They are **frozen** — no new features land in them — and are
+slated for removal in a future card-pack release. Migrate to
+`ecoflow-fleet-card` (the direct replacement for
+`ecoflow-panel-dashboard`) when convenient.
 
 ### Stats card (`custom:ecoflow-panel-card`) — legacy
 

@@ -8,6 +8,8 @@ import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
+import { cToF, dpuNum, cap, median, mad, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
+import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -26,29 +28,8 @@ import { PHOENIX_SITE } from './physics/clearSky.js';
  * not "emergency." Genuine danger is still caught by the static thresholds.
  */
 
-const cToF = (c: number) => c * 1.8 + 32;
-
-/** Extract the Core (DPU) number from a device name like "Core 3". */
-function dpuNum(name: string): number | null {
-  const m = name.match(/core\s*(\d+)/i) ?? name.match(/(\d+)/);
-  return m ? Number(m[1]) : null;
-}
-/** Capitalize the first letter. */
-function cap(s: string): string {
-  return s.length ? s[0].toUpperCase() + s.slice(1) : s;
-}
-
 const Z_INFO = 3.5;
 const Z_WARN = 5;
-
-function median(xs: number[]): number {
-  const s = [...xs].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
-function mad(xs: number[], med: number): number {
-  return median(xs.map((x) => Math.abs(x - med)));
-}
 
 interface PeerMetric {
   key: string;
@@ -421,41 +402,6 @@ const RUNTIME_TRAIL_MS = 3 * 60 * 60 * 1000;        // trailing window for disch
 const DEGRADE_MIN_SPAN_MS = 5 * 24 * 60 * 60 * 1000; // need ≥5 days for a degradation trend
 const DEGRADE_MIN_R2 = 0.25;                         // trend must explain ≥25% of variance
 
-interface LinFit {
-  slopePerMs: number;
-  intercept: number;        // fitted y at x = pts[0].ts
-  r2: number;
-  n: number;
-  slopeStdErrPerMs: number; // standard error of the slope — drives projection confidence bands
-}
-
-/** Ordinary least-squares fit; x is ms epoch (normalized internally). */
-function linregress(pts: Array<{ ts: number; value: number }>): LinFit | null {
-  const n = pts.length;
-  if (n < 8) return null;
-  const x0 = pts[0].ts;
-  let sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
-  for (const p of pts) {
-    const x = p.ts - x0;
-    const y = p.value;
-    sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y;
-  }
-  const den = n * sxx - sx * sx;
-  if (den === 0) return null;
-  const slope = (n * sxy - sx * sy) / den;
-  const intercept = (sy - slope * sx) / n;
-  const ssTot = syy - (sy * sy) / n;
-  const sxxCentered = sxx - (sx * sx) / n;
-  const r2 = ssTot > 0 ? Math.min(1, (slope * slope * sxxCentered) / ssTot) : 0;
-  // Standard error of the slope: √( residual variance ÷ Sxx ). A noisy or thin
-  // trend yields a large SE — which the EOL projection turns into a wide range
-  // rather than a falsely-precise date.
-  const ssRes = Math.max(0, ssTot - slope * slope * sxxCentered);
-  const slopeStdErrPerMs =
-    n > 2 && sxxCentered > 0 ? Math.sqrt(ssRes / (n - 2) / sxxCentered) : 0;
-  return { slopePerMs: slope, intercept, r2, n, slopeStdErrPerMs };
-}
-
 let forecastCache: { ts: number; alerts: Alert[]; depletionGate: boolean } | null = null;
 /** Test seam — clear the forecast-alert cache so successive scenarios recompute. */
 export function resetForecastAlertsCache(): void { forecastCache = null; }
@@ -734,8 +680,6 @@ const TYPICAL_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const MIN_RESPONSE_PAIRS = 2;   // min daylight (GHI,PV) pairs to fit an hour
 const DAYLIGHT_GHI = 20;        // W/m² — below this is night/near-night
 
-const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-
 // v0.9.29 — 5-min SQL bucketing on long-window hour-of-day helpers. All
 // three (hourCurve, hourCurveByWeekday, pvHourlyByEpoch) feed per-hour
 // means/medians, where the within-hour distribution is dominated by
@@ -956,7 +900,7 @@ export async function getDayForecast(
   // diagnostic models below (the operator still wants spare-array visibility
   // per-Core, just not contaminating the fleet model).
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
 
   // Typical-day fleet PV curve (fallback when the model lacks an hour) + load curve.
   const pvCurve = new Array(24).fill(0);
@@ -1368,9 +1312,6 @@ export interface FleetDegradation {
   eolSoh: number;
   packs: PackDegradation[];
 }
-
-const round1 = (x: number) => Math.round(x * 10) / 10;
-const round2 = (x: number) => Math.round(x * 100) / 100;
 
 /**
  * v0.28.0 — detect a SoH series that is one or two flat segments joined by a BMS
@@ -1838,9 +1779,7 @@ export async function computeDegradation(
   }
   const now = Date.now();
   const since = now - DEGRADE_REPORT_HISTORY_MS;
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   // Pass 1 — regress and project every pack independently. Yield to the
   // event loop after each pack so concurrent work (other cache-warmer
@@ -2183,9 +2122,7 @@ export function computeRoundTripEfficiency(
   if (rteCache && rteCache.key === key && Date.now() - rteCache.ts < RTE_TTL_MS) return rteCache.value;
   const now = Date.now();
   const todayStart = startOfLocalDayMs();
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   const localDateStr = (ms: number): string => {
     const d = new Date(ms);
@@ -2211,7 +2148,7 @@ export function computeRoundTripEfficiency(
   // both numerator and discharge denominator. Pre-fix: 88.8 % live;
   // healthy band per the header comment is 95-97 %.
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   const packSeries = new Map<string, { in: Array<{ ts: number; value: number }>; out: Array<{ ts: number; value: number }> }>();
   for (const d of homeDpus) {
     const metricsNeeded: string[] = [];
@@ -2384,9 +2321,7 @@ export async function computeShadeReport(
   // shade". The populated path below returns 'healthy'.
   const empty = (): ShadeReport => ({ generatedAt: now, status: 'insufficient-data', hours: [], estTotalKwhPerYear: 0 });
 
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
   if (dpus.length === 0) return empty();
 
   const weather = await getWeather();
@@ -2401,7 +2336,7 @@ export async function computeShadeReport(
   // (spare with panels → fleet over-reports baseline), both of which
   // throw off the shade-shortfall projection.
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   const fleetPvByEpoch = new Map<number, number>();
   for (const d of homeDpus) {
     const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
@@ -2518,9 +2453,7 @@ export async function computeSoilingDecomposition(
   const wxByHour = new Map<number, WeatherHour>();
   for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
 
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   const perDevice: SoilingPerDevice[] = [];
   for (const d of dpus) {
@@ -2541,7 +2474,7 @@ export async function computeSoilingDecomposition(
   // v0.9.76 — `perDevice` above keeps every DPU (spare-array diagnostics).
   // `perHour` is fleet-level and only home-connected DPUs should contribute.
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   const fleetPvE = new Map<number, number>();
   for (const d of homeDpus) {
     const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
@@ -2628,9 +2561,7 @@ export function computeStringMismatch(
   }
   const now = Date.now();
   const since = now - STRING_MISMATCH_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   // Per-DPU per-hour median PV. v0.9.29 — 5-min SQL bucketing. We're
   // already taking the per-hour median across many samples; the 5-min
@@ -3029,9 +2960,7 @@ export function computeChargeCurveFingerprint(
   if (chargeCurveCache && Date.now() - chargeCurveCache.ts < CHARGE_CURVE_TTL_MS) return chargeCurveCache.value;
   const now = Date.now();
   const since = now - CHARGE_CURVE_HISTORY_MS;
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   const packs: ChargeCurvePack[] = [];
   for (const d of dpus) {
@@ -3205,9 +3134,7 @@ export function computeInternalResistance(
   if (irCache && Date.now() - irCache.ts < IR_TTL_MS) return irCache.value;
   const now = Date.now();
   const since = now - IR_HISTORY_MS;
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   const out: InternalResistanceDevice[] = [];
   for (const d of dpus) {
@@ -3659,9 +3586,7 @@ export async function computeAmbientThermalForecast(
   if (ambientThermalCache && Date.now() - ambientThermalCache.ts < AMBIENT_THERMAL_TTL_MS) return ambientThermalCache.value;
   const now = Date.now();
   const since = now - AMBIENT_THERMAL_HISTORY_MS;
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
   const empty = (): AmbientThermalReport => ({ generatedAt: now, packs: [] });
   if (dpus.length === 0) return empty();
 
@@ -3961,7 +3886,7 @@ export function computeSelfConsumption(
   // because spare-Core PV + bench-charge cycles inflated the home numerator
   // against the home-only load denominator.
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   // v0.9.84 — integrate via windowedEnergyWh: completed calendar days are
   // memoized (immutable), so only today + the window's leading partial are
   // re-scanned. Benchmark: 7.4× faster warm, output identical to whole-window
@@ -4116,9 +4041,7 @@ export function computeThermalEvents(
   }
   const now = Date.now();
   const since = now - THERMAL_EVENT_HISTORY_MS;
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   const packs: ThermalEventCounts[] = [];
   for (const d of dpus) {
@@ -4294,9 +4217,7 @@ export function computeEquipmentHealth(
   const now = Date.now();
   const RECENT_MS = 7 * 24 * 60 * 60 * 1000;
   const BASELINE_MS = 60 * 24 * 60 * 60 * 1000;
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   const mpptStrings: MpptString[] = [];
   for (const d of dpus) {
@@ -4452,16 +4373,14 @@ export async function computeClipping(
   });
   if (!forecast) return empty();
 
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
   if (dpus.length === 0) return empty();
   // v0.9.76 — clipping is "home array hit inverter ceiling". Use only
   // SHP2-connected DPUs so a spare with bench panels doesn't either
   // inflate `observedW` (false-negative clipping) or pollute the
   // `arrayPeakW` ceiling derived from the now-also-filtered solar model.
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   if (homeDpus.length === 0) return empty();
 
   const arrayPeakW = Math.max(0, ...forecast.solarModel.hourly.map((h) => h.observedMaxPvW));
@@ -4807,12 +4726,10 @@ export async function computeCurtailment(
     })),
   };
 
-  const allDpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
-  if (allDpus.length === 0) return empty;
+  const dpus = allDpus(devices);
+  if (dpus.length === 0) return empty;
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = allDpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   if (homeDpus.length === 0) return empty;
   const shp2 = Object.values(devices).find(
     (d) => d.projection?.kind === 'shp2',
@@ -5383,9 +5300,7 @@ export function computeTariffReport(
   const since = now - windowDays * 86_400_000;
   const todayStart = startOfLocalDayMs();
 
-  const dpus = Object.values(devices).filter((d) => d.projection?.kind === 'dpu') as Array<
-    DeviceSnapshot & { projection: DpuProjection }
-  >;
+  const dpus = allDpus(devices);
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
@@ -5403,7 +5318,7 @@ export function computeTariffReport(
   // bench-charging — small today ($0.40 live) but the bug is real and
   // grows if Cores 4/5 see heavier wall charging.
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   const dpuAcInSeries = new Map<string, Array<{ ts: number; value: number }>>();
   for (const d of homeDpus) {
     dpuAcInSeries.set(d.sn, recorder.query(d.sn, 'ac_in', since, now, 60));
@@ -6074,9 +5989,7 @@ export async function computeBayesianSolarModel(
   const empty = (): BayesianSolarModel => ({
     generatedAt: now, hourly: [], totalSamples: 0, medianStdev: 0, agreementWithOls: 0,
   });
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
   if (dpus.length === 0) return empty();
 
   const weather = await getWeather();
@@ -6088,7 +6001,7 @@ export async function computeBayesianSolarModel(
   // home's GHI→PV response; including a spare's bench-charge PV would
   // bias the prior shift away from what the connected arrays produce.
   const connected = shp2ConnectedDpuSns(devices);
-  const homeDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
+  const homeDpus = homeConnectedDpus(dpus, connected);
   const fleetPvByEpoch = new Map<number, number>();
   for (const d of homeDpus) {
     const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
@@ -6351,9 +6264,6 @@ export interface FleetRiskReport {
   packs: PackRiskScore[];
 }
 
-/** Clamp x into [0, 1]. */
-const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
-
 let riskCache: { ts: number; value: FleetRiskReport } | null = null;
 const RISK_TTL_MS = 30 * 60 * 1000;
 const RISK_MODEL_VERSION = 'heuristic-v1';
@@ -6367,9 +6277,7 @@ export function computePackRiskScores(
 ): FleetRiskReport {
   if (riskCache && Date.now() - riskCache.ts < RISK_TTL_MS) return riskCache.value;
   const now = Date.now();
-  const dpus = Object.values(devices).filter(
-    (d) => d.projection?.kind === 'dpu',
-  ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
+  const dpus = allDpus(devices);
 
   // Build a lookup of features per (sn, packNum).
   const out: PackRiskScore[] = [];

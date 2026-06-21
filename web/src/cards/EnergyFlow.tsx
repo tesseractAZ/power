@@ -1,4 +1,4 @@
-import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
+import type { DeviceSnapshot, DpuProjection, GridBackstop, Shp2Projection } from '../types';
 import { fmtPct, fmtW } from '../format';
 import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 import { HUES, UI } from '../theme';
@@ -18,7 +18,7 @@ const FONT_MONO = 'var(--font-mono)';
 /**
  * v0.36.0 — the SHP2 grid backstop, mirrored from the server's GridBackstop
  * (server/src/gridState.ts) and surfaced on the fleet snapshot as `snapshot.grid`.
- * Optional here so the card degrades gracefully (legacy DPU-acIn-only view) on a
+ * Optional in Props so the card degrades gracefully (legacy DPU-acIn-only view) on a
  * cold snapshot that predates the field. The SHP2 is the grid interconnect; the
  * grid is a BACKSTOP that is tapped automatically at the reserve floor / for
  * rebalancing. Three states the flow renders:
@@ -26,18 +26,6 @@ const FONT_MONO = 'var(--font-mono)';
  *   (2) STANDBY  — present/declared but homeGridWatts≈0: there, not yet needed.
  *   (3) OFF-GRID — present false: islanded.
  */
-export interface GridBackstop {
-  present: boolean;
-  backstopping: boolean;
-  importLive: boolean;
-  declared: boolean;
-  /** Grid charging the DPUs (DPU ac_in path), W. */
-  importWatts: number;
-  /** SHP2 main-line grid power into the home (wattInfo.gridWatt), W. */
-  homeGridWatts: number;
-  reason?: string;
-}
-
 interface Props {
   devices: Record<string, DeviceSnapshot>;
   /** v0.36.0 — SHP2 grid backstop (snapshot.grid). Absent on a cold snapshot. */

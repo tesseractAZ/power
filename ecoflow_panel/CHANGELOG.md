@@ -3,6 +3,25 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.52.0 — 2026-06-21
+
+**Internal refactors (behavior-preserving) + full documentation refresh.** A multi-agent pass discovered and adversarially verified a set of safe dedup/extract/dead-code cleanups; a separate multi-agent pass brought the docs current with the v0.44.0–v0.51.0 accuracy work. No alarm, energy number, published HA value, or endpoint behavior changed — the refactors are guarded by the test suite (747 → 762) and the published-value contracts.
+
+### Refactors (no behavior change)
+- **Single fleet-flow aggregator.** `/api/ha-state` (index.ts) and the MQTT `buildState` publisher (mqttDiscovery.ts) previously computed the per-pack `fleet_battery_net` + fleet roll-ups in two hand-synced copies; both now call one `aggregateFleetFlow(devices)` (shp2Membership.ts) that returns **raw, un-rounded** sums, with every `Math.round` and the ±50 W charge/discharge-timer gate left at the call sites. A new `fleetAggregate.test.ts` pins the helper byte-identical to the former inline loop (spare exclusion, per-pack net sign, panel-load = circuit sum, offline exclusion, empty-set fallback, no-SHP2); the existing "every value_json key is emitted" MQTT contract test confirms no published field moved.
+- **shp2Membership.ts is the membership convergence point** — `aggregateFleetFlow`, `findShp2`/`onlineDpus`, `sourceSnsOf`, and an overloaded `isExpectedOfflineSpare(sn, Set|Record)` now live in one place; alerts.ts, alertMonitor.ts, index.ts, and analytics.ts delegate (the spare-core zombie/offline gate is unchanged — its oracle test stays green).
+- **analytics.ts math + fleet helpers extracted** (`analytics/mathHelpers.ts`, `analytics/fleet.ts`) verbatim; the 14 `dpus`-filter / 9 `homeConnectedDpus` sites now share helpers, deep-equal-confirmed against the inline forms.
+- **HA-payload formatters deduped** (`haPayloadFmt.ts`: `kwh1`/`makeLifetimeKwh`/`makeAlertCounter`/`soonestProjecting`) + `haPayloadFmt.test.ts`; recorder pack-detail type, `SEVERITY_ORDER`, and the core/spare derivation deduped; the MQTT availability triple hoisted to one `AVAILABILITY_BASE` (verified byte-identical — `device:` deliberately left inline so the serialized key order, hence the retained payload, is unchanged).
+- **Dead code removed:** the unused `insertMany`, a stale `weatherGhiRows` export, and the never-mounted `web/src/cards/SystemSummary.tsx` (grep-confirmed zero import sites). Type tightening: 3 `as any` casts and a formatter `any` narrowed.
+- `tsc --noEmit` clean, `npm test` 762/762, web `vite build` clean.
+
+### Documentation refresh (README, DOCS.md, lovelace/README)
+- **DOCS.md configuration section now matches `config.yaml` exactly (53/53 options):** added 13 real options that were undocumented (v0.12–v0.15 battery-SoC alarms, load-shedding advisor, grid-availability, Wyoming/Piper TTS, chime gap/pack knobs) and removed 6 that were never add-on options (the `TARIFF_*`, `GRID_CO2_INTENSITY_LB_PER_MWH`, `BROADCAST_HA_EXTERNAL_URL` keys). Fixed an incorrect default (`BROADCAST_LEAD_SILENCE_MS` is 1000) and a non-existent host-discovery endpoint.
+- **HA Energy Dashboard grid wiring corrected (v0.44.0/v0.48.0):** grid *consumption* is wired to `sensor.ecoflow_grid_to_home_lifetime_kwh` ("EcoFlow Grid Import (Home)", whole-home SHP2 `gridWatt`), with the renamed `…_grid_import` ("EcoFlow Grid to Battery Charge") flagged as the diagnostic DPU-`ac_in` subset; documented the new `grid_home_watts` ("EcoFlow Grid Power (Home)") live sensor.
+- **Lifetime battery energy semantics (v0.45.0):** charge and discharge are independent coulomb counters, discharge > charge is normal, the old clamp is gone, and the read-only `/api/debug/battery-lifetime` endpoint + offline-freeze backfill (v0.48.0) are documented.
+- **Cloud-offline wording (v0.49.0):** every "zombie" reference is gone across all three docs (the cross-doc critic caught two stragglers in the README); offline devices are described as having "lost their EcoFlow cloud (enhanced) connection" without asserting the LAN/MQTT-wedged diagnosis.
+- Corrected counts and stale references throughout: TUI screen count (9 → 8), entity totals (~22 → ~48 sensors + 3 binary_sensors + alarm switches), HACS card list (7 Lit cards + 2 frozen legacy bundles), test-gate count, the fifth (`ha`) notify channel, the v0.9.70 Wyoming-only TTS model (dropped `BROADCAST_TTS_SERVICE`/`TTS_LANGUAGE`/`TTS_REQUIRE_LOCAL`), and the roadmap heading (v0.10.2 → v0.51.0). All facts checked against released-HEAD source, not the in-flight tree.
+
 ## 0.51.0 — 2026-06-21
 
 **Telnet TUI overhaul — summary screens reflect v0.44.0–v0.50.0, verified against the live add-on.** A deep audit confirmed the TUI's displayed numbers already matched source (PV, SoC, capacity, grid, alerts all recompute correctly); this release closes the presentation/completeness gaps and the recent accuracy changes.
