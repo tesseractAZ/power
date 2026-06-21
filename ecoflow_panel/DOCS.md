@@ -386,13 +386,26 @@ rest:
         device_class: energy
         icon: mdi:home-lightning-bolt
 
-      - name: "EcoFlow Grid Import (lifetime)"
+      # Whole-home grid import metered at the SHP2 main (wattInfo.gridWatt).
+      # THIS is the sensor to wire into Energy Dashboard → Grid consumption.
+      - name: "EcoFlow Grid Import (Home)"
+        unique_id: ecoflow_grid_to_home_lifetime_kwh
+        value_template: "{{ value_json.grid_to_home_lifetime_kwh }}"
+        unit_of_measurement: "kWh"
+        state_class: total_increasing
+        device_class: energy
+        icon: mdi:transmission-tower-import
+
+      # Grid energy that AC-CHARGES the batteries (DPU ac_in) — a diagnostic
+      # SUBSET, near-zero on a solar-charged home. Do NOT use this for grid
+      # consumption (it reads ~0 and the dashboard shows no import).
+      - name: "EcoFlow Grid to Battery Charge"
         unique_id: ecoflow_grid_import_lifetime_kwh
         value_template: "{{ value_json.grid_import_lifetime_kwh }}"
         unit_of_measurement: "kWh"
         state_class: total_increasing
         device_class: energy
-        icon: mdi:transmission-tower-import
+        icon: mdi:battery-charging-outline
 
       - name: "EcoFlow Battery Energy In"
         unique_id: ecoflow_battery_charge_lifetime_kwh
@@ -435,7 +448,11 @@ The five `state_class: total_increasing` sensors above feed straight into
 Home Assistant's built-in **Energy Dashboard**. Once they're created,
 go to **Settings → Dashboards → Energy** and wire them in:
 
-- **Electricity grid → Add consumption** → `sensor.ecoflow_grid_import_lifetime_kwh`
+- **Electricity grid → Add consumption** → `sensor.ecoflow_grid_to_home_lifetime_kwh`
+  (MQTT discovery: **"EcoFlow Grid Import (Home)"** = `sensor.ecoflow_panel_ecoflow_grid_to_home`).
+  ⚠️ Do **not** pick "EcoFlow Grid to Battery Charge" (`…_grid_import_lifetime_kwh`, the DPU
+  `ac_in` subset) — it's near-zero on a solar-charged home, so the grid bar would read 0.
+  The home's true grid import is metered at the SHP2 main (`gridWatt`).
 - **Solar panels → Add solar production** → `sensor.ecoflow_pv_production`
 - **Home battery storage → Add battery system** →
   - *Energy going IN to the battery* → `sensor.ecoflow_battery_energy_in`

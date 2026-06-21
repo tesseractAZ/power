@@ -293,3 +293,30 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
   const missing = referenced.filter((k) => !emitted.has(k)).sort();
   assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);
 });
+
+/**
+ * v0.44.0 — grid-import naming honesty for the HA Energy Dashboard.
+ *
+ * Two grid energy sensors exist and they measure DIFFERENT things:
+ *   • grid_to_home_lifetime_kwh = SHP2-main meter (wattInfo.gridWatt) = the TRUE
+ *     whole-home grid import → the sensor to wire into Energy → Grid consumption.
+ *   • grid_import_lifetime_kwh  = DPU ac_in = grid energy that CHARGES the
+ *     batteries — a near-zero diagnostic SUBSET on a solar-charged home.
+ * Wiring the latter as grid consumption shows ~0 kWh (the v0.44.0 bug report).
+ * Pin the semantics so a future edit can't silently swap them back.
+ */
+test('mqtt-discovery: grid_to_home is the canonical (non-diagnostic) Grid Import energy sensor', () => {
+  const home = SENSORS.find((s) => s.unique_id === 'ecoflow_grid_to_home_lifetime_kwh');
+  assert.ok(home, 'grid_to_home lifetime sensor must exist');
+  assert.equal(home!.device_class, 'energy');
+  assert.equal(home!.state_class, 'total_increasing');
+  assert.equal(home!.entity_category, undefined, 'whole-home grid import must NOT be diagnostic (Energy Dashboard cannot pick diagnostic entities)');
+  assert.match(home!.value_template, /grid_to_home_lifetime_kwh/);
+});
+
+test('mqtt-discovery: grid_import (DPU ac_in) is demoted to a diagnostic sub-metric', () => {
+  const acIn = SENSORS.find((s) => s.unique_id === 'ecoflow_grid_import_lifetime_kwh');
+  assert.ok(acIn, 'grid_import (ac_in) lifetime sensor must exist');
+  assert.equal(acIn!.entity_category, 'diagnostic', 'ac_in is a charging subset, not whole-home grid — must be diagnostic so it is not mistaken for grid consumption');
+  assert.match(acIn!.value_template, /grid_import_lifetime_kwh/);
+});
