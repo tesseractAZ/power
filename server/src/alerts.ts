@@ -203,8 +203,14 @@ export function computeAlerts(
   const sourceSns = new Set(
     (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
+  // Only SHP2-bound cores count as grid import. When the source set is unknown
+  // (no SHP2 observed yet) count NONE — a wall-charging spare must never suppress
+  // the off-grid advisory, and acIn=0 keeps the safe "off-grid" default (v0.43.0,
+  // Copilot review). Note this `acIn` path is the FALLBACK only — when the grid
+  // resolver is supplied (always, in production) the off-grid decision uses
+  // `grid.present` and never reaches here.
   const acIn = dpus
-    .filter((d) => d.online && (sourceSns.size === 0 || sourceSns.has(d.sn)))
+    .filter((d) => d.online && sourceSns.has(d.sn))
     .reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
   // v0.43.0 — off-grid detection now uses the grid-presence RESOLVER (the same
   // `present` signal driving binary_sensor.off_grid and /api/ha-state since v0.40.0),
