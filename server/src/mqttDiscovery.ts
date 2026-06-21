@@ -603,12 +603,14 @@ export async function startMqttDiscovery(
       battery_charge_lifetime_kwh: lifetimeKwh('fleet_battery_charge_wh'),
       battery_discharge_lifetime_kwh: lifetimeKwh('fleet_battery_discharge_wh'),
       // v0.8.0 — per-circuit lifetime + carbon + tariff
-      // v0.40.2 — enumerate per-circuit lifetime keys from the UNION of the live circuit
-      // list (same source as discovery) and the persisted accumulator keys, so every
-      // discovered per-circuit sensor always finds its key in the payload — in steady
-      // state AND during the startup window before the first poll populates the snapshot
-      // (fixes the recurring "circuit_N_lifetime_kwh" HA template warning).
-      ...circuitLifetimeFields(shp2 ? shp2.projection.circuits : [], Object.keys(lifetime), lifetimeKwh),
+      // v0.40.2/.3 — enumerate per-circuit lifetime keys from the UNION of the live circuit
+      // list (same source as discovery) and the PERSISTED lifetime keys (recorder.listLifetimeKeys
+      // reads the lifetime_totals table directly — NOT getLifetimeTotals(), whose key set is
+      // snapshot-gated and so has no per-circuit keys until the first poll). This makes every
+      // discovered per-circuit sensor find its key — in steady state AND at startup before the
+      // snapshot loads, matching the prior run's retained sensors (fixes the recurring
+      // "circuit_N_lifetime_kwh" HA template warning, incl. the startup race Copilot flagged).
+      ...circuitLifetimeFields(shp2 ? shp2.projection.circuits : [], recorder.listLifetimeKeys(), lifetimeKwh),
       carbon_kg_avoided_7d: carbon.totalKgAvoided,
       carbon_lifetime_kg_avoided: carbon.lifetimeKgAvoided,
       carbon_lifetime_miles_not_driven: carbon.lifetimeMilesNotDriven,
