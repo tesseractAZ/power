@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.42.0"
+version: "0.43.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,

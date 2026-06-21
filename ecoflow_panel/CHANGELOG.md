@@ -3,6 +3,24 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.43.0 — 2026-06-21
+
+**Alerts + Solar page accuracy audits — 7 fixes (2 high, 3 med, 2 low).** Two multi-agent audits (Alerts: 18 findings → 8 defects; Solar: 10 → 6) traced every alert/threshold/count and every PV value back to source and recomputed against the live system. This release ships the high+medium-confidence fixes; the larger refactors are tracked as follow-ups (see below).
+
+### Alerts page
+- **[HIGH] Killed a live false "Running off-grid" alert on a grid-tied home.** `grid-offgrid` (alerts.ts) still triggered on the obsolete `acIn<5` DPU-sum heuristic, which reads 0 whenever PV/battery covers DPU charging **even while the grid carries home load through the SHP2 main** — so it fired "No grid import detected — fully on solar + batteries" 24/7 on a grid-tied home, contradicting `binary_sensor.off_grid`/`/api/ha-state` (both migrated to the grid resolver in v0.40.0). It now uses the same resolver: `offGrid = grid.present === true ? false : grid.present === false ? true : acIn<5` (the `acIn` fallback only applies when grid is omitted, keeping the safe "off-grid" default). The `computeAlerts` `grid` param gained `present`. A genuine outage (grid absent ⇒ `present:false`) still fires it.
+- **[MED] `shp2-near-reserve` is now grid-aware.** It hardcoded `warning` even while the grid backstopped the home — inconsistent with its grid-downgraded siblings (`shp2-below-reserve`, the SoC bands). It now mirrors them: `severity: onGrid ? 'info' : 'warning'` (downgrade-only; a real outage keeps it `warning`).
+- **[MED] Battery-page cell plate now mirrors the alarm engine.** The cell temperature plate turned amber at 95 °F while the engine's cell *info* threshold is 104 °F (`CELL_TEMP.infoF`) — the one band that didn't mirror despite the comment claiming it did. `WARM_F` 95 → 104.
+- **[MED] No more phantom "Pack —" box.** Core-scoped alerts (offline-*, DPU-level) rendered a `[Pack —]` box implying a pack scope that doesn't exist (live on every offline core). The Pack box now renders only when `packNum != null`.
+- **[LOW] Nominal-state copy.** The threshold-only Alerts page can't reach the ISA *Medium* tier, so "no Critical, High, or **Medium** conditions" → "no Critical or High conditions".
+
+### Solar page
+- **[HIGH] HV/LV channel-count tiles no longer undercount.** Both tiles showed `onlineDpus.length` (live connectivity = 2) while the same card's header said "42 panels" (3 equipped Cores × 14) — internally contradictory (2 × 14 = 28 ≠ 42), because a cloud-offline-but-wired Core's strings are still physically installed. A new `equippedCores = arraySns.size || onlineDpus.length` drives the topology tiles (renders 3, reconciling with 42), with a "· N offline" sub when fewer are live.
+- **[MED] Flow-diagram caption reconciled with the glyphs.** The caption printed `42 panels` above only 28 drawn panel glyphs (it draws a row per *online* Core). It now reads "42 installed · 28 shown · 400 W each" when fewer equipped Cores are online.
+- Tests: +6 (`alertGridOffgrid.test.ts` — off-grid via resolver present/absent/omitted-fallback; near-reserve grid-aware downgrade/outage/omitted). Full server suite 677/677; web `tsc + vite build` clean. The off-grid + near-reserve fixes were live-recomputed against the grid-tied home.
+
+**Tracked follow-ups (deferred from these audits):** Alerts — de-overload `source='learned'` (add an explicit ISA-tier field so measured reserve-band crossings stay on the Alerts page with correct provenance) + reserve-band on-screen dedup; delete the unused `NotificationCard`/`StatusBanner`/`/api/notify` frontend; cold-cell (41 °F) plate transition + balancing double-listing + cleared-history 200-cap copy. Solar — PV-specific "% measured" (today's coverage currently reports fleet-all-metric coverage; needs a server `pvCoverage` field); MPPT tile W-unit consistency; chart carry-forward review; `hasArray` empty-fallback. Energy reporting (from the v0.42.0 log audit, pre-existing) — round-trip-efficiency clamp not holding (discharged 7d > charged 7d) + lifetime charge==discharge (counters sum absolute magnitude instead of splitting signed flow).
+
 ## 0.42.0 — 2026-06-21
 
 **Battery-page accuracy audit — 9 fixes (2 high, 6 medium, 1 low).** A comprehensive multi-agent audit of the Battery page (`ThermalPanel.tsx`) traced every displayed/calculated value back to its `DpuPack`/SHP2 source and recomputed it against the live snapshot; 30 findings verified, deduped to these 9. Two HIGH bugs shared one root cause: folding a DPU's *cloud-online* status into *backup-pool* membership.
