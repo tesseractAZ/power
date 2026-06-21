@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.50.0 — 2026-06-21
+
+**Log-review fixes — quieter logs + per-circuit Energy monotonicity across restarts.** A live review of the add-on + HA Core logs surfaced two resolvable items.
+
+- **[Fixed] Client 4xx no longer logged at WARN.** The Fastify `onResponse` hook logged *every* `statusCode ≥ 400` at WARN — so a client probing a non-existent path (404 on `/api/strategy`, `/api/projection`) or sending bad params (400 on `/api/debug/raw`) inflated the warn stream and made the add-on look unhealthy. Now **5xx → warn** ("request error"), **4xx → debug** ("request rejected"), slow >1s → info. Real server errors stand out again.
+- **[Fixed] Per-circuit lifetime energy sensors no longer trip HA's `total_increasing` guard across a restart.** HA Recorder warned that `sensor.ecoflow_panel_ecoflow_circuit_8_energy` / `…_west_air_conditioner_energy` were "not strictly increasing" (e.g. 269.538 → 269.53, an 8 Wh dip). The per-key micro-dip clamp (`clampLifetimeDip`, ≤50 Wh) was keyed on an **in-memory** high-water map that reset on every process restart, so the first post-restart emit could dip a few Wh below HA's last value (today's multiple deploy-restarts amplified it). The emit high-water is now **persisted** to a `.emit-highwater.json` sidecar (written on the 5-min rollup cadence + on graceful shutdown, seeded on boot), so the dip clamp keeps its baseline across restarts — no more spurious meter-reset warnings, while a genuine >50 Wh reset still passes through. The sidecar is advisory: missing/corrupt → empty map → exactly the prior behavior (can only help, never regress). The v0.45.0 battery counters are unaffected (they clamp off the monotone floor, not the emit high-water).
+- Server suite 702 → 706 (+4); web build clean. Both verified against the live HA Core log.
+
 ## 0.49.0 — 2026-06-21
 
 **Retire the "EcoFlow zombie" framing — describe cloud-offline honestly.** The offline-device alert appended (for any device offline >30 min) *"likely in the EcoFlow zombie state — connected to LAN but MQTT TCP session wedged."* That's an **unverifiable inference stated as fact** — the add-on can't see the LAN or the MQTT socket; all it actually knows is that EcoFlow Cloud reports the device offline (it lost its cloud/enhanced connection). On a genuine home core that simply dropped its cloud link (Core 1), this reads as a scarier, specific fault than what's known. All user-facing "zombie" references are reframed to honest "lost its EcoFlow cloud (enhanced) connection" / "cloud-offline" language, **keeping** the actionable power-cycle remedy without asserting the LAN/MQTT diagnosis:
