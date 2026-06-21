@@ -21,7 +21,7 @@ import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '.
 // AVAILABLE (present/declared but on standby), and OFF-GRID (islanded). homeGridWatts
 // (SHP2 main) catches the backstop path that DPU ac_in import alone is blind to.
 import { liveGridBackstop } from '../gridState.js';
-import { isSourceDpuStale } from '../shp2Membership.js';
+import { isSourceDpuStale, shp2ConnectedDpuSns } from '../shp2Membership.js';
 
 // v0.15.15 — the CHARGER screen was removed with the web Charger tab: the EVSE
 // is app-only (no API/MQTT telemetry) and its host DPU (Core 4) is an offline
@@ -191,6 +191,20 @@ function gridStatus(snap: FleetSnapshot): GridStatus {
   return { state: 'standby', watts: 0, reason: g.reason };
 }
 
+/** v0.46.0 — fleet battery NET power from per-pack cell flow, NOT DPU throughput.
+ *  DPU `totalOut − totalIn` is throughput (PV+grid in / AC out) and overstates the
+ *  rate; the true battery DC flow is Σ over every DPU pack of (outputWatts −
+ *  inputWatts). Sign convention matches the server's `fleet_battery_net_watts`
+ *  (index.ts): POSITIVE = discharging, NEGATIVE = charging. Membership = the same
+ *  online-DPU set the rest of the summary reads. Mirrors `/api/ha-state`. */
+export function fleetBatteryNetWatts(onlineDpus: DpuDev[]): number {
+  let net = 0;
+  for (const d of onlineDpus) {
+    for (const pk of d.projection!.packs) net += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
+  }
+  return net;
+}
+
 function sortedDevices(snap: FleetSnapshot): DeviceSnapshot[] {
   return Object.values(snap.devices).sort((a, b) => {
     const rank = (d: DeviceSnapshot) =>
@@ -264,9 +278,8 @@ function statusLine(data: RenderData, w: number): string {
   const dpus = getDpus(snap).filter((d) => d.online && d.projection);
   const shp2 = getShp2(snap);
   const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
-  const totIn = sum(dpus, (d) => d.projection!.totalInWatts);
-  const totOut = sum(dpus, (d) => d.projection!.totalOutWatts);
-  const batNet = totOut - totIn;
+  // v0.46.0 — battery net is per-pack cell flow (+discharge/−charge), not DPU throughput.
+  const batNet = fleetBatteryNetWatts(dpus);
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const backup = shp2?.projection.backupBatPercent ?? null;
   // v0.36.0 — three grid states from the backstop resolver, not just off-grid vs tied.
@@ -340,9 +353,9 @@ function bodyOverview(data: RenderData): string[] {
   const shp2 = getShp2(snap);
   const allDev = Object.values(snap.devices);
   const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
-  const totIn = sum(dpus, (d) => d.projection!.totalInWatts);
-  const totOut = sum(dpus, (d) => d.projection!.totalOutWatts);
-  const batNet = totOut - totIn;
+  // v0.46.0 — battery net = Σ per-pack (outputWatts − inputWatts); +discharge/−charge.
+  // DPU throughput (totalOut − totalIn) overstated the rate and is no longer used.
+  const batNet = fleetBatteryNetWatts(dpus);
   const soc = avg(dpus.map((d) => d.projection!.soc));
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const activeCircuits = shp2 ? shp2.projection.circuits.filter((cir) => (cir.watts ?? 0) > 1).length : 0;
@@ -453,9 +466,25 @@ function bodyDevices(data: RenderData): string[] {
     let soc = '—';
     let live = '';
     const p = d.projection;
-    if (p?.kind === 'dpu') {
+    // v0.49.0 — a core/panel that EcoFlow Cloud reports offline kept its
+    // last-known projection in the snapshot store, so showing PV/out/load here
+    // would imply live telemetry from a device we can't currently reach. Frame
+    // it honestly as cloud-offline (last-known SoC stays useful) rather than as
+    // a live reading — the old "zombie" framing is gone fleet-wide.
+    if (p && !d.online) {
+      if (p.kind === 'dpu') soc = paint(socColor(p.soc), fmtPct(p.soc));
+      else if (p.kind === 'shp2') soc = paint(socColor(p.backupBatPercent), fmtPct(p.backupBatPercent));
+      else if (p.kind === 'generic' && p.soc != null) soc = fmtPct(p.soc);
+      // Fits the 22-wide LIVE cell (must stay ≤21 visible chars).
+      live = c.grey('cloud-offline (held)');
+    } else if (p?.kind === 'dpu') {
       soc = paint(socColor(p.soc), fmtPct(p.soc));
-      live = c.yellow('PV ' + fmtW(p.pvTotalWatts)) + c.grey(' · ') + c.white('out ' + fmtW(p.totalOutWatts));
+      // Per-pack battery flow (+discharge/−charge) alongside PV — the battery
+      // direction the throughput "out" number alone never conveyed. `d` is a DPU
+      // device in this branch (p.kind narrowed to 'dpu').
+      const bat = fleetBatteryNetWatts([d as DpuDev]);
+      const batTag = bat > 5 ? c.yellow('▼ ' + fmtW(bat)) : bat < -5 ? c.green('▲ ' + fmtW(-bat)) : c.grey('idle');
+      live = c.yellow('PV ' + fmtW(p.pvTotalWatts)) + c.grey(' · bat ') + batTag;
     } else if (p?.kind === 'shp2') {
       soc = paint(socColor(p.backupBatPercent), fmtPct(p.backupBatPercent));
       live = c.white('load ' + fmtW(sum(p.circuits, (cir) => cir.watts)));
@@ -490,6 +519,19 @@ function bodySolar(data: RenderData, w: number): string[] {
       c.grey('  ·  LV strings ') +
       c.white(fmtW(lvTot)),
   );
+  // v0.44.0 — today's PV produced, with the "% measured" reading PV-ONLY coverage
+  // (fleet.pvCoverage, gated on the SHP2-connected PV membership), not the
+  // all-metric mean — a PV-specific data-completeness number for a PV readout.
+  const f = data.totals?.fleet;
+  if (f) {
+    L.push(
+      c.grey('TODAY  ') +
+        c.yellow(fmtKwh(f.pvWh)) +
+        c.grey(' produced  ·  ') +
+        c.white(`${Math.round((f.pvCoverage ?? f.coverage) * 100)}% measured`) +
+        c.dim(' (PV coverage)'),
+    );
+  }
   L.push(rule(w));
   for (const d of dpus) {
     const p = d.projection;
@@ -539,7 +581,15 @@ function pvString(
 function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
   const dpus = getDpus(data.snap);
   if (dpus.length === 0) return [c.grey('No Delta Pro Ultra units discovered.')];
-  const di = Math.max(0, Math.min(sv.battDpu, dpus.length - 1));
+  let di = Math.max(0, Math.min(sv.battDpu, dpus.length - 1));
+  // v0.51.0 — if the selected DPU has no packs reporting (the default index 0 is
+  // Core 1, which is cloud-offline), open the per-pack grid on the first DPU that
+  // IS reporting so the screen shows real data instead of an all-"absent" grid.
+  // The offline core is still surfaced in the FLEET BATT / offline-freeze header.
+  if ((dpus[di].projection?.packs?.length ?? 0) === 0) {
+    const firstLive = dpus.findIndex((d) => (d.projection?.packs?.length ?? 0) > 0);
+    if (firstLive >= 0) di = firstLive;
+  }
   const dpu = dpus[di];
   const packs = dpu.projection?.packs ?? [];
   const pi = Math.max(0, Math.min(sv.battPack, 4));
@@ -557,6 +607,30 @@ function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
       c.cyanB(' ▼') +
       c.grey('      (arrows navigate)'),
   );
+
+  // v0.46.0 — fleet battery NET from per-pack flow (+discharge/−charge). v0.45.0 —
+  // surface the offline-FREEZE state: an SHP2-connected core that's cloud-offline
+  // keeps its last-known lifetime contribution HELD (so one offline core no longer
+  // stalls the whole fleet's battery counters). Name the held cores so the operator
+  // can see who's contributing live vs. carried-across-offline.
+  const onlineDpus = dpus.filter((d) => d.online && d.projection);
+  const fleetNet = fleetBatteryNetWatts(onlineDpus);
+  const connectedSns = shp2ConnectedDpuSns(data.snap.devices);
+  const heldCores = dpus.filter((d) => connectedSns.has(d.sn) && !d.online).map((d) => d.deviceName);
+  const netTag =
+    fleetNet > 5 ? c.yellow(`▼ discharging ${fmtW(fleetNet)}`)
+      : fleetNet < -5 ? c.green(`▲ charging ${fmtW(-fleetNet)}`)
+        : c.grey('idle');
+  L.push(
+    c.grey('FLEET BATT ') + netTag +
+      c.grey('   ') +
+      (heldCores.length > 0
+        ? c.yellow(`⚠ ${heldCores.length} core${heldCores.length > 1 ? 's' : ''} cloud-offline · held from last-known: `) + c.grey(heldCores.join(', '))
+        : c.grey('all connected cores live')),
+  );
+  if (dpu.online === false) {
+    L.push('  ' + c.yellow('● This core is cloud-offline — values are last-known, not live.'));
+  }
   // Pack table
   L.push(
     c.grey(
@@ -645,6 +719,27 @@ function packDetail(pk: DpuPack, dpu: DpuDev, w: number, degradation: FleetDegra
   ];
   L.push(c.cyanB('VITALS'));
   L.push(...statGrid(vitals, w));
+
+  // v0.45.0 — lifetime charge & discharge are INDEPENDENT coulomb counters
+  // (accuChgCap / accuDsgCap). The old `discharge ≤ charge` clamp was a category
+  // error and was removed: over a window that ends at a lower SoC than the
+  // baseline, cumulative DISCHARGE legitimately EXCEEDS charge. Show both honestly
+  // (Wh = mAh × 0.1024) — never imply they should be equal or that this is an RTE.
+  const chgKwh = pk.accuChgMah != null ? (pk.accuChgMah * MAH_TO_WH) / 1000 : null;
+  const dsgKwh = pk.accuDsgMah != null ? (pk.accuDsgMah * MAH_TO_WH) / 1000 : null;
+  if (chgKwh != null || dsgKwh != null) {
+    L.push(c.cyanB('LIFETIME ENERGY') + c.dim('   independent coulomb counters · discharge>charge is normal'));
+    L.push(
+      ...statGrid(
+        [
+          ['Charged', chgKwh != null ? `${chgKwh.toFixed(1)} kWh` : '—'],
+          ['Discharged', dsgKwh != null ? `${dsgKwh.toFixed(1)} kWh` : '—'],
+          ['Cycles', pk.cycles != null ? String(pk.cycles) : '—'],
+        ],
+        w,
+      ),
+    );
+  }
 
   // Capacity-fade → end-of-life projection — per-pack SoH regression.
   const deg = degradation.packs.find((p) => p.sn === dpu.sn && p.packNum === pk.num);
@@ -778,12 +873,16 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
           c.grey(' → home')
         : c.cyan('AVAILABLE') + c.grey(' — standby (battery/PV covering)');
   body.push('  ' + field('Status', statusVal, 14));
+  // v0.44.0 — "Home grid" is the SHP2-main meter (wattInfo.gridWatt): the
+  // authoritative WHOLE-HOME grid power. "DPU charge" is DPU ac_in — only grid
+  // that charges the batteries, NOT whole-home load — kept as a sub-reading so
+  // the two scopes are never conflated (the v0.44.0 grid-import correction).
   body.push(
     ...statGrid(
       [
-        ['Home grid', `${fmtW(grid.homeGridWatts)}`],
-        ['DPU import', `${fmtW(grid.importWatts)}`],
-        ['Present', grid.present ? (grid.importLive ? 'yes (live)' : grid.declared ? 'yes (declared)' : 'yes') : 'no'],
+        ['Home grid', `${fmtW(p.gridWatt ?? grid.homeGridWatts)}`],
+        ['DPU charge', `${fmtW(grid.importWatts)}`],
+        ['Present', grid.present ? (grid.importLive ? 'live' : grid.declared ? 'declared' : 'yes') : 'no'],
       ],
       w,
     ),
@@ -845,13 +944,18 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
   );
   for (const cir of p.pairedCircuits) {
     const ch = cir.secondaryCh != null ? `ch${cir.primaryCh}+${cir.secondaryCh}` : `ch${cir.primaryCh}`;
+    // v0.47.0 — loadIsEnable=false means the circuit is DISABLED (turned off in
+    // the SHP2, e.g. Pool Pump), NOT actively shed. Mark it as such; don't imply
+    // an automatic load-shed event.
+    const stateCell =
+      cir.loadIsEnable === false ? c.grey('disabled') : c.green('enabled');
     body.push(
       '  ' +
-        cell(c.white(cir.name) + c.grey(' ' + ch), 30) +
+        cell((cir.loadIsEnable === false ? c.grey(cir.name) : c.white(cir.name)) + c.grey(' ' + ch), 30) +
         cell(c.whiteB(fmtW(cir.watts)), 11) +
         cell(c.white(cir.breakerAmps != null ? `${cir.breakerAmps} A` : '—'), 10) +
         cell(cir.isSplitPhase ? c.cyan('240 V') : c.grey('120 V'), 8) +
-        (cir.loadIsEnable === false ? c.red('shed') : c.green('on')),
+        stateCell,
     );
   }
 
@@ -863,8 +967,13 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
 
 function bodyStrategy(data: RenderData): string[] {
   const shp2 = getShp2(data.snap);
-  if (!shp2) return [c.grey('SHP2 not available — strategy data comes from the Smart Home Panel.')];
-  const s = shp2.projection.strategy;
+  // v0.47.0 — the gate is online-aware: a cloud-offline SHP2's strategy config is
+  // stale, not authoritative. Require online before presenting it as live config.
+  if (!shp2 || !shp2.online) {
+    return [c.grey('SHP2 not online — strategy data comes from the Smart Home Panel.')];
+  }
+  const proj = shp2.projection;
+  const s = proj.strategy;
   const L: string[] = [];
 
   L.push(c.cyanB('LOAD MANAGEMENT'));
@@ -873,35 +982,60 @@ function bodyStrategy(data: RenderData): string[] {
       cell(c.grey(padEnd('Load shedding', 18)) + (s.loadShedEnabled ? c.green('ENABLED') : c.grey('disabled')), 30) +
       c.grey(s.loadShedConfigured ? '(configured)' : '(not configured)'),
   );
+  // v0.47.0 — read the CANONICAL projection.backupReserveSoc (the flat field the
+  // grid-aware floor alarm, grid-backstop, and the HA backup_reserve_percent
+  // sensor all act on), NOT strategy.backupReserveSoc (pd303_mc-preferred decode).
+  // They agree today but could silently diverge; the displayed reserve must never
+  // disagree with the reserve defending the home.
   L.push(
     '  ' +
       cell(
-        c.grey(padEnd('Backup reserve', 18)) + paint(socColor(s.backupReserveSoc), fmtPct(s.backupReserveSoc)),
+        c.grey(padEnd('Backup reserve', 18)) + paint(socColor(proj.backupReserveSoc), fmtPct(proj.backupReserveSoc)),
         30,
       ) +
       c.grey(s.backupReserveEnabled ? 'enabled' : 'disabled') +
       (s.solarBackupReserveSoc != null ? c.grey(`   solar reserve ${fmtPct(s.solarBackupReserveSoc)}`) : ''),
   );
+  // v0.47.0 — smart/backup/overload are RAW SHP2 enum codes (live 2/0/0); the repo
+  // carries no authoritative EcoFlow enum semantics, so show the codes honestly
+  // and label them as codes rather than fabricating "smart"/"backup" meanings.
   L.push(
     '  ' +
-      field('Modes', c.white(`backup ${s.backupMode ?? '—'}  ·  overload ${s.overloadMode ?? '—'}  ·  smart ${s.smartBackupMode ?? '—'}`), 18),
+      field('Mode codes', c.white(`smart ${s.smartBackupMode ?? '—'}  ·  backup ${s.backupMode ?? '—'}  ·  overload ${s.overloadMode ?? '—'}`), 18) +
+      c.dim('  (raw SHP2 codes)'),
   );
   if (s.midPriorityDischargeFloorSoc != null) {
     L.push('  ' + field('Mid-prio floor', paint(socColor(s.midPriorityDischargeFloorSoc), fmtPct(s.midPriorityDischargeFloorSoc)), 18));
   }
   L.push('');
 
-  L.push(c.cyanB('CIRCUIT PRIORITIES'));
-  const circuits = shp2.projection.pairedCircuits;
+  // v0.47.0 — shed order. The SHP2's NATIVE loadPriority convention (verified live
+  // against the running SHP2: Pool Pump=25=highest=shed-FIRST, a subpanel=1=shed-
+  // LAST) is the OPPOSITE polarity of the internal loadShedRegistry ("1 = shed
+  // first"). Different priority systems — do NOT unify. Sort ASCENDING so the
+  // most-protected (kept longest) sort to the top, and caption the direction
+  // correctly. Disabled circuits (loadIsEnable=false) are pinned to the bottom and
+  // clearly marked rather than ranked as active shed participants.
+  L.push(c.cyanB('CIRCUIT SHED ORDER') + c.dim('   ascending = most-protected (shed LAST) · higher # sheds FIRST'));
+  const prio = (cir: { loadPriority: number | null }) => cir.loadPriority ?? Number.POSITIVE_INFINITY;
+  const ranked = [...proj.pairedCircuits].sort((a, b) => {
+    const ea = a.loadIsEnable === false ? 1 : 0;
+    const eb = b.loadIsEnable === false ? 1 : 0;
+    if (ea !== eb) return ea - eb; // enabled circuits first, disabled pinned last
+    return prio(a) - prio(b);      // then most-protected (low #) → shed-first (high #)
+  });
   L.push(c.grey('  ' + cell('CIRCUIT', 32) + cell('BREAKER', 11) + cell('PRIORITY', 12) + 'STATE'));
-  for (const cir of circuits.slice(0, 8)) {
+  for (const cir of ranked.slice(0, 8)) {
+    const disabled = cir.loadIsEnable === false;
     const tag = cir.isSplitPhase ? c.grey(' (240V)') : '';
+    const nameCol = disabled ? c.grey(cir.name) + tag : c.white(cir.name) + tag;
+    const prioCol = cir.loadPriority != null ? `#${cir.loadPriority}` : '—';
     L.push(
       '  ' +
-        cell(c.white(cir.name) + tag, 32) +
+        cell(nameCol, 32) +
         cell(c.white(cir.breakerAmps != null ? `${cir.breakerAmps} A` : '—'), 11) +
-        cell(c.white(cir.loadPriority != null ? `level ${cir.loadPriority}` : '—'), 12) +
-        (cir.loadIsEnable === false ? c.red('disabled') : c.green('enabled')),
+        cell(disabled ? c.grey(prioCol) : c.white(prioCol), 12) +
+        (disabled ? c.grey('disabled · off in SHP2') : c.green('enabled')),
     );
   }
   L.push('');
@@ -909,9 +1043,15 @@ function bodyStrategy(data: RenderData): string[] {
   L.push(c.cyanB('CHARGE SCHEDULE') + c.dim('   time-of-use'));
   const t = s.timeTask;
   if (t) {
+    // v0.47.0 — the windows are only operative when BOTH the task is enabled AND
+    // the time-range gate (rangeEnabled) is on. When either is off the timeline is
+    // configured-but-inactive — label it "Configured" (not "Active") and note the
+    // gate so a disabled schedule isn't read as a live charge window.
+    const gated = t.isEnabled && t.rangeEnabled;
+    const taskState = t.isEnabled ? c.green('ENABLED') : c.grey('disabled');
     L.push(
       '  ' +
-        field('Task', (t.isEnabled ? c.green('ENABLED') : c.grey('disabled')) + c.grey(`  ${t.type ?? ''}  ${t.timeMode ?? ''}`), 14),
+        field('Task', taskState + c.grey(`  ${t.type ?? ''}  ${t.timeMode ?? ''}`), 14),
     );
     L.push(
       '  ' +
@@ -921,7 +1061,11 @@ function bodyStrategy(data: RenderData): string[] {
       t.windows.length > 0
         ? t.windows.map((tw) => `${hhmm(tw.startMinute)}–${hhmm(tw.endMinute)}`).join(', ')
         : 'none';
-    L.push('  ' + field('Windows', c.cyan(winText), 14));
+    const winLabel = gated ? 'Windows' : 'Windows (cfg)';
+    const winNote = gated
+      ? ''
+      : c.grey(`   ${!t.isEnabled ? 'task disabled' : 'time-range gate disabled'} — not active`);
+    L.push('  ' + field(winLabel, (gated ? c.cyan(winText) : c.grey(winText)) + winNote, 14));
   } else {
     L.push('  ' + c.grey('No charge schedule configured.'));
   }

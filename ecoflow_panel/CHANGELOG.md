@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.51.0 — 2026-06-21
+
+**Telnet TUI overhaul — summary screens reflect v0.44.0–v0.50.0, verified against the live add-on.** A deep audit confirmed the TUI's displayed numbers already matched source (PV, SoC, capacity, grid, alerts all recompute correctly); this release closes the presentation/completeness gaps and the recent accuracy changes.
+
+- **BATTERY:** new per-pack battery-net header (per-pack flow, not DPU throughput — mirrors `fleet_battery_net_watts`); a **LIFETIME ENERGY** section (Charged/Discharged as independent coulomb counters, captioned "discharge>charge is normal" — the v0.45.0 clamp removal); offline-freeze surfacing (names cores cloud-offline and held-from-last-known, e.g. Core 1). **Audit fix:** the per-pack grid now opens on the first *reporting* DPU instead of the default offline Core 1 (was an all-"absent" screen); the offline core is still flagged in the header.
+- **SOLAR:** PV "% measured" now uses PV-only `fleet.pvCoverage`, not the all-metric mean (v0.44.0).
+- **SHP2:** "Home grid" sourced from `gridWatt` (whole-home), `ac_in` relabelled "DPU charge" so the scopes aren't conflated. **Audit fix:** the grid "Present" value (`yes (declared)`) was truncated by the 12-char value cell → shortened to `declared`/`live`/`yes`/`no`.
+- **STRATEGY:** backup reserve reads the canonical `projection.backupReserveSoc` (matches the alarm); a sorted **CIRCUIT SHED ORDER** with the verified caption (ascending = shed-last; Pool Pump #25 = shed-first); disabled circuits pinned last + marked; TOU windows respect the `rangeEnabled` gate; mode enums shown honestly as raw codes.
+- **OVERVIEW / DEVICES:** per-pack battery-net; offline cores framed as cloud-offline/held (no "zombie" anywhere in the TUI — a regression test pins this).
+- Framework, navigation, and session handling untouched; no new write actions. +41 TUI render tests (none existed for summary-mode `renderScreen`); server suite 706 → 747; web build unaffected.
+
 ## 0.50.0 — 2026-06-21
 
 **Log-review fixes — quieter logs + per-circuit Energy monotonicity across restarts.** A live review of the add-on + HA Core logs surfaced two resolvable items.
