@@ -226,6 +226,13 @@ export interface Shp2PairedCircuit {
   name: string;               // name from primary leg
   watts: number | null;       // sum of both legs
   breakerAmps: number | null; // breaker rating from primary leg
+  // SHP2 native loadPriority: ASCENDING = most-protected (shed LAST); the HIGHEST
+  // number sheds FIRST. Verified empirically against live data: Pool Pump — the
+  // canonical least-essential load, currently SHP2-disabled — carries loadPriority
+  // 25, while a subpanel carries 1. This is the OPPOSITE polarity of
+  // loadShedRegistry.ts's internal HA shed-list convention (priority 1 = shed-FIRST).
+  // They are DIFFERENT priority systems — do NOT unify them or "fix" one to match
+  // the other.
   loadPriority: number | null;
   loadIsEnable: boolean | null;
   isSplitPhase: boolean;
@@ -312,8 +319,15 @@ function decodeTimeScale(sta: unknown): { windows: Shp2ChargeWindow[]; slotMinut
   const bits: boolean[] = [];
   for (const entry of sta) {
     if (typeof entry !== 'string') continue;
-    const byte = Buffer.from(entry, 'base64')[0] ?? 0;
-    for (let b = 7; b >= 0; b--) bits.push(((byte >> b) & 1) === 1);
+    // Iterate EVERY byte of the decoded entry, not just the first — a multi-byte
+    // base64 entry must contribute all its slots. Bit order is preserved MSB-first
+    // within each byte (bit 7 = earliest slot). For today's single-byte entries this
+    // is identical to the old `[0]`-only path (verified against the live timeScale.sta
+    // bitmap: windows decode the same 640–880 / 940–960).
+    const buf = Buffer.from(entry, 'base64');
+    for (const byte of buf) {
+      for (let b = 7; b >= 0; b--) bits.push(((byte >> b) & 1) === 1);
+    }
   }
   const totalSlots = bits.length || 144;
   const slotMinutes = Math.round((24 * 60) / totalSlots) || 10;
@@ -356,7 +370,14 @@ function projectShp2Strategy(q: Quota): Shp2Strategy {
     backupMode: num(q, 'pd303_mc.LoadStrategyCfg.backupMode'),
     overloadMode: num(q, 'pd303_mc.LoadStrategyCfg.overloadMode'),
     smartBackupMode: num(q, 'pd303_mc.smartBackupMode') ?? num(q, 'smartBackupMode'),
-    backupReserveSoc: num(q, 'pd303_mc.backupReserveSoc') ?? num(q, 'backupReserveSoc'),
+    // MUST decode the SAME reserve the floor alarm defends with. The alarm
+    // (alerts.ts), grid-backstop (gridState.ts), the HA backup_reserve_percent
+    // sensor and analytics all read the top-level projection.backupReserveSoc,
+    // which is the FLAT `backupReserveSoc` key only (see projectShp2 below). Keep
+    // this strategy-tile field decoded identically so the Strategy page can never
+    // show a reserve different from the one actually protecting the home — do NOT
+    // re-introduce a pd303_mc.* preference here without changing the alarm too.
+    backupReserveSoc: num(q, 'backupReserveSoc'),
     backupReserveEnabled: num(q, 'pd303_mc.backupReserveEnable') === 1,
     solarBackupReserveSoc: num(q, 'pd303_mc.solarBackupReserveSoc'),
     timeTask,

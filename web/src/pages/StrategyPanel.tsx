@@ -6,7 +6,10 @@ import { fmtPct, fmtW } from '../format';
  * charge schedule. Both are read-only — this dashboard never writes config.
  */
 export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnapshot> }) {
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2');
+  // Require online: a cloud-offline SHP2 carries STALE strategy config, and this
+  // card presents it as authoritative ("…needs the Smart Home Panel online"). An
+  // offline SHP2 must fall through to the not-available message.
+  const shp2 = Object.values(devices).find((d) => d.online && d.projection?.kind === 'shp2');
   const p = shp2?.projection?.kind === 'shp2' ? (shp2.projection as Shp2Projection) : null;
 
   if (!p) {
@@ -14,7 +17,13 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
   }
   const s = p.strategy;
 
-  // Rank paired circuits by load-shed priority (lower number = higher priority = shed last)
+  // Rank paired circuits by SHP2 native loadPriority. ASCENDING loadPriority =
+  // most-protected (shed LAST, kept powered longest); the HIGHEST number sheds
+  // FIRST. Verified empirically against live data: Pool Pump — the least-essential
+  // load and currently SHP2-disabled — is loadPriority 25, a subpanel is 1. This is
+  // the OPPOSITE polarity of server/src/loadShedRegistry.ts's internal HA shed-list
+  // convention (priority 1 = shed-FIRST). They are DIFFERENT priority systems — do
+  // NOT flip this sort to "match" loadShedRegistry; the direction here is correct.
   const ranked = [...p.pairedCircuits]
     .filter((c) => c.loadPriority != null)
     .sort((a, b) => (a.loadPriority ?? 999) - (b.loadPriority ?? 999));
@@ -32,14 +41,20 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Tile label="Mid-priority floor" value={fmtPct(s.midPriorityDischargeFloorSoc)} sub="mid loads cut at this SoC" />
-          <Tile label="Backup reserve" value={fmtPct(s.backupReserveSoc)} sub={s.backupReserveEnabled ? 'reserve enabled' : 'reserve disabled'} />
+          {/* Read the canonical top-level projection reserve — the SAME field the
+              floor alarm, grid-backstop and HA backup_reserve_percent sensor defend
+              with — NOT s.backupReserveSoc, so the tile can never show a reserve
+              different from the one actually protecting the home. */}
+          <Tile label="Backup reserve" value={fmtPct(p.backupReserveSoc)} sub={s.backupReserveEnabled ? 'reserve enabled' : 'reserve disabled'} />
           <Tile label="Solar reserve" value={fmtPct(s.solarBackupReserveSoc)} sub="target SoC on solar" />
-          <Tile label="Smart backup mode" value={String(s.smartBackupMode ?? '—')} sub={`backup ${s.backupMode ?? '—'} · overload ${s.overloadMode ?? '—'}`} />
+          {/* Raw SHP2 mode codes — exact EcoFlow enum semantics are unconfirmed, so
+              present them honestly as codes rather than fabricate labels. */}
+          <Tile label="Smart backup (mode code)" value={String(s.smartBackupMode ?? '—')} sub={`raw SHP2 codes · backup ${s.backupMode ?? '—'} · overload ${s.overloadMode ?? '—'}`} />
         </div>
         {!s.loadShedEnabled && s.loadShedConfigured && (
           <div className="text-[11px] text-muted mt-3 leading-relaxed">
             Priorities below are configured but the automatic load-shed strategy is currently switched off in the SHP2.
-            They define the intended shed order when enabled — lowest-ranked circuits drop first as the battery depletes.
+            They define the intended shed order when enabled — the highest-numbered circuits drop first as the battery depletes.
           </div>
         )}
       </div>
@@ -82,14 +97,20 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
               <Tile label="Charge target" value={fmtPct(s.timeTask.chargeCeilingSoc)} sub={`floor ${fmtPct(s.timeTask.chargeFloorSoc)}`} />
               <Tile label="Charge power" value={fmtW(s.timeTask.chargeWatts)} />
             </div>
-            <DayTimeline windows={s.timeTask.windows} />
-            <div className="text-[11px] text-muted mt-2">
-              {s.timeTask.windows.length === 0
-                ? 'No active window in the schedule bitmap.'
-                : `Active window${s.timeTask.windows.length > 1 ? 's' : ''}: ` +
-                  s.timeTask.windows.map((w) => `${fmtClock(w.startMinute)}–${fmtClock(w.endMinute)}`).join(', ') +
-                  ` · ${s.timeTask.slotMinutes}-min resolution`}
-              {!s.timeTask.isEnabled && ' · task currently disabled, so this window is not being acted on.'}
+            {/* The time-range gate (rangeEnabled) governs whether the bitmap windows
+                are operative at all. When off, the windows are NOT being acted on
+                regardless of isEnabled — de-emphasize them and say so. */}
+            <div className={s.timeTask.rangeEnabled ? '' : 'opacity-50'}>
+              <DayTimeline windows={s.timeTask.windows} />
+              <div className="text-[11px] text-muted mt-2">
+                {s.timeTask.windows.length === 0
+                  ? 'No active window in the schedule bitmap.'
+                  : `${s.timeTask.rangeEnabled ? 'Active' : 'Configured'} window${s.timeTask.windows.length > 1 ? 's' : ''}: ` +
+                    s.timeTask.windows.map((w) => `${fmtClock(w.startMinute)}–${fmtClock(w.endMinute)}`).join(', ') +
+                    ` · ${s.timeTask.slotMinutes}-min resolution`}
+                {!s.timeTask.rangeEnabled && ' · time-range gate disabled, so these windows are not active.'}
+                {s.timeTask.rangeEnabled && !s.timeTask.isEnabled && ' · task currently disabled, so this window is not being acted on.'}
+              </div>
             </div>
           </>
         )}
@@ -112,17 +133,27 @@ function PriorityRow({
   const tier = frac < 0.34 ? 'essential' : frac < 0.67 ? 'standard' : 'first to shed';
   const tierColor = frac < 0.34 ? 'text-ok' : frac < 0.67 ? 'text-amber-700' : 'text-warn';
   const active = (circuit.watts ?? 0) > 1;
+  // The SHP2 can have a circuit disabled (loadIsEnable === false, e.g. Pool Pump
+  // today). Keep it in the ranked list but clearly mark it — it is NOT an active
+  // shed participant despite carrying a loadPriority. Mirrors the telnet screen.
+  const disabled = circuit.loadIsEnable === false;
   return (
-    <div className="flex items-center gap-3 bg-panel2/50 border border-line rounded-lg p-2">
+    <div className={`flex items-center gap-3 bg-panel2/50 border border-line rounded-lg p-2 ${disabled ? 'opacity-50' : ''}`}>
       <div className={`text-lg font-bold tabular-nums w-8 text-center ${tierColor}`}>
         {rank ?? '—'}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium truncate">{circuit.name}</div>
+        <div className="text-sm font-medium truncate flex items-center gap-2">
+          <span className={disabled ? 'line-through' : ''}>{circuit.name}</span>
+          {disabled && (
+            <span className="badge badge-muted text-[9px] uppercase tracking-wider shrink-0">disabled</span>
+          )}
+        </div>
         <div className="text-[10px] text-muted">
           {circuit.isSplitPhase ? `ch${circuit.primaryCh}+${circuit.secondaryCh} · 240V` : `ch${circuit.primaryCh}`}
           {' · '}{circuit.breakerAmps ?? '—'}A
           {' · raw priority '}{circuit.loadPriority ?? '—'}
+          {disabled && ' · turned off in the SHP2'}
         </div>
       </div>
       <div className="text-right">

@@ -3,6 +3,19 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.47.0 — 2026-06-21
+
+**Strategy page accuracy audit — 7 fixes (3 med, 4 low), with the shed-order direction verified against live data.** A multi-agent audit traced every Strategy tile/decode (reserve SoCs, circuit shed-order, TOU charge schedule) to source and recomputed against the live SHP2; each finding was adversarially verified.
+
+- **[MED] 'Backup reserve' tile now reads the same field the alarm acts on.** The tile read `strategy.backupReserveSoc` (decoded `pd303_mc.backupReserveSoc ?? backupReserveSoc`, pd303_mc-preferred), while the grid-aware floor alarm, grid-backstop, and the HA `backup_reserve_percent` sensor all read the top-level `projection.backupReserveSoc` (flat key only). They agree today (10/10) but could silently diverge. Fixed both ways: the tile now reads `p.backupReserveSoc` (the canonical field), and the server strategy decode is made identical to the projection decode so the displayed reserve can never disagree with the reserve defending the home. +4 server tests pin it.
+- **[MED] 'SHP2 not available' gate is now online-aware.** It found the SHP2 by `kind==='shp2'` without checking `online`, so a cloud-offline SHP2 rendered stale config as authoritative (despite the card saying it "needs the Smart Home Panel online"). It now requires `d.online`.
+- **[MED] Shed-order direction verified + pinned (no behavior change).** The page sorts circuits ascending by `loadPriority` and captions "#1 = kept longest; higher numbers shed first" — which contradicts the internal `loadShedRegistry` ("1 = shed first"). Verified empirically against the live SHP2: the **Pool Pump** (canonical least-essential, and currently SHP2-disabled) carries the **highest** `loadPriority` (25), a subpanel carries 1 — so ascending = most-protected/shed-last is **correct**. Pinned with comments at the sort and the projection citing the evidence and that the SHP2's native convention is the *opposite* of the internal HA shed-list (different systems — don't unify).
+- **[LOW] Disabled circuits are now marked.** A circuit with `loadIsEnable=false` (live: Pool Pump) was ranked and tier-colored as an active shed participant. It's now dimmed/struck with a muted "disabled · turned off in the SHP2" chip (kept in the list, clearly marked).
+- **[LOW] TOU time-range gate respected.** The charge-schedule windows were shown as operative even when `rangeEnabled` was off; the timeline is now dimmed and labelled "Configured" (not "Active") with a "time-range gate disabled" note when the gate is off.
+- **[LOW] TOU bitmap decode no longer truncates multi-byte entries.** `decodeTimeScale` read only the first byte of each base64 entry; it now iterates every byte (MSB-first order preserved). Confirmed byte-identical on today's live bitmap (all entries are single-byte) — the fix only adds coverage for hypothetical multi-byte entries.
+- **[LOW] SHP2 mode enums shown honestly as raw codes.** Smart/backup/overload modes (live 2/0/0) printed as bare integers; with no authoritative EcoFlow enum semantics in the repo, the tile is relabelled "Smart backup (mode code)" with a "raw SHP2 codes" caption rather than fabricating labels.
+- Server suite 697 → 701; web build clean. Shed-order direction + reserve agreement were recomputed against the live SHP2.
+
 ## 0.46.0 — 2026-06-21
 
 **Dashboard accuracy audit — 7 fixes (3 med, 4 low).** A multi-agent audit traced every dashboard tile/number display → API → server → raw device data and recomputed each against the live add-on; every finding was adversarially verified before inclusion.
