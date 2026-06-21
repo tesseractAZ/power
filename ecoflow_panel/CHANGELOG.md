@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.49.0 — 2026-06-21
+
+**Retire the "EcoFlow zombie" framing — describe cloud-offline honestly.** The offline-device alert appended (for any device offline >30 min) *"likely in the EcoFlow zombie state — connected to LAN but MQTT TCP session wedged."* That's an **unverifiable inference stated as fact** — the add-on can't see the LAN or the MQTT socket; all it actually knows is that EcoFlow Cloud reports the device offline (it lost its cloud/enhanced connection). On a genuine home core that simply dropped its cloud link (Core 1), this reads as a scarier, specific fault than what's known. All user-facing "zombie" references are reframed to honest "lost its EcoFlow cloud (enhanced) connection" / "cloud-offline" language, **keeping** the actionable power-cycle remedy without asserting the LAN/MQTT diagnosis:
+- the offline-alert action hint (`alerts.ts`),
+- the repair-feed card (`repairIssues.ts`; its id `zombie-*` → `cloud-offline-*`),
+- the "Refresh cloud presence" button help text (`RefreshCloudButton.tsx`),
+- `DOCS.md` + `README.md` prose,
+- and internal code comments (`shp2Membership.ts`, `analytics.ts`, `index.ts`, `commands.ts`).
+
+No alert **severity, gating, annunciation, or alarm behavior changed** — wording + one repair-card id rename only. The spare-core offline gate (Cores 4/5) is untouched. Server suite 702 pass; web build clean. (The historical CHANGELOG entries that used the old term are left as-is.)
+
 ## 0.48.0 — 2026-06-21
 
 **Deferred energy follow-ups — make the v0.45.0 lifetime fix self-heal, + a home-grid power sensor.**
