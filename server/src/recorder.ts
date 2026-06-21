@@ -167,6 +167,13 @@ export interface Recorder {
   rollupLifetime: () => void;
   /** Snapshot of every lifetime counter (fleet + per-circuit). Keys are the metric_key strings. */
   getLifetimeTotals: () => Record<string, LifetimeTotals>;
+  /** v0.40.3 — every persisted lifetime metric_key from the `lifetime_totals` table,
+   *  independent of the current snapshot. Unlike getLifetimeTotals (whose key set is
+   *  snapshot-gated via allLifetimeKeys → no per-circuit keys until an SHP2 projection is
+   *  fetched), this returns the persisted keys directly, so the MQTT state payload can emit
+   *  per-circuit lifetime keys at startup — before the first poll populates the snapshot —
+   *  matching the retained HA per-circuit sensors from the prior run. */
+  listLifetimeKeys: () => string[];
 }
 
 export function createRecorder(store: SnapshotStore, log: (m: string) => void): Recorder {
@@ -498,6 +505,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     `INSERT INTO lifetime_totals (metric_key, wh, last_integrated_ts) VALUES (?, ?, ?)
      ON CONFLICT(metric_key) DO UPDATE SET wh = excluded.wh, last_integrated_ts = excluded.last_integrated_ts`,
   );
+  // v0.40.3 — persisted lifetime keys, snapshot-independent (see Recorder.listLifetimeKeys).
+  const lifetimeKeysStmt = db.prepare(`SELECT metric_key FROM lifetime_totals`);
+  const listLifetimeKeys = (): string[] =>
+    (lifetimeKeysStmt.all() as Array<{ metric_key: string }>).map((r) => r.metric_key);
   // Watt-integrated metrics: we sum these across all (sn,metric) pairs in
   // the current snapshot. Battery in/out comes from BMS counters directly
   // so it's NOT in this list (handled by computeBmsBatteryTotals).
@@ -1004,5 +1015,6 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     },
     rollupLifetime,
     getLifetimeTotals,
+    listLifetimeKeys,
   };
 }
