@@ -526,7 +526,7 @@ actions are triggered.
 
 **Repair issues feed.** `/api/repair-issues` returns a curated list of
 actionable maintenance items (panel wash, peer-outlier pack, MPPT
-drift, zombie device). Each has stable id, severity, summary, ordered
+drift, cloud-offline device). Each has stable id, severity, summary, ordered
 fix-steps. Build a Markdown card:
 
 ```yaml

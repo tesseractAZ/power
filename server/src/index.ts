@@ -773,7 +773,7 @@ app.get('/api/alert-telemetry', async (req, reply) =>
  * reboot isn't exposed in the public IoT API. The cheapest documented
  * action that round-trips through EcoFlow's cloud is a no-op write
  * (re-send the current backupReserveSoc), which is enough to un-stick
- * the "zombie online" state the reboot was originally meant to address.
+ * the cloud-offline (online-on-LAN-but-cloud-says-offline) state the reboot was originally meant to address.
  * Every write is rate-limited + audit-logged.
  */
 app.post<{ Params: { sn: string } }>('/api/device/refresh-cloud/:sn', { preHandler: requireWriteAuth }, async (req, reply) => {

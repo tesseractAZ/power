@@ -75,10 +75,10 @@ function persistFirstSeen(): void {
 
 // v0.10.4 — known OFFLINE BENCH SPARES (Core4, Core5) are intentionally kept
 // powered down, so their EcoFlow-offline state is expected — not actionable.
-// Suppress zombie-offline repair cards for these SNs to stop false-positive
+// Suppress cloud-offline repair cards for these SNs to stop false-positive
 // "power-cycle / reseat Ethernet" warnings.
 // v0.16.4 — the spare-SN allowlist now lives in shp2Membership.ts as the single
-// source of truth (shared with the connectivity-alert zombie gate in alerts.ts).
+// source of truth (shared with the connectivity-alert cloud-offline gate in alerts.ts).
 
 function track(id: string, now: number): number {
   let ts = firstSeenById.get(id);
@@ -103,17 +103,17 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
   const now = Date.now();
   const out: RepairIssue[] = [];
 
-  // EcoFlow-zombie devices (cloud says offline) — actionable as power-cycle.
+  // Cloud-offline devices (EcoFlow Cloud says offline) — actionable as a reconnect/power-cycle.
   for (const d of Object.values(ctx.devices)) {
     if (!d.online) {
       // v0.10.4 — skip intentionally-offline bench spares (Core4, Core5).
       if (SPARE_DPU_SNS.has(d.sn)) continue;
-      const id = `zombie-${d.sn}`;
+      const id = `cloud-offline-${d.sn}`;
       out.push({
         id,
         severity: 'warning',
         title: `${d.deviceName} marked offline by EcoFlow`,
-        summary: `${d.deviceName} (${d.sn}) is flagged offline by EcoFlow Cloud. If the device's network adapter shows online on your router, this is the "EcoFlow zombie" state — MQTT TCP session wedged.`,
+        summary: `${d.deviceName} (${d.sn}) is flagged offline by EcoFlow Cloud — it has lost its cloud (enhanced) connection. If the device still shows online on your router, a network/MQTT session reconnect or a power-cycle clears it.`,
         fixSteps: [
           `Confirm ${d.deviceName} is physically powered on.`,
           `On your router, verify the device's IP is currently active.`,

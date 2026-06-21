@@ -5,7 +5,7 @@ import { SPARE_DPU_SNS } from '../src/shp2Membership.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ===================================================================
- * v0.16.4 — Zombie-alert gate for designated bench spares.
+ * v0.16.4 — cloud-offline alert gate for designated bench spares.
  *
  * Cores 4 + 5 are spares kept powered down and NOT wired into the SHP2,
  * so their EcoFlow-Cloud "offline" / stale-telemetry state is an expected

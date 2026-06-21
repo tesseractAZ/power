@@ -5290,7 +5290,7 @@ export function computeCarbonReport(
     lifetimeMilesNotDriven: Math.round(lifetimeKg / KG_CO2_PER_MILE),
   };
   // v0.15.11 — do NOT poison-cache zeros. When the snapshot is transiently empty
-  // (no DPUs/SHP2 — e.g. a Core in the EcoFlow "zombie" offline state) every
+  // (no DPUs/SHP2 — e.g. a Core in the EcoFlow cloud-offline state) every
   // integral sums to 0; caching that serves 0 for the full TTL even after data
   // recovers. Match the sibling engines (selfConsumption/RTE/degradation): only
   // cache a device-present result, otherwise return the (uncached) zero so the
@@ -5449,7 +5449,7 @@ export function computeTariffReport(
     todaySolarLoadValueDollars: round2(todayTally.loadValue),
   };
   // v0.15.11 — don't poison-cache zeros on a transient empty snapshot (Core in
-  // EcoFlow "zombie" state → no DPUs/SHP2 → every $ integral is 0). Match the
+  // EcoFlow cloud-offline state → no DPUs/SHP2 → every $ integral is 0). Match the
   // sibling engines: only cache a device-present result.
   // v0.15.13 — `&&`, not `||`: tariff needs PV (DPUs) and load (SHP2); a
   // boot-partial snapshot with only one of them computes a misleading figure

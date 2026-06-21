@@ -265,7 +265,7 @@ export function computeAlerts(
       const ageMin = lastDataAt > 0 ? (now - lastDataAt) / 60_000 : Infinity;
       const hint =
         ageMin > 30
-          ? ' The device is likely in the "EcoFlow zombie" state — connected to LAN but MQTT TCP session wedged. Power-cycle the device to force a clean reconnect.'
+          ? ' No telemetry for over 30 minutes — the device has lost its EcoFlow cloud (enhanced) connection. It usually recovers once the cloud session re-establishes; if it stays offline, a power-cycle forces a clean reconnect.'
           : ageMin > 5
             ? ' Data is stale but recent — the cloud session may catch up on its own. Wait a few minutes; if it persists, power-cycle.'
             : ' Just dropped — likely a brief blip. Will re-evaluate.';

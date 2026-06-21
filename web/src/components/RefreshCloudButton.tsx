@@ -9,7 +9,7 @@ import { apiUrl } from '../api';
  * What it actually does: POSTs a documented no-op write that re-sends
  * the panel's CURRENT `backupReserveSoc` value back to itself. The
  * panel acknowledges the write through EcoFlow's cloud, which un-sticks
- * the "online on LAN but cloud says offline" zombie state that was the
+ * the "online on LAN but cloud says offline" lost-cloud state that was the
  * original motivation for a reboot button.
  *
  * Safe to use at any time — no device state changes, no service
@@ -144,7 +144,7 @@ export function RefreshCloudButton({ sn, deviceLabel = 'SHP2' }: { sn: string; d
             </p>
             <p className="text-xs text-muted leading-relaxed">
               Use when the dashboard or the EcoFlow app says the panel is offline but it's actually
-              working on your LAN ("EcoFlow zombie" state). The earlier "Reboot SHP2" button was
+              working on your LAN (it has lost its EcoFlow cloud connection). The earlier "Reboot SHP2" button was
               removed in v0.9.10 — reboot isn't in EcoFlow's public IoT API. Audit-logged.
             </p>
             <div className="flex justify-end gap-2 mt-4">

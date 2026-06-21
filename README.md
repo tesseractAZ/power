@@ -239,7 +239,7 @@ build pipeline (1m 30s end-to-end), 341-test CI gate that blocks bad
 releases, PWA-installable web UI with route-level code splitting
 (60 kB initial JS), persistent lifetime energy accumulator that
 survives recorder pruning + restarts, telnet TUI for terminal monitoring,
-per-SN connectivity logging, EcoFlow-zombie detection with actionable
+per-SN connectivity logging, EcoFlow cloud-offline detection with actionable
 fix steps in offline alerts.
 
 **HACS Lovelace cards (v0.9.50–v0.9.55)** — 9 Lit-based cards (fleet,
@@ -300,8 +300,8 @@ generate:
   pack-failure dataset, which only accumulates as deployments age and
   packs hit EOL. Shipping infrastructure (feature engineering, API
   shape, drop-in replacement target) is already in place.
-- **LAN-direct EcoFlow protocol** — eliminates the "EcoFlow Cloud
-  zombie" failure mode by reading telemetry from the SHP2 / DPUs
+- **LAN-direct EcoFlow protocol** — eliminates the EcoFlow
+  cloud-offline failure mode by reading telemetry from the SHP2 / DPUs
   directly over the local network. Multi-week reverse engineering on
   the wire format.
 - **Multi-site federation** — anonymized fleet comparison across

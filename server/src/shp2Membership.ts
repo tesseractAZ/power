@@ -87,7 +87,7 @@ export function isShp2Connected(sn: string, connected: Set<string>): boolean {
  * repairIssues.ts.
  *
  * Why an explicit SN allowlist (not the dynamic isConnected membership) is the
- * SAFETY FLOOR for the zombie gate: a genuine home core (1/2/3) — even one that
+ * SAFETY FLOOR for the cloud-offline gate: a genuine home core (1/2/3) — even one that
  * is faulted or unplugged and has therefore dropped out of the SHP2's
  * `isConnected` sources — must NEVER have its real offline alarm muted. Because
  * a home core's SN is never in this set, it can never be misclassified as a
@@ -120,7 +120,7 @@ export const SPARE_DPU_SNS: ReadonlySet<string> = new Set([
  * EcoFlow `/device/list` session — so `dpuStale` is a best-effort hint, not an
  * authoritative real-time cloud-presence signal), and is not a designated bench spare
  * (whose offline state is an EXPECTED steady state, never flagged — mirrors the
- * zombie-alert gating).
+ * cloud-offline alert gating).
  */
 export function isSourceDpuStale(
   source: { isConnected: boolean; sn: string | null },

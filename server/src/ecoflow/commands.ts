@@ -99,8 +99,8 @@ async function runCommand(action: string, req: CommandRequest): Promise<CommandR
  * all return error 8524 "invalid parameter." Reboot only exists via the
  * mobile app's private MQTT protobuf channel (cmdFunc=12).
  *
- * What we ARE able to do — and what actually solves the original "EcoFlow
- * zombie" problem (cloud says offline, LAN says online) — is a documented
+ * What we ARE able to do — and what actually solves the original
+ * cloud-offline (cloud says offline, LAN says online) problem — is a documented
  * **no-op write** that forces a round-trip through EcoFlow's cloud,
  * causing it to refresh its presence state for the device. The cheapest
  * such write is re-sending the current `backupReserveSoc` value: no state
