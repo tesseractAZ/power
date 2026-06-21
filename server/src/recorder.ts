@@ -311,6 +311,43 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}); writes resumed`);
   }
 
+  // v0.50.0 — persist the per-key emit high-water across restarts. The micro-dip
+  // clamp (clampLifetimeDip) keys on lifetimeEmitHighWater, an in-memory Map that
+  // previously reset every process restart. With no baseline after a restart the
+  // FIRST emit re-derives the live trapezoid a few Wh below what HA last recorded
+  // pre-restart, so HA's total_increasing sensors logged "state is not strictly
+  // increasing" (e.g. circuit_8_energy 269.538 → 269.53). This sidecar is the
+  // emit high-water analogue of the persisted battery floor: it restores the
+  // clamp's baseline so per-circuit (and all watt-integrated) lifetime sensors
+  // never emit below HA's last value. It is ADVISORY — a missing/corrupt file
+  // yields an empty map (exactly the pre-v0.50.0 behavior), so it can only help,
+  // never regress, and must never block startup. It stores ONLY a flat
+  // { [key]: Wh } of high-water values; no battery / floor / value semantics
+  // change (the battery counters clamp off bmsChargeFloor/bmsDischargeFloor, NOT
+  // this map). Mirrors the dirname(dbPath) sidecar pattern of the flag/gaps files.
+  const emitHighWaterPath = resolve(dirname(dbPath), '.emit-highwater.json');
+  const loadEmitHighWater = (): Map<string, number> => {
+    try {
+      const obj = JSON.parse(readFileSync(emitHighWaterPath, 'utf8'));
+      const m = new Map<string, number>();
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        for (const [k, v] of Object.entries(obj)) {
+          if (typeof v === 'number' && Number.isFinite(v)) m.set(k, v);
+        }
+      }
+      return m;
+    } catch {
+      return new Map<string, number>(); // missing/corrupt → empty (pre-v0.50.0 behavior)
+    }
+  };
+  const persistEmitHighWater = () => {
+    try {
+      writeFileSync(emitHighWaterPath, JSON.stringify(Object.fromEntries(lifetimeEmitHighWater)), { mode: 0o644 });
+    } catch (e: any) {
+      log(`recorder: failed to persist emit high-water (${e?.message ?? e})`);
+    }
+  };
+
   function record(samples: MetricSample[]) {
     if (samples.length === 0) return;
     const now = Date.now();
@@ -1146,6 +1183,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     bmsClampActive = inDeficit;
     writeLifetime('fleet_battery_charge_wh', bmsChargeFloor, now);
     writeLifetime('fleet_battery_discharge_wh', bmsDischargeFloor, now);
+    // v0.50.0 — piggyback the emit high-water persist on the 5-min rollup cadence
+    // (NOT on the hot getLifetimeTotals path). Advisory: a failed write is logged
+    // and ignored — the in-memory map stays authoritative for this process.
+    persistEmitHighWater();
   };
 
   // Roll up every 5 min — fast enough that HA sees fresh totals each poll,
@@ -1163,7 +1204,11 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   }, 30_000).unref();
 
   // v0.15.14 — last emitted total per key, for the jitter clamp below.
-  const lifetimeEmitHighWater = new Map<string, number>();
+  // v0.50.0 — seeded from the persisted sidecar so the clamp keeps its baseline
+  // across restarts (load is try/catch → empty on missing/corrupt). Seeded HERE,
+  // before any getLifetimeTotals call can emit, so the very first post-restart
+  // emit clamps against HA's last-recorded value rather than starting blind.
+  const lifetimeEmitHighWater = loadEmitHighWater();
 
   /** Snapshot of every counter (fleet + per-circuit), including live integral past the watermark. */
   const getLifetimeTotals = (): Record<string, LifetimeTotals> => {
@@ -1345,7 +1390,11 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     close: () => {
       clearInterval(lifetimeTimer);
       // Final rollup so we don't lose the trailing minute of energy on shutdown.
+      // rollupLifetime persists the emit high-water itself; if it throws before
+      // reaching that, persist once more directly so the sidecar reflects the
+      // last emitted values on a graceful restart.
       try { rollupLifetime(); } catch { /* ignore on shutdown */ }
+      try { persistEmitHighWater(); } catch { /* ignore on shutdown */ }
       db.close();
     },
     rollupLifetime,
