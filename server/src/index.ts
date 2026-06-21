@@ -622,6 +622,19 @@ app.get('/api/lifetime-energy', async (req, reply) => {
   }, 15);
 });
 
+// v0.45.0 — read-only diagnostics for the lifetime battery counters. Surfaces
+// the unclamped charge/discharge floors, the emitted totals (persisted+pending
+// split), the informational deficit the removed discharge≤charge clamp would
+// have shaved, the per-pack filter/held breakdown, and which SHP2 members are
+// being carried while offline. STRICTLY READ-ONLY (zero writes / zero mutation
+// of the emitted counters) — see recorder.batteryLifetimeDebug.
+app.get('/api/debug/battery-lifetime', async (req, reply) => {
+  return cached(req, reply, {
+    generated_at: Date.now(),
+    ...recorder.batteryLifetimeDebug(),
+  }, 15);
+});
+
 // v0.30.0 — telemetry-gap markers: a durable, queryable record of any home-feed
 // blackout the recorder detected (see recorder.detectTelemetryGap). A silent
 // upstream stall now shows up as an incident here instead of only being

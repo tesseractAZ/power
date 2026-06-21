@@ -174,6 +174,40 @@ export interface Recorder {
    *  per-circuit lifetime keys at startup — before the first poll populates the snapshot —
    *  matching the retained HA per-circuit sensors from the prior run. */
   listLifetimeKeys: () => string[];
+  /** v0.45.0 — READ-ONLY observability for the lifetime battery counters. Returns the
+   *  unclamped charge/discharge floors, the emitted totals (persisted + pending split),
+   *  the informational deficit (what the removed clamp would have shaved), the per-pack
+   *  breakdown (filter membership + held-from-offline carry), and which SHP2 members are
+   *  being carried while their packs are absent from the current snapshot. Performs ZERO
+   *  writes and ZERO mutation of the emitted counters. Surfaced at /api/debug/battery-lifetime. */
+  batteryLifetimeDebug: () => BatteryLifetimeDebug;
+}
+
+/** v0.45.0 — shape of recorder.batteryLifetimeDebug() (read-only diagnostics). */
+export interface BatteryLifetimeDebug {
+  rawChargeFloorWh: number;
+  rawDischargeFloorWh: number;
+  emittedChargeWh: number;
+  emittedDischargeWh: number;
+  charge: { persistedWh: number; pendingWh: number };
+  discharge: { persistedWh: number; pendingWh: number };
+  /** max(0, rawDischargeFloor − rawChargeFloor): what the removed clamp would have shaved. */
+  deficitWh: number;
+  packs: Array<{
+    sn: string;
+    num: number;
+    present: boolean;
+    passesFilter: boolean;
+    baselineChgMah: number | null;
+    baselineDsgMah: number | null;
+    accuChgMah: number | null;
+    accuDsgMah: number | null;
+    chgWh: number;
+    dsgWh: number;
+    heldFromLastKnown: boolean;
+  }>;
+  /** sourceSns members whose packs are absent this snapshot but carried via held last-known. */
+  offlineHeldMembers: string[];
 }
 
 export function createRecorder(store: SnapshotStore, log: (m: string) => void): Recorder {
@@ -642,37 +676,254 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     log(`recorder: v0.13.0 captured BMS baseline sn=${sn} pack=${packNum} baseChg=${base.chgMah.toFixed(0)}mAh baseDsg=${base.dsgMah.toFixed(0)}mAh`);
   };
 
-  const computeBmsBatteryTotals = (snap: FleetSnapshot): { chargeWh: number; dischargeWh: number } => {
-    let chargeWh = 0;
-    let dischargeWh = 0;
-    // v0.9.74 — only SHP2-connected packs count toward the home's
-    // lifetime battery in/out totals. A spare core's BMS counts up
-    // every time it's charged on the bench but that energy never
-    // reaches the home. Without this filter the HA Energy Dashboard
-    // "battery charged / discharged" tile was ~67% overstated for
-    // setups with spare cores.
+  // v0.45.0 — per-pack last-known home-relative Wh (charge/discharge deltas),
+  // held across an SHP2-connected pack's cloud-offline gap. When a core goes
+  // offline its packs leave the snapshot sum; without this the fleet BMS sum
+  // dropped below the monotone floor and BOTH counters froze (HA "Battery
+  // in/out today = 0 kWh"). We carry each connected pack's last good delta so
+  // one offline core can't drag the fleet sum down. Keyed `${sn}|${num}`.
+  //
+  // PERSISTED (pack_lastwh_<sn>_<num>_chg/_dsg, mirroring savePackBaseline) so
+  // a restart-while-offline — the operator's CURRENT condition (Core 1 offline)
+  // plus routine add-on restarts — does NOT re-freeze the counters. These keys
+  // are INTERNAL (like pack_base_*) and are excluded from the surfaced lifetime
+  // key sets (allLifetimeKeys / getLifetimeTotals).
+  const packLastWhKey = (sn: string, packNum: number, kind: 'chg' | 'dsg') =>
+    `pack_lastwh_${sn}_${packNum}_${kind}`;
+  const bmsLastPackWh: Map<string, { chgWh: number; dsgWh: number }> = new Map();
+  const loadPackLastWh = (sn: string, packNum: number): { chgWh: number; dsgWh: number } | undefined => {
+    const cacheKey = `${sn}|${packNum}`;
+    const cached = bmsLastPackWh.get(cacheKey);
+    if (cached) return cached;
+    const chg = readLifetime(packLastWhKey(sn, packNum, 'chg'));
+    const dsg = readLifetime(packLastWhKey(sn, packNum, 'dsg'));
+    // ts === 0 on both means nothing persisted yet for this pack.
+    if (chg.ts === 0 && dsg.ts === 0) return undefined;
+    const held = { chgWh: chg.wh, dsgWh: dsg.wh };
+    bmsLastPackWh.set(cacheKey, held);
+    return held;
+  };
+  const savePackLastWh = (sn: string, packNum: number, held: { chgWh: number; dsgWh: number }) => {
+    const now = Date.now();
+    writeLifetime(packLastWhKey(sn, packNum, 'chg'), held.chgWh, now);
+    writeLifetime(packLastWhKey(sn, packNum, 'dsg'), held.dsgWh, now);
+    bmsLastPackWh.set(`${sn}|${packNum}`, held);
+  };
+  // v0.45.0 — corrupt-read guard: a single rollup may never advance a pack's
+  // contribution by more than one full pack's capacity worth of Wh (a
+  // physically-impossible jump only a garbage BMS read could produce). Removing
+  // the old discharge≤charge invariant also removed its incidental protection
+  // against such a read permanently inflating the floor, so this caps it. Once-
+  // per-pack warn throttle keyed `${sn}|${num}` so a stuck read doesn't spew.
+  const FALLBACK_FULL_PACK_WH = 6200; // ~one DPU pack when fullCap is unavailable
+  const bmsCorruptWarned: Set<string> = new Set();
+
+  /**
+   * v0.45.0 — per-pack detail for one snapshot (the single source of truth for
+   * both the fleet sum and batteryLifetimeDebug). For EVERY pack on EVERY DPU we
+   * report whether it PASSES THE EXACT live-sum filter (`kind==='dpu'` AND
+   * sourceSns membership AND a captured baseline), its fresh baseline-subtracted
+   * delta (when it passes), and whether the contribution this snapshot came from
+   * a HELD last-known value (offline carry). A pack that fails the sourceSns
+   * filter (a spare core, the v0.9.74 exclusion) is NEVER carried and NEVER
+   * summed — `passesFilter:false`, contributes 0. `mutate:false` makes this safe
+   * for the read-only debug endpoint (no baseline capture, no held-value write).
+   */
+  const computeBmsBatteryDetail = (
+    snap: FleetSnapshot,
+    opts: { mutate: boolean },
+  ): {
+    chargeWh: number;
+    dischargeWh: number;
+    packs: Array<{
+      sn: string;
+      num: number;
+      present: boolean;
+      passesFilter: boolean;
+      baselineChgMah: number | null;
+      baselineDsgMah: number | null;
+      accuChgMah: number | null;
+      accuDsgMah: number | null;
+      chgWh: number;
+      dsgWh: number;
+      heldFromLastKnown: boolean;
+    }>;
+    offlineHeldMembers: string[];
+  } => {
+    // v0.9.74 — only SHP2-connected packs count toward the home's lifetime
+    // battery in/out totals. A spare core's BMS counts up every time it's
+    // charged on the bench but that energy never reaches the home. Without this
+    // filter the HA Energy Dashboard "battery charged / discharged" tile was
+    // ~67% overstated for setups with spare cores.
     const devices = Object.values(snap.devices);
     const shp2 = devices.find((d) => d.projection?.kind === 'shp2');
     const sourceSns = shp2
       ? new Set(((shp2.projection as Shp2Projection).sources ?? []).map((s) => s.sn).filter((s): s is string => !!s))
       : new Set<string>();
+    // v0.45.0 — "is this pack a home-fleet member?" uses the EXACT same predicate
+    // as the live sum: a DPU passing the sourceSns filter. The empty-set fallback
+    // (DPU-only setups / SHP2 not yet seen) matches the live sum's behavior. A
+    // pack that fails this is a spare — never held, never resurrected.
+    const isHomeMember = (sn: string) => sourceSns.size === 0 || sourceSns.has(sn);
+
+    const packs: Array<{
+      sn: string;
+      num: number;
+      present: boolean;
+      passesFilter: boolean;
+      baselineChgMah: number | null;
+      baselineDsgMah: number | null;
+      accuChgMah: number | null;
+      accuDsgMah: number | null;
+      chgWh: number;
+      dsgWh: number;
+      heldFromLastKnown: boolean;
+    }> = [];
+    // Keys passing the filter THIS snapshot (fresh delta path) — used to avoid
+    // double-counting them via the held-offline carry below.
+    const passedThisSnapshot = new Set<string>();
+    let chargeWh = 0;
+    let dischargeWh = 0;
+
     for (const d of devices) {
       if (d.projection?.kind !== 'dpu') continue;
-      if (sourceSns.size > 0 && !sourceSns.has(d.sn)) continue;
+      const member = isHomeMember(d.sn);
       for (const pk of (d.projection as DpuProjection).packs) {
-        // v0.13.0 — a newly-seen pack (install, pack-swap, hot-add)
-        // captures its own baseline lazily so its absolute factory
-        // offset never leaks into the home totals.
+        const cacheKey = `${d.sn}|${pk.num}`;
+        // v0.13.0 — a newly-seen pack (install, pack-swap, hot-add) captures its
+        // own baseline lazily so its absolute factory offset never leaks into
+        // the home totals. Only members capture a baseline (mirrors the live
+        // sum's filter; a spare must never seed home-fleet state).
         let base = loadPackBaseline(d.sn, pk.num);
-        if (!base && (pk.accuChgMah != null || pk.accuDsgMah != null)) {
+        if (!base && member && (pk.accuChgMah != null || pk.accuDsgMah != null)) {
           base = { chgMah: pk.accuChgMah ?? 0, dsgMah: pk.accuDsgMah ?? 0 };
-          savePackBaseline(d.sn, pk.num, base);
+          // Persist the baseline only on the mutating (rollup/live) path; the
+          // read-only debug path uses the just-derived value without writing.
+          if (opts.mutate) savePackBaseline(d.sn, pk.num, base);
         }
-        const { chgWh, dsgWh } = packDeltaWh(pk, base, PACK_MAH_TO_WH);
-        chargeWh += chgWh;
-        dischargeWh += dsgWh;
+        // The live-sum filter, applied identically here: DPU kind (already true)
+        // AND sourceSns membership AND non-null register AND a captured baseline.
+        const hasRegister = pk.accuChgMah != null || pk.accuDsgMah != null;
+        const passesFilter = member && hasRegister && !!base;
+        const fresh = passesFilter ? packDeltaWh(pk, base, PACK_MAH_TO_WH) : { chgWh: 0, dsgWh: 0 };
+
+        if (passesFilter) {
+          passedThisSnapshot.add(cacheKey);
+          // v0.45.0 corrupt-read guard: a single rollup may not advance a pack's
+          // contribution past its held value by more than one full pack capacity.
+          const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(d.sn, pk.num);
+          const capWh = (pk.fullCapMah != null ? pk.fullCapMah * PACK_MAH_TO_WH : FALLBACK_FULL_PACK_WH);
+          let useChg = fresh.chgWh;
+          let useDsg = fresh.dsgWh;
+          let suspect = false;
+          if (held) {
+            if (fresh.chgWh - held.chgWh > capWh || fresh.dsgWh - held.dsgWh > capWh) {
+              suspect = true;
+              useChg = held.chgWh;
+              useDsg = held.dsgWh;
+            }
+          }
+          if (suspect && opts.mutate && !bmsCorruptWarned.has(cacheKey)) {
+            bmsCorruptWarned.add(cacheKey);
+            log(`recorder: v0.45.0 WARN suspect BMS read sn=${d.sn} pack=${pk.num} — single-rollup jump exceeds one pack capacity (${capWh.toFixed(0)} Wh); holding previous (freshChg=${fresh.chgWh.toFixed(0)} heldChg=${held!.chgWh.toFixed(0)} freshDsg=${fresh.dsgWh.toFixed(0)} heldDsg=${held!.dsgWh.toFixed(0)} Wh)`);
+          } else if (!suspect) {
+            bmsCorruptWarned.delete(cacheKey);
+          }
+          // MONOTONE-HOLD: a lower reconnect register read never de-syncs the
+          // floor — store the max of held vs the (guard-applied) fresh value.
+          const newHeld = {
+            chgWh: Math.max(held?.chgWh ?? 0, useChg),
+            dsgWh: Math.max(held?.dsgWh ?? 0, useDsg),
+          };
+          // Mutating path persists + caches the advanced hold; read-only debug
+          // path leaves bmsLastPackWh untouched so it can never influence the
+          // next rollup's monotone-hold (strictly read-only).
+          if (opts.mutate) savePackLastWh(d.sn, pk.num, newHeld);
+          chargeWh += newHeld.chgWh;
+          dischargeWh += newHeld.dsgWh;
+          packs.push({
+            sn: d.sn,
+            num: pk.num,
+            present: true,
+            passesFilter: true,
+            baselineChgMah: base ? base.chgMah : null,
+            baselineDsgMah: base ? base.dsgMah : null,
+            accuChgMah: pk.accuChgMah,
+            accuDsgMah: pk.accuDsgMah,
+            chgWh: newHeld.chgWh,
+            dsgWh: newHeld.dsgWh,
+            heldFromLastKnown: false,
+          });
+        } else {
+          // Present in the snapshot but fails the filter (spare, or no baseline/
+          // register yet). Contributes nothing; reported for observability.
+          packs.push({
+            sn: d.sn,
+            num: pk.num,
+            present: true,
+            passesFilter: false,
+            baselineChgMah: base ? base.chgMah : null,
+            baselineDsgMah: base ? base.dsgMah : null,
+            accuChgMah: pk.accuChgMah,
+            accuDsgMah: pk.accuDsgMah,
+            chgWh: 0,
+            dsgWh: 0,
+            heldFromLastKnown: false,
+          });
+        }
       }
     }
+
+    // v0.45.0 — held-offline carry. Any pack we've previously held (in memory or
+    // persisted) whose pack is NOT passing the filter THIS snapshot contributes
+    // its HELD delta exactly once. This covers a member core going cloud-offline
+    // (its packs vanish from the snapshot). A pack failing the sourceSns filter
+    // this snapshot — e.g. a spare — must NEVER be carried; we only carry keys
+    // that aren't currently spare-excluded. Since a spare never enters
+    // bmsLastPackWh (only members are ever stored), the held set is members-only,
+    // so this is safe. We still re-confirm membership defensively.
+    const offlineHeldMembers: string[] = [];
+    const heldKeys = new Set<string>(bmsLastPackWh.keys());
+    // Also surface persisted-but-not-yet-loaded held keys (restart-while-offline):
+    // a member that was offline at boot has no snapshot row, so loadPackBaseline
+    // never ran for it — but its persisted pack_lastwh_* row must still carry.
+    for (const key of listLifetimeKeys()) {
+      const m = key.match(/^pack_lastwh_(.+)_(\d+)_chg$/);
+      if (!m) continue;
+      heldKeys.add(`${m[1]}|${Number(m[2])}`);
+    }
+    for (const cacheKey of heldKeys) {
+      if (passedThisSnapshot.has(cacheKey)) continue; // already summed via fresh path
+      const sep = cacheKey.lastIndexOf('|');
+      const sn = cacheKey.slice(0, sep);
+      const num = Number(cacheKey.slice(sep + 1));
+      // Never resurrect a spare: if the SHP2 currently excludes this SN, skip it.
+      if (!isHomeMember(sn)) continue;
+      const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(sn, num);
+      if (!held) continue;
+      chargeWh += held.chgWh;
+      dischargeWh += held.dsgWh;
+      offlineHeldMembers.push(cacheKey);
+      packs.push({
+        sn,
+        num,
+        present: false,
+        passesFilter: false,
+        baselineChgMah: bmsBaselines.get(cacheKey)?.chgMah ?? null,
+        baselineDsgMah: bmsBaselines.get(cacheKey)?.dsgMah ?? null,
+        accuChgMah: null,
+        accuDsgMah: null,
+        chgWh: held.chgWh,
+        dsgWh: held.dsgWh,
+        heldFromLastKnown: true,
+      });
+    }
+
+    return { chargeWh, dischargeWh, packs, offlineHeldMembers };
+  };
+
+  const computeBmsBatteryTotals = (snap: FleetSnapshot): { chargeWh: number; dischargeWh: number } => {
+    const { chargeWh, dischargeWh } = computeBmsBatteryDetail(snap, { mutate: true });
     return { chargeWh, dischargeWh };
   };
 
@@ -755,9 +1006,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // appear as a "battery emptied" event to HA's Energy Dashboard.
   let bmsChargeFloor = 0;
   let bmsDischargeFloor = 0;
-  // v0.13.0 — last-warned clamp state so identical clamps go silent (see the
-  // RTE guard in rollupLifetime). Starts false: the first clamp, if any,
-  // warns once; the WARN only re-fires after the clamp releases and re-trips.
+  // v0.45.0 — deficit-transition latch (formerly the clamp latch). The clamp is
+  // gone; this now only rate-limits the INFORMATIONAL "discharge exceeds charge"
+  // log in rollupLifetime to one line per transition into the (expected) deficit
+  // state. Starts false so the first deficit, if any, logs once.
   let bmsClampActive = false;
   // Seed the floors from whatever was last persisted (a fresh process must
   // not regress the persisted Wh number; HA reads that with state_class:
@@ -805,35 +1057,32 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     const bms = computeBmsBatteryTotals(snap);
     if (bms.chargeWh > bmsChargeFloor) bmsChargeFloor = bms.chargeWh;
     if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;
-    // v0.10.4 — enforce the physical invariant lifetime discharge ≤ lifetime
-    // charge before surfacing. The monotone floor-seeding can let discharge
-    // advance while charge stays pinned across reboots, producing an
-    // impossible RTE > 100% (e.g. 8027 Wh out vs 7980 Wh in). A battery can
-    // never deliver more than it stored, so clamp the surfaced discharge to
-    // the charge value. Floors stay intact (monotonicity preserved); we only
-    // clamp the written-out number and WARN so the data-quality issue stays
-    // visible without HA's Energy tiles contradicting themselves.
+    // v0.45.0 — REMOVED the discharge≤charge clamp. accuChgMah/accuDsgMah are
+    // COULOMB counters; over an OPEN window (v0.13.0 baseline → now) that ends
+    // at a LOWER SoC than baseline (the pool sits at ~30% now), cumulative
+    // discharge LEGITIMATELY exceeds cumulative charge. HA never requires in≥out
+    // — it ingests fleet_battery_charge_wh and fleet_battery_discharge_wh as two
+    // INDEPENDENT total_increasing sensors. The clamp protected no RTE sensor
+    // (RTE = analytics.computeRoundTripEfficiency, windowed, with its own ≤100%
+    // clamp). The old clamp pinned discharge to charge, freezing the true (~+45
+    // kWh higher) battery-out total. We now emit both monotone floors UNCLAMPED.
+    // The discharge floor steps up to its true value on the first post-deploy
+    // rollup — a one-time, intended, honest correction to HA's battery-out tile.
     //
-    // v0.13.0 — with per-pack baselines in place this clamp is now a
-    // last-resort guard, not the steady state. RATE-LIMIT its WARN to once
-    // per state transition (clamping↔not-clamping): the old code logged on
-    // every rollup, so a single stuck condition spewed 288 identical lines/
-    // day (926× across the audit window). We only emit when the clamp state
-    // actually changes.
-    let chargeOut = bmsChargeFloor;
-    let dischargeOut = bmsDischargeFloor;
-    const clamping = dischargeOut > chargeOut;
-    if (clamping) {
-      if (!bmsClampActive) {
-        log(`recorder: WARN clamping lifetime battery discharge ${dischargeOut.toFixed(0)} Wh to charge ${chargeOut.toFixed(0)} Wh (RTE > 100% is impossible; raw floors charge=${bmsChargeFloor.toFixed(0)} discharge=${bmsDischargeFloor.toFixed(0)})`);
-      }
-      dischargeOut = chargeOut;
-    } else if (bmsClampActive) {
-      log(`recorder: lifetime battery discharge ≤ charge again — clamp released (charge=${chargeOut.toFixed(0)} discharge=${dischargeOut.toFixed(0)} Wh)`);
+    // Informational (NOT a clamp): if discharge exceeds charge by a wide margin
+    // log it ONCE per transition into the deficit state, worded as the EXPECTED
+    // open-window deficit. bmsClampActive is reused purely as the transition
+    // latch to keep this to one line, not a per-rollup spew.
+    const deficitWh = bmsDischargeFloor - bmsChargeFloor;
+    const inDeficit = deficitWh > 1000;
+    if (inDeficit && !bmsClampActive) {
+      log(`recorder: v0.45.0 lifetime battery discharge exceeds charge by ${deficitWh.toFixed(0)} Wh — EXPECTED for an open accumulation window ending below the baseline SoC (NOT a fault, NOT clamped; the two HA total_increasing sensors are independent)`);
+    } else if (!inDeficit && bmsClampActive) {
+      log(`recorder: v0.45.0 lifetime battery discharge no longer exceeds charge by >1000 Wh (charge=${bmsChargeFloor.toFixed(0)} discharge=${bmsDischargeFloor.toFixed(0)} Wh)`);
     }
-    bmsClampActive = clamping;
-    writeLifetime('fleet_battery_charge_wh', chargeOut, now);
-    writeLifetime('fleet_battery_discharge_wh', dischargeOut, now);
+    bmsClampActive = inDeficit;
+    writeLifetime('fleet_battery_charge_wh', bmsChargeFloor, now);
+    writeLifetime('fleet_battery_discharge_wh', bmsDischargeFloor, now);
   };
 
   // Roll up every 5 min — fast enough that HA sees fresh totals each poll,
@@ -865,9 +1114,12 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       const watermark = prev.ts === 0 ? now : prev.ts;
       let pendingWh = 0;
       if (key === 'fleet_battery_charge_wh' || key === 'fleet_battery_discharge_wh') {
-        // BMS counters are already "live" — the persisted value reflects the
-        // most-recent rollup, and the current snapshot may show a slightly
-        // higher reading. Compare and use the max.
+        // v0.45.0 — each battery counter emits persistedWh + max(0, liveBmsWh −
+        // persisted), UNCLAMPED. The persisted value reflects the most-recent
+        // rollup; the current snapshot (with offline-held carry) may read a hair
+        // higher, so we add the live remainder. out > in is PHYSICAL for a
+        // net-discharged window (coulomb counters over an open window ending
+        // below baseline SoC) — the discharge counter is NOT pinned to charge.
         const bms = computeBmsBatteryTotals(snap);
         const liveBmsWh = key === 'fleet_battery_charge_wh' ? bms.chargeWh : bms.dischargeWh;
         const persisted = prev.wh;
@@ -895,29 +1147,47 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       lifetimeEmitHighWater.set(key, prev.wh + pendingWh);
       out[key] = { persistedWh: prev.wh, pendingWh, watermarkMs: watermark };
     }
-    // v0.27.0 — enforce RTE ≤ 100% on the EMITTED total, not just the persisted
-    // floor. rollupLifetime() clamps discharge≤charge on the persisted floor, but
-    // the loop above re-derives pendingWh independently from the RAW BMS reading
-    // (max(0, liveBmsWh − persisted)); the raw BMS discharge runs above the raw
-    // charge (factory bench-cycling skew), so discharge gets a live pending while
-    // charge gets 0 — re-surfacing an impossible discharge > charge (102.6% RTE)
-    // on HA's total_increasing tile even though the floor was clamped. Clamp the
-    // emitted discharge total DOWN to the emitted charge total; the persisted
-    // floor is untouched. charge is monotonic within a session (clampLifetimeDip),
-    // so the clamped discharge is too; the session high-water resets on restart,
-    // so the one-time downward correction of the previously-inflated value passes
-    // through (a single, intended HA reset to a physical value).
-    const chargeOut = out['fleet_battery_charge_wh'];
-    const dischargeOut = out['fleet_battery_discharge_wh'];
-    if (chargeOut && dischargeOut) {
-      const chargeTotal = chargeOut.persistedWh + chargeOut.pendingWh;
-      const dischargeTotal = dischargeOut.persistedWh + dischargeOut.pendingWh;
-      if (dischargeTotal > chargeTotal) {
-        dischargeOut.pendingWh = Math.max(0, chargeTotal - dischargeOut.persistedWh);
-        lifetimeEmitHighWater.set('fleet_battery_discharge_wh', dischargeOut.persistedWh + dischargeOut.pendingWh);
-      }
-    }
+    // v0.45.0 — REMOVED the emit-path discharge≤charge clamp. The two battery
+    // counters are surfaced independently (each = persistedWh + max(0, liveBmsWh
+    // − persisted)); out > in is physical for a net-discharged window and HA
+    // ingests them as two independent total_increasing sensors. The per-key
+    // micro-dip clamp (clampLifetimeDip) and per-key lifetimeEmitHighWater above
+    // are correct and retained — they protect each counter's own monotonicity
+    // without coupling discharge to charge.
     return out;
+  };
+
+  /**
+   * v0.45.0 — read-only diagnostics for the lifetime battery counters. Mirrors
+   * the math getLifetimeTotals uses for the two battery keys but writes NOTHING:
+   * computeBmsBatteryDetail({ mutate:false }) skips savePackBaseline /
+   * savePackLastWh and the corrupt-read warn, and we read the persisted floors
+   * via readLifetime without ever calling writeLifetime. The lifetime_totals
+   * table is byte/row-identical before and after this call.
+   */
+  const batteryLifetimeDebug = (): BatteryLifetimeDebug => {
+    const snap = store.get();
+    const detail = computeBmsBatteryDetail(snap, { mutate: false });
+    const chargePersisted = readLifetime('fleet_battery_charge_wh').wh;
+    const dischargePersisted = readLifetime('fleet_battery_discharge_wh').wh;
+    // Emitted = persisted + max(0, liveBms − persisted), matching getLifetimeTotals.
+    const chargePending = Math.max(0, detail.chargeWh - chargePersisted);
+    const dischargePending = Math.max(0, detail.dischargeWh - dischargePersisted);
+    // Raw unclamped floors: the in-memory floors advanced by rollups, lifted to
+    // the live reading if the snapshot currently reads higher (never persisted here).
+    const rawChargeFloorWh = Math.max(bmsChargeFloor, detail.chargeWh);
+    const rawDischargeFloorWh = Math.max(bmsDischargeFloor, detail.dischargeWh);
+    return {
+      rawChargeFloorWh,
+      rawDischargeFloorWh,
+      emittedChargeWh: chargePersisted + chargePending,
+      emittedDischargeWh: dischargePersisted + dischargePending,
+      charge: { persistedWh: chargePersisted, pendingWh: chargePending },
+      discharge: { persistedWh: dischargePersisted, pendingWh: dischargePending },
+      deficitWh: Math.max(0, rawDischargeFloorWh - rawChargeFloorWh),
+      packs: detail.packs,
+      offlineHeldMembers: detail.offlineHeldMembers,
+    };
   };
 
   // ─── Weather irradiance persistence (v0.13.1) ───────────────────────────
@@ -1018,5 +1288,6 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     rollupLifetime,
     getLifetimeTotals,
     listLifetimeKeys,
+    batteryLifetimeDebug,
   };
 }

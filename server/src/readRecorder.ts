@@ -113,6 +113,20 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     rollupLifetime: () => {},
     getLifetimeTotals,
     listLifetimeKeys,
+    // v0.45.0 — battery-lifetime diagnostics live on the write-path recorder
+    // (they need the snapshot store the worker doesn't have). /api/debug/battery-lifetime
+    // uses the main recorder; this stub keeps the worker a drop-in `Recorder`.
+    batteryLifetimeDebug: () => ({
+      rawChargeFloorWh: 0,
+      rawDischargeFloorWh: 0,
+      emittedChargeWh: 0,
+      emittedDischargeWh: 0,
+      charge: { persistedWh: 0, pendingWh: 0 },
+      discharge: { persistedWh: 0, pendingWh: 0 },
+      deficitWh: 0,
+      packs: [],
+      offlineHeldMembers: [],
+    }),
     recordWeatherGhi: () => {}, // v0.13.1 — write path; the read-only worker never writes
     telemetryGaps: () => [],    // v0.30.0 — gaps are detected on the write path; /api/telemetry-gaps uses the main recorder
     // ── read path: real ──
