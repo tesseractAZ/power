@@ -606,7 +606,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
    * the latest snapshot value (with a "monotone-or-stay" floor so a brief
    * BMS readback hiccup doesn't drop the count).
    */
-  const PACK_MAH_TO_WH = (51.2 * 2) / 1_000;   // 102.4 V × Ah = Wh; 1000 mAh = 1 Ah
+  // Each pack is 32S1P (~104 V nominal; 32 series cells whose mV sum to packVoltageMv).
+  // fullCap is single-string mAh; Wh = mAh × (32 × 3.2 V) / 1000 = mAh × 0.1024.
+  const PACK_MAH_TO_WH = (32 * 3.2) / 1_000;   // = 0.1024 Wh/mAh (was (51.2 * 2)/1_000, same value)
 
   // v0.13.0 — per-pack baseline capture. The accu* registers are FACTORY-
   // lifetime counters: packs ship with accuDsgMah > accuChgMah from bench
