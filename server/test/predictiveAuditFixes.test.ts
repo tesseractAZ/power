@@ -64,6 +64,27 @@ test('forecast-runtime alert SUPPRESSED when no forecast is supplied (defensive)
   assert.equal(hasRuntimeAlert(alerts), false, 'no depletion confirmation available → do not emit');
 });
 
+test('forecast-runtime cache keys on the depletion verdict — a warm suppress-cache must not block a real fire (v0.41.0 Copilot)', () => {
+  // The ~10-min cache is time-based; the runtime alert now depends on `forecast`. Without
+  // keying the cache on the depletion gate, a call carrying a suppressing forecast caches
+  // an empty result that a later depleting-forecast call would wrongly reuse (and vice
+  // versa). Exercise the exact sequence WITHOUT resetting the cache between calls.
+  resetForecastAlertsCache();
+  const rec = decliningRecorder();
+  const devs = shp2Draining();
+  assert.equal(hasRuntimeAlert(computeForecastAlerts(devs, rec, fc(30))), false, 'warms the cache under gate=false (no depletion)');
+  assert.equal(
+    hasRuntimeAlert(computeForecastAlerts(devs, rec, fc(5))),
+    true,
+    'gate flips false→true within the TTL — must recompute and fire, not return the stale suppression',
+  );
+  assert.equal(
+    hasRuntimeAlert(computeForecastAlerts(devs, rec, fc(30))),
+    false,
+    'gate flips true→false — must recompute and suppress, not return the stale fire alert',
+  );
+});
+
 /* ─── (2) string-mismatch leave-one-out median ────────────────────────────── */
 
 function pvSamples(value: number): Array<{ ts: number; value: number }> {

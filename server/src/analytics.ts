@@ -456,21 +456,36 @@ function linregress(pts: Array<{ ts: number; value: number }>): LinFit | null {
   return { slopePerMs: slope, intercept, r2, n, slopeStdErrPerMs };
 }
 
-let forecastCache: { ts: number; alerts: Alert[] } | null = null;
+let forecastCache: { ts: number; alerts: Alert[]; depletionGate: boolean } | null = null;
 /** Test seam — clear the forecast-alert cache so successive scenarios recompute. */
 export function resetForecastAlertsCache(): void { forecastCache = null; }
 
 /** Phase 3 learned alerts: runtime forecast + degradation projections. Cached ~10 min. */
 export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, recorder: Recorder, forecast?: DayForecast): Alert[] {
-  if (forecastCache && Date.now() - forecastCache.ts < FORECAST_TTL_MS) {
-    return forecastCache.alerts;
-  }
-  const out: Alert[] = [];
-  const now = Date.now();
   const list = Object.values(devices);
   const shp2 = list.find((d) => d.online && d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
+  // v0.41.0 — the runtime depletion alert is gated on whether the diurnal day-forecast
+  // ALSO projects reaching the reserve floor, so the emitted alert set now depends on
+  // `forecast`. The time-based cache therefore has to key on that gate too: without it, a
+  // call within the TTL carrying a different forecast (or `undefined`) would return alerts
+  // computed under the PREVIOUS forecast and wrongly suppress/emit the runtime alert
+  // (flagged in the v0.41.0 Copilot review). We key on the gate BOOLEAN — not the raw
+  // minProjectedSoc — so the cache still survives the per-cycle forecast jitter and only
+  // invalidates when the depletion verdict actually flips.
+  const reserveForGate = shp2?.projection.backupReserveSoc ?? 15;
+  const diurnalConfirmsDepletion =
+    forecast != null && forecast.minProjectedSoc != null && forecast.minProjectedSoc <= reserveForGate;
+  if (
+    forecastCache &&
+    forecastCache.depletionGate === diurnalConfirmsDepletion &&
+    Date.now() - forecastCache.ts < FORECAST_TTL_MS
+  ) {
+    return forecastCache.alerts;
+  }
+  const out: Alert[] = [];
+  const now = Date.now();
   const dpus = list.filter((d) => d.online && d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
@@ -485,13 +500,14 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
       const reserve = sp.backupReserveSoc ?? 15;
       const cur = sp.backupBatPercent;
       // v0.41.0 — gate the trailing-3h runtime alert on the DEPLETION-AWARE diurnal
-      // forecast. The flat trailing-decline extrapolation projects a false overnight
+      // forecast (`diurnalConfirmsDepletion`, computed above so it can also key the
+      // cache). The flat trailing-decline extrapolation projects a false overnight
       // depletion (it ignores dawn solar recovery); only surface this alert when the
       // hour-by-hour PV-minus-load forecast ALSO projects reaching the reserve floor.
       // (Audit fix: removed the "reserve at 3 AM" / bogus "implied draw" false positive
       // that contradicted /api/runway hoursToReserve=null on the same page.)
-      const diurnalConfirmsDepletion =
-        forecast != null && forecast.minProjectedSoc != null && forecast.minProjectedSoc <= reserve;
+      // NB: `reserve` here == `reserveForGate` above (same SHP2 reserve) — kept local for
+      // the alert content (hoursToReserve / detail text).
       if (cur != null && pctPerHour < -0.05 && cur > reserve && diurnalConfirmsDepletion) {
         const hoursToReserve = (cur - reserve) / -pctPerHour;
         let severity: 'warning' | 'info' | null = null;
@@ -614,7 +630,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
     }
   }
 
-  if (Object.values(devices).some((d) => d.projection)) forecastCache = { ts: now, alerts: out };
+  if (Object.values(devices).some((d) => d.projection)) forecastCache = { ts: now, alerts: out, depletionGate: diurnalConfirmsDepletion };
   return out;
 }
 
