@@ -1,8 +1,15 @@
-import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
+import type { DeviceSnapshot, DpuProjection, GridBackstop, Shp2Projection } from '../types';
 import { fmtMins, fmtPct, fmtW, fmtWh, socColor } from '../format';
 import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 
-export function SystemSummary({ devices }: { devices: Record<string, DeviceSnapshot> }) {
+export function SystemSummary({
+  devices,
+  grid,
+}: {
+  devices: Record<string, DeviceSnapshot>;
+  /** v0.46.0 — SHP2 grid backstop (snapshot.grid). Absent on a cold snapshot. */
+  grid?: GridBackstop;
+}) {
   const list = Object.values(devices);
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<DeviceSnapshot & { projection: DpuProjection }>;
   const shp2 = list.find((d) => d.projection?.kind === 'shp2') as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
@@ -20,8 +27,13 @@ export function SystemSummary({ devices }: { devices: Record<string, DeviceSnaps
   const pvTotal = connectedOnline.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
   const acOutTotal = connectedOnline.reduce((s, d) => s + (d.projection.acOutWatts ?? 0), 0);
   const acInTotal = connectedOnline.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
+  // v0.46.0 — battery net from PER-PACK flow, not DPU throughput, mirroring the
+  // server's fleet_battery_net_watts (server/src/index.ts:1108). total_in/out are
+  // DPU THROUGHPUT (PV+grid in / AC out), NOT battery-cell flow — `totalOut −
+  // totalIn` overstated the magnitude. Pack out = discharge, pack in = charge; net
+  // positive = discharging. Same connectedOnline set this tile already uses.
   const batWattsTotal = connectedOnline.reduce(
-    (s, d) => s + ((d.projection.totalOutWatts ?? 0) - (d.projection.totalInWatts ?? 0)),
+    (s, d) => s + d.projection.packs.reduce((p, pk) => p + ((pk.outputWatts ?? 0) - (pk.inputWatts ?? 0)), 0),
     0,
   );
 
@@ -31,6 +43,25 @@ export function SystemSummary({ devices }: { devices: Record<string, DeviceSnaps
       : connectedOnline.reduce((s, d) => s + (d.projection.soc ?? 0), 0) / connectedOnline.length;
 
   const circuitLoad = shp2?.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0) ?? null;
+
+  // ── v0.46.0 — FIX 3: whole-home grid, not DPU ac_in ─────────────────────────
+  // The old 'Grid in' tile read DPU acInWatts (grid charging the DPUs) and
+  // labelled it as the home grid / off-grid indicator. DPU ac_in is NOT
+  // whole-home grid — the SHP2 main `wattInfo.gridWatt` (grid_to_home) is (same
+  // distinction as the v0.44.0 grid-import fix). Source the home grid from
+  // shp2.projection.gridWatt, and derive off-grid from the grid RESOLVER
+  // (snapshot.grid / per-SHP2-device .grid) rather than `acIn < 5`. When gridWatt
+  // is unavailable, fall back to the honest DPU-ac-in figure with an honest label.
+  const resolvedGrid: GridBackstop | undefined = grid ?? shp2?.grid;
+  const homeGridWatts = shp2?.projection.gridWatt ?? null;
+  const haveHomeGrid = homeGridWatts != null;
+  const gridTileValue = haveHomeGrid ? fmtW(homeGridWatts) : fmtW(acInTotal);
+  const gridTileLabel = haveHomeGrid ? 'Grid → home' : 'DPU AC-in';
+  // Off-grid: trust the resolver's present flag when we have it; else the legacy
+  // signal (no DPU ac-in import). Keep consistent with EnergyFlow / Shp2Card.
+  const offGrid = resolvedGrid
+    ? !(resolvedGrid.present || resolvedGrid.declared)
+    : acInTotal < 5;
 
   return (
     <div className="card col-span-full">
@@ -46,7 +77,12 @@ export function SystemSummary({ devices }: { devices: Record<string, DeviceSnaps
           accent="text-accent"
           progress={avgSoc ?? undefined}
         />
-        <Tile label="Grid in" value={fmtW(acInTotal)} sub="off-grid if 0 W" accent="text-muted" />
+        <Tile
+          label={gridTileLabel}
+          value={gridTileValue}
+          sub={offGrid ? 'off-grid (islanded)' : haveHomeGrid ? 'SHP2 main grid' : 'DPU charging only'}
+          accent={offGrid ? 'text-warn' : 'text-muted'}
+        />
         <Tile label="Inverter out" value={fmtW(acOutTotal)} accent="text-ok" sub="3-phase AC" />
         <Tile
           label="Battery net"

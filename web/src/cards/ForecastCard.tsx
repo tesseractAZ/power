@@ -137,7 +137,15 @@ export const ForecastCard = memo(function ForecastCard() {
             </ResponsiveContainer>
           </div>
           <div className="text-[11px] text-muted mt-2 leading-relaxed">
-            Solar = your typical-day production scaled by the Open-Meteo cloud forecast; load = typical-day curve from history;
+            {/* v0.46.0 — caption follows the same hasWeather flag the badge uses.
+                When weather is present the solar curve is the equipment-tuned GHI
+                response model applied to the Open-Meteo radiation forecast; the
+                fallback is the typical-day curve scaled by the cloud forecast. */}
+            Solar ={' '}
+            {fc!.hasWeather
+              ? 'your equipment-tuned GHI response model applied to the Open-Meteo radiation forecast'
+              : 'your typical-day production scaled by the Open-Meteo cloud forecast'}
+            ; load = typical-day curve from history;
             SoC = current backup pool integrated forward (red dashed line marks the {fmtPct(fc!.reserveSoc, 0)} reserve).
             Sharpens as more history accumulates.
           </div>
