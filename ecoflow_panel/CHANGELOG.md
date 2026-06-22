@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.54.1 — 2026-06-22
+
+**[Diagnostic] Read-only `/api/debug/soiling` — surface why `dropPct` is what it is.** The v0.54.0 soiling coverage-gate did NOT suppress the live false "40.2%" alert (post-deploy live check caught it — the gate addressed an under-covered recent window, but this case is a different mechanism). To fix it correctly instead of guessing again, `computeSoiling` now also returns its full per-day clear-sky coefficient distribution (`dayCoeffs`/`dayHours`) + the coverage bar, exposed read-only at `/api/debug/soiling` (mirrors the forecast's own soiling object; NOT on the MQTT/ha-state path). This tells a baseline inflated by one outlier "best day" apart from a genuinely depressed recent window, so the targeted fix lands on the real cause. No alert/dropPct logic change; suite 769; `tsc` + web build clean.
+
 ## 0.54.0 — 2026-06-22
 
 **Audit-driven fixes: SoH display clamp, soiling false-alert gate, Alerts-page clarity, + a deploy-pipeline gate.** A deep audit of the Alerts page (every button traced + tested), the Battery pack matrix, and the recent power-cycle recovery produced an adversarially-verified fix list; this ships it.

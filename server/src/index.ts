@@ -647,6 +647,20 @@ app.get('/api/debug/battery-lifetime', async (req, reply) => {
   }, 15);
 });
 
+// v0.54.1 — read-only soiling diagnostics. Surfaces computeSoiling's full
+// per-day clear-sky coeff distribution (dayCoeffs/dayHours), the coverage bar,
+// baseline (current max), recentCoeff, recentCovered, cleanDays, and dropPct —
+// so a baseline inflated by one outlier "best day" can be told apart from a
+// genuinely depressed recent window. STRICTLY READ-ONLY (mirrors the forecast's
+// own soiling object; no recompute side effects, no writes).
+app.get('/api/debug/soiling', async (req, reply) => {
+  const fc = await analytics.report('forecast');
+  return cached(req, reply, {
+    generated_at: Date.now(),
+    soiling: fc.soiling ?? null,
+  }, 15);
+});
+
 // v0.30.0 — telemetry-gap markers: a durable, queryable record of any home-feed
 // blackout the recorder detected (see recorder.detectTelemetryGap). A silent
 // upstream stall now shows up as an incident here instead of only being

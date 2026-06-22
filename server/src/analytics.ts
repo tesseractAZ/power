@@ -648,6 +648,14 @@ export interface SoilingEstimate {
   recentCoeff: number;    // recent clear-sky W per W/m²
   cleanDays: number;      // number of clear-sky days the estimate used
   recentCovered?: boolean; // v0.54.0 — recent window has clear-hour coverage ~ the cleanest days. When false, recentCoeff is built from a data-gap-thinned window and the soiling alert is suppressed (estimate still shown).
+  // v0.54.1 — read-only diagnostics (surfaced by /api/debug/soiling, NOT on the
+  // MQTT/ha-state path). Lets the operator see WHY dropPct is what it is: the
+  // full per-day clear-sky coeff distribution + matching clear-hour counts and
+  // the coverage bar, so an inflated baseline (one outlier "best day") vs a
+  // genuinely depressed recent window can be told apart.
+  dayCoeffs?: number[];
+  dayHours?: number[];
+  covBar?: number;
 }
 
 export interface DayForecast {
@@ -883,7 +891,12 @@ function computeSoiling(
   const recentPool = (recentCovered ? wellCovered : days).slice(-3);
   const recentCoeff = median(recentPool.map((d) => d.coeff));
   const dropPct = baselineCoeff > 0 ? Math.round(((baselineCoeff - recentCoeff) / baselineCoeff) * 1000) / 10 : 0;
-  return { dropPct, baselineCoeff, recentCoeff, cleanDays: days.length, recentCovered };
+  return {
+    dropPct, baselineCoeff, recentCoeff, cleanDays: days.length, recentCovered,
+    dayCoeffs: days.map((d) => Math.round(d.coeff * 1000) / 1000),
+    dayHours: days.map((d) => d.hours),
+    covBar,
+  };
 }
 
 let dayForecastCache: { ts: number; value: DayForecast } | null = null;
