@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.53.0 — 2026-06-21
+
+**[Fixed] Solar page no longer shows a bench spare attached to an SHP2 connector.** With both spare Cores (4 & 5) powered up and cloud-online, the Solar "power flow" diagram drew a row for *every* online DPU and wired each into the shared battery cluster — so a spare appeared attached to an SHP2 DPU connector even though it has no PV array and occupies no SHP2 slot. The SHP2 hardware itself was correct (its 3 `Energy{1,2,3}Info` connectors reported Core 1/2/3, `isConnect=1`); the bug was purely in the web flow diagram, latent until the spares were powered. `FlowDiagram` now draws only the array-equipped (SHP2-bound) Cores — i.e. the SNs the SHP2 reports in its connectors (`arraySns`) — for the rows, SVG height, and the battery cluster, keeping the existing graceful fallback (when the SHP2 binding is briefly unknown on cold boot / reconnect, all DPUs are drawn rather than hiding the real array). Verified against the live system: `arraySns = {Core 1, Core 2, Core 3}`, so the diagram renders exactly those three and excludes both spares. The per-DPU MPPT cards and the 24h production chart still list every online Core (they show each spare's *real* idle/0 W telemetry — truthful, not a false attachment), so no information is lost. Web `vite build` clean; no server changes.
+
 ## 0.52.0 — 2026-06-21
 
 **Internal refactors (behavior-preserving) + full documentation refresh.** A multi-agent pass discovered and adversarially verified a set of safe dedup/extract/dead-code cleanups; a separate multi-agent pass brought the docs current with the v0.44.0–v0.51.0 accuracy work. No alarm, energy number, published HA value, or endpoint behavior changed — the refactors are guarded by the test suite (747 → 762) and the published-value contracts.
