@@ -401,6 +401,21 @@ const FORECAST_HISTORY_MS = 14 * 24 * 60 * 60 * 1000;
 const RUNTIME_TRAIL_MS = 3 * 60 * 60 * 1000;        // trailing window for discharge rate
 const DEGRADE_MIN_SPAN_MS = 5 * 24 * 60 * 60 * 1000; // need ≥5 days for a degradation trend
 const DEGRADE_MIN_R2 = 0.25;                         // trend must explain ≥25% of variance
+// v0.54.3 — the SoH-decline forecast (forecast-soh) uses its OWN, tighter gates than the
+// shared ones above. The shared gates still drive the cell-imbalance forecast — a faster-
+// moving signal that must KEEP its 5-day early-warning span (a rising imbalance can cross
+// 50 mV in weeks). SoH/EOL is the opposite: it must NOT be projected from a fortnight of
+// early-life BMS fullCap settling, so it needs a long baseline + a clear fit.
+const SOH_FORECAST_HISTORY_MS = 120 * 24 * 60 * 60 * 1000; // 120d baseline (vs 14d) — a real LFP fade (~2-3%/yr) is far below the SoH quantization noise over a fortnight
+const SOH_DEGRADE_MIN_SPAN_MS = 45 * 24 * 60 * 60 * 1000;  // ≥45 days of span before any EOL projection (vs 5d)
+const SOH_DEGRADE_MIN_R2 = 0.5;                            // the decline must explain ≥50% of variance (vs 0.25)
+// Physically-plausible SoH fade ceiling. Real LFP degrades ~2-3 %/yr; a regression implying a
+// faster fade is BMS fullCap-recalibration settling / quantization noise, not a trustworthy EOL
+// trajectory. With this ceiling + the noise floor (sohSignalBelowFloor) + the <3yr-to-85% gate,
+// forecast-soh fires only on an ABNORMAL, sustained ~6-10 %/yr decline. By design it does NOT
+// alert on a pack's normal, healthy 2-3 %/yr aging — that would be alarm fatigue, the SoH
+// threshold alarm backstops the absolute level, and a >10 %/yr "fade" is settling/noise.
+const MAX_SOH_FADE_PCT_PER_YEAR = 10;
 
 let forecastCache: { ts: number; alerts: Alert[]; depletionGate: boolean } | null = null;
 /** Test seam — clear the forecast-alert cache so successive scenarios recompute. */
@@ -518,14 +533,25 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
       const subject = { coreNum: dpuNum(d.deviceName), packNum: pk.num };
 
       // SoH decline → projected date to reach 85%
-      const sohPts = recorder.query(d.sn, `pack${pk.num}_soh`, now - FORECAST_HISTORY_MS, now);
+      const sohPts = recorder.query(d.sn, `pack${pk.num}_soh`, now - SOH_FORECAST_HISTORY_MS, now);
       const curSoh = pk.actSoh ?? pk.soh;
-      if (sohPts.length >= 8 && curSoh != null) {
+      if (
+        sohPts.length >= 8 && curSoh != null
+        // v0.54.3 — reuse the dated-EOL path's BMS-recalibration guards. A near-new pack
+        // settling its measured fullCap over the first weeks reads as a clean linear "fade";
+        // without these, the Predictive tab filled with false "declining → 85% in ~1.5 mo"
+        // alerts on packs sitting at 97–100% SoH. sohStepDominated rejects a quantization
+        // staircase; sohSignalBelowFloor rejects a net move under the SoH quantization noise.
+        && !sohStepDominated(sohPts) && !sohSignalBelowFloor(sohPts)
+      ) {
         const span = sohPts[sohPts.length - 1].ts - sohPts[0].ts;
         const fit = linregress(sohPts);
-        if (span >= DEGRADE_MIN_SPAN_MS && fit && fit.r2 >= DEGRADE_MIN_R2) {
+        if (span >= SOH_DEGRADE_MIN_SPAN_MS && fit && fit.r2 >= SOH_DEGRADE_MIN_R2) {
           const sohPerDay = fit.slopePerMs * 86_400_000;
-          if (sohPerDay < -0.001) {
+          // v0.54.3 — reject an implausibly-fast fade. Real LFP degrades ~2–3 %/yr; a slope
+          // implying more than MAX_SOH_FADE_PCT_PER_YEAR is settling/noise, not a trustworthy
+          // EOL trajectory (a genuine fast failure trips the SoH threshold alarm separately).
+          if (sohPerDay < -0.001 && -sohPerDay * 365.25 <= MAX_SOH_FADE_PCT_PER_YEAR) {
             const daysTo85 = (curSoh - 85) / -sohPerDay;
             if (daysTo85 > 0 && daysTo85 < 365 * 3) {
               const months = (daysTo85 / 30.4).toFixed(daysTo85 < 90 ? 1 : 0);

@@ -143,3 +143,103 @@ test('string-mismatch ratio is null when there is no OTHER connected DPU to comp
   const a = rep.devices.find((d) => d.sn === 'SN-A');
   assert.equal(a?.ratio, null, 'a single connected DPU has no peer → ratio null (UI shows —)');
 });
+
+/* ─── (3) v0.54.3 — forecast-soh false-decline gate ───────────────────────────
+ * The "State of health declining" predictive alert regressed an OLS line over the
+ * raw pack SoH series. On a near-new fleet (packs at 97–100 %), the BMS settling
+ * its measured fullCap over the first weeks reads as a confident multi-%/month
+ * "fade" → projected EOL in ~1.5 months. v0.54.3 hardens the firing gate four ways:
+ *   (a) ≥45-day span (was 5) — no EOL call from a fortnight of early-life settling;
+ *   (b) ≤10 %/yr rate ceiling — a faster slope is settling/noise, not real LFP fade;
+ *   (c) the dated-EOL path's BMS-recalibration guards (sohStepDominated /
+ *       sohSignalBelowFloor) now apply here too;
+ *   (d) R² ≥ 0.5 (was 0.25). The fade must STILL fire on a genuine, sustained,
+ *       physically-plausible decline (no over-suppression). */
+
+const DAY_MS = 86_400_000;
+const hasSohAlert = (alerts: { id: string }[]) => alerts.some((a) => a.id.startsWith('forecast-soh-'));
+
+/** One online DPU (Core 1, one pack at `curSoh`) + a recorder whose pack1_soh
+ *  query returns `series` spread evenly across `spanDays`. The mock ignores the
+ *  query's from/to bounds, so the observed span is exactly `spanDays`. */
+function dpuSoh(series: number[], curSoh: number, spanDays: number): { devs: Record<string, DeviceSnapshot>; rec: Recorder } {
+  const now = Date.now();
+  const n = series.length;
+  const pts = series.map((value, i) => ({ ts: now - spanDays * DAY_MS * (1 - i / (n - 1)), value }));
+  const devs: Record<string, DeviceSnapshot> = {
+    'SN-CORE1': {
+      sn: 'SN-CORE1', deviceName: 'Core 1', online: true, lastSeenMs: now,
+      projection: { kind: 'dpu', packs: [{ num: 1, actSoh: curSoh, soh: Math.round(curSoh) }] } as any,
+    } as any,
+  };
+  const rec = {
+    insertSnapshot: () => {},
+    query: (_sn: string, metric: string) => (metric === 'pack1_soh' ? pts : []),
+    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
+    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
+  } as unknown as Recorder;
+  return { devs, rec };
+}
+/** Clean linear SoH decline from `start` to `end` across `n` evenly-spaced samples. */
+const linDecline = (start: number, end: number, n: number) =>
+  Array.from({ length: n }, (_, i) => start + (end - start) * (i / (n - 1)));
+
+test('forecast-soh — the live false-positive shape (97% pack, ~14 days, ~3%/mo fit) does NOT fire (span gate)', () => {
+  resetForecastAlertsCache();
+  // This is exactly what filled the Predictive tab: a near-new pack with a fortnight
+  // of settling that OLS reads as "→85% in ~6 months". 14 days < the 45-day floor.
+  const { devs, rec } = dpuSoh(linDecline(98.5, 97.1, 14), 97.1, 14);
+  assert.equal(hasSohAlert(computeForecastAlerts(devs, rec, undefined)), false, 'a fortnight of data is too short to project battery EOL');
+});
+
+test('forecast-soh — an implausibly-fast fade (>10%/yr) does NOT fire even with ample span (rate ceiling)', () => {
+  resetForecastAlertsCache();
+  // 99.5 → 93 across 60 days = ~40 %/yr. Span (60d) and R² (clean line) both pass; the
+  // rate ceiling is what rejects it — real LFP fades ~2–3 %/yr, this is settling/noise.
+  const { devs, rec } = dpuSoh(linDecline(99.5, 93, 30), 93, 60);
+  assert.equal(hasSohAlert(computeForecastAlerts(devs, rec, undefined)), false, 'slope implies an impossible fade rate → suppressed');
+});
+
+test('forecast-soh — a long-flat-then-step BMS recalibration staircase does NOT fire (sohStepDominated wired)', () => {
+  resetForecastAlertsCache();
+  // 50 samples flat at 99, then a recalibration step down. Net 3pt / 120d ≈ 9 %/yr (within
+  // the ceiling) and EOL would project < 3yr, so ONLY the step guard stops the false fire.
+  const series = [...Array(50).fill(99), ...Array(6).fill(97.5), ...Array(4).fill(96)];
+  const { devs, rec } = dpuSoh(series, 96, 120);
+  assert.equal(hasSohAlert(computeForecastAlerts(devs, rec, undefined)), false, 'a quantization staircase is not a measurable trend');
+});
+
+test('forecast-soh — a genuine, sustained, plausible fade STILL fires (no over-suppression)', () => {
+  resetForecastAlertsCache();
+  // 99 → 96 across 120 days = ~9 %/yr (≤ ceiling), 3pt net (clears the noise floor),
+  // clean line (R²≈1), span 120d (≥45). Projects to 85% in ~14 months → must alert.
+  const { devs, rec } = dpuSoh(linDecline(99, 96, 60), 96, 120);
+  assert.equal(hasSohAlert(computeForecastAlerts(devs, rec, undefined)), true, 'a real multi-month decline within plausible bounds must still surface');
+});
+
+/* v0.54.3 — regression lock for the Issue-2 fix: the SoH tightening must NOT bleed into the
+ * cell-imbalance forecast, which is a faster signal that must keep its 5-day early-warning span.
+ * (forecast-imbalance had no test before; this pins the short-span behavior the SoH gate must not
+ * inherit. If someone re-merges the SoH and shared span/R² constants, this fails.) */
+const hasImbAlert = (alerts: { id: string }[]) => alerts.some((a) => a.id.startsWith('forecast-imbalance-'));
+
+test('forecast-imbalance — a fast cell-spread rise STILL fires at a ~7-day span (SoH 45-day gate must not bleed in)', () => {
+  resetForecastAlertsCache();
+  const now = Date.now();
+  const SPAN_D = 7; // > the imbalance 5-day floor, but well under the SoH 45-day floor
+  const vals = linDecline(18, 30, 12).map((v) => v); // 18 → 30 mV, clean rise
+  const pts = vals.map((value, i) => ({ ts: now - SPAN_D * DAY_MS * (1 - i / (vals.length - 1)), value }));
+  const devs: Record<string, DeviceSnapshot> = {
+    'SN-CORE1': {
+      sn: 'SN-CORE1', deviceName: 'Core 1', online: true, lastSeenMs: now,
+      projection: { kind: 'dpu', packs: [{ num: 1, maxVolDiffMv: 30 }] } as any,
+    } as any,
+  };
+  const rec = {
+    insertSnapshot: () => {},
+    query: (_sn: string, metric: string) => (metric === 'pack1_vol_diff_mv' ? pts : []),
+    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
+    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
+  } as unknown as Recorder;
+  assert.equal(hasImbAlert(computeForecastAlerts(devs, rec, undefined)), true, 'imbalance early-warning must survive the SoH-only tightening');
+});
