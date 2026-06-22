@@ -307,7 +307,16 @@ function FlowDiagram({
   const W = 900;
   const ROW_H = 128;
   const TOP = 56;
-  const H = TOP + dpus.length * ROW_H + 36;
+  // A DPU belongs on the SHP2 solar-flow diagram only when it's an SHP2 source
+  // (an array-equipped home Core). A bench spare is powered but NOT wired to the
+  // SHP2 — it has no PV array and occupies no SHP2 connector — so drawing it as a
+  // row feeding the shared battery cluster wrongly implied it was attached to a
+  // connector (surfaced once the spares were powered up). Fallback: if the SHP2
+  // binding is unknown (cold boot / SHP2 briefly offline) arraySns is empty and we
+  // draw every DPU rather than hiding the real array.
+  const hasArray = (sn: string) => arraySns.size === 0 || arraySns.has(sn);
+  const drawn = dpus.filter((d) => hasArray(d.sn));
+  const H = TOP + drawn.length * ROW_H + 36;
 
   // Animation period: faster = more watts
   const period = (w: number) => {
@@ -315,10 +324,6 @@ function FlowDiagram({
     return Math.max(0.6, Math.min(8, 1500 / Math.max(w, 50)));
   };
   const strokeW = (w: number) => Math.min(8, Math.max(1.2, Math.log10(Math.max(10, w)) * 1.6));
-
-  // A DPU has a solar array when it's an SHP2 source; if the SHP2 binding is
-  // unknown, treat every DPU as array-equipped.
-  const hasArray = (sn: string) => arraySns.size === 0 || arraySns.has(sn);
 
   const COL_PANELS = 80;
   const COL_DPU = 600;
@@ -377,14 +382,14 @@ function FlowDiagram({
               cloud-offline one. When fewer are drawn than installed, say so explicitly
               instead of captioning "42 panels" above 28 glyphs. */}
           {(() => {
-            const shown = dpus.filter((d) => hasArray(d.sn)).length * PANELS_PER_DPU;
+            const shown = drawn.length * PANELS_PER_DPU;
             return shown < totalPanels
               ? `${totalPanels} installed · ${shown} shown · ${PANEL_W} W each`
               : `${totalPanels} panels · ${PANEL_W} W each`;
           })()}
         </text>
 
-        {dpus.map((d, i) => {
+        {drawn.map((d, i) => {
           const p = d.projection;
           const yMid = TOP + i * ROW_H + ROW_H / 2;
           const hvW = p.pvHighWatts ?? 0;
@@ -486,9 +491,9 @@ function FlowDiagram({
         })}
 
         {/* Battery cluster (right) */}
-        <rect x={COL_BAT} y={TOP - 12} width={92} height={dpus.length * ROW_H + 24} rx={6} fill={CHART.tooltipBg} stroke={HUES.soc} strokeOpacity={0.9} strokeWidth={1.5} />
+        <rect x={COL_BAT} y={TOP - 12} width={92} height={drawn.length * ROW_H + 24} rx={6} fill={CHART.tooltipBg} stroke={HUES.soc} strokeOpacity={0.9} strokeWidth={1.5} />
         <text x={COL_BAT + 46} y={TOP + 8} textAnchor="middle" fill={CHART.axis} fontSize="11" fontWeight="600" letterSpacing="0.08em" style={{ textTransform: 'uppercase' }}>batteries</text>
-        <text x={COL_BAT + 46} y={TOP + (dpus.length * ROW_H) / 2 + 14} textAnchor="middle" fill={HUES.soc} fontSize="26" fontWeight="700">
+        <text x={COL_BAT + 46} y={TOP + (drawn.length * ROW_H) / 2 + 14} textAnchor="middle" fill={HUES.soc} fontSize="26" fontWeight="700">
           ⚡
         </text>
       </svg>
