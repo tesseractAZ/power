@@ -15,8 +15,10 @@ import {
   computeRoundTripEfficiency,
   computeSelfConsumption,
   computeEquipmentHealth,
+  computeSoiling,
   type DayForecast,
 } from '../src/analytics.js';
+import type { WeatherHour } from '../src/weather.js';
 import { integrateWh, startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -168,6 +170,45 @@ test('forecastDayAlerts — suppresses soiling-pv when the recent window is unde
     undefined,
     'a data-gap-inflated dropPct with recentCovered=false must not fire the soiling alert',
   );
+});
+
+// v0.54.2 — computeSoiling robustness. The baseline is the 90th-percentile clear-
+// day response (not the single all-time max) and the recent window is the last 5
+// well-covered days (not 3). Together they reject a freak-high baseline + 1–2
+// transient/gap-depressed full-coverage recent days (the live false "40.2%" on
+// 2026-06-22 where dayCoeffs ended …9.76, 6.68, 6.65 against a ~9.8 norm) while
+// still firing on a sustained real drop.
+function buildSoilingInputs(dayCoeffs: number[], hoursPerDay = 11) {
+  const RAD = 800; // W/m² clear-sky
+  const pv = new Map<number, number>();
+  const wx = new Map<number, WeatherHour>();
+  dayCoeffs.forEach((c, d) => {
+    for (let h = 0; h < hoursPerDay; h++) {
+      const he = d * 24 + 10 + h; // 10:00 + h on day d → a distinct calendar day per d
+      pv.set(he, c * RAD);
+      wx.set(he, { ts: he * 3_600_000, cloudCoverPct: 10, radiationWm2: RAD, tempC: 25 } as WeatherHour);
+    }
+  });
+  return { pv, wx };
+}
+
+test('computeSoiling — robust to a freak-high baseline + 2 low recent outliers (no false soiling)', () => {
+  // 6 normal clean days (~10) + one freak-high day (13) + two transient-low recent
+  // days (6.5), all FULL clear-hour coverage. Pre-v0.54.2 (max baseline + last-3
+  // median) → ~50% drop (false alarm); robust p90 + last-5 median → ~0%.
+  const { pv, wx } = buildSoilingInputs([10, 10, 10, 10, 10, 13, 10, 6.5, 6.5]);
+  const s = computeSoiling(pv, wx);
+  assert.ok(s, 'expected a soiling estimate');
+  assert.ok(s!.recentCovered, 'all days are fully covered here');
+  assert.ok(s!.dropPct < 12, `robust dropPct must stay below the 12% alert threshold, got ${s!.dropPct}`);
+});
+
+test('computeSoiling — a SUSTAINED real drop still fires', () => {
+  // baseline clean ~10, then the last 5 days all genuinely low (~8 ⇒ ~20% soiling)
+  const { pv, wx } = buildSoilingInputs([10, 10, 10, 10, 10, 8, 8, 8, 8, 8]);
+  const s = computeSoiling(pv, wx);
+  assert.ok(s, 'expected a soiling estimate');
+  assert.ok(s!.dropPct >= 12, `a sustained real drop must still fire, got ${s!.dropPct}`);
 });
 
 /* ─── cache-warmer reset (v0.9.11 bug fix) ───────────────────────────────

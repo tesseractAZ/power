@@ -855,7 +855,7 @@ function buildSolarResponse(
  * Compares the recent clear-sky coefficient to the best (cleanest) day on
  * record. Only clear daytime hours (low cloud, real sun) are used.
  */
-function computeSoiling(
+export function computeSoiling(
   pvByEpoch: Map<number, number>,
   wxByHour: Map<number, WeatherHour>,
 ): SoilingEstimate | null {
@@ -875,20 +875,23 @@ function computeSoiling(
     .map(([day, v]) => ({ t: new Date(day).getTime(), coeff: median(v), hours: v.length }))
     .sort((a, b) => a.t - b.t);
   if (days.length < 6) return null;
-  const baselineCoeff = Math.max(...days.map((d) => d.coeff));
-  // v0.54.0 — recentCoeff must come from days whose clear-hour COVERAGE is
-  // comparable to the cleanest days on record. A data-gap day (e.g. a mid-
-  // afternoon cloud-offline window) records far fewer clear hours and its
-  // sparse/partial PV depresses that day's coeff — which previously inflated
-  // dropPct into a false ~40% "soiling" Medium alert on recovery. Restrict the
-  // recent window to well-covered days; flag (recentCovered=false) when we
-  // couldn't, which suppresses the alert without hiding the estimate. Gap-free
-  // operation is unchanged: every day is well-covered → identical to the prior
-  // last-3-days median.
+  // v0.54.2 — clean-panel baseline = the 90th-percentile clear-day response, NOT
+  // the single all-time MAX. A freak cool-clear-day peak (live: 11.16 vs a 9.8
+  // median) inflated dropPct; p90 is a robust "best clean day" reference.
+  const sortedAsc = days.map((d) => d.coeff).sort((a, b) => a - b);
+  const baselineCoeff = sortedAsc[Math.floor(0.9 * (sortedAsc.length - 1))];
+  // recentCoeff is built from well-covered recent days only (v0.54.0: a data-gap
+  // day with few clear hours has a sparse/partial coeff and is excluded via the
+  // coverage bar; recentCovered=false suppresses the alert when we can't build a
+  // trustworthy window). v0.54.2: widen the window to the last 5 well-covered
+  // days (was 3) — two transient/gap-depressed FULL-coverage days (live: 6.68,
+  // 6.65 vs a 9.8 norm, NOT real fleet-wide soiling) swung the last-3 median to
+  // a false 40% drop. A 5-day median rejects 1–2 low outliers; a SUSTAINED real
+  // drop (most recent days all low) still lowers the median and fires.
   const covBar = Math.max(3, Math.round(Math.max(...days.map((d) => d.hours)) * 0.5));
   const wellCovered = days.filter((d) => d.hours >= covBar);
   const recentCovered = wellCovered.length >= 3;
-  const recentPool = (recentCovered ? wellCovered : days).slice(-3);
+  const recentPool = (recentCovered ? wellCovered : days).slice(-5);
   const recentCoeff = median(recentPool.map((d) => d.coeff));
   const dropPct = baselineCoeff > 0 ? Math.round(((baselineCoeff - recentCoeff) / baselineCoeff) * 1000) / 10 : 0;
   return {
