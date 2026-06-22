@@ -49,7 +49,7 @@ export function AlertOutcomeButtons({ alertId, onSubmitted }: AlertOutcomeButton
 
   if (submitted) {
     const label =
-      submitted === 'ack' ? '✓ ACKNOWLEDGED' :
+      submitted === 'ack' ? '✓ MARKED REAL' :
       submitted === 'dismiss' ? '✕ DISMISSED (false alarm)' :
       '🔧 LOGGED AS REAL FAILURE';
     return (
@@ -63,7 +63,7 @@ export function AlertOutcomeButtons({ alertId, onSubmitted }: AlertOutcomeButton
     <div className="inline-flex items-center gap-1">
       <OutcomeBtn
         label="✓ Real"
-        title="Acknowledge — this alert was real / I'm dealing with it"
+        title="This alert was real — logging it as a confirmed true alarm (and I'm handling it)"
         color="ok"
         busy={busy === 'ack'}
         onClick={() => submit('ack')}

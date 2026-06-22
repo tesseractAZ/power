@@ -205,6 +205,14 @@ export interface Alert {
    * faking source='learned'.
    */
   priority?: 'critical' | 'high' | 'medium' | 'low';
+  /**
+   * When `false`, this alert is suppressed from chime/push/broadcast but still
+   * shown on the Alerts page (e.g. a spare DPU's offline alarm, or a home core
+   * that's actively balancing). `undefined`/`true` annunciate normally. Rendered
+   * as a muted "silenced" badge — NOT a "spare" tag, since a balancing home core
+   * also lands here.
+   */
+  annunciate?: boolean;
   /** Subject identity — Core (DPU) number, then pack number, when scoped to one. */
   coreNum?: number | null;
   packNum?: number | null;

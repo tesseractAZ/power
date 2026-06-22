@@ -56,7 +56,7 @@ interface PriorityRow {
   id: AlarmPriority; label: string; isa: string; rank: number; tag: string;
   colorToken: string; description: string; response: string; enabled: boolean;
 }
-interface AlertSettingsResponse { priorities: PriorityRow[]; chimeRepeat: number; updatedAt: number }
+interface AlertSettingsResponse { priorities: PriorityRow[]; chimeRepeat: number; chimeRepeatDefault: number; updatedAt: number }
 
 type PreviewTarget = 'browser' | 'speakers';
 interface PreviewResponse {
@@ -286,8 +286,21 @@ export function AlertConsolePanel() {
     }
   }
 
-  function playUrl(url: string) {
+  async function playUrl(url: string) {
     setError(null);
+    // Precheck the asset exists — a deleted/reassigned tone now hard-404s
+    // (server SPA fallback no longer masks it as HTML 200). Distinguish a
+    // genuinely-missing file from a browser autoplay block.
+    try {
+      const head = await fetch(url, { method: 'HEAD' });
+      if (!head.ok) {
+        setError('Tone file missing — reassign or re-upload');
+        return;
+      }
+    } catch {
+      setError('Tone file missing — reassign or re-upload');
+      return;
+    }
     new Audio(url).play().catch(() => setError('Browser blocked autoplay — click Preview again.'));
   }
   function previewAssigned(level: Level, a: Assignment) {
@@ -437,7 +450,7 @@ export function AlertConsolePanel() {
           <div className="card-title">Annunciation</div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-panel2/60 border border-line rounded-lg p-3">
-              <div className="text-[10px] uppercase tracking-widest text-muted">Chime repeats (default 2)</div>
+              <div className="text-[10px] uppercase tracking-widest text-muted">Chime repeats <span className="normal-case tracking-normal opacity-70">(default {settings.chimeRepeatDefault})</span></div>
               <div className="text-xs text-muted mt-1 leading-relaxed">How many times the klaxon sounds before the spoken announcement on a new alarm.</div>
               <div className="flex items-center gap-2 mt-2">
                 <button type="button" onClick={() => setChime(settings.chimeRepeat - 1)}
@@ -512,7 +525,7 @@ export function AlertConsolePanel() {
         <div className="card-title">Tone per alert level</div>
         <p className="text-[11px] text-muted mt-1 leading-relaxed">
           Pick the default klaxon, a built-in tone, or one of your uploads to prepend each level’s announcement.
-          Critical/High → red · Medium → yellow · Low → green.
+          Critical/High → red · Medium/Low → yellow · green = recovery only.
         </p>
         <div className="mt-3 space-y-2">
           {data.levels.map((lvl) => {

@@ -23,7 +23,7 @@ export function AlertsPanel({ alerts }: { alerts: Alert[] }) {
       {/* Summary — four ISA priority tiles */}
       <div className="card">
         <div className="card-title flex items-center justify-between">
-          <span>System alerts</span>
+          <span>Threshold alerts</span>
           <span className="text-xs text-muted normal-case tracking-normal">{alerts.length} item(s) flagged</span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -43,7 +43,7 @@ export function AlertsPanel({ alerts }: { alerts: Alert[] }) {
         {actionable.length === 0 && (
           <div className="mt-3 flex items-center gap-2 text-sm text-ok">
             <span className="h-2 w-2 rounded-full bg-ok inline-block" />
-            All systems nominal — no Critical or High conditions across the fleet.
+            No Critical or High threshold alarms — check Predictive for learned signals.
           </div>
         )}
       </div>
@@ -153,6 +153,12 @@ function AlertRow({ alert, meta }: { alert: Alert; meta: PriorityMeta }) {
         <div className="flex items-baseline gap-2 flex-wrap">
           <span className="text-sm font-medium">{alert.title}</span>
           <span className="badge badge-muted text-[10px]">{alert.category}</span>
+          {/* annunciate:false = chime/push/broadcast suppressed (spare DPU OR a
+              balancing home core). "silenced" is the only accurate word here —
+              do NOT infer "spare" from this flag. */}
+          {alert.annunciate === false && (
+            <span className="badge badge-muted text-[10px]">silenced</span>
+          )}
           {alert.coreNum == null && <span className="text-[10px] text-muted">{alert.device}</span>}
         </div>
         <div className="text-xs text-muted mt-1 leading-relaxed">{alert.detail}</div>

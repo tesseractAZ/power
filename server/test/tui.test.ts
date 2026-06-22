@@ -397,6 +397,20 @@ test('renderPlant(console) — no flag string overflows the 8-char column', () =
   }
 });
 
+test('renderPlant(gen) — pack SoH% column clamps display to ≤ 100', () => {
+  // A couple near-new packs report fullCap > designCap so actSoh lands just over
+  // 100% (e.g. 100.44). The degradation engine keeps the raw value; the gen
+  // pack-row SoH% column clamps to 100 so it never shows a > 100.0 reading.
+  const snap = buildSnapshot({ numDpus: 1 });
+  const dpu = Object.values(snap.devices).find((d) => d.deviceName === 'DELTA-PRO-ULTRA-1')!;
+  for (const pk of (dpu.projection as DpuProjection).packs) pk.actSoh = 100.44;
+  const lines = renderPlant(makeView(100, 40, 'gen'), makePlantData(snap), { recorder: mockRecorder() });
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const plain = lines.map(stripAnsi).join('\n');
+  assert.ok(!/100\.4(?!\d)/.test(plain), `gen pack row rendered an unclamped SoH (100.4):\n${plain}`);
+  assert.ok(/100\.0/.test(plain), `clamped SoH 100.0 not present in gen pack rows:\n${plain}`);
+});
+
 test('renderPlant(gen) — packs count in title matches actual pack count', () => {
   // Bug v0.9.32: when packs is empty, divider showed "Pack 1/5" (hardcoded
   // fallback). The right behavior is to show "Pack 1/0" or skip the table

@@ -41,7 +41,7 @@ const PATH = process.env.ALERT_SETTINGS_PATH
 
 const CHIME_REPEAT_MIN = 1;
 const CHIME_REPEAT_MAX = 4;
-const DEFAULT_CHIME_REPEAT = 2; // v0.11.0 — user requested the chime sound twice on a new alert.
+export const DEFAULT_CHIME_REPEAT = 2; // v0.11.0 — user requested the chime sound twice on a new alert.
 
 function defaults(): AlertSettings {
   const priorityEnabled = {} as Record<AlarmPriority, boolean>;

@@ -154,6 +154,22 @@ test('forecastDayAlerts — does NOT fire soiling-pv when below threshold', () =
   assert.equal(alerts.find((a) => a.id === 'soiling-pv'), undefined);
 });
 
+// v0.54.0 — a data gap (e.g. a mid-afternoon cloud-offline window) thins the
+// recent clear-hour window and depresses recentCoeff, inflating dropPct into a
+// false "~40% soiling" Medium alert on recovery. computeSoiling now flags such a
+// window (recentCovered=false); the alert must stay silent until coverage returns.
+test('forecastDayAlerts — suppresses soiling-pv when the recent window is under-covered (post-gap artifact)', () => {
+  const df = emptyForecast({
+    soiling: { dropPct: 40, baselineCoeff: 10, recentCoeff: 6, cleanDays: 10, recentCovered: false },
+  });
+  const alerts = forecastDayAlerts(df);
+  assert.equal(
+    alerts.find((a) => a.id === 'soiling-pv'),
+    undefined,
+    'a data-gap-inflated dropPct with recentCovered=false must not fire the soiling alert',
+  );
+});
+
 /* ─── cache-warmer reset (v0.9.11 bug fix) ───────────────────────────────
  *
  * Regression test for the bug surfaced by log analysis: the cache-warmer

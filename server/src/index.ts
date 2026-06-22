@@ -70,7 +70,7 @@ import {
 } from './ecoflow/commands.js';
 import { appendWriteLog, tailWriteLog } from './writeLog.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 alarm-priority Alert Settings + preview.
-import { getAlertSettings, updateAlertSettings, isPriorityEnabled } from './alertSettings.js';
+import { getAlertSettings, updateAlertSettings, isPriorityEnabled, DEFAULT_CHIME_REPEAT } from './alertSettings.js';
 import { getBroadcastRuntimeConfig, updateBroadcastRuntimeConfig } from './broadcastRuntimeConfig.js';
 // v0.15.23 — Alert Console: operator-uploaded chime tones + per-level assignment.
 import {
@@ -299,8 +299,18 @@ const webDist =
   resolve(dirname(fileURLToPath(import.meta.url)), '../../web/dist');
 if (existsSync(webDist)) {
   await app.register(fastifyStatic, { root: webDist, wildcard: false });
+  // Asset prefixes served by fastify-static plugins below. A GET that misses a
+  // real file under one of these must hard-404 — falling through to the SPA
+  // catch-all would return index.html (HTML 200) for a missing tone, masking a
+  // broken assignment as a silent success in the Alert Console preview.
+  const ASSET_404_PREFIXES = ['/chimes/', '/audio-render/', '/audio/'];
   app.setNotFoundHandler((req, reply) => {
-    if (req.method !== 'GET' || req.url.startsWith('/api/') || req.url.startsWith('/ws')) {
+    if (
+      req.method !== 'GET' ||
+      req.url.startsWith('/api/') ||
+      req.url.startsWith('/ws') ||
+      ASSET_404_PREFIXES.some((p) => req.url.startsWith(p))
+    ) {
       reply.code(404).send({ error: 'not found' });
       return;
     }
@@ -2069,6 +2079,9 @@ function alertSettingsResponse() {
       };
     }),
     chimeRepeat: settings.chimeRepeat,
+    // The add-on baseline, surfaced so the UI can show the real default instead
+    // of a hardcoded literal (mirrors the broadcast card's envBaseline).
+    chimeRepeatDefault: DEFAULT_CHIME_REPEAT,
     updatedAt: settings.updatedAt,
   };
 }
@@ -2137,7 +2150,7 @@ function chimeConsoleResponse() {
   return {
     levels: CHIME_LEVELS,
     // UI labels for the 3 audio levels (the 4 ISA priorities collapse to these).
-    levelLabels: { red: 'Critical', yellow: 'Warning', green: 'Advisory' } as Record<AnnouncementLevel, string>,
+    levelLabels: { red: 'Critical', yellow: 'Caution', green: 'All-clear / Recovery' } as Record<AnnouncementLevel, string>,
     assignments: cfg.assignments,
     chimes: listChimes(),
     // v0.17.0 — the named built-in tone library, selectable per level alongside

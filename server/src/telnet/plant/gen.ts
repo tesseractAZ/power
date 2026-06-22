@@ -142,7 +142,10 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
     const tempCol = tempState(pk.temp ?? null);
     const socCol = socState(pk.soc ?? null);
     const cyc = pk.cycles != null ? String(pk.cycles) : '—';
-    const sohN = pk.actSoh ?? pk.soh;
+    // Display-only clamp: raw fullCap > designCap pushes actSoh slightly over 100%
+    // on near-new packs; the degradation engine/recorder keep the raw value.
+    const sohN0 = pk.actSoh ?? pk.soh;
+    const sohN = sohN0 == null ? null : Math.min(100, sohN0);
     const soh = sohN != null ? `${sohN.toFixed(1)}` : '—';
     // DPU packs don't expose a per-pack error code in the projection — we
     // surface overall fleet/MPPT errors on the system row instead. For a

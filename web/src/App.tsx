@@ -8,6 +8,7 @@ import type { DeviceSnapshot, DpuProjection, GenericProjection, Shp2Projection }
 import { Shp2Card } from './cards/Shp2Card';
 import { SmallDeviceCard } from './cards/SmallDeviceCard';
 import { alertCounts } from './alerts';
+import { priorityOf, priorityCounts } from './alertPriority';
 import { sortDevices } from './sort';
 import { fmtRel } from './format';
 import { SERIES_PALETTE } from './theme';
@@ -76,9 +77,13 @@ function NormalApp() {
   const alerts = snapshot?.alerts ?? [];
   const thresholdAlerts = useMemo(() => alerts.filter((a) => a.source !== 'learned'), [alerts]);
   const learnedAlerts = useMemo(() => alerts.filter((a) => a.source === 'learned'), [alerts]);
-  const thresholdCounts = useMemo(() => alertCounts(thresholdAlerts), [thresholdAlerts]);
   const learnedCounts = useMemo(() => alertCounts(learnedAlerts), [learnedAlerts]);
-  const alertBadgeCount = thresholdCounts.critical + thresholdCounts.warning;
+  // v0.54.0 — derive the Alerts badge + pill colour from the ISA priority of the
+  // threshold alerts, so a real measured-threshold Medium (P3, e.g. a reserve
+  // band) is reflected the same way the Alerts page counts it as "actionable".
+  const thresholdPriority = useMemo(() => priorityCounts(thresholdAlerts), [thresholdAlerts]);
+  const alertBadgeCount =
+    thresholdPriority.critical + thresholdPriority.high + thresholdPriority.medium;
   const predictiveBadgeCount = learnedCounts.critical + learnedCounts.warning;
 
   const shp2 = useMemo(() => sorted.find((d) => d.projection?.kind === 'shp2'), [sorted]);
@@ -199,7 +204,11 @@ function NormalApp() {
               {alertBadgeCount > 0 && (
                 <span
                   className={`text-[10px] font-semibold rounded-full px-1.5 py-px ${
-                    thresholdCounts.critical > 0 ? 'bg-bad/25 text-bad' : 'bg-warn/25 text-warn'
+                    thresholdPriority.critical > 0
+                      ? 'bg-bad/25 text-bad'
+                      : thresholdPriority.high > 0
+                        ? 'bg-high/25 text-high'
+                        : 'bg-warn/25 text-warn'
                   }`}
                 >
                   {alertBadgeCount}

@@ -106,10 +106,13 @@ function fmtVolt(mv: number | null | undefined): string {
   return mv > 10000 ? `${(mv / 1000).toFixed(1)} V` : `${(mv / 1000).toFixed(3)} V`;
 }
 /** Single SoH formatter shared by the matrix cell AND the detail tile so the same
- *  pack never renders two different numbers. One decimal keeps an above-nameplate
- *  reading visible (e.g. 100.4%) rather than collapsing to a bare "100%". */
+ *  pack never renders two different numbers. One decimal, clamped to 100% for
+ *  display: a couple near-new packs report fullCap > designCap so actSoh lands at
+ *  ~100.4%, which is physically nonsensical to show. The degradation engine and
+ *  recorder keep the RAW value (analytics.ts:1404 clamps internally) — this is a
+ *  display-only floor that keeps the four SoH render sites consistent. */
 function fmtSoh(v: number): string {
-  return `${v.toFixed(1)}%`;
+  return `${Math.min(100, v).toFixed(1)}%`;
 }
 
 /* ---- Matrix metric definitions ---- */

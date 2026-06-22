@@ -249,6 +249,29 @@ test('devices screen frames an offline core as cloud-offline, not stale-live', (
   assert.ok(/cloud-offline \(held\)/.test(offRow!), 'offline core shown with live PV instead of cloud-offline framing');
 });
 
+/* ── SoH display clamp (≤ 100%) — matrix + vitals ──────────────────────────
+ * A couple near-new packs report fullCap > designCap, so actSoh lands just over
+ * 100% (e.g. 100.44). That's physically nonsensical to SHOW; the degradation
+ * engine keeps the raw value, but every display site clamps to 100% so the
+ * matrix (1-decimal) and the detail vitals (2-decimal) never render > 100.0. */
+test('battery matrix + vitals clamp SoH display to ≤ 100%', () => {
+  const snap = buildSnapshot();
+  // Push every pack's measured SoH above nameplate on the SELECTED DPU (battDpu 0).
+  const dpu0 = Object.values(snap.devices).find((d) => d.projection?.kind === 'dpu')!;
+  for (const pk of (dpu0.projection as DpuProjection).packs) pk.actSoh = 100.44;
+  const lines = renderScreen(makeView('battery'), makeData(snap)).map(stripAnsi);
+  const plain = lines.join('\n');
+  // The raw over-100 tokens the unclamped formatters would emit must be absent.
+  assert.ok(!/100\.4%/.test(plain), `matrix rendered an unclamped SoH (100.4%):\n${plain}`);
+  assert.ok(!/100\.44%/.test(plain), `vitals rendered an unclamped SoH (100.44%):\n${plain}`);
+  // No SoH percentage token anywhere exceeds 100.0.
+  for (const m of plain.matchAll(/(\d+(?:\.\d+)?)%/g)) {
+    assert.ok(Number(m[1]) <= 100, `a percentage token (${m[1]}%) exceeds 100`);
+  }
+  // The clamped matrix value is what shows.
+  assert.ok(/100\.0%/.test(plain), `clamped SoH 100.0% not present:\n${plain}`);
+});
+
 test('battery screen surfaces the offline-freeze (held-from-last-known) state', () => {
   const lines = renderScreen(makeView('battery'), makeData(buildSnapshot({ offlineCore: true }))).map(stripAnsi);
   const plain = lines.join('\n');

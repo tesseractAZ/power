@@ -654,7 +654,10 @@ function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
       L.push(marker + c.grey(padEnd(`P${n}`, 5) + 'absent'));
       continue;
     }
-    const soh = pk.actSoh ?? pk.soh;
+    // Display-only clamp: a couple near-new packs report fullCap > designCap so
+    // actSoh lands at ~100.4%. The degradation engine/recorder keep the raw value.
+    const soh0 = pk.actSoh ?? pk.soh;
+    const soh = soh0 == null ? null : Math.min(100, soh0);
     const bal = (pk.balanceState ?? 0) !== 0 ? c.cyan(`↻ ${countSetBits(pk.balanceState!)}`) : c.grey('—');
     L.push(
       marker +
@@ -693,7 +696,10 @@ function packDetail(pk: DpuPack, dpu: DpuDev, w: number, degradation: FleetDegra
   );
   const cellV = pk.cellVoltagesMv;
   const meanMv = cellV.length ? cellV.reduce((s, v) => s + v, 0) / cellV.length : null;
-  const soh = pk.actSoh ?? pk.soh;
+  // Display-only clamp (see matrix above): raw fullCap > designCap pushes actSoh
+  // slightly over 100% on near-new packs; the analytics engine keeps the raw value.
+  const soh0 = pk.actSoh ?? pk.soh;
+  const soh = soh0 == null ? null : Math.min(100, soh0);
   const fullKwh = pk.fullCapMah != null ? (pk.fullCapMah * MAH_TO_WH) / 1000 : null;
   const bal = (pk.balanceState ?? 0) !== 0 ? `${countSetBits(pk.balanceState!)} cell(s)` : 'none';
 

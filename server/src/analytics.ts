@@ -647,6 +647,7 @@ export interface SoilingEstimate {
   baselineCoeff: number;  // best clear-sky W per W/m² observed (≈ clean panels)
   recentCoeff: number;    // recent clear-sky W per W/m²
   cleanDays: number;      // number of clear-sky days the estimate used
+  recentCovered?: boolean; // v0.54.0 — recent window has clear-hour coverage ~ the cleanest days. When false, recentCoeff is built from a data-gap-thinned window and the soiling alert is suppressed (estimate still shown).
 }
 
 export interface DayForecast {
@@ -863,13 +864,26 @@ function computeSoiling(
   }
   const days = [...byDay.entries()]
     .filter(([, v]) => v.length >= 3) // ≥3 clear hours to trust the day
-    .map(([day, v]) => ({ t: new Date(day).getTime(), coeff: median(v) }))
+    .map(([day, v]) => ({ t: new Date(day).getTime(), coeff: median(v), hours: v.length }))
     .sort((a, b) => a.t - b.t);
   if (days.length < 6) return null;
   const baselineCoeff = Math.max(...days.map((d) => d.coeff));
-  const recentCoeff = median(days.slice(-3).map((d) => d.coeff));
+  // v0.54.0 — recentCoeff must come from days whose clear-hour COVERAGE is
+  // comparable to the cleanest days on record. A data-gap day (e.g. a mid-
+  // afternoon cloud-offline window) records far fewer clear hours and its
+  // sparse/partial PV depresses that day's coeff — which previously inflated
+  // dropPct into a false ~40% "soiling" Medium alert on recovery. Restrict the
+  // recent window to well-covered days; flag (recentCovered=false) when we
+  // couldn't, which suppresses the alert without hiding the estimate. Gap-free
+  // operation is unchanged: every day is well-covered → identical to the prior
+  // last-3-days median.
+  const covBar = Math.max(3, Math.round(Math.max(...days.map((d) => d.hours)) * 0.5));
+  const wellCovered = days.filter((d) => d.hours >= covBar);
+  const recentCovered = wellCovered.length >= 3;
+  const recentPool = (recentCovered ? wellCovered : days).slice(-3);
+  const recentCoeff = median(recentPool.map((d) => d.coeff));
   const dropPct = baselineCoeff > 0 ? Math.round(((baselineCoeff - recentCoeff) / baselineCoeff) * 1000) / 10 : 0;
-  return { dropPct, baselineCoeff, recentCoeff, cleanDays: days.length };
+  return { dropPct, baselineCoeff, recentCoeff, cleanDays: days.length, recentCovered };
 }
 
 let dayForecastCache: { ts: number; value: DayForecast } | null = null;
@@ -1172,7 +1186,7 @@ export function forecastDayAlerts(df: DayForecast): Alert[] {
     });
   }
   // PV soiling — clear-sky output drifting below the clean-panel baseline.
-  if (df.soiling && df.soiling.cleanDays >= 6 && df.soiling.dropPct >= 12) {
+  if (df.soiling && df.soiling.cleanDays >= 6 && df.soiling.recentCovered !== false && df.soiling.dropPct >= 12) {
     out.push({
       id: 'soiling-pv',
       severity: df.soiling.dropPct >= 22 ? 'warning' : 'info',
