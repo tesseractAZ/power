@@ -630,6 +630,15 @@ app.get('/api/lifetime-energy', async (req, reply) => {
     grid_to_home_lifetime_kwh: live('fleet_grid_home_wh'),
     battery_charge_lifetime_kwh: live('fleet_battery_charge_wh'),
     battery_discharge_lifetime_kwh: live('fleet_battery_discharge_wh'),
+    // v0.56.0 — DISPLAY-ONLY annotation (does NOT touch the total_increasing counters). The coulomb
+    // baseline was captured mid-life, so over a window ending below baseline SoC cumulative discharge
+    // legitimately EXCEEDS charge (energy stored before the baseline counts on the way out but was
+    // never counted as charge in-window). This is NOT an RTE>100% energy-conservation violation —
+    // the user-facing round-trip efficiency is computed separately and clamped ≤100%. Positive =
+    // discharge ahead of charge; shrinks toward zero as the pool returns to its baseline SoC.
+    // See /api/debug/battery-lifetime.deficitWh.
+    battery_baseline_deficit_kwh:
+      Math.round((live('fleet_battery_discharge_wh') - live('fleet_battery_charge_wh')) * 1000) / 1000,
     details: totals,
   }, 15);
 });
