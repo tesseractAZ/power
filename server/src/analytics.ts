@@ -417,6 +417,36 @@ const SOH_DEGRADE_MIN_R2 = 0.5;                            // the decline must e
 // threshold alarm backstops the absolute level, and a >10 %/yr "fade" is settling/noise.
 const MAX_SOH_FADE_PCT_PER_YEAR = 10;
 
+/** v0.55.0 — physical ceiling on predicted EV-charging load per hour. The home has a SINGLE
+ *  EVSE; a residential charger tops out near 11.5 kW (48 A × 240 V). Configurable for a
+ *  different charger / a future second EVSE. */
+const EV_MAX_LOAD_W = Math.max(0, Number(process.env.EV_MAX_LOAD_W ?? 11520));
+
+/**
+ * v0.55.0 — fold predicted EV-charging sessions into a per-hour watt map for the load forecast.
+ * The home has ONE EVSE, so overlapping predicted sessions are ALTERNATIVES (uncertainty about
+ * which recurring window fires), not two cars at once — so each covered hour takes the MAX
+ * single-session watts, not the SUM. The old SUM stacked long overlapping windows into a
+ * physically-impossible ~17 kW (one Tesla session is ≤11.5 kW), which projected the overnight
+ * pool to 0% and inflated the forecast-soc-dip warning (latent false runway-critical if islanded).
+ * Each session is also hard-capped at `maxW` so a single anomalous recorded session can't inflate it.
+ */
+export function evLoadByHour(
+  sessions: Array<{ ts: number; durationHours: number; watts: number }>,
+  maxW: number = EV_MAX_LOAD_W,
+): Map<number, number> {
+  const byHour = new Map<number, number>();
+  for (const sess of sessions) {
+    const wholeHours = Math.max(1, Math.ceil(sess.durationHours));
+    const w = Math.min(sess.watts, maxW);
+    for (let i = 0; i < wholeHours; i++) {
+      const heKey = Math.floor((sess.ts + i * 3_600_000) / 3_600_000);
+      byHour.set(heKey, Math.max(byHour.get(heKey) ?? 0, w));
+    }
+  }
+  return byHour;
+}
+
 let forecastCache: { ts: number; alerts: Alert[]; depletionGate: boolean } | null = null;
 /** Test seam — clear the forecast-alert cache so successive scenarios recompute. */
 export function resetForecastAlertsCache(): void { forecastCache = null; }
@@ -1065,14 +1095,10 @@ export async function getDayForecast(
   // sessions overlap (rare but possible if multiple EVs / circuits), they
   // sum.
   const evPredictions = computeEvWindowPrediction(devices, recorder);
-  const evByHourEpoch = new Map<number, number>();
-  for (const sess of evPredictions.upcomingNext24h) {
-    const wholeHours = Math.max(1, Math.ceil(sess.durationHours));
-    for (let i = 0; i < wholeHours; i++) {
-      const heKey = Math.floor((sess.ts + i * 3_600_000) / 3_600_000);
-      evByHourEpoch.set(heKey, (evByHourEpoch.get(heKey) ?? 0) + sess.watts);
-    }
-  }
+  // v0.55.0 — single EVSE ⇒ overlapping predicted sessions are alternatives, so take the MAX
+  // watts per covered hour (capped at the charger max), not the SUM (which stacked to ~17 kW
+  // and projected a false overnight depletion). See evLoadByHour.
+  const evByHourEpoch = evLoadByHour(evPredictions.upcomingNext24h);
 
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
