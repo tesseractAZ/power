@@ -271,6 +271,35 @@ test('computeEvWindowPrediction — no spurious pattern from a single one-off cl
   assert.equal(r.patterns.length, 0, 'a one-off single-day cluster must not become a recurring pattern');
 });
 
+/* v0.56.1 — an EMPTY (0-session) EV prediction must be returned but NOT cached. Post-restart the
+ * first compute can catch the analytics worker's recorder read cold (0 sessions); with the 1 h TTL
+ * that empty would otherwise suppress the EV forecast for an hour. Mirrors the selfConsumption
+ * "returned but never latched" guard below. */
+function evCountingRecorder(series: Array<{ ts: number; value: number }> = []): Recorder & { queryCount: number } {
+  let queryCount = 0;
+  return {
+    insertSnapshot: () => {},
+    query: () => { queryCount++; return series; },
+    queryMulti: () => new Map(),
+    listMetrics: () => [],
+    close: () => {},
+    rollupLifetime: () => {},
+    getLifetimeTotals: () => ({}),
+    get queryCount() { return queryCount; },
+  } as unknown as Recorder & { queryCount: number };
+}
+
+test('computeEvWindowPrediction — an empty (0-session) result is returned but NOT cached (v0.56.1)', () => {
+  resetEvWindowCache();
+  const rec = evCountingRecorder([]); // recorder returns no pair-circuit data (cold post-restart)
+  const r1 = computeEvWindowPrediction(shp2WithCircuit(7), rec);
+  assert.equal(r1.sessionsObserved, 0);
+  const afterCold = rec.queryCount;
+  assert.ok(afterCold > 0, 'cold compute must hit the recorder');
+  computeEvWindowPrediction(shp2WithCircuit(7), rec); // a cached empty would serve this with 0 new queries
+  assert.ok(rec.queryCount > afterCold, 'an empty EV prediction must NOT be served from cache — it recomputes once warm');
+});
+
 /* ───────────────────────────────────────────────────────────────────────
  * v0.15.11 — runway publish sentinel (BUG-2). On a net-charging horizon the sim
  * never crosses reserve, so hoursTo* are legitimately null — but bare null →

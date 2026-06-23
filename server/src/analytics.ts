@@ -3010,7 +3010,11 @@ export function computeEvWindowPrediction(
     patterns,
     upcomingNext24h: upcoming,
   };
-  evWindowCache = { ts: now, value };
+  // v0.56.1 — do NOT cache an empty (0-session) result. Post-restart the first compute can catch
+  // the analytics worker's recorder read cold and find no sessions; with the 1 h TTL that empty
+  // would then suppress the EV forecast for an HOUR. Only cache a real prediction; an empty one
+  // recomputes on the next call (mirrors the v0.15.21 no-cache-empty-forecast precedent).
+  if (value.sessionsObserved > 0) evWindowCache = { ts: now, value };
   return value;
 }
 

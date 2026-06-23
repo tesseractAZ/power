@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.56.1 — 2026-06-22
+
+**[Fixed] The EV-window prediction could suppress the EV forecast for an hour after a restart.** `computeEvWindowPrediction` caches its result with a 1 h TTL; if the first compute after an add-on restart caught the analytics worker's recorder read cold, it found 0 sessions and cached that empty result — so `predictedEvLoadW` read 0 (and the EV forecast was absent) for up to an hour, until the TTL expired. Observed live right after the v0.56.0 deploy (`sessionsObserved: 0` while the recorder path was otherwise healthy). Fix: do not cache a 0-session result — an empty prediction recomputes on the next call instead (mirrors the existing v0.15.21 no-cache-empty-forecast guard for the day forecast). +1 test (an empty result is returned but never latched); suite 804 → 805; `tsc` clean.
+
 ## 0.56.0 — 2026-06-22
 
 Three performance-review follow-ups (each independently designed + adversarially reviewed).
