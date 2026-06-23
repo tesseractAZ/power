@@ -417,6 +417,36 @@ const SOH_DEGRADE_MIN_R2 = 0.5;                            // the decline must e
 // threshold alarm backstops the absolute level, and a >10 %/yr "fade" is settling/noise.
 const MAX_SOH_FADE_PCT_PER_YEAR = 10;
 
+/** v0.55.0 — physical ceiling on predicted EV-charging load per hour. The home has a SINGLE
+ *  EVSE; a residential charger tops out near 11.5 kW (48 A × 240 V). Configurable for a
+ *  different charger / a future second EVSE. */
+const EV_MAX_LOAD_W = Math.max(0, Number(process.env.EV_MAX_LOAD_W ?? 11520));
+
+/**
+ * v0.55.0 — fold predicted EV-charging sessions into a per-hour watt map for the load forecast.
+ * The home has ONE EVSE, so overlapping predicted sessions are ALTERNATIVES (uncertainty about
+ * which recurring window fires), not two cars at once — so each covered hour takes the MAX
+ * single-session watts, not the SUM. The old SUM stacked long overlapping windows into a
+ * physically-impossible ~17 kW (one Tesla session is ≤11.5 kW), which projected the overnight
+ * pool to 0% and inflated the forecast-soc-dip warning (latent false runway-critical if islanded).
+ * Each session is also hard-capped at `maxW` so a single anomalous recorded session can't inflate it.
+ */
+export function evLoadByHour(
+  sessions: Array<{ ts: number; durationHours: number; watts: number }>,
+  maxW: number = EV_MAX_LOAD_W,
+): Map<number, number> {
+  const byHour = new Map<number, number>();
+  for (const sess of sessions) {
+    const wholeHours = Math.max(1, Math.ceil(sess.durationHours));
+    const w = Math.min(sess.watts, maxW);
+    for (let i = 0; i < wholeHours; i++) {
+      const heKey = Math.floor((sess.ts + i * 3_600_000) / 3_600_000);
+      byHour.set(heKey, Math.max(byHour.get(heKey) ?? 0, w));
+    }
+  }
+  return byHour;
+}
+
 let forecastCache: { ts: number; alerts: Alert[]; depletionGate: boolean } | null = null;
 /** Test seam — clear the forecast-alert cache so successive scenarios recompute. */
 export function resetForecastAlertsCache(): void { forecastCache = null; }
@@ -1057,22 +1087,15 @@ export async function getDayForecast(
   let pvSum = 0;
   let pvCeilingW = 0; // v0.14.1 — clear-sky array ceiling (max observedMaxPvW × 1.05)
 
-  // v0.9.3 — lift predicted EV-charging sessions into the load curve. The
-  // EVSE window-prediction pattern detector already runs separately; this
-  // just folds its upcoming-24h forecast into each hour the session covers.
-  // Build a per-hour-epoch map of predicted EV watts (constant across each
-  // session's `durationHours` from the session start). When two predicted
-  // sessions overlap (rare but possible if multiple EVs / circuits), they
-  // sum.
+  // v0.9.3 — lift predicted EV-charging sessions into the load curve. The EVSE
+  // window-prediction pattern detector runs separately; this folds its upcoming-24h
+  // forecast into each hour a session covers.
+  // v0.55.0 — single EVSE ⇒ overlapping predicted sessions are ALTERNATIVES (which recurring
+  // window will fire), not two cars at once, so evLoadByHour takes the MAX watts per covered
+  // hour (capped at the charger max), NOT the SUM. The old SUM stacked long overlapping windows
+  // into a physically-impossible ~17 kW, projecting a false overnight depletion to 0%.
   const evPredictions = computeEvWindowPrediction(devices, recorder);
-  const evByHourEpoch = new Map<number, number>();
-  for (const sess of evPredictions.upcomingNext24h) {
-    const wholeHours = Math.max(1, Math.ceil(sess.durationHours));
-    for (let i = 0; i < wholeHours; i++) {
-      const heKey = Math.floor((sess.ts + i * 3_600_000) / 3_600_000);
-      evByHourEpoch.set(heKey, (evByHourEpoch.get(heKey) ?? 0) + sess.watts);
-    }
-  }
+  const evByHourEpoch = evLoadByHour(evPredictions.upcomingNext24h);
 
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
@@ -2928,8 +2951,9 @@ export function computeEvWindowPrediction(
   }
 
   // Project forward 24 h. v0.13.3 — two projection rules, deduped per future
-  // hour so a given hour is lifted at most once (the consumer SUMS watts across
-  // overlapping sessions, so a double-emit would double the EV load):
+  // hour so a given start-hour is emitted at most once (v0.55.0: the consumer
+  // takes the MAX watts per covered hour, not the SUM — so a duplicate emit
+  // would no longer double the load, but de-duping here keeps the output clean):
   //   • Weekday-keyed patterns keep their original semantics — they fire only on
   //     the matching (dayOfWeek, hour). A Tuesday-only charger still lifts only
   //     Tuesdays.
