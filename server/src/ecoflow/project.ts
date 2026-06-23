@@ -46,6 +46,53 @@ export function coherentBackupPool(
   return { pct, fullCapWh, remainWh };
 }
 
+/** v0.56.0 — grace-hold window for the backup-pool coherence gate. On a brief SHP2 cloud-reconnect
+ *  blip the trio reads incoherent for 1–2 ticks; rather than flap the gauge to "unknown" ~10-15×/day,
+ *  substitute the LAST coherent trio for up to this long. A SUSTAINED incoherence (real cloud-offline)
+ *  outlives the window → falls through to null → the gauge correctly goes unknown. ~3 min is far
+ *  longer than a reconnect blip, far shorter than a real outage, and — critically — MUST stay BELOW
+ *  the SoC alarm's SLEW_BASELINE_MAX_AGE_MS (10 min) so a hold never makes the alarm baseline stale.
+ *  Set to 0 to disable (any elapsed time fails the window check → behaves like before). */
+export const BACKUP_POOL_GRACE_HOLD_MS = Math.max(0, Number(process.env.BACKUP_POOL_GRACE_HOLD_MS ?? 180_000));
+
+export interface BackupPoolHold {
+  pct: number;
+  fullCapWh: number;
+  remainWh: number;
+  /** wall-clock of the LAST COHERENT reading — the window anchor (NOT refreshed while serving held). */
+  atMs: number;
+}
+
+/**
+ * v0.56.0 — apply the grace-hold over the coherence-gated trio. `live` is the freshly-gated result
+ * from `coherentBackupPool`; `held` is the last coherent trio we stashed (or null). A held value is,
+ * by construction, a previously-COHERENT trio — so it can never reintroduce the incoherent zero
+ * v0.54.4 was built to suppress, and feeding the SoC alarm a steady held value cannot cascade.
+ *   - live coherent          → publish live, refresh the hold (anchor atMs = nowMs).
+ *   - live incoherent, hold within window → publish HELD, carry the SAME hold (atMs unchanged so the
+ *                                            window keeps closing — else a sustained outage holds forever).
+ *   - live incoherent, hold absent/expired → publish null, DROP the hold (gauge goes unknown).
+ */
+export function backupPoolWithGraceHold(
+  live: { pct: number | null; fullCapWh: number | null; remainWh: number | null },
+  held: BackupPoolHold | null,
+  nowMs: number,
+  windowMs: number = BACKUP_POOL_GRACE_HOLD_MS,
+): {
+  out: { pct: number | null; fullCapWh: number | null; remainWh: number | null };
+  hold: BackupPoolHold | null;
+  source: 'live' | 'held' | 'none';
+} {
+  const coherent = live.pct != null && live.fullCapWh != null && live.remainWh != null;
+  if (coherent) {
+    return { out: live, hold: { pct: live.pct!, fullCapWh: live.fullCapWh!, remainWh: live.remainWh!, atMs: nowMs }, source: 'live' };
+  }
+  if (held && nowMs - held.atMs <= windowMs) {
+    return { out: { pct: held.pct, fullCapWh: held.fullCapWh, remainWh: held.remainWh }, hold: held, source: 'held' };
+  }
+  return { out: { pct: null, fullCapWh: null, remainWh: null }, hold: null, source: 'none' };
+}
+
 /**
  * v0.33.0 — derive a Delta Pro Ultra's WHOLE-UNIT battery DC current from its
  * per-pack power. The `hs_yj751_pd_backend_addr.batAmp` register reads only a

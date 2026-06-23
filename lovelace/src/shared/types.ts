@@ -495,13 +495,14 @@ export interface EvSessionPattern {
   typicalWatts: number;
   recurrences: number;
   energyKwh: number;
+  probability: number; // v0.56.0 — recurrence confidence (kept in sync with the server)
 }
 
 export interface EvWindowPrediction {
   generatedAt: number;
   sessionsObserved: number;
   patterns: EvSessionPattern[];
-  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number }>;
+  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number; probability: number }>;
 }
 
 export interface ChargeCurvePack {
