@@ -1182,9 +1182,25 @@ export async function getDayForecast(
   // projection) for the full 30-min TTL — observed live as 35–90 min of
   // "999 / no depletion" runway blindness after every restart. Serve the value
   // (callers still get PV/weather) but rebuild on the next request.
-  const loadCurveEmpty = !!shp2 && loadRes.spanMs === 0;
-  if (loadCurveEmpty) log('forecast: load curve empty (recorder not warm?) — NOT caching, will rebuild next call');
-  if (dpus.length > 0 && historyDays > 0 && !loadCurveEmpty) dayForecastCache = { ts: now, value };
+  // v0.57.0 — widen the v0.15.21 "don't cache an empty forecast" gate. The old
+  // `loadCurveEmpty = !!shp2 && loadRes.spanMs === 0` had a hole: its `!!shp2`
+  // guard short-circuits to false when the SHP2 is ABSENT from the snapshot (a
+  // cold worker right after a restart, or an SHP2 cloud-offline window) — the
+  // emptiest case of all — so a forecast built on the all-zero load fallback with
+  // no capacity basis (fullWh null → minProjectedSoc null) latched for the full
+  // 30-min TTL. Observed live as ~10 min of SoC/runway blindness after the v0.56.1
+  // deploy restart. Gate on INPUT SPANS / basis presence, never on output values:
+  // a real zero-PV night legitimately yields all-zero forecastPvW for every hour
+  // while still having a non-zero pvSpan from daytime history, and must still
+  // cache. Still SERVE the partial forecast (PV + weather stay useful); just don't
+  // latch it, so the next warm cycle rebuilds and it self-heals.
+  const loadCold = loadRes.spanMs === 0;              // no panel_load history (also true when the SHP2 is absent → zero-span fallback)
+  const pvCold = homeDpus.length > 0 && pvSpan === 0; // home DPUs present but their PV recorder is cold
+  const socBasisMissing = fullWh == null;             // no SHP2, or an incoherent backup pool → no SoC/runway projection
+  const structurallyIncomplete = loadCold || pvCold || socBasisMissing || historyDays <= 0;
+  if (structurallyIncomplete)
+    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — NOT caching, will rebuild next call`);
+  if (dpus.length > 0 && !structurallyIncomplete) dayForecastCache = { ts: now, value };
   return value;
 }
 
@@ -6618,6 +6634,7 @@ export function resetSelfConsumptionCache(): void {
 
 /** Test-only seam: clear forecast-related caches so each test starts cold. */
 export function resetForecastCachesForTesting(): void {
+  dayForecastCache = null; // v0.57.0 — was missing; needed to force a cold first compute when testing the structural-incompleteness latch gate
   probabilisticCache = null;
   multiDayCache = null;
   forecastSkillCache = null;

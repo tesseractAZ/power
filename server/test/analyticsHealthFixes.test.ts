@@ -19,13 +19,16 @@ import {
   computeRoundTripEfficiency,
   computeEvWindowPrediction,
   computeSelfConsumption,
+  getDayForecast,
   resetRteCache,
   resetEvWindowCache,
   resetSelfConsumptionCache,
   resetDailyEnergyCache,
+  resetForecastCachesForTesting,
   runwayHoursForPublish,
   RUNWAY_NO_DEPLETION_SENTINEL_H,
 } from '../src/analytics.js';
+import { setWeatherCacheForTesting, clearWeatherTestOverride } from '../src/weather.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -392,4 +395,105 @@ test('selfConsumption cache — complete fleet (DPU + SHP2) is cached as before'
   const cold = rec.queryMultiCount;
   computeSelfConsumption(full, rec);
   assert.equal(rec.queryMultiCount, cold, 'complete-fleet result is served from cache (TTL hit, zero new queries)');
+});
+
+/* ───────────────────────────────────────────────────────────────────────
+ * v0.57.0 — the day-ahead forecast must not LATCH a structurally-incomplete
+ * report. The v0.15.21 guard only caught `!!shp2 && loadRes.spanMs === 0` —
+ * its `!!shp2` short-circuit let the worst case (the SHP2 absent, or its
+ * backup pool not yet reported → fullWh null → minProjectedSoc null) sail
+ * through and cache a SoC-blind forecast for the full 30-min TTL. Observed
+ * live as ~10 min of runway/SoC blindness after the v0.56.1 deploy restart.
+ * The widened gate keys on input spans + capacity basis: serve the partial
+ * forecast, but never latch it.
+ * ─────────────────────────────────────────────────────────────────────── */
+
+/** Recorder that counts query() calls and returns a 2-point series spanning ~2
+ *  days for EVERY metric, so hourCurve / hourCurveByWeekday report spanMs > 0
+ *  (warm PV + load history). queryMulti is empty (it only feeds the solar model,
+ *  not the span gate). */
+function forecastCountingRecorder(): Recorder & { queryCount: number } {
+  let queryCount = 0;
+  const now = Date.now();
+  const spanned = [
+    { ts: now - 2 * 86_400_000, value: 100 },
+    { ts: now - 3_600_000, value: 100 },
+  ];
+  return {
+    insertSnapshot: () => {},
+    query: () => { queryCount++; return spanned; },
+    queryMulti: (_sn: string, metrics: string[]) => {
+      const m = new Map<string, Array<{ ts: number; value: number }>>();
+      for (const k of metrics) m.set(k, []);
+      return m;
+    },
+    listMetrics: () => [],
+    close: () => {},
+    rollupLifetime: () => {},
+    getLifetimeTotals: () => ({}),
+    get queryCount() { return queryCount; },
+  } as unknown as Recorder & { queryCount: number };
+}
+
+/** An SHP2 wired to SN-FC-DPU (so it counts as a home-connected fleet member),
+ *  with an optionally-present backup-capacity basis. */
+function shp2ForForecast(opts: { fullCapWh?: number | null; remainWh?: number | null } = {}): Record<string, DeviceSnapshot> {
+  return {
+    'SN-FC-SHP2': {
+      sn: 'SN-FC-SHP2',
+      deviceName: 'Smart Home Panel 2',
+      online: true,
+      lastSeenMs: Date.now(),
+      projection: {
+        kind: 'shp2',
+        area: null,
+        backupBatPercent: 60,
+        backupFullCapWh: opts.fullCapWh ?? null,
+        backupRemainWh: opts.remainWh ?? null,
+        backupChargeTimeMin: null, backupDischargeTimeMin: null,
+        backupReserveSoc: 15, chargeWattPower: null,
+        circuits: [], pairedCircuits: [],
+        sources: [{ isConnected: true, sn: 'SN-FC-DPU' }],
+        sourceWatts: [],
+        strategy: {} as any,
+      } as any,
+    } as unknown as DeviceSnapshot,
+  };
+}
+
+test('getDayForecast — SoC-blind forecast (shp2 present, no backup capacity) is returned but NOT latched (v0.57.0)', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null); // no network; the gate is independent of weather
+  try {
+    const rec = forecastCountingRecorder();
+    // Warm PV + load history (spanMs > 0) but the SHP2's backup pool is null
+    // (cold / incoherent) → minProjectedSoc null. Under the OLD gate this latched.
+    const devices = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: null }) };
+    const f1 = await getDayForecast(devices, rec);
+    assert.equal(f1.minProjectedSoc, null, 'no capacity basis → SoC projection is null');
+    const afterCold = rec.queryCount;
+    assert.ok(afterCold > 0, 'cold compute must hit the recorder');
+    await getDayForecast(devices, rec); // a latched SoC-blind forecast would serve this with 0 new queries
+    assert.ok(rec.queryCount > afterCold, 'a SoC-blind forecast must NOT be latched — it recomputes next call and self-heals');
+  } finally {
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
+});
+
+test('getDayForecast — complete inputs (shp2 + capacity + history) ARE cached, low SoC and all (v0.57.0 regression)', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  try {
+    const rec = forecastCountingRecorder();
+    const devices = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: 120_000, remainWh: 72_000 }) };
+    const f1 = await getDayForecast(devices, rec);
+    assert.ok(f1.minProjectedSoc != null, 'complete inputs → a real SoC projection (even if low)');
+    const cold = rec.queryCount;
+    await getDayForecast(devices, rec); // TTL hit → served from cache, zero new queries
+    assert.equal(rec.queryCount, cold, 'a structurally complete forecast is cached as before (no over-gating)');
+  } finally {
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
 });
