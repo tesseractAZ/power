@@ -16,6 +16,36 @@ const str = (q: Quota, k: string): string | null => {
   return v == null ? null : String(v);
 };
 
+/** SoC quantisation + REST/MQTT cross-sample jitter slack (mirrors gridState.ts's 1.5 %
+ *  boundary slack, widened for the cross-field comparison). */
+export const BACKUP_POOL_COHERENCE_SLACK_PCT = 5;
+
+/**
+ * v0.54.4 — backup-pool coherence gate. `backupBatPer`, `backupFullCap` and
+ * `backupDischargeRmainBatCap` all come from the SAME `backupIncreInfo` aggregate, so a
+ * healthy reading is self-consistent: `backupBatPer ≈ remain/full × 100` (live: 28 % vs
+ * 25497.6/92160 = 27.7 %). On an SHP2 EcoFlow-cloud reconnect the aggregate can momentarily
+ * report a stale/zero member while the pool is really fine — 2026-06-21 18:12 fired the whole
+ * 50→2 % SoC-alarm cascade + a broadcast off a transient 0.0 %. When the trio is mutually
+ * INCONSISTENT (or incomplete) none of it is trustworthy, so we return all-null ("unknown");
+ * every consumer (SoC alarm, on-screen reserve alert, runway projection, MQTT, recorder, TUI)
+ * already treats null as "no data" and self-heals on the next poll. NB: a perfectly coherent
+ * zero — all three reading ~0 together — is indistinguishable from a real empty pool by a
+ * stateless check, so the SoC alarm carries a separate single-tick plausibility guard for it.
+ */
+export function coherentBackupPool(
+  pct: number | null,
+  fullCapWh: number | null,
+  remainWh: number | null,
+): { pct: number | null; fullCapWh: number | null; remainWh: number | null } {
+  const untrusted = { pct: null, fullCapWh: null, remainWh: null };
+  // Need the full trio (and a real capacity) to cross-check; anything missing → untrusted.
+  if (pct == null || fullCapWh == null || fullCapWh <= 0 || remainWh == null) return untrusted;
+  const derivedPct = (remainWh / fullCapWh) * 100;
+  if (Math.abs(pct - derivedPct) > BACKUP_POOL_COHERENCE_SLACK_PCT) return untrusted;
+  return { pct, fullCapWh, remainWh };
+}
+
 /**
  * v0.33.0 — derive a Delta Pro Ultra's WHOLE-UNIT battery DC current from its
  * per-pack power. The `hs_yj751_pd_backend_addr.batAmp` register reads only a
@@ -470,12 +500,21 @@ export function projectShp2(q: Quota): Shp2Projection {
     ? (q['backupInfo.chWatt'] as number[])
     : [];
 
+  // v0.54.4 — gate the backup-pool trio on mutual coherence before it reaches any consumer,
+  // so a transient stale/zero member on an SHP2 cloud reconnect can't fire a false SoC-alarm
+  // cascade / runway-critical / reserve alert. Incoherent ⇒ all-null (unknown), self-heals.
+  const pool = coherentBackupPool(
+    num(q, 'backupIncreInfo.backupBatPer'),
+    num(q, 'backupIncreInfo.backupFullCap'),
+    num(q, 'backupIncreInfo.backupDischargeRmainBatCap'),
+  );
+
   return {
     kind: 'shp2',
     area: str(q, 'pd303_mc.area'),
-    backupBatPercent: num(q, 'backupIncreInfo.backupBatPer'),
-    backupFullCapWh: num(q, 'backupIncreInfo.backupFullCap'),
-    backupRemainWh: num(q, 'backupIncreInfo.backupDischargeRmainBatCap'),
+    backupBatPercent: pool.pct,
+    backupFullCapWh: pool.fullCapWh,
+    backupRemainWh: pool.remainWh,
     backupChargeTimeMin: num(q, 'backupInfo.backupChargeTime'),
     backupDischargeTimeMin: num(q, 'backupInfo.backupDischargeTime'),
     backupReserveSoc: num(q, 'backupReserveSoc'),

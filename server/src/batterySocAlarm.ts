@@ -52,6 +52,26 @@ export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
  *  it — stops a value sitting exactly on a boundary from chattering. */
 const REARM_MARGIN_PCT = 2;
 
+/** v0.54.4 — physical-plausibility guard. The ~92 kWh backup pool moves well under ~0.3 %
+ *  per poll even at rated discharge, so a single-tick SoC FALL larger than this from a
+ *  FRESH, healthy baseline is a stale/reconnect artifact (the SHP2's backupIncreInfo briefly
+ *  reads 0 on an EcoFlow-cloud reconnect — it laddered the whole 50→2 % cascade on
+ *  2026-06-21 18:12), not a real discharge. We ignore such a read rather than fire. This is
+ *  the depth backstop for the (rare) perfectly-coherent zero the source coherence gate
+ *  (ecoflow/project.ts coherentBackupPool) can't distinguish from a real empty pool. */
+const MAX_PLAUSIBLE_DROP_PCT = Number(process.env.BATTERY_SOC_MAX_DROP_PCT ?? 25);
+/** Only guard collapses FROM a healthy pool — a real deep discharge reaches 0 from an
+ *  already-low baseline, where the critical bands must still fire. */
+const HEALTHY_BASELINE_PCT = 30;
+/** The slew check only applies against a RECENT baseline. After a long gap (restart, hours
+ *  cloud-offline) the persisted lastSoc is stale and a large real change is plausible, so the
+ *  first fresh read re-baselines instead of being wrongly rejected. */
+const SLEW_BASELINE_MAX_AGE_MS = 10 * 60 * 1000;
+/** v0.54.4 — persist the baseline at least this often (even on a quiet, non-firing tick) so the
+ *  on-disk `lastSocAtMs` is never more than this stale; keeps the slew guard active across a
+ *  quick restart. Comfortably under SLEW_BASELINE_MAX_AGE_MS. */
+const BASELINE_PERSIST_THROTTLE_MS = 5 * 60 * 1000;
+
 /** The spoken message for a crossing, e.g. "Medium priority alarm. Backup pool at 20 percent."
  *  v0.15.16 — the alert type leads so the listener hears the severity before
  *  the detail (matches buildAlertMessage and the runway critical/high paths). */
@@ -110,14 +130,19 @@ interface PersistState {
   /** armed[pct] === true → eligible to fire on the next downward crossing. */
   armed: Record<string, boolean>;
   lastSoc: number | null;
+  /** v0.54.4 — wall-clock of the last honored reading; lets the slew guard tell a fresh
+   *  baseline (quick restart) from a stale one (long downtime). Absent in older state files
+   *  → treated as null → first read re-baselines (safe). */
+  lastSocAtMs?: number | null;
 }
 
 const STATE_PATH = process.env.BATTERY_SOC_ALARM_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'battery-soc-alarm.json');
 
 export interface BatterySocAlarm {
-  /** Feed the latest backup-pool SoC (%). Fires onCross for each downward crossing. */
-  update(socPct: number | null | undefined): void;
+  /** Feed the latest backup-pool SoC (%). Fires onCross for each downward crossing.
+   *  `nowMs` is injectable for deterministic tests (defaults to Date.now()). */
+  update(socPct: number | null | undefined, nowMs?: number): void;
   /** Current armed map — exposed for tests/diagnostics. */
   armed(): Record<number, boolean>;
 }
@@ -165,17 +190,41 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
   }
   let initialized = armed.size === BATTERY_SOC_THRESHOLDS.length;
   let lastSoc: number | null = persisted?.lastSoc ?? null;
+  let lastSocAtMs: number | null = persisted?.lastSocAtMs ?? null;
+  // v0.54.4 — the on-disk baseline must stay fresh enough that the plausibility guard is still
+  // active on the FIRST reading after a quick restart (SHP2 reconnects often coincide with
+  // add-on restart boundaries). Without this, a long quiet period (no crossings → no persist)
+  // leaves a stale `lastSocAtMs` on disk, so a coherent-zero arriving right at restart would
+  // slip past the guard. Persisting on a throttle bounds the on-disk staleness.
+  let lastPersistAtMs: number | null = lastSocAtMs;
 
   function persist() {
     const armedObj: Record<string, boolean> = {};
     for (const t of BATTERY_SOC_THRESHOLDS) armedObj[t.pct] = armed.get(t.pct) ?? true;
-    saveState(path, { armed: armedObj, lastSoc });
+    saveState(path, { armed: armedObj, lastSoc, lastSocAtMs });
+    lastPersistAtMs = lastSocAtMs;
   }
 
   return {
-    update(socPct) {
+    update(socPct, nowMs = Date.now()) {
       if (socPct == null || !Number.isFinite(socPct)) return;
       const soc = socPct;
+
+      // v0.54.4 — ignore an implausibly-large single-tick DROP from a FRESH, healthy baseline
+      // (a stale SHP2 reconnect reads 0 while the pool is fine). Don't fire, don't advance the
+      // baseline → it self-heals the instant a real read returns, and a SUSTAINED stale 0 keeps
+      // being rejected (the baseline never moves). A real discharge is gradual (each tick well
+      // under the cap) and never trips this; a real deep discharge reaches 0 from an already-low
+      // (<HEALTHY_BASELINE_PCT) baseline, where the guard is inactive so the critical bands fire.
+      if (
+        initialized && lastSoc != null && lastSocAtMs != null &&
+        nowMs - lastSocAtMs <= SLEW_BASELINE_MAX_AGE_MS &&
+        lastSoc >= HEALTHY_BASELINE_PCT &&
+        lastSoc - soc > MAX_PLAUSIBLE_DROP_PCT
+      ) {
+        log(`battery-soc-alarm: ignoring implausible ${lastSoc.toFixed(1)}→${soc.toFixed(1)}% single-tick drop (stale reconnect?)`);
+        return;
+      }
 
       // First real reading with no persisted state: arm only thresholds the
       // battery is currently ABOVE, so already-crossed ones don't re-fire.
@@ -183,6 +232,7 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
         for (const t of BATTERY_SOC_THRESHOLDS) armed.set(t.pct, soc > t.pct);
         initialized = true;
         lastSoc = soc;
+        lastSocAtMs = nowMs;
         persist();
         return;
       }
@@ -207,7 +257,12 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
         }
       }
       lastSoc = soc;
-      if (fired) persist();
+      lastSocAtMs = nowMs;
+      // Persist on a crossing/re-arm, or on the throttle so the on-disk baseline stays fresh
+      // enough that the plausibility guard survives a quick restart.
+      if (fired || lastPersistAtMs == null || nowMs - lastPersistAtMs >= BASELINE_PERSIST_THROTTLE_MS) {
+        persist();
+      }
     },
     armed() {
       const out: Record<number, boolean> = {};
