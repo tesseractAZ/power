@@ -62,8 +62,8 @@ export function buildAlertMessage(level: 'red' | 'yellow' | 'green', alerts: Ale
   const prefix = priorityAnnouncementPrefix(priorityOf(primary));
   const cat = ttsifyCategory(primary.category);
   const loc = ttsifyLocation(primary.coreNum, primary.packNum);
-  const title = ttsifyText(primary.title);
-  const detail = ttsifyText(shortenDetail(primary.detail));
+  const title = verbalizeForTts(primary.title);
+  const detail = verbalizeForTts(shortenDetail(primary.detail));
 
   const head = loc
     ? `${prefix} ${cat} ${loc}. ${title}.`
@@ -134,19 +134,85 @@ function numberWord(n: number): string {
   return String(n);
 }
 
-/** Normalize text for TTS — replace symbols and abbreviations that
- *  some engines read poorly ("%" as "percent sign"), but leave most
- *  alone so the alert author's wording survives.
+/**
+ * Verbalize a string for TTS so Piper/Wyoming reads it naturally instead of
+ * letter-by-letter or symbol-literal. Supersedes the old narrow `ttsifyText`:
+ * it now also expands UNITS ("6 h" → "6 hours", "450 W" → "450 watts",
+ * "7.5 kWh" → "7.5 kilowatt hours"), relational/math symbols (≥ ≤ < > ~ ≈ — · → ²),
+ * rate slashes ("%/h" → "percent per hour"), and plural "(s)" forms, on top of
+ * the existing percent / temperature / domain-abbreviation handling.
  *
- *  Conservative: we only fix things we've actually seen go wrong. */
-function ttsifyText(s: string): string {
+ * INVARIANTS:
+ *  • IDEMPOTENT at the FUNCTION level — verbalizeForTts(verbalizeForTts(x)) ===
+ *    verbalizeForTts(x) — because buildAlertMessage normalizes the alert
+ *    title/detail and THEN the renderer (audioRenderer.renderAnnouncement)
+ *    normalizes the whole assembled message a second time so the hand-built
+ *    SoC/runway/test/preview strings get the same safety net. (Note: individual
+ *    rules are not all self-no-ops — e.g. the h-rule turns "1 hour" into
+ *    "1 hours" — but the trailing singularize rule repairs the one-plural, so the
+ *    function as a whole round-trips. Any new time-unit rule must keep that
+ *    singularize list in sync.)
+ *  • Unit-expansion rules are NUMBER-ANCHORED ((\d…)\s*UNIT\b) so prose
+ *    ("a breaker"), device SNs (GBC0314), and error codes are never corrupted by
+ *    a unit rule — only a unit token abutting a number is expanded. Longest token
+ *    first (kWh before Wh before W; rate slashes before the bare-% rule). The
+ *    relational-symbol rules (< > ≥ ≤ ~ ≈) are intentionally un-anchored and fire
+ *    on any occurrence; alert strings should use the Unicode ≥/≤ for comparisons
+ *    (the ASCII >=/<= forms are handled too, but ≥/≤ is the house style).
+ *  • Only the SPOKEN path calls this; on-screen / notification copy keeps its
+ *    symbols. en_US only (the deployment's Piper voice). */
+export function verbalizeForTts(s: string): string {
   return s
-    .replace(/%/g, ' percent')
+    // plural "(s)" → plain plural BEFORE parens are stripped: "month(s)" → "months"
+    .replace(/\b(hour|minute|second|day|week|month|year|pack|cell|core|unit|panel)\(s\)/gi, '$1s')
+    // rate slashes → "per <unit>" (BEFORE the bare-% / unit rules consume the head)
+    .replace(/\/\s*h\b/g, ' per hour')                       // %/h, kWh/h
+    .replace(/\/\s*(day|week|month|year)\b/g, ' per $1')      // kWh/day, mV/week, %/month
+    // relational / approximation / math symbols
+    .replace(/\s*≥\s*/g, ' at or above ')
+    .replace(/\s*≤\s*/g, ' at or below ')
+    .replace(/\s*>=\s*/g, ' at or above ')  // ASCII forms before the bare < > rules, so no dangling "="
+    .replace(/\s*<=\s*/g, ' at or below ')
+    .replace(/\s*[≈~]\s*/g, ' about ')
+    .replace(/\s*<\s*/g, ' below ')
+    .replace(/\s*>\s*/g, ' above ')
+    .replace(/\s*→\s*/g, ' to ')
+    .replace(/²/g, ' squared')
+    // separators → a spoken pause
+    .replace(/\s*[—–]\s*/g, ', ')                             // em / en dash
+    .replace(/\s*·\s*/g, ', ')                                // middot
+    .replace(/[()]/g, ' ')                                    // drop parens (plural "(s)" already handled)
+    // duration combo BEFORE the generic hour rule: "3h 7m" → "3 hours 7 minutes"
+    .replace(/(\d+)\s*h\s+(\d+)\s*m\b/g, '$1 hours $2 minutes')
+    // energy / power / electrical units — number-anchored, longest token first
+    .replace(/(\d+(?:\.\d+)?)\s*kWh\b/g, '$1 kilowatt hours')
+    .replace(/(\d+(?:\.\d+)?)\s*Wh\b/g, '$1 watt hours')
+    .replace(/(\d+(?:\.\d+)?)\s*kWp\b/g, '$1 kilowatts peak')
+    .replace(/(\d+(?:\.\d+)?)\s*kW\b/g, '$1 kilowatts')
+    .replace(/(\d+(?:\.\d+)?)\s*W\b/g, '$1 watts')
+    .replace(/(\d+(?:\.\d+)?)\s*mAh\b/g, '$1 milliamp hours')
+    .replace(/(\d+(?:\.\d+)?)\s*Ah\b/g, '$1 amp hours')
+    .replace(/(\d+(?:\.\d+)?)\s*mA\b/g, '$1 milliamps')
+    .replace(/(\d+(?:\.\d+)?)\s*A\b/g, '$1 amps')
+    .replace(/(\d+(?:\.\d+)?)\s*mV\b/g, '$1 millivolts')
+    .replace(/(\d+(?:\.\d+)?)\s*kV\b/g, '$1 kilovolts')
+    .replace(/(\d+(?:\.\d+)?)\s*V\b/g, '$1 volts')
+    // time units — number-anchored
+    .replace(/(\d+(?:\.\d+)?)\s*h(?:rs?|ours?)?\b/g, '$1 hours') // 6h, 6 h, 6hr, 6 hrs, 6 hours
+    .replace(/(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b/g, '$1 minutes')
+    .replace(/(\d+(?:\.\d+)?)\s*mo\b/g, '$1 months')
+    // temperature & percent
     .replace(/°F/g, ' degrees Fahrenheit')
     .replace(/°C/g, ' degrees Celsius')
+    .replace(/%/g, ' percent')
+    // domain abbreviations — expand unknowns to words; keep established initialisms
     .replace(/\bSoC\b/g, 'state of charge')
     .replace(/\bSoH\b/g, 'state of health')
     .replace(/\bIR\b/g, 'internal resistance')
+    .replace(/\bEVSE\b/g, 'charger')          // before EV
+    .replace(/\bRTE\b/g, 'round trip efficiency')
+    .replace(/\bTOU\b/g, 'time of use')
+    .replace(/\bPV\b/g, 'solar')
     .replace(/\bMPPT\b/g, 'M P P T')
     .replace(/\bBMS\b/g, 'B M S')
     .replace(/\bEMS\b/g, 'E M S')
@@ -155,6 +221,10 @@ function ttsifyText(s: string): string {
     .replace(/\bEV\b/g, 'E V')
     .replace(/\bSHP2\b/g, 'smart panel')
     .replace(/\bDPU\b/g, 'D P U')
+    // singularize the realistic "1 <time>s" cases ("reserve in 1 hours" → "1 hour")
+    .replace(/\b1 (hour|minute|month|day|week|year)s\b/g, '1 $1')
+    // tidy: no space before punctuation introduced above, then collapse runs
+    .replace(/\s+([,.;:!?])/g, '$1')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }

@@ -63,6 +63,7 @@ import { readFile, writeFile, mkdir, access, readdir, stat, unlink } from 'node:
 import { existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
+import { verbalizeForTts } from './ttsService.js';
 import { getChimeRepeat } from './alertSettings.js';
 import { AUDIO_ASSETS_VERSION } from './audioAssets.js';
 
@@ -323,11 +324,21 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     }
   }
 
+  // v0.57.0 — verbalize the spoken text at the single chokepoint EVERY
+  // announcement path converges on: condition broadcasts (buildAlertMessage,
+  // already partly normalized — the pass is idempotent), the hand-built
+  // SoC/runway alarm strings (batterySocAlarm/runwayAlarm, previously RAW), and
+  // the test/preview strings. Units ("6 h" → "6 hours"), math/relational symbols
+  // (≥ < ~ — → ²) and abbreviations are now read naturally by Piper instead of
+  // letter-by-letter. Done AFTER renderCacheKey (above) so cache keys stay keyed
+  // on the raw message and remain stable.
+  const spoken = verbalizeForTts(message);
+
   // Render TTS
   const ttsResult = await renderWyomingTts({
     host: wyomingHost,
     port: wyomingPort,
-    text: message,
+    text: spoken,
     voice: wyomingVoice,
     timeoutMs: 15000,
   });
