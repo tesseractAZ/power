@@ -263,6 +263,41 @@ export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; c
   return { level, crit, warn };
 }
 
+// v0.58.0 — how long after boot the restart-continuation gate stays armed. Learned/
+// analytics alerts take ~1-2 min to re-warm post-restart, so a still-active
+// pre-restart condition re-appears as a "rise" minutes after boot; mirror the
+// notify path's warm-up grace. Env-tunable.
+const BROADCAST_BOOT_WARMUP_MS = Number(process.env.BROADCAST_BOOT_WARMUP_MS) || 10 * 60 * 1000;
+
+/**
+ * v0.58.0 — a restart must not re-broadcast (re-speak aloud) a YELLOW/GREEN
+ * condition that was already active and broadcast before the restart, even
+ * though analytics warm-up makes it re-appear as a fresh transition. Returns true
+ * (suppress) only for a yellow/green observation at or below the persisted
+ * pre-restart `baseline`, within the post-boot warm-up window.
+ *
+ * SAFETY: a RED (critical) observation is NEVER a continuation — it always
+ * returns false and broadcasts. Two reasons: (1) a critical that is still active
+ * across a restart SHOULD be re-announced; (2) the broadcast path is level-based
+ * with no alert identity, so a NEW, distinct critical firing during the warm-up
+ * window while a pre-restart red was already active would otherwise be swallowed
+ * by a same-rank (red≤red) match — an unacceptable risk of muting a fresh
+ * emergency. The observed restart re-speak bug was a YELLOW advisory; that is all
+ * we suppress. Pure + exported for tests.
+ */
+export function isRestartContinuation(
+  baseline: ConditionLevel | null,
+  observed: ConditionLevel,
+  msSinceBoot: number,
+  windowMs = BROADCAST_BOOT_WARMUP_MS,
+): boolean {
+  if (baseline == null) return false;        // first-ever boot / no verified prior broadcast → today's behaviour
+  if (msSinceBoot >= windowMs) return false; // past the warm-up window → normal transitions resume
+  if (observed === 'red') return false;      // SAFETY: never suppress a critical (re-announce; never mute a new one)
+  const RANK = { green: 0, yellow: 1, red: 2 } as const;
+  return RANK[observed] <= RANK[baseline];   // a same-or-lower yellow/green ⇒ continuation
+}
+
 /* ─── monitor ─────────────────────────────────────────────────────── */
 
 export interface BroadcastMonitor {
@@ -404,6 +439,12 @@ export function startBroadcastMonitor(
     lastSpokenMessage = s.lastSpokenMessage ?? null;
     if (s.lastRender) lastRender = s.lastRender;
   } catch { /* first boot / no prior state */ }
+  // v0.58.0 — restart-continuation baseline (used only to suppress a re-spoken
+  // YELLOW/GREEN advisory; criticals are never suppressed — see isRestartContinuation).
+  // Only adopt the persisted level when the last broadcast actually SUCCEEDED (the
+  // operator heard it); a failed/never-played pre-restart broadcast must still re-fire.
+  const bootMs = Date.now();
+  const bootBaselineLevel: ConditionLevel | null = lastOutcome === 'success' ? lastLevel : null;
 
   // v0.15.18 — single-slot deferred retry for broadcasts that could not be
   // verified (targets unavailable during an HA/MA restart, MA call failure,
@@ -734,6 +775,17 @@ export function startBroadcastMonitor(
     }
     const transitioned = level !== prevLevel;
     const newCrit = level === 'red' && crit > prevCrit;
+    // v0.58.0 — within the post-restart warm-up window, a condition that was
+    // already active (and successfully broadcast) before the restart re-appears as
+    // a "rise" once the analytics/learned alerts re-warm. Don't re-speak it aloud;
+    // adopt the level silently. A genuine escalation above the pre-restart baseline
+    // (e.g. yellow→red across the restart) still passes through and broadcasts.
+    if (transitioned && isRestartContinuation(bootBaselineLevel, level, Date.now() - bootMs)) {
+      log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);
+      prevLevel = level;
+      prevCrit = crit;
+      return;
+    }
     if (!transitioned && !newCrit) return;
     // Snapshot the transition state FIRST so a second arrival during an
     // in-flight broadcast doesn't re-fire (preserved from v0.9.49).

@@ -85,6 +85,16 @@ const CELL_TEMP_COLD_F = 41;
 
 const VOL_DIFF_WARN_MV = 20;
 const VOL_DIFF_CRIT_MV = 50;
+// v0.58.0 — on the LFP top-of-charge plateau (high SoC) cell spread transiently
+// balloons even with the BMS idle (balanceState=0), so the static 50 mV crit
+// chimed an audible klaxon repeatedly at the top of charge (live: 14 red
+// broadcasts in two top-of-charge bursts while the resting spread was a healthy
+// 2-5 mV). Above the plateau SoC, relax the critical threshold and keep a benign
+// excursion VISIBLE-but-silent (a debounced, auto-silenceable warning) — exactly
+// as the balancing gate does. A genuinely large spread (>= the relaxed ceiling)
+// still goes critical + audible. Env-tunable.
+const VOL_DIFF_PLATEAU_SOC_PCT = Number(process.env.VOL_DIFF_PLATEAU_SOC_PCT ?? 85);
+const VOL_DIFF_PLATEAU_CRIT_MV = Number(process.env.VOL_DIFF_PLATEAU_CRIT_MV ?? 90);
 const SOH_WARN_PCT = 85;
 const SOH_CRIT_PCT = 75;
 const PACK_SOC_LOW_PCT = 10;
@@ -387,11 +397,30 @@ export function computeAlerts(
         // alert VISIBLE (dashboard still shows it, with the balancing note) but mark
         // it annunciate:false so it never chimes/pushes during balancing. A genuine
         // sustained imbalance persists past balancing and re-fires annunciating.
-        const annun = balancing ? { annunciate: false } : {};
-        if (pk.maxVolDiffMv >= VOL_DIFF_CRIT_MV) {
-          out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${VOL_DIFF_CRIT_MV} mV).${balanceNote}`, ...annun });
+        // v0.58.0 — relaxed critical ceiling on the high-SoC LFP plateau (see
+        // VOL_DIFF_PLATEAU_* constants). packSoc prefers the pack reading and falls
+        // back to the device-projection SoC (pack soc is often null in DPU telemetry).
+        const packSoc = pk.soc ?? p.soc;
+        const onPlateau = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_SOC_PCT;
+        const critMv = onPlateau ? VOL_DIFF_PLATEAU_CRIT_MV : VOL_DIFF_CRIT_MV;
+        // A benign top-of-charge plateau excursion — a spread that WOULD have been
+        // critical off-plateau (>= VOL_DIFF_CRIT_MV) but sits under the relaxed
+        // plateau ceiling, with the BMS idle — stays VISIBLE but never chimes/pushes
+        // (same treatment as the balancing case). Normal warn-range spread
+        // (20..49 mV) keeps its usual annunciation; only the demoted-from-critical
+        // band is silenced, so the operator isn't klaxoned by expected LFP plateau
+        // spread. The silence is BOUNDED: as soon as SoC drops below the plateau
+        // (any discharge below VOL_DIFF_PLATEAU_SOC_PCT), the standard 50 mV critical
+        // re-arms — so a genuinely diverging pack still alarms audibly each cycle,
+        // and it stays visible as a warning meanwhile (SoH/degradation engines also
+        // track it independently).
+        const plateauBenign = onPlateau && !balancing && pk.maxVolDiffMv >= VOL_DIFF_CRIT_MV && pk.maxVolDiffMv < critMv;
+        const plateauNote = plateauBenign ? ' Expected top-of-charge cell spread.' : '';
+        const annun = (balancing || plateauBenign) ? { annunciate: false } : {};
+        if (pk.maxVolDiffMv >= critMv) {
+          out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${balanceNote}`, ...annun });
         } else if (pk.maxVolDiffMv >= VOL_DIFF_WARN_MV) {
-          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning ≥ ${VOL_DIFF_WARN_MV} mV).${balanceNote}`, ...annun });
+          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning ≥ ${VOL_DIFF_WARN_MV} mV).${balanceNote}${plateauNote}`, ...annun });
         }
       }
       if (balancing) {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { conditionFromAlerts, loadBroadcastConfig, announceVolumeLevel } from '../src/broadcast.js';
+import { conditionFromAlerts, loadBroadcastConfig, announceVolumeLevel, isRestartContinuation } from '../src/broadcast.js';
 import { generateAudioAssets } from '../src/audioAssets.js';
 import { mkdtempSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -353,4 +353,38 @@ test('loadBroadcastConfig — v0.15.7 repeatGapMs default + clamp', () => {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
     Object.assign(process.env, saved);
   }
+});
+
+/* ─── isRestartContinuation — v0.58.0 cross-restart broadcast dedup ──────
+ * A restart must not re-SPEAK a condition that was already active and already
+ * broadcast before the restart (the audible path lacked the cross-restart dedup
+ * the notify path has — live: a yellow re-spoken on every restart). Within the
+ * post-boot warm-up window, a same-or-lower level than the persisted baseline is
+ * a continuation (suppress); a genuine escalation still fires. */
+const WIN = 10 * 60 * 1000;
+
+test('isRestartContinuation — same YELLOW within window → suppress; same RED is NEVER suppressed', () => {
+  assert.equal(isRestartContinuation('yellow', 'yellow', 90_000, WIN), true);
+  // SAFETY (v0.58.0 review): a critical is never a "continuation". It re-announces
+  // on restart, AND a NEW distinct critical that fires during the warm-up window
+  // while a pre-restart red was active must not be muted by a same-rank red≤red match.
+  assert.equal(isRestartContinuation('red', 'red', 90_000, WIN), false);
+});
+
+test('isRestartContinuation — lower level within window → suppress (cleared while down, no spurious all-clear)', () => {
+  assert.equal(isRestartContinuation('red', 'green', 90_000, WIN), true);
+  assert.equal(isRestartContinuation('red', 'yellow', 90_000, WIN), true);
+});
+
+test('isRestartContinuation — ESCALATION above baseline still fires (never suppressed)', () => {
+  assert.equal(isRestartContinuation('yellow', 'red', 90_000, WIN), false);
+  assert.equal(isRestartContinuation('green', 'yellow', 90_000, WIN), false);
+});
+
+test('isRestartContinuation — past the warm-up window → normal transitions resume', () => {
+  assert.equal(isRestartContinuation('red', 'red', WIN + 1, WIN), false);
+});
+
+test('isRestartContinuation — no baseline (first boot / unverified prior broadcast) → today behaviour', () => {
+  assert.equal(isRestartContinuation(null, 'red', 1_000, WIN), false);
 });

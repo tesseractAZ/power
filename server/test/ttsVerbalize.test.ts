@@ -131,3 +131,23 @@ test('verbalize — full SoC alarm + runway alarm strings read naturally', () =>
     'Backup pool projected empty in about 6 hours. Grid is present.',
   );
 });
+
+/* ─── golden fixtures: ACTUAL strings observed in the 36h scenario log ────
+ * These are the real alarm/notify titles+details that were broadcast (under the
+ * OLD normalizer) during the deep-discharge + top-of-charge events. Lock them so
+ * the verbalizer keeps reading them naturally. */
+test('verbalize — golden fixtures from observed v0.57.0-era scenario log', () => {
+  // the literal runway notify string the user would have heard as "five h forty m"
+  assert.equal(
+    verbalizeForTts('Projected runtime ≈ 5h 40m to reserve'),
+    'Projected runtime about 5 hours 40 minutes to reserve',
+  );
+  // the cell-imbalance / MPPT family that flapped at top-of-charge
+  assert.equal(verbalizeForTts('HV MPPT error code 17'), 'high voltage M P P T error code 17');
+  assert.equal(
+    verbalizeForTts('Pack spread 35 mV (critical ≥ 40 mV)'),
+    'Pack spread 35 millivolts critical at or above 40 millivolts',
+  );
+  // a SoC-band title with a glued em-dash + percent
+  assert.equal(verbalizeForTts('Backup pool low — 20%'), 'Backup pool low, 20 percent');
+});

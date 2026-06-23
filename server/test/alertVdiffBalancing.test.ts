@@ -14,10 +14,10 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * re-fires annunciating.
  * =================================================================== */
 
-function dpuWithPack(pack: Record<string, number | null>): Record<string, DeviceSnapshot> {
+function dpuWithPack(pack: Record<string, number | null>, soc = 95): Record<string, DeviceSnapshot> {
   const projection = {
     kind: 'dpu',
-    soc: 95,
+    soc,
     packs: [{ num: 1, ...pack }],
     pvHighWatts: 0, pvLowWatts: 0, pvTotalWatts: 0,
     pvHighVolts: 0, pvHighAmps: 0, pvLowVolts: 0, pvLowAmps: 0,
@@ -41,8 +41,10 @@ const vdiffCrit = (devices: Record<string, DeviceSnapshot>) =>
 const vdiffWarn = (devices: Record<string, DeviceSnapshot>) =>
   computeAlerts(devices).find((a) => a.id === 'vdiff-warn-DPU-1-1');
 
+// soc 50 = OFF the v0.58.0 high-SoC plateau, so the 60 mV crit threshold is the
+// standard 50 mV and these balancing-gate cases keep their original meaning.
 test('vdiff-crit while BALANCING is still raised (visible) but annunciate:false (no chime/push)', () => {
-  const a = vdiffCrit(dpuWithPack({ maxVolDiffMv: 60, balanceState: 1 }));
+  const a = vdiffCrit(dpuWithPack({ maxVolDiffMv: 60, balanceState: 1 }, 50));
   assert.ok(a, 'critical imbalance alert should still be raised so it stays on-screen');
   assert.equal(a!.severity, 'critical');
   assert.equal(a!.annunciate, false);
@@ -50,7 +52,7 @@ test('vdiff-crit while BALANCING is still raised (visible) but annunciate:false 
 });
 
 test('vdiff-crit while NOT balancing annunciates normally (a real sustained fault)', () => {
-  const a = vdiffCrit(dpuWithPack({ maxVolDiffMv: 60, balanceState: 0 }));
+  const a = vdiffCrit(dpuWithPack({ maxVolDiffMv: 60, balanceState: 0 }, 50));
   assert.ok(a);
   // No annunciate key (or anything but false) → default-annunciating critical.
   assert.notEqual(a!.annunciate, false);
@@ -72,4 +74,37 @@ test('a spread below the warn threshold raises no vdiff alert at all, even while
   const devices = dpuWithPack({ maxVolDiffMv: 10, balanceState: 1 });
   assert.equal(vdiffCrit(devices), undefined);
   assert.equal(vdiffWarn(devices), undefined);
+});
+
+/* ===================================================================
+ * v0.58.0 — high-SoC LFP plateau relax. Cell spread balloons transiently at the
+ * top of charge with the BMS idle (balanceState=0), which the v0.29.0 balancing
+ * gate does NOT catch — so 50 mV chimed an audible CRITICAL klaxon every top-of-
+ * charge cycle (live: 14 red broadcasts in two bursts, resting spread 2-5 mV).
+ * Above VOL_DIFF_PLATEAU_SOC_PCT (85%) the critical threshold relaxes to
+ * VOL_DIFF_PLATEAU_CRIT_MV (90 mV); a benign 50-89 mV plateau excursion becomes a
+ * VISIBLE, non-annunciating warning; a genuinely large spread still goes critical.
+ * =================================================================== */
+
+test('plateau (soc 95, idle): a 60 mV spread is a non-annunciating WARNING, not an audible critical', () => {
+  const devices = dpuWithPack({ maxVolDiffMv: 60, balanceState: 0 }, 95);
+  assert.equal(vdiffCrit(devices), undefined, '60 mV at 95% SoC must NOT promote to critical');
+  const w = vdiffWarn(devices);
+  assert.ok(w, 'it stays visible as a warning');
+  assert.equal(w!.annunciate, false, 'benign top-of-charge spread must not chime/push');
+  assert.match(w!.detail, /top-of-charge/i);
+});
+
+test('plateau (soc 95, idle): a genuinely large spread (>= 90 mV) still goes CRITICAL and annunciates', () => {
+  const a = vdiffCrit(dpuWithPack({ maxVolDiffMv: 95, balanceState: 0 }, 95));
+  assert.ok(a, 'a 95 mV spread exceeds the relaxed plateau ceiling → still critical');
+  assert.equal(a!.severity, 'critical');
+  assert.notEqual(a!.annunciate, false, 'a real large imbalance still chimes');
+});
+
+test('off-plateau (soc 50, idle): a 60 mV spread is unchanged — annunciating CRITICAL', () => {
+  const a = vdiffCrit(dpuWithPack({ maxVolDiffMv: 60, balanceState: 0 }, 50));
+  assert.ok(a, 'below the plateau SoC the standard 50 mV crit threshold applies');
+  assert.equal(a!.severity, 'critical');
+  assert.notEqual(a!.annunciate, false);
 });
