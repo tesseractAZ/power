@@ -430,15 +430,19 @@ const EV_MAX_LOAD_W = Math.max(0, Number(process.env.EV_MAX_LOAD_W ?? 11520));
  * physically-impossible ~17 kW (one Tesla session is ≤11.5 kW), which projected the overnight
  * pool to 0% and inflated the forecast-soc-dip warning (latent false runway-critical if islanded).
  * Each session is also hard-capped at `maxW` so a single anomalous recorded session can't inflate it.
+ * v0.56.0 — each session is also weighted by its recurrence `probability` (expected-value load):
+ * a charger seen on only 3 of ~28 days contributes ~11% of its watts, so a sometimes-charger no
+ * longer hard-projects an overnight 0%. (Omitted probability ⇒ 1.0, so existing callers/tests are
+ * unchanged.) The cap is applied to the REAL session first (a physical ceiling), THEN the weight.
  */
 export function evLoadByHour(
-  sessions: Array<{ ts: number; durationHours: number; watts: number }>,
+  sessions: Array<{ ts: number; durationHours: number; watts: number; probability?: number }>,
   maxW: number = EV_MAX_LOAD_W,
 ): Map<number, number> {
   const byHour = new Map<number, number>();
   for (const sess of sessions) {
     const wholeHours = Math.max(1, Math.ceil(sess.durationHours));
-    const w = Math.min(sess.watts, maxW);
+    const w = Math.min(sess.watts, maxW) * clamp01(sess.probability ?? 1);
     for (let i = 0; i < wholeHours; i++) {
       const heKey = Math.floor((sess.ts + i * 3_600_000) / 3_600_000);
       byHour.set(heKey, Math.max(byHour.get(heKey) ?? 0, w));
@@ -671,6 +675,8 @@ export interface ForecastHour {
   modelled: boolean; // true = used the learned response model; false = fallback
   // v0.9.3 — predicted EV-charging load lifted from computeEvWindowPrediction
   // and folded into the load curve. 0 when no EV session is predicted.
+  // v0.56.0 — this is the EXPECTED-VALUE (recurrence-weighted) EV load: a session's full
+  // watts × its P(fires). The raw full-confidence watts + probability stay in /api/ev-window-prediction.
   predictedEvLoadW?: number;
 }
 
@@ -2758,13 +2764,14 @@ export interface EvSessionPattern {
   typicalWatts: number;
   recurrences: number;
   energyKwh: number;        // typical per-session
+  probability: number;      // v0.56.0 — P(session fires) = recurrences / observed-day denominator, 0..1
 }
 
 export interface EvWindowPrediction {
   generatedAt: number;
   sessionsObserved: number;
   patterns: EvSessionPattern[];
-  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number }>;
+  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number; probability: number }>;
 }
 
 let evWindowCache: { ts: number; value: EvWindowPrediction } | null = null;
@@ -2843,6 +2850,18 @@ export function computeEvWindowPrediction(
     }
   }
 
+  // v0.56.0 — recurrence-probability denominator. Distinct calendar days on which ANY EV
+  // session was observed in the window; a pattern seen on N of these days fired ~N/observedDays
+  // of the time, so we confidence-weight its projected watts (expected-value load) rather than
+  // assume it fires every night. A ~10 kW session seen 3 of ~28 days contributes ~1.1 kW.
+  const observedDayKeys = new Set(sessions.map((s) => new Date(s.startTs).toDateString()));
+  const observedDays = Math.max(1, observedDayKeys.size);
+  const observedDaysByDow = new Map<number, number>(); // for weekday-keyed patterns: a Tue charger can only fire on observed Tuesdays
+  for (const k of observedDayKeys) {
+    const dow = new Date(k).getDay();
+    observedDaysByDow.set(dow, (observedDaysByDow.get(dow) ?? 0) + 1);
+  }
+
   // Round each session's start to the nearest hour boundary once, up front —
   // both the weekday bucketing (below) and the v0.13.3 daily detector key off
   // it. (minutes >= 30 ⇒ +1 hour, else current hour.)
@@ -2889,6 +2908,8 @@ export function computeEvWindowPrediction(
       typicalWatts: Math.round(watts),
       recurrences: g.records.length,
       energyKwh: round1(kwh),
+      // v0.56.0 — fired on `recurrences` of the observed days of THIS weekday.
+      probability: clamp01(g.records.length / Math.max(1, observedDaysByDow.get(Number(dowS)) ?? 0)),
     });
   }
 
@@ -2947,6 +2968,10 @@ export function computeEvWindowPrediction(
       typicalWatts: Math.round(watts),
       recurrences: g.records.length,
       energyKwh: round1(kwh),
+      // v0.56.0 — a "daily" habit projects onto EVERY day, so its confidence is the fraction of
+      // observed days it actually fired (distinct-days, not raw session count → a multi-session
+      // day can't inflate it). A 3-of-28-days charger projects at ~0.11, not 1.0.
+      probability: clamp01(distinctDays / observedDays),
     });
   }
 
@@ -2975,7 +3000,7 @@ export function computeEvWindowPrediction(
       if (best == null || p.typicalWatts > best.typicalWatts) best = p;
     }
     if (best) {
-      upcoming.push({ ts, durationHours: best.typicalDurationHours, watts: best.typicalWatts, dayOfWeek: dow });
+      upcoming.push({ ts, durationHours: best.typicalDurationHours, watts: best.typicalWatts, dayOfWeek: dow, probability: best.probability });
     }
   }
 

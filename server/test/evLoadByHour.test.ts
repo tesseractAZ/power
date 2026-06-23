@@ -48,3 +48,38 @@ test('evLoadByHour — a real in-bounds session passes through unchanged', () =>
 test('evLoadByHour — empty sessions → empty map', () => {
   assert.equal(evLoadByHour([], 11520).size, 0);
 });
+
+/* v0.56.0 — recurrence-probability weighting (expected-value load). A charger seen on only a
+ * few of the observed days should contribute a FRACTION of its watts, so a sometimes-charger
+ * stops hard-projecting an overnight 0% (the live circuit-5 case: 10 kW seen 3 of ~28 days). */
+
+test('evLoadByHour — a low-recurrence session contributes its EXPECTED watts, not full', () => {
+  // The live incident shape: ~10 kW, 2.1h, fired 3 of ~28 days → P≈0.107 → ~1.08 kW expected.
+  const m = evLoadByHour([{ ts: 0, durationHours: 2.1, watts: 10055, probability: 3 / 28 }], 11520);
+  assert.ok(m.get(0)! < 1500 && m.get(0)! > 900, `expected ~1.08kW, got ${m.get(0)}`);
+});
+
+test('evLoadByHour — omitted probability ⇒ P=1 (backward compatible)', () => {
+  const m = evLoadByHour([{ ts: 0, durationHours: 1, watts: 7680 }], 11520);
+  assert.equal(m.get(0), 7680);
+});
+
+test('evLoadByHour — P=1 every-day charger passes full (capped) watts', () => {
+  const m = evLoadByHour([{ ts: 0, durationHours: 1, watts: 7680, probability: 1 }], 11520);
+  assert.equal(m.get(0), 7680);
+});
+
+test('evLoadByHour — cap applies to the REAL session first, THEN the weight', () => {
+  // min(17025, 11520) × 0.5 = 5760  (NOT 17025×0.5=8512.5, NOT capped-after).
+  const m = evLoadByHour([{ ts: 0, durationHours: 1, watts: 17025, probability: 0.5 }], 11520);
+  assert.equal(m.get(0), 5760);
+});
+
+test('evLoadByHour — overlap takes MAX of EXPECTED values (high-watt low-P no longer dominates)', () => {
+  // A:7000×0.2=1400 vs B:3500×1.0=3500 covering the same hour → 3500 (the more likely session wins).
+  const m = evLoadByHour([
+    { ts: 0, durationHours: 1, watts: 7000, probability: 0.2 },
+    { ts: 0, durationHours: 1, watts: 3500, probability: 1.0 },
+  ], 11520);
+  assert.equal(m.get(0), 3500);
+});

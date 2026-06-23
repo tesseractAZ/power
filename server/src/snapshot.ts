@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
-import { projectByProduct, Projection } from './ecoflow/project.js';
+import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 
 /** Local SN→name overrides from device-aliases.json (optional file). */
@@ -68,6 +68,14 @@ export class SnapshotStore extends EventEmitter {
   // Wired by `startPollLoop` so tests / call sites that build a store directly
   // get silent no-op behavior by default. (The MQTT entry point also wires it.)
   private logger: (msg: string) => void = () => {};
+
+  // v0.56.0 — last-coherent backup-pool trio per SHP2 SN, for the grace-hold that smooths the
+  // ~10-15/day reconnect blips that would otherwise flap the gauge to "unknown".
+  private backupPoolHoldBySn: Map<string, BackupPoolHold | null> = new Map();
+  // Injectable clock — prod uses Date.now; tests call setClock() for deterministic grace-hold timing.
+  private now: () => number = Date.now;
+  /** test-only — drive the grace-hold window deterministically. */
+  setClock(fn: () => number) { this.now = fn; }
 
   /**
    * v0.20.0 — monotonic per-emit sequence, bumped on every 'change' emit. Lets
@@ -189,12 +197,30 @@ export class SnapshotStore extends EventEmitter {
     this.lastDeviceListAttemptAt = Date.now();
   }
 
+  /** v0.56.0 — smooth the SHP2 backup-pool gauge across brief cloud-reconnect blips: substitute
+   *  the last-COHERENT trio for up to BACKUP_POOL_GRACE_HOLD_MS instead of immediately publishing
+   *  "unknown" when coherentBackupPool nulls a transient incoherent read. Mutates the projection
+   *  in place so EVERY consumer (gauge/MQTT/recorder/runway/SoC alarm) sees one consistent value.
+   *  No-op for non-SHP2 projections. */
+  private applyBackupPoolGraceHold(sn: string, proj: Projection | undefined): void {
+    if (!proj || proj.kind !== 'shp2') return;
+    const live = { pct: proj.backupBatPercent, fullCapWh: proj.backupFullCapWh, remainWh: proj.backupRemainWh };
+    const { out, hold, source } = backupPoolWithGraceHold(live, this.backupPoolHoldBySn.get(sn) ?? null, this.now());
+    this.backupPoolHoldBySn.set(sn, hold);
+    proj.backupBatPercent = out.pct;
+    proj.backupFullCapWh = out.fullCapWh;
+    proj.backupRemainWh = out.remainWh;
+    if (source === 'held') this.logger(`backup-pool: holding last-good ${out.pct}% across a reconnect blip (sn=${sn})`);
+    else if (source === 'none' && live.pct == null) this.logger(`backup-pool: grace window expired → unknown (sn=${sn})`);
+  }
+
   /** Replace the full raw quota for a device (called after a REST refresh). */
   setDeviceQuota(sn: string, raw: Record<string, unknown>, source: 'rest' | 'mqtt' = 'rest') {
     const cur = this.snap.devices[sn];
     if (!cur) return;
     this.rawBySn.set(sn, raw);
     cur.projection = projectByProduct(cur.productName, raw);
+    this.applyBackupPoolGraceHold(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? raw : undefined;
     cur.lastUpdated = Date.now();
     cur.lastError = undefined;
@@ -222,6 +248,7 @@ export class SnapshotStore extends EventEmitter {
     Object.assign(merged, partial);
     this.rawBySn.set(sn, merged);
     cur.projection = projectByProduct(cur.productName, merged);
+    this.applyBackupPoolGraceHold(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? merged : undefined;
     cur.lastUpdated = Date.now();
     cur.lastError = undefined;
