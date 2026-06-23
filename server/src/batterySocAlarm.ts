@@ -67,6 +67,10 @@ const HEALTHY_BASELINE_PCT = 30;
  *  cloud-offline) the persisted lastSoc is stale and a large real change is plausible, so the
  *  first fresh read re-baselines instead of being wrongly rejected. */
 const SLEW_BASELINE_MAX_AGE_MS = 10 * 60 * 1000;
+/** v0.54.4 — persist the baseline at least this often (even on a quiet, non-firing tick) so the
+ *  on-disk `lastSocAtMs` is never more than this stale; keeps the slew guard active across a
+ *  quick restart. Comfortably under SLEW_BASELINE_MAX_AGE_MS. */
+const BASELINE_PERSIST_THROTTLE_MS = 5 * 60 * 1000;
 
 /** The spoken message for a crossing, e.g. "Medium priority alarm. Backup pool at 20 percent."
  *  v0.15.16 — the alert type leads so the listener hears the severity before
@@ -187,11 +191,18 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
   let initialized = armed.size === BATTERY_SOC_THRESHOLDS.length;
   let lastSoc: number | null = persisted?.lastSoc ?? null;
   let lastSocAtMs: number | null = persisted?.lastSocAtMs ?? null;
+  // v0.54.4 — the on-disk baseline must stay fresh enough that the plausibility guard is still
+  // active on the FIRST reading after a quick restart (SHP2 reconnects often coincide with
+  // add-on restart boundaries). Without this, a long quiet period (no crossings → no persist)
+  // leaves a stale `lastSocAtMs` on disk, so a coherent-zero arriving right at restart would
+  // slip past the guard. Persisting on a throttle bounds the on-disk staleness.
+  let lastPersistAtMs: number | null = lastSocAtMs;
 
   function persist() {
     const armedObj: Record<string, boolean> = {};
     for (const t of BATTERY_SOC_THRESHOLDS) armedObj[t.pct] = armed.get(t.pct) ?? true;
     saveState(path, { armed: armedObj, lastSoc, lastSocAtMs });
+    lastPersistAtMs = lastSocAtMs;
   }
 
   return {
@@ -247,7 +258,11 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
       }
       lastSoc = soc;
       lastSocAtMs = nowMs;
-      if (fired) persist();
+      // Persist on a crossing/re-arm, or on the throttle so the on-disk baseline stays fresh
+      // enough that the plausibility guard survives a quick restart.
+      if (fired || lastPersistAtMs == null || nowMs - lastPersistAtMs >= BASELINE_PERSIST_THROTTLE_MS) {
+        persist();
+      }
     },
     armed() {
       const out: Record<number, boolean> = {};

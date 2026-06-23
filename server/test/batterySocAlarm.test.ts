@@ -201,6 +201,22 @@ test('v0.54.4 — after a long gap (stale baseline) a large real change re-basel
   assert.deepEqual(fired, [50, 40, 30, 20]);
 });
 
+test('v0.54.4 — throttled persist keeps the slew guard active across a quick restart', () => {
+  const sp = join(tmpdir(), `soc-restart-${process.pid}-${Date.now()}-${seq++}.json`);
+  tmpPaths.push(sp);
+  // Run quietly at 63% for a while: no crossings, but the throttle persists the baseline so the
+  // on-disk lastSocAtMs stays fresh (without it, only the boot persist @ t=0 would survive).
+  const a1 = createBatterySocAlarm({ onCross: () => {}, statePath: sp });
+  a1.update(63, 0); // boot → persist baseline @ 0
+  a1.update(63, 6 * MIN); // quiet, >5min since persist → throttled persist @ 6min
+  a1.update(63, 12 * MIN); // quiet → throttled persist @ 12min
+  // "Restart": a fresh instance loads the persisted state (baseline ≈ 12min old at t=13min → fresh).
+  const fired: number[] = [];
+  const a2 = createBatterySocAlarm({ onCross: (t) => fired.push(t.pct), statePath: sp });
+  a2.update(0, 13 * MIN); // transient 0 right after restart — guard still active (baseline 1min old)
+  assert.deepEqual(fired, [], 'a quick restart must not re-open the cascade — throttled persist kept the baseline fresh');
+});
+
 test('cleanup — remove tmp state files (best effort)', () => {
   for (const p of tmpPaths) {
     try {
