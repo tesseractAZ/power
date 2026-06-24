@@ -201,6 +201,11 @@ export const BINARY_SENSORS = [
   // INVERTS this sensor's meaning (off_grid=true → ON would read as "connected"). A plain
   // binary sensor keeps ON=off-grid unambiguous; the tower-off icon conveys state.
   { unique_id: 'ecoflow_off_grid', name: 'EcoFlow Off-Grid', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
+  // v0.59.0 — ON when the runway / projected-low-SoC numbers only apply to the
+  // ISLANDED case (the grid is actively backstopping the load now). Gate HA
+  // "runway < threshold" automations on this so a 0% / low-hour projection during
+  // a grid-tied cycle isn't treated as an imminent-depletion emergency.
+  { unique_id: 'ecoflow_runway_projection_islanded_only', name: 'EcoFlow Runway Projection Islanded-Only', icon: 'mdi:transmission-tower-import', value_template: '{{ "ON" if value_json.runway_projection_islanded_only else "OFF" }}' },
   // v0.9.77 — fires when the system is actively curtailing PV (batteries
   // full + home load < expected PV). HA can trigger automations off this
   // — e.g. "if curtailing for 10 min then turn pool pump on full speed."
@@ -587,6 +592,9 @@ export async function startMqttDiscovery(
       // sensors don't read HA 'unknown' (which must mean data-loss only).
       runway_to_reserve_hours: runwayHoursForPublish(runway.hoursToReserve, runway.unavailable),
       runway_to_empty_hours: runwayHoursForPublish(runway.hoursToEmpty, runway.unavailable),
+      // v0.59.0 — runway/dip projections assume islanded; true when the grid is
+      // actively backstopping → a low reading is informational, not actionable.
+      runway_projection_islanded_only: liveGridBackstop(snap.devices).backstopping,
       round_trip_efficiency_percent: rte.efficiencyPct,
       pv_clipped_kwh_today: clipping.todayKwh,
       pv_array_peak_watts: clipping.arrayPeakW,

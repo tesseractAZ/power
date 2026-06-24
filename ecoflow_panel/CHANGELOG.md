@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.59.0 — 2026-06-23
+
+Forecast realism — from the 36-hour scenario review.
+
+**[Fixed] The day-ahead forecast over-predicted overnight load ~2×, pinning the projected low SoC at 0%.** The typical-day load curve put the idle/overnight floor at ~6 kW when the house actually draws ~3.2 kW, so `projected_low_soc` sat at 0% (and runway at ~1.3 h) through whole grid-tied nights. Fix: a new `blendNightLoad` trims a *stale-high* curve hour toward the recent measured load — only when the curve exceeds 1.5× recent actual, only 60% of the way, and it can **only reduce** load (never raise it, never below recent). Hardened per review so it can't make the islanded runway over-optimistic: the trim is **gated to overnight/idle hours only** (a daytime curve hour legitimately runs above a brief recent dip), the recent anchor uses a **3-hour** trailing window (so a just-finished load cycle isn't mistaken for an idle night), and the trim is **floor-capped at 50%** of the curve (a pathologically-quiet hour can't gut a calibrated curve). A cold/empty recent window stays `null` (never zeroes the night). All env-tunable. +4 tests.
+
+**[Changed] `projected_low_soc` / runway projections are now labeled grid-aware.** A `0% / 1.3 h` projection during a *grid-tied* cycle was read as an imminent-depletion emergency when it only applies to the islanded case. Fix: a new `runway_projection_islanded_only` companion sensor (binary_sensor + `/api/ha-state` + MQTT) is ON when the grid is actively backstopping the load, so HA automations can gate `runway < threshold` rules; and the `forecast-soc-dip` narrative downgrades **warning → info** with "if islanded" wording when backstopping — mirroring the v0.23.0 grid-aware floor alarm. The numeric sensors stay continuous (islanding can begin any second) and the **audible floor alarm is untouched**. +1 test.
+
+Suite 831 → 836; `tsc` clean.
+
 ## 0.58.0 — 2026-06-23
 
 Alarm hygiene — from the 36-hour scenario review of a real deep-discharge + top-of-charge cycle.

@@ -7,6 +7,9 @@ import {
   computeMultiDayForecast,
   computeForecastSkill,
   computeAmbientThermalForecast,
+  blendNightLoad,
+  isForecastNightHour,
+  forecastDayAlerts,
   resetForecastCachesForTesting,
   type DayForecast,
   type ForecastHour,
@@ -508,4 +511,45 @@ test('cleanup — clear forecast caches and weather seam', () => {
   resetForecastCachesForTesting();
   clearWeatherTestOverride();
   assert.ok(true);
+});
+
+/* ─── v0.59.0 — forecast realism: night-load blend + grid-aware dip ──── */
+
+test('blendNightLoad — trims a stale-high curve hour toward recent actual', () => {
+  // curve 6000 W vs recent 3200 W: 6000 > 3200×1.5 (=4800) → blend 0.6 toward recent
+  assert.equal(blendNightLoad(6000, 3200, 1.5, 0.6), 6000 * (1 - 0.6) + 3200 * 0.6); // ~4320, halves the over-prediction
+});
+
+test('blendNightLoad — never RAISES load; passes through when close or unknown', () => {
+  assert.equal(blendNightLoad(3000, 3200, 1.5, 0.6), 3000, 'curve below recent → unchanged (never raises)');
+  assert.equal(blendNightLoad(4000, 3200, 1.5, 0.6), 4000, 'within 1.5× of recent → not stale-high → unchanged');
+  assert.equal(blendNightLoad(6000, null, 1.5, 0.6), 6000, 'recent unknown (cold window) → unchanged, never zeroes the night');
+});
+
+test('forecastDayAlerts — projected dip is grid-aware (v0.59.0)', () => {
+  const fc = emptyForecast({ minProjectedSoc: 0, minProjectedSocTs: 1_900_000_000_000, reserveSoc: 15 });
+  const islanded = forecastDayAlerts(fc).find((a) => a.id === 'forecast-soc-dip');
+  assert.ok(islanded, 'a sub-reserve projection raises the dip alert');
+  assert.equal(islanded!.severity, 'warning', 'no grid context → actionable warning (today behaviour)');
+
+  const offGrid = forecastDayAlerts(fc, { backstopping: false }).find((a) => a.id === 'forecast-soc-dip');
+  assert.equal(offGrid!.severity, 'warning', 'grid not backstopping (islanded) → still a warning');
+
+  const onGrid = forecastDayAlerts(fc, { backstopping: true, reason: 'grid import 3.2 kW' }).find((a) => a.id === 'forecast-soc-dip');
+  assert.ok(onGrid);
+  assert.equal(onGrid!.severity, 'info', 'grid backstopping → informational, not an actionable emergency');
+  assert.match(onGrid!.detail, /islanded|backstopping/i);
+});
+
+test('blendNightLoad — trim is FLOOR-CAPPED so a pathologically-quiet recent window cannot gut the curve (v0.59.0 review)', () => {
+  // recent 500 W vs curve 6000 W: raw blend = 6000*0.4 + 500*0.6 = 2700, but the
+  // 50% max-trim floor (6000*0.5 = 3000) binds → never below half the curve.
+  assert.equal(blendNightLoad(6000, 500, 1.5, 0.6, 0.5), 3000);
+  // a moderate recent (3200) lands above the floor → unaffected by the cap.
+  assert.equal(blendNightLoad(6000, 3200, 1.5, 0.6, 0.5), 6000 * 0.4 + 3200 * 0.6);
+});
+
+test('isForecastNightHour — gates the load blend to the overnight/idle band only (v0.59.0 review)', () => {
+  for (const h of [21, 22, 23, 0, 2, 5]) assert.equal(isForecastNightHour(h), true, `${h}:00 is overnight`);
+  for (const h of [6, 9, 14, 17, 20]) assert.equal(isForecastNightHour(h), false, `${h}:00 is daytime — curve must NOT be trimmed`);
 });

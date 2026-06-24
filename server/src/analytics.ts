@@ -966,6 +966,55 @@ export function computeSoiling(
 
 let dayForecastCache: { ts: number; value: DayForecast } | null = null;
 
+// v0.59.0 — overnight-load realism. The typical-day load curve over-predicts the
+// idle/overnight floor ~2x on this house (curve ~6kW vs ~3.2kW actually drawn),
+// which pinned projected_low_soc at 0%. When a projected hour's curve value is
+// implausibly above the RECENT measured load, pull it partway toward recent
+// actual — only ever TRIMS an over-prediction, never raises load (so a real
+// daytime peak or a legitimately busy night is untouched). Env-tunable; same
+// trailing-hour window the runway projection already uses (RUNWAY_LOAD_WINDOW_MS).
+// v0.59.0 — trailing window for the recent-load anchor. 3h (not 1h) so a brief
+// gap between cycling loads (e.g. the pool pump finishing) doesn't make a busy
+// night look idle and mis-trim the curve. Env-tunable.
+const FORECAST_RECENT_LOAD_WINDOW_MS = Math.max(0, Number(process.env.FORECAST_RECENT_LOAD_WINDOW_MS ?? 3 * 60 * 60 * 1000));
+const FORECAST_NIGHT_OVERPREDICT_RATIO = Math.max(1, Number(process.env.FORECAST_NIGHT_OVERPREDICT_RATIO ?? 1.5));
+const FORECAST_NIGHT_BLEND = Math.min(1, Math.max(0, Number(process.env.FORECAST_NIGHT_BLEND ?? 0.6)));
+// Cap the downward trim: blendNightLoad never reduces the curve below
+// (1 - MAX_TRIM)×raw. 0.5 fully corrects the observed ~2x over-prediction (curve
+// → recent actual) but no further, so a pathologically-quiet recent window can't
+// gut a well-calibrated curve. Env-tunable.
+const FORECAST_NIGHT_MAX_TRIM = Math.min(1, Math.max(0, Number(process.env.FORECAST_NIGHT_MAX_TRIM ?? 0.5)));
+// v0.59.0 — the blend is GATED to overnight/idle hours only. The ~2x over-predict
+// it corrects is the idle floor; during the day a curve hour legitimately runs
+// >1.5x a brief recent dip (a cloud cutting AC), so applying the trim there would
+// under-predict the real afternoon peak. Overnight band = [START..23] ∪ [0..END].
+const FORECAST_NIGHT_START_HOUR = Math.min(23, Math.max(0, Math.round(Number(process.env.FORECAST_NIGHT_START_HOUR ?? 21))));
+const FORECAST_NIGHT_END_HOUR = Math.min(23, Math.max(0, Math.round(Number(process.env.FORECAST_NIGHT_END_HOUR ?? 5))));
+
+/** v0.59.0 — trim a stale-high forecast load-curve hour toward recent measured
+ *  load. Only ever REDUCES load (an over-prediction); returns rawBase unchanged
+ *  when recent load is unknown (null) or the curve is plausibly close to actual
+ *  (<= ratio×recent). The trim is FLOOR-CAPPED at (1 - FORECAST_NIGHT_MAX_TRIM)×raw
+ *  so a pathologically-quiet recent window can't gut a well-calibrated curve. The
+ *  caller gates this to overnight hours (see FORECAST_NIGHT_START/END_HOUR). Pure
+ *  + exported for tests. */
+export function blendNightLoad(
+  rawBase: number,
+  recentLoadW: number | null,
+  ratio = FORECAST_NIGHT_OVERPREDICT_RATIO,
+  blend = FORECAST_NIGHT_BLEND,
+  maxTrim = FORECAST_NIGHT_MAX_TRIM,
+): number {
+  if (recentLoadW == null || rawBase <= recentLoadW * ratio) return rawBase;
+  const blended = rawBase * (1 - blend) + recentLoadW * blend;
+  return Math.max(blended, rawBase * (1 - maxTrim));
+}
+
+/** v0.59.0 — true for the overnight/idle band the load-blend is restricted to. */
+export function isForecastNightHour(clockHour: number): boolean {
+  return clockHour >= FORECAST_NIGHT_START_HOUR || clockHour <= FORECAST_NIGHT_END_HOUR;
+}
+
 /** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min. */
 export async function getDayForecast(
   devices: Record<string, DeviceSnapshot>,
@@ -1103,6 +1152,20 @@ export async function getDayForecast(
   const evPredictions = computeEvWindowPrediction(devices, recorder);
   const evByHourEpoch = evLoadByHour(evPredictions.upcomingNext24h);
 
+  // v0.59.0 — recent measured whole-home load (trailing window), used to TRIM a
+  // stale-high overnight curve. Computed once. Stays null (the no-trim signal) on a
+  // cold/empty window. The `avg > 0` guard is load-bearing: besides NaN from an
+  // empty mean, a confirmed all-zero average would otherwise feed recentLoadW=0 →
+  // blendNightLoad(raw, 0) trims every hour to (1-blend)×raw — a spurious over-trim.
+  let recentLoadW: number | null = null;
+  if (shp2) {
+    const recentPts = recorder.query(shp2.sn, 'panel_load', now - FORECAST_RECENT_LOAD_WINDOW_MS, now);
+    if (recentPts.length >= 2) {
+      const avg = recentPts.reduce((s, p) => s + p.value, 0) / recentPts.length;
+      if (Number.isFinite(avg) && avg > 0) recentLoadW = avg;
+    }
+  }
+
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
     const clock = new Date(ts).getHours();
@@ -1128,9 +1191,15 @@ export async function getDayForecast(
     // hour. Mon–Fri at 5pm looks nothing like Sat at 5pm in this house.
     const projDow = new Date(ts).getDay();
     const isWeekend = projDow === 0 || projDow === 6;
-    const baseLoad = useSplitLoad
+    const rawBase = useSplitLoad
       ? (isWeekend ? loadRes.weekend[clock] : loadRes.weekday[clock])
       : loadRes.combined[clock];
+    // v0.59.0 — trim a stale-high curve hour toward recent measured load, but ONLY
+    // for overnight/idle hours: the ~2x over-prediction is the idle floor, whereas
+    // a DAYTIME curve hour legitimately runs far above a brief recent dip (a cloud
+    // momentarily cutting AC load), so trimming there would under-predict the real
+    // afternoon peak and make the islanded SoC slope over-optimistic. Only ever reduces.
+    const baseLoad = isForecastNightHour(clock) ? blendNightLoad(rawBase, recentLoadW) : rawBase;
     // v0.9.3 — add any predicted EV-charging session that covers this hour.
     // The historical load curve already includes PAST EV sessions, but for
     // FUTURE hours we don't want the day-of-week average to flatten a known
@@ -1205,7 +1274,7 @@ export async function getDayForecast(
 }
 
 /** Forecast-driven alerts derived from a DayForecast. */
-export function forecastDayAlerts(df: DayForecast): Alert[] {
+export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolean; reason?: string }): Alert[] {
   const out: Alert[] = [];
   // v0.8.0 — counterfactual driver analysis. Decompose the forecast PV
   // shortfall into "how much is cloud cover" vs "how much is everything
@@ -1229,14 +1298,21 @@ export function forecastDayAlerts(df: DayForecast): Alert[] {
       : driverCloud > 30
         ? `Driven by elevated cloud cover (~${Math.round(driverCloud)}% avg) AND typical-load curve. Sunny conditions would lift the projection ~${Math.round((clearDayKwh - df.forecastPvWhNext24 / 1000))} kWh.`
         : `Cloud cover is moderate (~${Math.round(driverCloud)}% avg); the dip is driven mostly by load pattern + current battery starting point.`;
+    // v0.59.0 — grid-aware. When the grid is actively backstopping the load, a
+    // projected dip below reserve is informational ("if islanded"), not actionable —
+    // the same downgrade the floor alarm (runwayAlarm.classifyRunway) already applies.
+    // The numeric sensors stay continuous; only this NARRATIVE's severity/wording change.
+    const onGrid = grid?.backstopping === true;
     out.push({
       id: 'forecast-soc-dip',
-      severity: 'warning',
+      severity: onGrid ? 'info' : 'warning',
       category: 'SHP2',
       source: 'learned',
       device: 'System',
       title: 'Projected battery dip below reserve',
-      detail: `Forecast has the backup pool reaching ~${df.minProjectedSoc}% around ${when} — below the ${df.reserveSoc}% reserve. ${why}`,
+      detail: onGrid
+        ? `Forecast has the backup pool dipping to ~${df.minProjectedSoc}% around ${when} (below the ${df.reserveSoc}% reserve) IF islanded — the grid is backstopping the load now (${grid?.reason ?? 'grid present'}), so no action is needed. ${why}`
+        : `Forecast has the backup pool reaching ~${df.minProjectedSoc}% around ${when} — below the ${df.reserveSoc}% reserve. ${why}`,
       facts: [
         { label: 'Projected low SoC', value: `${df.minProjectedSoc}%` },
         { label: 'Reserve floor', value: `${df.reserveSoc}%` },

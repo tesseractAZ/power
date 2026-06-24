@@ -1228,6 +1228,12 @@ app.get('/api/ha-state', async (req, reply) => {
     // a healthy ">24 h" reading is distinguishable from a real telemetry outage.
     runway_to_reserve_hours: runwayHoursForPublish(runway.hoursToReserve, runway.unavailable),
     runway_to_empty_hours: runwayHoursForPublish(runway.hoursToEmpty, runway.unavailable),
+    // v0.59.0 — the runway / projected-low-SoC numbers assume the ISLANDED case (no
+    // grid). True when the grid is actively carrying the load, so a 0% / low-hour
+    // reading is informational, not an actionable depletion threat — let HA
+    // automations gate `runway < threshold` rules on this. The numeric sensors stay
+    // continuous (islanding can begin any second); this flag is the gate.
+    runway_projection_islanded_only: liveGridBackstop(snap.devices).backstopping,
     runway_recent_load_watts: runway.recentLoadWatts,
     runway_forecast_pv_used_kwh: runway.forecastPvUsedKwh,
 

@@ -714,7 +714,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     let stormPrep: Alert[] = [];
     try {
       const df = await getAnalytics().report('forecast');
-      forecastDay = forecastDayAlerts(df);
+      // v0.59.0 — pass grid presence so a projected dip below reserve reads as
+      // informational ("if islanded") when the grid is backstopping the load.
+      forecastDay = forecastDayAlerts(df, liveGridBackstop(snap.devices));
     } catch (e: any) {
       log(`forecast: day-ahead failed — ${e?.message ?? e}`);
     }
