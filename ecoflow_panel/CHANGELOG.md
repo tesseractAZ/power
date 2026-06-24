@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.63.0 — 2026-06-24
+
+**[Fixed] False "panel soiling" alarm from a fleet-aggregation artifact.** The audible soiling advisory read **35.3%** ("wash the panels") while every array was really only **~3–6%** soiled — and it *climbed within a single day*, which dust doesn't do. Root cause: the published soiling came from `computeSoiling(fleetPvByEpoch)` — the **summed** `pv_total` across the home Cores. When one Core has a zero/missing reading on a clear hour (an EcoFlow-cloud telemetry gap — these Cores drop cloud session intermittently), the per-Core estimate correctly discards that Core's own zero hour (the `coeff ≤ 0` filter), but the **fleet sum stays positive** (the other Cores still produce), so the hour is counted ~1/N short → a phantom fleet-wide ~(1/N) "soiling" (three home Cores → the observed ~35%).
+
+Now the fleet figure is the **median of the per-Core estimates** (`fleetSoilingFromDevices`), which is immune to the coverage-deflation: real soiling dims every array uniformly and shows up equally per-Core, so the per-Core median is the trustworthy number. Coverage gate: ≥2 home Cores with a well-covered estimate must contribute, else no estimate (no alert). A genuine fleet-wide soiling drop still fires (every array's own estimate falls). The forecast PV model still uses the summed fleet PV — only the soiling figure changed. +3 tests (incl. a regression proving the old fleet-sum inflates ≥25% on data where the per-Core fix stays <12%).
+
+Suite 860 → 863; `tsc` clean.
+
 ## 0.62.0 — 2026-06-24
 
 Audible broadcasts can now speak each alert in **English, then Spanish (Latin American)**.

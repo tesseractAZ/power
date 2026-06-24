@@ -964,6 +964,54 @@ export function computeSoiling(
   };
 }
 
+/**
+ * v0.63.0 — fleet soiling derived from the PER-CORE estimates (median of each
+ * home Core's own clear-sky drop), NOT the summed-fleet coefficient.
+ *
+ * Why this exists: `computeSoiling(fleetPvByEpoch)` DEFLATES the fleet coefficient
+ * when one home Core has a zero/missing `pv_total` on a clear hour (an EcoFlow-
+ * cloud telemetry gap — these Cores drop cloud session intermittently). The
+ * PER-CORE path discards that Core's own zero hour via the `coeff <= 0` filter,
+ * but the FLEET SUM stays positive (the other Cores still produce), so the hour
+ * is NOT discarded — it is merely counted ~1/N short, which reads as a false
+ * fleet-wide ~(1/N) "soiling". Live: three home Cores, one with recent cloud-gap
+ * clear hours → a phantom ~35% fleet drop while every array was really ~3-6%.
+ *
+ * Real soiling dims every array roughly uniformly and shows up EQUALLY per-Core,
+ * so the per-Core median is the trustworthy fleet figure and is immune to the
+ * coverage-deflation artifact. Coverage gate: only Cores with a trustworthy
+ * (recentCovered) estimate contribute, and ≥2 must contribute (a single Core
+ * can't represent the fleet) — otherwise null (no alert). Pure + exported for tests.
+ */
+export function fleetSoilingFromDevices(
+  homeCorePvMaps: ReadonlyArray<Map<number, number>>,
+  wxByHour: Map<number, WeatherHour>,
+): SoilingEstimate | null {
+  const ests = homeCorePvMaps
+    .map((m) => computeSoiling(m, wxByHour))
+    .filter((e): e is SoilingEstimate => e != null);
+  if (ests.length === 0) return null;
+  // Prefer the well-covered estimates; fall back to all valid ones only if fewer
+  // than two are well-covered (so a transient gap doesn't drop us to one Core).
+  const covered = ests.filter((e) => e.recentCovered);
+  const pool = covered.length >= 2 ? covered : ests;
+  if (pool.length < 2) return null; // need ≥2 home Cores for a fleet view
+  // Median per-Core drop = the typical array's soiling, robust to one odd Core.
+  const dropPct = Math.round(median(pool.map((e) => e.dropPct)) * 10) / 10;
+  // Representative coeffs + diagnostics from the median-drop Core, for display.
+  const repr = [...pool].sort((a, b) => a.dropPct - b.dropPct)[Math.floor((pool.length - 1) / 2)];
+  return {
+    dropPct,
+    baselineCoeff: repr.baselineCoeff,
+    recentCoeff: repr.recentCoeff,
+    cleanDays: Math.min(...pool.map((e) => e.cleanDays)),
+    recentCovered: pool.every((e) => e.recentCovered),
+    dayCoeffs: repr.dayCoeffs,
+    dayHours: repr.dayHours,
+    covBar: repr.covBar,
+  };
+}
+
 let dayForecastCache: { ts: number; value: DayForecast } | null = null;
 // v0.60.0 — throttle the "structurally incomplete" rebuild log. A cold post-boot
 // worker can hit this on every read for several minutes (the 4-min warm cycle +
@@ -1107,6 +1155,10 @@ export async function getDayForecast(
   // solarModel used by forecast/runway/MPC). deviceModels still iterates
   // every DPU so spares get per-Core diagnostics on the Solar page.
   const fleetPvByEpoch = new Map<number, number>();
+  // v0.63.0 — keep each home Core's OWN pv map so soiling is derived from the
+  // per-Core estimates (immune to the fleet-sum coverage-deflation artifact),
+  // not the summed-fleet coefficient. See fleetSoilingFromDevices.
+  const homeCorePvMaps: Map<number, number>[] = [];
   const deviceModels: DeviceSolarModel[] = [];
   for (const d of dpus) {
     // v0.25.0 — one queryMulti for all three PV metrics over the IDENTICAL
@@ -1119,6 +1171,7 @@ export async function getDayForecast(
     const pvE = pvHourlyFromPts(pvM.get('pv_total') ?? []);
     if (isShp2Connected(d.sn, connected)) {
       for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
+      homeCorePvMaps.push(pvE); // v0.63.0 — per-Core soiling source
     }
     deviceModels.push({
       sn: d.sn,
@@ -1249,7 +1302,7 @@ export async function getDayForecast(
     minProjectedSocTs: minSocTs,
     solarModel,
     deviceModels,
-    soiling: weather ? computeSoiling(fleetPvByEpoch, wxByHour) : null,
+    soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour) : null,
   };
   // v0.15.21 — never CACHE a forecast whose load curve came back empty: the
   // post-boot analytics worker can race the recorder and read zero panel_load

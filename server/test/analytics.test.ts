@@ -16,6 +16,7 @@ import {
   computeSelfConsumption,
   computeEquipmentHealth,
   computeSoiling,
+  fleetSoilingFromDevices,
   type DayForecast,
 } from '../src/analytics.js';
 import type { WeatherHour } from '../src/weather.js';
@@ -209,6 +210,48 @@ test('computeSoiling — a SUSTAINED real drop still fires', () => {
   const s = computeSoiling(pv, wx);
   assert.ok(s, 'expected a soiling estimate');
   assert.ok(s!.dropPct >= 12, `a sustained real drop must still fire, got ${s!.dropPct}`);
+});
+
+/* v0.63.0 — fleet soiling is derived from the PER-CORE estimates, not the summed
+ * fleet coefficient, so a single Core's zero/missing clear-hours (a cloud-offline
+ * telemetry gap) can't deflate the fleet sum into a phantom fleet-wide "soiling".
+ * Live 2026-06-24: 3 home Cores → a false 35.3% while every array was ~3-6%. */
+const coreMap = (coeffs: number[]) => buildSoilingInputs(coeffs).pv;
+const fleetSum = (maps: Map<number, number>[]) => {
+  const f = new Map<number, number>();
+  for (const m of maps) for (const [he, pv] of m) f.set(he, (f.get(he) ?? 0) + pv);
+  return f;
+};
+
+test('fleetSoilingFromDevices — immune to the fleet-sum coverage-deflation artifact', () => {
+  const wx = buildSoilingInputs([10, 10, 10, 10, 10, 10, 10, 10, 10]).wx; // shared clear-sky
+  const A = coreMap([10, 10, 10, 10, 10, 10, 10, 10, 10]); // clean
+  const B = coreMap([10, 10, 10, 10, 10, 10, 10, 10, 10]); // clean
+  const C = coreMap([10, 10, 10, 10, 10, 10, 0, 0, 0]);    // clean, but recent 3 days cloud-GAPPED (pv=0)
+
+  // OLD path (fleet sum): C's missing recent hours leave the sum ~1/3 short on
+  // those days → a phantom ~33% "soiling" even though every array is clean.
+  const bug = computeSoiling(fleetSum([A, B, C]), wx);
+  assert.ok(bug && bug.dropPct >= 25, `the fleet-sum artifact should inflate, got ${bug?.dropPct}`);
+
+  // FIX (per-Core median): every array is really clean → ~0%, below the 12% alert.
+  const fixed = fleetSoilingFromDevices([A, B, C], wx);
+  assert.ok(fixed, 'expected a fleet estimate');
+  assert.ok(fixed!.dropPct < 12, `per-Core median must stay below the alert threshold, got ${fixed!.dropPct}`);
+});
+
+test('fleetSoilingFromDevices — a SUSTAINED real fleet-wide drop still fires (every array soiled)', () => {
+  const wx = buildSoilingInputs([10, 10, 10, 10, 10, 10, 10, 10, 10, 10]).wx;
+  const soiled = () => coreMap([10, 10, 10, 10, 10, 8, 8, 8, 8, 8]); // ~20% per array
+  const s = fleetSoilingFromDevices([soiled(), soiled(), soiled()], wx);
+  assert.ok(s && s.dropPct >= 12, `real uniform soiling must still fire, got ${s?.dropPct}`);
+});
+
+test('fleetSoilingFromDevices — needs ≥2 home Cores with an estimate, else null', () => {
+  const wx = buildSoilingInputs([10, 10, 10, 10, 10, 10]).wx;
+  const one = coreMap([10, 10, 10, 10, 10, 10]);
+  assert.equal(fleetSoilingFromDevices([one], wx), null, 'a single Core cannot represent the fleet');
+  assert.equal(fleetSoilingFromDevices([], wx), null, 'no Cores → null');
 });
 
 /* ─── cache-warmer reset (v0.9.11 bug fix) ───────────────────────────────
