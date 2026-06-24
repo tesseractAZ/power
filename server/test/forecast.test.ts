@@ -9,6 +9,7 @@ import {
   computeAmbientThermalForecast,
   blendNightLoad,
   isForecastNightHour,
+  applyEmptyHysteresis,
   forecastDayAlerts,
   resetForecastCachesForTesting,
   type DayForecast,
@@ -552,4 +553,22 @@ test('blendNightLoad — trim is FLOOR-CAPPED so a pathologically-quiet recent w
 test('isForecastNightHour — gates the load blend to the overnight/idle band only (v0.59.0 review)', () => {
   for (const h of [21, 22, 23, 0, 2, 5]) assert.equal(isForecastNightHour(h), true, `${h}:00 is overnight`);
   for (const h of [6, 9, 14, 17, 20]) assert.equal(isForecastNightHour(h), false, `${h}:00 is daytime — curve must NOT be trimmed`);
+});
+
+/* ─── v0.60.0 — runway to-empty hysteresis (asymmetric) ─────────────── */
+
+test('applyEmptyHysteresis — finite publishes immediately + arms; null holds N then releases to sentinel', () => {
+  const s = { streak: 0, lastFinite: null as number | null };
+  assert.equal(applyEmptyHysteresis(8, s, 3), 8);     // finite crossing → publish + arm latch
+  assert.equal(applyEmptyHysteresis(null, s, 3), 8);  // 1st no-crossing → hold last finite
+  assert.equal(applyEmptyHysteresis(null, s, 3), 8);  // 2nd → hold
+  assert.equal(applyEmptyHysteresis(null, s, 3), null);// 3rd consecutive → release to 999 sentinel
+  assert.equal(applyEmptyHysteresis(null, s, 3), null);// stays released
+});
+
+test('applyEmptyHysteresis — a real depletion (none→finite) is published IMMEDIATELY, never delayed', () => {
+  const s = { streak: 0, lastFinite: null as number | null };
+  assert.equal(applyEmptyHysteresis(null, s, 3), null); // no depletion
+  assert.equal(applyEmptyHysteresis(5, s, 3), 5);       // depletion appears → immediate, no damping (safety)
+  assert.equal(applyEmptyHysteresis(null, s, 3), 5);    // the optimistic clear re-earns the hold from the fresh finite
 });
