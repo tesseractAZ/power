@@ -72,7 +72,7 @@ import type { Alert } from './alerts.js';
 import { config } from './config.js';
 import { callHaService, isSupervised, probeService, getEntityState } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
-import { renderAnnouncement, pruneRenderCache, type AnnouncementLevel } from './audioRenderer.js';
+import { renderAnnouncement, pruneRenderCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel } from './audioRenderer.js';
 import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
@@ -130,6 +130,13 @@ export interface BroadcastConfig {
   usePreAnnounce: boolean;
   /** v0.15.4 — retry the play_announcement call on an actual failure (0..3). */
   announceRetries: number;
+  /** v0.61.0 — append a spoken "End of message" terminator to the FINAL play of
+   *  each announcement so the operator hears a clear close. Default on. */
+  endOfMessage: boolean;
+  /** v0.61.0 — the terminator phrase. Blank disables it. Default 'End of message'. */
+  endOfMessagePhrase: string;
+  /** v0.61.0 — silence (ms) before the terminator on the final block. 0..5000. */
+  endOfMessageGapMs: number;
 }
 
 export function loadBroadcastConfig(): BroadcastConfig {
@@ -171,6 +178,14 @@ export function loadBroadcastConfig(): BroadcastConfig {
     announceVolume: resolveAnnounceVolume(process.env.BROADCAST_ANNOUNCE_VOLUME, volume),
     usePreAnnounce: process.env.BROADCAST_USE_PRE_ANNOUNCE === 'true' || process.env.BROADCAST_USE_PRE_ANNOUNCE === '1',
     announceRetries: clampIntEnv(process.env.BROADCAST_ANNOUNCE_RETRIES, 1, 0, 3),
+    // v0.61.0 — "End of message" terminator. ON by default (the user asked for it
+    // on every message); BROADCAST_END_OF_MESSAGE=false|0 disables it, as does a
+    // blank BROADCAST_END_OF_MESSAGE_PHRASE.
+    endOfMessage: !(process.env.BROADCAST_END_OF_MESSAGE === 'false' || process.env.BROADCAST_END_OF_MESSAGE === '0'),
+    // Trim at load so the resolved value matches what renderAnnouncement actually
+    // speaks (it trims too) — keeps the status payload + cache-key honest.
+    endOfMessagePhrase: (process.env.BROADCAST_END_OF_MESSAGE_PHRASE ?? END_OF_MESSAGE_PHRASE).trim(),
+    endOfMessageGapMs: clampIntEnv(process.env.BROADCAST_END_OF_MESSAGE_GAP_MS, END_OF_MESSAGE_GAP_MS, 0, 5000),
   };
 }
 
@@ -652,6 +667,9 @@ export function startBroadcastMonitor(
       announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second
       repeatGapMs: cfg.repeatGapMs, // v0.15.7 — silence between repeats so the repeat is audible
       chimeGapMs: cfg.chimeGapMs, // v0.15.15 — pause after the chime before the spoken message
+      endOfMessage: cfg.endOfMessage, // v0.61.0 — "End of message" terminator on the final play
+      endOfMessagePhrase: cfg.endOfMessagePhrase,
+      endOfMessageGapMs: cfg.endOfMessageGapMs,
       log,
     });
     lastRender = {
@@ -910,6 +928,9 @@ export function startBroadcastMonitor(
         announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second
         repeatGapMs: cfg.repeatGapMs, // v0.15.7 — silence between repeats so the repeat is audible
         chimeGapMs: cfg.chimeGapMs, // v0.15.15 — pause after the chime before the spoken message
+        endOfMessage: cfg.endOfMessage, // v0.61.0 — "End of message" terminator on the final play
+        endOfMessagePhrase: cfg.endOfMessagePhrase,
+        endOfMessageGapMs: cfg.endOfMessageGapMs,
         log,
       });
       lastRender = {

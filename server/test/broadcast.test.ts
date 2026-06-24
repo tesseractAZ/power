@@ -272,6 +272,36 @@ test('loadBroadcastConfig — v0.15.4 repeat / announce-volume / pre-announce / 
   }
 });
 
+/* v0.61.0 — "End of message" terminator config. The operator asked for it on
+ * every message, so it's ON by default; it's disablable via the toggle OR a
+ * blank phrase, and the phrase + pre-terminator gap are overridable. */
+test('loadBroadcastConfig — v0.61.0 end-of-message terminator (default on, overrides, disable)', () => {
+  const saved = { ...process.env };
+  try {
+    for (const k of ['BROADCAST_END_OF_MESSAGE', 'BROADCAST_END_OF_MESSAGE_PHRASE', 'BROADCAST_END_OF_MESSAGE_GAP_MS']) delete process.env[k];
+    const def = loadBroadcastConfig();
+    assert.equal(def.endOfMessage, true, 'terminator is ON by default');
+    assert.equal(def.endOfMessagePhrase, 'End of message', 'default phrase');
+    assert.equal(def.endOfMessageGapMs, 700, 'default pre-terminator gap');
+
+    process.env.BROADCAST_END_OF_MESSAGE = 'false';
+    assert.equal(loadBroadcastConfig().endOfMessage, false, "BROADCAST_END_OF_MESSAGE=false disables it");
+    process.env.BROADCAST_END_OF_MESSAGE = '0';
+    assert.equal(loadBroadcastConfig().endOfMessage, false, "...as does '0'");
+    delete process.env.BROADCAST_END_OF_MESSAGE;
+
+    process.env.BROADCAST_END_OF_MESSAGE_PHRASE = 'Message complete';
+    assert.equal(loadBroadcastConfig().endOfMessagePhrase, 'Message complete', 'phrase override');
+    process.env.BROADCAST_END_OF_MESSAGE_GAP_MS = '300';
+    assert.equal(loadBroadcastConfig().endOfMessageGapMs, 300, 'gap override');
+    process.env.BROADCAST_END_OF_MESSAGE_GAP_MS = '999999';
+    assert.equal(loadBroadcastConfig().endOfMessageGapMs, 5000, 'gap clamps to 5000');
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
 /* ===================================================================
  * v0.15.8 — volume conflict-proofing. The announcement volume is a SINGLE
  * source of truth: announceVolume (0..100), derived from BROADCAST_VOLUME when

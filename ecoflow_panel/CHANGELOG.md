@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.61.0 — 2026-06-23
+
+Audible alerts now close with a spoken **"End of message."**
+
+**[Added] "End of message" terminator on the FINAL play of every announcement.** So the operator hears a clear close and isn't left wondering whether more is coming. A broadcast repeats the (chime + spoken message) block `announceRepeat` times (default 2); the terminator is spoken **once, after the last repetition** — not on every pass. It is rendered as its own short Piper utterance and spliced onto the final block (with a brief lead-in gap), so a single-play alarm gets it too (the only play *is* the final play). On by default; `BROADCAST_END_OF_MESSAGE=false` (or a blank `BROADCAST_END_OF_MESSAGE_PHRASE`) disables it, and the phrase + pre-terminator gap (`BROADCAST_END_OF_MESSAGE_GAP_MS`, default 700 ms) are overridable.
+
+ANTI-FOOTGUN: a failed or format-mismatched terminator render is **non-fatal** — it's logged and omitted, and the alarm message still plays in full (a power-system alarm is never silenced by a cosmetic tail). The terminator is folded into the render cache key (omitted when off → tail-off keys stay byte-identical to pre-feature; included when on → toggling/phrase/gap re-renders), and the same effective-enable rule runs in both `renderAnnouncement` and `renderCacheKey` so the audio and its predicted filename stay in lock-step. The chime-only (empty-message) path returns before the terminator logic, so a no-message announcement never gets one. New pure `assembleAnnouncementParts` helper pins the "final-play-only" placement under unit test. +7 tests.
+
+Suite 842 → 849; `tsc` clean.
+
 ## 0.60.0 — 2026-06-23
 
 Robustness + log hygiene — from the 36-hour scenario review.

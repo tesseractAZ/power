@@ -1985,6 +1985,10 @@ app.get('/api/broadcast/status', async () => {
       leadSilenceMs: cfg.leadSilenceMs,
       usePreAnnounce: cfg.usePreAnnounce,
       announceRetries: cfg.announceRetries,
+      // v0.61.0 — "End of message" terminator on the final play (resolved state).
+      endOfMessage: cfg.endOfMessage,
+      endOfMessagePhrase: cfg.endOfMessagePhrase,
+      endOfMessageGapMs: cfg.endOfMessageGapMs,
       minSeverity: cfg.minSeverity,
       quietHours: cfg.quietHours,
       // v0.23.0 — whether critical alerts break through quiet hours (opt-in).

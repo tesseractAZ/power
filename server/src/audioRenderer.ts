@@ -87,6 +87,15 @@ export const RENDER_VERSION = 6;
  *  audio and the predicted cache filename stay in lock-step. */
 const MAX_CHIME_REPEAT = 8;
 
+/** v0.61.0 — spoken terminator appended to the FINAL play of every announcement
+ *  so the operator hears a clear close and isn't left waiting for more. Rendered
+ *  as its own short Piper utterance and spliced after the last repeated block.
+ *  Operator-overridable via BROADCAST_END_OF_MESSAGE_PHRASE (empty disables it);
+ *  the gap separates it from the message tail. Exported so the broadcast config
+ *  and tests reference the same defaults — keeping audio + cache key in lock-step. */
+export const END_OF_MESSAGE_PHRASE = 'End of message';
+export const END_OF_MESSAGE_GAP_MS = 700;
+
 export type AnnouncementLevel = 'red' | 'yellow' | 'green';
 
 export interface RenderOptions {
@@ -150,6 +159,23 @@ export interface RenderOptions {
    * chimePath, so the rendered audio and the cache key stay in lock-step.
    */
   chimeTag?: string;
+  /**
+   * v0.61.0 — append a spoken "End of message" terminator to the FINAL play
+   * (the last announceRepeat block) so the operator knows the announcement has
+   * finished and isn't waiting for more. Rendered as its own short Piper
+   * utterance and spliced after the last message block, with endOfMessageGapMs
+   * of silence before it. A tail render failure (or format mismatch) is
+   * NON-FATAL — the message still plays (a power-system alarm must never be
+   * silenced by a cosmetic tail). Part of the cache key. Neutral default → off;
+   * the broadcast config defaults it ON and passes it explicitly.
+   */
+  endOfMessage?: boolean;
+  /** v0.61.0 — the terminator phrase. Blank disables it. Part of the key.
+   *  Default → END_OF_MESSAGE_PHRASE ('End of message'). */
+  endOfMessagePhrase?: string;
+  /** v0.61.0 — silence (ms) before the terminator on the final block. Part of
+   *  the key. Default → END_OF_MESSAGE_GAP_MS. */
+  endOfMessageGapMs?: number;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
 }
@@ -206,6 +232,34 @@ function makeSilencePcm(header: WavHeader, leadMs: number): Buffer {
 }
 
 /**
+ * v0.61.0 — assemble the PCM part list for a chime+message announcement:
+ * lead-in silence, then `announceRepeat` copies of `block`, with `gap` between
+ * passes, and the "End of message" `tailPcm` (preceded by `endGap`) spliced onto
+ * the FINAL pass ONLY — so a multi-repeat alarm plays the terminator once, after
+ * the last repetition. Pure + exported so the final-play-only placement is
+ * unit-testable without a live Wyoming render.
+ */
+export function assembleAnnouncementParts(
+  silence: Buffer,
+  block: Buffer[],
+  announceRepeat: number,
+  gap: Buffer,
+  tailPcm: Buffer | null,
+  endGap: Buffer,
+): Buffer[] {
+  const parts: Buffer[] = [silence];
+  for (let i = 0; i < announceRepeat; i++) {
+    if (i > 0 && gap.length > 0) parts.push(gap);
+    parts.push(...block);
+    if (tailPcm && i === announceRepeat - 1) {
+      if (endGap.length > 0) parts.push(endGap);
+      parts.push(tailPcm);
+    }
+  }
+  return parts;
+}
+
+/**
  * Render (or fetch from cache) the combined announcement WAV. Returns
  * the basename to serve via the panel's HTTP static route.
  */
@@ -240,6 +294,16 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // v0.15.15 — silence (ms) after the chime group, before the spoken message.
   const chimeGapMs = Math.max(0, Math.round(opts.chimeGapMs ?? 1000));
 
+  // v0.61.0 — "End of message" terminator on the FINAL play. Resolved once here
+  // (neutral default OFF — the broadcast config defaults it ON) so the SAME
+  // values feed both the rendered audio AND the cache key. The effective enable
+  // (toggle AND non-blank phrase) is recomputed identically inside renderCacheKey,
+  // so a tail-bearing render and its predicted filename stay in lock-step.
+  const endOfMessage = opts.endOfMessage ?? false;
+  const endOfMessagePhrase = (opts.endOfMessagePhrase ?? END_OF_MESSAGE_PHRASE).trim();
+  const endOfMessageGapMs = Math.max(0, Math.round(opts.endOfMessageGapMs ?? END_OF_MESSAGE_GAP_MS));
+  const tailEnabled = endOfMessage && endOfMessagePhrase.length > 0;
+
   // Cache key derivation: stable for the same (version, level, message, repeat,
   // lead silence). Null message hashes distinctly from empty string so klaxon-
   // only and empty-spoken-message don't share a cache slot. The repeat count
@@ -250,7 +314,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // tag. The tag is folded into the key so swapping a tone busts the cache; the
   // built-in tag is OMITTED from the key so default users see zero cache churn.
   const chimeTag = opts.chimeTag ?? BUILTIN_CHIME_TAG;
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag);
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -384,12 +448,41 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const chimeGap = makeSilencePcm(klaxonHeader, chimeGapMs);
   if (chimeGap.length > 0) block.push(chimeGap);
   block.push(ttsPcm);
-  const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
-  const parts: Buffer[] = [silence];
-  for (let i = 0; i < announceRepeat; i++) {
-    if (i > 0 && gap.length > 0) parts.push(gap);
-    parts.push(...block);
+
+  // v0.61.0 — render the "End of message" terminator (its own short Piper
+  // utterance) and splice it onto the FINAL repeated block only, so on a
+  // multi-pass alarm the operator hears it once, after the last repetition.
+  // A failed/format-mismatched tail render is NON-FATAL: log and omit it — the
+  // alarm message still plays. (We only reach here with a message present and
+  // Wyoming already proven up by the main render above, so a tail failure is
+  // rare; it must never silence the alarm regardless.)
+  let tailPcm: Buffer | null = null;
+  if (tailEnabled) {
+    const tailResult = await renderWyomingTts({
+      host: wyomingHost,
+      port: wyomingPort,
+      text: verbalizeForTts(endOfMessagePhrase),
+      voice: wyomingVoice,
+      timeoutMs: 15000,
+    });
+    if (tailResult.ok && tailResult.wav) {
+      const tailHeader = parseWavHeader(tailResult.wav);
+      if (tailHeader.ok
+          && tailHeader.rate === klaxonHeader.rate
+          && tailHeader.width === klaxonHeader.width
+          && tailHeader.channels === klaxonHeader.channels) {
+        tailPcm = tailResult.wav.subarray(tailHeader.dataOffset, tailHeader.dataOffset + tailHeader.dataLength);
+      } else {
+        log('audioRenderer: end-of-message terminator format mismatch — omitting it (message still plays)');
+      }
+    } else {
+      log(`audioRenderer: end-of-message terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
+    }
   }
+
+  const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
+  const endGap = tailPcm ? makeSilencePcm(klaxonHeader, endOfMessageGapMs) : Buffer.alloc(0);
+  const parts = assembleAnnouncementParts(silence, block, announceRepeat, gap, tailPcm, endGap);
   const combinedPcm = Buffer.concat(parts);
   const combined = pcmToWav(combinedPcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
 
@@ -494,6 +587,9 @@ export function renderCacheKey(
   repeatGapMs?: number,
   chimeGapMs?: number,
   chimeTag?: string,
+  endOfMessage?: boolean,
+  endOfMessagePhrase?: string,
+  endOfMessageGapMs?: number,
 ): string {
   // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
   // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
@@ -518,8 +614,17 @@ export function renderCacheKey(
   // The builtin klaxon still OMITS the component (zero cache churn for the
   // default; the RENDER_VERSION bump above already flushes it once).
   const tagPart = tag === BUILTIN_CHIME_TAG ? '' : `|k${tag}|a${AUDIO_ASSETS_VERSION}`;
+  // v0.61.0 — "End of message" terminator identity. OMITTED when disabled (or the
+  // phrase is blank) so a tail-off render is BYTE-IDENTICAL to the pre-feature key
+  // (zero churn for that case); when enabled, the phrase + pre-terminator gap are
+  // folded in so toggling it (or changing the phrase/gap) re-renders. The SAME
+  // effective-enable rule runs in renderAnnouncement so audio + key stay in lock-step.
+  const eomPhrase = (endOfMessagePhrase ?? END_OF_MESSAGE_PHRASE).trim();
+  const eomOn = (endOfMessage ?? false) && eomPhrase.length > 0;
+  const eomGapMs = Math.max(0, Math.round(endOfMessageGapMs ?? END_OF_MESSAGE_GAP_MS));
+  const eomPart = eomOn ? `|e${eomGapMs}:${eomPhrase}` : '';
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}${eomPart}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }
