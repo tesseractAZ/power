@@ -24,6 +24,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { type AlarmPriority, priorityAnnouncementPrefix } from './alertPriority.js';
+import { priorityAnnouncementPrefixEs } from './ttsService.js';
 
 export interface SocThreshold {
   /** SoC percent at/below which (on the way down) this alarm fires. */
@@ -79,6 +80,20 @@ export function socAlarmMessage(t: SocThreshold): string {
   const prefix = priorityAnnouncementPrefix(t.priority);
   const tail = t.priority === 'critical' ? ' Restore charge immediately.' : '';
   return `${prefix} Backup pool at ${t.pct} percent.${tail}`;
+}
+
+/** v0.62.0 — Spanish (Latin American) counterpart of socAlarmMessage for the
+ *  bilingual second pass. Numbers are interpolated from the same threshold. */
+export function socAlarmMessageEs(t: SocThreshold): string {
+  const prefix = priorityAnnouncementPrefixEs(t.priority);
+  const tail = t.priority === 'critical' ? ' Restablezca la carga de inmediato.' : '';
+  return `${prefix} Reserva de respaldo al ${t.pct} por ciento.${tail}`;
+}
+
+/** v0.62.0 — Spanish counterpart of the grid-backstopped SoC advisory
+ *  ("drawing from grid power, no action needed"). */
+export function socAlarmAdvisoryEs(pct: number): string {
+  return `Aviso. Reserva de respaldo al ${pct} por ciento. Ahora se está tomando energía de la red; no se requiere acción.`;
 }
 
 /**

@@ -3,6 +3,18 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.62.0 — 2026-06-24
+
+Audible broadcasts can now speak each alert in **English, then Spanish (Latin American)**.
+
+**[Added] Bilingual second pass.** Instead of playing the message twice in English, a broadcast plays it once in English and once in Spanish — and the "End of message" terminator on the final (Spanish) pass becomes **"Fin del mensaje."** The Spanish wording is built from offline, deterministic templates (no translation API on the alarm path): the severity prefix, category, location ("Core tres batería dos"), acknowledge/repeat, the all-clear, the test broadcast, and the SoC / runway / floor / offline alarms are fully Spanish; any untranslated free-form detail tail falls back to the English original rather than risk a mistranslation.
+
+**Setup (one-time).** Bilingual is ON by default but a **no-op until you name a Spanish voice** that exists on your Piper/Wyoming server: set the new add-on option **`BROADCAST_WYOMING_VOICE_ES`** (e.g. `es_MX-claude-high`) — the voice must be the renderer's format (22050 Hz, 16-bit, mono; most `*-medium`/`*-high` Piper voices are). `BROADCAST_BILINGUAL` (default true) toggles it off without unsetting the voice. Until a Spanish voice is installed, announcements stay English-only.
+
+ANTI-FOOTGUN: each pass renders independently and a Spanish pass that fails (voice missing, wrong audio format) is **dropped, non-fatal** — the English alarm always plays in full (never a silent alarm). An incomplete render (Spanish dropped) is written to a throwaway `.partial.wav` name, never the cache key, so once the voice is installed the next render caches the full bilingual audio with no stale English-only file lingering on `/data`. The multi-pass renderer generalizes the v0.61.0 assembler (`assembleAnnouncementParts` now takes per-pass blocks); the messages + their voices/languages are folded into the render cache key so a bilingual render and its predicted filename stay in lock-step; monolingual keys are byte-identical to before. +11 tests.
+
+Suite 849 → 860; `tsc` clean.
+
 ## 0.61.0 — 2026-06-23
 
 Audible alerts now close with a spoken **"End of message."**

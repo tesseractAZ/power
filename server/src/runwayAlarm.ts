@@ -32,6 +32,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { type AlarmPriority, priorityAnnouncementPrefix } from './alertPriority.js';
+import { priorityAnnouncementPrefixEs } from './ttsService.js';
 
 /** The subset of RunwayProjection this alarm consumes. */
 export interface RunwayAlarmInput {
@@ -142,6 +143,34 @@ export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority,
   return `${prefix} Backup pool projected to reach reserve in about ${h} hours at the forecast load. Reduce consumption to preserve reserve until solar generates more.`;
 }
 
+/** v0.62.0 — Spanish "N hora(s)" with correct singular/plural. */
+function horasEs(n: number | null): string {
+  if (n == null) return '';
+  return n === 1 ? '1 hora' : `${n} horas`;
+}
+
+/** v0.62.0 — Spanish (Latin American) counterpart of runwayAlarmMessage for the
+ *  bilingual second pass. Same projection inputs → same numbers, in Spanish. */
+export function runwayAlarmMessageEs(p: RunwayAlarmInput, priority: AlarmPriority, grid?: GridContext): string {
+  const he = p.hoursToEmpty;
+  const hr = p.hoursToReserve;
+  if (belowReserveFloor(p) && grid?.backstopping) {
+    return 'Aviso. La reserva de respaldo alcanzó el nivel mínimo de reserva. Ahora se está tomando energía de la red; no se requiere acción.';
+  }
+  if (priority === 'critical' && belowReserveFloor(p)) {
+    return 'Alarma crítica. Alarma crítica. La reserva de respaldo está en el nivel mínimo de reserva. Los circuitos sin respaldo pueden quedarse sin energía. Reduzca la carga o encienda el generador.';
+  }
+  if (priority === 'critical' && he != null) {
+    return `Alarma crítica. Alarma crítica. Se proyecta que la reserva de respaldo se agote en aproximadamente ${horasEs(Math.max(1, Math.round(he)))} antes de que el sol se recupere. Reduzca la carga de inmediato.`;
+  }
+  if (priority === 'high' && he != null) {
+    return `Alarma de alta prioridad. Se proyecta que la reserva de respaldo se agote en aproximadamente ${horasEs(Math.max(1, Math.round(he)))} antes de que el sol se recupere. Reduzca la carga ahora.`;
+  }
+  const h = hr != null ? Math.max(1, Math.round(hr)) : null;
+  const prefix = priorityAnnouncementPrefixEs(priority);
+  return `${prefix} Se proyecta que la reserva de respaldo alcance el nivel mínimo de reserva en aproximadamente ${horasEs(h)} con la carga prevista. Reduzca el consumo para preservar la reserva hasta que el sol genere más.`;
+}
+
 interface PersistState {
   announcedPriority: AlarmPriority | null;
   lastAnnouncedAt: number | null;
@@ -173,7 +202,7 @@ export interface RunwayAlarm {
 
 export interface RunwayAlarmOptions {
   /** Invoked when an announcement should play. */
-  onTrigger: (priority: AlarmPriority, message: string) => void;
+  onTrigger: (priority: AlarmPriority, message: string, messageEs: string) => void;
   /** Override the per-persistence re-announce cadence (tests). */
   reannounceMs?: number;
   /** Override the persistence path (tests). */
@@ -258,7 +287,7 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
         ].filter(Boolean);
         log(`runway-alarm: ${desired} — ${figs.join(' / ') || 'no horizon figures'}`);
         try {
-          opts.onTrigger(desired, runwayAlarmMessage(p, desired, grid));
+          opts.onTrigger(desired, runwayAlarmMessage(p, desired, grid), runwayAlarmMessageEs(p, desired, grid));
         } catch (e: any) {
           log(`runway-alarm: onTrigger error: ${e?.message ?? e}`);
         }
