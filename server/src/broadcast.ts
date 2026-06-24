@@ -74,7 +74,7 @@ import { callHaService, isSupervised, probeService, getEntityState } from './haS
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
 import { renderAnnouncement, pruneRenderCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel } from './audioRenderer.js';
 import { resolveChime } from './chimeConfig.js';
-import { buildAlertMessage } from './ttsService.js';
+import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate + per-priority preview.
 // A priority turned off on the Alert Settings page must never trigger the
@@ -137,6 +137,16 @@ export interface BroadcastConfig {
   endOfMessagePhrase: string;
   /** v0.61.0 — silence (ms) before the terminator on the final block. 0..5000. */
   endOfMessageGapMs: number;
+  /** v0.62.0 — play a SECOND pass of each announcement in another language (the
+   *  message in English, then in Spanish). Active only when a second-language
+   *  voice is configured; otherwise a no-op (English only). Default on. */
+  bilingual: boolean;
+  /** v0.62.0 — the second-language Piper/Wyoming voice (e.g. "es_MX-claude-high").
+   *  EMPTY → bilingual inactive (the voice must exist on the Wyoming server). */
+  secondLangVoice: string;
+  /** v0.62.0 — the Spanish "End of message" terminator, used on the final
+   *  (Spanish) pass of a bilingual announcement. Default "Fin del mensaje". */
+  endOfMessagePhraseEs: string;
 }
 
 export function loadBroadcastConfig(): BroadcastConfig {
@@ -186,6 +196,13 @@ export function loadBroadcastConfig(): BroadcastConfig {
     // speaks (it trims too) — keeps the status payload + cache-key honest.
     endOfMessagePhrase: (process.env.BROADCAST_END_OF_MESSAGE_PHRASE ?? END_OF_MESSAGE_PHRASE).trim(),
     endOfMessageGapMs: clampIntEnv(process.env.BROADCAST_END_OF_MESSAGE_GAP_MS, END_OF_MESSAGE_GAP_MS, 0, 5000),
+    // v0.62.0 — bilingual second pass (English then Spanish). ON by default but a
+    // NO-OP until a Spanish voice is configured (BROADCAST_WYOMING_VOICE_ES), since
+    // that voice must be installed on the Wyoming/Piper server. Disable explicitly
+    // with BROADCAST_BILINGUAL=false|0.
+    bilingual: !(process.env.BROADCAST_BILINGUAL === 'false' || process.env.BROADCAST_BILINGUAL === '0'),
+    secondLangVoice: (process.env.BROADCAST_WYOMING_VOICE_ES ?? '').trim(),
+    endOfMessagePhraseEs: (process.env.BROADCAST_END_OF_MESSAGE_PHRASE_ES ?? 'Fin del mensaje').trim(),
   };
 }
 
@@ -343,7 +360,7 @@ export interface BroadcastMonitor {
    * No-ops (returns { ok:false, error:'broadcast disabled' }) when BROADCAST
    * is off. Never throws.
    */
-  announce: (priority: AlarmPriority, message: string) => Promise<{ ok: boolean; error?: string }>;
+  announce: (priority: AlarmPriority, message: string, messageEs?: string) => Promise<{ ok: boolean; error?: string }>;
   config: () => BroadcastConfig;
   status: () => BroadcastStatus;
   stop: () => void;
@@ -468,7 +485,7 @@ export function startBroadcastMonitor(
   let retryTimer: NodeJS.Timeout | null = null;
   let retryAttempt = 0;
   const RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
-  const scheduleBroadcastRetry = (level: ConditionLevel, message: string | null, reason: string) => {
+  const scheduleBroadcastRetry = (level: ConditionLevel, message: string | null, messageEs: string | null, reason: string) => {
     if (retryAttempt >= RETRY_DELAYS_MS.length) {
       log(`broadcast: giving up after ${retryAttempt} deferred retries (${reason})`);
       retryAttempt = 0;
@@ -493,7 +510,7 @@ export function startBroadcastMonitor(
         retryAttempt = 0;
         return;
       }
-      void runBroadcast(level, message);
+      void runBroadcast(level, message, false, messageEs);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -622,6 +639,7 @@ export function startBroadcastMonitor(
   const runBroadcastInner = async (
     level: ConditionLevel,
     message: string | null,
+    messageEs: string | null,
     bypassStormGate: boolean,
   ): Promise<{ ok: boolean; errors: string[] }> => {
     if (!supervised) return { ok: false, errors: ['not supervised'] };
@@ -653,9 +671,27 @@ export function startBroadcastMonitor(
     // resolveChime falls back to the built-in when a custom file is missing.
     const chime = resolveChime(level as AnnouncementLevel, opts.klaxonDir);
     if (chime.fellBack) log(`broadcast: assigned custom chime for ${level} missing — using built-in klaxon`);
+    // v0.62.0 — bilingual second pass: play the message in English, then in
+    // Spanish. Active only when a Spanish voice is configured (the voice must
+    // exist on the Wyoming server) AND a Spanish text was supplied AND there's an
+    // English message. The bilingual pair REPLACES the announceRepeat repeat (the
+    // two languages ARE the redundancy), and the terminator switches to its
+    // Spanish phrase since the final pass is Spanish.
+    const secondVoice = cfg.secondLangVoice.trim();
+    const bilingual = cfg.bilingual
+      && secondVoice.length > 0
+      && message != null && message.trim().length > 0
+      && messageEs != null && messageEs.trim().length > 0;
+    const messages = bilingual
+      ? [
+          { text: message!, lang: 'en' as const },                       // English, default voice
+          { text: messageEs!, lang: 'es' as const, voice: secondVoice },  // Spanish voice
+        ]
+      : undefined;
     const r = await renderAnnouncement({
       level,
       message,
+      messages, // v0.62.0 — present → multi-language passes (English then Spanish)
       klaxonDir: opts.klaxonDir,
       chimePath: chime.path,
       chimeTag: chime.tag,
@@ -664,11 +700,11 @@ export function startBroadcastMonitor(
       wyomingPort: cfg.wyomingPort,
       wyomingVoice: cfg.wyomingVoice ?? undefined,
       leadSilenceMs: cfg.leadSilenceMs, // v0.12.1 — speakers sync before the chime
-      announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second
+      announceRepeat: cfg.repeat, // v0.15.4 — repeat chime+message so a missed first pass gets a second (ignored when bilingual)
       repeatGapMs: cfg.repeatGapMs, // v0.15.7 — silence between repeats so the repeat is audible
       chimeGapMs: cfg.chimeGapMs, // v0.15.15 — pause after the chime before the spoken message
       endOfMessage: cfg.endOfMessage, // v0.61.0 — "End of message" terminator on the final play
-      endOfMessagePhrase: cfg.endOfMessagePhrase,
+      endOfMessagePhrase: bilingual ? cfg.endOfMessagePhraseEs : cfg.endOfMessagePhrase, // v0.62.0 — Spanish on the Spanish final pass
       endOfMessageGapMs: cfg.endOfMessageGapMs,
       log,
     });
@@ -700,7 +736,7 @@ export function startBroadcastMonitor(
     const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
     if (usable === 0) {
       errors.push('all broadcast targets unavailable (HA/MA restarting?)');
-      scheduleBroadcastRetry(level, message, 'all broadcast targets unavailable');
+      scheduleBroadcastRetry(level, message, messageEs, 'all broadcast targets unavailable');
       lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
       persistStatus();
       log(`broadcast: ${level} deferred — ${errors[0]}`);
@@ -712,7 +748,7 @@ export function startBroadcastMonitor(
     const call = await playAnnounce(url);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
-      scheduleBroadcastRetry(level, message, 'play_announcement failed after in-call retries');
+      scheduleBroadcastRetry(level, message, messageEs, 'play_announcement failed after in-call retries');
     }
 
     if (message) lastSpokenMessage = message;
@@ -724,7 +760,7 @@ export function startBroadcastMonitor(
     // and re-dispatch rather than report a success no one heard.
     if (call.ok && dt < 2000) {
       errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
-      scheduleBroadcastRetry(level, message, `suspiciously fast completion (${dt}ms)`);
+      scheduleBroadcastRetry(level, message, messageEs, `suspiciously fast completion (${dt}ms)`);
     }
     if (call.ok && errors.length === 0) {
       retryAttempt = 0; // verified success resets the deferred-retry budget
@@ -759,8 +795,9 @@ export function startBroadcastMonitor(
     level: ConditionLevel,
     message: string | null,
     bypassStormGate = false,
+    messageEs: string | null = null,
   ): Promise<{ ok: boolean; errors: string[] }> => {
-    const run = () => runBroadcastInner(level, message, bypassStormGate);
+    const run = () => runBroadcastInner(level, message, messageEs, bypassStormGate);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     return p;
@@ -771,6 +808,12 @@ export function startBroadcastMonitor(
     // formatted message; the renderer hits Wyoming directly. If Wyoming
     // is offline the render fails cleanly and the broadcast logs an error.
     return buildAlertMessage(level, alerts);
+  };
+
+  // v0.62.0 — the Spanish (Latin American) second-pass text for the same
+  // condition, mirroring messageFor. Built only when needed (bilingual active).
+  const messageEsFor = (level: ConditionLevel, alerts: Alert[]): string | null => {
+    return buildAlertMessageEs(level, alerts);
   };
 
   /* ── tick — periodic check for condition transitions */
@@ -827,7 +870,8 @@ export function startBroadcastMonitor(
     try {
       log(`broadcast: condition transition → ${level}${newCrit ? ' (new crit)' : ''}, ${cfg.targets.length} target(s)`);
       const message = messageFor(level, alerts);
-      const result = await runBroadcast(level, message);
+      const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
+      const result = await runBroadcast(level, message, false, messageEs);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       lastOutcome = result.ok ? 'success' : 'partial';
@@ -873,8 +917,14 @@ export function startBroadcastMonitor(
         level === 'red' ? `${priorityAnnouncementPrefix('critical')} Test broadcast. This is only a test.` :
         level === 'yellow' ? `${priorityAnnouncementPrefix('medium')} Test broadcast. This is only a test.` :
         'All clear. Test broadcast. This is only a test.';
+      // v0.62.0 — the Spanish second pass for a test, so a test rehearses the
+      // full bilingual announcement when a Spanish voice is configured.
+      const messageEs =
+        level === 'red' ? `${priorityAnnouncementPrefixEs('critical')} Transmisión de prueba. Esto es solo una prueba.` :
+        level === 'yellow' ? `${priorityAnnouncementPrefixEs('medium')} Transmisión de prueba. Esto es solo una prueba.` :
+        'Todo despejado. Transmisión de prueba. Esto es solo una prueba.';
       // bypassStormGate — a test is operator-initiated and must always play.
-      const r = await runBroadcast(level, message, true);
+      const r = await runBroadcast(level, message, true, messageEs);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       lastOutcome = r.ok ? 'success' : 'partial';
@@ -984,7 +1034,7 @@ export function startBroadcastMonitor(
     // ×getChimeRepeat() + TTS) and the Music-Assistant play path are IDENTICAL
     // to a real condition-transition broadcast. The SoC monitor edge-limits
     // crossings, so we deliberately apply NO cooldown here. Never throws.
-    announce: async (priority: AlarmPriority, message: string): Promise<{ ok: boolean; error?: string }> => {
+    announce: async (priority: AlarmPriority, message: string, messageEs?: string): Promise<{ ok: boolean; error?: string }> => {
       try {
         cfg = loadBroadcastConfig();
         if (!cfg.enabled) return { ok: false, error: 'broadcast disabled' };
@@ -1003,7 +1053,7 @@ export function startBroadcastMonitor(
           return { ok: false, error: 'suppressed: quiet hours' };
         }
         const level = klaxonLevelForPriority(priority);
-        const r = await runBroadcast(level, message);
+        const r = await runBroadcast(level, message, false, messageEs ?? null);
         lastBroadcastAt = Date.now();
         lastLevel = level;
         lastOutcome = r.ok ? 'success' : 'partial';

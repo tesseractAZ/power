@@ -83,7 +83,7 @@ import {
 import type { AnnouncementLevel } from './audioRenderer.js';
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from './alertPriority.js';
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
-import { createBatterySocAlarm, socAlarmMessage } from './batterySocAlarm.js';
+import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs } from './batterySocAlarm.js';
 import { createRunwayAlarm } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId, downgradePriorityForGrid } from './gridState.js';
 import { installProcessGuards } from './processGuard.js';
@@ -1789,7 +1789,8 @@ const batterySocAlarm = createBatterySocAlarm({
     const message = onGrid
       ? `Advisory. Backup pool at ${t.pct} percent — drawing from grid power, no action needed.`
       : socAlarmMessage(t);
-    void broadcast.announce(priority, message);
+    const messageEs = onGrid ? socAlarmAdvisoryEs(t.pct) : socAlarmMessageEs(t); // v0.62.0 — Spanish second pass
+    void broadcast.announce(priority, message, messageEs);
   },
   log: (m) => app.log.info(m),
 });
@@ -1833,7 +1834,7 @@ store.on('change', (snap: FleetSnapshot) => {
         if (!socGridForTick.backstopping) {
           socDowngraded.delete(pct);
           if (isPriorityEnabled(truePriority)) {
-            void broadcast.announce(truePriority, socAlarmMessage({ pct, priority: truePriority }));
+            void broadcast.announce(truePriority, socAlarmMessage({ pct, priority: truePriority }), socAlarmMessageEs({ pct, priority: truePriority }));
           }
         }
       }
@@ -1851,9 +1852,9 @@ store.on('change', (snap: FleetSnapshot) => {
 // cached. Honours the same per-priority Alert-Settings toggles as the SoC alarm.
 const runwayAlarmEnabled = process.env.BATTERY_RUNWAY_ALARM_ENABLED !== 'false';
 const runwayAlarm = createRunwayAlarm({
-  onTrigger: (priority, message) => {
+  onTrigger: (priority, message, messageEs) => {
     if (!isPriorityEnabled(priority)) return;
-    void broadcast.announce(priority, message);
+    void broadcast.announce(priority, message, messageEs); // v0.62.0 — Spanish second pass
   },
   log: (m) => app.log.info(m),
 });
@@ -1989,6 +1990,12 @@ app.get('/api/broadcast/status', async () => {
       endOfMessage: cfg.endOfMessage,
       endOfMessagePhrase: cfg.endOfMessagePhrase,
       endOfMessageGapMs: cfg.endOfMessageGapMs,
+      // v0.62.0 — bilingual second pass (English + Spanish). `bilingualActive` is
+      // the EFFECTIVE state: on only when a Spanish voice is also configured.
+      bilingual: cfg.bilingual,
+      bilingualActive: cfg.bilingual && cfg.secondLangVoice.length > 0,
+      secondLangVoice: cfg.secondLangVoice,
+      endOfMessagePhraseEs: cfg.endOfMessagePhraseEs,
       minSeverity: cfg.minSeverity,
       quietHours: cfg.quietHours,
       // v0.23.0 — whether critical alerts break through quiet hours (opt-in).

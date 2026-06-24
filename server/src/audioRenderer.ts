@@ -63,7 +63,7 @@ import { readFile, writeFile, mkdir, access, readdir, stat, unlink } from 'node:
 import { existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
-import { verbalizeForTts } from './ttsService.js';
+import { verbalizeForTts, verbalizeForTtsEs } from './ttsService.js';
 import { getChimeRepeat } from './alertSettings.js';
 import { AUDIO_ASSETS_VERSION } from './audioAssets.js';
 
@@ -176,6 +176,18 @@ export interface RenderOptions {
   /** v0.61.0 — silence (ms) before the terminator on the final block. Part of
    *  the key. Default → END_OF_MESSAGE_GAP_MS. */
   endOfMessageGapMs?: number;
+  /**
+   * v0.62.0 — bilingual / multi-language passes. When provided and non-empty,
+   * this REPLACES the single-`message`×`announceRepeat` repeat: each entry is
+   * rendered as its own pass (chime + that text, in that voice + language), in
+   * order, and the announcement plays them once each — e.g. [English, Spanish].
+   * The terminator rides the LAST surviving pass; its voice + language track that
+   * pass. A pass whose TTS fails to render (e.g. a Spanish voice not installed) is
+   * DROPPED — non-fatal, the other passes still play (never a silent alarm). Each
+   * entry is verbalized with the normalizer for its `lang` (default 'en'). Part of
+   * the cache key. When omitted, the legacy single-`message` path is unchanged.
+   */
+  messages?: ReadonlyArray<{ text: string; voice?: string; lang?: 'en' | 'es' }>;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
 }
@@ -232,26 +244,27 @@ function makeSilencePcm(header: WavHeader, leadMs: number): Buffer {
 }
 
 /**
- * v0.61.0 — assemble the PCM part list for a chime+message announcement:
- * lead-in silence, then `announceRepeat` copies of `block`, with `gap` between
- * passes, and the "End of message" `tailPcm` (preceded by `endGap`) spliced onto
- * the FINAL pass ONLY — so a multi-repeat alarm plays the terminator once, after
- * the last repetition. Pure + exported so the final-play-only placement is
- * unit-testable without a live Wyoming render.
+ * v0.61.0 / v0.62.0 — assemble the PCM part list for an announcement: lead-in
+ * silence, then each per-pass `block` in order (with `gap` between passes), and
+ * the terminator `tailPcm` (preceded by `endGap`) spliced onto the FINAL pass
+ * ONLY. Each pass is its own block, so a monolingual alarm passes the same block
+ * repeated (the legacy "say it twice" reliability repeat) while a bilingual alarm
+ * passes distinct blocks (English block, then Spanish block) — the terminator
+ * rides whichever pass is last. Pure + exported so the final-play-only placement
+ * is unit-testable without a live Wyoming render.
  */
 export function assembleAnnouncementParts(
   silence: Buffer,
-  block: Buffer[],
-  announceRepeat: number,
+  blocks: ReadonlyArray<Buffer[]>,
   gap: Buffer,
   tailPcm: Buffer | null,
   endGap: Buffer,
 ): Buffer[] {
   const parts: Buffer[] = [silence];
-  for (let i = 0; i < announceRepeat; i++) {
+  for (let i = 0; i < blocks.length; i++) {
     if (i > 0 && gap.length > 0) parts.push(gap);
-    parts.push(...block);
-    if (tailPcm && i === announceRepeat - 1) {
+    parts.push(...blocks[i]);
+    if (tailPcm && i === blocks.length - 1) {
       if (endGap.length > 0) parts.push(endGap);
       parts.push(tailPcm);
     }
@@ -314,7 +327,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // tag. The tag is folded into the key so swapping a tone busts the cache; the
   // built-in tag is OMITTED from the key so default users see zero cache churn.
   const chimeTag = opts.chimeTag ?? BUILTIN_CHIME_TAG;
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs);
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs, opts.messages);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -359,7 +372,11 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // serving path is uniform. v0.11.0 — repeat the chime N times so a chime-
   // only announcement matches the repeat applied on the chime+TTS path. When
   // N == 1 this is byte-identical to the original klaxon WAV.
-  if (!message || message.trim().length === 0) {
+  // v0.62.0 — klaxon-only only when NEITHER the legacy message NOR any bilingual
+  // pass has spoken text.
+  const anySpoken = (message != null && message.trim().length > 0)
+    || (opts.messages?.some((m) => m.text.trim().length > 0) ?? false);
+  if (!anySpoken) {
     try {
       await mkdir(cacheDir, { recursive: true });
       // v0.12.1 — prepend the lead-in silence and repeat the chime. When
@@ -388,81 +405,104 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     }
   }
 
-  // v0.57.0 — verbalize the spoken text at the single chokepoint EVERY
-  // announcement path converges on: condition broadcasts (buildAlertMessage,
-  // already partly normalized — the pass is idempotent), the hand-built
-  // SoC/runway alarm strings (batterySocAlarm/runwayAlarm, previously RAW), and
-  // the test/preview strings. Units ("6 h" → "6 hours"), math/relational symbols
-  // (≥ < ~ — → ²) and abbreviations are now read naturally by Piper instead of
-  // letter-by-letter. Done AFTER renderCacheKey (above) so cache keys stay keyed
-  // on the raw message and remain stable.
-  const spoken = verbalizeForTts(message);
+  // v0.62.0 — resolve the spoken PASSES. By default a single pass (the legacy
+  // `message`) repeated `announceRepeat` times for missed-first-pass reliability.
+  // When `opts.messages` is given, each entry is its OWN pass (e.g. English then
+  // Spanish), played once each in order; announceRepeat no longer multiplies (the
+  // list defines the sequence). Each pass is verbalized with its language's
+  // normalizer at the v0.57.0 chokepoint — English expands units/symbols; Spanish
+  // ("es") leaves the already-clean wording and normalizes only stray symbols.
+  const multi = !!(opts.messages && opts.messages.length > 0);
+  const passSpecs: Array<{ text: string; voice?: string; lang: 'en' | 'es' }> = multi
+    ? opts.messages!.map((m) => ({ text: m.text, voice: m.voice ?? wyomingVoice, lang: m.lang ?? 'en' }))
+    : [{ text: message ?? '', voice: wyomingVoice, lang: 'en' }];
 
-  // Render TTS
-  const ttsResult = await renderWyomingTts({
-    host: wyomingHost,
-    port: wyomingPort,
-    text: spoken,
-    voice: wyomingVoice,
-    timeoutMs: 15000,
-  });
-  if (!ttsResult.ok || !ttsResult.wav) {
-    return { ok: false, error: ttsResult.error ?? 'wyoming render failed', ttsRenderMs: ttsResult.durationMs };
+  // Render each UNIQUE (lang, voice, text) once — the legacy path repeats one
+  // pass, so this de-dupes its single render. A pass whose TTS fails OR whose WAV
+  // format doesn't match the klaxon is DROPPED (non-fatal); the others still play.
+  const passKey = (s: { lang: 'en' | 'es'; voice?: string; text: string }) =>
+    `${s.lang} ${s.voice ?? ''} ${s.text}`;
+  const renderedPcm = new Map<string, Buffer>();
+  const failedKeys = new Set<string>();
+  let firstTtsMs: number | undefined;
+  let lastFailReason: string | undefined;
+  for (const spec of passSpecs) {
+    const k = passKey(spec);
+    if (renderedPcm.has(k) || failedKeys.has(k)) continue;
+    const spokenText = spec.lang === 'es' ? verbalizeForTtsEs(spec.text) : verbalizeForTts(spec.text);
+    const r = await renderWyomingTts({
+      host: wyomingHost,
+      port: wyomingPort,
+      text: spokenText,
+      voice: spec.voice,
+      timeoutMs: 15000,
+    });
+    if (!r.ok || !r.wav) {
+      failedKeys.add(k);
+      lastFailReason = r.error ?? 'wyoming render failed';
+      log(`audioRenderer: spoken pass render failed (lang=${spec.lang} voice=${spec.voice ?? 'default'}): ${lastFailReason}${multi ? ' — dropping that pass' : ''}`);
+      continue;
+    }
+    const h = parseWavHeader(r.wav);
+    if (!h.ok || h.rate !== klaxonHeader.rate || h.width !== klaxonHeader.width || h.channels !== klaxonHeader.channels) {
+      failedKeys.add(k);
+      lastFailReason = h.ok
+        ? `format mismatch — klaxon=${klaxonHeader.rate}/${klaxonHeader.width * 8}/${klaxonHeader.channels} tts=${h.rate}/${h.width * 8}/${h.channels}`
+        : 'TTS WAV malformed (header parse failed)';
+      log(`audioRenderer: spoken pass ${lastFailReason} (lang=${spec.lang}, voice=${spec.voice ?? 'default'})${multi ? ' — dropping that pass' : ''}`);
+      continue;
+    }
+    firstTtsMs ??= r.durationMs;
+    renderedPcm.set(k, r.wav.subarray(h.dataOffset, h.dataOffset + h.dataLength));
   }
-  log(`audioRenderer: TTS rendered in ${ttsResult.durationMs}ms (${ttsResult.wav.length} bytes, ${ttsResult.rate}/${ttsResult.width}/${ttsResult.channels})`);
 
-  // Validate format match — required for byte-splice concat.
-  const ttsHeader = parseWavHeader(ttsResult.wav);
-  if (!ttsHeader.ok) {
-    return { ok: false, error: 'TTS WAV malformed (header parse failed)' };
+  // Surviving passes, in original order. ≥1 must survive (English always renders
+  // in practice; a total failure is a hard error, matching the prior behavior).
+  // The error carries the last failure reason so a single-pass format mismatch
+  // (e.g. a 16 kHz Piper voice) is still diagnosable.
+  const survivingSpecs = passSpecs.filter((s) => renderedPcm.has(passKey(s)));
+  if (survivingSpecs.length === 0) {
+    return { ok: false, error: lastFailReason ?? 'wyoming render failed (no spoken pass rendered)', ttsRenderMs: firstTtsMs };
   }
-  if (klaxonHeader.rate !== ttsHeader.rate
-      || klaxonHeader.width !== ttsHeader.width
-      || klaxonHeader.channels !== ttsHeader.channels) {
-    return {
-      ok: false,
-      error: `format mismatch — klaxon=${klaxonHeader.rate}/${klaxonHeader.width * 8}/${klaxonHeader.channels} tts=${ttsHeader.rate}/${ttsHeader.width * 8}/${ttsHeader.channels}`,
-      ttsRenderMs: ttsResult.durationMs,
-    };
-  }
+  const droppedPass = survivingSpecs.length < passSpecs.length;
+  log(`audioRenderer: rendered ${renderedPcm.size} spoken pass(es)${droppedPass ? ` (${passSpecs.length - survivingSpecs.length} dropped)` : ''} in ${firstTtsMs ?? 0}ms (first)`);
 
-  // Concat PCM data, rebuild header. v0.12.1 — a lead-in silence is prepended
-  // so speakers can sync before audio; then (v0.11.0) the chime plays chimeRepeat
-  // times (default 2) before the spoken TTS, so the operator hears a brief gap,
-  // the klaxon twice, then the announcement.
+  // Build one block (chime×chimeRepeat + post-chime gap + spoken pass) PER PASS.
+  // Legacy: the single surviving pass repeated announceRepeat times (reuses the
+  // same PCM buffers). Multi: each surviving pass once, in order. The chime list
+  // is a bounded push-loop (chimeRepeat ≤ MAX_CHIME_REPEAT) to stay off the
+  // resource-exhaustion path; for the monolingual case this is byte-identical to
+  // the prior single-block form.
   const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
-  const ttsPcm = ttsResult.wav.subarray(ttsHeader.dataOffset, ttsHeader.dataOffset + ttsHeader.dataLength);
   const silence = makeSilencePcm(klaxonHeader, leadMs);
-  // v0.15.4 — one block = chime×chimeRepeat + the spoken message; the whole block
-  // repeats announceRepeat times so a missed first pass gets a second. The lead-in
-  // silence stays once, up front. The chime list is built with a bounded push-loop
-  // (chimeRepeat is guarded to ≤ MAX_CHIME_REPEAT) rather than Array(n).fill(), to
-  // keep it off the resource-exhaustion path — byte-identical to the old form.
-  // v0.15.7 — a silence gap (repeatGapMs) is inserted between blocks so the
-  // listener can tell the message ended and is repeating.
-  // v0.15.15 — a post-chime gap (chimeGapMs, default 1 s) sits between the
-  // chime group and the spoken message so the chime fully decays before the
-  // announcement begins.
-  const block: Buffer[] = [];
-  for (let i = 0; i < chimeRepeat; i++) block.push(klaxonPcm);
   const chimeGap = makeSilencePcm(klaxonHeader, chimeGapMs);
-  if (chimeGap.length > 0) block.push(chimeGap);
-  block.push(ttsPcm);
+  const buildBlock = (ttsPcm: Buffer): Buffer[] => {
+    const b: Buffer[] = [];
+    for (let i = 0; i < chimeRepeat; i++) b.push(klaxonPcm);
+    if (chimeGap.length > 0) b.push(chimeGap);
+    b.push(ttsPcm);
+    return b;
+  };
+  const playSpecs = multi
+    ? survivingSpecs
+    : Array.from({ length: announceRepeat }, () => survivingSpecs[0]);
+  const blocks: Buffer[][] = playSpecs.map((s) => buildBlock(renderedPcm.get(passKey(s))!));
 
-  // v0.61.0 — render the "End of message" terminator (its own short Piper
-  // utterance) and splice it onto the FINAL repeated block only, so on a
-  // multi-pass alarm the operator hears it once, after the last repetition.
-  // A failed/format-mismatched tail render is NON-FATAL: log and omit it — the
-  // alarm message still plays. (We only reach here with a message present and
-  // Wyoming already proven up by the main render above, so a tail failure is
-  // rare; it must never silence the alarm regardless.)
+  // v0.61.0 / v0.62.0 — terminator ("End of message" / "Fin del mensaje") on the
+  // FINAL surviving pass. Its voice + language TRACK that pass, so a Spanish final
+  // pass gets a Spanish-voiced terminator. NON-FATAL: a failure logs, omits it
+  // (the message still plays), and marks the render incomplete so it isn't cached
+  // terminator-less under the terminator-on key.
+  const finalSpec = playSpecs[playSpecs.length - 1];
   let tailPcm: Buffer | null = null;
+  let tailDropped = false;
   if (tailEnabled) {
+    const tailSpoken = finalSpec.lang === 'es' ? verbalizeForTtsEs(endOfMessagePhrase) : verbalizeForTts(endOfMessagePhrase);
     const tailResult = await renderWyomingTts({
       host: wyomingHost,
       port: wyomingPort,
-      text: verbalizeForTts(endOfMessagePhrase),
-      voice: wyomingVoice,
+      text: tailSpoken,
+      voice: finalSpec.voice,
       timeoutMs: 15000,
     });
     if (tailResult.ok && tailResult.wav) {
@@ -473,36 +513,48 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
           && tailHeader.channels === klaxonHeader.channels) {
         tailPcm = tailResult.wav.subarray(tailHeader.dataOffset, tailHeader.dataOffset + tailHeader.dataLength);
       } else {
-        log('audioRenderer: end-of-message terminator format mismatch — omitting it (message still plays)');
+        tailDropped = true;
+        log('audioRenderer: terminator format mismatch — omitting it (message still plays)');
       }
     } else {
-      log(`audioRenderer: end-of-message terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
+      tailDropped = true;
+      log(`audioRenderer: terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
     }
   }
 
   const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
   const endGap = tailPcm ? makeSilencePcm(klaxonHeader, endOfMessageGapMs) : Buffer.alloc(0);
-  const parts = assembleAnnouncementParts(silence, block, announceRepeat, gap, tailPcm, endGap);
+  const parts = assembleAnnouncementParts(silence, blocks, gap, tailPcm, endGap);
   const combinedPcm = Buffer.concat(parts);
   const combined = pcmToWav(combinedPcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
 
-  // Write atomically (tmp → rename) so a half-written file never serves.
+  // v0.62.0 — only a COMPLETE render (no intended pass dropped, and any intended
+  // terminator present) is written under the cache-key filename. An INCOMPLETE
+  // render (e.g. the Spanish voice isn't installed yet) is written to a distinct
+  // `.partial.wav` name: it's served for THIS announcement but never cache-hit, so
+  // once the voice is provisioned the next render is complete and caches properly
+  // — no stale English-only file lingers under the bilingual key on persistent
+  // /data. Both are pruned by age (pruneRenderCache matches `*.wav`). Atomic
+  // tmp → rename so a half-written file never serves.
+  const incomplete = droppedPass || tailDropped;
+  const servedName = incomplete ? `${hash}.partial.wav` : filename;
+  const servedPath = resolve(cacheDir, servedName);
   try {
     await mkdir(cacheDir, { recursive: true });
-    const tmpPath = `${outPath}.tmp`;
+    const tmpPath = `${servedPath}.tmp`;
     await writeFile(tmpPath, combined);
     const { rename } = await import('node:fs/promises');
-    await rename(tmpPath, outPath);
+    await rename(tmpPath, servedPath);
   } catch (e: any) {
     return { ok: false, error: `cache write failed: ${e?.message ?? e}` };
   }
 
   return {
     ok: true,
-    filename,
+    filename: servedName,
     sizeBytes: combined.length,
     fromCache: false,
-    ttsRenderMs: ttsResult.durationMs,
+    ttsRenderMs: firstTtsMs,
   };
 }
 
@@ -590,6 +642,7 @@ export function renderCacheKey(
   endOfMessage?: boolean,
   endOfMessagePhrase?: string,
   endOfMessageGapMs?: number,
+  messages?: ReadonlyArray<{ text: string; voice?: string; lang?: 'en' | 'es' }>,
 ): string {
   // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
   // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
@@ -623,8 +676,16 @@ export function renderCacheKey(
   const eomOn = (endOfMessage ?? false) && eomPhrase.length > 0;
   const eomGapMs = Math.max(0, Math.round(endOfMessageGapMs ?? END_OF_MESSAGE_GAP_MS));
   const eomPart = eomOn ? `|e${eomGapMs}:${eomPhrase}` : '';
+  // v0.62.0 — bilingual / multi-pass identity. OMITTED when no messages (so the
+  // monolingual key is byte-identical to pre-feature); when present, each pass's
+  // (index, lang, voice, text) is folded in so the bilingual render gets a distinct
+  // key and changing a language/voice/text re-renders. The terminator voice +
+  // language derive from the final pass, so they're covered by this too.
+  const msgPart = (messages && messages.length)
+    ? '|L' + messages.map((m, i) => `${i}~${m.lang ?? 'en'}~${m.voice ?? ''}~${m.text}`).join('')
+    : '';
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}${eomPart}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}${eomPart}${msgPart}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }

@@ -1,5 +1,5 @@
 name: EcoFlow Panel
-version: "0.61.0"
+version: "0.62.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -162,6 +162,14 @@ options:
   # of available voices is published by Piper at startup and visible in
   # the Piper add-on log.
   BROADCAST_WYOMING_VOICE: ""
+  # v0.62.0 — bilingual broadcasts: each announcement plays in English, then in
+  # Spanish (Latin American). BROADCAST_BILINGUAL turns it on (default true) but it
+  # is a NO-OP until BROADCAST_WYOMING_VOICE_ES names a Spanish voice that EXISTS on
+  # your Piper/Wyoming server (e.g. "es_MX-claude-high"). The voice must be the
+  # renderer's format (22050 Hz, 16-bit, mono) — most *-medium/*-high Piper voices
+  # are. Leave the voice empty to keep announcements English-only.
+  BROADCAST_BILINGUAL: true
+  BROADCAST_WYOMING_VOICE_ES: ""
   # v0.12.0 — audible escalating alarm when the SHP2 backup pool crosses
   # DOWN through 40/30/20/15/10/8/4/2 %. Plays the chime + a spoken level on
   # the broadcast speakers, with rising priority (Low→Medium→High→Critical),
@@ -261,6 +269,8 @@ schema:
   BROADCAST_WYOMING_HOST: "str?"
   BROADCAST_WYOMING_PORT: port
   BROADCAST_WYOMING_VOICE: "str?"
+  BROADCAST_BILINGUAL: bool
+  BROADCAST_WYOMING_VOICE_ES: "str?"
   BATTERY_SOC_ALARM_ENABLED: bool
   BATTERY_RUNWAY_ALARM_ENABLED: bool
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: int(5,720)?

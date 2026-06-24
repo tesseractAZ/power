@@ -123,6 +123,13 @@ export BROADCAST_CHIME_PACK="$(bashio::config 'BROADCAST_CHIME_PACK')"
 export BROADCAST_WYOMING_HOST="$(bashio::config 'BROADCAST_WYOMING_HOST')"
 export BROADCAST_WYOMING_PORT="$(bashio::config 'BROADCAST_WYOMING_PORT')"
 export BROADCAST_WYOMING_VOICE="$(bashio::config 'BROADCAST_WYOMING_VOICE')"
+# v0.62.0 — bilingual second pass (English then Spanish).
+if bashio::config.true 'BROADCAST_BILINGUAL'; then
+  export BROADCAST_BILINGUAL=true
+else
+  export BROADCAST_BILINGUAL=false
+fi
+export BROADCAST_WYOMING_VOICE_ES="$(bashio::config 'BROADCAST_WYOMING_VOICE_ES')"
 if bashio::config.true 'BROADCAST_ENABLED'; then
   bashio::log.info "broadcast: enabled (targets: $BROADCAST_TARGETS)"
 fi
