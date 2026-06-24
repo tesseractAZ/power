@@ -49,12 +49,18 @@ export interface MqttHandle {
 // v0.10.4 — retry the cert HTTPS fetch on transient network errors so a boot-time
 // DNS brownout (EAI_AGAIN/ENOTFOUND/ECONNREFUSED/ETIMEDOUT/timeout) no longer aborts
 // MQTT start before the mqtt client (with its built-in reconnectPeriod) is created.
-function isTransientNetworkError(e: any): boolean {
+export function isTransientNetworkError(e: any): boolean {
   const code = String(e?.code ?? '');
   const msg = String(e?.message ?? e ?? '').toLowerCase();
   return (
     /EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(code) ||
-    /eai_again|enotfound|econnrefused|etimedout|timeout|connect timeout|fetch failed|network/i.test(msg)
+    // v0.60.0 — dropped the bare `|network` token. It matched ANY message
+    // containing "network" (e.g. "neural network training failed"); harmless for
+    // the narrow MQTT cert-fetch retry (real cases match on `code`), but this
+    // classifier is now also the process guard's survive/fatal gate, where an
+    // over-broad match could MASK a genuine bug. The specific terms cover the real
+    // transient cases (EAI_AGAIN/ENOTFOUND/ECONNREFUSED/ETIMEDOUT also carry a code).
+    /eai_again|enotfound|econnrefused|etimedout|timeout|connect timeout|fetch failed/i.test(msg)
   );
 }
 

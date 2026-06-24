@@ -3,6 +3,20 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.60.0 — 2026-06-23
+
+Robustness + log hygiene — from the 36-hour scenario review.
+
+**[Fixed] A transient DNS/network bounce could crash the add-on (`exit 255`).** During the daily 13:00 Supervisor maintenance window (CoreDNS plugin restart + AppArmor reload) the add-on died with a non-zero exit and took ~2 min to auto-recover — a real monitoring gap on a critical power system. New `processGuard.ts` installs `uncaughtException` / `unhandledRejection` handlers that **survive** a transient network/DNS error (EAI_AGAIN/ENOTFOUND/ECONNREFUSED/ETIMEDOUT/timeout — sharing the exact classifier the MQTT cert-fetch retry uses) while logging loudly, but **re-raise** a genuinely-fatal uncaught error so a real bug is never silently masked. +4 tests.
+
+**[Fixed] `runway_to_empty` flapped `999 ↔ finite` ~30×/window.** A finite empty-crossing sits at the far edge of the 24 h horizon, so minute-to-minute load/PV jitter tipped it across the boundary, churning the recorder + history UI. New `applyEmptyHysteresis` adds an **asymmetric** latch: a real depletion (`none → finite`) publishes *immediately* (never delayed — safety), but the optimistic `finite → "no depletion"` direction must hold N consecutive recomputes before releasing the sentinel. +2 tests.
+
+**[Changed] Throttled the post-restart "structurally incomplete" forecast log.** The v0.57.0 gate logged on every read while the worker warmed (~70 identical lines/8 min); now at most once per 5 min. Behavior unchanged — log-noise only.
+
+Deferred (flagged for a dedicated pass): the `off_grid` cold-start `unknown` guard — LOW severity, and its predicate is safety-sensitive (a wrong predicate masks a real off-grid read), so it warrants its own test-driven change rather than batching here.
+
+Suite 836 → 842; `tsc` clean.
+
 ## 0.59.0 — 2026-06-23
 
 Forecast realism — from the 36-hour scenario review.

@@ -965,6 +965,12 @@ export function computeSoiling(
 }
 
 let dayForecastCache: { ts: number; value: DayForecast } | null = null;
+// v0.60.0 — throttle the "structurally incomplete" rebuild log. A cold post-boot
+// worker can hit this on every read for several minutes (the 4-min warm cycle +
+// per-request rebuilds), flooding the log with ~70 identical lines; the gate is
+// working as designed, so log it at most once per window.
+let lastForecastIncompleteLogMs = 0;
+const FORECAST_INCOMPLETE_LOG_THROTTLE_MS = 5 * 60 * 1000;
 
 // v0.59.0 — overnight-load realism. The typical-day load curve over-predicts the
 // idle/overnight floor ~2x on this house (curve ~6kW vs ~3.2kW actually drawn),
@@ -1267,8 +1273,10 @@ export async function getDayForecast(
   const pvCold = homeDpus.length > 0 && pvSpan === 0; // home DPUs present but their PV recorder is cold
   const socBasisMissing = fullWh == null;             // no SHP2, or an incoherent backup pool → no SoC/runway projection
   const structurallyIncomplete = loadCold || pvCold || socBasisMissing || historyDays <= 0;
-  if (structurallyIncomplete)
-    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — NOT caching, will rebuild next call`);
+  if (structurallyIncomplete && now - lastForecastIncompleteLogMs >= FORECAST_INCOMPLETE_LOG_THROTTLE_MS) {
+    lastForecastIncompleteLogMs = now;
+    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — NOT caching, will rebuild next call (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
+  }
   if (dpus.length > 0 && !structurallyIncomplete) dayForecastCache = { ts: now, value };
   return value;
 }
@@ -2061,8 +2069,42 @@ export interface RunwayProjection {
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
 
-/** Test/bench seam. */
-export function resetRunwayCache(): void { runwayCache = null; }
+// v0.60.0 — asymmetric hysteresis on the to-EMPTY → 999 sentinel transition only.
+// A finite empty-crossing sits at the far edge of the 24h horizon, so minute-to-
+// minute load/PV jitter tips it across the boundary ~30×/window, churning the
+// recorder + any history UI. Latch the last finite hoursToEmpty for N consecutive
+// no-crossing recomputes before releasing to "no depletion". ONLY damps the
+// optimistic (finite→none) direction — a real depletion (none→finite) is published
+// immediately, so this can never delay a depletion warning.
+const RUNWAY_EMPTY_CLEAR_SAMPLES = Math.max(1, Math.round(Number(process.env.RUNWAY_EMPTY_CLEAR_SAMPLES ?? 3)));
+const runwayEmptyState: { streak: number; lastFinite: number | null } = { streak: 0, lastFinite: null };
+
+/** v0.60.0 — asymmetric hysteresis on the to-EMPTY → "no depletion" transition.
+ *  A finite crossing publishes immediately + arms the latch; the optimistic
+ *  finite→none direction holds the last finite reading and releases to null only on
+ *  the `clearSamples`-th consecutive no-crossing recompute (i.e. holds through the
+ *  first clearSamples-1, clears on the clearSamples-th). ONLY damps the optimistic
+ *  direction — a real depletion (none→finite) is published immediately, so this can
+ *  never delay a depletion warning. Mutates `state`. Pure + exported for tests. */
+export function applyEmptyHysteresis(
+  hoursToEmpty: number | null,
+  state: { streak: number; lastFinite: number | null },
+  clearSamples = RUNWAY_EMPTY_CLEAR_SAMPLES,
+): number | null {
+  if (hoursToEmpty != null) { state.streak = 0; state.lastFinite = hoursToEmpty; return hoursToEmpty; }
+  if (state.lastFinite != null) {
+    if (++state.streak < clearSamples) return state.lastFinite; // hold
+    state.lastFinite = null; // streak satisfied → release to the sentinel
+  }
+  return null;
+}
+
+/** Test/bench seam. NOTE: resets the state in THIS module instance only — effective
+ *  for unit tests that call computeRunway (or applyEmptyHysteresis) directly. In
+ *  production computeRunway runs in the analytics WORKER thread, which holds its own
+ *  module copy of runwayEmptyState/runwayCache; this main-thread reset does not touch
+ *  it (a worker respawn would reset the worker's copy, harmlessly releasing any hold). */
+export function resetRunwayCache(): void { runwayCache = null; runwayEmptyState.streak = 0; runwayEmptyState.lastFinite = null; }
 
 const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjection> = {}): RunwayProjection => ({
   generatedAt: now,
@@ -2235,6 +2277,12 @@ export function computeRunway(
     stateKwh = Math.max(0, nextState);
   }
 
+  // v0.60.0 — asymmetric hysteresis (this point is only reached on a HEALTHY
+  // compute; the unavailable cases early-return via emptyRunway before here, so a
+  // real outage publishes null immediately and never latches). A briefly-held stale
+  // finite is pessimistic (over-warns), never optimistic.
+  const pubHoursToEmpty = applyEmptyHysteresis(hoursToEmpty, runwayEmptyState);
+
   const value: RunwayProjection = {
     generatedAt: now,
     backupRemainingKwh: round2(backupRemainingKwh),
@@ -2242,9 +2290,9 @@ export function computeRunway(
     backupFullKwh: round2(backupFullKwh),
     recentLoadWatts: Math.round(loadAvgWatts),
     hoursToReserve: hoursToReserve != null ? round1(hoursToReserve) : null,
-    hoursToEmpty: hoursToEmpty != null ? round1(hoursToEmpty) : null,
+    hoursToEmpty: pubHoursToEmpty != null ? round1(pubHoursToEmpty) : null,
     reserveAtMs: hoursToReserve != null ? Math.round(now + hoursToReserve * 3_600_000) : null,
-    emptyAtMs: hoursToEmpty != null ? Math.round(now + hoursToEmpty * 3_600_000) : null,
+    emptyAtMs: pubHoursToEmpty != null ? Math.round(now + pubHoursToEmpty * 3_600_000) : null,
     forecastPvUsedKwh: round2(totalForecastPv),
     loadHorizonKwh: round2(totalLoad),
     horizonHours: RUNWAY_HORIZON_HOURS,

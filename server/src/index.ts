@@ -86,6 +86,7 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 import { createBatterySocAlarm, socAlarmMessage } from './batterySocAlarm.js';
 import { createRunwayAlarm } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId, downgradePriorityForGrid } from './gridState.js';
+import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
@@ -2538,6 +2539,17 @@ function familyOf(entityId: string, attrs: Record<string, unknown>): string {
 
 await app.listen({ host: config.host, port: config.port });
 app.log.info(`EcoFlow panel API listening on http://${config.host}:${config.port}`);
+
+// v0.60.0 — survive a transient DNS/network bounce (the daily CoreDNS/AppArmor
+// maintenance window crashed the add-on with exit 255) but re-raise a genuinely
+// fatal uncaught error. Covers the POST-BOOT steady-state runtime (where a transient
+// DNS error can leak out of the MQTT client's reconnect path as an unhandled
+// rejection); boot-time DNS transients are already handled by the cert-fetch retry
+// (getMqttCertificationWithRetry), and a genuine boot-time crash is correctly fatal.
+installProcessGuards({
+  error: (m) => app.log.error(m),
+  fatal: (m) => app.log.fatal(m),
+});
 
 const shutdown = async () => {
   app.log.info('shutting down');
