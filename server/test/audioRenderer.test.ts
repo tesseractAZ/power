@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { createServer, type Server, type Socket } from 'node:net';
 import { Buffer } from 'node:buffer';
-import { renderAnnouncement, renderCacheKey, parseWavHeader, pruneRenderCache, cachedRenderPath, BUILTIN_CHIME_TAG, KLAXON_FOR_LEVEL } from '../src/audioRenderer.js';
+import { renderAnnouncement, renderCacheKey, parseWavHeader, pruneRenderCache, cachedRenderPath, assembleAnnouncementParts, BUILTIN_CHIME_TAG, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, KLAXON_FOR_LEVEL } from '../src/audioRenderer.js';
 import { getChimeRepeat } from '../src/alertSettings.js'; // v0.11.0 — klaxon repeats getChimeRepeat()× before TTS
 import { pcmToWav } from '../src/wyomingTts.js';
 
@@ -660,4 +660,59 @@ test('renderAnnouncement — a missing custom chime FALLS BACK to the built-in k
   } finally {
     for (const d of [klaxonDir, cacheDir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+/* v0.61.0 — "End of message" terminator. The user asked for it on the FINAL play
+ * of every announcement. assembleAnnouncementParts is the pure splice point; its
+ * tests pin the placement deterministically (no live Wyoming render needed). */
+
+// Distinct marker buffers so we can assert placement by content.
+const S = Buffer.from('S'); // lead-in silence
+const C = Buffer.from('C'); // chime
+const M = Buffer.from('M'); // spoken message
+const G = Buffer.from('G'); // inter-repeat gap
+const E = Buffer.from('E'); // "End of message" terminator
+const g = Buffer.from('g'); // pre-terminator gap
+const seq = (parts: Buffer[]) => parts.map((b) => b.toString()).join('');
+
+test('assembleAnnouncementParts — terminator rides ONLY the final pass (multi-repeat)', () => {
+  const parts = assembleAnnouncementParts(S, [C, M], 2, G, E, g);
+  // lead-in, pass 1 (no tail), gap, pass 2 (+ pre-gap + tail).
+  assert.equal(seq(parts), 'SCMGCMgE');
+  assert.equal(parts.filter((b) => b === E).length, 1, 'terminator appears exactly once');
+  assert.equal(parts[parts.length - 1], E, 'terminator is the very last segment');
+  assert.equal(parts[parts.length - 2], g, 'pre-terminator gap immediately precedes it');
+  assert.equal(parts.filter((b) => b === M).length, 2, 'the message itself still plays every pass');
+});
+
+test('assembleAnnouncementParts — a single play IS the final play (gets the terminator)', () => {
+  const parts = assembleAnnouncementParts(S, [C, M], 1, G, E, Buffer.alloc(0));
+  assert.equal(seq(parts), 'SCME', 'announceRepeat=1 → one pass, terminator appended (empty pre-gap omitted)');
+  assert.equal(parts[parts.length - 1], E);
+});
+
+test('assembleAnnouncementParts — no terminator when disabled (tailPcm null) is byte-identical to plain repeats', () => {
+  const withNull = assembleAnnouncementParts(S, [C, M], 2, G, null, Buffer.alloc(0));
+  assert.equal(seq(withNull), 'SCMGCM', 'tail off → exactly the pre-feature layout');
+  assert.ok(!withNull.includes(E), 'no terminator segment anywhere');
+});
+
+test('renderCacheKey — terminator OFF is BYTE-IDENTICAL to the pre-feature key (zero churn)', () => {
+  const pre = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG); // 8-arg → eom undefined → off
+  const offExplicit = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
+  assert.equal(offExplicit, pre, 'endOfMessage:false omits the component → unchanged keys for the tail-off case');
+});
+
+test('renderCacheKey — enabling the terminator busts the cache; phrase + gap are part of the key', () => {
+  const off = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  const on = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
+  assert.notEqual(on, off, 'turning the terminator on changes the audio → distinct key');
+  assert.notEqual(on, renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'All clear', END_OF_MESSAGE_GAP_MS), 'a different phrase re-renders');
+  assert.notEqual(on, renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, 250), 'a different pre-terminator gap re-renders');
+});
+
+test('renderCacheKey — terminator ON with a blank phrase collapses to the OFF key (effective-disable)', () => {
+  const off = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  const blank = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, '   ', END_OF_MESSAGE_GAP_MS);
+  assert.equal(blank, off, 'endOfMessage:true + blank phrase = nothing to say → component omitted (matches the render)');
 });
