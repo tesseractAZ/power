@@ -3,6 +3,17 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.71.0 — 2026-06-25
+
+**[Changed] Predictive Insights page — de-duplicated, real EV schedule, near-new framing.** Three presentation fixes (no data-logic changes; adversarially reviewed for accuracy):
+- Forecast MAE + bias factor were rendered **twice** on the page. Removed the duplicate pair from the "Confidence" tile group (now titled **"Model fit (R²)"**, holding only the three regression-fit tiles); the richer "Forecast skill" section — MAE/bias + the 7-day predicted-vs-actual hindcast — stays the single source.
+- The EV-window card showed only a **count** of upcoming sessions. It now renders the actual **"Next 24 h"** schedule from `upcomingNext24h` — each session's local start time, duration, and power (W→kW) — above the recurring weekly patterns.
+- The degradation card now **leads** with a calm "Near-new fleet — no firm degradation trend yet" banner (with the live SoH range) whenever no pack has a trustworthy fade projection, instead of a buried tile subtitle; it auto-suppresses the moment a real trend exists.
+
+**[Docs] README roadmap refresh.** Updated the stale "Shipped through v0.51.0" status to current; marked the broadcast/TTS subsystem refactor **done**; corrected the "read-only, never modifies devices" framing (the add-on has a typed, allow-listed, per-SN-rate-limited, audit-logged, auth-gated write path — `ecoflow/commands.ts` + `writeLog.ts` + `requireWriteAuth`); kept only the genuinely-unshipped control/research items as outstanding (boost-reserve, quiet-hours toggle, skip-EV-window, per-circuit, force-rebalance, auto-apply dispatch, live strategy writes, trained ML classifier, LAN-direct protocol, multi-site, full HACS rewrite, WAVE2/Smart-Generator).
+
+Web `tsc -b` + build clean. Implemented in parallel + reviewed via a multi-agent workflow (review non-blocking).
+
 ## 0.70.1 — 2026-06-25
 
 **[Fixed] NWS cloud-cover cache now refreshes on its designed 2 h cadence, not every 15 min.** The v0.9.2 weather ensemble's cloud-cover cache (`getNwsHourlyCloud` / `fetchNwsHourlyCloud`) was reusing the module-level `TTL_MS` constant — which is the NWS *alerts* TTL (15 min) — for its freshness check, even though the design note specifies cloud cover should track the 2 h Open-Meteo weather TTL (`weather.ts`). Sky-cover forecasts don't move minute-to-minute, so the mismatch made ~8× more `api.weather.gov` calls than intended (120 min / 15 min). Fix introduces a separate `CLOUD_TTL_MS = 2 h` and uses it for the cloud cache; the alerts `TTL_MS` is unchanged. **Dormant on the current deployment** — NWS is off by default (`NWS_ENABLED`), so this is a correctness/efficiency fix with no behavior change unless the ensemble is enabled. Both TTL constants are now exported and a regression test pins them as distinct (cloud 2 h > alerts 15 min) so they can't silently re-collapse. Found during the v0.69.0 two-agent adversarial review as a pre-existing, out-of-scope issue. Suite 901 → 902; `tsc` clean.
