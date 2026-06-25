@@ -7,26 +7,26 @@
  * the web app surfaces, laid out for a power-plant-style operator console.
  *
  * No dependencies: Node's `net` + hand-rolled telnet negotiation + ANSI.
+ *
+ * v0.67.0 — the per-session render/input state machine moved to
+ * `session.ts` (transport-agnostic `TuiSession`), and the shared data caches
+ * (totals/forecast/degradation) moved to `dataProvider.ts` so the browser
+ * WebSocket console (`wsConsole.ts`, served at /console) reuses BOTH. This
+ * file now only owns the telnet transport: TCP + IAC negotiation + NAWS +
+ * the alt-screen lifecycle. The IAC parsing here is unchanged.
  */
 
 import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import type { SnapshotStore } from '../snapshot.js';
 import type { Recorder } from '../recorder.js';
-import { getAnalytics } from '../analyticsClient.js';
-import { computeTotals, startOfLocalDayMs } from '../aggregator.js';
-import type { FleetEnergyTotals } from '../aggregator.js';
-import { getDayForecast, computeDegradation } from '../analytics.js';
-import type { DayForecast, FleetDegradation } from '../analytics.js';
-import { renderScreen, SCREENS, getDpus } from './screens.js';
-import type { ScreenId, SessionView } from './screens.js';
-import { renderPlant, PLANT_SCREENS } from './plant/index.js';
-import type { PlantScreenId, PlantView } from './plant/index.js';
-import { renderChooser, defaultChooserState } from './plant/chooser.js';
-import type { ChooserState } from './plant/chooser.js';
+import { createTuiDataProvider } from './dataProvider.js';
+import type { TuiDataProvider } from './session.js';
+import { TuiSession } from './session.js';
+import type { InputEvent } from './session.js';
 import {
-  HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN, CURSOR_HOME, CLEAR_EOL, CLEAR_BELOW, RESET,
-  ENTER_ALT_BUFFER, EXIT_ALT_BUFFER, BEGIN_SYNC, END_SYNC,
+  HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN, RESET,
+  ENTER_ALT_BUFFER, EXIT_ALT_BUFFER,
 } from './ansi.js';
 
 /* ── Telnet protocol bytes ── */
@@ -41,52 +41,12 @@ const OPT_ECHO = 1;
 const OPT_SGA = 3;
 const OPT_NAWS = 31;
 
-type InputEvent = { type: 'key'; key: string } | { type: 'naws'; w: number; h: number };
-
-/**
- * v0.9.13 — session mode. On connect we show the chooser; the user picks
- * a console with [1] (Plant Operator) or [2] (Summary). TAB from any
- * non-chooser view returns to the chooser.
- */
-type SessionMode = 'chooser' | 'plant' | 'summary';
-
-interface Session {
+interface TelnetConn {
   socket: Socket;
-  width: number;
-  height: number;
-  mode: SessionMode;
-  /** SUMMARY mode state (legacy screens). */
-  screen: ScreenId;
-  battDpu: number;
-  battPack: number;
-  alertScroll: number;
-  /** PLANT mode state. */
-  plantScreen: PlantScreenId;
-  plantGenSel: number;
-  plantGenPack: number;
-  plantAlmScroll: number;
-  plantConnectedAt: number;
-  /** CHOOSER mode state. */
-  chooser: ChooserState;
+  session: TuiSession;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
-  /** v0.9.5 — true while a frame is being written; prevents overlapping draws
-   *  from interleaving (e.g. a NAWS event triggering a mid-frame redraw on
-   *  top of the periodic 1s redraw). Cleared as soon as socket.write returns. */
-  drawing: boolean;
-  /** v0.9.5 — a redraw was requested while drawing was in flight; honor it
-   *  immediately after the current frame finishes so user input still feels
-   *  instant without ever overlapping writes. */
-  drawPending: boolean;
-  /** v0.9.16 — hash of the last successfully-written frame body. When the
-   *  next render produces the same body, we skip the socket write entirely.
-   *  This drops Termius bandwidth on screens that don't change between ticks
-   *  (e.g. ALM with 5 stable alarms) from ~3 KB/s to 0 — and removes the
-   *  flicker that was visible on terminals without mode-2026 sync support. */
-  lastFrameHash: string;
 }
-
-const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 /**
  * Parse a raw input buffer into key/resize events, stripping telnet IAC
@@ -201,368 +161,77 @@ export interface TelnetServerOptions {
   host: string;
   port: number;
   log: (msg: string) => void;
+  /**
+   * v0.67.0 — optional shared data provider. When the caller wants the WS
+   * console and the telnet server to share ONE set of refresh timers, it
+   * creates the provider once and passes it in here. When omitted, the telnet
+   * server creates and owns its own (the standalone-telnet path).
+   */
+  data?: { provider: TuiDataProvider; stop: () => void };
 }
 
 export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
   const { store, recorder, host, port, log } = opts;
-  const sessions = new Set<Session>();
-  // v0.9.13 — captured once at server start so Plant header can show SYS.UPTIME.
-  const serverStartedAt = Date.now();
+  const conns = new Set<TelnetConn>();
 
-  // Shared, periodically-refreshed data caches — the energy integration and
-  // weather forecast are too heavy to run on every 1 s render.
-  let totals: FleetEnergyTotals | null = null;
-  let forecast: DayForecast | null = null;
-  // v0.9.50 — computeDegradation became async (yields the event loop between
-  // packs) so it can no longer be called inline from the sync `draw()`. Mirror
-  // the forecast pattern: refresh on a timer, hand the latest cached value to
-  // each render. The underlying analytics cache is 30 min anyway.
-  let degradation: FleetDegradation | null = null;
-  let stopped = false;
-  let forecastTimer: NodeJS.Timeout | null = null;
-  let degradationTimer: NodeJS.Timeout | null = null;
+  // Shared, periodically-refreshed data caches (energy totals, day-ahead
+  // forecast, capacity-fade degradation). Reused by every session here AND by
+  // the WS console when the caller passes a shared provider.
+  const owned = opts.data ?? createTuiDataProvider({ store, recorder, log });
+  const data = owned.provider;
+  const ownsData = !opts.data;
 
-  const storeReady = () => Object.keys(store.get().devices).length > 0;
-
-  const refreshTotals = async () => {
-    if (!storeReady()) return; // leave totals null until the fleet is discovered
+  const safeWrite = (socket: Socket, payload: string | Buffer) => {
     try {
-      totals = await getAnalytics().report('totals', { sinceMs: startOfLocalDayMs(), untilMs: Date.now() });
-    } catch (e: any) {
-      log(`telnet: totals refresh failed: ${e?.message ?? e}`);
-    }
-  };
-
-  // The day-ahead forecast is heavy and needs the device list + recorder
-  // history ready, so it self-schedules: fast retries until the first usable
-  // result lands, then a relaxed 5-minute cadence. A degraded result (no
-  // history yet) never clobbers a good one.
-  const refreshForecast = async (): Promise<boolean> => {
-    if (!storeReady()) return false;
-    try {
-      const f = await getAnalytics().report('forecast');
-      if (f.historyDays > 0 || forecast == null) forecast = f;
-      return f.historyDays > 0;
-    } catch (e: any) {
-      log(`telnet: forecast refresh failed: ${e?.message ?? e}`);
-      return false;
-    }
-  };
-  const scheduleForecast = (delayMs: number) => {
-    forecastTimer = setTimeout(async () => {
-      if (stopped) return;
-      const good = await refreshForecast();
-      if (!stopped) scheduleForecast(good ? 5 * 60_000 : 30_000);
-    }, delayMs);
-  };
-
-  // Async-aware degradation refresh — same self-scheduling shape as forecast.
-  // computeDegradation's internal cache is 30 min, so a 5 min poll is the
-  // right balance: we get a fresh value soon after each cache expiry while
-  // staying inside the analytics layer's intended cadence.
-  const refreshDegradation = async (): Promise<boolean> => {
-    if (!storeReady()) return false;
-    try {
-      degradation = await getAnalytics().report('degradation');
-      return true;
-    } catch (e: any) {
-      log(`telnet: degradation refresh failed: ${e?.message ?? e}`);
-      return false;
-    }
-  };
-  const scheduleDegradation = (delayMs: number) => {
-    degradationTimer = setTimeout(async () => {
-      if (stopped) return;
-      const good = await refreshDegradation();
-      if (!stopped) scheduleDegradation(good ? 5 * 60_000 : 30_000);
-    }, delayMs);
-  };
-
-  void refreshTotals();
-  const totalsTimer = setInterval(() => { void refreshTotals(); }, 15_000);
-  scheduleForecast(2_000);
-  scheduleDegradation(3_000);
-
-  const safeWrite = (s: Session, data: string | Buffer) => {
-    try {
-      if (!s.socket.destroyed && s.socket.writable) s.socket.write(data);
+      if (!socket.destroyed && socket.writable) socket.write(payload);
     } catch {
       /* peer vanished mid-write — the close handler will clean up */
     }
   };
 
-  const draw = (s: Session) => {
-    if (s.socket.destroyed) return;
-    // v0.9.5 — serialize frames. If a draw is already in flight, mark a
-    // pending redraw and bail. The completing frame will run the pending
-    // one on its way out. Eliminates the "two writes racing into the same
-    // ANSI stream" class of glitch.
-    if (s.drawing) {
-      s.drawPending = true;
-      return;
-    }
-    s.drawing = true;
-    s.drawPending = false;
-    try {
-      let lines: string[];
-      if (s.mode === 'chooser') {
-        s.chooser.width = s.width;
-        s.chooser.height = s.height;
-        lines = renderChooser(s.chooser);
-      } else if (s.mode === 'plant') {
-        const pv: PlantView = {
-          width: s.width,
-          height: s.height,
-          screen: s.plantScreen,
-          genSel: s.plantGenSel,
-          genPack: s.plantGenPack,
-          almScroll: s.plantAlmScroll,
-          connectedAt: s.plantConnectedAt,
-        };
-        lines = renderPlant(pv, {
-          snap: store.get(),
-          totals,
-          forecast,
-          // v0.9.50 — read from the timer-refreshed cache instead of calling
-          // the now-async computeDegradation inline. Empty placeholder until
-          // the first refresh lands (a few seconds after server start).
-          degradation: degradation ?? { generatedAt: Date.now(), eolSoh: 80, packs: [] },
-          serverStartedAt,
-        }, { recorder });
-      } else {
-        const sv: SessionView = {
-          width: s.width,
-          height: s.height,
-          screen: s.screen,
-          battDpu: s.battDpu,
-          battPack: s.battPack,
-          alertScroll: s.alertScroll,
-        };
-        // v0.9.50 — computeDegradation went async to yield between packs,
-        // so we read from the timer-refreshed cache instead of calling it
-        // inline. Empty placeholder until the first refresh lands.
-        lines = renderScreen(sv, {
-          snap: store.get(),
-          totals,
-          forecast,
-          degradation: degradation ?? { generatedAt: Date.now(), eolSoh: 80, packs: [] },
-        });
-      }
-      // v0.9.5 — wrap each frame in synchronized-output escapes so terminals
-      // that support mode 2026 (Kitty, recent iTerm2, recent WezTerm, Windows
-      // Terminal) buffer all output and flip atomically. Terminals that don't
-      // support it (Termius, older iTerm2, plain xterm) treat the escapes as
-      // no-ops and apply each subsequent escape live.
-      //
-      // v0.9.16 — fix flicker on non-mode-2026 terminals:
-      //   • Build the FRAME BODY (without sync escapes) and hash it.
-      //   • If the new body is byte-identical to the previous one, skip the
-      //     socket write entirely — Termius sees zero bytes, zero repaint
-      //     work. The 1 Hz draw timer keeps firing, so any change reaches
-      //     the wire within ~1 s of happening.
-      //   • Drop CLEAR_SCREEN. The combination of CURSOR_HOME at the top,
-      //     per-line CLEAR_EOL, and trailing CLEAR_BELOW already covers
-      //     every transition cleanly — and crucially does NOT produce a
-      //     visible blank-and-repaint on Termius. The "INFO" flash on the
-      //     ALM screen was a side effect of the per-tick blank.
-      let body = HIDE_CURSOR + CURSOR_HOME;
-      for (let i = 0; i < lines.length; i++) {
-        body += lines[i] + CLEAR_EOL;
-        if (i < lines.length - 1) body += '\r\n';
-      }
-      body += CLEAR_BELOW;
-
-      // Cheap stable hash of the body. The body is typically ~2-4 KB and
-      // already a UTF-8 string, so a 32-bit FNV-1a is plenty discriminative
-      // and avoids pulling in node:crypto on the hot path.
-      let hash = 2166136261;
-      for (let i = 0; i < body.length; i++) {
-        hash ^= body.charCodeAt(i);
-        hash = (hash * 16777619) >>> 0;
-      }
-      const hashStr = hash.toString(36);
-      if (hashStr === s.lastFrameHash) {
-        // Identical frame — no wire write, no terminal work, no flicker.
-        return;
-      }
-      s.lastFrameHash = hashStr;
-      safeWrite(s, BEGIN_SYNC + body + END_SYNC);
-    } finally {
-      s.drawing = false;
-      // Honor a pending redraw queued during this frame.
-      if (s.drawPending) {
-        s.drawPending = false;
-        // Schedule on the next tick so we don't grow the call stack on rapid
-        // keypress + interval coincidence.
-        setImmediate(() => draw(s));
-      }
-    }
-  };
-
-  const endSession = (s: Session) => {
-    if (!sessions.has(s)) return;
-    sessions.delete(s);
-    if (s.timer) {
-      clearInterval(s.timer);
-      s.timer = null;
+  const endConn = (conn: TelnetConn) => {
+    if (!conns.has(conn)) return;
+    conns.delete(conn);
+    if (conn.timer) {
+      clearInterval(conn.timer);
+      conn.timer = null;
     }
     try {
-      if (!s.socket.destroyed) {
+      if (!conn.socket.destroyed) {
         // v0.9.5 — restore the user's primary screen buffer + cursor on exit
         // so their terminal returns to whatever was visible before they ran
         // `telnet`. Without ?1049l the alt-buffer remains active and they'd
         // see a blank terminal until they manually re-enter primary mode.
-        s.socket.write(SHOW_CURSOR + RESET + EXIT_ALT_BUFFER + '\r\n');
-        s.socket.end();
+        conn.socket.write(SHOW_CURSOR + RESET + EXIT_ALT_BUFFER + '\r\n');
+        conn.socket.end();
       }
     } catch {
       /* ignore */
     }
   };
 
-  /** Apply a key to session state. Returns true if a redraw is warranted. */
-  const applyKey = (s: Session, key: string): boolean => {
-    /* ── chooser mode ────────────────────────────────────────────── */
-    if (s.mode === 'chooser') {
-      if (key === '1') {
-        s.mode = 'plant';
-        s.plantScreen = 'console';
-        s.plantConnectedAt = Date.now();
-        return true;
-      }
-      if (key === '2') {
-        s.mode = 'summary';
-        s.screen = 'overview';
-        return true;
-      }
-      if (key === 'left' || key === 'right') {
-        s.chooser.highlight = s.chooser.highlight === 0 ? 1 : 0;
-        return true;
-      }
-      if (key === 'enter') {
-        if (s.chooser.highlight === 0) {
-          s.mode = 'plant';
-          s.plantScreen = 'console';
-          s.plantConnectedAt = Date.now();
-        } else {
-          s.mode = 'summary';
-          s.screen = 'overview';
-        }
-        return true;
-      }
-      return false;
+  const onData = (conn: TelnetConn, chunk: Buffer) => {
+    conn.inbuf = conn.inbuf.length ? Buffer.concat([conn.inbuf, chunk]) : chunk;
+    if (conn.inbuf.length > 4096) conn.inbuf = conn.inbuf.subarray(conn.inbuf.length - 64); // drop runaway garbage
+    const { events, rest } = parseInput(conn.inbuf);
+    conn.inbuf = Buffer.from(rest);
+    const r = conn.session.feed(events);
+    if (r.quit) {
+      endConn(conn);
+      return;
     }
-
-    /* ── universal: TAB returns to chooser ──────────────────────── */
-    if (key === '\t' || key === 'tab') {
-      s.mode = 'chooser';
-      return true;
-    }
-
-    /* ── plant mode ─────────────────────────────────────────────── */
-    if (s.mode === 'plant') {
-      if (key.length === 1 && key >= '1' && key <= String(PLANT_SCREENS.length)) {
-        const next = PLANT_SCREENS[Number(key) - 1];
-        if (next !== s.plantScreen) {
-          s.plantScreen = next;
-          s.plantAlmScroll = 0;
-        }
-        return true;
-      }
-      if (key === 'up' || key === 'down' || key === 'left' || key === 'right') {
-        if (s.plantScreen === 'gen') {
-          const count = Math.max(1, getDpus(store.get()).length);
-          if (key === 'left') s.plantGenSel = (s.plantGenSel - 1 + count) % count;
-          else if (key === 'right') s.plantGenSel = (s.plantGenSel + 1) % count;
-          else if (key === 'up') s.plantGenPack = (s.plantGenPack + 4) % 5;
-          else if (key === 'down') s.plantGenPack = (s.plantGenPack + 1) % 5;
-          return true;
-        }
-        if (s.plantScreen === 'alm') {
-          if (key === 'up') s.plantAlmScroll = Math.max(0, s.plantAlmScroll - 1);
-          else if (key === 'down') s.plantAlmScroll += 1;
-          return true;
-        }
-      }
-      return false;
-    }
-
-    /* ── summary mode (legacy, unchanged) ───────────────────────── */
-    if (key.length === 1 && key >= '1' && key <= String(SCREENS.length)) {
-      const next = SCREENS[Number(key) - 1];
-      if (next !== s.screen) {
-        s.screen = next;
-        s.alertScroll = 0;
-      }
-      return true;
-    }
-    if (key === 'up' || key === 'down' || key === 'left' || key === 'right') {
-      if (s.screen === 'battery') {
-        const count = Math.max(1, getDpus(store.get()).length);
-        if (key === 'left') s.battDpu = (s.battDpu - 1 + count) % count;
-        else if (key === 'right') s.battDpu = (s.battDpu + 1) % count;
-        else if (key === 'up') s.battPack = (s.battPack + 4) % 5;
-        else if (key === 'down') s.battPack = (s.battPack + 1) % 5;
-        return true;
-      }
-      if (s.screen === 'alerts' || s.screen === 'predictive' || s.screen === 'shp2') {
-        if (key === 'up') s.alertScroll = Math.max(0, s.alertScroll - 1);
-        else if (key === 'down') s.alertScroll += 1;
-        return true;
-      }
-    }
-    return false;
-  };
-
-  const onData = (s: Session, data: Buffer) => {
-    s.inbuf = s.inbuf.length ? Buffer.concat([s.inbuf, data]) : data;
-    if (s.inbuf.length > 4096) s.inbuf = s.inbuf.subarray(s.inbuf.length - 64); // drop runaway garbage
-    const { events, rest } = parseInput(s.inbuf);
-    s.inbuf = Buffer.from(rest);
-    let dirty = false;
-    for (const ev of events) {
-      if (ev.type === 'naws') {
-        if (ev.w > 0 && ev.h > 0) {
-          s.width = clamp(ev.w, 60, 200);
-          s.height = clamp(ev.h, 16, 80);
-          dirty = true;
-        }
-      } else {
-        if (ev.key === 'ctrl-c' || ev.key === 'q' || ev.key === 'Q') {
-          endSession(s);
-          return;
-        }
-        if (applyKey(s, ev.key)) dirty = true;
-      }
-    }
-    if (dirty) draw(s);
+    if (r.redraw) conn.session.draw();
   };
 
   const server = createServer((socket) => {
     socket.setNoDelay(true);
-    const s: Session = {
-      socket,
-      width: 80,
-      height: 24,
-      mode: 'chooser',
-      screen: 'overview',
-      battDpu: 0,
-      battPack: 0,
-      alertScroll: 0,
-      plantScreen: 'console',
-      plantGenSel: 0,
-      plantGenPack: 0,
-      plantAlmScroll: 0,
-      plantConnectedAt: Date.now(),
-      chooser: defaultChooserState(80, 24),
-      inbuf: Buffer.alloc(0),
-      timer: null,
-      drawing: false,
-      drawPending: false,
-      lastFrameHash: '',
-    };
-    sessions.add(s);
-    log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${sessions.size} active)`);
+    const session = new TuiSession({
+      write: (payload) => safeWrite(socket, payload),
+      data,
+    });
+    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null };
+    conns.add(conn);
+    log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
 
     // Negotiate character-at-a-time mode + ask for the window size.
     socket.write(
@@ -575,16 +244,16 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     );
     // v0.9.5 — enter alt-screen buffer so we don't pollute the user's
     // scrollback and our frame boundaries can't smear into earlier output.
-    safeWrite(s, ENTER_ALT_BUFFER + HIDE_CURSOR + CLEAR_SCREEN);
-    draw(s);
-    s.timer = setInterval(() => draw(s), 1000);
+    safeWrite(socket, ENTER_ALT_BUFFER + HIDE_CURSOR + CLEAR_SCREEN);
+    session.draw();
+    conn.timer = setInterval(() => session.draw(), 1000);
 
     // node:net never delivers strings on a socket without setEncoding(); the
     // @types/node ≥ 22.19 union of `string | Buffer` is a theoretical-only
     // possibility for our setup, so coerce to keep the inner signature tight.
-    socket.on('data', (d) => onData(s, d as Buffer));
-    socket.on('close', () => endSession(s));
-    socket.on('error', () => endSession(s));
+    socket.on('data', (d) => onData(conn, d as Buffer));
+    socket.on('close', () => endConn(conn));
+    socket.on('error', () => endConn(conn));
   });
 
   server.on('error', (e: any) => log(`telnet: server error: ${e?.message ?? e}`));
@@ -592,12 +261,11 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
 
   return {
     stop: () => {
-      stopped = true;
-      clearInterval(totalsTimer);
-      if (forecastTimer) clearTimeout(forecastTimer);
-      if (degradationTimer) clearTimeout(degradationTimer);
-      for (const s of [...sessions]) endSession(s);
+      for (const conn of [...conns]) endConn(conn);
       server.close();
+      // Only stop the refresh timers if WE created them; a shared provider is
+      // the caller's to stop.
+      if (ownsData) owned.stop();
     },
   };
 }

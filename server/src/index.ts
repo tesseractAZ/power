@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
-import { createAuth } from './auth.js';
+import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
 import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus } from './shp2Membership.js';
@@ -53,6 +53,8 @@ import {
   runwayHoursForPublish,
 } from './analytics.js';
 import { startTelnetServer } from './telnet/server.js';
+import { createTuiDataProvider } from './telnet/dataProvider.js';
+import { registerWsConsole } from './telnet/wsConsole.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
 import { buildCalendarIcs } from './calendar.js';
 import { computeRepairIssues } from './repairIssues.js';
@@ -245,6 +247,11 @@ await app.register(websocket, {
       threshold: 1024,
       zlibDeflateOptions: { level: 6 },
     },
+    // v0.68.0 — bound inbound ws frames. The /ws snapshot socket and the
+    // /console/ws terminal only ever receive tiny client frames (keystrokes,
+    // a small resize JSON; /ws receives nothing), so 64 KiB is generous while
+    // capping a malicious/runaway client's per-frame memory.
+    maxPayload: 64 * 1024,
   },
 });
 // v0.9.14 — gzip/brotli on every response over 1 kB. JSON payloads (snapshot,
@@ -1649,7 +1656,22 @@ function snapshotFrame(): string {
   }
   return wsFrameStr;
 }
-app.get('/ws', { websocket: true }, (socket) => {
+app.get('/ws', {
+  websocket: true,
+  // v0.68.0 — reject cross-origin upgrades on the snapshot socket too, matching
+  // the /console/ws policy and the CORS origin callback. Read-only telemetry,
+  // but a cross-origin page shouldn't be able to stream the fleet snapshot.
+  // Missing Origin (same-origin fetch / HA dashboards / curl) and LAN/same
+  // origins still pass, so the React dashboard and Lovelace cards are unaffected.
+  preValidation: (req, reply, done) => {
+    const origin = req.headers.origin?.toString();
+    if (origin && !isAllowedOrigin(origin, auth.sameOrigins)) {
+      reply.code(403).send({ error: 'forbidden-origin' });
+      return; // reply short-circuits the route → upgrade never happens
+    }
+    done();
+  },
+}, (socket) => {
   socket.send(snapshotFrame());
   const onChange = () => {
     if (socket.readyState === socket.OPEN) {
@@ -1715,22 +1737,47 @@ app.log.info(
   `notify: channel=${monitor.getConfig().channel} configured=${isConfigured(monitor.getConfig())}`,
 );
 
-// Telnet control-room TUI — a menu-driven terminal view of the whole fleet.
+// Control-room TUI — a menu-driven terminal view of the whole fleet, exposed
+// two ways over ONE shared set of refresh timers:
+//   • the raw telnet TCP server on :2323 (gated by TELNET_ENABLED); and
+//   • a browser web terminal at /console on the web port :8787 (xterm.js over
+//     a WebSocket), reachable on the LAN + pointable from a HA panel_iframe.
+// v0.67.0 — the per-session render/input logic is transport-agnostic
+// (TuiSession), reused by both. The web console is read-only, same LAN
+// exposure as the already-unauthenticated telnet TUI.
 let stopTelnet: (() => void) | null = null;
-if (config.telnet.enabled) {
+const stopTuiData = (() => {
   try {
-    stopTelnet = startTelnetServer({
-      store,
-      recorder,
-      host: config.telnet.host,
-      port: config.telnet.port,
+    const tuiData = createTuiDataProvider({ store, recorder, log: (m) => app.log.info(m) });
+    // Browser web terminal — always available on the web port (independent of
+    // the telnet TCP toggle). Registered before app.listen().
+    registerWsConsole({
+      app,
+      data: tuiData.provider,
       log: (m) => app.log.info(m),
-    }).stop;
-    app.log.info(`telnet: control-room TUI on telnet://${config.telnet.host}:${config.telnet.port}`);
+      // Reject cross-origin ws upgrades using the SAME same-origin/LAN policy as
+      // CORS (auth.ts isAllowedOrigin). Missing Origin (same-origin browser
+      // fetch, HA panel_iframe, curl) is allowed by the caller in wsConsole.ts.
+      isOriginAllowed: (origin) => (origin ? isAllowedOrigin(origin, auth.sameOrigins) : true),
+    });
+    app.log.info('console: web terminal available at /console');
+    if (config.telnet.enabled) {
+      stopTelnet = startTelnetServer({
+        store,
+        recorder,
+        host: config.telnet.host,
+        port: config.telnet.port,
+        log: (m) => app.log.info(m),
+        data: tuiData, // share the refresh timers
+      }).stop;
+      app.log.info(`telnet: control-room TUI on telnet://${config.telnet.host}:${config.telnet.port}`);
+    }
+    return tuiData.stop;
   } catch (e: any) {
-    app.log.error(`telnet: failed to start: ${e?.message ?? e}`);
+    app.log.error(`console/telnet: failed to start: ${e?.message ?? e}`);
+    return () => {};
   }
-}
+})();
 
 // HA MQTT Discovery — opt-in. When wired to the user's HA MQTT broker, every
 // sensor we expose auto-registers under the "EcoFlow Panel" device with no
@@ -2569,6 +2616,7 @@ const shutdown = async () => {
   stopMqtt?.();
   monitor.stop();
   stopTelnet?.();
+  stopTuiData(); // shared TUI refresh timers (telnet + /console)
   stopMqttDiscovery?.();
   analytics.stop();
   broadcast.stop();
