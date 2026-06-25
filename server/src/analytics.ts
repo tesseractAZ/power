@@ -2428,6 +2428,15 @@ export function computeRunway(
 // cycles instead of every cycle. RTE is a 7-day rolling aggregate feeding an
 // HA sensor — 15-min freshness is ample.
 const RTE_TTL_MS = 15 * 60 * 1000;
+// v0.65.0 - extended-lookback window for the RTE backstop. When the primary round-trip
+// window has NO balanced day (a sustained net-discharge drawdown - every day's
+// discharge/charge ratio falls outside the [0.80, 1.05] band), the gated aggregate is
+// null and the sensor would read 'unknown' while the home is plainly still cycling.
+// Rather than fabricate a number, the lookback EXTENDS to this many days and reports RTE
+// from the most recent REAL balanced cycles (stateless, honest, never >100%, self-heals
+// the instant a balanced day re-enters the primary window). Only the degenerate path
+// pays the heavier query, and that wide pass uses coarser buckets.
+const RTE_EXTENDED_WINDOW_DAYS = Math.max(7, Math.round(Number(process.env.RTE_EXTENDED_WINDOW_DAYS ?? 30)));
 
 export interface RoundTripDay {
   date: string;
@@ -2490,7 +2499,10 @@ export function computeRoundTripEfficiency(
     for (const pk of d.projection.packs) {
       metricsNeeded.push(`pack${pk.num}_in`, `pack${pk.num}_out`);
     }
-    const byMetric = recorder.queryMulti(d.sn, metricsNeeded, fullStart, fullEnd, 60);
+    // v0.65.0 - coarser buckets for the wide extended-lookback pass (5x less data to
+    // integrate); the primary <=10-day pass keeps 60 s resolution so the per-day
+    // coverage gate is unchanged. Daily balanced-day detection is robust to 300 s buckets.
+    const byMetric = recorder.queryMulti(d.sn, metricsNeeded, fullStart, fullEnd, windowDays > 10 ? 300 : 60);
     for (const pk of d.projection.packs) {
       packSeries.set(`${d.sn}|${pk.num}`, {
         in: byMetric.get(`pack${pk.num}_in`) ?? [],
@@ -2596,8 +2608,21 @@ export function computeRoundTripEfficiency(
     efficiencyPct: effPct != null ? Math.round(effPct * 10) / 10 : null,
     perDay,
   };
-  if (dpus.length > 0) rteCache = { ts: now, key, value };
-  return value;
+  // v0.65.0 - extended-lookback backstop. If the primary window found NO balanced
+  // round-trip day (effPct null - typically a sustained net-discharge drawdown where
+  // every day's discharge/charge ratio left the [0.80, 1.05] band), re-run over a wider
+  // window and report the most recent REAL balanced cycles instead of going 'unknown'.
+  // Stateless and honest: only genuine balanced-day ratios are ever published (<=100%),
+  // and if even the wide window has none (a very long drawdown / fresh install) we keep
+  // the honest null. The wider call self-terminates (its windowDays == EXTENDED is not
+  // < EXTENDED, so no further recursion) and uses coarser buckets.
+  let out = value;
+  if (out.efficiencyPct == null && windowDays < RTE_EXTENDED_WINDOW_DAYS) {
+    const extended = computeRoundTripEfficiency(devices, recorder, RTE_EXTENDED_WINDOW_DAYS);
+    if (extended.efficiencyPct != null) out = extended;
+  }
+  if (dpus.length > 0) rteCache = { ts: now, key, value: out };
+  return out;
 }
 
 /* ===================================================================
