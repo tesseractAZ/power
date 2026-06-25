@@ -327,7 +327,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // tag. The tag is folded into the key so swapping a tone busts the cache; the
   // built-in tag is OMITTED from the key so default users see zero cache churn.
   const chimeTag = opts.chimeTag ?? BUILTIN_CHIME_TAG;
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs, opts.messages);
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs, opts.messages, wyomingVoice);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -421,7 +421,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // pass, so this de-dupes its single render. A pass whose TTS fails OR whose WAV
   // format doesn't match the klaxon is DROPPED (non-fatal); the others still play.
   const passKey = (s: { lang: 'en' | 'es'; voice?: string; text: string }) =>
-    `${s.lang} ${s.voice ?? ''} ${s.text}`;
+    `${s.lang}\u0000${s.voice ?? ''}\u0000${s.text}`;
   const renderedPcm = new Map<string, Buffer>();
   const failedKeys = new Set<string>();
   let firstTtsMs: number | undefined;
@@ -643,6 +643,11 @@ export function renderCacheKey(
   endOfMessagePhrase?: string,
   endOfMessageGapMs?: number,
   messages?: ReadonlyArray<{ text: string; voice?: string; lang?: 'en' | 'es' }>,
+  // v0.64.0 — the globally-configured Wyoming voice (BROADCAST_WYOMING_VOICE). Folded
+  // into the key so a voice change re-renders: the monolingual path keys on it directly,
+  // and the bilingual path resolves each inherited-voice pass to it (matching the audio
+  // renderAnnouncement actually produces via `m.voice ?? wyomingVoice`).
+  wyomingVoice?: string,
 ): string {
   // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
   // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
@@ -682,10 +687,17 @@ export function renderCacheKey(
   // key and changing a language/voice/text re-renders. The terminator voice +
   // language derive from the final pass, so they're covered by this too.
   const msgPart = (messages && messages.length)
-    ? '|L' + messages.map((m, i) => `${i}~${m.lang ?? 'en'}~${m.voice ?? ''}~${m.text}`).join('')
+    ? '|L' + messages.map((m, i) => `${i}~${m.lang ?? 'en'}~${m.voice ?? wyomingVoice ?? ''}~${m.text}`).join('')
     : '';
+  // v0.64.0 — monolingual (single-pass) resolved-voice identity. The bilingual path
+  // already folds each pass's resolved voice into msgPart; the legacy single-pass path
+  // had NO voice token at all, so a BROADCAST_WYOMING_VOICE change cache-hit the old
+  // default voice's WAV. OMITTED when no voice is pinned (Piper server default) so
+  // default users' keys stay byte-identical to the pre-feature string (zero churn);
+  // a pinned voice makes the key distinct so swapping it re-renders.
+  const voicePart = (!msgPart && wyomingVoice) ? `|V${wyomingVoice}` : '';
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}${eomPart}${msgPart}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}${eomPart}${msgPart}${voicePart}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }

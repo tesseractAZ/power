@@ -1477,6 +1477,16 @@ const EOL_MIN_R2 = 0.3;                                       // trend must expl
 // fade. You cannot extrapolate an ~18-pt decline-to-EOL from a ~1-pt signal; this
 // floor (~3 quantization steps) holds such packs at "learning". See sohSignalBelowFloor.
 const SOH_MIN_OBSERVED_DROP_PTS = 1.5;
+// v0.64.0 — implausible-fade ceiling for the DATED-EOL projection. Mirrors the
+// forecast-soh ALERT path's MAX_SOH_FADE_PCT_PER_YEAR: real LFP fades ~2-3 %/yr, so an
+// OLS slope implying a faster annual fade is early-life BMS fullCap recalibration
+// settling, NOT a trustworthy EOL trajectory. The alert path already rejected this, but
+// the projection path did not — so a near-new pack whose month-long fullCap settle
+// exceeded the sohSignalBelowFloor floor (>1.5 pt net) still dated a false ~0.4 yr EOL
+// (live: Core 3 packs 4 & 5, 95 % SoH, fit 39-43 %/yr). A genuine fast failure is caught
+// by the absolute SoH threshold alarm separately. ALIASED from the alert-path constant
+// so the two paths can never silently drift apart.
+const EOL_MAX_FADE_PCT_PER_YEAR = MAX_SOH_FADE_PCT_PER_YEAR;  // = 10 %/yr
 const EOL_MAX_YEARS = 40;                                     // beyond this, "EOL not in sight"
 // v0.42.0 — pack mAh → kWh conversion. Each DPU pack is 32S1P (~104 V nominal;
 //   32 series cells whose mV sum to packVoltageMv). fullCap is single-string mAh.
@@ -1610,6 +1620,18 @@ export function sohSignalBelowFloor(pts: Array<{ ts: number; value: number }>): 
   const firstMean = vals.slice(0, q).reduce((a, b) => a + b, 0) / q;
   const lastMean = vals.slice(-q).reduce((a, b) => a + b, 0) / q;
   return firstMean - lastMean < SOH_MIN_OBSERVED_DROP_PTS;
+}
+
+/**
+ * v0.64.0 — true when an OLS-fit fade rate is too fast to be real LFP degradation
+ * (≈2-3 %/yr) and is therefore early-life BMS fullCap-recalibration settling, not a
+ * trustworthy EOL trajectory. Mirror of the forecast-soh ALERT path's
+ * MAX_SOH_FADE_PCT_PER_YEAR test so the dated-EOL projection cannot outrun the alert.
+ * Exported so it can be unit-tested in isolation, like sohStepDominated /
+ * sohSignalBelowFloor. null (no fit) and flat/improving packs return false.
+ */
+export function fadeExceedsPlausibleCeiling(fadePctPerYear: number | null): boolean {
+  return fadePctPerYear != null && fadePctPerYear > EOL_MAX_FADE_PCT_PER_YEAR;
 }
 
 /** Regress one pack's SoH history and project it to end-of-life. */
@@ -1916,6 +1938,41 @@ function analysePack(
         summary +
         (avgPackTempC != null
           ? ` Avg pack temp ${Math.round(avgPackTempC)} °C across the window.`
+          : ''),
+    });
+  }
+
+  // v0.64.0 — implausible-fast-fade guard. The gates above (sohStepDominated /
+  // sohSignalBelowFloor / span+r² / stable) admit a near-new pack whose early-life
+  // BMS fullCap settling produced a multi-point SoH drop over the window that OLS
+  // annualizes into a physically-impossible fade (real LFP ≈ 2-3 %/yr). The forecast-soh
+  // ALERT path already rejected fades > MAX_SOH_FADE_PCT_PER_YEAR; this mirrors it so the
+  // DATED EOL can't outrun the alert. Route to 'learning' with NULL fade/EOL (does NOT
+  // seed the peer-fade pool, the confidence median-r², or degradation_soonest_eol_years
+  // → HA sensor stays 'unknown'). Re-arms automatically once a real, plausibly-paced
+  // multi-year trend accumulates. fadePctPerYear is already non-null here (the 'stable'
+  // branch returned on null), so the summary's .toFixed is safe.
+  if (fadeExceedsPlausibleCeiling(fadePctPerYear)) {
+    return mk({
+      status: 'learning',
+      fadePctPerYear: null,
+      fadeUncertaintyPct: null,
+      cyclesPerYear,
+      r2: null,
+      dataSpanDays: spanDays,
+      samples: sohPts.length,
+      avgPackTempC: avgPackTempC != null ? round1(avgPackTempC) : null,
+      arrheniusFactor: arrheniusFactor != null ? round2(arrheniusFactor) : null,
+      coulombicEffPct,
+      kalmanSmoothedSoh,
+      kalmanFadePctPerYear: null,
+      kalmanFadeStdevPctPerYear,
+      kalmanYearsToEol: null,
+      kalmanEolDate: null,
+      summary:
+        `SoH fit implies ~${fadePctPerYear.toFixed(1)}%/yr fade — faster than the ${EOL_MAX_FADE_PCT_PER_YEAR}%/yr physical ceiling for healthy LFP, so this is early-life BMS recalibration settling, not a real fade trend. Holding at "learning" — no dated end-of-life — until a plausibly-paced multi-year trend accumulates.` +
+        (avgPackTempC != null
+          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 25 °C` : ''}.`
           : ''),
     });
   }
