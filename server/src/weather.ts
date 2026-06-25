@@ -1,6 +1,7 @@
 import { request } from 'undici';
 import { config } from './config.js';
 import { getNwsHourlyCloud, isNwsEnabled } from './nws.js';
+import { singleFlight } from './singleFlight.js';
 
 /**
  * Weather forecast client. Open-Meteo is the primary source (free, no key,
@@ -38,6 +39,8 @@ export interface WeatherForecast {
 let cache: WeatherForecast | null = null;
 let testForceMode: 'unset' | 'value' | 'null' = 'unset';
 const TTL_MS = 2 * 60 * 60 * 1000; // 2h — weather forecasts don't move minute-to-minute
+// v0.69.0 — coalesce concurrent cold-cache fetches (see singleFlight.ts).
+const weatherFlight = singleFlight<WeatherForecast | null>();
 
 /**
  * Test-only seam: pin (or clear) the value getWeather() returns so tests
@@ -62,7 +65,17 @@ export async function getWeather(log: (m: string) => void = () => {}): Promise<W
   if (testForceMode === 'null') return null;
   if (testForceMode === 'value') return cache;
   if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache;
+  // v0.69.0 — coalesce concurrent cold-cache callers onto ONE fetch. The TTL
+  // cache above memoizes the resolved value but not the in-flight promise, so a
+  // cold window (restart, or a 2h-TTL expiry coincident with the worker self-warm
+  // + a multi-tab dashboard) had N callers each firing a full Open-Meteo+NWS
+  // fetch — boot logs showed `weather:fetched` repeated ~11x within 50s.
+  return weatherFlight.run(() => fetchWeatherUncached(log));
+}
 
+async function fetchWeatherUncached(log: (m: string) => void): Promise<WeatherForecast | null> {
+  // A prior in-flight fetch may have populated the cache while this caller queued.
+  if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache;
   const { forecastLat: lat, forecastLon: lon } = config;
   // v0.13.1 — past_days 3→7. The recorder now persists past+present GHI
   // (see index.ts → recordWeatherGhi), so one fetch backfills a full week

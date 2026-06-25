@@ -206,6 +206,10 @@ export const BINARY_SENSORS = [
   // "runway < threshold" automations on this so a 0% / low-hour projection during
   // a grid-tied cycle isn't treated as an imminent-depletion emergency.
   { unique_id: 'ecoflow_runway_projection_islanded_only', name: 'EcoFlow Runway Projection Islanded-Only', icon: 'mdi:transmission-tower-import', value_template: '{{ "ON" if value_json.runway_projection_islanded_only else "OFF" }}' },
+  // v0.69.0 — companion to the runway flag, scoped to the Projected Low SoC sensor:
+  // ON when that 0%/low projection only applies to the islanded case (grid backstopping
+  // now). Gate HA `projected_low_soc < N` automations on this to drop grid-tied false alarms.
+  { unique_id: 'ecoflow_projected_low_soc_islanded_only', name: 'EcoFlow Projected Low SoC Islanded-Only', icon: 'mdi:battery-alert-variant-outline', value_template: '{{ "ON" if value_json.projected_low_soc_islanded_only else "OFF" }}' },
   // v0.9.77 — fires when the system is actively curtailing PV (batteries
   // full + home load < expected PV). HA can trigger automations off this
   // — e.g. "if curtailing for 10 min then turn pool pump on full speed."
@@ -214,6 +218,10 @@ export const BINARY_SENSORS = [
   // extend runway. The operator's HA automations actuate off this (advisory
   // model); the add-on never toggles a load itself.
   { unique_id: 'ecoflow_load_shed_recommended', name: 'EcoFlow Load Shed Recommended', device_class: 'power', icon: 'mdi:power-plug-off', value_template: '{{ "ON" if value_json.load_shed_recommended else "OFF" }}' },
+  // v0.69.0 — ON when a SHP2-wired home core's own telemetry is missing from the
+  // self-consumption integral (cloud-offline / projection-less), so solar_fraction /
+  // direct-use undercount. Diagnostic: discount those KPIs while this reads ON.
+  { unique_id: 'ecoflow_self_consumption_coverage_partial', name: 'EcoFlow Self-Consumption Coverage Partial', icon: 'mdi:gauge-low', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.self_consumption_coverage_partial else "OFF" }}' },
 ];
 
 /**
@@ -595,6 +603,7 @@ export async function startMqttDiscovery(
       // v0.59.0 — runway/dip projections assume islanded; true when the grid is
       // actively backstopping → a low reading is informational, not actionable.
       runway_projection_islanded_only: liveGridBackstop(snap.devices).backstopping,
+      projected_low_soc_islanded_only: liveGridBackstop(snap.devices).backstopping,
       round_trip_efficiency_percent: rte.efficiencyPct,
       pv_clipped_kwh_today: clipping.todayKwh,
       pv_array_peak_watts: clipping.arrayPeakW,
@@ -606,6 +615,7 @@ export async function startMqttDiscovery(
       pv_curtailment_charge_ceiling_pct: curtailment.current?.chargeCeilingPct ?? null,
       solar_fraction_of_load_percent: sc.solarFractionOfLoadPct,
       direct_use_ratio_percent: sc.directUseRatioPct,
+      self_consumption_coverage_partial: sc.homeDpusCoveragePartial,
       pv_lifetime_kwh: lifetimeKwh('fleet_pv_wh'),
       load_lifetime_kwh: lifetimeKwh('fleet_load_wh'),
       grid_import_lifetime_kwh: lifetimeKwh('fleet_grid_import_wh'),
