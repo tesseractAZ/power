@@ -377,11 +377,14 @@ test('computeRoundTripEfficiency — single batched fetch per DPU + coverage-gat
   // <50% measured coverage (e.g. a 49-min partial-boot day) is set to null and
   // excluded from the aggregate. That removes the physically impossible
   // 130.8%/34.9% per-day values and reconciles the aggregate with
-  // self-consumption — WITHOUT the O(days × dpus) refetch. Budget stays ≤1
-  // queryMulti per DPU; never the per-metric query() path.
+  // self-consumption — WITHOUT the O(days × dpus) refetch.
+  // v0.65.0 — this synthetic fleet has no balanced round-trip day, so the
+  // extended-lookback backstop fires ONE additional batched pass (the wide window),
+  // still ≤1 queryMulti per DPU per pass → ≤2 passes × 4 DPUs = 8. The key invariant
+  // holds: batched per DPU, never the O(days × dpus) refetch, never per-metric query().
   assert.ok(
-    rec.queryMultiCount > 0 && rec.queryMultiCount <= 4,
-    `RTE made ${rec.queryMultiCount} queryMulti calls; budget is ≤ 4 (one per DPU)`,
+    rec.queryMultiCount > 0 && rec.queryMultiCount <= 8,
+    `RTE made ${rec.queryMultiCount} queryMulti calls; budget is ≤ 8 (≤2 batched passes × 4 DPUs)`,
   );
   assert.equal(rec.queryCount, 0, 'RTE should not use the per-metric query() path');
 });
