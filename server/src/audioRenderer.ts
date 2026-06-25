@@ -173,6 +173,11 @@ export interface RenderOptions {
   /** v0.61.0 — the terminator phrase. Blank disables it. Part of the key.
    *  Default → END_OF_MESSAGE_PHRASE ('End of message'). */
   endOfMessagePhrase?: string;
+  /** v0.67.0 — Spanish terminator phrase for the Spanish pass of a bilingual render.
+   *  Each language pass gets its OWN-language terminator (English pass → endOfMessagePhrase,
+   *  Spanish pass → this). Blank → the Spanish pass falls back to endOfMessagePhrase. Part
+   *  of the cache key. */
+  endOfMessagePhraseEs?: string;
   /** v0.61.0 — silence (ms) before the terminator on the final block. Part of
    *  the key. Default → END_OF_MESSAGE_GAP_MS. */
   endOfMessageGapMs?: number;
@@ -246,27 +251,28 @@ function makeSilencePcm(header: WavHeader, leadMs: number): Buffer {
 /**
  * v0.61.0 / v0.62.0 — assemble the PCM part list for an announcement: lead-in
  * silence, then each per-pass `block` in order (with `gap` between passes), and
- * the terminator `tailPcm` (preceded by `endGap`) spliced onto the FINAL pass
- * ONLY. Each pass is its own block, so a monolingual alarm passes the same block
- * repeated (the legacy "say it twice" reliability repeat) while a bilingual alarm
- * passes distinct blocks (English block, then Spanish block) — the terminator
- * rides whichever pass is last. Pure + exported so the final-play-only placement
- * is unit-testable without a live Wyoming render.
+ * a per-pass terminator `tails[i]` (preceded by `endGap`) spliced after its block. The
+ * caller supplies a terminator only on the LAST block of each language, so a bilingual
+ * alarm gets "End of message" after the English pass AND "Fin del mensaje" after the
+ * Spanish pass, while a monolingual alarm (the legacy "say it twice" repeat of one
+ * block) gets ONE terminator on the final block only. Pure + exported so the per-pass
+ * placement is unit-testable without a live Wyoming render.
  */
 export function assembleAnnouncementParts(
   silence: Buffer,
   blocks: ReadonlyArray<Buffer[]>,
   gap: Buffer,
-  tailPcm: Buffer | null,
+  tails: ReadonlyArray<Buffer | null>,
   endGap: Buffer,
 ): Buffer[] {
   const parts: Buffer[] = [silence];
   for (let i = 0; i < blocks.length; i++) {
     if (i > 0 && gap.length > 0) parts.push(gap);
     parts.push(...blocks[i]);
-    if (tailPcm && i === blocks.length - 1) {
+    const tail = tails[i];
+    if (tail) {
       if (endGap.length > 0) parts.push(endGap);
-      parts.push(tailPcm);
+      parts.push(tail);
     }
   }
   return parts;
@@ -315,6 +321,9 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const endOfMessage = opts.endOfMessage ?? false;
   const endOfMessagePhrase = (opts.endOfMessagePhrase ?? END_OF_MESSAGE_PHRASE).trim();
   const endOfMessageGapMs = Math.max(0, Math.round(opts.endOfMessageGapMs ?? END_OF_MESSAGE_GAP_MS));
+  // v0.67.0 — Spanish terminator phrase (blank → the Spanish pass falls back to the
+  // English phrase). Drives the per-language terminator on the Spanish pass.
+  const endOfMessagePhraseEs = (opts.endOfMessagePhraseEs ?? '').trim();
   const tailEnabled = endOfMessage && endOfMessagePhrase.length > 0;
 
   // Cache key derivation: stable for the same (version, level, message, repeat,
@@ -327,7 +336,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // tag. The tag is folded into the key so swapping a tone busts the cache; the
   // built-in tag is OMITTED from the key so default users see zero cache churn.
   const chimeTag = opts.chimeTag ?? BUILTIN_CHIME_TAG;
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs, opts.messages, wyomingVoice);
+  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs, opts.messages, wyomingVoice, endOfMessagePhraseEs);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -488,43 +497,52 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     : Array.from({ length: announceRepeat }, () => survivingSpecs[0]);
   const blocks: Buffer[][] = playSpecs.map((s) => buildBlock(renderedPcm.get(passKey(s))!));
 
-  // v0.61.0 / v0.62.0 — terminator ("End of message" / "Fin del mensaje") on the
-  // FINAL surviving pass. Its voice + language TRACK that pass, so a Spanish final
-  // pass gets a Spanish-voiced terminator. NON-FATAL: a failure logs, omits it
-  // (the message still plays), and marks the render incomplete so it isn't cached
-  // terminator-less under the terminator-on key.
-  const finalSpec = playSpecs[playSpecs.length - 1];
-  let tailPcm: Buffer | null = null;
+  // v0.61.0 / v0.62.0 / v0.67.0 — per-language "End of message" terminator. A terminator
+  // rides the LAST block of each language: a bilingual alarm says the English phrase after
+  // the English pass AND the Spanish phrase after the Spanish pass; a mono alarm
+  // (announceRepeat copies of ONE pass) gets a single terminator on the final block only
+  // (no later block shares its language). Each is voiced + verbalized in its own language.
+  // NON-FATAL: a terminator that fails to render / mismatches format is omitted (the
+  // message still plays) and marks the render incomplete so it isn't cached terminator-less
+  // under the terminator-on key.
+  const tails: Array<Buffer | null> = new Array(playSpecs.length).fill(null);
   let tailDropped = false;
   if (tailEnabled) {
-    const tailSpoken = finalSpec.lang === 'es' ? verbalizeForTtsEs(endOfMessagePhrase) : verbalizeForTts(endOfMessagePhrase);
-    const tailResult = await renderWyomingTts({
-      host: wyomingHost,
-      port: wyomingPort,
-      text: tailSpoken,
-      voice: finalSpec.voice,
-      timeoutMs: 15000,
-    });
-    if (tailResult.ok && tailResult.wav) {
-      const tailHeader = parseWavHeader(tailResult.wav);
-      if (tailHeader.ok
-          && tailHeader.rate === klaxonHeader.rate
-          && tailHeader.width === klaxonHeader.width
-          && tailHeader.channels === klaxonHeader.channels) {
-        tailPcm = tailResult.wav.subarray(tailHeader.dataOffset, tailHeader.dataOffset + tailHeader.dataLength);
-      } else {
-        tailDropped = true;
-        log('audioRenderer: terminator format mismatch — omitting it (message still plays)');
+    const tailPcmByKey = new Map<string, Buffer | null>(); // dedup identical (lang, voice, phrase)
+    for (let i = 0; i < playSpecs.length; i++) {
+      const spec = playSpecs[i];
+      // Only the LAST block of each language carries that language's terminator.
+      const lastOfLang = !playSpecs.slice(i + 1).some((s) => s.lang === spec.lang);
+      if (!lastOfLang) continue;
+      const phrase = spec.lang === 'es' ? (endOfMessagePhraseEs || endOfMessagePhrase) : endOfMessagePhrase;
+      if (phrase.length === 0) continue;
+      const ck = `${spec.lang} ${spec.voice ?? ''} ${phrase}`;
+      if (!tailPcmByKey.has(ck)) {
+        const tailSpoken = spec.lang === 'es' ? verbalizeForTtsEs(phrase) : verbalizeForTts(phrase);
+        const tailResult = await renderWyomingTts({ host: wyomingHost, port: wyomingPort, text: tailSpoken, voice: spec.voice, timeoutMs: 15000 });
+        let pcm: Buffer | null = null;
+        if (tailResult.ok && tailResult.wav) {
+          const th = parseWavHeader(tailResult.wav);
+          if (th.ok && th.rate === klaxonHeader.rate && th.width === klaxonHeader.width && th.channels === klaxonHeader.channels) {
+            pcm = tailResult.wav.subarray(th.dataOffset, th.dataOffset + th.dataLength);
+          } else {
+            tailDropped = true;
+            log('audioRenderer: terminator format mismatch — omitting it (message still plays)');
+          }
+        } else {
+          tailDropped = true;
+          log(`audioRenderer: terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
+        }
+        tailPcmByKey.set(ck, pcm);
       }
-    } else {
-      tailDropped = true;
-      log(`audioRenderer: terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
+      tails[i] = tailPcmByKey.get(ck) ?? null;
     }
   }
 
   const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
-  const endGap = tailPcm ? makeSilencePcm(klaxonHeader, endOfMessageGapMs) : Buffer.alloc(0);
-  const parts = assembleAnnouncementParts(silence, blocks, gap, tailPcm, endGap);
+  const anyTail = tails.some((t) => t != null);
+  const endGap = anyTail ? makeSilencePcm(klaxonHeader, endOfMessageGapMs) : Buffer.alloc(0);
+  const parts = assembleAnnouncementParts(silence, blocks, gap, tails, endGap);
   const combinedPcm = Buffer.concat(parts);
   const combined = pcmToWav(combinedPcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
 
@@ -648,6 +666,9 @@ export function renderCacheKey(
   // and the bilingual path resolves each inherited-voice pass to it (matching the audio
   // renderAnnouncement actually produces via `m.voice ?? wyomingVoice`).
   wyomingVoice?: string,
+  // v0.67.0 — Spanish terminator phrase; folded into the terminator identity so a
+  // bilingual render whose two passes carry different-language terminators keys distinctly.
+  endOfMessagePhraseEs?: string,
 ): string {
   // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
   // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
@@ -680,7 +701,11 @@ export function renderCacheKey(
   const eomPhrase = (endOfMessagePhrase ?? END_OF_MESSAGE_PHRASE).trim();
   const eomOn = (endOfMessage ?? false) && eomPhrase.length > 0;
   const eomGapMs = Math.max(0, Math.round(endOfMessageGapMs ?? END_OF_MESSAGE_GAP_MS));
-  const eomPart = eomOn ? `|e${eomGapMs}:${eomPhrase}` : '';
+  // v0.67.0 — fold the Spanish terminator phrase too, so a bilingual render whose English
+  // and Spanish passes carry DIFFERENT-language terminators keys distinctly. OMITTED when
+  // blank → byte-identical to the pre-v0.67.0 (mono / Spanish-only-terminator) key.
+  const eomPhraseEs = (endOfMessagePhraseEs ?? '').trim();
+  const eomPart = eomOn ? `|e${eomGapMs}:${eomPhrase}${eomPhraseEs ? '~' + eomPhraseEs : ''}` : '';
   // v0.62.0 — bilingual / multi-pass identity. OMITTED when no messages (so the
   // monolingual key is byte-identical to pre-feature); when present, each pass's
   // (index, lang, voice, text) is folded in so the bilingual render gets a distinct
