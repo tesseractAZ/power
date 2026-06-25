@@ -30,7 +30,7 @@ export function renderChooser(s: ChooserState): string[] {
   for (let i = 0; i < topPad; i++) out.push('');
 
   // Brand block — pseudo-LCD characters built from solid blocks.
-  // ECOFLOW PANEL — keep the lines visually balanced.
+  // POWER — keep the lines visually balanced.
   const brand = [
     '███████  ██████   ██████  ███████ ██       ██████  ██     ██   ',
     '██      ██       ██    ██ ██      ██      ██    ██ ██     ██   ',

@@ -1,5 +1,5 @@
 /**
- * Service worker for the EcoFlow Panel PWA.
+ * Service worker for the Power PWA.
  *
  * Strategy:
  *   - API requests (`/api/*` anywhere in the path, `/ws`): NEVER cached.

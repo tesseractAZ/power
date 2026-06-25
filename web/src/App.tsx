@@ -161,7 +161,7 @@ function NormalApp() {
     <div className="min-h-full p-4 md:p-6 max-w-[1800px] mx-auto">
       <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">EcoFlow Home Energy</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Power</h1>
           <div className="text-xs text-muted">
             {snapshot ? `${devices.length} devices · ${devices.filter((d) => d.online).length} online` : 'Loading…'} ·
             updated {fmtRel(snapshot?.generatedAt ?? null)}

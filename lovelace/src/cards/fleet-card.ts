@@ -149,7 +149,7 @@ export class EcoflowFleetCard extends EcoflowCardBase {
 
   render() {
     const snap = this.snapshot;
-    const title = this.config?.title ?? 'EcoFlow Panel';
+    const title = this.config?.title ?? 'Power';
 
     if (!snap) {
       return html`<ha-card>

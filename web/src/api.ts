@@ -1,5 +1,5 @@
 /**
- * URL helpers for the EcoFlow Panel SPA (v0.9.5).
+ * URL helpers for the Power SPA (v0.9.5).
  *
  * Direct LAN access:    http://homeassistant.local:8787/
  * HA Ingress (sidebar): http://homeassistant.local:8123/api/hassio_ingress/<token>/

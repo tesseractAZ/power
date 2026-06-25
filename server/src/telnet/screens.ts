@@ -267,7 +267,7 @@ function rule(w: number): string {
 
 function titleLine(sv: SessionView, w: number): string {
   return lr(
-    c.cyanB('ECOFLOW FLEET') + c.dim('  ·  ') + c.whiteB(SCREEN_LABEL[sv.screen]),
+    c.cyanB('POWER FLEET') + c.dim('  ·  ') + c.whiteB(SCREEN_LABEL[sv.screen]),
     c.white(clock()),
     w,
   );

@@ -1,6 +1,6 @@
 {
-  "name": "EcoFlow Panel",
-  "short_name": "EcoFlow",
+  "name": "Power",
+  "short_name": "Power",
   "description": "Local control-room dashboard for an EcoFlow off-grid home — live telemetry, predictive insights, and HA Energy Dashboard integration.",
   "start_url": "/",
   "display": "standalone",
