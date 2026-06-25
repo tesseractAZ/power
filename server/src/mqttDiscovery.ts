@@ -27,6 +27,7 @@ import { advisoryStateFields, getLatestAdvisory } from './loadShedAdvisor.js';
 import { lightingPostureTracker } from './lightingPosture.js';
 import { belowReserveFloor } from './runwayAlarm.js';
 import { liveGridBackstop } from './gridState.js';
+import { countCloudWedges } from './deviceLink.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -153,6 +154,13 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_alert_low_count', name: 'EcoFlow Low Priority Alarms (P4)', state_class: 'measurement', icon: 'mdi:information-outline', value_template: '{{ value_json.alert_low_count }}' },
   // Fleet
   { unique_id: 'ecoflow_fleet_devices_online', name: 'EcoFlow Fleet Devices Online', state_class: 'measurement', icon: 'mdi:home-battery', value_template: '{{ value_json.fleet_devices_online }}' },
+  // Cloud-wedge diagnostic: count of devices the EcoFlow cloud reports OFFLINE but
+  // that are still reachable on the LAN (per the operator's HA ping binary_sensors
+  // mapped via ECOFLOW_DEVICE_REACHABILITY) — i.e. an EcoFlow cloud-session/MQTT
+  // wedge rather than a real power/network outage. Reads 0 when the feature is
+  // unconfigured. Diagnostic so it sits under the device's diagnostics, not the
+  // primary controls.
+  { unique_id: 'ecoflow_cloud_wedge_count', name: 'EcoFlow Cloud-Wedged Devices', state_class: 'measurement', icon: 'mdi:cloud-alert', entity_category: 'diagnostic', value_template: '{{ value_json.ecoflow_cloud_wedge_count }}' },
   // ─── HA Energy Dashboard — monotonic lifetime counters (v0.7.6) ──────────
   // state_class: total_increasing tells HA to treat decreases as resets and
   // accumulate the per-hour delta into long-term Energy statistics.
@@ -645,6 +653,10 @@ export async function startMqttDiscovery(
       alert_medium_count: priorityCount('medium'),
       alert_low_count: priorityCount('low'),
       fleet_devices_online: devices.filter((d) => d.online).length,
+      // Cloud-wedge diagnostic — devices cloud-offline but LAN-reachable per the
+      // configured HA ping binary_sensors. 0 when ECOFLOW_DEVICE_REACHABILITY is
+      // unset (every offline device classifies 'unknown', never 'cloud_wedge').
+      ecoflow_cloud_wedge_count: countCloudWedges(devices),
       // v0.15.2 — load-shed advisory signals (recommendation + counterfactual)
       // for HA automations to gate on. Latest is computed on the advisor tick.
       ...advisoryStateFields(getLatestAdvisory()),

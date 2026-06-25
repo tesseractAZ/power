@@ -142,6 +142,8 @@ else
 fi
 # v0.23.0 — optional HA entity reporting real grid presence (grid-aware floor).
 export GRID_PRESENCE_ENTITY="$(bashio::config 'GRID_PRESENCE_ENTITY')"
+# v0.72.0 — optional SN->HA-ping-entity JSON map (cloud-wedge vs real-outage detection).
+export ECOFLOW_DEVICE_REACHABILITY="$(bashio::config 'ECOFLOW_DEVICE_REACHABILITY')"
 # v0.23.0 — wire the battery-alarm enable toggles + re-announce cadence to env.
 # These were declared in config.yaml but never exported here, so the HA toggles
 # were dead and the server only ever saw its code defaults (both enabled). Now

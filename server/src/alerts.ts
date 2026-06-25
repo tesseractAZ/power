@@ -2,6 +2,11 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { activeSocBand, socAlertSeverity } from './batterySocAlarm.js';
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared } from './shp2Membership.js';
+import {
+  classifyDeviceLink,
+  getDeviceReachability,
+  deviceReachabilityEntities,
+} from './deviceLink.js';
 
 /**
  * System-wide alerts engine — the single source of truth. The web UI renders
@@ -279,12 +284,36 @@ export function computeAlerts(
       ];
       // Append a one-line action hint matched to the most likely cause.
       const ageMin = lastDataAt > 0 ? (now - lastDataAt) / 60_000 : Infinity;
-      const hint =
+      let hint =
         ageMin > 30
           ? ' No telemetry for over 30 minutes — the device has lost its EcoFlow cloud (enhanced) connection. It usually recovers once the cloud session re-establishes; if it stays offline, a power-cycle forces a clean reconnect.'
           : ageMin > 5
             ? ' Data is stale but recent — the cloud session may catch up on its own. Wait a few minutes; if it persists, power-cycle.'
             : ' Just dropped — likely a brief blip. Will re-evaluate.';
+      // Cloud-wedge vs real-outage classification. EcoFlow's cloud says OFFLINE
+      // but gives no IP, so LAN reachability comes from an operator-configured HA
+      // ping binary_sensor (ECOFLOW_DEVICE_REACHABILITY → setDeviceReachability,
+      // populated by the main loop). PURELY additive: this only adds a fact and
+      // refines the hint text — it never changes the alert's id, severity,
+      // whether it fires, or the spare-gating. Dormant when unconfigured: the
+      // fact is omitted entirely (no 'unknown' noise) and the hint is unchanged.
+      const reachabilityConfigured = d.sn in deviceReachabilityEntities();
+      if (reachabilityConfigured) {
+        const link = classifyDeviceLink(false, getDeviceReachability(d.sn));
+        if (link === 'cloud_wedge') {
+          facts.push({ label: 'LAN reachability', value: 'Reachable (cloud session wedged)' });
+          hint =
+            ' The device IS reachable on the LAN, so this is an EcoFlow cloud-session wedge — its cloud/MQTT pipe stalled while the device itself is alive and on the network. Telemetry will resume when the cloud session re-establishes; do NOT power-cycle reflexively (it just interrupts a healthy unit and masks the cloud-side stall).';
+        } else if (link === 'real_outage') {
+          facts.push({ label: 'LAN reachability', value: 'Unreachable (no LAN ping)' });
+          hint =
+            ' The device is NOT reachable on the LAN, so this is likely a genuine power or network outage rather than a cloud wedge — check the device power, its breaker, and WiFi/router.';
+        } else {
+          // 'unknown' — entity configured but state unavailable. Surface the
+          // ambiguity as a fact but leave the existing age-based hint unchanged.
+          facts.push({ label: 'LAN reachability', value: 'Unknown (ping sensor unavailable)' });
+        }
+      }
       out.push({
         id: `offline-${d.sn}`,
         // A designated bench spare offline is expected, not a warning, and is

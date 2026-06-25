@@ -3,6 +3,12 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.72.0 — 2026-06-25
+
+**[Added] Cloud-wedge vs real-outage detection.** When EcoFlow's cloud reports a device offline, the add-on couldn't tell an EcoFlow cloud-session *wedge* (the device is alive and on your LAN — a known recurring failure where a Core sits cloud-offline for hours while perfectly reachable) from a *real outage* (no power / network). EcoFlow gives no device IP, so reachability comes from Home Assistant: configure one `ping` binary_sensor per device IP and map each device SN to its entity via the new **`ECOFLOW_DEVICE_REACHABILITY`** option (JSON `{"<SN>":"binary_sensor.core1_lan"}`). The offline alert is then enriched — *cloud-session wedge → telemetry resumes on its own, don't power-cycle reflexively* vs *real outage → check power/breaker/WiFi* — and a diagnostic `ecoflow_cloud_wedge_count` sensor is published. **Purely additive observability**: a pure, tested classifier (`deviceLink.ts`, +19 tests) + alert-text enrichment + one diagnostic sensor — it never changes whether or at what severity any alarm fires, and is fully dormant (zero behavior change, no HA reads) when the option is unset. The add-on does NOT do raw ICMP itself (HA does the ping; no new container capabilities). `tsc` clean; suite 921; adversarial review confirmed no alarm-firing change, dormant-safe, and correct reachability polarity (a real outage is never mislabeled a wedge).
+
+**[Docs] BLE probe runbook** (`docs/ble-probe-runbook.md`) — the procedure + decision gates for evaluating reverse-engineered EcoFlow BLE as an *optional, diagnostic-only* DPU cross-check (never an alarm authority). Background: research confirmed the Delta Pro Ultra / SHP2 expose **no LAN-IP protocol** (no Modbus / local-HTTP / local-MQTT); BLE is the only cloud-free path and is unsuitable as a primary/alarm source.
+
 ## 0.71.0 — 2026-06-25
 
 **[Changed] Predictive Insights page — de-duplicated, real EV schedule, near-new framing.** Three presentation fixes (no data-logic changes; adversarially reviewed for accuracy):

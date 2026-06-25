@@ -81,11 +81,75 @@ A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 | `BATTERY_RUNWAY_ALARM_ENABLED` | `true` | Audible escalating alarm when the 24h off-grid runway projection shows the backup pool reaching its reserve floor (or empty) before solar recovers — so load can be shed early. Distinct from the SoC-threshold ladder (which fires only after the pool has already fallen). Grid-aware. (v0.14.0) |
 | `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN` | `60` | Minutes between re-announcements of the runway-depletion alarm while the projection persists (5–720). (v0.14.0) |
 | `GRID_AVAILABLE` | `false` | Off-grid honesty: whether the site has utility-grid import available. MUST be `false` for an islanded off-grid system so the dispatch optimizer stops assuming an impossible grid backstop. Set `true` only if you are grid-tied. (`GRID_PRESENCE_ENTITY`, when set, overrides this dynamically.) (v0.15.2) |
+| `ECOFLOW_DEVICE_REACHABILITY` | _(empty)_ | Optional JSON object mapping a device **serial number** to an HA "ping" `binary_sensor` that pings that device's LAN IP, e.g. `{"GBC0314...":"binary_sensor.core1_lan","GBC0482...":"binary_sensor.core2_lan"}`. EcoFlow's cloud gives no device IP, so this is how the add-on tells a **cloud-session wedge** (cloud reports the device offline but it's still reachable on the LAN — telemetry resumes on its own) apart from a **real outage** (offline **and** LAN-unreachable — needs a power/breaker/WiFi check). Purely diagnostic: it enriches the offline alert's text/facts and publishes the `EcoFlow Cloud-Wedged Devices` count — it never changes whether an alarm fires or its severity. Empty/invalid ⇒ feature dormant. See **Cloud-wedge vs real-outage detection** below. |
 | `LOAD_SHEDDING_ADVISORY_ENABLED` | `true` | Load-shedding **advisor** (read + advise, never actuates). When the runway projection drops below the threshold, it recommends which allowlisted loads to shed (with a counterfactual runway) and publishes the recommendation as HA entities — your own HA automations decide whether to act. (v0.15.2) |
 | `LOAD_SHEDDING_SHED_ENTITIES` | _(empty)_ | Allowlist of sheddable loads (empty = advisor inactive, the safe default). Comma-separated `entity_id:priority:label:estimated_watts[:shp2_circuit]`; priority `1` = shed first (least important). Example: `switch.irrigation:1:Irrigation:200,switch.pool_pump:2:Pool pump:400:5`. (v0.15.2) |
 | `LOAD_SHEDDING_RUNWAY_THRESHOLD_H` | `4.0` | Hours-to-reserve at/below which the advisor starts recommending shedding. (v0.15.2) |
 | `LOAD_SHEDDING_RESTORE_MARGIN_H` | `2.0` | Extra hours above the threshold the (counterfactual) runway must reach before a shed is no longer recommended — anti-flap margin. (v0.15.2) |
 | `WRITE_DEBUG_TOKEN` | _(empty)_ | Set to a non-empty secret to unlock `POST /api/device/send-command` for probing undocumented EcoFlow commands. Requires `x-write-debug-token` header on every call. Leave empty in normal operation. (v0.9.9) |
+
+## Cloud-wedge vs real-outage detection
+
+When EcoFlow's cloud reports a Core/SHP2 **offline**, that single bit hides two
+very different situations:
+
+- **Cloud-session wedge** — the device is alive and on your LAN, but its EcoFlow
+  cloud/MQTT session has stalled (a known recurring failure: a Core can sit
+  cloud-offline for hours while its LAN is perfectly fine). Telemetry resumes on
+  its own once the cloud session re-establishes — a reflexive power-cycle just
+  interrupts a healthy unit and masks the cloud-side stall.
+- **Real outage** — the device is genuinely gone (no power, tripped breaker, dead
+  WiFi/router) and is unreachable on the LAN too. *This* is the case a
+  power-cycle / breaker / WiFi check actually fixes.
+
+EcoFlow's API gives no device IP, so the add-on can't tell them apart on its own,
+and it deliberately does **not** do raw ICMP itself (no extra container
+privileges). Instead you give Home Assistant one `ping` `binary_sensor` per device
+IP and tell the add-on which sensor maps to which serial number.
+
+**1. Add a ping binary_sensor per device** (HA `configuration.yaml`, using the
+modern `ping` integration — `device_class: connectivity` makes `on` = reachable):
+
+```yaml
+# configuration.yaml
+binary_sensor:
+  - platform: ping
+    host: 192.168.1.21        # Core 1's LAN IP (set a DHCP reservation)
+    name: Core 1 LAN
+    count: 3
+    scan_interval: 30
+  - platform: ping
+    host: 192.168.1.22        # Core 2's LAN IP
+    name: Core 2 LAN
+    count: 3
+    scan_interval: 30
+```
+
+This yields `binary_sensor.core_1_lan` / `binary_sensor.core_2_lan` (state `on`
+when the device answers ICMP, `off` when it doesn't).
+
+**2. Map serial numbers → ping sensors** via the `ECOFLOW_DEVICE_REACHABILITY`
+add-on option (a JSON object string):
+
+```json
+{"GBC0314XXXXXXXX":"binary_sensor.core_1_lan","GBC0482XXXXXXXX":"binary_sensor.core_2_lan"}
+```
+
+(Find each device's serial number on the add-on's Devices page or in the EcoFlow
+app.) The add-on reads these entity states each cycle. When the cloud then reports
+a mapped device offline, the offline alert is enriched:
+
+- **reachable on the LAN** → the alert says it's an EcoFlow **cloud-session wedge**
+  — telemetry will resume on its own; do **not** power-cycle reflexively.
+- **unreachable on the LAN** → the alert says it's likely a **real power/network
+  outage** — check the device power, its breaker, and WiFi/router.
+
+A fleet diagnostic sensor **`EcoFlow Cloud-Wedged Devices`**
+(`ecoflow_cloud_wedge_count`) reports how many devices are currently cloud-offline
+but LAN-reachable. With `ECOFLOW_DEVICE_REACHABILITY` empty the whole feature is
+dormant: no extra facts, no hint change, and the count reads `0`. The
+classification is **diagnostic only** — it never changes whether an alarm fires,
+its severity, or the bench-spare gating.
 
 ## Persistence
 

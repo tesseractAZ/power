@@ -21,7 +21,7 @@ import { isConfigured } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
 import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
-import { getAllStates } from './haService.js';
+import { getAllStates, getEntityState } from './haService.js';
 // v0.9.33 — Supervisor add-on + Core config-flow helpers
 import {
   listAddons,
@@ -88,6 +88,13 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs } from './batterySocAlarm.js';
 import { createRunwayAlarm } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId, downgradePriorityForGrid } from './gridState.js';
+import {
+  hasReachabilityConfig,
+  deviceReachabilityEntities,
+  setDeviceReachability,
+  interpretReachabilityState,
+  countCloudWedges,
+} from './deviceLink.js';
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
@@ -1328,6 +1335,11 @@ app.get('/api/ha-state', async (req, reply) => {
     // Connectivity
     fleet_devices_total: devices.length,
     fleet_devices_online: devices.filter((d) => d.online).length,
+    // Cloud-wedge diagnostic: devices the EcoFlow cloud reports OFFLINE but that
+    // are still reachable on the LAN (per the configured HA ping binary_sensors)
+    // — i.e. a cloud-session/MQTT wedge, not a real outage. 0 when the feature is
+    // unconfigured (every offline device classifies 'unknown', not 'cloud_wedge').
+    ecoflow_cloud_wedge_count: countCloudWedges(devices),
   };
   // v0.9.14 — 25 s cache: the underlying computes refresh every 4 min via the
   // cache warmer, but HA polls this every 30 s. ETag + 25 s max-age means most
@@ -1938,6 +1950,44 @@ if (runwayAlarmEnabled) {
     })();
   }, 2 * 60 * 1000);
   runwayAlarmTick.unref();
+}
+
+// Cloud-wedge vs real-outage reachability poll. EcoFlow's cloud gives NO device
+// IP, so LAN reachability is read from operator-configured HA ping binary_sensors
+// (ECOFLOW_DEVICE_REACHABILITY: SN → entity_id). Each tick we read those entity
+// states into the deviceLink cache, which the alarm engine then consults to
+// classify an offline device as a cloud-session wedge (reachable on the LAN) vs a
+// real power/network outage (unreachable). Mirrors the grid-presence fetch: same
+// async, non-blocking pattern, each HA read failure tolerated → 'unknown'. Fully
+// dormant when ECOFLOW_DEVICE_REACHABILITY is unset/empty (the interval still
+// runs but does nothing). Reads are independent of the SHP2 telemetry cadence so
+// the classification stays fresh even under a total MQTT stall.
+async function refreshDeviceReachability(): Promise<void> {
+  const entities = deviceReachabilityEntities();
+  await Promise.all(
+    Object.entries(entities).map(async ([sn, entityId]) => {
+      try {
+        const e = await getEntityState(entityId);
+        // A null read (HA unreachable / unknown entity) maps to 'unknown' — the
+        // safe default that yields no enrichment rather than a fabricated up/down.
+        setDeviceReachability(sn, interpretReachabilityState(e?.state ?? null));
+      } catch {
+        setDeviceReachability(sn, 'unknown');
+      }
+    }),
+  );
+}
+{
+  // Prime once at boot so the first offline alert can classify, then refresh on a
+  // cadence finer than the alert-eval loop. unref() so it never holds the process.
+  if (hasReachabilityConfig()) void refreshDeviceReachability();
+  const reachabilityTick = setInterval(() => {
+    if (!hasReachabilityConfig()) return; // dormant — no HA reads when unconfigured
+    void refreshDeviceReachability().catch((e: any) =>
+      app.log.debug(`device-reachability: refresh skipped (${e?.message ?? e})`),
+    );
+  }, 30 * 1000);
+  reachabilityTick.unref();
 }
 
 // v0.23.0 — one-time boot advisory: an ISLANDED site (no grid backstop) with

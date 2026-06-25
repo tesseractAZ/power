@@ -1,5 +1,5 @@
 name: Power
-version: "0.71.0"
+version: "0.72.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -202,6 +202,16 @@ options:
   # declared grid is not actually carrying the load at the floor. Empty = rely on
   # GRID_AVAILABLE (and live import) only.
   GRID_PRESENCE_ENTITY: ""
+  # v0.72.0 — OPTIONAL cloud-wedge vs real-outage detection. EcoFlow's cloud
+  # reports a device offline but gives no LAN IP, so reachability comes from Home
+  # Assistant: configure one `ping` binary_sensor (device_class connectivity) per
+  # device IP, then map each device SN -> its entity here as a JSON object, e.g.
+  #   {"GBC0314XXXXXXXX":"binary_sensor.core1_lan","J234000XXXXX":"binary_sensor.shp2_lan"}
+  # A cloud-offline device that is still LAN-reachable is labeled a cloud-session
+  # WEDGE (don't power-cycle reflexively); unreachable = a real OUTAGE. Purely
+  # diagnostic — enriches the offline alert + a wedge-count sensor; it never
+  # changes whether an alarm fires. Empty = off.
+  ECOFLOW_DEVICE_REACHABILITY: ""
   # v0.15.2 — intelligent load-shedding ADVISOR (Phase 1: read + advise, no
   # actuation). When the runway projection drops below the threshold, it
   # recommends which allowlisted loads to shed (with a counterfactual runway) and
@@ -276,6 +286,7 @@ schema:
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: int(5,720)?
   GRID_AVAILABLE: bool
   GRID_PRESENCE_ENTITY: "str?"
+  ECOFLOW_DEVICE_REACHABILITY: "str?"
   LOAD_SHEDDING_ADVISORY_ENABLED: bool
   LOAD_SHEDDING_SHED_ENTITIES: "str?"
   LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float
