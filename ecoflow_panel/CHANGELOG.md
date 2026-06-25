@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.70.0 — 2026-06-25
+
+**[Changed] SHP2 "Energy sources" slot boxes now carry each slot's DPU detail in-box.** The standalone "SHP2 view · slot N" detail panel that used to hang off the bottom of every SHP2-bound DPU card is folded into the matching slot box in the SHP2 card, so all of a slot's data lives in one place. To avoid repeating what the slot box already shows up top (battery %, signed watts, EMS temp, status), the in-box "DPU detail" block adds only the deeper SHP2-link fields — Remain (est), Capacity, Rated power, HW link, SHP2 error count — plus the two SHP2-attributed history sparklines (SoC + contribution), which are exactly what survive a DPU WiFi/cloud drop. Guarded on `s.sn` so an empty/spare connector renders unchanged (no detail block). The DpuCard keeps its `viaShp2` headline/sparkline fallbacks; only the bottom section moved (and its now-unused `fmtWh` import was dropped). Web `tsc -b` + build clean.
+
 ## 0.69.0 — 2026-06-25
 
 **[Performance] Single-flight dedup kills the cold-start cache stampede.** `getWeather`, `getDayForecast`, and the two NWS caches (`resolveNwsGrid`, `getNwsHourlyCloud`) memoized their *resolved value* behind a TTL but not the *in-flight promise* — so during a cold window (every add-on restart, plus any TTL expiry coincident with the worker self-warm + a multi-tab dashboard) every concurrent caller fell through and re-ran the full scan/fetch. The 24h boot logs showed it exactly: `weather:fetched` and `nws-cloud` each emitted ~11× in 50s, 13 slow requests summing 186s, and 9 analytics-worker timeouts (the day-ahead forecast scan timed out 3 separate times). New `singleFlight()` helper coalesces N concurrent cold-cache callers onto one computation (the pattern already proven in `haStateCache.ts`); once warm, behavior is unchanged. +3 unit tests.

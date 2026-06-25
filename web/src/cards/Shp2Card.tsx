@@ -6,6 +6,7 @@ import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { RefreshCloudButton } from '../components/RefreshCloudButton';
 import { HUES, UI } from '../theme';
+import type { DpuViaShp2 } from './DpuCard';
 
 // v0.36.0 — the SHP2 IS the grid interconnect: grid is a BACKSTOP it taps
 // automatically when the backup pool hits its reserve floor (or for rebalancing).
@@ -115,6 +116,49 @@ function GridStatusLine({ d }: { d: DeviceSnapshot }) {
 const CircuitModal = lazy(() =>
   import('../components/CircuitModal').then((m) => ({ default: m.CircuitModal })),
 );
+
+/**
+ * v0.70.0 — per-slot DPU detail, rendered in-box at the bottom of each SHP2
+ * "Energy sources" slot. This used to be a standalone "SHP2 view · slot N" section
+ * at the bottom of every SHP2-bound DpuCard; folding it into the matching slot box
+ * keeps all of a slot's info in one place. The summary fields the slot box already
+ * shows up top — battery %, signed watts, EMS temp, status badge — are intentionally
+ * NOT repeated here; this adds the deeper SHP2-link fields plus the SHP2-attributed
+ * history sparklines (which are exactly what survive a DPU WiFi/cloud drop). `liveWatts`
+ * stays on the prop (the slot box header renders it) so the DpuViaShp2 contract is unchanged.
+ */
+function Shp2ViewSection({ viaShp2 }: { viaShp2: DpuViaShp2 }) {
+  const { source, shp2Sn } = viaShp2;
+  const slot = source.slot;
+  const remainWh =
+    source.fullCap != null && source.batteryPercentage != null
+      ? (source.fullCap * source.batteryPercentage) / 100
+      : null;
+  return (
+    <div className="mt-3 pt-3 border-t border-line">
+      <div className="text-[10px] uppercase tracking-widest text-muted mb-2">DPU detail</div>
+
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 mb-3">
+        <div className="kv"><span className="kv-k">Remain (est)</span><span className="kv-v">{fmtWh(remainWh)}</span></div>
+        <div className="kv"><span className="kv-k">Capacity</span><span className="kv-v">{fmtWh(source.fullCap)}</span></div>
+        <div className="kv"><span className="kv-k">Rated power</span><span className="kv-v">{fmtW(source.ratePower)}</span></div>
+        <div className="kv"><span className="kv-k">HW link</span><span className="kv-v">{source.hwConnect ? 'connected' : 'no link'}</span></div>
+        <div className="kv"><span className="kv-k">SHP2 errors</span><span className="kv-v">{source.errorCodeNum ?? 0}</span></div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <div className="text-[10px] text-muted">SoC (1h) · via SHP2</div>
+          <Sparkline sn={shp2Sn} metric={`src${slot}_pct`} color={HUES.violet} />
+        </div>
+        <div>
+          <div className="text-[10px] text-muted">Contribution (1h) · via SHP2</div>
+          <Sparkline sn={shp2Sn} metric={`src${slot}_w`} color={HUES.violet} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // v0.22.0 — memo skips parent-driven re-renders that don't change `d`.
 // v0.36.0 — the SHP2 snapshot also carries the grid-backstop view (`grid`) and a
@@ -285,6 +329,18 @@ export const Shp2Card = memo(function Shp2Card({
                   </span>
                 </div>
                 <div className="bar mt-2"><div className={socColor(s.batteryPercentage)} style={{ width: `${s.batteryPercentage ?? 0}%` }} /></div>
+                {/* v0.70.0 — per-slot DPU detail, in-box at the bottom (was a standalone
+                    "SHP2 view · slot N" section on each DpuCard). Guard on s.sn so an
+                    empty/spare connector renders exactly as before (no detail block). */}
+                {s.sn ? (
+                  <Shp2ViewSection
+                    viaShp2={{
+                      source: s,
+                      liveWatts: p.sourceWatts[i] != null ? -p.sourceWatts[i] : null,
+                      shp2Sn: d.sn,
+                    }}
+                  />
+                ) : null}
               </div>
             ))}
           </div>
