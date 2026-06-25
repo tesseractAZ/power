@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import type { DeviceSnapshot, DpuProjection, Shp2EnergySource } from '../types';
-import { fmtMins, fmtPct, fmtTemp, fmtW, fmtWh, socColor } from '../format';
+import { fmtMins, fmtPct, fmtTemp, fmtW, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
 import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { HUES } from '../theme';
@@ -121,8 +121,6 @@ export const DpuCard = memo(function DpuCard({
         })}
       </div>
 
-      {/* SHP2 cross-reference — always at the bottom for bound DPUs */}
-      {viaShp2 && <Shp2ViewSection viaShp2={viaShp2} />}
     </div>
   );
 });
@@ -182,56 +180,6 @@ function DirectGrid({ p }: { p: DpuProjection | undefined }) {
       <div className="kv col-span-2">
         <span className="kv-k whitespace-nowrap">MPPT temp</span>
         <span className="kv-v whitespace-nowrap">HV {fmtTemp(p?.mpptHvTemp)} · LV {fmtTemp(p?.mpptLvTemp)}</span>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Compact "via SHP2" subsection rendered for every SHP2-bound DPU. Shows what the SHP2
- * sees over its wired link — useful as a cross-reference (e.g. SHP2's measured
- * contribution vs. the DPU's own total_out) and as a fallback when the DPU's WiFi is down.
- */
-function Shp2ViewSection({ viaShp2 }: { viaShp2: DpuViaShp2 }) {
-  const { source, liveWatts, shp2Sn } = viaShp2;
-  const slot = source.slot;
-  const remainWh =
-    source.fullCap != null && source.batteryPercentage != null
-      ? (source.fullCap * source.batteryPercentage) / 100
-      : null;
-  return (
-    <div className="mt-4 pt-3 border-t border-line">
-      <div className="flex items-center justify-between mb-2">
-        <div className="text-[10px] uppercase tracking-widest text-muted">SHP2 view · slot {slot}</div>
-        <span
-          className={`badge text-[10px] ${
-            source.isAcOpen ? 'badge-ok' : source.isConnected ? 'badge-warn' : 'badge-muted'
-          }`}
-        >
-          {source.isAcOpen ? 'AC open' : source.isConnected ? 'standby' : 'disconnected'}
-        </span>
-      </div>
-
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1 mb-3">
-        <div className="kv"><span className="kv-k">Live contribution</span><span className="kv-v">{fmtW(liveWatts)}</span></div>
-        <div className="kv"><span className="kv-k">EMS bat temp</span><span className="kv-v">{fmtTemp(source.emsBatTemp)}</span></div>
-        <div className="kv"><span className="kv-k">Battery %</span><span className="kv-v">{fmtPct(source.batteryPercentage)}</span></div>
-        <div className="kv"><span className="kv-k">Remain (est)</span><span className="kv-v">{fmtWh(remainWh)}</span></div>
-        <div className="kv"><span className="kv-k">Capacity</span><span className="kv-v">{fmtWh(source.fullCap)}</span></div>
-        <div className="kv"><span className="kv-k">Rated power</span><span className="kv-v">{fmtW(source.ratePower)}</span></div>
-        <div className="kv"><span className="kv-k">HW link</span><span className="kv-v">{source.hwConnect ? 'connected' : 'no link'}</span></div>
-        <div className="kv"><span className="kv-k">SHP2 errors</span><span className="kv-v">{source.errorCodeNum ?? 0}</span></div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <div>
-          <div className="text-[10px] text-muted">SoC (1h) · via SHP2</div>
-          <Sparkline sn={shp2Sn} metric={`src${slot}_pct`} color={HUES.violet} />
-        </div>
-        <div>
-          <div className="text-[10px] text-muted">Contribution (1h) · via SHP2</div>
-          <Sparkline sn={shp2Sn} metric={`src${slot}_w`} color={HUES.violet} />
-        </div>
       </div>
     </div>
   );
