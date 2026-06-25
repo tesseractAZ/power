@@ -35,7 +35,10 @@ export interface NwsAlertFeed {
 }
 
 let cache: NwsAlertFeed | null = null;
-const TTL_MS = 15 * 60 * 1000;
+/** Alerts cache TTL — 15 min. Active alerts can appear/clear fast, so we
+ *  re-poll often. NOTE: this is the *alerts* cadence only; the cloud-cover
+ *  cache below has its own (slower) CLOUD_TTL_MS — don't reuse this one. */
+export const TTL_MS = 15 * 60 * 1000;
 
 const USER_AGENT =
   'EcoFlowPanel/0.7.5 (https://github.com/tesseractAZ/ecoflow-panel)';
@@ -115,6 +118,12 @@ interface NwsCloudCache {
 }
 
 const GRID_TTL_MS = 24 * 60 * 60 * 1000;
+/** Cloud-cover cache TTL — 2 h, tracking the Open-Meteo weather TTL
+ *  (weather.ts) per the v0.9.2 design note above. Deliberately NOT the
+ *  15-min alerts TTL_MS: sky-cover forecasts don't move minute-to-minute,
+ *  and reusing the alerts cadence made ~8× more api.weather.gov calls than
+ *  designed (120 min / 15 min). */
+export const CLOUD_TTL_MS = 2 * 60 * 60 * 1000;
 let gridCache: NwsGridLookup | null = null;
 let cloudCache: NwsCloudCache | null = null;
 // v0.69.0 — coalesce concurrent cold-cache fetches (see singleFlight.ts).
@@ -180,13 +189,13 @@ export function expandSkyCoverEntry(entry: { validTime?: string; value?: number 
 
 export async function getNwsHourlyCloud(log: (m: string) => void = () => {}): Promise<NwsCloudCache | null> {
   if (!isNwsEnabled()) return null;
-  if (cloudCache && Date.now() - cloudCache.fetchedAt < TTL_MS) return cloudCache;
+  if (cloudCache && Date.now() - cloudCache.fetchedAt < CLOUD_TTL_MS) return cloudCache;
   // v0.69.0 — coalesce concurrent cold-cache callers onto one NWS fetch.
   return nwsCloudFlight.run(() => fetchNwsHourlyCloud(log));
 }
 
 async function fetchNwsHourlyCloud(log: (m: string) => void): Promise<NwsCloudCache | null> {
-  if (cloudCache && Date.now() - cloudCache.fetchedAt < TTL_MS) return cloudCache;
+  if (cloudCache && Date.now() - cloudCache.fetchedAt < CLOUD_TTL_MS) return cloudCache;
   const { forecastLat: lat, forecastLon: lon } = config;
   const grid = await resolveNwsGrid(lat, lon, log);
   if (!grid) return null;

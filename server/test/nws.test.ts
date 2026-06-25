@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { expandSkyCoverEntry } from '../src/nws.js';
+import { expandSkyCoverEntry, TTL_MS, CLOUD_TTL_MS } from '../src/nws.js';
 
 /**
  * NWS NDFD skyCover entries carry ISO 8601 durations in their `validTime`
@@ -62,4 +62,18 @@ test('expandSkyCoverEntry — unknown duration format defaults to 1 hour', () =>
   const out = expandSkyCoverEntry({ validTime: `${start}/junk`, value: 25 });
   assert.equal(out.length, 1);
   assert.equal(out[0].ts, Date.parse(start));
+});
+
+/**
+ * Regression guard for the v0.9.2 cloud-cover cadence. The cloud-cover cache
+ * (getNwsHourlyCloud) must refresh on the 2 h Open-Meteo cadence, NOT the
+ * 15-min alerts cadence — sky-cover doesn't move minute-to-minute. These once
+ * shared a single module-level TTL_MS, which made ~8× more api.weather.gov
+ * calls than the design intended. Keep them distinct.
+ */
+test('CLOUD_TTL_MS is the 2 h cloud cadence, distinct from the 15-min alerts TTL', () => {
+  assert.equal(CLOUD_TTL_MS, 2 * 60 * 60 * 1000); // 2 h, tracks Open-Meteo
+  assert.equal(TTL_MS, 15 * 60 * 1000);           // 15 min alerts cadence
+  assert.notEqual(CLOUD_TTL_MS, TTL_MS);          // must never re-collapse
+  assert.ok(CLOUD_TTL_MS > TTL_MS, 'cloud cover should refresh slower than alerts');
 });
