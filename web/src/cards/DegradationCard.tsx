@@ -102,12 +102,34 @@ export function DegradationCard() {
   const capPct = capNow != null && capDesign != null && capDesign > 0 ? (capNow / capDesign) * 100 : null;
   const outliers = projecting.filter((p) => p.peerOutlier);
 
+  // "Near-new fleet" framing — show a calm, prominent banner ONLY while no pack has
+  // a firm degradation trend yet. Detected from data already in scope: zero packs in
+  // the `projecting` status (so medianFade/eolDate are unavailable). When a real trend
+  // exists (any pack projecting), the banner is suppressed and the tables stand alone.
+  const noFirmTrend = deg.packs.length > 0 && projecting.length === 0;
+  const sohValues = deg.packs.map((p) => p.currentSoh).filter((s): s is number => s != null);
+  const sohRange =
+    sohValues.length > 0
+      ? sohValues.length === 1 || Math.min(...sohValues) === Math.max(...sohValues)
+        ? `${Math.min(...sohValues).toFixed(1)}%`
+        : `${Math.min(...sohValues).toFixed(1)}–${Math.max(...sohValues).toFixed(1)}%`
+      : null;
+
   return (
     <div className="card">
       <div className="card-title flex items-center justify-between">
         <span>Battery degradation · end-of-life projection</span>
         <span className="text-xs text-muted normal-case tracking-normal">{deg.packs.length} pack(s)</span>
       </div>
+
+      {noFirmTrend && (
+        <div className="border border-accent/30 bg-accent/10 rounded-md px-3 py-2.5 text-sm mb-3">
+          <span className="text-[10px] uppercase tracking-widest text-accent mr-2">Near-new fleet</span>
+          No firm degradation trend yet. SoH / EOL projections appear once enough history
+          accrues; current readings{sohRange ? ` (SoH ${sohRange})` : ''} reflect BMS settling,
+          not fade.
+        </div>
+      )}
       <p className="text-sm text-muted leading-relaxed mb-3">
         Every pack's BMS reports a State of Health — measured usable capacity against the pack's
         original design capacity. Each pack's recorded SoH is regressed over its full history; the

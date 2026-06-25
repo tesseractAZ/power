@@ -185,14 +185,15 @@ production vs development to keep the PR list short.
 
 ## Roadmap
 
-### Shipped through v0.51.0
+### Shipped through v0.70.x
 
 The original roadmap (v0.7.0 / v0.8.0+ / external + infrastructure) and
-multiple follow-on series (predictive-engine v2, polish + tests, HACS
-Lovelace cards, security hardening, broadcast/TTS robustness, engine
-audit + test backfill, and the v0.41.0–v0.47.0 page-by-page accuracy
-audits) are all shipped. Highlights — see
-[CHANGELOG.md](CHANGELOG.md) for the per-release breakdown:
+every follow-on series (predictive-engine v2, polish + tests, HACS
+Lovelace cards, security hardening, the broadcast/TTS rewrite + bilingual
+TTS, engine audit + test backfill, the v0.41.0–v0.47.0 page-by-page
+accuracy audits, and the v0.52.0–v0.70.x correctness / alarm-hygiene /
+forecast-realism / i18n / packaging work) are all shipped. Highlights —
+see [CHANGELOG.md](CHANGELOG.md) for the per-release breakdown:
 
 **Off-thread analytics (v0.10.0–v0.10.2)** — `node:sqlite` is synchronous, so
 every heavy history scan now runs on a dedicated **worker thread**; the main
@@ -260,7 +261,7 @@ auto-downgrade (info-silencing, warning→info demotion, chronic-noise
 silencing).
 
 **Plumbing** — Node 22 + Fastify + node:sqlite + tsx, native ARM64 CI
-build pipeline (1m 30s end-to-end), a 740+-test server CI gate that blocks
+build pipeline (1m 30s end-to-end), a 900+-test server CI gate that blocks
 bad releases, PWA-installable web UI with route-level code splitting
 (60 kB initial JS), persistent lifetime energy accumulator that
 survives recorder pruning + restarts, telnet TUI for terminal monitoring,
@@ -272,6 +273,36 @@ unverifiable LAN/MQTT-wedged diagnosis. v0.50.0 quieted the
 request log (5xx → warn, 4xx → debug, slow >1s → info) and persists the
 per-circuit emit high-water so per-circuit Energy sensors stay monotone
 across restarts.
+
+**Accuracy & alarm hygiene (v0.52.0–v0.65.0)** — Solar page no longer draws
+bench-spare cores as SHP2-attached (v0.53.0); SoH false-alert gate +
+soiling decomposition fixes (v0.54.x); transient-SoC=0 guard on the
+backup-pool alarm during a SHP2 cloud-reconnect (v0.54.4); EV-load
+over-prediction fixed in the day-ahead forecast (v0.55.0); cell-imbalance
+no longer klaxons on the LFP top-of-charge plateau and active advisories
+aren't re-spoken on every restart (v0.58.0); overnight-load blend +
+grid-aware "if islanded" projection wording (v0.59.0); a transient DNS/
+network bounce no longer crashes the add-on + runway hysteresis (v0.60.0);
+false fleet-aggregation soiling alarm fixed via per-core median (v0.63.0);
+an implausible-fade EOL ceiling kills false ~0.4-yr pack-replacement dates
+(v0.64.0); the RTE sensor extends its lookback instead of going dark during
+a net-discharge drawdown (v0.65.0).
+
+**Robustness + observability (v0.69.0–v0.70.x)** — a `singleFlight()` helper
+coalesces the cold-start weather/forecast/NWS cache stampede (v0.69.0);
+self-consumption + projected-low-SoC gain islanded-only / partial-coverage
+companion `binary_sensor`s so a grid-tied or cloud-offline reading isn't
+read as an emergency (v0.69.0); the SHP2 "Energy sources" slot detail folds
+into each slot box (v0.70.0); and the NWS cloud-cover cache refreshes on its
+designed 2 h cadence rather than the 15 min alerts TTL (v0.70.1).
+
+**Packaging (v0.66.0–v0.67.0)** — the app was rebranded to **Power**
+(cosmetic only; the add-on slug `ecoflow_panel`, the GHCR image, the MQTT
+device, and every `sensor.ecoflow_panel_*` entity ID are unchanged → zero
+migration), and the control-room TUI is now also a browser terminal at
+`http://<host>:8787/console` (xterm.js, vendored offline) for a HA
+`panel_iframe`, sharing one transport-agnostic `TuiSession` with the telnet
+server.
 
 **HACS Lovelace cards (v0.9.50–v0.9.55)** — 7 Lit-based cards (fleet,
 alerts, battery, solar, strategy, insights, circuit) plus the two original
@@ -287,13 +318,23 @@ generated at `/data/panel-write-token.txt`, mode 0600). The
 `send-command` debug path adds constant-time token compare, per-SN
 cooldown, `cmdSet` allow-list, and payload-shape caps.
 
-**Broadcast / TTS (v0.9.70)** — TTS is now a single always-local engine:
-Wyoming Protocol → Piper, wired via `BROADCAST_WYOMING_HOST`
+**Broadcast / TTS (v0.9.70 → v0.68.0)** — the broadcast/TTS subsystem was
+rewritten and is now the canonical path. TTS is a single always-local
+engine: Wyoming Protocol → Piper, wired via `BROADCAST_WYOMING_HOST`
 (default `core-piper`) / `BROADCAST_WYOMING_PORT` (10200) /
 `BROADCAST_WYOMING_VOICE`. This replaced the earlier multi-engine
 fallback chain — the old `BROADCAST_TTS_SERVICE` / `BROADCAST_TTS_LANGUAGE`
 / `BROADCAST_TTS_REQUIRE_LOCAL` options were dropped (no Cloud TTS path
-remains, so off-grid setups are local by construction).
+remains, so off-grid setups are local by construction). The v0.9.70
+rewrite also collapsed every speaker onto one
+`music_assistant.play_announcement` call (no per-protocol staggering) and
+removed the klaxon settle timers / two-phase sequencing. Follow-ons:
+runtime broadcast config + operator-uploaded chimes via the web **Alert
+Console** (v0.15.23 / v0.18.0), a natural-speech `verbalizeForTts`
+normalizer at the single render chokepoint (v0.57.0), a spoken "End of
+message" terminator on the final play (v0.61.0), and a bilingual
+English-then-Latin-American-Spanish second pass with offline deterministic
+templates and per-language terminators (v0.62.0 / v0.68.0).
 
 **MPC dispatch fix (v0.9.64)** — `simulateHour()` now actually applies
 the explicit battery-flow component for `dischargeMax`,
@@ -324,16 +365,28 @@ sweep that prunes historical-mistake double-prefixed `unique_id`s.
 
 ### Held until requested
 
-The following are **read-only by design**. The panel doesn't modify the
-EcoFlow devices it observes. When you're ready to make it bi-directional
+The panel is **read-mostly**: it observes, and the few writes it can make
+are explicit, allow-listed, per-SN rate-limited, audit-logged (append-only
+at `/data/writes.log`, tail via `/api/writes/log`), and auth-gated
+(HA Ingress / same-origin / `X-Panel-Write-Token`, with the
+`/api/device/send-command` debug path additionally requiring
+`WRITE_DEBUG_TOKEN`). Today that write surface is deliberately narrow — a
+no-op SHP2 cloud-presence refresh (`/api/device/refresh-cloud`, which
+re-sends the *current* `backupReserveSoc` to nudge EcoFlow's cloud back
+online without changing any state) plus the gated diagnostic
+`send-command` primitive (`cmdSet` allow-list: `PD303_APP_SET` / the
+`WN511_*` DPU families). None of the operator *control* features below are
+built yet. When you're ready to make the panel genuinely bi-directional
 these are the candidates:
 
-- Boost backup reserve switch (storm mode)
+- Boost backup reserve switch (storm mode) — the `PD303_APP_SET` write
+  path already exists; this would expose it as a guarded control
 - Quiet-hours notification override toggle
 - Skip next predicted EV charging window
 - Force pack rebalance button
 - Per-circuit on/off
-- Auto-apply the recommended dispatch plan
+- Auto-apply the recommended dispatch plan (today it is recommend-only by
+  design — the add-on never toggles a load itself)
 - Live SHP2 strategy adjustment (mode, reserve, TOU windows)
 
 ### Genuinely deferred (research-grade)
@@ -362,21 +415,16 @@ generate:
 
 - **WAVE 2 / Smart Generator schemas** — proper projections when those
   come online via the EcoFlow IoT Open API.
-- **Broadcast / TTS subsystem refactor** — the
-  `broadcast.ts` + `ttsService.ts` + `haService.ts` paths accumulated
-  workarounds across v0.9.18 → v0.9.65 (MA `media_stop` pre-flight,
-  `tts_proxy` URL handoff, klaxon settle timers, language-format
-  retry chain, no-cloud gating). Many were defensive responses to bugs
-  that have since been fixed upstream (MA queue races, Wyoming locale
-  parsing, Piper 500s). Worth a clean-room redesign that:
-    1. Picks one canonical broadcast target representation
-       (deduplicate the MA/Sonos/apple_tv pairings — the operator currently has
-       three device-registry duplicates that the broadcast code papers
-       over),
-    2. Collapses the MA / `media_player` backend selector into a single
-       service-call path with a thin compatibility shim,
-    3. Drops the settle timers in favor of HA-event-driven sequencing
-       (`media_player.state == playing` → fire next), and
-    4. Replaces the TTS engine-pick fallback chain with a small
-       provider interface tested against Piper / Cloud / Google in
-       isolation. Bundle the cleanup as a single focused release.
+- **Broadcast / TTS subsystem refactor — DONE (v0.9.70).** The clean-room
+  redesign this item asked for has shipped: every speaker now fires through
+  one `music_assistant.play_announcement` call (no MA/Sonos/apple_tv
+  per-protocol pairings), the MA / `media_player` backend selector and its
+  fallback chain were removed (`BROADCAST_USE_MUSIC_ASSISTANT` /
+  `BROADCAST_TTS_SERVICE` / `BROADCAST_TTS_LANGUAGE` /
+  `BROADCAST_TTS_REQUIRE_LOCAL` dropped), the klaxon settle timers /
+  two-phase sequencing are gone (MA owns sequencing + volume restore), and
+  TTS is a single always-local Wyoming → Piper provider (no Cloud/Google
+  fallback to pick from — off-grid by construction). The remaining residue
+  is small: prune the now-dead `tts_proxy` / legacy-language plumbing and
+  the orphaned `ttsGetUrl` in `haService.ts` — a short cleanup PR, not a
+  redesign.

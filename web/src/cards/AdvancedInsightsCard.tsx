@@ -147,13 +147,15 @@ export function AdvancedInsightsCard() {
       )}
 
       {conf && (
-        <Section title="Confidence" subtitle="Trust each projection by its fit quality">
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        // Model fit (R²) — the regression-quality side of "trust this projection".
+        // Forecast MAE / bias are intentionally NOT shown here: they are the richer
+        // "Forecast skill" section's single source of truth (model-vs-actual PV
+        // hindcast, below) and were duplicated here byte-for-byte.
+        <Section title="Model fit (R²)" subtitle="Trust each projection by its regression fit">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <Tile label="Degradation R²" value={conf.degradationMedianR2 != null ? conf.degradationMedianR2.toFixed(2) : '—'} />
             <Tile label="Solar model R²" value={conf.solarModelMedianR2 != null ? conf.solarModelMedianR2.toFixed(2) : '—'} />
             <Tile label="Thermal R²" value={conf.thermalMedianR2 != null ? conf.thermalMedianR2.toFixed(2) : '—'} />
-            <Tile label="Forecast bias" value={conf.forecastSkillBiasFactor != null ? `×${conf.forecastSkillBiasFactor.toFixed(2)}` : '—'} />
-            <Tile label="Forecast MAE" value={conf.forecastSkillMaePct != null ? `${conf.forecastSkillMaePct}%` : '—'} />
           </div>
         </Section>
       )}
@@ -287,6 +289,26 @@ export function AdvancedInsightsCard() {
             {ev.sessionsObserved} session{ev.sessionsObserved === 1 ? '' : 's'} observed in last 30 d ·{' '}
             {ev.upcomingNext24h.length} predicted in next 24 h
           </div>
+
+          {/* Predicted schedule for the next 24 h — actual timestamped sessions
+              (not the weekly patterns). Each entry's `watts` is a power figure,
+              so divide by 1000 for kW; `ts` is epoch-ms shown in local time. */}
+          <div className="text-[11px] uppercase tracking-wider text-muted mb-1">Next 24 h</div>
+          {ev.upcomingNext24h.length === 0 ? (
+            <div className="text-xs text-muted mb-3">None predicted in next 24 h.</div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+              {ev.upcomingNext24h.map((u, i) => (
+                <div key={i} className="bg-panel2/50 border border-line rounded-md p-2 text-xs flex items-baseline gap-2">
+                  <span className="font-semibold w-28 shrink-0">{fmtEvStart(u.ts)}</span>
+                  <span className="text-muted">{u.durationHours.toFixed(1)} h</span>
+                  <span className="font-mono tabular-nums text-muted ml-auto">{(u.watts / 1000).toFixed(1)} kW</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="text-[11px] uppercase tracking-wider text-muted mb-1">Recurring patterns</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {ev.patterns.slice(0, 8).map((p, i) => (
               <div key={i} className="bg-panel2/50 border border-line rounded-md p-2 text-xs">
@@ -385,6 +407,15 @@ export function AdvancedInsightsCard() {
       )}
     </div>
   );
+}
+
+/** A predicted EV-session start (epoch-ms) → local weekday + time, e.g. "Tue 2:00 PM". */
+function fmtEvStart(ts: number): string {
+  return new Date(ts).toLocaleString([], {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }
 
 function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
