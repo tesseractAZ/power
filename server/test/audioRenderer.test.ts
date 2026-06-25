@@ -662,22 +662,25 @@ test('renderAnnouncement — a missing custom chime FALLS BACK to the built-in k
   }
 });
 
-/* v0.61.0 — "End of message" terminator. The user asked for it on the FINAL play
- * of every announcement. assembleAnnouncementParts is the pure splice point; its
- * tests pin the placement deterministically (no live Wyoming render needed). */
+/* v0.61.0 / v0.62.0 / v0.67.0 — "End of message" terminator. v0.67.0 makes it PER
+ * LANGUAGE: assembleAnnouncementParts takes a `tails[]` aligned with blocks and splices
+ * tails[i] after block i. The caller (renderAnnouncement) supplies a terminator only on
+ * the LAST block of each language. These tests pin the splice deterministically (no live
+ * Wyoming render needed). */
 
 // Distinct marker buffers so we can assert placement by content.
 const S = Buffer.from('S'); // lead-in silence
 const C = Buffer.from('C'); // chime
 const M = Buffer.from('M'); // spoken message (English)
 const Z = Buffer.from('Z'); // spoken message (Spanish) — distinct pass content
-const G = Buffer.from('G'); // inter-repeat gap
-const E = Buffer.from('E'); // "End of message" terminator
+const G = Buffer.from('G'); // inter-pass / inter-repeat gap
+const E = Buffer.from('E'); // English "End of message" terminator
+const F = Buffer.from('F'); // Spanish "Fin del mensaje" terminator
 const g = Buffer.from('g'); // pre-terminator gap
 const seq = (parts: Buffer[]) => parts.map((b) => b.toString()).join('');
 
-test('assembleAnnouncementParts — terminator rides ONLY the final pass (multi-repeat)', () => {
-  const parts = assembleAnnouncementParts(S, [[C, M], [C, M]], G, E, g);
+test('assembleAnnouncementParts — mono repeat: terminator only on the final block (caller passes [null, tail])', () => {
+  const parts = assembleAnnouncementParts(S, [[C, M], [C, M]], G, [null, E], g);
   // lead-in, pass 1 (no tail), gap, pass 2 (+ pre-gap + tail).
   assert.equal(seq(parts), 'SCMGCMgE');
   assert.equal(parts.filter((b) => b === E).length, 1, 'terminator appears exactly once');
@@ -686,32 +689,34 @@ test('assembleAnnouncementParts — terminator rides ONLY the final pass (multi-
   assert.equal(parts.filter((b) => b === M).length, 2, 'the message itself still plays every pass');
 });
 
-test('assembleAnnouncementParts — a single play IS the final play (gets the terminator)', () => {
-  const parts = assembleAnnouncementParts(S, [[C, M]], G, E, Buffer.alloc(0));
+test('assembleAnnouncementParts — a single play gets the terminator (caller passes [tail])', () => {
+  const parts = assembleAnnouncementParts(S, [[C, M]], G, [E], Buffer.alloc(0));
   assert.equal(seq(parts), 'SCME', 'one pass → terminator appended (empty pre-gap omitted)');
   assert.equal(parts[parts.length - 1], E);
 });
 
-test('assembleAnnouncementParts — no terminator when disabled (tailPcm null) is byte-identical to plain repeats', () => {
-  const withNull = assembleAnnouncementParts(S, [[C, M], [C, M]], G, null, Buffer.alloc(0));
-  assert.equal(seq(withNull), 'SCMGCM', 'tail off → exactly the pre-feature layout');
-  assert.ok(!withNull.includes(E), 'no terminator segment anywhere');
+test('assembleAnnouncementParts — no terminator (tails all null) is byte-identical to plain repeats', () => {
+  const off = assembleAnnouncementParts(S, [[C, M], [C, M]], G, [null, null], Buffer.alloc(0));
+  assert.equal(seq(off), 'SCMGCM', 'tails off → exactly the pre-feature layout');
+  assert.ok(!off.includes(E), 'no terminator segment anywhere');
 });
 
-/* v0.62.0 — bilingual passes: English block then a DISTINCT Spanish block, the
- * (Spanish) terminator riding only the final (Spanish) pass. */
-test('assembleAnnouncementParts — bilingual: English pass, then Spanish pass + terminator on the LAST', () => {
-  const parts = assembleAnnouncementParts(S, [[C, M], [C, Z]], G, E, g);
-  assert.equal(seq(parts), 'SCMGCZgE', 'lead-in, English pass, gap, Spanish pass, pre-gap, terminator');
+/* v0.67.0 — bilingual passes: English block then a DISTINCT Spanish block, EACH ending
+ * with its OWN-language terminator (English "End of message", Spanish "Fin del mensaje"). */
+test('assembleAnnouncementParts — bilingual: per-language terminator after EACH pass', () => {
+  const parts = assembleAnnouncementParts(S, [[C, M], [C, Z]], G, [E, F], g);
+  // lead-in, English pass, pre-gap, English terminator, inter-pass gap, Spanish pass, pre-gap, Spanish terminator.
+  assert.equal(seq(parts), 'SCMgEGCZgF');
   assert.equal(parts.filter((b) => b === M).length, 1, 'English said once');
   assert.equal(parts.filter((b) => b === Z).length, 1, 'Spanish said once');
-  assert.equal(parts[parts.length - 1], E, 'terminator is last (rides the Spanish pass)');
-  // The terminator must NOT attach to the English (first) pass.
-  assert.equal(seq(parts).indexOf('E'), seq(parts).length - 1);
+  assert.equal(parts.filter((b) => b === E).length, 1, 'English terminator once');
+  assert.equal(parts.filter((b) => b === F).length, 1, 'Spanish terminator once');
+  assert.equal(parts[parts.length - 1], F, 'Spanish terminator is the very last segment');
+  assert.ok(seq(parts).indexOf('E') < seq(parts).indexOf('Z'), 'the English terminator precedes the Spanish pass');
 });
 
 test('assembleAnnouncementParts — bilingual with no terminator → English then Spanish, nothing after', () => {
-  const parts = assembleAnnouncementParts(S, [[C, M], [C, Z]], G, null, Buffer.alloc(0));
+  const parts = assembleAnnouncementParts(S, [[C, M], [C, Z]], G, [null, null], Buffer.alloc(0));
   assert.equal(seq(parts), 'SCMGCZ');
 });
 
@@ -721,6 +726,14 @@ test('renderCacheKey — no messages is BYTE-IDENTICAL to the pre-feature key (z
   const empty = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, []);
   assert.equal(undef, pre, 'messages undefined → unchanged key');
   assert.equal(empty, pre, 'messages empty → unchanged key');
+});
+
+test('renderCacheKey — v0.67.0 Spanish terminator phrase folds when present, omitted when blank', () => {
+  const base = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined);
+  const withEs = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined, 'Fin del mensaje');
+  const blankEs = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined, '');
+  assert.notEqual(withEs, base, 'adding a Spanish terminator phrase changes the key → the bilingual two-terminator render re-renders');
+  assert.equal(blankEs, base, 'a blank Spanish phrase is omitted → byte-identical to the single-terminator key (zero churn)');
 });
 
 test('renderCacheKey — bilingual messages bust the cache; voice / text / lang each matter', () => {

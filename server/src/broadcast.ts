@@ -704,7 +704,8 @@ export function startBroadcastMonitor(
       repeatGapMs: cfg.repeatGapMs, // v0.15.7 — silence between repeats so the repeat is audible
       chimeGapMs: cfg.chimeGapMs, // v0.15.15 — pause after the chime before the spoken message
       endOfMessage: cfg.endOfMessage, // v0.61.0 — "End of message" terminator on the final play
-      endOfMessagePhrase: bilingual ? cfg.endOfMessagePhraseEs : cfg.endOfMessagePhrase, // v0.62.0 — Spanish on the Spanish final pass
+      endOfMessagePhrase: cfg.endOfMessagePhrase, // v0.67.0 — English terminator rides the English pass
+      endOfMessagePhraseEs: cfg.endOfMessagePhraseEs, // v0.67.0 — Spanish terminator rides the Spanish pass
       endOfMessageGapMs: cfg.endOfMessageGapMs,
       log,
     });
@@ -980,6 +981,7 @@ export function startBroadcastMonitor(
         chimeGapMs: cfg.chimeGapMs, // v0.15.15 — pause after the chime before the spoken message
         endOfMessage: cfg.endOfMessage, // v0.61.0 — "End of message" terminator on the final play
         endOfMessagePhrase: cfg.endOfMessagePhrase,
+        endOfMessagePhraseEs: cfg.endOfMessagePhraseEs, // v0.67.0 — per-language terminator (English-only preview ignores it)
         endOfMessageGapMs: cfg.endOfMessageGapMs,
         log,
       });
