@@ -1,5 +1,6 @@
 import { request } from 'undici';
 import { config } from './config.js';
+import { singleFlight } from './singleFlight.js';
 
 /**
  * National Weather Service alerts client (alerts.weather.gov) — free, no API
@@ -116,10 +117,22 @@ interface NwsCloudCache {
 const GRID_TTL_MS = 24 * 60 * 60 * 1000;
 let gridCache: NwsGridLookup | null = null;
 let cloudCache: NwsCloudCache | null = null;
+// v0.69.0 — coalesce concurrent cold-cache fetches (see singleFlight.ts).
+const nwsGridFlight = singleFlight<NwsGridLookup | null>();
+const nwsCloudFlight = singleFlight<NwsCloudCache | null>();
 
 async function resolveNwsGrid(lat: number, lon: number, log: (m: string) => void): Promise<NwsGridLookup | null> {
   if (gridCache && gridCache.lat === lat && gridCache.lon === lon && Date.now() - gridCache.fetchedAt < GRID_TTL_MS) {
     return gridCache;
+  }
+  // v0.69.0 — coalesce concurrent cold lookups (config coords are constant, so a
+  // single in-flight slot is safe).
+  return nwsGridFlight.run(() => fetchNwsGrid(lat, lon, log));
+}
+
+async function fetchNwsGrid(lat: number, lon: number, log: (m: string) => void): Promise<NwsGridLookup | null> {
+  if (gridCache && gridCache.lat === lat && gridCache.lon === lon && Date.now() - gridCache.fetchedAt < GRID_TTL_MS) {
+    return gridCache; // a prior flight may have resolved it while we queued
   }
   const url = `https://api.weather.gov/points/${lat},${lon}`;
   try {
@@ -167,6 +180,12 @@ export function expandSkyCoverEntry(entry: { validTime?: string; value?: number 
 
 export async function getNwsHourlyCloud(log: (m: string) => void = () => {}): Promise<NwsCloudCache | null> {
   if (!isNwsEnabled()) return null;
+  if (cloudCache && Date.now() - cloudCache.fetchedAt < TTL_MS) return cloudCache;
+  // v0.69.0 — coalesce concurrent cold-cache callers onto one NWS fetch.
+  return nwsCloudFlight.run(() => fetchNwsHourlyCloud(log));
+}
+
+async function fetchNwsHourlyCloud(log: (m: string) => void): Promise<NwsCloudCache | null> {
   if (cloudCache && Date.now() - cloudCache.fetchedAt < TTL_MS) return cloudCache;
   const { forecastLat: lat, forecastLon: lon } = config;
   const grid = await resolveNwsGrid(lat, lon, log);

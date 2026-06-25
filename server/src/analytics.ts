@@ -10,6 +10,7 @@ import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
+import { singleFlight } from './singleFlight.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -1013,6 +1014,9 @@ export function fleetSoilingFromDevices(
 }
 
 let dayForecastCache: { ts: number; value: DayForecast } | null = null;
+// v0.69.0 — coalesce concurrent cold-cache callers onto one forecast scan (the
+// heaviest analytics computation; see singleFlight.ts).
+const dayForecastFlight = singleFlight<DayForecast>();
 // v0.60.0 — throttle the "structurally incomplete" rebuild log. A cold post-boot
 // worker can hit this on every read for several minutes (the 4-min warm cycle +
 // per-request rebuilds), flooding the log with ~70 identical lines; the gate is
@@ -1077,6 +1081,23 @@ export async function getDayForecast(
 ): Promise<DayForecast> {
   if (dayForecastCache && Date.now() - dayForecastCache.ts < FORECAST_DAY_TTL_MS) {
     return dayForecastCache.value;
+  }
+  // v0.69.0 — coalesce concurrent cold-cache callers. The 30-min TTL cache above
+  // memoizes the value but not the in-flight promise; during a cold boot every
+  // concurrent caller re-ran this full multi-device scan + weather fetch (the
+  // analytics worker timed out 9x). The forecast is a slowly-varying day-ahead
+  // projection, so callers within one cold window safely share one computation —
+  // exactly the semantics the 30-min TTL already implies once warm.
+  return dayForecastFlight.run(() => computeDayForecastUncached(devices, recorder, log));
+}
+
+async function computeDayForecastUncached(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  log: (m: string) => void,
+): Promise<DayForecast> {
+  if (dayForecastCache && Date.now() - dayForecastCache.ts < FORECAST_DAY_TTL_MS) {
+    return dayForecastCache.value; // a prior flight may have populated it while we queued
   }
   const now = Date.now();
   const since = now - TYPICAL_HISTORY_MS;
@@ -4133,6 +4154,21 @@ export interface SelfConsumption {
    *  over the window (0..1). Below GRID_HOME_MIN_COVERAGE the whole-home grid term
    *  is not trusted. */
   gridHomeCoverageFrac: number;
+  /** v0.69.0 — # of DPU cores the SHP2 reports wired into its connector slots
+   *  (non-spare home cores). The PV/charge/discharge integral sums over these. */
+  homeDpusConnected: number;
+  /** v0.69.0 — # of those connected home cores actually CONTRIBUTING fresh telemetry
+   *  to this window (live projection + not cloud-offline). When < homeDpusConnected a
+   *  connected core's own PV/charge metrics are missing from the integral, so pvKwh /
+   *  solarFractionOfLoadPct undercount — consumers should flag the KPI as partial
+   *  coverage rather than authoritative. (The backup-pool capacity is unaffected: it
+   *  comes from the SHP2's own aggregate, not these per-core sums.) */
+  homeDpusReporting: number;
+  /** v0.69.0 — true when the self-consumption KPIs are computed over partial home-core
+   *  coverage and should be discounted: an SHP2 is present but a wired home core isn't
+   *  contributing, OR the SHP2 itself reported zero connectors (cloud-offline → the
+   *  home-only integral scope is gone). A DPU-only install (no SHP2) is never partial. */
+  homeDpusCoveragePartial: boolean;
 }
 
 let selfConsumptionCache: { ts: number; key: string; value: SelfConsumption } | null = null;
@@ -4220,6 +4256,34 @@ export function resetDailyEnergyCache(): void { dailyEnergyWhCache.clear(); }
  *  and its integral undercounts grid, inflating the KPIs. */
 const GRID_HOME_MIN_COVERAGE = 0.9;
 
+/** v0.69.0 — self-consumption home-core coverage. The KPIs integrate each home core's
+ *  OWN pv_total/ac_in/pack* metrics, so a SHP2-wired core that goes cloud-offline (or
+ *  loses its projection) silently drops out of the sum and deflates solar_fraction.
+ *  This reports how many wired home cores are actually contributing, and whether
+ *  coverage is partial.
+ *
+ *  Crucially: when the SHP2 ITSELF is cloud-offline it reports ZERO connectors
+ *  (connected.size === 0) — the home-only scope is gone and the KPI is LEAST trustworthy
+ *  — so that case is flagged partial too (whenever an SHP2 exists at all). Deriving the
+ *  flag from a naive `reporting < connected` would read `N < 0 = false` ("fine") in
+ *  exactly that window, masking unknown as OK. A genuine DPU-only install (no SHP2) is
+ *  never partial: ac_in is the grid measure and there's no SHP2 membership to miss.
+ *  Exported for unit testing. */
+export function selfConsumptionCoverage(
+  connected: Set<string>,
+  homeDpus: ReadonlyArray<{ sn: string }>,
+  devices: Record<string, { online?: boolean } | undefined>,
+  shp2Present: boolean,
+): { homeDpusConnected: number; homeDpusReporting: number; coveragePartial: boolean } {
+  const homeDpusConnected = connected.size;
+  const homeDpusReporting = homeDpusConnected === 0
+    ? 0 // SHP2 reported no connectors (offline/absent) → no authoritative roster
+    : homeDpus.filter((d) => devices[d.sn]?.online !== false).length;
+  const coveragePartial =
+    shp2Present && (homeDpusConnected === 0 || homeDpusReporting < homeDpusConnected);
+  return { homeDpusConnected, homeDpusReporting, coveragePartial };
+}
+
 export function computeSelfConsumption(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
@@ -4271,6 +4335,14 @@ export function computeSelfConsumption(
   // against the home-only load denominator.
   const connected = shp2ConnectedDpuSns(devices);
   const homeDpus = homeConnectedDpus(dpus, connected);
+  // v0.69.0 — coverage telemetry (see selfConsumptionCoverage). The KPIs integrate each
+  // home core's OWN pv_total/ac_in/pack* metrics, so a SHP2-wired core that goes
+  // cloud-offline / loses its projection silently drops out and deflates the KPIs.
+  // Surface the gap (we deliberately DON'T gate the cache: on this fleet home cores go
+  // cloud-offline for hours, and gating would disable the heaviest analytics fn for that
+  // whole window; the value is equally deflated cached-or-not, so visibility is the fix).
+  const { homeDpusConnected, homeDpusReporting, coveragePartial: homeDpusCoveragePartial } =
+    selfConsumptionCoverage(connected, homeDpus, devices, shp2 != null);
   // v0.9.84 — integrate via windowedEnergyWh: completed calendar days are
   // memoized (immutable), so only today + the window's leading partial are
   // re-scanned. Benchmark: 7.4× faster warm, output identical to whole-window
@@ -4359,6 +4431,9 @@ export function computeSelfConsumption(
     directUseRatioPct: pvKwh > 0.5 ? Math.round((pvToLoadKwh / pvKwh) * 1000) / 10 : null,
     gridForKpiKwh: gridForKpiKwh != null ? round2(gridForKpiKwh) : null,
     gridHomeCoverageFrac: Math.round(gridHomeCoverageFrac * 1000) / 1000,
+    homeDpusConnected,
+    homeDpusReporting,
+    homeDpusCoveragePartial,
   };
   // v0.15.13 — require a structurally complete fleet (≥1 DPU AND the SHP2)
   // before caching. The v0.15.11-era guard accepted any DPU, but during the

@@ -1242,6 +1242,11 @@ app.get('/api/ha-state', async (req, reply) => {
     // automations gate `runway < threshold` rules on this. The numeric sensors stay
     // continuous (islanding can begin any second); this flag is the gate.
     runway_projection_islanded_only: liveGridBackstop(snap.devices).backstopping,
+    // v0.69.0 — the same islanded-only caveat applies to projected_low_soc_percent
+    // above: a 0% / low projection during a grid-tied cycle is informational, not an
+    // imminent-depletion threat. Discoverable companion to the runway flag so an HA
+    // automation gating on `projected_low_soc < N` can suppress grid-tied false alarms.
+    projected_low_soc_islanded_only: liveGridBackstop(snap.devices).backstopping,
     runway_recent_load_watts: runway.recentLoadWatts,
     runway_forecast_pv_used_kwh: runway.forecastPvUsedKwh,
 
@@ -1277,6 +1282,12 @@ app.get('/api/ha-state', async (req, reply) => {
     grid_import_kwh_7d: selfCons.gridImportKwh,
     solar_fraction_of_load_percent: selfCons.solarFractionOfLoadPct,
     direct_use_ratio_percent: selfCons.directUseRatioPct,
+    // v0.69.0 — home-core coverage for the self-consumption KPIs. reporting < connected
+    // means a SHP2-wired home core's own PV/charge telemetry is missing from the 7-day
+    // integral (cloud-offline / projection-less), so solar_fraction undercounts.
+    self_consumption_home_dpus_connected: selfCons.homeDpusConnected,
+    self_consumption_home_dpus_reporting: selfCons.homeDpusReporting,
+    self_consumption_coverage_partial: selfCons.homeDpusCoveragePartial,
 
     // Lifetime monotonic energy counters for HA Energy Dashboard (v0.7.6).
     // state_class: total_increasing — survive samples-table pruning via the
