@@ -75,7 +75,7 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   const modeText = gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'GRID BACKSTOP' : 'GRID STANDBY';
   const modeState: AlarmState = gridState === 'islanded' ? 'normal' : gridState === 'active' ? 'warn' : 'manual';
   out.push(statusHeader({
-    station: 'ECOFLOW · SITE 01 · OFF-GRID PLANT',
+    station: 'POWER · SITE 01 · OFF-GRID PLANT',
     mode: modeText,
     modeState,
     uptime: uptime(data.serverStartedAt),

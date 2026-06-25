@@ -2306,7 +2306,7 @@ app.get('/api/admin/addons', { preHandler: requireWriteAuth }, async (_req, repl
     reply.code(503);
     return {
       ok: false,
-      error: 'Supervisor add-on API unavailable. Add-on may lack hassio_api permission (was added in v0.9.33). After updating, the user must reapprove the add-on permissions in Home Assistant → Settings → Add-ons → EcoFlow Panel.',
+      error: 'Supervisor add-on API unavailable. Add-on may lack hassio_api permission (was added in v0.9.33). After updating, the user must reapprove the add-on permissions in Home Assistant → Settings → Add-ons → Power.',
     };
   }
   return { ok: true, count: addons.length, addons };
@@ -2426,7 +2426,7 @@ app.post<{ Querystring: { host?: string; port?: string } }>(
       reply.code(startRes.status >= 400 ? startRes.status : 502);
       return {
         ok: false,
-        error: `Could not start Wyoming config flow: HTTP ${startRes.status} ${startRes.error ?? ''}. If status is 403, the add-on may lack hassio_api permission — reapprove the add-on permissions in Home Assistant → Settings → Add-ons → EcoFlow Panel.`,
+        error: `Could not start Wyoming config flow: HTTP ${startRes.status} ${startRes.error ?? ''}. If status is 403, the add-on may lack hassio_api permission — reapprove the add-on permissions in Home Assistant → Settings → Add-ons → Power.`,
         body: startRes.body,
       };
     }

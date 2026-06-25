@@ -1,4 +1,4 @@
-# EcoFlow Home Energy Panel
+# Power
 
 Local "control-room" dashboard and telnet TUI for an EcoFlow fleet (SHP2,
 Delta Pro Ultra inverters, Delta/River 3 Plus UPS units, EV charger). Talks to
@@ -24,7 +24,7 @@ For a Pi running Home Assistant OS or Supervised:
    git clone https://github.com/tesseractAZ/ecoflow-panel.git
    ```
 3. In Home Assistant: **Settings → Add-ons → Add-on Store**, click the ⋮ menu
-   → **Reload**. **EcoFlow Panel** appears under "Local add-ons".
+   → **Reload**. **Power** appears under "Local add-ons".
 4. **Install** — HA Supervisor pulls the pre-built image from GHCR (seconds,
    not minutes — see [Releasing a new version](#releasing-a-new-version) for
    the build pipeline). Then open **Configuration** and paste your EcoFlow

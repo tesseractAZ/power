@@ -3,7 +3,7 @@
   "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Lit-based HACS frontend cards for the EcoFlow Panel add-on",
+  "description": "Lit-based HACS frontend cards for the Power add-on",
   "scripts": {
     "build": "rollup -c",
     "dev": "rollup -c -w",

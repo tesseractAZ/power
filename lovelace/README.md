@@ -1,6 +1,6 @@
-# EcoFlow Panel — Lovelace cards
+# Power — Lovelace cards
 
-HACS plugin that ships Lovelace cards for the **EcoFlow Panel**
+HACS plugin that ships Lovelace cards for the **Power**
 add-on. **Seven Lit-based cards** (v1.1.0) plus the original two
 legacy cards. Pick one or use several — all the new cards share a
 single WebSocket connection to the add-on per host.
@@ -22,7 +22,7 @@ surface; each new card links out to it for context.
 
 1. **HACS → Frontend → ⋮ → Custom repositories**
 2. Add `https://github.com/tesseractAZ/ecoflow-panel` as **Type: Plugin**
-3. Search for "EcoFlow Panel Card" and install it
+3. Search for "Power Card" and install it
 4. HACS will copy `dist/ecoflow-panel-card.js` (the HACS-registered
    entry) into `<config>/www/community/EcoFlow-Panel-Card/`. To use
    the other cards (`fleet`, `battery`, `solar`, `alerts`):
@@ -57,7 +57,7 @@ Every Lit-based card accepts the same three options:
 
 | Option | Default | Notes |
 |---|---|---|
-| `host` | `http://homeassistant.local:8787` | Where the EcoFlow Panel add-on lives |
+| `host` | `http://homeassistant.local:8787` | Where the Power add-on lives |
 | `title` | per-card default | Card header text |
 | `refresh_seconds` | `30` (min 10) | Poll interval for HTTP-backed sections (the WS stream updates separately) |
 

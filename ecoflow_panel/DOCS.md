@@ -1,4 +1,4 @@
-# EcoFlow Panel
+# Power
 
 A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 (Smart Home Panel 2, Delta Pro Ultras, smaller UPS units, EV charger).

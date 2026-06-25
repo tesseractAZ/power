@@ -24,7 +24,7 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     // Surface to the console for remote diagnosis.
-    console.error('EcoFlow Panel — render error:', error, info?.componentStack);
+    console.error('Power — render error:', error, info?.componentStack);
   }
 
   render() {
@@ -41,7 +41,7 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
           boxSizing: 'border-box',
         }}
       >
-        <h2 style={{ color: '#ff8c1f', margin: '0 0 12px' }}>EcoFlow Panel hit an error</h2>
+        <h2 style={{ color: '#ff8c1f', margin: '0 0 12px' }}>Power hit an error</h2>
         <p style={{ margin: '0 0 12px', opacity: 0.85 }}>
           The dashboard caught a problem while rendering. The details below help pinpoint it.
         </p>

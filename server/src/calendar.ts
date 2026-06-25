@@ -65,10 +65,10 @@ function emit(ev: CalEvent[]): string {
   const head = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
-    'PRODID:-//EcoFlow Panel//v0.8.0//EN',
+    'PRODID:-//Power//v0.8.0//EN',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
-    'X-WR-CALNAME:EcoFlow Panel',
+    'X-WR-CALNAME:Power',
     'X-WR-CALDESC:Forecasted EcoFlow events',
   ];
   const tail = ['END:VCALENDAR'];

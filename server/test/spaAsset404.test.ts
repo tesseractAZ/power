@@ -36,7 +36,7 @@ async function buildApp() {
   const chimesDir = join(root, 'chimes');
   for (const d of [webDist, audioDir, audioRenderDir, chimesDir]) mkdirSync(d, { recursive: true });
   // A recognisable SPA shell so we can tell index.html apart from a 404 body.
-  writeFileSync(join(webDist, 'index.html'), '<!doctype html><title>EcoFlow Panel SPA</title>');
+  writeFileSync(join(webDist, 'index.html'), '<!doctype html><title>Power SPA</title>');
   // A REAL asset under each prefix, to prove the hard-404 fix does NOT break
   // serving existing files. The /audio/ static is wildcard:false (enumerates at
   // registration), so these must exist before the static plugins register below.
@@ -72,7 +72,7 @@ test('GET /chimes/<missing>.wav hard-404s instead of serving the SPA index.html'
   try {
     const r = await app.inject({ method: 'GET', url: '/chimes/nonexistent.wav' });
     assert.equal(r.statusCode, 404, `expected 404 for a missing tone, got ${r.statusCode}`);
-    assert.ok(!/EcoFlow Panel SPA/.test(r.body), 'a missing tone returned the SPA index.html (HTML 200 masquerade)');
+    assert.ok(!/Power SPA/.test(r.body), 'a missing tone returned the SPA index.html (HTML 200 masquerade)');
   } finally {
     await app.close();
   }
@@ -84,7 +84,7 @@ test('GETs for missing assets under all three audio prefixes hard-404', async ()
     for (const url of ['/audio/missing.wav', '/audio-render/missing.wav', '/chimes/missing.wav']) {
       const r = await app.inject({ method: 'GET', url });
       assert.equal(r.statusCode, 404, `expected 404 for ${url}, got ${r.statusCode}`);
-      assert.ok(!/EcoFlow Panel SPA/.test(r.body), `${url} fell through to the SPA index.html`);
+      assert.ok(!/Power SPA/.test(r.body), `${url} fell through to the SPA index.html`);
     }
   } finally {
     await app.close();
@@ -96,7 +96,7 @@ test('a deep SPA route still serves index.html (404 scope not over-broadened)', 
   try {
     const r = await app.inject({ method: 'GET', url: '/alerts/some/deep/route' });
     assert.equal(r.statusCode, 200, `expected SPA fallback 200, got ${r.statusCode}`);
-    assert.ok(/EcoFlow Panel SPA/.test(r.body), 'SPA deep-link fallback no longer serves index.html');
+    assert.ok(/Power SPA/.test(r.body), 'SPA deep-link fallback no longer serves index.html');
   } finally {
     await app.close();
   }
@@ -109,7 +109,7 @@ test('existing assets under all three audio prefixes still serve 200 (fix did no
       const r = await app.inject({ method: 'GET', url });
       assert.equal(r.statusCode, 200, `expected a real asset at ${url} to serve 200, got ${r.statusCode}`);
       assert.ok(/RIFFEXISTINGWAVDATA/.test(r.body), `${url} did not return the real asset bytes`);
-      assert.ok(!/EcoFlow Panel SPA/.test(r.body), `${url} returned the SPA index.html instead of the asset`);
+      assert.ok(!/Power SPA/.test(r.body), `${url} returned the SPA index.html instead of the asset`);
     }
   } finally {
     await app.close();

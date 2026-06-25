@@ -28,7 +28,7 @@ export abstract class EcoflowCardBase extends LitElement {
     if (!config) throw new Error('Invalid config');
     this.config = {
       host: config.host || 'http://homeassistant.local:8787',
-      title: config.title || 'EcoFlow Panel',
+      title: config.title || 'Power',
       refresh_seconds: config.refresh_seconds ?? 30,
       type: config.type,
     };

@@ -8,7 +8,7 @@ args:
   TZ: UTC
 
 labels:
-  org.opencontainers.image.title: EcoFlow Panel
+  org.opencontainers.image.title: Power
   org.opencontainers.image.description: Local dashboard + control-room TUI for an EcoFlow off-grid home
   org.opencontainers.image.source: https://github.com/tesseractAZ/ecoflow-panel
   org.opencontainers.image.licenses: MIT

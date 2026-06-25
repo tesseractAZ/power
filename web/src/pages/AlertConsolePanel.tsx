@@ -408,7 +408,7 @@ export function AlertConsolePanel() {
               {overrideActive ? (
                 <>Live override active · add-on default: <span className="text-ink">{bcastCfg.envBaseline.enabled ? 'on' : 'off'}, {Math.round(bcastCfg.envBaseline.volume * 100)}%</span></>
               ) : (
-                <>Using the add-on default (Settings → Add-ons → EcoFlow Panel).</>
+                <>Using the add-on default (Settings → Add-ons → Power).</>
               )}
             </div>
             {overrideActive && (
