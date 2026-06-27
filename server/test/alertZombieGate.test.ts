@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeAlerts, type Alert } from '../src/alerts.js';
 import { SPARE_DPU_SNS } from '../src/shp2Membership.js';
+import { setDeviceReachability, type Reachability } from '../src/deviceLink.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ===================================================================
@@ -154,6 +155,102 @@ test('spare reporting as a CONNECTED source, then offline → annunciates (re-ar
     ),
   );
   assert.notEqual(offlineOf(alerts, CORE4)?.annunciate, false);
+});
+
+/* ─── v0.73.0: the offline alert is INVARIANT to LAN reachability ───
+ *
+ * The cloud-wedge-vs-real-outage feature (ECOFLOW_DEVICE_REACHABILITY +
+ * setDeviceReachability) is purely ADDITIVE: it enriches an offline alert's
+ * facts/hint text but must NEVER change the alert's id, severity, whether it
+ * fires, or the spare-gating (annunciate:false). This is the load-bearing
+ * safety property the v0.73.0 audit asked to pin down: the reachability cache
+ * now has a TTL + validation, so prove that across getDeviceReachability() =
+ * 'up' / 'down' / 'unknown' the alarm-relevant fields are byte-identical.
+ * ───────────────────────────────────────────────────────────────── */
+
+function withReachabilityEnv(map: Record<string, string>, fn: () => void): void {
+  const prev = process.env.ECOFLOW_DEVICE_REACHABILITY;
+  process.env.ECOFLOW_DEVICE_REACHABILITY = JSON.stringify(map);
+  try {
+    fn();
+  } finally {
+    if (prev === undefined) delete process.env.ECOFLOW_DEVICE_REACHABILITY;
+    else process.env.ECOFLOW_DEVICE_REACHABILITY = prev;
+  }
+}
+
+test('v0.73.0 — home-core offline alert is INVARIANT (id/severity/fires/annunciate) across reachability up/down/unknown', () => {
+  // A valid entity_id so deviceReachabilityEntities() keeps it (post-validation).
+  withReachabilityEnv({ [HOME_CORE_2]: 'binary_sensor.core2_lan' }, () => {
+    const fleet = devices(
+      shp2([
+        { slot: 1, sn: 'CORE_1', isConnected: true },
+        { slot: 2, sn: HOME_CORE_2, isConnected: true },
+        { slot: 3, sn: 'CORE_3', isConnected: true },
+      ]),
+      dpu({ sn: HOME_CORE_2, online: false }),
+    );
+    for (const r of ['up', 'down', 'unknown'] as Reachability[]) {
+      setDeviceReachability(HOME_CORE_2, r); // fresh ts → within the TTL
+      const a = offlineOf(computeAlerts(fleet), HOME_CORE_2);
+      assert.ok(a, `home-core offline alert must STILL fire with reachability=${r}`);
+      assert.equal(a!.id, `offline-${HOME_CORE_2}`, `id unchanged (${r})`);
+      assert.equal(a!.severity, 'warning', `severity stays warning for a home core (${r})`);
+      assert.notEqual(a!.annunciate, false, `home core must NEVER be muted (${r})`);
+    }
+  });
+});
+
+test('v0.73.0 — spare offline alert keeps id/info-severity/annunciate:false across reachability up/down/unknown', () => {
+  withReachabilityEnv({ [CORE4]: 'binary_sensor.core4_lan' }, () => {
+    // Spare not wired into the SHP2 → expected-offline steady state, muted.
+    const fleet = devices(
+      shp2([{ slot: 1, sn: 'CORE_1', isConnected: true }]),
+      dpu({ sn: CORE4, online: false }),
+    );
+    for (const r of ['up', 'down', 'unknown'] as Reachability[]) {
+      setDeviceReachability(CORE4, r);
+      const a = offlineOf(computeAlerts(fleet), CORE4);
+      assert.ok(a, `spare offline alert must still be EMITTED with reachability=${r}`);
+      assert.equal(a!.id, `offline-${CORE4}`, `id unchanged (${r})`);
+      assert.equal(a!.severity, 'info', `spare stays info (${r})`);
+      assert.equal(a!.annunciate, false, `spare stays non-annunciating (${r})`);
+    }
+  });
+});
+
+test('v0.73.0 — reachability ONLY enriches: it adds a LAN-reachability fact but the alarm fields are unchanged vs the unconfigured baseline', () => {
+  const fleet = devices(
+    shp2([
+      { slot: 1, sn: 'CORE_1', isConnected: true },
+      { slot: 2, sn: HOME_CORE_2, isConnected: true },
+      { slot: 3, sn: 'CORE_3', isConnected: true },
+    ]),
+    dpu({ sn: HOME_CORE_2, online: false }),
+  );
+  // Baseline: feature dormant (unconfigured) → no LAN fact.
+  const prev = process.env.ECOFLOW_DEVICE_REACHABILITY;
+  delete process.env.ECOFLOW_DEVICE_REACHABILITY;
+  let base: Alert | undefined;
+  try {
+    base = offlineOf(computeAlerts(fleet), HOME_CORE_2);
+  } finally {
+    if (prev !== undefined) process.env.ECOFLOW_DEVICE_REACHABILITY = prev;
+  }
+  assert.ok(base);
+  assert.ok(!base!.facts?.some((f) => f.label === 'LAN reachability'), 'dormant feature adds no LAN fact');
+
+  // Configured + reachable-up → adds a "cloud session wedged" LAN fact, but id /
+  // severity / annunciate are identical to the dormant baseline.
+  withReachabilityEnv({ [HOME_CORE_2]: 'binary_sensor.core2_lan' }, () => {
+    setDeviceReachability(HOME_CORE_2, 'up');
+    const enriched = offlineOf(computeAlerts(fleet), HOME_CORE_2);
+    assert.ok(enriched);
+    assert.equal(enriched!.id, base!.id);
+    assert.equal(enriched!.severity, base!.severity);
+    assert.equal(enriched!.annunciate, base!.annunciate);
+    assert.ok(enriched!.facts?.some((f) => f.label === 'LAN reachability'), 'configured feature adds the LAN-reachability fact (the only difference)');
+  });
 });
 
 /* ─── the system-wide cloud-session-stale alert is SN-agnostic ───── */

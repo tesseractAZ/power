@@ -41,3 +41,28 @@ test('clears the slot on rejection so the next call retries', async () => {
   assert.equal(sf.inFlight(), false, 'slot cleared after a throw');
   assert.equal(await sf.run(fn), 2, 'next call retries after a failed flight');
 });
+
+test('v0.73.0 — 3 concurrent callers onto a REJECTING flight all receive the rejection; slot clears', async () => {
+  // The rejection counterpart to the concurrent-coalescing happy path: when the single
+  // in-flight computation throws, callers 2..N (who shared it) must each see that same
+  // rejection — not a silently-swallowed error or a hang — and the slot must clear so the
+  // next cold cycle can retry. fn runs exactly once for all three.
+  const sf = singleFlight<number>();
+  let calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((res) => { release = res; });
+  const fn = async () => { calls++; await gate; throw new Error('boom'); };
+  const p1 = sf.run(fn);
+  const p2 = sf.run(fn);
+  const p3 = sf.run(fn);
+  assert.equal(sf.inFlight(), true, 'all three are queued onto one in-flight computation');
+  release();
+  // Each of the three concurrent callers receives the rejection.
+  const results = await Promise.allSettled([p1, p2, p3]);
+  for (const r of results) {
+    assert.equal(r.status, 'rejected');
+    assert.match(String((r as PromiseRejectedResult).reason?.message ?? ''), /boom/);
+  }
+  assert.equal(calls, 1, 'fn executed exactly once for 3 concurrent callers, even on rejection');
+  assert.equal(sf.inFlight(), false, 'slot cleared after the shared flight rejected');
+});

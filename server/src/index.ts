@@ -1962,25 +1962,43 @@ if (runwayAlarmEnabled) {
 // dormant when ECOFLOW_DEVICE_REACHABILITY is unset/empty (the interval still
 // runs but does nothing). Reads are independent of the SHP2 telemetry cadence so
 // the classification stays fresh even under a total MQTT stall.
+// v0.73.0 (finding #4) — in-flight guard so overlapping 30 s ticks coalesce. If a
+// Supervisor read hangs (the 5 s/10 s caps below bound a single read, but a whole
+// fan-out can still straddle a tick boundary), the next tick reuses the in-flight
+// promise rather than launching a second concurrent fan-out. Mirrors haStateCache's
+// `if (inflight) return inflight`.
+let reachabilityInflight: Promise<void> | null = null;
 async function refreshDeviceReachability(): Promise<void> {
-  const entities = deviceReachabilityEntities();
-  await Promise.all(
-    Object.entries(entities).map(async ([sn, entityId]) => {
-      try {
-        const e = await getEntityState(entityId);
-        // A null read (HA unreachable / unknown entity) maps to 'unknown' — the
-        // safe default that yields no enrichment rather than a fabricated up/down.
-        setDeviceReachability(sn, interpretReachabilityState(e?.state ?? null));
-      } catch {
-        setDeviceReachability(sn, 'unknown');
-      }
-    }),
-  );
+  if (reachabilityInflight) return reachabilityInflight;
+  reachabilityInflight = (async () => {
+    const entities = deviceReachabilityEntities();
+    await Promise.all(
+      Object.entries(entities).map(async ([sn, entityId]) => {
+        try {
+          // v0.73.0 (finding #4) — explicit short caps so a hung Supervisor read
+          // can't pile up across the 30 s poll. undici's default is ~5 min.
+          const e = await getEntityState(entityId, { headersTimeoutMs: 4000, bodyTimeoutMs: 8000 });
+          // A null read (HA unreachable / unknown entity) maps to 'unknown' — the
+          // safe default that yields no enrichment rather than a fabricated up/down.
+          setDeviceReachability(sn, interpretReachabilityState(e?.state ?? null));
+        } catch {
+          setDeviceReachability(sn, 'unknown');
+        }
+      }),
+    );
+  })().finally(() => { reachabilityInflight = null; });
+  return reachabilityInflight;
 }
 {
   // Prime once at boot so the first offline alert can classify, then refresh on a
   // cadence finer than the alert-eval loop. unref() so it never holds the process.
-  if (hasReachabilityConfig()) void refreshDeviceReachability();
+  // v0.73.0 (finding #8) — match the interval tick's .catch so a boot-prime rejection
+  // can't surface as an unhandled rejection.
+  if (hasReachabilityConfig()) {
+    void refreshDeviceReachability().catch((e: any) =>
+      app.log.debug(`device-reachability: boot prime skipped (${e?.message ?? e})`),
+    );
+  }
   const reachabilityTick = setInterval(() => {
     if (!hasReachabilityConfig()) return; // dormant — no HA reads when unconfigured
     void refreshDeviceReachability().catch((e: any) =>
