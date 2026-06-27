@@ -90,6 +90,62 @@ export function isSustainGatedLoadAnomaly(alert: Pick<Alert, 'id' | 'source'>): 
   return alert.source === 'learned' && /^baseline-(ch\d+|pair\d+)_w-/.test(alert.id);
 }
 
+// v0.74.0 — resolve-side dwell for the per-pack low-SoC family ("Pack nearly
+// empty", ids `soc-low-<sn>-<packNum>`). The FIRE side is already deduped by
+// `notified`, but the RESOLVE side fires a "Resolved:" on the very first tick
+// the alert is absent. When a pack's SoC sits ON the threshold it crosses back
+// and forth every poll, so each absent tick emitted a fresh "Resolved:" and the
+// next present tick re-fired — a 36 h log showed 22 resolves for 7 genuine
+// fires across three packs. A short resolve dwell (mirroring the load-anomaly
+// dwell at the falling edge) holds the entry until the SoC has been
+// continuously back above threshold for SOC_RESOLVE_DWELL_MS, so a single
+// boundary jitter no longer emits good-news spam. Resolve-only: it can never
+// delay or suppress a FIRE, an escalation, or the audible alarm (those read the
+// live snapshot on the main thread) — only the "condition cleared" push. If the
+// pack dips back under threshold during the dwell the rising-edge path clears
+// `clearedSince` and no spurious resolve is sent. Env-tunable, house pattern.
+const SOC_RESOLVE_DWELL_MS = Number(process.env.SOC_RESOLVE_DWELL_MS ?? 3 * 60_000);
+
+/**
+ * v0.74.0 — does this alert belong to the per-pack low-SoC family that gets the
+ * resolve-side dwell? Matches `soc-low-<sn>-<packNum>` only. Pure + exported for
+ * tests.
+ */
+export function isSocResolveDwellFamily(alert: Pick<Alert, 'id'>): boolean {
+  return /^soc-low-/.test(alert.id);
+}
+
+/**
+ * v0.74.0 — a short, human-facing device locator appended to the push TITLE so
+ * the SAME condition on different subjects is distinguishable at a glance
+ * (three packs all titled "Pack nearly empty" used to be indistinguishable in
+ * the notification list). Prefers the device name, then the Core/pack numbers.
+ * Returns '' for system-wide alerts (device 'System'/'EcoFlow Cloud' with no
+ * Core scope) so their titles stay clean. Pure + exported for tests.
+ */
+export function notifyLocator(alert: Pick<Alert, 'device' | 'coreNum' | 'packNum'>): string {
+  const parts: string[] = [];
+  const dev = alert.device?.trim();
+  if (dev && dev !== 'System' && dev !== 'EcoFlow Cloud') {
+    parts.push(dev);
+  } else if (alert.coreNum != null) {
+    parts.push(`Core ${alert.coreNum}`);
+  }
+  if (alert.packNum != null) parts.push(`pack ${alert.packNum}`);
+  return parts.join(' ');
+}
+
+/**
+ * v0.74.0 — stable per-subject notification identity. The alert `id` already
+ * embeds the device SN (e.g. `soc-low-<sn>-<packNum>`, `dpu-err-<sn>`), so it is
+ * the natural per-subject key: distinct packs get distinct ids, and a
+ * "Resolved:" reuses its fire-side id so the channel updates the same card. The
+ * channel slugifies it to its own safe charset. Pure + exported for tests.
+ */
+export function notifyDedupId(alert: Pick<Alert, 'id'>): string {
+  return alert.id;
+}
+
 /**
  * v0.38.0 — the fire debounce for an alert: the long sustain window for the
  * gated load-anomaly family, else the standard debounce. Critical alerts keep
@@ -650,15 +706,25 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // stays critical/warning/info so the ntfy/Pushover priority maps are
     // unchanged. Priority is derived from the EFFECTIVE severity (so a
     // warning→info auto-demotion shows "[Low]").
+    // v0.74.0 — append a device locator so the same condition on different
+    // subjects is distinguishable in the notification list ("Pack nearly empty
+    // — RIVER 3 Plus pack 1" vs "… Delta 3 Plus pack 1"). Empty for system-wide
+    // alerts, so their titles are unchanged.
+    const loc = notifyLocator(alert);
+    const titleBody = loc ? `${alert.title} — ${loc}` : alert.title;
     const title =
       kind === 'resolved'
-        ? `Resolved: ${alert.title}`
-        : `[${priorityMeta(priorityOf({ severity: effectiveSeverity, source: alert.source })).label}] ${alert.title}`;
+        ? `Resolved: ${titleBody}`
+        : `[${priorityMeta(priorityOf({ severity: effectiveSeverity, source: alert.source })).label}] ${titleBody}`;
     try {
       await sendNotification(cfg, {
         title: `EcoFlow · ${title}`,
         body: kind === 'resolved' ? `${alert.detail}\n\n(condition cleared)` : alert.detail,
         severity: kind === 'resolved' ? 'resolved' : effectiveSeverity,
+        // v0.74.0 — per-subject card identity (same id for fire + its resolve)
+        // so distinct subjects no longer overwrite one shared severity-keyed card
+        // and a "Resolved:" updates the card it fired on. See notifyDedupId.
+        dedupId: notifyDedupId(alert),
       });
       sentSinceStart++;
       log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune)` : ''}`);
@@ -850,17 +916,24 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // which made the chronic-noise rule blind to permanently-active
         // alerts (they never cleared, so never got counted).
         recordRise(a, now);
-        // v0.15.21 — an alert already pushed before the last restart must not
-        // re-push when analytics warm-up makes it "rise" again post-boot.
-        const notifiedBeforeRestart = persistedNotified.has(a.id);
-        if (notifiedBeforeRestart && !firstRun) {
-          log(`notify: "${a.title}" was already notified before restart — suppressing duplicate`);
+        // v0.15.21 — an alert already pushed (recorded in notify-state.json) must
+        // not re-push when it "rises" again here: analytics warm-up re-deriving
+        // it post-boot, OR its tracked entry having been dropped and recreated
+        // while the persisted record still stands. The suppression is correct in
+        // all those cases.
+        // v0.74.0 — corrected the log wording only. It previously asserted "was
+        // already notified before restart", which misled restart-triage: the gate
+        // keys purely on the persisted record, so it also fires in steady state
+        // far from any restart. The suppression ACTION is unchanged.
+        const alreadyNotified = persistedNotified.has(a.id);
+        if (alreadyNotified && !firstRun) {
+          log(`notify: "${a.title}" already has a notification on record (notify-state) — suppressing duplicate push`);
         }
         tracked.set(a.id, {
           alert: a,
           firstSeen: now,
-          notified: firstRun || notifiedBeforeRestart,
-          notifiedSeverity: firstRun || notifiedBeforeRestart ? a.severity : undefined,
+          notified: firstRun || alreadyNotified,
+          notifiedSeverity: firstRun || alreadyNotified ? a.severity : undefined,
         });
         continue;
       }
@@ -962,6 +1035,20 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           continue; // start the dwell; re-evaluate next tick
         }
         if (now - t.clearedSince < BASELINE_LOAD_RESOLVE_DWELL_MS) continue; // still dwelling
+      }
+      // v0.74.0 — resolve dwell for the per-pack low-SoC family. A pack whose
+      // SoC sits on the "nearly empty" threshold crosses it every poll; without
+      // a dwell each absent tick emits a premature "Resolved:" (good-news spam)
+      // and the next present tick re-fires. Hold the entry until the SoC has been
+      // continuously back above threshold for SOC_RESOLVE_DWELL_MS. If it dips
+      // back under first, the rising-edge path clears `clearedSince` and no
+      // resolve is sent. Resolve-only — never delays a fire or the audible alarm.
+      if (isSocResolveDwellFamily(t.alert)) {
+        if (t.clearedSince == null) {
+          t.clearedSince = now;
+          continue; // start the dwell; re-evaluate next tick
+        }
+        if (now - t.clearedSince < SOC_RESOLVE_DWELL_MS) continue; // still dwelling
       }
       const duration = now - t.firstSeen;
       // v0.16.4 — defense-in-depth: a non-annunciating alert (annunciate:false,
