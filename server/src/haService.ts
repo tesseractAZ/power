@@ -116,13 +116,25 @@ export async function callHaService(
  * Convenience — fetch the state of an entity. Returns `null` if HA
  * doesn't know it (or we're not supervised).
  */
-export async function getEntityState(entityId: string): Promise<{ state: string; attributes: Record<string, unknown> } | null> {
+export async function getEntityState(
+  entityId: string,
+  /** v0.73.0 — optional explicit caps so a hung Supervisor read can't pile up under
+   *  the 30 s reachability poll (finding #4). Defaults match the prior undici behavior
+   *  for existing callers; the reachability poll passes a short cap. */
+  opts: { headersTimeoutMs?: number; bodyTimeoutMs?: number } = {},
+): Promise<{ state: string; attributes: Record<string, unknown> } | null> {
   const t = token();
   if (!t) return null;
   try {
-    const res = await request(`${SUPERVISOR_BASE}/states/${entityId}`, {
+    // v0.73.0 (finding #2) — encode the entity_id into the URL path. It's
+    // operator-supplied (ECOFLOW_DEVICE_REACHABILITY / grid-presence config) and was
+    // interpolated raw; a value with a '/', '?' or '#' would alter the request path.
+    // The sibling config-flow helpers already encode; match them.
+    const res = await request(`${SUPERVISOR_BASE}/states/${encodeURIComponent(entityId)}`, {
       method: 'GET',
       headers: { 'Authorization': `Bearer ${t}` },
+      ...(opts.headersTimeoutMs != null ? { headersTimeout: opts.headersTimeoutMs } : {}),
+      ...(opts.bodyTimeoutMs != null ? { bodyTimeout: opts.bodyTimeoutMs } : {}),
     });
     if (res.statusCode !== 200) return null;
     const body = await res.body.text();

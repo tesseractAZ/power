@@ -461,21 +461,89 @@ function shp2ForForecast(opts: { fullCapWh?: number | null; remainWh?: number | 
   };
 }
 
-test('getDayForecast — SoC-blind forecast (shp2 present, no backup capacity) is returned but NOT latched (v0.57.0)', async () => {
+test('getDayForecast — SoC-blind forecast (shp2 present, no backup capacity) is NEGATIVE-cached, not re-scanned every call (v0.73.0)', async () => {
+  // v0.73.0 supersedes the v0.57.0 "never latch an incomplete forecast" behavior:
+  // re-scanning on EVERY /api/ha-state poll was the live-incident defect (the cold
+  // >30 s scan piled onto the single analytics worker → 30 s timeout → retry → 500
+  // whenever the SHP2 was cloud-offline). The fix is a SHORT negative-cache window:
+  // an incomplete forecast IS cached (incomplete:true) and served within
+  // INCOMPLETE_FORECAST_TTL_MS, so a second call inside the window does NOT re-scan.
   resetForecastCachesForTesting();
   setWeatherCacheForTesting(null); // no network; the gate is independent of weather
+  const prevTtl = process.env.INCOMPLETE_FORECAST_TTL_MS;
+  process.env.INCOMPLETE_FORECAST_TTL_MS = '150000'; // explicit non-zero window
   try {
     const rec = forecastCountingRecorder();
     // Warm PV + load history (spanMs > 0) but the SHP2's backup pool is null
-    // (cold / incoherent) → minProjectedSoc null. Under the OLD gate this latched.
+    // (cold / incoherent) → minProjectedSoc null → structurally incomplete.
     const devices = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: null }) };
     const f1 = await getDayForecast(devices, rec);
     assert.equal(f1.minProjectedSoc, null, 'no capacity basis → SoC projection is null');
     const afterCold = rec.queryCount;
     assert.ok(afterCold > 0, 'cold compute must hit the recorder');
-    await getDayForecast(devices, rec); // a latched SoC-blind forecast would serve this with 0 new queries
-    assert.ok(rec.queryCount > afterCold, 'a SoC-blind forecast must NOT be latched — it recomputes next call and self-heals');
+    // Second call WITHIN the negative-cache window must be served from cache —
+    // this is the live-incident regression: no re-scan on every poll.
+    await getDayForecast(devices, rec);
+    assert.equal(rec.queryCount, afterCold, 'incomplete forecast is negative-cached — a call within the TTL must NOT re-scan the recorder');
   } finally {
+    if (prevTtl === undefined) delete process.env.INCOMPLETE_FORECAST_TTL_MS;
+    else process.env.INCOMPLETE_FORECAST_TTL_MS = prevTtl;
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
+});
+
+test('getDayForecast — incomplete forecast EXPIRES after the negative-cache TTL and re-scans (v0.73.0)', async () => {
+  // With the window set to 0, the incomplete entry is immediately stale, so the next
+  // call re-scans — proving the negative cache is a bounded window, not a permanent latch.
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  const prevTtl = process.env.INCOMPLETE_FORECAST_TTL_MS;
+  process.env.INCOMPLETE_FORECAST_TTL_MS = '0';
+  try {
+    const rec = forecastCountingRecorder();
+    const devices = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: null }) };
+    await getDayForecast(devices, rec);
+    const afterCold = rec.queryCount;
+    await getDayForecast(devices, rec); // window=0 → entry already stale → re-scan
+    assert.ok(rec.queryCount > afterCold, 'a 0-length negative-cache window must re-scan (no permanent latch)');
+  } finally {
+    if (prevTtl === undefined) delete process.env.INCOMPLETE_FORECAST_TTL_MS;
+    else process.env.INCOMPLETE_FORECAST_TTL_MS = prevTtl;
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
+});
+
+test('getDayForecast — a COMPLETE forecast supersedes a cached incomplete one once the SHP2 returns (v0.73.0)', async () => {
+  // The supersession safety: while the SHP2 is cloud-offline the forecast is incomplete
+  // and negative-cached; the instant the SHP2 returns (next non-stale call after the
+  // short window) the recompute is structurally complete → it overwrites the cache with
+  // incomplete:false + the full 30-min TTL, so a stale incomplete forecast can never get
+  // stuck. We force the incomplete entry stale (window=0) so the SHP2-present recompute
+  // runs, then assert the now-complete entry is latched for the full TTL.
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  const prevTtl = process.env.INCOMPLETE_FORECAST_TTL_MS;
+  process.env.INCOMPLETE_FORECAST_TTL_MS = '0';
+  try {
+    const rec = forecastCountingRecorder();
+    // Phase 1: SHP2 cloud-offline → no capacity basis → incomplete, negative-cached.
+    const offline = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: null }) };
+    const fIncomplete = await getDayForecast(offline, rec);
+    assert.equal(fIncomplete.minProjectedSoc, null, 'offline SHP2 → SoC-blind forecast');
+    // Phase 2: SHP2 RETURNS with a real backup pool → structurally complete recompute.
+    const online = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: 120_000, remainWh: 72_000 }) };
+    const fComplete = await getDayForecast(online, rec);
+    assert.ok(fComplete.minProjectedSoc != null, 'returned SHP2 → a real SoC projection supersedes the SoC-blind one');
+    // Phase 3: the now-COMPLETE entry is latched for the full TTL even with the window
+    // still 0 — proving it was tagged incomplete:false, not the short negative-cache.
+    const afterComplete = rec.queryCount;
+    await getDayForecast(online, rec);
+    assert.equal(rec.queryCount, afterComplete, 'a complete forecast is cached for the full 30-min TTL (window=0 does NOT expire it)');
+  } finally {
+    if (prevTtl === undefined) delete process.env.INCOMPLETE_FORECAST_TTL_MS;
+    else process.env.INCOMPLETE_FORECAST_TTL_MS = prevTtl;
     clearWeatherTestOverride();
     resetForecastCachesForTesting();
   }

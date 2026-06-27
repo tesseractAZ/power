@@ -87,6 +87,11 @@ export function classifyDeviceLink(cloudOnline: boolean, reachable: Reachability
  * non-empty-string entries survive, so a stray null/number/array can't poison the
  * map.
  */
+/** v0.73.0 — a valid Home Assistant entity_id: `domain.object_id`, lower-snake on
+ *  both sides (e.g. `binary_sensor.core1_lan`). Anything else (path separators,
+ *  spaces, uppercase, missing dot) is rejected by deviceReachabilityEntities. */
+const ENTITY_ID_RE = /^[a-z0-9_]+\.[a-z0-9_]+$/;
+
 export function deviceReachabilityEntities(): Record<string, string> {
   const raw = (process.env.ECOFLOW_DEVICE_REACHABILITY ?? '').trim();
   if (raw === '') return {};
@@ -101,7 +106,11 @@ export function deviceReachabilityEntities(): Record<string, string> {
   for (const [sn, entityId] of Object.entries(parsed as Record<string, unknown>)) {
     const key = typeof sn === 'string' ? sn.trim() : '';
     const val = typeof entityId === 'string' ? entityId.trim() : '';
-    if (key !== '' && val !== '') out[key] = val;
+    // v0.73.0 (finding #2) — only accept a well-formed HA entity_id (domain.object_id,
+    // lower-snake). This is defence-in-depth alongside getEntityState's encodeURIComponent:
+    // it drops a malformed/hostile value (path separators, spaces, injection attempts)
+    // here, before it ever reaches an HA request, while keeping every valid entry.
+    if (key !== '' && ENTITY_ID_RE.test(val)) out[key] = val;
   }
   return out;
 }
@@ -119,14 +128,28 @@ export function hasReachabilityConfig(): boolean {
  * alert. A missing SN reads 'unknown' — the safe default that yields a 'unknown'
  * classification (no enrichment) rather than a fabricated up/down.
  */
-const reachabilityBySn = new Map<string, Reachability>();
+const reachabilityBySn = new Map<string, { reachable: Reachability; ts: number }>();
 
-export function setDeviceReachability(sn: string, reachable: Reachability): void {
-  reachabilityBySn.set(sn, reachable);
+/** v0.73.0 (finding #3) — staleness guard, mirroring gridState's GRID_ENTITY_MAX_AGE_MS.
+ *  A reachability reading older than this decays to 'unknown' rather than replaying a
+ *  frozen last-known value: when the HA poll stalls (Supervisor wedge / token expiry /
+ *  the entity goes stale) the safe answer is "we don't know", not a stale 'up'/'down'
+ *  that could mis-classify an offline device's cause. The 30 s poll refreshes well
+ *  inside this, so a live sensor never decays; only a since-frozen one does. 150 s ≈ 5×
+ *  the poll interval, so a single missed tick can't trip it. Env-tunable. */
+export const REACHABILITY_MAX_AGE_MS = Math.max(0, Number(process.env.REACHABILITY_MAX_AGE_MS ?? 150_000));
+
+export function setDeviceReachability(sn: string, reachable: Reachability, ts: number = Date.now()): void {
+  reachabilityBySn.set(sn, { reachable, ts });
 }
 
-export function getDeviceReachability(sn: string): Reachability {
-  return reachabilityBySn.get(sn) ?? 'unknown';
+export function getDeviceReachability(sn: string, now: number = Date.now()): Reachability {
+  const entry = reachabilityBySn.get(sn);
+  if (entry == null) return 'unknown';
+  // A frozen reading older than the TTL decays to 'unknown' (safe default → no
+  // enrichment / 'unknown' classification), never a stale fabricated up/down.
+  if (now - entry.ts > REACHABILITY_MAX_AGE_MS) return 'unknown';
+  return entry.reachable;
 }
 
 /**

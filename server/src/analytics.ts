@@ -748,6 +748,24 @@ export interface DayForecast {
 }
 
 const FORECAST_DAY_TTL_MS = 30 * 60 * 1000;
+// v0.73.0 — short negative-cache TTL for a STRUCTURALLY-INCOMPLETE forecast (audit
+// finding #1). When the SHP2 is cloud-offline the forecast comes back incomplete
+// (socBasisMissing / loadCold) and the full-TTL cache gate below NEVER populates,
+// so every /api/ha-state poll re-ran the >30 s cold recorder scan on the single
+// analytics worker → 30 s client timeout → retry → ~60 s → HTTP 500. We now STILL
+// cache the incomplete value but tag it `incomplete:true` and only serve it for this
+// short window, bounding the cold re-scan to once per ~150 s instead of every call.
+// CRUCIAL: this is alarm-neutral — the SoC/floor alarms read backupBatPercent off the
+// LIVE snapshot (not the forecast) and computeRunway short-circuits to emptyRunway when
+// the SHP2 is absent regardless of forecast content, so serving an incomplete forecast
+// from cache feeds the SAME alarm decision the uncached one would. And it self-heals:
+// once the SHP2 returns, the next call is structurally complete → it recomputes and
+// overwrites the cache with incomplete:false + full TTL (see the cache-write gate).
+// Read lazily (per call) so a test can flip the window to 0 to exercise expiry without a
+// module reload; production sets it once via env (or the 150 s default).
+function incompleteForecastTtlMs(): number {
+  return Math.max(0, Number(process.env.INCOMPLETE_FORECAST_TTL_MS ?? 150 * 1000));
+}
 const TYPICAL_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const MIN_RESPONSE_PAIRS = 2;   // min daylight (GHI,PV) pairs to fit an hour
 const DAYLIGHT_GHI = 20;        // W/m² — below this is night/near-night
@@ -1013,7 +1031,21 @@ export function fleetSoilingFromDevices(
   };
 }
 
-let dayForecastCache: { ts: number; value: DayForecast } | null = null;
+// v0.73.0 — `incomplete` tags a structurally-incomplete forecast (SHP2 cloud-offline:
+// no SoC basis / cold load history). A complete forecast (incomplete:false) is served
+// for the full FORECAST_DAY_TTL_MS; an incomplete one only for INCOMPLETE_FORECAST_TTL_MS,
+// so the cold re-scan is bounded to once per short window rather than every call, and a
+// complete forecast supersedes it the moment real data returns.
+let dayForecastCache: { ts: number; value: DayForecast; incomplete: boolean } | null = null;
+// v0.73.0 — true while the current cache entry is still fresh for its TTL. A complete
+// entry uses the full 30-min TTL; an incomplete one decays after INCOMPLETE_FORECAST_TTL_MS
+// (a short negative-cache window). Centralising the rule keeps getDayForecast and the
+// inside-flight re-check in lock-step.
+function dayForecastCacheFresh(now: number): boolean {
+  if (!dayForecastCache) return false;
+  const ttl = dayForecastCache.incomplete ? incompleteForecastTtlMs() : FORECAST_DAY_TTL_MS;
+  return now - dayForecastCache.ts < ttl;
+}
 // v0.69.0 — coalesce concurrent cold-cache callers onto one forecast scan (the
 // heaviest analytics computation; see singleFlight.ts).
 const dayForecastFlight = singleFlight<DayForecast>();
@@ -1079,7 +1111,7 @@ export async function getDayForecast(
   recorder: Recorder,
   log: (m: string) => void = () => {},
 ): Promise<DayForecast> {
-  if (dayForecastCache && Date.now() - dayForecastCache.ts < FORECAST_DAY_TTL_MS) {
+  if (dayForecastCache && dayForecastCacheFresh(Date.now())) {
     return dayForecastCache.value;
   }
   // v0.69.0 — coalesce concurrent cold-cache callers. The 30-min TTL cache above
@@ -1096,7 +1128,7 @@ async function computeDayForecastUncached(
   recorder: Recorder,
   log: (m: string) => void,
 ): Promise<DayForecast> {
-  if (dayForecastCache && Date.now() - dayForecastCache.ts < FORECAST_DAY_TTL_MS) {
+  if (dayForecastCache && dayForecastCacheFresh(Date.now())) {
     return dayForecastCache.value; // a prior flight may have populated it while we queued
   }
   const now = Date.now();
@@ -1341,17 +1373,32 @@ async function computeDayForecastUncached(
   // deploy restart. Gate on INPUT SPANS / basis presence, never on output values:
   // a real zero-PV night legitimately yields all-zero forecastPvW for every hour
   // while still having a non-zero pvSpan from daytime history, and must still
-  // cache. Still SERVE the partial forecast (PV + weather stay useful); just don't
-  // latch it, so the next warm cycle rebuilds and it self-heals.
+  // cache. Still SERVE the partial forecast (PV + weather stay useful).
+  // v0.73.0 — instead of NOT caching an incomplete forecast (which made every
+  // /api/ha-state poll re-run the >30 s cold recorder scan on the single analytics
+  // worker → 30 s timeout → retry → ~60 s → HTTP 500 whenever the SHP2 was cloud-
+  // offline), give it a SHORT NEGATIVE-CACHE TTL: still cache the partial value but
+  // tag it `incomplete:true` so it's served only for INCOMPLETE_FORECAST_TTL_MS
+  // (~150 s) before re-scanning. This bounds the cold re-scan to once per ~150 s
+  // rather than every call, while a structurally COMPLETE forecast (incomplete:false)
+  // still caches for the full 30-min TTL and SUPERSEDES the incomplete entry the
+  // moment real data returns — so a stale incomplete forecast can never get stuck.
+  // Alarm-neutral: the SoC/floor alarms read the LIVE snapshot's backupBatPercent
+  // (not the forecast) and computeRunway short-circuits to emptyRunway when the SHP2
+  // is absent regardless of forecast content, so caching the incomplete forecast
+  // feeds the SAME alarm decision the uncached one would.
   const loadCold = loadRes.spanMs === 0;              // no panel_load history (also true when the SHP2 is absent → zero-span fallback)
   const pvCold = homeDpus.length > 0 && pvSpan === 0; // home DPUs present but their PV recorder is cold
   const socBasisMissing = fullWh == null;             // no SHP2, or an incoherent backup pool → no SoC/runway projection
   const structurallyIncomplete = loadCold || pvCold || socBasisMissing || historyDays <= 0;
   if (structurallyIncomplete && now - lastForecastIncompleteLogMs >= FORECAST_INCOMPLETE_LOG_THROTTLE_MS) {
     lastForecastIncompleteLogMs = now;
-    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — NOT caching, will rebuild next call (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
+    log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — negative-caching for ${incompleteForecastTtlMs() / 1000}s then rebuilding (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
   }
-  if (dpus.length > 0 && !structurallyIncomplete) dayForecastCache = { ts: now, value };
+  // Cache whenever ≥1 DPU is present (so a totally-empty fleet still doesn't latch),
+  // tagging the entry incomplete so the TTL fast-path uses the short negative-cache
+  // window. A complete forecast overwrites it with incomplete:false + full TTL.
+  if (dpus.length > 0) dayForecastCache = { ts: now, value, incomplete: structurallyIncomplete };
   return value;
 }
 

@@ -8,6 +8,7 @@ import {
   setDeviceReachability,
   getDeviceReachability,
   countCloudWedges,
+  REACHABILITY_MAX_AGE_MS,
   type Reachability,
 } from '../src/deviceLink.js';
 
@@ -113,6 +114,26 @@ test('parser: drops entries with non-string or empty values (no poisoning)', () 
   });
 });
 
+// ── v0.73.0 (finding #2): entity_id validation drops malformed/hostile values ──
+
+test('parser: drops values that are not a well-formed entity_id; keeps the valid ones', () => {
+  withEnv(JSON.stringify({
+    GOOD1: 'binary_sensor.core1_lan',           // valid
+    GOOD2: 'device_tracker.core2_phone',        // valid
+    SLASH: 'binary_sensor.core/../../states',   // path separator → drop
+    SPACE: 'binary_sensor.core 3',              // space → drop
+    UPPER: 'Binary_Sensor.Core4',               // uppercase → drop
+    NODOT: 'binary_sensor_core5',               // missing domain dot → drop
+    EMPTYOBJ: 'binary_sensor.',                 // empty object_id → drop
+    QUERY: 'binary_sensor.x?foo=bar',           // query char → drop
+  }), () => {
+    assert.deepEqual(deviceReachabilityEntities(), {
+      GOOD1: 'binary_sensor.core1_lan',
+      GOOD2: 'device_tracker.core2_phone',
+    });
+  });
+});
+
 // ── interpretReachabilityState: HA ping binary_sensor convention ─────────────
 
 test('interpret: connectivity "on" / home / connected / true → up', () => {
@@ -146,6 +167,31 @@ test('cache: set then get round-trips and overwrites', () => {
   assert.equal(getDeviceReachability('CACHE_SN'), 'down');
   setDeviceReachability('CACHE_SN', 'unknown');
   assert.equal(getDeviceReachability('CACHE_SN'), 'unknown');
+});
+
+// ── v0.73.0 (finding #3): reachability cache TTL — a stale reading decays to unknown ──
+
+test('cache TTL: a reading older than REACHABILITY_MAX_AGE_MS decays to "unknown"', () => {
+  const base = 1_000_000_000_000; // fixed clock so the test is deterministic
+  setDeviceReachability('TTL_SN', 'up', base);
+  // Fresh read at the same instant and well inside the window → the live value.
+  assert.equal(getDeviceReachability('TTL_SN', base), 'up');
+  assert.equal(getDeviceReachability('TTL_SN', base + REACHABILITY_MAX_AGE_MS - 1), 'up', 'just inside the TTL stays live');
+  // Past the TTL the frozen reading must NOT replay 'up' — it decays to the safe default.
+  assert.equal(getDeviceReachability('TTL_SN', base + REACHABILITY_MAX_AGE_MS + 1), 'unknown', 'a since-frozen reading past the TTL decays to unknown, not a stale up/down');
+  // A 'down' reading decays the same way (no fabricated outage classification either).
+  setDeviceReachability('TTL_SN2', 'down', base);
+  assert.equal(getDeviceReachability('TTL_SN2', base + REACHABILITY_MAX_AGE_MS + 1), 'unknown');
+});
+
+test('cache TTL: a refresh resets the age (a live 30 s poll never decays)', () => {
+  const base = 2_000_000_000_000;
+  setDeviceReachability('TTL_REFRESH', 'up', base);
+  // Refresh just before expiry (mirrors the 30 s poll landing inside the 150 s window).
+  setDeviceReachability('TTL_REFRESH', 'up', base + REACHABILITY_MAX_AGE_MS - 1);
+  // Now read at a point that WOULD have been stale relative to the first write but is
+  // fresh relative to the refresh → still 'up'.
+  assert.equal(getDeviceReachability('TTL_REFRESH', base + REACHABILITY_MAX_AGE_MS + 1), 'up');
 });
 
 // ── countCloudWedges: only cloud-offline + LAN-up devices count ──────────────
