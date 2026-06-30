@@ -12,6 +12,7 @@ import {
   socAlertSeverity,
   type SocThreshold,
 } from '../src/batterySocAlarm.js';
+import { downgradePriorityForGrid } from '../src/gridState.js';
 
 // v0.12.0 — Unit tests for the backup-pool SoC audible alarm. Each test uses a
 // UNIQUE tmp statePath so the persisted armed-map / lastSoc never leaks between
@@ -22,7 +23,11 @@ let seq = 0;
 function makeAlarm(onCross: (t: SocThreshold) => void) {
   const statePath = join(tmpdir(), `soc-${process.pid}-${Date.now()}-${seq++}.json`);
   tmpPaths.push(statePath);
-  return createBatterySocAlarm({ onCross, statePath });
+  // v0.75.0 — onCross now fires per crossed band with an isPrimary flag; this helper
+  // records only the ANNOUNCED (most-severe) band, so `fired` reflects what the operator
+  // actually hears (the audible collapse). The per-band firing itself is asserted directly
+  // by the "onCross fires for EVERY crossed band" test below.
+  return createBatterySocAlarm({ onCross: (t, isPrimary) => { if (isPrimary) onCross(t); }, statePath });
 }
 
 test('BATTERY_SOC_THRESHOLDS — pcts and escalating priorities', () => {
@@ -71,20 +76,18 @@ test('boot-arming — first reading below thresholds must NOT re-announce', () =
   assert.deepEqual(fired, []);
 });
 
-test('crossing deep — fires 40..4 but not 2 when landing at 3', () => {
+test('crossing deep — collapses to the worst band (4) but not 2 when landing at 3', () => {
   const fired: number[] = [];
   const alarm = makeAlarm((t) => fired.push(t.pct));
-  // v0.54.4 — a 47-pt fall in one tick is implausible from a FRESH baseline (the new
+  // v0.54.4 — a 47-pt fall in one tick is implausible from a FRESH baseline (the
   // single-tick plausibility guard would treat it as a stale-reconnect artifact). Here we
-  // exercise the deep-crossing ladder against a STALE baseline (>10 min apart), which is the
-  // case the guard intentionally allows (a large change after a long gap is real).
+  // exercise the deep crossing against a STALE baseline (>10 min apart), which the guard
+  // intentionally allows (a large change after a long gap is real).
   alarm.update(50, 0); // arms all
-  alarm.update(3, 11 * 60 * 1000); // crosses everything at/above 3
-  const set = new Set(fired);
-  for (const pct of [40, 30, 20, 15, 10, 8, 4]) {
-    assert.ok(set.has(pct), `expected ${pct} to have fired`);
-  }
-  assert.ok(!set.has(2), '2 must NOT fire (3 > 2)');
+  alarm.update(3, 11 * 60 * 1000); // crosses 40/30/20/15/10/8/4 in ONE tick (not 2: 3 > 2)
+  // v0.75.0 — collapsed to the single most-severe band crossed (4%, critical). The critical
+  // alarm is still announced (never suppressed); 2 still does NOT fire because 3 > 2.
+  assert.deepEqual(fired, [4]);
 });
 
 test('hysteresis — a value hovering on a boundary does not re-arm/chatter', () => {
@@ -95,16 +98,16 @@ test('hysteresis — a value hovering on a boundary does not re-arm/chatter', ()
   // within the cap so they pass regardless.
   const t0 = 11 * 60 * 1000;
   alarm.update(50, 0); // arms all
-  alarm.update(19, t0); // crosses 40, 30, 20
-  assert.deepEqual(fired, [40, 30, 20]);
+  alarm.update(19, t0); // crosses 40, 30, 20 in one tick → v0.75.0 collapses to the worst (20)
+  assert.deepEqual(fired, [20]);
   // +1 over the 20 boundary is NOT enough hysteresis to re-arm 20.
   alarm.update(21, t0 + 1000);
-  assert.deepEqual(fired, [40, 30, 20]);
+  assert.deepEqual(fired, [20]);
   // +2 over the boundary DOES re-arm 20.
   alarm.update(22, t0 + 2000);
-  // Back below 20 → 20 fires again (now the 4th entry).
+  // Back below 20 → 20 fires again (the re-arm/hysteresis behaviour is unchanged by collapse).
   alarm.update(19, t0 + 3000);
-  assert.deepEqual(fired, [40, 30, 20, 20]);
+  assert.deepEqual(fired, [20, 20]);
 });
 
 test('activeSocBand — lowest threshold currently crossed', () => {
@@ -183,22 +186,26 @@ test('v0.54.4 — a genuine gradual discharge still fires every band once', () =
   assert.deepEqual(fired, [50, 40, 30, 20, 15, 10, 8, 4, 2]);
 });
 
-test('v0.54.4 — a real deep discharge that reaches 0 from a LOW baseline still fires critical', () => {
+test('v0.54.4/v0.75.0 — a real deep discharge that reaches 0 from a LOW baseline still fires critical (collapsed to the worst band)', () => {
   const fired: number[] = [];
   const alarm = makeAlarm((t) => fired.push(t.pct));
   alarm.update(12, 0); // boot already low (<30) → 50..15 disarmed, 10/8/4/2 armed
-  alarm.update(0, 1 * MIN); // 12→0: guard inactive (baseline <30) → critical bands fire
-  assert.deepEqual(fired, [10, 8, 4, 2]);
+  alarm.update(0, 1 * MIN); // 12→0 in one tick: guard inactive (baseline <30); crosses 10/8/4/2
+  // v0.75.0 — the same-tick multi-band crossing collapses to ONE announce for the most-severe
+  // band (2%, critical). The critical alarm still fires — collapse never suppresses it.
+  assert.deepEqual(fired, [2]);
 });
 
-test('v0.54.4 — after a long gap (stale baseline) a large real change re-baselines, not suppressed', () => {
+test('v0.54.4/v0.75.0 — after a long gap (stale baseline) a large real change re-baselines and announces the worst band, not suppressed', () => {
   const fired: number[] = [];
   const alarm = makeAlarm((t) => fired.push(t.pct));
   alarm.update(63, 0); // boot healthy
-  // 25 min later (was the add-on down / SHP2 offline?) the pool genuinely sits at 20 — a real
-  // 43-pt change, but plausible across the gap. Stale baseline → guard inactive → bands fire.
+  // 25 min later (add-on down / SHP2 offline) the pool genuinely sits at 20 — a real 43-pt
+  // change, plausible across the gap (stale baseline → guard inactive). Crosses 50/40/30/20.
+  // v0.75.0 — collapsed to the most-severe band crossed (20%): the alarm IS announced (not
+  // suppressed), once, instead of laddering 50/40/30/20.
   alarm.update(20, 25 * MIN);
-  assert.deepEqual(fired, [50, 40, 30, 20]);
+  assert.deepEqual(fired, [20]);
 });
 
 test('v0.54.4 — throttled persist keeps the slew guard active across a quick restart', () => {
@@ -215,6 +222,121 @@ test('v0.54.4 — throttled persist keeps the slew guard active across a quick r
   const a2 = createBatterySocAlarm({ onCross: (t) => fired.push(t.pct), statePath: sp });
   a2.update(0, 13 * MIN); // transient 0 right after restart — guard still active (baseline 1min old)
   assert.deepEqual(fired, [], 'a quick restart must not re-open the cascade — throttled persist kept the baseline fresh');
+});
+
+/* ── v0.75.0 — same-tick multi-band crossing collapses to one announce ──── */
+
+test('v0.75.0 — a long-offline reconnect at low SoC announces only the worst band', () => {
+  const fired: SocThreshold[] = [];
+  const a = makeAlarm((t) => fired.push(t));
+  const t0 = 1_700_000_000_000;
+  a.update(60, t0); // cold-start baseline (no fire), arms every band
+  assert.equal(fired.length, 0, 'cold start does not fire');
+  // 11 min later the SHP2 returns at 17% (a long-offline reconnect → stale baseline,
+  // so the slew guard re-baselines rather than rejecting). Crosses 50/40/30/20 in one
+  // tick; only the most-severe (20%, medium) should announce — not the whole ladder.
+  a.update(17, t0 + 11 * MIN);
+  assert.equal(fired.length, 1, 'exactly one announce for a same-tick multi-band crossing');
+  assert.equal(fired[0].pct, 20);
+  assert.equal(fired[0].priority, 'medium');
+});
+
+test('v0.75.0 — gradual one-band-per-tick discharge still fires each band once (unchanged)', () => {
+  const fired: number[] = [];
+  const a = makeAlarm((t) => fired.push(t.pct));
+  let now = 1_710_000_000_000;
+  a.update(60, now); // baseline
+  a.update(45, (now += MIN)); // crosses 50 only
+  a.update(35, (now += MIN)); // crosses 40 only
+  a.update(25, (now += MIN)); // crosses 30 only
+  assert.deepEqual(fired, [50, 40, 30], 'a normal gradual discharge is byte-identical to before');
+});
+
+test('v0.75.0 — a fast same-tick discharge below the slew cap collapses to the worst band', () => {
+  const fired: SocThreshold[] = [];
+  const a = makeAlarm((t) => fired.push(t));
+  let now = 1_720_000_000_000;
+  a.update(28, now); // baseline just under 30 (arms 20/15/10/8/4/2)
+  // 28→9 in one tick: 19-pt drop is under the 25-pt slew cap AND the baseline is
+  // <30 so the guard is inactive; crosses 20/15/10 → announce only 10% (high).
+  a.update(9, (now += MIN));
+  assert.equal(fired.length, 1);
+  assert.equal(fired[0].pct, 10);
+  assert.equal(fired[0].priority, 'high');
+});
+
+test('v0.75.0 — bands re-arm after recovery so a later dip re-announces the worst band', () => {
+  const fired: number[] = [];
+  const a = makeAlarm((t) => fired.push(t.pct));
+  let now = 1_730_000_000_000;
+  a.update(60, now);
+  a.update(17, (now += 11 * MIN)); // collapse → 20
+  a.update(60, (now += MIN)); // recover well above all bands → re-arm (no fire on the way up)
+  a.update(17, (now += 11 * MIN)); // dip again after >10min → fire 20 again
+  assert.deepEqual(fired, [20, 20]);
+});
+
+test('v0.75.0 — onCross fires for EVERY crossed band, flagging only the most-severe as primary', () => {
+  // Guards the regression the adversarial review caught: the consumer (index.ts) records the
+  // grid-downgrade re-escalation map inside onCross, so it must hear EVERY crossed band — not
+  // just the announced one — or a later grid drop can fail-silent on the higher emergency bands.
+  const calls: { pct: number; primary: boolean }[] = [];
+  const sp = join(tmpdir(), `soc-perband-${process.pid}-${Date.now()}-${seq++}.json`);
+  tmpPaths.push(sp);
+  const a = createBatterySocAlarm({ onCross: (t, primary) => calls.push({ pct: t.pct, primary }), statePath: sp });
+  a.update(60, 0); // cold-start baseline (no fire)
+  a.update(17, 11 * MIN); // stale baseline → crosses 50/40/30/20 in one tick
+  assert.deepEqual(calls.map((c) => c.pct), [50, 40, 30, 20], 'consumer is notified of every crossed band');
+  assert.deepEqual(
+    calls.map((c) => c.primary),
+    [false, false, false, true],
+    'only the most-severe band (20%) is the primary/announced one',
+  );
+});
+
+test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands after a partial recovery', () => {
+  // The first adversarial review's exact fail-silent scenario, locked in end-to-end: a FAITHFUL copy
+  // of the index.ts onCross + socDowngraded re-escalation consumer, driven by the REAL alarm module.
+  // On-grid same-tick multi-emergency crossing → partial recovery above the worst band → grid drop
+  // MUST audibly re-escalate the shallower high bands (pre-collapse behaviour). If the collapse had
+  // starved socDowngraded of the non-worst bands (the bug), the grid drop would be silent here.
+  const sp = join(tmpdir(), `soc-reesc-${process.pid}-${Date.now()}-${seq++}.json`);
+  tmpPaths.push(sp);
+  const announced: { pct: number; priority: string }[] = [];
+  const socDowngraded = new Map<number, string>();
+  let backstopping = true; // grid present
+  const a = createBatterySocAlarm({
+    statePath: sp,
+    onCross: (t, isPrimary) => {
+      // Mirror of index.ts onCross: record the grid-downgrade map for EVERY band, announce only primary.
+      const priority = downgradePriorityForGrid(t.priority, backstopping);
+      const onGrid = priority !== t.priority;
+      if (onGrid) socDowngraded.set(t.pct, t.priority);
+      else socDowngraded.delete(t.pct);
+      if (!isPrimary) return;
+      announced.push({ pct: t.pct, priority });
+    },
+  });
+  // Mirror of index.ts re-escalation: climb-out clears bands SoC rose above; a grid drop re-announces
+  // every still-active downgraded band at its TRUE priority.
+  const reEscalate = (soc: number) => {
+    if (socDowngraded.size === 0) return;
+    for (const [pct, truePriority] of [...socDowngraded]) {
+      if (soc > pct) { socDowngraded.delete(pct); continue; }
+      if (!backstopping) { socDowngraded.delete(pct); announced.push({ pct, priority: truePriority }); }
+    }
+  };
+
+  a.update(12, 0); // boot low, on-grid (baseline <30 arms 10/8/4/2)
+  a.update(3, 1 * MIN); reEscalate(3); // 12→3 crosses 10/8/4 in one tick — collapse announces worst(4) only
+  // Despite the audible collapse, EVERY crossed emergency band is recorded for later re-escalation:
+  assert.deepEqual([...socDowngraded.keys()].sort((x, y) => y - x), [10, 8, 4]);
+  a.update(5, 2 * MIN); reEscalate(5); // partial recovery to 5%: climbs out 4 (5>4); 8/10 remain
+  assert.deepEqual([...socDowngraded.keys()].sort((x, y) => y - x), [10, 8]);
+  backstopping = false; // GRID DROPS
+  a.update(5, 3 * MIN); reEscalate(5); // at 5% off-grid → re-escalate the still-active high bands
+  const reesc = announced.filter((x) => x.priority === 'high').map((x) => x.pct).sort((x, y) => y - x);
+  assert.deepEqual(reesc, [10, 8], 'grid drop must audibly re-escalate the higher emergency bands, not go silent');
 });
 
 test('cleanup — remove tmp state files (best effort)', () => {

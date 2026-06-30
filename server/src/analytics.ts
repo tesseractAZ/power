@@ -745,6 +745,15 @@ export interface DayForecast {
   solarModel: SolarResponseModel;       // fleet-wide learned response
   deviceModels: DeviceSolarModel[];     // per-DPU — reveals placement/shading differences
   soiling: SoilingEstimate | null;      // null until ≥6 clear-sky days are recorded
+  // v0.75.0 — home-core coverage basis for this forecast (same counts the
+  // SelfConsumption KPI surfaces). When a wired home Core is cloud-offline the
+  // day-ahead PV / projected-low-SoC is computed from a degraded basis (e.g. 1 of
+  // 3 Cores reporting); the web surfaces a calm "Forecast basis: N of M home Cores
+  // reporting" caveat when homeDpusCoveragePartial is true. Mirrors
+  // selfConsumptionCoverage(); display-only, never gates a number.
+  homeDpusConnected: number;
+  homeDpusReporting: number;
+  homeDpusCoveragePartial: boolean;
 }
 
 const FORECAST_DAY_TTL_MS = 30 * 60 * 1000;
@@ -1149,6 +1158,11 @@ async function computeDayForecastUncached(
   // per-Core, just not contaminating the fleet model).
   const connected = shp2ConnectedDpuSns(devices);
   const homeDpus = homeConnectedDpus(dpus, connected);
+  // v0.75.0 — home-core coverage basis for this forecast. Same counts the
+  // SelfConsumption KPI uses; threaded onto DayForecast so the web can show a calm
+  // "Forecast basis: N of M home Cores reporting" caveat when a wired Core is
+  // cloud-offline (degraded PV/projected-SoC basis). Display-only; gates no number.
+  const forecastCoverage = selfConsumptionCoverage(connected, homeDpus, devices, shp2 != null);
 
   // Typical-day fleet PV curve (fallback when the model lacks an hour) + load curve.
   const pvCurve = new Array(24).fill(0);
@@ -1356,6 +1370,9 @@ async function computeDayForecastUncached(
     solarModel,
     deviceModels,
     soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour) : null,
+    homeDpusConnected: forecastCoverage.homeDpusConnected,
+    homeDpusReporting: forecastCoverage.homeDpusReporting,
+    homeDpusCoveragePartial: forecastCoverage.coveragePartial,
   };
   // v0.15.21 — never CACHE a forecast whose load curve came back empty: the
   // post-boot analytics worker can race the recorder and read zero panel_load

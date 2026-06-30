@@ -301,6 +301,13 @@ export interface DayForecast {
   solarModel: SolarResponseModel;
   deviceModels: DeviceSolarModel[];
   soiling: SoilingEstimate | null;
+  // v0.75.0 — home-core coverage basis for this forecast. When a wired home Core
+  // is cloud-offline the PV / projected-low-SoC is computed from a degraded basis;
+  // the card shows a calm "Forecast basis: N of M home Cores reporting" caveat when
+  // homeDpusCoveragePartial is true. Optional for back-compat with older servers.
+  homeDpusConnected?: number;
+  homeDpusReporting?: number;
+  homeDpusCoveragePartial?: boolean;
 }
 
 export type DegradeStatus = 'projecting' | 'stable' | 'learning' | 'no-data';

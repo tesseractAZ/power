@@ -1,12 +1,19 @@
 /**
  * v0.12.0 — Backup-pool state-of-charge (SoC) audible alarm.
  *
- * Fires an escalating audible announcement each time the SHP2 backup pool SoC
- * crosses DOWN through a threshold: 50 / 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %, with
- * the alarm PRIORITY rising as the reserve gets lower (Low → Medium → High →
- * Critical). One announcement per downward crossing — not once per tick — with
+ * Fires an escalating audible announcement when the SHP2 backup pool SoC crosses
+ * DOWN through a threshold: 50 / 40 / 30 / 20 / 15 / 10 / 8 / 4 / 2 %, with the alarm
+ * PRIORITY rising as the reserve gets lower (Low → Medium → High → Critical),
  * hysteresis so a value hovering on a boundary doesn't chatter, and persisted
  * state so a restart doesn't re-announce thresholds already crossed.
+ *
+ * v0.75.0 — at most ONE announcement per tick: if a single update crosses several
+ * bands at once (a long-offline source returning at a low SoC, or a fast discharge
+ * spanning bands in one ~60s poll), only the MOST-SEVERE band crossed is announced.
+ * onCross still fires for EVERY crossed band (with isPrimary=true only on the worst)
+ * so the consumer's per-band bookkeeping — notably index.ts's grid-downgrade
+ * re-escalation map — stays complete; only the audible announce collapses. A normal
+ * gradual discharge (one band per tick) is unchanged.
  *
  * This is a DEDICATED audible path (it calls broadcast.announce directly)
  * rather than riding the normal alert→condition→broadcast pipeline, because
@@ -163,8 +170,17 @@ export interface BatterySocAlarm {
 }
 
 export interface BatterySocAlarmOptions {
-  /** Invoked once per downward threshold crossing. */
-  onCross: (t: SocThreshold) => void;
+  /**
+   * Invoked once per band crossed in a tick. `isPrimary` is true ONLY for the
+   * most-severe band crossed this tick (the lowest pct = highest priority). The
+   * consumer should ANNOUNCE only when `isPrimary` is true — this collapses a
+   * same-tick multi-band crossing (a long-offline reconnect at low SoC, or a fast
+   * discharge) to a single audible alarm — but should apply any PER-BAND
+   * bookkeeping (e.g. the grid-downgrade re-escalation record in index.ts) on
+   * EVERY call, so a later grid drop can still re-escalate every band the pool
+   * crossed. Collapsing the announce must never collapse the bookkeeping.
+   */
+  onCross: (t: SocThreshold, isPrimary: boolean) => void;
   /** Override the persistence path (tests). */
   statePath?: string;
   /** Optional logger. */
@@ -252,30 +268,57 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
         return;
       }
 
-      let fired = false;
+      // v0.75.0 — gather ALL newly-crossed armed thresholds this tick (and any
+      // re-arms), then announce ONCE for the MOST-SEVERE band crossed instead of
+      // laddering a separate announcement per band. A long-offline source that
+      // returns at a low SoC (the SHP2 reconnecting at 17% laddered 50/40/30/20 in
+      // one tick on 2026-06-29) — or a genuine fast discharge spanning several
+      // bands in a single ~60s poll — used to fire every band. The operator needs
+      // the worst (most actionable) band, not a replay of bands already passed;
+      // the on-screen alert (activeSocBand) shows the current band independently.
+      // This NEVER suppresses a real alarm: the most-severe crossed band is always
+      // announced, and a gradual discharge (one band per tick) is unchanged — only
+      // multi-band SAME-TICK crossings collapse from N announcements to one.
+      const crossed: SocThreshold[] = [];
+      let rearmed = false;
       for (const t of BATTERY_SOC_THRESHOLDS) {
         const isArmed = armed.get(t.pct) ?? true;
         if (isArmed && soc <= t.pct) {
-          // Downward crossing.
-          armed.set(t.pct, false);
-          fired = true;
-          log(`battery-soc-alarm: crossed ${t.pct}% (${t.priority}) — SoC ${soc.toFixed(1)}%`);
-          try {
-            opts.onCross(t);
-          } catch (e: any) {
-            log(`battery-soc-alarm: onCross error: ${e?.message ?? e}`);
-          }
+          armed.set(t.pct, false); // disarm every band we crossed this tick
+          crossed.push(t);
         } else if (!isArmed && soc >= t.pct + REARM_MARGIN_PCT) {
           // Recovered above the threshold (+hysteresis) → re-arm for next time.
           armed.set(t.pct, true);
-          fired = true;
+          rearmed = true;
+        }
+      }
+      if (crossed.length > 0) {
+        // BATTERY_SOC_THRESHOLDS descends by pct, so the LAST crossed entry is the
+        // lowest pct = highest priority = the most-severe band (the one to announce).
+        const worstIdx = crossed.length - 1;
+        const worst = crossed[worstIdx];
+        const collapsed =
+          crossed.length > 1
+            ? ` [collapsed ${crossed.length} same-tick crossings: ${crossed.map((c) => `${c.pct}%(${c.priority})`).join('/')} → announce ${worst.pct}%(${worst.priority})]`
+            : '';
+        log(`battery-soc-alarm: crossed ${worst.pct}% (${worst.priority}) — SoC ${soc.toFixed(1)}%${collapsed}`);
+        // Notify the consumer of EVERY crossed band (so per-band state like the
+        // grid-downgrade re-escalation map stays complete), flagging only the
+        // most-severe as the one to ANNOUNCE. Collapsing the audible ladder must
+        // not drop the per-band bookkeeping the consumer needs.
+        for (let i = 0; i < crossed.length; i++) {
+          try {
+            opts.onCross(crossed[i], i === worstIdx);
+          } catch (e: any) {
+            log(`battery-soc-alarm: onCross error: ${e?.message ?? e}`);
+          }
         }
       }
       lastSoc = soc;
       lastSocAtMs = nowMs;
       // Persist on a crossing/re-arm, or on the throttle so the on-disk baseline stays fresh
       // enough that the plausibility guard survives a quick restart.
-      if (fired || lastPersistAtMs == null || nowMs - lastPersistAtMs >= BASELINE_PERSIST_THROTTLE_MS) {
+      if (crossed.length > 0 || rearmed || lastPersistAtMs == null || nowMs - lastPersistAtMs >= BASELINE_PERSIST_THROTTLE_MS) {
         persist();
       }
     },
