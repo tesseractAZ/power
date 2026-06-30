@@ -1740,6 +1740,11 @@ ghiPersistTick.unref();
 // cert fetch, so this only fires on a longer outage.)
 let stopMqtt: (() => void) | null = null;
 const MQTT_RETRY_MS = [10_000, 30_000, 60_000, 120_000, 300_000];
+// v0.75.0 — number of initial retry attempts during which a DNS/signature failure
+// is a benign boot-window transient (logged at warn, not error). Covers the
+// 10+30+60+120+300s backoff ≈ first ~9 min; a failure still recurring after that
+// is genuinely persistent and escalates back to error so it stands out.
+const MQTT_BOOT_GRACE_ATTEMPTS = Number(process.env.MQTT_BOOT_GRACE_ATTEMPTS ?? 5);
 const startMqttWithRetry = async (attempt = 0): Promise<void> => {
   if (stopMqtt) return; // already connected (or a prior attempt won the race)
   try {
@@ -1748,7 +1753,21 @@ const startMqttWithRetry = async (attempt = 0): Promise<void> => {
     if (attempt > 0) app.log.info(`mqtt: connected after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`);
   } catch (e: any) {
     const delay = MQTT_RETRY_MS[Math.min(attempt, MQTT_RETRY_MS.length - 1)];
-    app.log.error(`mqtt: start failed (REST polling continues): ${e?.message ?? e} — retry in ${delay / 1000}s`);
+    const msg = e?.message ?? String(e);
+    // v0.75.0 — the first few boot-window failures are almost always a DNS race:
+    // the Pi's resolver isn't up yet, so api-a.ecoflow.com fails to resolve
+    // (EAI_AGAIN / ENOTFOUND) and the EcoFlow signature handshake then reports
+    // 8521 "signature is wrong". These self-heal within ~10 min on the backoff and
+    // REST polling (the alarm data path) never stops — so log them at WARN, not
+    // ERROR, so a genuinely PERSISTENT auth/signature failure (still failing past
+    // the boot window) stands out instead of being buried under benign boot
+    // artifacts. After MQTT_BOOT_GRACE_ATTEMPTS the failure escalates back to error.
+    const transientBoot =
+      attempt < MQTT_BOOT_GRACE_ATTEMPTS &&
+      /EAI_AGAIN|ENOTFOUND|getaddrinfo|8521|signature is wrong/i.test(msg);
+    const line = `mqtt: start failed (REST polling continues): ${msg} — retry in ${delay / 1000}s${transientBoot ? ' (boot-window transient)' : ''}`;
+    if (transientBoot) app.log.warn(line);
+    else app.log.error(line);
     setTimeout(() => { void startMqttWithRetry(attempt + 1); }, delay).unref();
   }
 };
@@ -1846,15 +1865,26 @@ let socGridForTick = liveGridBackstop({});
 // (fail-silent). We re-escalate it from the tick below.
 const socDowngraded = new Map<number, AlarmPriority>();
 const batterySocAlarm = createBatterySocAlarm({
-  onCross: (t) => {
+  onCross: (t, isPrimary) => {
     // Grid-aware: when the grid is backstopping the home, a low pool is a
     // non-event (the SHP2 transfers to mains at the floor), so the emergency
     // tiers (high/critical — the ≤10% bands) collapse to a low advisory. Off-grid
     // (the safe default) keeps the original priority.
     const priority = downgradePriorityForGrid(t.priority, socGridForTick.backstopping);
     const onGrid = priority !== t.priority;
+    // Record/clear the grid-downgrade re-escalation state for EVERY crossed band —
+    // primary or not — so a later grid drop re-escalates every band the pool is
+    // still in. v0.75.0 collapses only the ANNOUNCE (below), never this bookkeeping;
+    // recording only the worst band would let a grid drop fail-silent on the higher
+    // emergency bands after a partial recovery above the worst one.
     if (onGrid) socDowngraded.set(t.pct, t.priority);
     else socDowngraded.delete(t.pct);
+    // v0.75.0 — only the most-severe band of a same-tick multi-band crossing
+    // announces, so a reconnect-at-low-SoC (or fast discharge) produces ONE audible
+    // alarm rather than laddering 50/40/30/20. The on-screen alert (activeSocBand)
+    // shows the current band independently, and the per-band socDowngraded record
+    // above is unaffected, so nothing is suppressed — only the audio is de-duped.
+    if (!isPrimary) return;
     if (!isPriorityEnabled(priority)) return;          // honour the Alert Settings annunciation toggles
     const message = onGrid
       ? `Advisory. Backup pool at ${t.pct} percent — drawing from grid power, no action needed.`

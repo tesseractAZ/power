@@ -175,8 +175,10 @@ export class SnapshotStore extends EventEmitter {
       } else if (existing == null) {
         this.logger(`device-list: ${deviceAliases[d.sn] ?? d.deviceName ?? d.sn} (${d.sn}) first sight, ${newOnline ? 'online' : 'offline'}`);
       }
-      // Local alias wins; then the API name; then the raw serial.
-      const name = deviceAliases[d.sn] ?? d.deviceName ?? d.sn;
+      // Local alias wins; else resolve a real display name from the cloud
+      // deviceName, falling back to the product type when the cloud name is just
+      // the bare serial (v0.75.0 — resolveDeviceName), then the raw serial.
+      const name = deviceAliases[d.sn] ?? resolveDeviceName(d.deviceName, d.productName, d.sn);
       this.snap.devices[d.sn] = {
         sn: d.sn,
         deviceName: name,
@@ -275,6 +277,28 @@ export class SnapshotStore extends EventEmitter {
     this.snap.generatedAt = Date.now();
     this.emit('change', this.snap, sn);
   }
+}
+
+/**
+ * v0.75.0 — resolve a human-readable display name for a device. EcoFlow's
+ * `/device/list` returns `deviceName === sn` when the owner never set a friendly
+ * name, so the raw serial leaks into the UI and the recurring "<SN> is flagged
+ * offline" info-alert (live example: KT21ZAH4HG160047, deviceName == its SN,
+ * productName == "WAVE 2"). Conservatively override ONLY when the cloud name is
+ * missing or is exactly the SN: prefer the cloud `deviceName` (a real name), then
+ * the `productName`, then fall back to the SN. Trim before comparing so a padded
+ * name still reads as "real". Pure + side-effect-free for unit testing.
+ */
+export function resolveDeviceName(
+  deviceName: string | null | undefined,
+  productName: string | null | undefined,
+  sn: string,
+): string {
+  const name = (deviceName ?? '').trim();
+  if (name !== '' && name !== sn.trim()) return name;
+  const product = (productName ?? '').trim();
+  if (product !== '') return product;
+  return sn;
 }
 
 function guessProductFromName(name: string): string {

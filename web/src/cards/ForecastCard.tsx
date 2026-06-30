@@ -55,6 +55,13 @@ export const ForecastCard = memo(function ForecastCard() {
               {fc.hasWeather ? 'cloud-aware' : 'history only'}
             </span>
           )}
+          {/* v0.75.0 — calm caveat when a wired home Core is cloud-offline: the
+              day-ahead PV / projected-low-SoC is computed from a degraded basis. */}
+          {fc && fc.homeDpusCoveragePartial && fc.homeDpusConnected != null && (
+            <span className="badge badge-warn normal-case tracking-normal">
+              Forecast basis: {fc.homeDpusReporting ?? 0} of {fc.homeDpusConnected} home Cores reporting
+            </span>
+          )}
           {fc && <span>{fc.historyDays.toFixed(1)} days of history</span>}
         </span>
       </div>
