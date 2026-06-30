@@ -319,6 +319,15 @@ export function computeAlerts(
         // A designated bench spare offline is expected, not a warning, and is
         // marked non-annunciating so it never chimes/pushes/raises the condition.
         severity: spare ? 'info' : isCore || isPanel ? 'warning' : 'info',
+        // v0.76.0 — explicit ISA priority so a connectivity wedge no longer maps to
+        // High/P2 ("a protective hardware limit has been crossed"), which inflated a
+        // known, non-actionable cloud-offline to the same tier as a real hardware
+        // breach and masked genuine P2s. The SHP2/Panel offline stays High (it is the
+        // alarm DATA SOURCE — losing it degrades the floor/SoC alarm inputs); a home
+        // Core offline is Medium/P3 (the SHP2 aggregate still covers the backup pool —
+        // it needs attention, e.g. a network power-cycle, but isn't an emergency); a
+        // peripheral offline is Low/P4. Spares stay non-annunciating regardless.
+        priority: spare ? 'low' : isPanel ? 'high' : isCore ? 'medium' : 'low',
         category: 'Connectivity',
         device: d.deviceName,
         title: spare ? 'Bench spare offline (expected)' : 'Device offline (per EcoFlow Cloud)',

@@ -7014,6 +7014,9 @@ export function resetHaStateShortLivedCaches(): void {
  * (no v0.9.11 cold window) and no single cycle re-walks all of them. */
 export function resetClippingCache(): void { clippingCache = null; }
 export function resetRteCache(): void { rteCache = null; }
+// v0.76.0 — pack-risk cache reset seam (the 30-min riskCache had no reset export,
+// forcing pack-risk tests into a single call; this lets them drive multiple inputs).
+export function resetRiskCache(): void { riskCache = null; }
 export function resetTariffCache(): void { tariffCache = null; }
 // v0.10.4 — IR cache is a single module global NOT keyed by the device fleet
 // (fine in prod where the fleet is constant, but tests with distinct fixtures

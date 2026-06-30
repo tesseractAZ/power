@@ -87,7 +87,9 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs } from './batterySocAlarm.js';
 import { createRunwayAlarm } from './runwayAlarm.js';
-import { liveGridBackstop, gridPresenceEntityId, downgradePriorityForGrid } from './gridState.js';
+import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
+import { socGridCrossDecision, reEscalateGridDrop } from './socGridDispatch.js';
+import { classifyMqttStartFailure } from './mqttStartClassify.js';
 import {
   hasReachabilityConfig,
   deviceReachabilityEntities,
@@ -1762,9 +1764,8 @@ const startMqttWithRetry = async (attempt = 0): Promise<void> => {
     // ERROR, so a genuinely PERSISTENT auth/signature failure (still failing past
     // the boot window) stands out instead of being buried under benign boot
     // artifacts. After MQTT_BOOT_GRACE_ATTEMPTS the failure escalates back to error.
-    const transientBoot =
-      attempt < MQTT_BOOT_GRACE_ATTEMPTS &&
-      /EAI_AGAIN|ENOTFOUND|getaddrinfo|8521|signature is wrong/i.test(msg);
+    // v0.76.0 — level selection extracted to the pure, tested classifyMqttStartFailure().
+    const transientBoot = classifyMqttStartFailure(attempt, msg, MQTT_BOOT_GRACE_ATTEMPTS) === 'warn';
     const line = `mqtt: start failed (REST polling continues): ${msg} — retry in ${delay / 1000}s${transientBoot ? ' (boot-window transient)' : ''}`;
     if (transientBoot) app.log.warn(line);
     else app.log.error(line);
@@ -1870,8 +1871,9 @@ const batterySocAlarm = createBatterySocAlarm({
     // non-event (the SHP2 transfers to mains at the floor), so the emergency
     // tiers (high/critical — the ≤10% bands) collapse to a low advisory. Off-grid
     // (the safe default) keeps the original priority.
-    const priority = downgradePriorityForGrid(t.priority, socGridForTick.backstopping);
-    const onGrid = priority !== t.priority;
+    // v0.76.0 — grid-aware downgrade decision extracted to the pure, tested
+    // socGridCrossDecision() (was inline downgradePriorityForGrid + comparison).
+    const { priority, onGrid } = socGridCrossDecision(t, socGridForTick.backstopping);
     // Record/clear the grid-downgrade re-escalation state for EVERY crossed band —
     // primary or not — so a later grid drop re-escalates every band the pool is
     // still in. v0.75.0 collapses only the ANNOUNCE (below), never this bookkeeping;
@@ -1925,19 +1927,12 @@ store.on('change', (snap: FleetSnapshot) => {
     // So this re-escalation self-heals on the ~60s REST cadence even under a
     // TOTAL MQTT stall — the poll loop is the de facto timer that closes the
     // grid-drop window; it does not depend on fresh SHP2 MQTT telemetry.
-    if (soc != null && socDowngraded.size > 0) {
-      for (const [pct, truePriority] of [...socDowngraded]) {
-        if (soc > pct) {
-          socDowngraded.delete(pct); // climbed back out of the band
-          continue;
-        }
-        if (!socGridForTick.backstopping) {
-          socDowngraded.delete(pct);
-          if (isPriorityEnabled(truePriority)) {
-            void broadcast.announce(truePriority, socAlarmMessage({ pct, priority: truePriority }), socAlarmMessageEs({ pct, priority: truePriority }));
-          }
-        }
-      }
+    // v0.76.0 — the grid-drop re-escalation pass is now the pure, tested
+    // reEscalateGridDrop() (mutates socDowngraded + returns the bands to announce),
+    // so the exact v0.75.0-regressed path is exercised by a test driving the REAL
+    // function instead of a hand-copied mirror.
+    for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, socGridForTick.backstopping, isPriorityEnabled)) {
+      void broadcast.announce(priority, socAlarmMessage({ pct, priority }), socAlarmMessageEs({ pct, priority }));
     }
   })();
 });

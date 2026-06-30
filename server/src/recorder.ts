@@ -17,6 +17,11 @@ const MIN_INTERVAL_MS = 10_000;   // never record same metric more than once / 1
 const MAX_INTERVAL_MS = 300_000;  // heartbeat: record at least every 5 min even if unchanged
 const VALUE_EPSILON = 0.5;        // ignore wiggle smaller than this (watts/percent)
 
+// v0.76.0 — gate the routine per-minute sample-count heartbeat to debug. Set
+// LOG_LEVEL=debug (or trace) to restore the line; errors/gaps/anomalies are
+// unaffected (they log at their own levels regardless).
+const RECORDER_DEBUG = /^(debug|trace)$/i.test(config.logLevel);
+
 /**
  * v0.30.0 — a persisted record of a telemetry blackout: a stretch where the
  * recorder wrote NO home-device samples for far longer than the heartbeat,
@@ -388,7 +393,11 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     recordedSamplesPeak = Math.max(recordedSamplesPeak, written);
     const tickNowMs = Date.now();
     if (tickNowMs - lastSampleLogAt >= 60_000) {
-      if (recordedSamplesSinceTick > 0) {
+      // v0.76.0 — this once-per-minute heartbeat carries no signal in steady
+      // state (it fires whenever ANY sample lands, ~7687 lines over 52h). Demote
+      // routine activity to debug; an actual telemetry GAP / record failure /
+      // BMS anomaly is logged separately above & below and keeps its own level.
+      if (recordedSamplesSinceTick > 0 && RECORDER_DEBUG) {
         log(`recorder: ${recordedSamplesSinceTick} samples in last ${Math.round((tickNowMs - lastSampleLogAt) / 1000)}s (peak burst ${recordedSamplesPeak})`);
       }
       recordedSamplesSinceTick = 0;

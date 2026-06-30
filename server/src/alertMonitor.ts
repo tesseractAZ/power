@@ -155,6 +155,36 @@ export function notifyDebounceMsFor(alert: Pick<Alert, 'id' | 'source'>): number
   return isSustainGatedLoadAnomaly(alert) ? BASELINE_LOAD_SUSTAIN_MS : DEBOUNCE_MS;
 }
 
+/** v0.76.0 — the rising-edge notify decision, extracted as a PURE function so the
+ *  highest-stakes alarm-dispatch branch (quiet-hours queue vs immediate push vs
+ *  suppress, plus escalation re-notify and the critical-breaks-quiet rule) is
+ *  directly unit-testable instead of being buried in the `evaluate` closure.
+ *  Returns:
+ *   - 'dispatch' → push now (caller marks notified + persists),
+ *   - 'queue'    → hold for the morning digest (caller sets the in-memory queued
+ *                  flag but must NOT persist, so a restart re-queues it),
+ *   - 'none'     → not eligible this tick.
+ *  An alert is eligible if it hasn't already been notified AND isn't already
+ *  queued, OR if it has ESCALATED above the severity it was last dispatched at
+ *  (escalation re-notifies even after a prior push). Eligibility additionally
+ *  requires the debounce to have elapsed and the severity to qualify. A qualifying
+ *  alert in the quiet window queues unless it is a critical and criticals are
+ *  configured to break through. */
+export type AlertDispatchAction = 'dispatch' | 'queue' | 'none';
+export function decideAlertDispatch(p: {
+  qualifies: boolean;
+  alreadyNotified: boolean;
+  alreadyQueued: boolean;
+  escalated: boolean;
+  debounceElapsed: boolean;
+  inQuiet: boolean;
+  breaksThrough: boolean;
+}): AlertDispatchAction {
+  const eligible = (!p.alreadyNotified && !p.alreadyQueued) || p.escalated;
+  if (!eligible || !p.debounceElapsed || !p.qualifies) return 'none';
+  return p.inQuiet && !p.breaksThrough ? 'queue' : 'dispatch';
+}
+
 // v0.13.2 — clear-duration thresholds hoisted to module scope so the
 // classification is a single pure function shared by recordClear and tests.
 const SHORT_CLEAR_MS = 10 * 60 * 1000;            // resolved within 10 min = transient
@@ -192,6 +222,14 @@ interface TrackedAlert {
    *  mid-anomaly doesn't emit a premature "Resolved:". Reset to undefined if
    *  the alert reappears before the dwell elapses. */
   clearedSince?: number;
+  /** v0.76.0 — true while this alert is sitting in the in-memory quiet-hours
+   *  digest queue but has NOT yet been dispatched/persisted. Lets the rising-edge
+   *  gate avoid re-queueing it every tick, while deliberately NOT being persisted:
+   *  a restart before the 08:00 digest leaves persistedNotified WITHOUT this id,
+   *  so the alert is re-evaluated and re-queued rather than silently dropped (the
+   *  in-memory quietQueue does not survive a restart). Cleared once the alert is
+   *  actually dispatched or the digest sends. */
+  queued?: boolean;
 }
 
 /** A historical record of an alert that was raised and later cleared. */
@@ -328,6 +366,22 @@ const sevRank = SEVERITY_ORDER;
 
 function qualifies(sev: Severity, min: Severity): boolean {
   return sevRank[sev] <= sevRank[min];
+}
+
+/** v0.76.0 — has this alert ESCALATED above the severity it was last ACTED ON
+ *  (dispatched OR queued for the digest)? Pure + exported so the escalation-while-
+ *  queued path — a held warning that becomes critical during quiet hours, which the
+ *  restart-drop fix's deferred `notified` would otherwise hide — is unit-testable.
+ *  An alert never acted on (notifiedSeverity undefined) cannot escalate. */
+export function isAlertEscalation(
+  prev: { notified: boolean; queued?: boolean; notifiedSeverity?: Severity },
+  severity: Severity,
+): boolean {
+  return (
+    (prev.notified || prev.queued === true) &&
+    prev.notifiedSeverity != null &&
+    sevRank[severity] < sevRank[prev.notifiedSeverity]
+  );
 }
 
 /** Parse "22-06" into [22, 6]; "" / invalid → null (feature off). Exported for tests. */
@@ -768,6 +822,21 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       });
       sentSinceStart++;
       log(`notify: morning digest sent (${quietQueue.length} alerts) via ${cfg.channel}`);
+      // v0.76.0 — the held alerts have now ACTUALLY been delivered, so mark them
+      // notified + persisted (deferred from queue-time so a pre-digest restart
+      // couldn't silently drop them). Keyed by id; the tracked entry may already
+      // have cleared, in which case the persisted record alone prevents a re-push.
+      const digestSentMs = Date.now();
+      for (const qa of quietQueue) {
+        const qt = tracked.get(qa.id);
+        if (qt) {
+          qt.notified = true;
+          qt.notifiedSeverity = qa.severity;
+          qt.queued = false;
+        }
+        persistedNotified.set(qa.id, digestSentMs);
+      }
+      persistNotified();
       quietQueue.length = 0;
     } catch (e: any) {
       log(`notify: morning digest failed — ${e?.message ?? e}`);
@@ -968,34 +1037,55 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // the `notified` flag swallows the upgrade and the push channel stays
       // silent on a genuine emergency. Escalation bypasses debounce (like a fresh
       // critical) so the upgrade is immediate.
-      const escalated =
-        existing.notified &&
-        existing.notifiedSeverity != null &&
-        sevRank[a.severity] < sevRank[existing.notifiedSeverity];
+      // v0.76.0 — a QUEUED alert (left notified=false by the restart-drop fix) must
+      // ALSO be re-evaluated when it escalates, or a warning that becomes critical
+      // while held in quiet hours would be stuck at its original tier — and, under
+      // CRITICAL_BREAKS_QUIET_HOURS=true, a genuine overnight critical would never
+      // break through. notifiedSeverity is recorded at BOTH dispatch and queue time,
+      // so isAlertEscalation() (pure, tested) sees the queued severity too.
+      const escalated = isAlertEscalation(existing, a.severity);
       const escDebounceMs = escalated && a.severity === 'critical' ? 0 : debounceMs;
-      if (
-        (!existing.notified || escalated) &&
-        now - existing.firstSeen >= escDebounceMs &&
-        qualifies(a.severity, cfg.minSeverity)
-      ) {
+      // Quiet hours: warning/info is always queued for the morning digest.
+      // v0.23.0 — critical breaks through ONLY when CRITICAL_BREAKS_QUIET_HOURS
+      // is opted in; default OFF ⇒ critical is also queued (surfaces at the
+      // digest, still visible on-screen meanwhile) so nights stay quiet.
+      const quiet = QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW);
+      const breaksThrough = a.severity === 'critical' && CRITICAL_BREAKS_QUIET;
+      // v0.76.0 — decision extracted to the pure decideAlertDispatch() (tested).
+      const action = decideAlertDispatch({
+        qualifies: qualifies(a.severity, cfg.minSeverity),
+        alreadyNotified: existing.notified,
+        alreadyQueued: existing.queued === true,
+        escalated,
+        debounceElapsed: now - existing.firstSeen >= escDebounceMs,
+        inQuiet: quiet,
+        breaksThrough,
+      });
+      if (action === 'queue') {
+        // v0.76.0 — hold for the morning digest. Set ONLY the in-memory `queued`
+        // flag (prevents re-queueing every tick); deliberately do NOT mark
+        // notified or persist, so a restart before the digest re-evaluates and
+        // re-queues this alert rather than silently dropping it (the in-memory
+        // quietQueue does NOT survive a restart, but persistedNotified does — so
+        // marking notified at queue-time, as the pre-v0.76 code did, let the daily
+        // clock-jump restart permanently swallow a held overnight alert). The
+        // digest marks it notified + persisted when it actually sends.
+        existing.queued = true;
+        // v0.76.0 — record the severity we queued AT (but NOT `notified`, and NOT
+        // persisted) so a later escalation of a held alert is detected (the escalated
+        // check above reads notifiedSeverity). notified stays false so a restart still
+        // re-queues; persistedNotified stays absent so the restart-drop fix holds.
+        existing.notifiedSeverity = a.severity;
+        quietQueue.push(a);
+        log(`notify: queued for morning digest — "${a.title}" (severity ${a.severity})`);
+      } else if (action === 'dispatch') {
         existing.notified = true;
         existing.notifiedSeverity = a.severity;
-        // v0.15.21 — record the push durably so a restart can't repeat it
-        // (queued-for-digest counts: the digest path will deliver it once).
+        existing.queued = false;
+        // v0.15.21 — record the push durably so a restart can't repeat it.
         persistedNotified.set(a.id, now);
         persistNotified();
-        // Quiet hours: warning/info is always queued for the morning digest.
-        // v0.23.0 — critical breaks through ONLY when CRITICAL_BREAKS_QUIET_HOURS
-        // is opted in; default OFF ⇒ critical is also queued (surfaces at the
-        // 07:00 digest, still visible on-screen meanwhile) so nights stay quiet.
-        const quiet = QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW);
-        const breaksThrough = a.severity === 'critical' && CRITICAL_BREAKS_QUIET;
-        if (quiet && !breaksThrough) {
-          quietQueue.push(a);
-          log(`notify: queued for morning digest — "${a.title}" (severity ${a.severity})`);
-        } else {
-          await dispatch(a, 'new');
-        }
+        await dispatch(a, 'new');
       }
     }
 

@@ -3,6 +3,18 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.76.0 — 2026-06-30
+
+**[Fixed/Tested] Log-review hardening bundle** — from a 10-lens multi-agent review of ~52h of add-on + HA host/core/supervisor logs + live state (28 confirmed findings), adversarially reviewed (verdict: alarm-safe; the one must-fix it found was fixed + tested). The operator chose to keep overnight quiet-hours silence, so the focus is durability + correctness of the existing channels, not changing alarm policy.
+
+**Alarm-path fixes (adversarially reviewed):**
+- **A quiet-hours-queued alert no longer silently drops across a restart.** It used to be marked notified+persisted at *queue* time, but the in-memory digest queue doesn't survive a restart — so the host's daily clock-jump reboot could permanently swallow a held overnight alert. Now notified+persist is **deferred until the alert actually dispatches or the digest sends**, with an in-memory `queued` flag preventing re-queue churn; a restart re-evaluates and re-queues instead of dropping. An escalation of a held alert (warning→critical) is still detected (`notifiedSeverity` is recorded at queue time), so a genuine overnight critical still breaks through under `CRITICAL_BREAKS_QUIET_HOURS=true`.
+- **Offline/Connectivity alerts no longer annunciate as "protective hardware limit crossed" (P2).** A home-Core cloud-wedge is now Medium/P3 (the SHP2 aggregate still covers the backup pool); the SHP2/Panel offline stays High (it *is* the alarm data source); peripherals Low. Stops a known, non-actionable wedge from masking genuine P2s. (Push still fires by default — severity is unchanged.)
+
+**[Tested] Test-robustness backfill (the priority ask):** extracted the previously-untested alarm-dispatch decision (`decideAlertDispatch`), the escalation check (`isAlertEscalation`), the SoC grid-drop re-escalation (`socGridDispatch.ts` — the v0.75 regression test now drives the **real** functions, not a hand-copied mirror), the MQTT boot-grace classifier (`classifyMqttStartFailure`), and the alarm-priority MQTT switch-command logic into pure, exported, unit-tested functions. Added positive-path clipping tests, pack-risk characterization tests, a log-coalescer test, repairIssues tests, and a `resetRiskCache` seam. Suite **954 → 1009 (+55)**.
+
+**[Changed] Hygiene:** ~72% of the add-on log was unconditional heartbeat — poll-ok / recorder-sample lines are now debug-gated (kept on failure→recovery or high latency), and MQTT reconnect storms are coalesced (`logCoalesce.ts`); MQTT boot-window DNS/8521 failures already log at warn (v0.75). repairIssues peripheral-offline severity aligned with the alert engine (info, was warning) + soiling card threshold 15→12 to match the alert. `tsc` clean (server + web).
+
 ## 0.75.0 — 2026-06-29
 
 **[Fixed] Hygiene bundle from the 2–3 day deep dive** (18-agent review; system verdict *degraded-not-broken* — these are the actionable cleanups it surfaced, none safety-critical). Four fixes, two-phase adversarially reviewed:

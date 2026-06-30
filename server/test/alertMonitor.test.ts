@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseQuietHours, inQuietWindow, buildIncidents } from '../src/alertMonitor.js';
+import { parseQuietHours, inQuietWindow, buildIncidents, decideAlertDispatch, isAlertEscalation } from '../src/alertMonitor.js';
 import type { Alert } from '../src/alerts.js';
 
 test('parseQuietHours — accepts "22-06" → [22, 6]', () => {
@@ -159,6 +159,93 @@ test('notify-state — corrupt or missing files seed fresh, never throw', () => 
   const path2 = tmpState();
   writeFileSync(path2, JSON.stringify({ weird: 'not-a-number' }));
   assert.equal(loadNotifiedState(path2).size, 0);
+});
+
+/* ── v0.76.0 — the rising-edge dispatch decision (quiet-queue vs push vs none) ── */
+
+const D = {
+  qualifies: true, alreadyNotified: false, alreadyQueued: false, escalated: false,
+  debounceElapsed: true, inQuiet: false, breaksThrough: false,
+};
+
+test('decideAlertDispatch — fresh qualifying alert outside quiet hours → dispatch', () => {
+  assert.equal(decideAlertDispatch({ ...D }), 'dispatch');
+});
+
+test('decideAlertDispatch — fresh qualifying alert IN quiet hours (no break-through) → queue', () => {
+  assert.equal(decideAlertDispatch({ ...D, inQuiet: true }), 'queue');
+});
+
+test('decideAlertDispatch — critical in quiet hours WITH break-through → dispatch', () => {
+  assert.equal(decideAlertDispatch({ ...D, inQuiet: true, breaksThrough: true }), 'dispatch');
+});
+
+test('decideAlertDispatch — already notified, not escalated → none (no re-push)', () => {
+  assert.equal(decideAlertDispatch({ ...D, alreadyNotified: true }), 'none');
+});
+
+test('decideAlertDispatch — already queued, not escalated → none (no re-queue every tick)', () => {
+  assert.equal(decideAlertDispatch({ ...D, alreadyQueued: true }), 'none');
+});
+
+test('decideAlertDispatch — ESCALATED re-notifies even after a prior push (outside quiet → dispatch)', () => {
+  assert.equal(decideAlertDispatch({ ...D, alreadyNotified: true, escalated: true }), 'dispatch');
+});
+
+test('decideAlertDispatch — escalated but in quiet hours (no break-through) → queue', () => {
+  assert.equal(decideAlertDispatch({ ...D, alreadyNotified: true, escalated: true, inQuiet: true }), 'queue');
+});
+
+test('decideAlertDispatch — not yet debounced → none', () => {
+  assert.equal(decideAlertDispatch({ ...D, debounceElapsed: false }), 'none');
+});
+
+test('decideAlertDispatch — does not qualify (below min severity) → none', () => {
+  assert.equal(decideAlertDispatch({ ...D, qualifies: false }), 'none');
+});
+
+test('decideAlertDispatch — a queued alert that later ESCALATES is still eligible (escalated overrides alreadyQueued)', () => {
+  // The restart-drop fix sets `alreadyQueued` instead of `alreadyNotified` for a
+  // held alert; escalation must still be able to re-evaluate it.
+  assert.equal(decideAlertDispatch({ ...D, alreadyQueued: true, escalated: true, inQuiet: true }), 'queue');
+  assert.equal(decideAlertDispatch({ ...D, alreadyQueued: true, escalated: true, inQuiet: false }), 'dispatch');
+});
+
+/* ── v0.76.0 — escalation detection incl. the queued path (the review must-fix) ── */
+
+test('isAlertEscalation — a DISPATCHED warning escalating to critical is an escalation', () => {
+  assert.equal(isAlertEscalation({ notified: true, notifiedSeverity: 'warning' }, 'critical'), true);
+});
+
+test('isAlertEscalation — a QUEUED warning escalating to critical IS detected (the restart-drop must-fix)', () => {
+  // Before the fix, a queued alert had notified=false / notifiedSeverity=undefined, so an
+  // escalation while held in quiet hours was invisible — under CRITICAL_BREAKS_QUIET_HOURS=true
+  // a real overnight critical would never break through. notifiedSeverity is now recorded at
+  // queue time, so escalation fires for a held alert too.
+  assert.equal(isAlertEscalation({ notified: false, queued: true, notifiedSeverity: 'warning' }, 'critical'), true);
+});
+
+test('isAlertEscalation — a queued alert at the SAME severity is not an escalation', () => {
+  assert.equal(isAlertEscalation({ notified: false, queued: true, notifiedSeverity: 'warning' }, 'warning'), false);
+});
+
+test('isAlertEscalation — a fresh alert never acted on (no notifiedSeverity) cannot escalate', () => {
+  assert.equal(isAlertEscalation({ notified: false, queued: false }, 'critical'), false);
+  assert.equal(isAlertEscalation({ notified: false }, 'critical'), false);
+});
+
+test('isAlertEscalation — a DE-escalation (critical → warning) is not an escalation', () => {
+  assert.equal(isAlertEscalation({ notified: true, notifiedSeverity: 'critical' }, 'warning'), false);
+});
+
+test('isAlertEscalation — end-to-end with decideAlertDispatch: a queued warning→critical re-queues (quiet) / dispatches (break-through)', () => {
+  // The integration the review flagged as previously unreachable: queued + escalated.
+  const prev = { notified: false, queued: true, notifiedSeverity: 'warning' as const };
+  const escalated = isAlertEscalation(prev, 'critical');
+  assert.equal(escalated, true);
+  const base = { qualifies: true, alreadyNotified: false, alreadyQueued: true, escalated, debounceElapsed: true };
+  assert.equal(decideAlertDispatch({ ...base, inQuiet: true, breaksThrough: false }), 'queue'); // re-queue at critical
+  assert.equal(decideAlertDispatch({ ...base, inQuiet: true, breaksThrough: true }), 'dispatch'); // breaks through
 });
 
 test.after(() => {

@@ -6,6 +6,7 @@ import { ecoflow, type MqttCertification } from './rest.js'; // v0.10.4 — type
 import { SnapshotStore } from '../snapshot.js';
 import { config } from '../config.js';
 import { translateDpuMqtt } from './mqttTranslate.js';
+import { makeLogCoalescer } from '../logCoalesce.js';
 
 /**
  * EcoFlow IoT Open MQTT subscriber.
@@ -126,7 +127,16 @@ export async function startMqtt(store: SnapshotStore, log: (msg: string) => void
     });
   };
 
+  // v0.76.0 — coalesce the reconnect/error/close storm. A DNS brownout drives
+  // the client into a tight loop where these three lines repeat in lockstep
+  // (one 66-min EAI_AGAIN incident logged 514 duplicate lines). Keep the FIRST
+  // occurrence of each distinct line at its original level/format; suppress
+  // identical repeats and roll them up periodically. `connect` flushes the
+  // pending summary so recovery is a clean, greppable transition.
+  const stormLog = makeLogCoalescer(log);
+
   client.on('connect', () => {
+    stormLog.flush(); // emit any suppressed reconnect/error tail before the recovery line
     log('mqtt: connected');
     for (const sn of Object.keys(store.get().devices)) subscribeForSn(sn);
   });
@@ -136,9 +146,9 @@ export async function startMqtt(store: SnapshotStore, log: (msg: string) => void
     for (const sn of Object.keys(store.get().devices)) subscribeForSn(sn);
   });
 
-  client.on('reconnect', () => log('mqtt: reconnecting'));
-  client.on('close', () => log('mqtt: connection closed'));
-  client.on('error', (e) => log(`mqtt: error ${e.message}`));
+  client.on('reconnect', () => stormLog.log('mqtt: reconnecting'));
+  client.on('close', () => stormLog.log('mqtt: connection closed'));
+  client.on('error', (e) => stormLog.log(`mqtt: error ${e.message}`));
 
   client.on('message', (topic, payload) => {
     // topic format: /open/{username}/{sn}/{kind}
