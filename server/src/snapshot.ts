@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
+import { config } from './config.js';
 
 /** Local SN→name overrides from device-aliases.json (optional file). */
 function loadDeviceAliases(): Record<string, string> {
@@ -353,9 +354,19 @@ function flattenInto(input: unknown, prefix: string, out: Record<string, unknown
   out[prefix] = input;
 }
 
+// v0.76.0 — the per-tick "poll ok" line fired unconditionally every poll
+// (~5541 lines over 52h, the single largest INFO source). It carries no signal
+// in steady state: an operator only cares that polling RECOVERED after a
+// failure, or that a poll ran slow. Routine successes are demoted to debug
+// (visible only at LOG_LEVEL=debug/trace); the recovery and slow-poll lines
+// stay at INFO so a grep during an incident still surfaces them.
+const POLL_DEBUG = /^(debug|trace)$/i.test(config.logLevel);
+const SLOW_POLL_MS = 5_000;
+
 export function startPollLoop(store: SnapshotStore, intervalMs: number, log: (msg: string) => void): () => void {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
+  let lastPollFailed = false; // track failure→ok recovery for the one INFO line that matters
   // Wire the per-SN state-transition logger into the store on first poll.
   store.setLogger(log);
   const tick = async () => {
@@ -363,9 +374,18 @@ export function startPollLoop(store: SnapshotStore, intervalMs: number, log: (ms
     const t0 = Date.now();
     try {
       await refreshAll(store);
-      log(`poll ok in ${Date.now() - t0}ms`);
+      const tookMs = Date.now() - t0;
+      if (lastPollFailed) {
+        log(`poll ok in ${tookMs}ms (recovered)`);   // failure→ok transition: keep at INFO
+      } else if (tookMs >= SLOW_POLL_MS) {
+        log(`poll ok in ${tookMs}ms (slow)`);         // latency anomaly: keep at INFO
+      } else if (POLL_DEBUG) {
+        log(`poll ok in ${tookMs}ms`);                // routine success: debug-gated
+      }
+      lastPollFailed = false;
     } catch (e: any) {
       log(`poll failed: ${e?.message ?? e}`);
+      lastPollFailed = true;
     }
     if (!stopped) timer = setTimeout(tick, intervalMs);
   };

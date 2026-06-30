@@ -12,7 +12,8 @@ import {
   socAlertSeverity,
   type SocThreshold,
 } from '../src/batterySocAlarm.js';
-import { downgradePriorityForGrid } from '../src/gridState.js';
+import { socGridCrossDecision, reEscalateGridDrop } from '../src/socGridDispatch.js';
+import type { AlarmPriority } from '../src/alertPriority.js';
 
 // v0.12.0 — Unit tests for the backup-pool SoC audible alarm. Each test uses a
 // UNIQUE tmp statePath so the persisted armed-map / lastSoc never leaks between
@@ -302,28 +303,28 @@ test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands
   // starved socDowngraded of the non-worst bands (the bug), the grid drop would be silent here.
   const sp = join(tmpdir(), `soc-reesc-${process.pid}-${Date.now()}-${seq++}.json`);
   tmpPaths.push(sp);
-  const announced: { pct: number; priority: string }[] = [];
-  const socDowngraded = new Map<number, string>();
+  const announced: { pct: number; priority: AlarmPriority }[] = [];
+  const socDowngraded = new Map<number, AlarmPriority>();
   let backstopping = true; // grid present
+  // v0.76.0 — drives the REAL extracted dispatch functions (socGridCrossDecision +
+  // reEscalateGridDrop) instead of a hand-copied mirror, so this regression can no
+  // longer pass while index.ts's actual logic drifts. The only thing reproduced
+  // here is index.ts's tiny onCross consumer glue (record every band, announce
+  // only the primary) — the grid-downgrade decision and the re-escalation pass are
+  // the production functions verbatim.
   const a = createBatterySocAlarm({
     statePath: sp,
     onCross: (t, isPrimary) => {
-      // Mirror of index.ts onCross: record the grid-downgrade map for EVERY band, announce only primary.
-      const priority = downgradePriorityForGrid(t.priority, backstopping);
-      const onGrid = priority !== t.priority;
+      const { priority, onGrid } = socGridCrossDecision(t, backstopping);
       if (onGrid) socDowngraded.set(t.pct, t.priority);
       else socDowngraded.delete(t.pct);
       if (!isPrimary) return;
       announced.push({ pct: t.pct, priority });
     },
   });
-  // Mirror of index.ts re-escalation: climb-out clears bands SoC rose above; a grid drop re-announces
-  // every still-active downgraded band at its TRUE priority.
   const reEscalate = (soc: number) => {
-    if (socDowngraded.size === 0) return;
-    for (const [pct, truePriority] of [...socDowngraded]) {
-      if (soc > pct) { socDowngraded.delete(pct); continue; }
-      if (!backstopping) { socDowngraded.delete(pct); announced.push({ pct, priority: truePriority }); }
+    for (const band of reEscalateGridDrop(socDowngraded, soc, backstopping, () => true)) {
+      announced.push(band);
     }
   };
 

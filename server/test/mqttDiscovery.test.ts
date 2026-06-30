@@ -9,7 +9,12 @@ import {
   legacyUniqueIdsFor,
   MQTT_DISCOVERY_DEDUP_VERSION,
   planCircuitDiscovery,
+  commandTopicToPriority,
+  parseAlertSwitchCommand,
+  alertSwitchCommandTopic,
+  alertSwitchStateTopic,
 } from '../src/mqttDiscovery.js';
+import { ALARM_PRIORITY_ORDER } from '../src/alertPriority.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -324,4 +329,97 @@ test('mqtt-discovery: grid_import (DPU ac_in) is demoted to a diagnostic sub-met
   assert.ok(acIn, 'grid_import (ac_in) lifetime sensor must exist');
   assert.equal(acIn!.entity_category, 'diagnostic', 'ac_in is a charging subset, not whole-home grid — must be diagnostic so it is not mistaken for grid consumption');
   assert.match(acIn!.value_template, /grid_import_lifetime_kwh/);
+});
+
+/**
+ * v0.76.0 — alarm-priority MQTT switch-command parse (`commandTopicToPriority`
+ * + `parseAlertSwitchCommand`).
+ *
+ * This is the alarm-safety-relevant path: when HA toggles a per-priority switch
+ * ON, the add-on must RE-ENABLE that ISA priority's annunciation. The logic used
+ * to be inlined inside the un-exported startMqttDiscovery closure with no test;
+ * a regression in topic-parse or ON/OFF mapping could silently fail to un-mute a
+ * priority. These tests pin the pure decision the runtime handler now delegates
+ * to (the handler calls parseAlertSwitchCommand and no-ops on null).
+ *
+ * Note: parseAlertSwitchCommand is intentionally side-effect-free — it does NOT
+ * call updateAlertSettings. The runtime only invokes updateAlertSettings when
+ * this returns non-null, so "no-op" cases below (unknown topic, bad payload,
+ * state-topic echo) prove the runtime never mutates settings for them.
+ */
+
+test('mqtt switch: command topic resolves to the correct priority for each of critical/high/medium/low', () => {
+  for (const p of ALARM_PRIORITY_ORDER) {
+    assert.equal(
+      commandTopicToPriority(alertSwitchCommandTopic(p)),
+      p,
+      `${p} command topic must resolve back to ${p}`,
+    );
+  }
+  // All four priorities are covered (no missing/extra mapping).
+  assert.deepEqual([...ALARM_PRIORITY_ORDER], ['critical', 'high', 'medium', 'low']);
+});
+
+test('mqtt switch: each command topic uses the exact wire string HA publishes to', () => {
+  assert.equal(commandTopicToPriority('ecoflow_panel/alerts/critical/set'), 'critical');
+  assert.equal(commandTopicToPriority('ecoflow_panel/alerts/high/set'), 'high');
+  assert.equal(commandTopicToPriority('ecoflow_panel/alerts/medium/set'), 'medium');
+  assert.equal(commandTopicToPriority('ecoflow_panel/alerts/low/set'), 'low');
+});
+
+test('mqtt switch: ON re-enables and OFF mutes — for every priority', () => {
+  for (const p of ALARM_PRIORITY_ORDER) {
+    const topic = alertSwitchCommandTopic(p);
+    assert.deepEqual(parseAlertSwitchCommand(topic, 'ON'), { priority: p, enabled: true });
+    assert.deepEqual(parseAlertSwitchCommand(topic, 'OFF'), { priority: p, enabled: false });
+  }
+});
+
+test('mqtt switch: payload parsing trims whitespace and is case-insensitive (re-enable must be robust)', () => {
+  const topic = alertSwitchCommandTopic('critical');
+  // lowercase
+  assert.deepEqual(parseAlertSwitchCommand(topic, 'on'), { priority: 'critical', enabled: true });
+  assert.deepEqual(parseAlertSwitchCommand(topic, 'off'), { priority: 'critical', enabled: false });
+  // mixed case
+  assert.deepEqual(parseAlertSwitchCommand(topic, 'On'), { priority: 'critical', enabled: true });
+  // surrounding whitespace + newline (retained payloads sometimes carry a trailing \n)
+  assert.deepEqual(parseAlertSwitchCommand(topic, '  ON  '), { priority: 'critical', enabled: true });
+  assert.deepEqual(parseAlertSwitchCommand(topic, '\tOFF\n'), { priority: 'critical', enabled: false });
+});
+
+test('mqtt switch: unknown payload is a safe no-op (never guesses a default that could silence an alarm)', () => {
+  const topic = alertSwitchCommandTopic('critical');
+  for (const bad of ['', ' ', 'TRUE', '1', 'enable', 'ONOFF', 'O N', 'toggle']) {
+    assert.equal(parseAlertSwitchCommand(topic, bad), null, `payload ${JSON.stringify(bad)} must be a no-op`);
+  }
+});
+
+test('mqtt switch: unrelated/unknown topic is a no-op (does NOT resolve a priority)', () => {
+  for (const topic of [
+    'ecoflow_panel/state',
+    'ecoflow_panel/availability',
+    'homeassistant/sensor/ecoflow_pv_lifetime_kwh/config',
+    'ecoflow_panel/alerts/critical', // missing /set suffix
+    'ecoflow_panel/alerts/bogus/set', // not a real priority
+    'totally/unrelated/topic',
+    '',
+  ]) {
+    assert.equal(commandTopicToPriority(topic), undefined, `${topic} must not resolve a priority`);
+    // …and even with a valid ON payload, the parse is null → runtime no-op.
+    assert.equal(parseAlertSwitchCommand(topic, 'ON'), null, `${topic} + ON must be a no-op`);
+  }
+});
+
+test('mqtt switch: the STATE-topic echo never feeds back into a command (no feedback loop)', () => {
+  // The runtime echoes the resolved state to alertSwitchStateTopic(p). If that
+  // echo were ever re-ingested by the command handler it would loop. Pin that a
+  // state topic resolves to NO priority and parses to null even with ON/OFF.
+  for (const p of ALARM_PRIORITY_ORDER) {
+    const stateTopic = alertSwitchStateTopic(p);
+    // sanity: state and command topics are distinct strings
+    assert.notEqual(stateTopic, alertSwitchCommandTopic(p));
+    assert.equal(commandTopicToPriority(stateTopic), undefined, `${stateTopic} (state) must not be a command topic`);
+    assert.equal(parseAlertSwitchCommand(stateTopic, 'ON'), null);
+    assert.equal(parseAlertSwitchCommand(stateTopic, 'OFF'), null);
+  }
 });

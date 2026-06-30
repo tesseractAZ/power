@@ -80,6 +80,22 @@ function persistFirstSeen(): void {
 // v0.16.4 — the spare-SN allowlist now lives in shp2Membership.ts as the single
 // source of truth (shared with the connectivity-alert cloud-offline gate in alerts.ts).
 
+// v0.76.0 — peripheral-vs-core/SHP2 classification, mirrored from alerts.ts so the
+// repair card's severity matches the alert engine's for the SAME offline event.
+// alerts.ts (offline branch, ~line 321) derives offline severity as:
+//     spare ? 'info' : isCore || isPanel ? 'warning' : 'info'
+// where  isCore  = productName includes 'delta pro ultra'  (a battery Core/DPU)
+//        isPanel = productName includes 'smart home panel'  (the SHP2)
+// So Cores + the SHP2 are 'warning'; every other (peripheral) unit — the Smart
+// Generator, WAVE 2, EVSE, etc. — is 'info'. This is a deliberately DUPLICATED
+// predicate (not an import from alerts.ts) to avoid cross-file coupling while
+// alerts.ts is being edited in parallel; keep it in sync with the SOURCE OF TRUTH
+// in alerts.ts. The split is product-name based, exactly as alerts.ts does it.
+function isCoreOrShp2(productName: string): boolean {
+  const p = productName.toLowerCase();
+  return p.includes('delta pro ultra') || p.includes('smart home panel');
+}
+
 function track(id: string, now: number): number {
   let ts = firstSeenById.get(id);
   if (ts == null) {
@@ -109,9 +125,15 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
       // v0.10.4 — skip intentionally-offline bench spares (Core4, Core5).
       if (SPARE_DPU_SNS.has(d.sn)) continue;
       const id = `cloud-offline-${d.sn}`;
+      // v0.76.0 — severity must match the alert engine for the SAME offline event:
+      // Cores + the SHP2 are 'warning'; peripherals (Smart Generator, WAVE 2, EVSE)
+      // are 'info'. Previously this was hard-coded 'warning' for every device, so a
+      // peripheral got a 'warning' repair card while alerts.ts classified it 'info'
+      // — same event, two severities. Source of truth: alerts.ts offline branch.
+      const offlineSeverity: RepairSeverity = isCoreOrShp2(d.productName) ? 'warning' : 'info';
       out.push({
         id,
-        severity: 'warning',
+        severity: offlineSeverity,
         title: `${d.deviceName} marked offline by EcoFlow`,
         summary: `${d.deviceName} (${d.sn}) is flagged offline by EcoFlow Cloud — it has lost its cloud (enhanced) connection. If the device still shows online on your router, a network/MQTT session reconnect or a power-cycle clears it.`,
         fixSteps: [
@@ -130,8 +152,14 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
 
   // Soiling above wash threshold.
   if (ctx.soiling) {
+    // v0.76.0 — align the repair-card threshold to the soiling ALERT threshold so a
+    // 12–15% soiling drop no longer produces an alert with no actionable repair card.
+    // Source of truth: the soiling alert in analytics.ts (~line 1498) fires at
+    // `dropPct >= 12` (with cleanDays >= 6). Was 15 here — too high — leaving the
+    // 12–15% band alerted-but-uncardable. Keep the `>= 6` clean-days gate aligned too.
+    const SOILING_CARD_DROP_PCT = 12; // mirror analytics.ts soiling alert threshold
     const perDpu = ctx.soiling.perDevice.filter(
-      (d) => d.dropPct != null && d.dropPct >= 15 && d.cleanDays >= 6,
+      (d) => d.dropPct != null && d.dropPct >= SOILING_CARD_DROP_PCT && d.cleanDays >= 6,
     );
     if (perDpu.length > 0) {
       const id = 'wash-panels';

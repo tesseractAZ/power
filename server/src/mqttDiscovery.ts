@@ -83,10 +83,53 @@ const EXPIRE_AFTER_S = 120;
 // dedicated state + command topic under the same `ecoflow_panel` base prefix
 // the other entities use. The switch object/unique id is `ecoflow_alerts_<p>`.
 const alertSwitchUniqueId = (p: AlarmPriority) => `ecoflow_alerts_${p}`;
-const alertSwitchStateTopic = (p: AlarmPriority) => `ecoflow_panel/alerts/${p}/state`;
-const alertSwitchCommandTopic = (p: AlarmPriority) => `ecoflow_panel/alerts/${p}/set`;
+export const alertSwitchStateTopic = (p: AlarmPriority) => `ecoflow_panel/alerts/${p}/state`;
+export const alertSwitchCommandTopic = (p: AlarmPriority) => `ecoflow_panel/alerts/${p}/set`;
 const SWITCH_ON = 'ON';
 const SWITCH_OFF = 'OFF';
+
+// v0.76.0 — pure, testable extraction of the alarm-priority MQTT switch-command
+// logic that was previously inlined in the startMqttDiscovery closure. This is
+// the alarm-safety-relevant path: an incoming HA switch ON/OFF must map to the
+// correct ISA priority and enable/disable flag so a muted alarm priority can be
+// reliably RE-ENABLED. Kept side-effect-free so the runtime handler (which calls
+// updateAlertSettings + publishes the echo) and the tests share one code path.
+
+/**
+ * Resolve an MQTT command topic back to the ISA priority it controls.
+ * Returns undefined for any topic that is not a per-priority command topic
+ * (e.g. the STATE-topic echo, or an unrelated subscription) — the caller
+ * treats undefined as a no-op, so this never feeds the state echo back into a
+ * command (no feedback loop).
+ */
+export function commandTopicToPriority(topic: string): AlarmPriority | undefined {
+  for (const p of ALARM_PRIORITY_ORDER) {
+    if (alertSwitchCommandTopic(p) === topic) return p;
+  }
+  return undefined;
+}
+
+/** Result of parsing an alarm-switch command: which priority and whether to enable it. */
+export interface AlertSwitchCommand {
+  priority: AlarmPriority;
+  enabled: boolean;
+}
+
+/**
+ * Pure parse of an incoming switch command (topic + raw payload) into the
+ * priority/enabled pair the runtime feeds to updateAlertSettings. Returns null
+ * for a no-op:
+ *   • topic is not a per-priority command topic, OR
+ *   • payload (after trim + upper-case) is neither ON nor OFF (unknown payload
+ *     is a safe no-op — we never guess a default that could silence an alarm).
+ */
+export function parseAlertSwitchCommand(topic: string, payloadRaw: string): AlertSwitchCommand | null {
+  const priority = commandTopicToPriority(topic);
+  if (!priority) return null;
+  const payload = payloadRaw.trim().toUpperCase();
+  if (payload !== SWITCH_ON && payload !== SWITCH_OFF) return null;
+  return { priority, enabled: payload === SWITCH_ON };
+}
 
 export interface SensorConfig {
   unique_id: string;
@@ -702,22 +745,16 @@ export async function startMqttDiscovery(
     }
   };
 
-  // v0.11.0 — fast lookup from a switch command topic back to its priority,
-  // so the message handler can map an incoming ON/OFF to the right setting.
-  const commandTopicToPriority = new Map<string, AlarmPriority>(
-    ALARM_PRIORITY_ORDER.map((p) => [alertSwitchCommandTopic(p), p]),
-  );
-
   // v0.11.0 — HA toggled a switch: apply it to alertSettings (source 'mqtt'),
   // then echo the resolved state back to that switch's STATE topic. We publish
   // to the STATE topic (not the COMMAND topic) so this never re-triggers the
-  // command handler — no feedback loop.
+  // command handler — no feedback loop. Topic→priority + ON/OFF parsing is the
+  // pure parseAlertSwitchCommand helper above (v0.76.0); any non-command topic
+  // or unknown payload returns null and is a no-op here.
   const handleSwitchCommand = (topic: string, payloadRaw: string) => {
-    const p = commandTopicToPriority.get(topic);
-    if (!p) return;
-    const payload = payloadRaw.trim().toUpperCase();
-    if (payload !== SWITCH_ON && payload !== SWITCH_OFF) return;
-    const enabled = payload === SWITCH_ON;
+    const cmd = parseAlertSwitchCommand(topic, payloadRaw);
+    if (!cmd) return;
+    const { priority: p, enabled } = cmd;
     // updateAlertSettings notifies onAlertSettingsChange listeners (incl. the
     // one below) which republishes ALL switch states — but publishing to the
     // retained STATE topic here too keeps this priority's toggle snappy.
