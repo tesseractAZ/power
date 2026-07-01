@@ -1216,8 +1216,13 @@ app.get('/api/ha-state', async (req, reply) => {
     backup_discharge_minutes: fleetBatteryNet < -50 ? null : (shp2?.projection.backupDischargeTimeMin ?? null),
 
     // Forecast (cached ~30min)
-    forecast_pv_next_24h_kwh: Math.round(fc.forecastPvWhNext24 / 100) / 10,
-    typical_pv_per_day_kwh: Math.round(fc.typicalPvWhPerDay / 100) / 10,
+    // v0.78.0 — publish the RESTORED display basis (all SHP2-connected Cores, wedged
+    // included) so the tile shows true full-fleet PV rather than deflating to the
+    // reporting Cores while a home Core is cloud-wedged. The alarm-facing basis stays
+    // reporting-only (see getDayForecast + the computeRunway invariant). `?? …` keeps
+    // pre-v0.78 cached forecast shapes working (Display == reporting there).
+    forecast_pv_next_24h_kwh: Math.round((fc.forecastPvWhNext24Display ?? fc.forecastPvWhNext24) / 100) / 10,
+    typical_pv_per_day_kwh: Math.round((fc.typicalPvWhPerDayDisplay ?? fc.typicalPvWhPerDay) / 100) / 10,
     projected_low_soc_percent: fc.minProjectedSoc,
     projected_low_soc_at: fc.minProjectedSocTs,
     forecast_history_days: fc.historyDays,

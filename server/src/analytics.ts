@@ -761,6 +761,24 @@ export interface DayForecast {
   homeDpusConnected: number;
   homeDpusReporting: number;
   homeDpusCoveragePartial: boolean;
+  // v0.78.0 — RESTORED display-only PV basis. When a wired home Core is cloud-wedged
+  // it drops out of the LIVE device map, so the alarm-facing fields above
+  // (forecastPvWhNext24 / typicalPvWhPerDay / typicalPvCurveWhPerHour / solarModel /
+  // hours[].forecastPvW) collapse to the reporting cores' PV — deflating the DISPLAY
+  // tiles to ~1 of 3 Cores. These parallel *Display fields sum each SHP2-CONNECTED SN's
+  // OWN recorder history (all 3 authoritative home Cores, present or wedged) so the
+  // dashboard shows the true full-fleet PV. They NEVER feed the runway alarm: computeRunway
+  // reads ONLY hours[].forecastPvW (the conservative reporting-only series), which is left
+  // untouched. `restoredSolarModel` carries the restored fleet fit so computeClipping can
+  // publish a full-fleet arrayPeak / observedW without disturbing the alarm's solarModel.
+  // Anti-fabrication: built by SUMMING real recorded values by SN only — never scaled,
+  // multiplied, or extrapolated. A connected SN with no recorder history contributes 0. When
+  // the connected set equals the live-present set (all Cores reporting) or the SHP2 is
+  // absent (empty connected set), these equal the reporting-basis fields exactly.
+  forecastPvWhNext24Display: number;
+  typicalPvWhPerDayDisplay: number;
+  typicalPvCurveWhPerHourDisplay?: number[];
+  restoredSolarModel: SolarResponseModel;
 }
 
 const FORECAST_DAY_TTL_MS = 30 * 60 * 1000;
@@ -1121,6 +1139,34 @@ export function isForecastNightHour(clockHour: number): boolean {
   return clockHour >= FORECAST_NIGHT_START_HOUR || clockHour <= FORECAST_NIGHT_END_HOUR;
 }
 
+/**
+ * v0.78.0 — the single per-hour PV projection, extracted VERBATIM from
+ * getDayForecast's main loop so the alarm-facing series and the restored
+ * display-basis 24 h PV sum use byte-identical math. Given the hour's learned
+ * response, forecast GHI + cloud, the fallback typical-day curve value, and the
+ * historical clearness, returns the projected PV watts and whether it was
+ * equipment-modelled. Pure — no I/O.
+ */
+function forecastHourPvW(
+  resp: HourResponse,
+  ghi: number | null,
+  cloud: number | null,
+  fallbackCurveW: number,
+  clearnessHist: number,
+): { pv: number; modelled: boolean } {
+  if (resp.coeff != null && ghi != null) {
+    // Equipment-tuned: learned response × forecast sunlight, capped at observed peak.
+    const hourCeil = resp.observedMaxPvW * 1.05;
+    return { pv: Math.min(resp.coeff * ghi, hourCeil), modelled: true };
+  }
+  // Fallback: typical-day curve × cloud derate.
+  const pv =
+    cloud != null
+      ? fallbackCurveW * Math.max(0.1, Math.min(1.3, (1 - (0.75 * cloud) / 100) / clearnessHist))
+      : fallbackCurveW;
+  return { pv, modelled: false };
+}
+
 /** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min. */
 export async function getDayForecast(
   devices: Record<string, DeviceSnapshot>,
@@ -1178,6 +1224,24 @@ async function computeDayForecastUncached(
     const { curve, spanMs } = hourCurve(recorder, d.sn, 'pv_total', since, now);
     for (let h = 0; h < 24; h++) pvCurve[h] += curve[h];
     pvSpan = Math.max(pvSpan, spanMs);
+  }
+
+  // v0.78.0 — RESTORED display-basis PV curve. `pvCurve` above only sums home Cores
+  // that are LIVE-present in the device map, so a cloud-wedged Core (absent from the
+  // map but still an authoritative SHP2-connected source) silently deflates the
+  // display tiles to ~1 of 3 Cores. Start from a copy of the reporting curve and ADD
+  // each CONNECTED-but-ABSENT SN's OWN recorder pv_total history (anti-fabrication: a
+  // real recorded sum, read by SN; an absent Core with no recorder history adds 0).
+  // When the connected set equals the live-present set (all Cores reporting) OR the
+  // SHP2 is absent (empty connected set → isShp2Connected true for all, so every home
+  // DPU is already in homeDpus and there are no missing SNs), this equals pvCurve
+  // exactly — edge cases (a)+(b) are byte-identical. Never feeds the alarm.
+  const presentHomeSns = new Set(homeDpus.map((d) => d.sn));
+  const missingConnectedSns = [...connected].filter((sn) => !presentHomeSns.has(sn));
+  const restoredPvCurve = pvCurve.slice();
+  for (const sn of missingConnectedSns) {
+    const { curve } = hourCurve(recorder, sn, 'pv_total', since, now);
+    for (let h = 0; h < 24; h++) restoredPvCurve[h] += curve[h];
   }
   // v0.6.0 — separate weekday vs weekend load curves. EV charging,
   // dishwasher, laundry, and home-office HVAC duty all run on visibly
@@ -1257,6 +1321,22 @@ async function computeDayForecastUncached(
   }
   const solarModel = buildSolarResponse(fleetPvByEpoch, ghiByEpoch);
 
+  // v0.78.0 — RESTORED display-basis fleet solar model. `fleetPvByEpoch` above only
+  // sums LIVE-present home Cores (the loop iterates `dpus`), so a cloud-wedged Core
+  // is absent and the fleet model — and thus the pv_array_peak / clipping tiles that
+  // read solarModel.hourly[].observedMaxPvW — collapses to the reporting Cores. Add
+  // each CONNECTED-but-ABSENT SN's OWN recorded pv_total epochs onto a copy of the
+  // reporting map and refit (anti-fabrication: real recorded PV summed by SN only).
+  // `solarModel` (above) stays reporting-only and remains the ALARM-facing model that
+  // hours[].forecastPvW is built from; `restoredSolarModel` is display/clipping-only.
+  // With no missing SNs this refits an identical map → equals solarModel.
+  const restoredFleetPvByEpoch = new Map(fleetPvByEpoch);
+  for (const sn of missingConnectedSns) {
+    const pvE = pvHourlyByEpoch(recorder, sn, 'pv_total', since, now);
+    for (const [he, pv] of pvE) restoredFleetPvByEpoch.set(he, (restoredFleetPvByEpoch.get(he) ?? 0) + pv);
+  }
+  const restoredSolarModel = buildSolarResponse(restoredFleetPvByEpoch, ghiByEpoch);
+
   // Recent historical clearness — for the cloud-derate fallback only.
   let clearnessHist = 1;
   if (weather) {
@@ -1307,18 +1387,13 @@ async function computeDayForecastUncached(
     const ghi = wx ? wx.radiationWm2 : null;
     const resp = solarModel.hourly[clock];
 
-    let pv: number;
-    let modelled = false;
-    if (resp.coeff != null && ghi != null) {
-      // Equipment-tuned: learned response × forecast sunlight, capped at observed peak.
+    // v0.78.0 — via the shared forecastHourPvW helper (byte-identical to the
+    // former inline math). This is the ALARM-FACING PV series (reporting-only
+    // solarModel/pvCurve); computeRunway reads hours[].forecastPvW downstream.
+    const { pv, modelled } = forecastHourPvW(resp, ghi, cloud, pvCurve[clock], clearnessHist);
+    if (modelled) {
       const hourCeil = resp.observedMaxPvW * 1.05;
-      pv = Math.min(resp.coeff * ghi, hourCeil);
       if (hourCeil > pvCeilingW) pvCeilingW = hourCeil; // v0.14.1 — track clear-sky ceiling for P90 clamp
-      modelled = true;
-    } else {
-      // Fallback: typical-day curve × cloud derate.
-      const basePv = pvCurve[clock];
-      pv = cloud != null ? basePv * Math.max(0.1, Math.min(1.3, (1 - (0.75 * cloud) / 100) / clearnessHist)) : basePv;
     }
     // Day-of-week-aware load: pick weekday vs weekend curve for the projected
     // hour. Mon–Fri at 5pm looks nothing like Sat at 5pm in this house.
@@ -1362,6 +1437,24 @@ async function computeDayForecastUncached(
     });
   }
 
+  // v0.78.0 — RESTORED display-basis next-24h PV sum. Re-runs the SAME per-hour PV
+  // projection (forecastHourPvW) over the identical GHI/cloud/clearness inputs, but
+  // with the RESTORED solar model + typical curve (all SHP2-connected Cores, wedged
+  // included). This is what the display tiles publish; the alarm-facing pvSum above
+  // (built from the reporting-only series that computeRunway consumes) is untouched.
+  // When there are no missing SNs, restoredSolarModel/restoredPvCurve equal their
+  // reporting counterparts, so restoredPvSum === pvSum exactly.
+  let restoredPvSum = 0;
+  for (let k = 0; k < 24; k++) {
+    const ts = startHour + k * 3_600_000;
+    const clock = new Date(ts).getHours();
+    const wx = wxByHour.get(Math.floor(ts / 3_600_000)) ?? null;
+    const cloud = wx ? wx.cloudCoverPct : null;
+    const ghi = wx ? wx.radiationWm2 : null;
+    const { pv } = forecastHourPvW(restoredSolarModel.hourly[clock], ghi, cloud, restoredPvCurve[clock], clearnessHist);
+    restoredPvSum += pv;
+  }
+
   const value: DayForecast = {
     generatedAt: now,
     hasWeather,
@@ -1371,6 +1464,11 @@ async function computeDayForecastUncached(
     forecastPvWhNext24: Math.round(pvSum),
     typicalPvWhPerDay: Math.round(pvCurve.reduce((a, b) => a + b, 0)),
     typicalPvCurveWhPerHour: pvCurve.map((w) => Math.round(w)), // v0.13.1 — for diurnal backtest baseline
+    // v0.78.0 — restored display basis (all SHP2-connected Cores; see interface docs).
+    forecastPvWhNext24Display: Math.round(restoredPvSum),
+    typicalPvWhPerDayDisplay: Math.round(restoredPvCurve.reduce((a, b) => a + b, 0)),
+    typicalPvCurveWhPerHourDisplay: restoredPvCurve.map((w) => Math.round(w)),
+    restoredSolarModel,
     pvCeilingW: pvCeilingW > 0 ? Math.round(pvCeilingW) : undefined, // v0.14.1 — P90 clamp
     minProjectedSoc: minSoc == null ? null : Math.round(minSoc * 10) / 10,
     minProjectedSocTs: minSocTs,
@@ -2400,6 +2498,18 @@ export function computeRunway(
     loadAvgWatts = fallback;
   }
 
+  // ★★ ALARM-SAFETY INVARIANT (v0.78.0) — DO NOT VIOLATE. The runway depletion sim
+  // (hoursToReserve / hoursToEmpty → runwayAlarm.classifyRunway) MUST be driven by the
+  // CONSERVATIVE reporting-only PV series ONLY. pvByHour reads exclusively
+  // forecast.hours[h].forecastPvW, which getDayForecast builds from the reporting-only
+  // solarModel (live-present home Cores). The RESTORED, higher display basis added in
+  // v0.78.0 (forecast.forecastPvWhNext24Display / typicalPvWhPerDayDisplay /
+  // restoredSolarModel) exists SOLELY for the ha-state / MQTT display tiles. A higher PV
+  // input lengthens runway (fewer deficit hours ⇒ later/never reserve+empty crossings),
+  // so wiring any restored / estimated / scaled PV in here would UNDER-ALARM during a
+  // wedge — exactly the failure this split prevents. NEVER read a *Display field or
+  // restoredSolarModel below. See runwayPvBasisGuard.test.ts, which pins that computeRunway
+  // is byte-identical before/after the display restore and monotonic in forecastPvW.
   const pvByHour: number[] = [];
   const loadByHour: number[] = [];
   if (forecast) {
@@ -4437,6 +4547,27 @@ export function computeSelfConsumption(
       batteryDischargeKwh += (wh.get(`pack${pk.num}_out`) ?? 0) / 1000;
     }
   }
+  // v0.78.0 — RESTORE the display basis for the KPIs. The loop above integrates only
+  // LIVE-present home Cores, so a cloud-wedged Core (absent from the device map but still
+  // an authoritative SHP2-connected source) silently deflates pvKwh → solarFraction /
+  // directUseRatio. Add each CONNECTED-but-ABSENT SN's OWN recorded window integral. A
+  // wedged Core isn't in `devices`, so we can't read d.projection.packs for its pack list;
+  // instead enumerate the pack{N}_in/out metrics that ACTUALLY EXIST in the recorder for
+  // that SN via listMetrics — the anti-fabrication safety valve (real recorded metrics
+  // only; an SN with no history contributes 0 and adds nothing). Order-independent sums.
+  const presentHomeSns = new Set(homeDpus.map((d) => d.sn));
+  const missingConnectedSns = [...connected].filter((sn) => !presentHomeSns.has(sn));
+  for (const sn of missingConnectedSns) {
+    const recorded = recorder.listMetrics(sn);
+    const packInMetrics = recorded.filter((m) => /^pack\d+_in$/.test(m));
+    const packOutMetrics = recorded.filter((m) => /^pack\d+_out$/.test(m));
+    const metricsNeeded = ['pv_total', 'ac_in', ...packInMetrics, ...packOutMetrics];
+    const wh = windowedEnergyWh(recorder, sn, metricsNeeded, since, now, ANALYTICS_BUCKET_SEC, todayStart);
+    pvKwh += (wh.get('pv_total') ?? 0) / 1000;
+    gridImportKwh += (wh.get('ac_in') ?? 0) / 1000;
+    for (const m of packInMetrics) batteryChargeKwh += (wh.get(m) ?? 0) / 1000;
+    for (const m of packOutMetrics) batteryDischargeKwh += (wh.get(m) ?? 0) / 1000;
+  }
   const shp2Wh = shp2
     ? windowedEnergyWh(recorder, shp2.sn, ['panel_load', 'grid_home_w'], since, now, ANALYTICS_BUCKET_SEC, todayStart)
     : new Map<string, number>();
@@ -4915,9 +5046,23 @@ export async function computeClipping(
   // `arrayPeakW` ceiling derived from the now-also-filtered solar model.
   const connected = shp2ConnectedDpuSns(devices);
   const homeDpus = homeConnectedDpus(dpus, connected);
-  if (homeDpus.length === 0) return empty();
+  // v0.78.0 — RESTORE the display basis. Clipping is a display KPI ("did the home
+  // array hit its inverter ceiling today?"), so it reads the SAME restored basis as the
+  // forecast tiles: iterate ALL SHP2-connected SNs (live-present home Cores + any
+  // cloud-wedged Core that's absent from the device map but still an authoritative
+  // connected source), and use restoredSolarModel for the arrayPeak ceiling + per-hour
+  // model coeff. observedW/arrayPeak/modelW are read straight from each SN's OWN recorded
+  // pv_total — anti-fabrication: real recorded values summed by SN, never scaled. Old
+  // cached forecasts predating this field fall back to solarModel (== reporting basis).
+  const restoredModel = forecast.restoredSolarModel ?? forecast.solarModel;
+  const presentHomeSns = new Set(homeDpus.map((d) => d.sn));
+  const missingConnectedSns = [...connected].filter((sn) => !presentHomeSns.has(sn));
+  const clippingSns = [...homeDpus.map((d) => d.sn), ...missingConnectedSns];
+  // A wedge that hides EVERY home Core still leaves connected sources with recorder
+  // history — proceed on those. Only bail when there's genuinely nothing to read.
+  if (clippingSns.length === 0) return empty();
 
-  const arrayPeakW = Math.max(0, ...forecast.solarModel.hourly.map((h) => h.observedMaxPvW));
+  const arrayPeakW = Math.max(0, ...restoredModel.hourly.map((h) => h.observedMaxPvW));
   if (arrayPeakW <= 0) return empty();
 
   // Today's per-hour GHI lives in the weather cache (Open-Meteo returns the
@@ -4936,14 +5081,14 @@ export async function computeClipping(
   // the within-minute average, which matters more for accuracy than the
   // arithmetic mean of raw 10-second readings).
   const dpuPvByHour: Map<string, number[][]> = new Map(); // sn → 24 arrays of bucket values
-  for (const d of homeDpus) {
-    const pts = recorder.query(d.sn, 'pv_total', todayStart, now, 60);
+  for (const sn of clippingSns) {
+    const pts = recorder.query(sn, 'pv_total', todayStart, now, 60);
     const hourBuckets: number[][] = Array.from({ length: 24 }, () => []);
     for (const p of pts) {
       const h = Math.floor((p.ts - todayStart) / 3_600_000);
       if (h >= 0 && h < 24) hourBuckets[h].push(p.value);
     }
-    dpuPvByHour.set(d.sn, hourBuckets);
+    dpuPvByHour.set(sn, hourBuckets);
   }
 
   const perHour: ClippingHour[] = [];
@@ -4955,13 +5100,12 @@ export async function computeClipping(
     const hourEnd = Math.min(hourStart + 3_600_000, now);
     let observedW = 0;
     let totalPts = 0;
-    // v0.13.3 — iterate homeDpus, not dpus. dpuPvByHour is only populated for
-    // SHP2-connected DPUs (above), so a spare DPU's lookup already returned []
-    // and contributed nothing — but iterating dpus mis-stated the intent and
-    // would silently start summing a spare's PV the moment dpuPvByHour grew to
-    // cover it. Mirror the v0.9.76 spare-isolation scope explicitly.
-    for (const d of homeDpus) {
-      const bucket = dpuPvByHour.get(d.sn)?.[h] ?? [];
+    // v0.13.3 — iterate the SHP2-connected scope only (dpuPvByHour is populated
+    // exactly for clippingSns above), so a spare DPU's PV never inflates observedW.
+    // v0.78.0 — clippingSns = live-present home Cores + cloud-wedged connected Cores,
+    // so a wedge no longer deflates the observed fleet PV to the reporting Cores.
+    for (const sn of clippingSns) {
+      const bucket = dpuPvByHour.get(sn)?.[h] ?? [];
       if (bucket.length === 0) continue;
       observedW += bucket.reduce((s, x) => s + x, 0) / bucket.length;
       totalPts += bucket.length;
@@ -4969,7 +5113,7 @@ export async function computeClipping(
     if (totalPts === 0) continue;
     const wx = wxByHour.get(Math.floor(hourStart / 3_600_000));
     const hod = new Date(hourStart).getHours();
-    const resp = forecast.solarModel.hourly[hod];
+    const resp = restoredModel.hourly[hod];
     let modelW: number | null = null;
     if (wx && resp.coeff != null && wx.radiationWm2 > DAYLIGHT_GHI) {
       modelW = resp.coeff * wx.radiationWm2;

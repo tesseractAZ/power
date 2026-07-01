@@ -646,7 +646,8 @@ export async function startMqttDiscovery(
       backup_pool_percent: shp2?.projection.backupBatPercent ?? null,
       backup_remaining_kwh: kwh1(shp2?.projection.backupRemainWh),
       backup_full_capacity_kwh: kwh1(shp2?.projection.backupFullCapWh),
-      forecast_pv_next_24h_kwh: Math.round(fc.forecastPvWhNext24 / 100) / 10,
+      // v0.78.0 — RESTORED display basis, byte-identical to /api/ha-state (see index.ts).
+      forecast_pv_next_24h_kwh: Math.round((fc.forecastPvWhNext24Display ?? fc.forecastPvWhNext24) / 100) / 10,
       projected_low_soc_percent: fc.minProjectedSoc,
       forecast_structurally_incomplete: fc.structurallyIncomplete ?? false, // v0.77.0 — diagnostic basis flag
       soiling_drop_percent: fc.soiling?.dropPct ?? null,
