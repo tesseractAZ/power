@@ -56,13 +56,17 @@ function clampVol(n: unknown): number | null {
   return Math.max(0, Math.min(1, v));
 }
 
-/** Coerce an arbitrary parsed object into a valid config, filling gaps from defaults. */
+/** Coerce an arbitrary parsed object into a valid config, filling gaps from defaults.
+ *  Every field is re-normalized into a FRESH primitive (`=== true` for the boolean,
+ *  Number() for the numbers) so nothing request-derived flows verbatim into the
+ *  persisted JSON (CodeQL js/http-to-file-access) — the file only ever contains
+ *  values of this exact typed shape. */
 function sanitize(raw: any, source: string): BroadcastRuntimeConfig {
   const base = defaults();
   if (raw && typeof raw === 'object') {
-    if (typeof raw.enabled === 'boolean') base.enabled = raw.enabled;
+    if (typeof raw.enabled === 'boolean') base.enabled = raw.enabled === true;
     if (raw.volume != null) base.volume = clampVol(raw.volume);
-    if (typeof raw.updatedAt === 'number') base.updatedAt = raw.updatedAt;
+    if (typeof raw.updatedAt === 'number') base.updatedAt = Number(raw.updatedAt);
   }
   base.source = source;
   return base;
@@ -94,6 +98,8 @@ export function onBroadcastRuntimeConfigChange(fn: Listener): () => void {
 }
 
 function persist(c: BroadcastRuntimeConfig): void {
+  // PATH is a fixed constant (env override or a config-derived sibling of the
+  // DB) — never request-influenced; only the sanitize()-typed content varies.
   try { mkdirSync(dirname(PATH), { recursive: true }); } catch { /* best effort */ }
   const tmp = `${PATH}.tmp`;
   writeFileSync(tmp, JSON.stringify(c, null, 2));
@@ -111,7 +117,9 @@ export function updateBroadcastRuntimeConfig(
   source = 'web',
 ): BroadcastRuntimeConfig {
   const next = sanitize(getBroadcastRuntimeConfig(), source); // clone current
-  if ('enabled' in patch) next.enabled = typeof patch.enabled === 'boolean' ? patch.enabled : null;
+  // `=== true` re-normalizes the request-derived boolean into a fresh primitive
+  // (see sanitize) — behavior-identical for booleans, non-booleans clear to null.
+  if ('enabled' in patch) next.enabled = typeof patch.enabled === 'boolean' ? patch.enabled === true : null;
   if ('volume' in patch) next.volume = patch.volume == null ? null : clampVol(patch.volume);
   next.updatedAt = Date.now();
   next.source = source;

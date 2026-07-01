@@ -280,7 +280,7 @@ export function saveChime(buf: Buffer, originalName: string, nowMs = Date.now())
   const path = chimeFilePath(id);
   if (path == null) return { ok: false, error: 'internal: bad chime id' };
   const manifest = readManifest();
-  const existing = manifest[id] != null && existsSync(path);
+  const existing = Object.hasOwn(manifest, id) && existsSync(path);
   if (!existing && listChimes().length >= MAX_CHIME_COUNT) {
     return { ok: false, error: `library full (max ${MAX_CHIME_COUNT} tones) — delete one first` };
   }
@@ -312,12 +312,18 @@ export function saveChime(buf: Buffer, originalName: string, nowMs = Date.now())
 
 /** Delete a stored chime + its manifest entry. Returns true if anything removed. */
 export function deleteChime(id: string): boolean {
+  // The strict id gate comes FIRST: chimeFilePath() rejects anything that is
+  // not exactly 16 lowercase hex chars, so a hostile id ("__proto__",
+  // "constructor", "../../x") never reaches the file op OR the manifest
+  // property ops below (CodeQL js/remote-property-injection). The manifest is
+  // additionally a null-prototype object (readManifest), and Object.hasOwn
+  // only matches own entries — three independent layers.
   const path = chimeFilePath(id);
   if (path == null) return false; // malformed/traversal id — nothing to delete
   let removed = false;
   if (existsSync(path)) { try { rmSync(path); removed = true; } catch { /* ignore */ } }
   const manifest = readManifest();
-  if (manifest[id] != null) { delete manifest[id]; writeManifest(manifest); removed = true; }
+  if (Object.hasOwn(manifest, id)) { delete manifest[id]; writeManifest(manifest); removed = true; }
   return removed;
 }
 

@@ -5,7 +5,6 @@ import {
   mkdirSync,
   rmSync,
   writeFileSync,
-  existsSync,
   utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -106,7 +105,7 @@ function touchFile(path: string, mtimeMs: number) {
 /** Wipe both model files so each test starts from a known "no files" state. */
 function resetModelFiles() {
   for (const p of [MODEL_PATH, SHADOW_PATH]) {
-    if (existsSync(p)) rmSync(p, { force: true });
+    rmSync(p, { force: true }); // force → no-op when absent (no exists→rm race)
   }
 }
 
@@ -286,8 +285,9 @@ test('computePackRiskV2 — degraded gate pins trained score to heuristic per pa
   // the precision branch because it's the simplest way to force degraded
   // mode without seeding both MODEL_PATH and SHADOW_PATH.
   const outcomesPath = process.env.ALERT_OUTCOMES_PATH!;
-  // Wipe any prior content from earlier tests.
-  if (existsSync(outcomesPath)) rmSync(outcomesPath);
+  // Wipe any prior content from earlier tests. force → no-op when absent, so
+  // no exists→rm→write race (CodeQL js/file-system-race).
+  rmSync(outcomesPath, { force: true });
   const now = Date.now();
   const dismissEntries = [
     { ts: now, alertId: 'pack-hot-X-1', outcome: 'dismiss', source: {} },
@@ -390,7 +390,7 @@ test('computePackRiskV2 — v0.9.62: drift gate fires end-to-end via on-disk bas
   // Wipe alert outcomes so precision is null and ONLY the drift branch
   // can drive the degraded verdict — proves the drift path is live.
   const outcomesPath = process.env.ALERT_OUTCOMES_PATH!;
-  if (existsSync(outcomesPath)) rmSync(outcomesPath);
+  rmSync(outcomesPath, { force: true });
 
   const heuristic = [{
     sn: 'TESTSN2',

@@ -24,7 +24,7 @@
  * when `createAuth` is called.
  */
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 
@@ -114,11 +114,12 @@ export function loadOrCreateWriteToken(
 ): string {
   const envTok = process.env.PANEL_WRITE_TOKEN;
   if (envTok && envTok.length >= 16) return envTok;
+  // TOCTOU hardening (CodeQL js/file-system-race): read directly instead of
+  // exists→read→write — ENOENT lands in the same catch the old existsSync
+  // false-branch skipped to, so absent/unreadable/too-short all regenerate.
   try {
-    if (existsSync(writeTokenPath)) {
-      const t = readFileSync(writeTokenPath, 'utf8').trim();
-      if (t.length >= 16) return t;
-    }
+    const t = readFileSync(writeTokenPath, 'utf8').trim();
+    if (t.length >= 16) return t;
   } catch { /* fall through to regenerate */ }
   const fresh = randomUUID();
   try {

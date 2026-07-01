@@ -282,6 +282,28 @@ test('pruneRenderCache — removes files older than maxAge, keeps fresh', async 
   }
 });
 
+test('pruneRenderCache — v0.79.0 sweeps crash-orphaned .tmp files older than 1h, keeps fresh ones', async () => {
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-prune-tmp-'));
+  try {
+    // A crash orphan from an interrupted atomic write (unique random name),
+    // a FRESH temp that could belong to an in-flight render, and a bystander.
+    writeFileSync(resolve(cacheDir, 'dddddddddddddddd.wav.123.abcdefabcdef.tmp'), Buffer.alloc(10));
+    writeFileSync(resolve(cacheDir, 'eeeeeeeeeeeeeeee.wav.456.abcdefabcdef.tmp'), Buffer.alloc(10));
+    writeFileSync(resolve(cacheDir, 'not-audio.json'), '{}');
+    const { utimes } = await import('node:fs/promises');
+    const twoHoursAgo = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    await utimes(resolve(cacheDir, 'dddddddddddddddd.wav.123.abcdefabcdef.tmp'), twoHoursAgo, twoHoursAgo);
+    // maxAge for WAVs is 7 days, but .tmp files use min(maxAge, 1h).
+    const removed = await pruneRenderCache(cacheDir, 7 * 24 * 60 * 60 * 1000, () => {});
+    assert.equal(removed, 1, 'exactly the stale orphan is reclaimed');
+    assert.equal(existsSync(resolve(cacheDir, 'dddddddddddddddd.wav.123.abcdefabcdef.tmp')), false, '2h-old orphan removed');
+    assert.equal(existsSync(resolve(cacheDir, 'eeeeeeeeeeeeeeee.wav.456.abcdefabcdef.tmp')), true, 'fresh temp (possible in-flight render) kept');
+    assert.equal(existsSync(resolve(cacheDir, 'not-audio.json')), true, 'non-wav non-tmp bystander untouched');
+  } finally {
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
 // v0.12.1 — lead-in silence: prepended before the first chime so multi-room /
 // AirPlay speakers can sync before any audio. Frame-aligned zero PCM, folded
 // into the cache key.

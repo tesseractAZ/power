@@ -26,8 +26,9 @@
  * Home Assistant — this module only ever computes and publishes.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 
 export type LightingPosture = 'surplus' | 'normal' | 'conserve' | 'amber' | 'red' | 'critical';
@@ -139,10 +140,7 @@ function loadPersisted(path: string): PersistedPosture | null {
 
 function savePersisted(path: string, s: Omit<PersistedPosture, 'savedAtMs'>): void {
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ ...s, savedAtMs: Date.now() } satisfies PersistedPosture));
-    renameSync(tmp, path);
+    atomicWriteFileSync(path, JSON.stringify({ ...s, savedAtMs: Date.now() } satisfies PersistedPosture));
   } catch {
     /* best effort — losing this just risks one restart flap */
   }

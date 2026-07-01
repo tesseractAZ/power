@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -142,12 +142,12 @@ test('tracker — reset() forgets state so the next update seeds fresh', () => {
 
 /* ─── v0.15.20 — persistence across restarts ─────────────────────────── */
 
-const tmpPaths: string[] = [];
+// State files live in a private (0700) mkdtemp directory — no predictable
+// names in the shared os tmpdir (CodeQL js/insecure-temporary-file).
+const stateDir = mkdtempSync(join(tmpdir(), 'posture-state-'));
 let seq = 0;
 function tmpState(): string {
-  const p = join(tmpdir(), `posture-${process.pid}-${seq++}.json`);
-  tmpPaths.push(p);
-  return p;
+  return join(stateDir, `posture-${seq++}.json`);
 }
 
 test('persistence — a restart resumes the held posture (no flap on half-warm calm)', () => {
@@ -213,7 +213,5 @@ test('persistence — same-rank reason refreshes do NOT rewrite the file each ti
 });
 
 test.after(() => {
-  for (const p of tmpPaths) {
-    try { rmSync(p, { force: true }); } catch { /* best effort */ }
-  }
+  try { rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
 });

@@ -157,6 +157,35 @@ test('manifest — a crafted __proto__/constructor key cannot pollute Object.pro
   assert.equal((Object.prototype as Record<string, unknown>).polluted, undefined);
 });
 
+test('deleteChime — hostile ids (__proto__/constructor) are rejected before any manifest or file op', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve: res } = await import('node:path');
+  // Store a real chime so there is manifest state to protect. This also
+  // rewrites manifest.json through readManifest→writeManifest, which must DROP
+  // the hostile keys the previous test planted (read-filter round-trip).
+  const c = saveChime(tone(777, 3000), 'keep.wav');
+  assert.ok(c.ok, c.error);
+  const manifestPath = res(tmp, 'manifest.json');
+  const before = readFileSync(manifestPath, 'utf8');
+  assert.ok(!before.includes('__proto__'), 'rewrite must drop hostile manifest keys');
+
+  for (const id of [
+    '__proto__', 'constructor', 'prototype', 'hasOwnProperty',
+    'AAAAAAAAAAAAAAAA',        // 16 chars but uppercase — fails the hex gate
+    'deadbeefdeadbee',         // 15 chars — wrong length
+    'deadbeefdeadbeef.wav',    // extension smuggling
+    '../../etc/passwd aa',
+  ]) {
+    assert.equal(deleteChime(id), false, `hostile id must be rejected: ${JSON.stringify(id)}`);
+  }
+  // Rejected ids never reach writeManifest (file bytes untouched), never
+  // pollute the prototype, and the real chime + its file survive.
+  assert.equal(readFileSync(manifestPath, 'utf8'), before, 'manifest must not be rewritten for rejected ids');
+  assert.equal(({} as Record<string, unknown>).polluted, undefined);
+  assert.equal((Object.prototype as Record<string, unknown>).polluted, undefined);
+  assert.ok(chimeExists(c.meta!.id));
+});
+
 test.after(() => { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 // silence unused-import lint for the existsSync import kept for clarity
