@@ -19,9 +19,10 @@
  * USER THOUGHT OF WHAT WE TOLD THEM.
  */
 
-import { appendFileSync, mkdirSync, existsSync, statSync, openSync, readSync, closeSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, existsSync, fstatSync, openSync, readSync, closeSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
+import { cleanText, cleanMultilineText, finiteNumber } from './logSanitize.js';
 
 export type AlertOutcome = 'ack' | 'dismiss' | 'failed' | 'resolved';
 
@@ -68,12 +69,65 @@ function ensureDir() {
   initialized = true;
 }
 
+/* ─── content sanitization (CodeQL js/http-to-file-access) ──────────────
+ * PATH is a fixed constant (env override or a config-derived sibling of the
+ * DB) — the PATH is never request-influenced. The CONTENT carries operator
+ * input BY DESIGN (the outcome capture IS the labeled dataset), so instead of
+ * writing the request-built object verbatim we re-serialize an explicit typed
+ * shape: known fields only, the outcome allow-listed to fresh literals,
+ * numbers coerced finite, strings control-stripped and length-bounded. */
+
+/** Feature maps: bounded key count, cleaned keys, finite numeric values only. */
+function cleanFeatureMap(v: Record<string, number> | undefined | null): Record<string, number> | undefined {
+  if (v == null || typeof v !== 'object') return undefined;
+  const out: Record<string, number> = {};
+  let count = 0;
+  for (const [k, raw] of Object.entries(v)) {
+    if (++count > 64) break;
+    const n = Number(raw);
+    const key = cleanText(k, 64);
+    if (key !== undefined && Number.isFinite(n)) out[key] = n;
+  }
+  return out;
+}
+
+/** Re-serialize into the explicit AlertOutcomeEntry shape. Backward-compatible:
+ *  same field names, same JSONL row — loaders (tail/readAll) are unchanged. */
+function sanitizeOutcomeEntry(entry: AlertOutcomeEntry): AlertOutcomeEntry {
+  // Allow-list the verdict into a fresh literal (index.ts validates before
+  // calling; 'resolved' is the neutral fallback for anything unexpected).
+  const outcome: AlertOutcome =
+    entry.outcome === 'ack' ? 'ack'
+    : entry.outcome === 'dismiss' ? 'dismiss'
+    : entry.outcome === 'failed' ? 'failed'
+    : 'resolved';
+  return {
+    ts: finiteNumber(entry.ts) ?? Date.now(),
+    alertId: cleanText(entry.alertId, 200) ?? '',
+    category: cleanText(entry.category, 64),
+    severity: cleanText(entry.severity, 32),
+    outcome,
+    // Free text — keeps operator-typed newlines/tabs, strips other controls.
+    // 500 matches the clamp the API route already applies.
+    notes: cleanMultilineText(entry.notes, 500),
+    features: cleanFeatureMap(entry.features),
+    // Preserve the tri-state: undefined = key omitted (pre-v0.9.59 rows),
+    // null = explicitly "no LR vector" — both round-trip as before.
+    lrFeatures: entry.lrFeatures === null ? null : cleanFeatureMap(entry.lrFeatures),
+    alertFiredAt: finiteNumber(entry.alertFiredAt),
+    source: {
+      ip: cleanText(entry.source?.ip, 64),
+      ua: cleanText(entry.source?.ua, 256),
+    },
+  };
+}
+
 /** Append one outcome. Synchronous — submissions are infrequent + must
  *  durable-by-EOF before we acknowledge to the client. */
 export function appendAlertOutcome(entry: AlertOutcomeEntry): void {
   try {
     ensureDir();
-    appendFileSync(PATH, JSON.stringify(entry) + '\n');
+    appendFileSync(PATH, JSON.stringify(sanitizeOutcomeEntry(entry)) + '\n');
   } catch (e: any) {
     // Don't crash the API on a disk-full or permission error; surface but continue.
     console.error(`alertOutcomes: append failed: ${e?.message ?? e}`);
@@ -82,17 +136,20 @@ export function appendAlertOutcome(entry: AlertOutcomeEntry): void {
 
 /** Tail the most recent N entries (newest first). */
 export function tailAlertOutcomes(limit = 100): AlertOutcomeEntry[] {
-  if (!existsSync(PATH)) return [];
+  // TOCTOU hardening (CodeQL js/file-system-race): open FIRST, then fstat the
+  // HANDLE — size and read come from the same inode, and a missing file just
+  // throws ENOENT out of openSync (→ []), same as the old existsSync probe.
+  let fd: number;
   try {
-    const stat = statSync(PATH);
+    fd = openSync(PATH, 'r');
+  } catch {
+    return [];
+  }
+  try {
+    const stat = fstatSync(fd);
     const start = Math.max(0, stat.size - TAIL_MAX_BYTES);
     const buf = Buffer.alloc(Math.min(stat.size, TAIL_MAX_BYTES));
-    const fd = openSync(PATH, 'r');
-    try {
-      readSync(fd, buf, 0, buf.length, start);
-    } finally {
-      closeSync(fd);
-    }
+    readSync(fd, buf, 0, buf.length, start);
     const text = buf.toString('utf-8');
     const startNL = start > 0 ? text.indexOf('\n') + 1 : 0;
     const usable = text.slice(startNL);
@@ -104,6 +161,8 @@ export function tailAlertOutcomes(limit = 100): AlertOutcomeEntry[] {
     return parsed.slice(-limit).reverse();
   } catch {
     return [];
+  } finally {
+    closeSync(fd);
   }
 }
 

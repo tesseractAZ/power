@@ -58,8 +58,8 @@
  *     anyone actually hits this.
  */
 
-import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, access, readdir, stat, unlink } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { readFile, writeFile, mkdir, access, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
@@ -386,6 +386,11 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const anySpoken = (message != null && message.trim().length > 0)
     || (opts.messages?.some((m) => m.text.trim().length > 0) ?? false);
   if (!anySpoken) {
+    // TOCTOU/atomicity hardening (CodeQL js/file-system-race): the stat()
+    // cache-miss above must not pair with a direct write to the final path —
+    // write an unpredictable same-directory temp, then rename, so the HTTP
+    // path can never serve a partially-written WAV either.
+    const tmpPath = `${outPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     try {
       await mkdir(cacheDir, { recursive: true });
       // v0.12.1 — prepend the lead-in silence and repeat the chime. When
@@ -407,9 +412,11 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
         const pcm = Buffer.concat(chimeParts);
         klaxonOnly = pcmToWav(pcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
       }
-      await writeFile(outPath, klaxonOnly);
+      await writeFile(tmpPath, klaxonOnly, { flag: 'wx' });
+      await rename(tmpPath, outPath);
       return { ok: true, filename, sizeBytes: klaxonOnly.length, fromCache: false };
     } catch (e: any) {
+      await rm(tmpPath, { force: true }).catch(() => { /* best effort */ });
       return { ok: false, error: `cache write failed: ${e?.message ?? e}` };
     }
   }
@@ -557,13 +564,15 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const incomplete = droppedPass || tailDropped;
   const servedName = incomplete ? `${hash}.partial.wav` : filename;
   const servedPath = resolve(cacheDir, servedName);
+  // Same unpredictable-temp + exclusive-create hardening as the klaxon-only
+  // cache write above (a guessable `<path>.tmp` could be pre-planted).
+  const tmpPath = `${servedPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     await mkdir(cacheDir, { recursive: true });
-    const tmpPath = `${servedPath}.tmp`;
-    await writeFile(tmpPath, combined);
-    const { rename } = await import('node:fs/promises');
+    await writeFile(tmpPath, combined, { flag: 'wx' });
     await rename(tmpPath, servedPath);
   } catch (e: any) {
+    await rm(tmpPath, { force: true }).catch(() => { /* best effort */ });
     return { ok: false, error: `cache write failed: ${e?.message ?? e}` };
   }
 
@@ -625,11 +634,19 @@ export async function pruneRenderCache(cacheDir: string, maxAgeMs: number, log: 
   let removed = 0;
   try {
     for (const name of await readdir(cacheDir)) {
-      if (!name.endsWith('.wav')) continue;
+      // v0.79.0 — also sweep crash-orphaned atomic-write temps. The unique
+      // random temp names (`*.tmp`, hardened for CodeQL) mean a power cut
+      // between write and rename leaves an orphan nothing overwrites (the old
+      // fixed `.tmp` name self-healed by the next render); reclaim any .tmp
+      // older than 1 h — far beyond any live render, which completes in
+      // seconds — so /data can't slowly fill with unreclaimable orphans.
+      const isTmp = name.endsWith('.tmp');
+      if (!name.endsWith('.wav') && !isTmp) continue;
       const full = resolve(cacheDir, name);
       try {
         const st = await stat(full);
-        if (now - st.mtimeMs > maxAgeMs) {
+        const ageLimit = isTmp ? Math.min(maxAgeMs, 3_600_000) : maxAgeMs;
+        if (now - st.mtimeMs > ageLimit) {
           await unlink(full);
           removed++;
         }

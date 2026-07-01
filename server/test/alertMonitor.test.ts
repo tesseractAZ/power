@@ -116,16 +116,16 @@ test('buildIncidents — sorted by severity (critical first), then by alertCount
 /* ─── v0.15.21 — notified-state persistence across restarts ──────────── */
 
 import { loadNotifiedState, saveNotifiedState, NOTIFY_STATE_MAX_AGE_MS } from '../src/alertMonitor.js';
-import { writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const tmpPaths: string[] = [];
+// State files live in a private (0700) mkdtemp directory — no predictable
+// names in the shared os tmpdir (CodeQL js/insecure-temporary-file).
+const stateDir = mkdtempSync(join(tmpdir(), 'alertmonitor-state-'));
 let seq = 0;
 function tmpState(): string {
-  const p = join(tmpdir(), `notify-state-${process.pid}-${seq++}.json`);
-  tmpPaths.push(p);
-  return p;
+  return join(stateDir, `notify-state-${seq++}.json`);
 }
 
 test('notify-state — round-trips notified alerts across a "restart"', () => {
@@ -151,7 +151,7 @@ test('notify-state — stale entries (> 24 h) are dropped at load', () => {
 });
 
 test('notify-state — corrupt or missing files seed fresh, never throw', () => {
-  const missing = loadNotifiedState(join(tmpdir(), 'definitely-not-here.json'));
+  const missing = loadNotifiedState(join(stateDir, 'definitely-not-here.json'));
   assert.equal(missing.size, 0);
   const path = tmpState();
   writeFileSync(path, '{broken json');
@@ -249,7 +249,5 @@ test('isAlertEscalation — end-to-end with decideAlertDispatch: a queued warnin
 });
 
 test.after(() => {
-  for (const p of tmpPaths) {
-    try { rmSync(p, { force: true }); } catch { /* best effort */ }
-  }
+  try { rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
 });

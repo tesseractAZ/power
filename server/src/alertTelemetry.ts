@@ -24,7 +24,7 @@
  * machine-generated (frequent, only valuable for ~weeks).
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, fstatSync, openSync, readSync, closeSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 
@@ -83,19 +83,22 @@ export function appendTelemetryEvent(entry: TelemetryEntry): void {
  * fold them into the rollup in chronological order.
  */
 export function readRecentTelemetry(windowMs: number = REPLAY_WINDOW_MS): TelemetryEntry[] {
-  if (!existsSync(PATH)) return [];
+  // TOCTOU hardening (CodeQL js/file-system-race): open FIRST, then fstat the
+  // HANDLE — size and read come from the same inode, and a missing file just
+  // throws ENOENT out of openSync (→ []), same as the old existsSync probe.
+  let fd: number;
   try {
-    const stat = statSync(PATH);
+    fd = openSync(PATH, 'r');
+  } catch {
+    return [];
+  }
+  try {
+    const stat = fstatSync(fd);
     const start = Math.max(0, stat.size - REPLAY_MAX_BYTES);
     const len = Math.min(stat.size, REPLAY_MAX_BYTES);
     if (len === 0) return [];
     const buf = Buffer.alloc(len);
-    const fd = openSync(PATH, 'r');
-    try {
-      readSync(fd, buf, 0, len, start);
-    } finally {
-      closeSync(fd);
-    }
+    readSync(fd, buf, 0, len, start);
     const text = buf.toString('utf-8');
     // Drop the first (possibly partial) line if we started mid-file.
     const startNL = start > 0 ? text.indexOf('\n') + 1 : 0;
@@ -112,6 +115,8 @@ export function readRecentTelemetry(windowMs: number = REPLAY_WINDOW_MS): Teleme
     return out;
   } catch {
     return [];
+  } finally {
+    closeSync(fd);
   }
 }
 

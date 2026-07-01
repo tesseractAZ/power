@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { SnapshotStore, FleetSnapshot } from './snapshot.js';
@@ -123,6 +123,26 @@ export interface PackBaseline {
  * `dsgWh ≤ chgWh` holds whenever the underlying deltas do, so the RTE clamp
  * downstream stops firing on healthy data.
  */
+/**
+ * v0.79.0 — fail-safe probe for the one-time reset marker files. Reads the
+ * marker (no existsSync→write TOCTOU pair), but ONLY a confirmed-absent file
+ * (ENOENT) reads as "not yet claimed". Any other failure — EIO from a
+ * corrupted inode after an unclean power-off (this host's dominant reboot
+ * cause), EISDIR, EACCES — means something occupies the marker path, so the
+ * destructive one-time counter reset must be SKIPPED, never re-run: the `wx`
+ * marker re-write would EEXIST silently and the reset would repeat every boot,
+ * feeding HA's total_increasing Energy sensors a meter reset per boot.
+ * Exported for tests.
+ */
+export function markerPresentProbe(flagPath: string): boolean {
+  try {
+    readFileSync(flagPath);
+    return true;
+  } catch (e: any) {
+    return e?.code !== 'ENOENT';
+  }
+}
+
 export function packDeltaWh(
   pk: { accuChgMah: number | null; accuDsgMah: number | null },
   base: PackBaseline | undefined,
@@ -1036,17 +1056,34 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // resulting one-time drop as a meter reset; the next day's delta
   // (and every day thereafter) is correct.
   // dbPath = /data/ecoflow.db, dirname → /data (the persistent volume).
+  //
+  // TOCTOU hardening (CodeQL js/file-system-race): probe the one-time markers
+  // by READING them instead of existsSync — an exists→write pair on the same
+  // path is the flagged check/use race. ONLY a confirmed-absent marker (ENOENT)
+  // means "not yet claimed"; any OTHER read failure (EIO from a corrupted inode
+  // after an unclean power-off, EISDIR, …) means SOMETHING occupies the marker
+  // path and must be treated as CLAIMED — otherwise a present-but-unreadable
+  // marker would re-run the destructive lifetime-counter reset on EVERY boot
+  // (the `wx` re-write below EEXISTs silently, so it would never self-repair).
+  // This matches the old existsSync gate's fail-safe direction. Pinned by
+  // recorder oneTimeMarkerPresent tests.
+  const oneTimeMarkerPresent = markerPresentProbe;
   const SHP2_FILTER_FLAG = resolve(dirname(dbPath), '.shp2-filter-v1.flag');
-  if (!existsSync(SHP2_FILTER_FLAG)) {
+  if (!oneTimeMarkerPresent(SHP2_FILTER_FLAG)) {
     log('recorder: v0.9.74 first run — resetting fleet lifetime counters for SHP2-membership filter');
     for (const key of ['fleet_battery_charge_wh', 'fleet_battery_discharge_wh', 'fleet_pv_wh', 'fleet_grid_import_wh']) {
       writeLifetime(key, 0, Date.now());
     }
     try {
       mkdirSync(dirname(SHP2_FILTER_FLAG), { recursive: true });
-      writeFileSync(SHP2_FILTER_FLAG, `reset at ${new Date().toISOString()}\n`, { mode: 0o644 });
+      // `wx` — exclusive create. If a concurrent starter raced us to the
+      // marker, the reset already ran and EEXIST is success (matches the old
+      // silent overwrite); anything else keeps the noisy-but-non-fatal log.
+      writeFileSync(SHP2_FILTER_FLAG, `reset at ${new Date().toISOString()}\n`, { mode: 0o644, flag: 'wx' });
     } catch (e: any) {
-      log(`recorder: could not write reset marker ${SHP2_FILTER_FLAG}: ${e?.message ?? e} (next boot will reset again — non-fatal but noisy)`);
+      if (e?.code !== 'EEXIST') {
+        log(`recorder: could not write reset marker ${SHP2_FILTER_FLAG}: ${e?.message ?? e} (next boot will reset again — non-fatal but noisy)`);
+      }
     }
   }
 
@@ -1067,7 +1104,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // day's delta is correct. Packs not visible right now capture their
   // baseline lazily on first sight (see computeBmsBatteryTotals).
   const BMS_BASELINE_FLAG = resolve(dirname(dbPath), '.bms-baseline-v1.flag');
-  if (!existsSync(BMS_BASELINE_FLAG)) {
+  if (!oneTimeMarkerPresent(BMS_BASELINE_FLAG)) {
     log('recorder: v0.13.0 first run — capturing per-pack BMS baselines and re-zeroing fleet battery counters');
     try {
       const snap = store.get();
@@ -1087,9 +1124,13 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     }
     try {
       mkdirSync(dirname(BMS_BASELINE_FLAG), { recursive: true });
-      writeFileSync(BMS_BASELINE_FLAG, `baselined at ${new Date().toISOString()}\n`, { mode: 0o644 });
+      // `wx` — see the SHP2 filter marker above; EEXIST = a racing starter
+      // already claimed it, which is success.
+      writeFileSync(BMS_BASELINE_FLAG, `baselined at ${new Date().toISOString()}\n`, { mode: 0o644, flag: 'wx' });
     } catch (e: any) {
-      log(`recorder: could not write baseline marker ${BMS_BASELINE_FLAG}: ${e?.message ?? e} (next boot will re-capture — non-fatal but noisy)`);
+      if (e?.code !== 'EEXIST') {
+        log(`recorder: could not write baseline marker ${BMS_BASELINE_FLAG}: ${e?.message ?? e} (next boot will re-capture — non-fatal but noisy)`);
+      }
     }
   }
 

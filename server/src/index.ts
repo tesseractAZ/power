@@ -2201,8 +2201,18 @@ function broadcastConfigResponse() {
 }
 
 // GET — current effective broadcast enable/volume + override + env baseline. NO
-// auth: read-only and non-sensitive (matches /api/broadcast/status).
-app.get('/api/broadcast/config', async () => broadcastConfigResponse());
+// auth: read-only and non-sensitive (matches /api/broadcast/status). Served
+// entirely from in-memory state (broadcast.config() is the monitor's closure
+// config; getBroadcastRuntimeConfig() caches after its first disk read), so the
+// read bucket below is belt-and-braces (CodeQL js/missing-rate-limiting) — and
+// DELIBERATELY separate from the PUT's bucket so a flood of reads can never
+// 429 an operator write. The UI fetches this once per console mount.
+const broadcastConfigReadRateLimit = makeRateLimiter(120, 60_000);
+app.get(
+  '/api/broadcast/config',
+  { preHandler: broadcastConfigReadRateLimit },
+  async () => broadcastConfigResponse(),
+);
 
 // PUT — set or clear the runtime enable/volume override. Write-gated + rate
 // limited (touches /data). A field present sets it (boolean/number overrides
@@ -2288,8 +2298,16 @@ function alertSettingsResponse() {
 }
 
 // GET — current annunciation settings. NO auth: read-only and non-sensitive
-// (matches /api/broadcast/status, which is also unauthenticated).
-app.get('/api/alert-settings', async () => alertSettingsResponse());
+// (matches /api/broadcast/status, which is also unauthenticated). Served from
+// memory (getAlertSettings() caches after its first disk read); the dedicated
+// read bucket bounds request-handling work regardless (CodeQL
+// js/missing-rate-limiting) without sharing the write path's budget.
+const alertSettingsReadRateLimit = makeRateLimiter(120, 60_000);
+app.get(
+  '/api/alert-settings',
+  { preHandler: alertSettingsReadRateLimit },
+  async () => alertSettingsResponse(),
+);
 
 // PUT — update per-priority enable flags and/or chime repeat. Write-gated.
 app.put<{ Body: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>>; chimeRepeat?: number } }>(

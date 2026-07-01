@@ -17,7 +17,7 @@
  * file size stays modest (~88 KB for a 2 s clip).
  */
 
-import { writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 
@@ -614,13 +614,13 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
   const pack = selectedChimePack();
   const wantMarker = `${AUDIO_ASSETS_VERSION}:${pack}`;
   const versionMarker = resolve(outDir, '.assets-version');
+  // TOCTOU hardening (CodeQL js/file-system-race): read the marker directly —
+  // absent and unreadable both land in the catch and read as '' (stale),
+  // exactly like the old existsSync-guarded read.
   let onDiskMarker = '';
-  if (existsSync(versionMarker)) {
-    try {
-      const { readFile } = await import('node:fs/promises');
-      onDiskMarker = (await readFile(versionMarker, 'utf8')).trim();
-    } catch { /* ignore — treat as empty (stale) */ }
-  }
+  try {
+    onDiskMarker = (await readFile(versionMarker, 'utf8')).trim();
+  } catch { /* absent/unreadable — treat as empty (stale) */ }
   const stale = onDiskMarker !== wantMarker;
   if (stale && onDiskMarker) {
     log(`audioAssets: marker "${onDiskMarker}" on disk, regenerating for "${wantMarker}"`);
@@ -649,23 +649,26 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
     await writeWavAtomic(path, wav);
     log(`audioAssets: wrote ${tone.id}.wav (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
   }
-  if (stale || !existsSync(versionMarker)) {
+  // Write the marker only when it was stale/missing at boot. `wantMarker` is
+  // never empty, so a missing/unreadable marker always read as stale above —
+  // no existsSync re-check needed (that exists→write pair was the CodeQL
+  // js/file-system-race TOCTOU; a concurrent delete now just means one extra
+  // regeneration next boot, same as any other lost-marker case).
+  if (stale) {
     await writeFile(versionMarker, wantMarker + '\n');
   }
 }
 
 /** Force-regenerate (used by tests / explicit "reset audio" trigger). */
 export async function regenerateAudioAssets(outDir: string, log: (m: string) => void): Promise<void> {
-  const { unlink } = await import('node:fs/promises');
+  // `rm(force)` removes-if-present in one call — no exists→unlink TOCTOU pair.
+  const { rm } = await import('node:fs/promises');
   for (const id of AUDIO_ASSETS) {
-    const path = resolve(outDir, `${id}.wav`);
-    if (existsSync(path)) await unlink(path);
+    await rm(resolve(outDir, `${id}.wav`), { force: true });
   }
   for (const tone of BUILTIN_TONES) {
-    const path = resolve(outDir, `${tone.id}.wav`);
-    if (existsSync(path)) await unlink(path);
+    await rm(resolve(outDir, `${tone.id}.wav`), { force: true });
   }
-  const versionMarker = resolve(outDir, '.assets-version');
-  if (existsSync(versionMarker)) await unlink(versionMarker);
+  await rm(resolve(outDir, '.assets-version'), { force: true });
   return generateAudioAssets(outDir, log);
 }

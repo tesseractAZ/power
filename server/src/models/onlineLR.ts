@@ -197,7 +197,13 @@ function loadBaselineBias(): number {
   return DEFAULT_BASELINE_BIAS;
 }
 
-/** Persist the shadow model after each SGD step. */
+/** Persist the shadow model after each SGD step.
+ *
+ *  CodeQL js/http-to-file-access context: SHADOW_PATH is a fixed constant —
+ *  never request-influenced. The numeric model content (weights/bias/loss) is
+ *  derived arithmetically with finite-guards, so the only request-derived
+ *  value that can reach this file is the sanitized alertId embedded in the
+ *  provenance `notes` string built in updateFromOutcome (see there). */
 function saveShadow(model: LrModel): void {
   mkdirSync(dirname(SHADOW_PATH), { recursive: true });
   writeFileSync(SHADOW_PATH, JSON.stringify(model, null, 2));
@@ -294,6 +300,13 @@ export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) =
   const newFinalLoss =
     model.finalLoss > 0 ? LOSS_EMA * model.finalLoss + (1 - LOSS_EMA) * sampleLoss : sampleLoss;
 
+  // Provenance note (persisted into the shadow-model file). The alertId is
+  // request-derived — allow-list its characters and bound its length before it
+  // lands on disk; the verdict is re-normalized to a fresh literal ('resolved'
+  // already returned above, so ack/dismiss/failed cover every reachable case).
+  const alertIdForNotes = String(outcome.alertId ?? '').replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 120);
+  const verdictForNotes: AlertOutcome =
+    outcome.outcome === 'dismiss' ? 'dismiss' : outcome.outcome === 'failed' ? 'failed' : 'ack';
   const updated: LrModel = {
     ...model,
     weights: newWeights,
@@ -302,7 +315,7 @@ export function updateFromOutcome(outcome: AlertOutcomeEntry, log: (m: string) =
     samples: model.samples + 1,
     source: 'labeled',
     finalLoss: Math.round(newFinalLoss * 10000) / 10000,
-    notes: `online-updated from outcome ${outcome.alertId} (${outcome.outcome}, label=${label}) at ${new Date().toISOString()}`,
+    notes: `online-updated from outcome ${alertIdForNotes} (${verdictForNotes}, label=${label}) at ${new Date().toISOString()}`,
   };
   saveShadow(updated);
 

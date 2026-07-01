@@ -1,5 +1,5 @@
 import mqtt, { MqttClient } from 'mqtt';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { Recorder } from './recorder.js';
@@ -461,7 +461,11 @@ export async function startMqttDiscovery(
   // left in HA by previous releases (see `legacyUniqueIdsFor` comment).
   const dedupFlagPath = resolve(process.env.DATA_DIR ?? '/data', DEDUP_FLAG_BASENAME);
   const clearLegacyDiscovery = () => {
-    if (existsSync(dedupFlagPath)) return;
+    // TOCTOU hardening (CodeQL js/file-system-race): probe the marker by
+    // READING it — an exists→write pair on the same path is the flagged
+    // check/use race. A successful read = already cleaned up; a failed read
+    // (ENOENT) = run the (idempotent) cleanup, same as the old existsSync.
+    try { readFileSync(dedupFlagPath); return; } catch { /* absent → run cleanup */ }
     let cleared = 0;
     const clearTopic = (topic: string) => {
       // Empty retained payload tells HA "this discovery is gone" — the
@@ -490,11 +494,15 @@ export async function startMqttDiscovery(
     }
     try {
       mkdirSync(dirname(dedupFlagPath), { recursive: true });
-      writeFileSync(dedupFlagPath, `${new Date().toISOString()}\n`);
+      // `wx` — exclusive create; EEXIST means a racing startup already wrote
+      // the marker, which is success (the retained-clear is idempotent).
+      writeFileSync(dedupFlagPath, `${new Date().toISOString()}\n`, { flag: 'wx' });
     } catch (e: any) {
       // Marker file write failed — log but don't fail the connection. Worst
       // case the cleanup runs again next startup (idempotent retained-clear).
-      log(`mqtt-discovery: dedup marker write failed (${e?.message ?? e}); cleanup may repeat`);
+      if (e?.code !== 'EEXIST') {
+        log(`mqtt-discovery: dedup marker write failed (${e?.message ?? e}); cleanup may repeat`);
+      }
     }
     log(`mqtt-discovery: cleared ${cleared} legacy discovery configs (v${MQTT_DISCOVERY_DEDUP_VERSION} dedup pass)`);
   };

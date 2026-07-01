@@ -28,8 +28,9 @@
  * doesn't immediately re-announce.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 import { type AlarmPriority, priorityAnnouncementPrefix } from './alertPriority.js';
 import { priorityAnnouncementPrefixEs } from './ttsService.js';
@@ -227,10 +228,7 @@ function loadState(path: string): PersistState | null {
 
 function saveState(path: string, s: PersistState): void {
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(s));
-    renameSync(tmp, path);
+    atomicWriteFileSync(path, JSON.stringify(s));
   } catch {
     /* best effort — losing this just risks one extra announcement after a crash */
   }

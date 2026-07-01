@@ -68,7 +68,12 @@ export const PRIORITY_META: Record<AlarmPriority, PriorityMeta> = {
  * the legacy severity+source heuristic. Mirrors server/src/alertPriority.ts.
  */
 export function priorityOf(alert: Pick<Alert, 'severity' | 'source' | 'priority'>): AlarmPriority {
-  if (alert.priority) return alert.priority;
+  // Allowlist the explicit field: `priority` arrives in server JSON and is not
+  // otherwise validated at runtime, and callers use the returned value as a
+  // property key (priorityCounts, PRIORITY_META lookups) — so only the four
+  // known tiers may pass through (CodeQL js/remote-property-injection).
+  // Anything malformed falls through to the severity-derived mapping below.
+  if (alert.priority && Object.hasOwn(PRIORITY_META, alert.priority)) return alert.priority;
   if (alert.severity === 'critical') return 'critical';
   if (alert.severity === 'warning') return alert.source === 'learned' ? 'medium' : 'high';
   return 'low';

@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
 import { computeAlerts, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
@@ -556,10 +557,7 @@ export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string,
 
 export function saveNotifiedState(path: string, state: Map<string, number>): void {
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(Object.fromEntries(state)));
-    renameSync(tmp, path);
+    atomicWriteFileSync(path, JSON.stringify(Object.fromEntries(state)));
   } catch {
     /* best effort — losing this just risks one duplicate push after a crash */
   }
