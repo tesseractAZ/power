@@ -725,6 +725,13 @@ export interface DayForecast {
   generatedAt: number;
   hasWeather: boolean;
   historyDays: number;
+  /** v0.77.0 — true when the forecast was built on an incomplete basis (cold
+   *  load/PV history, no SoC basis because the SHP2/backup pool is absent or
+   *  incoherent, or zero history days). Surfaced as a diagnostic sensor so a
+   *  degraded projection (e.g. while home Cores are cloud-wedged) is
+   *  operator-visible; the runway/projected-SoC numbers should be read with
+   *  appropriate skepticism when this is true. */
+  structurallyIncomplete?: boolean;
   reserveSoc: number;
   hours: ForecastHour[];
   forecastPvWhNext24: number;
@@ -1412,6 +1419,10 @@ async function computeDayForecastUncached(
     lastForecastIncompleteLogMs = now;
     log(`forecast: structurally incomplete (loadCold=${loadCold} pvCold=${pvCold} socBasisMissing=${socBasisMissing} historyDays=${historyDays.toFixed(2)}) — negative-caching for ${incompleteForecastTtlMs() / 1000}s then rebuilding (throttled ${FORECAST_INCOMPLETE_LOG_THROTTLE_MS / 60000}m)`);
   }
+  // v0.77.0 — surface the same flag on the value so ha-state / MQTT can publish a
+  // diagnostic "forecast basis incomplete" sensor (the flag drove only the cache
+  // TTL before). Set before caching so the cached value carries it too.
+  value.structurallyIncomplete = structurallyIncomplete;
   // Cache whenever ≥1 DPU is present (so a totally-empty fleet still doesn't latch),
   // tagging the entry incomplete so the TTL fast-path uses the short negative-cache
   // window. A complete forecast overwrites it with incomplete:false + full TTL.

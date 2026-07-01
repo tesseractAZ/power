@@ -565,3 +565,32 @@ test('getDayForecast — complete inputs (shp2 + capacity + history) ARE cached,
     resetForecastCachesForTesting();
   }
 });
+
+test('getDayForecast — structurallyIncomplete flag mirrors the basis quality (v0.77.0)', async () => {
+  // v0.77.0 surfaces the same cold/incoherent-basis flag that drove the negative-cache
+  // TTL onto the returned forecast, so ha-state / MQTT can publish an operator-visible
+  // "forecast basis incomplete" diagnostic. The flag must be TRUE exactly when the
+  // projection is SoC-blind (SHP2 cloud-offline / no capacity basis) and FALSE for a
+  // structurally complete projection. This is pure observability — it must NOT change
+  // whether a forecast is produced or cached.
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  try {
+    const rec = forecastCountingRecorder();
+    // SoC-blind: warm PV+load history but no backup-capacity basis → incomplete.
+    const blind = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: null }) };
+    const fBlind = await getDayForecast(blind, rec);
+    assert.equal(fBlind.minProjectedSoc, null, 'guard: this fixture is genuinely SoC-blind');
+    assert.equal(fBlind.structurallyIncomplete, true, 'SoC-blind forecast is flagged structurally incomplete');
+
+    resetForecastCachesForTesting(); // avoid the negative-cache serving the blind entry
+    // Complete: SHP2 returns a real backup pool → structurally complete projection.
+    const complete = { ...oneDpuOnePack('SN-FC-DPU'), ...shp2ForForecast({ fullCapWh: 120_000, remainWh: 72_000 }) };
+    const fComplete = await getDayForecast(complete, rec);
+    assert.ok(fComplete.minProjectedSoc != null, 'guard: this fixture has a real SoC basis');
+    assert.equal(fComplete.structurallyIncomplete, false, 'a complete forecast is NOT flagged incomplete');
+  } finally {
+    clearWeatherTestOverride();
+    resetForecastCachesForTesting();
+  }
+});
