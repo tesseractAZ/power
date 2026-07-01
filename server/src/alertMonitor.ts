@@ -115,6 +115,27 @@ export function isSocResolveDwellFamily(alert: Pick<Alert, 'id'>): boolean {
   return /^soc-low-/.test(alert.id);
 }
 
+// v0.77.0 — resolve-side dwell for the per-pack cell-imbalance (vdiff) family. A
+// pack whose max cell spread sits ON the warning threshold (e.g. 20 mV) crosses it
+// every poll, so each absent tick emitted a premature "Resolved:" and the next
+// present tick re-fired — a live v0.76 log showed Core 3 pack 4 pushing ~4× in
+// 11 min, diluting the operator's sole live alarm channel (HA push). Same
+// resolve-only mechanism as the soc-low family: it holds the "condition cleared"
+// push until the spread has been continuously back under threshold for the dwell,
+// and NEVER delays or suppresses a FIRE. Applies to both warning and critical
+// vdiff (delaying a critical's good-news resolve is harmless; a flapping critical
+// would be worse). Env-tunable, house pattern.
+const VDIFF_RESOLVE_DWELL_MS = Number(process.env.VDIFF_RESOLVE_DWELL_MS ?? 3 * 60_000);
+
+/**
+ * v0.77.0 — does this alert belong to the per-pack cell-imbalance family that gets
+ * the resolve-side dwell? Matches `vdiff-warn-<sn>-<pack>` / `vdiff-crit-<sn>-<pack>`.
+ * Pure + exported for tests.
+ */
+export function isCellImbalanceResolveDwellFamily(alert: Pick<Alert, 'id'>): boolean {
+  return /^vdiff-(warn|crit)-/.test(alert.id);
+}
+
 /**
  * v0.74.0 — a short, human-facing device locator appended to the push TITLE so
  * the SAME condition on different subjects is distinguishable at a glance
@@ -1139,6 +1160,17 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           continue; // start the dwell; re-evaluate next tick
         }
         if (now - t.clearedSince < SOC_RESOLVE_DWELL_MS) continue; // still dwelling
+      }
+      // v0.77.0 — same resolve-side dwell for the per-pack cell-imbalance (vdiff)
+      // family: a pack whose cell spread sits on the warning/critical threshold was
+      // flapping "Resolved:"/re-fire every poll (Core 3 pack 4: ~4 pushes in 11 min,
+      // live v0.76 log), diluting the operator's sole live push channel. Resolve-only.
+      if (isCellImbalanceResolveDwellFamily(t.alert)) {
+        if (t.clearedSince == null) {
+          t.clearedSince = now;
+          continue;
+        }
+        if (now - t.clearedSince < VDIFF_RESOLVE_DWELL_MS) continue;
       }
       const duration = now - t.firstSeen;
       // v0.16.4 — defense-in-depth: a non-annunciating alert (annunciate:false,

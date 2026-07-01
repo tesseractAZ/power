@@ -1222,6 +1222,10 @@ app.get('/api/ha-state', async (req, reply) => {
     projected_low_soc_at: fc.minProjectedSocTs,
     forecast_history_days: fc.historyDays,
     forecast_has_weather: fc.hasWeather,
+    // v0.77.0 — diagnostic: the forecast was built on an incomplete basis (cold
+    // history / no SoC basis while the SHP2 or home Cores are cloud-offline). Lets
+    // the operator read runway/projected-SoC with appropriate skepticism.
+    forecast_structurally_incomplete: fc.structurallyIncomplete ?? false,
     soiling_drop_percent: fc.soiling?.dropPct ?? null,
 
     // Degradation (cached ~30min)

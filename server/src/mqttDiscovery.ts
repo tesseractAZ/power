@@ -273,6 +273,10 @@ export const BINARY_SENSORS = [
   // self-consumption integral (cloud-offline / projection-less), so solar_fraction /
   // direct-use undercount. Diagnostic: discount those KPIs while this reads ON.
   { unique_id: 'ecoflow_self_consumption_coverage_partial', name: 'EcoFlow Self-Consumption Coverage Partial', icon: 'mdi:gauge-low', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.self_consumption_coverage_partial else "OFF" }}' },
+  // v0.77.0 — forecast built on an incomplete basis (cold history / no SoC basis while the SHP2 or home Cores are cloud-offline).
+  // No device_class (matches the coverage_partial sibling): a plain diagnostic on/off, not a HA "problem" indicator that would sit
+  // persistently red during a Core cloud-wedge. The point is operator-visibility of a degraded forecast basis, not an alarm.
+  { unique_id: 'ecoflow_forecast_basis_incomplete', name: 'EcoFlow Forecast Basis Incomplete', icon: 'mdi:cloud-question', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.forecast_structurally_incomplete else "OFF" }}' },
 ];
 
 /**
@@ -644,6 +648,7 @@ export async function startMqttDiscovery(
       backup_full_capacity_kwh: kwh1(shp2?.projection.backupFullCapWh),
       forecast_pv_next_24h_kwh: Math.round(fc.forecastPvWhNext24 / 100) / 10,
       projected_low_soc_percent: fc.minProjectedSoc,
+      forecast_structurally_incomplete: fc.structurallyIncomplete ?? false, // v0.77.0 — diagnostic basis flag
       soiling_drop_percent: fc.soiling?.dropPct ?? null,
       degradation_soonest_eol_years: soonest?.yearsToEol ?? null,
       degradation_peer_outliers: projecting.filter((p) => p.peerOutlier).length,

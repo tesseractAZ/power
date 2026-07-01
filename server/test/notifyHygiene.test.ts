@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isSocResolveDwellFamily,
+  isCellImbalanceResolveDwellFamily,
   notifyLocator,
   notifyDedupId,
 } from '../src/alertMonitor.js';
@@ -32,6 +33,20 @@ test('isSocResolveDwellFamily — matches the soc-low pack family only', () => {
   assert.equal(isSocResolveDwellFamily({ id: 'baseline-ch1_w-SN' }), false);
   assert.equal(isSocResolveDwellFamily({ id: 'cell-imbalance-SN-3' }), false);
   assert.equal(isSocResolveDwellFamily({ id: 'shp2-below-reserve' }), false);
+});
+
+test('v0.77.0 — isCellImbalanceResolveDwellFamily matches the vdiff warn/crit family only', () => {
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-warn-Y711FAB59J234000-1' }), true);
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-crit-HD31ZAS-2' }), true);
+  // Not the soc-low family (that has its own dwell) and not other families.
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'soc-low-HD31ZAS-1' }), false);
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'dpu-err-GBC0314' }), false);
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-something-else' }), false);
+  // The two dwell families are disjoint (each gets its own resolve-dwell block).
+  assert.equal(
+    isSocResolveDwellFamily({ id: 'vdiff-warn-x-1' }) || isCellImbalanceResolveDwellFamily({ id: 'soc-low-x-1' }),
+    false,
+  );
 });
 
 /* ── item 2a: human-facing device locator ────────────────────────────────── */
