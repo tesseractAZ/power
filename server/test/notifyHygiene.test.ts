@@ -5,6 +5,8 @@ import {
   isCellImbalanceResolveDwellFamily,
   notifyLocator,
   notifyDedupId,
+  shouldSendResolve,
+  moreSevere,
 } from '../src/alertMonitor.js';
 import { haNotificationId } from '../src/notify.js';
 import type { Alert } from '../src/alerts.js';
@@ -108,4 +110,44 @@ test('haNotificationId — arbitrary ids reduce to HA-safe [a-z0-9_], length-cap
   assert.ok(id.length <= 'ecoflow_panel_'.length + 96);
   // An all-symbol dedupId must not collapse to a bare prefix.
   assert.equal(haNotificationId('@#$%', 'critical'), 'ecoflow_panel_critical');
+});
+
+/* ── v0.80.0 — resolve delivery-integrity gate (shouldSendResolve) ────────── */
+
+test('v0.80.0 — shouldSendResolve: boot-seeded entry (no real push) never emits a phantom resolve', () => {
+  // The live 68.9h defect: "Resolved: EcoFlow Cloud session stale" pushed after
+  // every daily reboot — boot-seeding set notified=true for alerts merely present
+  // at startup, and the resolve gate keyed on notified. pushSent stays false.
+  const bootSeeded = { pushSent: false, notifiedSeverity: 'warning' as const, alert: a({ id: 'cloud-session-stale', severity: 'warning' }) };
+  assert.equal(shouldSendResolve(bootSeeded, true, 'warning'), false);
+  assert.equal(shouldSendResolve({ ...bootSeeded, pushSent: undefined }, true, 'warning'), false);
+});
+
+test('v0.80.0 — shouldSendResolve: a pushed fire owes its resolve at the NOTIFIED severity', () => {
+  // The live defect: "[Medium] Projected runtime…" and "Backup pool low — 20%"
+  // pushed as warnings but downgraded below minSeverity by clear time — the old
+  // current-severity gate ate their all-clear and stranded the HA cards.
+  const downgradedByClearTime = { pushSent: true, notifiedSeverity: 'warning' as const, alert: a({ id: 'forecast-runtime-X', severity: 'info' }) };
+  assert.equal(shouldSendResolve(downgradedByClearTime, true, 'warning'), true, 'notified-at severity governs');
+});
+
+test('v0.80.0 — shouldSendResolve: legacy entry without notifiedSeverity falls back to current severity', () => {
+  const legacy = { pushSent: true, alert: a({ id: 'x-1', severity: 'warning' }) };
+  assert.equal(shouldSendResolve(legacy, true, 'warning'), true);
+  const legacyBelow = { pushSent: true, alert: a({ id: 'x-2', severity: 'info' }) };
+  assert.equal(shouldSendResolve(legacyBelow, true, 'warning'), false);
+});
+
+test('v0.80.0 — shouldSendResolve: policy gates still hold (annunciate=false, notifyResolved=false)', () => {
+  const t = { pushSent: true, notifiedSeverity: 'warning' as const, alert: a({ id: 'x-3', severity: 'warning', annunciate: false }) };
+  assert.equal(shouldSendResolve(t, true, 'warning'), false, 'annunciate=false mutes the resolve');
+  const t2 = { pushSent: true, notifiedSeverity: 'warning' as const, alert: a({ id: 'x-4', severity: 'warning' }) };
+  assert.equal(shouldSendResolve(t2, false, 'warning'), false, 'notifyResolved=false mutes the resolve');
+});
+
+test('v0.80.0 — moreSevere ratchets: a notified severity can never regress', () => {
+  assert.equal(moreSevere('critical', 'warning'), 'critical');
+  assert.equal(moreSevere('warning', 'critical'), 'critical');
+  assert.equal(moreSevere('warning', 'info'), 'warning');
+  assert.equal(moreSevere('info', 'info'), 'info');
 });
