@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.80.1 — 2026-07-02
+
+**[Fixed] Web image build — `@vitejs/plugin-react` 4→6 to match vite 8's peer range.** v0.80.0's image build failed in CI on `npm ci` ERESOLVE (plugin-react 4.x peers cap at vite ^7; the repo has been on vite ^8 — local installs tolerated it, and the floating Node base image's newer npm began enforcing it strictly between the v0.79.0 and v0.80.0 builds). plugin-react ^6.0.3 declares `vite: ^8.0.0`; `npm ci --dry-run` clean, web `tsc` clean, build green. No add-on code changes — this release carries v0.80.0's alarm-delivery-integrity work to the Pi.
+
 ## 0.80.0 — 2026-07-02
 
 **[Fixed] Alarm delivery integrity — the push channel is now at-least-once.** From a verified 68.9 h log review (5 lenses, 47k lines): the sole live alarm channel was fire-and-forget — an alert was durably marked "notified" BEFORE the send, and the one real send failure in the window (HTTP 400 while HA Core restarted, logged at info with no identity) permanently ate a push. On a host that reboots ~1.7×/day, that mechanism would eat a critical fire the same way.
