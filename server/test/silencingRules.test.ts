@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applySilencingRules, type AlertActionStats } from '../src/alertMonitor.js';
+import { applySilencingRules, ENERGY_STATE_FAMILIES, type AlertActionStats } from '../src/alertMonitor.js';
+import { familyOf } from '../src/alertOutcomes.js';
 
 // v0.30.0 — the four auto-silencing rules were extracted from a closure into the
 // pure exported applySilencingRules() so they're unit-testable. These tests pin
@@ -75,4 +76,34 @@ test('Rule 4 — a high-volume but PERSISTENT warning (a real standing condition
   applySilencingRules(t);
   assert.equal(t.warningDemotedToInfo, false);
   assert.equal(t.chronicNoiseSilenced, false);
+});
+
+/* ── v0.80.0 — energy-state families are exempt from every auto-tune rule ── */
+
+test('v0.80.0 — an energy-state family is NEVER demoted/silenced, even with demote-qualifying stats', () => {
+  // The live 68.9h shape: backup-soc boundary-flapped at the 20% band enough to
+  // qualify for Rule 2 (warning, short-frac ≥ 0.80) AND Rule 4 (volume + low
+  // persistence) — and a genuine backup-pool-at-17% event then pushed as "[Low]".
+  // A fast clear on an energy-state family IS a real recovery, not sensor noise.
+  for (const familyKey of ['backup-soc', 'shp2-below-reserve', 'shp2-near-reserve', 'soc-low', 'forecast-runtime']) {
+    const t = stats({ familyKey, severity: 'warning', riseCount: 200, shortClearsCount: 180, neverClearedCount: 5 });
+    applySilencingRules(t);
+    assert.equal(t.warningDemotedToInfo, false, `${familyKey} must not demote`);
+    assert.equal(t.downgradedSilenced, false, `${familyKey} must not silence`);
+    assert.equal(t.chronicNoiseSilenced, false, `${familyKey} must not chronic-silence`);
+  }
+});
+
+test('v0.80.0 — the exemption set matches familyOf() of the real alert ids', () => {
+  // Pin the derivation so an alert-id rename can't silently orphan the exemption.
+  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('backup-soc-20')));
+  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('shp2-below-reserve')));
+  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('soc-low-Y711ZAB59GBC0314-3')));
+  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('forecast-runtime-HD31ZASAHH120432')));
+});
+
+test('v0.80.0 — non-exempt families still demote exactly as before (regression guard)', () => {
+  const t = stats({ familyKey: 'vdiff-warn', severity: 'warning', riseCount: 20, shortClearsCount: 17 });
+  applySilencingRules(t);
+  assert.equal(t.warningDemotedToInfo, true);
 });

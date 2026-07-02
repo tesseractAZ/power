@@ -33,6 +33,12 @@ export interface TelemetryGap {
   endMs: number;       // first home-device sample after the silence
   durationMs: number;  // endMs − startMs
   detectedAt: number;  // == endMs (when the gap was recognised)
+  /** v0.80.0 — present (true) only when the gap was detected AT STARTUP by
+   * comparing the newest persisted sample against the boot clock: the silence
+   * spans a process restart (host power loss / add-on stop), so `endMs` is the
+   * boot-time detection instant, not a resumed write. Optional + additive so
+   * every existing reader of the sidecar / /api/telemetry-gaps is unaffected. */
+  restartSpanning?: boolean;
 }
 
 /**
@@ -326,9 +332,25 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     } catch { return []; }
   })();
 
-  function recordTelemetryGap(startMs: number, endMs: number) {
-    const gap: TelemetryGap = { startMs, endMs, durationMs: endMs - startMs, detectedAt: endMs };
-    telemetryGapsLog.push(gap);
+  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean }) {
+    // v0.80.0 — an ONGOING blackout re-detects at EVERY boot with the same
+    // startMs (no home sample landed in between), e.g. consecutive restarts
+    // inside one multi-hour power outage. Extend the existing record in place
+    // instead of appending an overlapping duplicate, so the sidecar counts one
+    // outage exactly once (with its true, growing duration). In-process gaps
+    // can't collide this way (lastHomeInsertTs advances past each one).
+    const prior = opts?.restartSpanning
+      ? telemetryGapsLog.find((g) => g.restartSpanning === true && g.startMs === startMs)
+      : undefined;
+    const gap: TelemetryGap = prior ?? { startMs, endMs, durationMs: endMs - startMs, detectedAt: endMs };
+    if (prior) {
+      prior.endMs = endMs;
+      prior.durationMs = endMs - startMs;
+      prior.detectedAt = endMs;
+    } else {
+      if (opts?.restartSpanning) gap.restartSpanning = true;
+      telemetryGapsLog.push(gap);
+    }
     if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
     try {
       writeFileSync(gapsPath, JSON.stringify(telemetryGapsLog), { mode: 0o644 });
@@ -336,7 +358,49 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       log(`recorder: failed to persist telemetry gap (${e?.message ?? e})`);
     }
     const mins = Math.round(gap.durationMs / 60_000);
-    log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}); writes resumed`);
+    const range = `${new Date(startMs).toISOString()} → ${new Date(endMs).toISOString()}`;
+    // Both variants share the "TELEMETRY GAP — no home-device samples for N min"
+    // stem so log scanners bucket them together; only the tail distinguishes a
+    // restart-spanning blackout (v0.80.0) from an in-process stall (v0.30.0).
+    if (opts?.restartSpanning) {
+      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}) spanning a restart (host down or add-on stopped); history in that window is unrecoverable`);
+    } else {
+      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}); writes resumed`);
+    }
+  }
+
+  // v0.80.0 — restart-spanning telemetry-gap detection (startup, OBSERVABILITY
+  // ONLY). detectTelemetryGap only compares consecutive IN-PROCESS inserts, so a
+  // blackout that spans a process restart is invisible by construction: the
+  // process boots, lastHomeInsertTs re-seeds to 0, and the outage is never
+  // accounted (a 68.9h log review found 3 host power losses, 88–193 min each —
+  // ~6.4h / ~9.3% of history silently missing with ZERO "TELEMETRY GAP" lines).
+  // At startup, compare the newest persisted sample against the boot clock with
+  // the SAME threshold and record through the SAME recordTelemetryGap path (same
+  // sidecar, same log-line stem) marked restartSpanning. Exclusions mirror the
+  // in-process detector's semantics: the "weather" pseudo-SN is stamped with
+  // forecast-hour epochs (not wall clock — a future-stamped row would mask a
+  // real outage) and spares are excluded for the v0.30.0 reason (a bench unit
+  // must not mask a home-feed stall). NOTE: lastHomeInsertTs is deliberately NOT
+  // seeded from maxTs — the gap up to boot is fully recorded here, and seeding
+  // would make the first in-process insert double-log an overlapping gap.
+  // Fail-open: this is a diagnostic; it must never block startup. A fresh/empty
+  // DB yields MAX(ts) = NULL → detectTelemetryGap's lastInsertMs>0 guard skips.
+  // RTC-less-Pi5 clock skew (boot clock BEHIND the last sample until NTP steps
+  // forward) yields a negative delta → same guard direction, no false gap.
+  try {
+    const restartGapExcludedSns = [WEATHER_SN, ...SPARE_DPU_SNS];
+    const row = db.prepare(
+      `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
+    ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
+    const maxTs = row?.maxTs == null ? null : Number(row.maxTs);
+    const bootMs = Date.now();
+    if (maxTs != null && Number.isFinite(maxTs) && detectTelemetryGap(maxTs, bootMs, GAP_THRESHOLD_MS)) {
+      recordTelemetryGap(maxTs, bootMs, { restartSpanning: true });
+    }
+  } catch (e: any) {
+    // Diagnostic-only: swallow and continue startup (debug-gated breadcrumb).
+    if (RECORDER_DEBUG) log(`recorder: restart-spanning gap check skipped (${e?.message ?? e})`);
   }
 
   // v0.50.0 — persist the per-key emit high-water across restarts. The micro-dip

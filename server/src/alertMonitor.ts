@@ -252,6 +252,15 @@ interface TrackedAlert {
    *  in-memory quietQueue does not survive a restart). Cleared once the alert is
    *  actually dispatched or the digest sends. */
   queued?: boolean;
+  /** v0.80.0 — true only when a fire push for this alert was ACTUALLY delivered
+   *  (dispatch succeeded, digest sent, or rehydrated from a persisted notify-state
+   *  record — i.e. a real prior push). Distinct from `notified`, which boot-seeding
+   *  sets true for alerts merely PRESENT at startup to suppress re-pushing them.
+   *  The "Resolved:" push gates on THIS flag, so a fire that was never delivered
+   *  (boot-seeded, or its send failed) can never emit a phantom all-clear — the
+   *  68.9h log review found a spurious "Resolved: EcoFlow Cloud session stale"
+   *  push after every daily reboot from exactly that boot-seeded path. */
+  pushSent?: boolean;
 }
 
 /** A historical record of an alert that was raised and later cleared. */
@@ -303,7 +312,25 @@ export interface AlertActionStats {
  * Mutates the three boolean flags on `t` in place. Critical severity is never
  * silenced or demoted: it must always push.
  */
+/** v0.80.0 — ENERGY-STATE families are exempt from every auto-tune rule. The
+ *  silencing/demotion rules infer "sensor noise" from fast self-clears — but for
+ *  these families a fast clear IS a genuine recovery (charging resumed, load
+ *  dropped), not jitter, so the rules' premise doesn't hold. The 68.9h log review
+ *  caught the real cost: a genuine backup-pool-at-17% event pushed as "[Low] …
+ *  (severity warning→info via auto-tune)" because boundary flapping at the 20%
+ *  band had accumulated enough short-clears to demote the family. Exported for
+ *  tests. Keyed by familyOf(alert.id). */
+export const ENERGY_STATE_FAMILIES: ReadonlySet<string> = new Set([
+  'backup-soc',        // SHP2 backup-pool SoC ladder (backup-soc-50/40/30/20/…)
+  'shp2-below-reserve',
+  'shp2-near-reserve',
+  'soc-low',           // per-pack nearly-empty
+  'forecast-runtime',  // projected runtime to reserve
+]);
+
 export function applySilencingRules(t: AlertActionStats): void {
+  // v0.80.0 — energy-state families always annunciate at their true severity.
+  if (ENERGY_STATE_FAMILIES.has(t.familyKey)) return;
   const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
   const DOWNGRADE_SHORT_FRAC = 0.7;               // ≥ 70% of rises clear within SHORT_CLEAR_MS
   // v0.9.3 — extended self-tuning rules
@@ -388,6 +415,39 @@ const sevRank = SEVERITY_ORDER;
 
 function qualifies(sev: Severity, min: Severity): boolean {
   return sevRank[sev] <= sevRank[min];
+}
+
+/** v0.80.0 — the more-severe of two severities. Used to guarantee a notified
+ *  severity can only ever RATCHET UP: the digest re-marks queued alerts from
+ *  potentially-stale queue entries, and overwriting an escalated-and-dispatched
+ *  alert's critical back down to its queued warning would make the next tick
+ *  read "escalated" again and emit a duplicate critical push (and, with sev now
+ *  persisted, re-fire it after a restart). Exported for tests. */
+export function moreSevere(a: Severity, b: Severity): Severity {
+  return sevRank[a] <= sevRank[b] ? a : b;
+}
+
+/** v0.80.0 — should a "Resolved:" push go out for this cleared alert? Pure +
+ *  exported so the two delivery-integrity rules from the 68.9h log review are
+ *  unit-testable on the exact runtime code path:
+ *  (1) gate on pushSent (a REAL delivered fire), not `notified` — boot-seeding
+ *      marks alerts merely present at startup as notified, which emitted a
+ *      phantom "Resolved: EcoFlow Cloud session stale" after every daily reboot;
+ *  (2) qualify on the severity the fire was NOTIFIED at (fallback: current) —
+ *      two real warning-tier pushes never got their all-clear because the alert
+ *      had downgraded below minSeverity by clear time. A pushed fire owes its
+ *      resolve regardless of what the severity reads at clear time. */
+export function shouldSendResolve(
+  t: { pushSent?: boolean; notifiedSeverity?: Severity; alert: Pick<Alert, 'severity' | 'annunciate'> },
+  notifyResolved: boolean,
+  minSeverity: Severity,
+): boolean {
+  return (
+    t.pushSent === true &&
+    t.alert.annunciate !== false &&
+    notifyResolved &&
+    qualifies(t.notifiedSeverity ?? t.alert.severity, minSeverity)
+  );
 }
 
 /** v0.76.0 — has this alert ESCALATED above the severity it was last ACTED ON
@@ -535,19 +595,51 @@ export interface AlertMonitor {
 
 /** Entries older than this are dropped at load (the event is long over). */
 export const NOTIFY_STATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** v0.80.0 — a record for a STILL-ACTIVE notified alert is timestamp-refreshed
+ *  once it is older than this, so a long-lived alert (a >25 h cloud wedge — a
+ *  documented real event for this fleet) never TTL-drops its proof-of-delivery
+ *  across one of this host's ~daily reboots, which would strand its "Resolved:"
+ *  card. Half the TTL: at most one extra sidecar write every 12 h per alert,
+ *  while records for alerts that genuinely vanished still expire at 24 h. */
+export const NOTIFY_STATE_REFRESH_MS = NOTIFY_STATE_MAX_AGE_MS / 2;
 /** Learned alerts absent during this post-boot window are warm-up, not
  *  recovery — hold their falling edge so a restart can't emit a premature
  *  "Resolved" (observed 25 s after a boot, before analytics had warmed). */
 export const LEARNED_RESOLVE_GRACE_MS = 10 * 60 * 1000;
 
-export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string, number> {
-  const out = new Map<string, number>();
+/** v0.80.0 — persisted notify-state record. Legacy files stored a bare
+ *  epoch-ms number; the record now also carries whether the push was actually
+ *  DELIVERED (`sent` — false for a policy-suppressed dispatch, which must not
+ *  rehydrate into a "Resolved:"-owing pushSent) and the severity it was
+ *  notified at (`sev` — so the owed-resolve rule survives a restart even when
+ *  the alert has downgraded below minSeverity by clear time). A legacy number
+ *  loads as {ts, sent: true}: pre-v0.80 records cannot distinguish suppressed,
+ *  and treating them as delivered matches the pre-upgrade resolve behavior. */
+export interface NotifyRecord {
+  ts: number;
+  sent: boolean;
+  sev?: Severity;
+}
+
+export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string, NotifyRecord> {
+  const out = new Map<string, NotifyRecord>();
   try {
     if (!existsSync(path)) return out;
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     const cutoff = nowMs - NOTIFY_STATE_MAX_AGE_MS;
-    for (const [id, at] of Object.entries(raw)) {
-      if (typeof at === 'number' && at > cutoff) out.set(id, at);
+    for (const [id, v] of Object.entries(raw)) {
+      if (typeof v === 'number' && v > cutoff) {
+        out.set(id, { ts: v, sent: true }); // legacy shape (pre-v0.80)
+      } else if (v !== null && typeof v === 'object') {
+        const r = v as { ts?: unknown; sent?: unknown; sev?: unknown };
+        if (typeof r.ts === 'number' && r.ts > cutoff) {
+          out.set(id, {
+            ts: r.ts,
+            sent: r.sent === true,
+            sev: r.sev === 'critical' || r.sev === 'warning' || r.sev === 'info' ? r.sev : undefined,
+          });
+        }
+      }
     }
   } catch {
     /* corrupt → start fresh */
@@ -555,7 +647,7 @@ export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string,
   return out;
 }
 
-export function saveNotifiedState(path: string, state: Map<string, number>): void {
+export function saveNotifiedState(path: string, state: Map<string, NotifyRecord>): void {
   try {
     atomicWriteFileSync(path, JSON.stringify(Object.fromEntries(state)));
   } catch {
@@ -751,20 +843,30 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     log(`alert-telemetry: replayed ${n} events across ${telemetry.size} families`);
   };
 
-  const dispatch = async (alert: Alert, kind: 'new' | 'resolved') => {
-    if (!isConfigured(cfg)) return;
+  /** v0.80.0 — dispatch outcome. 'sent' = the push was actually delivered;
+   *  'suppressed' = a POLICY gate (no channel / auto-tune silencing / priority
+   *  toggle) intentionally skipped it — counts as handled, never retried;
+   *  'failed' = the send itself errored (HA Core restarting, network) — the
+   *  caller must NOT mark the alert notified, so the next evaluate tick
+   *  retries. The 68.9h log review found the old void dispatch let one real
+   *  HTTP 400 (HA mid-restart) permanently eat a push: `notified` was already
+   *  durably persisted before the send, and the failure logged at info with no
+   *  identity. At-least-once now: a crash between send and persist duplicates
+   *  one push after restart — the right direction for the sole alarm channel. */
+  const dispatch = async (alert: Alert, kind: 'new' | 'resolved'): Promise<'sent' | 'suppressed' | 'failed'> => {
+    if (!isConfigured(cfg)) return 'suppressed';
     // v0.9.59 — silencing is now family-keyed so a single noisy condition
     // spread across multiple packs aggregates correctly. The decision
     // still operates per-alert (we silence THIS alert's notification),
     // but the threshold for the decision comes from the family rollup.
     const t = telemetry.get(familyOf(alert.id));
     // v0.7.5 silencing or v0.9.3 chronic-noise silencing — skip notify entirely.
-    if (t?.downgradedSilenced || t?.chronicNoiseSilenced) return;
+    if (t?.downgradedSilenced || t?.chronicNoiseSilenced) return 'suppressed';
     // v0.11.0 — ISA priority annunciation gate. When the operator has turned
     // off this alarm's priority on the Alert Settings page, suppress the push
     // notification (the alert still stays in snapshot.alerts and renders in the
     // UI — we silence the annunciation, never hide an active alarm).
-    if (!isPriorityEnabled(priorityOf(alert))) return;
+    if (!isPriorityEnabled(priorityOf(alert))) return 'suppressed';
     // v0.9.3 warning→info demotion — alert still notifies but at info priority
     // (no [CRITICAL] prefix, lower ntfy priority). The decision applies only
     // to new alerts, not resolved-cleared notifications.
@@ -801,13 +903,22 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       });
       sentSinceStart++;
       log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune)` : ''}`);
+      return 'sent';
     } catch (e: any) {
-      log(`notify: send failed — ${e?.message ?? e}`);
+      // v0.80.0 — identity + retry intent in the failure line (the old
+      // identity-free info line hid which push a real HTTP 400 ate).
+      log(`notify: WARNING — send failed for "${title}" — ${e?.message ?? e}; will retry next evaluate tick`);
+      return 'failed';
     }
   };
 
-  const dispatchDigest = async () => {
-    if (quietQueue.length === 0) return;
+  /** v0.80.0 — returns whether the digest is SETTLED for this hour (sent,
+   *  nothing to send, or deliberately dropped). A send FAILURE returns false so
+   *  the caller does NOT latch lastDigestHour — the held overnight alerts retry
+   *  on every tick within the digest hour instead of silently waiting 24 h
+   *  (the one delivery path the at-least-once rework had left fire-and-forget). */
+  const dispatchDigest = async (): Promise<boolean> => {
+    if (quietQueue.length === 0) return true;
     // v0.15.18 — the digest used to vanish without a trace when no channel was
     // configured: 58 queued warnings (incl. 17× cell-imbalance) dropped over
     // 50 h with nothing in the log. Now it says so, loudly, once per digest.
@@ -818,7 +929,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           `"ha" (HA persistent notification, zero setup), ntfy, pushover, or webhook to receive them. Dropping queue.`,
       );
       quietQueue.length = 0;
-      return;
+      return true;
     }
     // v0.15.18 — include device identity so a digest line is actionable on its
     // own ("Cell imbalance" alone can't say WHICH of 15 packs).
@@ -848,21 +959,53 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       const digestSentMs = Date.now();
       for (const qa of quietQueue) {
         const qt = tracked.get(qa.id);
+        // v0.80.0 — RATCHET, never regress: a queued warning that escalated and
+        // was dispatched directly (critical break-through, or the post-quiet
+        // pre-digest window) already holds the higher severity; re-marking it
+        // from this stale queue entry would re-arm isAlertEscalation and emit a
+        // duplicate critical push. See moreSevere().
         if (qt) {
           qt.notified = true;
-          qt.notifiedSeverity = qa.severity;
+          qt.notifiedSeverity = qt.notifiedSeverity ? moreSevere(qt.notifiedSeverity, qa.severity) : qa.severity;
           qt.queued = false;
+          qt.pushSent = true; // the digest line IS the delivered fire; its resolve is owed
         }
-        persistedNotified.set(qa.id, digestSentMs);
+        const prior = persistedNotified.get(qa.id);
+        const sev = prior?.sev ? moreSevere(prior.sev, qa.severity) : qa.severity;
+        persistedNotified.set(qa.id, { ts: digestSentMs, sent: true, sev });
       }
       persistNotified();
       quietQueue.length = 0;
+      return true;
     } catch (e: any) {
-      log(`notify: morning digest failed — ${e?.message ?? e}`);
+      // v0.80.0 — the queue is retained (cleared only in the success path) and
+      // the caller retries next tick within the digest hour.
+      log(`notify: WARNING — morning digest failed — ${e?.message ?? e}; will retry next evaluate tick`);
+      return false;
     }
   };
 
+  // v0.80.0 — evaluate() re-entrancy guard. The at-least-once rework marks
+  // `notified` AFTER the awaited send, so without this latch an overlapping
+  // setInterval tick (a tick outlives EVAL_INTERVAL_MS whenever sends hang
+  // against a restarting HA Core — exactly the retry window) would see
+  // notified=false mid-send and double-dispatch the same fire, and a clear
+  // during the overlap would recordClear() twice, corrupting the auto-tune
+  // telemetry fractions. Skipping a tick while one is in flight is safe: the
+  // next interval re-evaluates from the live snapshot.
+  let evaluating = false;
+
   const evaluate = async () => {
+    if (evaluating) return;
+    evaluating = true;
+    try {
+      await evaluateInner();
+    } finally {
+      evaluating = false;
+    }
+  };
+
+  const evaluateInner = async () => {
     const snap = store.get();
     let forecastDay: Alert[] = [];
     let stormPrep: Alert[] = [];
@@ -1013,7 +1156,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // already notified before restart", which misled restart-triage: the gate
         // keys purely on the persisted record, so it also fires in steady state
         // far from any restart. The suppression ACTION is unchanged.
-        const alreadyNotified = persistedNotified.has(a.id);
+        const rec = persistedNotified.get(a.id);
+        const alreadyNotified = rec != null;
         if (alreadyNotified && !firstRun) {
           log(`notify: "${a.title}" already has a notification on record (notify-state) — suppressing duplicate push`);
         }
@@ -1021,7 +1165,17 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           alert: a,
           firstSeen: now,
           notified: firstRun || alreadyNotified,
-          notifiedSeverity: firstRun || alreadyNotified ? a.severity : undefined,
+          // v0.80.0 — rehydrate the severity we actually notified at (the record
+          // carries it), so the owed-resolve rule survives a restart even when
+          // the alert has since downgraded below minSeverity; fall back to the
+          // current severity for legacy/absent records.
+          notifiedSeverity: alreadyNotified ? (rec.sev ?? a.severity) : firstRun ? a.severity : undefined,
+          // v0.80.0 — pushSent only when the record says the push was DELIVERED
+          // (`sent`; a policy-suppressed dispatch also persists a record for
+          // dedupe, but its rehydration must not owe a "Resolved:"). A
+          // firstRun-only seed suppresses the fire push but must not enable an
+          // all-clear for a push that never went out.
+          pushSent: rec?.sent === true,
         });
         continue;
       }
@@ -1030,6 +1184,20 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // resolve-dwell countdown (a sustained load-anomaly that briefly dipped
       // back to baseline and recovered must not resolve).
       existing.clearedSince = undefined;
+      // v0.80.0 — keep the notify-state record ALIVE while its alert stays
+      // active: the record is stamped once at dispatch and NOTIFY_STATE_MAX_AGE
+      // (24 h) drops it at load, so an alert outliving 24 h (a >25 h cloud wedge
+      // is documented for this fleet) that spans one of this host's ~daily
+      // reboots would rehydrate with pushSent=false and lose its owed
+      // "Resolved:". Refresh at most every NOTIFY_STATE_REFRESH_MS (12 h), so
+      // records for alerts that genuinely vanished still expire on schedule.
+      if (existing.notified) {
+        const liveRec = persistedNotified.get(a.id);
+        if (liveRec && now - liveRec.ts > NOTIFY_STATE_REFRESH_MS) {
+          persistedNotified.set(a.id, { ...liveRec, ts: now });
+          persistNotified();
+        }
+      }
       // v0.16.4 — non-annunciating alerts (annunciate === false, e.g. an
       // expected-offline bench spare) stay tracked + visible in snapshot.alerts
       // but must never push or queue a notification. Gate HERE, above the
@@ -1098,13 +1266,30 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         quietQueue.push(a);
         log(`notify: queued for morning digest — "${a.title}" (severity ${a.severity})`);
       } else if (action === 'dispatch') {
-        existing.notified = true;
-        existing.notifiedSeverity = a.severity;
+        // v0.80.0 — at-LEAST-once delivery: attempt the send FIRST; mark +
+        // durably persist only when it was sent (or policy-suppressed = handled).
+        // The old order (persist, then send) let one real HTTP 400 during an HA
+        // Core restart permanently eat a push — notify-state said "already
+        // notified", so it was never retried and never re-pushed. On 'failed'
+        // NOTHING advances and the next evaluate tick naturally retries:
+        //   • first dispatch (notified=false, queued=false) — eligible again;
+        //   • ESCALATED re-dispatch of an already-notified alert — eligible again
+        //     only because notifiedSeverity still holds the OLD severity. Do NOT
+        //     set notifiedSeverity pre-send: advancing it on a failed escalation
+        //     would make the next tick read critical<critical = not-escalated and
+        //     silently swallow the retry of a CRITICAL break-through push.
         existing.queued = false;
-        // v0.15.21 — record the push durably so a restart can't repeat it.
-        persistedNotified.set(a.id, now);
-        persistNotified();
-        await dispatch(a, 'new');
+        const outcome = await dispatch(a, 'new');
+        if (outcome !== 'failed') {
+          existing.notified = true;
+          existing.notifiedSeverity = a.severity;
+          if (outcome === 'sent') existing.pushSent = true;
+          // v0.15.21 — record the push durably so a restart can't repeat it.
+          // v0.80.0 — the record carries delivered-vs-suppressed + the severity,
+          // so a restart rehydrates pushSent/notifiedSeverity faithfully.
+          persistedNotified.set(a.id, { ts: now, sent: outcome === 'sent', sev: a.severity });
+          persistNotified();
+        }
       }
     }
 
@@ -1112,8 +1297,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     if (Number.isInteger(DIGEST_HOUR) && DIGEST_HOUR >= 0 && DIGEST_HOUR <= 23) {
       const h = nowDate.getHours();
       if (h === DIGEST_HOUR && lastDigestHour !== h) {
-        await dispatchDigest();
-        lastDigestHour = h;
+        // v0.80.0 — latch the hour only when the digest SETTLED; a failed send
+        // retries each tick within the hour rather than waiting until tomorrow.
+        if (await dispatchDigest()) lastDigestHour = h;
       } else if (h !== DIGEST_HOUR) {
         lastDigestHour = -1;
       }
@@ -1176,8 +1362,22 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // either, even if a boot seeded its `notified` flag true. The current
       // spare is info-severity (so qualifies() already returns false), but this
       // keeps the mute correct for any future warning/critical annunciate:false.
-      if (t.notified && t.alert.annunciate !== false && cfg.notifyResolved && qualifies(t.alert.severity, cfg.minSeverity)) {
-        await dispatch(t.alert, 'resolved');
+      // v0.80.0 — delivery-integrity: the gate is the pure shouldSendResolve()
+      // (pushSent + notified-at severity; see its doc), and a FAILED resolve send
+      // keeps the tracked entry (continue) so the next tick retries —
+      // recordClear/delete only run once the resolve is settled.
+      // v0.80.0 — forget the notified-state record BEFORE attempting the resolve
+      // send: the event is over, and the record's only job (suppressing a
+      // duplicate fire push for THIS event) is done. If the record instead
+      // outlived a failed resolve into a restart, a GENUINE re-rise within the
+      // 24 h TTL — including one arriving straight at critical — would read
+      // "already notified" and be silently eaten. Losing the resolve retry
+      // across a restart is the bounded, safe direction; eating a future fire
+      // is not. Within-process retry is unaffected (it gates on the tracked
+      // entry's pushSent, not the record).
+      if (persistedNotified.delete(id)) persistNotified();
+      if (shouldSendResolve(t, cfg.notifyResolved, cfg.minSeverity)) {
+        if ((await dispatch(t.alert, 'resolved')) === 'failed') continue;
       }
       // v0.13.2 — account EVERY cleared rise in telemetry, not just clears that
       // outlived the debounce window. The old code only called recordClear when
@@ -1197,9 +1397,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // v0.13.2 — moved out of the debounce-gated block (see above).
       recordClear(t.alert, duration, now);
       tracked.delete(id);
-      // v0.15.21 — the event is over; forget its notified-state so a future
-      // genuine re-rise notifies again.
-      if (persistedNotified.delete(id)) persistNotified();
+      // (v0.15.21's notified-state forget moved ABOVE the resolve attempt in
+      // v0.80.0 — see the comment there.)
     }
 
     firstRun = false;

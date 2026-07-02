@@ -128,26 +128,44 @@ function tmpState(): string {
   return join(stateDir, `notify-state-${seq++}.json`);
 }
 
-test('notify-state — round-trips notified alerts across a "restart"', () => {
+test('notify-state — round-trips notified alerts across a "restart" (v0.80.0 record shape)', () => {
   const path = tmpState();
   const now = Date.now();
-  const state = new Map([['forecast-runtime-dip', now - 60_000], ['soc-low-20', now - 5_000]]);
+  const state = new Map([
+    ['forecast-runtime-dip', { ts: now - 60_000, sent: true, sev: 'warning' as const }],
+    ['soc-low-20', { ts: now - 5_000, sent: false }],
+  ]);
   saveNotifiedState(path, state);
   const loaded = loadNotifiedState(path, now);
   assert.equal(loaded.size, 2);
-  assert.equal(loaded.get('forecast-runtime-dip'), now - 60_000);
+  assert.deepEqual(loaded.get('forecast-runtime-dip'), { ts: now - 60_000, sent: true, sev: 'warning' });
+  // A policy-suppressed record round-trips sent=false — its rehydration must
+  // not owe a "Resolved:" (the phantom-resolve laundering fix).
+  assert.deepEqual(loaded.get('soc-low-20'), { ts: now - 5_000, sent: false, sev: undefined });
 });
 
-test('notify-state — stale entries (> 24 h) are dropped at load', () => {
+test('notify-state — LEGACY bare-number records load as delivered pushes (pre-v0.80 files)', () => {
+  const path = tmpState();
+  const now = Date.now();
+  writeFileSync(path, JSON.stringify({ 'legacy-alert': now - 60_000 }));
+  const loaded = loadNotifiedState(path, now);
+  assert.deepEqual(loaded.get('legacy-alert'), { ts: now - 60_000, sent: true });
+});
+
+test('notify-state — stale entries (> 24 h) are dropped at load, both shapes', () => {
   const path = tmpState();
   const now = Date.now();
   saveNotifiedState(path, new Map([
-    ['old-event', now - NOTIFY_STATE_MAX_AGE_MS - 1000],
-    ['fresh-event', now - 1000],
+    ['old-event', { ts: now - NOTIFY_STATE_MAX_AGE_MS - 1000, sent: true }],
+    ['fresh-event', { ts: now - 1000, sent: true }],
   ]));
   const loaded = loadNotifiedState(path, now);
   assert.equal(loaded.size, 1);
   assert.ok(loaded.has('fresh-event'));
+  // legacy numeric stale entry also drops
+  const path2 = tmpState();
+  writeFileSync(path2, JSON.stringify({ 'old-legacy': now - NOTIFY_STATE_MAX_AGE_MS - 1000 }));
+  assert.equal(loadNotifiedState(path2, now).size, 0);
 });
 
 test('notify-state — corrupt or missing files seed fresh, never throw', () => {
