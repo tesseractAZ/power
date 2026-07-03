@@ -66,11 +66,13 @@ export interface BackupPoolHold {
 /* v0.81.0 — coherent-but-implausible SoC slew guard, at the SHARED backup-pool
  * seam. These MIRROR batterySocAlarm.ts's guard constants (kept in sync via the
  * same env var + literals) — see backupPoolWithGraceHold below for why the guard
- * belongs here, not only in the alarm. A single-tick backup-pool SoC change larger
- * than BACKUP_POOL_MAX_SLEW_PCT from a FRESH, HEALTHY held baseline is physically
- * impossible on the ~92 kWh pool (max ~0.5 %/60 s poll) and is a stale-reconnect
- * artifact; only DROPS are guarded (the false-low-alarm direction the SoC alarm
- * already rejects). */
+ * belongs here, not only in the alarm, and for the SYMMETRIC drop/rise gating. A
+ * single-tick backup-pool SoC change larger than BACKUP_POOL_MAX_SLEW_PCT from a
+ * FRESH held baseline is physically impossible on the ~92 kWh pool (max ~0.5 %/60 s
+ * poll) and is a stale-reconnect artifact. A DROP is rejected only from a HEALTHY
+ * (>= BACKUP_POOL_HEALTHY_BASELINE_PCT) baseline — never mask a low near the danger
+ * zone; a RISE is rejected regardless of baseline health (holding the lower value
+ * can only over-alarm, never mask a low). */
 export const BACKUP_POOL_MAX_SLEW_PCT = Number(process.env.BATTERY_SOC_MAX_DROP_PCT ?? 25);
 const BACKUP_POOL_HEALTHY_BASELINE_PCT = 30;
 const BACKUP_POOL_SLEW_MAX_AGE_MS = 10 * 60 * 1000;
@@ -99,20 +101,20 @@ export function backupPoolWithGraceHold(
   if (coherent) {
     // v0.81.0 — a coherent read can still be a stale cloud-reconnect ARTIFACT: an
     // internally-consistent pct/remain/full trio that plummets implausibly in one
-    // poll (live 2026-07-03: the SHP2 aggregate blipped 44→17→57→35% during a DPU
+    // poll (live 2026-07-02: the SHP2 aggregate blipped 44→17→57→35% during a DPU
     // cloud-resync). The coherence gate above can't catch it (all three fields ARE
     // present + consistent). It used to slip through as 'live' → recorded to history
     // AND fed forecast-runtime (which fired a false "1h 21m to reserve" push) — while
     // batterySocAlarm's OWN identical guard correctly rejected it for the SoC ladder.
     // Applying the guard HERE, at the seam every consumer reads, gives the recorder /
     // gauge / forecast the SAME held value the alarm already used — one plausibility
-    // guard, not an alarm-only one. Guarded ONLY for a DROP from a FRESH (< max-age),
-    // HEALTHY (≥ baseline) held pool: a real discharge is gradual and never trips it;
-    // a real deep discharge reaches low from an already-low baseline where the guard
-    // is inactive; and after a genuine long SHP2 offline the held baseline is STALE
-    // (> max-age), so a real low-SoC reconnect is HONORED (re-baselined), never masked.
-    // `hold` is returned UNCHANGED (atMs not advanced) so a sustained bad value keeps
-    // being rejected and it self-heals the instant a real read returns.
+    // guard, not an alarm-only one. It fires only against a FRESH (< max-age) held
+    // baseline: a real discharge is gradual and never trips it; a real deep discharge
+    // reaches low from an already-low baseline where the DROP half is inactive; and
+    // after a genuine long SHP2 offline the held baseline is STALE (> max-age), so a
+    // real low-SoC reconnect is HONORED (re-baselined), never masked. `hold` is
+    // returned UNCHANGED (atMs not advanced) so a sustained bad value keeps being
+    // rejected and it self-heals the instant a real read returns.
     //
     // The guard is SYMMETRIC — it rejects an implausible RISE as well as a drop — but
     // the two directions are gated differently, and that asymmetry is safety-critical:
