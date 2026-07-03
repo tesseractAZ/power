@@ -123,7 +123,7 @@ export function AdvancedInsightsCard() {
             <Tile label="Load" value={`${sc.loadKwh.toFixed(1)} kWh`} />
             <Tile label="To battery" value={`${sc.pvToBatteryKwh.toFixed(1)} kWh`} />
             <Tile label="Bat discharge" value={`${sc.batteryDischargeKwh.toFixed(1)} kWh`} />
-            <Tile label="Grid import" value={`${sc.gridImportKwh.toFixed(1)} kWh`} />
+            <Tile label="Grid import" value={sc.gridForKpiKwh != null ? `${sc.gridForKpiKwh.toFixed(1)} kWh` : '—'} sub={sc.gridToHomeKwh > 0 ? 'whole-home @ SHP2 main' : undefined} />
             <Tile label="Solar fraction" value={sc.solarFractionOfLoadPct != null ? `${sc.solarFractionOfLoadPct}%` : '—'} />
             <Tile label="Direct use" value={sc.directUseRatioPct != null ? `${sc.directUseRatioPct}%` : '—'} />
           </div>

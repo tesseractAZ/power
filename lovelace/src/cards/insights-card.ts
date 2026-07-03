@@ -584,8 +584,8 @@ export class EcoflowInsightsCard extends EcoflowCardBase {
           ></ef-tile>
           <ef-tile
             label="Grid import"
-            value=${sc.gridImportKwh.toFixed(1)}
-            unit="kWh"
+            value=${sc.gridForKpiKwh != null ? sc.gridForKpiKwh.toFixed(1) : '—'}
+            unit=${sc.gridForKpiKwh != null ? 'kWh' : ''}
           ></ef-tile>
           <ef-tile
             label="Solar fraction"
