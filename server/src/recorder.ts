@@ -862,6 +862,20 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // per-pack warn throttle keyed `${sn}|${num}` so a stuck read doesn't spew.
   const FALLBACK_FULL_PACK_WH = 6200; // ~one DPU pack when fullCap is unavailable
   const bmsCorruptWarned: Set<string> = new Set();
+  // v0.81.0 — the v0.45.0 corrupt-read guard (above) can't tell a one-poll garbage
+  // spike from a GENUINE multi-day reconnect: both look like fresh jumping > one
+  // pack capacity above held. For a transient the next poll returns to normal; for
+  // a reconnect the gap is permanent, so `suspect` latches true FOREVER, held stays
+  // frozen, and every post-reconnect kWh is silently dropped from HA Energy (the
+  // live operator condition: Cores 1+2 offline for days, then back). We disambiguate
+  // by PERSISTENCE: count consecutive suspect rollups per pack; once a pack has been
+  // suspect for REBASELINE_SUSPECT_ROLLUPS in a row it's a real reconnect, so we
+  // re-baseline the pack (base := register − held) making fresh == held again — the
+  // unobservable offline throughput is dropped (never injected as an HA
+  // total_increasing spike) and live counting resumes from `held`. In-memory only:
+  // a restart re-detects the same still-frozen pack and re-heals within N rollups.
+  const bmsSuspectStreak: Map<string, number> = new Map();
+  const REBASELINE_SUSPECT_ROLLUPS = Math.max(1, Number(process.env.BMS_REBASELINE_SUSPECT_ROLLUPS ?? 3));
 
   /**
    * v0.45.0 — per-pack detail for one snapshot (the single source of truth for
@@ -876,7 +890,13 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
    */
   const computeBmsBatteryDetail = (
     snap: FleetSnapshot,
-    opts: { mutate: boolean },
+    // mutate: persist baselines / held (rollup AND the hot getLifetimeTotals read
+    // path both mutate — the offline-freeze fix advances held on reads too).
+    // rollup: TRUE only from rollupLifetime's periodic cadence — it gates the
+    // v0.81.0 reconnect re-baseline so its per-pack suspect STREAK counts real
+    // rollups, NOT reads (getLifetimeTotals calls this twice per read; counting
+    // those would trip the re-baseline in a few milliseconds on a single bad poll).
+    opts: { mutate: boolean; rollup?: boolean },
   ): {
     chargeWh: number;
     dischargeWh: number;
@@ -940,6 +960,40 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
               useChg = held.chgWh;
               useDsg = held.dsgWh;
             }
+          }
+          // v0.81.0 — persistence-based reconnect escape. A one-poll garbage read
+          // clears on the next rollup (streak never reaches the threshold); a
+          // genuine multi-day reconnect stays suspect EVERY rollup, which is how the
+          // v0.45.0 guard used to freeze the counters forever. Once a pack has been
+          // suspect for REBASELINE_SUSPECT_ROLLUPS consecutive ROLLUPS (and both
+          // registers are present), we re-baseline base := register − held so
+          // packDeltaWh(pk, base) == held from now on: this rollup still reports the
+          // frozen `held` (NO total_increasing spike into HA), the unobservable
+          // offline throughput is dropped, and the NEXT rollup's fresh grows from
+          // `held` → live counting resumes. Gated on opts.rollup (NOT opts.mutate):
+          // getLifetimeTotals mutates on every read and would otherwise pump the
+          // streak to threshold in milliseconds on a single bad poll. Streak is
+          // in-memory (a restart re-detects the still-frozen pack and re-heals within
+          // N rollups). Debug/read paths never re-baseline nor advance the streak.
+          if (suspect && opts.rollup && held) {
+            const streak = (bmsSuspectStreak.get(cacheKey) ?? 0) + 1;
+            bmsSuspectStreak.set(cacheKey, streak);
+            if (streak >= REBASELINE_SUSPECT_ROLLUPS && base && pk.accuChgMah != null && pk.accuDsgMah != null) {
+              const rebased: PackBaseline = {
+                chgMah: pk.accuChgMah - held.chgWh / PACK_MAH_TO_WH,
+                dsgMah: pk.accuDsgMah - held.dsgWh / PACK_MAH_TO_WH,
+              };
+              savePackBaseline(d.sn, pk.num, rebased);
+              base = rebased;                 // reported baseline reflects the reset
+              useChg = held.chgWh;            // this rollup: exactly held, no spike
+              useDsg = held.dsgWh;
+              suspect = false;                // resolved — counting resumes next tick
+              bmsSuspectStreak.delete(cacheKey);
+              bmsCorruptWarned.delete(cacheKey);
+              log(`recorder: v0.81.0 re-baselined reconnected pack sn=${d.sn} pack=${pk.num} after ${streak} suspect rollups — dropped unobserved offline gap, resume from held (heldChg=${held.chgWh.toFixed(0)} heldDsg=${held.dsgWh.toFixed(0)} Wh; newBaseChg=${rebased.chgMah.toFixed(0)} newBaseDsg=${rebased.dsgMah.toFixed(0)} mAh)`);
+            }
+          } else if (!suspect && opts.rollup) {
+            bmsSuspectStreak.delete(cacheKey);
           }
           if (suspect && opts.mutate && !bmsCorruptWarned.has(cacheKey)) {
             bmsCorruptWarned.add(cacheKey);
@@ -1098,8 +1152,11 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     return { chargeWh, dischargeWh, packs, offlineHeldMembers };
   };
 
-  const computeBmsBatteryTotals = (snap: FleetSnapshot): { chargeWh: number; dischargeWh: number } => {
-    const { chargeWh, dischargeWh } = computeBmsBatteryDetail(snap, { mutate: true });
+  const computeBmsBatteryTotals = (
+    snap: FleetSnapshot,
+    opts: { rollup?: boolean } = {},
+  ): { chargeWh: number; dischargeWh: number } => {
+    const { chargeWh, dischargeWh } = computeBmsBatteryDetail(snap, { mutate: true, rollup: opts.rollup });
     return { chargeWh, dischargeWh };
   };
 
@@ -1250,8 +1307,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       writeLifetime(key, prev.wh + addedWh, now);
     }
 
-    // BMS-sourced battery counters — store max(BMS, persistedFloor).
-    const bms = computeBmsBatteryTotals(snap);
+    // BMS-sourced battery counters — store max(BMS, persistedFloor). rollup:true so
+    // the v0.81.0 reconnect re-baseline advances its suspect streak on THIS periodic
+    // cadence only (getLifetimeTotals mutates on reads but must NOT drive the streak).
+    const bms = computeBmsBatteryTotals(snap, { rollup: true });
     if (bms.chargeWh > bmsChargeFloor) bmsChargeFloor = bms.chargeWh;
     if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;
     // v0.45.0 — REMOVED the discharge≤charge clamp. accuChgMah/accuDsgMah are
