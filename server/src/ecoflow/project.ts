@@ -63,6 +63,18 @@ export interface BackupPoolHold {
   atMs: number;
 }
 
+/* v0.81.0 — coherent-but-implausible SoC slew guard, at the SHARED backup-pool
+ * seam. These MIRROR batterySocAlarm.ts's guard constants (kept in sync via the
+ * same env var + literals) — see backupPoolWithGraceHold below for why the guard
+ * belongs here, not only in the alarm. A single-tick backup-pool SoC change larger
+ * than BACKUP_POOL_MAX_SLEW_PCT from a FRESH, HEALTHY held baseline is physically
+ * impossible on the ~92 kWh pool (max ~0.5 %/60 s poll) and is a stale-reconnect
+ * artifact; only DROPS are guarded (the false-low-alarm direction the SoC alarm
+ * already rejects). */
+export const BACKUP_POOL_MAX_SLEW_PCT = Number(process.env.BATTERY_SOC_MAX_DROP_PCT ?? 25);
+const BACKUP_POOL_HEALTHY_BASELINE_PCT = 30;
+const BACKUP_POOL_SLEW_MAX_AGE_MS = 10 * 60 * 1000;
+
 /**
  * v0.56.0 — apply the grace-hold over the coherence-gated trio. `live` is the freshly-gated result
  * from `coherentBackupPool`; `held` is the last coherent trio we stashed (or null). A held value is,
@@ -85,6 +97,48 @@ export function backupPoolWithGraceHold(
 } {
   const coherent = live.pct != null && live.fullCapWh != null && live.remainWh != null;
   if (coherent) {
+    // v0.81.0 — a coherent read can still be a stale cloud-reconnect ARTIFACT: an
+    // internally-consistent pct/remain/full trio that plummets implausibly in one
+    // poll (live 2026-07-03: the SHP2 aggregate blipped 44→17→57→35% during a DPU
+    // cloud-resync). The coherence gate above can't catch it (all three fields ARE
+    // present + consistent). It used to slip through as 'live' → recorded to history
+    // AND fed forecast-runtime (which fired a false "1h 21m to reserve" push) — while
+    // batterySocAlarm's OWN identical guard correctly rejected it for the SoC ladder.
+    // Applying the guard HERE, at the seam every consumer reads, gives the recorder /
+    // gauge / forecast the SAME held value the alarm already used — one plausibility
+    // guard, not an alarm-only one. Guarded ONLY for a DROP from a FRESH (< max-age),
+    // HEALTHY (≥ baseline) held pool: a real discharge is gradual and never trips it;
+    // a real deep discharge reaches low from an already-low baseline where the guard
+    // is inactive; and after a genuine long SHP2 offline the held baseline is STALE
+    // (> max-age), so a real low-SoC reconnect is HONORED (re-baselined), never masked.
+    // `hold` is returned UNCHANGED (atMs not advanced) so a sustained bad value keeps
+    // being rejected and it self-heals the instant a real read returns.
+    //
+    // The guard is SYMMETRIC — it rejects an implausible RISE as well as a drop — but
+    // the two directions are gated differently, and that asymmetry is safety-critical:
+    //   • DROP (masks a low): allowed to reject ONLY from a HEALTHY baseline
+    //     (held.pct ≥ 30). Below the healthy floor we NEVER mask a drop — fail toward
+    //     alarming near the danger zone, where a masked low would be an emergency.
+    //   • RISE (rejects a high): rejected REGARDLESS of baseline health, no healthy
+    //     gate. A > MAX_SLEW rise on the ~92 kWh pool is non-physical (≈1.4 MW), and
+    //     holding the LOWER prior value is the conservative direction — it can only
+    //     over-alarm, never mask a low. This gate is what stops the v0.81.0 seam
+    //     regression an adversarial review found: WITHOUT it, a stale-HIGH cloud
+    //     reconnect replay (e.g. the pool genuinely at 8% but the SHP2 backupIncreInfo
+    //     replays a coherent 40%) sails through unpoliced (the 8% baseline is below
+    //     the healthy floor, so the drop guard is inactive), BECOMES the fresh
+    //     "healthy" held, and then arms the drop guard to mask every subsequent REAL
+    //     low (6/4/2%) — and because snapshot.ts mutates backupRemainWh through this
+    //     seam, that would silence the off-grid runway/floor CRITICAL for up to 10 min
+    //     (the last independent low-pool alarm channel).
+    if (held != null && nowMs - held.atMs <= BACKUP_POOL_SLEW_MAX_AGE_MS) {
+      const drop = held.pct - live.pct!; // > 0 when live is LOWER than the baseline
+      const implausibleDrop = held.pct >= BACKUP_POOL_HEALTHY_BASELINE_PCT && drop > BACKUP_POOL_MAX_SLEW_PCT;
+      const implausibleRise = -drop > BACKUP_POOL_MAX_SLEW_PCT; // live is > MAX above baseline
+      if (implausibleDrop || implausibleRise) {
+        return { out: { pct: held.pct, fullCapWh: held.fullCapWh, remainWh: held.remainWh }, hold: held, source: 'held' };
+      }
+    }
     return { out: live, hold: { pct: live.pct!, fullCapWh: live.fullCapWh!, remainWh: live.remainWh!, atMs: nowMs }, source: 'live' };
   }
   if (held && nowMs - held.atMs <= windowMs) {
