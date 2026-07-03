@@ -384,7 +384,16 @@ export interface SelfConsumption {
   loadKwh: number;
   batteryChargeKwh: number;
   batteryDischargeKwh: number;
-  gridImportKwh: number;
+  gridImportKwh: number;   // DPU ac_in — grid that CHARGED the DPUs (a subset of total home grid)
+  /** v0.34.0 — total whole-home grid import metered at the SHP2 main (grid_home_w). */
+  gridToHomeKwh: number;
+  /** v0.40.0 — coverage-GATED whole-home grid term the KPIs use (SHP2 main when
+   *  grid_home_w covers the window, gridImportKwh on a DPU-only install, null when an
+   *  SHP2 home lacks enough grid_home_w history). SHOW this for "grid import" —
+   *  gridImportKwh reads ~0 when grid serves loads directly rather than charging DPUs. */
+  gridForKpiKwh: number | null;
+  /** v0.40.0 — grid_home_w coverage as a fraction of panel_load coverage (0..1). */
+  gridHomeCoverageFrac: number;
   pvToLoadKwh: number;
   pvToBatteryKwh: number;
   solarFractionOfLoadPct: number | null;
