@@ -10,16 +10,19 @@ import {
 /* v0.81.0 — coherent-but-implausible SoC slew guard at the SHARED backup-pool seam.
  *
  * A stale SHP2 cloud-reconnect can return an internally-CONSISTENT trio whose pct
- * plummets impossibly in one poll (live 2026-07-03: 44→17% during a DPU resync).
+ * jumps impossibly in one poll (live 2026-07-02: 44→17→57→35% during a DPU resync).
  * The v0.54.4 coherence gate can't catch it (all three fields present + consistent),
  * so it used to publish as 'live' → recorded to history AND fed forecast-runtime,
  * which fired a false "1h 21m to reserve" push — while batterySocAlarm's own guard
  * correctly rejected it. Moving the guard here means every consumer (recorder /
  * gauge / forecast) sees the same held value the alarm already used.
  *
- * Guarded ONLY for a DROP from a FRESH (< 10 min) HEALTHY (≥ 30%) held baseline;
- * the hold is returned UNCHANGED so a sustained bad value keeps being rejected and
- * it self-heals the instant a real read returns. */
+ * The guard is SYMMETRIC from a FRESH (< 10 min) held baseline: a DROP is rejected
+ * only from a HEALTHY (≥ 30%) baseline (never mask a low near the danger zone); a
+ * RISE is rejected regardless of baseline health (holding the lower value can only
+ * over-alarm, never mask a low — this is the anti-poisoning gate). The hold is
+ * returned UNCHANGED so a sustained bad value keeps being rejected and it self-heals
+ * the instant a real read returns. */
 
 const FULL = 92160;
 const WIN = 180_000;
