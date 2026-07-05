@@ -19,8 +19,20 @@ export interface NwsAlert {
   severity: 'Extreme' | 'Severe' | 'Moderate' | 'Minor' | 'Unknown';
   certainty: 'Observed' | 'Likely' | 'Possible' | 'Unlikely' | 'Unknown';
   urgency: 'Immediate' | 'Expected' | 'Future' | 'Past' | 'Unknown';
-  onset: string | null;      // ISO
-  expires: string | null;    // ISO
+  // NWS CAP time semantics (all ISO8601). These are THREE different clocks and
+  // conflating them is what made the displayed stamps look "swapped":
+  //   • onset     — when the weather EVENT begins (may be null / in the past for
+  //                 an already-in-effect warning).
+  //   • effective — when the alert MESSAGE became valid (issue-ish time).
+  //   • ends      — when the weather EVENT ends. THIS is "storm over".
+  //   • expires   — when the alert MESSAGE expires; NWS re-issues ~hourly, so it
+  //                 is often only ~30 min out — NOT when the event ends. Pairing
+  //                 onset (event start, maybe tomorrow) with expires (message
+  //                 expiry, ~30 min) reads as start-after-end. Use onset→ends.
+  onset: string | null;      // ISO — event begins
+  effective: string | null;  // ISO — message became valid
+  ends: string | null;       // ISO — event ends ("in effect until")
+  expires: string | null;    // ISO — message expiry (re-issue deadline, short)
   headline: string | null;
   description: string | null;
   instruction: string | null;
@@ -32,6 +44,29 @@ export interface NwsAlertFeed {
   lat: number;
   lon: number;
   alerts: NwsAlert[];
+}
+
+/**
+ * v0.85.0 — resolve an alert's TRUE event window (pure + exported for tests).
+ * The event span is onset→ends; effective/expires are only fallbacks. `expires`
+ * alone is the ~30-min message-refresh deadline (NOT the event end), so it is
+ * last-resort only — pairing it with onset made a future storm read
+ * start-after-end. `inEffectNow` is true once it has begun (onset in the past or
+ * absent). The web nwsWindow() helper mirrors this exactly.
+ */
+export function nwsEventWindow(
+  a: Pick<NwsAlert, 'onset' | 'effective' | 'ends' | 'expires'>,
+  nowMs: number,
+): { beginsMs: number | null; endsMs: number | null; inEffectNow: boolean } {
+  const rawBegins = a.onset ? Date.parse(a.onset) : a.effective ? Date.parse(a.effective) : NaN;
+  const rawEnds = a.ends ? Date.parse(a.ends) : a.expires ? Date.parse(a.expires) : NaN;
+  const bOk = Number.isFinite(rawBegins);
+  const eOk = Number.isFinite(rawEnds);
+  return {
+    beginsMs: bOk ? rawBegins : null,
+    endsMs: eOk ? rawEnds : null,
+    inEffectNow: !bOk || rawBegins <= nowMs,
+  };
 }
 
 let cache: NwsAlertFeed | null = null;
@@ -67,6 +102,8 @@ export async function getNwsAlerts(log: (m: string) => void = () => {}): Promise
         certainty: p.certainty ?? 'Unknown',
         urgency: p.urgency ?? 'Unknown',
         onset: p.onset ?? null,
+        effective: p.effective ?? null,
+        ends: p.ends ?? null,
         expires: p.expires ?? null,
         headline: p.headline ?? null,
         description: p.description ?? null,

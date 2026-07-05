@@ -21,6 +21,12 @@ import { fmtTemp, fmtW, fmtWh } from '../format';
 import { sortDevices } from '../sort';
 import { SolarResponseCard } from '../cards/SolarResponseCard';
 import { CurtailmentCard } from '../cards/CurtailmentCard';
+// v0.85.0 — the dissolved Predictive tab's solar sections relocate here:
+// day-ahead forecast + learned response model + soiling (ForecastDetail), plus
+// the forecast-skill / weather-ensemble / equipment / shade / soiling /
+// string-mismatch analytics (filtered AdvancedInsightsCard).
+import { ForecastDetail } from '../cards/ForecastDetail';
+import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 import { apiUrl } from '../api';
 import { CHART, HUES } from '../theme';
 
@@ -291,6 +297,33 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
       {/* Solar curtailment — energy thrown away when batteries are full and home
           load can't absorb the PV. Lives on the Solar page (v0.24.2). */}
       <CurtailmentCard />
+
+      {/* ── Predictive & diagnostics (relocated from the dissolved Predictive
+          tab in v0.85.0). Live production is above; from here down the content
+          is model-driven and marked with the PredictiveBadge. Order: day-ahead
+          FORECAST → forecast-skill accuracy & weather ensemble → equipment /
+          soiling / shade / mismatch diagnostics. */}
+      <div className="pt-2">
+        <div className="text-xs uppercase tracking-widest text-muted mb-2">
+          Solar forecast &amp; diagnostics
+        </div>
+      </div>
+
+      {/* Day-ahead solar & consumption forecast + learned response model + soiling */}
+      <ForecastDetail />
+
+      {/* Forecast skill (accuracy headline), weather ensemble, and the solar
+          diagnostics. Each section is empty-by-design on a healthy fleet. */}
+      <AdvancedInsightsCard
+        sections={[
+          'forecast-skill',
+          'weather-ensemble',
+          'equipment-health',
+          'shade',
+          'soiling-decomposition',
+          'string-mismatch',
+        ]}
+      />
     </div>
   );
 }

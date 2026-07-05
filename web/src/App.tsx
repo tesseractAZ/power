@@ -7,8 +7,7 @@ import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
 import type { DeviceSnapshot, DpuProjection, GenericProjection, Shp2Projection } from './types';
 import { Shp2Card } from './cards/Shp2Card';
 import { SmallDeviceCard } from './cards/SmallDeviceCard';
-import { alertCounts } from './alerts';
-import { priorityOf, priorityCounts } from './alertPriority';
+import { priorityCounts } from './alertPriority';
 import { sortDevices } from './sort';
 import { fmtRel } from './format';
 import { SERIES_PALETTE } from './theme';
@@ -26,14 +25,18 @@ const ThermalPanel = lazy(() => import('./pages/ThermalPanel').then((m) => ({ de
 const SolarPanel = lazy(() => import('./pages/SolarPanel').then((m) => ({ default: m.SolarPanel })));
 const StrategyPanel = lazy(() => import('./pages/StrategyPanel').then((m) => ({ default: m.StrategyPanel })));
 const AlertsPanel = lazy(() => import('./pages/AlertsPanel').then((m) => ({ default: m.AlertsPanel })));
-// v0.19.0 — the unified Alert Console (broadcast master + per-priority
-// annunciation + per-level tones + library) replaced the separate Alert
-// Settings + Alert Console tabs.
-const AlertConsolePanel = lazy(() =>
-  import('./pages/AlertConsolePanel').then((m) => ({ default: m.AlertConsolePanel })),
-);
-const PredictiveInsights = lazy(() => import('./pages/PredictiveInsights').then((m) => ({ default: m.PredictiveInsights })));
+// v0.85.0 — the Alert Console (broadcast master + per-priority annunciation +
+// per-level tones + library) is no longer a top-level tab; it's hosted inside
+// the Alerts page under its "Settings" sub-view. The predictive analytics tab
+// was likewise dissolved and its sections relocated to their home pages
+// (Solar / Battery / Strategy / Dashboard).
 const TrendChart = lazy(() => import('./charts/TrendChart').then((m) => ({ default: m.TrendChart })));
+// v0.85.0 — the dashboard's compact predictive strip (trust scorecard +
+// self-consumption + active incidents) reuses AdvancedInsightsCard's filtered
+// sections; lazy so its analytics fetches stay off the entry chunk.
+const AdvancedInsightsCard = lazy(() =>
+  import('./cards/AdvancedInsightsCard').then((m) => ({ default: m.AdvancedInsightsCard })),
+);
 // v0.22.0 — ForecastCard is the last eager recharts consumer on the dashboard.
 // Lazy-loading it (alongside LazySparkline in the DPU/SHP2 cards) is what
 // finally keeps the ~540 kB recharts chunk OUT of the entry bundle: the
@@ -60,7 +63,7 @@ export default function App() {
 function NormalApp() {
   const { snapshot, conn } = useSnapshot();
   const [tab, setTab] = useState<
-    'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts' | 'alert-console' | 'predictive'
+    'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts'
   >('dashboard');
 
   // Attach glossary hover tooltips to every matching label across the app.
@@ -76,15 +79,15 @@ function NormalApp() {
 
   const alerts = snapshot?.alerts ?? [];
   const thresholdAlerts = useMemo(() => alerts.filter((a) => a.source !== 'learned'), [alerts]);
+  // v0.85.0 — learned (model-driven) signals feed the Alerts page's "Learned"
+  // sub-view, which renders each detection's statistical `facts` breakdown.
   const learnedAlerts = useMemo(() => alerts.filter((a) => a.source === 'learned'), [alerts]);
-  const learnedCounts = useMemo(() => alertCounts(learnedAlerts), [learnedAlerts]);
   // v0.54.0 — derive the Alerts badge + pill colour from the ISA priority of the
   // threshold alerts, so a real measured-threshold Medium (P3, e.g. a reserve
   // band) is reflected the same way the Alerts page counts it as "actionable".
   const thresholdPriority = useMemo(() => priorityCounts(thresholdAlerts), [thresholdAlerts]);
   const alertBadgeCount =
     thresholdPriority.critical + thresholdPriority.high + thresholdPriority.medium;
-  const predictiveBadgeCount = learnedCounts.critical + learnedCounts.warning;
 
   const shp2 = useMemo(() => sorted.find((d) => d.projection?.kind === 'shp2'), [sorted]);
   const dpus = useMemo(
@@ -169,8 +172,8 @@ function NormalApp() {
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">
           {/* v0.15.9 — the tab pill WRAPS (was overflow-x-auto, which silently
-              scroll-hid Strategy/Alerts/Settings/Predictive on narrow widths / the
-              HA ingress sidebar). Wrapping keeps every tab reachable. */}
+              scroll-hid tabs on narrow widths / the HA ingress sidebar).
+              Wrapping keeps every tab reachable. v0.85.0 reduced 7 tabs → 5. */}
           <div className="flex flex-wrap bg-panel border border-line rounded-lg max-w-full">
             <button
               onClick={() => setTab('dashboard')}
@@ -215,28 +218,6 @@ function NormalApp() {
                 </span>
               )}
             </button>
-            <button
-              onClick={() => setTab('alert-console')}
-              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap ${tab === 'alert-console' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
-              title="Broadcast on/off + volume, per-priority annunciation, and the tone for each alert level (built-in or your own)."
-            >
-              Alert Console
-            </button>
-            <button
-              onClick={() => setTab('predictive')}
-              className={`px-3 py-1 transition-colors shrink-0 whitespace-nowrap flex items-center gap-1.5 ${tab === 'predictive' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}
-            >
-              Predictive
-              {predictiveBadgeCount > 0 && (
-                <span
-                  className={`text-[10px] font-semibold rounded-full px-1.5 py-px ${
-                    learnedCounts.critical > 0 ? 'bg-bad/25 text-bad' : 'bg-warn/25 text-warn'
-                  }`}
-                >
-                  {predictiveBadgeCount}
-                </span>
-              )}
-            </button>
           </div>
           <span
             className={`badge ${conn === 'open' ? 'badge-ok' : conn === 'connecting' ? 'badge-warn' : 'badge-bad'}`}
@@ -256,9 +237,7 @@ function NormalApp() {
           {tab === 'thermal' && <ThermalPanel devices={snapshot.devices} />}
           {tab === 'solar' && <SolarPanel devices={snapshot.devices} />}
           {tab === 'strategy' && <StrategyPanel devices={snapshot.devices} />}
-          {tab === 'alerts' && <AlertsPanel alerts={thresholdAlerts} />}
-          {tab === 'alert-console' && <AlertConsolePanel />}
-          {tab === 'predictive' && <PredictiveInsights alerts={learnedAlerts} />}
+          {tab === 'alerts' && <AlertsPanel alerts={thresholdAlerts} learnedAlerts={learnedAlerts} />}
         </Suspense>
       ) : (
         <>
@@ -318,6 +297,17 @@ function NormalApp() {
             </div>
           </div>
         )}
+
+        {/* v0.85.0 — compact predictive strip: are the projections trustworthy
+            (model-fit R²), where did the kWh go (7-day self-consumption), and
+            what's clustered (active incidents). The deep predictive detail lives
+            on each home page; this is the overview digest. Each block is
+            empty-by-design on a healthy fleet and simply doesn't render then. */}
+        <div className="mt-6 space-y-4">
+          <Suspense fallback={<div className="card text-sm text-muted">Loading model-fit & self-consumption…</div>}>
+            <AdvancedInsightsCard sections={['model-fit', 'self-consumption', 'incidents']} />
+          </Suspense>
+        </div>
         </>
       )}
     </div>

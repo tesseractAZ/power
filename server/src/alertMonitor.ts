@@ -711,6 +711,30 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   }
   const persistNotified = () => saveNotifiedState(notifyStatePath, persistedNotified);
 
+  // v0.85.0 — cleared-alert history persistence. The in-memory clearedLog was
+  // wiped on every restart, so on a host that power-cycles daily the operator
+  // lost the record of what fired and cleared — the exact thing they need to see
+  // "what happened" when the audible channel was down. Persist it to a bounded
+  // JSON sidecar (newest-first), seed it on boot, rewrite on each qualifying
+  // clear. Best-effort throughout: alert HISTORY is observability, never gates a
+  // live alarm.
+  const CLEARED_LOG_MAX = Math.max(50, Number(process.env.CLEARED_LOG_MAX ?? 500));
+  const clearedLogPath =
+    process.env.CLEARED_LOG_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'cleared-alerts.json');
+  try {
+    const raw = JSON.parse(readFileSync(clearedLogPath, 'utf8')) as ClearedAlert[];
+    if (Array.isArray(raw)) {
+      for (const c of raw.slice(0, CLEARED_LOG_MAX)) {
+        if (c && (c as ClearedAlert).alert && Number.isFinite(c.raisedAt) && Number.isFinite(c.clearedAt)) clearedLog.push(c);
+      }
+      if (clearedLog.length > 0) log(`alerts: rehydrated ${clearedLog.length} cleared-alert record(s) from ${clearedLogPath}`);
+    }
+  } catch { /* first boot / no prior log — fine */ }
+  const persistClearedLog = () => {
+    try { atomicWriteFileSync(clearedLogPath, JSON.stringify(clearedLog.slice(0, CLEARED_LOG_MAX))); }
+    catch { /* best-effort; history is non-critical */ }
+  };
+
   const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
   // v0.23.0 — opt-in: when true, critical alerts break through quiet hours and
   // push immediately (today's behaviour). Default false ⇒ critical is ALSO held
@@ -1448,7 +1472,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // surfacing in the cleared-alert UI), but telemetry counts the clear.
       if (duration >= DEBOUNCE_MS) {
         clearedLog.unshift({ alert: t.alert, raisedAt: t.firstSeen, clearedAt: now, durationMs: duration });
-        if (clearedLog.length > 200) clearedLog.pop();
+        if (clearedLog.length > CLEARED_LOG_MAX) clearedLog.pop();
+        persistClearedLog(); // v0.85.0 — survive restarts (the daily Pi power cut)
       }
       // v0.9.59 — records shortClear / longActive events into the family rollup
       // and appends them to the persisted telemetry log.

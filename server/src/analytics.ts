@@ -6,7 +6,7 @@ import { getWeather, type WeatherHour, type WeatherForecast } from './weather.js
 import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
-import { getNwsAlerts, isNwsEnabled, type NwsAlert } from './nws.js';
+import { getNwsAlerts, isNwsEnabled, nwsEventWindow, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
@@ -5772,10 +5772,19 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
     const severe = STORM_SEVERE_EVENTS.has(a.event) || a.severity === 'Severe' || a.severity === 'Extreme';
     if (!severe) continue;
     const sev: Alert['severity'] = a.severity === 'Extreme' || a.urgency === 'Immediate' ? 'critical' : 'warning';
-    const onsetDate = a.onset ? new Date(a.onset) : null;
-    const whenStr = onsetDate
-      ? onsetDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })
-      : 'soon';
+    // Event window uses onset→ends (the storm's real span). `expires` is only the
+    // NWS message-refresh deadline (~30 min out) and must NOT be shown as the event
+    // end — pairing onset with expires made a future storm read start-after-end.
+    // Window resolution is the pure, unit-tested nwsEventWindow() (nws.ts).
+    const win = nwsEventWindow(a, Date.now());
+    const beginsDate = win.beginsMs != null ? new Date(win.beginsMs) : null;
+    const endsDate = win.endsMs != null ? new Date(win.endsMs) : null;
+    // inEffectNow is true whenever beginsMs is null, so the else branch always has
+    // a non-null beginsDate — but keep an explicit guard for the type-checker.
+    const inEffectNow = win.inEffectNow;
+    const whenStr = inEffectNow || !beginsDate
+      ? (endsDate ? `now through ${endsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : 'now')
+      : `${beginsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}${endsDate ? ` through ${endsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : ''}`;
     out.push({
       id: `storm-${a.id || a.event}`.replace(/[^a-zA-Z0-9-]/g, '_').slice(0, 96),
       severity: sev,
@@ -5783,13 +5792,13 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
       source: 'learned',
       device: 'System',
       title: `${a.event} — pre-charge recommended`,
-      detail: `NWS has issued a ${a.event} for ${a.areaDesc ?? 'your area'} ${whenStr}. Charge the backup pool to 100% before onset so grid loss leaves you in a strong position. ${a.headline ?? ''}`,
+      detail: `NWS has issued a ${a.event} for ${a.areaDesc ?? 'your area'}, in effect ${whenStr}. Charge the backup pool to 100% before it begins so grid loss leaves you in a strong position. ${a.headline ?? ''}`,
       facts: [
         { label: 'Event', value: a.event },
         { label: 'Severity', value: a.severity },
         { label: 'Urgency', value: a.urgency },
-        { label: 'Onset', value: onsetDate ? onsetDate.toLocaleString() : '—' },
-        { label: 'Expires', value: a.expires ? new Date(a.expires).toLocaleString() : '—' },
+        { label: 'Begins', value: beginsDate ? (inEffectNow ? 'In effect now' : beginsDate.toLocaleString()) : '—' },
+        { label: 'Ends', value: endsDate ? endsDate.toLocaleString() : '—' },
         { label: 'Area', value: a.areaDesc ?? '—' },
       ],
     });

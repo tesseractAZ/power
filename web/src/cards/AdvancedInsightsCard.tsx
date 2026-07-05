@@ -16,14 +16,61 @@ import type {
   Incident,
 } from '../types';
 import { apiUrl } from '../api';
+import { PredictiveBadge, type PredictiveKind } from '../components/PredictiveBadge';
 
 /**
  * Advanced Insights (v0.7.5) — surfaces the dozen new analytics functions
  * built in the v0.7.5 release. Each section is one fetch + one compact
  * read-only summary. The compute heavy lifting happens server-side; this
  * card just renders.
+ *
+ * v0.85.0 — the Predictive tab was dissolved; this card is now embedded into
+ * the Solar / Battery / Dashboard / Strategy pages. Each embed passes a
+ * `sections` allow-list (stable keys, see SectionKey) so a page renders only
+ * the analytics relevant to it. Passing nothing renders all sections (the
+ * former full-page behaviour). The fetches are unchanged — a page that hides a
+ * section still fetches it (cheap; keeps this file un-split).
  */
-export function AdvancedInsightsCard() {
+
+/** Stable identifiers for each analytics block — the `sections` filter keys. */
+export type SectionKey =
+  | 'incidents'
+  | 'nws'
+  | 'self-consumption'
+  | 'weather-ensemble'
+  | 'model-fit'
+  | 'thermal-events'
+  | 'equipment-health'
+  | 'shade'
+  | 'soiling-decomposition'
+  | 'string-mismatch'
+  | 'ev-window'
+  | 'charge-curve'
+  | 'internal-resistance'
+  | 'forecast-skill'
+  | 'ambient-thermal';
+// v0.85.0 — render an NWS alert's TRUE event window. The old display showed
+// `expires` (the message-refresh deadline, often ~30 min out) as if it were the
+// event end, so a future storm read start-after-end. Use onset→ends; show
+// "in effect until X" when it has already begun.
+function nwsWindow(a: NwsAlert): string {
+  const begins = a.onset ?? a.effective;
+  const ends = a.ends ?? a.expires;
+  const beginsMs = begins ? Date.parse(begins) : NaN;
+  const endsMs = ends ? Date.parse(ends) : NaN;
+  const endsStr = Number.isFinite(endsMs) ? new Date(endsMs).toLocaleString() : null;
+  const inEffect = !Number.isFinite(beginsMs) || beginsMs <= Date.now();
+  if (inEffect) return endsStr ? `in effect until ${endsStr}` : 'in effect now';
+  const beginsStr = new Date(beginsMs).toLocaleString();
+  return endsStr ? `${beginsStr} → ${endsStr}` : `begins ${beginsStr}`;
+}
+
+export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } = {}) {
+  // When `sections` is provided, render ONLY those keys (order-independent — the
+  // page decides layout order by where it places this card). Undefined ⇒ all.
+  const only = sections ? new Set<SectionKey>(sections) : null;
+  const show = (key: SectionKey) => only == null || only.has(key);
+
   const [sc, setSc] = useState<SelfConsumption | null>(null);
   const [thermal, setThermal] = useState<FleetThermalEvents | null>(null);
   const [equip, setEquip] = useState<EquipmentHealth | null>(null);
@@ -75,15 +122,20 @@ export function AdvancedInsightsCard() {
 
   return (
     <div className="space-y-4">
-      <div className="card">
-        <div className="card-title">Advanced insights (v0.7.5)</div>
-        <p className="text-sm text-muted leading-relaxed">
-          The full advanced-analytics surface, one block per family.
-          Quiet sections mean the underlying signal has nothing actionable to say right now.
-        </p>
-      </div>
+      {/* The generic intro only appears in "render-all" mode (the legacy full
+          page). On a destination page each section carries its own header, so
+          this blurb would just be noise. */}
+      {only == null && (
+        <div className="card">
+          <div className="card-title">Advanced insights (v0.7.5)</div>
+          <p className="text-sm text-muted leading-relaxed">
+            The full advanced-analytics surface, one block per family.
+            Quiet sections mean the underlying signal has nothing actionable to say right now.
+          </p>
+        </div>
+      )}
 
-      {incidents.length > 0 && (
+      {show('incidents') && incidents.length > 0 && (
         <Section title="Active incidents" subtitle="Clustered alerts that share a Core / Pack">
           <div className="space-y-2">
             {incidents.slice(0, 8).map((i) => (
@@ -100,7 +152,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {nws.length > 0 && (
+      {show('nws') && nws.length > 0 && (
         <Section title="NWS active alerts" subtitle="Storm-prep — pre-charge to 100%">
           <div className="space-y-2">
             {nws.map((a) => (
@@ -108,7 +160,7 @@ export function AdvancedInsightsCard() {
                 <div className="font-semibold">{a.event}</div>
                 <div className="text-xs text-muted mt-1">{a.headline ?? a.areaDesc}</div>
                 <div className="text-[10px] text-muted mt-1">
-                  Severity {a.severity} · {a.urgency} · expires {a.expires ? new Date(a.expires).toLocaleString() : '—'}
+                  Severity {a.severity} · {a.urgency} · {nwsWindow(a)}
                 </div>
               </div>
             ))}
@@ -116,7 +168,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {sc && (
+      {show('self-consumption') && sc && (
         <Section title="Self-consumption (7-day rolling)" subtitle="Where the kWh actually went">
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
             <Tile label="PV gen" value={`${sc.pvKwh.toFixed(1)} kWh`} />
@@ -130,8 +182,16 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {ensemble && ensemble.sourcesCount > 1 && (
-        <Section title="Weather ensemble" subtitle="Open-Meteo + NWS NDFD cloud-cover blend">
+      {show('weather-ensemble') && ensemble && ensemble.sourcesCount > 1 && (
+        <Section
+          title="Weather ensemble"
+          subtitle="Open-Meteo + NWS NDFD cloud-cover blend"
+          predictive={{
+            kind: 'model',
+            accuracy: `±${ensemble.avgDisagreementPct.toFixed(1)}% spread`,
+            title: 'Cross-source cloud-cover disagreement — how far the forecasts diverge (wider = less certain).',
+          }}
+        >
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <Tile label="Sources" value={`${ensemble.sourcesCount}`} sub={`enriched ${ensemble.enrichedHourCount}/${ensemble.hourCount} h`} />
             <Tile label="Avg disagreement" value={`${ensemble.avgDisagreementPct.toFixed(1)}%`} sub="|Open-Meteo − NWS|" />
@@ -146,12 +206,20 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {conf && (
+      {show('model-fit') && conf && (
         // Model fit (R²) — the regression-quality side of "trust this projection".
         // Forecast MAE / bias are intentionally NOT shown here: they are the richer
         // "Forecast skill" section's single source of truth (model-vs-actual PV
         // hindcast, below) and were duplicated here byte-for-byte.
-        <Section title="Model fit (R²)" subtitle="Trust each projection by its regression fit">
+        <Section
+          title="Model fit (R²)"
+          subtitle="Trust each projection by its regression fit"
+          predictive={{
+            kind: 'model',
+            accuracy: null,
+            title: 'Regression fit quality (R²) for each learned model — closer to 1.00 = better fit.',
+          }}
+        >
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <Tile label="Degradation R²" value={conf.degradationMedianR2 != null ? conf.degradationMedianR2.toFixed(2) : '—'} />
             <Tile label="Solar model R²" value={conf.solarModelMedianR2 != null ? conf.solarModelMedianR2.toFixed(2) : '—'} />
@@ -160,7 +228,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {thermal && thermal.packs.length > 0 && (
+      {show('thermal-events') && thermal && thermal.packs.length > 0 && (
         <Section title="Thermal events — cumulative" subtitle="Hard-life score, normalised per year">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {thermal.packs
@@ -180,7 +248,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {equip && (equip.mpptStrings.some((s) => s.driftPctPts != null) || equip.inverterStandby.some((s) => s.idleWatts != null)) && (
+      {show('equipment-health') && equip && (equip.mpptStrings.some((s) => s.driftPctPts != null) || equip.inverterStandby.some((s) => s.idleWatts != null)) && (
         <Section title="Equipment health" subtitle="MPPT conversion drift + inverter idle losses">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <div>
@@ -214,7 +282,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {shade && shade.hours.length > 0 && (
+      {show('shade') && shade && shade.hours.length > 0 && (
         <Section title="Shade events" subtitle="Recurring per-hour shortfall vs the clean-array reference">
           <div className="text-xs text-muted mb-2">
             Est. <span className="font-mono">{shade.estTotalKwhPerYear} kWh/yr</span> lost to physical obstruction
@@ -232,7 +300,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {soil && (soil.perDevice.length > 0 || soil.perHour.length > 0) && (
+      {show('soiling-decomposition') && soil && (soil.perDevice.length > 0 || soil.perHour.length > 0) && (
         <Section title="Soiling decomposition" subtitle="Per-DPU and per-hour breakdown">
           {soil.perDevice.length > 0 && (
             <div className="mb-3">
@@ -265,7 +333,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {mismatch && mismatch.devices.length > 0 && (
+      {show('string-mismatch') && mismatch && mismatch.devices.length > 0 && (
         <Section title="String mismatch / per-DPU production" subtitle="Each DPU vs the fleet median">
           <div className="space-y-1">
             {mismatch.devices.map((d) => (
@@ -283,8 +351,16 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {ev && ev.patterns.length > 0 && (
-        <Section title="EV-charging window prediction" subtitle="Recurring sessions detected in EVSE-bound circuit history">
+      {show('ev-window') && ev && ev.patterns.length > 0 && (
+        <Section
+          title="EV-charging window prediction"
+          subtitle="Recurring sessions detected in EVSE-bound circuit history"
+          predictive={{
+            kind: 'prediction',
+            accuracy: `${ev.sessionsObserved} sessions / 30 d`,
+            title: 'Next-24h EV sessions predicted from recurring weekly patterns in EVSE-circuit history.',
+          }}
+        >
           <div className="text-xs text-muted mb-2">
             {ev.sessionsObserved} session{ev.sessionsObserved === 1 ? '' : 's'} observed in last 30 d ·{' '}
             {ev.upcomingNext24h.length} predicted in next 24 h
@@ -325,7 +401,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {charge && charge.packs.some((p) => p.meanDriftMv != null) && (
+      {show('charge-curve') && charge && charge.packs.some((p) => p.meanDriftMv != null) && (
         <Section title="Charge-curve fingerprint drift" subtitle="V at SoC checkpoints, recent vs baseline">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {charge.packs.filter((p) => p.meanDriftMv != null).slice(0, 10).map((p) => (
@@ -348,7 +424,7 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {ir && ir.devices.some((d) => d.recentMilliohms != null) && (
+      {show('internal-resistance') && ir && ir.devices.some((d) => d.recentMilliohms != null) && (
         <Section title="Internal resistance trend" subtitle="dV/dI from snapshots — per Core (bus-level)">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {ir.devices.filter((d) => d.recentMilliohms != null).map((d) => (
@@ -365,8 +441,19 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {skill && skill.days.length > 0 && (
-        <Section title="Forecast skill" subtitle="Hindcast: model vs actual PV, last 7 days">
+      {show('forecast-skill') && skill && skill.days.length > 0 && (
+        <Section
+          title="Forecast skill"
+          subtitle="Hindcast: model vs actual PV, last 7 days"
+          predictive={{
+            kind: 'forecast',
+            accuracy:
+              skill.meanAbsErrorPct != null
+                ? `±${skill.meanAbsErrorPct}%${skill.biasFactor != null ? ` · ×${skill.biasFactor.toFixed(2)} bias` : ''}`
+                : null,
+            title: 'Day-ahead PV forecast accuracy — mean absolute error vs actuals over the last 7 days, with the multiplicative bias.',
+          }}
+        >
           {skill.meanAbsErrorPct != null && (
             <div className="text-xs text-muted mb-2">
               MAE <span className="font-mono">{skill.meanAbsErrorKwh} kWh</span> ({skill.meanAbsErrorPct}%) · bias factor{' '}
@@ -386,8 +473,25 @@ export function AdvancedInsightsCard() {
         </Section>
       )}
 
-      {ambient && ambient.packs.some((p) => p.predictedPeak24hC != null) && (
-        <Section title="Ambient-coupled thermal forecast" subtitle="Predicted pack-temp peaks in next 24 h">
+      {show('ambient-thermal') && ambient && ambient.packs.some((p) => p.predictedPeak24hC != null) && (
+        <Section
+          title="Ambient-coupled thermal forecast"
+          subtitle="Predicted pack-temp peaks in next 24 h"
+          predictive={{
+            kind: 'forecast',
+            accuracy: (() => {
+              const r2s = ambient.packs
+                .filter((p) => p.predictedPeak24hC != null && p.r2 != null)
+                .map((p) => p.r2 as number)
+                .sort((a, b) => a - b);
+              if (r2s.length === 0) return null;
+              const mid = Math.floor(r2s.length / 2);
+              const med = r2s.length % 2 ? r2s[mid] : (r2s[mid - 1] + r2s[mid]) / 2;
+              return `R² ${med.toFixed(2)}`;
+            })(),
+            title: 'Pack-temperature peak forecast fitted from ambient temperature + load; R² is the fit quality.',
+          }}
+        >
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {ambient.packs.filter((p) => p.predictedPeak24hC != null).slice(0, 10).map((p) => {
               const tF = p.predictedPeak24hC != null ? Math.round(p.predictedPeak24hC * 1.8 + 32) : null;
@@ -418,11 +522,26 @@ function fmtEvStart(ts: number): string {
   });
 }
 
-function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+function Section({
+  title,
+  subtitle,
+  predictive,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  /** When set, a PredictiveBadge is rendered next to the title marking this
+   *  section as model-driven, with an accuracy chip. */
+  predictive?: { kind?: PredictiveKind; accuracy?: string | null; title?: string };
+  children: React.ReactNode;
+}) {
   return (
     <div className="card">
-      <div className="card-title flex items-baseline gap-2">
+      <div className="card-title flex items-center gap-2 flex-wrap">
         <span>{title}</span>
+        {predictive && (
+          <PredictiveBadge kind={predictive.kind} accuracy={predictive.accuracy} title={predictive.title} />
+        )}
         {subtitle && (
           <span className="text-[11px] text-muted normal-case tracking-normal ml-auto hidden sm:inline">{subtitle}</span>
         )}
