@@ -4,6 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
 import { computeAlerts, outageAlerts, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
+import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare } from './shp2Membership.js';
 import {
   computeLearnedAlerts,
@@ -1125,6 +1126,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         recentWindowMs: OUTAGE_RECENT_WINDOW_MS,
         minDurationMs: OUTAGE_MIN_DURATION_MS,
       }),
+      // v0.84.0 — audible-delivery self-alert. When audible broadcasting is
+      // enabled but the broadcast monitor has CONFIRMED no reachable speaker
+      // (Music Assistant down → its media_players go unavailable), surface it as
+      // a WARNING push. This is the ONLY component that can report a dead audible
+      // channel — the audible path itself can't announce its own outage. It rides
+      // this push path (working) with full dedup/quiet-hours; conditionFromAlerts
+      // excludes its id so it never tries to chime. Null health (unprobed/boot/
+      // transient) yields no alert — see broadcastHealthAlert.
+      ...(() => { const a = broadcastHealthAlert(getBroadcastHealth(), Date.now()); return a ? [a] : []; })(),
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
     // into the SHP2) is online for diagnostics but must NEVER chime/push. v0.16.4

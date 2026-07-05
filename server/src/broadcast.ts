@@ -76,6 +76,7 @@ import { renderAnnouncement, pruneRenderCache, END_OF_MESSAGE_PHRASE, END_OF_MES
 import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
+import { setBroadcastHealth } from './broadcastHealth.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate + per-priority preview.
 // A priority turned off on the Alert Settings page must never trigger the
 // chime/broadcast, so we filter silenced-priority alerts out before deriving
@@ -292,7 +293,13 @@ export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; c
       // detected); it must not hold the live audible condition yellow for its 24 h
       // visible life. It fires its own one-shot push; excluding it here (like the
       // other event-style ids above) keeps it out of the standing chime/all-clear.
-      !a.id.startsWith('system-outage'),
+      !a.id.startsWith('system-outage') &&
+      // v0.84.0 — the audible-unreachable self-alert MUST push (so it is NOT
+      // annunciate:false, which would suppress the push too) but must never
+      // raise the audible condition: it would try to chime over the very
+      // channel it reports broken, fail, and churn deferred retries. Exclude it
+      // by id here — same intent as the system-outage exclusion above.
+      !a.id.startsWith('system-audible'),
   );
   const crit = counted.filter((a) => a.severity === 'critical').length;
   const warn = counted.filter((a) => a.severity === 'warning').length;
@@ -392,6 +399,13 @@ export interface BroadcastStatus {
    *  /api/broadcast/status. Escalations always bypass the gate, so a genuinely new
    *  critical is never counted here. */
   stormSuppressedCount: number;
+  /** v0.84.0 — audible-delivery health. `reachable`: true / false(confirmed) /
+   *  null(unprobed or N/A). `usableTargets`: configured speakers currently not
+   *  `unavailable`. `reason`: why it's unreachable. Feeds the operator self-alert
+   *  (system-audible-unreachable) + the HA diagnostic sensors. */
+  audibleReachable: boolean | null;
+  audibleUsableTargets: number;
+  audibleReason: string | null;
   /** v0.9.70 — diagnostic from the most recent render. */
   lastRender: {
     filename: string | null;
@@ -591,6 +605,107 @@ export function startBroadcastMonitor(
 
   void detectMusicAssistant();
 
+  // v0.84.0 — Audible-delivery health probe. Runs on its own throttle (NOT only
+  // when a broadcast fires) so a dead audible channel is caught even while the
+  // fleet is green. Reachability keys off TARGET AVAILABILITY — the unambiguous
+  // signal: when Music Assistant is down, its provided media_players go
+  // `unavailable` (or vanish), so usableTargets → 0. That is exactly the silent
+  // failure this release exists to surface. A confirm-streak debounces transient
+  // HA/MA restart windows (targets briefly deregister) so a blip never fires the
+  // operator alert; `reachable` stays null until CONFIRMED, and null never alarms.
+  // Invariant/edge: the MOTIVATING failure (MA setup_error) drops ALL players to
+  // `unavailable` and HOLDS, so 3-consecutive is reliable. Only a pathologically
+  // flapping MA aligned to the probe beat could evade the streak — an unlikely,
+  // self-resolving nuisance, not a hidden dead channel.
+  const AUDIBLE_HEALTH_PROBE_MS = Number(process.env.BROADCAST_HEALTH_PROBE_MS) || 60_000;
+  const AUDIBLE_UNREACHABLE_CONFIRM = Math.max(1, Number(process.env.BROADCAST_UNREACHABLE_CONFIRM ?? 3));
+  let lastAudibleHealthAt = 0;
+  let audibleReachable: boolean | null = null; // published, debounced
+  let audibleUsableTargets = 0;
+  let audibleReason: string | null = null;
+  let unreachableStreak = 0;
+  // Re-entrancy guard: the zero-target broadcast path fires computeAudibleHealth(
+  // true) fire-and-forget, which can overlap the periodic interval (or a second
+  // failed broadcast) while the prior call is parked on the getEntityState await.
+  // Two overlapping runs would each `unreachableStreak += 1` for ONE real probe
+  // window and trip CONFIRM early — defeating the very debounce meant to ride out
+  // a restart flap. Coalesce: a concurrent call just no-ops (force callers only
+  // want to freshen, which the in-flight probe already does).
+  let audibleProbeInFlight = false;
+  const computeAudibleHealth = async (force = false): Promise<void> => {
+    const nowMs = Date.now();
+    if (!force && nowMs - lastAudibleHealthAt < AUDIBLE_HEALTH_PROBE_MS) return;
+    if (audibleProbeInFlight) return;
+    audibleProbeInFlight = true;
+    lastAudibleHealthAt = nowMs;
+    try {
+      const publish = () => setBroadcastHealth({
+        enabled: cfg.enabled,
+        supervised,
+        targetCount: cfg.targets.length,
+        usableTargets: audibleUsableTargets,
+        // Honest MA flag: the announce service can be REGISTERED yet play to no one
+        // (MA in setup_error keeps its services in the catalog) — require a
+        // reachable speaker too. Falls back to the raw service probe when unprobed.
+        musicAssistantAvailable: musicAssistantAvailable && audibleReachable !== false,
+        reachable: audibleReachable,
+        reason: audibleReason,
+        lastProbeAt: nowMs,
+      });
+      // Audible not applicable (disabled or unsupervised) → unknown, never alarms.
+      if (!supervised || !cfg.enabled) {
+        unreachableStreak = 0; audibleReachable = null; audibleUsableTargets = 0; audibleReason = null;
+        publish();
+        return;
+      }
+      // Enabled but no speakers configured → a persistent config error, report it
+      // immediately (not a transient restart, so no debounce needed).
+      if (cfg.targets.length === 0) {
+        unreachableStreak = AUDIBLE_UNREACHABLE_CONFIRM; audibleReachable = false; audibleUsableTargets = 0;
+        audibleReason = 'no speakers configured (BROADCAST_TARGETS empty)';
+        publish();
+        return;
+      }
+      const states = await Promise.all(cfg.targets.map((t) => getEntityState(t).catch(() => null)));
+      const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
+      // Distinguish "entity says unavailable" (the MA-down signature) from every
+      // read returning null (getEntityState collapses non-200/timeout/parse to
+      // null) — an all-null probe means we can't read HA at all, so the reason
+      // must NOT misattribute a Core/Supervisor-API outage to Music Assistant and
+      // misdirect triage. Both still count as not-usable → the alert can fire, but
+      // with an accurate cause. (The real broadcast path makes the same null==down
+      // assumption, so firing here is consistent; only the wording is refined.)
+      const anyReadable = states.some((s) => s != null);
+      audibleUsableTargets = usable;
+      if (usable > 0) {
+        unreachableStreak = 0; audibleReachable = true; audibleReason = null;
+      } else {
+        unreachableStreak += 1;
+        audibleReason = !anyReadable
+          ? 'cannot read speaker state from Home Assistant (Core/Supervisor API may be unreachable)'
+          : musicAssistantAvailable
+            ? `all ${cfg.targets.length} configured speaker(s) report unavailable (Music Assistant may be down)`
+            : 'Music Assistant service not detected and no speakers reachable';
+        // Only CONFIRM after the streak clears the debounce; until then hold the
+        // prior published value (null at boot) so a single restart blip is silent.
+        if (unreachableStreak >= AUDIBLE_UNREACHABLE_CONFIRM) audibleReachable = false;
+      }
+      publish();
+    } finally {
+      audibleProbeInFlight = false;
+    }
+  };
+  // Seed once shortly after boot (HA registry warm), then on the recurring probe.
+  // A probe throw must LOG, never vanish as an unhandled rejection — silent
+  // failure is the exact class this module exists to catch, and the try/finally
+  // in computeAudibleHealth propagates (doesn't swallow) a throw. Mirror the main
+  // tick's `.catch(log)` on every call site.
+  const onProbeError = (e: any) => log(`broadcast: audible-health probe failed — ${e?.message ?? e}`);
+  const audibleHealthKick = setTimeout(() => { computeAudibleHealth(true).catch(onProbeError); }, 15_000);
+  audibleHealthKick.unref();
+  const audibleHealthInterval = setInterval(() => { computeAudibleHealth().catch(onProbeError); }, AUDIBLE_HEALTH_PROBE_MS);
+  audibleHealthInterval.unref();
+
   const inQuiet = (): boolean => {
     if (!cfg.quietHours) return false;
     return inQuietWindow(new Date(), cfg.quietHours);
@@ -745,6 +860,10 @@ export function startBroadcastMonitor(
       scheduleBroadcastRetry(level, message, messageEs, 'all broadcast targets unavailable');
       lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
       persistStatus();
+      // v0.84.0 — a real broadcast that found ZERO reachable speakers is strong
+      // evidence the audible channel is down; freshen the health probe now so the
+      // operator self-alert doesn't wait for the next periodic tick to confirm.
+      computeAudibleHealth(true).catch(onProbeError);
       log(`broadcast: ${level} deferred — ${errors[0]}`);
       return { ok: false, errors };
     }
@@ -1082,17 +1201,26 @@ export function startBroadcastMonitor(
       lastLevel,
       lastOutcome,
       lastErrors,
-      musicAssistantAvailable,
+      // v0.84.0 — honest: the announce service can be registered while playing to
+      // no one (MA in setup_error). Report it available only when it is present
+      // AND audible isn't CONFIRMED unreachable.
+      musicAssistantAvailable: musicAssistantAvailable && audibleReachable !== false,
       wyomingReachable,
       testCooldownRemainingMs: Math.max(0, lastTestAt + TEST_COOLDOWN_MS - Date.now()),
       lastSpokenMessage,
       stormSuppressedCount,
+      // v0.84.0 — audible-delivery health (feeds the operator self-alert + sensor).
+      audibleReachable,
+      audibleUsableTargets,
+      audibleReason,
       lastRender: { ...lastRender },
     }),
     stop: () => {
       stopped = true;
       clearInterval(tickInterval);
       clearInterval(pruneInterval);
+      clearInterval(audibleHealthInterval);
+      clearTimeout(audibleHealthKick);
       offRuntimeConfig();
     },
   };

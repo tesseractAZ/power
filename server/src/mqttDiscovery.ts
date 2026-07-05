@@ -29,6 +29,7 @@ import { belowReserveFloor } from './runwayAlarm.js';
 import { liveGridBackstop } from './gridState.js';
 import { countCloudWedges } from './deviceLink.js';
 import { outageTracking } from './alerts.js';
+import { getBroadcastHealth } from './broadcastHealth.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -214,6 +215,12 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_system_outage_24h', name: 'EcoFlow System Outage (24h)', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.system_outage_active_24h else "OFF" }}' },
   { unique_id: 'ecoflow_system_outage_count_24h', name: 'EcoFlow System Outages 24h', state_class: 'measurement', icon: 'mdi:counter', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_count_24h }}' },
   { unique_id: 'ecoflow_system_outage_minutes_24h', name: 'EcoFlow System Outage Minutes 24h', state_class: 'measurement', unit_of_measurement: 'min', icon: 'mdi:timer-alert-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_total_minutes_24h }}' },
+  // v0.84.0 — audible-delivery health. `audible_status` is reachable / UNREACHABLE
+  // / disabled / unknown so an operator can alert on a dead audible channel (MA
+  // down → speakers unavailable) that would otherwise be invisible; the paired
+  // count shows how many configured speakers are currently reachable.
+  { unique_id: 'ecoflow_audible_channel_status', name: 'EcoFlow Audible Alarm Channel', icon: 'mdi:speaker-wireless', entity_category: 'diagnostic', value_template: '{{ value_json.audible_status }}' },
+  { unique_id: 'ecoflow_audible_speakers_reachable', name: 'EcoFlow Audible Speakers Reachable', state_class: 'measurement', icon: 'mdi:speaker-multiple', entity_category: 'diagnostic', value_template: '{{ value_json.audible_usable_speakers }}' },
   // ─── HA Energy Dashboard — monotonic lifetime counters (v0.7.6) ──────────
   // state_class: total_increasing tells HA to treat decreases as resets and
   // accumulate the per-hour delta into long-term Energy statistics.
@@ -732,6 +739,22 @@ export async function startMqttDiscovery(
           system_outage_active_24h: t.count > 0,
           system_outage_count_24h: t.count,
           system_outage_total_minutes_24h: t.totalMinutes,
+        };
+      })(),
+      // v0.84.0 — audible-delivery health mirror (see broadcastHealth.ts). Status
+      // is 4-state so `disabled`/`unknown` never read as a false "unreachable".
+      ...(() => {
+        const h = getBroadcastHealth();
+        const status = !h.enabled
+          ? 'disabled'
+          : h.reachable === true
+            ? 'reachable'
+            : h.reachable === false
+              ? 'UNREACHABLE'
+              : 'unknown';
+        return {
+          audible_status: status,
+          audible_usable_speakers: h.usableTargets,
         };
       })(),
       // v0.15.2 — load-shed advisory signals (recommendation + counterfactual)
