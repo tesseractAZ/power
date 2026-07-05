@@ -68,14 +68,16 @@ test('broadcastHealthAlert — no speakers configured gives the empty-targets wo
   assert.match(a!.detail, /no speakers are configured/);
 });
 
-test('broadcastHealthAlert — the probe reason flows into the detail verbatim (HA-API vs MA-down distinction)', () => {
-  // The probe sets reason to distinguish an all-null read (HA/Supervisor API
-  // unreachable) from entities reporting `unavailable` (MA down). Whichever it
+test('broadcastHealthAlert — the probe reason flows into the detail verbatim (not-found vs unavailable distinction)', () => {
+  // The probe sets reason to distinguish an all-null read (speakers NOT FOUND —
+  // MA setup_error removes its media_players, or the HA API is down) from entities
+  // reporting `unavailable` (integration loaded, speaker offline). Whichever it
   // is, the builder must surface it so operator triage isn't misdirected.
-  const api = broadcastHealthAlert(H({ reason: 'cannot read speaker state from Home Assistant (Core/Supervisor API may be unreachable)' }), NOW);
-  assert.match(api!.detail, /Core\/Supervisor API may be unreachable/);
-  const ma = broadcastHealthAlert(H({ reason: 'all 2 configured speaker(s) report unavailable (Music Assistant may be down)' }), NOW);
-  assert.match(ma!.detail, /Music Assistant may be down/);
+  const gone = broadcastHealthAlert(H({ reason: 'configured speaker(s) not found in Home Assistant — Music Assistant is likely down (its media_players disappear in setup_error), or the HA API is unreachable' }), NOW);
+  assert.match(gone!.detail, /Music Assistant is likely down/);
+  assert.match(gone!.detail, /HA API is unreachable/);
+  const offline = broadcastHealthAlert(H({ reason: 'all 2 configured speaker(s) report unavailable (Music Assistant or the speakers may be down)' }), NOW);
+  assert.match(offline!.detail, /report unavailable/);
 });
 
 test('isAudibleHealthAlert — matches only the audible-health id', () => {
