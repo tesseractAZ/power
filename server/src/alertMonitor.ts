@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
-import { computeAlerts, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
+import { computeAlerts, outageAlerts, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
 import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare } from './shp2Membership.js';
 import {
   computeLearnedAlerts,
@@ -56,6 +56,16 @@ import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 
 const EVAL_INTERVAL_MS = Number(process.env.ALERT_EVAL_MS ?? 20_000);
 const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
+
+// v0.83.0 — system data-gap / unplanned-outage alerting. The recorder records
+// telemetry blackouts (host power loss / add-on stop / MQTT stall > 15 min) into
+// its gaps sidecar; these surface each recent one as a push-worthy WARNING so the
+// operator is flagged when the alarm went dark and can watch the trend after a
+// UPS/power fix. Defaults: alert on any recorded gap (≥ the recorder's own 15-min
+// floor), keep each visible for 24 h, then it ages off (event — no resolve push).
+const OUTAGE_ALERTS_ENABLED = (process.env.SYSTEM_OUTAGE_ALERT_ENABLED ?? 'true') !== 'false';
+const OUTAGE_RECENT_WINDOW_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_RECENT_WINDOW_H ?? 24)) * 3_600_000;
+const OUTAGE_MIN_DURATION_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_MIN_MINUTES ?? 15)) * 60_000;
 
 // v0.38.0 — sustained-duration gate for the per-circuit load-anomaly family
 // ("<Circuit> load unusual for the hour"). The detector already requires the
@@ -437,11 +447,35 @@ export function moreSevere(a: Severity, b: Severity): Severity {
  *      two real warning-tier pushes never got their all-clear because the alert
  *      had downgraded below minSeverity by clear time. A pushed fire owes its
  *      resolve regardless of what the severity reads at clear time. */
+/**
+ * v0.83.0 — should a NEW alert present on the monitor's FIRST evaluate() tick be
+ * boot-seeded as already-`notified` (suppressing its fire push)? A pre-existing
+ * alert at boot is normally seeded so a sustained CONDITION (a still-low battery)
+ * isn't re-announced on every restart. BUT a system-outage EVENT is recorded
+ * synchronously in createRecorder() BEFORE startAlertMonitor(), so a
+ * restart-spanning outage (the Pi lost power — the case this feature exists to
+ * flag) is ALWAYS present on tick 1 with firstRun===true and would be silently
+ * boot-suppressed forever. An outage is an event we WANT to push after the very
+ * restart it spans, so it is NOT firstRun-seeded — only a genuine persisted record
+ * (`alreadyNotified`) suppresses it, which dedups it across subsequent reboots.
+ * Pure + exported so the firstRun path (untestable via the private evaluate loop)
+ * is unit-testable. Behaviour is IDENTICAL to the old `firstRun || alreadyNotified`
+ * for every non-outage alert.
+ */
+export function bootSeedNotified(p: { alert: Pick<Alert, 'id'>; firstRun: boolean; alreadyNotified: boolean }): boolean {
+  if (isOutageEventFamily(p.alert)) return p.alreadyNotified;
+  return p.firstRun || p.alreadyNotified;
+}
+
 export function shouldSendResolve(
-  t: { pushSent?: boolean; notifiedSeverity?: Severity; alert: Pick<Alert, 'severity' | 'annunciate'> },
+  t: { pushSent?: boolean; notifiedSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity' | 'annunciate'> },
   notifyResolved: boolean,
   minSeverity: Severity,
 ): boolean {
+  // v0.83.0 — a system-outage alert is an EVENT (the outage already ended when we
+  // detected it); it ages off the list silently and must never emit a "Resolved:"
+  // push — that would be a meaningless "the past outage recovered" a day later.
+  if (isOutageEventFamily(t.alert)) return false;
   return (
     t.pushSent === true &&
     t.alert.annunciate !== false &&
@@ -1082,6 +1116,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       ...forecastDay,
       ...stormPrep,
       ...curtailment,
+      // v0.83.0 — recorded telemetry blackouts (host power loss / add-on stop /
+      // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable
+      // gaps sidecar, so a gap detected AT BOOT (spanning the very restart that
+      // caused it) still fires after the process comes back.
+      ...outageAlerts(recorder.telemetryGaps(), Date.now(), {
+        enabled: OUTAGE_ALERTS_ENABLED,
+        recentWindowMs: OUTAGE_RECENT_WINDOW_MS,
+        minDurationMs: OUTAGE_MIN_DURATION_MS,
+      }),
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
     // into the SHP2) is online for diagnostics but must NEVER chime/push. v0.16.4
@@ -1161,15 +1204,20 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         if (alreadyNotified && !firstRun) {
           log(`notify: "${a.title}" already has a notification on record (notify-state) — suppressing duplicate push`);
         }
+        // v0.83.0 — outage EVENTs are NOT firstRun-seeded (see bootSeedNotified),
+        // so a restart-spanning outage recorded before the monitor starts still
+        // fires its push on the boot that follows it, instead of being swallowed.
+        const seeded = bootSeedNotified({ alert: a, firstRun, alreadyNotified });
         tracked.set(a.id, {
           alert: a,
           firstSeen: now,
-          notified: firstRun || alreadyNotified,
+          notified: seeded,
           // v0.80.0 — rehydrate the severity we actually notified at (the record
           // carries it), so the owed-resolve rule survives a restart even when
           // the alert has since downgraded below minSeverity; fall back to the
-          // current severity for legacy/absent records.
-          notifiedSeverity: alreadyNotified ? (rec.sev ?? a.severity) : firstRun ? a.severity : undefined,
+          // current severity for legacy/absent records. A not-seeded alert hasn't
+          // been notified yet → undefined (so its next tick dispatches normally).
+          notifiedSeverity: alreadyNotified ? (rec.sev ?? a.severity) : seeded ? a.severity : undefined,
           // v0.80.0 — pushSent only when the record says the push was DELIVERED
           // (`sent`; a policy-suppressed dispatch also persists a record for
           // dedupe, but its rehydration must not owe a "Resolved:"). A

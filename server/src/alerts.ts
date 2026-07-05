@@ -616,3 +616,112 @@ export function alertCounts(alerts: Alert[]): Record<Severity, number> {
     info: alerts.filter((a) => a.severity === 'info').length,
   };
 }
+
+/* ── v0.83.0 — SYSTEM DATA-GAP / UNPLANNED-OUTAGE ALERTING ──────────────────
+ * The recorder already DETECTS + persists telemetry blackouts (a stretch with no
+ * home-device samples > GAP_THRESHOLD_MS, incl. the restart-spanning variant that
+ * catches a host power loss / add-on stop) into its gaps sidecar — but nothing
+ * surfaced them to the operator. This turns each recent recorded gap into a
+ * push-worthy alert so the operator is FLAGGED when the alarm system went dark
+ * (e.g. the ~daily Pi power cut), and can tell whether a hardware fix — a UPS
+ * firmware update, moving the Pi to an always-on circuit — actually stopped them.
+ *
+ * It is an EVENT, not a sustained condition: the outage is already over by the
+ * time we detect it (writes resumed / the process rebooted). So it FIRES ONCE per
+ * distinct gap (stable id `system-outage-<startMs>`), stays visible in the alert
+ * list for a recent window, then ages off — and it is exempt from "Resolved:"
+ * pushes (isOutageEventFamily), since an event doesn't "recover". Severity is
+ * WARNING (routes to the push channel, operator-actionable) but NOT critical —
+ * there is nothing to do in the moment; it's a retrospective flag. */
+
+/** Stable id prefix so the same gap never re-alerts and the resolve path can
+ *  exempt it. Keyed on the gap's startMs (immutable per gap, survives restarts
+ *  via the sidecar). */
+export function outageAlertId(startMs: number): string {
+  return `system-outage-${startMs}`;
+}
+
+/** An outage EVENT alert never sends a "Resolved:" push — it ages off silently. */
+export function isOutageEventFamily(alert: Pick<Alert, 'id'>): boolean {
+  return alert.id.startsWith('system-outage-');
+}
+
+export interface OutageAlertOptions {
+  /** Only surface gaps DETECTED within this window; older ones have aged off. */
+  recentWindowMs: number;
+  /** Ignore gaps shorter than this (the recorder floor is 15 min; this can raise it). */
+  minDurationMs: number;
+  /** Feature toggle. */
+  enabled: boolean;
+}
+
+const fmtClock = (ms: number): string =>
+  new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+/**
+ * Build operator alerts from the recorder's recorded telemetry gaps. Pure +
+ * exported so the recency / duration / dedup / restart-vs-stall wording is
+ * unit-testable. One Alert per qualifying gap, newest first.
+ */
+export function outageAlerts(
+  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean }>,
+  nowMs: number,
+  opts: OutageAlertOptions,
+): Alert[] {
+  if (!opts.enabled) return [];
+  const out: Alert[] = [];
+  for (const g of gaps) {
+    if (!Number.isFinite(g.startMs) || !Number.isFinite(g.durationMs)) continue;
+    if (g.durationMs < opts.minDurationMs) continue;                 // too short to bother the operator
+    if (nowMs - g.detectedAt > opts.recentWindowMs) continue;        // aged out → drops from the list (no resolve push)
+    const mins = Math.max(1, Math.round(g.durationMs / 60_000));
+    const restart = g.restartSpanning === true;
+    out.push({
+      id: outageAlertId(g.startMs),
+      severity: 'warning',
+      category: 'Connectivity',
+      device: 'System',
+      // Explicit ISA Medium (P3): operator-relevant, but retrospective — not an
+      // immediate hardware danger, so it must not read as a High protective limit.
+      priority: 'medium',
+      title: restart
+        ? `System outage — alarm was dark ${mins} min`
+        : `Telemetry gap — no data for ${mins} min`,
+      detail: restart
+        ? `No home telemetry was recorded for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}), spanning a restart — the Pi lost power or the add-on stopped, so the alarm system was OFFLINE for that stretch and this window of history is unrecoverable. If this recurs, the Pi needs an always-on power source (UPS / dedicated circuit).`
+        : `No home-device samples reached the recorder for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) — an MQTT/broker stall; writes have since resumed. History in that window is missing but the process stayed up.`,
+      facts: [
+        { label: 'Duration', value: `${mins} min` },
+        { label: 'Started', value: fmtClock(g.startMs) },
+        { label: 'Ended', value: fmtClock(g.endMs) },
+        { label: 'Type', value: restart ? 'restart-spanning (power/host)' : 'in-process (MQTT stall)' },
+      ],
+    });
+  }
+  // Newest gap first so the most recent outage sorts to the top of its severity band.
+  return out.sort((a, b) => b.id.localeCompare(a.id));
+}
+
+/**
+ * Compact operator-facing rollup of recorded outages over a window — feeds the
+ * ha-state tiles / MQTT sensors so the operator can TRACK the trend (did the UPS
+ * firmware fix reduce the count?) at a glance, independent of the transient alerts.
+ */
+export function outageTracking(
+  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean }>,
+  nowMs: number,
+  windowMs: number,
+): { count: number; totalMinutes: number; lastEndedMs: number | null; lastDurationMinutes: number | null } {
+  const recent = gaps.filter((g) => Number.isFinite(g.endMs) && nowMs - g.endMs <= windowMs);
+  const totalMs = recent.reduce((s, g) => s + Math.max(0, g.durationMs), 0);
+  const last = recent.reduce<null | { endMs: number; durationMs: number }>(
+    (acc, g) => (acc == null || g.endMs > acc.endMs ? { endMs: g.endMs, durationMs: g.durationMs } : acc),
+    null,
+  );
+  return {
+    count: recent.length,
+    totalMinutes: Math.round(totalMs / 60_000),
+    lastEndedMs: last?.endMs ?? null,
+    lastDurationMinutes: last != null ? Math.max(1, Math.round(last.durationMs / 60_000)) : null,
+  };
+}

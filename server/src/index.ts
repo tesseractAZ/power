@@ -17,6 +17,7 @@ import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
+import { outageTracking } from './alerts.js';
 import { isConfigured } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
 import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
@@ -1351,6 +1352,21 @@ app.get('/api/ha-state', async (req, reply) => {
     // — i.e. a cloud-session/MQTT wedge, not a real outage. 0 when the feature is
     // unconfigured (every offline device classifies 'unknown', not 'cloud_wedge').
     ecoflow_cloud_wedge_count: countCloudWedges(devices),
+    // v0.83.0 — system data-gap / unplanned-outage TRACKING (24 h). Counts the
+    // recorder's recorded telemetry blackouts (host power loss / add-on stop /
+    // MQTT stall > 15 min) so the operator can watch the trend and confirm a
+    // power/UPS fix reduced them. The transient push alerts live in snapshot.alerts;
+    // these are the durable at-a-glance tiles. All 0/null on a healthy day.
+    ...(() => {
+      const t = outageTracking(recorder.telemetryGaps(), Date.now(), 24 * 3_600_000);
+      return {
+        system_outage_active_24h: t.count > 0,   // boolean flag for the diagnostic on/off tile
+        system_outage_count_24h: t.count,
+        system_outage_total_minutes_24h: t.totalMinutes,
+        system_outage_last_ended: t.lastEndedMs, // epoch ms, null if none in 24 h
+        system_outage_last_duration_minutes: t.lastDurationMinutes,
+      };
+    })(),
   };
   // v0.9.14 — 25 s cache: the underlying computes refresh every 4 min via the
   // cache warmer, but HA polls this every 30 s. ETag + 25 s max-age means most

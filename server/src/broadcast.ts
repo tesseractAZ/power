@@ -287,7 +287,12 @@ export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; c
       a.annunciate !== false &&
       !a.id.startsWith('backup-soc') &&
       !a.id.startsWith('shp2-below-reserve') &&
-      !a.id.startsWith('forecast-runtime'),
+      !a.id.startsWith('forecast-runtime') &&
+      // v0.83.0 — a system-outage is a retrospective EVENT (already over when
+      // detected); it must not hold the live audible condition yellow for its 24 h
+      // visible life. It fires its own one-shot push; excluding it here (like the
+      // other event-style ids above) keeps it out of the standing chime/all-clear.
+      !a.id.startsWith('system-outage'),
   );
   const crit = counted.filter((a) => a.severity === 'critical').length;
   const warn = counted.filter((a) => a.severity === 'warning').length;
