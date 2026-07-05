@@ -3,6 +3,10 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.84.1 — 2026-07-05
+
+**[Fixed] Audible-unreachable reason wording — accurate cause attribution.** Live-verifying v0.84.0 exposed a misattribution: when Music Assistant is in `setup_error` it **removes** its `media_player`s entirely, so the reachability probe reads `null` (entity NOT FOUND), not `state='unavailable'`. The v0.84.0 all-`null` branch attributed that to *"Core/Supervisor API may be unreachable"* — pointing operator triage at the wrong subsystem (the actual cause was MA down). The all-`null` reason now names **both** likely causes honestly: *"configured speaker(s) not found in Home Assistant — Music Assistant is likely down (its media_players disappear in setup_error), or the HA API is unreachable"*, and the `unavailable` branch reads *"…report unavailable (Music Assistant or the speakers may be down)"*. No behavior change — the self-alert fires/clears identically; only the human-facing reason string is corrected. Full suite green.
+
 ## 0.84.0 — 2026-07-05
 
 **[Added] Audible alarm channel self-alert — the add-on now tells you when audible is dead.** The audible path (Music Assistant → speakers) can be **enabled yet reach no speaker** — Music Assistant slips into `setup_error`, its provided `media_player`s go `unavailable`, and audible alarms silently do nothing. In production this exact failure hid a **dead alarm channel**, and the *only* component that "knew" was the dead audible path itself. Now the broadcast monitor probes speaker reachability on its own cadence (independent of whether an alert is firing) and, when audible is enabled but **confirmed** unreachable, raises a WARNING that rides the **working push channel** so you actually find out.

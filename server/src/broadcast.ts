@@ -668,13 +668,17 @@ export function startBroadcastMonitor(
       }
       const states = await Promise.all(cfg.targets.map((t) => getEntityState(t).catch(() => null)));
       const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
-      // Distinguish "entity says unavailable" (the MA-down signature) from every
-      // read returning null (getEntityState collapses non-200/timeout/parse to
-      // null) — an all-null probe means we can't read HA at all, so the reason
-      // must NOT misattribute a Core/Supervisor-API outage to Music Assistant and
-      // misdirect triage. Both still count as not-usable → the alert can fire, but
-      // with an accurate cause. (The real broadcast path makes the same null==down
-      // assumption, so firing here is consistent; only the wording is refined.)
+      // Two distinct not-usable signatures, worth distinguishing for triage:
+      //   • entity present but state==='unavailable' → the integration is loaded
+      //     and the speaker/player itself is offline;
+      //   • getEntityState returns null → the entity is NOT FOUND (or the read
+      //     errored). In THIS deployment the dominant null cause is Music Assistant
+      //     in setup_error, which REMOVES its media_players entirely (verified live
+      //     at v0.84.0 deploy) — it does NOT leave them at state='unavailable'. A
+      //     genuine HA/Supervisor-API outage also yields all-null, so the reason
+      //     names BOTH causes without over-committing (a true API outage would also
+      //     break this add-on's other reads and the push channel, making MA-down
+      //     the likelier cause of an isolated all-null speaker probe).
       const anyReadable = states.some((s) => s != null);
       audibleUsableTargets = usable;
       if (usable > 0) {
@@ -682,10 +686,8 @@ export function startBroadcastMonitor(
       } else {
         unreachableStreak += 1;
         audibleReason = !anyReadable
-          ? 'cannot read speaker state from Home Assistant (Core/Supervisor API may be unreachable)'
-          : musicAssistantAvailable
-            ? `all ${cfg.targets.length} configured speaker(s) report unavailable (Music Assistant may be down)`
-            : 'Music Assistant service not detected and no speakers reachable';
+          ? 'configured speaker(s) not found in Home Assistant — Music Assistant is likely down (its media_players disappear in setup_error), or the HA API is unreachable'
+          : `all ${cfg.targets.length} configured speaker(s) report unavailable (Music Assistant or the speakers may be down)`;
         // Only CONFIRM after the streak clears the debounce; until then hold the
         // prior published value (null at boot) so a single restart blip is silent.
         if (unreachableStreak >= AUDIBLE_UNREACHABLE_CONFIRM) audibleReachable = false;
