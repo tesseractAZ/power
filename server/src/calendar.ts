@@ -152,11 +152,16 @@ export function buildCalendarIcs(src: CalendarSources): string {
     }
   }
 
-  // Active NWS storm windows.
+  // Active NWS storm windows — the EVENT span is onset→ends (fall back to
+  // effective / expires only when the event fields are absent). `expires` alone
+  // is the message-refresh deadline, not the storm's end, so a calendar block
+  // built from it would be misleadingly short.
   for (const a of src.nwsAlerts) {
-    if (!a.onset || !a.expires) continue;
-    const start = Date.parse(a.onset);
-    const end = Date.parse(a.expires);
+    const startIso = a.onset ?? a.effective;
+    const endIso = a.ends ?? a.expires;
+    if (!startIso || !endIso) continue;
+    const start = Date.parse(startIso);
+    const end = Date.parse(endIso);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= Date.now()) continue;
     events.push({
       uid: `nws-${a.id || a.event}`.replace(/[^a-zA-Z0-9-]/g, '_').slice(0, 96),

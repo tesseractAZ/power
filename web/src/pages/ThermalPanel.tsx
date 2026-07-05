@@ -4,6 +4,12 @@ import type { DeviceSnapshot, DpuPack, DpuProjection, Shp2Projection } from '../
 import { cToF, fmtPct, fmtW, fmtWh, fmtMins } from '../format';
 import { sortDevices } from '../sort';
 import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
+// v0.85.0 — the dissolved Predictive tab's battery sections relocate here:
+// degradation / EOL projection + round-trip efficiency (DegradationCard), plus
+// the thermal-events / charge-curve / internal-resistance / ambient-thermal
+// analytics (filtered AdvancedInsightsCard).
+import { DegradationCard } from '../cards/DegradationCard';
+import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 
 // DPU pack capacity is reported in single-string mAh. Each pack is 32S1P (~104 V
 // nominal — 32 series LFP cells at ~3.2 V whose mV sum to packVoltageMv), so
@@ -384,6 +390,26 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
           </div>
         </div>
       )}
+
+      {/* ── Predictive & diagnostics (relocated from the dissolved Predictive
+          tab in v0.85.0). Live pack telemetry is above; from here down the
+          content is model-driven and marked with the PredictiveBadge. Order:
+          degradation / EOL PROJECTION → thermal / resistance / charge-curve /
+          ambient-thermal diagnostics. */}
+      <div className="pt-2">
+        <div className="text-xs uppercase tracking-widest text-muted mb-2">
+          Battery projection &amp; diagnostics
+        </div>
+      </div>
+
+      {/* Per-pack capacity-fade → end-of-life projection + round-trip efficiency */}
+      <DegradationCard />
+
+      {/* Thermal-event load, charge-curve drift, internal resistance, and the
+          ambient-coupled thermal forecast. Empty-by-design on a healthy fleet. */}
+      <AdvancedInsightsCard
+        sections={['ambient-thermal', 'thermal-events', 'internal-resistance', 'charge-curve']}
+      />
     </div>
   );
 }

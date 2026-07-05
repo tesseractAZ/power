@@ -1,9 +1,17 @@
 import type { DeviceSnapshot, Shp2ChargeWindow, Shp2PairedCircuit, Shp2Projection } from '../types';
 import { fmtPct, fmtW } from '../format';
+// v0.85.0 — the dissolved Predictive tab's strategy-relevant sections relocate
+// here: EV-charging window prediction + NWS active alerts (storm-prep). Both
+// are model-driven and marked with the PredictiveBadge inside the card.
+import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 
 /**
  * SHP2 strategy view: per-circuit load-shed priorities and the time-of-use
  * charge schedule. Both are read-only — this dashboard never writes config.
+ *
+ * v0.85.0 — also hosts the forward-looking strategy predictions (EV-charging
+ * windows, storm-prep NWS alerts). Those do NOT depend on the SHP2 being
+ * online, so they render even when the SHP2 config below is unavailable.
  */
 export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnapshot> }) {
   // Require online: a cloud-offline SHP2 carries STALE strategy config, and this
@@ -12,8 +20,16 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
   const shp2 = Object.values(devices).find((d) => d.online && d.projection?.kind === 'shp2');
   const p = shp2?.projection?.kind === 'shp2' ? (shp2.projection as Shp2Projection) : null;
 
+  // EV-window + NWS storm-prep predictions — independent of SHP2 availability.
+  const predictions = <AdvancedInsightsCard sections={['ev-window', 'nws']} />;
+
   if (!p) {
-    return <div className="card">SHP2 not available — strategy view needs the Smart Home Panel online.</div>;
+    return (
+      <div className="space-y-4">
+        <div className="card">SHP2 not available — strategy view needs the Smart Home Panel online.</div>
+        {predictions}
+      </div>
+    );
   }
   const s = p.strategy;
 
@@ -115,6 +131,17 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
           </>
         )}
       </div>
+
+      {/* ── Forward-looking strategy (relocated from the dissolved Predictive
+          tab in v0.85.0). The config above is live SHP2 state; these are
+          model-driven and marked with the PredictiveBadge. Empty-by-design when
+          no EV pattern is detected and no NWS alert is active. */}
+      <div className="pt-2">
+        <div className="text-xs uppercase tracking-widest text-muted mb-2">
+          Forecast &amp; storm-prep
+        </div>
+      </div>
+      {predictions}
     </div>
   );
 }
