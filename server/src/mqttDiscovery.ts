@@ -28,6 +28,7 @@ import { lightingPostureTracker } from './lightingPosture.js';
 import { belowReserveFloor } from './runwayAlarm.js';
 import { liveGridBackstop } from './gridState.js';
 import { countCloudWedges } from './deviceLink.js';
+import { outageTracking } from './alerts.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -204,6 +205,15 @@ export const SENSORS: SensorConfig[] = [
   // unconfigured. Diagnostic so it sits under the device's diagnostics, not the
   // primary controls.
   { unique_id: 'ecoflow_cloud_wedge_count', name: 'EcoFlow Cloud-Wedged Devices', state_class: 'measurement', icon: 'mdi:cloud-alert', entity_category: 'diagnostic', value_template: '{{ value_json.ecoflow_cloud_wedge_count }}' },
+  // v0.83.0 — system data-gap / unplanned-outage TRACKING (24 h). Recorded
+  // telemetry blackouts (host power loss / add-on stop / MQTT stall > 15 min).
+  // A binary "system outage in the last 24 h" flag + count + total minutes so an
+  // operator can watch the trend after a UPS/power fix. Diagnostic; all 0 = clean.
+  // Plain ON/OFF diagnostic (no device_class 'problem' — matches the coverage_partial
+  // sibling convention; the operator FLAG is the push alert, this is a status tile).
+  { unique_id: 'ecoflow_system_outage_24h', name: 'EcoFlow System Outage (24h)', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.system_outage_active_24h else "OFF" }}' },
+  { unique_id: 'ecoflow_system_outage_count_24h', name: 'EcoFlow System Outages 24h', state_class: 'measurement', icon: 'mdi:counter', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_count_24h }}' },
+  { unique_id: 'ecoflow_system_outage_minutes_24h', name: 'EcoFlow System Outage Minutes 24h', state_class: 'measurement', unit_of_measurement: 'min', icon: 'mdi:timer-alert-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_total_minutes_24h }}' },
   // ─── HA Energy Dashboard — monotonic lifetime counters (v0.7.6) ──────────
   // state_class: total_increasing tells HA to treat decreases as resets and
   // accumulate the per-hour delta into long-term Energy statistics.
@@ -714,6 +724,16 @@ export async function startMqttDiscovery(
       // configured HA ping binary_sensors. 0 when ECOFLOW_DEVICE_REACHABILITY is
       // unset (every offline device classifies 'unknown', never 'cloud_wedge').
       ecoflow_cloud_wedge_count: countCloudWedges(devices),
+      // v0.83.0 — system data-gap / unplanned-outage tracking (24 h). Mirrors the
+      // /api/ha-state tiles so the MQTT diagnostic sensors have data.
+      ...(() => {
+        const t = outageTracking(recorder.telemetryGaps(), Date.now(), 24 * 3_600_000);
+        return {
+          system_outage_active_24h: t.count > 0,
+          system_outage_count_24h: t.count,
+          system_outage_total_minutes_24h: t.totalMinutes,
+        };
+      })(),
       // v0.15.2 — load-shed advisory signals (recommendation + counterfactual)
       // for HA automations to gate on. Latest is computed on the advisor tick.
       ...advisoryStateFields(getLatestAdvisory()),
