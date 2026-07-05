@@ -708,7 +708,12 @@ export interface NwsAlert {
   severity: string;
   certainty: string;
   urgency: string;
+  // NWS CAP times (ISO). onset=event begins, effective=message valid,
+  // ends=event ends ("in effect until"), expires=message refresh deadline (short,
+  // NOT the event end). Show onset→ends; expires is only a fallback. See nws.ts.
   onset: string | null;
+  effective: string | null;
+  ends: string | null;
   expires: string | null;
   headline: string | null;
   description: string | null;
