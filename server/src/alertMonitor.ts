@@ -690,6 +690,44 @@ export function saveNotifiedState(path: string, state: Map<string, NotifyRecord>
   }
 }
 
+/** v0.85.0 — cleared-alert history persistence (exported + pure I/O for tests,
+ *  mirroring loadNotifiedState/saveNotifiedState). A bounded, newest-first array
+ *  in a JSON sidecar; survives restarts so the operator can reconstruct what
+ *  fired and cleared even across the daily Pi power cut. `load` validates each
+ *  record (drops garbage / non-arrays / a corrupt file) and caps to `max`;
+ *  `save` is atomic and best-effort (history is observability, never gates a
+ *  live alarm). */
+export function loadClearedLog(path: string, max: number): ClearedAlert[] {
+  const out: ClearedAlert[] = [];
+  try {
+    if (!existsSync(path)) return out;
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    if (!Array.isArray(raw)) return out;
+    for (const c of raw) {
+      const rec = c as Partial<ClearedAlert>;
+      if (
+        rec && typeof rec === 'object' &&
+        rec.alert && typeof rec.alert === 'object' &&
+        Number.isFinite(rec.raisedAt) && Number.isFinite(rec.clearedAt)
+      ) {
+        out.push(rec as ClearedAlert);
+        if (out.length >= max) break;
+      }
+    }
+  } catch {
+    /* corrupt / missing → start fresh */
+  }
+  return out;
+}
+
+export function saveClearedLog(path: string, logArr: ClearedAlert[], max: number): void {
+  try {
+    atomicWriteFileSync(path, JSON.stringify(logArr.slice(0, max)));
+  } catch {
+    /* best effort — history is non-critical */
+  }
+}
+
 export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log: (m: string) => void): AlertMonitor {
   let cfg = loadNotifyConfig();
   const tracked = new Map<string, TrackedAlert>();
@@ -721,19 +759,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const CLEARED_LOG_MAX = Math.max(50, Number(process.env.CLEARED_LOG_MAX ?? 500));
   const clearedLogPath =
     process.env.CLEARED_LOG_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'cleared-alerts.json');
-  try {
-    const raw = JSON.parse(readFileSync(clearedLogPath, 'utf8')) as ClearedAlert[];
-    if (Array.isArray(raw)) {
-      for (const c of raw.slice(0, CLEARED_LOG_MAX)) {
-        if (c && (c as ClearedAlert).alert && Number.isFinite(c.raisedAt) && Number.isFinite(c.clearedAt)) clearedLog.push(c);
-      }
-      if (clearedLog.length > 0) log(`alerts: rehydrated ${clearedLog.length} cleared-alert record(s) from ${clearedLogPath}`);
-    }
-  } catch { /* first boot / no prior log — fine */ }
-  const persistClearedLog = () => {
-    try { atomicWriteFileSync(clearedLogPath, JSON.stringify(clearedLog.slice(0, CLEARED_LOG_MAX))); }
-    catch { /* best-effort; history is non-critical */ }
-  };
+  for (const c of loadClearedLog(clearedLogPath, CLEARED_LOG_MAX)) clearedLog.push(c);
+  if (clearedLog.length > 0) log(`alerts: rehydrated ${clearedLog.length} cleared-alert record(s) from ${clearedLogPath}`);
+  const persistClearedLog = () => saveClearedLog(clearedLogPath, clearedLog, CLEARED_LOG_MAX);
 
   const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
   // v0.23.0 — opt-in: when true, critical alerts break through quiet hours and
