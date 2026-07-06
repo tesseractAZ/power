@@ -132,7 +132,18 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
-  const w = shp2?.projection.gridWatt ?? null;
+  // v0.88.0 — FAIL-SAFE on an OFFLINE SHP2. `gridWatt` is the SHP2's OWN cloud-MQTT
+  // reading; when the SHP2 goes cloud-offline its last value FREEZES in the
+  // projection. An unguarded frozen-high gridWatt (e.g. the 7–8 kW it pulls to
+  // carry the home at the reserve floor) would keep importLive=true → backstopping
+  // =true → silently MUTE a REAL at-floor outage that begins during the offline
+  // window. Mirror the `d.online` scoping the DPU ac_in path (computeGridImportWatts
+  // above) already applies: an offline SHP2 contributes NO measured grid flow and
+  // never fabricates grid presence from a stale sample. A genuinely online SHP2 with
+  // bursty MQTT self-corrects on its next message, so this only suppresses the
+  // frozen-offline case — it strictly HARDENS the alarm, never weakens it.
+  if (!shp2 || !shp2.online) return 0;
+  const w = shp2.projection.gridWatt ?? null;
   return w != null && Number.isFinite(w) && w > 0 ? w : 0;
 }
 

@@ -188,6 +188,25 @@ test('computeHomeGridWatts: positive gridWatt only; null/negative/non-finite/no-
   assert.equal(computeHomeGridWatts(fleet(dpu('A', 600))), 0, 'no SHP2 device → 0');
 });
 
+test('v0.88.0 — an OFFLINE SHP2 contributes 0 home-grid watts (frozen gridWatt must NOT mute a real at-floor outage)', () => {
+  // A cloud-offline SHP2 freezes its last gridWatt in the projection. Unguarded,
+  // a frozen-high value (e.g. the 8 kW it pulls at the floor) would keep
+  // importLive=true → backstopping=true → mute a REAL outage that begins during
+  // the offline window. The online-gate mirrors the DPU ac_in path.
+  const offlineShp2 = { ...shp2(['A'], -300, 8000), online: false };
+  assert.equal(computeHomeGridWatts(fleet(offlineShp2)), 0, 'offline SHP2: stale gridWatt contributes nothing');
+  // Sanity: the SAME device online still reports its 8 kW (no regression to the live path).
+  assert.equal(computeHomeGridWatts(fleet(shp2(['A'], -300, 8000))), 8000);
+  // End-to-end: an offline SHP2 at the reserve floor with a frozen-high gridWatt +
+  // a declared grid must NOT backstop (no importLive from the stale sample; the
+  // discharging pool at the floor keeps it critical) — the outage stays audible.
+  const g = resolveGridBackstop({
+    devices: fleet(offlineShp2), ...NO_DECL, gridAvailableFallback: true, atReserveFloor: true,
+  });
+  assert.equal(g.importLive, false, 'offline SHP2 gridWatt no longer asserts live import');
+  assert.equal(g.backstopping, false, 'a real at-floor outage during SHP2 cloud-offline is NOT muted');
+});
+
 /* ===================================================================
  * v0.36.0 — FLOOR-HARDENING. AT the reserve floor, a DECLARED grid with
  * NO measured flow on EITHER path (DPU ac_in AND SHP2 gridWatt both 0)
