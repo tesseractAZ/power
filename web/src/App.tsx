@@ -12,6 +12,7 @@ import { sortDevices } from './sort';
 import { fmtRel } from './format';
 import { SERIES_PALETTE } from './theme';
 import { ThemeToggle } from './components/ThemeToggle';
+import { SectionHeader } from './components/sections';
 import { installGlossaryTooltips } from './glossary';
 
 // v0.8.1 — route-level code splitting. Each non-default page becomes its own
@@ -304,6 +305,11 @@ function NormalApp() {
             on each home page; this is the overview digest. Each block is
             empty-by-design on a healthy fleet and simply doesn't render then. */}
         <div className="mt-6 space-y-4">
+          <SectionHeader
+            accent="neutral"
+            title="Overview digest"
+            takeaway="Are the projections trustworthy, where the kWh went, and any clustered incidents."
+          />
           <Suspense fallback={<div className="card text-sm text-muted">Loading model-fit & self-consumption…</div>}>
             <AdvancedInsightsCard sections={['model-fit', 'self-consumption', 'incidents']} />
           </Suspense>

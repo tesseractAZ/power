@@ -14,6 +14,7 @@ import {
 import { AlertOutcomeButtons } from '../components/AlertOutcomeButtons';
 import { SubNav } from '../components/SubNav';
 import { PredictiveBadge } from '../components/PredictiveBadge';
+import { HowItWorks } from '../components/sections';
 import { apiUrl } from '../api';
 
 // v0.85.0 — the former standalone "Alert Console" tab now lives under this
@@ -183,12 +184,12 @@ function LearnedAlertsView({ alerts }: { alerts: Alert[] }) {
             {alerts.length} learned signal(s)
           </span>
         </div>
-        <p className="text-sm text-muted leading-relaxed">
+        <HowItWorks>
           Model-driven detections, not fixed-threshold rules. The learned engine compares every
           battery pack against its four siblings, every sensor against its own hour-of-day history,
           and projects current trends forward — surfacing problems an absolute limit would miss.
           Each signal shows the statistics behind the flag.
-        </p>
+        </HowItWorks>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
           <CountTile label="Anomalies" value={anomalies.length} accent={anomalies.length ? 'text-accent' : 'text-muted'} />
           <CountTile label="Forecasts" value={forecasts.length} accent={forecasts.length ? 'text-accent' : 'text-muted'} />
@@ -351,10 +352,10 @@ function ClearedAlertsView() {
         </div>
       </div>
 
-      <p className="text-[11px] text-muted leading-relaxed mb-3">
+      <HowItWorks>
         History persists across restarts — readable even when speakers are down. Each alert is logged
         here when it clears, threshold and learned alike, with how long it lasted.
-      </p>
+      </HowItWorks>
 
       {shown.length === 0 ? (
         <div className="text-sm text-muted leading-relaxed">

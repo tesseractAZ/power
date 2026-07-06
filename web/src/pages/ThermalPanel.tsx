@@ -10,6 +10,7 @@ import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 // analytics (filtered AdvancedInsightsCard).
 import { DegradationCard } from '../cards/DegradationCard';
 import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
+import { SectionHeader } from '../components/sections';
 
 // DPU pack capacity is reported in single-string mAh. Each pack is 32S1P (~104 V
 // nominal — 32 series LFP cells at ~3.2 V whose mV sum to packVoltageMv), so
@@ -397,9 +398,11 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
           degradation / EOL PROJECTION → thermal / resistance / charge-curve /
           ambient-thermal diagnostics. */}
       <div className="pt-2">
-        <div className="text-xs uppercase tracking-widest text-muted mb-2">
-          Battery projection &amp; diagnostics
-        </div>
+        <SectionHeader
+          accent="battery"
+          title={<>Battery projection &amp; diagnostics</>}
+          takeaway="End-of-life projection and model-driven diagnostics — quiet on a healthy fleet."
+        />
       </div>
 
       {/* Per-pack capacity-fade → end-of-life projection + round-trip efficiency */}

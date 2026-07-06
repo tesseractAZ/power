@@ -4,6 +4,7 @@ import { fmtPct, fmtW } from '../format';
 // here: EV-charging window prediction + NWS active alerts (storm-prep). Both
 // are model-driven and marked with the PredictiveBadge inside the card.
 import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
+import { SectionHeader } from '../components/sections';
 
 /**
  * SHP2 strategy view: per-circuit load-shed priorities and the time-of-use
@@ -137,9 +138,11 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
           model-driven and marked with the PredictiveBadge. Empty-by-design when
           no EV pattern is detected and no NWS alert is active. */}
       <div className="pt-2">
-        <div className="text-xs uppercase tracking-widest text-muted mb-2">
-          Forecast &amp; storm-prep
-        </div>
+        <SectionHeader
+          accent="grid"
+          title={<>Forecast &amp; storm-prep</>}
+          takeaway="EV-charging windows and active storm alerts — quiet when none are detected."
+        />
       </div>
       {predictions}
     </div>

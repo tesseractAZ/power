@@ -27,6 +27,7 @@ import { CurtailmentCard } from '../cards/CurtailmentCard';
 // string-mismatch analytics (filtered AdvancedInsightsCard).
 import { ForecastDetail } from '../cards/ForecastDetail';
 import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
+import { SectionHeader } from '../components/sections';
 import { apiUrl } from '../api';
 import { CHART, HUES } from '../theme';
 
@@ -304,9 +305,11 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
           FORECAST → forecast-skill accuracy & weather ensemble → equipment /
           soiling / shade / mismatch diagnostics. */}
       <div className="pt-2">
-        <div className="text-xs uppercase tracking-widest text-muted mb-2">
-          Solar forecast &amp; diagnostics
-        </div>
+        <SectionHeader
+          accent="solar"
+          title={<>Solar forecast &amp; diagnostics</>}
+          takeaway="Day-ahead projection and model-driven diagnostics — quiet on a healthy fleet."
+        />
       </div>
 
       {/* Day-ahead solar & consumption forecast + learned response model + soiling */}

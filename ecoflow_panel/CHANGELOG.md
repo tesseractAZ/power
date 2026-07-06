@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.86.0 — 2026-07-06
+
+**[Changed] Readability pass — the pages read as titled sections, not a wall of numbers.** The dashboard had two problems: headers were tiny muted uppercase (they looked like faint captions, so nothing anchored the eye), and every analytics card opened with a multi-sentence method-explainer paragraph that repeated the numbers below it. This pass keeps all the context but gets it out of the way.
+
+- **Headers now read as headers.** The global card title is bold, ink-coloured and larger (was tiny/grey/uppercase), so every card across the app gains a clear header for free. New shared `SectionHeader` (a domain-colour accent bar — solar/battery/grid — + bold title + optional one-line takeaway), `SubHeader` (a bold subsection divider with a hairline rule), and `.subhead`/`.takeaway` classes give multi-part cards a real visual hierarchy. The Solar / Battery / Strategy / Dashboard predictive sections now sit under an accented header with a plain-language takeaway.
+- **The repeating narrative moved out of the default flow.** The static "how this is computed" paragraphs (Open-Meteo → response model → SoC track; the SoH-regression method; the ensemble-band explanation; the anomaly-vs-forecast and cleared-history notes) are now collapsed into a **"How this works"** expander, replaced in-line by AT MOST one plain-language takeaway that cites the live number (e.g. "≈X kWh solar vs Y load over the next 24 h"). Context is one click away, never gone.
+- **Purely-predictive detail collapses; everything live stays put.** Only two tables — the day-ahead **per-hour forecast** and the **per-hour solar-response coefficients** (both pure prediction) — now sit behind a "Show detail" expander so the summary tiles lead. **Nothing live or safety-relevant is collapsed:** every telemetry reading, alert/incident, warning/critical/offline/fault state, SoC/runway/power, per-pack SoH/thermal/EOL table, per-circuit power, EVSE, grid state, and the whole Active-alerts alarm view render by default exactly as before.
+
+**Purely a presentation change** — frontend only, zero server/data/engine/endpoint changes. Verified for a mission-critical alarm system: the Active alarm view and all live cards (DPU/SHP2/Runway/Today/EnergyFlow) are untouched; every card's data-cell count is byte-identical to before (nothing deleted); web tsc + vite build clean; full server suite 1105 green; independent data-loss/alarm-regression review + preview smoke-test passed. Correct in both Default and Babylon 5 themes.
+
 ## 0.85.1 — 2026-07-05
 
 **[Fixed] Copilot PR-review follow-ups.**
