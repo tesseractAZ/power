@@ -3,6 +3,14 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.88.0 — 2026-07-06
+
+From an aggressive whole-system log sweep (every add-on + Core + Supervisor + host, 30-agent workflow) driven by real telemetry — and an operator correction that the SHP2 **does** pull from grid at night (floor-managed to ~10% to prevent aging).
+
+**[Fixed] Grid-backstop safety hardening — a cloud-offline SHP2's frozen grid reading can no longer mute a real outage.** `computeHomeGridWatts` (the SHP2 `wattInfo.gridWatt` path, the authoritative whole-home grid-import measurement) read the projection value with **no online/freshness gate**. When the SHP2 goes cloud-offline its last `gridWatt` freezes in the projection — and the SHP2 legitimately pulls **7–8 kW** to carry the home at the reserve floor (confirmed live: 318/322 non-zero samples, peak 8053 W, +46 kWh overnight, pool recovered 11%→45%). An unguarded frozen-high value would keep `importLive`/`backstopping` true and **silently mute a real at-floor outage that began during the offline window**. Now mirrors the `d.online` scoping the DPU `ac_in` path (`computeGridImportWatts`) already applies: an **offline** SHP2 contributes **zero** measured grid flow and never fabricates grid presence from a stale sample. A genuinely online SHP2 with bursty MQTT self-corrects on its next message, so this only suppresses the frozen-offline case — it **strictly hardens** the alarm, never weakens it. New unit test drives the end-to-end path (offline SHP2 at the floor → not backstopping → outage stays audible).
+
+**Sweep results:** the Power add-on log was clean (100/100 INFO, zero errors/crashes/MQTT-drops). Other add-ons/host healthy — only benign/infra items (Scrypted RTSP-teardown EPIPE, a Piper restart, a Switchboard AMI reconnect loop, hourly host DHCP→timesyncd, a Supervisor update-check timeout). **Deferred (operator decision):** the rare between-burst false "backup-pool projected" critical at the floor — the fix trades detection latency for suppression and the adversarial verifier confirmed the naive latch would mute a real outage, so it is surfaced as a tradeoff rather than shipped. Server-only; no config/data/endpoint change. `tsc` clean; suite **1114** green.
+
 ## 0.87.0 — 2026-07-06
 
 Two grid-aware alarm fixes from an exhaustive, adversarially-verified live log review (v0.86.1, 2026-07-06). Both were confirmed by an 18-agent review and each fix is verified NOT to weaken the real grid-down islanding emergency path.
