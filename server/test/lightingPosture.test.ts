@@ -73,6 +73,33 @@ test('rawPosture — critical at/below the reserve floor, regardless of horizon 
   assert.match(r.reason, /reserve floor/);
 });
 
+/* ─── v0.87.0 — grid-aware: don't conserve lighting while the grid backstops ── */
+
+test('rawPosture — gridBackstopping demotes the runway-derived red/amber/conserve to normal (above floor)', () => {
+  // Live 2026-07-06: grid_available=on, pool above floor, hoursToReserve≈0.8 → the
+  // engine went RED and HA dimmed/swept the lights on a grid-TIED evening. The
+  // runway projection is islanded-only, so on grid these depletion escalations must
+  // not fire.
+  assert.equal(rawPosture(inputs({ gridBackstopping: true, hoursToReserve: 0.8 })).posture, 'normal'); // was red
+  assert.equal(rawPosture(inputs({ gridBackstopping: true, hoursToReserve: 9.3, dawnMinSocPct: 12 })).posture, 'normal'); // was amber
+  assert.equal(rawPosture(inputs({ gridBackstopping: true, dawnMinSocPct: 20 })).posture, 'normal'); // was conserve
+  assert.match(rawPosture(inputs({ gridBackstopping: true, hoursToReserve: 0.8 })).reason, /grid backstopping/);
+});
+
+test('rawPosture — gridBackstopping NEVER masks the at/below-floor critical, and still allows surplus', () => {
+  // SAFETY: the floor critical is grid-independent (at the floor even a backstopped
+  // home is in a real conserve-hard state); only the forward PROJECTION demotes.
+  assert.equal(rawPosture(inputs({ gridBackstopping: true, belowReserveFloor: true })).posture, 'critical');
+  // Excess-solar surplus is orthogonal to depletion and still surfaces on grid.
+  assert.equal(rawPosture(inputs({ gridBackstopping: true, curtailmentActive: true })).posture, 'surplus');
+});
+
+test('rawPosture — islanding (gridBackstopping false/absent) keeps the full escalation ladder', () => {
+  // The islanding-safe default: absent flag behaves exactly as before this change.
+  assert.equal(rawPosture(inputs({ hoursToReserve: 0.8 })).posture, 'red');
+  assert.equal(rawPosture(inputs({ gridBackstopping: false, hoursToReserve: 0.8 })).posture, 'red');
+});
+
 /* ─── tracker — asymmetric hysteresis ────────────────────────────────── */
 
 test('tracker — escalation applies immediately', () => {
