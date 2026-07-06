@@ -17,6 +17,7 @@ import type {
 } from '../types';
 import { apiUrl } from '../api';
 import { PredictiveBadge, type PredictiveKind } from '../components/PredictiveBadge';
+import { HowItWorks } from '../components/sections';
 
 /**
  * Advanced Insights (v0.7.5) — surfaces the dozen new analytics functions
@@ -127,10 +128,9 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
           this blurb would just be noise. */}
       {only == null && (
         <div className="card">
-          <div className="card-title">Advanced insights (v0.7.5)</div>
-          <p className="text-sm text-muted leading-relaxed">
-            The full advanced-analytics surface, one block per family.
-            Quiet sections mean the underlying signal has nothing actionable to say right now.
+          <div className="card-title">Advanced insights</div>
+          <p className="takeaway">
+            One block per analytics family — a quiet section means that signal has nothing actionable right now.
           </p>
         </div>
       )}
@@ -198,11 +198,11 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
             <Tile label="Status" value={ensemble.avgDisagreementPct > 15 ? 'wide bands' : 'tight bands'} sub="forecast confidence" />
             <Tile label="Coverage" value={`${Math.round((ensemble.enrichedHourCount / Math.max(1, ensemble.hourCount)) * 100)}%`} sub="ensemble overlap" />
           </div>
-          <p className="text-[11px] text-muted mt-2 leading-relaxed">
+          <HowItWorks>
             High disagreement (&gt; 15%) widens P10/P90 forecast bands — sources don't agree, so the
             point estimate has more uncertainty than usual. Phoenix monsoon clouds are where this
             matters most.
-          </p>
+          </HowItWorks>
         </Section>
       )}
 

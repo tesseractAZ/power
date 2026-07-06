@@ -3,6 +3,7 @@ import type { DayForecast, ForecastHour, HourResponse, SolarResponseModel, Devic
 import { fmtW } from '../format';
 import { apiUrl } from '../api';
 import { PredictiveBadge } from '../components/PredictiveBadge';
+import { SectionHeader, Expander } from '../components/sections';
 
 /**
  * Forecast detail for the Predictive Insights page — shows the full machinery
@@ -110,23 +111,33 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
         : `The backup pool stays above the ${fc.reserveSoc}% reserve floor across the 24-hour window — projected low of ${fc.minProjectedSoc}%${fc.minProjectedSocTs != null ? ` around ${tsHour(fc.minProjectedSocTs)}` : ''}.`;
   return (
     <div className="card">
-      <div className="card-title flex items-center justify-between gap-2">
-        <span className="flex items-center gap-2">
-          Day-ahead solar &amp; consumption forecast
-          {/* v0.85.1 — mark the headline prediction. Chip suppressed: the
-              dedicated forecast-skill section on this page carries the ±MAE%. */}
-          <PredictiveBadge kind="forecast" accuracy={null} />
-        </span>
-        <span className={`badge ${fc.hasWeather ? 'badge-ok' : 'badge-muted'}`}>
-          {fc.hasWeather ? 'cloud-aware' : 'typical-day fallback'}
-        </span>
-      </div>
-      <p className="text-sm text-muted leading-relaxed mb-3">
-        Open-Meteo supplies an hourly cloud-cover and solar-radiation (GHI) forecast for your
-        location. Each hour's GHI is run through the equipment-tuned response model (below) to
-        project PV; that is integrated against the typical-day load curve into a battery SoC track
-        — the runtime forecast.
-      </p>
+      <SectionHeader
+        accent="solar"
+        title={
+          <span className="flex items-center gap-2 flex-wrap">
+            Day-ahead solar &amp; consumption forecast
+            {/* v0.85.1 — mark the headline prediction. Chip suppressed: the
+                dedicated forecast-skill section on this page carries the ±MAE%. */}
+            <PredictiveBadge kind="forecast" accuracy={null} />
+          </span>
+        }
+        chip={
+          <span className={`badge ${fc.hasWeather ? 'badge-ok' : 'badge-muted'}`}>
+            {fc.hasWeather ? 'cloud-aware' : 'typical-day fallback'}
+          </span>
+        }
+        takeaway={
+          <>≈{kwh(fc.forecastPvWhNext24)} solar vs {kwh(loadWh)} load over the next 24 h.</>
+        }
+        info={
+          <>
+            Open-Meteo supplies an hourly cloud-cover and solar-radiation (GHI) forecast for your
+            location. Each hour's GHI is run through the equipment-tuned response model (below) to
+            project PV; that is integrated against the typical-day load curve into a battery SoC track
+            — the runtime forecast.
+          </>
+        }
+      />
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3">
         <Tile label="Solar next 24 h" value={kwh(fc.forecastPvWhNext24)} accent="text-accent" />
         <Tile label="Forecast load 24 h" value={kwh(loadWh)} accent="text-warn" />
@@ -142,29 +153,31 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
         <span className="text-[10px] uppercase tracking-widest text-muted mr-2">Runtime</span>
         {runtimeNote}
       </div>
-      <div className="text-xs uppercase tracking-widest text-muted mb-1.5">
-        Cloud prediction & hourly projection — next 24 h
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs tabular-nums">
-          <thead>
-            <tr className="text-muted text-left">
-              <Th>Hour</Th>
-              <Th>Cloud cover</Th>
-              <Th>GHI</Th>
-              <Th>Forecast PV</Th>
-              <Th>Forecast load</Th>
-              <Th>Proj. SoC</Th>
-              <Th>Source</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {fc.hours.map((h) => (
-              <HourRow key={h.ts} h={h} />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* Purely-predictive per-hour projection — collapsed so the summary tiles +
+          runtime note lead. Safe to collapse per readability rules (day-ahead
+          forecast, no alarm/live-reading content). */}
+      <Expander label="Cloud prediction & hourly projection — next 24 h" count={fc.hours.length}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs tabular-nums">
+            <thead>
+              <tr className="text-muted text-left">
+                <Th>Hour</Th>
+                <Th>Cloud cover</Th>
+                <Th>GHI</Th>
+                <Th>Forecast PV</Th>
+                <Th>Forecast load</Th>
+                <Th>Proj. SoC</Th>
+                <Th>Source</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {fc.hours.map((h) => (
+                <HourRow key={h.ts} h={h} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Expander>
     </div>
   );
 }
@@ -203,56 +216,63 @@ function ModelCard({ fc }: { fc: DayForecast }) {
 
   return (
     <div className="card">
-      <div className="card-title">Learned response model · equipment-tuned</div>
-      <p className="text-sm text-muted leading-relaxed mb-3">
-        Rather than a generic cloud-derate, the model pairs every hour of recorded PV with
-        Open-Meteo's <em>historical</em> solar radiation for that same hour, groups by hour-of-day,
-        and fits a response coefficient — watts of PV per W/m² of GHI. That single number bakes in
-        array size, orientation, inverter clipping and time-of-day shading. Built from{' '}
-        <span className="text-ink font-medium">{m.pairCount}</span> hourly (GHI, PV) pairs over{' '}
-        <span className="text-ink font-medium">{m.historyDays.toFixed(1)} days</span>; peak
-        coefficient{' '}
-        {/* v0.41.0 (Copilot follow-up) — render the GATED peak (fleetPeak = peakResponse(m),
-            r²/sample-gated) not raw m.peakCoeff: the backend gate can legitimately leave
-            peakCoeff at 0 on thin early history while the table still shows raw coefficients,
-            which would make a "0.0 W per W/m²" headline contradict the rows below it. */}
-        <span className="text-ink font-medium">
-          {fleetPeak ? `${fleetPeak.coeff!.toFixed(1)} W per W/m²` : 'still calibrating'}
-        </span>.
-      </p>
+      <SectionHeader
+        accent="solar"
+        title="Learned response model · equipment-tuned"
+        takeaway={
+          <>
+            Fit from {m.pairCount} hourly (GHI, PV) pairs over {m.historyDays.toFixed(1)} days · peak{' '}
+            {/* v0.41.0 (Copilot follow-up) — render the GATED peak (fleetPeak = peakResponse(m),
+                r²/sample-gated) not raw m.peakCoeff: the backend gate can legitimately leave
+                peakCoeff at 0 on thin early history while the table still shows raw coefficients,
+                which would make a "0.0 W per W/m²" headline contradict the rows below it. */}
+            {fleetPeak ? `${fleetPeak.coeff!.toFixed(1)} W per W/m²` : 'still calibrating'}.
+          </>
+        }
+        info={
+          <>
+            Rather than a generic cloud-derate, the model pairs every hour of recorded PV with
+            Open-Meteo's <em>historical</em> solar radiation for that same hour, groups by hour-of-day,
+            and fits a response coefficient — watts of PV per W/m² of GHI. That single number bakes in
+            array size, orientation, inverter clipping and time-of-day shading.
+          </>
+        }
+      />
 
       <SoilingNote fc={fc} />
 
-      <div className="text-xs uppercase tracking-widest text-muted mb-1.5">
-        Response coefficient by hour-of-day
-      </div>
       {daylight.length === 0 ? (
         <div className="text-sm text-muted mb-4">
           Not enough recorded PV paired with sunlight data yet — the model falls back to a
           typical-day curve with a cloud derate.
         </div>
       ) : (
-        <div className="overflow-x-auto mb-4">
-          <table className="w-full text-xs tabular-nums">
-            <thead>
-              <tr className="text-muted text-left">
-                <Th>Hour</Th>
-                <Th>Coefficient</Th>
-                <Th>Fit R²</Th>
-                <Th>Samples</Th>
-                <Th>Observed peak PV</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {daylight.map((h) => (
-                <CoeffRow key={h.hour} h={h} peak={m.peakCoeff} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        // Purely-predictive per-hour response coefficients — collapsed per
+        // readability rules (no live/alarm content; the fleet-peak headline is
+        // already in the takeaway above).
+        <Expander label="Response coefficient by hour-of-day" count={daylight.length}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs tabular-nums">
+              <thead>
+                <tr className="text-muted text-left">
+                  <Th>Hour</Th>
+                  <Th>Coefficient</Th>
+                  <Th>Fit R²</Th>
+                  <Th>Samples</Th>
+                  <Th>Observed peak PV</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {daylight.map((h) => (
+                  <CoeffRow key={h.hour} h={h} peak={m.peakCoeff} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Expander>
       )}
 
-      <div className="text-xs uppercase tracking-widest text-muted mb-1.5">Panel-position inference</div>
+      <div className="text-xs uppercase tracking-widest text-muted mb-1.5 mt-4">Panel-position inference</div>
       <div className="space-y-1.5 text-sm">
         {centroidHourRounded != null ? (
           <Inference

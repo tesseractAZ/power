@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { FleetDegradation, PackDegradation, DegradeStatus, RoundTripEfficiency } from '../types';
 import { apiUrl } from '../api';
 import { PredictiveBadge } from '../components/PredictiveBadge';
+import { SectionHeader } from '../components/sections';
 
 /**
  * Battery degradation — per-pack capacity-fade → end-of-life projection.
@@ -116,17 +117,39 @@ export function DegradationCard() {
         : `${Math.min(...sohValues).toFixed(1)}–${Math.max(...sohValues).toFixed(1)}%`
       : null;
 
+  const takeaway = noFirmTrend
+    ? `No firm fade trend yet${sohRange ? ` — SoH ${sohRange}` : ''}; projections appear as history accrues.`
+    : soonest
+      ? `Soonest projected end-of-life ${fmtEol(soonest.eolDate)} (${packLabel(soonest)}, ~${soonest.yearsToEol} yr)${capPct != null ? ` · fleet capacity ${capPct.toFixed(1)}% of design` : ''}.`
+      : capPct != null
+        ? `Fleet capacity ${capPct.toFixed(1)}% of design; no pack projecting end-of-life yet.`
+        : 'Gathering per-pack State-of-Health history.';
+
   return (
     <div className="card">
-      <div className="card-title flex items-center justify-between gap-2">
-        <span className="flex items-center gap-2">
-          Battery degradation · end-of-life projection
-          {/* v0.85.1 — mark the EOL projection predictive. Chip suppressed: the
-              per-pack R² and ±years band are shown inline in the table below. */}
-          <PredictiveBadge kind="projection" accuracy={null} />
-        </span>
-        <span className="text-xs text-muted normal-case tracking-normal">{deg.packs.length} pack(s)</span>
-      </div>
+      <SectionHeader
+        accent="battery"
+        title={
+          <span className="flex items-center gap-2 flex-wrap">
+            Battery degradation · end-of-life projection
+            {/* v0.85.1 — mark the EOL projection predictive. Chip suppressed: the
+                per-pack R² and ±years band are shown inline in the table below. */}
+            <PredictiveBadge kind="projection" accuracy={null} />
+          </span>
+        }
+        chip={<span className="text-xs text-muted normal-case tracking-normal">{deg.packs.length} pack(s)</span>}
+        takeaway={takeaway}
+        info={
+          <>
+            Every pack's BMS reports a State of Health — measured usable capacity against the pack's
+            original design capacity. Each pack's recorded SoH is regressed over its full history; the
+            regression's slope standard error becomes a confidence band, so the decline is extrapolated
+            to the {deg.eolSoh}% end-of-life mark as a dated projection <em>with an honest range</em>{' '}
+            rather than a single false-precision date. A parallel cycle-count fit adds usage intensity,
+            and every pack's fade rate is compared against the fleet to flag one wearing abnormally fast.
+          </>
+        }
+      />
 
       {noFirmTrend && (
         <div className="border border-accent/30 bg-accent/10 rounded-md px-3 py-2.5 text-sm mb-3">
@@ -136,14 +159,6 @@ export function DegradationCard() {
           not fade.
         </div>
       )}
-      <p className="text-sm text-muted leading-relaxed mb-3">
-        Every pack's BMS reports a State of Health — measured usable capacity against the pack's
-        original design capacity. Each pack's recorded SoH is regressed over its full history; the
-        regression's slope standard error becomes a confidence band, so the decline is extrapolated
-        to the {deg.eolSoh}% end-of-life mark as a dated projection <em>with an honest range</em>{' '}
-        rather than a single false-precision date. A parallel cycle-count fit adds usage intensity,
-        and every pack's fade rate is compared against the fleet to flag one wearing abnormally fast.
-      </p>
 
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         <Tile

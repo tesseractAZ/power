@@ -100,7 +100,16 @@ body {
 
 /* Instrument panels — squared, crisply bordered. */
 .card { @apply bg-panel border border-line rounded-lg p-4 shadow-sm relative; }
-.card-title { @apply text-xs uppercase tracking-widest text-muted font-semibold mb-2; }
+/* v0.86.0 — headers now READ as headers: bold, ink-coloured, larger (was tiny
+   muted uppercase, which looked like a faint caption). Callers that need a
+   right-side chip still add `flex items-center justify-between`. */
+.card-title { @apply text-[13px] font-bold text-ink tracking-tight mb-2; }
+/* Subsection header inside a multi-part card: bold, with a hairline rule above
+   to visually separate it from the block before it. */
+.subhead { @apply text-[11px] font-bold uppercase tracking-wide text-ink border-t border-line pt-3 mt-4 mb-2 flex items-center justify-between gap-2; }
+/* One-line plain-language takeaway that sits under a header and cites the live
+   number — replaces the multi-sentence explainer paragraphs. */
+.takeaway { @apply text-sm text-ink/90 leading-snug mb-2; }
 .kv { @apply flex items-baseline justify-between text-sm; }
 .kv-k { @apply text-muted; }
 .kv-v { @apply font-mono tabular-nums font-semibold; }
