@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { FleetDegradation, PackDegradation, DegradeStatus, RoundTripEfficiency } from '../types';
 import { apiUrl } from '../api';
+import { PredictiveBadge } from '../components/PredictiveBadge';
 
 /**
  * Battery degradation — per-pack capacity-fade → end-of-life projection.
@@ -117,8 +118,13 @@ export function DegradationCard() {
 
   return (
     <div className="card">
-      <div className="card-title flex items-center justify-between">
-        <span>Battery degradation · end-of-life projection</span>
+      <div className="card-title flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2">
+          Battery degradation · end-of-life projection
+          {/* v0.85.1 — mark the EOL projection predictive. Chip suppressed: the
+              per-pack R² and ±years band are shown inline in the table below. */}
+          <PredictiveBadge kind="projection" accuracy={null} />
+        </span>
         <span className="text-xs text-muted normal-case tracking-normal">{deg.packs.length} pack(s)</span>
       </div>
 

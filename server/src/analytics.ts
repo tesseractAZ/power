@@ -5792,7 +5792,13 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
       source: 'learned',
       device: 'System',
       title: `${a.event} — pre-charge recommended`,
-      detail: `NWS has issued a ${a.event} for ${a.areaDesc ?? 'your area'}, in effect ${whenStr}. Charge the backup pool to 100% before it begins so grid loss leaves you in a strong position. ${a.headline ?? ''}`,
+      // Charge advice must not say "before it begins" for an event already in
+      // effect (whenStr = "now …"); use present-tense advice in that case.
+      detail: `NWS has issued a ${a.event} for ${a.areaDesc ?? 'your area'}, in effect ${whenStr}. ${
+        inEffectNow
+          ? 'Charge the backup pool to 100% now so grid loss leaves you in a strong position.'
+          : 'Charge the backup pool to 100% before it begins so grid loss leaves you in a strong position.'
+      } ${a.headline ?? ''}`,
       facts: [
         { label: 'Event', value: a.event },
         { label: 'Severity', value: a.severity },
