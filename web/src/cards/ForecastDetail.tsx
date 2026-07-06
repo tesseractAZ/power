@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { DayForecast, ForecastHour, HourResponse, SolarResponseModel, DeviceSolarModel } from '../types';
 import { fmtW } from '../format';
 import { apiUrl } from '../api';
+import { PredictiveBadge } from '../components/PredictiveBadge';
 
 /**
  * Forecast detail for the Predictive Insights page — shows the full machinery
@@ -109,8 +110,13 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
         : `The backup pool stays above the ${fc.reserveSoc}% reserve floor across the 24-hour window — projected low of ${fc.minProjectedSoc}%${fc.minProjectedSocTs != null ? ` around ${tsHour(fc.minProjectedSocTs)}` : ''}.`;
   return (
     <div className="card">
-      <div className="card-title flex items-center justify-between">
-        <span>Day-ahead solar &amp; consumption forecast</span>
+      <div className="card-title flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2">
+          Day-ahead solar &amp; consumption forecast
+          {/* v0.85.1 — mark the headline prediction. Chip suppressed: the
+              dedicated forecast-skill section on this page carries the ±MAE%. */}
+          <PredictiveBadge kind="forecast" accuracy={null} />
+        </span>
         <span className={`badge ${fc.hasWeather ? 'badge-ok' : 'badge-muted'}`}>
           {fc.hasWeather ? 'cloud-aware' : 'typical-day fallback'}
         </span>
