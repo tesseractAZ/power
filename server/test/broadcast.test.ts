@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { conditionFromAlerts, loadBroadcastConfig, announceVolumeLevel, isRestartContinuation } from '../src/broadcast.js';
+import { conditionFromAlerts, loadBroadcastConfig, announceVolumeLevel, isRestartContinuation, holdBootRed } from '../src/broadcast.js';
 import { generateAudioAssets } from '../src/audioAssets.js';
 import { mkdtempSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -417,4 +417,37 @@ test('isRestartContinuation — past the warm-up window → normal transitions r
 
 test('isRestartContinuation — no baseline (first boot / unverified prior broadcast) → today behaviour', () => {
   assert.equal(isRestartContinuation(null, 'red', 1_000, WIN), false);
+});
+
+/* ─── holdBootRed — v0.87.0 boot phantom-critical grace ──────────────────
+ * A per-device critical can flicker on ONE 10s tick as telemetry populates ~30s
+ * post-boot, then clear. Because a RED is never a restart-continuation, that
+ * phantom would annunciate a false emergency. holdBootRed holds the FIRST fresh
+ * red one tick within the warm-up window; a red that persists confirms next tick
+ * (≤10s late) and a one-tick phantom is dropped. A genuine red is NEVER
+ * suppressed — only delayed by at most one tick, and never outside the window. */
+
+test('holdBootRed — first fresh red within the warm-up window is HELD (not spoken yet)', () => {
+  assert.equal(holdBootRed(true, 30_000, false, WIN), true);
+});
+
+test('holdBootRed — a red that PERSISTS to the next tick confirms and fires (latch already set)', () => {
+  // second observation: alreadySeen=true ⇒ no longer held ⇒ broadcasts.
+  assert.equal(holdBootRed(true, 40_000, true, WIN), false);
+});
+
+test('holdBootRed — SAFETY: past the warm-up window a red is NEVER held (fires immediately)', () => {
+  assert.equal(holdBootRed(true, WIN + 1, false, WIN), false);
+});
+
+test('holdBootRed — a non-red tick (wouldFireRed=false) is never held', () => {
+  assert.equal(holdBootRed(false, 10_000, false, WIN), false);
+});
+
+test('holdBootRed — the phantom→clear→genuine sequence: held, then (latch reset by caller) held again, then confirms', () => {
+  // tick A: phantom red → held. tick B: cleared (caller resets latch on non-red).
+  // tick C: genuine red, latch false again → held one tick. tick D: persists → fires.
+  assert.equal(holdBootRed(true, 20_000, false, WIN), true);   // A: phantom held
+  assert.equal(holdBootRed(true, 40_000, false, WIN), true);   // C: genuine, latch reset → held
+  assert.equal(holdBootRed(true, 50_000, true, WIN), false);   // D: persists → fires
 });

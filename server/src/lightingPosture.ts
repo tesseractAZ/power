@@ -59,6 +59,13 @@ export interface PostureInputs {
   reservePct: number | null;
   /** PV curtailment currently active (energy going unharvested). */
   curtailmentActive: boolean;
+  /** v0.87.0 — the grid is genuinely backstopping the home right now
+   *  (liveGridBackstop().backstopping). When true and the pool is above its floor,
+   *  the runway-to-reserve projection is islanded-only, so the depletion-driven
+   *  conserve escalations (red/amber/conserve) must NOT fire — the house should not
+   *  dim/sweep lights while the grid has it. Absent/false = the full escalation
+   *  ladder (the islanding-safe default). */
+  gridBackstopping?: boolean;
   /** Clock injection for deterministic tests. */
   nowMs: number;
 }
@@ -73,6 +80,20 @@ export interface PostureResult {
 export function rawPosture(i: PostureInputs): PostureResult {
   if (i.belowReserveFloor) {
     return { posture: 'critical', reason: 'pool at/below reserve floor' };
+  }
+  // v0.87.0 — grid-aware: when the grid is genuinely backstopping the home and the
+  // pool is above its floor (the belowReserveFloor→critical branch above still
+  // handles the floor itself), the runway-to-reserve projection is islanded-only — a
+  // non-event on grid, since the SHP2 transfers to mains at the floor. So the
+  // depletion-driven escalations (red/amber/conserve) must NOT fire; the house
+  // should not dim/sweep lights on a grid-up evening. Excess-solar surplus still
+  // applies. When gridBackstopping is false/absent (islanding — the safe default)
+  // the full escalation ladder below runs unchanged.
+  if (i.gridBackstopping) {
+    if (i.curtailmentActive) {
+      return { posture: 'surplus', reason: 'PV curtailment active — surplus energy available' };
+    }
+    return { posture: 'normal', reason: 'grid backstopping — depletion projection is islanded-only' };
   }
   if (i.hoursToReserve != null && i.hoursToReserve <= RED_HOURS_TO_RESERVE) {
     return { posture: 'red', reason: `reserve crossing in ${i.hoursToReserve.toFixed(1)}h` };

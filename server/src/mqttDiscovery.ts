@@ -649,6 +649,11 @@ export async function startMqttDiscovery(
       dawnMinSocPct: fc.minProjectedSoc,
       reservePct: shp2?.projection.backupReserveSoc ?? null,
       curtailmentActive: !!(curtailment as { active?: boolean }).active,
+      // v0.87.0 — feed the same grid-backstop signal the alarm engines use so the
+      // posture stops escalating to red/amber on a grid-tied evening (the runway
+      // projection it keys on is islanded-only). Same resolver as off_grid /
+      // runway_projection_islanded_only above.
+      gridBackstopping: liveGridBackstop(snap.devices).backstopping,
       nowMs: Date.now(),
     });
     return {
