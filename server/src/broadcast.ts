@@ -342,6 +342,31 @@ export function isRestartContinuation(
   return RANK[observed] <= RANK[baseline];   // a same-or-lower yellow/green ⇒ continuation
 }
 
+/**
+ * v0.87.0 — boot phantom-critical grace. During the post-boot warm-up window,
+ * telemetry populates over the first ticks and a transient per-device critical can
+ * appear on ONE 10s tick then clear as real values arrive. Because a RED is
+ * (correctly) never suppressed by isRestartContinuation, that phantom would
+ * annunciate a FALSE emergency ~30s after every restart (observed live 2026-07-06:
+ * "condition transition → red (new crit)" ~30s post-boot, critical_alerts=0 after).
+ *
+ * This returns true (HOLD — do not broadcast this red yet) for the FIRST fresh red
+ * within the warm-up window; the caller sets its seen-latch and does NOT advance
+ * prevLevel, so a red that PERSISTS re-presents as a transition next tick and then
+ * fires (≤ one 10s tick late). A one-tick populate phantom clears and is never
+ * spoken. Outside the window, or once the latch is set (confirmed), returns false =
+ * fire immediately. A genuine standing critical is therefore delayed by at most one
+ * tick and NEVER suppressed. Pure + exported for tests.
+ */
+export function holdBootRed(
+  wouldFireRed: boolean,
+  msSinceBoot: number,
+  alreadySeen: boolean,
+  windowMs = BROADCAST_BOOT_WARMUP_MS,
+): boolean {
+  return wouldFireRed && msSinceBoot < windowMs && !alreadySeen;
+}
+
 /* ─── monitor ─────────────────────────────────────────────────────── */
 
 export interface BroadcastMonitor {
@@ -945,6 +970,10 @@ export function startBroadcastMonitor(
 
   /* ── tick — periodic check for condition transitions */
   let tickInFlight = false;
+  // v0.87.0 — boot phantom-critical grace latch (see holdBootRed). Set once a fresh
+  // red is held for confirmation within the warm-up window; cleared whenever the
+  // level is not red, so a later red re-confirms rather than fast-tracks.
+  let warmupRedSeen = false;
   const tick = async () => {
     if (stopped) return;
     cfg = loadBroadcastConfig();
@@ -963,6 +992,10 @@ export function startBroadcastMonitor(
     }
     const transitioned = level !== prevLevel;
     const newCrit = level === 'red' && crit > prevCrit;
+    // v0.87.0 — clear the boot phantom-red latch whenever the level is not red
+    // (phantom cleared or genuine de-escalation), so a later red in the warm-up
+    // window is re-confirmed across a tick rather than fast-tracked.
+    if (level !== 'red') warmupRedSeen = false;
     // v0.58.0 — within the post-restart warm-up window, a condition that was
     // already active (and successfully broadcast) before the restart re-appears as
     // a "rise" once the analytics/learned alerts re-warm. Don't re-speak it aloud;
@@ -975,6 +1008,18 @@ export function startBroadcastMonitor(
       return;
     }
     if (!transitioned && !newCrit) return;
+    // v0.87.0 — boot phantom-critical grace. A fresh red inside the warm-up window
+    // is held ONE tick to confirm it is a standing critical and not a
+    // telemetry-populate phantom (which appears then clears ~30s post-boot). We do
+    // NOT advance prevLevel here, so a persisting red re-presents as a transition on
+    // the next 10s tick and fires then; a one-tick phantom clears and is never
+    // spoken. Outside the window (or once confirmed) holdBootRed returns false and
+    // red fires immediately — never suppressed, delayed by ≤ one tick.
+    if (holdBootRed(level === 'red' && (transitioned || newCrit), Date.now() - bootMs, warmupRedSeen)) {
+      warmupRedSeen = true;
+      log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard)`);
+      return;
+    }
     // Snapshot the transition state FIRST so a second arrival during an
     // in-flight broadcast doesn't re-fire (preserved from v0.9.49).
     prevLevel = level;
