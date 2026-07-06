@@ -3,6 +3,13 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.86.1 — 2026-07-06
+
+**[Changed] Readability pass — finish the one card the v0.86.0 sweep missed.** The Solar page's **"Array sunlight response (learned)"** card still opened its below-chart caption with the static method sentence ("Watts of PV per W/m² of sunlight, learned by pairing recorded output with Open-Meteo's solar-radiation history…") — the exact repeating-narrative style v0.86.0 demoted everywhere else. That method prose (how the coefficient is learned + what the curve shape means + the by-inverter/by-string hint) now sits in a collapsed **"How this works"**, so the summary tiles + chart lead.
+
+- **The live data-quality caveat stays visible.** When the model is still calibrating (`< 5` samples/hour) the "Still preliminary — the curves firm up over the next couple of weeks" line renders **by default** as a plain takeaway, alongside the existing "Confidence: Preliminary" tile — it reports a live state, so it is never collapsed.
+- **Nothing else changed.** The peak-response / strongest-hour / confidence tiles and the per-inverter and per-string response chart render exactly as before. Verified against the same rule as v0.86.0 — *collapse the method, never the measurement.* Frontend-only; web tsc + vite build clean; full server suite 1105 green. Correct in Default + Babylon 5.
+
 ## 0.86.0 — 2026-07-06
 
 **[Changed] Readability pass — the pages read as titled sections, not a wall of numbers.** The dashboard had two problems: headers were tiny muted uppercase (they looked like faint captions, so nothing anchored the eye), and every analytics card opened with a multi-sentence method-explainer paragraph that repeated the numbers below it. This pass keeps all the context but gets it out of the way.
