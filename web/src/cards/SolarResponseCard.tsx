@@ -12,6 +12,7 @@ import {
 import type { DayForecast, SolarResponseModel } from '../types';
 import { apiUrl } from '../api';
 import { CHART, HUES, UI } from '../theme';
+import { HowItWorks } from '../components/sections';
 
 const fmtHour = (h: number) => (h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`);
 const INV_COLORS = [HUES.battery, HUES.soc, HUES.solar, HUES.violet, HUES.pink];
@@ -174,14 +175,22 @@ export function SolarResponseCard() {
               </LineChart>
             </ResponsiveContainer>
           </div>
-          <div className="text-[11px] text-muted mt-2 leading-relaxed">
+          {minSamples < 5 && (
+            <p className="takeaway mt-2">
+              Still preliminary — the curves firm up over the next couple of weeks as more paired sunlight + output history accrues.
+            </p>
+          )}
+          {/* v0.86.1 — the static method prose (how the coefficient is learned +
+              what the curve shape means) moves into a collapsed How-this-works so
+              the tiles + chart lead. The preliminary confidence caveat above stays
+              VISIBLE because it is a live data-quality state, not method prose. */}
+          <HowItWorks>
             Watts of PV per W/m² of sunlight, learned by pairing recorded output with Open-Meteo's solar-radiation
-            history. The <em>shape</em> reveals orientation and shading.{' '}
+            history. The <em>shape</em> of each curve reveals orientation and shading.{' '}
             {mode === 'inverter'
               ? 'Switch to HV/LV string view to compare the two MPPT arrays on each inverter — if their peaks differ, they face different directions.'
               : "Each inverter's HV and LV inputs take separate arrays; differing peak hours mean they're aimed differently (or one is shaded part of the day)."}
-            {minSamples < 5 && ' Still preliminary — the curves firm up over the next couple of weeks.'}
-          </div>
+          </HowItWorks>
         </>
       )}
     </div>
