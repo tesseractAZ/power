@@ -3,6 +3,22 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.91.0 — 2026-07-07
+
+Configuration-page ease-of-use overhaul + an aggressive correctness review of the whole options → env → consumer chain. Every setting on the add-on **Configuration** page now has a plain-language label and inline help, the fields are grouped essentials-first, and a 25-agent workflow (recon → per-group authoring → adversarial verify → completeness critic) proved every change safe against the live-saved values.
+
+**[Added] `translations/en.yaml` — labels + inline help for all 56 options.** Home Assistant renders each option's `name` as its field label and `description` as the helper line beneath it. Previously the form showed raw `SCREAMING_SNAKE_CASE` keys with no explanation; now every field has a concise human name and a 1–3 sentence plain-text description that states what it does, the accepted format with an example where non-obvious (quiet-hours `HH-HH`, the polymorphic Announce-Volume `off|none|standing|0-100`, the load-shed CSV `entity_id:priority:label:watts[:circuit]`, the reachability JSON map), the default, and key interactions (e.g. "no-op unless a speaker is listed"). Keys are validated byte-for-byte against `config.yaml` at build time.
+
+**[Changed] Fields reordered essentials-first.** The Configuration form now flows credentials/core → site location → notifications → audible broadcast → battery & grid alarms → load-shedding → integrations → telnet → diagnostics (`WRITE_DEBUG_TOKEN` last). A fresh installer meets the only must-set fields first; opt-in machinery and security-sensitive diagnostics sit at the bottom. Purely the display order — a config-integrity oracle proved the 56 keys and every default are byte-identical to before.
+
+**[Changed] Five numeric fields gained inclusive range guardrails.** `FORECAST_LAT → float(-90,90)`, `FORECAST_LON → float(-180,180)`, `BROADCAST_VOLUME → float(0,1)`, and both load-shed hour thresholds → `float(0,168)`. Bounds are inclusive and contain every current value/default, so the widget now rejects a fat-fingered out-of-range entry at Save without touching any saved config. The `str?`/`password`/`url` fields were deliberately left as-is (the notify URL fields must stay `str?` — `url?` rejects their empty default on Save).
+
+**[Fixed] Documentation drift — the SoC alarm ladder starts at 50%, not 40%.** The authoritative `BATTERY_SOC_THRESHOLDS` array fires at **50/40/30/20/15/10/8/4/2%**, but four comments/docs (`batterySocAlarm.ts`, `index.ts`, `alerts.ts`, `DOCS.md`) said `40/…` — corrected everywhere, including the new inline help. No behavior change (the code array was always right).
+
+**[Review] The whole options → env → consumer chain was audited; no correctness bugs found.** A suspected `TELNET_ENABLED` no-op (config.ts reads `!== '0'`) was **refuted**: the s6 run script wraps every bool in `if bashio::config.true … export=1 else export=0`, so a false toggle deterministically exports `"0"` and telnet correctly disables. All 13 bool consumers were cross-checked against their bridge convention (numeric `1/0` vs string `true/false`) — zero mismatches. Documented one non-blocking robustness note: the two bridge conventions are individually correct but implicitly coupled to their consumers.
+
+Config/docs only (plus comment fixes); no runtime code path changed. `ports_description` kept as the single source for port labels (no duplicate `network:` block). `tsc` clean; full suite green.
+
 ## 0.90.0 — 2026-07-06
 
 **[Changed] Analytics report coalescing + short TTL cache — collapses the concurrent dashboard fan-out into one worker round-trip.** Each dashboard poll fans out ~9 concurrent `analytics.report()` calls (`/api/ha-state`, `mqttDiscovery.buildState`, `alertMonitor`, `featureSnapshot`) that all funnel through the single analytics worker's serial message loop, so a batch queued behind a slow scan serialises. `analyticsClient.report()` now (a) **coalesces** concurrent identical calls into ONE worker round-trip and (b) serves a repeat within a short **per-report TTL** (default 20 s; 3–5 s for the alarm-facing `forecast`/`runway`/`curtailmentAlerts`/`baselineAlerts`/`forecastAlerts`; 0 = coalesce-only for the args-bearing `totals`/`circuitHistory`/`backtest`) from a **structured clone** of the last result.

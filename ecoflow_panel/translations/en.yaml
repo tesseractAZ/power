@@ -1,0 +1,174 @@
+# Home Assistant Configuration-page labels + inline help for the Power add-on.
+# HA renders each option's `name` as its field label and `description` as the
+# plain-text helper line beneath it. Keys MUST match config.yaml options exactly
+# (a typo silently falls back to the raw KEY with no warning). Port labels live in
+# config.yaml `ports_description:` — kept single-source, so no `network:` block here.
+configuration:
+  ECOFLOW_ACCESS_KEY:
+    name: EcoFlow Access Key
+    description: IoT access key from the EcoFlow developer portal (developer.ecoflow.com). Required — without it the add-on cannot poll your devices. Masked on entry and never shown back.
+  ECOFLOW_SECRET_KEY:
+    name: EcoFlow Secret Key
+    description: Secret paired with the access key above; used as the HMAC-SHA256 signing key for EcoFlow API requests. Required. Masked on entry and never shown back — presence only.
+  ECOFLOW_API_HOST:
+    name: EcoFlow API Host
+    description: Base URL of the EcoFlow cloud API. Leave at the default https://api-a.ecoflow.com unless EcoFlow directs you to a different regional endpoint. Must be a full URL including https://.
+  LOG_LEVEL:
+    name: Log Level
+    description: Verbosity of the add-on log (Fastify/pino). info is the default; pick debug or trace for more detail when troubleshooting, or warn/error/fatal to quiet routine output.
+  FORECAST_LAT:
+    name: Site Latitude
+    description: Install site latitude in decimal degrees, north positive (e.g. 33.4484 for Phoenix, AZ). Used only to fetch the solar day-ahead weather forecast. Default 33.4484.
+  FORECAST_LON:
+    name: Site Longitude
+    description: Install site longitude in decimal degrees, east positive / west negative (e.g. -112.074 for Phoenix, AZ). Used only to fetch the solar day-ahead weather forecast. Default -112.074.
+  NOTIFY_CHANNEL:
+    name: Notify Channel
+    description: 'Where per-alert push notifications go: none (off, default), ntfy, pushover, webhook, or ha. ha posts Home Assistant persistent notifications (visible in the HA UI and companion app, zero external setup). Each other channel stays silent until its fields below are filled: ntfy needs a topic, pushover needs token+user, webhook needs a URL.'
+  NOTIFY_MIN_SEVERITY:
+    name: Notify Minimum Severity
+    description: Lowest alert severity that triggers a push. warning (default) sends warnings and criticals; critical sends criticals only. Applies to the notify channel only; the audible broadcast has its own Broadcast Minimum Severity.
+  NOTIFY_RESOLVED:
+    name: Notify On Resolved
+    description: When on (default), also send a 'Resolved:' push once an alert clears, so you get the all-clear and not just the alarm. Turn off to receive only firing notifications. No effect when Notify Channel is none.
+  NOTIFY_NTFY_SERVER:
+    name: ntfy Server URL
+    description: Base URL of your ntfy server, e.g. https://ntfy.sh (the default public server). Only used when Notify Channel is ntfy; leave as-is unless you self-host. No trailing path needed — the topic is appended.
+  NOTIFY_NTFY_TOPIC:
+    name: ntfy Topic
+    description: The ntfy topic alerts publish to (the part after the server URL), e.g. my-ecoflow-alerts. Required for the ntfy channel — it is 'configured' only once this is non-empty. Only used when Notify Channel is ntfy; default empty.
+  NOTIFY_PUSHOVER_TOKEN:
+    name: Pushover Application Token
+    description: Your Pushover application/API token. Required together with Pushover User Key — the pushover channel is configured only when both are set. Only used when Notify Channel is pushover; masked on entry, presence-only, default empty.
+  NOTIFY_PUSHOVER_USER:
+    name: Pushover User Key
+    description: Your Pushover user (or group) key. Required together with the Pushover Application Token for the pushover channel to send. Only used when Notify Channel is pushover; masked on entry, presence-only, default empty.
+  NOTIFY_WEBHOOK_URL:
+    name: Webhook URL
+    description: HTTP(S) endpoint that receives a JSON POST (title, body, severity, ts) per alert. Required for the webhook channel — configured only when this is non-empty. Only used when Notify Channel is webhook; default empty.
+  NOTIFY_QUIET_HOURS:
+    name: Notify Quiet Hours
+    description: Local-time window that holds lower-severity pushes and batches them into the morning digest instead of pinging you overnight. Format 24-hour HH-HH, e.g. 22-06 (10pm-6am, default); may wrap past midnight; blank disables. Critical is also held unless Critical Breaks Quiet Hours is on; the audible broadcast has its own Broadcast Quiet Hours.
+  NOTIFY_DIGEST_HOUR:
+    name: Morning Digest Hour
+    description: Local hour (0-23) at which alerts queued during quiet hours are delivered as one morning-digest push. Default 7 (7am). Only meaningful when a Notify Channel is set and quiet hours are in use.
+  BROADCAST_ENABLED:
+    name: Enable Audible Broadcasts
+    description: Master switch for spoken alarm announcements and chimes on your Home Assistant media_player speakers (HomePod/Sonos/ecobee). Off by default, and does nothing until you also list at least one speaker in Broadcast Targets; push notifications are separate and unaffected. Can also be toggled live from the dashboard.
+  BROADCAST_TARGETS:
+    name: Broadcast Target Speakers
+    description: Comma-separated Home Assistant media_player entity IDs alarms play on, e.g. media_player.living_room, media_player.kitchen. Each entry must start with 'media_player.'; anything else is silently dropped. Empty (the default) means no audible alarm can play even when broadcasts are enabled.
+  BROADCAST_MIN_SEVERITY:
+    name: Broadcast Minimum Severity
+    description: Lowest alarm tier that triggers an audible broadcast. 'critical' (default) broadcasts only criticals; 'warning' broadcasts warnings and criticals. This gates the audible channel only, separate from the push-notification severity setting.
+  BROADCAST_QUIET_HOURS:
+    name: Broadcast Quiet Hours
+    description: Local overnight window that suppresses lower-priority broadcasts, written as 'HH-HH' on a 24-hour clock, e.g. 22-06 for 10 PM to 6 AM (wraps past midnight); default 22-06. Leave empty for no quiet hours. Whether critical alarms still break through is set by Critical Alarms Break Quiet Hours below.
+  CRITICAL_BREAKS_QUIET_HOURS:
+    name: Critical Alarms Break Quiet Hours
+    description: Whether CRITICAL alarms can chime and push during quiet hours. Off by default, so quiet hours hold every tier overnight — the alert still appears on-screen immediately and is delivered in the morning digest, but nothing sounds until morning. Turn on to be woken for genuine emergencies; applies to both the audible and push channels.
+  BROADCAST_AUDIO_BASE:
+    name: Broadcast Audio Base URL
+    description: Base URL your speakers fetch the chime WAV files from; must be reachable from the speakers on your LAN. Default http://homeassistant.local:8787 uses mDNS; if mDNS is flaky, set your HA host IP instead, e.g. http://192.168.5.152:8787. A trailing slash is trimmed and a blank value falls back to the mDNS default.
+  BROADCAST_VOLUME:
+    name: Broadcast Volume
+    description: Speaker volume for audible alarm announcements, from 0.0 (silent) to 1.0 (full); default 0.5. This is also the level the spoken announcement plays at unless Announce Volume overrides it, and it can be adjusted live from the dashboard.
+  BROADCAST_CHIME_PACK:
+    name: Alarm Chime Pack
+    description: Which alarm chime sound set the speakers use. 'powerplant' (default) is ISA-18.2 industrial annunciator cadences that signal priority by rhythm (emergency warble / caution pulse / advisory chime); 'airport' is the older melodic struck-bell PA chimes. Changing this regenerates the speaker WAVs on the next add-on restart.
+  BROADCAST_ANNOUNCE_VOLUME:
+    name: Announce Volume Override
+    description: Speaker volume for the announcement. Leave empty (default) to play at Broadcast Volume x 100; enter 0-100 to force that exact level (e.g. 80); or enter off, none, or standing to omit the volume command and keep each speaker's current level. Any non-empty value pins the level, making the master Broadcast Volume slider informational only.
+  BROADCAST_USE_PRE_ANNOUNCE:
+    name: Use Pre-Announce Tone
+    description: When on, plays Music Assistant's short pre-announce tone before the message, which can wake a sleepy ecobee speaker so it does not clip the start. Off by default.
+  BROADCAST_LEAD_SILENCE_MS:
+    name: Broadcast Lead-In Silence (ms)
+    description: 'Milliseconds of silence prepended to every audible alarm/broadcast so slow speakers (AirPlay/ecobee especially) can join the stream before the chime, preventing a clipped start. Range 0-5000, default 1000; set 0 to disable. Example: 1500.'
+  BROADCAST_REPEAT:
+    name: Broadcast Repeat Count
+    description: 'How many times the whole chime-plus-spoken-message block plays per announcement, so a missed first pass gets a second. 1 = once, 2 = twice, max 3; default 2. The gap between repeats is set by Broadcast Repeat Gap. Note: ignored in bilingual mode, where the English-then-Spanish pair is the repeat.'
+  BROADCAST_REPEAT_GAP_MS:
+    name: Broadcast Repeat Gap (ms)
+    description: Milliseconds of silence inserted between repeated announcement blocks so the repeat is audibly distinct (message, pause, then it plays again). Range 0-5000, default 1500; set 0 to remove the pause. No effect unless Broadcast Repeat Count is greater than 1.
+  BROADCAST_CHIME_GAP_MS:
+    name: Broadcast Chime Gap (ms)
+    description: Milliseconds of silence inserted after the alert chime and before the spoken message, letting the chime decay so the announcement does not overlap it. Range 0-5000, default 1000; set 0 to disable.
+  BROADCAST_ANNOUNCE_RETRIES:
+    name: Announce Retries
+    description: How many times to retry the announcement when the speaker service call actually fails (not for missed audio). Range 0-3, default 1; set 0 to never retry.
+  BROADCAST_WYOMING_HOST:
+    name: Wyoming TTS Host
+    description: Hostname or IP of the Wyoming Protocol (Piper) TTS server that renders spoken alarms. Default core-piper reaches Home Assistant's Piper add-on; override only if Piper runs elsewhere, e.g. piper.lan or 192.168.5.10. A plain host, not a URL (no scheme or port).
+  BROADCAST_WYOMING_PORT:
+    name: Wyoming TTS Port
+    description: TCP port of the Wyoming/Piper TTS server, 0-65535. Default 10200 is Piper's standard Wyoming port; change only if your Piper host listens elsewhere.
+  BROADCAST_WYOMING_VOICE:
+    name: Wyoming TTS Voice (English)
+    description: Piper voice for English announcements, e.g. en_US-amy-medium or en_GB-alan-low. Leave empty to use the Piper add-on's own configured voice. The voice must exist on your Piper server (voices are listed in its startup log).
+  BROADCAST_BILINGUAL:
+    name: Bilingual Announcements
+    description: When on (the default), each announcement plays in English, then in Latin American Spanish. It stays a no-op until Wyoming TTS Voice (Spanish) below names a Spanish voice that exists on your Piper server. Turn off to force English-only.
+  BROADCAST_WYOMING_VOICE_ES:
+    name: Wyoming TTS Voice (Spanish)
+    description: Spanish Piper voice for the bilingual second pass, e.g. es_MX-claude-high. Setting this is what activates bilingual mode — leave empty and announcements stay English-only even with Bilingual Announcements on. Must exist on your Piper server in 22050 Hz / 16-bit mono (most *-medium/*-high voices are).
+  BATTERY_SOC_ALARM_ENABLED:
+    name: Battery SoC Alarm
+    description: Sounds an escalating audible alarm on the broadcast speakers as the SHP2 backup pool falls DOWN through 50/40/30/20/15/10/8/4/2% (priority rises Low to Critical). Default on; turn off to silence this ladder. Only sounds if broadcast speakers are configured, and each tier still obeys the per-priority Alert Settings toggles and quiet hours.
+  BATTERY_RUNWAY_ALARM_ENABLED:
+    name: Battery Runway Alarm
+    description: Sounds an escalating audible alarm when the 24-hour off-grid runway projection shows the backup pool reaching its reserve floor (or empty) before solar recovers, so you can shed load early. This is the forward-looking projection alarm, distinct from the SoC-threshold ladder that only fires after the pool has already fallen. Default on; turn off to silence it.
+  BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN:
+    name: Runway Alarm Re-announce Interval (min)
+    description: How often, in minutes, the Battery Runway Alarm repeats its spoken announcement while the depletion projection persists. Default 60; accepts 5 to 720 minutes (5 min to 12 h). No effect when the Battery Runway Alarm is off.
+  GRID_AVAILABLE:
+    name: Grid Import Available
+    description: Declares whether the site has utility grid import. Leave OFF for an islanded off-grid system so the dispatch optimizer stops assuming an impossible grid backstop (the safe default); turn ON only if you are grid-tied. When off and no Grid Presence Entity is set, the system treats itself as off-grid and keeps the backup-pool floor alarm at CRITICAL.
+  GRID_PRESENCE_ENTITY:
+    name: Grid Presence Entity
+    description: 'Optional HA entity ID that reports whether the utility grid is energized, making the backup-pool floor alarm grid-aware: while the grid is present, the pool reaching its ~10% reserve floor is downgraded from CRITICAL to an on-screen advisory. Point it at a binary_sensor/input_boolean (on = present) or a grid voltage sensor (>50 = present), e.g. binary_sensor.grid_available. Empty (default) falls back to Grid Import Available plus live import; if set but unavailable/unknown the floor stays CRITICAL (the safe default).'
+  LOAD_SHEDDING_ADVISORY_ENABLED:
+    name: Load-Shedding Advisor
+    description: 'Advisory-only engine: when off-grid runway drops low it recommends which allowlisted loads to shed and publishes the suggestion as sensors/MQTT entities, but never switches anything itself — your own HA automations decide whether to act. Default on, but stays inactive until you list at least one load in Sheddable Loads.'
+  LOAD_SHEDDING_SHED_ENTITIES:
+    name: Sheddable Loads
+    description: 'Comma-separated allowlist of loads the advisor may recommend shedding — nothing outside this list is ever suggested. Each entry is entity_id:priority:label:estimated_watts[:shp2_circuit]; priority 1 = shed first (least important), last field is an optional SHP2 circuit number for measured watts. Example: switch.pool_pump:2:Pool pump:400:5,switch.irrigation:1:Irrigation:200. Empty (default) keeps the advisor inactive.'
+  LOAD_SHEDDING_RUNWAY_THRESHOLD_H:
+    name: Shed-Trigger Runway (Hours)
+    description: When projected off-grid hours-to-reserve (or hours-to-empty) fall to this value or below, the advisor starts recommending loads to shed. Higher = advise earlier; lower = wait longer. Default 4.0. No effect unless the advisor is on and Sheddable Loads is non-empty.
+  LOAD_SHEDDING_RESTORE_MARGIN_H:
+    name: Restore Margin (Hours)
+    description: 'Anti-flap buffer: after a shed, the counterfactual runway must reach the trigger threshold PLUS these extra hours before the shed is withdrawn, preventing rapid on/off recommendations. Default 2.0. Only matters when the advisor is on and actively recommending.'
+  NWS_ENABLED:
+    name: NWS Storm Alerts
+    description: Pull active US National Weather Service alerts near your site (from FORECAST_LAT/LON) to fire a "pre-charge to 100% before a forecast storm" alert. Free — no API key or account. Off by default; outside the US the feed returns empty (a harmless no-op).
+  MQTT_DISCOVERY_ENABLED:
+    name: MQTT Discovery
+    description: Publish every panel sensor to Home Assistant via MQTT auto-discovery, so they appear automatically under an "EcoFlow Panel" device with no configuration.yaml edits. Off by default. No-op unless MQTT Broker Host is also set — both are required.
+  MQTT_DISCOVERY_HOST:
+    name: MQTT Broker Host
+    description: Hostname or IP of your MQTT broker, e.g. core-mosquitto (HA's Mosquitto add-on) or 192.168.1.50. Required for MQTT Discovery — if empty, discovery stays off even when the toggle is on. Default empty.
+  MQTT_DISCOVERY_PORT:
+    name: MQTT Broker Port
+    description: TCP port of the MQTT broker. Default 1883 (standard unencrypted MQTT). Only used when MQTT Discovery is enabled with a host set.
+  MQTT_DISCOVERY_USER:
+    name: MQTT Username
+    description: Username for broker authentication. Leave empty for an anonymous broker. Only used when MQTT Discovery is enabled with a host set. Default empty.
+  MQTT_DISCOVERY_PASS:
+    name: MQTT Password
+    description: Password for broker authentication, paired with MQTT Username. Masked on entry and never shown back. Leave empty for an anonymous broker; only used when MQTT Discovery is enabled with a host set.
+  MQTT_DISCOVERY_PREFIX:
+    name: MQTT Discovery Prefix
+    description: Topic prefix HA listens on for auto-discovery; must match your HA MQTT integration's discovery prefix. "homeassistant" is the HA default and almost always correct. Only used when MQTT Discovery is enabled. Default homeassistant.
+  TELNET_ENABLED:
+    name: Enable Telnet TUI
+    description: Turns on the raw telnet control-room TUI on the Telnet TUI Port (default 2323), a full-screen terminal dashboard reachable with any telnet client. This port has NO authentication, so keep it on a trusted LAN. Default on.
+  TELNET_PORT:
+    name: Telnet TUI Port
+    description: TCP port the telnet control-room TUI listens on, e.g. 2323 (the default). If you change it, also change the 2323/tcp mapping in the add-on's Network section to match so it stays reachable. Ignored when Enable Telnet TUI is off.
+  ECOFLOW_DEVICE_REACHABILITY:
+    name: Device LAN Reachability Map
+    description: Optional JSON object mapping each device serial to an HA ping binary_sensor (device_class connectivity) that watches its LAN IP, e.g. {"GBC0314XXXXXXXX":"binary_sensor.core1_lan"}. A cloud-offline but LAN-reachable device is flagged a session wedge (don't power-cycle); unreachable is a real outage. Purely diagnostic — it only enriches the offline alert and a wedge-count sensor; empty (the default) or malformed JSON leaves it off.
+  WRITE_DEBUG_TOKEN:
+    name: Write Debug Token
+    description: Secret that enables the diagnostic POST /api/device/send-command endpoint for probing undocumented EcoFlow commands (e.g. an SHP2 reboot). Empty (the default) keeps the endpoint disabled. When set, every call must send this exact value in the x-write-debug-token header (and be same-origin / HA-ingress).

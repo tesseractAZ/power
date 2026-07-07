@@ -35,6 +35,12 @@ A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 
 ## Options
 
+> Since v0.91.0 every option shows a plain-language **label and inline help** directly
+> on the add-on **Configuration** page (from `translations/en.yaml`), and the fields are
+> **grouped essentials-first** (credentials → site → notifications → broadcast → battery/grid
+> → load-shedding → integrations → telnet → diagnostics). This table is the full reference;
+> the Configuration page is the quick guide.
+
 | Option | Default | Notes |
 | --- | --- | --- |
 | `ECOFLOW_ACCESS_KEY` | _(required)_ | From the EcoFlow developer portal. |
@@ -77,7 +83,7 @@ A local "control-room" dashboard and telnet TUI for an EcoFlow off-grid home
 | `BROADCAST_WYOMING_HOST` | `core-piper` | Hostname of the Wyoming-protocol TTS server (HA's official **Piper** add-on). The broadcast path talks to Piper directly (since v0.9.70), bypassing HA's TTS service catalog. Override only for an external Piper host. |
 | `BROADCAST_WYOMING_PORT` | `10200` | Piper's standard Wyoming port. |
 | `BROADCAST_WYOMING_VOICE` | _(empty)_ | Optional Piper voice override (e.g. `en_US-amy-medium`, `en_GB-alan-low`). Empty = whatever voice the Piper add-on is configured to use. (v0.9.70) |
-| `BATTERY_SOC_ALARM_ENABLED` | `true` | Audible escalating alarm when the SHP2 backup pool crosses **down** through 40/30/20/15/10/8/4/2 % (Low→Medium→High→Critical), on the broadcast speakers, respecting the per-priority Alert Settings toggles. Set `false` to disable. (v0.12.0) |
+| `BATTERY_SOC_ALARM_ENABLED` | `true` | Audible escalating alarm when the SHP2 backup pool crosses **down** through 50/40/30/20/15/10/8/4/2 % (Low→Medium→High→Critical), on the broadcast speakers, respecting the per-priority Alert Settings toggles. Set `false` to disable. (v0.12.0) |
 | `BATTERY_RUNWAY_ALARM_ENABLED` | `true` | Audible escalating alarm when the 24h off-grid runway projection shows the backup pool reaching its reserve floor (or empty) before solar recovers — so load can be shed early. Distinct from the SoC-threshold ladder (which fires only after the pool has already fallen). Grid-aware. (v0.14.0) |
 | `BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN` | `60` | Minutes between re-announcements of the runway-depletion alarm while the projection persists (5–720). (v0.14.0) |
 | `GRID_AVAILABLE` | `false` | Off-grid honesty: whether the site has utility-grid import available. MUST be `false` for an islanded off-grid system so the dispatch optimizer stops assuming an impossible grid backstop. Set `true` only if you are grid-tied. (`GRID_PRESENCE_ENTITY`, when set, overrides this dynamically.) (v0.15.2) |
