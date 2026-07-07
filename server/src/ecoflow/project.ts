@@ -438,6 +438,19 @@ export interface Shp2Projection {
    *  charges the DPUs, missing grid that serves home loads directly through the
    *  panel — which is why home load didn't reconcile against PV + DPU-ac_in grid. */
   gridWatt: number | null;
+  /** v0.89.0 — the SHP2's OWN direct grid-presence flag (pd303_mc.masterIncreInfo.gridSta).
+   *  Raw enum for observability: 0 = grid volt. not detected (islanded), 1 = Grid OK,
+   *  2 = grid overvolt./overfreq (energized but out of spec → SHP2 islands onto EPS).
+   *  null = field absent/unparsable (older firmware / partial /quota/all) ⇒ UNKNOWN.
+   *  Unlike gridWatt (which reads 0 in the gaps between the SHP2's 8 kW charge bursts)
+   *  this is the panel master controller's live line-sensing flag — grid PRESENT even
+   *  when momentarily not drawing. */
+  gridSta: number | null;
+  /** v0.89.0 — the ALARM-facing grid-present signal derived from gridSta. VALUE-1-ONLY:
+   *  true IFF gridSta === 1 (Grid OK). 0 (gone) and 2 (energized-but-out-of-spec → the
+   *  SHP2 islands onto battery, NOT a safe backstop) → false; null → null. Consumed by
+   *  gridState.computeShp2GridConnected as an additive, online-gated backstop signal. */
+  gridConnected: boolean | null;
   strategy: Shp2Strategy;
 }
 
@@ -627,6 +640,15 @@ export function projectShp2(q: Quota): Shp2Projection {
     sources,
     sourceWatts,
     gridWatt: num(q, 'wattInfo.gridWatt'),
+    gridSta: num(q, 'pd303_mc.masterIncreInfo.gridSta'),
+    gridConnected: (() => {
+      const s = num(q, 'pd303_mc.masterIncreInfo.gridSta');
+      // v0.89.0 VALUE-1-ONLY. 1 = Grid OK → connected. 2 = grid energized but OUT OF
+      // SPEC → the SHP2 islands onto EPS (running off battery) → NOT a safe backstop →
+      // treat as NOT connected for the alarm. 0 = grid gone. null/other = unknown
+      // (never fabricate presence).
+      return s == null ? null : s === 1 ? true : false;
+    })(),
     strategy: projectShp2Strategy(q),
   };
 }

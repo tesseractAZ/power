@@ -4,6 +4,7 @@ import {
   resolveGridBackstop,
   computeGridImportWatts,
   computeHomeGridWatts,
+  computeShp2GridConnected,
   interpretGridEntity,
   downgradePriorityForGrid,
 } from '../src/gridState.js';
@@ -20,12 +21,18 @@ import {
 function dpu(sn: string, acInWatts: number, online = true): any {
   return { sn, online, productName: 'Delta Pro Ultra', projection: { kind: 'dpu', acInWatts } };
 }
-function shp2(sourceSns: (string | null)[], chargeWattPower: number | null, gridWatt: number | null = null): any {
+function shp2(
+  sourceSns: (string | null)[],
+  chargeWattPower: number | null,
+  gridWatt: number | null = null,
+  gridConnected: boolean | null = null, // v0.89.0 — pd303_mc.masterIncreInfo.gridSta (value-1-only)
+  online = true,
+): any {
   return {
     sn: 'SHP2',
-    online: true,
+    online,
     productName: 'Smart Home Panel 2',
-    projection: { kind: 'shp2', chargeWattPower, gridWatt, sources: sourceSns.map((sn, i) => ({ slot: i + 1, sn })) },
+    projection: { kind: 'shp2', chargeWattPower, gridWatt, gridConnected, sources: sourceSns.map((sn, i) => ({ slot: i + 1, sn })) },
   };
 }
 function fleet(...devs: any[]): Record<string, any> {
@@ -205,6 +212,85 @@ test('v0.88.0 — an OFFLINE SHP2 contributes 0 home-grid watts (frozen gridWatt
   });
   assert.equal(g.importLive, false, 'offline SHP2 gridWatt no longer asserts live import');
   assert.equal(g.backstopping, false, 'a real at-floor outage during SHP2 cloud-offline is NOT muted');
+});
+
+/* ===================================================================
+ * v0.89.0 — the SHP2's OWN direct grid-presence flag (gridSta=Grid OK,
+ * pd303_mc.masterIncreInfo.gridSta, VALUE-1-ONLY, online-gated). Additive
+ * backstop signal that closes the between-burst false at-floor critical
+ * WITHOUT muting a real outage: exempt from floorWithoutFlow (burst-gap
+ * immunity) but SUBJECT to poolDischarging (no wedged/stale mute).
+ * =================================================================== */
+
+test('computeShp2GridConnected: online passes gridConnected through; offline ⇒ null; no-SHP2 ⇒ null', () => {
+  assert.equal(computeShp2GridConnected(fleet(shp2([null], 0, 0, true, true))), true);
+  assert.equal(computeShp2GridConnected(fleet(shp2([null], 0, 0, false, true))), false);
+  assert.equal(computeShp2GridConnected(fleet(shp2([null], 0, 0, null, true))), null);
+  assert.equal(computeShp2GridConnected(fleet(shp2([null], 0, 8000, true, false))), null, 'OFFLINE SHP2: frozen gridSta must not assert presence');
+  assert.equal(computeShp2GridConnected(fleet(dpu('A', 600))), null, 'no SHP2 device → null');
+});
+
+test('v0.89.0 #1 — gridSta=Grid OK in a burst gap at the floor (pool NOT discharging) → backstopping (the core false-critical fix)', () => {
+  // gridWatt momentarily 0, no DPU ac-in, no declared entity, pool AT reserve floor,
+  // charge paused (cwp=0). Pre-v0.89 this was off-grid/critical; now gridSta downgrades it.
+  const g = resolveGridBackstop({
+    devices: fleet(shp2([null], 0, 0, true, true)), ...NO_DECL, atReserveFloor: true,
+  });
+  assert.equal(g.importLive, false, 'no measured flow this instant');
+  assert.equal(g.present, true);
+  assert.equal(g.backstopping, true, 'SHP2 gridSta=Grid OK holds the floor through the burst gap');
+  assert.match(g.reason, /grid connected/);
+});
+
+test('v0.89.0 #2/#6 — gridSta NOT Grid OK (0 or 2), no flow, no declared → off-grid, critical stays', () => {
+  // gridConnected=false represents BOTH gridSta=0 (grid gone) and gridSta=2 (energized
+  // but out-of-spec → SHP2 islands onto battery — NOT a safe backstop). Neither backstops.
+  const g = resolveGridBackstop({
+    devices: fleet(shp2([null], -300, 0, false, true)), ...NO_DECL, atReserveFloor: true,
+  });
+  assert.equal(g.present, false);
+  assert.equal(g.backstopping, false, 'a real/islanded outage is not muted');
+});
+
+test('v0.89.0 #3 — gridSta=Grid OK but SHP2 OFFLINE (frozen) → not present, not backstopping', () => {
+  const g = resolveGridBackstop({
+    devices: fleet(shp2([null], -300, 8000, true, false)), ...NO_DECL, atReserveFloor: true,
+  });
+  assert.equal(g.shp2GridConnected, null, 'offline ⇒ gridSta signal withheld');
+  assert.equal(g.backstopping, false, 'frozen-offline gridSta cannot mute an at-floor outage');
+});
+
+test('v0.89.0 #4 — gridSta=null (older firmware) does NOT break the existing gridWatt import path', () => {
+  const g = resolveGridBackstop({ devices: fleet(shp2([null], 0, 5000, null, true)), ...NO_DECL });
+  assert.equal(g.importLive, true, 'homeGridWatts=5000 still proves live import');
+  assert.equal(g.backstopping, true);
+});
+
+test('v0.89.0 #5 — gridSta=null + declared + at floor + no flow → still withheld (floorWithoutFlow intact)', () => {
+  const g = resolveGridBackstop({
+    devices: fleet(shp2([null], -300, 0, null, true)), ...NO_DECL, gridAvailableFallback: true, atReserveFloor: true,
+  });
+  assert.equal(g.present, true, 'declared toggle still marks present');
+  assert.equal(g.backstopping, false, 'a null gridSta must not accidentally satisfy the flag path');
+});
+
+test('v0.89.0 #7 — WEDGE: gridSta=Grid OK but pool NET-DISCHARGING at floor → present but NOT backstopping', () => {
+  // The poolDischarging guard applies to the gridSta term too: a stale/wedged "connected"
+  // while the pool net-discharges past the floor is treated as no real backstop.
+  const g = resolveGridBackstop({
+    devices: fleet(shp2([null], -300, 0, true, true)), ...NO_DECL, atReserveFloor: true,
+  });
+  assert.equal(g.present, true);
+  assert.equal(g.backstopping, false, 'net-discharging pool withholds the gridSta backstop');
+  assert.match(g.reason, /still discharging/);
+});
+
+test('v0.89.0 #8 — gridSta=Grid OK + a wall-charging SPARE DPU (not an SHP2 source) → present from gridSta, spare scoping unregressed', () => {
+  const g = resolveGridBackstop({
+    devices: fleet(shp2([null], 0, 0, true, true), dpu('SPARE', 600)), ...NO_DECL,
+  });
+  assert.equal(g.importWatts, 0, 'spare DPU ac-in still excluded (not an SHP2 source)');
+  assert.equal(g.backstopping, true, 'present comes from gridSta, not the spare');
 });
 
 /* ===================================================================

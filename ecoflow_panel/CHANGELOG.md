@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.89.0 — 2026-07-06
+
+The SHP2's OWN grid signal — a cleaner, device-informed fix for the between-burst false critical, plus the SHP2 operating modes surfaced. Researched from EcoFlow's PD303 API + two community integrations, adversarially safety-verified, and confirmed live on the actual SHP2 (`gridSta=1`, `gridVol=123`, `gridWatt=0` in a burst gap — the exact case).
+
+**[Fixed] The between-burst false "backup-pool projected" critical is resolved using the SHP2's own grid flag — safely.** Instead of a latency-trading latch (deferred earlier as unsafe), the add-on now reads **`pd303_mc.masterIncreInfo.gridSta`** — the panel master controller's live grid-line sensing (0 = grid not detected, 1 = Grid OK, 2 = overvolt/overfreq → islanding). Unlike `gridWatt` (which reads 0 in the gaps between the SHP2's 8 kW charge bursts), `gridSta` stays **Grid OK** through the gaps and drops the instant the utility is lost (the SHP2 must island in milliseconds). Parsed **value-1-only** (`gridConnected`), it joins `resolveGridBackstop` as an **additive, online-gated** backstop term that is **exempt from the floor-without-flow guard** (burst-gap immunity — the whole point) but still **subject to the pool-discharge guard** (a wedged/stale "connected" can't mute a net-discharging at-floor outage). Verified safe by construction: it can only *relax* a false critical; a real outage drops `gridSta`, the term vanishes, and the existing off-grid path fires. 9 new unit tests cover burst-gap, real-outage, offline-frozen, wedge, null-firmware, value-2-islanding, and spare-DPU cases.
+
+**[Added] SHP2 operating modes + grid status surfaced as HA diagnostic sensors.** New: **SHP2 Grid Connected** (binary), **SHP2 Grid Status** (Grid OK / not detected / overvolt), **Backup Reserve Floor** (the canonical `projection.backupReserveSoc` the floor alarm defends with — never the strategy copy), **Solar Backup Reserve**, **Backup Reserve Enabled**, and the raw **Smart Backup / Backup / Overload mode codes** (EcoFlow publishes no enum semantics, so these are honest integer codes — use `/api/debug/raw?sn=<SHP2>` to field-research them). All null-safe → HA `unknown` when the SHP2 is cloud-offline. The web Strategy panel already showed the modes; this brings them to HA for monitoring/automation. Purely additive — no alarm-logic change beyond the gridSta backstop above.
+
+Server-only; no config/endpoint change. `tsc` clean; full suite **1123** green.
+
 ## 0.88.0 — 2026-07-06
 
 From an aggressive whole-system log sweep (every add-on + Core + Supervisor + host, 30-agent workflow) driven by real telemetry — and an operator correction that the SHP2 **does** pull from grid at night (floor-managed to ~10% to prevent aging).
