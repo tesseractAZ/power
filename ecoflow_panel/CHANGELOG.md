@@ -3,6 +3,20 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.92.0 — 2026-07-07
+
+Engine-audit fixes, bundle 1 of 2 (safety + robustness). From the live 19-agent engine audit (v0.91.0): every safety-critical path verified accurate, and these are the confirmed, code-fixable robustness/correctness defects. Bundle 2 (energy-KPI + diagnostic accuracy) follows.
+
+**[Fixed] (#1, HIGH) Message-RATE floor detector — a device crawling at a tiny message rate no longer hides from the staleness AND gap detectors.** The audit caught the single-point-critical SHP2 (the floor/SoC/runway alarm data source) reporting ~0.24 msg/min for ~13 h: its ~5-min heartbeat kept `lastUpdated` under both the 180 s staleness threshold and the 15-min recorder gap threshold, so neither detector fired. New `messageRateFloor.ts` learns a per-device baseline from healthy samples and flags a sustained collapse below a fraction of it (default: eligible ≥10 msg/min, trip <20% of baseline, sustain ≥20 min) — edge-triggered, with guards against eroding the baseline during a collapse, firing on a quiet device, or a counter reset. This bundle wires it as a **WARN log** (immediate operator/log visibility on the blind spot); v0.93.0 promotes it to a push/audible alert once wired into the alert pipeline. Purely observational — cannot alter any existing alarm. Env-tunable (`MSG_RATE_FLOOR_*`). 5 unit tests.
+
+**[Fixed] (#6) Load-shed advisor is now grid-AWARE.** `computeAdvisory` called `classifyRunway` with no grid context, so with the grid backstopping the floor it reported band=critical / actionable=true while the (correctly grid-aware) audible alarm stayed silent — a contradictory "shed now" the operator would see next to a quiet alarm. It now threads the live `GridContext` through `update()`→`computeAdvisory`→`classifyRunway`, mirroring `runwayAlarm.update`: while the grid carries the load at the floor the band is null and nothing is recommended.
+
+**[Fixed] (#11) Load-shed "actionable" now requires a MEANINGFUL benefit.** Previously any allowlisted load being on made the advisory actionable, even when the recommended shed bought ~0 extra runway (e.g. 70 W off a ~6 kW draw). Now a shed must extend runway-to-reserve by ≥`MIN_SHED_BENEFIT_HOURS` (0.25 h) or remove the depletion entirely; otherwise it's surfaced as a candidate but marked not-actionable with an explanatory note.
+
+**[Fixed] (#2) Broadcast target-drift resolver — a renamed speaker id no longer silently disarms the audible alarm.** When the ecobee media_player ids were renamed, the stale ids sat in `BROADCAST_TARGETS` and 8 alarm broadcasts (incl. one RED) were silently dropped; the recurring health probe couldn't tell a rename (never self-heals) from a transient MA-down (both look all-null) so it debounced both. A new one-shot config-load resolver checks every configured target against the full HA registry and, **only** when other media_player entities exist but the specific target does not (the unambiguous rename signature), logs a loud named WARN and trips the audible-health tile immediately (un-debounced) — while staying silent when HA is unreachable or MA is fully down (those remain the health probe's debounced job). HA push remains the guaranteed channel throughout.
+
+`tsc` clean; full suite **1134** green (+6).
+
 ## 0.91.0 — 2026-07-07
 
 Configuration-page ease-of-use overhaul + an aggressive correctness review of the whole options → env → consumer chain. Every setting on the add-on **Configuration** page now has a plain-language label and inline help, the fields are grouped essentials-first, and a 25-agent workflow (recon → per-group authoring → adversarial verify → completeness critic) proved every change safe against the live-saved values.
