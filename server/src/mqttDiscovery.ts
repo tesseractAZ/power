@@ -262,6 +262,25 @@ export const SENSORS: SensorConfig[] = [
   // input_boolean.lighting_postures_enabled — the add-on never toggles a light.
   { unique_id: 'ecoflow_lighting_posture', name: 'EcoFlow Lighting Posture', icon: 'mdi:lightbulb-auto', value_template: '{{ value_json.lighting_posture }}' },
   { unique_id: 'ecoflow_lighting_posture_reason', name: 'EcoFlow Lighting Posture Reason', icon: 'mdi:information-outline', entity_category: 'diagnostic', value_template: '{{ value_json.lighting_posture_reason }}' },
+  // ─── v0.89.0 — SHP2 operating-mode / reserve strategy (diagnostic; publish-only) ──
+  // Surface the SHP2's OWN strategy config + grid-line flag as read-only HA
+  // diagnostics so an operator/automation can see the backup posture, reserve floor,
+  // and grid presence without the web UI. backup_reserve_percent reads the CANONICAL
+  // projection.backupReserveSoc (the field the floor alarm + grid-backstop defend
+  // with) — NEVER strategy.backupReserveSoc — so it can never disagree with the
+  // reserve actually protecting the home. The *_mode_code sensors are RAW SHP2 enum
+  // codes: EcoFlow publishes no authoritative value→meaning mapping (live values are
+  // smart=2 / backup=0 / overload=0), so they are exposed honestly as integers, not
+  // fabricated labels. Numeric-null fields emit null → HA 'unknown' when the SHP2 is
+  // cloud-offline (by design, never substitute 0). Use /api/debug/raw?sn=<SHP2> to
+  // field-research the codes against the EcoFlow app.
+  { unique_id: 'ecoflow_shp2_grid_sta', name: 'EcoFlow SHP2 Grid Status', icon: 'mdi:transmission-tower', entity_category: 'diagnostic', value_template: '{{ value_json.shp2_grid_status }}' },
+  { unique_id: 'ecoflow_backup_reserve_percent', name: 'EcoFlow Backup Reserve Floor', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-lock', entity_category: 'diagnostic', value_template: '{{ value_json.backup_reserve_percent }}' },
+  { unique_id: 'ecoflow_solar_backup_reserve_percent', name: 'EcoFlow Solar Backup Reserve', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power-variant', entity_category: 'diagnostic', value_template: '{{ value_json.solar_backup_reserve_percent }}' },
+  { unique_id: 'ecoflow_backup_reserve_enabled', name: 'EcoFlow Backup Reserve Enabled', icon: 'mdi:battery-lock-open', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.backup_reserve_enabled else "OFF" }}' },
+  { unique_id: 'ecoflow_smart_backup_mode_code', name: 'EcoFlow Smart Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery', entity_category: 'diagnostic', value_template: '{{ value_json.smart_backup_mode_code }}' },
+  { unique_id: 'ecoflow_backup_mode_code', name: 'EcoFlow Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery-outline', entity_category: 'diagnostic', value_template: '{{ value_json.backup_mode_code }}' },
+  { unique_id: 'ecoflow_overload_mode_code', name: 'EcoFlow Overload Mode (code)', state_class: 'measurement', icon: 'mdi:flash-alert', entity_category: 'diagnostic', value_template: '{{ value_json.overload_mode_code }}' },
 ];
 
 export const BINARY_SENSORS = [
@@ -269,6 +288,12 @@ export const BINARY_SENSORS = [
   // INVERTS this sensor's meaning (off_grid=true → ON would read as "connected"). A plain
   // binary sensor keeps ON=off-grid unambiguous; the tower-off icon conveys state.
   { unique_id: 'ecoflow_off_grid', name: 'EcoFlow Off-Grid', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
+  // v0.89.0 — the SHP2's OWN direct grid-line flag (pd303_mc.masterIncreInfo.gridSta=Grid OK,
+  // online-gated). ON=grid connected. Unlike off_grid (which can flip during the SHP2's
+  // between-burst gaps when measured flow momentarily reads 0), this stays ON through the
+  // gaps and drops the instant the utility is lost. `unknown` (no template value) when the
+  // SHP2 is cloud-offline or the field is absent — do NOT infer a grid state from unknown.
+  { unique_id: 'ecoflow_shp2_grid_connected', name: 'EcoFlow SHP2 Grid Connected', icon: 'mdi:transmission-tower', value_template: '{{ value_json.shp2_grid_connected }}' },
   // v0.59.0 — ON when the runway / projected-low-SoC numbers only apply to the
   // ISLANDED case (the grid is actively backstopping the load now). Gate HA
   // "runway < threshold" automations on this so a 0% / low-hour projection during
@@ -673,6 +698,17 @@ export async function startMqttDiscovery(
       // the operator's grid toggle was ON and the SHP2 backstopped the home from grid. This
       // now matches the alarm engine's view (which kept critical=0 through the floor drain).
       off_grid: !liveGridBackstop(snap.devices).present,
+      // v0.89.0 — the SHP2's OWN grid-line flag, online-gated (gridState.shp2GridConnected).
+      // ON/OFF/unknown (null) — the burst-gap-immune complement to off_grid.
+      shp2_grid_connected: (() => {
+        const c = liveGridBackstop(snap.devices).shp2GridConnected;
+        return c == null ? null : c ? 'ON' : 'OFF';
+      })(),
+      // v0.89.0 — human-readable raw gridSta for the diagnostic sensor.
+      shp2_grid_status: (() => {
+        const s = shp2?.projection.gridSta ?? null;
+        return s == null ? null : s === 1 ? 'Grid OK' : s === 0 ? 'Grid not detected' : s === 2 ? 'Grid overvolt/overfreq' : `code ${s}`;
+      })(),
       backup_pool_percent: shp2?.projection.backupBatPercent ?? null,
       backup_remaining_kwh: kwh1(shp2?.projection.backupRemainWh),
       backup_full_capacity_kwh: kwh1(shp2?.projection.backupFullCapWh),
@@ -765,6 +801,21 @@ export async function startMqttDiscovery(
       // v0.15.2 — load-shed advisory signals (recommendation + counterfactual)
       // for HA automations to gate on. Latest is computed on the advisor tick.
       ...advisoryStateFields(getLatestAdvisory()),
+      // v0.89.0 — SHP2 operating-mode / reserve strategy diagnostics. Reserve floor
+      // reads the CANONICAL projection.backupReserveSoc the floor alarm defends with
+      // (NOT strategy.backupReserveSoc). Mode codes are raw SHP2 enum ints (no
+      // published semantics). Null-safe → HA 'unknown' when cloud-offline.
+      ...(() => {
+        const st = shp2?.projection.strategy;
+        return {
+          backup_reserve_percent: shp2?.projection.backupReserveSoc ?? null,
+          solar_backup_reserve_percent: st?.solarBackupReserveSoc ?? null,
+          backup_reserve_enabled: st?.backupReserveEnabled ?? false,
+          smart_backup_mode_code: st?.smartBackupMode ?? null,
+          backup_mode_code: st?.backupMode ?? null,
+          overload_mode_code: st?.overloadMode ?? null,
+        };
+      })(),
     };
   };
 

@@ -75,6 +75,10 @@ export interface GridBackstop {
   importWatts: number;
   /** v0.36.0 — SHP2 main-line grid power into the home (W) (wattInfo.gridWatt). */
   homeGridWatts: number;
+  /** v0.89.0 — the SHP2's OWN direct grid-presence flag (pd303_mc.masterIncreInfo.gridSta,
+   *  VALUE-1-ONLY, online-gated): true=Grid OK, false=islanded/out-of-spec, null=unknown.
+   *  Additive backstop signal; observability + a future HA binary_sensor. */
+  shp2GridConnected: boolean | null;
   /** Human-readable reason, for status payloads / logs / alert detail. */
   reason: string;
 }
@@ -148,6 +152,29 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
 }
 
 /**
+ * v0.89.0 — the SHP2's OWN direct grid-presence flag (projection.gridConnected, from
+ * pd303_mc.masterIncreInfo.gridSta VALUE-1-ONLY). Returns true (Grid OK) / false
+ * (islanded, or energized-but-out-of-spec) / null (unknown). FAIL-SAFE, mirroring
+ * computeHomeGridWatts:
+ *   - An OFFLINE SHP2 ⇒ null (its last gridSta FROZE; a stale "1" must never assert
+ *     presence into an outage that begins during the offline window).
+ *   - Field absent/unknown ⇒ null.
+ * This is the panel's live line-sensing flag: it stays true through the zero-watt gaps
+ * between the SHP2's 8 kW charge bursts (the exact false-critical this closes), and
+ * drops to 0/2 the instant the utility is lost or goes out-of-spec (the SHP2 must
+ * island in ms). It is only ever used ADDITIVELY (a positive present-signal), never a
+ * sole mute gate, and — in resolveGridBackstop — is still SUBJECT to the pool-discharge
+ * guard so a wedged/stale "connected" can't mute a net-discharging at-floor outage.
+ */
+export function computeShp2GridConnected(devices: Record<string, DeviceSnapshot>): boolean | null {
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  if (!shp2 || !shp2.online) return null;
+  return shp2.projection.gridConnected ?? null;
+}
+
+/**
  * Interpret a Home Assistant grid-presence entity state into present(true) /
  * absent(false) / unknown(null). Supports the realistic entity kinds:
  *   - binary_sensor / input_boolean / switch: on/true/home/connected/closed → present
@@ -199,6 +226,16 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // energized AND carrying — independent of the declared toggle.
   const importLive = importWatts >= GRID_IMPORT_WATTS || homeGridWatts >= HOME_GRID_IMPORT_WATTS;
 
+  // v0.89.0 — the SHP2's OWN direct grid-presence flag (gridSta=Grid OK), online-gated
+  // + VALUE-1-ONLY (see computeShp2GridConnected). This is the burst-gap-immune signal:
+  // it stays true through the zero-watt gaps between the SHP2's 8 kW charge bursts while
+  // measured import momentarily reads 0, closing the between-burst false at-floor
+  // critical. It is ADDITIVE only — a real outage drops gridSta (→ false/null) and this
+  // term vanishes. It is NOT folded into importLive (which would unconditionally bypass
+  // the poolDischarging guard); it gets its own term below that is still subject to
+  // poolDischarging, so a wedged/stale "connected" can't mute a net-discharging outage.
+  const shp2GridConnected = computeShp2GridConnected(input.devices);
+
   // Declared presence: a configured entity is authoritative (unknown ⇒ NOT
   // declared, the safe default); otherwise fall back to GRID_AVAILABLE.
   // v0.23.0 — a STALE configured entity (HA unreachable) is treated as UNKNOWN,
@@ -209,7 +246,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
     ? entityPresent === true
     : input.gridAvailableFallback;
 
-  const present = importLive || declared;
+  const present = importLive || declared || shp2GridConnected === true;
 
   // Re-escalation guard: if presence is only DECLARED (not proven by live
   // import) and the SHP2 backup pool is clearly net-discharging, the declared
@@ -228,23 +265,34 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // grid-available downgrade is preserved.
   const anyMeasuredFlow = importWatts > 0 || homeGridWatts > 0;
   const floorWithoutFlow = !!input.atReserveFloor && !anyMeasuredFlow;
-  const backstopping = importLive || (declared && !poolDischarging && !floorWithoutFlow);
+  // v0.89.0 — the gridSta backstop term. EXEMPT from floorWithoutFlow (that guard exists
+  // to distrust a stale operator toggle with no measured flow — but gridSta is a LIVE
+  // measured device signal, and burst-gap immunity is the whole point). SUBJECT to
+  // poolDischarging: a gridSta=Grid OK reading while the pool is net-discharging past the
+  // floor is treated as NOT a real backstop (closes the frozen/wedged-connected mute).
+  const gridStaBackstop = shp2GridConnected === true && !poolDischarging;
+  const backstopping =
+    importLive || gridStaBackstop || (declared && !poolDischarging && !floorWithoutFlow);
 
   const reason = importLive
     ? importWatts >= GRID_IMPORT_WATTS
       ? `live grid import ${Math.round(importWatts)} W (DPU ac-in)`
       : `live home-grid ${Math.round(homeGridWatts)} W (SHP2 main)`
-    : declared
-      ? floorWithoutFlow
-        ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
-        : poolDischarging
-          ? 'grid declared present but backup pool still discharging — not backstopping'
-          : 'grid declared present'
-      : input.gridEntityConfigured
-        ? 'grid entity reports not present (or unknown)'
-        : 'off-grid (no grid declared, no import)';
+    : gridStaBackstop
+      ? 'SHP2 reports grid connected (gridSta=Grid OK)'
+      : shp2GridConnected === true && poolDischarging
+        ? 'SHP2 gridSta=Grid OK but backup pool still discharging — not backstopping'
+        : declared
+          ? floorWithoutFlow
+            ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
+            : poolDischarging
+              ? 'grid declared present but backup pool still discharging — not backstopping'
+              : 'grid declared present'
+          : input.gridEntityConfigured
+            ? 'grid entity reports not present (or unknown)'
+            : 'off-grid (no grid declared, no import)';
 
-  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, reason };
+  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason };
 }
 
 /** Live wrapper: reads GRID_PRESENCE_ENTITY / GRID_AVAILABLE from env and the

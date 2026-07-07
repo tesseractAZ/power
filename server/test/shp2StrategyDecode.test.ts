@@ -34,6 +34,25 @@ function quotaWith(extra: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
+test('v0.89.0 — gridSta (pd303_mc.masterIncreInfo.gridSta) parses raw + VALUE-1-ONLY gridConnected', () => {
+  // Grid OK (live captured value on HD31ZASAHH120432: gridSta=1, gridVol=123).
+  let p = projectShp2(quotaWith({ 'pd303_mc.masterIncreInfo.gridSta': 1 }));
+  assert.equal(p.gridSta, 1);
+  assert.equal(p.gridConnected, true, 'gridSta=1 → connected');
+  // Grid gone.
+  p = projectShp2(quotaWith({ 'pd303_mc.masterIncreInfo.gridSta': 0 }));
+  assert.equal(p.gridSta, 0);
+  assert.equal(p.gridConnected, false, 'gridSta=0 → not connected');
+  // Energized but out-of-spec → SHP2 islands onto EPS → NOT a safe backstop → false.
+  p = projectShp2(quotaWith({ 'pd303_mc.masterIncreInfo.gridSta': 2 }));
+  assert.equal(p.gridSta, 2);
+  assert.equal(p.gridConnected, false, 'gridSta=2 (overvolt/overfreq) is NOT a backstop — value-1-only');
+  // Absent (older firmware / partial quota) → unknown, never fabricated.
+  p = projectShp2(quotaWith());
+  assert.equal(p.gridSta, null);
+  assert.equal(p.gridConnected, null, 'absent gridSta → unknown');
+});
+
 test('FIX 6 — live single-byte bitmap decodes to the same windows (no behavior change)', () => {
   const p = projectShp2(quotaWith());
   assert.equal(p.strategy.timeTask?.slotMinutes, 10);
