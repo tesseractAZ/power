@@ -100,6 +100,7 @@ import {
 } from './deviceLink.js';
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
+import { RateFloorTracker } from './messageRateFloor.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
 
@@ -2108,7 +2109,11 @@ if (loadShedAdvisoryEnabled) {
         if (getShedCandidates().length === 0) return;
         await haStateCache.refreshIfStale();
         const r = await analytics.report('runway');
-        loadShedAdvisor.update(r);
+        // v0.92.0 — pass the live grid backstop so the advisor is grid-AWARE
+        // (mirrors runwayAlarm.update above): while the grid carries the load at
+        // the floor, classifyRunway returns null → no shed recommended, matching
+        // the audible alarm the operator hears.
+        loadShedAdvisor.update(r, liveGridBackstop(store.get().devices));
       } catch (e: any) {
         app.log.debug(`load-shed: advisory tick skipped (${e?.message ?? e})`);
       }
@@ -2116,6 +2121,38 @@ if (loadShedAdvisoryEnabled) {
   }, 2 * 60 * 1000);
   loadShedTick.unref();
 }
+
+// v0.92.0 — message-RATE floor monitor (finding #1). A device (notably the
+// single-point-critical SHP2) can crawl at a tiny message rate for hours while its
+// ~5-min heartbeat keeps `lastUpdated` under BOTH the 180 s staleness threshold and
+// the 15-min recorder gap threshold — so neither existing detector fires. This
+// samples the per-SN cumulative count every 60 s and, when a normally-chatty device's
+// rate collapses below its learned baseline for a sustained window, logs a WARN naming
+// it (v0.93.0 will promote this to a push/audible alert once wired into the alert
+// pipeline). Purely observational for now — cannot suppress or alter any existing alarm.
+const rateFloor = new RateFloorTracker();
+const rateFloorTick = setInterval(() => {
+  try {
+    const now = Date.now();
+    const devices = store.get().devices;
+    for (const [sn, count] of store.mqttMsgCountBySn) {
+      const r = rateFloor.sample(sn, count, now);
+      const name = devices[sn]?.deviceName ?? sn;
+      if (r.collapsed) {
+        app.log.warn(
+          `msg-rate-floor: ${name} message rate collapsed to ` +
+          `${r.rate?.toFixed(2) ?? '?'} msg/min (baseline ~${r.baseline.toFixed(0)}) — device is barely reporting ` +
+          `while still appearing "fresh"; check the EcoFlow cloud session / power for ${sn}`,
+        );
+      } else if (r.recovered) {
+        app.log.info(`msg-rate-floor: ${name} message rate recovered (${r.rate?.toFixed(1) ?? '?'} msg/min)`);
+      }
+    }
+  } catch (e: any) {
+    app.log.debug(`msg-rate-floor: tick skipped (${e?.message ?? e})`);
+  }
+}, 60 * 1000);
+rateFloorTick.unref();
 
 // Read-only advisory status. No auth: it exposes no secrets and actuates nothing.
 app.get('/api/load-shedding/status', async () => ({

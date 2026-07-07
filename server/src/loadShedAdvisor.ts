@@ -14,7 +14,7 @@
  * live HA or analytics worker; the thin createLoadShedAdvisor() wrapper injects
  * the accessors, mirroring how runwayAlarm/batterySocAlarm take callbacks.
  */
-import { classifyRunway } from './runwayAlarm.js';
+import { classifyRunway, type GridContext } from './runwayAlarm.js';
 import type { AlarmPriority } from './alertPriority.js';
 import type { ShedCandidate } from './loadShedRegistry.js';
 import type { CachedEntity } from './haStateCache.js';
@@ -157,15 +157,27 @@ export function buildLoadComposition(
  * positive watt figure, until the (upper-bound) counterfactual runway clears the
  * threshold + restore margin or the list is exhausted.
  */
+// v0.92.0 — minimum runway-to-reserve extension (hours) a recommended shed must
+// buy before it is marked actionable. Below this the shed is cosmetic (its watts
+// are negligible against the current draw) and a "shed now" prompt would mislead.
+const MIN_SHED_BENEFIT_HOURS = 0.25;
+
 export function computeAdvisory(opts: {
   now: number;
   runway: RunwayLike;
   composition: LoadCompositionEntry[];
   thresholdHours: number;
   restoreMarginHours: number;
+  /** v0.92.0 — grid-backstop context. When the grid is carrying the load at the
+   *  floor, classifyRunway returns null (no depletion emergency), so the advisor
+   *  must NOT recommend shedding — mirrors runwayAlarm.update's grid arg. Without
+   *  it the advisor was grid-BLIND and reported critical/actionable while the
+   *  audible alarm was (correctly) silent, contradicting the alarm the operator
+   *  hears. */
+  grid?: GridContext;
 }): LoadShedAdvisory {
-  const { now, runway, composition, thresholdHours, restoreMarginHours } = opts;
-  const band = classifyRunway(runway);
+  const { now, runway, composition, thresholdHours, restoreMarginHours, grid } = opts;
+  const band = classifyRunway(runway, grid);
   const current = { hoursToReserve: runway.hoursToReserve, hoursToEmpty: runway.hoursToEmpty };
   const targetHours = thresholdHours + restoreMarginHours;
 
@@ -191,8 +203,17 @@ export function computeAdvisory(opts: {
     }
   }
 
-  const actionable = inBand && belowThreshold && recommended.length > 0;
-  const note = buildNote(band, current, projectedAfterShed, recommended, composition);
+  // v0.92.0 — a shed is only actionable if it MEANINGFULLY extends the runway.
+  // Previously actionable=true whenever any allowlisted load was on, even when the
+  // recommended shed bought ~0 extra hours (e.g. 70 W off a ~6 kW draw left
+  // hoursToReserve unchanged) — a misleading "shed now" with no benefit. Require a
+  // measurable improvement (or the shed to remove the depletion entirely).
+  const materiallyHelps =
+    projectedAfterShed.hoursToReserve == null || // shed clears the depletion in-horizon
+    (runway.hoursToReserve != null &&
+      projectedAfterShed.hoursToReserve >= runway.hoursToReserve + MIN_SHED_BENEFIT_HOURS);
+  const actionable = inBand && belowThreshold && recommended.length > 0 && materiallyHelps;
+  const note = buildNote(band, current, projectedAfterShed, recommended, composition, actionable);
 
   return {
     generatedAt: now,
@@ -220,15 +241,25 @@ function buildNote(
   projected: { hoursToReserve: number | null; hoursToEmpty: number | null },
   recommended: ShedRecommendation[],
   composition: LoadCompositionEntry[],
+  actionable: boolean,
 ): string {
   if (composition.length === 0) {
     return 'No sheddable loads configured (LOAD_SHEDDING_SHED_ENTITIES is empty) — advisory inactive.';
   }
   if (band == null) {
-    return 'Runway healthy — no shed recommended.';
+    // v0.92.0 — includes the grid-backstopping case: classifyRunway returns null
+    // while the grid carries the load at the floor, so no shed is warranted.
+    return 'Runway healthy (or grid backstopping) — no shed recommended.';
   }
   if (recommended.length === 0) {
     return `Runway in ${band} band but nothing actionable (no allowlisted load is currently on with a measurable draw).`;
+  }
+  if (!actionable) {
+    const saved = recommended.reduce((s, r) => s + r.wattsSaved, 0);
+    return (
+      `Runway ${band}: reserve in ${fmtH(current.hoursToReserve)}. The only available shed ` +
+      `(~${saved} W) would not meaningfully extend it — no actionable shed.`
+    );
   }
   const names = recommended.map((r) => r.label).join(' + ');
   const saved = recommended.reduce((s, r) => s + r.wattsSaved, 0);
@@ -270,7 +301,7 @@ export function advisoryStateFields(a: LoadShedAdvisory | null): {
 }
 
 export interface LoadShedAdvisor {
-  update(runway: RunwayLike): LoadShedAdvisory;
+  update(runway: RunwayLike, grid?: GridContext): LoadShedAdvisory;
   getStatus(): LoadShedAdvisory | null;
 }
 
@@ -284,7 +315,7 @@ export function createLoadShedAdvisor(deps: {
 }): LoadShedAdvisor {
   const now = deps.now ?? (() => Date.now());
   return {
-    update(runway: RunwayLike): LoadShedAdvisory {
+    update(runway: RunwayLike, grid?: GridContext): LoadShedAdvisory {
       const composition = buildLoadComposition(deps.getCandidates(), deps.haEntity, deps.shp2CircuitWatts);
       const a = computeAdvisory({
         now: now(),
@@ -292,6 +323,7 @@ export function createLoadShedAdvisor(deps: {
         composition,
         thresholdHours: deps.thresholdHours(),
         restoreMarginHours: deps.restoreMarginHours(),
+        grid,
       });
       setLatestAdvisory(a);
       return a;

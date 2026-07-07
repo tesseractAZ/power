@@ -70,7 +70,7 @@ import { resolve } from 'node:path';
 import type { SnapshotStore } from './snapshot.js';
 import type { Alert } from './alerts.js';
 import { config } from './config.js';
-import { callHaService, isSupervised, probeService, getEntityState } from './haService.js';
+import { callHaService, isSupervised, probeService, getEntityState, getAllStates } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
 import { renderAnnouncement, pruneRenderCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel } from './audioRenderer.js';
 import { resolveChime } from './chimeConfig.js';
@@ -730,6 +730,47 @@ export function startBroadcastMonitor(
   const onProbeError = (e: any) => log(`broadcast: audible-health probe failed — ${e?.message ?? e}`);
   const audibleHealthKick = setTimeout(() => { computeAudibleHealth(true).catch(onProbeError); }, 15_000);
   audibleHealthKick.unref();
+
+  // v0.92.0 — CONFIG-DRIFT resolver. A renamed HA entity leaves a stale id in
+  // BROADCAST_TARGETS that stays "configured" until the operator notices; the
+  // audit found 8 alarm broadcasts (incl. a RED) silently dropped this way when
+  // the ecobee ids were renamed. The recurring health probe can't tell a rename
+  // (never self-heals) from a transient MA-down (all-null looks the same), so it
+  // debounces both. This one-shot resolves every configured target against the
+  // FULL HA registry once (registry warm) and, ONLY when other media_player
+  // entities exist but the specific target does not — the unambiguous rename
+  // signature — logs a loud, named WARN so the operator sees exactly which id
+  // drifted. Safe: fires nothing when HA is unreachable (all-null) or MA is fully
+  // down (no media_players at all); those stay the health probe's job.
+  const resolveTargetDriftOnce = async (): Promise<void> => {
+    if (!supervised || !cfg.enabled || cfg.targets.length === 0) return;
+    const all = await getAllStates().catch(() => null);
+    if (!all) return; // HA API unreachable → not a drift signal, skip
+    const present = new Set(all.map((e) => e.entity_id));
+    const mediaPlayerCount = all.filter((e) => e.entity_id.startsWith('media_player.')).length;
+    const missing = cfg.targets.filter((t) => !present.has(t));
+    if (missing.length === 0) return;
+    if (mediaPlayerCount === 0) {
+      // No media_players at all → Music Assistant likely down; the health probe
+      // handles this (debounced), don't cry rename.
+      log(`broadcast: ${missing.length} configured target(s) not found and NO media_player entities exist — Music Assistant likely down (health probe will track)`);
+      return;
+    }
+    log(
+      `broadcast: WARNING — configured target(s) NOT FOUND in Home Assistant: ${missing.join(', ')}. ` +
+      `${mediaPlayerCount} other media_player entities exist, so these ids are almost certainly renamed/mistyped — ` +
+      `audible alarms to them will NOT play. Fix BROADCAST_TARGETS.`,
+    );
+    // Surface it to the operator health tile immediately (un-debounced): a rename
+    // never self-heals, so waiting on the streak just delays the signal.
+    if (missing.length === cfg.targets.length) {
+      unreachableStreak = AUDIBLE_UNREACHABLE_CONFIRM;
+      audibleReachable = false;
+      audibleReason = `configured speaker id(s) not found in Home Assistant (renamed/mistyped): ${missing.join(', ')}`;
+    }
+  };
+  const targetDriftKick = setTimeout(() => { void resolveTargetDriftOnce().catch(onProbeError); }, 16_000);
+  targetDriftKick.unref();
   const audibleHealthInterval = setInterval(() => { computeAudibleHealth().catch(onProbeError); }, AUDIBLE_HEALTH_PROBE_MS);
   audibleHealthInterval.unref();
 
