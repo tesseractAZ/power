@@ -5,6 +5,8 @@ import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
 import { computeAlerts, outageAlerts, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
+// v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
+import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare } from './shp2Membership.js';
 import {
   computeLearnedAlerts,
@@ -1187,6 +1189,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // excludes its id so it never tries to chime. Null health (unprobed/boot/
       // transient) yields no alert — see broadcastHealthAlert.
       ...(() => { const a = broadcastHealthAlert(getBroadcastHealth(), Date.now()); return a ? [a] : []; })(),
+      // v0.93.0 (audit #1 phase-2) — devices whose incoming message RATE has
+      // collapsed below their learned baseline while `lastUpdated` stays fresh
+      // (the SHP2 ~13 h crawl that defeated the staleness + gap detectors). The
+      // 60 s rate-floor tick in index.ts publishes the collapsing set; this turns
+      // each into a WARNING push, riding the SAME notify path as offline/stale.
+      ...rateFloorAlerts(getRateFloorCollapses()),
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
     // into the SHP2) is online for diagnostics but must NEVER chime/push. v0.16.4

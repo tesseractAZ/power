@@ -175,8 +175,16 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         const gate = bumpPeerHit(hitKey);
         if (!gate.emit) continue;
 
-        const severity = z >= Z_WARN ? 'warning' : 'info';
         const dir = v > med ? 'higher than' : 'lower than';
+        // v0.93.0 (audit #14) — thermal peer-outlier warnings gate to the HOT
+        // side only. A below-typical temperature on a heat-generating MPPT/pack
+        // is benign (better cooling / lower duty), so the direction-agnostic |z|
+        // must not raise a WARNING for a cold excursion. Demote cold-side thermal
+        // outliers to INFO (still surfaced); non-thermal metrics keep the
+        // symmetric |z| rule. Diagnostic path only — no alarm/safety consumer.
+        const isThermal = metric.category === 'Thermal';
+        const warnEligible = isThermal ? v > med : true;
+        const severity = z >= Z_WARN && warnEligible ? 'warning' : 'info';
         out.push({
           id: `peer-${metric.key}-${d.sn}-${pk.num}`,
           severity,
@@ -1337,6 +1345,22 @@ async function computeDayForecastUncached(
   }
   const restoredSolarModel = buildSolarResponse(restoredFleetPvByEpoch, ghiByEpoch);
 
+  // v0.93.0 (audit #3) — ALARM-FACING PV bias correction. Hindcast the reporting-only
+  // `solarModel` against the last 7 days of actual home-Core PV (same home DPUs that
+  // built the model — v0.9.76) to derive a clamped bias factor, then apply it to the
+  // alarm-facing forecastPvW BELOW so computeRunway/computeMultiDayForecast/probabilistic
+  // consume BIAS-CORRECTED PV. In the field the model over-predicts on cloudy days
+  // (factor ≈0.62); correcting toward it SHORTENS runway — the safe islanded direction.
+  // Self-activating + no-op until ≥3 mature weather-covered days exist (see
+  // computePvBiasCorrection): factor stays 1.0 (raw PV, unchanged behaviour) otherwise.
+  const biasTodayStart = startOfLocalDayMs();
+  const biasWindowStart = biasTodayStart - 7 * 86_400_000;
+  const pvBySnForBias = new Map<string, Array<{ ts: number; value: number }>>();
+  for (const d of homeDpus) {
+    pvBySnForBias.set(d.sn, recorder.query(d.sn, 'pv_total', biasWindowStart, biasTodayStart));
+  }
+  const pvBiasFactor = computePvBiasCorrection(solarModel, ghiByEpoch, pvBySnForBias, biasTodayStart);
+
   // Recent historical clearness — for the cloud-derate fallback only.
   let clearnessHist = 1;
   if (weather) {
@@ -1391,6 +1415,11 @@ async function computeDayForecastUncached(
     // former inline math). This is the ALARM-FACING PV series (reporting-only
     // solarModel/pvCurve); computeRunway reads hours[].forecastPvW downstream.
     const { pv, modelled } = forecastHourPvW(resp, ghi, cloud, pvCurve[clock], clearnessHist);
+    // v0.93.0 (audit #3) — bias-correct the alarm-facing PV. pvBiasFactor is 1.0
+    // (no-op) until ≥3 mature weather-covered hindcast days exist; when the model
+    // over-predicts it is < 1, deflating forecastPvW/pvSum and the projected-SoC
+    // slope so the runway alarm reads CONSERVATIVE (shorter). Clamped [0.5,1.2].
+    const pvAlarm = pv * pvBiasFactor;
     if (modelled) {
       const hourCeil = resp.observedMaxPvW * 1.05;
       if (hourCeil > pvCeilingW) pvCeilingW = hourCeil; // v0.14.1 — track clear-sky ceiling for P90 clamp
@@ -1415,10 +1444,14 @@ async function computeDayForecastUncached(
     // explicitly here for hours where one is predicted.
     const evLoad = evByHourEpoch.get(Math.floor(ts / 3_600_000)) ?? 0;
     const load = baseLoad + evLoad;
-    pvSum += pv;
+    // v0.93.0 (audit #3) — pvSum, the projected-SoC sim, and forecastPvW all consume
+    // the BIAS-CORRECTED pvAlarm (never the raw pv), so the alarm-facing reporting
+    // next-24h, the projected-SoC slope, and the per-hour series stay mutually
+    // consistent and conservative. The DISPLAY basis (restoredPvSum below) stays raw.
+    pvSum += pvAlarm;
     let socPct: number | null = null;
     if (fullWh && fullWh > 0 && socWh != null) {
-      socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load)));
+      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - load)));
       socPct = (socWh / fullWh) * 100;
       if (minSoc == null || socPct < minSoc) {
         minSoc = socPct;
@@ -1427,7 +1460,7 @@ async function computeDayForecastUncached(
     }
     hours.push({
       ts,
-      forecastPvW: Math.round(pv),
+      forecastPvW: Math.round(pvAlarm),
       forecastLoadW: Math.round(load),
       cloudCoverPct: cloud,
       ghiWm2: ghi == null ? null : Math.round(ghi),
@@ -1957,7 +1990,19 @@ function analysePack(
     // 100.45/100.56 beside a clamped currentSoh=100. The EOL headroom math
     // below uses the clamped value too — a ≤0.6 % haircut on a fresh pack.
     kalmanSmoothedSoh = kf.smoothedSoh != null ? Math.min(100, round2(kf.smoothedSoh)) : null;
-    if (kalmanSmoothedSoh != null && kalmanFadePctPerYear != null && kalmanFadePctPerYear > 0.1) {
+    // v0.93.0 (audit #16) — mirror the OLS fade-ceiling guard on the Kalman
+    // years-to-EOL path. Without it, a Kalman fade rate above the physical LFP
+    // ceiling (early-life BMS fullCap settling) could publish a false dated
+    // kalmanYearsToEol / kalmanEolDate even when the OLS path correctly rejected
+    // it. fadeExceedsPlausibleCeiling is the same helper the OLS path uses, so
+    // the two can never drift apart. Diagnostic parallel projection — no
+    // alarm/safety consumer.
+    if (
+      kalmanSmoothedSoh != null &&
+      kalmanFadePctPerYear != null &&
+      kalmanFadePctPerYear > 0.1 &&
+      !fadeExceedsPlausibleCeiling(kalmanFadePctPerYear)
+    ) {
       const headroom = kalmanSmoothedSoh - EOL_SOH;
       const yrs = headroom / kalmanFadePctPerYear;
       if (yrs > 0 && yrs <= EOL_MAX_YEARS) {
@@ -2875,6 +2920,107 @@ export interface ShadeReport {
 
 let shadeCache: { ts: number; value: ShadeReport } | null = null;
 
+// v0.93.0 (audit #9) — shade shortfall + kWh/yr rebuilt PER-CORE, mirroring
+// fleetSoilingFromDevices. The pre-v0.63.0 path summed every home Core's pv_total
+// into ONE fleetPvByEpoch and built BOTH the p90 clean-day refCoeff AND the observed
+// shortfall from that sum — the exact coverage-deflation the v0.63.0 soiling comment
+// warns about: a wedged Core's missing clear hour makes the fleet sum drop ~1/N but
+// stay positive, so the hour is NOT discarded (as computeSoiling's coeff<=0 filter
+// would per-Core) — it is merely counted ~1/N short and reads as a phantom fleet-wide
+// 58-91% "shortfall" (bogus kWh/yr) while every array was really fine. Deriving the
+// shortfall PER-CORE (each Core's own p90 refCoeff vs its own observed) makes each
+// Core's zero/gap hour drop out of its OWN pairs, so it can't deflate anyone else.
+//
+// Fleet aggregation, per hour-of-day:
+//   - shortfallPct = MEDIAN of the per-Core shortfalls (real shade dims arrays
+//     roughly uniformly and shows up per-Core; one Core's gap can't move the median),
+//     gated >= SHADE_DROP_THRESHOLD like the old fleet path.
+//   - expectedW / observedW = SUM across the contributing Cores, so the DISPLAYED
+//     watts stay whole-fleet-scale (same units the old output carried).
+//   - clearDays = min across contributing Cores (the honest floor).
+//   - estTotalKwhPerYear = SUM of each Core's OWN annual shortfall over its OWN
+//     shaded hours — fleet-scale kWh, each Core self-consistent, no cross-Core
+//     deflation. Diagnostic/UI only; no alarm consumer. Pure + exported for tests.
+interface CoreShadeAgg { shortfall: number; observed: number; expected: number; days: number }
+export function shadeHoursFromCorePvMaps(
+  homeCorePvMaps: ReadonlyArray<Map<number, number>>,
+  wxByHourEpoch: Map<number, WeatherHour>,
+): { hours: ShadeHour[]; estTotalKwhPerYear: number } {
+  // Per-Core shortfall by hour-of-day, plus each Core's own annual kWh shortfall.
+  const perCoreHourShortfall: Array<Map<number, CoreShadeAgg>> = [];
+  let annualKwhShortfall = 0;
+  for (const pvByEpoch of homeCorePvMaps) {
+    const byHour: Array<Array<{ predicted: number; observed: number; day: string }>> =
+      Array.from({ length: 24 }, () => []);
+    // This Core's own p90 clean-day refCoeff per hour-of-day. Built ONLY from this
+    // Core's clear hours (coeff>0 there by construction), so a missing/zero hour is
+    // simply absent — it can't deflate the reference the way a fleet sum's still-
+    // positive short hour does.
+    const clearByHour = new Map<number, number[]>();
+    for (const [he, pv] of pvByEpoch) {
+      const wx = wxByHourEpoch.get(he);
+      if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
+      const coeff = pv / wx.radiationWm2;
+      if (!Number.isFinite(coeff) || coeff <= 0) continue; // drop this Core's gap hour
+      const hod = new Date(he * 3_600_000).getHours();
+      const arr = clearByHour.get(hod) ?? [];
+      arr.push(coeff);
+      clearByHour.set(hod, arr);
+    }
+    const refCoeffByHour = new Map<number, number>();
+    for (const [h, arr] of clearByHour) {
+      if (arr.length < 3) continue;
+      const sorted = arr.slice().sort((a, b) => a - b);
+      const p90 = sorted[Math.floor(sorted.length * 0.9)] ?? sorted[sorted.length - 1];
+      refCoeffByHour.set(h, p90);
+    }
+    for (const [he, pv] of pvByEpoch) {
+      const wx = wxByHourEpoch.get(he);
+      if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
+      const hod = new Date(he * 3_600_000).getHours();
+      const ref = refCoeffByHour.get(hod);
+      if (ref == null) continue;
+      byHour[hod].push({ predicted: ref * wx.radiationWm2, observed: pv, day: new Date(he * 3_600_000).toDateString() });
+    }
+    const coreHours = new Map<number, CoreShadeAgg>();
+    for (let h = 0; h < 24; h++) {
+      const pairs = byHour[h];
+      const days = new Set(pairs.map((p) => p.day));
+      if (days.size < SHADE_MIN_CLEAR_DAYS) continue;
+      const obsMed = median(pairs.map((p) => p.observed));
+      const predMed = median(pairs.map((p) => p.predicted));
+      if (predMed < 100) continue;
+      const shortfall = (predMed - obsMed) / predMed;
+      coreHours.set(h, { shortfall, observed: obsMed, expected: predMed, days: days.size });
+      // This Core's own annual shortfall over its own shaded hours (fleet-scale sum).
+      if (shortfall >= SHADE_DROP_THRESHOLD) annualKwhShortfall += ((predMed - obsMed) / 1000) * 365;
+    }
+    perCoreHourShortfall.push(coreHours);
+  }
+
+  const hours: ShadeHour[] = [];
+  for (let h = 0; h < 24; h++) {
+    const contrib = perCoreHourShortfall
+      .map((m) => m.get(h))
+      .filter((v): v is CoreShadeAgg => v != null);
+    if (contrib.length === 0) continue;
+    // MEDIAN per-Core shortfall — robust to a single Core's odd hour, unlike the
+    // fleet-sum path where one Core's gap deflated the shared coefficient.
+    const shortfall = median(contrib.map((c) => c.shortfall));
+    if (shortfall < SHADE_DROP_THRESHOLD) continue;
+    const observedW = contrib.reduce((s, c) => s + c.observed, 0);
+    const expectedW = contrib.reduce((s, c) => s + c.expected, 0);
+    hours.push({
+      hour: h,
+      observedW: Math.round(observedW),
+      expectedW: Math.round(expectedW),
+      shortfallPct: Math.round(shortfall * 1000) / 10,
+      clearDays: Math.min(...contrib.map((c) => c.days)),
+    });
+  }
+  return { hours, estTotalKwhPerYear: Math.round(annualKwhShortfall) };
+}
+
 export async function computeShadeReport(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
@@ -2903,67 +3049,13 @@ export async function computeShadeReport(
   // throw off the shade-shortfall projection.
   const connected = shp2ConnectedDpuSns(devices);
   const homeDpus = homeConnectedDpus(dpus, connected);
-  const fleetPvByEpoch = new Map<number, number>();
-  for (const d of homeDpus) {
-    const pvE = pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now);
-    for (const [he, pv] of pvE) fleetPvByEpoch.set(he, (fleetPvByEpoch.get(he) ?? 0) + pv);
-  }
+  // v0.93.0 (audit #9) — keep each home Core's OWN pv_total map (NOT one summed
+  // fleetPvByEpoch) so the shade shortfall + refCoeff are derived per-Core and can't
+  // be deflated by a wedged Core's still-positive-but-short fleet hour. See
+  // shadeHoursFromCorePvMaps (mirrors the v0.63.0 fleetSoilingFromDevices pattern).
+  const homeCorePvMaps = homeDpus.map((d) => pvHourlyByEpoch(recorder, d.sn, 'pv_total', since, now));
 
-  // Per hour-of-day: collect (predicted, observed) pairs across clear-sky hours.
-  const byHour: Array<Array<{ predicted: number; observed: number; day: string }>> =
-    Array.from({ length: 24 }, () => []);
-  // Build a quick GHI-keyed model: for each hour-of-day, the best (largest)
-  // ratio of observed PV to GHI on a clear day = the "no-shade" reference.
-  // We approximate predicted from the cleanest day's response.
-  const clearByHour: Map<number, Array<{ coeff: number }>> = new Map();
-  for (const [he, pv] of fleetPvByEpoch) {
-    const wx = wxByHourEpoch.get(he);
-    if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
-    const hod = new Date(he * 3_600_000).getHours();
-    const arr = clearByHour.get(hod) ?? [];
-    arr.push({ coeff: pv / wx.radiationWm2 });
-    clearByHour.set(hod, arr);
-  }
-  const refCoeffByHour = new Map<number, number>();
-  for (const [h, arr] of clearByHour) {
-    if (arr.length < 3) continue;
-    // 90th-percentile coeff = the "clean / unshaded" benchmark for this hour
-    const sorted = arr.map((p) => p.coeff).sort((a, b) => a - b);
-    const p90 = sorted[Math.floor(sorted.length * 0.9)] ?? sorted[sorted.length - 1];
-    refCoeffByHour.set(h, p90);
-  }
-
-  for (const [he, pv] of fleetPvByEpoch) {
-    const wx = wxByHourEpoch.get(he);
-    if (!wx || wx.cloudCoverPct > 20 || wx.radiationWm2 < 200) continue;
-    const hod = new Date(he * 3_600_000).getHours();
-    const ref = refCoeffByHour.get(hod);
-    if (ref == null) continue;
-    const predicted = ref * wx.radiationWm2;
-    const day = new Date(he * 3_600_000).toDateString();
-    byHour[hod].push({ predicted, observed: pv, day });
-  }
-
-  const hours: ShadeHour[] = [];
-  let annualKwhShortfall = 0;
-  for (let h = 0; h < 24; h++) {
-    const pairs = byHour[h];
-    const days = new Set(pairs.map((p) => p.day));
-    if (days.size < SHADE_MIN_CLEAR_DAYS) continue;
-    const obsMed = median(pairs.map((p) => p.observed));
-    const predMed = median(pairs.map((p) => p.predicted));
-    if (predMed < 100) continue;
-    const shortfall = (predMed - obsMed) / predMed;
-    if (shortfall < SHADE_DROP_THRESHOLD) continue;
-    hours.push({
-      hour: h,
-      observedW: Math.round(obsMed),
-      expectedW: Math.round(predMed),
-      shortfallPct: Math.round(shortfall * 1000) / 10,
-      clearDays: days.size,
-    });
-    annualKwhShortfall += ((predMed - obsMed) / 1000) * 365;
-  }
+  const { hours, estTotalKwhPerYear } = shadeHoursFromCorePvMaps(homeCorePvMaps, wxByHourEpoch);
 
   const value: ShadeReport = {
     generatedAt: now,
@@ -2971,7 +3063,7 @@ export async function computeShadeReport(
     // crossed the shade threshold — a healthy array, not missing data.
     status: 'healthy',
     hours,
-    estTotalKwhPerYear: Math.round(annualKwhShortfall),
+    estTotalKwhPerYear,
   };
   shadeCache = { ts: now, value };
   return value;
@@ -3975,6 +4067,73 @@ export function diurnalBaselinePredictor(pvCurveWhPerHour: number[]): (hourStart
   return (hourStartMs: number) => curve[new Date(hourStartMs).getHours()];
 }
 
+/**
+ * v0.93.0 (audit #3) — ALARM-FACING PV bias correction.
+ *
+ * The forecast-skill hindcast computes a biasFactor = sum(actual)/sum(predicted)
+ * over mature weather-covered days (≈0.62 in the field: the GHI→PV model
+ * OVER-predicts on cloudy days). Before this fix that factor fed the confidence
+ * report ONLY — the alarm-facing forecast.hours[].forecastPvW series (which
+ * computeRunway, computeMultiDayForecast, and computeProbabilistic all consume)
+ * used the RAW model PV. Over-predicted PV shrinks the runway deficit → latent
+ * islanding UNDER-alarm.
+ *
+ * This helper recomputes that factor from the SAME solar model + GHI + actual PV
+ * the caller already has in scope, then returns a CLAMPED, GUARDED scalar to
+ * multiply forecast PV by BEFORE the alarm consumers see it:
+ *   • clamp(factor, [0.5, 1.2]) — never trust an extreme hindcast ratio; a
+ *     factor < 1 (over-prediction) shortens runway = the SAFE islanded direction,
+ *     and the 1.2 ceiling caps any runway-LENGTHENING (under-prediction) correction.
+ *   • REQUIRE ≥ 3 mature weather-covered days before activating — same maturity
+ *     gate the skill stats use (predKwh/actKwh non-degenerate). Fewer ⇒ 1.0.
+ *   • FALL BACK to 1.0 (no-op) whenever the ratio is null/degenerate.
+ * Self-activating: a no-op until the hindcast data matures, so it is safe to ship.
+ *
+ * Pure + exported so the guard test can pin the gate/clamp without a live recorder.
+ */
+export const PV_BIAS_CLAMP_LO = 0.5;
+export const PV_BIAS_CLAMP_HI = 1.2;
+export const PV_BIAS_MIN_MATURE_DAYS = 3;
+
+export function computePvBiasCorrection(
+  solarModel: SolarResponseModel,
+  ghiByEpoch: Map<number, number>,
+  pvBySn: Map<string, Array<{ ts: number; value: number }>>,
+  todayStartMs: number,
+  windowDays = 7,
+): number {
+  let totalPred = 0, totalAct = 0, matureDays = 0;
+  for (let i = windowDays; i >= 1; i--) {
+    const dayStart = todayStartMs - i * 86_400_000;
+    // Same "day had ANY irradiance" coverage gate the skill hindcast uses.
+    if (!dayHasGhiCoverage(ghiByEpoch, dayStart)) continue;
+    let predWh = 0, actWh = 0;
+    for (let h = 0; h < 24; h++) {
+      const hourStart = dayStart + h * 3_600_000;
+      const he = Math.floor(hourStart / 3_600_000);
+      const ghi = ghiByEpoch.get(he);
+      const resp = solarModel.hourly[new Date(hourStart).getHours()];
+      if (ghi != null && resp.coeff != null) predWh += resp.coeff * ghi;
+      for (const pts of pvBySn.values()) {
+        const slice = sliceByTsInclusive(pts, hourStart, hourStart + 3_600_000);
+        if (slice.length === 0) continue;
+        actWh += slice.reduce((s, p) => s + p.value, 0) / slice.length;
+      }
+    }
+    const predKwh = predWh / 1000;
+    const actKwh = actWh / 1000;
+    // Identical maturity gate to computeForecastSkill's biasFactor accumulation.
+    if (predKwh > 0.5 && actKwh > 0.5 && predKwh >= 0.25 * actKwh) {
+      totalPred += predKwh; totalAct += actKwh; matureDays++;
+    }
+  }
+  // Insufficient mature coverage OR degenerate ratio ⇒ no-op.
+  if (matureDays < PV_BIAS_MIN_MATURE_DAYS || totalPred <= 0.5) return 1.0;
+  const raw = totalAct / totalPred;
+  if (!Number.isFinite(raw) || raw <= 0) return 1.0;
+  return Math.min(PV_BIAS_CLAMP_HI, Math.max(PV_BIAS_CLAMP_LO, raw));
+}
+
 export async function computeForecastSkill(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
@@ -4612,7 +4771,18 @@ export function computeSelfConsumption(
 
   // Charge fed by PV is what the PV produced beyond what went to load — the rest
   // came from grid. On an off-grid system gridImportKwh ≈ 0 and PV ≈ load+charge.
-  const pvToBatteryKwh = Math.max(0, batteryChargeKwh - gridImportKwh);
+  // v0.93.0 (audit #4) — on an SHP2 home the DPU `ac_in` (gridImportKwh) reads ~0
+  // while real grid flows through the SHP2 main (gridForKpiKwh, the coverage-gated
+  // term used for solarFraction). Subtracting only ac_in credited ALL battery charge
+  // to PV even while the SHP2 charged the pool from grid at the floor, over-stating
+  // direct-use. Apportion the TRUSTED grid load-first (the SHP2 carries the home from
+  // grid and tops the pool at the ~10% floor): grid beyond the load is what charged
+  // the battery from grid; the remaining charge is PV. Fall back to ac_in for a
+  // DPU-only install or when grid_home_w isn't trusted yet (gridForKpiKwh null).
+  const gridToBatteryKwh = (shp2 && gridForKpiKwh != null)
+    ? Math.max(0, gridForKpiKwh - loadKwh)
+    : gridImportKwh;
+  const pvToBatteryKwh = Math.max(0, batteryChargeKwh - gridToBatteryKwh);
   const pvToLoadKwh = Math.max(0, pvKwh - pvToBatteryKwh);
   const value: SelfConsumption = {
     generatedAt: now,
@@ -6018,6 +6188,26 @@ export function computeTariffReport(
   }
   const loadSeries = shp2 ? recorder.query(shp2.sn, 'panel_load', since, now, 60) : [];
 
+  // v0.93.0 (audit #5) — whole-home grid term for the tariff cost, coverage-gated,
+  // mirroring computeSelfConsumption's gridForKpiKwh / gridHomeTrusted pattern. On an
+  // SHP2 home the DPU `ac_in` reads ~0 while real grid flows through the SHP2 main
+  // (grid_home_w), so a cost built only from ac_in reported gridImportCost=$0 and
+  // credited ALL panel_load as solar value. When grid_home_w is measured wherever
+  // panel_load is (coverage ≥ GRID_HOME_MIN_COVERAGE) we take the whole-home superset
+  // max(grid_home_w, ac_in) per hour; otherwise (DPU-only install, or the post-instrument
+  // ramp before grid_home_w spans the window) we keep ac_in exactly as before.
+  const gridHomeSeries = shp2 ? recorder.query(shp2.sn, 'grid_home_w', since, now, 60) : [];
+  let gridHomeTrusted = false;
+  if (shp2) {
+    const cov = recorder.queryMulti(
+      shp2.sn, ['panel_load', 'grid_home_w'], since - DAILY_ENERGY_LOOKBACK_MS, now, 300,
+    );
+    const loadCovMs = integrateWh(cov.get('panel_load') ?? [], since, now).coverageMs;
+    const gridCovMs = integrateWh(cov.get('grid_home_w') ?? [], since, now).coverageMs;
+    const gridHomeCoverageFrac = loadCovMs > 0 ? Math.min(1, gridCovMs / loadCovMs) : 0;
+    gridHomeTrusted = gridHomeCoverageFrac >= GRID_HOME_MIN_COVERAGE;
+  }
+
   const tally = (sinceMs: number) => {
     let gridCost = 0;
     let loadValue = 0;
@@ -6031,6 +6221,13 @@ export function computeTariffReport(
       }
       if (shp2) {
         loadWh += integrateWh(loadSeries, t, tEnd).wh;
+      }
+      // v0.93.0 (audit #5) — take the whole-home grid superset when trusted (see the
+      // gridHomeTrusted derivation above). max() keeps the DPU-charging ac_in if it ever
+      // exceeds the SHP2 main for the hour; on a DPU-only install or the untrusted ramp
+      // this branch never runs, so ac_in is used unchanged.
+      if (shp2 && gridHomeTrusted) {
+        gridWh = Math.max(gridWh, integrateWh(gridHomeSeries, t, tEnd).wh);
       }
       gridCost += (gridWh / 1000) * rate;
       // v0.10.4 — value only the solar+battery-served load (subtract grid),

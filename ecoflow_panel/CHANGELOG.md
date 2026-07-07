@@ -3,6 +3,30 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.93.0 — 2026-07-07
+
+Engine-audit fixes, bundle 2 of 2 (accuracy / KPI / diagnostics) + promotion of the SHP2 rate-floor detector to a real push alert. Completes every code-fixable defect from the live v0.91.0 engine audit. Each alarm-adjacent change was hand-reviewed against the source and is fail-safe; `tsc` clean, full suite **1168** green (+34).
+
+**[Fixed] (#3, safety-adjacent) The PV forecast bias is now applied to the alarm-facing runway — closing a latent islanding UNDER-alarm.** The hindcast bias factor (~0.62 — the GHI→PV model over-predicts on cloudy days) previously fed only the confidence report; the runway/multi-day/probabilistic-P50 projections consumed the RAW over-optimistic PV, which shrinks the runway deficit. New pure `computePvBiasCorrection` recomputes the factor from the same solar model + GHI + actual home-Core PV and returns a **clamped [0.5, 1.2], guarded** scalar that multiplies the alarm-facing `forecastPvW` (and the projected-SoC sim + next-24h PV sum) BEFORE the alarm consumers see it. Self-activating and **safe-by-default**: a no-op (factor 1.0) until ≥3 mature weather-covered hindcast days exist; correcting toward <1 SHORTENS the runway — the conservative islanded direction — and the display/clipping basis stays raw. 8 guard tests.
+
+**[Fixed] (#1 phase-2) The SHP2 message-rate-floor collapse is now a real push alert, not just a log line.** v0.92.0 detected the collapse and WARN-logged it; new `messageRateFloorAlert.ts` (mirroring `broadcastHealth`'s set/get + pure-builder split) turns each collapsing device into a **WARNING / ISA-Medium** Alert that rides the SAME notify + `snapshot.alerts` pipeline as the offline/stale alerts (stable id `msg-rate-floor-<sn>`, de-duped across ticks, resolves on recovery). Not critical — push is the right channel; it must reach the operator without breaking quiet hours as an emergency.
+
+**[Fixed] (#8) A runway CRITICAL can no longer chime audibly at the by-design ~10% floor while the grid is backstopping.** New pure `shouldGateRunwayAudible(grid)` gates ONLY `broadcast.announce` when the grid is actively carrying the load at the floor (a belt-and-braces mute atop the existing grid-aware classifier). Push and on-screen are untouched; off-grid (backstopping=false, the safe default) is unchanged, so a genuine islanded depletion still annunciates. Reads the same-tick grid state the classifier used (mirrors `socGridForTick`). 4 tests.
+
+**[Fixed] (#4/#5) Self-consumption and tariff KPIs use the SHP2 whole-home grid term, not DPU `ac_in`.** On an SHP2 home the DPU `ac_in` reads ~0 while real grid flows through the SHP2 main, so both reports mis-attributed grid-served energy to solar: self-consumption credited ALL battery charge to PV (wrong `direct_use_ratio`) and the tariff report showed **$0 grid cost** / over-stated net savings. Self-consumption now apportions the coverage-gated `gridForKpiKwh` load-first (grid beyond load charged the battery); the tariff report adds `grid_home_w` as the grid term, coverage-gated like the sibling KPIs. DPU-only installs and the untrusted `grid_home_w` ramp keep `ac_in` unchanged. The lifetime energy LEDGER (already correct) is untouched. No alarm consumer.
+
+**[Fixed] (#9) The shade report derives clear-sky shortfall + annual kWh per-Core, not from summed fleet PV** — eliminating a phantom 58-91%/hr shortfall (and bogus kWh/yr) when a cloud-wedged Core's missing clear hour deflated the shared fleet coefficient. Mirrors the v0.63.0 per-Core soiling path (per-Core p90 refCoeff + shortfall, aggregated by median). Solar-diagnostics UI only; output shape unchanged. 4 tests.
+
+**[Fixed] (#10) The internal-resistance monthly trend is nulled when implausible** (from <20 R-samples or |trend| beyond the physical pack-resistance ceiling), so the Battery diagnostic no longer surfaces impossible values (e.g. −74 mΩ/mo on a ~55 mΩ pack) or the self-contradictory "resistance stable" pack-risk card. Score unchanged (already tier-protected).
+
+**[Fixed] (#14) The learned peer-baseline detector no longer warns on COLD-side MPPT temperatures** — a below-typical reading on a heat-generating MPPT is benign, so thermal targets now gate the WARNING tier to the hot side (below-typical demotes to info). Non-thermal metrics keep the symmetric z-rule.
+
+**[Fixed] (#16) The Kalman years-to-EOL path gained the OLS fade-ceiling guard** (defensive; latent on the near-new fleet) — a Kalman fade above the physical LFP ceiling can no longer publish a false dated EOL when the OLS path correctly rejected it.
+
+**[Fixed] (#12) The MPC dispatch planner can no longer recommend draining the pack below the operator's reserve floor** — the DP-allowable reserve setpoint is floored at `reserveFloorPct`, so a "lower reserve" action can't reach 0% to escape the reserve-dip penalty. Recommend-only; touches no safety alarm. 2 tests.
+
+**[Fixed] (#13) The dispatch-plan "savings" no longer contradicts the MPC's $0** under a flat tariff — the figure is relabeled/reconciled as self-consumption value rather than arbitrage savings, so the two endpoints agree.
+
 ## 0.92.0 — 2026-07-07
 
 Engine-audit fixes, bundle 1 of 2 (safety + robustness). From the live 19-agent engine audit (v0.91.0): every safety-critical path verified accurate, and these are the confirmed, code-fixable robustness/correctness defects. Bundle 2 (energy-KPI + diagnostic accuracy) follows.

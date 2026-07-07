@@ -87,6 +87,20 @@ export interface GridContext {
   backstopping: boolean;
 }
 
+/**
+ * v0.93.0 (audit #8) — should the runway alarm's AUDIBLE annunciation be gated?
+ * True ONLY while the grid is actively backstopping the home: at that point the
+ * pool reaching/holding the by-design reserve floor merely transfers to mains, so
+ * the audible chime that flapped on a grid-tied home is muted. This gates ONLY the
+ * audible path (broadcast.announce) at the index.ts call site — push + on-screen
+ * are untouched. Off-grid / grid-not-carrying (backstopping=false or no context) →
+ * false → a genuine islanded depletion still annunciates unchanged. Pure so the
+ * mute decision is unit-tested without the broadcast wiring.
+ */
+export function shouldGateRunwayAudible(grid?: GridContext): boolean {
+  return grid?.backstopping === true;
+}
+
 export function classifyRunway(p: RunwayAlarmInput, grid?: GridContext): AlarmPriority | null {
   if (p.unavailable != null) return null;
   // v0.15.18 — being AT/below the reserve floor is the emergency this ladder
