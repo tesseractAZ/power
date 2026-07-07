@@ -87,7 +87,7 @@ import type { AnnouncementLevel } from './audioRenderer.js';
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from './alertPriority.js';
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs } from './batterySocAlarm.js';
-import { createRunwayAlarm } from './runwayAlarm.js';
+import { createRunwayAlarm, shouldGateRunwayAudible } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 import { socGridCrossDecision, reEscalateGridDrop } from './socGridDispatch.js';
 import { classifyMqttStartFailure } from './mqttStartClassify.js';
@@ -101,6 +101,9 @@ import {
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker } from './messageRateFloor.js';
+// v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
+// them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
+import { setRateFloorCollapses, type RateFloorCollapse } from './messageRateFloorAlert.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
 
@@ -1972,9 +1975,28 @@ store.on('change', (snap: FleetSnapshot) => {
 // cadence is far finer than the hourly re-announce throttle and the report is
 // cached. Honours the same per-priority Alert-Settings toggles as the SoC alarm.
 const runwayAlarmEnabled = process.env.BATTERY_RUNWAY_ALARM_ENABLED !== 'false';
+// v0.93.0 (audit #8) — the grid-backstop snapshot for the CURRENT runway tick,
+// assigned right before runwayAlarm.update below (same tick's grid state the
+// classifier sees). Read by onTrigger to gate ONLY the AUDIBLE runway alarm while
+// the grid is backstopping — a belt-and-braces mute of the by-design ~10% floor
+// audible that flapped a chime on a grid-tied home (one audible fired). Mirrors
+// socGridForTick. Push + on-screen (the analytics forecast-runtime-* alert via
+// computeAlerts) are UNTOUCHED — only broadcast.announce is gated. Off-grid
+// (backstopping=false, the safe default) → gate is a no-op → a real islanded
+// depletion still annunciates unchanged.
+let runwayGridForTick = liveGridBackstop({});
 const runwayAlarm = createRunwayAlarm({
   onTrigger: (priority, message, messageEs) => {
     if (!isPriorityEnabled(priority)) return;
+    // v0.93.0 (audit #8) — AUDIBLE-only grid gate. When the grid is backstopping,
+    // the pool reaching/holding the reserve floor merely transfers to mains, so the
+    // audible chime is suppressed here even if a transient backstopping=false let the
+    // classifier reach critical. Never suppresses push/on-screen; never fires when
+    // off-grid (backstopping=false), so a genuine islanded emergency is unchanged.
+    if (shouldGateRunwayAudible(runwayGridForTick)) {
+      app.log.info('runway-alarm: audible suppressed — grid backstopping (push/on-screen unaffected)');
+      return;
+    }
     void broadcast.announce(priority, message, messageEs); // v0.62.0 — Spanish second pass
   },
   log: (m) => app.log.info(m),
@@ -1994,7 +2016,11 @@ if (runwayAlarmEnabled) {
           }
         }
         const r = await analytics.report('runway');
-        runwayAlarm.update(r, liveGridBackstop(store.get().devices));
+        // v0.93.0 (audit #8) — assign the tick's grid backstop synchronously BEFORE
+        // update() so onTrigger's audible gate reads exactly the grid state this
+        // classification used (no stale-cache divergence). Mirrors socGridForTick.
+        runwayGridForTick = liveGridBackstop(store.get().devices);
+        runwayAlarm.update(r, runwayGridForTick);
       } catch (e: any) {
         app.log.debug(`runway-alarm: poll skipped (${e?.message ?? e})`);
       }
@@ -2135,9 +2161,18 @@ const rateFloorTick = setInterval(() => {
   try {
     const now = Date.now();
     const devices = store.get().devices;
+    // v0.93.0 (audit #1 phase-2) — accumulate the CURRENTLY-collapsing devices this
+    // tick and publish them so alertMonitor surfaces a real push alert per device
+    // (via rateFloorAlerts). `collapsing` is true while a fired collapse is ongoing,
+    // so the set is stable across ticks (dedup) and empties on recovery. The WARN
+    // log is preserved below exactly as before.
+    const collapses: RateFloorCollapse[] = [];
     for (const [sn, count] of store.mqttMsgCountBySn) {
       const r = rateFloor.sample(sn, count, now);
       const name = devices[sn]?.deviceName ?? sn;
+      if (r.collapsing) {
+        collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });
+      }
       if (r.collapsed) {
         app.log.warn(
           `msg-rate-floor: ${name} message rate collapsed to ` +
@@ -2148,6 +2183,7 @@ const rateFloorTick = setInterval(() => {
         app.log.info(`msg-rate-floor: ${name} message rate recovered (${r.rate?.toFixed(1) ?? '?'} msg/min)`);
       }
     }
+    setRateFloorCollapses(collapses);
   } catch (e: any) {
     app.log.debug(`msg-rate-floor: tick skipped (${e?.message ?? e})`);
   }
