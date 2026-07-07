@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.90.0 — 2026-07-06
+
+**[Changed] Analytics report coalescing + short TTL cache — collapses the concurrent dashboard fan-out into one worker round-trip.** Each dashboard poll fans out ~9 concurrent `analytics.report()` calls (`/api/ha-state`, `mqttDiscovery.buildState`, `alertMonitor`, `featureSnapshot`) that all funnel through the single analytics worker's serial message loop, so a batch queued behind a slow scan serialises. `analyticsClient.report()` now (a) **coalesces** concurrent identical calls into ONE worker round-trip and (b) serves a repeat within a short **per-report TTL** (default 20 s; 3–5 s for the alarm-facing `forecast`/`runway`/`curtailmentAlerts`/`baselineAlerts`/`forecastAlerts`; 0 = coalesce-only for the args-bearing `totals`/`circuitHistory`/`backtest`) from a **structured clone** of the last result.
+
+Safety, verified: the TTL is *strictly fresher* than today — every heavy report already carries a 5–30 min internal cache inside the worker and the alarm engine (`alertMonitor`, 20 s eval) tolerates that, so a few seconds on the main thread changes no alarm timing. Every cache hit is `structuredClone`d — load-bearing because `alertMonitor` mutates `annunciate` on alert objects that are elements of report results, and today each consumer gets an independent copy across the worker `postMessage` boundary; cloning preserves that exact semantic so no consumer shares a mutable ref. Rejections are never cached (no negative caching) and the cache is dropped on worker respawn (no stale-across-respawn). `query()`/`listMetrics()` are untouched (unbounded args; already HTTP-cached). Env-tunable via `ANALYTICS_REPORT_TTL_MS`.
+
+**[Note] 304/ETag recompute — investigated, deliberately not migrated.** The second perf item ("304s still pay the full recompute") turned out to be a *marginal* micro-optimisation, not the multi-second win it appeared: `analytics.report()` is already a ~1 ms worker-cached IPC (not a main-thread scan), so a 304 only wastes the ETag `JSON.stringify`. And naively validator-caching the highest-traffic endpoint (`/api/ha-state`) would be **unsafe** — it embeds live `Date.now()`/outage fields, so a report-`generatedAt` validator could 304 a response whose live SoC/outage tiles changed (stale safety data). A safe migration would require per-endpoint `generatedAt` verification (several target reports don't carry one). Given the marginal gain and the mission-critical read path, the coalescing above is the real win and the ETag micro-opt is intentionally left for a future, per-endpoint-verified pass.
+
+Server-only; no config/endpoint change. `tsc` clean; full suite **1128** green.
+
 ## 0.89.0 — 2026-07-06
 
 The SHP2's OWN grid signal — a cleaner, device-informed fix for the between-burst false critical, plus the SHP2 operating modes surfaced. Researched from EcoFlow's PD303 API + two community integrations, adversarially safety-verified, and confirmed live on the actual SHP2 (`gridSta=1`, `gridVol=123`, `gridWatt=0` in a burst gap — the exact case).
