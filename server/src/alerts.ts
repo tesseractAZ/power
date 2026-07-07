@@ -555,7 +555,7 @@ export function computeAlerts(
   }
 
   // v0.12.0 — backup-pool SoC band alert. One on-screen alert for the lowest
-  // SoC threshold the backup pool is currently at/below (40/30/20/15/10/8/4/2 %),
+  // SoC threshold the backup pool is currently at/below (50/40/30/20/15/10/8/4/2 %),
   // its severity/source chosen by socAlertSeverity so priorityOf() derives the
   // matching ISA tier (Low→Critical). The audible escalating alarm is fired
   // separately via broadcast.announce (batterySocAlarm + index.ts); the id MUST

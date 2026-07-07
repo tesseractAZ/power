@@ -1877,7 +1877,7 @@ const broadcast = startBroadcastMonitor(store, (m) => app.log.info(m), {
   cacheUrlPath: '/audio-render',
 });
 
-// v0.12.0 — backup-pool SoC audible alarm (40/30/20/15/10/8/4/2%, escalating priority).
+// v0.12.0 — backup-pool SoC audible alarm (50/40/30/20/15/10/8/4/2%, escalating priority).
 const socAlarmEnabled = process.env.BATTERY_SOC_ALARM_ENABLED !== 'false';
 // v0.23.0 — the grid-backstop snapshot for the CURRENT tick, recomputed once per
 // store change (with a fresh HA cache when a grid entity is configured) and read

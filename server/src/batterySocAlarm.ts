@@ -43,7 +43,7 @@ export interface SocThreshold {
 
 /**
  * Thresholds, highest → lowest SoC, with escalating priority. The user asked
- * for 40/30/20/15/10/8/4/2 % with "increased priority as capacity gets lowest".
+ * for 50/40/30/20/15/10/8/4/2 % with "increased priority as capacity gets lowest".
  */
 export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
   { pct: 50, priority: 'low' },
