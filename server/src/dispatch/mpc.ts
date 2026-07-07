@@ -411,7 +411,16 @@ export function recommendDispatch(inputs: MpcInputs): MpcResult {
 
     for (const [socStart, cell] of fwd) {
       for (const action of ACTIONS) {
-        const newReserve = Math.max(0, Math.min(50, inputs.reserveFloorPct + action.deltaReservePct));
+        // v0.93.0 (audit #12) — floor the DP-allowable reserve setpoint at the
+        // operator's real reserveFloorPct. The legacy `lower` action (delta -10)
+        // could otherwise drive newReserve below the configured floor (down to 0);
+        // simulateHour then measured the reserve-dip penalty against that SAME
+        // lowered setpoint, so draining the pack below the floor incurred no
+        // penalty and the planner would recommend emptying the battery to 0%.
+        // Clamping the lower bound to reserveFloorPct means a recommended reserve
+        // can never fall under the operator's floor, and any dip below the floor
+        // is always penalized. (Recommend-only; touches no safety alarm.)
+        const newReserve = Math.max(inputs.reserveFloorPct, Math.min(50, inputs.reserveFloorPct + action.deltaReservePct));
         const sim = simulateHour(
           socStart, pvForThisHour, load, newReserve, action.batteryFlowFrac,
           inputs.capacityKwh, inputs.gridAvailable,
