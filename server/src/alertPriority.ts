@@ -100,6 +100,29 @@ export function priorityMeta(p: AlarmPriority): AlarmPriorityMeta {
   return ALARM_PRIORITY_META[p];
 }
 
+/**
+ * v0.94.0 — the ISA priority used for the HA notify-TITLE bracket, e.g. "[Medium] …".
+ *
+ * Honours the alert's EXPLICIT `priority` (via priorityOf) UNLESS auto-tune has demoted
+ * the severity for this send — in which case the demoted `effectiveSeverity` drives the
+ * bracket, so a warning→info demotion still renders "[Low]".
+ *
+ * Fixes a re-audit finding: the notify-title caller passed only `{ severity, source }`,
+ * dropping `alert.priority`, so priorityOf fell through to its severity+source heuristic
+ * (warning + non-learned → 'high') and mislabelled every explicit-priority='medium'
+ * WARNING — the message-rate-floor collapse, the backup-SoC reserve bands, the
+ * audible-unreachable and telemetry-gap alerts — as "[High]". (It only ever OVER-warned;
+ * routing/severity/annunciation read the full alert and were correct.)
+ */
+export function notifyBracketPriority(
+  alert: Pick<Alert, 'severity' | 'source' | 'priority'>,
+  effectiveSeverity: Alert['severity'],
+): AlarmPriority {
+  return effectiveSeverity === alert.severity
+    ? priorityOf(alert)
+    : priorityOf({ severity: effectiveSeverity, source: alert.source });
+}
+
 export function priorityRank(p: AlarmPriority): number {
   return ALARM_PRIORITY_META[p].rank;
 }
