@@ -3,6 +3,12 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.94.0 — 2026-07-07
+
+The one genuine defect from the v0.93.0 post-change re-audit (a fresh, 21-agent, adversarially-verified sweep of the deployed add-on: HA notifications, display/entities, ingestion/storage, all engines, and a full log review). The re-audit verdict was **GREEN — zero regressions**: every v0.91→v0.93 change verified active and correct in production (97/97 HA entities sane, MQTT fresh on SHP2 + all 3 home Cores, ledger coherent, 0 error/fatal over ~18.5 h uptime, 0 false criticals, notify fire→Resolved lifecycle clean, warm latency unchanged). This ships the single cosmetic fix it surfaced.
+
+**[Fixed] HA notification titles over-labelled explicit-priority `medium` warnings as `[High]`.** The notify title-builder passed only `{ severity, source }` into `priorityOf()`, dropping the alert's explicit `priority`, so `priorityOf` fell through to its `severity`+`source` heuristic (`warning` + non-`learned` → `high`). Every producer that sets an explicit `priority: 'medium'` on a real threshold `warning` — the new message-rate-floor collapse alert, the backup-SoC reserve bands, audible-unreachable, and telemetry-gap — therefore rendered as **`[High]`** in the Home Assistant notification title. It only ever **over**-warned (never under-warned) and corrupted no routing, severity, annunciation, web, klaxon, or HA-sensor surface — those all read the full alert and were already correct; the bug was isolated to the notify-title bracket. Pre-existing since the v0.11.0/v0.44.0 priority path; the new v0.93.0 rate-floor alert merely surfaced it. New pure `notifyBracketPriority(alert, effectiveSeverity)` honours the explicit priority **except** when auto-tune actually demoted the severity for this send — there the demoted severity still drives the bracket, so a `warning→info` demotion continues to render `[Low]`. 6 new tests; full suite **1174** green. No behaviour change to any alarm, routing, or data path.
+
 ## 0.93.0 — 2026-07-07
 
 Engine-audit fixes, bundle 2 of 2 (accuracy / KPI / diagnostics) + promotion of the SHP2 rate-floor detector to a real push alert. Completes every code-fixable defect from the live v0.91.0 engine audit. Each alarm-adjacent change was hand-reviewed against the source and is fail-safe; `tsc` clean, full suite **1168** green (+34).

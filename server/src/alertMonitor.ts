@@ -37,7 +37,7 @@ import { getAnalytics } from './analyticsClient.js';
 // a priority on the Alert Settings page silences its notification here (the
 // alert stays visible in snapshot.alerts).
 import { isPriorityEnabled } from './alertSettings.js';
-import { priorityOf, priorityMeta } from './alertPriority.js';
+import { priorityOf, priorityMeta, notifyBracketPriority } from './alertPriority.js';
 import * as haStateCache from './haStateCache.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 
@@ -976,10 +976,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // alerts, so their titles are unchanged.
     const loc = notifyLocator(alert);
     const titleBody = loc ? `${alert.title} — ${loc}` : alert.title;
+    // v0.94.0 (re-audit #1) — the HA notify title bracket must honour the alert's
+    // EXPLICIT priority (see notifyBracketPriority): passing only { severity, source }
+    // dropped alert.priority and mislabelled explicit-priority='medium' warnings (the
+    // rate-floor collapse, backup-SoC reserve bands, audible-unreachable, telemetry-gap)
+    // as "[High]". It preserves the warning→info auto-tune demotion "[Low]" display.
     const title =
       kind === 'resolved'
         ? `Resolved: ${titleBody}`
-        : `[${priorityMeta(priorityOf({ severity: effectiveSeverity, source: alert.source })).label}] ${titleBody}`;
+        : `[${priorityMeta(notifyBracketPriority(alert, effectiveSeverity)).label}] ${titleBody}`;
     try {
       await sendNotification(cfg, {
         title: `EcoFlow · ${title}`,
