@@ -3,6 +3,16 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.97.0 — 2026-07-09
+
+**Alarm-delivery integrity.** Three confirmed defects from a fresh comprehensive re-audit (79-agent, read-only, adversarially-verified sweep of engines + TUI + data + logs), each independently re-verified against the code and each capable of **silently dropping or suppressing a real notification**. `tsc` clean; suite **1177** (+2 new guards). No stored-data path changed. (The re-audit's other confirmed items — a TUI/energy spare-membership cluster and lower-severity accuracy/display items — follow in later releases; the one grid-backstop item was deferred pending an operator-config decision.)
+
+**[Fixed] (#2, critical — notify) A condition transition arriving while a broadcast is still playing is no longer lost forever.** `broadcast.ts tick()` committed `prevLevel`/`prevCrit` *before* the in-flight guard, so a *different* level detected during a long (20–105 s, observed) Music-Assistant `play_announcement` advanced `prevLevel` to it and then skipped — leaving it reading as already-seen once the broadcast finished, with no retry path. A real audible all-clear or escalation could be dropped. The in-flight check now runs *before* `prevLevel` is committed (mirroring the adjacent `holdBootRed` one-tick-hold), so the missed transition re-presents on the next tick. Every other skip (disabled/min-severity/quiet) still adopts the level.
+
+**[Fixed] (#3, critical — notify) The morning digest no longer stamps a phantom "already-notified" record for alerts that self-resolved overnight.** `quietQueue` was never pruned when an alert cleared (only bulk-cleared at digest time), and the persist loop wrote `persistedNotified` for *every* queued id — so a warning that rose at 22:15 and cleared by 22:40 still got a fresh notified record at 07:00, which then suppressed a genuine **new** rise of the same single-severity id later that day (no escalation → dispatched as `none`, never pushed). The digest now filters to alerts still legitimately queued (`tracked.get(id)?.queued === true`) for both the body and the persist loop; stale entries are discarded, not recorded.
+
+**[Fixed] (#4, high — telemetry) A failing REST poll no longer resets the "Telemetry stale" safety-net clock.** `snapshot.ts setDeviceError()` bumped `lastUpdated` (the field the stale alarm keys on) on every failed quota poll (~60 s), so a device whose REST poll kept throwing — while still listed online with a frozen projection — stayed under the 3-minute stale threshold forever. It now records the failure time in a separate `lastErrorAt`; `lastUpdated` advances only on genuine fresh telemetry (REST success or an MQTT delta). Guarded by a new `snapshotErrorClock.test.ts`.
+
 ## 0.96.0 — 2026-07-08
 
 The one **HIGH-severity** display defect deferred from v0.95.0, done carefully as its own change. `tsc` clean, suite **1175** green (+1 new regression test). No safety-engine or stored-data path changed — the authoritative `fleet_battery_net_watts` HA sensor was already correct; this only makes the telnet TUI header read the same basis.

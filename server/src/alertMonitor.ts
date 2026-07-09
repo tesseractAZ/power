@@ -1025,9 +1025,23 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       quietQueue.length = 0;
       return true;
     }
+    // v0.97.0 (re-audit #3) — only digest alerts that are STILL legitimately held.
+    // quietQueue is never pruned when an alert self-resolves (the falling-edge loop
+    // deletes the `tracked` entry but leaves the stale queue entry), and the persist
+    // loop below stamps `persistedNotified` for EVERY queued id — so a warning that
+    // rose at 22:15 and cleared by 22:40 would get a fresh "notified" record at 07:00,
+    // silently suppressing a genuine NEW rise of the same single-severity id later that
+    // day (alreadyNotified=true, no escalation → dispatched as 'none', never pushed).
+    // Filter to entries whose tracked state is still queued+active; drop the rest.
+    const pending = quietQueue.filter((a) => tracked.get(a.id)?.queued === true);
+    if (pending.length === 0) {
+      log(`notify: morning digest — all ${quietQueue.length} queued alert(s) self-resolved overnight; nothing to send`);
+      quietQueue.length = 0;
+      return true;
+    }
     // v0.15.18 — include device identity so a digest line is actionable on its
     // own ("Cell imbalance" alone can't say WHICH of 15 packs).
-    const lines = quietQueue.map((a) => {
+    const lines = pending.map((a) => {
       const loc =
         a.coreNum != null
           ? ` (Core ${a.coreNum}${a.packNum != null ? ` pack ${a.packNum}` : ''})`
@@ -1036,7 +1050,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     });
     try {
       await sendNotification(cfg, {
-        title: `EcoFlow · Morning digest (${quietQueue.length} alert${quietQueue.length === 1 ? '' : 's'})`,
+        title: `EcoFlow · Morning digest (${pending.length} alert${pending.length === 1 ? '' : 's'})`,
         body: `Held during overnight quiet hours:\n\n${lines.join('\n')}\n\n${
           CRITICAL_BREAKS_QUIET
             ? '(Critical alerts break through immediately; the items above are warning/info.)'
@@ -1045,13 +1059,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         severity: 'info',
       });
       sentSinceStart++;
-      log(`notify: morning digest sent (${quietQueue.length} alerts) via ${cfg.channel}`);
+      log(`notify: morning digest sent (${pending.length} alerts) via ${cfg.channel}`);
       // v0.76.0 — the held alerts have now ACTUALLY been delivered, so mark them
       // notified + persisted (deferred from queue-time so a pre-digest restart
       // couldn't silently drop them). Keyed by id; the tracked entry may already
       // have cleared, in which case the persisted record alone prevents a re-push.
       const digestSentMs = Date.now();
-      for (const qa of quietQueue) {
+      for (const qa of pending) {
         const qt = tracked.get(qa.id);
         // v0.80.0 — RATCHET, never regress: a queued warning that escalated and
         // was dispatched directly (critical break-through, or the post-quiet

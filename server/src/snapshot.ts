@@ -23,8 +23,11 @@ export interface DeviceSnapshot {
   deviceName: string;
   productName: string;
   online: boolean;
-  lastUpdated: number; // ms epoch
+  lastUpdated: number; // ms epoch — last SUCCESSFUL data (fresh telemetry). The
+  // 'Telemetry stale' alarm keys on this, so a FAILED poll must NOT bump it.
   lastError?: string;
+  lastErrorAt?: number; // v0.97.0 — ms epoch of the last poll FAILURE (distinct
+  // from lastUpdated so a REST error can't reset the staleness clock).
   projection?: Projection;
   raw?: Record<string, unknown>; // included only if SNAPSHOT_INCLUDE_RAW=1
   // v0.37.0 — the SHP2 device carries its own grid backstop + off_grid flag for
@@ -274,7 +277,13 @@ export class SnapshotStore extends EventEmitter {
     const cur = this.snap.devices[sn];
     if (!cur) return;
     cur.lastError = error;
-    cur.lastUpdated = Date.now();
+    // v0.97.0 (re-audit #4) — do NOT bump lastUpdated on a poll FAILURE. lastUpdated
+    // is the "last fresh telemetry" clock the 'Telemetry stale' alarm keys on; a
+    // recurring REST error (device still listed online, projection frozen) used to
+    // reset it every ~60s, holding the device under the 3-min stale threshold forever
+    // and defeating the safety-net. Record the failure time separately instead; a
+    // live MQTT delta on a healthy device still bumps lastUpdated via mergeDeviceQuota.
+    cur.lastErrorAt = Date.now();
     this.snap.generatedAt = Date.now();
     this.emit('change', this.snap, sn);
   }
