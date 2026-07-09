@@ -5202,11 +5202,17 @@ export async function computeClipping(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
   forecast: DayForecast | null,
+  // v0.99.0 — injectable clock for the ELAPSED-HOUR / local-day determination only.
+  // Defaults to Date.now() in production; tests pass a deterministic mid-day timestamp so
+  // the per-hour assertions never depend on wall-clock time-of-day (in the first ~30 min
+  // after local midnight no hour's midpoint has elapsed, so perHour would be empty). The
+  // cache-TTL freshness check + the cache `ts` stay on the REAL clock (see below).
+  nowMs: number = Date.now(),
 ): Promise<ClippingEstimate> {
   if (clippingCache && Date.now() - clippingCache.ts < CLIPPING_TTL_MS) {
     return clippingCache.value;
   }
-  const now = Date.now();
+  const now = nowMs;
   const empty = (): ClippingEstimate => ({
     generatedAt: now,
     todayKwh: 0,
@@ -5250,7 +5256,7 @@ export async function computeClipping(
   const wxByHour = new Map<number, WeatherHour>();
   for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
 
-  const todayStart = startOfLocalDayMs();
+  const todayStart = startOfLocalDayMs(new Date(nowMs));
   // v0.9.29 — pull pv_total ONCE per DPU for today's full window, then
   // bucket by hour in JS. Was 24 × dpus = 96 round-trips per call; now
   // dpus = 4 round-trips. The bucket-sec=60 averages within a minute so
@@ -5320,7 +5326,10 @@ export async function computeClipping(
     arrayPeakW: Math.round(arrayPeakW),
     hoursAtPeak,
   };
-  clippingCache = { ts: now, value };
+  // v0.99.0 — cache freshness is REAL wall-clock (decoupled from the injectable compute
+  // clock `now`), so an injected mid-day `nowMs` in tests can't poison a later real call's
+  // TTL. In production `nowMs === Date.now()` so this is a no-op change.
+  clippingCache = { ts: Date.now(), value };
   return value;
 }
 
