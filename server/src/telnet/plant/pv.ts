@@ -79,7 +79,9 @@ export function renderPv(view: PlantView, data: PlantData): string[] {
     out.push(divider('FORECAST vs. REALIZED — next 24 h', W));
     const fc = data.forecast;
     out.push(padEnd(
-      '  ' + c.grey('FORECAST PV NEXT 24 h ') + c.yellow(`${(fc.forecastPvWhNext24 / 1000).toFixed(2)} kWh`) +
+      // v0.95.0 (re-audit #7) — display basis (restored full-fleet), matching the HA
+      // sensor + web tiles; the runway alarm reads hours[].forecastPvW, not this field.
+      '  ' + c.grey('FORECAST PV NEXT 24 h ') + c.yellow(`${((fc.forecastPvWhNext24Display ?? fc.forecastPvWhNext24) / 1000).toFixed(2)} kWh`) +
       c.grey('   TYPICAL ') + c.white(`${(fc.typicalPvWhPerDay / 1000).toFixed(2)} kWh/day`) +
       c.grey('   HISTORY ') + c.white(`${fc.historyDays.toFixed(1)} d`),
       W,

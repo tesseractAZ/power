@@ -400,11 +400,14 @@ function bodyOverview(data: RenderData): string[] {
 
   L.push(c.cyanB('24-HOUR FORECAST') + c.dim(forecast ? `   ${forecast.hasWeather ? 'cloud-aware' : 'typical-day'} · ${forecast.historyDays.toFixed(1)} d history` : ''));
   if (forecast) {
-    const [label, col] = outlook(forecast);
+    const [label, col] = outlook(forecast, liveGridBackstop(snap.devices).backstopping);
     L.push(
       twoCol(
         'Solar next 24h',
-        c.yellow(fmtKwh(forecast.forecastPvWhNext24)),
+        // v0.95.0 (re-audit #7) — match the HA sensor + web tiles (restored full-fleet
+        // display basis), not the alarm-conservative reporting-only raw sum. The runway
+        // alarm path is untouched (it reads hours[].forecastPvW, not this display field).
+        c.yellow(fmtKwh(forecast.forecastPvWhNext24Display ?? forecast.forecastPvWhNext24)),
         'Typical/day',
         c.grey(fmtKwh(forecast.typicalPvWhPerDay)),
       ),
@@ -438,7 +441,11 @@ function bodyOverview(data: RenderData): string[] {
           'SHP2',
           paint(socColor(p.backupBatPercent), `backup ${fmtPct(p.backupBatPercent)}`) +
             c.grey(` · reserve ${fmtPct(p.backupReserveSoc)}`) +
-            (p.chargeWattPower ? c.green(` · charging ${fmtW(p.chargeWattPower)}`) : ''),
+            // v0.95.0 (re-audit #4) — chargeWattPower is the CONFIGURED AC charge-rate
+            // LIMIT (== strategy.timeTask.chargeWatts), NOT live charge power — it reads
+            // 7.2 kW even while the SHP2 is idle/backstopping. Label it as a limit (matching
+            // bus.ts "CHG PWR LIMIT") so a static setpoint is never shown as live charging.
+            (p.chargeWattPower ? c.grey(` · chg limit ${fmtW(p.chargeWattPower)}`) : ''),
           16,
         ),
     );
@@ -446,10 +453,15 @@ function bodyOverview(data: RenderData): string[] {
   return L;
 }
 
-function outlook(fc: DayForecast): [string, ColorKey] {
+// v0.95.0 (re-audit #5) — grid-aware, mirroring the forecast-soc-dip narrative and
+// runwayAlarm.classifyRunway: while the grid is backstopping the home, a projected dip
+// to/through the reserve floor is islanded-only (the SHP2 transfers to mains at the
+// floor), so the headline reads amber "CRIT if islanded" instead of a red CRITICAL that
+// misreads as an active emergency on a healthy grid-tied home. Off-grid → unchanged red.
+function outlook(fc: DayForecast, backstopping = false): [string, ColorKey] {
   if (fc.minProjectedSoc == null) return ['UNKNOWN', 'grey'];
   const margin = fc.minProjectedSoc - fc.reserveSoc;
-  if (margin <= 0) return ['CRITICAL', 'red'];
+  if (margin <= 0) return backstopping ? ['CRIT if islanded', 'yellow'] : ['CRITICAL', 'red'];
   if (margin < 10) return ['TIGHT', 'yellow'];
   if (margin < 25) return ['ADEQUATE', 'green'];
   return ['COMFORTABLE', 'green'];
@@ -902,7 +914,10 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
         ['Reserve', p.backupReserveSoc != null ? `${p.backupReserveSoc}%` : '—'],
         ['Capacity', p.backupFullCapWh != null ? `${(p.backupFullCapWh / 1000).toFixed(2)} kWh` : '—'],
         ['Remaining', p.backupRemainWh != null ? `${(p.backupRemainWh / 1000).toFixed(2)} kWh` : '—'],
-        ['Charge W', fmtW(p.chargeWattPower)],
+        // v0.95.0 (re-audit #4) — chargeWattPower is the configured charge-rate LIMIT,
+        // not live charge power (reads 7.2 kW while idle). Label accordingly, matching
+        // bus.ts "CHG PWR LIMIT".
+        ['Charge limit', fmtW(p.chargeWattPower)],
         ['To full', fmtMins(p.backupChargeTimeMin)],
         ['Runtime', fmtMins(p.backupDischargeTimeMin)],
       ],

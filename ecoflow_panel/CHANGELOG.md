@@ -3,6 +3,24 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.95.0 — 2026-07-08
+
+Display-accuracy fixes from the comprehensive v0.94.0 system re-audit (25-agent, adversarially-verified sweep of engines, the telnet TUI, notifications, display, storage, logs, perf). Verdict was **HEALTHY — zero critical defects; safety/alarm engines correct and grid-aware; clean logs over ~50 h; energy ledgers coherent; 97/97 HA entities accurate.** Every confirmed defect was in a presentation surface. This ships the clean, high-confidence subset; `tsc` clean, suite **1174** green. No alarm-decision, routing, or stored-data path changed.
+
+**[Fixed] (#3, accuracy) The forecast-runtime "runtime to reserve" push alert is now grid-aware.** It was the only reserve/runtime alert whose severity keyed on hours-only with no grid parameter, so it pushed a `[Medium]` warning while the grid was backstopping the home (its siblings — forecast-soc-dip, the SHP2 reserve alerts, and the runway audible gate — all already downgrade on grid). Now, while `liveGridBackstop().backstopping`, a projected runtime to the reserve floor is capped at **info** and the detail says "the grid is backstopping the home now, so this is informational — it applies only if you island." Off-grid behaviour is unchanged.
+
+**[Fixed] (#5, TUI) The overview "Outlook" is grid-aware** — it read red **CRITICAL** on a healthy grid-tied home whenever the projected low SoC touched the reserve floor (the projection number was correct; only the red label lacked the islanded caveat). While the grid is backstopping it now reads amber **"CRIT if islanded"**, mirroring the forecast-soc-dip narrative. Off-grid → unchanged red CRITICAL.
+
+**[Fixed] (#4, TUI) The SHP2 `chargeWattPower` is labelled as a charge LIMIT, not live charge power.** It is the configured AC charge-rate limit (== `strategy.timeTask.chargeWatts`) and reads 7.2 kW even while the SHP2 is idle/backstopping, so the overview "· charging 7.20 kW" and the SHP2-card "Charge W" both mis-read as active charging. Relabelled to "chg limit" / "Charge limit" (matching the `bus.ts` "CHG PWR LIMIT" tag that already had it right).
+
+**[Fixed] (#7, TUI) The TUI "Solar next 24 h" now uses the display basis** (`forecastPvWhNext24Display`, restored full-fleet) so it matches the HA sensor (`forecast_pv_next_24h_kwh`) and the web tiles, instead of the alarm-conservative reporting-only raw sum (53 vs 62 kWh). The runway alarm path is untouched — it reads `hours[].forecastPvW`, not this display field.
+
+**[Fixed] (#8, TUI) The Plant alarm-list identifier column is middle-truncated** so the trailing pack/slot discriminator survives — end-truncation clipped `soc-low-<SN>-1` and `…-4` to the same 22-char head, rendering distinct per-pack SoC alarms as byte-identical rows.
+
+**[Fixed] (#12, diagnostic) The LFP-SoC physics note no longer prints the literal "current undefined A > 0.5 A threshold"** on packs whose current isn't reported (null `packCurrentA`); it now emits "pack current not reported — cannot confirm rest".
+
+**[Note] Deferred to a focused follow-up:** the TUI fleet-header battery-net value can momentarily show a physically-impossible multi-kW discharge from an unguarded per-pack `outputWatts−inputWatts` sum (the authoritative HA `fleet_battery_net_watts` sensor and the console both correctly read idle; the spike is transient and non-safety) — a coherence guard on that shared per-pack calc (which also feeds the HA sensor) is being handled as its own careful change. Also deferred: resolved-notification-card dismissal and the soiling/shade 7-day-vs-30-day weather window (both low, report-only).
+
 ## 0.94.0 — 2026-07-07
 
 The one genuine defect from the v0.93.0 post-change re-audit (a fresh, 21-agent, adversarially-verified sweep of the deployed add-on: HA notifications, display/entities, ingestion/storage, all engines, and a full log review). The re-audit verdict was **GREEN — zero regressions**: every v0.91→v0.93 change verified active and correct in production (97/97 HA entities sane, MQTT fresh on SHP2 + all 3 home Cores, ledger coherent, 0 error/fatal over ~18.5 h uptime, 0 false criticals, notify fire→Resolved lifecycle clean, warm latency unchanged). This ships the single cosmetic fix it surfaced.
