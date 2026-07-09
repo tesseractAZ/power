@@ -30,6 +30,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
+import { aggregateFleetFlow } from './shp2Membership.js';
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
@@ -43,14 +44,17 @@ export const GRID_IMPORT_WATTS = 5;
  *  floor). 25 W clears standby/measurement noise while still catching any real
  *  backstop (an at-floor transfer pulls kW). */
 export const HOME_GRID_IMPORT_WATTS = 25;
-/** chargeWattPower below −this (W) ⇒ the backup pool is net-discharging.
- *  Live telemetry confirms positive = charging (observed +7200 W while SoC rose).
- *  The negative = discharging direction is ASSUMED, not yet verified against a
- *  live discharge sample — so the re-escalation guard that uses it is BEST-EFFORT.
- *  It only matters for operators who DECLARE the grid present (entity/GRID_AVAILABLE)
- *  WITHOUT live import; the primary defence for those operators is a REAL grid
- *  sensor as GRID_PRESENCE_ENTITY (it flips off when the grid drops). For the
- *  islanded operator (declared=false) this constant is never consulted. */
+/** fleetBatteryNet above +this (W) ⇒ the SHP2 backup pool is net-discharging (POSITIVE =
+ *  discharging, per aggregateFleetFlow / the fleet_battery_net_watts sensor). v0.98.0 —
+ *  previously keyed off chargeWattPower's sign, but that field is a non-negative configured
+ *  charge LIMIT (~7.2 kW even while idle) and never went negative, so the guard was
+ *  PERMANENTLY DEAD; it now reads the live per-pack net. Its effect is FLOOR-SCOPED (only
+ *  distrusts a declared/gridSta grid AT/near the reserve floor — where a present grid must
+ *  have transferred and the pool must stop draining, true for BOTH grid-priority and
+ *  self-consumption SHP2 modes; away from the floor a discharging pool is normal cycling).
+ *  It only matters for operators who DECLARE the grid present WITHOUT live import; the
+ *  immediate primary defence is still a REAL grid sensor as GRID_PRESENCE_ENTITY (it flips
+ *  off when the grid drops). For the islanded operator (declared=false) it is never consulted. */
 export const POOL_DISCHARGE_WATTS = 50;
 /** v0.23.0 — a configured grid-presence entity older than this (ms) is treated
  *  as UNKNOWN, not its last-known value. When HA is unreachable (Pi reboot /
@@ -251,11 +255,21 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // Re-escalation guard: if presence is only DECLARED (not proven by live
   // import) and the SHP2 backup pool is clearly net-discharging, the declared
   // grid is NOT actually carrying the load → withhold the at-floor downgrade.
-  const shp2 = Object.values(input.devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
-  const cwp = shp2?.projection.chargeWattPower ?? null;
-  const poolDischarging = cwp != null && cwp < -POOL_DISCHARGE_WATTS;
+  // v0.98.0 (re-audit #1) — pool-discharge from the LIVE per-pack net flow
+  // (aggregateFleetFlow.fleetBatteryNet, POSITIVE = discharging), the authoritative signal
+  // behind the fleet_battery_net_watts sensor + the TUI header (v0.96.0), scoped to
+  // SHP2-connected sources. Replaces `chargeWattPower < -POOL_DISCHARGE_WATTS`, which was
+  // PERMANENTLY FALSE (chargeWattPower is the non-negative configured AC charge-rate LIMIT,
+  // ~7.2 kW even while idle) — so this re-escalation guard was DEAD. index.ts already uses
+  // the same `fleetBatteryNet > 50` discharge threshold for backup_charge_minutes.
+  const poolDischarging = aggregateFleetFlow(input.devices).fleetBatteryNet > POOL_DISCHARGE_WATTS;
+  // FLOOR-SCOPED effect (matches this module's header intent): only DISTRUST a declared /
+  // gridSta grid for pool-discharge AT/near the reserve floor — that is where a present grid
+  // must have transferred and the pool must stop draining, true for BOTH grid-priority and
+  // self-consumption SHP2 modes. Away from the floor a discharging pool is normal cycling and
+  // must NOT withhold the backstop (else a self-consumption home would nuisance-escalate every
+  // evening). The grid-presence entity flipping off remains the immediate primary defence.
+  const poolDischargingAtFloor = poolDischarging && !!input.atReserveFloor;
   // v0.36.0 floor-hardening: AT the reserve floor, a merely-DECLARED grid with
   // NO measured flow on EITHER path (DPU ac_in AND SHP2 gridWatt both below
   // threshold) must NOT backstop — a stale "grid available" toggle must not mute
@@ -270,9 +284,9 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // measured device signal, and burst-gap immunity is the whole point). SUBJECT to
   // poolDischarging: a gridSta=Grid OK reading while the pool is net-discharging past the
   // floor is treated as NOT a real backstop (closes the frozen/wedged-connected mute).
-  const gridStaBackstop = shp2GridConnected === true && !poolDischarging;
+  const gridStaBackstop = shp2GridConnected === true && !poolDischargingAtFloor;
   const backstopping =
-    importLive || gridStaBackstop || (declared && !poolDischarging && !floorWithoutFlow);
+    importLive || gridStaBackstop || (declared && !poolDischargingAtFloor && !floorWithoutFlow);
 
   const reason = importLive
     ? importWatts >= GRID_IMPORT_WATTS
@@ -280,13 +294,13 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
       : `live home-grid ${Math.round(homeGridWatts)} W (SHP2 main)`
     : gridStaBackstop
       ? 'SHP2 reports grid connected (gridSta=Grid OK)'
-      : shp2GridConnected === true && poolDischarging
-        ? 'SHP2 gridSta=Grid OK but backup pool still discharging — not backstopping'
+      : shp2GridConnected === true && poolDischargingAtFloor
+        ? 'SHP2 gridSta=Grid OK but backup pool still discharging at the reserve floor — not backstopping'
         : declared
           ? floorWithoutFlow
             ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
-            : poolDischarging
-              ? 'grid declared present but backup pool still discharging — not backstopping'
+            : poolDischargingAtFloor
+              ? 'grid declared present but backup pool still discharging at the reserve floor — not backstopping'
               : 'grid declared present'
           : input.gridEntityConfigured
             ? 'grid entity reports not present (or unknown)'
