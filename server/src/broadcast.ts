@@ -1061,8 +1061,21 @@ export function startBroadcastMonitor(
       log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard)`);
       return;
     }
-    // Snapshot the transition state FIRST so a second arrival during an
-    // in-flight broadcast doesn't re-fire (preserved from v0.9.49).
+    // v0.97.0 (re-audit #2) — check in-flight BEFORE committing prevLevel/prevCrit.
+    // MA play_announcement blocks 20-105 s (>> the 10 s tick). If a DIFFERENT level
+    // arrives while a broadcast is in flight and we advance prevLevel first, the
+    // transition reads as already-seen once the broadcast completes and is LOST
+    // forever — no retry path recovers it (observed: yellow in flight, green arrives,
+    // green never speaks). Returning here WITHOUT advancing prevLevel lets the missed
+    // transition re-present as a fresh transition on the next tick once the in-flight
+    // broadcast finishes — mirroring the holdBootRed one-tick-hold above. Every OTHER
+    // skip below (disabled/minSeverity/quiet) still adopts the level: no retry wanted.
+    if (tickInFlight) {
+      log(`broadcast: ${level} skipped — previous broadcast still in flight (re-presents next tick)`);
+      return;
+    }
+    // Snapshot the transition state so a SAME-level re-arrival during the next
+    // in-flight window doesn't re-fire (the `transitioned` check above handles it).
     prevLevel = level;
     prevCrit = crit;
     if (!cfg.enabled) return;
@@ -1073,10 +1086,6 @@ export function startBroadcastMonitor(
     // the push path queues it for the morning digest).
     if (inQuiet() && !(level === 'red' && cfg.criticalBreakThrough)) {
       log(`broadcast: ${level} suppressed by quiet hours`);
-      return;
-    }
-    if (tickInFlight) {
-      log(`broadcast: ${level} skipped — previous broadcast still in flight`);
       return;
     }
     tickInFlight = true;
