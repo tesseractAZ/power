@@ -3,6 +3,12 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.99.0 — 2026-07-09
+
+**Test determinism (no production behavior change).** `tsc` clean; suite **1179** green regardless of time-of-day.
+
+**[Fixed] `computeClipping` clipping-KPI test no longer flakes in the first ~30 min after local midnight.** `computeClipping` now takes an optional injectable `nowMs` (defaults to `Date.now()`) that drives ONLY the elapsed-hour / local-day determination; the cache-TTL freshness check and the cache timestamp stay on the real wall clock. The `runwayPvBasisGuard` "cloud-wedged connected Core is RESTORED" test pins this to local-noon so its per-hour assertion never depends on wall-clock time (before, in the first 30 min after local midnight no hour's midpoint had elapsed → `perHour` was empty → the row lookup returned undefined). Same deterministic-clock pattern the codebase already uses for MpcInputs (v0.9.67). Production behavior is identical — `nowMs === Date.now()` on every real call.
+
 ## 0.98.0 — 2026-07-09
 
 **Grid-backstop re-escalation guard revived (re-audit #1), operator-chosen floor-scoped design.** `tsc` clean; suite **1179** (rewritten gridState safety fixtures + 3 new cases). The change is inert on the current live state (grid-tied, pool idle) and only affects the declared-grid-at-the-reserve-floor case.
