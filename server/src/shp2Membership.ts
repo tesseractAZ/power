@@ -53,8 +53,12 @@ export function shp2ConnectedDpuSns(devices: Record<string, DeviceSnapshot>): Se
   const shp2 = list.find((d) => d.projection?.kind === 'shp2');
   if (!shp2 || shp2.projection?.kind !== 'shp2') return new Set();
   const proj = shp2.projection as Shp2Projection;
+  // v0.98.0 — `?? []` so a partial SHP2 projection with no sources[] subtree (e.g. a
+  // /quota/all that returns the backup SoC but omits pd303_mc sources) can't throw. This
+  // matches computeGridImportWatts's existing guard and matters now that aggregateFleetFlow
+  // (which calls this) is also reached from the grid-backstop resolver.
   return new Set(
-    proj.sources
+    (proj.sources ?? [])
       .filter((s) => s.isConnected && s.sn)
       .map((s) => s.sn as string),
   );
@@ -224,11 +228,17 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
     fleetOut += d.projection.totalOutWatts ?? 0;
     acIn += d.projection.acInWatts ?? 0;
     // v0.10.4 — battery net from PER-PACK flow, not DPU throughput.
-    for (const pk of d.projection.packs) fleetBatteryNet += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
+    // v0.98.0 — `?? []` so a DPU projection without packs[] can't throw (aggregateFleetFlow
+    // is now also on the grid-backstop path); a pack-less DPU simply contributes 0 net.
+    for (const pk of d.projection.packs ?? []) fleetBatteryNet += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
   }
 
   let panelLoad = 0;
-  if (shp2) for (const c of shp2.projection.circuits) panelLoad += c.watts ?? 0;
+  // v0.98.0 — tolerate a partial SHP2 projection with no circuits[] (e.g. a /quota/all that
+  // omits the circuit subtree). aggregateFleetFlow is now also reached from the grid-backstop
+  // resolver, so it must not throw on an incomplete projection — a missing circuits array just
+  // means panelLoad 0, never a crash.
+  if (shp2) for (const c of shp2.projection.circuits ?? []) panelLoad += c.watts ?? 0;
 
   return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad };
 }

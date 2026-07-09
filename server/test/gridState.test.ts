@@ -16,10 +16,15 @@ import {
  * guard across the full off-grid / live-import / declared matrix.
  * =================================================================== */
 
-// Minimal device fixtures — the resolver only reads kind/online/sn/acInWatts on
-// DPUs and the SHP2's sources[].sn + chargeWattPower.
-function dpu(sn: string, acInWatts: number, online = true): any {
-  return { sn, online, productName: 'Delta Pro Ultra', projection: { kind: 'dpu', acInWatts } };
+// Minimal device fixtures — the resolver reads kind/online/sn/acInWatts + per-pack
+// flow on DPUs and the SHP2's sources[].sn.
+// v0.98.0 — poolDischarging is now driven by the LIVE per-pack net (aggregateFleetFlow.
+// fleetBatteryNet), NOT chargeWattPower's sign. packNetW: >0 = discharging (outputWatts),
+// <0 = charging (inputWatts), 0 = idle. chargeWattPower is retained on the SHP2 fixture only
+// to prove it is IGNORED by the guard.
+function dpu(sn: string, acInWatts: number, online = true, packNetW = 0): any {
+  const packs = [{ inputWatts: packNetW < 0 ? -packNetW : 0, outputWatts: packNetW > 0 ? packNetW : 0 }];
+  return { sn, online, productName: 'Delta Pro Ultra', projection: { kind: 'dpu', acInWatts, packs } };
 }
 function shp2(
   sourceSns: (string | null)[],
@@ -32,7 +37,9 @@ function shp2(
     sn: 'SHP2',
     online,
     productName: 'Smart Home Panel 2',
-    projection: { kind: 'shp2', chargeWattPower, gridWatt, gridConnected, sources: sourceSns.map((sn, i) => ({ slot: i + 1, sn })) },
+    // v0.98.0 — circuits: [] so aggregateFleetFlow's panelLoad loop (now reached via the
+    // live poolDischarging path) doesn't crash; panelLoad is unused by resolveGridBackstop.
+    projection: { kind: 'shp2', chargeWattPower, gridWatt, gridConnected, circuits: [], sources: sourceSns.map((sn, i) => ({ slot: i + 1, sn })) },
   };
 }
 function fleet(...devs: any[]): Record<string, any> {
@@ -52,28 +59,50 @@ test('off-grid (no entity, GRID_AVAILABLE false, no import) → not present, not
   assert.equal(g.declared, false);
 });
 
-test('live grid import alone proves present AND backstopping (no declaration needed)', () => {
-  const devices = fleet(shp2(['A', 'B'], -1200 /* even discharging */), dpu('A', 600), dpu('B', 200));
-  const g = resolveGridBackstop({ devices, ...NO_DECL });
+test('live grid import alone proves present AND backstopping — even at the floor with a discharging pool', () => {
+  // A+B discharging 1100 W (per-pack) AT the reserve floor — importLive is still definitive.
+  const devices = fleet(shp2(['A', 'B'], 0), dpu('A', 600, true, 700), dpu('B', 200, true, 400));
+  const g = resolveGridBackstop({ devices, ...NO_DECL, atReserveFloor: true });
   assert.equal(g.importWatts, 800);
   assert.equal(g.importLive, true);
   assert.equal(g.present, true);
-  assert.equal(g.backstopping, true, 'live import is definitive — overrides a discharging pool');
+  assert.equal(g.backstopping, true, 'live import is definitive — overrides a discharging pool even at the floor');
 });
 
 test('GRID_AVAILABLE fallback declares present; pool charging → backstopping', () => {
-  const devices = fleet(shp2(['A'], 7200 /* charging */), dpu('A', 0));
+  const devices = fleet(shp2(['A'], 7200), dpu('A', 0, true, -500 /* charging */));
   const g = resolveGridBackstop({ devices, ...NO_DECL, gridAvailableFallback: true });
   assert.equal(g.declared, true);
   assert.equal(g.present, true);
   assert.equal(g.backstopping, true);
 });
 
-test('declared present but pool DISCHARGING → re-escalation guard: NOT backstopping', () => {
-  const devices = fleet(shp2(['A'], -300 /* discharging > 50 W */), dpu('A', 0));
-  const g = resolveGridBackstop({ devices, ...NO_DECL, gridAvailableFallback: true });
+test('declared present but pool DISCHARGING AT THE FLOOR → re-escalation guard: NOT backstopping', () => {
+  // v0.98.0 — the guard is now LIVE (per-pack 300 W discharge) AND floor-scoped. chargeWattPower
+  // is +7200 (a real, non-negative charge limit) — proving the guard no longer reads its sign.
+  const devices = fleet(shp2(['A'], 7200), dpu('A', 0, true, 300 /* discharging > 50 W */));
+  const g = resolveGridBackstop({ devices, ...NO_DECL, gridAvailableFallback: true, atReserveFloor: true });
   assert.equal(g.present, true, 'nominally present (declared)');
   assert.equal(g.backstopping, false, 'declared grid not carrying the load at the floor → stay critical');
+});
+
+test('v0.98.0 — declared + pool discharging but AWAY FROM THE FLOOR → STILL backstopping (no self-consumption nuisance)', () => {
+  // Same discharging pool, NOT at the reserve floor: normal battery-priority cycling must NOT
+  // withhold the declared-grid backstop (else a self-consumption home escalates every evening).
+  const devices = fleet(shp2(['A'], 7200), dpu('A', 0, true, 300));
+  const g = resolveGridBackstop({ devices, ...NO_DECL, gridAvailableFallback: true, atReserveFloor: false });
+  assert.equal(g.declared, true);
+  assert.equal(g.backstopping, true, 'away from the floor a discharging pool is normal cycling — backstop preserved');
+});
+
+test('v0.98.0 — the guard reads the LIVE per-pack net, NOT chargeWattPower: gridSta=OK + CHARGING packs at the floor → backstopping', () => {
+  // The old dead guard keyed off chargeWattPower<-50 (never true). Here chargeWattPower is +7200
+  // and the pack is CHARGING (net -400) at the floor → pool is NOT discharging → the gridSta
+  // backstop holds. (gridSta is used so floorWithoutFlow doesn't mask the poolDischarging path;
+  // its DISCHARGING counterpart is the v0.89.0 #7 WEDGE test, which now flips to NOT backstopping.)
+  const devices = fleet(shp2([null], 7200, 0, true /* gridSta OK */, true), dpu('A', 0, true, -400 /* charging */));
+  const g = resolveGridBackstop({ devices, ...NO_DECL, atReserveFloor: true });
+  assert.equal(g.backstopping, true, 'a charging pool at the floor is a real backstop — chargeWattPower sign is irrelevant');
 });
 
 test('configured entity ON → present; OFF / unavailable / unknown / empty → NOT present (safe)', () => {
@@ -162,13 +191,13 @@ test('SHP2 home-grid flow (gridWatt) alone proves present AND backstopping — t
   assert.equal(g.backstopping, true, 'measured home-grid flow backstops the floor without needing the toggle');
 });
 
-test('home-grid flow overrides a declared-but-discharging pool (measured flow is definitive)', () => {
-  // chargeWattPower −300 would trip the best-effort discharge guard, but a measured
-  // gridWatt proves the grid IS carrying the home → must stay backstopping.
-  const devices = fleet(shp2(['A'], -300, 5000 /* gridWatt */), dpu('A', 0));
-  const g = resolveGridBackstop({ devices, ...NO_DECL, gridAvailableFallback: true });
+test('home-grid flow overrides a declared-but-discharging pool at the floor (measured flow is definitive)', () => {
+  // A discharging pool (per-pack 300 W) AT the floor would trip the re-escalation guard, but a
+  // measured gridWatt proves the grid IS carrying the home → must stay backstopping.
+  const devices = fleet(shp2(['A'], 7200, 5000 /* gridWatt */), dpu('A', 0, true, 300));
+  const g = resolveGridBackstop({ devices, ...NO_DECL, gridAvailableFallback: true, atReserveFloor: true });
   assert.equal(g.importLive, true);
-  assert.equal(g.backstopping, true, 'live home-grid flow overrides the chargeWattPower discharge guard');
+  assert.equal(g.backstopping, true, 'live home-grid flow overrides the pool-discharge guard');
 });
 
 test('neither grid path flowing + no declaration → off-grid (home-grid path never fabricates presence)', () => {
@@ -276,12 +305,13 @@ test('v0.89.0 #5 — gridSta=null + declared + at floor + no flow → still with
 
 test('v0.89.0 #7 — WEDGE: gridSta=Grid OK but pool NET-DISCHARGING at floor → present but NOT backstopping', () => {
   // The poolDischarging guard applies to the gridSta term too: a stale/wedged "connected"
-  // while the pool net-discharges past the floor is treated as no real backstop.
+  // while the pool net-discharges past the floor is treated as no real backstop. v0.98.0 — the
+  // discharge is a LIVE per-pack net (300 W) and the guard is floor-scoped (atReserveFloor).
   const g = resolveGridBackstop({
-    devices: fleet(shp2([null], -300, 0, true, true)), ...NO_DECL, atReserveFloor: true,
+    devices: fleet(shp2([null], 0, 0, true, true), dpu('A', 0, true, 300)), ...NO_DECL, atReserveFloor: true,
   });
   assert.equal(g.present, true);
-  assert.equal(g.backstopping, false, 'net-discharging pool withholds the gridSta backstop');
+  assert.equal(g.backstopping, false, 'net-discharging pool at the floor withholds the gridSta backstop');
   assert.match(g.reason, /still discharging/);
 });
 
