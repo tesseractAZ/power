@@ -451,9 +451,12 @@ test('computeClipping — a cloud-wedged connected Core is RESTORED into observe
   resetClippingCache();
   setWeatherCacheForTesting(cloudyWeather(10)); // low cloud (unused by this assertion path)
   const todayStart = startOfLocalDayMs();
-  const now = Date.now();
   const HOUR = 3_600_000;
-  // Choose an elapsed hour to assert on (hour 0 is always elapsed once past midnight).
+  // v0.99.0 — deterministic local-noon-today. computeClipping now takes an injectable clock;
+  // pinning it to mid-day means hour 0's midpoint (00:30) is always elapsed, so this test no
+  // longer flakes in the first ~30 min after LOCAL midnight (when NO hour has elapsed yet).
+  const now = todayStart + 12 * HOUR;
+  // Choose an elapsed hour to assert on (hour 0 is elapsed under the pinned mid-day clock).
   const targetHod = new Date(todayStart).getHours(); // local hour-of-day of today's hour 0 slot
   const A_W = 4000;
   const B_W = 5000;
@@ -499,7 +502,7 @@ test('computeClipping — a cloud-wedged connected Core is RESTORED into observe
   } as unknown as DayForecast;
 
   const devices = { 'SHP2-GUARD': shp2(['A', 'B']), A: dpu('A') }; // B wedged (absent)
-  const c = await computeClipping(devices, rec, forecast);
+  const c = await computeClipping(devices, rec, forecast, now); // v0.99.0 — pinned mid-day clock
   clearWeatherTestOverride();
   resetClippingCache();
 
