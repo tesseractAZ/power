@@ -74,7 +74,11 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
       padEnd(c.grey(tstr), 19),
       padEnd(prioColor(prio)(prioTag), 6),
       padEnd(c.white((a.category ?? '—').toUpperCase()), 12),
-      padEnd(c.white(truncate(a.id ?? '—', 22)), 22),
+      // v0.95.0 (re-audit #8) — MIDDLE-truncate the id so the trailing pack/slot
+      // discriminator survives. End-truncation dropped it: 'soc-low-<14-char-SN>-1' and
+      // '…-4' both clipped to the same 22-char 'soc-low-<SN>' head, rendering distinct
+      // per-pack SoC alarms as byte-identical rows. Keep head + tail with an ellipsis.
+      padEnd(c.white((() => { const s = a.id ?? '—'; return s.length > 22 ? s.slice(0, 12) + '…' + s.slice(-9) : s; })()), 22),
       c.whiteB(truncate(msg ?? '', Math.max(20, W - 64))),
     ].join(' '));
   }

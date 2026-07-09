@@ -145,7 +145,12 @@ export function analyzePackLfp(inputs: LfpAnalysisInputs): LfpAnalysis {
     ? false
     : (now - inputs.lastNonRestingAtMs) >= RESTING_AGE_MIN_MS;
   const isResting = lowCurrent && idleLongEnough;
-  if (!lowCurrent) notes.push(`current ${inputs.packCurrentA?.toFixed(2)} A > ${RESTING_CURRENT_THRESHOLD_A} A threshold`);
+  // v0.95.0 (re-audit #12) — when pack current is unreported (packCurrentA == null,
+  // e.g. totalVoltage null in the projection), lowCurrent is false, so the old note
+  // printed the literal "current undefined A > 0.5 A threshold" on every pack. Emit a
+  // distinct, honest note instead of a bogus threshold comparison against undefined.
+  if (inputs.packCurrentA == null) notes.push('pack current not reported — cannot confirm rest');
+  else if (!lowCurrent) notes.push(`current ${inputs.packCurrentA.toFixed(2)} A > ${RESTING_CURRENT_THRESHOLD_A} A threshold`);
   if (!idleLongEnough) notes.push('pack hasn\'t been idle long enough for OCV to settle');
 
   // Physics SoC only meaningful while resting.

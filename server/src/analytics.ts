@@ -1,4 +1,5 @@
 import type { DeviceSnapshot } from './snapshot.js';
+import { liveGridBackstop } from './gridState.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
@@ -528,6 +529,13 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
         let severity: 'warning' | 'info' | null = null;
         if (hoursToReserve < 6) severity = 'warning';
         else if (hoursToReserve <= 18) severity = 'info';
+        // v0.95.0 (re-audit #3) — grid-aware, matching forecast-soc-dip and the runway
+        // audible gate: while the grid is backstopping the home, a projected runtime to
+        // the reserve floor is INFORMATIONAL ("if islanded"), never a warning — the SHP2
+        // just transfers to mains at the floor. This was the only reserve/runtime alert
+        // still keyed on hours-only; its siblings already downgrade on grid.
+        const gridBackstopping = liveGridBackstop(devices).backstopping === true;
+        if (severity === 'warning' && gridBackstopping) severity = 'info';
         if (severity) {
           // v0.26.0 — derive hrs+mins from ONE rounding so a fractional hour
           // ≥ 59.5/60 carries into the hour instead of rendering "14h 60m"
@@ -542,7 +550,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
             source: 'learned',
             device: shp2.deviceName,
             title: `Projected runtime ≈ ${hrs}h ${mins}m to reserve`,
-            detail: `Backup pool ${cur}% draining ${(-pctPerHour).toFixed(1)}%/h (3h average) — projected to reach the ${reserve}% reserve floor in about ${hrs}h ${mins}m. Forecast assumes current load continues; daily-cycle modelling comes with solar/load forecasting.`,
+            detail: `Backup pool ${cur}% draining ${(-pctPerHour).toFixed(1)}%/h (3h average) — projected to reach the ${reserve}% reserve floor in about ${hrs}h ${mins}m. Forecast assumes current load continues; daily-cycle modelling comes with solar/load forecasting.${gridBackstopping ? ' The grid is backstopping the home now, so this is informational — it applies only if you island.' : ''}`,
             facts: [
               { label: 'Backup pool now', value: `${cur}%` },
               { label: 'Decline rate', value: `${(-pctPerHour).toFixed(2)} %/h` },
