@@ -3,6 +3,12 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 0.96.0 — 2026-07-08
+
+The one **HIGH-severity** display defect deferred from v0.95.0, done carefully as its own change. `tsc` clean, suite **1175** green (+1 new regression test). No safety-engine or stored-data path changed — the authoritative `fleet_battery_net_watts` HA sensor was already correct; this only makes the telnet TUI header read the same basis.
+
+**[Fixed] (#1/#11, accuracy) The TUI fleet battery-net header no longer shows a spare Core's pack flow as a phantom fleet swing.** The header and the HA `fleet_battery_net_watts` sensor use the *identical* per-pack formula `Σ(outputWatts − inputWatts)`; they diverged only on **membership**. The server's `aggregateFleetFlow` sums only DPUs that are online **AND** declared as SHP2 sources (`gridDpus`); the three TUI fleet call-sites summed *every* online DPU via `getDpus()`, so a spare Core 4/5 that is online but on a bench/PV charger (never on the home bus) leaked its multi-kW pack flow into the header — a physically-impossible reading, while the sensor correctly read idle. The three fleet sites (`statusLine`, `bodyOverview`, the FLEET-BATT summary) now read `aggregateFleetFlow(devices).fleetBatteryNet` — the exact value the sensor emits — so the two surfaces are identical by construction. The per-DPU device-row flow (`fleetBatteryNetWatts([d])`) is unchanged; that one is intentionally a single device. This closes both the re-audit's #1 (the impossible header value) and #11 (the missing SHP2-membership filter) in one change. Guarded by a new render test: an online spare with heavy discharge no longer moves the connected-only fleet net.
+
 ## 0.95.0 — 2026-07-08
 
 Display-accuracy fixes from the comprehensive v0.94.0 system re-audit (25-agent, adversarially-verified sweep of engines, the telnet TUI, notifications, display, storage, logs, perf). Verdict was **HEALTHY — zero critical defects; safety/alarm engines correct and grid-aware; clean logs over ~50 h; energy ledgers coherent; 97/97 HA entities accurate.** Every confirmed defect was in a presentation surface. This ships the clean, high-confidence subset; `tsc` clean, suite **1174** green. No alarm-decision, routing, or stored-data path changed.
