@@ -21,7 +21,7 @@ import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '.
 // AVAILABLE (present/declared but on standby), and OFF-GRID (islanded). homeGridWatts
 // (SHP2 main) catches the backstop path that DPU ac_in import alone is blind to.
 import { liveGridBackstop } from '../gridState.js';
-import { isSourceDpuStale, shp2ConnectedDpuSns } from '../shp2Membership.js';
+import { isSourceDpuStale, shp2ConnectedDpuSns, aggregateFleetFlow } from '../shp2Membership.js';
 
 // v0.15.15 — the CHARGER screen was removed with the web Charger tab: the EVSE
 // is app-only (no API/MQTT telemetry) and its host DPU (Core 4) is an offline
@@ -191,12 +191,19 @@ function gridStatus(snap: FleetSnapshot): GridStatus {
   return { state: 'standby', watts: 0, reason: g.reason };
 }
 
-/** v0.46.0 — fleet battery NET power from per-pack cell flow, NOT DPU throughput.
- *  DPU `totalOut − totalIn` is throughput (PV+grid in / AC out) and overstates the
- *  rate; the true battery DC flow is Σ over every DPU pack of (outputWatts −
- *  inputWatts). Sign convention matches the server's `fleet_battery_net_watts`
- *  (index.ts): POSITIVE = discharging, NEGATIVE = charging. Membership = the same
- *  online-DPU set the rest of the summary reads. Mirrors `/api/ha-state`. */
+/** v0.46.0 — battery NET power for ONE OR MORE explicitly-passed DPUs, from per-pack
+ *  cell flow, NOT DPU throughput. DPU `totalOut − totalIn` is throughput (PV+grid in /
+ *  AC out) and overstates the rate; the true battery DC flow is Σ over every DPU pack of
+ *  (outputWatts − inputWatts). Sign: POSITIVE = discharging, NEGATIVE = charging.
+ *
+ *  v0.96.0 — this is now the PER-DPU / raw-list primitive only (e.g. a single device
+ *  row). FLEET-level callers must NOT pass a hand-filtered online list here: use
+ *  `aggregateFleetFlow(devices).fleetBatteryNet` instead, which is the SAME value the
+ *  authoritative `fleet_battery_net_watts` HA sensor emits (online AND SHP2-connected
+ *  membership). The old fleet callers passed all online DPUs including the spare Cores,
+ *  whose bench/PV pack flow (never on the home bus) leaked a phantom multi-kW term into
+ *  the header while the sensor correctly excluded it. Collapse the method, keep one
+ *  measurement. */
 export function fleetBatteryNetWatts(onlineDpus: DpuDev[]): number {
   let net = 0;
   for (const d of onlineDpus) {
@@ -278,8 +285,10 @@ function statusLine(data: RenderData, w: number): string {
   const dpus = getDpus(snap).filter((d) => d.online && d.projection);
   const shp2 = getShp2(snap);
   const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
-  // v0.46.0 — battery net is per-pack cell flow (+discharge/−charge), not DPU throughput.
-  const batNet = fleetBatteryNetWatts(dpus);
+  // v0.96.0 — read the SAME fleet battery-net the `fleet_battery_net_watts` HA sensor
+  // emits (aggregateFleetFlow = online AND SHP2-connected), not a local sum over all
+  // online DPUs — the latter leaked spare-Core bench/PV pack flow into the header.
+  const batNet = aggregateFleetFlow(snap.devices).fleetBatteryNet;
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const backup = shp2?.projection.backupBatPercent ?? null;
   // v0.36.0 — three grid states from the backstop resolver, not just off-grid vs tied.
@@ -355,7 +364,10 @@ function bodyOverview(data: RenderData): string[] {
   const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
   // v0.46.0 — battery net = Σ per-pack (outputWatts − inputWatts); +discharge/−charge.
   // DPU throughput (totalOut − totalIn) overstated the rate and is no longer used.
-  const batNet = fleetBatteryNetWatts(dpus);
+  // v0.96.0 — sourced from aggregateFleetFlow (online AND SHP2-connected), the exact
+  // basis of the `fleet_battery_net_watts` HA sensor, so the header can no longer show
+  // a spare Core's bench/PV pack flow as a phantom fleet discharge.
+  const batNet = aggregateFleetFlow(snap.devices).fleetBatteryNet;
   const soc = avg(dpus.map((d) => d.projection!.soc));
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const activeCircuits = shp2 ? shp2.projection.circuits.filter((cir) => (cir.watts ?? 0) > 1).length : 0;
@@ -625,8 +637,10 @@ function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
   // keeps its last-known lifetime contribution HELD (so one offline core no longer
   // stalls the whole fleet's battery counters). Name the held cores so the operator
   // can see who's contributing live vs. carried-across-offline.
-  const onlineDpus = dpus.filter((d) => d.online && d.projection);
-  const fleetNet = fleetBatteryNetWatts(onlineDpus);
+  // v0.96.0 — fleetNet from aggregateFleetFlow (online AND SHP2-connected), matching the
+  // `fleet_battery_net_watts` HA sensor exactly; the held-cores line below names the
+  // SHP2-connected cores that are cloud-offline (carried, not summed live).
+  const fleetNet = aggregateFleetFlow(data.snap.devices).fleetBatteryNet;
   const connectedSns = shp2ConnectedDpuSns(data.snap.devices);
   const heldCores = dpus.filter((d) => connectedSns.has(d.sn) && !d.online).map((d) => d.deviceName);
   const netTag =

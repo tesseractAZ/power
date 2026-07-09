@@ -193,6 +193,27 @@ test('overview battery line uses per-pack flow, not DPU throughput', () => {
   assert.ok(!/9\.99 kW|9998/.test(plain), 'throughput-derived net leaked into overview');
 });
 
+// v0.96.0 (re-audit #1/#11) — the fleet battery-net header must read the SAME basis as
+// the `fleet_battery_net_watts` HA sensor (aggregateFleetFlow = online AND SHP2-connected),
+// NOT a raw sum over every online DPU. A spare Core (online, bench/PV-charging, not on the
+// home bus) was leaking its per-pack flow into the header as a phantom fleet swing.
+test('overview fleet battery-net EXCLUDES a spare (non-SHP2-connected) core', () => {
+  const home1 = buildDpu(1, 'DPU-SN-1', { charging: true }); // 5×(0−600) = −3000
+  const home2 = buildDpu(2, 'DPU-SN-2', { charging: true }); // −3000  → connected net −6000
+  // Third core: ONLINE but NOT one of the SHP2's declared sources. Discharging hard —
+  // if it leaked in it would swing the net −6000 → −3500 ("charging 3.50 kW").
+  const spare = buildDpu(3, 'SPARE-SN', { charging: false }); // 5×(500−0) = +2500
+  const shp2 = buildShp2('SHP2-SN', ['DPU-SN-1', 'DPU-SN-2']); // only the two home cores connected
+  const devices: Record<string, DeviceSnapshot> = {};
+  for (const d of [home1, home2, spare, shp2]) devices[d.sn] = d;
+  const snap: FleetSnapshot = { generatedAt: Date.now(), devices, alerts: [] };
+
+  const plain = renderScreen(makeView('overview'), makeData(snap, makeTotals())).map(stripAnsi).join('\n');
+  assert.ok(/charging 6\.00 kW/.test(plain), `connected-only net expected 'charging 6.00 kW', got:\n${plain}`);
+  assert.ok(!/charging 3\.50 kW/.test(plain), 'spare-core pack flow leaked into the fleet battery-net');
+  assert.ok(!/discharging/.test(plain), 'fleet header wrongly flipped to discharging with a spare present');
+});
+
 /* ── Solar PV coverage (v0.44.0) ───────────────────────────────────────── */
 
 test('solar "% measured" uses PV-only coverage, not all-metric coverage', () => {
