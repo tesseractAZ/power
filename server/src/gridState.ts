@@ -30,7 +30,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { aggregateFleetFlow } from './shp2Membership.js';
+import { aggregateFleetFlow, homeCoreCoverage } from './shp2Membership.js';
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
@@ -262,7 +262,17 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // PERMANENTLY FALSE (chargeWattPower is the non-negative configured AC charge-rate LIMIT,
   // ~7.2 kW even while idle) — so this re-escalation guard was DEAD. index.ts already uses
   // the same `fleetBatteryNet > 50` discharge threshold for backup_charge_minutes.
-  const poolDischarging = aggregateFleetFlow(input.devices).fleetBatteryNet > POOL_DISCHARGE_WATTS;
+  // v1.3.0 (audit rank 3) — COVERAGE-GATE the "not discharging" conclusion. fleetBatteryNet
+  // sums only cloud-ONLINE, SHP2-connected DPUs, so a wedged home Core's real drain is
+  // invisible: the sum can read under the 50 W threshold while the pool is genuinely
+  // draining, and this guard would then hand a stale/declared grid the at-floor downgrade
+  // it exists to withhold. We can PROVE discharge from a partial sum, but we can never
+  // DISPROVE it. So an incomplete roster resolves toward "discharging" — the direction that
+  // keeps a real at-floor emergency audible. The effect stays floor-scoped (below), so a
+  // wedged Core away from the floor changes nothing.
+  const poolCoverage = homeCoreCoverage(input.devices);
+  const poolDischargingObserved = aggregateFleetFlow(input.devices).fleetBatteryNet > POOL_DISCHARGE_WATTS;
+  const poolDischarging = poolDischargingObserved || !poolCoverage.complete;
   // FLOOR-SCOPED effect (matches this module's header intent): only DISTRUST a declared /
   // gridSta grid for pool-discharge AT/near the reserve floor — that is where a present grid
   // must have transferred and the pool must stop draining, true for BOTH grid-priority and
@@ -295,12 +305,16 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
     : gridStaBackstop
       ? 'SHP2 reports grid connected (gridSta=Grid OK)'
       : shp2GridConnected === true && poolDischargingAtFloor
-        ? 'SHP2 gridSta=Grid OK but backup pool still discharging at the reserve floor — not backstopping'
+        ? poolDischargingObserved
+          ? 'SHP2 gridSta=Grid OK but backup pool still discharging at the reserve floor — not backstopping'
+          : `SHP2 gridSta=Grid OK but only ${poolCoverage.reporting}/${poolCoverage.connected} home Cores are reporting at the reserve floor — pool drain unobservable, not backstopping`
         : declared
           ? floorWithoutFlow
             ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
             : poolDischargingAtFloor
-              ? 'grid declared present but backup pool still discharging at the reserve floor — not backstopping'
+              ? poolDischargingObserved
+                ? 'grid declared present but backup pool still discharging at the reserve floor — not backstopping'
+                : `grid declared present but only ${poolCoverage.reporting}/${poolCoverage.connected} home Cores are reporting at the reserve floor — pool drain unobservable, not backstopping`
               : 'grid declared present'
           : input.gridEntityConfigured
             ? 'grid entity reports not present (or unknown)'

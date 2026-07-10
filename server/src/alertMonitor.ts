@@ -470,6 +470,50 @@ export function bootSeedNotified(p: { alert: Pick<Alert, 'id'>; firstRun: boolea
   return p.firstRun || p.alreadyNotified;
 }
 
+/**
+ * v1.3.0 (audit rank 2) — reconcile the persisted notified-state against reality after a boot.
+ *
+ * `persistedNotified` survives a restart; the in-memory `tracked` map does not. The
+ * falling-edge resolve loop only ever walks `tracked`. So an alert that FIRED, was pushed,
+ * and then CLEARED while the process was down is never resolved:
+ *
+ *   - its HA persistent-notification card stays up forever (as of v1.1.0 only a resolve
+ *     dismisses a card), and
+ *   - its notified-record keeps suppressing a genuine RE-FIRE for the full 24 h TTL.
+ *
+ * On this host — which loses power daily — that is a live hole in the one push channel.
+ * Observed on the msg-rate-floor family: "Device barely reporting" (SHP2) fired, the add-on
+ * restarted ~66 min later, and no "Resolved:" ever followed in the next 13.8 h of log.
+ *
+ * So once per boot, after the alert engine is demonstrably warm (LEARNED_RESOLVE_GRACE_MS —
+ * the same window that already keeps a cold analytics worker from looking like "recovery"),
+ * every persisted id that is neither firing nor tracked is retired: resolved if it owed a
+ * "Resolved:" by the ordinary rule, otherwise merely dropped so it cannot eat a future fire.
+ *
+ * A record whose alert is genuinely still active appears in `currentIds` and is left alone.
+ * Pure + exported so this boot-only branch is unit-testable.
+ */
+export function orphanedNotifiedIds(p: {
+  persisted: Map<string, NotifyRecord>;
+  currentIds: Set<string>;
+  trackedIds: Set<string>;
+  notifyResolved: boolean;
+  minSeverity: Severity;
+}): { resolve: string[]; drop: string[] } {
+  const resolve: string[] = [];
+  const drop: string[] = [];
+  for (const [id, rec] of p.persisted) {
+    if (p.currentIds.has(id) || p.trackedIds.has(id)) continue; // still active — not an orphan
+    const owed = shouldSendResolve(
+      { pushSent: rec.sent, notifiedSeverity: rec.sev, alert: { id, severity: rec.sev ?? 'warning' } },
+      p.notifyResolved,
+      p.minSeverity,
+    );
+    (owed ? resolve : drop).push(id);
+  }
+  return { resolve, drop };
+}
+
 export function shouldSendResolve(
   t: { pushSent?: boolean; notifiedSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity' | 'annunciate'> },
   notifyResolved: boolean,
@@ -656,6 +700,11 @@ export interface NotifyRecord {
   ts: number;
   sent: boolean;
   sev?: Severity;
+  /** v1.3.0 — the alert's human title, so a boot-time orphan resolve (see
+   *  `orphanedNotifiedIds`) can name what cleared instead of emitting an anonymous
+   *  "Resolved:". Absent on pre-v1.3.0 records; the HA channel ignores the title on a
+   *  dismiss anyway, so a legacy record still retires its card correctly. */
+  title?: string;
 }
 
 export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string, NotifyRecord> {
@@ -668,12 +717,13 @@ export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string,
       if (typeof v === 'number' && v > cutoff) {
         out.set(id, { ts: v, sent: true }); // legacy shape (pre-v0.80)
       } else if (v !== null && typeof v === 'object') {
-        const r = v as { ts?: unknown; sent?: unknown; sev?: unknown };
+        const r = v as { ts?: unknown; sent?: unknown; sev?: unknown; title?: unknown };
         if (typeof r.ts === 'number' && r.ts > cutoff) {
           out.set(id, {
             ts: r.ts,
             sent: r.sent === true,
             sev: r.sev === 'critical' || r.sev === 'warning' || r.sev === 'info' ? r.sev : undefined,
+            ...(typeof r.title === 'string' ? { title: r.title } : {}),
           });
         }
       }
@@ -739,6 +789,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   let currentIncidents: Incident[] = [];
   let sentSinceStart = 0;
   let firstRun = true;
+  /** v1.3.0 — boot-time orphan reconcile (see orphanedNotifiedIds); runs once, after warm-up. */
+  const bootMs = Date.now();
+  let orphanSweepDone = false;
   let lastDigestHour = -1;
   const monitorStartMs = Date.now();
 
@@ -1039,14 +1092,24 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       quietQueue.length = 0;
       return true;
     }
-    // v0.15.18 — include device identity so a digest line is actionable on its
-    // own ("Cell imbalance" alone can't say WHICH of 15 packs).
-    const lines = pending.map((a) => {
-      const loc =
-        a.coreNum != null
-          ? ` (Core ${a.coreNum}${a.packNum != null ? ` pack ${a.packNum}` : ''})`
-          : '';
-      return `• [${a.severity}] ${a.title}${loc}`;
+    // v1.3.0 (audit rank 6) — order the digest by SEVERITY, most severe first. `pending`
+    // preserves overnight ARRIVAL order, so with the operator's live config (every tier,
+    // including critical, held until 08:00) a genuine critical queued at 02:00 rendered
+    // buried among routine warnings. Every other alert-ordering surface in this codebase
+    // sorts by SEVERITY_ORDER first; the digest was the lone exception. Sort is stable, so
+    // equal-severity items keep their arrival order.
+    const ordered = [...pending].sort((a, b) => sevRank[a.severity] - sevRank[b.severity]);
+    // v0.15.18 — include device identity so a digest line is actionable on its own
+    // ("Cell imbalance" alone can't say WHICH of 15 packs).
+    // v1.3.0 (audit rank 9) — use the shared notifyLocator: the old coreNum-only branch
+    // rendered NO locator at all for a non-Core-scoped subject (an SHP2 circuit baseline
+    // anomaly), which is exactly where the identity is needed most.
+    // v1.3.0 (audit rank 45) — label each line with the ISA priority shown everywhere else
+    // in the UI and in single-alert pushes, not the raw internal severity literal.
+    const lines = ordered.map((a) => {
+      const loc = notifyLocator(a);
+      const label = priorityMeta(notifyBracketPriority(a, a.severity)).label;
+      return `• [${label}] ${a.title}${loc ? ` (${loc})` : ''}`;
     });
     try {
       await sendNotification(cfg, {
@@ -1057,6 +1120,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
             : '(Every tier — including critical — was held overnight. Set CRITICAL_BREAKS_QUIET_HOURS=true to be woken for critical emergencies.)'
         }`,
         severity: 'info',
+        // v1.3.0 (audit rank 7) — without a dedupId the digest keyed on the legacy
+        // per-severity id `ecoflow_panel_info`, which the manual "Send Test" push also
+        // used: whichever landed second silently REPLACED the other's HA card. Give each
+        // its own stable card identity.
+        dedupId: 'digest',
       });
       sentSinceStart++;
       log(`notify: morning digest sent (${pending.length} alerts) via ${cfg.channel}`);
@@ -1080,7 +1148,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         }
         const prior = persistedNotified.get(qa.id);
         const sev = prior?.sev ? moreSevere(prior.sev, qa.severity) : qa.severity;
-        persistedNotified.set(qa.id, { ts: digestSentMs, sent: true, sev });
+        persistedNotified.set(qa.id, { ts: digestSentMs, sent: true, sev, title: qa.title });
       }
       persistNotified();
       quietQueue.length = 0;
@@ -1400,7 +1468,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // check above reads notifiedSeverity). notified stays false so a restart still
         // re-queues; persistedNotified stays absent so the restart-drop fix holds.
         existing.notifiedSeverity = a.severity;
-        quietQueue.push(a);
+        // v1.3.0 (audit rank 8) — an alert that ESCALATES while already queued re-enters
+        // this branch (decideAlertDispatch: `eligible = (!notified && !queued) || escalated`)
+        // and used to be pushed a SECOND time, so the morning digest listed it twice — once
+        // at the old severity, once at the new. Replace the held entry in place: one line
+        // per subject, carrying the escalated severity.
+        const queuedAt = quietQueue.findIndex((q) => q.id === a.id);
+        if (queuedAt >= 0) quietQueue[queuedAt] = a;
+        else quietQueue.push(a);
         log(`notify: queued for morning digest — "${a.title}" (severity ${a.severity})`);
       } else if (action === 'dispatch') {
         // v0.80.0 — at-LEAST-once delivery: attempt the send FIRST; mark +
@@ -1424,7 +1499,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           // v0.15.21 — record the push durably so a restart can't repeat it.
           // v0.80.0 — the record carries delivered-vs-suppressed + the severity,
           // so a restart rehydrates pushSent/notifiedSeverity faithfully.
-          persistedNotified.set(a.id, { ts: now, sent: outcome === 'sent', sev: a.severity });
+          persistedNotified.set(a.id, { ts: now, sent: outcome === 'sent', sev: a.severity, title: a.title });
           persistNotified();
         }
       }
@@ -1539,6 +1614,43 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // v0.80.0 — see the comment there.)
     }
 
+    // v1.3.0 (audit rank 2) — retire notified-records orphaned by a restart. Runs ONCE per
+    // boot, and only after the engine is warm, so a cold analytics worker can never look
+    // like "the alert recovered". See orphanedNotifiedIds for the full rationale.
+    if (!orphanSweepDone && now - bootMs >= LEARNED_RESOLVE_GRACE_MS) {
+      orphanSweepDone = true;
+      const { resolve, drop } = orphanedNotifiedIds({
+        persisted: persistedNotified,
+        currentIds,
+        trackedIds: new Set(tracked.keys()),
+        notifyResolved: cfg.notifyResolved,
+        minSeverity: cfg.minSeverity,
+      });
+      for (const id of resolve) {
+        const rec = persistedNotified.get(id)!;
+        // Forget the record FIRST, mirroring the v0.80.0 ordering: a failed resolve must
+        // not leave a record behind that would eat a genuine re-fire within the 24 h TTL.
+        persistedNotified.delete(id);
+        const title = rec.title ?? id;
+        try {
+          await sendNotification(cfg, {
+            title: `EcoFlow · Resolved: ${title}`,
+            body: `${title}\n\n(condition cleared while the add-on was restarting)`,
+            severity: 'resolved',
+            dedupId: id, // === notifyDedupId(alert), so this dismisses the exact card it fired on
+          });
+          log(`notify: retired orphaned "${title}" (cleared across a restart)`);
+        } catch (e: any) {
+          log(`notify: WARNING — orphan resolve failed for "${title}" — ${e?.message ?? e}`);
+        }
+      }
+      for (const id of drop) persistedNotified.delete(id);
+      if (resolve.length || drop.length) {
+        persistNotified();
+        log(`notify: boot reconcile — resolved ${resolve.length}, dropped ${drop.length} orphaned record(s)`);
+      }
+    }
+
     firstRun = false;
   };
 
@@ -1567,6 +1679,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         title: 'EcoFlow · Test notification',
         body: 'Notifications are working. This is a test from the EcoFlow panel.',
         severity: 'info',
+        // v1.3.0 (audit rank 7) — distinct card identity; this used to collide with the
+        // morning digest on the legacy `ecoflow_panel_info` id and overwrite it.
+        dedupId: 'test',
       });
       sentSinceStart++;
     },

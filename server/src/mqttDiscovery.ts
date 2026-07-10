@@ -280,7 +280,11 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_shp2_grid_sta', name: 'EcoFlow SHP2 Grid Status', icon: 'mdi:transmission-tower', entity_category: 'diagnostic', value_template: '{{ value_json.shp2_grid_status }}' },
   { unique_id: 'ecoflow_backup_reserve_percent', name: 'EcoFlow Backup Reserve Floor', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-lock', entity_category: 'diagnostic', value_template: '{{ value_json.backup_reserve_percent }}' },
   { unique_id: 'ecoflow_solar_backup_reserve_percent', name: 'EcoFlow Solar Backup Reserve', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power-variant', entity_category: 'diagnostic', value_template: '{{ value_json.solar_backup_reserve_percent }}' },
-  { unique_id: 'ecoflow_backup_reserve_enabled', name: 'EcoFlow Backup Reserve Enabled', icon: 'mdi:battery-lock-open', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.backup_reserve_enabled else "OFF" }}' },
+  // v1.3.0 (audit rank 13) — the old template `{{ "ON" if ... else "OFF" }}` collapsed a
+  // NULL (SHP2 cloud-offline → no strategy object) into "OFF": it asserted that the backup
+  // reserve floor is DISABLED at exactly the moment we cannot see it. A data gap must read
+  // `unknown`, never a fabricated safety-off. Matches the null-safe neighbours above.
+  { unique_id: 'ecoflow_backup_reserve_enabled', name: 'EcoFlow Backup Reserve Enabled', icon: 'mdi:battery-lock-open', entity_category: 'diagnostic', value_template: '{{ "unknown" if value_json.backup_reserve_enabled is none else ("ON" if value_json.backup_reserve_enabled else "OFF") }}' },
   { unique_id: 'ecoflow_smart_backup_mode_code', name: 'EcoFlow Smart Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery', entity_category: 'diagnostic', value_template: '{{ value_json.smart_backup_mode_code }}' },
   { unique_id: 'ecoflow_backup_mode_code', name: 'EcoFlow Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery-outline', entity_category: 'diagnostic', value_template: '{{ value_json.backup_mode_code }}' },
   { unique_id: 'ecoflow_overload_mode_code', name: 'EcoFlow Overload Mode (code)', state_class: 'measurement', icon: 'mdi:flash-alert', entity_category: 'diagnostic', value_template: '{{ value_json.overload_mode_code }}' },
@@ -813,7 +817,8 @@ export async function startMqttDiscovery(
         return {
           backup_reserve_percent: shp2?.projection.backupReserveSoc ?? null,
           solar_backup_reserve_percent: st?.solarBackupReserveSoc ?? null,
-          backup_reserve_enabled: st?.backupReserveEnabled ?? false,
+          // v1.3.0 — null (not false) when the strategy is unavailable; see the sensor's template.
+          backup_reserve_enabled: st?.backupReserveEnabled ?? null,
           smart_backup_mode_code: st?.smartBackupMode ?? null,
           backup_mode_code: st?.backupMode ?? null,
           overload_mode_code: st?.overloadMode ?? null,

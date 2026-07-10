@@ -153,14 +153,23 @@ export class SnapshotStore extends EventEmitter {
       // mergeDeviceQuota handles raw cache merge, projection refresh, and change emit.
       this.mergeDeviceQuota(sn, translatedRest, 'mqtt');
     } else {
-      // No REST-schema translation available — still surface the change so
-      // the WS broadcasts the new lastUpdated/source info.
-      const cur = this.snap.devices[sn];
-      if (cur) {
-        cur.lastUpdated = Date.now();
-        this.snap.generatedAt = Date.now();
-        this.emit('change', this.snap, sn);
-      }
+      // v1.3.0 (audit rank 1) — an MQTT message we cannot translate carries NO telemetry,
+      // so it must NOT touch `lastUpdated`. That field is the "last fresh telemetry" clock
+      // the 'Telemetry stale' alarm keys on (alerts.ts, STALE_MS = 3 min), and only the
+      // REST/translated paths actually refresh the projection.
+      //
+      // This mattered most for the SHP2 — the device that owns the backup pool, reserve
+      // floor and grid presence. `ecoflow/mqtt.ts` only translates `delta pro ultra`
+      // products, so `translatedRest` is ALWAYS null for the SHP2, and its healthy ~9
+      // msg/min MQTT stream perpetually reset the freshness clock. If the REST poll for the
+      // SHP2 began failing, its projection would freeze while 'Telemetry stale' never fired.
+      // Same class of defect as the v0.97.0 fix on the poll-failure path.
+      //
+      // We still emit so the WS/UI pick up the new lastMqttAt + source; the stale alert's
+      // own detail line already reports "Last MQTT msg Xs ago" beside "no fresh telemetry
+      // for Ym", which is exactly the chatter-without-telemetry diagnostic an operator needs.
+      this.snap.generatedAt = Date.now();
+      if (this.snap.devices[sn]) this.emit('change', this.snap, sn);
     }
   }
 
