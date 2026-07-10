@@ -1,3 +1,68 @@
+## v1.3.0 — alarm integrity: the safety-critical half of the 21-dimension audit
+
+A 21-dimension adversarial audit of the live system produced 79 distinct findings, 58 of
+which survived independent verification. This release fixes the alarm-, notification- and
+data-integrity ones. (A separate release covers the TUI display cluster.)
+
+### The SHP2's own MQTT heartbeat was masking a REST outage on the SHP2
+`lastUpdated` is the "last fresh telemetry" clock the `Telemetry stale` alarm keys on
+(3 min). `setMqttMessage` bumped it on **every** parsed MQTT message — including ones it
+could not translate into a projection update. And `ecoflow/mqtt.ts` only translates
+`delta pro ultra` products, so for the **SHP2** — the device that owns the backup pool,
+the reserve floor and grid presence — the translation is *always* null. Its healthy
+~9 msg/min stream therefore reset the freshness clock forever, while its projection came
+only from the 60 s REST poll. Had that poll started failing, every SHP2 number would have
+frozen and `Telemetry stale` would never have fired.
+
+An untranslatable message is not telemetry, and no longer touches the clock. MQTT liveness
+is still recorded separately, so the stale alert reports exactly the diagnostic that names
+this condition: *"no fresh telemetry for 14m. Last MQTT msg 5s ago."* Same defect class as
+the v0.97.0 poll-failure fix, on the other input path.
+
+### An alert that cleared while the add-on was down was never resolved
+`persistedNotified` survives a restart; the in-memory `tracked` map does not — and the
+falling-edge resolve loop only walks `tracked`. So such an alert never emitted its
+"Resolved:", its HA card stayed up forever (since v1.1.0 only a resolve dismisses a card),
+**and** its notified-record kept suppressing a genuine re-fire for the full 24 h TTL. On a
+host that loses power daily this was a live hole in the one push channel. Observed on the
+msg-rate-floor family: "Device barely reporting" (SHP2) fired, the add-on restarted ~66 min
+later, and no "Resolved:" followed in the next 13.8 h of log.
+
+New `orphanedNotifiedIds` reconciles the persisted state against reality once per boot,
+after `LEARNED_RESOLVE_GRACE_MS` — the same warm-up window that already keeps a cold
+analytics worker from looking like "recovery". Orphans that owe a resolve get one; the rest
+are dropped so they cannot eat a future fire.
+
+### The pool-discharge floor guard was blind to a wedged Core
+`fleetBatteryNet` sums only cloud-online, SHP2-connected DPUs, so a cloud-wedged home Core's
+real drain is invisible. The v0.98.0 guard could then read "net < 50 W, so the pool is not
+draining" and hand a stale/declared grid the at-floor downgrade it exists to withhold —
+muting a genuine emergency.
+
+We can PROVE discharge from a partial sum; we can never DISPROVE it. New `homeCoreCoverage`
+gates the conclusion: an incomplete roster resolves toward "discharging". The effect stays
+floor-scoped, so a wedged Core during normal cycling changes nothing, and a live measured
+import still wins outright.
+
+### Morning digest
+- **Ordered by severity.** With every tier held overnight, a critical queued at 02:00
+  rendered buried among routine warnings. It now leads. (Stable within a tier.)
+- **No longer collides with "Send Test".** Both sent with no `dedupId`, so both keyed on
+  `ecoflow_panel_info` and whichever landed second silently replaced the other's card.
+- **Names non-Core subjects.** The locator was built from `coreNum` alone, so an SHP2
+  circuit anomaly got no identity at all. It now uses the shared `notifyLocator`.
+- **Labels lines with the ISA priority** shown everywhere else, not the raw severity literal.
+- **An escalating held alert is no longer listed twice** — once at each severity.
+
+### Two entities that lied
+- `ecoflow_backup_reserve_enabled` collapsed a NULL (SHP2 cloud-offline) into `"OFF"`,
+  asserting the backup reserve floor was **disabled** at exactly the moment it could not be
+  seen. A data gap now reads `unknown`.
+- `grid_to_home_lifetime_kwh` was published by `/api/lifetime-energy` but missing from
+  `/api/ha-state`, so the REST sensor DOCS.md tells operators to build read `unknown` forever.
+
+Tests 1205 → 1231.
+
 ## v1.2.0 — physics SoC, spoken alerts, and an HA device class
 
 ### `/api/physics/lfp-soc` could never produce its headline number (two defects)

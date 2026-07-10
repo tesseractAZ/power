@@ -208,6 +208,44 @@ export function onlineDpus(
  * exactly as the former inline loops did (same `?? 0` order, per-pack
  * out−in net, circuit-watt sum).
  */
+/**
+ * v1.3.0 (audit rank 3) — can we actually SEE the whole home battery pool right now?
+ *
+ * `aggregateFleetFlow` sums only DPUs that are BOTH cloud-online and SHP2-connected. A
+ * home Core that is cloud-wedged — a documented recurring event on this fleet — silently
+ * drops out of that sum while it keeps physically discharging. So any safety decision that
+ * concludes "fleetBatteryNet is small, therefore the pool is not draining" is unsound
+ * unless every home Core is reporting. We can PROVE discharge from a partial sum; we can
+ * never DISPROVE it.
+ *
+ * The home-Core roster is the SHP2's own connected-source list when we have it. When we do
+ * not (no SHP2, or a cloud-offline SHP2 whose sources[] lost `isConnected`) we fall back to
+ * "every DPU that is not a designated bench spare" — which is exactly the population
+ * `isShp2Connected`'s empty-set fallback already sums, and it still notices an OFFLINE home
+ * Core, which the roster path would have missed entirely in that degraded state.
+ *
+ * An EMPTY roster means there are no home Cores in the device map at all — no pool exists,
+ * so there is nothing we are failing to observe and `complete` is vacuously true. That is
+ * NOT the "empty set looks fine" trap of [[project_audit_v069_v070]]: there, an empty
+ * roster meant the observations were missing; here it means the subjects are.
+ */
+export function homeCoreCoverage(devices: Record<string, DeviceSnapshot>): {
+  connected: number;
+  reporting: number;
+  complete: boolean;
+} {
+  const connected = shp2ConnectedDpuSns(devices);
+  const roster: string[] = connected.size > 0
+    ? [...connected]
+    : Object.values(devices)
+        .filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn))
+        .map((d) => d.sn);
+  if (roster.length === 0) return { connected: 0, reporting: 0, complete: true };
+  const online = new Set(onlineDpus(devices).map((d) => d.sn));
+  const reporting = roster.filter((sn) => online.has(sn)).length;
+  return { connected: roster.length, reporting, complete: reporting === roster.length };
+}
+
 export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   fleetPv: number;
   fleetIn: number;
