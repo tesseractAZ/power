@@ -97,6 +97,31 @@ const PUSHOVER_PRIORITY: Record<NotifyMessage['severity'], number> = {
  * charset ([a-z0-9_]) and length-capped, so an arbitrary alert id can't produce
  * an invalid notification_id. Pure + exported for tests.
  */
+/**
+ * v1.1.0 — decide what the HA persistent-notification channel should actually DO.
+ *
+ * The drawer must show ACTIVE conditions. Previously a "Resolved:" send re-`create`d the
+ * same card, so a cleared condition sat in HA's notification section forever until the
+ * operator dismissed it by hand — observed live:
+ *   `ecoflow_panel_baseline_pair6_w_...` → "EcoFlow · Resolved: West Air conditioner load
+ *    unusual for the hour … (condition cleared)"
+ * A drawer full of resolved cards is worse than useless on an alarm system: it trains the
+ * operator to ignore it. The resolve RECORD already lives in the app's cleared-anomalies log.
+ *
+ * So: a resolve DISMISSES the card it fired on. That is only safe when we can identify that
+ * card, i.e. when a `dedupId` was supplied — `haNotificationId` slugs the dedupId and ignores
+ * severity, so the fire-side and resolve-side ids are identical. Without a dedupId the fire
+ * used a per-severity id we can no longer reconstruct from `'resolved'`, so we keep the old
+ * create-a-card behaviour rather than guess and dismiss the wrong one.
+ *
+ * Pure + exported for tests.
+ */
+export function haNotifyCall(msg: NotifyMessage): { service: 'create' | 'dismiss'; notificationId: string } {
+  const notificationId = haNotificationId(msg.dedupId, msg.severity);
+  const service = msg.severity === 'resolved' && msg.dedupId ? 'dismiss' : 'create';
+  return { service, notificationId };
+}
+
 export function haNotificationId(dedupId: string | undefined, severity: NotifyMessage['severity']): string {
   if (!dedupId) return `ecoflow_panel_${severity}`;
   const slug = dedupId
@@ -172,20 +197,21 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
     // "Resolved:" updates the card it fired on. Falls back to the legacy
     // per-severity id when no dedupId is given (digest, etc.). The id is fixed
     // to a safe HA slug ([a-z0-9_]) regardless of what the alert id contains.
+    // v1.1.0 — a "Resolved:" now DISMISSES the card it fired on instead of re-creating it,
+    // so HA's notification drawer shows ACTIVE conditions only (see haNotifyCall).
     const token = process.env.SUPERVISOR_TOKEN;
     if (!token) throw new Error('SUPERVISOR_TOKEN not set (not running supervised)');
-    const notificationId = haNotificationId(msg.dedupId, msg.severity);
-    const res = await request('http://supervisor/core/api/services/persistent_notification/create', {
+    const { service, notificationId } = haNotifyCall(msg);
+    const body = service === 'dismiss'
+      ? { notification_id: notificationId }
+      : { title: msg.title, message: msg.body, notification_id: notificationId };
+    const res = await request(`http://supervisor/core/api/services/persistent_notification/${service}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: msg.title,
-        message: msg.body,
-        notification_id: notificationId,
-      }),
+      body: JSON.stringify(body),
     });
     if (res.statusCode >= 300) {
-      throw new Error(`HA persistent_notification returned HTTP ${res.statusCode}`);
+      throw new Error(`HA persistent_notification.${service} returned HTTP ${res.statusCode}`);
     }
     return;
   }
