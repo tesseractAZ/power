@@ -74,9 +74,21 @@ export function socFromOcv(voltsTotal: number, perCell = false): number | null {
     const [soc1, v1] = LFP_OCV_TABLE_25C[i - 1];
     const [soc2, v2] = LFP_OCV_TABLE_25C[i];
     if (vCell >= v1 && vCell <= v2) {
-      // Note: voltage isn't strictly monotonic at the very flat midrange
-      // — neighboring points can be equal. Handle by mid-bracket fallback.
-      if (v2 === v1) return (soc1 + soc2) / 2;
+      // v1.3.1 (audit rank 51) — the old `if (v2 === v1) return (soc1+soc2)/2` guard was
+      // UNREACHABLE. The table's flat midrange holds one voltage across two SoC points
+      // (3.30 V at 40 % and 45 %, and likewise 3.31 / 3.32 / 3.33). A cell sitting exactly on
+      // a plateau matches the RISING bracket into it first — [35, 3.29] → [40, 3.30] — whose
+      // endpoints differ, so it returned frac=1 → the plateau's LOW end, silently. LFP's OCV
+      // curve simply cannot resolve SoC on the plateau; reporting one end as if it were exact
+      // biases socDriftPct low by up to 5 points on every rested pack that lands there.
+      // Resolve the FULL run of table entries sharing this voltage and return its midpoint —
+      // the honest centre of the ambiguity band.
+      if (v2 === v1) return (soc1 + soc2) / 2; // (kept for a hypothetical descending table)
+      if (vCell === v2) {
+        let last = i;
+        while (last + 1 < LFP_OCV_TABLE_25C.length && LFP_OCV_TABLE_25C[last + 1][1] === v2) last++;
+        if (last > i) return (soc2 + LFP_OCV_TABLE_25C[last][0]) / 2;
+      }
       const frac = (vCell - v1) / (v2 - v1);
       return soc1 + frac * (soc2 - soc1);
     }
