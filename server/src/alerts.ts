@@ -739,15 +739,24 @@ export function outageTracking(
   gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean }>,
   nowMs: number,
   windowMs: number,
-): { count: number; totalMinutes: number; lastEndedMs: number | null; lastDurationMinutes: number | null } {
+): { count: number; powerOutageCount: number; telemetryGapCount: number; totalMinutes: number; lastEndedMs: number | null; lastDurationMinutes: number | null } {
   const recent = gaps.filter((g) => Number.isFinite(g.endMs) && nowMs - g.endMs <= windowMs);
   const totalMs = recent.reduce((s, g) => s + Math.max(0, g.durationMs), 0);
   const last = recent.reduce<null | { endMs: number; durationMs: number }>(
     (acc, g) => (acc == null || g.endMs > acc.endMs ? { endMs: g.endMs, durationMs: g.durationMs } : acc),
     null,
   );
+  // v1.4.1 (daytime-review #4) — split the total by cause. A `restartSpanning` gap means the
+  // add-on/host itself was DOWN across the gap (a power / reboot event); a non-spanning gap is
+  // a cloud/telemetry stall while the process kept running (the DNS/MQTT blips this fleet rides
+  // out — see [[project_wifi_loss_root_cause]]). Mixing them made a benign cloud blip read as a
+  // "system outage". `count` stays the total (unchanged for existing consumers); the two split
+  // counters let the operator answer "was that power, or just the cloud?" at a glance.
+  const powerOutageCount = recent.filter((g) => g.restartSpanning === true).length;
   return {
     count: recent.length,
+    powerOutageCount,
+    telemetryGapCount: recent.length - powerOutageCount,
     totalMinutes: Math.round(totalMs / 60_000),
     lastEndedMs: last?.endMs ?? null,
     lastDurationMinutes: last != null ? Math.max(1, Math.round(last.durationMs / 60_000)) : null,

@@ -217,6 +217,10 @@ export const SENSORS: SensorConfig[] = [
   // sibling convention; the operator FLAG is the push alert, this is a status tile).
   { unique_id: 'ecoflow_system_outage_24h', name: 'EcoFlow System Outage (24h)', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.system_outage_active_24h else "OFF" }}' },
   { unique_id: 'ecoflow_system_outage_count_24h', name: 'EcoFlow System Outages 24h', state_class: 'measurement', icon: 'mdi:counter', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_count_24h }}' },
+  // v1.4.1 (daytime-review #4) — split the 24h total by cause so a cloud/MQTT stall (process
+  // stayed up) is not read as a power event (add-on/host was down across the gap).
+  { unique_id: 'ecoflow_system_power_outage_count_24h', name: 'EcoFlow Power Outages 24h', state_class: 'measurement', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ value_json.system_power_outage_count_24h }}' },
+  { unique_id: 'ecoflow_system_telemetry_gap_count_24h', name: 'EcoFlow Telemetry Gaps 24h', state_class: 'measurement', icon: 'mdi:cloud-off-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_telemetry_gap_count_24h }}' },
   { unique_id: 'ecoflow_system_outage_minutes_24h', name: 'EcoFlow System Outage Minutes 24h', state_class: 'measurement', unit_of_measurement: 'min', icon: 'mdi:timer-alert-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_total_minutes_24h }}' },
   // v0.84.0 — audible-delivery health. `audible_status` is reachable / UNREACHABLE
   // / disabled / unknown so an operator can alert on a dead audible channel (MA
@@ -791,6 +795,9 @@ export async function startMqttDiscovery(
         return {
           system_outage_active_24h: t.count > 0,
           system_outage_count_24h: t.count,
+          // v1.4.1 — split by cause (see index.ts / alerts.ts outageTracking).
+          system_power_outage_count_24h: t.powerOutageCount,
+          system_telemetry_gap_count_24h: t.telemetryGapCount,
           system_outage_total_minutes_24h: t.totalMinutes,
         };
       })(),
