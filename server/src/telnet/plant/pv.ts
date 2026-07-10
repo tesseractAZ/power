@@ -72,8 +72,6 @@ export function renderPv(view: PlantView, data: PlantData): string[] {
   for (let i = 0; i < dpus.length; i++) {
     const d = dpus[i];
     const p = d.projection;
-    const hvErr = (p.pvHighErrCode ?? 0) > 0;
-    const lvErr = (p.pvLowErrCode ?? 0) > 0;
     out.push('  ' + [
       // v1.0.0 — label by the PHYSICAL generator number, not the array index: with any
       // home Core offline, index-labelling shifted every row below it onto the wrong unit.
@@ -81,11 +79,11 @@ export function renderPv(view: PlantView, data: PlantData): string[] {
       padStart(fmtVStr(p.pvHighVolts), 7),
       padStart(fmtAStr(p.pvHighAmps), 7),
       padStart(fmtKw(p.pvHighWatts ?? 0), 9),
-      padStart(hvErr ? c.red(((p.pvHighErrCode ?? 0).toString(16)).toUpperCase()) : c.green('OK'), 6),
+      padStart(errCell(p.pvHighErrCode, p.pvHighWatts, p.pvHighAmps), 6),
       '  ' + padStart(fmtVStr(p.pvLowVolts), 7),
       padStart(fmtAStr(p.pvLowAmps), 7),
       padStart(fmtKw(p.pvLowWatts ?? 0), 9),
-      padStart(lvErr ? c.red(((p.pvLowErrCode ?? 0).toString(16)).toUpperCase()) : c.green('OK'), 6),
+      padStart(errCell(p.pvLowErrCode, p.pvLowWatts, p.pvLowAmps), 6),
     ].join(' '));
   }
   out.push('');
@@ -122,6 +120,19 @@ function fmtKw(w: number): string {
   if (a >= 1000) return `${(w / 1000).toFixed(2)} kW`;
   return `${Math.round(w)} W`;
 }
+/** v1.0.1 — an MPPT error code is only a FAULT while the string is actually producing
+ *  (real watts AND real current). At dusk / during curtailment EcoFlow reports a non-zero
+ *  *standby* code on an idle string — every home Core shows the identical code at once —
+ *  and painting that red made all three generators look faulted every evening. Mirrors
+ *  `mpptProducing()` in alerts.ts so the screen and the alarm engine agree: red only when
+ *  the alarm engine would raise it, grey "stby" when it is benign idle. */
+function errCell(code: number | null | undefined, watts: number | null | undefined, amps: number | null | undefined): string {
+  if ((code ?? 0) === 0) return c.green('OK');
+  const hex = (code ?? 0).toString(16).toUpperCase();
+  const producing = watts != null && watts > 20 && (amps == null || amps > 0.3);
+  return producing ? c.red(hex) : c.grey('stby');
+}
+
 function fmtVStr(v: number | null | undefined): string {
   if (v == null) return c.grey('—');
   return c.white(`${v.toFixed(1)}V`);
