@@ -563,7 +563,10 @@ export function computeAlerts(
     for (const s of sp.sources) {
       const tag = `SHP2 slot ${s.slot}`;
       if ((s.errorCodeNum ?? 0) !== 0) {
-        out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', detail: `${tag} reports ${s.errorCodeNum} error(s).` });
+        // v1.2.0 — this detail is read aloud by TTS on a CRITICAL alert, and "error(s)"
+        // is not something a voice can say. errorCodeNum is a COUNT of active codes.
+        const n = s.errorCodeNum!;
+        out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', detail: `${tag} reports ${n} ${n === 1 ? 'error' : 'errors'}.` });
       }
       if (s.isConnected && !s.hwConnect) {
         out.push({ id: `shp2-src-hw-${s.slot}`, severity: 'warning', category: 'SHP2', device: shp2.deviceName, title: 'Source link issue', detail: `${tag} shows connected but no hardware link.` });
