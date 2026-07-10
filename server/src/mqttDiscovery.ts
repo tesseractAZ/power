@@ -159,7 +159,10 @@ export const SENSORS: SensorConfig[] = [
   // SHP2 backup pool
   { unique_id: 'ecoflow_backup_pool', name: 'EcoFlow Backup Pool', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', value_template: '{{ value_json.backup_pool_percent }}' },
   { unique_id: 'ecoflow_backup_remaining_kwh', name: 'EcoFlow Backup Remaining', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_remaining_kwh }}' },
-  { unique_id: 'ecoflow_backup_full_capacity_kwh', name: 'EcoFlow Backup Capacity', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_full_capacity_kwh }}' },
+  // v1.2.0 — `energy_storage`, matching its sibling `backup_remaining_kwh` one line up.
+  // Without it HA treats a stored-energy kWh as a bare measurement: wrong default icon,
+  // and it can't be picked in pickers that filter on the storage device class.
+  { unique_id: 'ecoflow_backup_full_capacity_kwh', name: 'EcoFlow Backup Capacity', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_full_capacity_kwh }}' },
   // Forecast
   // v0.15.3 — no device_class: a forecast/rolling kWh is a `measurement` (goes up
   // AND down); device_class energy forces total/total_increasing → HA rejects it.

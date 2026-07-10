@@ -1,3 +1,36 @@
+## v1.2.0 — physics SoC, spoken alerts, and an HA device class
+
+### `/api/physics/lfp-soc` could never produce its headline number (two defects)
+The endpoint exists to say "physics says this pack is at X%, but the BMS reports Y%". Against the
+live fleet it returned `isResting: false` and `physicsSoCPct: null` on **all 15 packs**, with
+confidence capped at 0.5. Two independent causes, both fixed:
+
+- **`packCurrentA` was always null.** It was derived from `pk.totalVoltage` — a field the pack
+  projection has never had, so it was `undefined` on every pack. Now derived from the fields that
+  do exist: `(outputWatts - inputWatts) / (packVoltageMv / 1000)`.
+- **`lastNonRestingAtMs: null` was hardcoded** at the call site, so `idleLongEnough` was false
+  forever. New `physics/restTracker.ts` samples every pack on the poll cadence and records when it
+  last moved current, keyed on the pack **hardware serial** so the history follows the physical
+  pack across renumbering and DPU reordering.
+
+On first sight of a pack the tracker seeds `lastNonRestingAt` to *now*. Rest may well have begun
+before the add-on started, but we have no evidence of it, so we require a full 10 minutes of rest
+that we observed ourselves before trusting pack voltage as a settled OCV. An unreadable current
+counts as movement — silence is not evidence of stillness. We under-claim rest rather than
+fabricate an OCV-derived SoC.
+
+### A critical alert said "1 error(s)" out loud
+`shp2-src-err` is a CRITICAL alert, and critical alert details are read aloud by the TTS broadcast
+path. `errorCodeNum` is a count of active error codes, so the detail now reads "1 error" / "3
+errors".
+
+### `ecoflow_backup_full_capacity_kwh` was missing its device class
+It now declares `device_class: energy_storage`, matching its sibling `backup_remaining_kwh`.
+Without it, HA treated a stored-energy kWh as a bare measurement: wrong default icon, and it could
+not be selected in pickers that filter on the storage device class.
+
+Tests 1195 → 1205.
+
 # Changelog
 
 All notable changes to this add-on are listed here. Versioning follows
