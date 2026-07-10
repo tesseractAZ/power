@@ -3,6 +3,18 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 1.0.1 — 2026-07-09
+
+**A live false alarm, found by driving the real TUI.** Capturing all 14 telnet screens against the running system showed all three home Cores painting a red `1C9` HV-MPPT error at dusk, and a `[warning] HV MPPT error code` alert actually firing. `tsc` clean; suite **1183** (+3 guards). No other alarm path changed.
+
+**[Fixed] (safety/noise) The sunset MPPT standby code no longer raises a warning.** EcoFlow reports a non-zero *standby* status on an idle string; the guard that suppresses it has now been defeated twice, in complementary ways:
+- v0.9.80 used an **amp** floor → a `0 W / 0.275 A` shutdown trickle slipped through.
+- v0.9.81 switched to a **watt** floor → a dusk reading of `55 W` while amps read `0.0 A` slips through.
+
+Captured live: `Core 3 HV solar input reports error code 457 while producing 55 W (294 V, 0.00 A)` — the alert text is self-contradictory, because EcoFlow's watt and amp fields disagree during the ramp-down. All three Cores reported the identical `457` at that instant, and (as `alerts.ts` itself argues) *a real fault cannot be identical across independent units*. `mpptProducing()` now requires **both** real watts **and** real current, which rejects both modes; when a device reports no current at all it falls back to the watt test rather than silently suppressing.
+
+**[Fixed] (display) The plant PV screen distinguishes a standby code from a fault.** It painted **any** non-zero code red, so every evening all three generators looked faulted. It now mirrors the alarm engine exactly — red only when the engine would raise it, grey `stby` when the string is benign idle.
+
 ## 1.0.0 — 2026-07-09
 
 **One definition of "the home fleet."** v0.96.0 unified the TUI fleet *battery-net* with the `fleet_battery_net_watts` HA sensor. This finishes the job: every remaining surface that aggregated over "all online DPUs" now uses the same **online AND SHP2-connected** membership, so a bench **spare Core** (online, self-charging on its own panels) can no longer leak into a home-plant figure. `tsc` clean; suite **1180** (+1 guard). Live today all 3 SHP2 slots report `isConnected=true`, so the emitted numbers are unchanged — these close *latent* divergences that appear the moment a spare is powered on or a slot drops.

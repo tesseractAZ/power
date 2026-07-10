@@ -72,8 +72,31 @@ const cToF = (c: number) => c * 1.8 + 32;
  * it's idle/shedding/shutting-down and any code is benign standby.
  */
 const MPPT_WATT_FLOOR = 20;   // W — below this the string isn't meaningfully producing
-const mpptProducing = (watts: number | null): boolean =>
-  watts != null && watts > MPPT_WATT_FLOOR;
+/** A — just above the 0.275 A sunset shutdown trickle observed on Core 2 (v0.9.81 note). */
+const MPPT_AMP_FLOOR = 0.3;
+
+/**
+ * v1.0.1 — a string counts as PRODUCING only when it makes real watts AND actually
+ * draws current. The two documented false-positive modes are complementary, and each
+ * single-signal guard let the other through:
+ *
+ *   v0.9.80 amp floor  → a 0 W / 0.275 A sunset shutdown trickle slipped past it.
+ *   v0.9.81 watt floor → a dusk HV reading of 55 W while amps read 0.0 A slips past it.
+ *                        (Observed live: Core 3, code 457, 294 V, 0.0 A, 55 W — the alert
+ *                        text literally read "producing 55 W (294 V, 0.0 A)". EcoFlow's
+ *                        watt and amp fields disagree during the ramp-down, so neither
+ *                        alone is trustworthy.) All three home Cores reported the SAME
+ *                        code 457 at that instant — and a real fault cannot be identical
+ *                        across independent units, confirming benign standby.
+ *
+ * Requiring BOTH signals rejects both modes. `amps == null` (device doesn't report
+ * current) falls back to the watt test alone rather than silently suppressing.
+ */
+const mpptProducing = (watts: number | null, amps: number | null): boolean => {
+  if (watts == null || watts <= MPPT_WATT_FLOOR) return false;
+  if (amps == null) return true;
+  return amps > MPPT_AMP_FLOOR;
+};
 
 /*
  * Thresholds. EcoFlow's API does NOT expose cell-imbalance or temperature alarm
@@ -377,11 +400,13 @@ export function computeAlerts(
     // code" 17× while live codes read 0 — the classic shed signature.
     // Mirror the UI's channelState thresholds (web SolarPanel.tsx): a code
     // is only a real error if the string is drawing current.
-    if ((p.pvHighErrCode ?? 0) !== 0 && mpptProducing(p.pvHighWatts)) {
-      out.push({ id: `dpu-pvh-err-${d.sn}`, severity: 'warning', category: 'Solar', device: d.deviceName, title: 'HV MPPT error code', detail: `${d.deviceName} HV solar input reports error code ${p.pvHighErrCode} while producing ${p.pvHighWatts?.toFixed(0)} W (${p.pvHighVolts?.toFixed(0)} V, ${p.pvHighAmps?.toFixed(1)} A).` });
+    // v1.0.1 — `mpptProducing` now needs BOTH watts and current (see its docstring): a
+    // dusk ramp-down reports real-looking watts with ~0 A, which is standby, not a fault.
+    if ((p.pvHighErrCode ?? 0) !== 0 && mpptProducing(p.pvHighWatts, p.pvHighAmps)) {
+      out.push({ id: `dpu-pvh-err-${d.sn}`, severity: 'warning', category: 'Solar', device: d.deviceName, title: 'HV MPPT error code', detail: `${d.deviceName} HV solar input reports error code ${p.pvHighErrCode} while producing ${p.pvHighWatts?.toFixed(0)} W (${p.pvHighVolts?.toFixed(0)} V, ${p.pvHighAmps?.toFixed(2)} A).` });
     }
-    if ((p.pvLowErrCode ?? 0) !== 0 && mpptProducing(p.pvLowWatts)) {
-      out.push({ id: `dpu-pvl-err-${d.sn}`, severity: 'warning', category: 'Solar', device: d.deviceName, title: 'LV MPPT error code', detail: `${d.deviceName} LV solar input reports error code ${p.pvLowErrCode} while producing ${p.pvLowWatts?.toFixed(0)} W (${p.pvLowVolts?.toFixed(0)} V, ${p.pvLowAmps?.toFixed(1)} A).` });
+    if ((p.pvLowErrCode ?? 0) !== 0 && mpptProducing(p.pvLowWatts, p.pvLowAmps)) {
+      out.push({ id: `dpu-pvl-err-${d.sn}`, severity: 'warning', category: 'Solar', device: d.deviceName, title: 'LV MPPT error code', detail: `${d.deviceName} LV solar input reports error code ${p.pvLowErrCode} while producing ${p.pvLowWatts?.toFixed(0)} W (${p.pvLowVolts?.toFixed(0)} V, ${p.pvLowAmps?.toFixed(2)} A).` });
     }
 
     for (const [label, slug, c] of [
