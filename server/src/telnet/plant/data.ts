@@ -31,6 +31,16 @@ function dpuNum(name: string): number {
   return m ? Number(m[1]) : 999;
 }
 
+/** v1.0.1 — promoted from pv.ts: the physical generator number for a Core, parsed
+ *  from its display name ("Core 3" / "DELTA-PRO-ULTRA-3" → 3). Any screen that
+ *  filters the result of getDpus() (by .online, SHP2-membership, etc.) MUST label
+ *  rows with this, never with the loop index — filtering compacts the array, so
+ *  the index no longer equals the physical Core once any unit drops out. */
+export function generatorNumber(deviceName: string, fallbackIdx: number): number {
+  const m = deviceName?.match(/(\d+)/);
+  return m ? Number(m[1]) : fallbackIdx + 1;
+}
+
 /** Age of the last telemetry for a device, in ms (or null if never seen). */
 export function deviceAgeMs(d: DeviceSnapshot): number | null {
   if (!d.lastUpdated) return null;
@@ -52,11 +62,14 @@ export function dpuFlags(d: DpuDev): string {
   const p = d.projection;
   // A/M (Auto/Manual — we don't currently track this from EcoFlow; default A)
   // L/R (Local — i.e. on LAN — vs Remote/cloud only). We mark L if WiFi+MQTT reached us recently.
-  // N/W/A (alarm state for the device summary)
+  // N/W/A (alarm state for the device summary) — driven by the SAME socState()
+  // band (red<20/yellow<50) the SOC row's own glyph uses, via alarmLetter().
+  // A standalone soc<20 cutoff here previously disagreed with the warn (<50)
+  // band next to it: e.g. 29% SOC drew a warn ▲ glyph but an 'N' flag.
   const ar = 'A';                                   // assume automatic
   const lr = d.online ? 'L' : 'R';                  // online = local route reachable
   const sysErr = p.sysErrCode ?? 0;
-  const ns = sysErr > 0 ? 'A' : (p.soc != null && p.soc < 20 ? 'W' : 'N');
+  const ns = sysErr > 0 ? 'A' : alarmLetter(socState(p.soc));
   return `${ar}/${lr}/${ns}`;
 }
 
@@ -87,6 +100,15 @@ export function circuitLoadState(loadW: number | null | undefined, breakerA: num
   if (pct >= CIRCUIT_LOAD_PCT_BANDS.red) return 'alarm';
   if (pct >= CIRCUIT_LOAD_PCT_BANDS.yellow) return 'warn';
   return 'normal';
+}
+
+/**
+ * Map a row's AlarmState to the single N/W/A letter used in flags columns —
+ * the ONE place that letter is derived, so a flags column can never disagree
+ * with the glyph/color the caller computed for the same reading.
+ */
+export function alarmLetter(state: AlarmState): 'N' | 'W' | 'A' {
+  return state === 'alarm' || state === 'trip' ? 'A' : state === 'warn' ? 'W' : 'N';
 }
 
 /* ─── formatters returning {value, unit} pairs ──────────────────────── */

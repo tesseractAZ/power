@@ -55,6 +55,7 @@ export interface SessionView {
   screen: ScreenId;
   battDpu: number;
   battPack: number;
+  battScroll: number;
   alertScroll: number;
 }
 export interface RenderData {
@@ -299,26 +300,39 @@ function statusLine(data: RenderData, w: number): string {
   // v0.11.0 — count by the 4-tier ISA priority instead of raw severity.
   const pc = prioCounts(alerts);
 
-  const seg: string[] = [];
-  seg.push(
+  // v1.4.0 (audit rank 4) — the alert-priority badge is the header's only persistent
+  // at-a-glance ALARM cue. Previously it was appended LAST after the 5 telemetry segments
+  // and the whole line was padEnd()-truncated, so at the default 80 cols the 5 verbose
+  // telemetry segments (+ the "  │  " separators) consumed the full width and the badge was
+  // silently dropped on EVERY screen — including the ALERTS screen itself. Two changes:
+  //   1. a compact " │ " separator (was "  │  ") reclaims 8 cols, so telemetry + badge now
+  //      fit 80; and
+  //   2. when an alarm is ACTIVE the badge leads, so it is never the segment truncation eats
+  //      — an active alarm is the single most important thing on the line. NOMINAL trails
+  //      (droppable). Telemetry never precedes the badge when it matters.
+  const telem: string[] = [];
+  telem.push(
     grid.state === 'islanded'
       ? c.yellowB('OFF-GRID')
       : grid.state === 'active'
         ? c.greenB('GRID ' + fmtW(grid.watts) + ' →')
         : c.cyan('GRID standby'),
   );
-  seg.push(c.grey('BACKUP ') + paint(socColor(backup), fmtPct(backup)));
-  seg.push(c.grey('PV ') + c.yellow(fmtW(pv)));
-  seg.push(c.grey('LOAD ') + c.white(fmtW(load)));
+  telem.push(c.grey('BACKUP ') + paint(socColor(backup), fmtPct(backup)));
+  telem.push(c.grey('PV ') + c.yellow(fmtW(pv)));
+  telem.push(c.grey('LOAD ') + c.white(fmtW(load)));
   const arrow = batNet > 5 ? c.yellow('▼ ') : batNet < -5 ? c.green('▲ ') : '';
-  seg.push(c.grey('BATT ') + arrow + c.white(fmtW(Math.abs(batNet))));
-  if (pc.critical > 0) seg.push(prioColor('critical')(`${pc.critical} CRIT`));
-  if (pc.high > 0) seg.push(prioColor('high')(`${pc.high} HIGH`));
-  if (pc.medium > 0) seg.push(prioColor('medium')(`${pc.medium} MED`));
-  if (pc.low > 0) seg.push(prioColor('low')(`${pc.low} LOW`));
-  if (pc.critical === 0 && pc.high === 0 && pc.medium === 0 && pc.low === 0) seg.push(c.green('NOMINAL'));
+  telem.push(c.grey('BATT ') + arrow + c.white(fmtW(Math.abs(batNet))));
 
-  return padEnd(seg.join(c.grey('  │  ')), w);
+  const badges: string[] = [];
+  if (pc.critical > 0) badges.push(prioColor('critical')(`${pc.critical} CRIT`));
+  if (pc.high > 0) badges.push(prioColor('high')(`${pc.high} HIGH`));
+  if (pc.medium > 0) badges.push(prioColor('medium')(`${pc.medium} MED`));
+  if (pc.low > 0) badges.push(prioColor('low')(`${pc.low} LOW`));
+
+  const sep = c.grey(' │ ');
+  const seg = badges.length > 0 ? [...badges, ...telem] : [...telem, c.green('NOMINAL')];
+  return padEnd(seg.join(sep), w);
 }
 
 function menuLine(sv: SessionView, w: number): string {
@@ -344,11 +358,11 @@ function renderBody(sv: SessionView, data: RenderData, w: number, h: number): st
     case 'solar':
       return bodySolar(data, w);
     case 'battery':
-      return bodyBattery(sv, data, w);
+      return bodyBattery(sv, data, w, h);
     case 'shp2':
       return bodyShp2(sv, data, w, h);
     case 'strategy':
-      return bodyStrategy(data);
+      return bodyStrategy(sv, data, h);
     case 'alerts':
       return bodyAlerts(sv, data, w, h);
     case 'predictive':
@@ -617,15 +631,18 @@ function pvString(
 
 /* ───────────────────────── BATTERY ───────────────────────── */
 
-function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
+function bodyBattery(sv: SessionView, data: RenderData, w: number, h: number): string[] {
   const dpus = getDpus(data.snap);
   if (dpus.length === 0) return [c.grey('No Delta Pro Ultra units discovered.')];
   let di = Math.max(0, Math.min(sv.battDpu, dpus.length - 1));
-  // v0.51.0 — if the selected DPU has no packs reporting (the default index 0 is
-  // Core 1, which is cloud-offline), open the per-pack grid on the first DPU that
-  // IS reporting so the screen shows real data instead of an all-"absent" grid.
-  // The offline core is still surfaced in the FLEET BATT / offline-freeze header.
-  if ((dpus[di].projection?.packs?.length ?? 0) === 0) {
+  // v0.51.0 — on the UN-navigated default landing (sv.battDpu === 0) only: if Core 1
+  // is cloud-offline with no packs reporting, open the grid on the first DPU that IS
+  // reporting instead of an all-"absent" grid. Gate on sv.battDpu (the raw arrow-key
+  // state), not di: once the operator has explicitly arrowed onto a pack-less DPU
+  // (e.g. a bench-spare Core 4/5), honor that selection — arrows must never silently
+  // redirect to a different core's data. The pack-less DPU still renders correctly via
+  // the existing "absent" pack rows / "not reporting" message below, under its own name.
+  if (sv.battDpu === 0 && (dpus[0].projection?.packs?.length ?? 0) === 0) {
     const firstLive = dpus.findIndex((d) => (d.projection?.packs?.length ?? 0) > 0);
     if (firstLive >= 0) di = firstLive;
   }
@@ -644,7 +661,9 @@ function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
       c.cyanB('▲ ') +
       c.whiteB(String(pi + 1)) +
       c.cyanB(' ▼') +
-      c.grey('      (arrows navigate)'),
+      c.grey('      (arrows navigate · ') +
+      c.cyanB('[ ]') +
+      c.grey(' scroll detail)'),
   );
 
   // v0.46.0 — fleet battery NET from per-pack flow (+discharge/−charge). v0.45.0 —
@@ -718,8 +737,14 @@ function bodyBattery(sv: SessionView, data: RenderData, w: number): string[] {
     L.push(c.grey(`Pack ${pi + 1} is not reporting on ${dpu.deviceName}.`));
     return L;
   }
-  L.push(...packDetail(selPack, dpu, w, data.degradation));
-  return L;
+  // The pack detail (VITALS/LIFETIME ENERGY/CAPACITY FADE/thermal grids/all-cell
+  // voltages — 32 CELL VOLTAGES alone can run 5+ rows) routinely exceeds contentH.
+  // renderScreen()'s fit() used to silently slice it with zero cue, dropping SoH,
+  // capacity-fade, and thermal data with no indicator. Paginate it like
+  // bodyShp2/bodyAlerts/bodyPredictive. Scrolled with [ / ] — not ↑/↓ — because
+  // battery's own arrows are already claimed by pack/DPU selection above.
+  const detailBlocks = packDetail(selPack, dpu, w, data.degradation).map((line) => [line]);
+  return L.concat(paginate(detailBlocks, sv.battScroll, Math.max(3, h - L.length), '[ ]'));
 }
 
 function spreadCell(mv: number | null): string {
@@ -896,6 +921,11 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
   const p = shp2.projection;
   const dpus = getDpus(data.snap);
   const nameFor = (sn: string | null) => (sn ? (dpus.find((d) => d.sn === sn)?.deviceName ?? sn) : '—');
+  // v1.4.0 (audit rank 16) — gate "To full" exactly as index.ts gates `backup_charge_minutes`
+  // (fleetBatteryNet > 50 W = discharging): SHP2's backupChargeTimeMin can hold a stale or
+  // PV-forecast ETA while the pool is actively draining, showing a charge-completion time
+  // during a real drawdown.
+  const chargeGated = aggregateFleetFlow(data.snap.devices).fleetBatteryNet > 50;
 
   const body: string[] = [];
 
@@ -947,7 +977,7 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
         // not live charge power (reads 7.2 kW while idle). Label accordingly, matching
         // bus.ts "CHG PWR LIMIT".
         ['Charge limit', fmtW(p.chargeWattPower)],
-        ['To full', fmtMins(p.backupChargeTimeMin)],
+        ['To full', chargeGated ? '—' : fmtMins(p.backupChargeTimeMin)],
         ['Runtime', fmtMins(p.backupDischargeTimeMin)],
       ],
       w,
@@ -1015,7 +1045,7 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
 
 /* ───────────────────────── STRATEGY ───────────────────────── */
 
-function bodyStrategy(data: RenderData): string[] {
+function bodyStrategy(sv: SessionView, data: RenderData, h: number): string[] {
   const shp2 = getShp2(data.snap);
   // v0.47.0 — the gate is online-aware: a cloud-offline SHP2's strategy config is
   // stale, not authoritative. Require online before presenting it as live config.
@@ -1066,7 +1096,10 @@ function bodyStrategy(data: RenderData): string[] {
   // most-protected (kept longest) sort to the top, and caption the direction
   // correctly. Disabled circuits (loadIsEnable=false) are pinned to the bottom and
   // clearly marked rather than ranked as active shed participants.
-  L.push(c.cyanB('CIRCUIT SHED ORDER') + c.dim('   ascending = most-protected (shed LAST) · higher # sheds FIRST'));
+  // v1.3.1 — the safety-critical word here is FIRST (it defines which end of the
+  // priority number sheds first); the original 82-char caption truncated it away
+  // at 80 cols (contentW=76). Shortened wording keeps LAST/FIRST inside budget.
+  L.push(c.cyanB('CIRCUIT SHED ORDER') + c.dim('   low # = shed LAST (protected) · high # sheds FIRST'));
   const prio = (cir: { loadPriority: number | null }) => cir.loadPriority ?? Number.POSITIVE_INFINITY;
   const ranked = [...proj.pairedCircuits].sort((a, b) => {
     const ea = a.loadIsEnable === false ? 1 : 0;
@@ -1085,7 +1118,11 @@ function bodyStrategy(data: RenderData): string[] {
         cell(nameCol, 32) +
         cell(c.white(cir.breakerAmps != null ? `${cir.breakerAmps} A` : '—'), 11) +
         cell(disabled ? c.grey(prioCol) : c.white(prioCol), 12) +
-        (disabled ? c.grey('disabled · off in SHP2') : c.green('enabled')),
+        // v1.3.1 — STATE is unbounded raw text after 3 fixed cell() columns (2+32+11+12
+        // = 57 of 76 cols at 80x24), leaving only 19 cols; the old 22-char string
+        // truncated to 'disabled · off in S'. Shortened text still says WHERE it was
+        // disabled (SHP2, not an automatic shed) per the v0.47.0 note above.
+        (disabled ? c.grey('disabled in SHP2') : c.green('enabled')),
     );
   }
   L.push('');
@@ -1119,7 +1156,10 @@ function bodyStrategy(data: RenderData): string[] {
   } else {
     L.push('  ' + c.grey('No charge schedule configured.'));
   }
-  return L;
+  // v1.3.1 — CHARGE SCHEDULE (rate, ceiling/floor, actual TOU windows) ran off the
+  // bottom of an 80x24 frame with no scroll hint (unlike every other overflow-
+  // prone screen). Paginate the whole body so nothing is silently dropped.
+  return paginate(L.map((l) => [l]), sv.alertScroll, h);
 }
 
 /* ───────────────────────── ALERTS + PREDICTIVE ───────────────────────── */
@@ -1169,7 +1209,7 @@ function subjectCells(a: Alert): [string, string] {
 /** Slice blocks — each possibly a different height — to fit `avail` lines.
  *  Scrolling advances a whole block at a time, so no block is ever split and
  *  no wrapped detail text is clipped mid-sentence. */
-function paginate(blocks: string[][], scroll: number, avail: number): string[] {
+function paginate(blocks: string[][], scroll: number, avail: number, hintKeys = '▲▼'): string[] {
   if (blocks.length === 0) return [];
   const total = blocks.reduce((acc, b) => acc + b.length, 0);
   const overflow = total > avail;
@@ -1198,7 +1238,7 @@ function paginate(blocks: string[][], scroll: number, avail: number): string[] {
     shown++;
   }
   if (overflow) {
-    out.push(c.grey(`  ▲▼ scroll — ${s + 1}-${s + shown} of ${blocks.length}`));
+    out.push(c.grey(`  ${hintKeys} scroll — ${s + 1}-${s + shown} of ${blocks.length}`));
   }
   return out;
 }
