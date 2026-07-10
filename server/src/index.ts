@@ -1331,6 +1331,11 @@ app.get('/api/ha-state', async (req, reply) => {
     pv_lifetime_kwh: lifetimeKwh('fleet_pv_wh'),
     load_lifetime_kwh: lifetimeKwh('fleet_load_wh'),
     grid_import_lifetime_kwh: lifetimeKwh('fleet_grid_import_wh'),
+    // v1.3.0 (audit rank 12) — the SHP2-gridWatt whole-home counter (v0.34.0). It was
+    // published by /api/lifetime-energy but absent from /api/ha-state, so the REST sensor
+    // DOCS.md tells operators to create against ha-state read `unknown` forever. Distinct
+    // from grid_import_lifetime_kwh (DPU ac_in basis) — see project_energy_grid_reconcile.
+    grid_to_home_lifetime_kwh: lifetimeKwh('fleet_grid_home_wh'),
     battery_charge_lifetime_kwh: lifetimeKwh('fleet_battery_charge_wh'),
     battery_discharge_lifetime_kwh: lifetimeKwh('fleet_battery_discharge_wh'),
 
