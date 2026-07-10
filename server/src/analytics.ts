@@ -1161,6 +1161,26 @@ export function blendNightLoad(
   return Math.max(blended, rawBase * (1 - maxTrim));
 }
 
+/**
+ * v1.4.2 (daytime-review) — anchor the projected-SoC sim's near-term hours UPWARD to the
+ * observed load, the same fix computeRunway got in v0.15.17. `hoursAhead` is the hour index
+ * from now (0 = current hour); only the first `blendHours` are anchored, with a linearly
+ * decaying weight (1, .75, .5, .25 for blendHours=4). `Math.max` so a lighter-than-modelled
+ * day never becomes MORE optimistic, and a brief burst decays out of the far horizon. Units
+ * are whatever the caller uses (whole-panel watts here); returns baseLoad unchanged past the
+ * window or with no recent sample. Pure + exported for tests, mirroring blendNightLoad.
+ */
+export function anchorNearTermLoad(
+  baseLoad: number,
+  recentLoadW: number | null,
+  hoursAhead: number,
+  blendHours: number,
+): number {
+  if (recentLoadW == null || hoursAhead >= blendHours || hoursAhead < 0) return baseLoad;
+  const w = 1 - hoursAhead / blendHours;
+  return Math.max(baseLoad, recentLoadW * w + baseLoad * (1 - w));
+}
+
 /** v0.59.0 — true for the overnight/idle band the load-blend is restricted to. */
 export function isForecastNightHour(clockHour: number): boolean {
   return clockHour >= FORECAST_NIGHT_START_HOUR || clockHour <= FORECAST_NIGHT_END_HOUR;
@@ -1459,7 +1479,14 @@ async function computeDayForecastUncached(
     // a DAYTIME curve hour legitimately runs far above a brief recent dip (a cloud
     // momentarily cutting AC load), so trimming there would under-predict the real
     // afternoon peak and make the islanded SoC slope over-optimistic. Only ever reduces.
-    const baseLoad = isForecastNightHour(clock) ? blendNightLoad(rawBase, recentLoadW) : rawBase;
+    const trimmed = isForecastNightHour(clock) ? blendNightLoad(rawBase, recentLoadW) : rawBase;
+    // v1.4.2 (daytime-review) — then anchor the near-term hours UPWARD to observed load, the
+    // v0.15.17 fix computeRunway got but that was never ported to this sibling minProjectedSoc
+    // sim. Without it, a SUSTAINED daytime load far above the modelled hour (an AC compressor
+    // pulling 5–10 kW against a ~1 kW typical hour) left the projected-SoC slope — and thus
+    // projected_low_soc_at and the forecast-soc-dip "Expected at" text — hours too optimistic vs.
+    // the correctly-anchored runway sensors, an on-screen contradiction during a real anomaly.
+    const baseLoad = anchorNearTermLoad(trimmed, recentLoadW, k, RUNWAY_BLEND_HOURS);
     // v0.9.3 — add any predicted EV-charging session that covers this hour.
     // The historical load curve already includes PAST EV sessions, but for
     // FUTURE hours we don't want the day-of-week average to flatten a known

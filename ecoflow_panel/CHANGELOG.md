@@ -1,3 +1,23 @@
+## v1.4.2 — forecast SoC-dip is now load-anchored (daytime-review follow-up)
+
+The daytime live review found that `getDayForecast`'s projected-SoC simulation — which feeds
+`projected_low_soc_at`/`_percent` and the `forecast-soc-dip` alert's "Expected at" text — used
+the pure day-of-week load curve for daytime hours with no anchor to the observed load. The
+safety-critical `computeRunway` sensors already anchor their near-term hours upward to the live
+load (the v0.15.17 fix), but that was never ported to this sibling sim. So during a sustained
+load spike (an AC compressor pulling ~10 kW against a ~1 kW modelled hour), the dashboard's
+"Expected at" could sit hours later than the correctly-anchored runway/audible sensors — an
+on-screen contradiction during a real event.
+
+New pure `anchorNearTermLoad()` applies the same decaying upward anchor (`Math.max`, weights
+1/.75/.5/.25 over the first 4 hours) to the forecast sim's near-term load, so the projected-SoC
+slope and the "Expected at" narrative now agree with the runway sensors. A lighter-than-modelled
+day never becomes more optimistic; a brief burst decays out of the far horizon. The audible
+alarm and load-shed paths were already correct (they read `computeRunway`); this fixes only the
+display sensors that lagged.
+
+Tests 1242 → 1244.
+
 ## v1.4.1 — outage-cause split + doc correction (daytime live review)
 
 A comprehensive adversarial review of the live daytime system (now with real PV) confirmed
