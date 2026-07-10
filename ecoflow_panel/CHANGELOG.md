@@ -1,3 +1,27 @@
+## v1.4.1 — outage-cause split + doc correction (daytime live review)
+
+A comprehensive adversarial review of the live daytime system (now with real PV) confirmed
+NO regressions from v1.1.0–v1.4.0 and everything computing correctly. Two items shipped here.
+
+### Outage counters now distinguish power loss from cloud gaps
+`system_outage_count_24h` mixed two very different events: a **power/reboot** outage (the
+add-on/host was actually down across the gap, `restartSpanning=true`) and a **cloud/telemetry
+stall** (the process stayed up but the EcoFlow cloud went unreachable — the DNS/MQTT blips
+this fleet rides out). A benign cloud blip therefore read as a "system outage". Two new
+diagnostic sensors split the total by cause — `system_power_outage_count_24h` and
+`system_telemetry_gap_count_24h` — while `system_outage_count_24h`/`_total_minutes_24h` stay
+the combined total for existing consumers. (The recent two "Telemetry gap" alerts were exactly
+this: cloud stalls the add-on survived, not power events.) Also clarified in-code that
+`system_outage_active_24h` is a 24 h *occurred-within-window* flag, not "happening now" — read
+`_last_ended` for recency.
+
+### Doc correction
+The v1.4.0 note said the PV gauges use the "observed array peak"; the actual fix scales them to
+the EcoFlow **datasheet** MPPT rating (4 kW HV + 1.6 kW LV per Core), which exceeds the observed
+peak. Same outcome (no >100% pinning), accurate wording.
+
+Tests 1241 → 1242.
+
 ## v1.4.0 — TUI display fixes (21-dimension audit, part 3)
 
 The audit captured every telnet TUI screen at 80x24 (the default terminal) and 160x50 and
@@ -29,7 +53,7 @@ discharge signal the `backup_charge_minutes` HA sensor uses.
 - **CONSOLE** flag column agrees with the row's own state glyph; fleet-aggregate tag quality
   reflects the worst contributing member, not the first (ranks 19, 20, 22, 38).
 - **BUS** per-circuit STATE column and the split-phase glyph survive 80 cols (ranks 34, 40).
-- **PV** array gauges use the observed array peak, so they no longer pin over 100% (rank 21).
+- **PV** array gauges scale to the EcoFlow datasheet MPPT rating (4 kW HV + 1.6 kW LV per Core), which exceeds the observed array peak, so they no longer pin over 100% (rank 21).
 - **BATTERY** arrowing to a pack-less spare Core no longer silently shows Core 1's data under
   the wrong header (rank 32).
 

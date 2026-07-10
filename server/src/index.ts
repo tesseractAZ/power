@@ -1382,8 +1382,15 @@ app.get('/api/ha-state', async (req, reply) => {
     ...(() => {
       const t = outageTracking(recorder.telemetryGaps(), Date.now(), 24 * 3_600_000);
       return {
-        system_outage_active_24h: t.count > 0,   // boolean flag for the diagnostic on/off tile
+        // v1.4.1 (daytime-review #4) — `system_outage_active_24h` is a 24 h OR-of-past-events
+        // flag ("a gap occurred in the last 24 h"), NOT "a gap is happening right now"; the name
+        // is retained for the existing diagnostic tile, but `..._last_ended` is the field to read
+        // for recency. `count`/`total` stay the mixed total for backward compatibility.
+        system_outage_active_24h: t.count > 0,
         system_outage_count_24h: t.count,
+        // Split by cause so a benign cloud/telemetry stall isn't mistaken for a power event.
+        system_power_outage_count_24h: t.powerOutageCount,     // add-on/host was DOWN across the gap
+        system_telemetry_gap_count_24h: t.telemetryGapCount,   // cloud/MQTT stall, process stayed up
         system_outage_total_minutes_24h: t.totalMinutes,
         system_outage_last_ended: t.lastEndedMs, // epoch ms, null if none in 24 h
         system_outage_last_duration_minutes: t.lastDurationMinutes,
