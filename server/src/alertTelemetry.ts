@@ -26,6 +26,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, fstatSync, openSync, readSync, closeSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 
 /** Telemetry event kinds we track for auto-silencing decisions. */
@@ -63,12 +64,50 @@ function ensureDir() {
   initialized = true;
 }
 
+/**
+ * v1.3.1 (audit rank 49) — rotate at twice the replay budget. This file's own doc says the
+ * events are "only valuable for ~weeks", and boot replays just the last 30 days / 4 MB — but
+ * nothing ever pruned it. On a panel that has flapped for months it grows without bound on the
+ * Pi's SD card, and every byte past REPLAY_MAX_BYTES is written once and never read again.
+ */
+export const ROTATE_AT_BYTES = 2 * REPLAY_MAX_BYTES;
+/** statSync on every append would be wasteful; steady state is a few dozen lines a day. */
+const ROTATE_CHECK_EVERY = 256;
+let appendsSinceCheck = 0;
+
+/** Drop the oldest whole lines until the file is back under REPLAY_MAX_BYTES. Exported for tests. */
+export function rotateTelemetryIfOversized(path: string = PATH): boolean {
+  try {
+    if (!existsSync(path)) return false;
+    const fd = openSync(path, 'r');
+    let size: number;
+    try { size = fstatSync(fd).size; } finally { closeSync(fd); }
+    if (size <= ROTATE_AT_BYTES) return false;
+    const text = readFileSync(path, 'utf8');
+    // Keep the newest REPLAY_MAX_BYTES, then discard the leading PARTIAL line so every
+    // surviving line still parses.
+    const cut = text.slice(-REPLAY_MAX_BYTES);
+    const nl = cut.indexOf('\n');
+    const tail = nl >= 0 ? cut.slice(nl + 1) : '';
+    atomicWriteFileSync(path, tail);
+    console.warn(`alertTelemetry: rotated ${path} (${size} → ${tail.length} bytes)`);
+    return true;
+  } catch (e: any) {
+    console.error(`alertTelemetry: rotate failed: ${e?.message ?? e}`);
+    return false;
+  }
+}
+
 /** Append one telemetry event. Synchronous — log volume is low enough
  *  (a few dozen lines per day in steady state) that we don't need batching. */
 export function appendTelemetryEvent(entry: TelemetryEntry): void {
   try {
     ensureDir();
     appendFileSync(PATH, JSON.stringify(entry) + '\n');
+    if (++appendsSinceCheck >= ROTATE_CHECK_EVERY) {
+      appendsSinceCheck = 0;
+      rotateTelemetryIfOversized();
+    }
   } catch (e: any) {
     console.error(`alertTelemetry: append failed: ${e?.message ?? e}`);
   }
