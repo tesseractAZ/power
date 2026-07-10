@@ -8,6 +8,7 @@ import {
   computeForecastSkill,
   computeAmbientThermalForecast,
   blendNightLoad,
+  anchorNearTermLoad,
   isForecastNightHour,
   applyEmptyHysteresis,
   forecastDayAlerts,
@@ -525,6 +526,32 @@ test('blendNightLoad — never RAISES load; passes through when close or unknown
   assert.equal(blendNightLoad(3000, 3200, 1.5, 0.6), 3000, 'curve below recent → unchanged (never raises)');
   assert.equal(blendNightLoad(4000, 3200, 1.5, 0.6), 4000, 'within 1.5× of recent → not stale-high → unchanged');
   assert.equal(blendNightLoad(6000, null, 1.5, 0.6), 6000, 'recent unknown (cold window) → unchanged, never zeroes the night');
+});
+
+test('v1.4.2 — anchorNearTermLoad raises the near-term sim toward a SUSTAINED observed load', () => {
+  // The daytime failure the runway sensors already guard against: a ~1 kW modelled hour while
+  // the panel actually draws ~10 kW (AC compressor). The first RUNWAY_BLEND_HOURS must lift.
+  const BH = 4;
+  // hour 0: full weight → the observed load itself.
+  assert.equal(anchorNearTermLoad(1000, 10000, 0, BH), 10000);
+  // hour 1: weight .75 → 10000*.75 + 1000*.25 = 7750.
+  assert.equal(anchorNearTermLoad(1000, 10000, 1, BH), 7750);
+  // hour 2: .5, hour 3: .25 — monotonically decaying back toward the curve.
+  assert.equal(anchorNearTermLoad(1000, 10000, 2, BH), 5500);
+  assert.equal(anchorNearTermLoad(1000, 10000, 3, BH), 3250);
+});
+
+test('v1.4.2 — anchorNearTermLoad never LOWERS load and no-ops past the window / with no sample', () => {
+  const BH = 4;
+  // A lighter-than-modelled day: recent below curve → max() keeps the (higher) curve. Never
+  // becomes MORE optimistic, mirroring blendNightLoad's own never-raise guard on the trim side.
+  assert.equal(anchorNearTermLoad(6000, 2000, 0, BH), 6000);
+  assert.equal(anchorNearTermLoad(6000, 2000, 1, BH), 6000);
+  // Past the blend window the far horizon is untouched (a burst can't dominate hour 4+).
+  assert.equal(anchorNearTermLoad(1000, 10000, 4, BH), 1000);
+  assert.equal(anchorNearTermLoad(1000, 10000, 12, BH), 1000);
+  // Cold window (no recent sample) passes through unchanged.
+  assert.equal(anchorNearTermLoad(1000, null, 0, BH), 1000);
 });
 
 test('forecastDayAlerts — projected dip is grid-aware (v0.59.0)', () => {
