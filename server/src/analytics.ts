@@ -1438,11 +1438,15 @@ async function computeDayForecastUncached(
     // (no-op) until ≥3 mature weather-covered hindcast days exist; when the model
     // over-predicts it is < 1, deflating forecastPvW/pvSum and the projected-SoC
     // slope so the runway alarm reads CONSERVATIVE (shorter). Clamped [0.5,1.2].
-    const pvAlarm = pv * pvBiasFactor;
-    if (modelled) {
-      const hourCeil = resp.observedMaxPvW * 1.05;
-      if (hourCeil > pvCeilingW) pvCeilingW = hourCeil; // v0.14.1 — track clear-sky ceiling for P90 clamp
-    }
+    // v1.3.1 (audit rank 11) — RE-CLAMP after the bias multiply. forecastHourPvW already caps a
+    // modelled hour at the observed physical ceiling, but pvBiasFactor is clamped [0.5, 1.2], so
+    // an UNDER-predicting model (bias > 1) multiplied straight back past that ceiling: the
+    // alarm-facing series could project more PV than the array has ever produced in that hour.
+    // That inflates the projected-SoC slope and makes the runway alarm read LONGER — the unsafe
+    // direction here. Deflation (bias < 1) stays unclamped; it is the conservative one.
+    const hourCeil = modelled ? resp.observedMaxPvW * 1.05 : null;
+    const pvAlarm = hourCeil != null ? Math.min(pv * pvBiasFactor, hourCeil) : pv * pvBiasFactor;
+    if (hourCeil != null && hourCeil > pvCeilingW) pvCeilingW = hourCeil; // v0.14.1 — clear-sky ceiling for the P90 clamp
     // Day-of-week-aware load: pick weekday vs weekend curve for the projected
     // hour. Mon–Fri at 5pm looks nothing like Sat at 5pm in this house.
     const projDow = new Date(ts).getDay();

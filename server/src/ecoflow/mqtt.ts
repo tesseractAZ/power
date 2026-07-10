@@ -84,7 +84,18 @@ async function getMqttCertificationWithRetry(log: (msg: string) => void): Promis
   throw new Error('mqtt: certification retry exhausted');
 }
 
-export async function startMqtt(store: SnapshotStore, log: (msg: string) => void): Promise<MqttHandle> {
+/**
+ * v1.3.1 (audit rank 46) — `warn` exists so a genuine connectivity FAILURE (a broker error,
+ * a DNS EAI_AGAIN) lands at warn level instead of info. Every line here used to log at info,
+ * so scanning the add-on log for level >= 40 returned nothing even while the fleet was
+ * failing to reach the cloud. Storm-coalescing still wraps it, so a flapping broker cannot
+ * spam the log. Defaults to `log` for callers that don't distinguish levels.
+ */
+export async function startMqtt(
+  store: SnapshotStore,
+  log: (msg: string) => void,
+  warn: (msg: string) => void = log,
+): Promise<MqttHandle> {
   log('mqtt: requesting certification');
   const cert = await getMqttCertificationWithRetry(log);
   const username = cert.certificateAccount;
@@ -134,9 +145,14 @@ export async function startMqtt(store: SnapshotStore, log: (msg: string) => void
   // identical repeats and roll them up periodically. `connect` flushes the
   // pending summary so recovery is a clean, greppable transition.
   const stormLog = makeLogCoalescer(log);
+  // v1.3.1 (audit rank 46) — a broker ERROR is a failure, not churn: coalesce it the same way,
+  // but emit at warn so it is visible to a level>=40 log scan. `reconnect`/`close` stay at info
+  // (a close also happens on a normal shutdown).
+  const stormWarn = makeLogCoalescer(warn);
 
   client.on('connect', () => {
     stormLog.flush(); // emit any suppressed reconnect/error tail before the recovery line
+    stormWarn.flush();
     log('mqtt: connected');
     for (const sn of Object.keys(store.get().devices)) subscribeForSn(sn);
   });
@@ -148,7 +164,7 @@ export async function startMqtt(store: SnapshotStore, log: (msg: string) => void
 
   client.on('reconnect', () => stormLog.log('mqtt: reconnecting'));
   client.on('close', () => stormLog.log('mqtt: connection closed'));
-  client.on('error', (e) => stormLog.log(`mqtt: error ${e.message}`));
+  client.on('error', (e) => stormWarn.log(`mqtt: error ${e.message}`));
 
   client.on('message', (topic, payload) => {
     // topic format: /open/{username}/{sn}/{kind}

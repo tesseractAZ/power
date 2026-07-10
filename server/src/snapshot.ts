@@ -381,7 +381,18 @@ function flattenInto(input: unknown, prefix: string, out: Record<string, unknown
 const POLL_DEBUG = /^(debug|trace)$/i.test(config.logLevel);
 const SLOW_POLL_MS = 5_000;
 
-export function startPollLoop(store: SnapshotStore, intervalMs: number, log: (msg: string) => void): () => void {
+/**
+ * v1.3.1 (audit rank 46) — `warn` exists so a FAILED poll (DNS EAI_AGAIN, cloud 5xx) lands at
+ * warn level. It used to log at info alongside the routine success lines, so scanning the
+ * add-on log for level >= 40 returned nothing even while every poll was failing. Defaults to
+ * `log` for callers that don't distinguish levels.
+ */
+export function startPollLoop(
+  store: SnapshotStore,
+  intervalMs: number,
+  log: (msg: string) => void,
+  warn: (msg: string) => void = log,
+): () => void {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   let lastPollFailed = false; // track failure→ok recovery for the one INFO line that matters
@@ -402,7 +413,7 @@ export function startPollLoop(store: SnapshotStore, intervalMs: number, log: (ms
       }
       lastPollFailed = false;
     } catch (e: any) {
-      log(`poll failed: ${e?.message ?? e}`);
+      warn(`poll failed: ${e?.message ?? e}`);
       lastPollFailed = true;
     }
     if (!stopped) timer = setTimeout(tick, intervalMs);

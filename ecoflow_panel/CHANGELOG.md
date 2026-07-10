@@ -1,3 +1,42 @@
+## v1.3.1 — engines, physics and observability (21-dimension audit, part 2)
+
+### The alarm-facing PV forecast could exceed physics
+`forecastHourPvW` caps a modelled hour at the array's observed peak for that hour. The
+bias correction then multiplied straight back past that cap: `pvBiasFactor` is clamped
+`[0.5, 1.2]`, so an **under**-predicting model (bias > 1) projected more PV than the array
+has ever produced in that hour. That inflates the projected-SoC slope and makes the runway
+alarm read **longer** — the unsafe direction on an off-grid system. The result is now
+re-clamped to the hour ceiling. Deflation (bias < 1) is untouched; it is the conservative one.
+
+### `socFromOcv` silently collapsed the LFP plateau to its low end
+The OCV table holds one voltage across two SoC points four times over (3.30 V at both 40 %
+and 45 %, likewise 3.31 / 3.32 / 3.33). A cell resting exactly on a plateau matched the
+*rising* bracket into it first, whose endpoints differ, and returned the plateau's low end.
+The `v2 === v1` guard written to handle this was unreachable. LFP's OCV curve genuinely
+cannot resolve SoC on the plateau, so reporting one end as though it were exact biased
+`socDriftPct` low by up to 5 points on every rested pack that landed there. It now returns
+the midpoint of the ambiguity band.
+
+### Genuine connectivity failures were invisible to an error-level log scan
+Both the MQTT broker error handler and the REST poll's failure path logged at **info**,
+alongside the routine success lines. Grepping the add-on log for `level >= 40` returned
+nothing even while the fleet could not reach the cloud. Both now log at `warn`, still
+storm-coalesced so a flapping broker cannot spam the log.
+
+### `alert-telemetry.jsonl` grew without bound
+The file's own doc says its events are "only valuable for ~weeks", and boot replays just the
+last 30 days / 4 MB — but nothing ever pruned it. It now rotates at twice the replay budget,
+dropping the oldest whole lines. Every byte past that was written once and never read again,
+on the Pi's SD card.
+
+### Two advisory flags misused an HA device class
+On a **binary** sensor, HA's `power` class means "ON = power detected". `PV Curtailment
+Active` and `Load Shed Recommended` are advisory flags — ON means "we are curtailing" / "you
+should shed", not "power is present". The class also relabels their state text. Removed, to
+match the sibling advisory flags that correctly carry none.
+
+Tests 1231 → 1239.
+
 ## v1.3.0 — alarm integrity: the safety-critical half of the 21-dimension audit
 
 A 21-dimension adversarial audit of the live system produced 79 distinct findings, 58 of

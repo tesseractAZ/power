@@ -1,5 +1,5 @@
 name: Power
-version: "1.3.0"
+version: "1.3.1"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,

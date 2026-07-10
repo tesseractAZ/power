@@ -313,11 +313,16 @@ export const BINARY_SENSORS = [
   // v0.9.77 — fires when the system is actively curtailing PV (batteries
   // full + home load < expected PV). HA can trigger automations off this
   // — e.g. "if curtailing for 10 min then turn pool pump on full speed."
-  { unique_id: 'ecoflow_pv_curtailment_active', name: 'EcoFlow PV Curtailment Active', device_class: 'power', icon: 'mdi:solar-power-variant', value_template: '{{ "ON" if value_json.pv_curtailment_active else "OFF" }}' },
+  // v1.3.1 (audit rank 44) — no device_class. On a BINARY sensor, HA's `power` class means
+  // "ON = power detected / OFF = no power", which is not what an advisory flag says: ON here
+  // means "we are curtailing", not "power is present". It also relabels the state text. The
+  // sibling advisory flags above (islanded-only) correctly carry no device_class; the icon
+  // conveys meaning. Same for load-shed below.
+  { unique_id: 'ecoflow_pv_curtailment_active', name: 'EcoFlow PV Curtailment Active', icon: 'mdi:solar-power-variant', value_template: '{{ "ON" if value_json.pv_curtailment_active else "OFF" }}' },
   // v0.15.2 — ON when the load-shed advisor recommends shedding ≥1 load to
   // extend runway. The operator's HA automations actuate off this (advisory
   // model); the add-on never toggles a load itself.
-  { unique_id: 'ecoflow_load_shed_recommended', name: 'EcoFlow Load Shed Recommended', device_class: 'power', icon: 'mdi:power-plug-off', value_template: '{{ "ON" if value_json.load_shed_recommended else "OFF" }}' },
+  { unique_id: 'ecoflow_load_shed_recommended', name: 'EcoFlow Load Shed Recommended', icon: 'mdi:power-plug-off', value_template: '{{ "ON" if value_json.load_shed_recommended else "OFF" }}' },
   // v0.69.0 — ON when a SHP2-wired home core's own telemetry is missing from the
   // self-consumption integral (cloud-offline / projection-less), so solar_fraction /
   // direct-use undercount. Diagnostic: discount those KPIs while this reads ON.

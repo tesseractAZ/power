@@ -1753,7 +1753,7 @@ app.get('/ws', {
   socket.on('close', () => store.off('change', onChange));
 });
 
-const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m));
+const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m));
 
 /* v1.2.0 — feed the per-pack rest tracker. `analyzePackLfp` needs to know when a pack
  * last moved current before it will trust pack voltage as a rested OCV; nothing was
@@ -1815,7 +1815,7 @@ const MQTT_BOOT_GRACE_ATTEMPTS = Number(process.env.MQTT_BOOT_GRACE_ATTEMPTS ?? 
 const startMqttWithRetry = async (attempt = 0): Promise<void> => {
   if (stopMqtt) return; // already connected (or a prior attempt won the race)
   try {
-    const mqttHandle = await startMqtt(store, (m) => app.log.info(m));
+    const mqttHandle = await startMqtt(store, (m) => app.log.info(m), (m) => app.log.warn(m));
     stopMqtt = mqttHandle.stop;
     if (attempt > 0) app.log.info(`mqtt: connected after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`);
   } catch (e: any) {
