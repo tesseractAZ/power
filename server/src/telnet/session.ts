@@ -101,6 +101,7 @@ export class TuiSession {
   private screen: ScreenId = 'overview';
   private battDpu = 0;
   private battPack = 0;
+  private battScroll = 0;
   private alertScroll = 0;
 
   /** PLANT mode state. */
@@ -249,6 +250,7 @@ export class TuiSession {
       if (next !== this.screen) {
         this.screen = next;
         this.alertScroll = 0;
+        this.battScroll = 0;
       }
       return true;
     }
@@ -259,13 +261,24 @@ export class TuiSession {
         else if (key === 'right') this.battDpu = (this.battDpu + 1) % count;
         else if (key === 'up') this.battPack = (this.battPack + 4) % 5;
         else if (key === 'down') this.battPack = (this.battPack + 1) % 5;
+        // v1.4.0 (audit rank 5) — a different DPU/pack swaps in an entirely different
+        // detail body; any prior scroll offset into the old body is stale.
+        this.battScroll = 0;
         return true;
       }
-      if (this.screen === 'alerts' || this.screen === 'predictive' || this.screen === 'shp2') {
+      if (this.screen === 'alerts' || this.screen === 'predictive' || this.screen === 'shp2' || this.screen === 'strategy') {
         if (key === 'up') this.alertScroll = Math.max(0, this.alertScroll - 1);
         else if (key === 'down') this.alertScroll += 1;
         return true;
       }
+    }
+    // v1.4.0 (audit rank 5) — BATTERY's own ↑/↓/←/→ are already claimed by pack/DPU
+    // navigation above, so the pack-detail pane (VITALS/LIFETIME/thermal grids/32 CELL
+    // VOLTAGES — see packDetail() in screens.ts) scrolls on [ / ] instead of the other
+    // paginated screens' ↑/↓; reusing ↑/↓ here would silently steal DPU/pack navigation.
+    if (this.screen === 'battery' && (key === '[' || key === ']')) {
+      this.battScroll = key === '[' ? Math.max(0, this.battScroll - 1) : this.battScroll + 1;
+      return true;
     }
     return false;
   }
@@ -305,6 +318,7 @@ export class TuiSession {
       screen: this.screen,
       battDpu: this.battDpu,
       battPack: this.battPack,
+      battScroll: this.battScroll,
       alertScroll: this.alertScroll,
     };
     return renderScreen(sv, {
