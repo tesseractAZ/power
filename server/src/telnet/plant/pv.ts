@@ -7,19 +7,12 @@
 
 import { c, padEnd, padStart, BOX } from '../ansi.js';
 import { divider, gauge, stateGlyph } from './scada.js';
-import { getDpus, fmtW, fmtPct, deviceQuality, sum } from './data.js';
+import { getDpus, fmtW, fmtPct, deviceQuality, sum, generatorNumber } from './data.js';
 import type { PlantData, PlantView } from './types.js';
 import { shp2ConnectedDpuSns, isShp2Connected } from '../../shp2Membership.js';
 
-/** v1.0.0 — the physical generator number for a Core, parsed from its display name
- *  ("Core 3" / "DELTA-PRO-ULTRA-3" → 3). The MPPT table used to label rows by their
- *  position in the filtered array ("GEN 1, GEN 2, …"), so whenever any home Core was
- *  offline every row below it silently pointed at the wrong physical unit. */
-function generatorNumber(deviceName: string, fallbackIdx: number): number {
-  const m = deviceName?.match(/(\d+)/);
-  return m ? Number(m[1]) : fallbackIdx + 1;
-}
-
+// v1.0.1 — generatorNumber() promoted to data.ts (trd.ts's TRENDS screen needs the
+// same physical-vs-index fix). See data.ts for the constraint it enforces.
 export function renderPv(view: PlantView, data: PlantData): string[] {
   const W = view.width;
   const out: string[] = [];
@@ -40,11 +33,19 @@ export function renderPv(view: PlantView, data: PlantData): string[] {
   /* ── array summary ────────────────────────────────────────────── */
   out.push(divider('PV ARRAY — FLEET TOTAL', W));
   // v0.9.33 — was hard-coded 12000 / 4000 (assumed a 10-HV+4-LV string
-  // fleet). Each DPU has ONE HV MPPT (nameplate ~1600 W) and ONE LV MPPT
-  // (~1000 W). Scale by the actual number of online DPUs so the gauge is
+  // fleet). Scale by the actual number of online DPUs so the gauge is
   // meaningful regardless of fleet size. Fall back to safe minimums.
-  const PER_DPU_HV_W = 1600;
-  const PER_DPU_LV_W = 1000;
+  // audit g10-pv-peaks — the per-DPU numbers were themselves wrong. EcoFlow's own
+  // Delta Pro Ultra datasheet rates HV-PV at 4000 W (80-450V/15A) and LV-PV at
+  // 1600 W (30-150V/15A) — 5.6 kW/unit, matching EcoFlow's published 16.8kW/
+  // 3-inverter fleet figure. The old 1600/1000 guess sat BELOW the real HV cap,
+  // so a string running near its true hardware ceiling read as "over 100%" in
+  // the % text (the bar itself clamps at 100% — see gauge() in scada.ts — but
+  // the numeric label does not). Use the device's OWN hardware limit, not a
+  // historical-observed-peak proxy: unlike an observed max, the datasheet
+  // rating can never be exceeded by an actual reading.
+  const PER_DPU_HV_W = 4000;
+  const PER_DPU_LV_W = 1600;
   const peakHv = Math.max(PER_DPU_HV_W, dpus.length * PER_DPU_HV_W);
   const peakLv = Math.max(PER_DPU_LV_W, dpus.length * PER_DPU_LV_W);
   const peakTot = peakHv + peakLv;

@@ -139,7 +139,7 @@ function makeData(snap: FleetSnapshot, totals: FleetEnergyTotals | null = null):
 }
 
 function makeView(screen: ScreenId, width = 100, height = 40): SessionView {
-  return { width, height, screen, battDpu: 0, battPack: 0, alertScroll: 0 };
+  return { width, height, screen, battDpu: 0, battPack: 0, battScroll: 0, alertScroll: 0 };
 }
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -258,7 +258,7 @@ test('strategy marks disabled Pool Pump and shows mode codes honestly', () => {
   const lines = renderScreen(makeView('strategy'), makeData(buildSnapshot()));
   const plain = lines.map(stripAnsi).join('\n');
   assert.ok(/Pool Pump/.test(plain), 'Pool Pump circuit missing');
-  assert.ok(/disabled · off in SHP2/.test(plain), 'disabled circuit not clearly marked');
+  assert.ok(/disabled in SHP2/.test(plain), 'disabled circuit not clearly marked');
   assert.ok(/raw SHP2 codes/.test(plain), 'mode enums not labelled as raw codes');
   // TOU task is disabled → windows must be flagged not-active, not presented live.
   assert.ok(/not active|gate disabled|task disabled/.test(plain), 'TOU disabled-task gate not respected');
@@ -311,6 +311,54 @@ test('battery matrix + vitals clamp SoH display to ≤ 100%', () => {
   }
   // The clamped matrix value is what shows.
   assert.ok(/100\.0%/.test(plain), `clamped SoH 100.0% not present:\n${plain}`);
+});
+
+test('v1.4.0 (audit rank 4) — the alert-priority badge survives the header at 80 cols', () => {
+  // The fixture carries one warning-tier alert → a priority badge. Before, the badge was
+  // appended after the 5 telemetry segments and the line was padEnd-truncated, so at 80 cols
+  // it silently vanished on every screen. Now an active alarm leads and can't be evicted.
+  const data = makeData(buildSnapshot({ pv: true }), makeTotals());
+  const statusRow = (screen: ScreenId, w: number) =>
+    renderScreen(makeView(screen, w, 24), data).map(stripAnsi).find((l) => /BACKUP/.test(l)) ?? '';
+  for (const screen of ['overview', 'alerts', 'battery'] as const) {
+    const header = statusRow(screen, 80);
+    assert.ok(/\bHIGH\b|\bMED\b|\bLOW\b|\bCRIT\b/.test(header),
+      `alert badge missing from the ${screen} header at 80 cols:\n${header}`);
+    assert.ok(header.length <= 80, `header exceeds 80 cols on ${screen}: ${header.length}`);
+  }
+  // A NOMINAL fleet (no alerts) still shows telemetry + NOMINAL, not a bare line.
+  const snap = buildSnapshot({ pv: true }); snap.alerts = [];
+  const nom = renderScreen(makeView('overview', 80, 24), makeData(snap, makeTotals()))
+    .map(stripAnsi).find((l) => /BACKUP/.test(l)) ?? '';
+  assert.ok(/GRID|OFF-GRID/.test(nom) && /BACKUP/.test(nom), `telemetry missing when NOMINAL:\n${nom}`);
+});
+
+test('v1.4.0 (audit rank 5) — battery detail PAGINATES at 80x24 instead of silently truncating', () => {
+  // Before: bodyBattery flattened packDetail() into one array and renderScreen's fit()
+  // sliced it to contentH with no cue, silently dropping SoH/LIFETIME/CAPACITY FADE/CELL
+  // TEMPERATURES/MOSFET/PTC and all 32 CELL VOLTAGES on the default 80x24 terminal.
+  const snap = buildSnapshot({ pv: true });
+  const data = makeData(snap, makeTotals());
+
+  // The whole detail fits a tall terminal — CELL VOLTAGES present, no scroll hint needed.
+  const wide = renderScreen(makeView('battery', 160, 50), data).map(stripAnsi).join('\n');
+  assert.ok(/CELL VOLTAGES/.test(wide), 'wide terminal must show the full pack detail');
+
+  // At 80x24 the detail overflows, so pagination MUST engage: a scroll hint appears,
+  // and it names the battery-specific [ ] keys (↑/↓ are claimed by DPU/pack nav).
+  const p0 = renderScreen(makeView('battery', 80, 24), data).map(stripAnsi).join('\n');
+  assert.ok(/\[ \] scroll — \d+-\d+ of \d+/.test(p0), `no scroll hint at 80x24:\n${p0}`);
+  assert.ok(p0.split('\n').length <= 24, 'the rendered screen must fit 24 rows');
+
+  // The content the old code silently dropped is REACHABLE by scrolling — not gone.
+  // paginate() keeps whole blocks, so a given section may sit on any page; the property
+  // that matters is that it appears on SOME page across the full scroll range.
+  const pagesUnion = Array.from({ length: 40 }, (_, s) =>
+    renderScreen({ ...makeView('battery', 80, 24), battScroll: s }, data).map(stripAnsi).join('\n'),
+  ).join('\n');
+  for (const section of ['SoH', 'CELL VOLTAGES', 'MOSFET', 'CELL TEMP']) {
+    assert.ok(pagesUnion.includes(section), `"${section}" unreachable across all battery pages`);
+  }
 });
 
 test('battery screen surfaces the offline-freeze (held-from-last-known) state', () => {

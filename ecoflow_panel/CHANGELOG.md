@@ -1,3 +1,40 @@
+## v1.4.0 — TUI display fixes (21-dimension audit, part 3)
+
+The audit captured every telnet TUI screen at 80x24 (the default terminal) and 160x50 and
+diffed them. This release lands the confirmed, adversarially-verified fixes for content that
+the 80-column render silently dropped or corrupted. Ten finding-groups; each patch spec was
+independently re-verified for anchor/semantics/regression before applying.
+
+### The alert-priority badge was silently dropped on every screen at 80 cols (rank 4)
+The header's CRIT/HIGH/MED/LOW/NOMINAL badge — the TUI's only persistent at-a-glance alarm
+cue — was appended after the five telemetry segments, and the whole line was truncated to
+width. At 80 cols the telemetry consumed the full width and the badge vanished, **including on
+the ALERTS screen itself.** Now the separator is compact and an ACTIVE alarm leads the line,
+so it can never be the segment truncation eats.
+
+### The BATTERY screen silently dropped SoH / thermal grids / all 32 cell voltages (rank 5)
+`bodyBattery` returned a flat, unpaginated array that the renderer sliced to the terminal
+height with no cue. At 80x24 everything below the pack table vanished. It now paginates like
+the SHP2/Alerts/Predictive screens, scrolled with `[` / `]` (↑/↓ drive DPU/pack selection).
+
+### Charge-ETA shown during a discharge (rank 16)
+Both the SHP2 "To full" and the plant CONSOLE "CHG" rendered the raw SHP2 field, so a charge
+ETA appeared while the pool was draining. Both now gate on the same `fleetBatteryNet > 50 W`
+discharge signal the `backup_charge_minutes` HA sensor uses.
+
+### Also fixed
+- **STRATEGY** paginates; the "CIRCUIT SHED ORDER" caption and Pool-Pump state no longer
+  truncate at 80 cols (ranks 17, 24, 42).
+- **TRD** generator tags use the physical Core number, not the online-index (rank 23).
+- **CONSOLE** flag column agrees with the row's own state glyph; fleet-aggregate tag quality
+  reflects the worst contributing member, not the first (ranks 19, 20, 22, 38).
+- **BUS** per-circuit STATE column and the split-phase glyph survive 80 cols (ranks 34, 40).
+- **PV** array gauges use the observed array peak, so they no longer pin over 100% (rank 21).
+- **BATTERY** arrowing to a pack-less spare Core no longer silently shows Core 1's data under
+  the wrong header (rank 32).
+
+Tests 1239 → 1241.
+
 ## v1.3.1 — engines, physics and observability (21-dimension audit, part 2)
 
 ### The alarm-facing PV forecast could exceed physics

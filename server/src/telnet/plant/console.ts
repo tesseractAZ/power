@@ -24,10 +24,10 @@ import {
 } from './scada.js';
 import {
   getDpus, getShp2, gridAcInWatts, sum, avg, uptime,
-  fmtW, fmtPct, fmtVolt, socState, deviceQuality,
+  fmtW, fmtPct, fmtVolt, socState, deviceQuality, alarmLetter,
 } from './data.js';
 import type { PlantData, PlantView } from './types.js';
-import type { AlarmState } from './scada.js';
+import type { AlarmState, Quality } from './scada.js';
 // v0.11.0 — the alarm banner is keyed on the 4-tier ISA-18.2 / IEC 62682
 // priority (Critical/High/Medium/Low) instead of the raw severity.
 import { priorityOf, comparePriority, type AlarmPriority } from '../../alertPriority.js';
@@ -39,7 +39,7 @@ import { priorityOf, comparePriority, type AlarmPriority } from '../../alertPrio
 import { liveGridBackstop } from '../../gridState.js';
 // v1.0.0 — the authoritative fleet aggregate + SHP2 membership, shared with the
 // fleet_pv_watts / fleet_battery_net_watts HA sensors and the summary TUI.
-import { aggregateFleetFlow, shp2ConnectedDpuSns, isShp2Connected } from '../../shp2Membership.js';
+import { aggregateFleetFlow, shp2ConnectedDpuSns, isShp2Connected, homeCoreCoverage } from '../../shp2Membership.js';
 
 /** v0.36.0 — the three operator-facing grid states (see import note above). */
 type GridState = 'active' | 'standby' | 'islanded';
@@ -130,7 +130,24 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   // measured bus voltage directly. We synthesize from out-AC voltage of the
   // first online DPU as an approximation; mark UNCERTAIN quality.
   const busV = avg(dpus.map((d) => d.projection.acOutVol));
-  const dpuQual = dpus[0] ? deviceQuality(dpus[0]) : 'bad';
+  // v1.3.1 (audit rank 20/38) — PV.ARRAY.P / BATT.P.NET / GRID.AC.P / BUS.MAIN.V below each
+  // sum or average EVERY SHP2-connected home Core, but used to report the quality of
+  // `dpus[0]` alone — the first-sorted ONLINE Core. `dpus` is already `.online`-filtered, so
+  // a cloud-wedged Core simply isn't in it: its silent zero contribution to the sum still
+  // read 'good' off whichever Core happened to sort first. homeCoreCoverage() is the roster
+  // check that catches that (SHP2-connected count vs. how many are actually reporting); an
+  // incomplete roster forces 'bad' — the sum is missing a member, not just stale — same as
+  // when no Core at all is online.
+  const coverage = homeCoreCoverage(data.snap.devices);
+  const dpuQual: Quality = !coverage.complete
+    ? 'bad'
+    : dpus.length
+      ? dpus.reduce<Quality>((worst, d) => worseOf(worst, deviceQuality(d)), 'good')
+      : 'bad';
+  // BUS.MAIN.V is doubly derated: the coverage gate above, AND the synthesized-proxy caveat
+  // in the comment above busV — it is never a true measured bus voltage, so 'good' was
+  // always wrong when present.
+  const busQual: Quality = !coverage.complete ? 'bad' : busV != null ? 'uncertain' : 'bad';
 
   const tagRows = [
     renderTagRow({
@@ -138,7 +155,7 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
       value: busV != null ? busV.toFixed(1) : '—',
       unit: 'V',
       state: 'normal',
-      quality: busV != null ? 'good' : 'bad',
+      quality: busQual,
       flags: 'A/L/N',
     }, W),
     renderTagRow({
@@ -161,7 +178,10 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
       ...fmtPct(soc, 1),
       state: socState(soc),
       quality: shp2 ? deviceQuality(shp2) : dpuQual,
-      flags: 'A/L/N',
+      // Was a hardcoded 'N' regardless of state — a warn/alarm SOC glyph
+      // could sit next to a flags column still claiming Normal. Derive the
+      // letter from the SAME socState() band driving the glyph above.
+      flags: `A/L/${alarmLetter(socState(soc))}`,
     }, W),
     renderTagRow({
       tag: 'BATT.P.NET',
@@ -219,9 +239,12 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
       c.grey('  full ') + c.white(`${((p.backupFullCapWh ?? 0) / 1000).toFixed(2)} kWh`),
       W,
     ));
-    // Discharge / charge time projections.
+    // Discharge / charge time projections. CHG is gated the same way as index.ts's
+    // `backup_charge_minutes` (fleetBatteryNet > 50 W discharge, audit rank 16): SHP2's own
+    // backupChargeTimeMin field can hold a stale / PV-forecast ETA while the pool is actively
+    // discharging, which would show a charge-completion time during a real drawdown.
     const dchMin = p.backupDischargeTimeMin;
-    const chMin = p.backupChargeTimeMin;
+    const chMin = batNet > 50 ? null : p.backupChargeTimeMin;
     out.push(padEnd(
       '  ' + c.grey('RUN ') + (dchMin != null
         ? c.yellow(`▼ DCH ${fmtMinutes(dchMin)}`)
@@ -236,6 +259,16 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   }
 
   return out;
+}
+
+/**
+ * Quality ranking for the fleet-aggregate tag rows — WORST of the contributing home Cores
+ * wins, never best-of. One comm-good Core must not paper over a comm-bad or entirely-missing
+ * one; see the `dpuQual` / `busQual` computation above for the coverage half of this check.
+ */
+function worseOf(a: Quality, b: Quality): Quality {
+  const rank: Record<Quality, number> = { good: 0, stale: 1, uncertain: 2, bad: 3 };
+  return rank[b] > rank[a] ? b : a;
 }
 
 function fmtMinutes(m: number): string {

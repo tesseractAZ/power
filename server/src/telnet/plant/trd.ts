@@ -10,7 +10,7 @@ import { c, padEnd, padStart, truncate, BOX } from '../ansi.js';
 import { divider, trendStrip, stateGlyph } from './scada.js';
 import {
   getDpus, getShp2, fmtW, fmtPct, fmtVolt,
-  socState, deviceQuality, sum,
+  socState, deviceQuality, sum, generatorNumber,
 } from './data.js';
 import type { PlantData, PlantView } from './types.js';
 import type { Recorder } from '../../recorder.js';
@@ -41,8 +41,13 @@ export function renderTrd(view: PlantView, data: PlantData, ctx: TrdContext): st
   const dpus = getDpus(data).filter((d) => d.online);
   for (let i = 0; i < dpus.length; i++) {
     const d = dpus[i];
-    tags.push({ tag: `GEN.${i + 1}.PV.P`,  metricSn: d.sn, metric: 'pv_total', unit: 'W' });
-    tags.push({ tag: `GEN.${i + 1}.P.OUT`, metricSn: d.sn, metric: 'ac_out',  unit: 'W' });
+    // v1.0.1 — label by the PHYSICAL generator number (see data.ts), not the position
+    // in this ONLINE-filtered array: when a home Core is cloud-wedged, filtering drops
+    // it and shifts every tag below it onto the wrong Core — exactly the moment an
+    // operator is reading trends to diagnose which unit is actually faulted.
+    const gen = generatorNumber(d.deviceName, i);
+    tags.push({ tag: `GEN.${gen}.PV.P`,  metricSn: d.sn, metric: 'pv_total', unit: 'W' });
+    tags.push({ tag: `GEN.${gen}.P.OUT`, metricSn: d.sn, metric: 'ac_out',  unit: 'W' });
   }
 
   for (const t of tags) {

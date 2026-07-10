@@ -44,14 +44,24 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
   // which shifted every header column one space LEFT of where the data
   // landed. The fix: 3-space header prefix to match the glyph's column.
   const headers = ['CH', 'NAME', 'BRK', 'V', 'P', 'A', 'LOAD%', 'STATE'];
+  // Column-width budget: prefix(3) + CH + NAME(22) + BRK(5) + V(4) + P(10) +
+  // A(6) + LOAD%-wrapper + STATE(6) + 7 join-spaces must total <= 80 — the
+  // default negotiated NAWS terminal is 80x24, and index.ts's renderPlant()
+  // does padEnd(body[i], W) with NO wrap, so anything past column 80 is
+  // silently truncated off, including STATE (the per-circuit alarm/warn/
+  // idle text). CH is 7 (not 6) so "10+12 ⇶" (7 visible chars — the only
+  // double-digit+double-digit pair) keeps its split-phase glyph instead of
+  // padEnd() truncating it away. The 8 columns that costs come back out of
+  // LOAD%'s bar width below (gw), which is decorative — no numeric or name
+  // data is shortened.
   out.push('   ' + c.grey([
-    padEnd(headers[0], 6),
+    padEnd(headers[0], 7),
     padEnd(headers[1], 22),
     padStart(headers[2], 5),
     padStart(headers[3], 4),
     padStart(headers[4], 10),
     padStart(headers[5], 6),
-    '  ' + padEnd(headers[6], 16),
+    '  ' + padEnd(headers[6], 8),
     padEnd(headers[7], 6),
   ].join(' ')));
 
@@ -93,7 +103,11 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
     const watts = r.w ?? 0;
     const amps = r.breaker ? watts / r.v : null;
     const pct = r.breaker ? Math.min(100, (Math.abs(watts) / (r.breaker * r.v)) * 100) : 0;
-    const gw = 14;
+    // gw shrunk 14->6 (and the LOAD%-wrapper below 16->8) to give back the
+    // 8 columns CH/STATE need to both fit an 80-col frame — see the header
+    // comment above for the full column-width budget. The bar is purely
+    // decorative; the watts/amps/pct numbers next to it are untouched.
+    const gw = 6;
     const gColor: 'green' | 'yellow' | 'red' =
       r.state === 'alarm' ? 'red' : r.state === 'warn' ? 'yellow' : 'green';
     const stateText =
@@ -102,13 +116,18 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
       watts < 1 ? c.grey('IDLE') : c.green('OK');
 
     out.push(' ' + stateGlyph(r.state) + ' ' + [
-      padEnd(c.whiteB(r.ch) + (r.isSplit ? c.grey(' ⇶') : ''), 6),
+      // CH is 7 wide, not 6: "10+12 ⇶" is 7 visible chars, and padEnd()
+      // truncates (never overflows) when content exceeds width — at 6 it
+      // was silently dropping the ⇶ for every double-digit+double-digit
+      // pair (only 10+12 today, but the next one is one paired-circuit
+      // rename away).
+      padEnd(c.whiteB(r.ch) + (r.isSplit ? c.grey(' ⇶') : ''), 7),
       padEnd(truncate(c.white(r.name), 22), 22),
       padStart(r.breaker != null ? `${r.breaker}A` : '—', 5),
       padStart(`${r.v}`, 4),
       padStart(fmtKw(watts), 10),
       padStart(amps != null ? `${amps.toFixed(1)}A` : '—', 6),
-      '  ' + padEnd(gauge(pct, gw, gColor) + ` ${pct.toFixed(0).padStart(3)}%`, 16),
+      '  ' + padEnd(gauge(pct, gw, gColor) + ` ${pct.toFixed(0).padStart(3)}%`, 8),
       padEnd(stateText, 6),
     ].join(' '));
   }
