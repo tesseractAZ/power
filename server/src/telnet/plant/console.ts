@@ -37,6 +37,9 @@ import { priorityOf, comparePriority, type AlarmPriority } from '../../alertPrio
 // SHP2 main backstop path — or DPU ac_in import), AVAILABLE (present/declared but
 // on standby), and OFF-GRID (islanded).
 import { liveGridBackstop } from '../../gridState.js';
+// v1.0.0 — the authoritative fleet aggregate + SHP2 membership, shared with the
+// fleet_pv_watts / fleet_battery_net_watts HA sensors and the summary TUI.
+import { aggregateFleetFlow, shp2ConnectedDpuSns, isShp2Connected } from '../../shp2Membership.js';
 
 /** v0.36.0 — the three operator-facing grid states (see import note above). */
 type GridState = 'active' | 'standby' | 'islanded';
@@ -46,12 +49,20 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   const out: string[] = [];
 
   const shp2 = getShp2(data);
-  const dpus = getDpus(data).filter((d) => d.online);
-  const pv = sum(dpus, (d) => d.projection.pvTotalWatts);
+  // v1.0.0 — the CONSOLE is the HOME-plant faceplate: every fleet figure on it must be
+  // scoped to the SHP2-connected home Cores. A bench SPARE Core (online, self-charging on
+  // its own panels) used to leak into PV, battery-net, bus voltage and device quality here.
+  //   • PV + battery-net now read the SAME authoritative aggregate as the fleet_pv_watts /
+  //     fleet_battery_net_watts HA sensors and the summary TUI (aggregateFleetFlow: online
+  //     AND SHP2-connected; per-pack net where POSITIVE = discharging). This also retires
+  //     the pre-v0.96.0 DPU-throughput formula (totalOut − totalIn), which is inverter
+  //     throughput, not battery DC flow, and overstated the rate.
+  //   • `dpus` (bus voltage, device quality, and the no-SHP2 fallbacks) is likewise gated.
+  // Result: the SCADA console can no longer disagree with the HA sensors for one instant.
+  const { fleetPv: pv, fleetBatteryNet: batNet } = aggregateFleetFlow(data.snap.devices);
+  const connectedSns = shp2ConnectedDpuSns(data.snap.devices);
+  const dpus = getDpus(data).filter((d) => d.online && isShp2Connected(d.sn, connectedSns));
   const acIn = gridAcInWatts(data);
-  const totIn = sum(dpus, (d) => d.projection.totalInWatts);
-  const totOut = sum(dpus, (d) => d.projection.totalOutWatts);
-  const batNet = totOut - totIn;        // positive = discharging
   const soc = shp2?.projection.backupBatPercent ?? avg(dpus.map((d) => d.projection.soc));
   const load = shp2
     ? sum(shp2.projection.circuits, (cir) => cir.watts)

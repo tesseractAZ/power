@@ -9,13 +9,27 @@ import { c, padEnd, padStart, BOX } from '../ansi.js';
 import { divider, gauge, stateGlyph } from './scada.js';
 import { getDpus, fmtW, fmtPct, deviceQuality, sum } from './data.js';
 import type { PlantData, PlantView } from './types.js';
+import { shp2ConnectedDpuSns, isShp2Connected } from '../../shp2Membership.js';
+
+/** v1.0.0 — the physical generator number for a Core, parsed from its display name
+ *  ("Core 3" / "DELTA-PRO-ULTRA-3" → 3). The MPPT table used to label rows by their
+ *  position in the filtered array ("GEN 1, GEN 2, …"), so whenever any home Core was
+ *  offline every row below it silently pointed at the wrong physical unit. */
+function generatorNumber(deviceName: string, fallbackIdx: number): number {
+  const m = deviceName?.match(/(\d+)/);
+  return m ? Number(m[1]) : fallbackIdx + 1;
+}
 
 export function renderPv(view: PlantView, data: PlantData): string[] {
   const W = view.width;
   const out: string[] = [];
-  const dpus = getDpus(data).filter((d) => d.online);
+  // v1.0.0 — the PV screen is the HOME array. A bench SPARE Core with its own panels is
+  // not part of it: it used to inflate FLEET TOTAL / HV / LV and add a phantom GEN row.
+  // Scope to online AND SHP2-connected Cores, matching the fleet_pv_watts HA sensor.
+  const connectedSns = shp2ConnectedDpuSns(data.snap.devices);
+  const dpus = getDpus(data).filter((d) => d.online && isShp2Connected(d.sn, connectedSns));
   if (dpus.length === 0) {
-    out.push(c.grey('  No DPUs online — no PV array data.'));
+    out.push(c.grey('  No home Cores online — no PV array data.'));
     return out;
   }
 
@@ -61,7 +75,9 @@ export function renderPv(view: PlantView, data: PlantData): string[] {
     const hvErr = (p.pvHighErrCode ?? 0) > 0;
     const lvErr = (p.pvLowErrCode ?? 0) > 0;
     out.push('  ' + [
-      padEnd(c.whiteB(`GEN ${i + 1}`), 8),
+      // v1.0.0 — label by the PHYSICAL generator number, not the array index: with any
+      // home Core offline, index-labelling shifted every row below it onto the wrong unit.
+      padEnd(c.whiteB(`GEN ${generatorNumber(d.deviceName, i)}`), 8),
       padStart(fmtVStr(p.pvHighVolts), 7),
       padStart(fmtAStr(p.pvHighAmps), 7),
       padStart(fmtKw(p.pvHighWatts ?? 0), 9),
