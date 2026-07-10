@@ -21,7 +21,7 @@ import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '.
 // AVAILABLE (present/declared but on standby), and OFF-GRID (islanded). homeGridWatts
 // (SHP2 main) catches the backstop path that DPU ac_in import alone is blind to.
 import { liveGridBackstop } from '../gridState.js';
-import { isSourceDpuStale, shp2ConnectedDpuSns, aggregateFleetFlow } from '../shp2Membership.js';
+import { isSourceDpuStale, shp2ConnectedDpuSns, isShp2Connected, aggregateFleetFlow } from '../shp2Membership.js';
 
 // v0.15.15 — the CHARGER screen was removed with the web Charger tab: the EVSE
 // is app-only (no API/MQTT telemetry) and its host DPU (Core 4) is an offline
@@ -282,13 +282,15 @@ function titleLine(sv: SessionView, w: number): string {
 
 function statusLine(data: RenderData, w: number): string {
   const { snap } = data;
-  const dpus = getDpus(snap).filter((d) => d.online && d.projection);
+  // v1.0.0 — home Cores only (see bodyOverview).
+  const connectedSns = shp2ConnectedDpuSns(snap.devices);
+  const dpus = getDpus(snap).filter((d) => d.online && d.projection && isShp2Connected(d.sn, connectedSns));
   const shp2 = getShp2(snap);
-  const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
   // v0.96.0 — read the SAME fleet battery-net the `fleet_battery_net_watts` HA sensor
   // emits (aggregateFleetFlow = online AND SHP2-connected), not a local sum over all
   // online DPUs — the latter leaked spare-Core bench/PV pack flow into the header.
-  const batNet = aggregateFleetFlow(snap.devices).fleetBatteryNet;
+  // v1.0.0 — PV joins it on the same aggregate (== the fleet_pv_watts sensor).
+  const { fleetPv: pv, fleetBatteryNet: batNet } = aggregateFleetFlow(snap.devices);
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const backup = shp2?.projection.backupBatPercent ?? null;
   // v0.36.0 — three grid states from the backstop resolver, not just off-grid vs tied.
@@ -358,17 +360,26 @@ function renderBody(sv: SessionView, data: RenderData, w: number, h: number): st
 
 function bodyOverview(data: RenderData): string[] {
   const { snap, totals, forecast } = data;
-  const dpus = getDpus(snap).filter((d) => d.online && d.projection);
+  // v1.0.0 — gate the DPU set to the SHP2-connected home Cores, matching every fleet
+  // sensor. A bench SPARE Core is not part of the home plant.
+  const connectedSns = shp2ConnectedDpuSns(snap.devices);
+  const dpus = getDpus(snap).filter((d) => d.online && d.projection && isShp2Connected(d.sn, connectedSns));
   const shp2 = getShp2(snap);
   const allDev = Object.values(snap.devices);
-  const pv = sum(dpus, (d) => d.projection!.pvTotalWatts);
   // v0.46.0 — battery net = Σ per-pack (outputWatts − inputWatts); +discharge/−charge.
   // DPU throughput (totalOut − totalIn) overstated the rate and is no longer used.
   // v0.96.0 — sourced from aggregateFleetFlow (online AND SHP2-connected), the exact
   // basis of the `fleet_battery_net_watts` HA sensor, so the header can no longer show
   // a spare Core's bench/PV pack flow as a phantom fleet discharge.
-  const batNet = aggregateFleetFlow(snap.devices).fleetBatteryNet;
-  const soc = avg(dpus.map((d) => d.projection!.soc));
+  // v1.0.0 — PV joins it on the same aggregate (== the fleet_pv_watts sensor).
+  const { fleetPv: pv, fleetBatteryNet: batNet } = aggregateFleetFlow(snap.devices);
+  // v1.0.0 — the ENERGY-FLOW "Battery" tile is the HOME BACKUP POOL, so it reads the SHP2's
+  // own authoritative pool % — the very number this screen already prints twice (header
+  // "BACKUP" and the SHP2 line). It used to be an unweighted mean of every online DPU's SoC
+  // INCLUDING the bench spares, so a spare at a different charge state silently dragged the
+  // headline battery gauge away from the pool it is supposed to represent. Falls back to the
+  // connected-Core mean only when there is no SHP2 (DPU-only installs).
+  const soc = shp2?.projection.backupBatPercent ?? avg(dpus.map((d) => d.projection!.soc));
   const load = shp2 ? sum(shp2.projection.circuits, (cir) => cir.watts) : sum(dpus, (d) => d.projection!.acOutWatts);
   const activeCircuits = shp2 ? shp2.projection.circuits.filter((cir) => (cir.watts ?? 0) > 1).length : 0;
   // v0.36.0 — the SHP2 is the grid interconnect; grid backstops the home (active),
@@ -529,7 +540,11 @@ function bodyDevices(data: RenderData): string[] {
 
 function bodySolar(data: RenderData, w: number): string[] {
   const dpus = getDpus(data.snap);
-  const online = dpus.filter((d) => d.online && d.projection);
+  // v1.0.0 — "FLEET PV" is the HOME array. A bench SPARE Core with its own panels used to
+  // inflate the fleet PV / HV / LV totals here (and add a phantom per-Core row), making
+  // this screen disagree with the fleet_pv_watts HA sensor. Home Cores only.
+  const connectedSns = shp2ConnectedDpuSns(data.snap.devices);
+  const online = dpus.filter((d) => d.online && d.projection && isShp2Connected(d.sn, connectedSns));
   const pvTot = sum(online, (d) => d.projection!.pvTotalWatts);
   const hvTot = sum(online, (d) => d.projection!.pvHighWatts);
   const lvTot = sum(online, (d) => d.projection!.pvLowWatts);

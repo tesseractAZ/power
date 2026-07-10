@@ -3,6 +3,22 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 1.0.0 — 2026-07-09
+
+**One definition of "the home fleet."** v0.96.0 unified the TUI fleet *battery-net* with the `fleet_battery_net_watts` HA sensor. This finishes the job: every remaining surface that aggregated over "all online DPUs" now uses the same **online AND SHP2-connected** membership, so a bench **spare Core** (online, self-charging on its own panels) can no longer leak into a home-plant figure. `tsc` clean; suite **1180** (+1 guard). Live today all 3 SHP2 slots report `isConnected=true`, so the emitted numbers are unchanged — these close *latent* divergences that appear the moment a spare is powered on or a slot drops.
+
+**[Fixed] (display) Plant CONSOLE — the SCADA faceplate no longer disagrees with the HA sensors.** `plant/console.ts` computed `BATT.P.NET` as `Σ(totalOutWatts − totalInWatts)` over *every* online DPU. That is inverter **throughput**, not battery DC flow (it overstates the rate — the pre-v0.96.0 formula), and it counted the spares. PV, bus voltage and device-quality had the same unfiltered membership. All four now read the authoritative `aggregateFleetFlow(devices)` / connected-Core set, identical to `fleet_battery_net_watts` and `fleet_pv_watts`.
+
+**[Fixed] (display) Fleet PV totals are the HOME array everywhere.** `telnet/screens.ts` (status bar, Overview, Solar screen) and `plant/pv.ts` (FLEET TOTAL / HV / LV, plus the per-Core MPPT table) summed PV across all online DPUs, so a spare's bench panels inflated the home array and made the TUI disagree with `fleet_pv_watts`. Now gated to SHP2-connected Cores.
+
+**[Fixed] (display) The Overview "Battery" tile shows the SHP2 backup pool.** It was an *unweighted mean of every online DPU's SoC* — spares included — while the very same screen printed the correct pool % twice (header `BACKUP` and the SHP2 line). A spare at a different charge state silently dragged the headline battery gauge away from the pool it represents. It now reads `backupBatPercent`, falling back to the connected-Core mean only on DPU-only installs.
+
+**[Fixed] (display) Plant PV MPPT rows are labelled by physical generator number.** Rows were labelled `GEN 1, GEN 2, …` by their position in the filtered array, so with any home Core offline every row below it silently pointed at the wrong physical unit. Now parsed from the device name.
+
+**[Fixed] (accuracy, stored data) Recorder lifetime membership requires `isConnected`.** `recorder.ts sourceSnsOf()` took every SHP2 slot that merely reported an SN. A slot the SHP2 itself no longer counts as connected (a Core dropped off the home bus while still listed) kept feeding the **HA Energy lifetime counters** (`fleet_pv_wh`, `fleet_load_wh`, `fleet_grid_*_wh`) and the per-pack BMS detail — and those are `total_increasing`, so a stale contributor inflates them permanently. It now delegates to the canonical `shp2ConnectedDpuSns`, giving the recorder, `aggregateFleetFlow` and the live sensors a single shared definition of home-fleet membership.
+
+**[Test]** New render guard: a spare Core with 9 kW of bench panels does not enter the Overview's fleet PV, and the Battery tile reads the SHP2 pool (48%) rather than the DPU SoC mean (60%).
+
 ## 0.99.0 — 2026-07-09
 
 **Test determinism (no production behavior change).** `tsc` clean; suite **1179** green regardless of time-of-day.
