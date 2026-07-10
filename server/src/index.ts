@@ -1302,7 +1302,19 @@ app.get('/api/ha-state', async (req, reply) => {
     load_kwh_7d: selfCons.loadKwh,
     battery_charge_kwh_7d: selfCons.batteryChargeKwh,
     battery_discharge_kwh_7d: selfCons.batteryDischargeKwh,
-    grid_import_kwh_7d: selfCons.gridImportKwh,
+    // v1.1.0 — WHOLE-HOME grid over the window, not the DPU-charging subset.
+    // `selfCons.gridImportKwh` is documented as "DPU ac_in — grid that CHARGED the DPUs (a
+    // subset of total home grid)". On this SHP2 home the grid flows through the panel main
+    // and never touches DPU ac_in, so it reads 0 — while `tariff_grid_import_cost_7d_dollars`
+    // costed the whole-home grid and read $61.33. The emitted pair was a flat contradiction:
+    // a $61 grid bill on zero grid kWh. ($61.33 ÷ $0.17/kWh ≈ 361 kWh ≈ load_kwh_7d 781 ×
+    // (1 − 53.6% solar) — the tariff was right.) `gridForKpiKwh` is the same coverage-gated
+    // whole-home superset the tariff, solar_fraction and carbon KPIs already use, so all four
+    // now agree. It is null when grid_home_w can't be trusted, publishing "unknown" rather
+    // than a wrong number — the same posture as solar_fraction_of_load_percent.
+    // NOTE: `grid_import_lifetime_kwh` (the HA Energy Dashboard counter) still reads the
+    // ac_in-based `fleet_grid_import_wh` and is deliberately NOT changed here.
+    grid_import_kwh_7d: selfCons.gridForKpiKwh,
     solar_fraction_of_load_percent: selfCons.solarFractionOfLoadPct,
     direct_use_ratio_percent: selfCons.directUseRatioPct,
     // v0.69.0 — home-core coverage for the self-consumption KPIs. reporting < connected

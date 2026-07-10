@@ -32,6 +32,43 @@ export function mad(xs: number[], med: number): number {
   return median(xs.map((x) => Math.abs(x - med)));
 }
 
+/** The standard modified-z constant (0.6745 = Φ⁻¹(0.75), so MAD ≈ σ for normal data). */
+export const MODIFIED_Z_K = 0.6745;
+
+/**
+ * v1.1.0 — modified z-score with a VARIANCE FLOOR.
+ *
+ * `z = 0.6745·|x − med| / MAD` is unbounded as MAD → 0, and real telemetry hits that
+ * constantly: any metric that sits on one steady value across its whole comparison
+ * window has a near-zero MAD (an AC circuit idling at 135 W overnight). A genuine
+ * excursion then scores in the hundreds. Observed live, in an operator-facing HA
+ * notification: `z 610.4`.
+ *
+ * Two things break:
+ *   1. The number is meaningless to read.
+ *   2. The severity gate COLLAPSES. Once MAD ≈ 0, every deviation past the absolute
+ *      floor lands astronomically above Z_WARN, so the z-test stops discriminating and
+ *      only `floor` does any work — a bare floor-cross is indistinguishable from a 10×
+ *      excursion, and both emit a warning.
+ *
+ * Callers already declare the smallest deviation worth flagging (`floor`). We floor MAD
+ * at the value that makes a deviation of exactly `floor`, with zero observed variance,
+ * score exactly `zAtFloor`. That turns the previous ad-hoc `MAD === 0 → constant`
+ * fallbacks into the continuous limit of one rule, and keeps z interpretable: under
+ * degenerate variance `z === zAtFloor · (absDev / floor)` — literally "how many floors
+ * from typical". When the data has real scatter (MAD above that floor) the true modified
+ * z-score is returned unchanged, so well-behaved metrics are unaffected.
+ */
+export function robustZ(value: number, med: number, madValue: number, floor: number, zAtFloor: number): number {
+  const absDev = Math.abs(value - med);
+  if (!(floor > 0) || !(zAtFloor > 0)) {
+    // No usable floor — fall back to the raw statistic, guarding the MAD===0 singularity.
+    return madValue > 0 ? Math.abs((MODIFIED_Z_K * absDev) / madValue) : zAtFloor;
+  }
+  const madFloor = (MODIFIED_Z_K * floor) / zAtFloor;
+  return Math.abs((MODIFIED_Z_K * absDev) / Math.max(madValue, madFloor));
+}
+
 export interface LinFit {
   slopePerMs: number;
   intercept: number;        // fitted y at x = pts[0].ts

@@ -9,7 +9,7 @@ import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, nwsEventWindow, type NwsAlert } from './nws.js';
 import { PHOENIX_SITE } from './physics/clearSky.js';
-import { cToF, dpuNum, cap, median, mad, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
+import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
 import { singleFlight } from './singleFlight.js';
 
@@ -162,7 +162,10 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         // a *warning*; a bare floor-cross with no sibling spread isn't strong
         // enough for warning. Starting it at Z_INFO makes it surface as INFO
         // (still visible) until real scatter pushes the true z-score up.
-        const z = m > 0 ? Math.abs((0.6745 * (v - med)) / m) : Z_INFO;
+        // v1.1.0 — that only patched MAD === 0 exactly; MAD → 0⁺ still blew z up to the
+        // hundreds. robustZ() floors MAD so a floor-sized deviation with no scatter scores
+        // exactly Z_INFO — the continuous form of the same rule (see mathHelpers.robustZ).
+        const z = robustZ(v, med, m, metric.floor, Z_INFO);
         if (z < Z_INFO) continue;
 
         // v0.13.2 — hysteresis: this pack crossed the gate, but the learned
@@ -364,7 +367,15 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
       }
     }
 
-    const z = m > 0 ? Math.abs((0.6745 * (t.live - med)) / m) : Z_WARN;
+    // v1.1.0 — MAD-floored modified z. The hour-of-day bucket for a steady circuit has a
+    // near-zero MAD (an AC idling at 135 W), so the raw statistic blew up: an operator-facing
+    // HA notification literally read "z 610.4". That also COLLAPSED this severity gate —
+    // every past-floor deviation landed far above Z_WARN, so `z` stopped discriminating and
+    // only `t.floor` did any work. Flooring MAD makes a floor-sized deviation with zero
+    // scatter score exactly Z_INFO (matching the peer path's v0.13.2 reasoning: a bare
+    // floor-cross is INFO, not a warning), and a warning now needs ~1.43× the floor — or
+    // real scatter. Absolute-threshold alarms (alerts.ts CELL_TEMP etc.) are untouched.
+    const z = robustZ(t.live, med, m, t.floor, Z_INFO);
     if (z < Z_INFO) continue;
 
     const severity = z >= Z_WARN ? 'warning' : 'info';

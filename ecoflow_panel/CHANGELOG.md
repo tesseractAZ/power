@@ -3,6 +3,20 @@
 All notable changes to this add-on are listed here. Versioning follows
 [Semantic Versioning](https://semver.org).
 
+## 1.1.0 — 2026-07-10
+
+**Beyond the TUI: the engines, the data, and HA's notification drawer.** Three defects found by cross-checking the live `/api/ha-state`, the HA notification section (via the WebSocket `persistent_notification/get`, which is the only place they exist), and the analytics math. `tsc` clean; suite **1195** (+12 guards). No alarm-decision path changed.
+
+**[Fixed] (accuracy, math) The modified z-score no longer explodes when a metric has no scatter.** `z = 0.6745·|x − med| / MAD` is unbounded as MAD → 0, and real telemetry hits that constantly: any circuit sitting on one steady value all hour has a near-zero MAD. A live HA notification read:
+
+> `West Air conditioner load is 3190 W — 3054 W above its typical 135 W for this hour (baseline: 14.0 days of history, 1345 samples; z 610.4)`
+
+Two things broke. The number is meaningless to read — and the **severity gate collapsed**: once MAD ≈ 0, *every* deviation past the absolute floor lands far above `Z_WARN`, so `z` stopped discriminating and only `floor` did any work; a bare floor-cross was indistinguishable from a 10× excursion and both emitted a *warning*. The new `robustZ()` floors MAD at the value that makes a floor-sized deviation with zero scatter score exactly `Z_INFO` — turning the two ad-hoc `MAD === 0 → constant` fallbacks (which disagreed: `Z_WARN` on the self-baseline path, `Z_INFO` on the peer path) into the continuous limit of one rule. Under degenerate variance `z` is now simply `Z_INFO × (absDev / floor)` — "how many floors from typical". Real scatter is untouched: when MAD exceeds that floor the true statistic passes through. The live case scores **21.4 instead of 610.4** and still warns; a bare floor-cross is now correctly `info`. Absolute-threshold alarms (`alerts.ts` `CELL_TEMP` etc.) are unaffected.
+
+**[Fixed] (notifications) A resolved condition now DISMISSES its HA card instead of leaving a "Resolved:" card forever.** The HA channel re-`create`d the same `notification_id` on resolve, so cleared conditions accumulated in HA's notification drawer until dismissed by hand — live example: `ecoflow_panel_baseline_pair6_w_…` → *"EcoFlow · Resolved: West Air conditioner load unusual for the hour … (condition cleared)"*. A drawer full of resolved cards trains an operator to ignore it; the resolve record already lives in the cleared-anomalies log. A resolve now calls `persistent_notification.dismiss` on the exact card it fired on (`haNotificationId` slugs the `dedupId` and ignores severity, so fire-side and resolve-side ids match). Without a `dedupId` the fire used a per-severity id that can't be reconstructed from `'resolved'`, so those keep the old create-a-card behaviour rather than dismiss the wrong card.
+
+**[Fixed] (accuracy) `grid_import_kwh_7d` is the whole-home grid, ending a $61 bill on zero kWh.** It emitted `selfCons.gridImportKwh` — documented as *"DPU ac_in — grid that CHARGED the DPUs (a subset of total home grid)"*. On an SHP2 home the grid flows through the panel main and never touches DPU `ac_in`, so it read **0** while `tariff_grid_import_cost_7d_dollars` read **$61.33**. The tariff was right: `$61.33 ÷ $0.17/kWh ≈ 361 kWh ≈ load_kwh_7d 781 × (1 − 53.6 % solar)`. It now emits the coverage-gated whole-home superset `gridForKpiKwh` that the tariff, `solar_fraction_of_load_percent` and the carbon KPIs already share, so all four agree; it publishes `unknown` when `grid_home_w` can't be trusted rather than a wrong number. `grid_import_lifetime_kwh` (the HA Energy Dashboard counter) still reads the `ac_in`-based `fleet_grid_import_wh` and is deliberately unchanged.
+
 ## 1.0.1 — 2026-07-09
 
 **A live false alarm, found by driving the real TUI.** Capturing all 14 telnet screens against the running system showed all three home Cores painting a red `1C9` HV-MPPT error at dusk, and a `[warning] HV MPPT error code` alert actually firing. `tsc` clean; suite **1183** (+3 guards). No other alarm path changed.
