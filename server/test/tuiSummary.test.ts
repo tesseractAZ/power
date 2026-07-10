@@ -214,6 +214,26 @@ test('overview fleet battery-net EXCLUDES a spare (non-SHP2-connected) core', ()
   assert.ok(!/discharging/.test(plain), 'fleet header wrongly flipped to discharging with a spare present');
 });
 
+// v1.0.0 — the SAME SHP2-connected membership now governs fleet PV, and the ENERGY-FLOW
+// "Battery" tile reads the SHP2's own backup-pool % rather than an unweighted mean of every
+// online DPU's SoC (which silently included the bench spares).
+test('overview fleet PV excludes a spare core, and the Battery tile reads the SHP2 pool', () => {
+  const home1 = buildDpu(1, 'DPU-SN-1', { pvW: 4000 });
+  const home2 = buildDpu(2, 'DPU-SN-2', { pvW: 3000 });          // home array = 7.00 kW
+  const spare = buildDpu(3, 'SPARE-SN', { pvW: 9000 });          // bench panels — must NOT count
+  const shp2 = buildShp2('SHP2-SN', ['DPU-SN-1', 'DPU-SN-2']);   // backupBatPercent = 48
+  const devices: Record<string, DeviceSnapshot> = {};
+  for (const d of [home1, home2, spare, shp2]) devices[d.sn] = d;
+  const snap: FleetSnapshot = { generatedAt: Date.now(), devices, alerts: [] };
+
+  const plain = renderScreen(makeView('overview'), makeData(snap, makeTotals())).map(stripAnsi).join('\n');
+  assert.ok(/7\.00 kW/.test(plain), `home-array PV expected '7.00 kW', got:\n${plain}`);
+  assert.ok(!/16\.00 kW/.test(plain), "spare-core PV (9 kW) leaked into the overview's fleet PV total");
+  // Battery tile: the SHP2 pool is 48%; every DPU fixture SoC is 60%. Pre-fix it showed 60%.
+  assert.ok(/48%/.test(plain), `Battery tile must show the SHP2 backup pool (48%), got:\n${plain}`);
+  assert.ok(!/ 60%/.test(plain), 'Battery tile fell back to the unweighted DPU SoC mean (60%)');
+});
+
 /* ── Solar PV coverage (v0.44.0) ───────────────────────────────────────── */
 
 test('solar "% measured" uses PV-only coverage, not all-metric coverage', () => {

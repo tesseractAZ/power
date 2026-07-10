@@ -5,7 +5,7 @@ import { config } from './config.js';
 import { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
-import { SPARE_DPU_SNS } from './shp2Membership.js';
+import { SPARE_DPU_SNS, shp2ConnectedDpuSns } from './shp2Membership.js';
 
 interface MetricSample {
   sn: string;
@@ -715,15 +715,18 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
    */
   // v0.52.0 — the SHP2 `sources` SN set (home-fleet membership), used by both
   // buildContributors (lifetime-key contributor wiring) and
-  // computeBmsBatteryDetail (per-pack home-member filter). LITERAL copy of the
-  // former inline derivation: keep the `?? []`, the `.map((s) => s.sn)`, the
-  // `.filter((s): s is string => !!s)`, and the `new Set<string>()` fallback exact.
-  const sourceSnsOf = (snap: FleetSnapshot): Set<string> => {
-    const shp2 = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2');
-    return shp2
-      ? new Set(((shp2.projection as Shp2Projection).sources ?? []).map((s) => s.sn).filter((s): s is string => !!s))
-      : new Set<string>();
-  };
+  // computeBmsBatteryDetail (per-pack home-member filter).
+  //
+  // v1.0.0 — now delegates to the canonical `shp2ConnectedDpuSns`, which additionally
+  // requires `isConnected`. The former inline copy took EVERY slot that merely reported an
+  // SN, so a slot the SHP2 itself no longer counts as connected (a Core dropped off the
+  // home bus while still listed) kept feeding the HA Energy LIFETIME counters
+  // (fleet_pv_wh / fleet_load_wh / fleet_grid_*_wh) and the per-pack BMS detail. Those are
+  // total_increasing counters, so a stale contributor silently inflates them forever. Using
+  // one membership definition everywhere also means the recorder can no longer disagree
+  // with aggregateFleetFlow / the live sensors about which Cores are "the home fleet".
+  // (Live today: all 3 slots report isConnected=true, so this is a no-op hardening.)
+  const sourceSnsOf = (snap: FleetSnapshot): Set<string> => shp2ConnectedDpuSns(snap.devices);
 
   const buildContributors = (snap: FleetSnapshot): Record<string, Array<{ sn: string; metric: string }>> => {
     const out: Record<string, Array<{ sn: string; metric: string }>> = {
