@@ -103,7 +103,23 @@ test('outageTracking — rolls up count / total minutes / last ended+duration ov
 
 test('outageTracking — a clean 24 h reads zeros / null', () => {
   const t = outageTracking([], now, 24 * H);
-  assert.deepEqual(t, { count: 0, totalMinutes: 0, lastEndedMs: null, lastDurationMinutes: null });
+  assert.deepEqual(t, { count: 0, powerOutageCount: 0, telemetryGapCount: 0, totalMinutes: 0, lastEndedMs: null, lastDurationMinutes: null });
+});
+
+test('v1.4.1 — outageTracking splits the total into power outages vs cloud/telemetry gaps', () => {
+  // A restartSpanning gap = the add-on/host was DOWN across it (power/reboot). A non-spanning
+  // gap = a cloud/MQTT stall while the process kept running. The total must never mislabel a
+  // cloud blip as a power event.
+  const gaps = [
+    gap({ startMs: now - 300 * MIN, endMs: now - 250 * MIN, durationMs: 50 * MIN, restartSpanning: true }),  // power
+    gap({ startMs: now - 120 * MIN, endMs: now - 90 * MIN, durationMs: 30 * MIN, restartSpanning: false }),  // cloud
+    gap({ startMs: now - 60 * MIN, endMs: now - 40 * MIN, durationMs: 20 * MIN }),                            // cloud (unset → false)
+  ];
+  const t = outageTracking(gaps, now, 24 * H);
+  assert.equal(t.count, 3, 'total unchanged for existing consumers');
+  assert.equal(t.powerOutageCount, 1, 'only the restartSpanning gap is a power outage');
+  assert.equal(t.telemetryGapCount, 2, 'both cloud stalls (incl. unset) are telemetry gaps');
+  assert.equal(t.powerOutageCount + t.telemetryGapCount, t.count, 'split partitions the total');
 });
 
 /* ── v0.83.0 REGRESSION — the adversarial review caught the flagship case broken:
