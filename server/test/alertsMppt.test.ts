@@ -66,6 +66,27 @@ test('MPPT alert SUPPRESSED on sunset shutdown trickle (0 W, 0.275 A above old a
   assert.equal(hasHvErr(dpuWith({ pvHighErrCode: 457, pvHighVolts: 164, pvHighAmps: 0.275, pvHighWatts: 0 })), false);
 });
 
+test('MPPT alert SUPPRESSED on the dusk ramp-down (55 W reported but 0.0 A) — v1.0.1', () => {
+  // The live false-positive that slipped through the v0.9.81 WATT floor. Captured from the
+  // running system: Core 3 HV, code 457, 294 V, 0.0 A, 55 W — the alert text itself read
+  // "producing 55 W (294 V, 0.0 A)", i.e. EcoFlow's watt and amp fields disagree during the
+  // ramp-down. All three home Cores reported the identical 457 at that instant, and a real
+  // fault cannot be identical across independent units. Requiring BOTH watts and current
+  // rejects it; 55 W passes the watt floor but 0.0 A fails the amp floor.
+  assert.equal(hasHvErr(dpuWith({ pvHighErrCode: 457, pvHighVolts: 294, pvHighAmps: 0, pvHighWatts: 55 })), false);
+});
+
+test('MPPT alert STILL FIRES when watts AND current are both real (regression guard)', () => {
+  // The amp requirement must not mask a genuine producing-fault: 1.5 A is well clear of the
+  // 0.3 A shutdown-trickle floor.
+  assert.equal(hasHvErr(dpuWith({ pvHighErrCode: 457, pvHighVolts: 300, pvHighAmps: 1.5, pvHighWatts: 450 })), true);
+});
+
+test('MPPT alert falls back to the watt test when the device reports no current', () => {
+  // amps == null (no current telemetry) must NOT silently suppress a real code.
+  assert.equal(hasHvErr(dpuWith({ pvHighErrCode: 5, pvHighVolts: 380, pvHighAmps: null, pvHighWatts: 1596 })), true);
+});
+
 test('MPPT alert not raised at all when code is zero (baseline)', () => {
   assert.equal(hasHvErr(dpuWith({ pvHighErrCode: 0, pvHighVolts: 380, pvHighAmps: 4.2 })), false);
   assert.equal(hasLvErr(dpuWith({ pvLowErrCode: 0, pvLowVolts: 130, pvLowAmps: 0 })), false);
