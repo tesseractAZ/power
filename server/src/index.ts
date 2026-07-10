@@ -39,6 +39,7 @@ import { updateFromOutcome } from './models/onlineLR.js';
 import { computeModelHealth } from './models/modelHealth.js';
 import { physicsPmax, physicsScore, PHOENIX_SITE } from './physics/clearSky.js';
 import { analyzePackLfp } from './physics/lfpOcv.js';
+import { packCurrentAmps, observePackRest, lastNonRestingAtMs, retainPacks, packRestKey } from './physics/restTracker.js';
 import { fitHierarchical, findOutliers, type HBPackObs } from './models/hierarchicalBayes.js';
 import { recommendDispatch, type MpcInputs } from './dispatch/mpc.js';
 import {
@@ -1510,18 +1511,17 @@ app.get('/api/physics/lfp-soc', async (req, reply) => {
   for (const d of dpus) {
     const p = d.projection as any;
     for (const pk of (p.packs ?? [])) {
-      // We don't currently track per-pack "last non-resting" timestamp, so we
-      // proxy via: if the current pack draw is low NOW, assume rested. This
-      // is conservative — confidence stays low until we add proper tracking.
-      const packCurrentA = pk.outputWatts != null && pk.totalVoltage != null && pk.totalVoltage > 0
-        ? pk.outputWatts / pk.totalVoltage
-        : null;
+      // v1.2.0 — the old code read `pk.totalVoltage`, a field the pack projection has
+      // never had, so packCurrentA was null on every pack. Derive it from the real
+      // fields, and take `lastNonRestingAtMs` from the rest tracker fed by the poll
+      // loop (it was hardcoded null, pinning isResting false forever).
+      const packVoltageMv = pk.packVoltageMv ?? pk.adBatVoltageMv ?? null;
       const analysis = analyzePackLfp({
-        packVoltageMv: pk.packVoltageMv ?? pk.adBatVoltageMv ?? null,
+        packVoltageMv,
         reportedSoCPct: pk.soc ?? null,
         cellVoltagesMv: pk.cellVoltagesMv ?? [],
-        packCurrentA,
-        lastNonRestingAtMs: null, // not tracked yet — analysis will note this
+        packCurrentA: packCurrentAmps(pk.outputWatts, pk.inputWatts, packVoltageMv),
+        lastNonRestingAtMs: lastNonRestingAtMs(packRestKey(d.sn, pk)),
       });
       results.push({ device: d.deviceName, packNum: pk.num, analysis });
     }
@@ -1749,6 +1749,25 @@ app.get('/ws', {
 });
 
 const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m));
+
+/* v1.2.0 — feed the per-pack rest tracker. `analyzePackLfp` needs to know when a pack
+ * last moved current before it will trust pack voltage as a rested OCV; nothing was
+ * recording that, so `/api/physics/lfp-soc` reported isResting=false on all 15 packs and
+ * never produced a physics SoC. Sampled on the poll cadence — OCV settling is a 10-minute
+ * scale phenomenon, so a 60 s sample is ample. Keyed on the pack hardware serial. */
+const restTrackerTick = setInterval(() => {
+  const now = Date.now();
+  const keys: string[] = [];
+  for (const d of onlineDpus(store.get().devices)) {
+    for (const pk of ((d.projection as any)?.packs ?? [])) {
+      const key = packRestKey(d.sn, pk);
+      keys.push(key);
+      observePackRest(key, packCurrentAmps(pk.outputWatts, pk.inputWatts, pk.packVoltageMv ?? pk.adBatVoltageMv), now);
+    }
+  }
+  retainPacks(keys);
+}, POLL_INTERVAL_MS);
+restTrackerTick.unref?.();
 
 // v0.13.3 — periodic GHI persistence. v0.13.1 only persisted the weather
 // irradiance series from the /api/weather/ensemble HTTP handler, so GHI rows
@@ -2845,6 +2864,7 @@ const shutdown = async () => {
   app.log.info('shutting down');
   stopPoll();
   clearInterval(ghiPersistTick);
+  clearInterval(restTrackerTick);
   stopMqtt?.();
   monitor.stop();
   stopTelnet?.();
