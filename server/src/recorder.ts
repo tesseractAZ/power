@@ -717,6 +717,36 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   const writeLifetime = (key: string, wh: number, ts: number) => {
     lifetimeUpsertStmt.run(key, wh, ts);
   };
+  // v1.4.4 — see migrateLifetimeKey below: deletes a legacy row once its value
+  // has been copied forward under the new stable key, so it can never be
+  // rediscovered later as a second, stale contributor (double-count risk).
+  const lifetimeDeleteStmt = db.prepare(`DELETE FROM lifetime_totals WHERE metric_key = ?`);
+  /**
+   * v1.4.4 — one-time migration for a lifetime_totals row moving from a legacy
+   * key shape to a new one (used to re-key per-pack BMS lifetime state off the
+   * positional BMS-bus slot number onto the pack's stable hardware serial —
+   * see packBaseKey/packLastWhKey). Copies the legacy row's (wh, ts) forward
+   * VERBATIM — never resets to 0 — because these feed HA `total_increasing`
+   * sensors and a reset reads as a meter rollback. Deletes the legacy row in
+   * the SAME transaction so it's never rediscovered as a stale second
+   * contributor. No-op if there's nothing to migrate or the new key already
+   * has data (idempotent — safe to call on every read).
+   */
+  const migrateLifetimeKey = (oldKey: string, newKey: string): void => {
+    const old = readLifetime(oldKey);
+    if (old.ts === 0) return;
+    if (readLifetime(newKey).ts !== 0) return;
+    const tx = db.prepare('BEGIN');
+    tx.run();
+    try {
+      writeLifetime(newKey, old.wh, old.ts);
+      lifetimeDeleteStmt.run(oldKey);
+      db.prepare('COMMIT').run();
+    } catch (e) {
+      db.prepare('ROLLBACK').run();
+      throw e;
+    }
+  };
 
   /**
    * Build per-snapshot lists of (sn, metric) pairs that contribute to each
@@ -811,27 +841,60 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // baseline captured once at install so DELTAS — the energy that's
   // actually flowed since we started watching — drive the home totals.
   // Both counters zero at install, so discharge ≤ charge holds naturally.
-  const packBaseKey = (sn: string, packNum: number, kind: 'chg' | 'dsg') =>
-    `pack_base_${sn}_${packNum}_${kind}`;
+  // v1.4.4 — ANTI-FOOTGUN FIX: the positional BMS-bus slot (`num`, aka
+  // hs_yj751_bms_slave_addr.N — see project.ts DpuPack) is NOT a stable pack
+  // identity; it can renumber on a BMS rescan or a pack reseat. Keying
+  // persisted lifetime state on (sn, num) alone let a renumbered/reseated pack
+  // silently inherit — and corrupt — whatever OTHER pack previously occupied
+  // that slot's baseline/held row (double-count or lost history). Mirrors the
+  // v1.2.0 restTracker.packRestKey precedent: prefer the pack's own hardware
+  // serial (`packSn`), which survives renumbering; fall back to the legacy
+  // slot-numbered shape ONLY when packSn hasn't been reported yet (unchanged
+  // format — no migration needed for that case).
+  const packIdentity = (sn: string, pk: { packSn?: string | null; num: number }): string | null =>
+    pk.packSn ? `${sn}:${pk.packSn}` : null;
+  const packCacheKey = (sn: string, pk: { packSn?: string | null; num: number }): string =>
+    packIdentity(sn, pk) ?? `${sn}|${pk.num}`;
+  const legacyPackBaseKey = (sn: string, num: number, kind: 'chg' | 'dsg') => `pack_base_${sn}_${num}_${kind}`;
+  const packBaseKey = (sn: string, pk: { packSn?: string | null; num: number }, kind: 'chg' | 'dsg'): string => {
+    const id = packIdentity(sn, pk);
+    return id ? `pack_baseid_${id}_${kind}` : legacyPackBaseKey(sn, pk.num, kind);
+  };
   const bmsBaselines: Map<string, PackBaseline> = new Map();
-  const loadPackBaseline = (sn: string, packNum: number): PackBaseline | undefined => {
-    const cacheKey = `${sn}|${packNum}`;
+  const loadPackBaseline = (sn: string, pk: { packSn?: string | null; num: number }, mutate: boolean): PackBaseline | undefined => {
+    const cacheKey = packCacheKey(sn, pk);
     const cached = bmsBaselines.get(cacheKey);
     if (cached) return cached;
-    const chg = readLifetime(packBaseKey(sn, packNum, 'chg'));
-    const dsg = readLifetime(packBaseKey(sn, packNum, 'dsg'));
+    let chg = readLifetime(packBaseKey(sn, pk, 'chg'));
+    let dsg = readLifetime(packBaseKey(sn, pk, 'dsg'));
+    if (chg.ts === 0 && dsg.ts === 0 && pk.packSn) {
+      // v1.4.4 migration source: this pack's serial is now known but nothing is
+      // persisted yet under its stable key — it may still have a baseline under
+      // the pre-packSn slot key. Read it (works read-only too); only WRITE the
+      // migration (copy-forward + delete legacy row) on the mutating path.
+      const legacyChg = readLifetime(legacyPackBaseKey(sn, pk.num, 'chg'));
+      const legacyDsg = readLifetime(legacyPackBaseKey(sn, pk.num, 'dsg'));
+      if (legacyChg.ts !== 0 || legacyDsg.ts !== 0) {
+        chg = legacyChg; dsg = legacyDsg;
+        if (mutate) {
+          migrateLifetimeKey(legacyPackBaseKey(sn, pk.num, 'chg'), packBaseKey(sn, pk, 'chg'));
+          migrateLifetimeKey(legacyPackBaseKey(sn, pk.num, 'dsg'), packBaseKey(sn, pk, 'dsg'));
+          log(`recorder: v1.4.4 migrated pack baseline to packSn key sn=${sn} packSn=${pk.packSn} (was slot ${pk.num})`);
+        }
+      }
+    }
     // ts === 0 on both means no baseline has been persisted yet.
     if (chg.ts === 0 && dsg.ts === 0) return undefined;
     const base: PackBaseline = { chgMah: chg.wh, dsgMah: dsg.wh };
     bmsBaselines.set(cacheKey, base);
     return base;
   };
-  const savePackBaseline = (sn: string, packNum: number, base: PackBaseline) => {
+  const savePackBaseline = (sn: string, pk: { packSn?: string | null; num: number }, base: PackBaseline) => {
     const now = Date.now();
-    writeLifetime(packBaseKey(sn, packNum, 'chg'), base.chgMah, now);
-    writeLifetime(packBaseKey(sn, packNum, 'dsg'), base.dsgMah, now);
-    bmsBaselines.set(`${sn}|${packNum}`, base);
-    log(`recorder: v0.13.0 captured BMS baseline sn=${sn} pack=${packNum} baseChg=${base.chgMah.toFixed(0)}mAh baseDsg=${base.dsgMah.toFixed(0)}mAh`);
+    writeLifetime(packBaseKey(sn, pk, 'chg'), base.chgMah, now);
+    writeLifetime(packBaseKey(sn, pk, 'dsg'), base.dsgMah, now);
+    bmsBaselines.set(packCacheKey(sn, pk), base);
+    log(`recorder: v0.13.0 captured BMS baseline sn=${sn} pack=${pk.num}${pk.packSn ? ` packSn=${pk.packSn}` : ''} baseChg=${base.chgMah.toFixed(0)}mAh baseDsg=${base.dsgMah.toFixed(0)}mAh`);
   };
 
   // v0.45.0 — per-pack last-known home-relative Wh (charge/discharge deltas),
@@ -846,26 +909,42 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // plus routine add-on restarts — does NOT re-freeze the counters. These keys
   // are INTERNAL (like pack_base_*) and are excluded from the surfaced lifetime
   // key sets (allLifetimeKeys / getLifetimeTotals).
-  const packLastWhKey = (sn: string, packNum: number, kind: 'chg' | 'dsg') =>
-    `pack_lastwh_${sn}_${packNum}_${kind}`;
+  const legacyPackLastWhKey = (sn: string, num: number, kind: 'chg' | 'dsg') => `pack_lastwh_${sn}_${num}_${kind}`;
+  const packLastWhKey = (sn: string, pk: { packSn?: string | null; num: number }, kind: 'chg' | 'dsg'): string => {
+    const id = packIdentity(sn, pk);
+    return id ? `pack_lastwhid_${id}_${kind}` : legacyPackLastWhKey(sn, pk.num, kind);
+  };
   const bmsLastPackWh: Map<string, { chgWh: number; dsgWh: number }> = new Map();
-  const loadPackLastWh = (sn: string, packNum: number): { chgWh: number; dsgWh: number } | undefined => {
-    const cacheKey = `${sn}|${packNum}`;
+  const loadPackLastWh = (sn: string, pk: { packSn?: string | null; num: number }, mutate: boolean): { chgWh: number; dsgWh: number } | undefined => {
+    const cacheKey = packCacheKey(sn, pk);
     const cached = bmsLastPackWh.get(cacheKey);
     if (cached) return cached;
-    const chg = readLifetime(packLastWhKey(sn, packNum, 'chg'));
-    const dsg = readLifetime(packLastWhKey(sn, packNum, 'dsg'));
+    let chg = readLifetime(packLastWhKey(sn, pk, 'chg'));
+    let dsg = readLifetime(packLastWhKey(sn, pk, 'dsg'));
+    if (chg.ts === 0 && dsg.ts === 0 && pk.packSn) {
+      // v1.4.4 migration source — see loadPackBaseline for the full rationale.
+      const legacyChg = readLifetime(legacyPackLastWhKey(sn, pk.num, 'chg'));
+      const legacyDsg = readLifetime(legacyPackLastWhKey(sn, pk.num, 'dsg'));
+      if (legacyChg.ts !== 0 || legacyDsg.ts !== 0) {
+        chg = legacyChg; dsg = legacyDsg;
+        if (mutate) {
+          migrateLifetimeKey(legacyPackLastWhKey(sn, pk.num, 'chg'), packLastWhKey(sn, pk, 'chg'));
+          migrateLifetimeKey(legacyPackLastWhKey(sn, pk.num, 'dsg'), packLastWhKey(sn, pk, 'dsg'));
+          log(`recorder: v1.4.4 migrated pack held-Wh to packSn key sn=${sn} packSn=${pk.packSn} (was slot ${pk.num})`);
+        }
+      }
+    }
     // ts === 0 on both means nothing persisted yet for this pack.
     if (chg.ts === 0 && dsg.ts === 0) return undefined;
     const held = { chgWh: chg.wh, dsgWh: dsg.wh };
     bmsLastPackWh.set(cacheKey, held);
     return held;
   };
-  const savePackLastWh = (sn: string, packNum: number, held: { chgWh: number; dsgWh: number }) => {
+  const savePackLastWh = (sn: string, pk: { packSn?: string | null; num: number }, held: { chgWh: number; dsgWh: number }) => {
     const now = Date.now();
-    writeLifetime(packLastWhKey(sn, packNum, 'chg'), held.chgWh, now);
-    writeLifetime(packLastWhKey(sn, packNum, 'dsg'), held.dsgWh, now);
-    bmsLastPackWh.set(`${sn}|${packNum}`, held);
+    writeLifetime(packLastWhKey(sn, pk, 'chg'), held.chgWh, now);
+    writeLifetime(packLastWhKey(sn, pk, 'dsg'), held.dsgWh, now);
+    bmsLastPackWh.set(packCacheKey(sn, pk), held);
   };
   // v0.45.0 — corrupt-read guard: a single rollup may never advance a pack's
   // contribution by more than one full pack's capacity worth of Wh (a
@@ -940,17 +1019,17 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       if (d.projection?.kind !== 'dpu') continue;
       const member = isHomeMember(d.sn);
       for (const pk of (d.projection as DpuProjection).packs) {
-        const cacheKey = `${d.sn}|${pk.num}`;
+        const cacheKey = packCacheKey(d.sn, pk);
         // v0.13.0 — a newly-seen pack (install, pack-swap, hot-add) captures its
         // own baseline lazily so its absolute factory offset never leaks into
         // the home totals. Only members capture a baseline (mirrors the live
         // sum's filter; a spare must never seed home-fleet state).
-        let base = loadPackBaseline(d.sn, pk.num);
+        let base = loadPackBaseline(d.sn, pk, opts.mutate);
         if (!base && member && (pk.accuChgMah != null || pk.accuDsgMah != null)) {
           base = { chgMah: pk.accuChgMah ?? 0, dsgMah: pk.accuDsgMah ?? 0 };
           // Persist the baseline only on the mutating (rollup/live) path; the
           // read-only debug path uses the just-derived value without writing.
-          if (opts.mutate) savePackBaseline(d.sn, pk.num, base);
+          if (opts.mutate) savePackBaseline(d.sn, pk, base);
         }
         // The live-sum filter, applied identically here: DPU kind (already true)
         // AND sourceSns membership AND non-null register AND a captured baseline.
@@ -962,7 +1041,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
           passedThisSnapshot.add(cacheKey);
           // v0.45.0 corrupt-read guard: a single rollup may not advance a pack's
           // contribution past its held value by more than one full pack capacity.
-          const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(d.sn, pk.num);
+          const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(d.sn, pk, opts.mutate);
           const capWh = (pk.fullCapMah != null ? pk.fullCapMah * PACK_MAH_TO_WH : FALLBACK_FULL_PACK_WH);
           let useChg = fresh.chgWh;
           let useDsg = fresh.dsgWh;
@@ -996,7 +1075,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
                 chgMah: pk.accuChgMah - held.chgWh / PACK_MAH_TO_WH,
                 dsgMah: pk.accuDsgMah - held.dsgWh / PACK_MAH_TO_WH,
               };
-              savePackBaseline(d.sn, pk.num, rebased);
+              savePackBaseline(d.sn, pk, rebased);
               base = rebased;                 // reported baseline reflects the reset
               useChg = held.chgWh;            // this rollup: exactly held, no spike
               useDsg = held.dsgWh;
@@ -1029,7 +1108,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
           // correct either way (loadPackLastWh/savePackLastWh both keep it in
           // sync), so skipping the write changes nothing observable.
           const heldAdvanced = !held || newHeld.chgWh !== held.chgWh || newHeld.dsgWh !== held.dsgWh;
-          if (opts.mutate && heldAdvanced) savePackLastWh(d.sn, pk.num, newHeld);
+          if (opts.mutate && heldAdvanced) savePackLastWh(d.sn, pk, newHeld);
           chargeWh += newHeld.chgWh;
           dischargeWh += newHeld.dsgWh;
           packs.push({
@@ -1100,8 +1179,15 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         if (!isHomeMember(sn)) continue;
         if (passedThisSnapshot.has(cacheKey)) continue;
         if (bmsLastPackWh.has(cacheKey)) continue;
-        if (loadPackLastWh(sn, num)) continue; // also populates bmsLastPackWh; harmless
-        const base = loadPackBaseline(sn, num);
+        // v1.4.4 — this discovery loop only ever finds LEGACY (slot-numbered)
+        // baseline rows (the regex above requires a numeric slot); pass
+        // packSn: null explicitly so it reads/writes that same legacy shape, as
+        // it always has. A pack whose baseline now lives under the new packSn
+        // key was, by construction, seen live in this same mutating call and
+        // already got a held row written alongside it — it can never reach
+        // this backfill path.
+        if (loadPackLastWh(sn, { packSn: null, num }, true)) continue; // also populates bmsLastPackWh; harmless
+        const base = loadPackBaseline(sn, { packSn: null, num }, true);
         if (!base) continue; // no baseline → nothing to subtract from
         // Last recorded register values before this pack went offline.
         const chgPts = queryStmt.all(sn, `pack${num}_lifetime_chg_mah`, nowMs - BACKFILL_WINDOW_MS, nowMs) as Array<{ ts: number; value: number }>;
@@ -1116,7 +1202,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         };
         // PERSIST the held value only — the carry loop below sums it this same
         // rollup (cacheKey is now in bmsLastPackWh + has a pack_lastwh_* row).
-        savePackLastWh(sn, num, held);
+        savePackLastWh(sn, { packSn: null, num }, held);
         backfilledThisCall.add(cacheKey);
         log(`recorder: v0.48.0 backfilled offline-at-deploy hold sn=${sn} pack=${num} from history (lastChg=${lastChgMah ?? 'null'}mAh lastDsg=${lastDsgMah ?? 'null'}mAh base=${base.chgMah.toFixed(0)}/${base.dsgMah.toFixed(0)} → held=${held.chgWh.toFixed(0)}/${held.dsgWh.toFixed(0)} Wh)`);
       }
@@ -1135,19 +1221,30 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // Also surface persisted-but-not-yet-loaded held keys (restart-while-offline):
     // a member that was offline at boot has no snapshot row, so loadPackBaseline
     // never ran for it — but its persisted pack_lastwh_* row must still carry.
+    // v1.4.4 — two persisted shapes to discover: the legacy slot-numbered key
+    // (cache key `<sn>|<num>`) and the new packSn-stable key (cache key
+    // `<sn>:<packSn>`, see packIdentity/packCacheKey). migrateLifetimeKey
+    // deletes the legacy row in the same transaction it writes the new one, so
+    // a pack is never discoverable under BOTH shapes at once (no double-count).
+    // Device/pack serials never contain ':' or '|', so the two shapes never
+    // collide with each other.
     for (const key of listLifetimeKeys()) {
-      const m = key.match(/^pack_lastwh_(.+)_(\d+)_chg$/);
-      if (!m) continue;
-      heldKeys.add(`${m[1]}|${Number(m[2])}`);
+      const legacy = key.match(/^pack_lastwh_(.+)_(\d+)_chg$/);
+      if (legacy) { heldKeys.add(`${legacy[1]}|${Number(legacy[2])}`); continue; }
+      const stable = key.match(/^pack_lastwhid_(.+)_chg$/);
+      if (stable) heldKeys.add(stable[1]); // "<sn>:<packSn>"
     }
     for (const cacheKey of heldKeys) {
       if (passedThisSnapshot.has(cacheKey)) continue; // already summed via fresh path
-      const sep = cacheKey.lastIndexOf('|');
-      const sn = cacheKey.slice(0, sep);
-      const num = Number(cacheKey.slice(sep + 1));
+      const stableSep = cacheKey.lastIndexOf(':');
+      const legacySep = cacheKey.lastIndexOf('|');
+      const isStable = stableSep !== -1 && stableSep > legacySep;
+      const sn = isStable ? cacheKey.slice(0, stableSep) : cacheKey.slice(0, legacySep);
+      const packSn = isStable ? cacheKey.slice(stableSep + 1) : null;
+      const num = isStable ? NaN : Number(cacheKey.slice(legacySep + 1));
       // Never resurrect a spare: if the SHP2 currently excludes this SN, skip it.
       if (!isHomeMember(sn)) continue;
-      const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(sn, num);
+      const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(sn, { packSn, num }, opts.mutate);
       if (!held) continue;
       chargeWh += held.chgWh;
       dischargeWh += held.dsgWh;
@@ -1252,8 +1349,8 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         if (d.projection?.kind !== 'dpu') continue;
         for (const pk of (d.projection as DpuProjection).packs) {
           if (pk.accuChgMah == null && pk.accuDsgMah == null) continue;
-          if (loadPackBaseline(d.sn, pk.num)) continue; // already captured
-          savePackBaseline(d.sn, pk.num, { chgMah: pk.accuChgMah ?? 0, dsgMah: pk.accuDsgMah ?? 0 });
+          if (loadPackBaseline(d.sn, pk, true)) continue; // already captured
+          savePackBaseline(d.sn, pk, { chgMah: pk.accuChgMah ?? 0, dsgMah: pk.accuDsgMah ?? 0 });
         }
       }
     } catch (e: any) {

@@ -87,7 +87,7 @@ test('restart-while-offline carries the persisted held value (no re-freeze)', ()
     const rec1 = createRecorder(store as any, () => {});
     rec1.rollupLifetime(); // baselines (deltas 0)
     store.snap.devices.DPU_B = dpuDevice('DPU_B', [{ num: 1, accuChgMah: 2_030_000, accuDsgMah: 2_010_000 }]); // +30k chg
-    rec1.rollupLifetime(); // persists pack_lastwh_DPU_B_1_chg = 30k * mahToWh
+    rec1.rollupLifetime(); // v1.4.4: persists pack_lastwhid_DPU_B:DPU_B-P1_chg = 30k * mahToWh (DPU_B reports a packSn)
     rec1.close();
   }
 
@@ -108,7 +108,10 @@ test('restart-while-offline carries the persisted held value (no re-freeze)', ()
 
   // The debug view confirms B is being carried as an offline-held member.
   const dbg = rec2.batteryLifetimeDebug();
-  assert.ok(dbg.offlineHeldMembers.includes('DPU_B|1'), `DPU_B|1 should be an offline-held member, got ${dbg.offlineHeldMembers.join(',')}`);
+  // v1.4.4 — DPU_B's pack reports a packSn, so its held row now persists under
+  // the stable packSn-keyed shape (`<sn>:<packSn>`), not the legacy `<sn>|<num>`
+  // slot-numbered shape.
+  assert.ok(dbg.offlineHeldMembers.includes('DPU_B:DPU_B-P1'), `DPU_B:DPU_B-P1 should be an offline-held member, got ${dbg.offlineHeldMembers.join(',')}`);
 
   rec2.close();
 });
