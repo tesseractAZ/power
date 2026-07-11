@@ -99,11 +99,14 @@ jobs:
           # Native runners hold steady around 3 min and match amd64.
           - arch: aarch64
             platform: linux/arm64
-            base: ghcr.io/home-assistant/aarch64-base:3.21
+            # v1.7.0 (security #6, CWE-1357) — digest-pin the base image so a
+            # repointed upstream `3.21` tag can't silently change our runtime.
+            # Update the digest deliberately when bumping the base.
+            base: ghcr.io/home-assistant/aarch64-base:3.21@sha256:5100b3a2e4741440e7bd587c124920fa3bf02287c4de3cb48aacef7049530ee1
             runner: ubuntu-24.04-arm
           - arch: amd64
             platform: linux/amd64
-            base: ghcr.io/home-assistant/amd64-base:3.21
+            base: ghcr.io/home-assistant/amd64-base:3.21@sha256:995fc8a44059b3bac015603f63b56b1bf935c2227c5176823d9bb76b45fc2249
             runner: ubuntu-24.04
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1

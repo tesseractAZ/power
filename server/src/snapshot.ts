@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
@@ -194,7 +195,9 @@ export class SnapshotStore extends EventEmitter {
       const name = deviceAliases[d.sn] ?? resolveDeviceName(d.deviceName, d.productName, d.sn);
       this.snap.devices[d.sn] = {
         sn: d.sn,
-        deviceName: name,
+        // v1.7.0 (security #2) — strip terminal control/ESC bytes from the
+        // cloud/alias-sourced display name before it can reach the telnet render.
+        deviceName: sanitizeDisplayName(name, 48, d.sn),
         productName: d.productName ?? guessProductFromName(name),
         online: newOnline,
         lastUpdated: existing?.lastUpdated ?? 0,

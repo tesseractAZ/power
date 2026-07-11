@@ -1,5 +1,5 @@
 name: Power
-version: "1.6.0"
+version: "1.7.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -54,7 +54,12 @@ homeassistant_api: true
 # We do NOT install/uninstall add-ons in code without explicit user
 # action — every Supervisor call goes through a named endpoint.
 hassio_api: true
-hassio_role: manager
+# v1.7.0 (security #4, CWE-250) — least privilege: the add-on's only Supervisor
+# call is a read-only GET /addons (Piper/speaker visibility survey). `manager`
+# also grants add-on start/stop/reconfigure, which a compromised process/token
+# would inherit; `homeassistant` retains the Core API + the read it needs. If a
+# future feature needs true add-on management, bump this back to manager.
+hassio_role: homeassistant
 # Per-field labels + help render on the Configuration page from
 # translations/en.yaml; full reference is in DOCS.md “Options”.
 # Order below = the order shown in the HA form (essentials first).
@@ -120,7 +125,10 @@ options:
   MQTT_DISCOVERY_PASS: ""
   MQTT_DISCOVERY_PREFIX: homeassistant
   # Telnet control-room TUI (LAN-only, unauthenticated interface)
-  TELNET_ENABLED: true
+  # v1.7.0 (security #5, CWE-1188) — default OFF: an unauthenticated control-plane
+  # published on the host LAN shouldn't be on-by-default on a fresh install. Opt in
+  # by setting this true. (Existing installs keep their saved value on upgrade.)
+  TELNET_ENABLED: false
   TELNET_PORT: 2323
   # Diagnostic / advanced (leave default unless you know you need them)
   ECOFLOW_DEVICE_REACHABILITY: ""
