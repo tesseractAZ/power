@@ -47,6 +47,17 @@ type GridState = 'active' | 'standby' | 'islanded';
 export function renderConsole(view: PlantView, data: PlantData): string[] {
   const W = view.width;
   const out: string[] = [];
+  // v-r18 — the CONSOLE's full layout (status/banner/mimic/tags/pool + inter-section
+  // blank-line spacing) runs to ~25 rows. renderPlant's body budget is `height - 2`
+  // (footer rule + legend) and SILENTLY CLIPS whatever renderConsole returns beyond
+  // that (see plant/index.ts renderPlant: `cap = Math.min(body.length, bodyMaxH)`).
+  // At the reference 80×24 terminal that budget is 22 rows, so the last-rendered
+  // section — the BATTERY POOL gauge/reserve/runway lines — was the one silently
+  // dropped every time, even though its own "BATTERY POOL" divider still printed
+  // above the void. Below ~27 rows we drop the four purely-cosmetic inter-section
+  // blank lines (saves 4 rows, 25→21) so the pool block always survives; above the
+  // threshold (e.g. 160×50) the full spaced-out console-quality layout is unchanged.
+  const compact = view.height <= 26;
 
   const shp2 = getShp2(data);
   // v1.0.0 — the CONSOLE is the HOME-plant faceplate: every fleet figure on it must be
@@ -116,13 +127,13 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     counts,
     ackCount: 0,
   }, W));
-  out.push('');
+  if (!compact) out.push('');
 
   /* ── 3. mimic-style power-flow diagram ────────────────────────────── */
   out.push(divider('MIMIC — POWER FLOW', W));
-  out.push('');
+  if (!compact) out.push('');
   out.push(...renderMimic(pv, batNet, gridWatts, load, soc, gridState, W));
-  out.push('');
+  if (!compact) out.push('');
 
   /* ── 4. headline tag rows ─────────────────────────────────────────── */
   out.push(divider('PRIMARY TAGS', W));
@@ -219,7 +230,7 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     }, W),
   ];
   for (const r of tagRows) out.push(r);
-  out.push('');
+  if (!compact) out.push('');
 
   /* ── 5. battery pool gauge ────────────────────────────────────────── */
   out.push(divider('BATTERY POOL', W));

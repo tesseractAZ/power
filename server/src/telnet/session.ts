@@ -228,11 +228,19 @@ export class TuiSession {
       }
       if (key === 'up' || key === 'down' || key === 'left' || key === 'right') {
         if (this.plantScreen === 'gen') {
-          const count = Math.max(1, getDpus(this.data.store.get()).length);
+          const dpus = getDpus(this.data.store.get());
+          const count = Math.max(1, dpus.length);
           if (key === 'left') this.plantGenSel = (this.plantGenSel - 1 + count) % count;
           else if (key === 'right') this.plantGenSel = (this.plantGenSel + 1) % count;
-          else if (key === 'up') this.plantGenPack = (this.plantGenPack + 4) % 5;
-          else if (key === 'down') this.plantGenPack = (this.plantGenPack + 1) % 5;
+          else {
+            // r27 — pack count is per-DPU (a DPU can report 1-5 packs), not a
+            // fixed 5: the old hardcoded `% 5` let the selector land on a
+            // phantom slot with no pack behind it on a <5-pack DPU. Mirrors the
+            // count-aware pattern already used for plantGenSel above.
+            const packCount = Math.max(1, dpus[this.plantGenSel]?.projection?.packs.length ?? 1);
+            if (key === 'up') this.plantGenPack = (this.plantGenPack - 1 + packCount) % packCount;
+            else if (key === 'down') this.plantGenPack = (this.plantGenPack + 1) % packCount;
+          }
           return true;
         }
         if (this.plantScreen === 'alm') {

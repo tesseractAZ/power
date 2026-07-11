@@ -1,3 +1,34 @@
+## v1.5.1 — deferred Tier-1 TUI: every screen honest at 80×24
+
+The remaining deferred telnet-TUI display findings (all re-verified against live 80×24 vs 160×50
+captures; the OVERVIEW-overflow finding's first fix was rejected on wrong width math and redone).
+
+- **CONSOLE `BATTERY POOL` no longer vanishes at 80×24** (r18). The console's full layout ran ~25
+  rows and the caller silently clips to `height − 2` (22 at 80×24), so the pool SOC/reserve/runway
+  lines were dropped every time, leaving a bare divider. Short terminals now shed the four cosmetic
+  inter-section blank lines (25→21 rows) so the pool block always survives; 160×50 layout unchanged.
+- **GEN shows all packs + count-aware selector** (r27). The 5th pack row was dropped at 80×24 (the
+  selected-pack gauge is now height-budgeted), and the pack selector's hardcoded `mod 5` is now
+  driven by the DPU's actual pack count.
+- **Mode chooser fits 24 rows** (r28) — the first screen every client sees no longer overflows.
+- **DEVICES shows the REAL error, not a literal** (r30). The fallback row hardcoded `error 1006 ·
+  app-only` for every projection-less device; it now shows each device's actual `lastError`, and the
+  LIVE column was widened so the kW unit suffix stops truncating.
+- **OVERVIEW "Battery net" stops truncating** (r35). Worst case (`… discharged`) overran the framed
+  width by 4 chars and `padEnd` silently clipped the tail; the verbose word is replaced with the
+  file's own `▼`/`▲` glyph placed before the value (worst case now 4 cols under budget).
+- **SHP2 detail flags cloud-offline** (r15) — a header line (matching the BATTERY screen's wording)
+  now appears when the whole SHP2 is cloud-offline, so last-known values aren't mistaken for live.
+- **PREDICTIVE header caption fits 80 cols** (r36c, the display half of the r36 fix whose °C→°F half
+  shipped in v1.5.0).
+- **Pack/MPPT/MOS/PTC temperatures colour against the REAL thermal bands** (r14). GEN's per-pack TEMP
+  column and screens.ts's temperature grids each invented their own thresholds (and reused ONE band
+  for physically different sensors — battery cells vs MPPT converters vs PTC heaters, which run hot by
+  design). All now key off a single exported source of truth aligned to the live thermal-alarm bands,
+  so a colour on screen means the same thing the alarm engine means.
+
+Tests 1245 green; tsc clean. Display correctness live-verified via telnet captures at both sizes.
+
 ## v1.5.0 — deferred Tier-2 backend: accuracy, alarm-severity parity, and perf
 
 Bundle of the confirmed non-TUI backlog from the deferred-items audit (each finding independently
