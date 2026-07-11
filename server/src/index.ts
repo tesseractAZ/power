@@ -90,6 +90,7 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs } from './batterySocAlarm.js';
 import { createRunwayAlarm, shouldGateRunwayAudible } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
+import { hostPowerEntityId } from './hostPower.js';
 import { socGridCrossDecision, reEscalateGridDrop } from './socGridDispatch.js';
 import { classifyMqttStartFailure } from './mqttStartClassify.js';
 import {
@@ -1976,7 +1977,7 @@ store.on('change', (snap: FleetSnapshot) => {
     // Keep the grid-presence entity fresh (TTL-gated) so onCross + the
     // re-escalation below see live grid state. Assign + update run synchronously
     // after the await, so onCross reads exactly the grid computed for this tick.
-    if (gridPresenceEntityId()) {
+    if (gridPresenceEntityId() || hostPowerEntityId()) {
       try {
         await haStateCache.refreshIfStale();
       } catch {
@@ -2051,7 +2052,7 @@ if (runwayAlarmEnabled) {
         // v0.23.0 — keep the grid-presence entity fresh (TTL-gated + coalesced)
         // so the floor classifier sees live grid state, then resolve the
         // backstop from the current snapshot and pass it into the alarm.
-        if (gridPresenceEntityId()) {
+        if (gridPresenceEntityId() || hostPowerEntityId()) {
           try {
             await haStateCache.refreshIfStale();
           } catch {

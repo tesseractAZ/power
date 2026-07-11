@@ -1,3 +1,21 @@
+## v1.6.0 — host power self-monitor (the alarm watches its own Pi)
+
+The Raspberry Pi running this add-on is the whole monitor's single point of failure: if it browns
+out, every channel — HA push, the dashboard, the TUI, the audible path — goes dark at once. HA's
+Raspberry Pi Power Supply Checker already exposes the kernel under-voltage flag as a `binary_sensor`
+(device_class `problem`), which trips *before* the Pi actually dies.
+
+New optional `HOST_POWER_ENTITY` config (point it at `binary_sensor.rpi_power_status`): when set, the
+alarm engine ingests that sensor through the same warm HA-state cache the grid-presence feature uses
+and raises a `warning` alarm (`host-power-undervoltage`) whenever the host reports under-voltage — an
+early warning to fix a marginal supply or a sagging power circuit while the alarm is still up. This
+directly hardens the operator's standing #1 concern (the Pi's power circuit). Dormant by default; an
+unset or stale reading is treated as unknown and never manufactures an alarm.
+
+New `hostPower.ts` module (mirrors `gridState.ts`) + `hostPower.test.ts` pinning the on/off/unknown
+interpretation and the dormant-when-unset safety. Adds the 57th config option (kept in sync across
+config.yaml schema, the run-script env bridge, and the translation). Tests 1250 → 1253; tsc clean.
+
 ## v1.5.3 — plant ALM shows each alarm's true onset time (restart-persistent)
 
 The plant ALARM screen stamped every row with `snapshot.generatedAt` (this refresh's clock), so an

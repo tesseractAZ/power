@@ -2,6 +2,7 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { activeSocBand, socAlertSeverity } from './batterySocAlarm.js';
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared } from './shp2Membership.js';
+import { liveHostPower } from './hostPower.js';
 import {
   classifyDeviceLink,
   getDeviceReachability,
@@ -279,6 +280,24 @@ export function computeAlerts(
   const offGrid = grid?.present === true ? false : grid?.present === false ? true : acIn < 5;
   if (offGrid) {
     out.push({ id: 'grid-offgrid', severity: 'info', category: 'Grid', device: 'System', title: 'Running off-grid', detail: 'No grid connection detected — home running on solar + batteries.' });
+  }
+
+  // v1.6.0 — host power self-monitor. The Pi running this alarm is the whole
+  // monitor's single point of failure: if it browns out, every channel goes
+  // dark at once. HOST_POWER_ENTITY (HA's RPi Power Supply Checker, a
+  // device_class=problem binary_sensor) trips on kernel under-voltage BEFORE
+  // the Pi dies, so surface it as an early warning to fix the supply/circuit
+  // while the alarm is still up. Dormant unless the entity is configured.
+  const hostPower = liveHostPower();
+  if (hostPower.underVoltage === true) {
+    out.push({
+      id: 'host-power-undervoltage',
+      severity: 'warning',
+      category: 'Connectivity',
+      device: 'System',
+      title: 'Alarm host power — under-voltage',
+      detail: `The Raspberry Pi running this monitor reported under-voltage (${hostPower.entityId}). A marginal or failing power supply — or a sagging power circuit — can brown the host out and take the whole alarm dark. Check the Pi's supply and the circuit it's on before that happens.`,
+    });
   }
 
   // v0.16.4 — designated bench spares (Core 4/5) are intentionally kept powered
