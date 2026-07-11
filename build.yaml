@@ -1,8 +1,11 @@
 # Per-arch base images supplied by Home Assistant.
 # 3.21 ships Node 22 in the Alpine main repo (we apk-install nodejs+npm).
+# v1.7.2 (security #6, CWE-1357) — digest-pinned to match images.yml + ci.yml so a
+# local HA build (this fallback path) can't silently pull a repointed `3.21` tag.
+# Keep these three files in lockstep; update the digest deliberately on a base bump.
 build_from:
-  aarch64: ghcr.io/home-assistant/aarch64-base:3.21
-  amd64: ghcr.io/home-assistant/amd64-base:3.21
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.21@sha256:5100b3a2e4741440e7bd587c124920fa3bf02287c4de3cb48aacef7049530ee1
+  amd64: ghcr.io/home-assistant/amd64-base:3.21@sha256:995fc8a44059b3bac015603f63b56b1bf935c2227c5176823d9bb76b45fc2249
 
 args:
   TZ: UTC
