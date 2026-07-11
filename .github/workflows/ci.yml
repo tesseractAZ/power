@@ -58,7 +58,9 @@ jobs:
           push: false
           load: false
           build-args: |
-            BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21
+            # v1.7.0 (security #6, CWE-1357) — digest-pinned; keep in lockstep
+            # with images.yml amd64 base.
+            BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21@sha256:995fc8a44059b3bac015603f63b56b1bf935c2227c5176823d9bb76b45fc2249
             BUILD_ARCH=amd64
             BUILD_DATE=ci
             BUILD_DESCRIPTION=EcoFlow Panel (smoke)

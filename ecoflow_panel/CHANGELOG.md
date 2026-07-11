@@ -1,3 +1,40 @@
+## v1.7.0 — security remediation (telnet DoS caps, ANSI-injection strip, least-privilege packaging)
+
+A 7-class security audit of the add-on surfaced 6 findings (2 medium in the telnet transport, 4 low
+in packaging). All six are fixed here; every code fix is covered by a new regression test, and the
+full server suite (1264 tests) + `tsc` stay green. No behavior visible to the operator changes — the
+dashboard, alarms, broadcast path, and (on this instance) the telnet TUI all keep working.
+
+- **#1 — telnet DoS guards (CWE-400).** The raw telnet listener (`:2323`) never got the WS console's
+  v0.68.0 hardening: an unauthenticated LAN peer could open unbounded idle sockets, each spawning a
+  permanent 1 Hz render timer that starves the single-threaded event loop (Fastify API + alerting +
+  MQTT + EcoFlow polling all share it). Added a concurrent-connection cap (`MAX_TELNET_CONNS = 16`,
+  over-cap connections get a short banner and close) and an idle-reap (`TELNET_IDLE_TIMEOUT_MS = 5m`,
+  reset on any inbound byte) — parity with `wsConsole.ts`. New `test/telnetCaps.test.ts` exercises
+  both against a real server on an ephemeral port.
+- **#2 — ANSI/terminal-escape injection in display names (CWE-150).** A device name (EcoFlow app) or
+  SHP2 breaker-circuit name is cloud/MQTT-sourced and flowed unsanitized into the telnet/console ANSI
+  render stream. Whoever could set a name could embed terminal escape sequences (OSC title-set, OSC 52
+  clipboard-write, cursor/screen control) that *execute in the operator's terminal* when they open the
+  TUI. New `sanitizeDisplayName()` strips C0 controls (incl. ESC 0x1b), DEL, and the C1 block
+  (0x7f–0x9f, catching the 8-bit CSI 0x9b), collapses runs to a space, and clamps length; applied at
+  every ingestion point (`snapshot.ts` device name, `project.ts` SHP2 circuit names). New
+  `test/sanitizeDisplayName.test.ts`.
+- **#3 — AppArmor blanket `file,` removed (CWE-732).** The profile granted unrestricted read+write to
+  the whole filesystem, negating its own file confinement. Removed in favour of the explicit per-path
+  allow rules already present (they cover /init, /bin, /lib, /app, node native modules, /data, /tmp,
+  /proc/self, the CA bundles, /dev/urandom).
+- **#4 — Supervisor role least-privilege (CWE-250).** `hassio_role` downgraded `manager` →
+  `homeassistant`. The add-on's only Supervisor call is a read-only `GET /addons` (Piper/speaker
+  visibility survey); `manager` additionally granted add-on start/stop/reconfigure that a compromised
+  process would inherit.
+- **#5 — telnet default-off (CWE-1188).** `TELNET_ENABLED` now defaults `false`: an unauthenticated
+  control-plane on the host LAN shouldn't be on-by-default on a fresh install. Existing installs keep
+  their saved value on upgrade (this instance has it explicitly `true`, so nothing changes here).
+- **#6 — base image digest-pinned (CWE-1357).** `ghcr.io/home-assistant/{arch}-base:3.21` is now
+  pinned to its `@sha256:` digest in `images.yml` + `ci.yml`, so a repointed upstream `3.21` tag can't
+  silently change our runtime.
+
 ## v1.6.0 — host power self-monitor (the alarm watches its own Pi)
 
 The Raspberry Pi running this add-on is the whole monitor's single point of failure: if it browns
