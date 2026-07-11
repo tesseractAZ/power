@@ -378,8 +378,37 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     const z = robustZ(t.live, med, m, t.floor, Z_INFO);
     if (z < Z_INFO) continue;
 
-    const severity = z >= Z_WARN ? 'warning' : 'info';
-    const dir = t.live > med ? 'above' : 'below';
+    // t_selfbaseline — cap severity at INFO for sustained/bursty duty-cycled
+    // load circuits (t.sustained: AC compressors etc, set in buildBaselineTargets
+    // on SHP2 pairedCircuits/per-circuit loads). The BASELINE_SUSTAINED_* gate
+    // above already proves the excursion is real, but for a bimodal on/off
+    // circuit the hour-of-day median sits near the OFF state, so a normal
+    // on-cycle during hot weather scores a huge z (observed 19-48 in
+    // production, EVERY compressor cycle) and always clears Z_WARN. A
+    // duration-based gate cannot fix this: a genuinely long hot-day AC run
+    // duty-cycles identically to a stuck circuit, so widening the sustain
+    // window only delays the same flood, it doesn't stop it. Circuit-level
+    // faults on these same circuits are already covered by the dedicated
+    // absolute-threshold `circuit-overload-<ch>` alert (alerts.ts, breaker-
+    // capacity based, duty-cycle agnostic), so demoting this statistical
+    // family to INFO for bursty targets loses no safety coverage — the
+    // anomaly stays fully visible (facts + z-score intact) at INFO, it just
+    // stops competing for warning-severity attention. Thermal/SoC
+    // self-baseline targets (t.sustained unset) are unaffected and keep the
+    // normal z >= Z_WARN rule.
+    const severity = t.sustained ? 'info' : (z >= Z_WARN ? 'warning' : 'info');
+    // Finding #31 — the printed deviation must reconcile with the printed live/
+    // typical figures. absDev is full-precision, but t.fmt() (tempFmt/wattFmt)
+    // rounds live and med INDEPENDENTLY for display, so |round(live)-round(med)|
+    // can differ from round(absDev) by ±1 (e.g. "101°F — 12°F above … 90°F"
+    // where 101-90=11). Derive the displayed deviation from the SAME rounded
+    // figures the reader sees, not from the unrounded absDev, so the three
+    // numbers always add up. Detection (the floor gate above and z-score) still
+    // uses the full-precision absDev/med — only display changes here.
+    const dispLive = Math.round(t.live);
+    const dispMed = Math.round(med);
+    const dispAbsDev = Math.abs(dispLive - dispMed);
+    const dir = dispLive >= dispMed ? 'above' : 'below';
     const spanDays = ((pts[pts.length - 1].ts - pts[0].ts) / 86_400_000).toFixed(1);
     const subj = t.packNum != null ? `${t.device} Pack ${t.packNum}` : t.device;
     out.push({
@@ -391,11 +420,11 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
       coreNum: t.coreNum,
       packNum: t.packNum,
       title: `${cap(t.label)} unusual for the hour`,
-      detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(absDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).`,
+      detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(dispAbsDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).`,
       facts: [
         { label: 'Current reading', value: t.fmt(t.live) },
         { label: 'Typical (this hour)', value: t.fmt(med) },
-        { label: 'Deviation', value: `${t.live > med ? '+' : '-'}${t.fmt(absDev)}` },
+        { label: 'Deviation', value: `${dispLive >= dispMed ? '+' : '-'}${t.fmt(dispAbsDev)}` },
         { label: 'Baseline window', value: `${spanDays} d, ${bucket.length} samples` },
         { label: 'z-score', value: z.toFixed(1) },
       ],
@@ -763,6 +792,14 @@ export interface DayForecast {
   hours: ForecastHour[];
   forecastPvWhNext24: number;
   typicalPvWhPerDay: number;
+  // v1.4.3 (audit #22) — the SAME alarm-facing bias-correction factor (v0.93.0
+  // computePvBiasCorrection) that was folded into forecastPvWhNext24/hours[].forecastPvW
+  // above. 1.0 (no-op) until the hindcast has ≥3 mature weather-covered days; clamped
+  // [0.5, 1.2] otherwise. typicalPvWhPerDay (above) is a RAW historical hour-of-day
+  // average and is NEVER bias-corrected — surfaced here so forecastDayAlerts'
+  // forecast-low-solar narrative can put both sides of its comparison on the same
+  // basis instead of comparing a bias-corrected figure against a non-bias-corrected one.
+  pvBiasFactor?: number;
   // v0.13.1 — 24-slot typical-day PV curve (Wh per hour-of-day, index 0=midnight).
   // Sums to typicalPvWhPerDay. Exposed so the forecast backtest can use a diurnal
   // baseline (night≈0, noon≈peak) via diurnalBaselinePredictor() instead of a flat
@@ -1546,6 +1583,8 @@ async function computeDayForecastUncached(
     hours,
     forecastPvWhNext24: Math.round(pvSum),
     typicalPvWhPerDay: Math.round(pvCurve.reduce((a, b) => a + b, 0)),
+    // v1.4.3 (audit #22) — see the DayForecast interface doc on this field.
+    pvBiasFactor,
     typicalPvCurveWhPerHour: pvCurve.map((w) => Math.round(w)), // v0.13.1 — for diurnal backtest baseline
     // v0.78.0 — restored display basis (all SHP2-connected Cores; see interface docs).
     forecastPvWhNext24Display: Math.round(restoredPvSum),
@@ -1662,8 +1701,24 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
       ],
     });
   }
-  if (df.hasWeather && df.typicalPvWhPerDay > 0 && df.forecastPvWhNext24 < 0.6 * df.typicalPvWhPerDay) {
-    const shortfallPct = Math.round((1 - df.forecastPvWhNext24 / df.typicalPvWhPerDay) * 100);
+  // v1.4.3 (audit #22) — forecastPvWhNext24 is the bias-corrected alarm-facing PV sum
+  // (v0.93.0 pvBiasFactor, clamped [0.5, 1.2], applied for runway safety — see the
+  // getDayForecast loop above); typicalPvWhPerDay is a RAW historical hour-of-day
+  // average that is NEVER bias-corrected. Comparing them directly compared a
+  // bias-corrected figure against a non-bias-corrected one: when the hindcast is
+  // deflating the forecast (factor < 1 — the common case in the field per the v0.93.0
+  // note, ≈0.62), that mechanical deflation alone could trip the "<60% of typical"
+  // trigger and inflate shortfallPct even on an otherwise-typical day, and the
+  // cloud-only driver text below then misattributed the gap to weather/equipment
+  // ("check for soiling, shading, or under-performing MPPT strings") instead of the
+  // model recalibration. Put both sides on the SAME basis for this comparison by
+  // applying the identical factor to the typical baseline here — typicalPvWhPerDay
+  // itself stays untouched for its other consumers (PV telnet/web tiles, the
+  // backtest's diurnal baseline).
+  const lowSolarBiasFactor = df.pvBiasFactor ?? 1;
+  const typicalBiasAdjusted = df.typicalPvWhPerDay * lowSolarBiasFactor;
+  if (df.hasWeather && typicalBiasAdjusted > 0 && df.forecastPvWhNext24 < 0.6 * typicalBiasAdjusted) {
+    const shortfallPct = Math.round((1 - df.forecastPvWhNext24 / typicalBiasAdjusted) * 100);
     const why = driverCloud > 60
       ? `Cloud cover ~${Math.round(driverCloud)}% (vs typical ~30%) is the dominant driver — this is weather, not equipment.`
       : driverCloud > 40
@@ -1676,13 +1731,14 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
       source: 'learned',
       device: 'System',
       title: 'Low solar forecast',
-      detail: `Next-24h solar forecast ~${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh — ${shortfallPct}% below the typical ~${(df.typicalPvWhPerDay / 1000).toFixed(1)} kWh/day. ${why}`,
+      detail: `Next-24h solar forecast ~${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh — ${shortfallPct}% below the typical ~${(df.typicalPvWhPerDay / 1000).toFixed(1)} kWh/day${lowSolarBiasFactor !== 1 ? ` (comparison bias-corrected ×${lowSolarBiasFactor.toFixed(2)} to match the forecast basis)` : ''}. ${why}`,
       facts: [
         { label: 'Solar next 24h', value: `${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh` },
         { label: 'Typical per day', value: `${(df.typicalPvWhPerDay / 1000).toFixed(1)} kWh` },
-        { label: 'Forecast vs typical', value: `${Math.round((df.forecastPvWhNext24 / df.typicalPvWhPerDay) * 100)}%` },
+        { label: 'Forecast vs typical', value: `${Math.round((df.forecastPvWhNext24 / typicalBiasAdjusted) * 100)}%` },
         { label: 'Avg cloud cover', value: `${Math.round(driverCloud)}%` },
         { label: 'Hours modelled', value: `${driverModelled}/${driverTotal}` },
+        ...(lowSolarBiasFactor !== 1 ? [{ label: 'Model bias correction', value: `×${lowSolarBiasFactor.toFixed(2)}` }] : []),
       ],
     });
   }
@@ -2127,7 +2183,7 @@ function analysePack(
       summary:
         `SoH history looks like a BMS recalibration step on otherwise-flat data, not a measurable fade trend — holding off on a dated end-of-life projection until a real multi-point trend accumulates.` +
         (avgPackTempC != null
-          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 25 °C` : ''}.`
+          ? ` Avg pack temp ${Math.round(cToF(avgPackTempC))} °F${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 77 °F` : ''}.`
           : ''),
     });
   }
@@ -2161,7 +2217,7 @@ function analysePack(
       summary:
         `SoH has moved only a fraction of a percent across the recorded window — below the BMS recalibration/quantization noise floor — so a dated end-of-life would be extrapolating from noise. Holding at "learning" until a clear multi-point decline accumulates.` +
         (avgPackTempC != null
-          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 25 °C` : ''}.`
+          ? ` Avg pack temp ${Math.round(cToF(avgPackTempC))} °F${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 77 °F` : ''}.`
           : ''),
     });
   }
@@ -2186,12 +2242,23 @@ function analysePack(
       kalmanSmoothedSoh,
       kalmanFadePctPerYear,
       kalmanFadeStdevPctPerYear,
-      kalmanYearsToEol,
-      kalmanEolDate,
+      // v0.93.x (t_kalman) — mirror the OLS maturity/min-history gate (span ≥
+      // EOL_MIN_SPAN_MS, r² ≥ EOL_MIN_R2) onto the Kalman DATED EOL fields.
+      // kalmanFilterSoh only requires 3 points and carries no span/quality gate
+      // of its own, so a pack with just enough history to clear the top-of-
+      // function no-data check (≥8 buckets — as little as ~2 days at the 6-hour
+      // bucket size) could otherwise publish a confidently-dated
+      // kalmanYearsToEol/kalmanEolDate here even while OLS is correctly held at
+      // "learning" (no dated EOL) for the identical pack. The preliminary
+      // kalmanFadePctPerYear/kalmanSmoothedSoh stay visible, exactly like OLS's
+      // own preliminary fadePctPerYear above — only the DATED projection is
+      // withheld until the trend clears the maturity bar.
+      kalmanYearsToEol: null,
+      kalmanEolDate: null,
       summary:
         `Gathering data — ${spanDays} day(s) recorded; a dated end-of-life projection needs ≥ ${EOL_MIN_SPAN_DAYS} days of trend at R² ≥ ${EOL_MIN_R2} (have ${spanDays} d, R² ${fit ? fit.r2.toFixed(2) : '—'}).` +
         (avgPackTempC != null
-          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs a 25 °C reference` : ''}.`
+          ? ` Avg pack temp ${Math.round(cToF(avgPackTempC))} °F${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs a 77 °F reference` : ''}.`
           : ''),
     });
   }
@@ -2226,7 +2293,7 @@ function analysePack(
       summary:
         summary +
         (avgPackTempC != null
-          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C across the window.`
+          ? ` Avg pack temp ${Math.round(cToF(avgPackTempC))} °F across the window.`
           : ''),
     });
   }
@@ -2261,7 +2328,7 @@ function analysePack(
       summary:
         `SoH fit implies ~${fadePctPerYear.toFixed(1)}%/yr fade — faster than the ${EOL_MAX_FADE_PCT_PER_YEAR}%/yr physical ceiling for healthy LFP, so this is early-life BMS recalibration settling, not a real fade trend. Holding at "learning" — no dated end-of-life — until a plausibly-paced multi-year trend accumulates.` +
         (avgPackTempC != null
-          ? ` Avg pack temp ${Math.round(avgPackTempC)} °C${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 25 °C` : ''}.`
+          ? ` Avg pack temp ${Math.round(cToF(avgPackTempC))} °F${arrheniusFactor != null && arrheniusFactor > 1.1 ? ` — ~${arrheniusFactor.toFixed(1)}× the calendar-fade rate vs 77 °F` : ''}.`
           : ''),
     });
   }
@@ -2309,9 +2376,9 @@ function analysePack(
   }
   const arrheniusNote =
     avgPackTempC != null && fadePctPerYearAt25C != null && coolingBenefitYears != null
-      ? ` Avg pack temp ${Math.round(avgPackTempC)} °C → Arrhenius-equivalent to ~${fadePctPerYearAt25C} %/yr at 25 °C; cooling the cells ${COOLING_DELTA_C} °C would extend service life by ~${coolingBenefitYears} years.`
+      ? ` Avg pack temp ${Math.round(cToF(avgPackTempC))} °F → Arrhenius-equivalent to ~${fadePctPerYearAt25C} %/yr at 77 °F; cooling the cells ${Math.round(COOLING_DELTA_C * 1.8)} °F would extend service life by ~${coolingBenefitYears} years.`
       : avgPackTempC != null
-        ? ` Avg pack temp ${Math.round(avgPackTempC)} °C across the window.`
+        ? ` Avg pack temp ${Math.round(cToF(avgPackTempC))} °F across the window.`
         : '';
 
   return mk({
@@ -2407,9 +2474,22 @@ export async function computeDegradation(
     // the connected-only baseline. That way a spare pack with abnormal
     // fade still shows up as peerOutlier=true — useful operator info even
     // though the spare isn't powering the home today.
+    //
+    // v1.1.x — this used to be a hand-rolled `m > 0 ? |0.6745·dev/m| : 0` modified
+    // z-score: unbounded as MAD → 0 (a matched fleet where every connected pack
+    // fades at nearly the same rate has MAD ≈ 0, so a fraction-of-a-%/yr deviation
+    // scored in the hundreds — the same failure mode robustZ() exists to fix, see
+    // mathHelpers.robustZ) and it also silently never fired at MAD === 0 exactly.
+    // Floor MAD the same way the peer-anomaly engine does above (line ~168): below
+    // FADE_PEER_Z_FLOOR_PCT_PER_YEAR — the same 0.1 %/yr "no measurable capacity
+    // fade" noise floor already used a few hundred lines up to call a fade rate
+    // indistinguishable from flat — a deviation of exactly that size with zero peer
+    // scatter is defined to score exactly Z_INFO; real scatter above the floor still
+    // yields the true modified z-score, unchanged.
+    const FADE_PEER_Z_FLOOR_PCT_PER_YEAR = 0.1;
     for (const p of projecting) {
       p.peerFadeRatio = med > 0 ? round2(p.fadePctPerYear / med) : null;
-      const z = m > 0 ? Math.abs((0.6745 * (p.fadePctPerYear - med)) / m) : 0;
+      const z = robustZ(p.fadePctPerYear, med, m, FADE_PEER_Z_FLOOR_PCT_PER_YEAR, Z_INFO);
       if (p.fadePctPerYear > med && z >= Z_INFO) {
         p.peerOutlier = true;
         p.summary += ` It is fading about ${(p.peerFadeRatio ?? 1).toFixed(1)}× the fleet-median rate — the fastest-wearing pack in its peer group.`;
@@ -3232,6 +3312,11 @@ export async function computeSoilingDecomposition(
 
 const STRING_MISMATCH_TTL_MS = 15 * 60 * 1000;
 const STRING_MISMATCH_WINDOW_DAYS = 14;
+// v1.1.0 — smallest ratio deviation worth flagging before robustZ's variance floor
+// (mathHelpers.robustZ) takes over. 0.05 == a string producing 5 percentage points
+// below the fleet-median ratio (e.g. 0.95× vs 1.00×) is the smallest gap operators
+// care about; anything smaller is normal panel-to-panel / shade scatter.
+const STRING_MISMATCH_RATIO_FLOOR = 0.05;
 
 export interface DeviceProductionRatio {
   sn: string;
@@ -3344,7 +3429,17 @@ export function computeStringMismatch(
     const m = mad(deviceAvgRatios, med);
     for (const r of ratios) {
       if (r.ratio == null) continue;
-      const z = m > 0 ? Math.abs((0.6745 * (r.ratio - med)) / m) : 0;
+      // v1.1.0 — MAD-floored modified z (mathHelpers.robustZ), matching the peer-outlier
+      // (v0.13.2) and hour-of-day baseline (v1.1.0) alarm paths in this file. The raw
+      // `0.6745·|x−med|/MAD` statistic is unbounded as MAD → 0, which is exactly what
+      // happens when only a few connected strings report and their averaged ratios sit
+      // within a hair of each other — a trivial wobble could otherwise score in the
+      // hundreds (the same failure mode documented for the peer/baseline paths) and
+      // swamp the Z_INFO/Z_WARN gate below; the old `m > 0 ? … : 0` fallback was worse,
+      // silently disabling outlier detection whenever the baseline was perfectly flat.
+      // Flooring MAD makes a floor-sized ratio deviation with zero scatter score exactly
+      // Z_INFO; real scatter above the floor is unaffected.
+      const z = robustZ(r.ratio, med, m, STRING_MISMATCH_RATIO_FLOOR, Z_INFO);
       r.modifiedZ = round2(z);
       if (r.ratio < med && z >= Z_INFO) r.outlier = true;
     }
@@ -4894,6 +4989,14 @@ const THERMAL_THRESHOLD_C_INFO = (96 - 32) / 1.8;   // ≈ 35.6 °C
 const THERMAL_THRESHOLD_C_WARN = (113 - 32) / 1.8;  // 45 °C
 const THERMAL_THRESHOLD_C_CRIT = (131 - 32) / 1.8;  // 55 °C
 const THERMAL_HYSTERESIS_C = 1.5; // must fall back this far before re-arming
+// v0.14.x — recorder gap cap for time-above-threshold accounting. The recorder
+// only guarantees a sample at least every 5 min (recorder.ts MAX_INTERVAL_MS)
+// while telemetry is actually flowing; a wider inter-sample dt means the
+// recorder/telemetry was down for that span, not that the pack sat hot the
+// whole time. Mirrors the GAP_THRESHOLD_MS = 3× heartbeat convention recorder.ts
+// already uses for telemetry-gap detection. Any dt beyond this cap is dropped
+// from warm/hot/overheat accounting instead of being credited to the pre-gap band.
+const THERMAL_SAMPLE_GAP_CAP_MS = 15 * 60 * 1000; // 15 min = 3 × 5-min heartbeat
 
 export interface ThermalEventCounts {
   sn: string;
@@ -4955,13 +5058,19 @@ export function computeThermalEvents(
         if (!hotArmed && p.value < THERMAL_THRESHOLD_C_WARN - THERMAL_HYSTERESIS_C) hotArmed = true;
         if (overheatArmed && p.value >= THERMAL_THRESHOLD_C_CRIT) { overheatEvents++; overheatArmed = false; }
         if (!overheatArmed && p.value < THERMAL_THRESHOLD_C_CRIT - THERMAL_HYSTERESIS_C) overheatArmed = true;
-        // Time-above-threshold — credit the gap between this sample and the
-        // last to whichever band the previous reading sat in.
+        // Time-above-threshold — credit the interval between this sample and
+        // the last to whichever band the previous reading sat in, UNLESS that
+        // interval is wider than a few recorder heartbeats: a wide dt means a
+        // recorder/telemetry gap sat in between, and the gap span must not be
+        // attributed to the pre-gap band (a pack reading hot right before a
+        // multi-hour outage should not be scored as hot for the whole outage).
         if (prevTs != null && prevTemp != null) {
           const dt = p.ts - prevTs;
-          if (prevTemp >= THERMAL_THRESHOLD_C_INFO) warmMs += dt;
-          if (prevTemp >= THERMAL_THRESHOLD_C_WARN) hotMs += dt;
-          if (prevTemp >= THERMAL_THRESHOLD_C_CRIT) overheatMs += dt;
+          if (dt <= THERMAL_SAMPLE_GAP_CAP_MS) {
+            if (prevTemp >= THERMAL_THRESHOLD_C_INFO) warmMs += dt;
+            if (prevTemp >= THERMAL_THRESHOLD_C_WARN) hotMs += dt;
+            if (prevTemp >= THERMAL_THRESHOLD_C_CRIT) overheatMs += dt;
+          }
         }
         prevTs = p.ts; prevTemp = p.value;
       }
@@ -6632,16 +6741,22 @@ export async function computeMultiDayForecast(
   const fullWh = shp2?.projection.backupFullCapWh ?? null;
   let socWh = shp2?.projection.backupRemainWh ?? null;
 
-  // v0.9.58 — index the day-ahead forecast's load curve by hour-of-day. Was:
-  //   const load = forecast.hours[0]?.forecastLoadW ?? 0;
-  // which held the load constant at hour-0's value for EVERY hour of the
-  // 3-day horizon. With hour-0 typically a low-load overnight slot (~800 W),
-  // total day load came out to ~19 kWh — vs the operator's real 30-90 kWh daily
-  // load. The forecast.hours[] entries are ordered chronologically starting
-  // from `Math.ceil(now / 3_600_000)` (see getDayForecast), so we can't index
-  // by `[h % 24]` directly; build an explicit hour-of-day lookup and fall
-  // back to the chronological first hour for any HoD slot the 24-h forecast
-  // window doesn't cover.
+  // v1.4.4 (finding #50/#22) — index the day-ahead forecast's hours by
+  // absolute hour-epoch. Each ForecastHour already carries getDayForecast's
+  // FULL basis (weekday/weekend load split, predicted EV load, near-term
+  // trim/anchor, and the v0.93.0/v1.3.1 PV bias-correction + re-clamp) for
+  // that EXACT timestamp, so any multi-day hour the 24h forecast covers
+  // reuses it verbatim below instead of a re-derived approximation.
+  const forecastByHourEpoch = new Map<number, ForecastHour>();
+  for (const fh of forecast.hours) forecastByHourEpoch.set(Math.floor(fh.ts / 3_600_000), fh);
+
+  // v0.9.58 — hour-of-day fallback load lookup, kept as the fallback of last
+  // resort below (see useSplitLoad) for hours beyond the 24h forecast window
+  // when there isn't enough live weekday/weekend recorder history to trust
+  // the day-of-week-aware split. Was previously the ONLY basis for every
+  // out-of-window hour, which held day-0's weekday/weekend mix constant
+  // across every day of the horizon regardless of that day's actual
+  // day-of-week — see hourCurveByWeekday below for the real fix.
   const loadByHod = new Array(24).fill(0);
   const loadHodFilled = new Array(24).fill(false);
   for (const fh of forecast.hours) {
@@ -6652,6 +6767,39 @@ export async function computeMultiDayForecast(
     }
   }
   const fallbackLoad = forecast.hours[0]?.forecastLoadW ?? 0;
+
+  // v1.4.4 (finding #50/#22) — day-of-week-aware load curve, the SAME basis
+  // getDayForecast uses (hourCurveByWeekday + the WEEKDAY_MIN_SAMPLES=24
+  // trust gate), so hours beyond the 24h forecast window (days 2-3 of a
+  // 3-day rollup) pick up an ACTUAL weekend curve on a Saturday instead of
+  // repeating whatever weekday/weekend mix happened to land in the single
+  // day-ahead forecast (loadByHod above).
+  const since = now - TYPICAL_HISTORY_MS;
+  const loadRes = shp2
+    ? hourCurveByWeekday(recorder, shp2.sn, 'panel_load', since, now)
+    : {
+        weekday: new Array(24).fill(0),
+        weekend: new Array(24).fill(0),
+        combined: new Array(24).fill(0),
+        spanMs: 0,
+        weekdaySamples: 0,
+        weekendSamples: 0,
+      };
+  const WEEKDAY_MIN_SAMPLES = 24;
+  const useSplitLoad =
+    loadRes.weekdaySamples >= WEEKDAY_MIN_SAMPLES && loadRes.weekendSamples >= WEEKDAY_MIN_SAMPLES;
+  // v1.4.4 (finding #50/#22) — reuse getDayForecast's already-derived
+  // alarm-facing PV bias-correction factor (see computePvBiasCorrection) for
+  // the climatology-based PV projection below, instead of raw uncorrected PV.
+  const pvBiasFactor = forecast.pvBiasFactor ?? 1;
+
+  // v1.4.4 (finding #50/#22) — predicted EV-charging load, the same source
+  // getDayForecast folds in (see evByHourEpoch there). The window predictor
+  // only projects the next 24h, so this mostly applies to hours already
+  // covered by forecastByHourEpoch above; any spillover into the start of
+  // day 2 is still added here, matching getDayForecast's own horizon.
+  const evPredictions = computeEvWindowPrediction(devices, recorder);
+  const evByHourEpoch = evLoadByHour(evPredictions.upcomingNext24h);
 
   // v0.10.4 — radiation climatology for hours BEYOND the weather window.
   // Open-Meteo's hourly radiation typically reaches only ~48 h out, so day-3
@@ -6681,18 +6829,43 @@ export async function computeMultiDayForecast(
     let minSocTs: number | null = null;
     for (let t = dayStart; t < dayEnd; t += 3_600_000) {
       if (t < now && dayIdx === 0) continue; // skip past hours today
-      const wx = wxByHour.get(Math.floor(t / 3_600_000));
+      const hourEpoch = Math.floor(t / 3_600_000);
       const hod = new Date(t).getHours();
-      const resp = forecast.solarModel.hourly[hod];
-      // v0.10.4 — real weather where available, else the radiation climatology
-      // (see above) so day-3 doesn't collapse to a phantom 0 kWh / 0% SoC.
-      const radiationWm2 = wx ? wx.radiationWm2 : climoRadiationWm2(hod);
-      let pv = 0;
-      if (resp.coeff != null && radiationWm2 > 0) {
-        pv = Math.min(resp.coeff * radiationWm2, resp.observedMaxPvW * 1.05);
+      const fh = forecastByHourEpoch.get(hourEpoch);
+      let pv: number;
+      let load: number;
+      if (fh) {
+        // v1.4.4 — hour is inside the 24h day-ahead forecast: reuse its exact
+        // bias-corrected PV and weekday/EV/trim-aware load basis verbatim.
+        pv = fh.forecastPvW;
+        load = fh.forecastLoadW;
+      } else {
+        const wx = wxByHour.get(hourEpoch);
+        const resp = forecast.solarModel.hourly[hod];
+        // v0.10.4 — real weather where available, else the radiation climatology
+        // (see above) so day-3 doesn't collapse to a phantom 0 kWh / 0% SoC.
+        const radiationWm2 = wx ? wx.radiationWm2 : climoRadiationWm2(hod);
+        pv = 0;
+        if (resp.coeff != null && radiationWm2 > 0) {
+          const ceilW = resp.observedMaxPvW * 1.05;
+          // v1.4.4 (finding #50/#22) — same v0.93.0/v1.3.1 alarm-facing bias
+          // correction getDayForecast applies: clamp to the physical ceiling,
+          // apply the bias factor, then RE-CLAMP (an under-predicting bias > 1
+          // could otherwise push the projection past the array's observed
+          // ceiling — the unsafe, runway-lengthening direction).
+          pv = Math.min(Math.min(resp.coeff * radiationWm2, ceilW) * pvBiasFactor, ceilW);
+        }
+        // v1.4.4 (finding #50/#22) — prefer the live day-of-week-aware curve;
+        // fall back to the v0.9.58 flat per-HoD mix (loadByHod above) only when
+        // there isn't enough weekday/weekend history to trust the split.
+        const dow = new Date(t).getDay();
+        const isWeekend = dow === 0 || dow === 6;
+        const baseLoad = useSplitLoad
+          ? (isWeekend ? loadRes.weekend[hod] : loadRes.weekday[hod])
+          : (loadHodFilled[hod] ? loadByHod[hod] : fallbackLoad);
+        const evLoad = evByHourEpoch.get(hourEpoch) ?? 0;
+        load = baseLoad + evLoad;
       }
-      // v0.9.58 — per-HoD load (see loadByHod above), not constant-from-hour-0.
-      const load = loadHodFilled[hod] ? loadByHod[hod] : fallbackLoad;
       pvWh += pv;
       loadWh += load;
       if (fullWh && fullWh > 0 && socWh != null) {

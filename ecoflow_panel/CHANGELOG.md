@@ -1,3 +1,45 @@
+## v1.5.0 — deferred Tier-2 backend: accuracy, alarm-severity parity, and perf
+
+Bundle of the confirmed non-TUI backlog from the deferred-items audit (each finding independently
+re-verified against live code by an adversarial multi-agent pass; two initial specs were caught as
+wrong/placeholder and redone from scratch).
+
+**Alarm severity parity (audit #24).** `batterySocAlarm`'s fixed SoC ladder classified the 10 % and
+8 % bands as `high` (audible P2), but `alerts.ts`'s reserve-floor classifier calls the same off-grid
+SoC `critical` (both sit below the default 15 % reserve). A user who muted only the "High" tier could
+go silent on a genuinely reserve-floor-critical SoC. The ladder now calls 10 %/8 % `critical` too —
+**reconciled UPWARD only** (4 %/2 % were already critical; grid-aware downgrading already treats
+high/critical identically, so on-grid advisory behaviour is unchanged).
+
+**Forecast consistency (audit #22, #50).** `forecast-low-solar` now compares bias-corrected PV on both
+sides of its trigger (was apples-vs-oranges). `computeMultiDayForecast` now reuses each in-window
+`ForecastHour`'s full basis verbatim and, for days 2–3 beyond the 24 h window, applies the same
+day-of-week load split (`hourCurveByWeekday`), predicted EV load, and v0.93.0/v1.3.1 PV bias-correction
+(+ re-clamp) that `getDayForecast` uses — instead of a flat hour-of-day load and raw uncorrected PV.
+
+**Robust statistics.** The fade-rate peer z-score (`computeDegradation` pass 2) and the per-string
+production-ratio z-score (`computeStringMismatch`) were hand-rolled modified-z with a `:0` fallback and
+no variance floor — a near-zero peer MAD exploded z into the hundreds, an exact-zero MAD silently
+suppressed real outliers. Both now use the shared `robustZ()` floor helper.
+
+**Alarm hygiene.** Self-baseline anomalies on bursty duty-cycled AC/load circuits (observed z 19–48
+every compressor cycle) are capped at INFO — the dedicated absolute-threshold `circuit-overload` alert
+already covers real circuit faults, so no safety coverage is lost, and the statistical family stops
+diluting the warning channel (thermal/SoC baselines unaffected). Self-baseline alert bodies now derive
+the printed deviation from the same rounded figures shown, so live/typical/deviation reconcile (#31).
+
+**Correctness + perf.** Kalman EOL is now gated behind the same OLS maturity/min-history gate as the
+OLS EOL, so it can't emit a confident end-of-life during early-life BMS settling. TRD's `GEN.n.P.OUT`
+trend now uses `totalOutWatts` (AC+DC+USB), matching the GEN detail screen (was `ac_out`, AC-leg only —
+under-reported DC/USB output). `computeThermalEvents` no longer credits a recorder data-gap to the
+pre-gap temperature band (#52). `getLifetimeTotals()` runs the mutating BMS pack pass once per call
+instead of twice and only writes to SQLite when a value changed (#29). The hourly-retention `DELETE`
+gets a `ts`-leading index so it stops full-scanning `samples` (#28). TRD batches its ~12 per-redraw
+recorder reads into one `queryMulti` (#48). Degradation status summaries emit °F, not raw °C (audit
+r36a). (`t_provcache`/#47 was investigated and found already-cached — no change.)
+
+Tests 1245 (all green); no oracle/behaviour regressions outside the intended alarm-severity change.
+
 ## v1.4.3 — plant ALM screen wraps the alarm message (audit rank 26)
 
 The plant ALARM screen hard-truncated each alarm's MESSAGE at a fixed column with no wrap and

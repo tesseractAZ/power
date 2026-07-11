@@ -44,6 +44,23 @@ export interface SocThreshold {
 /**
  * Thresholds, highest → lowest SoC, with escalating priority. The user asked
  * for 50/40/30/20/15/10/8/4/2 % with "increased priority as capacity gets lowest".
+ *
+ * audit #24 — 10 % and 8 % are 'critical', not 'high'. alerts.ts's
+ * `shp2-below-reserve` reserve-floor classifier treats ANY backupBatPercent
+ * under the reserve floor (default `backupReserveSoc ?? 15`) as severity
+ * 'critical' while off-grid. 10 % and 8 % both sit BELOW that default 15 %
+ * floor, so this ladder must call them 'critical' too — a 'high' classification
+ * here let the on-screen reserve alert read Critical while the dedicated audible
+ * (and its independently user-mutable Alert Settings toggle, isPriorityEnabled
+ * in index.ts) stayed on the lesser High tier, so a user who muted only "High"
+ * could go silent on a genuinely reserve-floor-critical SoC. Reconciled UPWARD
+ * only — 4 %/2 % were already 'critical' and are unchanged, and grid-aware
+ * downgrading (socGridCrossDecision / downgradePriorityForGrid) already treats
+ * 'critical' and 'high' identically, so on-grid advisory behaviour is
+ * unaffected. NOTE: `backupReserveSoc` is user-configurable; a reserve set far
+ * from the 15 % default can still let this fixed ladder diverge from the floor
+ * classifier at other pcts — this targets the concrete default-configuration,
+ * off-grid disagreement, not a fully dynamic reserve-aware ladder.
  */
 export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
   { pct: 50, priority: 'low' },
@@ -51,8 +68,8 @@ export const BATTERY_SOC_THRESHOLDS: readonly SocThreshold[] = [
   { pct: 30, priority: 'low' },
   { pct: 20, priority: 'medium' },
   { pct: 15, priority: 'medium' },
-  { pct: 10, priority: 'high' },
-  { pct: 8, priority: 'high' },
+  { pct: 10, priority: 'critical' },
+  { pct: 8, priority: 'critical' },
   { pct: 4, priority: 'critical' },
   { pct: 2, priority: 'critical' },
 ] as const;

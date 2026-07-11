@@ -47,11 +47,39 @@ export function renderTrd(view: PlantView, data: PlantData, ctx: TrdContext): st
     // operator is reading trends to diagnose which unit is actually faulted.
     const gen = generatorNumber(d.deviceName, i);
     tags.push({ tag: `GEN.${gen}.PV.P`,  metricSn: d.sn, metric: 'pv_total', unit: 'W' });
-    tags.push({ tag: `GEN.${gen}.P.OUT`, metricSn: d.sn, metric: 'ac_out',  unit: 'W' });
+    // v1.0.2 — GEN.<n>.P.OUT must mean the same thing here as it does on the GEN
+    // detail screen (gen.ts), which reports p.totalOutWatts (wattsOutSum — the
+    // DPU's total output across AC + DC/USB ports), not just the AC leg. Using
+    // 'ac_out' (outAc5p8Pwr only) under-reported output whenever a DC port drew
+    // power, and made the identical instrument tag disagree between screens.
+    // The recorder already captures wattsOutSum under 'total_out' — no new
+    // plumbing needed.
+    tags.push({ tag: `GEN.${gen}.P.OUT`, metricSn: d.sn, metric: 'total_out', unit: 'W' });
+  }
+
+  // v-batch — group tags by device SN and fetch each device's tags in ONE
+  // queryMulti() call instead of one query() per tag. TRD previously issued
+  // one synchronous SQLite statement per row (~12/redraw across a typical
+  // fleet: 2 SHP2 tags + 2 tags x N online DPUs). queryMulti() already exists
+  // on the recorder (used by equipment-health / self-consumption) and pulls
+  // every requested metric for one sn via a single cached prepared statement,
+  // so this collapses per-redraw SQLite calls to one per DISTINCT device SN
+  // (typically 4-6) with byte-identical output — same window, same buckets,
+  // same per-tag math below.
+  const metricsBySn = new Map<string, Set<string>>();
+  for (const t of tags) {
+    let s = metricsBySn.get(t.metricSn);
+    if (!s) { s = new Set(); metricsBySn.set(t.metricSn, s); }
+    s.add(t.metric);
+  }
+  const nowMs = Date.now();
+  const seriesBySn = new Map<string, Map<string, Array<{ ts: number; value: number }>>>();
+  for (const [sn, metrics] of metricsBySn) {
+    seriesBySn.set(sn, ctx.recorder.queryMulti(sn, [...metrics], sinceMs, nowMs, 60));
   }
 
   for (const t of tags) {
-    const pts = ctx.recorder.query(t.metricSn, t.metric, sinceMs, Date.now(), 60);
+    const pts = seriesBySn.get(t.metricSn)?.get(t.metric) ?? [];
     const series = pts.map((p) => p.value);
     const latest = series.length > 0 ? series[series.length - 1] : null;
     const lo = series.length ? Math.min(...series) : 0;
