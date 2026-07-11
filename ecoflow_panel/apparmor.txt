@@ -62,13 +62,19 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # certificates, locale data). The Dockerfile is the source of truth
   # for what files exist; this profile follows its layout.
   #
-  # v1.7.0 (security #3, CWE-732) — the bare `file,` rule granted UNRESTRICTED
-  # read+write to the whole filesystem, negating this profile's file confinement
-  # (a post-RCE attacker could read/write anywhere). Removed in favour of the
-  # explicit per-path allow rules below, which cover everything the runtime
-  # actually needs: /init + /bin + /lib + /app (read) + node_modules native
-  # modules (mix) + /data + /tmp + /run (rwk) + /proc/self + the CA bundles +
-  # /dev/urandom. `signal,` and `network,` are unrelated and kept.
+  # v1.7.1 — REVERTED the v1.7.0 (security #3, CWE-732) removal of this blanket
+  # `file,` rule. Rationale for the revert: removing it broke the s6-overlay
+  # RESTART path with `/bin/sh: can't open '/init': Permission denied` (crash
+  # loop → add-on down). The per-path rules had `/init ix,` (execute) but s6
+  # re-OPENS /init for READING during shutdown/restart, which needs `r` — the
+  # blanket rule had silently provided it. A correct tightening must be driven
+  # by the host audit.log (type=AVC denials) and boot-tested, not derived by
+  # inspection; several s6 read paths beyond /init are likely also implicit.
+  # Deferred: enumerate real AVC denials on a test boot, add `r`/`mr` for each
+  # (start with `/init rix,`), then drop `file,`. Until then the blanket rule
+  # stays — it matches the healthy v1.6.0 behavior. The profile still denies the
+  # dangerous capabilities/mount/ptrace below (that confinement is unaffected).
+  file,
   signal,
   network,
 
