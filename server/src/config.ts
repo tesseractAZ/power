@@ -45,7 +45,13 @@ export const config = {
   // hit the host's IPv6 stack with no listener and the connection is RST'd.
   // Same fix as v0.3.1 applied to the telnet bind.
   host: process.env.HOST ?? '::',
-  dbPath: process.env.DB_PATH ?? '../data/ecoflow.db',
+  // v1.7.2 — when unset, default to an ABSOLUTE /data path inside the HA add-on
+  // container (SUPERVISOR_TOKEN is always injected there) so a dropped DB_PATH
+  // export can never silently redirect state writes to /app/data (cwd is
+  // /app/server) — which the v1.7.2 AppArmor `deny /app/{,**} wal` rule would then
+  // block, aborting startup. Outside the container (dev/tests) the relative
+  // default is unchanged; every test sets DB_PATH explicitly regardless.
+  dbPath: process.env.DB_PATH ?? (process.env.SUPERVISOR_TOKEN ? '/data/ecoflow.db' : '../data/ecoflow.db'),
   logLevel: process.env.LOG_LEVEL ?? 'info',
   // Location for solar weather forecasting (defaults to Phoenix, AZ).
   forecastLat: Number(process.env.FORECAST_LAT ?? 33.4484),

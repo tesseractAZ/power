@@ -62,18 +62,22 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # certificates, locale data). The Dockerfile is the source of truth
   # for what files exist; this profile follows its layout.
   #
-  # v1.7.1 — REVERTED the v1.7.0 (security #3, CWE-732) removal of this blanket
-  # `file,` rule. Rationale for the revert: removing it broke the s6-overlay
-  # RESTART path with `/bin/sh: can't open '/init': Permission denied` (crash
-  # loop → add-on down). The per-path rules had `/init ix,` (execute) but s6
-  # re-OPENS /init for READING during shutdown/restart, which needs `r` — the
-  # blanket rule had silently provided it. A correct tightening must be driven
-  # by the host audit.log (type=AVC denials) and boot-tested, not derived by
-  # inspection; several s6 read paths beyond /init are likely also implicit.
-  # Deferred: enumerate real AVC denials on a test boot, add `r`/`mr` for each
-  # (start with `/init rix,`), then drop `file,`. Until then the blanket rule
-  # stays — it matches the healthy v1.6.0 behavior. The profile still denies the
-  # dangerous capabilities/mount/ptrace below (that confinement is unaffected).
+  # This blanket `file,` rule is INTENTIONALLY RETAINED (do not remove it).
+  #
+  # v1.7.0 removed it (security #3) in favour of a per-path allow list, but that
+  # list had `/init ix,` (execute) while s6-overlay re-OPENS /init for READING
+  # during shutdown/restart — the read was denied → `/bin/sh: can't open '/init':
+  # Permission denied` crash-loop → add-on down. Reverted in v1.7.1.
+  #
+  # v1.7.2 tightens #3 the safe way instead: KEEP `file,` (so no read/exec can
+  # ever be denied — the /init crash CANNOT recur) and layer WRITE-immutability
+  # deny rules on the code/binary/library dirs in the deny section below (see the
+  # `deny /app|/usr|/bin|/sbin|/lib|/lib64|/init … wal,` block). That closes the
+  # dominant CWE-732 vector (persisting/tampering via WRITE) with zero read-denial
+  # risk. STILL DEFERRED (needs a host audit.log boot-test, never inspection):
+  # full READ-confinement (dropping `file,`) and write-locking the s6 init trees
+  # (/command, /package) + /etc — their failure mode is an invisible init
+  # crash-loop, so they can't be verified by the add-on-log EACCES method.
   file,
   signal,
   network,
@@ -172,6 +176,32 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   deny /proc/sysrq-trigger w,
   deny /sys/kernel/** w,
   deny /sys/firmware/** rw,
+
+  # v1.7.2 (security #3, CWE-732) — code/binary/library WRITE-immutability.
+  # The blanket `file,` rule above is RETAINED, so every READ and EXEC stays
+  # granted (this is why the v1.7.0 `/init` read-denial crash-loop CANNOT recur —
+  # v1.7.0 replaced `file,` with `/init ix,` and denied s6's READ of /init; we do
+  # not touch reads/execs at all). These deny rules subtract only w/a/l on the
+  # immutable surfaces the add-on process could be coerced into tampering with:
+  # `w` blocks create (O_CREAT), truncate/overwrite (O_TRUNC/O_WRONLY),
+  # rename-into and unlink; `a` blocks O_APPEND injection into an existing code
+  # file; `l` blocks planting a hardlink under a code dir. m/r/i/x/k are untouched,
+  # so .so/.node executable-mmap load + exec still work. This shuts the dominant
+  # CWE-732 vector: a compromised Fastify/telnet/TTS process persisting a
+  # restart-surviving backdoor. chmod/chown/utimes are capability-mediated (chown/
+  # fowner/fsetid, granted above), NOT `w`-mediated, so s6 fix-attrs is unaffected.
+  # NOTE: /command + /package (s6 init trees, currently `rwix`) are intentionally
+  # NOT denied here — a mistaken denial in those PID1 trees is an INVISIBLE init
+  # crash-loop (the v1.7.0 symptom) that the add-on-log verification can't catch;
+  # tightening them requires a host audit.log boot-test, deferred. /etc stays
+  # writable (s6 needs /etc/{cont-init,services,cont-finish}.d) — also audit-driven.
+  deny /app/{,**} wal,
+  deny /usr/{,**} wal,
+  deny /bin/{,**} wal,
+  deny /sbin/{,**} wal,
+  deny /lib/{,**} wal,
+  deny /lib64/{,**} wal,
+  deny /init wal,
 
   # Deny mount / umount / pivot_root (no container escape attempts).
   deny mount,
