@@ -1,5 +1,5 @@
 name: Power
-version: "1.5.3"
+version: "1.6.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -105,6 +105,7 @@ options:
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: 60
   GRID_AVAILABLE: false
   GRID_PRESENCE_ENTITY: ""
+  HOST_POWER_ENTITY: ""
   # Load-shedding advisor (read + advise only; never actuates)
   LOAD_SHEDDING_ADVISORY_ENABLED: true
   LOAD_SHEDDING_SHED_ENTITIES: ""
@@ -175,6 +176,7 @@ schema:
   BATTERY_RUNWAY_ALARM_REANNOUNCE_MIN: int(5,720)?
   GRID_AVAILABLE: bool
   GRID_PRESENCE_ENTITY: "str?"
+  HOST_POWER_ENTITY: "str?"
   # Load-shedding advisor (read + advise only; never actuates)
   LOAD_SHEDDING_ADVISORY_ENABLED: bool
   LOAD_SHEDDING_SHED_ENTITIES: "str?"

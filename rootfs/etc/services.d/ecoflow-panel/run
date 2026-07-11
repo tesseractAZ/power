@@ -142,6 +142,10 @@ else
 fi
 # v0.23.0 — optional HA entity reporting real grid presence (grid-aware floor).
 export GRID_PRESENCE_ENTITY="$(bashio::config 'GRID_PRESENCE_ENTITY')"
+# v1.6.0 — host power self-monitor: an HA binary_sensor (device_class=problem)
+# reporting the Pi's kernel under-voltage flag. When set, the alarm engine warns
+# on a browning-out host before it takes the whole monitor dark. Empty = dormant.
+export HOST_POWER_ENTITY="$(bashio::config 'HOST_POWER_ENTITY')"
 # v0.72.0 — optional SN->HA-ping-entity JSON map (cloud-wedge vs real-outage detection).
 export ECOFLOW_DEVICE_REACHABILITY="$(bashio::config 'ECOFLOW_DEVICE_REACHABILITY')"
 # v0.23.0 — wire the battery-alarm enable toggles + re-announce cadence to env.
