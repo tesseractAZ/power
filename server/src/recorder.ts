@@ -278,6 +278,16 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       value REAL NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_samples_sn_metric_ts ON samples (sn, metric, ts);
+    -- v_t_retidx — dedicated single-column index on ts so the hourly retention
+    -- DELETE (WHERE ts < ?, see prune below) can seek instead of full-scanning
+    -- the whole samples table. The composite (sn, metric, ts) index above is
+    -- unusable for that predicate: it has no equality/bound on the leading
+    -- (sn) column, so the planner can't range-scan on ts through it. Without
+    -- this, every hourly prune scans the entire table while holding SQLite's
+    -- write lock, serializing against the near-continuous insert() writes from
+    -- live telemetry recording. Additive: does not change/replace the existing
+    -- composite index used by query()/queryMulti(); ANALYZE below covers both.
+    CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples (ts);
     CREATE TABLE IF NOT EXISTS lifetime_totals (
       metric_key TEXT PRIMARY KEY,
       wh REAL NOT NULL DEFAULT 0,
@@ -1012,8 +1022,14 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
           };
           // Mutating path persists + caches the advanced hold; read-only debug
           // path leaves bmsLastPackWh untouched so it can never influence the
-          // next rollup's monotone-hold (strictly read-only).
-          if (opts.mutate) savePackLastWh(d.sn, pk.num, newHeld);
+          // next rollup's monotone-hold (strictly read-only). Finding #29 — only
+          // hit SQLite when the held value actually advanced; getLifetimeTotals
+          // runs this mutating pass on every read (each poll), and re-writing an
+          // unchanged hold was pure write amplification. bmsLastPackWh is already
+          // correct either way (loadPackLastWh/savePackLastWh both keep it in
+          // sync), so skipping the write changes nothing observable.
+          const heldAdvanced = !held || newHeld.chgWh !== held.chgWh || newHeld.dsgWh !== held.dsgWh;
+          if (opts.mutate && heldAdvanced) savePackLastWh(d.sn, pk.num, newHeld);
           chargeWh += newHeld.chgWh;
           dischargeWh += newHeld.dsgWh;
           packs.push({
@@ -1376,6 +1392,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     const contributors = buildContributors(snap);
     const out: Record<string, LifetimeTotals> = {};
     const allKeys = allLifetimeKeys(snap);
+    // Finding #29 — memoized across the loop below so the mutating BMS pack
+    // pass (computeBmsBatteryTotals → computeBmsBatteryDetail) runs at most
+    // ONCE per getLifetimeTotals() call instead of once per battery key.
+    let bmsBatteryTotals: { chargeWh: number; dischargeWh: number } | undefined;
     for (const key of allKeys) {
       const prev = readLifetime(key);
       const watermark = prev.ts === 0 ? now : prev.ts;
@@ -1387,8 +1407,12 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         // higher, so we add the live remainder. out > in is PHYSICAL for a
         // net-discharged window (coulomb counters over an open window ending
         // below baseline SoC) — the discharge counter is NOT pinned to charge.
-        const bms = computeBmsBatteryTotals(snap);
-        const liveBmsWh = key === 'fleet_battery_charge_wh' ? bms.chargeWh : bms.dischargeWh;
+        // Finding #29 — computeBmsBatteryTotals runs the mutating per-pack BMS
+        // pass; both battery keys land in this branch on the SAME allKeys loop,
+        // so memoize it lazily here rather than re-running the full pass (and
+        // its unconditional-write side effects) a second time for the second key.
+        if (!bmsBatteryTotals) bmsBatteryTotals = computeBmsBatteryTotals(snap);
+        const liveBmsWh = key === 'fleet_battery_charge_wh' ? bmsBatteryTotals.chargeWh : bmsBatteryTotals.dischargeWh;
         const persisted = prev.wh;
         pendingWh = Math.max(0, liveBmsWh - persisted);
       } else if (watermark < now) {
