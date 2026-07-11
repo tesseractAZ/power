@@ -61,7 +61,14 @@ profile addon_ecoflow_panel flags=(attach_disconnected,mediate_deleted) {
   # General read access to the container rootfs (app code, libs,
   # certificates, locale data). The Dockerfile is the source of truth
   # for what files exist; this profile follows its layout.
-  file,
+  #
+  # v1.7.0 (security #3, CWE-732) — the bare `file,` rule granted UNRESTRICTED
+  # read+write to the whole filesystem, negating this profile's file confinement
+  # (a post-RCE attacker could read/write anywhere). Removed in favour of the
+  # explicit per-path allow rules below, which cover everything the runtime
+  # actually needs: /init + /bin + /lib + /app (read) + node_modules native
+  # modules (mix) + /data + /tmp + /run (rwk) + /proc/self + the CA bundles +
+  # /dev/urandom. `signal,` and `network,` are unrelated and kept.
   signal,
   network,
 

@@ -46,7 +46,18 @@ interface TelnetConn {
   session: TuiSession;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
+  // v1.7.0 (security #1) — per-connection idle-close timer, reset on every
+  // inbound chunk; parity with the WS console's WS_IDLE_TIMEOUT_MS.
+  idle: NodeJS.Timeout | null;
 }
+
+// v1.7.0 (security #1, CWE-400) — the raw telnet listener never got the WS
+// console's v0.68.0 DoS guards. Without a cap + idle-reap, a LAN peer opening
+// many idle sockets would each get a permanent 1 Hz render timer, starving the
+// shared single-threaded Node event loop (Fastify API + alerting + MQTT + EcoFlow
+// polling all run in it). Match wsConsole.ts (MAX_WS_SESSIONS / WS_IDLE_TIMEOUT_MS).
+export const MAX_TELNET_CONNS = 16;
+export const TELNET_IDLE_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * Parse a raw input buffer into key/resize events, stripping telnet IAC
@@ -168,10 +179,20 @@ export interface TelnetServerOptions {
    * server creates and owns its own (the standalone-telnet path).
    */
   data?: { provider: TuiDataProvider; stop: () => void };
+  /**
+   * v1.7.0 (security #1) — override the concurrent-connection cap and the
+   * idle-reap window. Production leaves both undefined (→ MAX_TELNET_CONNS /
+   * TELNET_IDLE_TIMEOUT_MS); tests pass tiny values to exercise the guards
+   * without opening 16 sockets or waiting 5 minutes.
+   */
+  maxConns?: number;
+  idleTimeoutMs?: number;
 }
 
-export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
+export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void; server: import('node:net').Server } {
   const { store, recorder, host, port, log } = opts;
+  const maxConns = opts.maxConns ?? MAX_TELNET_CONNS;
+  const idleMs = opts.idleTimeoutMs ?? TELNET_IDLE_TIMEOUT_MS;
   const conns = new Set<TelnetConn>();
 
   // Shared, periodically-refreshed data caches (energy totals, day-ahead
@@ -196,6 +217,10 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       clearInterval(conn.timer);
       conn.timer = null;
     }
+    if (conn.idle) {
+      clearTimeout(conn.idle);
+      conn.idle = null;
+    }
     try {
       if (!conn.socket.destroyed) {
         // v0.9.5 — restore the user's primary screen buffer + cursor on exit
@@ -211,6 +236,12 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
   };
 
   const onData = (conn: TelnetConn, chunk: Buffer) => {
+    // v1.7.0 (security #1) — any inbound activity resets the idle-reap timer.
+    if (conn.idle) {
+      clearTimeout(conn.idle);
+      conn.idle = setTimeout(() => endConn(conn), idleMs);
+      conn.idle.unref?.();
+    }
     conn.inbuf = conn.inbuf.length ? Buffer.concat([conn.inbuf, chunk]) : chunk;
     if (conn.inbuf.length > 4096) conn.inbuf = conn.inbuf.subarray(conn.inbuf.length - 64); // drop runaway garbage
     const { events, rest } = parseInput(conn.inbuf);
@@ -225,13 +256,25 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
 
   const server = createServer((socket) => {
     socket.setNoDelay(true);
+    // v1.7.0 (security #1) — concurrent-connection cap (parity with the WS
+    // console's MAX_WS_SESSIONS). Beyond the cap we send a short banner and close
+    // so a LAN flood can't spawn unbounded per-connection render timers.
+    if (conns.size >= maxConns) {
+      try { socket.end(`\r\nToo many active connections (max ${maxConns}). Try again later.\r\n`); } catch { /* ignore */ }
+      return;
+    }
     const session = new TuiSession({
       write: (payload) => safeWrite(socket, payload),
       data,
     });
-    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null };
+    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null, idle: null };
     conns.add(conn);
     log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
+    // v1.7.0 (security #1) — idle-reap: close a session silent for
+    // TELNET_IDLE_TIMEOUT_MS. Reset on every inbound chunk (onData). unref() so
+    // the timer never keeps the process alive.
+    conn.idle = setTimeout(() => { log('telnet: idle timeout — closing'); endConn(conn); }, idleMs);
+    conn.idle.unref?.();
 
     // Negotiate character-at-a-time mode + ask for the window size.
     socket.write(
@@ -260,6 +303,9 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
   server.listen(port, host);
 
   return {
+    // v1.7.0 — expose the underlying net.Server so callers/tests can read the
+    // bound address (esp. when listening on port 0). index.ts uses only .stop().
+    server,
     stop: () => {
       for (const conn of [...conns]) endConn(conn);
       server.close();

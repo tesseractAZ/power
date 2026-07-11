@@ -2,6 +2,7 @@
  * Project raw EcoFlow quota maps into compact, UI-ready shapes per product family.
  * Field names below come from probing the user's actual fleet (see /tmp/ecoflow-probe.log).
  */
+import { sanitizeDisplayName } from '../logSanitize.js';
 
 type Quota = Record<string, unknown>;
 
@@ -573,7 +574,9 @@ export function projectShp2(q: Quota): Shp2Projection {
       pairedCircuits.push({
         primaryCh,
         secondaryCh,
-        name: primary.name,
+        // v1.7.0 (security #2) — strip terminal control/ESC bytes from the
+        // SHP2-configured breaker-circuit name before it reaches the TUI render.
+        name: sanitizeDisplayName(primary.name),
         watts: sumWatts,
         breakerAmps: primary.setAmp,
         loadPriority: primary.loadPriority,
@@ -586,7 +589,7 @@ export function projectShp2(q: Quota): Shp2Projection {
       pairedCircuits.push({
         primaryCh: c.ch,
         secondaryCh: null,
-        name: c.name,
+        name: sanitizeDisplayName(c.name),
         watts: c.watts,
         breakerAmps: c.setAmp,
         loadPriority: c.loadPriority,
