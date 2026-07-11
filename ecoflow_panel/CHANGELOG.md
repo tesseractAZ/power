@@ -1,3 +1,29 @@
+## v1.5.3 — plant ALM shows each alarm's true onset time (restart-persistent)
+
+The plant ALARM screen stamped every row with `snapshot.generatedAt` (this refresh's clock), so an
+alarm active for hours read as if it had just fired. The `Alert` type is stateless — nothing on it
+records when it first became active — and alertMonitor's in-memory `TrackedAlert.firstSeen` resets on
+every restart (this host restarts ~daily on the Pi power circuit).
+
+New restart-persistent onset sidecar (`alertOnset.ts`): keyed by alert id, it records the wall-clock
+ms an id was first seen active, persists to the same state-dir convention as the other alarm sidecars,
+and prunes an id the moment it goes inactive (so a clear-then-rise is a fresh event, matching how
+`tracked`/notify-state/telemetry already treat it). ALM now shows each alarm's true onset, falling
+back to `generatedAt` only when no onset is recorded yet.
+
+The sidecar is synced **after** alertMonitor's falling-edge/dwell loop, keyed on the post-dwell
+surviving roster (`tracked`), so an alarm briefly held through a resolve-dwell keeps its true onset
+instead of being pruned and re-stamped with a later time.
+
+Also fixes a display gap the live review surfaced: at 80×24 a single pathologically-long alarm could
+consume the whole screen and push the "… N more below" scroll cue (and every other active alarm) off
+the bottom with no indication more existed. The first row is now capped to reserve the cue's two rows
+and marked with " …" when truncated (a lone long alarm with nothing below still renders in full — the
+v1.4.3 wrap is unchanged).
+
+New `alertOnset.test.ts` pins onset no-drift, prune-on-clear/fresh-on-refire, and cross-restart
+persistence. Tests 1247 → 1250; tsc clean.
+
 ## v1.5.2 — BMS lifetime energy keyed on the pack's stable serial (data integrity)
 
 Per-pack BMS lifetime state — the v0.13.0 factory-register baseline and the v0.45.0 held/carry Wh

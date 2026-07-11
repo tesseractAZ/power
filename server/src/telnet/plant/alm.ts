@@ -10,6 +10,7 @@ import { divider } from './scada.js';
 import type { PlantData, PlantView } from './types.js';
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
 import { priorityOf, priorityMeta, type AlarmPriority } from '../../alertPriority.js';
+import { getAlertOnset } from '../../alertOnset.js';
 
 /** ANSI colourizer for an ISA priority. No orange in the 16-colour palette, so
  *  High shares Critical's bright-red; Medium = bright-yellow; Low = cyan. */
@@ -42,9 +43,13 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   const W = view.width;
   const out: string[] = [];
 
-  // Alerts in the snapshot don't carry their own timestamp — they're
-  // computed fresh each refresh cycle. We use snapshot.generatedAt as the
-  // "this alarm was present at this moment" stamp.
+  // v1.x — each alarm now stamps its own ONSET from the restart-persistent
+  // alertOnset sidecar (see getAlertOnset() in the render loop below).
+  // `stamp` is kept only as the FALLBACK for an id the sidecar hasn't
+  // recorded yet (e.g. it fired between the last alertMonitor sync tick and
+  // this render) — previously this was blindly used as EVERY alarm's
+  // timestamp, so a long-standing alarm displayed the current refresh time,
+  // not when it actually started.
   const stamp = data.snap.generatedAt ?? Date.now();
   const alerts = (data.snap.alerts ?? []).slice();
   // v0.11.0 — tally by the 4-tier ISA priority instead of raw severity.
@@ -80,9 +85,14 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   ].join(' ')));
 
   const start = Math.max(0, Math.min(alerts.length - 1, view.almScroll));
-  const tsDate = new Date(stamp);
   const p2 = (n: number) => String(n).padStart(2, '0');
-  const tstr = `${tsDate.getFullYear()}-${p2(tsDate.getMonth() + 1)}-${p2(tsDate.getDate())} ${p2(tsDate.getHours())}:${p2(tsDate.getMinutes())}:${p2(tsDate.getSeconds())}`;
+  // v1.x — per-alarm TIMESTAMP formatter; each row stamps its own ONSET (see
+  // the getAlertOnset() call inside the render loop below), not one shared
+  // refresh-time string.
+  const fmtTs = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+  };
 
   // v1.4.3 (audit rank 26) — WRAP the message instead of hard-truncating it. The MESSAGE
   // column starts at fixed offset 65 (2 indent + 19 TS + 1 + 6 PRIO + 1 + 12 CAT + 1 + 22 ID
@@ -98,17 +108,36 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   // "N more below" hint is honest at any terminal height.
   const rowBudget = Math.max(4, view.height - 8);
 
+  // v1.x — reserve two rows (blank + "… N more below") so the scroll cue can
+  // never be pushed off the bottom by the alarm rows above it.
+  const moreBelow = alerts.length - start > 1;
+  const bodyBudget = moreBelow ? Math.max(2, rowBudget - 2) : rowBudget;
   let usedRows = 0;
   let shown = 0;
   for (let i = start; i < alerts.length; i++) {
     const a = alerts[i];
     const prio = priorityOf(a);
     const prioTag = priorityMeta(prio).tag;
+    // v1.x — true onset (restart-persistent sidecar), falling back to the
+    // per-refresh `stamp` only when this id has no recorded onset yet.
+    const tstr = fmtTs(getAlertOnset(a.id) ?? stamp);
     const msg = a.detail ? `${a.title} — ${a.detail}` : a.title;
     const wrapped = wrapPlain(msg ?? '', msgWidth);
+    // v1.x — a single pathologically-long alarm used to consume the whole screen
+    // at 80×24, pushing the "… N more below" cue (and every other active alarm)
+    // off the bottom with no indication more existed. When it's the FIRST row and
+    // its own wrapped block overruns the body budget while other alarms wait
+    // below, cap it and mark the truncation with " …" so the operator sees both
+    // the alarm's start AND that there's more to scroll to. (A lone long alarm
+    // with nothing below still renders in full — the v1.4.3 wrap is unchanged.)
+    if (shown === 0 && moreBelow && wrapped.length > bodyBudget) {
+      const cap = Math.max(1, bodyBudget - 1);
+      wrapped.length = cap;
+      wrapped[cap - 1] = `${wrapped[cap - 1] ?? ''} …`;
+    }
     // Don't start an alarm whose wrapped block can't finish inside the budget (but always
     // render at least the first alarm so a very tall message on a short screen still shows).
-    if (shown > 0 && usedRows + wrapped.length > rowBudget) break;
+    if (shown > 0 && usedRows + wrapped.length > bodyBudget) break;
     out.push('  ' + [
       padEnd(c.grey(tstr), 19),
       padEnd(prioColor(prio)(prioTag), 6),
