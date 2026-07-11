@@ -18,6 +18,7 @@ import {
   socState, tempState, deviceQuality, dpuFlags,
 } from './data.js';
 import type { PlantData, PlantView } from './types.js';
+import { CELL_TEMP } from '../../alerts.js';
 
 export function renderGen(view: PlantView, data: PlantData): string[] {
   const dpus = getDpus(data);
@@ -136,6 +137,17 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
     padStart(headers[3], 10), padStart(headers[4], 6), padStart(headers[5], 7),
     '  ' + padEnd(headers[6], 8),
   ].join(' ')));
+  // r27 — a DPU can report up to 5 packs: 1 row each, plus 2 more rows of
+  // SOC/TEMP gauge under whichever pack is SELECTED. plant/index.ts clips the
+  // whole frame to `view.height - 2` and silently drops whatever line lands
+  // last — at 80x24 that budget has room for all 5 pack rows but NOT for 5
+  // rows + a 2-row gauge, so the old always-draw-the-gauge code let the clip
+  // eat a pack row (often the 5th) depending on which pack was selected.
+  // Compute the real remaining budget and drop the GAUGE, never a pack row,
+  // when both don't fit — every pack stays visible/reachable at 80x24.
+  const bodyBudget = view.height - 2; // mirrors plant/index.ts's footerLines reservation
+  const rowsAvailable = Math.max(0, bodyBudget - out.length);
+  const showGauge = rowsAvailable >= packCount + 2;
   for (let i = 0; i < (p.packs.length || 0); i++) {
     const pk = p.packs[i];
     const sel = i === view.genPack;
@@ -166,12 +178,18 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
       '  ' + padEnd(stateCol(stateName), 8),
     ].join(' ');
     out.push(row);
-    // For the selected pack, drop a gauge underneath.
-    if (sel) {
+    // For the selected pack, drop a gauge underneath — only if it fits without
+    // pushing a pack row past the frame's clip boundary (r27; see budget calc
+    // above the loop).
+    if (sel && showGauge) {
       const gw = Math.max(20, Math.min(60, W - 30));
       out.push('    ' + c.grey('  SOC  ') + bandedGauge(pk.soc ?? 0, { red: 20, yellow: 50 }, gw, false) +
         '  ' + c.whiteB(`${(pk.soc ?? 0).toFixed(0)}%`));
-      out.push('    ' + c.grey('  TEMP ') + bandedGauge(Math.min(100, ((pk.temp ?? 0) / 60) * 100), { red: 70, yellow: 50 }, gw, true) +
+      // Gauge is a 0–60 °C scale; align the red/yellow breakpoints with the real
+      // CELL_TEMP alarm band (crit 131°F / warn 113°F ≈ 55 °C / 45 °C) instead of
+      // the previous hardcoded 70/50 % pair (42 °C / 30 °C), which matched no
+      // actual alarm threshold and disagreed with fmtTempRaw() above.
+      out.push('    ' + c.grey('  TEMP ') + bandedGauge(Math.min(100, ((pk.temp ?? 0) / 60) * 100), { red: 8.3, yellow: 25 }, gw, true) +
         '  ' + (pk.temp != null ? c.whiteB(`${((pk.temp * 9) / 5 + 32).toFixed(0)}°F`) : c.grey('—')));
     }
   }
@@ -187,7 +205,10 @@ function fmtPctRaw(p: number | null | undefined): string {
 function fmtTempRaw(tC: number | null | undefined): string {
   if (tC == null) return c.grey('—');
   const f = (tC * 9) / 5 + 32;
-  const col = f >= 122 ? c.red : f >= 104 ? c.yellow : c.green;
+  // v-r14 — aligned with alerts.ts CELL_TEMP (the live thermal-alarm engine):
+  // was a locally-invented 104/122°F pair that disagreed with the alarm
+  // engine's own warn/crit crossings (113/131°F).
+  const col = f >= CELL_TEMP.critF! ? c.red : f >= CELL_TEMP.infoF ? c.yellow : c.green;
   return col(`${f.toFixed(0)}°F`);
 }
 function fmtVoltRaw(mv: number | null | undefined): string {
