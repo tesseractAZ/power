@@ -1,3 +1,29 @@
+## v1.7.2 — AppArmor #3, the safe way: WRITE-immutability on code/binary/lib dirs (no read-denial risk)
+
+Completes security finding #3 (deferred after the v1.7.0 revert) using a design that **cannot reproduce the
+v1.7.0 outage**. Rather than removing the blanket `file,` rule and enumerating every read/exec (the approach that
+denied s6's read of `/init` and crash-looped the add-on), v1.7.2 **keeps `file,`** — so no read or exec can ever be
+denied — and layers seven `deny … wal` (write+append+link) rules on the immutable surfaces a compromised runtime
+process could tamper with: `/app`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the `/init` entrypoint. This shuts
+the dominant CWE-732 vector (persisting a restart-surviving backdoor by creating/overwriting/appending/hardlinking
+a file under a code dir) while leaving `m/r/i/x/k` untouched, so `.so`/`.node` load and exec are unaffected.
+
+Validated by a 9-agent adversarial workflow + a live probe: the app runs `tsx src/index.ts` at runtime and tsx's
+transform cache resolves to `/tmp/tsx-<uid>` (not `/app`); every application write resolves under `/data` or `/tmp`;
+`chmod`/`chown` are capability-mediated (not `w`), so s6 `fix-attrs` is unaffected. The s6 init trees `/command`
+and `/package` and `/etc` are intentionally **left writable** — a mistaken deny there is an *invisible init
+crash-loop* (the v1.7.0 symptom) that the deploy-time verification can't catch; write-locking them and full
+read-confinement remain deferred to a host-`audit.log`-driven boot-test.
+
+Two hardening riders bundled:
+- **config.ts** — `dbPath`'s unset default is now absolute `/data/ecoflow.db` inside the add-on container (keyed on
+  `SUPERVISOR_TOKEN`; dev/tests unchanged), so a dropped `DB_PATH` export can't silently redirect state writes to
+  `/app/data` and be denied by the new rule.
+- **build.yaml** — digest-pinned the base image (the local-build fallback path), matching the v1.7.0 pins in
+  `images.yml` + `ci.yml` (completes #6).
+
+No behavior change; suite stays green (1264 tests) + tsc clean.
+
 ## v1.7.1 — hotfix: revert the AppArmor tightening from v1.7.0 (it broke the add-on restart)
 
 v1.7.0's security fix #3 removed the AppArmor profile's blanket `file,` rule in favour of the explicit
