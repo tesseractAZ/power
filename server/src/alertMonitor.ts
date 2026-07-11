@@ -40,6 +40,9 @@ import { isPriorityEnabled } from './alertSettings.js';
 import { priorityOf, priorityMeta, notifyBracketPriority } from './alertPriority.js';
 import * as haStateCache from './haStateCache.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
+// v1.x — restart-persistent per-alert onset (first-seen) timestamps for the
+// ALM screen; see alertOnset.ts.
+import { syncAlertOnsets } from './alertOnset.js';
 
 /**
  * Watches the fleet, attaches computed alerts to the snapshot, and pushes a
@@ -1308,6 +1311,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     const now = Date.now();
     const nowDate = new Date(now);
     const currentIds = new Set(alerts.map((a) => a.id));
+    // v1.x (r25) — the restart-persistent onset sidecar is synced AFTER the
+    // falling-edge/dwell loop below (see the syncAlertOnsets call there) so it
+    // keys on the POST-dwell surviving roster (`tracked`), not the raw per-tick
+    // `currentIds`: an alert held through a resolve-dwell (briefly absent, then
+    // back) keeps its true onset instead of being pruned and re-stamped.
 
     // Rising edges + debounce
     for (const a of alerts) {
@@ -1613,6 +1621,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // (v0.15.21's notified-state forget moved ABOVE the resolve attempt in
       // v0.80.0 — see the comment there.)
     }
+
+    // v1.x (r25) — record each alarm's onset from the POST-dwell surviving roster.
+    // `tracked` still holds any alert in a resolve-dwell (briefly absent then back),
+    // so its true first-seen survives a flap instead of being pruned + re-stamped
+    // with a later time. The sidecar persists these across a restart so the ALM
+    // screen can show the real onset instead of the per-refresh generatedAt stamp.
+    syncAlertOnsets(new Set(tracked.keys()), now);
 
     // v1.3.0 (audit rank 2) — retire notified-records orphaned by a restart. Runs ONCE per
     // boot, and only after the engine is warm, so a cold analytics worker can never look
