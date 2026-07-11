@@ -127,6 +127,9 @@ configuration:
   GRID_PRESENCE_ENTITY:
     name: Grid Presence Entity
     description: 'Optional HA entity ID that reports whether the utility grid is energized, making the backup-pool floor alarm grid-aware: while the grid is present, the pool reaching its ~10% reserve floor is downgraded from CRITICAL to an on-screen advisory. Point it at a binary_sensor/input_boolean (on = present) or a grid voltage sensor (>50 = present), e.g. binary_sensor.grid_available. Empty (default) falls back to Grid Import Available plus live import; if set but unavailable/unknown the floor stays CRITICAL (the safe default).'
+  HOST_POWER_ENTITY:
+    name: Host Power Entity
+    description: 'Optional HA entity ID for a self-monitor of the Pi that runs this alarm — its own single point of failure. Point it at the Raspberry Pi Power Supply Checker''s binary_sensor (device_class problem, on = under-voltage), e.g. binary_sensor.rpi_power_status. When set, the alarm warns if the host reports under-voltage, so you can fix a marginal supply or sagging circuit before it browns the Pi out and takes the whole monitor dark. Empty (default) leaves the feature dormant.'
   LOAD_SHEDDING_ADVISORY_ENABLED:
     name: Load-Shedding Advisor
     description: 'Advisory-only engine: when off-grid runway drops low it recommends which allowlisted loads to shed and publishes the suggestion as sensors/MQTT entities, but never switches anything itself — your own HA automations decide whether to act. Default on, but stays inactive until you list at least one load in Sheddable Loads.'
