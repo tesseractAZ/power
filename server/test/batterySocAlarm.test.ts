@@ -38,7 +38,9 @@ test('BATTERY_SOC_THRESHOLDS — pcts and escalating priorities', () => {
   );
   assert.deepEqual(
     BATTERY_SOC_THRESHOLDS.map((t) => t.priority),
-    ['low', 'low', 'low', 'medium', 'medium', 'high', 'high', 'critical', 'critical'],
+    // audit #24 — 10 %/8 % promoted 'high'→'critical' to match alerts.ts's
+    // reserve-floor classifier at the default 15 % reserve (both below floor, off-grid).
+    ['low', 'low', 'low', 'medium', 'medium', 'critical', 'critical', 'critical', 'critical'],
   );
 });
 
@@ -259,11 +261,12 @@ test('v0.75.0 — a fast same-tick discharge below the slew cap collapses to the
   let now = 1_720_000_000_000;
   a.update(28, now); // baseline just under 30 (arms 20/15/10/8/4/2)
   // 28→9 in one tick: 19-pt drop is under the 25-pt slew cap AND the baseline is
-  // <30 so the guard is inactive; crosses 20/15/10 → announce only 10% (high).
+  // <30 so the guard is inactive; crosses 20/15/10 → announce only 10% (now
+  // 'critical' — audit #24 reconciled the ladder to the reserve-floor classifier).
   a.update(9, (now += MIN));
   assert.equal(fired.length, 1);
   assert.equal(fired[0].pct, 10);
-  assert.equal(fired[0].priority, 'high');
+  assert.equal(fired[0].priority, 'critical');
 });
 
 test('v0.75.0 — bands re-arm after recovery so a later dip re-announces the worst band', () => {
@@ -335,8 +338,9 @@ test('v0.75.0 — REGRESSION: grid-drop re-escalates ALL crossed emergency bands
   a.update(5, 2 * MIN); reEscalate(5); // partial recovery to 5%: climbs out 4 (5>4); 8/10 remain
   assert.deepEqual([...socDowngraded.keys()].sort((x, y) => y - x), [10, 8]);
   backstopping = false; // GRID DROPS
-  a.update(5, 3 * MIN); reEscalate(5); // at 5% off-grid → re-escalate the still-active high bands
-  const reesc = announced.filter((x) => x.priority === 'high').map((x) => x.pct).sort((x, y) => y - x);
+  a.update(5, 3 * MIN); reEscalate(5); // at 5% off-grid → re-escalate the still-active emergency bands
+  // audit #24 — 10%/8% are now priority='critical' in the ladder (reconciled to the reserve-floor classifier).
+  const reesc = announced.filter((x) => x.priority === 'critical').map((x) => x.pct).sort((x, y) => y - x);
   assert.deepEqual(reesc, [10, 8], 'grid drop must audibly re-escalate the higher emergency bands, not go silent');
 });
 
