@@ -1,3 +1,15 @@
+## v1.4.3 — plant ALM screen wraps the alarm message (audit rank 26)
+
+The plant ALARM screen hard-truncated each alarm's MESSAGE at a fixed column with no wrap and
+no ellipsis, so the operative half of an alarm — "Backup pool 17% is close to the 10% reserve
+floor — grid is bac…", "Projected battery dip below reserve — Forecast has the pool dipping to
+~0% around Fri…" — was silently cut off, even on a wide terminal (reported from a live screen).
+
+The message now WRAPS onto continuation lines aligned under the MESSAGE column, so the full
+alarm text is always readable. Row rendering is also budgeted against the real terminal height
+(was a fixed 30-row slice), so the "N more below" scroll hint is honest at any height.
+
+Tests 1244 → 1245.
 ## v1.4.2 — forecast SoC-dip is now load-anchored (daytime-review follow-up)
 
 The daytime live review found that `getDayForecast`'s projected-SoC simulation — which feeds

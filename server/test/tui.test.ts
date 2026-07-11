@@ -260,6 +260,17 @@ test('renderPlant(alm) — many alerts, scrolled view', () => {
   assertFrame(lines, 100, 40, 'plant/alm@scrolled');
 });
 
+test('v1.4.3 (audit rank 26) — ALM wraps the message; the tail is not truncated away', () => {
+  // The fixture detail ends in "…column truncation handling"; the old truncate(msg, W-64)
+  // silently clipped that tail with no cue. Wrapping must preserve the full text.
+  const snap = buildSnapshot({ numAlerts: 3, daylight: true });
+  const lines = renderPlant(makeView(100, 40, 'alm'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.ok(/handling/.test(plain), `the wrapped alarm tail ("handling") must survive:\n${plain}`);
+  // And every rendered line still fits the terminal width (no overflow from continuation lines).
+  for (let i = 0; i < lines.length; i++) assert.ok(visLen(lines[i]) <= 100, `alm line ${i} overflows 100 cols`);
+});
+
 test('renderPlant(gen) — genSel out-of-range is clamped', () => {
   const snap = buildSnapshot({ numDpus: 2 });
   const view = { ...makeView(100, 40, 'gen'), genSel: 99 };

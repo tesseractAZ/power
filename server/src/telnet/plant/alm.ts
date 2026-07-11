@@ -5,7 +5,7 @@
  * category, identifier, and message. Scrollable with ↑/↓.
  */
 
-import { c, padEnd, truncate, BOX } from '../ansi.js';
+import { c, padEnd } from '../ansi.js';
 import { divider } from './scada.js';
 import type { PlantData, PlantView } from './types.js';
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
@@ -15,6 +15,27 @@ import { priorityOf, priorityMeta, type AlarmPriority } from '../../alertPriorit
  *  High shares Critical's bright-red; Medium = bright-yellow; Low = cyan. */
 function prioColor(p: AlarmPriority): (s: string) => string {
   return p === 'critical' ? c.redB : p === 'high' ? c.redB : p === 'medium' ? c.yellowB : c.cyan;
+}
+
+/** Word-wrap a PLAIN (un-coloured) string to lines no wider than `width`; a single
+ *  token longer than the column is hard-broken. Returns at least one (possibly empty)
+ *  line so the caller always has a row to colourise. */
+function wrapPlain(s: string, width: number): string[] {
+  const w = Math.max(8, width);
+  const lines: string[] = [];
+  let cur = '';
+  for (let word of s.split(/\s+/).filter(Boolean)) {
+    while (word.length > w) {
+      if (cur) { lines.push(cur); cur = ''; }
+      lines.push(word.slice(0, w));
+      word = word.slice(w);
+    }
+    if (!cur) cur = word;
+    else if (cur.length + 1 + word.length <= w) cur += ' ' + word;
+    else { lines.push(cur); cur = word; }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [''];
 }
 
 export function renderAlm(view: PlantView, data: PlantData): string[] {
@@ -59,33 +80,53 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   ].join(' ')));
 
   const start = Math.max(0, Math.min(alerts.length - 1, view.almScroll));
-  // We render as many rows as we have body height for; the dispatcher will
-  // clip to actual height anyway. Use a generous max here.
-  const visible = alerts.slice(start, start + 30);
   const tsDate = new Date(stamp);
   const p2 = (n: number) => String(n).padStart(2, '0');
   const tstr = `${tsDate.getFullYear()}-${p2(tsDate.getMonth() + 1)}-${p2(tsDate.getDate())} ${p2(tsDate.getHours())}:${p2(tsDate.getMinutes())}:${p2(tsDate.getSeconds())}`;
-  for (const a of visible) {
+
+  // v1.4.3 (audit rank 26) — WRAP the message instead of hard-truncating it. The MESSAGE
+  // column starts at fixed offset 65 (2 indent + 19 TS + 1 + 6 PRIO + 1 + 12 CAT + 1 + 22 ID
+  // + 1), and the alarm detail (e.g. "Backup pool 17% is close to the 10% reserve floor — grid
+  // is backstopping…") routinely runs past it. The old `truncate(msg, W-64)` silently clipped
+  // the operative half of the alarm — "grid is bac…" — with no cue. Wrap onto continuation
+  // lines aligned under MESSAGE so the full text is always readable.
+  const MSG_COL = 65;
+  const msgWidth = Math.max(8, W - MSG_COL);          // fills exactly to W, never overflows
+  const contIndent = ' '.repeat(MSG_COL);
+  // v1.4.3 (audit rank 10/41) — budget rows against the ACTUAL body height (plant/index.ts
+  // clips to H-2, and this screen's own header is 4 lines), not a fixed 30-row slice, so the
+  // "N more below" hint is honest at any terminal height.
+  const rowBudget = Math.max(4, view.height - 8);
+
+  let usedRows = 0;
+  let shown = 0;
+  for (let i = start; i < alerts.length; i++) {
+    const a = alerts[i];
     const prio = priorityOf(a);
     const prioTag = priorityMeta(prio).tag;
-    // Compose the message line: title + optional detail.
     const msg = a.detail ? `${a.title} — ${a.detail}` : a.title;
+    const wrapped = wrapPlain(msg ?? '', msgWidth);
+    // Don't start an alarm whose wrapped block can't finish inside the budget (but always
+    // render at least the first alarm so a very tall message on a short screen still shows).
+    if (shown > 0 && usedRows + wrapped.length > rowBudget) break;
     out.push('  ' + [
       padEnd(c.grey(tstr), 19),
       padEnd(prioColor(prio)(prioTag), 6),
       padEnd(c.white((a.category ?? '—').toUpperCase()), 12),
       // v0.95.0 (re-audit #8) — MIDDLE-truncate the id so the trailing pack/slot
-      // discriminator survives. End-truncation dropped it: 'soc-low-<14-char-SN>-1' and
-      // '…-4' both clipped to the same 22-char 'soc-low-<SN>' head, rendering distinct
-      // per-pack SoC alarms as byte-identical rows. Keep head + tail with an ellipsis.
+      // discriminator survives (end-truncation collapsed distinct per-pack alarms into one row).
       padEnd(c.white((() => { const s = a.id ?? '—'; return s.length > 22 ? s.slice(0, 12) + '…' + s.slice(-9) : s; })()), 22),
-      c.whiteB(truncate(msg ?? '', Math.max(20, W - 64))),
+      c.whiteB(wrapped[0]),
     ].join(' '));
+    for (let j = 1; j < wrapped.length; j++) out.push(contIndent + c.whiteB(wrapped[j]));
+    usedRows += wrapped.length;
+    shown++;
   }
 
-  if (alerts.length > visible.length) {
+  const remaining = alerts.length - start - shown;
+  if (remaining > 0) {
     out.push('');
-    out.push(padEnd(c.grey(`  … ${alerts.length - start - visible.length} more below (↓ to scroll)`), W));
+    out.push(padEnd(c.grey(`  … ${remaining} more below (↓ to scroll)`), W));
   }
 
   return out;
