@@ -25,8 +25,12 @@ export function renderChooser(s: ChooserState): string[] {
   const H = Math.max(20, s.height);
   const out: string[] = [];
 
-  // Top vertical spacing — push the brand block toward the upper third.
-  const topPad = Math.max(1, Math.floor(H * 0.10));
+  // Top vertical spacing — kept small (not proportional to H) so the whole
+  // chooser fits inside a standard 80x24 terminal without scrolling. r28:
+  // the previous H*0.10 pad plus a stacked-card layout that ran ~9 rows per
+  // wrapped body pushed total content well past row 24 at 80x24 — the very
+  // first screen every telnet client sees.
+  const topPad = Math.max(1, Math.floor(H * 0.05));
   for (let i = 0; i < topPad; i++) out.push('');
 
   // Brand block — pseudo-LCD characters built from solid blocks.
@@ -41,7 +45,6 @@ export function renderChooser(s: ChooserState): string[] {
   for (const line of brand) {
     out.push(center(c.cyanB(line), W));
   }
-  out.push('');
   out.push(center(c.dim('P L A N T   C O N T R O L   S T A T I O N'), W));
   out.push('');
 
@@ -54,45 +57,30 @@ export function renderChooser(s: ChooserState): string[] {
     {
       key: '1',
       title: 'PLANT OPERATOR',
-      sub: 'SCADA · gauges · alarms · trends',
+      sub: 'SCADA · alarms · trends',
       lines: [
-        'Technical control-room console.',
-        'Tag-based instrumentation, alarm',
-        'banner, mimic flow diagram, per-',
-        'circuit feeders, trend strips, and',
-        'live point quality flags.',
-        '',
-        'Designed for the operator who wants',
-        'every number and the state of every',
-        'switch on one screen.',
+        'Tags, alarms, mimic diagram,',
+        'trend strips — every point.',
       ],
     },
     {
       key: '2',
       title: 'SUMMARY',
-      sub: 'narrative · headlines · forecast',
+      sub: 'narrative · forecast',
       lines: [
-        'Friendly bird\'s-eye dashboard.',
-        'Energy flow, today\'s totals, fleet',
-        'inventory, day-ahead forecast, and',
-        'cleanly-formatted device cards.',
-        '',
-        'The original UI — best when you',
-        'want a quick read of "how are',
-        'we doing?" rather than every',
-        'measurement.',
+        'Energy flow, today\'s totals,',
+        'fleet inventory, forecast.',
       ],
     },
   ];
 
-  // v0.15.9 — cardW 38→40. The description source lines run up to 35 visible
-  // chars, but at width 38 the body content area is inner-2 = 34, so wrapText
-  // re-wrapped those lines and orphaned their last word ("…who" / "wants" on its
-  // own line), and 34-char lines hit content == inner exactly and dropped the
-  // right border. At 40 the content area is 36 ≥ every source line, so each fits
-  // with a guaranteed trailing pad — no orphan wrap, no border drop. Still stacks
-  // (not side-by-side) on an 80-col terminal, matching prior behaviour.
-  const cardW = 40;
+  // r28: cardW 40→36 and the body copy trimmed to two short lines each so the
+  // pair renders SIDE-BY-SIDE (not stacked) at the standard 80-col width:
+  // 36*2 + gap(4) + margin(4) = 80. Side-by-side costs the height of ONE
+  // card instead of two stacked ones — that's what keeps the whole chooser
+  // inside 24 rows. Narrower terminals still fall back to the stacked branch
+  // below.
+  const cardW = 36;
   const gap = 4;
   const sideBySide = W >= cardW * 2 + gap + 4;
 

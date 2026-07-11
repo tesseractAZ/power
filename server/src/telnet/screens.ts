@@ -12,6 +12,7 @@ import type { DpuProjection, DpuPack, Shp2Projection } from '../ecoflow/project.
 import type { FleetEnergyTotals } from '../aggregator.js';
 import type { DayForecast, FleetDegradation } from '../analytics.js';
 import type { Alert } from '../alerts.js';
+import { CELL_TEMP, MOS_TEMP, MPPT_TEMP, PTC_TEMP, type TempBand } from '../alerts.js';
 import { c, BOX, padEnd, padStart, truncate, center, lr, bar, visLen } from './ansi.js';
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
 import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '../alertPriority.js';
@@ -137,12 +138,15 @@ function countSetBits(n: number): number {
   return count;
 }
 
-function tempColor(cels: number | null | undefined): ColorKey {
+// v-r14 — colour against the SAME band the alarm engine (alerts.ts) fires on,
+// per sensor type: a hot MPPT/MOSFET/PTC heater is normal where a hot LFP cell
+// is not, so every caller must pass its own band instead of sharing one.
+function tempColor(cels: number | null | undefined, band: TempBand): ColorKey {
   if (cels == null) return 'grey';
   const f = cToF(cels);
-  if (f >= 131) return 'red';
-  if (f >= 113) return 'yellow';
-  if (f >= 95) return 'yellow';
+  if (band.critF != null && f >= band.critF) return 'red';
+  if (f >= band.warnF) return 'yellow';
+  if (f >= band.infoF) return 'yellow';
   if (f >= 60) return 'green';
   return 'cyan';
 }
@@ -420,14 +424,14 @@ function bodyOverview(data: RenderData): string[] {
   const cov = f ? `${Math.round(f.coverage * 100)}% measured` : 'no data';
   L.push(c.cyanB('TODAY') + c.dim(`   since local midnight · ${cov}`));
   if (f) {
-    const netTag = f.batteryNetWh >= 0 ? 'discharged' : 'charged';
+    const netTag = f.batteryNetWh >= 0 ? '▼' : '▲';
     L.push(twoCol('Solar produced', c.yellow(fmtKwh(f.pvWh)), 'AC output', c.white(fmtKwh(f.acOutWh))));
     L.push(
       twoCol(
         'Panel load',
         c.white(fmtKwh(f.panelLoadWh)),
         'Battery net',
-        paint(f.batteryNetWh >= 0 ? 'yellow' : 'green', `${fmtKwh(Math.abs(f.batteryNetWh))} ${netTag}`),
+        paint(f.batteryNetWh >= 0 ? 'yellow' : 'green', `${netTag} ${fmtKwh(Math.abs(f.batteryNetWh))}`),
       ),
     );
   } else {
@@ -509,7 +513,7 @@ function outlook(fc: DayForecast, backstopping = false): [string, ColorKey] {
 function bodyDevices(data: RenderData): string[] {
   const devs = sortedDevices(data.snap);
   const L: string[] = [];
-  L.push(c.grey(cell('STATUS', 10) + cell('DEVICE', 21) + cell('SOC', 6) + cell('LIVE', 22) + 'SERIAL'));
+  L.push(c.grey(cell('STATUS', 10) + cell('DEVICE', 21) + cell('SOC', 6) + cell('LIVE', 32) + 'SERIAL'));
   for (const d of devs) {
     const stat = d.online ? c.green('● ONLINE') : c.red('○ OFFLINE');
     let soc = '—';
@@ -524,7 +528,7 @@ function bodyDevices(data: RenderData): string[] {
       if (p.kind === 'dpu') soc = paint(socColor(p.soc), fmtPct(p.soc));
       else if (p.kind === 'shp2') soc = paint(socColor(p.backupBatPercent), fmtPct(p.backupBatPercent));
       else if (p.kind === 'generic' && p.soc != null) soc = fmtPct(p.soc);
-      // Fits the 22-wide LIVE cell (must stay ≤21 visible chars).
+      // Fits the 32-wide LIVE cell (must stay ≤31 visible chars).
       live = c.grey('cloud-offline (held)');
     } else if (p?.kind === 'dpu') {
       soc = paint(socColor(p.soc), fmtPct(p.soc));
@@ -541,10 +545,10 @@ function bodyDevices(data: RenderData): string[] {
       soc = p.soc != null ? fmtPct(p.soc) : '—';
       live = p.soc != null || p.outWatts != null ? c.white(fmtW(p.outWatts)) : c.grey('app-only device');
     } else {
-      live = c.grey(d.lastError ? 'error 1006 · app-only' : 'no telemetry');
+      live = c.grey(d.lastError ? `error: ${d.lastError}` : 'no telemetry');
     }
     L.push(
-      cell(stat, 10) + cell(c.white(d.deviceName), 21) + cell(soc, 6) + cell(live, 22) + c.grey(d.sn),
+      cell(stat, 10) + cell(c.white(d.deviceName), 21) + cell(soc, 6) + cell(live, 32) + c.grey(d.sn),
     );
   }
   return L;
@@ -599,9 +603,9 @@ function bodySolar(data: RenderData, w: number): string[] {
         c.grey('total ') +
         c.yellow(padEnd(fmtW(p.pvTotalWatts), 9)) +
         c.grey('MPPT  ') +
-        paint(tempColor(p.mpptHvTemp), 'HV ' + fmtTemp(p.mpptHvTemp)) +
+        paint(tempColor(p.mpptHvTemp, MPPT_TEMP), 'HV ' + fmtTemp(p.mpptHvTemp)) +
         c.grey(' · ') +
-        paint(tempColor(p.mpptLvTemp), 'LV ' + fmtTemp(p.mpptLvTemp)),
+        paint(tempColor(p.mpptLvTemp, MPPT_TEMP), 'LV ' + fmtTemp(p.mpptLvTemp)),
     );
     L.push('  ' + pvString('HV', p.pvHighVolts, p.pvHighAmps, p.pvHighWatts, p.pvHighErrCode));
     L.push('  ' + pvString('LV', p.pvLowVolts, p.pvLowAmps, p.pvLowWatts, p.pvLowErrCode));
@@ -724,9 +728,9 @@ function bodyBattery(sv: SessionView, data: RenderData, w: number, h: number): s
         padEnd(sel ? c.whiteB(`P${n}`) : c.white(`P${n}`), 7) +
         padEnd(paint(socColor(pk.soc), fmtPct(pk.soc)), 7) +
         padEnd(c.white(soh != null ? `${soh.toFixed(1)}%` : '—'), 9) +
-        padEnd(paint(tempColor(pk.temp), fmtTemp(pk.temp)), 8) +
-        padEnd(paint(tempColor(pk.maxCellTemp), fmtTemp(pk.maxCellTemp)), 8) +
-        padEnd(paint(tempColor(pk.minCellTemp), fmtTemp(pk.minCellTemp)), 8) +
+        padEnd(paint(tempColor(pk.temp, CELL_TEMP), fmtTemp(pk.temp)), 8) +
+        padEnd(paint(tempColor(pk.maxCellTemp, CELL_TEMP), fmtTemp(pk.maxCellTemp)), 8) +
+        padEnd(paint(tempColor(pk.minCellTemp, CELL_TEMP), fmtTemp(pk.minCellTemp)), 8) +
         padEnd(spreadCell(pk.maxVolDiffMv), 9) +
         padEnd(c.white(pk.cycles != null ? String(pk.cycles) : '—'), 7) +
         bal,
@@ -864,11 +868,11 @@ function packDetail(pk: DpuPack, dpu: DpuDev, w: number, degradation: FleetDegra
   }
 
   L.push(c.cyanB(`CELL TEMPERATURES · ${pk.cellTemps.length}`));
-  L.push(...sensorGrid(pk.cellTemps, 'C', w));
+  L.push(...sensorGrid(pk.cellTemps, 'C', w, CELL_TEMP));
   L.push(c.cyanB(`MOSFET TEMPS · ${pk.mosTemps.length}`));
-  L.push(...sensorGrid(pk.mosTemps, 'M', w));
+  L.push(...sensorGrid(pk.mosTemps, 'M', w, MOS_TEMP));
   L.push(c.cyanB(`PTC HEATER TEMPS · ${pk.ptcTemps.length}`));
-  L.push(...sensorGrid(pk.ptcTemps, 'P', w));
+  L.push(...sensorGrid(pk.ptcTemps, 'P', w, PTC_TEMP));
   if (cellV.length > 0 && meanMv != null) {
     L.push(c.cyanB(`CELL VOLTAGES · ${cellV.length}`) + c.grey(`   mean ${(meanMv / 1000).toFixed(3)} V · ±dev coloured`));
     const colW = 13;
@@ -903,11 +907,11 @@ function statGrid(items: Array<[string, string]>, w: number): string[] {
 }
 
 /** Temperature readings laid into an aligned grid. */
-function sensorGrid(values: number[], prefix: string, w: number): string[] {
+function sensorGrid(values: number[], prefix: string, w: number, band: TempBand): string[] {
   if (values.length === 0) return ['  ' + c.grey('no data')];
   const colW = 12;
   const cols = Math.max(1, Math.floor((w - 2) / colW));
-  const cells = values.map((v, i) => cell(c.grey(`${prefix}${i + 1}`) + ' ' + paint(tempColor(v), fmtTemp(v)), colW));
+  const cells = values.map((v, i) => cell(c.grey(`${prefix}${i + 1}`) + ' ' + paint(tempColor(v, band), fmtTemp(v)), colW));
   const lines: string[] = [];
   for (let i = 0; i < cells.length; i += cols) lines.push('  ' + cells.slice(i, i + cols).join(''));
   return lines;
@@ -1013,7 +1017,7 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
         cell(link, 13) +
         cell(s.isAcOpen ? c.green('open') : c.grey('closed'), 9) +
         cell(c.white(s.ratePower != null ? `${s.ratePower} W` : '—'), 10) +
-        paint(tempColor(s.emsBatTemp), fmtTemp(s.emsBatTemp)) +
+        paint(tempColor(s.emsBatTemp, CELL_TEMP), fmtTemp(s.emsBatTemp)) +
         (dpuStale ? c.yellow('  ⚠ DPU telemetry stale (battery still counted)') : ''),
     );
   }
@@ -1039,7 +1043,14 @@ function bodyShp2(sv: SessionView, data: RenderData, w: number, h: number): stri
     );
   }
 
+  // v1.4.x (r15) — the SHP2 detail screen otherwise has no header-level cue that
+  // the panel itself is cloud-offline: reserve/backup/circuits below are all frozen
+  // at their last-known values (same framing as the BATTERY screen's per-core notice
+  // and the DEVICES screen's "cloud-offline (held)" tag), but nothing here said so.
   const head = [c.cyanB('SMART HOME PANEL 2') + c.grey('   ' + shp2.sn), rule(w)];
+  if (!shp2.online) {
+    head.push(c.yellow('● This SHP2 is cloud-offline — values are last-known, not live.'));
+  }
   return head.concat(paginate(body.map((l) => [l]), sv.alertScroll, Math.max(2, h - 2)));
 }
 
@@ -1346,11 +1357,14 @@ function bodyPredictive(sv: SessionView, data: RenderData, w: number, h: number)
   const L: string[] = [];
   L.push(
     c.cyanB(plural(learned.length, 'LEARNED SIGNAL', 'LEARNED SIGNALS')) +
-      c.grey('     ') +
+      c.grey('  ') +
       c.white(plural(anomalies.length, 'anomaly', 'anomalies')) +
       c.grey(' · ') +
       c.white(plural(forecasts.length, 'forecast', 'forecasts')) +
-      c.grey('     peer comparison · self-baseline · trend projection'),
+      // Shortened from 'peer comparison · self-baseline · trend projection'
+      // (50 chars) — the full caption ran past contentW (76 at an 80-col
+      // frame) and was silently clipped by framed()'s padEnd()/truncate().
+      c.grey('  ·  peer/baseline/trend'),
   );
   L.push(rule(w));
   if (learned.length === 0) {

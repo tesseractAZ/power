@@ -102,14 +102,25 @@ const mpptProducing = (watts: number | null, amps: number | null): boolean => {
  * Thresholds. EcoFlow's API does NOT expose cell-imbalance or temperature alarm
  * limits, so these are our own (general LFP best practice). Where EcoFlow exposes
  * an operating limit (emsParaVol window) we use its numbers directly.
+ *
+ * v-r14 — exported so the telnet TUI (screens.ts, plant/gen.ts) can colour live
+ * temperature readouts against the SAME bands this engine alarms on, instead of
+ * maintaining separate, drifted copies. One band per physically-distinct sensor:
+ * a hot MPPT or MOSFET is normal where a hot LFP cell is not.
  */
-type TempBand = { infoF: number; warnF: number; critF?: number };
-const CELL_TEMP: TempBand = { infoF: 104, warnF: 113, critF: 131 };
-const MOS_TEMP: TempBand = { infoF: 104, warnF: 131, critF: 149 };
-const BOARD_TEMP: TempBand = { infoF: 113, warnF: 140, critF: 158 };
-const SHUNT_TEMP: TempBand = { infoF: 113, warnF: 140 };
-const MPPT_TEMP: TempBand = { infoF: 131, warnF: 149, critF: 167 };
-const CELL_TEMP_COLD_F = 41;
+export type TempBand = { infoF: number; warnF: number; critF?: number };
+export const CELL_TEMP: TempBand = { infoF: 104, warnF: 113, critF: 131 };
+export const MOS_TEMP: TempBand = { infoF: 104, warnF: 131, critF: 149 };
+export const BOARD_TEMP: TempBand = { infoF: 113, warnF: 140, critF: 158 };
+export const SHUNT_TEMP: TempBand = { infoF: 113, warnF: 140 };
+export const MPPT_TEMP: TempBand = { infoF: 131, warnF: 149, critF: 167 };
+// PTC elements are resistive HEATERS, not sensors to protect — they run hot by
+// design (self-regulating Curie-point heaters typically operate ~60-90 °C /
+// 140-194 °F). No PTC alert is wired into computeAlerts() below; this band
+// exists solely so the TUI doesn't paint a normally-hot heater the same
+// red/yellow as an overheating battery cell.
+export const PTC_TEMP: TempBand = { infoF: 158, warnF: 176, critF: 194 };
+export const CELL_TEMP_COLD_F = 41;
 
 const VOL_DIFF_WARN_MV = 20;
 const VOL_DIFF_CRIT_MV = 50;
