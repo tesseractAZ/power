@@ -1,3 +1,36 @@
+## v1.5.2 — BMS lifetime energy keyed on the pack's stable serial (data integrity)
+
+Per-pack BMS lifetime state — the v0.13.0 factory-register baseline and the v0.45.0 held/carry Wh
+that together compose the HA-Energy-Dashboard `total_increasing` `fleet_battery_charge_wh` /
+`fleet_battery_discharge_wh` sensors — was persisted and cached under the DPU serial **plus the
+positional BMS-bus slot number** (`num`, i.e. `hs_yj751_bms_slave_addr.N`), never the pack's stable
+hardware serial (`packSn`). This is the exact anti-pattern the v1.2.0 `restTracker.packRestKey` fix
+already avoids for pack-rest state, but the lifetime accumulator was never brought in line.
+
+`num` can renumber on a BMS rescan or a pack reseat without the physical pack changing. Under the old
+key a renumbered pack silently inherited whatever OTHER pack previously occupied that `(sn, num)`
+slot's baseline/held row — either tripping the corrupt-read guard (freeze/undercount) or, after the
+v0.81.0 reconnect re-baseline confirms it, permanently dropping the moved pack's accumulated delta:
+a genuine double-count-or-loss feeding a `total_increasing` meter (which must never roll back).
+
+Now re-keyed on `packSn` (`pack_baseid_<sn>:<packSn>_*` / `pack_lastwhid_*`), with:
+- a **backward-compatible migration** — the first time a pack's serial is seen live, any existing
+  legacy slot-keyed row is copied forward VERBATIM (never reset to 0) onto the new key and the legacy
+  row is deleted in the SAME transaction, so it can't be rediscovered as a stale second contributor;
+- a **legacy fallback** — a pack whose BMS hasn't reported its serial yet keeps the exact old key
+  shape (byte-identical behaviour, no migration);
+- **dual-shape offline discovery** — the restart-while-offline carry loop now recognises both the
+  legacy `<sn>|<num>` and the new `<sn>:<packSn>` cache-key shapes, so a migrated-but-currently-
+  offline member isn't dropped from the fleet sum after a process restart.
+
+Two new tests (`recorderPackRenumber.test.ts`) pin the upgrade migration (counter continues, doesn't
+reset) and the renumber-safety property (two packs swapping BMS-bus slots keep their own history, no
+cross-contamination). Building the second test surfaced — and the fix confirmed correct against — the
+recorder's real cross-restart carry behaviour. All existing recorder tests pass unchanged except one
+`offlineHeldMembers` string literal that legitimately changed shape for a packSn-bearing pack.
+
+Tests 1245 → 1247; tsc clean. `restTracker.ts` (already packSn-keyed since v1.2.0) is untouched.
+
 ## v1.5.1 — deferred Tier-1 TUI: every screen honest at 80×24
 
 The remaining deferred telnet-TUI display findings (all re-verified against live 80×24 vs 160×50
