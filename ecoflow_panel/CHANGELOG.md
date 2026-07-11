@@ -1,3 +1,15 @@
+## v1.7.1 — hotfix: revert the AppArmor tightening from v1.7.0 (it broke the add-on restart)
+
+v1.7.0's security fix #3 removed the AppArmor profile's blanket `file,` rule in favour of the explicit
+per-path allow list. That list had `/init ix,` (execute) but **not** read — and s6-overlay re-*opens*
+`/init` for reading during its shutdown/restart sequence. The result on the first restart after the
+update was a crash loop (`/bin/sh: can't open '/init': Permission denied`) that put the add-on — and
+therefore the whole alarm — into the `error` state. Reverted to the blanket `file,` rule (byte-identical
+file-access to the healthy v1.6.0 profile), restoring service. The other five v1.7.0 fixes are unaffected
+and remain in place. Tightening the file rules correctly is deferred to a host-audit.log-driven, boot-tested
+change (see the note in `apparmor.txt`); the profile still denies the dangerous capabilities / mount /
+ptrace, so its core confinement is intact.
+
 ## v1.7.0 — security remediation (telnet DoS caps, ANSI-injection strip, least-privilege packaging)
 
 A 7-class security audit of the add-on surfaced 6 findings (2 medium in the telnet transport, 4 low
