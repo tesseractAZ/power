@@ -900,37 +900,56 @@ function hourCurve(
  * schedule when nobody's at work. Falls back to the combined curve when
  * either bucket is too thin to trust.
  */
-function hourCurveByWeekday(
-  recorder: Recorder,
-  sn: string,
-  metric: string,
-  sinceMs: number,
+// v1.9.0 (review F5) — recency half-life for the LOAD curve, in days. The
+// 30-day ground-truth review measured the trailing-mean curve lagging the
+// June→July summer load ramp by ~13-17% at daytime hours (worst -1.5 to -1.8 kW
+// at 13:00-15:00) — an optimistic lean on the runway 4-8h tiers. Exponentially
+// down-weighting old samples (weight = 2^(-ageDays/halfLife)) makes the curve
+// track a regime shift within ~1-2 half-lives while still smoothing day-to-day
+// noise. 7 days ≈ last week dominates but the month still stabilizes the shape.
+// ≤ 0 disables (plain mean, the pre-v1.9.0 behaviour). Env-tunable.
+const FORECAST_LOAD_HALF_LIFE_DAYS = Number(process.env.FORECAST_LOAD_HALF_LIFE_DAYS ?? 7);
+
+/** v1.9.0 (review F5) — pure core of hourCurveByWeekday: recency-weighted
+ *  hour-of-day curves from raw points. weight = 2^(-ageDays/halfLifeDays);
+ *  halfLifeDays <= 0 (or non-finite) degrades to the plain mean. Exported for
+ *  tests. Sample COUNTS stay raw (they gate the weekday/weekend split, which is
+ *  about coverage, not recency). */
+export function weightedHourCurveByWeekday(
+  pts: Array<{ ts: number; value: number }>,
   nowMs: number,
+  halfLifeDays: number,
 ): { weekday: number[]; weekend: number[]; combined: number[]; spanMs: number; weekdaySamples: number; weekendSamples: number } {
-  const pts = recorder.query(sn, metric, sinceMs, nowMs, HOUR_CURVE_BUCKET_SEC);
-  const weekdayBuckets: number[][] = Array.from({ length: 24 }, () => []);
-  const weekendBuckets: number[][] = Array.from({ length: 24 }, () => []);
-  const combinedBuckets: number[][] = Array.from({ length: 24 }, () => []);
+  const useWeights = Number.isFinite(halfLifeDays) && halfLifeDays > 0;
+  const halfLifeMs = halfLifeDays * 86_400_000;
+  type WB = { wSum: number; wvSum: number; n: number };
+  const mk = (): WB[] => Array.from({ length: 24 }, () => ({ wSum: 0, wvSum: 0, n: 0 }));
+  const weekdayB = mk();
+  const weekendB = mk();
+  const combinedB = mk();
   let weekdaySamples = 0;
   let weekendSamples = 0;
+  const add = (b: WB, w: number, v: number) => { b.wSum += w; b.wvSum += w * v; b.n++; };
   for (const p of pts) {
     const d = new Date(p.ts);
     const h = d.getHours();
     const dow = d.getDay(); // 0 = Sun, 6 = Sat
-    combinedBuckets[h].push(p.value);
+    const w = useWeights ? Math.pow(2, -Math.max(0, nowMs - p.ts) / halfLifeMs) : 1;
+    add(combinedB[h], w, p.value);
     if (dow === 0 || dow === 6) {
-      weekendBuckets[h].push(p.value);
+      add(weekendB[h], w, p.value);
       weekendSamples++;
     } else {
-      weekdayBuckets[h].push(p.value);
+      add(weekdayB[h], w, p.value);
       weekdaySamples++;
     }
   }
-  const combined = combinedBuckets.map((b) => mean(b));
+  const avg = (b: WB): number => (b.wSum > 0 ? b.wvSum / b.wSum : NaN);
+  const combined = combinedB.map(avg);
   // If a bucket has no samples for a given hour, fall back to the combined
   // hour — keeps the curve continuous when one weekday/weekend group is thin.
-  const weekday = weekdayBuckets.map((b, h) => (b.length ? mean(b) : combined[h]));
-  const weekend = weekendBuckets.map((b, h) => (b.length ? mean(b) : combined[h]));
+  const weekday = weekdayB.map((b, h) => (b.n ? avg(b) : combined[h]));
+  const weekend = weekendB.map((b, h) => (b.n ? avg(b) : combined[h]));
   return {
     weekday,
     weekend,
@@ -939,6 +958,20 @@ function hourCurveByWeekday(
     weekdaySamples,
     weekendSamples,
   };
+}
+
+function hourCurveByWeekday(
+  recorder: Recorder,
+  sn: string,
+  metric: string,
+  sinceMs: number,
+  nowMs: number,
+): { weekday: number[]; weekend: number[]; combined: number[]; spanMs: number; weekdaySamples: number; weekendSamples: number } {
+  const pts = recorder.query(sn, metric, sinceMs, nowMs, HOUR_CURVE_BUCKET_SEC);
+  // v1.9.0 (review F5) — recency-weighted so the curve tracks the seasonal load
+  // regime instead of lagging it by half the window. Both consumers (the 24h
+  // day-ahead forecast AND the multi-day rollup) share this path.
+  return weightedHourCurveByWeekday(pts, nowMs, FORECAST_LOAD_HALF_LIFE_DAYS);
 }
 
 /** Average an already-fetched bucketed PV series into hourly buckets keyed by
@@ -1195,7 +1228,57 @@ export function blendNightLoad(
 ): number {
   if (recentLoadW == null || rawBase <= recentLoadW * ratio) return rawBase;
   const blended = rawBase * (1 - blend) + recentLoadW * blend;
-  return Math.max(blended, rawBase * (1 - maxTrim));
+  // v1.9.0 (review F12) — explicit floor at the OBSERVED load: the trim exists to
+  // pull an over-predicting curve toward reality, so it must never land BELOW what
+  // the house is measurably drawing right now. With the default params the blend
+  // already sits above recentLoadW whenever the trim fires; this floor makes the
+  // invariant structural rather than parameter-dependent. (min with rawBase keeps
+  // the "only ever reduces" contract when recent load exceeds the curve.)
+  return Math.max(blended, rawBase * (1 - maxTrim), Math.min(rawBase, recentLoadW));
+}
+
+/** v1.9.0 (review F12) — the night trim may only use its generation-time anchor
+ *  on hours of the SAME ongoing night. The 3h recentLoad anchor measured at an
+ *  early-morning origin (e.g. 04:00, idle) was being applied to the NEXT
+ *  evening's 21:00-23:00 hours ~17h away, gutting the forecast evening AC load
+ *  by 26-37%. Same-night = the anchor hour is itself in the night band, the
+ *  target hour is in the night band, and the target is at most 9h ahead (the
+ *  21:00→05:00 band is 9h long, so anything farther is a DIFFERENT night).
+ *  Pure + exported for tests. */
+export function isSameNightTrimWindow(anchorClock: number, targetClock: number, hoursAhead: number): boolean {
+  return (
+    isForecastNightHour(anchorClock) &&
+    isForecastNightHour(targetClock) &&
+    hoursAhead >= 0 &&
+    hoursAhead <= 9
+  );
+}
+
+// v1.9.0 (review F12) — the trim's premise ("the curve over-predicts nights ~2x",
+// v0.59.0) is checked empirically before every forecast build instead of assumed
+// forever. The review measured the premise EXPIRED: the raw night curve is now
+// near-unbiased (-77W), and an unconditional trim was converting a +957W raw
+// bias into a -462W UNDER-prediction (mean trim 1419W) on the runway 4-8h tiers.
+const NIGHT_TRIM_MIN_PAIRS = 12;          // < 12 hindcast night-hours → keep the trim (cold curve = original v0.59 stale-curve regime)
+const NIGHT_TRIM_MIN_BIAS_FRAC = 0.25;    // enable only when the curve over-predicts nights by > 25% of actual…
+const NIGHT_TRIM_MIN_BIAS_ABS_W = 150;    // …and by > 150 W absolute (a near-zero night can't enable it on noise)
+
+/** v1.9.0 (review F12) — should the overnight curve trim be active at all?
+ *  `pairs` is the trailing hindcast: for each recorded night-band hour, the
+ *  curve's prediction vs the actual hourly mean load. Enabled only when the
+ *  curve MATERIALLY over-predicts nights (the condition the trim was built
+ *  for); a near-unbiased or under-predicting curve disables it. Pure +
+ *  exported for tests. */
+export function shouldTrimNightCurve(
+  pairs: Array<{ predictedW: number; actualW: number }>,
+  minPairs = NIGHT_TRIM_MIN_PAIRS,
+  minBiasFrac = NIGHT_TRIM_MIN_BIAS_FRAC,
+  minBiasAbsW = NIGHT_TRIM_MIN_BIAS_ABS_W,
+): boolean {
+  if (pairs.length < minPairs) return true; // too little history to refute the stale-curve premise
+  const meanBias = mean(pairs.map((p) => p.predictedW - p.actualW));
+  const meanActual = mean(pairs.map((p) => p.actualW));
+  return meanBias > Math.max(minBiasAbsW, meanActual * minBiasFrac);
 }
 
 /**
@@ -1479,6 +1562,44 @@ async function computeDayForecastUncached(
     }
   }
 
+  // v1.9.0 (review F12) — check the night-trim's premise against the last 7 days
+  // before using it: hindcast the SAME curve lookup the loop below uses against
+  // the recorded hourly night-band load, and enable the trim only if the curve
+  // still materially over-predicts nights (shouldTrimNightCurve). The review
+  // measured the v0.59 premise expired (raw night bias -77W) and the trim was
+  // pushing nights ~1.4 kW UNDER reality — the optimistic direction on the
+  // runway 4-8h tiers. Skipped entirely (trim stays off) when recentLoadW is
+  // null, since blendNightLoad no-ops without an anchor anyway.
+  let nightTrimActive = false;
+  if (recentLoadW != null && shp2) {
+    const hindPts = recorder.query(shp2.sn, 'panel_load', now - 7 * 86_400_000, now, HOUR_CURVE_BUCKET_SEC);
+    const byHourEpoch = new Map<number, number[]>();
+    for (const p of hindPts) {
+      const he = Math.floor(p.ts / 3_600_000);
+      let arr = byHourEpoch.get(he);
+      if (!arr) byHourEpoch.set(he, (arr = []));
+      arr.push(p.value);
+    }
+    const nightPairs: Array<{ predictedW: number; actualW: number }> = [];
+    for (const [he, vs] of byHourEpoch) {
+      const d = new Date(he * 3_600_000);
+      const hClock = d.getHours();
+      if (!isForecastNightHour(hClock)) continue;
+      const dw = d.getDay();
+      const wknd = dw === 0 || dw === 6;
+      const predicted = useSplitLoad
+        ? (wknd ? loadRes.weekend[hClock] : loadRes.weekday[hClock])
+        : loadRes.combined[hClock];
+      if (!Number.isFinite(predicted)) continue;
+      nightPairs.push({ predictedW: predicted, actualW: mean(vs) });
+    }
+    nightTrimActive = shouldTrimNightCurve(nightPairs);
+  }
+  // v1.9.0 (review F12) — the anchor is only night-representative when NOW is in
+  // the night band; isSameNightTrimWindow additionally restricts the trim to
+  // hours of THIS night (see the loop below).
+  const anchorClock = new Date(now).getHours();
+
   for (let k = 0; k < 24; k++) {
     const ts = startHour + k * 3_600_000;
     const clock = new Date(ts).getHours();
@@ -1516,7 +1637,13 @@ async function computeDayForecastUncached(
     // a DAYTIME curve hour legitimately runs far above a brief recent dip (a cloud
     // momentarily cutting AC load), so trimming there would under-predict the real
     // afternoon peak and make the islanded SoC slope over-optimistic. Only ever reduces.
-    const trimmed = isForecastNightHour(clock) ? blendNightLoad(rawBase, recentLoadW) : rawBase;
+    // v1.9.0 (review F12) — two extra gates: (a) nightTrimActive — the curve must
+    // still MEASURABLY over-predict nights (premise check above); (b) same-night —
+    // the generation-time anchor may only trim hours of THIS ongoing night, never
+    // tomorrow evening's (an 04:00 idle anchor was gutting next-evening AC 26-37%).
+    const trimmed = nightTrimActive && isSameNightTrimWindow(anchorClock, clock, k)
+      ? blendNightLoad(rawBase, recentLoadW)
+      : rawBase;
     // v1.4.2 (daytime-review) — then anchor the near-term hours UPWARD to observed load, the
     // v0.15.17 fix computeRunway got but that was never ported to this sibling minProjectedSoc
     // sim. Without it, a SUSTAINED daytime load far above the modelled hour (an AC compressor
