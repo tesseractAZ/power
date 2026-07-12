@@ -77,6 +77,13 @@ export class SnapshotStore extends EventEmitter {
   // v0.56.0 — last-coherent backup-pool trio per SHP2 SN, for the grace-hold that smooths the
   // ~10-15/day reconnect blips that would otherwise flap the gauge to "unknown".
   private backupPoolHoldBySn: Map<string, BackupPoolHold | null> = new Map();
+  // v1.11.0 (review F8) — per-DPU inverter-error onset: {code, sinceMs} for the
+  // currently-standing nonzero sysErrCode, or null when clear. A cloud reconnect
+  // blips sysErrCode nonzero for 20-160s then clears (07-02: two transient CRITICAL
+  // "Inverter error code" alerts drove the HA critical_alerts sensor to 2); a real
+  // inverter fault persists. Reset when the code clears OR changes value, so the
+  // debounce clock only runs while the SAME error is continuously present.
+  private dpuErrOnsetBySn: Map<string, { code: number; sinceMs: number }> = new Map();
   // v1.8.0 (review F3) — ms epoch when the PUBLISHED pool % went null (i.e. after
   // the grace hold already absorbed reconnect blips). Feeds the reserve-blind
   // compensating alert so it keys off a SUSTAINED blind window, not a flicker.
@@ -249,6 +256,26 @@ export class SnapshotStore extends EventEmitter {
     return this.backupPoolUnknownSinceBySn.get(sn) ?? null;
   }
 
+  /** v1.11.0 (review F8) — update the per-DPU inverter-error onset from the freshly
+   *  applied projection. Called for every device at each ingest so the onset clock
+   *  reflects continuous presence of the SAME nonzero code. */
+  private trackDpuErrOnset(sn: string, proj: Projection | undefined): void {
+    if (!proj || proj.kind !== 'dpu') return;
+    const code = proj.sysErrCode ?? 0;
+    if (code === 0) { this.dpuErrOnsetBySn.delete(sn); return; }
+    const prev = this.dpuErrOnsetBySn.get(sn);
+    // Re-baseline the clock on the first appearance OR a code change — a
+    // different code is a different fault, not a continuation.
+    if (!prev || prev.code !== code) this.dpuErrOnsetBySn.set(sn, { code, sinceMs: this.now() });
+  }
+
+  /** v1.11.0 (review F8) — {code, sinceMs} of the currently-standing inverter
+   *  error for this DPU, or null when clear. alerts.ts debounces the CRITICAL on
+   *  `now - sinceMs`. */
+  dpuErrOnset(sn: string): { code: number; sinceMs: number } | null {
+    return this.dpuErrOnsetBySn.get(sn) ?? null;
+  }
+
   /** Replace the full raw quota for a device (called after a REST refresh). */
   setDeviceQuota(sn: string, raw: Record<string, unknown>, source: 'rest' | 'mqtt' = 'rest') {
     const cur = this.snap.devices[sn];
@@ -256,6 +283,7 @@ export class SnapshotStore extends EventEmitter {
     this.rawBySn.set(sn, raw);
     cur.projection = projectByProduct(cur.productName, raw);
     this.applyBackupPoolGraceHold(sn, cur.projection);
+    this.trackDpuErrOnset(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? raw : undefined;
     cur.lastUpdated = Date.now();
     cur.lastError = undefined;
@@ -284,6 +312,7 @@ export class SnapshotStore extends EventEmitter {
     this.rawBySn.set(sn, merged);
     cur.projection = projectByProduct(cur.productName, merged);
     this.applyBackupPoolGraceHold(sn, cur.projection);
+    this.trackDpuErrOnset(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? merged : undefined;
     cur.lastUpdated = Date.now();
     cur.lastError = undefined;

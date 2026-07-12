@@ -1314,7 +1314,7 @@ export function isForecastNightHour(clockHour: number): boolean {
  * historical clearness, returns the projected PV watts and whether it was
  * equipment-modelled. Pure — no I/O.
  */
-function forecastHourPvW(
+export function forecastHourPvW(
   resp: HourResponse,
   ghi: number | null,
   cloud: number | null,
