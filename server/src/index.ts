@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc } from './shp2Membership.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
@@ -1972,7 +1972,18 @@ const batterySocAlarm = createBatterySocAlarm({
 store.on('change', (snap: FleetSnapshot) => {
   if (!socAlarmEnabled) return;
   const shp2 = findShp2(snap.devices);
-  const soc = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection.backupBatPercent : null;
+  const shp2Soc = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection.backupBatPercent : null;
+  // v1.8.0 (review F3) — reserve-chain SHP2-blind failover. The SoC ladder reads
+  // ONLY the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the
+  // 30-day review found two blackouts (42.2h, 25.8h) in which the pool crossed
+  // 50/40/30/20% while the ladder sat dark for 17.8-20.8h. When that field is null,
+  // fall back to the mean SoC of the home Cores still reporting (the pool IS those
+  // batteries) so the audible ladder keeps firing. homeFleetMeanSoc returns null
+  // only when NO Core is reporting — then the reserve-blind warning (computeAlerts)
+  // + the offline alerts are the signal, and update(null) is a safe no-op. The
+  // engine's own coherence guard still rejects an implausible drop from a fresh
+  // baseline, so a bad fallback read can't ladder falsely.
+  const soc = shp2Soc != null ? shp2Soc : homeFleetMeanSoc(snap.devices);
   void (async () => {
     // Keep the grid-presence entity fresh (TTL-gated) so onCross + the
     // re-escalation below see live grid state. Assign + update run synchronously

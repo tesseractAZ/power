@@ -1,7 +1,7 @@
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import { activeSocBand, socAlertSeverity } from './batterySocAlarm.js';
-import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import {
   classifyDeviceLink,
@@ -192,6 +192,10 @@ export interface ConnectivityContext {
   lastDeviceListAttemptAt: number;   // 0 = never attempted
   lastDeviceListSuccessAt: number;   // 0 = never succeeded
   perDevice: Map<string, { lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number }>;
+  /** v1.8.0 (review F3) — ms epoch when the SHP2's published backup-pool % went
+   *  null (post-grace-hold; SnapshotStore.backupPoolUnknownSince), or null while
+   *  readable. Drives the reserve-alarm-blind compensating alert. */
+  backupPoolUnknownSinceMs?: number | null;
 }
 
 /** Format an age in ms as the most natural short human string. */
@@ -210,6 +214,12 @@ function fmtAge(ms: number): string {
 // poll in 5 min the session is genuinely stale and any "online: 0" we're
 // showing is unreliable.
 const CLOUD_SESSION_STALE_MS = 5 * 60 * 1000;
+// v1.8.0 (review F3) — reserve-alarm-blind debounce + escalation windows. 15 min
+// of sustained pool-unreadability (well past the 3-min grace hold) before the
+// warning fires; 60 min blind while NOT grid-backstopped escalates to critical
+// (the escalation re-triggers the push channel via the alert monitor).
+const RESERVE_BLIND_AFTER_MS = 15 * 60 * 1000;
+const RESERVE_BLIND_CRITICAL_MS = 60 * 60 * 1000;
 
 export function computeAlerts(
   devices: Record<string, DeviceSnapshot>,
@@ -368,7 +378,14 @@ export function computeAlerts(
         }
       }
       out.push({
-        id: `offline-${d.sn}`,
+        // v1.8.0 (review F2) — spares get their OWN alert family. familyOf()
+        // collapses `offline-<SN>` to one 'offline' family for every device, so
+        // daily bench-spare churn (the spares' circuit power-cycles) tripped the
+        // auto-silencer's high-volume rule on 06-04 and the latch then silently
+        // dropped 134 real home-Core/SHP2 offline warnings. `offline-spare-<SN>`
+        // rolls up under 'offline-spare' instead, so spare churn can never poison
+        // the home-device family's dispatch stats.
+        id: spare ? `offline-spare-${d.sn}` : `offline-${d.sn}`,
         // A designated bench spare offline is expected, not a warning, and is
         // marked non-annunciating so it never chimes/pushes/raises the condition.
         severity: spare ? 'info' : isCore || isPanel ? 'warning' : 'info',
@@ -394,7 +411,10 @@ export function computeAlerts(
     } else if (d.projection && d.lastUpdated && now - d.lastUpdated > STALE_MS) {
       const conn = connectivity?.perDevice.get(d.sn);
       out.push({
-        id: `stale-${d.sn}`,
+        // v1.8.0 (review F2) — same spare-family split as `offline-` above: a
+        // bench spare's expected idle telemetry must not pollute the home
+        // devices' 'stale' family stats.
+        id: spare ? `stale-spare-${d.sn}` : `stale-${d.sn}`,
         severity: spare ? 'info' : 'warning',
         category: 'Connectivity',
         device: d.deviceName,
@@ -609,6 +629,56 @@ export function computeAlerts(
       if (pc.watts >= capacity * CIRCUIT_BREAKER_WARN_FRAC) {
         out.push({ id: `circuit-overload-${pc.primaryCh}`, severity: 'warning', category: 'SHP2', device: shp2.deviceName, title: 'Circuit near breaker limit', detail: `${pc.name} drawing ${Math.round(pc.watts)} W — over ${Math.round(CIRCUIT_BREAKER_WARN_FRAC * 100)}% of its ${pc.breakerAmps} A breaker.` });
       }
+    }
+  }
+
+  // v1.8.0 (review F3) — reserve-alarm-blind compensating alert. The entire
+  // reserve chain (SoC ladder, near/below-reserve pair, runway) keys off the
+  // SHP2's backup-pool %; the 30-day engine review found two cloud wedges (42.2h,
+  // 25.8h) in which that value read null while the pool physically crossed
+  // 50/40/30/20% — every reserve classifier sat dark for 17.8-20.8h with only a
+  // generic connectivity warning. This alert says the RESERVE-specific thing:
+  // "your reserve alarm is blind right now". Debounced to a sustained blind
+  // window (the grace hold already absorbs reconnect blips; we additionally wait
+  // RESERVE_BLIND_AFTER_MS) so routine flaps never fire it. Escalates to critical
+  // after RESERVE_BLIND_CRITICAL_MS when the grid is NOT backstopping (off-grid,
+  // a blind reserve alarm is genuinely dangerous) — the severity escalation
+  // re-triggers the push channel via the alert monitor's escalation path. Listed
+  // in ENERGY_STATE_FAMILIES so the auto-silencer can never eat it.
+  if (shp2) {
+    const sp2 = shp2.projection?.kind === 'shp2' ? (shp2.projection as Shp2Projection) : null;
+    const poolNull = sp2 == null || sp2.backupBatPercent == null;
+    let blindSinceMs: number | null = null;
+    if (poolNull) {
+      // Pool published as unknown — onset tracked by the snapshot store
+      // (post-grace-hold). Fallback to lastUpdated when the context is absent.
+      blindSinceMs = connectivity?.backupPoolUnknownSinceMs ?? shp2.lastUpdated ?? null;
+    } else if (!shp2.online) {
+      // Cloud says the SHP2 is offline: the projection (incl. the pool %) is a
+      // FROZEN last-known value, not live truth. Blind since the last fresh data.
+      blindSinceMs = shp2.lastUpdated ?? null;
+    }
+    const blindMs = blindSinceMs != null ? now - blindSinceMs : 0;
+    if (blindSinceMs != null && blindMs >= RESERVE_BLIND_AFTER_MS) {
+      const offGrid = grid?.backstopping !== true;
+      const critical = offGrid && blindMs >= RESERVE_BLIND_CRITICAL_MS;
+      const fallbackSoc = homeFleetMeanSoc(devices);
+      const fallbackTxt = fallbackSoc != null
+        ? `The SoC alarm ladder is running on the Core-fleet fallback (mean ${fallbackSoc.toFixed(0)}% across reporting Cores).`
+        : 'No home Core is reporting either — the SoC alarm ladder is fully dark.';
+      out.push({
+        id: 'reserve-alarm-blind',
+        severity: critical ? 'critical' : 'warning',
+        category: 'Connectivity',
+        device: shp2.deviceName,
+        title: critical ? 'Reserve alarm blind — off-grid' : 'Reserve alarm blind',
+        detail: `SHP2 backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — the reserve/runway alarms cannot see the pool. ${fallbackTxt}${offGrid ? '' : ' Grid is backstopping the home, so a low pool would transfer to mains.'} If this persists, power-cycle the SHP2 network connection.`,
+        facts: [
+          { label: 'Blind for', value: fmtAge(blindMs) },
+          { label: 'Fallback ladder', value: fallbackSoc != null ? `${fallbackSoc.toFixed(0)}% (Core-fleet mean)` : 'unavailable' },
+          { label: 'Escalates', value: offGrid ? `critical after ${fmtAge(RESERVE_BLIND_CRITICAL_MS)} blind` : 'suppressed while grid backstops' },
+        ],
+      });
     }
   }
 

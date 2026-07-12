@@ -246,6 +246,37 @@ export function homeCoreCoverage(devices: Record<string, DeviceSnapshot>): {
   return { connected: roster.length, reporting, complete: reporting === roster.length };
 }
 
+/**
+ * v1.8.0 (review F3) — reserve-alarm SHP2-blind fallback SoC.
+ *
+ * The reserve/SoC/runway alarm chain reads ONLY the SHP2 backup-pool % via
+ * `shp2.projection.backupBatPercent`, which the SHP2 nulls when it goes
+ * cloud-offline. The 30-day engine review found two blackouts (42.2h, 25.8h) in
+ * which the pool physically crossed 50/40/30/20% while every reserve classifier
+ * sat dark for 17.8–20.8h because that one field was null.
+ *
+ * Fallback: the mean SoC of the home Cores STILL REPORTING their own telemetry.
+ * The SHP2 backup pool IS those same batteries, so their mean SoC is a faithful
+ * proxy for the pool % — good enough to keep the audible ladder firing on the
+ * right side of a real depletion (an approximate SoC that CAN alarm beats an
+ * exact SoC that can't). Spares are excluded (not part of the pool); an offline
+ * Core is excluded (its last-known SoC is stale). Returns null only when NO home
+ * Core is reporting — in which case the reserve-blind warning + offline alerts
+ * are the operator's signal, not a fabricated number.
+ */
+export function homeFleetMeanSoc(devices: Record<string, DeviceSnapshot>): number | null {
+  const socs: number[] = [];
+  for (const d of Object.values(devices)) {
+    if (d.projection?.kind !== 'dpu') continue;
+    if (SPARE_DPU_SNS.has(d.sn)) continue; // spares are not wired into the backup pool
+    if (!d.online) continue;               // only Cores currently reporting fresh telemetry
+    const s = d.projection.soc;
+    if (s != null && Number.isFinite(s)) socs.push(s);
+  }
+  if (socs.length === 0) return null;
+  return socs.reduce((a, b) => a + b, 0) / socs.length;
+}
+
 export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   fleetPv: number;
   fleetIn: number;
