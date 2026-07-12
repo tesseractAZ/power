@@ -1486,7 +1486,24 @@ async function computeDayForecastUncached(
       lv: buildSolarResponse(pvHourlyFromPts(pvM.get('pv_low') ?? []), ghiByEpoch),
     });
   }
-  const solarModel = buildSolarResponse(fleetPvByEpoch, ghiByEpoch);
+  // v1.10.0 (review F11) — train the ALARM-facing model on FULL-COVERAGE hours
+  // only: 31% of the last 30 days' daylight training pairs were missing ≥1 home
+  // Core (the 06-29→07-02 cloud blackout), and pairing full GHI with a
+  // partial-fleet PV sum deflated the fitted coefficients 11-23% (noon 8.25 vs
+  // 9.44 full-coverage) — a chronic -21% clear-day under-forecast the clamped
+  // bias correction could not fully repair. Hours where any reporting Core is
+  // absent are telemetry gaps, not low-output observations. Falls back to the
+  // ungated union (pre-v1.10.0 behaviour) when too few full-coverage hours
+  // exist; the ungated `fleetPvByEpoch` still feeds the RESTORED display model
+  // below (its charter is completeness, and it re-adds the missing Cores' own
+  // recorded PV anyway).
+  const fleetFit = fullCoverageFleetPv(homeCorePvMaps);
+  if (fleetFit.usedFullCoverageOnly && fleetFit.fullHours < fleetFit.unionHours) {
+    log(`solar-model: fitted on ${fleetFit.fullHours}/${fleetFit.unionHours} full-coverage hours (F11 gate — partial-fleet hours excluded)`);
+  } else if (!fleetFit.usedFullCoverageOnly && homeCorePvMaps.length > 1) {
+    log(`solar-model: only ${fleetFit.fullHours} full-coverage hours (<${SOLAR_FIT_MIN_FULL_COVERAGE_HOURS}) — falling back to the ungated fit`);
+  }
+  const solarModel = buildSolarResponse(fleetFit.map, ghiByEpoch);
 
   // v0.78.0 — RESTORED display-basis fleet solar model. `fleetPvByEpoch` above only
   // sums LIVE-present home Cores (the loop iterates `dpus`), so a cloud-wedged Core
@@ -1518,7 +1535,7 @@ async function computeDayForecastUncached(
   for (const d of homeDpus) {
     pvBySnForBias.set(d.sn, recorder.query(d.sn, 'pv_total', biasWindowStart, biasTodayStart));
   }
-  const pvBiasFactor = computePvBiasCorrection(solarModel, ghiByEpoch, pvBySnForBias, biasTodayStart);
+  const pvBiasFactor = computePvBiasCorrection(solarModel, ghiByEpoch, pvBySnForBias, biasTodayStart, undefined, log);
 
   // Recent historical clearness — for the cloud-derate fallback only.
   let clearnessHist = 1;
@@ -4230,6 +4247,12 @@ export interface ForecastSkillDay {
   // cache (3-day window) was the only GHI source; the recorder ghi_wm2 series
   // now backfills a week, but a true gap still flags weatherCovered:false.
   weatherCovered: boolean;
+  // v1.10.0 (review F4) — true when a wired home Core reported under 80% of the
+  // day's daylight hours: the "actual" PV for that day is missing TELEMETRY,
+  // not missing sunlight, so the day is shown but excluded from MAE/bias (its
+  // errorPct is null). Keeps the 06-29-style wedge from being scored as a
+  // phantom +29% over-forecast.
+  coverageGap?: boolean;
 }
 
 export interface ForecastSkillReport {
@@ -4367,18 +4390,125 @@ export const PV_BIAS_CLAMP_LO = 0.5;
 export const PV_BIAS_CLAMP_HI = 1.2;
 export const PV_BIAS_MIN_MATURE_DAYS = 3;
 
+// v1.10.0 (review F4/F11) — per-core coverage gates. The 30-day ground-truth
+// review found that hours/days where a wired home Core recorded ZERO telemetry
+// were being scored as ZERO SUNLIGHT: (F4) the bias hindcast scored the
+// 06-29→07-02 Core1+Core2 cloud blackout as a 37% over-forecast and crashed the
+// alarm-facing pvBiasFactor to 0.63 (truth ~1.15) for ~a week; (F11) 31% of the
+// solar model's training pairs had <3 cores reporting, deflating the fitted
+// coefficients 11-23% below a full-coverage fit. Missing telemetry must be
+// EXCLUDED, never averaged in as darkness.
+export const PV_COVERAGE_MIN_FRAC = 0.8;              // a core must report ≥80% of a day's daylight hours
+export const SOLAR_FIT_MIN_FULL_COVERAGE_HOURS = 72;  // ≈3 days of daylight pairs before the gated fit is trusted
+
+/** v1.10.0 (review F4) — per-local-day, per-core telemetry coverage over the
+ *  day's DAYLIGHT hours (GHI > DAYLIGHT_GHI). A day is `covered` only when
+ *  EVERY SN in `pvBySn` reported at least `minFrac` of that day's daylight
+ *  hour-epochs. Days with no daylight GHI at all are neutral (`covered: true`,
+ *  daylightHours 0) — the existing dayHasGhiCoverage gate already excludes
+ *  them from every consumer. A core that is dark for the WHOLE window fails
+ *  every day, driving the bias factor to its neutral 1.0 no-op — the safe
+ *  posture when the actuals are unmeasurable. Pure + exported for tests. */
+export function coreCoverageByDay(
+  ghiByEpoch: Map<number, number>,
+  pvBySn: Map<string, Array<{ ts: number; value: number }>>,
+  todayStartMs: number,
+  windowDays: number,
+  minFrac = PV_COVERAGE_MIN_FRAC,
+): Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }> {
+  // Bucket each SN's samples once into hour-epoch presence sets.
+  const presentBySn = new Map<string, Set<number>>();
+  for (const [sn, pts] of pvBySn) {
+    const set = new Set<number>();
+    for (const p of pts) set.add(Math.floor(p.ts / 3_600_000));
+    presentBySn.set(sn, set);
+  }
+  const out = new Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }>();
+  for (let i = windowDays; i >= 1; i--) {
+    const dayStart = todayStartMs - i * 86_400_000;
+    const daylight: number[] = [];
+    for (let h = 0; h < 24; h++) {
+      const he = Math.floor((dayStart + h * 3_600_000) / 3_600_000);
+      const ghi = ghiByEpoch.get(he);
+      if (ghi != null && ghi > DAYLIGHT_GHI) daylight.push(he);
+    }
+    if (daylight.length === 0) {
+      out.set(dayStart, { covered: true, daylightHours: 0, worstSn: null, worstFrac: null });
+      continue;
+    }
+    let covered = true;
+    let worstSn: string | null = null;
+    let worstFrac: number | null = null;
+    for (const [sn, present] of presentBySn) {
+      const hit = daylight.reduce((n, he) => n + (present.has(he) ? 1 : 0), 0);
+      const frac = hit / daylight.length;
+      if (worstFrac == null || frac < worstFrac) { worstFrac = frac; worstSn = sn; }
+      if (frac < minFrac) covered = false;
+    }
+    out.set(dayStart, { covered, daylightHours: daylight.length, worstSn, worstFrac });
+  }
+  return out;
+}
+
+/** v1.10.0 (review F11) — sum per-core hourly PV maps into a fleet map using
+ *  ONLY hour-epochs where EVERY contributing core reported (the intersection),
+ *  so a cloud-wedged core's absence can't masquerade as a low-output hour and
+ *  deflate the fitted GHI→PV coefficients. A core with ZERO samples in the
+ *  whole window is skipped from the requirement (it adds nothing to any sum,
+ *  and requiring it would empty the intersection). If fewer than
+ *  `minFullHours` full-coverage hours exist (young install / long blackout),
+ *  falls back to the ungated union sum — the pre-v1.10.0 behaviour — rather
+ *  than fitting on a sliver. Pure + exported for tests. */
+export function fullCoverageFleetPv(
+  perCore: Array<Map<number, number>>,
+  minFullHours = SOLAR_FIT_MIN_FULL_COVERAGE_HOURS,
+): { map: Map<number, number>; usedFullCoverageOnly: boolean; fullHours: number; unionHours: number } {
+  const contributing = perCore.filter((m) => m.size > 0);
+  const union = new Map<number, number>();
+  for (const m of contributing) for (const [he, pv] of m) union.set(he, (union.get(he) ?? 0) + pv);
+  if (contributing.length <= 1) {
+    return { map: union, usedFullCoverageOnly: false, fullHours: union.size, unionHours: union.size };
+  }
+  const gated = new Map<number, number>();
+  const [first, ...rest] = contributing;
+  for (const [he, pv] of first) {
+    let sum = pv;
+    let all = true;
+    for (const m of rest) {
+      const v = m.get(he);
+      if (v == null) { all = false; break; }
+      sum += v;
+    }
+    if (all) gated.set(he, sum);
+  }
+  if (gated.size < minFullHours) {
+    return { map: union, usedFullCoverageOnly: false, fullHours: gated.size, unionHours: union.size };
+  }
+  return { map: gated, usedFullCoverageOnly: true, fullHours: gated.size, unionHours: union.size };
+}
+
 export function computePvBiasCorrection(
   solarModel: SolarResponseModel,
   ghiByEpoch: Map<number, number>,
   pvBySn: Map<string, Array<{ ts: number; value: number }>>,
   todayStartMs: number,
   windowDays = 7,
+  log?: (msg: string) => void,
 ): number {
+  // v1.10.0 (review F4) — exclude hindcast days where any wired core's
+  // telemetry is materially missing: those days score missing DATA as missing
+  // SUNLIGHT and whipsaw the alarm-facing factor (0.63 during the 06-29 wedge).
+  const coverage = coreCoverageByDay(ghiByEpoch, pvBySn, todayStartMs, windowDays);
   let totalPred = 0, totalAct = 0, matureDays = 0;
   for (let i = windowDays; i >= 1; i--) {
     const dayStart = todayStartMs - i * 86_400_000;
     // Same "day had ANY irradiance" coverage gate the skill hindcast uses.
     if (!dayHasGhiCoverage(ghiByEpoch, dayStart)) continue;
+    const cov = coverage.get(dayStart);
+    if (cov && !cov.covered) {
+      log?.(`pv-bias: excluded ${new Date(dayStart).toISOString().slice(0, 10)} — core ${cov.worstSn} reported ${Math.round((cov.worstFrac ?? 0) * 100)}% of daylight hours (telemetry gap, not weather)`);
+      continue;
+    }
     let predWh = 0, actWh = 0;
     for (let h = 0; h < 24; h++) {
       const hourStart = dayStart + h * 3_600_000;
@@ -4455,6 +4585,13 @@ export async function computeForecastSkill(
     pvBySn.set(d.sn, recorder.query(d.sn, 'pv_total', windowStart, todayStart));
   }
 
+  // v1.10.0 (review F4) — per-core daylight coverage per day: a day where a
+  // wired core recorded (nearly) nothing must not be SCORED — its "actual" is
+  // missing telemetry, not missing sunlight. Such days previously passed the
+  // maturity gate and injected phantom over-forecast errors into MAE/bias
+  // (07-04: +29.1% "error" while Core2 recorded zero rows).
+  const dayCoverage = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, windowDays);
+
   const days: ForecastSkillDay[] = [];
   let totalPred = 0, totalAct = 0, errSum = 0, errCount = 0;
   for (let i = windowDays; i >= 1; i--) {
@@ -4464,6 +4601,7 @@ export async function computeForecastSkill(
     // errorPct=-100 row, and keep it out of the MAE/bias stats (which were
     // already correct — they gate on predKwh/actKwh below).
     const weatherCovered = dayHasGhiCoverage(ghiByEpoch, dayStart);
+    const coverageGap = weatherCovered && dayCoverage.get(dayStart)?.covered === false;
     let predWh = 0, actWh = 0;
     for (let h = 0; h < 24; h++) {
       const hourStart = dayStart + h * 3_600_000;
@@ -4483,7 +4621,9 @@ export async function computeForecastSkill(
     const predKwh = predWh / 1000;
     const actKwh = actWh / 1000;
     const errKwh = predKwh - actKwh;
-    const errPct = weatherCovered && actKwh > 0.5 ? Math.round((errKwh / actKwh) * 1000) / 10 : null;
+    // v1.10.0 (review F4) — a coverage-gap day's errorPct is null: the actual
+    // is unmeasurable, so a percentage "miss" would be a fabrication.
+    const errPct = weatherCovered && !coverageGap && actKwh > 0.5 ? Math.round((errKwh / actKwh) * 1000) / 10 : null;
     const date = new Date(dayStart);
     days.push({
       date: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
@@ -4492,9 +4632,14 @@ export async function computeForecastSkill(
       errorKwh: round2(errKwh),
       errorPct: errPct,
       weatherCovered,
+      ...(coverageGap ? { coverageGap: true } : {}),
     });
     // Uncovered days never feed the stats — there's no prediction to score.
     if (!weatherCovered) continue;
+    // v1.10.0 (review F4) — telemetry-gap days never feed MAE/bias either:
+    // scoring missing data as missing sunlight whipsawed biasFactor to 0.63
+    // during the 06-29 wedge and still dragged it 1.23→1.19 via the 07-04 gap.
+    if (coverageGap) continue;
     // v0.10.4 — only "mature" days feed the skill stats. Warmup days, where
     // the solar model was barely trained and under-predicted grossly (predKwh
     // a small fraction of actual), passed the old `>0.5` gate and dragged

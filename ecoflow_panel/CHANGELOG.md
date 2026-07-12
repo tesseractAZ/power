@@ -1,3 +1,38 @@
+## v1.10.0 — engine-review fixes F4 + F11: missing telemetry is no longer scored as missing sunlight
+
+Continues the ground-truth review remediation. One defect pattern, two call sites: hours/days where a
+wired home Core recorded ZERO telemetry (a cloud wedge) were being averaged into the PV learning as
+ZERO OUTPUT. +10 regression tests (suite 1292 → 1302); tsc + full suite green.
+
+**F4 — per-core coverage gate on the bias/skill hindcast "actuals".** The pvBiasFactor hindcast summed
+actual PV over whichever Cores happened to be reporting each hour, with no coverage gate — so the
+06-29→07-02 Core1+Core2 blackout was scored as a 37% "over-forecast", crashing the alarm-facing PV
+correction to **0.63** (truth ~1.15) for ~a week (runway/soc-dip mechanically pessimistic;
+forecast-soc-dip spiked to 10 rises on 07-05), and the 07-04 Core2 gap still dragged the live factor
+1.23 → 1.19 today. Now `coreCoverageByDay` requires EVERY wired Core to report ≥80% of a day's
+daylight hours (GHI > 20 W/m²) for that day to be scored:
+- `computePvBiasCorrection` skips uncovered days (each exclusion is logged with the core and its
+  coverage fraction — a telemetry gap, not weather);
+- `computeForecastSkill` shows the day but flags it `coverageGap: true` with `errorPct: null`, and
+  keeps it out of MAE/bias — no more phantom +29% "misses";
+- a Core dark the ENTIRE window fails every day → the factor holds its neutral 1.0 no-op (never
+  learns from unmeasurable actuals);
+- a genuine cloudy day — all Cores reporting, output low — still teaches the model (pinned by test).
+
+**F11 — full-coverage training for the alarm-facing GHI→PV model.** 31% of the last 30 days' daylight
+training pairs were missing ≥1 of 3 home Cores, deflating the through-origin coefficients **11-23%**
+below a full-coverage fit (noon 8.25-8.38 vs 9.44) — a chronic ~-21% clear-day under-forecast that the
+[0.5, 1.2]-clamped bias correction could not fully repair (raw model ~60 kWh/day vs 75-78 actual).
+`fullCoverageFleetPv` now fits the alarm-facing model ONLY on hour-epochs where every reporting Core
+has data (a whole-window-dark Core is skipped from the requirement — it adds nothing to any sum), with
+a logged fallback to the ungated fit when fewer than 72 full-coverage hours exist (young install /
+long blackout). The RESTORED display model keeps its ungated basis — its charter is completeness and
+it re-adds missing Cores' own recorded PV.
+
+Direction of both fixes: the raw model rises toward what the array actually delivers, so the bias
+correction shrinks toward 1.0 and stops whipsawing when wedge days roll through the 7-day window —
+steadier runway/soc-dip inputs, fewer cry-wolf lows.
+
 ## v1.9.1 — hotfix: AppArmor deny mask `wal` → `wl` (append/write conflict broke profile load after a host reboot)
 
 **Incident.** After a Home Assistant OS reboot, this add-on would not start — the whole alarm was down.
