@@ -1,3 +1,38 @@
+## v1.11.0 — engine-review fixes F8 + F24: reconnect blips can't fire a false CRITICAL, and the self-assessment scores the real forecaster
+
+Continues the ground-truth review remediation. +6 regression tests (suite 1302 → 1308); tsc + full
+suite green.
+
+**F8 — debounce the transient inverter-error CRITICAL.** An SHP2/DPU cloud reconnect blips
+`sysErrCode` nonzero for 20-160 s then clears; on 07-02 that fired two false CRITICAL "Inverter error
+code" alerts and stepped HA's `sensor.ecoflow_panel_ecoflow_critical_alerts` to 2 — any operator
+automation keyed on `criticals > 0` would have fired, and (outside quiet hours) a red klaxon was
+eligible. The `dpu-err` CRITICAL is now held until the SAME nonzero code has stood for 3 minutes
+(`DPU_ERR_DEBOUNCE_MS`), tracked as a per-DPU onset in the snapshot store (re-baselined on a code
+change or clear, so the clock only runs while the same fault is continuously present). A genuine
+inverter fault persists and still fires, one alarm-eval cycle past the window. The pool-side reconnect
+garbage (false near-reserve, band flapping) was already closed by the v0.81.0 seam slew-guard; this
+completes F8. When the onset context is absent (older callers/tests) the alert fires immediately —
+no path can silently lose a real fault.
+
+**F24 — the self-assessment now scores the model the alarm actually uses, honestly.**
+- *Real-model backtest:* `/api/backtest/forecast` previously scored ONLY the diurnal typical-day
+  baseline (`model:'typical-day-baseline'`), so the r²≈0.94 headline described a model nothing
+  alarms on — F5's -13% load drift and F11's PV deflation were invisible to the system's own health
+  reporting. It now ALSO returns an `alarmModel` score built from the real GHI→PV solar model ×
+  recorded GHI × the clamped `pvBiasFactor` — exactly what `computeRunway`/probabilistic consume.
+- *Honest gap integration:* the backtest dropped PV production across any >10-min recorder gap
+  (treating it as zero Wh), which under-counted actuals and inflated the reported positive bias — the
+  alarming-sounding "over-forecast" direction. Removing the zero-fill, the identical 168 h window
+  reads bias +166.6 → +99.1 Wh/h, MAE 401 → 342, r² 0.932 → 0.961.
+- *Convention reconciliation:* the response now carries a `biasConvention` string spelling out that
+  the backtest `bias` (mean pred−act; positive = over-forecast) and `/api/confidence.pvBiasFactor`
+  (Σact/Σpred; >1 = under-produce) describe the SAME error with opposite-signed conventions — ending
+  the "bias +146 over vs factor 1.19 under" seed contradiction.
+
+Deferred within F24: persisting the issued forecasts + a week-over-week skill TREND (the snapshot is
+still instantaneous) and a LOAD-side backtest — feature-sized additions rather than correctness fixes.
+
 ## v1.10.0 — engine-review fixes F4 + F11: missing telemetry is no longer scored as missing sunlight
 
 Continues the ground-truth review remediation. One defect pattern, two call sites: hours/days where a

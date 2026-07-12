@@ -1255,11 +1255,19 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // the reserve-alarm-blind compensating alert. One SHP2 per home; find it in
     // the snapshot and read the store's tracked onset for that SN.
     const shp2Sn = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2')?.sn;
+    // v1.11.0 (review F8) — per-DPU inverter-error onset for the dpu-err debounce.
+    const dpuErrOnsetBySn = new Map<string, { code: number; sinceMs: number }>();
+    for (const d of Object.values(snap.devices)) {
+      if (d.projection?.kind !== 'dpu') continue;
+      const o = store.dpuErrOnset(d.sn);
+      if (o) dpuErrOnsetBySn.set(d.sn, o);
+    }
     const connectivity = {
       lastDeviceListAttemptAt: store.lastDeviceListAttemptAt,
       lastDeviceListSuccessAt: store.lastDeviceListSuccessAt,
       perDevice,
       backupPoolUnknownSinceMs: shp2Sn ? store.backupPoolUnknownSince(shp2Sn) : null,
+      dpuErrOnsetBySn,
     };
 
     // v0.10.0 — baseline + forecast alert signals are recorder-backed; fetch

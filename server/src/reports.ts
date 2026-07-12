@@ -28,9 +28,50 @@ import {
   computeMultiDayForecast,
   computeBayesianSolarModel,
   diurnalBaselinePredictor,
+  forecastHourPvW,
 } from './analytics.js';
 import { computeTotals, circuitHistoryByDay } from './aggregator.js';
 import { backtestPvForecast } from './backtest.js';
+
+/**
+ * v1.11.0 (review F24) — build the predictor for the REAL alarm-facing forecaster:
+ * the learned GHI→PV solar model × recorded GHI, capped at the observed ceiling,
+ * then multiplied by the same clamped pvBiasFactor computeRunway/probabilistic
+ * consume. Historical GHI + cloud come from the recorder's durable `weather`
+ * series. This is the model the alarm actually uses — the pre-v1.11.0 backtest
+ * scored only the diurnal typical-day BASELINE (`model:'typical-day-baseline'`),
+ * so the r²≈0.94 headline described a model nothing alarms on, and F5/F11's real
+ * drift was invisible to the system's own health reporting.
+ */
+function alarmModelPredictor(
+  fc: { solarModel: { hourly: Array<{ hour: number; coeff: number | null; observedMaxPvW: number }> }; pvBiasFactor?: number; typicalPvCurveWhPerHour?: number[] },
+  recorder: Recorder,
+  nowMs: number,
+  hoursBack: number,
+): (hourStartMs: number) => number {
+  const windowStart = nowMs - hoursBack * 3_600_000;
+  const ghiByHe = new Map<number, number>();
+  const cloudByHe = new Map<number, number>();
+  for (const r of recorder.query('weather', 'ghi_wm2', windowStart, nowMs, 3600)) ghiByHe.set(Math.floor(r.ts / 3_600_000), r.value);
+  for (const r of recorder.query('weather', 'cloud_pct', windowStart, nowMs, 3600)) cloudByHe.set(Math.floor(r.ts / 3_600_000), r.value);
+  const bias = fc.pvBiasFactor ?? 1;
+  const curve = fc.typicalPvCurveWhPerHour ?? [];
+  return (hourStartMs: number): number => {
+    const hod = new Date(hourStartMs).getHours();
+    const resp = fc.solarModel.hourly[hod];
+    if (!resp) return 0;
+    const he = Math.floor(hourStartMs / 3_600_000);
+    const ghi = ghiByHe.get(he) ?? null;
+    // clearnessHist=1: the modelled (coeff≠null) branch — the alarm's clear-day
+    // path — ignores it; the fallback branch only runs for null-coeff night hours
+    // where ghi≈0 and pv≈0 either way.
+    const { pv } = forecastHourPvW(resp as any, ghi, cloudByHe.get(he) ?? null, curve[hod] ?? 0, 1);
+    // Mirror getDayForecast's pvAlarm clamp: re-cap AFTER the bias multiply so an
+    // under-predicting model can't project more PV than the array has produced.
+    const hourCeil = resp.coeff != null ? resp.observedMaxPvW * 1.05 : null;
+    return hourCeil != null ? Math.min(pv * bias, hourCeil) : pv * bias;
+  };
+}
 
 /**
  * v0.10.0 — the report registry.
@@ -138,15 +179,43 @@ const BUILDERS: Record<string, Builder> = {
   // predictor from args: a 24-slot diurnal curve (curve[hourOfDay], night≈0 /
   // noon≈peak) when present, else the legacy flat scalar. The flat constant is
   // why the backtest scored R²≈0 — it predicted the same Wh for night and noon.
-  backtest: (ctx, a) => backtestPvForecast({
-    recorder: ctx.recorder,
-    dpuSns: a.dpuSns ?? [],
-    hoursBack: a.hoursBack ?? 168,
-    predict:
-      a.typicalPvCurveWhPerHour && a.typicalPvCurveWhPerHour.length === 24
-        ? diurnalBaselinePredictor(a.typicalPvCurveWhPerHour)
-        : () => a.typicalWhPerHour ?? 0,
-  }),
+  backtest: async (ctx, a) => {
+    const hoursBack = a.hoursBack ?? 168;
+    const dpuSns = a.dpuSns ?? [];
+    const baseline = backtestPvForecast({
+      recorder: ctx.recorder,
+      dpuSns,
+      hoursBack,
+      predict:
+        a.typicalPvCurveWhPerHour && a.typicalPvCurveWhPerHour.length === 24
+          ? diurnalBaselinePredictor(a.typicalPvCurveWhPerHour)
+          : () => a.typicalWhPerHour ?? 0,
+    });
+    // v1.11.0 (review F24) — ALSO score the real alarm-facing model, so the
+    // reported skill reflects what computeRunway actually consumes.
+    let alarmModel: unknown = null;
+    try {
+      const fc: any = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
+      if (fc?.solarModel?.hourly?.length === 24) {
+        alarmModel = backtestPvForecast({
+          recorder: ctx.recorder,
+          dpuSns,
+          hoursBack,
+          predict: alarmModelPredictor(fc, ctx.recorder, Date.now(), hoursBack),
+        });
+      }
+    } catch { /* alarm-model score is best-effort; baseline still returned */ }
+    // v1.11.0 (review F24) — spell out the two bias conventions so the seed
+    // contradiction (backtest bias > 0 "over-forecast" vs pvBiasFactor > 1
+    // "under-forecast") is reconciled, not just presented side by side.
+    return {
+      ...baseline,
+      model: 'typical-day-baseline',
+      alarmModel,
+      biasConvention:
+        "bias = mean(predicted − actual) Wh/h; POSITIVE = the model over-forecast PV. Distinct from /api/confidence.pvBiasFactor = Σactual/Σpredicted (a MULTIPLIER); pvBiasFactor > 1 = the raw model UNDER-produces and the alarm scales PV UP. The two describe the SAME error with opposite-signed conventions.",
+    };
+  },
 };
 
 export type ReportName = keyof typeof BUILDERS;
