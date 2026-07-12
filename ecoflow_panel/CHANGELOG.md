@@ -1,3 +1,33 @@
+## v1.9.0 — engine-review fixes F12 + F5: the runway 4-8h tiers' load basis stops leaning optimistic
+
+Continues the ground-truth review remediation. Both findings were CONFIRMED against 30 days of
+recorded load; +14 regression tests (suite 1278 → 1292), tsc + full suite green.
+
+**F12 — the overnight load trim (v0.59 `blendNightLoad`) had outlived its premise and was
+overshooting.** The review measured the raw night curve near-unbiased (-77 W) while the trim was
+converting a +957 W raw bias into a **-462 W under-prediction** (mean trim 1.4 kW), and its single
+generation-time 3-hour anchor was being applied to the WRONG hours — an 04:00 idle anchor gutting the
+next evening's 21:00-23:00 AC load by 26-37%. The under-predicted load flows into `computeRunway`
+for hours ≥4, which drives the audible high (≤8h) and medium runway tiers. Three gates now bound it:
+- **Empirical premise check** (`shouldTrimNightCurve`) — before every forecast build, the SAME curve
+  lookup is hindcast against the last 7 days of recorded night-band load; the trim only activates if
+  the curve still *materially* over-predicts nights (> 25% of actual AND > 150 W). Today's
+  near-unbiased curve ⇒ trim stays OFF. A cold curve (< 12 night hours of history) keeps the trim —
+  the original stale-curve regime v0.59 was built for.
+- **Same-night gating** (`isSameNightTrimWindow`) — the anchor may only trim hours of THIS ongoing
+  night (anchor hour in the night band, target in the night band, ≤ 9 h ahead). An early-morning or
+  daytime origin can never touch the next evening.
+- **Observed-load floor** — `blendNightLoad` can never land below the measured recent load,
+  structurally (was parameter-dependent).
+
+**F5 — the load curve lagged the June→July summer ramp by ~13-17% at daytime hours** (worst
+-1.5 to -1.8 kW at 13:00-15:00) because a plain 30-day trailing mean weights week-old and month-old
+days equally. The hour-of-day curves (weekday/weekend/combined — shared by the day-ahead forecast
+AND the multi-day rollup) are now **recency-weighted**: each sample carries weight 2^(−age/half-life),
+half-life 7 days (`FORECAST_LOAD_HALF_LIFE_DAYS`, ≤0 restores the plain mean). After one week of a
+new regime the curve is ~72% converged instead of ~50%, while day-to-day noise still smooths out.
+Sample *counts* stay raw — the weekday/weekend split trust gate is about coverage, not recency.
+
 ## v1.8.0 — engine-review fixes F3 + F2: the reserve chain can no longer go silently blind, and the auto-silencer can no longer eat real alarms
 
 The 30-day ground-truth engine review (72-agent adversarial audit against the recorder DB + alert
