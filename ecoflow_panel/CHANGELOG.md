@@ -1,3 +1,47 @@
+## v1.8.0 — engine-review fixes F3 + F2: the reserve chain can no longer go silently blind, and the auto-silencer can no longer eat real alarms
+
+The 30-day ground-truth engine review (72-agent adversarial audit against the recorder DB + alert
+telemetry) confirmed two HIGH late-alarm defects. Both are fixed here; +14 regression tests
+(suite 1264 → 1278), tsc + full suite green.
+
+**F3 — reserve chain blind during SHP2 cloud wedges.** Every reserve classifier (the SoC alarm
+ladder, the near/below-reserve pair, runway) read ONLY `backupBatPercent` from the SHP2, which nulls
+when the SHP2 goes cloud-offline. Two blackouts this month (42.2h and 25.8h) left the ladder dark for
+17.8–20.8 hours while the pool physically crossed 50/40/30/20% and bottomed at ~9–19%. Two fixes:
+
+- **DPU-fleet failover for the SoC ladder** — when the SHP2 pool % is unreadable, the ladder now
+  feeds on the mean SoC of the home Cores still reporting their own telemetry (`homeFleetMeanSoc`;
+  the backup pool IS those batteries, so the mean is a faithful proxy). Spares and offline Cores are
+  excluded; if NO Core reports, the ladder abstains (null) rather than fabricating. The engine's
+  existing slew/coherence guard still rejects implausible fallback reads.
+- **`reserve-alarm-blind` compensating alert** — after 15 minutes of sustained pool-unreadability
+  (the 3-min grace hold + a new store-tracked onset means reconnect blips can never fire it), a
+  warning tells you the one reserve-specific thing the generic connectivity warning never did:
+  *"your reserve alarm is blind right now"*, with the fallback-ladder SoC in the detail. It
+  escalates to **critical after 60 minutes blind while the grid is NOT backstopping** (the truly
+  dangerous conjunction), and the escalation re-triggers the push channel. Also covers the
+  frozen-value case (SHP2 marked cloud-offline while its projection still shows a stale pool %).
+
+**F2 — auto-silencer severity-blind one-way latch.** `familyOf()` collapsed every device's offline
+alert into one 'offline' family; daily bench-spare churn tripped the high-volume silencing rule on
+06-04, and the set-once latch then silently dropped **134 real home-Core/SHP2 offline warnings** —
+including a 07-10 event where all four home devices went dark within 15 minutes. Four fixes:
+
+- **Spares get their own families** — `offline-spare-<SN>` / `stale-spare-<SN>`, so spare churn can
+  never again poison the home devices' dispatch stats (spare families remain tunable).
+- **Wedge-signal families exempt from auto-tune** — 'offline', 'stale', 'forecast-soc-dip', and the
+  new 'reserve-alarm-blind' join ENERGY_STATE_FAMILIES: their fast clears are genuine recoveries,
+  not sensor jitter, and they are precisely the families you need pushed during a wedge.
+- **Re-derive instead of latch** — `applySilencingRules` now recomputes the silencing flags from the
+  current counters + the family's current severity on every evaluation. A stale latch (like the live
+  'offline' one from 06-04) clears on the first evaluation after upgrade; a family that re-classifies
+  info→warning sheds its info-tier latch; a latch whose conditions still hold is unchanged.
+- **Critical bypass at the dispatch gate** — a critical alert can never be suppressed by a family
+  latch, regardless of what severity tripped it.
+
+F1 (quiet-hours critical break-through + mobile push channel) is deliberately deferred per operator
+decision.
+
 ## v1.7.2 — AppArmor #3, the safe way: WRITE-immutability on code/binary/lib dirs (no read-denial risk)
 
 Completes security finding #3 (deferred after the v1.7.0 revert) using a design that **cannot reproduce the

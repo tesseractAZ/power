@@ -77,6 +77,10 @@ export class SnapshotStore extends EventEmitter {
   // v0.56.0 — last-coherent backup-pool trio per SHP2 SN, for the grace-hold that smooths the
   // ~10-15/day reconnect blips that would otherwise flap the gauge to "unknown".
   private backupPoolHoldBySn: Map<string, BackupPoolHold | null> = new Map();
+  // v1.8.0 (review F3) — ms epoch when the PUBLISHED pool % went null (i.e. after
+  // the grace hold already absorbed reconnect blips). Feeds the reserve-blind
+  // compensating alert so it keys off a SUSTAINED blind window, not a flicker.
+  private backupPoolUnknownSinceBySn: Map<string, number> = new Map();
   // Injectable clock — prod uses Date.now; tests call setClock() for deterministic grace-hold timing.
   private now: () => number = Date.now;
   /** test-only — drive the grace-hold window deterministically. */
@@ -230,6 +234,19 @@ export class SnapshotStore extends EventEmitter {
     proj.backupRemainWh = out.remainWh;
     if (source === 'held') this.logger(`backup-pool: holding last-good ${out.pct}% across a reconnect blip (sn=${sn})`);
     else if (source === 'none' && live.pct == null) this.logger(`backup-pool: grace window expired → unknown (sn=${sn})`);
+    // v1.8.0 (review F3) — record the onset of a published-null pool; clear the
+    // instant a real read returns. Consumed by backupPoolUnknownSince().
+    if (out.pct == null) {
+      if (!this.backupPoolUnknownSinceBySn.has(sn)) this.backupPoolUnknownSinceBySn.set(sn, this.now());
+    } else {
+      this.backupPoolUnknownSinceBySn.delete(sn);
+    }
+  }
+
+  /** v1.8.0 (review F3) — ms epoch when this SHP2's published backup-pool % went
+   *  null (post-grace-hold), or null while it is readable. */
+  backupPoolUnknownSince(sn: string): number | null {
+    return this.backupPoolUnknownSinceBySn.get(sn) ?? null;
   }
 
   /** Replace the full raw quota for a device (called after a REST refresh). */

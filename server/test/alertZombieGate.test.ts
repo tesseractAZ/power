@@ -76,8 +76,13 @@ function devices(...arr: DeviceSnapshot[]): Record<string, DeviceSnapshot> {
   return m;
 }
 
-const offlineOf = (alerts: Alert[], sn: string) => alerts.find((a) => a.id === `offline-${sn}`);
-const staleOf = (alerts: Alert[], sn: string) => alerts.find((a) => a.id === `stale-${sn}`);
+// v1.8.0 (review F2) — spares emit under their OWN family (`offline-spare-<SN>` /
+// `stale-spare-<SN>`) so bench-spare churn can't poison the home devices'
+// dispatch stats; the helpers accept both forms.
+const offlineOf = (alerts: Alert[], sn: string) =>
+  alerts.find((a) => a.id === `offline-${sn}` || a.id === `offline-spare-${sn}`);
+const staleOf = (alerts: Alert[], sn: string) =>
+  alerts.find((a) => a.id === `stale-${sn}` || a.id === `stale-spare-${sn}`);
 
 /* ─── the mute path ─────────────────────────────────────────────── */
 
@@ -212,7 +217,8 @@ test('v0.73.0 — spare offline alert keeps id/info-severity/annunciate:false ac
       setDeviceReachability(CORE4, r);
       const a = offlineOf(computeAlerts(fleet), CORE4);
       assert.ok(a, `spare offline alert must still be EMITTED with reachability=${r}`);
-      assert.equal(a!.id, `offline-${CORE4}`, `id unchanged (${r})`);
+      // v1.8.0 (review F2) — spares now emit under their own family id.
+      assert.equal(a!.id, `offline-spare-${CORE4}`, `id stable across reachability states (${r})`);
       assert.equal(a!.severity, 'info', `spare stays info (${r})`);
       assert.equal(a!.annunciate, false, `spare stays non-annunciating (${r})`);
     }

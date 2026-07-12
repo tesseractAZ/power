@@ -342,9 +342,36 @@ export const ENERGY_STATE_FAMILIES: ReadonlySet<string> = new Set([
   'shp2-near-reserve',
   'soc-low',           // per-pack nearly-empty
   'forecast-runtime',  // projected runtime to reserve
+  // v1.8.0 (review F2) — the connectivity families ARE the wedge signal (the one
+  // thing you need pushed when the reserve chain goes blind), and their fast
+  // clears are genuine recoveries (device came back), not sensor jitter — the
+  // auto-tune premise doesn't hold. The 30-day review found the 'offline' family
+  // latched on 06-04 by bench-spare churn, silently dropping 134 real home-Core/
+  // SHP2 offline warnings (incl. a 07-10 event where all four home devices went
+  // dark within 15 min). Spares now roll up separately ('offline-spare' /
+  // 'stale-spare' — NOT listed here, so spare churn can still be auto-tuned).
+  'offline',
+  'stale',
+  'forecast-soc-dip',    // projected SoC dip — energy-state; was silenced same-day it last pushed
+  'reserve-alarm-blind', // v1.8.0 F3 compensating alert — must never be eaten by its own monitor
 ]);
 
 export function applySilencingRules(t: AlertActionStats): void {
+  // v1.8.0 (review F2) — RE-DERIVE the flags from the current counters + the
+  // family's CURRENT exemplar severity on every evaluation, instead of one-way
+  // latching. The old set-once flags were severity-blind: once 'offline' latched
+  // downgradedSilenced from info-tier bench-spare churn, a later WARNING (or
+  // critical) member of the family hit the dispatch gate and was dropped without
+  // its own severity ever being consulted. Re-deriving means (a) a family whose
+  // live severity re-classifies (info→warning) sheds an info-tier latch, (b) a
+  // family newly added to ENERGY_STATE_FAMILIES sheds any stale latch on the
+  // next evaluation, and (c) the natural decay of the 30-day telemetry replay
+  // window can actually clear a latch after the noise stops — none of which the
+  // sticky flags allowed. The rules below are pure functions of the counters, so
+  // re-deriving never weakens a latch whose conditions still hold.
+  t.downgradedSilenced = false;
+  t.warningDemotedToInfo = false;
+  t.chronicNoiseSilenced = false;
   // v0.80.0 — energy-state families always annunciate at their true severity.
   if (ENERGY_STATE_FAMILIES.has(t.familyKey)) return;
   const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
@@ -1006,7 +1033,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // but the threshold for the decision comes from the family rollup.
     const t = telemetry.get(familyOf(alert.id));
     // v0.7.5 silencing or v0.9.3 chronic-noise silencing — skip notify entirely.
-    if (t?.downgradedSilenced || t?.chronicNoiseSilenced) return 'suppressed';
+    // v1.8.0 (review F2) — severity-aware: a CRITICAL alert is NEVER suppressed
+    // by a family auto-tune latch. The rules never trip ON a critical exemplar,
+    // but a mixed-severity family whose latch was set from info/warning noise
+    // used to eat a later critical member right here, unconditionally.
+    if (alert.severity !== 'critical' && (t?.downgradedSilenced || t?.chronicNoiseSilenced)) return 'suppressed';
     // v0.11.0 — ISA priority annunciation gate. When the operator has turned
     // off this alarm's priority on the Alert Settings page, suppress the push
     // notification (the alert still stays in snapshot.alerts and renders in the
@@ -1220,10 +1251,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         mqttCount: store.mqttMsgCountBySn.get(d.sn) ?? 0,
       });
     }
+    // v1.8.0 (review F3) — the SHP2's pool-unknown onset (post-grace-hold), for
+    // the reserve-alarm-blind compensating alert. One SHP2 per home; find it in
+    // the snapshot and read the store's tracked onset for that SN.
+    const shp2Sn = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2')?.sn;
     const connectivity = {
       lastDeviceListAttemptAt: store.lastDeviceListAttemptAt,
       lastDeviceListSuccessAt: store.lastDeviceListSuccessAt,
       perDevice,
+      backupPoolUnknownSinceMs: shp2Sn ? store.backupPoolUnknownSince(shp2Sn) : null,
     };
 
     // v0.10.0 — baseline + forecast alert signals are recorder-backed; fetch
