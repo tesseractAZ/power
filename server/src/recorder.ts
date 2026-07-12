@@ -15,6 +15,16 @@ interface MetricSample {
 
 const MIN_INTERVAL_MS = 10_000;   // never record same metric more than once / 10s
 const MAX_INTERVAL_MS = 300_000;  // heartbeat: record at least every 5 min even if unchanged
+// v1.12.0 (review F9) — the lifetime rollup integrates each window [watermark → now]
+// but its query was `ts >= watermark`, so integrateWh() never received a sample from
+// BEFORE the watermark and its boundary-hold (which value-holds the last pre-window
+// reading forward to `sinceMs`) could not engage — the head segment of EVERY window
+// was silently dropped, under-counting every total_increasing lifetime counter 13-18%
+// (worst on steady-telemetry days). Widen the fetch lower bound by integrateWh's own
+// maxGap so the pre-window boundary sample is returned; the integration WINDOW stays
+// [watermark, now] (integrateWh clips), so this only recovers the lost head — no
+// double-count (adjacent windows share the boundary instant, not an interval).
+const LIFETIME_ROLLUP_LOOKBACK_MS = 10 * 60 * 1000; // == integrateWh default maxGapMs
 const VALUE_EPSILON = 0.5;        // ignore wiggle smaller than this (watts/percent)
 
 // v0.76.0 — gate the routine per-minute sample-count heartbeat to debug. Set
@@ -1412,7 +1422,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       if (since >= now) continue;
       let addedWh = 0;
       for (const c of contributors[key] ?? []) {
-        const pts = queryStmt.all(c.sn, c.metric, since, now) as Array<{ ts: number; value: number }>;
+        // v1.12.0 (review F9) — fetch from `since - lookback` so integrateWh gets the
+        // pre-window boundary sample; it still integrates only [since, now].
+        const pts = queryStmt.all(c.sn, c.metric, since - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
         const r = integrateWh(pts, since, now);
         addedWh += r.wh;
       }
@@ -1514,7 +1526,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         pendingWh = Math.max(0, liveBmsWh - persisted);
       } else if (watermark < now) {
         for (const c of contributors[key] ?? []) {
-          const pts = queryStmt.all(c.sn, c.metric, watermark, now) as Array<{ ts: number; value: number }>;
+          // v1.12.0 (review F9) — same head-segment fix as rollupLifetime: fetch the
+          // pre-watermark boundary sample so integrateWh's value-hold engages.
+          const pts = queryStmt.all(c.sn, c.metric, watermark - LIFETIME_ROLLUP_LOOKBACK_MS, now) as Array<{ ts: number; value: number }>;
           pendingWh += integrateWh(pts, watermark, now).wh;
         }
         if (pendingWh < 0) pendingWh = 0;
