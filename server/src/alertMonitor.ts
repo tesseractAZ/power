@@ -287,6 +287,18 @@ export interface ClearedAlert {
   durationMs: number;
 }
 
+/** v1.12.0 (review F19) — evict ONE entry from a newest-first cleared-alert log,
+ *  preferring the oldest info-severity (learned-noise) record; only when nothing
+ *  but warning/critical remains does it drop the oldest overall. Mutates in place.
+ *  Pure + exported for tests. Keeps the significant forensic record from being
+ *  amputated by high-volume noise families. */
+export function pruneOldestNonSignificant(logArr: ClearedAlert[]): void {
+  for (let i = logArr.length - 1; i >= 0; i--) {
+    if ((logArr[i].alert?.severity ?? 'info') === 'info') { logArr.splice(i, 1); return; }
+  }
+  logArr.pop();
+}
+
 /**
  * Cumulative rise/duration stats for an alert FAMILY, used by auto-downgrade.
  *
@@ -841,7 +853,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   // JSON sidecar (newest-first), seed it on boot, rewrite on each qualifying
   // clear. Best-effort throughout: alert HISTORY is observability, never gates a
   // live alarm.
-  const CLEARED_LOG_MAX = Math.max(50, Number(process.env.CLEARED_LOG_MAX ?? 500));
+  // v1.12.0 (review F19) — 500 spanned only 5.7 days: learned-noise families
+  // (peer-temp etc.) churn ~90 clears/day and a plain FIFO evicted EVERY genuinely
+  // significant event — the log held 0 criticals despite 114 critical-family rises
+  // in 30 days. Raised the cap AND made eviction severity-aware (below): the
+  // operator's only persisted "what fired and cleared" record must not be amputated
+  // by the same noise the auto-silencer merely mutes from push.
+  const CLEARED_LOG_MAX = Math.max(50, Number(process.env.CLEARED_LOG_MAX ?? 1500));
+  const evictOldestCleared = () => pruneOldestNonSignificant(clearedLog);
   const clearedLogPath =
     process.env.CLEARED_LOG_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'cleared-alerts.json');
   for (const c of loadClearedLog(clearedLogPath, CLEARED_LOG_MAX)) clearedLog.push(c);
@@ -1654,7 +1673,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // surfacing in the cleared-alert UI), but telemetry counts the clear.
       if (duration >= DEBOUNCE_MS) {
         clearedLog.unshift({ alert: t.alert, raisedAt: t.firstSeen, clearedAt: now, durationMs: duration });
-        if (clearedLog.length > CLEARED_LOG_MAX) clearedLog.pop();
+        if (clearedLog.length > CLEARED_LOG_MAX) evictOldestCleared(); // v1.12.0 (F19) — noise-first eviction
         persistClearedLog(); // v0.85.0 — survive restarts (the daily Pi power cut)
       }
       // v0.9.59 — records shortClear / longActive events into the family rollup
