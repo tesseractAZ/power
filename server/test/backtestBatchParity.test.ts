@@ -45,7 +45,9 @@ function backtestOld(inputs: {
       if (pts.length < 2) continue;
       for (let i = 1; i < pts.length; i++) {
         const dtMs = pts[i].ts - pts[i - 1].ts;
-        if (dtMs > 600_000) continue;
+        // v1.11.0 (review F24) — the gap-skip was removed from backtestPvForecast
+        // (it under-counted actuals over recorder gaps → inflated over-forecast
+        // bias). This reference mirrors the corrected full-trapezoid integration.
         const avg = (pts[i].value + pts[i - 1].value) / 2;
         actualWh += (avg * dtMs) / HOUR;
       }

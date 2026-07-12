@@ -196,6 +196,11 @@ export interface ConnectivityContext {
    *  null (post-grace-hold; SnapshotStore.backupPoolUnknownSince), or null while
    *  readable. Drives the reserve-alarm-blind compensating alert. */
   backupPoolUnknownSinceMs?: number | null;
+  /** v1.11.0 (review F8) — per-DPU inverter-error onset (SnapshotStore.dpuErrOnset),
+   *  keyed by SN. The `dpu-err` CRITICAL is held until the SAME nonzero code has
+   *  stood for DPU_ERR_DEBOUNCE_MS, so a cloud-reconnect blip (nonzero for
+   *  20-160s, then clears) never reaches HA's critical_alerts sensor. */
+  dpuErrOnsetBySn?: Map<string, { code: number; sinceMs: number }>;
 }
 
 /** Format an age in ms as the most natural short human string. */
@@ -220,6 +225,11 @@ const CLOUD_SESSION_STALE_MS = 5 * 60 * 1000;
 // (the escalation re-triggers the push channel via the alert monitor).
 const RESERVE_BLIND_AFTER_MS = 15 * 60 * 1000;
 const RESERVE_BLIND_CRITICAL_MS = 60 * 60 * 1000;
+// v1.11.0 (review F8) — an inverter error must stand this long before the CRITICAL
+// fires. The observed reconnect blips cleared within 20-160s; 3 min clears them all
+// with margin while a genuine fault (which persists indefinitely) is delayed only
+// one alarm-eval cycle past the window.
+const DPU_ERR_DEBOUNCE_MS = 3 * 60 * 1000;
 
 export function computeAlerts(
   devices: Record<string, DeviceSnapshot>,
@@ -440,7 +450,20 @@ export function computeAlerts(
     const dpuStart = out.length;
 
     if ((p.sysErrCode ?? 0) !== 0) {
-      out.push({ id: `dpu-err-${d.sn}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Inverter error code', detail: `${d.deviceName} reports system error code ${p.sysErrCode}.` });
+      // v1.11.0 (review F8) — debounce the CRITICAL: an SHP2/DPU cloud reconnect
+      // blips sysErrCode nonzero for 20-160s then clears (07-02 fired two false
+      // CRITICAL "Inverter error code" alerts → HA critical_alerts stepped to 2 →
+      // any operator automation keyed on criticals>0 would have fired). A REAL
+      // inverter fault persists. Suppress until the SAME code has stood for
+      // DPU_ERR_DEBOUNCE_MS. Onset is tracked in the store (re-baselined on a
+      // code change / clear). When the context is absent (older callers/tests),
+      // the guard is skipped and the alert fires immediately — the pre-v1.11.0
+      // behaviour, so no path silently loses a real fault.
+      const onset = connectivity?.dpuErrOnsetBySn?.get(d.sn);
+      const debounced = onset != null && onset.code === (p.sysErrCode ?? 0) && (now - onset.sinceMs) < DPU_ERR_DEBOUNCE_MS;
+      if (!debounced) {
+        out.push({ id: `dpu-err-${d.sn}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Inverter error code', detail: `${d.deviceName} reports system error code ${p.sysErrCode}.` });
+      }
     }
     // v0.9.80 — only flag an MPPT error code when that string is actually
     // PRODUCING. During curtailment the DPU sheds the LV string (and
