@@ -800,8 +800,16 @@ export function isOutageEventFamily(alert: Pick<Alert, 'id'>): boolean {
 export interface OutageAlertOptions {
   /** Only surface gaps DETECTED within this window; older ones have aged off. */
   recentWindowMs: number;
-  /** Ignore gaps shorter than this (the recorder floor is 15 min; this can raise it). */
+  /** Ignore IN-PROCESS gaps shorter than this (a cloud/MQTT stall while the process stayed up). */
   minDurationMs: number;
+  /**
+   * v1.13.0 (review F10) — separate, typically LOWER floor for `restartSpanning`
+   * gaps. A restart means the alarm was genuinely DOWN, so even a sub-15-min dark
+   * window is operator-relevant (an 11-min deploy blackout previously produced no
+   * "alarm was dark" alert at all). Optional + omittable: when absent, restart
+   * gaps fall back to `minDurationMs` (exact pre-v1.13.0 behavior).
+   */
+  restartMinDurationMs?: number;
   /** Feature toggle. */
   enabled: boolean;
 }
@@ -823,7 +831,13 @@ export function outageAlerts(
   const out: Alert[] = [];
   for (const g of gaps) {
     if (!Number.isFinite(g.startMs) || !Number.isFinite(g.durationMs)) continue;
-    if (g.durationMs < opts.minDurationMs) continue;                 // too short to bother the operator
+    // v1.13.0 (F10) — a restart-spanning gap (the alarm was genuinely DOWN) clears
+    // a lower floor than an in-process cloud stall; falls back to minDurationMs when
+    // restartMinDurationMs is omitted (pre-v1.13.0 behavior).
+    const floorMs = g.restartSpanning === true && opts.restartMinDurationMs != null
+      ? opts.restartMinDurationMs
+      : opts.minDurationMs;
+    if (g.durationMs < floorMs) continue;                           // too short to bother the operator
     if (nowMs - g.detectedAt > opts.recentWindowMs) continue;        // aged out → drops from the list (no resolve push)
     const mins = Math.max(1, Math.round(g.durationMs / 60_000));
     const restart = g.restartSpanning === true;
