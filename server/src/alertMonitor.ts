@@ -72,6 +72,10 @@ const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
 const OUTAGE_ALERTS_ENABLED = (process.env.SYSTEM_OUTAGE_ALERT_ENABLED ?? 'true') !== 'false';
 const OUTAGE_RECENT_WINDOW_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_RECENT_WINDOW_H ?? 24)) * 3_600_000;
 const OUTAGE_MIN_DURATION_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_MIN_MINUTES ?? 15)) * 60_000;
+// v1.13.0 (review F10) — restart-spanning outages (the alarm was genuinely DOWN)
+// surface at a lower floor than in-process cloud stalls; 5 min matches the
+// recorder's RESTART_GAP_FLOOR_MS so every ledgered restart gap also alerts.
+const OUTAGE_RESTART_MIN_DURATION_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_RESTART_MIN_MINUTES ?? 5)) * 60_000;
 
 // v0.38.0 — sustained-duration gate for the per-circuit load-anomaly family
 // ("<Circuit> load unusual for the hour"). The detector already requires the
@@ -1332,6 +1336,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         enabled: OUTAGE_ALERTS_ENABLED,
         recentWindowMs: OUTAGE_RECENT_WINDOW_MS,
         minDurationMs: OUTAGE_MIN_DURATION_MS,
+        restartMinDurationMs: OUTAGE_RESTART_MIN_DURATION_MS,
       }),
       // v0.84.0 — audible-delivery self-alert. When audible broadcasting is
       // enabled but the broadcast monitor has CONFIRMED no reachable speaker
