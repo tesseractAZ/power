@@ -1,3 +1,22 @@
+## v1.9.1 — hotfix: AppArmor deny mask `wal` → `wl` (append/write conflict broke profile load after a host reboot)
+
+**Incident.** After a Home Assistant OS reboot, this add-on would not start — the whole alarm was down.
+Root cause: the v1.7.2 write-immutability deny rules used the mask `wal` (write+append+link). On the
+stricter AppArmor parser HAOS ships with kernel 6.18, the append bit `a` and write bit `w` are
+**mutually exclusive** in one rule (`w` already implies append semantics), so a fresh compile fails with
+`Conflict 'a' and 'w' perms are mutually exclusive`. It had worked since v1.7.2 only because the
+previously-compiled profile was **cached**; the reboot into a new AppArmor feature set forced a
+recompile from source, which the parser then rejected — the profile failed to load, so runc could not
+apply it and the container never started (surfaced as `unable to apply apparmor profile … no such file
+or directory`). Every other add-on loaded fine.
+
+**Fix.** The mask is now `wl` (write+link). `w` already covers `O_APPEND` create/truncate/overwrite/
+rename/unlink, so dropping the redundant `a` loses nothing meaningful; `l` still blocks planting a
+hardlink under a code dir. Verified with a fresh, cache-skipping `apparmor_parser -T -Q` on the live
+host before shipping. **Never combine `a` with `w`** in a single AppArmor rule; validate any mask
+change against a cold parse. (The live profile was hot-patched to restore service immediately; this
+release makes the corrected mask permanent so a future update/reboot cannot reintroduce it.)
+
 ## v1.9.0 — engine-review fixes F12 + F5: the runway 4-8h tiers' load basis stops leaning optimistic
 
 Continues the ground-truth review remediation. Both findings were CONFIRMED against 30 days of
