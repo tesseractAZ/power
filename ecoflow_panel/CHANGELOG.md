@@ -1,3 +1,34 @@
+## v1.13.0 — engine-review fixes F10 + F22: the outage ledger stops hiding sub-15-min and restart-erased alarm-dark windows
+
+Continues the ground-truth review remediation. +11 regression tests (suite 1314 → 1325); tsc + full
+suite green. This is the observability layer the operator relies on to know **the alarm went dark** —
+with the audible channel off and HA push the only live path, an unreported blackout is exactly what
+these tiles exist to confess.
+
+**F10 + F22 — a restart-spanning blackout is now measured at a 5-min floor, and a clock-skewed boot no
+longer vanishes.** The recorder's telemetry-gap ledger (the sole source for the "System outage — alarm
+was dark N min" alert and every `system_outage_*` / `telemetry_gaps_24h` counter) used one 15-min
+threshold for both an in-process stall AND a restart-spanning gap. That structurally hid every blackout
+under 15 minutes: an 11-min deploy outage and a 16-min restart-erased stall both read as **zero** on
+the outage tiles, and a review of the recorder DB found 2 of 6 real ≥15-min blackouts missed —
+including the longest (94.5 min). Two fixes, both in a new pure `classifyRestartGap`:
+
+- *Tighter restart floor.* A restart spans a process DEATH, so (unlike an in-process stall, which can
+  be heartbeat jitter) the gap IS the dark time. Restart-spanning detection now uses
+  `RESTART_GAP_FLOOR_MS` (5 min = one heartbeat interval), not the 15-min in-process threshold. The
+  in-process path keeps 15 min so a benign cloud/MQTT blip never trips a false outage. A quick clean
+  restart (< 5 min, a routine deploy) still records nothing.
+- *Clock-skew no longer drops the gap.* On an RTC-less Pi the boot clock can be BEHIND the newest
+  persisted sample until NTP steps it forward (negative delta). The old code silently skipped that
+  case; it now DEFERS — seeds the gap anchor and lets the first post-NTP insert record it with the
+  restart floor.
+
+The alert layer mirrors this: `outageAlerts` takes an optional `restartMinDurationMs` (5 min, env
+`SYSTEM_OUTAGE_RESTART_MIN_MINUTES`) so a sub-15-min restart gap now fires the "alarm was dark N min"
+warning; in-process stalls keep the 15-min floor. Omitting the option preserves exact pre-v1.13.0
+behavior. The 24h counters (`outageTracking`) already had no floor, so a ledgered sub-15-min restart
+gap flows straight to `system_outage_count_24h` / `_total_minutes_24h` / `_power_outage_count_24h`.
+
 ## v1.12.0 — engine-review fixes F9 + F19: lifetime counters stop under-counting, and noise churn can't amputate a cleared CRITICAL
 
 Continues the ground-truth review remediation. +6 regression tests (suite 1308 → 1314); tsc + full

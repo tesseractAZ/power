@@ -60,6 +60,44 @@ export function detectTelemetryGap(lastInsertMs: number, nowMs: number, threshol
   return lastInsertMs > 0 && nowMs - lastInsertMs > thresholdMs;
 }
 
+/**
+ * v1.13.0 (review F10 + F22) — decide what the BOOT-time restart-gap check should
+ * do, as a pure function so the (subtle) clock-skew branch is unit-testable.
+ *
+ * A restart-spanning gap is the time between the newest persisted home sample
+ * (`maxTs`) and the boot clock (`bootMs`). Unlike an in-process stall it spans a
+ * process DEATH, so there is no heartbeat-jitter confound — the gap IS the dark
+ * time — which is why it warrants a TIGHTER floor (`restartFloorMs`, one heartbeat
+ * interval) than the 15-min in-process threshold that structurally hid sub-15-min
+ * blackouts (an 11-min deploy outage, a restart-erased 16-min stall).
+ *
+ * Three outcomes:
+ *  - `record`: the boot clock is ≥ floor past the last sample → trustworthy, real
+ *    downtime; ledger it now.
+ *  - `defer`:  the boot clock is BEHIND the last sample (RTC-less Pi before NTP
+ *    steps forward → negative delta). We cannot measure the gap at this instant,
+ *    and the pre-fix code SILENTLY DROPPED it. Instead, defer to the first
+ *    in-process insert after the clock corrects (see the record() path).
+ *  - `none`:   0 ≤ delta < floor → a quick clean restart with negligible dark
+ *    time (routine deploy), or no prior sample at all.
+ */
+export type RestartGapDecision =
+  | { kind: 'record'; startMs: number; endMs: number }
+  | { kind: 'defer'; anchorMs: number }
+  | { kind: 'none' };
+
+export function classifyRestartGap(
+  maxTs: number | null,
+  bootMs: number,
+  restartFloorMs: number,
+): RestartGapDecision {
+  if (maxTs == null || !Number.isFinite(maxTs)) return { kind: 'none' };
+  const deltaMs = bootMs - maxTs;
+  if (deltaMs >= restartFloorMs) return { kind: 'record', startMs: maxTs, endMs: bootMs };
+  if (deltaMs < 0) return { kind: 'defer', anchorMs: maxTs };
+  return { kind: 'none' };
+}
+
 // v0.13.1 — pseudo-device + metric names for the persisted weather-irradiance
 // series (the durable GHI backfill, see recordWeatherGhi). Stored under SN
 // "weather" so it shares the samples table + query() path with real devices
@@ -342,9 +380,20 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // durable marker (NOT synthetic samples — those would corrupt the
   // byte-identical history + energy integration). Surfaced at /api/telemetry-gaps.
   const GAP_THRESHOLD_MS = 3 * MAX_INTERVAL_MS;   // 15 min — comfortably above the 5-min heartbeat
+  // v1.13.0 (review F10 + F22) — the RESTART path uses a tighter floor: a restart
+  // that lost even one full heartbeat interval of coverage is real, operator-
+  // relevant dark time the 15-min in-process threshold hid. In-process stalls keep
+  // GAP_THRESHOLD_MS so a benign cloud/MQTT blip never trips a false outage.
+  const RESTART_GAP_FLOOR_MS = MAX_INTERVAL_MS;   // 5 min — one heartbeat interval
   const GAPS_MAX = 50;                            // bounded persisted ring
   const gapsPath = resolve(dirname(dbPath), 'telemetry-gaps.json');
   let lastHomeInsertTs = 0;
+  // v1.13.0 (review F10b) — set when the boot-time gap check could NOT run because
+  // the boot clock was BEHIND the newest persisted sample (RTC-less Pi before NTP
+  // steps forward). We can't measure the gap then, so we DEFER: seed
+  // lastHomeInsertTs to the pre-boot anchor and let the first in-process insert
+  // (after the clock corrects) record it with the restart floor. Cleared once resolved.
+  let pendingRestartGap = false;
   const telemetryGapsLog: TelemetryGap[] = (() => {
     try {
       const arr = JSON.parse(readFileSync(gapsPath, 'utf8'));
@@ -395,28 +444,35 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // process boots, lastHomeInsertTs re-seeds to 0, and the outage is never
   // accounted (a 68.9h log review found 3 host power losses, 88–193 min each —
   // ~6.4h / ~9.3% of history silently missing with ZERO "TELEMETRY GAP" lines).
-  // At startup, compare the newest persisted sample against the boot clock with
-  // the SAME threshold and record through the SAME recordTelemetryGap path (same
-  // sidecar, same log-line stem) marked restartSpanning. Exclusions mirror the
-  // in-process detector's semantics: the "weather" pseudo-SN is stamped with
-  // forecast-hour epochs (not wall clock — a future-stamped row would mask a
-  // real outage) and spares are excluded for the v0.30.0 reason (a bench unit
-  // must not mask a home-feed stall). NOTE: lastHomeInsertTs is deliberately NOT
-  // seeded from maxTs — the gap up to boot is fully recorded here, and seeding
-  // would make the first in-process insert double-log an overlapping gap.
-  // Fail-open: this is a diagnostic; it must never block startup. A fresh/empty
-  // DB yields MAX(ts) = NULL → detectTelemetryGap's lastInsertMs>0 guard skips.
-  // RTC-less-Pi5 clock skew (boot clock BEHIND the last sample until NTP steps
-  // forward) yields a negative delta → same guard direction, no false gap.
+  // At startup, compare the newest persisted sample against the boot clock and
+  // record through the SAME recordTelemetryGap path (same sidecar, same log-line
+  // stem) marked restartSpanning. Exclusions mirror the in-process detector's
+  // semantics: the "weather" pseudo-SN is stamped with forecast-hour epochs (not
+  // wall clock — a future-stamped row would mask a real outage) and spares are
+  // excluded for the v0.30.0 reason (a bench unit must not mask a home-feed stall).
+  // Fail-open: this is a diagnostic; it must never block startup.
+  //
+  // v1.13.0 (review F10 + F22) — two fixes to the decision, both in classifyRestartGap:
+  //  (1) use RESTART_GAP_FLOOR_MS (5 min), not GAP_THRESHOLD_MS (15 min) — an
+  //      11-min deploy blackout and a restart-erased 16-min stall previously fell
+  //      below 15 min and were NEVER ledgered, so every outage tile read zero.
+  //  (2) clock skew (boot clock BEHIND the last sample, RTC-less Pi pre-NTP) used
+  //      to yield a negative delta that was SILENTLY DROPPED. Now it DEFERS: seed
+  //      lastHomeInsertTs to the pre-boot anchor so the first in-process insert
+  //      (post-NTP) records it. In the `record` case lastHomeInsertTs stays 0, so
+  //      the first insert starts fresh and cannot double-log the same gap.
   try {
     const restartGapExcludedSns = [WEATHER_SN, ...SPARE_DPU_SNS];
     const row = db.prepare(
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
     const maxTs = row?.maxTs == null ? null : Number(row.maxTs);
-    const bootMs = Date.now();
-    if (maxTs != null && Number.isFinite(maxTs) && detectTelemetryGap(maxTs, bootMs, GAP_THRESHOLD_MS)) {
-      recordTelemetryGap(maxTs, bootMs, { restartSpanning: true });
+    const decision = classifyRestartGap(maxTs, Date.now(), RESTART_GAP_FLOOR_MS);
+    if (decision.kind === 'record') {
+      recordTelemetryGap(decision.startMs, decision.endMs, { restartSpanning: true });
+    } else if (decision.kind === 'defer') {
+      lastHomeInsertTs = decision.anchorMs;
+      pendingRestartGap = true;
     }
   } catch (e: any) {
     // Diagnostic-only: swallow and continue startup (debug-gated breadcrumb).
@@ -484,10 +540,25 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // v0.30.0 — fleet telemetry-gap heartbeat. A home-device write just landed;
     // if the previous home write was long ago, telemetry was silent in between.
     if (sawHomeInsert) {
-      if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
-        recordTelemetryGap(lastHomeInsertTs, now);
+      if (pendingRestartGap) {
+        // v1.13.0 (F10b) deferred path: the boot check couldn't run because the
+        // boot clock was behind the pre-boot anchor (RTC-less Pi, pre-NTP). Wait
+        // until the clock has advanced past that anchor (NTP stepped forward), then
+        // record the restart-spanning gap with the RESTART floor. Until then, hold
+        // the anchor — don't let a still-skewed clock move it backwards.
+        if (now > lastHomeInsertTs) {
+          if (detectTelemetryGap(lastHomeInsertTs, now, RESTART_GAP_FLOOR_MS)) {
+            recordTelemetryGap(lastHomeInsertTs, now, { restartSpanning: true });
+          }
+          pendingRestartGap = false;
+          lastHomeInsertTs = now;
+        }
+      } else {
+        if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
+          recordTelemetryGap(lastHomeInsertTs, now);
+        }
+        lastHomeInsertTs = now;
       }
-      lastHomeInsertTs = now;
     }
     // v0.9.74 — silence per-tick chatter. The previous "wrote N samples"
     // line fired every 10 s under normal load (~44 lines/min, ~88 % of
