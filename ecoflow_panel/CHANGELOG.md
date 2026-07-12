@@ -1,3 +1,33 @@
+## v1.12.0 — engine-review fixes F9 + F19: lifetime counters stop under-counting, and noise churn can't amputate a cleared CRITICAL
+
+Continues the ground-truth review remediation. +6 regression tests (suite 1308 → 1314); tsc + full
+suite green.
+
+**F9 — the lifetime rollup was dropping the head of every window (13-18% under-count).**
+`rollupLifetime` integrates each metric over the window `[watermark → now]`, but it queried the
+recorder with `ts >= watermark`, so `integrateWh()` never received the sample from *before* the
+watermark. Its boundary-hold — which value-holds the last pre-window reading forward to the window
+start so the first covered instant isn't a dead zone — therefore could not engage, and the head
+segment `[watermark → first in-window sample]` was silently dropped from every window. Chained across
+thousands of 5-min rollups this under-counted every `total_increasing` lifetime counter (per-circuit
+kWh, fleet PV/charge/discharge, carbon offset) by ~13-18%, worst on steady-telemetry days. The fetch
+lower bound is now widened by `LIFETIME_ROLLUP_LOOKBACK_MS` (= `integrateWh`'s own 10-min `maxGap`) so
+the pre-window boundary sample is returned; the integration WINDOW is unchanged (`integrateWh` still
+clips to `[watermark, now]`), so this only recovers the lost head — adjacent windows share the
+boundary *instant*, never an interval, so nothing is double-counted. A pre-window sample older than
+`maxGap` is still correctly NOT held (a real outage stays a gap, no fabricated energy). Counters read
+truthfully higher from the first rollup after deploy; no historical backfill (the loss was never
+persisted as a negative — totals were simply low going forward).
+
+**F19 — a plain FIFO cleared-alert log let noise evict the record of real events.** The cleared-alert
+ring buffer trimmed oldest-first at its cap, so a burst of low-severity churn (a flapping warning
+family clearing dozens of times) would push every genuine warning/critical clear out of the log — the
+operator's post-incident record of "what fired and cleared" could contain zero significant events.
+Eviction is now severity-aware: `pruneOldestNonSignificant` drops the oldest INFO entry first and only
+falls back to popping the oldest overall when *every* retained entry is significant, so a
+warning/critical clear survives arbitrary info-level noise. The cap is also raised 500 → 1500. A lone
+critical is never amputated even under 90-clears/day churn (regression-pinned).
+
 ## v1.11.0 — engine-review fixes F8 + F24: reconnect blips can't fire a false CRITICAL, and the self-assessment scores the real forecaster
 
 Continues the ground-truth review remediation. +6 regression tests (suite 1302 → 1308); tsc + full
