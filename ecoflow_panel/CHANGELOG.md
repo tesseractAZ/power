@@ -1,3 +1,81 @@
+## v1.16.0 — engine-review F7+F23: the probabilistic SoC band becomes an actual probability
+
+Two confirmed findings, one root cause in `computeProbabilisticForecast`:
+
+**F7 — the band never accumulated.** p10/p90 SoC were recomputed each hour as the deterministic
+p50 ± THAT single hour's PV half-range, so uncertainty could not compound across the horizon.
+Live signature: overnight the published band collapsed to ±0.1 SoC point (and to an exact
+[0, 0] at the trough) while the realized nightly minimum across 30 recorded nights spanned
+9.3–38%. The "P10 trajectory" was the deterministic line with a cosmetic ±ε — zero early-warning
+margin beyond the forecast it decorated.
+
+**The rebuild — a coherent trajectory ensemble.** Day-scale forecast errors are strongly
+correlated across hours (a cloudier-than-forecast day is cloudy all day; a heavier-than-forecast
+evening stays heavy), so each ensemble member draws ONE standard-normal z and holds it for the
+whole window. 21 equal-probability quantile paths (plus dedicated z=∓1.282 paths, which under
+this comonotone model ARE the exact P10/P90 trajectories) integrate hour-over-hour from the same
+starting SoC with per-path clamping at 0/100% — so the band compounds where it should and
+collapses physically where every path saturates (mutual full or mutual empty). Published
+p50SocPct stays anchored to the deterministic forecast's `projectedSocPct` (the richer
+simulation); the ensemble contributes only its offset from the raw median path. The per-hour PV
+band (`p10W/p50W/p90W`) is byte-identical to v1.15.0 — this release changes only the SoC band
+and the summary statistics.
+
+**Load-side sigma (`PROB_LOAD_SIGMA_FRAC`, default 0.15, env-tunable).** The old band's PV sigma
+is multiplicative on forecast PV — which is 0 at night — so overnight the band structurally
+COULD NOT grow, in exactly the window where realized spread is largest (EV sessions, HVAC).
+A fractional load sigma now folds in per hour (quadrature), letting the band breathe overnight.
+NaN/empty-safe parse (the v1.14.0 `Number('') === 0` class — caught by its own new test during
+development).
+
+**F23 — pAboveReservePct was a mislabeled hour count.** It counted the fraction of hours with
+p10 ≥ reserve while documenting itself as "probability SoC stays ≥ reserve through 24h" — reading
+42% on a night its own median trajectory sat below reserve for 11 straight hours. It is now a
+true min-over-path event probability: the share of ensemble paths whose SoC never dips below
+reserve at any hour of the window. `pFullCharge` similarly becomes max-over-path (≥99% at any
+hour). Both now publish null — not a fake 0 — when the forecast carries no SoC trajectory.
+
+Consumers: `/api/forecast/probabilistic` + the Lovelace solar-card confidence badge only (the
+badge already renders the null case as "no SoC ref"). Grep-verified: nothing in the alarm or
+notification pipeline reads these fields — the life-safety paths are untouched.
+
+**Pre-merge adversarial review (4 lenses: statistics, code-truth, consumers, mutation testing) —
+all confirmed findings fixed before ship:**
+- *Hour-0 seed misalignment (statistics lens, CONFIRMED)* — `hours[0].projectedSocPct` is the
+  deterministic sim's POST-hour-0 state, yet the ensemble seeded there and re-applied hour 0's
+  delta, running every raw path an hour ahead of the anchor. Invisible mid-range (the anchoring
+  cancels it exactly — proven) but the raw median clamped at the 0/100 rails one hour early,
+  collapsing the anchored band onto p50 — OPTIMISTIC precisely near the empty rail. The ensemble
+  now seeds one deterministic step behind the anchor; two rail-alignment regression tests pin it.
+- *NaN non-recovery + clean-prefix scoring (code-truth lens, CONFIRMED)* — a single NaN
+  PV/load hour turned the stateful integrators NaN forever AND let pAboveReservePct silently
+  score only the clean prefix while claiming full-window semantics (probe: read 100% where the
+  old code read a pessimistic 50%). A non-finite hour now skips the step (band recovers at the
+  next clean hour) and nulls the summaries — "never dips at ANY hour" is unknowable for a
+  window that couldn't be fully scored.
+- *uncertaintyKwhStdev basis* — the ±kWh badge figure accumulated PV-only sigma, which reads
+  0 kWh beside a several-point overnight band; it now accumulates the same per-hour net sigma
+  that drives the band.
+- *7 surviving mutants (mutation lens)* — the initial tests couldn't distinguish min-over-path
+  from end-state (every fixture dipped at the window's END), pinned no absolute band magnitude
+  (a ±1σ-mislabeled-as-±1.282σ band passed), and left the ≥ boundary, ensemble size, quadrature,
+  and null-carry unpinned. Six new tests: V-shaped mid-window dip (0%, end-state bug reads
+  100%), touch-full-then-fall + flat-99.5 (pFullCharge), exact-width assertions (load-only ≈4.6
+  pts, PV+load quadrature ≈0.8 pts), graze pinned to exactly 52%, null-hour carry.
+- Verified clean: alarm/notification pipeline consumes NONE of these fields (grep-proven across
+  alertMonitor/alerts/notify/socGridDispatch/loadShedAdvisor); the MPC dispatch planner reads
+  only the unchanged p10W; nothing persists the fields to the recorder or HA sensors; the
+  Lovelace badge null-guards. Note for API users: automations comparing pAboveReservePct to a
+  threshold (e.g. the DOCS.md "delay laundry if > 70%" example) will cross very differently —
+  the number finally means what the docs always said it meant.
+
+Real-data replay (live forecast + skill pulled from the Pi): band widths now grow 1.4 → 20.8
+SoC points across the day instead of resetting each hour, the P10 edge correctly reaches the
+floor during the afternoon drain, and tonight's overnight [0,0] band is mutual-saturation truth
+(the islanded-hypothetical trajectory starts at 7.3% — even the 97.5th-percentile path drains
+to empty), not the old collapse. +14 regression tests (suite 1362 → 1376); tsc + full suite
+green.
+
 ## v1.15.0 — engine-review F6: the EV predictor finally sees the real EV (and stops seeing the air conditioners)
 
 The 30-day ground-truth review's F-graded finding: the EV window predictor had NEVER detected the
