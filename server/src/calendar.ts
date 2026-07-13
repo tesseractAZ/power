@@ -141,6 +141,10 @@ export function buildCalendarIcs(src: CalendarSources): string {
   // Predicted EV charging sessions.
   if (src.evWindow) {
     for (const u of src.evWindow.upcomingNext24h) {
+      // v1.15.0 — the LIVE overlay entry (a session charging right now) is not a
+      // prediction: its uid would churn on every regeneration and the wording
+      // below would misdescribe it. The calendar shows mined patterns only.
+      if (u.live) continue;
       const end = u.ts + u.durationHours * 3_600_000;
       events.push({
         uid: `ev-${u.ts}`,

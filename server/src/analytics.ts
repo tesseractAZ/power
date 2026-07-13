@@ -3606,9 +3606,39 @@ export function computeStringMismatch(
 
 const EV_WINDOW_TTL_MS = 60 * 60 * 1000;
 const EV_WINDOW_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
-const EV_WINDOW_MIN_WATTS = 2000;     // above this counts as a "charging" sample
+const EV_WINDOW_MIN_WATTS = 2000;     // above this counts as a "charging" sample (session boundary)
 const EV_WINDOW_MIN_DURATION_MS = 30 * 60 * 1000; // sustained ≥ 30 min
 const EV_WINDOW_MIN_RECURRENCES = 3;  // need ≥3 weeks of the same pattern
+// v1.15.0 (review F6) — EVSE plateau discriminator. The 2 kW session floor made the
+// detector pattern-match AIR CONDITIONERS: 100% of this site's live patterns (26/26)
+// were the two ACs cycling at 2.2-4.1 kW, adding a phantom ~748 W "EV" lift to 63%
+// of forecast hours (double-counting AC already in the load curve) while the REAL
+// EVSE sessions (10.2-11.1 kW plateau, 12 in 30 days) matched no recurrence bucket
+// and went entirely unforecast. Ground truth is perfectly bimodal — a circuit is
+// either < ~4 kW (AC/subpanel) or > ~10 kW (EV) — so only sessions whose AVERAGE
+// power clears this floor are EV. 6 kW default: ~50% above the worst observed AC,
+// well under any residential EVSE ≥ 25 A; env-tunable for smaller chargers.
+// NaN-safe (review): Math.max(0, NaN) is NaN, and `x < NaN` is false — a malformed
+// env value would silently disable BOTH the plateau filter (phantom AC patterns
+// return) and the live-session gate (any fresh sample becomes a "live EV").
+const EV_PLATEAU_MIN_W = (() => {
+  const n = Number(process.env.EV_PLATEAU_MIN_W);
+  return Number.isFinite(n) && n >= 0 ? n : 6000;
+})();
+// v1.15.0 — live-session awareness (the alarm-relevant piece for a NON-recurrent
+// driver: scattered start times defeat any window prediction, but an ACTIVE
+// ~10.5 kW session is directly observable and its remaining energy is projectable).
+const EV_LIVE_FRESH_MS = 10 * 60 * 1000;        // latest sample must be this fresh to count as "charging now"
+const EV_LIVE_LOOKBACK_MS = 8 * 60 * 60 * 1000; // window to locate the active session's start
+const EV_LIVE_GAP_MS = 15 * 60 * 1000;          // sample-gap that terminates the backward session walk
+const EV_LIVE_MIN_SUSTAIN_MS = 5 * 60 * 1000;   // review: one glitched high sample must not fabricate a session
+const EV_SESSION_FALLBACK_KWH = 11;             // remaining-energy basis when no session history exists yet
+const EV_LIVE_MAX_REMAINING_H = 4;              // physical sanity cap (largest observed session ≈ 3 h)
+// review — a genuinely-EV-free site would otherwise re-mine 30 days × every paired
+// circuit on EVERY call (the v0.56.1 never-cache-empty rule assumed "empty" only
+// meant a cold post-boot recorder). Empty results now cache briefly: boot-cold
+// recovery within minutes, no permanent thrash.
+const EV_WINDOW_EMPTY_TTL_MS = 5 * 60 * 1000;
 
 interface EvSessionRaw {
   startTs: number;
@@ -3629,14 +3659,34 @@ export interface EvSessionPattern {
   probability: number;      // v0.56.0 — P(session fires) = recurrences / observed-day denominator, 0..1
 }
 
-export interface EvWindowPrediction {
-  generatedAt: number;
-  sessionsObserved: number;
-  patterns: EvSessionPattern[];
-  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number; probability: number }>;
+/** v1.15.0 — an ACTIVE charging session observed on the EVSE circuit right now. */
+export interface LiveEvSession {
+  circuit: number;
+  watts: number;                 // live draw, capped at EV_MAX_LOAD_W
+  startedAt: number;             // ms epoch of the session's first sample
+  consumedKwh: number;           // energy delivered so far this session
+  projectedRemainingHours: number; // expected remaining runtime at the live draw
 }
 
-let evWindowCache: { ts: number; value: EvWindowPrediction } | null = null;
+export interface EvWindowPrediction {
+  generatedAt: number;
+  /** EV sessions (plateau ≥ EV_PLATEAU_MIN_W) observed in the 30-day window. */
+  sessionsObserved: number;
+  patterns: EvSessionPattern[];
+  upcomingNext24h: Array<{ ts: number; durationHours: number; watts: number; dayOfWeek: number; probability: number; live?: boolean }>;
+  /** v1.15.0 — honest session-distribution stats for a NON-recurrent driver
+   *  (scattered start times legitimately produce zero patterns; these fields
+   *  still tell the operator what the EV actually does). Null when no EV
+   *  sessions were observed. */
+  typicalSessionKwh: number | null;   // median per-session energy
+  p90SessionKwh: number | null;       // 90th-percentile per-session energy
+  typicalSessionWatts: number | null; // median in-session average draw
+  sessionsPerWeek: number | null;     // observed session rate
+  /** Present only while a session is actively drawing on the EVSE circuit. */
+  liveSession?: LiveEvSession;
+}
+
+let evWindowCache: { ts: number; ttlMs: number; value: EvWindowPrediction } | null = null;
 
 function extractEvSessions(points: Array<{ ts: number; value: number }>): EvSessionRaw[] {
   if (points.length < 2) return [];
@@ -3651,14 +3701,32 @@ function extractEvSessions(points: Array<{ ts: number; value: number }>): EvSess
   let prevW: number | null = null;
   for (const p of points) {
     if (p.value >= EV_WINDOW_MIN_WATTS) {
+      // v1.15.0 — a recording gap inside a plateau splits the session: without
+      // this, the trapezoid below would bridge the gap and fabricate energy
+      // across time we didn't observe (same contract as integrateWh's maxGap).
+      if (inSession && prevTs != null && p.ts - prevTs > EV_LIVE_GAP_MS) {
+        if (sessLastTs - sessStart >= EV_WINDOW_MIN_DURATION_MS) {
+          out.push({
+            startTs: sessStart,
+            endTs: sessLastTs,
+            avgWatts: wattsCount > 0 ? wattsAcc / wattsCount : 0,
+            energyKwh: energyWhAcc / 1000,
+          });
+        }
+        inSession = false;
+      }
       if (!inSession) {
         inSession = true;
         sessStart = p.ts;
         energyWhAcc = 0;
         wattsAcc = 0;
         wattsCount = 0;
-      }
-      if (prevTs != null && prevW != null) {
+      } else if (prevTs != null && prevW != null) {
+        // v1.15.0 — integrate only WITHIN the session. The old code also ran on
+        // the session's FIRST sample, trapezoiding from the previous session's
+        // flush (often days earlier) — per-session energyKwh was inflated by
+        // orders of magnitude. Harmless while display-only; now typicalSessionKwh
+        // drives the live-session remaining-energy projection, so it must be real.
         const dtH = (p.ts - prevTs) / 3_600_000;
         energyWhAcc += ((prevW + p.value) / 2) * dtH;
       }
@@ -3691,11 +3759,14 @@ function extractEvSessions(points: Array<{ ts: number; value: number }>): EvSess
   return out;
 }
 
-export function computeEvWindowPrediction(
+/** v1.15.0 — the (1 h-cached) pattern-mining half of the EV prediction. The
+ *  live-session overlay lives in computeEvWindowPrediction so an active charge
+ *  is never hidden behind this cache. */
+function computeMinedEvWindowPrediction(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
 ): EvWindowPrediction {
-  if (evWindowCache && Date.now() - evWindowCache.ts < EV_WINDOW_TTL_MS) return evWindowCache.value;
+  if (evWindowCache && Date.now() - evWindowCache.ts < evWindowCache.ttlMs) return evWindowCache.value;
   const now = Date.now();
   const since = now - EV_WINDOW_HISTORY_MS;
 
@@ -3707,6 +3778,12 @@ export function computeEvWindowPrediction(
     for (const pc of shp2.projection.pairedCircuits) {
       const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, since, now);
       for (const s of extractEvSessions(pts)) {
+        // v1.15.0 (review F6) — plateau discriminator: only sessions whose average
+        // power clears EV_PLATEAU_MIN_W are EV. This is what stops the two air
+        // conditioners (2.2-4.1 kW duty cycles, formerly 26/26 of all "patterns")
+        // from masquerading as charging sessions; the recurrence machinery below
+        // is unchanged and still detects a genuinely habitual real charger.
+        if (s.avgWatts < EV_PLATEAU_MIN_W) continue;
         sessions.push({ ...s, sn: shp2.sn, circuit: pc.primaryCh });
       }
     }
@@ -3866,18 +3943,153 @@ export function computeEvWindowPrediction(
     }
   }
 
+  // v1.15.0 — honest distribution stats. For a non-recurrent driver (this site:
+  // 12 sessions/30d at scattered hours) the pattern list above is legitimately
+  // EMPTY; these stats still describe what the EV actually does, and
+  // typicalSessionKwh drives the live-session remaining-energy projection.
+  const sortedKwh = sessions.map((s) => s.energyKwh).sort((a, b) => a - b);
+  const p90Kwh = sortedKwh.length > 0 ? sortedKwh[Math.min(sortedKwh.length - 1, Math.floor(sortedKwh.length * 0.9))] : null;
+  const windowDays = EV_WINDOW_HISTORY_MS / 86_400_000;
+
   const value: EvWindowPrediction = {
     generatedAt: now,
     sessionsObserved: sessions.length,
     patterns,
     upcomingNext24h: upcoming,
+    typicalSessionKwh: sessions.length > 0 ? round1(median(sessions.map((s) => s.energyKwh))) : null,
+    p90SessionKwh: p90Kwh == null ? null : round1(p90Kwh),
+    typicalSessionWatts: sessions.length > 0 ? Math.round(median(sessions.map((s) => s.avgWatts))) : null,
+    sessionsPerWeek: sessions.length > 0 ? round1(sessions.length / (windowDays / 7)) : null,
   };
-  // v0.56.1 — do NOT cache an empty (0-session) result. Post-restart the first compute can catch
-  // the analytics worker's recorder read cold and find no sessions; with the 1 h TTL that empty
-  // would then suppress the EV forecast for an HOUR. Only cache a real prediction; an empty one
-  // recomputes on the next call (mirrors the v0.15.21 no-cache-empty-forecast precedent).
-  if (value.sessionsObserved > 0) evWindowCache = { ts: now, value };
+  // v0.56.1 — an empty (0-session) result must not suppress the EV forecast for a full
+  // hour (post-restart the first compute can catch the analytics worker's recorder cold).
+  // v1.15.0 (review) — but with the plateau filter, "no EV sessions" is also a legitimate
+  // PERMANENT state, and never caching it re-mined 30 days x every paired circuit on every
+  // call. Empty results now cache with a SHORT TTL: boot-cold recovers within minutes,
+  // an EV-free site stops thrashing.
+  evWindowCache = { ts: now, ttlMs: value.sessionsObserved > 0 ? EV_WINDOW_TTL_MS : EV_WINDOW_EMPTY_TTL_MS, value };
   return value;
+}
+
+/**
+ * v1.15.0 (review F6) — detect an ACTIVE EV charging session on any SHP2 paired
+ * circuit. This is the alarm-relevant piece for a non-recurrent driver: window
+ * prediction cannot see a session coming, but once the EVSE is drawing its
+ * ~10.5 kW plateau the session is directly observable and its remaining energy
+ * is projectable from the empirical session-energy distribution. Pure over the
+ * recorder + clock inputs; exported for tests.
+ */
+export function detectLiveEvSession(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+  nowMs: number,
+  typicalSessionKwh: number | null,
+  p90SessionKwh: number | null = null,
+): LiveEvSession | null {
+  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+    | (DeviceSnapshot & { projection: Shp2Projection })
+    | undefined;
+  if (!shp2) return null;
+  for (const pc of shp2.projection.pairedCircuits) {
+    const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, nowMs - EV_LIVE_LOOKBACK_MS, nowMs) ?? [];
+    if (pts.length === 0) continue;
+    const last = pts[pts.length - 1];
+    if (!Number.isFinite(last.value)) continue;        // review: NaN passes < comparisons
+    if (nowMs - last.ts > EV_LIVE_FRESH_MS) continue;  // stale — not observably charging NOW
+    if (last.value < EV_PLATEAU_MIN_W) continue;       // below the EVSE plateau — AC/idle
+    // Walk backward to the session start: the contiguous stretch that stayed at
+    // charging level (EV_WINDOW_MIN_WATTS catches the preamble/taper around the
+    // plateau), terminated by a sub-threshold sample or a recording gap.
+    let startIdx = pts.length - 1;
+    for (let i = pts.length - 2; i >= 0; i--) {
+      if (pts[i].value < EV_WINDOW_MIN_WATTS) break;
+      if (pts[i + 1].ts - pts[i].ts > EV_LIVE_GAP_MS) break;
+      startIdx = i;
+    }
+    // review — a single glitched high sample must not fabricate a live session:
+    // require the charging stretch to have persisted (>=2 samples over >=5 min).
+    // A real plateau clears this within one recorder tick; detection is delayed
+    // by at most the sustain window, never lost.
+    if (startIdx === pts.length - 1 || last.ts - pts[startIdx].ts < EV_LIVE_MIN_SUSTAIN_MS) continue;
+    // Consumed energy: trapezoid over the stretch, plus the last value held to
+    // now (clamped — a future-stamped sample must not integrate negative energy).
+    let wh = 0;
+    for (let i = startIdx + 1; i < pts.length; i++) {
+      wh += ((pts[i].value + pts[i - 1].value) / 2) * (pts[i].ts - pts[i - 1].ts) / 3_600_000;
+    }
+    wh += last.value * Math.max(0, nowMs - last.ts) / 3_600_000;
+    const consumedKwh = wh / 1000;
+    // Remaining: expected total minus delivered so far. Basis is the MEDIAN
+    // observed session (falling back to a typical residential charge with no
+    // history) — but once a session has OUTLIVED the median, the honest
+    // conditional expectation is a bigger charge, so re-target to the P90
+    // (review: with the median alone, a real 31 kWh session's tail collapsed to
+    // the floor ~1.25 h in and ~18 kWh of ongoing draw went unprojected).
+    // Floored at 1 kWh and capped at a physical-sanity runtime.
+    let targetKwh = typicalSessionKwh ?? EV_SESSION_FALLBACK_KWH;
+    if (p90SessionKwh != null && consumedKwh >= targetKwh) targetKwh = p90SessionKwh;
+    const remainingKwh = Math.max(targetKwh - consumedKwh, 1);
+    const watts = Math.min(last.value, EV_MAX_LOAD_W);
+    const projectedRemainingHours = Math.min(
+      (remainingKwh * 1000) / Math.max(watts, 1000),
+      EV_LIVE_MAX_REMAINING_H,
+    );
+    return {
+      circuit: pc.primaryCh,
+      watts: Math.round(watts),
+      startedAt: pts[startIdx].ts,
+      consumedKwh: round1(consumedKwh),
+      projectedRemainingHours: round1(projectedRemainingHours),
+    };
+  }
+  return null;
+}
+
+/**
+ * v1.15.0 — public EV prediction: the 1 h-cached mined patterns PLUS a fresh
+ * live-session overlay on every call. The overlay must never sit behind the
+ * mining cache — a session that starts right after a cache fill would otherwise
+ * be invisible to the forecast for up to an hour, exactly when the projected-SoC
+ * trajectory most needs to carry the active ~10.5 kW draw.
+ */
+export function computeEvWindowPrediction(
+  devices: Record<string, DeviceSnapshot>,
+  recorder: Recorder,
+): EvWindowPrediction {
+  const mined = computeMinedEvWindowPrediction(devices, recorder);
+  const nowMs = Date.now();
+  const live = detectLiveEvSession(devices, recorder, nowMs, mined.typicalSessionKwh, mined.p90SessionKwh);
+  if (!live) return mined;
+  // Prepend the live session as an upcoming entry at probability 1, ALIGNED TO
+  // HOUR-SPAN COVERAGE (review): evLoadByHour keys ceil(durationHours) whole
+  // clock-hours from floor(ts), and getDayForecast simulates from the NEXT hour
+  // boundary — an entry keyed at nowMs with <=1 h remaining covered only the
+  // current (never-simulated) partial hour, so the overlay lifted zero forecast
+  // hours for most detections. Anchoring at the hour start with the elapsed
+  // fraction folded into the duration covers every clock hour the remaining
+  // tail actually touches. evLoadByHour takes the MAX watts per hour, so
+  // coexistence with a mined pattern is safe. Never mutate the cached object.
+  // Honest scope: the day-forecast consumers hold their own ~30-min result
+  // cache, so the overlay enters the projected-SoC sim at the next forecast
+  // recompute (sessions run 0.5-3 h — most of a session is covered); direct
+  // consumers (/api/ev-window-prediction, reports, HA payload) see it fresh on
+  // every call, and the runway ALARM deliberately keeps its evidence-based
+  // observed-load anchor instead (v0.15.21).
+  const hourStartMs = Math.floor(nowMs / 3_600_000) * 3_600_000;
+  const liveEntry = {
+    ts: hourStartMs,
+    durationHours: (nowMs - hourStartMs) / 3_600_000 + live.projectedRemainingHours,
+    watts: live.watts,
+    dayOfWeek: new Date(nowMs).getDay(),
+    probability: 1,
+    live: true,
+  };
+  return {
+    ...mined,
+    generatedAt: nowMs,
+    liveSession: live,
+    upcomingNext24h: [liveEntry, ...mined.upcomingNext24h],
+  };
 }
 
 /* ===================================================================
