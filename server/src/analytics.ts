@@ -6944,9 +6944,15 @@ export interface ForecastBand {
 export interface ProbabilisticForecast {
   generatedAt: number;
   hours: ForecastBand[];
-  // Confidence summary
-  pAboveReservePct: number | null;     // probability projected SoC stays ≥ reserve through 24h
-  pFullCharge: number | null;          // probability SoC reaches 100% during the window
+  // Confidence summary.
+  // v1.16.0 (engine-review F23) — pAboveReservePct is a min-over-path event
+  // probability: the share of the coherent trajectory ensemble whose SoC never
+  // dips below reserve at ANY hour of the window. It was previously the
+  // fraction of hours with p10 ≥ reserve, which read 42% while the median
+  // trajectory itself sat below reserve for 11 straight hours. null when the
+  // forecast carries no SoC trajectory (previously published a misleading 0).
+  pAboveReservePct: number | null;
+  pFullCharge: number | null;          // probability SoC reaches ≥99% at some hour of the window (max-over-path)
   uncertaintyKwhStdev: number;         // typical ±band width over the window (kWh stdev)
 }
 
@@ -6955,6 +6961,38 @@ const PROB_TTL_MS = 15 * 60 * 1000;
 
 /** Normal-distribution shortcut: P10 ≈ μ−1.282σ, P90 ≈ μ+1.282σ. */
 const Z10 = 1.282;
+
+/* v1.16.0 (engine-review F7) — coherent trajectory ensemble.
+ *
+ * The old SoC band was recomputed every hour as p50 ± THAT hour's PV
+ * half-range, so uncertainty never accumulated across the horizon: overnight
+ * the band collapsed to ±0.1 SoC pt while realized nightly minima across 30
+ * recorded nights spanned 9-38%. Forecast errors are strongly correlated
+ * across hours (a cloudier-than-forecast day is cloudy all day), so each
+ * ensemble member draws ONE standard-normal z and holds it for the whole
+ * window; the trajectory is then a monotone function of z, which makes the
+ * z=∓1.282 paths exact 10th/90th-percentile trajectories and lets min/max
+ * path events be counted directly over equal-weight quantile paths. */
+const PROB_ENSEMBLE_Z: readonly number[] = [
+  -1.9808, -1.4652, -1.1798, -0.9674, -0.7916, -0.6375, -0.4972, -0.3661,
+  -0.241, -0.1196, 0, 0.1196, 0.241, 0.3661, 0.4972, 0.6375, 0.7916,
+  0.9674, 1.1798, 1.4652, 1.9808,
+]; // Φ⁻¹((i+0.5)/21) — 21 equal-probability quantiles
+
+/* Load-side 1σ as a fraction of forecast load, folded (in quadrature, per
+ * hour) into the trajectory ensemble. Without it the band cannot grow
+ * overnight at all — PV sigma is multiplicative on forecast PV, which is 0
+ * at night — yet the observed nightly-minimum spread is driven mostly by
+ * load surprise (EV sessions, HVAC). NaN-safe: `x < NaN` is false, which
+ * would silently zero the term (the v1.14.0 Math.max(0, NaN) class). */
+export function parseProbLoadSigmaFrac(raw: string | undefined): number {
+  // Number('') === 0 — an unset-but-present env var must fall back to the
+  // default, not silently zero the load-uncertainty term (v1.14.0 envNum bug).
+  if (raw == null || raw.trim() === '') return 0.15;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.15;
+}
+const PROB_LOAD_SIGMA_FRAC = parseProbLoadSigmaFrac(process.env.PROB_LOAD_SIGMA_FRAC);
 
 export async function computeProbabilisticForecast(
   forecast: DayForecast | null,
@@ -7039,14 +7077,45 @@ export async function computeProbabilisticForecast(
     const dpuCount = Math.max(1, forecast.deviceModels.length);
     fullKwh = dpuCount * PACKS_PER_DPU * PACK_KWH_NAMEPLATE;
   }
-  // Simulate three parallel SoC trajectories starting from the same SoC.
-  // We don't know the initial SoC here, but we do know the projected curve
-  // from the base forecast — derive starting SoC from the first hour.
-  let p10Soc = forecast.hours[0]?.projectedSocPct ?? null;
-  let p50Soc = p10Soc;
-  let p90Soc = p10Soc;
-  let aboveReserveCount = 0;
-  let fullChargeCount = 0;
+  // v1.16.0 (engine-review F7) — coherent SoC trajectory ensemble replacing
+  // the per-hour band reset. Every ensemble member (plus the dedicated
+  // z=∓1.282 band paths) integrates hour-over-hour from the same starting SoC
+  // with per-path clamping at 0/100, so uncertainty compounds across the
+  // horizon and saturation behaves physically (paths pinned together at
+  // full/empty carry no spread). Published p50SocPct stays anchored to the
+  // deterministic forecast's projectedSocPct — the richer simulation — and
+  // the band/ensemble carry only their OFFSET from the raw median path, so
+  // the two methods can't drift apart for non-PV reasons.
+  const clampSoc = (v: number) => Math.min(100, Math.max(0, v));
+  // hours[0].projectedSocPct is the deterministic sim's POST-hour-0 state
+  // (socWh steps before each push), and the loop below applies hour 0's delta
+  // to every path — so seed the ensemble one deterministic step BEHIND the
+  // anchor. Seeding AT hours[0] runs every raw path an hour ahead: invisible
+  // mid-range (the anchoring cancels it) but the raw median clamps at the
+  // 0/100 rails one hour early, collapsing the anchored band onto p50 —
+  // optimistic exactly near the empty rail.
+  const rawStart = forecast.hours[0]?.projectedSocPct;
+  let startSoc: number | null = null;
+  if (rawStart != null && Number.isFinite(rawStart)) {
+    const h0 = forecast.hours[0];
+    const d0Kwh = (h0.forecastPvW - h0.forecastLoadW) / 1000;
+    startSoc = clampSoc(rawStart - (Number.isFinite(d0Kwh) ? (d0Kwh / fullKwh) * 100 : 0));
+  }
+  const paths = startSoc != null ? PROB_ENSEMBLE_Z.map(() => startSoc) : [];
+  const pathMin = paths.map(() => Infinity); // min over ANCHORED path values
+  const pathMax = paths.map(() => -Infinity);
+  let lowSoc = startSoc;   // z = −1.282 → exact P10 trajectory (comonotone)
+  let midSoc = startSoc;   // z = 0 raw median (anchoring reference)
+  let highSoc = startSoc;  // z = +1.282 → exact P90 trajectory
+  let anchorSoc = startSoc; // deterministic curve, carried across null hours
+  // A non-finite PV/load hour (an upstream NaN leak — the class this codebase
+  // has hit repeatedly) must not permanently poison the stateful integrators,
+  // and it must not let the min-over-path summaries silently score only the
+  // clean prefix while claiming full-window semantics — that fails OPTIMISTIC
+  // on a safety-facing statistic. Skip the hour's step (state carries, band
+  // recovers at the next clean hour) and null the summaries: "never dips at
+  // ANY hour" is unknowable for a window we could not fully score.
+  let windowUnscored = false;
   let stdevAccum = 0;
   // v0.9.59 — anchor the horizon to the first forecast hour so the band-widening
   // multiplier below grows monotonically across the window regardless of when
@@ -7086,46 +7155,77 @@ export async function computeProbabilisticForecast(
     const pvCeil = forecast.pvCeilingW ?? 0;
     const p90raw = p50 * (1 + Z10 * sigmaFrac);
     const p90 = pvCeil > 0 ? Math.min(p90raw, pvCeil) : p90raw;
-    // SoC propagation: use the load as deterministic, vary PV.
-    const dP10 = (p10 - h.forecastLoadW) / 1000;
-    const dP50 = (p50 - h.forecastLoadW) / 1000;
-    const dP90 = (p90 - h.forecastLoadW) / 1000;
-    void dP50;
-    // Convert delta watts to SoC% using the rough pack capacity (whatever
-    // resolves the projected p50 trajectory). Derive from the base forecast:
-    // if base SoC moved X% under dP50 kWh, that's the conversion factor.
-    if (p50Soc != null) {
-      const baseNext = h.projectedSocPct;
-      // Step the deterministic curve forward without re-deriving it (we trust
-      // forecast.hours[i].projectedSocPct as the p50 trajectory).
-      p50Soc = baseNext ?? p50Soc;
-      // v0.9.58 — scale the (P90-P10) kWh half-range to SoC% via the live full
-      // capacity backed out from the deterministic projection above. Was:
-      //   socStepPct = socStep * 5   // implied ~20 kWh pack — wrong for a
-      //                              // ~120 kWh fleet, badly narrow bands.
-      const socStep = (dP90 - dP10) / 2; // kWh half-range
-      const socStepPct = (socStep / fullKwh) * 100;
-      p10Soc = Math.max(0, (p50Soc ?? 0) - socStepPct);
-      p90Soc = Math.min(100, (p50Soc ?? 0) + socStepPct);
+    // Per-hour 1σ of the NET energy delta, in kWh. PV side: the published
+    // (clamped) P10-P90 half-range converted back to 1σ. Load side: a
+    // fractional sigma on forecast load — without it the band cannot grow
+    // overnight (PV sigma is multiplicative on PV, which is 0 at night),
+    // yet load surprise dominates realized overnight spread. Quadrature
+    // within the hour; a single z across hours (fully correlated) is the
+    // conservative shape for weather-regime + habit errors.
+    const sigmaPvKwh = (p90 - p10) / 2000 / Z10;
+    const sigmaLoadKwh = (PROB_LOAD_SIGMA_FRAC * Math.max(0, h.forecastLoadW)) / 1000;
+    const sigmaNetKwh = Math.sqrt(sigmaPvKwh * sigmaPvKwh + sigmaLoadKwh * sigmaLoadKwh);
+    // v1.16.0 — accumulate the SAME per-hour sigma that drives the band, so
+    // the published ±kWh figure can't read 0 beside a several-point overnight
+    // band (the old PV-only accumulation did exactly that at night).
+    if (Number.isFinite(sigmaNetKwh)) stdevAccum += sigmaNetKwh;
+    const dP50Kwh = (p50 - h.forecastLoadW) / 1000;
+    let p10SocOut: number | null = null;
+    let p50SocOut: number | null = null;
+    let p90SocOut: number | null = null;
+    if (startSoc != null && lowSoc != null && midSoc != null && highSoc != null) {
+      if (Number.isFinite(dP50Kwh) && Number.isFinite(sigmaNetKwh)) {
+        const stepPct = (z: number) => ((dP50Kwh + z * sigmaNetKwh) / fullKwh) * 100;
+        lowSoc = clampSoc(lowSoc + stepPct(-Z10));
+        midSoc = clampSoc(midSoc + stepPct(0));
+        highSoc = clampSoc(highSoc + stepPct(Z10));
+        for (let i = 0; i < paths.length; i++) paths[i] = clampSoc(paths[i] + stepPct(PROB_ENSEMBLE_Z[i]));
+      } else {
+        windowUnscored = true;
+      }
+      // Anchor to the deterministic trajectory. Number.isFinite (not ??)
+      // carries the last known value across BOTH null and NaN hours — a NaN
+      // anchor would otherwise flow into every published field via `NaN ?? x
+      // === NaN`.
+      anchorSoc = Number.isFinite(h.projectedSocPct as number) ? (h.projectedSocPct as number) : anchorSoc;
+      if (anchorSoc != null) {
+        p50SocOut = anchorSoc;
+        p10SocOut = clampSoc(anchorSoc + lowSoc - midSoc);
+        p90SocOut = clampSoc(anchorSoc + highSoc - midSoc);
+        for (let i = 0; i < paths.length; i++) {
+          const anchored = clampSoc(anchorSoc + paths[i] - midSoc);
+          if (anchored < pathMin[i]) pathMin[i] = anchored;
+          if (anchored > pathMax[i]) pathMax[i] = anchored;
+        }
+      }
     }
-    if (p10Soc != null && p10Soc >= reserveSoc) aboveReserveCount++;
-    if (p90Soc != null && p90Soc >= 99) fullChargeCount++;
-    stdevAccum += sigmaFrac * p50;
     bands.push({
       ts: h.ts,
       p10W: Math.round(p10), p50W: Math.round(p50), p90W: Math.round(p90),
-      p10SocPct: p10Soc != null ? Math.round(p10Soc * 10) / 10 : null,
-      p50SocPct: p50Soc != null ? Math.round(p50Soc * 10) / 10 : null,
-      p90SocPct: p90Soc != null ? Math.round(p90Soc * 10) / 10 : null,
+      p10SocPct: p10SocOut != null ? Math.round(p10SocOut * 10) / 10 : null,
+      p50SocPct: p50SocOut != null ? Math.round(p50SocOut * 10) / 10 : null,
+      p90SocPct: p90SocOut != null ? Math.round(p90SocOut * 10) / 10 : null,
     });
   }
-  const total = bands.length || 1;
+  // v1.16.0 (engine-review F23) — min/max-over-path event probabilities over
+  // the equal-weight quantile ensemble, replacing the fraction-of-hours count
+  // (which read "42% above reserve" while its own median trajectory sat below
+  // reserve for 11 straight hours). null — not a fake 0 or a fake count —
+  // when the forecast carries no SoC trajectory.
+  const scored = windowUnscored ? [] : pathMin.filter((m) => Number.isFinite(m));
+  const pAboveReservePct = scored.length > 0
+    ? Math.round((scored.filter((m) => m >= reserveSoc).length / scored.length) * 100)
+    : null;
+  const maxScored = windowUnscored ? [] : pathMax.filter((m) => Number.isFinite(m));
+  const pFullCharge = maxScored.length > 0
+    ? Math.round((maxScored.filter((m) => m >= 99).length / maxScored.length) * 100)
+    : null;
   const value: ProbabilisticForecast = {
     generatedAt: now,
     hours: bands,
-    pAboveReservePct: Math.round((aboveReserveCount / total) * 100),
-    pFullCharge: Math.round((fullChargeCount / total) * 100),
-    uncertaintyKwhStdev: Math.round((stdevAccum / 1000) * 100) / 100,
+    pAboveReservePct,
+    pFullCharge,
+    uncertaintyKwhStdev: Math.round(stdevAccum * 100) / 100, // already kWh (Σ per-hour sigmaNetKwh)
   };
   probabilisticCache = { ts: now, value };
   return value;

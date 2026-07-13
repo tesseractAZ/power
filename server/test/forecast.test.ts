@@ -4,6 +4,7 @@ import {
   bayesUpdate,
   BAYES_OBS_SIGMA2,
   computeProbabilisticForecast,
+  parseProbLoadSigmaFrac,
   computeMultiDayForecast,
   computeForecastSkill,
   computeAmbientThermalForecast,
@@ -351,6 +352,396 @@ test('computeProbabilisticForecast — v0.9.58 regression: SoC band scales to ba
     `SoC band width should be ~1.2 % for a 120 kWh fleet at hour 1; got ${socBandWidth.toFixed(2)} % ` +
       `(pre-v0.9.58 bug would give ~7-12 %)`,
   );
+});
+
+/* ─── v1.16.0 (engine-review F7/F23) — coherent trajectory ensemble ──
+ *
+ * F7: the SoC band was recomputed each hour as p50 ± that hour's PV
+ * half-range, so uncertainty never accumulated — overnight the band
+ * collapsed to ±0.1 SoC pt while realized nightly minima spanned 9-38%.
+ * F23: pAboveReservePct counted hours-with-p10-above-reserve and called
+ * it "probability SoC stays ≥ reserve through 24h" — reading 42% while
+ * its own median trajectory sat below reserve for 11 straight hours.
+ * ─────────────────────────────────────────────────────────────────── */
+
+test('probabilistic F7 — SoC band COMPOUNDS across the horizon (not per-hour reset)', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // Constant PV/load/sigma: the ONLY source of band growth across hours is
+  // accumulation. Back-out pair: dSoc 0.5 %/h under (2000−1000) W → fullKwh
+  // = 1 kWh / 0.005 = 200. No trajectory approaches the 0/100 clamps.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 12,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 2_000,
+      forecastLoadW: () => 1_000,
+      projectedSocPct: (h) => 50 + h * 0.5,
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  const width = (b: (typeof r.hours)[number]) => (b.p90SocPct ?? 0) - (b.p10SocPct ?? 0);
+  const w0 = width(r.hours[0]);
+  const w11 = width(r.hours[11]);
+  // Coherent accumulation: ~12 summed hourly sigmas → ratio ≈ 13×. The old
+  // per-hour reset gave ratio ≈ horizonFactor growth only (≈ 1.2×).
+  assert.ok(w0 > 0, `hour-0 band should be nonzero, got ${w0}`);
+  assert.ok(
+    w11 / w0 > 5,
+    `hour-11 band should be many× hour-0 (accumulation); got ${w0.toFixed(2)} → ${w11.toFixed(2)} (ratio ${(w11 / w0).toFixed(2)})`,
+  );
+  // Monotone growth while nothing clamps.
+  for (let i = 1; i < r.hours.length; i++) {
+    assert.ok(
+      width(r.hours[i]) >= width(r.hours[i - 1]) - 0.11, // 0.1-pt output rounding slack
+      `band width should not shrink while unclamped: hour ${i - 1} ${width(r.hours[i - 1])} → hour ${i} ${width(r.hours[i])}`,
+    );
+  }
+});
+
+test('probabilistic F7 — band grows OVERNIGHT via load sigma (PV sigma is 0 at night)', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // PV = 0 all night: the multiplicative PV sigma is exactly 0, so the old
+  // code published a ZERO-width band through the exact window where the
+  // realized nightly-minimum spread is largest. Load sigma must carry it.
+  // Back-out: dSoc −1 %/h under −2 kWh → fullKwh = 200.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 12,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 2_000,
+      projectedSocPct: (h) => 80 - h * 1,
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  const w11 = (r.hours[11].p90SocPct ?? 0) - (r.hours[11].p10SocPct ?? 0);
+  // 2 · 1.282 · (12 h · 0.15 · 2 kWh) / 200 kWh · 100 ≈ 4.6 pts.
+  assert.ok(w11 > 2, `overnight band at hour 11 should be > 2 SoC pts (old code: 0.0); got ${w11.toFixed(2)}`);
+  // PV band itself must still read 0 — the growth is SoC-side only.
+  assert.equal(r.hours[11].p10W, 0);
+  assert.equal(r.hours[11].p90W, 0);
+});
+
+test('probabilistic F23 — pAboveReservePct is min-over-path: a late certain dip → 0%, not hours-fraction', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // Zero PV and zero load → zero sigma → every ensemble path IS the
+  // deterministic curve. That curve dips below reserve (15) for the last 4
+  // of 24 hours. Fraction-of-hours (old semantics) reads 20/24 ≈ 83%; the
+  // true probability of "never dips below reserve in the window" is 0.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 0,
+      projectedSocPct: (h) => (h >= 20 ? 5 : 50),
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  assert.equal(r.pAboveReservePct, 0, `certain late dip must read 0% (old hour-count read ~83%); got ${r.pAboveReservePct}`);
+  assert.equal(r.pFullCharge, 0);
+});
+
+test('probabilistic F23 — deterministic curve grazing reserve exactly → ~half the ensemble dips', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // The median path ends exactly AT reserve (15). With symmetric load sigma,
+  // paths below the median dip under; the median and everything above stay
+  // at-or-over → 11 of 21 paths ≥ reserve ≈ 52%.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 1_000,
+      projectedSocPct: (h) => 15 + (23 - h), // 38 → 15, −1 %/h → fullKwh = 100
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  // Exact by construction: fullKwh = 100 and −1 %/h steps are fp-exact, so the
+  // z=0 path's min lands on exactly 15.0 and 11 of 21 paths count as ≥ reserve
+  // → round(11/21·100) = 52. Pinning the integer also kills the >=→> boundary
+  // mutation (48) and any ensemble-size drift (20 paths → 50).
+  assert.equal(r.pAboveReservePct, 52, `graze-the-reserve must read exactly 52%; got ${r.pAboveReservePct}`);
+});
+
+test('probabilistic F23 — a mid-window dip that RECOVERS still counts (min-over-path, not end-state)', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // V-shape: dip below reserve (15) for hours 10-13, back to 50 after. Zero
+  // sigma → every path IS the deterministic curve. An end-state (or last-value)
+  // implementation reads 100% "above reserve"; the true min-over-path answer
+  // is 0%. This is the exact bug class F23 fixed — a dip concentrated
+  // mid-window must not be forgiven by the recovery.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 0,
+      projectedSocPct: (h) => (h >= 10 && h <= 13 ? 5 : 50),
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  assert.equal(r.pAboveReservePct, 0, `mid-window dip must read 0% (end-state bug reads 100%); got ${r.pAboveReservePct}`);
+});
+
+test('probabilistic F23 — pFullCharge is max-over-path: touching full mid-window counts; 99.5% counts as full', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // Curve touches 100 for hours 10-13 then falls back to 60 (zero sigma).
+  // Max-over-path → 100%; a last-value implementation reads 0.
+  const touch = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 0,
+      projectedSocPct: (h) => (h >= 10 && h <= 13 ? 100 : 60),
+    }),
+  });
+  const rTouch = await computeProbabilisticForecast(touch, null);
+  assert.equal(rTouch.pFullCharge, 100, `touch-full-then-fall must read 100; got ${rTouch.pFullCharge}`);
+  // Flat 99.5: the ≥99 threshold means "effectively full" — pins the
+  // threshold against a 99→100 tightening that would zero this out.
+  resetForecastCachesForTesting();
+  const flat995 = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 0,
+      projectedSocPct: () => 99.5,
+    }),
+  });
+  const rFlat = await computeProbabilisticForecast(flat995, null);
+  assert.equal(rFlat.pFullCharge, 100, `flat 99.5% must count as full (threshold is ≥99); got ${rFlat.pFullCharge}`);
+});
+
+test('probabilistic F7 — band width magnitude is exact: load-only sigma (overnight) and PV+load quadrature', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // Load-only (overnight): PV = 0 ⇒ sigmaNet = 0.15 · 2 kWh = 0.3 kWh/h flat
+  // (no horizon factor on the load term). Width after 12 hours =
+  // 2 · 1.282 · (12 · 0.3) / 200 kWh · 100 ≈ 4.62 pts. Pins the absolute
+  // sigma scale — ratio/floor assertions alone let a uniform ±1σ-vs-±1.282σ
+  // mislabeling (P16/P84 sold as P10/P90) pass silently.
+  const night = emptyForecast({
+    hours: hourlyForecast({
+      count: 12,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 2_000,
+      projectedSocPct: (h) => 80 - h, // −1 %/h under −2 kWh → fullKwh = 200
+    }),
+  });
+  const rNight = await computeProbabilisticForecast(night, null);
+  const wNight = (rNight.hours[11].p90SocPct ?? 0) - (rNight.hours[11].p10SocPct ?? 0);
+  assert.ok(
+    wNight >= 4.3 && wNight <= 4.9,
+    `overnight 12h width should be ≈4.6 pts (±1σ mutant: 3.6); got ${wNight.toFixed(2)}`,
+  );
+  // PV+load both nonzero at hour 0 (horizon factor exactly 1): quadrature
+  // sqrt(0.583² + 0.225²) ≈ 0.625 kWh → width ≈ 0.80 pts. A linear-sum
+  // "simplification" (0.808 kWh) or a missing /Z10 on the PV term (0.781 kWh)
+  // both land at ≈1.0 — outside the window.
+  resetForecastCachesForTesting();
+  const day = emptyForecast({
+    hours: hourlyForecast({
+      count: 6,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 2_000,
+      forecastLoadW: () => 1_500,
+      projectedSocPct: (h) => 50 + h * 0.25, // +0.25 %/h under +0.5 kWh → fullKwh = 200
+    }),
+  });
+  const rDay = await computeProbabilisticForecast(day, null);
+  const wDay = (rDay.hours[0].p90SocPct ?? 0) - (rDay.hours[0].p10SocPct ?? 0);
+  assert.ok(
+    wDay >= 0.7 && wDay <= 0.9,
+    `hour-0 PV+load width should be ≈0.8 pts via quadrature (linear-sum/missing-Z10 mutants: ≈1.0); got ${wDay.toFixed(2)}`,
+  );
+});
+
+test('probabilistic F7 — a null projectedSocPct hour is carried, not a hole in the band', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // The anchor carries the last known deterministic value across a null hour
+  // (pre-v1.16 behavior). Without the carry, hour 6 publishes null SoC AND
+  // skips min-tracking for that hour — a dip there would vanish from the
+  // path statistics.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 12,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 2_000,
+      forecastLoadW: () => 1_000,
+      projectedSocPct: (h) => (h === 6 ? null : 50 + h * 0.5),
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  assert.equal(r.hours[6].p50SocPct, 52.5, `hour 6 must carry hour 5's anchor (52.5); got ${r.hours[6].p50SocPct}`);
+  assert.ok(r.hours[6].p10SocPct != null && r.hours[6].p90SocPct != null, 'band must not have a null hole at the carried hour');
+});
+
+test('probabilistic F23 — no SoC trajectory → pAboveReservePct/pFullCharge are null, not a fake 0', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 2_000,
+      forecastLoadW: () => 1_000,
+      projectedSocPct: () => null,
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  assert.equal(r.pAboveReservePct, null);
+  assert.equal(r.pFullCharge, null);
+  for (const b of r.hours) {
+    assert.equal(b.p10SocPct, null);
+    assert.equal(b.p50SocPct, null);
+    assert.equal(b.p90SocPct, null);
+  }
+});
+
+test('probabilistic F7 — published p50SocPct stays anchored to the deterministic trajectory', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  const proj = (h: number) => 50 + h * 0.5;
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 12,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 2_000,
+      forecastLoadW: () => 1_000,
+      projectedSocPct: proj,
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  for (let i = 0; i < r.hours.length; i++) {
+    assert.equal(
+      r.hours[i].p50SocPct,
+      Math.round(proj(i) * 10) / 10,
+      `hour ${i}: p50SocPct must equal the deterministic projectedSocPct`,
+    );
+    assert.ok((r.hours[i].p10SocPct ?? 0) <= (r.hours[i].p50SocPct ?? 0));
+    assert.ok((r.hours[i].p50SocPct ?? 0) <= (r.hours[i].p90SocPct ?? 0));
+  }
+});
+
+test('probabilistic F7 — saturation at full charge collapses the band and pFullCharge reads 100', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // Massive PV surplus: every ensemble path (even the deep-percentile ones)
+  // pins at 100 well before the window ends. Per-path clamping must collapse
+  // the band to zero at the ceiling — the offset-only formulation would have
+  // kept publishing p90 > p50 after mutual saturation.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 20_000,
+      forecastLoadW: () => 0,
+      projectedSocPct: (h) => Math.min(80 + h * 5, 100), // back-out: 20 kWh / 5 % → 400 kWh
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  const last = r.hours[r.hours.length - 1];
+  assert.equal(last.p10SocPct, 100, `all paths saturated → p10 should read 100; got ${last.p10SocPct}`);
+  assert.equal(last.p90SocPct, 100);
+  assert.equal(r.pFullCharge, 100);
+});
+
+test('probabilistic F7 — ensemble seeds one step BEHIND the anchor: no early band collapse at the rails', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // hours[0].projectedSocPct is POST-hour-0; seeding the raw paths there and
+  // re-applying hour 0's delta runs them an hour ahead of the anchor. The
+  // misalignment is invisible mid-range but clamps the raw median at a rail
+  // one hour early, collapsing the anchored band onto p50.
+  // Empty-rail case (alarm-relevant): draining −6 kWh/h toward 0 on a 100 kWh
+  // pool. At hour 3 the anchor is 2%; the misaligned raw median is already
+  // pinned at 0, dragging p10 up to equal p50 — an optimistic zero-width band
+  // exactly at the floor. Correct alignment keeps p10 < p50 there.
+  const drain = emptyForecast({
+    hours: hourlyForecast({
+      count: 6,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 0,
+      forecastLoadW: () => 6_000,
+      projectedSocPct: (h) => Math.max(20 - h * 6, 0), // −6 %/h under −6 kWh → fullKwh = 100
+    }),
+  });
+  const rDrain = await computeProbabilisticForecast(drain, null);
+  const h3 = rDrain.hours[3]; // anchor = 2%
+  assert.ok(
+    (h3.p10SocPct ?? 0) < (h3.p50SocPct ?? 0),
+    `p10 must stay below p50 near the empty rail (misaligned seed collapses it): p10=${h3.p10SocPct} p50=${h3.p50SocPct}`,
+  );
+  // Full-rail mirror: charging +6 kWh/h, anchor 94% at hour 1. The misaligned
+  // raw median is already pinned at 100, zeroing the upside band an hour early.
+  resetForecastCachesForTesting();
+  const charge = emptyForecast({
+    hours: hourlyForecast({
+      count: 6,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: () => 7_000,
+      forecastLoadW: () => 1_000,
+      projectedSocPct: (h) => Math.min(88 + h * 6, 100),
+    }),
+  });
+  const rCharge = await computeProbabilisticForecast(charge, null);
+  const h1 = rCharge.hours[1]; // anchor = 94%
+  assert.ok(
+    (h1.p90SocPct ?? 0) > (h1.p50SocPct ?? 0),
+    `p90 must stay above p50 near the full rail: p90=${h1.p90SocPct} p50=${h1.p50SocPct}`,
+  );
+});
+
+test('probabilistic F7 — a NaN hour neither poisons the ensemble nor lets summaries fail optimistic', async () => {
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  // Hour 6 carries NaN PV/load/SoC (an upstream leak). Requirements:
+  // (1) the band RECOVERS at the next clean hour — the stateful integrators
+  //     must not turn NaN forever (clampSoc(NaN) === NaN);
+  // (2) pAboveReservePct/pFullCharge read null — "never dips at ANY hour"
+  //     cannot be claimed for a window with an unscoreable hour. Scoring only
+  //     the clean prefix would fail OPTIMISTIC (100%) on a curve whose dip
+  //     lives after the poison.
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      forecastPvW: (h) => (h === 6 ? NaN : 0),
+      forecastLoadW: (h) => (h === 6 ? NaN : 1_000),
+      projectedSocPct: (h) => (h === 6 ? NaN : 80 - h * 1),
+    }),
+  });
+  const r = await computeProbabilisticForecast(fc, null);
+  const last = r.hours[23];
+  assert.ok(
+    last.p10SocPct != null && Number.isFinite(last.p10SocPct),
+    `band must recover after the NaN hour; hour 23 p10=${last.p10SocPct}`,
+  );
+  assert.ok((last.p90SocPct ?? 0) - (last.p10SocPct ?? 0) > 1, 'recovered band still carries accumulated width');
+  assert.equal(r.hours[6].p50SocPct, r.hours[5].p50SocPct, 'NaN anchor hour carries the last finite value');
+  assert.equal(r.pAboveReservePct, null, `unscoreable window must read null, not a clean-prefix probability; got ${r.pAboveReservePct}`);
+  assert.equal(r.pFullCharge, null);
+});
+
+test('parseProbLoadSigmaFrac — NaN-safe env parse (the v1.14.0 Math.max(0, NaN) class)', () => {
+  assert.equal(parseProbLoadSigmaFrac(undefined), 0.15);
+  assert.equal(parseProbLoadSigmaFrac(''), 0.15);
+  assert.equal(parseProbLoadSigmaFrac('garbage'), 0.15);
+  assert.equal(parseProbLoadSigmaFrac('-0.1'), 0.15);  // negative → default
+  assert.equal(parseProbLoadSigmaFrac('1.5'), 0.15);   // > 1 → default
+  assert.equal(parseProbLoadSigmaFrac('0.25'), 0.25);
+  assert.equal(parseProbLoadSigmaFrac('0'), 0);        // explicit opt-out is honored
 });
 
 /* ─── computeMultiDayForecast ─────────────────────────────────────────
