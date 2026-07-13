@@ -650,7 +650,10 @@ export interface PackRiskV2Report {
    * Optional so existing consumers don't break.
    */
   degraded?: boolean;
-  degradeReason?: 'drift' | 'precision' | 'drift+precision';
+  /** v1.18.0 (F16) — 'samples': the shadow has too few labeled training
+   *  samples to serve; the composite pins to the heuristic ALONE (the
+   *  novelty track is also excluded — see computePackRiskV2). */
+  degradeReason?: 'samples' | 'drift' | 'precision' | 'drift+precision';
   /** Debug payload for /api/models/health so the dashboard can surface
    *  the exact numbers that drove the gate decision. */
   gateDecision?: {
@@ -658,6 +661,7 @@ export interface PackRiskV2Report {
     overallPrecision: number | null;
     threshold: number;
     minPrecision: number;
+    minTrainingSamples?: number;
     degraded: boolean;
   };
 }
@@ -688,16 +692,36 @@ export interface PackRiskV2Report {
  * why the previous shadow-vs-`model` comparison was a no-op end-to-end.
  * The parameter is retained to preserve the call-site API.
  */
-export function computeGateDecision(_model: LrModel): {
+/* v1.18.0 (engine-review F16) — NaN/empty-safe env parse for the gate knobs.
+ * `Number('') === 0` would zero a threshold and silently flip gate behavior. */
+function gateEnvNum(name: string, def: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === '') return def;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
+/* v1.18.0 (engine-review F16) — minimum labeled training samples before the
+ * shadow LR's score is allowed into the operator-facing composite. The live
+ * system served a 13-sample one-class shadow whose learned signal was 99.99%
+ * bias ("raise everyone's risk"), inflating healthy-fleet composites 4-7×
+ * (three near-new packs falsely tiered 'moderate'). 8 features + bias ≈ 9
+ * params; ≥10 observations/param is the floor of respectability. */
+const PACK_RISK_MIN_TRAINING_SAMPLES = gateEnvNum('PACK_RISK_MIN_TRAINING_SAMPLES', 100);
+/* Minimum decided outcomes before alert-family precision counts as evidence. */
+const PACK_RISK_MIN_DECIDED_OUTCOMES = gateEnvNum('PACK_RISK_MIN_DECIDED_OUTCOMES', 10);
+
+export function computeGateDecision(model: LrModel): {
   driftL2: number | null;
   overallPrecision: number | null;
   threshold: number;
   minPrecision: number;
+  minTrainingSamples: number;
   degraded: boolean;
-  reason?: 'drift' | 'precision' | 'drift+precision';
+  reason?: 'samples' | 'drift' | 'precision' | 'drift+precision';
 } {
-  const threshold = Number(process.env.PACK_RISK_DRIFT_THRESHOLD ?? 2.0);
-  const minPrecision = Number(process.env.PACK_RISK_MIN_PRECISION ?? 0.4);
+  const threshold = gateEnvNum('PACK_RISK_DRIFT_THRESHOLD', 2.0);
+  const minPrecision = gateEnvNum('PACK_RISK_MIN_PRECISION', 0.4);
 
   // Drift: L2 distance between shadow and the on-disk baseline.
   //
@@ -718,9 +742,15 @@ export function computeGateDecision(_model: LrModel): {
   try {
     const baseline = loadBaselineModelOnly();
     if (baseline === null) {
-      // No on-disk baseline → no meaningful drift to report. Treat as 0
-      // so the gate stays open; precision branch can still fire.
-      driftL2 = 0;
+      // v1.18.0 (F16) — no on-disk baseline means drift is UNKNOWN, not zero.
+      // The old `driftL2 = 0` displayed as a measured no-drift verdict in
+      // /api/models/health while the shadow's actual divergence (the live
+      // system's +0.586 all-bias walk) was structurally invisible — the gate
+      // could never fire on the exact cold-start it was written to catch.
+      // null does not degrade by itself (same gate outcome), but the samples
+      // gate now covers the immature-shadow case, and the health surface
+      // stops asserting a comparison that never happened.
+      driftL2 = null;
     } else {
       const shadow = loadShadowModel();
       let l2sq = 0;
@@ -746,24 +776,48 @@ export function computeGateDecision(_model: LrModel): {
     const families = computeFamilyStats();
     let totalReal = 0;
     let totalDecided = 0;
+    let totalDismiss = 0;
     for (const f of families) {
       const real = f.ack + f.failed;
       const decided = real + f.dismiss;
       totalReal += real;
       totalDecided += decided;
+      totalDismiss += f.dismiss;
     }
-    overallPrecision = totalDecided > 0 ? totalReal / totalDecided : null;
+    // v1.18.0 (F16) — precision is EVIDENCE only when the outcome stream can
+    // express a false positive. The live system's 33 outcomes were 33 batch
+    // 'ack's (median time-to-action 21.9 DAYS) — a UI that only ever produces
+    // acks pins precision at 1.0 forever, which is not a measurement; the
+    // precision gate could structurally never fire. Require a minimum decided
+    // count AND at least one dismissal before the ratio counts. This can never
+    // block a genuine degrade: precision < 0.4 arithmetically requires
+    // dismissals to dominate, so any sub-threshold stream passes the guard.
+    overallPrecision =
+      totalDecided >= PACK_RISK_MIN_DECIDED_OUTCOMES && totalDismiss > 0
+        ? totalReal / totalDecided
+        : null;
   } catch {
     overallPrecision = null;
   }
 
+  // v1.18.0 (F16) — the missing gate: an immature LABELED shadow (too few
+  // training samples) must not reach the composite regardless of drift or
+  // precision. loadModel() prefers the shadow file whenever it exists, so
+  // this is the only check standing between a 13-sample artifact and the
+  // dashboard. Scoped to source 'labeled': the in-code heuristic-distilled
+  // default mirrors the heuristic by construction — sample count is not its
+  // trust axis, and cold-start (no shadow at all) stays ungated as designed.
+  const samplesBad = model.source === 'labeled' && model.samples < PACK_RISK_MIN_TRAINING_SAMPLES;
   const driftBad = driftL2 != null && driftL2 > threshold;
   const precBad = overallPrecision != null && overallPrecision < minPrecision;
-  const degraded = driftBad || precBad;
-  const reason: 'drift' | 'precision' | 'drift+precision' | undefined =
-    driftBad && precBad ? 'drift+precision' : driftBad ? 'drift' : precBad ? 'precision' : undefined;
+  const degraded = samplesBad || driftBad || precBad;
+  // 'samples' dominates the reason: drift/precision verdicts about a model
+  // too immature to serve are secondary detail.
+  const reason: 'samples' | 'drift' | 'precision' | 'drift+precision' | undefined = samplesBad
+    ? 'samples'
+    : driftBad && precBad ? 'drift+precision' : driftBad ? 'drift' : precBad ? 'precision' : undefined;
 
-  return { driftL2, overallPrecision, threshold, minPrecision, degraded, reason };
+  return { driftL2, overallPrecision, threshold, minPrecision, minTrainingSamples: PACK_RISK_MIN_TRAINING_SAMPLES, degraded, reason };
 }
 
 export function computePackRiskV2(
@@ -831,9 +885,19 @@ export function computePackRiskV2(
     // and `pred.contributions` for debug visibility — only the score that
     // feeds the composite is overridden.
     const trainedScore = gate.degraded ? heur.score0to100 : pred.score0to100;
-    const composite = Math.round(
-      (heur.score0to100 + trainedScore + (nov?.novelty0to100 ?? 0)) / 3,
-    );
+    // v1.18.0 (F16) — an immature ML stack ('samples' gate) contributes
+    // NOTHING to the operator-facing composite: not the shadow score (pinned
+    // above) and not the unsupervised novelty either. With the trained track
+    // pinned, mean(heur, heur, novelty) still read 37 'moderate' on a healthy
+    // pack whose novelty=100 came from a 16-sample charge-curve checkpoint —
+    // the exact 4-7× inflation F16 flagged. Both tracks stay fully populated
+    // as diagnostics; only the headline composite (which the dashboard tiers
+    // at ≥25 'moderate' / ≥50 'elevated') is heuristic-only until the model
+    // earns its way in. Mature-model degrades (drift/precision) keep the
+    // pre-existing behavior: trained pinned, novelty still averaged.
+    const composite = gate.reason === 'samples'
+      ? heur.score0to100
+      : Math.round((heur.score0to100 + trainedScore + (nov?.novelty0to100 ?? 0)) / 3);
     packs.push({
       sn: f.sn,
       device: heur.device,
@@ -878,6 +942,7 @@ export function computePackRiskV2(
       overallPrecision: gate.overallPrecision,
       threshold: gate.threshold,
       minPrecision: gate.minPrecision,
+      minTrainingSamples: gate.minTrainingSamples,
       degraded: gate.degraded,
     },
   };
