@@ -753,14 +753,24 @@ export interface ForecastHour {
 export interface HourResponse {
   hour: number;             // 0-23 local hour-of-day
   coeff: number | null;     // learned W of PV per W/m² of GHI; null = insufficient data
-  r2: number;               // fit quality 0-1
+  /** Within-slot Pearson r². DIAGNOSTIC ONLY (v1.20.0, F21): in a low-variance
+   *  climate this is degenerate by construction (near-constant per-slot GHI ⇒
+   *  r²≈0 even for an excellent model) — nothing may gate on it. */
+  r2: number;
   samples: number;
   observedMaxPvW: number;   // historical peak PV at this hour (clipping clamp)
+  /** v1.20.0 (F21) — mean daylight GHI of the slot's samples; feeds the
+   *  peak-coefficient brightness gate here and its frontend mirror. */
+  meanGhiWm2?: number;
 }
 
 export interface SolarResponseModel {
   hourly: HourResponse[];   // length 24
-  peakCoeff: number;        // best (r²/sample-gated) hourly coefficient — diagnostic headline only
+  peakCoeff: number;        // best (brightness/sample-gated, v1.20.0 F21) hourly coefficient — diagnostic headline only
+  /** v1.20.0 (F21) — the effective brightness floor (W/m²) the peak gate used.
+   *  Published so frontend mirrors gate on the SAME threshold instead of
+   *  hardcoding 300 (which would silently diverge if the env knob is ever set). */
+  peakGateMinGhiWm2: number;
   pairCount: number;        // total (GHI, PV) hourly pairs the fit used
   historyDays: number;
 }
@@ -880,6 +890,23 @@ function incompleteForecastTtlMs(): number {
 const TYPICAL_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 const MIN_RESPONSE_PAIRS = 2;   // min daylight (GHI,PV) pairs to fit an hour
 const DAYLIGHT_GHI = 20;        // W/m² — below this is night/near-night
+/* v1.20.0 (engine-review F21) — minimum slot MEAN GHI for the headline peak
+ * coefficient. The v0.41.0 r²≥0.2 gate was a proxy for "don't let a
+ * numerically unstable low-GHI dawn slope win peak", but within-slot Pearson
+ * r² is degenerate BY CONSTRUCTION in a low-variance climate (Phoenix summer
+ * GHI CV is 5-26% per slot, so slot r² reads ~0.00-0.15 while the model's
+ * day-level replay scores r²≈0.94) — the gate could never pass and the fleet
+ * "Peak response" headline rendered a confident 0.0 W per W/m² against an
+ * observed ~8-11. Gate directly on what actually conditions the
+ * through-origin slope: a bright slot (slope noise ∝ 1/ΣGHI²) with enough
+ * samples. 300 W/m² is far above the dawn-instability regime (~25 W/m²) and
+ * below any productive mid-morning slot. NaN/empty-safe env override. */
+const PEAK_RESPONSE_MIN_GHI_WM2 = (() => {
+  const raw = process.env.PEAK_RESPONSE_MIN_GHI_WM2;
+  if (raw == null || raw.trim() === '') return 300;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 300;
+})();
 
 // v0.9.29 — 5-min SQL bucketing on long-window hour-of-day helpers. All
 // three (hourCurve, hourCurveByWeekday, pvHourlyByEpoch) feed per-hour
@@ -1019,7 +1046,7 @@ function pvHourlyByEpoch(
  * Fit the learned solar-response model: pair hourly PV with hourly GHI, group
  * by hour-of-day, fit a through-origin slope (W per W/m²) for each hour.
  */
-function buildSolarResponse(
+export function buildSolarResponse( // exported v1.20.0 for the F21 gate tests
   pvByEpoch: Map<number, number>,
   ghiByEpoch: Map<number, number>,
 ): SolarResponseModel {
@@ -1042,7 +1069,7 @@ function buildSolarResponse(
     const observedMax = g.length ? Math.max(...g.map((p) => p.pv)) : 0;
     const day = g.filter((p) => p.ghi > DAYLIGHT_GHI);
     if (day.length < MIN_RESPONSE_PAIRS) {
-      hourly.push({ hour: h, coeff: null, r2: 0, samples: day.length, observedMaxPvW: Math.round(observedMax) });
+      hourly.push({ hour: h, coeff: null, r2: 0, samples: day.length, observedMaxPvW: Math.round(observedMax), meanGhiWm2: 0 });
       continue;
     }
     // Through-origin least squares: coeff = Σ(pv·ghi) / Σ(ghi²)
@@ -1063,14 +1090,24 @@ function buildSolarResponse(
     }
     // r² is only meaningful with ≥3 points (2 points always fit a line perfectly).
     const r2 = day.length >= 3 && vg > 0 && vp > 0 ? (cov * cov) / (vg * vp) : 0;
-    // v0.41.0 — only a well-fit, multi-sample hour may set the headline peak coeff.
-    // Low-GHI dawn hours produce numerically unstable PV/GHI slopes (e.g. an r²≈0.02,
-    // GHI≈25 W/m² hour falsely winning "peak") that mislabel a south array as east-facing.
-    if (r2 >= 0.2 && day.length >= 3 && coeff > peakCoeff) peakCoeff = coeff;
-    hourly.push({ hour: h, coeff, r2, samples: day.length, observedMaxPvW: Math.round(observedMax) });
+    // v1.20.0 (engine-review F21) — the v0.41.0 r²≥0.2 gate here was a proxy
+    // for "no unstable low-GHI dawn slopes", but within-slot r² tracks the
+    // WEATHER REGIME, not the array: under clear-sky stretches (most of the
+    // year here) day-to-day slot GHI is near-constant, r² degenerates to
+    // ~0-0.15, and the fleet peak read a confident 0.0 against an observed
+    // ~8-11 W per W/m² (the state at engine-review time); monsoon variability
+    // intermittently revives it — a headline that flaps with the sky. Gate on
+    // the slope's actual conditioning instead: a BRIGHT slot with enough
+    // samples. Ground-truthed 2026-07-13 vs the 30d Open-Meteo archive: dawn/
+    // dusk slot means are ≤ ~170 W/m² under either hour-labeling convention
+    // (the inflated hour-6 slope misses the floor ≥2×), midday means are
+    // 337-974, and old/new gates pick the SAME 8.76 peak on live data. r²
+    // stays published as a diagnostic. Mirrored in web ForecastDetail.
+    if (mg >= PEAK_RESPONSE_MIN_GHI_WM2 && day.length >= 3 && coeff > peakCoeff) peakCoeff = coeff;
+    hourly.push({ hour: h, coeff, r2, samples: day.length, observedMaxPvW: Math.round(observedMax), meanGhiWm2: Math.round(mg) });
   }
   const historyDays = maxEpoch > minEpoch ? (maxEpoch - minEpoch) / 24 : 0;
-  return { hourly, peakCoeff, pairCount, historyDays };
+  return { hourly, peakCoeff, peakGateMinGhiWm2: PEAK_RESPONSE_MIN_GHI_WM2, pairCount, historyDays };
 }
 
 /**
@@ -4603,7 +4640,11 @@ export interface ForecastSkillReport {
   windowDays: number;
 }
 
-let forecastSkillCache: { ts: number; value: ForecastSkillReport } | null = null;
+// v1.20.0 (review fix) — keyed by windowDays: /api/confidence computes
+// forecastDayR2 over 30 days while the UI/probabilistic paths stay on the
+// 7-day default; a single slot would silently serve whichever window computed
+// first for up to the TTL.
+const forecastSkillCache = new Map<number, { ts: number; value: ForecastSkillReport }>();
 
 /**
  * v0.13.1 — durable GHI lookup keyed by hour-epoch (ms/3.6e6).
@@ -4881,7 +4922,8 @@ export async function computeForecastSkill(
   forecast: DayForecast | null,
   windowDays = 7,
 ): Promise<ForecastSkillReport> {
-  if (forecastSkillCache && Date.now() - forecastSkillCache.ts < FORECAST_SKILL_TTL_MS) return forecastSkillCache.value;
+  const skillHit = forecastSkillCache.get(windowDays);
+  if (skillHit && Date.now() - skillHit.ts < FORECAST_SKILL_TTL_MS) return skillHit.value;
   const now = Date.now();
   const emptyVal = (): ForecastSkillReport => ({
     generatedAt: now, days: [], meanAbsErrorKwh: null, meanAbsErrorPct: null,
@@ -4998,7 +5040,7 @@ export async function computeForecastSkill(
     biasFactor: totalPred > 0.5 ? round2(totalAct / totalPred) : null,
     windowDays,
   };
-  if (dpus.length > 0) forecastSkillCache = { ts: now, value };
+  if (dpus.length > 0) forecastSkillCache.set(windowDays, { ts: now, value });
   return value;
 }
 
@@ -5184,7 +5226,14 @@ export async function computeAmbientThermalForecast(
 export interface ConfidenceSnapshot {
   generatedAt: number;
   degradationMedianR2: number | null;
-  solarModelMedianR2: number | null;
+  /** v1.20.0 (engine-review F21) — REPLACED the within-slot median r²
+   *  (`solarModelMedianR2`), which was degenerate by construction in a
+   *  low-variance climate: it read 0.02 while the same model's day-level
+   *  replay scored r²≈0.94, telling the operator a healthy forecast explains
+   *  2% of variance. This is the honest headline: Pearson r² of predicted vs
+   *  actual daily PV kWh across the skill report's covered days (≥5 days
+   *  required, else null). */
+  forecastDayR2: number | null;
   thermalMedianR2: number | null;
   forecastSkillBiasFactor: number | null;
   forecastSkillMaePct: number | null;
@@ -5192,21 +5241,38 @@ export interface ConfidenceSnapshot {
 
 export function computeConfidenceSnapshot(
   degradation: FleetDegradation,
-  forecast: DayForecast | null,
   thermal: AmbientThermalReport,
   skill: ForecastSkillReport,
 ): ConfidenceSnapshot {
   const degR2s = degradation.packs
     .map((p) => p.r2)
     .filter((r): r is number => r != null);
-  const solarR2s = forecast
-    ? forecast.solarModel.hourly.map((h) => h.r2).filter((r) => r > 0)
-    : [];
+  // v1.20.0 (F21) — day-level replay skill from days the hindcast could
+  // actually score: weather-covered and not telemetry-gapped (errorPct null
+  // marks the v1.10 coverage exclusion). The caller must supply a 30-DAY
+  // skill report (review fix): the r²≈0.94 that motivated this metric was
+  // measured over 30 days spanning weather regimes — a 7-day window of
+  // near-identical clear-sky days gives 5-7 low-variance points whose r² is
+  // noise/quantization-dominated, the same regime-tracking dishonesty this
+  // field replaced.
+  const scored = skill.days.filter((d) => d.weatherCovered && d.errorPct != null);
+  let forecastDayR2: number | null = null;
+  if (scored.length >= 5) {
+    const mx = mean(scored.map((d) => d.predictedKwh));
+    const my = mean(scored.map((d) => d.actualKwh));
+    let cov = 0, vx = 0, vy = 0;
+    for (const d of scored) {
+      cov += (d.predictedKwh - mx) * (d.actualKwh - my);
+      vx += (d.predictedKwh - mx) ** 2;
+      vy += (d.actualKwh - my) ** 2;
+    }
+    forecastDayR2 = vx > 0 && vy > 0 ? round2((cov * cov) / (vx * vy)) : null;
+  }
   const thermalR2s = thermal.packs.map((p) => p.r2).filter((r): r is number => r != null);
   return {
     generatedAt: Date.now(),
     degradationMedianR2: degR2s.length ? round2(median(degR2s)) : null,
-    solarModelMedianR2: solarR2s.length ? round2(median(solarR2s)) : null,
+    forecastDayR2,
     thermalMedianR2: thermalR2s.length ? round2(median(thermalR2s)) : null,
     forecastSkillBiasFactor: skill.biasFactor,
     forecastSkillMaePct: skill.meanAbsErrorPct,
@@ -8348,7 +8414,7 @@ export function resetForecastCachesForTesting(): void {
   dayForecastCache = null; // v0.57.0 — was missing; needed to force a cold first compute when testing the structural-incompleteness latch gate
   probabilisticCache = null;
   multiDayCache = null;
-  forecastSkillCache = null;
+  forecastSkillCache.clear();
   bayesCache = null;
   ambientThermalCache = null;
   dispatchCache = null;

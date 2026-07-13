@@ -90,9 +90,14 @@ export function SolarResponseCard() {
   let peakHour: number | null = null;
   let minSamples = Infinity;
   if (fleet) {
+    // v1.20.0 (review fix) — argmax over GATED rows only, mirroring the backend
+    // peakCoeff brightness/sample gate (threshold published as peakGateMinGhiWm2).
+    // The raw argmax would name the inflated ~19 W-per-W/m² dawn slope "Strongest
+    // hour" right beside the gated "Peak response 8.8 W" tile.
+    const minGhi = fleet.peakGateMinGhiWm2 ?? 300;
     let best = -1;
     for (const hr of fleet.hourly) {
-      if (hr.coeff != null && hr.coeff > best) {
+      if (hr.coeff != null && (hr.meanGhiWm2 ?? 0) >= minGhi && hr.samples >= 3 && hr.coeff > best) {
         best = hr.coeff;
         peakHour = hr.hour;
       }

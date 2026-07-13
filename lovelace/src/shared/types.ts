@@ -223,11 +223,15 @@ export interface HourResponse {
   r2: number;
   samples: number;
   observedMaxPvW: number;
+  /** v1.20.0 (F21) — slot mean daylight GHI; feeds the peak-coefficient brightness gate. */
+  meanGhiWm2?: number;
 }
 
 export interface SolarResponseModel {
   hourly: HourResponse[];
   peakCoeff: number;
+  /** v1.20.0 (F21) — the brightness floor (W/m²) the backend peak gate used. */
+  peakGateMinGhiWm2?: number;
   pairCount: number;
   historyDays: number;
 }
@@ -591,7 +595,8 @@ export interface AmbientThermalReport {
 export interface ConfidenceSnapshot {
   generatedAt: number;
   degradationMedianR2: number | null;
-  solarModelMedianR2: number | null;
+  /** v1.20.0 (F21) — day-level replay r² (replaces the degenerate within-slot median). */
+  forecastDayR2: number | null;
   thermalMedianR2: number | null;
   forecastSkillBiasFactor: number | null;
   forecastSkillMaePct: number | null;

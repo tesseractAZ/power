@@ -756,13 +756,17 @@ app.get('/api/ambient-thermal-forecast', async (req, reply) =>
 );
 
 app.get('/api/confidence', async (req, reply) => {
-  const [fc, deg, thermal, skill] = await Promise.all([
-    analytics.report('forecast'),
+  // v1.20.0 (review fix) — forecastDayR2 needs the 30-DAY skill window (the
+  // basis its r²≈0.94 premise was validated on); the default 7-day report
+  // stays untouched for /api/forecast-skill and the probabilistic band.
+  // (Also dropped the dead report('forecast') fetch — computeConfidenceSnapshot
+  // never read it.)
+  const [deg, thermal, skill] = await Promise.all([
     analytics.report('degradation'),
     analytics.report('ambientThermal'),
-    analytics.report('forecastSkill'),
+    analytics.report('forecastSkill', { days: 30 }),
   ]);
-  return cached(req, reply, computeConfidenceSnapshot(deg, fc, thermal, skill), 60);
+  return cached(req, reply, computeConfidenceSnapshot(deg, thermal, skill), 60);
 });
 
 app.get('/api/nws-alerts', async (req, reply) =>

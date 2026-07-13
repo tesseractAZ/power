@@ -24,14 +24,16 @@ function tsHour(ts: number): string {
   return fmtHour(new Date(ts).getHours());
 }
 
-/** Hour-of-day with the strongest WELL-FIT learned response coefficient. */
+/** Hour-of-day with the strongest GATED (bright, sampled) learned response coefficient. */
 function peakResponse(m: SolarResponseModel): HourResponse | null {
   let best: HourResponse | null = null;
   for (const h of m.hourly) {
-    // v0.41.0 — gate on fit quality + sample count (mirrors the backend peakCoeff gate).
-    // Low-GHI dawn hours yield numerically unstable PV/GHI slopes that otherwise falsely
-    // win "peak" and mislabel a south-facing array as east-facing.
-    if (h.coeff == null || h.r2 < 0.2 || h.samples < 3) continue;
+    // v1.20.0 (F21) — mirrors the backend peakCoeff BRIGHTNESS gate, reading
+    // the threshold the backend actually used (published as peakGateMinGhiWm2;
+    // 300 fallback for pre-v1.20 payloads). Within-slot r² is degenerate in a
+    // low-variance climate; the slope's real conditioning is slot brightness +
+    // samples. Dawn instability (~150 W/m² at 6 AM here) fails the floor.
+    if (h.coeff == null || (h.meanGhiWm2 ?? 0) < (m.peakGateMinGhiWm2 ?? 300) || h.samples < 3) continue;
     if (!best || h.coeff > (best.coeff ?? -1)) best = h;
   }
   return best;
@@ -223,9 +225,10 @@ function ModelCard({ fc }: { fc: DayForecast }) {
           <>
             Fit from {m.pairCount} hourly (GHI, PV) pairs over {m.historyDays.toFixed(1)} days · peak{' '}
             {/* v0.41.0 (Copilot follow-up) — render the GATED peak (fleetPeak = peakResponse(m),
-                r²/sample-gated) not raw m.peakCoeff: the backend gate can legitimately leave
-                peakCoeff at 0 on thin early history while the table still shows raw coefficients,
-                which would make a "0.0 W per W/m²" headline contradict the rows below it. */}
+                brightness/sample-gated since v1.20.0) not raw m.peakCoeff: the backend gate can
+                legitimately leave peakCoeff at 0 on thin early history while the table still shows
+                raw coefficients, which would make a "0.0 W per W/m²" headline contradict the rows
+                below it. */}
             {fleetPeak ? `${fleetPeak.coeff!.toFixed(1)} W per W/m²` : 'still calibrating'}.
           </>
         }
@@ -264,7 +267,7 @@ function ModelCard({ fc }: { fc: DayForecast }) {
               </thead>
               <tbody>
                 {daylight.map((h) => (
-                  <CoeffRow key={h.hour} h={h} peak={m.peakCoeff} />
+                  <CoeffRow key={h.hour} h={h} peakHour={fleetPeak?.hour ?? null} />
                 ))}
               </tbody>
             </table>
@@ -292,8 +295,14 @@ function ModelCard({ fc }: { fc: DayForecast }) {
   );
 }
 
-function CoeffRow({ h, peak }: { h: HourResponse; peak: number }) {
-  const isPeak = h.coeff != null && peak > 0 && h.coeff >= peak - 0.001;
+// v1.20.0 (review fix) — badge by IDENTITY with the gated winner, not by raw-coefficient
+// comparison against m.peakCoeff. The old `coeff >= peak - 0.001` predicate was dormant while
+// peakCoeff was 0; once the F21 gate un-starves the headline it would badge any UNGATED row
+// whose raw slope exceeds the gated peak — on this fleet, the inflated 6 AM dawn slope
+// (~19 W per W/m² at ~150 W/m² mean GHI) — re-displaying the exact orientation mislabel the
+// gate exists to prevent, right beside a takeaway naming a different peak.
+function CoeffRow({ h, peakHour }: { h: HourResponse; peakHour: number | null }) {
+  const isPeak = peakHour != null && h.hour === peakHour;
   return (
     <tr className="border-t border-line/50">
       <td className="py-1 pr-4 text-ink font-medium">{fmtHour(h.hour)}</td>
@@ -314,16 +323,16 @@ function DeviceInference({ dm }: { dm: DeviceSolarModel }) {
   const lv = peakResponse(dm.lv);
   if (!whole && !hv && !lv) {
     // v0.41.0 (Copilot follow-up) — peakResponse() now returns null both when there's no
-    // PV at all AND when PV exists but no hour clears the r²/sample fit gate. Don't claim
-    // "No recorded PV" in the latter case: productionCentroidHour() keys off observedMaxPvW
-    // (raw production, fit-independent), so it tells the two apart truthfully.
+    // PV at all AND when PV exists but no hour clears the brightness/sample gate (v1.20.0).
+    // Don't claim "No recorded PV" in the latter case: productionCentroidHour() keys off
+    // observedMaxPvW (raw production, fit-independent), so it tells the two apart truthfully.
     const hasPv = productionCentroidHour(dm.model) != null;
     return (
       <Inference
         label={dm.device}
         detail={
           hasPv
-            ? 'PV recorded, but the GHI→PV response is still calibrating — not enough well-fit hours to infer orientation yet.'
+            ? 'PV recorded, but the GHI→PV response is still calibrating — not enough bright, well-sampled hours to infer orientation yet.'
             : "No recorded PV — offline gaps or an unwired spare; orientation can't be inferred yet."
         }
         muted

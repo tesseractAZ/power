@@ -665,8 +665,8 @@ export class EcoflowInsightsCard extends EcoflowCardBase {
             value=${c.degradationMedianR2 != null ? c.degradationMedianR2.toFixed(2) : '—'}
           ></ef-tile>
           <ef-tile
-            label="Solar model R²"
-            value=${c.solarModelMedianR2 != null ? c.solarModelMedianR2.toFixed(2) : '—'}
+            label="Forecast day R²"
+            value=${c.forecastDayR2 != null ? c.forecastDayR2.toFixed(2) : '—'}
           ></ef-tile>
           <ef-tile
             label="Thermal R²"
