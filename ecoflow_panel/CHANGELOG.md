@@ -1,3 +1,76 @@
+## v1.19.0 — engine-review F20+F17: the learning loop gets honest inputs
+
+Two findings about what the ML feedback loop actually trains on — directly downstream of
+v1.18.0's samples gate, which now waits for 100 real labeled outcomes: those outcomes are only
+worth waiting for if the features attached to them are true.
+
+**F20 — feature snapshots stop being frozen at first-ever fire.** `captureSnapshot` deduped by
+alertId against a cache hydrated from the ENTIRE history file at boot, and the only eviction
+path was outcome submission (33 times ever) — so on a fleet whose alert traffic is ~44 recurring
+alertIds, "the feature vector as it was at fire time" was actually the alert's FIRST-EVER fire,
+potentially weeks stale. 216 rises over 28 hours wrote zero snapshots; outcome records embedded
+features up to 618 hours older than the fire they labeled. The monitor invokes capture exactly
+once per RISE, so every rise now captures fresh features; a 60-second same-rise guard (absolute
+delta — NTP steps on this host must not wedge it) absorbs double-invocation, and the history
+file compacts at boot past 512 KB down to the LRU-retained 500 entries so per-rise persistence
+stays bounded on disk and at boot.
+
+**F17 — coulombic efficiency stops publishing counter noise as "early cell aging".** The BMS
+lifetime counters on this hardware are systematically unphysical: over 30 days every one of the
+15 home packs shows discharged/charged ABOVE 100% (101.2–107.0% — impossible), with weekly
+windows swinging 96.5–122%. The old [90, 100.5] acceptance band dropped the recognized-artifact
+high tail but kept the identical artifact's LOW tail as a measurement — publishing CE 93–95%
+that the pack-risk heuristic saturated to max risk with "side-reactions consuming charge — early
+cell aging" on month-old healthy packs (and it was the TOP feature importance in the v2 trained
+model). The estimator now self-validates: the 7-day reading publishes only when the FULL
+degradation window's own ratio sits inside the same physical band (counters proven trustworthy)
+AND the 7-day and long-run ratios agree within 2 pp (real CE moves slowly; the entire downstream
+discriminating span is 2 pp, so a bigger divergence is window noise, not chemistry). Extracted
+to a pure, tested `coulombicEfficiencyFromCounters`.
+
+**Expected live effect (BY DESIGN, not a regression): all 15 packs' coulombic efficiency reads
+null** — their counters are demonstrably unphysical, and an honest unknown beats a fabricated
+risk factor. The dashboard tile shows —, the "early cell aging" text disappears from pack-risk
+factors, and heuristic scores drop slightly as the saturated ceNorm contribution goes neutral.
+A genuinely degrading pack remains covered by SoH fade, cell-imbalance, internal-R, and the
+absolute thermal engines.
+
+**Boundary-point counter fetch (operator-directed perf fix).** The CE estimator's full-window
+self-validation initially materialized the raw 30-day counter window (~28k rows per pack,
+~150 ms of Pi event-loop stall per pack per degradation pass) even though the pure function
+reads only the first/last point of the window and of the 7-day tail. A new
+`Recorder.queryFirstLast` (two LIMIT-1 index seeks, implemented in both the main and worker
+recorders) plus a pure `mergeCounterEdges` now feed the estimator CE-equivalent input from four
+points per metric. Equivalence proven by a 500-trial randomized property test, a real-recorder
+edge test, and a dev-DB probe: identical published CE (values and nulls) on all 20 pack pairs,
+41,158 raw rows avoided, 23 ms → 1.5 ms on the dev machine.
+
+**Pre-merge adversarial review (23-agent workflow: 2 find-lenses → 2-skeptic verify panels →
+worktree mutation testing), all confirmed findings fixed before ship:**
+- *Short-history vacuous gates* — with ≤7 days of counter history the tail IS the full window,
+  so both new gates degenerate into the plain clamp: a fresh series (recorder reset, packSn
+  re-key, new pack) would have republished the artifact's low tail as "early cell aging" for its
+  first week. A span floor (≥2 tail windows = 14 days) now applies before ANY value publishes —
+  the estimator earns trust as history accumulates.
+- *Clock-step capture wedge* — the same-rise guard's signed delta would have read any BACKWARD
+  NTP step (this host's daily reality) as "same rise" and suppressed captures until wall-clock
+  re-passed the stale timestamp; the absolute delta ships instead.
+- *Non-atomic compaction* — the boot rewrite of the ONLY copy of the snapshot history now uses
+  the house temp+rename pattern; a mid-write power loss can no longer destroy it.
+- *Hydration recency* — duplicate alertIds are the norm in the per-rise file, and a plain
+  Map.set left keys at FIRST-appearance position, so boot trim would have evicted the hottest
+  recurring alerts first; hydration now delete-before-sets (recency = last appearance).
+- *Boundary-fetch perf* (operator-directed, above) and the stale PERSISTENT_FAMILIES rationale
+  in alertOutcomes were confirmed by the review as already fixed/documented in this branch.
+- *Mutation testing 6/10 killed initially* — the four survivors all have killing tests now: the
+  sanity gate proven load-bearing ALONE (a fixture where consistency passes but the long-window
+  ratio is unphysical — the headline artifact test was being rescued by the consistency gate),
+  the inclusive 7-day tail boundary, the full-window throughput floor on a thin busy-tail
+  history, and LRU recency-refresh under cap eviction (a hot recurring alert must survive;
+  without delete-before-set it was the FIRST evicted).
+
++16 regression tests (suite 1406 → 1422); tsc + full suite green.
+
 ## v1.18.0 — engine-review F16: pack-risk v2 stops serving a 13-sample artifact to the dashboard
 
 The HA dashboard's pack-risk composite blended a shadow logistic-regression model trained on
