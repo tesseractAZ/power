@@ -136,6 +136,41 @@ export function activeSocBand(socPct: number | null | undefined): SocThreshold |
 }
 
 /**
+ * v1.17.0 (engine-review F15) — the on-screen band with the audible ladder's
+ * 2% re-arm margin. Pure banding had zero hysteresis: SoC oscillating 40↔41
+ * toggled backup-soc-40 on/off every sample — 399 on-screen rises in 30 days
+ * against only ~115 hysteresis-qualified real downward crossings (replay of
+ * the ladder's own re-arm rules over the same data), a 3.5× churn multiplier
+ * polluting cleared-history and the telemetry that trains the auto-silencer.
+ *
+ * Semantics track the audible ladder's re-arm margin, with one deliberate
+ * boundary difference:
+ *  - a DEEPER crossing takes effect immediately (never delays escalation);
+ *  - the held band clears/ascends only once SoC has climbed ABOVE
+ *    band + REARM_MARGIN_PCT. The ladder re-arms AT band + margin (`>=`,
+ *    line ~334); the screen holds one point longer (`<=`) because integer
+ *    telemetry pins at exact values for hours and display-side favors
+ *    hold-stability — the ladder's re-arm is a silent internal flip, so the
+ *    boundary point produces no operator-visible divergence;
+ *  - a null/non-finite SoC drops the band (no fabricated hold).
+ *
+ * Pure: the caller (alerts.ts) owns the held-band state and passes the
+ * previous result's pct back in.
+ */
+export function activeSocBandWithHysteresis(
+  socPct: number | null | undefined,
+  prevBandPct: number | null,
+): SocThreshold | null {
+  const raw = activeSocBand(socPct);
+  if (prevBandPct == null || socPct == null || !Number.isFinite(socPct)) return raw;
+  if (raw != null && raw.pct < prevBandPct) return raw; // deeper crossing — escalate now
+  if (socPct <= prevBandPct + REARM_MARGIN_PCT) {
+    return BATTERY_SOC_THRESHOLDS.find((t) => t.pct === prevBandPct) ?? raw;
+  }
+  return raw;
+}
+
+/**
  * The (severity, source, priority) to stamp on the on-screen alert so that the
  * web/TUI's priorityOf() derives the SAME ISA priority as the audible alarm —
  * giving all four tiers (Low/Medium/High/Critical) from this one alert.
