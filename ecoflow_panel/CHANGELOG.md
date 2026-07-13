@@ -1,3 +1,32 @@
+## v1.21.0 — engine-review F28: cell-imbalance churn at the 20 mV line
+
+Two residual cry-wolf sources in the cell-imbalance families. Both were already auto-demoted
+or silenced on the push channel by earlier work — this release stops the dashboard/cleared-log
+churn itself. Neither change can delay or suppress a fire.
+
+**`vdiff-warn` gets rise-side hysteresis.** The 20 mV warning line had none: threshold-kissing
+19–22 mV spreads fired the alert on every touch — in the 30-day ground truth, 73–100% of this
+family's rises cleared within minutes. The v0.77 resolve dwell only holds the *resolve* push;
+it cannot stop the re-fire on the next kiss. The warning now **fires at ≥ 24 mV** (clear of the
+observed kissing band) and, once fired, **holds while the spread is still ≥ 20 mV** — so a real
+episode doesn't flap on the way down, and a spread descending out of critical keeps its warning
+through the 20–49 mV band instead of vanishing. A data gap or offline device resets the episode
+(the hold must re-earn its rise), the balancing/plateau annunciation gates compose unchanged,
+and the critical thresholds (50 mV, 90 mV on-plateau) are untouched — a real fault still fires
+instantly.
+
+**`peer-voldiff` joins the resolve-dwell family.** 100% of its 30-day rises short-cleared
+*despite* the v0.13.2 three-consecutive-cycle rise gate: the outlier persists the ~60 s it takes
+to emit, then drops back under the floor minutes later — a rise gate can't absorb that shape;
+only holding the resolve can. It now gets the same 3-minute resolve-side dwell as
+`vdiff-warn`/`vdiff-crit` (resolve-only; fires are never delayed). The other peer families are
+untouched — peer-temp was fixed at the floor (v1.17) and peer-soc at v0.13.2's floor raise.
+
+9 new regression tests (suite 1441) pin: no fire in the 20–23 mV kiss band, fire-at-24 +
+hold-through-21 + clear-below-20 + re-earn, crit-descent hold, data-gap and device-absence
+episode resets, per-pack hold isolation, balancing-gate composition on a held alert, and the
+dwell family membership (peer-voldiff in; peer-temp/soc/soh out).
+
 ## v1.20.0 — engine-review F21: solar-model metrics that mean something
 
 Two published solar-model quality numbers were degenerate by construction in this climate, and

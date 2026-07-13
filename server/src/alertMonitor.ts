@@ -148,10 +148,18 @@ const VDIFF_RESOLVE_DWELL_MS = Number(process.env.VDIFF_RESOLVE_DWELL_MS ?? 3 * 
 /**
  * v0.77.0 — does this alert belong to the per-pack cell-imbalance family that gets
  * the resolve-side dwell? Matches `vdiff-warn-<sn>-<pack>` / `vdiff-crit-<sn>-<pack>`.
+ * v1.21.0 (engine-review F28) — `peer-voldiff-<sn>-<pack>` joins the family: in the
+ * 30-day ground truth 100% of its rises short-cleared despite the v0.13.2
+ * 3-consecutive-cycle RISE gate (the outlier persists the ~60 s it takes to emit,
+ * then drops back under the floor minutes later — a rise gate can't absorb that;
+ * only holding the RESOLVE can). Same semantics: never delays or suppresses a
+ * fire, only the "Resolved:" push. The other peer families are untouched —
+ * peer-temp was fixed at the floor (v1.17 F18) and peer-soc at v0.13.2's floor
+ * raise; neither showed residual churn in the review.
  * Pure + exported for tests.
  */
 export function isCellImbalanceResolveDwellFamily(alert: Pick<Alert, 'id'>): boolean {
-  return /^vdiff-(warn|crit)-/.test(alert.id);
+  return /^(vdiff-(warn|crit)|peer-voldiff)-/.test(alert.id);
 }
 
 /* v1.17.0 (engine-review F13) — resolve-side dwell for the forecast-soc-dip
