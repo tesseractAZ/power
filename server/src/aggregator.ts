@@ -43,6 +43,11 @@ export interface IntegrationResult {
   samples: number;        // sample points used
 }
 
+/** v1.14.0 (review F9 sibling) — fetch lower-bound widening so integrateWh
+ *  receives the pre-window boundary sample and its (real-gap-conditioned)
+ *  head-hold can recover the head segment. == integrateWh's default maxGapMs. */
+export const INTEGRATE_HEAD_LOOKBACK_MS = 10 * 60 * 1000;
+
 export function integrateWh(
   points: Array<{ ts: number; value: number }>,
   sinceMs: number,
@@ -57,7 +62,22 @@ export function integrateWh(
   const inWindow = points.filter((p) => p.ts >= sinceMs && p.ts <= untilMs);
   const lastBefore = points.filter((p) => p.ts < sinceMs).pop();
   const series: Array<{ ts: number; value: number }> = [];
-  if (lastBefore && sinceMs - lastBefore.ts <= maxGapMs) {
+  // v1.14.0 (review of F9) — the head-hold must be conditioned on the REAL
+  // inter-sample gap (first in-window sample − boundary sample), not on the
+  // distance to the window edge. The old `sinceMs - lastBefore.ts <= maxGapMs`
+  // check let a caller whose window boundaries chop a real >maxGap coverage loss
+  // into <=maxGap pieces (the 5-min lifetime-rollup watermark does exactly this)
+  // integrate ENTIRE windows at held power during a telemetry stall: with no
+  // in-window samples the head-hold + tail-hold synthesized both endpoints and
+  // the per-segment gap check below never saw the true gap — fabricating
+  // ~10 min × last-known W into total_increasing counters per stall, and
+  // bridging >maxGap gaps that straddle a window boundary. Requiring a real
+  // in-window sample within maxGap of the boundary restores the documented
+  // contract exactly: an empty window contributes 0 (as it did before the
+  // boundary sample was fetched at all), and a real gap > maxGap is never
+  // extrapolated no matter where a window boundary lands inside it. When the
+  // condition holds, `sinceMs - lastBefore.ts <= maxGapMs` is implied.
+  if (lastBefore && inWindow.length > 0 && inWindow[0].ts - lastBefore.ts <= maxGapMs) {
     series.push({ ts: sinceMs, value: lastBefore.value });
   }
   for (const p of inWindow) series.push(p);
@@ -155,11 +175,14 @@ export function circuitHistoryByDay(
     const dayStart = todayStart - i * ONE_DAY;
     const dayEndFull = dayStart + ONE_DAY;
     const dayEnd = i === 0 ? now : dayEndFull;
-    const pts = recorder.query(sn, seriesMetric, dayStart, dayEnd);
+    // v1.14.0 (F9 sibling) — include the pre-window boundary sample so the day's
+    // head segment isn't dropped (integrateWh clips to [dayStart, dayEnd]).
+    const pts = recorder.query(sn, seriesMetric, dayStart - INTEGRATE_HEAD_LOOKBACK_MS, dayEnd);
     const integ = integrateWh(pts, dayStart, dayEnd);
     let peakW = 0;
     let peakAtMs: number | null = null;
     for (const p of pts) {
+      if (p.ts < dayStart) continue; // pre-window boundary sample belongs to yesterday's peak
       if (p.value > peakW) {
         peakW = p.value;
         peakAtMs = p.ts;
@@ -237,7 +260,9 @@ export function computeTotals(
     const metrics: Record<string, IntegrationResult> = {};
 
     const ingest = (metric: string) => {
-      const pts = recorder.query(d.sn, metric, sinceMs, untilMs);
+      // v1.14.0 (F9 sibling) — widen the fetch so the head segment is recovered;
+      // integrateWh still integrates only [sinceMs, untilMs].
+      const pts = recorder.query(d.sn, metric, sinceMs - INTEGRATE_HEAD_LOOKBACK_MS, untilMs);
       const r = integrateWh(pts, sinceMs, untilMs);
       metrics[metric] = r;
       if (r.totalMs > 0) {

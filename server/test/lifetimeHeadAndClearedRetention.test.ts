@@ -25,12 +25,13 @@ const HOUR = 3_600_000;
 test('integrateWh — a pre-window boundary sample recovers the dropped head segment', () => {
   const since = 10 * HOUR;
   const until = since + HOUR;
-  // Steady 1000 W, sampled every 5 min. The first IN-WINDOW sample lands 9 min
+  // Steady 1000 W, sampled every 5 min. The first IN-WINDOW sample lands 7 min
   // into the window; a boundary sample sits 2 min before `since` (the one the OLD
-  // `ts >= since` query never fetched). Dense enough that every interval is ≤ the
-  // 10-min maxGap, so ONLY the head [since → since+9min] differs.
+  // `ts >= since` query never fetched). The REAL inter-sample gap (boundary →
+  // first in-window) is 9 min ≤ the 10-min maxGap, so the head-hold legitimately
+  // bridges it (v1.14.0 conditions the hold on this real gap, not the window edge).
   const inWindow: Array<{ ts: number; value: number }> = [];
-  for (let t = since + 9 * 60_000; t <= until; t += 5 * 60_000) inWindow.push({ ts: t, value: 1000 });
+  for (let t = since + 7 * 60_000; t <= until; t += 5 * 60_000) inWindow.push({ ts: t, value: 1000 });
   const withBoundary = [{ ts: since - 2 * 60_000, value: 1000 }, ...inWindow];
   const withoutBoundary = inWindow.slice(); // what the buggy query returned
 
@@ -38,11 +39,11 @@ test('integrateWh — a pre-window boundary sample recovers the dropped head seg
   const truncated = integrateWh(withoutBoundary, since, until).wh;
 
   // With the boundary sample, the value is held from `since`, so the whole hour
-  // integrates to ~1000 Wh. Without it, the head [since → since+9min] is lost →
-  // ~1000 × (51/60) ≈ 850 Wh. The ~9-min head recovered per window compounds
-  // across thousands of 5-min rollups into the observed 13-18% under-count.
+  // integrates to ~1000 Wh. Without it, the head [since → since+7min] is lost →
+  // ~1000 × (53/60) ≈ 883 Wh. The head recovered per window compounds across
+  // thousands of 5-min rollups into the observed 13-18% under-count.
   assert.ok(Math.abs(full - 1000) < 1, `full-window integral ≈ 1000 Wh (got ${full.toFixed(1)})`);
-  assert.ok(truncated < 870 && truncated > 830, `head-dropped integral is short by the 9-min head (got ${truncated.toFixed(1)})`);
+  assert.ok(truncated < 900 && truncated > 865, `head-dropped integral is short by the 7-min head (got ${truncated.toFixed(1)})`);
   assert.ok(full - truncated > 100, `the recovered head segment (Δ=${(full - truncated).toFixed(1)} Wh) is real, non-zero energy`);
 });
 
@@ -86,11 +87,15 @@ test('pruneOldestNonSignificant — evicts the NEWER info before an OLDER critic
   assert.deepEqual(log.map((c) => c.alert.severity), ['critical'], 'the info is dropped even though it is newer than the critical');
 });
 
-test('pruneOldestNonSignificant — only when ALL are significant does it drop the oldest overall', () => {
+test('pruneOldestNonSignificant — v1.14.0 tiering: a warning evicts before ANY critical', () => {
+  // v1.12.0 dropped the oldest overall here (the critical@10) — the review showed
+  // that under warning-severity churn this degraded back to FIFO and amputated
+  // criticals. The tiered eviction takes the warning first.
   const log: ClearedAlert[] = [cleared('critical', 30), cleared('warning', 20), cleared('critical', 10)];
   pruneOldestNonSignificant(log);
   assert.equal(log.length, 2);
-  assert.ok(!log.some((c) => c.clearedAt === 10), 'oldest significant dropped as a last resort');
+  assert.ok(!log.some((c) => c.alert.severity === 'warning'), 'the warning is evicted, both criticals survive');
+  assert.ok(log.some((c) => c.clearedAt === 10), 'the oldest critical is protected');
 });
 
 test('pruneOldestNonSignificant — 90/day noise never evicts a lone critical', () => {

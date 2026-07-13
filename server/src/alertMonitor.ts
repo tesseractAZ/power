@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
-import { computeAlerts, outageAlerts, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
@@ -69,13 +69,10 @@ const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
 // operator is flagged when the alarm went dark and can watch the trend after a
 // UPS/power fix. Defaults: alert on any recorded gap (≥ the recorder's own 15-min
 // floor), keep each visible for 24 h, then it ages off (event — no resolve push).
-const OUTAGE_ALERTS_ENABLED = (process.env.SYSTEM_OUTAGE_ALERT_ENABLED ?? 'true') !== 'false';
-const OUTAGE_RECENT_WINDOW_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_RECENT_WINDOW_H ?? 24)) * 3_600_000;
-const OUTAGE_MIN_DURATION_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_MIN_MINUTES ?? 15)) * 60_000;
-// v1.13.0 (review F10) — restart-spanning outages (the alarm was genuinely DOWN)
-// surface at a lower floor than in-process cloud stalls; 5 min matches the
-// recorder's RESTART_GAP_FLOOR_MS so every ledgered restart gap also alerts.
-const OUTAGE_RESTART_MIN_DURATION_MS = Math.max(0, Number(process.env.SYSTEM_OUTAGE_RESTART_MIN_MINUTES ?? 5)) * 60_000;
+// v1.14.0 — resolved through the exported, unit-tested resolveOutageAlertOptions
+// (alerts.ts): NaN-safe env parsing, and dropping the v1.13.0 restart floor from
+// the options now fails a test instead of silently regressing to pre-F10 alerting.
+const OUTAGE_ALERT_OPTS = resolveOutageAlertOptions(process.env);
 
 // v0.38.0 — sustained-duration gate for the per-circuit load-anomaly family
 // ("<Circuit> load unusual for the hour"). The detector already requires the
@@ -257,6 +254,12 @@ interface TrackedAlert {
    *  critical when the grid drops out at the reserve floor) re-notifies instead
    *  of being silently swallowed by an already-true `notified`. */
   notifiedSeverity?: Severity;
+  /** v1.14.0 (review of F19) — the MOST SEVERE severity this alert reached while
+   *  active. The cleared-alert record previously carried the FINAL tick's
+   *  severity, so shp2-below-reserve (critical during a grid outage, info once
+   *  the grid restored, then clears) was persisted as 'info' and evicted before
+   *  sensor noise — the forensic record of a critical event, gone first. */
+  peakSeverity?: Severity;
   /** v0.38.0 — first eval tick at which this alert went absent, for the
    *  resolve-dwell gate on the sustained load-anomaly family. The tracked
    *  entry is held (not resolved) until it has been continuously absent for
@@ -291,14 +294,32 @@ export interface ClearedAlert {
   durationMs: number;
 }
 
-/** v1.12.0 (review F19) — evict ONE entry from a newest-first cleared-alert log,
- *  preferring the oldest info-severity (learned-noise) record; only when nothing
- *  but warning/critical remains does it drop the oldest overall. Mutates in place.
- *  Pure + exported for tests. Keeps the significant forensic record from being
- *  amputated by high-volume noise families. */
-export function pruneOldestNonSignificant(logArr: ClearedAlert[]): void {
+/** v1.12.0 (review F19) — evict ONE entry from a newest-first cleared-alert log.
+ *
+ *  v1.14.0 (review of F19) — TIERED eviction. The v1.12.0 version only protected
+ *  against INFO churn: once the log was majority warning-severity noise (the
+ *  chronic families auto-tune demotes are emitted at SOURCE severity 'warning',
+ *  which is what the cleared record carries), it fell through to plain FIFO and
+ *  the oldest genuine critical was amputated anyway. Order now: oldest info →
+ *  oldest noise-flagged warning (via the optional `isNoise` predicate, wired to
+ *  the auto-tune family flags) → oldest warning → oldest overall. A CRITICAL can
+ *  only be evicted when the entire log is criticals. Mutates in place; pure +
+ *  exported for tests. */
+export function pruneOldestNonSignificant(
+  logArr: ClearedAlert[],
+  isNoise?: (e: ClearedAlert) => boolean,
+): void {
+  const sev = (i: number) => logArr[i].alert?.severity ?? 'info';
   for (let i = logArr.length - 1; i >= 0; i--) {
-    if ((logArr[i].alert?.severity ?? 'info') === 'info') { logArr.splice(i, 1); return; }
+    if (sev(i) === 'info') { logArr.splice(i, 1); return; }
+  }
+  if (isNoise) {
+    for (let i = logArr.length - 1; i >= 0; i--) {
+      if (sev(i) === 'warning' && isNoise(logArr[i])) { logArr.splice(i, 1); return; }
+    }
+  }
+  for (let i = logArr.length - 1; i >= 0; i--) {
+    if (sev(i) === 'warning') { logArr.splice(i, 1); return; }
   }
   logArr.pop();
 }
@@ -863,8 +884,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   // in 30 days. Raised the cap AND made eviction severity-aware (below): the
   // operator's only persisted "what fired and cleared" record must not be amputated
   // by the same noise the auto-silencer merely mutes from push.
-  const CLEARED_LOG_MAX = Math.max(50, Number(process.env.CLEARED_LOG_MAX ?? 1500));
-  const evictOldestCleared = () => pruneOldestNonSignificant(clearedLog);
+  // v1.14.0 — envNum is NaN-safe: `Math.max(50, Number('1,500'))` was NaN, which
+  // disabled trimming AND made saveClearedLog's slice(0, NaN) persist an empty
+  // array — one malformed env var atomically wiped the forensic sidecar.
+  const CLEARED_LOG_MAX = envNum(process.env.CLEARED_LOG_MAX, 1500, 50);
+  // v1.14.0 — eviction consults the auto-tune family flags: a warning-severity
+  // record from a family the tuner has already judged chronic noise evicts before
+  // a genuine warning, and criticals only ever evict when the log is ALL criticals.
+  const evictOldestCleared = () =>
+    pruneOldestNonSignificant(clearedLog, (e) => {
+      const t = telemetry.get(familyOf(e.alert?.id ?? ''));
+      return t != null && (t.warningDemotedToInfo || t.downgradedSilenced || t.chronicNoiseSilenced);
+    });
   const clearedLogPath =
     process.env.CLEARED_LOG_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'cleared-alerts.json');
   for (const c of loadClearedLog(clearedLogPath, CLEARED_LOG_MAX)) clearedLog.push(c);
@@ -1291,6 +1322,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       perDevice,
       backupPoolUnknownSinceMs: shp2Sn ? store.backupPoolUnknownSince(shp2Sn) : null,
       dpuErrOnsetBySn,
+      // v1.14.0 — per-slot SHP2 source-error onsets for the shp2-src-err debounce.
+      shp2SrcErrOnsetBySlot: store.shp2SrcErrOnsets(),
     };
 
     // v0.10.0 — baseline + forecast alert signals are recorder-backed; fetch
@@ -1332,12 +1365,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable
       // gaps sidecar, so a gap detected AT BOOT (spanning the very restart that
       // caused it) still fires after the process comes back.
-      ...outageAlerts(recorder.telemetryGaps(), Date.now(), {
-        enabled: OUTAGE_ALERTS_ENABLED,
-        recentWindowMs: OUTAGE_RECENT_WINDOW_MS,
-        minDurationMs: OUTAGE_MIN_DURATION_MS,
-        restartMinDurationMs: OUTAGE_RESTART_MIN_DURATION_MS,
-      }),
+      ...outageAlerts(recorder.telemetryGaps(), Date.now(), OUTAGE_ALERT_OPTS),
       // v0.84.0 — audible-delivery self-alert. When audible broadcasting is
       // enabled but the broadcast monitor has CONFIRMED no reachable speaker
       // (Music Assistant down → its media_players go unavailable), surface it as
@@ -1444,6 +1472,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         tracked.set(a.id, {
           alert: a,
           firstSeen: now,
+          peakSeverity: a.severity,
           notified: seeded,
           // v0.80.0 — rehydrate the severity we actually notified at (the record
           // carries it), so the owed-resolve rule survives a restart even when
@@ -1460,6 +1489,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         });
         continue;
       }
+      // v1.14.0 — track the lifetime peak BEFORE overwriting the alert object,
+      // so a dual-severity alert (info↔critical under one id) clears with its
+      // most severe face on record.
+      existing.peakSeverity = moreSevere(existing.peakSeverity ?? existing.alert.severity, a.severity);
       existing.alert = a;
       // v0.38.0 — the alert is present again this tick, so cancel any pending
       // resolve-dwell countdown (a sustained load-anomaly that briefly dipped
@@ -1677,7 +1710,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // The visible-history push stays gated by duration (a 5s blip isn't worth
       // surfacing in the cleared-alert UI), but telemetry counts the clear.
       if (duration >= DEBOUNCE_MS) {
-        clearedLog.unshift({ alert: t.alert, raisedAt: t.firstSeen, clearedAt: now, durationMs: duration });
+        // v1.14.0 — persist the alert at its PEAK severity over its life, so a
+        // dual-severity alert that de-escalated before clearing keeps its
+        // critical-history record (and eviction protection).
+        const peak = t.peakSeverity != null ? moreSevere(t.peakSeverity, t.alert.severity) : t.alert.severity;
+        const recordedAlert = peak !== t.alert.severity ? { ...t.alert, severity: peak } : t.alert;
+        clearedLog.unshift({ alert: recordedAlert, raisedAt: t.firstSeen, clearedAt: now, durationMs: duration });
         if (clearedLog.length > CLEARED_LOG_MAX) evictOldestCleared(); // v1.12.0 (F19) — noise-first eviction
         persistClearedLog(); // v0.85.0 — survive restarts (the daily Pi power cut)
       }

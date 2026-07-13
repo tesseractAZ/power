@@ -1,3 +1,69 @@
+## v1.14.0 — adversarial review of v1.12/v1.13: fabrication, defer-race, stale-push, and eviction-bypass fixes
+
+A 42-agent adversarial review of the v1.12.0/v1.13.0 releases confirmed 12 findings (3-lens
+verification panels, 0 refuted). This release corrects every code defect found, closes the flagged
+test gaps (two live mutation-reverts previously passed the whole suite), and fixes a live false
+critical from this morning. +34 regression tests (suite 1314 → 1348); tsc + full suite green.
+
+**Fabrication fix (review of F9) — the head-hold now checks the REAL inter-sample gap.**
+`integrateWh`'s boundary-hold engaged whenever the last pre-window sample was within maxGap of the
+*window edge*, so the 5-min rollup watermark could chop a real >10-min telemetry stall into ≤10-min
+pieces the per-segment gap check never saw: every stall onset fabricated ~10 min × last-known W into
+`total_increasing` counters (≈1.3 kWh per event at midday PV), and a >maxGap gap straddling a
+watermark bridged nearly in full — violating the documented "never extrapolate across >10 min"
+contract and the emit-null-over-fabricated invariant. The hold now requires a real in-window sample
+whose distance from the boundary sample is ≤ maxGap; an empty window contributes 0 exactly as it did
+pre-v1.12.0, while the legitimate head recovery F9 shipped for is preserved. The same (now-safe)
+lookback is applied to the two sibling head-drop sites (`/api/summary/today`, circuit day history).
+A new rollup-level test drives the REAL `rollupLifetime` across a synthetic 45-min stall and kills
+both mutation-reverts the review proved invisible (suite passed with either fix reverted).
+
+**Defer race fix (review of F10) — monotonic-clock resolution.** The v1.13.0 deferred restart-gap
+check resolved on the first insert whose wall clock crossed the anchor — but an RTC-less Pi's skewed
+clock *drifts* past the anchor within seconds (the anchor is only clock-file save-lag ahead), so any
+insert landing before the NTP step measured the gap as ~seconds and silently discarded it: the exact
+5-15-min blackout class v1.13.0 shipped to catch. `resolveDeferredRestartGap` (pure, tested) now uses
+monotonic uptime: `wall now − monotonic elapsed` is the boot instant in the current clock, so the true
+pre-boot dark time appears exactly when NTP steps — whenever that is — and a never-stepping clock
+disarms cleanly at a 10-min settle budget. While armed, the ≥15-min in-process detector is suspended
+(an NTP step mid-stream would otherwise ledger a false "MQTT stall" over a period samples were
+actually flowing). Also restored the dropped `maxTs > 0` guard in `classifyRestartGap` (a corrupt
+ts=0 row ledgered a 56-year gap pre-guard).
+
+**Stale-push fix (F10b) — outage alerts re-notify as a blackout grows, and deploys stop crying wolf.**
+An in-place-extended blackout kept one alert id forever, so the operator's only push said "dark
+6 min" while the same gap grew to hours. The id now carries a duration TIER (15 min / 1 h / 6 h);
+crossing a tier fires a fresh alert with the true magnitude (the old one ages off silently — outage
+events are resolve-exempt). And because v1.13.0's 5-min floor made every GHCR deploy (~11 min dark)
+push "[Medium] System outage … the Pi needs a UPS", the recorder now stamps a clean-shutdown marker
+in `close()` (reached via SIGTERM on every add-on stop/update): a restart gap whose pre-boot anchor
+matches the marker is classified **graceful** — low priority, honest "Add-on restart (deploy)" copy,
+no UPS advice — and is excluded from the power-outage trend counter
+(`system_graceful_restart_count_24h` added; a real power loss leaves no marker and reports exactly
+as before).
+
+**Eviction fixes (review of F19).** `pruneOldestNonSignificant` keyed on source severity, and the
+chronic-noise families auto-tune demotes are *emitted* at warning — so warning churn filled the log,
+the info tier never matched, and it fell back to plain FIFO, amputating the oldest critical anyway
+(just on a ~17-day horizon instead of ~6). Eviction is now tiered: oldest info → oldest
+noise-flagged warning (wired to the auto-tune family flags) → oldest warning → a critical only when
+the log is ALL criticals. Cleared records also persist the alert's PEAK severity over its life
+(shp2-below-reserve flipping critical→info before clearing was recorded as 'info' and evicted before
+sensor noise). And all env-number parsing is NaN-safe via `envNum` — `CLEARED_LOG_MAX=1,500`
+previously made the save path persist an empty array, atomically wiping the forensic sidecar.
+
+**shp2-src-err debounce (live 05:35 finding).** A transient SHP2-reported source error (fired
+05:35:01, self-resolved 05:36:01 on 2026-07-12) pushed an HA critical AND played a 64-second audible
+red broadcast for a 60-second flap. The `shp2-src-err-<slot>` CRITICAL now debounces exactly like the
+v1.11.0 dpu-err fix: held until the SAME error count has stood 3 minutes (per-slot onset tracked in
+the snapshot store, re-baselined on count change/clear); no onset context still fires immediately, so
+a real fault is never lost.
+
+**Test-gap closures (review):** the F10 restart-floor env wiring and the recorder→tracking→HA payload
+hop were both untested (and the payload mapping was hand-duplicated in index.ts and mqttDiscovery.ts)
+— `resolveOutageAlertOptions` and `systemOutageFields` are now single-sourced in alerts.ts, used by
+both consumers, and unit-tested; dropping the restart floor or a payload field now fails tests.
+
 ## v1.13.0 — engine-review fixes F10 + F22: the outage ledger stops hiding sub-15-min and restart-erased alarm-dark windows
 
 Continues the ground-truth review remediation. +11 regression tests (suite 1314 → 1325); tsc + full
