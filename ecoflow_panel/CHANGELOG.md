@@ -1,3 +1,67 @@
+## v1.15.0 — engine-review F6: the EV predictor finally sees the real EV (and stops seeing the air conditioners)
+
+The 30-day ground-truth review's F-graded finding: the EV window predictor had NEVER detected the
+actual EV. Its 2 kW session floor pattern-matched the two air conditioners — on identical replayed
+data the old code found **191 "sessions" and 24 patterns, all on AC circuits 6/9 (2.2-4.1 kW), zero
+on the EVSE**, fabricating **~10 kWh/day** of phantom load across 14 forecast hours (double-counting
+AC already in the day-of-week load curve and dragging `projected_low_soc` toward its saturated 0%),
+while the real 10.2-11.1 kW sessions (11 in 30 days, 3.8-31 kWh, scattered start hours) went
+entirely unforecast — the single biggest load surprise an islanded runway can face. +13 regression
+tests (suite 1349 → 1362); rebuilt predictor validated against the live recorder's full 30-day
+history, then hardened by a pre-merge 5-lens adversarial review (fixes folded in below). tsc +
+full suite green.
+
+**Plateau discriminator.** The circuit signal is perfectly bimodal (< ~4 kW AC/subpanel vs > ~10 kW
+EV), so sessions only count as EV when their average power clears `EV_PLATEAU_MIN_W` (default
+6 kW, env-tunable). On real data: 11 sessions observed, **0 phantom patterns, 0 fabricated kWh**.
+The recurrence machinery is unchanged — a genuinely habitual real charger still yields patterns,
+probability-weighted as before.
+
+**Honest distribution stats.** A non-recurrent driver legitimately produces zero patterns; the
+prediction now carries what the EV actually does instead: `typicalSessionKwh` (median 13.2),
+`p90SessionKwh` (26.2), `typicalSessionWatts` (10,436), `sessionsPerWeek` (2.6) — served on
+`/api/ev-window-prediction`.
+
+**Live-session awareness (the alarm-relevant piece).** Scattered start times defeat any window
+prediction — but an ACTIVE ~10.5 kW draw is directly observable. `detectLiveEvSession` finds a
+fresh (≤10 min) at-plateau draw on any paired circuit, walks back to the session start, integrates
+consumed energy, and projects the remaining runtime from the empirical median session energy
+(floored at 1 kWh, capped at 4 h). The live entry is overlaid **fresh on every call** — deliberately
+outside the 1 h pattern-mining cache, which would otherwise hide a just-started session from the
+projected-SoC trajectory for up to an hour. It enters `forecastLoadW`/`predictedEvLoadW` (the
+projected-SoC sim now carries the active draw); the runway alarm keeps its v0.15.21 posture
+(predicted EV stripped, the observed-load anchor carries a real live draw — evidence-based alarms).
+
+**extractEvSessions energy fix (pre-existing).** A session's first sample used to trapezoid from the
+PREVIOUS session's last sample — often days earlier — inflating per-session `energyKwh` by orders of
+magnitude (harmless while display-only; now `typicalSessionKwh` drives the live remaining-energy
+projection). Integration is now strictly within-session, and a >15-min recording gap splits the
+session instead of bridging fabricated energy across unobserved time.
+
+**Pre-merge adversarial review fixes (5-lens find + verify panel; all folded in before ship):**
+- *Hour-span alignment* — the live entry was keyed at `now` with `durationHours = remaining`, but
+  `evLoadByHour` covers whole clock-hours and the forecast simulates from the NEXT hour boundary,
+  so any session with ≤1 h remaining lifted ZERO simulated hours (~85% of real detections). The
+  entry is now anchored at the hour start with the elapsed fraction folded in, covering every clock
+  hour the remaining tail actually touches.
+- *P90 conditional re-target* — remaining energy based on the median alone collapsed to the 1 kWh
+  floor ~1.25 h into a long charge, leaving a real 31 kWh session's tail (~18 kWh of ongoing draw)
+  unprojected. Once a session outlives the median, the target re-anchors to the P90 (the honest
+  conditional expectation of a session that has already proven larger than typical).
+- *Robustness* — a NaN-valued `EV_PLATEAU_MIN_W` env would have silently disabled BOTH new gates
+  (`x < NaN` is false — the same NaN-through-Math.max class fixed in v1.14.0); a single glitched
+  high sample no longer fabricates a session (≥2 samples over ≥5 min sustain required); a NaN or
+  future-stamped latest sample is rejected/clamped.
+- *Empty-result cache* — with the plateau filter, "no EV sessions" is a legitimate permanent state;
+  the v0.56.1 never-cache-empty rule would have re-mined 30 days × every circuit on every call.
+  Empty results now cache for 5 minutes (boot-cold still recovers in minutes; no thrash).
+- *Calendar* — the live overlay entry is excluded from the ICS feed (it is not a prediction; its
+  per-build uid would churn subscribers).
+- *Honest scope note* — the day-forecast consumers hold a ~30-min result cache, so the live overlay
+  enters the projected-SoC sim at the next forecast recompute (most of a 0.5-3 h session is
+  covered); direct consumers see it fresh per call, and the runway ALARM deliberately keeps its
+  evidence-based observed-load anchor (v0.15.21) rather than trusting predictions.
+
 ## v1.14.1 — HOTFIX: MQTT availability stuck 'offline' after a broker-side reconnect (all 87 HA entities unavailable)
 
 **Live incident (2026-07-12):** a ~95 s event-loop stall at 05:41 made mosquitto time the session
