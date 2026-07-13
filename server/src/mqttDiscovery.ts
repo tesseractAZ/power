@@ -627,7 +627,10 @@ export async function startMqttDiscovery(
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
     }
-    client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 });
+    // v1.14.1 — availability 'online' moved OUT of here into the connect handler:
+    // publishing it only alongside the one-time discovery configs meant a broker-
+    // side disconnect (LWT retains 'offline') was never overwritten on reconnect,
+    // and HA marked all entities unavailable until an add-on restart.
     log(`mqtt-discovery: published ${SENSORS.length} sensor configs + ${BINARY_SENSORS.length} binary_sensor configs + ${ALARM_PRIORITY_ORDER.length} alarm-priority switches to ${url} (prefix=${prefix})`);
   };
 
@@ -859,6 +862,10 @@ export async function startMqttDiscovery(
 
   const publishState = async () => {
     if (!client.connected) return;
+    // v1.14.1 belt-and-braces — re-assert availability every state cycle while
+    // connected, so no future path can leave a retained 'offline' standing while
+    // we are demonstrably alive and publishing (tiny retained payload, idempotent).
+    client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 });
     // Assert/refresh the dynamic per-circuit discovery configs before the state
     // payload, so HA has the entity definitions in hand when the values land.
     publishCircuitDiscovery();
@@ -905,6 +912,13 @@ export async function startMqttDiscovery(
 
   client.on('connect', () => {
     log(`mqtt-discovery: connected to ${url}`);
+    // v1.14.1 — republish availability on EVERY connect, unconditionally. The
+    // broker's LWT retains 'offline' when it times the session out (live: a ~95s
+    // event-loop stall at 05:41 on 2026-07-12); 'online' used to be published only
+    // inside the one-time discovery block below, so every reconnect left the
+    // retained 'offline' in place and HA held all 87 entities unavailable until
+    // an add-on restart. Retained, so HA sees it even if it reconnects later.
+    client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 });
     if (!published) {
       // Clear legacy unique_ids FIRST so HA processes the removal alongside
       // the (re)publish of the canonical configs in the same session.
