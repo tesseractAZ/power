@@ -30,7 +30,7 @@ test('outageAlerts — a recent restart-spanning gap fires ONE warning with the 
   assert.equal(a[0].severity, 'warning');
   assert.equal(a[0].category, 'Connectivity');
   assert.equal(a[0].priority, 'medium');
-  assert.equal(a[0].id, outageAlertId(now - 100 * MIN));
+  assert.equal(a[0].id, outageAlertId(now - 100 * MIN, 90 * MIN)); // v1.14.0 — id carries the duration tier
   assert.match(a[0].title, /alarm was dark 90 min/);
   assert.match(a[0].detail, /spanning a restart|OFFLINE|unrecoverable/);
   assert.ok(a[0].facts?.some((f) => f.value.includes('restart-spanning')));
@@ -63,10 +63,10 @@ test('outageAlerts — the id is stable per gap startMs (same gap never re-alert
   const g2 = gap({ startMs: now - 120 * MIN, endMs: now - 90 * MIN, durationMs: 30 * MIN, detectedAt: now - 90 * MIN });
   const a = outageAlerts([g1, g2], now, OPTS);
   assert.equal(a.length, 2);
-  // Same startMs → identical id across calls (dedup key for notify-once).
-  assert.equal(outageAlerts([g1], now, OPTS)[0].id, a.find((x) => x.id.endsWith(String(g1.startMs)))!.id);
-  // Newest gap (larger startMs) sorts first.
-  assert.equal(a[0].id, outageAlertId(g2.startMs));
+  // Same startMs + same duration tier → identical id across calls (dedup key for notify-once).
+  assert.equal(outageAlerts([g1], now, OPTS)[0].id, a.find((x) => x.id.includes(String(g1.startMs)))!.id);
+  // Newest gap (larger startMs) sorts first (v1.14.0 — the id also carries its duration tier).
+  assert.equal(a[0].id, outageAlertId(g2.startMs, g2.durationMs));
 });
 
 test('outageAlerts — non-finite/garbage gaps are skipped, never crash', () => {
@@ -103,7 +103,7 @@ test('outageTracking — rolls up count / total minutes / last ended+duration ov
 
 test('outageTracking — a clean 24 h reads zeros / null', () => {
   const t = outageTracking([], now, 24 * H);
-  assert.deepEqual(t, { count: 0, powerOutageCount: 0, telemetryGapCount: 0, totalMinutes: 0, lastEndedMs: null, lastDurationMinutes: null });
+  assert.deepEqual(t, { count: 0, powerOutageCount: 0, gracefulRestartCount: 0, telemetryGapCount: 0, totalMinutes: 0, lastEndedMs: null, lastDurationMinutes: null });
 });
 
 test('v1.4.1 — outageTracking splits the total into power outages vs cloud/telemetry gaps', () => {

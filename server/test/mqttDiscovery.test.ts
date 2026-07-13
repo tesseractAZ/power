@@ -299,6 +299,13 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
   const advStart = advisorSrc.indexOf('return {', advisorSrc.indexOf('function advisoryStateFields'));
   const advEnd = advisorSrc.indexOf('};', advStart);
   for (const m of advisorSrc.slice(advStart, advEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+  // … plus the keys spread in from systemOutageFields() (alerts.ts, v1.14.0 —
+  // the outage tiles are single-sourced with /api/ha-state).
+  const alertsSrc = readFileSync(resolve(__dir, '../src/alerts.ts'), 'utf8');
+  const sofStart = alertsSrc.indexOf('return {', alertsSrc.indexOf('export function systemOutageFields'));
+  const sofEnd = alertsSrc.indexOf('};', sofStart);
+  assert.ok(sofStart > 0 && sofEnd > sofStart, 'could not locate systemOutageFields return block');
+  for (const m of alertsSrc.slice(sofStart, sofEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
 
   const missing = referenced.filter((k) => !emitted.has(k)).sort();
   assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);

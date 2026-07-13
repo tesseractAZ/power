@@ -201,6 +201,12 @@ export interface ConnectivityContext {
    *  stood for DPU_ERR_DEBOUNCE_MS, so a cloud-reconnect blip (nonzero for
    *  20-160s, then clears) never reaches HA's critical_alerts sensor. */
   dpuErrOnsetBySn?: Map<string, { code: number; sinceMs: number }>;
+  /** v1.14.0 (live 05:35 flap) — per-SHP2-slot source-error onset, keyed
+   *  `<sn>:<slot>` (SnapshotStore.shp2SrcErrOnsets). The `shp2-src-err-<slot>`
+   *  CRITICAL is held until the SAME nonzero error count has stood for the
+   *  shared 3-min debounce — a 60-s transient device-reported error fired a
+   *  full audible red broadcast + HA critical push at 05:35 on 2026-07-12. */
+  shp2SrcErrOnsetBySlot?: Map<string, { count: number; sinceMs: number }>;
 }
 
 /** Format an age in ms as the most natural short human string. */
@@ -639,7 +645,17 @@ export function computeAlerts(
         // v1.2.0 — this detail is read aloud by TTS on a CRITICAL alert, and "error(s)"
         // is not something a voice can say. errorCodeNum is a COUNT of active codes.
         const n = s.errorCodeNum!;
-        out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', detail: `${tag} reports ${n} ${n === 1 ? 'error' : 'errors'}.` });
+        // v1.14.0 — debounce, mirroring the dpu-err pattern (same 3-min window):
+        // a transient device-reported error (fired 05:35:01, cleared 05:36:01 on
+        // 2026-07-12) woke the house with a 64-s audible red + critical push. The
+        // CRITICAL is held until the SAME count has stood for the window; no
+        // onset context (older callers) fires immediately — a real fault is
+        // never silently lost, it just waits one debounce.
+        const srcOnset = connectivity?.shp2SrcErrOnsetBySlot?.get(`${shp2.sn}:${s.slot}`);
+        const srcDebounced = srcOnset != null && srcOnset.count === n && (now - srcOnset.sinceMs) < DPU_ERR_DEBOUNCE_MS;
+        if (!srcDebounced) {
+          out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', detail: `${tag} reports ${n} ${n === 1 ? 'error' : 'errors'}.` });
+        }
       }
       if (s.isConnected && !s.hwConnect) {
         out.push({ id: `shp2-src-hw-${s.slot}`, severity: 'warning', category: 'SHP2', device: shp2.deviceName, title: 'Source link issue', detail: `${tag} shows connected but no hardware link.` });
@@ -785,11 +801,28 @@ export function alertCounts(alerts: Alert[]): Record<Severity, number> {
  * WARNING (routes to the push channel, operator-actionable) but NOT critical —
  * there is nothing to do in the moment; it's a retrospective flag. */
 
-/** Stable id prefix so the same gap never re-alerts and the resolve path can
+/** v1.14.0 (review of F10b) — duration tier for the outage alert id. A
+ *  restart-spanning blackout that is EXTENDED in place (consecutive boots inside
+ *  one outage share a startMs) kept the same alert id forever, so the operator's
+ *  only push reported the first short segment ("dark 6 min") while the same gap
+ *  grew to hours. Crossing a tier changes the id, which fires a fresh alert with
+ *  the true magnitude; the old tier's alert ages off silently (outage events are
+ *  exempt from resolve pushes). Tier 0 keeps the bare legacy id. */
+export function outageDurationTier(durationMs: number): number {
+  if (durationMs >= 6 * 3_600_000) return 3;  // ≥ 6 h
+  if (durationMs >= 3_600_000) return 2;      // ≥ 1 h
+  if (durationMs >= 15 * 60_000) return 1;    // ≥ 15 min
+  return 0;
+}
+
+/** Stable id so the same gap never re-alerts (per tier) and the resolve path can
  *  exempt it. Keyed on the gap's startMs (immutable per gap, survives restarts
- *  via the sidecar). */
-export function outageAlertId(startMs: number): string {
-  return `system-outage-${startMs}`;
+ *  via the sidecar) plus the duration tier (see outageDurationTier). The tier
+ *  suffix is pure digits so familyOf() still rolls every variant up under the
+ *  `system-outage` family. */
+export function outageAlertId(startMs: number, durationMs = 0): string {
+  const tier = outageDurationTier(durationMs);
+  return tier === 0 ? `system-outage-${startMs}` : `system-outage-${startMs}-${tier}`;
 }
 
 /** An outage EVENT alert never sends a "Resolved:" push — it ages off silently. */
@@ -814,6 +847,29 @@ export interface OutageAlertOptions {
   enabled: boolean;
 }
 
+/** v1.14.0 — NaN-safe env number parse. `Math.max(50, Number('1,500'))` is NaN
+ *  (Math.max propagates NaN), which downstream disabled the cleared-log trim AND
+ *  made the save path persist an empty array — one bad env var atomically wiped
+ *  the forensic sidecar. Non-finite input falls back to the default. */
+export function envNum(raw: string | undefined, def: number, min: number): number {
+  if (raw == null || raw.trim() === '') return def; // unset/empty ≠ zero
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(min, n) : def;
+}
+
+/** v1.14.0 (review — restart-floor wiring was untested) — single, testable source
+ *  for the outage-alert options. Dropping `restartMinDurationMs` here (the exact
+ *  mutation the review flagged as a maximally silent regression, since omitting
+ *  it falls back to the 15-min floor by design) now fails a unit test. */
+export function resolveOutageAlertOptions(env: Record<string, string | undefined>): OutageAlertOptions {
+  return {
+    enabled: (env.SYSTEM_OUTAGE_ALERT_ENABLED ?? 'true') !== 'false',
+    recentWindowMs: envNum(env.SYSTEM_OUTAGE_RECENT_WINDOW_H, 24, 0) * 3_600_000,
+    minDurationMs: envNum(env.SYSTEM_OUTAGE_MIN_MINUTES, 15, 0) * 60_000,
+    restartMinDurationMs: envNum(env.SYSTEM_OUTAGE_RESTART_MIN_MINUTES, 5, 0) * 60_000,
+  };
+}
+
 const fmtClock = (ms: number): string =>
   new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
@@ -823,7 +879,7 @@ const fmtClock = (ms: number): string =>
  * unit-testable. One Alert per qualifying gap, newest first.
  */
 export function outageAlerts(
-  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean }>,
+  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean }>,
   nowMs: number,
   opts: OutageAlertOptions,
 ): Alert[] {
@@ -841,25 +897,38 @@ export function outageAlerts(
     if (nowMs - g.detectedAt > opts.recentWindowMs) continue;        // aged out → drops from the list (no resolve push)
     const mins = Math.max(1, Math.round(g.durationMs / 60_000));
     const restart = g.restartSpanning === true;
+    // v1.14.0 — a restart gap whose pre-boot anchor matched the clean-shutdown
+    // marker was a DELIBERATE stop (deploy/update/restart). Still worth a record
+    // (the alarm WAS dark), but at low priority and without the misleading
+    // "get a UPS" remediation — at this project's release cadence that push
+    // would otherwise fire on every deploy and poison the power-outage trend.
+    const graceful = restart && g.graceful === true;
     out.push({
-      id: outageAlertId(g.startMs),
+      // v1.14.0 (F10b) — id carries the duration TIER so an in-place-extended
+      // blackout re-notifies with its true magnitude instead of the operator's
+      // last word staying "dark 6 min" on a 3-hour outage.
+      id: outageAlertId(g.startMs, g.durationMs),
       severity: 'warning',
       category: 'Connectivity',
       device: 'System',
       // Explicit ISA Medium (P3): operator-relevant, but retrospective — not an
       // immediate hardware danger, so it must not read as a High protective limit.
-      priority: 'medium',
-      title: restart
-        ? `System outage — alarm was dark ${mins} min`
-        : `Telemetry gap — no data for ${mins} min`,
-      detail: restart
-        ? `No home telemetry was recorded for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}), spanning a restart — the Pi lost power or the add-on stopped, so the alarm system was OFFLINE for that stretch and this window of history is unrecoverable. If this recurs, the Pi needs an always-on power source (UPS / dedicated circuit).`
-        : `No home-device samples reached the recorder for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) — an MQTT/broker stall; writes have since resumed. History in that window is missing but the process stayed up.`,
+      priority: graceful ? 'low' : 'medium',
+      title: graceful
+        ? `Add-on restart — alarm was dark ${mins} min`
+        : restart
+          ? `System outage — alarm was dark ${mins} min`
+          : `Telemetry gap — no data for ${mins} min`,
+      detail: graceful
+        ? `The add-on was deliberately stopped/updated (deploy or restart) and telemetry was dark for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}). Expected downtime for a deploy; history in that window is unrecoverable.`
+        : restart
+          ? `No home telemetry was recorded for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}), spanning a restart — the Pi lost power or the add-on stopped, so the alarm system was OFFLINE for that stretch and this window of history is unrecoverable. If this recurs, the Pi needs an always-on power source (UPS / dedicated circuit).`
+          : `No home-device samples reached the recorder for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) — an MQTT/broker stall; writes have since resumed. History in that window is missing but the process stayed up.`,
       facts: [
         { label: 'Duration', value: `${mins} min` },
         { label: 'Started', value: fmtClock(g.startMs) },
         { label: 'Ended', value: fmtClock(g.endMs) },
-        { label: 'Type', value: restart ? 'restart-spanning (power/host)' : 'in-process (MQTT stall)' },
+        { label: 'Type', value: graceful ? 'deliberate stop (deploy/update)' : restart ? 'restart-spanning (power/host)' : 'in-process (MQTT stall)' },
       ],
     });
   }
@@ -873,10 +942,10 @@ export function outageAlerts(
  * firmware fix reduce the count?) at a glance, independent of the transient alerts.
  */
 export function outageTracking(
-  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean }>,
+  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean }>,
   nowMs: number,
   windowMs: number,
-): { count: number; powerOutageCount: number; telemetryGapCount: number; totalMinutes: number; lastEndedMs: number | null; lastDurationMinutes: number | null } {
+): { count: number; powerOutageCount: number; gracefulRestartCount: number; telemetryGapCount: number; totalMinutes: number; lastEndedMs: number | null; lastDurationMinutes: number | null } {
   const recent = gaps.filter((g) => Number.isFinite(g.endMs) && nowMs - g.endMs <= windowMs);
   const totalMs = recent.reduce((s, g) => s + Math.max(0, g.durationMs), 0);
   const last = recent.reduce<null | { endMs: number; durationMs: number }>(
@@ -887,15 +956,47 @@ export function outageTracking(
   // add-on/host itself was DOWN across the gap (a power / reboot event); a non-spanning gap is
   // a cloud/telemetry stall while the process kept running (the DNS/MQTT blips this fleet rides
   // out — see [[project_wifi_loss_root_cause]]). Mixing them made a benign cloud blip read as a
-  // "system outage". `count` stays the total (unchanged for existing consumers); the two split
+  // "system outage". `count` stays the total (unchanged for existing consumers); the split
   // counters let the operator answer "was that power, or just the cloud?" at a glance.
-  const powerOutageCount = recent.filter((g) => g.restartSpanning === true).length;
+  // v1.14.0 — a graceful (deliberate stop/deploy) restart is NOT a power outage:
+  // counting deploys as power events poisoned the trend the operator uses to
+  // judge whether the daily-power-loss fix worked. Still in `count`/minutes.
+  const restarts = recent.filter((g) => g.restartSpanning === true);
+  const gracefulRestartCount = restarts.filter((g) => g.graceful === true).length;
   return {
     count: recent.length,
-    powerOutageCount,
-    telemetryGapCount: recent.length - powerOutageCount,
+    powerOutageCount: restarts.length - gracefulRestartCount,
+    gracefulRestartCount,
+    telemetryGapCount: recent.length - restarts.length,
     totalMinutes: Math.round(totalMs / 60_000),
     lastEndedMs: last?.endMs ?? null,
     lastDurationMinutes: last != null ? Math.max(1, Math.round(last.durationMs / 60_000)) : null,
+  };
+}
+
+/** v1.14.0 (review — the recorder→tracking→HA payload hop was untested, and
+ *  index.ts + mqttDiscovery.ts each hand-rolled the same field mapping) — the
+ *  single source for the `system_outage_*` fields served at /api/ha-state and
+ *  published to the MQTT state topic. */
+export function systemOutageFields(
+  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean }>,
+  nowMs: number,
+): Record<string, number | boolean | null> {
+  const t = outageTracking(gaps, nowMs, 24 * 3_600_000);
+  return {
+    // `system_outage_active_24h` is a 24 h OR-of-past-events flag ("a gap occurred
+    // in the last 24 h"), NOT "a gap is happening right now" — `..._last_ended`
+    // is the field to read for recency. `count`/`total` stay the mixed total for
+    // backward compatibility.
+    system_outage_active_24h: t.count > 0,
+    system_outage_count_24h: t.count,
+    // Split by cause so a benign cloud/telemetry stall (or a deliberate deploy)
+    // isn't mistaken for a power event.
+    system_power_outage_count_24h: t.powerOutageCount,     // add-on/host DOWN, NOT deliberate
+    system_graceful_restart_count_24h: t.gracefulRestartCount, // deliberate stop/update (deploys)
+    system_telemetry_gap_count_24h: t.telemetryGapCount,   // cloud/MQTT stall, process stayed up
+    system_outage_total_minutes_24h: t.totalMinutes,
+    system_outage_last_ended: t.lastEndedMs, // epoch ms, null if none in 24 h
+    system_outage_last_duration_minutes: t.lastDurationMinutes,
   };
 }

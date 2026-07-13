@@ -28,7 +28,7 @@ import { lightingPostureTracker } from './lightingPosture.js';
 import { belowReserveFloor } from './runwayAlarm.js';
 import { liveGridBackstop } from './gridState.js';
 import { countCloudWedges } from './deviceLink.js';
-import { outageTracking } from './alerts.js';
+import { systemOutageFields } from './alerts.js';
 import { getBroadcastHealth } from './broadcastHealth.js';
 
 /**
@@ -210,9 +210,10 @@ export const SENSORS: SensorConfig[] = [
   // primary controls.
   { unique_id: 'ecoflow_cloud_wedge_count', name: 'EcoFlow Cloud-Wedged Devices', state_class: 'measurement', icon: 'mdi:cloud-alert', entity_category: 'diagnostic', value_template: '{{ value_json.ecoflow_cloud_wedge_count }}' },
   // v0.83.0 — system data-gap / unplanned-outage TRACKING (24 h). Recorded
-  // telemetry blackouts (host power loss / add-on stop / MQTT stall > 15 min).
-  // A binary "system outage in the last 24 h" flag + count + total minutes so an
-  // operator can watch the trend after a UPS/power fix. Diagnostic; all 0 = clean.
+  // telemetry blackouts (restart-spanning gaps ≥ 5 min — power loss, add-on stop,
+  // or deploy — and in-process MQTT stalls > 15 min). A binary "system outage in
+  // the last 24 h" flag + count + total minutes so an operator can watch the
+  // trend after a UPS/power fix. Diagnostic; all 0 = clean.
   // Plain ON/OFF diagnostic (no device_class 'problem' — matches the coverage_partial
   // sibling convention; the operator FLAG is the push alert, this is a status tile).
   { unique_id: 'ecoflow_system_outage_24h', name: 'EcoFlow System Outage (24h)', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.system_outage_active_24h else "OFF" }}' },
@@ -790,17 +791,8 @@ export async function startMqttDiscovery(
       ecoflow_cloud_wedge_count: countCloudWedges(devices),
       // v0.83.0 — system data-gap / unplanned-outage tracking (24 h). Mirrors the
       // /api/ha-state tiles so the MQTT diagnostic sensors have data.
-      ...(() => {
-        const t = outageTracking(recorder.telemetryGaps(), Date.now(), 24 * 3_600_000);
-        return {
-          system_outage_active_24h: t.count > 0,
-          system_outage_count_24h: t.count,
-          // v1.4.1 — split by cause (see index.ts / alerts.ts outageTracking).
-          system_power_outage_count_24h: t.powerOutageCount,
-          system_telemetry_gap_count_24h: t.telemetryGapCount,
-          system_outage_total_minutes_24h: t.totalMinutes,
-        };
-      })(),
+      // v1.14.0 — single-sourced with /api/ha-state (alerts.ts systemOutageFields).
+      ...systemOutageFields(recorder.telemetryGaps(), Date.now()),
       // v0.84.0 — audible-delivery health mirror (see broadcastHealth.ts). Status
       // is 4-state so `disabled`/`unknown` never read as a false "unreachable".
       ...(() => {
