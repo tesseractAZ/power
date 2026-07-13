@@ -1,3 +1,22 @@
+## v1.14.1 — HOTFIX: MQTT availability stuck 'offline' after a broker-side reconnect (all 87 HA entities unavailable)
+
+**Live incident (2026-07-12):** a ~95 s event-loop stall at 05:41 made mosquitto time the session
+out, firing the Last-Will which RETAINS `offline` on `ecoflow_panel/availability`. The ONLY code
+path publishing `online` lived inside `publishDiscovery()`, which the connect handler gates behind
+`if (!published)` — first connect only. Every reconnect (logged at 14:27 and 14:29) therefore left
+the retained `offline` standing, and HA held all 87 MQTT entities (`sensor.ecoflow_panel_*`,
+binary_sensors, alarm-priority switches — including the v1.13.0 outage tiles) **unavailable for 9+
+hours** until an add-on restart. The critical-alert push path (HTTP via the supervisor) does not
+depend on MQTT, so alarm delivery was never blocked — this was the HA sensor/automation surface.
+
+**Fix:** availability `online` (retained) is now published on EVERY `connect` event, unconditionally,
+before the one-time discovery gate; `publishDiscovery()` no longer owns it (single source — a
+refactor can't silently re-gate it). Belt-and-braces: `publishState()` re-asserts `online` each
+publish cycle while connected, so no future path can leave a retained `offline` standing while the
+add-on is demonstrably alive. The LWT `offline` pairing is unchanged — the pair is now self-healing.
+Structural regression test pins all four properties (suite 1348 → 1349). The deploy restart itself
+clears the currently-stuck retained `offline`.
+
 ## v1.14.0 — adversarial review of v1.12/v1.13: fabrication, defer-race, stale-push, and eviction-bypass fixes
 
 A 42-agent adversarial review of the v1.12.0/v1.13.0 releases confirmed 12 findings (3-lens

@@ -430,3 +430,65 @@ test('mqtt switch: the STATE-topic echo never feeds back into a command (no feed
     assert.equal(parseAlertSwitchCommand(stateTopic, 'OFF'), null);
   }
 });
+
+/**
+ * v1.14.1 — availability must be republished on EVERY MQTT (re)connect.
+ *
+ * LIVE INCIDENT (2026-07-12): a ~95 s event-loop stall at 05:41 made the broker
+ * time the session out, firing the LWT which RETAINS 'offline' on
+ * ecoflow_panel/availability. The only 'online' publish lived inside
+ * publishDiscovery(), which the connect handler gates behind `if (!published)`
+ * (first connect only) — so every reconnect (logged 14:27/14:29) left the
+ * retained 'offline' standing and HA held all 87 entities unavailable for
+ * 9+ hours until an add-on restart. These structural pins (the closure is
+ * un-exported; source inspection is this file's established convention — see
+ * the protocolVersion:5 tests) assert the repaired shape:
+ *   (1) the connect handler publishes 'online' BEFORE / outside the
+ *       one-time `if (!published)` discovery gate;
+ *   (2) publishDiscovery() no longer owns the availability publish (single
+ *       source — a refactor can't silently re-gate it);
+ *   (3) publishState() re-asserts 'online' each cycle (belt-and-braces);
+ *   (4) the LWT still retains 'offline' (the pairing that makes the
+ *       every-connect republish load-bearing).
+ */
+test("mqtt availability: 'online' is republished on EVERY connect, outside the one-time discovery gate", () => {
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(__dir, '../src/mqttDiscovery.ts'), 'utf8');
+  const onlinePublish = "client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 });";
+
+  // (1) connect handler: 'online' before the `if (!published)` gate.
+  const connectIdx = src.indexOf("client.on('connect'");
+  assert.ok(connectIdx > 0, 'connect handler present');
+  const gateIdx = src.indexOf('if (!published)', connectIdx);
+  assert.ok(gateIdx > connectIdx, 'one-time discovery gate present in the connect handler');
+  const onlineInConnect = src.indexOf(onlinePublish, connectIdx);
+  assert.ok(
+    onlineInConnect > connectIdx && onlineInConnect < gateIdx,
+    "availability 'online' must be published unconditionally on every connect, BEFORE the first-connect-only gate — otherwise a broker-timeout LWT 'offline' is never overwritten on reconnect",
+  );
+
+  // (2) publishDiscovery no longer publishes availability.
+  const pdStart = src.indexOf('const publishDiscovery = ');
+  const pdEnd = src.indexOf('\n  };', pdStart);
+  assert.ok(pdStart > 0 && pdEnd > pdStart, 'publishDiscovery located');
+  assert.ok(
+    !src.slice(pdStart, pdEnd).includes("AVAILABILITY_TOPIC, 'online'"),
+    "publishDiscovery must NOT own the 'online' publish — it is one-time-gated, which is the exact bug shape",
+  );
+
+  // (3) publishState re-asserts availability each cycle.
+  const psStart = src.indexOf('const publishState = ');
+  const psEnd = src.indexOf('\n  };', psStart);
+  assert.ok(psStart > 0 && psEnd > psStart, 'publishState located');
+  assert.ok(
+    src.slice(psStart, psEnd).includes(onlinePublish),
+    "publishState must re-assert availability 'online' while connected (belt-and-braces against any future retained 'offline')",
+  );
+
+  // (4) the LWT pairing: broker retains 'offline' on session death.
+  assert.match(
+    src,
+    /will:\s*\{\s*topic:\s*AVAILABILITY_TOPIC,\s*payload:\s*'offline',\s*retain:\s*true/,
+    "the LWT must retain 'offline' — with the every-connect 'online' republish this pair is self-healing",
+  );
+});
