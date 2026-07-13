@@ -1,6 +1,14 @@
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { activeSocBand, socAlertSeverity } from './batterySocAlarm.js';
+import { activeSocBandWithHysteresis, socAlertSeverity } from './batterySocAlarm.js';
+
+/* v1.17.0 (engine-review F15) — held-band state for the on-screen backup-soc
+ * alert's re-arm hysteresis. computeAlerts has exactly one production call site
+ * (alertMonitor's snapshot loop), so a module singleton is safe; tests reset it. */
+let heldSocBandPct: number | null = null;
+export function resetOnScreenSocBandForTesting(): void {
+  heldSocBandPct = null;
+}
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import {
@@ -606,7 +614,14 @@ export function computeAlerts(
     const sp = shp2.projection;
     const reserve = sp.backupReserveSoc ?? 15;
     if (sp.backupBatPercent != null) {
-      if (sp.backupBatPercent < reserve) {
+      // v1.17.0 (engine-review F14) — INCLUSIVE floor comparison, matching
+      // runwayAlarm.belowReserveFloor's `<=`. The pool pins at EXACTLY the
+      // integer reserve value for hours every night (7.9h/8.8h stretches in the
+      // 30-day cleared-alert ledger); with strict `<` that steady state
+      // classified as merely "approaching reserve" (warning off-grid), so a
+      // real overnight outage with the pool holding the floor would never show
+      // the at-the-floor critical — only the instantaneous crossing tick would.
+      if (sp.backupBatPercent <= reserve) {
         // v0.23.0 — when the grid is backstopping the home, the pool sitting at
         // its reserve floor just transfers to mains; downgrade critical → info
         // (still visible) so it doesn't push/chime as an emergency.
@@ -616,10 +631,10 @@ export function computeAlerts(
           severity: onGrid ? 'info' : 'critical',
           category: 'SHP2',
           device: shp2.deviceName,
-          title: onGrid ? 'Backup at reserve — on grid' : 'Backup below reserve',
+          title: onGrid ? 'Backup at reserve — on grid' : 'Backup at/below reserve',
           detail: onGrid
             ? `Backup pool ${sp.backupBatPercent}% is at/under the ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
-            : `Backup pool ${sp.backupBatPercent}% is under the ${reserve}% reserve floor.`,
+            : `Backup pool ${sp.backupBatPercent}% is at/under the ${reserve}% reserve floor.`,
         });
       } else if (sp.backupBatPercent < reserve + 10) {
         // v0.43.0 — grid-aware, mirroring shp2-below-reserve above: while the grid
@@ -732,7 +747,14 @@ export function computeAlerts(
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
   const soc = socShp2?.projection.backupBatPercent ?? null;
-  const band = activeSocBand(soc);
+  // v1.17.0 (engine-review F15) — hysteresis: track the held band across calls
+  // so SoC chattering on a boundary (40↔41 every sample) doesn't toggle the
+  // alert; it clears only once SoC climbs past band + 2 (the audible ladder's
+  // own re-arm margin). State updates on EVERY call — including snapshots
+  // where the shp2 pair suppresses the emission below — because the held band
+  // describes the SoC, not whether this producer emitted.
+  const band = activeSocBandWithHysteresis(soc, heldSocBandPct);
+  heldSocBandPct = band?.pct ?? null;
   // v0.44.0 — dedup: the shp2-near-reserve / shp2-below-reserve pair above
   // (grid-aware) already owns the soc < reserve+10 window. Suppress the
   // backup-soc band push inside that window so the reserve story has ONE
@@ -759,6 +781,10 @@ export function computeAlerts(
     // (spread below) is what reaches Medium, so reserve bands show on the
     // operational Alerts page and read correctly in cleared history.
     const { severity, source, priority } = socAlertSeverity(onGridEmergency ? 'low' : band.priority);
+    // v1.17.0 (F15) — inside the re-arm margin the SoC can sit 1-2 pts ABOVE
+    // the held band; say so instead of the (then-false) "at or below".
+    const heldAbove = soc > band.pct;
+    const heldNote = heldAbove ? ` (holding the ${band.pct}% band until above ${band.pct + 2}%)` : '';
     out.push({
       id: `backup-soc-${band.pct}`,
       severity,
@@ -768,8 +794,8 @@ export function computeAlerts(
       device: 'SHP2 backup pool',
       title: `Backup pool low — ${Math.round(soc)}%`,
       detail: onGridEmergency
-        ? `Backup reserve at ${Math.round(soc)}%, at/below the ${band.pct}% threshold — drawing from grid power, no action needed.`
-        : `Backup reserve at ${Math.round(soc)}%, at or below the ${band.pct}% ${band.priority}-priority threshold.`,
+        ? `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at/below'} the ${band.pct}% threshold — drawing from grid power, no action needed.${heldNote}`
+        : `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% ${band.priority}-priority threshold.${heldNote}`,
     });
   }
 

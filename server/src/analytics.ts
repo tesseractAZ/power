@@ -48,7 +48,14 @@ const PEER_METRICS: PeerMetric[] = [
     key: 'temp',
     label: 'temperature',
     category: 'Thermal',
-    floor: 5,
+    // v1.17.0 (engine-review F18) — 5°F was far below any thermally meaningful
+    // sibling delta: 1407 rises in 30 days (52.6% short-clear, the fleet's #1
+    // event source) with a 400-rise ground-truth join showing EVERY fired delta
+    // ≤4.5°C (8.1°F) at absolute temps ≤37°C — 0 of 400 actionable, while the
+    // absolute thermal engine (40°C info band) stayed quiet and correct. 9°F
+    // (5°C) sits just above the observed benign-spread envelope; the peer-SoC
+    // floor got the identical treatment (5→8) in v0.13.2. z-scores unchanged.
+    floor: 9,
     get: (pk) => {
       const c = pk.maxCellTemp ?? pk.temp;
       return c == null ? null : cToF(c);
@@ -1814,6 +1821,14 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
   ) / 1000;
   if (df.minProjectedSoc != null && df.minProjectedSocTs != null && df.minProjectedSoc < df.reserveSoc) {
     const when = new Date(df.minProjectedSocTs).toLocaleString([], { weekday: 'short', hour: 'numeric' });
+    // v1.17.0 (engine-review F13) — discriminating power. The islanded-only dip
+    // reads 0% every night on a home that rides the grid at the reserve floor
+    // (82/82 valid HA samples over 7 days), so depth alone can't distinguish a
+    // marginal night from a hopeless one. Hours-below-reserve is the magnitude
+    // that still varies when the floor saturates.
+    const hoursBelowReserve = df.hours.filter(
+      (h) => h.projectedSocPct != null && h.projectedSocPct < df.reserveSoc,
+    ).length;
     const why = driverCloud > 50
       ? `Driven primarily by tomorrow's high cloud cover (~${Math.round(driverCloud)}% avg). Under typical Phoenix-clear sky (~20% cloud) the projection would stay above reserve.`
       : driverCloud > 30
@@ -1837,6 +1852,7 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
       facts: [
         { label: 'Projected low SoC', value: `${df.minProjectedSoc}%` },
         { label: 'Reserve floor', value: `${df.reserveSoc}%` },
+        { label: 'Hours below reserve (islanded)', value: `${hoursBelowReserve} h` },
         { label: 'Expected at', value: when },
         { label: 'Solar next 24h', value: `${(df.forecastPvWhNext24 / 1000).toFixed(1)} kWh` },
         { label: 'Clear-sky ceiling', value: `${clearDayKwh.toFixed(1)} kWh` },

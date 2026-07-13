@@ -960,6 +960,27 @@ test('forecastDayAlerts — projected dip is grid-aware (v0.59.0)', () => {
   assert.match(onGrid!.detail, /islanded|backstopping/i);
 });
 
+test('forecastDayAlerts — v1.17.0 (F13) dip alert carries the hours-below-reserve discriminating fact', () => {
+  // On a home that rides the grid at the reserve floor the projected depth
+  // saturates at 0% every night; hours-below-reserve is the magnitude that
+  // still varies. 6 of 24 hours below the 15% reserve here.
+  const fc = emptyForecast({
+    minProjectedSoc: 0,
+    minProjectedSocTs: 1_900_000_000_000,
+    reserveSoc: 15,
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      projectedSocPct: (h) => (h >= 2 && h <= 7 ? 5 : 50),
+    }),
+  });
+  const dip = forecastDayAlerts(fc).find((a) => a.id === 'forecast-soc-dip');
+  assert.ok(dip);
+  const fact = dip!.facts?.find((f) => f.label === 'Hours below reserve (islanded)');
+  assert.ok(fact, 'the discriminating fact must be present');
+  assert.equal(fact!.value, '6 h');
+});
+
 test('blendNightLoad — trim is FLOOR-CAPPED so a pathologically-quiet recent window cannot gut the curve (v0.59.0 review)', () => {
   // recent 500 W vs curve 6000 W: raw blend = 6000*0.4 + 500*0.6 = 2700, but the
   // 50% max-trim floor (6000*0.5 = 3000) binds → never below half the curve.
