@@ -160,6 +160,14 @@ export interface LrModel {
   finalLoss: number;
   /** Notes for the human reading the file. */
   notes?: string;
+  /** v1.18.0 (F16) — WHERE the model was loaded from, stamped by loadModel/
+   *  loadBaselineModelOnly (never persisted to disk). 'shadow' = the online-SGD
+   *  file; 'baseline' = MODEL_PATH (labels.csv batch fit); 'default' = the
+   *  in-code fallback. The samples gate applies only to non-baseline labeled
+   *  models: a converged batch fit legitimately has ~one sample per fleet pack
+   *  (~20-25 here) and must not be permanently gated by a floor written for
+   *  the online one-class walk. */
+  provenance?: 'shadow' | 'baseline' | 'default';
 }
 
 /** Sigmoid activation. */
@@ -321,7 +329,7 @@ export function loadModel(): LrModel {
   if (sourcePath) {
     try {
       const raw = readFileSync(sourcePath, 'utf8');
-      const m = JSON.parse(raw) as LrModel;
+      const m = { ...(JSON.parse(raw) as LrModel), provenance: (sourcePath === SHADOW_PATH ? 'shadow' : 'baseline') as 'shadow' | 'baseline' };
       modelCache = m;
       modelCacheLoadedAt = Date.now();
       modelCacheSourcePath = sourcePath;
@@ -333,7 +341,7 @@ export function loadModel(): LrModel {
       if (sourcePath === SHADOW_PATH && baselineExists) {
         try {
           const raw = readFileSync(MODEL_PATH, 'utf8');
-          const m = JSON.parse(raw) as LrModel;
+          const m = { ...(JSON.parse(raw) as LrModel), provenance: 'baseline' as const };
           modelCache = m;
           modelCacheLoadedAt = Date.now();
           modelCacheSourcePath = MODEL_PATH;
@@ -346,11 +354,11 @@ export function loadModel(): LrModel {
     }
   }
 
-  modelCache = DEFAULT_MODEL;
+  modelCache = { ...DEFAULT_MODEL, provenance: 'default' as const };
   modelCacheLoadedAt = Date.now();
   modelCacheSourcePath = null;
   modelCacheSourceMtimeMs = 0;
-  return DEFAULT_MODEL;
+  return modelCache;
 }
 
 export function saveModel(model: LrModel): void {
@@ -381,7 +389,7 @@ export function saveModel(model: LrModel): void {
 export function loadBaselineModelOnly(): LrModel | null {
   if (!existsSync(MODEL_PATH)) return null;
   try {
-    return JSON.parse(readFileSync(MODEL_PATH, 'utf8')) as LrModel;
+    return { ...(JSON.parse(readFileSync(MODEL_PATH, 'utf8')) as LrModel), provenance: 'baseline' };
   } catch {
     return null;
   }
@@ -708,8 +716,12 @@ function gateEnvNum(name: string, def: number): number {
  * (three near-new packs falsely tiered 'moderate'). 8 features + bias ≈ 9
  * params; ≥10 observations/param is the floor of respectability. */
 const PACK_RISK_MIN_TRAINING_SAMPLES = gateEnvNum('PACK_RISK_MIN_TRAINING_SAMPLES', 100);
-/* Minimum decided outcomes before alert-family precision counts as evidence. */
-const PACK_RISK_MIN_DECIDED_OUTCOMES = gateEnvNum('PACK_RISK_MIN_DECIDED_OUTCOMES', 10);
+/* Minimum decided outcomes (with ≥1 dismissal among them) before alert-family
+ * precision counts as evidence. 3, not higher: dismissals are ALWAYS
+ * informative (each one is an explicit false-positive verdict), so a short
+ * 100%-dismiss stream must still be able to degrade the model — a 10-outcome
+ * floor would have ignored up to 9 straight false-positive verdicts. */
+const PACK_RISK_MIN_DECIDED_OUTCOMES = gateEnvNum('PACK_RISK_MIN_DECIDED_OUTCOMES', 3);
 
 export function computeGateDecision(model: LrModel): {
   driftL2: number | null;
@@ -788,12 +800,14 @@ export function computeGateDecision(model: LrModel): {
     // express a false positive. The live system's 33 outcomes were 33 batch
     // 'ack's (median time-to-action 21.9 DAYS) — a UI that only ever produces
     // acks pins precision at 1.0 forever, which is not a measurement; the
-    // precision gate could structurally never fire. Require a minimum decided
-    // count AND at least one dismissal before the ratio counts. This can never
-    // block a genuine degrade: precision < 0.4 arithmetically requires
-    // dismissals to dominate, so any sub-threshold stream passes the guard.
+    // precision gate could structurally never fire. Require at least one
+    // dismissal AND a small decided floor (3 — anti-flap only, so a single
+    // stray dismissal can't degrade the model by itself, but a genuine short
+    // false-positive streak still can). Dismissals are the informative class:
+    // every sub-0.4 stream necessarily contains them, so this guard can delay
+    // a genuine degrade by at most two outcomes, never block it.
     overallPrecision =
-      totalDecided >= PACK_RISK_MIN_DECIDED_OUTCOMES && totalDismiss > 0
+      totalDismiss > 0 && totalDecided >= PACK_RISK_MIN_DECIDED_OUTCOMES
         ? totalReal / totalDecided
         : null;
   } catch {
@@ -804,10 +818,25 @@ export function computeGateDecision(model: LrModel): {
   // training samples) must not reach the composite regardless of drift or
   // precision. loadModel() prefers the shadow file whenever it exists, so
   // this is the only check standing between a 13-sample artifact and the
-  // dashboard. Scoped to source 'labeled': the in-code heuristic-distilled
-  // default mirrors the heuristic by construction — sample count is not its
-  // trust axis, and cold-start (no shadow at all) stays ungated as designed.
-  const samplesBad = model.source === 'labeled' && model.samples < PACK_RISK_MIN_TRAINING_SAMPLES;
+  // dashboard. Exemptions, both deliberate:
+  //  - source 'heuristic-distilled' (the in-code default and distilled fits
+  //    mirror the heuristic by construction — sample count is not their trust
+  //    axis; cold-start stays ungated as designed);
+  //  - provenance 'baseline' (a labels.csv batch fit via train-pack-risk is a
+  //    CONVERGED, balance-checked fit that legitimately has ~one sample per
+  //    fleet pack — ~20-25 here — and would otherwise be gated forever; the
+  //    train script owns its own sample floor).
+  // Everything else — the online-SGD shadow, and any file whose `source` is
+  // missing or unrecognized (fail-safe: `undefined === 'labeled'` would have
+  // let a hand-edited file through) — must show a FINITE samples count at or
+  // above the floor (`undefined < 100` is false — the old shape silently
+  // opened the gate on a corrupt file). Note the shadow inherits its seed
+  // model's batch count (~20-25 on this fleet), so the floor in practice
+  // demands ≥75 real operator outcomes on top — bounded dilution, accepted.
+  const samplesBad =
+    model.provenance !== 'baseline' &&
+    model.source !== 'heuristic-distilled' &&
+    !(Number.isFinite(model.samples) && model.samples >= PACK_RISK_MIN_TRAINING_SAMPLES);
   const driftBad = driftL2 != null && driftL2 > threshold;
   const precBad = overallPrecision != null && overallPrecision < minPrecision;
   const degraded = samplesBad || driftBad || precBad;

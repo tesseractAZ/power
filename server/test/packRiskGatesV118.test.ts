@@ -209,11 +209,121 @@ test('F16 — a mature ungated model blends novelty into the composite again', (
   );
 });
 
-test('F16 — below MIN_DECIDED, even mixed outcomes are not evidence', () => {
+test('F16 — below MIN_DECIDED (3), even a mixed stream is not evidence; AT the boundary it is', () => {
   resetFiles();
   writeFileSync(SHADOW_PATH, modelJson({ samples: 250 }));
   writeFileSync(BASELINE_PATH, modelJson({ samples: 250 }));
-  writeOutcomes([{ outcome: 'ack' }, { outcome: 'dismiss' }, { outcome: 'ack' }]); // 3 < 10
+  // 2 decided (1 ack + 1 dismiss) < 3 → a single stray dismissal cannot
+  // degrade the model by itself.
+  writeOutcomes([{ outcome: 'ack' }, { outcome: 'dismiss' }]);
+  let gate = computeGateDecision(loadModel());
+  assert.equal(gate.overallPrecision, null, '2 decided outcomes are noise, not a precision estimate');
+  // Exactly 3 decided with a dismissal IS evidence (>= is inclusive): a short
+  // 100%-false-positive streak must be able to degrade — the review proved a
+  // 10-outcome floor would have ignored up to 9 straight dismissals.
+  writeOutcomes([{ outcome: 'ack' }, { outcome: 'dismiss' }, { outcome: 'dismiss' }]);
+  gate = computeGateDecision(loadModel());
+  assert.ok(gate.overallPrecision != null, 'exactly MIN_DECIDED with a dismissal counts');
+  assert.ok(Math.abs((gate.overallPrecision ?? 0) - 1 / 3) < 1e-9);
+  assert.equal(gate.degraded, true, '33% precision < 0.4 must degrade');
+  assert.equal(gate.reason, 'precision');
+});
+
+/* ── review-driven mutation killers + scoping tests ───────────────── */
+
+test('F16 — a labeled model with EXACTLY the floor count passes (boundary is inclusive)', () => {
+  resetFiles();
+  writeFileSync(SHADOW_PATH, modelJson({ samples: 100 }));
+  writeFileSync(BASELINE_PATH, modelJson({ samples: 100 }));
   const gate = computeGateDecision(loadModel());
-  assert.equal(gate.overallPrecision, null, '3 decided outcomes are noise, not a precision estimate');
+  assert.equal(gate.degraded, false, `exactly ${gate.minTrainingSamples} samples suffices; got reason=${gate.reason}`);
+});
+
+test('F16 — the literal in-code default shape (heuristic-distilled, samples 0) stays ungated', () => {
+  resetFiles();
+  // No files at all → loadModel returns the in-code default: samples 0,
+  // source 'heuristic-distilled'. It mirrors the heuristic by construction —
+  // gating it would pin every cold-start install to degraded:'samples'.
+  const m = loadModel();
+  assert.equal(m.source, 'heuristic-distilled');
+  assert.equal(m.samples, 0);
+  const gate = computeGateDecision(m);
+  assert.equal(gate.degraded, false, 'cold-start default must not be samples-gated');
+  assert.equal(gate.reason, undefined);
+});
+
+test('F16 — a labels.csv BATCH baseline (~20 samples, source labeled) is the graduation path and passes', () => {
+  resetFiles();
+  // train-pack-risk writes MODEL_PATH with source 'labeled' and ~one sample
+  // per fleet pack (~20-25 here). A converged batch fit must not be
+  // permanently gated by a floor written for the online one-class walk.
+  writeFileSync(BASELINE_PATH, modelJson({ samples: 20 }));
+  const m = loadModel(); // no shadow → serves the baseline, provenance 'baseline'
+  assert.equal(m.provenance, 'baseline');
+  const gate = computeGateDecision(m);
+  assert.equal(gate.degraded, false, `batch-trained baseline must pass the samples gate; got reason=${gate.reason}`);
+});
+
+test('F16 — a shadow with a MISSING source field is gated (fail-safe), not silently served', () => {
+  resetFiles();
+  const noSource = JSON.parse(modelJson({ samples: 3 }));
+  delete noSource.source;
+  writeFileSync(SHADOW_PATH, JSON.stringify(noSource));
+  const gate = computeGateDecision(loadModel());
+  assert.equal(gate.degraded, true, "undefined !== 'heuristic-distilled' → the floor applies");
+  assert.equal(gate.reason, 'samples');
+});
+
+test('F16 — a shadow with a MISSING samples field is gated (undefined < 100 is false — the old shape failed open)', () => {
+  resetFiles();
+  const noSamples = JSON.parse(modelJson({ samples: 0 }));
+  delete noSamples.samples;
+  writeFileSync(SHADOW_PATH, JSON.stringify(noSamples));
+  const gate = computeGateDecision(loadModel());
+  assert.equal(gate.degraded, true);
+  assert.equal(gate.reason, 'samples');
+});
+
+test('F16 — a mature model degraded for PRECISION keeps novelty in the composite (only the samples gate pins fully)', () => {
+  resetFiles();
+  writeFileSync(SHADOW_PATH, modelJson({ samples: 250 }));
+  writeFileSync(BASELINE_PATH, modelJson({ samples: 250 }));
+  // 2 real / 12 decided = 0.17 < 0.4 → precision degrade on a mature model.
+  writeOutcomes([
+    ...Array.from({ length: 2 }, () => ({ outcome: 'ack' })),
+    ...Array.from({ length: 10 }, () => ({ outcome: 'dismiss' })),
+  ]);
+  const f = riskFixtures();
+  const r = computePackRiskV2(f.devices, f.heuristic, f.emptyDeg, f.emptyTherm, f.emptyIr, f.chargeCurve);
+  assert.equal(r.degraded, true);
+  assert.equal(r.degradeReason, 'precision');
+  const p5 = r.packs.find((p) => p.packNum === 5)!;
+  // Trained is pinned to the heuristic, but the mean-of-three (with novelty)
+  // is preserved for mature-model degrades — the full pin is samples-only.
+  assert.equal(p5.trained.score0to100, 4, 'trained track pinned to heuristic');
+  assert.ok(
+    p5.composite0to100 > 4,
+    `precision-degraded composite must still blend novelty; got ${p5.composite0to100}`,
+  );
+});
+
+test('F16 — gate knobs are empty-string-safe (the HA options→env bridge exports unset options as "")', () => {
+  resetFiles();
+  writeFileSync(SHADOW_PATH, modelJson({ samples: 250 }));
+  writeFileSync(BASELINE_PATH, modelJson({ samples: 250 }));
+  const prev = process.env.PACK_RISK_DRIFT_THRESHOLD;
+  const prevP = process.env.PACK_RISK_MIN_PRECISION;
+  try {
+    process.env.PACK_RISK_DRIFT_THRESHOLD = '';
+    process.env.PACK_RISK_MIN_PRECISION = '';
+    const gate = computeGateDecision(loadModel());
+    // Number('') === 0 would set threshold 0 (degrade on any drift) and
+    // minPrecision 0 (precision gate never fires) — reintroducing F16.
+    assert.equal(gate.threshold, 2, `empty env must fall back to 2.0; got ${gate.threshold}`);
+    assert.equal(gate.minPrecision, 0.4, `empty env must fall back to 0.4; got ${gate.minPrecision}`);
+    assert.equal(gate.degraded, false);
+  } finally {
+    if (prev == null) delete process.env.PACK_RISK_DRIFT_THRESHOLD; else process.env.PACK_RISK_DRIFT_THRESHOLD = prev;
+    if (prevP == null) delete process.env.PACK_RISK_MIN_PRECISION; else process.env.PACK_RISK_MIN_PRECISION = prevP;
+  }
 });
