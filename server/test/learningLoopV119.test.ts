@@ -51,7 +51,7 @@ writeFileSync(SNAP_PATH, bigHistory.join('\n') + '\n');
 const preBytes = statSync(SNAP_PATH).size;
 
 const { captureSnapshot, getSnapshot } = await import('../src/featureSnapshot.js');
-const { coulombicEfficiencyFromCounters } = await import('../src/analytics.js');
+const { coulombicEfficiencyFromCounters, mergeCounterEdges } = await import('../src/analytics.js');
 
 test('F20 — boot compaction: an oversized history file is rewritten down to the retained LRU entries', () => {
   // First touch initializes the module (hydrate + compact).
@@ -182,4 +182,95 @@ test('F17 — insufficient points return null (no fabrication from one sample)',
     ),
     null,
   );
+});
+
+/* ── F17 perf: boundary-point fetch equivalence ───────────────────── */
+
+/** Mimic recorder.queryFirstLast over an in-memory sorted series. */
+function firstLast(
+  pts: Array<{ ts: number; value: number }>,
+  since: number,
+  until: number,
+): Array<{ ts: number; value: number }> {
+  const inWin = pts.filter((p) => p.ts >= since && p.ts <= until);
+  if (inWin.length === 0) return [];
+  const first = inWin[0];
+  const last = inWin[inWin.length - 1];
+  return last.ts !== first.ts ? [first, last] : [first];
+}
+
+test('F17 perf — randomized property: edge-merged input is CE-equivalent to the raw window (500 trials)', () => {
+  // The analysePack call site replaced the raw 30-day counter query (~28k
+  // rows/pack, ~150 ms Pi event-loop stall) with 4 LIMIT-1 edge seeks per
+  // metric. This property pins the substitution: for ANY series shape —
+  // sparse, dense, tail-empty, single-point windows, counter resets,
+  // artifact ratios, boundary-exact timestamps — the pure function must
+  // produce the IDENTICAL published CE from the merged edges.
+  let seed = 0xC0FFEE;
+  const rnd = () => {
+    // xorshift32 — deterministic, no Math.random (repo test convention).
+    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+    return ((seed >>> 0) % 100000) / 100000;
+  };
+  const now = 1_790_000_000_000;
+  const since = now - 30 * DAY;
+  for (let trial = 0; trial < 500; trial++) {
+    const n = Math.floor(rnd() * 40); // 0..39 points, incl. degenerate counts
+    const mkSeries = () => {
+      const pts: Array<{ ts: number; value: number }> = [];
+      let v = 1_000_000;
+      let ts = since + Math.floor(rnd() * 3 * DAY);
+      for (let i = 0; i < n; i++) {
+        // Occasionally land EXACTLY on the 7-day tail cutoff (boundary case)
+        // or reset the counter (BMS swap).
+        ts = rnd() < 0.05 ? now - 7 * DAY : ts + Math.floor(rnd() * 2 * DAY) + HOUR;
+        if (ts > now) break;
+        v = rnd() < 0.03 ? 1_000 : v + Math.floor(rnd() * 30_000);
+        pts.push({ ts, value: v });
+      }
+      return pts.sort((a, b) => a.ts - b.ts);
+    };
+    const chg = mkSeries();
+    const dsg = mkSeries();
+    const raw = coulombicEfficiencyFromCounters(chg, dsg, now);
+    const edges = coulombicEfficiencyFromCounters(
+      mergeCounterEdges(firstLast(chg, since, now), firstLast(chg, now - 7 * DAY, now)),
+      mergeCounterEdges(firstLast(dsg, since, now), firstLast(dsg, now - 7 * DAY, now)),
+      now,
+    );
+    assert.equal(edges, raw, `trial ${trial}: edges=${edges} raw=${raw} (n=${n})`);
+  }
+});
+
+test('F17 perf — real readRecorder queryFirstLast returns exactly the window edges', async () => {
+  // Seed a samples table directly (recorder schema), then open it with
+  // createReadRecorder — the READ-ONLY worker recorder analysePack actually
+  // runs on — and compare queryFirstLast against query()'s own first/last.
+  const { DatabaseSync } = await import('node:sqlite');
+  const dbPath = join(tmpRoot, 'edge-test.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`CREATE TABLE samples (ts INTEGER NOT NULL, sn TEXT NOT NULL, metric TEXT NOT NULL, value REAL NOT NULL);
+           CREATE INDEX idx_samples_sn_metric_ts ON samples (sn, metric, ts);`);
+  const ins = db.prepare('INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)');
+  const base = 1_790_000_000_000;
+  for (let i = 0; i < 48; i++) ins.run(base + i * HOUR, 'SN-EDGE', 'pack1_lifetime_chg_mah', 1_000_000 + i * 20_000);
+  db.close();
+
+  const { createReadRecorder } = await import('../src/readRecorder.js');
+  const rr = createReadRecorder(dbPath);
+  try {
+    assert.equal(typeof rr.queryFirstLast, 'function', 'the worker recorder must implement the fast path');
+    const since = base + 5 * HOUR;
+    const until = base + 40 * HOUR;
+    const full = rr.query('SN-EDGE', 'pack1_lifetime_chg_mah', since, until);
+    assert.ok(full.length > 2, `fixture must have interior rows (${full.length})`);
+    const edges = rr.queryFirstLast!('SN-EDGE', 'pack1_lifetime_chg_mah', since, until);
+    assert.deepEqual(edges, [full[0], full[full.length - 1]], 'edges must be the exact first/last rows');
+    // Empty window → empty result; single-row window → one point, not a pair.
+    assert.deepEqual(rr.queryFirstLast!('SN-EDGE', 'pack1_lifetime_chg_mah', until + DAY, until + 2 * DAY), []);
+    const one = rr.queryFirstLast!('SN-EDGE', 'pack1_lifetime_chg_mah', base, base);
+    assert.equal(one.length, 1, 'a single-sample window returns one point, not a duplicated pair');
+  } finally {
+    rr.close();
+  }
 });

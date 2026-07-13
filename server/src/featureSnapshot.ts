@@ -151,8 +151,11 @@ export function captureSnapshot(record: SnapshotRecord, log: (m: string) => void
   // to 618 h older than the fire they labeled. The caller (alertMonitor)
   // invokes this exactly once per RISE, so every rise now captures fresh
   // features; the guard below only absorbs same-rise double-invocation.
+  // Math.abs: on this host the clock can step at NTP resync; a signed
+  // comparison would read any BACKWARD step as "same rise" and suppress
+  // captures until wall-clock re-passed the stale prev.ts.
   const prev = cache.get(record.alertId);
-  if (prev && record.ts - prev.ts < SAME_RISE_GUARD_MS) return;
+  if (prev && Math.abs(record.ts - prev.ts) < SAME_RISE_GUARD_MS) return;
   // Delete-before-set keeps Map insertion order = recency for the LRU.
   cache.delete(record.alertId);
   cache.set(record.alertId, record);

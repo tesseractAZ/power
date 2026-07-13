@@ -2179,6 +2179,25 @@ const CE_CONSISTENCY_TOL_PP = 2.0;
  * A genuinely degrading pack is still covered by SoH fade, cell-imbalance,
  * internal-R, and the absolute thermal engines.
  */
+/**
+ * v1.19.0 (F17 perf) — merge the full-window edge pair and the 7-day-tail
+ * edge pair into one sorted, ts-deduped point array that is EQUIVALENT input
+ * for coulombicEfficiencyFromCounters: the pure function reads only
+ * chgPts[0]/chgPts[last] (full window) and the first/last point with
+ * ts ≥ now−7d (tail), and those four extremes are exactly what the two edge
+ * pairs carry. Dedup collapses only identical-ts rows, which mirrors the raw
+ * array's behavior when a window genuinely holds fewer than two distinct
+ * points (the function's ≥2-point gates then fire identically). Proven by
+ * the randomized equivalence property test in learningLoopV119.test.ts.
+ */
+export function mergeCounterEdges(
+  fullEdges: Array<{ ts: number; value: number }>,
+  tailEdges: Array<{ ts: number; value: number }>,
+): Array<{ ts: number; value: number }> {
+  const merged = [...fullEdges, ...tailEdges].sort((a, b) => a.ts - b.ts);
+  return merged.filter((p, i) => i === 0 || p.ts !== merged[i - 1].ts);
+}
+
 export function coulombicEfficiencyFromCounters(
   chgPts: Array<{ ts: number; value: number }>,
   dsgPts: Array<{ ts: number; value: number }>,
@@ -2373,15 +2392,25 @@ function analysePack(
   // 93-95% that the pack-risk heuristic saturated to max risk with the text
   // "side-reactions consuming charge — early cell aging" on month-old healthy
   // packs. All gating lives in coulombicEfficiencyFromCounters (pure, tested).
-  const lifetimeMetrics = recorder.queryMulti(
-    d.sn,
-    [`pack${pk.num}_lifetime_chg_mah`, `pack${pk.num}_lifetime_dsg_mah`],
-    since,
-    now,
-  );
+  //
+  // Boundary-point fetch: the pure function reads ONLY the first/last point
+  // of the full window and the first/last point of the 7-day tail, so
+  // materializing the raw window (~28k rows/pack over 30 days ≈ ~150 ms of
+  // Pi event-loop stall per pack) buys nothing. Four LIMIT-1 index seeks per
+  // metric reproduce the exact same four extremes; merging the two edge
+  // pairs (dedup by ts) preserves the pure function's point-count semantics
+  // too — see the equivalence property test in learningLoopV119.test.ts.
+  // Falls back to the raw query for Recorder stubs without queryFirstLast.
+  const ceEdgePoints = (metric: string): Array<{ ts: number; value: number }> => {
+    if (!recorder.queryFirstLast) return recorder.query(d.sn, metric, since, now);
+    return mergeCounterEdges(
+      recorder.queryFirstLast(d.sn, metric, since, now),
+      recorder.queryFirstLast(d.sn, metric, now - CE_WINDOW_MS, now),
+    );
+  };
   const coulombicEffPct = coulombicEfficiencyFromCounters(
-    lifetimeMetrics.get(`pack${pk.num}_lifetime_chg_mah`) ?? [],
-    lifetimeMetrics.get(`pack${pk.num}_lifetime_dsg_mah`) ?? [],
+    ceEdgePoints(`pack${pk.num}_lifetime_chg_mah`),
+    ceEdgePoints(`pack${pk.num}_lifetime_dsg_mah`),
     now,
   );
 
