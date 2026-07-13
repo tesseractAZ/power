@@ -358,14 +358,14 @@ class EcoFlowPanelDashboard extends HTMLElement {
           </div>
           ${risk ? `<div class="tile">
             <div class="tile-label">ML model</div>
-            <div class="tile-value">${risk.modelSource === 'labeled' ? 'real' : 'baseline'}</div>
-            <div class="tile-sub">${esc(risk.modelVersion)}</div>
+            <div class="tile-value">${risk.degradeReason === 'samples' ? 'immature — gated' : risk.modelSource === 'labeled' ? 'real' : 'baseline'}</div>
+            <div class="tile-sub">${risk.degradeReason === 'samples' ? `${risk.modelTrainingSamples ?? '?'} labeled samples — composite is heuristic-only until ${risk.gateDecision?.minTrainingSamples ?? 100}` : esc(risk.modelVersion)}</div>
           </div>` : ''}
         </div>
       </div>
       ${risk ? `
       <div class="section">
-        <div class="section-title">Pack risk (composite — heuristic + trained + novelty)</div>
+        <div class="section-title">Pack risk (${risk.degradeReason === 'samples' ? 'heuristic only — ML tracks shown as diagnostics, not blended' : risk.degraded ? `composite — trained track degraded: ${esc(risk.degradeReason || '')}` : 'composite — heuristic + trained + novelty'})</div>
         ${riskRows}
       </div>
       ` : ''}
