@@ -340,7 +340,7 @@ const ES_TITLE_BY_ID_PREFIX: ReadonlyArray<readonly [string, string]> = [
   ['dpu-err', 'Código de error del inversor'],
   ['shp2-src-err', 'Error en una fuente de energía'],
   ['shp2-src-hw', 'Problema de enlace en una fuente'],
-  ['shp2-below-reserve', 'Respaldo por debajo de la reserva'],
+  ['shp2-below-reserve', 'Respaldo en o por debajo de la reserva'], // v1.17.0 F14 — inclusive floor: 'at or below', not strictly below
   ['shp2-near-reserve', 'Respaldo acercándose a la reserva'],
   ['circuit-overload', 'Circuito cerca del límite del disyuntor'],
   ['cloud-session-stale', 'Sesión de la nube de EcoFlow inactiva'],

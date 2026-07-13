@@ -154,6 +154,26 @@ export function isCellImbalanceResolveDwellFamily(alert: Pick<Alert, 'id'>): boo
   return /^vdiff-(warn|crit)-/.test(alert.id);
 }
 
+/* v1.17.0 (engine-review F13) — resolve-side dwell for the forecast-soc-dip
+ * family. Unlike the 3-min sensor-boundary dwells above, this one absorbs
+ * FORECAST-PIPELINE flicker: a regenerated forecast that momentarily reads
+ * non-dipping (or a post-restart cold-cache null) clears the alert for a full
+ * ~30-min forecast-cache cycle before the next regeneration re-rises it —
+ * 185 rises in 40 days (up to 11/day) for an at-most-once-nightly condition.
+ * 90 min comfortably outlasts one bad cache cycle. NaN/empty-safe parse
+ * (Number('') === 0 would set a zero dwell and silently disable the fix). */
+const FORECAST_DIP_RESOLVE_DWELL_MS = (() => {
+  const raw = process.env.FORECAST_DIP_RESOLVE_DWELL_MS;
+  if (raw == null || raw.trim() === '') return 90 * 60_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 90 * 60_000;
+})();
+
+/** Pure + exported for tests. */
+export function isForecastDipResolveDwellFamily(alert: Pick<Alert, 'id'>): boolean {
+  return alert.id === 'forecast-soc-dip';
+}
+
 /**
  * v0.74.0 — a short, human-facing device locator appended to the push TITLE so
  * the SAME condition on different subjects is distinguishable at a glance
@@ -1676,6 +1696,23 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           continue;
         }
         if (now - t.clearedSince < VDIFF_RESOLVE_DWELL_MS) continue;
+      }
+      // v1.17.0 (engine-review F13) — resolve-side dwell for forecast-soc-dip.
+      // The dip condition genuinely persists all night, but its PRESENCE flickers
+      // with the forecast pipeline: a regenerated forecast momentarily reading
+      // non-dipping (or a post-restart cold-cache null) clears the alert for one
+      // ~30-min forecast-cache cycle and the next regeneration re-rises it —
+      // 185 rises in 40 days (up to 11/day) for what is at most a once-nightly
+      // condition. The dwell must therefore outlast a full forecast-cache cycle,
+      // unlike the 3-min sensor-boundary dwells above. Resolve-only, and the
+      // family is info-severity while grid-backstopped — holding its good-news
+      // push can never delay a fire or the audible alarm.
+      if (isForecastDipResolveDwellFamily(t.alert)) {
+        if (t.clearedSince == null) {
+          t.clearedSince = now;
+          continue;
+        }
+        if (now - t.clearedSince < FORECAST_DIP_RESOLVE_DWELL_MS) continue;
       }
       const duration = now - t.firstSeen;
       // v0.16.4 — defense-in-depth: a non-annunciating alert (annunciate:false,

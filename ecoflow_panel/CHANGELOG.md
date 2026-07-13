@@ -1,3 +1,74 @@
+## v1.17.0 — engine-review F13+F14+F15+F18: the alarm stream earns back its signal-to-noise
+
+Four alarm-quality findings from the 30-day ground-truth review, all in the "trust erosion"
+class — a warning channel that cries constantly (or classifies the emergency one notch too low)
+trains the operator to ignore the one alert that matters.
+
+**F14 — pinned-at-the-floor now classifies at/below reserve (inclusive `<=`).** The backup pool
+holds EXACTLY the integer reserve value for hours every night (7.9 h and 8.8 h stretches in the
+30-day ledger), and the strict `<` in the on-screen classifier filed that steady state under
+"approaching reserve" — warning severity off-grid — while runwayAlarm's inclusive `<=` called
+the identical state critical. In a real overnight outage with the pool holding the floor, the
+operator-trained [Critical] framing would never have appeared on screen; only the instantaneous
+crossing tick was covered. The two engines now agree; grid-backstopped severity remains info.
+
+**F15 — the on-screen SoC band gets the audible ladder's 2% re-arm hysteresis.** Pure banding
+re-evaluated every snapshot, so SoC chattering on a boundary (40↔41) toggled the band alert on
+every sample: 399 on-screen rises in 30 days against ~115 hysteresis-qualified real crossings
+(a replay of the ladder's own re-arm rules over the same data) — 3.5× churn polluting
+cleared-history and the telemetry that trains the auto-silencer. The band now descends
+immediately on a deeper crossing (never delays a worse state) but ascends/clears only once SoC
+climbs past band + 2 — the same margin the audible ladder has always used. Held-above readings
+say "near the X% threshold (holding until above X+2%)" instead of the then-false "at or below".
+The audible ladder itself is untouched.
+
+**F18 — peer-temp effect-size floor 5°F → 9°F.** The single largest event source in the fleet's
+telemetry: 1407 rises in 30 days (52.6% short-clear, peak 67/day), and a 400-rise ground-truth
+join showed every fired delta ≤ 4.5°C (8.1°F) at absolute temps ≤ 37°C — zero actionable, while
+the absolute thermal engine (40°C info band) stayed quiet and correct. 9°F (5°C) sits just above
+the observed benign-spread envelope. Same treatment the peer-SoC floor got in v0.13.2 (5→8);
+z-scores and every absolute threshold unchanged.
+
+**F13 — forecast-soc-dip stops re-rising on forecast-pipeline flicker.** The islanded-only dip
+condition genuinely persists all night, but its PRESENCE flickered with the forecast pipeline
+(a regeneration momentarily reading non-dipping, or a post-restart cold-cache null, clears the
+alert for one ~30-min cache cycle and the next regeneration re-rises it): 185 rises in 40 days,
+up to 11/day, for an at-most-once-nightly condition. It now joins the resolve-side dwell house
+pattern (soc-low/vdiff/baseline-load precedents) with a 90-minute dwell sized to outlast a full
+forecast-cache cycle — resolve-only, info-severity while grid-backstopped, can never delay a
+fire. And because the projected depth saturates at 0% every night on a home that rides the grid
+at the reserve floor (82/82 valid HA samples over 7 days read 0), the alert now carries an
+"Hours below reserve (islanded)" fact — the magnitude that still discriminates a marginal night
+from a hopeless one when depth cannot.
+
+**Pre-merge adversarial review (26-agent workflow: 3 find-lenses → 2-skeptic verify panels →
+worktree mutation testing), confirmed findings fixed before ship:**
+- *All-clear speech during an active critical* — `shp2-below-reserve` is excluded from the
+  broadcast's ambient condition count by design (runwayAlarm owns the floor audible), but with
+  F14's inclusive floor the off-grid at-the-floor state occupies that id for the whole dwell —
+  and the ambient transition to green would SPEAK "All clear. All stations report normal." on
+  the same speakers as the simultaneous runway critical. The green announcement is now gated
+  while any critical-severity alert is active (pre-existing at soc<reserve too — fixed for both);
+  the ambient level itself keeps the v0.23.0 counting design.
+- *TTS-unverbalizable slashes* — the new critical title/detail said "at/below" / "at/under";
+  `verbalizeForTts` has no generic slash rule, so Piper would speak "slash" on the life-safety
+  audible path. All spoken strings now use "at or below" / "at or under", and the Spanish title
+  map (which still said strictly "por debajo") becomes "en o por debajo de la reserva".
+- *The F18 floor also rescales the zero-scatter z* — `floor` doubles as robustZ's MAD-floor, so
+  the identical-siblings warning boundary moved ~7.1°F → ~12.9°F alongside the gate. That
+  coupling is intentional (the floor defines "noteworthy"; z is expressed in floor units) but
+  was undocumented and untested — the comment claiming "z-scores unchanged" was false. Now
+  documented, with severity pinned in tests (9.9°F → info, 13.5°F → warning).
+- *Held-band text consistency* — the "near the X%" wording now keys off the ROUNDED SoC the
+  operator sees; the hysteresis boundary's deliberate one-point divergence from the audible
+  ladder's re-arm (`<=` hold vs `>=` re-arm — display favors hold-stability; the ladder's
+  re-arm is a silent internal flip) is documented instead of claimed as "exact".
+- *Mutation testing: 7/8 killed* — the survivor (hours-below-reserve counting `<=` instead of
+  `<`) is now pinned by a test that also locks in the deliberate asymmetry: hours pinned AT the
+  floor are the F14 at-the-floor state, not "below" hours.
+
++14 regression tests (suite 1376 → 1390); tsc + full suite green.
+
 ## v1.16.0 — engine-review F7+F23: the probabilistic SoC band becomes an actual probability
 
 Two confirmed findings, one root cause in `computeProbabilisticForecast`:

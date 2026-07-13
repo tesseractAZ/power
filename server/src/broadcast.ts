@@ -1079,6 +1079,20 @@ export function startBroadcastMonitor(
     prevLevel = level;
     prevCrit = crit;
     if (!cfg.enabled) return;
+    // v1.17.0 (engine-review F14 follow-up) — never SPEAK an all-clear while a
+    // critical-severity alert is active, even one excluded from the ambient
+    // condition COUNT above. shp2-below-reserve is excluded by design (the
+    // grid-aware runwayAlarm owns its audible), but with F14's inclusive floor
+    // the at-the-reserve-floor state occupies that id for the whole off-grid
+    // dwell — and a spoken "All clear. All stations report normal." while the
+    // runway alarm is simultaneously announcing a critical at the floor is a
+    // contradiction on the same speakers. The ambient LEVEL still adopts green
+    // (v0.23.0 counting design unchanged; state committed above — no retry);
+    // only the green ANNOUNCEMENT is gated.
+    if (level === 'green' && alerts.some((a) => a.severity === 'critical' && a.annunciate !== false)) {
+      log('broadcast: green adopted silently — a critical alert is still active (all-clear speech gated)');
+      return;
+    }
     if (level === 'yellow' && cfg.minSeverity === 'critical') return;
     // v0.23.0 — yellow/green always respect quiet hours. red (a critical
     // condition) breaks through ONLY when the operator opted in; default OFF ⇒
