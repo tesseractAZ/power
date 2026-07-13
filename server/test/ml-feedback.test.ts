@@ -179,7 +179,9 @@ test('computeGateDecision — cold-start (no shadow, no outcomes) is NOT degrade
   // No alert outcomes; precision is null.
   const gate = ml.computeGateDecision(makeBaseline());
   assert.equal(gate.degraded, false, 'cold start should not degrade');
-  assert.equal(gate.driftL2, 0, 'no drift when shadow matches baseline');
+  // v1.18.0 (F16): with no on-disk baseline there is nothing to compare —
+  // drift reads null (unknown), never a measured-looking 0.
+  assert.equal(gate.driftL2, null, 'no baseline on disk → drift is unknown (null)');
   assert.equal(gate.overallPrecision, null, 'no decided outcomes → null precision');
 });
 
@@ -257,20 +259,22 @@ test('computeGateDecision — v0.9.62: drift compares shadow vs on-disk baseline
   assert.equal(gate.reason, 'drift');
 });
 
-test('computeGateDecision — no on-disk baseline (only shadow) → drift treated as 0', () => {
+test('computeGateDecision — no on-disk baseline (only shadow) → drift UNKNOWN (null), not a fake 0', () => {
   // Cold-start edge case: operator has never run training, so MODEL_PATH
   // doesn't exist, but the shadow has accumulated SGD updates. We have no
-  // "true baseline" to compare against — the gate treats drift as 0 (the
-  // correct "no comparison possible" answer) so it stays open and lets
-  // the precision branch decide on its own.
+  // "true baseline" to compare against. v1.18.0 (engine-review F16): this
+  // used to report driftL2 = 0 — a "measured no-drift" verdict for a
+  // comparison that never happened, hiding the shadow's real walk from
+  // /api/models/health. Drift is now null (unknown); unknown alone does not
+  // degrade — the samples gate covers the immature-labeled-shadow case.
   resetModelFiles();
   // Shadow only, with bias deliberately far from any reasonable baseline.
   writeFileSync(SHADOW_PATH, JSON.stringify({ ...makeBaseline(), version: 'shadow-orphan', bias: -10 }));
   touchFile(SHADOW_PATH, Date.now() + 440_000);
 
   const gate = ml.computeGateDecision(makeBaseline());
-  assert.equal(gate.driftL2, 0, 'missing baseline → drift defaults to 0, not null');
-  assert.equal(gate.degraded, false, 'no baseline + no decided outcomes → gate stays open');
+  assert.equal(gate.driftL2, null, 'missing baseline → drift is UNKNOWN (null), never a measured-looking 0');
+  assert.equal(gate.degraded, false, 'unknown drift + no decided outcomes → gate stays open');
 });
 
 /* ─── computePackRiskV2 — degraded gate pins trained → heuristic ─────── */
@@ -289,11 +293,11 @@ test('computePackRiskV2 — degraded gate pins trained score to heuristic per pa
   // no exists→rm→write race (CodeQL js/file-system-race).
   rmSync(outcomesPath, { force: true });
   const now = Date.now();
-  const dismissEntries = [
-    { ts: now, alertId: 'pack-hot-X-1', outcome: 'dismiss', source: {} },
-    { ts: now, alertId: 'pack-hot-X-2', outcome: 'dismiss', source: {} },
-    { ts: now, alertId: 'pack-hot-X-3', outcome: 'dismiss', source: {} },
-  ];
+  // v1.18.0 (F16): precision only counts as evidence with >= 10 decided
+  // outcomes (and >= 1 dismissal) — seed 12 dismissals so the gate fires.
+  const dismissEntries = Array.from({ length: 12 }, (_, i) => (
+    { ts: now, alertId: `pack-hot-X-${i + 1}`, outcome: 'dismiss', source: {} }
+  ));
   writeFileSync(
     outcomesPath,
     dismissEntries.map((e) => JSON.stringify(e)).join('\n') + '\n',

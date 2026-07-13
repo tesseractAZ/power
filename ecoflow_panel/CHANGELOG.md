@@ -1,3 +1,75 @@
+## v1.18.0 — engine-review F16: pack-risk v2 stops serving a 13-sample artifact to the dashboard
+
+The HA dashboard's pack-risk composite blended a shadow logistic-regression model trained on
+just 13 labeled outcomes — a model whose learned signal was 99.99% bias ("raise everyone's
+risk") — plus an unsupervised novelty score, inflating a healthy fleet's composites 4-7×: the
+heuristic scored every pack 2-6 ("low") while three near-new packs rendered "moderate" (≥25)
+and one sat 5 points from "elevated". Both safety gates written to catch exactly this were
+structurally dead.
+
+**The missing gate — minimum training samples.** `loadModel()` prefers the shadow file whenever
+it exists, and nothing checked how much it had learned. A LABELED shadow below
+`PACK_RISK_MIN_TRAINING_SAMPLES` (default 100 — 8 features + bias at ≥10 obs/param; env-tunable,
+NaN/empty-safe) now degrades with reason `samples`, and the operator-facing composite pins to
+the HEURISTIC ALONE — the novelty track is excluded too, because with only the trained track
+pinned, mean(heuristic, heuristic, novelty=100) still read 37 "moderate" on a healthy pack whose
+novelty spike came from a 16-sample charge-curve checkpoint. Both ML tracks stay fully populated
+as diagnostics; they just don't tier packs until the model has earned it. Scoped to source
+`labeled`: the in-code heuristic-distilled default mirrors the heuristic by construction, and
+cold-start stays ungated as designed. Fail-safe on corrupt files (a missing samples field counts
+as insufficient, not as a pass). Mature-model degrades (drift/precision) keep their pre-existing
+behavior.
+
+**The drift gate could never fire on the cold-start it was written for.** With no on-disk
+baseline (the live state — `data/models` contained only the shadow), `driftL2` reported 0: a
+measured-looking no-drift verdict for a comparison that never happened, hiding the shadow's
+actual +0.586 all-bias walk from /api/models/health. It now reports null (unknown); unknown
+alone never degrades, and the samples gate covers the immature-shadow case the dead drift gate
+was masking.
+
+**The precision gate was pinned at 1.0 by a one-class outcome stream.** All 33 recorded outcomes
+were batch "ack"s (median time-to-action 21.9 days, all-zero feature vectors) — a UI that only
+ever produces acks can never register a false positive, so precision read a permanent 1.0 and
+the <0.4 degrade could structurally never fire. Precision now counts as evidence only with
+≥10 decided outcomes AND at least one dismissal; this can never block a genuine degrade
+(precision < 0.4 arithmetically requires dismissals to dominate).
+
+Expected live effect: /api/pack-risk/v2 reports `degraded: true, degradeReason: "samples"`,
+every composite drops to its honest heuristic score (2-6, all "low"), and the false "moderate"
+tiers disappear from the dashboard until the model accumulates 100 real labeled outcomes.
+
+**Pre-merge adversarial review (21-agent workflow: 2 find-lenses → 2-skeptic verify panels →
+worktree mutation testing), all 9 double-confirmed findings fixed before ship:**
+- *The batch-training graduation path was permanently gated* — `labels.csv` + `train-pack-risk`
+  legitimately produces ~one sample per fleet pack (~20-25 here), so the documented path to a
+  real labeled model could never pass a 100-sample floor. Models now carry a load-provenance
+  stamp; a converged batch BASELINE is exempt (the train script owns its own floor) while the
+  online-SGD shadow — the F16 failure mode — still needs 100.
+- *Missing/garbage `source` failed open* — `undefined === 'labeled'` is false, so a hand-edited
+  or foreign-written shadow dodged the gate entirely. The exemption is now allow-listed
+  (`heuristic-distilled` only); anything unrecognized gets the floor.
+- *The precision guard's own claim was false* — a 10-outcome floor would have ignored up to 9
+  straight dismissals (a 100% false-positive stream). Dismissals are always informative: the
+  floor drops to 3 decided outcomes with ≥1 dismissal — a single stray dismissal still can't
+  flap the gate, but a genuine short false-positive streak degrades.
+- */api/models/health contradicted the gate on the same product* — it still rendered the
+  disavowed all-ack precision as 1.0 and presented seed-relative weight movement as measured
+  baseline drift. It now single-sources the gate verdict (same object /api/pack-risk/v2 serves),
+  labels its drift basis (`baseline` vs `default-seed`), and carries `baselineOnDisk`.
+- *The dashboard card mislabeled the gated state* — "ML model: real" + a "heuristic + trained +
+  novelty" title in exactly the state where neither is true. The card now shows
+  "immature — gated · N labeled samples — composite is heuristic-only until 100" and retitles
+  the section per gate state, so the composite drop reads as a fix, not a mystery.
+- *Mutation testing 5/9 killed initially* — all four survivors now have killing tests: the
+  inclusive boundary at exactly 100 samples, the literal cold-start default shape (samples 0,
+  heuristic-distilled) staying ungated, precision-degraded mature models KEEPING novelty in the
+  composite (the full pin is samples-only), and empty-string env knobs falling back to defaults
+  (the HA options→env bridge exports unset options as `''`; `Number('') === 0` would have set
+  a zero drift threshold and reintroduced F16 verbatim).
+
++16 gate tests (packRiskGatesV118); 2 stale-semantics tests updated to the new honest behavior.
+Suite 1390 → 1406; tsc clean.
+
 ## v1.17.0 — engine-review F13+F14+F15+F18: the alarm stream earns back its signal-to-noise
 
 Four alarm-quality findings from the 30-day ground-truth review, all in the "trust erosion"

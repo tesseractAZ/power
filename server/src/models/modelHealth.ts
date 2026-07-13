@@ -15,7 +15,7 @@
 
 import { computeFamilyStats } from '../alertOutcomes.js';
 import { loadShadowModel } from './onlineLR.js';
-import { loadBaselineModelOnly, DEFAULT_MODEL } from '../ml.js';
+import { loadBaselineModelOnly, DEFAULT_MODEL, loadModel, computeGateDecision } from '../ml.js';
 import { FEATURE_NAMES } from '../ml.js';
 
 export interface ModelHealthReport {
@@ -26,8 +26,15 @@ export interface ModelHealthReport {
     /** Per-weight delta between baseline and shadow.
      *  Magnitude shows how much the online updates have moved the model. */
     weightDeltas: Record<string, number>;
-    /** L2 norm of weight differences — a single summary statistic. */
+    /** L2 norm of weight differences — a single summary statistic.
+     *  v1.18.0 (F16): read `driftBasis` before trusting this number — with no
+     *  on-disk baseline it measures movement from the IN-CODE SEED, not drift
+     *  from a trained baseline (the gate's driftL2 reads null in that case). */
     totalDriftL2: number;
+    /** v1.18.0 (F16) — what totalDriftL2 was computed against. */
+    driftBasis: 'baseline' | 'default-seed';
+    /** v1.18.0 (F16) — whether a trained baseline file exists on disk. */
+    baselineOnDisk: boolean;
     /** Samples seen since last full retrain. */
     onlineSamples: number;
     /**
@@ -43,8 +50,16 @@ export interface ModelHealthReport {
   alertFamilies: ReturnType<typeof computeFamilyStats>;
   /** Total alerts with operator verdicts. */
   labeledAlertCount: number;
-  /** Overall precision across all families that have decided outcomes. */
+  /** Overall precision across all families that have decided outcomes.
+   *  v1.18.0 (F16) — same evidence semantics as the pack-risk gate: null
+   *  unless the stream contains >= 1 dismissal and >= 3 decided outcomes.
+   *  A one-class all-'ack' stream is not a measurement (the live system's 33
+   *  batch-acks rendered a fake permanent 1.0 here). */
   overallPrecision: number | null;
+  /** v1.18.0 (F16) — the authoritative auto-downgrade gate verdict for the
+   *  CURRENTLY SERVED pack-risk model (same object /api/pack-risk/v2 reports),
+   *  so the health surface and the gate can never disagree again. */
+  gate: ReturnType<typeof computeGateDecision>;
 }
 
 /** Below this magnitude a weight delta is treated as "no movement" — guards
@@ -59,7 +74,13 @@ export function computeModelHealth(): ModelHealthReport {
   // had run. `loadBaselineModelOnly()` reads MODEL_PATH (the frozen baseline)
   // directly; when no trained baseline exists yet we fall back to the in-code
   // DEFAULT_MODEL rather than the shadow, so the comparison stays honest.
-  const baseline = loadBaselineModelOnly() ?? DEFAULT_MODEL;
+  const baselineOnDisk = loadBaselineModelOnly();
+  // v1.18.0 (F16) — keep the per-weight movement detail even with no trained
+  // baseline (movement since the in-code seed is still diagnostic), but LABEL
+  // the basis: the pre-fix report presented seed-relative movement as if it
+  // were measured baseline drift (the live +0.586 all-bias walk rendered as
+  // authoritative drift while the gate saw nothing).
+  const baseline = baselineOnDisk ?? DEFAULT_MODEL;
   const shadow = loadShadowModel();
   const weightDeltas: Record<string, number> = {};
   let l2sq = 0;
@@ -88,7 +109,12 @@ export function computeModelHealth(): ModelHealthReport {
     totalReal += real;
     totalDecided += decided;
   }
-  const overallPrecision = totalDecided > 0 ? totalReal / totalDecided : null;
+  // v1.18.0 (F16) — single-source the gate verdict and the evidence-guarded
+  // precision from computeGateDecision (the exact object /api/pack-risk/v2
+  // serves), instead of re-deriving both with the disavowed pre-F16 math.
+  const gate = computeGateDecision(loadModel());
+  const overallPrecision = gate.overallPrecision;
+  void totalReal; void totalDecided;
 
   return {
     generatedAt: Date.now(),
@@ -107,6 +133,8 @@ export function computeModelHealth(): ModelHealthReport {
       },
       weightDeltas,
       totalDriftL2: Math.sqrt(l2sq),
+      driftBasis: (baselineOnDisk ? 'baseline' : 'default-seed') as 'baseline' | 'default-seed',
+      baselineOnDisk: baselineOnDisk != null,
       onlineSamples: Math.max(0, shadow.samples - baseline.samples),
       // v0.13.0 — honest count: the raw online-sample delta, but only when
       // SOMETHING actually moved. If every weight (and bias) is within
@@ -118,5 +146,6 @@ export function computeModelHealth(): ModelHealthReport {
     alertFamilies: families,
     labeledAlertCount: labeledCount,
     overallPrecision,
+    gate,
   };
 }

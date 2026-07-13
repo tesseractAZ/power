@@ -160,6 +160,14 @@ export interface LrModel {
   finalLoss: number;
   /** Notes for the human reading the file. */
   notes?: string;
+  /** v1.18.0 (F16) — WHERE the model was loaded from, stamped by loadModel/
+   *  loadBaselineModelOnly (never persisted to disk). 'shadow' = the online-SGD
+   *  file; 'baseline' = MODEL_PATH (labels.csv batch fit); 'default' = the
+   *  in-code fallback. The samples gate applies only to non-baseline labeled
+   *  models: a converged batch fit legitimately has ~one sample per fleet pack
+   *  (~20-25 here) and must not be permanently gated by a floor written for
+   *  the online one-class walk. */
+  provenance?: 'shadow' | 'baseline' | 'default';
 }
 
 /** Sigmoid activation. */
@@ -321,7 +329,7 @@ export function loadModel(): LrModel {
   if (sourcePath) {
     try {
       const raw = readFileSync(sourcePath, 'utf8');
-      const m = JSON.parse(raw) as LrModel;
+      const m = { ...(JSON.parse(raw) as LrModel), provenance: (sourcePath === SHADOW_PATH ? 'shadow' : 'baseline') as 'shadow' | 'baseline' };
       modelCache = m;
       modelCacheLoadedAt = Date.now();
       modelCacheSourcePath = sourcePath;
@@ -333,7 +341,7 @@ export function loadModel(): LrModel {
       if (sourcePath === SHADOW_PATH && baselineExists) {
         try {
           const raw = readFileSync(MODEL_PATH, 'utf8');
-          const m = JSON.parse(raw) as LrModel;
+          const m = { ...(JSON.parse(raw) as LrModel), provenance: 'baseline' as const };
           modelCache = m;
           modelCacheLoadedAt = Date.now();
           modelCacheSourcePath = MODEL_PATH;
@@ -346,11 +354,11 @@ export function loadModel(): LrModel {
     }
   }
 
-  modelCache = DEFAULT_MODEL;
+  modelCache = { ...DEFAULT_MODEL, provenance: 'default' as const };
   modelCacheLoadedAt = Date.now();
   modelCacheSourcePath = null;
   modelCacheSourceMtimeMs = 0;
-  return DEFAULT_MODEL;
+  return modelCache;
 }
 
 export function saveModel(model: LrModel): void {
@@ -381,7 +389,7 @@ export function saveModel(model: LrModel): void {
 export function loadBaselineModelOnly(): LrModel | null {
   if (!existsSync(MODEL_PATH)) return null;
   try {
-    return JSON.parse(readFileSync(MODEL_PATH, 'utf8')) as LrModel;
+    return { ...(JSON.parse(readFileSync(MODEL_PATH, 'utf8')) as LrModel), provenance: 'baseline' };
   } catch {
     return null;
   }
@@ -650,7 +658,10 @@ export interface PackRiskV2Report {
    * Optional so existing consumers don't break.
    */
   degraded?: boolean;
-  degradeReason?: 'drift' | 'precision' | 'drift+precision';
+  /** v1.18.0 (F16) — 'samples': the shadow has too few labeled training
+   *  samples to serve; the composite pins to the heuristic ALONE (the
+   *  novelty track is also excluded — see computePackRiskV2). */
+  degradeReason?: 'samples' | 'drift' | 'precision' | 'drift+precision';
   /** Debug payload for /api/models/health so the dashboard can surface
    *  the exact numbers that drove the gate decision. */
   gateDecision?: {
@@ -658,6 +669,7 @@ export interface PackRiskV2Report {
     overallPrecision: number | null;
     threshold: number;
     minPrecision: number;
+    minTrainingSamples?: number;
     degraded: boolean;
   };
 }
@@ -688,16 +700,40 @@ export interface PackRiskV2Report {
  * why the previous shadow-vs-`model` comparison was a no-op end-to-end.
  * The parameter is retained to preserve the call-site API.
  */
-export function computeGateDecision(_model: LrModel): {
+/* v1.18.0 (engine-review F16) — NaN/empty-safe env parse for the gate knobs.
+ * `Number('') === 0` would zero a threshold and silently flip gate behavior. */
+function gateEnvNum(name: string, def: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === '') return def;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
+/* v1.18.0 (engine-review F16) — minimum labeled training samples before the
+ * shadow LR's score is allowed into the operator-facing composite. The live
+ * system served a 13-sample one-class shadow whose learned signal was 99.99%
+ * bias ("raise everyone's risk"), inflating healthy-fleet composites 4-7×
+ * (three near-new packs falsely tiered 'moderate'). 8 features + bias ≈ 9
+ * params; ≥10 observations/param is the floor of respectability. */
+const PACK_RISK_MIN_TRAINING_SAMPLES = gateEnvNum('PACK_RISK_MIN_TRAINING_SAMPLES', 100);
+/* Minimum decided outcomes (with ≥1 dismissal among them) before alert-family
+ * precision counts as evidence. 3, not higher: dismissals are ALWAYS
+ * informative (each one is an explicit false-positive verdict), so a short
+ * 100%-dismiss stream must still be able to degrade the model — a 10-outcome
+ * floor would have ignored up to 9 straight false-positive verdicts. */
+const PACK_RISK_MIN_DECIDED_OUTCOMES = gateEnvNum('PACK_RISK_MIN_DECIDED_OUTCOMES', 3);
+
+export function computeGateDecision(model: LrModel): {
   driftL2: number | null;
   overallPrecision: number | null;
   threshold: number;
   minPrecision: number;
+  minTrainingSamples: number;
   degraded: boolean;
-  reason?: 'drift' | 'precision' | 'drift+precision';
+  reason?: 'samples' | 'drift' | 'precision' | 'drift+precision';
 } {
-  const threshold = Number(process.env.PACK_RISK_DRIFT_THRESHOLD ?? 2.0);
-  const minPrecision = Number(process.env.PACK_RISK_MIN_PRECISION ?? 0.4);
+  const threshold = gateEnvNum('PACK_RISK_DRIFT_THRESHOLD', 2.0);
+  const minPrecision = gateEnvNum('PACK_RISK_MIN_PRECISION', 0.4);
 
   // Drift: L2 distance between shadow and the on-disk baseline.
   //
@@ -718,9 +754,15 @@ export function computeGateDecision(_model: LrModel): {
   try {
     const baseline = loadBaselineModelOnly();
     if (baseline === null) {
-      // No on-disk baseline → no meaningful drift to report. Treat as 0
-      // so the gate stays open; precision branch can still fire.
-      driftL2 = 0;
+      // v1.18.0 (F16) — no on-disk baseline means drift is UNKNOWN, not zero.
+      // The old `driftL2 = 0` displayed as a measured no-drift verdict in
+      // /api/models/health while the shadow's actual divergence (the live
+      // system's +0.586 all-bias walk) was structurally invisible — the gate
+      // could never fire on the exact cold-start it was written to catch.
+      // null does not degrade by itself (same gate outcome), but the samples
+      // gate now covers the immature-shadow case, and the health surface
+      // stops asserting a comparison that never happened.
+      driftL2 = null;
     } else {
       const shadow = loadShadowModel();
       let l2sq = 0;
@@ -746,24 +788,65 @@ export function computeGateDecision(_model: LrModel): {
     const families = computeFamilyStats();
     let totalReal = 0;
     let totalDecided = 0;
+    let totalDismiss = 0;
     for (const f of families) {
       const real = f.ack + f.failed;
       const decided = real + f.dismiss;
       totalReal += real;
       totalDecided += decided;
+      totalDismiss += f.dismiss;
     }
-    overallPrecision = totalDecided > 0 ? totalReal / totalDecided : null;
+    // v1.18.0 (F16) — precision is EVIDENCE only when the outcome stream can
+    // express a false positive. The live system's 33 outcomes were 33 batch
+    // 'ack's (median time-to-action 21.9 DAYS) — a UI that only ever produces
+    // acks pins precision at 1.0 forever, which is not a measurement; the
+    // precision gate could structurally never fire. Require at least one
+    // dismissal AND a small decided floor (3 — anti-flap only, so a single
+    // stray dismissal can't degrade the model by itself, but a genuine short
+    // false-positive streak still can). Dismissals are the informative class:
+    // every sub-0.4 stream necessarily contains them, so this guard can delay
+    // a genuine degrade by at most two outcomes, never block it.
+    overallPrecision =
+      totalDismiss > 0 && totalDecided >= PACK_RISK_MIN_DECIDED_OUTCOMES
+        ? totalReal / totalDecided
+        : null;
   } catch {
     overallPrecision = null;
   }
 
+  // v1.18.0 (F16) — the missing gate: an immature LABELED shadow (too few
+  // training samples) must not reach the composite regardless of drift or
+  // precision. loadModel() prefers the shadow file whenever it exists, so
+  // this is the only check standing between a 13-sample artifact and the
+  // dashboard. Exemptions, both deliberate:
+  //  - source 'heuristic-distilled' (the in-code default and distilled fits
+  //    mirror the heuristic by construction — sample count is not their trust
+  //    axis; cold-start stays ungated as designed);
+  //  - provenance 'baseline' (a labels.csv batch fit via train-pack-risk is a
+  //    CONVERGED, balance-checked fit that legitimately has ~one sample per
+  //    fleet pack — ~20-25 here — and would otherwise be gated forever; the
+  //    train script owns its own sample floor).
+  // Everything else — the online-SGD shadow, and any file whose `source` is
+  // missing or unrecognized (fail-safe: `undefined === 'labeled'` would have
+  // let a hand-edited file through) — must show a FINITE samples count at or
+  // above the floor (`undefined < 100` is false — the old shape silently
+  // opened the gate on a corrupt file). Note the shadow inherits its seed
+  // model's batch count (~20-25 on this fleet), so the floor in practice
+  // demands ≥75 real operator outcomes on top — bounded dilution, accepted.
+  const samplesBad =
+    model.provenance !== 'baseline' &&
+    model.source !== 'heuristic-distilled' &&
+    !(Number.isFinite(model.samples) && model.samples >= PACK_RISK_MIN_TRAINING_SAMPLES);
   const driftBad = driftL2 != null && driftL2 > threshold;
   const precBad = overallPrecision != null && overallPrecision < minPrecision;
-  const degraded = driftBad || precBad;
-  const reason: 'drift' | 'precision' | 'drift+precision' | undefined =
-    driftBad && precBad ? 'drift+precision' : driftBad ? 'drift' : precBad ? 'precision' : undefined;
+  const degraded = samplesBad || driftBad || precBad;
+  // 'samples' dominates the reason: drift/precision verdicts about a model
+  // too immature to serve are secondary detail.
+  const reason: 'samples' | 'drift' | 'precision' | 'drift+precision' | undefined = samplesBad
+    ? 'samples'
+    : driftBad && precBad ? 'drift+precision' : driftBad ? 'drift' : precBad ? 'precision' : undefined;
 
-  return { driftL2, overallPrecision, threshold, minPrecision, degraded, reason };
+  return { driftL2, overallPrecision, threshold, minPrecision, minTrainingSamples: PACK_RISK_MIN_TRAINING_SAMPLES, degraded, reason };
 }
 
 export function computePackRiskV2(
@@ -831,9 +914,19 @@ export function computePackRiskV2(
     // and `pred.contributions` for debug visibility — only the score that
     // feeds the composite is overridden.
     const trainedScore = gate.degraded ? heur.score0to100 : pred.score0to100;
-    const composite = Math.round(
-      (heur.score0to100 + trainedScore + (nov?.novelty0to100 ?? 0)) / 3,
-    );
+    // v1.18.0 (F16) — an immature ML stack ('samples' gate) contributes
+    // NOTHING to the operator-facing composite: not the shadow score (pinned
+    // above) and not the unsupervised novelty either. With the trained track
+    // pinned, mean(heur, heur, novelty) still read 37 'moderate' on a healthy
+    // pack whose novelty=100 came from a 16-sample charge-curve checkpoint —
+    // the exact 4-7× inflation F16 flagged. Both tracks stay fully populated
+    // as diagnostics; only the headline composite (which the dashboard tiers
+    // at ≥25 'moderate' / ≥50 'elevated') is heuristic-only until the model
+    // earns its way in. Mature-model degrades (drift/precision) keep the
+    // pre-existing behavior: trained pinned, novelty still averaged.
+    const composite = gate.reason === 'samples'
+      ? heur.score0to100
+      : Math.round((heur.score0to100 + trainedScore + (nov?.novelty0to100 ?? 0)) / 3);
     packs.push({
       sn: f.sn,
       device: heur.device,
@@ -878,6 +971,7 @@ export function computePackRiskV2(
       overallPrecision: gate.overallPrecision,
       threshold: gate.threshold,
       minPrecision: gate.minPrecision,
+      minTrainingSamples: gate.minTrainingSamples,
       degraded: gate.degraded,
     },
   };
