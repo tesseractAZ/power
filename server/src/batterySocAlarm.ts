@@ -143,10 +143,15 @@ export function activeSocBand(socPct: number | null | undefined): SocThreshold |
  * the ladder's own re-arm rules over the same data), a 3.5× churn multiplier
  * polluting cleared-history and the telemetry that trains the auto-silencer.
  *
- * Semantics mirror the audible ladder exactly:
+ * Semantics track the audible ladder's re-arm margin, with one deliberate
+ * boundary difference:
  *  - a DEEPER crossing takes effect immediately (never delays escalation);
  *  - the held band clears/ascends only once SoC has climbed ABOVE
- *    band + REARM_MARGIN_PCT (a value sitting on the boundary can't chatter);
+ *    band + REARM_MARGIN_PCT. The ladder re-arms AT band + margin (`>=`,
+ *    line ~334); the screen holds one point longer (`<=`) because integer
+ *    telemetry pins at exact values for hours and display-side favors
+ *    hold-stability — the ladder's re-arm is a silent internal flip, so the
+ *    boundary point produces no operator-visible divergence;
  *  - a null/non-finite SoC drops the band (no fabricated hold).
  *
  * Pure: the caller (alerts.ts) owns the held-band state and passes the

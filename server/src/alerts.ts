@@ -631,10 +631,13 @@ export function computeAlerts(
           severity: onGrid ? 'info' : 'critical',
           category: 'SHP2',
           device: shp2.deviceName,
-          title: onGrid ? 'Backup at reserve — on grid' : 'Backup at/below reserve',
+          // v1.17.0 review — "at or below", never "at/below": these strings
+          // reach Piper on the critical audible path and verbalizeForTts has
+          // no generic slash rule (espeak speaks '/' literally).
+          title: onGrid ? 'Backup at reserve — on grid' : 'Backup at or below reserve',
           detail: onGrid
-            ? `Backup pool ${sp.backupBatPercent}% is at/under the ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
-            : `Backup pool ${sp.backupBatPercent}% is at/under the ${reserve}% reserve floor.`,
+            ? `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+            : `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor.`,
         });
       } else if (sp.backupBatPercent < reserve + 10) {
         // v0.43.0 — grid-aware, mirroring shp2-below-reserve above: while the grid
@@ -759,7 +762,7 @@ export function computeAlerts(
   // (grid-aware) already owns the soc < reserve+10 window. Suppress the
   // backup-soc band push inside that window so the reserve story has ONE
   // on-screen producer; only emit the band alert ABOVE it. The shp2 pair fully
-  // covers the suppressed window (near = reserve..reserve+10, below = <reserve),
+  // covers the suppressed window (near = (reserve, reserve+10), below = ≤reserve — v1.17.0 F14 inclusive),
   // so no reserve condition is dropped. Use the SAME reserve default as that
   // block (sp.backupReserveSoc ?? 15). The audible SoC alarm ladder is
   // untouched — this only gates the on-screen mirror.
@@ -782,8 +785,10 @@ export function computeAlerts(
     // operational Alerts page and read correctly in cleared history.
     const { severity, source, priority } = socAlertSeverity(onGridEmergency ? 'low' : band.priority);
     // v1.17.0 (F15) — inside the re-arm margin the SoC can sit 1-2 pts ABOVE
-    // the held band; say so instead of the (then-false) "at or below".
-    const heldAbove = soc > band.pct;
+    // the held band; say so instead of the (then-false) "at or below". Compare
+    // the ROUNDED value the operator sees (a 40.4% reading displays as 40 —
+    // "near the 40% threshold" beside "at 40%" would read self-contradictory).
+    const heldAbove = Math.round(soc) > band.pct;
     const heldNote = heldAbove ? ` (holding the ${band.pct}% band until above ${band.pct + 2}%)` : '';
     out.push({
       id: `backup-soc-${band.pct}`,
@@ -794,7 +799,7 @@ export function computeAlerts(
       device: 'SHP2 backup pool',
       title: `Backup pool low — ${Math.round(soc)}%`,
       detail: onGridEmergency
-        ? `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at/below'} the ${band.pct}% threshold — drawing from grid power, no action needed.${heldNote}`
+        ? `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% threshold — drawing from grid power, no action needed.${heldNote}`
         : `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% ${band.priority}-priority threshold.${heldNote}`,
     });
   }

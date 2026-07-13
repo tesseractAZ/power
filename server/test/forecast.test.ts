@@ -981,6 +981,26 @@ test('forecastDayAlerts — v1.17.0 (F13) dip alert carries the hours-below-rese
   assert.equal(fact!.value, '6 h');
 });
 
+test('forecastDayAlerts — hours pinned AT the reserve floor do not count as "below" (strict <, deliberate asymmetry with F14)', () => {
+  // The F14 CLASSIFIER is inclusive ("at/below" is one state); this FACT is
+  // labeled "below" and counts strictly-below hours — hours riding exactly
+  // AT the floor are the F14 at-the-floor state, not a deficit. 3 hours
+  // strictly below (5%), 5 hours pinned at exactly reserve (15%) → "3 h".
+  const fc = emptyForecast({
+    minProjectedSoc: 0,
+    minProjectedSocTs: 1_900_000_000_000,
+    reserveSoc: 15,
+    hours: hourlyForecast({
+      count: 24,
+      startTs: tomorrowLocalMidnight(),
+      projectedSocPct: (h) => (h >= 2 && h <= 4 ? 5 : h >= 5 && h <= 9 ? 15 : 50),
+    }),
+  });
+  const dip = forecastDayAlerts(fc).find((a) => a.id === 'forecast-soc-dip');
+  const fact = dip!.facts?.find((f) => f.label === 'Hours below reserve (islanded)');
+  assert.equal(fact!.value, '3 h', 'at-the-floor hours (== reserve) must not inflate the below count');
+});
+
 test('blendNightLoad — trim is FLOOR-CAPPED so a pathologically-quiet recent window cannot gut the curve (v0.59.0 review)', () => {
   // recent 500 W vs curve 6000 W: raw blend = 6000*0.4 + 500*0.6 = 2700, but the
   // 50% max-trim floor (6000*0.5 = 3000) binds → never below half the curve.

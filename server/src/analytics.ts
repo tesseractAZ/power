@@ -54,7 +54,13 @@ const PEER_METRICS: PeerMetric[] = [
     // ≤4.5°C (8.1°F) at absolute temps ≤37°C — 0 of 400 actionable, while the
     // absolute thermal engine (40°C info band) stayed quiet and correct. 9°F
     // (5°C) sits just above the observed benign-spread envelope; the peer-SoC
-    // floor got the identical treatment (5→8) in v0.13.2. z-scores unchanged.
+    // floor got the identical treatment (5→8) in v0.13.2. NOTE: `floor` also
+    // feeds robustZ() as the MAD-floor, so in a zero-scatter fleet (identical
+    // siblings — the normal state) the z-scale moves with it: the warning
+    // boundary shifts from ~7.1°F to ~12.9°F sibling delta. That rescaling is
+    // INTENTIONAL and consistent with the metric's design (the floor defines
+    // "noteworthy" and z is expressed in floor units); Z_INFO/Z_WARN constants
+    // and every absolute thermal threshold are unchanged.
     floor: 9,
     get: (pk) => {
       const c = pk.maxCellTemp ?? pk.temp;

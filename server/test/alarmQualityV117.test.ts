@@ -152,13 +152,29 @@ test('F18 — the entire observed benign envelope (≤4.5°C sibling delta) no l
   }
 });
 
-test('F18 — a thermally meaningful outlier (5.5°C ≈ 9.9°F) still fires after the hit gate', () => {
+test('F18 — a thermally meaningful outlier (5.5°C ≈ 9.9°F) still fires after the hit gate — as INFO', () => {
   _resetPeerHitCounts();
   const devs = dpuWithTempOutlier(5.5);
   computeLearnedAlerts(devs); // cycle 1 — hysteresis gate
   computeLearnedAlerts(devs); // cycle 2
   const alerts = computeLearnedAlerts(devs); // cycle 3 — emits
-  assert.equal(peerTempAlerts(alerts).length, 1, 'a genuine ≥9°F outlier must still alert');
+  const fired = peerTempAlerts(alerts);
+  assert.equal(fired.length, 1, 'a genuine ≥9°F outlier must still alert');
+  // The floor doubles as robustZ's MAD-floor, so in a zero-scatter fleet the
+  // z-scale moved with it: warning now needs ~12.9°F (was ~7.1°F). 9.9°F is
+  // in the rescaled info band — pin it so the coupling is visible, not silent.
+  assert.equal(fired[0].severity, 'info', '9.9°F zero-scatter delta is info under the rescaled z');
+});
+
+test('F18 — the rescaled zero-scatter WARNING boundary still fires for a large outlier (7.5°C ≈ 13.5°F)', () => {
+  _resetPeerHitCounts();
+  const devs = dpuWithTempOutlier(7.5); // 13.5°F > the ~12.9°F rescaled warning boundary
+  computeLearnedAlerts(devs);
+  computeLearnedAlerts(devs);
+  const alerts = computeLearnedAlerts(devs);
+  const fired = peerTempAlerts(alerts);
+  assert.equal(fired.length, 1);
+  assert.equal(fired[0].severity, 'warning', 'a 13.5°F sibling delta must still reach warning');
 });
 
 /* ── F13: forecast-soc-dip resolve dwell family ───────────────────── */
