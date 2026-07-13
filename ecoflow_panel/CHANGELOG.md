@@ -1,3 +1,59 @@
+## v1.20.0 — engine-review F21: solar-model metrics that mean something
+
+Two published solar-model quality numbers were degenerate by construction in this climate, and
+one of them silently disabled a headline. Phoenix summer gives near-identical GHI in the same
+hour slot day after day (5–26% variation), so the within-slot Pearson r² of PV vs GHI reads
+~0.00–0.15 **for a model whose day-level replay scores r² ≈ 0.94** — there is simply no
+variance to explain. Nothing was wrong with the model; the metric was answering a question the
+climate never asks.
+
+**The peak-response headline flapped with the weather regime.** `buildSolarResponse` only
+promoted an hour slot's W-per-W/m² coefficient to the fleet `peakCoeff` if that slot's r² ≥ 0.2
+— a gate added (v0.41.0 era) to stop unstable dawn/dusk slopes from winning "peak" and
+mislabeling array orientation. But within-slot r² tracks the **sky**, not the array: at
+engine-review time (07-11, clear-sky regime) no slot passed and the SolarResponseCard rendered
+a confident "Peak response 0.0 W per W/m²" against an observed ~8–11; two days later July
+monsoon variability had revived two slots (r² 0.45/0.56) and the headline read 8.76 again. The
+gate is now what actually conditions a through-origin slope: slot **brightness** (mean GHI ≥
+300 W/m², `PEAK_RESPONSE_MIN_GHI_WM2`, env-tunable and NaN/empty-safe) plus ≥ 3 samples.
+Ground-truthed pre-ship against the 30-day Open-Meteo archive for this site: dawn/dusk slot
+means are ≤ ~170 W/m² under either hour-labeling convention — the inflated hour-6 slope
+(19.1 W per W/m², the exact case the old gate existed for) misses the floor by ≥ 2× — midday
+means run 337–974, and on live data old and new gates pick the **same 8.76 peak**; the change
+is that the headline no longer collapses to 0.0 when the clear-sky regime returns. Every slot
+now publishes `meanGhiWm2` so the UI can show why a slot did or didn't qualify; slot r² stays
+published as a diagnostic, it just no longer gates anything.
+
+**The confidence tile headlined the degenerate number.** `ConfidenceSnapshot.solarModelMedianR2`
+— the median of those same within-slot r² values — told the operator "the solar model explains
+2% of variance." Replaced by `forecastDayR2`: the day-level Pearson r² of predicted vs actual
+daily PV kWh over a **30-day** skill window (the basis the motivating r² ≈ 0.94 was measured
+on — the adversarial review caught that the default 7-day window would hand this metric 5–7
+near-identical clear-sky points whose r² is noise-dominated, recreating the regime-tracking
+dishonesty it replaces), computed only from weather-covered scored days and requiring ≥ 5 of
+them (else null — including the zero-variance case, which reads null rather than a fake 0
+or 1). The forecast-skill cache is now keyed by window so the 30-day confidence basis and the
+7-day `/api/forecast-skill`/probabilistic-band basis can't serve each other's reports. Web and
+Lovelace surfaces updated in lockstep (the TUI never surfaced the old field).
+
+**Adversarial review hardened the frontend mirrors.** The peak headline's un-starving would
+have activated a dormant badge bug: the hourly-table "peak" badge matched rows by raw
+coefficient (`coeff ≥ peakCoeff`), so the ungated 6 AM dawn row (19.1) would have been badged
+"peak" beside a takeaway naming 8.76 — the exact orientation mislabel the gate prevents. The
+badge now marks the gated winner by identity, the SolarResponseCard "Strongest hour" tile
+argmaxes over gated rows only, and both mirrors read the brightness threshold from the payload
+(`peakGateMinGhiWm2`) instead of hardcoding 300. Also dropped `computeConfidenceSnapshot`'s
+dead `forecast` parameter (and its per-poll report fetch).
+
+10 regression tests (suite 1432) pin: bright zero-variance slot sets peak (the exact case the
+old gate starved), dawn slope still excluded, high-variance climates unchanged, thin slots
+can't headline, the published gate threshold, forecastDayR2 exactness, the ≥5-scored-days floor
+with coverage exclusion, telemetry-gapped days excluded on the errorPct conjunct alone, r² (not
+raw r — a perfectly anti-tracking replay reads 1), and null on degenerate day variance.
+Worktree mutation testing: 10 mutants, 8 killed by the original suite; the 2 survivors were an
+equivalent mutant (tie semantics on an argmax with no hour attribution) and the raw-r gap now
+killed by the anti-correlation test (re-verified live).
+
 ## v1.19.0 — engine-review F20+F17: the learning loop gets honest inputs
 
 Two findings about what the ML feedback loop actually trains on — directly downstream of
