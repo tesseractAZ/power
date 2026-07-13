@@ -222,7 +222,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
         >
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <Tile label="Degradation R²" value={conf.degradationMedianR2 != null ? conf.degradationMedianR2.toFixed(2) : '—'} />
-            <Tile label="Solar model R²" value={conf.solarModelMedianR2 != null ? conf.solarModelMedianR2.toFixed(2) : '—'} />
+            <Tile label="Forecast day R²" value={conf.forecastDayR2 != null ? conf.forecastDayR2.toFixed(2) : '—'} />
             <Tile label="Thermal R²" value={conf.thermalMedianR2 != null ? conf.thermalMedianR2.toFixed(2) : '—'} />
           </div>
         </Section>
