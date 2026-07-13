@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { SnapshotStore, FleetSnapshot } from './snapshot.js';
@@ -49,6 +49,10 @@ export interface TelemetryGap {
    * boot-time detection instant, not a resumed write. Optional + additive so
    * every existing reader of the sidecar / /api/telemetry-gaps is unaffected. */
   restartSpanning?: boolean;
+  /** v1.14.0 — present (true) only on a restart-spanning gap whose pre-boot
+   * anchor matches a clean-shutdown marker: the stop was DELIBERATE (add-on
+   * update/restart/deploy), not a power loss. Optional + additive. */
+  graceful?: boolean;
 }
 
 /**
@@ -91,11 +95,54 @@ export function classifyRestartGap(
   bootMs: number,
   restartFloorMs: number,
 ): RestartGapDecision {
-  if (maxTs == null || !Number.isFinite(maxTs)) return { kind: 'none' };
+  // v1.14.0 (review) — `maxTs <= 0` restores the old detectTelemetryGap
+  // `lastInsertMs > 0` guard this classifier replaced: a corrupt/hand-imported
+  // ts=0 row must not ledger a multi-decade "restart-spanning" gap.
+  if (maxTs == null || !Number.isFinite(maxTs) || maxTs <= 0) return { kind: 'none' };
   const deltaMs = bootMs - maxTs;
   if (deltaMs >= restartFloorMs) return { kind: 'record', startMs: maxTs, endMs: bootMs };
   if (deltaMs < 0) return { kind: 'defer', anchorMs: maxTs };
   return { kind: 'none' };
+}
+
+/**
+ * v1.14.0 (review of F10's defer path) — resolve a DEFERRED restart-gap check,
+ * pure so the clock-skew branches are unit-testable.
+ *
+ * The v1.13.0 defer resolved on the first insert whose wall clock crossed the
+ * anchor — but an RTC-less Pi's skewed clock DRIFTS past the anchor within
+ * seconds (the anchor is only clock-file-save-lag ahead of the boot clock), so
+ * if any insert landed before NTP stepped, the gap was measured as ~seconds and
+ * silently discarded: the exact 5-15-min blackout class F10/F22 shipped to fix.
+ *
+ * The robust signal is MONOTONIC elapsed time, which no NTP step can touch:
+ *   estBootWallMs = nowWallMs − monoElapsedMs
+ * is the process-boot instant expressed in the CURRENT wall clock. Before NTP
+ * steps it equals the (skewed) boot clock and darkMs stays ~0 — so we HOLD.
+ * After NTP steps it is the true boot instant no matter when the step happened
+ * — darkMs becomes the true pre-boot dark time, and we RECORD if it clears the
+ * floor. If nothing has cleared the floor by `settleMs` of process uptime, the
+ * clock was never meaningfully skewed and there is no material dark time: DISARM.
+ */
+export type DeferredRestartGapResolution =
+  | { action: 'record'; startMs: number; endMs: number }
+  | { action: 'disarm' }
+  | { action: 'hold' };
+
+export function resolveDeferredRestartGap(inputs: {
+  anchorMs: number;       // pre-boot MAX(ts) — where the dark window starts
+  nowWallMs: number;      // wall clock at this insert
+  monoElapsedMs: number;  // monotonic ms since recorder construction (NTP-immune)
+  floorMs: number;        // RESTART_GAP_FLOOR_MS
+  settleMs: number;       // uptime budget to wait for the NTP step
+}): DeferredRestartGapResolution {
+  const estBootWallMs = inputs.nowWallMs - inputs.monoElapsedMs;
+  const darkMs = estBootWallMs - inputs.anchorMs;
+  if (darkMs >= inputs.floorMs) {
+    return { action: 'record', startMs: inputs.anchorMs, endMs: inputs.anchorMs + darkMs };
+  }
+  if (inputs.monoElapsedMs >= inputs.settleMs) return { action: 'disarm' };
+  return { action: 'hold' };
 }
 
 // v0.13.1 — pseudo-device + metric names for the persisted weather-irradiance
@@ -390,10 +437,31 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   let lastHomeInsertTs = 0;
   // v1.13.0 (review F10b) — set when the boot-time gap check could NOT run because
   // the boot clock was BEHIND the newest persisted sample (RTC-less Pi before NTP
-  // steps forward). We can't measure the gap then, so we DEFER: seed
-  // lastHomeInsertTs to the pre-boot anchor and let the first in-process insert
-  // (after the clock corrects) record it with the restart floor. Cleared once resolved.
+  // steps forward). We can't measure the gap then, so we DEFER to the in-process
+  // insert path, which resolves via resolveDeferredRestartGap (v1.14.0: monotonic
+  // uptime, immune to the skewed clock drifting past the anchor). Cleared once resolved.
   let pendingRestartGap = false;
+  let restartGapAnchorMs = 0;
+  // v1.14.0 — monotonic zero-point for the deferred resolution: performance.now()
+  // is unaffected by NTP steps, so (wall now − monotonic elapsed) is the process
+  // boot instant expressed in the CURRENT wall clock.
+  const bootMonoMs = performance.now();
+  const RESTART_GAP_SETTLE_MS = 10 * 60 * 1000; // NTP-step wait budget (uptime)
+  // v1.14.0 (review of F10b) — graceful-shutdown marker. close() (reached via the
+  // index.ts SIGTERM/SIGINT handler on every add-on stop/update) stamps this
+  // sidecar; the next boot reads+deletes it, and a restart gap whose pre-boot
+  // anchor matches the marker is a DELIBERATE stop (deploy/update/restart), not a
+  // power loss — so the operator alert says so instead of recommending a UPS, and
+  // the power-outage trend counter isn't poisoned by routine deploys.
+  const cleanShutdownPath = resolve(dirname(dbPath), '.clean-shutdown');
+  function readCleanShutdownMarker(): number | null {
+    try {
+      const ts = Number(readFileSync(cleanShutdownPath, 'utf8').trim());
+      try { unlinkSync(cleanShutdownPath); } catch { /* best-effort */ }
+      return Number.isFinite(ts) && ts > 0 ? ts : null;
+    } catch { return null; }
+  }
+  let pendingRestartGraceful = false;
   const telemetryGapsLog: TelemetryGap[] = (() => {
     try {
       const arr = JSON.parse(readFileSync(gapsPath, 'utf8'));
@@ -401,7 +469,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     } catch { return []; }
   })();
 
-  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean }) {
+  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean }) {
     // v0.80.0 — an ONGOING blackout re-detects at EVERY boot with the same
     // startMs (no home sample landed in between), e.g. consecutive restarts
     // inside one multi-hour power outage. Extend the existing record in place
@@ -418,6 +486,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       prior.detectedAt = endMs;
     } else {
       if (opts?.restartSpanning) gap.restartSpanning = true;
+      if (opts?.graceful) gap.graceful = true;
       telemetryGapsLog.push(gap);
     }
     if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
@@ -432,7 +501,8 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // stem so log scanners bucket them together; only the tail distinguishes a
     // restart-spanning blackout (v0.80.0) from an in-process stall (v0.30.0).
     if (opts?.restartSpanning) {
-      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}) spanning a restart (host down or add-on stopped); history in that window is unrecoverable`);
+      const cause = opts?.graceful ? 'a deliberate add-on stop/update' : 'host down or add-on stopped';
+      log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}) spanning a restart (${cause}); history in that window is unrecoverable`);
     } else {
       log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}); writes resumed`);
     }
@@ -467,11 +537,16 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
     const maxTs = row?.maxTs == null ? null : Number(row.maxTs);
+    // v1.14.0 — a clean-shutdown marker within a heartbeat of the pre-boot anchor
+    // means the preceding stop was deliberate (deploy/update), not a power loss.
+    const markerTs = readCleanShutdownMarker();
+    const graceful = markerTs != null && maxTs != null && Math.abs(markerTs - maxTs) <= MAX_INTERVAL_MS;
     const decision = classifyRestartGap(maxTs, Date.now(), RESTART_GAP_FLOOR_MS);
     if (decision.kind === 'record') {
-      recordTelemetryGap(decision.startMs, decision.endMs, { restartSpanning: true });
+      recordTelemetryGap(decision.startMs, decision.endMs, { restartSpanning: true, graceful });
     } else if (decision.kind === 'defer') {
-      lastHomeInsertTs = decision.anchorMs;
+      restartGapAnchorMs = decision.anchorMs;
+      pendingRestartGraceful = graceful;
       pendingRestartGap = true;
     }
   } catch (e: any) {
@@ -541,18 +616,30 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // if the previous home write was long ago, telemetry was silent in between.
     if (sawHomeInsert) {
       if (pendingRestartGap) {
-        // v1.13.0 (F10b) deferred path: the boot check couldn't run because the
-        // boot clock was behind the pre-boot anchor (RTC-less Pi, pre-NTP). Wait
-        // until the clock has advanced past that anchor (NTP stepped forward), then
-        // record the restart-spanning gap with the RESTART floor. Until then, hold
-        // the anchor — don't let a still-skewed clock move it backwards.
-        if (now > lastHomeInsertTs) {
-          if (detectTelemetryGap(lastHomeInsertTs, now, RESTART_GAP_FLOOR_MS)) {
-            recordTelemetryGap(lastHomeInsertTs, now, { restartSpanning: true });
-          }
+        // v1.14.0 (review of F10b's defer) — the v1.13.0 resolution fired on the
+        // first insert whose wall clock crossed the anchor, but a skewed clock
+        // DRIFTS past the anchor within seconds (long before NTP steps), so the
+        // gap measured ~0 and the blackout was silently discarded. Resolve via
+        // monotonic uptime instead (resolveDeferredRestartGap): (wall − monotonic
+        // elapsed) is the boot instant in the CURRENT clock, so the true pre-boot
+        // dark time appears exactly when NTP steps, whenever that is. While armed
+        // the ≥15-min in-process detector is suspended — an NTP step mid-stream
+        // would otherwise read as a false "MQTT stall" even though samples were
+        // flowing on the skewed clock; the defer resolution accounts the dark.
+        const res = resolveDeferredRestartGap({
+          anchorMs: restartGapAnchorMs,
+          nowWallMs: now,
+          monoElapsedMs: performance.now() - bootMonoMs,
+          floorMs: RESTART_GAP_FLOOR_MS,
+          settleMs: RESTART_GAP_SETTLE_MS,
+        });
+        if (res.action === 'record') {
+          recordTelemetryGap(res.startMs, res.endMs, { restartSpanning: true, graceful: pendingRestartGraceful });
           pendingRestartGap = false;
-          lastHomeInsertTs = now;
+        } else if (res.action === 'disarm') {
+          pendingRestartGap = false; // clock never stepped materially — no material dark time
         }
+        lastHomeInsertTs = now;
       } else {
         if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
           recordTelemetryGap(lastHomeInsertTs, now);
@@ -1760,6 +1847,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       // last emitted values on a graceful restart.
       try { rollupLifetime(); } catch { /* ignore on shutdown */ }
       try { persistEmitHighWater(); } catch { /* ignore on shutdown */ }
+      // v1.14.0 — stamp the clean-shutdown marker (reached via index.ts's
+      // SIGTERM/SIGINT handler on every add-on stop/update) so the next boot can
+      // classify the restart gap as deliberate rather than a power loss.
+      try { writeFileSync(cleanShutdownPath, String(Date.now()), { mode: 0o644 }); } catch { /* best-effort */ }
       db.close();
     },
     rollupLifetime,

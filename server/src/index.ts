@@ -17,7 +17,7 @@ import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import { startAlertMonitor } from './alertMonitor.js';
-import { outageTracking } from './alerts.js';
+import { systemOutageFields } from './alerts.js';
 import { isConfigured } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
 import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
@@ -1380,23 +1380,9 @@ app.get('/api/ha-state', async (req, reply) => {
     // MQTT stall > 15 min) so the operator can watch the trend and confirm a
     // power/UPS fix reduced them. The transient push alerts live in snapshot.alerts;
     // these are the durable at-a-glance tiles. All 0/null on a healthy day.
-    ...(() => {
-      const t = outageTracking(recorder.telemetryGaps(), Date.now(), 24 * 3_600_000);
-      return {
-        // v1.4.1 (daytime-review #4) — `system_outage_active_24h` is a 24 h OR-of-past-events
-        // flag ("a gap occurred in the last 24 h"), NOT "a gap is happening right now"; the name
-        // is retained for the existing diagnostic tile, but `..._last_ended` is the field to read
-        // for recency. `count`/`total` stay the mixed total for backward compatibility.
-        system_outage_active_24h: t.count > 0,
-        system_outage_count_24h: t.count,
-        // Split by cause so a benign cloud/telemetry stall isn't mistaken for a power event.
-        system_power_outage_count_24h: t.powerOutageCount,     // add-on/host was DOWN across the gap
-        system_telemetry_gap_count_24h: t.telemetryGapCount,   // cloud/MQTT stall, process stayed up
-        system_outage_total_minutes_24h: t.totalMinutes,
-        system_outage_last_ended: t.lastEndedMs, // epoch ms, null if none in 24 h
-        system_outage_last_duration_minutes: t.lastDurationMinutes,
-      };
-    })(),
+    // v1.14.0 — single-sourced with the MQTT state publisher (alerts.ts
+    // systemOutageFields) and unit-tested at the payload level.
+    ...systemOutageFields(recorder.telemetryGaps(), Date.now()),
   };
   // v0.9.14 — 25 s cache: the underlying computes refresh every 4 min via the
   // cache warmer, but HA polls this every 30 s. ETag + 25 s max-age means most

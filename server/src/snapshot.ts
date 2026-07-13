@@ -84,6 +84,9 @@ export class SnapshotStore extends EventEmitter {
   // inverter fault persists. Reset when the code clears OR changes value, so the
   // debounce clock only runs while the SAME error is continuously present.
   private dpuErrOnsetBySn: Map<string, { code: number; sinceMs: number }> = new Map();
+  /** v1.14.0 — per-SHP2-slot source-error onset (key `<sn>:<slot>`), mirroring
+   *  dpuErrOnsetBySn for the shp2-src-err CRITICAL debounce. */
+  private shp2SrcErrOnsetBySlot: Map<string, { count: number; sinceMs: number }> = new Map();
   // v1.8.0 (review F3) — ms epoch when the PUBLISHED pool % went null (i.e. after
   // the grace hold already absorbed reconnect blips). Feeds the reserve-blind
   // compensating alert so it keys off a SUSTAINED blind window, not a flicker.
@@ -276,6 +279,34 @@ export class SnapshotStore extends EventEmitter {
     return this.dpuErrOnsetBySn.get(sn) ?? null;
   }
 
+  /** v1.14.0 — per-SHP2-slot source-error onset, mirroring trackDpuErrOnset. A
+   *  transient device-reported error (60-s flap at 05:35 on 2026-07-12) fired a
+   *  full audible red + critical push; alerts.ts now debounces the
+   *  `shp2-src-err-<slot>` CRITICAL on `now - sinceMs` with the same 3-min
+   *  window. Re-baselined on a count change or clear (a slot vanishing from
+   *  `sources` clears too, so a stale onset can't debounce a NEW fault later). */
+  private trackShp2SrcErrOnsets(sn: string, proj: Projection | undefined): void {
+    if (!proj || proj.kind !== 'shp2') return;
+    const live = new Set<string>();
+    for (const s of proj.sources) {
+      const key = `${sn}:${s.slot}`;
+      const count = s.errorCodeNum ?? 0;
+      if (count === 0) { this.shp2SrcErrOnsetBySlot.delete(key); continue; }
+      live.add(key);
+      const prev = this.shp2SrcErrOnsetBySlot.get(key);
+      if (!prev || prev.count !== count) this.shp2SrcErrOnsetBySlot.set(key, { count, sinceMs: this.now() });
+    }
+    for (const key of this.shp2SrcErrOnsetBySlot.keys()) {
+      if (key.startsWith(`${sn}:`) && !live.has(key)) this.shp2SrcErrOnsetBySlot.delete(key);
+    }
+  }
+
+  /** v1.14.0 — copy of the per-slot src-err onset map (keys `<sn>:<slot>`), for
+   *  the ConnectivityContext handed to computeAlerts. */
+  shp2SrcErrOnsets(): Map<string, { count: number; sinceMs: number }> {
+    return new Map(this.shp2SrcErrOnsetBySlot);
+  }
+
   /** Replace the full raw quota for a device (called after a REST refresh). */
   setDeviceQuota(sn: string, raw: Record<string, unknown>, source: 'rest' | 'mqtt' = 'rest') {
     const cur = this.snap.devices[sn];
@@ -284,6 +315,7 @@ export class SnapshotStore extends EventEmitter {
     cur.projection = projectByProduct(cur.productName, raw);
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
+    this.trackShp2SrcErrOnsets(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? raw : undefined;
     cur.lastUpdated = Date.now();
     cur.lastError = undefined;
@@ -313,6 +345,7 @@ export class SnapshotStore extends EventEmitter {
     cur.projection = projectByProduct(cur.productName, merged);
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
+    this.trackShp2SrcErrOnsets(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? merged : undefined;
     cur.lastUpdated = Date.now();
     cur.lastError = undefined;
