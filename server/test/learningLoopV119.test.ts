@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 
@@ -47,8 +47,11 @@ for (let i = 0; i < 2000; i++) {
     }),
   );
 }
-writeFileSync(SNAP_PATH, bigHistory.join('\n') + '\n');
-const preBytes = statSync(SNAP_PATH).size;
+const bigHistoryText = bigHistory.join('\n') + '\n';
+writeFileSync(SNAP_PATH, bigHistoryText);
+// Size derived from the content we just wrote — no stat-then-read TOCTOU
+// (CodeQL js/file-system-race), and byte-identical to what landed on disk.
+const preBytes = Buffer.byteLength(bigHistoryText);
 
 const { captureSnapshot, getSnapshot } = await import('../src/featureSnapshot.js');
 const { coulombicEfficiencyFromCounters, mergeCounterEdges } = await import('../src/analytics.js');
@@ -56,10 +59,13 @@ const { coulombicEfficiencyFromCounters, mergeCounterEdges } = await import('../
 test('F20 — boot compaction: an oversized history file is rewritten down to the retained LRU entries', () => {
   // First touch initializes the module (hydrate + compact).
   getSnapshot('hist-1999');
-  const postBytes = statSync(SNAP_PATH).size;
+  // Single read: size and content come from the same snapshot of the file
+  // (no stat-then-read race for CodeQL to flag).
+  const postText = readFileSync(SNAP_PATH, 'utf-8');
+  const postBytes = Buffer.byteLength(postText);
   assert.ok(preBytes > 512 * 1024, `fixture must exceed the cap (${preBytes} bytes)`);
   assert.ok(postBytes < preBytes / 2, `file must shrink substantially: ${preBytes} → ${postBytes}`);
-  const lines = readFileSync(SNAP_PATH, 'utf-8').split('\n').filter((l) => l.trim());
+  const lines = postText.split('\n').filter((l) => l.trim());
   assert.equal(lines.length, 500, 'compacted file holds exactly the LRU-retained entries');
   // Compacted lines must be REAL records, not stringified keys — a corrupt
   // rewrite would still JSON.parse at next boot and silently vaporize the
