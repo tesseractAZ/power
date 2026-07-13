@@ -2133,6 +2133,79 @@ export function fadeExceedsPlausibleCeiling(fadePctPerYear: number | null): bool
   return fadePctPerYear != null && fadePctPerYear > EOL_MAX_FADE_PCT_PER_YEAR;
 }
 
+/* v1.19.0 (engine-review F17) — coulombic-efficiency gates. The 7-day reading
+ * publishes ONLY when the counters prove themselves trustworthy over the full
+ * query window. Constants exported-adjacent for the tests' arithmetic. */
+const CE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** ≥ ~1 kWh of throughput on a 102.4 V string — tiny deltas produce noisy ratios. */
+const CE_MIN_CHG_DELTA_MAH = 10_000;
+/** The long-window sanity check needs proportionally more throughput to mean anything. */
+const CE_MIN_FULL_CHG_DELTA_MAH = 30_000;
+/** Physical acceptance band (CE cannot exceed 100%; 100.5 tolerates rounding). */
+const CE_BAND_LO = 90;
+const CE_BAND_HI = 100.5;
+/** Max |7-day − full-window| divergence before the reading is window noise.
+ *  Real CE moves slowly; the pack-risk discriminating span is only 2 pp
+ *  (99% healthy → 97% max-risk), so a reading that can't agree with its own
+ *  long-run ratio to within 2 pp carries no signal at that resolution. */
+const CE_CONSISTENCY_TOL_PP = 2.0;
+
+/**
+ * v1.19.0 (engine-review F17) — self-validating coulombic efficiency.
+ *
+ * The BMS lifetime counters on this hardware carry a systematic asymmetry:
+ * over 30 days every one of the 15 home packs shows dsg/chg ABOVE 100%
+ * (101.2-107.0% — physically impossible), and weekly windows swing 96.5-122%.
+ * A clamp alone cannot separate artifact from signal because the artifact
+ * band STRADDLES the acceptance band: the >100.5% tail was dropped while the
+ * identical artifact's low tail published as "early cell aging" at max risk.
+ *
+ * Publish the 7-day CE only when ALL hold:
+ *  1. the 7-day window has meaningful throughput and a ratio inside the
+ *     physical band [90, 100.5];
+ *  2. the FULL window (the degradation query span, ≥30 d in steady state)
+ *     has proportionally meaningful throughput and its own ratio inside the
+ *     SAME physical band — a long-window ratio above 100.5% proves the
+ *     counters are artifact-ridden for this pack, so no sub-window of them
+ *     is a measurement;
+ *  3. the 7-day and full-window ratios agree within 2 pp — real CE changes
+ *     slowly, so a divergence bigger than the entire downstream
+ *     discriminating span is window noise, not chemistry.
+ *
+ * null means "unknown" and every consumer treats it as neutral (heuristic
+ * ceNorm → 0, LR normalizeFeature → 0, dashboard tile → —). On the current
+ * fleet ALL 15 packs read null BY DESIGN: their counters are demonstrably
+ * unphysical, and an honest unknown beats a fabricated risk factor.
+ * A genuinely degrading pack is still covered by SoH fade, cell-imbalance,
+ * internal-R, and the absolute thermal engines.
+ */
+export function coulombicEfficiencyFromCounters(
+  chgPts: Array<{ ts: number; value: number }>,
+  dsgPts: Array<{ ts: number; value: number }>,
+  nowMs: number,
+): number | null {
+  if (chgPts.length < 2 || dsgPts.length < 2) return null;
+  const fullChg = chgPts[chgPts.length - 1].value - chgPts[0].value;
+  const fullDsg = dsgPts[dsgPts.length - 1].value - dsgPts[0].value;
+  if (!(fullChg >= CE_MIN_FULL_CHG_DELTA_MAH && fullDsg > 0)) return null;
+  const fullRatio = (fullDsg / fullChg) * 100;
+  if (!(fullRatio >= CE_BAND_LO && fullRatio <= CE_BAND_HI)) return null;
+
+  const ceSince = nowMs - CE_WINDOW_MS;
+  const chg7 = chgPts.filter((p) => p.ts >= ceSince);
+  const dsg7 = dsgPts.filter((p) => p.ts >= ceSince);
+  if (chg7.length < 2 || dsg7.length < 2) return null;
+  const chgDelta = chg7[chg7.length - 1].value - chg7[0].value;
+  const dsgDelta = dsg7[dsg7.length - 1].value - dsg7[0].value;
+  if (!(chgDelta >= CE_MIN_CHG_DELTA_MAH && dsgDelta > 0)) return null;
+  const ratio = (dsgDelta / chgDelta) * 100;
+  if (!(ratio >= CE_BAND_LO && ratio <= CE_BAND_HI)) return null;
+  if (Math.abs(ratio - fullRatio) > CE_CONSISTENCY_TOL_PP) return null;
+  // v0.41.0 — display never reads >100% (the admission band tolerates
+  // counter rounding, the physical ceiling does not move).
+  return Math.min(100, round2(ratio));
+}
+
 /** Regress one pack's SoH history and project it to end-of-life. */
 function analysePack(
   d: DeviceSnapshot & { projection: DpuProjection },
@@ -2290,38 +2363,27 @@ function analysePack(
   // during that period. Healthy LFP cells stay well above 99%; a downward
   // drift means side reactions are consuming charge that doesn't come back
   // out, an early sign of cell degradation that fade-by-SoH alone misses.
-  const CE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-  const ceSince = now - CE_WINDOW_MS;
-  // v0.9.50 — same batching reasoning: lifetime chg + dsg counters share
-  // (sn, window, no-bucket) so one queryMulti collapses the pair.
+  //
+  // v1.19.0 (engine-review F17) — query the FULL degradation window (not just
+  // 7 days) so the estimator can SELF-VALIDATE the counters before publishing:
+  // on this fleet every one of the 15 home packs shows a physically impossible
+  // >100% dsg/chg over 30 days, with weekly windows swinging 96.5-122%. The
+  // old [90, 100.5] clamp dropped the recognized-artifact HIGH tail but kept
+  // the identical artifact's LOW tail as a "measurement" — publishing CE
+  // 93-95% that the pack-risk heuristic saturated to max risk with the text
+  // "side-reactions consuming charge — early cell aging" on month-old healthy
+  // packs. All gating lives in coulombicEfficiencyFromCounters (pure, tested).
   const lifetimeMetrics = recorder.queryMulti(
     d.sn,
     [`pack${pk.num}_lifetime_chg_mah`, `pack${pk.num}_lifetime_dsg_mah`],
-    ceSince,
+    since,
     now,
   );
-  const chgPts = lifetimeMetrics.get(`pack${pk.num}_lifetime_chg_mah`) ?? [];
-  const dsgPts = lifetimeMetrics.get(`pack${pk.num}_lifetime_dsg_mah`) ?? [];
-  let coulombicEffPct: number | null = null;
-  if (chgPts.length >= 2 && dsgPts.length >= 2) {
-    const chgDelta = chgPts[chgPts.length - 1].value - chgPts[0].value;
-    const dsgDelta = dsgPts[dsgPts.length - 1].value - dsgPts[0].value;
-    // Require meaningful throughput in the window (≥ ~1 kWh worth of mAh on
-    // a single 102.4V string ≈ 10k mAh) — tiny deltas produce noisy ratios.
-    if (chgDelta >= 10_000 && dsgDelta > 0) {
-      const ratio = (dsgDelta / chgDelta) * 100;
-      // v0.10.4 — clamp to a PHYSICAL band. Coulombic efficiency cannot exceed
-      // 100% (you can't discharge more than you charged); healthy LFP runs
-      // 99–99.9%. The old 50–110% band let counter quirks surface impossible
-      // values like Core 3's 101%+. 100.5% tolerates counter rounding; a true
-      // <90% would be a hard fault — but it's far more often a counter-reset
-      // artifact, so we drop it rather than alarm on a phantom.
-      // v0.41.0 — clamp to the physical 100% ceiling: coulombic efficiency cannot
-      // exceed 100% (you can't discharge more than you charged). The 100.5% admission
-      // band still tolerates counter rounding, but the displayed value never reads >100%.
-      if (ratio >= 90 && ratio <= 100.5) coulombicEffPct = Math.min(100, round2(ratio));
-    }
-  }
+  const coulombicEffPct = coulombicEfficiencyFromCounters(
+    lifetimeMetrics.get(`pack${pk.num}_lifetime_chg_mah`) ?? [],
+    lifetimeMetrics.get(`pack${pk.num}_lifetime_dsg_mah`) ?? [],
+    now,
+  );
 
   // v0.28.0 — reject a BMS-recalibration staircase BEFORE it can drive a fade /
   // dated EOL / r² / peer-fade. Route to 'learning' with NULL fade + NULL r² so it
