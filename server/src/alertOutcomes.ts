@@ -212,10 +212,15 @@ export interface AlertFamilyStats {
  */
 /**
  * v0.13.2 — Families whose underlying condition is CONTINUOUSLY-ACTIVE /
- * persistent rather than a transient event. For these, `alertFiredAt` is
- * stamped once at the first-ever fire and never refreshed, so
- * `ts - alertFiredAt` measures how long the (still-true) condition has
- * EXISTED, not how quickly the operator responded. The 7-day audit (P2-6)
+ * persistent rather than a transient event. v1.19.0 (F20) note: snapshots
+ * now re-capture on every RISE, so for a persistent condition `alertFiredAt`
+ * refreshes at each process restart's boot re-rise — on this daily-rebooting
+ * host it reads roughly "time since last boot", and pre-F20 jsonl entries
+ * (first-ever-fire stamps, up to 618 h stale) coexist with post-F20 entries
+ * in the same log. Either way the ratio `ts - alertFiredAt` does NOT measure
+ * operator response for a permanently-true condition, so the exclusion below
+ * stands — it is now justified by mixed/boot-relative semantics rather than
+ * by the old never-refreshed premise. The 7-day audit (P2-6)
  * saw `medianTimeToActionMs` of 9.44 days for `offline` and 13.18 days for
  * `grid-offgrid` — pure condition-age, not response latency. We exclude
  * these from the time-to-action metric (return null) rather than report a

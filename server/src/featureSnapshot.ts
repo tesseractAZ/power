@@ -20,7 +20,7 @@
  * snapshot only the relevant signals — not the whole device projection.
  */
 
-import { appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import type { Alert } from './alerts.js';
@@ -48,7 +48,16 @@ const PATH = process.env.FEATURE_SNAPSHOTS_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'feature-snapshots.jsonl');
 
 const MAX_IN_MEMORY = 500;
-const HYDRATE_BYTES = 256 * 1024; // re-read last 256 KB at boot
+/* v1.19.0 (engine-review F20) — same-rise double-invocation guard. The
+ * caller (alertMonitor) captures once per RISE; anything re-arriving within
+ * this window for the same alertId is the same fire (boot replay racing a
+ * live tick), not a new one. A genuine re-fire is always minutes+ later
+ * (alerts must CLEAR before they can rise again). */
+const SAME_RISE_GUARD_MS = 60_000;
+/* v1.19.0 (engine-review F20) — with per-rise capture the jsonl grows
+ * ~200-300 lines/day; compact it at boot once it passes this size, keeping
+ * only the entries the LRU retains. Bounded disk + bounded boot read. */
+const COMPACT_BYTES = 512 * 1024;
 
 export interface SnapshotRecord {
   alertId: string;
@@ -101,6 +110,13 @@ function ensureInit(log: (m: string) => void = () => {}) {
     for (const line of lines) {
       try {
         const r = JSON.parse(line) as SnapshotRecord;
+        // v1.19.0 review — delete-before-set: with per-rise capture, duplicate
+        // alertIds are the NORM in the file, and a plain set() would leave the
+        // key at its FIRST-appearance position — hydrated recency would then
+        // be first-seen order, and the trim below (plus later cap evictions)
+        // would evict the hottest recurring alerts first. Recency must mean
+        // LAST appearance, matching captureSnapshot's own ordering.
+        cache.delete(r.alertId);
         cache.set(r.alertId, r);
         n++;
       } catch { /* skip */ }
@@ -112,6 +128,23 @@ function ensureInit(log: (m: string) => void = () => {}) {
       cache.delete(firstKey);
     }
     if (n > 0) log(`featureSnapshot: hydrated ${n} entries (${cache.size} kept in memory)`);
+    // v1.19.0 (F20) — per-rise capture makes the file append-heavy (the old
+    // forever-dedup wrote 236 records in 2 months; honest capture writes
+    // ~200-300/day). Rewrite the file from the retained cache when it grows
+    // past the cap so disk stays bounded and the next boot's whole-file read
+    // stays cheap. Boot-time only, single-threaded, before any appends.
+    try {
+      if (text.length > COMPACT_BYTES) {
+        const compacted = [...cache.values()].map((r) => JSON.stringify(r)).join('\n') + '\n';
+        // Atomic temp+rename (house pattern, chimeConfig.ts): this host loses
+        // power daily — an in-place truncate-and-write caught mid-flight would
+        // destroy the ONLY copy of the snapshot history.
+        const tmp = `${PATH}.tmp`;
+        writeFileSync(tmp, compacted);
+        renameSync(tmp, PATH);
+        log(`featureSnapshot: compacted ${text.length} -> ${compacted.length} bytes (${cache.size} entries kept)`);
+      }
+    } catch { /* compaction is best-effort — appends still work on the big file */ }
   } catch {
     /* file unreadable — start fresh */
   }
@@ -120,10 +153,23 @@ function ensureInit(log: (m: string) => void = () => {}) {
 /** Capture (or update) the snapshot for an alert. Persisted + cached. */
 export function captureSnapshot(record: SnapshotRecord, log: (m: string) => void = () => {}): void {
   ensureInit(log);
-  // De-dup: if we already snapshotted this alert recently, don't re-write.
-  // The features we care about are the ones at FIRST FIRING, not subsequent
-  // refreshes. Update timestamp + features only if cache miss.
-  if (cache.has(record.alertId)) return;
+  // v1.19.0 (engine-review F20) — the old de-dup was `if (cache.has(id))
+  // return;` against a cache hydrated from the ENTIRE history file at boot:
+  // any alertId ever snapshotted was never captured again (dropSnapshot fires
+  // only on outcome submission — 33 times ever). On a fleet whose traffic is
+  // ~44 RECURRING alertIds, "the feature vector as it was at fire time" was
+  // actually the alert's FIRST-EVER fire, potentially weeks stale — 216 rises
+  // over 28 h wrote zero snapshots, and outcome records embedded features up
+  // to 618 h older than the fire they labeled. The caller (alertMonitor)
+  // invokes this exactly once per RISE, so every rise now captures fresh
+  // features; the guard below only absorbs same-rise double-invocation.
+  // Math.abs: on this host the clock can step at NTP resync; a signed
+  // comparison would read any BACKWARD step as "same rise" and suppress
+  // captures until wall-clock re-passed the stale prev.ts.
+  const prev = cache.get(record.alertId);
+  if (prev && Math.abs(record.ts - prev.ts) < SAME_RISE_GUARD_MS) return;
+  // Delete-before-set keeps Map insertion order = recency for the LRU.
+  cache.delete(record.alertId);
   cache.set(record.alertId, record);
   // Evict oldest if over cap.
   if (cache.size > MAX_IN_MEMORY) {

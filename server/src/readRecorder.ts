@@ -41,6 +41,13 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
   const queryStmt = db.prepare(
     `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
   );
+  // v1.19.0 (F17 perf) — window-edge seeks (see recorder.ts twin).
+  const queryFirstStmt = db.prepare(
+    `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC LIMIT 1`,
+  );
+  const queryLastStmt = db.prepare(
+    `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1`,
+  );
   const queryBucketedStmt = db.prepare(
     `SELECT CAST((ts / ?) AS INTEGER) * ? AS bucket_ts, AVG(value) AS value
        FROM samples
@@ -137,6 +144,12 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
       const bucketMs = bucketSec * 1000;
       const rows = queryBucketedStmt.all(bucketMs, bucketMs, sn, metric, sinceMs, untilMs) as Array<{ bucket_ts: number; value: number }>;
       return rows.map((r) => ({ ts: r.bucket_ts, value: r.value }));
+    },
+    queryFirstLast: (sn, metric, sinceMs, untilMs) => {
+      const first = queryFirstStmt.get(sn, metric, sinceMs, untilMs) as { ts: number; value: number } | undefined;
+      if (!first) return [];
+      const last = queryLastStmt.get(sn, metric, sinceMs, untilMs) as { ts: number; value: number } | undefined;
+      return last && last.ts !== first.ts ? [first, last] : [first];
     },
     queryMulti: (sn, metrics, sinceMs, untilMs, bucketSec) => {
       const out = new Map<string, Array<{ ts: number; value: number }>>();

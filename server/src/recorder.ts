@@ -261,6 +261,15 @@ export function packDeltaWh(
 export interface Recorder {
   insertSnapshot: (snap: FleetSnapshot) => void;
   query: (sn: string, metric: string, sinceMs: number, untilMs: number, bucketSec?: number) => Array<{ ts: number; value: number }>;
+  /** v1.19.0 (engine-review F17 perf) — boundary-point fetch: the first and
+   * last raw sample inside [sinceMs, untilMs] (0, 1, or 2 points; 1 when a
+   * single sample is both). Two LIMIT-1 index seeks on (sn, metric, ts)
+   * instead of materializing the whole window — delta-of-counters consumers
+   * (coulombic efficiency) only read the window edges, and the raw 30-day
+   * counter window is ~28k rows (~150 ms of Pi event-loop stall per pack).
+   * OPTIONAL so lightweight test stubs keep compiling; callers must fall
+   * back to query() when absent. */
+  queryFirstLast?: (sn: string, metric: string, sinceMs: number, untilMs: number) => Array<{ ts: number; value: number }>;
   /** v0.9.29 — batched read: one SQL call returns rows for many (sn, metric)
    * pairs, keyed by metric. Cuts per-query overhead (statement-bind +
    * page-cache lookups) by ~6× when the caller has many metrics to pull
@@ -799,6 +808,14 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
 
   const queryStmt = db.prepare(
     `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
+  );
+  // v1.19.0 (F17 perf) — window-edge seeks; both ride the (sn, metric, ts)
+  // composite index, O(log n) each vs the full-window scan.
+  const queryFirstStmt = db.prepare(
+    `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC LIMIT 1`,
+  );
+  const queryLastStmt = db.prepare(
+    `SELECT ts, value FROM samples WHERE sn = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1`,
   );
   // v0.9.14 — SQL-side bucketing. Before this, query() read every raw sample
   // (potentially tens of thousands over a 7-day window) and the caller bucketed
@@ -1817,6 +1834,12 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       const bucketMs = bucketSec * 1000;
       const rows = queryBucketedStmt.all(bucketMs, bucketMs, sn, metric, sinceMs, untilMs) as Array<{ bucket_ts: number; value: number }>;
       return rows.map((r) => ({ ts: r.bucket_ts, value: r.value }));
+    },
+    queryFirstLast: (sn, metric, sinceMs, untilMs) => {
+      const first = queryFirstStmt.get(sn, metric, sinceMs, untilMs) as { ts: number; value: number } | undefined;
+      if (!first) return [];
+      const last = queryLastStmt.get(sn, metric, sinceMs, untilMs) as { ts: number; value: number } | undefined;
+      return last && last.ts !== first.ts ? [first, last] : [first];
     },
     queryMulti: (sn, metrics, sinceMs, untilMs, bucketSec) => {
       const out = new Map<string, Array<{ ts: number; value: number }>>();
