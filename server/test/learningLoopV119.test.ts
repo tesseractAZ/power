@@ -61,6 +61,12 @@ test('F20 — boot compaction: an oversized history file is rewritten down to th
   assert.ok(postBytes < preBytes / 2, `file must shrink substantially: ${preBytes} → ${postBytes}`);
   const lines = readFileSync(SNAP_PATH, 'utf-8').split('\n').filter((l) => l.trim());
   assert.equal(lines.length, 500, 'compacted file holds exactly the LRU-retained entries');
+  // Compacted lines must be REAL records, not stringified keys — a corrupt
+  // rewrite would still JSON.parse at next boot and silently vaporize the
+  // whole history into one undefined-keyed entry.
+  const sample = JSON.parse(lines[0]);
+  assert.equal(typeof sample, 'object');
+  assert.ok(sample.alertId && sample.features, 'compacted records carry alertId + features');
   // The newest survive the trim; the oldest are gone.
   assert.ok(getSnapshot('hist-1999'), 'newest history entry retained');
   assert.equal(getSnapshot('hist-0'), undefined, 'oldest history entry evicted');
@@ -273,4 +279,97 @@ test('F17 perf — real readRecorder queryFirstLast returns exactly the window e
   } finally {
     rr.close();
   }
+});
+
+/* ── review-driven killing tests (v1.19.0 pre-merge review) ───────── */
+
+test('F17 review — a short counter history (≤2 tail windows) cannot self-validate and must read null', () => {
+  const now = 1_790_000_000_000;
+  // 5 days of history at 96.5% — the artifact's in-band low tail on a FRESH
+  // series (recorder reset, packSn re-key, new pack). With ≤7 d of points the
+  // tail === the full window, ratio === fullRatio, and both new gates
+  // degenerate into the plain clamp — the pre-guard code republished this as
+  // "early cell aging" at max risk for the series' first week.
+  const s = counterSeries({ nowMs: now, days: 5, headRatio: 0.965, tailRatio: 0.965 });
+  assert.equal(coulombicEfficiencyFromCounters(s.chg, s.dsg, now), null, 'short history must not publish');
+  // 13 days still fails the 14-day (2× tail window) span floor…
+  const s13 = counterSeries({ nowMs: now, days: 13, headRatio: 0.995, tailRatio: 0.995 });
+  assert.equal(coulombicEfficiencyFromCounters(s13.chg, s13.dsg, now), null, '13-day span is below the 2×-tail floor');
+  // …and 14 days exactly passes (inclusive boundary; healthy data publishes).
+  const s14 = counterSeries({ nowMs: now, days: 14, headRatio: 0.995, tailRatio: 0.995 });
+  assert.ok(coulombicEfficiencyFromCounters(s14.chg, s14.dsg, now) != null, '14-day span earns trust');
+});
+
+test('F17 review — the long-window sanity gate is load-bearing ALONE (consistency cannot mask its removal)', () => {
+  const now = 1_790_000_000_000;
+  // head 102% / tail 99.5% over 30 d: fullRatio ≈ 101.4% (>100.5 — counters
+  // proven artifact-ridden) while |tail − full| = 1.9 pp ≤ 2 (consistency
+  // PASSES). Only the sanity gate stands between this fixture and a published
+  // 99.5 — the mutation review proved the headline artifact test was killed
+  // by the consistency gate instead, leaving sanity-gate removal invisible.
+  const s = counterSeries({ nowMs: now, days: 30, headRatio: 1.02, tailRatio: 0.995 });
+  assert.equal(
+    coulombicEfficiencyFromCounters(s.chg, s.dsg, now),
+    null,
+    'an unphysical long-window ratio must null the CE even when consistency passes',
+  );
+});
+
+test('F17 review — the 7-day tail cutoff is INCLUSIVE (a sample exactly at now−7d anchors the tail)', () => {
+  const now = 1_790_000_000_000;
+  // Three points: 14 d ago, EXACTLY 7 d ago, 1 d ago. With >= the tail is
+  // [now−7d, now−1d] → 2 points → publishes 99.5. With > (mutant) the tail is
+  // a single point → null. Span 13 d... must be ≥14 d — use 15 d ago instead.
+  const chg = [
+    { ts: now - 15 * DAY, value: 1_000_000 },
+    { ts: now - 7 * DAY, value: 1_200_000 },
+    { ts: now - 1 * DAY, value: 1_400_000 },
+  ];
+  const dsg = [
+    { ts: now - 15 * DAY, value: 1_000_000 },
+    { ts: now - 7 * DAY, value: 1_199_000 },
+    { ts: now - 1 * DAY, value: 1_398_000 },
+  ];
+  const ce = coulombicEfficiencyFromCounters(chg, dsg, now);
+  assert.ok(ce != null, 'the boundary sample must anchor the tail (inclusive >=)');
+  assert.ok(ce! >= 99 && ce! <= 100, `tail CE ≈ 99.5; got ${ce}`);
+});
+
+test('F17 review — the full-window throughput floor is load-bearing (thin history cannot publish on a busy tail)', () => {
+  const now = 1_790_000_000_000;
+  // Head nearly idle (5k mAh over 23 d), tail busy (15k over 7 d): the 7-day
+  // floor (10k) passes but the full window (20k < 30k) must not — a window
+  // this thin cannot power the sanity check it feeds.
+  const chg = [
+    { ts: now - 30 * DAY, value: 1_000_000 },
+    { ts: now - 7 * DAY, value: 1_005_000 },
+    { ts: now - 1 * DAY, value: 1_020_000 },
+  ];
+  const dsg = [
+    { ts: now - 30 * DAY, value: 1_000_000 },
+    { ts: now - 7 * DAY, value: 1_004_975 },
+    { ts: now - 1 * DAY, value: 1_019_900 },
+  ];
+  assert.equal(coulombicEfficiencyFromCounters(chg, dsg, now), null, 'full-window floor must gate a thin history');
+});
+
+test('F20 review — re-capture refreshes LRU recency: a hot recurring alert survives cap eviction', () => {
+  const t0 = 1_795_000_000_000;
+  captureSnapshot({ alertId: 'hot-recurring', ts: t0, features: { pack_soc: 20 } });
+  // Push the hot alert to the oldest edge of the 500-entry cache…
+  for (let i = 0; i < 499; i++) {
+    captureSnapshot({ alertId: `cold-a-${i}`, ts: t0 + i, features: { n: i } });
+  }
+  // …then it re-fires (a genuine new rise, past the 60 s guard). Without
+  // delete-before-set, Map.set keeps the ORIGINAL insertion position: the
+  // hottest alert stays "oldest" and is the first evicted while stale
+  // one-shots survive — getSnapshot at outcome time then misses a LIVE alert.
+  captureSnapshot({ alertId: 'hot-recurring', ts: t0 + 2 * HOUR, features: { pack_soc: 12 } });
+  // 499 more captures evict everything older than the refreshed entry.
+  for (let i = 0; i < 499; i++) {
+    captureSnapshot({ alertId: `cold-b-${i}`, ts: t0 + 3 * HOUR + i, features: { n: i } });
+  }
+  assert.ok(getSnapshot('hot-recurring'), 're-captured alert must rank by its LATEST fire, not its first');
+  assert.equal(getSnapshot('hot-recurring')?.features.pack_soc, 12);
+  assert.equal(getSnapshot('cold-a-0'), undefined, 'stale one-shots are the ones evicted');
 });

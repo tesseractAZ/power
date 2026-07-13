@@ -2141,6 +2141,15 @@ const CE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const CE_MIN_CHG_DELTA_MAH = 10_000;
 /** The long-window sanity check needs proportionally more throughput to mean anything. */
 const CE_MIN_FULL_CHG_DELTA_MAH = 30_000;
+/** v1.19.0 review — the self-validation is VACUOUS when the counter history
+ *  spans ≤7 days: the tail filter selects the whole array, ratio === fullRatio
+ *  exactly, and gates 2+3 degenerate into the plain [90, 100.5] clamp the fix
+ *  exists to replace. 30k mAh is only ~1.5-3 days of this fleet's throughput,
+ *  so a fresh series (recorder reset, packSn re-key, new pack) would republish
+ *  the artifact's low tail as "early cell aging" for its first week. Require
+ *  the history to span at least two full tail windows before ANY value
+ *  publishes — the estimator earns trust as history accumulates. */
+const CE_MIN_SPAN_MS = 2 * CE_WINDOW_MS;
 /** Physical acceptance band (CE cannot exceed 100%; 100.5 tolerates rounding). */
 const CE_BAND_LO = 90;
 const CE_BAND_HI = 100.5;
@@ -2204,6 +2213,11 @@ export function coulombicEfficiencyFromCounters(
   nowMs: number,
 ): number | null {
   if (chgPts.length < 2 || dsgPts.length < 2) return null;
+  // Span guard BEFORE anything else: a short history cannot self-validate
+  // (tail === full ⇒ the consistency and sanity gates are tautologies).
+  const chgSpan = chgPts[chgPts.length - 1].ts - chgPts[0].ts;
+  const dsgSpan = dsgPts[dsgPts.length - 1].ts - dsgPts[0].ts;
+  if (chgSpan < CE_MIN_SPAN_MS || dsgSpan < CE_MIN_SPAN_MS) return null;
   const fullChg = chgPts[chgPts.length - 1].value - chgPts[0].value;
   const fullDsg = dsgPts[dsgPts.length - 1].value - dsgPts[0].value;
   if (!(fullChg >= CE_MIN_FULL_CHG_DELTA_MAH && fullDsg > 0)) return null;

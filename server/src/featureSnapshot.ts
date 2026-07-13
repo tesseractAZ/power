@@ -20,7 +20,7 @@
  * snapshot only the relevant signals — not the whole device projection.
  */
 
-import { appendFileSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import type { Alert } from './alerts.js';
@@ -110,6 +110,13 @@ function ensureInit(log: (m: string) => void = () => {}) {
     for (const line of lines) {
       try {
         const r = JSON.parse(line) as SnapshotRecord;
+        // v1.19.0 review — delete-before-set: with per-rise capture, duplicate
+        // alertIds are the NORM in the file, and a plain set() would leave the
+        // key at its FIRST-appearance position — hydrated recency would then
+        // be first-seen order, and the trim below (plus later cap evictions)
+        // would evict the hottest recurring alerts first. Recency must mean
+        // LAST appearance, matching captureSnapshot's own ordering.
+        cache.delete(r.alertId);
         cache.set(r.alertId, r);
         n++;
       } catch { /* skip */ }
@@ -129,7 +136,12 @@ function ensureInit(log: (m: string) => void = () => {}) {
     try {
       if (text.length > COMPACT_BYTES) {
         const compacted = [...cache.values()].map((r) => JSON.stringify(r)).join('\n') + '\n';
-        writeFileSync(PATH, compacted);
+        // Atomic temp+rename (house pattern, chimeConfig.ts): this host loses
+        // power daily — an in-place truncate-and-write caught mid-flight would
+        // destroy the ONLY copy of the snapshot history.
+        const tmp = `${PATH}.tmp`;
+        writeFileSync(tmp, compacted);
+        renameSync(tmp, PATH);
         log(`featureSnapshot: compacted ${text.length} -> ${compacted.length} bytes (${cache.size} entries kept)`);
       }
     } catch { /* compaction is best-effort — appends still work on the big file */ }
