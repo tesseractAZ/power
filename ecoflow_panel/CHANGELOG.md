@@ -32,11 +32,14 @@ baseline-vs-recent drift was measured against itself by construction. The baseli
 only from samples **older than the 7-day recent window** (≥ 5 of them, else null), and both
 web and Lovelace cards render the baseline conditionally instead of printing "base null mΩ".
 
-8 new regression tests (suite 1450) pin: sign rejection (a 15-event wrong-signed series yields
+10 new regression tests (suite 1452) pin: sign rejection (a 15-event wrong-signed series yields
 0 samples), mixed-series median integrity, noise-fit trend gated null with diagnostic r²,
-genuine +2.6 mΩ/mo trend still publishing, the plausibility ceiling on a perfect-fit unphysical
-slope, the span gate on a 5-day burst, all-recent → null baseline, and old-cohort/new-cohort
-drift measurability.
+genuine +2.6 mΩ/mo trend still publishing, the plausibility ceiling on both a positive AND a
+**negative** unphysical slope (the −74.46 mΩ/mo the ceiling exists to catch — every gate now
+has a fixture that isolates it), the span gate on a 5-day burst with an otherwise-plausible
+slope, the baseline min-samples floor at its 1-4-sample boundary, all-recent → null baseline,
+and old-cohort/new-cohort drift measurability. Every mutant of the three new gates is killed by
+the test that targets it (verified by mutation testing).
 
 ## v1.21.0 — engine-review F28: cell-imbalance churn at the 20 mV line
 

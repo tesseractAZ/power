@@ -128,17 +128,30 @@ test('F27 — a genuine, physical trend still publishes (regression)', () => {
   );
 });
 
-test('F27 — the plausibility ceiling nulls a perfect-fit but unphysical slope', () => {
+test('F27 — the plausibility ceiling nulls a perfect-fit but unphysical POSITIVE slope', () => {
   // 10 → 60 mΩ over 20 days = +75 mΩ/mo at r² ≈ 1 — a regime change, not aging.
   const row = run('SN-F27-CEIL', spread(20, 22, 2, (i) => 10 + (50 * i) / 19));
-  assert.equal(row.trendMilliohmsPerMonth, null, 'unphysical slope must not publish');
+  assert.equal(row.trendMilliohmsPerMonth, null, 'unphysical +slope must not publish');
   assert.ok(row.trendR2 != null && row.trendR2 > 0.9, 'r² alone did not gate it — the ceiling did');
 });
 
-test('F27 — a one-burst cluster (span < 14 d) cannot extrapolate to a monthly trend', () => {
-  // Perfect rising fit, but all 15 events inside 5 days.
-  const row = run('SN-F27-SPAN', spread(15, 6, 1, (i) => 6 + (1.5 * i) / 14));
+test('F27 — the ceiling nulls a NEGATIVE unphysical slope too (the exact live −74.46 mΩ/mo defect)', () => {
+  // 60 → 10 mΩ over 20 days = −75 mΩ/mo, r² ≈ 1. The live bug that motivated
+  // F27 was a NEGATIVE slope; the ceiling must be two-sided (Math.abs), not a
+  // one-directional >5 test. Mutation M5 (dropping the abs) survives every
+  // POSITIVE-slope ceiling fixture — this is the guard that kills it.
+  const row = run('SN-F27-CEIL-NEG', spread(20, 22, 2, (i) => 60 - (50 * i) / 19));
+  assert.equal(row.trendMilliohmsPerMonth, null, 'unphysical −slope must not publish either');
+  assert.ok(row.trendR2 != null && row.trendR2 > 0.9, 'r² is high — only the two-sided ceiling gates it');
+});
+
+test('F27 — a one-burst cluster (span < 14 d) with a PLAUSIBLE slope is gated by span alone', () => {
+  // 6 → 6.5 mΩ over 5 days ≈ +3 mΩ/mo: within the ±5 ceiling and r² ≈ 1, so
+  // ONLY the 14-day span gate can null it. (The earlier +9 mΩ/mo fixture was
+  // dead-covered by the ceiling — mutation M4 survived it; this isolates span.)
+  const row = run('SN-F27-SPAN', spread(15, 6, 1, (i) => 6 + (0.5 * i) / 14));
   assert.equal(row.status, 'tracking');
+  assert.ok(row.trendR2 != null && row.trendR2 > 0.9, 'clean fit — not gated by r²');
   assert.equal(row.trendMilliohmsPerMonth, null, 'a 5-day burst must not publish a /month slope');
 });
 
@@ -158,4 +171,17 @@ test('F27 — baseline comes from the OLD cohort only, so drift is measurable', 
   const row = run('SN-F27-DRIFT', evts);
   assert.ok(Math.abs((row.baselineMilliohms ?? 0) - 6) < 0.5, `baseline from the old cohort (${row.baselineMilliohms})`);
   assert.ok(Math.abs((row.recentMilliohms ?? 0) - 10) < 0.5, `recent from the new cohort (${row.recentMilliohms})`);
+});
+
+test('F27 — the IR_BASELINE_MIN_SAMPLES floor rejects a 1-4 pre-recent cohort (boundary)', () => {
+  // EXACTLY 4 pre-recent samples + 11 recent: enough total to reach 'tracking'
+  // (15 events = 30 raw points, 15 accepted ≥ 10), but the old cohort is below
+  // IR_BASELINE_MIN_SAMPLES=5, so a 1-point baseline must NOT be published.
+  // (Mutation M7 — dropping the floor to 0 — survives the 0-pre-recent and
+  //  10-pre-recent tests; only this 1-4 boundary exercises the gate itself.)
+  const evts = [...spread(4, 25, 15, () => 6), ...spread(11, 5, 1, () => 10)];
+  const row = run('SN-F27-BASE4', evts);
+  assert.equal(row.status, 'tracking');
+  assert.ok(row.recentMilliohms != null, 'the 11 recent samples still set recent R');
+  assert.equal(row.baselineMilliohms, null, '4 pre-recent samples (< 5) must not form a baseline');
 });
