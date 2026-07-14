@@ -457,7 +457,7 @@ const de={attribute:!0,type:String,converter:$,reflect:!1,hasChanged:y},he=(e=de
           ${s.map(e=>{const t=e.trendMilliohmsPerMonth,s=null!=t&&t>.5?"warn":"";return q`<div class="row">
               <span class="label">Core ${e.coreNum}</span>
               <span class="num">${e.recentMilliohms} mΩ</span>
-              <span class="meta">base ${e.baselineMilliohms} mΩ</span>
+              <span class="meta">${null!=e.baselineMilliohms?`base ${e.baselineMilliohms} mΩ`:""}</span>
               <span class="num ${s} right">
                 ${null!=t?`${t>=0?"+":""}${t} mΩ/mo`:""}
               </span>
