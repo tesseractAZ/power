@@ -32,6 +32,29 @@ import { config } from './config.js';
 /** Telemetry event kinds we track for auto-silencing decisions. */
 export type TelemetryEvent = 'rise' | 'shortClear' | 'longActive';
 
+/**
+ * v1.23.0 (engine-review F31) — parse one JSONL line, recovering torn-append
+ * records. A power cut mid-append can leave the file extended with a run of NUL
+ * bytes ahead of the next flushed record (classic delayed-allocation crash
+ * artifact — the Pi cuts power daily). `\0` is not whitespace, so `.trim()`
+ * never removed it and JSON.parse threw on the NUL-prefixed line, silently
+ * dropping the valid record that follows (live: one real rise event lost after
+ * 424 leading NULs). Strip a leading NUL run before parsing; a line that is
+ * still not JSON after that throws and is skipped exactly as before.
+ * Returns null on unrecoverable lines. Exported for tests.
+ */
+export function parseTelemetryLine(line: string): TelemetryEntry | null {
+  // Strip a leading run of NUL / other C0 control bytes (the torn-append
+  // artifact); a valid JSON record begins with '{' (0x7B), never a control byte.
+  const cleaned = line.replace(/^[\u0000-\u001f]+/, '');
+  if (cleaned.length === 0) return null;
+  try {
+    return JSON.parse(cleaned) as TelemetryEntry;
+  } catch {
+    return null;
+  }
+}
+
 /** One persisted event line. */
 export interface TelemetryEntry {
   /** familyOf(alertId) — e.g. "pack-hot", "cell-imbalance". Rule thresholds are evaluated against this. */
@@ -146,10 +169,8 @@ export function readRecentTelemetry(windowMs: number = REPLAY_WINDOW_MS): Teleme
     const cutoff = Date.now() - windowMs;
     const out: TelemetryEntry[] = [];
     for (const line of lines) {
-      try {
-        const e = JSON.parse(line) as TelemetryEntry;
-        if (typeof e?.ts === 'number' && e.ts >= cutoff) out.push(e);
-      } catch { /* skip malformed */ }
+      const e = parseTelemetryLine(line); // v1.23.0 (F31) — recovers NUL-torn records
+      if (e && typeof e.ts === 'number' && e.ts >= cutoff) out.push(e);
     }
     return out;
   } catch {
@@ -228,7 +249,8 @@ export function readAllTelemetry(): TelemetryEntry[] {
     const lines = text.split('\n').filter((l) => l.trim().length > 0);
     const out: TelemetryEntry[] = [];
     for (const line of lines) {
-      try { out.push(JSON.parse(line) as TelemetryEntry); } catch { /* skip */ }
+      const e = parseTelemetryLine(line); // v1.23.0 (F31) — recovers NUL-torn records
+      if (e) out.push(e);
     }
     return out;
   } catch {
