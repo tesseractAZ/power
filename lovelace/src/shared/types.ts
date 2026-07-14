@@ -547,8 +547,11 @@ export interface InternalResistanceDevice {
   recentMilliohms: number | null;
   baselineMilliohms: number | null;
   trendMilliohmsPerMonth: number | null;
+  /** v1.22.0 (F27) — OLS fit quality of the R trend, diagnostic; present even
+   *  when the trend is gated null (low r² / span / plausibility ceiling). */
+  trendR2: number | null;
   samples: number;
-  status: 'tracking' | 'learning' | 'no-data';
+  status: 'tracking' | 'learning' | 'insufficient-cadence' | 'no-data';
 }
 
 export interface InternalResistanceReport {

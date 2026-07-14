@@ -1,3 +1,43 @@
+## v1.22.0 — engine-review F27: the internal-resistance trend stops bluffing
+
+The IR engine was publishing **−74.46 mΩ/mo** from 10 samples under a confident "tracking"
+label — a self-contradictory diagnostic (a resistance *falling* by 74 mΩ every month on a
+5–30 mΩ measurement is not a battery, it's noise). Fully isolated from the alarm path; three
+honesty defects fixed:
+
+**Wrong-signed dV/dI pairs are rejected, not `abs()`-coerced.** `bat_amp` is into-battery-
+positive (charging positive — see `deriveWholeUnitBatAmp`), so a genuine Ohmic response has
+**dV/dI > 0 regardless of charge direction** (V = OCV + I·R). A negative ratio means the bus
+voltage moved *against* the current step — OCV/SoC drift or a V/A snap race — and `Math.abs()`
+was silently aging that contamination into the medians and trend as plausible positive
+resistance. Expect live sample counts to drop and some Cores to fall from "tracking" back to
+"learning" after this ships: those samples were never resistance measurements. (One
+pre-existing test had encoded the inverted sign convention — invisible under `abs()` — and was
+corrected to the documented one.)
+
+**The slope now publishes through the same gates every other trend engine has.** The raw OLS
+slope published unconditionally — `linregress` computes `r²` and a slope standard error, and
+this engine read neither. `trendMilliohmsPerMonth` now requires **r² ≥ 0.3** (matches the EOL
+gate), a **≥ 14-day sample span** (a one-burst cluster extrapolated to a monthly rate explodes —
+the same failure class as the v1.19 CE span gate), and a **±5 mΩ/mo plausibility ceiling**
+(LFP bus IR ages well under 1–2 mΩ/mo even near end of life; the pack-risk factor saturates at
+3, so a same-magnitude *positive* noise excursion would have pinned a pack's risk factor at
+maximum). A new diagnostic `trendR2` publishes alongside — even when the trend is gated null —
+so the UI and future reviews can see why. The medians (recent/baseline R) still publish at
+10 samples; they're robust — the slope wasn't.
+
+**The baseline no longer compares the data to itself.** At exactly 10 samples the
+"first 30 %, floor 10" baseline slice was the *entire series* — recent window included — so
+baseline-vs-recent drift was measured against itself by construction. The baseline now draws
+only from samples **older than the 7-day recent window** (≥ 5 of them, else null), and both
+web and Lovelace cards render the baseline conditionally instead of printing "base null mΩ".
+
+8 new regression tests (suite 1450) pin: sign rejection (a 15-event wrong-signed series yields
+0 samples), mixed-series median integrity, noise-fit trend gated null with diagnostic r²,
+genuine +2.6 mΩ/mo trend still publishing, the plausibility ceiling on a perfect-fit unphysical
+slope, the span gate on a 5-day burst, all-recent → null baseline, and old-cohort/new-cohort
+drift measurability.
+
 ## v1.21.0 — engine-review F28: cell-imbalance churn at the 20 mV line
 
 Two residual cry-wolf sources in the cell-imbalance families. Both were already auto-demoted

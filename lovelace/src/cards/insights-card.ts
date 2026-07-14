@@ -993,7 +993,7 @@ export class EcoflowInsightsCard extends EcoflowCardBase {
             return html`<div class="row">
               <span class="label">Core ${d.coreNum}</span>
               <span class="num">${d.recentMilliohms} mΩ</span>
-              <span class="meta">base ${d.baselineMilliohms} mΩ</span>
+              <span class="meta">${d.baselineMilliohms != null ? `base ${d.baselineMilliohms} mΩ` : ''}</span>
               <span class="num ${trendCls} right">
                 ${trend != null ? `${trend >= 0 ? '+' : ''}${trend} mΩ/mo` : ''}
               </span>
