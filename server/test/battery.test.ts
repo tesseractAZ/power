@@ -505,7 +505,12 @@ test('computeInternalResistance — clean isolated ≥5 A steps now yield a trac
   const sn = 'SN-IR-CLEAN';
   const now = Date.now();
   const R_TRUE_MILLI = 10;
-  const vAt = (a: number) => 51.40 - (R_TRUE_MILLI / 1000) * a; // V sags linearly with current
+  // v1.22.0 (F27) — fixture sign corrected to the documented bat_amp
+  // convention (into-battery-positive; see deriveWholeUnitBatAmp): V RISES
+  // with charging current, V = OCV + I·R, so dV/dI = +R. The original
+  // "V sags with current" shape modeled a discharge-positive amp — invisible
+  // under the old Math.abs() coercion, rejected by the new sign gate.
+  const vAt = (a: number) => 51.40 + (R_TRUE_MILLI / 1000) * a;
   const vol: Array<{ ts: number; value: number }> = [];
   const amp: Array<{ ts: number; value: number }> = [];
   let ts = now - DAY_MS;

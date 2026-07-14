@@ -431,7 +431,11 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
               <div key={d.sn} className="bg-panel2/50 border border-line rounded-md p-2 text-xs flex items-baseline gap-2">
                 <span className="font-semibold w-20 shrink-0">Core {d.coreNum}</span>
                 <span className="font-mono tabular-nums">{d.recentMilliohms} mΩ</span>
-                <span className="text-[10px] text-muted">base {d.baselineMilliohms} mΩ</span>
+                {/* v1.22.0 (F27) — baseline can be null while recent is set
+                    (fewer than 5 pre-recent samples); don't render "base null". */}
+                {d.baselineMilliohms != null && (
+                  <span className="text-[10px] text-muted">base {d.baselineMilliohms} mΩ</span>
+                )}
                 <span className={`text-[10px] ml-auto ${(d.trendMilliohmsPerMonth ?? 0) > 0.5 ? 'text-warn' : 'text-muted'}`}>
                   {d.trendMilliohmsPerMonth != null ? `${d.trendMilliohmsPerMonth >= 0 ? '+' : ''}${d.trendMilliohmsPerMonth} mΩ/mo` : ''}
                 </span>

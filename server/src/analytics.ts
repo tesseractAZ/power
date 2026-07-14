@@ -4450,6 +4450,26 @@ const IR_STEADY_DIDT_MAX_A_PER_S = 3;
 // inverter-bus dV/dI signal. Was [1, 500] mΩ — let through bus-noise.
 const IR_R_MIN_MILLI = 2;
 const IR_R_MAX_MILLI = 100;
+// v1.22.0 (engine-review F27) — trend-publication gates. 10 accepted dV/dI
+// pairs over 30 days published a RAW OLS slope (live: −74.46 mΩ/mo) with no
+// fit-quality check — the only trend engine here without one — under a
+// 'tracking' label. The MEDIANS (recent/baseline R) are robust at 10 samples;
+// the slope is not. Publish trendMilliohmsPerMonth only when the fit explains
+// ≥ 30% of variance (matches EOL_MIN_R2), the samples span ≥ 14 days (a
+// one-burst cluster extrapolated to /month explodes — the F17 CE span-gate
+// failure class), and the slope lands under a physical plausibility ceiling:
+// LFP bus IR ages well under 1-2 mΩ/mo even near end of life and the
+// pack-risk factor saturates at 3, so |slope| past 5 is a regime change or
+// noise, never aging. trendR2 is published alongside as a diagnostic.
+const IR_TREND_MIN_R2 = 0.3;
+const IR_TREND_MIN_SPAN_MS = 14 * 24 * 60 * 60 * 1000;
+const IR_TREND_MAX_ABS_MILLI_PER_MONTH = 5;
+// v1.22.0 (F27) — the baseline must come from samples strictly OLDER than the
+// 7-day 'recent' window. The old first-30%-of-all slice floored at 10 meant
+// that at exactly 10 samples the "baseline" WAS the whole series, recent
+// included — the baseline-vs-recent comparison measured the data against
+// itself. Fewer than 5 pre-recent points → null, not a 2-point "baseline".
+const IR_BASELINE_MIN_SAMPLES = 5;
 
 export interface InternalResistanceDevice {
   sn: string;
@@ -4458,6 +4478,10 @@ export interface InternalResistanceDevice {
   recentMilliohms: number | null;
   baselineMilliohms: number | null;
   trendMilliohmsPerMonth: number | null;
+  /** v1.22.0 (F27) — OLS fit quality of the R-vs-time trend, DIAGNOSTIC ONLY.
+   *  Published even when the trend itself is gated null, so the UI/review can
+   *  see WHY (low r² vs ceiling vs span). */
+  trendR2: number | null;
   samples: number;
   // v0.13.3 — 'insufficient-cadence' is the HONEST terminal state: we have raw
   // V/A history but the 10-60 s poll cadence yields no clean dV/dI pairs, so
@@ -4494,7 +4518,7 @@ export function computeInternalResistance(
       out.push({
         sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
         recentMilliohms: null, baselineMilliohms: null, trendMilliohmsPerMonth: null,
-        samples: 0, status: 'no-data',
+        trendR2: null, samples: 0, status: 'no-data',
       });
       continue;
     }
@@ -4553,10 +4577,16 @@ export function computeInternalResistance(
       const dV = b.v - a.v;
       const r = (dV / dI) * 1000; // mΩ
       if (!Number.isFinite(r)) continue;
-      // R must be positive (V drops as current draw rises) and within a sane LFP band.
-      const rAbs = Math.abs(r);
-      if (rAbs < IR_R_MIN_MILLI || rAbs > IR_R_MAX_MILLI) continue;
-      rSamples.push({ ts: b.ts, rMilli: rAbs });
+      // v1.22.0 (engine-review F27) — REJECT wrong-signed pairs instead of
+      // Math.abs()-coercing them. bat_amp is into-battery-positive (see
+      // deriveWholeUnitBatAmp: charging positive, discharging negative), so a
+      // genuine Ohmic response has dV/dI > 0 regardless of charge direction
+      // (V = OCV + I·R). A negative ratio means the bus voltage moved AGAINST
+      // the current step — OCV/SoC drift or a V/A snap race, not resistance —
+      // and abs() was silently aging that contamination into the medians and
+      // trend as a plausible positive R. (r < IR_R_MIN also drops negatives.)
+      if (r < IR_R_MIN_MILLI || r > IR_R_MAX_MILLI) continue;
+      rSamples.push({ ts: b.ts, rMilli: r });
     }
     if (rSamples.length < 10) {
       // v0.13.3 — honest stopgap. We have ≥30 raw V/A samples (else 'no-data'
@@ -4573,19 +4603,36 @@ export function computeInternalResistance(
       out.push({
         sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
         recentMilliohms: null, baselineMilliohms: null, trendMilliohmsPerMonth: null,
-        samples: rSamples.length, status,
+        trendR2: null, samples: rSamples.length, status,
       });
       continue;
     }
     const recentCutoff = now - 7 * 24 * 60 * 60 * 1000;
     const recent = rSamples.filter((p) => p.ts >= recentCutoff).map((p) => p.rMilli);
-    const baseline = rSamples.slice(0, Math.max(10, Math.floor(rSamples.length * 0.3))).map((p) => p.rMilli);
+    // v1.22.0 (F27) — baseline drawn ONLY from pre-recent samples (see
+    // IR_BASELINE_MIN_SAMPLES). Keeps the original earliest-30% flavor within
+    // that older cohort.
+    const baseSrc = rSamples.filter((p) => p.ts < recentCutoff);
+    const baseline = baseSrc.length >= IR_BASELINE_MIN_SAMPLES
+      ? baseSrc.slice(0, Math.max(IR_BASELINE_MIN_SAMPLES, Math.floor(baseSrc.length * 0.3))).map((p) => p.rMilli)
+      : [];
     const fit = linregress(rSamples.map((p) => ({ ts: p.ts, value: p.rMilli })));
+    // v1.22.0 (F27) — the slope publishes only through the r²/span/ceiling
+    // gates (constants above); the medians publish regardless — they are what
+    // 'tracking' vouches for.
+    const spanMs = rSamples[rSamples.length - 1].ts - rSamples[0].ts;
+    const slopePerMonth = fit ? fit.slopePerMs * 30 * 86_400_000 : null;
+    const trendPublishable =
+      fit != null && slopePerMonth != null &&
+      fit.r2 >= IR_TREND_MIN_R2 &&
+      spanMs >= IR_TREND_MIN_SPAN_MS &&
+      Math.abs(slopePerMonth) <= IR_TREND_MAX_ABS_MILLI_PER_MONTH;
     out.push({
       sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
       recentMilliohms: recent.length ? round2(median(recent)) : null,
       baselineMilliohms: baseline.length ? round2(median(baseline)) : null,
-      trendMilliohmsPerMonth: fit ? round2(fit.slopePerMs * 30 * 86_400_000) : null,
+      trendMilliohmsPerMonth: trendPublishable ? round2(slopePerMonth!) : null,
+      trendR2: fit ? round2(fit.r2) : null,
       samples: rSamples.length, status: 'tracking',
     });
   }
