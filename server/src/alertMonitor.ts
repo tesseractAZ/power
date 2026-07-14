@@ -1011,9 +1011,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // v1.23.0 (engine-review F31) — clamp against clock-skew negatives. The Pi
     // loses power daily and its RTC-less clock jumps backward on NTP resync, so
     // a raisedAt stamped before a resync minus a `ts` after it yields a negative
-    // duration (live: 4 such events in 30 days). Left unclamped it poisons the
-    // medianDurationMs EWMA and misclassifies the clear as a shortClear. A
-    // measured duration is never physically negative.
+    // duration (live: 4 such events in 30 days). Left unclamped a negative would
+    // drag the medianDurationMs EWMA below zero and be persisted as a negative
+    // durationMs in the telemetry log. (It does NOT change the short/long
+    // classification — a near-instant clear is legitimately a shortClear either
+    // way; the clamp only keeps the recorded magnitude physical.)
     duration = Math.max(0, duration);
     const t = getOrSeedRollup(alert);
     // Online median via incremental approximation; for the simple use-case the

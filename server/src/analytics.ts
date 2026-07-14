@@ -3544,13 +3544,16 @@ export async function computeSoilingDecomposition(
   const now = Date.now();
   const since = now - 60 * 24 * 60 * 60 * 1000;
   const empty = (): SoilingDecomposition => ({ generatedAt: now, perDevice: [], perHour: [] });
-  // v1.23.0 (engine-review F29) — seed the whole 60-day decomposition window from
-  // the recorder-persisted weather series FIRST (the v0.13.1 backfill), then let
-  // the live cache OVERWRITE its freshest hours. The old code paired 60 days of
-  // PV with only getWeather()'s 7-day cache, so the soiling BASELINE slid forward
+  // v1.23.0 (engine-review F29) — seed the decomposition window from the
+  // recorder-persisted weather series FIRST (the v0.13.1 backfill), then let the
+  // live cache OVERWRITE its freshest hours. The old code paired the PV history
+  // with only getWeather()'s 7-day cache, so the soiling BASELINE slid forward
   // with the dirt it exists to measure — structurally blind to gradual soiling,
   // permanently (live: reported 0.9-1.6% while the true fleet figure is ~10-12%).
-  // Now the baseline spans the same 60 days as the PV it's compared against.
+  // Now the weather spans the SAME window as the PV it's compared against; the
+  // 60-day `since` is only a query ceiling — the effective window is bounded by
+  // the recorder's ~30-day sample retention, which is ample for a soiling
+  // baseline vs the recent-7-day window.
   const wxByHour = new Map<number, WeatherHour>();
   const ghiByEpoch = new Map<number, number>();
   mergeRecorderWeather(

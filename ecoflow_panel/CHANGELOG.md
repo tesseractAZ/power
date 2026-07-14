@@ -3,14 +3,16 @@
 Three unrelated low-severity findings, all reporting/robustness rather than safety, closing out
 the 30-day ground-truth engine review.
 
-**F29 — per-Core soiling reads the real 60-day baseline, not a sliding 7-day one.**
-`computeSoilingDecomposition` paired 60 days of PV against only `getWeather()`'s 7-day live cache,
+**F29 — per-Core soiling reads a real multi-week baseline, not a sliding 7-day one.**
+`computeSoilingDecomposition` paired its PV history against only `getWeather()`'s 7-day live cache,
 so the soiling *baseline* slid forward with the very dirt it exists to measure — structurally
 blind to gradual soiling, permanently (live: the per-Core tile read 0.9–1.6% while the correct
 fleet figure is ~10–12%, painting a green tile that should have tripped its own warn tier). The
 fix is the three-lines-away v0.13.1 `mergeRecorderWeather` backfill, already used by the
-alarm-facing solar model: seed the whole window from the recorder-persisted `ghi_wm2`/`cloud_pct`
-series first, then let the live cache overwrite its freshest hours. As a bonus the decomposition
+alarm-facing solar model: seed the window from the recorder-persisted `ghi_wm2`/`cloud_pct`
+series first, then let the live cache overwrite its freshest hours. The weather now spans the same
+window as the PV (bounded by the recorder's ~30-day sample retention — the 60-day query is only a
+ceiling), which is ample for a baseline vs the recent-7-day window. As a bonus the decomposition
 now computes even when the live weather cache is cold (recorder-only), instead of bailing empty.
 
 **F30 — the daily PV P10-P90 band self-calibrates to realized coverage.** The band's per-hour

@@ -130,11 +130,14 @@ test('F30 — <14 scored days → gate not met → bandSigmaCal 1.0, realized ha
   assert.equal(r.realizedDailyErrHalfFrac, null);
 });
 
-test('F30 — ≥14 tight-error days shrink the band (0.4 ≤ cal < 1) and narrow it vs uncalibrated', async () => {
+test('F30 — moderate realized error lands the calibration in the INTERMEDIATE band (0.4 < cal < 1)', async () => {
+  // ~25% daily error → realized half-frac ≈ 0.25 vs a produced ≈ 0.4 → cal ≈ 0.63,
+  // strictly between the 0.4 floor and 1. (An 8% fixture would floor at exactly
+  // 0.4 — the review-flagged gap that left this open interval untested.)
   const rawSpread = daySpread(await computeProbabilisticForecast(forecast24(), null));
   resetForecastCachesForTesting(); setWeatherCacheForTesting(null);
-  const r = await computeProbabilisticForecast(forecast24(), skill(skillDays(20, 8)));
-  assert.ok(r.bandSigmaCal! >= 0.4 && r.bandSigmaCal! < 1, `shrunk + floored; got ${r.bandSigmaCal}`);
+  const r = await computeProbabilisticForecast(forecast24(), skill(skillDays(20, 25)));
+  assert.ok(r.bandSigmaCal! > 0.4 && r.bandSigmaCal! < 1, `intermediate shrink, not floored/clamped; got ${r.bandSigmaCal}`);
   assert.ok(daySpread(r) < rawSpread, 'the calibrated band is narrower than the raw band');
   assert.ok(r.realizedDailyErrHalfFrac != null && r.realizedDailyErrHalfFrac > 0);
   for (const b of r.hours) { assert.ok(b.p10W <= b.p50W && b.p50W <= b.p90W); }
