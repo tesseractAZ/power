@@ -109,6 +109,33 @@ test('F28 — annunciation gates compose with the hold: a held warning while bal
   assert.equal(held!.annunciate, false, 'balancing gate still silences the held alert');
 });
 
+test('F28 — a hold must not leak across the SN boundary (same pack number on two devices)', () => {
+  // Mutation-testing survivor: keying the hold by pack number alone would let a
+  // real >=24 mV episode on one Core grant every same-numbered pack fleet-wide
+  // a 20 mV kiss-fire pass. Cycle shape matters: each cycle presents ONLY one
+  // device, so under the mutant the collided key "1" survives the prune via the
+  // other device's presence and wrongly fires.
+  const only = (sn: string, mv: number) => {
+    const devices = dpuWithPack({ maxVolDiffMv: mv, balanceState: 0 });
+    const d = devices['DPU-1'];
+    delete devices['DPU-1'];
+    (d as any).sn = sn;
+    devices[sn] = d;
+    return computeAlerts(devices);
+  };
+  assert.ok(only('DPU-A', 24).find((a) => a.id === 'vdiff-warn-DPU-A-1'), 'DPU-A pack 1 fires at 24');
+  assert.equal(
+    only('DPU-B', 22).find((a) => a.id === 'vdiff-warn-DPU-B-1'),
+    undefined,
+    "DPU-B pack 1 at 22 mV must not inherit DPU-A's hold",
+  );
+  assert.equal(
+    only('DPU-A', 22).find((a) => a.id === 'vdiff-warn-DPU-A-1'),
+    undefined,
+    "DPU-A's own hold was pruned while it was absent — 22 mV must re-earn the rise",
+  );
+});
+
 /* ── peer-voldiff joins the resolve-dwell family ─────────────────── */
 
 test('F28 — isCellImbalanceResolveDwellFamily now matches peer-voldiff per-pack ids', () => {
