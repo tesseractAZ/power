@@ -1,3 +1,50 @@
+## v1.23.0 — engine-review F29 + F30 + F31: the final low-severity queue
+
+Three unrelated low-severity findings, all reporting/robustness rather than safety, closing out
+the 30-day ground-truth engine review.
+
+**F29 — per-Core soiling reads a real multi-week baseline, not a sliding 7-day one.**
+`computeSoilingDecomposition` paired its PV history against only `getWeather()`'s 7-day live cache,
+so the soiling *baseline* slid forward with the very dirt it exists to measure — structurally
+blind to gradual soiling, permanently (live: the per-Core tile read 0.9–1.6% while the correct
+fleet figure is ~10–12%, painting a green tile that should have tripped its own warn tier). The
+fix is the three-lines-away v0.13.1 `mergeRecorderWeather` backfill, already used by the
+alarm-facing solar model: seed the window from the recorder-persisted `ghi_wm2`/`cloud_pct`
+series first, then let the live cache overwrite its freshest hours. The weather now spans the same
+window as the PV (bounded by the recorder's ~30-day sample retention — the 60-day query is only a
+ceiling), which is ample for a baseline vs the recent-7-day window. As a bonus the decomposition
+now computes even when the live weather cache is cold (recorder-only), instead of bailing empty.
+
+**F30 — the daily PV P10-P90 band self-calibrates to realized coverage.** The band's per-hour
+sigma is built from raw cloud-cover *variance*, which the point forecast already absorbs, so the
+daily band over-covered badly (live: 42% daily half-width against a realized ~7% daily error →
+~96–100% realized coverage vs a nominal 80% — doubly conservative, which costs the recommend-only
+MPC money, never safety). The band now measures the realized daily error spread from the skill
+report (80th percentile of |daily error|) and shrinks toward ~80% central coverage. Guardrails
+that keep this safe on a life-adjacent forecast: **shrink-only** (the raw wide band is the
+default), **floored at 0.4×** (a benign window can't collapse it), **gated on ≥14 weather-covered
+scored days** (so monsoon variability is in the sample before it acts — inert on the current
+7-day window, self-activating later), and **env-overridable** (`PV_BAND_SIGMA_CAL`). Two new
+diagnostics — `bandSigmaCal` and `realizedDailyErrHalfFrac` — make the calibration observable.
+The band feeds the MPC recommendation and the probabilistic display badge only; it is not an
+alarm input.
+
+**F31 — alert telemetry recovers power-cut-torn records and rejects clock-skew negatives.** The
+daily Pi power cut can leave a JSONL append torn behind a run of NUL bytes (delayed-allocation
+crash artifact); `\0` isn't whitespace, so the old `trim()`+`JSON.parse` silently dropped the
+valid record that followed. A new `parseTelemetryLine` strips leading NUL/C0 control bytes before
+parsing, recovering the record. Separately, `recordClear` now clamps duration ≥ 0 so a
+before-resync `raisedAt` minus an after-resync clear can't feed a negative duration into the
+median EWMA or misclassify the clear as a short-clear.
+
+16 new regression tests (suite 1468): NUL-torn record recovery + pure-NUL/garbage rejection; the
+band calibration gate, floor, shrink-only clamp, intermediate factor, env override, and monotonic
+P10≤P50≤P90; the pure `parsePvBandSigmaCal`/`pvBandRealizedHalfFrac` helpers (including p80-not-min
+on a varied set); and soiling computing from recorder weather with the live cache cold plus the
+no-weather empty-guard. Mutation-tested (10 mutants): 9 killed; the one survivor is the defensive
+`recordClear` duration clamp — a `Math.max(0, x)` on `medianDurationMs`, which has no live
+consumer and needs no behavior test.
+
 ## v1.22.0 — engine-review F27: the internal-resistance trend stops bluffing
 
 The IR engine was publishing **−74.46 mΩ/mo** from 10 samples under a confident "tracking"
