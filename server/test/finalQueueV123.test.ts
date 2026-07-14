@@ -94,6 +94,16 @@ test('F30 — pvBandRealizedHalfFrac excludes uncovered / null-errorPct days fro
   assert.equal(pvBandRealizedHalfFrac(mixed), null);
 });
 
+test('F30 — pvBandRealizedHalfFrac returns the 80th percentile, not the min, of a VARIED error set', () => {
+  // 11 days at 2% + one each at 10/20/40% → sorted |err|/100 puts the p80
+  // (nearest-rank index ceil(0.8·14)-1 = 11) at 0.10, distinct from the 0.02
+  // minimum. An all-equal fixture can't tell p80 from min apart.
+  const days = [
+    ...skillDays(11, 2), ...skillDays(1, 10), ...skillDays(1, 20), ...skillDays(1, 40),
+  ];
+  assert.equal(pvBandRealizedHalfFrac(days), 0.1);
+});
+
 /* ── F30: band calibration end-to-end ────────────────────────────── */
 
 function forecast24(): DayForecast {
@@ -146,6 +156,16 @@ test('F30 — moderate realized error lands the calibration in the INTERMEDIATE 
 test('F30 — an extremely tight realized error floors the calibration at 0.4 (never collapses the band)', async () => {
   const r = await computeProbabilisticForecast(forecast24(), skill(skillDays(20, 1)));
   assert.equal(r.bandSigmaCal, 0.4, 'shrink is capped at the 40% floor');
+});
+
+test('F30 — the auto calibration is SHRINK-ONLY: a loose realized error never widens the band', async () => {
+  // ~60% realized daily error exceeds the raw band half-width, so the raw ratio
+  // would want cal > 1 (widen). Shrink-only clamps it to exactly 1 — the band
+  // is never widened beyond the conservative raw default.
+  const r = await computeProbabilisticForecast(forecast24(), skill(skillDays(20, 60)));
+  assert.equal(r.bandSigmaCal, 1, 'cal is capped at 1 (never widens)');
+  assert.ok(r.realizedDailyErrHalfFrac != null && r.realizedDailyErrHalfFrac > 0.4,
+    'it DID measure a large realized error — the clamp, not the gate, held it at 1');
 });
 
 test('F30 — PV_BAND_SIGMA_CAL env override wins over the auto factor', async () => {
@@ -218,4 +238,27 @@ test('F29 — soiling decomposition computes from RECORDER weather even when the
   const dev = r.perDevice[0];
   assert.ok(dev.baselineCoeff != null && dev.recentCoeff != null, 'baseline + recent coefficients computed');
   assert.ok((dev.dropPct ?? 0) > 5, `the ~11% recent soiling drop is detected (got ${dev.dropPct}%)`);
+});
+
+test('F29 — with NO weather from either source the decomposition still bails empty (guard intact)', async () => {
+  // The size===0 guard must still short-circuit: live cache null AND recorder
+  // weather empty → no baseline can form → empty(), not a bogus row.
+  resetForecastCachesForTesting();
+  setWeatherCacheForTesting(null);
+  const sn = 'SN-SOIL-EMPTY';
+  const noWeather = {
+    insertSnapshot: () => {},
+    query: (qsn: string, metric: string) => (qsn === sn && metric === 'pv_total'
+      ? [{ ts: Date.now() - DAY, value: 5000 }] : []),
+    queryMulti: (_sn: string, metrics: string[]) => {
+      const m = new Map<string, Array<{ ts: number; value: number }>>();
+      for (const k of metrics) m.set(k, []);
+      return m;
+    },
+    listMetrics: () => [], close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
+  } as unknown as Recorder;
+  const r = await computeSoilingDecomposition(dpuDevice(sn), noWeather);
+  clearWeatherTestOverride();
+  assert.equal(r.perDevice.length, 0, 'no weather → empty(), no per-device rows');
+  assert.equal(r.perHour.length, 0);
 });
