@@ -3544,10 +3544,25 @@ export async function computeSoilingDecomposition(
   const now = Date.now();
   const since = now - 60 * 24 * 60 * 60 * 1000;
   const empty = (): SoilingDecomposition => ({ generatedAt: now, perDevice: [], perHour: [] });
-  const weather = await getWeather();
-  if (!weather) return empty();
+  // v1.23.0 (engine-review F29) — seed the whole 60-day decomposition window from
+  // the recorder-persisted weather series FIRST (the v0.13.1 backfill), then let
+  // the live cache OVERWRITE its freshest hours. The old code paired 60 days of
+  // PV with only getWeather()'s 7-day cache, so the soiling BASELINE slid forward
+  // with the dirt it exists to measure — structurally blind to gradual soiling,
+  // permanently (live: reported 0.9-1.6% while the true fleet figure is ~10-12%).
+  // Now the baseline spans the same 60 days as the PV it's compared against.
   const wxByHour = new Map<number, WeatherHour>();
-  for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
+  const ghiByEpoch = new Map<number, number>();
+  mergeRecorderWeather(
+    wxByHour, ghiByEpoch,
+    recorder.query('weather', 'ghi_wm2', since, now, 3600),
+    recorder.query('weather', 'cloud_pct', since, now, 3600),
+  );
+  const weather = await getWeather();
+  if (weather) for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
+  // With the recorder backfill the decomposition can run even when the live
+  // cache is cold; only bail when NEITHER source produced any weather.
+  if (wxByHour.size === 0) return empty();
 
   const dpus = allDpus(devices);
 
@@ -7194,6 +7209,13 @@ export interface ProbabilisticForecast {
   pAboveReservePct: number | null;
   pFullCharge: number | null;          // probability SoC reaches ≥99% at some hour of the window (max-over-path)
   uncertaintyKwhStdev: number;         // typical ±band width over the window (kWh stdev)
+  // v1.23.0 (engine-review F30) — diagnostics for the band calibration. cal < 1
+  // means the raw band was shrunk toward the realized daily coverage; 1 means
+  // no calibration (env override, or fewer than PV_BAND_CAL_MIN_DAYS scored
+  // days). realizedDailyErrHalfFrac is the measured ~80%-coverage daily
+  // half-width (null until enough scored days exist).
+  bandSigmaCal?: number;
+  realizedDailyErrHalfFrac?: number | null;
 }
 
 let probabilisticCache: { ts: number; value: ProbabilisticForecast } | null = null;
@@ -7201,6 +7223,44 @@ const PROB_TTL_MS = 15 * 60 * 1000;
 
 /** Normal-distribution shortcut: P10 ≈ μ−1.282σ, P90 ≈ μ+1.282σ. */
 const Z10 = 1.282;
+
+/* v1.23.0 (engine-review F30) — daily PV-band calibration. The per-hour sigma
+ * is built from cloud-cover VARIANCE, a raw uncertainty proxy the point
+ * forecast already absorbs, so the daily P10-P90 band over-covers badly (live:
+ * 42% daily half-width vs a realized ~7% daily forecast error → ~96-100%
+ * realized coverage against a nominal 80%). We measure the realized daily error
+ * spread from the skill report and SHRINK the band to hit ~80% central
+ * coverage. Gated on ≥ this many weather-covered scored days (so a short
+ * clear-sky window can't collapse the band — monsoon variability must be in the
+ * sample), shrink-only, and floored so even a benign window keeps a real band.
+ * Recommend-only-MPC + display band; NOT an alarm input. */
+const PV_BAND_CAL_MIN_DAYS = 14;
+const PV_BAND_CAL_FLOOR = 0.4;   // never shrink below 40% of the raw band width
+
+/** Operator override for the band calibration factor. Empty/NaN/out-of-range →
+ *  null (auto). Clamped to [0.1, 2] so a config typo can't zero or balloon the
+ *  band. Exported for tests. */
+export function parsePvBandSigmaCal(raw: string | undefined): number | null {
+  if (raw == null || raw.trim() === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(2, Math.max(0.1, n));
+}
+
+/** v1.23.0 (engine-review F30) — the daily P10-P90 half-width fraction that
+ *  yields ~80% central coverage, from the realized daily error distribution.
+ *  Nearest-rank 80th percentile of |errorPct|/100 over weather-covered scored
+ *  days (for a roughly symmetric error, P(|e| ≤ q80) ≈ 0.80 places the P10/P90
+ *  edges at ±q80). Returns null below PV_BAND_CAL_MIN_DAYS days. Pure + exported. */
+export function pvBandRealizedHalfFrac(days: ForecastSkillReport['days']): number | null {
+  const errs = days
+    .filter((d) => d.weatherCovered && d.errorPct != null && Number.isFinite(d.errorPct))
+    .map((d) => Math.abs(d.errorPct as number) / 100)
+    .sort((a, b) => a - b);
+  if (errs.length < PV_BAND_CAL_MIN_DAYS) return null;
+  const rank = Math.max(0, Math.min(errs.length - 1, Math.ceil(0.8 * errs.length) - 1));
+  return errs[rank];
+}
 
 /* v1.16.0 (engine-review F7) — coherent trajectory ensemble.
  *
@@ -7361,31 +7421,51 @@ export async function computeProbabilisticForecast(
   // multiplier below grows monotonically across the window regardless of when
   // the forecast was generated relative to wall-clock `now`.
   const forecastStartTs = forecast.hours[0]?.ts ?? now;
+  // v1.23.0 (engine-review F30) — precompute each hour's RAW (cal=1) sigmaFrac.
+  // It depends only on hour-of-day cloud variance, ensemble disagreement, model
+  // skill, and horizon — none of the SoC-trajectory loop state — so it can be
+  // hoisted, measured, and calibrated before the trajectory integration below.
+  //   • cloudStdev: historical hour-of-day cloud-cover stdev (raw uncertainty).
+  //   • disagreementFrac (v0.9.2): Open-Meteo vs NWS cloud disagreement, N/100.
+  //   • horizonFactor (v0.9.59): sqrt(1 + h/24) — chaos compounds with time
+  //     (variance ~linear in time, stdev ~sqrt(time)); hour 24 ≈ 1.41×.
+  const sigmaFracRaw: number[] = [];
+  let calSumP50 = 0;
+  let calSumHalf = 0;
   for (const h of forecast.hours) {
     const hod = new Date(h.ts).getHours();
     const cloudStdev = cloudVarByHour[hod];
-    // v0.9.2 — fold per-hour ensemble disagreement into the band. When
-    // Open-Meteo and NWS disagree by N pp on cloud cover, treat that as an
-    // additional N/100 fraction of PV uncertainty (proportional contribution).
     const disagreementFrac = (disagreeByHourEpoch.get(Math.floor(h.ts / 3_600_000)) ?? 0) / 100;
-    // Wider band when cloud cover varies historically AND when the ensemble
-    // disagrees AND when the model itself is biased. Quadrature-sum.
     const baseSigmaFrac = Math.sqrt(
       cloudStdev * cloudStdev + skillFrac * skillFrac + disagreementFrac * disagreementFrac,
     );
-    // v0.9.59 — widen the band with horizon. The base sigmaFrac above is
-    // entirely "what-time-of-day-is-it" structure; it gives hour-24 the same
-    // band as hour-1 even though further-out forecasts are physically less
-    // certain (atmospheric chaos compounds with time). Multiply by a sqrt-
-    // shaped horizon factor: an h-hours-out forecast carries roughly
-    // sqrt(1 + h/24) more uncertainty than the immediate one. Hour 0 stays
-    // at 1.0×; hour 24 widens by ~1.41×; a 48-hour horizon by ~1.73×. The
-    // sqrt scaling (rather than linear) is the right shape for a random-
-    // walk-of-clouds process — variance grows linearly with time, stdev as
-    // sqrt(time).
     const horizonHours = Math.max(0, (h.ts - forecastStartTs) / 3_600_000);
-    const horizonFactor = Math.sqrt(1 + horizonHours / 24);
-    const sigmaFrac = baseSigmaFrac * horizonFactor;
+    const sf = baseSigmaFrac * Math.sqrt(1 + horizonHours / 24);
+    sigmaFracRaw.push(sf);
+    // Accumulate the raw daily P10-P90 half-width (same ceiling clamp the loop
+    // applies) so we can compare it to the realized coverage target.
+    const p50c = h.forecastPvW;
+    const p10c = Math.max(0, p50c * (1 - Z10 * sf));
+    const pvCeilC = forecast.pvCeilingW ?? 0;
+    const p90rawC = p50c * (1 + Z10 * sf);
+    const p90c = pvCeilC > 0 ? Math.min(p90rawC, pvCeilC) : p90rawC;
+    calSumP50 += p50c;
+    calSumHalf += (p90c - p10c) / 2;
+  }
+  const producedHalfFrac = calSumP50 > 0 ? calSumHalf / calSumP50 : null;
+  const realizedHalfFrac = skill ? pvBandRealizedHalfFrac(skill.days) : null;
+  const envCal = parsePvBandSigmaCal(process.env.PV_BAND_SIGMA_CAL);
+  let bandCal = 1;
+  if (envCal != null) {
+    bandCal = envCal;
+  } else if (realizedHalfFrac != null && producedHalfFrac != null && producedHalfFrac > 0) {
+    // Shrink-only + floored: the raw band is the safe conservative default, and
+    // the floor caps how far a benign window can tighten it.
+    bandCal = Math.min(1, Math.max(PV_BAND_CAL_FLOOR, realizedHalfFrac / producedHalfFrac));
+  }
+  for (let hIdx = 0; hIdx < forecast.hours.length; hIdx++) {
+    const h = forecast.hours[hIdx];
+    const sigmaFrac = sigmaFracRaw[hIdx] * bandCal;
     const p50 = h.forecastPvW;
     const p10 = Math.max(0, p50 * (1 - Z10 * sigmaFrac));
     // v0.14.1 — clamp the best-case band to the array's clear-sky ceiling so P90
@@ -7466,6 +7546,8 @@ export async function computeProbabilisticForecast(
     pAboveReservePct,
     pFullCharge,
     uncertaintyKwhStdev: Math.round(stdevAccum * 100) / 100, // already kWh (Σ per-hour sigmaNetKwh)
+    bandSigmaCal: Math.round(bandCal * 100) / 100,
+    realizedDailyErrHalfFrac: realizedHalfFrac != null ? Math.round(realizedHalfFrac * 1000) / 1000 : null,
   };
   probabilisticCache = { ts: now, value };
   return value;
@@ -8460,6 +8542,7 @@ export function resetSelfConsumptionCache(): void {
 export function resetForecastCachesForTesting(): void {
   dayForecastCache = null; // v0.57.0 — was missing; needed to force a cold first compute when testing the structural-incompleteness latch gate
   probabilisticCache = null;
+  soilingDecompCache = null; // v1.23.0 (F29) — force a cold soiling recompute
   multiDayCache = null;
   forecastSkillCache.clear();
   bayesCache = null;
