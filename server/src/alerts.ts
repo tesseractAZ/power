@@ -9,6 +9,15 @@ let heldSocBandPct: number | null = null;
 export function resetOnScreenSocBandForTesting(): void {
   heldSocBandPct = null;
 }
+/* v1.21.0 (engine-review F28) — packs currently HELD in the vdiff warning by the
+ * rise-side hysteresis (fired at >= VOL_DIFF_WARN_RISE_MV, holding while still
+ * >= VOL_DIFF_WARN_MV). Keyed `${sn}-${packNum}`. Same single-call-site module
+ * singleton as the SoC band above; pruned each cycle so a pack that goes
+ * missing (device offline, vdiff reading null) must re-earn the rise. */
+const heldVdiffWarnKeys = new Set<string>();
+export function resetVdiffWarnHoldForTesting(): void {
+  heldVdiffWarnKeys.clear();
+}
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import {
@@ -132,6 +141,17 @@ export const PTC_TEMP: TempBand = { infoF: 158, warnF: 176, critF: 194 };
 export const CELL_TEMP_COLD_F = 41;
 
 const VOL_DIFF_WARN_MV = 20;
+// v1.21.0 (engine-review F28) — rise-side margin for the vdiff warning. The
+// 20 mV line had ZERO rise hysteresis, so threshold-kissing 19-22 mV spreads
+// fired `vdiff-warn` on every touch (30-day ground truth: 73-100% of rises
+// cleared within minutes; the v0.77 resolve dwell only holds the RESOLVE push
+// — it cannot stop the dashboard re-fire churn on the next kiss). Fire only at
+// >= 24 mV (clear of the observed 20-23 mV kissing band); once fired, HOLD the
+// warning while the spread is still >= the original 20 mV, so a real episode
+// doesn't flap on the way down. The critical threshold is untouched — a 50 mV
+// (90 mV on-plateau) spread is instantaneous by design (v0.29 handles its
+// transients via the balancing/plateau annunciate gates).
+const VOL_DIFF_WARN_RISE_MV = 24;
 const VOL_DIFF_CRIT_MV = 50;
 // v0.58.0 — on the LFP top-of-charge plateau (high SoC) cell spread transiently
 // balloons even with the BMS idle (balanceState=0), so the static 50 mV crit
@@ -258,6 +278,10 @@ export function computeAlerts(
   grid?: { present?: boolean; backstopping: boolean; reason?: string },
 ): Alert[] {
   const out: Alert[] = [];
+  // v1.21.0 (F28) — vdiff keys observed (non-null reading) this cycle; held
+  // rise-hysteresis state for any key NOT seen is pruned at the end of the
+  // device loop, so a data gap or offline device resets the episode.
+  const seenVdiffKeys = new Set<string>();
   const list = Object.values(devices);
   const now = Date.now();
 
@@ -567,10 +591,24 @@ export function computeAlerts(
         const plateauBenign = onPlateau && !balancing && pk.maxVolDiffMv >= VOL_DIFF_CRIT_MV && pk.maxVolDiffMv < critMv;
         const plateauNote = plateauBenign ? ' Expected top-of-charge cell spread.' : '';
         const annun = (balancing || plateauBenign) ? { annunciate: false } : {};
+        // v1.21.0 (engine-review F28) — rise-side hysteresis: fire the warning
+        // only at >= VOL_DIFF_WARN_RISE_MV; once fired, hold it while the spread
+        // is still >= VOL_DIFF_WARN_MV. A spread descending OUT of critical
+        // (always >= the rise line) marks the hold too, so it keeps its warning
+        // through the 20-49 mV band instead of vanishing. Threshold-kissing
+        // 19-23 mV spreads — 73-100% of this family's 30-day rises, all
+        // short-clearing — no longer fire at all.
+        const vdiffKey = `${d.sn}-${pk.num}`;
+        seenVdiffKeys.add(vdiffKey);
+        const warnActive =
+          pk.maxVolDiffMv >= VOL_DIFF_WARN_RISE_MV ||
+          (heldVdiffWarnKeys.has(vdiffKey) && pk.maxVolDiffMv >= VOL_DIFF_WARN_MV);
+        if (warnActive) heldVdiffWarnKeys.add(vdiffKey);
+        else heldVdiffWarnKeys.delete(vdiffKey);
         if (pk.maxVolDiffMv >= critMv) {
           out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${balanceNote}`, ...annun });
-        } else if (pk.maxVolDiffMv >= VOL_DIFF_WARN_MV) {
-          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning ≥ ${VOL_DIFF_WARN_MV} mV).${balanceNote}${plateauNote}`, ...annun });
+        } else if (warnActive) {
+          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${balanceNote}${plateauNote}`, ...annun });
         }
       }
       if (balancing) {
@@ -608,6 +646,14 @@ export function computeAlerts(
         if (out[i].annunciate !== false) out[i].annunciate = false;
       }
     }
+  }
+
+  // v1.21.0 (F28) — a held vdiff-warn key whose pack produced no reading this
+  // cycle (device offline / vdiff null) loses its hold: the episode must
+  // re-earn the >= VOL_DIFF_WARN_RISE_MV rise when data returns, mirroring the
+  // peer-hit prune philosophy (a lapsed condition re-earns its gate).
+  for (const k of heldVdiffWarnKeys) {
+    if (!seenVdiffKeys.has(k)) heldVdiffWarnKeys.delete(k);
   }
 
   if (shp2?.online && shp2.projection) {
