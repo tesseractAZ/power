@@ -22,7 +22,7 @@ only holding the resolve can. It now gets the same 3-minute resolve-side dwell a
 `vdiff-warn`/`vdiff-crit` (resolve-only; fires are never delayed). The other peer families are
 untouched — peer-temp was fixed at the floor (v1.17) and peer-soc at v0.13.2's floor raise.
 
-9 new regression tests (suite 1441) pin: no fire in the 20–23 mV kiss band, fire-at-24 +
+10 new regression tests (suite 1442) pin: no fire in the 20–23 mV kiss band, fire-at-24 +
 hold-through-21 + clear-below-20 + re-earn, crit-descent hold, data-gap and device-absence
 episode resets, per-pack hold isolation, balancing-gate composition on a held alert, and the
 dwell family membership (peer-voldiff in; peer-temp/soc/soh out).
