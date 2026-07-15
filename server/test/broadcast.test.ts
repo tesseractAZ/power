@@ -163,6 +163,50 @@ test('loadBroadcastConfig — parses targets, ignores non-media_player IDs', () 
   }
 });
 
+test('loadBroadcastConfig — v1.25.0: sipTargets default empty; unset is safe', () => {
+  const prev = { ...process.env };
+  try {
+    delete process.env.BROADCAST_SIP_TARGETS;
+    assert.deepEqual(loadBroadcastConfig().sipTargets, [], 'unset BROADCAST_SIP_TARGETS → no SIP targets');
+    for (const raw of ['', '   ', ',,,', 'cordless', 'media_player', 'switch.x']) {
+      process.env.BROADCAST_SIP_TARGETS = raw;
+      assert.equal(loadBroadcastConfig().sipTargets.length, 0, `"${raw}" must produce NO SIP targets`);
+    }
+  } finally {
+    process.env = prev;
+  }
+});
+
+test('loadBroadcastConfig — v1.25.0: sipTargets applies the same media_player.* scope guard', () => {
+  const prev = { ...process.env };
+  try {
+    delete process.env.BROADCAST_TARGETS;
+    process.env.BROADCAST_SIP_TARGETS =
+      ' media_player.cordless_speaker , switch.pool_pump ,, light.porch , media_player.intercom ';
+    const cfg = loadBroadcastConfig();
+    assert.deepEqual(cfg.sipTargets, ['media_player.cordless_speaker', 'media_player.intercom'],
+      'only trimmed media_player.* SIP entries are admitted');
+    assert.ok(!cfg.sipTargets.some((t) => !t.startsWith('media_player.')), 'no non-media_player SIP target can leak in');
+  } finally {
+    process.env = prev;
+  }
+});
+
+test('loadBroadcastConfig — v1.25.0: a target in BOTH lists is dropped from sipTargets (MA wins, no double-announce)', () => {
+  const prev = { ...process.env };
+  try {
+    process.env.BROADCAST_TARGETS = 'media_player.west_hallway, media_player.guest_thermostat';
+    // cordless is SIP-only; west_hallway is (wrongly) in both → must not double-fire.
+    process.env.BROADCAST_SIP_TARGETS = 'media_player.cordless_speaker, media_player.west_hallway';
+    const cfg = loadBroadcastConfig();
+    assert.deepEqual(cfg.targets, ['media_player.west_hallway', 'media_player.guest_thermostat']);
+    assert.deepEqual(cfg.sipTargets, ['media_player.cordless_speaker'],
+      'a media_player present in BROADCAST_TARGETS is removed from sipTargets so it is announced once (via MA), not twice');
+  } finally {
+    process.env = prev;
+  }
+});
+
 test('loadBroadcastConfig — clamps volume to [0, 1]', () => {
   const prev = { ...process.env };
   process.env.BROADCAST_VOLUME = '1.5';

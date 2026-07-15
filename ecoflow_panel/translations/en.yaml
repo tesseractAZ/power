@@ -57,7 +57,10 @@ configuration:
     description: Master switch for spoken alarm announcements and chimes on your Home Assistant media_player speakers (HomePod/Sonos/ecobee). Off by default, and does nothing until you also list at least one speaker in Broadcast Targets; push notifications are separate and unaffected. Can also be toggled live from the dashboard.
   BROADCAST_TARGETS:
     name: Broadcast Target Speakers
-    description: Comma-separated Home Assistant media_player entity IDs alarms play on, e.g. media_player.living_room, media_player.kitchen. Each entry must start with 'media_player.'; anything else is silently dropped. Empty (the default) means no audible alarm can play even when broadcasts are enabled.
+    description: Comma-separated Home Assistant media_player entity IDs alarms play on, e.g. media_player.living_room, media_player.kitchen. Each entry must start with 'media_player.'; anything else is silently dropped. Empty (the default) means no audible alarm can play even when broadcasts are enabled. These play through Music Assistant.
+  BROADCAST_SIP_TARGETS:
+    name: Broadcast SIP / Intercom Targets
+    description: Comma-separated media_player entity IDs that receive alarms via media_player.play_media(announce) instead of Music Assistant — for SIP / intercom endpoints Music Assistant cannot drive, such as the Switchboard cordless (media_player.cordless_speaker). They get the same spoken alarm audio, play alongside the Music Assistant speakers above, and fire independently — so they still sound when Music Assistant is down. Each entry must start with 'media_player.'. Requires at least one Broadcast Target Speaker configured for broadcasts to run.
   BROADCAST_MIN_SEVERITY:
     name: Broadcast Minimum Severity
     description: Lowest alarm tier that triggers an audible broadcast. 'critical' (default) broadcasts only criticals; 'warning' broadcasts warnings and criticals. This gates the audible channel only, separate from the push-notification severity setting.
