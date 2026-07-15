@@ -1,5 +1,5 @@
 name: Power
-version: "1.24.0"
+version: "1.25.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -86,6 +86,7 @@ options:
   # Audible broadcast — spoken alarms + chimes over HA media_player speakers
   BROADCAST_ENABLED: false
   BROADCAST_TARGETS: ""
+  BROADCAST_SIP_TARGETS: ""
   BROADCAST_MIN_SEVERITY: critical
   BROADCAST_QUIET_HOURS: "22-06"
   CRITICAL_BREAKS_QUIET_HOURS: false
@@ -160,6 +161,7 @@ schema:
   # Audible broadcast — spoken alarms + chimes over HA media_player speakers
   BROADCAST_ENABLED: bool
   BROADCAST_TARGETS: "str?"
+  BROADCAST_SIP_TARGETS: "str?"
   BROADCAST_MIN_SEVERITY: list(critical|warning)
   BROADCAST_QUIET_HOURS: "str?"
   CRITICAL_BREAKS_QUIET_HOURS: bool

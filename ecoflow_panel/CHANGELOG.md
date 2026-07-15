@@ -1,3 +1,30 @@
+## v1.25.0 — power alarms reach SIP/intercom endpoints (the Switchboard cordless) via a direct play_media side-channel
+
+Music Assistant drives the ecobee alarm speakers, but it **cannot drive a SIP phone**: exposing the
+Switchboard cordless (`media_player.cordless_speaker`) as an MA player registers it, yet MA's
+announcement flow never plays on it (no real playback state), and the broadcast's pre-announce
+`volume_set` 500s on it (a SIP endpoint has no volume feature — the exact "Server got itself in
+trouble" seen live). So the cordless got noise and no audio when listed in `BROADCAST_TARGETS`.
+
+**New option `BROADCAST_SIP_TARGETS`** — a second, comma-separated list of `media_player.*` entity
+IDs that receive the SAME rendered alarm audio via `media_player.play_media(announce=true)` instead
+of Music Assistant. The dispatch is:
+
+- **independent of Music Assistant** — fired *before* the MA-target availability pre-flight, so a SIP
+  target is a genuine ALTERNATE alarm channel that still speaks even when MA / the ecobees are down
+  (mid-restart, `unavailable`), the exact failure it exists to cover;
+- **fire-and-forget** — the ~3-5 s `play_media` → switchboard render+originate round-trip never delays
+  the (already 17-34 s) MA announcement to the ecobees, and never fails the MA broadcast;
+- **no volume pin** — SIP endpoints have no volume, so the `volume_set` that 500s is skipped entirely;
+- **gated identically** — it runs inside `runBroadcastInner`, so every real alarm path (condition
+  transitions, the dedicated SoC/runway `announce()`, `test()`, deferred retries) reaches the SIP
+  targets, under the same enable / min-severity / quiet-hours / storm gates as the MA speakers.
+
+A `media_player` listed in both `BROADCAST_TARGETS` and `BROADCAST_SIP_TARGETS` is dropped from the
+SIP list (MA wins) so it is never double-announced. `BROADCAST_SIP_TARGETS` shares the strict
+`media_player.*` scope guard. At least one `BROADCAST_TARGETS` speaker is still required for a
+broadcast to run. (broadcast.ts, config.yaml, run, en.yaml)
+
 ## v1.24.0 — whole-system audit: three confirmed fixes (one alarm-delivery, two display honesty)
 
 A detailed log + performance + math audit of the whole system (24 agents across 11 dimensions,
