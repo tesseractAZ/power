@@ -798,9 +798,23 @@ export function startBroadcastMonitor(
     // (the explicit manual-volume escape hatch → leave the speaker as-is).
     const standingLevel = announceVolumeLevel(cfg.announceVolume);
     if (standingLevel != null && cfg.targets.length > 0) {
-      const vr = await callHaService('media_player', 'volume_set', { entity_id: cfg.targets, volume_level: standingLevel });
-      if (!vr.ok) log(`broadcast: pre-announce volume_set to ${standingLevel} failed (continuing) — ${vr.error ?? vr.status}`);
-      else await new Promise((res) => setTimeout(res, 300)); // let RAOP apply before the stream
+      // v1.24.0 (system audit) — pin PER TARGET, not as one batched volume_set over
+      // cfg.targets. HA resolves a batched entity_id list before executing, so a
+      // single VOLUME_SET-INCAPABLE target (the cordless_speaker's supported_features
+      // lack the bit; the two ecobees have it) makes the whole call raise
+      // ServiceNotSupported and NO speaker — including both working ecobees — gets
+      // pinned, silently defeating the very loudness safety net this pin exists for
+      // (an ecobee AirPlay receiver can drift to ~0.2). Per-target isolates the
+      // incapable one so the capable speakers are always set. Best-effort, parallel,
+      // still never blocks the announcement.
+      const vrs = await Promise.all(cfg.targets.map((t) =>
+        callHaService('media_player', 'volume_set', { entity_id: t, volume_level: standingLevel })));
+      const failed = cfg.targets.filter((_t, i) => !vrs[i].ok);
+      if (failed.length) {
+        const firstErr = vrs.find((r) => !r.ok);
+        log(`broadcast: pre-announce volume_set to ${standingLevel} failed for ${failed.join(', ')} (continuing) — ${firstErr?.error ?? firstErr?.status}`);
+      }
+      if (vrs.some((r) => r.ok)) await new Promise((res) => setTimeout(res, 300)); // let RAOP apply before the stream
     }
 
     const params: Record<string, unknown> = {
