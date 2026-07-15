@@ -1,3 +1,44 @@
+## v1.26.0 — runway accuracy: the depletion sim accounts for the DC→AC discharge loss
+
+A novel, ground-truth-backed accuracy assessment of the whole system (25 agents; every predictive
+engine cross-validated against Open-Meteo GHI for Phoenix, the 42×400 W array physics, the SHP2
+92.16 kWh capacity, energy conservation, and the system's own backtest) graded the system **A−**,
+with **one** adversarially-confirmed defect — and it was in the safety-critical runway engine, in
+the optimistic direction.
+
+**The depletion sim now accounts for the DC→AC discharge loss.** The runway sim (`computeRunway`) and
+its two sibling SoC integrators (`getDayForecast.projectedSocPct` and `computeMultiDayForecast`) tracked
+the DC battery pool (`backupBatPercent × backupFullCapWh`) but subtracted the *delivered* home load,
+ignoring the inverter conversion loss. On the DC bus, PV enters at ~unity (MPPT) while the AC home load
+is pulled through the inverter at 1/η_dis, so the pool changes by **`pv − load/η`** each hour — not the
+raw `pv − load`. The old raw form drained ~6% too slowly, so the countdown read **long (optimistic)**,
+the unsafe direction for an islanding alarm. Confirmed empirically, not theoretically: on 2026-07-14
+the pack drew **6.22 kW gross for 5.88 kW delivered** (ratio 0.945 — exactly the measured 7-day RTE).
+
+The correction is applied per-flow (`pv − load/RUNWAY_DISCHARGE_EFFICIENCY`, default **0.94**,
+env-overridable, clamped [0.80, 1.0]) — **not** the tempting `(pv − load)/η`, which would wrongly divide
+the *PV credit* by η too and stay optimistic whenever PV > 0 (e.g. at `pv == load` the pack still drains
+at `load·(1 − 1/η)`, but `(pv − load)/η` reads a flat pool and never-empties — a fully suppressed
+depletion crossing; **caught and fixed during the change's own adversarial review**). The new delta is
+`≤` the pre-v1.26 raw delta for all (pv, load), so the sim can only ever read *shorter-or-equal* than
+before — a strict safety improvement — and `∂delta/∂pv = 1` preserves the `runwayPvBasisGuard`
+monotonic-in-forecastPvW invariant. Applying the identical correction to `projectedSocPct` and the
+multi-day day-0 sim keeps the v1.24 forecast-runtime card (which bounds itself by the `projectedSocPct`
+crossing) consistent with the η-corrected `/api/runway` and eliminates the cross-surface SoC
+contradiction. `loadShedAdvisor` now subtracts shed watts on the same pool basis (`shedKw / η`) so the
+shed-benefit estimate stays consistent with the pool-drain countdown. Reported `loadHorizonKwh` /
+`forecastPvUsedKwh` stay on the RAW delivered basis. Effect at the current fleet state is small
+(hours-to-reserve moves ~1 min; the 25% reserve floor + grid backstop bound the exposure) — a
+correctness fix that moves a systematic bias from optimistic to neutral-conservative.
+
+5 new regression tests pin the η-correction, including the two PV > 0 cases that the physics turns on
+(`pv == load` must still drain, not read flat; a daytime partial-cloud deficit uses `pv − load/η`, not
+the PV-over-crediting `(pv − load)/η`); the runway backtests in dispatch.test.ts / loadShed.test.ts were
+re-baselined to the corrected (shorter) crossings. Suite 1479 green; tsc clean on server + web +
+lovelace. Every other engine was graded accurate within its stated conservative caveats (daily PV
+matches Open-Meteo to 0–1%; capacity ties to 0.07%; soiling to ~1%; energy conservation closes to 6.5%;
+alert engine 7/7 true positives).
+
 ## v1.25.0 — power alarms reach SIP/intercom endpoints (the Switchboard cordless) via a direct play_media side-channel
 
 Music Assistant drives the ecobee alarm speakers, but it **cannot drive a SIP phone**: exposing the

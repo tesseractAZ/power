@@ -1748,7 +1748,13 @@ async function computeDayForecastUncached(
     pvSum += pvAlarm;
     let socPct: number | null = null;
     if (fullWh && fullWh > 0 && socWh != null) {
-      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - load)));
+      // v1.26.0 — DC-bus pool-drain accounting pv − load/η (see computeRunway):
+      // PV enters the DC bus at ~unity, the AC load is pulled through the inverter
+      // at 1/η. Keeps this projected-SoC crossing (which the v1.24 forecast-runtime
+      // card BOUNDS itself by) consistent with the η-corrected /api/runway and
+      // makes minProjectedSoc equally honest. delta ≤ the pre-v1.26 unity value
+      // for all pv,load ⇒ only ever LOWERS the SoC path (conservative).
+      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - load / RUNWAY_DISCHARGE_EFFICIENCY)));
       socPct = (socWh / fullWh) * 100;
       if (minSoc == null || socPct < minSoc) {
         minSoc = socPct;
@@ -2850,6 +2856,24 @@ const RUNWAY_BLEND_HOURS = 4;
 // occupied home idles ≥ ~300 W), not a real model. See the degenerate-curve
 // guard in computeRunway.
 const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
+// v1.26.0 (accuracy audit) — the depletion sim tracks the DC battery POOL
+// (backupRemainingKwh = backupBatPercent × backupFullCapWh) yet subtracts the
+// DELIVERED home load, ignoring the DC→AC discharge conversion loss. Delivering
+// 1 kWh at the panel costs the pack 1/η_dis kWh, so the pool drains ~6% faster
+// than the raw load implies — a runway that reads LONG (optimistic), the unsafe
+// direction for an islanding countdown. Live-confirmed 2026-07-14: the pack drew
+// 6.22 kW gross for 5.88 kW delivered (ratio 0.945 == the measured 7-day RTE).
+// Divide the net DEFICIT by this efficiency so the countdown reflects real pool
+// drain. Applied to net-DISCHARGE hours ONLY (surplus/charging hours keep the raw
+// delta, so the sim is never MORE optimistic than pre-v1.26) ⇒ runway can only
+// shorten-or-equal, preserving the runwayPvBasisGuard monotonic-in-forecastPvW
+// invariant. Default 0.94 (marginally conservative vs the measured ~0.945),
+// env-overridable, clamped to [0.80,1.0] so a bad env can never lengthen runway
+// beyond the true (unity) reading or collapse it to an untrusted extreme.
+export const RUNWAY_DISCHARGE_EFFICIENCY = Math.min(
+  1,
+  Math.max(0.8, Number(process.env.RUNWAY_DISCHARGE_EFFICIENCY ?? 0.94) || 0.94),
+);
 
 export interface RunwayProjection {
   generatedAt: number;
@@ -3079,7 +3103,16 @@ export function computeRunway(
     const loadKwhPerHour = loadByHour[h];
     totalForecastPv += pvKwh;
     totalLoad += loadKwhPerHour;
-    const delta = pvKwh - loadKwhPerHour;
+    // v1.26.0 — DC-bus pool-drain accounting. PV enters the DC bus at ~unity
+    // (MPPT); the AC home load is pulled through the inverter at 1/η_dis; so the
+    // pool changes by pv − load/η each hour (a deficit drains faster, a surplus
+    // charges by the DC residual after serving load). NOT (pv−load)/η — that
+    // wrongly divides the PV credit by η too and stays optimistic whenever pv>0
+    // (e.g. pv==load must still drain at load·(1−1/η)). `totalLoad`/`totalForecastPv`
+    // above stay RAW (reporting basis). delta ≤ the pre-v1.26 unity delta for all
+    // pv,load ⇒ runway only ever shortens; ∂delta/∂pv = 1 ⇒ monotonic in
+    // forecastPvW (the runwayPvBasisGuard invariant holds).
+    const delta = pvKwh - loadKwhPerHour / RUNWAY_DISCHARGE_EFFICIENCY;
     const nextState = stateKwh + delta;
     if (hoursToReserve == null && stateKwh > backupReserveKwh && nextState <= backupReserveKwh) {
       const frac = delta < 0 ? (stateKwh - backupReserveKwh) / -delta : 1;
@@ -7370,10 +7403,13 @@ export async function computeProbabilisticForecast(
   const bands: ForecastBand[] = [];
   // v0.9.58 — back out the live backup-pool full capacity from the base
   // forecast's own projected SoC trajectory. The forecast was generated against
-  // `shp2.projection.backupFullCapWh` via `socWh += (pv - load); socPct = socWh /
-  // fullWh * 100`, so for any two consecutive hours where deltaSoc is non-zero
-  // and SoC hasn't clamped at 0/100:
-  //     fullKwh = (pv - load) [kWh] / (deltaSocPct / 100)
+  // `shp2.projection.backupFullCapWh` via `socWh += (pv - load/η); socPct = socWh /
+  // fullWh * 100` (v1.26.0 DC-bus balance — see RUNWAY_DISCHARGE_EFFICIENCY), so
+  // for any two consecutive hours where deltaSoc is non-zero and SoC hasn't
+  // clamped at 0/100:
+  //     fullKwh = (pv - load/η) [kWh] / (deltaSocPct / 100)
+  // The inversion MUST use the same pv - load/η the forward integrator used, or
+  // the recovered capacity (hence the P10/P90 band width) is biased.
   // Pick the hour with the largest |deltaSocPct| that isn't clamped — that
   // maximises numerical conditioning. If no usable hour exists (e.g. the
   // forecast was generated with no SHP2 projection so projectedSocPct is null
@@ -7393,7 +7429,7 @@ export async function computeProbabilisticForecast(
     if (Math.abs(dSocPct) < 0.05) continue;                 // too small to invert reliably
     if (prev.projectedSocPct <= 0.5 || prev.projectedSocPct >= 99.5) continue; // clamped
     if (cur.projectedSocPct <= 0.5 || cur.projectedSocPct >= 99.5) continue;   // clamped
-    const kwhDelta = (cur.forecastPvW - cur.forecastLoadW) / 1000;
+    const kwhDelta = (cur.forecastPvW - cur.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
     if (Math.abs(kwhDelta) < 0.05) continue;
     const candidate = kwhDelta / (dSocPct / 100);           // kWh per 100 % SoC = full capacity
     if (candidate < 5 || candidate > 1000) continue;        // sanity guard
@@ -7427,7 +7463,11 @@ export async function computeProbabilisticForecast(
   let startSoc: number | null = null;
   if (rawStart != null && Number.isFinite(rawStart)) {
     const h0 = forecast.hours[0];
-    const d0Kwh = (h0.forecastPvW - h0.forecastLoadW) / 1000;
+    // v1.26.0 — reconstruct hour-0's SoC delta with the same pv − load/η the
+    // forward integrator used, so the one-step-behind seed lands where the
+    // deterministic sim actually started (matters at the empty rail, where the
+    // seed's clamp behaviour sets the near-zero band).
+    const d0Kwh = (h0.forecastPvW - h0.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
     startSoc = clampSoc(rawStart - (Number.isFinite(d0Kwh) ? (d0Kwh / fullKwh) * 100 : 0));
   }
   const paths = startSoc != null ? PROB_ENSEMBLE_Z.map(() => startSoc) : [];
@@ -7518,7 +7558,15 @@ export async function computeProbabilisticForecast(
     // the published ±kWh figure can't read 0 beside a several-point overnight
     // band (the old PV-only accumulation did exactly that at night).
     if (Number.isFinite(sigmaNetKwh)) stdevAccum += sigmaNetKwh;
-    const dP50Kwh = (p50 - h.forecastLoadW) / 1000;
+    // v1.26.0 — pv − load/η, uniform with the other integrators. The published
+    // band anchors on projectedSocPct + (path − midSoc), so in the UNCLAMPED
+    // interior dP50Kwh cancels in the offset and is output-neutral; near the
+    // 0/100 rails the per-path clampSoc is nonlinear so it does affect clamp
+    // timing — but only in the SAFE direction (the /η delta syncs midSoc's
+    // empty-rail arrival with the anchor's own η-integrator, collapsing spread
+    // in step with the floor rather than showing phantom spread below it). Kept
+    // aligned so no future reader mistakes it for the raw-vs-η bug fixed elsewhere.
+    const dP50Kwh = (p50 - h.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
     let p10SocOut: number | null = null;
     let p50SocOut: number | null = null;
     let p90SocOut: number | null = null;
@@ -7804,7 +7852,11 @@ export async function computeMultiDayForecast(
       pvWh += pv;
       loadWh += load;
       if (fullWh && fullWh > 0 && socWh != null) {
-        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load)));
+        // v1.26.0 — same DC-bus balance pv − load/η as computeRunway /
+        // getDayForecast, so day-0 minProjectedSoc stays consistent with
+        // getDayForecast (no cross-surface contradiction) and the multi-day SoC
+        // path is equally honest. Report-only (not an alarm gate).
+        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load / RUNWAY_DISCHARGE_EFFICIENCY)));
         const socPct = (socWh / fullWh) * 100;
         if (minSoc == null || socPct < minSoc) {
           minSoc = socPct;

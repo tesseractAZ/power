@@ -15,6 +15,7 @@
  * the accessors, mirroring how runwayAlarm/batterySocAlarm take callbacks.
  */
 import { classifyRunway, type GridContext } from './runwayAlarm.js';
+import { RUNWAY_DISCHARGE_EFFICIENCY } from './analytics.js';
 import type { AlarmPriority } from './alertPriority.js';
 import type { ShedCandidate } from './loadShedRegistry.js';
 import type { CachedEntity } from './haStateCache.js';
@@ -90,7 +91,12 @@ export function computeRunwayWithShedOffset(
     if (hours == null) return null; // already not depleting within horizon
     if (energyKwh == null || energyKwh <= 0 || hours <= 0) return hours;
     const netKw = energyKwh / hours;
-    const newNetKw = netKw - shedKw;
+    // v1.26.0 — `hours` is now the η-corrected POOL-drain countdown, so netKw is
+    // the gross pool-drain rate (delivered load / η). Shedding shedKw of DELIVERED
+    // load reduces the pool drain by shedKw/η, not shedKw — divide onto the same
+    // pool basis so the two terms are consistent (else the shed benefit is
+    // under-counted by ~1/η, understating the extended runway).
+    const newNetKw = netKw - shedKw / RUNWAY_DISCHARGE_EFFICIENCY;
     if (newNetKw <= 0.001) return null; // shedding ≥ net draw → no depletion
     return Math.round((energyKwh / newNetKw) * 10) / 10;
   };

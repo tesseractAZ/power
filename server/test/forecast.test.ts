@@ -14,6 +14,7 @@ import {
   applyEmptyHysteresis,
   forecastDayAlerts,
   resetForecastCachesForTesting,
+  RUNWAY_DISCHARGE_EFFICIENCY,
   type DayForecast,
   type ForecastHour,
   type HourResponse,
@@ -535,7 +536,10 @@ test('probabilistic F7 — band width magnitude is exact: load-only sigma (overn
       startTs: tomorrowLocalMidnight(),
       forecastPvW: () => 0,
       forecastLoadW: () => 2_000,
-      projectedSocPct: (h) => 80 - h, // −1 %/h under −2 kWh → fullKwh = 200
+      // v1.26.0 — the SoC slope matches the pv − load/η forward integrator the
+      // back-out inverts, so it still recovers fullKwh = 200 (η cancels):
+      // dSocPct = (0 − 2/η)/200·100 = −1/η %/h.
+      projectedSocPct: (h) => 80 - h / RUNWAY_DISCHARGE_EFFICIENCY,
     }),
   });
   const rNight = await computeProbabilisticForecast(night, null);
@@ -555,7 +559,9 @@ test('probabilistic F7 — band width magnitude is exact: load-only sigma (overn
       startTs: tomorrowLocalMidnight(),
       forecastPvW: () => 2_000,
       forecastLoadW: () => 1_500,
-      projectedSocPct: (h) => 50 + h * 0.25, // +0.25 %/h under +0.5 kWh → fullKwh = 200
+      // v1.26.0 — SoC slope matches the pv − load/η integrator so the back-out
+      // still recovers fullKwh = 200: dSocPct = (2 − 1.5/η)/200·100 = (1 − 0.75/η) %/h.
+      projectedSocPct: (h) => 50 + h * (1 - 0.75 / RUNWAY_DISCHARGE_EFFICIENCY),
     }),
   });
   const rDay = await computeProbabilisticForecast(day, null);
