@@ -1,3 +1,35 @@
+## v1.26.0 — runway accuracy: the depletion sim accounts for the DC→AC discharge loss
+
+A novel, ground-truth-backed accuracy assessment of the whole system (25 agents; every predictive
+engine cross-validated against Open-Meteo GHI for Phoenix, the 42×400 W array physics, the SHP2
+92.16 kWh capacity, energy conservation, and the system's own backtest) graded the system **A−**,
+with **one** adversarially-confirmed defect — and it was in the safety-critical runway engine, in
+the optimistic direction.
+
+**The depletion sim now drains the pool by gross pack discharge, not delivered load.** `computeRunway`
+(and the sibling day-ahead `projectedSocPct` sim in `getDayForecast`) tracked the DC battery pool
+(`backupBatPercent × backupFullCapWh`) but subtracted the *delivered* home load — ignoring the DC→AC
+discharge conversion loss. To deliver 1 kWh at the panel the pack must give up 1/η_dis kWh, so the
+pool drains ~6% faster than the raw load implies; the countdown therefore read **long (optimistic)**,
+the unsafe direction for an islanding alarm. This was confirmed empirically, not theoretically: on
+2026-07-14 the pack drew **6.22 kW gross for 5.88 kW delivered** (ratio 0.945 — exactly the measured
+7-day round-trip efficiency). A net-**deficit** hour now drains the pool by `load / RUNWAY_DISCHARGE_EFFICIENCY`
+(default **0.94**, env-overridable, clamped to [0.80, 1.0]); **surplus/charging hours pass through
+unchanged**, so the sim can only ever read *shorter-or-equal* than before — a strict safety
+improvement that preserves the `runwayPvBasisGuard` monotonic-in-forecastPvW invariant. Applying the
+same correction to `projectedSocPct` keeps the v1.24 forecast-runtime card (which bounds itself by that
+crossing) consistent with the η-corrected `/api/runway`, and makes `minProjectedSoc` equally honest.
+Effect at the current fleet state is small (hours-to-reserve moves ~1 min; the 25% reserve floor and
+grid backstop bound the exposure) — a correctness fix that moves a systematic bias from optimistic to
+neutral-conservative.
+
+3 new regression tests pin the η-correction (an overnight deficit reaches reserve/empty by exactly the
+η factor sooner; never optimistic); the 5 runway backtests in dispatch.test.ts were re-baselined to the
+corrected (shorter) crossings. Suite 1477 green; tsc clean on server + web + lovelace. Every other
+engine was graded accurate within its stated conservative caveats (daily PV matches Open-Meteo to 0–1%;
+capacity ties to 0.07%; soiling to ~1%; energy conservation closes to 6.5%; alert engine 7/7 true
+positives).
+
 ## v1.25.0 — power alarms reach SIP/intercom endpoints (the Switchboard cordless) via a direct play_media side-channel
 
 Music Assistant drives the ecobee alarm speakers, but it **cannot drive a SIP phone**: exposing the

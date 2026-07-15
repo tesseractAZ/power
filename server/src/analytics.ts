@@ -1748,7 +1748,14 @@ async function computeDayForecastUncached(
     pvSum += pvAlarm;
     let socPct: number | null = null;
     if (fullWh && fullWh > 0 && socWh != null) {
-      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - load)));
+      // v1.26.0 — same DC→AC discharge-loss accounting as computeRunway: a net
+      // DEFICIT hour drains the DC pool by load/η_dis, a surplus hour passes
+      // through unchanged. Keeps this projected-SoC crossing (which the v1.24
+      // forecast-runtime card BOUNDS itself by) consistent with the η-corrected
+      // /api/runway countdown, and makes minProjectedSoc equally honest. Only
+      // ever LOWERS the SoC path ⇒ conservative for the depletion gate.
+      const socDelta = pvAlarm - load;
+      socWh = Math.max(0, Math.min(fullWh, socWh + (socDelta < 0 ? socDelta / RUNWAY_DISCHARGE_EFFICIENCY : socDelta)));
       socPct = (socWh / fullWh) * 100;
       if (minSoc == null || socPct < minSoc) {
         minSoc = socPct;
@@ -2850,6 +2857,24 @@ const RUNWAY_BLEND_HOURS = 4;
 // occupied home idles ≥ ~300 W), not a real model. See the degenerate-curve
 // guard in computeRunway.
 const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
+// v1.26.0 (accuracy audit) — the depletion sim tracks the DC battery POOL
+// (backupRemainingKwh = backupBatPercent × backupFullCapWh) yet subtracts the
+// DELIVERED home load, ignoring the DC→AC discharge conversion loss. Delivering
+// 1 kWh at the panel costs the pack 1/η_dis kWh, so the pool drains ~6% faster
+// than the raw load implies — a runway that reads LONG (optimistic), the unsafe
+// direction for an islanding countdown. Live-confirmed 2026-07-14: the pack drew
+// 6.22 kW gross for 5.88 kW delivered (ratio 0.945 == the measured 7-day RTE).
+// Divide the net DEFICIT by this efficiency so the countdown reflects real pool
+// drain. Applied to net-DISCHARGE hours ONLY (surplus/charging hours keep the raw
+// delta, so the sim is never MORE optimistic than pre-v1.26) ⇒ runway can only
+// shorten-or-equal, preserving the runwayPvBasisGuard monotonic-in-forecastPvW
+// invariant. Default 0.94 (marginally conservative vs the measured ~0.945),
+// env-overridable, clamped to [0.80,1.0] so a bad env can never lengthen runway
+// beyond the true (unity) reading or collapse it to an untrusted extreme.
+export const RUNWAY_DISCHARGE_EFFICIENCY = Math.min(
+  1,
+  Math.max(0.8, Number(process.env.RUNWAY_DISCHARGE_EFFICIENCY ?? 0.94) || 0.94),
+);
 
 export interface RunwayProjection {
   generatedAt: number;
@@ -3079,7 +3104,12 @@ export function computeRunway(
     const loadKwhPerHour = loadByHour[h];
     totalForecastPv += pvKwh;
     totalLoad += loadKwhPerHour;
-    const delta = pvKwh - loadKwhPerHour;
+    // v1.26.0 — pool-drain accounting: a net DEFICIT hour drains the DC pool by
+    // load/η_dis (the DC→AC discharge loss), a net SURPLUS hour passes through
+    // unchanged (raw delta). See RUNWAY_DISCHARGE_EFFICIENCY. `totalLoad` above
+    // stays the RAW delivered load (reporting basis) — only the pool sim adjusts.
+    const grossDelta = pvKwh - loadKwhPerHour;
+    const delta = grossDelta < 0 ? grossDelta / RUNWAY_DISCHARGE_EFFICIENCY : grossDelta;
     const nextState = stateKwh + delta;
     if (hoursToReserve == null && stateKwh > backupReserveKwh && nextState <= backupReserveKwh) {
       const frac = delta < 0 ? (stateKwh - backupReserveKwh) / -delta : 1;

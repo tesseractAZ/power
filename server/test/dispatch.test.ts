@@ -143,11 +143,12 @@ test('computeRunway — discharge prediction with reserve floor', () => {
   const r = computeRunway(devices, rec, null);
   assert.equal(r.unavailable, null);
   assert.equal(r.recentLoadWatts, 1000);
-  // hoursToReserve should be ~21 h (close enough — engine uses linear interp)
+  // hoursToReserve ≈ (30-9)/1 = 21 h at unity; × RUNWAY_DISCHARGE_EFFICIENCY
+  // (v1.26.0 — the DC→AC discharge loss drains the pool faster) ≈ 19.7 h.
   assert.ok(r.hoursToReserve != null);
   assert.ok(
-    r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
-    `expected hoursToReserve ~21, got ${r.hoursToReserve}`,
+    r.hoursToReserve! >= 18.5 && r.hoursToReserve! <= 21,
+    `expected hoursToReserve ~19.7 (21 h × η_dis), got ${r.hoursToReserve}`,
   );
 });
 
@@ -180,8 +181,8 @@ test('computeRunway — sustained observed load above the curve pulls the crossi
   // then the 1 kWh/h curve: reserve (7 kWh later) at ≈ 11 h — NOT the curve-only 21 h.
   assert.ok(r.hoursToReserve != null, 'crossing must be detected');
   assert.ok(
-    r.hoursToReserve! >= 10 && r.hoursToReserve! <= 12.5,
-    `expected hoursToReserve ≈ 11 with the observed-load anchor, got ${r.hoursToReserve}`,
+    r.hoursToReserve! >= 8.5 && r.hoursToReserve! <= 11,
+    `expected hoursToReserve ≈ 9.7 (≈11 h × η_dis, v1.26.0) with the observed-load anchor, got ${r.hoursToReserve}`,
   );
 });
 
@@ -208,8 +209,8 @@ test('computeRunway — predicted EV sessions do NOT drive depletion alarms (fal
   const r = computeRunway(devices, mockRecorder({ panel_load: loadPts }), fc);
   assert.equal(r.unavailable, null);
   assert.ok(
-    r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
-    `speculative EV load must not pull the crossing in, got ${r.hoursToReserve}`,
+    r.hoursToReserve! >= 18.5 && r.hoursToReserve! <= 21,
+    `speculative EV load must not pull the crossing in (≈19.7 h — base load only × η_dis), got ${r.hoursToReserve}`,
   );
 });
 
@@ -229,8 +230,8 @@ test('computeRunway — degenerate (all-zero) load curve falls back to observed 
   assert.equal(r.loadModelDegraded, true);
   assert.ok(r.hoursToReserve != null, 'a crossing MUST be projected on a degenerate curve + real load');
   assert.ok(
-    r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
-    `expected ~21 h on the observed load, got ${r.hoursToReserve}`,
+    r.hoursToReserve! >= 18.5 && r.hoursToReserve! <= 21,
+    `expected ~19.7 h (21 h × η_dis, v1.26.0) on the observed load, got ${r.hoursToReserve}`,
   );
 });
 
@@ -252,8 +253,8 @@ test('computeRunway — lighter-than-modelled observed load never increases opti
   const r = computeRunway(devices, mockRecorder({ panel_load: loadPts }), runwayForecast(1000));
   assert.equal(r.unavailable, null);
   assert.ok(
-    r.hoursToReserve! >= 20 && r.hoursToReserve! <= 24,
-    `curve must still rule when observed < modelled, got ${r.hoursToReserve}`,
+    r.hoursToReserve! >= 18.5 && r.hoursToReserve! <= 21,
+    `curve must still rule when observed < modelled (≈19.7 h × η_dis, v1.26.0), got ${r.hoursToReserve}`,
   );
 });
 
