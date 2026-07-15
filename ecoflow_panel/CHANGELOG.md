@@ -1,3 +1,30 @@
+## v1.27.0 — dispatch planner: round-trip storage losses (the last raw pv−load sim)
+
+The v1.26.0 accuracy work converted the whole forecast/runway/alarm family to the η-honest DC-bus
+balance, and a focused verification flagged the one remaining lossless integrator: `computeDispatchPlan`,
+the **advisory-only** TOU economic dispatch *recommendation* planner ("DO NOT auto-apply"). It stepped a
+battery SoC with raw `pv − load` — modeling a **lossless** pack — so its pre-peak import sizing and
+savings estimate were mildly optimistic vs the η-honest runway.
+
+Unlike the depletion sims (which only *discharge*), this planner both charges and discharges, so a
+**round-trip** loss applies. It now uses `DISPATCH_ROUND_TRIP_EFFICIENCY` (default **0.945** = the
+measured 7-day RTE, env-overridable, clamped [0.80, 1.0]) split symmetrically across the two legs —
+η_chg = η_dis = **√RTE ≈ 0.972**. A PV surplus now stores only `√RTE ×` the surplus (charge loss); a
+deficit now draws `deficit / √RTE` from the pack (discharge loss), and the reserve-floor guards test
+that *drawn* amount so a recommended discharge can never dip the pack below reserve. The off-peak
+grid top-off keeps its billed draw but the pack fills at √RTE, naturally pulling more off-peak import
+over the window. Net effect: the SoC trajectory, savings, and import sizing are all slightly more
+conservative (round-trip losses reduce the modeled economic benefit) — never *under*-stating the grid
+import a real round trip needs.
+
+This deliberately uses a clean symmetric round-trip split rather than reusing the runway's
+`RUNWAY_DISCHARGE_EFFICIENCY` (0.94) for the discharge leg — that value folds SHP2/standby overhead
+into the single discharge leg the *safety countdown* cares about, and pairing it with RTE=0.945 would
+imply an unphysical η_chg > 1. The planner stays **advisory-only / surfacing-only**; nothing here
+touches the alarm, runway countdown, or notification path. 3 new regression tests pin the round-trip
+behavior (charge stores √RTE of the surplus; discharge draws deficit/√RTE; the constant is guarded).
+Suite 1482 green; tsc clean on server + web + lovelace.
+
 ## v1.26.0 — runway accuracy: the depletion sim accounts for the DC→AC discharge loss
 
 A novel, ground-truth-backed accuracy assessment of the whole system (25 agents; every predictive

@@ -12,6 +12,8 @@ import {
   computeCarbonReport,
   computeTariffReport,
   computeDispatchPlan,
+  DISPATCH_ROUND_TRIP_EFFICIENCY,
+  resetForecastCachesForTesting,
   resetHaStateShortLivedCaches,
   resetRunwayCache,
   type DayForecast,
@@ -627,6 +629,60 @@ test('computeDispatchPlan — surplus-PV hour → charge_from_pv action', () => 
   assert.equal(dp.hours.length, 2);
   assert.equal(dp.hours[0].action, 'charge_from_pv');
   assert.ok(dp.hours[0].flowW > 0);
+});
+
+/* ── v1.27.0 round-trip efficiency (advisory planner) ─────────────────────
+ * The pack stores only √RTE of a PV surplus and gives up load/√RTE to deliver
+ * a deficit, so the SoC trajectory (and thus cost/import sizing) is no longer
+ * the old lossless model. Assertions are η-agnostic (derived from the const). */
+
+test('computeDispatchPlan — round-trip const is a conservative sub-unity value in (0.80,1.0]', () => {
+  assert.ok(DISPATCH_ROUND_TRIP_EFFICIENCY > 0.8 && DISPATCH_ROUND_TRIP_EFFICIENCY <= 1.0,
+    `RTE must be in the guarded band (got ${DISPATCH_ROUND_TRIP_EFFICIENCY})`);
+  assert.ok(DISPATCH_ROUND_TRIP_EFFICIENCY < 1.0,
+    'RTE must be < 1 so charge/discharge losses actually apply');
+});
+
+test('computeDispatchPlan — charging stores only √RTE of the PV surplus (not the full surplus)', () => {
+  resetForecastCachesForTesting();
+  const full = 60, remain = 30;
+  const devices = fakeShp2({ backupFullCapWh: full * 1000, backupRemainWh: remain * 1000, backupReserveSoc: 15 });
+  const forecast = emptyForecast({
+    hours: [{ ts: Date.now(), forecastPvW: 9000, forecastLoadW: 1000, cloudCoverPct: 10, ghiWm2: 800, projectedSocPct: 50, modelled: true }] as any,
+  });
+  const dp = computeDispatchPlan(devices, forecast);
+  const h = dp.hours[0];
+  assert.equal(h.action, 'charge_from_pv');
+  const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
+  const surplus = 8;                                   // 9 kW pv − 1 kW load
+  const stored = surplus * legEff;                     // pack gain (room 30 not binding)
+  const expectedEndPct = ((remain + stored) / full) * 100;
+  const losslessEndPct = ((remain + surplus) / full) * 100;
+  assert.ok(Math.abs(h.socEndPct - expectedEndPct) < 0.3,
+    `socEnd should reflect √RTE-stored charge ≈ ${expectedEndPct.toFixed(1)}%; got ${h.socEndPct}`);
+  assert.ok(h.socEndPct < losslessEndPct - 0.15,
+    `socEnd must be BELOW the lossless ${losslessEndPct.toFixed(1)}% (charge loss); got ${h.socEndPct}`);
+});
+
+test('computeDispatchPlan — discharging draws deficit/√RTE from the pack (not just the delivered deficit)', () => {
+  resetForecastCachesForTesting();
+  const full = 60, remain = 55;                        // ≥ 80% pre-peak target → discharges regardless of TOU
+  const devices = fakeShp2({ backupFullCapWh: full * 1000, backupRemainWh: remain * 1000, backupReserveSoc: 15 });
+  const forecast = emptyForecast({
+    hours: [{ ts: Date.now(), forecastPvW: 0, forecastLoadW: 4000, cloudCoverPct: 80, ghiWm2: 0, projectedSocPct: 90, modelled: true }] as any,
+  });
+  const dp = computeDispatchPlan(devices, forecast);
+  const h = dp.hours[0];
+  assert.equal(h.action, 'discharge_to_load');
+  assert.equal(h.flowW, 4000, 'delivered flow is the 4 kW deficit');
+  const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
+  const drawn = 4 / legEff;                            // pack gives up more than delivered
+  const expectedEndPct = ((remain - drawn) / full) * 100;
+  const losslessEndPct = ((remain - 4) / full) * 100;
+  assert.ok(Math.abs(h.socEndPct - expectedEndPct) < 0.3,
+    `socEnd should reflect deficit/√RTE draw ≈ ${expectedEndPct.toFixed(1)}%; got ${h.socEndPct}`);
+  assert.ok(h.socEndPct < losslessEndPct - 0.1,
+    `socEnd must be BELOW the lossless ${losslessEndPct.toFixed(1)}% (discharge loss); got ${h.socEndPct}`);
 });
 
 /* ─── recommendDispatch (MPC) — v0.9.59 regression guards ────────────── */
