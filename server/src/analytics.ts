@@ -7403,10 +7403,13 @@ export async function computeProbabilisticForecast(
   const bands: ForecastBand[] = [];
   // v0.9.58 — back out the live backup-pool full capacity from the base
   // forecast's own projected SoC trajectory. The forecast was generated against
-  // `shp2.projection.backupFullCapWh` via `socWh += (pv - load); socPct = socWh /
-  // fullWh * 100`, so for any two consecutive hours where deltaSoc is non-zero
-  // and SoC hasn't clamped at 0/100:
-  //     fullKwh = (pv - load) [kWh] / (deltaSocPct / 100)
+  // `shp2.projection.backupFullCapWh` via `socWh += (pv - load/η); socPct = socWh /
+  // fullWh * 100` (v1.26.0 DC-bus balance — see RUNWAY_DISCHARGE_EFFICIENCY), so
+  // for any two consecutive hours where deltaSoc is non-zero and SoC hasn't
+  // clamped at 0/100:
+  //     fullKwh = (pv - load/η) [kWh] / (deltaSocPct / 100)
+  // The inversion MUST use the same pv - load/η the forward integrator used, or
+  // the recovered capacity (hence the P10/P90 band width) is biased.
   // Pick the hour with the largest |deltaSocPct| that isn't clamped — that
   // maximises numerical conditioning. If no usable hour exists (e.g. the
   // forecast was generated with no SHP2 projection so projectedSocPct is null
@@ -7426,7 +7429,7 @@ export async function computeProbabilisticForecast(
     if (Math.abs(dSocPct) < 0.05) continue;                 // too small to invert reliably
     if (prev.projectedSocPct <= 0.5 || prev.projectedSocPct >= 99.5) continue; // clamped
     if (cur.projectedSocPct <= 0.5 || cur.projectedSocPct >= 99.5) continue;   // clamped
-    const kwhDelta = (cur.forecastPvW - cur.forecastLoadW) / 1000;
+    const kwhDelta = (cur.forecastPvW - cur.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
     if (Math.abs(kwhDelta) < 0.05) continue;
     const candidate = kwhDelta / (dSocPct / 100);           // kWh per 100 % SoC = full capacity
     if (candidate < 5 || candidate > 1000) continue;        // sanity guard
@@ -7460,7 +7463,11 @@ export async function computeProbabilisticForecast(
   let startSoc: number | null = null;
   if (rawStart != null && Number.isFinite(rawStart)) {
     const h0 = forecast.hours[0];
-    const d0Kwh = (h0.forecastPvW - h0.forecastLoadW) / 1000;
+    // v1.26.0 — reconstruct hour-0's SoC delta with the same pv − load/η the
+    // forward integrator used, so the one-step-behind seed lands where the
+    // deterministic sim actually started (matters at the empty rail, where the
+    // seed's clamp behaviour sets the near-zero band).
+    const d0Kwh = (h0.forecastPvW - h0.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
     startSoc = clampSoc(rawStart - (Number.isFinite(d0Kwh) ? (d0Kwh / fullKwh) * 100 : 0));
   }
   const paths = startSoc != null ? PROB_ENSEMBLE_Z.map(() => startSoc) : [];
@@ -7551,7 +7558,11 @@ export async function computeProbabilisticForecast(
     // the published ±kWh figure can't read 0 beside a several-point overnight
     // band (the old PV-only accumulation did exactly that at night).
     if (Number.isFinite(sigmaNetKwh)) stdevAccum += sigmaNetKwh;
-    const dP50Kwh = (p50 - h.forecastLoadW) / 1000;
+    // v1.26.0 — pv − load/η, uniform with the other integrators. (The published
+    // band anchors on projectedSocPct + (path − midSoc), so dP50Kwh cancels in
+    // the offset and this is output-neutral — kept aligned so no future reader
+    // mistakes it for the raw-vs-η inconsistency corrected elsewhere.)
+    const dP50Kwh = (p50 - h.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
     let p10SocOut: number | null = null;
     let p50SocOut: number | null = null;
     let p90SocOut: number | null = null;
