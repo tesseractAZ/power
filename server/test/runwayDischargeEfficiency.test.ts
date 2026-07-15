@@ -50,16 +50,17 @@ function loadRecorder(loadW: number): Recorder {
   } as unknown as Recorder;
 }
 
-/** Overnight islanded forecast: PV=0 every hour, a constant delivered load. */
-function overnight(loadW: number): DayForecast {
+/** Islanded forecast with constant PV (DC) and delivered load (AC) every hour. */
+function islanded(pvW: number, loadW: number): DayForecast {
   const hours = Array.from({ length: 24 }, (_, k) => ({
     ts: k * HOUR,
-    forecastPvW: 0,
+    forecastPvW: pvW,
     forecastLoadW: loadW,
     projectedSocPct: null,
   }));
   return { minProjectedSoc: 0, reserveSoc: 25, hours } as unknown as DayForecast;
 }
+const overnight = (loadW: number) => islanded(0, loadW);
 
 test('v1.26.0 — RUNWAY_DISCHARGE_EFFICIENCY is a conservative sub-unity constant in [0.80,1.0)', () => {
   assert.ok(RUNWAY_DISCHARGE_EFFICIENCY > 0.8 && RUNWAY_DISCHARGE_EFFICIENCY < 1.0,
@@ -92,4 +93,39 @@ test('v1.26.0 — time-to-empty is also shortened by the discharge loss (never o
     `time-to-empty must not exceed the naive ${naive}h (got ${r.hoursToEmpty})`);
   assert.ok(Math.abs(r.hoursToEmpty! - naive * RUNWAY_DISCHARGE_EFFICIENCY) < 0.15,
     `time-to-empty should be ~${(naive * RUNWAY_DISCHARGE_EFFICIENCY).toFixed(2)}h; got ${r.hoursToEmpty}`);
+});
+
+/* ── PV>0 deficit: the pool drains on the DC-bus balance pv − load/η, NOT the
+ *    seductive (pv−load)/η that also divides the PV credit by η. These cases
+ *    only fire when PV>0 (the all-zero cases above cannot distinguish them). ── */
+
+test('v1.26.0 — pv==load still DRAINS (the pack pays the inverter tax); (pv−load)/η would wrongly read flat/never-empty', () => {
+  resetRunwayCache();
+  // pv (DC) == load (AC) == 10 kW. Real DC-bus drain = pv − load/η = 10·(1 − 1/η)
+  // ≈ −0.638 kW/h. The rejected (pv−load)/η formula gives 0 ⇒ pool flat ⇒ hoursToEmpty
+  // null (a fully suppressed depletion crossing) — the exact optimism this pins out.
+  const full = 92.16, reserve = 0, remaining = 10;
+  const kw = 10;
+  const r = computeRunway(shp2(remaining, reserve, full), loadRecorder(kw * 1000), islanded(kw * 1000, kw * 1000));
+  assert.ok(r.hoursToEmpty != null, 'pv==load MUST still project depletion — not null (that is the suppressed-crossing bug)');
+  const drainKw = kw / RUNWAY_DISCHARGE_EFFICIENCY - kw;    // load/η − pv
+  const expected = remaining / drainKw;                    // ≈ 15.7 h
+  assert.ok(Math.abs(r.hoursToEmpty! - expected) < 0.3,
+    `hoursToEmpty should be ~${expected.toFixed(1)}h (drain = load/η − pv); got ${r.hoursToEmpty}`);
+});
+
+test('v1.26.0 — daytime partial-cloud deficit uses pv − load/η, not (pv−load)/η (PV not over-credited)', () => {
+  resetRunwayCache();
+  // Islanded, partial cloud: PV 2 kW (DC), load 5 kW (AC). 30 kWh above reserve.
+  const full = 92.16, reserve = 23.04, remaining = 53.04;  // 30 kWh usable
+  const r = computeRunway(shp2(remaining, reserve, full), loadRecorder(5000), islanded(2000, 5000));
+  assert.ok(r.hoursToReserve != null, 'a daytime deficit still crosses reserve');
+  const correctDrainKw = 5 / RUNWAY_DISCHARGE_EFFICIENCY - 2;   // load/η − pv ≈ 3.319
+  const correct = 30 / correctDrainKw;                          // ≈ 9.0 h
+  const buggyDrainKw = (5 - 2) / RUNWAY_DISCHARGE_EFFICIENCY;    // (load−pv)/η ≈ 3.191
+  const buggy = 30 / buggyDrainKw;                              // ≈ 9.4 h (optimistic)
+  assert.ok(Math.abs(r.hoursToReserve! - correct) < 0.3,
+    `hoursToReserve should be ~${correct.toFixed(1)}h (drain load/η − pv); got ${r.hoursToReserve}`);
+  assert.ok(r.hoursToReserve! < buggy - 0.15,
+    `must be shorter than the (pv−load)/η value ${buggy.toFixed(1)}h that over-credits PV; got ${r.hoursToReserve}`);
 });

@@ -1748,14 +1748,13 @@ async function computeDayForecastUncached(
     pvSum += pvAlarm;
     let socPct: number | null = null;
     if (fullWh && fullWh > 0 && socWh != null) {
-      // v1.26.0 — same DC→AC discharge-loss accounting as computeRunway: a net
-      // DEFICIT hour drains the DC pool by load/η_dis, a surplus hour passes
-      // through unchanged. Keeps this projected-SoC crossing (which the v1.24
-      // forecast-runtime card BOUNDS itself by) consistent with the η-corrected
-      // /api/runway countdown, and makes minProjectedSoc equally honest. Only
-      // ever LOWERS the SoC path ⇒ conservative for the depletion gate.
-      const socDelta = pvAlarm - load;
-      socWh = Math.max(0, Math.min(fullWh, socWh + (socDelta < 0 ? socDelta / RUNWAY_DISCHARGE_EFFICIENCY : socDelta)));
+      // v1.26.0 — DC-bus pool-drain accounting pv − load/η (see computeRunway):
+      // PV enters the DC bus at ~unity, the AC load is pulled through the inverter
+      // at 1/η. Keeps this projected-SoC crossing (which the v1.24 forecast-runtime
+      // card BOUNDS itself by) consistent with the η-corrected /api/runway and
+      // makes minProjectedSoc equally honest. delta ≤ the pre-v1.26 unity value
+      // for all pv,load ⇒ only ever LOWERS the SoC path (conservative).
+      socWh = Math.max(0, Math.min(fullWh, socWh + (pvAlarm - load / RUNWAY_DISCHARGE_EFFICIENCY)));
       socPct = (socWh / fullWh) * 100;
       if (minSoc == null || socPct < minSoc) {
         minSoc = socPct;
@@ -3104,12 +3103,16 @@ export function computeRunway(
     const loadKwhPerHour = loadByHour[h];
     totalForecastPv += pvKwh;
     totalLoad += loadKwhPerHour;
-    // v1.26.0 — pool-drain accounting: a net DEFICIT hour drains the DC pool by
-    // load/η_dis (the DC→AC discharge loss), a net SURPLUS hour passes through
-    // unchanged (raw delta). See RUNWAY_DISCHARGE_EFFICIENCY. `totalLoad` above
-    // stays the RAW delivered load (reporting basis) — only the pool sim adjusts.
-    const grossDelta = pvKwh - loadKwhPerHour;
-    const delta = grossDelta < 0 ? grossDelta / RUNWAY_DISCHARGE_EFFICIENCY : grossDelta;
+    // v1.26.0 — DC-bus pool-drain accounting. PV enters the DC bus at ~unity
+    // (MPPT); the AC home load is pulled through the inverter at 1/η_dis; so the
+    // pool changes by pv − load/η each hour (a deficit drains faster, a surplus
+    // charges by the DC residual after serving load). NOT (pv−load)/η — that
+    // wrongly divides the PV credit by η too and stays optimistic whenever pv>0
+    // (e.g. pv==load must still drain at load·(1−1/η)). `totalLoad`/`totalForecastPv`
+    // above stay RAW (reporting basis). delta ≤ the pre-v1.26 unity delta for all
+    // pv,load ⇒ runway only ever shortens; ∂delta/∂pv = 1 ⇒ monotonic in
+    // forecastPvW (the runwayPvBasisGuard invariant holds).
+    const delta = pvKwh - loadKwhPerHour / RUNWAY_DISCHARGE_EFFICIENCY;
     const nextState = stateKwh + delta;
     if (hoursToReserve == null && stateKwh > backupReserveKwh && nextState <= backupReserveKwh) {
       const frac = delta < 0 ? (stateKwh - backupReserveKwh) / -delta : 1;
@@ -7834,7 +7837,11 @@ export async function computeMultiDayForecast(
       pvWh += pv;
       loadWh += load;
       if (fullWh && fullWh > 0 && socWh != null) {
-        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load)));
+        // v1.26.0 — same DC-bus balance pv − load/η as computeRunway /
+        // getDayForecast, so day-0 minProjectedSoc stays consistent with
+        // getDayForecast (no cross-surface contradiction) and the multi-day SoC
+        // path is equally honest. Report-only (not an alarm gate).
+        socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load / RUNWAY_DISCHARGE_EFFICIENCY)));
         const socPct = (socWh / fullWh) * 100;
         if (minSoc == null || socPct < minSoc) {
           minSoc = socPct;

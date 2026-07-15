@@ -79,12 +79,14 @@ test('extractEntityWatts: no power signal → null', () => {
 // ── loadShedAdvisor.computeRunwayWithShedOffset ───────────────────────────────
 
 test('computeRunwayWithShedOffset: shedding extends hoursToReserve (upper bound)', () => {
-  // 10 kWh above reserve, 3 h to reserve → 3.33 kW net; shedding 2 kW → 1.33 kW → ~7.5 h
+  // 10 kWh above reserve, 3 h to reserve → 3.33 kW pool-drain rate. v1.26.0: shedding
+  // 2 kW DELIVERED removes 2/η ≈ 2.13 kW from the pool drain (both on the pool basis)
+  // → 1.21 kW → ~8.3 h. (Pre-v1.26 subtracted 2 kW directly → ~7.5 h, under-counting.)
   const out = computeRunwayWithShedOffset(
     { backupRemainingKwh: 20, backupReserveKwh: 10, hoursToReserve: 3, hoursToEmpty: 6 },
     2000,
   );
-  assert.ok(out.hoursToReserve! > 7 && out.hoursToReserve! < 8, `got ${out.hoursToReserve}`);
+  assert.ok(out.hoursToReserve! > 8 && out.hoursToReserve! < 8.6, `got ${out.hoursToReserve}`);
 });
 
 test('computeRunwayWithShedOffset: shedding ≥ net draw → null (no depletion)', () => {
