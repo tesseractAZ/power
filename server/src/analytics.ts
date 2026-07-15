@@ -7558,10 +7558,14 @@ export async function computeProbabilisticForecast(
     // the published ±kWh figure can't read 0 beside a several-point overnight
     // band (the old PV-only accumulation did exactly that at night).
     if (Number.isFinite(sigmaNetKwh)) stdevAccum += sigmaNetKwh;
-    // v1.26.0 — pv − load/η, uniform with the other integrators. (The published
-    // band anchors on projectedSocPct + (path − midSoc), so dP50Kwh cancels in
-    // the offset and this is output-neutral — kept aligned so no future reader
-    // mistakes it for the raw-vs-η inconsistency corrected elsewhere.)
+    // v1.26.0 — pv − load/η, uniform with the other integrators. The published
+    // band anchors on projectedSocPct + (path − midSoc), so in the UNCLAMPED
+    // interior dP50Kwh cancels in the offset and is output-neutral; near the
+    // 0/100 rails the per-path clampSoc is nonlinear so it does affect clamp
+    // timing — but only in the SAFE direction (the /η delta syncs midSoc's
+    // empty-rail arrival with the anchor's own η-integrator, collapsing spread
+    // in step with the floor rather than showing phantom spread below it). Kept
+    // aligned so no future reader mistakes it for the raw-vs-η bug fixed elsewhere.
     const dP50Kwh = (p50 - h.forecastLoadW / RUNWAY_DISCHARGE_EFFICIENCY) / 1000;
     let p10SocOut: number | null = null;
     let p50SocOut: number | null = null;
