@@ -1,3 +1,48 @@
+## v1.24.0 — whole-system audit: three confirmed fixes (one alarm-delivery, two display honesty)
+
+A detailed log + performance + math audit of the whole system (24 agents across 11 dimensions,
+with an extra lens on the engines shipped over v1.17.0–v1.23.0). Every recently-shipped engine was
+independently recomputed against live endpoints + the Open-Meteo GHI archive and **confirmed
+correct**; the safety-critical runway math (4.2h islanded / 8.8h grid-backed) recomputed correct;
+no performance regression surfaced. Six raw findings distilled to three that survived adversarial
+two-skeptic verification. All three ship here.
+
+**#1 (the only one that can degrade a real alarm) — the pre-announce volume pin is now per-target,
+not one batched call.** Before a critical broadcast, `startBroadcastMonitor` pins each target to the
+standing announce volume so an AirPlay receiver that has drifted toward silence (an ecobee can sit
+near ~0.2) is audible when the klaxon plays. That pin was a *single* `volume_set` over the whole
+`cfg.targets` list — and Home Assistant resolves a batched `entity_id` list before executing, so one
+`VOLUME_SET`-incapable target in the list (the cordless speaker lacks the `supported_features` bit;
+the two ecobees have it) makes the **entire** call raise `ServiceNotSupported` and *no* speaker gets
+pinned — silently defeating the loudness safety net for the two working ecobees too. The pin is now a
+best-effort **per-target** `Promise.all` loop: the incapable target fails in isolation and is logged,
+the capable speakers are always set, and the 300 ms RAOP settle still runs whenever at least one pin
+succeeded. The announcement itself was never blocked by this and still isn't. (broadcast.ts)
+
+**#2 (display honesty, same-page contradiction) — the "projected runtime to reserve" card is bounded
+by the diurnal forecast's own reserve crossing.** The card extrapolates the trailing-3h `backup_pct`
+slope in a straight line — but that line runs flat across the solar boundary (afternoon peak →
+evening rolloff → overnight), so it read **17h39m** while `/api/runway` on the same page read **4.2h**:
+an under-warning contradiction. The displayed time is now `min(trailing extrapolation, first hour the
+daily-cycle forecast's `projectedSocPct` dips to/below reserve)` — it can only ever *shorten*, never
+lengthen, and the severity tier keys on the bounded value. When bounded, the detail text says so
+("Capped at the daily-cycle solar/load forecast's reserve crossing…"). A legacy forecast with no
+`hours[]` falls through (`forecast.hours?.find`) to the pre-v1.24 trailing value — no throw, no
+behavior change on that path. (analytics.ts `computeForecastAlerts`)
+
+**#3 (display-only, no alarm/wash-card consumer) — the soiling per-hour breakdown adopts the same
+robust baseline the per-Core paths already use.** The per-hour decomposition still carried both
+anti-patterns the honest per-Core paths were fixed away from: a `Math.max` baseline (a freak
+clear-day peak inflates the drop) and a low 250 W/m² GHI floor (at dawn/dusk the pv/GHI ratio is
+geometry-dominated, not soiling — hour 18 read an impossible 67.3% drop). It now uses a **p90**
+baseline and a **400 W/m²** floor (well-lit hours only), and requires ≥2 recent samples per hour.
+The per-Core medians (the honest F29 output that drives the tiles) are untouched. (analytics.ts
+`computeSoilingDecomposition`)
+
+3 new regression tests (suite 1471) pin the forecast-runtime bounding: bounded to the diurnal
+crossing when it is sooner; the trailing value retained when it is sooner (the bound only shortens);
+and the legacy no-`hours[]` forecast falling back without throwing.
+
 ## v1.23.0 — engine-review F29 + F30 + F31: the final low-severity queue
 
 Three unrelated low-severity findings, all reporting/robustness rather than safety, closing out

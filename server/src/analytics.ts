@@ -578,7 +578,23 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
       // NB: `reserve` here == `reserveForGate` above (same SHP2 reserve) — kept local for
       // the alert content (hoursToReserve / detail text).
       if (cur != null && pctPerHour < -0.05 && cur > reserve && diurnalConfirmsDepletion) {
-        const hoursToReserve = (cur - reserve) / -pctPerHour;
+        // v1.24.0 (system audit) — the trailing-3h backup_pct slope is
+        // flat-extrapolated across the solar boundary (afternoon peak → evening
+        // rolloff → overnight), so it can read ~4x the authoritative diurnal
+        // projection (live: 17h39m vs /api/runway 4.2h) — an UNDER-warning
+        // contradiction with the runway tile on the same page. BOUND the displayed
+        // time by the daily-cycle forecast's own reserve crossing (the first hour
+        // projectedSocPct dips to/below reserve, which already gated this card via
+        // diurnalConfirmsDepletion), so it can never read longer than the
+        // hour-by-hour projection. Severity is then keyed on the bounded value.
+        const fcReserve = forecast.reserveSoc ?? reserve;
+        const cross = forecast.hours?.find(
+          (hh) => hh.projectedSocPct != null && hh.projectedSocPct <= fcReserve && hh.ts > now,
+        );
+        const trailingHrs = (cur - reserve) / -pctPerHour;
+        const diurnalHrs = cross ? Math.max(0, (cross.ts - now) / 3_600_000) : Infinity;
+        const bounded = diurnalHrs < trailingHrs;
+        const hoursToReserve = bounded ? diurnalHrs : trailingHrs;
         let severity: 'warning' | 'info' | null = null;
         if (hoursToReserve < 6) severity = 'warning';
         else if (hoursToReserve <= 18) severity = 'info';
@@ -603,7 +619,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
             source: 'learned',
             device: shp2.deviceName,
             title: `Projected runtime ≈ ${hrs}h ${mins}m to reserve`,
-            detail: `Backup pool ${cur}% draining ${(-pctPerHour).toFixed(1)}%/h (3h average) — projected to reach the ${reserve}% reserve floor in about ${hrs}h ${mins}m. Forecast assumes current load continues; daily-cycle modelling comes with solar/load forecasting.${gridBackstopping ? ' The grid is backstopping the home now, so this is informational — it applies only if you island.' : ''}`,
+            detail: `Backup pool ${cur}% draining ${(-pctPerHour).toFixed(1)}%/h (3h average) — projected to reach the ${reserve}% reserve floor in about ${hrs}h ${mins}m. ${bounded ? 'Capped at the daily-cycle solar/load forecast’s reserve crossing (the trailing 3h rate alone would read longer but ignores dawn recovery / evening rolloff).' : 'Forecast assumes current load continues; daily-cycle modelling comes with solar/load forecasting.'}${gridBackstopping ? ' The grid is backstopping the home now, so this is informational — it applies only if you island.' : ''}`,
             facts: [
               { label: 'Backup pool now', value: `${cur}%` },
               { label: 'Decline rate', value: `${(-pctPerHour).toFixed(2)} %/h` },
@@ -3595,11 +3611,20 @@ export async function computeSoilingDecomposition(
     for (const [he, pv] of pvE) fleetPvE.set(he, (fleetPvE.get(he) ?? 0) + pv);
   }
   const recentMs = 7 * 24 * 60 * 60 * 1000;
+  // v1.24.0 (system audit) — the per-hour breakdown had BOTH anti-patterns the
+  // robust per-Core paths were already fixed away from: a Math.max baseline (the
+  // v0.54.2 fix moved to p90 because a freak clear-day peak inflates dropPct) and
+  // a low 250 W/m² floor. At dawn/dusk the pv/GHI ratio is geometry-dominated
+  // (sun angle, panel tilt), not soiling, so hour 18 read an impossible 67.3%
+  // drop. Raise the per-hour GHI floor so only well-lit hours contribute, and use
+  // the p90 baseline. (Display-only — no alarm/wash-card consumes perHour; the
+  // per-Core medians are the honest F29 output.)
+  const PERHOUR_MIN_GHI_WM2 = 400;
   const byHour: Array<{ baseline: number[]; recent: number[] }> =
     Array.from({ length: 24 }, () => ({ baseline: [], recent: [] }));
   for (const [he, pv] of fleetPvE) {
     const wx = wxByHour.get(he);
-    if (!wx || wx.cloudCoverPct > 25 || wx.radiationWm2 < 250) continue;
+    if (!wx || wx.cloudCoverPct > 25 || wx.radiationWm2 < PERHOUR_MIN_GHI_WM2) continue;
     const coeff = pv / wx.radiationWm2;
     if (!Number.isFinite(coeff) || coeff <= 0) continue;
     const ts = he * 3_600_000;
@@ -3610,8 +3635,9 @@ export async function computeSoilingDecomposition(
   const perHour = [];
   for (let h = 0; h < 24; h++) {
     const { baseline, recent } = byHour[h];
-    if (baseline.length < 3 || recent.length < 1) continue;
-    const base = Math.max(...baseline);
+    if (baseline.length < 3 || recent.length < 2) continue;
+    const sortedBase = [...baseline].sort((a, b) => a - b);
+    const base = sortedBase[Math.floor(0.9 * (sortedBase.length - 1))]; // p90, not all-time max
     const rec = median(recent);
     const drop = base > 0 ? ((base - rec) / base) * 100 : 0;
     perHour.push({
