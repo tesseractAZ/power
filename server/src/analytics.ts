@@ -7917,6 +7917,23 @@ export interface DispatchPlan {
 let dispatchCache: { ts: number; value: DispatchPlan } | null = null;
 const DISPATCH_TTL_MS = 30 * 60 * 1000;
 
+/* v1.27.0 — round-trip storage efficiency for the ADVISORY dispatch planner.
+ * Unlike the depletion sims (discharge-ONLY → RUNWAY_DISCHARGE_EFFICIENCY), this
+ * planner both charges and discharges, so a ROUND-TRIP loss applies. We take the
+ * measured 7-day RTE (/api/round-trip-efficiency ≈ 0.945) and split it SYMMETRICALLY
+ * across the two legs — η_chg = η_dis = √RTE ≈ 0.972 — so charging stores √RTE of the
+ * input and discharging delivers √RTE of the draw (net round-trip = RTE). This
+ * deliberately differs from RUNWAY_DISCHARGE_EFFICIENCY (0.94): that value folds
+ * SHP2/standby overhead into the single discharge leg the safety countdown cares
+ * about, whereas here we want a clean, physically-even round trip for cost/import
+ * sizing (reusing 0.94 on the discharge leg would imply η_chg = RTE/0.94 > 1, which
+ * is unphysical). Advisory-only, conservative (never under-states the grid import a
+ * real round trip needs). Env-overridable, clamped [0.80, 1.0]. */
+export const DISPATCH_ROUND_TRIP_EFFICIENCY = Math.min(
+  1,
+  Math.max(0.8, Number(process.env.DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.945) || 0.945),
+);
+
 export function computeDispatchPlan(
   devices: Record<string, DeviceSnapshot>,
   forecast: DayForecast | null,
@@ -7937,6 +7954,9 @@ export function computeDispatchPlan(
   const reserveKwh = (fullKwh * reservePct) / 100;
   const targetPrePeakSocPct = 80;
   const targetPrePeakKwh = (fullKwh * targetPrePeakSocPct) / 100;
+  // v1.27.0 — per-leg efficiency (√RTE): charging stores legEff of the input,
+  // discharging draws load/legEff from the pack. See DISPATCH_ROUND_TRIP_EFFICIENCY.
+  const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
 
   const hours: DispatchHour[] = [];
   let allGridCost = 0;
@@ -7953,33 +7973,42 @@ export function computeDispatchPlan(
     let hourlyCost = 0;
 
     if (pvKwh > loadKwh) {
-      // Surplus PV → charge battery
+      // Surplus PV → charge battery. v1.27.0: the pack GAINS only legEff of the PV
+      // surplus (charge conversion loss); cap the STORED energy at the remaining
+      // room, and report the PV actually diverted to charging as the flow.
       const surplus = pvKwh - loadKwh;
       const room = fullKwh - socKwh;
-      flowKwh = Math.min(surplus, room);
-      socKwh += flowKwh;
+      const stored = Math.min(surplus * legEff, room);
+      socKwh += stored;
+      flowKwh = stored / legEff;              // PV diverted to charging (≤ surplus)
       action = 'charge_from_pv';
     } else {
-      // Deficit
+      // Deficit. v1.27.0: delivering `deficit` from the battery DRAWS deficit/legEff
+      // from the pack (discharge conversion loss); the reserve guards test that drawn
+      // amount so a discharge can never dip the pack below reserve.
       const deficit = loadKwh - pvKwh;
-      if (onPeak && socKwh - deficit >= reserveKwh) {
+      const drawn = deficit / legEff;
+      if (onPeak && socKwh - drawn >= reserveKwh) {
         // Discharge battery during peak hours (saves the most $)
-        flowKwh = deficit;
-        socKwh -= flowKwh;
+        socKwh -= drawn;
+        flowKwh = deficit;                     // delivered to load
         action = 'discharge_to_load';
       } else if (!onPeak && socKwh < targetPrePeakKwh) {
-        // Off-peak charge from grid to top off before peak
+        // Off-peak charge from grid to top off before peak. `need` is grid energy
+        // DRAWN (billed at `rate`); only (need − deficit) reaches the charger and
+        // only legEff of THAT is stored — so the pack fills slower than a lossless
+        // model, naturally pulling more off-peak import over the window (conservative).
         const need = Math.min(deficit + (targetPrePeakKwh - socKwh) * 0.1, deficit + 1);
         hourlyCost = need * rate;
         action = 'grid_import';
         flowKwh = need;
-        socKwh = Math.min(fullKwh, socKwh + (need - deficit));
-      } else if (socKwh - deficit >= reserveKwh) {
-        flowKwh = deficit;
-        socKwh -= flowKwh;
+        socKwh = Math.min(fullKwh, socKwh + (need - deficit) * legEff);
+      } else if (socKwh - drawn >= reserveKwh) {
+        socKwh -= drawn;
+        flowKwh = deficit;                     // delivered to load
         action = 'discharge_to_load';
       } else {
-        // Forced grid import (battery at reserve)
+        // Forced grid import (battery can't cover the deficit above reserve)
         hourlyCost = deficit * rate;
         action = 'grid_import';
         flowKwh = deficit;
