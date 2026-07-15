@@ -16,14 +16,21 @@ of Music Assistant. The dispatch is:
 - **fire-and-forget** — the ~3-5 s `play_media` → switchboard render+originate round-trip never delays
   the (already 17-34 s) MA announcement to the ecobees, and never fails the MA broadcast;
 - **no volume pin** — SIP endpoints have no volume, so the `volume_set` that 500s is skipped entirely;
-- **gated identically** — it runs inside `runBroadcastInner`, so every real alarm path (condition
-  transitions, the dedicated SoC/runway `announce()`, `test()`, deferred retries) reaches the SIP
-  targets, under the same enable / min-severity / quiet-hours / storm gates as the MA speakers.
+- **gated identically** — it runs inside `runBroadcastInner`, downstream of the storm gate and of
+  the caller-level enable / min-severity / quiet-hours gates, so every fresh alarm (condition
+  transitions, the dedicated SoC/runway `announce()`, `test()`) reaches the SIP targets under the
+  same suppression rules as the MA speakers — and never fires when MA is correctly silenced;
+- **not re-fired by MA retries** — a deferred retry (`scheduleBroadcastRetry`) exists only to reach
+  MA targets that were unavailable; the SIP target already received this exact audio on the first
+  dispatch, so retries pass `skipSip` and do NOT replay the identical alarm on the cordless at
+  +30/+90/+180 s.
 
 A `media_player` listed in both `BROADCAST_TARGETS` and `BROADCAST_SIP_TARGETS` is dropped from the
 SIP list (MA wins) so it is never double-announced. `BROADCAST_SIP_TARGETS` shares the strict
-`media_player.*` scope guard. At least one `BROADCAST_TARGETS` speaker is still required for a
-broadcast to run. (broadcast.ts, config.yaml, run, en.yaml)
+`media_player.*` scope guard. At least one `BROADCAST_TARGETS` (Music Assistant) speaker is required
+for a broadcast to run — SIP targets are an add-on channel, not a standalone one, which keeps the
+whole outcome / retry / audible-health machinery keyed on the verifiable MA path. (broadcast.ts,
+config.yaml, run, en.yaml)
 
 ## v1.24.0 — whole-system audit: three confirmed fixes (one alarm-delivery, two display honesty)
 

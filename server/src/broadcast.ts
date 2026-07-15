@@ -568,7 +568,10 @@ export function startBroadcastMonitor(
         retryAttempt = 0;
         return;
       }
-      void runBroadcast(level, message, false, messageEs);
+      // v1.25.0 — skipSip: this retry exists only to reach the MA targets that were
+      // unavailable; the SIP target already received this exact audio on the first
+      // dispatch, so re-firing it would replay the identical alarm on the cordless.
+      void runBroadcast(level, message, false, messageEs, true);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -601,7 +604,8 @@ export function startBroadcastMonitor(
   } else if (cfg.targets.length === 0) {
     log('broadcast: no targets configured (set BROADCAST_TARGETS to comma-separated media_player entity IDs)');
   } else {
-    log(`broadcast: enabled, ${cfg.targets.length} target(s): ${cfg.targets.join(', ')}`);
+    log(`broadcast: enabled, ${cfg.targets.length} MA target(s): ${cfg.targets.join(', ')}`
+      + (cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP target(s): ${cfg.sipTargets.join(', ')}` : ''));
   }
 
   // v0.9.80 — avoid a startup false-negative. At boot the Supervisor proxy /
@@ -888,9 +892,15 @@ export function startBroadcastMonitor(
     message: string | null,
     messageEs: string | null,
     bypassStormGate: boolean,
+    skipSip = false, // v1.25.0 — true on a deferred MA retry: SIP already got the first dispatch.
   ): Promise<{ ok: boolean; errors: string[] }> => {
     if (!supervised) return { ok: false, errors: ['not supervised'] };
-    if (cfg.targets.length === 0 && cfg.sipTargets.length === 0) return { ok: false, errors: ['no targets configured'] };
+    // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
+    // ADD-ON channel, not a standalone one): it keeps the audible-health self-alert +
+    // the whole MA outcome/retry machinery keyed on `cfg.targets` and avoids reporting
+    // a SIP-only "success" we can't verify (SIP dispatch is fire-and-forget). A SIP
+    // list with no MA targets is treated as no targets, matching the option's help text.
+    if (cfg.targets.length === 0) return { ok: false, errors: ['no targets configured'] };
 
     // v0.15.22 — storm gates (see constants above). Escalations always play.
     if (!bypassStormGate && lastPlayedAt > 0) {
@@ -986,9 +996,14 @@ export function startBroadcastMonitor(
     //     mid-restart / unavailable (the exact failure it exists to cover);
     //   • fire-and-forget, so the ~3-5 s play_media → switchboard render+originate
     //     round-trip NEVER delays the (already 17-34 s) MA announcement to the ecobees.
+    // `skipSip` is set on DEFERRED MA RETRIES (scheduleBroadcastRetry): the retry exists
+    // only to reach MA targets that were unavailable — the SIP target already got this
+    // exact audio on the first dispatch, so re-firing it would replay the identical
+    // alarm on the cordless at +30/+90/+180 s. The first-attempt storm gate (above)
+    // already suppresses genuine same-message/same-level re-transitions before here.
     // playSipAnnounce logs its own per-target outcome and never throws (callHaService
     // resolves, Promise.all can't reject); the .catch is belt-and-suspenders.
-    if (cfg.sipTargets.length > 0) {
+    if (cfg.sipTargets.length > 0 && !skipSip) {
       void playSipAnnounce(url).catch((e) => log(`broadcast: SIP dispatch failed — ${e?.message ?? e}`));
     }
 
@@ -996,13 +1011,10 @@ export function startBroadcastMonitor(
     // entities briefly deregister; HA then ACCEPTS play_announcement and
     // silently drops it (3 confirmed swallowed broadcasts, each "ok" in
     // 20-34 ms). Verify at least one target is registered and available
-    // before dispatching; otherwise defer and retry. v1.25.0 — MA-only; a SIP-only
-    // config (no MA targets) skips the pre-flight (the SIP dispatch already fired).
-    const states = cfg.targets.length > 0
-      ? await Promise.all(cfg.targets.map((t) => getEntityState(t)))
-      : [];
+    // before dispatching; otherwise defer and retry.
+    const states = await Promise.all(cfg.targets.map((t) => getEntityState(t)));
     const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
-    if (cfg.targets.length > 0 && usable === 0) {
+    if (usable === 0) {
       errors.push('all broadcast targets unavailable (HA/MA restarting?)');
       scheduleBroadcastRetry(level, message, messageEs, 'all broadcast targets unavailable');
       lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
@@ -1016,13 +1028,9 @@ export function startBroadcastMonitor(
     }
 
     // 3. Single MA play_announcement to every MA target (the SIP side-channel was
-    // already dispatched above). Skipped for a SIP-only config — then `call` is a
-    // synthetic ok so the SIP-only broadcast reports success once dispatched (the
-    // fire-and-forget SIP path logs its own real per-target outcome).
-    const call = cfg.targets.length > 0
-      ? await playAnnounce(url)
-      : { ok: true as boolean, error: undefined as string | undefined };
-    if (cfg.targets.length > 0 && !call.ok) {
+    // already dispatched, fire-and-forget, above).
+    const call = await playAnnounce(url);
+    if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
       scheduleBroadcastRetry(level, message, messageEs, 'play_announcement failed after in-call retries');
     }
@@ -1033,10 +1041,8 @@ export function startBroadcastMonitor(
     // v0.15.18 — a real MA announcement blocks until playback completes
     // (observed 17-34 s). A sub-2 s "ok" means HA returned without playing
     // (entity registered but its player not ready) — treat as unverified
-    // and re-dispatch rather than report a success no one heard. v1.25.0 — MA-only:
-    // play_media (the SIP path) legitimately returns fast, so this timing heuristic
-    // must not apply to a SIP-only broadcast.
-    if (cfg.targets.length > 0 && call.ok && dt < 2000) {
+    // and re-dispatch rather than report a success no one heard.
+    if (call.ok && dt < 2000) {
       errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
       scheduleBroadcastRetry(level, message, messageEs, `suspiciously fast completion (${dt}ms)`);
     }
@@ -1074,8 +1080,9 @@ export function startBroadcastMonitor(
     message: string | null,
     bypassStormGate = false,
     messageEs: string | null = null,
+    skipSip = false, // v1.25.0 — forwarded to runBroadcastInner; set by deferred MA retries.
   ): Promise<{ ok: boolean; errors: string[] }> => {
-    const run = () => runBroadcastInner(level, message, messageEs, bypassStormGate);
+    const run = () => runBroadcastInner(level, message, messageEs, bypassStormGate, skipSip);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     return p;
