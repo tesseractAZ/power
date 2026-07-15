@@ -89,6 +89,9 @@ else
   export BROADCAST_ENABLED=false
 fi
 export BROADCAST_TARGETS="$(bashio::config 'BROADCAST_TARGETS')"
+# v1.25.0 — SIP / announce-only targets (e.g. the Switchboard cordless) that get
+# alarms via media_player.play_media(announce) instead of Music Assistant.
+export BROADCAST_SIP_TARGETS="$(bashio::config 'BROADCAST_SIP_TARGETS')"
 export BROADCAST_AUDIO_BASE="$(bashio::config 'BROADCAST_AUDIO_BASE')"
 export BROADCAST_VOLUME="$(bashio::config 'BROADCAST_VOLUME')"
 # v0.15.4 — announcement reliability/repeat knobs (ecobee-friendly)

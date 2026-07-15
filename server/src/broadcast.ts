@@ -96,6 +96,12 @@ import { isPriorityEnabled } from './alertSettings.js';
 export interface BroadcastConfig {
   enabled: boolean;
   targets: string[];
+  /** v1.25.0 — SIP / announce-only media_player targets (e.g. the Switchboard
+   *  cordless) driven via media_player.play_media(announce) rather than Music
+   *  Assistant. MA can't drive a SIP phone (no playback state; volume_set 500s),
+   *  so these take the same rendered audio over play_media, dispatched
+   *  independently of (and in parallel with) the MA speakers. */
+  sipTargets: string[];
   audioBase: string;
   volume: number;
   minSeverity: 'critical' | 'warning';
@@ -156,6 +162,13 @@ export function loadBroadcastConfig(): BroadcastConfig {
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0 && s.startsWith('media_player.'));
+  // v1.25.0 — SIP / announce-only targets, same parse/validation as `targets`.
+  // A target listed in BOTH lists would be double-announced (MA + play_media), so
+  // SIP entries also present in `targets` are dropped here — MA wins.
+  const sipTargets = (process.env.BROADCAST_SIP_TARGETS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s.startsWith('media_player.') && !targets.includes(s));
   // v0.18.0 — the env vars set the BASELINE; the /data runtime override (set
   // live from the UI) wins when present. We re-read it here on every call, and
   // loadBroadcastConfig is itself re-read each tick + per broadcast, so a UI
@@ -168,6 +181,7 @@ export function loadBroadcastConfig(): BroadcastConfig {
   return {
     enabled,
     targets,
+    sipTargets,
     audioBase: (process.env.BROADCAST_AUDIO_BASE || 'http://homeassistant.local:8787').replace(/\/$/, ''),
     volume,
     minSeverity: (process.env.BROADCAST_MIN_SEVERITY ?? 'critical') === 'warning' ? 'warning' : 'critical',
@@ -554,7 +568,10 @@ export function startBroadcastMonitor(
         retryAttempt = 0;
         return;
       }
-      void runBroadcast(level, message, false, messageEs);
+      // v1.25.0 — skipSip: this retry exists only to reach the MA targets that were
+      // unavailable; the SIP target already received this exact audio on the first
+      // dispatch, so re-firing it would replay the identical alarm on the cordless.
+      void runBroadcast(level, message, false, messageEs, true);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -587,7 +604,8 @@ export function startBroadcastMonitor(
   } else if (cfg.targets.length === 0) {
     log('broadcast: no targets configured (set BROADCAST_TARGETS to comma-separated media_player entity IDs)');
   } else {
-    log(`broadcast: enabled, ${cfg.targets.length} target(s): ${cfg.targets.join(', ')}`);
+    log(`broadcast: enabled, ${cfg.targets.length} MA target(s): ${cfg.targets.join(', ')}`
+      + (cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP target(s): ${cfg.sipTargets.join(', ')}` : ''));
   }
 
   // v0.9.80 — avoid a startup false-negative. At boot the Supervisor proxy /
@@ -836,6 +854,37 @@ export function startBroadcastMonitor(
   };
 
   /**
+   * v1.25.0 — deliver the announcement to the SIP / announce-only targets (the
+   * Switchboard cordless) via media_player.play_media(announce=true). These are NOT
+   * Music Assistant players: MA can't drive a SIP phone (no playback state, and a
+   * volume_set on the cordless 500s — it has no volume feature), so they take the
+   * SAME rendered-audio URL over play_media directly. No volume pre-pin (nothing to
+   * pin). Best-effort + parallel: each target is independent, a failure is logged,
+   * and — because the caller dispatches this fire-and-forget — it NEVER delays or
+   * fails the Music Assistant broadcast. Returns per-target tallies for the log.
+   */
+  const playSipAnnounce = async (url: string): Promise<{ attempted: number; ok: number; errors: string[] }> => {
+    if (cfg.sipTargets.length === 0) return { attempted: 0, ok: 0, errors: [] };
+    const results = await Promise.all(cfg.sipTargets.map((t) =>
+      callHaService('media_player', 'play_media', {
+        entity_id: t,
+        media_content_id: url,
+        media_content_type: 'music',
+        announce: true,
+      })));
+    const okCount = results.filter((r) => r.ok).length;
+    const errs = results
+      .map((r, i) => (r.ok ? null : `${cfg.sipTargets[i]}: ${r.error ?? r.status}`))
+      .filter((x): x is string => x != null);
+    if (errs.length) {
+      log(`broadcast: SIP play_media failed for ${errs.length}/${cfg.sipTargets.length} target(s) — ${errs[0]}`);
+    } else if (okCount) {
+      log(`broadcast: SIP announce → ${okCount} target(s) via play_media`);
+    }
+    return { attempted: cfg.sipTargets.length, ok: okCount, errors: errs };
+  };
+
+  /**
    * Single broadcast: render → one MA call. No staggering, no settles.
    */
   const runBroadcastInner = async (
@@ -843,8 +892,14 @@ export function startBroadcastMonitor(
     message: string | null,
     messageEs: string | null,
     bypassStormGate: boolean,
+    skipSip = false, // v1.25.0 — true on a deferred MA retry: SIP already got the first dispatch.
   ): Promise<{ ok: boolean; errors: string[] }> => {
     if (!supervised) return { ok: false, errors: ['not supervised'] };
+    // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
+    // ADD-ON channel, not a standalone one): it keeps the audible-health self-alert +
+    // the whole MA outcome/retry machinery keyed on `cfg.targets` and avoids reporting
+    // a SIP-only "success" we can't verify (SIP dispatch is fire-and-forget). A SIP
+    // list with no MA targets is treated as no targets, matching the option's help text.
     if (cfg.targets.length === 0) return { ok: false, errors: ['no targets configured'] };
 
     // v0.15.22 — storm gates (see constants above). Escalations always play.
@@ -930,6 +985,28 @@ export function startBroadcastMonitor(
     }
     wyomingReachable = message ? true : wyomingReachable; // only "proved" by a TTS render
 
+    // v1.25.0 — the fetch URL for the rendered audio; shared by the SIP side-channel
+    // and the Music Assistant path below.
+    const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
+
+    // v1.25.0 — SIP / announce-only side-channel (the Switchboard cordless), fired
+    // HERE — BEFORE the MA-target availability pre-flight — and FIRE-AND-FORGET:
+    //   • before the pre-flight, so the cordless is a genuine ALTERNATE alarm channel
+    //     that still speaks even when the MA pre-flight defers because the ecobees are
+    //     mid-restart / unavailable (the exact failure it exists to cover);
+    //   • fire-and-forget, so the ~3-5 s play_media → switchboard render+originate
+    //     round-trip NEVER delays the (already 17-34 s) MA announcement to the ecobees.
+    // `skipSip` is set on DEFERRED MA RETRIES (scheduleBroadcastRetry): the retry exists
+    // only to reach MA targets that were unavailable — the SIP target already got this
+    // exact audio on the first dispatch, so re-firing it would replay the identical
+    // alarm on the cordless at +30/+90/+180 s. The first-attempt storm gate (above)
+    // already suppresses genuine same-message/same-level re-transitions before here.
+    // playSipAnnounce logs its own per-target outcome and never throws (callHaService
+    // resolves, Promise.all can't reject); the .catch is belt-and-suspenders.
+    if (cfg.sipTargets.length > 0 && !skipSip) {
+      void playSipAnnounce(url).catch((e) => log(`broadcast: SIP dispatch failed — ${e?.message ?? e}`));
+    }
+
     // 2. v0.15.18 — pre-flight: during HA/MA restart windows the media_player
     // entities briefly deregister; HA then ACCEPTS play_announcement and
     // silently drops it (3 confirmed swallowed broadcasts, each "ok" in
@@ -950,8 +1027,8 @@ export function startBroadcastMonitor(
       return { ok: false, errors };
     }
 
-    // 3. Single MA play_announcement to every target.
-    const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
+    // 3. Single MA play_announcement to every MA target (the SIP side-channel was
+    // already dispatched, fire-and-forget, above).
     const call = await playAnnounce(url);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
@@ -979,7 +1056,7 @@ export function startBroadcastMonitor(
     }
     const renderTag = r.fromCache ? 'cached' : `rendered+${r.ttsRenderMs}ms`;
     if (errors.length === 0) {
-      log(`broadcast: ${level} → ok in ${dt}ms (${cfg.targets.length} targets, ${renderTag}, ${r.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
+      log(`broadcast: ${level} → ok in ${dt}ms (${cfg.targets.length} MA${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${r.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
     } else {
       log(`broadcast: ${level} → ${errors.length} error(s) in ${dt}ms: ${errors.join('; ')}`);
     }
@@ -1003,8 +1080,9 @@ export function startBroadcastMonitor(
     message: string | null,
     bypassStormGate = false,
     messageEs: string | null = null,
+    skipSip = false, // v1.25.0 — forwarded to runBroadcastInner; set by deferred MA retries.
   ): Promise<{ ok: boolean; errors: string[] }> => {
-    const run = () => runBroadcastInner(level, message, messageEs, bypassStormGate);
+    const run = () => runBroadcastInner(level, message, messageEs, bypassStormGate, skipSip);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     return p;

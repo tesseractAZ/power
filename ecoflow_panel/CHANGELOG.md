@@ -1,3 +1,37 @@
+## v1.25.0 — power alarms reach SIP/intercom endpoints (the Switchboard cordless) via a direct play_media side-channel
+
+Music Assistant drives the ecobee alarm speakers, but it **cannot drive a SIP phone**: exposing the
+Switchboard cordless (`media_player.cordless_speaker`) as an MA player registers it, yet MA's
+announcement flow never plays on it (no real playback state), and the broadcast's pre-announce
+`volume_set` 500s on it (a SIP endpoint has no volume feature — the exact "Server got itself in
+trouble" seen live). So the cordless got noise and no audio when listed in `BROADCAST_TARGETS`.
+
+**New option `BROADCAST_SIP_TARGETS`** — a second, comma-separated list of `media_player.*` entity
+IDs that receive the SAME rendered alarm audio via `media_player.play_media(announce=true)` instead
+of Music Assistant. The dispatch is:
+
+- **independent of Music Assistant** — fired *before* the MA-target availability pre-flight, so a SIP
+  target is a genuine ALTERNATE alarm channel that still speaks even when MA / the ecobees are down
+  (mid-restart, `unavailable`), the exact failure it exists to cover;
+- **fire-and-forget** — the ~3-5 s `play_media` → switchboard render+originate round-trip never delays
+  the (already 17-34 s) MA announcement to the ecobees, and never fails the MA broadcast;
+- **no volume pin** — SIP endpoints have no volume, so the `volume_set` that 500s is skipped entirely;
+- **gated identically** — it runs inside `runBroadcastInner`, downstream of the storm gate and of
+  the caller-level enable / min-severity / quiet-hours gates, so every fresh alarm (condition
+  transitions, the dedicated SoC/runway `announce()`, `test()`) reaches the SIP targets under the
+  same suppression rules as the MA speakers — and never fires when MA is correctly silenced;
+- **not re-fired by MA retries** — a deferred retry (`scheduleBroadcastRetry`) exists only to reach
+  MA targets that were unavailable; the SIP target already received this exact audio on the first
+  dispatch, so retries pass `skipSip` and do NOT replay the identical alarm on the cordless at
+  +30/+90/+180 s.
+
+A `media_player` listed in both `BROADCAST_TARGETS` and `BROADCAST_SIP_TARGETS` is dropped from the
+SIP list (MA wins) so it is never double-announced. `BROADCAST_SIP_TARGETS` shares the strict
+`media_player.*` scope guard. At least one `BROADCAST_TARGETS` (Music Assistant) speaker is required
+for a broadcast to run — SIP targets are an add-on channel, not a standalone one, which keeps the
+whole outcome / retry / audible-health machinery keyed on the verifiable MA path. (broadcast.ts,
+config.yaml, run, en.yaml)
+
 ## v1.24.0 — whole-system audit: three confirmed fixes (one alarm-delivery, two display honesty)
 
 A detailed log + performance + math audit of the whole system (24 agents across 11 dimensions,
