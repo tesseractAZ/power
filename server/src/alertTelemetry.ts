@@ -100,13 +100,23 @@ let appendsSinceCheck = 0;
 
 /** Drop the oldest whole lines until the file is back under REPLAY_MAX_BYTES. Exported for tests. */
 export function rotateTelemetryIfOversized(path: string = PATH): boolean {
+  // Open ONCE and operate on the file descriptor for both stat and read, so there is
+  // no check-then-use (existsSync→open) or re-resolve (stat-path→read-path) window a
+  // concurrent unlink/replace could exploit (CodeQL js/file-system-race). A missing
+  // file (ENOENT on open) means there is nothing to rotate — same result as the old
+  // existsSync probe.
+  let fd: number | undefined;
   try {
-    if (!existsSync(path)) return false;
-    const fd = openSync(path, 'r');
-    let size: number;
-    try { size = fstatSync(fd).size; } finally { closeSync(fd); }
+    fd = openSync(path, 'r');
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return false;
+    console.error(`alertTelemetry: rotate open failed: ${e?.message ?? e}`);
+    return false;
+  }
+  try {
+    const size = fstatSync(fd).size;
     if (size <= ROTATE_AT_BYTES) return false;
-    const text = readFileSync(path, 'utf8');
+    const text = readFileSync(fd, 'utf8'); // read from the open fd — same inode as the stat
     // Keep the newest REPLAY_MAX_BYTES, then discard the leading PARTIAL line so every
     // surviving line still parses.
     const cut = text.slice(-REPLAY_MAX_BYTES);
@@ -118,6 +128,8 @@ export function rotateTelemetryIfOversized(path: string = PATH): boolean {
   } catch (e: any) {
     console.error(`alertTelemetry: rotate failed: ${e?.message ?? e}`);
     return false;
+  } finally {
+    closeSync(fd);
   }
 }
 
