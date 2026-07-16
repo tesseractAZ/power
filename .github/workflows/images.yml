@@ -229,6 +229,53 @@ jobs:
             --title "${{ needs.resolve.outputs.tag }}" \
             --notes-file /tmp/notes.md
 
+      # Attach the printable documentation (.docx) to the Release. Built from the
+      # docs at THIS tag by the same generator CI uses (scripts/build-docs-docx.py),
+      # so every published version carries an always-current, offline-printable
+      # manual (README + SECURITY + the full DOCS.md engine reference). Runs after
+      # "Create GitHub Release" whether or not the skip gate fired — on a re-run
+      # --clobber refreshes the asset, so a re-published Release ends up with an
+      # up-to-date document either way.
+      #
+      # These steps are deliberately best-effort: the images and the Release
+      # itself have already published by this point, so a documentation build
+      # must never turn a successful release RED. They are gated two ways:
+      #   * `hashFiles(script) != ''` — re-running this workflow (workflow_dispatch)
+      #     against an OLD tag whose tree predates this tooling checks out no
+      #     script; the steps then skip cleanly instead of erroring.
+      #   * `continue-on-error` — a transient apt/pandoc/gh hiccup is tolerated,
+      #     and the attach step only runs when the build actually produced a file
+      #     (`steps.docx.outcome == 'success'`).
+      - name: Ensure pandoc
+        if: ${{ hashFiles('scripts/build-docs-docx.py') != '' }}
+        continue-on-error: true
+        run: |
+          command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
+          pandoc --version | head -1
+
+      - name: Build documentation .docx
+        id: docx
+        if: ${{ hashFiles('scripts/build-docs-docx.py') != '' }}
+        continue-on-error: true
+        env:
+          V: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          python3 scripts/build-docs-docx.py \
+            --version "$V" \
+            --ref "$TAG" \
+            --output "EcoFlow-Panel-Documentation-v${V}.docx"
+
+      - name: Attach .docx to the Release
+        if: ${{ steps.docx.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.resolve.outputs.version }}
+        run: |
+          gh release upload "${{ needs.resolve.outputs.tag }}" \
+            "EcoFlow-Panel-Documentation-v${V}.docx" --clobber
+
       - name: Summary
         env:
           V: ${{ needs.resolve.outputs.version }}
