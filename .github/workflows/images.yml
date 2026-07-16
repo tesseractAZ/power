@@ -220,42 +220,28 @@ jobs:
           cat /tmp/notes.md
           echo "─────────────────────────────────────────────"
 
-      - name: Create GitHub Release
-        if: steps.gate.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ needs.resolve.outputs.tag }}" \
-            --title "${{ needs.resolve.outputs.tag }}" \
-            --notes-file /tmp/notes.md
-
-      # Attach the printable documentation (.docx) to the Release. Built from the
-      # docs at THIS tag by the same generator CI uses (scripts/build-docs-docx.py),
-      # so every published version carries an always-current, offline-printable
-      # manual (README + SECURITY + the full DOCS.md engine reference). Runs after
-      # "Create GitHub Release" whether or not the skip gate fired — on a re-run
-      # --clobber refreshes the asset, so a re-published Release ends up with an
-      # up-to-date document either way.
+      # Build the printable documentation (.docx) BEFORE creating the Release so it
+      # can be attached AT creation. This repo has immutable Releases enabled, so
+      # assets cannot be added after `gh release create` (HTTP 422) — the file is
+      # therefore passed as a positional asset to `gh release create` below, not
+      # uploaded in a later step. Same generator CI uses (scripts/build-docs-docx.py);
+      # the document bundles README + SECURITY + the full DOCS.md engine reference.
       #
-      # These steps are deliberately best-effort: the images and the Release
-      # itself have already published by this point, so a documentation build
-      # must never turn a successful release RED. They are gated two ways:
-      #   * `hashFiles(script) != ''` — re-running this workflow (workflow_dispatch)
-      #     against an OLD tag whose tree predates this tooling checks out no
-      #     script; the steps then skip cleanly instead of erroring.
-      #   * `continue-on-error` — a transient apt/pandoc/gh hiccup is tolerated,
-      #     and the attach step only runs when the build actually produced a file
-      #     (`steps.docx.outcome == 'success'`).
+      # Best-effort: gated on `!skip` (only when we actually create the Release) and
+      # `hashFiles(script) != ''` (a workflow_dispatch re-run against an OLD tag that
+      # predates this tooling has no script → skip cleanly), and `continue-on-error`
+      # so a transient apt/pandoc hiccup can't turn a successful release RED. If the
+      # build is skipped or fails, the Release is still created — just without the
+      # document.
       - name: Ensure pandoc
-        if: ${{ hashFiles('scripts/build-docs-docx.py') != '' }}
+        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
         run: |
           command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
           pandoc --version | head -1
 
       - name: Build documentation .docx
-        id: docx
-        if: ${{ hashFiles('scripts/build-docs-docx.py') != '' }}
+        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
         continue-on-error: true
         env:
           V: ${{ needs.resolve.outputs.version }}
@@ -266,15 +252,22 @@ jobs:
             --ref "$TAG" \
             --output "EcoFlow-Panel-Documentation-v${V}.docx"
 
-      - name: Attach .docx to the Release
-        if: ${{ steps.docx.outcome == 'success' }}
-        continue-on-error: true
+      - name: Create GitHub Release (with docs asset)
+        if: steps.gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ needs.resolve.outputs.version }}
         run: |
-          gh release upload "${{ needs.resolve.outputs.tag }}" \
-            "EcoFlow-Panel-Documentation-v${V}.docx" --clobber
+          set -eo pipefail
+          # Immutable Releases seal assets at creation — attach the .docx here, not
+          # in a later step. Include it only if the build produced the file.
+          assets=()
+          doc="EcoFlow-Panel-Documentation-v${V}.docx"
+          if [ -f "$doc" ]; then assets+=("$doc"); fi
+          gh release create "${{ needs.resolve.outputs.tag }}" \
+            --title "${{ needs.resolve.outputs.tag }}" \
+            --notes-file /tmp/notes.md \
+            "${assets[@]}"
 
       - name: Summary
         env:
