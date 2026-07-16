@@ -20,6 +20,11 @@ Panel 2**, ~4 **Delta Pro Ultra** battery/inverter Cores (5 packs each), a
 > **every** feature and engine — what each does, the exact algorithm and math it
 > computes, how data traces through the pipeline, its endpoints/sensors, config
 > knobs, and edge-case guards. This README is the tour; DOCS.md is the manual.
+>
+> 🖨️ **Offline / printable:** a Microsoft Word build of this README + `SECURITY.md`
+> + the full `DOCS.md` (single file, ~150 pages, with a linked table of contents)
+> is attached to every [GitHub Release](https://github.com/tesseractAZ/ecoflow-panel/releases).
+> Regenerate it locally with `python3 scripts/build-docs-docx.py` (needs `pandoc`).
 
 ---
 

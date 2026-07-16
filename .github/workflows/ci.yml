@@ -71,3 +71,32 @@ jobs:
           # v0.9.37 — ignore-error=true so a flaky GHA cache doesn't fail the smoke build.
           cache-from: type=gha,scope=docker-smoke
           cache-to: type=gha,mode=max,scope=docker-smoke,ignore-error=true
+
+  docs-docx:
+    # Assemble README + SECURITY + DOCS into the printable .docx on every
+    # push/PR. Purpose is twofold: (1) catch a DOCS.md that no longer converts
+    # cleanly BEFORE it reaches a release, and (2) publish a downloadable
+    # preview artifact so reviewers can read the offline manual for the branch.
+    # The same generator (scripts/build-docs-docx.py) attaches the .docx to the
+    # GitHub Release in images.yml, so this job keeps that path exercised.
+    name: Build documentation (.docx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Ensure pandoc
+        run: |
+          command -v pandoc >/dev/null || { sudo apt-get update && sudo apt-get install -y pandoc; }
+          pandoc --version | head -1
+
+      - name: Build .docx
+        run: |
+          python3 scripts/build-docs-docx.py \
+            --ref "${GITHUB_SHA:0:7}" \
+            --output "EcoFlow-Panel-Documentation.docx"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: documentation-docx
+          path: EcoFlow-Panel-Documentation.docx
+          if-no-files-found: error
