@@ -25,7 +25,7 @@ export default {
         info: 'rgb(var(--color-info) / <alpha-value>)',
       },
       fontFamily: {
-        // CSS variables let the B5 theme swap fonts without touching JSX.
+        // CSS variables let the High Contrast theme swap fonts without touching JSX.
         sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         mono: ['var(--font-mono)', 'ui-monospace', 'SF Mono', 'monospace'],
       },

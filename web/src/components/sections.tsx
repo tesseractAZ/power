@@ -14,7 +14,7 @@ import type { ReactNode } from 'react';
  *     (kept available, out of the default flow).
  *   • Expander — a generic "Show detail" collapse for dense per-hour / per-pack /
  *     per-circuit tables, so the default view is summary tiles.
- * All theme-token only (correct in Default + Babylon 5).
+ * All theme-token only (correct in Default + High Contrast).
  */
 
 export type Accent = 'solar' | 'battery' | 'grid' | 'load' | 'soc' | 'neutral' | 'alert';

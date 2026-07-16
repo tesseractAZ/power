@@ -54,7 +54,7 @@ function GridStatusLine({ d }: { d: DeviceSnapshot }) {
   if (status.state === 'unknown') return null;
 
   // Theme-aware colors: grid identity hue for the live/standby states, the card's
-  // bad token for an islanded home. cssVar (UI.*) keeps B5 (dark) correct.
+  // bad token for an islanded home. cssVar (UI.*) keeps High Contrast (dark) correct.
   const dotStyle = (color: string) => ({
     width: 8,
     height: 8,

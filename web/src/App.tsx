@@ -52,10 +52,11 @@ const PageFallback = () => (
 );
 
 /**
- * v0.15.6 — the Default / Babylon 5 dashboard is the only UI now; the
+ * v0.15.6 — the Default / High Contrast dashboard is the only UI now; the
  * alternate Starfleet and Opus themes were removed. App is a thin wrapper
  * around NormalApp, which owns all the dashboard's hooks and state. (The CSS
- * palette still swaps between Default and B5 via the data-theme attribute.)
+ * palette still swaps between Default and High Contrast via the data-theme
+ * attribute.)
  */
 export default function App() {
   return <NormalApp />;
@@ -226,7 +227,7 @@ function NormalApp() {
           >
             {conn === 'open' ? 'live' : conn === 'connecting' ? 'linking' : 'offline'}
           </span>
-          {/* v0.9.11 — theme picker (Default / Babylon 5). */}
+          {/* v0.9.11 — theme picker (Default / High Contrast). */}
           <ThemeToggle />
         </div>
       </header>

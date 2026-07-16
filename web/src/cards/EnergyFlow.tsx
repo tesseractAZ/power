@@ -4,13 +4,14 @@ import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 import { HUES, UI } from '../theme';
 
 /**
- * v0.36.0 — theme-aware fonts for SVG <text>. The B5 theme swaps `--font-sans`
- * → Orbitron and `--font-mono` → Share Tech Mono under [data-theme="b5"]
- * (src/index.css); the Default theme resolves them to ui-sans-serif /
- * ui-monospace, so referencing the CSS var stays byte-identical on Default
- * while letting B5 re-skin. Hardcoding "ui-sans-serif"/"ui-monospace" here
- * (as the old core-kW label did) bypasses that swap and clashes with the rest
- * of the B5 chrome — so all flow labels route through these vars instead.
+ * v0.36.0 — theme-aware fonts for SVG <text>. The High Contrast theme swaps
+ * `--font-sans` → Orbitron and `--font-mono` → Share Tech Mono under
+ * [data-theme="high-contrast"] (src/index.css); the Default theme resolves them
+ * to ui-sans-serif / ui-monospace, so referencing the CSS var stays
+ * byte-identical on Default while letting High Contrast re-skin. Hardcoding
+ * "ui-sans-serif"/"ui-monospace" here (as the old core-kW label did) bypasses
+ * that swap and clashes with the rest of the High Contrast chrome — so all flow
+ * labels route through these vars instead.
  */
 const FONT_SANS = 'var(--font-sans)';
 const FONT_MONO = 'var(--font-mono)';
@@ -221,8 +222,9 @@ function Node({
       <text x={x + 12} y={y + 18} fill={UI.muted} fontSize="10" fontFamily={FONT_SANS} letterSpacing="0.1em" style={{ textTransform: 'uppercase' }}>{title}</text>
       <text x={x + 12} y={y + h - 10} fill={UI.muted} fontSize="10" fontFamily={FONT_SANS}>{subtitle ?? ''}</text>
       {/* The central core/value readout — uses the theme MONO var (Share Tech
-          Mono in B5) so it matches the rest of the B5 flow chrome instead of the
-          old hardcoded ui-sans-serif that clashed with the dark station UI. */}
+          Mono in High Contrast) so it matches the rest of the High Contrast flow
+          chrome instead of the old hardcoded ui-sans-serif that clashed with the
+          dark UI. */}
       <text x={x + w - 12} y={y + h / 2 + (big ? 8 : 6)} textAnchor="end" fill={accent} fontSize={big ? 28 : 18} fontWeight="700" fontFamily={FONT_MONO}>
         {value}
       </text>
