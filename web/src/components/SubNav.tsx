@@ -6,7 +6,7 @@
  * rather than a new affordance. Used for the Alerts page's Active | Cleared |
  * Settings switch; any page that wants section grouping can reuse it.
  *
- * Token-only styling ⇒ correct in both Default and Babylon-5 themes.
+ * Token-only styling ⇒ correct in both Default and High Contrast themes.
  */
 
 export interface SubNavTab<T extends string> {

@@ -6101,7 +6101,7 @@ Sections: (1) broadcast master (enable + volume, warns when off); (2) per-priori
 `web/src/theme.ts` + `ThemeToggle`. Two themes, switched via a header pill and persisted to `localStorage`:
 
 - **Default** — "Light industrial HMI / control-room palette".
-- **Babylon 5** — "Earthforce / Babylon Station system UI — deep navy + station cyan + amber accents" (lazy-loads its Google Fonts on first selection).
+- **High Contrast** — "High-contrast dark palette — deep navy + cyan + amber accents" (lazy-loads its Google Fonts on first selection).
 
 The palette itself lives in CSS variables under `[data-theme="..."]` selectors in `index.css`; `applyTheme` sets the attribute. recharts needs literal color strings (Tailwind classes can't reach it), so `UI`/`CHART`/`HUES`/`SERIES_PALETTE` are **Proxies** that resolve the current theme's CSS variable (a space-separated `R G B` triple → hex) on every access, so charts re-color on theme toggle through React's normal re-render.
 

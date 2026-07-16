@@ -8,7 +8,7 @@
  * (and how much to trust them) versus which are live telemetry.
  *
  * Styling is token-only (bg-accent/15 text-accent) so it reads correctly in
- * both the Default and Babylon-5 themes. It never carries a status colour — a
+ * both the Default and High Contrast themes. It never carries a status colour — a
  * prediction being uncertain is not an alarm condition.
  */
 

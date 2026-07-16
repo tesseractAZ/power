@@ -1,3 +1,25 @@
+## v1.29.0 — rename the "Babylon 5" theme to "High Contrast"
+
+A UI-labeling release — no engine behaviour changes.
+
+The alternate dark dashboard theme (deep navy + cyan + amber, bracket-corner panels,
+phosphor glow) is renamed from **Babylon 5** to **High Contrast** everywhere it appears —
+the theme picker and its description, the `DOCS.md` theme list, and all source comments.
+The visual design is unchanged; only the name and the internal slug change.
+
+- **Slug migrated safely.** The theme's internal id / `data-theme` value / stored preference
+  moved from `b5` to `high-contrast` (with the CSS selectors, the lazy-loaded Google-Fonts
+  `<link>` id, and localStorage persistence). `getStoredTheme()` maps a legacy stored `b5`
+  forward to `high-contrast`, so anyone who already had the theme selected keeps it across
+  the upgrade.
+- **Docs + comments.** `DOCS.md`'s theme entry and every in-code comment that referred to
+  "Babylon 5" / "B5" (including the Babylon-5-universe flavour text in the CSS/theme comments)
+  now describe a generic high-contrast dark palette.
+
+Verified: web `tsc` + production build clean; a live browser check confirmed the picker shows
+"High Contrast", selecting it applies the dark theme (attribute + CSS + fonts) and persists as
+`high-contrast`, and a legacy `b5` stored value migrates forward on load.
+
 ## v1.28.0 — complete documentation rewrite + GitHub hygiene sweep
 
 A documentation and repository-hygiene release — no engine behaviour changes.

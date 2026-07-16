@@ -34,8 +34,8 @@
 
   /* v0.36.0 — chart + flow-diagram colors. These Default values are the exact
      pre-theming literals, so the Default theme is byte-identical; the
-     [data-theme="b5"] block re-skins them for the dark palette. Consumed via the
-     CHART / HUES / SERIES_PALETTE / UI.elev resolvers in theme.ts. */
+     [data-theme="high-contrast"] block re-skins them for the dark palette. Consumed
+     via the CHART / HUES / SERIES_PALETTE / UI.elev resolvers in theme.ts. */
   --color-elev: 255 255 255;        /* #ffffff  raised surface (flow-diagram node box) */
   --chart-grid: 196 202 211;        /* #c4cad3  chart gridlines */
   --chart-tooltip-bg: 255 255 255;  /* #ffffff  chart tooltip background */
@@ -52,35 +52,33 @@
   --font-mono: ui-monospace;
 }
 
-[data-theme="b5"] {
-  /* Babylon 5 — Earthforce / Babylon Station system UI.
+[data-theme="high-contrast"] {
+  /* High Contrast — dark, high-contrast control-room palette.
    *
-   * Inspired by BabCom panels, ISN broadcasts, EAS Hyperion bridge
-   * consoles, and the station-wide identicode displays. The signature
-   * elements: deep-space background, bright station cyan for frames +
-   * primary readouts, EarthForce amber for highlights, phosphor green
-   * for nominal status, magenta-red for alerts. */
-  --color-bg: 2 6 17;            /* #020611  deep space */
+   * Signature elements: deep-space background, bright cyan for frames +
+   * primary readouts, amber for highlights, phosphor green for nominal
+   * status, magenta-red for alerts. */
+  --color-bg: 2 6 17;            /* #020611  deep background */
   --color-panel: 10 20 40;       /* #0a1428  panel face */
   --color-panel2: 5 12 28;       /* #050c1c  recessed track */
-  --color-line: 30 136 196;      /* #1e88c4  station cyan */
+  --color-line: 30 136 196;      /* #1e88c4  cyan */
   --color-ink: 168 233 255;      /* #a8e9ff  cyan-white readout */
   --color-muted: 90 122 140;     /* #5a7a8c  dim cyan label */
-  --color-accent: 255 180 59;    /* #ffb43b  EAS amber */
+  --color-accent: 255 180 59;    /* #ffb43b  amber */
   --color-ok: 58 255 122;        /* #3aff7a  phosphor green */
   --color-warn: 255 140 31;      /* #ff8c1f  amber alert */
   --color-bad: 255 40 96;        /* #ff2860  magenta-red (Critical / P1) */
   --color-high: 255 122 31;      /* #ff7a1f  hot orange (High / P2) */
-  --color-info: 80 180 255;      /* #50b4ff  station blue (Low / P4) */
+  --color-info: 80 180 255;      /* #50b4ff  blue (Low / P4) */
 
-  /* v0.36.0 — chart + flow-diagram colors, re-skinned for the dark station
-     palette so recharts gridlines/tooltips and the energy-flow node boxes stop
-     rendering as light-theme white. */
+  /* v0.36.0 — chart + flow-diagram colors, re-skinned for the dark palette so
+     recharts gridlines/tooltips and the energy-flow node boxes stop rendering
+     as light-theme white. */
   --color-elev: 8 18 38;            /* raised panel face (node box) */
-  --chart-grid: 22 48 74;           /* dim station-cyan gridline */
+  --chart-grid: 22 48 74;           /* dim cyan gridline */
   --chart-tooltip-bg: 10 20 40;     /* panel face */
-  --hue-solar: 255 180 59;          /* EAS amber */
-  --hue-battery: 80 180 255;        /* station blue */
+  --hue-solar: 255 180 59;          /* amber */
+  --hue-battery: 80 180 255;        /* blue */
   --hue-load: 56 220 220;           /* bright cyan */
   --hue-soc: 58 255 122;            /* phosphor green */
   --hue-grid: 120 140 160;          /* dim blue-grey */
@@ -130,20 +128,19 @@ body {
  * Theme-scoped chrome — only applies when its [data-theme=...] is active.
  * ───────────────────────────────────────────────────────────────────── */
 
-/* B5: bracket-corner panel decorations. Two pseudo-elements per card.
-   Each draws an L-shaped cyan bracket in opposite corners, evoking the
-   "data window" framing used throughout Babylon 5's system displays.
-   Also: glow on cyan readouts, square corners (B5 had no roundness),
-   tighter tracking on labels. */
-[data-theme="b5"] .card {
+/* High Contrast: bracket-corner panel decorations. Two pseudo-elements per
+   card. Each draws an L-shaped cyan bracket in opposite corners, evoking the
+   "data window" framing used on high-density system displays. Also: glow on
+   cyan readouts, square corners (no roundness), tighter tracking on labels. */
+[data-theme="high-contrast"] .card {
   border-radius: 0;
   border-width: 1px;
   box-shadow:
     inset 0 0 0 1px rgb(var(--color-panel) / 0.5),
     0 0 0 1px rgb(var(--color-line) / 0.2);
 }
-[data-theme="b5"] .card::before,
-[data-theme="b5"] .card::after {
+[data-theme="high-contrast"] .card::before,
+[data-theme="high-contrast"] .card::after {
   content: '';
   position: absolute;
   width: 18px;
@@ -152,48 +149,48 @@ body {
   border-style: solid;
   pointer-events: none;
 }
-[data-theme="b5"] .card::before {
+[data-theme="high-contrast"] .card::before {
   top: -1px;
   left: -1px;
   border-width: 2px 0 0 2px;
 }
-[data-theme="b5"] .card::after {
+[data-theme="high-contrast"] .card::after {
   bottom: -1px;
   right: -1px;
   border-width: 0 2px 2px 0;
 }
 
-/* B5: badges are squared off + slightly more opaque so they read like
-   the lozenge status pills used in EAS bridge displays. */
-[data-theme="b5"] .badge {
+/* High Contrast: badges are squared off + slightly more opaque so they read
+   like lozenge status pills. */
+[data-theme="high-contrast"] .badge {
   border-radius: 0;
   letter-spacing: 0.12em;
   font-weight: 700;
 }
 
-/* B5: bars are squared off, with a faint cyan line on top for the
+/* High Contrast: bars are squared off, with a faint cyan line on top for the
    "scribed scale" look. */
-[data-theme="b5"] .bar {
+[data-theme="high-contrast"] .bar {
   border-radius: 0;
   border-color: rgb(var(--color-line) / 0.7);
 }
 
-/* B5: primary headings + KV values get the phosphor glow used on
-   station consoles — tiny, never overwhelming. */
-[data-theme="b5"] h1,
-[data-theme="b5"] h2,
-[data-theme="b5"] h3 {
+/* High Contrast: primary headings + KV values get a subtle phosphor glow —
+   tiny, never overwhelming. */
+[data-theme="high-contrast"] h1,
+[data-theme="high-contrast"] h2,
+[data-theme="high-contrast"] h3 {
   text-shadow: 0 0 6px rgb(var(--color-line) / 0.45);
   letter-spacing: 0.04em;
 }
-[data-theme="b5"] .kv-v {
+[data-theme="high-contrast"] .kv-v {
   text-shadow: 0 0 4px rgb(var(--color-ink) / 0.4);
 }
 
-/* B5: body background gets a very subtle starfield-haze gradient so the
-   deep-space feel doesn't look like a flat black slab. Static (no anim)
+/* High Contrast: body background gets a very subtle haze gradient so the
+   deep background doesn't look like a flat black slab. Static (no anim)
    to stay calm at a glance. */
-[data-theme="b5"] body {
+[data-theme="high-contrast"] body {
   background-image:
     radial-gradient(ellipse at 20% 0%, rgb(30 136 196 / 0.08), transparent 60%),
     radial-gradient(ellipse at 80% 100%, rgb(255 180 59 / 0.05), transparent 55%);

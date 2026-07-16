@@ -13,8 +13,8 @@
  *   2. **Runtime theme switcher** (`THEMES`, `applyTheme`, `useTheme`)
  *      — the CSS variables themselves live under `[data-theme="..."]`
  *      selectors in src/index.css. This module sets the attribute,
- *      persists the choice to localStorage, and lazy-loads B5's
- *      Google Fonts when that theme is first selected.
+ *      persists the choice to localStorage, and lazy-loads the High
+ *      Contrast theme's Google Fonts when that theme is first selected.
  */
 
 import { useSyncExternalStore } from 'react';
@@ -64,7 +64,7 @@ const UI_FALLBACK = {
   ok: '#15803d',
   warn: '#b45309',
   bad: '#b91c1c',
-  elev: '#ffffff', // v0.36.0 — raised surface (flow-diagram node box). #fff default, dark panel in B5.
+  elev: '#ffffff', // v0.36.0 — raised surface (flow-diagram node box). #fff default, dark panel in High Contrast.
 } as const;
 
 export const UI: Readonly<typeof UI_FALLBACK> = cssVarProxy('--color-', UI_FALLBACK);
@@ -72,8 +72,8 @@ export const UI: Readonly<typeof UI_FALLBACK> = cssVarProxy('--color-', UI_FALLB
 /** Structural chart colors (gridlines, axes, tooltip). */
 export const CHART = {
   // v0.36.0 — dedicated --chart-* vars whose Default values equal the historical
-  // literals (#c4cad3 / #ffffff), so the Default theme is unchanged while B5
-  // supplies dark variants.
+  // literals (#c4cad3 / #ffffff), so the Default theme is unchanged while High
+  // Contrast supplies dark variants.
   get grid() { return cssVarRgb('--chart-grid', '#c4cad3'); },
   get axis() { return UI.muted; },
   get tooltipBg() { return cssVarRgb('--chart-tooltip-bg', '#ffffff'); },
@@ -94,8 +94,8 @@ const HUES_FALLBACK = {
 
 /**
  * v0.36.0 — semantic series hues, now THEME-AWARE (resolve from `--hue-*` CSS
- * vars). Default values match the originals exactly; B5 brightens them so chart
- * series read on the dark station palette instead of the muted light-theme tones.
+ * vars). Default values match the originals exactly; High Contrast brightens them
+ * so chart series read on the dark palette instead of the muted light-theme tones.
  * (Solar = amber, battery = blue, load = cyan, soc = green stays meaningful.)
  */
 export const HUES: Readonly<typeof HUES_FALLBACK> = cssVarProxy('--hue-', HUES_FALLBACK);
@@ -125,9 +125,9 @@ export const THEMES = [
     description: 'Light industrial HMI / control-room palette (original).',
   },
   {
-    id: 'b5' as const,
-    name: 'Babylon 5',
-    description: 'Earthforce / Babylon Station system UI — deep navy + station cyan + amber accents.',
+    id: 'high-contrast' as const,
+    name: 'High Contrast',
+    description: 'High-contrast dark palette — deep navy + cyan + amber accents.',
   },
 ];
 
@@ -139,7 +139,10 @@ const DEFAULT_THEME: ThemeId = 'default';
 export function getStoredTheme(): ThemeId {
   if (typeof window === 'undefined') return DEFAULT_THEME;
   try {
-    const v = window.localStorage.getItem(STORAGE_KEY) as ThemeId | null;
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    // Migrate the pre-rename slug: the "High Contrast" theme was formerly stored
+    // as 'b5'. Map it forward so an existing selection survives the rename.
+    const v = (raw === 'b5' ? 'high-contrast' : raw) as ThemeId | null;
     return v && THEMES.some((t) => t.id === v) ? v : DEFAULT_THEME;
   } catch {
     return DEFAULT_THEME;
@@ -149,11 +152,11 @@ export function getStoredTheme(): ThemeId {
 export function applyTheme(id: ThemeId) {
   if (typeof document === 'undefined') return;
   document.documentElement.dataset.theme = id;
-  // Lazy-load the B5 Google Fonts only when that theme is actually selected.
-  // Idempotent — checks for an existing <link> with the same id first.
-  if (id === 'b5' && !document.getElementById('theme-b5-fonts')) {
+  // Lazy-load the High Contrast Google Fonts only when that theme is actually
+  // selected. Idempotent — checks for an existing <link> with the same id first.
+  if (id === 'high-contrast' && !document.getElementById('theme-high-contrast-fonts')) {
     const link = document.createElement('link');
-    link.id = 'theme-b5-fonts';
+    link.id = 'theme-high-contrast-fonts';
     link.rel = 'stylesheet';
     link.href =
       'https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap';
