@@ -1,3 +1,35 @@
+## v1.28.0 — complete documentation rewrite + GitHub hygiene sweep
+
+A documentation and repository-hygiene release — no engine behaviour changes.
+
+**Documentation (`DOCS.md` fully rewritten, `README.md` replaced, `SECURITY.md` added).**
+`ecoflow_panel/DOCS.md` is now the **complete reference** — 14 chapters (~460 KB) written
+directly from the source and completeness-/accuracy-checked against it (an independent
+critic pass found **zero** invented constants or formulas). It documents **every** feature
+and engine — architecture & data flow; EcoFlow cloud + HA wiring; the solar/PV forecast
+engine; the physics-based & Bayesian model tier (clear-sky ceiling, LFP-OCV SoC,
+hierarchical-Bayes SoH, recursive Bayesian solar); the safety-critical runway/depletion/
+SoC alarms; the battery & PV health engines (SoH/EOL/pack-risk/resistance/RTE/thermal/
+soiling); energy accounting, cost & dispatch; alerts/anomaly/incidents; the online learning
+loop; the audible broadcast + chimes + TTS pipeline; the web/TUI/HACS interfaces;
+configuration/deployment/security/operations; the safety & operational plumbing; and the
+energy-aware lighting/HVAC posture — each with its inputs, exact algorithm & math, data-flow
+trace, endpoints/sensors, config knobs, and edge-case guards. `README.md` is now a polished
+top-level tour that links into the reference. `SECURITY.md` adds a private
+vulnerability-reporting policy (GitHub Security Advisories) and states the security posture.
+
+**GitHub hygiene.**
+- **Dependencies:** folded the 5 open Dependabot version bumps into `main` and verified them
+  against current code — server `@fastify/static` 9.1→9.3, `@fastify/websocket` 11.0→11.3,
+  `fastify` 5.9→5.10, `mqtt` 5.10→5.15, `@types/node`+`tsx` (dev); web `recharts` 3.9.1→3.9.2,
+  `postcss`+`vite` (dev). Full suite (1482) green, tsc + web build clean. (A Dependabot PR that
+  read as failing was tested against a stale base; it is clean on current code.)
+- **Code scanning:** the `js/file-system-race` (TOCTOU) alerts in `alertTelemetry.ts` are
+  fixed — `rotateTelemetryIfOversized` now opens the file once and stats+reads from the file
+  descriptor (not the path), removing the check-then-use and re-resolve windows. The test-only
+  alert was dismissed (single-threaded test on an exclusive temp file — no real concurrency).
+- **Branches:** removed two stale remote branches (`copilot/code-review`, `tesseractAZ-patch-1`).
+
 ## v1.27.0 — dispatch planner: round-trip storage losses (the last raw pv−load sim)
 
 The v1.26.0 accuracy work converted the whole forecast/runway/alarm family to the η-honest DC-bus
