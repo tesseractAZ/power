@@ -78,8 +78,13 @@ test('(b) stale home max ts — exactly one gap logged + appended to the sidecar
     const spareSn = [...SPARE_DPU_SNS][0];
     if (spareSn) ins.run(beforeBoot - 60_000, spareSn, 'soc', 42);
     // …and a FUTURE-stamped weather row (forecast-hour epochs, not wall clock)
-    // must not mask it either.
+    // must not mask it either…
     ins.run(beforeBoot + 2 * 3_600_000, 'weather', 'ghi_wm2', 500);
+    // …and (v1.31.0) neither must a RECENT forecast-archive row: the archive
+    // tick keeps writing wall-clock-stamped rows while the device feeds are
+    // wedged (the forecast is computable from cached model + weather), so an
+    // unexcluded 'forecast' SN would pull MAX(ts) past the home stall.
+    ins.run(beforeBoot - 30_000, 'forecast', 'pv_next24_wh', 68_000);
   });
 
   const { rec, lines } = makeRecorder(); // the "restart"

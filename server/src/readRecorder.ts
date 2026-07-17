@@ -118,6 +118,9 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     // ── write path: stubbed (worker never writes) ──
     insertSnapshot: () => {},
     rollupLifetime: () => {},
+    // v1.31.0 — the forecast archive is written by the MAIN process's GHI
+    // persistence tick; a worker-side call would be a wiring bug, so no-op.
+    recordForecastArchive: () => {},
     getLifetimeTotals,
     listLifetimeKeys,
     // v0.45.0 — battery-lifetime diagnostics live on the write-path recorder

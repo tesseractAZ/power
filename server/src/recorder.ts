@@ -150,6 +150,9 @@ export function resolveDeferredRestartGap(inputs: {
 // "weather" so it shares the samples table + query() path with real devices
 // but never collides with a hardware SN.
 const WEATHER_SN = 'weather';
+// v1.31.0 — day-ahead forecast archive series (see recordForecastArchive).
+const FORECAST_SN = 'forecast';
+const FORECAST_PV_NEXT24_METRIC = 'pv_next24_wh';
 const WEATHER_GHI_METRIC = 'ghi_wm2';     // global horizontal irradiance, W/m²
 const WEATHER_CLOUD_METRIC = 'cloud_pct'; // cloud cover, %
 
@@ -297,6 +300,8 @@ export interface Recorder {
   recordWeatherGhi: (
     hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null }>,
   ) => void;
+  /** v1.31.0 — archive the issued next-24h PV forecast (Wh) for out-of-sample scoring. */
+  recordForecastArchive: (pvNext24Wh: number, issuedAtMs: number) => void;
   close: () => void;
   /** Force a lifetime-rollup tick (used by tests / on shutdown). */
   rollupLifetime: () => void;
@@ -541,7 +546,13 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   //      (post-NTP) records it. In the `record` case lastHomeInsertTs stays 0, so
   //      the first insert starts fresh and cannot double-log the same gap.
   try {
-    const restartGapExcludedSns = [WEATHER_SN, ...SPARE_DPU_SNS];
+    // v1.31.0 — FORECAST_SN joins the exclusion: the forecast-archive tick
+    // writes wall-clock-stamped rows even while the device feeds are wedged
+    // (the forecast is computable from the cached model + weather), so its
+    // rows would pull MAX(ts) past the last real home sample and mask the
+    // pre-crash stall this detector exists to ledger. Same invariant as
+    // WEATHER_SN/spares: only HOME-FEED writers may anchor the gap.
+    const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, ...SPARE_DPU_SNS];
     const row = db.prepare(
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
@@ -1822,6 +1833,30 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     if (written > 0) log(`recorder: v0.13.1 persisted ${written} weather GHI/cloud rows`);
   };
 
+  // ─── Day-ahead forecast archive (v1.31.0) ────────────────────────────────
+  // Durable record of the ISSUED next-24h PV forecast (the bias-corrected
+  // alarm-facing total, forecastPvWhNext24) under pseudo-SN "forecast". The
+  // band calibrator currently scores CURRENT-MODEL HINDCASTS against realized
+  // GHI — a basis that (a) is rewritten whenever the model re-learns and
+  // (b) omits the weather-forecast component of true day-ahead error. This
+  // series is the raw material for genuinely out-of-sample scoring: once ~14+
+  // days exist, the calibrator can compare each day's actual PV against the
+  // value that was PUBLISHED at the time (the row nearest that day's local
+  // midnight). Scoring switch is data-gated — this release only writes.
+  // Same conventions as recordWeatherGhi: hour-snapped ts (≤24 rows/day),
+  // idempotent per hour, change-detected (relative 0.5%) so stable forecasts
+  // collapse to a few rows/day.
+  const recordForecastArchive = (pvNext24Wh: number, issuedAtMs: number) => {
+    if (!Number.isFinite(pvNext24Wh) || pvNext24Wh < 0 || !Number.isFinite(issuedAtMs)) return;
+    const ts = Math.floor(issuedAtMs / 3_600_000) * 3_600_000;
+    if (weatherExistsStmt.get(FORECAST_SN, FORECAST_PV_NEXT24_METRIC, ts)) return;
+    const prev = weatherPrevStmt.get(FORECAST_SN, FORECAST_PV_NEXT24_METRIC, ts) as
+      | { value: number }
+      | undefined;
+    if (prev && Math.abs(pvNext24Wh - prev.value) < Math.max(VALUE_EPSILON, 0.005 * Math.abs(prev.value))) return;
+    insert.run(ts, FORECAST_SN, FORECAST_PV_NEXT24_METRIC, pvNext24Wh);
+  };
+
   return {
     insertSnapshot: (snap) => record(extract(snap)),
     query: (sn, metric, sinceMs, untilMs, bucketSec) => {
@@ -1862,6 +1897,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     listMetrics: (sn) => (metricsStmt.all(sn) as Array<{ metric: string }>).map((r) => r.metric),
     telemetryGaps: () => telemetryGapsLog.slice(),
     recordWeatherGhi,
+    recordForecastArchive,
     close: () => {
       clearInterval(lifetimeTimer);
       // Final rollup so we don't lose the trailing minute of energy on shutdown.

@@ -1790,6 +1790,22 @@ const ghiPersistTick = setInterval(() => {
         recorder.recordWeatherGhi(weatherGhiRows(w));
         app.log.debug(`weather: periodic GHI persistence (${w.hours.length} hours)`);
       }
+      // v1.31.0 — archive the ISSUED next-24h PV forecast alongside the GHI
+      // rows (same cadence; hour-snapped + change-detected in the recorder, so
+      // this is ≤ a handful of rows/day). The band calibrator will score
+      // against this archive — true out-of-sample day-ahead error — once
+      // enough days accumulate; until then it only writes. Best-effort: an
+      // analytics hiccup must not disturb the GHI persistence above.
+      if (recorder) {
+        try {
+          const fc = await analytics.report('forecast');
+          if (fc && Number.isFinite(fc.forecastPvWhNext24)) {
+            recorder.recordForecastArchive(fc.forecastPvWhNext24, Date.now());
+          }
+        } catch (e: any) {
+          app.log.debug(`forecast-archive: skipped (${e?.message ?? e})`);
+        }
+      }
     } catch (e: any) {
       app.log.debug(`weather: periodic GHI persistence skipped (${e?.message ?? e})`);
     }
