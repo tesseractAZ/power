@@ -7278,7 +7278,19 @@ export interface ProbabilisticForecast {
   // half-width (null until enough scored days exist).
   bandSigmaCal?: number;
   realizedDailyErrHalfFrac?: number | null;
+  // v1.31.0 — continuous-coverage diagnostics: scored calibration days, and the
+  // share whose realized daily |error| fell inside the current band's daily
+  // half-width. Nominal target ≥80% (the band is DELIBERATELY conservative —
+  // the 0.4 shrink floor binds); a reading trending toward 80% is the signal
+  // to revisit the floor, a reading below it is a regression.
+  calScoredDays?: number;
+  bandRealizedCoveragePct?: number | null;
 }
+/* INVARIANT (verified by exhaustive consumer census, v1.30.0 audit): the
+ * ProbabilisticForecast is display + recommend-only-MPC — it feeds NO alarm.
+ * Its calibration (bandSigmaCal et al.) is tuned under that assumption.
+ * Wiring ANY field above into mqttDiscovery, alerts.ts, runwayAlarm.ts, or the
+ * broadcast path requires re-auditing the calibration first. */
 
 let probabilisticCache: { ts: number; value: ProbabilisticForecast } | null = null;
 const PROB_TTL_MS = 15 * 60 * 1000;
@@ -7320,18 +7332,57 @@ export function parsePvBandSigmaCal(raw: string | undefined): number | null {
   return Math.min(2, Math.max(0.1, n));
 }
 
+/** v1.31.0 — the calibrator's scored daily error sample, on a basis COHERENT
+ *  with the band it calibrates (audit follow-ups to F30):
+ *    • BIAS: the band wraps hours[].forecastPvW, which carries pvBiasFactor
+ *      (v0.93.0) — but the skill hindcast scores the RAW model. Each day's
+ *      prediction is therefore bias-adjusted here (predictedKwh × biasFactor)
+ *      before the error is taken, so the calibrator measures errors of the
+ *      series the band actually wraps, not of a forecast never published.
+ *    • DENOMINATOR: errors are |actual − adjPred| / adjPred (%-of-PREDICTED),
+ *      matching how the half-width is applied (band width is a fraction of
+ *      P50), not the skill report's errorPct (%-of-actual) — which read
+ *      anti-conservative under under-prediction bias.
+ *  Day gating is unchanged: weather-covered, non-null errorPct (nulls mark
+ *  coverage-gap days), plus adjPred > 0.5 kWh (a near-zero prediction can't
+ *  be scored as a fraction of itself). NOTE the hindcast basis still uses
+ *  REALIZED GHI, so these errors omit the weather-forecast component of true
+ *  day-ahead error — the PV_BAND_CAL_FLOOR covers that gap until the
+ *  forecast-archive series (recorder SN 'forecast') matures enough to score
+ *  genuinely out-of-sample. Pure + exported for tests. */
+export function pvBandScoredErrs(
+  days: ForecastSkillReport['days'],
+  biasFactor: number | null = 1,
+): number[] {
+  const bf = biasFactor != null && Number.isFinite(biasFactor) && biasFactor > 0 ? biasFactor : 1;
+  return days
+    .filter((d) => d.weatherCovered && d.errorPct != null && Number.isFinite(d.errorPct))
+    .map((d) => {
+      const adjPred = d.predictedKwh * bf;
+      if (!(adjPred > 0.5)) return null;
+      const e = Math.abs(d.actualKwh - adjPred) / adjPred;
+      return Number.isFinite(e) ? e : null;
+    })
+    .filter((v): v is number => v != null)
+    .sort((a, b) => a - b);
+}
+
 /** v1.23.0 (engine-review F30) — the daily P10-P90 half-width fraction that
  *  yields ~80% central coverage, from the realized daily error distribution.
- *  Nearest-rank 80th percentile of |errorPct|/100 over weather-covered scored
- *  days (for a roughly symmetric error, P(|e| ≤ q80) ≈ 0.80 places the P10/P90
- *  edges at ±q80). Returns null below PV_BAND_CAL_MIN_DAYS days. Pure + exported. */
-export function pvBandRealizedHalfFrac(days: ForecastSkillReport['days']): number | null {
-  const errs = days
-    .filter((d) => d.weatherCovered && d.errorPct != null && Number.isFinite(d.errorPct))
-    .map((d) => Math.abs(d.errorPct as number) / 100)
-    .sort((a, b) => a - b);
+ *  v1.31.0 — errors come from pvBandScoredErrs (bias-adjusted, %-of-predicted;
+ *  see its doc), and the quantile rank is k = ceil(0.8·(n+1)) (1-indexed,
+ *  clamped to n): for the band [−x(k), +x(k)] built from n sorted |errors|,
+ *  E[coverage of a new day] = k/(n+1), so this k keeps E[coverage] ≥ 0.8 for
+ *  EVERY n — the old nearest-rank ceil(0.8·n) held exactly 0.8 at n=14 but
+ *  dipped to ~0.75-0.77 for most n in (14, 30] once the window widened.
+ *  Returns null below PV_BAND_CAL_MIN_DAYS scored days. Pure + exported. */
+export function pvBandRealizedHalfFrac(
+  days: ForecastSkillReport['days'],
+  biasFactor: number | null = 1,
+): number | null {
+  const errs = pvBandScoredErrs(days, biasFactor);
   if (errs.length < PV_BAND_CAL_MIN_DAYS) return null;
-  const rank = Math.max(0, Math.min(errs.length - 1, Math.ceil(0.8 * errs.length) - 1));
+  const rank = Math.max(0, Math.min(errs.length - 1, Math.ceil(0.8 * (errs.length + 1)) - 1));
   return errs[rank];
 }
 
@@ -7533,7 +7584,12 @@ export async function computeProbabilisticForecast(
     calSumHalf += (p90c - p10c) / 2;
   }
   const producedHalfFrac = calSumP50 > 0 ? calSumHalf / calSumP50 : null;
-  const realizedHalfFrac = skill ? pvBandRealizedHalfFrac(skill.days) : null;
+  // v1.31.0 — score the calibrator's errors on the band's own basis: the
+  // forecast's pvBiasFactor (the correction hours[].forecastPvW carries) and
+  // %-of-predicted denominators. See pvBandScoredErrs.
+  const calBias = forecast.pvBiasFactor ?? 1;
+  const calErrs = skill ? pvBandScoredErrs(skill.days, calBias) : [];
+  const realizedHalfFrac = skill ? pvBandRealizedHalfFrac(skill.days, calBias) : null;
   const envCal = parsePvBandSigmaCal(process.env.PV_BAND_SIGMA_CAL);
   let bandCal = 1;
   if (envCal != null) {
@@ -7636,6 +7692,16 @@ export async function computeProbabilisticForecast(
     uncertaintyKwhStdev: Math.round(stdevAccum * 100) / 100, // already kWh (Σ per-hour sigmaNetKwh)
     bandSigmaCal: Math.round(bandCal * 100) / 100,
     realizedDailyErrHalfFrac: realizedHalfFrac != null ? Math.round(realizedHalfFrac * 1000) / 1000 : null,
+    // v1.31.0 — continuous-coverage diagnostics (audit follow-up): the count of
+    // scored calibration days, and the share of them whose realized daily error
+    // fell inside the CURRENT band's daily half-width. The band's honest label
+    // is "≥80%, conservatively wide" (the 0.4 floor binds by design); this
+    // makes that claim measurable release-over-release instead of asserted.
+    calScoredDays: calErrs.length,
+    bandRealizedCoveragePct:
+      calErrs.length > 0 && producedHalfFrac != null
+        ? Math.round((calErrs.filter((e) => e <= producedHalfFrac * bandCal).length / calErrs.length) * 100)
+        : null,
   };
   probabilisticCache = { ts: now, value };
   return value;

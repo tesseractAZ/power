@@ -1,3 +1,50 @@
+## v1.31.0 — band-calibration integrity (audit follow-ups)
+
+Implements the four deeper statistical findings the v1.30.0 calibration audit
+documented. **Advisory/display path only — the band feeds no alarm** (census
+invariant now stated in code at the `ProbabilisticForecast` interface).
+
+- **Coherent error basis** (`pvBandScoredErrs`, new). The calibrator's daily
+  errors are now measured against the series the band actually wraps: each
+  scored day's prediction is adjusted by the forecast's `pvBiasFactor` (the
+  correction `hours[].forecastPvW` carries) and the error is taken as
+  `|actual − adjPred| / adjPred` — **%-of-predicted**, matching how the
+  half-width is applied to P50. Previously it used the skill report's
+  `errorPct` (%-of-actual) on raw-model errors — anti-conservative under
+  under-prediction bias and scored against a forecast never published. Not a
+  band *shift*: `pvBiasFactor` already centers publication; shifting the band
+  too would double-apply (audit finding #3 resolved as "don't").
+- **Coverage-unbiased quantile.** The realized half-width rank is now
+  `k = ceil(0.8·(n+1))` (clamped to n): for a band built from n sorted
+  |errors|, E[coverage of a new day] = k/(n+1), so expected coverage stays
+  ≥80% for **every** n. The old nearest-rank `ceil(0.8·n)` was exact at n=14
+  but dipped to ~0.75 for most n in (14, 30] once v1.30.0 widened the window.
+  (Identical result at n=14 — the v1.23.0 F30 tests pass unchanged.)
+- **Continuous coverage diagnostics.** `/api/forecast/probabilistic` now
+  publishes `calScoredDays` and `bandRealizedCoveragePct` (share of scored
+  days whose realized error fell inside the current band's daily half-width).
+  The band's honest label — documented in DOCS.md — is "**≥80%, deliberately
+  conservative**" (the 0.4 floor binds by design); the diagnostic makes that
+  claim measurable release-over-release. Trending toward 80% = the signal to
+  revisit the floor; below it = a regression.
+- **Day-ahead forecast archive.** The recorder now persists the *issued*
+  next-24h PV forecast (`recordForecastArchive`, pseudo-SN `forecast`, metric
+  `pv_next24_wh`; hour-snapped, idempotent, change-detected — a few rows/day)
+  from the main process's 45-min GHI-persistence tick. The calibrator's
+  current hindcast basis is rewritten whenever the model re-learns and omits
+  the weather-forecast component of true day-ahead error; this archive is the
+  raw material for genuinely out-of-sample scoring. **Scoring switch is
+  data-gated** (~14+ archived days) for a future release; this one only
+  writes. The read-only worker recorder stubs the method (a worker-side write
+  would be a wiring bug).
+
+Deliberately unchanged: the ≥14-scored-day gate, the 0.4 floor (regime-shift
+insurance — the hindcast-basis conservatisms above are exactly what it
+covers), and the conditional-sigma rework (cloud climatology → residual-based
+sigma) which stays on the roadmap. 1493 tests green (+8: denominator, bias
+basis, unscorable-day drop, n=15/n=14 rank pins, payload diagnostics ×2,
+archive idempotency/change-detection).
+
 ## v1.30.0 — activate the P10/P90 band calibration (dormant since v1.23.0)
 
 A calibration-audit release for the probabilistic day-ahead PV band. **Advisory/display
