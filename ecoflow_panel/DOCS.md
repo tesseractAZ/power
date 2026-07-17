@@ -1905,13 +1905,18 @@ sf (raw)         = baseSigmaFrac · sqrt(1 + horizonHours/24)     // hour 24 ≈
 
 #### Self-calibrating band width (v1.23.0 F30)
 
-The raw band over-covers badly (live: 42% daily half-width vs ~7% realized error
-→ ~96–100% coverage against a nominal 80%). So the band is **shrunk** to hit ~80%:
+The raw band over-covers badly (live pre-fix: 76% daily half-width vs ~7%
+realized error → ~100% coverage against a nominal 80%). So the band is
+**shrunk** toward the realized error spread:
 
 ```
-producedHalfFrac = Σ (p90−p10)/2  /  Σ p50           // raw band's daily half-width fraction
-realizedHalfFrac = pvBandRealizedHalfFrac(skill.days) // nearest-rank 80th pct of |errorPct|/100
-                                                       // over weather-covered scored days
+producedHalfFrac = Σ (p90−p10)/2  /  Σ p50            // raw band's daily half-width fraction
+errs             = pvBandScoredErrs(skill.days, pvBiasFactor)
+                   //  v1.31.0 — per scored day: |actual − pred·biasFactor| / (pred·biasFactor)
+                   //  (bias-adjusted so the errors are of the SERIES THE BAND WRAPS —
+                   //   hours[].forecastPvW carries pvBiasFactor — and %-of-PREDICTED,
+                   //   matching how the half-width is applied to P50)
+realizedHalfFrac = errs[k],  k = ceil(0.8·(n+1))       // v1.31.0 — E[coverage] = k/(n+1) ≥ 0.8 ∀n
 if env PV_BAND_SIGMA_CAL set:  bandCal = clamp(0.1, 2, env)
 elif realized & produced known: bandCal = clamp(PV_BAND_CAL_FLOOR=0.4, 1, realizedHalfFrac/producedHalfFrac)
 else: bandCal = 1
@@ -1920,8 +1925,36 @@ sigmaFrac = sfRaw · bandCal
 
 `pvBandRealizedHalfFrac` returns null below `PV_BAND_CAL_MIN_DAYS = 14` scored
 days (so a short clear-sky window can't collapse the band — monsoon variability
-must be in the sample). Shrink-only, floored at 0.4. **Display + MPC-recommend
-only; NOT an alarm input.**
+must be in the sample). The skill window feeding it is
+`PV_BAND_CAL_WINDOW_DAYS = 30` **calendar** days (v1.30.0 — the gate counts
+*scored* days; at realistic ~50–65% weather/telemetry coverage a 14-day window
+can never reach 14 scored days, which left the calibration dormant from
+v1.23.0 to v1.30.0). Shrink-only, floored at 0.4.
+
+**Honest label:** the floor binds in practice (realized/produced ≈ 0.1–0.2 <
+0.4), so this band targets "**≥ 80% coverage, deliberately conservative**" — not
+"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the
+calibrator's errors come from a *current-model hindcast against realized GHI*,
+so they (a) are rewritten when the model re-learns, (b) omit the
+weather-forecast component of true day-ahead error, (c) apply `pvBiasFactor` as
+a plain daily multiply while publication re-clamps per-hour at the physical
+ceiling — under an *under-prediction* regime (`pvBiasFactor > 1`, ceiling
+pinned) the calibrator's basis sits above the published series and its errors
+under-state the published band's misses (dormant while `pvBiasFactor ≤ 1`, the
+current regime), and (d) the sample censors tail days — `actualKwh ≤ 0.5`
+days (errorPct null) and `adjPred ≤ 0.5` days drop rather than scoring as
+≈100% misses, and a retention-truncated fragment day at the window's oldest
+edge can carry a phantom error (conservative direction: it inflates q80). All
+four are resolved properly by archive-based out-of-sample scoring, not by
+patching the hindcast basis further. The recorder's `forecast/pv_next24_wh`
+archive series (v1.31.0, written by the main process's GHI-persistence tick)
+accumulates the *issued* forecasts so a future release can score genuinely
+out-of-sample; the published `calScoredDays` + `bandRealizedCoveragePct`
+diagnostics make the coverage claim continuously measurable — a reading
+trending toward 80% is the signal to revisit the floor, below it is a
+regression. **Display + MPC-recommend only; NOT an alarm input** (verified by
+exhaustive consumer census, v1.30.0 audit — wiring any field into
+mqttDiscovery/alerts/runwayAlarm requires re-auditing the calibration).
 
 #### PV band per hour
 
@@ -1998,7 +2031,8 @@ A non-finite PV/load hour sets `windowUnscored` and nulls the min/max summaries
 
 ```ts
 { generatedAt, hours: ForecastBand[], pAboveReservePct|null, pFullCharge|null,
-  uncertaintyKwhStdev, bandSigmaCal?, realizedDailyErrHalfFrac? }
+  uncertaintyKwhStdev, bandSigmaCal?, realizedDailyErrHalfFrac?,
+  calScoredDays?, bandRealizedCoveragePct? }   // v1.31.0 coverage diagnostics
 ForecastBand = { ts, p10W, p50W, p90W, p10SocPct|null, p50SocPct|null, p90SocPct|null }
 ```
 
