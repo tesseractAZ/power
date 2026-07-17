@@ -7698,9 +7698,15 @@ export async function computeProbabilisticForecast(
     // is "≥80%, conservatively wide" (the 0.4 floor binds by design); this
     // makes that claim measurable release-over-release instead of asserted.
     calScoredDays: calErrs.length,
+    // Relative epsilon on the edge comparison: when bandCal is exactly
+    // realized/produced, the q80 error sits ON the band edge and a bare `<=`
+    // can flip on FP rounding — spuriously reading below the 80% regression
+    // threshold this diagnostic documents.
     bandRealizedCoveragePct:
       calErrs.length > 0 && producedHalfFrac != null
-        ? Math.round((calErrs.filter((e) => e <= producedHalfFrac * bandCal).length / calErrs.length) * 100)
+        ? Math.round(
+            (calErrs.filter((e) => e <= producedHalfFrac * bandCal * (1 + 1e-9)).length / calErrs.length) * 100,
+          )
         : null,
   };
   probabilisticCache = { ts: now, value };

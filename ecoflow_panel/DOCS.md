@@ -1933,10 +1933,20 @@ v1.23.0 to v1.30.0). Shrink-only, floored at 0.4.
 
 **Honest label:** the floor binds in practice (realized/produced ≈ 0.1–0.2 <
 0.4), so this band targets "**≥ 80% coverage, deliberately conservative**" — not
-"= 80%". Two known conservatisms the floor is insurance for: the calibrator's
-errors come from a *current-model hindcast against realized GHI*, so they (a)
-are rewritten when the model re-learns and (b) omit the weather-forecast
-component of true day-ahead error. The recorder's `forecast/pv_next24_wh`
+"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the
+calibrator's errors come from a *current-model hindcast against realized GHI*,
+so they (a) are rewritten when the model re-learns, (b) omit the
+weather-forecast component of true day-ahead error, (c) apply `pvBiasFactor` as
+a plain daily multiply while publication re-clamps per-hour at the physical
+ceiling — under an *under-prediction* regime (`pvBiasFactor > 1`, ceiling
+pinned) the calibrator's basis sits above the published series and its errors
+under-state the published band's misses (dormant while `pvBiasFactor ≤ 1`, the
+current regime), and (d) the sample censors tail days — `actualKwh ≤ 0.5`
+days (errorPct null) and `adjPred ≤ 0.5` days drop rather than scoring as
+≈100% misses, and a retention-truncated fragment day at the window's oldest
+edge can carry a phantom error (conservative direction: it inflates q80). All
+four are resolved properly by archive-based out-of-sample scoring, not by
+patching the hindcast basis further. The recorder's `forecast/pv_next24_wh`
 archive series (v1.31.0, written by the main process's GHI-persistence tick)
 accumulates the *issued* forecasts so a future release can score genuinely
 out-of-sample; the published `calScoredDays` + `bandRealizedCoveragePct`

@@ -546,7 +546,13 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   //      (post-NTP) records it. In the `record` case lastHomeInsertTs stays 0, so
   //      the first insert starts fresh and cannot double-log the same gap.
   try {
-    const restartGapExcludedSns = [WEATHER_SN, ...SPARE_DPU_SNS];
+    // v1.31.0 — FORECAST_SN joins the exclusion: the forecast-archive tick
+    // writes wall-clock-stamped rows even while the device feeds are wedged
+    // (the forecast is computable from the cached model + weather), so its
+    // rows would pull MAX(ts) past the last real home sample and mask the
+    // pre-crash stall this detector exists to ledger. Same invariant as
+    // WEATHER_SN/spares: only HOME-FEED writers may anchor the gap.
+    const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, ...SPARE_DPU_SNS];
     const row = db.prepare(
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;

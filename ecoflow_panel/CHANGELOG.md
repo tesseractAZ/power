@@ -45,6 +45,19 @@ sigma) which stays on the roadmap. 1493 tests green (+8: denominator, bias
 basis, unscorable-day drop, n=15/n=14 rank pins, payload diagnostics ×2,
 archive idempotency/change-detection).
 
+**Review round (adversarial multi-agent):** one confirmed defect fixed —
+`FORECAST_SN` joined `restartGapExcludedSns` (the archive tick writes
+wall-clock rows even while device feeds are wedged, so an unexcluded
+`forecast` SN could anchor MAX(ts) and mask a home-telemetry stall in the
+restart-spanning gap detector; the v0.80.0 anti-masking invariant now lists
+all three non-home writers, pinned by an extended restart-gap test). Also: a
+relative epsilon on the `bandRealizedCoveragePct` edge comparison (an
+at-the-edge q80 could flip below the 80% threshold on FP rounding), and the
+calibrator's four residual conservatism gaps (per-hour ceiling re-clamp
+asymmetry under `pvBiasFactor > 1`, tail-day censoring, retention-fragment
+days, hindcast basis) are now documented in DOCS.md as floor-covered until
+archive-based scoring lands.
+
 ## v1.30.0 — activate the P10/P90 band calibration (dormant since v1.23.0)
 
 A calibration-audit release for the probabilistic day-ahead PV band. **Advisory/display
