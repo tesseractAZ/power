@@ -2862,7 +2862,13 @@ const LOAD_CURVE_MIN_PLAUSIBLE_KW = 0.05;
 // 1 kWh at the panel costs the pack 1/η_dis kWh, so the pool drains ~6% faster
 // than the raw load implies — a runway that reads LONG (optimistic), the unsafe
 // direction for an islanding countdown. Live-confirmed 2026-07-14: the pack drew
-// 6.22 kW gross for 5.88 kW delivered (ratio 0.945 == the measured 7-day RTE).
+// 6.22 kW gross for 5.88 kW delivered — ratio 0.945, the measured pack-terminal→AC
+// DISCHARGE-CONVERSION LEG. (v1.32.0 correction: that ratio NUMERICALLY COINCIDED
+// with the pack-plane 7-day RTE reading that morning, but they are DIFFERENT
+// physical quantities — the RTE endpoint integrates pack_in/pack_out at the BMS
+// terminals and excludes both conversion legs. The one-leg value is exactly what
+// THIS pool-drain constant needs; treating it as the system round trip is the
+// error that produced the v1.27 dispatch constant, fixed in v1.32.0.)
 // Divide the net DEFICIT by this efficiency so the countdown reflects real pool
 // drain. Applied to net-DISCHARGE hours ONLY (surplus/charging hours keep the raw
 // delta, so the sim is never MORE optimistic than pre-v1.26) ⇒ runway can only
@@ -3122,7 +3128,11 @@ export function computeRunway(
       const frac = delta < 0 ? stateKwh / -delta : 1;
       hoursToEmpty = h + Math.min(1, Math.max(0, frac));
     }
-    stateKwh = Math.max(0, nextState);
+    // v1.32.0 (cross-model review) — cap the pool at physical capacity, matching
+    // the sibling integrator (getDayForecast, line ~1757). Without the cap a long
+    // PV-surplus stretch banked phantom above-capacity energy that then extended
+    // the later drain — optimistic. The clamp can only SHORTEN runway.
+    stateKwh = Math.max(0, Math.min(backupFullKwh, nextState));
   }
 
   // v0.60.0 — asymmetric hysteresis (this point is only reached on a HEALTHY
@@ -8000,21 +8010,37 @@ export interface DispatchPlan {
 let dispatchCache: { ts: number; value: DispatchPlan } | null = null;
 const DISPATCH_TTL_MS = 30 * 60 * 1000;
 
-/* v1.27.0 — round-trip storage efficiency for the ADVISORY dispatch planner.
- * Unlike the depletion sims (discharge-ONLY → RUNWAY_DISCHARGE_EFFICIENCY), this
- * planner both charges and discharges, so a ROUND-TRIP loss applies. We take the
- * measured 7-day RTE (/api/round-trip-efficiency ≈ 0.945) and split it SYMMETRICALLY
- * across the two legs — η_chg = η_dis = √RTE ≈ 0.972 — so charging stores √RTE of the
- * input and discharging delivers √RTE of the draw (net round-trip = RTE). This
- * deliberately differs from RUNWAY_DISCHARGE_EFFICIENCY (0.94): that value folds
- * SHP2/standby overhead into the single discharge leg the safety countdown cares
- * about, whereas here we want a clean, physically-even round trip for cost/import
- * sizing (reusing 0.94 on the discharge leg would imply η_chg = RTE/0.94 > 1, which
- * is unphysical). Advisory-only, conservative (never under-states the grid import a
- * real round trip needs). Env-overridable, clamped [0.80, 1.0]. */
+/* v1.27.0 / CORRECTED v1.32.0 — round-trip storage efficiency for the ADVISORY
+ * dispatch planner. Unlike the depletion sims (discharge-ONLY →
+ * RUNWAY_DISCHARGE_EFFICIENCY), this planner both charges and discharges, so a
+ * ROUND-TRIP loss applies, split symmetrically: η_leg = √RTE; charging stores
+ * √RTE of the input, discharging delivers √RTE of the draw.
+ *
+ * v1.32.0 (cross-model review) — the v1.27.0 default of 0.945 was a
+ * MISINTERPRETED MEASUREMENT: /api/round-trip-efficiency integrates
+ * pack_in/pack_out at the BMS PACK TERMINALS, so its ~0.89–0.92 reading is the
+ * battery-internal round trip and EXCLUDES both conversion legs; the 0.945 it
+ * briefly read on 2026-07-14 numerically coincided with the separately-measured
+ * pack-terminal→AC DISCHARGE-CONVERSION leg (6.22 kW → 5.88 kW), and the two
+ * different quantities were conflated. The planner's flows span the FULL path
+ * (PV-DC/grid-AC in → pack → AC out), whose round trip composes THREE planes:
+ *   η_chg-conv (~0.97, MPPT/charger) × η_pack-RTE (~0.91, live 14-day
+ *   /api/round-trip-efficiency) × η_dis-conv (0.945, the v1.26 measured leg)
+ *   ≈ 0.83–0.86.
+ * Default now 0.86 (upper-middle of the composed range; cross-checked against
+ * dispatch/mpc.ts's independently-derived 0.90 and the live 7d pack-RTE 0.893 —
+ * both of which already sit below the old 0.945). The symmetric √RTE split
+ * (legs ≈ 0.927) is an approximation — the true legs are asymmetric (~0.90
+ * discharge, ~0.925 charge on the pool basis) — but the residual ±3% per leg is
+ * inside measurement noise for an advisory plan and keeps the tested mechanics
+ * unchanged. INVARIANT (pinned by test): √DISPATCH_ROUND_TRIP_EFFICIENCY ≤
+ * RUNWAY_DISCHARGE_EFFICIENCY — a round trip's per-leg efficiency can never
+ * exceed the measured single discharge leg; the v1.27.0 constant violated this
+ * (0.972 > 0.94), which is how the misinterpretation was caught. Advisory-only.
+ * Env-overridable, clamped [0.80, 1.0]. */
 export const DISPATCH_ROUND_TRIP_EFFICIENCY = Math.min(
   1,
-  Math.max(0.8, Number(process.env.DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.945) || 0.945),
+  Math.max(0.8, Number(process.env.DISPATCH_ROUND_TRIP_EFFICIENCY ?? 0.86) || 0.86),
 );
 
 export function computeDispatchPlan(

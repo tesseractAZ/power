@@ -542,6 +542,17 @@ export function startBroadcastMonitor(
   // broadcast supersedes the pending retry.
   let retryTimer: NodeJS.Timeout | null = null;
   let retryAttempt = 0;
+  // v1.32.0 (cross-model review) — track whether the LAST SIP dispatch actually
+  // DELIVERED (ok > 0), not merely that it was attempted. v1.25.0's skipSip
+  // conflated "dispatched" with "delivered": a failed first SIP dispatch was
+  // never retried, defeating the alternate channel in exactly the correlated-
+  // failure scenario it exists for. Deferred MA retries now skip SIP only when
+  // the first dispatch genuinely reached a target. Starts true so a retry armed
+  // before any SIP dispatch this boot doesn't replay. Set pessimistically false
+  // at dispatch and flipped by the async outcome (~3-5 s, well inside the 30 s
+  // first retry delay); if the outcome is somehow still unknown at retry time,
+  // we re-fire SIP — for an ALARM channel a rare duplicate beats silence.
+  let lastSipDispatchOk = true;
   const RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
   const scheduleBroadcastRetry = (level: ConditionLevel, message: string | null, messageEs: string | null, reason: string) => {
     if (retryAttempt >= RETRY_DELAYS_MS.length) {
@@ -568,10 +579,12 @@ export function startBroadcastMonitor(
         retryAttempt = 0;
         return;
       }
-      // v1.25.0 — skipSip: this retry exists only to reach the MA targets that were
+      // v1.25.0 — skipSip: this retry exists to reach the MA targets that were
       // unavailable; the SIP target already received this exact audio on the first
       // dispatch, so re-firing it would replay the identical alarm on the cordless.
-      void runBroadcast(level, message, false, messageEs, true);
+      // v1.32.0 — but ONLY skip when the first SIP dispatch actually DELIVERED
+      // (lastSipDispatchOk); a failed SIP dispatch is retried alongside MA.
+      void runBroadcast(level, message, false, messageEs, lastSipDispatchOk);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -1004,7 +1017,13 @@ export function startBroadcastMonitor(
     // playSipAnnounce logs its own per-target outcome and never throws (callHaService
     // resolves, Promise.all can't reject); the .catch is belt-and-suspenders.
     if (cfg.sipTargets.length > 0 && !skipSip) {
-      void playSipAnnounce(url).catch((e) => log(`broadcast: SIP dispatch failed — ${e?.message ?? e}`));
+      lastSipDispatchOk = false; // pessimistic until the async outcome lands (v1.32.0)
+      void playSipAnnounce(url)
+        .then((r) => {
+          lastSipDispatchOk = r.ok > 0;
+          if (r.ok === 0) log(`broadcast: SIP dispatch reached 0/${r.attempted} targets — a deferred retry will re-fire SIP`);
+        })
+        .catch((e) => { lastSipDispatchOk = false; log(`broadcast: SIP dispatch failed — ${e?.message ?? e}`); });
     }
 
     // 2. v0.15.18 — pre-flight: during HA/MA restart windows the media_player

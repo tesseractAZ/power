@@ -1,3 +1,53 @@
+## v1.32.0 — cross-model review corrections: the dispatch round-trip constant + three companions
+
+A Fable cross-model review (21 agents, adversarially verified) re-derived the v1.24–v1.27
+finding-driven engine work from first principles. The mechanics of every item verified correct;
+one constant did not.
+
+**The headline (HIGH, confirmed thrice + live data): `DISPATCH_ROUND_TRIP_EFFICIENCY` 0.945 → 0.86.**
+The v1.27.0 value was a misinterpreted measurement. `/api/round-trip-efficiency` integrates
+`pack_in`/`pack_out` at the **BMS pack terminals** — battery-internal round trip, excluding BOTH
+conversion legs (live: 89.3% 7-day / 91.6% 14-day, not 94.5%). Its brief 0.945 reading on
+2026-07-14 numerically coincided with the separately-measured pack-terminal→AC
+**discharge-conversion leg** (6.22 kW → 5.88 kW = 0.945), and the two different physical
+quantities were conflated — so the planner modeled a full PV→pack→AC round trip at 0.945 when
+the composed truth is η_chg-conv (~0.97) × η_pack-RTE (~0.91) × η_dis-conv (0.945) ≈ **0.83–0.86**
+(cross-checked: `dispatch/mpc.ts` independently books the same loop at 0.90). Round-trip losses
+were under-booked ~2×; savings overstated; off-peak import under-sized; the per-leg 0.972 even
+exceeded the measured single discharge leg. Advisory-only surface (verified: sole consumer
+`GET /api/dispatch-plan`, no alarm coupling). The v1.27 tests were η-agnostic by construction
+and structurally could not catch a wrong constant. **New invariant test**
+(`rteIntegrity.test.ts`): `√DISPATCH_ROUND_TRIP_EFFICIENCY ≤ RUNWAY_DISCHARGE_EFFICIENCY` —
+the v1.27 value violated it (0.972 > 0.94); the violation *is* the misinterpretation, and it
+can no longer ship silently. v1.26's `RUNWAY_DISCHARGE_EFFICIENCY` 0.94 is **confirmed correct
+for its use** (the one-leg value is exactly what a pool-drain countdown needs; all 7 integration
+sites verified at HEAD; the 5 v1.26 tests mutation-verified to kill the wrong form) — only its
+prose conflated the quantities; comments corrected at all three sites.
+
+**Companions from the same review:**
+- **`computeRunway` pool cap** (pre-existing): the hour loop floored the pool at 0 but never
+  capped it at `backupFullKwh` (its sibling integrator does) — a long PV-surplus stretch banked
+  phantom above-capacity energy that extended the later drain, optimistic. Now
+  `min(backupFullKwh, …)`; the clamp can only SHORTEN runway. Pinned by a surplus-then-dark
+  test where the unclamped sim pushed the reserve crossing out of the horizon entirely.
+- **SIP retry delivery-tracking** (v1.25 gap): `skipSip` conflated *dispatched* with
+  *delivered* — a failed first SIP dispatch was never retried, defeating the alternate alarm
+  channel in exactly the correlated-failure scenario it exists for. Deferred MA retries now
+  skip SIP only when the first dispatch genuinely reached ≥1 target (`lastSipDispatchOk`); an
+  unknown outcome re-fires — for an alarm channel a rare duplicate beats silence.
+- **Prose corrections**: the "ratio 0.945 == the measured 7-day RTE" identity claim removed
+  from the v1.26 comment and its test header (they are different quantities that coincided
+  for one morning).
+
+Review verdicts for the record: v1.26 CORRECT-WITH-CAVEATS · v1.27 constant DEFECTIVE (fixed
+here) · v1.24 fixes CORRECT-WITH-CAVEATS (all three live-verified) · v1.25 CORRECT-WITH-CAVEATS
+(all six properties hold; retry gap fixed here) · the "A−" assessment methodology graded
+DEFECTIVE (circular capacity tie-out, in-sample PV comparison, conservation graded without a
+loss model — the 6.5% residual *was* the conversion physics; documented for future audit
+method, no code impact). Deferred to its own release: the unity charge-credit refinement in
+the η sims (~4–7% of stored surplus, fix direction strictly conservative, alarm-adjacent —
+deserves solo review). 1496 tests green (+3), tsc clean.
+
 ## v1.31.0 — band-calibration integrity (audit follow-ups)
 
 Implements the four deeper statistical findings the v1.30.0 calibration audit
