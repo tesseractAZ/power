@@ -13,7 +13,9 @@ import type { DayForecast } from '../src/analytics.js';
  * panel the pack gives up 1/η_dis kWh, so the pool drains ~6% faster than the raw
  * load implies — the pre-v1.26 sim read the runway LONG (optimistic), the unsafe
  * direction for an islanding countdown. Live-confirmed 2026-07-14: the pack drew
- * 6.22 kW gross for 5.88 kW delivered (ratio 0.945 == the measured RTE).
+ * 6.22 kW gross for 5.88 kW delivered — ratio 0.945, the pack-terminal→AC
+ * discharge-conversion LEG (v1.32.0: NOT the pack-plane RTE, which it merely
+ * numerically coincided with that day; see rteIntegrity.test.ts).
  *
  * This pins: (1) η is in the conservative sub-unity band; (2) an overnight
  * (PV≈0) deficit reaches reserve/empty FASTER by exactly the η factor vs a naive
