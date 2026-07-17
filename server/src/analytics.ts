@@ -7298,6 +7298,17 @@ const Z10 = 1.282;
  * Recommend-only-MPC + display band; NOT an alarm input. */
 const PV_BAND_CAL_MIN_DAYS = 14;
 const PV_BAND_CAL_FLOOR = 0.4;   // never shrink below 40% of the raw band width
+/** v1.30.0 — skill-report window (calendar days) fed to the band calibration.
+ *  The ≥PV_BAND_CAL_MIN_DAYS gate counts SCORED days (weather-covered, non-null
+ *  errorPct), but the skill window bounds CALENDAR days — at the live fleet's
+ *  observed ~64% scoring coverage (storm/telemetry-gap days are excluded by
+ *  design), a 14-day window tops out at ~9 scored days and the calibration can
+ *  never engage. It shipped in v1.23.0 wired to the DEFAULT 7-day window
+ *  (structurally < 14 at any coverage), so bandSigmaCal sat pinned at 1 in
+ *  production. 30 calendar days needs only ~47% coverage to reach 14 scored
+ *  days (precedent: /api/confidence already hindcasts days:30; the skill memo
+ *  is keyed per windowDays so cached 7-day reports are unaffected). */
+export const PV_BAND_CAL_WINDOW_DAYS = 30;
 
 /** Operator override for the band calibration factor. Empty/NaN/out-of-range →
  *  null (auto). Clamped to [0.1, 2] so a config typo can't zero or balloon the

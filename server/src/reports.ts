@@ -23,6 +23,7 @@ import {
   computeChargeCurveFingerprint,
   computeInternalResistance,
   computeForecastSkill,
+  PV_BAND_CAL_WINDOW_DAYS,
   computeAmbientThermalForecast,
   computeProbabilisticForecast,
   computeMultiDayForecast,
@@ -165,7 +166,16 @@ const BUILDERS: Record<string, Builder> = {
   ambientThermal: (ctx) => computeAmbientThermalForecast(devicesOf(ctx), ctx.recorder),
   probabilisticForecast: async (ctx) => {
     const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
-    const skill = await computeForecastSkill(devicesOf(ctx), ctx.recorder, fc);
+    // v1.30.0 — feed the band a 30-day skill window (PV_BAND_CAL_WINDOW_DAYS),
+    // not the 7-day default: the F30 calibration gate needs ≥14 SCORED days,
+    // which a 7-day report can never contain (bandSigmaCal sat pinned at 1 in
+    // production since v1.23.0) and a 14-day window only reaches at 100%
+    // weather/telemetry coverage (live: 9/14). One window serves BOTH skillFrac
+    // and the calibration so the shrink ratio is measured on the same sample
+    // the sigma was built from.
+    const skill = await computeForecastSkill(
+      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS,
+    );
     return computeProbabilisticForecast(fc, skill);
   },
   multiDayForecast: async (ctx, a) => {

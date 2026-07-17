@@ -747,7 +747,9 @@ app.get('/api/internal-resistance', async (req, reply) =>
 );
 
 app.get<{ Querystring: { days?: string } }>('/api/forecast-skill', async (req, reply) => {
-  const days = Math.max(1, Math.min(14, Number(req.query.days ?? 7) || 7));
+  // v1.30.0 — clamp raised 14→30 to match PV_BAND_CAL_WINDOW_DAYS (the window
+  // the probabilistic band's calibration hindcasts), bounded by recorder retention.
+  const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7));
   return cached(req, reply, await analytics.report('forecastSkill', { days }), 60);
 });
 

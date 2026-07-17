@@ -1,3 +1,41 @@
+## v1.30.0 — activate the P10/P90 band calibration (dormant since v1.23.0)
+
+A calibration-audit release for the probabilistic day-ahead PV band. **Advisory/display
+path only — the band feeds no alarm** (verified by exhaustive consumer census: the
+`/api/forecast/probabilistic` display, the recommend-only `/api/dispatch/recommend`
+MPC, and the Lovelace solar-card badges; no MQTT sensor derives from it).
+
+**The defect.** The v1.23.0 (F30) band self-calibration — built to shrink the raw
+band to ~80% realized daily coverage — never ran in production. Its gate requires
+≥14 weather-covered **scored** days, but the `probabilisticForecast` builder fed it
+the **default 7-day** skill window (structurally below the gate at any coverage),
+and even a 14-day window only reaches 14 scored days at 100% telemetry/weather
+coverage (live: 9 of 14). Result: `bandSigmaCal` pinned at 1 since ship — the band
+ran ±76% of daily forecast kWh against a realized q80 daily error of ~7%,
+i.e. ~100% coverage with a near-vacuous P10 (≈0.19×P50). The v1.23.0 unit tests
+missed it because every fixture was an ideal ≥14-scored-day report.
+
+**The fix.** New `PV_BAND_CAL_WINDOW_DAYS = 30`: the builder now feeds a 30-day
+skill window (needs only ~47% coverage to reach 14 scored days; precedent —
+`/api/confidence` already hindcasts 30 days; the skill memo is keyed per window so
+7-day consumers are untouched). One window serves both `skillFrac` and the
+calibration, so the shrink ratio is measured on the sample the sigma was built
+from. The `/api/forecast-skill` route clamp rises 14→30 to match. The ≥14-scored
+gate and the 0.4 shrink floor are deliberately unchanged (the floor is the
+regime-shift insurance; expect the floor to bind → band tightens ×2.5, still
+conservative). Post-deploy expectation: `bandSigmaCal` = 0.40,
+`realizedDailyErrHalfFrac` ≈ 0.07–0.12 on `/api/forecast/probabilistic`.
+
+New tests (3) encode the realistic partial-coverage scenario the originals missed:
+a 30-day/63%-coverage report activates the calibration; the same coverage on a
+14-day window provably cannot; and the window constant is pinned ≥30 with the
+coverage arithmetic documented. 1485 tests green.
+
+Audit follow-ups noted for future work (documented, not shipped): calibrator error
+basis (raw-model hindcast vs published bias-corrected forecast; %-of-actual vs
+%-of-predicted denominator), archiving day-ahead predictions for true out-of-sample
+scoring, and an interpolated quantile if the window ever widens further.
+
 ## v1.29.0 — rename the "Babylon 5" theme to "High Contrast"
 
 A UI-labeling release — no engine behaviour changes.
