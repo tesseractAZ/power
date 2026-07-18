@@ -1,3 +1,21 @@
+## v1.33.0 — multi-day forecast horizon cache fix
+
+`computeMultiDayForecast`'s 30-minute result cache (analytics.ts) was keyed by time
+only, not by `horizonDays`. So once the dashboard's default `days=3` call warmed the
+cache, a subsequent `GET /api/forecast/multi-day?days=4` within the TTL was served the
+stale **3-day** result — silently truncating any longer horizon. It surfaced during
+the night-charge arbitrage design work: the weekend (Fri→Mon) shortfall lookahead needs
+a 4-day horizon, and would have been quietly cut back to 3.
+
+Fix: key the cache by `horizonDays` (recompute when the requested horizon differs).
+Behavior for the default `days=3` path is unchanged. Also confirmed in the same pass
+(no code change needed): the SHP2 reserve floor reads a consistent **10%** across
+`/api/runway`, `/api/ha-state`, and the raw device — an earlier transient 12% reading
+was pre-propagation of an operator app-change, not a derivation bug.
+
+New regression test (`forecast.test.ts`): a `days=4` call after a `days=3` call with no
+cache reset returns 4 days, not the cached 3. 1497 tests green (+1), tsc clean.
+
 ## v1.32.0 — cross-model review corrections: the dispatch round-trip constant + three companions
 
 A Fable cross-model review (21 agents, adversarially verified) re-derived the v1.24–v1.27

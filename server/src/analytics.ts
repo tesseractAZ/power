@@ -7793,7 +7793,7 @@ export interface MultiDayForecast {
   days: DayRollup[];
 }
 
-let multiDayCache: { ts: number; value: MultiDayForecast } | null = null;
+let multiDayCache: { ts: number; horizonDays: number; value: MultiDayForecast } | null = null;
 const MULTI_DAY_TTL_MS = 30 * 60 * 1000;
 
 export async function computeMultiDayForecast(
@@ -7802,7 +7802,15 @@ export async function computeMultiDayForecast(
   forecast: DayForecast | null,
   horizonDays = 3,
 ): Promise<MultiDayForecast> {
-  if (multiDayCache && Date.now() - multiDayCache.ts < MULTI_DAY_TTL_MS) return multiDayCache.value;
+  // v1.33.0 — cache MUST be keyed by horizonDays: a days=3 call (the UI default)
+  // otherwise satisfied a subsequent days=4 request from the 30-min-TTL cache,
+  // silently truncating the weekend (Fri->Mon) lookahead the night-charge planner needs.
+  if (
+    multiDayCache &&
+    multiDayCache.horizonDays === horizonDays &&
+    Date.now() - multiDayCache.ts < MULTI_DAY_TTL_MS
+  )
+    return multiDayCache.value;
   const now = Date.now();
   const empty = (): MultiDayForecast => ({ generatedAt: now, days: [] });
   if (!forecast) return empty();
@@ -7967,7 +7975,7 @@ export async function computeMultiDayForecast(
     });
   }
   const value: MultiDayForecast = { generatedAt: now, days };
-  multiDayCache = { ts: now, value };
+  multiDayCache = { ts: now, horizonDays, value };
   return value;
 }
 

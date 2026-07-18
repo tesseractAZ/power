@@ -824,6 +824,41 @@ test('computeMultiDayForecast — v0.9.58 regression: day-2 hour-18 load uses pe
   );
 });
 
+test('computeMultiDayForecast — v1.33.0: a days=4 call after a days=3 call is NOT served the cached 3-day horizon', async () => {
+  // Pre-v1.33.0 the 30-min cache was not keyed by horizonDays, so the UI's
+  // default days=3 warm-up satisfied a subsequent days=4 request from cache —
+  // silently truncating the Fri->Mon weekend lookahead. Both calls run with
+  // NO reset between them, so the second MUST hit (and correctly reject) the cache.
+  resetForecastCachesForTesting();
+  const todayStart = startOfLocalDayMs();
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: todayStart + 86_400_000,
+      forecastPvW: () => 0,
+      forecastLoadW: () => 500,
+    }),
+    solarModel: flatSolarModel(),
+  });
+  // Weather must cover today + 4 full days so a 4-day horizon can populate.
+  setWeatherCacheForTesting(syntheticWeather({ startTs: todayStart, count: 5 * 24, radiationWm2: 0 }));
+
+  const three = await computeMultiDayForecast({}, emptyRecorder(), fc, 3);
+  assert.equal(three.days.length, 3, 'first call (days=3) returns 3 days and warms the cache');
+
+  // Same cache window, larger horizon — the horizon key must force a recompute.
+  const four = await computeMultiDayForecast({}, emptyRecorder(), fc, 4);
+  assert.equal(
+    four.days.length,
+    4,
+    `days=4 after days=3 must recompute to 4 days, not return the cached 3 (bug); got ${four.days.length}`,
+  );
+
+  // And a repeat days=3 is still served from cache correctly (horizon match).
+  const threeAgain = await computeMultiDayForecast({}, emptyRecorder(), fc, 3);
+  assert.equal(threeAgain.days.length, 3, 'a matching-horizon repeat still returns the right shape');
+});
+
 /* ─── computeForecastSkill ────────────────────────────────────────────
  *
  * Compares hindcast predictions against actuals over a back-window.
