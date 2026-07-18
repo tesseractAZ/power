@@ -2343,7 +2343,7 @@ function clampInt(v: number, lo: number, hi: number, dflt: number): number {
 /** Restart-persistent day-keyed latch (the Pi power-cycles daily; the latch must
  *  survive that so the evening job fires at most ONCE per Phoenix calendar day). */
 interface NightChargeLatch { lastNotifyDay: string | null }
-function readNightChargeLatch(): NightChargeLatch {
+function readNightChargeLatchFile(): NightChargeLatch {
   try {
     const raw = JSON.parse(readFileSync(NIGHT_CHARGE_LATCH_PATH, 'utf8'));
     const d = raw?.lastNotifyDay;
@@ -2352,7 +2352,17 @@ function readNightChargeLatch(): NightChargeLatch {
     return { lastNotifyDay: null };
   }
 }
+// In-memory mirror of the persisted latch, seeded once from disk at module load.
+// The read path (evening job tick + the status route) reads THIS, never the file,
+// so no request/timer performs an unbounded filesystem read (CWE-770 / CodeQL
+// js/missing-rate-limiting); the file is the cross-restart source of truth,
+// updated in lock-step on every write.
+let nightChargeLatchMem: NightChargeLatch = readNightChargeLatchFile();
+function readNightChargeLatch(): NightChargeLatch {
+  return nightChargeLatchMem;
+}
 function writeNightChargeLatch(l: NightChargeLatch): void {
+  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay };
   try {
     atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(l));
   } catch (e: any) {
