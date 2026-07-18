@@ -1,3 +1,38 @@
+## v1.36.0 — TOU tariff model (APS R-EV), pure module
+
+Third increment of the TOU night-charge arbitrage feature (advisory-only; no writes).
+
+New `server/src/tariff.ts`: a declarative multi-period, seasonal, timezone-resolved
+tariff model + `rateAt(model, ts)` resolver. Nothing consumes it yet — the existing
+2-tier path (`onPeakAt` / the MPC feed) is rewired onto it in the next release, and the
+config-form exposure after that — so this increment is provable entirely by unit tests
+with zero live impact (accuracy-attribution splitting).
+
+Models the deployed plan, APS Rate Schedule R-EV, which the flat on/off-peak pair
+cannot express: ON-PEAK 4–7pm Mon–Fri (year-round), SUPER-OFF-PEAK 10am–3pm Mon–Fri
+(winter only), OVERNIGHT 11pm–5am Mon–Fri (year-round), OFF-PEAK everything else incl.
+all weekends + observed holidays; seasons SUMMER May–Oct / WINTER Nov–Apr; no demand
+charge (inert field kept for future plans). Every local field is resolved in an explicit
+IANA timezone (America/Phoenix) via `Intl.DateTimeFormat` — never the host clock.
+
+★ Rates default to null (`ratesConfirmed=false`) → every resolved `centsPerKwh` is null
+until the owner confirms effective per-period cents from a bill (null-over-fabrication).
+★ DOW edge, pinned + owner-confirmable: the wrap-around overnight window is evaluated per
+instant's own weekday, so Fri 11pm is overnight but Sat 12am–5am is off-peak (weekend),
+and Sun 11pm is off-peak while Mon 12am–5am is overnight — consistent with "off-peak =
+all weekends". 19 boundary tests (season flips, on-peak/super-off-peak/overnight edges,
+DOW crossings, holidays, wrap-around, confirm gate). 1521 tests green (+23), tsc clean.
+
+Pre-merge adversarial review (13 agents) hardened the module before it landed: DOW is now
+derived from the resolved local calendar date (ICU-weekday-independent — a degraded-ICU
+runtime can no longer silently collapse every weekday to Sunday/off-peak); the Intl
+formatter is memoized per timezone; the rate-confirmation gate now also nulls
+`fixedDailyCents` when unconfirmed (no fabricated basic-service charge); `RateSlice`
+carries `ratesConfirmed` so a consumer can distinguish "rates not yet confirmed" from a
+"confirmed-but-missing-season" data gap; and `isOnPeak` follows an explicit
+`period.onPeak` flag instead of a magic id string. The calendar-month season
+approximation (vs APS billing-cycle boundaries) is documented as a known ≤-few-days/yr edge.
+
 ## v1.35.0 — extend the weather forecast horizon 2 → 4 days
 
 Second increment of the TOU night-charge arbitrage feature (advisory-only; no writes).
