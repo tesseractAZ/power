@@ -1,3 +1,17 @@
+## v1.38.2 — release docs: ship a .pdf alongside the .docx
+
+Every GitHub Release now carries the full documentation as BOTH `.docx` and
+`.pdf`. The PDF is a faithful render of the exact same document (README +
+SECURITY + the full DOCS.md engine reference, same generated table of contents
+and page breaks) produced by LibreOffice headless from the `.docx` — no LaTeX
+toolchain. The per-PR "Build documentation" check now builds and uploads both
+formats (`if-no-files-found: error`), so a DOCS.md or toolchain change that
+can't produce a PDF fails the check rather than silently shipping a release
+without one; the Release-time PDF stays best-effort (a transient LibreOffice/apt
+hiccup can't turn a good release red). Both files are attached at
+`gh release create` per the immutable-Releases rule. Docs-tooling only — no
+add-on code change. (Existing releases keep just the .docx: immutable Releases
+seal assets at creation, so the PDF starts from this version forward.)
 ## v1.38.1 — night-charge status route: no per-request DB read (CodeQL CWE-770)
 
 Follow-up to v1.38.0. CodeQL (js/missing-rate-limiting) flagged the

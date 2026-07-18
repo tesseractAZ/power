@@ -252,6 +252,27 @@ jobs:
             --ref "$TAG" \
             --output "EcoFlow-Panel-Documentation-v${V}.docx"
 
+      # Render the .docx to a .pdf (same document, no LaTeX) so every Release
+      # carries both formats. Best-effort like the .docx: gated + continue-on-error
+      # so a transient LibreOffice/apt hiccup can't turn a good release RED — the
+      # PR's docs check is the hard gate that the PDF toolchain works.
+      - name: Ensure LibreOffice (docx → pdf)
+        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
+        continue-on-error: true
+        run: |
+          command -v libreoffice >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-writer; }
+          libreoffice --version | head -1
+
+      - name: Build documentation .pdf
+        if: ${{ steps.gate.outputs.skip != 'true' && hashFiles('scripts/build-docs-docx.py') != '' }}
+        continue-on-error: true
+        env:
+          V: ${{ needs.resolve.outputs.version }}
+        run: |
+          libreoffice --headless -env:UserInstallation=file:///tmp/loprofile \
+            --convert-to pdf --outdir . "EcoFlow-Panel-Documentation-v${V}.docx"
+          ls -la "EcoFlow-Panel-Documentation-v${V}.pdf" || true
+
       - name: Create GitHub Release (with docs asset)
         if: steps.gate.outputs.skip != 'true'
         env:
@@ -259,11 +280,13 @@ jobs:
           V: ${{ needs.resolve.outputs.version }}
         run: |
           set -eo pipefail
-          # Immutable Releases seal assets at creation — attach the .docx here, not
-          # in a later step. Include it only if the build produced the file.
+          # Immutable Releases seal assets at creation — attach the docs here, not
+          # in a later step. Include each format only if its build produced the file.
           assets=()
           doc="EcoFlow-Panel-Documentation-v${V}.docx"
+          pdf="EcoFlow-Panel-Documentation-v${V}.pdf"
           if [ -f "$doc" ]; then assets+=("$doc"); fi
+          if [ -f "$pdf" ]; then assets+=("$pdf"); fi
           gh release create "${{ needs.resolve.outputs.tag }}" \
             --title "${{ needs.resolve.outputs.tag }}" \
             --notes-file /tmp/notes.md \
