@@ -23,6 +23,13 @@ import {
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, priorityOf, type AlarmPriority } from './alertPriority.js';
 import { getAlertSettings, updateAlertSettings, onAlertSettingsChange } from './alertSettings.js';
 import { advisoryStateFields, getLatestAdvisory } from './loadShedAdvisor.js';
+// v1.38.0 — night-charge TOU-arbitrage advisory (design §4.1). State fields carry
+// the plan's target SoC / buy kWh / window / charge_tonight (12 h staleness guard,
+// charge_tonight strictly false on a null/stale plan); gate fields carry the
+// write-readiness enum + fail-closed write_ready. Both wired into buildState so
+// the HA night-charge entities have data (read-only; the add-on never charges).
+import { nightChargeStateFields, getLatestNightChargePlan } from './nightChargeAdvisor.js';
+import { nightChargeGateFields, getLatestReadiness } from './nightChargeGate.js';
 // v0.15.19 — lighting energy posture (runway-driven; see lightingPosture.ts).
 import { lightingPostureTracker } from './lightingPosture.js';
 import { belowReserveFloor } from './runwayAlarm.js';
@@ -80,6 +87,13 @@ const PUBLISH_INTERVAL_MS = 30 * 1000;
 // `total_increasing` lifetime-energy / per-circuit sensors, since an expiring
 // long-term-statistics source would create gaps in the HA Energy dashboard.
 const EXPIRE_AFTER_S = 120;
+// v1.38.0 — the night-charge advisory sensors are refreshed once per evening
+// (~21:30), so the 120 s live-sensor expiry would mark them unavailable within
+// minutes. A ~25 h expiry (design §4.1 / invariant I12) tolerates the normal
+// once-a-day update cadence yet STILL flips the entities to UNAVAILABLE if the
+// advisor dies (daily power-cycle, crash, wedge) — so HA never serves a retained
+// `charge_tonight=ON` from a dead advisor instead of the honest 'unavailable'.
+const NIGHT_CHARGE_EXPIRE_AFTER_S = 90_000;
 
 // v0.11.0 — per-priority alarm on/off switch topics. Each ISA priority gets a
 // dedicated state + command topic under the same `ecoflow_panel` base prefix
@@ -142,6 +156,11 @@ export interface SensorConfig {
   icon?: string;
   value_template: string;
   entity_category?: 'diagnostic' | 'config';
+  // v1.38.0 — per-sensor override of the default `expire_after` (the night-charge
+  // advisory sensors carry a ~25 h expiry, not the 120 s live-sensor default; see
+  // NIGHT_CHARGE_EXPIRE_AFTER_S). When unset, publishDiscovery falls back to the
+  // legacy rule (EXPIRE_AFTER_S for non-total_increasing sensors, none otherwise).
+  expire_after?: number;
 }
 
 export const SENSORS: SensorConfig[] = [
@@ -263,6 +282,23 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_load_shed_recommended_count', name: 'EcoFlow Load-Shed Recommended Count', state_class: 'measurement', icon: 'mdi:power-plug-off', value_template: '{{ value_json.load_shed_recommended_count }}' },
   { unique_id: 'ecoflow_load_shed_recommended_watts', name: 'EcoFlow Load-Shed Recommended Watts', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:power-plug-off-outline', value_template: '{{ value_json.load_shed_recommended_watts }}' },
 
+  // ─── v1.38.0 night-charge TOU-arbitrage advisory (ADVISORY / no-write) ──────
+  // The advisor sizes an optional cheap-overnight grid buy (APS R-EV 11pm–5am)
+  // so tomorrow holds the reserve floor + outage cushion and skips the 4–7pm
+  // peak (design §2, §4.1). Read-only: the operator's own HA automation actuates
+  // — the add-on NEVER charges. NO device_class (a target that moves up AND down,
+  // not an accumulation — buy_kwh MUST NOT be device_class:energy). Readiness +
+  // window are plain string sensors. Each carries NIGHT_CHARGE_EXPIRE_AFTER_S
+  // (~25 h, I12) so the once-nightly cadence doesn't trip the expiry but a dead
+  // advisor still flips these to UNAVAILABLE the next day. Numeric fields emit
+  // null (→ HA 'unknown') when the plan is stale/incomplete — never a fabricated
+  // value. The AVAILABILITY spread is applied uniformly in publishDiscovery().
+  { unique_id: 'ecoflow_night_charge_target_soc', name: 'EcoFlow Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
+  { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'EcoFlow Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
+  { unique_id: 'ecoflow_night_charge_readiness', name: 'EcoFlow Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
+  { unique_id: 'ecoflow_night_charge_window_start', name: 'EcoFlow Night-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_start }}' },
+  { unique_id: 'ecoflow_night_charge_window_end', name: 'EcoFlow Night-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_end }}' },
+
   // ─── v0.15.19 lighting energy posture (publish-only; HA automations actuate) ─
   // One runway-derived enum (surplus|normal|conserve|amber|red|critical) the
   // home's lighting keys off. Escalation is immediate; de-escalation holds
@@ -295,7 +331,19 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_overload_mode_code', name: 'EcoFlow Overload Mode (code)', state_class: 'measurement', icon: 'mdi:flash-alert', entity_category: 'diagnostic', value_template: '{{ value_json.overload_mode_code }}' },
 ];
 
-export const BINARY_SENSORS = [
+export interface BinarySensorConfig {
+  unique_id: string;
+  name: string;
+  device_class?: string;
+  icon?: string;
+  value_template: string;
+  entity_category?: 'diagnostic' | 'config';
+  // v1.38.0 — per-sensor `expire_after` override (night-charge advisory flags use
+  // ~25 h; every other binary uses the 120 s live default). See publishDiscovery.
+  expire_after?: number;
+}
+
+export const BINARY_SENSORS: BinarySensorConfig[] = [
   // v0.40.0 — no device_class: 'connectivity' here. That class means ON=connected, which
   // INVERTS this sensor's meaning (off_grid=true → ON would read as "connected"). A plain
   // binary sensor keeps ON=off-grid unambiguous; the tower-off icon conveys state.
@@ -328,6 +376,20 @@ export const BINARY_SENSORS = [
   // extend runway. The operator's HA automations actuate off this (advisory
   // model); the add-on never toggles a load itself.
   { unique_id: 'ecoflow_load_shed_recommended', name: 'EcoFlow Load Shed Recommended', icon: 'mdi:power-plug-off', value_template: '{{ "ON" if value_json.load_shed_recommended else "OFF" }}' },
+  // ─── v1.38.0 night-charge advisory (ADVISORY / no-write) ────────────────────
+  // ON when tonight's advisor recommends a cheap-overnight grid buy. CLONE of
+  // ecoflow_load_shed_recommended: NO device_class (ON here means "charge is
+  // recommended", not "power detected" — the class would relabel + invert the
+  // meaning), the icon conveys state. The owner's HA automation actuates — the
+  // add-on NEVER charges, and the automation MUST also gate on
+  // night_charge_write_ready + the window_start/_end sensors, never on this alone.
+  // Long expire_after (I12) so a dead advisor's retained ON is marked UNAVAILABLE,
+  // never trusted as a live ON.
+  { unique_id: 'ecoflow_night_charge_recommended', name: 'EcoFlow Night-Charge Recommended', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.charge_tonight else "OFF" }}' },
+  // Write-readiness gate (§5). FAIL-CLOSED: nightChargeGateFields emits this
+  // strictly false on a null readiness (never null-as-true) and always emits the
+  // key, so a data gap reads OFF, not a stale retained ON. NO device_class.
+  { unique_id: 'ecoflow_night_charge_write_ready', name: 'EcoFlow Night-Charge Write Ready', icon: 'mdi:shield-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.night_charge_write_ready else "OFF" }}' },
   // v0.69.0 — ON when a SHP2-wired home core's own telemetry is missing from the
   // self-consumption integral (cloud-offline / projection-less), so solar_fraction /
   // direct-use undercount. Diagnostic: discount those KPIs while this reads ON.
@@ -575,7 +637,13 @@ export async function startMqttDiscovery(
         ...AVAILABILITY_BASE,
         // v0.13.7 — expire live measurements, but never the total_increasing
         // energy sources (would gap HA Energy history).
-        ...(s.state_class !== 'total_increasing' ? { expire_after: EXPIRE_AFTER_S } : {}),
+        // v1.38.0 — a per-sensor `expire_after` (the night-charge advisory
+        // sensors, ~25 h) wins over the 120 s default; otherwise unchanged.
+        ...(s.expire_after != null
+          ? { expire_after: s.expire_after }
+          : s.state_class !== 'total_increasing'
+            ? { expire_after: EXPIRE_AFTER_S }
+            : {}),
         device: DEVICE_INFO,
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
@@ -587,7 +655,8 @@ export async function startMqttDiscovery(
         state_topic: STATE_TOPIC,
         ...AVAILABILITY_BASE,
         // v0.13.7 — binary status entities are live (never total_increasing).
-        expire_after: EXPIRE_AFTER_S,
+        // v1.38.0 — the night-charge advisory flags override with a ~25 h expiry.
+        expire_after: s.expire_after ?? EXPIRE_AFTER_S,
         device: DEVICE_INFO,
       };
       client.publish(topic, JSON.stringify(cfg), { retain: true, qos: 0 });
@@ -815,6 +884,15 @@ export async function startMqttDiscovery(
       // v0.15.2 — load-shed advisory signals (recommendation + counterfactual)
       // for HA automations to gate on. Latest is computed on the advisor tick.
       ...advisoryStateFields(getLatestAdvisory()),
+      // v1.38.0 — night-charge advisory (state fields) + write-readiness gate
+      // fields (design §4.1). Both are fail-safe: nightChargeStateFields returns
+      // charge_tonight strictly false and numeric fields null unless the plan is
+      // fresh (basisComplete && <12 h old); nightChargeGateFields returns
+      // night_charge_write_ready strictly false on a null readiness. Wired here
+      // AND into /api/ha-state (index.ts) in parity, matching the pv_curtailment
+      // precedent. Read-only — no field here is consumed by the alarm spine.
+      ...nightChargeStateFields(getLatestNightChargePlan()),
+      ...nightChargeGateFields(getLatestReadiness()),
       // v0.89.0 — SHP2 operating-mode / reserve strategy diagnostics. Reserve floor
       // reads the CANONICAL projection.backupReserveSoc the floor alarm defends with
       // (NOT strategy.backupReserveSoc). Mode codes are raw SHP2 enum ints (no

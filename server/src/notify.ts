@@ -1,5 +1,6 @@
 import { request } from 'undici';
 import type { Severity } from './alerts.js';
+import type { NightChargePlan } from './nightChargeAdvisor.js';
 
 /**
  * Notification dispatch. Supports ntfy (default — free, no account), Pushover,
@@ -215,4 +216,88 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
     }
     return;
   }
+}
+
+/**
+ * v1.38.0 — build the ~21:30 night-charge advisory notification (design §4.2).
+ *
+ * Three shapes, ALL severity 'info' and ALL dedupId 'night_charge_plan' so the
+ * message lands in ONE updating HA card (a nightly stack of cards would train the
+ * operator to ignore it). This is dispatched via a DIRECT sendNotification()
+ * (design §4.2 / I10) so it bypasses NOTIFY_QUIET_HOURS + minSeverity — a plan
+ * pushed after charging should begin is worse than none, so it must not sit in a
+ * quiet-hours queue.
+ *
+ *   • charge  — a buy IS recommended tonight. The body states the buy kWh, the
+ *               target pool SoC %, tomorrow's projected low SoC WITHOUT vs WITH
+ *               the buy, the floor+cushion line, the confidence tier, and the
+ *               ADVISORY-ONLY automation contract (the add-on never charges; wire
+ *               your HA automation to charge_tonight gated on write-ready+window).
+ *   • hold    — no charge needed; the projected trough already clears floor+cushion.
+ *   • insufficient_basis — no plan tonight (basis incomplete). Sending this makes
+ *               the ABSENCE explicit so the owner never wonders if the job died.
+ *
+ * ★ SAFETY: this is a READ-ONLY advisory. The message NEVER implies the add-on
+ *   will act, and it NEVER fabricates a number — a null plan or a null field
+ *   renders as an em-dash and (for a null/insufficient plan) the insufficient
+ *   shape, never a guessed cushion the owner might trust. Pure + null-safe.
+ */
+export function buildNightChargeMessage(
+  plan: NightChargePlan | null,
+  shape: 'charge' | 'hold' | 'insufficient_basis',
+): NotifyMessage {
+  const base = { severity: 'info' as const, dedupId: 'night_charge_plan' };
+
+  // A null plan can only ever be "insufficient basis" — never a fabricated
+  // charge/hold — regardless of the shape the caller asked for.
+  if (shape === 'insufficient_basis' || !plan) {
+    return {
+      ...base,
+      title: 'Night-charge: no plan tonight',
+      body:
+        'No overnight charge plan tonight — the forecast/telemetry basis is incomplete, '
+        + 'so nothing will be charged. (This confirms the evening job ran; the reserve '
+        + 'floor is unchanged.)',
+    };
+  }
+
+  const pct = (n: number | null): string => (n == null ? '—' : `${round1(n)}%`);
+  const kwh = (n: number | null): string => (n == null ? '—' : `${round1(n)} kWh`);
+  const floorCushion = round1(plan.reserveFloorPct + plan.cushionPct);
+
+  if (shape === 'hold') {
+    return {
+      ...base,
+      title: 'Night-charge: hold (no charge needed)',
+      body:
+        `No overnight charge needed — the projected overnight low SoC `
+        + `(${pct(plan.minProjSocPct ?? plan.baselineMinSocPct)}) stays at or above the `
+        + `${floorCushion}% floor+cushion. Nothing will be charged.`,
+    };
+  }
+
+  // shape === 'charge'
+  const shortfallNote = plan.cushionShortfall
+    ? ' NOTE: charge/pool limits prevent fully meeting the cushion — residual risk remains.'
+    : '';
+  const overBuyNote = plan.bindingCap === 'overBuy'
+    ? ' NOTE: the buy exceeds tomorrow morning’s PV headroom; a small clip is accepted to hold resilience.'
+    : '';
+  return {
+    ...base,
+    title: `Night-charge: buy ~${kwh(plan.buyKwh)} tonight`,
+    body:
+      `Buy ~${kwh(plan.buyKwh)} of grid energy overnight → target ${pct(plan.targetSocPct)} pool SoC. `
+      + `Without it, tomorrow’s projected low SoC falls to ~${pct(plan.baselineMinSocPct)}; `
+      + `with it, ~${pct(plan.minProjSocPct)} (the floor+cushion line is ${floorCushion}%). `
+      + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote} `
+      + 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
+      + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '
+      + 'and the night_charge_window_start/_end sensors.',
+  };
+}
+
+/** One-decimal rounding for the human-facing advisory strings. */
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
 }

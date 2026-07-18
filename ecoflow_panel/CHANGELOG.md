@@ -1,3 +1,67 @@
+## v1.38.0 — night-charge advisory stack: learning, delivery, gate (advisory-only, NO writes)
+
+The full advisory-v1 of the TOU night-charge arbitrage feature — built as one
+release across five subsystems (parallel build over disjoint files, then
+integrated + whole-stack adversarially reviewed). **Advisory only: the feature
+issues NO device commands and never touches the floor/runway/SoC alarm spine.**
+It reads the same `backupReserveSoc` the floor alarm defends and produces no
+state the alarms consume.
+
+**What it does now.** Every ~30 min (and once at ~21:30 America/Phoenix) it
+computes tonight's recommended overnight buy — "buy N kWh → target SoC X%" —
+sized to hold `reserveFloor + outageCushion` from the cheap-window close to the
+next cheap window, and surfaces it on: a `night_charge_*` HA sensor set (7
+entities, LWT + `expire_after` so a dead advisor never leaves a stale
+`charge_tonight=ON`), a ~21:30 push notification (charge / hold /
+insufficient-basis), `/api/night-charge/status`, a web card, and a TUI
+TONIGHT'S PLAN block. Your HA automation gates on `charge_tonight` **AND**
+readiness **AND** the published window — never `charge_tonight` alone.
+
+**Learning from night one.** A durable, never-pruned SQLite ledger
+(`night_charge_ledger` + `night_charge_calibration`) records each night's
+prediction and, the next evening, its measured outcome + forecast-accuracy
+scores. A **write-readiness gate** (`nightChargeGate.ts`) reduces that ledger to
+`LEARNING | READY_TO_CONSIDER_WRITES | BLOCKED` + a "what's blocking" list — a
+pure, fail-closed predicate gating ONLY on physically-measured accuracy (zero
+plan-trajectory floor-breaches, under-buy rate, PV/load MAE+bias, band coverage,
+forecast-basis; out-of-sample, autocorrelation-adjusted effective-N). It stays
+LEARNING until genuine clean nights accrue — the intended earn-the-write posture.
+No write path is built; the dormant CHARGE_TIME_TASK probe stays deferred (§6).
+
+**Config.** Cushion %, min-buy, charge-cap kW, load-P90 factor, notify hour/minute,
+notify-on-hold, and the APS **R-EV rate fields** so you can enter effective
+¢/kWh — until confirmed, every dollar figure emits null (never a fabricated rate).
+
+**Whole-stack adversarial review (18 agents) confirmed 9 findings — all fixed
++ regression-tested before ship:**
+- **HIGH under-buy — EV de-dup was not atomic:** the embedded expected-value EV
+  was stripped from the load unconditionally but the committed p90 block re-added
+  only if the separate EV report survived — on a real charging night with a sparse
+  session history the EV load vanished from the basis → under-sized buy (a safety
+  miss). De-dup is now atomic: strip only when the block will actually be placed.
+- **HIGH under-buy ×2 — weekend/storm horizon truncation:** `nextRecharge` was the
+  first hour where CENTRAL pv≥load, so a single transient sunny hour (or a P50
+  crossing the P10/P90-sized trough would still drain through) truncated a Fri→Mon
+  carry and hid the Sat/Sun-night troughs. Now the horizon runs to the next
+  cheap-window START (tariff-based, deterministic) — the full weekend is simulated.
+- **HIGH — write-readiness gate was permanently inert:** the ledger stores
+  `algo_version` as TEXT but the gate compared it numerically, so every persisted
+  night was excluded and the gate never left LEARNING. Now string-compared, with
+  an end-to-end round-trip test through the real recorder.
+- **HIGH gate-false-safe — floor-breach only counted coverage-scored nights:** a
+  would-have-breached plan on a propped/low-coverage storm night (the adverse
+  night the gate exists for) didn't block. Now every forecast plan-night with a
+  breach verdict blocks, coverage-excluded or not.
+- **MED — outcome scoring was coupled to the notify window** (a missed 21:30 job
+  dropped the prior night, an MNAR bias): scoring + readiness now also run on the
+  recompute tick and the cutoff branch, idempotently.
+- Plus 3 lower-severity (beyond-24h EV double-count → bounded to the band region;
+  window_start truncation during a mid-window recompute → back-scan to the true
+  start).
+
+1610 server tests green (+all subsystem + regression tests), tsc clean both
+packages. Nothing calls a write primitive; the ledger begins accumulating the
+accuracy record immediately so the write decision can be judged on real history.
 ## v1.37.0 — night-charge advisor: the pure sizing brain (increment 1)
 
 First increment of the TOU night-charge arbitrage feature (design:
