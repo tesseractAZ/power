@@ -53,6 +53,14 @@ import {
   rootCausesFor,
   computePackRiskScores,
   runwayHoursForPublish,
+  // v1.38.0 (night-charge WS4) — verified efficiency seams the advisor sizes
+  // against (injected, never hard-coded downstream): legEff = √DISPATCH_RTE,
+  // dischargeEff = the DC-bus discharge tax.
+  DISPATCH_ROUND_TRIP_EFFICIENCY,
+  RUNWAY_DISCHARGE_EFFICIENCY,
+} from './analytics.js';
+import type {
+  ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
 } from './analytics.js';
 import { startTelnetServer } from './telnet/server.js';
 import { createTuiDataProvider } from './telnet/dataProvider.js';
@@ -108,6 +116,40 @@ import { RateFloorTracker } from './messageRateFloor.js';
 import { setRateFloorCollapses, type RateFloorCollapse } from './messageRateFloorAlert.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
+// v1.38.0 (night-charge WS4 integration) — wire the ADVISORY TOU-arbitrage
+// night-charge advisor (nightChargeAdvisor.ts / nightChargeGate.ts) into the
+// live surfaces. READ-ONLY / NO-WRITE: nothing below produces state the
+// floor/runway/SoC alarm spine depends on; every field emits null over a
+// fabricated number. Design: docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md §2–§5.
+import {
+  getLatestNightChargePlan,
+  setLatestNightChargePlan,
+  nightChargeStateFields,
+  buildNightChargeInputs,
+  computeNightChargePlan,
+  resolveCheapWindow,
+  scoreNightOutcome,
+  type NightChargePlan,
+  type NightChargeInputDeps,
+  type NightForecastHour,
+  type NightDayRollup,
+  type NightEvCommit,
+  type NightOutcomeActuals,
+  type BindingCap,
+  type NightChargeObjective,
+} from './nightChargeAdvisor.js';
+import {
+  getLatestReadiness,
+  setLatestReadiness,
+  nightChargeGateFields,
+  computeNightChargeReadiness,
+  CURRENT_ALGO_VERSION,
+} from './nightChargeGate.js';
+import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
+import { buildApsREvModel, rateAt, localParts, seasonOf, type ApsREvRates } from './tariff.js';
+import { atomicWriteFileSync } from './atomicWrite.js';
+import { readFileSync } from 'node:fs';
+import type { NightLedgerRow } from './recorder.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -1389,6 +1431,16 @@ app.get('/api/ha-state', async (req, reply) => {
     // v1.14.0 — single-sourced with the MQTT state publisher (alerts.ts
     // systemOutageFields) and unit-tested at the payload level.
     ...systemOutageFields(recorder.telemetryGaps(), Date.now()),
+
+    // v1.38.0 — night-charge ADVISORY (state fields) + write-readiness gate
+    // fields (design §4.1). Mirrors mqttDiscovery.buildState EXACTLY (the
+    // deliberate MQTT/REST parity fix, matching the pv_curtailment precedent).
+    // Both are fail-safe: nightChargeStateFields returns charge_tonight strictly
+    // false + numeric fields null unless the plan is fresh (basisComplete &&
+    // <12 h old); nightChargeGateFields returns write_ready strictly false on a
+    // null readiness. READ-ONLY — no field here is consumed by the alarm spine.
+    ...nightChargeStateFields(getLatestNightChargePlan()),
+    ...nightChargeGateFields(getLatestReadiness()),
   };
   // v0.9.14 — 25 s cache: the underlying computes refresh every 4 min via the
   // cache warmer, but HA polls this every 30 s. ETag + 25 s max-age means most
@@ -2261,6 +2313,678 @@ app.get('/api/load-shedding/status', async () => ({
   haStateCacheAgeMs: haStateCache.getCacheAgeMs(),
   advisory: loadShedAdvisor.getStatus(),
 }));
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * v1.38.0 — Night-charge TOU-arbitrage ADVISOR wiring (design §2–§5).
+ *
+ * ADVISORY / NO-WRITE. This orchestrates the pure subsystem modules
+ * (nightChargeAdvisor.ts + nightChargeGate.ts + recorder ledger) — it NEVER
+ * issues a device write and NEVER touches the floor/runway/SoC alarm spine. It
+ * (1) recomputes a fresh plan on a 30-min tick so HA/status always have a
+ * ≤12 h-fresh plan; (2) runs ONE ~21:30 America/Phoenix evening job (day-keyed,
+ * restart-persistent latch) that records the plan row, scores yesterday's
+ * outcome, recomputes readiness, and sends ONE notification; (3) serves
+ * GET /api/night-charge/status. Every numeric emits null over a fabricated
+ * number, and any incomplete/incoherent/thin basis yields a null plan. Mirrors
+ * the load-shed advisor block above.
+ * ═════════════════════════════════════════════════════════════════════════ */
+const nightChargeEnabled = process.env.NIGHT_CHARGE_ADVISOR_ENABLED !== 'false';
+const NIGHT_CHARGE_NOTIFY_HOUR = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_HOUR ?? 21), 0, 23, 21);
+const NIGHT_CHARGE_NOTIFY_MINUTE = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_MINUTE ?? 30), 0, 59, 30);
+const NIGHT_CHARGE_LATCH_PATH =
+  process.env.NIGHT_CHARGE_LATCH_PATH ?? resolve(process.cwd(), config.dbPath, '..', '.night-charge-latch.json');
+const HOUR_MS = 3_600_000;
+
+function clampInt(v: number, lo: number, hi: number, dflt: number): number {
+  if (!Number.isFinite(v)) return dflt;
+  return Math.min(hi, Math.max(lo, Math.round(v)));
+}
+
+/** Restart-persistent day-keyed latch (the Pi power-cycles daily; the latch must
+ *  survive that so the evening job fires at most ONCE per Phoenix calendar day). */
+interface NightChargeLatch { lastNotifyDay: string | null }
+function readNightChargeLatchFile(): NightChargeLatch {
+  try {
+    const raw = JSON.parse(readFileSync(NIGHT_CHARGE_LATCH_PATH, 'utf8'));
+    const d = raw?.lastNotifyDay;
+    return { lastNotifyDay: typeof d === 'string' ? d : null };
+  } catch {
+    return { lastNotifyDay: null };
+  }
+}
+// In-memory mirror of the persisted latch, seeded once from disk at module load.
+// The read path (evening job tick + the status route) reads THIS, never the file,
+// so no request/timer performs an unbounded filesystem read (CWE-770 / CodeQL
+// js/missing-rate-limiting); the file is the cross-restart source of truth,
+// updated in lock-step on every write.
+let nightChargeLatchMem: NightChargeLatch = readNightChargeLatchFile();
+function readNightChargeLatch(): NightChargeLatch {
+  return nightChargeLatchMem;
+}
+function writeNightChargeLatch(l: NightChargeLatch): void {
+  nightChargeLatchMem = { lastNotifyDay: l.lastNotifyDay };
+  try {
+    atomicWriteFileSync(NIGHT_CHARGE_LATCH_PATH, JSON.stringify(l));
+  } catch (e: any) {
+    app.log.debug(`night-charge: latch persist failed (${e?.message ?? e})`);
+  }
+}
+
+/** Minute-of-day in America/Phoenix (localParts is hour-granular; the ~21:30
+ *  gate needs minutes). Explicit IANA resolution — never the host clock. */
+function phoenixMinuteOfDay(ms: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Phoenix', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(ms));
+  const num = (t: string): number => Number(parts.find((p) => p.type === t)?.value ?? '0');
+  return num('hour') * 60 + num('minute');
+}
+
+/** Read the APS R-EV per-period effective cents from the config env (all default
+ *  "" / unconfirmed → ratesConfirmed=false → every $ output null). */
+function apsREvRatesFromEnv(): ApsREvRates {
+  const cent = (name: string): number | null => {
+    const raw = process.env[name];
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    onPeak: { summer: cent('TARIFF_APS_ONPEAK_SUMMER_CENTS'), winter: cent('TARIFF_APS_ONPEAK_WINTER_CENTS') },
+    offPeak: { summer: cent('TARIFF_APS_OFFPEAK_SUMMER_CENTS'), winter: cent('TARIFF_APS_OFFPEAK_WINTER_CENTS') },
+    overnight: { summer: cent('TARIFF_APS_OVERNIGHT_CENTS'), winter: cent('TARIFF_APS_OVERNIGHT_CENTS') },
+    superOffPeak: { summer: null, winter: cent('TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS') },
+    confirmed: process.env.TARIFF_APS_RATES_CONFIRMED === 'true',
+  };
+}
+
+/** Cheap-period id the advisor sizes the buy against (the OVERNIGHT R-EV tier). */
+const NIGHT_CHEAP_PERIOD_ID = 'overnight';
+/** N_MIN scored calibration days before the band is trusted (design §2.3). */
+const NIGHT_MIN_CAL_DAYS = 14;
+
+/** Extras carried alongside the plan so the evening job can map plan+inputs →
+ *  the snake_case NightLedgerRow columns the pure plan doesn't itself carry. */
+interface NightPlanExtras {
+  socNowPct: number;
+  fullKwh: number;
+  cushionPct: number;
+  cushionKwh: number;
+  horizonHours: number;
+  pvP10Kwh: number; pvP50Kwh: number; pvP90Kwh: number;
+  loadP10Kwh: number; loadP50Kwh: number; loadP90Kwh: number;
+  evP90SessionKwh: number; evSessionCount: number;
+  bandSigmaCal: number;
+  calScoredDays: number;
+  forecastBasis: string;
+  weatherCovered: number;
+  tariffSnapshot: string;
+}
+
+function round2(n: number): number { return Math.round(n * 100) / 100; }
+function round1(n: number): number { return Math.round(n * 10) / 10; }
+
+/**
+ * Assemble a NightChargeInputDeps from the LIVE analytics reports + SHP2
+ * projection, size the plan, and latch it in the holder. Returns the plan plus
+ * the ledger extras (or null when inputs cannot be constructed — SHP2 offline /
+ * missing battery fields, I5). Direct orchestration (NOT createNightChargeAdvisor.
+ * update() — buildInputs there is synchronous, but we need awaited analytics).
+ */
+async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | null> {
+  const nowMs = Date.now();
+  const shp2 = findShp2(store.get().devices);
+  if (!shp2 || shp2.projection?.kind !== 'shp2') return null; // I5 — advisory null
+  const sp: any = shp2.projection;
+
+  const fullWh: number | null = sp.backupFullCapWh ?? null;
+  const socNowPct: number | null = sp.backupBatPercent ?? null;
+  const remainWh: number | null = sp.backupRemainWh ?? null;
+  const reserveFloorPct: number | null = sp.backupReserveSoc ?? null;
+  if (fullWh == null || fullWh <= 0 || socNowPct == null || reserveFloorPct == null) return null; // I5
+  const fullKwh = fullWh / 1000;
+
+  // I11 — SoC coherence (% vs remainWh/fullWh). false ⇒ the sizer returns null.
+  const socCoherent = remainWh != null && Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
+
+  // Verified efficiency seams (injected, never hard-coded downstream).
+  const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY); // ≈ 0.927
+  const dischargeEff = RUNWAY_DISCHARGE_EFFICIENCY;         // ≈ 0.94
+
+  // Operator knobs.
+  const cushionPct = Number(process.env.ARB_OUTAGE_CUSHION_PCT ?? 15);
+  const chargeCapKw = Number(process.env.ARB_CHARGE_CAP_KW ?? 7.2);
+  const loadP90Factor = Number(process.env.ARB_LOAD_P90_FACTOR ?? 1.15);
+  const evMaxLoadW = Number(process.env.EV_MAX_LOAD_W ?? 11520);
+  const minBuyKwh = Number(process.env.ARB_MIN_BUY_KWH ?? 1);
+
+  // Tariff period resolver (America/Phoenix, R-EV). Cents may be unconfirmed —
+  // periodId is structural and needs no confirmed rate.
+  const tariffModel = buildApsREvModel(apsREvRatesFromEnv());
+  const periodIdAt = (ts: number): string => rateAt(tariffModel, ts).periodId;
+
+  // Live analytics reports (each best-effort — a missing report degrades the
+  // basis to null, never a fabricated number).
+  const [prob, multiDay, dayAhead, evReport] = await Promise.all([
+    analytics.report<ProbabilisticForecast>('probabilisticForecast').catch(() => null),
+    analytics.report<MultiDayForecast>('multiDayForecast', { days: 4 }).catch(() => null),
+    analytics.report<DayForecast>('forecast').catch(() => null),
+    analytics.report<EvWindowPrediction>('evWindowPrediction').catch(() => null),
+  ]);
+
+  // Day-ahead hours by hour-epoch — the load side (probabilistic band is PV-only).
+  const dayAheadByEpoch = new Map<number, ForecastHour>();
+  for (const fh of dayAhead?.hours ?? []) dayAheadByEpoch.set(Math.floor(fh.ts / HOUR_MS), fh);
+
+  // bandHours (within-24 h authoritative band): PV P10 from the probabilistic
+  // forecast; load P90 = day-ahead forecastLoadW × ARB_LOAD_P90_FACTOR. The
+  // day-ahead forecast folds an EXPECTED-VALUE EV block (predictedEvLoadW) into
+  // forecastLoadW, so embeddedEvW is that component ALSO scaled by the P90 factor
+  // (it sits inside the scaled loadP90W) — the advisor subtracts it before
+  // placing the committed p90SessionKwh block, so EV is never double-counted (§2.3).
+  const bandHours: NightForecastHour[] = [];
+  for (const pb of prob?.hours ?? []) {
+    const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
+    if (!fh) continue; // no load side for this hour → skip (band must carry both)
+    bandHours.push({
+      ts: pb.ts,
+      pvP10W: pb.p10W,
+      loadP90W: fh.forecastLoadW * loadP90Factor,
+      embeddedEvW: (fh.predictedEvLoadW ?? 0) * loadP90Factor,
+    });
+  }
+
+  // dayRollups (beyond the 24 h band): multi-day hourly {ts,pvW,loadW}. The
+  // merge in buildNightChargeInputs is keyed by ts and the band always wins, so
+  // day-0 overlap hours are superseded; daysAhead widens the daily P10/P90.
+  const dayRollups: NightDayRollup[] = (multiDay?.days ?? []).map((d, idx) => ({
+    daysAhead: idx,
+    hours: d.hours.map((h) => ({ ts: h.ts, pvW: h.pvW, loadW: h.loadW })),
+  }));
+
+  const realizedDailyErrHalfFrac = prob?.realizedDailyErrHalfFrac ?? 0;
+  const calScoredDays = prob?.calScoredDays ?? 0;
+  const bandCoverageFrac = (prob?.bandRealizedCoveragePct ?? 0) / 100;
+
+  // Cheap window (needed here for nextRecharge + morning-surplus bounds; the
+  // sizer resolves it again from the same resolver — identical result).
+  const window = resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);
+  const windowEndMs = window?.endMs ?? nowMs;
+
+  // nextRecharge = the START of the NEXT cheap charge window after tonight's —
+  // the next time we can cheaply top up (design §2.4). Tariff-based and
+  // deterministic: a single transient sunny hour, OR a CENTRAL-forecast pv≥load
+  // crossing that the P10-PV/P90-load sim would still be draining through, can no
+  // longer truncate the multi-day carry. On a weekday this lands ~tomorrow night;
+  // on Friday the next OVERNIGHT tier is Monday, so the full Fri→Mon (~72 h)
+  // carry is simulated and the Sat/Sun-night troughs are not hidden — the exact
+  // under-buy the "first pv≥load hour" heuristic caused. Scan 4 days to bridge
+  // the weekend gap.
+  const nextWindow = resolveCheapWindow(periodIdAt, windowEndMs + HOUR_MS, NIGHT_CHEAP_PERIOD_ID, 96);
+  const nextRechargeMs: number | null = nextWindow?.startMs ?? null;
+
+  // morningPvSurplusP90Kwh — the over-buy ceiling headroom. Sum over the next
+  // solar day (window-end → +14 h) of max(0, P90 PV − forecast load). P90 PV =
+  // the probabilistic p90W (best case) — the deliberate asymmetry so we never
+  // over-buy into morning-PV clipping. null when the band doesn't cover it.
+  let morningSurplusKwh = 0;
+  let morningHasData = false;
+  const morningEndMs = windowEndMs + 14 * HOUR_MS;
+  if (window) {
+    for (const pb of prob?.hours ?? []) {
+      if (pb.ts < windowEndMs || pb.ts >= morningEndMs) continue;
+      const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
+      if (!fh) continue;
+      morningHasData = true;
+      morningSurplusKwh += Math.max(0, pb.p90W - fh.forecastLoadW) / 1000;
+    }
+  }
+  const morningPvSurplusP90Kwh = morningHasData ? round2(morningSurplusKwh) : null;
+
+  // Committed-EV worst case: next predicted session start (>= now-hour), the p90
+  // session energy, and the observed session count (tail-sufficiency).
+  let ev: NightEvCommit | null = null;
+  if (evReport) {
+    const nowHour = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+    const candidates = (evReport.upcomingNext24h ?? [])
+      .filter((e) => e.ts + (e.durationHours ?? 0) * HOUR_MS > nowMs) // ongoing or future
+      .sort((a, b) => a.ts - b.ts);
+    ev = {
+      p90SessionKwh: evReport.p90SessionKwh ?? null,
+      chargeStartMs: candidates.length ? Math.max(candidates[0].ts, nowHour) : null,
+      sessionCount: evReport.sessionsObserved ?? 0,
+    };
+  }
+
+  // Confidence tier — derived from the real-weather horizon vs the plan horizon.
+  // forecast = the whole post-window horizon is weather-backed; climatology =
+  // no real forecast / the window itself is past the weather horizon; mixed =
+  // part of the horizon runs past it (weekend carry beyond the ~4-day forecast).
+  let weatherHorizonEndMs: number | null = null;
+  try {
+    const wx = await getWeather();
+    if (wx && wx.hours.length) weatherHorizonEndMs = Math.max(...wx.hours.map((h) => h.ts)) + HOUR_MS;
+  } catch { /* weather optional — null ⇒ climatology below */ }
+  const horizonEndMs = nextRechargeMs ?? (window ? window.endMs + 24 * HOUR_MS : nowMs + 24 * HOUR_MS);
+  let confidenceTier: 'forecast' | 'mixed' | 'climatology';
+  if (!(dayAhead?.hasWeather === true) || weatherHorizonEndMs == null) {
+    confidenceTier = 'climatology';
+  } else if (horizonEndMs <= weatherHorizonEndMs) {
+    confidenceTier = 'forecast';
+  } else if ((window?.startMs ?? nowMs) >= weatherHorizonEndMs) {
+    confidenceTier = 'climatology';
+  } else {
+    confidenceTier = 'mixed';
+  }
+
+  const forecastPresent = bandHours.length > 0;
+
+  const deps: NightChargeInputDeps = {
+    nowMs,
+    fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
+    legEff, dischargeEff, chargeCapKw,
+    periodIdAt, cheapPeriodId: NIGHT_CHEAP_PERIOD_ID, windowScanHours: 30,
+    bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
+    ev, evMaxLoadW,
+    confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
+    morningPvSurplusP90Kwh, minBuyKwh,
+  };
+
+  const inputs = buildNightChargeInputs(deps);
+  const plan = computeNightChargePlan(inputs);
+  setLatestNightChargePlan(plan);
+
+  // Ledger diagnostics computed over the authoritative 24 h band (where the
+  // P10/P50/P90 percentiles are actually defined).
+  let pvP10 = 0, pvP50 = 0, pvP90 = 0, loadP50 = 0;
+  for (const pb of prob?.hours ?? []) {
+    const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
+    if (!fh) continue;
+    pvP10 += pb.p10W / 1000;
+    pvP50 += pb.p50W / 1000;
+    pvP90 += pb.p90W / 1000;
+    loadP50 += fh.forecastLoadW / 1000;
+  }
+  const season = seasonOf(localParts(nowMs, tariffModel.timezone).month, tariffModel.summerMonths);
+  const tariffSnapshot = JSON.stringify({
+    planId: tariffModel.planId,
+    season,
+    periodIdNow: periodIdAt(nowMs),
+    ratesConfirmed: tariffModel.ratesConfirmed,
+    centsByTier: {
+      onPeak: tariffModel.periods.find((p) => p.id === 'on_peak')?.centsBySeason[season] ?? null,
+      overnight: tariffModel.periods.find((p) => p.id === 'overnight')?.centsBySeason[season] ?? null,
+      superOffPeak: tariffModel.periods.find((p) => p.id === 'super_off_peak')?.centsBySeason[season] ?? null,
+      offPeak: tariffModel.offPeak.centsBySeason[season] ?? null,
+    },
+    demandUsdPerKw: null,
+  });
+
+  const extras: NightPlanExtras = {
+    socNowPct,
+    fullKwh,
+    cushionPct,
+    cushionKwh: round2((fullKwh * cushionPct) / 100),
+    horizonHours: inputs.horizon.length,
+    pvP10Kwh: round2(pvP10), pvP50Kwh: round2(pvP50), pvP90Kwh: round2(pvP90),
+    loadP10Kwh: round2(loadP50 / loadP90Factor), loadP50Kwh: round2(loadP50), loadP90Kwh: round2(loadP50 * loadP90Factor),
+    evP90SessionKwh: ev?.p90SessionKwh ?? 0,
+    evSessionCount: ev?.sessionCount ?? 0,
+    bandSigmaCal: prob?.bandSigmaCal ?? 1,
+    calScoredDays,
+    forecastBasis: confidenceTier,
+    weatherCovered: dayAhead?.hasWeather ? 1 : 0,
+    tariffSnapshot,
+  };
+
+  return { plan, extras };
+}
+
+/** Map a fresh plan + extras → the frozen NightLedgerRow PLAN columns and upsert.
+ *  For an incomplete-basis plan the trajectory fields are OMITTED (→ NULL) so the
+ *  scorer can detect "no basis" via a null min_proj_soc_pct and mark scored=0. */
+function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: NightPlanExtras): void {
+  const row: Partial<NightLedgerRow> & { plan_date: string } = {
+    plan_date: planDate,
+    issued_at_ms: plan.generatedAt,
+    algo_version: String(CURRENT_ALGO_VERSION),
+    posture: 'advisory',
+    objective: plan.objective,
+    rationale: plan.rationale,
+    confidence_tier: plan.confidenceTier,
+    horizon_hours: extras.horizonHours,
+    soc_now_pct: round1(extras.socNowPct),
+    target_soc_pct: plan.targetSocPct ?? 0,
+    buy_kwh: plan.buyKwh ?? 0,
+    required_extra_kwh: plan.requiredExtraKwh ?? 0,
+    reserve_floor_pct: plan.reserveFloorPct,
+    cushion_pct: plan.cushionPct,
+    cushion_kwh: extras.cushionKwh,
+    binding_cap: plan.bindingCap,
+    pv_p10_kwh: extras.pvP10Kwh,
+    pv_p50_kwh: extras.pvP50Kwh,
+    pv_p90_kwh: extras.pvP90Kwh,
+    load_p10_kwh: extras.loadP10Kwh,
+    load_p50_kwh: extras.loadP50Kwh,
+    load_p90_kwh: extras.loadP90Kwh,
+    ev_p90_session_kwh: round2(extras.evP90SessionKwh),
+    ev_session_count: extras.evSessionCount,
+    pool_full_kwh: round2(extras.fullKwh),
+    band_sigma_cal: extras.bandSigmaCal,
+    cal_scored_days: extras.calScoredDays,
+    forecast_basis: extras.forecastBasis,
+    weather_covered: extras.weatherCovered,
+    tariff_snapshot: extras.tariffSnapshot,
+  };
+  // Only a plan with a real trajectory records min_proj_soc — a null-basis /
+  // insufficient plan leaves it NULL so the scorer recognises "no basis".
+  if (plan.minProjSocPct != null) {
+    row.min_proj_soc_pct = plan.minProjSocPct;
+    if (plan.minProjSocTsMs != null) row.min_proj_soc_ts_ms = plan.minProjSocTsMs;
+  }
+  recorder.recordNightPlan(row);
+}
+
+/** Trapezoidal integral of a watts series (Wh) over [startMs, endMs], skipping
+ *  gaps > 1 h. `positiveOnly` clamps each sample ≥ 0 (grid IMPORT accounting). */
+function integrateWh(pts: Array<{ ts: number; value: number }>, positiveOnly: boolean): number {
+  let wh = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const dtH = (pts[i].ts - pts[i - 1].ts) / HOUR_MS;
+    if (dtH <= 0 || dtH > 1) continue; // gap — don't integrate across it
+    const a = positiveOnly ? Math.max(0, pts[i - 1].value) : pts[i - 1].value;
+    const b = positiveOnly ? Math.max(0, pts[i].value) : pts[i].value;
+    wh += ((a + b) / 2) * dtH;
+  }
+  return wh;
+}
+
+/** Fraction of [startMs, endMs) covered by samples, by 5-min buckets present. */
+function coverageFrac(pts: Array<{ ts: number; value: number }>, startMs: number, endMs: number): number {
+  const span = endMs - startMs;
+  if (span <= 0) return 0;
+  const bucketMs = 5 * 60_000;
+  const total = Math.ceil(span / bucketMs);
+  if (total <= 0) return 0;
+  const seen = new Set<number>();
+  for (const p of pts) {
+    if (p.ts < startMs || p.ts >= endMs) continue;
+    seen.add(Math.floor((p.ts - startMs) / bucketMs));
+  }
+  return Math.min(1, seen.size / total);
+}
+
+/**
+ * Score YESTERDAY's plan now that its charge window + 4–7pm have both closed
+ * (design §3.1). Measures the actuals we CAN defensibly source from history and
+ * records them; the plan-trajectory floor verdict is scored on the plan's own
+ * simulated trajectory (§3.3), never on baseline telemetry.
+ *
+ * ★ FAIL-SAFE (design §"outcome actuals"): in advisory phase the home runs
+ *   WITHOUT the pre-buy, and on a grid-tied home its own overnight import can
+ *   prop the SoC — so the realized-need buy is only a defensible hindsight
+ *   counterfactual on a CLEAN night (near-zero window import). On a propped or
+ *   low-coverage night we set scored=0 with an explicit score_notes rather than
+ *   fabricate a safety-critical under-buy number. coverage < 0.9 ⇒ scored=0.
+ */
+function scoreYesterdayNightPlan(nowMs: number): void {
+  const shp2 = findShp2(store.get().devices);
+  if (!shp2 || shp2.projection?.kind !== 'shp2') return; // can't source actuals
+  const shp2Sn = shp2.sn;
+
+  const yDate = localParts(nowMs - 86_400_000, 'America/Phoenix').ymd;
+  const rows = recorder.readNightLedger(2);
+  const y = rows.find((r) => r.plan_date === yDate);
+  if (!y) return; // no plan issued yesterday (first-run / job missed)
+  if (y.outcome_captured_at_ms != null) return; // already scored — idempotent
+
+  // The scored night's clock windows, resolved in America/Phoenix.
+  const yLocal = localParts(nowMs - 86_400_000, 'America/Phoenix');
+  const dayStartUtc = Date.UTC(yLocal.year, yLocal.month - 1, yLocal.day) + 7 * HOUR_MS; // Phoenix = UTC-7 (no DST)
+  const onpeakStart = dayStartUtc + 16 * HOUR_MS;              // yesterday 16:00
+  const onpeakEnd = dayStartUtc + 19 * HOUR_MS;                // yesterday 19:00
+  const windowStart = dayStartUtc + 23 * HOUR_MS;             // yesterday 23:00
+  const windowEnd = dayStartUtc + 24 * HOUR_MS + 5 * HOUR_MS; // today 05:00
+  const scoreFrom = windowEnd;                                // plan trajectory scores post-05:00
+  const spanEnd = Math.min(nowMs, dayStartUtc + 24 * HOUR_MS + 21 * HOUR_MS); // → ~today 21:00
+  // PV/load TOTALS are compared against the plan's forecast P50, which covered
+  // the ~24 h from issue (~21:30). Integrate actuals over the SAME [issue, +24 h]
+  // horizon so pv_err_frac / load_err_frac are like-for-like, not the charge-window span.
+  const fcSpanStart = y.issued_at_ms;
+  const fcSpanEnd = Math.min(nowMs, y.issued_at_ms + 24 * HOUR_MS);
+
+  const gridWin = recorder.query(shp2Sn, 'grid_home_w', windowStart, windowEnd);
+  const gridPeak = recorder.query(shp2Sn, 'grid_home_w', onpeakStart, onpeakEnd);
+  const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
+  const loadPts = recorder.query(shp2Sn, 'panel_load', fcSpanStart, fcSpanEnd);
+
+  const windowImportKwh = round2(integrateWh(gridWin, true) / 1000);
+  const onpeakImportKwh = gridPeak.length ? round2(integrateWh(gridPeak, true) / 1000) : null;
+  const winCoverage = round2(coverageFrac(gridWin, windowStart, windowEnd));
+
+  // Actual PV = summed pv_total over the SHP2-connected home DPUs (the same
+  // basis the forecast PV is built from); actual load = SHP2 panel_load. Both
+  // over the forecast horizon [issue, +24 h].
+  const homeSns = shp2ConnectedDpuSns(store.get().devices);
+  let actualPvKwh: number | null = null;
+  if (homeSns.size) {
+    let pvWh = 0;
+    for (const sn of homeSns) pvWh += integrateWh(recorder.query(sn, 'pv_total', fcSpanStart, fcSpanEnd), true);
+    actualPvKwh = round2(pvWh / 1000);
+  }
+  const actualLoadKwh = loadPts.length ? round2(integrateWh(loadPts, false) / 1000) : null;
+
+  // Actual min SoC over the scored trajectory span (raw telemetry; used only for
+  // soc_min_err, NOT the floor verdict — §3.3).
+  let actualMinSocPct: number | null = null;
+  let actualMinSocTsMs: number | null = null;
+  for (const p of socPts) {
+    if (actualMinSocPct == null || p.value < actualMinSocPct) { actualMinSocPct = p.value; actualMinSocTsMs = p.ts; }
+  }
+  if (actualMinSocPct != null) actualMinSocPct = round1(actualMinSocPct);
+
+  const hadBasis = y.min_proj_soc_pct != null; // null ⇒ plan had no trajectory
+  const cleanBaseline = windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1); // near-zero overnight import
+  const covOk = winCoverage >= 0.9;
+
+  // Realized-need buy = the meter energy that WOULD have held floor+cushion,
+  // measured from the CLEAN no-buy trough. Defensible only on a clean, covered
+  // night with a coherent min-SoC read; else null → buy_err null → scored=0.
+  let realizedNeedBuyKwh: number | null = null;
+  let scored = 0;
+  let scoreNotes: string;
+  if (!hadBasis) {
+    scoreNotes = 'not scored — plan basis was incomplete (no trajectory to score).';
+  } else if (!covOk) {
+    scoreNotes = `not scored — overnight grid_home_w coverage ${(winCoverage * 100).toFixed(0)}% < 90% (MNAR-excluded).`;
+  } else if (actualMinSocPct == null) {
+    scoreNotes = 'not scored — no backup_pct telemetry over the scored span.';
+  } else if (!cleanBaseline) {
+    scoreNotes = `not scored — baseline propped by ${windowImportKwh} kWh overnight grid import; realized-need not defensible without an actuated counterfactual (§5).`;
+  } else {
+    const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
+    const targetFloorKwh = ((y.reserve_floor_pct + y.cushion_pct) / 100) * y.pool_full_kwh;
+    const actualMinPackKwh = (actualMinSocPct / 100) * y.pool_full_kwh;
+    realizedNeedBuyKwh = round2(Math.max(0, targetFloorKwh - actualMinPackKwh) / legEff);
+    scored = 1;
+    scoreNotes = 'scored — clean islanded baseline; realized-need from measured no-buy trough.';
+  }
+
+  // Reconstruct just the plan fields the scorer reads.
+  const yPlan: NightChargePlan = {
+    generatedAt: y.issued_at_ms,
+    basisComplete: hadBasis,
+    objective: y.objective as NightChargeObjective,
+    chargeTonight: (y.buy_kwh ?? 0) > 0,
+    buyKwh: y.buy_kwh ?? null,
+    targetSocPct: y.target_soc_pct ?? null,
+    requiredExtraKwh: y.required_extra_kwh ?? null,
+    bindingCap: (y.binding_cap as BindingCap) ?? null,
+    cushionShortfall: false,
+    minProjSocPct: y.min_proj_soc_pct ?? null,
+    minProjSocTsMs: y.min_proj_soc_ts_ms ?? null,
+    baselineMinSocPct: null,
+    confidenceTier: y.confidence_tier as NightChargePlan['confidenceTier'],
+    window: null,
+    reserveFloorPct: y.reserve_floor_pct,
+    cushionPct: y.cushion_pct,
+    rationale: y.rationale ?? '',
+  };
+  const actuals: NightOutcomeActuals = {
+    actualPvKwh, actualLoadKwh, actualMinSocPct, actualMinSocTsMs,
+    realizedNeedBuyKwh,
+    forecastPvKwh: y.pv_p50_kwh ?? null,
+    forecastLoadKwh: y.load_p50_kwh ?? null,
+  };
+  const score = scoreNightOutcome(yPlan, actuals);
+
+  const inBand = (a: number | null, lo: number | null, hi: number | null): number | null =>
+    a == null || lo == null || hi == null ? null : (a >= lo && a <= hi ? 1 : 0);
+  const cushionBreached =
+    actualMinSocPct == null ? null : (actualMinSocPct < y.reserve_floor_pct + y.cushion_pct ? 1 : 0);
+
+  recorder.recordNightOutcome(yDate, {
+    outcome_captured_at_ms: nowMs,
+    actual_pv_kwh: actualPvKwh,
+    actual_load_kwh: actualLoadKwh,
+    actual_window_import_kwh: windowImportKwh,
+    actual_onpeak_import_kwh: onpeakImportKwh,
+    onpeak_import_occurred: onpeakImportKwh == null ? null : (onpeakImportKwh > 0.05 ? 1 : 0),
+    actual_min_soc_pct: actualMinSocPct,
+    actual_min_soc_ts_ms: actualMinSocTsMs,
+    plan_traj_floor_breached: score.planTrajFloorBreached == null ? null : (score.planTrajFloorBreached ? 1 : 0),
+    cushion_breached: cushionBreached,
+    grid_home_coverage_frac: winCoverage,
+    scored,
+    score_notes: scoreNotes,
+    pv_err_frac: score.pvErrFrac,
+    pv_in_band: inBand(actualPvKwh, y.pv_p10_kwh, y.pv_p90_kwh),
+    load_err_frac: score.loadErrFrac,
+    load_in_band: inBand(actualLoadKwh, y.load_p10_kwh, y.load_p90_kwh),
+    buy_err_kwh: score.buyErrKwh,
+    soc_min_err_pct: score.socMinErrPct,
+  });
+}
+
+/**
+ * The single ~21:30 America/Phoenix evening job (design §3.2). Day-keyed +
+ * restart-persistent latch so it fires at most once per Phoenix calendar day
+ * across the daily power-cycle. In order: recompute fresh plan → record plan row
+ * → score yesterday → recompute readiness → send ONE notification. Latches only
+ * AFTER a successful send. Guarded end-to-end; a plan pushed after charging
+ * should begin is worse than none, so past 23:00 it log-and-latches.
+ */
+async function runNightChargeEveningJob(): Promise<void> {
+  const nowMs = Date.now();
+  const today = localParts(nowMs, 'America/Phoenix').ymd;
+  const latch = readNightChargeLatch();
+  if (latch.lastNotifyDay === today) return; // already fired today (survives restart)
+
+  const nowMin = phoenixMinuteOfDay(nowMs);
+  const fireMin = NIGHT_CHARGE_NOTIFY_HOUR * 60 + NIGHT_CHARGE_NOTIFY_MINUTE;
+  const cutoffMin = 23 * 60; // catch-up window [fire, 23:00)
+  if (nowMin < fireMin) return; // too early
+  if (nowMin >= cutoffMin) {
+    app.log.warn(`night-charge: evening job missed today's ${NIGHT_CHARGE_NOTIFY_HOUR}:${String(NIGHT_CHARGE_NOTIFY_MINUTE).padStart(2, '0')}–23:00 window; skipping the notify + latching (a late plan is worse than none).`);
+    // Still SCORE yesterday + refresh readiness even when tonight's NOTIFY window
+    // was missed — otherwise a missed evening job permanently drops the prior
+    // night's outcome from the ledger/gate, an uncounted MNAR exclusion that
+    // biases the write-readiness reduction (the tick below also does this, but
+    // do it here so a same-day miss is captured immediately).
+    try { scoreYesterdayNightPlan(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
+    try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch { /* fail-safe */ }
+    writeNightChargeLatch({ lastNotifyDay: today });
+    return;
+  }
+
+  try {
+    // (a) recompute fresh; (b) record the plan row (when a plan was produced).
+    const fresh = await recomputeNightChargePlan();
+    if (fresh) recordNightPlanRow(today, fresh.plan, fresh.extras);
+
+    // (c) score yesterday (independent of today's SHP2 state).
+    try { scoreYesterdayNightPlan(nowMs); }
+    catch (e: any) { app.log.debug(`night-charge: yesterday scoring skipped (${e?.message ?? e})`); }
+
+    // (d) recompute readiness over the full ledger (400 d ≫ the in-season window).
+    try {
+      const readiness = computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION });
+      setLatestReadiness(readiness);
+    } catch (e: any) { app.log.debug(`night-charge: readiness recompute skipped (${e?.message ?? e})`); }
+
+    // (e) send ONE notification, honoring NIGHT_CHARGE_NOTIFY_ON_HOLD.
+    const plan = fresh?.plan ?? null;
+    const shape: 'charge' | 'hold' | 'insufficient_basis' =
+      plan == null || !plan.basisComplete ? 'insufficient_basis' : (plan.chargeTonight ? 'charge' : 'hold');
+    const notifyOnHold = process.env.NIGHT_CHARGE_NOTIFY_ON_HOLD !== 'false';
+    if (shape === 'hold' && !notifyOnHold) {
+      // Suppressed by owner config; still latch so we don't retry all night.
+      writeNightChargeLatch({ lastNotifyDay: today });
+      app.log.info('night-charge: hold plan — notification suppressed (NIGHT_CHARGE_NOTIFY_ON_HOLD=false); latched.');
+      return;
+    }
+    const cfg = loadNotifyConfig();
+    const msg = buildNightChargeMessage(plan, shape);
+    await sendNotification(cfg, msg); // direct — bypasses quiet-hours/min-severity (I10)
+    writeNightChargeLatch({ lastNotifyDay: today }); // latch AFTER a successful send
+    app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);
+  } catch (e: any) {
+    // Do NOT latch on failure — retry next minute-tick within the window.
+    app.log.warn(`night-charge: evening job failed, will retry within the window (${e?.message ?? e})`);
+  }
+}
+
+if (nightChargeEnabled) {
+  // Periodic recompute (30 min, unref'd) so /api/ha-state + status always have a
+  // ≤12 h-fresh plan even on days the evening job hasn't fired yet. Best-effort.
+  const nightRecomputeTick = setInterval(() => {
+    void (async () => {
+      try { await recomputeNightChargePlan(); }
+      catch (e: any) { app.log.debug(`night-charge: recompute tick skipped (${e?.message ?? e})`); }
+      // Score yesterday + refresh readiness on the tick too (idempotent — the
+      // scorer returns once outcome_captured_at_ms is set) so the ledger and the
+      // write-readiness reduction stay current EVEN on a day the evening notify
+      // job never fired — decoupling outcome capture from the notify window so a
+      // missed window can't silently drop a night (an MNAR bias in the gate).
+      try { scoreYesterdayNightPlan(Date.now()); }
+      catch (e: any) { app.log.debug(`night-charge: tick scoring skipped (${e?.message ?? e})`); }
+      try {
+        setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
+      } catch { /* fail-safe: readiness stays at its last value / LEARNING */ }
+    })();
+  }, 30 * 60 * 1000);
+  nightRecomputeTick.unref();
+  // A gentle first recompute a minute after boot (analytics worker warm) so the
+  // holder isn't empty before the first scheduled tick.
+  const nightWarm = setTimeout(() => {
+    void recomputeNightChargePlan().catch((e: any) => app.log.debug(`night-charge: warm recompute skipped (${e?.message ?? e})`));
+  }, 60 * 1000);
+  nightWarm.unref();
+  // Evening job — minute-granular gate + day-keyed restart-persistent latch.
+  const nightEveningTick = setInterval(() => { void runNightChargeEveningJob(); }, 60 * 1000);
+  nightEveningTick.unref();
+}
+
+// Read-only advisory status (design §4.4). No auth: exposes no secrets, actuates
+// nothing. Mirrors /api/load-shedding/status. reserveFloorPercent is the SAME
+// projection.backupReserveSoc the floor alarm defends — never a divergent copy.
+app.get('/api/night-charge/status', async () => {
+  const plan = getLatestNightChargePlan();
+  const shp2 = findShp2(store.get().devices);
+  const sp: any = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection : null;
+  const latch = readNightChargeLatch();
+  return {
+    enabled: nightChargeEnabled,
+    mode: 'advisory',
+    window: plan?.window ?? null,
+    reserveFloorPercent: sp?.backupReserveSoc ?? null,
+    confidence: plan?.confidenceTier ?? null,
+    notify: { hour: NIGHT_CHARGE_NOTIFY_HOUR, minute: NIGHT_CHARGE_NOTIFY_MINUTE, lastNotifyDay: latch.lastNotifyDay },
+    plan,
+    readiness: getLatestReadiness(),
+    recentOutcomes: recorder.readNightLedger(7),
+  };
+});
 
 // Diagnostics: the analytics worker is the cache warmer now (self-warming
 // inside a worker thread). Endpoint kept for backward-compat.

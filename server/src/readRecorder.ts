@@ -1,6 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { resolve } from 'node:path';
-import type { Recorder, LifetimeTotals } from './recorder.js';
+import type { Recorder, LifetimeTotals, NightLedgerRow, NightCalibration } from './recorder.js';
+// v1.38.0 (WS2) — Phoenix calendar-date resolution for the ledger read cutoff.
+// tariff.ts is pure/import-free (no circular dependency).
+import { localParts } from './tariff.js';
 
 /**
  * v0.10.0 — read-only Recorder for the analytics worker thread.
@@ -114,6 +117,33 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     }
   };
 
+  // v1.38.0 (WS2) — night-charge ledger reads over the SAME read connection.
+  // Prepared lazily + wrapped in try/catch: on a brand-new DB the writer may not
+  // have created the tables yet, and an eager prepare() would throw at
+  // construction (mirrors getLifetimeTotals). Fail-safe to empty/null.
+  let nightLedgerStmt: ReturnType<typeof db.prepare> | null = null;
+  const readNightLedger = (sinceDays: number): NightLedgerRow[] => {
+    try {
+      nightLedgerStmt ??= db.prepare(
+        `SELECT * FROM night_charge_ledger WHERE plan_date >= ? ORDER BY plan_date ASC`,
+      );
+      const cutoffMs = Date.now() - Math.max(0, sinceDays) * 86_400_000;
+      const cutoff = localParts(cutoffMs, 'America/Phoenix').ymd;
+      return nightLedgerStmt.all(cutoff) as unknown as NightLedgerRow[];
+    } catch {
+      return [];
+    }
+  };
+  let nightCalStmt: ReturnType<typeof db.prepare> | null = null;
+  const readNightCalibration = (): NightCalibration | null => {
+    try {
+      nightCalStmt ??= db.prepare(`SELECT * FROM night_charge_calibration WHERE id = 1`);
+      return (nightCalStmt.get() as NightCalibration | undefined) ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   return {
     // ── write path: stubbed (worker never writes) ──
     insertSnapshot: () => {},
@@ -121,6 +151,12 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
     // v1.31.0 — the forecast archive is written by the MAIN process's GHI
     // persistence tick; a worker-side call would be a wiring bug, so no-op.
     recordForecastArchive: () => {},
+    // v1.38.0 (WS2) — night-charge ledger/calibration writes happen on the MAIN
+    // process's evening job; a worker-side call would be a wiring bug, so no-op
+    // (matches the recordForecastArchive stub precedent).
+    recordNightPlan: () => {},
+    recordNightOutcome: () => {},
+    upsertNightCalibration: () => {},
     getLifetimeTotals,
     listLifetimeKeys,
     // v0.45.0 — battery-lifetime diagnostics live on the write-path recorder
@@ -171,6 +207,9 @@ export function createReadRecorder(dbPathInput?: string): Recorder {
       return out;
     },
     listMetrics: (sn) => (metricsStmt.all(sn) as Array<{ metric: string }>).map((r) => r.metric),
+    // v1.38.0 (WS2) — real ledger reads (the worker/reports path reduces over these).
+    readNightLedger,
+    readNightCalibration,
     close: () => db.close(),
   };
 }

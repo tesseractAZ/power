@@ -4,6 +4,11 @@ import { fmtPct, fmtW } from '../format';
 // here: EV-charging window prediction + NWS active alerts (storm-prep). Both
 // are model-driven and marked with the PredictiveBadge inside the card.
 import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
+// v1.38.0 (night-charge advisory, WS4) — the advisor's TONIGHT'S PLAN card,
+// self-fetching and SHP2-availability-independent. Mounted just ABOVE the SHP2
+// native "Charge schedule (time-of-use)" card so the advisory recommendation and
+// the device's own schedule sit together but are never confused.
+import { NightChargeCard } from '../cards/NightChargeCard';
 import { SectionHeader } from '../components/sections';
 
 /**
@@ -91,6 +96,11 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
           #1 = highest priority (last to be shed, kept powered longest). Higher numbers shed earlier when backup runs low.
         </div>
       </div>
+
+      {/* Tonight's night-charge advisory (our planner — distinct from the SHP2's
+          native TOU schedule below). Self-fetching; renders its own unavailable
+          shape when no plan is live. */}
+      <NightChargeCard />
 
       {/* Charge schedule */}
       <div className="card">

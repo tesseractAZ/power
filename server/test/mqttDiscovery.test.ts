@@ -307,6 +307,25 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
   assert.ok(sofStart > 0 && sofEnd > sofStart, 'could not locate systemOutageFields return block');
   for (const m of alertsSrc.slice(sofStart, sofEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
 
+  // … plus the keys spread in from nightChargeStateFields() (nightChargeAdvisor.ts,
+  // v1.38.0) and nightChargeGateFields() (nightChargeGate.ts) — the night-charge
+  // advisory tiles, single-sourced with /api/ha-state exactly like the two above.
+  const ncSrc = readFileSync(resolve(__dir, '../src/nightChargeAdvisor.ts'), 'utf8');
+  const ncStart = ncSrc.indexOf('return {', ncSrc.indexOf('function nightChargeStateFields'));
+  const ncEnd = ncSrc.indexOf('};', ncStart);
+  assert.ok(ncStart > 0 && ncEnd > ncStart, 'could not locate nightChargeStateFields return block');
+  for (const m of ncSrc.slice(ncStart, ncEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+  const gateSrc = readFileSync(resolve(__dir, '../src/nightChargeGate.ts'), 'utf8');
+  // nightChargeGateFields has two return literals (null-guard + the live path);
+  // harvest BOTH so a key emitted on only one branch still counts.
+  let gStart = gateSrc.indexOf('return {', gateSrc.indexOf('function nightChargeGateFields'));
+  assert.ok(gStart > 0, 'could not locate nightChargeGateFields return block');
+  while (gStart > 0) {
+    const gEnd = gateSrc.indexOf('};', gStart);
+    for (const m of gateSrc.slice(gStart, gEnd).matchAll(/^\s+([a-z][a-z0-9_]*):/gm)) emitted.add(m[1]);
+    gStart = gateSrc.indexOf('return {', gEnd);
+  }
+
   const missing = referenced.filter((k) => !emitted.has(k)).sort();
   assert.deepEqual(missing, [], `Sensors reference value_json keys buildState never emits: ${missing.join(', ')}`);
 });

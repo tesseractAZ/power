@@ -415,3 +415,423 @@ function round2(n: number): number { return Math.round(n * 100) / 100; }
 /** Hour-of-day hint for the rationale string (no TZ math — display only; the
  *  window bounds are already resolved in Phoenix upstream). */
 function fmtLocalHint(_ms: number): string { return 'the window close'; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * WS1 — advisor plumbing (module holder, state fields, input assembly, scoring,
+ * and the createNightChargeAdvisor wrapper). Everything below is ADDITIVE to the
+ * pure sizing brain above; it never touches computeNightChargePlan.
+ *
+ * Design: docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md §2 (one planner, scored ==
+ * actuated), §3.1 (score columns), §4.1 (12 h staleness state fields). Posture
+ * stays READ-ONLY / NO-WRITE: nothing here produces state the floor/runway/SoC
+ * alarm spine depends on, and every surface emits NULL over a fabricated number.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+// --- Module holder (latest plan) for the API + MQTT + notify surfaces ---------
+// Mirrors loadShedAdvisor's getLatestAdvisory/setLatestAdvisory holder.
+let latestPlan: NightChargePlan | null = null;
+export function getLatestNightChargePlan(): NightChargePlan | null {
+  return latestPlan;
+}
+export function setLatestNightChargePlan(p: NightChargePlan): void {
+  latestPlan = p;
+}
+
+/** 12 h staleness guard (design §4.1 / I12). Past this, a plan is not fresh —
+ *  its numeric fields read null and charge_tonight reverts to false so a dead or
+ *  wedged advisor (the Pi power-cycles daily) can never leave a stale ON. The HA
+ *  layer additionally sets expire_after so the retained topic goes UNAVAILABLE. */
+const PLAN_STALENESS_MS = 43_200_000; // 12 h
+
+/** Format a UTC instant as "HH:MM" in America/Phoenix (design: America/Phoenix
+ *  via Intl, never the host clock; Phoenix has no DST but the resolver does not
+ *  rely on that). */
+function fmtPhoenixHm(ms: number): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Phoenix',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(ms));
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  const hh = get('hour') || '00';
+  const mm = get('minute') || '00';
+  return `${hh}:${mm}`;
+}
+
+/**
+ * Flat fields published into the MQTT state payload + /api/ha-state so the
+ * owner's HA automation can gate on the recommendation (advisory actuation
+ * model). 12 h staleness guard (design §4.1): numeric fields are null unless the
+ * plan is fresh AND its basis is complete; charge_tonight is STRICTLY false
+ * unless fresh && plan.chargeTonight (never null-as-true). window_start/_end are
+ * "HH:MM" America/Phoenix from plan.window, null when there is no window.
+ */
+export function nightChargeStateFields(
+  plan: NightChargePlan | null,
+  nowMs: number = Date.now(),
+): {
+  night_charge_target_soc_percent: number | null;
+  night_charge_buy_kwh: number | null;
+  night_charge_window_start: string | null;
+  night_charge_window_end: string | null;
+  charge_tonight: boolean;
+} {
+  const fresh = !!plan && plan.basisComplete && nowMs - plan.generatedAt < PLAN_STALENESS_MS;
+  const win = plan?.window ?? null;
+  return {
+    night_charge_target_soc_percent: fresh ? plan!.targetSocPct : null,
+    night_charge_buy_kwh: fresh ? plan!.buyKwh : null,
+    // Window is informational (the automation gates on availability+charge_tonight
+    // AND honors this window). Surfaced from plan.window whenever present; null on
+    // no window / null plan. HA expire_after (§I12) covers the dead-advisor case.
+    night_charge_window_start: win ? fmtPhoenixHm(win.startMs) : null,
+    night_charge_window_end: win ? fmtPhoenixHm(win.endMs) : null,
+    charge_tonight: fresh ? plan!.chargeTonight === true : false,
+  };
+}
+
+// --- buildNightChargeInputs: assemble worst-case inputs from injected pieces ---
+// Design §2.3 (conservative worst-case: P10 PV, P90 load, committed-EV block,
+// EV de-dup) + §2.4 (multi-day horizon, daily P10/P90 widened by √daysAhead) +
+// §1 (cheap-window resolution via a tariff period resolver). Everything is
+// INJECTED — no analytics/tariff import — so the assembly is unit-provable.
+
+/** One hour of the injected within-horizon probabilistic band. `loadP90W` is the
+ *  P90 (high) load; when the base curve embeds historical EV, `embeddedEvW` is
+ *  the historical-EV watts to subtract so the explicit committed-EV block is not
+ *  double-counted (§2.3). Beyond the band, hours are synthesized from rollups. */
+export interface NightForecastHour {
+  ts: number;
+  pvP10W: number;
+  loadP90W: number;
+  /** Historical EV watts embedded in loadP90W to de-dup (default 0 = EV-clean). */
+  embeddedEvW?: number;
+}
+
+/** A future day's hourly trajectory (multi-day sim rollup), used beyond the 24 h
+ *  band. `daysAhead` (1,2,3…) widens the daily P10/P90 by √daysAhead (§2.4). */
+export interface NightDayRollup {
+  daysAhead: number;
+  hours: { ts: number; pvW: number; loadW: number }[];
+}
+
+/** The committed-EV worst case: place `p90SessionKwh` (NOT the prob-weighted
+ *  expected value — §2.3) as a block starting at the predicted charge hour. */
+export interface NightEvCommit {
+  p90SessionKwh: number | null;
+  chargeStartMs: number | null;
+  sessionCount: number;
+}
+
+export interface NightChargeInputDeps {
+  nowMs: number;
+
+  // Battery state (from the SHP2 projection upstream).
+  fullKwh: number;
+  socNowPct: number;
+  reserveFloorPct: number;
+  cushionPct: number;
+  socCoherent: boolean;
+
+  // Verified efficiency constants + charge feasibility (INJECTED, never hard-coded).
+  legEff: number; // √DISPATCH_ROUND_TRIP_EFFICIENCY
+  dischargeEff: number; // RUNWAY_DISCHARGE_EFFICIENCY
+  chargeCapKw: number;
+
+  // Cheap-window resolution: a tariff period resolver (rateAt(...).periodId) and
+  // the id of the OVERNIGHT (23:00–05:00) cheap period. No tariff import here.
+  periodIdAt: (tsMs: number) => string;
+  cheapPeriodId: string;
+  windowScanHours?: number;
+
+  // Forecast basis.
+  bandHours: NightForecastHour[]; // within-24 h probabilistic band (authoritative)
+  dayRollups: NightDayRollup[]; // beyond day-0, for the weekend/multi-day carry
+  realizedDailyErrHalfFrac: number; // widens synthesized daily P10/P90
+  /** Horizon end (next reliable recharge). null ⇒ end after the last hour. */
+  nextRechargeMs: number | null;
+
+  // Committed-EV worst case + clamp.
+  ev: NightEvCommit | null;
+  evMaxLoadW: number; // EV_MAX_LOAD_W = 11520
+
+  // Basis-quality gates (→ basisComplete).
+  confidenceTier: 'forecast' | 'mixed' | 'climatology';
+  forecastPresent: boolean;
+  calScoredDays: number;
+  minCalScoredDays: number; // N_MIN
+  bandCoverageFrac: number;
+
+  morningPvSurplusP90Kwh: number | null;
+  minBuyKwh: number;
+}
+
+/**
+ * Resolve tonight's cheap charge window by scanning a period resolver forward
+ * for the next contiguous run of `cheapPeriodId` (the OVERNIGHT tier, §1). Hour-
+ * aligned bounds. Returns null if no cheap hour is found within `scanHours`.
+ * PURE — the resolver (rateAt-backed) is injected, resolved in Phoenix upstream.
+ */
+export function resolveCheapWindow(
+  periodIdAt: (tsMs: number) => string,
+  fromMs: number,
+  cheapPeriodId: string,
+  scanHours = 30,
+): { startMs: number; endMs: number } | null {
+  const h0 = Math.floor(fromMs / HOUR_MS) * HOUR_MS;
+  // If `fromMs` is ALREADY inside a cheap window (a recompute running during the
+  // 23:00–05:00 window), walk BACK to the window's true start so the reported
+  // window_start isn't truncated to the live mid-window clock (§4 display honesty).
+  if (periodIdAt(h0) === cheapPeriodId) {
+    let s = h0;
+    for (let i = 1; i <= scanHours; i++) {
+      const t = h0 - i * HOUR_MS;
+      if (periodIdAt(t) === cheapPeriodId) s = t;
+      else break;
+    }
+    for (let i = 1; i <= scanHours + 1; i++) {
+      const t = h0 + i * HOUR_MS;
+      if (periodIdAt(t) !== cheapPeriodId) return { startMs: s, endMs: t };
+    }
+    return { startMs: s, endMs: h0 + (scanHours + 1) * HOUR_MS };
+  }
+  let startMs: number | null = null;
+  for (let i = 0; i <= scanHours; i++) {
+    const t = h0 + i * HOUR_MS;
+    const isCheap = periodIdAt(t) === cheapPeriodId;
+    if (isCheap && startMs == null) {
+      startMs = t;
+    } else if (!isCheap && startMs != null) {
+      return { startMs, endMs: t };
+    }
+  }
+  // Ran off the scan horizon mid-window → close at the horizon edge (rare; the
+  // 6 h overnight window fits easily inside a 30 h scan).
+  if (startMs != null) return { startMs, endMs: h0 + (scanHours + 1) * HOUR_MS };
+  return null;
+}
+
+/**
+ * Assemble a NightChargeInputs from injected forecast pieces. PURE. The
+ * conservative-worst-case rules (§2.3) live here so they are provable:
+ *  - PV = P10 (band within 24 h; synthesized daily P10 = rollup PV × (1 −
+ *    errHalfFrac·√daysAhead) beyond 24 h).
+ *  - Load = P90 base with the historical-EV component DE-DUPLICATED out, then the
+ *    committed p90SessionKwh EV block placed from the predicted charge hour,
+ *    clamped per-hour at evMaxLoadW (EV_MAX_LOAD_W).
+ *  - Window from the injected tariff period resolver (OVERNIGHT tier).
+ *  - basisComplete = forecast present AND not climatology AND calScoredDays ≥
+ *    N_MIN AND band coverage ≥ 0.9; a false here forces a null plan downstream.
+ */
+export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeInputs {
+  const {
+    nowMs, fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
+    legEff, dischargeEff, chargeCapKw,
+    periodIdAt, cheapPeriodId, windowScanHours = 30,
+    bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
+    ev, evMaxLoadW,
+    confidenceTier, forecastPresent, calScoredDays, minCalScoredDays, bandCoverageFrac,
+    morningPvSurplusP90Kwh, minBuyKwh,
+  } = deps;
+
+  const window = resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
+
+  // ★ EV de-dup MUST be atomic with the re-add (§2.3): only STRIP the embedded
+  // expected-value EV from the base load when we will actually place the
+  // committed p90 EV block in its stead. If the committed block will NOT be
+  // placed (no EV report / no valid p90 session / no charge-start), KEEP the
+  // embedded expected-value EV in the load — stripping it without replacing it
+  // would erase a real charging night from the sizing basis and UNDER-buy (a
+  // safety miss). Never strip without replacing.
+  const evBlockWillPlace = !!(ev && ev.p90SessionKwh != null && ev.p90SessionKwh > 0 && ev.chargeStartMs != null);
+
+  // Merge band (authoritative) with beyond-24 h synthesized rollup hours, keyed
+  // by ts so the band always wins where both cover an hour.
+  const byTs = new Map<number, NightChargeHour>();
+  for (const h of bandHours) {
+    if (!Number.isFinite(h.ts)) continue;
+    const embedded = evBlockWillPlace ? Math.max(0, h.embeddedEvW ?? 0) : 0;
+    const loadClean = Math.max(0, h.loadP90W - embedded); // §2.3 EV de-dup (only when replacing)
+    byTs.set(h.ts, { ts: h.ts, pvP10W: Math.max(0, h.pvP10W), loadP90W: loadClean });
+  }
+  for (const dr of dayRollups) {
+    const da = Math.max(1, dr.daysAhead);
+    const widen = Math.max(0, realizedDailyErrHalfFrac) * Math.sqrt(da);
+    const p10Frac = Math.max(0, 1 - widen); // pessimistic-low PV
+    const p90Frac = 1 + widen; // pessimistic-high load
+    for (const hh of dr.hours) {
+      if (!Number.isFinite(hh.ts) || byTs.has(hh.ts)) continue;
+      byTs.set(hh.ts, {
+        ts: hh.ts,
+        pvP10W: Math.max(0, hh.pvW * p10Frac),
+        loadP90W: Math.max(0, hh.loadW * p90Frac),
+      });
+    }
+  }
+
+  const horizon = Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
+
+  // Place the committed-EV worst-case block on the EV-CLEAN base (§2.3). The
+  // p90 session energy is laid down from the predicted charge hour forward, the
+  // EV component capped at evMaxLoadW/hour, spilling to later hours if a single
+  // hour cannot hold the whole session (physically correct worst case).
+  if (evBlockWillPlace) {
+    const startHour = Math.floor(ev!.chargeStartMs! / HOUR_MS) * HOUR_MS;
+    // Only place the committed block within the next-24 h BAND region (the
+    // committed session is a next-day event). Beyond-24 h rollup hours already
+    // embed typical EV in their loadW and are NOT de-duped, so adding the block
+    // there would double-count (a — safe-direction — over-buy). Bounding to 24 h
+    // keeps the block on the EV-clean band and avoids the double count.
+    const blockEndMs = nowMs + 24 * HOUR_MS;
+    let remainingKwh = ev!.p90SessionKwh!;
+    for (const h of horizon) {
+      if (remainingKwh <= 1e-9 || h.ts >= blockEndMs) break;
+      if (h.ts < startHour) continue;
+      const addW = Math.min(Math.max(0, evMaxLoadW), remainingKwh * 1000);
+      h.loadP90W += addW;
+      remainingKwh -= addW / 1000;
+    }
+  }
+
+  // Trim to [nowHour, nextRecharge). The sizing brain also filters ≥ nowMs, but
+  // clamping here keeps the horizon we hand it honest.
+  const nowHour = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+  const end = nextRechargeMs ?? (horizon.length ? horizon[horizon.length - 1].ts + HOUR_MS : nowHour + HOUR_MS);
+  const trimmed = horizon.filter((h) => h.ts >= nowHour && h.ts < end);
+
+  const basisComplete =
+    forecastPresent &&
+    confidenceTier !== 'climatology' &&
+    calScoredDays >= minCalScoredDays &&
+    bandCoverageFrac >= 0.9;
+
+  return {
+    nowMs,
+    fullKwh,
+    socNowPct,
+    reserveFloorPct,
+    cushionPct,
+    socCoherent,
+    legEff,
+    dischargeEff,
+    chargeCapKw,
+    window,
+    horizon: trimmed,
+    morningPvSurplusP90Kwh,
+    confidenceTier,
+    basisComplete,
+    minBuyKwh,
+  };
+}
+
+// --- scoreNightOutcome: the §3.1 score columns from a plan + measured actuals ---
+
+/** Measured next-evening actuals for scoring last night's plan (design §3.1). */
+export interface NightOutcomeActuals {
+  /** Realized PV energy over the scored span, kWh. */
+  actualPvKwh: number | null;
+  /** Realized house load over the scored span, kWh. */
+  actualLoadKwh: number | null;
+  /** Realized minimum SoC % and its instant (raw telemetry — the UN-actuated
+   *  baseline in advisory phase; used only for soc_min_err, NOT the floor
+   *  verdict, which is the plan trajectory per §3.3). */
+  actualMinSocPct: number | null;
+  actualMinSocTsMs: number | null;
+  /** The buy that, in hindsight with actual PV/load, WOULD have been required to
+   *  hold floor+cushion — the "realized need". buy_err = planned − this. */
+  realizedNeedBuyKwh: number | null;
+  /** Central (P50) forecast totals the plan was issued against, for the signed
+   *  fractional PV/load errors (the plan itself sizes on P10/P90). */
+  forecastPvKwh: number | null;
+  forecastLoadKwh: number | null;
+}
+
+/** The §3.1 SCORE columns produced from a plan + its measured outcome. */
+export interface NightOutcomeScore {
+  /** (actual − forecast)/forecast; + = more PV than forecast (less shortfall). */
+  pvErrFrac: number | null;
+  /** (actual − forecast)/forecast; + = more load than forecast (worse). */
+  loadErrFrac: number | null;
+  /** planned buy − realized need, kWh, signed (+ = over-bought, the SAFE side;
+   *  − = under-bought, the life-safety miss §5.1). */
+  buyErrKwh: number | null;
+  /** plan minProjSoc − actual min SoC, %-points (+ = plan optimistic vs reality). */
+  socMinErrPct: number | null;
+  /** Would the PLAN's own trajectory (buy applied) have breached floor+cushion?
+   *  Evaluated on the plan trajectory (§3.3), never on baseline telemetry. null
+   *  when the plan produced no trajectory (incomplete basis / hold). */
+  planTrajFloorBreached: boolean | null;
+}
+
+/**
+ * Score a plan against its measured outcome (design §3.1). PURE. The floor-breach
+ * verdict is taken from the PLAN's own simulated trajectory (§3.3) — in advisory
+ * phase the home runs WITHOUT the buy, so raw min-SoC telemetry measures the
+ * un-actuated baseline, not the plan's line. All fields fail null-safe.
+ */
+export function scoreNightOutcome(
+  plan: NightChargePlan | null,
+  actuals: NightOutcomeActuals,
+): NightOutcomeScore {
+  const signedFrac = (actual: number | null, forecast: number | null): number | null => {
+    if (actual == null || forecast == null || !Number.isFinite(forecast) || Math.abs(forecast) < 1e-9) return null;
+    return round2((actual - forecast) / forecast);
+  };
+
+  const planBuy = plan?.buyKwh ?? null;
+  const buyErrKwh =
+    planBuy != null && actuals.realizedNeedBuyKwh != null
+      ? round2(planBuy - actuals.realizedNeedBuyKwh)
+      : null;
+
+  const socMinErrPct =
+    plan?.minProjSocPct != null && actuals.actualMinSocPct != null
+      ? round1(plan.minProjSocPct - actuals.actualMinSocPct)
+      : null;
+
+  // §3.3: the safety verdict is the plan trajectory (buy applied) dipping below
+  // floor+cushion, i.e. the module's own minProjSocPct vs the floor+cushion line.
+  const targetFloorPct = plan ? plan.reserveFloorPct + plan.cushionPct : null;
+  const planTrajFloorBreached =
+    plan == null || plan.minProjSocPct == null || targetFloorPct == null
+      ? null
+      : plan.minProjSocPct < targetFloorPct - 1e-9;
+
+  return {
+    pvErrFrac: signedFrac(actuals.actualPvKwh, actuals.forecastPvKwh),
+    loadErrFrac: signedFrac(actuals.actualLoadKwh, actuals.forecastLoadKwh),
+    buyErrKwh,
+    socMinErrPct,
+    planTrajFloorBreached,
+  };
+}
+
+// --- createNightChargeAdvisor: the thin wrapper (mirrors createLoadShedAdvisor) ---
+
+export interface NightChargeAdvisor {
+  /** Assemble fresh inputs → compute the plan → store it in the holder → return. */
+  update(): NightChargePlan;
+  getStatus(): NightChargePlan | null;
+}
+
+/**
+ * Thin advisor wrapper: injects the input assembly (via buildInputs, which the
+ * integrator wires to the live analytics/tariff pieces at ~21:30), computes the
+ * plan through the pure brain, and latches it in the module holder for the API /
+ * MQTT / notify surfaces. Mirrors createLoadShedAdvisor (loadShedAdvisor.ts).
+ */
+export function createNightChargeAdvisor(deps: {
+  buildInputs: () => NightChargeInputDeps;
+  now?: () => number;
+}): NightChargeAdvisor {
+  return {
+    update(): NightChargePlan {
+      const inputs = buildNightChargeInputs(deps.buildInputs());
+      const plan = computeNightChargePlan(inputs);
+      setLatestNightChargePlan(plan);
+      return plan;
+    },
+    getStatus: () => getLatestNightChargePlan(),
+  };
+}
