@@ -2370,6 +2370,17 @@ function writeNightChargeLatch(l: NightChargeLatch): void {
   }
 }
 
+// In-memory cache of the last 7 ledger rows for the read-only status route, so
+// that handler never performs a per-request SQLite (filesystem) read — CWE-770 /
+// CodeQL js/missing-rate-limiting. Refreshed by the background recompute tick /
+// evening job (timers, not rate-limited request handlers), matching how the
+// other read endpoints serve worker/holder data rather than hitting the DB inline.
+let nightRecentOutcomesMem: unknown[] = [];
+function refreshNightRecentOutcomes(): void {
+  try { nightRecentOutcomesMem = recorder.readNightLedger(7); }
+  catch { /* keep the last cached value; the route must never touch the DB */ }
+}
+
 /** Minute-of-day in America/Phoenix (localParts is hour-granular; the ~21:30
  *  gate needs minutes). Explicit IANA resolution — never the host clock. */
 function phoenixMinuteOfDay(ms: number): number {
@@ -2951,13 +2962,15 @@ if (nightChargeEnabled) {
       try {
         setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
       } catch { /* fail-safe: readiness stays at its last value / LEARNING */ }
+      refreshNightRecentOutcomes(); // keep the status route's cache warm (DB read on a timer, not the handler)
     })();
   }, 30 * 60 * 1000);
   nightRecomputeTick.unref();
   // A gentle first recompute a minute after boot (analytics worker warm) so the
-  // holder isn't empty before the first scheduled tick.
+  // holder + status cache aren't empty before the first scheduled tick.
   const nightWarm = setTimeout(() => {
     void recomputeNightChargePlan().catch((e: any) => app.log.debug(`night-charge: warm recompute skipped (${e?.message ?? e})`));
+    refreshNightRecentOutcomes();
   }, 60 * 1000);
   nightWarm.unref();
   // Evening job — minute-granular gate + day-keyed restart-persistent latch.
@@ -2982,7 +2995,9 @@ app.get('/api/night-charge/status', async () => {
     notify: { hour: NIGHT_CHARGE_NOTIFY_HOUR, minute: NIGHT_CHARGE_NOTIFY_MINUTE, lastNotifyDay: latch.lastNotifyDay },
     plan,
     readiness: getLatestReadiness(),
-    recentOutcomes: recorder.readNightLedger(7),
+    // In-memory cache refreshed by the recompute tick / evening job — the route
+    // must NOT read the ledger (DB/filesystem) inline (CWE-770).
+    recentOutcomes: nightRecentOutcomesMem,
   };
 });
 

@@ -1,3 +1,14 @@
+## v1.38.1 — night-charge status route: no per-request DB read (CodeQL CWE-770)
+
+Follow-up to v1.38.0. CodeQL (js/missing-rate-limiting) flagged the
+`/api/night-charge/status` handler for a per-request filesystem read
+(`recorder.readNightLedger(7)` — a SQLite query). The route now serves
+`recentOutcomes` from an in-memory cache (`nightRecentOutcomesMem`) refreshed by
+the background recompute tick / evening job (timers, not rate-limited request
+handlers) — matching how the other read endpoints serve worker/holder data
+rather than hitting the DB inline. Also removes the incidental latch-file read
+from the same handler (in-memory mirror, from the v1.38.0 fix). No behavior
+change to the advisory; 1610 tests green, tsc clean.
 ## v1.38.0 — night-charge advisory stack: learning, delivery, gate (advisory-only, NO writes)
 
 The full advisory-v1 of the TOU night-charge arbitrage feature — built as one
