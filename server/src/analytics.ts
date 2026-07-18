@@ -7780,12 +7780,23 @@ export function rootCausesFor(alertId: string): Array<{ id: string; description:
  * min projected SoC + ts) so the UI can show "tomorrow ⨯ Tue ⨯ Wed".
  * =================================================================== */
 
+export interface MultiDayHour {
+  ts: number;
+  pvW: number;
+  loadW: number;
+  socPct: number | null;
+}
+
 export interface DayRollup {
   date: string;
   pvKwh: number;
   loadKwh: number;
   minProjectedSoc: number | null;
   minProjectedSocTs: number | null;
+  /** v1.34.0 — the per-hour {ts, pv, load, soc} trajectory the rollup sim walks
+   *  internally. Exposed for the night-charge arbitrage advisor (shortfall
+   *  trough + carry-to-next-window sizing). Day-0 covers only future hours. */
+  hours: MultiDayHour[];
 }
 
 export interface MultiDayForecast {
@@ -7911,6 +7922,7 @@ export async function computeMultiDayForecast(
     let loadWh = 0;
     let minSoc: number | null = null;
     let minSocTs: number | null = null;
+    const hours: MultiDayHour[] = [];
     for (let t = dayStart; t < dayEnd; t += 3_600_000) {
       if (t < now && dayIdx === 0) continue; // skip past hours today
       const hourEpoch = Math.floor(t / 3_600_000);
@@ -7952,6 +7964,7 @@ export async function computeMultiDayForecast(
       }
       pvWh += pv;
       loadWh += load;
+      let socPctThisHour: number | null = null;
       if (fullWh && fullWh > 0 && socWh != null) {
         // v1.26.0 — same DC-bus balance pv − load/η as computeRunway /
         // getDayForecast, so day-0 minProjectedSoc stays consistent with
@@ -7959,11 +7972,19 @@ export async function computeMultiDayForecast(
         // path is equally honest. Report-only (not an alarm gate).
         socWh = Math.max(0, Math.min(fullWh, socWh + (pv - load / RUNWAY_DISCHARGE_EFFICIENCY)));
         const socPct = (socWh / fullWh) * 100;
+        socPctThisHour = socPct;
         if (minSoc == null || socPct < minSoc) {
           minSoc = socPct;
           minSocTs = t;
         }
       }
+      // v1.34.0 — retain the per-hour point (rounded like the rollup fields).
+      hours.push({
+        ts: t,
+        pvW: Math.round(pv),
+        loadW: Math.round(load),
+        socPct: socPctThisHour != null ? Math.round(socPctThisHour * 10) / 10 : null,
+      });
     }
     const date = new Date(dayStart);
     days.push({
@@ -7972,6 +7993,7 @@ export async function computeMultiDayForecast(
       loadKwh: Math.round(loadWh / 100) / 10,
       minProjectedSoc: minSoc != null ? Math.round(minSoc * 10) / 10 : null,
       minProjectedSocTs: minSocTs,
+      hours,
     });
   }
   const value: MultiDayForecast = { generatedAt: now, days };
