@@ -1,3 +1,47 @@
+## v1.37.0 — night-charge advisor: the pure sizing brain (increment 1)
+
+First increment of the TOU night-charge arbitrage feature (design:
+`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`). Ships **only** the dependency-injected
+sizing math — `server/src/nightChargeAdvisor.ts` `computeNightChargePlan()` —
+wired to nothing, exactly as `tariff.ts` (v1.36.0) shipped its model with zero
+live surface. The recommendation is provable entirely by unit tests before any
+I/O, holder, endpoint, HA entity, evening job, ledger, or write path touches it
+(those are later, separately-attributable releases).
+
+**What it computes:** on a night a shortfall is anticipated, the kWh to buy in
+the cheap overnight window and the target SoC%, sized so the projected pool
+trajectory holds `reserveFloor + outageCushion` from window-close through the
+next recharge.
+
+**Accuracy & safety posture (binding):**
+- **Under-buy is a SAFETY miss, not a cost miss** — the outage cushion is the
+  owner's explicit resilience requirement. Sizing uses **worst-case inputs**:
+  P10 (low) PV and P90 (high) load. The over-buy *ceiling* uses P90 (high) PV —
+  the deliberate asymmetry so we never under-buy the floor yet never over-buy
+  into next-morning clipping.
+- **Emit null over a fabricated number** — incomplete / incoherent / thin /
+  climatology-only basis, no window, or zero capacity all yield a null plan
+  (`chargeTonight=false`, no buy), never a best-effort number.
+- **Read-only, never touches the alarm spine** — it reads the same
+  `backupReserveSoc` the floor alarm defends; it produces no state the floor /
+  runway / SoC alarms depend on.
+- **DC-bus recurrence identical** to `computeRunway` / the multi-day sim
+  (`pack += pvP10 − loadP90/η`, clamp [0,full]) so the advisor's trough is
+  consistent with the alarm's runway projection.
+- Efficiency constants are **injected** (`legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY
+  ≈ 0.927`, `dischargeEff = RUNWAY_DISCHARGE_EFFICIENCY ≈ 0.94`), never
+  hard-coded — a real-constants test pins it.
+- Caps surfaced honestly via `bindingCap` (`requirement` / `chargePower` /
+  `poolHeadroom` / `overBuy`) and a `cushionShortfall` flag when the charger or
+  pool prevents fully meeting the cushion (residual risk disclosed in the
+  rationale). On a tight day resilience wins the over-buy ceiling and accepts a
+  small clip.
+
+15 focused deterministic tests (fail-safe gates, exact floor+cushion sizing,
+worst-case monotonicity, every cap, the meter≥pack invariant); 1536 server
+tests green (+15), tsc clean. No config, endpoint, or behavior change — nothing
+calls this module yet.
+
 ## v1.36.0 — TOU tariff model (APS R-EV), pure module
 
 Third increment of the TOU night-charge arbitrage feature (advisory-only; no writes).
