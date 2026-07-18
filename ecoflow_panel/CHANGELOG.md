@@ -1,3 +1,23 @@
+## v1.35.0 — extend the weather forecast horizon 2 → 4 days
+
+Second increment of the TOU night-charge arbitrage feature (advisory-only; no writes).
+
+The Open-Meteo fetch requested `forecast_days=2`, so the multi-day forecast's days 3-4
+fell back to an hour-of-day radiation *climatology* ("typical recent day") rather than a
+real forecast. The arbitrage weekend lookahead needs genuine day-3/4 solar: because the
+cheap overnight window and the 4-7pm peak are both weekday-only, a Friday plan must
+reason all the way to Monday, and that back half was previously climatology-grade.
+
+Bump to `forecast_days=4` (Open-Meteo's free tier allows up to 16). This purely APPENDS
+days 3-4 — the first 48h of hourly weather are byte-identical, so the alarm-facing 24h
+day-ahead forecast (runway/floor/SoC) is unchanged. Isolated in its own release so any
+multi-day forecast shift on days 3-4 is cleanly attributable to this one change.
+
+Live-verified before/after: the day-ahead forecast (minProjectedSoc, pvBiasFactor,
+forecastPvWhNext24, first-hours pv/load) and the runway alarm numbers are unchanged;
+only the multi-day days 3-4 move from climatology to forecast-backed. 1498 tests green,
+tsc clean.
+
 ## v1.34.0 — expose the multi-day forecast's per-hour trajectory
 
 First increment of the TOU night-charge arbitrage feature (advisory-only; no writes).

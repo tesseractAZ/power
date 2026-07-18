@@ -85,7 +85,14 @@ async function fetchWeatherUncached(log: (m: string) => void): Promise<WeatherFo
   // endpoint, no key, one extra query param.
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-    `&hourly=cloud_cover,shortwave_radiation,temperature_2m&forecast_days=2&past_days=7`;
+    // v1.35.0 — forecast_days 2→4. The night-charge arbitrage weekend lookahead
+    // (a Friday plan must reason to Monday, since the cheap overnight window and
+    // the 4-7pm peak are both weekday-only) needs real forecast radiation on days
+    // 3-4 instead of the hour-of-day radiation climatology the multi-day sim falls
+    // back to beyond the horizon. Open-Meteo's free tier allows up to 16. This only
+    // APPENDS days 3-4; the first 48h (and thus the alarm-facing 24h day-ahead
+    // forecast) are byte-identical, so no alarm output changes.
+    `&hourly=cloud_cover,shortwave_radiation,temperature_2m&forecast_days=4&past_days=7`;
   try {
     const res = await request(url);
     if (res.statusCode >= 300) throw new Error(`HTTP ${res.statusCode}`);
