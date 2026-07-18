@@ -28,6 +28,7 @@ process.env.DB_PATH = join(tmp, 'ecoflow.db');
 const { createRecorder } = await import('../src/recorder.js');
 const { createReadRecorder } = await import('../src/readRecorder.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
+const { computeNightChargeReadiness, CURRENT_ALGO_VERSION } = await import('../src/nightChargeGate.js');
 import type { NightLedgerRow, NightCalibration } from '../src/recorder.js';
 
 const PLAN_DATE = '2026-07-15';
@@ -272,5 +273,24 @@ test('readNightLedger respects the sinceDays cutoff', () => {
   } finally {
     rec.close();
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+
+test('v1.38.0 regression — gate counts a recorded row (TEXT algo_version) end-to-end, not excluded', () => {
+  // The whole gate was inert because the persisted TEXT algo_version never matched
+  // a numeric compare. Record a real plan + a breach outcome through the recorder,
+  // read it back, and confirm the gate SEES it (→ BLOCKED, not LEARNING-because-empty).
+  const store = new SnapshotStore();
+  const rec = createRecorder(store, () => {});
+  try {
+    rec.recordNightPlan({ ...fullPlan(), algo_version: String(CURRENT_ALGO_VERSION) });
+    rec.recordNightOutcome(PLAN_DATE, { outcome_captured_at_ms: 1_752_680_000_000, scored: 1, plan_traj_floor_breached: 1 });
+    const rows = rec.readNightLedger(100_000);
+    const r = computeNightChargeReadiness(rows, 1_752_700_000_000, { algoVersion: CURRENT_ALGO_VERSION });
+    assert.equal(r.state, 'BLOCKED', 'the recorded floor-breach row must be counted (proves TEXT algo_version matches)');
+    assert.equal(r.writeReady, false);
+  } finally {
+    rec.close();
   }
 });

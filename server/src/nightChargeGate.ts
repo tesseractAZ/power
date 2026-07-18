@@ -169,7 +169,11 @@ export function computeNightChargeReadiness(
   const list = Array.isArray(rows) ? rows : [];
 
   // Current-algo rows only (prior-version rows are EXCLUDED, not tagged — §5.2).
-  const currentAlgo = list.filter((r) => asNum(r.algo_version) === algoVersion);
+  // Compare as STRINGS: recordNightPlan persists algo_version as SQLite TEXT
+  // ("1"), so a numeric `asNum(...) === algoVersion` never matched a real row and
+  // the gate was permanently stuck excluding every persisted night. String-vs-
+  // string is robust whether the column is stored TEXT or INTEGER.
+  const currentAlgo = list.filter((r) => String(r.algo_version) === String(algoVersion));
 
   // Rows that reached an outcome (window + 4–7pm closed) — the denominator for
   // the MNAR exclusion fraction (§3.5).
@@ -196,8 +200,20 @@ export function computeNightChargeReadiness(
 
   // ── HARD: plan-trajectory floor safety (§5.1). Evaluated on the SIMULATED
   // plan trajectory, recorded by WS2 as `plan_traj_floor_breached` (§3.3). A
-  // SINGLE would-have-breached plan-night → not ready, regardless of sample. ──
-  const floorBreaches = eligible.filter((r) => truthy(r.plan_traj_floor_breached)).length;
+  // SINGLE would-have-breached plan-night → not ready, regardless of sample.
+  // ★ Evaluated over ALL current-algo, forecast-tier rows that recorded a breach
+  // verdict — NOT only the coverage-`scored` subset: the plan-trajectory breach
+  // is a property of the plan's own simulated trajectory (§3.3), independent of
+  // grid_home_w coverage, so a would-have-breached plan on a coverage-EXCLUDED
+  // (propped / storm / SHP2-offline) night — exactly the adverse high-shortfall
+  // night the gate exists to catch — MUST still block readiness. ──
+  // "has a verdict" = the field is present (null ⇒ no trajectory recorded). Use
+  // a loose != null so a boolean true/false (in-memory) OR a SQLite 0/1 both count
+  // — asNum() would wrongly drop the boolean form and let a breach slip through.
+  const floorBreachPool = currentAlgo.filter(
+    (r) => r.confidence_tier === 'forecast' && r.plan_traj_floor_breached != null,
+  );
+  const floorBreaches = floorBreachPool.filter((r) => truthy(r.plan_traj_floor_breached)).length;
 
   // ── Sizing under-buy (HARD, asymmetric §5.1). buy_err_kwh signed, +over-bought;
   // under-buy = buy_err_kwh < 0. ──
@@ -252,7 +268,7 @@ export function computeNightChargeReadiness(
   const hard: string[] = [];
   if (floorBreaches > 0) {
     hard.push(
-      `plan-trajectory floor breach on ${floorBreaches} scored night(s) — a single would-have-breach blocks writes (§5.1 HARD).`,
+      `plan-trajectory floor breach on ${floorBreaches} forecast plan-night(s) (incl. coverage-excluded) — a single would-have-breach blocks writes (§5.1 HARD).`,
     );
   }
   if (

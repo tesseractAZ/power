@@ -348,3 +348,29 @@ test('metrics expose the frozen thresholds and computed sub-metrics', () => {
   assert.equal(r.metrics.forecastBasisPct, 100);
   assert.equal(typeof r.metrics.bandCoveragePct, 'number');
 });
+
+
+/* ── v1.38.0 whole-stack-review regressions ──────────────────────────────── */
+
+test('regression — algo_version stored as SQLite TEXT "1" is COUNTED, not excluded (gate not inert)', () => {
+  // The recorder persists algo_version as TEXT; the old numeric `asNum(...) ===
+  // algoVersion` never matched a real "1", so currentAlgo was ALWAYS empty and
+  // the gate was permanently stuck in LEARNING regardless of the record.
+  const rows = cleanLedger(100).map((r) => ({ ...(r as any), algo_version: String(CURRENT_ALGO_VERSION) })) as unknown as NightLedgerRow[];
+  const r = computeNightChargeReadiness(rows, NOW);
+  assert.ok(r.scoredDays > 0, 'TEXT-algo_version rows must be counted, not excluded');
+  assert.equal(r.state, 'READY_TO_CONSIDER_WRITES');
+});
+
+test('regression — a floor breach on a COVERAGE-EXCLUDED (scored=0) forecast night still BLOCKS', () => {
+  // §3.3 plan-trajectory breach is independent of grid_home_w coverage, so a
+  // would-have-breached plan on a propped / low-coverage storm night — the exact
+  // adverse night the gate exists to catch — must still block, not be ignored
+  // because it fell out of the coverage-`scored` subset.
+  const rows = cleanLedger(100, (r, i) => {
+    if (i === 0) { r.plan_traj_floor_breached = 1; r.scored = 0; r.grid_home_coverage_frac = 0.4; }
+  });
+  const r = computeNightChargeReadiness(rows, NOW);
+  assert.equal(r.state, 'BLOCKED', 'a breach on a coverage-excluded night must block');
+  assert.equal(r.writeReady, false);
+});

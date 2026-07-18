@@ -580,6 +580,22 @@ export function resolveCheapWindow(
   scanHours = 30,
 ): { startMs: number; endMs: number } | null {
   const h0 = Math.floor(fromMs / HOUR_MS) * HOUR_MS;
+  // If `fromMs` is ALREADY inside a cheap window (a recompute running during the
+  // 23:00–05:00 window), walk BACK to the window's true start so the reported
+  // window_start isn't truncated to the live mid-window clock (§4 display honesty).
+  if (periodIdAt(h0) === cheapPeriodId) {
+    let s = h0;
+    for (let i = 1; i <= scanHours; i++) {
+      const t = h0 - i * HOUR_MS;
+      if (periodIdAt(t) === cheapPeriodId) s = t;
+      else break;
+    }
+    for (let i = 1; i <= scanHours + 1; i++) {
+      const t = h0 + i * HOUR_MS;
+      if (periodIdAt(t) !== cheapPeriodId) return { startMs: s, endMs: t };
+    }
+    return { startMs: s, endMs: h0 + (scanHours + 1) * HOUR_MS };
+  }
   let startMs: number | null = null;
   for (let i = 0; i <= scanHours; i++) {
     const t = h0 + i * HOUR_MS;
@@ -621,13 +637,22 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
 
   const window = resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
 
+  // ★ EV de-dup MUST be atomic with the re-add (§2.3): only STRIP the embedded
+  // expected-value EV from the base load when we will actually place the
+  // committed p90 EV block in its stead. If the committed block will NOT be
+  // placed (no EV report / no valid p90 session / no charge-start), KEEP the
+  // embedded expected-value EV in the load — stripping it without replacing it
+  // would erase a real charging night from the sizing basis and UNDER-buy (a
+  // safety miss). Never strip without replacing.
+  const evBlockWillPlace = !!(ev && ev.p90SessionKwh != null && ev.p90SessionKwh > 0 && ev.chargeStartMs != null);
+
   // Merge band (authoritative) with beyond-24 h synthesized rollup hours, keyed
   // by ts so the band always wins where both cover an hour.
   const byTs = new Map<number, NightChargeHour>();
   for (const h of bandHours) {
     if (!Number.isFinite(h.ts)) continue;
-    const embedded = Math.max(0, h.embeddedEvW ?? 0);
-    const loadClean = Math.max(0, h.loadP90W - embedded); // §2.3 EV de-dup
+    const embedded = evBlockWillPlace ? Math.max(0, h.embeddedEvW ?? 0) : 0;
+    const loadClean = Math.max(0, h.loadP90W - embedded); // §2.3 EV de-dup (only when replacing)
     byTs.set(h.ts, { ts: h.ts, pvP10W: Math.max(0, h.pvP10W), loadP90W: loadClean });
   }
   for (const dr of dayRollups) {
@@ -651,11 +676,17 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   // p90 session energy is laid down from the predicted charge hour forward, the
   // EV component capped at evMaxLoadW/hour, spilling to later hours if a single
   // hour cannot hold the whole session (physically correct worst case).
-  if (ev && ev.p90SessionKwh != null && ev.p90SessionKwh > 0 && ev.chargeStartMs != null) {
-    const startHour = Math.floor(ev.chargeStartMs / HOUR_MS) * HOUR_MS;
-    let remainingKwh = ev.p90SessionKwh;
+  if (evBlockWillPlace) {
+    const startHour = Math.floor(ev!.chargeStartMs! / HOUR_MS) * HOUR_MS;
+    // Only place the committed block within the next-24 h BAND region (the
+    // committed session is a next-day event). Beyond-24 h rollup hours already
+    // embed typical EV in their loadW and are NOT de-duped, so adding the block
+    // there would double-count (a — safe-direction — over-buy). Bounding to 24 h
+    // keeps the block on the EV-clean band and avoids the double count.
+    const blockEndMs = nowMs + 24 * HOUR_MS;
+    let remainingKwh = ev!.p90SessionKwh!;
     for (const h of horizon) {
-      if (remainingKwh <= 1e-9) break;
+      if (remainingKwh <= 1e-9 || h.ts >= blockEndMs) break;
       if (h.ts < startHour) continue;
       const addW = Math.min(Math.max(0, evMaxLoadW), remainingKwh * 1000);
       h.loadP90W += addW;

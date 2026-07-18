@@ -2501,24 +2501,17 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   const window = resolveCheapWindow(periodIdAt, nowMs, NIGHT_CHEAP_PERIOD_ID, 30);
   const windowEndMs = window?.endMs ?? nowMs;
 
-  // nextRecharge = first hour AFTER the cheap window where forecast pv ≥ load
-  // (the morning refill). Scanned over the merged day-ahead + multi-day pv/load.
-  const pvLoadByEpoch = new Map<number, { ts: number; pvW: number; loadW: number }>();
-  for (const fh of dayAhead?.hours ?? []) {
-    pvLoadByEpoch.set(Math.floor(fh.ts / HOUR_MS), { ts: fh.ts, pvW: fh.forecastPvW, loadW: fh.forecastLoadW });
-  }
-  for (const dr of multiDay?.days ?? []) {
-    for (const h of dr.hours) {
-      const e = Math.floor(h.ts / HOUR_MS);
-      if (!pvLoadByEpoch.has(e)) pvLoadByEpoch.set(e, { ts: h.ts, pvW: h.pvW, loadW: h.loadW });
-    }
-  }
-  const pvLoadSorted = [...pvLoadByEpoch.values()].sort((a, b) => a.ts - b.ts);
-  let nextRechargeMs: number | null = null;
-  for (const p of pvLoadSorted) {
-    if (p.ts < windowEndMs) continue;
-    if (p.pvW > 0 && p.pvW >= p.loadW) { nextRechargeMs = p.ts; break; }
-  }
+  // nextRecharge = the START of the NEXT cheap charge window after tonight's —
+  // the next time we can cheaply top up (design §2.4). Tariff-based and
+  // deterministic: a single transient sunny hour, OR a CENTRAL-forecast pv≥load
+  // crossing that the P10-PV/P90-load sim would still be draining through, can no
+  // longer truncate the multi-day carry. On a weekday this lands ~tomorrow night;
+  // on Friday the next OVERNIGHT tier is Monday, so the full Fri→Mon (~72 h)
+  // carry is simulated and the Sat/Sun-night troughs are not hidden — the exact
+  // under-buy the "first pv≥load hour" heuristic caused. Scan 4 days to bridge
+  // the weekend gap.
+  const nextWindow = resolveCheapWindow(periodIdAt, windowEndMs + HOUR_MS, NIGHT_CHEAP_PERIOD_ID, 96);
+  const nextRechargeMs: number | null = nextWindow?.startMs ?? null;
 
   // morningPvSurplusP90Kwh — the over-buy ceiling headroom. Sum over the next
   // solar day (window-end → +14 h) of max(0, P90 PV − forecast load). P90 PV =
@@ -2882,7 +2875,14 @@ async function runNightChargeEveningJob(): Promise<void> {
   const cutoffMin = 23 * 60; // catch-up window [fire, 23:00)
   if (nowMin < fireMin) return; // too early
   if (nowMin >= cutoffMin) {
-    app.log.warn(`night-charge: evening job missed today's ${NIGHT_CHARGE_NOTIFY_HOUR}:${String(NIGHT_CHARGE_NOTIFY_MINUTE).padStart(2, '0')}–23:00 window; skipping + latching (a late plan is worse than none).`);
+    app.log.warn(`night-charge: evening job missed today's ${NIGHT_CHARGE_NOTIFY_HOUR}:${String(NIGHT_CHARGE_NOTIFY_MINUTE).padStart(2, '0')}–23:00 window; skipping the notify + latching (a late plan is worse than none).`);
+    // Still SCORE yesterday + refresh readiness even when tonight's NOTIFY window
+    // was missed — otherwise a missed evening job permanently drops the prior
+    // night's outcome from the ledger/gate, an uncounted MNAR exclusion that
+    // biases the write-readiness reduction (the tick below also does this, but
+    // do it here so a same-day miss is captured immediately).
+    try { scoreYesterdayNightPlan(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
+    try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch { /* fail-safe */ }
     writeNightChargeLatch({ lastNotifyDay: today });
     return;
   }
@@ -2928,7 +2928,20 @@ if (nightChargeEnabled) {
   // Periodic recompute (30 min, unref'd) so /api/ha-state + status always have a
   // ≤12 h-fresh plan even on days the evening job hasn't fired yet. Best-effort.
   const nightRecomputeTick = setInterval(() => {
-    void recomputeNightChargePlan().catch((e: any) => app.log.debug(`night-charge: recompute tick skipped (${e?.message ?? e})`));
+    void (async () => {
+      try { await recomputeNightChargePlan(); }
+      catch (e: any) { app.log.debug(`night-charge: recompute tick skipped (${e?.message ?? e})`); }
+      // Score yesterday + refresh readiness on the tick too (idempotent — the
+      // scorer returns once outcome_captured_at_ms is set) so the ledger and the
+      // write-readiness reduction stay current EVEN on a day the evening notify
+      // job never fired — decoupling outcome capture from the notify window so a
+      // missed window can't silently drop a night (an MNAR bias in the gate).
+      try { scoreYesterdayNightPlan(Date.now()); }
+      catch (e: any) { app.log.debug(`night-charge: tick scoring skipped (${e?.message ?? e})`); }
+      try {
+        setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
+      } catch { /* fail-safe: readiness stays at its last value / LEARNING */ }
+    })();
   }, 30 * 60 * 1000);
   nightRecomputeTick.unref();
   // A gentle first recompute a minute after boot (analytics worker warm) so the

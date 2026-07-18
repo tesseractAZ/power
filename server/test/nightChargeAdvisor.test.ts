@@ -529,3 +529,36 @@ test('advisor — climatology basis latches a null plan (charge_tonight false)',
   assert.equal(plan.chargeTonight, false);
   assert.equal(plan.buyKwh, null);
 });
+
+
+/* ── v1.38.0 review regression: EV de-dup must be ATOMIC with the re-add ─────
+ * Stripping the embedded expected-value EV without placing the committed p90
+ * block would erase a real charging night from the sizing basis and UNDER-buy.
+ * When no committed block will be placed (ev=null), the embedded EV must be KEPT. */
+test('regression — buildNightChargeInputs keeps embedded EV in load when NO committed block is placed', () => {
+  const startMs = B;
+  const bandHours = Array.from({ length: 12 }, (_, i) => ({
+    ts: startMs + i * HOUR, pvP10W: 0, loadP90W: 3000, embeddedEvW: 2000, // 2 kW expected EV inside the 3 kW load
+  }));
+  const periodIdAt = (ts: number) => {
+    const h = Math.floor((ts - startMs) / HOUR) % 24;
+    return h >= 2 && h < 8 ? 'overnight' : 'off';
+  };
+  const common = {
+    nowMs: startMs, fullKwh: 92.16, socNowPct: 30, reserveFloorPct: 10, cushionPct: 15, socCoherent: true,
+    legEff: 0.927, dischargeEff: 0.94, chargeCapKw: 7.2,
+    periodIdAt, cheapPeriodId: 'overnight', dayRollups: [], realizedDailyErrHalfFrac: 0.2, nextRechargeMs: null,
+    evMaxLoadW: 11520, confidenceTier: 'forecast' as const, forecastPresent: true, calScoredDays: 20,
+    minCalScoredDays: 14, bandCoverageFrac: 0.95, morningPvSurplusP90Kwh: null, minBuyKwh: 1,
+  };
+  const withoutEv = buildNightChargeInputs({ ...common, bandHours, ev: null });
+  // With no committed block, the 2 kW embedded EV must NOT be stripped → 3000 W preserved.
+  const cheap = withoutEv.horizon.find((h) => h.loadP90W > 0);
+  assert.ok(cheap, 'horizon has load hours');
+  assert.ok(Math.abs(cheap!.loadP90W - 3000) < 1, `embedded EV kept when no block placed (got ${cheap!.loadP90W})`);
+
+  const withEv = buildNightChargeInputs({ ...common, bandHours, ev: { p90SessionKwh: 20, chargeStartMs: startMs + 3 * HOUR, sessionCount: 12 } });
+  // With a committed block, the embedded 2 kW IS stripped (loadClean 1000 W) before the p90 block is laid on.
+  const preBlock = withEv.horizon.find((h) => h.ts === startMs); // hour before the 03:00 block
+  assert.ok(preBlock && Math.abs(preBlock.loadP90W - 1000) < 1, `embedded EV stripped when block WILL place (got ${preBlock?.loadP90W})`);
+});
