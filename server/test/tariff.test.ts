@@ -8,6 +8,7 @@ import {
   buildApsREvModel,
   flatTariffModel,
   APS_SUMMER_MONTHS,
+  type TariffModel,
 } from '../src/tariff.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -178,4 +179,63 @@ test('tariff — flatTariffModel: every hour is off-peak at the flat rate', () =
 
 test('tariff — flatTariffModel(null) is unconfirmed → null cents', () => {
   assert.equal(rateAt(flatTariffModel(null), phx(2026, 1, 5, 17)).centsPerKwh, null);
+});
+
+/* ── review-hardening (v1.36.0) ───────────────────────────────────────── */
+
+test('tariff — dow is derived from the local calendar date (ICU-weekday independent)', () => {
+  // Known DOWs, resolved from the Phoenix-local Y-M-D, not an ICU weekday string.
+  assert.equal(localParts(phx(2026, 1, 9, 12), 'America/Phoenix').dow, 5); // Fri
+  assert.equal(localParts(phx(2026, 1, 10, 12), 'America/Phoenix').dow, 6); // Sat
+  assert.equal(localParts(phx(2026, 1, 11, 12), 'America/Phoenix').dow, 0); // Sun
+  assert.equal(localParts(phx(2026, 1, 12, 12), 'America/Phoenix').dow, 1); // Mon
+});
+
+test('tariff — RateSlice.ratesConfirmed mirrors the model (distinguishes null-kinds)', () => {
+  // Unconfirmed: null cents AND ratesConfirmed=false.
+  const u = rateAt(rev, phx(2026, 1, 5, 17));
+  assert.equal(u.centsPerKwh, null);
+  assert.equal(u.ratesConfirmed, false);
+  // Confirmed but a missing-season data gap: null cents BUT ratesConfirmed=true,
+  // so a consumer can tell "rate gap" apart from "not yet confirmed".
+  const gap = buildApsREvModel({ confirmed: true, overnight: { summer: null, winter: 8.5 } });
+  const g = rateAt(gap, phx(2026, 7, 6, 2)); // summer overnight, summer rate null
+  assert.equal(g.periodId, 'overnight');
+  assert.equal(g.centsPerKwh, null);
+  assert.equal(g.ratesConfirmed, true);
+});
+
+test('tariff — fixedDailyCents is nulled while unconfirmed (no fabricated money)', () => {
+  const unconfirmed = buildApsREvModel({ fixedDailyCents: 45 });
+  assert.equal(unconfirmed.ratesConfirmed, false);
+  assert.equal(unconfirmed.fixedDailyCents, null); // not leaked
+  const confirmed = buildApsREvModel({ confirmed: true, fixedDailyCents: 45 });
+  assert.equal(confirmed.fixedDailyCents, 45); // surfaced once confirmed
+});
+
+test('tariff — isOnPeak follows the period.onPeak flag, not a magic id string', () => {
+  // A model whose on-peak period has a NON-"on_peak" id but onPeak:true must
+  // still resolve isOnPeak correctly (proves onPeakAt replacement is id-agnostic).
+  const m: TariffModel = {
+    planId: 'custom',
+    timezone: 'America/Phoenix',
+    periods: [
+      {
+        id: 'peak', // deliberately not 'on_peak'
+        label: 'Peak',
+        startHour: 16,
+        endHour: 19,
+        weekdays: [1, 2, 3, 4, 5],
+        seasons: null,
+        centsBySeason: { summer: 40, winter: 38 },
+        onPeak: true,
+      },
+    ],
+    offPeak: { id: 'off', label: 'Off', centsBySeason: { summer: 12, winter: 12 } },
+    summerMonths: APS_SUMMER_MONTHS,
+    holidays: [],
+    ratesConfirmed: true,
+  };
+  assert.equal(rateAt(m, phx(2026, 1, 5, 17)).isOnPeak, true); // in 'peak' window
+  assert.equal(rateAt(m, phx(2026, 1, 5, 2)).isOnPeak, false); // off-peak
 });

@@ -58,6 +58,10 @@ export interface TariffPeriod {
   seasons?: Season[] | null;
   /** Per-season energy rate. */
   centsBySeason: SeasonalCents;
+  /** Marks this as THE on-peak period for the `isOnPeak` back-compat flag,
+   *  independent of the period id (so a non-'on_peak'-id model still resolves
+   *  isOnPeak correctly). */
+  onPeak?: boolean;
 }
 
 export interface TariffModel {
@@ -93,11 +97,12 @@ export interface RateSlice {
   centsPerKwh: number | null;
   /** Back-compat with the legacy `onPeakAt(ts)` boolean. */
   isOnPeak: boolean;
+  /** Mirrors the model's flag so a consumer can distinguish "null because rates
+   *  aren't confirmed yet" (ratesConfirmed=false) from "null because this
+   *  confirmed period has a missing-season data gap" (ratesConfirmed=true,
+   *  centsPerKwh=null) — the two require different handling in the sizer. */
+  ratesConfirmed: boolean;
 }
-
-const WEEKDAY_INDEX: Record<string, number> = {
-  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-};
 
 export interface LocalParts {
   year: number;
@@ -108,28 +113,49 @@ export interface LocalParts {
   ymd: string; // 'YYYY-MM-DD'
 }
 
+// v1.36.0 (review-hardening) — memoize one formatter per timezone. rateAt is
+// called once per hour across a multi-day horizon when the MPC builds a cents
+// vector; re-constructing an identical Intl.DateTimeFormat each call is pure
+// repeated allocation. Correctness is unchanged (same formatter, same output).
+const FORMATTER_CACHE = new Map<string, Intl.DateTimeFormat>();
+function formatterFor(timezone: string): Intl.DateTimeFormat {
+  let f = FORMATTER_CACHE.get(timezone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      hourCycle: 'h23',
+    });
+    FORMATTER_CACHE.set(timezone, f);
+  }
+  return f;
+}
+
 /** Resolve a UTC instant into local calendar/clock parts in an explicit IANA
  *  timezone. Uses hourCycle 'h23' so midnight is 0 (not 24). */
 export function localParts(tsMs: number, timezone: string): LocalParts {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    hourCycle: 'h23',
-    weekday: 'short',
-  }).formatToParts(new Date(tsMs));
+  const parts = formatterFor(timezone).formatToParts(new Date(tsMs));
   const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
   const year = Number(get('year'));
   const month = Number(get('month'));
   const day = Number(get('day'));
+  // v1.36.0 (review-hardening) — derive day-of-week from the RESOLVED LOCAL
+  // calendar date, not an ICU 'weekday' part. getUTCDay of the Y-M-D at UTC
+  // midnight is exactly that calendar date's weekday, and it is ICU-locale
+  // independent: a degraded/small-icu runtime that dropped the 'weekday' part
+  // would otherwise have collapsed every weekday to Sunday (dow=0) → every
+  // on-peak/overnight hour silently mispriced as weekend off-peak. Fail-safe by
+  // construction on the safety-relevant path.
+  const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
   return {
     year,
     month,
     day,
     hour: Number(get('hour')),
-    dow: WEEKDAY_INDEX[get('weekday')] ?? 0,
+    dow,
     ymd: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
   };
 }
@@ -161,6 +187,7 @@ export function rateAt(model: TariffModel, tsMs: number): RateSlice {
       season,
       centsPerKwh: pickCents(model.offPeak.centsBySeason),
       isOnPeak: false,
+      ratesConfirmed: model.ratesConfirmed,
     };
   }
 
@@ -173,7 +200,8 @@ export function rateAt(model: TariffModel, tsMs: number): RateSlice {
       periodLabel: p.label,
       season,
       centsPerKwh: pickCents(p.centsBySeason),
-      isOnPeak: p.id === 'on_peak',
+      isOnPeak: p.onPeak === true,
+      ratesConfirmed: model.ratesConfirmed,
     };
   }
 
@@ -183,11 +211,17 @@ export function rateAt(model: TariffModel, tsMs: number): RateSlice {
     season,
     centsPerKwh: pickCents(model.offPeak.centsBySeason),
     isOnPeak: false,
+    ratesConfirmed: model.ratesConfirmed,
   };
 }
 
 const MON_FRI = [1, 2, 3, 4, 5];
-/** APS billing-cycle seasons: SUMMER = May–Oct, WINTER = Nov–Apr. */
+/** APS seasons: SUMMER = May–Oct, WINTER = Nov–Apr.
+ *  ★ NOTE (documented approximation): APS defines seasons by BILLING CYCLE, not
+ *  calendar month, so a handful of boundary days in early May / early Nov that
+ *  still fall in the prior month's billing cycle are seasoned by calendar month
+ *  here. Exact billing-cycle handling needs the meter read date (not modeled;
+ *  deferred). Bounded to ≤ a few days/yr and rates are null until confirmed. */
 export const APS_SUMMER_MONTHS = [5, 6, 7, 8, 9, 10];
 
 export interface ApsREvRates {
@@ -220,6 +254,7 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
         weekdays: MON_FRI,
         seasons: null, // year-round
         centsBySeason: rates.onPeak ?? NULL_SEASON,
+        onPeak: true,
       },
       {
         id: 'super_off_peak',
@@ -248,7 +283,10 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
     summerMonths: APS_SUMMER_MONTHS,
     holidays: rates.holidays ?? [],
     demand: null, // R-EV has no demand charge
-    fixedDailyCents: rates.fixedDailyCents ?? null,
+    // Null-over-fabrication (review-hardening): a money value is surfaced only
+    // once rates are confirmed, so an unconfirmed model can never leak a
+    // fabricated basic-service charge to a daily-cost consumer.
+    fixedDailyCents: (rates.confirmed ?? false) ? (rates.fixedDailyCents ?? null) : null,
     ratesConfirmed: rates.confirmed ?? false,
   };
 }

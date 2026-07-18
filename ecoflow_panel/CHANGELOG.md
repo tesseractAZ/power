@@ -21,7 +21,17 @@ until the owner confirms effective per-period cents from a bill (null-over-fabri
 instant's own weekday, so Fri 11pm is overnight but Sat 12am–5am is off-peak (weekend),
 and Sun 11pm is off-peak while Mon 12am–5am is overnight — consistent with "off-peak =
 all weekends". 19 boundary tests (season flips, on-peak/super-off-peak/overnight edges,
-DOW crossings, holidays, wrap-around, confirm gate). 1517 tests green (+19), tsc clean.
+DOW crossings, holidays, wrap-around, confirm gate). 1521 tests green (+23), tsc clean.
+
+Pre-merge adversarial review (13 agents) hardened the module before it landed: DOW is now
+derived from the resolved local calendar date (ICU-weekday-independent — a degraded-ICU
+runtime can no longer silently collapse every weekday to Sunday/off-peak); the Intl
+formatter is memoized per timezone; the rate-confirmation gate now also nulls
+`fixedDailyCents` when unconfirmed (no fabricated basic-service charge); `RateSlice`
+carries `ratesConfirmed` so a consumer can distinguish "rates not yet confirmed" from a
+"confirmed-but-missing-season" data gap; and `isOnPeak` follows an explicit
+`period.onPeak` flag instead of a magic id string. The calendar-month season
+approximation (vs APS billing-cycle boundaries) is documented as a known ≤-few-days/yr edge.
 
 ## v1.35.0 — extend the weather forecast horizon 2 → 4 days
 
