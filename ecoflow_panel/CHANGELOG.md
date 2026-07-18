@@ -1,3 +1,23 @@
+## v1.34.0 — expose the multi-day forecast's per-hour trajectory
+
+First increment of the TOU night-charge arbitrage feature (advisory-only; no writes).
+
+`computeMultiDayForecast` already walks an hourly DC-bus sim internally
+(`socWh += pv − load/η`, analytics.ts) but discarded everything except each day's
+min-SoC rollup. This exposes that per-hour series — `DayRollup.hours: {ts, pvW, loadW,
+socPct}[]` — so the forthcoming night-charge advisor can read the exact shortfall
+trough and the carry-to-next-window SoC trajectory it needs to size a buy, instead of
+re-deriving a second (possibly contradictory) sim.
+
+Purely additive: the rollup fields (`pvKwh`/`loadKwh`/`minProjectedSoc`) are byte-for-byte
+unchanged; day-0 exposes only future hours (past hours are skipped as before). New tests
+tie the hourly series out to the day rollups (summed hourly load == `loadKwh`; min over
+hourly `socPct` == `minProjectedSoc`) so the two can never silently diverge.
+
+Advisory-feature note: this changes only the `/api/forecast/multi-day` payload shape;
+no alarm reads it (the runway and floor alarms use the 24h day-ahead forecast). 1498
+tests green (+1), tsc clean.
+
 ## v1.33.0 — multi-day forecast horizon cache fix
 
 `computeMultiDayForecast`'s 30-minute result cache (analytics.ts) was keyed by time

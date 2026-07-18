@@ -859,6 +859,63 @@ test('computeMultiDayForecast — v1.33.0: a days=4 call after a days=3 call is 
   assert.equal(threeAgain.days.length, 3, 'a matching-horizon repeat still returns the right shape');
 });
 
+test('computeMultiDayForecast — v1.34.0: exposes a per-hour {ts,pvW,loadW,socPct} series consistent with the day rollups', async () => {
+  // The night-charge advisor reads this hourly series to find the shortfall
+  // trough and size the carry. Verify it exists, is coherent, and ties out to
+  // the day-level rollups it was aggregated from (no separate/contradictory sim).
+  resetForecastCachesForTesting();
+  const todayStart = startOfLocalDayMs();
+  const fc = emptyForecast({
+    hours: hourlyForecast({
+      count: 24,
+      startTs: todayStart + 86_400_000,
+      forecastPvW: () => 0,
+      forecastLoadW: () => 500,
+    }),
+    solarModel: flatSolarModel(),
+  });
+  setWeatherCacheForTesting(syntheticWeather({ startTs: todayStart, count: 4 * 24, radiationWm2: 0 }));
+
+  // A SHP2 present so the SoC trajectory is populated (not null).
+  const r = await computeMultiDayForecast(
+    { 'SHP2-TEST': makeShp2({ backupFullCapWh: 120_000, backupRemainWh: 72_000 }) },
+    emptyRecorder(),
+    fc,
+    3,
+  );
+  const d1 = r.days[1]; // a fully-iterated day (day-0 skips past hours)
+  assert.equal(d1.hours.length, 24, `day-1 should expose 24 hourly points; got ${d1.hours.length}`);
+
+  // Shape + monotone timestamps at 1h spacing.
+  for (let i = 0; i < d1.hours.length; i++) {
+    const h = d1.hours[i];
+    assert.equal(typeof h.ts, 'number');
+    assert.equal(typeof h.pvW, 'number');
+    assert.equal(typeof h.loadW, 'number');
+    if (i > 0) assert.equal(h.ts - d1.hours[i - 1].ts, 3_600_000, 'hourly points are 1h apart');
+  }
+
+  // Tie-out #1: the summed hourly load equals the day's loadKwh rollup.
+  const hourLoadKwh = d1.hours.reduce((a, h) => a + h.loadW, 0) / 1000;
+  assert.ok(
+    Math.abs(hourLoadKwh - d1.loadKwh) < 0.05,
+    `sum of hourly loadW (${hourLoadKwh.toFixed(2)} kWh) must match rollup loadKwh (${d1.loadKwh}); no divergent sim`,
+  );
+
+  // Tie-out #2: SoC is populated (SHP2 present) and its minimum equals the
+  // rollup's minProjectedSoc, both from the SAME DC-bus walk.
+  const socs = d1.hours.map((h) => h.socPct).filter((s): s is number => s != null);
+  assert.equal(socs.length, 24, 'every hour has a SoC when the SHP2 capacity is known');
+  const minHourSoc = Math.min(...socs);
+  assert.ok(
+    Math.abs(minHourSoc - (d1.minProjectedSoc ?? -1)) < 0.11,
+    `min over hourly socPct (${minHourSoc}) must equal rollup minProjectedSoc (${d1.minProjectedSoc})`,
+  );
+  // With PV=0 and a steady load the trajectory is monotone-decreasing → the
+  // trough is the last hour (the shape the shortfall sizer keys on).
+  assert.equal(socs[socs.length - 1], minHourSoc, 'a steady overnight drain troughs at the final hour');
+});
+
 /* ─── computeForecastSkill ────────────────────────────────────────────
  *
  * Compares hindcast predictions against actuals over a back-window.
