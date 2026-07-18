@@ -23,6 +23,12 @@ import { priorityOf, priorityMeta, comparePriority, type AlarmPriority } from '.
 // (SHP2 main) catches the backstop path that DPU ac_in import alone is blind to.
 import { liveGridBackstop } from '../gridState.js';
 import { isSourceDpuStale, shp2ConnectedDpuSns, isShp2Connected, aggregateFleetFlow } from '../shp2Membership.js';
+// v1.38.0 (night-charge advisory, WS4) — TONIGHT'S PLAN reads the advisor's
+// staleness-gated in-process holder (dataProvider.nightChargePlan) and formats
+// the owner-facing buy/target/window through the SAME nightChargeStateFields
+// spread HA publishes, so the terminal and the HA entities never disagree.
+import { nightChargePlan } from './dataProvider.js';
+import { nightChargeStateFields } from '../nightChargeAdvisor.js';
 
 // v0.15.15 — the CHARGER screen was removed with the web Charger tab: the EVSE
 // is app-only (no API/MQTT telemetry) and its host DPU (Core 4) is an offline
@@ -1135,6 +1141,73 @@ function bodyStrategy(sv: SessionView, data: RenderData, h: number): string[] {
         // disabled (SHP2, not an automatic shed) per the v0.47.0 note above.
         (disabled ? c.grey('disabled in SHP2') : c.green('enabled')),
     );
+  }
+  L.push('');
+
+  // v1.38.0 (night-charge advisory, WS4) — TONIGHT'S PLAN: the advisor's
+  // recommendation for tonight's cheap-window grid buy. DISTINCT from CHARGE
+  // SCHEDULE below (the SHP2's NATIVE timeTask config): this is OUR advisory
+  // planner, and the two must never be confused. Read the synchronous,
+  // staleness-gated holder; null → one grey line, never a fabricated number
+  // (design §4.3). The block is advisory/read-only and touches nothing.
+  L.push(c.cyanB("TONIGHT'S PLAN") + c.dim('   night-charge advisory'));
+  const ncNow = Date.now();
+  const ncp = nightChargePlan(ncNow);
+  if (!ncp) {
+    L.push('  ' + c.grey('No night-charge plan tonight — advisor idle or basis incomplete.'));
+  } else if (!ncp.chargeTonight) {
+    // HOLD — basis complete, projected trough already holds floor+cushion.
+    const trough = ncp.baselineMinSocPct;
+    L.push(
+      '  ' +
+        c.grey('Hold — no overnight charge needed; trough ') +
+        (trough != null ? paint(socColor(trough), fmtPct(trough)) : c.grey('—')) +
+        c.grey(` ≥ floor+cushion ${fmtPct(ncp.reserveFloorPct + ncp.cushionPct)}.`),
+    );
+  } else {
+    // CHARGE — surface buy/target/window (the exact HA numbers) + the
+    // baseline→plan trough, confidence, and the honest cushion caveat.
+    const sf = nightChargeStateFields(ncp, ncNow);
+    const buy = sf.night_charge_buy_kwh;
+    const tgt = sf.night_charge_target_soc_percent;
+    const ws = sf.night_charge_window_start;
+    const we = sf.night_charge_window_end;
+    L.push(
+      '  ' +
+        field(
+          'Buy',
+          c.whiteB(buy != null ? `${buy.toFixed(1)} kWh` : '—') +
+            c.grey('  → target ') +
+            (tgt != null ? paint(socColor(tgt), fmtPct(tgt)) : c.grey('—')) +
+            (ws && we ? c.grey(`   window ${ws}–${we}`) : ''),
+          14,
+        ),
+    );
+    const base = ncp.baselineMinSocPct;
+    const proj = ncp.minProjSocPct;
+    L.push(
+      '  ' +
+        field(
+          'Trough',
+          (base != null ? paint(socColor(base), fmtPct(base)) : c.grey('—')) +
+            c.grey(' no-buy → ') +
+            (proj != null ? paint(socColor(proj), fmtPct(proj)) : c.grey('—')) +
+            c.grey(` with buy   floor+cushion ${fmtPct(ncp.reserveFloorPct + ncp.cushionPct)}`),
+          14,
+        ),
+    );
+    L.push(
+      '  ' +
+        field(
+          'Confidence',
+          c.white(ncp.confidenceTier) + (ncp.bindingCap ? c.grey(`   cap: ${ncp.bindingCap}`) : ''),
+          14,
+        ),
+    );
+    if (ncp.cushionShortfall) {
+      L.push('  ' + c.yellow('caps prevent fully meeting the cushion — residual risk remains.'));
+    }
+    L.push('  ' + c.dim('advisory only — gate an HA automation on charge_tonight + readiness.'));
   }
   L.push('');
 

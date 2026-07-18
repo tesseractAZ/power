@@ -145,6 +145,51 @@ configuration:
   LOAD_SHEDDING_RESTORE_MARGIN_H:
     name: Restore Margin (Hours)
     description: 'Anti-flap buffer: after a shed, the counterfactual runway must reach the trigger threshold PLUS these extra hours before the shed is withdrawn, preventing rapid on/off recommendations. Default 2.0. Only matters when the advisor is on and actively recommending.'
+  NIGHT_CHARGE_ADVISOR_ENABLED:
+    name: Night-Charge Advisor
+    description: 'Advisory-only: on days a shortfall is anticipated, recommends buying the right amount of grid energy in the cheap overnight window so the home never imports at the 4–7pm peak and keeps an outage cushion above the reserve floor. It NEVER charges or writes to any device — it publishes the suggestion as sensors/MQTT entities and a nightly notification, and your own HA automation decides whether to act. Default on. Learns and records from day one; write-eligibility stays off until the record proves accuracy.'
+  ARB_OUTAGE_CUSHION_PCT:
+    name: Outage Cushion (%)
+    description: 'How much battery headroom, in percent of pool capacity, to keep ABOVE the reserve floor as resilience against an unexpected outage. The advisor sizes the overnight buy so the worst-case (low-PV / high-load) projection stays at or above floor+cushion. Default 15. This never changes the independent reserve-floor alarm — it only sizes the advisory recommendation.'
+  ARB_MIN_BUY_KWH:
+    name: Minimum Buy (kWh)
+    description: Below this recommended buy size the advisor treats the night as a "hold" (no meaningful charge) rather than nagging about a trivial top-up. Default 1.0 kWh.
+  ARB_CHARGE_CAP_KW:
+    name: Grid-Charge Power Cap (kW)
+    description: The real SHP2 grid-charge power ceiling used to bound how much energy the overnight window can physically deliver. Default 7.2 kW (the live chChargeWatt). Only affects the advisory sizing math; no device is ever set.
+  ARB_LOAD_P90_FACTOR:
+    name: Load P90 Factor
+    description: 'Conservative multiplier applied to the day-ahead forecast load to get a pessimistic-high (P90) load for sizing — under-buy is treated as a safety miss, so the advisor sizes against a worst-case load. Default 1.15 (15% headroom). Range 1.0–2.0.'
+  NIGHT_CHARGE_NOTIFY_HOUR:
+    name: Night-Charge Notify Hour
+    description: 'Local (America/Phoenix) hour the once-nightly night-charge advisory is sent — early enough to act before the overnight window opens. Default 21 (9pm). The job fires at most once per calendar day and survives the daily power-cycle.'
+  NIGHT_CHARGE_NOTIFY_MINUTE:
+    name: Night-Charge Notify Minute
+    description: Minute of the Night-Charge Notify Hour to send the nightly advisory. Default 30 (so 21:30 by default). Range 0–59.
+  NIGHT_CHARGE_NOTIFY_ON_HOLD:
+    name: Notify On "Hold" Nights
+    description: 'When on (default), the nightly advisory is sent even on "hold" nights (no charge needed) so you get a consistent nightly confirmation the job ran. Turn off to only be notified when a charge is actually recommended or when the basis is missing.'
+  TARIFF_APS_ONPEAK_SUMMER_CENTS:
+    name: APS On-Peak ¢/kWh (Summer)
+    description: 'Effective summer on-peak energy price in cents per kWh (APS R-EV, 4–7pm Mon–Fri, May–Oct), taken from a real bill including adjustors. Leave blank until confirmed — any blank rate forces rates-unconfirmed, so every dollar figure is published as null (never a fabricated number).'
+  TARIFF_APS_ONPEAK_WINTER_CENTS:
+    name: APS On-Peak ¢/kWh (Winter)
+    description: Effective winter on-peak energy price in cents per kWh (APS R-EV, 4–7pm Mon–Fri, Nov–Apr), from a real bill. Leave blank until confirmed.
+  TARIFF_APS_OFFPEAK_SUMMER_CENTS:
+    name: APS Off-Peak ¢/kWh (Summer)
+    description: Effective summer off-peak energy price in cents per kWh (APS R-EV — everything outside the named windows, plus all weekends and holidays, May–Oct), from a real bill. Leave blank until confirmed.
+  TARIFF_APS_OFFPEAK_WINTER_CENTS:
+    name: APS Off-Peak ¢/kWh (Winter)
+    description: Effective winter off-peak energy price in cents per kWh (APS R-EV, Nov–Apr), from a real bill. Leave blank until confirmed.
+  TARIFF_APS_OVERNIGHT_CENTS:
+    name: APS Overnight ¢/kWh
+    description: 'Effective overnight super-off-peak price in cents per kWh (APS R-EV, 11pm–5am Mon–Fri, year-round — the cheap EV/battery-charging window). From a real bill. Leave blank until confirmed.'
+  TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS:
+    name: APS Winter Super-Off-Peak ¢/kWh
+    description: 'Effective winter daytime super-off-peak price in cents per kWh (APS R-EV, 10am–3pm Mon–Fri, Nov–Apr — the cheapest tier, overlaps solar). From a real bill. Leave blank until confirmed.'
+  TARIFF_APS_RATES_CONFIRMED:
+    name: Rates Confirmed
+    description: 'Turn on ONLY after you have entered every applicable APS R-EV rate above from a real bill. While off (default), all dollar outputs are published as null rather than computed from placeholder rates — the "null over a fabricated number" rule. Turning it on with any required rate still blank keeps that period null.'
   NWS_ENABLED:
     name: NWS Storm Alerts
     description: Pull active US National Weather Service alerts near your site (from FORECAST_LAT/LON) to fire a "pre-charge to 100% before a forecast storm" alert. Free — no API key or account. Off by default; outside the US the feed returns empty (a harmless no-op).

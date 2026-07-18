@@ -117,6 +117,23 @@ options:
   LOAD_SHEDDING_SHED_ENTITIES: ""
   LOAD_SHEDDING_RUNWAY_THRESHOLD_H: 4.0
   LOAD_SHEDDING_RESTORE_MARGIN_H: 2.0
+  # Night-charge TOU-arbitrage advisor (ADVISORY — never writes to any device)
+  NIGHT_CHARGE_ADVISOR_ENABLED: true
+  ARB_OUTAGE_CUSHION_PCT: 15
+  ARB_MIN_BUY_KWH: 1
+  ARB_CHARGE_CAP_KW: 7.2
+  ARB_LOAD_P90_FACTOR: 1.15
+  NIGHT_CHARGE_NOTIFY_HOUR: 21
+  NIGHT_CHARGE_NOTIFY_MINUTE: 30
+  NIGHT_CHARGE_NOTIFY_ON_HOLD: true
+  # APS R-EV effective ¢/kWh (enter from a bill; blank = unconfirmed → $ output null)
+  TARIFF_APS_ONPEAK_SUMMER_CENTS: ""
+  TARIFF_APS_ONPEAK_WINTER_CENTS: ""
+  TARIFF_APS_OFFPEAK_SUMMER_CENTS: ""
+  TARIFF_APS_OFFPEAK_WINTER_CENTS: ""
+  TARIFF_APS_OVERNIGHT_CENTS: ""
+  TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS: ""
+  TARIFF_APS_RATES_CONFIRMED: false
   # Integrations (opt-in): NWS storm alerts + MQTT auto-discovery
   NWS_ENABLED: false
   MQTT_DISCOVERY_ENABLED: false
@@ -192,6 +209,24 @@ schema:
   LOAD_SHEDDING_SHED_ENTITIES: "str?"
   LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float(0,168)
   LOAD_SHEDDING_RESTORE_MARGIN_H: float(0,168)
+  # Night-charge TOU-arbitrage advisor (ADVISORY — never writes to any device)
+  NIGHT_CHARGE_ADVISOR_ENABLED: bool
+  ARB_OUTAGE_CUSHION_PCT: int(0,40)
+  ARB_MIN_BUY_KWH: float(0,50)
+  ARB_CHARGE_CAP_KW: float(0,50)
+  ARB_LOAD_P90_FACTOR: float(1,2)
+  NIGHT_CHARGE_NOTIFY_HOUR: int(0,23)
+  NIGHT_CHARGE_NOTIFY_MINUTE: int(0,59)
+  NIGHT_CHARGE_NOTIFY_ON_HOLD: bool
+  # APS R-EV effective ¢/kWh — str? (ships empty; runtime parses number-or-null,
+  # same "ship empty, validate at send time" pattern as the NOTIFY_* URLs above).
+  TARIFF_APS_ONPEAK_SUMMER_CENTS: "str?"
+  TARIFF_APS_ONPEAK_WINTER_CENTS: "str?"
+  TARIFF_APS_OFFPEAK_SUMMER_CENTS: "str?"
+  TARIFF_APS_OFFPEAK_WINTER_CENTS: "str?"
+  TARIFF_APS_OVERNIGHT_CENTS: "str?"
+  TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS: "str?"
+  TARIFF_APS_RATES_CONFIRMED: bool
   # Integrations (opt-in): NWS storm alerts + MQTT auto-discovery
   NWS_ENABLED: bool
   MQTT_DISCOVERY_ENABLED: bool

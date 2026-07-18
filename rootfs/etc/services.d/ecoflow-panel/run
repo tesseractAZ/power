@@ -174,6 +174,37 @@ fi
 export LOAD_SHEDDING_SHED_ENTITIES="$(bashio::config 'LOAD_SHEDDING_SHED_ENTITIES')"
 export LOAD_SHEDDING_RUNWAY_THRESHOLD_H="$(bashio::config 'LOAD_SHEDDING_RUNWAY_THRESHOLD_H')"
 export LOAD_SHEDDING_RESTORE_MARGIN_H="$(bashio::config 'LOAD_SHEDDING_RESTORE_MARGIN_H')"
+# v1.38.0 — night-charge TOU-arbitrage ADVISOR (read + advise; NEVER writes to any
+# device). Enable flag + on-hold flag use the string true/false bool convention
+# (the server reads them as `!== 'false'`); the numeric knobs + APS R-EV cents pass
+# through verbatim (the server parses each cent as number-or-null, blank = unconfirmed).
+if bashio::config.true 'NIGHT_CHARGE_ADVISOR_ENABLED'; then
+  export NIGHT_CHARGE_ADVISOR_ENABLED=true
+else
+  export NIGHT_CHARGE_ADVISOR_ENABLED=false
+fi
+export ARB_OUTAGE_CUSHION_PCT="$(bashio::config 'ARB_OUTAGE_CUSHION_PCT')"
+export ARB_MIN_BUY_KWH="$(bashio::config 'ARB_MIN_BUY_KWH')"
+export ARB_CHARGE_CAP_KW="$(bashio::config 'ARB_CHARGE_CAP_KW')"
+export ARB_LOAD_P90_FACTOR="$(bashio::config 'ARB_LOAD_P90_FACTOR')"
+export NIGHT_CHARGE_NOTIFY_HOUR="$(bashio::config 'NIGHT_CHARGE_NOTIFY_HOUR')"
+export NIGHT_CHARGE_NOTIFY_MINUTE="$(bashio::config 'NIGHT_CHARGE_NOTIFY_MINUTE')"
+if bashio::config.true 'NIGHT_CHARGE_NOTIFY_ON_HOLD'; then
+  export NIGHT_CHARGE_NOTIFY_ON_HOLD=true
+else
+  export NIGHT_CHARGE_NOTIFY_ON_HOLD=false
+fi
+export TARIFF_APS_ONPEAK_SUMMER_CENTS="$(bashio::config 'TARIFF_APS_ONPEAK_SUMMER_CENTS')"
+export TARIFF_APS_ONPEAK_WINTER_CENTS="$(bashio::config 'TARIFF_APS_ONPEAK_WINTER_CENTS')"
+export TARIFF_APS_OFFPEAK_SUMMER_CENTS="$(bashio::config 'TARIFF_APS_OFFPEAK_SUMMER_CENTS')"
+export TARIFF_APS_OFFPEAK_WINTER_CENTS="$(bashio::config 'TARIFF_APS_OFFPEAK_WINTER_CENTS')"
+export TARIFF_APS_OVERNIGHT_CENTS="$(bashio::config 'TARIFF_APS_OVERNIGHT_CENTS')"
+export TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS="$(bashio::config 'TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS')"
+if bashio::config.true 'TARIFF_APS_RATES_CONFIRMED'; then
+  export TARIFF_APS_RATES_CONFIRMED=true
+else
+  export TARIFF_APS_RATES_CONFIRMED=false
+fi
 # SUPERVISOR_TOKEN is provided automatically by the HA Supervisor —
 # no need to export it manually. The Node process inherits it.
 

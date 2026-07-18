@@ -6,6 +6,10 @@ import { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
 import { SPARE_DPU_SNS, shp2ConnectedDpuSns } from './shp2Membership.js';
+// v1.38.0 (WS2) — Phoenix calendar-date resolution for the night-charge ledger
+// read cutoff. tariff.ts is a pure, import-free module (no circular dependency);
+// `.ymd` is the same America/Phoenix YYYY-MM-DD key the ledger stores plan_date as.
+import { localParts } from './tariff.js';
 
 interface MetricSample {
   sn: string;
@@ -152,6 +156,11 @@ export function resolveDeferredRestartGap(inputs: {
 const WEATHER_SN = 'weather';
 // v1.31.0 — day-ahead forecast archive series (see recordForecastArchive).
 const FORECAST_SN = 'forecast';
+// v1.38.0 (WS2) — synthetic SN reserved for the night-charge feature's OPTIONAL
+// disposable 30-day chart-overlay samples (design §0.1/§3.1). The DURABLE ledger
+// lives in its own never-pruned tables (night_charge_ledger/_calibration), NOT
+// here — this SN is only the excluded anchor for restart-gap detection.
+const NIGHT_CHARGE_SN = 'night_charge';
 const FORECAST_PV_NEXT24_METRIC = 'pv_next24_wh';
 const WEATHER_GHI_METRIC = 'ghi_wm2';     // global horizontal irradiance, W/m²
 const WEATHER_CLOUD_METRIC = 'cloud_pct'; // cloud cover, %
@@ -302,6 +311,22 @@ export interface Recorder {
   ) => void;
   /** v1.31.0 — archive the issued next-24h PV forecast (Wh) for out-of-sample scoring. */
   recordForecastArchive: (pvNext24Wh: number, issuedAtMs: number) => void;
+  /** v1.38.0 (WS2, night-charge learning ledger — design §3.1). Upsert the
+   *  frozen PLAN row for a local `plan_date` (YYYY-MM-DD, America/Phoenix). Only
+   *  the provided fields are written; re-issuing the same date overwrites the
+   *  plan columns. Durable + NEVER pruned. */
+  recordNightPlan: (row: Partial<NightLedgerRow> & { plan_date: string }) => void;
+  /** v1.38.0 (WS2) — merge OUTCOME/SCORE fields onto an existing plan row via
+   *  INSERT..ON CONFLICT(plan_date) DO UPDATE; only the provided columns are
+   *  overwritten, so the frozen plan columns survive an outcome/score update. */
+  recordNightOutcome: (planDate: string, fields: Partial<NightLedgerRow>) => void;
+  /** v1.38.0 (WS2) — ledger rows whose `plan_date` is within the last
+   *  `sinceDays` Phoenix calendar days, ascending by date. */
+  readNightLedger: (sinceDays: number) => NightLedgerRow[];
+  /** v1.38.0 (WS2) — the singleton calibration state, or null before first fit. */
+  readNightCalibration: () => NightCalibration | null;
+  /** v1.38.0 (WS2) — upsert the singleton calibration row (id forced to 1). */
+  upsertNightCalibration: (c: NightCalibration) => void;
   close: () => void;
   /** Force a lifetime-rollup tick (used by tests / on shutdown). */
   rollupLifetime: () => void;
@@ -357,6 +382,157 @@ export interface BatteryLifetimeDebug {
   offlineHeldMembers: string[];
 }
 
+/**
+ * v1.38.0 (WS2) — one durable row of the night-charge learning ledger
+ * (design §3.1). One row per `plan_date` (YYYY-MM-DD, America/Phoenix), upserted.
+ *
+ *  - PLAN columns are frozen the evening before (immutable once written; a
+ *    re-issue for the same date overwrites only the plan columns). `algo_version`
+ *    is a PLAN column so a physics/re-learn fix is attributable and prior-version
+ *    rows are EXCLUDABLE by the readiness gate (design §5.2, I13).
+ *  - OUTCOME columns are NULL until ~21:30 the next evening, once the charge
+ *    window AND the 4–7pm peak have both closed.
+ *  - SCORE columns are the derived accuracy terms (NULL until scored).
+ *
+ * ★ This lives in a DEDICATED, NEVER-PRUNED table (created alongside
+ *   `lifetime_totals`, never referenced by the samples prune) — the multi-month
+ *   verification record the write-readiness gate reduces over MUST survive the
+ *   30-day `samples` retention (design §0.1 binding decision).
+ * ★ Booleans are stored as INTEGER 0/1 — node:sqlite rejects a JS boolean bind
+ *   (the recorder coerces defensively). JSON blobs (`tariff_snapshot`) are TEXT.
+ *   OUTCOME + SCORE columns are nullable; PLAN columns are frozen but typed
+ *   non-null (a Partial is accepted on write so a thin plan can omit fields).
+ */
+export interface NightLedgerRow {
+  // ── Primary key ──
+  plan_date: string; // YYYY-MM-DD, America/Phoenix
+
+  // ── PLAN (frozen the evening before, immutable) ──
+  issued_at_ms: number;
+  algo_version: string; // excludes prior-version rows on a physics/re-learn fix
+  posture: string; // 'advisory'
+  objective: string; // 'resilience_cushion' | 'energy_arb' | 'peak_avoidance' | 'none'
+  rationale: string;
+  confidence_tier: string; // 'forecast' | 'mixed' | 'climatology'
+  horizon_hours: number;
+  soc_now_pct: number;
+  soc_at_window_start_pct: number;
+  target_soc_pct: number;
+  buy_kwh: number;
+  required_extra_kwh: number;
+  reserve_floor_pct: number;
+  cushion_pct: number;
+  cushion_kwh: number;
+  binding_cap: string | null; // enum-ish; null when no cap bound the buy
+  pv_p10_kwh: number;
+  pv_p50_kwh: number;
+  pv_p90_kwh: number;
+  load_p10_kwh: number;
+  load_p50_kwh: number;
+  load_p90_kwh: number;
+  ev_p90_session_kwh: number;
+  ev_session_count: number; // tail-sufficiency for the EV p90
+  min_proj_soc_pct: number; // from the SIMULATED plan trajectory (design §3.3)
+  min_proj_soc_ts_ms: number;
+  pool_full_kwh: number;
+  band_sigma_cal: number;
+  cal_scored_days: number;
+  forecast_basis: string;
+  weather_covered: number; // 0/1
+  tariff_snapshot: string; // JSON: plan/season/periodId/centsByTier/ratesConfirmed/…
+
+  // ── OUTCOME (NULL until ~21:30 next evening) ──
+  outcome_captured_at_ms: number | null;
+  actual_pv_kwh: number | null;
+  actual_load_kwh: number | null;
+  actual_window_import_kwh: number | null; // grid_home_w 23:00–05:00
+  actual_grid_to_battery_kwh: number | null; // exact night-charge attribution
+  actual_onpeak_import_kwh: number | null; // grid_home_w 16:00–19:00 M-F
+  onpeak_import_occurred: number | null; // 0/1
+  actual_min_soc_pct: number | null;
+  actual_min_soc_ts_ms: number | null;
+  plan_traj_floor_breached: number | null; // 0/1 — scored on the SIMULATED trajectory (§3.3)
+  cushion_breached: number | null; // 0/1
+  grid_home_coverage_frac: number | null;
+  outage_during_day: number | null; // 0/1
+  scored: number | null; // 0/1 (0 when coverage<0.9 or excluded)
+  score_notes: string | null;
+
+  // ── SCORE (NULL until scored) ──
+  pv_err_frac: number | null;
+  pv_in_band: number | null; // 0/1
+  load_err_frac: number | null;
+  load_in_band: number | null; // 0/1
+  buy_err_kwh: number | null; // signed, + over-bought
+  soc_min_err_pct: number | null;
+  realized_cost_cents: number | null; // measured
+  counterfactual_cost_cents: number | null; // flagged ESTIMATE
+  realized_savings_cents: number | null; // flagged UNVALIDATED pre-write
+  demand_charge_savings_cents: number | null; // nullable
+  would_have_peak_imported: number | null; // 0/1
+}
+
+/**
+ * v1.38.0 (WS2) — singleton calibration state (design §3.4). Seasonally-
+ * stratified cushion learner + buy de-bias + EV-tail inflation, plus the MNAR
+ * exclusion bookkeeping the readiness gate reads (§3.5). Singleton (id=1 CHECK);
+ * upserted. Full history is reconstructable from the ledger, so this holds only
+ * CURRENT state. Fail-safe: any NaN / insufficient-data path resolves to the
+ * conservative side UPSTREAM (bigger cushion, advisory posture); this table only
+ * persists the learned numbers — it never modifies the independent floor/runway
+ * safety spine. `state_json` is an extensibility escape hatch for additional
+ * learner state without a schema migration.
+ */
+export interface NightCalibration {
+  id: number; // always 1 (singleton, CHECK enforced)
+  updated_at_ms: number;
+  cushion_pct_summer: number | null;
+  cushion_pct_winter: number | null;
+  cushion_pct_monsoon: number | null;
+  cushion_floor_pct: number | null; // long-horizon / EVT season-worst floor (non-shrinking)
+  buy_bias_kwh: number | null; // median signed buy_err — CENTRAL-forecast de-bias only
+  ev_p90_inflation: number | null; // conservative inflation until the EV tail is sufficient
+  scored_days: number | null;
+  exclusion_frac: number | null; // MNAR exclusion fraction (readiness cap input)
+  algo_version: string | null; // version the learned state was fit under
+  state_json: string | null; // additional learner state as JSON (extensibility)
+}
+
+// v1.38.0 (WS2) — canonical, ordered column whitelists. The upsert builder
+// interpolates column NAMES into SQL, so every name MUST come from these frozen
+// sets (never from caller-supplied keys) — that is what makes the dynamic
+// INSERT..ON CONFLICT injection-safe. Keep in lockstep with the CREATE TABLE
+// statements and the interfaces above.
+const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
+  'plan_date',
+  'issued_at_ms', 'algo_version', 'posture', 'objective', 'rationale',
+  'confidence_tier', 'horizon_hours', 'soc_now_pct', 'soc_at_window_start_pct',
+  'target_soc_pct', 'buy_kwh', 'required_extra_kwh', 'reserve_floor_pct',
+  'cushion_pct', 'cushion_kwh', 'binding_cap', 'pv_p10_kwh', 'pv_p50_kwh',
+  'pv_p90_kwh', 'load_p10_kwh', 'load_p50_kwh', 'load_p90_kwh',
+  'ev_p90_session_kwh', 'ev_session_count', 'min_proj_soc_pct',
+  'min_proj_soc_ts_ms', 'pool_full_kwh', 'band_sigma_cal', 'cal_scored_days',
+  'forecast_basis', 'weather_covered', 'tariff_snapshot',
+  'outcome_captured_at_ms', 'actual_pv_kwh', 'actual_load_kwh',
+  'actual_window_import_kwh', 'actual_grid_to_battery_kwh',
+  'actual_onpeak_import_kwh', 'onpeak_import_occurred', 'actual_min_soc_pct',
+  'actual_min_soc_ts_ms', 'plan_traj_floor_breached', 'cushion_breached',
+  'grid_home_coverage_frac', 'outage_during_day', 'scored', 'score_notes',
+  'pv_err_frac', 'pv_in_band', 'load_err_frac', 'load_in_band', 'buy_err_kwh',
+  'soc_min_err_pct', 'realized_cost_cents', 'counterfactual_cost_cents',
+  'realized_savings_cents', 'demand_charge_savings_cents',
+  'would_have_peak_imported',
+];
+const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
+
+const NIGHT_CALIBRATION_COLUMNS: readonly (keyof NightCalibration)[] = [
+  'id', 'updated_at_ms', 'cushion_pct_summer', 'cushion_pct_winter',
+  'cushion_pct_monsoon', 'cushion_floor_pct', 'buy_bias_kwh',
+  'ev_p90_inflation', 'scored_days', 'exclusion_frac', 'algo_version',
+  'state_json',
+];
+const NIGHT_CALIBRATION_COLUMN_SET = new Set<string>(NIGHT_CALIBRATION_COLUMNS as readonly string[]);
+
 export function createRecorder(store: SnapshotStore, log: (m: string) => void): Recorder {
   const dbPath = resolve(process.cwd(), config.dbPath);
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -401,6 +577,93 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       metric_key TEXT PRIMARY KEY,
       wh REAL NOT NULL DEFAULT 0,
       last_integrated_ts INTEGER NOT NULL DEFAULT 0
+    );
+    -- v1.38.0 (WS2) — night-charge learning ledger (design §3.1). One row per
+    -- plan_date (YYYY-MM-DD America/Phoenix), upserted. DEDICATED + NEVER PRUNED:
+    -- created HERE alongside lifetime_totals and never referenced by the samples
+    -- prune (DELETE FROM samples … below), so the multi-month verification record
+    -- the write-readiness gate reduces over survives the 30-day samples retention.
+    -- PLAN cols are frozen (immutable once written); OUTCOME + SCORE cols are
+    -- nullable (filled/derived the next evening). Booleans are INTEGER 0/1.
+    CREATE TABLE IF NOT EXISTS night_charge_ledger (
+      plan_date TEXT PRIMARY KEY,
+      -- PLAN (frozen)
+      issued_at_ms INTEGER,
+      algo_version TEXT,
+      posture TEXT,
+      objective TEXT,
+      rationale TEXT,
+      confidence_tier TEXT,
+      horizon_hours REAL,
+      soc_now_pct REAL,
+      soc_at_window_start_pct REAL,
+      target_soc_pct REAL,
+      buy_kwh REAL,
+      required_extra_kwh REAL,
+      reserve_floor_pct REAL,
+      cushion_pct REAL,
+      cushion_kwh REAL,
+      binding_cap TEXT,
+      pv_p10_kwh REAL,
+      pv_p50_kwh REAL,
+      pv_p90_kwh REAL,
+      load_p10_kwh REAL,
+      load_p50_kwh REAL,
+      load_p90_kwh REAL,
+      ev_p90_session_kwh REAL,
+      ev_session_count INTEGER,
+      min_proj_soc_pct REAL,
+      min_proj_soc_ts_ms INTEGER,
+      pool_full_kwh REAL,
+      band_sigma_cal REAL,
+      cal_scored_days INTEGER,
+      forecast_basis TEXT,
+      weather_covered INTEGER,
+      tariff_snapshot TEXT,
+      -- OUTCOME (nullable until captured)
+      outcome_captured_at_ms INTEGER,
+      actual_pv_kwh REAL,
+      actual_load_kwh REAL,
+      actual_window_import_kwh REAL,
+      actual_grid_to_battery_kwh REAL,
+      actual_onpeak_import_kwh REAL,
+      onpeak_import_occurred INTEGER,
+      actual_min_soc_pct REAL,
+      actual_min_soc_ts_ms INTEGER,
+      plan_traj_floor_breached INTEGER,
+      cushion_breached INTEGER,
+      grid_home_coverage_frac REAL,
+      outage_during_day INTEGER,
+      scored INTEGER,
+      score_notes TEXT,
+      -- SCORE (nullable until scored)
+      pv_err_frac REAL,
+      pv_in_band INTEGER,
+      load_err_frac REAL,
+      load_in_band INTEGER,
+      buy_err_kwh REAL,
+      soc_min_err_pct REAL,
+      realized_cost_cents REAL,
+      counterfactual_cost_cents REAL,
+      realized_savings_cents REAL,
+      demand_charge_savings_cents REAL,
+      would_have_peak_imported INTEGER
+    );
+    -- v1.38.0 (WS2) — singleton calibration state (design §3.4/§3.5). id=1 CHECK
+    -- enforces the singleton; history is reconstructable from the ledger.
+    CREATE TABLE IF NOT EXISTS night_charge_calibration (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      updated_at_ms INTEGER,
+      cushion_pct_summer REAL,
+      cushion_pct_winter REAL,
+      cushion_pct_monsoon REAL,
+      cushion_floor_pct REAL,
+      buy_bias_kwh REAL,
+      ev_p90_inflation REAL,
+      scored_days INTEGER,
+      exclusion_frac REAL,
+      algo_version TEXT,
+      state_json TEXT
     );
   `);
 
@@ -552,7 +815,12 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // rows would pull MAX(ts) past the last real home sample and mask the
     // pre-crash stall this detector exists to ledger. Same invariant as
     // WEATHER_SN/spares: only HOME-FEED writers may anchor the gap.
-    const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, ...SPARE_DPU_SNS];
+    // v1.38.0 (WS2) — 'night_charge' joins the exclusion: the optional disposable
+    // 30-day chart-overlay samples the night-charge feature may write ride a
+    // synthetic SN and are wall-clock-stamped off-cadence, so (like WEATHER/
+    // FORECAST) they must not pull MAX(ts) past the last real home sample and
+    // mask a pre-crash telemetry stall this detector exists to ledger.
+    const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, NIGHT_CHARGE_SN, ...SPARE_DPU_SNS];
     const row = db.prepare(
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
@@ -1857,6 +2125,110 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     insert.run(ts, FORECAST_SN, FORECAST_PV_NEXT24_METRIC, pvNext24Wh);
   };
 
+  // ─── Night-charge learning ledger (v1.38.0, WS2) ─────────────────────────
+  // Durable, never-pruned upsert path for the night-charge advisor's plan +
+  // outcome + score record (design §3.1). The plan is written once the evening
+  // before; the outcome/score fields are merged onto the SAME plan_date row the
+  // next evening via INSERT..ON CONFLICT(pk) DO UPDATE, overwriting ONLY the
+  // columns provided this call so the frozen plan columns survive a partial
+  // outcome update. Prepared statements are cached per column-shape (like
+  // getQueryMultiStmt) — one prepared statement per distinct set of columns.
+  type NightStmtCache = Map<string, ReturnType<typeof db.prepare>>;
+  /**
+   * Dynamic, injection-safe upsert. Column NAMES come ONLY from `columnSet`
+   * (the frozen whitelist) — never from caller keys — so the interpolation is
+   * safe. Only the columns actually present (and not `undefined`) are written,
+   * which is what makes a partial outcome update preserve every omitted plan
+   * column. Booleans are coerced to INTEGER 0/1 (node:sqlite rejects a JS
+   * boolean bind); `null` passes through, `undefined` is skipped.
+   */
+  function nightUpsert(
+    table: string,
+    columnSet: Set<string>,
+    pkCol: string,
+    cache: NightStmtCache,
+    fields: Record<string, unknown>,
+  ): void {
+    const cols = Object.keys(fields).filter((k) => columnSet.has(k) && fields[k] !== undefined);
+    if (!cols.includes(pkCol)) {
+      throw new Error(`nightUpsert(${table}): missing primary key '${pkCol}'`);
+    }
+    cols.sort(); // stable order → stable cache key → one prepared stmt per shape
+    const cacheKey = cols.join(',');
+    let stmt = cache.get(cacheKey);
+    if (!stmt) {
+      const placeholders = cols.map(() => '?').join(', ');
+      const setCols = cols.filter((c) => c !== pkCol);
+      // Overwrite only the PROVIDED non-PK columns; when nothing but the PK is
+      // provided, a self-assign keeps the statement valid (a pure touch/no-op).
+      const setClause = setCols.length
+        ? setCols.map((c) => `${c} = excluded.${c}`).join(', ')
+        : `${pkCol} = excluded.${pkCol}`;
+      const sql =
+        `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders}) ` +
+        `ON CONFLICT(${pkCol}) DO UPDATE SET ${setClause}`;
+      stmt = db.prepare(sql);
+      cache.set(cacheKey, stmt);
+    }
+    const binds = cols.map((c) => {
+      const v = fields[c];
+      return typeof v === 'boolean' ? (v ? 1 : 0) : (v as any);
+    });
+    stmt.run(...binds);
+  }
+
+  const nightLedgerStmtCache: NightStmtCache = new Map();
+  const nightCalStmtCache: NightStmtCache = new Map();
+
+  const recordNightPlan = (row: Partial<NightLedgerRow> & { plan_date: string }): void => {
+    nightUpsert(
+      'night_charge_ledger',
+      NIGHT_LEDGER_COLUMN_SET,
+      'plan_date',
+      nightLedgerStmtCache,
+      row as Record<string, unknown>,
+    );
+  };
+
+  const recordNightOutcome = (planDate: string, fields: Partial<NightLedgerRow>): void => {
+    // planDate wins over any plan_date in `fields` (defensive), so an outcome
+    // update always targets the intended row.
+    nightUpsert(
+      'night_charge_ledger',
+      NIGHT_LEDGER_COLUMN_SET,
+      'plan_date',
+      nightLedgerStmtCache,
+      { ...fields, plan_date: planDate } as Record<string, unknown>,
+    );
+  };
+
+  const nightLedgerReadStmt = db.prepare(
+    `SELECT * FROM night_charge_ledger WHERE plan_date >= ? ORDER BY plan_date ASC`,
+  );
+  const readNightLedger = (sinceDays: number): NightLedgerRow[] => {
+    // Lower-bound plan_date by the Phoenix calendar date `sinceDays` ago. ISO
+    // YYYY-MM-DD sorts lexicographically, so a string compare is a date compare.
+    const cutoffMs = Date.now() - Math.max(0, sinceDays) * 86_400_000;
+    const cutoff = localParts(cutoffMs, 'America/Phoenix').ymd;
+    return nightLedgerReadStmt.all(cutoff) as unknown as NightLedgerRow[];
+  };
+
+  const nightCalReadStmt = db.prepare(`SELECT * FROM night_charge_calibration WHERE id = 1`);
+  const readNightCalibration = (): NightCalibration | null => {
+    return (nightCalReadStmt.get() as NightCalibration | undefined) ?? null;
+  };
+
+  const upsertNightCalibration = (c: NightCalibration): void => {
+    // Force the singleton id so a caller can never split the row.
+    nightUpsert(
+      'night_charge_calibration',
+      NIGHT_CALIBRATION_COLUMN_SET,
+      'id',
+      nightCalStmtCache,
+      { ...c, id: 1 } as Record<string, unknown>,
+    );
+  };
+
   return {
     insertSnapshot: (snap) => record(extract(snap)),
     query: (sn, metric, sinceMs, untilMs, bucketSec) => {
@@ -1898,6 +2270,11 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     telemetryGaps: () => telemetryGapsLog.slice(),
     recordWeatherGhi,
     recordForecastArchive,
+    recordNightPlan,
+    recordNightOutcome,
+    readNightLedger,
+    readNightCalibration,
+    upsertNightCalibration,
     close: () => {
       clearInterval(lifetimeTimer);
       // Final rollup so we don't lose the trailing minute of energy on shutdown.
