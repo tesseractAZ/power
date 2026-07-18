@@ -190,3 +190,7 @@ See [`SECURITY.md`](SECURITY.md) for the vulnerability-reporting policy and the
 security posture: AppArmor confinement, device writes off by default behind an
 audit log and auth-gated endpoints, the unauthenticated TUI off by default, and
 secrets handled presence-only (never logged or echoed).
+
+## License
+
+[MIT](LICENSE) © Eric Paschal
