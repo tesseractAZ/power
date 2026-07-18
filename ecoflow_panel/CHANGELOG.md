@@ -37,10 +37,25 @@ next recharge.
   rationale). On a tight day resilience wins the over-buy ceiling and accepts a
   small clip.
 
-15 focused deterministic tests (fail-safe gates, exact floor+cushion sizing,
-worst-case monotonicity, every cap, the meter≥pack invariant); 1536 server
-tests green (+15), tsc clean. No config, endpoint, or behavior change — nothing
-calls this module yet.
+**Pre-merge adversarial review (13 agents) caught two CONFIRMED critical
+safety-direction defects in the first cut of the sizing math — fixed before this
+shipped, with regression tests pinning each:**
+- **Deep-shortfall under-buy:** sizing `requiredExtra = targetFloor − baselineTrough`
+  truncated at the floor because the baseline DC-bus sim clamps at 0, so a night
+  draining *below* empty under-sized the buy (~28 kWh when ~61 was needed) yet
+  reported "met" — an UNDER-BUY, the life-safety miss.
+- **Full-clamp erasing the lift, flag stayed green:** a mid-window PV surge
+  clamping the pack to full made the with-buy trough sit below floor+cushion while
+  `cushionShortfall=false`/`bindingCap='requirement'` (the 72 h Fri→Mon horizon
+  saturates on weekend middays).
+Root cause (shared): the buy was sized by an additive-offset that the DC-bus
+clamps break in both directions, and the re-simulation was computed but never fed
+back. **Fix:** the buy is now SOLVED by bisection against the clamp-exact,
+monotone-in-lift with-buy re-sim trough, and `cushionShortfall` is driven by that
+trough — so neither a full-clamp nor a below-empty deficit can present as
+"requirement met". 17 deterministic tests (+2 regressions); 1538 server tests
+green, tsc clean. No config, endpoint, or behavior change — nothing calls this
+module yet.
 
 ## v1.36.0 — TOU tariff model (APS R-EV), pure module
 

@@ -270,27 +270,44 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const windowEnd = window.endMs;
   const windowHours = (windowEnd - windowStart) / HOUR_MS;
 
-  // Split the horizon: pre-window carry (now→windowStart), the window hours
-  // (billed load happens even while grid-charging), and the post-window horizon.
-  const preWindow = horizon.filter((h) => h.ts >= nowMs && h.ts < windowStart);
+  // Window hours (billed house load happens even while grid-charging — it caps
+  // how much grid energy can reach the charger).
   const windowHrs = horizon.filter((h) => h.ts >= windowStart && h.ts < windowEnd);
   // The scored trajectory runs from window-end forward (the buy tops the pack at
   // 05:00; the pre-window trough is a TONIGHT concern the alarm owns, not
   // something a 23:00 buy can fix).
-  const postAndWindow = horizon.filter((h) => h.ts >= windowStart);
+  const postHours = horizon.filter((h) => h.ts >= windowEnd);
 
-  // ── §2.2 step 1–2: NO-BUY baseline. Carry SoC_now from now to next recharge;
-  // record the trough over [windowEnd, end]. ──
+  // ── §2.2 step 1: pack level ENTERING window-close, no buy (carry SoC_now
+  // through the pre-window + window house load). ──
   const baseline = simulate(socNowKwh, fullKwh, horizon.filter((h) => h.ts >= nowMs), dischargeEff, windowEnd, windowEnd);
-  const packAtWindowEnd_noBuy = baseline.packAtMarkKwh; // pack entering 05:00, no buy
-  const minPost_noBuy = baseline.minPackKwh;
-  const baselineMinSocPct = round1((minPost_noBuy / fullKwh) * 100);
+  const packAtWindowEnd_noBuy = baseline.packAtMarkKwh;
 
-  // ── §2.2 step 3: required pack-kWh lift so the trough holds floor+cushion ──
-  const requiredExtraKwh = Math.max(0, targetFloorKwh - minPost_noBuy);
+  // ★★ THE SIZING AUTHORITY (v1.37.0 review fix — two CONFIRMED criticals):
+  // `trough(lift)` = the simulated PLAN-trajectory minimum pack over
+  // [windowEnd, end] when the overnight buy raises the window-close pack by
+  // `lift` kWh. Sizing is SOLVED against this clamp-exact re-simulation, NOT the
+  // additive-offset `targetFloor − clampedBaselineTrough`, which the DC-bus
+  // clamps break in BOTH safety-critical directions:
+  //   (a) a mid-window PV surge that clamps the pack to FULL erases the lift, so
+  //       an additive estimate reports "requirement met" while the trajectory
+  //       still dips below floor+cushion (unflagged residual risk); and
+  //   (b) a deep drain that clamps the baseline trough at 0 TRUNCATES the
+  //       apparent deficit at targetFloor, so the additive requiredExtra
+  //       under-sizes the buy on exactly the deep-shortfall night — an UNDER-BUY,
+  //       the life-safety miss.
+  // trough(lift) is monotone non-decreasing in `lift` (max(0,min(full,·))
+  // preserves order), so a bisection is exact.
+  const troughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
+    const r = simulate(packAtWindowEnd_noBuy + lift, fullKwh, postHours, dischargeEff, windowEnd, windowEnd);
+    return { minKwh: r.minPackKwh, minTs: r.minTsMs };
+  };
+
+  const baselineTrough = troughAtLift(0);
+  const baselineMinSocPct = round1((baselineTrough.minKwh / fullKwh) * 100);
 
   // No shortfall projected → HOLD (no buy). Honest "you don't need to charge".
-  if (requiredExtraKwh <= 1e-9) {
+  if (baselineTrough.minKwh >= targetFloorKwh - 1e-9) {
     return {
       ...nullPlan(inputs, true, `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above the ${round1(reserveFloorPct + cushionPct)}% floor+cushion; no charge needed.`),
       objective: 'none',
@@ -298,48 +315,71 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       requiredExtraKwh: 0,
       targetSocPct: round1((packAtWindowEnd_noBuy / fullKwh) * 100),
       minProjSocPct: baselineMinSocPct,
-      minProjSocTsMs: baseline.minTsMs,
+      minProjSocTsMs: baselineTrough.minTs,
       baselineMinSocPct,
     };
   }
 
-  // ── Caps (design §2.2). Which cap bounds the achievable lift. ──
-  // Charge-power feasibility: over the window the grid can deliver at most
-  // chargeCapKw·windowHours; the house load during the window is served first,
-  // and only legEff of what reaches the charger is stored in the pack.
+  // Feasibility bounds on the lift.
+  // Charge-power: over the window the grid delivers at most chargeCapKw·hours;
+  // the window house load is served first, and only legEff of what reaches the
+  // charger is stored in the pack.
   const windowLoadKwh = windowHrs.reduce((s, h) => s + h.loadP90W / 1000, 0);
-  const maxGridKwh = chargeCapKw * windowHours;
-  const chargePowerLiftKwh = Math.max(0, (maxGridKwh - windowLoadKwh) * legEff);
-
-  // Pool headroom: cannot lift the pack past full.
+  const chargePowerLiftKwh = Math.max(0, (chargeCapKw * windowHours - windowLoadKwh) * legEff);
+  // Pool headroom: the pack physically cannot hold more than full.
   const poolHeadroomLiftKwh = Math.max(0, fullKwh - packAtWindowEnd_noBuy);
 
-  // The achievable lift is the requirement, bounded by the two HARD caps.
-  let liftKwh = requiredExtraKwh;
-  let bindingCap: BindingCap = 'requirement';
-  if (chargePowerLiftKwh < liftKwh) { liftKwh = chargePowerLiftKwh; bindingCap = 'chargePower'; }
-  if (poolHeadroomLiftKwh < liftKwh) { liftKwh = poolHeadroomLiftKwh; bindingCap = 'poolHeadroom'; }
-  const cushionShortfall = liftKwh < requiredExtraKwh - 1e-6; // caps prevented meeting floor+cushion
+  // §2.2 step 3 — minimal lift (bounded only by what the pack can physically
+  // hold) that makes the re-simulated trough reach floor+cushion. If even
+  // filling the pack to full can't hold the line (saturation / horizon too
+  // long), the requirement IS the full-pack lift and the cushion is unmeetable
+  // (flagged below via the trough, not assumed met).
+  let requiredExtraKwh: number;
+  if (troughAtLift(poolHeadroomLiftKwh).minKwh < targetFloorKwh - 1e-9) {
+    requiredExtraKwh = poolHeadroomLiftKwh;
+  } else {
+    let lo = 0;
+    let hi = poolHeadroomLiftKwh;
+    for (let i = 0; i < 48; i++) {
+      const mid = (lo + hi) / 2;
+      if (troughAtLift(mid).minKwh >= targetFloorKwh) hi = mid;
+      else lo = mid;
+    }
+    requiredExtraKwh = hi;
+  }
 
-  // Over-buy ceiling: if the (resilience-required) target pushes the pack above
-  // full − P90 morning surplus, morning PV will clip. Resilience WINS — we keep
-  // the buy — but flag it so the operator/ledger see the accepted clip.
-  const targetPackKwh_pre = packAtWindowEnd_noBuy + liftKwh;
+  // The ACTUALLY achievable lift = requirement bounded by charge power.
+  const liftKwh = Math.min(requiredExtraKwh, chargePowerLiftKwh);
+  let bindingCap: BindingCap = 'requirement';
+  if (requiredExtraKwh >= poolHeadroomLiftKwh - 1e-6) bindingCap = 'poolHeadroom';
+  if (chargePowerLiftKwh < requiredExtraKwh - 1e-6) bindingCap = 'chargePower';
+
+  // ★ cushionShortfall is driven by the re-simulated trough under the lift we can
+  // actually deliver — so NEITHER a full-clamp erasing the lift NOR a
+  // below-empty deficit can present as "requirement met" (fixes both criticals).
+  const withBuy = troughAtLift(liftKwh);
+  const minProjKwh = withBuy.minKwh;
+  const minProjSocPct = round1((minProjKwh / fullKwh) * 100);
+  const cushionShortfall = minProjKwh < targetFloorKwh - 1e-6;
+  if (cushionShortfall && bindingCap === 'requirement') {
+    // A clamp (saturation / below-empty), not a linear cap, is the limiter;
+    // attribute to the tighter physical bound so the flag is never 'requirement'.
+    bindingCap = poolHeadroomLiftKwh <= chargePowerLiftKwh ? 'poolHeadroom' : 'chargePower';
+  }
+
+  const targetPackKwh = Math.min(fullKwh, packAtWindowEnd_noBuy + liftKwh);
+
+  // Over-buy ceiling (flag only; resilience wins): the required buy pushes the
+  // pack above full − P90 morning surplus, so morning PV will clip. Keep the
+  // buy; flag the accepted clip — but only when the cushion IS met (otherwise
+  // the shortfall flag already dominates).
   if (
     morningPvSurplusP90Kwh != null &&
-    targetPackKwh_pre > fullKwh - morningPvSurplusP90Kwh + 1e-6 &&
-    !cushionShortfall
+    !cushionShortfall &&
+    targetPackKwh > fullKwh - morningPvSurplusP90Kwh + 1e-6
   ) {
     bindingCap = 'overBuy';
   }
-
-  // ── §2.2 step 3 (near-saturation): if the buy pushes the pack near full, the
-  // additive-offset assumption breaks (clamping loses lift). Re-simulate the
-  // post-window trajectory WITH the buy applied to get the exact trough. ──
-  const targetPackKwh = Math.min(fullKwh, packAtWindowEnd_noBuy + liftKwh);
-  const withBuy = simulate(targetPackKwh, fullKwh, postAndWindow.filter((h) => h.ts >= windowEnd), dischargeEff, windowEnd, windowEnd);
-  const minProjKwh = withBuy.minPackKwh;
-  const minProjSocPct = round1((minProjKwh / fullKwh) * 100);
 
   const buyKwh = liftKwh / legEff; // meter sees more than the pack stores
   const targetSocPct = round1((targetPackKwh / fullKwh) * 100);
@@ -360,7 +400,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     bindingCap,
     cushionShortfall,
     minProjSocPct,
-    minProjSocTsMs: withBuy.minTsMs,
+    minProjSocTsMs: withBuy.minTs,
     baselineMinSocPct,
     confidenceTier: inputs.confidenceTier,
     window,

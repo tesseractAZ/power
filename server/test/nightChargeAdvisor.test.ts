@@ -162,6 +162,48 @@ test('efficiency is injected, not hard-coded — real 0.86 RTE constants size co
   assert.ok(p.minProjSocPct! >= 25 - 0.2, `plan trough ${p.minProjSocPct}% must hold ~25%`);
 });
 
+// ── REGRESSION (v1.37.0 review, CONFIRMED critical #2): deep shortfall must NOT
+//    truncate the buy at floor+cushion — the DC-bus 0-clamp on the baseline once
+//    hid the true (below-empty) deficit and under-bought on the exact night the
+//    feature exists for. Sizing now solves against the with-buy re-sim trough. ──
+test('regression — deep shortfall (baseline drains below empty) sizes the FULL need, not a truncated buy', () => {
+  // socNow 10 kWh, 2 kWh/h drain: the no-buy trough clamps to 0 well before the
+  // real trough. True need to hold the 25 kWh floor+cushion against the 30 kWh
+  // post-window drain is a 55 kWh pack lift (meter ~61) — NOT the 25 kWh the old
+  // targetFloor-minus-clamped-baseline would have produced.
+  const p = computeNightChargePlan(baseInputs({ socNowPct: 10, horizon: mkHorizon(B, 24, 0, 1800) }));
+  assert.equal(p.chargeTonight, true);
+  assert.equal(p.cushionShortfall, false, 'the buy is feasible here — cushion IS met, not a shortfall');
+  assert.ok(Math.abs(p.requiredExtraKwh! - 55) < 0.1, `required pack lift ≈ 55 kWh (full need), got ${p.requiredExtraKwh}`);
+  assert.ok(Math.abs(p.buyKwh! - 55 / 0.9) < 0.1, `meter buy ≈ 61.1 kWh, got ${p.buyKwh}`);
+  // The plan's own trajectory holds the line — never truncated below it.
+  assert.ok(p.minProjSocPct! >= 25 - 0.05, `plan trough must hold 25%, got ${p.minProjSocPct}`);
+});
+
+// ── REGRESSION (v1.37.0 review, CONFIRMED critical #1): a mid-window PV surge
+//    that clamps the pack to FULL erases the lift; the re-sim trough then sits
+//    below floor+cushion, and cushionShortfall MUST fire (it once stayed false,
+//    presenting a below-cushion plan as "requirement met"). ──
+test('regression — full-clamp erasing the lift MUST flag cushionShortfall (not "met")', () => {
+  // packAtWindowEnd(no buy) = 50 (start 50, PV=load=0 pre/at window). Post-window:
+  // hour A a +60 kWh PV surge (clamps to full 100 for any buy), hour B a −80 kWh
+  // deficit → trough 20 kWh (20%) regardless of the buy: unreachable by charging.
+  const horizon = [
+    { ts: B, pvP10W: 0, loadP90W: 0 },                                 // now→windowEnd flat
+    ...Array.from({ length: 3 }, (_, i) => ({ ts: B + (i + 1) * HOUR, pvP10W: 0, loadP90W: 0 })),
+    { ts: B + 4 * HOUR, pvP10W: 60000, loadP90W: 0 },                  // window-end +60 kWh surge
+    { ts: B + 5 * HOUR, pvP10W: 0, loadP90W: 72000 },                  // −80 kWh deficit (÷0.9)
+    ...mkHorizon(B + 6 * HOUR, 6, 0, 0),
+  ];
+  const p = computeNightChargePlan(baseInputs({
+    socNowPct: 50, window: { startMs: B + 3 * HOUR, endMs: B + 4 * HOUR }, horizon, minBuyKwh: 0.1,
+  }));
+  assert.equal(p.cushionShortfall, true, 'the buy cannot lift the post-surge trough — MUST be flagged');
+  assert.notEqual(p.bindingCap, 'requirement', 'bindingCap must never claim the requirement was met');
+  assert.ok(p.minProjSocPct! < 25, `plan trough stays below floor+cushion, got ${p.minProjSocPct}`);
+  assert.ok(/residual risk/i.test(p.rationale), 'rationale must disclose the residual risk');
+});
+
 // ── Meter-vs-pack invariant: the buy at the meter always exceeds the pack lift ──
 test('invariant — buyKwh (meter) ≥ requiredExtraKwh (pack) on any charging night', () => {
   for (const load of [700, 900, 1200, 1500, 2000]) {
