@@ -22,7 +22,7 @@
     "fastify": "^5.10.0",
     "mqtt": "^5.15.2",
     "undici": "^6.27.0",
-    "ws": "^8.21.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
