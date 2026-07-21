@@ -416,7 +416,9 @@ export interface NightLedgerRow {
   confidence_tier: string; // 'forecast' | 'mixed' | 'climatology'
   horizon_hours: number;
   soc_now_pct: number;
-  soc_at_window_start_pct: number;
+  // v1.39.0: written from plan.projSocAtWindowStartPct (was declared but never
+  // written — NULL on every pre-v1.39.0 row, so the type is honestly nullable).
+  soc_at_window_start_pct: number | null;
   target_soc_pct: number;
   buy_kwh: number;
   required_extra_kwh: number;
@@ -440,6 +442,12 @@ export interface NightLedgerRow {
   forecast_basis: string;
   weather_covered: number; // 0/1
   tariff_snapshot: string; // JSON: plan/season/periodId/centsByTier/ratesConfirmed/…
+  // v1.39.0: the plan's ACTUAL resolved charge window (resolveCheapWindow) —
+  // weekend plans resolve windows disjoint from the canonical 23:00–05:00
+  // night, and the scorer/completion gate must pair actuals to the REAL
+  // window. NULL on pre-v1.39.0 rows (those capture as scored=0, unpaired).
+  window_start_ms: number | null;
+  window_end_ms: number | null;
 
   // ── OUTCOME (NULL until ~21:30 next evening) ──
   outcome_captured_at_ms: number | null;
@@ -513,6 +521,7 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'ev_p90_session_kwh', 'ev_session_count', 'min_proj_soc_pct',
   'min_proj_soc_ts_ms', 'pool_full_kwh', 'band_sigma_cal', 'cal_scored_days',
   'forecast_basis', 'weather_covered', 'tariff_snapshot',
+  'window_start_ms', 'window_end_ms',
   'outcome_captured_at_ms', 'actual_pv_kwh', 'actual_load_kwh',
   'actual_window_import_kwh', 'actual_grid_to_battery_kwh',
   'actual_onpeak_import_kwh', 'onpeak_import_occurred', 'actual_min_soc_pct',
@@ -620,6 +629,8 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       forecast_basis TEXT,
       weather_covered INTEGER,
       tariff_snapshot TEXT,
+      window_start_ms INTEGER,
+      window_end_ms INTEGER,
       -- OUTCOME (nullable until captured)
       outcome_captured_at_ms INTEGER,
       actual_pv_kwh REAL,
@@ -666,6 +677,15 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       state_json TEXT
     );
   `);
+
+  // v1.39.0 migration — CREATE TABLE IF NOT EXISTS does not evolve columns on
+  // an existing DB, so add the plan's ACTUAL resolved charge window columns
+  // idempotently (ALTER fails harmlessly when the column already exists).
+  for (const col of ['window_start_ms INTEGER', 'window_end_ms INTEGER']) {
+    try {
+      db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);
+    } catch { /* column already exists */ }
+  }
 
   // v0.9.29 — refresh query-planner statistics. Without this, after a fresh
   // install (samples table empty when ANALYZE last ran), SQLite assumes the

@@ -7,8 +7,9 @@ EcoFlow off-grid system into a fully-instrumented, self-learning **control room*
 It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST + live MQTT),
 persists a per-metric SQLite time-series, runs **~40 analytics engines** in a
 worker thread, and serves the results four ways: a **React dashboard**, a
-**telnet "control-room" TUI**, **78 Home Assistant MQTT-discovery entities**
-(including the Energy Dashboard), and **HACS Lovelace cards**. When the pack is
+**telnet "control-room" TUI**, **80+ Home Assistant MQTT-discovery entities**
+(sensors, binary sensors, and alarm-priority switches — plus dynamic
+per-circuit sensors and the Energy Dashboard), and **HACS Lovelace cards**. When the pack is
 projected to reach its reserve floor, it raises an **audible alarm** — chimes +
 text-to-speech over Home Assistant media players and a SIP intercom.
 
@@ -35,7 +36,7 @@ time-of-use rate.
 
 **Telemetry & history**
 - Reverse-engineered EcoFlow cloud MQTT ingest (per-SN raw merge across `cmdId`
-  1/21/28) → a unified snapshot for every DPU Core, the SHP2, and the EVSE —
+  1/2/4/21/28) → a unified snapshot for every DPU Core, the SHP2, and the EVSE —
   including **SHP2-attributed data for Cores whose Wi-Fi is down**.
 - SQLite time-series (adaptive interval + value-epsilon dedup, ~30-day retention)
   and monotonic lifetime-energy accumulators wired into the HA Energy Dashboard.

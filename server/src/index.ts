@@ -129,6 +129,8 @@ import {
   computeNightChargePlan,
   resolveCheapWindow,
   scoreNightOutcome,
+  nightWindowBounds,
+  medianFilter3,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -2329,7 +2331,11 @@ app.get('/api/load-shedding/status', async () => ({
  * the load-shed advisor block above.
  * ═════════════════════════════════════════════════════════════════════════ */
 const nightChargeEnabled = process.env.NIGHT_CHARGE_ADVISOR_ENABLED !== 'false';
-const NIGHT_CHARGE_NOTIFY_HOUR = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_HOUR ?? 21), 0, 23, 21);
+// v1.39.0: max 22, not 23 — the evening job's catch-up window is [fire, 23:00),
+// so hour=23 made the fire window the EMPTY SET: the advisory could never send
+// and every night logged a "missed window" that looked transient. config.yaml
+// clamps to int(0,22) too; this guard covers a stale/hand-set env.
+const NIGHT_CHARGE_NOTIFY_HOUR = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_HOUR ?? 21), 0, 22, 21);
 const NIGHT_CHARGE_NOTIFY_MINUTE = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_MINUTE ?? 30), 0, 59, 30);
 const NIGHT_CHARGE_LATCH_PATH =
   process.env.NIGHT_CHARGE_LATCH_PATH ?? resolve(process.cwd(), config.dbPath, '..', '.night-charge-latch.json');
@@ -2526,11 +2532,16 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   // the next time we can cheaply top up (design §2.4). Tariff-based and
   // deterministic: a single transient sunny hour, OR a CENTRAL-forecast pv≥load
   // crossing that the P10-PV/P90-load sim would still be draining through, can no
-  // longer truncate the multi-day carry. On a weekday this lands ~tomorrow night;
-  // on Friday the next OVERNIGHT tier is Monday, so the full Fri→Mon (~72 h)
-  // carry is simulated and the Sat/Sun-night troughs are not hidden — the exact
-  // under-buy the "first pv≥load hour" heuristic caused. Scan 4 days to bridge
-  // the weekend gap.
+  // longer truncate the multi-day carry. On a weekday this lands ~tomorrow night.
+  // ★ WEEKEND SEMANTICS (v1.39.0 honesty pass): tariff.ts gates OVERNIGHT on
+  // each hour's own calendar weekday, so the model's Friday window is Fri
+  // 23:00–24:00 ONLY (Sat 00:00–05:00 = weekend off-peak) and the next window
+  // opens Mon 00:00 — a ~48 h carry, sized against a 1-hour charge window
+  // (charge-power capped, cushionShortfall honestly flagged). Whether the REAL
+  // APS R-EV extends Friday's overnight into Saturday 00:00–05:00 is an OPEN
+  // tariff question only the owner's bill can settle; if it does, the fix
+  // belongs in tariff.ts's weekday gating, not here. Scan 4 days to bridge
+  // the weekend gap either way.
   const nextWindow = resolveCheapWindow(periodIdAt, windowEndMs + HOUR_MS, NIGHT_CHEAP_PERIOD_ID, 96);
   const nextRechargeMs: number | null = nextWindow?.startMs ?? null;
 
@@ -2693,6 +2704,19 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     row.min_proj_soc_pct = plan.minProjSocPct;
     if (plan.minProjSocTsMs != null) row.min_proj_soc_ts_ms = plan.minProjSocTsMs;
   }
+  // v1.39.0: the §3.1 frozen plan column soc_at_window_start_pct was declared in
+  // the schema but never written (NULL on every row) — it now records the plan's
+  // own projected pack SoC entering the charge window (the pre-window carry).
+  if (plan.projSocAtWindowStartPct != null) row.soc_at_window_start_pct = plan.projSocAtWindowStartPct;
+  // v1.39.0 (2nd adversarial pass): freeze the plan's ACTUAL resolved charge
+  // window. Weekend plans resolve windows disjoint from the canonical
+  // 23:00–05:00 night (a Saturday plan's window is Monday 00:00–05:00), so the
+  // scorer/completion gate MUST pair actuals to the real window — without these
+  // columns a Saturday night would be captured before its window even opened.
+  if (plan.window) {
+    row.window_start_ms = plan.window.startMs;
+    row.window_end_ms = plan.window.endMs;
+  }
   recorder.recordNightPlan(row);
 }
 
@@ -2738,26 +2762,107 @@ function coverageFrac(pts: Array<{ ts: number; value: number }>, startMs: number
  *   low-coverage night we set scored=0 with an explicit score_notes rather than
  *   fabricate a safety-critical under-buy number. coverage < 0.9 ⇒ scored=0.
  */
-function scoreYesterdayNightPlan(nowMs: number): void {
+/** The scoring spans for one ledger row. v1.39.0 2nd-pass: derived from the
+ *  row's OWN stored window when present — weekend plans resolve windows
+ *  disjoint from the canonical 23:00–05:00 night (Saturday → Monday
+ *  00:00–05:00), and pairing actuals to the wrong night was the very defect
+ *  class this release repairs. On-peak spans stay plan-date-anchored (the
+ *  4–7 pm of the plan day is well-defined regardless of the charge window). */
+interface NightScoringSpans {
+  windowStart: number;
+  windowEnd: number;
+  onpeakStart: number;
+  onpeakEnd: number;
+  scoreSpanEnd: number;
+  completeMs: number;
+  /** false ⇒ pre-v1.39.0 row with no stored window — actuals CANNOT be paired
+   *  to the plan's real window; capture as scored=0, never fabricate. */
+  windowKnown: boolean;
+}
+function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
+  const b = nightWindowBounds(String(y.plan_date));
+  if (!b) return null; // malformed plan_date
+  const ws = typeof y.window_start_ms === 'number' ? y.window_start_ms : null;
+  const we = typeof y.window_end_ms === 'number' ? y.window_end_ms : null;
+  if (ws != null && we != null && we > ws) {
+    // The plan-trajectory score span runs 16 h past the REAL window close
+    // (mirrors the canonical 05:00→21:00 trough span).
+    const scoreSpanEnd = we + 16 * HOUR_MS;
+    return {
+      windowStart: ws, windowEnd: we,
+      onpeakStart: b.onpeakStartMs, onpeakEnd: b.onpeakEndMs,
+      scoreSpanEnd, completeMs: scoreSpanEnd, windowKnown: true,
+    };
+  }
+  return {
+    windowStart: b.windowStartMs, windowEnd: b.windowEndMs,
+    onpeakStart: b.onpeakStartMs, onpeakEnd: b.onpeakEndMs,
+    scoreSpanEnd: b.scoreSpanEndMs, completeMs: b.completeMs, windowKnown: false,
+  };
+}
+
+function scoreCompletedNights(nowMs: number): void {
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return; // can't source actuals
   const shp2Sn = shp2.sn;
+  // v1.39.0: BACKFILL, not exactly-yesterday. The old scorer targeted only
+  // localParts(now−24h) — a night left uncaptured across SHP2-wedge / downtime
+  // days was orphaned FOREVER once the date advanced (an uncounted MNAR
+  // exclusion). 60-day sweep (matching the premature-capture repair window):
+  // a night whose raw telemetry (~30 d retention) has aged out captures
+  // HONESTLY as scored=0 with null actuals via the guards in scoreNightRow —
+  // it does not stay uncaptured forever.
+  const rows = recorder.readNightLedger(60);
+  for (const y of rows) {
+    if (y.outcome_captured_at_ms != null) continue; // already captured — idempotent
+    const s = nightSpansForRow(y);
+    if (!s) continue; // malformed plan_date — leave for manual inspection
+    // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
+    // only once its FULL scored span has elapsed — 16 h past its REAL window
+    // close. The pre-fix midnight tick captured yesterday's row while its
+    // charge window was still OPEN — window coverage ~25% ⇒ scored=0, inverted
+    // SoC query ⇒ actuals null — and the idempotence latch then froze those
+    // truncated actuals into the never-pruned ledger forever, so the
+    // write-readiness gate could never accumulate a single scored night.
+    if (nowMs < s.completeMs) continue; // night still in flight — do NOT capture
+    try {
+      scoreNightRow(y, s, shp2Sn, nowMs);
+    } catch (e: any) {
+      app.log.debug(`night-charge: scoring ${y.plan_date} skipped (${e?.message ?? e})`);
+    }
+  }
+}
 
-  const yDate = localParts(nowMs - 86_400_000, 'America/Phoenix').ymd;
-  const rows = recorder.readNightLedger(2);
-  const y = rows.find((r) => r.plan_date === yDate);
-  if (!y) return; // no plan issued yesterday (first-run / job missed)
-  if (y.outcome_captured_at_ms != null) return; // already scored — idempotent
-
-  // The scored night's clock windows, resolved in America/Phoenix.
-  const yLocal = localParts(nowMs - 86_400_000, 'America/Phoenix');
-  const dayStartUtc = Date.UTC(yLocal.year, yLocal.month - 1, yLocal.day) + 7 * HOUR_MS; // Phoenix = UTC-7 (no DST)
-  const onpeakStart = dayStartUtc + 16 * HOUR_MS;              // yesterday 16:00
-  const onpeakEnd = dayStartUtc + 19 * HOUR_MS;                // yesterday 19:00
-  const windowStart = dayStartUtc + 23 * HOUR_MS;             // yesterday 23:00
-  const windowEnd = dayStartUtc + 24 * HOUR_MS + 5 * HOUR_MS; // today 05:00
-  const scoreFrom = windowEnd;                                // plan trajectory scores post-05:00
-  const spanEnd = Math.min(nowMs, dayStartUtc + 24 * HOUR_MS + 21 * HOUR_MS); // → ~today 21:00
+/** Score ONE completed night row. Extracted from the old yesterday-only scorer
+ *  so the completion-gated backfill loop above can target ANY uncaptured
+ *  plan_date; the night's clock spans come from nightSpansForRow (the same
+ *  single source of truth the completion gate uses), never from `now`. */
+function scoreNightRow(
+  y: NightLedgerRow,
+  s: NightScoringSpans,
+  shp2Sn: string,
+  nowMs: number,
+): void {
+  const yDate = String(y.plan_date);
+  // Pre-v1.39.0 rows never recorded their resolved window — the actuals cannot
+  // be paired to the plan's REAL charge window (which for weekend plans is a
+  // different night entirely). Capture honestly as unscored; never fabricate a
+  // cross-span comparison the gate would then learn from.
+  if (!s.windowKnown) {
+    recorder.recordNightOutcome(yDate, {
+      outcome_captured_at_ms: nowMs,
+      scored: 0,
+      score_notes:
+        "not scored — the plan's resolved charge window was not recorded (pre-v1.39.0 row); actuals cannot be paired to the real window.",
+    });
+    return;
+  }
+  const onpeakStart = s.onpeakStart;               // plan-day 16:00
+  const onpeakEnd = s.onpeakEnd;                   // plan-day 19:00
+  const windowStart = s.windowStart;               // the plan's REAL window open
+  const windowEnd = s.windowEnd;                   // the plan's REAL window close
+  const scoreFrom = windowEnd;                     // plan trajectory scores post-close
+  const spanEnd = Math.min(nowMs, s.scoreSpanEnd); // window close + 16 h (gate ⇒ fully elapsed)
   // PV/load TOTALS are compared against the plan's forecast P50, which covered
   // the ~24 h from issue (~21:30). Integrate actuals over the SAME [issue, +24 h]
   // horizon so pv_err_frac / load_err_frac are like-for-like, not the charge-window span.
@@ -2769,7 +2874,9 @@ function scoreYesterdayNightPlan(nowMs: number): void {
   const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
   const loadPts = recorder.query(shp2Sn, 'panel_load', fcSpanStart, fcSpanEnd);
 
-  const windowImportKwh = round2(integrateWh(gridWin, true) / 1000);
+  // v1.39.0 2nd-pass: null-over-fabrication — zero samples must record NULL,
+  // not a "measured" 0 kWh import (matching the on-peak guard one line down).
+  const windowImportKwh = gridWin.length ? round2(integrateWh(gridWin, true) / 1000) : null;
   const onpeakImportKwh = gridPeak.length ? round2(integrateWh(gridPeak, true) / 1000) : null;
   const winCoverage = round2(coverageFrac(gridWin, windowStart, windowEnd));
 
@@ -2787,15 +2894,23 @@ function scoreYesterdayNightPlan(nowMs: number): void {
 
   // Actual min SoC over the scored trajectory span (raw telemetry; used only for
   // soc_min_err, NOT the floor verdict — §3.3).
+  // v1.39.0 2nd-pass: median-of-3 filter before the min-scan. The documented
+  // SHP2 cloud-reconnect artifact emits a single transient backupBatPercent=0
+  // sample (the same artifact behind the historical 50→2% SoC-alarm false
+  // cascade); an unfiltered min-scan latches it, fabricating realizedNeed =
+  // the full floor+cushion and a false HARD under-buy in the gate's evidence.
+  // A 3-sample median kills isolated spikes while passing real sustained lows.
   let actualMinSocPct: number | null = null;
   let actualMinSocTsMs: number | null = null;
-  for (const p of socPts) {
+  for (const p of medianFilter3(socPts)) {
     if (actualMinSocPct == null || p.value < actualMinSocPct) { actualMinSocPct = p.value; actualMinSocTsMs = p.ts; }
   }
   if (actualMinSocPct != null) actualMinSocPct = round1(actualMinSocPct);
 
   const hadBasis = y.min_proj_soc_pct != null; // null ⇒ plan had no trajectory
-  const cleanBaseline = windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1); // near-zero overnight import
+  // null import (no samples) is NOT clean — it is unknown; covOk=false already
+  // forces scored=0 on such nights, this just keeps the flag honest too.
+  const cleanBaseline = windowImportKwh != null && windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1);
   const covOk = winCoverage >= 0.9;
 
   // Realized-need buy = the meter energy that WOULD have held floor+cushion,
@@ -2835,6 +2950,8 @@ function scoreYesterdayNightPlan(nowMs: number): void {
     minProjSocPct: y.min_proj_soc_pct ?? null,
     minProjSocTsMs: y.min_proj_soc_ts_ms ?? null,
     baselineMinSocPct: null,
+    projSocAtWindowStartPct: y.soc_at_window_start_pct ?? null,
+    preWindowMinSocPct: null,
     confidenceTier: y.confidence_tier as NightChargePlan['confidenceTier'],
     window: null,
     reserveFloorPct: y.reserve_floor_pct,
@@ -2885,7 +3002,21 @@ function scoreYesterdayNightPlan(nowMs: number): void {
  * AFTER a successful send. Guarded end-to-end; a plan pushed after charging
  * should begin is worse than none, so past 23:00 it log-and-latches.
  */
+let nightEveningJobInFlight = false; // v1.39.0: re-entrancy guard — a run slower
+// than the 60 s tick (analytics reports + a weather fetch, latch written only
+// after the awaited send) let overlapping runs each pass the latch check and
+// each send the evening notification.
 async function runNightChargeEveningJob(): Promise<void> {
+  if (nightEveningJobInFlight) return;
+  nightEveningJobInFlight = true;
+  try {
+    await runNightChargeEveningJobInner();
+  } finally {
+    nightEveningJobInFlight = false;
+  }
+}
+
+async function runNightChargeEveningJobInner(): Promise<void> {
   const nowMs = Date.now();
   const today = localParts(nowMs, 'America/Phoenix').ymd;
   const latch = readNightChargeLatch();
@@ -2902,8 +3033,9 @@ async function runNightChargeEveningJob(): Promise<void> {
     // night's outcome from the ledger/gate, an uncounted MNAR exclusion that
     // biases the write-readiness reduction (the tick below also does this, but
     // do it here so a same-day miss is captured immediately).
-    try { scoreYesterdayNightPlan(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
+    try { scoreCompletedNights(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
     try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch { /* fail-safe */ }
+    refreshNightRecentOutcomes(); // scoring may have updated rows the status route serves
     writeNightChargeLatch({ lastNotifyDay: today });
     return;
   }
@@ -2911,10 +3043,15 @@ async function runNightChargeEveningJob(): Promise<void> {
   try {
     // (a) recompute fresh; (b) record the plan row (when a plan was produced).
     const fresh = await recomputeNightChargePlan();
-    if (fresh) recordNightPlanRow(today, fresh.plan, fresh.extras);
+    if (fresh) {
+      recordNightPlanRow(today, fresh.plan, fresh.extras);
+      // v1.39.0: refresh the status route's in-memory mirror immediately — the
+      // just-recorded row was otherwise invisible for up to 30 min (next tick).
+      refreshNightRecentOutcomes();
+    }
 
     // (c) score yesterday (independent of today's SHP2 state).
-    try { scoreYesterdayNightPlan(nowMs); }
+    try { scoreCompletedNights(nowMs); }
     catch (e: any) { app.log.debug(`night-charge: yesterday scoring skipped (${e?.message ?? e})`); }
 
     // (d) recompute readiness over the full ledger (400 d ≫ the in-season window).
@@ -2945,6 +3082,56 @@ async function runNightChargeEveningJob(): Promise<void> {
   }
 }
 
+/**
+ * v1.39.0 one-time-per-boot, idempotent repair: pre-v1.39.0 the scorer could
+ * capture a night's outcome just after midnight — mid-charge-window — and the
+ * idempotence latch then froze the truncated actuals (scored=0, null SoC,
+ * ~25% coverage) into the never-pruned ledger forever. Reset any row whose
+ * capture PRECEDES its own night-completion boundary so the (now
+ * completion-gated) scorer re-captures it with full-span actuals. Rows are
+ * corrected in place — never deleted. Idempotent: a reset row has a null
+ * capture (skipped next boot) and a correctly re-scored row has
+ * capture ≥ completeMs (also skipped).
+ */
+function repairPrematureNightOutcomes(): void {
+  try {
+    const rows = recorder.readNightLedger(60);
+    for (const y of rows) {
+      const cap = y.outcome_captured_at_ms;
+      if (cap == null) continue;
+      // Same span derivation as the scorer (stored real window when present) —
+      // a capture is premature iff it precedes ITS OWN night's completion.
+      const s = nightSpansForRow(y);
+      if (!s || cap >= s.completeMs) continue; // captured after completion — sound
+      recorder.recordNightOutcome(String(y.plan_date), {
+        outcome_captured_at_ms: null,
+        actual_pv_kwh: null,
+        actual_load_kwh: null,
+        actual_window_import_kwh: null,
+        actual_onpeak_import_kwh: null,
+        onpeak_import_occurred: null,
+        actual_min_soc_pct: null,
+        actual_min_soc_ts_ms: null,
+        plan_traj_floor_breached: null,
+        cushion_breached: null,
+        grid_home_coverage_frac: null,
+        scored: 0,
+        score_notes:
+          'reset — outcome had been captured before the night completed (pre-v1.39.0 mid-window scoring defect); re-captured by the backfill sweep — scored where telemetry still exists, else honestly unscored.',
+        pv_err_frac: null,
+        pv_in_band: null,
+        load_err_frac: null,
+        load_in_band: null,
+        buy_err_kwh: null,
+        soc_min_err_pct: null,
+      });
+      app.log.info(`night-charge: reset prematurely-captured outcome for ${y.plan_date} (was captured mid-night).`);
+    }
+  } catch (e: any) {
+    app.log.debug(`night-charge: premature-outcome repair skipped (${e?.message ?? e})`);
+  }
+}
+
 if (nightChargeEnabled) {
   // Periodic recompute (30 min, unref'd) so /api/ha-state + status always have a
   // ≤12 h-fresh plan even on days the evening job hasn't fired yet. Best-effort.
@@ -2957,7 +3144,7 @@ if (nightChargeEnabled) {
       // write-readiness reduction stay current EVEN on a day the evening notify
       // job never fired — decoupling outcome capture from the notify window so a
       // missed window can't silently drop a night (an MNAR bias in the gate).
-      try { scoreYesterdayNightPlan(Date.now()); }
+      try { scoreCompletedNights(Date.now()); }
       catch (e: any) { app.log.debug(`night-charge: tick scoring skipped (${e?.message ?? e})`); }
       try {
         setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
@@ -2966,10 +3153,19 @@ if (nightChargeEnabled) {
     })();
   }, 30 * 60 * 1000);
   nightRecomputeTick.unref();
-  // A gentle first recompute a minute after boot (analytics worker warm) so the
+  // A gentle first warm-up a minute after boot (analytics worker warm) so the
   // holder + status cache aren't empty before the first scheduled tick.
+  // v1.39.0: the warm path now also (a) repairs prematurely-captured outcome
+  // rows, (b) runs the completion-gated backfill scorer, and (c) recomputes
+  // readiness — previously readiness stayed null for up to 30 min after every
+  // daily power-cycle, flapping the HA gate fields to null each morning.
   const nightWarm = setTimeout(() => {
+    repairPrematureNightOutcomes();
     void recomputeNightChargePlan().catch((e: any) => app.log.debug(`night-charge: warm recompute skipped (${e?.message ?? e})`));
+    try { scoreCompletedNights(Date.now()); } catch (e: any) { app.log.debug(`night-charge: warm scoring skipped (${e?.message ?? e})`); }
+    try {
+      setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
+    } catch { /* fail-safe: readiness recomputes on the first 30-min tick */ }
     refreshNightRecentOutcomes();
   }, 60 * 1000);
   nightWarm.unref();
