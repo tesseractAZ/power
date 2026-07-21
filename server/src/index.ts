@@ -3034,7 +3034,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // biases the write-readiness reduction (the tick below also does this, but
     // do it here so a same-day miss is captured immediately).
     try { scoreCompletedNights(nowMs); } catch (e: any) { app.log.debug(`night-charge: cutoff scoring skipped (${e?.message ?? e})`); }
-    try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch { /* fail-safe */ }
+    try { setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), nowMs, { algoVersion: CURRENT_ALGO_VERSION })); } catch (e: any) { app.log.debug(`night-charge: cutoff readiness recompute failed (${e?.message ?? e})`); }
     refreshNightRecentOutcomes(); // scoring may have updated rows the status route serves
     writeNightChargeLatch({ lastNotifyDay: today });
     return;
@@ -3148,7 +3148,7 @@ if (nightChargeEnabled) {
       catch (e: any) { app.log.debug(`night-charge: tick scoring skipped (${e?.message ?? e})`); }
       try {
         setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
-      } catch { /* fail-safe: readiness stays at its last value / LEARNING */ }
+      } catch (e: any) { app.log.debug(`night-charge: tick readiness recompute failed (${e?.message ?? e})`); }
       refreshNightRecentOutcomes(); // keep the status route's cache warm (DB read on a timer, not the handler)
     })();
   }, 30 * 60 * 1000);
@@ -3165,7 +3165,7 @@ if (nightChargeEnabled) {
     try { scoreCompletedNights(Date.now()); } catch (e: any) { app.log.debug(`night-charge: warm scoring skipped (${e?.message ?? e})`); }
     try {
       setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
-    } catch { /* fail-safe: readiness recomputes on the first 30-min tick */ }
+    } catch (e: any) { app.log.debug(`night-charge: warm readiness recompute failed (${e?.message ?? e})`); }
     refreshNightRecentOutcomes();
   }, 60 * 1000);
   nightWarm.unref();

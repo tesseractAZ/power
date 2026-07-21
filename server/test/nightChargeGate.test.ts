@@ -7,6 +7,7 @@ import {
   setLatestReadiness,
   CURRENT_ALGO_VERSION,
   type NightChargeReadiness,
+  phoenixYmd,
 } from '../src/nightChargeGate.js';
 import type { NightLedgerRow } from '../src/recorder.js';
 
@@ -390,4 +391,13 @@ test('regression — a floor breach on a COVERAGE-EXCLUDED (scored=0) forecast n
   const r = computeNightChargeReadiness(rows, NOW);
   assert.equal(r.state, 'BLOCKED', 'a breach on a coverage-excluded night must block');
   assert.equal(r.writeReady, false);
+});
+
+test('v1.39.1 — phoenixYmd emits strict ISO YYYY-MM-DD (locale-fallback-proof)', () => {
+  // 2026-07-20 22:18 MST = 2026-07-21 05:18 UTC → Phoenix date 2026-07-20.
+  assert.equal(phoenixYmd(Date.UTC(2026, 6, 21, 5, 18)), '2026-07-20');
+  // Midnight boundary: 2026-07-21 06:59 UTC = 23:59 MST Jul 20; 07:00 UTC = 00:00 MST Jul 21.
+  assert.equal(phoenixYmd(Date.UTC(2026, 6, 21, 6, 59)), '2026-07-20');
+  assert.equal(phoenixYmd(Date.UTC(2026, 6, 21, 7, 0)), '2026-07-21');
+  assert.match(phoenixYmd(Date.now?.() ?? 0) || phoenixYmd(1784692000000), /^\d{4}-\d{2}-\d{2}$/);
 });
