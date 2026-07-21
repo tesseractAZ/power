@@ -162,7 +162,7 @@ configuration:
     description: 'Conservative multiplier applied to the day-ahead forecast load to get a pessimistic-high (P90) load for sizing — under-buy is treated as a safety miss, so the advisor sizes against a worst-case load. Default 1.15 (15% headroom). Range 1.0–2.0.'
   NIGHT_CHARGE_NOTIFY_HOUR:
     name: Night-Charge Notify Hour
-    description: 'Local (America/Phoenix) hour the once-nightly night-charge advisory is sent — early enough to act before the overnight window opens. Default 21 (9pm). The job fires at most once per calendar day and survives the daily power-cycle.'
+    description: 'Local (America/Phoenix) hour the once-nightly night-charge advisory is sent — early enough to act before the overnight window opens. Default 21 (9pm), latest 22: the send window closes at 23:00 when charging begins, so an hour of 23 could never send.'
   NIGHT_CHARGE_NOTIFY_MINUTE:
     name: Night-Charge Notify Minute
     description: Minute of the Night-Charge Notify Hour to send the nightly advisory. Default 30 (so 21:30 by default). Range 0–59.

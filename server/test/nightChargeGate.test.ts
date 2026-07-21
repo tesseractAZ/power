@@ -250,18 +250,35 @@ test('mixed-basis rows also do not count toward eligibility', () => {
 /* ── MNAR exclusion cap (§3.5) ────────────────────────────────────────── */
 
 test('MNAR exclusion above cap blocks readiness', () => {
-  // 100 eligible scored forecast nights + 120 outcome-captured-but-excluded
-  // nights (scored=0) → exclusion 120/220 ≈ 55% > 35% cap.
-  const scored = cleanLedger(100);
-  const excluded = cleanLedger(120, (r, i) => {
-    r.scored = 0;
-    r.plan_date = '2027-' + String((i % 12) + 1).padStart(2, '0') + '-15';
-  });
-  const r = computeNightChargeReadiness([...scored, ...excluded], NOW);
+  // v1.39.0 semantics: the exclusion denominator is EXPECTED nights — every
+  // Phoenix calendar date in the trailing 120-day window through the last
+  // COMPLETED night — so unscored AND entirely-missing nights count as
+  // exclusions (the adverse SHP2-offline nights that never produced a row).
+  // 70 scored recent nights + a 130-day-old unscored anchor row ⇒ the expected
+  // window spans 120 days, ~51 of them unscored ⇒ ≈ 43% > the 35% cap, even
+  // though 70 ≥ 60 scored nights exist.
+  const scored = cleanLedger(70);
+  const anchor = makeRow({ plan_date: '2026-02-01', scored: 0, outcome_captured_at_ms: null });
+  const r = computeNightChargeReadiness([anchor, ...scored], NOW);
   assert.equal(r.state, 'LEARNING');
   assert.equal(r.writeReady, false);
   assert.ok((r.metrics.exclusionFrac as number) > 0.35);
   assert.ok(r.blocking.some((b) => /exclusion/.test(b)));
+});
+
+test('v1.39.0 — nights MISSING from the ledger entirely count toward MNAR exclusion', () => {
+  // 100 clean contiguous nights ⇒ exclusion ≈ 0. Remove a 30-night stretch from
+  // the middle (add-on down / SHP2 offline — no rows at all): those nights must
+  // reappear in the exclusion fraction, not silently shrink the denominator.
+  const full = cleanLedger(100);
+  const contiguous = computeNightChargeReadiness(full, NOW);
+  assert.ok((contiguous.metrics.exclusionFrac as number) < 0.05, 'contiguous ledger ≈ 0 exclusion');
+  const gapped = full.filter((_, i) => i < 30 || i >= 60); // 30-night hole
+  const r = computeNightChargeReadiness(gapped, NOW);
+  assert.ok(
+    (r.metrics.exclusionFrac as number) > 0.25,
+    `missing nights must count as exclusions (got ${r.metrics.exclusionFrac})`,
+  );
 });
 
 /* ── band over-coverage fails the UPPER bound ─────────────────────────── */

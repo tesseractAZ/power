@@ -30,6 +30,25 @@ import type { NightLedgerRow } from './recorder.js';
 
 const DAY_MS = 86_400_000;
 
+// ── v1.39.0 pure Phoenix-date helpers for the expected-nights MNAR denominator ──
+/** YYYY-MM-DD of an instant in America/Phoenix (en-CA formats ISO-style). */
+function phoenixYmd(ms: number): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Phoenix', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(ms));
+}
+function ymdToUtcMs(ymd: string): number {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+function addDaysYmd(ymd: string, days: number): string {
+  return new Date(ymdToUtcMs(ymd) + days * DAY_MS).toISOString().slice(0, 10);
+}
+function daysBetweenYmdInclusive(a: string, b: string): number {
+  return Math.round((ymdToUtcMs(b) - ymdToUtcMs(a)) / DAY_MS) + 1;
+}
+function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
+
 /* ── Pre-registered, FROZEN thresholds (§5.1/§5.2). Never tuned on the season
  *    the gate gates (garden-of-forking-paths); a later re-tune bumps
  *    CURRENT_ALGO_VERSION and resets the readiness clock. ─────────────────── */
@@ -175,12 +194,41 @@ export function computeNightChargeReadiness(
   // string is robust whether the column is stored TEXT or INTEGER.
   const currentAlgo = list.filter((r) => String(r.algo_version) === String(algoVersion));
 
-  // Rows that reached an outcome (window + 4–7pm closed) — the denominator for
-  // the MNAR exclusion fraction (§3.5).
+  // Rows that reached an outcome (night fully complete) — used for the
+  // forecast-basis diagnostic and the ELIGIBLE set below.
   const withOutcome = currentAlgo.filter((r) => asNum(r.outcome_captured_at_ms) != null);
   const scoredWithOutcome = withOutcome.filter((r) => truthy(r.scored));
-  const excludedCount = withOutcome.length - scoredWithOutcome.length;
-  const exclusionFrac = withOutcome.length > 0 ? excludedCount / withOutcome.length : null;
+
+  // v1.39.0 (§3.5, review MED ×2): the MNAR denominator is EXPECTED nights, not
+  // rows-that-reached-an-outcome. Nights that never produced a ledger row at all
+  // — add-on down at the evening job, SHP2 cloud-offline (the documented ADVERSE
+  // failure modes) — and completed rows never captured must count as exclusions;
+  // keying the fraction on captured rows let exactly the adverse nights the
+  // MAX_EXCLUSION_FRAC cap exists for vanish from BOTH numerator and
+  // denominator. Expected range = every Phoenix calendar date from the first
+  // current-algo plan (bounded to a trailing 120 d so ancient history can't
+  // dominate) through the most recent COMPLETED night: plan D completes at
+  // D+1 21:00, so the latest complete plan date is the Phoenix date of now−45 h.
+  let exclusionFrac: number | null = null;
+  {
+    const dates = currentAlgo
+      .map((r) => String(r.plan_date))
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      .sort();
+    if (dates.length) {
+      const lastComplete = phoenixYmd(nowMs - 45 * 3_600_000);
+      const rangeStart = maxYmd(dates[0], addDaysYmd(lastComplete, -119));
+      if (lastComplete >= rangeStart) {
+        const expected = daysBetweenYmdInclusive(rangeStart, lastComplete);
+        const scoredInRange = new Set(
+          scoredWithOutcome
+            .map((r) => String(r.plan_date))
+            .filter((d) => d >= rangeStart && d <= lastComplete),
+        ).size;
+        if (expected > 0) exclusionFrac = Math.max(0, expected - scoredInRange) / expected;
+      }
+    }
+  }
 
   // Fraction of scored nights that were forecast-backed (dashboard/diagnostic).
   const forecastBasisPct =

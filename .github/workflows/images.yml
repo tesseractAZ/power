@@ -281,12 +281,14 @@ jobs:
         run: |
           set -eo pipefail
           # Immutable Releases seal assets at creation — attach the docs here, not
-          # in a later step. Include each format only if its build produced the file.
+          # in a later step. Include each format only if its build produced a
+          # NON-EMPTY file (-s, not -f): an interrupted LibreOffice conversion
+          # can leave a zero-byte pdf that would otherwise be sealed forever.
           assets=()
           doc="EcoFlow-Panel-Documentation-v${V}.docx"
           pdf="EcoFlow-Panel-Documentation-v${V}.pdf"
-          if [ -f "$doc" ]; then assets+=("$doc"); fi
-          if [ -f "$pdf" ]; then assets+=("$pdf"); fi
+          if [ -s "$doc" ]; then assets+=("$doc"); fi
+          if [ -s "$pdf" ]; then assets+=("$pdf"); fi
           gh release create "${{ needs.resolve.outputs.tag }}" \
             --title "${{ needs.resolve.outputs.tag }}" \
             --notes-file /tmp/notes.md \
