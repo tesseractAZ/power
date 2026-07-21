@@ -31,18 +31,29 @@ import type { NightLedgerRow } from './recorder.js';
 const DAY_MS = 86_400_000;
 
 // ── v1.39.0 pure Phoenix-date helpers for the expected-nights MNAR denominator ──
-/** YYYY-MM-DD of an instant in America/Phoenix (en-CA formats ISO-style). */
-function phoenixYmd(ms: number): string {
-  return new Intl.DateTimeFormat('en-CA', {
+/** YYYY-MM-DD of an instant in America/Phoenix. v1.39.1: built from en-US
+ *  formatToParts — the house pattern (fmtPhoenixHm / phoenixMinuteOfDay /
+ *  localParts) — NOT the en-CA format() shortcut: on a Node whose ICU lacks
+ *  en-CA the locale silently falls back to a non-ISO date shape, addDaysYmd
+ *  then builds an Invalid Date, and toISOString() THROWS — swallowed by the
+ *  fail-safe catches, leaving readiness permanently null on the live Pi while
+ *  every full-ICU dev machine passed. en-US parts are locale-fallback-proof. */
+export function phoenixYmd(ms: number): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Phoenix', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date(ms));
+  }).formatToParts(new Date(ms));
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 function ymdToUtcMs(ymd: string): number {
-  const [y, m, d] = ymd.split('-').map(Number);
-  return Date.UTC(y, m - 1, d);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return NaN; // malformed — caller guards
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
 }
 function addDaysYmd(ymd: string, days: number): string {
-  return new Date(ymdToUtcMs(ymd) + days * DAY_MS).toISOString().slice(0, 10);
+  const base = ymdToUtcMs(ymd);
+  if (!Number.isFinite(base)) return ymd; // defensive: never throw from a date helper
+  return new Date(base + days * DAY_MS).toISOString().slice(0, 10);
 }
 function daysBetweenYmdInclusive(a: string, b: string): number {
   return Math.round((ymdToUtcMs(b) - ymdToUtcMs(a)) / DAY_MS) + 1;

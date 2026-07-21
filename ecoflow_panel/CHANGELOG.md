@@ -1,3 +1,16 @@
+## v1.39.1 — hotfix: readiness null on the Pi (locale-fallback date helper)
+
+Live verification of v1.39.0 caught it within minutes of deploy: the ledger
+repair and honest re-capture worked, but `readiness` served null. Root cause:
+the new gate helper built its YYYY-MM-DD via the `en-CA` locale shortcut — on
+the Pi's Node/ICU that locale falls back to a non-ISO shape, `addDaysYmd` then
+constructs an Invalid Date and `toISOString()` throws, swallowed by the
+fail-safe catch, leaving readiness permanently null (while every full-ICU dev
+machine passed). Fixed with the house pattern: `en-US` `formatToParts`
+(locale-fallback-proof), a strict-ISO parse guard so the date helpers can
+never throw, and the three silent readiness catches now log at debug so this
+class of invisible failure is diagnosable. One new shape-pinning test.
+
 ## v1.39.0 — night-charge engine repair: the learning loop actually learns
 
 A post-merge adversarial review (31 agents) of the v1.37–v1.38 night-charge
