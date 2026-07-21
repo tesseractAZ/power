@@ -43,9 +43,26 @@ ledger rows captured at 00:12–00:15.
 **Ops/robustness**: evening-job re-entrancy guard; boot warm-path now repairs +
 scores + recomputes readiness (gate fields no longer flap null for 30 min after
 the daily power-cycle); recent-outcomes mirror refreshes on every write path;
-`NIGHT_CHARGE_NOTIFY_HOUR` clamped to 22 (23 made the send window the empty
-set); Release pdf attach requires a non-empty file; README corrections (cmdId
-1/2/4/21/28, entity count). 11 new regression tests (1,621 total, all green).
+`NIGHT_CHARGE_NOTIFY_HOUR` clamped to 22 in code (23 made the send window the
+empty set; the config schema stays 0–23 so an existing stored 23 cannot brick
+the add-on at start); Release pdf attach requires a non-empty file; README
+corrections (cmdId 1/2/4/21/28, entity count).
+
+**Hardening (second adversarial pass, pre-merge)**: a 3-agent attack on the fix
+diff found the completion gate still assumed every night is the canonical
+23:00–05:00 — wrong for weekend plans, whose REAL windows are disjoint (a
+Saturday plan's window is Monday 00:00–05:00). The ledger now freezes each
+plan's actual resolved window (`window_start_ms`/`window_end_ms`, idempotent
+migration) and the scorer/completion gate/repair all pair actuals to it;
+pre-v1.39.0 rows without a stored window capture honestly as scored=0. Also
+from the attack pass: the backfill sweep widened to 60 d to match the repair
+window (telemetry-less nights capture with null actuals, never fabricated
+zeros); a median-of-3 filter on the SoC min-scan kills the SHP2-reconnect
+transient-zero artifact that would have fabricated false hard under-buys;
+degenerate `EV_MAX_LOAD_W` can no longer strip EV load without replacing it;
+mid-window recomputes no longer emit a false "before the window opens" claim;
+sims include the in-progress hour (conservative direction). 16 new regression
+tests total (1,626 suite, all green).
 
 ## v1.38.3 — changelog: keep the HA panel fast (recent releases only)
 

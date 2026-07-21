@@ -11,6 +11,7 @@ import {
   createNightChargeAdvisor,
   nightWindowBounds,
   fmtPhoenixDayHm,
+  medianFilter3,
   type NightChargeInputs,
   type NightChargeHour,
   type NightChargePlan,
@@ -695,4 +696,68 @@ test('v1.39.0 — state fields day-qualify a window ≥24 h away', () => {
   const fields = nightChargeStateFields({ ...plan, window: { startMs: monStart, endMs: monStart + 5 * HOUR } }, nowMs);
   assert.match(String(fields.night_charge_window_start), /^Mon /,
     'a weekend plan must not present Monday\'s window as a date-less tonight');
+});
+
+/* ── v1.39.0 second adversarial pass — hardening regressions ── */
+
+test('v1.39.0/2 — medianFilter3 kills an isolated transient zero, passes a sustained low', () => {
+  const mk = (vals: number[]) => vals.map((v, i) => ({ ts: B + i * 60_000, value: v }));
+  // Isolated SHP2-reconnect artifact: one 0 amid ~50s → filtered min stays ~49.
+  const spiky = medianFilter3(mk([50, 49, 0, 50, 51]));
+  assert.equal(Math.min(...spiky.map((p) => p.value)), 49, 'single-sample zero must not survive');
+  // Genuine sustained low: three consecutive 12s → the low PASSES the filter.
+  const real = medianFilter3(mk([50, 30, 12, 12, 12, 30, 50]));
+  assert.equal(Math.min(...real.map((p) => p.value)), 12, 'a real sustained low must survive');
+  // Short series pass through untouched.
+  assert.deepEqual(medianFilter3(mk([7, 3])).map((p) => p.value), [7, 3]);
+});
+
+for (const [name, bad] of [['zero', 0], ['negative', -5], ['NaN', NaN]] as const) {
+  test(`v1.39.0/2 — degenerate evMaxLoadW (${name}) keeps embedded EV (no strip-without-replace)`, () => {
+    const startMs = B;
+    const bandHours = Array.from({ length: 12 }, (_, i) => ({
+      ts: startMs + i * HOUR, pvP10W: 0, loadP90W: 3000, embeddedEvW: 2000,
+    }));
+    const periodIdAt = (ts: number) => {
+      const h = Math.floor((ts - startMs) / HOUR) % 24;
+      return h >= 2 && h < 8 ? 'overnight' : 'off';
+    };
+    const inputs = buildNightChargeInputs({
+      nowMs: startMs, fullKwh: 92.16, socNowPct: 30, reserveFloorPct: 10, cushionPct: 15, socCoherent: true,
+      legEff: 0.927, dischargeEff: 0.94, chargeCapKw: 7.2,
+      periodIdAt, cheapPeriodId: 'overnight', dayRollups: [], realizedDailyErrHalfFrac: 0.2, nextRechargeMs: null,
+      evMaxLoadW: bad, confidenceTier: 'forecast', forecastPresent: true, calScoredDays: 20,
+      minCalScoredDays: 14, bandCoverageFrac: 0.95, morningPvSurplusP90Kwh: null, minBuyKwh: 1,
+      bandHours, ev: { p90SessionKwh: 20, chargeStartMs: startMs + 3 * HOUR, sessionCount: 12 },
+    });
+    // The block cannot place → the embedded 2 kW stays in EVERY hour (3000 W).
+    for (const h of inputs.horizon) {
+      assert.ok(Math.abs(h.loadP90W - 3000) < 1, `hour ${(h.ts - startMs) / HOUR}: embedded must be kept (got ${h.loadP90W})`);
+    }
+  });
+}
+
+test('v1.39.0/2 — mid-window plan: pre-window fields are null, no false "before the window opens" claim', () => {
+  // nowMs INSIDE the window (B+6h in a B+3h..B+9h window), SoC below floor+cushion.
+  const midNow = B + 6 * HOUR;
+  const horizon: NightChargeHour[] = Array.from({ length: 18 }, (_, i) => ({
+    ts: B + (6 + i) * HOUR, pvP10W: 0, loadP90W: 900,
+  }));
+  const p = computeNightChargePlan(baseInputs({ nowMs: midNow, socNowPct: 12, horizon, minBuyKwh: 0.1 }));
+  assert.equal(p.projSocAtWindowStartPct, null, 'window-entry SoC is not knowable mid-window');
+  assert.equal(p.preWindowMinSocPct, null);
+  assert.ok(!/before the charge window opens/i.test(p.rationale),
+    'must not claim a future window opening while already inside the window');
+});
+
+test('v1.39.0/2 — in-progress hour is simulated (conservative), not dropped', () => {
+  // nowMs = B + 30 min: the B-hour (900 W) is in progress. Pre-fix the sim
+  // filtered h.ts >= nowMs and dropped that hour entirely; now it is included
+  // in full. With 1 kWh/h drain the baseline trough (and hence the buy) must
+  // reflect the extra ~1 kWh vs the dropped-hour sim.
+  const aligned = computeNightChargePlan(baseInputs({ nowMs: B }));
+  const midHour = computeNightChargePlan(baseInputs({ nowMs: B + 30 * 60_000 }));
+  // Same horizon, same hours simulated (floor(now) = B) ⇒ identical sizing.
+  assert.equal(midHour.requiredExtraKwh, aligned.requiredExtraKwh,
+    'mid-hour evaluation must simulate the same hour set as the aligned one (full current hour, conservative)');
 });

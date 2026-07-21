@@ -130,6 +130,7 @@ import {
   resolveCheapWindow,
   scoreNightOutcome,
   nightWindowBounds,
+  medianFilter3,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -2707,6 +2708,15 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
   // the schema but never written (NULL on every row) — it now records the plan's
   // own projected pack SoC entering the charge window (the pre-window carry).
   if (plan.projSocAtWindowStartPct != null) row.soc_at_window_start_pct = plan.projSocAtWindowStartPct;
+  // v1.39.0 (2nd adversarial pass): freeze the plan's ACTUAL resolved charge
+  // window. Weekend plans resolve windows disjoint from the canonical
+  // 23:00–05:00 night (a Saturday plan's window is Monday 00:00–05:00), so the
+  // scorer/completion gate MUST pair actuals to the real window — without these
+  // columns a Saturday night would be captured before its window even opened.
+  if (plan.window) {
+    row.window_start_ms = plan.window.startMs;
+    row.window_end_ms = plan.window.endMs;
+  }
   recorder.recordNightPlan(row);
 }
 
@@ -2752,6 +2762,45 @@ function coverageFrac(pts: Array<{ ts: number; value: number }>, startMs: number
  *   low-coverage night we set scored=0 with an explicit score_notes rather than
  *   fabricate a safety-critical under-buy number. coverage < 0.9 ⇒ scored=0.
  */
+/** The scoring spans for one ledger row. v1.39.0 2nd-pass: derived from the
+ *  row's OWN stored window when present — weekend plans resolve windows
+ *  disjoint from the canonical 23:00–05:00 night (Saturday → Monday
+ *  00:00–05:00), and pairing actuals to the wrong night was the very defect
+ *  class this release repairs. On-peak spans stay plan-date-anchored (the
+ *  4–7 pm of the plan day is well-defined regardless of the charge window). */
+interface NightScoringSpans {
+  windowStart: number;
+  windowEnd: number;
+  onpeakStart: number;
+  onpeakEnd: number;
+  scoreSpanEnd: number;
+  completeMs: number;
+  /** false ⇒ pre-v1.39.0 row with no stored window — actuals CANNOT be paired
+   *  to the plan's real window; capture as scored=0, never fabricate. */
+  windowKnown: boolean;
+}
+function nightSpansForRow(y: NightLedgerRow): NightScoringSpans | null {
+  const b = nightWindowBounds(String(y.plan_date));
+  if (!b) return null; // malformed plan_date
+  const ws = typeof y.window_start_ms === 'number' ? y.window_start_ms : null;
+  const we = typeof y.window_end_ms === 'number' ? y.window_end_ms : null;
+  if (ws != null && we != null && we > ws) {
+    // The plan-trajectory score span runs 16 h past the REAL window close
+    // (mirrors the canonical 05:00→21:00 trough span).
+    const scoreSpanEnd = we + 16 * HOUR_MS;
+    return {
+      windowStart: ws, windowEnd: we,
+      onpeakStart: b.onpeakStartMs, onpeakEnd: b.onpeakEndMs,
+      scoreSpanEnd, completeMs: scoreSpanEnd, windowKnown: true,
+    };
+  }
+  return {
+    windowStart: b.windowStartMs, windowEnd: b.windowEndMs,
+    onpeakStart: b.onpeakStartMs, onpeakEnd: b.onpeakEndMs,
+    scoreSpanEnd: b.scoreSpanEndMs, completeMs: b.completeMs, windowKnown: false,
+  };
+}
+
 function scoreCompletedNights(nowMs: number): void {
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return; // can't source actuals
@@ -2759,23 +2808,25 @@ function scoreCompletedNights(nowMs: number): void {
   // v1.39.0: BACKFILL, not exactly-yesterday. The old scorer targeted only
   // localParts(now−24h) — a night left uncaptured across SHP2-wedge / downtime
   // days was orphaned FOREVER once the date advanced (an uncounted MNAR
-  // exclusion). Raw telemetry retention is ~30 d, so a 14-day sweep re-scores
-  // every completed, uncaptured night while its actuals still exist.
-  const rows = recorder.readNightLedger(14);
+  // exclusion). 60-day sweep (matching the premature-capture repair window):
+  // a night whose raw telemetry (~30 d retention) has aged out captures
+  // HONESTLY as scored=0 with null actuals via the guards in scoreNightRow —
+  // it does not stay uncaptured forever.
+  const rows = recorder.readNightLedger(60);
   for (const y of rows) {
     if (y.outcome_captured_at_ms != null) continue; // already captured — idempotent
-    const b = nightWindowBounds(String(y.plan_date));
-    if (!b) continue; // malformed plan_date — leave for manual inspection
+    const s = nightSpansForRow(y);
+    if (!s) continue; // malformed plan_date — leave for manual inspection
     // ★ THE v1.39.0 COMPLETION GATE (review HIGH ×2): a night may be captured
-    // only once its FULL scored span has elapsed (plan-date+1 21:00). The
-    // pre-fix midnight tick captured yesterday's row while its charge window
-    // was still OPEN — window coverage ~25% ⇒ scored=0, inverted SoC query ⇒
-    // actuals null — and the idempotence latch then froze those truncated
-    // actuals into the never-pruned ledger forever, so the write-readiness
-    // gate could never accumulate a single scored night.
-    if (nowMs < b.completeMs) continue; // night still in flight — do NOT capture
+    // only once its FULL scored span has elapsed — 16 h past its REAL window
+    // close. The pre-fix midnight tick captured yesterday's row while its
+    // charge window was still OPEN — window coverage ~25% ⇒ scored=0, inverted
+    // SoC query ⇒ actuals null — and the idempotence latch then froze those
+    // truncated actuals into the never-pruned ledger forever, so the
+    // write-readiness gate could never accumulate a single scored night.
+    if (nowMs < s.completeMs) continue; // night still in flight — do NOT capture
     try {
-      scoreNightRow(y, b, shp2Sn, nowMs);
+      scoreNightRow(y, s, shp2Sn, nowMs);
     } catch (e: any) {
       app.log.debug(`night-charge: scoring ${y.plan_date} skipped (${e?.message ?? e})`);
     }
@@ -2784,21 +2835,34 @@ function scoreCompletedNights(nowMs: number): void {
 
 /** Score ONE completed night row. Extracted from the old yesterday-only scorer
  *  so the completion-gated backfill loop above can target ANY uncaptured
- *  plan_date; the night's clock spans come from nightWindowBounds (the same
+ *  plan_date; the night's clock spans come from nightSpansForRow (the same
  *  single source of truth the completion gate uses), never from `now`. */
 function scoreNightRow(
   y: NightLedgerRow,
-  b: NonNullable<ReturnType<typeof nightWindowBounds>>,
+  s: NightScoringSpans,
   shp2Sn: string,
   nowMs: number,
 ): void {
   const yDate = String(y.plan_date);
-  const onpeakStart = b.onpeakStartMs;             // plan-day 16:00
-  const onpeakEnd = b.onpeakEndMs;                 // plan-day 19:00
-  const windowStart = b.windowStartMs;             // plan-day 23:00
-  const windowEnd = b.windowEndMs;                 // plan-day+1 05:00
-  const scoreFrom = windowEnd;                     // plan trajectory scores post-05:00
-  const spanEnd = Math.min(nowMs, b.scoreSpanEndMs); // plan-day+1 21:00 (gate ⇒ fully elapsed)
+  // Pre-v1.39.0 rows never recorded their resolved window — the actuals cannot
+  // be paired to the plan's REAL charge window (which for weekend plans is a
+  // different night entirely). Capture honestly as unscored; never fabricate a
+  // cross-span comparison the gate would then learn from.
+  if (!s.windowKnown) {
+    recorder.recordNightOutcome(yDate, {
+      outcome_captured_at_ms: nowMs,
+      scored: 0,
+      score_notes:
+        "not scored — the plan's resolved charge window was not recorded (pre-v1.39.0 row); actuals cannot be paired to the real window.",
+    });
+    return;
+  }
+  const onpeakStart = s.onpeakStart;               // plan-day 16:00
+  const onpeakEnd = s.onpeakEnd;                   // plan-day 19:00
+  const windowStart = s.windowStart;               // the plan's REAL window open
+  const windowEnd = s.windowEnd;                   // the plan's REAL window close
+  const scoreFrom = windowEnd;                     // plan trajectory scores post-close
+  const spanEnd = Math.min(nowMs, s.scoreSpanEnd); // window close + 16 h (gate ⇒ fully elapsed)
   // PV/load TOTALS are compared against the plan's forecast P50, which covered
   // the ~24 h from issue (~21:30). Integrate actuals over the SAME [issue, +24 h]
   // horizon so pv_err_frac / load_err_frac are like-for-like, not the charge-window span.
@@ -2810,7 +2874,9 @@ function scoreNightRow(
   const socPts = recorder.query(shp2Sn, 'backup_pct', scoreFrom, spanEnd);
   const loadPts = recorder.query(shp2Sn, 'panel_load', fcSpanStart, fcSpanEnd);
 
-  const windowImportKwh = round2(integrateWh(gridWin, true) / 1000);
+  // v1.39.0 2nd-pass: null-over-fabrication — zero samples must record NULL,
+  // not a "measured" 0 kWh import (matching the on-peak guard one line down).
+  const windowImportKwh = gridWin.length ? round2(integrateWh(gridWin, true) / 1000) : null;
   const onpeakImportKwh = gridPeak.length ? round2(integrateWh(gridPeak, true) / 1000) : null;
   const winCoverage = round2(coverageFrac(gridWin, windowStart, windowEnd));
 
@@ -2828,15 +2894,23 @@ function scoreNightRow(
 
   // Actual min SoC over the scored trajectory span (raw telemetry; used only for
   // soc_min_err, NOT the floor verdict — §3.3).
+  // v1.39.0 2nd-pass: median-of-3 filter before the min-scan. The documented
+  // SHP2 cloud-reconnect artifact emits a single transient backupBatPercent=0
+  // sample (the same artifact behind the historical 50→2% SoC-alarm false
+  // cascade); an unfiltered min-scan latches it, fabricating realizedNeed =
+  // the full floor+cushion and a false HARD under-buy in the gate's evidence.
+  // A 3-sample median kills isolated spikes while passing real sustained lows.
   let actualMinSocPct: number | null = null;
   let actualMinSocTsMs: number | null = null;
-  for (const p of socPts) {
+  for (const p of medianFilter3(socPts)) {
     if (actualMinSocPct == null || p.value < actualMinSocPct) { actualMinSocPct = p.value; actualMinSocTsMs = p.ts; }
   }
   if (actualMinSocPct != null) actualMinSocPct = round1(actualMinSocPct);
 
   const hadBasis = y.min_proj_soc_pct != null; // null ⇒ plan had no trajectory
-  const cleanBaseline = windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1); // near-zero overnight import
+  // null import (no samples) is NOT clean — it is unknown; covOk=false already
+  // forces scored=0 on such nights, this just keeps the flag honest too.
+  const cleanBaseline = windowImportKwh != null && windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1);
   const covOk = winCoverage >= 0.9;
 
   // Realized-need buy = the meter energy that WOULD have held floor+cushion,
@@ -3025,8 +3099,10 @@ function repairPrematureNightOutcomes(): void {
     for (const y of rows) {
       const cap = y.outcome_captured_at_ms;
       if (cap == null) continue;
-      const b = nightWindowBounds(String(y.plan_date));
-      if (!b || cap >= b.completeMs) continue; // captured after completion — sound
+      // Same span derivation as the scorer (stored real window when present) —
+      // a capture is premature iff it precedes ITS OWN night's completion.
+      const s = nightSpansForRow(y);
+      if (!s || cap >= s.completeMs) continue; // captured after completion — sound
       recorder.recordNightOutcome(String(y.plan_date), {
         outcome_captured_at_ms: null,
         actual_pv_kwh: null,
@@ -3041,7 +3117,7 @@ function repairPrematureNightOutcomes(): void {
         grid_home_coverage_frac: null,
         scored: 0,
         score_notes:
-          'reset — outcome had been captured before the night completed (pre-v1.39.0 mid-window scoring defect); will re-score with full-span actuals.',
+          'reset — outcome had been captured before the night completed (pre-v1.39.0 mid-window scoring defect); re-captured by the backfill sweep — scored where telemetry still exists, else honestly unscored.',
         pv_err_frac: null,
         pv_in_band: null,
         load_err_frac: null,

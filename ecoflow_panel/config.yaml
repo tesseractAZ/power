@@ -215,7 +215,7 @@ schema:
   ARB_MIN_BUY_KWH: float(0,50)
   ARB_CHARGE_CAP_KW: float(0,50)
   ARB_LOAD_P90_FACTOR: float(1,2)
-  NIGHT_CHARGE_NOTIFY_HOUR: int(0,22)
+  NIGHT_CHARGE_NOTIFY_HOUR: int(0,23)
   NIGHT_CHARGE_NOTIFY_MINUTE: int(0,59)
   NIGHT_CHARGE_NOTIFY_ON_HOLD: bool
   # APS R-EV effective ¢/kWh — str? (ships empty; runtime parses number-or-null,

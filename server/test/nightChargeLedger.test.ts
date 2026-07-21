@@ -294,3 +294,19 @@ test('v1.38.0 regression — gate counts a recorded row (TEXT algo_version) end-
     rec.close();
   }
 });
+
+test('v1.39.0/2 — window_start_ms/window_end_ms round-trip through the ledger', () => {
+  const store = new SnapshotStore();
+  const rec = createRecorder(store, () => {});
+  const ws = Date.UTC(2026, 6, 21, 6, 0); // Mon 23:00 Phoenix
+  const we = ws + 6 * 3_600_000;
+  rec.recordNightPlan({
+    plan_date: '2026-07-20', issued_at_ms: ws - 5_400_000, algo_version: 'nc-v1',
+    window_start_ms: ws, window_end_ms: we,
+  });
+  const r = rec.readNightLedger(300).find((x) => x.plan_date === '2026-07-20')!;
+  assert.ok(r, 'row present');
+  assert.equal(r.window_start_ms, ws, 'stored window start must round-trip');
+  assert.equal(r.window_end_ms, we, 'stored window end must round-trip');
+  rec.close();
+});

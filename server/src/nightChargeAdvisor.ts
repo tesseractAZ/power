@@ -310,7 +310,13 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 
   // ── §2.2 step 1: pack level ENTERING window-close, no buy (carry SoC_now
   // through the pre-window + window house load). ──
-  const baseline = simulate(socNowKwh, fullKwh, horizon.filter((h) => h.ts >= nowMs), dischargeEff, windowEnd, windowEnd);
+  // v1.39.0 2nd-pass: simulate from the FLOOR of the current hour, not nowMs —
+  // filtering h.ts >= nowMs dropped the in-progress hour entirely, so every
+  // 21:30 plan under-simulated ~30 min of drain (under-buy direction).
+  // Including the full current hour over-counts by ≤ the elapsed fraction —
+  // the conservative (over-buy) direction, consistent with buildInputs' trim.
+  const simFromMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+  const baseline = simulate(socNowKwh, fullKwh, horizon.filter((h) => h.ts >= simFromMs), dischargeEff, windowEnd, windowEnd);
   const packAtWindowEnd_noBuy = baseline.packAtMarkKwh;
 
   // v1.39.0 (§4 honesty): the PRE-WINDOW carry — pack path from now to the
@@ -320,17 +326,26 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // carry crosses whole nights the [windowEnd, …] scored trough never sees.
   // packAtMark here = pack ENTERING the window → the ledger's frozen
   // soc_at_window_start_pct plan column.
-  const preWindow = simulate(
-    socNowKwh, fullKwh,
-    horizon.filter((h) => h.ts >= nowMs && h.ts < windowStart),
-    dischargeEff, 0, windowStart,
-  );
-  const projSocAtWindowStartPct = round1((preWindow.packAtMarkKwh / fullKwh) * 100);
-  const preWindowMinSocPct = round1((preWindow.minPackKwh / fullKwh) * 100);
-  const preWindowNote =
-    preWindowMinSocPct < round1(reserveFloorPct + cushionPct)
-      ? ` NOTE: before the charge window opens (${fmtPhoenixDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% — a dip tonight's buy cannot prevent; the floor alarm owns that span.`
-      : '';
+  // 2nd-pass: MID-WINDOW (nowMs ≥ windowStart) there IS no pre-window span —
+  // fields stay null and no note is emitted. The pre-fix code collapsed them
+  // to the CURRENT SoC and could emit a false "before the charge window opens"
+  // statement about a window that was already open.
+  const midWindow = nowMs >= windowStart;
+  let projSocAtWindowStartPct: number | null = null;
+  let preWindowMinSocPct: number | null = null;
+  let preWindowNote = '';
+  if (!midWindow) {
+    const preWindow = simulate(
+      socNowKwh, fullKwh,
+      horizon.filter((h) => h.ts >= simFromMs && h.ts < windowStart),
+      dischargeEff, 0, windowStart,
+    );
+    projSocAtWindowStartPct = round1((preWindow.packAtMarkKwh / fullKwh) * 100);
+    preWindowMinSocPct = round1((preWindow.minPackKwh / fullKwh) * 100);
+    if (preWindowMinSocPct < round1(reserveFloorPct + cushionPct)) {
+      preWindowNote = ` NOTE: before the charge window opens (${fmtPhoenixDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% — a dip tonight's buy cannot prevent; the floor alarm owns that span.`;
+    }
+  }
 
   // ★★ THE SIZING AUTHORITY (v1.37.0 review fix — two CONFIRMED criticals):
   // `trough(lift)` = the simulated PLAN-trajectory minimum pack over
@@ -714,7 +729,13 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   // embedded expected-value EV in the load — stripping it without replacing it
   // would erase a real charging night from the sizing basis and UNDER-buy (a
   // safety miss). Never strip without replacing.
-  const evBlockWillPlace = !!(ev && ev.p90SessionKwh != null && ev.p90SessionKwh > 0 && ev.chargeStartMs != null);
+  // 2nd-pass guard: a degenerate evMaxLoadW (≤0 / NaN) would make every
+  // placement hour add 0 W while still stripping its embedded EV — the exact
+  // strip-without-replace mass under-buy. Treat it as "cannot place".
+  const evBlockWillPlace = !!(
+    ev && ev.p90SessionKwh != null && ev.p90SessionKwh > 0 && ev.chargeStartMs != null &&
+    Number.isFinite(evMaxLoadW) && evMaxLoadW > 0
+  );
 
   // Merge band (authoritative) with beyond-24 h synthesized rollup hours, keyed
   // by ts so the band always wins where both cover an hour.
@@ -948,4 +969,23 @@ export function nightWindowBounds(planDate: string): {
     scoreSpanEndMs,
     completeMs: scoreSpanEndMs,
   };
+}
+
+/**
+ * v1.39.0: 3-sample median filter over a {ts,value} series. Kills ISOLATED
+ * transient spikes (the SHP2 cloud-reconnect single-sample backupBatPercent=0
+ * artifact) while passing genuine sustained excursions — a real low reading
+ * has neighbors that agree with it. Endpoints pass through unchanged. PURE.
+ */
+export function medianFilter3(
+  pts: ReadonlyArray<{ ts: number; value: number }>,
+): Array<{ ts: number; value: number }> {
+  if (pts.length < 3) return pts.slice();
+  const out: Array<{ ts: number; value: number }> = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const tri = [pts[i - 1].value, pts[i].value, pts[i + 1].value].sort((a, b) => a - b);
+    out.push({ ts: pts[i].ts, value: tri[1] });
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
 }
