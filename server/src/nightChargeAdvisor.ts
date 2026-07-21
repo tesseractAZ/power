@@ -144,6 +144,16 @@ export interface NightChargePlan {
   /** The no-buy baseline trough (what WOULD happen without the recommendation). */
   baselineMinSocPct: number | null;
 
+  /** v1.39.0 (§4 honesty): the plan-projected pack SoC % ENTERING the charge
+   *  window (the carry from now to window open). Freezes into the ledger's
+   *  soc_at_window_start_pct plan column. null when basis incomplete. */
+  projSocAtWindowStartPct: number | null;
+  /** v1.39.0 (§4 honesty): the projected minimum SoC % over [now, windowStart)
+   *  — the span a tonight buy CANNOT protect. On weekend evenings the resolved
+   *  window can be 24–50 h away, so this span covers whole nights; the plan
+   *  must not silently exclude it from its safety claims. */
+  preWindowMinSocPct: number | null;
+
   confidenceTier: NightChargeInputs['confidenceTier'];
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;
@@ -224,6 +234,8 @@ function nullPlan(
     minProjSocPct: null,
     minProjSocTsMs: null,
     baselineMinSocPct: null,
+    projSocAtWindowStartPct: null,
+    preWindowMinSocPct: null,
     confidenceTier: inputs.confidenceTier,
     window: inputs.window,
     reserveFloorPct: inputs.reserveFloorPct,
@@ -258,6 +270,15 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   if (!window || !(window.endMs > window.startMs)) return nullPlan(inputs, false, 'No plan — no valid cheap charge window resolved for tonight.');
   if (!Number.isFinite(fullKwh) || fullKwh <= 0) return nullPlan(inputs, false, 'No plan — pool capacity unavailable.');
   if (!Number.isFinite(socNowPct)) return nullPlan(inputs, false, 'No plan — current SoC unavailable.');
+  // v1.39.0 review fix: a non-finite floor/cushion made targetFloorKwh NaN,
+  // every bisection comparison false, and the buy silently resolved to the FULL
+  // pool headroom — a confident max-buy instead of the fail-closed null the
+  // module's contract promises for degenerate inputs. Same class for the
+  // efficiency/charge-cap knobs (all operator-config-sourced).
+  if (!Number.isFinite(reserveFloorPct) || reserveFloorPct < 0 || !Number.isFinite(cushionPct) || cushionPct < 0)
+    return nullPlan(inputs, false, 'No plan — reserve floor / outage cushion is not a finite non-negative number.');
+  if (!Number.isFinite(legEff) || legEff <= 0 || !Number.isFinite(dischargeEff) || dischargeEff <= 0 || !Number.isFinite(chargeCapKw) || chargeCapKw < 0)
+    return nullPlan(inputs, false, 'No plan — efficiency/charge-power configuration is not a finite number.');
   if (horizon.length === 0) return nullPlan(inputs, false, 'No plan — empty forecast horizon.');
 
   const fullWh = fullKwh * 1000;
@@ -268,7 +289,16 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const socNowKwh = (fullKwh * socNowPct) / 100;
   const windowStart = window.startMs;
   const windowEnd = window.endMs;
-  const windowHours = (windowEnd - windowStart) / HOUR_MS;
+  // v1.39.0 review fix (HIGH): the charge-power feasibility cap must credit only
+  // the REMAINING window when the plan is computed mid-window — the 30-min
+  // recompute tick runs around the clock, and resolveCheapWindow deliberately
+  // walks back to the true window start for display honesty. Crediting the full
+  // window length mid-window over-credits already-elapsed hours (up to ~6 h ×
+  // chargeCapKw of nonexistent lift) and can present an undeliverable buy as
+  // fully meeting the cushion — the exact unflagged-residual-risk class the
+  // v1.37.0 re-sim fix exists to prevent.
+  const effChargeStartMs = Math.max(windowStart, nowMs);
+  const remainingWindowHours = Math.max(0, (windowEnd - effChargeStartMs) / HOUR_MS);
 
   // Window hours (billed house load happens even while grid-charging — it caps
   // how much grid energy can reach the charger).
@@ -282,6 +312,25 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // through the pre-window + window house load). ──
   const baseline = simulate(socNowKwh, fullKwh, horizon.filter((h) => h.ts >= nowMs), dischargeEff, windowEnd, windowEnd);
   const packAtWindowEnd_noBuy = baseline.packAtMarkKwh;
+
+  // v1.39.0 (§4 honesty): the PRE-WINDOW carry — pack path from now to the
+  // window OPEN. A tonight buy cannot prevent a pre-window dip (the floor alarm
+  // owns that span), but the plan must not silently exclude it from its safety
+  // claims: on weekend evenings the resolved window can be 24–50 h away, so the
+  // carry crosses whole nights the [windowEnd, …] scored trough never sees.
+  // packAtMark here = pack ENTERING the window → the ledger's frozen
+  // soc_at_window_start_pct plan column.
+  const preWindow = simulate(
+    socNowKwh, fullKwh,
+    horizon.filter((h) => h.ts >= nowMs && h.ts < windowStart),
+    dischargeEff, 0, windowStart,
+  );
+  const projSocAtWindowStartPct = round1((preWindow.packAtMarkKwh / fullKwh) * 100);
+  const preWindowMinSocPct = round1((preWindow.minPackKwh / fullKwh) * 100);
+  const preWindowNote =
+    preWindowMinSocPct < round1(reserveFloorPct + cushionPct)
+      ? ` NOTE: before the charge window opens (${fmtPhoenixDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% — a dip tonight's buy cannot prevent; the floor alarm owns that span.`
+      : '';
 
   // ★★ THE SIZING AUTHORITY (v1.37.0 review fix — two CONFIRMED criticals):
   // `trough(lift)` = the simulated PLAN-trajectory minimum pack over
@@ -309,7 +358,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // No shortfall projected → HOLD (no buy). Honest "you don't need to charge".
   if (baselineTrough.minKwh >= targetFloorKwh - 1e-9) {
     return {
-      ...nullPlan(inputs, true, `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above the ${round1(reserveFloorPct + cushionPct)}% floor+cushion; no charge needed.`),
+      ...nullPlan(inputs, true, `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above the ${round1(reserveFloorPct + cushionPct)}% floor+cushion; no charge needed.${preWindowNote}`),
       objective: 'none',
       buyKwh: 0,
       requiredExtraKwh: 0,
@@ -317,6 +366,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       minProjSocPct: baselineMinSocPct,
       minProjSocTsMs: baselineTrough.minTs,
       baselineMinSocPct,
+      projSocAtWindowStartPct,
+      preWindowMinSocPct,
     };
   }
 
@@ -325,7 +376,10 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // the window house load is served first, and only legEff of what reaches the
   // charger is stored in the pack.
   const windowLoadKwh = windowHrs.reduce((s, h) => s + h.loadP90W / 1000, 0);
-  const chargePowerLiftKwh = Math.max(0, (chargeCapKw * windowHours - windowLoadKwh) * legEff);
+  // Remaining-window credit only (the horizon is trimmed to ≥ nowHour upstream,
+  // so windowLoadKwh already sums only remaining-hour house load — the gross
+  // term must use the SAME remaining span, not the full window length).
+  const chargePowerLiftKwh = Math.max(0, (chargeCapKw * remainingWindowHours - windowLoadKwh) * legEff);
   // Pool headroom: the pack physically cannot hold more than full.
   const poolHeadroomLiftKwh = Math.max(0, fullKwh - packAtWindowEnd_noBuy);
 
@@ -386,8 +440,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const chargeTonight = buyKwh >= minBuyKwh;
 
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwh)} kWh overnight → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}. Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}`
-    : `Hold — the projected shortfall (${round1(buyKwh)} kWh) is below the ${round1(minBuyKwh)} kWh minimum-buy threshold; no meaningful charge.`;
+    ? `Buy ~${round1(buyKwh)} kWh overnight → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}. Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${preWindowNote}`
+    : `Hold — the projected shortfall (${round1(buyKwh)} kWh) is below the ${round1(minBuyKwh)} kWh minimum-buy threshold; no meaningful charge.${preWindowNote}`;
 
   return {
     generatedAt: nowMs,
@@ -402,6 +456,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     minProjSocPct,
     minProjSocTsMs: withBuy.minTs,
     baselineMinSocPct,
+    projSocAtWindowStartPct,
+    preWindowMinSocPct,
     confidenceTier: inputs.confidenceTier,
     window,
     reserveFloorPct,
@@ -459,6 +515,19 @@ function fmtPhoenixHm(ms: number): string {
   return `${hh}:${mm}`;
 }
 
+/** v1.39.0 (§4 display honesty): "HH:MM" for instants within the next 24 h,
+ *  "EEE HH:MM" (e.g. "Mon 00:00") beyond — a Saturday-evening plan resolving
+ *  Monday's window must not present it as tonight's. Exported for the
+ *  delivery surfaces (MQTT state / TUI / notify) so they agree. */
+export function fmtPhoenixDayHm(ms: number, nowMs: number): string {
+  const hm = fmtPhoenixHm(ms);
+  if (ms - nowMs < 24 * HOUR_MS) return hm;
+  const wd = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', weekday: 'short' })
+    .formatToParts(new Date(ms))
+    .find((p) => p.type === 'weekday')?.value ?? '';
+  return wd ? `${wd} ${hm}` : hm;
+}
+
 /**
  * Flat fields published into the MQTT state payload + /api/ha-state so the
  * owner's HA automation can gate on the recommendation (advisory actuation
@@ -485,8 +554,10 @@ export function nightChargeStateFields(
     // Window is informational (the automation gates on availability+charge_tonight
     // AND honors this window). Surfaced from plan.window whenever present; null on
     // no window / null plan. HA expire_after (§I12) covers the dead-advisor case.
-    night_charge_window_start: win ? fmtPhoenixHm(win.startMs) : null,
-    night_charge_window_end: win ? fmtPhoenixHm(win.endMs) : null,
+    // v1.39.0: day-qualified beyond 24 h ("Mon 00:00") — a weekend plan resolving
+    // Monday's window must not present a date-less HH:MM as tonight's window.
+    night_charge_window_start: win ? fmtPhoenixDayHm(win.startMs, nowMs) : null,
+    night_charge_window_end: win ? fmtPhoenixDayHm(win.endMs, nowMs) : null,
     charge_tonight: fresh ? plan!.chargeTonight === true : false,
   };
 }
@@ -580,6 +651,18 @@ export function resolveCheapWindow(
   scanHours = 30,
 ): { startMs: number; endMs: number } | null {
   const h0 = Math.floor(fromMs / HOUR_MS) * HOUR_MS;
+  // v1.39.0 review fix: the END of a found run is scanned up to 24 h past the
+  // run's own start — a window START must lie within scanHours, but a run
+  // straddling the scan edge must not have its end truncated to the horizon
+  // (a Saturday-evening scan found Monday 00:00 at hour 27 of a 30 h scan and
+  // clipped the window end to Monday 04:00 instead of 05:00).
+  const endOfRun = (runStartMs: number): number => {
+    for (let i = 1; i <= 24; i++) {
+      const t = runStartMs + i * HOUR_MS;
+      if (periodIdAt(t) !== cheapPeriodId) return t;
+    }
+    return runStartMs + 25 * HOUR_MS; // pathological always-cheap resolver — bounded
+  };
   // If `fromMs` is ALREADY inside a cheap window (a recompute running during the
   // 23:00–05:00 window), walk BACK to the window's true start so the reported
   // window_start isn't truncated to the live mid-window clock (§4 display honesty).
@@ -590,25 +673,12 @@ export function resolveCheapWindow(
       if (periodIdAt(t) === cheapPeriodId) s = t;
       else break;
     }
-    for (let i = 1; i <= scanHours + 1; i++) {
-      const t = h0 + i * HOUR_MS;
-      if (periodIdAt(t) !== cheapPeriodId) return { startMs: s, endMs: t };
-    }
-    return { startMs: s, endMs: h0 + (scanHours + 1) * HOUR_MS };
+    return { startMs: s, endMs: endOfRun(h0) };
   }
-  let startMs: number | null = null;
   for (let i = 0; i <= scanHours; i++) {
     const t = h0 + i * HOUR_MS;
-    const isCheap = periodIdAt(t) === cheapPeriodId;
-    if (isCheap && startMs == null) {
-      startMs = t;
-    } else if (!isCheap && startMs != null) {
-      return { startMs, endMs: t };
-    }
+    if (periodIdAt(t) === cheapPeriodId) return { startMs: t, endMs: endOfRun(t) };
   }
-  // Ran off the scan horizon mid-window → close at the horizon edge (rare; the
-  // 6 h overnight window fits easily inside a 30 h scan).
-  if (startMs != null) return { startMs, endMs: h0 + (scanHours + 1) * HOUR_MS };
   return null;
 }
 
@@ -648,12 +718,18 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
 
   // Merge band (authoritative) with beyond-24 h synthesized rollup hours, keyed
   // by ts so the band always wins where both cover an hour.
+  // v1.39.0 review fix: the embedded EV is NOT stripped here — the strip happens
+  // hour-by-hour inside the block placement below, so ONLY the hours the
+  // committed p90 block actually covers are de-duped. Stripping every band hour
+  // up front erased OTHER predicted sessions (e.g. tomorrow evening's mined
+  // pattern) and any hours a truncated block never reached — an under-buy.
+  // "Never strip without replacing" (§2.3) now holds PER-HOUR, not per-plan.
+  const embByTs = new Map<number, number>();
   const byTs = new Map<number, NightChargeHour>();
   for (const h of bandHours) {
     if (!Number.isFinite(h.ts)) continue;
-    const embedded = evBlockWillPlace ? Math.max(0, h.embeddedEvW ?? 0) : 0;
-    const loadClean = Math.max(0, h.loadP90W - embedded); // §2.3 EV de-dup (only when replacing)
-    byTs.set(h.ts, { ts: h.ts, pvP10W: Math.max(0, h.pvP10W), loadP90W: loadClean });
+    if (evBlockWillPlace) embByTs.set(h.ts, Math.max(0, h.embeddedEvW ?? 0));
+    byTs.set(h.ts, { ts: h.ts, pvP10W: Math.max(0, h.pvP10W), loadP90W: Math.max(0, h.loadP90W) });
   }
   for (const dr of dayRollups) {
     const da = Math.max(1, dr.daysAhead);
@@ -688,8 +764,13 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     for (const h of horizon) {
       if (remainingKwh <= 1e-9 || h.ts >= blockEndMs) break;
       if (h.ts < startHour) continue;
+      // De-dup exactly THIS hour's embedded EV and replace it with the
+      // committed-block watts (atomic per-hour strip+re-add). Hours before the
+      // block, after it exhausts, or beyond the band region keep their embedded
+      // expected-value EV untouched.
+      const emb = embByTs.get(h.ts) ?? 0;
       const addW = Math.min(Math.max(0, evMaxLoadW), remainingKwh * 1000);
-      h.loadP90W += addW;
+      h.loadP90W = Math.max(0, h.loadP90W - emb) + addW;
       remainingKwh -= addW / 1000;
     }
   }
@@ -833,5 +914,38 @@ export function createNightChargeAdvisor(deps: {
       return plan;
     },
     getStatus: () => getLatestNightChargePlan(),
+  };
+}
+
+/**
+ * v1.39.0: the fixed America/Phoenix (UTC-7, no DST) clock bounds of a plan
+ * date's night — the single source of truth for the SCORER's spans and for the
+ * "may this night be scored yet?" completion boundary. Plan for day D covers
+ * charge window [D 23:00, D+1 05:00); its plan-trajectory score span runs
+ * [D+1 05:00, D+1 21:00); the night is COMPLETE — and may be outcome-captured —
+ * only at/after D+1 21:00. Scoring earlier permanently freezes truncated
+ * actuals into the never-pruned ledger (the pre-v1.39.0 midnight-capture
+ * defect). PURE — returns null on a malformed date string.
+ */
+export function nightWindowBounds(planDate: string): {
+  onpeakStartMs: number;
+  onpeakEndMs: number;
+  windowStartMs: number;
+  windowEndMs: number;
+  scoreSpanEndMs: number;
+  /** The instant the night is fully observable; scoring before this is invalid. */
+  completeMs: number;
+} | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(planDate ?? '');
+  if (!m) return null;
+  const dayStartUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) + 7 * HOUR_MS; // Phoenix midnight
+  const scoreSpanEndMs = dayStartUtc + 45 * HOUR_MS; // D+1 21:00
+  return {
+    onpeakStartMs: dayStartUtc + 16 * HOUR_MS, // D 16:00
+    onpeakEndMs: dayStartUtc + 19 * HOUR_MS,   // D 19:00
+    windowStartMs: dayStartUtc + 23 * HOUR_MS, // D 23:00
+    windowEndMs: dayStartUtc + 29 * HOUR_MS,   // D+1 05:00
+    scoreSpanEndMs,
+    completeMs: scoreSpanEndMs,
   };
 }

@@ -416,7 +416,9 @@ export interface NightLedgerRow {
   confidence_tier: string; // 'forecast' | 'mixed' | 'climatology'
   horizon_hours: number;
   soc_now_pct: number;
-  soc_at_window_start_pct: number;
+  // v1.39.0: written from plan.projSocAtWindowStartPct (was declared but never
+  // written — NULL on every pre-v1.39.0 row, so the type is honestly nullable).
+  soc_at_window_start_pct: number | null;
   target_soc_pct: number;
   buy_kwh: number;
   required_extra_kwh: number;

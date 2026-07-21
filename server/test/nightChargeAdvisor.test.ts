@@ -9,6 +9,8 @@ import {
   getLatestNightChargePlan,
   setLatestNightChargePlan,
   createNightChargeAdvisor,
+  nightWindowBounds,
+  fmtPhoenixDayHm,
   type NightChargeInputs,
   type NightChargeHour,
   type NightChargePlan,
@@ -558,7 +560,139 @@ test('regression — buildNightChargeInputs keeps embedded EV in load when NO co
   assert.ok(Math.abs(cheap!.loadP90W - 3000) < 1, `embedded EV kept when no block placed (got ${cheap!.loadP90W})`);
 
   const withEv = buildNightChargeInputs({ ...common, bandHours, ev: { p90SessionKwh: 20, chargeStartMs: startMs + 3 * HOUR, sessionCount: 12 } });
-  // With a committed block, the embedded 2 kW IS stripped (loadClean 1000 W) before the p90 block is laid on.
-  const preBlock = withEv.horizon.find((h) => h.ts === startMs); // hour before the 03:00 block
-  assert.ok(preBlock && Math.abs(preBlock.loadP90W - 1000) < 1, `embedded EV stripped when block WILL place (got ${preBlock?.loadP90W})`);
+  // v1.39.0: the strip is atomic PER-HOUR with the re-add — only hours the
+  // committed p90 block actually covers are de-duped. Hours before the block
+  // KEEP their embedded EV (hour 0's 2 kW may be a DIFFERENT predicted
+  // session; erasing it under-buys — the confirmed v1.38 defect).
+  const preBlock = withEv.horizon.find((h) => h.ts === startMs)!;
+  assert.ok(Math.abs(preBlock.loadP90W - 3000) < 1, `pre-block hour keeps embedded EV (got ${preBlock.loadP90W})`);
+  // Hour AT the block start: embedded stripped, p90 watts laid on → 3000 − 2000 + 11520.
+  const blockHour = withEv.horizon.find((h) => h.ts === startMs + 3 * HOUR)!;
+  assert.ok(Math.abs(blockHour.loadP90W - 12520) < 1, `block hour = clean base + p90 block (got ${blockHour.loadP90W})`);
+  // Second block hour: remaining 20 − 11.52 = 8.48 kWh → 3000 − 2000 + 8480.
+  const blockHour2 = withEv.horizon.find((h) => h.ts === startMs + 4 * HOUR)!;
+  assert.ok(Math.abs(blockHour2.loadP90W - 9480) < 1, `block spill hour (got ${blockHour2.loadP90W})`);
+  // After the block exhausts: embedded kept again — never strip without replacing.
+  const postBlock = withEv.horizon.find((h) => h.ts === startMs + 5 * HOUR)!;
+  assert.ok(Math.abs(postBlock.loadP90W - 3000) < 1, `post-block hour keeps embedded EV (got ${postBlock.loadP90W})`);
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * v1.39.0 review-fix regressions (post-merge adversarial review of v1.37–v1.38)
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+// ── HIGH: mid-window recompute must credit only the REMAINING window ──
+test('v1.39.0 — mid-window plan caps charge power by the REMAINING window hours', () => {
+  // Window [B+3h, B+9h] (6 h). Evaluate at B+6h — 3 h remain. chargeCapKw 2,
+  // legEff 0.9, window-hour load 0 (horizon load starts after the window) ⇒
+  // remaining-cap = 2·3·0.9 = 5.4 kWh. The pre-fix full-window credit would
+  // have been 2·6·0.9 = 10.8 kWh. Post-window drain: 1800 W ⇒ 2 kWh/h from
+  // B+9h, so the trough collapses and requiredExtra ≫ cap ⇒ bindingCap
+  // 'chargePower' with the buy bounded by the 5.4 kWh REMAINING credit.
+  const midNow = B + 6 * HOUR;
+  const horizon: NightChargeHour[] = [
+    ...Array.from({ length: 3 }, (_, i) => ({ ts: B + (6 + i) * HOUR, pvP10W: 0, loadP90W: 0 })), // window hrs left
+    ...Array.from({ length: 15 }, (_, i) => ({ ts: B + (9 + i) * HOUR, pvP10W: 0, loadP90W: 1800 })),
+  ];
+  const p = computeNightChargePlan(baseInputs({ nowMs: midNow, socNowPct: 10, chargeCapKw: 2, horizon, minBuyKwh: 0.1 }));
+  assert.equal(p.bindingCap, 'chargePower');
+  assert.equal(p.cushionShortfall, true);
+  // lift ≤ 5.4 kWh ⇒ buy = lift/legEff ≤ 6.0 kWh — NOT the ~12 kWh a
+  // full-window credit would have allowed.
+  assert.ok(p.buyKwh! <= 5.4 / 0.9 + 0.01, `buy ${p.buyKwh} must be capped by the remaining window (≤6.0)`);
+  assert.ok(/residual risk/i.test(p.rationale), 'undeliverable remainder must be disclosed');
+});
+
+test('v1.39.0 — pre-window evaluation still credits the full window (no regression)', () => {
+  // Same clean shortfall as the canonical case (evaluated at B, window B+3..B+9):
+  // the remaining window IS the full window, so numbers are unchanged.
+  const p = computeNightChargePlan(baseInputs());
+  assert.equal(p.requiredExtraKwh, 19);
+  assert.equal(p.bindingCap, 'requirement');
+  assert.ok(Math.abs(p.buyKwh! - 19 / 0.9) < 0.02);
+});
+
+// ── LOW: non-finite floor/cushion must fail CLOSED, not max-buy ──
+for (const [name, ov] of [
+  ['NaN cushionPct', { cushionPct: NaN }],
+  ['NaN reserveFloorPct', { reserveFloorPct: NaN }],
+  ['negative cushionPct', { cushionPct: -5 }],
+  ['NaN chargeCapKw', { chargeCapKw: NaN }],
+] as const) {
+  test(`v1.39.0 — degenerate config (${name}) → null plan, never a confident max-buy`, () => {
+    const p = computeNightChargePlan(baseInputs(ov as Partial<NightChargeInputs>));
+    assert.equal(p.chargeTonight, false);
+    assert.equal(p.buyKwh, null, 'must be null — the pre-fix path resolved to the FULL pool headroom');
+    assert.equal(p.objective, 'none');
+  });
+}
+
+// ── MED: a run straddling the scan edge keeps its true END ──
+test('v1.39.0 — resolveCheapWindow: window found at the scan edge is not end-truncated', () => {
+  // Saturday-evening shape: the next overnight run starts 27 h out and runs 5 h
+  // (hours 27..31). A 30 h scan finds the start at h=27; the END (h=32) lies
+  // past the scan horizon and must still be resolved exactly.
+  const from = B;
+  const periodIdAt = (ts: number): string => {
+    const h = Math.round((ts - B) / HOUR);
+    return h >= 27 && h < 32 ? 'overnight' : 'off_peak';
+  };
+  const win = resolveCheapWindow(periodIdAt, from, 'overnight', 30);
+  assert.ok(win, 'window resolves');
+  assert.equal((win!.startMs - B) / HOUR, 27);
+  assert.equal((win!.endMs - B) / HOUR, 32, 'end must be the true run end, not the scan horizon');
+});
+
+// ── MED: far-window honesty — the pre-window carry is measured and disclosed ──
+test('v1.39.0 — pre-window dip below floor+cushion is measured and disclosed', () => {
+  // Window opens 27 h out (weekend shape). Heavy drain before it: the pack
+  // dips well below floor+cushion long before the window opens. The plan must
+  // (a) expose preWindowMinSocPct, (b) expose projSocAtWindowStartPct, and
+  // (c) say so in the rationale — even on a HOLD.
+  const windowStart = B + 27 * HOUR;
+  const windowEnd = B + 32 * HOUR;
+  // Drain 2 kWh/h for 10 h (30 → 10%), then PV recovers the pack before the window.
+  const horizon: NightChargeHour[] = Array.from({ length: 40 }, (_, i) => {
+    const ts = B + i * HOUR;
+    if (i < 10) return { ts, pvP10W: 0, loadP90W: 1800 };       // deep pre-window drain
+    if (i < 27) return { ts, pvP10W: 6000, loadP90W: 900 };     // recovery before window
+    return { ts, pvP10W: 0, loadP90W: 450 };                    // light overnight
+  });
+  const p = computeNightChargePlan(baseInputs({
+    window: { startMs: windowStart, endMs: windowEnd },
+    horizon,
+  }));
+  assert.ok(p.preWindowMinSocPct != null && p.preWindowMinSocPct <= 11,
+    `pre-window trough ~10% must be measured (got ${p.preWindowMinSocPct})`);
+  assert.ok(p.projSocAtWindowStartPct != null && p.projSocAtWindowStartPct > 50,
+    `window-entry SoC reflects the recovery (got ${p.projSocAtWindowStartPct})`);
+  assert.ok(/before the charge window opens/i.test(p.rationale),
+    'the un-protectable pre-window dip must be disclosed in the rationale');
+});
+
+// ── nightWindowBounds: the single source of truth for scoring spans ──
+test('v1.39.0 — nightWindowBounds resolves the Phoenix night clock exactly', () => {
+  const b = nightWindowBounds('2026-07-18')!;
+  const day = Date.UTC(2026, 6, 18) + 7 * HOUR; // Phoenix midnight
+  assert.equal(b.windowStartMs, day + 23 * HOUR);
+  assert.equal(b.windowEndMs, day + 29 * HOUR);
+  assert.equal(b.onpeakStartMs, day + 16 * HOUR);
+  assert.equal(b.onpeakEndMs, day + 19 * HOUR);
+  assert.equal(b.completeMs, day + 45 * HOUR, 'a night completes at D+1 21:00 Phoenix');
+  assert.equal(nightWindowBounds('garbage'), null);
+  assert.equal(nightWindowBounds('2026-7-8'), null, 'strict YYYY-MM-DD only');
+});
+
+// ── display honesty: far windows are day-qualified ──
+test('v1.39.0 — state fields day-qualify a window ≥24 h away', () => {
+  const nowMs = Date.parse('2026-07-18T04:30:00Z'); // Sat 21:30 Phoenix
+  const monStart = Date.parse('2026-07-20T07:00:00Z'); // Mon 00:00 Phoenix (~50.5 h out)
+  assert.match(fmtPhoenixDayHm(monStart, nowMs), /^Mon 00:00$/);
+  assert.equal(fmtPhoenixDayHm(nowMs + 2 * HOUR, nowMs), fmtPhoenixDayHm(nowMs + 2 * HOUR, nowMs).slice(-5),
+    'near instants stay bare HH:MM');
+  const plan = computeNightChargePlan(baseInputs());
+  setLatestNightChargePlan(plan);
+  const fields = nightChargeStateFields({ ...plan, window: { startMs: monStart, endMs: monStart + 5 * HOUR } }, nowMs);
+  assert.match(String(fields.night_charge_window_start), /^Mon /,
+    'a weekend plan must not present Monday\'s window as a date-less tonight');
 });
