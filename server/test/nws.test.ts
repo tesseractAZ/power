@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { expandSkyCoverEntry, TTL_MS, CLOUD_TTL_MS } from '../src/nws.js';
 
 /**
@@ -76,4 +77,18 @@ test('CLOUD_TTL_MS is the 2 h cloud cadence, distinct from the 15-min alerts TTL
   assert.equal(TTL_MS, 15 * 60 * 1000);           // 15 min alerts cadence
   assert.notEqual(CLOUD_TTL_MS, TTL_MS);          // must never re-collapse
   assert.ok(CLOUD_TTL_MS > TTL_MS, 'cloud cover should refresh slower than alerts');
+});
+
+// ── v1.40.0 — the active-alerts query MUST include Update messages ──
+// NWS delivers upgrades (Watch → Warning) and routine continuations as
+// message_type=Update, and an Update supersedes the original Alert in the
+// /alerts/active feed. A query filtered to `alert` alone loses every product
+// at its first update (live-confirmed: an active Extreme Heat Warning
+// returned zero features under the old query). Pin the query string so a
+// regression cannot silently reintroduce the filter.
+test('v1.40.0 — alerts query includes message_type=alert,update', async () => {
+  const src = await readFile(new URL('../src/nws.ts', import.meta.url), 'utf8');
+  const m = src.match(/alerts\/active\?[^`]*/);
+  assert.ok(m, 'active-alerts query present');
+  assert.match(m[0], /message_type=alert,update/, 'Update messages must be included');
 });

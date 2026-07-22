@@ -2323,8 +2323,8 @@ app.get('/api/load-shedding/status', async () => ({
  * (nightChargeAdvisor.ts + nightChargeGate.ts + recorder ledger) — it NEVER
  * issues a device write and NEVER touches the floor/runway/SoC alarm spine. It
  * (1) recomputes a fresh plan on a 30-min tick so HA/status always have a
- * ≤12 h-fresh plan; (2) runs ONE ~21:30 America/Phoenix evening job (day-keyed,
- * restart-persistent latch) that records the plan row, scores yesterday's
+ * ≤12 h-fresh plan; (2) runs ONE ~21:30 America/Phoenix evening job (day-keyed
+ * latch, persisted across add-on restarts) that records the plan row, scores yesterday's
  * outcome, recomputes readiness, and sends ONE notification; (3) serves
  * GET /api/night-charge/status. Every numeric emits null over a fabricated
  * number, and any incomplete/incoherent/thin basis yields a null plan. Mirrors
@@ -2339,6 +2339,10 @@ const NIGHT_CHARGE_NOTIFY_HOUR = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY
 const NIGHT_CHARGE_NOTIFY_MINUTE = clampInt(Number(process.env.NIGHT_CHARGE_NOTIFY_MINUTE ?? 30), 0, 59, 30);
 const NIGHT_CHARGE_LATCH_PATH =
   process.env.NIGHT_CHARGE_LATCH_PATH ?? resolve(process.cwd(), config.dbPath, '..', '.night-charge-latch.json');
+// v1.40.0: the freshest pre-window plan, persisted so a restart during the
+// evening job's 21:30–23:00 record window no longer loses the night's plan row.
+const NIGHT_CHARGE_PLANSNAP_PATH =
+  process.env.NIGHT_CHARGE_PLANSNAP_PATH ?? resolve(process.cwd(), config.dbPath, '..', '.night-charge-plan.json');
 const HOUR_MS = 3_600_000;
 
 function clampInt(v: number, lo: number, hi: number, dflt: number): number {
@@ -2346,8 +2350,11 @@ function clampInt(v: number, lo: number, hi: number, dflt: number): number {
   return Math.min(hi, Math.max(lo, Math.round(v)));
 }
 
-/** Restart-persistent day-keyed latch (the Pi power-cycles daily; the latch must
- *  survive that so the evening job fires at most ONCE per Phoenix calendar day). */
+/** Restart-persistent day-keyed latch. The add-on restarts whenever it is
+ *  updated (and on host maintenance), so the latch must survive restarts for
+ *  the evening job to fire at most ONCE per Phoenix calendar day. (v1.40.0:
+ *  the host itself is verified stable — the earlier "daily power-cycle"
+ *  premise no longer holds; restart-resilience is still required.) */
 interface NightChargeLatch { lastNotifyDay: string | null }
 function readNightChargeLatchFile(): NightChargeLatch {
   try {
@@ -2659,6 +2666,22 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     tariffSnapshot,
   };
 
+  // v1.40.0: persist the freshest PRE-WINDOW plan to disk. The evening job's
+  // record moment is otherwise a single ~90-minute liveness window
+  // (21:30–23:00): a restart/update landing inside it lost the night's plan
+  // row entirely (an unlearnable night the gate could only count as missing).
+  // The 30-min tick recomputes plans all day, so a late boot inside/after the
+  // charge window can still record the last honest pre-window plan of the day
+  // (issued_at stays the plan's own generatedAt — never backdated).
+  if (plan.window && nowMs < plan.window.startMs) {
+    try {
+      atomicWriteFileSync(NIGHT_CHARGE_PLANSNAP_PATH, JSON.stringify({
+        day: localParts(nowMs, 'America/Phoenix').ymd, plan, extras,
+      }));
+    } catch (e: any) {
+      app.log.debug(`night-charge: plan snapshot persist failed (${e?.message ?? e})`);
+    }
+  }
   return { plan, extras };
 }
 
@@ -2997,7 +3020,7 @@ function scoreNightRow(
 /**
  * The single ~21:30 America/Phoenix evening job (design §3.2). Day-keyed +
  * restart-persistent latch so it fires at most once per Phoenix calendar day
- * across the daily power-cycle. In order: recompute fresh plan → record plan row
+ * across add-on restarts (updates, host maintenance). In order: recompute fresh plan → record plan row
  * → score yesterday → recompute readiness → send ONE notification. Latches only
  * AFTER a successful send. Guarded end-to-end; a plan pushed after charging
  * should begin is worse than none, so past 23:00 it log-and-latches.
@@ -3028,6 +3051,23 @@ async function runNightChargeEveningJobInner(): Promise<void> {
   if (nowMin < fireMin) return; // too early
   if (nowMin >= cutoffMin) {
     app.log.warn(`night-charge: evening job missed today's ${NIGHT_CHARGE_NOTIFY_HOUR}:${String(NIGHT_CHARGE_NOTIFY_MINUTE).padStart(2, '0')}–23:00 window; skipping the notify + latching (a late plan is worse than none).`);
+    // v1.40.0: the NOTIFY is skipped, but the LEDGER ROW need not be lost — if
+    // a pre-window plan snapshot from today exists and no row was recorded,
+    // record it now with its honest original issued_at (plan.generatedAt).
+    // This converts "restart during the 21:30–23:00 window" from an
+    // unlearnable missing night into a recorded one.
+    try {
+      const hasRow = recorder.readNightLedger(2).some((r) => r.plan_date === today);
+      if (!hasRow) {
+        const snap = JSON.parse(readFileSync(NIGHT_CHARGE_PLANSNAP_PATH, 'utf8'));
+        if (snap?.day === today && snap.plan && snap.extras) {
+          recordNightPlanRow(today, snap.plan as NightChargePlan, snap.extras as NightPlanExtras);
+          app.log.info(`night-charge: recorded today's plan row from the persisted pre-window snapshot (issued ${new Date(snap.plan.generatedAt).toISOString()}) after missing the live record window.`);
+        }
+      }
+    } catch (e: any) {
+      app.log.debug(`night-charge: snapshot recovery skipped (${e?.message ?? e})`);
+    }
     // Still SCORE yesterday + refresh readiness even when tonight's NOTIFY window
     // was missed — otherwise a missed evening job permanently drops the prior
     // night's outcome from the ledger/gate, an uncounted MNAR exclusion that
@@ -3048,6 +3088,11 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       // v1.39.0: refresh the status route's in-memory mirror immediately — the
       // just-recorded row was otherwise invisible for up to 30 min (next tick).
       refreshNightRecentOutcomes();
+      // v1.40.0: the subsystem previously logged nothing at info level — an
+      // incident left zero breadcrumbs. One line per nightly lifecycle event.
+      app.log.info(`night-charge: plan row recorded for ${today} — chargeTonight=${fresh.plan.chargeTonight} buyKwh=${fresh.plan.buyKwh ?? 'null'} window=${fresh.plan.window ? new Date(fresh.plan.window.startMs).toISOString() : 'none'}`);
+    } else {
+      app.log.info(`night-charge: no plan row for ${today} — inputs unavailable (SHP2 offline / missing battery fields); the night will count as an exclusion.`);
     }
 
     // (c) score yesterday (independent of today's SHP2 state).
@@ -3158,7 +3203,7 @@ if (nightChargeEnabled) {
   // v1.39.0: the warm path now also (a) repairs prematurely-captured outcome
   // rows, (b) runs the completion-gated backfill scorer, and (c) recomputes
   // readiness — previously readiness stayed null for up to 30 min after every
-  // daily power-cycle, flapping the HA gate fields to null each morning.
+  // add-on restart (update/maintenance), flapping the HA gate fields to null.
   const nightWarm = setTimeout(() => {
     repairPrematureNightOutcomes();
     void recomputeNightChargePlan().catch((e: any) => app.log.debug(`night-charge: warm recompute skipped (${e?.message ?? e})`));

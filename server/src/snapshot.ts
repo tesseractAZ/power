@@ -415,7 +415,11 @@ function guessProductFromName(name: string): string {
   return 'Unknown';
 }
 
-export async function refreshAll(store: SnapshotStore): Promise<void> {
+// v1.40.0: once-per-session memory for per-device quota-fetch failures so the
+// debug breadcrumb below cannot become poll-cadence log spam.
+const quotaErrLogged = new Set<string>();
+
+export async function refreshAll(store: SnapshotStore, log: (m: string) => void = () => {}): Promise<void> {
   store.markDeviceListAttempt();
   const list = await ecoflow.listDevices();
   store.setDeviceList(list);
@@ -427,7 +431,16 @@ export async function refreshAll(store: SnapshotStore): Promise<void> {
           const quota = await ecoflow.getQuotaAll(d.sn);
           store.setDeviceQuota(d.sn, quota);
         } catch (e: any) {
-          store.setDeviceError(d.sn, String(e?.message ?? e));
+          const msg = String(e?.message ?? e);
+          store.setDeviceError(d.sn, msg);
+          // v1.40.0: debug-log once per device per session — persistent quota
+          // failures (e.g. API code 1006, an account-permission limitation on
+          // some device classes) previously surfaced ONLY in the snapshot,
+          // leaving no log breadcrumb at all (silent-catch rule).
+          if (!quotaErrLogged.has(d.sn)) {
+            quotaErrLogged.add(d.sn);
+            log(`snapshot: quota fetch failed for ${d.sn} (${msg}) — device serves from device/list presence only (logged once per session)`);
+          }
         }
       }),
   );
@@ -484,7 +497,7 @@ export function startPollLoop(
     if (stopped) return;
     const t0 = Date.now();
     try {
-      await refreshAll(store);
+      await refreshAll(store, log);
       const tookMs = Date.now() - t0;
       if (lastPollFailed) {
         log(`poll ok in ${tookMs}ms (recovered)`);   // failure→ok transition: keep at INFO

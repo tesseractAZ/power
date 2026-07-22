@@ -87,7 +87,14 @@ export async function getNwsAlerts(log: (m: string) => void = () => {}): Promise
   if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache;
 
   const { forecastLat: lat, forecastLon: lon } = config;
-  const url = `https://api.weather.gov/alerts/active?point=${lat},${lon}&status=actual&message_type=alert`;
+  // v1.40.0: message_type MUST include `update` — NWS delivers upgrades
+  // (Watch → Warning) and routine continuations as message_type=Update, and an
+  // Update supersedes the original Alert message in the /alerts/active feed.
+  // Filtering to `alert` alone made every product vanish from the feed at its
+  // FIRST update (live-confirmed: an active Extreme Heat Warning returned zero
+  // features under the old query), silently clearing storm pre-charge alerts
+  // while the hazard still stood.
+  const url = `https://api.weather.gov/alerts/active?point=${lat},${lon}&status=actual&message_type=alert,update`;
   try {
     const res = await request(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/geo+json' } });
     if (res.statusCode >= 300) throw new Error(`HTTP ${res.statusCode}`);
