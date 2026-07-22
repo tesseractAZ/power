@@ -1,81 +1,98 @@
-## v1.39.1 — hotfix: readiness null on the Pi (locale-fallback date helper)
+## v1.40.0 — storm-alert continuity, plan-capture resilience, subsystem observability
 
-Live verification of v1.39.0 caught it within minutes of deploy: the ledger
-repair and honest re-capture worked, but `readiness` served null. Root cause:
-the new gate helper built its YYYY-MM-DD via the `en-CA` locale shortcut — on
-the Pi's Node/ICU that locale falls back to a non-ISO shape, `addDaysYmd` then
-constructs an Invalid Date and `toISOString()` throws, swallowed by the
-fail-safe catch, leaving readiness permanently null (while every full-ICU dev
-machine passed). Fixed with the house pattern: `en-US` `formatToParts`
-(locale-fallback-proof), a strict-ISO parse guard so the date helpers can
-never throw, and the three silent readiness catches now log at debug so this
-class of invisible failure is diagnosable. One new shape-pinning test.
+**Storm alerts survive NWS product updates.** The active-alerts query now
+requests `message_type=alert,update`. NWS delivers upgrades (Watch → Warning)
+and routine continuations as `Update` messages that supersede the original
+`Alert` in the `/alerts/active` feed; the previous `alert`-only filter dropped
+every product from the feed at its first update, silently clearing the
+pre-charge advisory while the hazard still stood. Storm alert ids now key on
+the event name rather than the per-message NWS URN, so a product's lifecycle
+of updates presents as one continuous alert (the message URN remains in the
+alert facts). One added query-pin regression test.
 
-## v1.39.0 — night-charge engine repair: the learning loop actually learns
+**Night-charge plan capture no longer depends on a single 90-minute liveness
+window.** The freshest pre-window plan (with its ledger extras) is persisted
+to disk on every recompute; if the evening job's 21:30–23:00 record window is
+missed (restart, update), the next run records the persisted plan with its
+original `generatedAt` — converting a previously unlearnable missing night
+into a recorded one. Timestamps are never backdated.
 
-A post-merge adversarial review (31 agents) of the v1.37–v1.38 night-charge
-stack confirmed 18 defects; this release fixes all of them. The headline: the
-nightly outcome scorer fired on the first 30-min tick after midnight — **mid
-charge-window** — permanently freezing truncated actuals (scored=0, ~25%
-coverage, null SoC) into the never-pruned ledger, so the write-readiness gate
-could never accumulate a single scored night. Live-verified on the Pi: all 3
-ledger rows captured at 00:12–00:15.
+**Observability.** The night-charge subsystem now logs one info line per
+nightly lifecycle event (plan recorded / no plan with reason / snapshot
+recovery); per-device quota-fetch failures (e.g. EcoFlow API code 1006 on
+unsupported device classes) log once per session instead of failing silently.
+Comments asserting a "daily host power-cycle" are corrected — the host is
+verified stable; restart-resilience remains (add-on updates restart the
+process). 1,630 tests green.
 
-**Scoring/ledger (engine repair)**
-- Completion gate: a night may be outcome-captured only after its full scored
-  span elapses (plan-date+1 21:00, `nightWindowBounds` = single source of truth).
-- Backfill: the scorer sweeps ALL completed, uncaptured nights in the last 14 d
-  (was: exactly-yesterday — SHP2-wedge/downtime nights were orphaned forever).
-- One-time idempotent repair at boot: prematurely-captured rows are reset in
-  place (never deleted) and re-scored with full-span actuals.
-- The §3.1 `soc_at_window_start_pct` plan column is now actually written.
+## v1.39.1 — hotfix: readiness could serve null on ICU-limited hosts
 
-**Sizing accuracy (under-buy class)**
-- Mid-window recompute credits only the REMAINING charge window (was: full
-  window length — up to ~40 kWh of nonexistent lift presented as deliverable).
-- EV de-dup is atomic PER-HOUR: embedded EV is stripped only on hours the
-  committed p90 block actually covers (was: stripped everywhere, erasing other
-  predicted sessions and truncated-block hours).
-- Non-finite floor/cushion/efficiency config → fail-closed null plan (was: NaN
-  poisoned the bisection into a confident full-headroom max-buy).
-- `resolveCheapWindow` no longer truncates a window END that straddles the scan
-  horizon (Saturday scans clipped Monday 05:00 to 04:00).
+The night-charge gate's date helpers derived YYYY-MM-DD via the `en-CA`
+locale shortcut. On Node builds whose ICU lacks that locale, the format falls
+back to a non-ISO shape; `addDaysYmd` then constructs an Invalid Date and
+`toISOString()` throws inside fail-safe catches, leaving the write-readiness
+state permanently null while full-ICU hosts pass all tests.
 
-**Honesty (weekend/far-window)**
-- New plan fields `preWindowMinSocPct` + `projSocAtWindowStartPct`: the
-  un-protectable pre-window carry is measured and disclosed in the rationale.
-- Window state fields day-qualify instants ≥24 h out ("Mon 00:00") — a weekend
-  plan no longer presents Monday's window as a date-less tonight.
+- `phoenixYmd` now builds the date from `en-US` `formatToParts`
+  (locale-fallback-proof; matches the repository's other Phoenix-time helpers).
+- Strict-ISO parse guards: the date helpers can no longer throw.
+- The three previously silent readiness catches log at debug level.
+- One added regression test pins the strict ISO output shape (1,629 total).
 
-**Gate (MNAR integrity)**
-- The exclusion denominator is now EXPECTED nights (trailing 120 d through the
-  last completed night): nights missing from the ledger entirely — add-on down,
-  SHP2 offline, exactly the adverse nights the 35% cap exists for — count as
+## v1.39.0 — night-charge engine repair: completion-gated scoring
+
+An adversarial review of the v1.37.0–v1.38.3 night-charge stack confirmed 18
+defects (4 high); a second adversarial pass over the fix itself confirmed 10
+more. All 28 are corrected in this release. The central repair: nightly
+outcomes were captured by the first 30-minute tick after midnight — while the
+charge window was still open — and an idempotence latch froze those truncated
+actuals into the never-pruned ledger, so the write-readiness gate could never
+accumulate a scored night.
+
+**Scoring correctness**
+- Completion gate: a night is outcome-captured only ≥ 16 h after its REAL
+  charge-window close. Each plan's resolved window is now frozen into the
+  ledger (`window_start_ms`/`window_end_ms`, idempotent migration) and the
+  scorer, completion gate, and boot repair all pair actuals to it — weekend
+  plans resolve windows disjoint from the canonical 23:00–05:00 night (a
+  Saturday plan's window is Monday 00:00–05:00 under the hour-weekday tariff
+  model). Rows recorded before the window columns existed capture honestly as
+  `scored=0` (unpairable), never cross-span.
+- Backfill scorer sweeps 60 days of uncaptured rows on every tick (matching
+  the premature-capture repair window); nights whose telemetry has aged out
+  capture with null actuals rather than fabricated zeros.
+- Boot repair: outcomes captured before their night completed are reset once
+  and re-scored by the backfill with full-span actuals where telemetry exists.
+- SoC min-scan applies a median-of-3 filter, rejecting the single-sample
+  transient-zero artifact a cloud reconnect can emit (which would otherwise
+  fabricate a hard under-buy verdict in the gate's evidence).
+
+**Sizing correctness**
+- Mid-window recomputes credit only the REMAINING window
+  (`max(windowStart, now)`) in the charge-power cap; the pre-fix full-window
+  credit could present an undeliverable buy as fully meeting the cushion.
+- EV block strip/re-add is atomic per hour — embedded EV load is stripped
+  only where the worst-case block is actually re-added; degenerate
+  `EV_MAX_LOAD_W` (≤ 0/NaN) disables placement instead of stripping.
+- Simulations include the in-progress hour (conservative direction);
+  non-finite floor/cushion/efficiency inputs fail closed to a null plan.
+- Weekend/far windows: the plan carries pre-window carry fields
+  (`projSocAtWindowStartPct`, `preWindowMinSocPct`) and day-qualifies window
+  display strings ≥ 24 h out; mid-window recomputes null these fields rather
+  than emitting a false "before the window opens" statement.
+
+**Gate correctness**
+- The MNAR exclusion denominator counts EXPECTED nights over the trailing
+  in-season range, so missing rows (downtime, SHP2 offline) count as
   exclusions instead of silently shrinking the denominator.
 
-**Ops/robustness**: evening-job re-entrancy guard; boot warm-path now repairs +
-scores + recomputes readiness (gate fields no longer flap null for 30 min after
-the daily power-cycle); recent-outcomes mirror refreshes on every write path;
-`NIGHT_CHARGE_NOTIFY_HOUR` clamped to 22 in code (23 made the send window the
-empty set; the config schema stays 0–23 so an existing stored 23 cannot brick
-the add-on at start); Release pdf attach requires a non-empty file; README
-corrections (cmdId 1/2/4/21/28, entity count).
-
-**Hardening (second adversarial pass, pre-merge)**: a 3-agent attack on the fix
-diff found the completion gate still assumed every night is the canonical
-23:00–05:00 — wrong for weekend plans, whose REAL windows are disjoint (a
-Saturday plan's window is Monday 00:00–05:00). The ledger now freezes each
-plan's actual resolved window (`window_start_ms`/`window_end_ms`, idempotent
-migration) and the scorer/completion gate/repair all pair actuals to it;
-pre-v1.39.0 rows without a stored window capture honestly as scored=0. Also
-from the attack pass: the backfill sweep widened to 60 d to match the repair
-window (telemetry-less nights capture with null actuals, never fabricated
-zeros); a median-of-3 filter on the SoC min-scan kills the SHP2-reconnect
-transient-zero artifact that would have fabricated false hard under-buys;
-degenerate `EV_MAX_LOAD_W` can no longer strip EV load without replacing it;
-mid-window recomputes no longer emit a false "before the window opens" claim;
-sims include the in-progress hour (conservative direction). 16 new regression
-tests total (1,626 suite, all green).
+**Ops/robustness**: evening-job re-entrancy guard; boot warm path repairs +
+scores + recomputes readiness; recent-outcomes mirror refreshes on every
+write path; `NIGHT_CHARGE_NOTIFY_HOUR` is clamped to 22 in code (23 made the
+send window empty; the config schema remains 0–23 so an existing stored 23
+cannot fail add-on validation); Release pdf attachment requires a non-empty
+file; README corrections (cmdId 1/2/4/21/28, entity count). 23 added
+regression tests (1,628 total).
 
 ## v1.38.3 — changelog: keep the HA panel fast (recent releases only)
 

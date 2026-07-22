@@ -6935,7 +6935,12 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
       ? (endsDate ? `now through ${endsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : 'now')
       : `${beginsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}${endsDate ? ` through ${endsDate.toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : ''}`;
     out.push({
-      id: `storm-${a.id || a.event}`.replace(/[^a-zA-Z0-9-]/g, '_').slice(0, 96),
+      // v1.40.0: id keys on the EVENT, not the NWS message URN — every NWS
+      // update/upgrade mints a new URN, and a URN-keyed id made the panel
+      // clear + re-raise (or, pre-v1.40.0, just clear) on each message in a
+      // product's lifecycle. One home ⇒ one alert per concurrent event type;
+      // the message URN stays visible in the facts for traceability.
+      id: `storm-${a.event}`.replace(/[^a-zA-Z0-9-]/g, '_').slice(0, 96),
       severity: sev,
       category: 'Grid',
       source: 'learned',
@@ -6955,6 +6960,8 @@ export async function stormPrepAlerts(_devices: Record<string, DeviceSnapshot>):
         { label: 'Begins', value: beginsDate ? (inEffectNow ? 'In effect now' : beginsDate.toLocaleString()) : '—' },
         { label: 'Ends', value: endsDate ? endsDate.toLocaleString() : '—' },
         { label: 'Area', value: a.areaDesc ?? '—' },
+        // Traceability to the exact NWS product message (ids churn per update).
+        { label: 'NWS message', value: a.id ? a.id.slice(-24) : '—' },
       ],
     });
   }
