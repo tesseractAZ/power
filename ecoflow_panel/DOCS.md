@@ -23,6 +23,8 @@ The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQ
 12. [Configuration, Deployment, Security & Operations](#12-configuration-deployment-security--operations)
 13. [Safety & Operational Plumbing](#13-safety--operational-plumbing)
 14. [Intelligent Lighting & HVAC Posture (energy-aware automation)](#14-intelligent-lighting--hvac-posture-energy-aware-automation)
+15. [Night-Charge TOU Arbitrage Advisor (advisory)](#15-night-charge-tou-arbitrage-advisor-advisory)
+16. [Appendix A — Feature Inventory (evidence linkage)](#appendix-a--feature-inventory-evidence-linkage)
 
 
 ---
@@ -7631,3 +7633,535 @@ is add-on code vs. HA-side:
 signals honestly (including null-safe "no data → normal/inactive" behavior) and hands them
 to Home Assistant. Every actuation — lighting or HVAC — is HA-side automation, and the HVAC
 side is little more than a labeled recommendation today.
+
+---
+
+## 15. Night-Charge TOU Arbitrage Advisor (advisory)
+
+*Tariff model, worst-case sizing brain, learning ledger, completion-gated scoring, and the frozen write-readiness gate — the advisory engine that recommends a cheap-overnight grid buy sized to hold an outage cushion above the reserve floor.*
+
+On a day a battery shortfall is anticipated, the advisor recommends buying the *right* amount of grid energy in the cheap APS R-EV overnight window (23:00–05:00 Mon–Fri) so the home (a) never imports at the 4–7pm on-peak and (b) carries an **outage cushion** above the reserve floor into the next day. It is framed as much a *resilience* feature as a cost feature, and its posture is **ADVISORY / NO-WRITE**: the add-on never issues a device write. The recommendation is published as HA entities, an API endpoint, a nightly notification, and TUI/web panels; an owner-authored HA automation decides whether to act on it. In parallel, every night's plan is frozen into a durable ledger and scored against measured reality, and a fail-closed readiness gate reduces that record into a single "is the accuracy proven enough to even *consider* writes?" verdict.
+
+The subsystem spans five modules, all shipped incrementally (v1.36.0 tariff → v1.37.0 sizing brain → v1.38.0 ledger + wiring + surfaces → v1.39.x scoring/gate hardening):
+
+| Module | Role |
+|---|---|
+| `tariff.ts` | Declarative multi-period, seasonal, timezone-resolved TOU model + `rateAt` resolver (pure) |
+| `nightChargeAdvisor.ts` | Pure sizing brain (`computeNightChargePlan`), input assembly, outcome scoring math, night-clock bounds, plan holder |
+| `nightChargeGate.ts` | Pure write-readiness reduction over the ledger + readiness holder |
+| `recorder.ts` | `night_charge_ledger` / `night_charge_calibration` durable tables + injection-safe upsert |
+| `index.ts:2320–3200` | Orchestration: 30-min recompute tick, ~21:30 evening job, backfill scorer, premature-capture repair, `/api/night-charge/status` |
+
+---
+
+### 1. Purpose & safety posture
+
+The binding safety invariants, enforced structurally rather than by convention:
+
+- **Read-only with respect to the alarm spine.** The advisor reads the same `projection.backupReserveSoc` the reserve-floor alarm (§5) defends — the *same field*, never a divergent copy — and produces **no** state the floor/runway/SoC alarms consume. A bug here can mis-recommend; it cannot mis-alarm.
+- **Under-buy is a safety miss, not a cost miss.** The outage cushion is an explicit resilience requirement; a confidently under-sized buy leaves the home at the floor with no cushion when an outage hits. Sizing therefore uses **worst-case inputs**: P10 (pessimistic-low) PV and P90 (pessimistic-high) load, with committed EV load placed as a worst-case block.
+- **The over-buy ceiling is the deliberate asymmetry.** The floor is sized with P10 PV (never under-buy); the "don't clip tomorrow morning's PV" ceiling is sized with **P90** PV (never over-buy into clipping). Where the two collide on a genuinely tight day, **resilience wins**: the buy is kept, the clip is accepted, and `bindingCap='overBuy'` is surfaced.
+- **Emit null over a fabricated number.** An incomplete, incoherent, thin, or climatology-only basis yields a *null plan* (`chargeTonight=false`, every numeric field `null`) — never a best-effort small number the operator might trust as cushion. The same discipline runs through the tariff (`ratesConfirmed=false` ⇒ every `$` output null), the scorer (zero telemetry samples ⇒ `null`, not a "measured" `0`), and the gate (null readiness ⇒ `write_ready` strictly `false`).
+- **The gate never enables a write.** `READY_TO_CONSIDER_WRITES` only unlocks *consideration*; the device write path is separately deferred behind a probe + owner toggle + the safety spine (design `docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md` §6, not yet built).
+
+---
+
+### 2. Architecture & data flow
+
+```
+  SHP2 projection (backupFullCapWh, backupBatPercent,      analytics worker reports
+  backupRemainWh, backupReserveSoc)                        probabilisticForecast · forecast
+          │                                                multiDayForecast(4d) · evWindowPrediction
+          └──────────────┬─────────────────────────────────────────┘
+                         ▼
+        recomputeNightChargePlan()  (index.ts:2451, every 30 min + evening job)
+          buildApsREvModel(env) → periodIdAt = rateAt(...).periodId
+          buildNightChargeInputs(deps)   (nightChargeAdvisor.ts:712, pure)
+          computeNightChargePlan(inputs) (nightChargeAdvisor.ts:258, pure)
+                         │
+                         ▼
+        setLatestNightChargePlan(plan)  — in-process holder (12 h staleness guard)
+          ├─→ /api/ha-state + MQTT state payload (nightChargeStateFields)
+          ├─→ /api/night-charge/status (index.ts:3180)
+          ├─→ TUI Strategy screen "TONIGHT'S PLAN" · web NightChargeCard
+          │
+   ~21:30 evening job (once per Phoenix day, restart-persistent latch)
+          ├─→ recordNightPlanRow() → night_charge_ledger (frozen PLAN columns)
+          ├─→ scoreCompletedNights() → OUTCOME + SCORE columns (completion-gated)
+          ├─→ computeNightChargeReadiness(readNightLedger(400)) → readiness holder
+          └─→ ONE notification (buildNightChargeMessage, dedupId night_charge_plan)
+```
+
+Everything below the report boundary is dependency-injected and pure — `computeNightChargePlan`, `buildNightChargeInputs`, `resolveCheapWindow`, `scoreNightOutcome`, `nightWindowBounds`, `medianFilter3`, and `computeNightChargeReadiness` perform no I/O and read no clocks, so the sizing and gating math is provable by unit test.
+
+**Timers** (all created only when `NIGHT_CHARGE_ADVISOR_ENABLED !== 'false'`, all `unref()`'d):
+
+| Timer | Cadence | Work |
+|---|---|---|
+| Recompute tick | 30 min | Fresh plan → holder; score completed nights; recompute readiness; refresh the status route's in-memory ledger cache |
+| Evening-job tick | 60 s | `runNightChargeEveningJob()` (minute-granular fire gate, see below) |
+| Boot warm-up | once, +60 s | `repairPrematureNightOutcomes()`; fresh plan; score; readiness — so the holder and HA gate fields are not null for up to 30 min after the daily host power-cycle (v1.39.0) |
+
+**The evening job** (`index.ts:3009`). Fires at most **once per Phoenix calendar day**, keyed by a restart-persistent latch file (`.night-charge-latch.json` beside the DB, atomic write, in-memory mirror so no request/timer performs an unbounded filesystem read). The fire window is `[NIGHT_CHARGE_NOTIFY_HOUR:MINUTE, 23:00)` local (default 21:30); a re-entrancy guard prevents a slow run (awaited analytics + weather + notify) from overlapping the next 60 s tick (v1.39.0). In order: recompute fresh plan → record the plan row → score completed nights → recompute readiness → send **one** notification → latch *only after a successful send* (failure retries on the next tick within the window). Past 23:00 the notify is skipped-and-latched — a plan pushed after charging should already have begun is worse than none — but scoring and readiness still run, so a missed notify window can never orphan a night's outcome (an MNAR bias in the gate's evidence). All local-time gates resolve via explicit `America/Phoenix` `Intl` parts (`phoenixMinuteOfDay`, `localParts`), never the host clock. The freshest pre-window plan (with its ledger extras) also persists to disk on every recompute (`.night-charge-plan.json`, atomic write, v1.40.0); when the live record window is missed entirely (a restart or update between 21:30 and 23:00), the next run records the persisted plan with its original `generatedAt` — the plan row survives, timestamps are never backdated.
+
+---
+
+### 3. The tariff model (`tariff.ts`, v1.36.0)
+
+A declarative, pure TOU model — periods, seasons, holidays, timezone — plus the `rateAt(model, tsMs)` resolver. `buildApsREvModel(rates)` constructs the deployed plan, **APS Rate Schedule R-EV** (four periods, two seasons, no demand charge):
+
+| Period id | Local window | Days | Seasons | Notes |
+|---|---|---|---|---|
+| `on_peak` | 16:00–19:00 | Mon–Fri | year-round | `onPeak: true` (drives the `isOnPeak` back-compat flag) |
+| `super_off_peak` | 10:00–15:00 | Mon–Fri | winter only | overlaps solar |
+| `overnight` | 23:00–05:00 (wraps) | Mon–Fri | year-round | **the cheap charge window the advisor sizes against** |
+| `off_peak` | catch-all | — | — | all remaining hours, all weekends, observed holidays |
+
+Seasons: `APS_SUMMER_MONTHS = [5,6,7,8,9,10]` (May–Oct); the rest is winter. This is a documented approximation — APS defines seasons by *billing cycle*, not calendar month, so a handful of boundary days each year may be seasoned one cycle early/late (bounded to ≤ a few days/yr; inert while rates are unconfirmed). `holidays` (local `YYYY-MM-DD` strings, all-day off-peak, checked *before* every specific period) defaults to `[]` — the APS observed-holiday list is documented as "confirm from a bill", not guessed.
+
+**Resolution algorithm** (`rateAt`): resolve the instant into local parts via a memoized `Intl.DateTimeFormat('en-US', { timeZone, hourCycle:'h23' })` `formatToParts` (one formatter per timezone; never the host clock, so a non-Phoenix container cannot bleed a rate boundary); derive day-of-week from the *resolved calendar date* via `Date.UTC(y,m-1,d).getUTCDay()` rather than an ICU `weekday` part — a degraded/small-ICU runtime that dropped the part would otherwise collapse every weekday to Sunday and silently misprice every on-peak/overnight hour as weekend off-peak (fail-safe by construction). Then: holiday check → first matching period in priority order (season gate, weekday gate, `inHourWindow` with wrap-around: `start>end` wraps past midnight, `start===end` means all 24 h) → the `off_peak` catch-all.
+
+**★ Per-instant weekday semantics (load-bearing).** A period's `weekdays` gate is evaluated against **each instant's own** local day-of-week, not the day the window "started". The wrap-around overnight window therefore resolves literally: Fri 23:00 *is* overnight (Friday is Mon–Fri) but Sat 00:00–05:00 is **off-peak** (Saturday is a weekend); likewise Sun 23:00 is off-peak while Mon 00:00–05:00 is overnight. Whether real APS billing treats Friday-night→Saturday-morning as a single overnight block is an **open tariff question** only a bill can settle (see §11); the model's reading is the defensible default consistent with "off-peak = all weekends".
+
+**Rates-unconfirmed ⇒ `$` outputs null.** Every period carries per-season `centsBySeason` values that default to `null`, and the model carries `ratesConfirmed` (default `false`). While `ratesConfirmed=false`, `rateAt` resolves `centsPerKwh` to **null for every period regardless of the numbers in the model**, and `buildApsREvModel` also nulls `fixedDailyCents` — an unconfirmed model can never leak a fabricated basic-service charge or energy rate into a cost consumer. The returned `RateSlice` mirrors `ratesConfirmed` so a consumer can distinguish "null because unconfirmed" from "null because this confirmed period has a missing-season data gap". `periodId` is **structural** and needs no confirmed rate — which is what lets the advisor resolve the charge window while every `$` output stays null. `flatTariffModel(cents)` wraps a single-rate legacy plan in the same shape so an eventual consumer rewire is a behavior-preserving swap.
+
+**Env mapping** (`apsREvRatesFromEnv`, `index.ts`): empty-string/unset options read as `null` (unconfirmed).
+
+| Env option | Fills |
+|---|---|
+| `TARIFF_APS_ONPEAK_SUMMER_CENTS` / `TARIFF_APS_ONPEAK_WINTER_CENTS` | `on_peak` summer / winter |
+| `TARIFF_APS_OFFPEAK_SUMMER_CENTS` / `TARIFF_APS_OFFPEAK_WINTER_CENTS` | `off_peak` summer / winter |
+| `TARIFF_APS_OVERNIGHT_CENTS` | `overnight`, **both** seasons (one env, same rate) |
+| `TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS` | `super_off_peak` winter (summer stays `null` — the period is winter-only) |
+| `TARIFF_APS_RATES_CONFIRMED` | `ratesConfirmed` (`'true'` only) |
+
+---
+
+### 4. Input assembly — the worst-case basis
+
+`recomputeNightChargePlan()` (`index.ts:2451`) assembles `NightChargeInputDeps` from live state, then hands off to the pure `buildNightChargeInputs` → `computeNightChargePlan`. It returns `null` (no plan recorded, holder untouched) when inputs cannot be constructed at all — SHP2 projection missing, or `backupFullCapWh`/`backupBatPercent`/`backupReserveSoc` absent (design invariant I5).
+
+**Battery state.** `fullKwh = backupFullCapWh/1000`, `socNowPct = backupBatPercent`, `reserveFloorPct = backupReserveSoc`. SoC coherence (I11): `socCoherent = |remainWh/fullWh·100 − socNowPct| ≤ 8` — the same %-vs-Wh cross-check discipline the SoC alarm uses; `false` forces a null plan downstream.
+
+**Efficiency seams** (injected, never hard-coded downstream): `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927` (charge leg — the pack stores `legEff` of what reaches the charger; `DISPATCH_ROUND_TRIP_EFFICIENCY` defaults 0.86, §7) and `dischargeEff = RUNWAY_DISCHARGE_EFFICIENCY` (default 0.94, the runway DC-bus discharge tax, §5).
+
+**The conservative band** (within ~24 h, authoritative): for each probabilistic-forecast hour with a matching day-ahead hour, `pvP10W = p10W` and `loadP90W = forecastLoadW × ARB_LOAD_P90_FACTOR` (default 1.15). The day-ahead load already folds an *expected-value* EV block (`predictedEvLoadW`) into `forecastLoadW`, so `embeddedEvW = predictedEvLoadW × factor` is carried alongside for de-duplication. Hours with no load side are skipped — the band must carry both.
+
+**Beyond the band**: multi-day rollup hours, widened per day by `√daysAhead`: `pvP10 = pvW·max(0, 1 − errHalfFrac·√daysAhead)`, `loadP90 = loadW·(1 + errHalfFrac·√daysAhead)` where `errHalfFrac` is the probabilistic forecast's realized daily error half-width. The merge is keyed by hour timestamp and **the band always wins** where both cover an hour.
+
+**Cheap-window resolution** (`resolveCheapWindow`, `nightChargeAdvisor.ts:662`): scan the injected `periodIdAt` resolver forward hour-by-hour (default 30 h) for the next contiguous run of the `overnight` period id; a run's *end* is scanned up to 24 h past the run's own start so a run straddling the scan edge is not truncated (v1.39.0 — a Saturday-evening scan finding Monday 00:00 at hour 27 of 30 must still report the close as 05:00, not 04:00). When the scan instant is already *inside* a cheap window (the recompute tick runs around the clock), the resolver walks **back** to the window's true start so the reported `window_start` is the real 23:00, not the live mid-window clock (display honesty). A pathological always-cheap resolver is bounded at 25 h.
+
+**`nextRechargeMs`** = the start of the *next* cheap window after tonight's (separate 96 h scan) — the horizon end. Tariff-based and deterministic: a single transient sunny hour, or a central-forecast pv≥load crossing that the P10/P90 sim would still be draining through, cannot truncate the multi-day carry. On a weekday this lands ~tomorrow night; across a weekend it produces the 24–50 h carry described in §11.
+
+**Morning-PV ceiling headroom**: `morningPvSurplusP90Kwh = Σ max(0, p90W − forecastLoadW)/1000` over `[windowEnd, windowEnd+14 h)` — P90 (best-case) PV by design, so the ceiling never over-buys into clipping. `null` when the band doesn't cover the span (ceiling simply not applied).
+
+**Committed-EV worst case**: from the EV window prediction report — `p90SessionKwh` (the P90 session energy, **not** the probability-weighted expected value), `chargeStartMs` = the first upcoming/ongoing predicted session (floored to ≥ the current hour), `sessionCount`. Placement (in `buildNightChargeInputs`) lays the P90 energy down from the predicted charge hour forward, capped at `EV_MAX_LOAD_W` (default 11 520 W) per hour, spilling into later hours until exhausted, and bounded to the next-24 h band region (beyond-24 h rollup hours already embed typical EV in their `loadW` and are not de-duplicated — adding the block there would double-count).
+
+**★ EV strip/re-add atomicity.** The embedded expected-value EV is stripped from the base load **only** on the hours the committed P90 block actually covers, hour-by-hour, atomically with the re-add: `loadP90W = max(0, loadP90W − embeddedEvW) + addW`. Hours before the block, after it exhausts, or beyond the band keep their embedded EV untouched. Stripping without replacing would erase a real charging night from the sizing basis and under-buy — a safety miss — so "never strip without replacing" holds **per-hour**, not per-plan (v1.39.0; the earlier whole-band strip erased *other* predicted sessions). A degenerate `evMaxLoadW` (≤ 0 / NaN) would make every placement hour add 0 W while still stripping — it is treated as "cannot place" and the embedded EV is kept.
+
+**Confidence tier**: `forecast` when the whole horizon (through `nextRecharge`) is inside the real-weather horizon; `climatology` when there is no weather-backed day-ahead forecast at all *or* the charge window itself lies past the weather horizon; `mixed` when only part of the horizon runs past it (the weekend carry beyond the ~4-day forecast).
+
+**`basisComplete`** = `forecastPresent && confidenceTier !== 'climatology' && calScoredDays ≥ 14 && bandCoverageFrac ≥ 0.9` — the probabilistic band must have ≥ `NIGHT_MIN_CAL_DAYS = 14` scored calibration days *and* realized in-band coverage ≥ 90% before the advisor will size anything on it. `false` forces the null plan.
+
+Finally the horizon is trimmed to `[floor(now to hour), nextRecharge)`.
+
+---
+
+### 5. The sizing brain (`computeNightChargePlan`, `nightChargeAdvisor.ts:258`)
+
+Pure; the objective is **lexicographic**: (1) *hard resilience constraint* — the P10-PV/P90-load pool trajectory must stay ≥ floor+cushion from window-end to the next recharge; (2) source that energy in the cheap window (the arbitrage); (3) ceiling so a too-full pack doesn't clip morning PV.
+
+#### Fail-closed gates (every one ⇒ the null plan — all numerics null, `chargeTonight` strictly false)
+
+1. `basisComplete === false`; 2. `socCoherent === false`; 3. `confidenceTier === 'climatology'` ("will not size a buy on a guessed sky"); 4. no valid window (`window` null or `endMs ≤ startMs`); 5. non-finite/non-positive `fullKwh`; 6. non-finite `socNowPct`; 7. non-finite or negative `reserveFloorPct`/`cushionPct` (v1.39.0 — a NaN floor made `targetFloorKwh` NaN, every bisection comparison false, and the buy silently resolved to the *full pool headroom*: a confident max-buy instead of the promised fail-closed null); 8. non-finite `legEff`/`dischargeEff`/`chargeCapKw` (same class — all operator-config-sourced); 9. empty horizon.
+
+#### The DC-bus recurrence
+
+Each simulated hour: `packWh ← clamp(packWh + pvP10W − loadP90W/dischargeEff, [0, fullWh])` — delivering `load` at the panel draws `load/η` from the pack. This is **identical** to the runway/forecast/multi-day recurrence (`analytics.ts:7973`), so the advisor's trough is consistent with the alarm's runway projection. The simulation starts from the **floor of the current hour** (`simFromMs = floor(nowMs/1h)·1h`), not `nowMs`: filtering `≥ nowMs` dropped the in-progress hour entirely, under-simulating ~30 min of drain at the 21:30 issue time (an under-buy); including the full current hour over-counts by at most the elapsed fraction — the conservative, over-buy direction (v1.39.0).
+
+#### Baseline and the pre-window carry
+
+One baseline walk yields `packAtWindowEnd_noBuy` (pack entering the window close with no buy, carrying tonight's pre-window + in-window house load) and the no-buy trough over `[windowEnd, horizon end]` → `baselineMinSocPct`.
+
+When the plan is issued *before* the window opens, a second walk over `[simFromMs, windowStart)` produces the **pre-window carry** (v1.39.0, §4-honesty): `projSocAtWindowStartPct` (pack entering the window — frozen into the ledger's `soc_at_window_start_pct`) and `preWindowMinSocPct` (the projected minimum over the span a tonight buy *cannot* protect). On weekend evenings the resolved window can be 24–50 h away, so this span covers whole nights the scored `[windowEnd, …)` trough never sees; if it dips below floor+cushion, the rationale carries an explicit "a dip tonight's buy cannot prevent; the floor alarm owns that span" note with the day-qualified window-open time. **Mid-window** (`nowMs ≥ windowStart`) there is no pre-window span: both fields stay `null` and no note is emitted — the pre-fix code collapsed them to the current SoC and could emit a false "before the charge window opens" statement about a window already open.
+
+#### The hold branch
+
+With `targetFloorKwh = fullKwh·(reserveFloorPct + cushionPct)/100`: if the no-buy trough already holds the line (`≥ targetFloorKwh − 1e-9`), the plan is an honest **hold** — `buyKwh: 0`, `requiredExtraKwh: 0`, `objective: 'none'`, trough fields populated, rationale "no charge needed".
+
+#### ★★ The sizing authority — bisection against the re-simulated with-buy trough
+
+`troughAtLift(lift)` re-runs the full post-window simulation with the window-close pack raised by `lift` kWh. Sizing is **solved against this clamp-exact re-simulation, never the additive offset** `targetFloor − clampedBaselineTrough`, which the DC-bus clamps break in *both* safety-critical directions (two confirmed v1.37.0 criticals):
+
+- (a) a mid-window PV surge that clamps the pack to FULL **erases the lift** — an additive estimate reports "requirement met" while the trajectory still dips below floor+cushion (unflagged residual risk);
+- (b) a deep drain that clamps the baseline trough at 0 **truncates the apparent deficit** at `targetFloor` — the additive requiredExtra under-sizes the buy on exactly the deep-shortfall night (an under-buy, the life-safety miss).
+
+`trough(lift)` is monotone non-decreasing in `lift` (`max(0,min(full,·))` preserves order), so a bisection is exact: if even `troughAtLift(poolHeadroomLiftKwh)` cannot hold the line, `requiredExtraKwh = poolHeadroomLiftKwh` (the requirement *is* the full-pack lift; the unmet cushion is flagged via the trough below, never assumed met); otherwise 48 bisection iterations over `[0, poolHeadroomLiftKwh]` find the minimal lift whose re-simulated trough reaches `targetFloorKwh`.
+
+#### The three caps
+
+```
+remainingWindowHours  = max(0, (windowEnd − max(windowStart, nowMs)) / 1 h)     // mid-window clamp (v1.39.0)
+windowLoadKwh         = Σ loadP90W/1000 over horizon hours in [windowStart, windowEnd)
+chargePowerLiftKwh    = max(0, (chargeCapKw · remainingWindowHours − windowLoadKwh) · legEff)
+poolHeadroomLiftKwh   = max(0, fullKwh − packAtWindowEnd_noBuy)
+liftKwh               = min(requiredExtraKwh, chargePowerLiftKwh)
+```
+
+The charge-power cap credits only the **remaining** window when computed mid-window: the 30-min recompute tick runs around the clock and `resolveCheapWindow` deliberately walks back to the true window start for display honesty, so crediting the full window length would over-credit up to ~6 h × `chargeCapKw` of nonexistent lift and present an undeliverable buy as fully meeting the cushion (v1.39.0). The horizon is already trimmed to ≥ the current hour upstream, so `windowLoadKwh` sums the same remaining span. In-window house load is served first (billed load happens while grid-charging), and only `legEff` of what reaches the charger is stored.
+
+`bindingCap` resolution: `'requirement'` by default; `'poolHeadroom'` when `requiredExtraKwh ≥ poolHeadroomLiftKwh − 1e-6`; `'chargePower'` when `chargePowerLiftKwh < requiredExtraKwh − 1e-6`. **`cushionShortfall`** is driven by the re-simulated trough *under the lift actually deliverable* (`troughAtLift(liftKwh).minKwh < targetFloorKwh − 1e-6`) — so neither a full-clamp erasing the lift nor a below-empty deficit can present as "requirement met". If the shortfall exists while `bindingCap` still reads `'requirement'` (a clamp, not a linear cap, was the limiter), the flag is re-attributed to the tighter physical bound so it is never `'requirement'`-with-shortfall. Finally the **over-buy ceiling** is a *flag only* (resilience wins): when the cushion IS met and `targetPackKwh > fullKwh − morningPvSurplusP90Kwh + 1e-6`, `bindingCap='overBuy'` — the buy is kept and the accepted clip is disclosed.
+
+#### Outputs
+
+`buyKwh = liftKwh / legEff` (the meter sees more than the pack stores), `targetSocPct = (packAtWindowEnd_noBuy + liftKwh)/fullKwh·100` (clamped to full), `minProjSocPct`/`minProjSocTsMs` from the with-buy re-simulation (the number the ledger's floor verdict is scored on), `baselineMinSocPct`, `chargeTonight = buyKwh ≥ minBuyKwh` (`ARB_MIN_BUY_KWH`, default 1 — below it the night is a "hold", no nagging about a trivial top-up), and a composed `rationale` string carrying the buy, target, no-buy trough, floor+cushion line, and the honest shortfall / over-buy / pre-window notes.
+
+---
+
+### 6. The learning ledger (`night_charge_ledger`, `recorder.ts`, v1.38.0)
+
+One durable row per `plan_date` (`YYYY-MM-DD`, America/Phoenix; primary key), in three column groups:
+
+- **PLAN** (frozen the evening before; a re-issue for the same date overwrites only the plan columns): `issued_at_ms`, `algo_version` (stored TEXT — a physics fix bumps it and makes prior rows excludable, §8), `posture` (`'advisory'`), `objective`, `rationale`, `confidence_tier`, `horizon_hours`, `soc_now_pct`, `soc_at_window_start_pct` (v1.39.0 — the plan's own projected pack SoC entering the window; NULL on every pre-v1.39.0 row), `target_soc_pct`, `buy_kwh`, `required_extra_kwh`, `reserve_floor_pct`, `cushion_pct`, `cushion_kwh`, `binding_cap`, the forecast basis (`pv_p10/p50/p90_kwh`, `load_p10/p50/p90_kwh`, `ev_p90_session_kwh`, `ev_session_count`, `band_sigma_cal`, `cal_scored_days`, `forecast_basis`, `weather_covered`), `min_proj_soc_pct`/`min_proj_soc_ts_ms` (the simulated plan trajectory — **omitted entirely for an incomplete-basis plan**, so a NULL here is the scorer's "no basis" sentinel), `pool_full_kwh`, `tariff_snapshot` (JSON: plan/season/period-now/ratesConfirmed/cents-by-tier), and **`window_start_ms` / `window_end_ms`** (v1.39.0) — the plan's *actually resolved* charge window. Weekend plans resolve windows disjoint from the canonical 23:00–05:00 night (a Saturday plan's window is Monday 00:00–05:00), and the scorer/completion gate must pair actuals to the **real** window; without these columns a Saturday night would be captured before its window even opened. Added to existing databases by an idempotent `ALTER TABLE` migration.
+- **OUTCOME** (NULL until the night completes): `outcome_captured_at_ms`, `actual_pv_kwh`, `actual_load_kwh`, `actual_window_import_kwh`, `actual_onpeak_import_kwh`, `onpeak_import_occurred`, `actual_min_soc_pct`/`_ts_ms`, `plan_traj_floor_breached`, `cushion_breached`, `grid_home_coverage_frac`, `scored` (0/1), `score_notes`.
+- **SCORE** (NULL until scored): `pv_err_frac`, `pv_in_band`, `load_err_frac`, `load_in_band`, `buy_err_kwh` (signed, + = over-bought), `soc_min_err_pct`.
+
+Several declared columns are *never written* in the current release and read NULL by design: `actual_grid_to_battery_kwh` (exact charge attribution needs an actuated night), `outage_during_day`, and the cost/savings columns (`realized_cost_cents`, `counterfactual_cost_cents`, `realized_savings_cents`, `demand_charge_savings_cents`, `would_have_peak_imported`) — there is no valid savings counterfactual pre-write, and rates default unconfirmed.
+
+**★ Never pruned.** The table is created alongside `lifetime_totals` and is never referenced by the hourly `samples` prune — the multi-month verification record the write-readiness gate reduces over **must survive the 30-day samples retention** (design §0.1, binding). The companion `night_charge_calibration` singleton (`id=1 CHECK`; seasonal cushion learner / buy de-bias / EV-tail inflation state, design §3.4) has schema and read/write API but **no live producer or consumer yet** — the learner is a later increment.
+
+**Write path.** `nightUpsert` builds a dynamic `INSERT … ON CONFLICT(plan_date) DO UPDATE` where column names come *only* from a frozen whitelist (`NIGHT_LEDGER_COLUMNS`), never caller keys — that is what makes the interpolation injection-safe. Only columns present and not `undefined` are written, so a partial outcome merge preserves every frozen plan column; prepared statements are cached per column-shape; JS booleans are coerced to INTEGER 0/1 (`node:sqlite` rejects a boolean bind). `recordNightPlanRow` (`index.ts:2668`) coerces nullable plan numerics to 0 for the non-null plan columns (`target_soc_pct`, `buy_kwh`, `required_extra_kwh`) but *omits* `min_proj_soc_pct` when null so the sentinel survives. The synthetic SN `night_charge` is reserved for optional disposable 30-day chart-overlay samples and joins the restart-gap exclusion list (like `weather`/`forecast`) so off-cadence wall-clock rows can never mask a real telemetry stall; the durable ledger itself never rides the `samples` table.
+
+---
+
+### 7. Completion-gated outcome scoring
+
+#### The night clock (`nightWindowBounds`, `nightChargeAdvisor.ts:951`)
+
+The single source of truth for a plan date's spans, in fixed America/Phoenix arithmetic (UTC−7, no DST; pure, null on a malformed date): plan for day `D` covers charge window `[D 23:00, D+1 05:00)`; the plan-trajectory score span runs `[D+1 05:00, D+1 21:00)`; the night is **complete** — and may be outcome-captured — only at/after `D+1 21:00` (`completeMs`, = day-start + 45 h). `nightSpansForRow` (`index.ts:2782`) prefers the row's **own stored window** when present: the score span then runs **16 h past the real window close** (`window_end_ms + 16 h` — the same close+16 h shape as the canonical 05:00→21:00), which is what pairs a weekend plan's actuals to its Monday-morning window instead of the canonical night. Rows without a stored window (`pre-v1.39.0`) are marked `windowKnown=false` and captured honestly as `scored=0` — actuals cannot be paired to the plan's real window, and a fabricated cross-span comparison must never enter the gate's evidence.
+
+**★ The completion gate** (v1.39.0): a night may be captured only once `nowMs ≥ completeMs`. The pre-fix midnight tick captured yesterday's row while its charge window was still *open* — window coverage ~25% ⇒ `scored=0`, inverted SoC query ⇒ null actuals — and the idempotence latch then froze those truncated actuals into the never-pruned ledger forever, so the readiness gate could never accumulate a single scored night.
+
+#### The backfill sweep (`scoreCompletedNights`, `index.ts:2804`)
+
+Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last **60 days** of ledger rows (not exactly-yesterday — the old scorer orphaned any night left uncaptured across SHP2-wedge/downtime days forever, an uncounted MNAR exclusion), skipping rows already captured (`outcome_captured_at_ms != null` — idempotent) and rows still in flight. A night whose raw telemetry (~30-day retention) has aged out captures honestly as `scored=0` with null actuals — it does not stay uncaptured forever.
+
+#### Measuring one night (`scoreNightRow`, `index.ts:2840`)
+
+- **Grid import**: trapezoidal integration of SHP2 `grid_home_w` (positive-clamped, gaps > 1 h skipped) over the real charge window and over the plan-day 16:00–19:00 on-peak. **Null-over-fabrication**: zero samples record NULL, never a "measured" 0 kWh.
+- **Coverage**: fraction of 5-min buckets in the window with ≥ 1 sample; `< 0.9` ⇒ `scored=0` ("MNAR-excluded").
+- **PV/load actuals** are integrated over `[issued_at_ms, +24 h]` — the same horizon the frozen P50 forecast covered, so `pv_err_frac`/`load_err_frac` are like-for-like. Actual PV = Σ `pv_total` over the SHP2-connected home DPUs (the same basis the forecast is built from); actual load = SHP2 `panel_load`.
+- **Minimum SoC** over the score span passes through `medianFilter3` (3-sample median; endpoints pass through) *before* the min-scan: the documented SHP2 cloud-reconnect artifact emits a single transient `backupBatPercent=0` sample, and an unfiltered min-scan latches it — fabricating a realized need equal to the full floor+cushion and a false HARD under-buy in the gate's evidence. A genuine sustained low has agreeing neighbors and passes.
+- **Realized-need buy** — the hindsight counterfactual `buy_err_kwh` is scored against — is defensible **only on a clean night**: in advisory phase the home runs *without* the buy, and on a grid-tied home its own overnight import props the SoC. `scored=1` requires: plan had a trajectory (`min_proj_soc_pct` non-null) ∧ coverage ≥ 0.9 ∧ a min-SoC read exists ∧ window import ≤ `ARB_MIN_BUY_KWH` (near-zero — "clean islanded baseline"). Then `realizedNeedBuyKwh = max(0, targetFloorKwh − actualMinPackKwh)/legEff`. Every other case records `scored=0` with an explicit `score_notes` reason.
+- **The floor verdict is the plan trajectory, never baseline telemetry** (design §3.3): `plan_traj_floor_breached` = the plan's own simulated `minProjSocPct < reserveFloor + cushion` — in advisory phase raw min-SoC telemetry measures the un-actuated baseline, not the plan's line. Raw telemetry feeds only `soc_min_err_pct` (plan minus actual) and the separate `cushion_breached` observation. `pv_in_band`/`load_in_band` check the actual against the frozen `[P10, P90]`; `onpeak_import_occurred` uses a 0.05 kWh threshold.
+
+#### Premature-capture repair (`repairPrematureNightOutcomes`, `index.ts:3096`)
+
+Once per boot, idempotent: any row whose `outcome_captured_at_ms` **precedes its own night's `completeMs`** (the pre-v1.39.0 mid-window defect) has its outcome/score columns reset to NULL (`scored=0`, explanatory `score_notes`) so the now-completion-gated sweep re-captures it with full-span actuals. Rows are corrected in place — never deleted.
+
+---
+
+### 8. The write-readiness gate (`computeNightChargeReadiness`, `nightChargeGate.ts:193`)
+
+A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three states — `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` — plus `writeReady` and a human-readable `blocking[]` list. It gates **only on physically-measured prediction accuracy**: there is deliberately *no* savings term (no valid counterfactual exists pre-write, so a savings gate would certify a number the system cannot observe). Recomputed over `readNightLedger(400)` on every tick, evening job, and warm-up.
+
+**Thresholds are pre-registered and frozen** — never tuned on the season they gate (garden-of-forking-paths); a re-tune bumps `CURRENT_ALGO_VERSION` (currently **1**) and resets the readiness clock. Rows are filtered to the current algo version by **string** comparison (`recordNightPlan` persists `algo_version` as SQLite TEXT; a numeric compare never matched a real row and left the gate permanently stuck). Prior-version rows are *excluded*, not tagged — a planner physics fix changes the meaning of every prior row.
+
+**Eligible rows** = `scored=1` ∧ current algo ∧ `confidence_tier === 'forecast'` (climatology/mixed weekend rows never count), chronological by `plan_date`.
+
+**HARD failures ⇒ `BLOCKED`** (evaluated first):
+
+| Gate | Rule |
+|---|---|
+| Plan-trajectory floor breach | A **single** `plan_traj_floor_breached` row blocks. Evaluated over **all** current-algo forecast-tier rows with a recorded verdict — *not* only the coverage-`scored` subset: the breach is a property of the plan's own simulated trajectory, independent of `grid_home_w` coverage, so a would-have-breached plan on a coverage-excluded (propped/storm/SHP2-offline) night — exactly the adverse night the gate exists to catch — still blocks. Presence-checked with a loose `!= null` so both boolean and 0/1 forms count. |
+| Under-buy rate | With ≥ `MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5` scored nights: fraction of `buy_err_kwh < 0` must be ≤ `MAX_UNDERBUY_RATE = 0.10` (under-buy is the asymmetric safety miss). Below 5 nights this is still LEARNING, not BLOCKED. |
+
+**Soft eligibility gates** — *any* unmet or uncomputable metric ⇒ fail-closed `LEARNING` (design I13; missing/thin/young data is never null-as-ready):
+
+| Metric | Threshold | Constant |
+|---|---|---|
+| Scored forecast-backed nights | ≥ 60 | `MIN_SCORED_ELIGIBLE_DAYS = 60` |
+| In-season record age (oldest eligible `issued_at_ms`) | ≥ 90 days | `REQUIRED_IN_SEASON_DAYS = 90` |
+| Autocorrelation-adjusted effective N | ≥ 45 | `MIN_EFFECTIVE_N = 45` |
+| Signed buy bias (mean `buy_err_kwh`) | in `[0, 5]` kWh | `BUY_BIAS_MIN_KWH = 0`, `BUY_BIAS_MAX_KWH = 5` — never net under, never gross over |
+| PV day-ahead accuracy | MAE ≤ 0.20 ∧ \|bias\| ≤ 0.10 (fractions of actual) | `PV_MAE_MAX_FRAC`, `PV_BIAS_ABS_MAX_FRAC` |
+| Load day-ahead accuracy | MAE ≤ 0.20 ∧ \|bias\| ≤ 0.10 | `LOAD_MAE_MAX_FRAC`, `LOAD_BIAS_ABS_MAX_FRAC` |
+| Realized band coverage (both PV *and* load in `[P10,P90]`) | in `[0.78, 0.92]` | `BAND_COVERAGE_MIN/MAX` — too high means the band is uselessly wide, too low means unsafe |
+| MNAR exclusion fraction | ≤ 0.35 | `MAX_EXCLUSION_FRAC = 0.35` |
+
+Accuracy is **normalized MAE + a separate signed bias, deliberately not r²**: r² is variance-driven and inflated by monsoon swings — a +15–20% biased-but-correlated forecast passes r² ≥ 0.80 yet mis-sizes the buy.
+
+**Effective N** (`effectiveSampleSize`, `nightChargeGate.ts:157`): `n·(1−r₁)/(1+r₁)` with lag-1 autocorrelation `r₁` computed over the PV residual series (fallback: load residuals, then the raw count), clamped to `[0, 0.99]` — a cloudy stretch is several *correlated* bad nights, so raw count over-counts evidence; negative autocorrelation is clamped to 0 so it can only ever reduce, never inflate.
+
+**The MNAR denominator is *expected* nights, not captured rows** (v1.39.0): nights that never produced a ledger row at all — add-on down at the evening job, SHP2 cloud-offline, the documented *adverse* failure modes — must count as exclusions; keying the fraction on captured rows let exactly those nights vanish from both numerator and denominator. Expected range = every Phoenix calendar date from the first current-algo plan (bounded to a trailing 120 days) through the most recent *completed* night — the Phoenix date of `now − 45 h` (plan `D` completes at `D+1 21:00`). `exclusionFrac = max(0, expected − distinct scored plan-dates in range)/expected`. Phoenix dates are built from `en-US` `formatToParts` (v1.39.1) — the `en-CA` `format()` shortcut silently falls back to a non-ISO shape on a small-ICU Node, cascading into a swallowed throw and a permanently-null readiness.
+
+`nightChargeGateFields` (`nightChargeGate.ts:426`) flattens the result for the state payloads; on a null readiness it emits `night_charge_readiness: 'unknown'`, **`night_charge_write_ready` strictly `false`**, and every diagnostic null.
+
+---
+
+### 9. Delivery surfaces
+
+**State payloads.** `nightChargeStateFields(plan, now)` + `nightChargeGateFields(readiness)` are spread into **both** the MQTT state payload (`mqttDiscovery.ts:894`) and `/api/ha-state` (`index.ts:1444`) — deliberate MQTT/REST parity. A plan is *fresh* only when `basisComplete && age < PLAN_STALENESS_MS` (12 h = 43 200 000 ms, design I12): numeric fields are null and `charge_tonight` strictly `false` otherwise, so a dead or wedged advisor (the host power-cycles daily) can never leave a stale ON. The window strings are informational (published whenever the plan carries a window) and **day-qualified beyond 24 h** via `fmtPhoenixDayHm` — `"23:00"` within a day, `"Mon 00:00"` beyond — so a Saturday plan resolving Monday's window is never presented as tonight's (v1.39.0).
+
+**HA MQTT-discovery entities** (all carry `expire_after = 90 000 s` (~25 h) so the once-nightly cadence doesn't trip expiry but a dead add-on flips them to `unavailable` — a retained `charge_tonight=ON` from a dead advisor would be worse):
+
+| Entity | Type | Content |
+|---|---|---|
+| `ecoflow_night_charge_recommended` | binary_sensor | `charge_tonight` — the single flag an owner automation gates on |
+| `ecoflow_night_charge_target_soc` | sensor (%) | Target pool SoC by window close |
+| `ecoflow_night_charge_buy_kwh` | sensor (kWh) | Recommended meter-side buy |
+| `ecoflow_night_charge_window_start` / `_end` | sensor (string) | Day-qualified Phoenix `HH:MM` window bounds |
+| `ecoflow_night_charge_readiness` | sensor (diagnostic) | `LEARNING` / `READY_TO_CONSIDER_WRITES` / `BLOCKED` |
+| `ecoflow_night_charge_write_ready` | binary_sensor (diagnostic) | Fail-closed gate boolean |
+
+The remaining gate diagnostics (`night_charge_under_buy_rate`, `night_charge_band_coverage_pct`, `night_charge_plan_nights_scored`, `night_charge_effective_n`, `night_charge_forecast_basis_pct`, `night_charge_exclusion_fraction`) ride the same payloads without dedicated discovery entities.
+
+**`GET /api/night-charge/status`** (`index.ts:3180`): `{ enabled, mode:'advisory', window, reserveFloorPercent, confidence, notify:{hour,minute,lastNotifyDay}, plan, readiness, recentOutcomes }`. `reserveFloorPercent` is read live from `projection.backupReserveSoc` — the same field the floor alarm defends. `recentOutcomes` is an in-memory mirror of the last 7 ledger days refreshed by the timers, so the request handler never touches the DB inline (CWE-770). No auth: read-only, exposes no secrets, actuates nothing.
+
+**Notification** (`buildNightChargeMessage`, `notify.ts:245`): three shapes — `charge` (buy kWh, target SoC, low-SoC without vs with the buy, floor+cushion line, confidence, honest shortfall/over-buy notes, and the advisory automation contract), `hold` (no charge needed), and `insufficient_basis` (sent so the *absence* of a plan is explicit — the owner never wonders if the job died; a null plan can only ever render this shape regardless of the requested one). All severity `info` with a single `dedupId: 'night_charge_plan'` so the nightly message lands in **one updating card**, and dispatched via a *direct* `sendNotification` that bypasses quiet-hours and min-severity (design I10) — a plan queued past the charge-window open is worse than none. `NIGHT_CHARGE_NOTIFY_ON_HOLD=false` suppresses hold-night sends (still latching the day).
+
+**TUI**: the Strategy screen renders a `TONIGHT'S PLAN` block (`telnet/screens.ts:1153`) from a 12 h staleness-gated accessor (`dataProvider.nightChargePlan` — present ∧ `basisComplete` ∧ fresh, else one grey line), formatted through the *same* `nightChargeStateFields` so the terminal and the HA entities never disagree. It is deliberately distinct from the adjacent `CHARGE SCHEDULE` block (the SHP2's native `timeTask` config). **Web**: `NightChargeCard` on the Strategy panel — zero-prop, self-fetching `/api/night-charge/status` on a 60 s poll, with its own matching 12 h client-side staleness guard; a null/incomplete/stale plan renders the grey "unavailable" shape, never a fabricated number.
+
+---
+
+### 10. Configuration
+
+Add-on options (`config.yaml` → env):
+
+| Option | Default | Range | Meaning |
+|---|---|---|---|
+| `NIGHT_CHARGE_ADVISOR_ENABLED` | `true` | bool | Master switch for the timers + surfaces (env compare is `!== 'false'`) |
+| `ARB_OUTAGE_CUSHION_PCT` | `15` | int 0–40 | Cushion % above the reserve floor the trough must hold; never changes the independent floor alarm |
+| `ARB_MIN_BUY_KWH` | `1` | float 0–50 | Below this recommended buy, the night is a "hold" |
+| `ARB_CHARGE_CAP_KW` | `7.2` | float 0–50 | Grid-charge power ceiling used by the feasibility cap (the live `chChargeWatt`); sizing only, no device is ever set |
+| `ARB_LOAD_P90_FACTOR` | `1.15` | float 1–2 | Pessimistic-high load multiplier on the day-ahead forecast |
+| `NIGHT_CHARGE_NOTIFY_HOUR` / `_MINUTE` | `21` / `30` | runtime-clamped int 0–**22** / 0–59 | Evening-job fire time; hour is clamped to ≤ 22 because the catch-up window is `[fire, 23:00)` — hour 23 made it the empty set (v1.39.0) |
+| `NIGHT_CHARGE_NOTIFY_ON_HOLD` | `true` | bool | Send the nightly advisory even on hold nights (consistent "the job ran" confirmation) |
+| `TARIFF_APS_*_CENTS` ×6 | `""` | str | Per-period effective ¢/kWh from a bill (§3 table); empty = unconfirmed |
+| `TARIFF_APS_RATES_CONFIRMED` | `false` | bool | While false, **every** `$` output is null regardless of entered rates |
+
+Env-only knobs (not in the options form): `NIGHT_CHARGE_LATCH_PATH` (latch file location; defaults beside the DB), `EV_MAX_LOAD_W` (default `11520` — the per-hour EV block cap, shared with the EV detection engine), and the shared efficiency seams `DISPATCH_ROUND_TRIP_EFFICIENCY` (default `0.86`, clamped [0.8, 1]; the advisor's charge leg is its square root ≈ 0.927) and `RUNWAY_DISCHARGE_EFFICIENCY` (default `0.94`, clamped [0.8, 1]) — both injected from `analytics.ts`, never re-declared.
+
+---
+
+### 11. Failure modes & known limitations
+
+- **Basis-completeness gate.** No plan is sized unless the probabilistic band exists, the confidence tier is not climatology, `calScoredDays ≥ 14`, *and* realized band coverage ≥ 0.9. On a young install (or after a forecast-model reset) the advisor publishes the explicit `insufficient_basis` shape nightly — this is by design, not a fault.
+- **SHP2 offline / missing battery fields** ⇒ `recomputeNightChargePlan` returns null and the holder keeps the prior plan until the 12 h staleness guard nulls the surfaces and the ~25 h `expire_after` flips the HA entities to `unavailable`. The scorer likewise cannot source actuals while the SHP2 projection is absent; affected nights land as MNAR exclusions, which the gate's expected-nights denominator counts against readiness.
+- **Weekend tariff boundary (open question).** The model's per-instant weekday gating makes Friday's window Fri 23:00–24:00 only (Sat 00:00–05:00 is weekend off-peak) with the next window opening Mon 00:00 — a ~48 h carry sized against a 1-hour charge window (charge-power capped, `cushionShortfall` honestly flagged) on a mostly `mixed`-tier basis that never enters gate eligibility. Whether real APS billing extends Friday's overnight into Saturday morning can only be settled from a bill; if it does, the correction belongs in `tariff.ts` weekday gating. Rates are null until confirmed, so no `$` output depends on the answer.
+- **Hardware charge envelope is an open datum.** `ARB_CHARGE_CAP_KW` reflects the observed `chChargeWatt` (7.2 kW), not a verified hardware spec; the feasibility cap is only as accurate as this knob.
+- **Advisory-only, twice over.** The add-on performs no writes in any state, and `READY_TO_CONSIDER_WRITES` unlocks only *consideration* — the eventual write path is separately deferred behind a probe, an owner toggle, and the safety spine. During the advisory phase the realized-need counterfactual is defensible only on clean (near-zero-import) nights, so grid-propped nights are excluded from scoring rather than fabricated.
+- **Pre-v1.39.0 ledger rows** carry no stored window and are permanently unscoreable (captured as `scored=0` with an explanatory note); nights whose raw telemetry has aged past the 30-day samples retention capture honestly unscored rather than staying open forever.
+- **The calibration learner is not yet live.** `night_charge_calibration` (seasonal cushion, buy de-bias, EV-tail inflation) exists as schema + API only; the cushion remains the static `ARB_OUTAGE_CUSHION_PCT` until the learner ships as its own increment.
+
+---
+
+All verification complete. Composing the appendix now from the verified consumer graph.
+
+---
+
+## Appendix A — Feature Inventory (evidence linkage)
+
+Purpose: a pruning-oriented ledger of every substantive feature/engine, what math it runs, which field signals feed it, and — decisive for keeping it — **what actually consumes its output**. Consumer columns were verified by grepping the pinned source revision (`git grep … HEAD -- server/src web/src lovelace/src`), not by reading intent from comments. Evidence status is one of:
+
+- **measured-and-active** — output is consumed by at least one live surface (alarm, HA sensor, UI card, TUI screen, or another engine) and the math has operated on real field data.
+- **data-gated (…)** — wired and correct, but a stated gate holds the output at `null`/inactive until the field record satisfies it; the parenthetical names what unlocks it.
+- **advisory-dormant** — deliberately advisory or deliberately not wired (documented posture, not an accident).
+- **weak-linkage candidate** — no consumer beyond its own ad-hoc endpoint, or math that has never received field validation; one-line justification given. These are the removal-review set collected at the end.
+
+Diagnostic endpoints with a documented validation role (e.g. the forecast backtest) are not flagged merely for lacking an automated consumer; endpoint-only engines with no validation role are.
+
+### A.1 Ingest, storage & threading (§1, §2)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| `SnapshotStore` dual-schema ingest | Two caches (REST `rawBySn`, MQTT `mqttFlatBySn`), single `change` fan-out with `frameSeq` (§1.1, §1.3) | REST `/device/list`+`/quota/all` (60 s poll); MQTT `/open/{user}/{sn}/quota`,`/status` | recorder, analytics worker, `/ws`, alert monitor, MQTT discovery — every downstream | measured-and-active |
+| DPU MQTT→REST translation | `translateDpuMqtt()` cmdId schema → `hs_yj751_*` quota shape; only DPUs drive live projection from MQTT (§2) | DPU cmdId frames (`bpInfo[].*`) | `SnapshotStore` projection refresh | measured-and-active |
+| Product projections | `projectByProduct()` → typed dpu/shp2/generic `Projection` (§2) | Raw quota maps | Every engine, UI, sensors | measured-and-active |
+| Backup-pool grace-hold + slew guard | `backupPoolWithGraceHold` holds last-good pool through transient nulls; slew-limits implausible jumps (§2) | SHP2 `backupIncreInfo.*` (aggregate `backup{Remain,FullCap}Wh`, `backupBatPercent`) | Runway, SoC alarm, HA `backup_pool` sensors | measured-and-active |
+| SQLite recorder | `record(extract(snap))` with dedupe/heartbeat, retention, WAL; read-only worker twin `readRecorder.ts` byte-parity-tested (§1.4) | All projected metrics | Every history-driven engine | measured-and-active |
+| Lifetime accumulators | `rollupLifetime()` monotonic Wh counters; steady-state RTE clamp (`charge == discharge` by design) + micro-dip clamp `clampLifetimeDip` (§1.4.6, §7.2) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | `/api/lifetime-energy`, HA Energy Dashboard `*_lifetime_kwh` | measured-and-active |
+| Telemetry-gap detection | Recorder gap scan → outage/gap events (§1.4.7) | Sample timestamps | `/api/telemetry-gaps`, `outageAlerts()`, HA `system_outage_*` / `system_telemetry_gap_count_24h` | measured-and-active |
+| Trapezoidal integration | `integrateWh` gap-aware trapezoid; shared day-boundary endpoint (§1.5, §7.0.1) | Any W-metric series | selfConsumption, RTE, tariff, carbon, totals, circuit history | measured-and-active |
+| Analytics worker + report registry | Worker thread, `BUILDERS` registry, coalesce + TTL cache, `WARM_REPORTS` self-warm (§1.6, §1.8) | — (infrastructure) | All `/api/<report>` routes, MQTT state, TUI | measured-and-active |
+| `lastUpdated` freshness contract | SHP2 MQTT chatter must not touch the freshness clock; REST owns non-DPU freshness (§1.7) | Message arrival times | Staleness alerts, grace-holds | measured-and-active |
+
+### A.2 Cloud protocol & HA wiring (§2)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| REST client + HMAC signing | `ecoflow/sign.ts` HMAC-SHA256 request signing (§2) | Cloud credentials (env) | Poll loop | measured-and-active |
+| MQTT client (`param`-not-`params` fix) | Per-device quota/status subscription; corrected payload key (§2) | Broker frames | Ingest | measured-and-active |
+| SHP2 membership + spare roster | Core↔SHP2 from `backupIncreInfo.Energy{1,2,3}Info`, not positional; explicit spare-SN allowlist (§2, §8.8) | SHP2 energy-info slots; `SPARE_DPU_SNS` env | Zombie gate, selfConsumption scope, degradation peer baselines | measured-and-active |
+| Cloud-wedge vs outage classifier | `deviceLink.ts` pure classifier: LAN-reachable + cloud-silent = wedge, both-dark = outage (§2) | LAN ICMP ping, MQTT/REST freshness | Offline alerts, HA `ecoflow_cloud_wedge_count` | measured-and-active |
+| HA service layer | `haService.ts` `callHaService` — total, never throws (§2, §10.10) | HA supervisor API | Broadcast, shed registry, hostPower, haStateCache | measured-and-active |
+| MQTT discovery entity set | ~50 sensors + ~9 binary sensors, availability + expiry, honest-null templating (§2) | `buildState()` composition | Home Assistant | measured-and-active |
+| Energy Dashboard counters | `total_increasing` lifetime kWh set incl. dynamic per-circuit discovery (§2) | Lifetime accumulators | HA Energy | measured-and-active |
+| Alarm-priority switches | Bidirectional `switch` per ISA priority; `parseAlertSwitchCommand` no-op on unknown payload (§2) | HA command topic | `alertSettings`, alarm gating | measured-and-active |
+| `refreshShp2CloudPresence` write | The one real write; audited (`writeLog.ts`), rate-limited, `requireWriteAuth` (§2, §12) | Operator action | Web `RefreshCloudButton`, cooldown endpoint | measured-and-active |
+| `debugSendCommand` | Arbitrary-command escape hatch; off unless write-debug env + token (§2, §12) | Operator action | `/api/device/send-command` | advisory-dormant (disabled by default, by design) |
+
+### A.3 Solar & PV forecast (§3)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| GHI→PV response model | Per-hour through-origin OLS `β = Σ(pv·ghi)/Σ(ghi²)`; `peakCoeff` gated on GHI ≥ 300 W/m² + ≥3 samples (§3.1) | Recorder `pv_total`, Open-Meteo GHI | `getDayForecast`, `SolarResponseCard`, backtest | measured-and-active |
+| Full-coverage fitting gate | `fullCoverageFleetPv` excludes cloud-gap hours from fitting (§3.1) | Per-Core coverage | Response model | measured-and-active |
+| Day-ahead forecast | Per-hour `forecastPvW`/`forecastLoadW`; PV bias correction; structural-incompleteness gate; restored display basis (§3.2) | Response model, weather, load history, EV prediction | Runway, runway/forecast alarms, HA sensors, cards, TUI, calendar, MPC | measured-and-active |
+| PV bias correction | `pvBiasFactor = Σactual/Σpredicted` multiplier (§3.3) | Forecast vs recorded PV | Day-ahead forecast, `/api/confidence` | measured-and-active |
+| EV-window prediction | `computeEvWindowPrediction` expected-value `evLoadByHour`; subtracted from the alarm load (safety invariant §5.1.5) | EVSE circuit history | Forecast load, runway (subtraction), calendar, insights cards | measured-and-active |
+| Forecast skill | Day-level replay MAE/bias/r² over covered days (§3.4) | Forecast archive vs actuals | Probabilistic band calibration, `/api/confidence.forecastDayR2`, repair issues, insights | measured-and-active |
+| Confidence snapshot | Medians of engine r² + forecast bias/MAE (§3.5, §8.10) | degradation, thermal, skill reports | `/api/confidence`, insights cards | measured-and-active |
+| Probabilistic P10/P90 SoC band | Per-hour sigma + coherent SoC ensemble; F30 self-calibrating shrink over `PV_BAND_CAL_WINDOW_DAYS = 30` (§3.6) | Forecast + skill | `/api/forecast/probabilistic`, Lovelace solar-card, MPC P10 envelope | measured-and-active; band **calibration** data-gated (needs ≥14 scored days in the 30-day window) |
+| Multi-day horizon | `computeMultiDayForecast` extends PV/SoC 2–3 days on typical-day curves (§3.7) | Forecast + weather | `/api/forecast/multi-day` only — no UI, TUI, HA, or engine consumer | **weak-linkage candidate** — output consumed by nothing |
+| Open-Meteo ingestion | GHI + temp hourly fetch, cached (§3.8) | Open-Meteo API | Forecast, curtailment, thermal, shade | measured-and-active |
+| NWS NDFD ensemble | Opt-in second cloud source + disagreement metric (§3.8) | NWS NDFD (`NWS_ENABLED`) | `/api/weather/ensemble`, insights cards | data-gated (off unless `NWS_ENABLED`) |
+| NWS storm alerts | CAP alert fetch → alert/calendar/broadcast context (§8.3.4) | NWS CAP feed | `forecastDayAlerts`, calendar, insights cards | data-gated (off unless `NWS_ENABLED`) |
+| Forecast backtest | `backtestPvForecast` RMSE/MAE/bias/R² replay incl. the alarm-facing predictor (F24) (§1.8) | 168 h recorder actuals | `/api/backtest/forecast` (operator-invoked validation harness) | measured-and-active (validation instrument; no automated consumer by design) |
+
+### A.4 Physics & Bayesian tier (§4)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Clear-sky PV model | Solar geometry → `clearSkyGHI` → POA → cell-temp derate → `physicsPmax`; `physicsScore = realized/theoretical` (§4.1) | Site constants, ambient temp, live PV | `/api/physics/pv-pmax` only (referee role is manual; `PHOENIX_SITE.pNamplate` is separately load-bearing in `BAYES_OBS_SIGMA2`) | **weak-linkage candidate** — no automated cross-check consumes `physicsScore` |
+| LFP OCV→SoC + rest tracker | OCV lookup on rested packs (`REST_CURRENT_THRESHOLD_A = 0.5`, 60 s tick) → `socDriftPct` vs BMS (§4.2) | `bmsMaster` volts/amps per pack | `/api/physics/lfp-soc` only | **weak-linkage candidate** — drift feeds no alarm/engine; tick runs regardless |
+| Hierarchical Bayes pack SoH | Partial pooling `fitHierarchical` + `findOutliers(z ≥ 2.0)` (§4.3) | Per-pack SoH cross-section | `/api/models/hierarchical-pack-soh` only | **weak-linkage candidate** — endpoint-only; near-new fleet has produced no outlier to validate against |
+| Recursive Bayesian solar model | Per-hour Gaussian posterior over GHI→PV slope with `agreementWithOls` (§4.4) | Recorder pv/GHI pairs | **Curtailment expected-PV** (`predictExpectedPv`), `/api/forecast/bayesian` | measured-and-active |
+| Kalman SoH filter | 2-state constant-velocity filter (`R = 0.05`) run side-by-side with OLS fade; mirrors every OLS gate (§6.8) | `sohPts` per pack | `kalman*` fields inside `/api/degradation` | measured-and-active (parallel diagnostic inside a consumed report) |
+
+### A.5 Runway, depletion & SoC alarms (§5) — safety-critical
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Runway depletion simulation | DC-bus drain `delta = pv − load/η` (`RUNWAY_DISCHARGE_EFFICIENCY`), interpolated reserve/empty crossings, 4 h observed-load `max()` blend, 50 W degenerate-curve guard (§5.1) | SHP2 pool fields, `panel_load` history, day-ahead forecast, `backupReserveSoc` | Audible alarm, HA runway sensors, `RunwayCard`, fleet-card, TUI, shed advisor | measured-and-active |
+| Empty hysteresis | `applyEmptyHysteresis` de-flaps the published hours-to-empty (§5.1.6) | Raw crossing | Published runway | measured-and-active |
+| Runway severity ladder | `classifyRunway(p, grid)` bands + grid-aware null while backstopping; islanded re-escalation (§5.2) | Runway + grid backstop | Alarm state machine, shed advisor, TUI banners | measured-and-active |
+| Runway alarm state machine | `createRunwayAlarm` edge-triggered spoken alarms (§5.2.4) | Severity band | Audible path, notify | measured-and-active |
+| Battery-SoC floor alarm | Ladder 50/40/30/20/15/10/8/4/2 % with arming hysteresis + coherence guard (% vs `remainWh/fullCapWh`) against transient zeros (§5.3) | `backupBatPercent`, pool Wh | Audible path, HA alert counts, banding helpers | measured-and-active |
+| SHP2-blind failover | Fleet-median DPU SoC drives the ladder when the SHP2 aggregate is absent (§5.3.7) | Per-DPU `soc` | SoC alarm | measured-and-active |
+| Grid backstop resolver | `resolveGridBackstop`/`liveGridBackstop` combine `gridSta` (0/1/2), grid watts, staleness fail-safe; `backstopping` stricter than `present` (§5.4) | SHP2 `pd303_mc.masterIncreInfo.gridSta`, `grid_home_w` | Alarms, `off_grid` sensor, lighting posture, TUI, analytics | measured-and-active |
+| Grid-aware SoC dispatch | `socGridCrossDecision` downgrade on-grid + `reEscalateGridDrop` on islanding (§5.4.5) | SoC bands + backstop | SoC alarm tick | measured-and-active |
+| Load-shed advisor | Upper-bound counterfactual `computeRunwayWithShedOffset` (`shedKw/η` on pool basis); recommends only in actionable band with ≥ 0.25 h benefit (§5.5) | Runway, HA entity watts (`haStateCache`), SHP2 circuits | `load_shed_recommended*` sensors, `/api/load-shedding/status`, `runway_to_reserve_if_shed_hours` | data-gated (inactive until `LOAD_SHEDDING_SHED_ENTITIES` allowlist is configured; advisory-only by design) |
+| Load-shed registry | Candidate composition: SHP2 circuit → HA sensor → estimate; phantom-entity flagging (§5.5) | Allowlist + HA states | Shed advisor, StrategyPanel/TUI priority displays | data-gated (same allowlist) |
+
+### A.6 Battery & PV health (§6)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| SoH fade + EOL projection | OLS fade `−slope×YEAR_MS` ±1 SE, Arrhenius `2^((T−25)/10)`, 7-state gate chain, `EOL_SOH = 80` (§6.1) | `actSoh`/`soh`, `pack{n}_temp`, cycles | HA `..._soonest_pack_eol`, `DegradationCard`, battery-card, TUI, pack-risk, confidence, repair issues | measured-and-active; dated EOL data-gated (fade gates on near-new fleet — `unknown` by design) |
+| Peer fade comparison | Robust median+MAD z on projecting, connected packs; spares scored, never baseline (§6.1) | Fade rates | Degradation summaries | data-gated (needs ≥3 projecting packs) |
+| Coulombic efficiency (F17) | 7-day counter-edge ratio with span/full-window/consistency triple gate (§6.2) | `pack{n}_lifetime_{chg,dsg}_mah` edges | `coulombicEffPct` in degradation; pack-risk feature 3 | data-gated (all three F17 gates; null on current counters by design) |
+| Round-trip efficiency | Day-level `discharged/charged` in [0.8, 1.05] with ≥50 % coverage; ≤100 clamp; v0.65.0 extended-lookback backstop (§6.3) | Pack in/out integrals | HA RTE sensor, `DegradationCard`, battery-card, MPC cycling cost | measured-and-active |
+| Internal resistance | Steady-state-filtered `dV/dI` (≥5 A steps, sign-checked F27), median recent vs baseline, gated trend (§6.4) | `bmsMaster` V/A pairs | `/api/internal-resistance`, insights, pack-risk feature | data-gated (trend needs r² ≥ 0.3, 14 d span; currently immature by design) |
+| Charge-curve fingerprint | Median V drift at SoC checkpoints [40, 60, 80, 95] % during active charge; baseline vs recent 14 d windows (§6.5) | V + SoC + input W | `/api/charge-curve`, insights, pack-risk feature 5 | measured-and-active (holds at `baseline` until ~28 d span) |
+| Ambient-thermal forecast | 2-var least squares `pack_temp ~ ambient + load`; 24 h predicted peak (§6.6) | `pack{n}_temp`, weather, in/out | `/api/ambient-thermal-forecast`, insights, `thermalMedianR2` | measured-and-active |
+| Thermal-event counter | Rising-edge events at 35.6/45/55 °C with 1.5 °C hysteresis; gap-capped time-above; `hardLifeScore` (§6.7) | `pack{n}_temp` raw | `/api/thermal-events`, insights, pack-risk feature | measured-and-active |
+| Pack-risk v1 heuristic | Weighted six-feature composite (fade, thermal, IR, CE, curve-drift, cycles) (§6.9) | Health reports above | `/api/pack-risk` + input to v2 only | **weak-linkage candidate** — no alarm/UI/sensor reads either pack-risk endpoint |
+| Pack-risk v2 ML | Logistic regression + novelty + auto-downgrade gate; heuristic-pinned below `PACK_RISK_MIN_TRAINING_SAMPLES = 100` (§6.10, §9) | LR features + shadow model | `/api/pack-risk/v2` only | **weak-linkage candidate** — endpoint-only AND gate-pinned (≥100 labeled outcomes required); no field validation event yet |
+| String mismatch | Per-DPU PV ratio vs fleet at same hour, robust median+MAD (§6.11) | Per-Core `pv_total` | `/api/string-mismatch`, insights cards | measured-and-active |
+| Soiling decomposition | Per-Core soiling estimate; published fleet figure = per-Core **median** (v0.63.0 anti-deflation); F29 multi-week weather backfill (§6.12) | Per-Core PV, GHI | `/api/soiling-decomposition`, `/api/debug/soiling`, insights, solar-card, repair issues | measured-and-active (validated against a real soiling event and a false-alarm fix) |
+| Shade report | Recurring same-hour shortfall vs clear-day reference, `SHADE_DROP_THRESHOLD = 0.18`, ≥`SHADE_MIN_CLEAR_DAYS = 5`, per-Core median (§6.12 note) | Per-Core PV, weather | `/api/shade-report`, insights, solar-card | measured-and-active |
+| Inverter clipping | Flat-top detection vs forecast peak (§6.13, §7.7) | `pv_total`, forecast | HA clipping sensor, solar-card | measured-and-active |
+| Equipment health | MPPT ratio series + inverter standby `cappedMedianEffPct` (§6.14) | MPPT in/out, standby W | `/api/equipment-health`, insights, repair issues (−3 pp MPPT drift gate) | measured-and-active |
+
+### A.7 Energy accounting, cost & dispatch (§7)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Self-consumption / solar fraction | Grid-displacement form `(load − gridForKpi)/load`; PV↔battery↔grid apportionment; coverage gate `GRID_HOME_MIN_COVERAGE = 0.9` (§7.1) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | HA sensors, insights, carbon, tariff | measured-and-active |
+| Two-grid-quantities discipline | `gridImport` (DPU `ac_in`) vs `gridToHome` (SHP2 `grid_home_w`); KPI picks trusted superset (§7.0.2) | Both grid metrics | selfConsumption, tariff, HA Energy wiring | measured-and-active |
+| Carbon accounting | `gridDisplacedKwh × 0.4990 kg/kWh` (`GRID_CO2_INTENSITY_LB_PER_MWH = 1100`); capped part-sum (§7.3) | selfConsumption output | `/api/carbon`, HA carbon sensor | measured-and-active |
+| Legacy tariff report | Hourly `onPeakAt` walk; `TARIFF_FLAT_CENTS_PER_KWH = 17` default; whole-home superset (audit #5) (§7.4) | Grid + load integrals | `/api/tariff`, HA `tariff_*` sensors | measured-and-active |
+| Greedy dispatch plan | Per-hour charge/discharge/import branches, `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY` (0.86 → ≈0.927), reserve guard on drawn amount (§7.5) | SoC, forecast, tariff constants | `/api/dispatch-plan`, Lovelace strategy-card | measured-and-active (advisory-only by design) |
+| MPC dispatch recommender | Rolling DP over 24 h with P10 risk branch, degrade detection, `reserveDipPenaltyUsdPerKwh = 1.0` (§7.6) | Forecast, probabilistic band, RTE, legacy flat-tariff env (not `tariff.ts`) | `/api/dispatch/recommend` only — no card, sensor, or engine | **weak-linkage candidate** — endpoint-only; tariff basis diverges from the canonical R-EV model |
+| SoC-saturation curtailment | Bayesian expected-PV gap vs live PV above dynamic charge ceiling `homeChargeCeilingPct()`; surplus W + kWh history (§7.8, §14.2) | SoC, `pv_total`, GHI, circuits | `pv_curtailment_*` sensors, `CurtailmentCard`, lighting posture `surplus` trigger, curtailment alerts | measured-and-active |
+
+### A.8 Alerts, incidents & learning loop (§8, §9)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Alert taxonomy + ISA priority | `Alert` shape; ISA-18.2/IEC 62682 priority derivation (§8.1) | — | Everything alert-adjacent | measured-and-active |
+| Threshold alerts | `computeAlerts()` temp/SoC/offline/reserve bands incl. LFP top-of-charge relaxation (§8.2) | Projections, connectivity, grid | Monitor → notify/audible/sensors/UI | measured-and-active |
+| Outage events | `outageAlerts()` power-loss vs telemetry-gap events (§8.2.3) | Gap detection | Monitor, HA outage sensors | measured-and-active |
+| Peer-comparison learned alerts | Robust median+MAD cross-fleet outliers (§8.3.1) | Fleet projections | Monitor | measured-and-active |
+| Self-baseline alerts | Per-device baseline drift (§8.3.2) | Recorder history | Monitor | measured-and-active |
+| Degradation/runtime forecast alerts | Trailing-3h runtime + SoH-decline with `SOH_FORECAST_*` gates (§8.3.3) | Degradation, forecast | Monitor | measured-and-active |
+| Day-ahead solar/load alerts | `forecastDayAlerts(df, grid)` incl. storm context (§8.3.4) | Forecast, NWS | Monitor | measured-and-active |
+| Alert monitor | 20 s eval; rising-edge debounce, dwell, dispatch decision (§8.4) | All alert sources | notify, broadcast, incidents, persistence | measured-and-active |
+| Quiet hours + morning digest | `NOTIFY_QUIET_HOURS` (default `22-06`), `CRITICAL_BREAKS_QUIET_HOURS` (default false), digest at `NOTIFY_DIGEST_HOUR = 7` (§8.4.2) | Wall clock | notify queue | measured-and-active |
+| Incident clustering | `buildIncidents(alerts)` correlation grouping (§8.4.3) | Live alerts | `/api/incidents`, insights cards | measured-and-active |
+| Cooldown auto-silence | Churn detection → temporary silence (§8.4.4) | Fire history | Monitor | measured-and-active |
+| Notification delivery | ntfy/Pushover/webhook/HA channels, dedupe, digest (§8.5) | Monitor decisions | Operator push | measured-and-active |
+| Feature snapshots | `featureSnapshot.ts` captures LR feature vector once per rise (§8.6, §9.1) | degradation/thermal/IR/chargeCurve reports | Outcome→LR training join | measured-and-active (scaffolding for the gated loop) |
+| Outcome capture | `POST /api/alerts/outcome` labels + family precision rollups (§8.6, §9.2) | Operator button presses (web/Lovelace) | LR update, `/api/alerts/outcomes/stats` | measured-and-active |
+| Online LR (SGD) | `updateFromOutcome` shadow-only step + prequential loss (§9.3) | Snapshots + labels | Shadow model → pack-risk v2 gate | data-gated (gate floor 100 samples; no promotion path by design) |
+| Model health + gate | `computeGateDecision` samples/drift/precision policing (§9.4) | Shadow model state | `/api/models/health`; gate applied inside `computePackRiskV2` | data-gated (same floor; report endpoint has no other consumer) |
+| Machine alert telemetry | `alertTelemetry.ts` structured fire/resolve log (§8.6) | Monitor events | `/api/alert-telemetry` only | **weak-linkage candidate** — machine-readable diagnostic no tool ingests |
+| Repair issues | `computeRepairIssues` composes degradation+soiling+equipmentHealth+skill into repair cards (§8.7) | Those four reports | `/api/repair-issues` only — no UI/HA surface renders it | **weak-linkage candidate** — endpoint-only composition of already-surfaced engines |
+| Zombie gate | Spare-DPU offline-alert gate via explicit SN allowlist (§8.8) | `SPARE_DPU_SNS` | Offline alerting | measured-and-active |
+| Root-cause map | `rootCausesFor(alertId)` static cause suggestions (§8.9) | Alert id | `/api/root-cause` only | **weak-linkage candidate** — no UI passes an alert id to it |
+| Annunciation settings | `alertSettings.ts` per-priority enable + chime repeat, MQTT-bidirectional (§8.11) | Operator toggles | Alert Console, HA switches, broadcast gating | measured-and-active |
+
+### A.9 Audible broadcast & TTS (§10)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| Condition derivation + tick | `conditionFromAlerts` → level; 10 s tick with boot-grace, priority and settings gates (§10.2) | Live alerts | Speaker/SIP announcements | measured-and-active |
+| Alarm-storm gates | Identical-message and per-level repeat suppression; escalations always play (§10.2.3) | Broadcast history | Tick loop | measured-and-active |
+| MA + SIP dispatch | Media-player pre-flight + verification; per-target volume pin; `BROADCAST_SIP_TARGETS` side-channel (§10.3) | HA media players, SIP endpoint | Household audible path | measured-and-active |
+| Announcement renderer | Chime + TTS layout, per-language terminator, content-keyed cache (§10.4) | Level + message | Broadcast, browser/speaker test paths | measured-and-active |
+| Tone library + chime packs | Four level klaxons + named built-ins, version-gated regeneration (§10.5) | — | Renderer | measured-and-active |
+| Operator tones + per-level assignment | `chimeStore.ts` uploads; `chimeConfig.ts` level→chime map (§10.6–10.7) | Operator uploads | Alert Console, renderer | measured-and-active |
+| TTS build + verbalizer | `buildAlertMessage` → `verbalizeForTts` (idempotent normalizer); optional second-language pass (§10.8) | Alert facts | Renderer | measured-and-active (second language data-gated on config) |
+| Wyoming/Piper client | Raw-PCM synth over Wyoming protocol, `en_US-lessac-medium` (§10.9) | Piper add-on | Renderer | measured-and-active |
+| Runtime config two-layer | Env baseline + live override file; `resolveAnnounceVolume` (§10.11) | Operator PUT | Broadcast | measured-and-active |
+| Audible-delivery health | `broadcastHealth.ts` reachability probes → `audible_channel_status` + self-alert (§10.13) | MA/SIP probe results | HA sensors, alert monitor | measured-and-active |
+
+### A.10 Night-charge advisory stack (v1.36–v1.39; no chapter yet — `tariff.ts`, `nightChargeAdvisor.ts`, `nightChargeGate.ts`)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| APS R-EV tariff model | `buildApsREvModel`/`rateAt`: 4-period, 2-season, weekday-literal windows; unconfirmed rates resolve to `null` cents (fail-safe) | Env rate config (`apsREvRatesFromEnv()`; no price API exists) | Night-charge advisor + gate | measured-and-active |
+| Night-charge plan | `computeNightChargePlan`: deep-shortfall buy sized by **bisection against a clamp-exact with-buy re-sim trough** (never additive offset); `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY ≈ 0.927` | Day forecast, probabilistic band, SoC/pool, tariff windows, EV commitments | Evening notify (bypasses quiet hours as a plan advisory), HA `charge_tonight` sensors, `/api/night-charge/status`, `NightChargeCard` | measured-and-active (**advisory-only — the add-on never writes `backupReserveSoc`**) |
+| Plan staleness fail-safe | `nightChargeStateFields`: `charge_tonight` strictly `false` unless plan < 12 h old (`PLAN_STALENESS_MS`) | Latest plan timestamp | HA sensors, `/api/ha-state` | measured-and-active |
+| Night ledger + outcome scorer | Never-pruned `night_charge_ledger`/`_calibration`; `scoreNightOutcome` against the ledger's **stored per-plan window** (weekend windows are disjoint from weekday 23:00–05:00); premature-capture repair; grid-import-propped baselines refused a score | Recorder actuals over the plan window | Readiness gate, status endpoint, card | measured-and-active |
+| Write-readiness gate | `computeNightChargeReadiness`: ≥60 scored forecast-backed nights, effective-N ≥ 45, underbuy ≤ 10 %, PV/load MAE ≤ 20 % and \|bias\| ≤ 10 %, band coverage 0.78–0.92, exclusions ≤ 35 %, ≥90 in-season days | Ledger rows | HA `write_ready` flag (strictly false on failure), status endpoint | data-gated (unlocks only when every criterion holds; the write path itself is intentionally not implemented) |
+
+### A.11 Safety & operational plumbing (§13)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| `processGuard` | Top-level crash classification + survival policy (§13.1) | Uncaught errors | Process lifetime (safety-critical) | measured-and-active |
+| `hostPower` | Pi under-voltage interpretation with `HOST_POWER_MAX_AGE_MS = 120 000` staleness (§13.2) | HA entity named by `HOST_POWER_ENTITY` | Self-alert via `alerts.ts` | data-gated (inert until `HOST_POWER_ENTITY` is configured) |
+| `haStateCache` | TTL-gated entity-watts cache + `extractEntityWatts` (§13.3) | HA states API | Shed advisor, hostPower | measured-and-active |
+| `alertOnset` | Restart-persistent alarm onset timestamps, clear-then-rise semantics (§13.4) | Alert edges | Monitor, TUI ALM screen | measured-and-active |
+| Message-rate floor | Per-SN healthy-only EWMA baseline; collapse < 0.2× baseline sustained 20 min → edge-triggered P3 alert (§13.5) | Cumulative MQTT message counters | Alert monitor self-alert (defeats the "looks fresh" wedge trap) | measured-and-active |
+| Log/format hygiene | `logCoalesce` storm suppression, `logSanitize` bounds, `mqttStartClassify` boot-grace levels, `haPayloadFmt` shared formatting (§13.6) | Log/publish paths | All logging + HA payloads | measured-and-active |
+
+### A.12 UI surfaces & automation posture (§11, §14)
+
+| Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
+|---|---|---|---|---|
+| `/ws` snapshot spine | Throttled full-snapshot frames (§11.0) | SnapshotStore | Web dashboard, wsConsole | measured-and-active |
+| Web dashboard (React PWA) | Tabs: Dashboard/Solar/Battery/Strategy/Alerts/Console (§11.1) | `/ws` + 30+ `/api/*` | Operator | measured-and-active |
+| Telnet TUI | Plant Operator + Summary consoles, DoS-hardened, port 2323 (§11.2) | dataProvider (`totals`/`forecast`/`degradation`) + snapshot | Operator | measured-and-active |
+| HACS Lovelace cards | fleet/solar/battery/circuit/alerts/insights/strategy cards, shared per-host store, CORS allow-list (§11.3) | `/api/*` (verified per-card set) | HA dashboards | measured-and-active |
+| Lighting posture | `rawPosture` ladder (critical/red ≤ 4 h/amber/conserve < 35 % dawn/surplus/normal) + asymmetric 15-min de-escalation hold + restart persistence (§14.1) | Runway, dawn-min SoC, reserve, curtailment, grid backstop | HA `lighting_posture`(+`_reason`) sensors → HA-side automations | measured-and-active |
+| Surplus / opportunistic loads | Curtailment surplus vs hardcoded load catalog (`fitsInSurplus = surplus ≥ estimatedW`) (§14.2) | Curtailment report | Curtailment endpoint/card fields | measured-and-active (catalog hardcoded; `haServiceHint` always `null` — Phase-2 actuation not implemented) |
+| HVAC posture | Two `category:'hvac'` catalog entries only; no posture sensor, no thermostat actuation (§14.3) | — | — | advisory-dormant (documented DORMANT) |
+
+### Candidates for removal review
+
+Consumers verified at the pinned revision; deleting an engine also deletes its listed route/fields. Items are candidates for *review*, not verdicts — each line states the linkage failure.
+
+1. `server/src/analytics.ts:computeMultiDayForecast` (+ `multiDayForecast` builder, `/api/forecast/multi-day`) — no UI, TUI, HA, or engine consumer.
+2. `server/src/dispatch/mpc.ts:recommendDispatch` (entire module + `/api/dispatch/recommend`) — endpoint-only; duplicates dispatch-plan territory on a legacy flat-tariff basis that diverges from `tariff.ts`.
+3. `server/src/analytics.ts:computePackRiskScores` + `server/src/ml.ts:computePackRiskV2` (+ `/api/pack-risk`, `/api/pack-risk/v2`) — nothing reads either endpoint. Removing v2 orphans the chain `server/src/models/onlineLR.ts` + `server/src/models/modelHealth.ts` + the LR-vector portion of `featureSnapshot.ts`; outcome capture itself should stay (it powers `/api/alerts/outcomes/stats` precision accounting).
+4. `server/src/models/hierarchicalBayes.ts:fitHierarchical` (+ `/api/models/hierarchical-pack-soh`) — endpoint-only referee; no automated cross-check.
+5. `server/src/physics/clearSky.ts:physicsPmax`/`physicsScore` (+ `/api/physics/pv-pmax`) — endpoint-only. **`PHOENIX_SITE` must survive any removal** (consumed by `BAYES_OBS_SIGMA2` in `analytics.ts`).
+6. `server/src/physics/lfpOcv.ts:analyzePackLfp` + `server/src/physics/restTracker.ts` (+ `/api/physics/lfp-soc` and the 60 s rest-tracker interval) — `socDriftPct` feeds no alarm or engine; the tick costs cycles regardless.
+7. `server/src/repairIssues.ts:computeRepairIssues` (+ `/api/repair-issues`) — recomposes four already-surfaced engines into cards nothing renders.
+8. `server/src/analytics.ts:rootCausesFor` (+ `/api/root-cause`) — no caller passes an alert id.
+9. `server/src/alertTelemetry.ts` (+ `/api/alert-telemetry`) — marginal: machine-readable fire/resolve log with no ingesting tool; cheapest to keep, first to cut if the file grows.
+
+Not candidates despite thin linkage: the forecast backtest (`/api/backtest/forecast`) is the validation instrument for the alarm-facing PV model; `debugSendCommand` and the HVAC-posture stub are documented deliberate postures, not orphans.
