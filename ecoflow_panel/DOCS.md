@@ -1407,6 +1407,7 @@ are cached (~30 min) on the worker.
 | `DB_PATH` | `/data/ecoflow.db` (supervised) | recorder DB |
 | `LOG_LEVEL` | `info` | `debug`/`trace` un-gates routine "poll ok" lines |
 | `TELNET_ENABLED` / `TELNET_HOST` / `TELNET_PORT` | on / `::` / `2323` | telnet TUI |
+| `TUI_USERNAME` / `TUI_PASSWORD` | empty | console login (empty password = prompt disabled) |
 
 ---
 
@@ -6217,18 +6218,37 @@ Both transports cap concurrency and reap idle sessions so a LAN flood can't spaw
 - Telnet: `MAX_TELNET_CONNS = 16`, `TELNET_IDLE_TIMEOUT_MS = 5 min` (reset on any inbound byte; over-cap connections get a banner and close). Inbound buffer capped at 4096 bytes.
 - WS console: parity `MAX_WS_SESSIONS` / `WS_IDLE_TIMEOUT_MS` + `maxPayload`-bounded frames.
 
-#### 2.3 Mode chooser
+#### 2.3 Operator login (v1.46.0)
 
-On connect, `TuiSession` starts in **chooser** mode (`plant/chooser.ts`), presenting two option cards:
+When a console password is configured (`TUI_PASSWORD` option, non-empty), every
+session — telnet and `/console` alike — starts at a login prompt (`telnet/login.ts`)
+rendered in the same pseudo-LCD lettering as the console brand. `TUI_USERNAME`
+defaults to `operator` when left empty. The input state machine lives in the
+transport-agnostic session driver, so both transports share one implementation:
+printable keys type into the active field (password echoes masked), backspace
+edits, TAB switches fields, ENTER advances username → password → verify.
+Credential comparison is constant-time (fixed-length buffers through
+`timingSafeEqual`, so neither content nor length leaks). Brute-force is
+bounded twice: three failed attempts disconnect the session, and a
+cross-session sliding-window throttle (10 failures per 10 minutes, shared by
+both transports) refuses further submits outright while saturated. `q` does not quit at the prompt (it is a legitimate credential
+character); `Ctrl-C` always disconnects. With no password configured the
+session opens straight into the console — the login layer is opt-in, and
+classic telnet is unencrypted, so the prompt is LAN-level access control, not
+transport security.
 
-- **[1] PLANT OPERATOR** — "SCADA-style technical console" (default highlight).
-- **[2] SUMMARY** — "friendly bird's-eye dashboard (the original UI)".
+#### 2.4 The console (`telnet/plant/`)
 
-Navigation: `←/→` highlight, `Enter` or the digit key selects. From any non-chooser view, **TAB** returns to the chooser. `Q`/`Ctrl-C` disconnects.
+v1.46.0 consolidates the TUI to a **single interface**: the v0.9.13 mode
+chooser and the legacy Summary console (`telnet/screens.ts`) are removed, so
+every connection lands in the same SCADA-style console, there is one theme to
+maintain, and the full terminal is spent on the console itself.
 
-#### 2.4 Plant Operator console (`telnet/plant/`)
-
-Single-line-bordered SCADA frame (deliberately distinct from Summary's double-line borders). Every screen shares a top status header (timestamp, SYS.UPTIME, mode, alarm count), an alarm banner (newest unack'd, keyed on 4-tier ISA-18.2/IEC-62682 priority), a body, and a footer hotkey legend. `PLANT_SCREENS` (`plant/types.ts`), selected with digits **1–6**:
+Every screen shares a top status header (timestamp, SYS.UPTIME, mode, alarm
+count), an alarm banner (newest unack'd, keyed on 4-tier ISA-18.2/IEC-62682
+priority), a body, and a footer hotkey legend. `PLANT_SCREENS`
+(`plant/types.ts`), selected with digits **1–6**; **TAB** cycles to the next
+screen. `Q`/`Ctrl-C` disconnects.
 
 | Key | Id | Label | Content |
 |---|---|---|---|
@@ -6241,15 +6261,28 @@ Single-line-bordered SCADA frame (deliberately distinct from Summary's double-li
 
 The grid state resolver (`gridState.liveGridBackstop`) drives the console's ACTIVE / AVAILABLE / OFF-GRID grid annunciation.
 
-#### 2.5 Summary console (`telnet/screens.ts`)
+#### 2.5 Large-format graphics (v1.46.0)
 
-The original friendly dashboard. Double-line-bordered frame. `SCREENS`, selected with digits:
+Two pure primitive modules feed the screens; both emit plain strings (callers
+colorize whole segments, and visible width equals `.length` before styling):
 
-```
-['overview', 'devices', 'solar', 'battery', 'shp2', 'strategy', 'alerts', 'predictive']
-```
+- **`telnet/bigfont.ts`** — a 5-row pseudo-LCD block font (digits, `%`, `kW`,
+  `.`, `:`, `-`, `+`, `/`, `h`). `bigText(s)` returns 5 equal-width rows;
+  `bigTextWidth(s)` sizes without rendering.
+- **`telnet/gauges.ts`** — `hbar` (eighth-block horizontal bar, width×8-step
+  resolution), `vscale` (eighth-height column chart), `braille` (2×4-dot
+  braille sparkline — 4 vertical levels per half-column), `tile` (3-row
+  ISA-annunciator window), `fracLabel`. All total: NaN/Infinity/degenerate
+  ranges clamp rather than throw.
 
-Navigation specifics: on **battery**, `←/→` selects DPU and `↑/↓` selects pack (5-slot cycle), with the pack-detail pane (VITALS/LIFETIME/thermal grids/32 cell voltages) scrolling on `[` / `]`; on **alerts / predictive / shp2 / strategy**, `↑/↓` scroll the list. Changing screen or DPU/pack resets scroll offsets.
+Screen usage — every placement is width/height-adaptive and degrades to the
+pre-v1.46.0 rendering when the terminal is too small (80×24 stays clean):
+CONSOLE gains a big-digit headline band (fleet SoC / PV kW / LOAD kW) at
+≥ 96×32 plus an always-on full-width POOL `hbar` gauge; TRENDS strips are
+full-width `braille` sparklines; ALARM gains a 7-window annunciator header
+(BATTERY SOLAR THERMAL SHP2 GRID COMMS SYSTEM — lit red for critical, yellow
+for warning, dark-but-visible otherwise, ISA-style); GEN pack rows gain `hbar`
+SoC bars.
 
 #### 2.6 Rendering internals
 
@@ -6532,6 +6565,8 @@ trailing `?` marks the field optional. Defaults are the values in the `options:`
 |--------------|---------|--------|---------|
 | `TELNET_ENABLED` | `false` | `bool` (→ `1`/`0`) | (v1.7.0, security #5, CWE-1188) **Default OFF.** An unauthenticated control-plane on the LAN shouldn't be on by default. Existing installs keep their saved value on upgrade. |
 | `TELNET_PORT` | `2323` | `port` | Telnet TUI port. |
+| `TUI_USERNAME` | empty | `str?` | Console login username (defaults to `operator` when empty and a password is set). |
+| `TUI_PASSWORD` | empty | `password?` | Console login password; empty disables the login prompt. Masked in the options UI. |
 
 #### Diagnostic / advanced
 

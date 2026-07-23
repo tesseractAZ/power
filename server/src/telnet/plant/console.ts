@@ -22,6 +22,11 @@ import {
   alarmBanner, statusHeader, divider, renderTagRow, bandedGauge,
   busBarSegment, MIMIC, stateGlyph, deviationDisplay,
 } from './scada.js';
+// v1.38.0 — big-digit headline band (pseudo-LCD block digits) + eighth-block
+// backup-pool gauge. Both primitives emit plain strings (no ANSI), so their
+// .length is the visible width; colour is applied here around whole segments.
+import { bigText, bigTextWidth, BIG_ROWS } from '../bigfont.js';
+import { hbar, fracLabel } from '../gauges.js';
 import {
   getDpus, getShp2, gridAcInWatts, sum, avg, uptime,
   fmtW, fmtPct, fmtVolt, socState, deviceQuality, alarmLetter,
@@ -54,10 +59,18 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   // At the reference 80×24 terminal that budget is 22 rows, so the last-rendered
   // section — the BATTERY POOL gauge/reserve/runway lines — was the one silently
   // dropped every time, even though its own "BATTERY POOL" divider still printed
-  // above the void. Below ~27 rows we drop the four purely-cosmetic inter-section
-  // blank lines (saves 4 rows, 25→21) so the pool block always survives; above the
-  // threshold (e.g. 160×50) the full spaced-out console-quality layout is unchanged.
-  const compact = view.height <= 26;
+  // above the void. When the frame is tight we drop the five purely-cosmetic
+  // inter-section blank lines so the pool block always survives; on a roomy
+  // terminal the full spaced-out console-quality layout is unchanged.
+  //
+  // v1.38.0 — row accounting: the fully-spaced layout is 27 rows (25 classic +
+  // the always-on POOL gauge line + one spacing blank), plus BIG_ROWS+1 more when
+  // the big-digit headline band is up. The band itself only lights on a terminal
+  // that can afford it (≥ 96 cols for three big figures, ≥ 32 rows so the compact
+  // fallback still fits); below that the classic console renders unchanged.
+  const showBand = W >= 96 && view.height >= 32;
+  const fullRows = 27 + (showBand ? BIG_ROWS + 1 : 0);
+  const compact = view.height - 2 < fullRows;
 
   const shp2 = getShp2(data);
   // v1.0.0 — the CONSOLE is the HOME-plant faceplate: every fleet figure on it must be
@@ -127,6 +140,15 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
     counts,
     ackCount: 0,
   }, W));
+  if (!compact) out.push('');
+
+  /* ── 2b. big-digit headline band + backup-pool gauge ──────────────── */
+  // The band renders the three figures an operator glances at from across the
+  // room — fleet SoC, PV production, panel load — five rows tall. Only when
+  // the terminal is roomy (see showBand above); the gauge line below renders
+  // at EVERY size.
+  if (showBand) out.push(...renderHeadlineBand(soc, pv, load, W));
+  out.push(renderPoolGauge(soc, W));
   if (!compact) out.push('');
 
   /* ── 3. mimic-style power-flow diagram ────────────────────────────── */
@@ -288,6 +310,79 @@ function fmtMinutes(m: number): string {
   const mm = Math.round(m % 60);
   if (h < 24) return `${h}h ${String(mm).padStart(2, '0')}m`;
   return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/* ─── v1.38.0 — big-digit headline band + pool gauge ──────────────────── */
+
+/** SoC → whole-segment colourizer, on the same red<20 / yellow<50 bands as
+ *  socState(); null (no reading) renders grey. */
+function socColor(soc: number | null | undefined): (s: string) => string {
+  const st = socState(soc);
+  return st === 'alarm' ? c.red : st === 'warn' ? c.yellow : st === 'comm' ? c.grey : c.green;
+}
+
+/** kW figure for the big font: one decimal below 10 kW, whole kW above —
+ *  bounds the glyph run so three figures always fit a 96-col band. */
+function fmtBigKw(w: number): string {
+  const kw = w / 1000;
+  return Math.abs(kw) < 10 ? `${kw.toFixed(1)}kW` : `${Math.round(kw)}kW`;
+}
+
+/**
+ * Big-digit headline band: fleet battery SoC, PV kW and panel-load kW rendered
+ * BIG_ROWS tall via bigfont.ts, laid out side by side with a small grey label
+ * line above each figure. SoC is colorized by the shared SoC bands; PV is
+ * always yellow (solar), LOAD cyan. bigText() output is plain, so segments are
+ * measured with .length and colorized whole — never padded after styling.
+ * Returns [] when the three figures cannot fit `width` (caller inserts
+ * unconditionally and simply gets nothing).
+ */
+function renderHeadlineBand(
+  soc: number | null | undefined,
+  pvW: number,
+  loadW: number,
+  width: number,
+): string[] {
+  const groups = [
+    { label: 'BATT SOC', text: soc != null ? `${Math.round(soc)}%` : '--', paint: socColor(soc) },
+    { label: 'PV ARRAY', text: fmtBigKw(pvW), paint: c.yellow },
+    { label: 'LOAD', text: fmtBigKw(loadW), paint: c.cyan },
+  ];
+  const widths = groups.map((g) => bigTextWidth(g.text));
+  const sumW = widths.reduce((a, b) => a + b, 0);
+  const indent = 2;
+  // Spread the figures with up to 8 blank columns between them; if even
+  // 1-column gaps cannot fit, degrade to no band at all.
+  const gap = Math.min(8, Math.floor((width - indent - sumW) / (groups.length - 1)));
+  if (gap < 1) return [];
+
+  let labelRow = ' '.repeat(indent);
+  const rows: string[] = Array.from({ length: BIG_ROWS }, () => ' '.repeat(indent));
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    const big = bigText(g.text);
+    const sep = i > 0 ? ' '.repeat(gap) : '';
+    const lbl = g.label.slice(0, widths[i]);
+    labelRow += sep + c.grey(lbl) + ' '.repeat(widths[i] - lbl.length);
+    for (let r = 0; r < BIG_ROWS; r++) rows[r] += sep + g.paint(big[r]);
+  }
+  return [labelRow, ...rows];
+}
+
+/**
+ * Full-width backup-pool gauge line: POOL label + eighth-block hbar spanning
+ * the remaining columns + fixed 4-char percent readout. Bar colour follows
+ * the shared SoC bands; a missing reading renders an empty grey bar with a
+ * grey em-dash readout. Visible layout: 2 indent + 'POOL ' (5) + bar + 1
+ * space + 4-char label = exactly `width`.
+ */
+function renderPoolGauge(soc: number | null | undefined, width: number): string {
+  const barW = Math.max(4, width - 12);
+  if (soc == null) {
+    return '  ' + c.grey('POOL ') + c.grey(hbar(0, barW)) + ' ' + c.grey('   —');
+  }
+  const frac = soc / 100;
+  return '  ' + c.grey('POOL ') + socColor(soc)(hbar(frac, barW)) + ' ' + c.whiteB(fracLabel(frac));
 }
 
 /**

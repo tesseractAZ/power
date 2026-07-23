@@ -22,7 +22,7 @@ import type { SnapshotStore } from '../snapshot.js';
 import type { Recorder } from '../recorder.js';
 import { createTuiDataProvider } from './dataProvider.js';
 import type { TuiDataProvider } from './session.js';
-import { TuiSession } from './session.js';
+import { TuiSession, authFromEnv } from './session.js';
 import type { InputEvent } from './session.js';
 import {
   HIDE_CURSOR, SHOW_CURSOR, CLEAR_SCREEN, RESET,
@@ -150,8 +150,15 @@ function parseInput(buf: Buffer): { events: InputEvent[]; rest: Buffer } {
       i += 1;
       continue;
     }
+    if (b === 8 || b === 127) {
+      // v1.46.0 — BS/DEL both arrive as backspace depending on the client's
+      // terminal; the login prompt needs it, the console ignores it.
+      events.push({ type: 'key', key: 'backspace' });
+      i += 1;
+      continue;
+    }
     if (b === 9) {
-      // v0.9.13 — TAB key returns to the mode chooser.
+      // v1.46.0 — TAB cycles console screens (and toggles login fields).
       events.push({ type: 'key', key: 'tab' });
       i += 1;
       continue;
@@ -264,6 +271,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       return;
     }
     const session = new TuiSession({
+      auth: authFromEnv(),
       write: (payload) => safeWrite(socket, payload),
       data,
     });
