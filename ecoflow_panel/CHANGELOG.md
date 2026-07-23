@@ -1,3 +1,48 @@
+## v1.45.0 — alarm-delivery resilience: chime-only fallback, spoken retry, pressure dwell, top-of-charge quiet
+
+Ground truth for every change: 2026-07-23. The nightly Home Assistant backup
+(docker image exports, ≈04:58–05:02) saturated host I/O at the moment quiet
+hours ended; the resulting host-pressure critical triggered a red broadcast
+whose spoken render failed on both passes — and the broadcast was skipped
+entirely, delivering NO audio for a red condition. The same morning, the
+fleet's first full grid top-up in weeks produced transient warn-band cell-spread
+alerts on 14 of 15 packs.
+
+**Chime-only render fallback.** A spoken-render failure no longer skips the
+broadcast: the announcement falls back to a chime-only render (cached, no
+Wyoming dependency) so the klaxon always sounds. The failed render stays in
+`lastRender`/errors (outcome `partial`), and the fallback never touches the
+`tts-render-degraded` failure counter — only a fresh spoken render success
+resets it.
+
+**One spoken retry.** A render-failed condition broadcast schedules a single
+spoken retry 90 s later — past the stall window — re-checking that the
+condition level is unchanged, broadcasts are enabled, and quiet hours permit.
+The retry bypasses the storm gate (an intentionally identical message) and is
+never repeated: a second consecutive failure is the `tts-render-degraded`
+alert's job.
+
+**Host-pressure crit dwell.** The host-pressure CRITICAL (and its red
+broadcast) now requires crit-level pressure to sustain for 180 s
+(`HOST_PRESSURE_CRIT_DWELL_S`, 0–900). Observed episodes — boot load, store
+refresh, nightly backup — each lasted 1–3 minutes and are real pressure but
+not red-klaxon events; they surface immediately as the warning instead.
+QoS/degraded-mode keys on the raw assessment and still engages instantly.
+
+**Top-of-charge quiet for warn-band cell spread.** Warn-band (24–49 mV) cell
+imbalance on a pack at ≥ 95% SoC (`VOL_DIFF_PLATEAU_QUIET_SOC_PCT`) is now
+`annunciate: false` — visible in every UI, no push. The v0.58.0 plateau
+machinery already relaxed the critical; the warn band was still pushing on the
+expected LFP top-of-charge signature. Below 95% the standard annunciation
+re-arms; the plateau-critical ceiling (90 mV) still annunciates.
+
+**`errorCodeNum` is a code, not a count.** `SHP2 slot 3 reports 533 errors`
+misread the field: the value is the source device's error code (proven live:
+slot 3 read 533, byte-identical to Core 3's own `sysErrCode`, 5xx battery/BMS
+band). Now reads `reports error code 533 (battery/BMS protection band)`.
+
+Tests: 1,671 green (dwell state machine, plateau-quiet bands, code wording).
+
 ## v1.44.0 — TTS render-failure self-alert (dead-voice detection)
 
 The render cache creates a blind spot: a wedged TTS engine (a Home Assistant

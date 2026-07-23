@@ -4451,6 +4451,7 @@ Battery/voltage/health thresholds:
 | `VOL_DIFF_CRIT_MV` | 50 | cell-imbalance critical (off-plateau) |
 | `VOL_DIFF_PLATEAU_SOC_PCT` | 85 (`VOL_DIFF_PLATEAU_SOC_PCT` env) | above this SoC, relax the crit |
 | `VOL_DIFF_PLATEAU_CRIT_MV` | 90 (`VOL_DIFF_PLATEAU_CRIT_MV` env) | relaxed crit on the LFP top-of-charge plateau |
+| `VOL_DIFF_PLATEAU_QUIET_SOC_PCT` | 95 (env) | at/above this pack SoC, warn-band spread is visible but `annunciate:false` (v1.45.0) |
 | `SOH_WARN_PCT` / `SOH_CRIT_PCT` | 85 / 75 | pack health warn/critical |
 | `PACK_SOC_LOW_PCT` | 10 | per-pack "nearly empty" |
 | `PACK_IMBALANCE_WARN_PCT` | 15 | intra-DPU SoC spread warning |
@@ -4482,7 +4483,7 @@ Battery/voltage/health thresholds:
 **Per-pack (each DPU pack):**
 
 - `soh-crit-<SN>-<pk>` (critical) / `soh-warn-<SN>-<pk>` (warning) — `actSoh ?? soh` below 75 / 85%.
-- `vdiff-crit-<SN>-<pk>` (critical) / `vdiff-warn-<SN>-<pk>` (warning) — cell spread. **Rise-side hysteresis** (F28): warning fires only at ≥ `VOL_DIFF_WARN_RISE_MV` (24 mV), then HOLDS while still ≥ `VOL_DIFF_WARN_MV` (20 mV); held state is keyed `${sn}-${pk}` and pruned each cycle for any pack that produced no reading. Critical at ≥ `critMv` where `critMv` = 90 mV on the plateau (`packSoc ≥ 85%`) else 50 mV. Two `annunciate:false` demotions keep benign excursions visible-but-silent: (a) `balanceState != 0` (BMS actively balancing), (b) a plateau-benign excursion (would be crit off-plateau but under the relaxed plateau ceiling, BMS idle). Silence is bounded — SoC dropping below plateau re-arms the 50 mV critical.
+- `vdiff-crit-<SN>-<pk>` (critical) / `vdiff-warn-<SN>-<pk>` (warning) — cell spread. **Rise-side hysteresis** (F28): warning fires only at ≥ `VOL_DIFF_WARN_RISE_MV` (24 mV), then HOLDS while still ≥ `VOL_DIFF_WARN_MV` (20 mV); held state is keyed `${sn}-${pk}` and pruned each cycle for any pack that produced no reading. Critical at ≥ `critMv` where `critMv` = 90 mV on the plateau (`packSoc ≥ 85%`) else 50 mV. Three `annunciate:false` demotions keep benign excursions visible-but-silent: (a) `balanceState != 0` (BMS actively balancing), (b) a plateau-benign excursion (would be crit off-plateau but under the relaxed plateau ceiling, BMS idle), (c) **v1.45.0** — any warn-band spread on a pack at ≥ `VOL_DIFF_PLATEAU_QUIET_SOC_PCT` (95%): at top of charge the LFP curve transiently widens warn-band spread fleet-wide (observed: 14 of 15 packs within two hours of a full top-up, all self-clearing), so those stay visible without pushing. Silence is bounded — SoC dropping below the respective plateau line re-arms standard annunciation, and the plateau-critical ceiling (90 mV) always annunciates.
 - **Cell forensics (v1.41.0).** Every cell-fault alert carries detection → isolation → root cause with supporting ranges, sourced from the pure helpers `packCellForensics` and `packLatchSignature` (`alerts.ts`, unit-tested, null when per-cell telemetry is absent):
   - `packCellForensics` isolates the cell farthest from the pack's median cell voltage across the 32S1P string (`cellVoltagesMv`) and reports the deviant cell's 1-based index, its voltage, the pack median, the **signed deviation** (negative = weak/low cell), the pack spread, and the sibling packs' spreads for contrast. The critical's detail names the isolated cell inline (spoken by the audible pipeline); the full dossier renders as alert facts.
   - `packLatchSignature` classifies a **BMS protection latch** only when all three legs hold: the pack is SoC-stranded ≥ 20 points below the sibling median, exchanging < 25 W, while the sibling median flow is ≥ 100 W. A pack idling alongside idle siblings never classifies (no false latch verdicts from shared idleness).
@@ -5619,6 +5620,18 @@ The alert names the failure count and last error, states that critical chimes
 still deliver (the klaxon path needs no TTS) while speech is dropped, and
 carries the remedy: restart the Piper add-on, after which the next changed
 message re-renders and the alert self-resolves.
+
+**Failure-path delivery (v1.45.0).** A spoken-render failure never silences a
+condition broadcast: the announcement falls back to a **chime-only render**
+(cached, no Wyoming dependency) so the klaxon still sounds, the outcome reports
+`partial` with the render error retained, and the tick layer schedules **one
+spoken retry 90 s later** — past a transient host stall (the observed failure
+class: nightly backup I/O saturating the host at 04:58–05:02, colliding with
+quiet-hours end). The retry re-checks the condition level, enablement, and
+quiet hours, bypasses the storm gate (the identical message is intentional),
+and is never repeated — a second consecutive failure is this alert's job. The
+chime-only fallback does not touch the failure counter; only a fresh spoken
+render success resets it.
 
 ---
 
@@ -6839,6 +6852,14 @@ The alarm shares its host with other add-ons; a co-tenant failure (memory leak, 
 | Load (1 min) | `/proc/loadavg` | ≥ 3.5 / ≥ 6 (`VITALS_LOAD_*`, 4-core host) |
 
 `assessVitals` (pure) applies per-dimension hysteresis — escalation immediate, de-escalation only past a clearance margin — and rolls the maximum into one assessment. Surfaces: four HA diagnostic sensors (`ecoflow_host_evloop_lag`, `ecoflow_host_mem_available`, `ecoflow_host_disk_free`, `ecoflow_host_load_1m`), `vitalsLevel` on `/api/health`, and ONE rolled alert (`host-pressure-warn`/`host-pressure-crit`) whose detail names every pressured dimension with its value — a starved host is one operator situation, not four alert families. Under a critical assessment, **alarm-first QoS** pauses discretionary analytics ticks (rest tracker, GHI persistence) so the process's remaining CPU serves the poll → alert → broadcast path; the alert states that this shedding is active.
+
+**Crit dwell (v1.45.0).** The critical alert (and the red broadcast it raises)
+requires the crit assessment to sustain for `HOST_PRESSURE_CRIT_DWELL_S`
+(default 180 s, range 0–900) — observed transient spikes (boot load, store
+refresh, the nightly backup's docker exports) each last 1–3 minutes and are
+real pressure but not red-klaxon events. During the dwell the condition
+surfaces as the warning; QoS shedding keys on the raw assessment level and
+engages immediately regardless.
 
 ### 13.0c Out-of-band dead-man heartbeat (v1.43.0)
 

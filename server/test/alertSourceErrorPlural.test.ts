@@ -4,11 +4,12 @@ import { computeAlerts } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ===================================================================
- * v1.2.0 — "SHP2 slot 1 reports 1 error(s)."
- *
- * `shp2-src-err` is a CRITICAL alert, and critical alert details are read aloud by the
- * TTS broadcast path. "error(s)" is not a thing a voice can pronounce. `errorCodeNum`
- * is a COUNT of active error codes, so pluralize it properly.
+ * v1.45.0 — `errorCodeNum` carries the source device's ERROR CODE, not a
+ * count. Proven live 2026-07-23: SHP2 slot 3 read 533, byte-identical to
+ * Core 3's own sysErrCode 533 (battery/BMS protection band) during a real
+ * BMS protection latch; the 2026-07-12 episode's "461" was likewise a code.
+ * The v1.2.0 count reading produced "SHP2 slot 3 reports 533 errors" —
+ * factually wrong, needlessly alarming, and spoken aloud by TTS.
  * =================================================================== */
 
 const now = Date.now();
@@ -22,18 +23,18 @@ const shp2With = (errorCodeNum: number): DeviceSnapshot => ({
 } as DeviceSnapshot);
 
 const detailFor = (n: number): string | undefined =>
-  computeAlerts([shp2With(n)]).find((a) => a.id === 'shp2-src-err-1')?.detail;
+  computeAlerts([shp2With(n)] as any).find((a) => a.id === 'shp2-src-err-1')?.detail;
 
-test('exactly one error reads as singular — no "error(s)" reaches TTS', () => {
-  const d = detailFor(1);
-  assert.equal(d, 'SHP2 slot 1 reports 1 error.');
-  assert.ok(!d!.includes('(s)'));
+test('a 5xx code names the code and the battery/BMS band — never "N errors"', () => {
+  const d = detailFor(533);
+  assert.equal(d, 'SHP2 slot 1 reports error code 533 (battery/BMS protection band).');
+  assert.ok(!d!.includes('errors'));
 });
 
-test('more than one error reads as plural', () => {
-  assert.equal(detailFor(3), 'SHP2 slot 1 reports 3 errors.');
+test('a non-5xx code names the code without the band note', () => {
+  assert.equal(detailFor(461), 'SHP2 slot 1 reports error code 461.');
 });
 
-test('zero errors raises no alert at all', () => {
+test('zero (no error code) raises no alert at all', () => {
   assert.equal(detailFor(0), undefined);
 });

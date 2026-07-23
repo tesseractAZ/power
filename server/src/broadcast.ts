@@ -986,21 +986,54 @@ export function startBroadcastMonitor(
       fromCache: r.fromCache ?? null,
       error: r.error ?? null,
     };
+    // v1.45.0 — NEVER silent on a spoken-render failure. Live 2026-07-23
+    // 05:01 MST: the nightly backup's I/O storm stalled both spoken passes and
+    // the whole broadcast was skipped — a red condition transition delivered
+    // NO audio at all. On failure, fall back to a chime-only render (cached,
+    // no Wyoming dependency) so the klaxon still sounds; the tick layer
+    // schedules one spoken retry (pendingSpokenRetry) to deliver the speech
+    // once the stall passes. The failed render stays in lastRender/errors so
+    // the outcome reports partial and the tts-render-degraded counter is
+    // untouched by the chime-only fallback (it only resets on a fresh SPOKEN
+    // render success).
+    let rr = r;
+    let spokenDropped = false;
     if (!r.ok || !r.filename) {
-      // Render failed. If a message was requested but TTS broke, we COULD
-      // fall through to klaxon-only by re-rendering with message=null.
-      // For now: surface the error so it's visible and skip the broadcast.
-      // The user can pin BROADCAST_TARGETS to "" to disable while
-      // diagnosing without losing the alert pipeline.
       wyomingReachable = false;
       errors.push(`render: ${r.error ?? 'unknown'}`);
-      return { ok: false, errors };
+      if (message != null) {
+        const fb = await renderAnnouncement({
+          level,
+          message: null,
+          klaxonDir: opts.klaxonDir,
+          chimePath: chime.path,
+          chimeTag: chime.tag,
+          cacheDir: opts.cacheDir,
+          wyomingHost: cfg.wyomingHost,
+          wyomingPort: cfg.wyomingPort,
+          leadSilenceMs: cfg.leadSilenceMs,
+          announceRepeat: cfg.repeat,
+          repeatGapMs: cfg.repeatGapMs,
+          chimeGapMs: cfg.chimeGapMs,
+          log,
+        });
+        if (fb.ok && fb.filename) {
+          spokenDropped = true;
+          rr = fb;
+          errors.push('fallback: chime-only (spoken render failed)');
+          log(`broadcast: spoken render failed — falling back to chime-only so the ${level} condition still sounds`);
+        } else {
+          return { ok: false, errors };
+        }
+      } else {
+        return { ok: false, errors };
+      }
     }
-    wyomingReachable = message ? true : wyomingReachable; // only "proved" by a TTS render
+    if (message && !spokenDropped) wyomingReachable = true; // only "proved" by a TTS render
 
     // v1.25.0 — the fetch URL for the rendered audio; shared by the SIP side-channel
     // and the Music Assistant path below.
-    const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
+    const url = `${cfg.audioBase}${opts.cacheUrlPath}/${rr.filename}`;
 
     // v1.25.0 — SIP / announce-only side-channel (the Switchboard cordless), fired
     // HERE — BEFORE the MA-target availability pre-flight — and FIRE-AND-FORGET:
@@ -1054,7 +1087,7 @@ export function startBroadcastMonitor(
       scheduleBroadcastRetry(level, message, messageEs, 'play_announcement failed after in-call retries');
     }
 
-    if (message) lastSpokenMessage = message;
+    if (message && !spokenDropped) lastSpokenMessage = message;
 
     const dt = Date.now() - t0;
     // v0.15.18 — a real MA announcement blocks until playback completes
@@ -1073,9 +1106,9 @@ export function startBroadcastMonitor(
       lastPlayedLevel = level;
       lastPlayedMessage = message;
     }
-    const renderTag = r.fromCache ? 'cached' : `rendered+${r.ttsRenderMs}ms`;
+    const renderTag = rr.fromCache ? 'cached' : `rendered+${rr.ttsRenderMs ?? 0}ms`;
     if (errors.length === 0) {
-      log(`broadcast: ${level} → ok in ${dt}ms (${cfg.targets.length} MA${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${r.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
+      log(`broadcast: ${level} → ok in ${dt}ms (${cfg.targets.length} MA${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${rr.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
     } else {
       log(`broadcast: ${level} → ${errors.length} error(s) in ${dt}ms: ${errors.join('; ')}`);
     }
@@ -1093,6 +1126,16 @@ export function startBroadcastMonitor(
   // HTTP 500s ("Server got itself in trouble", observed Jun 12 04:12Z). Now
   // a second request simply waits for the first playback to finish — and by
   // then the storm gates above usually (correctly) absorb it.
+  // v1.45.0 — one spoken retry after a render-failed condition broadcast. The
+  // failure class this covers is a transient host stall (the nightly backup's
+  // docker exports saturate the Pi ~04:58-05:02 MST, colliding with quiet-hours
+  // end at 05:00): the chime-only fallback already sounded, and the speech is
+  // re-attempted once after the stall window. A single retry only — a second
+  // consecutive render failure is the tts-render-degraded alert's job, not a
+  // retry loop's.
+  const SPOKEN_RETRY_DELAY_MS = 90_000;
+  let pendingSpokenRetry: { level: ConditionLevel; failedAt: number } | null = null;
+
   let broadcastChain: Promise<unknown> = Promise.resolve();
   const runBroadcast = (
     level: ConditionLevel,
@@ -1141,6 +1184,33 @@ export function startBroadcastMonitor(
       prevLevel = level;
       prevCrit = crit;
       return;
+    }
+    // v1.45.0 — due spoken retry (see pendingSpokenRetry). Runs only when no
+    // transition work is in flight; re-checks that the condition level is
+    // unchanged (a new transition supersedes the retry naturally), that
+    // broadcasts are still enabled, and quiet hours — the same gate the
+    // original attempt faced. Bypasses the storm gate: an intentionally
+    // identical message is the whole point of the retry.
+    if (pendingSpokenRetry && !tickInFlight && Date.now() - pendingSpokenRetry.failedAt >= SPOKEN_RETRY_DELAY_MS) {
+      const want = pendingSpokenRetry.level;
+      pendingSpokenRetry = null;
+      if (level === want && cfg.enabled && !(inQuiet() && !(level === 'red' && cfg.criticalBreakThrough))) {
+        tickInFlight = true;
+        try {
+          log(`broadcast: spoken retry after render failure → ${level}`);
+          const message = messageFor(level, alerts);
+          const messageEs = messageEsFor(level, alerts);
+          const result = await runBroadcast(level, message, true, messageEs);
+          lastBroadcastAt = Date.now();
+          lastLevel = level;
+          lastOutcome = result.ok ? 'success' : 'partial';
+          lastErrors = result.errors;
+        } finally {
+          tickInFlight = false;
+        }
+        return;
+      }
+      log(`broadcast: spoken retry dropped — level moved ${want} → ${level} or gated`);
     }
     const transitioned = level !== prevLevel;
     const newCrit = level === 'red' && crit > prevCrit;
@@ -1216,6 +1286,7 @@ export function startBroadcastMonitor(
     tickInFlight = true;
     try {
       log(`broadcast: condition transition → ${level}${newCrit ? ' (new crit)' : ''}, ${cfg.targets.length} target(s)`);
+      pendingSpokenRetry = null; // a fresh transition supersedes any queued retry
       const message = messageFor(level, alerts);
       const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
       const result = await runBroadcast(level, message, false, messageEs);
@@ -1223,6 +1294,12 @@ export function startBroadcastMonitor(
       lastLevel = level;
       lastOutcome = result.ok ? 'success' : 'partial';
       lastErrors = result.errors;
+      // v1.45.0 — a render failure (chime-only fallback or full skip) earns ONE
+      // spoken retry after the stall window.
+      if (!result.ok && result.errors.some((e) => e.startsWith('render:'))) {
+        pendingSpokenRetry = { level, failedAt: Date.now() };
+        log(`broadcast: spoken render failed — one retry scheduled in ${SPOKEN_RETRY_DELAY_MS / 1000}s`);
+      }
     } finally {
       tickInFlight = false;
     }

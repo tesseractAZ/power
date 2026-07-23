@@ -64,9 +64,35 @@ test('vdiff-warn while BALANCING is likewise gated to annunciate:false', () => {
   assert.equal(a!.annunciate, false);
 });
 
-test('vdiff-warn while NOT balancing annunciates normally', () => {
-  const a = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }));
+test('vdiff-warn while NOT balancing annunciates normally (below the quiet plateau)', () => {
+  // soc 80 — under the v1.45.0 95% plateau-quiet line, so the balancing gate
+  // alone decides annunciation here.
+  const a = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }, 80));
   assert.ok(a);
+  assert.notEqual(a!.annunciate, false);
+});
+
+/* v1.45.0 — top-of-charge quiet for the WARN band. 2026-07-23 ground truth:
+ * the first full grid top-up in weeks put every pack >= 95% and 14 of 15
+ * packs fired 24-49 mV warn-band spreads that self-cleared in minutes. Those
+ * stay VISIBLE but must not push; the critical path is untouched. */
+test('v1.45.0 — warn-band spread on a >= 95% pack is visible but annunciate:false', () => {
+  const a = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }, 96));
+  assert.ok(a, 'stays visible in the UI');
+  assert.equal(a!.annunciate, false);
+  assert.match(a!.detail, /top-of-charge/i);
+});
+
+test('v1.45.0 — the same spread at 94% annunciates normally (quiet line is 95)', () => {
+  const a = vdiffWarn(dpuWithPack({ maxVolDiffMv: 30, balanceState: 0 }, 94));
+  assert.ok(a);
+  assert.notEqual(a!.annunciate, false);
+});
+
+test('v1.45.0 — a plateau-critical spread (>= 90 mV) at 96% still annunciates as critical', () => {
+  const a = vdiffCrit(dpuWithPack({ maxVolDiffMv: 95, balanceState: 0 }, 96));
+  assert.ok(a, 'a genuinely large spread is critical even at top of charge');
+  assert.equal(a!.severity, 'critical');
   assert.notEqual(a!.annunciate, false);
 });
 

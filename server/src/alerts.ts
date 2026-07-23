@@ -279,6 +279,8 @@ const VOL_DIFF_CRIT_MV = 50;
 // as the balancing gate does. A genuinely large spread (>= the relaxed ceiling)
 // still goes critical + audible. Env-tunable.
 const VOL_DIFF_PLATEAU_SOC_PCT = Number(process.env.VOL_DIFF_PLATEAU_SOC_PCT ?? 85);
+// v1.45.0 — above this SoC, WARN-band spread (24-49 mV) is annunciate:false.
+const VOL_DIFF_PLATEAU_QUIET_SOC_PCT = Number(process.env.VOL_DIFF_PLATEAU_QUIET_SOC_PCT ?? 95);
 const VOL_DIFF_PLATEAU_CRIT_MV = Number(process.env.VOL_DIFF_PLATEAU_CRIT_MV ?? 90);
 const SOH_WARN_PCT = 85;
 const SOH_CRIT_PCT = 75;
@@ -381,6 +383,23 @@ const RESERVE_BLIND_CRITICAL_MS = 60 * 60 * 1000;
 // with margin while a genuine fault (which persists indefinitely) is delayed only
 // one alarm-eval cycle past the window.
 const DPU_ERR_DEBOUNCE_MS = 3 * 60 * 1000;
+
+/* v1.45.0 — host-pressure crit dwell. The vitals assessment escalates
+ * instantly (correct for QoS), but the RED ANNUNCIATION requires the crit to
+ * sustain: 1-3-minute load spikes from the nightly backup / boot / store
+ * refresh are real pressure yet not red-klaxon events. Pure over (level, now)
+ * with a module holder, mirroring heldHostTempLevel. */
+export const HOST_PRESSURE_CRIT_DWELL_MS = (() => {
+  const v = Number(process.env.HOST_PRESSURE_CRIT_DWELL_S);
+  return Number.isFinite(v) && v >= 0 && v <= 900 ? v * 1000 : 180_000;
+})();
+let hostPressureCritSinceMs: number | null = null;
+export function hostPressureCritSustained(level: 'ok' | 'warn' | 'crit', now: number): boolean {
+  if (level !== 'crit') { hostPressureCritSinceMs = null; return false; }
+  hostPressureCritSinceMs ??= now;
+  return now - hostPressureCritSinceMs >= HOST_PRESSURE_CRIT_DWELL_MS;
+}
+export function _resetHostPressureDwellForTest(): void { hostPressureCritSinceMs = null; }
 
 export function computeAlerts(
   devices: Record<string, DeviceSnapshot>,
@@ -507,7 +526,15 @@ export function computeAlerts(
   // /proc) produces no alert — null over fabrication.
   const vitals = currentAssessment();
   if (vitals && vitals.level !== 'ok') {
-    const crit = vitals.level === 'crit';
+    // v1.45.0 — the CRITICAL must SUSTAIN before it annunciates red. Ground
+    // truth (2026-07-23): four crit episodes in 9.5 h, each 1-3 min — boot
+    // load, a store refresh, and the nightly backup's docker exports; the
+    // 05:00:50 episode triggered a red broadcast about the backup itself.
+    // Transient spikes now surface immediately as the WARNING; the critical
+    // (and its red broadcast) fires only once crit pressure has stood for the
+    // dwell. QoS/degraded-mode is driven by the assessment level directly and
+    // still engages instantly — only the annunciation waits.
+    const crit = vitals.level === 'crit' && hostPressureCritSustained(vitals.level, now);
     out.push({
       id: crit ? 'host-pressure-crit' : 'host-pressure-warn',
       severity: crit ? 'critical' : 'warning',
@@ -517,6 +544,8 @@ export function computeAlerts(
       detail: `The host running this monitor shows resource pressure — ${vitals.reasons.join('; ')}. Another add-on is likely consuming the host; check the Home Assistant add-on pages for the top CPU/memory consumer. Alert delivery may be delayed while pressure persists${crit ? ' (discretionary analytics are paused to protect the alarm path)' : ''}.`,
       facts: vitals.reasons.map((r, i) => ({ label: `Signal ${i + 1}`, value: r })),
     });
+  } else {
+    hostPressureCritSustained('ok', now); // clears the dwell holder between episodes
   }
 
   // v1.44.0 — dead-voice self-alert. A wedged TTS engine hides behind the
@@ -805,8 +834,17 @@ export function computeAlerts(
         // and it stays visible as a warning meanwhile (SoH/degradation engines also
         // track it independently).
         const plateauBenign = onPlateau && !balancing && pk.maxVolDiffMv >= VOL_DIFF_CRIT_MV && pk.maxVolDiffMv < critMv;
-        const plateauNote = plateauBenign ? ' Expected top-of-charge cell spread.' : '';
-        const annun = (balancing || plateauBenign) ? { annunciate: false } : {};
+        // v1.45.0 — quiet the WARN band at top-of-charge too. Ground truth
+        // (2026-07-23): the fleet's first full grid top-up in weeks put every
+        // pack >= 95% under morning curtailment and 14 of 15 packs fired
+        // 24-49 mV warn-band spreads within two hours — all self-cleared in
+        // minutes. That is the plateau signature, not degradation: a genuinely
+        // diverging pack rides its spread DOWN off the plateau (the 50 mV crit
+        // re-arms below 85%) and the peer/SoH engines track it independently.
+        // Warn-band spread on a >= 95% pack stays VISIBLE but does not push.
+        const plateauQuietWarn = packSoc != null && packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT && pk.maxVolDiffMv < critMv;
+        const plateauNote = (plateauBenign || plateauQuietWarn) ? ' Expected top-of-charge cell spread.' : '';
+        const annun = (balancing || plateauBenign || plateauQuietWarn) ? { annunciate: false } : {};
         // v1.21.0 (engine-review F28) — rise-side hysteresis: fire the warning
         // only at >= VOL_DIFF_WARN_RISE_MV; once fired, hold it while the spread
         // is still >= VOL_DIFF_WARN_MV. A spread descending OUT of critical
@@ -931,8 +969,13 @@ export function computeAlerts(
     for (const s of sp.sources) {
       const tag = `SHP2 slot ${s.slot}`;
       if ((s.errorCodeNum ?? 0) !== 0) {
-        // v1.2.0 — this detail is read aloud by TTS on a CRITICAL alert, and "error(s)"
-        // is not something a voice can say. errorCodeNum is a COUNT of active codes.
+        // v1.45.0 — errorCodeNum carries the source device's ERROR CODE, not a
+        // count (the v1.2.0 reading). Proven live 2026-07-23: slot 3 read 533,
+        // byte-identical to Core 3's own sysErrCode 533 (battery/BMS protection
+        // band); the 2026-07-12 episode's "461" was likewise a code. The old
+        // count phrasing produced "SHP2 slot 3 reports 533 errors" — wrong and
+        // alarming — and TTS spoke it. Name it as a code, with the same 5xx
+        // band note the dpu-err alert uses.
         const n = s.errorCodeNum!;
         // v1.14.0 — debounce, mirroring the dpu-err pattern (same 3-min window):
         // a transient device-reported error (fired 05:35:01, cleared 05:36:01 on
@@ -943,7 +986,7 @@ export function computeAlerts(
         const srcOnset = connectivity?.shp2SrcErrOnsetBySlot?.get(`${shp2.sn}:${s.slot}`);
         const srcDebounced = srcOnset != null && srcOnset.count === n && (now - srcOnset.sinceMs) < DPU_ERR_DEBOUNCE_MS;
         if (!srcDebounced) {
-          out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', detail: `${tag} reports ${n} ${n === 1 ? 'error' : 'errors'}.` });
+          out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', detail: `${tag} reports error code ${n}${n >= 500 && n < 600 ? ' (battery/BMS protection band)' : ''}.` });
         }
       }
       if (s.isConnected && !s.hwConnect) {
