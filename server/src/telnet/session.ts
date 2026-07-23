@@ -22,7 +22,7 @@
  * connection lifecycle, and any protocol negotiation.
  *
  * Behaviour is byte-for-byte identical to the pre-extraction telnet server:
- * the same `renderChooser`/`renderPlant`/`renderScreen` calls, the same frame
+ * the same `renderPlant`/`renderLogin` calls, the same frame
  * body assembly (HIDE_CURSOR + CURSOR_HOME + per-line CLEAR_EOL + CLEAR_BELOW),
  * the same FNV-1a frame hash, and the same BEGIN_SYNC/END_SYNC wrapping.
  */
@@ -148,6 +148,24 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): { username: s
 }
 
 /**
+ * v1.47.1 (full-pass) — the login prompt can only ever TYPE printable ASCII
+ * (both transports emit keys for bytes 0x20-0x7E) capped at AUTH_FIELD_MAX
+ * chars, but the options schema accepts any string. A password outside that
+ * envelope is a guaranteed lockout: every submit fails until the throttle
+ * saturates. Returns the problems for the caller to log at startup — loudly,
+ * once — rather than letting the operator discover it at the prompt.
+ */
+export function authConfigProblems(auth: { username: string; password: string } | null): string[] {
+  if (!auth) return [];
+  const out: string[] = [];
+  for (const [label, v] of [['TUI_USERNAME', auth.username], ['TUI_PASSWORD', auth.password]] as const) {
+    if (v.length > AUTH_FIELD_MAX) out.push(`${label} is ${v.length} chars — the login prompt accepts at most ${AUTH_FIELD_MAX}; this credential can never be typed`);
+    if (!/^[\x20-\x7e]*$/.test(v)) out.push(`${label} contains non-ASCII characters — the login prompt only accepts printable ASCII; this credential can never be typed`);
+  }
+  return out;
+}
+
+/**
  * One TUI session: the render/input state machine. Construct one per
  * connection; drive it with `feed()`, `resize()`, and the 1 Hz `draw()` tick.
  */
@@ -269,8 +287,11 @@ export class TuiSession {
         if (this.plantScreen === 'gen') {
           const dpus = getDpus({ snap: this.data.store.get() } as Parameters<typeof getDpus>[0]);
           const count = Math.max(1, dpus.length);
-          if (key === 'left') this.plantGenSel = (this.plantGenSel - 1 + count) % count;
-          else if (key === 'right') this.plantGenSel = (this.plantGenSel + 1) % count;
+          // v1.47.1 (full-pass) — a DPU change invalidates the pack index (a
+          // 2-pack unit after a 5-pack unit rendered "Pack 5/2" with no
+          // highlighted row); the renderer also clamps defensively.
+          if (key === 'left') { this.plantGenSel = (this.plantGenSel - 1 + count) % count; this.plantGenPack = 0; }
+          else if (key === 'right') { this.plantGenSel = (this.plantGenSel + 1) % count; this.plantGenPack = 0; }
           else {
             // r27 — pack count is per-DPU (a DPU can report 1-5 packs), not a
             // fixed 5: the old hardcoded `% 5` let the selector land on a
@@ -311,9 +332,13 @@ export class TuiSession {
         // Saturated window: refuse outright — no oracle, no more attempts.
         return 'denied';
       }
-      const ok = this.auth != null
-        && credentialEqual(st.user, this.auth.username)
-        && credentialEqual(this.loginPass, this.auth.password);
+      // v1.47.1 (full-pass) — evaluate BOTH compares unconditionally: the
+      // short-circuit skipped the password compare on a wrong username,
+      // re-opening exactly the field-level timing oracle the fixed-length
+      // compare exists to prevent.
+      const userOk = this.auth != null && credentialEqual(st.user, this.auth.username);
+      const passOk = this.auth != null && credentialEqual(this.loginPass, this.auth.password);
+      const ok = userOk && passOk;
       if (ok) {
         this.mode = 'plant';
         this.plantScreen = 'console';

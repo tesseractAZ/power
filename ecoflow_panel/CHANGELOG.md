@@ -1,3 +1,35 @@
+## v1.47.1 — console full-pass fixes
+
+A four-angle QA pass on the v1.46.0 console (adversarial code review,
+rendering fuzz across sizes and degenerate data, a live interactive session,
+and a raw-TCP auth transport probe) produced ten findings; all are addressed.
+
+- **ALARM message column adapts below 90 cols** — the fixed 65-col offset left
+  zero visible message text on 60–64-col terminals; at least ~24 message
+  columns now always survive.
+- **Narrow annunciator folds instead of dropping** — when the tile roster
+  doesn't fit, hidden groups fold into the last visible window (lit at the
+  highest folded severity), preserving the no-alarm-group-ever-unlit invariant.
+- **GEN pack index resets on DPU change and clamps in the renderer** — a
+  2-pack unit after a 5-pack unit rendered "Pack 5/2" with no highlighted row.
+- **Segment-split CRLF no longer double-enters** — a chunk-final CR now
+  swallows the LF/NUL arriving in the next TCP segment (at the login prompt
+  the double enter submitted an empty password and burned an attempt).
+- **NAWS IAC-escape unescaping** — a dimension byte of 255 no longer shifts
+  the payload and misparses the window size.
+- **Credential compare is branchless across fields** — both compares always
+  run, closing a username-validity timing oracle the short-circuit re-opened.
+- **Untypeable-credential guard** — the login prompt only accepts printable
+  ASCII ≤ 64 chars; a configured credential outside that envelope now logs a
+  loud startup warning (and the option help documents the envelope) instead of
+  guaranteeing a lockout.
+- Footer legend corrected (`TAB next` — the chooser it referenced is gone);
+  dead `trendStrip` export removed; stale comment references to deleted
+  modules updated.
+- New coverage: raw-TCP telnet auth integration suite (real IAC negotiation,
+  BS/DEL editing, q-at-prompt, 3-failure disconnect) plus render regressions
+  for the three visual fixes.
+
 ## v1.47.0 — remove the HACS Lovelace card family
 
 The Lit card bundle (`lovelace/` — seven cards plus shared infrastructure,
