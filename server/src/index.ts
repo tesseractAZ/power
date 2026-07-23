@@ -449,31 +449,6 @@ await app.register(fastifyStatic, {
   wildcard: true,
 });
 
-// v0.9.55 — serve the HACS Lovelace card bundles directly from the
-// add-on at `/lovelace/<card>.js`, so a HA dashboard can reference them
-// as Lovelace resources without HACS being installed. The `@fastify/cors`
-// register on line 112 already passes `origin: true`, so a dashboard
-// hosted at :8123 can do `import('http://host:8787/lovelace/foo.js')`
-// without the browser blocking the module fetch.
-//
-// In production (the add-on image) the Dockerfile copies
-// `lovelace/dist/` to `/app/lovelace/dist/`; in local dev the relative
-// `../../lovelace/dist` from `server/dist/` resolves the same way.
-const lovelaceDist =
-  process.env.LOVELACE_DIST_PATH ??
-  resolve(dirname(fileURLToPath(import.meta.url)), '../../lovelace/dist');
-if (existsSync(lovelaceDist)) {
-  await app.register(fastifyStatic, {
-    root: lovelaceDist,
-    prefix: '/lovelace/',
-    decorateReply: false,
-    wildcard: false,
-  });
-  app.log.info(`lovelace: serving card bundles from ${lovelaceDist}`);
-} else {
-  app.log.warn(`lovelace: no bundle directory at ${lovelaceDist}`);
-}
-
 const store = new SnapshotStore();
 /** v0.36.0 — snapshot the dashboard/TUI consume, augmented with the live grid backstop. */
 function snapshotForClient(): FleetSnapshot {

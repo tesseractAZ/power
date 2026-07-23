@@ -6035,7 +6035,7 @@ JSON endpoints:
 
 ---
 
-## 11. User Interfaces: Web Dashboard, Telnet TUI & HACS Cards
+## 11. User Interfaces: Web Dashboard & Telnet TUI
 
 The ecoflow-panel add-on exposes the same underlying fleet telemetry through **three independent front ends**, each aimed at a different consumption context:
 
@@ -6290,63 +6290,14 @@ SoC bars.
 
 ---
 
-### 3. HACS Lovelace cards (`lovelace/`)
+### 3. HACS Lovelace cards — removed (v1.47.0)
 
-Lit-based custom cards installed via HACS, for embedding the fleet views inside a native Home Assistant Lovelace dashboard. **Seven Lit cards** (v1.1.0) plus two legacy cards. Source in `lovelace/src/`.
-
-#### 3.1 Card set
-
-| Card (`custom:` type) | Source | Reads (beyond `/ws` snapshot) |
-|---|---|---|
-| `ecoflow-fleet-card` | `cards/fleet-card.ts` | `/api/runway`, `/api/summary/today`, `/api/forecast` — energy-flow SVG, runway, per-device grid, 24 h forecast, connection badge |
-| `ecoflow-battery-card` | `cards/battery-card.ts` | `/api/degradation`, `/api/round-trip-efficiency` — thermal + per-pack vitals + degradation trend + RTE |
-| `ecoflow-solar-card` | `cards/solar-card.ts` | `/api/summary/today`, `/api/forecast`, `/api/forecast/probabilistic`, `/api/clipping`, `/api/shade-report`, `/api/soiling-decomposition` — live PV, per-MPPT, probabilistic forecast, clipping/soiling/shade |
-| `ecoflow-alerts-card` | `cards/alerts-card.ts` | `/api/alerts/outcome`, `/api/notify/status`, `/api/notify/test` — active/cleared alerts, predictive insights, notify controls |
-| `ecoflow-strategy-card` | `cards/strategy-card.ts` | `/api/dispatch-plan` — dispatch/strategy |
-| `ecoflow-insights-card` | `cards/insights-card.ts` | 15 analytics endpoints (self-consumption, thermal-events, equipment-health, shade, soiling, string-mismatch, ev-window, charge-curve, internal-resistance, forecast-skill, ambient-thermal, confidence, nws-alerts, incidents, weather/ensemble) |
-| `ecoflow-circuit-card` | `cards/circuit-card.ts` | `/api/circuit/history`, `/api/history` — per-circuit history |
-| `ecoflow-panel-card` (legacy) | — | 12 headline numbers |
-| `ecoflow-panel-dashboard` (legacy v0.9.4) | — | Tabbed Dashboard/Battery/Forecast/Alerts |
-
-For deep analytics not in a single card (full strategy config, per-circuit history at length), each card links out to the PWA at `:8787`.
-
-#### 3.2 Shared per-host snapshot store
-
-All Lit cards extend `EcoflowCardBase` (`shared/base-card.ts`) and share **one WebSocket per host** via a refcounted singleton store (`shared/snapshot-store.ts`, `getStore(host)`). Behavior:
-
-- **Config**: each card accepts `host` (default `http://homeassistant.local:8787`), `title` (default `Power`), and `refresh_seconds` (default 30, min clamped to 10 for HTTP fetches).
-- **Subscribe lifecycle**: the first subscriber opens the WS **and** fires a one-shot REST `/api/snapshot` seed (`seedFromRest`) so cards mounted before the first WS push render immediately; the seed never clobbers a snapshot already delivered by WS.
-- **Reconnect**: exponential backoff `[1s, 2s, 4s, 8s, 16s, 30s]` (capped), reset to 1 s on open. `connectionState()` reports `idle | connecting | open | closed | reconnecting` for the fleet card's badge.
-- **Grace teardown**: when the last subscriber leaves, the WS stays alive for `GRACE_MS = 5000` before teardown, so Lovelace tab switches / minor DOM churn don't churn the connection; the singleton is dropped only after the grace window expires with no subscribers.
-- The last good snapshot is retained across a disconnect, so a card keeps showing data while "reconnecting".
-
-#### 3.3 How cards reach the add-on over CORS
-
-Cards run inside the HA frontend (origin e.g. `http://homeassistant.local:8123`) but fetch/WS to the add-on's own origin (`http://homeassistant.local:8787`) — a **cross-origin** request. The server's `@fastify/cors` uses `auth.corsOriginCallback`:
-
-- A missing `Origin` (same-origin, curl, server-side) → allowed.
-- Otherwise `isAllowedOrigin(origin, sameOrigins)` must pass: same-origin set, the explicit **`HA_DASHBOARD_ORIGINS`** allowlist (`http(s)://homeassistant(.local):8123` and `:8787`), or the **`LAN_ORIGIN_RE`** regex — private IPv4 ranges (`10.*`, `127.*`, `192.168.*`, `172.16–31.*`) or any `*.local` host, on ports `8123` or `8787`.
-- Anything else → CORS denied (no `Access-Control-Allow-Origin`, browser blocks it).
-
-`snapshot-store.ts` normalizes the configured `host` for both transports: `buildWsUrl` maps `http→ws`/`https→wss` (or defaults a bare `host:port` to `ws://`) + `/ws`; `buildApiUrl` maps `ws→http` (or defaults to `http://`) + the path. `shared/api.ts` provides the same `apiUrl(host, path)` / `wsUrl(host)` helpers for the REST fetches.
-
-Read-only telemetry (snapshot/analytics) passes CORS freely; **writes** (alert outcome, notify test, chime upload) additionally require the write-auth preHandler (`requireWriteAuth`): HA-ingress + Supervisor source, same-origin, or an `X-Panel-Write-Token` header — otherwise `401`.
-
-#### 3.4 Shared building blocks
-
-`lovelace/src/shared/` mirrors the web app's helpers so the cards render consistently: `theme.css.ts` (theme tokens), `glossary.ts` (the same term→explanation map applied as tooltips inside the cards), `charts.ts` (inline SVG sparklines/charts — no chart library), `format.ts`/`sort.ts`/`alerts.ts`, and `primitives/` (`ef-section`, `ef-tile`, `ef-badge` Lit components). Cards refresh their HTTP-backed resources on their own `refresh_seconds` interval independent of the shared WS snapshot.
-
----
-
-### Cross-cutting notes
-
-- **One data model, three renderers.** The `FleetSnapshot` pushed over `/ws` and the `/api/*` analytics are identical across all three UIs; only the presentation differs (React tiles, ANSI SCADA frames, Lit cards).
-- **Honest-null / empty-by-design.** Predictive/insight sections render nothing on a healthy fleet rather than fabricating numbers — true in the web `AdvancedInsightsCard`, the Lovelace `insights-card`, and the TUI predictive screen.
-- **Ingress-relative everywhere.** The web SPA (via `baseDir()`), its service worker, and its WS all resolve correctly behind HA Ingress; the WS console's `panel_iframe` and the Lovelace cards' cross-origin fetches are explicitly accommodated by the CORS allowlist.
-- **Auth asymmetry.** Reads are open (CORS-allowlisted); the telnet/`/console` TUI is unauthenticated LAN-trust; every write is gated by `requireWriteAuth` (ingress / same-origin / token).
-
-
----
+The HACS Lit card family (`ecoflow-fleet/alerts/battery/solar/strategy/insights/circuit`)
+and its `/lovelace/*` static route were removed in v1.47.0: the cards
+duplicated the ingress web dashboard, the deployment consuming them had pinned
+a stale CDN snapshot, and retiring them deletes an unauthenticated CORS-open
+static surface plus committed build artifacts. Historical documentation lives
+in the pre-v1.47.0 tags.
 
 ## 12. Configuration, Deployment, Security & Operations
 
