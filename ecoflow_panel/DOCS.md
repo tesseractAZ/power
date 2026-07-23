@@ -5596,6 +5596,30 @@ and caches properly. Both are pruned by age.
 `CACHE_MAX_AGE_MS = 7 days`, and also sweeps crash-orphaned `*.tmp` files older
 than 1 h.
 
+#### 4.7 Render health — the dead-voice self-alert (v1.44.0)
+
+The cache creates a blind spot: a wedged TTS engine (a Home Assistant Core
+update can kill the Piper add-on's Wyoming socket while the add-on still reports
+`started`) renders nothing, yet previously-cached WAVs keep playing, so the
+alarm's voice can be dead for days while every repeated announcement still
+sounds normal. The failure only surfaces when a *changed* message forces a fresh
+render — which is precisely when speech matters.
+
+`audioRenderer.ts` therefore tracks **fresh-render health** in a module holder
+(`ttsRenderHealth()`): each render request whose spoken passes *all* fail
+increments a consecutive-failure counter (recording the last error and
+timestamp); a successful fresh render resets it. Cache hits never touch the
+counter in either direction — they prove the disk file exists, not that the
+engine is alive.
+
+`alerts.ts` raises **`tts-render-degraded`** (warning, Connectivity/System)
+when the counter reaches **≥ 2** — one blown render is tolerated as transient;
+two consecutive failures with no intervening success indicates a wedged engine.
+The alert names the failure count and last error, states that critical chimes
+still deliver (the klaxon path needs no TTS) while speech is dropped, and
+carries the remedy: restart the Piper add-on, after which the next changed
+message re-renders and the alert self-resolves.
+
 ---
 
 ### 5. The tone library (`audioAssets.ts`)
