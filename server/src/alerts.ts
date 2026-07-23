@@ -40,6 +40,116 @@ export interface AlertFact {
   value: string;
 }
 
+
+/* ── v1.41.0 — pack cell forensics ─────────────────────────────────────────
+ * A battery fault alert should carry detection → isolation → root cause with
+ * supporting ranges: WHICH cell deviates, by how much, against the pack median
+ * and against sibling packs — the exact dossier an after-sales ticket needs.
+ * Both helpers are PURE and emit null when the underlying per-cell / per-pack
+ * telemetry is absent (null over fabrication). */
+
+export interface PackCellForensics {
+  cellCount: number;
+  /** 1-based index of the cell farthest from the pack median. */
+  deviantCell: number;
+  deviantMv: number;
+  medianMv: number;
+  /** Signed deviation (deviant − median): negative = weak/low cell. */
+  deltaMv: number;
+  spreadMv: number;
+  /** Other packs' spreads (mV) on the same unit, for contrast. */
+  siblingSpreadsMv: number[];
+}
+
+/** Isolate the deviant cell in pack `packNum` of a DPU's pack set. */
+export function packCellForensics(
+  packs: ReadonlyArray<{ num: number; cellVoltagesMv: number[] }>,
+  packNum: number,
+): PackCellForensics | null {
+  const pk = packs.find((p) => p.num === packNum);
+  const cells = pk?.cellVoltagesMv ?? [];
+  if (cells.length < 4 || cells.some((v) => !Number.isFinite(v) || v <= 0)) return null;
+  const sorted = [...cells].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  const medianMv = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  let deviantIdx = 0;
+  for (let i = 1; i < cells.length; i++) {
+    if (Math.abs(cells[i] - medianMv) > Math.abs(cells[deviantIdx] - medianMv)) deviantIdx = i;
+  }
+  const siblingSpreadsMv = packs
+    .filter((p) => p.num !== packNum && (p.cellVoltagesMv?.length ?? 0) >= 4)
+    .map((p) => Math.max(...p.cellVoltagesMv) - Math.min(...p.cellVoltagesMv))
+    .filter((s) => Number.isFinite(s));
+  return {
+    cellCount: cells.length,
+    deviantCell: deviantIdx + 1,
+    deviantMv: cells[deviantIdx],
+    medianMv: Math.round(medianMv),
+    deltaMv: Math.round(cells[deviantIdx] - medianMv),
+    spreadMv: Math.max(...cells) - Math.min(...cells),
+    siblingSpreadsMv,
+  };
+}
+
+export interface PackLatchSignature {
+  socPct: number;
+  siblingMedianSocPct: number;
+  /** Net pack power (charge − discharge), W — ~0 on a latched pack. */
+  packAbsW: number;
+  siblingMedianAbsW: number;
+}
+
+/** BMS protection-latch signature: the pack is SoC-stranded from its siblings
+ *  (≥ 20 pts below the sibling median) while exchanging ~no power (< 25 W)
+ *  during active sibling flow (sibling median ≥ 100 W). All three legs must
+ *  hold — a pack idling alongside idle siblings is NOT latched. */
+export function packLatchSignature(
+  packs: ReadonlyArray<{ num: number; soc: number | null; inputWatts: number | null; outputWatts: number | null }>,
+  packNum: number,
+): PackLatchSignature | null {
+  const absW = (p: { inputWatts: number | null; outputWatts: number | null }): number | null =>
+    p.inputWatts == null && p.outputWatts == null ? null : Math.abs(p.inputWatts ?? 0) + Math.abs(p.outputWatts ?? 0);
+  const pk = packs.find((p) => p.num === packNum);
+  if (!pk || pk.soc == null) return null;
+  const packW = absW(pk);
+  if (packW == null) return null;
+  const sibs = packs.filter((p) => p.num !== packNum);
+  const sibSocs = sibs.map((p) => p.soc).filter((s): s is number => s != null).sort((a, b) => a - b);
+  const sibWs = sibs.map(absW).filter((w): w is number => w != null).sort((a, b) => a - b);
+  if (sibSocs.length < 2 || sibWs.length < 2) return null;
+  const medSoc = sibSocs[sibSocs.length >> 1];
+  const medW = sibWs[sibWs.length >> 1];
+  if (medSoc - pk.soc >= 20 && packW < 25 && medW >= 100) {
+    return { socPct: pk.soc, siblingMedianSocPct: medSoc, packAbsW: Math.round(packW), siblingMedianAbsW: Math.round(medW) };
+  }
+  return null;
+}
+
+/** Facts rows shared by the cell-fault alert family (null-safe assembly). */
+function cellFaultFacts(f: PackCellForensics | null, latch: PackLatchSignature | null): AlertFact[] {
+  const rows: AlertFact[] = [];
+  if (f) {
+    rows.push(
+      { label: 'Deviant cell', value: `#${f.deviantCell} of ${f.cellCount} at ${(f.deviantMv / 1000).toFixed(3)} V` },
+      { label: 'Pack median cell', value: `${(f.medianMv / 1000).toFixed(3)} V` },
+      { label: 'Deviation', value: `${f.deltaMv > 0 ? '+' : ''}${f.deltaMv} mV (${f.deltaMv < 0 ? 'weak/low' : 'high'} cell)` },
+      { label: 'This pack spread', value: `${f.spreadMv} mV` },
+    );
+    if (f.siblingSpreadsMv.length) {
+      const lo = Math.min(...f.siblingSpreadsMv), hi = Math.max(...f.siblingSpreadsMv);
+      rows.push({ label: 'Sibling pack spreads', value: lo === hi ? `${lo} mV` : `${lo}–${hi} mV` });
+    }
+  }
+  if (latch) {
+    rows.push(
+      { label: 'Pack charge/discharge', value: `${latch.packAbsW} W (SoC ${latch.socPct}%)` },
+      { label: 'Sibling packs', value: `~${latch.siblingMedianAbsW} W median (SoC ~${latch.siblingMedianSocPct}%)` },
+      { label: 'Assessment', value: 'BMS protection latch — pack excluded from parallel operation' },
+    );
+  }
+  return rows;
+}
+
 export interface Alert {
   id: string;
   severity: Severity;
@@ -500,7 +610,30 @@ export function computeAlerts(
       const onset = connectivity?.dpuErrOnsetBySn?.get(d.sn);
       const debounced = onset != null && onset.code === (p.sysErrCode ?? 0) && (now - onset.sinceMs) < DPU_ERR_DEBOUNCE_MS;
       if (!debounced) {
-        out.push({ id: `dpu-err-${d.sn}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Inverter error code', detail: `${d.deviceName} reports system error code ${p.sysErrCode}.` });
+        // v1.41.0 — code-band-aware title: the 5xx band is battery/BMS
+        // protection in EcoFlow's error list, and the old blanket "Inverter
+        // error code" title mis-pointed triage at the wrong subsystem. The id
+        // is deliberately UNCHANGED so a standing fault does not re-raise as a
+        // new alert on upgrade. When a pack shows the BMS protection-latch
+        // signature (SoC-stranded + zero flow during sibling activity), the
+        // alert names the probable source pack and carries the cell dossier.
+        const code = p.sysErrCode ?? 0;
+        const batteryBand = code >= 500 && code < 600;
+        let srcPack: number | null = null;
+        let srcLatch: PackLatchSignature | null = null;
+        for (const cand of p.packs) {
+          const l = packLatchSignature(p.packs, cand.num);
+          if (l) { srcPack = cand.num; srcLatch = l; break; }
+        }
+        const srcFx = srcPack != null ? packCellForensics(p.packs, srcPack) : null;
+        const srcNote = srcPack != null ? ` Probable source: Pack ${srcPack} — BMS protection latch.` : '';
+        const errFacts = cellFaultFacts(srcFx, srcLatch);
+        out.push({
+          id: `dpu-err-${d.sn}`, severity: 'critical', category: 'Battery', device: d.deviceName,
+          title: batteryBand ? 'Battery protection fault' : 'Inverter error code',
+          detail: `${d.deviceName} reports system error code ${code}${batteryBand ? ' (battery/BMS protection band)' : ''}.${srcNote}`,
+          ...(errFacts.length ? { facts: [{ label: 'Error code', value: String(code) }, ...errFacts] } : {}),
+        });
       }
     }
     // v0.9.80 — only flag an MPPT error code when that string is actually
@@ -545,7 +678,17 @@ export function computeAlerts(
     if (packSocs.length > 1) {
       const spread = Math.max(...packSocs) - Math.min(...packSocs);
       if (spread >= PACK_IMBALANCE_WARN_PCT) {
-        out.push({ id: `dpu-imbalance-${d.sn}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Packs out of balance', detail: `${spread.toFixed(0)}% SoC spread across ${d.deviceName}'s packs (≥ ${PACK_IMBALANCE_WARN_PCT}%).` });
+        // v1.41.0 — name the outlier pack; if it also shows the protection-latch
+        // signature, say so (a stranded pack is a fault; drifted balance is not).
+        const minSoc = Math.min(...packSocs);
+        const outlier = p.packs.find((x) => x.soc === minSoc);
+        const outLatch = outlier ? packLatchSignature(p.packs, outlier.num) : null;
+        const outNote = outlier
+          ? (outLatch
+            ? ` Pack ${outlier.num} is stranded at ${minSoc}% with ~${outLatch.packAbsW} W flow while siblings run ~${outLatch.siblingMedianAbsW} W — BMS protection latch signature.`
+            : ` Lowest: Pack ${outlier.num} at ${minSoc}%.`)
+          : '';
+        out.push({ id: `dpu-imbalance-${d.sn}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Packs out of balance', detail: `${spread.toFixed(0)}% SoC spread across ${d.deviceName}'s packs (≥ ${PACK_IMBALANCE_WARN_PCT}%).${outNote}`, ...(outLatch ? { facts: cellFaultFacts(outlier ? packCellForensics(p.packs, outlier.num) : null, outLatch) } : {}) });
       }
     }
 
@@ -605,10 +748,19 @@ export function computeAlerts(
           (heldVdiffWarnKeys.has(vdiffKey) && pk.maxVolDiffMv >= VOL_DIFF_WARN_MV);
         if (warnActive) heldVdiffWarnKeys.add(vdiffKey);
         else heldVdiffWarnKeys.delete(vdiffKey);
+        // v1.41.0 — cell forensics: the alert carries WHICH cell deviates and by
+        // how much vs the pack median and sibling packs (facts), and the critical's
+        // spoken detail names the isolated cell — detection → isolation → root
+        // cause in the alert itself, ready for an after-sales ticket.
+        const fx = packCellForensics(p.packs, pk.num);
+        const latch = packLatchSignature(p.packs, pk.num);
+        const cellNote = fx ? ` Deviant cell #${fx.deviantCell} (${fx.deltaMv > 0 ? '+' : ''}${fx.deltaMv} mV vs pack median).` : '';
+        const factRows = cellFaultFacts(fx, latch);
+        const facts = factRows.length ? { facts: factRows } : {};
         if (pk.maxVolDiffMv >= critMv) {
-          out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${balanceNote}`, ...annun });
+          out.push({ id: `vdiff-crit-${d.sn}-${pk.num}`, severity: 'critical', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (critical ≥ ${critMv} mV).${cellNote}${balanceNote}`, ...facts, ...annun });
         } else if (warnActive) {
-          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${balanceNote}${plateauNote}`, ...annun });
+          out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${cellNote}${balanceNote}${plateauNote}`, ...facts, ...annun });
         }
       }
       if (balancing) {
