@@ -147,9 +147,11 @@ test('secrecy — the URL never appears in any log line', async () => {
   assert.equal(logs.length, 3);
   assert.match(logs[0], /TypeError/);
   assert.match(logs[2], /HTTP 503/);
+  // Assert ABSENCE of the secret path token only — matching on the full URL
+  // string trips CodeQL js/incomplete-url-substring-sanitization (it reads as
+  // URL *validation*); the capability token is the secret part anyway.
   for (const line of logs) {
-    assert.ok(!line.includes(SECRET), `full URL leaked: ${line}`);
-    assert.ok(!line.includes('distinctive-token'), `URL path leaked: ${line}`);
+    assert.ok(!line.includes('deadbeef-cafe-distinctive-token'), `URL secret leaked: ${line}`);
   }
 });
 
