@@ -1,3 +1,28 @@
+## v1.42.0 — alarm-host thermal monitor + baseline regime-shift absorption
+
+Implements the two build items from the stack health-and-headroom review.
+
+**Alarm-host thermal monitor.** The add-on now monitors its own host: the SoC
+temperature is sampled from the kernel thermal zones every 60 s and surfaced
+as an HA sensor (`ecoflow_host_soc_temp`, diagnostic; trend history via the
+Home Assistant recorder) plus hysteresis-guarded alerts — warning at 78 °C and
+critical at 84 °C (env-overridable), the critical sitting just below the ~85 °C
+throttle point because throttling degrades the alarm pipeline exactly when
+extreme ambient heat makes it matter most. Hosts with no readable thermal zone
+read null and never alert.
+
+**Self-baseline regime-shift absorption.** The rolling 14-day hour-of-day
+baseline absorbs a persistent behavior change in ≈ 7 days; until then the
+change re-fired "unusual for the hour" alerts on what is plainly a new normal
+(observed: 215 info alerts over a two-zone AC duty swap). A trailing-days
+detector now recognizes ≥ 5 consecutive same-direction days, states the
+situation in the alert ("a new normal pattern the rolling baseline is
+absorbing, ~N day(s) to full absorption"), and silences annunciation until
+absorption completes. Direction reversals or under-floor days break the streak
+and restore normal annunciation.
+
+7 added regression tests (1,644 total).
+
 ## v1.41.0 — cell-level fault forensics in battery alerts
 
 Battery fault alerts now carry detection → isolation → root cause with

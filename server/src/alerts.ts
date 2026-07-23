@@ -20,6 +20,11 @@ export function resetVdiffWarnHoldForTesting(): void {
 }
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
+import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
+
+// v1.42.0 — host-temp hysteresis level held across builds (module singleton,
+// same lifetime pattern as the vdiff warning hold set).
+let heldHostTempLevel: HostTempLevel = 'ok';
 import {
   classifyDeviceLink,
   getDeviceReachability,
@@ -466,6 +471,31 @@ export function computeAlerts(
       title: 'Alarm host power — under-voltage',
       detail: `The Raspberry Pi running this monitor reported under-voltage (${hostPower.entityId}). A marginal or failing power supply — or a sagging power circuit — can brown the host out and take the whole alarm dark. Check the Pi's supply and the circuit it's on before that happens.`,
     });
+  }
+
+  // v1.42.0 — alarm-host SoC temperature (heat-event tripwire). Fires from the
+  // kernel thermal zones via hostThermal.ts with rise/clear hysteresis; silent
+  // (no alert, no fabricated reading) when no zone is readable. The critical
+  // sits just below the Pi's ~85 °C throttle point because throttling degrades
+  // the alarm pipeline exactly when extreme ambient heat makes it matter most.
+  const hostTemp = liveHostTemp(now);
+  if (hostTemp) {
+    heldHostTempLevel = hostTempLevel(hostTemp.tempC, heldHostTempLevel);
+    if (heldHostTempLevel !== 'ok') {
+      const crit = heldHostTempLevel === 'crit';
+      out.push({
+        id: crit ? 'host-temp-crit' : 'host-temp-warn',
+        severity: crit ? 'critical' : 'warning',
+        category: 'Connectivity',
+        device: 'System',
+        title: crit ? 'Alarm host overheating' : 'Alarm host running hot',
+        detail: `The host running this monitor reads ${hostTemp.tempC.toFixed(0)}°C at the SoC — ${crit ? `at the pre-throttle line (≥ ${HOST_TEMP_CRIT_C}°C; throttling begins ~85°C and slows the alarm pipeline)` : `above the ${HOST_TEMP_WARN_C}°C action threshold`}. Improve airflow around the host or relocate it somewhere cooler.`,
+        facts: [
+          { label: 'SoC temperature', value: `${hostTemp.tempC.toFixed(1)}°C` },
+          { label: 'Warning / critical', value: `${HOST_TEMP_WARN_C}°C / ${HOST_TEMP_CRIT_C}°C (throttle ~85°C)` },
+        ],
+      });
+    }
   }
 
   // v0.16.4 — designated bench spares (Core 4/5) are intentionally kept powered
