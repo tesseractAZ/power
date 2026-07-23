@@ -63,6 +63,7 @@ import type {
   ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
 } from './analytics.js';
 import { startTelnetServer } from './telnet/server.js';
+import { authFromEnv, authConfigProblems } from './telnet/session.js';
 import { createTuiDataProvider } from './telnet/dataProvider.js';
 import { registerWsConsole } from './telnet/wsConsole.js';
 import { startMqttDiscovery } from './mqttDiscovery.js';
@@ -1948,6 +1949,10 @@ const stopTuiData = (() => {
         data: tuiData, // share the refresh timers
       }).stop;
       app.log.info(`telnet: control-room TUI on telnet://${config.telnet.host}:${config.telnet.port}`);
+      // v1.47.1 (full-pass) — surface an untypeable credential envelope at
+      // boot instead of letting the operator discover a guaranteed lockout at
+      // the prompt (printable-ASCII, <= 64 chars).
+      for (const p of authConfigProblems(authFromEnv())) app.log.warn(`console: ${p}`);
     }
     return tuiData.stop;
   } catch (e: any) {
