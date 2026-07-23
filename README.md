@@ -9,7 +9,7 @@ persists a per-metric SQLite time-series, runs **~40 analytics engines** in a
 worker thread, and serves the results four ways: a **React dashboard**, a
 **telnet "control-room" TUI**, **80+ Home Assistant MQTT-discovery entities**
 (sensors, binary sensors, and alarm-priority switches — plus dynamic
-per-circuit sensors and the Energy Dashboard), and **HACS Lovelace cards**. When the pack is
+per-circuit sensors and the Energy Dashboard). When the pack is
 projected to reach its reserve floor, it raises an **audible alarm** — chimes +
 text-to-speech over Home Assistant media players and a SIP intercom.
 
@@ -89,8 +89,7 @@ time-of-use rate.
   fallback), Music Assistant / `media_player`, and a **SIP** side-channel to an
   antique-phone intercom.
 - **Web dashboard** (Energy · Battery · Solar · EVSE · Strategy · Alerts ·
-  Predictive Insights), **telnet TUI** (Plant-Operator console), and **HACS
-  Lovelace cards**.
+  Predictive Insights) and **telnet TUI** (Plant-Operator console).
 
 See the [DOCS.md table of contents](ecoflow_panel/DOCS.md#table-of-contents) for
 the full, math-level treatment of each of the above.
@@ -104,7 +103,7 @@ EcoFlow cloud ──MQTT──▶ snapshot store ──▶ SQLite recorder ─�
    (IoT-Open)          (DeviceSnapshot)     (time-series +           │
                                              lifetime accum.)        ├─▶ HTTP API  (:8787)
                                                                      ├─▶ HA MQTT-discovery entities
-                                                                     ├─▶ React web UI + HACS cards
+                                                                     ├─▶ React web UI
                                                                      ├─▶ telnet TUI (:2323)
                                                                      └─▶ runway alarm ─▶ audible broadcast
 ```
@@ -146,7 +145,6 @@ Every configuration option is documented in
 |------|-----------|
 | `server/` | Node/TypeScript server — ingest, recorder, ~40 analytics engines, HTTP API, MQTT discovery, broadcast/TTS, telnet TUI |
 | `web/` | React dashboard (Vite) |
-| `lovelace/` | HACS Lit cards (`ecoflow-fleet` / `alerts` / `battery` / `solar` / `strategy` / `insights` / `circuit`) |
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `DOCS.md`, `CHANGELOG.md` (+ archive), AppArmor profile |
 | `scripts/` | Docs builder (`build-docs-docx.py`), device probes |
 | `.github/workflows/` | CI (type-check ×2, Dockerfile smoke, docs `.docx`+`.pdf`, CodeQL) + tag-release → multi-arch GHCR publish |

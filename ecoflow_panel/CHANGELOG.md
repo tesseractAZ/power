@@ -1,3 +1,15 @@
+## v1.47.0 — remove the HACS Lovelace card family
+
+The Lit card bundle (`lovelace/` — seven cards plus shared infrastructure,
+~1.9 MB committed source and dist artifacts) is removed, along with the
+`/lovelace/*` static route and its Dockerfile copy. Rationale: the cards
+duplicated the ingress web dashboard; the one deployment consuming them had
+long since pinned a stale CDN snapshot rather than the served bundles; and the
+route was an unauthenticated, CORS-open static surface. Removal shrinks the
+image and the repository, and deletes an entire card build toolchain from the
+maintenance surface. Historical card documentation remains available in
+pre-v1.47.0 tags.
+
 ## v1.46.0 — single-console TUI: operator login, large-format graphics, chooser and Summary console removed
 
 The terminal UI consolidates to **one interface**. The v0.9.13 mode chooser
