@@ -22,6 +22,7 @@ import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareSh
 import { liveHostPower } from './hostPower.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
 import { currentAssessment } from './selfVitals.js';
+import { ttsRenderHealth } from './audioRenderer.js';
 
 // v1.42.0 — host-temp hysteresis level held across builds (module singleton,
 // same lifetime pattern as the vdiff warning hold set).
@@ -515,6 +516,28 @@ export function computeAlerts(
       title: crit ? 'Alarm host under critical pressure' : 'Alarm host under pressure',
       detail: `The host running this monitor shows resource pressure — ${vitals.reasons.join('; ')}. Another add-on is likely consuming the host; check the Home Assistant add-on pages for the top CPU/memory consumer. Alert delivery may be delayed while pressure persists${crit ? ' (discretionary analytics are paused to protect the alarm path)' : ''}.`,
       facts: vitals.reasons.map((r, i) => ({ label: `Signal ${i + 1}`, value: r })),
+    });
+  }
+
+  // v1.44.0 — dead-voice self-alert. A wedged TTS engine hides behind the
+  // audio cache (identical messages keep playing from disk), so render health
+  // is tracked per FRESH render request: ≥ 2 consecutive failures means the
+  // alarm's VOICE is degraded even though chimes still deliver. Auto-resolves
+  // when a fresh render succeeds.
+  const tts = ttsRenderHealth();
+  if (tts.consecutiveFailures >= 2) {
+    out.push({
+      id: 'tts-render-degraded',
+      severity: 'warning',
+      category: 'Connectivity',
+      device: 'System',
+      title: 'Alarm voice degraded — TTS renders failing',
+      detail: `Spoken announcements are failing to render (${tts.consecutiveFailures} consecutive failures; last: ${tts.lastFailureReason ?? 'unknown'}). Critical chimes still deliver, but alerts play WITHOUT speech. Known cause: a Home Assistant Core update can wedge the Piper add-on's Wyoming socket — restart the Piper add-on, then any changed alert message will re-render.`,
+      facts: [
+        { label: 'Consecutive render failures', value: String(tts.consecutiveFailures) },
+        { label: 'Last error', value: tts.lastFailureReason ?? '—' },
+        { label: 'Remedy', value: 'Restart the Piper add-on (core_piper)' },
+      ],
     });
   }
 

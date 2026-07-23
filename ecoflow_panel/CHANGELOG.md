@@ -1,3 +1,26 @@
+## v1.44.0 — TTS render-failure self-alert (dead-voice detection)
+
+The render cache creates a blind spot: a wedged TTS engine (a Home Assistant
+Core update can kill the Piper add-on's Wyoming socket while the add-on still
+reports `started`) renders nothing, yet previously-cached WAVs keep playing —
+the alarm's voice can be dead for days while repeated announcements still sound
+normal, surfacing only when a changed message forces a fresh render.
+
+**Fresh-render health tracking.** `audioRenderer.ts` now counts consecutive
+failed render requests (a request fails when every spoken pass fails), retaining
+the last error and timestamp; a successful fresh render resets the counter.
+Cache hits never touch the counter in either direction — a cached WAV proves the
+file exists, not that the engine is alive.
+
+**`tts-render-degraded` alert.** A warning (Connectivity/System) fires at ≥ 2
+consecutive failed fresh renders — one blown render is tolerated as transient —
+and self-resolves on the next successful render. The alert reports the failure
+count and last error, notes that critical chimes still deliver while speech is
+dropped, and names the remedy (restart the Piper add-on).
+
+Pure-state-machine coverage for the health holder (accumulate / threshold /
+reset / snapshot isolation). No behavior change to the render path itself.
+
 ## v1.43.0 — co-tenant degradation defense: self-vitals + out-of-band heartbeat
 
 The alarm shares its host with other add-ons; this release defends against
