@@ -70,7 +70,7 @@ function renderFooter(view: PlantView, width: number): string {
     active: id === view.screen,
   }));
   const extra =
-    c.cyanB('TAB') + ' ' + c.grey('menu') + '   ' +
+    c.cyanB('TAB') + ' ' + c.grey('next') + '   ' +
     c.cyanB('Q') + ' ' + c.grey('quit');
   return footerLegend(tabs, extra, width);
 }

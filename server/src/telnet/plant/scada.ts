@@ -224,34 +224,6 @@ const SPARK_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
  * Render a sparkline from a series of numeric samples. Auto-scales to
  * min/max across the input. Returns exactly `width` characters.
  */
-export function trendStrip(samples: number[], width = 8): string {
-  if (samples.length === 0) return ' '.repeat(width);
-  // Resample to exactly `width` buckets by simple stride / averaging.
-  const out: number[] = new Array(width);
-  if (samples.length <= width) {
-    // Pad left with the first sample so the most-recent value is right-most.
-    const padN = width - samples.length;
-    for (let i = 0; i < padN; i++) out[i] = samples[0];
-    for (let i = 0; i < samples.length; i++) out[padN + i] = samples[i];
-  } else {
-    const step = samples.length / width;
-    for (let i = 0; i < width; i++) {
-      const a = Math.floor(i * step);
-      const b = Math.min(samples.length, Math.floor((i + 1) * step));
-      let s = 0;
-      let n = 0;
-      for (let j = a; j < b; j++) { s += samples[j]; n++; }
-      out[i] = n > 0 ? s / n : samples[a];
-    }
-  }
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const v of out) { if (v < lo) lo = v; if (v > hi) hi = v; }
-  const span = hi - lo || 1;
-  return out
-    .map((v) => SPARK_CHARS[Math.min(7, Math.max(0, Math.floor(((v - lo) / span) * 7.999)))])
-    .join('');
-}
 
 /* ─── deviation displays — for frequency, voltage, set-point bias ─────── */
 

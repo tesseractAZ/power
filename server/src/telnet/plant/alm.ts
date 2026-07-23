@@ -84,12 +84,26 @@ function renderAnnunciator(alerts: PlantData['snap']['alerts'], width: number): 
   const shown = Math.min(ANNUN_TILES.length, Math.max(1, Math.floor((width - 2 + 1) / (minTileW + 1))));
   const tileW = Math.min(18, Math.floor((width - 2 - (shown - 1)) / shown));
   if (tileW < 3) return [];
+  // v1.47.1 (full-pass) — when the width can't fit the whole roster, the
+  // trailing tiles fold into the LAST visible window instead of vanishing:
+  // the final tile becomes the catch-all, lit (at the highest folded
+  // severity) if ANY hidden group is lit. The invariant this preserves is the
+  // panel's reason to exist — no active alarm group can ever be unlit merely
+  // because the terminal is narrow.
+  const visible = ANNUN_TILES.slice(0, shown);
+  const folded = ANNUN_TILES.slice(shown);
   const rows = ['', '', ''];
   for (let i = 0; i < shown; i++) {
-    const t = ANNUN_TILES[i];
-    const group = byCat.get(t.key);
+    const t = visible[i];
+    let group = byCat.get(t.key);
+    if (i === shown - 1) {
+      for (const f of folded) {
+        const fg = byCat.get(f.key);
+        if (fg) group = { crit: (group?.crit ?? false) || fg.crit };
+      }
+    }
     const lit = group != null;
-    const paint = !lit ? c.grey : group.crit ? c.redB : c.yellowB;
+    const paint = group == null ? c.grey : group.crit ? c.redB : c.yellowB;
     const box = tile(t.label, lit, tileW);
     const sep = i > 0 ? ' ' : '';
     for (let r = 0; r < ANNUN_ROWS; r++) rows[r] += sep + paint(box[r]);
@@ -164,7 +178,12 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   // is backstopping…") routinely runs past it. The old `truncate(msg, W-64)` silently clipped
   // the operative half of the alarm — "grid is bac…" — with no cue. Wrap onto continuation
   // lines aligned under MESSAGE so the full text is always readable.
-  const MSG_COL = 65;
+  // v1.47.1 (full-pass) — the fixed 65-col offset left ZERO visible message on
+  // 60-64-col terminals (the session's minimum is 60): the row rendered only
+  // TS/PRIO/CAT/ID and the wrapped continuation lines were entirely blank. The
+  // column adapts so at least ~24 message columns always survive; the fixed
+  // prefix columns are truncated by the same padEnd that always governed them.
+  const MSG_COL = Math.min(65, Math.max(24, W - 24));
   const msgWidth = Math.max(8, W - MSG_COL);          // fills exactly to W, never overflows
   const contIndent = ' '.repeat(MSG_COL);
   // v1.4.3 (audit rank 10/41) — budget rows against the ACTUAL body height (plant/index.ts

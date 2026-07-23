@@ -519,3 +519,41 @@ test('renderPlant(gen) — packs count in title matches actual pack count', () =
     `GEN divider claims '/5' when packs is empty: ${JSON.stringify(p.slice(0, 80))}`,
   );
 });
+
+
+/* ── v1.47.1 full-pass regression fixes ─────────────────────────────────── */
+
+test('v1.47.1 — ALM message column adapts at the 60-col minimum (text visible)', () => {
+  const snap = buildSnapshot({ daylight: true });
+  const lines = renderPlant(makeView(60, 24, 'alm'), makePlantData(snap), { recorder: mockRecorder() });
+  const stripAnsi = (l: string) => l.replace(/\x1b\[[0-9;]*m/g, '');
+  // At 60 cols the fixed prefix compresses so message text survives: at least
+  // one alarm row must contain lowercase message words past column 30.
+  const hasMsg = lines.some((l) => /[a-z]{3}.*[a-z]{3}/.test(stripAnsi(l).slice(30)));
+  assert.ok(hasMsg, 'no visible alarm message text at 60 cols');
+});
+
+test('v1.47.1 — narrow annunciator folds hidden groups into the last tile (never unlit)', () => {
+  // An alarm in a category beyond the visible tile count must still light the
+  // final (catch-all) window at 60 cols, where only 6 of 7 tiles fit.
+  const snap = buildSnapshot({ daylight: true });
+  (snap as any).alerts = [
+    { id: 'x1', severity: 'critical', category: 'weird-unknown-cat', device: 'System', title: 'Mystery', detail: 'mystery alarm' },
+  ];
+  const lines = renderPlant(makeView(60, 24, 'alm'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  // The catch-all maps to SYSTEM, which doesn't fit at 60 cols — the fold
+  // must light the LAST visible tile (lit tiles carry █ lamp edges).
+  assert.ok(/█\s*COMMS\s*█/.test(plain), 'catch-all fold did not light the last visible tile at 60 cols');
+});
+
+test('v1.47.1 — GEN clamps a stale pack index from a previous DPU', () => {
+  const snap = buildSnapshot({ numDpus: 2 });
+  const view = { ...makeView(100, 40, 'gen'), genSel: 1, genPack: 4 };
+  const lines = renderPlant(view, makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  // The divider must never claim a pack beyond the count (e.g. "Pack 5/2").
+  const m = plain.match(/Pack (\d+)\/(\d+)/);
+  assert.ok(m, 'pack divider missing');
+  assert.ok(Number(m![1]) <= Number(m![2]), `divider claims ${m![0]}`);
+});

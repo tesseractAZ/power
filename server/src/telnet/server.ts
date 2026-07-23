@@ -45,6 +45,8 @@ interface TelnetConn {
   socket: Socket;
   session: TuiSession;
   inbuf: Buffer;
+  /** v1.47.1 — a chunk-final CR emitted enter; swallow its LF/NUL next chunk. */
+  swallowAfterCr: boolean;
   timer: NodeJS.Timeout | null;
   // v1.7.0 (security #1) — per-connection idle-close timer, reset on every
   // inbound chunk; parity with the WS console's WS_IDLE_TIMEOUT_MS.
@@ -64,10 +66,14 @@ export const TELNET_IDLE_TIMEOUT_MS = 5 * 60_000;
  * sequences. Incomplete trailing sequences are returned in `rest` to be
  * prepended to the next chunk.
  */
-function parseInput(buf: Buffer): { events: InputEvent[]; rest: Buffer } {
+function parseInput(buf: Buffer, swallowLeadingLf = false): { events: InputEvent[]; rest: Buffer; swallowAfterCr: boolean } {
   const events: InputEvent[] = [];
   const n = buf.length;
   let i = 0;
+  let swallowAfterCr = false;
+  // v1.47.1 — a CR that ended the PREVIOUS chunk already emitted its enter;
+  // drop the LF/NUL that belongs to it.
+  if (swallowLeadingLf && i < n && (buf[i] === 10 || buf[i] === 0)) i += 1;
   while (i < n) {
     const b = buf[i];
 
@@ -99,7 +105,16 @@ function parseInput(buf: Buffer): { events: InputEvent[]; rest: Buffer } {
           j++;
         }
         if (incomplete || seAt < 0) break; // wait for the rest
-        const sub = buf.subarray(i + 2, seAt);
+        // v1.47.1 (full-pass) — unescape doubled IAC bytes in the payload: a
+        // dimension byte equal to 255 arrives as IAC IAC, and without
+        // collapsing it the following bytes shift and w/h misparse (a
+        // 255-col terminal negotiated 65280 rows).
+        const raw = buf.subarray(i + 2, seAt);
+        const sub: number[] = [];
+        for (let k = 0; k < raw.length; k++) {
+          sub.push(raw[k]);
+          if (raw[k] === IAC && k + 1 < raw.length && raw[k + 1] === IAC) k++;
+        }
         if (sub.length >= 5 && sub[0] === OPT_NAWS) {
           events.push({ type: 'naws', w: (sub[1] << 8) | sub[2], h: (sub[3] << 8) | sub[4] });
         }
@@ -138,6 +153,11 @@ function parseInput(buf: Buffer): { events: InputEvent[]; rest: Buffer } {
       events.push({ type: 'key', key: 'enter' });
       i += 1;
       if (i < n && (buf[i] === 10 || buf[i] === 0)) i += 1; // swallow LF / NUL after CR
+      // v1.47.1 (full-pass) — a CR at the very end of a chunk must swallow a
+      // LF/NUL that arrives in the NEXT chunk, or a segment-split CRLF yields
+      // a double enter (at the login prompt that submitted an empty password
+      // and burned an attempt).
+      else if (i >= n) swallowAfterCr = true;
       continue;
     }
     if (b === 10) {
@@ -170,7 +190,7 @@ function parseInput(buf: Buffer): { events: InputEvent[]; rest: Buffer } {
     }
     i += 1; // skip other control bytes
   }
-  return { events, rest: buf.subarray(i) };
+  return { events, rest: buf.subarray(i), swallowAfterCr };
 }
 
 export interface TelnetServerOptions {
@@ -251,7 +271,8 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     }
     conn.inbuf = conn.inbuf.length ? Buffer.concat([conn.inbuf, chunk]) : chunk;
     if (conn.inbuf.length > 4096) conn.inbuf = conn.inbuf.subarray(conn.inbuf.length - 64); // drop runaway garbage
-    const { events, rest } = parseInput(conn.inbuf);
+    const { events, rest, swallowAfterCr } = parseInput(conn.inbuf, conn.swallowAfterCr);
+    conn.swallowAfterCr = swallowAfterCr;
     conn.inbuf = Buffer.from(rest);
     const r = conn.session.feed(events);
     if (r.quit) {
@@ -275,7 +296,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       write: (payload) => safeWrite(socket, payload),
       data,
     });
-    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null, idle: null };
+    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), swallowAfterCr: false, timer: null, idle: null };
     conns.add(conn);
     log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
     // v1.7.0 (security #1) — idle-reap: close a session silent for

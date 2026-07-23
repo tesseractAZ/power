@@ -127,7 +127,11 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
   // DPU whose first BMS payload hadn't landed). Show the true count, and
   // if it's zero, emit a "no pack data yet" line in place of the table.
   const packCount = p.packs.length;
-  out.push(divider(`PACKS — ↑/↓ select  ·  Pack ${packCount > 0 ? view.genPack + 1 : 0}/${packCount}`, W));
+  // v1.47.1 (full-pass) — clamp like genSel above: left/right DPU changes leave
+  // the pack index from the PREVIOUS DPU behind, and a 2-pack unit after a
+  // 5-pack unit rendered "Pack 5/2" with no highlighted row.
+  const packIdx = packCount > 0 ? Math.max(0, Math.min(packCount - 1, view.genPack)) : 0;
+  out.push(divider(`PACKS — ↑/↓ select  ·  Pack ${packCount > 0 ? packIdx + 1 : 0}/${packCount}`, W));
   if (packCount === 0) {
     out.push(c.grey('  No pack data received yet — waiting for first BMS payload.'));
     return out;
@@ -161,7 +165,7 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
   const showGauge = rowsAvailable >= packCount + 2;
   for (let i = 0; i < (p.packs.length || 0); i++) {
     const pk = p.packs[i];
-    const sel = i === view.genPack;
+    const sel = i === packIdx;
     const tempCol = tempState(pk.temp ?? null);
     const socCol = socState(pk.soc ?? null);
     const cyc = pk.cycles != null ? String(pk.cycles) : '—';

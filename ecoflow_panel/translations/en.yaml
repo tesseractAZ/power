@@ -235,7 +235,7 @@ configuration:
     description: Operator username for the control-room console login, e.g. operator (used when left empty and a password is set). Applies to both the telnet TUI and the /console browser terminal. Ignored while Console Password is empty.
   TUI_PASSWORD:
     name: Console Password
-    description: Operator password for the control-room console login. Leave empty to disable the login prompt entirely (the default — sessions open straight into the console). When set, every telnet and /console connection must sign in; three failed attempts disconnect. Note that classic telnet is unencrypted — treat this as LAN-level access control, not transport security.
+    description: Operator password for the control-room console login. Leave empty to disable the login prompt entirely (the default — sessions open straight into the console). When set, every telnet and /console connection must sign in; three failed attempts disconnect. Use printable ASCII, at most 64 characters — the terminal prompt cannot type other characters and the add-on logs a warning at startup if the configured value falls outside that envelope. Note that classic telnet is unencrypted — treat this as LAN-level access control, not transport security.
   ECOFLOW_DEVICE_REACHABILITY:
     name: Device LAN Reachability Map
     description: Optional JSON object mapping each device serial to an HA ping binary_sensor (device_class connectivity) that watches its LAN IP, e.g. {"GBC0314XXXXXXXX":"binary_sensor.core1_lan"}. A cloud-offline but LAN-reachable device is flagged a session wedge (don't power-cycle); unreachable is a real outage. Purely diagnostic — it only enriches the offline alert and a wedge-count sensor; empty (the default) or malformed JSON leaves it off.
