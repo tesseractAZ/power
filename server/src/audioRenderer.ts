@@ -67,6 +67,32 @@ import { verbalizeForTts, verbalizeForTtsEs } from './ttsService.js';
 import { getChimeRepeat } from './alertSettings.js';
 import { AUDIO_ASSETS_VERSION } from './audioAssets.js';
 
+/* ── v1.44.0 — TTS render health (the dead-voice self-alert) ────────────────
+ * A wedged Piper renders nothing while cached WAVs keep playing, so a dead
+ * voice can hide behind the cache for days (observed: 27 h, exposed only when
+ * a retitle forced the first fresh render). This holder counts consecutive
+ * FAILED render requests (a request fails when every spoken pass fails);
+ * cached deliveries prove nothing about render health and do not touch it.
+ * A fresh successful render resets the counter, auto-resolving the alert. */
+export interface TtsRenderHealth {
+  consecutiveFailures: number;
+  lastFailureMs: number | null;
+  lastFailureReason: string | null;
+  lastSuccessMs: number | null;
+}
+let ttsHealth: TtsRenderHealth = { consecutiveFailures: 0, lastFailureMs: null, lastFailureReason: null, lastSuccessMs: null };
+export function ttsRenderHealth(): TtsRenderHealth { return { ...ttsHealth }; }
+export function noteTtsRenderFailure(reason: string, now: number = Date.now()): void {
+  ttsHealth = { consecutiveFailures: ttsHealth.consecutiveFailures + 1, lastFailureMs: now, lastFailureReason: reason, lastSuccessMs: ttsHealth.lastSuccessMs };
+}
+export function noteTtsRenderSuccess(now: number = Date.now()): void {
+  ttsHealth = { consecutiveFailures: 0, lastFailureMs: ttsHealth.lastFailureMs, lastFailureReason: null, lastSuccessMs: now };
+}
+export function _resetTtsHealthForTest(): void {
+  ttsHealth = { consecutiveFailures: 0, lastFailureMs: null, lastFailureReason: null, lastSuccessMs: null };
+}
+
+
 /** Bump when the render pipeline changes in a way that invalidates the cache.
  *  v2 (v0.12.1): the optional lead-in silence is now part of every render.
  *  v3 (v0.15.4): announce-repeat folded into the key.
@@ -478,6 +504,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   // (e.g. a 16 kHz Piper voice) is still diagnosable.
   const survivingSpecs = passSpecs.filter((s) => renderedPcm.has(passKey(s)));
   if (survivingSpecs.length === 0) {
+    noteTtsRenderFailure(lastFailReason ?? 'wyoming render failed (no spoken pass rendered)');
     return { ok: false, error: lastFailReason ?? 'wyoming render failed (no spoken pass rendered)', ttsRenderMs: firstTtsMs };
   }
   const droppedPass = survivingSpecs.length < passSpecs.length;
@@ -576,6 +603,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     return { ok: false, error: `cache write failed: ${e?.message ?? e}` };
   }
 
+  noteTtsRenderSuccess();
   return {
     ok: true,
     filename: servedName,
