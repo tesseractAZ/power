@@ -15,7 +15,7 @@ import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import WebSocket from 'ws';
 import { parseXtermData, registerWsConsole, MAX_WS_SESSIONS, WS_IDLE_TIMEOUT_MS } from '../src/telnet/wsConsole.js';
-import { TuiSession } from '../src/telnet/session.js';
+import { TuiSession, _resetAuthThrottleForTest } from '../src/telnet/session.js';
 import type { TuiDataProvider } from '../src/telnet/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
@@ -141,6 +141,7 @@ test('TuiSession — no configured password opens straight into the console', ()
 });
 
 test('TuiSession — auth: correct credentials unlock the console', () => {
+  _resetAuthThrottleForTest();
   const { session } = makeSession(100, 40, { username: 'operator', password: 'hunter2' });
   assert.equal(session.isInteractive, false, 'starts at the login prompt');
   const type = (text: string) => session.feed([...text].map((ch) => ({ type: 'key' as const, key: ch })));
@@ -153,6 +154,7 @@ test('TuiSession — auth: correct credentials unlock the console', () => {
 });
 
 test('TuiSession — auth: q while typing does NOT quit; three failures do', () => {
+  _resetAuthThrottleForTest();
   const { session } = makeSession(100, 40, { username: 'operator', password: 'secret' });
   // 'q' is a legitimate credential character at the login prompt.
   assert.equal(session.feed([{ type: 'key', key: 'q' }]).quit, undefined);
@@ -166,11 +168,34 @@ test('TuiSession — auth: q while typing does NOT quit; three failures do', () 
 });
 
 test('TuiSession — auth: backspace edits the active field', () => {
+  _resetAuthThrottleForTest();
   const { session } = makeSession(100, 40, { username: 'op', password: 'pw' });
   const keys = (...ks: string[]) => session.feed(ks.map((k) => ({ type: 'key' as const, key: k })));
   keys('o', 'x', 'backspace', 'p', 'enter'); // username 'op' after edit
   keys('p', 'w', 'enter');
   assert.equal(session.isInteractive, true);
+});
+
+test('TuiSession — auth: cross-session throttle refuses submits after 10 window failures', () => {
+  _resetAuthThrottleForTest();
+  const fail = () => {
+    const { session } = makeSession(100, 40, { username: 'op', password: 'pw' });
+    return session.feed([
+      { type: 'key', key: 'x' }, { type: 'key', key: 'enter' },
+      { type: 'key', key: 'y' }, { type: 'key', key: 'enter' },
+    ]);
+  };
+  // 10 failures across 10 fresh sessions saturate the sliding window …
+  for (let i = 0; i < 10; i++) fail();
+  // … so an 11th session is refused on its FIRST submit, even with the
+  // correct credentials — no oracle while throttled.
+  const { session } = makeSession(100, 40, { username: 'op', password: 'pw' });
+  const r = session.feed([
+    { type: 'key', key: 'o' }, { type: 'key', key: 'p' }, { type: 'key', key: 'enter' },
+    { type: 'key', key: 'p' }, { type: 'key', key: 'w' }, { type: 'key', key: 'enter' },
+  ]);
+  assert.equal(r.quit, true, 'throttled submit disconnects');
+  _resetAuthThrottleForTest();
 });
 
 test('TuiSession — ctrl-c and q report quit (console mode)', () => {

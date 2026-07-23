@@ -6227,9 +6227,11 @@ defaults to `operator` when left empty. The input state machine lives in the
 transport-agnostic session driver, so both transports share one implementation:
 printable keys type into the active field (password echoes masked), backspace
 edits, TAB switches fields, ENTER advances username → password → verify.
-Credential comparison is constant-time (SHA-256 digests through
-`timingSafeEqual`, so neither content nor length leaks). Three failed attempts
-disconnect. `q` does not quit at the prompt (it is a legitimate credential
+Credential comparison is constant-time (fixed-length buffers through
+`timingSafeEqual`, so neither content nor length leaks). Brute-force is
+bounded twice: three failed attempts disconnect the session, and a
+cross-session sliding-window throttle (10 failures per 10 minutes, shared by
+both transports) refuses further submits outright while saturated. `q` does not quit at the prompt (it is a legitimate credential
 character); `Ctrl-C` always disconnects. With no password configured the
 session opens straight into the console — the login layer is opt-in, and
 classic telnet is unencrypted, so the prompt is LAN-level access control, not

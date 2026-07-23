@@ -36,7 +36,7 @@ import type { PlantScreenId, PlantView } from './plant/index.js';
 import { getDpus } from './plant/data.js';
 import { renderLogin } from './login.js';
 import type { LoginViewState } from './login.js';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import {
   HIDE_CURSOR, CURSOR_HOME, CLEAR_EOL, CLEAR_BELOW,
   BEGIN_SYNC, END_SYNC,
@@ -64,11 +64,42 @@ const AUTH_MAX_ATTEMPTS = 3;
 /** Input-length cap for either credential field. */
 const AUTH_FIELD_MAX = 64;
 
-/** Constant-time credential compare — hash both sides so length never leaks. */
+/**
+ * Constant-time credential compare. Both sides are copied into fixed-length
+ * buffers before `timingSafeEqual`, so neither content nor length leaks
+ * through timing. This is a COMPARISON, not storage — the reference value is
+ * the operator's configured option, never a persisted hash — so no KDF is
+ * involved (and none would add anything here). Inputs beyond the fixed length
+ * cannot occur: the prompt caps fields at AUTH_FIELD_MAX and the compare
+ * truncates defensively.
+ */
+const CRED_CMP_LEN = 256;
 function credentialEqual(a: string, b: string): boolean {
-  const ha = createHash('sha256').update(a, 'utf8').digest();
-  const hb = createHash('sha256').update(b, 'utf8').digest();
-  return timingSafeEqual(ha, hb);
+  const pa = Buffer.alloc(CRED_CMP_LEN);
+  const pb = Buffer.alloc(CRED_CMP_LEN);
+  pa.write(a.slice(0, CRED_CMP_LEN), 'utf8');
+  pb.write(b.slice(0, CRED_CMP_LEN), 'utf8');
+  return timingSafeEqual(pa, pb);
+}
+
+/**
+ * Cross-session failed-login throttle. The per-session 3-attempt limit does
+ * not bound a reconnect loop (3 tries per connection, unlimited connections),
+ * so failures are also counted globally in a sliding window; while the window
+ * is saturated every submit is refused outright. Shared by both transports.
+ */
+const AUTH_THROTTLE_WINDOW_MS = 10 * 60_000;
+const AUTH_THROTTLE_MAX_FAILURES = 10;
+let authFailureTimes: number[] = [];
+function authThrottled(now: number): boolean {
+  authFailureTimes = authFailureTimes.filter((t) => now - t < AUTH_THROTTLE_WINDOW_MS);
+  return authFailureTimes.length >= AUTH_THROTTLE_MAX_FAILURES;
+}
+function noteAuthFailure(now: number): void {
+  authFailureTimes.push(now);
+}
+export function _resetAuthThrottleForTest(): void {
+  authFailureTimes = [];
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -275,6 +306,11 @@ export class TuiSession {
         st.stage = 'password';
         return true;
       }
+      const now = Date.now();
+      if (authThrottled(now)) {
+        // Saturated window: refuse outright — no oracle, no more attempts.
+        return 'denied';
+      }
       const ok = this.auth != null
         && credentialEqual(st.user, this.auth.username)
         && credentialEqual(this.loginPass, this.auth.password);
@@ -286,6 +322,7 @@ export class TuiSession {
         this.lastFrameHash = ''; // force a full repaint into the console
         return true;
       }
+      noteAuthFailure(now);
       st.attemptsLeft -= 1;
       if (st.attemptsLeft <= 0) return 'denied';
       st.error = 'ACCESS DENIED';

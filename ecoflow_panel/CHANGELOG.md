@@ -12,7 +12,10 @@ password set, every session starts at a login prompt shared by both transports
 (the state machine lives in the transport-agnostic session driver): masked
 password echo, backspace editing, TAB field switch, constant-time credential
 comparison (SHA-256 + `timingSafeEqual`), three failed attempts disconnect,
-and `q` is typeable at the prompt (`Ctrl-C` still always disconnects). An
+and `q` is typeable at the prompt (`Ctrl-C` still always disconnects).
+Brute-force is bounded twice: three attempts per connection, plus a
+cross-session sliding-window throttle (10 failures / 10 minutes across both
+transports) that refuses further submits outright while saturated. An
 empty password leaves the prompt off — opt-in, matching the notification
 channels — and the option help notes that classic telnet is unencrypted, so
 this is LAN-level access control, not transport security.
