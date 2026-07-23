@@ -31,12 +31,12 @@ import type { SnapshotStore } from '../snapshot.js';
 import type { Recorder } from '../recorder.js';
 import type { FleetEnergyTotals } from '../aggregator.js';
 import type { DayForecast, FleetDegradation } from '../analytics.js';
-import { renderScreen, SCREENS, getDpus } from './screens.js';
-import type { ScreenId, SessionView } from './screens.js';
 import { renderPlant, PLANT_SCREENS } from './plant/index.js';
 import type { PlantScreenId, PlantView } from './plant/index.js';
-import { renderChooser, defaultChooserState } from './plant/chooser.js';
-import type { ChooserState } from './plant/chooser.js';
+import { getDpus } from './plant/data.js';
+import { renderLogin } from './login.js';
+import type { LoginViewState } from './login.js';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   HIDE_CURSOR, CURSOR_HOME, CLEAR_EOL, CLEAR_BELOW,
   BEGIN_SYNC, END_SYNC,
@@ -48,11 +48,28 @@ export type InputEvent =
   | { type: 'naws'; w: number; h: number };
 
 /**
- * v0.9.13 — session mode. On connect we show the chooser; the user picks a
- * console with [1] (Plant Operator) or [2] (Summary). TAB from any non-chooser
- * view returns to the chooser.
+ * v1.46.0 — single-console session. The v0.9.13 chooser + legacy Summary
+ * console are removed: the Plant Operator console IS the interface, so every
+ * connection lands on the same screens, the render code has one theme to
+ * maintain, and the full terminal is spent on the console itself. When
+ * operator credentials are configured (`TUI_PASSWORD` non-empty) the session
+ * starts in 'auth' and must pass the login prompt; with no password set the
+ * session opens straight into the console (the login layer is opt-in, exactly
+ * like the notification channels).
  */
-type SessionMode = 'chooser' | 'plant' | 'summary';
+type SessionMode = 'auth' | 'plant';
+
+/** Login attempts before the transport is told to disconnect. */
+const AUTH_MAX_ATTEMPTS = 3;
+/** Input-length cap for either credential field. */
+const AUTH_FIELD_MAX = 64;
+
+/** Constant-time credential compare — hash both sides so length never leaks. */
+function credentialEqual(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a, 'utf8').digest();
+  const hb = createHash('sha256').update(b, 'utf8').digest();
+  return timingSafeEqual(ha, hb);
+}
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -83,6 +100,20 @@ export interface TuiSessionOptions {
   /** Initial terminal size. */
   width?: number;
   height?: number;
+  /**
+   * v1.46.0 — operator credentials. `null`/absent password ⇒ login disabled
+   * (the session opens straight into the console). Injectable for tests; the
+   * transports pass the add-on options via `authFromEnv()`.
+   */
+  auth?: { username: string; password: string } | null;
+}
+
+/** Resolve the login gate from the add-on options (env). Empty password ⇒ off. */
+export function authFromEnv(env: NodeJS.ProcessEnv = process.env): { username: string; password: string } | null {
+  const password = (env.TUI_PASSWORD ?? '').trim();
+  if (password.length === 0) return null;
+  const username = (env.TUI_USERNAME ?? '').trim() || 'operator';
+  return { username, password };
 }
 
 /**
@@ -95,14 +126,12 @@ export class TuiSession {
 
   width: number;
   height: number;
-  private mode: SessionMode = 'chooser';
+  private mode: SessionMode;
 
-  /** SUMMARY mode state (legacy screens). */
-  private screen: ScreenId = 'overview';
-  private battDpu = 0;
-  private battPack = 0;
-  private battScroll = 0;
-  private alertScroll = 0;
+  /** AUTH mode state (only meaningful while mode === 'auth'). */
+  private readonly auth: { username: string; password: string } | null;
+  private login: LoginViewState = { stage: 'username', user: '', passLen: 0, attemptsLeft: AUTH_MAX_ATTEMPTS, error: null };
+  private loginPass = '';
 
   /** PLANT mode state. */
   private plantScreen: PlantScreenId = 'console';
@@ -110,9 +139,6 @@ export class TuiSession {
   private plantGenPack = 0;
   private plantAlmScroll = 0;
   private plantConnectedAt = Date.now();
-
-  /** CHOOSER mode state. */
-  private chooser: ChooserState;
 
   /** v0.9.5 — true while a frame is being written; prevents overlapping draws
    *  from interleaving (e.g. a resize event triggering a mid-frame redraw on
@@ -132,12 +158,14 @@ export class TuiSession {
     this.data = opts.data;
     this.width = opts.width ?? 80;
     this.height = opts.height ?? 24;
-    this.chooser = defaultChooserState(this.width, this.height);
+    this.auth = opts.auth ?? null;
+    this.mode = this.auth ? 'auth' : 'plant';
+    this.plantConnectedAt = Date.now();
   }
 
-  /** True once the user has left the chooser (used to surface a busy state). */
+  /** True once the session has passed (or never needed) the login gate. */
   get isInteractive(): boolean {
-    return this.mode !== 'chooser';
+    return this.mode === 'plant';
   }
 
   /**
@@ -168,8 +196,16 @@ export class TuiSession {
       if (ev.type === 'naws') {
         if (this.resize(ev.w, ev.h)) dirty = true;
       } else {
-        if (ev.key === 'ctrl-c' || ev.key === 'q' || ev.key === 'Q') {
+        // ctrl-c always disconnects; 'q' only once past the login prompt — a
+        // username or password may legitimately contain the letter q.
+        if (ev.key === 'ctrl-c' || (this.mode === 'plant' && (ev.key === 'q' || ev.key === 'Q'))) {
           return { quit: true };
+        }
+        if (this.mode === 'auth') {
+          const r = this.applyAuthKey(ev.key);
+          if (r === 'denied') return { quit: true };
+          if (r) dirty = true;
+          continue;
         }
         if (this.applyKey(ev.key)) dirty = true;
       }
@@ -179,40 +215,12 @@ export class TuiSession {
 
   /** Apply a key to session state. Returns true if a redraw is warranted. */
   private applyKey(key: string): boolean {
-    /* ── chooser mode ────────────────────────────────────────────── */
-    if (this.mode === 'chooser') {
-      if (key === '1') {
-        this.mode = 'plant';
-        this.plantScreen = 'console';
-        this.plantConnectedAt = Date.now();
-        return true;
-      }
-      if (key === '2') {
-        this.mode = 'summary';
-        this.screen = 'overview';
-        return true;
-      }
-      if (key === 'left' || key === 'right') {
-        this.chooser.highlight = this.chooser.highlight === 0 ? 1 : 0;
-        return true;
-      }
-      if (key === 'enter') {
-        if (this.chooser.highlight === 0) {
-          this.mode = 'plant';
-          this.plantScreen = 'console';
-          this.plantConnectedAt = Date.now();
-        } else {
-          this.mode = 'summary';
-          this.screen = 'overview';
-        }
-        return true;
-      }
-      return false;
-    }
-
-    /* ── universal: TAB returns to chooser ──────────────────────── */
+    /* ── TAB cycles to the next console screen (the chooser it used to
+       return to no longer exists). */
     if (key === '\t' || key === 'tab') {
-      this.mode = 'chooser';
+      const idx = PLANT_SCREENS.indexOf(this.plantScreen);
+      this.plantScreen = PLANT_SCREENS[(idx + 1) % PLANT_SCREENS.length];
+      this.plantAlmScroll = 0;
       return true;
     }
 
@@ -228,7 +236,7 @@ export class TuiSession {
       }
       if (key === 'up' || key === 'down' || key === 'left' || key === 'right') {
         if (this.plantScreen === 'gen') {
-          const dpus = getDpus(this.data.store.get());
+          const dpus = getDpus({ snap: this.data.store.get() } as Parameters<typeof getDpus>[0]);
           const count = Math.max(1, dpus.length);
           if (key === 'left') this.plantGenSel = (this.plantGenSel - 1 + count) % count;
           else if (key === 'right') this.plantGenSel = (this.plantGenSel + 1) % count;
@@ -252,40 +260,57 @@ export class TuiSession {
       return false;
     }
 
-    /* ── summary mode (legacy, unchanged) ───────────────────────── */
-    if (key.length === 1 && key >= '1' && key <= String(SCREENS.length)) {
-      const next = SCREENS[Number(key) - 1];
-      if (next !== this.screen) {
-        this.screen = next;
-        this.alertScroll = 0;
-        this.battScroll = 0;
+    return false;
+  }
+
+  /* ── v1.46.0 — login state machine ─────────────────────────────────
+   * Printable keys type into the active field, backspace edits, ENTER
+   * advances username → password → verify. TAB jumps between fields.
+   * A rejected attempt clears the password and burns one attempt; the
+   * third rejection returns 'denied' and the transport disconnects. */
+  private applyAuthKey(key: string): boolean | 'denied' {
+    const st = this.login;
+    if (key === 'enter') {
+      if (st.stage === 'username') {
+        st.stage = 'password';
+        return true;
       }
+      const ok = this.auth != null
+        && credentialEqual(st.user, this.auth.username)
+        && credentialEqual(this.loginPass, this.auth.password);
+      if (ok) {
+        this.mode = 'plant';
+        this.plantScreen = 'console';
+        this.plantConnectedAt = Date.now();
+        this.loginPass = '';
+        this.lastFrameHash = ''; // force a full repaint into the console
+        return true;
+      }
+      st.attemptsLeft -= 1;
+      if (st.attemptsLeft <= 0) return 'denied';
+      st.error = 'ACCESS DENIED';
+      st.stage = 'username';
+      st.user = '';
+      st.passLen = 0;
+      this.loginPass = '';
       return true;
     }
-    if (key === 'up' || key === 'down' || key === 'left' || key === 'right') {
-      if (this.screen === 'battery') {
-        const count = Math.max(1, getDpus(this.data.store.get()).length);
-        if (key === 'left') this.battDpu = (this.battDpu - 1 + count) % count;
-        else if (key === 'right') this.battDpu = (this.battDpu + 1) % count;
-        else if (key === 'up') this.battPack = (this.battPack + 4) % 5;
-        else if (key === 'down') this.battPack = (this.battPack + 1) % 5;
-        // v1.4.0 (audit rank 5) — a different DPU/pack swaps in an entirely different
-        // detail body; any prior scroll offset into the old body is stale.
-        this.battScroll = 0;
-        return true;
-      }
-      if (this.screen === 'alerts' || this.screen === 'predictive' || this.screen === 'shp2' || this.screen === 'strategy') {
-        if (key === 'up') this.alertScroll = Math.max(0, this.alertScroll - 1);
-        else if (key === 'down') this.alertScroll += 1;
-        return true;
-      }
+    if (key === '\t' || key === 'tab') {
+      st.stage = st.stage === 'username' ? 'password' : 'username';
+      return true;
     }
-    // v1.4.0 (audit rank 5) — BATTERY's own ↑/↓/←/→ are already claimed by pack/DPU
-    // navigation above, so the pack-detail pane (VITALS/LIFETIME/thermal grids/32 CELL
-    // VOLTAGES — see packDetail() in screens.ts) scrolls on [ / ] instead of the other
-    // paginated screens' ↑/↓; reusing ↑/↓ here would silently steal DPU/pack navigation.
-    if (this.screen === 'battery' && (key === '[' || key === ']')) {
-      this.battScroll = key === '[' ? Math.max(0, this.battScroll - 1) : this.battScroll + 1;
+    if (key === 'backspace') {
+      if (st.stage === 'username') st.user = st.user.slice(0, -1);
+      else { this.loginPass = this.loginPass.slice(0, -1); st.passLen = this.loginPass.length; }
+      return true;
+    }
+    if (key.length === 1 && key >= ' ' && key <= '~') {
+      st.error = null;
+      if (st.stage === 'username' && st.user.length < AUTH_FIELD_MAX) st.user += key;
+      else if (st.stage === 'password' && this.loginPass.length < AUTH_FIELD_MAX) {
+        this.loginPass += key;
+        st.passLen = this.loginPass.length;
+      }
       return true;
     }
     return false;
@@ -294,47 +319,28 @@ export class TuiSession {
   /** Build the array of frame lines for the current state. */
   private renderLines(): string[] {
     const d = this.data;
-    if (this.mode === 'chooser') {
-      this.chooser.width = this.width;
-      this.chooser.height = this.height;
-      return renderChooser(this.chooser);
+    if (this.mode === 'auth') {
+      return renderLogin(this.login, this.width, this.height);
     }
-    if (this.mode === 'plant') {
-      const pv: PlantView = {
-        width: this.width,
-        height: this.height,
-        screen: this.plantScreen,
-        genSel: this.plantGenSel,
-        genPack: this.plantGenPack,
-        almScroll: this.plantAlmScroll,
-        connectedAt: this.plantConnectedAt,
-      };
-      return renderPlant(pv, {
-        snap: d.store.get(),
-        totals: d.totals(),
-        forecast: d.forecast(),
-        // v0.9.50 — read from the timer-refreshed cache instead of calling the
-        // now-async computeDegradation inline. Empty placeholder until the
-        // first refresh lands (a few seconds after server start).
-        degradation: d.degradation() ?? { generatedAt: Date.now(), eolSoh: 80, packs: [] },
-        serverStartedAt: d.serverStartedAt,
-      }, { recorder: d.recorder });
-    }
-    const sv: SessionView = {
+    const pv: PlantView = {
       width: this.width,
       height: this.height,
-      screen: this.screen,
-      battDpu: this.battDpu,
-      battPack: this.battPack,
-      battScroll: this.battScroll,
-      alertScroll: this.alertScroll,
+      screen: this.plantScreen,
+      genSel: this.plantGenSel,
+      genPack: this.plantGenPack,
+      almScroll: this.plantAlmScroll,
+      connectedAt: this.plantConnectedAt,
     };
-    return renderScreen(sv, {
+    return renderPlant(pv, {
       snap: d.store.get(),
       totals: d.totals(),
       forecast: d.forecast(),
+      // v0.9.50 — read from the timer-refreshed cache instead of calling the
+      // now-async computeDegradation inline. Empty placeholder until the
+      // first refresh lands (a few seconds after server start).
       degradation: d.degradation() ?? { generatedAt: Date.now(), eolSoh: 80, packs: [] },
-    });
+      serverStartedAt: d.serverStartedAt,
+    }, { recorder: d.recorder });
   }
 
   /**

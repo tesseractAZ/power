@@ -51,13 +51,14 @@ function mockDataProvider(): TuiDataProvider {
 }
 
 /** A TuiSession wired to a string-collecting sink. */
-function makeSession(width = 100, height = 40) {
+function makeSession(width = 100, height = 40, auth: { username: string; password: string } | null = null) {
   const writes: string[] = [];
   const session = new TuiSession({
     write: (d) => writes.push(d),
     data: mockDataProvider(),
     width,
     height,
+    auth,
   });
   return { session, writes };
 }
@@ -122,17 +123,57 @@ test('TuiSession — identical re-draw is suppressed (anti-flicker)', () => {
   assert.equal(writes.length, after1, 'identical frame should not be re-written');
 });
 
-test('TuiSession — navigating chooser → plant produces a new frame', () => {
+test('TuiSession — v1.46.0: switching console screens produces a new frame', () => {
   const { session, writes } = makeSession();
   session.draw();
   const before = writes.length;
-  const r = session.feed([{ type: 'key', key: '1' }]); // pick Plant Operator
+  const r = session.feed([{ type: 'key', key: '2' }]); // console → gen
   assert.equal(r.redraw, true);
   session.draw();
-  assert.ok(writes.length > before, 'mode switch should yield a fresh frame');
+  assert.ok(writes.length > before, 'screen switch should yield a fresh frame');
 });
 
-test('TuiSession — ctrl-c and q report quit', () => {
+/* ── v1.46.0 — login gate (session-level, shared by both transports) ───── */
+
+test('TuiSession — no configured password opens straight into the console', () => {
+  const { session } = makeSession();
+  assert.equal(session.isInteractive, true);
+});
+
+test('TuiSession — auth: correct credentials unlock the console', () => {
+  const { session } = makeSession(100, 40, { username: 'operator', password: 'hunter2' });
+  assert.equal(session.isInteractive, false, 'starts at the login prompt');
+  const type = (text: string) => session.feed([...text].map((ch) => ({ type: 'key' as const, key: ch })));
+  type('operator');
+  session.feed([{ type: 'key', key: 'enter' }]);
+  type('hunter2');
+  const r = session.feed([{ type: 'key', key: 'enter' }]);
+  assert.equal(r.redraw, true);
+  assert.equal(session.isInteractive, true, 'authenticated → console');
+});
+
+test('TuiSession — auth: q while typing does NOT quit; three failures do', () => {
+  const { session } = makeSession(100, 40, { username: 'operator', password: 'secret' });
+  // 'q' is a legitimate credential character at the login prompt.
+  assert.equal(session.feed([{ type: 'key', key: 'q' }]).quit, undefined);
+  const attempt = () => session.feed([
+    { type: 'key', key: 'x' }, { type: 'key', key: 'enter' },
+    { type: 'key', key: 'y' }, { type: 'key', key: 'enter' },
+  ]);
+  assert.equal(attempt().quit, undefined, 'first failure re-prompts');
+  assert.equal(attempt().quit, undefined, 'second failure re-prompts');
+  assert.equal(attempt().quit, true, 'third failure disconnects');
+});
+
+test('TuiSession — auth: backspace edits the active field', () => {
+  const { session } = makeSession(100, 40, { username: 'op', password: 'pw' });
+  const keys = (...ks: string[]) => session.feed(ks.map((k) => ({ type: 'key' as const, key: k })));
+  keys('o', 'x', 'backspace', 'p', 'enter'); // username 'op' after edit
+  keys('p', 'w', 'enter');
+  assert.equal(session.isInteractive, true);
+});
+
+test('TuiSession — ctrl-c and q report quit (console mode)', () => {
   const a = makeSession();
   assert.equal(a.session.feed([{ type: 'key', key: 'ctrl-c' }]).quit, true);
   const b = makeSession();
@@ -168,13 +209,15 @@ test('TuiSession — resize via a naws InputEvent redraws', () => {
   assert.equal(session.height, 50);
 });
 
-test('TuiSession — TAB from a console returns to the chooser', () => {
-  const { session } = makeSession();
-  session.feed([{ type: 'key', key: '1' }]); // into plant
+test('TuiSession — v1.46.0: TAB cycles console screens (chooser removed)', () => {
+  const { session, writes } = makeSession();
   assert.equal(session.isInteractive, true);
-  const r = session.feed([{ type: 'key', key: 'tab' }]); // back to chooser
+  session.draw();
+  const before = writes.length;
+  const r = session.feed([{ type: 'key', key: 'tab' }]);
   assert.equal(r.redraw, true);
-  assert.equal(session.isInteractive, false);
+  session.draw();
+  assert.ok(writes.length > before, 'TAB should land on a different screen frame');
 });
 
 /* ── /console/ws hardening (v0.68.0): origin gate, cap, idle timeout ─────── */

@@ -1,13 +1,18 @@
 /**
  * TRD screen — trend strips for the headline tags.
  *
- * Each tag gets a row: tag name, latest value, then a 60-char sparkline
- * built from the last hour of recorder samples (one bucket per minute).
- * Designed to look like the strip-recorder chart on an old SCADA HMI.
+ * Each tag gets a row: tag name, latest value, then a braille sparkline
+ * spanning every remaining column (2 samples per cell × 4 vertical levels —
+ * see gauges.ts) built from the last hour of recorder samples (one bucket
+ * per minute). Designed to look like the strip-recorder chart on an old
+ * SCADA HMI.
  */
 
 import { c, padEnd, padStart, truncate, BOX } from '../ansi.js';
-import { divider, trendStrip, stateGlyph } from './scada.js';
+import { divider, stateGlyph } from './scada.js';
+// v1.38.0 — full-width braille sparklines replace the fixed-width block-glyph
+// mini strips. braille() output is plain (no ANSI); colorized whole below.
+import { braille } from '../gauges.js';
 import {
   getDpus, getShp2, fmtW, fmtPct, fmtVolt,
   socState, deviceQuality, sum, generatorNumber,
@@ -25,7 +30,10 @@ export interface TrdContext {
 export function renderTrd(view: PlantView, data: PlantData, ctx: TrdContext): string[] {
   const W = view.width;
   const out: string[] = [];
-  const sparkW = Math.max(20, Math.min(80, W - 40));
+  // v1.38.0 — the sparkline takes EVERY column after the fixed prefix (2
+  // indent + 16 tag + 1 + 13 value/unit + 3), instead of the old capped
+  // 20–80-char strip. Prefix + sparkW = exactly W.
+  const sparkW = Math.max(8, W - 35);
   const sinceMs = Date.now() - 60 * 60 * 1000;          // last 60 min
 
   out.push(divider('TRENDS — last 60 minutes (1-min buckets)', W));
@@ -86,14 +94,18 @@ export function renderTrd(view: PlantView, data: PlantData, ctx: TrdContext): st
     const hi = series.length ? Math.max(...series) : 0;
 
     const tagStr = c.whiteB(padEnd(t.tag, 16));
+    // Both branches render exactly 13 visible chars (9 value + 1 + 3 unit) so
+    // the sparkline column starts in the same place on every row.
     const latestStr = latest == null
-      ? c.grey(padStart('—', 9))
+      ? c.grey(padStart('—', 9)) + ' '.repeat(4)
       : c.whiteB(padStart(formatVal(latest, t.unit), 9)) + c.grey(' ' + padEnd(t.unit, 3));
     const rangeStr = series.length
       ? c.grey(`[${formatVal(lo, t.unit)}…${formatVal(hi, t.unit)} ${t.unit}]`)
       : c.grey('[no data]');
-    const trend = trendStrip(series, sparkW);
-    const trendStyled = c.cyan(trend);
+    // Braille bounds pinned to the SAME raw lo/hi shown in the range label, so
+    // the strip and its caption can never disagree about the scale. A flat
+    // series (lo == hi) renders mid-height; an empty one, blank cells.
+    const trendStyled = c.cyan(braille(series, sparkW, lo, hi));
 
     out.push(`  ${tagStr} ${latestStr}   ${trendStyled}`);
     out.push(`  ${c.grey(' '.repeat(16))} ${rangeStr}`);

@@ -13,6 +13,8 @@ import { c, padEnd, padStart, truncate, visLen, BOX } from '../ansi.js';
 import {
   divider, renderTagRow, gauge, bandedGauge, stateGlyph,
 } from './scada.js';
+// v1.38.0 — eighth-block per-pack SoC bars (plain strings, colorized whole).
+import { hbar } from '../gauges.js';
 import {
   getDpus, fmtW, fmtPct, fmtTempF, fmtWh,
   socState, tempState, deviceQuality, dpuFlags,
@@ -130,10 +132,19 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
     out.push(c.grey('  No pack data received yet — waiting for first BMS payload.'));
     return out;
   }
-  // Compact tabular pack rows:  # SOC  TEMP   V       CYC   CAP%   STATE
+  // Compact tabular pack rows:  # SOC [bar] TEMP   V       CYC   CAP%   STATE
+  // v1.38.0 — width-adaptive SoC bar column beside the numeric SOC, colorized
+  // by the same red<20 / yellow<50 bands as fmtPctRaw(). The fixed columns
+  // total 59 visible cols; the bar takes up to 16 of the spare width and is
+  // dropped entirely below 6 spare cols, so the classic numeric-only table
+  // still renders unchanged on a very narrow terminal.
+  const socBarW = Math.min(16, W - 60);
+  const showSocBar = socBarW >= 6;
   const headers = ['PK', 'SOC', 'TEMP', 'V.PACK', 'CYC', 'SOH%', 'STATE'];
   out.push('  ' + c.grey([
-    padEnd(headers[0], 4), padStart(headers[1], 7), padStart(headers[2], 7),
+    padEnd(headers[0], 4), padStart(headers[1], 7),
+    ...(showSocBar ? [padEnd(socBarW >= 7 ? 'SOC BAR' : 'BAR', socBarW)] : []),
+    padStart(headers[2], 7),
     padStart(headers[3], 10), padStart(headers[4], 6), padStart(headers[5], 7),
     '  ' + padEnd(headers[6], 8),
   ].join(' ')));
@@ -171,6 +182,7 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
     const row = '  ' + [
       padEnd((sel ? c.invert(c.whiteB(` ${i + 1} `)) : ` ${i + 1} `), 4),
       padStart(fmtPctRaw(pk.soc), 7),
+      ...(showSocBar ? [socBarCell(pk.soc, socBarW)] : []),
       padStart(fmtTempRaw(pk.temp), 7),
       padStart(fmtVoltRaw(pk.packVoltageMv ?? pk.adBatVoltageMv ?? null), 10),
       padStart(cyc, 6),
@@ -201,6 +213,13 @@ function fmtPctRaw(p: number | null | undefined): string {
   if (p == null) return '—';
   const col = p < 20 ? c.red : p < 50 ? c.yellow : c.green;
   return col(`${p.toFixed(0)}%`);
+}
+/** v1.38.0 — per-pack SoC bar cell: exactly `width` visible chars (hbar pads
+ *  with spaces), colorized whole on the same bands as fmtPctRaw(). */
+function socBarCell(soc: number | null | undefined, width: number): string {
+  if (soc == null) return c.grey(hbar(0, width));
+  const col = soc < 20 ? c.red : soc < 50 ? c.yellow : c.green;
+  return col(hbar(soc / 100, width));
 }
 function fmtTempRaw(tC: number | null | undefined): string {
   if (tC == null) return c.grey('—');

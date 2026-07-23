@@ -1,3 +1,36 @@
+## v1.46.0 — single-console TUI: operator login, large-format graphics, chooser and Summary console removed
+
+The terminal UI consolidates to **one interface**. The v0.9.13 mode chooser
+and the legacy Summary console (`telnet/screens.ts`) are removed; every telnet
+and `/console` session lands in the SCADA-style console. One theme to
+maintain, and the full terminal is spent on the console itself. TAB now cycles
+console screens.
+
+**Operator login.** New `TUI_USERNAME` / `TUI_PASSWORD` options (schema
+`str?` / `password?` — the password is masked in the options UI). With a
+password set, every session starts at a login prompt shared by both transports
+(the state machine lives in the transport-agnostic session driver): masked
+password echo, backspace editing, TAB field switch, constant-time credential
+comparison (SHA-256 + `timingSafeEqual`), three failed attempts disconnect,
+and `q` is typeable at the prompt (`Ctrl-C` still always disconnects). An
+empty password leaves the prompt off — opt-in, matching the notification
+channels — and the option help notes that classic telnet is unencrypted, so
+this is LAN-level access control, not transport security.
+
+**Large-format graphics.** Two new pure primitive modules:
+`telnet/bigfont.ts` (5-row pseudo-LCD block font) and `telnet/gauges.ts`
+(eighth-block `hbar`, eighth-height `vscale`, 2×4-dot `braille` sparklines,
+3-row ISA-annunciator `tile`). Screen placements are width/height-adaptive and
+degrade to the previous rendering on small terminals: CONSOLE gains a
+big-digit headline band (fleet SoC / PV kW / LOAD kW, ≥ 96×32) and an
+always-on full-width POOL gauge; TRENDS strips become full-width braille
+sparklines; ALARM gains a 7-window annunciator header (lit red/yellow by
+severity, dark windows stay visible); GEN pack rows gain SoC bars.
+
+Both input parsers now emit `backspace` (BS/DEL). Tests: 1,683 green
+(bigfont 6, gauges 39, login/session flows, per-screen frame invariants at
+80×24 / 100×40 / 120×40).
+
 ## v1.45.0 — alarm-delivery resilience: chime-only fallback, spoken retry, pressure dwell, top-of-charge quiet
 
 Ground truth for every change: 2026-07-23. The nightly Home Assistant backup

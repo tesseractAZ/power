@@ -2102,7 +2102,7 @@ const EOL_MAX_YEARS = 40;                                     // beyond this, "E
 //   58804 × (32 × 3.2) / 1_000_000 = 6.02 kWh, matching the EcoFlow 6.144 kWh
 //   nameplate spec for a 99 %-SoH pack.
 // Identical constant exists at recorder.ts (`PACK_MAH_TO_WH = (32 * 3.2) / 1_000`) and
-// telnet/screens.ts (`MAH_TO_WH`); same value, same derivation.
+// the former telnet summary console (`MAH_TO_WH`); same value, same derivation.
 const PACK_MAH_TO_KWH = (32 * 3.2) / 1_000_000;               // single-string mAh → pack kWh
 const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
 
