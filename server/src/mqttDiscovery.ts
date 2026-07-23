@@ -1,5 +1,6 @@
 import mqtt, { MqttClient } from 'mqtt';
 import { liveHostTemp } from './hostThermal.js';
+import { liveVitals } from './selfVitals.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { SnapshotStore, FleetSnapshot } from './snapshot.js';
@@ -297,6 +298,10 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_night_charge_target_soc', name: 'EcoFlow Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
   // v1.42.0 — alarm-host SoC temperature (heat tripwire; HA recorder provides
   // the trend history). Null when the host exposes no readable thermal zone.
+  { unique_id: 'ecoflow_host_evloop_lag', name: 'EcoFlow Host Event-Loop Lag', state_class: 'measurement', unit_of_measurement: 'ms', icon: 'mdi:timer-sand', entity_category: 'diagnostic', value_template: '{{ value_json.host_evloop_lag_ms }}' },
+  { unique_id: 'ecoflow_host_mem_available', name: 'EcoFlow Host Memory Available', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:memory', entity_category: 'diagnostic', value_template: '{{ value_json.host_mem_available_mb }}' },
+  { unique_id: 'ecoflow_host_disk_free', name: 'EcoFlow Host Data Disk Free', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:harddisk', entity_category: 'diagnostic', value_template: '{{ value_json.host_data_disk_free_mb }}' },
+  { unique_id: 'ecoflow_host_load_1m', name: 'EcoFlow Host Load (1m)', state_class: 'measurement', icon: 'mdi:chip', entity_category: 'diagnostic', value_template: '{{ value_json.host_load_1m }}' },
   { unique_id: 'ecoflow_host_soc_temp', name: 'EcoFlow Host SoC Temperature', device_class: 'temperature', state_class: 'measurement', unit_of_measurement: '°C', entity_category: 'diagnostic', value_template: '{{ value_json.host_soc_temp_c }}' },
   { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'EcoFlow Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
   { unique_id: 'ecoflow_night_charge_readiness', name: 'EcoFlow Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
@@ -896,6 +901,10 @@ export async function startMqttDiscovery(
       // AND into /api/ha-state (index.ts) in parity, matching the pv_curtailment
       // precedent. Read-only — no field here is consumed by the alarm spine.
       host_soc_temp_c: liveHostTemp()?.tempC ?? null,
+      host_evloop_lag_ms: liveVitals()?.evLoopLagMs ?? null,
+      host_mem_available_mb: liveVitals()?.memAvailableMb ?? null,
+      host_data_disk_free_mb: liveVitals()?.dataDiskFreeMb ?? null,
+      host_load_1m: liveVitals()?.load1 ?? null,
       ...nightChargeStateFields(getLatestNightChargePlan()),
       ...nightChargeGateFields(getLatestReadiness()),
       // v0.89.0 — SHP2 operating-mode / reserve strategy diagnostics. Reserve floor
