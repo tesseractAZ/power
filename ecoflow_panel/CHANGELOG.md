@@ -1,3 +1,30 @@
+## v1.41.0 — cell-level fault forensics in battery alerts
+
+Battery fault alerts now carry detection → isolation → root cause with
+supporting ranges, assembled from telemetry the engine already collects.
+
+- **Cell isolation.** Cell-imbalance alerts (`vdiff-crit`/`vdiff-warn`)
+  identify the exact deviant cell in the 32-cell string — index, voltage,
+  signed deviation vs the pack median (negative = weak/low cell) — with the
+  pack's spread and the sibling packs' spreads (typically 3–5 mV) as
+  supporting ranges. The critical's detail names the isolated cell; the full
+  dossier renders as alert facts, formatted for direct use in an after-sales
+  ticket.
+- **BMS protection-latch classification.** A three-legged signature (pack
+  SoC-stranded ≥ 20 points below the sibling median, exchanging < 25 W, while
+  siblings flow ≥ 100 W) classifies a pack as protection-latched. Shared
+  idleness never classifies. `Packs out of balance` names the lowest pack and
+  states the flow contrast when the signature holds.
+- **Error-code band titling.** `dpu-err` alerts for codes 500–599 present as
+  "Battery protection fault" (battery/BMS protection band) rather than the
+  blanket "Inverter error code" that previously mis-pointed triage at the
+  wrong subsystem; when a pack shows the latch signature the alert names the
+  probable source pack. Alert ids are unchanged, so standing faults do not
+  re-raise on upgrade.
+
+All helpers are pure, unit-tested, and emit null when per-cell telemetry is
+absent. 7 added regression tests (1,637 total).
+
 ## v1.40.0 — storm-alert continuity, plan-capture resilience, subsystem observability
 
 **Storm alerts survive NWS product updates.** The active-alerts query now
