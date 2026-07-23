@@ -1,5 +1,5 @@
 name: Power
-version: "1.45.0"
+version: "1.46.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -150,6 +150,8 @@ options:
   # by setting this true. (Existing installs keep their saved value on upgrade.)
   TELNET_ENABLED: false
   TELNET_PORT: 2323
+  TUI_USERNAME: ""
+  TUI_PASSWORD: ""
   # Diagnostic / advanced (leave default unless you know you need them)
   ECOFLOW_DEVICE_REACHABILITY: ""
   WRITE_DEBUG_TOKEN: ""
@@ -242,6 +244,8 @@ schema:
   # Telnet control-room TUI (LAN-only, unauthenticated interface)
   TELNET_ENABLED: bool
   TELNET_PORT: port
+  TUI_USERNAME: str?
+  TUI_PASSWORD: password?
   # Diagnostic / advanced (leave default unless you know you need them)
   ECOFLOW_DEVICE_REACHABILITY: "str?"
   WRITE_DEBUG_TOKEN: "password?"

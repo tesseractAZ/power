@@ -1,12 +1,17 @@
 /**
  * ALM screen — alarm console.
  *
- * Sorted newest first. Each alarm shows its timestamp, ISA priority tag,
- * category, identifier, and message. Scrollable with ↑/↓.
+ * An ISA-18.1-style annunciator header (one legend tile per alarm category,
+ * lit when that group has an active alert) sits above the alarm list.
+ * The list is sorted newest first; each alarm shows its timestamp, ISA
+ * priority tag, category, identifier, and message. Scrollable with ↑/↓.
  */
 
 import { c, padEnd } from '../ansi.js';
 import { divider } from './scada.js';
+// v1.38.0 — annunciator legend tiles (3-row lamp boxes; plain strings,
+// colorized whole per tile).
+import { tile } from '../gauges.js';
 import type { PlantData, PlantView } from './types.js';
 // v0.11.0 — derive the 4-tier ISA-18.2 / IEC 62682 alarm priority for display.
 import { priorityOf, priorityMeta, type AlarmPriority } from '../../alertPriority.js';
@@ -39,6 +44,59 @@ function wrapPlain(s: string, width: number): string[] {
   return lines.length ? lines : [''];
 }
 
+/**
+ * Fixed annunciator panel roster: one legend window per alert category
+ * (the alerts.ts category union), plus a SYSTEM catch-all so an alarm with an
+ * unrecognized category can never bypass the panel unlit. Keys are matched
+ * case-insensitively; labels are sized to fit an 80-col 7-tile panel.
+ */
+const ANNUN_TILES: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'battery', label: 'BATTERY' },
+  { key: 'solar', label: 'SOLAR' },
+  { key: 'thermal', label: 'THERMAL' },
+  { key: 'shp2', label: 'SHP2' },
+  { key: 'grid', label: 'GRID' },
+  { key: 'connectivity', label: 'COMMS' },
+  { key: 'system', label: 'SYSTEM' },
+];
+
+/** Rows the annunciator header occupies (tile() is always 3 rows). */
+const ANNUN_ROWS = 3;
+
+/**
+ * Render the annunciator header: equal-width tiles, as many as fit at ≥ 8
+ * cols each (all seven fit from 80 cols up), 1-col gaps. A lit tile is red
+ * when the group holds a Critical/High alarm, yellow when only Medium/Low;
+ * dark tiles are grey. Tiles are plain strings colorized whole — visible
+ * width is 2 + shown×tileW + (shown−1), always ≤ `width`.
+ */
+function renderAnnunciator(alerts: PlantData['snap']['alerts'], width: number): string[] {
+  const byCat = new Map<string, { crit: boolean }>();
+  for (const a of alerts ?? []) {
+    const raw = (a.category ?? '').toLowerCase();
+    const key = ANNUN_TILES.some((t) => t.key === raw) ? raw : 'system';
+    const cur = byCat.get(key) ?? { crit: false };
+    const p = priorityOf(a);
+    if (p === 'critical' || p === 'high') cur.crit = true;
+    byCat.set(key, cur);
+  }
+  const minTileW = 8;
+  const shown = Math.min(ANNUN_TILES.length, Math.max(1, Math.floor((width - 2 + 1) / (minTileW + 1))));
+  const tileW = Math.min(18, Math.floor((width - 2 - (shown - 1)) / shown));
+  if (tileW < 3) return [];
+  const rows = ['', '', ''];
+  for (let i = 0; i < shown; i++) {
+    const t = ANNUN_TILES[i];
+    const group = byCat.get(t.key);
+    const lit = group != null;
+    const paint = !lit ? c.grey : group.crit ? c.redB : c.yellowB;
+    const box = tile(t.label, lit, tileW);
+    const sep = i > 0 ? ' ' : '';
+    for (let r = 0; r < ANNUN_ROWS; r++) rows[r] += sep + paint(box[r]);
+  }
+  return rows.map((r) => '  ' + r);
+}
+
 export function renderAlm(view: PlantView, data: PlantData): string[] {
   const W = view.width;
   const out: string[] = [];
@@ -55,6 +113,12 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   // v0.11.0 — tally by the 4-tier ISA priority instead of raw severity.
   const pc: Record<AlarmPriority, number> = { critical: 0, high: 0, medium: 0, low: 0 };
   for (const a of alerts) pc[priorityOf(a)]++;
+
+  // v1.38.0 — annunciator header above the list. A real ISA panel keeps all
+  // its windows visible at all times (a dark tile IS information), so this
+  // renders on an empty alarm list too.
+  const annun = renderAnnunciator(alerts, W);
+  out.push(...annun);
 
   out.push(divider(`ALARM LIST — ${alerts.length} active`, W));
   out.push(padEnd(
@@ -106,7 +170,9 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   // v1.4.3 (audit rank 10/41) — budget rows against the ACTUAL body height (plant/index.ts
   // clips to H-2, and this screen's own header is 4 lines), not a fixed 30-row slice, so the
   // "N more below" hint is honest at any terminal height.
-  const rowBudget = Math.max(4, view.height - 8);
+  // v1.38.0 — the annunciator header above the divider consumes its rows from
+  // the same budget.
+  const rowBudget = Math.max(4, view.height - 8 - annun.length);
 
   // v1.x — reserve two rows (blank + "… N more below") so the scroll cue can
   // never be pushed off the bottom by the alarm rows above it.

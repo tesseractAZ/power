@@ -31,7 +31,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { WebSocket } from '@fastify/websocket';
-import { TuiSession } from './session.js';
+import { TuiSession, authFromEnv } from './session.js';
 import type { InputEvent, TuiDataProvider } from './session.js';
 
 /**
@@ -121,6 +121,13 @@ export function parseXtermData(s: string): InputEvent[] {
     }
     if (code === 3) {
       events.push({ type: 'key', key: 'ctrl-c' });
+      i += 1;
+      continue;
+    }
+    if (code === 8 || code === 127) {
+      // v1.46.0 — BS/DEL both arrive as backspace depending on the client's
+      // terminal; the login prompt needs it, the console ignores it.
+      events.push({ type: 'key', key: 'backspace' });
       i += 1;
       continue;
     }
@@ -350,6 +357,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
     liveSessions += 1;
 
     const session = new TuiSession({
+      auth: authFromEnv(),
       // xterm renders the bytes verbatim; no telnet alt-buffer dance needed.
       write: (payload) => {
         if (socket.readyState === socket.OPEN) socket.send(payload);
@@ -406,8 +414,8 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       }
       const r = session.feed(parseXtermData(text));
       if (r.quit) {
-        // Browser sessions can't "quit" the page; just reset to the chooser by
-        // closing — the client auto-reconnects to a fresh session.
+        // Browser sessions can't "quit" the page; close the socket — the
+        // client auto-reconnects to a fresh session (which re-prompts login).
         try { socket.close(); } catch { /* ignore */ }
         return;
       }

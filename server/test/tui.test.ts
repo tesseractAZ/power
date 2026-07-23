@@ -23,7 +23,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderPlant, PLANT_SCREENS, type PlantScreenId, type PlantView, type PlantData } from '../src/telnet/plant/index.js';
-import { renderChooser, defaultChooserState } from '../src/telnet/plant/chooser.js';
 import { visLen } from '../src/telnet/ansi.js';
 import type { FleetSnapshot, DeviceSnapshot } from '../src/snapshot.js';
 import type { DpuProjection, Shp2Projection } from '../src/ecoflow/project.js';
@@ -212,6 +211,9 @@ function assertFrame(lines: string[], width: number, height: number, label: stri
 const SHAPES: Array<{ name: string; width: number; height: number }> = [
   { name: '80×24', width: 80, height: 24 },
   { name: '100×40', width: 100, height: 40 },
+  // v1.38.0 — the big-digit console band / annunciator tiles light up from
+  // 96 cols; 120×40 exercises every screen with them active.
+  { name: '120×40', width: 120, height: 40 },
   { name: '200×60', width: 200, height: 60 },
 ];
 
@@ -277,32 +279,6 @@ test('renderPlant(gen) — genSel out-of-range is clamped', () => {
   // Should clamp internally and render without throwing.
   const lines = renderPlant(view, makePlantData(snap), { recorder: mockRecorder() });
   assertFrame(lines, 100, 40, 'plant/gen@oob-sel');
-});
-
-/* ── chooser tests ─────────────────────────────────────────────────────── */
-
-test('renderChooser — 80×24, default highlight', () => {
-  const lines = renderChooser(defaultChooserState(80, 24));
-  // chooser is NOT padded by a dispatcher — but each line must still be ≤ W.
-  for (let i = 0; i < lines.length; i++) {
-    assert.ok(visLen(lines[i]) <= 80, `chooser line ${i} too wide: ${visLen(lines[i])}`);
-  }
-});
-
-test('renderChooser — narrow 60×20 (stacked layout)', () => {
-  const lines = renderChooser(defaultChooserState(60, 20));
-  for (let i = 0; i < lines.length; i++) {
-    assert.ok(visLen(lines[i]) <= 60, `narrow chooser line ${i} too wide: ${visLen(lines[i])}`);
-  }
-});
-
-test('renderChooser — wide 120×40, second option highlighted', () => {
-  const s = defaultChooserState(120, 40);
-  s.highlight = 1;
-  const lines = renderChooser(s);
-  for (let i = 0; i < lines.length; i++) {
-    assert.ok(visLen(lines[i]) <= 120, `wide chooser line ${i} too wide: ${visLen(lines[i])}`);
-  }
 });
 
 /* ── specific bugs caught and locked in ────────────────────────────────── */
@@ -420,6 +396,108 @@ test('renderPlant(gen) — pack SoH% column clamps display to ≤ 100', () => {
   const plain = lines.map(stripAnsi).join('\n');
   assert.ok(!/100\.4(?!\d)/.test(plain), `gen pack row rendered an unclamped SoH (100.4):\n${plain}`);
   assert.ok(/100\.0/.test(plain), `clamped SoH 100.0 not present in gen pack rows:\n${plain}`);
+});
+
+/* ── v1.38.0 — big-digit band, pool gauge, braille trends, annunciator ── */
+
+test('renderPlant(console) — 120×40 renders the 5-row big-digit band + pool gauge', () => {
+  const snap = buildSnapshot({ daylight: true });
+  const lines = renderPlant(makeView(120, 40, 'console'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  // Label row above the big digits carries all three group labels.
+  const li = plain.findIndex((l) => /BATT SOC/.test(l) && /PV ARRAY/.test(l) && /LOAD/.test(l));
+  assert.ok(li >= 0, `band label row missing:\n${plain.join('\n')}`);
+  // The next 5 rows are the bigfont glyph rows — every one carries blocks.
+  for (let r = 1; r <= 5; r++) {
+    assert.ok(/█/.test(plain[li + r]), `big-digit row ${r} has no block glyphs: ${JSON.stringify(plain[li + r])}`);
+  }
+  // Full-width pool gauge: POOL label + eighth-block bar + 4-char percent.
+  assert.ok(
+    plain.some((l) => /^ {2}POOL [█▉▊▋▌▍▎▏ ]+ +\d+%\s*$/.test(l)),
+    `pool gauge line missing:\n${plain.join('\n')}`,
+  );
+  assertFrame(lines, 120, 40, 'plant/console@120×40-bigband');
+});
+
+test('renderPlant(console) — 80×24 degrades: no big-digit band, pool gauge still present', () => {
+  const snap = buildSnapshot({ daylight: true });
+  const lines = renderPlant(makeView(80, 24, 'console'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  assert.ok(!plain.some((l) => /BATT SOC|PV ARRAY/.test(l)), 'big-digit band must not render at 80×24');
+  assert.ok(plain.some((l) => /^ {2}POOL /.test(l)), 'pool gauge must render at every size');
+  // The band must not displace the BATTERY POOL section either.
+  assert.ok(plain.some((l) => /BATTERY POOL/.test(l)), 'BATTERY POOL section lost at 80×24');
+  assertFrame(lines, 80, 24, 'plant/console@80×24-degrade');
+});
+
+test('renderPlant(alm) — 120×40 renders the annunciator header with equal-width tiles', () => {
+  const snap = buildSnapshot({ numAlerts: 4, daylight: true });
+  const lines = renderPlant(makeView(120, 40, 'alm'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  // Tile top rules: runs of ▁ separated by 1-col gaps — all the same width.
+  const topIdx = plain.findIndex((l) => /▁{4,}/.test(l));
+  assert.ok(topIdx >= 0, `annunciator top rules missing:\n${plain.join('\n')}`);
+  const tops = plain[topIdx].trim().split(/ +/);
+  assert.ok(tops.length >= 2, `expected multiple tiles, got ${tops.length}`);
+  for (const t of tops) {
+    assert.equal(t.length, tops[0].length, `tiles not equal width: ${tops.map((x) => x.length).join(',')}`);
+  }
+  // Legend row: fixture categories (thermal crit, battery warn, connectivity
+  // info) are lit with █ lamp edges; quiet groups (SOLAR, GRID…) are not.
+  // Slice the legend row into per-tile cells (indent 2, 1-col gaps) so a lit
+  // neighbour's edge can't bleed into the check.
+  const tileW = tops[0].length;
+  const legend = plain[topIdx + 1];
+  const cell = (i: number) => legend.slice(2 + i * (tileW + 1), 2 + i * (tileW + 1) + tileW);
+  const cellFor = (label: string) => {
+    for (let i = 0; i < tops.length; i++) if (cell(i).includes(label)) return cell(i);
+    return null;
+  };
+  const thermal = cellFor('THERMAL');
+  const battery = cellFor('BATTERY');
+  const solar = cellFor('SOLAR');
+  assert.ok(thermal != null && thermal.startsWith('█') && thermal.endsWith('█'), `THERMAL tile not lit: ${JSON.stringify(thermal)}`);
+  assert.ok(battery != null && battery.startsWith('█') && battery.endsWith('█'), `BATTERY tile not lit: ${JSON.stringify(battery)}`);
+  assert.ok(solar != null && !solar.includes('█'), `SOLAR tile should be dark: ${JSON.stringify(solar)}`);
+  assert.ok(/▔{4,}/.test(plain[topIdx + 2]), 'annunciator bottom rules missing');
+  assertFrame(lines, 120, 40, 'plant/alm@120×40-annunciator');
+});
+
+test('renderPlant(alm) — annunciator fits and stays equal-width at 80×24', () => {
+  const snap = buildSnapshot({ numAlerts: 4, daylight: true });
+  const lines = renderPlant(makeView(80, 24, 'alm'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  const topIdx = plain.findIndex((l) => /▁{4,}/.test(l));
+  assert.ok(topIdx >= 0, 'annunciator must render at 80 cols');
+  const tops = plain[topIdx].trim().split(/ +/);
+  for (const t of tops) assert.equal(t.length, tops[0].length, 'tiles not equal width at 80 cols');
+  assertFrame(lines, 80, 24, 'plant/alm@80×24-annunciator');
+});
+
+test('renderPlant(trd) — trend rows carry full-width braille sparklines', () => {
+  const snap = buildSnapshot({ daylight: true });
+  const lines = renderPlant(makeView(100, 40, 'trd'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  // Sparkline spans every column after the 35-col fixed prefix (here 65) —
+  // with the empty mock recorder that is a run of blank braille cells, which
+  // still sit inside the braille block (U+2800–U+28FF).
+  const run = new RegExp(`[\\u2800-\\u28ff]{${100 - 35}}`);
+  const battRow = plain.find((l) => /BATT\.SOC/.test(l));
+  assert.ok(battRow != null, `BATT.SOC trend row missing:\n${plain.join('\n')}`);
+  assert.ok(run.test(battRow), `BATT.SOC row lacks a full-width braille strip: ${JSON.stringify(battRow)}`);
+  assertFrame(lines, 100, 40, 'plant/trd@braille');
+});
+
+test('renderPlant(gen) — pack rows carry a colorized SoC bar column at 80×24', () => {
+  const snap = buildSnapshot({ numDpus: 1 });
+  const lines = renderPlant(makeView(80, 24, 'gen'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  const anyPackRow = plain.find((l) => /%/.test(l) && /(NORMAL|WARN)/.test(l));
+  assert.ok(anyPackRow != null, `no pack rows rendered:\n${plain.join('\n')}`);
+  // 80% SoC over a 16-col bar = 12.8 cells → a solid run of full blocks.
+  assert.ok(/█{2,}/.test(anyPackRow), `pack row missing SoC bar: ${JSON.stringify(anyPackRow)}`);
+  assert.ok(plain.some((l) => /SOC BAR/.test(l)), 'SOC BAR header column missing');
+  assertFrame(lines, 80, 24, 'plant/gen@80×24-socbar');
 });
 
 test('renderPlant(gen) — packs count in title matches actual pack count', () => {
