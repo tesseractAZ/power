@@ -6803,6 +6803,23 @@ The add-on monitors the machine it runs on. `hostThermal.ts` samples the kernel 
 - Alerts `host-temp-warn` (warning, ≥ `HOST_TEMP_WARN_C`, default 78 °C) and `host-temp-crit` (critical, ≥ `HOST_TEMP_CRIT_C`, default 84 °C), with 3 °C rise/clear hysteresis (`hostTempLevel`, pure). The critical sits just below the host SoC's ~85 °C throttle point: thermal throttling slows the alarm pipeline precisely when extreme ambient heat makes it matter most.
 - Null-honest: a host with no readable thermal zone produces a null sensor and no alerts. Thresholds are env-overridable (`HOST_TEMP_WARN_C`, `HOST_TEMP_CRIT_C`), not add-on options.
 
+### 13.0b Co-tenant degradation defense — self-vitals (v1.43.0)
+
+The alarm shares its host with other add-ons; a co-tenant failure (memory leak, CPU spin, disk fill) degrades the alarm indirectly. `selfVitals.ts` provides in-band early warning across four dimensions, each null-honest when its source is unreadable:
+
+| Dimension | Source | Warn / Crit (env-overridable) |
+|---|---|---|
+| Event-loop lag | 500 ms drift probe, EMA α=0.2 + 60 s max | ≥ 200 ms / ≥ 1000 ms EMA (`VITALS_LAG_*_MS`) |
+| Memory available | `/proc/meminfo` MemAvailable | < 700 MB / < 350 MB (`VITALS_MEM_*_MB`) |
+| Data-disk free | `statfs` on the data directory | < 2048 MB / < 512 MB (`VITALS_DISK_*_MB`) |
+| Load (1 min) | `/proc/loadavg` | ≥ 3.5 / ≥ 6 (`VITALS_LOAD_*`, 4-core host) |
+
+`assessVitals` (pure) applies per-dimension hysteresis — escalation immediate, de-escalation only past a clearance margin — and rolls the maximum into one assessment. Surfaces: four HA diagnostic sensors (`ecoflow_host_evloop_lag`, `ecoflow_host_mem_available`, `ecoflow_host_disk_free`, `ecoflow_host_load_1m`), `vitalsLevel` on `/api/health`, and ONE rolled alert (`host-pressure-warn`/`host-pressure-crit`) whose detail names every pressured dimension with its value — a starved host is one operator situation, not four alert families. Under a critical assessment, **alarm-first QoS** pauses discretionary analytics ticks (rest tracker, GHI persistence) so the process's remaining CPU serves the poll → alert → broadcast path; the alert states that this shedding is active.
+
+### 13.0c Out-of-band dead-man heartbeat (v1.43.0)
+
+In-band self-monitoring fails with the host, so the final layer lives outside the failure domain: `heartbeat.ts` sends an HTTPS GET to an operator-configured external heartbeat receiver (`HEARTBEAT_URL`, healthchecks.io-style) every `HEARTBEAT_INTERVAL_S` (60–3600 s, default 300, ±10 % jitter), starting at boot. When the pings stop — host dead, container OOM-killed, kernel wedged, power lost — the external service notifies the operator from outside the house. Properties: fully inert when no URL is configured; https-only; the URL is treated as a capability token and never logged (only its host, once, on rejection); state-transition-only logging; a send failure is local information only (internet-down ≠ host-down — the external service's own grace period makes the dead-man decision), so the module raises no alerts and only reports `heartbeatStatus()` on `/api/health`. Recommended external configuration: check period = the configured interval, grace ≈ 2 intervals.
+
 *Process guard, host-power self-monitor, HA state cache, onset persistence, message-rate floor, and log/format hygiene — the reliability layer that keeps a life-safety monitor alive and honest.*
 
 This cluster is not a feature the operator sees on a screen. It is the connective tissue that lets every other engine survive the real-world failure modes of an off-grid Raspberry Pi: a daily Supervisor maintenance bounce, a Pi that loses power almost every day, an EcoFlow cloud session that wedges without going fully silent, and a log stream that floods during outages. Three of these modules (`processGuard`, `hostPower`, `messageRateFloor`) are load-bearing safety components — a bug in them can either kill the alarm or blind it. The rest bound what lands on disk and in the log so a real signal stays greppable and a hostile device name can't hijack the operator's terminal.

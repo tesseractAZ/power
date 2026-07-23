@@ -169,6 +169,19 @@ configuration:
   NIGHT_CHARGE_NOTIFY_ON_HOLD:
     name: Notify On "Hold" Nights
     description: 'When on (default), the nightly advisory is sent even on "hold" nights (no charge needed) so you get a consistent nightly confirmation the job ran. Turn off to only be notified when a charge is actually recommended or when the basis is missing.'
+  HEARTBEAT_URL:
+    name: External heartbeat (dead-man's switch) URL
+    description: >-
+      Optional https ping URL from an external heartbeat service (e.g. a
+      healthchecks.io check). The add-on sends a GET on the interval below;
+      if the pings stop — host dead, container killed, power lost — the
+      EXTERNAL service notifies you from outside the failure domain. Leave
+      empty to disable. The URL is a capability token: it is never logged.
+  HEARTBEAT_INTERVAL_S:
+    name: Heartbeat interval (seconds)
+    description: >-
+      How often the heartbeat ping is sent (60–3600, default 300). Set the
+      external check's period to this value and its grace to ~2 intervals.
   TARIFF_APS_ONPEAK_SUMMER_CENTS:
     name: APS On-Peak ¢/kWh (Summer)
     description: 'Effective summer on-peak energy price in cents per kWh (APS R-EV, 4–7pm Mon–Fri, May–Oct), taken from a real bill including adjustors. Leave blank until confirmed — any blank rate forces rates-unconfirmed, so every dollar figure is published as null (never a fabricated number).'
