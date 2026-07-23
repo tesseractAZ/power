@@ -4555,6 +4555,8 @@ Learned alerts carry `source: 'learned'` (→ ISA Medium at warning severity). R
 
 **OUTPUT id** `baseline-<metric>-<SN>` (e.g. `baseline-pair6_w-<SN>`, `baseline-pack3_temp-<SN>`), title "… unusual for the hour", facts: current, typical-this-hour, deviation, baseline window (days/samples), z-score.
 
+**Regime-shift absorption (v1.42.0).** The baseline is a rolling 14-day hour-of-day median with no stored model, so a persistent behavior change (for example two AC zones exchanging duty roles) is fully absorbed once the new pattern becomes the window majority (≈ 7 days). Until then the deviation is real but is a *new normal*, not an anomaly: `regimeShiftDays` (pure, exported) counts trailing consecutive days whose daily bucket-median deviates in the same direction past the floor, and at ≥ `REGIME_SHIFT_MIN_DAYS` (5) the alert states the situation ("persisted N consecutive days — a new normal pattern the rolling baseline is absorbing, ~M day(s) to full absorption") and sets `annunciate:false` until absorption completes. A trailing day that reverses direction, or deviates under the floor, breaks the streak and restores normal annunciation.
+
 #### 3.3 Degradation & runtime forecast — `computeForecastAlerts(devices, recorder, forecast?)`
 
 **WHAT.** Regression-based projections. Cached ~10 min (`FORECAST_TTL_MS`), keyed also on the depletion gate boolean.
@@ -6792,6 +6794,14 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 ---
 
 ## 13. Safety & Operational Plumbing
+
+### 13.0 Alarm-host thermal monitor (v1.42.0)
+
+The add-on monitors the machine it runs on. `hostThermal.ts` samples the kernel thermal zones (`/sys/class/thermal/thermal_zone*/temp`, read-only in the container) every 60 s, takes the hottest valid zone (readings outside 5–130 °C are rejected), and holds the freshest sample with a 5-minute staleness bound. Surfaces:
+
+- `host_soc_temp_c` in `/api/ha-state` and the MQTT state payload; discovery sensor `ecoflow_host_soc_temp` (`device_class: temperature`, diagnostic). Trend history comes from the Home Assistant recorder — the add-on stores none.
+- Alerts `host-temp-warn` (warning, ≥ `HOST_TEMP_WARN_C`, default 78 °C) and `host-temp-crit` (critical, ≥ `HOST_TEMP_CRIT_C`, default 84 °C), with 3 °C rise/clear hysteresis (`hostTempLevel`, pure). The critical sits just below the host SoC's ~85 °C throttle point: thermal throttling slows the alarm pipeline precisely when extreme ambient heat makes it matter most.
+- Null-honest: a host with no readable thermal zone produces a null sensor and no alerts. Thresholds are env-overridable (`HOST_TEMP_WARN_C`, `HOST_TEMP_CRIT_C`), not add-on options.
 
 *Process guard, host-power self-monitor, HA state cache, onset persistence, message-rate floor, and log/format hygiene — the reliability layer that keeps a life-safety monitor alive and honest.*
 

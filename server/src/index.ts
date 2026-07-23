@@ -99,6 +99,7 @@ import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvi
 import { createRunwayAlarm, shouldGateRunwayAudible } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 import { hostPowerEntityId } from './hostPower.js';
+import { sampleHostTemp, liveHostTemp } from './hostThermal.js';
 import { socGridCrossDecision, reEscalateGridDrop } from './socGridDispatch.js';
 import { classifyMqttStartFailure } from './mqttStartClassify.js';
 import {
@@ -1442,6 +1443,7 @@ app.get('/api/ha-state', async (req, reply) => {
     // <12 h old); nightChargeGateFields returns write_ready strictly false on a
     // null readiness. READ-ONLY — no field here is consumed by the alarm spine.
     ...nightChargeStateFields(getLatestNightChargePlan()),
+    host_soc_temp_c: liveHostTemp()?.tempC ?? null,
     ...nightChargeGateFields(getLatestReadiness()),
   };
   // v0.9.14 — 25 s cache: the underlying computes refresh every 4 min via the
@@ -1814,6 +1816,13 @@ const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), 
  * recording that, so `/api/physics/lfp-soc` reported isResting=false on all 15 packs and
  * never produced a physics SoC. Sampled on the poll cadence — OCV settling is a 10-minute
  * scale phenomenon, so a 60 s sample is ample. Keyed on the pack hardware serial. */
+// v1.42.0 — host SoC temperature sampler (60 s). Read-only sysfs read; the
+// holder feeds the alert builder, /api/ha-state, and the MQTT sensor. On hosts
+// with no readable thermal zone every surface stays null (no alert).
+const hostTempTick = setInterval(() => { sampleHostTemp(); }, 60 * 1000);
+hostTempTick.unref();
+sampleHostTemp();
+
 const restTrackerTick = setInterval(() => {
   const now = Date.now();
   const keys: string[] = [];

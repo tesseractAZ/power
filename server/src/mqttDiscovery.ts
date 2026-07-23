@@ -1,4 +1,5 @@
 import mqtt, { MqttClient } from 'mqtt';
+import { liveHostTemp } from './hostThermal.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { SnapshotStore, FleetSnapshot } from './snapshot.js';
@@ -294,6 +295,9 @@ export const SENSORS: SensorConfig[] = [
   // null (→ HA 'unknown') when the plan is stale/incomplete — never a fabricated
   // value. The AVAILABILITY spread is applied uniformly in publishDiscovery().
   { unique_id: 'ecoflow_night_charge_target_soc', name: 'EcoFlow Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
+  // v1.42.0 — alarm-host SoC temperature (heat tripwire; HA recorder provides
+  // the trend history). Null when the host exposes no readable thermal zone.
+  { unique_id: 'ecoflow_host_soc_temp', name: 'EcoFlow Host SoC Temperature', device_class: 'temperature', state_class: 'measurement', unit_of_measurement: '°C', entity_category: 'diagnostic', value_template: '{{ value_json.host_soc_temp_c }}' },
   { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'EcoFlow Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
   { unique_id: 'ecoflow_night_charge_readiness', name: 'EcoFlow Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
   { unique_id: 'ecoflow_night_charge_window_start', name: 'EcoFlow Night-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_start }}' },
@@ -891,6 +895,7 @@ export async function startMqttDiscovery(
       // night_charge_write_ready strictly false on a null readiness. Wired here
       // AND into /api/ha-state (index.ts) in parity, matching the pv_curtailment
       // precedent. Read-only — no field here is consumed by the alarm spine.
+      host_soc_temp_c: liveHostTemp()?.tempC ?? null,
       ...nightChargeStateFields(getLatestNightChargePlan()),
       ...nightChargeGateFields(getLatestReadiness()),
       // v0.89.0 — SHP2 operating-mode / reserve strategy diagnostics. Reserve floor

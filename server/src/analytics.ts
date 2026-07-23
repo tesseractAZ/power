@@ -332,6 +332,41 @@ function buildBaselineTargets(devices: Record<string, DeviceSnapshot>): Baseline
 
 let baselineCache: { ts: number; alerts: Alert[] } | null = null;
 
+
+/** v1.42.0 — regime-shift detector for the self-baseline family. The baseline
+ *  is a ROLLING 14-day hour-of-day median with no stored model, so a persistent
+ *  behavior change (e.g. two AC zones swapping duty) is fully absorbed once the
+ *  new pattern is the window majority (~7 days) — but until then the family
+ *  re-fires "unusual for the hour" on a pattern that is plainly the new normal.
+ *  This counts TRAILING consecutive days whose daily bucket-median deviates in
+ *  the same direction past the floor; at ≥ REGIME_SHIFT_MIN_DAYS the alert
+ *  says what is happening and stops annunciating while absorption completes.
+ *  PURE. */
+export const REGIME_SHIFT_MIN_DAYS = 5;
+export function regimeShiftDays(
+  bucketPts: ReadonlyArray<{ ts: number; v: number }>,
+  med: number,
+  floor: number,
+  dirSign: number,
+  nowMs: number,
+): number {
+  const DAY = 86_400_000;
+  let days = 0;
+  for (let d = 0; d < 14; d++) {
+    const lo = nowMs - (d + 1) * DAY;
+    const hi = nowMs - d * DAY;
+    const vals = bucketPts.filter((p) => p.ts >= lo && p.ts < hi).map((p) => p.v).sort((a, b) => a - b);
+    if (vals.length === 0) {
+      if (d === 0) continue; // today's bucket may simply not have samples yet
+      break;
+    }
+    const dayMed = vals[vals.length >> 1];
+    if (Math.sign(dayMed - med) === dirSign && Math.abs(dayMed - med) >= floor) days++;
+    else break;
+  }
+  return days;
+}
+
 /** Phase 2 learned alerts: per-sensor self-baseline. Cached ~5 min. */
 export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, recorder: Recorder): Alert[] {
   if (baselineCache && Date.now() - baselineCache.ts < BASELINE_TTL_MS) {
@@ -348,11 +383,13 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     if (pts.length < BASELINE_MIN_SAMPLES) continue;
     if (pts[pts.length - 1].ts - pts[0].ts < BASELINE_MIN_SPAN_MS) continue; // not enough span
 
-    // Samples within ±1 hour of the current hour-of-day
-    const bucket = pts
+    // Samples within ±1 hour of the current hour-of-day (timestamps kept for
+    // the v1.42.0 regime-shift check below).
+    const bucketPts = pts
       .filter((p) => windowHours.has(new Date(p.ts).getHours()))
-      .map((p) => t.transform(p.value))
-      .filter((v) => Number.isFinite(v));
+      .map((p) => ({ ts: p.ts, v: t.transform(p.value) }))
+      .filter((p) => Number.isFinite(p.v));
+    const bucket = bucketPts.map((p) => p.v);
     if (bucket.length < BASELINE_MIN_SAMPLES) continue;
 
     const med = median(bucket);
@@ -424,16 +461,26 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     const dir = dispLive >= dispMed ? 'above' : 'below';
     const spanDays = ((pts[pts.length - 1].ts - pts[0].ts) / 86_400_000).toFixed(1);
     const subj = t.packNum != null ? `${t.device} Pack ${t.packNum}` : t.device;
+    // v1.42.0 — a deviation that has held the same direction for days is a NEW
+    // NORMAL the rolling baseline is still absorbing, not an anomaly worth
+    // annunciating. Say so and go quiet; full absorption ≈ half the 14-day
+    // window after the change.
+    const shiftDays = regimeShiftDays(bucketPts, med, t.floor, Math.sign(t.live - med), now);
+    const regime = shiftDays >= REGIME_SHIFT_MIN_DAYS;
+    const regimeNote = regime
+      ? ` This deviation has persisted ${shiftDays} consecutive days — reading as a new normal pattern the rolling baseline is absorbing (~${Math.max(1, 8 - shiftDays)} day(s) to full absorption); silenced meanwhile.`
+      : '';
     out.push({
       id: `baseline-${t.metric}-${t.sn}`,
       severity,
+      ...(regime ? { annunciate: false } : {}),
       category: t.category,
       source: 'learned',
       device: t.device,
       coreNum: t.coreNum,
       packNum: t.packNum,
       title: `${cap(t.label)} unusual for the hour`,
-      detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(dispAbsDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).`,
+      detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(dispAbsDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).${regimeNote}`,
       facts: [
         { label: 'Current reading', value: t.fmt(t.live) },
         { label: 'Typical (this hour)', value: t.fmt(med) },
