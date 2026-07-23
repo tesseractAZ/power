@@ -1,3 +1,31 @@
+## v1.43.0 — co-tenant degradation defense: self-vitals + out-of-band heartbeat
+
+The alarm shares its host with other add-ons; this release defends against
+the failure mode where a CO-TENANT (not the alarm itself) degrades the host —
+leaking memory, spinning CPU, filling the shared disk — and the alarm's
+performance erodes with it.
+
+**In-band self-vitals.** Four pressure dimensions, each null-honest when its
+source is unreadable: event-loop lag (500 ms drift probe, EMA + 60 s max —
+the direct "this process is being starved" signal), MemAvailable, data-disk
+free space, and 1-minute load. Pure per-dimension hysteresis rolls into one
+assessment surfaced as four HA diagnostic sensors, a `/api/health` field, and
+a single rolled `host-pressure` warning/critical alert naming every pressured
+dimension with its value. Under a critical assessment, alarm-first QoS pauses
+discretionary analytics ticks so remaining CPU serves the
+poll → alert → broadcast path.
+
+**Out-of-band dead-man heartbeat.** An optional HTTPS ping to an external
+heartbeat receiver (`HEARTBEAT_URL` + `HEARTBEAT_INTERVAL_S` add-on options;
+healthchecks.io-style) sent from boot on a jittered interval. When the pings
+stop — host dead, container killed, power lost — the external service
+notifies the operator from outside the failure domain: the one alarm channel
+that does not share fate with the host. Inert when unconfigured; https-only;
+the URL is never logged; send failures are local information only and raise
+no alerts (the external grace period makes the dead-man decision).
+
+19 added regression tests (1,663 total).
+
 ## v1.42.0 — alarm-host thermal monitor + baseline regime-shift absorption
 
 Implements the two build items from the stack health-and-headroom review.

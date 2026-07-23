@@ -100,6 +100,8 @@ import { createRunwayAlarm, shouldGateRunwayAudible } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 import { hostPowerEntityId } from './hostPower.js';
 import { sampleHostTemp, liveHostTemp } from './hostThermal.js';
+import { startVitals, tickAssess, liveVitals, currentAssessment, degradedMode } from './selfVitals.js';
+import { startHeartbeat, heartbeatStatus } from './heartbeat.js';
 import { socGridCrossDecision, reEscalateGridDrop } from './socGridDispatch.js';
 import { classifyMqttStartFailure } from './mqttStartClassify.js';
 import {
@@ -521,7 +523,7 @@ const analytics = initAnalyticsClient(resolve(process.cwd(), config.dbPath), (m)
 store.on('change', (snap) => analytics.pushSnapshot(snap));
 
 app.get('/api/snapshot', async () => snapshotForClient());
-app.get('/api/health', async () => ({ ok: true, generatedAt: store.get().generatedAt }));
+app.get('/api/health', async () => ({ ok: true, vitalsLevel: currentAssessment()?.level ?? null, heartbeat: heartbeatStatus(), generatedAt: store.get().generatedAt }));
 
 /**
  * v0.9.74 — unauth version stamp. Quick debug surface to confirm which
@@ -1444,6 +1446,10 @@ app.get('/api/ha-state', async (req, reply) => {
     // null readiness. READ-ONLY — no field here is consumed by the alarm spine.
     ...nightChargeStateFields(getLatestNightChargePlan()),
     host_soc_temp_c: liveHostTemp()?.tempC ?? null,
+    host_evloop_lag_ms: liveVitals()?.evLoopLagMs ?? null,
+    host_mem_available_mb: liveVitals()?.memAvailableMb ?? null,
+    host_data_disk_free_mb: liveVitals()?.dataDiskFreeMb ?? null,
+    host_load_1m: liveVitals()?.load1 ?? null,
     ...nightChargeGateFields(getLatestReadiness()),
   };
   // v0.9.14 — 25 s cache: the underlying computes refresh every 4 min via the
@@ -1819,11 +1825,19 @@ const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), 
 // v1.42.0 — host SoC temperature sampler (60 s). Read-only sysfs read; the
 // holder feeds the alert builder, /api/ha-state, and the MQTT sensor. On hosts
 // with no readable thermal zone every surface stays null (no alert).
-const hostTempTick = setInterval(() => { sampleHostTemp(); }, 60 * 1000);
+const hostTempTick = setInterval(() => { sampleHostTemp(); tickAssess(); }, 60 * 1000);
 hostTempTick.unref();
 sampleHostTemp();
+// v1.43.0 — co-tenant degradation defense: in-band vitals (event-loop lag,
+// /proc pressure, data-disk free) + the out-of-band dead-man heartbeat.
+startVitals(resolve(process.cwd(), config.dbPath, '..'));
+tickAssess();
+startHeartbeat((m) => app.log.info(m));
 
 const restTrackerTick = setInterval(() => {
+  // v1.43.0 alarm-first QoS: under critical host pressure, discretionary
+  // analytics yield their slice to the poll→alert→broadcast path.
+  if (degradedMode()) { app.log.debug('vitals: skipping rest-tracker tick (host pressure critical)'); return; }
   const now = Date.now();
   const keys: string[] = [];
   for (const d of onlineDpus(store.get().devices)) {
@@ -1846,6 +1860,7 @@ restTrackerTick.unref?.();
 // change-detected + idempotent, so re-persisting the same rows never dupes.
 const GHI_PERSIST_INTERVAL_MS = 45 * 60_000;
 const ghiPersistTick = setInterval(() => {
+  if (degradedMode()) { app.log.debug('vitals: skipping GHI-persist tick (host pressure critical)'); return; }
   void (async () => {
     try {
       const w = await getWeather((m) => app.log.debug(m));

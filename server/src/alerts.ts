@@ -21,6 +21,7 @@ export function resetVdiffWarnHoldForTesting(): void {
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
+import { currentAssessment } from './selfVitals.js';
 
 // v1.42.0 — host-temp hysteresis level held across builds (module singleton,
 // same lifetime pattern as the vdiff warning hold set).
@@ -496,6 +497,25 @@ export function computeAlerts(
         ],
       });
     }
+  }
+
+  // v1.43.0 — co-tenant degradation (host pressure). One ROLLED alert (not a
+  // family per dimension): the assessment's reasons already name each pressured
+  // dimension with its value, and a starved host is one operator situation, not
+  // four. Hysteresis lives in assessVitals; absence of vitals (unreadable
+  // /proc) produces no alert — null over fabrication.
+  const vitals = currentAssessment();
+  if (vitals && vitals.level !== 'ok') {
+    const crit = vitals.level === 'crit';
+    out.push({
+      id: crit ? 'host-pressure-crit' : 'host-pressure-warn',
+      severity: crit ? 'critical' : 'warning',
+      category: 'Connectivity',
+      device: 'System',
+      title: crit ? 'Alarm host under critical pressure' : 'Alarm host under pressure',
+      detail: `The host running this monitor shows resource pressure — ${vitals.reasons.join('; ')}. Another add-on is likely consuming the host; check the Home Assistant add-on pages for the top CPU/memory consumer. Alert delivery may be delayed while pressure persists${crit ? ' (discretionary analytics are paused to protect the alarm path)' : ''}.`,
+      facts: vitals.reasons.map((r, i) => ({ label: `Signal ${i + 1}`, value: r })),
+    });
   }
 
   // v0.16.4 — designated bench spares (Core 4/5) are intentionally kept powered

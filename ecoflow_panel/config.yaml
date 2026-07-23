@@ -1,5 +1,5 @@
 name: Power
-version: "1.42.0"
+version: "1.43.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -127,6 +127,8 @@ options:
   NIGHT_CHARGE_NOTIFY_MINUTE: 30
   NIGHT_CHARGE_NOTIFY_ON_HOLD: true
   # APS R-EV effective ¢/kWh (enter from a bill; blank = unconfirmed → $ output null)
+  HEARTBEAT_URL: ""
+  HEARTBEAT_INTERVAL_S: 300
   TARIFF_APS_ONPEAK_SUMMER_CENTS: ""
   TARIFF_APS_ONPEAK_WINTER_CENTS: ""
   TARIFF_APS_OFFPEAK_SUMMER_CENTS: ""
@@ -220,6 +222,8 @@ schema:
   NIGHT_CHARGE_NOTIFY_ON_HOLD: bool
   # APS R-EV effective ¢/kWh — str? (ships empty; runtime parses number-or-null,
   # same "ship empty, validate at send time" pattern as the NOTIFY_* URLs above).
+  HEARTBEAT_URL: "str?"
+  HEARTBEAT_INTERVAL_S: "int(60,3600)?"
   TARIFF_APS_ONPEAK_SUMMER_CENTS: "str?"
   TARIFF_APS_ONPEAK_WINTER_CENTS: "str?"
   TARIFF_APS_OFFPEAK_SUMMER_CENTS: "str?"
