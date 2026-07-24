@@ -94,13 +94,6 @@ export function qualityChar(q: Quality): string {
   }
 }
 
-/** Pick a quality based on age of the underlying sample. */
-export function ageQuality(ageMs: number | null | undefined): Quality {
-  if (ageMs == null) return 'bad';
-  if (ageMs < 30_000) return 'good';
-  if (ageMs < 180_000) return 'stale';
-  return 'bad';
-}
 
 /* ─── tag row — the atomic unit of the SCADA display ──────────────────── */
 
@@ -151,16 +144,6 @@ export function renderTagRow(row: TagRow, widthCols: number): string {
   return widthCols > 0 ? padEnd(base, widthCols) : base;
 }
 
-/**
- * Render a tag row when no value is available (no telemetry, comm down).
- * Same column layout but everything dim/grey to emphasize absence.
- */
-export function renderTagRowNoData(tag: string, reason: string, widthCols: number): string {
-  const glyph = stateGlyph('comm');
-  const tagPadded = padDotLeader(c.grey(tag), tag, 32);
-  const reasonStr = c.grey(padEnd(`—  ${reason}`, 9 + 1 + 4 + 1 + 1 + 2 + 8 + 1 + 8));
-  return widthCols > 0 ? padEnd(`${glyph}  ${tagPadded} ${reasonStr}`, widthCols) : `${glyph}  ${tagPadded} ${reasonStr}`;
-}
 
 /** Pad a (possibly ANSI-styled) tag with grey dots out to width. */
 function padDotLeader(styled: string, plain: string, widthCols: number): string {
@@ -261,7 +244,7 @@ export function divider(label: string, width: number): string {
   const leftPad = 6;
   const left = BOX.lJoint + BOX.h.repeat(leftPad);
   // Build the right side so the total visible width = `width`.
-  const rest = width - visLen(left) - inner.length - 1;
+  const rest = width - visLen(left) - visLen(inner) - 1;
   const right = BOX.h.repeat(Math.max(0, rest)) + BOX.rJoint;
   return c.cyan(left) + c.cyanB(inner) + c.cyan(right);
 }
@@ -351,7 +334,7 @@ export function statusHeader(h: StatusHeader, width: number): string {
     // Pathological narrow terminal — keep MODE, drop the rest.
     return truncate(right, width);
   }
-  const stationFit = h.station.length <= stationBudget
+  const stationFit = visLen(h.station) <= stationBudget
     ? h.station
     : truncate(h.station, stationBudget);
   const left = c.cyanB('▎') + c.whiteB(' ' + stationFit) + tsPart;
@@ -398,28 +381,10 @@ export const MIMIC = {
   battery: '▮', solar: '☀', breaker: '◧', motor: '⊙', meter: '⏱',
 };
 
-/**
- * Render a small equipment box — label on top, value inside, status glyph
- * in the bottom-right corner. Returns 3 lines.
- *
- *   ┌─ GEN 1 ─────┐
- *   │  +2.4 kW    │
- *   │ SOC 87%   ● │
- *   └─────────────┘
- *
- * In practice we go cheaper than this — see `equipmentBlock`.
- */
-export function equipmentBlock(label: string, value: string, sub: string, state: AlarmState, width: number): string[] {
-  const inner = width - 2;
-  const top = c.cyan(MIMIC.tl + MIMIC.h + ' ' + label + ' ' + MIMIC.h.repeat(Math.max(0, inner - label.length - 4)) + MIMIC.tr);
-  const mid = c.cyan(MIMIC.v) + ' ' + padEnd(STATE_COLOR[state](value), inner - 1) + c.cyan(MIMIC.v);
-  const bot = c.cyan(MIMIC.bl + padEnd(' ' + c.grey(sub) + '  ' + stateGlyph(state), inner) + MIMIC.br);
-  return [top, mid, bot];
-}
 
 /** Bus-bar segment — a chunk of double-line representing the main bus. */
 export function busBarSegment(label: string, width: number): string {
   const inner = ` ${label} `;
-  const each = Math.max(2, Math.floor((width - inner.length) / 2));
-  return c.cyanB(MIMIC.dh.repeat(each) + inner + MIMIC.dh.repeat(width - each - inner.length));
+  const each = Math.max(2, Math.floor((width - visLen(inner)) / 2));
+  return c.cyanB(MIMIC.dh.repeat(each) + inner + MIMIC.dh.repeat(Math.max(0, width - each - visLen(inner))));
 }

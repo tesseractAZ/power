@@ -139,11 +139,6 @@ export function fmtAmp(w: number | null | undefined, v = 120): { value: string; 
   if (w == null) return { value: '—', unit: '' };
   return { value: (w / v).toFixed(1), unit: 'A' };
 }
-export function fmtHz(): { value: string; unit: string } {
-  // EcoFlow API exposes outAc5p8Freq on DPU projection; we surface it where
-  // available. As a fleet-level value we project the median.
-  return { value: '60.00', unit: 'Hz' };
-}
 
 /* ─── tag-row builders for common SCADA points ───────────────────────── */
 
@@ -180,18 +175,6 @@ export function gridAcInWatts(data: PlantData): number {
   return sum(grid, (d) => d.projection.acInWatts);
 }
 
-/** Sample series from the recorder for a trend strip — last N samples. */
-export function recentSeries(
-  recorder: PlantData['snap'] extends never ? never : unknown,
-  // Recorder isn't on PlantData directly — we instead expect the caller
-  // to provide samples via the renderer thread. Kept as a placeholder for
-  // future inline trend strips.
-  _sn: string,
-  _metric: string,
-  _samples = 8,
-): number[] {
-  return [];
-}
 
 /** Format a human-friendly uptime from a start timestamp. */
 export function uptime(startMs: number): string {
