@@ -75,9 +75,47 @@ export const BOX = {
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
+/*
+ * v1.47.2 (second-pass) — display-width-aware column math. The original
+ * contract ("only BMP single-cell glyphs are used, so .length matches
+ * on-screen columns") holds for everything the add-on generates, but NOT for
+ * data-carried strings: EcoFlow device names and SHP2 circuit names are
+ * user-set in the EcoFlow app and pass sanitizeDisplayName untouched when
+ * they contain CJK or emoji — each rendering 2 terminal columns while
+ * counting 1, smearing every aligned layout that shows the name. Column
+ * width is now computed per code point: East Asian Wide/Fullwidth and emoji
+ * count 2, combining marks count 0, everything else 1. The ASCII fast path
+ * keeps the hot render loop at its previous cost.
+ */
+function charWidth(cp: number): number {
+  if (cp < 0x1100) return 1; // ASCII + Latin — the overwhelmingly common case
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+    (cp >= 0x2e80 && cp <= 0xa4cf) || // CJK radicals … Yi
+    (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+    (cp >= 0xf900 && cp <= 0xfaff) || // CJK compatibility ideographs
+    (cp >= 0xfe30 && cp <= 0xfe4f) || // CJK compatibility forms
+    (cp >= 0xff00 && cp <= 0xff60) || // fullwidth forms
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff) || // emoji & pictographs
+    (cp >= 0x20000 && cp <= 0x3fffd)    // CJK extension planes
+  ) return 2;
+  if ((cp >= 0x0300 && cp <= 0x036f) || (cp >= 0xfe00 && cp <= 0xfe0f) || cp === 0x200d) return 0; // combining / VS / ZWJ
+  return 1;
+}
+
 /** On-screen column count of a string, ignoring ANSI escape codes. */
 export function visLen(s: string): number {
-  return s.replace(ANSI_RE, '').length;
+  const plain = s.replace(ANSI_RE, '');
+  // Fast path: pure ASCII measures as .length.
+  let ascii = true;
+  for (let i = 0; i < plain.length; i++) {
+    if (plain.charCodeAt(i) > 0x7e) { ascii = false; break; }
+  }
+  if (ascii) return plain.length;
+  let w = 0;
+  for (const ch of plain) w += charWidth(ch.codePointAt(0)!);
+  return w;
 }
 
 /** Truncate to a visible width, keeping ANSI codes intact and resetting at the cut. */
@@ -96,9 +134,15 @@ export function truncate(s: string, width: number): string {
         continue;
       }
     }
-    out += s[i];
-    vis++;
-    i++;
+    // v1.47.2 — advance by CODE POINT and count display columns, so a
+    // double-width glyph is either kept whole or dropped, never split.
+    const cp = s.codePointAt(i)!;
+    const cw = charWidth(cp);
+    if (vis + cw > width) break;
+    const chLen = cp > 0xffff ? 2 : 1;
+    out += s.slice(i, i + chLen);
+    vis += cw;
+    i += chLen;
   }
   return out + RESET;
 }

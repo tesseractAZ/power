@@ -1939,6 +1939,11 @@ const stopTuiData = (() => {
       isOriginAllowed: (origin) => (origin ? isAllowedOrigin(origin, auth.sameOrigins) : true),
     });
     app.log.info('console: web terminal available at /console');
+    // v1.47.2 — the untypeable-credential warning belongs to BOTH transports:
+    // /console is registered unconditionally (and the shipped default is
+    // telnet off), so emitting it only when telnet was enabled left the
+    // default configuration silent about a guaranteed lockout.
+    for (const p of authConfigProblems(authFromEnv())) app.log.warn(`console: ${p}`);
     if (config.telnet.enabled) {
       stopTelnet = startTelnetServer({
         store,
@@ -1949,10 +1954,6 @@ const stopTuiData = (() => {
         data: tuiData, // share the refresh timers
       }).stop;
       app.log.info(`telnet: control-room TUI on telnet://${config.telnet.host}:${config.telnet.port}`);
-      // v1.47.1 (full-pass) — surface an untypeable credential envelope at
-      // boot instead of letting the operator discover a guaranteed lockout at
-      // the prompt (printable-ASCII, <= 64 chars).
-      for (const p of authConfigProblems(authFromEnv())) app.log.warn(`console: ${p}`);
     }
     return tuiData.stop;
   } catch (e: any) {

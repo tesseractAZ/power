@@ -95,12 +95,22 @@ export function parseXtermData(s: string): InputEvent[] {
       }
       const b1 = s.charCodeAt(i + 1);
       if (b1 === 0x5b || b1 === 0x4f) {
-        if (i + 2 >= n) break; // incomplete — wait for the rest
-        const f = s.charCodeAt(i + 2);
+        // v1.47.2 (second-pass) — variable-length CSI (see server.ts): consume
+        // parameter/intermediate bytes to the final, so Delete/Home/End and
+        // modified arrows can't leak printable tails into the session (a
+        // leaked '~' at the login prompt silently corrupted the credential).
+        let j = i + 2;
+        while (j < n) {
+          const cj = s.charCodeAt(j);
+          if ((cj >= 0x30 && cj <= 0x3f) || (cj >= 0x20 && cj <= 0x2f)) { j++; continue; }
+          break;
+        }
+        if (j >= n) break; // incomplete — xterm onData delivers sequences atomically
+        const f = s.charCodeAt(j);
         const arrow =
           f === 0x41 ? 'up' : f === 0x42 ? 'down' : f === 0x43 ? 'right' : f === 0x44 ? 'left' : null;
         if (arrow) events.push({ type: 'key', key: arrow });
-        i += 3;
+        i = j + 1;
         continue;
       }
       events.push({ type: 'key', key: 'esc' });
@@ -239,6 +249,7 @@ const CONSOLE_HTML = `<!doctype html>
   // (→ sendResize), so without this guard each user resize sent a duplicate
   // {type:'resize'} frame and could re-enter. Track + compare to suppress that.
   var lastCols = 0, lastRows = 0;
+  var keepalive = null;
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -249,6 +260,10 @@ const CONSOLE_HTML = `<!doctype html>
 
     ws.onopen = function () {
       if (retry) { clearTimeout(retry); retry = null; }
+      if (keepalive) clearInterval(keepalive);
+      keepalive = setInterval(function () {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+      }, 60000);
       statusEl.textContent = 'connected';
       // Force the first resize through even if dims() matches the stale latch.
       lastCols = 0; lastRows = 0;
@@ -256,6 +271,7 @@ const CONSOLE_HTML = `<!doctype html>
     };
     ws.onmessage = function (ev) { term.write(ev.data); };
     ws.onclose = function () {
+      if (keepalive) { clearInterval(keepalive); keepalive = null; }
       statusEl.textContent = 'disconnected — reconnecting…';
       retry = setTimeout(connect, 1500);
     };
@@ -402,6 +418,12 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       if (text.length && text[0] === '{') {
         try {
           const msg = JSON.parse(text);
+          // v1.47.2 — client keepalive: a passively WATCHED console sends no
+          // keystrokes, so the 5-min inbound idle timeout closed wall-display
+          // sessions every 5 minutes (and, with a password set, dumped them at
+          // the login prompt on reconnect). The ping's only job is the armIdle
+          // above.
+          if (msg && msg.type === 'ping') return;
           if (msg && msg.type === 'resize') {
             const cols = Number(msg.cols);
             const rows = Number(msg.rows);

@@ -376,3 +376,21 @@ test('console/ws — exported guard-rail constants are sane', () => {
   assert.ok(MAX_WS_SESSIONS >= 1 && MAX_WS_SESSIONS <= 256);
   assert.ok(WS_IDLE_TIMEOUT_MS >= 60_000, 'idle window should be at least a minute in prod');
 });
+
+
+/* ── v1.47.2 — variable-length CSI: no printable tail may leak ──────────── */
+
+test('parseXtermData — v1.47.2: Delete (ESC[3~) emits nothing printable', () => {
+  const ev = parseXtermData('\x1b[3~');
+  assert.equal(ev.filter((e) => e.type === 'key' && e.key.length === 1).length, 0, `leaked: ${JSON.stringify(ev)}`);
+});
+
+test('parseXtermData — v1.47.2: Ctrl-Right (ESC[1;5C) is right, with no ;5C tail', () => {
+  const ev = parseXtermData('\x1b[1;5C');
+  assert.deepEqual(ev, [{ type: 'key', key: 'right' }]);
+});
+
+test('parseXtermData — v1.47.2: F5 (ESC[15~) emits no screen-hotkey digits', () => {
+  const ev = parseXtermData('\x1b[15~');
+  assert.equal(ev.some((e) => e.type === 'key' && /^[0-9]$/.test((e as any).key)), false, `leaked digits: ${JSON.stringify(ev)}`);
+});

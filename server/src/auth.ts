@@ -61,8 +61,16 @@ export const HA_DASHBOARD_ORIGINS = new Set<string>([
  * `*.local` — on ports 8123 or 8787 only. Intentionally narrow — we
  * don't want to match arbitrary internet origins.
  */
+// v1.47.2 (second-pass) — the port suffix is optional-with-alternatives now:
+// HA behind a reverse proxy or the companion app arrives on the default
+// https/http port (no explicit :port in the Origin), and Nabu Casa remote
+// arrives as https://<id>.ui.nabu.casa. Both were 403'd by the strict
+// :8123/:8787 requirement, which broke the /console websocket exactly on the
+// legitimate remote-access paths while the page itself loaded (GET carries no
+// Origin). Arbitrary internet origins still do not match: the host must be a
+// private-range IP, *.local, or *.ui.nabu.casa.
 export const LAN_ORIGIN_RE =
-  /^https?:\/\/(?:(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|[a-zA-Z0-9-]+\.local):(?:8123|8787)$/;
+  /^https?:\/\/(?:(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|[a-zA-Z0-9-]+\.local|[a-zA-Z0-9-]+\.ui\.nabu\.casa)(?::\d{1,5})?$/;
 
 /** CORS allow-list check — used by the @fastify/cors origin callback. */
 export function isAllowedOrigin(origin: string, sameOrigins: Set<string>): boolean {

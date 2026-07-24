@@ -134,7 +134,11 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   const annun = renderAnnunciator(alerts, W);
   out.push(...annun);
 
-  out.push(divider(`ALARM LIST — ${alerts.length} active`, W));
+  // v1.47.2 (second-pass) — a static alarm list is byte-identical frame to
+  // frame (the anti-flicker hash then writes nothing), so a dead link and a
+  // healthy quiet screen looked the same. The wall-clock in the banner gives
+  // every ALM frame a 1 Hz liveness tick.
+  out.push(divider(`ALARM LIST — ${alerts.length} active  ·  ${new Date(stamp).toTimeString().slice(0, 8)}`, W));
   out.push(padEnd(
     '  ' + prioColor('critical')(`CRIT ${pc.critical}`) + c.grey('  ·  ') +
     prioColor('high')(`HIGH ${pc.high}`) + c.grey('  ·  ') +
@@ -178,11 +182,13 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
   // is backstopping…") routinely runs past it. The old `truncate(msg, W-64)` silently clipped
   // the operative half of the alarm — "grid is bac…" — with no cue. Wrap onto continuation
   // lines aligned under MESSAGE so the full text is always readable.
-  // v1.47.1 (full-pass) — the fixed 65-col offset left ZERO visible message on
-  // 60-64-col terminals (the session's minimum is 60): the row rendered only
-  // TS/PRIO/CAT/ID and the wrapped continuation lines were entirely blank. The
-  // column adapts so at least ~24 message columns always survive; the fixed
-  // prefix columns are truncated by the same padEnd that always governed them.
+  // v1.47.1/v1.47.2 (full-pass) — the message column adapts so at least ~24
+  // message columns always survive on a narrow terminal; the fixed prefix
+  // (TS/PRIO/CAT/ID) is COMPRESSED to end exactly at MSG_COL so the first
+  // message segment starts there and aligns with the wrapped continuation
+  // lines. v1.47.1 adapted only the wrap width, leaving the prefix hard-coded
+  // at column 65 — which clipped the first line's tail at 66-88 cols and hid
+  // it entirely below 66; v1.47.2 compresses the prefix itself.
   const MSG_COL = Math.min(65, Math.max(24, W - 24));
   const msgWidth = Math.max(8, W - MSG_COL);          // fills exactly to W, never overflows
   const contIndent = ' '.repeat(MSG_COL);
@@ -223,15 +229,19 @@ export function renderAlm(view: PlantView, data: PlantData): string[] {
     // Don't start an alarm whose wrapped block can't finish inside the budget (but always
     // render at least the first alarm so a very tall message on a short screen still shows).
     if (shown > 0 && usedRows + wrapped.length > bodyBudget) break;
-    out.push('  ' + [
+    const idStr = (() => { const s = a.id ?? '—'; return s.length > 22 ? s.slice(0, 12) + '…' + s.slice(-9) : s; })();
+    const prefix = '  ' + [
       padEnd(c.grey(tstr), 19),
       padEnd(prioColor(prio)(prioTag), 6),
       padEnd(c.white((a.category ?? '—').toUpperCase()), 12),
       // v0.95.0 (re-audit #8) — MIDDLE-truncate the id so the trailing pack/slot
       // discriminator survives (end-truncation collapsed distinct per-pack alarms into one row).
-      padEnd(c.white((() => { const s = a.id ?? '—'; return s.length > 22 ? s.slice(0, 12) + '…' + s.slice(-9) : s; })()), 22),
-      c.whiteB(wrapped[0]),
-    ].join(' '));
+      padEnd(c.white(idStr), 22),
+    ].join(' ');
+    // v1.47.2 — fit the prefix to exactly MSG_COL (compressing the least-vital
+    // trailing columns at narrow widths) so the message lands at MSG_COL, in
+    // line with contIndent. At W >= 89 this is a no-op (prefix is 65 wide).
+    out.push(padEnd(prefix, MSG_COL) + c.whiteB(wrapped[0]));
     for (let j = 1; j < wrapped.length; j++) out.push(contIndent + c.whiteB(wrapped[j]));
     usedRows += wrapped.length;
     shown++;

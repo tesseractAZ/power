@@ -1,3 +1,49 @@
+## v1.47.2 — second-pass fixes: ALM column regression, remote-access origin gate, CSI parsing, display width
+
+A second QA pass (adversarial re-verification of the v1.47.1 fixes, parser
+fuzzing, live concurrency/soak, and an end-to-end browser-transport drive)
+produced nine findings; all are addressed.
+
+- **ALM message column, completed** — v1.47.1 adapted the wrap width but left
+  the prefix hard-coded at column 65, clipping the first message segment's
+  tail at 66–88 cols (a regression at the standard 80×24) and hiding it
+  below 66. The prefix now compresses to end exactly at the adaptive column,
+  so the first segment renders in full and aligns with its continuations.
+- **Remote-access origin gate** — the `/console/ws` upgrade rejected the
+  legitimate remote paths: Nabu Casa origins (`https://<id>.ui.nabu.casa`)
+  and any reverse-proxied or portless LAN origin failed the strict
+  `:8123`/`:8787` requirement. Private-range hosts now match on any (or no)
+  port, and Nabu Casa remote is allow-listed; arbitrary internet origins
+  still do not match.
+- **Variable-length CSI parsing** (both transports) — Delete/Home/End and
+  modified arrows leaked printable tails (`~`, `;5C`) into the session: a
+  screen-hotkey digit could switch screens, and at the login prompt a leaked
+  character silently corrupted the credential. Full CSI sequences are now
+  consumed; arrow finals still navigate.
+- **Dangling-subnegotiation wedge** — an unterminated `IAC SB` held the whole
+  telnet input stream hostage (including `q`/`Ctrl-C`) while resetting the
+  idle reaper. The wait is now bounded at 64 buffered bytes.
+- **Wall-display keepalive** — the browser console sent no traffic while
+  passively watched, so the 5-minute inbound idle timeout closed it (and,
+  with a password set, dumped it at the login prompt on reconnect). The
+  client now pings every 60 s; the server recognizes the ping.
+- **Display-width-aware layout** — `visLen`/`truncate`/`padEnd` now count
+  CJK/fullwidth/emoji as two columns and combining marks as zero, so
+  user-set EcoFlow device or circuit names outside ASCII no longer smear
+  aligned layouts. Double-width glyphs are kept whole or dropped, never split.
+- **Liveness ticks on ALM/BUS** — the two fully-static screens gained a
+  wall-clock in their banner, so a healthy quiet screen and a dead link are
+  no longer byte-identical.
+- **Untypeable-credential warning covers both transports** — it fired only
+  when telnet was enabled, yet `/console` (always registered, and telnet
+  ships disabled by default) enforces the same login.
+- Documentation corrected: the console is credential-gated when
+  `TUI_PASSWORD` is set (two sections still said "unauthenticated"), and the
+  shipped `TELNET_ENABLED` default is `false`.
+
+Tests: 1,699 green (new: ALM first-segment alignment, CJK width, CSI-leak
+cases, origin-gate remote/portless/Nabu-Casa coverage).
+
 ## v1.47.1 — console full-pass fixes
 
 A four-angle QA pass on the v1.46.0 console (adversarial code review,

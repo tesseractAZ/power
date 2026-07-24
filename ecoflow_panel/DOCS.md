@@ -6042,7 +6042,7 @@ The ecoflow-panel add-on exposes the same underlying fleet telemetry through **t
 | UI | Transport | Where it runs | Auth posture |
 |---|---|---|---|
 | **React web dashboard (PWA)** | WebSocket `/ws` + REST `/api/*` | Browser at `:8787` or via HA Ingress sidebar | Same-origin; writes need ingress/same-origin/token |
-| **Control-room TUI** | Raw telnet TCP `:2323` **and** browser xterm.js at `/console` | `nc`/`telnet` client, or browser | Unauthenticated, LAN-trust |
+| **Control-room TUI** | Raw telnet TCP `:2323` **and** browser xterm.js at `/console` | `nc`/`telnet` client, or browser | LAN-trust by default; opt-in operator login via `TUI_PASSWORD` (§11 2.3) |
 | **HACS Lovelace cards** | WebSocket `/ws` + REST `/api/*` (cross-origin CORS) | Home Assistant Lovelace dashboards | CORS-allowlisted read; writes token-gated |
 
 All three read the **same `FleetSnapshot`** the server pushes ~1×/sec over `/ws`, plus the same analytics REST endpoints. This document is a features-and-navigation reference for each surface.
@@ -6207,9 +6207,9 @@ A SCADA/power-plant-styled terminal UI. The per-session render/input state machi
 nc <host> 2323          # or:  telnet <host> 2323
 ```
 
-Gated by `TELNET_ENABLED` (env, default on; `TELNET_ENABLED=0` disables). Host defaults to `::`, port to `2323` (`config.ts`: `TELNET_HOST`, `TELNET_PORT`). The browser variant needs no client — open `/console`.
+Gated by `TELNET_ENABLED` (bare-env default on; the SHIPPED add-on options default is `TELNET_ENABLED: false` — enable it in the add-on configuration). Host defaults to `::`, port to `2323` (`config.ts`: `TELNET_HOST`, `TELNET_PORT`). The browser variant needs no client — open `/console`.
 
-The TUI is **unauthenticated** on both transports — read-only telemetry meant for a trusted LAN (the `ports_description` explicitly warns so). The `/console/ws` upgrade rejects a cross-origin `Origin` but accepts same-origin/LAN/missing-Origin (so the panel_iframe works).
+By default the TUI is **unauthenticated** on both transports — read-only telemetry meant for a trusted LAN (the `ports_description` explicitly warns so); setting `TUI_PASSWORD` enables the operator login on both (§2.3). The `/console/ws` upgrade rejects a cross-origin `Origin` but accepts same-origin/LAN/Nabu-Casa/missing-Origin (so the panel_iframe and remote access work).
 
 #### 2.2 Hardening (DoS guards)
 

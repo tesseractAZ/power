@@ -557,3 +557,34 @@ test('v1.47.1 — GEN clamps a stale pack index from a previous DPU', () => {
   assert.ok(m, 'pack divider missing');
   assert.ok(Number(m![1]) <= Number(m![2]), `divider claims ${m![0]}`);
 });
+
+
+/* ── v1.47.2 second-pass regression fixes ───────────────────────────────── */
+
+test('v1.47.2 — ALM first message segment is complete and aligned at 80 cols', () => {
+  const snap = buildSnapshot({ daylight: true });
+  (snap as any).alerts = [
+    { id: 'r1', severity: 'critical', category: 'Battery', device: 'Core 1', title: 'Cell imbalance', detail: 'Core 1 Pack 2 cell spread 61 mV sustained beyond threshold' },
+  ];
+  const lines = renderPlant(makeView(80, 30, 'alm'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  // With MSG_COL = 56 at W=80, msgWidth = 24: the first wrapped segment
+  // ("Cell imbalance — Core 1" = 23 chars) must appear IN FULL on the first
+  // alarm row — v1.47.1 clipped its tail at the terminal edge.
+  const row = plain.find((l) => l.includes('Cell imbalance'));
+  assert.ok(row, 'first message segment missing entirely');
+  assert.ok(row!.includes('Cell imbalance — Core 1'), `first segment clipped: ${JSON.stringify(row)}`);
+  // And the continuation lines align under it (same start column).
+  const startCol = row!.indexOf('Cell imbalance');
+  const cont = plain.find((l) => l.trimStart().startsWith('Pack 2') || l.trimStart().startsWith('cell spread'));
+  if (cont) assert.equal(cont.indexOf(cont.trim()[0] === 'P' ? 'Pack 2' : 'cell spread'), startCol, 'continuation misaligned');
+});
+
+test('v1.47.2 — visLen/padEnd count CJK as double-width', async () => {
+  const { visLen, padEnd: pe } = await import('../src/telnet/ansi.js');
+  assert.equal(visLen('電池コア'), 8, 'four CJK glyphs occupy eight columns');
+  assert.equal(visLen('Core 1'), 6);
+  assert.equal(visLen('🔋'), 2, 'emoji is double-width');
+  const padded = pe('電池', 6);
+  assert.equal(visLen(padded), 6, 'padEnd pads to the display width, not .length');
+});

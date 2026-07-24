@@ -24,7 +24,9 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
   const qual = deviceQuality(shp2);
 
   /* ── bus header ───────────────────────────────────────────────── */
-  out.push(divider(`MAIN BUS — SHP2 ${shp2.sn}  ·  ${shp2.deviceName}`, W));
+  // v1.47.2 — liveness tick (see alm.ts): a static bus screen must still
+  // visibly breathe so a wedged link can't impersonate a healthy quiet one.
+  out.push(divider(`MAIN BUS — SHP2 ${shp2.sn}  ·  ${shp2.deviceName}  ·  ${new Date(data.snap.generatedAt ?? Date.now()).toTimeString().slice(0, 8)}`, W));
   const totalLoad = p.circuits.reduce((s, ch) => s + (ch.watts ?? 0), 0);
   const reserveSoc = p.backupReserveSoc ?? 0;
   const poolSoc = p.backupBatPercent ?? 0;

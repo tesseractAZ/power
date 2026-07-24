@@ -104,7 +104,14 @@ function parseInput(buf: Buffer, swallowLeadingLf = false): { events: InputEvent
           }
           j++;
         }
-        if (incomplete || seAt < 0) break; // wait for the rest
+        // v1.47.2 (second-pass) — bound the wait for IAC SE: a dangling
+        // subnegotiation used to hold the ENTIRE input stream hostage (every
+        // later keystroke — including q/ctrl-c — was buffered as SB payload,
+        // and each chunk reset the idle reaper). Real SB payloads are tiny
+        // (NAWS = 5 bytes); past 64 buffered bytes the SB is abandoned and
+        // parsing resumes after its header.
+        if ((incomplete || seAt < 0) && n - i <= 64) break; // wait for the rest
+        if (incomplete || seAt < 0) { i += 2; continue; }   // abandoned dangling SB
         // v1.47.1 (full-pass) — unescape doubled IAC bytes in the payload: a
         // dimension byte equal to 255 arrives as IAC IAC, and without
         // collapsing it the following bytes shift and w/h misparse (a
@@ -131,17 +138,28 @@ function parseInput(buf: Buffer, swallowLeadingLf = false): { events: InputEvent
     }
 
     if (b === 0x1b) {
-      // ESC — possibly an arrow-key sequence.
+      // ESC — possibly a CSI/SS3 sequence.
       if (i + 1 >= n) break; // wait — could be the start of a sequence
       const b1 = buf[i + 1];
       if (b1 === 0x5b || b1 === 0x4f) {
-        // CSI / SS3
-        if (i + 2 >= n) break; // incomplete
-        const f = buf[i + 2];
+        // v1.47.2 (second-pass) — CSI sequences are VARIABLE length: parameter
+        // bytes (0x30-0x3F) and intermediates (0x20-0x2F) run until a final in
+        // 0x40-0x7E. The old fixed-3-byte read leaked the tail of Delete
+        // (ESC[3~ → '~'), Home/End, and modified arrows (ESC[1;5C → ';5C' —
+        // where '5' is a screen hotkey and, at the login prompt, a silent
+        // credential corruption). Consume the whole sequence; map A/B/C/D
+        // finals to arrows regardless of parameters (Ctrl-arrow still moves).
+        let j = i + 2;
+        while (j < n && ((buf[j] >= 0x30 && buf[j] <= 0x3f) || (buf[j] >= 0x20 && buf[j] <= 0x2f))) j++;
+        if (j >= n) {
+          if (n - i <= 16) break; // incomplete — wait for the final byte
+          i = j; continue;        // runaway "sequence" — drop it
+        }
+        const f = buf[j];
         const arrow =
           f === 0x41 ? 'up' : f === 0x42 ? 'down' : f === 0x43 ? 'right' : f === 0x44 ? 'left' : null;
         if (arrow) events.push({ type: 'key', key: arrow });
-        i += 3;
+        i = j + 1;
         continue;
       }
       events.push({ type: 'key', key: 'esc' });
