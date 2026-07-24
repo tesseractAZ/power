@@ -113,11 +113,33 @@ test('LAN_ORIGIN_RE — v1.47.2: portless and any-port private origins match (re
   assert.ok(LAN_ORIGIN_RE.test('https://10.0.0.4:443'));
 });
 
-test('LAN_ORIGIN_RE — v1.47.2: Nabu Casa remote origins match', () => {
-  assert.ok(LAN_ORIGIN_RE.test('https://abcdef123456.ui.nabu.casa'));
-  // …but not lookalikes on other domains.
-  assert.equal(LAN_ORIGIN_RE.test('https://abcdef123456.ui.nabu.casa.evil.io'), false);
-  assert.equal(LAN_ORIGIN_RE.test('https://ui.nabu.casa.attacker.net'), false);
+test('v1.47.3 — buildSameOrigins includes IPv6 loopback', () => {
+  const same = buildSameOrigins('192.168.5.152', 8787);
+  assert.ok(same.has('http://[::1]:8787'));
+  assert.ok(same.has('https://[::1]:8787'));
+});
+
+test('v1.47.3 — TUI_TRUSTED_ORIGINS is an EXACT-match opt-in, never a wildcard', () => {
+  const prev = process.env.TUI_TRUSTED_ORIGINS;
+  process.env.TUI_TRUSTED_ORIGINS = 'https://my-id.ui.nabu.casa , https://vpn.example.net';
+  try {
+    const auth = createAuth({ host: 'homeassistant.local', port: 8787, dataDir: join(tmpRoot, `trusted-${Date.now()}`) });
+    assert.ok(isAllowedOrigin('https://my-id.ui.nabu.casa', auth.sameOrigins), 'declared origin allowed');
+    assert.ok(isAllowedOrigin('https://vpn.example.net', auth.sameOrigins));
+    // A DIFFERENT nabu.casa tenant is still rejected — no namespace widening.
+    assert.equal(isAllowedOrigin('https://attacker.ui.nabu.casa', auth.sameOrigins), false);
+  } finally {
+    if (prev === undefined) delete process.env.TUI_TRUSTED_ORIGINS; else process.env.TUI_TRUSTED_ORIGINS = prev;
+  }
+});
+
+test('LAN_ORIGIN_RE — v1.47.3: Nabu Casa blanket removed (CSWSH surface)', () => {
+  // v1.47.2 briefly matched the whole *.ui.nabu.casa namespace, which any HA
+  // Cloud tenant (incl. an attacker) owns. v1.47.3 removed it: remote /console
+  // is reached via HA ingress (HA-auth-gated), or a specific origin can be
+  // allow-listed with TUI_TRUSTED_ORIGINS. So no nabu.casa host matches now.
+  assert.equal(LAN_ORIGIN_RE.test('https://abcdef123456.ui.nabu.casa'), false);
+  assert.equal(LAN_ORIGIN_RE.test('https://attacker.ui.nabu.casa'), false);
 });
 
 test('LAN_ORIGIN_RE — rejects non-RFC1918 / non-LAN hosts', () => {

@@ -1,3 +1,49 @@
+## v1.47.3 — third-pass fixes: complete the display-width migration + close the origin-gate CSWSH surface
+
+A third QA pass (regression-proving the v1.47.2 display-width rewrite,
+origin-gate security, a live keepalive soak, and a whole-surface review) found
+that the v1.47.2 change made `visLen` width-aware but left several CALLERS on
+raw `.length`, so they disagreed once a name/detail carried CJK. All are now
+consistent.
+
+- **Alarm wrapping is display-width correct** — `wrapPlain` delegated to a new
+  `wrapDisplay`; a CJK/emoji alarm detail wraps at the right visual column
+  instead of overrunning the row and having its tail clipped (a v1.47.2
+  regression that silently lost the operative half of an alarm).
+- **Header fills use `visLen`** — `divider`, `busBarSegment`, and
+  `statusHeader` computed their fill from `.length`, so a CJK device/circuit
+  name over-filled the GEN/BUS headers past the width.
+- **Combining marks are zero-width** — the combining-diacritical branch in
+  `charWidth` was dead (shadowed by the Latin fast-return); NFD names now
+  measure correctly.
+- **`padEnd`/`padStart`/`center` re-pad after a wide-glyph straddle** — they
+  delegated to `truncate` (which may stop one column short of a double-width
+  glyph) and returned width−1, breaking their exact-width contract.
+- **Emoji width scoped honestly** — the wide range covers the pictograph
+  planes (🔋, flags) but deliberately NOT the Misc-Symbols block (☀ ⚡ ⌁),
+  which this renderer uses as single-column decorations and whose presentation
+  is terminal-dependent.
+
+**Security — origin gate.** v1.47.2's blanket `*.ui.nabu.casa` allowance let
+ANY Home Assistant Cloud tenant's origin (including an attacker's own) pass the
+`/console` websocket gate (a WebSocket upgrade is not SOP-protected, so the
+Origin check is the only CSWSH defense). Removed. Remote access is via HA
+ingress (HA-auth-gated); a specific remote origin can be allow-listed
+explicitly with the new **`TUI_TRUSTED_ORIGINS`** option (exact match, never a
+wildcard, empty by default). IPv6 loopback added to the same-origin set.
+
+- **Idle reaper vs keepalive** — a bare keepalive ping refreshes the idle
+  deadline only once the session is past the login gate, so a silent
+  login-parked tab still reaps and can't hold a session slot indefinitely.
+- Dead exports removed (`renderTagRowNoData`, `equipmentBlock`, `ageQuality`,
+  `recentSeries`, `fmtHz`); stale docs corrected (residual Lovelace mentions in
+  the intro/overview/deploy sections; the `TELNET_ENABLED` "default on" wording
+  now reflects the shipped default-off).
+
+Tests: 1,705 green (CJK wrap/tail retention, combining zero-width, padEnd
+straddle re-pad, divider CJK fill, trusted-origins exact-match, IPv6
+same-origin, nabu-casa blanket rejection).
+
 ## v1.47.2 — second-pass fixes: ALM column regression, remote-access origin gate, CSI parsing, display width
 
 A second QA pass (adversarial re-verification of the v1.47.1 fixes, parser

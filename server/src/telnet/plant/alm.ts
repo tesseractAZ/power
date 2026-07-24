@@ -7,7 +7,7 @@
  * priority tag, category, identifier, and message. Scrollable with ↑/↓.
  */
 
-import { c, padEnd } from '../ansi.js';
+import { c, padEnd, wrapDisplay } from '../ansi.js';
 import { divider } from './scada.js';
 // v1.38.0 — annunciator legend tiles (3-row lamp boxes; plain strings,
 // colorized whole per tile).
@@ -27,21 +27,12 @@ function prioColor(p: AlarmPriority): (s: string) => string {
  *  token longer than the column is hard-broken. Returns at least one (possibly empty)
  *  line so the caller always has a row to colourise. */
 function wrapPlain(s: string, width: number): string[] {
-  const w = Math.max(8, width);
-  const lines: string[] = [];
-  let cur = '';
-  for (let word of s.split(/\s+/).filter(Boolean)) {
-    while (word.length > w) {
-      if (cur) { lines.push(cur); cur = ''; }
-      lines.push(word.slice(0, w));
-      word = word.slice(w);
-    }
-    if (!cur) cur = word;
-    else if (cur.length + 1 + word.length <= w) cur += ' ' + word;
-    else { lines.push(cur); cur = word; }
-  }
-  if (cur) lines.push(cur);
-  return lines.length ? lines : [''];
+  // v1.47.3 — delegate to the DISPLAY-width wrapper so a CJK/emoji alarm detail
+  // wraps at the right visual column. The prior .length-based wrap produced
+  // segments up to 2x too wide once visLen became width-aware, so the emitted
+  // row overran W and the dispatcher clipped the tail — silently losing the
+  // operative half of an alarm.
+  return wrapDisplay(s, Math.max(8, width));
 }
 
 /**
