@@ -218,12 +218,7 @@ export function gauge(
 
 /* ─── trend strip — last-N-samples mini-sparkline ─────────────────────── */
 
-const SPARK_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/**
- * Render a sparkline from a series of numeric samples. Auto-scales to
- * min/max across the input. Returns exactly `width` characters.
- */
 
 /* ─── deviation displays — for frequency, voltage, set-point bias ─────── */
 

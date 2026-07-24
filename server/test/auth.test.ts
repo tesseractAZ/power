@@ -105,11 +105,25 @@ test('LAN_ORIGIN_RE — matches RFC1918 hosts on 8123/8787', () => {
   assert.ok(LAN_ORIGIN_RE.test('https://my-pi.local:8787'));
 });
 
+test('LAN_ORIGIN_RE — v1.47.2: portless and any-port private origins match (reverse proxy / default ports)', () => {
+  // A reverse-proxied HA or the companion app arrives with no explicit port.
+  assert.ok(LAN_ORIGIN_RE.test('http://192.168.1.5'));
+  assert.ok(LAN_ORIGIN_RE.test('https://homeassistant.local'));
+  assert.ok(LAN_ORIGIN_RE.test('http://192.168.1.5:80'));
+  assert.ok(LAN_ORIGIN_RE.test('https://10.0.0.4:443'));
+});
+
+test('LAN_ORIGIN_RE — v1.47.2: Nabu Casa remote origins match', () => {
+  assert.ok(LAN_ORIGIN_RE.test('https://abcdef123456.ui.nabu.casa'));
+  // …but not lookalikes on other domains.
+  assert.equal(LAN_ORIGIN_RE.test('https://abcdef123456.ui.nabu.casa.evil.io'), false);
+  assert.equal(LAN_ORIGIN_RE.test('https://ui.nabu.casa.attacker.net'), false);
+});
+
 test('LAN_ORIGIN_RE — rejects non-RFC1918 / non-LAN hosts', () => {
   assert.equal(LAN_ORIGIN_RE.test('http://8.8.8.8:8123'), false);
   assert.equal(LAN_ORIGIN_RE.test('http://203.0.113.1:8123'), false);
-  // Wrong port: should not match.
-  assert.equal(LAN_ORIGIN_RE.test('http://192.168.1.5:80'), false);
+  assert.equal(LAN_ORIGIN_RE.test('https://evil.example.com'), false);
   // 172.32 is OUTSIDE the 172.16-31 RFC1918 block.
   assert.equal(LAN_ORIGIN_RE.test('http://172.32.0.1:8123'), false);
 });
