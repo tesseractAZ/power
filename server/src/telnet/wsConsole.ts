@@ -411,19 +411,25 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
     session.draw();
 
     socket.on('message', (raw: Buffer) => {
-      armIdle(); // any inbound frame resets the idle deadline
       const text = raw.toString('utf8');
       // A control message is a JSON object with a known `type`; anything else
       // is treated as raw keyboard data from xterm.
       if (text.length && text[0] === '{') {
         try {
           const msg = JSON.parse(text);
-          // v1.47.2 — client keepalive: a passively WATCHED console sends no
-          // keystrokes, so the 5-min inbound idle timeout closed wall-display
-          // sessions every 5 minutes (and, with a password set, dumped them at
-          // the login prompt on reconnect). The ping's only job is the armIdle
-          // above.
-          if (msg && msg.type === 'ping') return;
+          // v1.47.2/v1.47.3 — client keepalive: a passively WATCHED console
+          // sends no keystrokes, so without a ping the 5-min idle timeout
+          // closed wall-display sessions. A bare ping refreshes the deadline
+          // ONLY once the session is past the login gate (session.isInteractive
+          // is true after login, or immediately when no password is set); a
+          // SILENT login-parked tab that only pings is NOT kept alive, so it
+          // still reaps at the idle timeout and cannot hold a session slot
+          // indefinitely. Genuine activity (keystrokes/resize) always re-arms.
+          if (msg && msg.type === 'ping') {
+            if (session.isInteractive) armIdle();
+            return;
+          }
+          armIdle(); // resize is genuine activity
           if (msg && msg.type === 'resize') {
             const cols = Number(msg.cols);
             const rows = Number(msg.rows);
@@ -434,6 +440,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
           /* not JSON — fall through and treat as keyboard data */
         }
       }
+      armIdle(); // keystrokes are genuine activity — always reset the deadline
       const r = session.feed(parseXtermData(text));
       if (r.quit) {
         // Browser sessions can't "quit" the page; close the socket — the

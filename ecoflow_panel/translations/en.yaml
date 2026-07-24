@@ -147,7 +147,7 @@ configuration:
     description: 'Anti-flap buffer: after a shed, the counterfactual runway must reach the trigger threshold PLUS these extra hours before the shed is withdrawn, preventing rapid on/off recommendations. Default 2.0. Only matters when the advisor is on and actively recommending.'
   NIGHT_CHARGE_ADVISOR_ENABLED:
     name: Night-Charge Advisor
-    description: 'Advisory-only: on days a shortfall is anticipated, recommends buying the right amount of grid energy in the cheap overnight window so the home never imports at the 4–7pm peak and keeps an outage cushion above the reserve floor. It NEVER charges or writes to any device — it publishes the suggestion as sensors/MQTT entities and a nightly notification, and your own HA automation decides whether to act. Default on. Learns and records from day one; write-eligibility stays off until the record proves accuracy.'
+    description: 'Advisory-only: on days a shortfall is anticipated, recommends buying the right amount of grid energy in the cheap overnight window so the home never imports at the 4–7pm peak and keeps an outage cushion above the reserve floor. It NEVER charges or writes to any device — it publishes the suggestion as sensors/MQTT entities and a nightly notification, and your own HA automation decides whether to act. Default off in the add-on options — enable it here to listen on the telnet port. Learns and records from day one; write-eligibility stays off until the record proves accuracy.'
   ARB_OUTAGE_CUSHION_PCT:
     name: Outage Cushion (%)
     description: 'How much battery headroom, in percent of pool capacity, to keep ABOVE the reserve floor as resilience against an unexpected outage. The advisor sizes the overnight buy so the worst-case (low-PV / high-load) projection stays at or above floor+cushion. Default 15. This never changes the independent reserve-floor alarm — it only sizes the advisory recommendation.'
@@ -226,7 +226,7 @@ configuration:
     description: Topic prefix HA listens on for auto-discovery; must match your HA MQTT integration's discovery prefix. "homeassistant" is the HA default and almost always correct. Only used when MQTT Discovery is enabled. Default homeassistant.
   TELNET_ENABLED:
     name: Enable Telnet TUI
-    description: Turns on the raw telnet control-room TUI on the Telnet TUI Port (default 2323), a full-screen terminal dashboard reachable with any telnet client. This port has NO authentication, so keep it on a trusted LAN. Default on.
+    description: Turns on the raw telnet control-room TUI on the Telnet TUI Port (default 2323), a full-screen terminal dashboard reachable with any telnet client. This port is LAN-trust by default; set a Console Password to require login, so keep it on a trusted LAN. Default on.
   TELNET_PORT:
     name: Telnet TUI Port
     description: TCP port the telnet control-room TUI listens on, e.g. 2323 (the default). If you change it, also change the 2323/tcp mapping in the add-on's Network section to match so it stays reachable. Ignored when Enable Telnet TUI is off.
@@ -236,6 +236,9 @@ configuration:
   TUI_PASSWORD:
     name: Console Password
     description: Operator password for the control-room console login. Leave empty to disable the login prompt entirely (the default — sessions open straight into the console). When set, every telnet and /console connection must sign in; three failed attempts disconnect. Use printable ASCII, at most 64 characters — the terminal prompt cannot type other characters and the add-on logs a warning at startup if the configured value falls outside that envelope. Note that classic telnet is unencrypted — treat this as LAN-level access control, not transport security.
+  TUI_TRUSTED_ORIGINS:
+    name: Console Trusted Origins
+    description: Advanced. Comma-separated list of EXACT browser origins additionally allowed to open the /console web terminal (e.g. https://your-id.ui.nabu.casa for direct remote access). Leave empty (default) — the console is reachable on the LAN and through the Home Assistant sidebar without this. Each entry is an exact match, never a wildcard.
   ECOFLOW_DEVICE_REACHABILITY:
     name: Device LAN Reachability Map
     description: Optional JSON object mapping each device serial to an HA ping binary_sensor (device_class connectivity) that watches its LAN IP, e.g. {"GBC0314XXXXXXXX":"binary_sensor.core1_lan"}. A cloud-offline but LAN-reachable device is flagged a session wedge (don't power-cycle); unreachable is a real outage. Purely diagnostic — it only enriches the offline alert and a wedge-count sensor; empty (the default) or malformed JSON leaves it off.

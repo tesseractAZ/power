@@ -38,6 +38,7 @@ export TELNET_HOST=::
 export TELNET_PORT="$(bashio::config 'TELNET_PORT')"
 export TUI_USERNAME="$(bashio::config 'TUI_USERNAME')"
 export TUI_PASSWORD="$(bashio::config 'TUI_PASSWORD')"
+export TUI_TRUSTED_ORIGINS="$(bashio::config 'TUI_TRUSTED_ORIGINS')"
 
 # ── Push notifications ───────────────────────────────────────────────────────
 export NOTIFY_CHANNEL="$(bashio::config 'NOTIFY_CHANNEL')"

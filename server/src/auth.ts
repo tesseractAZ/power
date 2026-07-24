@@ -43,6 +43,8 @@ export function buildSameOrigins(host: string, port: number): Set<string> {
     `https://localhost:${port}`,
     `http://127.0.0.1:${port}`,
     `https://127.0.0.1:${port}`,
+    `http://[::1]:${port}`,
+    `https://[::1]:${port}`,
   ]);
 }
 
@@ -61,16 +63,19 @@ export const HA_DASHBOARD_ORIGINS = new Set<string>([
  * `*.local` — on ports 8123 or 8787 only. Intentionally narrow — we
  * don't want to match arbitrary internet origins.
  */
-// v1.47.2 (second-pass) — the port suffix is optional-with-alternatives now:
-// HA behind a reverse proxy or the companion app arrives on the default
-// https/http port (no explicit :port in the Origin), and Nabu Casa remote
-// arrives as https://<id>.ui.nabu.casa. Both were 403'd by the strict
-// :8123/:8787 requirement, which broke the /console websocket exactly on the
-// legitimate remote-access paths while the page itself loaded (GET carries no
-// Origin). Arbitrary internet origins still do not match: the host must be a
-// private-range IP, *.local, or *.ui.nabu.casa.
+// v1.47.2/v1.47.3 — the port suffix is optional (HA behind a reverse proxy or
+// the companion app arrives on the default http/https port, no explicit
+// :port), which fixes the /console websocket for those LAN paths. v1.47.3
+// REMOVED the blanket `*.ui.nabu.casa` alternative added in v1.47.2: a
+// WebSocket upgrade is not subject to SOP, so the server-side Origin check is
+// the only CSWSH defense, and matching the ENTIRE Nabu Casa namespace let any
+// tenant's page (including an attacker's own <id>.ui.nabu.casa) pass the gate.
+// Remote access to /console is via HA ingress (auth-gated by HA, not by this
+// Origin check); a specific remote origin can be allow-listed explicitly with
+// the TUI_TRUSTED_ORIGINS option. The host must be a private-range IP or
+// *.local — arbitrary internet origins do not match.
 export const LAN_ORIGIN_RE =
-  /^https?:\/\/(?:(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|[a-zA-Z0-9-]+\.local|[a-zA-Z0-9-]+\.ui\.nabu\.casa)(?::\d{1,5})?$/;
+  /^https?:\/\/(?:(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|[a-zA-Z0-9-]+\.local)(?::\d{1,5})?$/;
 
 /** CORS allow-list check — used by the @fastify/cors origin callback. */
 export function isAllowedOrigin(origin: string, sameOrigins: Set<string>): boolean {
@@ -209,6 +214,13 @@ export function createAuth(opts: AuthOptions): Auth {
   const dataDir = opts.dataDir ?? process.env.DATA_DIR ?? '/data';
   const tokenPath = resolve(dataDir, 'panel-write-token.txt');
   const sameOrigins = buildSameOrigins(opts.host, opts.port);
+  // v1.47.3 — operator-declared trusted browser origins (comma-separated exact
+  // origins, e.g. a specific Nabu Casa URL for direct remote /console access).
+  // Empty by default; each entry is an EXACT match, never a wildcard, so it
+  // cannot widen the gate to a whole namespace.
+  for (const o of (process.env.TUI_TRUSTED_ORIGINS ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    sameOrigins.add(o);
+  }
   const token = loadOrCreateWriteToken(tokenPath, opts.log);
   const tokenBuf = Buffer.from(token, 'utf8');
 

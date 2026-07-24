@@ -88,6 +88,9 @@ const ANSI_RE = /\x1b\[[0-9;]*m/g;
  * keeps the hot render loop at its previous cost.
  */
 function charWidth(cp: number): number {
+  // Zero-width first (some combining marks live below 0x1100, so this must
+  // precede the Latin fast-return).
+  if ((cp >= 0x0300 && cp <= 0x036f) || (cp >= 0xfe00 && cp <= 0xfe0f) || cp === 0x200d) return 0; // combining / VS / ZWJ
   if (cp < 0x1100) return 1; // ASCII + Latin — the overwhelmingly common case
   if (
     (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
@@ -97,10 +100,16 @@ function charWidth(cp: number): number {
     (cp >= 0xfe30 && cp <= 0xfe4f) || // CJK compatibility forms
     (cp >= 0xff00 && cp <= 0xff60) || // fullwidth forms
     (cp >= 0xffe0 && cp <= 0xffe6) ||
-    (cp >= 0x1f300 && cp <= 0x1faff) || // emoji & pictographs
+    (cp >= 0x1f000 && cp <= 0x1faff) || // Mahjong … Symbols-and-Pictographs-Extended (incl. flags 1F1E6-1F1FF, 🔋 1F50B)
     (cp >= 0x20000 && cp <= 0x3fffd)    // CJK extension planes
   ) return 2;
-  if ((cp >= 0x0300 && cp <= 0x036f) || (cp >= 0xfe00 && cp <= 0xfe0f) || cp === 0x200d) return 0; // combining / VS / ZWJ
+  // NOTE (v1.47.3): the Misc-Symbols/Dingbats block (0x2600-0x27BF: ☀ ⚡ ❤ …)
+  // is deliberately NOT counted as wide. Those code points have
+  // terminal-DEPENDENT presentation, and this renderer uses several of them
+  // (☀ ⚡ ⌁ ⏱ ▮ in the console mimic) as SINGLE-column decorations — counting
+  // them 2 would break its own layout. They therefore measure 1, consistent
+  // with the renderer's own usage; a device name carrying one may be ±1 col on
+  // an emoji-presentation terminal (accepted, low-frequency).
   return 1;
 }
 
@@ -150,14 +159,22 @@ export function truncate(s: string, width: number): string {
 /** Pad (or truncate) to an exact visible width, content left-aligned. */
 export function padEnd(s: string, width: number): string {
   const len = visLen(s);
-  if (len > width) return truncate(s, width);
+  if (len > width) {
+    // v1.47.3 — truncate() may stop one column short when a double-width glyph
+    // straddles the cut; re-pad so the contract (exactly `width`) still holds.
+    const t = truncate(s, width);
+    return t + ' '.repeat(Math.max(0, width - visLen(t)));
+  }
   return s + ' '.repeat(width - len);
 }
 
 /** Pad (or truncate) to an exact visible width, content right-aligned. */
 export function padStart(s: string, width: number): string {
   const len = visLen(s);
-  if (len > width) return truncate(s, width);
+  if (len > width) {
+    const t = truncate(s, width);
+    return ' '.repeat(Math.max(0, width - visLen(t))) + t;
+  }
   return ' '.repeat(width - len) + s;
 }
 
@@ -181,4 +198,51 @@ export function bar(frac: number, width: number, color: keyof typeof c = 'green'
   const f = Math.max(0, Math.min(1, Number.isFinite(frac) ? frac : 0));
   const filled = Math.round(f * width);
   return c[color]('█'.repeat(filled)) + c.grey('░'.repeat(Math.max(0, width - filled)));
+}
+
+
+/** v1.47.3 — display columns of a PLAIN (no-ANSI) string. */
+export function displayWidth(s: string): number { return visLen(s); }
+
+/**
+ * v1.47.3 — word-wrap PLAIN text (no ANSI) to a DISPLAY width, so CJK/emoji
+ * content wraps at the right visual column instead of code-unit count. A word
+ * longer than the width is hard-split on a display-column boundary (never
+ * mid-double-width-glyph). Mirrors the prior alm wrap semantics, width-correct.
+ */
+export function wrapDisplay(s: string, width: number): string[] {
+  const w = Math.max(1, width);
+  const lines: string[] = [];
+  // Split a plain word into <= w-display-column chunks, whole glyphs only.
+  const hardSplit = (word: string): string[] => {
+    const chunks: string[] = [];
+    let cur = '';
+    let curW = 0;
+    for (const ch of word) {
+      const cw = displayWidth(ch);
+      if (curW + cw > w) { chunks.push(cur); cur = ''; curW = 0; }
+      cur += ch;
+      curW += cw;
+    }
+    if (cur) chunks.push(cur);
+    return chunks;
+  };
+  let cur = '';
+  for (const word of s.split(/\s+/).filter(Boolean)) {
+    const pieces = displayWidth(word) > w ? hardSplit(word) : [word];
+    for (let k = 0; k < pieces.length; k++) {
+      const piece = pieces[k];
+      // A hard-split remainder always starts its own line except the last piece.
+      if (k < pieces.length - 1) {
+        if (cur) { lines.push(cur); cur = ''; }
+        lines.push(piece);
+        continue;
+      }
+      if (!cur) cur = piece;
+      else if (displayWidth(cur) + 1 + displayWidth(piece) <= w) cur += ' ' + piece;
+      else { lines.push(cur); cur = piece; }
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [''];
 }

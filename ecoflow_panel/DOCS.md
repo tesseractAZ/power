@@ -2,7 +2,7 @@
 
 This is the definitive technical reference for the **ecoflow-panel** Home Assistant add-on: a life-safety off-grid solar/battery monitor and depletion alarm for a Phoenix, AZ system (EcoFlow Smart Home Panel 2 + Delta Pro Ultra battery/inverter Cores + a 42-panel array + EVSE). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the endpoints and sensors it produces, the configuration knobs that tune it, and its edge-case guards.
 
-The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, a telnet TUI (`:2323`), and a set of HACS Lovelace cards. It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
+The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, a telnet TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
 
 > Every constant, formula, endpoint path, and config key below was written directly from the source and independently completeness-/accuracy-checked against it. Where a value is a tunable default, that is noted. For the operator quick-start, install steps, and the option list, see the top of the **Configuration, Deployment, Security & Operations** chapter; for a high-level tour, see `README.md`.
 
@@ -516,7 +516,7 @@ analytics.
 #### 9.5 Web UI
 
 Built React bundle served by `@fastify/static` at `/` with SPA fallback
-(`WEB_DIST_PATH`), plus Lovelace card bundles. In dev, Vite is the front-end and
+(`WEB_DIST_PATH`), plus the telnet TUI. In dev, Vite is the front-end and
 proxies `/api` + `/ws` back to this process.
 
 ---
@@ -6043,7 +6043,6 @@ The ecoflow-panel add-on exposes the same underlying fleet telemetry through **t
 |---|---|---|---|
 | **React web dashboard (PWA)** | WebSocket `/ws` + REST `/api/*` | Browser at `:8787` or via HA Ingress sidebar | Same-origin; writes need ingress/same-origin/token |
 | **Control-room TUI** | Raw telnet TCP `:2323` **and** browser xterm.js at `/console` | `nc`/`telnet` client, or browser | LAN-trust by default; opt-in operator login via `TUI_PASSWORD` (§11 2.3) |
-| **HACS Lovelace cards** | WebSocket `/ws` + REST `/api/*` (cross-origin CORS) | Home Assistant Lovelace dashboards | CORS-allowlisted read; writes token-gated |
 
 All three read the **same `FleetSnapshot`** the server pushes ~1×/sec over `/ws`, plus the same analytics REST endpoints. This document is a features-and-navigation reference for each surface.
 
@@ -6687,7 +6686,7 @@ works in parallel.
 2. **serverdeps** (`node:22-alpine`) — `npm ci` the server deps (`tsx` is a runtime dep, not
    just dev — the server runs TS directly).
 3. **runtime** (`FROM ${BUILD_FROM}` — the HA Alpine+s6+bashio base) — `apk add nodejs npm
-   ca-certificates tzdata`, copy `server/`, the built `web/dist`, the prebuilt `lovelace/dist`,
+   ca-certificates tzdata`, copy `server/`, the built `web/dist`,
    and `rootfs/` (the s6 service). `chmod a+x` the run script. `EXPOSE 8787 2323`.
 
 Runtime ENV baked in: `NODE_ENV=production`, `PORT=8787`, `HOST=0.0.0.0`, `DB_PATH=/data/ecoflow.db`,
@@ -8208,7 +8207,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | `/ws` snapshot spine | Throttled full-snapshot frames (§11.0) | SnapshotStore | Web dashboard, wsConsole | measured-and-active |
 | Web dashboard (React PWA) | Tabs: Dashboard/Solar/Battery/Strategy/Alerts/Console (§11.1) | `/ws` + 30+ `/api/*` | Operator | measured-and-active |
 | Telnet TUI | Plant Operator + Summary consoles, DoS-hardened, port 2323 (§11.2) | dataProvider (`totals`/`forecast`/`degradation`) + snapshot | Operator | measured-and-active |
-| HACS Lovelace cards | fleet/solar/battery/circuit/alerts/insights/strategy cards, shared per-host store, CORS allow-list (§11.3) | `/api/*` (verified per-card set) | HA dashboards | measured-and-active |
+| HACS Lovelace cards | REMOVED in v1.47.0 (duplicated the web dashboard; consumer had pinned a stale CDN snapshot) | — | — | removed |
 | Lighting posture | `rawPosture` ladder (critical/red ≤ 4 h/amber/conserve < 35 % dawn/surplus/normal) + asymmetric 15-min de-escalation hold + restart persistence (§14.1) | Runway, dawn-min SoC, reserve, curtailment, grid backstop | HA `lighting_posture`(+`_reason`) sensors → HA-side automations | measured-and-active |
 | Surplus / opportunistic loads | Curtailment surplus vs hardcoded load catalog (`fitsInSurplus = surplus ≥ estimatedW`) (§14.2) | Curtailment report | Curtailment endpoint/card fields | measured-and-active (catalog hardcoded; `haServiceHint` always `null` — Phase-2 actuation not implemented) |
 | HVAC posture | Two `category:'hvac'` catalog entries only; no posture sensor, no thermostat actuation (§14.3) | — | — | advisory-dormant (documented DORMANT) |

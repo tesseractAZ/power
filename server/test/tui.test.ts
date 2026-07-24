@@ -588,3 +588,58 @@ test('v1.47.2 — visLen/padEnd count CJK as double-width', async () => {
   const padded = pe('電池', 6);
   assert.equal(visLen(padded), 6, 'padEnd pads to the display width, not .length');
 });
+
+
+/* ── v1.47.3 third-pass regression fixes ────────────────────────────────── */
+
+test('v1.47.3 — combining marks are zero-width (dead-code branch fixed)', async () => {
+  const { visLen } = await import('../src/telnet/ansi.js');
+  assert.equal(visLen('e\u0301'), 1, 'e + combining acute occupies one column');
+  assert.equal(visLen('Re\u0301frige\u0301rateur'), 13, 'NFD name measures display width, not code units');
+});
+
+test('v1.47.3 — padEnd re-pads to exact width across a wide-glyph straddle', async () => {
+  const { padEnd, padStart, visLen } = await import('../src/telnet/ansi.js');
+  assert.equal(visLen(padEnd('abcd\u4e00', 5)), 5, 'straddle → drop wide glyph, then re-pad to width');
+  assert.equal(visLen(padEnd('\u4e00\u4e00\u4e00', 5)), 5);
+  assert.equal(visLen(padStart('abcd\u4e00', 5)), 5);
+});
+
+test('v1.47.3 — CJK alarm detail wraps on display width and keeps its tail', () => {
+  const snap = buildSnapshot({ daylight: true });
+  const tail = 'TAILMARK';
+  (snap as any).alerts = [
+    { id: 'w1', severity: 'critical', category: 'Battery', device: 'Core 1', title: '電池', detail: '電池 電池 電池 電池 電池 電池 ' + tail },
+  ];
+  const lines = renderPlant(makeView(80, 30, 'alm'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  // Every rendered line stays within width…
+  for (const l of plain) assert.ok(visLenLocal(l) <= 80, `overflow: ${JSON.stringify(l)}`);
+  // …and the operative tail is NOT lost (v1.47.2 clipped it because wrapPlain
+  // wrapped on .length while visLen had become display-aware).
+  assert.ok(plain.some((l) => l.includes(tail)), 'CJK alarm tail was lost');
+});
+
+test('v1.47.3 — divider fills to width with a CJK label (visLen, not .length)', () => {
+  const snap = buildSnapshot({ daylight: true });
+  const dpu = Object.values((snap as any).devices).find((d: any) => d.productName?.includes('Delta'));
+  if (dpu) (dpu as any).deviceName = '核心三号';
+  const lines = renderPlant(makeView(100, 40, 'gen'), makePlantData(snap), { recorder: mockRecorder() });
+  const plain = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  for (const l of plain) assert.ok(visLenLocal(l) <= 100, `gen line over width with CJK name: ${JSON.stringify(l)}`);
+});
+
+// local display-width measure mirroring ansi.visLen for the assertions above.
+function visLenLocal(s: string): number {
+  const plain = s.replace(/\x1b\[[0-9;]*m/g, '');
+  let w = 0;
+  for (const ch of plain) {
+    const cp = ch.codePointAt(0)!;
+    if ((cp >= 0x0300 && cp <= 0x036f) || (cp >= 0xfe00 && cp <= 0xfe0f) || cp === 0x200d) continue;
+    if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
+        (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) ||
+        (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f000 && cp <= 0x1faff) || (cp >= 0x20000 && cp <= 0x3fffd)) w += 2;
+    else w += 1;
+  }
+  return w;
+}
