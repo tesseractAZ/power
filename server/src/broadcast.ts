@@ -72,7 +72,7 @@ import type { Alert } from './alerts.js';
 import { config } from './config.js';
 import { callHaService, isSupervised, probeService, getEntityState, getAllStates } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
-import { renderAnnouncement, pruneRenderCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel } from './audioRenderer.js';
+import { renderAnnouncement, pruneRenderCache, prewarmTerminatorCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel } from './audioRenderer.js';
 import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
@@ -487,6 +487,22 @@ export function startBroadcastMonitor(
   // ~10s tick. The audible path already reloads per tick/broadcast; this is for
   // read coherence.
   const offRuntimeConfig = onBroadcastRuntimeConfigChange(() => { cfg = loadBroadcastConfig(); });
+  // v1.48.0 — boot-time terminator pre-warm. Delayed so Piper (and the rest of
+  // the boot) settles first; entries are ordered Spanish → English so Piper is
+  // left holding the PRIMARY voice, meaning a fresh alarm's first render needs
+  // no model load at all. On a warmed install this is two file stats and no
+  // Piper traffic. Failures are non-fatal (alarm path renders on demand).
+  const prewarmTimer: NodeJS.Timeout = setTimeout(() => {
+    if (stopped || !cfg.enabled || !cfg.endOfMessage || cfg.wyomingHost.length === 0) return;
+    const entries: Array<{ lang: 'en' | 'es'; voice?: string; phrase: string }> = [];
+    if (cfg.bilingual && cfg.secondLangVoice.length > 0) {
+      entries.push({ lang: 'es', voice: cfg.secondLangVoice, phrase: cfg.endOfMessagePhraseEs || cfg.endOfMessagePhrase });
+    }
+    entries.push({ lang: 'en', voice: cfg.wyomingVoice ?? undefined, phrase: cfg.endOfMessagePhrase });
+    prewarmTerminatorCache({
+      cacheDir: opts.cacheDir, host: cfg.wyomingHost, port: cfg.wyomingPort, entries, log,
+    }).catch((e) => log(`broadcast: terminator pre-warm errored (non-fatal): ${e instanceof Error ? e.message : String(e)}`));
+  }, 20_000);
   let prevLevel: ConditionLevel | null = null;
   let prevCrit = 0;
   let firstTick = true;
@@ -1520,6 +1536,7 @@ export function startBroadcastMonitor(
       clearInterval(pruneInterval);
       clearInterval(audibleHealthInterval);
       clearTimeout(audibleHealthKick);
+      clearTimeout(prewarmTimer);
       offRuntimeConfig();
     },
   };

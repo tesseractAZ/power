@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { renderAnnouncement, _resetResidentVoiceForTest, _resetTerminatorCacheForTest } from '../src/audioRenderer.js';
+import { renderAnnouncement, prewarmTerminatorCache, _resetResidentVoiceForTest, _resetTerminatorCacheForTest } from '../src/audioRenderer.js';
 import { pcmToWav } from '../src/wyomingTts.js';
 import { generateAudioAssets } from '../src/audioAssets.js';
 
@@ -175,5 +175,60 @@ test('v1.47.6 — terminators render once, then come from cache (voice switches 
     assert.equal(secondTerminatorRenders, 0, 'terminators served from disk cache — zero re-renders');
     // Only the two message passes hit Piper.
     assert.equal(rendered.length, 2, `expected only the 2 message passes, got ${rendered.length}`);
+  });
+});
+
+
+/* v1.48.0 — boot-time terminator pre-warm. The phrases and voices are known at
+ * startup, so the boot pays the (one-time) terminator renders in the background
+ * and NO announcement ever renders one cold — even right after a voice change
+ * or cache wipe. Proven: pre-warm renders each entry once, a later announcement
+ * renders ONLY its message passes, and a second pre-warm is a pure no-op. */
+test('v1.48.0 — boot pre-warm renders terminators once; alarms then render zero terminators', async () => {
+  await withDirs(async (klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    _resetTerminatorCacheForTest();
+    const rendered: string[] = [];
+    const renderTts = async (o: { text?: string; voice?: string }) => {
+      rendered.push(`${o.voice}:${o.text}`);
+      return { ok: true as const, wav: fakeWav(200), durationMs: 5 };
+    };
+    const entries = [
+      { lang: 'es' as const, voice: 'es_MX-claude-high', phrase: 'Fin del mensaje' },
+      { lang: 'en' as const, voice: 'en_US-lessac-medium', phrase: 'End of message' },
+    ];
+    const p1 = await prewarmTerminatorCache({ cacheDir, host: 'x', port: 1, entries, log: () => {}, renderTts: renderTts as any });
+    assert.deepEqual({ rendered: p1.rendered, cached: p1.cached, failed: p1.failed }, { rendered: 2, cached: 0, failed: 0 });
+    // Ordered as given: Spanish first, primary English LAST (left resident).
+    assert.deepEqual(rendered.map((x) => x.split(':')[0]), ['es_MX-claude-high', 'en_US-lessac-medium']);
+
+    // An announcement after pre-warm: only the 2 message passes hit the renderer,
+    // even with the in-memory memo cleared (the DISK cache must serve — the
+    // pre-warm wrote files under the same key the alarm path reads).
+    rendered.length = 0;
+    _resetTerminatorCacheForTest();
+    const r = await renderAnnouncement({
+      ...baseOpts(klaxonDir, cacheDir), endOfMessage: true,
+      // Mirror production: broadcast.ts passes the Spanish phrase through, and the
+      // pre-warm wiring uses the same `phraseEs || phrase` fallback — the keys must
+      // agree END TO END or the pre-warm is useless.
+      endOfMessagePhraseEs: 'Fin del mensaje',
+      message: 'Alpha',
+      messages: [
+        { text: 'Alpha', voice: 'en_US-lessac-medium', lang: 'en' as const },
+        { text: 'Alpha es', voice: 'es_MX-claude-high', lang: 'es' as const },
+      ],
+      renderTts,
+    } as any);
+    assert.equal(r.ok, true);
+    assert.ok(!r.filename?.includes('.partial.'), 'terminators present → complete render');
+    assert.equal(rendered.filter((x) => /End of message|Fin del mensaje/.test(x)).length, 0, 'no cold terminator render at alarm time');
+    assert.equal(rendered.length, 2, `expected only the 2 message passes, got ${rendered.length}`);
+
+    // Re-running the pre-warm (every boot) is two file stats, no renders.
+    rendered.length = 0;
+    const p2 = await prewarmTerminatorCache({ cacheDir, host: 'x', port: 1, entries, log: () => {}, renderTts: renderTts as any });
+    assert.deepEqual({ rendered: p2.rendered, cached: p2.cached, failed: p2.failed }, { rendered: 0, cached: 2, failed: 0 });
+    assert.equal(rendered.length, 0, 'warmed boot performs no renders');
   });
 });

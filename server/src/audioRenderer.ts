@@ -185,16 +185,41 @@ async function renderWithinBudget(
  */
 const terminatorMemo = new Map<string, Buffer>();
 export function _resetTerminatorCacheForTest(): void { terminatorMemo.clear(); }
+/** v1.48.0 — the on-disk key deliberately EXCLUDES the PCM format: a chime whose
+ *  format differs from Piper's output breaks the spoken path outright (pass
+ *  format-mismatch), so exactly one format is ever viable per install. Reads
+ *  validate the header against the requested format anyway (a wrong-format file
+ *  is a cache miss that gets re-rendered and overwritten), and dropping fmt from
+ *  the key is what lets the boot pre-warm write usable entries without knowing
+ *  the chime format. The in-memory memo keeps fmt in ITS key because memo hits
+ *  skip that read-time validation. */
+function terminatorKey(lang: 'en' | 'es', voice: string | undefined, phrase: string): string {
+  return createHash('sha1')
+    .update(`term|v${RENDER_VERSION}|${lang}|${voice ?? ''}|${phrase}`)
+    .digest('hex').slice(0, 16);
+}
+/** Persist a terminator WAV (atomic tmp+rename, unpredictable temp name — same
+ *  hardening as the render cache). Best-effort: a failed write only means the
+ *  next announcement re-renders. */
+async function persistTerminatorWav(cacheDir: string, file: string, wav: Buffer): Promise<void> {
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await mkdir(cacheDir, { recursive: true });
+    await writeFile(tmp, wav, { flag: 'wx' });
+    await rename(tmp, file);
+  } catch {
+    await rm(tmp, { force: true }).catch(() => { /* best effort */ });
+  }
+}
 async function terminatorPcm(opts: {
   cacheDir: string; host: string; port: number; phrase: string; spoken: string;
   voice?: string; lang: 'en' | 'es'; fmt: { rate: number; width: number; channels: number };
   render: typeof renderWyomingTts; deadline: number; log: (m: string) => void;
 }): Promise<{ pcm: Buffer | null; dropped: boolean }> {
   const { cacheDir, host, port, phrase, spoken, voice, lang, fmt, render, deadline, log } = opts;
-  const key = createHash('sha1')
-    .update(`term|v${RENDER_VERSION}|${lang}|${voice ?? ''}|${phrase}|${fmt.rate}/${fmt.width}/${fmt.channels}`)
-    .digest('hex').slice(0, 16);
-  const memo = terminatorMemo.get(key);
+  const key = terminatorKey(lang, voice, phrase);
+  const memoKey = `${key}|${fmt.rate}/${fmt.width}/${fmt.channels}`;
+  const memo = terminatorMemo.get(memoKey);
   if (memo) return { pcm: memo, dropped: false };
   const file = resolve(cacheDir, `term-${key}.wav`);
   try {
@@ -202,7 +227,7 @@ async function terminatorPcm(opts: {
     const h = parseWavHeader(wav);
     if (h.ok && h.rate === fmt.rate && h.width === fmt.width && h.channels === fmt.channels) {
       const pcm = wav.subarray(h.dataOffset, h.dataOffset + h.dataLength);
-      terminatorMemo.set(key, pcm);
+      terminatorMemo.set(memoKey, pcm);
       return { pcm, dropped: false };
     }
   } catch { /* not cached yet — render it below */ }
@@ -218,18 +243,55 @@ async function terminatorPcm(opts: {
     return { pcm: null, dropped: true };
   }
   const pcm = r.wav.subarray(h.dataOffset, h.dataOffset + h.dataLength);
-  terminatorMemo.set(key, pcm);
-  // Persist so the cost is paid ONCE for the lifetime of the install (atomic
-  // tmp+rename, unpredictable temp name — same hardening as the render cache).
-  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  try {
-    await mkdir(cacheDir, { recursive: true });
-    await writeFile(tmp, r.wav, { flag: 'wx' });
-    await rename(tmp, file);
-  } catch {
-    await rm(tmp, { force: true }).catch(() => { /* best effort */ });
-  }
+  terminatorMemo.set(memoKey, pcm);
+  // Persist so the cost is paid ONCE for the lifetime of the install.
+  await persistTerminatorWav(cacheDir, file, r.wav);
   return { pcm, dropped: false };
+}
+
+/** v1.48.0 — generous boot-time budget: this never runs on the alarm path, so a
+ *  slow first render (voice download / cold model) is acceptable here where it
+ *  would not be during an announcement. */
+const PREWARM_TIMEOUT_MS = 30_000;
+
+/**
+ * v1.48.0 — boot-time terminator pre-warm. The terminator phrases and voices
+ * are fully known at startup, so rendering them ONCE in the background (and
+ * persisting via the same cache the alarm path reads) means no announcement
+ * ever pays a cold terminator render — even right after a voice change, a
+ * RENDER_VERSION bump, or a cache wipe. With terminators always cached, the
+ * resident-first pass ordering bounds a fresh bilingual alarm at ONE voice
+ * switch regardless of which voices are configured.
+ *
+ * Entries render in the given order — put the PRIMARY voice last so Piper is
+ * left holding it. Failures are logged and skipped (the alarm path falls back
+ * to rendering on demand, exactly as before this existed).
+ */
+export async function prewarmTerminatorCache(opts: {
+  cacheDir: string; host: string; port: number;
+  entries: Array<{ lang: 'en' | 'es'; voice?: string; phrase: string }>;
+  log: (m: string) => void;
+  renderTts?: typeof renderWyomingTts;
+}): Promise<{ rendered: number; cached: number; failed: number }> {
+  const render = opts.renderTts ?? renderWyomingTts;
+  let rendered = 0, cached = 0, failed = 0;
+  for (const e of opts.entries) {
+    if (e.phrase.length === 0) continue;
+    const file = resolve(opts.cacheDir, `term-${terminatorKey(e.lang, e.voice, e.phrase)}.wav`);
+    try { await access(file); cached++; continue; } catch { /* absent — render below */ }
+    const spoken = e.lang === 'es' ? verbalizeForTtsEs(e.phrase) : verbalizeForTts(e.phrase);
+    const r = await render({ host: opts.host, port: opts.port, text: spoken, voice: e.voice, timeoutMs: PREWARM_TIMEOUT_MS });
+    if (!r.ok || !r.wav || !parseWavHeader(r.wav).ok) {
+      failed++;
+      opts.log(`audioRenderer: terminator pre-warm failed (lang=${e.lang} voice=${e.voice ?? 'default'}): ${r.error ?? 'malformed WAV'} — the next announcement renders it on demand`);
+      continue;
+    }
+    residentVoice = e.voice ?? ''; // Piper genuinely holds this voice now
+    await persistTerminatorWav(opts.cacheDir, file, r.wav);
+    rendered++;
+  }
+  opts.log(`audioRenderer: terminator pre-warm — ${rendered} rendered, ${cached} already cached${failed > 0 ? `, ${failed} failed` : ''}`);
+  return { rendered, cached, failed };
 }
 
 
