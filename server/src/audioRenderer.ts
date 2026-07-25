@@ -171,6 +171,67 @@ async function renderWithinBudget(
   return r;
 }
 
+/**
+ * v1.47.6 — PERSISTENT terminator cache. The "End of message" / "Fin del
+ * mensaje" phrases NEVER change, yet every fresh announcement re-rendered them
+ * — and each one costs a full voice switch (~4.2 s measured; Piper keeps one
+ * model resident, so the cost is the model load, not the phrase length). A
+ * bilingual alarm therefore paid up to FOUR loads. Caching the terminator PCM
+ * on disk removes two of them permanently: after the first render the
+ * terminators are free forever, so a bilingual alarm costs one voice switch.
+ *
+ * Keyed on RENDER_VERSION + lang + voice + phrase + PCM format, so changing
+ * any of them re-renders rather than serving stale audio.
+ */
+const terminatorMemo = new Map<string, Buffer>();
+export function _resetTerminatorCacheForTest(): void { terminatorMemo.clear(); }
+async function terminatorPcm(opts: {
+  cacheDir: string; host: string; port: number; phrase: string; spoken: string;
+  voice?: string; lang: 'en' | 'es'; fmt: { rate: number; width: number; channels: number };
+  render: typeof renderWyomingTts; deadline: number; log: (m: string) => void;
+}): Promise<{ pcm: Buffer | null; dropped: boolean }> {
+  const { cacheDir, host, port, phrase, spoken, voice, lang, fmt, render, deadline, log } = opts;
+  const key = createHash('sha1')
+    .update(`term|v${RENDER_VERSION}|${lang}|${voice ?? ''}|${phrase}|${fmt.rate}/${fmt.width}/${fmt.channels}`)
+    .digest('hex').slice(0, 16);
+  const memo = terminatorMemo.get(key);
+  if (memo) return { pcm: memo, dropped: false };
+  const file = resolve(cacheDir, `term-${key}.wav`);
+  try {
+    const wav = await readFile(file);
+    const h = parseWavHeader(wav);
+    if (h.ok && h.rate === fmt.rate && h.width === fmt.width && h.channels === fmt.channels) {
+      const pcm = wav.subarray(h.dataOffset, h.dataOffset + h.dataLength);
+      terminatorMemo.set(key, pcm);
+      return { pcm, dropped: false };
+    }
+  } catch { /* not cached yet — render it below */ }
+  const r = await renderWithinBudget(render, host, port, spoken, voice, deadline, log, `terminator (lang=${lang})`);
+  if (r == null) return { pcm: null, dropped: true };
+  if (!r.ok || !r.wav) {
+    log(`audioRenderer: terminator render failed (${r.error ?? 'unknown'}) — omitting it (message still plays)`);
+    return { pcm: null, dropped: true };
+  }
+  const h = parseWavHeader(r.wav);
+  if (!h.ok || h.rate !== fmt.rate || h.width !== fmt.width || h.channels !== fmt.channels) {
+    log('audioRenderer: terminator format mismatch — omitting it (message still plays)');
+    return { pcm: null, dropped: true };
+  }
+  const pcm = r.wav.subarray(h.dataOffset, h.dataOffset + h.dataLength);
+  terminatorMemo.set(key, pcm);
+  // Persist so the cost is paid ONCE for the lifetime of the install (atomic
+  // tmp+rename, unpredictable temp name — same hardening as the render cache).
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await mkdir(cacheDir, { recursive: true });
+    await writeFile(tmp, r.wav, { flag: 'wx' });
+    await rename(tmp, file);
+  } catch {
+    await rm(tmp, { force: true }).catch(() => { /* best effort */ });
+  }
+  return { pcm, dropped: false };
+}
+
 
 /** Bump when the render pipeline changes in a way that invalidates the cache.
  *  v2 (v0.12.1): the optional lead-in silence is now part of every render.
@@ -645,24 +706,17 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     for (const job of residentFirst(jobs)) {
       if (tailPcmByKey.has(job.ck)) continue;
       const tailSpoken = job.lang === 'es' ? verbalizeForTtsEs(job.phrase) : verbalizeForTts(job.phrase);
-      const tailResult = await renderWithinBudget(doRender, wyomingHost, wyomingPort, tailSpoken, job.voice, spokenDeadline, log, `terminator (lang=${job.lang})`);
-      let pcm: Buffer | null = null;
-      if (tailResult == null) {
-        tailDropped = true; // budget spent — omit the terminator, message still plays
-      } else if (tailResult.ok && tailResult.wav) {
-        const th = parseWavHeader(tailResult.wav);
-        if (th.ok && th.rate === klaxonHeader.rate && th.width === klaxonHeader.width && th.channels === klaxonHeader.channels) {
-          pcm = tailResult.wav.subarray(th.dataOffset, th.dataOffset + th.dataLength);
-          residentVoice = job.voice ?? '';
-        } else {
-          tailDropped = true;
-          log('audioRenderer: terminator format mismatch — omitting it (message still plays)');
-        }
-      } else {
-        tailDropped = true;
-        log(`audioRenderer: terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
-      }
-      tailPcmByKey.set(job.ck, pcm);
+      // v1.47.6 — served from the persistent terminator cache; only the very
+      // first announcement per (lang, voice, phrase) pays a render.
+      const t = await terminatorPcm({
+        cacheDir, host: wyomingHost, port: wyomingPort, phrase: job.phrase, spoken: tailSpoken,
+        voice: job.voice, lang: job.lang,
+        fmt: { rate: klaxonHeader.rate, width: klaxonHeader.width, channels: klaxonHeader.channels },
+        render: doRender, deadline: spokenDeadline, log,
+      });
+      if (t.dropped) tailDropped = true;
+      if (t.pcm) residentVoice = job.voice ?? '';
+      tailPcmByKey.set(job.ck, t.pcm);
     }
     for (const job of jobs) tails[job.i] = tailPcmByKey.get(job.ck) ?? null;
   }
