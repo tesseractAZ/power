@@ -92,6 +92,43 @@ export function _resetTtsHealthForTest(): void {
   ttsHealth = { consecutiveFailures: 0, lastFailureMs: null, lastFailureReason: null, lastSuccessMs: null };
 }
 
+/* ── v1.47.4 — spoken-pass render reliability ──────────────────────────────
+ * Piper keeps ONE voice resident and cold-loads (a medium model ~1-3 s, a
+ * "high" model ~4 s) on every voice switch. A bilingual alarm renders English
+ * and Spanish passes AND per-language terminators; rendered en/es/en/es it
+ * forced FOUR model reloads per alarm, so under any Piper contention the
+ * slower (Spanish) pass could time out or drop its socket and get dropped —
+ * the alarm then played English only. Two mitigations: render the voice Piper
+ * currently has resident FIRST (halves the reloads), and RETRY a transient
+ * render failure once (the retry lands on the now-warm model). */
+const PASS_TIMEOUT_MS = (() => {
+  const v = Number(process.env.BROADCAST_TTS_PASS_TIMEOUT_MS);
+  return Number.isFinite(v) && v >= 5000 && v <= 60000 ? v : 20000;
+})();
+const PASS_RETRY_DELAY_MS = 400;
+/** The voice Piper most recently rendered (module state; renders are serialized
+ *  by the broadcast single-flight, and a cache hit — which never touches Piper
+ *  — leaves this unchanged, matching Piper's actual resident model). */
+let residentVoice = '';
+export function _resetResidentVoiceForTest(): void { residentVoice = ''; }
+/** Order render specs so the resident voice's items come first (0 reloads),
+ *  then group remaining items by voice so each voice loads at most once. */
+function residentFirst<T extends { voice?: string }>(specs: T[]): T[] {
+  return [...specs].sort((a, b) => {
+    const ar = (a.voice ?? '') === residentVoice, br = (b.voice ?? '') === residentVoice;
+    return ar === br ? 0 : ar ? -1 : 1;
+  });
+}
+async function renderPassWithRetry(render: typeof renderWyomingTts, host: string, port: number, text: string, voice: string | undefined, log: (m: string) => void, label: string) {
+  let r = await render({ host, port, text, voice, timeoutMs: PASS_TIMEOUT_MS });
+  if (!r.ok || !r.wav) {
+    log(`audioRenderer: ${label} render failed (${r.error ?? 'unknown'}) — retrying once`);
+    await new Promise((res) => setTimeout(res, PASS_RETRY_DELAY_MS));
+    r = await render({ host, port, text, voice, timeoutMs: PASS_TIMEOUT_MS });
+  }
+  return r;
+}
+
 
 /** Bump when the render pipeline changes in a way that invalidates the cache.
  *  v2 (v0.12.1): the optional lead-in silence is now part of every render.
@@ -221,6 +258,8 @@ export interface RenderOptions {
   messages?: ReadonlyArray<{ text: string; voice?: string; lang?: 'en' | 'es' }>;
   /** Logger; receives one line per stage. */
   log: (m: string) => void;
+  /** v1.47.4 — injectable Wyoming renderer (tests). Defaults to renderWyomingTts. */
+  renderTts?: typeof renderWyomingTts;
 }
 
 export interface RenderResult {
@@ -310,6 +349,7 @@ export function assembleAnnouncementParts(
  */
 export async function renderAnnouncement(opts: RenderOptions): Promise<RenderResult> {
   const { level, message, klaxonDir, cacheDir, wyomingHost, wyomingPort, wyomingVoice, log } = opts;
+  const doRender = opts.renderTts ?? renderWyomingTts; // v1.47.4 — injectable for tests
 
   // v0.11.0 — chime repeats getChimeRepeat() times (default 2) before the TTS.
   // Resolve N once here so it's part of both the rendered audio AND the cache
@@ -468,23 +508,20 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const failedKeys = new Set<string>();
   let firstTtsMs: number | undefined;
   let lastFailReason: string | undefined;
-  for (const spec of passSpecs) {
+  // v1.47.4 — render the resident voice first (playback order is unaffected —
+  // it is driven by survivingSpecs/passSpecs below, so English still plays first).
+  for (const spec of residentFirst(passSpecs)) {
     const k = passKey(spec);
     if (renderedPcm.has(k) || failedKeys.has(k)) continue;
     const spokenText = spec.lang === 'es' ? verbalizeForTtsEs(spec.text) : verbalizeForTts(spec.text);
-    const r = await renderWyomingTts({
-      host: wyomingHost,
-      port: wyomingPort,
-      text: spokenText,
-      voice: spec.voice,
-      timeoutMs: 15000,
-    });
+    const r = await renderPassWithRetry(doRender, wyomingHost, wyomingPort, spokenText, spec.voice, log, `spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`);
     if (!r.ok || !r.wav) {
       failedKeys.add(k);
       lastFailReason = r.error ?? 'wyoming render failed';
-      log(`audioRenderer: spoken pass render failed (lang=${spec.lang} voice=${spec.voice ?? 'default'}): ${lastFailReason}${multi ? ' — dropping that pass' : ''}`);
+      log(`audioRenderer: spoken pass render failed after retry (lang=${spec.lang} voice=${spec.voice ?? 'default'}): ${lastFailReason}${multi ? ' — dropping that pass' : ''}`);
       continue;
     }
+    residentVoice = spec.voice ?? ''; // Piper now holds this voice
     const h = parseWavHeader(r.wav);
     if (!h.ok || h.rate !== klaxonHeader.rate || h.width !== klaxonHeader.width || h.channels !== klaxonHeader.channels) {
       failedKeys.add(k);
@@ -543,6 +580,12 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   let tailDropped = false;
   if (tailEnabled) {
     const tailPcmByKey = new Map<string, Buffer | null>(); // dedup identical (lang, voice, phrase)
+    // v1.47.4 — collect the per-language terminator jobs first, then render them
+    // resident-voice-first (with retry), so the terminator of the voice Piper
+    // still holds needs no reload. Output is unchanged — tails[i] is filled the
+    // same way; only the render-call order is optimized.
+    type TailJob = { i: number; lang: 'en' | 'es'; voice?: string; phrase: string; ck: string };
+    const jobs: TailJob[] = [];
     for (let i = 0; i < playSpecs.length; i++) {
       const spec = playSpecs[i];
       // Only the LAST block of each language carries that language's terminator.
@@ -550,27 +593,29 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
       if (!lastOfLang) continue;
       const phrase = spec.lang === 'es' ? (endOfMessagePhraseEs || endOfMessagePhrase) : endOfMessagePhrase;
       if (phrase.length === 0) continue;
-      const ck = `${spec.lang} ${spec.voice ?? ''} ${phrase}`;
-      if (!tailPcmByKey.has(ck)) {
-        const tailSpoken = spec.lang === 'es' ? verbalizeForTtsEs(phrase) : verbalizeForTts(phrase);
-        const tailResult = await renderWyomingTts({ host: wyomingHost, port: wyomingPort, text: tailSpoken, voice: spec.voice, timeoutMs: 15000 });
-        let pcm: Buffer | null = null;
-        if (tailResult.ok && tailResult.wav) {
-          const th = parseWavHeader(tailResult.wav);
-          if (th.ok && th.rate === klaxonHeader.rate && th.width === klaxonHeader.width && th.channels === klaxonHeader.channels) {
-            pcm = tailResult.wav.subarray(th.dataOffset, th.dataOffset + th.dataLength);
-          } else {
-            tailDropped = true;
-            log('audioRenderer: terminator format mismatch — omitting it (message still plays)');
-          }
+      jobs.push({ i, lang: spec.lang, voice: spec.voice, phrase, ck: `${spec.lang} ${spec.voice ?? ''} ${phrase}` });
+    }
+    for (const job of residentFirst(jobs)) {
+      if (tailPcmByKey.has(job.ck)) continue;
+      const tailSpoken = job.lang === 'es' ? verbalizeForTtsEs(job.phrase) : verbalizeForTts(job.phrase);
+      const tailResult = await renderPassWithRetry(doRender, wyomingHost, wyomingPort, tailSpoken, job.voice, log, `terminator (lang=${job.lang})`);
+      let pcm: Buffer | null = null;
+      if (tailResult.ok && tailResult.wav) {
+        const th = parseWavHeader(tailResult.wav);
+        if (th.ok && th.rate === klaxonHeader.rate && th.width === klaxonHeader.width && th.channels === klaxonHeader.channels) {
+          pcm = tailResult.wav.subarray(th.dataOffset, th.dataOffset + th.dataLength);
+          residentVoice = job.voice ?? '';
         } else {
           tailDropped = true;
-          log(`audioRenderer: terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
+          log('audioRenderer: terminator format mismatch — omitting it (message still plays)');
         }
-        tailPcmByKey.set(ck, pcm);
+      } else {
+        tailDropped = true;
+        log(`audioRenderer: terminator render failed after retry (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
       }
-      tails[i] = tailPcmByKey.get(ck) ?? null;
+      tailPcmByKey.set(job.ck, pcm);
     }
+    for (const job of jobs) tails[job.i] = tailPcmByKey.get(job.ck) ?? null;
   }
 
   const gap = makeSilencePcm(klaxonHeader, repeatGapMs);

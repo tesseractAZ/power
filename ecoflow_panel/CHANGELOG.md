@@ -1,3 +1,31 @@
+## v1.47.4 — bilingual alarm reliability: Spanish pass no longer silently dropped
+
+Diagnosed from a live alarm that played English only: the Spanish second pass
+had rendered-failed with a Piper socket stall and been dropped (served as a
+`.partial.wav`, outcome still "success"). Measured on the deployed Piper: the
+English voice cold-loads in ~0.8 s but the heavy `es_MX-claude-high` model
+takes ~4 s, and because Piper keeps one voice resident while a bilingual alarm
+alternates languages, each announcement forced up to FOUR model reloads — so
+under any contention the slow Spanish pass timed out or dropped its socket.
+
+- **Per-pass render retry.** A transient spoken-pass failure (timeout/socket)
+  is retried once; the retry lands on the now-warm model. Format mismatches
+  (deterministic) are never retried.
+- **Resident-voice-first render order.** Passes and per-language terminators
+  render the voice Piper currently holds first, cutting model reloads per
+  bilingual alarm from ~4 to ~2. Playback order is unchanged (English still
+  first).
+- **Per-pass timeout is env-tunable** (`BROADCAST_TTS_PASS_TIMEOUT_MS`,
+  default raised 15 s → 20 s) for headroom on a cold model under load.
+- **Recommend a medium Spanish voice.** The option help now recommends a
+  `*-medium` voice (e.g. `es_MX-ald-medium`) over `*-high` for faster
+  cold-load; medium and high are both 22050/16/mono so the change is
+  format-safe.
+
+Tests: 1,707 green, including an injected-renderer bilingual suite proving the
+retry recovers a dropped Spanish pass and the render order is resident-first
+across broadcasts.
+
 ## v1.47.3 — third-pass fixes: complete the display-width migration + close the origin-gate CSWSH surface
 
 A third QA pass (regression-proving the v1.47.2 display-width rewrite,

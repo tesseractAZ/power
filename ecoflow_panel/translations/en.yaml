@@ -114,7 +114,7 @@ configuration:
     description: When on (the default), each announcement plays in English, then in Latin American Spanish. It stays a no-op until Wyoming TTS Voice (Spanish) below names a Spanish voice that exists on your Piper server. Turn off to force English-only.
   BROADCAST_WYOMING_VOICE_ES:
     name: Wyoming TTS Voice (Spanish)
-    description: Spanish Piper voice for the bilingual second pass, e.g. es_MX-claude-high. Setting this is what activates bilingual mode — leave empty and announcements stay English-only even with Bilingual Announcements on. Must exist on your Piper server in 22050 Hz / 16-bit mono (most *-medium/*-high voices are).
+    description: Spanish Piper voice for the bilingual second pass. Recommended: a *-medium voice such as es_MX-ald-medium — medium models cold-load faster than *-high, which matters because Piper holds one voice resident and alternates languages each alarm. Setting this is what activates bilingual mode; leave empty and announcements stay English-only even with Bilingual Announcements on. Must exist on your Piper server in 22050 Hz / 16-bit mono (most *-medium/*-high voices are).
   BATTERY_SOC_ALARM_ENABLED:
     name: Battery SoC Alarm
     description: Sounds an escalating audible alarm on the broadcast speakers as the SHP2 backup pool falls DOWN through 50/40/30/20/15/10/8/4/2% (priority rises Low to Critical). Default on; turn off to silence this ladder. Only sounds if broadcast speakers are configured, and each tier still obeys the per-priority Alert Settings toggles and quiet hours.
