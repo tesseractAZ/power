@@ -1,3 +1,23 @@
+## v1.47.6 — terminator audio cached permanently (halves the voice switches per alarm)
+
+Measured on the deployed Piper: a voice switch costs ~4.2 s and the cost is
+the MODEL LOAD, not the phrase — `en_US-lessac-medium` takes 0.71 s when it is
+the resident model and 4.20 s when it must reload, exactly like the Spanish
+voice. A bilingual alarm renders two message passes plus two per-language
+terminators, so it could pay four loads.
+
+The terminator phrases ("End of message" / "Fin del mensaje") never change,
+yet they were re-rendered for every fresh announcement. They are now cached as
+PCM on disk, keyed by render version + language + voice + phrase + PCM format:
+the first announcement per key pays one render, every later one is free. A
+fresh bilingual alarm therefore costs one voice switch instead of two, and the
+TTS server sees half the requests.
+
+Tests: 1,710 green, including a case that renders two announcements with
+different message text and asserts the terminators are rendered exactly once
+and then served from disk (with the in-memory memo cleared in between, so the
+disk path is what is proven).
+
 ## v1.47.5 — bounded alarm latency; stop retrying a wedged TTS server
 
 A red alarm sounded its chime with NO speech in either language, 151 seconds

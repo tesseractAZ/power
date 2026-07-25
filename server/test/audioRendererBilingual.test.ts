@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { renderAnnouncement, _resetResidentVoiceForTest } from '../src/audioRenderer.js';
+import { renderAnnouncement, _resetResidentVoiceForTest, _resetTerminatorCacheForTest } from '../src/audioRenderer.js';
 import { pcmToWav } from '../src/wyomingTts.js';
 import { generateAudioAssets } from '../src/audioAssets.js';
 
@@ -134,5 +134,46 @@ test('v1.47.5 — the spoken phase is budget-bounded (alarm does not wait indefi
     } finally {
       delete process.env.BROADCAST_TTS_TOTAL_BUDGET_MS;
     }
+  });
+});
+
+
+/* v1.47.6 — the terminator phrases never change, so they must be rendered at
+ * most ONCE per (lang, voice, phrase) and then served from disk. Each avoided
+ * render is a whole ~4.2 s voice switch on a one-model-resident Piper. */
+test('v1.47.6 — terminators render once, then come from cache (voice switches halved)', async () => {
+  await withDirs(async (klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    _resetTerminatorCacheForTest();
+    const rendered: string[] = [];
+    const renderTts = async (o: { text?: string; voice?: string }) => {
+      rendered.push(`${o.voice}:${o.text}`);
+      return { ok: true as const, wav: fakeWav(200), durationMs: 5 };
+    };
+    const opts = (msg: string) => ({
+      ...baseOpts(klaxonDir, cacheDir), endOfMessage: true,
+      message: msg,
+      messages: [
+        { text: msg, voice: 'en_US-lessac-medium', lang: 'en' as const },
+        { text: `${msg} es`, voice: 'es_MX-ald-medium', lang: 'es' as const },
+      ],
+      renderTts,
+    });
+    // First announcement: 2 passes + 2 terminators = 4 renders.
+    const r1 = await renderAnnouncement(opts('Alpha') as any);
+    assert.equal(r1.ok, true);
+    const firstTerminatorRenders = rendered.filter((x) => /End of message|Fin del mensaje/.test(x)).length;
+    assert.equal(firstTerminatorRenders, 2, 'first announcement renders both terminators');
+
+    // Second announcement with DIFFERENT message text (so passes re-render, but
+    // the terminators must be served from the persistent cache).
+    rendered.length = 0;
+    _resetTerminatorCacheForTest(); // clear the in-memory memo — disk must still serve
+    const r2 = await renderAnnouncement(opts('Bravo') as any);
+    assert.equal(r2.ok, true);
+    const secondTerminatorRenders = rendered.filter((x) => /End of message|Fin del mensaje/.test(x)).length;
+    assert.equal(secondTerminatorRenders, 0, 'terminators served from disk cache — zero re-renders');
+    // Only the two message passes hit Piper.
+    assert.equal(rendered.length, 2, `expected only the 2 message passes, got ${rendered.length}`);
   });
 });
