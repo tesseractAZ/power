@@ -1,3 +1,30 @@
+## v1.47.5 — bounded alarm latency; stop retrying a wedged TTS server
+
+A red alarm sounded its chime with NO speech in either language, 151 seconds
+after the condition transitioned. Root cause was a starved host, not the voice
+config: with the fleet under an extreme-heat evening load the Pi sat at load
+~5 on 4 cores with the CPU capped at 1.9 of 2.4 GHz, and Piper rendered 6-10x
+slower than spec (warm English 4.9 s vs 0.53 s that morning). Every pass
+exceeded its timeout, v1.47.4's blanket retry doubled each wait, and the
+aborted sockets crashed Piper (55 `BrokenPipeError`, 3 "Server stopped" in one
+afternoon), after which its watchdog restarted it.
+
+- **Total spoken-render budget** (`BROADCAST_TTS_TOTAL_BUDGET_MS`, default
+  25 s) covering all passes AND terminators. Once spent, no further render is
+  attempted and the chime-only fallback fires. Alarm latency is now bounded
+  regardless of how sick the TTS server is — the chime is the alarm; speech is
+  the bonus.
+- **Retry only fast failures.** A socket/stream error is transient and cheap to
+  retry; a TIMEOUT means the server is wedged or starved, so retrying only
+  doubles the delay and aborts another socket — and aborted sockets are what
+  crash Piper. Timeouts are detected both by wall clock and by the reported
+  error, since neither signal alone is reliable.
+- **Per-pass timeout lowered 20 s → 12 s** (still env-tunable), with each
+  attempt additionally clamped to the remaining budget.
+
+Tests: 1,709 green, including a wedged-server case asserting exactly one
+attempt per pass and a budget case asserting the spoken phase stays bounded.
+
 ## v1.47.4 — bilingual alarm reliability: Spanish pass no longer silently dropped
 
 Diagnosed from a live alarm that played English only: the Spanish second pass
