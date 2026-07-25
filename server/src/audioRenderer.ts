@@ -92,20 +92,36 @@ export function _resetTtsHealthForTest(): void {
   ttsHealth = { consecutiveFailures: 0, lastFailureMs: null, lastFailureReason: null, lastSuccessMs: null };
 }
 
-/* ── v1.47.4 — spoken-pass render reliability ──────────────────────────────
- * Piper keeps ONE voice resident and cold-loads (a medium model ~1-3 s, a
- * "high" model ~4 s) on every voice switch. A bilingual alarm renders English
- * and Spanish passes AND per-language terminators; rendered en/es/en/es it
- * forced FOUR model reloads per alarm, so under any Piper contention the
- * slower (Spanish) pass could time out or drop its socket and get dropped —
- * the alarm then played English only. Two mitigations: render the voice Piper
- * currently has resident FIRST (halves the reloads), and RETRY a transient
- * render failure once (the retry lands on the now-warm model). */
+/* ── v1.47.5 — spoken-render reliability AND bounded alarm latency ─────────
+ * Piper keeps ONE voice resident and cold-loads on each switch, so a bilingual
+ * alarm (2 passes + 2 terminators) can pay several loads. When the HOST is
+ * CPU-starved (observed live: load ~5 on 4 cores, Piper 6-10x slower than
+ * spec) those renders exceed any per-pass timeout, and v1.47.4's blanket
+ * retry turned that into a 151-SECOND alarm — unacceptable on a life-safety
+ * path, where the chime must sound promptly and speech is the bonus.
+ *
+ * Two rules, both about bounding damage:
+ *   1. TOTAL BUDGET for the whole spoken phase. Once spent, no further pass or
+ *      terminator is attempted; whatever rendered is used, else the caller's
+ *      chime-only fallback fires. Alarm latency is bounded regardless of how
+ *      sick Piper is.
+ *   2. RETRY ONLY FAST FAILURES. A socket error (Piper restarting / dropping
+ *      mid-stream) is transient and cheap to retry. A TIMEOUT means Piper is
+ *      wedged or starved — retrying just burns the budget a second time and
+ *      adds another aborted socket, and aborted sockets are what crash Piper
+ *      (observed: 55 BrokenPipeError, 3 "Server stopped" in one afternoon). */
 const PASS_TIMEOUT_MS = (() => {
   const v = Number(process.env.BROADCAST_TTS_PASS_TIMEOUT_MS);
-  return Number.isFinite(v) && v >= 5000 && v <= 60000 ? v : 20000;
+  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : 12000;
 })();
-const PASS_RETRY_DELAY_MS = 400;
+/** Whole-spoken-phase budget (passes + terminators). Bounds alarm latency. */
+const SPOKEN_BUDGET_MS = (() => {
+  const v = Number(process.env.BROADCAST_TTS_TOTAL_BUDGET_MS);
+  return Number.isFinite(v) && v >= 5000 && v <= 120000 ? v : 25000;
+})();
+/** A failure this fast is a socket/stream error, not a wedged server — retry it. */
+const FAST_FAIL_MS = 3000;
+const PASS_RETRY_DELAY_MS = 300;
 /** The voice Piper most recently rendered (module state; renders are serialized
  *  by the broadcast single-flight, and a cache hit — which never touches Piper
  *  — leaves this unchanged, matching Piper's actual resident model). */
@@ -119,12 +135,38 @@ function residentFirst<T extends { voice?: string }>(specs: T[]): T[] {
     return ar === br ? 0 : ar ? -1 : 1;
   });
 }
-async function renderPassWithRetry(render: typeof renderWyomingTts, host: string, port: number, text: string, voice: string | undefined, log: (m: string) => void, label: string) {
-  let r = await render({ host, port, text, voice, timeoutMs: PASS_TIMEOUT_MS });
+/**
+ * Render one spoken item within the remaining budget. Returns `null` when the
+ * budget is already spent (caller drops the item without touching Piper).
+ * Retries once ONLY when the first failure was fast (socket error) and budget
+ * remains — never after a timeout.
+ */
+async function renderWithinBudget(
+  render: typeof renderWyomingTts,
+  host: string, port: number, text: string, voice: string | undefined,
+  deadline: number, log: (m: string) => void, label: string,
+) {
+  const remaining = () => deadline - Date.now();
+  if (remaining() <= 0) {
+    log(`audioRenderer: ${label} skipped — spoken-render budget spent (alarm latency bound)`);
+    return null;
+  }
+  const t0 = Date.now();
+  let r = await render({ host, port, text, voice, timeoutMs: Math.min(PASS_TIMEOUT_MS, remaining()) });
   if (!r.ok || !r.wav) {
-    log(`audioRenderer: ${label} render failed (${r.error ?? 'unknown'}) — retrying once`);
-    await new Promise((res) => setTimeout(res, PASS_RETRY_DELAY_MS));
-    r = await render({ host, port, text, voice, timeoutMs: PASS_TIMEOUT_MS });
+    const elapsed = Date.now() - t0;
+    // A timeout is identified BOTH ways — by the wall clock and by the reported
+    // error — because neither alone is reliable: a renderer can report a timeout
+    // promptly, and a slow socket error is still a socket error.
+    const timedOut = elapsed >= FAST_FAIL_MS || /timeout/i.test(r.error ?? '');
+    const fastFail = !timedOut;
+    if (fastFail && remaining() > FAST_FAIL_MS) {
+      log(`audioRenderer: ${label} failed fast (${r.error ?? 'unknown'}) after ${elapsed}ms — retrying once`);
+      await new Promise((res) => setTimeout(res, PASS_RETRY_DELAY_MS));
+      r = await render({ host, port, text, voice, timeoutMs: Math.min(PASS_TIMEOUT_MS, Math.max(0, remaining())) });
+    } else if (timedOut) {
+      log(`audioRenderer: ${label} timed out after ${elapsed}ms — NOT retrying (server wedged/starved; retry would double the delay and abort another socket)`);
+    }
   }
   return r;
 }
@@ -508,17 +550,22 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const failedKeys = new Set<string>();
   let firstTtsMs: number | undefined;
   let lastFailReason: string | undefined;
+  // v1.47.5 — ONE budget for the whole spoken phase (passes + terminators), so
+  // a starved/wedged Piper can delay the alarm by at most this much before the
+  // caller's chime-only fallback takes over.
+  const spokenDeadline = Date.now() + SPOKEN_BUDGET_MS;
   // v1.47.4 — render the resident voice first (playback order is unaffected —
   // it is driven by survivingSpecs/passSpecs below, so English still plays first).
   for (const spec of residentFirst(passSpecs)) {
     const k = passKey(spec);
     if (renderedPcm.has(k) || failedKeys.has(k)) continue;
     const spokenText = spec.lang === 'es' ? verbalizeForTtsEs(spec.text) : verbalizeForTts(spec.text);
-    const r = await renderPassWithRetry(doRender, wyomingHost, wyomingPort, spokenText, spec.voice, log, `spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`);
+    const r = await renderWithinBudget(doRender, wyomingHost, wyomingPort, spokenText, spec.voice, spokenDeadline, log, `spoken pass (lang=${spec.lang} voice=${spec.voice ?? 'default'})`);
+    if (r == null) { failedKeys.add(k); lastFailReason ??= 'spoken-render budget spent'; continue; }
     if (!r.ok || !r.wav) {
       failedKeys.add(k);
       lastFailReason = r.error ?? 'wyoming render failed';
-      log(`audioRenderer: spoken pass render failed after retry (lang=${spec.lang} voice=${spec.voice ?? 'default'}): ${lastFailReason}${multi ? ' — dropping that pass' : ''}`);
+      log(`audioRenderer: spoken pass render failed (lang=${spec.lang} voice=${spec.voice ?? 'default'}): ${lastFailReason}${multi ? ' — dropping that pass' : ''}`);
       continue;
     }
     residentVoice = spec.voice ?? ''; // Piper now holds this voice
@@ -598,9 +645,11 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     for (const job of residentFirst(jobs)) {
       if (tailPcmByKey.has(job.ck)) continue;
       const tailSpoken = job.lang === 'es' ? verbalizeForTtsEs(job.phrase) : verbalizeForTts(job.phrase);
-      const tailResult = await renderPassWithRetry(doRender, wyomingHost, wyomingPort, tailSpoken, job.voice, log, `terminator (lang=${job.lang})`);
+      const tailResult = await renderWithinBudget(doRender, wyomingHost, wyomingPort, tailSpoken, job.voice, spokenDeadline, log, `terminator (lang=${job.lang})`);
       let pcm: Buffer | null = null;
-      if (tailResult.ok && tailResult.wav) {
+      if (tailResult == null) {
+        tailDropped = true; // budget spent — omit the terminator, message still plays
+      } else if (tailResult.ok && tailResult.wav) {
         const th = parseWavHeader(tailResult.wav);
         if (th.ok && th.rate === klaxonHeader.rate && th.width === klaxonHeader.width && th.channels === klaxonHeader.channels) {
           pcm = tailResult.wav.subarray(th.dataOffset, th.dataOffset + th.dataLength);
@@ -611,7 +660,7 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
         }
       } else {
         tailDropped = true;
-        log(`audioRenderer: terminator render failed after retry (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
+        log(`audioRenderer: terminator render failed (${tailResult.error ?? 'unknown'}) — omitting it (message still plays)`);
       }
       tailPcmByKey.set(job.ck, pcm);
     }

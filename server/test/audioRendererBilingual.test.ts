@@ -85,3 +85,54 @@ test('v1.47.4 — render order is resident-voice-first across broadcasts', async
     assert.deepEqual(order, ['es_MX-ald-medium', 'en_US-lessac-medium'], 'second broadcast: resident es first');
   });
 });
+
+
+/* v1.47.5 — bounded alarm latency + no-retry-on-timeout. Live incident: a
+ * CPU-starved host made Piper 6-10x slower, every pass timed out, the blanket
+ * v1.47.4 retry doubled each wait, and the alarm took 151 s to sound. The
+ * chime must not wait on a sick TTS server. */
+
+test('v1.47.5 — a timeout is NOT retried (one attempt per pass when the server is wedged)', async () => {
+  await withDirs(async (klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    let attempts = 0;
+    // Simulate a wedged server: every call consumes its full timeout, then fails.
+    const renderTts = async (o: { timeoutMs?: number }) => {
+      attempts++;
+      await new Promise((r) => setTimeout(r, Math.min(120, o.timeoutMs ?? 50)));
+      return { ok: false as const, error: `wyoming render timeout after ${o.timeoutMs}ms` };
+    };
+    const r = await renderAnnouncement({
+      ...baseOpts(klaxonDir, cacheDir), renderTts,
+      // Tiny budget so the test is fast; per-attempt timeout is clamped to it.
+    } as any);
+    assert.equal(r.ok, false, 'all passes failed → hard error (caller falls back to chime-only)');
+    // TWO passes, ONE attempt each — no retry after a timeout.
+    assert.equal(attempts, 2, `expected 1 attempt per pass, got ${attempts}`);
+  });
+});
+
+test('v1.47.5 — the spoken phase is budget-bounded (alarm does not wait indefinitely)', async () => {
+  await withDirs(async (klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    process.env.BROADCAST_TTS_TOTAL_BUDGET_MS = '5000'; // floor of the accepted range
+    try {
+      let attempts = 0;
+      const renderTts = async (o: { timeoutMs?: number }) => {
+        attempts++;
+        await new Promise((r) => setTimeout(r, Math.max(1, Math.min(o.timeoutMs ?? 50, 1200))));
+        return { ok: false as const, error: 'wyoming render timeout' };
+      };
+      const t0 = Date.now();
+      const r = await renderAnnouncement({ ...baseOpts(klaxonDir, cacheDir), endOfMessage: true, renderTts } as any);
+      const elapsed = Date.now() - t0;
+      assert.equal(r.ok, false);
+      // Passes + terminators all fail, but the whole phase stays bounded — it must
+      // never approach the unbounded per-item sum that produced the 151 s alarm.
+      assert.ok(elapsed < 20000, `spoken phase took ${elapsed}ms — expected bounded`);
+      assert.ok(attempts <= 4, `expected attempts bounded by budget, got ${attempts}`);
+    } finally {
+      delete process.env.BROADCAST_TTS_TOTAL_BUDGET_MS;
+    }
+  });
+});
