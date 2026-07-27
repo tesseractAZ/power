@@ -5553,6 +5553,25 @@ monolingual alarm gets one terminator on the final block. A terminator that
 fails to render or mismatches format is **omitted** (message still plays) and
 marks the render incomplete.
 
+Terminator audio is **cached permanently** at `/data/audio-render/term-<hash>.wav`
+(keyed on render version + language + voice + phrase; the WAV header is
+validated against the chime format at read time, and the age-based cache prune
+exempts `term-*` files). The disk cache applies only when the voice is
+explicitly pinned — with the voice unset the audio depends on the TTS server's
+own default voice, so only the in-memory memo (cleared on restart) is used.
+The phrases never change, so only the first announcement per key pays a render.
+At boot the monitor **pre-warms** this cache (~20 s after start, Spanish first
+so Piper is left holding the primary English voice), serialized through the
+broadcast single-flight: each entry is its own queue slot, a pending real
+broadcast makes remaining entries yield instantly, and a failed entry halts the
+pre-warm rather than sending more requests to a struggling server. After any
+voice change or cache wipe the cost is paid once at boot, never during an
+alarm. Because Piper holds one voice model resident and a model switch costs
+~4 s regardless of quality tier, a fresh bilingual alarm with warmed
+terminators performs at most **one** voice switch — passes render
+resident-voice-first (tracking updates only on real renders, never on cache
+hits), and message passes always take budget priority over terminators.
+
 #### 4.4 Format & concat
 
 Everything is a **byte-splice of raw PCM** — there is no per-render resampling.

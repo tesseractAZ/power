@@ -1,3 +1,79 @@
+## v1.48.0 — terminators pre-warmed at boot; one voice switch per fresh alarm, any voice tier
+
+This release also fixes two defects found by live-incident review:
+
+**Night-charge advisory was permanently starved by a wrong coverage constant.**
+The plan-basis gate required realized P10–P90 band coverage ≥ 90%, but the
+band's NOMINAL coverage is 80% and the engine's own write-readiness gate
+accepts [78%, 92%] as calibrated. A correctly calibrated forecast (live: 85%
+coverage, 20 scored calibration days) therefore failed the basis gate every
+night — every evening advisory said "insufficient basis", no buy/hold guidance
+was ever produced, no night was ever scored, and readiness could never
+accumulate. The floor is now 0.78, matching the write gate. Coverage BELOW
+0.78 (an overconfident band) still blocks; an over-wide band is conservative
+for the P10-PV sizing and needs no upper bound at the advisory tier.
+
+**The 90-second spoken retry never covered dedicated-path alarms.** The v1.45.0
+retry was wired only into the condition-transition path. Alarms delivered via
+the dedicated announce() path (battery SoC ladder, runway) that lost their
+speech to a starved TTS server fell back to chime-only and NO spoken retry
+ever followed — exactly the two chime-only alarms heard live on Saturday
+(renders timed out during afternoon host contention; the chime fired as
+designed, the speech never returned). Both paths now share one scheduling
+seam, and a dedicated-path retry replays its ORIGINAL message verbatim
+(re-deriving from the condition spine would speak the wrong alarm, since
+ladder alerts are excluded from the condition).
+
+Follow-through on the v1.47.6 measurement: a Piper voice-model switch costs
+~4.2 s regardless of quality tier. The remaining cold-render exposure was the
+FIRST alarm after a voice change, a render-version bump, or a cache wipe,
+which still paid cold terminator renders — and with them extra voice switches.
+
+The terminator phrases and voices are fully known at startup, so the monitor
+now pre-warms the terminator cache in the background ~20 s after boot
+(Spanish first, primary English last, leaving Piper holding the English
+model). On a warmed install this is two file checks and no TTS traffic. A
+pre-warm failure is non-fatal: the alarm path renders on demand exactly as
+before.
+
+The on-disk cache key no longer includes the PCM format. Read-time WAV-header
+validation is unchanged, and exactly one format is ever viable per install
+(a chime that mismatches Piper's output breaks the spoken path outright), so
+the format term only prevented the pre-warm from writing usable entries. The
+in-memory memo keeps the format in its key because memo hits skip that
+read-time validation.
+
+Priority under a wedged TTS server is unchanged: message passes always take
+render-budget precedence over terminators — the Spanish message outranks the
+English closing phrase.
+
+With terminators always cached and passes rendered resident-voice-first, a
+fresh bilingual alarm performs at most ONE voice switch. That removes the
+reason for the temporary Spanish medium-voice recommendation, so the default
+guidance returns to any tier (the deployment returns to es_MX-claude-high);
+the configuration help text has been corrected accordingly.
+
+An adversarial review of this change confirmed and fixed four defects before
+release: (1) the pre-warm now runs THROUGH the broadcast single-flight — one
+queue slot per entry, yielding instantly when a real broadcast is pending — so
+it can never interleave TTS requests with an in-flight alarm (unserialized
+aborted sockets are the known Piper-crash vector) and an alarm waits behind at
+most one 8-second render; (2) resident-voice tracking updates only on actual
+renders — stamping it on cache hits inverted the tracking and made every
+steady-state bilingual alarm pay a second voice switch; (3) the age-based
+cache prune now exempts `term-*` files, which it was silently deleting weekly
+(un-doing the "permanent" cache for long-uptime installs); (4) an unpinned
+(empty) voice no longer persists to disk — the audio depends on the TTS
+server's default voice, which can change without this add-on knowing, so only
+the restart-scoped memo applies. A pre-warm failure also halts the remaining
+entries instead of firing more requests at a struggling server.
+
+Tests: 1,714, including an end-to-end case proving the pre-warm writes under
+the exact key the alarm path reads (memo cleared, disk must serve), that a
+warmed boot performs zero renders, that cached terminators leave resident-voice
+tracking truthful across three consecutive alarms, that the prune never removes
+terminator files, and that a failed pre-warm entry stops the run.
+
 ## v1.47.6 — terminator audio cached permanently (halves the voice switches per alarm)
 
 Measured on the deployed Piper: a voice switch costs ~4.2 s and the cost is
