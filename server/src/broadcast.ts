@@ -487,22 +487,6 @@ export function startBroadcastMonitor(
   // ~10s tick. The audible path already reloads per tick/broadcast; this is for
   // read coherence.
   const offRuntimeConfig = onBroadcastRuntimeConfigChange(() => { cfg = loadBroadcastConfig(); });
-  // v1.48.0 — boot-time terminator pre-warm. Delayed so Piper (and the rest of
-  // the boot) settles first; entries are ordered Spanish → English so Piper is
-  // left holding the PRIMARY voice, meaning a fresh alarm's first render needs
-  // no model load at all. On a warmed install this is two file stats and no
-  // Piper traffic. Failures are non-fatal (alarm path renders on demand).
-  const prewarmTimer: NodeJS.Timeout = setTimeout(() => {
-    if (stopped || !cfg.enabled || !cfg.endOfMessage || cfg.wyomingHost.length === 0) return;
-    const entries: Array<{ lang: 'en' | 'es'; voice?: string; phrase: string }> = [];
-    if (cfg.bilingual && cfg.secondLangVoice.length > 0) {
-      entries.push({ lang: 'es', voice: cfg.secondLangVoice, phrase: cfg.endOfMessagePhraseEs || cfg.endOfMessagePhrase });
-    }
-    entries.push({ lang: 'en', voice: cfg.wyomingVoice ?? undefined, phrase: cfg.endOfMessagePhrase });
-    prewarmTerminatorCache({
-      cacheDir: opts.cacheDir, host: cfg.wyomingHost, port: cfg.wyomingPort, entries, log,
-    }).catch((e) => log(`broadcast: terminator pre-warm errored (non-fatal): ${e instanceof Error ? e.message : String(e)}`));
-  }, 20_000);
   let prevLevel: ConditionLevel | null = null;
   let prevCrit = 0;
   let firstTick = true;
@@ -1150,9 +1134,38 @@ export function startBroadcastMonitor(
   // consecutive render failure is the tts-render-degraded alert's job, not a
   // retry loop's.
   const SPOKEN_RETRY_DELAY_MS = 90_000;
-  let pendingSpokenRetry: { level: ConditionLevel; failedAt: number } | null = null;
+  // v1.48.0 — `message`/`messageEs` present ⇒ the retry replays THAT text (a
+  // dedicated-path alarm: SoC ladder / runway, whose message is not derivable
+  // from the condition spine). Absent ⇒ a condition broadcast; the retry
+  // re-derives the message from the live alerts at fire time (v1.45.0 shape).
+  let pendingSpokenRetry: {
+    level: ConditionLevel; failedAt: number;
+    message?: string | null; messageEs?: string | null;
+  } | null = null;
+  // v1.48.0 — one scheduling seam for EVERY live alarm path. Saturday's live
+  // incident: two starved-Piper chime-only alarms came through the DEDICATED
+  // announce() path (SoC ladder), which never scheduled the v1.45.0 spoken
+  // retry — the operator heard chimes and no speech ever followed. The tick
+  // path and announce() now share this.
+  const noteSpokenRenderFailure = (
+    level: ConditionLevel,
+    result: { ok: boolean; errors: string[] },
+    message?: string | null,
+    messageEs?: string | null,
+  ): void => {
+    if (result.ok || !result.errors.some((e) => e.startsWith('render:'))) return;
+    pendingSpokenRetry = message !== undefined
+      ? { level, failedAt: Date.now(), message, messageEs: messageEs ?? null }
+      : { level, failedAt: Date.now() };
+    log(`broadcast: spoken render failed — one retry scheduled in ${SPOKEN_RETRY_DELAY_MS / 1000}s`);
+  };
 
   let broadcastChain: Promise<unknown> = Promise.resolve();
+  // v1.48.0 — count of REAL audible broadcasts enqueued and not yet settled.
+  // The terminator pre-warm reads this to yield: any pre-warm chain link that
+  // finds a real broadcast pending becomes an instant no-op, so an alarm never
+  // waits behind more than ONE short pre-warm render.
+  let realAudibleInFlight = 0;
   const runBroadcast = (
     level: ConditionLevel,
     message: string | null,
@@ -1160,11 +1173,53 @@ export function startBroadcastMonitor(
     messageEs: string | null = null,
     skipSip = false, // v1.25.0 — forwarded to runBroadcastInner; set by deferred MA retries.
   ): Promise<{ ok: boolean; errors: string[] }> => {
+    realAudibleInFlight++;
     const run = () => runBroadcastInner(level, message, messageEs, bypassStormGate, skipSip);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
+    void p.then(() => { realAudibleInFlight--; }, () => { realAudibleInFlight--; });
     return p;
   };
+
+  // v1.48.0 — boot-time terminator pre-warm, SERIALIZED through the broadcast
+  // single-flight (unserialized Piper traffic is the documented crash vector,
+  // and audioRenderer's residentVoice tracking assumes serialized renders).
+  // Each entry is its OWN chain link so a real broadcast enqueued mid-pre-warm
+  // waits behind at most one short render; later links see it pending and
+  // no-op. Entries are ordered Spanish → English so Piper is left holding the
+  // PRIMARY voice. On a warmed install every link is a single file stat.
+  // Failures halt the remaining entries (never fire fresh requests at a server
+  // that just failed — the alarm path renders on demand as before).
+  const prewarmTimer: NodeJS.Timeout = setTimeout(() => {
+    if (stopped || !cfg.enabled || !cfg.endOfMessage || cfg.wyomingHost.length === 0) return;
+    const entries: Array<{ lang: 'en' | 'es'; voice?: string; phrase: string }> = [];
+    if (cfg.bilingual && cfg.secondLangVoice.length > 0) {
+      entries.push({ lang: 'es', voice: cfg.secondLangVoice, phrase: cfg.endOfMessagePhraseEs || cfg.endOfMessagePhrase });
+    }
+    entries.push({ lang: 'en', voice: cfg.wyomingVoice ?? undefined, phrase: cfg.endOfMessagePhrase });
+    let halted = false;
+    for (const entry of entries) {
+      const job = async () => {
+        if (stopped || halted) return;
+        if (realAudibleInFlight > 0) {
+          halted = true;
+          log('broadcast: terminator pre-warm yielded — a real broadcast is pending (remaining entries render on demand)');
+          return;
+        }
+        try {
+          const r = await prewarmTerminatorCache({
+            cacheDir: opts.cacheDir, host: cfg.wyomingHost, port: cfg.wyomingPort, entries: [entry], log,
+          });
+          if (r.failed > 0) halted = true;
+        } catch (e) {
+          halted = true;
+          log(`broadcast: terminator pre-warm errored (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      };
+      const p = broadcastChain.then(job, job);
+      broadcastChain = p.catch(() => undefined);
+    }
+  }, 20_000);
 
   const messageFor = (level: ConditionLevel, alerts: Alert[]): string | null => {
     // No engine detection — Wyoming is always our TTS path. Return the
@@ -1209,14 +1264,23 @@ export function startBroadcastMonitor(
     // identical message is the whole point of the retry.
     if (pendingSpokenRetry && !tickInFlight && Date.now() - pendingSpokenRetry.failedAt >= SPOKEN_RETRY_DELAY_MS) {
       const want = pendingSpokenRetry.level;
+      // v1.48.0 — a dedicated-path retry carries its own text and replays it
+      // verbatim; the condition-level match below only applies to condition
+      // broadcasts (a SoC-ladder alarm is EXCLUDED from the condition spine,
+      // so `level === want` would wrongly drop it, or worse, re-derivation
+      // would speak a DIFFERENT alarm's message).
+      const stored = pendingSpokenRetry.message !== undefined
+        ? { message: pendingSpokenRetry.message, messageEs: pendingSpokenRetry.messageEs ?? null }
+        : null;
       pendingSpokenRetry = null;
-      if (level === want && cfg.enabled && !(inQuiet() && !(level === 'red' && cfg.criticalBreakThrough))) {
+      const levelOk = stored != null || level === want;
+      if (levelOk && cfg.enabled && !(inQuiet() && !(want === 'red' && cfg.criticalBreakThrough))) {
         tickInFlight = true;
         try {
-          log(`broadcast: spoken retry after render failure → ${level}`);
-          const message = messageFor(level, alerts);
-          const messageEs = messageEsFor(level, alerts);
-          const result = await runBroadcast(level, message, true, messageEs);
+          log(`broadcast: spoken retry after render failure → ${want}${stored ? ' (dedicated-path message replay)' : ''}`);
+          const message = stored ? stored.message : messageFor(level, alerts);
+          const messageEs = stored ? stored.messageEs : messageEsFor(level, alerts);
+          const result = await runBroadcast(want, message, true, messageEs);
           lastBroadcastAt = Date.now();
           lastLevel = level;
           lastOutcome = result.ok ? 'success' : 'partial';
@@ -1312,10 +1376,7 @@ export function startBroadcastMonitor(
       lastErrors = result.errors;
       // v1.45.0 — a render failure (chime-only fallback or full skip) earns ONE
       // spoken retry after the stall window.
-      if (!result.ok && result.errors.some((e) => e.startsWith('render:'))) {
-        pendingSpokenRetry = { level, failedAt: Date.now() };
-        log(`broadcast: spoken render failed — one retry scheduled in ${SPOKEN_RETRY_DELAY_MS / 1000}s`);
-      }
+      noteSpokenRenderFailure(level, result);
     } finally {
       tickInFlight = false;
     }
@@ -1499,6 +1560,9 @@ export function startBroadcastMonitor(
         lastLevel = level;
         lastOutcome = r.ok ? 'success' : 'partial';
         lastErrors = r.errors;
+        // v1.48.0 — dedicated-path alarms (SoC ladder / runway) earn the same
+        // one-shot spoken retry as condition broadcasts, replaying THIS message.
+        noteSpokenRenderFailure(level, r, message, messageEs ?? null);
         return r.ok ? { ok: true } : { ok: false, error: r.errors.join('; ') || 'broadcast failed' };
       } catch (e: any) {
         const err = e?.message ?? String(e);

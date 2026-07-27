@@ -221,16 +221,25 @@ async function terminatorPcm(opts: {
   const memoKey = `${key}|${fmt.rate}/${fmt.width}/${fmt.channels}`;
   const memo = terminatorMemo.get(memoKey);
   if (memo) return { pcm: memo, dropped: false };
+  // v1.48.0 — the DISK cache is only used when the voice is explicitly pinned.
+  // With voice unset the rendered audio depends on the TTS server's configured
+  // default voice, which can change without touching this add-on — a persisted
+  // file would then serve the OLD voice forever. The in-memory memo is safe
+  // (cleared on restart, and a server voice change requires its restart too).
+  const pinned = (voice ?? '').length > 0;
   const file = resolve(cacheDir, `term-${key}.wav`);
-  try {
-    const wav = await readFile(file);
-    const h = parseWavHeader(wav);
-    if (h.ok && h.rate === fmt.rate && h.width === fmt.width && h.channels === fmt.channels) {
-      const pcm = wav.subarray(h.dataOffset, h.dataOffset + h.dataLength);
-      terminatorMemo.set(memoKey, pcm);
-      return { pcm, dropped: false };
-    }
-  } catch { /* not cached yet — render it below */ }
+  if (pinned) {
+    try {
+      const wav = await readFile(file);
+      const h = parseWavHeader(wav);
+      if (h.ok && h.rate === fmt.rate && h.width === fmt.width && h.channels === fmt.channels
+        && h.dataOffset + h.dataLength <= wav.length) {
+        const pcm = wav.subarray(h.dataOffset, h.dataOffset + h.dataLength);
+        terminatorMemo.set(memoKey, pcm);
+        return { pcm, dropped: false };
+      }
+    } catch { /* not cached yet — render it below */ }
+  }
   const r = await renderWithinBudget(render, host, port, spoken, voice, deadline, log, `terminator (lang=${lang})`);
   if (r == null) return { pcm: null, dropped: true };
   if (!r.ok || !r.wav) {
@@ -243,16 +252,24 @@ async function terminatorPcm(opts: {
     return { pcm: null, dropped: true };
   }
   const pcm = r.wav.subarray(h.dataOffset, h.dataOffset + h.dataLength);
+  // v1.48.0 — the render genuinely touched Piper, so IT owns the resident-voice
+  // update. The caller must not stamp on cache hits (which never touch Piper) —
+  // that inverted the tracking and made every steady-state bilingual alarm pay
+  // an extra voice switch.
+  residentVoice = voice ?? '';
   terminatorMemo.set(memoKey, pcm);
-  // Persist so the cost is paid ONCE for the lifetime of the install.
-  await persistTerminatorWav(cacheDir, file, r.wav);
+  // Persist so the cost is paid ONCE for the lifetime of the install (pinned
+  // voices only — see above).
+  if (pinned) await persistTerminatorWav(cacheDir, file, r.wav);
   return { pcm, dropped: false };
 }
 
-/** v1.48.0 — generous boot-time budget: this never runs on the alarm path, so a
- *  slow first render (voice download / cold model) is acceptable here where it
- *  would not be during an announcement. */
-const PREWARM_TIMEOUT_MS = 30_000;
+/** v1.48.0 — pre-warm render budget. Tighter than first drafted: the pre-warm
+ *  runs on the broadcast single-flight chain, so its in-flight render is the
+ *  MOST an alarm can wait behind. A cold model load is ~4.2 s + ~1 s synthesis;
+ *  8 s is ample for a healthy server, and a server that can't make it is sick —
+ *  the pre-warm halts rather than fire more requests at it. */
+const PREWARM_TIMEOUT_MS = 8_000;
 
 /**
  * v1.48.0 — boot-time terminator pre-warm. The terminator phrases and voices
@@ -276,15 +293,17 @@ export async function prewarmTerminatorCache(opts: {
   const render = opts.renderTts ?? renderWyomingTts;
   let rendered = 0, cached = 0, failed = 0;
   for (const e of opts.entries) {
-    if (e.phrase.length === 0) continue;
+    // Unpinned (empty) voice never persists — see the pinned-voice rule in
+    // terminatorPcm. Nothing to pre-warm for it.
+    if (e.phrase.length === 0 || (e.voice ?? '').length === 0) continue;
     const file = resolve(opts.cacheDir, `term-${terminatorKey(e.lang, e.voice, e.phrase)}.wav`);
     try { await access(file); cached++; continue; } catch { /* absent — render below */ }
     const spoken = e.lang === 'es' ? verbalizeForTtsEs(e.phrase) : verbalizeForTts(e.phrase);
     const r = await render({ host: opts.host, port: opts.port, text: spoken, voice: e.voice, timeoutMs: PREWARM_TIMEOUT_MS });
     if (!r.ok || !r.wav || !parseWavHeader(r.wav).ok) {
       failed++;
-      opts.log(`audioRenderer: terminator pre-warm failed (lang=${e.lang} voice=${e.voice ?? 'default'}): ${r.error ?? 'malformed WAV'} — the next announcement renders it on demand`);
-      continue;
+      opts.log(`audioRenderer: terminator pre-warm failed (lang=${e.lang} voice=${e.voice ?? 'default'}): ${r.error ?? 'malformed WAV'} — halting pre-warm (renders on demand instead)`);
+      break; // never fire the next request at a server that just failed/stalled
     }
     residentVoice = e.voice ?? ''; // Piper genuinely holds this voice now
     await persistTerminatorWav(opts.cacheDir, file, r.wav);
@@ -777,7 +796,6 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
         render: doRender, deadline: spokenDeadline, log,
       });
       if (t.dropped) tailDropped = true;
-      if (t.pcm) residentVoice = job.voice ?? '';
       tailPcmByKey.set(job.ck, t.pcm);
     }
     for (const job of jobs) tails[job.i] = tailPcmByKey.get(job.ck) ?? null;
@@ -880,6 +898,12 @@ export async function pruneRenderCache(cacheDir: string, maxAgeMs: number, log: 
       // seconds — so /data can't slowly fill with unreclaimable orphans.
       const isTmp = name.endsWith('.tmp');
       if (!name.endsWith('.wav') && !isTmp) continue;
+      // v1.48.0 — terminator cache files are PERMANENT by design (the phrases
+      // never change and each avoided re-render is a whole voice switch on the
+      // alarm path). Age-pruning them silently re-introduced cold terminator
+      // renders for exactly the long-uptime / rare-alarm installs. Orphaned
+      // term-*.tmp files are still swept by the 1 h rule below.
+      if (name.startsWith('term-') && !isTmp) continue;
       const full = resolve(cacheDir, name);
       try {
         const st = await stat(full);

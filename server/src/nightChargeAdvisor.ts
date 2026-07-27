@@ -98,7 +98,7 @@ export interface NightChargeInputs {
 
   // ── Basis quality (gates) ──
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
-  /** calScoredDays ≥ N_MIN AND band coverage ≥ 0.9 AND forecast present. */
+  /** calScoredDays ≥ N_MIN AND band coverage ≥ 0.78 (nominal 80% band, matching the write gate's floor) AND forecast present. */
   basisComplete: boolean;
 
   /** Below this buy, treat the night as "hold" (no meaningful charge). kWh. */
@@ -707,7 +707,7 @@ export function resolveCheapWindow(
  *    clamped per-hour at evMaxLoadW (EV_MAX_LOAD_W).
  *  - Window from the injected tariff period resolver (OVERNIGHT tier).
  *  - basisComplete = forecast present AND not climatology AND calScoredDays ≥
- *    N_MIN AND band coverage ≥ 0.9; a false here forces a null plan downstream.
+ *    N_MIN AND band coverage ≥ 0.78 (write-gate floor); a false here forces a null plan downstream.
  */
 export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeInputs {
   const {
@@ -802,11 +802,20 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   const end = nextRechargeMs ?? (horizon.length ? horizon[horizon.length - 1].ts + HOUR_MS : nowHour + HOUR_MS);
   const trimmed = horizon.filter((h) => h.ts >= nowHour && h.ts < end);
 
+  // v1.48.0 — coverage floor corrected 0.9 → 0.78. The P10–P90 band nominally
+  // covers 80%, and the WRITE gate (nightChargeGate.ts) accepts realized
+  // coverage in [0.78, 0.92] as calibrated. Requiring ≥ 0.9 here meant a
+  // CORRECTLY calibrated forecast (e.g. the live 85%) failed the basis every
+  // night — no plan, no advisory content, nothing scored, readiness starved.
+  // Below 0.78 the band is overconfident (too narrow) and still blocks; above
+  // 0.92 it is over-wide, which is CONSERVATIVE for the P10-PV sizing this
+  // basis feeds, so the advisory basis needs no upper bound (the write gate
+  // keeps its stricter two-sided band).
   const basisComplete =
     forecastPresent &&
     confidenceTier !== 'climatology' &&
     calScoredDays >= minCalScoredDays &&
-    bandCoverageFrac >= 0.9;
+    bandCoverageFrac >= 0.78;
 
   return {
     nowMs,

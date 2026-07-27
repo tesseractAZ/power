@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { renderAnnouncement, prewarmTerminatorCache, _resetResidentVoiceForTest, _resetTerminatorCacheForTest } from '../src/audioRenderer.js';
+import { renderAnnouncement, prewarmTerminatorCache, pruneRenderCache, _resetResidentVoiceForTest, _resetTerminatorCacheForTest } from '../src/audioRenderer.js';
 import { pcmToWav } from '../src/wyomingTts.js';
 import { generateAudioAssets } from '../src/audioAssets.js';
 
@@ -231,4 +231,82 @@ test('v1.48.0 — boot pre-warm renders terminators once; alarms then render zer
     assert.deepEqual({ rendered: p2.rendered, cached: p2.cached, failed: p2.failed }, { rendered: 0, cached: 2, failed: 0 });
     assert.equal(rendered.length, 0, 'warmed boot performs no renders');
   });
+});
+
+/* v1.48.0 review fixes — three defects the adversarial review confirmed. */
+
+test('v1.48.0 — cached terminators do NOT corrupt resident-voice tracking (steady state stays ≤1 switch)', async () => {
+  await withDirs(async (klaxonDir, cacheDir) => {
+    _resetResidentVoiceForTest();
+    _resetTerminatorCacheForTest();
+    const order: string[] = [];
+    const renderTts = async (o: { text?: string; voice?: string }) => {
+      order.push(`${o.voice}`);
+      return { ok: true as const, wav: fakeWav(200), durationMs: 5 };
+    };
+    const opts = (msg: string) => ({
+      ...baseOpts(klaxonDir, cacheDir), endOfMessage: true, endOfMessagePhraseEs: 'Fin del mensaje',
+      message: msg,
+      messages: [
+        { text: msg, voice: 'en-v', lang: 'en' as const },
+        { text: `${msg} es`, voice: 'es-v', lang: 'es' as const },
+      ],
+      renderTts,
+    });
+    // Alarm 1: renders passes en,es + terminators (resident-first ordering of the
+    // tails: after the es pass Piper holds es, so the es terminator renders first,
+    // then the en terminator — Piper ends holding EN (the last actual render).
+    await renderAnnouncement(opts('Alpha') as any);
+    // Alarm 2: terminators now cached — only passes render, and the FIRST pass must
+    // be the voice of the LAST ACTUAL RENDER of alarm 1 (the en terminator), not
+    // whatever a cache hit claimed. Before this fix the cached tail loop falsely
+    // stamped residentVoice, inverting the order and adding a cold switch.
+    order.length = 0;
+    await renderAnnouncement(opts('Bravo') as any);
+    assert.deepEqual(order, ['en-v', 'es-v'], 'alarm 2 renders resident (en) first — 1 switch');
+    // Alarm 3: after alarm 2's passes Piper holds es → es must come first now.
+    order.length = 0;
+    await renderAnnouncement(opts('Charlie') as any);
+    assert.deepEqual(order, ['es-v', 'en-v'], 'alarm 3 renders resident (es) first — 1 switch');
+  });
+});
+
+test('v1.48.0 — pruneRenderCache never deletes terminator cache files (they are permanent)', async () => {
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-prune-'));
+  try {
+    const old = new Date(Date.now() - 30 * 86_400_000); // far beyond any max age
+    for (const name of ['term-abcdef0123456789.wav', 'deadbeef01234567.wav', `term-ffff.wav.123.aaaaaa.tmp`]) {
+      writeFileSync(resolve(cacheDir, name), fakeWav(50));
+      utimesSync(resolve(cacheDir, name), old, old);
+    }
+    const removed = await pruneRenderCache(cacheDir, 7 * 86_400_000, () => {});
+    const left = readdirSync(cacheDir).sort();
+    assert.equal(removed, 2, 'combined render + orphaned term tmp removed');
+    assert.deepEqual(left, ['term-abcdef0123456789.wav'], 'terminator WAV survives; stale combined render and tmp orphan swept');
+  } finally {
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test('v1.48.0 — pre-warm halts on the first failure (no follow-up request at a sick server)', async () => {
+  const cacheDir = mkdtempSync(resolve(tmpdir(), 'ef-halt-'));
+  try {
+    _resetResidentVoiceForTest();
+    _resetTerminatorCacheForTest();
+    let attempts = 0;
+    const renderTts = async () => { attempts++; return { ok: false as const, error: 'wyoming render timeout' }; };
+    const r = await prewarmTerminatorCache({
+      cacheDir, host: 'x', port: 1,
+      entries: [
+        { lang: 'es', voice: 'es-v', phrase: 'Fin del mensaje' },
+        { lang: 'en', voice: 'en-v', phrase: 'End of message' },
+      ],
+      log: () => {}, renderTts: renderTts as any,
+    });
+    assert.equal(attempts, 1, 'second entry never attempted after the first failed');
+    assert.deepEqual({ rendered: r.rendered, cached: r.cached, failed: r.failed }, { rendered: 0, cached: 0, failed: 1 });
+    assert.equal(existsSync(resolve(cacheDir, 'term-')) || readdirSync(cacheDir).length, 0, 'nothing persisted');
+  } finally {
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
 });
