@@ -1,31 +1,6 @@
-import type { Alert, Severity } from '../types';
+import type { Alert } from '../types';
 // v0.11.0 — per-ALERT rendering colours/labels by ISA priority (Critical/High/Medium/Low).
-import { priorityOf, priorityCounts, PRIORITY_META, comparePriority, type AlarmPriority } from '../alertPriority';
-
-// v0.11.0 — re-export the priority helpers so pages importing from AlertParts
-// can count/sort/colour by the 4-tier ISA taxonomy in one place.
-export { priorityOf, priorityCounts, PRIORITY_META, comparePriority };
-
-/**
- * Shared severity styling. Kept exported + keyed by `severity` for back-compat
- * (App.tsx / other callers may reference it), but per-ALERT rendering below
- * derives the 4-tier ISA priority via priorityOf() and pulls colour/label from
- * PRIORITY_META instead.
- */
-export const SEV_META: Record<Severity, { label: string; dot: string; ring: string; badge: string }> = {
-  critical: { label: 'Critical', dot: 'bg-bad', ring: 'border-bad/40', badge: 'badge-bad' },
-  warning: { label: 'Warning', dot: 'bg-warn', ring: 'border-warn/40', badge: 'badge-warn' },
-  info: { label: 'Info', dot: 'bg-muted', ring: 'border-line', badge: 'badge-muted' },
-};
-
-export function sevRank(s: Severity): number {
-  return s === 'critical' ? 0 : s === 'warning' ? 1 : 2;
-}
-
-/** Sort comparator for alerts — most-severe ISA priority first. */
-export function alertRank(alert: Pick<Alert, 'severity' | 'source'>): number {
-  return PRIORITY_META[priorityOf(alert)].rank;
-}
+import { priorityOf, type AlarmPriority } from '../alertPriority';
 
 /** Priority-tinted backplate — colour carried by the plate, dark ink on top. */
 function boxTint(p: AlarmPriority): string {

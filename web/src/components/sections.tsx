@@ -9,7 +9,6 @@ import type { ReactNode } from 'react';
  * numbers". These primitives fix both:
  *   • SectionHeader — a prominent, scannable title with a domain-colour accent
  *     bar, an optional right-side status chip, and an optional one-line takeaway.
- *   • SubHeader — a bold subsection divider inside a multi-part card.
  *   • HowItWorks — the static "how this is computed" prose, collapsed by default
  *     (kept available, out of the default flow).
  *   • Expander — a generic "Show detail" collapse for dense per-hour / per-pack /
@@ -63,16 +62,6 @@ export function SectionHeader({
       </div>
       {takeaway != null && <p className="text-sm text-ink/90 leading-snug mt-1 ml-3">{takeaway}</p>}
       {info != null && <div className="ml-3"><HowItWorks>{info}</HowItWorks></div>}
-    </div>
-  );
-}
-
-/** Bold subsection divider inside a multi-part card (hairline rule above). */
-export function SubHeader({ children, right }: { children: ReactNode; right?: ReactNode }) {
-  return (
-    <div className="subhead">
-      <span>{children}</span>
-      {right}
     </div>
   );
 }

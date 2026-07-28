@@ -88,16 +88,8 @@ export function getCachedEntity(entityId: string): CachedEntity | null {
   return cache.get(entityId) ?? null;
 }
 
-export function getCachedStates(): ReadonlyMap<string, CachedEntity> {
-  return cache;
-}
-
 export function getCacheAgeMs(now: number = Date.now()): number {
   return lastFetchedAt ? now - lastFetchedAt : Number.POSITIVE_INFINITY;
-}
-
-export function cacheSize(): number {
-  return cache.size;
 }
 
 /** Test/reset hook. */
