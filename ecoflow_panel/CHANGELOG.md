@@ -1,3 +1,22 @@
+## v1.48.2 — dependency security sweep (zero open alerts)
+
+All four open Dependabot PRs are merged (undici 6.28.0, recharts 3.10.1, the
+web development group, docker/login-action 4.5.1), and the four open
+Dependabot alerts — find-my-way (HTTP/2 DDoS, GHSA-c96f-x56v-gq3h) and three
+fast-uri host-confusion advisories (GHSA-v2hh-gcrm-f6hx, GHSA-4c8g-83qw-93j6)
+— are resolved by lockfile updates, along with a brace-expansion DoS fix the
+audit surfaced in passing.
+
+`@fastify/static` is upgraded 9.3.0 → 10.1.2, closing two high advisories the
+alert feed had not yet raised: authorization bypass via non-canonical URL
+paths (GHSA-8pvw-jcv7-9cmj) and route-guard bypass via path traversal
+(GHSA-83w8-p2f5-377r). Both matter here — the add-on serves its dashboard and
+rendered alarm audio through this plugin behind origin/auth gates. The major
+bump is peer-compatible (Fastify 5 on both sides).
+
+`npm audit`: zero vulnerabilities in both packages. Code-scanning and
+secret-scanning alert lists are also empty. 1,714 tests green.
+
 ## v1.48.1 — dead-code removal (13 verified-unused exports)
 
 An unused-export audit (mechanical scan, cross-referenced against the test
