@@ -474,6 +474,16 @@ export interface BroadcastMonitorOpts {
   cacheUrlPath: string;
 }
 
+/** v1.48.3 — true when EVERY per-target SIP dispatch failure is timeout-classed.
+ *  A timeout means the HTTP response was lost, NOT that the service didn't run —
+ *  under HA load the call regularly executes server-side after the client gives
+ *  up, so delivery is UNKNOWN (verified against entity state) rather than
+ *  failed. Any non-timeout failure in the set makes the whole dispatch a
+ *  definite miss. Exported for tests. */
+export function sipTimeoutLike(errors: string[]): boolean {
+  return errors.length > 0 && errors.every((e) => /timeout|abort/i.test(e));
+}
+
 export function startBroadcastMonitor(
   store: SnapshotStore,
   log: (m: string) => void,
@@ -1054,7 +1064,36 @@ export function startBroadcastMonitor(
       void playSipAnnounce(url)
         .then((r) => {
           lastSipDispatchOk = r.ok > 0;
-          if (r.ok === 0) log(`broadcast: SIP dispatch reached 0/${r.attempted} targets — a deferred retry will re-fire SIP`);
+          if (r.ok === 0) {
+            // v1.48.3 — a TIMEOUT-classed failure means the HTTP RESPONSE was
+            // lost, not that the service didn't run: under HA load the
+            // play_media call regularly executes server-side after our client
+            // gives up. Live incident: the "failed" dispatch had actually
+            // placed the call (announce played), the deferred retry re-fired
+            // SIP believing 0/1 delivered, and the duplicate arrived while the
+            // phone was still in the announce call — it RANG instead of
+            // auto-answering. Delivery after a timeout is UNKNOWN, so verify
+            // against the entity's real state (~8 s in, mid-announce for any
+            // real call) before letting the retry re-fire SIP. A non-timeout
+            // failure (4xx/5xx/refused) stays a definite miss and retries.
+            if (sipTimeoutLike(r.errors)) {
+              const probe = setTimeout(() => {
+                void Promise.all(cfg.sipTargets.map((t) => getEntityState(t).catch(() => null)))
+                  .then((states) => {
+                    const active = states.some((s) => s != null && (s.state === 'playing' || s.state === 'on'));
+                    if (active) {
+                      lastSipDispatchOk = true;
+                      log('broadcast: SIP delivery confirmed via entity state after an HTTP timeout — duplicate re-fire suppressed');
+                    } else {
+                      log(`broadcast: SIP dispatch timed out and the target is not playing — a deferred retry will re-fire SIP`);
+                    }
+                  });
+              }, 8_000);
+              probe.unref?.();
+            } else {
+              log(`broadcast: SIP dispatch reached 0/${r.attempted} targets — a deferred retry will re-fire SIP`);
+            }
+          }
         })
         .catch((e) => { lastSipDispatchOk = false; log(`broadcast: SIP dispatch failed — ${e?.message ?? e}`); });
     }
