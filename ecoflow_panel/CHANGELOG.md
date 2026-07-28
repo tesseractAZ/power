@@ -1,3 +1,24 @@
+## v1.48.3 — SIP dispatch timeout no longer causes a phantom ringing call
+
+Live incident: during an HA overload window, the SIP announce dispatch to the
+cordless handset failed client-side with an HTTP header timeout — but the
+service call had executed server-side, and the announce call was placed and
+played. The deferred retry, believing 0/1 targets were reached, re-fired SIP;
+the duplicate call arrived while the handset was still in the ~50-second
+announce call and could not auto-answer, so the phone RANG after the
+announcement — a confusing phantom call during an alarm.
+
+A timeout-classed dispatch failure now means delivery UNKNOWN, not failed:
+the monitor probes the target entity's real state ~8 seconds after the
+timeout, and if the announce call is live (entity playing) the SIP leg is
+counted as delivered and the deferred retry will not re-fire it. Non-timeout
+failures (4xx/5xx/refused) remain definite misses and retry exactly as
+before — the duplicate-beats-silence policy is unchanged for genuine
+failures.
+
+Tests: 1,715 (timeout classification: header/body timeouts and aborts route
+to the verify path; refusals and mixed failures stay definite).
+
 ## v1.48.2 — dependency security sweep (zero open alerts)
 
 All four open Dependabot PRs are merged (undici 6.28.0, recharts 3.10.1, the
