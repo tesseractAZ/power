@@ -4438,7 +4438,6 @@ Temperature bands (`TempBand = { infoF, warnF, critF? }`, one band per physicall
 | `BOARD_TEMP` | 113 | 140 | 158 |
 | `SHUNT_TEMP` | 113 | 140 | — |
 | `MPPT_TEMP` | 131 | 149 | 167 |
-| `PTC_TEMP` | 158 | 176 | 194 |  (TUI-colour only; no alert wired — PTC is a resistive heater, hot by design) |
 | `CELL_TEMP_COLD_F` | — | — | ≤ 41 °F fires a cold-charge-derate warning |
 
 `classifyTemp()` converts °C→°F (`cToF = c*1.8+32`) and returns the highest band crossed. `tempAlert()` builds the alert with verb (`overheating`/`running hot`/`getting warm`).
@@ -7051,9 +7050,7 @@ Read accessors:
 | Function | Returns |
 |----------|---------|
 | `getCachedEntity(entityId)` | the `CachedEntity` or `null` |
-| `getCachedStates()` | the whole `ReadonlyMap` |
 | `getCacheAgeMs(now)` | `lastFetchedAt ? now - lastFetchedAt : +Infinity` |
-| `cacheSize()` | number of cached entities |
 | `__resetHaStateCache()` | test hook |
 
 #### Trace / wire-in
