@@ -352,21 +352,6 @@ export interface PackDegradation {
   summary: string;
 }
 
-export interface ClippingHour {
-  hour: number;
-  observedW: number;
-  modelW: number | null;
-  clippedW: number;
-}
-
-export interface ClippingEstimate {
-  generatedAt: number;
-  todayKwh: number;
-  perHour: ClippingHour[];
-  arrayPeakW: number;
-  hoursAtPeak: number;
-}
-
 // v0.9.77 — SoC-saturation curtailment report from /api/curtailment.
 export interface OpportunisticLoad {
   id: string;
@@ -749,15 +734,3 @@ export interface Incident {
   detail: string;
 }
 
-export interface AlertActionStats {
-  alertId: string;
-  title: string;
-  severity: Severity;
-  category: string;
-  riseCount: number;
-  medianDurationMs: number;
-  longestDurationMs: number;
-  shortClearsCount: number;
-  downgradedSilenced: boolean;
-  lastSeenAt: number | null;
-}

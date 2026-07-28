@@ -98,7 +98,3 @@ export function initShedRegistry(log: (m: string) => void): ShedCandidate[] {
   return c;
 }
 
-/** Test/reset hook. */
-export function __resetShedRegistry(): void {
-  candidates = null;
-}

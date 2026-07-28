@@ -1,3 +1,26 @@
+## v1.48.1 — dead-code removal (13 verified-unused exports)
+
+An unused-export audit (mechanical scan, cross-referenced against the test
+suite and scripts, then adversarially verified per candidate) confirmed 13
+exports with zero references of any kind — runtime, test, type-only, dynamic,
+or cross-package. All are removed:
+
+Server: `alertCounts`, `PTC_TEMP` (its promised TUI colouring was never
+implemented), `getCachedStates`, `cacheSize`, `__resetShedRegistry`,
+`telnet/plant/scada.ts stateText`.
+
+Web: the entire unreferenced `src/alerts.ts` module, the `ClippingEstimate` /
+`ClippingHour` / `AlertActionStats` client type mirrors (the web never fetches
+those endpoints), `sevRank` / `alertRank` / `SEV_META` (superseded by the
+4-tier ISA priority rendering in v0.11.0; the "kept for back-compat" comment
+had no surviving caller), the unpulled priority re-exports in AlertParts, and
+`SubHeader` with its orphaned `.subhead` CSS rule.
+
+Three DOCS.md rows documenting the removed exports are corrected in the same
+change. The 55 `*ForTest` reset seams the scan also flags are intentional
+test API and are kept; `__resetHaStateCache` is kept as a documented test
+hook. No behavior changes.
+
 ## v1.48.0 — terminators pre-warmed at boot; one voice switch per fresh alarm, any voice tier
 
 This release also fixes two defects found by live-incident review:

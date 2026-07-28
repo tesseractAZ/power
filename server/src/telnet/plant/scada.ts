@@ -73,9 +73,6 @@ const STATE_GLYPH: Record<AlarmState, string> = {
   oos:    '○',
 };
 
-export function stateText(state: AlarmState, text: string): string {
-  return STATE_COLOR[state](text);
-}
 export function stateGlyph(state: AlarmState): string {
   return STATE_COLOR[state](STATE_GLYPH[state]);
 }

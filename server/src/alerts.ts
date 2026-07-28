@@ -249,12 +249,6 @@ export const MOS_TEMP: TempBand = { infoF: 104, warnF: 131, critF: 149 };
 export const BOARD_TEMP: TempBand = { infoF: 113, warnF: 140, critF: 158 };
 export const SHUNT_TEMP: TempBand = { infoF: 113, warnF: 140 };
 export const MPPT_TEMP: TempBand = { infoF: 131, warnF: 149, critF: 167 };
-// PTC elements are resistive HEATERS, not sensors to protect — they run hot by
-// design (self-regulating Curie-point heaters typically operate ~60-90 °C /
-// 140-194 °F). No PTC alert is wired into computeAlerts() below; this band
-// exists solely so the TUI doesn't paint a normally-hot heater the same
-// red/yellow as an overheating battery cell.
-export const PTC_TEMP: TempBand = { infoF: 158, warnF: 176, critF: 194 };
 export const CELL_TEMP_COLD_F = 41;
 
 const VOL_DIFF_WARN_MV = 20;
@@ -1119,14 +1113,6 @@ export function computeAlerts(
   }
 
   return out.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.category.localeCompare(b.category));
-}
-
-export function alertCounts(alerts: Alert[]): Record<Severity, number> {
-  return {
-    critical: alerts.filter((a) => a.severity === 'critical').length,
-    warning: alerts.filter((a) => a.severity === 'warning').length,
-    info: alerts.filter((a) => a.severity === 'info').length,
-  };
 }
 
 /* ── v0.83.0 — SYSTEM DATA-GAP / UNPLANNED-OUTAGE ALERTING ──────────────────
