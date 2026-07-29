@@ -1,3 +1,19 @@
+## v1.48.4 — Music Assistant detection self-heals after HA restarts
+
+The Music Assistant service probe ran once at add-on boot and again only on
+operator-initiated test broadcasts. When an HA Core/OS update restarts
+everything, Music Assistant regularly comes up minutes after this add-on — the
+boot probe then records a CONFIRMED absent, and with no periodic re-check the
+status surface reported the announce service missing for hours after it had
+re-registered (live incident following the HA OS 18.1 update). Real alarm
+dispatch never gated on the flag, so delivery was unaffected — the status was
+simply wrong, and a wrong "MA missing" reading undermines exactly the health
+surface an operator checks after an update.
+
+The periodic audible-health tick now re-probes the service registry whenever
+the flag is down, so detection converges within one probe cycle of Music
+Assistant returning.
+
 ## v1.48.3 — SIP dispatch timeout no longer causes a phantom ringing call
 
 Live incident: during an HA overload window, the SIP announce dispatch to the
