@@ -812,7 +812,18 @@ export function startBroadcastMonitor(
   };
   const targetDriftKick = setTimeout(() => { void resolveTargetDriftOnce().catch(onProbeError); }, 16_000);
   targetDriftKick.unref();
-  const audibleHealthInterval = setInterval(() => { computeAudibleHealth().catch(onProbeError); }, AUDIBLE_HEALTH_PROBE_MS);
+  const audibleHealthInterval = setInterval(() => {
+    // v1.48.4 — self-heal the MA service-detection flag. A CONFIRMED-absent at
+    // boot (MA still restarting after an HA/OS update deregisters its services)
+    // previously stuck until an operator ran a manual test broadcast: the boot
+    // probe was the only unconditional check, and real broadcasts don't gate on
+    // the flag, so nothing ever corrected the status. Live incident: HA OS 18.1
+    // update → MA wedged at add-on boot → flag false for hours while the
+    // service was long since registered. One cheap re-probe per health tick,
+    // only while the flag is down.
+    if (supervised && !musicAssistantAvailable) void detectMusicAssistant({ retries: 0 });
+    computeAudibleHealth().catch(onProbeError);
+  }, AUDIBLE_HEALTH_PROBE_MS);
   audibleHealthInterval.unref();
 
   const inQuiet = (): boolean => {
