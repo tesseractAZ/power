@@ -164,6 +164,30 @@ test('v1.49.0 — while charging, the house rides grid bypass (no pack drain in 
   assert.ok(Math.abs(p.targetSocPct! - 37.8) < 0.1, `target 37.8% (bypassed window drain), got ${p.targetSocPct}`);
 });
 
+// ── v1.49.0 REVIEW REGRESSION (HIGH): the achievable-model search domain must
+//    not stop at the stale fullKwh − noBuy bound — past it, more lift still buys
+//    more bypass hours. Scenario (verified by execution during review): near-full
+//    pack + heavy in-window load + heavy post-window drain. The stale bound
+//    declared 28 kWh "unmeetable" (trough 22, below the 25 floor+cushion) when
+//    34.46 kWh — inside the 38.88 charge-power cap — holds the line exactly. ──
+test('v1.49.0 — bisection searches the achievable plateau, not the stale pool bound (no false unmeetable)', () => {
+  const horizon = mkHorizon(B, 24, 0, [
+    ...Array.from({ length: 9 }, () => 2700),   // pre-window + window: 3 kWh/h pack drain
+    ...Array.from({ length: 15 }, () => 4500),  // post-window: 5 kWh/h pack drain
+  ]);
+  const p = computeNightChargePlan(baseInputs({ socNowPct: 99, chargeCapKw: 7.2, horizon, minBuyKwh: 0.1 }));
+  assert.equal(p.cushionShortfall, false, 'the cushion IS deliverable — must not be declared unmeetable');
+  assert.equal(p.bindingCap, 'requirement');
+  assert.ok(Math.abs(p.requiredExtraKwh! - 34.46) < 0.1, `required ≈ 34.46 (achievable-model), got ${p.requiredExtraKwh}`);
+  assert.ok(Math.abs(p.minProjSocPct! - 25) < 0.1, `plan trough holds 25%, got ${p.minProjSocPct}`);
+});
+
+test('v1.49.0 — chargeCapKw 0 yields no phantom bypass lift (honest zero-buy shortfall)', () => {
+  const p = computeNightChargePlan(baseInputs({ chargeCapKw: 0, minBuyKwh: 0.1 }));
+  assert.equal(p.chargeTonight, false, 'no charger ⇒ no buy');
+  assert.equal(p.cushionShortfall, true, 'and the unmet cushion is disclosed');
+});
+
 // ── (d2) Pool-headroom cap: pack already near full ⇒ can't add the needed lift ──
 test('cap — pool-headroom limit bounds the buy when the pack is near full', () => {
   // window [B, B+1h] (1 h); hour B flux 0 so packAtWindowEnd = socNow = 98 (headroom 2).
