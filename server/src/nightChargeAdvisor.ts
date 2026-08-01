@@ -300,9 +300,13 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const effChargeStartMs = Math.max(windowStart, nowMs);
   const remainingWindowHours = Math.max(0, (windowEnd - effChargeStartMs) / HOUR_MS);
 
-  // Window hours (billed house load happens even while grid-charging — it caps
-  // how much grid energy can reach the charger).
-  const windowHrs = horizon.filter((h) => h.ts >= windowStart && h.ts < windowEnd);
+  // Window hours — the slice the with-buy walk simulates (grid bypass during
+  // charging hours, normal drain otherwise; see packAtWindowEndWith). Trimmed
+  // to ≥ the current hour so an untrimmed caller horizon cannot re-drain
+  // already-elapsed window hours (mid-window honesty does not depend on the
+  // upstream trim).
+  const windowSimFloorMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+  const windowHrs = horizon.filter((h) => h.ts >= windowStart && h.ts >= windowSimFloorMs && h.ts < windowEnd);
   // The scored trajectory runs from window-end forward (the buy tops the pack at
   // 05:00; the pre-window trough is a TONIGHT concern the alarm owns, not
   // something a 23:00 buy can fix).
@@ -316,8 +320,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // Including the full current hour over-counts by ≤ the elapsed fraction —
   // the conservative (over-buy) direction, consistent with buildInputs' trim.
   const simFromMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
-  const baseline = simulate(socNowKwh, fullKwh, horizon.filter((h) => h.ts >= simFromMs), dischargeEff, windowEnd, windowEnd);
+  const preHorizon = horizon.filter((h) => h.ts >= simFromMs);
+  const baseline = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowEnd, windowEnd);
   const packAtWindowEnd_noBuy = baseline.packAtMarkKwh;
+  // v1.49.0 — pack level ENTERING the window (carry to window OPEN), the anchor
+  // for the lift-aware window model below.
+  const packAtWindowStartKwh = simulate(socNowKwh, fullKwh, preHorizon, dischargeEff, windowStart, windowStart).packAtMarkKwh;
 
   // v1.39.0 (§4 honesty): the PRE-WINDOW carry — pack path from now to the
   // window OPEN. A tonight buy cannot prevent a pre-window dip (the floor alarm
@@ -362,8 +370,33 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   //       the life-safety miss.
   // trough(lift) is monotone non-decreasing in `lift` (max(0,min(full,·))
   // preserves order), so a bisection is exact.
+  // v1.49.0 — the with-buy WINDOW model. `chChargeWatt` is a CHARGE-ONLY cap
+  // (the SHP2 CHARGE_TIME_TASK's grid→battery power); house load on a grid-tied
+  // SHP2 is grid pass-through and NEVER competes with the charger — the prior
+  // model subtracted window house load from the charge budget AND drained it
+  // from the pack (double-count), under-sizing buys ~5× (empirically falsified
+  // by the ledger: measured window imports sustain ~2× chargeCapKw). Charging
+  // occupies the FIRST chargeHours(lift) of the remaining window; while the
+  // charger runs, the home rides grid bypass (no pack drain); the rest of the
+  // window drains normally. Per-hour clamps keep saturation/empty honest, and
+  // pack(lift) is monotone non-decreasing in lift so the bisection stays exact.
+  const packAtWindowEndWith = (lift: number): number => {
+    if (lift <= 0 || chargeCapKw <= 0) return packAtWindowEnd_noBuy;
+    const chargeHours = Math.min(remainingWindowHours, lift / (chargeCapKw * legEff));
+    let pack = packAtWindowStartKwh;
+    let hoursIn = 0;
+    for (const h of windowHrs) {
+      const chargeFrac = Math.max(0, Math.min(1, chargeHours - hoursIn));
+      hoursIn += 1;
+      const pvKwh = h.pvP10W / 1000;
+      const drainKwh = ((h.loadP90W / 1000) * (1 - chargeFrac)) / dischargeEff;
+      const gainKwh = chargeCapKw * legEff * chargeFrac;
+      pack = Math.max(0, Math.min(fullKwh, pack + pvKwh + gainKwh - drainKwh));
+    }
+    return pack;
+  };
   const troughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
-    const r = simulate(packAtWindowEnd_noBuy + lift, fullKwh, postHours, dischargeEff, windowEnd, windowEnd);
+    const r = simulate(packAtWindowEndWith(lift), fullKwh, postHours, dischargeEff, windowEnd, windowEnd);
     return { minKwh: r.minPackKwh, minTs: r.minTsMs };
   };
 
@@ -387,28 +420,36 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   }
 
   // Feasibility bounds on the lift.
-  // Charge-power: over the window the grid delivers at most chargeCapKw·hours;
-  // the window house load is served first, and only legEff of what reaches the
-  // charger is stored in the pack.
-  const windowLoadKwh = windowHrs.reduce((s, h) => s + h.loadP90W / 1000, 0);
-  // Remaining-window credit only (the horizon is trimmed to ≥ nowHour upstream,
-  // so windowLoadKwh already sums only remaining-hour house load — the gross
-  // term must use the SAME remaining span, not the full window length).
-  const chargePowerLiftKwh = Math.max(0, (chargeCapKw * remainingWindowHours - windowLoadKwh) * legEff);
+  // Charge-power (v1.49.0): chargeCapKw is the CHARGE-ONLY ceiling — the full
+  // remaining window is available to the charger and house load is grid
+  // pass-through (see packAtWindowEndWith above). Credit is bounded by BOTH the
+  // wall-clock remaining window and the simulable window buckets, so a horizon
+  // gap inside the window can never bill grid energy the trajectory model
+  // itself cannot absorb.
+  const chargePowerLiftKwh = Math.max(0, chargeCapKw * Math.min(remainingWindowHours, windowHrs.length) * legEff);
   // Pool headroom: the pack physically cannot hold more than full.
   const poolHeadroomLiftKwh = Math.max(0, fullKwh - packAtWindowEnd_noBuy);
 
-  // §2.2 step 3 — minimal lift (bounded only by what the pack can physically
-  // hold) that makes the re-simulated trough reach floor+cushion. If even
-  // filling the pack to full can't hold the line (saturation / horizon too
-  // long), the requirement IS the full-pack lift and the cushion is unmeetable
-  // (flagged below via the trough, not assumed met).
+  // §2.2 step 3 — minimal lift that makes the re-simulated trough reach
+  // floor+cushion, searched over the ACHIEVABLE-model plateau bound (v1.49.0
+  // review fix): under the bypass model, pack(L) keeps rising past the old
+  // fullKwh − noBuy bound — a larger L extends the charging (bypass) hours even
+  // after the full clamp bites — and only plateaus once chargeHours pins at the
+  // remaining window (L = chargePowerLiftKwh). Searching the stale bound
+  // UNDER-BOUGHT deliverable cushions and mis-reported them as unmeetable (the
+  // life-safety miss). The per-hour [0, fullKwh] clamps inside
+  // packAtWindowEndWith keep any over-wide domain honest; pack(L) is monotone,
+  // so the bisection stays exact.
+  const hiLift = Math.max(chargePowerLiftKwh, poolHeadroomLiftKwh);
+  const meetable = troughAtLift(hiLift).minKwh >= targetFloorKwh - 1e-9;
   let requiredExtraKwh: number;
-  if (troughAtLift(poolHeadroomLiftKwh).minKwh < targetFloorKwh - 1e-9) {
+  if (!meetable) {
+    // Even max effort can't hold the line — report the legacy full-pack proxy;
+    // cushionShortfall (from the re-simulated trough below) tells the truth.
     requiredExtraKwh = poolHeadroomLiftKwh;
   } else {
     let lo = 0;
-    let hi = poolHeadroomLiftKwh;
+    let hi = hiLift;
     for (let i = 0; i < 48; i++) {
       const mid = (lo + hi) / 2;
       if (troughAtLift(mid).minKwh >= targetFloorKwh) hi = mid;
@@ -420,8 +461,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // The ACTUALLY achievable lift = requirement bounded by charge power.
   const liftKwh = Math.min(requiredExtraKwh, chargePowerLiftKwh);
   let bindingCap: BindingCap = 'requirement';
-  if (requiredExtraKwh >= poolHeadroomLiftKwh - 1e-6) bindingCap = 'poolHeadroom';
-  if (chargePowerLiftKwh < requiredExtraKwh - 1e-6) bindingCap = 'chargePower';
+  if (!meetable) {
+    bindingCap = poolHeadroomLiftKwh <= chargePowerLiftKwh ? 'poolHeadroom' : 'chargePower';
+  } else if (chargePowerLiftKwh < requiredExtraKwh - 1e-6) {
+    bindingCap = 'chargePower';
+  }
 
   // ★ cushionShortfall is driven by the re-simulated trough under the lift we can
   // actually deliver — so NEITHER a full-clamp erasing the lift NOR a
@@ -436,7 +480,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     bindingCap = poolHeadroomLiftKwh <= chargePowerLiftKwh ? 'poolHeadroom' : 'chargePower';
   }
 
-  const targetPackKwh = Math.min(fullKwh, packAtWindowEnd_noBuy + liftKwh);
+  const targetPackKwh = packAtWindowEndWith(liftKwh);
 
   // Over-buy ceiling (flag only; resilience wins): the required buy pushes the
   // pack above full − P90 morning surplus, so morning PV will clip. Keep the

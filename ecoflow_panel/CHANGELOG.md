@@ -1,3 +1,44 @@
+## v1.49.0 — night-charge sizing corrected: the charge cap is charge-only
+
+The buy sizer modeled `chChargeWatt` (7.2 kW) as a total grid-input budget
+shared with concurrent house load, and simultaneously drained that same window
+load from the pack trajectory — a double-count that collapsed a 6-hour window's
+deliverable lift from ~40 kWh to ~7–8 kWh and produced charge targets below the
+reserve floor. The model was empirically falsified by the engine's own outcome
+ledger: measured grid import during charge windows sustained 13.5–14 kW,
+nearly twice the supposed ceiling. `chChargeWatt` is the SHP2 charge task's
+grid-to-battery power limit; house load is service-feed pass-through on a
+grid-tied system and never competes with the charger.
+
+The corrected window model: the charge cap credits the full remaining window
+(`chargeCapKw × hours × legEff`), charging occupies the leading hours of the
+window, and while the charger runs the home rides grid bypass (no pack drain
+in charging hours); non-charging window hours drain normally, with per-hour
+clamps preserving saturation/empty honesty and bisection exactness. Charge
+targets now land where physics puts them (~43% instead of ~8% on a
+deep-shortfall night at the 7.2 kW cap).
+
+An adversarial review of the corrected model (findings verified by executing
+the code) surfaced and fixed one high-severity residual before release: the
+requirement bisection still searched the OLD model's pool-headroom bound, but
+under the bypass model the deliverable trajectory keeps improving past that
+bound (more lift buys more bypass hours), so realistic near-full/heavy-load
+nights were under-bought and mis-reported as unmeetable — the search domain is
+now the achievable-model plateau, with a dedicated regression fixture. Also
+fixed from review: the charge credit is bounded by simulable window buckets
+(horizon gaps can no longer bill unabsorbable energy), the window slice is
+self-trimmed against untrimmed caller horizons, a zero charge-cap no longer
+produces phantom bypass lift, and the stale shared-budget formula block in the
+documentation is corrected.
+
+Fixtures were re-derived from the stated physics, not copied from outputs
+(canonical clean-shortfall lift 19 → 18.79 kWh via the bypass credit;
+deep-shortfall 55 → 61.63 kWh because front-loaded charging lifts the pack off
+the empty-clamp and late-window drain becomes real). Two new discriminator
+tests fail decisively under the old shared-budget model. The design document's
+§2.2 cap prescription — the origin of the defect — is corrected in the same
+change. 1,719 tests.
+
 ## v1.48.4 — Music Assistant detection self-heals after HA restarts
 
 The Music Assistant service probe ran once at add-on boot and again only on
