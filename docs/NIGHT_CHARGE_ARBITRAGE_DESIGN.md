@@ -1,6 +1,20 @@
 # Night-Charge TOU Arbitrage — Design & Plan
 
-_Generated 2026-07-17 by a 12-agent design dive (7 design + 3 adversarial critics + synthesis + red-team) reconciled with a 4-agent APS-EV/EcoFlow verification. Advisory-first, no-write; write toggled on only after the learning record proves accuracy. Not yet implemented._
+_Generated 2026-07-17 by a 12-agent design dive (7 design + 3 adversarial critics + synthesis + red-team) reconciled with a 4-agent APS-EV/EcoFlow verification. Implemented incrementally v1.36.0–v1.51.0. The original advisory-first no-write posture, Invariant I1, the §5 gate criteria, and the §6 CHARGE_TIME_TASK-only write plan were **superseded by the Amendment of 2026-07-31** (below): a supervised bounded-reserve-write mode shipped in v1.50.0 with a gate redesigned around actuated-night evidence. Sections marked "superseded" are retained as the design record._
+
+---
+
+## Amendment — 2026-07-31 (implemented in v1.50.0)
+
+**Why the original posture was revised.** Two of the original document's premises failed in operation. (1) The §5 gate's evidence base — clean-islanded-baseline nights — is structurally unreachable on a grid-tied home: the SHP2 carries the house on grid at the reserve floor and imports every night, freezing `scoredDays` at 0; the gate could never open as designed. (2) §5.1's permanent floor-breach strikes never age, so a strike recorded under a since-corrected sizing model (the v1.49.0 charge-only-cap fix) blocked writes forever with no path to recovery. The CHARGE_TIME_TASK probe path (§6) was additionally never probe-proven; the bounded reserve raise — the mechanism I1 banned — is in fact the only documented, round-trip-verified write shape available (`PD303_APP_SET`/`backupReserveSoc`, exercised as a no-op by the cloud-presence refresh since v0.9.10).
+
+**The amended write posture** (`NIGHT_CHARGE_MODE: advisory | supervised | auto`, default `advisory` — never writes):
+
+- **Supervised** (explicit owner opt-in): each charge night, the evening job announces the plan (notification + audible broadcast) with the intended buy, the clamped reserve target, and a cancel deadline; the armed state persists only after an announcement channel confirms delivery. At window open − 5 min, ONE bounded write raises `backupReserveSoc` to `min(round(target), 50)` — validated into the device's [10, 50] range, audit-logged, write-ahead-intent journaled so a lost confirmation is adopted from the live read-back rather than orphaned. The prior value auto-restores at window close + 5 min (mode-independent; escalates to a critical annunciation after repeated failure while retrying). Cancellation disarms pre-write and reverts post-write.
+- **Auto**: honored as unattended only once the gate graduates (`writeReady`); structurally demoted to supervised semantics until then (`effectiveActuationMode`).
+- I2, I3 (as a clamp), I4-class outage guards, the null-over-fabrication rule, and the alarm-spine independence are unchanged and remain binding.
+
+**The amended gate (v2, `CURRENT_ALGO_VERSION = 2`).** Evidence = scored **actuated** nights: delivery is measured as window grid import minus the concurrent house pass-through, and the realized-need counterfactual derives from the delivered-charge-subtracted trough (new ledger columns `cushion_shortfall`, `actuated`, `actuation_applied_at_ms`, `delivered_kwh`). Graduation to auto: **≥ 21 scored actuated nights, under-buy ≤ 10%, delivery bias in [0, 5] kWh, band coverage in [78, 92]% over ≥ 14 verdict nights, zero engine-fault strikes.** A strike requires the plan to have *claimed hold* (`cushionShortfall` falsy — disclosed shortfalls are physics, not fault) AND a trajectory or realized breach; strikes live in a rolling 45-day window and clear after 14 consecutive strike-free actuated nights. The algo-version bump excludes every v1-era row (the v1.49.0 physics change invalidates them per §0.2) — including the v1 strikes.
 
 > **Confirmed post-dive:** Plan = APS **R-EV**, **no demand charge** (pure energy arbitrage — the ~40%% demand-charge conditional branch collapses). Tariff source = **manual** (EcoFlow API exposes no rates). EcoFlow **smartBackupMode=2**, not self-scheduling → we own the optimization, gated on `smartBackupMode`+`TimeTaskCfg1.isEnable`.
 
@@ -10,7 +24,7 @@ _Generated 2026-07-17 by a 12-agent design dive (7 design + 3 adversarial critic
 
 ## 0. Objective, posture, and the two decisions that gate everything
 
-**What the owner asked for.** On days a shortfall is anticipated, buy the *right* amount of grid energy in the cheap super-off-peak overnight window so the home (a) never imports at the 4–7pm M-F peak and (b) keeps an **outage cushion above the 10% reserve floor**. This is **as much a resilience feature as a cost feature.** Posture is **advisory / NO-WRITE now**; write is toggled on **only after Eric AND the system have verified accuracy, history, performance, and value.** Accuracy is mission-critical to a life-safety off-grid home. The system must **learn and record from day one.**
+**What the owner asked for.** On days a shortfall is anticipated, buy the *right* amount of grid energy in the cheap super-off-peak overnight window so the home (a) never imports at the 4–7pm M-F peak and (b) keeps an **outage cushion above the 10% reserve floor**. This is **as much a resilience feature as a cost feature.** Posture is **advisory / NO-WRITE now**; write is toggled on **only after the owner AND the system have verified accuracy, history, performance, and value.** Accuracy is mission-critical to a life-safety off-grid home. The system must **learn and record from day one.**
 
 **Design spine (unchanged from the safety dimension, reinforced by all three critics): the feature is a subordinate of the safety spine, never a peer.** The two independent alarms — runway (`classifyRunway` runwayAlarm.ts:104) and SHP2 floor/SoC (`shp2-below-reserve` batterySocAlarm.ts:49-50) — plus outage fusion (`resolveGridBackstop` gridState.ts:224) remain the untouched safety authority. The advisor only *reads* the projections those alarms read; it never produces state they depend on.
 
@@ -149,7 +163,7 @@ All surfaces read one holder `getLatestNightChargePlan()`. **One HA namespace `n
 
 ### 4.2 The ~21:30 notification (part of the single evening job)
 
-Direct `sendNotification` (bypasses NOTIFY_QUIET_HOURS 22–06 and minSeverity — those gates live only in alertMonitor's evaluate loop, not notify.ts:137). Severity `info`, `dedupId:'night_charge_plan'` (one updating HA card). Recompute fresh at send time. Three shapes: `charge` (buy X kWh to Y%, tomorrow's dip without/with, floor+cushion context, confidence+reason, "advisory only — wire your automation to `charge_tonight` gated on readiness+window"), `hold` ("no overnight charge needed, projected min SoC stays above floor+cushion"), `insufficient_basis` ("no plan tonight — basis incomplete, nothing will be charged" — sending this makes the *absence* explicit so Eric never wonders if the job died). `NIGHT_CHARGE_NOTIFY_ON_HOLD` default true.
+Direct `sendNotification` (bypasses NOTIFY_QUIET_HOURS 22–06 and minSeverity — those gates live only in alertMonitor's evaluate loop, not notify.ts:137). Severity `info`, `dedupId:'night_charge_plan'` (one updating HA card). Recompute fresh at send time. Three shapes: `charge` (buy X kWh to Y%, tomorrow's dip without/with, floor+cushion context, confidence+reason, "advisory only — wire your automation to `charge_tonight` gated on readiness+window"), `hold` ("no overnight charge needed, projected min SoC stays above floor+cushion"), `insufficient_basis` ("no plan tonight — basis incomplete, nothing will be charged" — sending this makes the *absence* explicit so the operator never wonders if the job died). `NIGHT_CHARGE_NOTIFY_ON_HOLD` default true.
 
 ### 4.3 Web + TUI
 
@@ -161,7 +175,7 @@ Direct `sendNotification` (bypasses NOTIFY_QUIET_HOURS 22–06 and minSeverity �
 
 ---
 
-## 5. Write-readiness gate — pure predicate, physically-measured, out-of-sample
+## 5. Write-readiness gate — pure predicate, physically-measured, out-of-sample *(criteria superseded by the Amendment of 2026-07-31 — gate v2 graduates on actuated-night evidence)*
 
 Per the architecture critic, for v1 the gate is **NOT** a 4-state machine with a 0–100 weighted score, regime-diversity bonus, hysteresis, and supervised-ramp module — none of that is observable for months (WRITE-ELIGIBLE is unreachable during the first in-season sample anyway). It is a **pure reduction over the one ledger table**, surfaced as one boolean + a "what's blocking" list. Per the learning skeptic, it gates **only on physically-measured prediction accuracy** — savings-agreement is removed because there is no valid counterfactual pre-write.
 
@@ -189,7 +203,7 @@ Persist only the current `ReadinessState` (v1: `LEARNING` | `READY_TO_CONSIDER_W
 
 ---
 
-## 6. The dormant, toggle-ready write path — deferred, CHARGE_TIME_TASK only
+## 6. The dormant, toggle-ready write path — deferred, CHARGE_TIME_TASK only *(superseded by the Amendment of 2026-07-31 — the shipped path is the supervised bounded reserve write, `nightChargeActuator.ts`)*
 
 **No `commands.ts` actuation helper is built until the device-native mechanism is probe-proven.** The advisory v1 must not depend on any write primitive.
 
@@ -210,7 +224,7 @@ Tier 0 advisory+learning (now). Tier 1 `NIGHT_CHARGE_MODE` config flag armed (fi
 ## 7. Safety invariants (binding) + fail-safe decision table
 
 **Invariants:**
-- **I1** The feature NEVER writes `backupReserveSoc`. Only device-self-expiring `CHARGE_TIME_TASK` is admissible, probe-proven, else advisory-forever.
+- **I1** *(superseded by the Amendment of 2026-07-31 — v1.50.0 ships a supervised bounded `backupReserveSoc` write; the CHARGE_TIME_TASK-only doctrine was never probe-proven.)* ~~The feature NEVER writes `backupReserveSoc`. Only device-self-expiring `CHARGE_TIME_TASK` is admissible, probe-proven, else advisory-forever.~~
 - **I2** Size from worst-case (P10 PV / P90 load / `p90SessionKwh`); under-buy is a **safety** miss.
 - **I3** `targetSoc ≤ hightBattery` ceiling AND ≤ `fullKwh − P90 morning PV headroom`; `buyKwh` capped by feasibility AND ceiling-headroom.
 - **I4** Write precondition requires `resolveGridBackstop().present===true`; any outage signal → hard NO-WRITE; the outage alarm always wins within <25 s.

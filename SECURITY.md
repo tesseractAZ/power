@@ -40,9 +40,14 @@ changelog if you'd like it.
 
 - **AppArmor profile** (`ecoflow_panel/apparmor.txt`) confines the container's
   filesystem and capabilities.
-- **Write commands to the battery hardware are OFF by default** (`write_actions_enabled`
-  is `false`); the send-command debug path additionally requires a `WRITE_DEBUG_TOKEN`.
-  Every write is recorded to an append-only audit log.
+- **Device writes default to off.** The only production write path is the
+  night-charge supervised reserve write (v1.50.0), disabled unless the owner
+  sets `NIGHT_CHARGE_MODE` to `supervised` or `auto` (default `advisory` —
+  never writes); when enabled it is announced each evening, cancellable,
+  validated into the device's [10, 50] reserve range, and auto-reverted after
+  the charge window. The arbitrary send-command debug path additionally
+  requires a `WRITE_DEBUG_TOKEN`. Every write is recorded to an append-only
+  audit log.
 - **Write/administrative endpoints are auth-gated** (CSRF/CORS controls, the
   send-command lockdown, and audit-log read auth).
 - **Secrets** (EcoFlow `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY`, weather/HA

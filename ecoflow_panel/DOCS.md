@@ -23,7 +23,7 @@ The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQ
 12. [Configuration, Deployment, Security & Operations](#12-configuration-deployment-security--operations)
 13. [Safety & Operational Plumbing](#13-safety--operational-plumbing)
 14. [Intelligent Lighting & HVAC Posture (energy-aware automation)](#14-intelligent-lighting--hvac-posture-energy-aware-automation)
-15. [Night-Charge TOU Arbitrage Advisor (advisory)](#15-night-charge-tou-arbitrage-advisor-advisory)
+15. [Night-Charge TOU Arbitrage Advisor](#15-night-charge-tou-arbitrage-advisor)
 16. [Appendix A — Feature Inventory (evidence linkage)](#appendix-a--feature-inventory-evidence-linkage)
 
 
@@ -257,8 +257,11 @@ pushing only finite numbers. Metrics emitted per projection kind:
 
 #### 4.5 Retention
 
-Hourly `setInterval` runs `DELETE FROM samples WHERE ts < now − RETAIN_MS`,
-`RETAIN_MS = 30 days`. Timer is `.unref()`'d.
+Hourly `setInterval` runs `DELETE FROM samples WHERE ts < now − RETAIN_MS`.
+`RETAIN_MS` derives from the `RECORDER_RETENTION_DAYS` option (v1.51.0 —
+default 30 days, clamped [7, 730]; malformed values fall back to the default
+so a config typo can never become a delete-everything retention). The
+effective value is logged at startup. Timer is `.unref()`'d.
 
 #### 4.6 Lifetime accumulators — `rollupLifetime()`
 
@@ -1260,7 +1263,17 @@ is not in the public IoT API** (`PD303_REBOOT`/`PD303_APP_REBOOT`/`PD303_SYS_REB
 DPU-style shapes all return error 8524 "invalid parameter"; reboot only exists via the
 mobile app's private MQTT protobuf channel, `cmdFunc=12`).
 
-#### `refreshShp2CloudPresence` — the one real write
+#### `setBackupReserveSoc` — the night-charge reserve write (v1.50.0)
+
+The supervised night-charge actuator's single write primitive: set
+`backupReserveSoc` on the SHP2 via the same documented `PD303_APP_SET` shape
+the cloud-presence refresh round-trips, with a changed value. The target is
+VALIDATED (not silently clamped) into the device's documented [10, 50] range,
+audit-logged under action `night-charge-reserve`, and paced by a 5-minute
+per-SN cooldown. Only the night-charge actuator calls it (§15.8b) — there is
+no direct HTTP surface for arbitrary reserve writes.
+
+#### `refreshShp2CloudPresence` — the documented no-op write
 
 A documented **no-op**: re-send the current `backupReserveSoc` back to the SHP2
 (`{ cmdCode: 'PD303_APP_SET', params: { backupReserveSoc } }`). No state changes, but the
@@ -3300,7 +3313,7 @@ Regresses each pack's BMS-reported SoH history into a calendar-fade rate (%/yr),
 | `pack${n}_lifetime_chg_mah`, `pack${n}_lifetime_dsg_mah` | coulombic efficiency (see §2) |
 | Device fields `pk.actSoh ?? pk.soh`, `pk.fullCapMah`, `pk.designCapMah`, `pk.accuDsgMah`/`accuChgMah`, `pk.cycles` | current-state snapshot |
 
-`DEGRADE_REPORT_HISTORY_MS = 30 d` (== recorder retention), `DEGRADE_BUCKET_SEC = 6*3600` (6-hour buckets to de-noise SoH jitter), `DEGRADE_REPORT_TTL_MS = 30 min`.
+`DEGRADE_REPORT_HISTORY_MS = 30 d` (the report window is fixed; it coincides with the retention default, not the configured retention), `DEGRADE_BUCKET_SEC = 6*3600` (6-hour buckets to de-noise SoH jitter), `DEGRADE_REPORT_TTL_MS = 30 min`.
 
 #### Calculation — step by step
 
@@ -3585,7 +3598,7 @@ Fleet soiling = **median** of each home Core's own `dropPct` (only Cores with a 
 For each DPU it emits `SoilingPerDevice { sn, device, coreNum, dropPct, cleanDays, recentCoeff, baselineCoeff }` from `computeSoiling`.
 
 #### F29 multi-week weather backfill
-The decomposition window (`since = now − 60 d`, a query ceiling only) seeds weather from the **recorder-persisted** series first — `recorder.query('weather', 'ghi_wm2'/'cloud_pct', since, now, 3600)` via `mergeRecorderWeather` — then lets the live `getWeather()` cache overwrite its freshest hours. Before F29 the baseline was paired only with `getWeather()`'s 7-day cache, so the soiling baseline **slid forward with the dirt it exists to measure** (reported 0.9–1.6% while the truth was ~10–12%). Now the weather spans the same window as the PV it's compared against (effectively bounded by the recorder's ~30-day retention). Bails only if neither source produced any weather.
+The decomposition window (`since = now − 60 d`, a query ceiling only) seeds weather from the **recorder-persisted** series first — `recorder.query('weather', 'ghi_wm2'/'cloud_pct', since, now, 3600)` via `mergeRecorderWeather` — then lets the live `getWeather()` cache overwrite its freshest hours. Before F29 the baseline was paired only with `getWeather()`'s 7-day cache, so the soiling baseline **slid forward with the dirt it exists to measure** (reported 0.9–1.6% while the truth was ~10–12%). Now the weather spans the same window as the PV it's compared against (bounded by the configured samples retention — default 30 days — or the 60-day query ceiling, whichever is smaller). Bails only if neither source produced any weather.
 
 #### Per-hour shape (fleet, home-connected only)
 Sums home-Core `pv_total` per hour-epoch (`fleetPvE`). Filter: `cloudCoverPct ≤ 25` and `radiationWm2 ≥ PERHOUR_MIN_GHI_WM2 (400)` — a raised floor (v1.24.0) because at dawn/dusk the pv/GHI ratio is geometry-dominated (sun angle/tilt), not soiling (hour 18 once read an impossible 67.3% drop). Split by hour-of-day into `baseline` (older than 7 d) and `recent` (last 7 d). Need ≥3 baseline + ≥2 recent. `base = p90 of baseline` (`sorted[floor(0.9×(n−1))]`, not all-time max), `rec = median(recent)`, `dropPct = ((base−rec)/base)×100`.
@@ -6325,7 +6338,7 @@ write-auth, CORS, the write-debug lockdown), the CI + release pipeline, the ingr
 and the operational runbook.
 
 Sources of truth cited throughout:
-- `ecoflow_panel/config.yaml` — add-on manifest + options + schema (currently `version: "1.27.0"`)
+- `ecoflow_panel/config.yaml` — add-on manifest + options + schema (`version:` is bumped every release; the file is authoritative)
 - `ecoflow_panel/translations/en.yaml` — per-field labels/help on the HA Configuration page
 - `rootfs/etc/services.d/ecoflow-panel/run` — the s6 service runner (options→env bridge)
 - `server/src/auth.ts` — write-auth gate, CORS allow-list, token bootstrap
@@ -6344,7 +6357,7 @@ runs the container.
 | Key | Value | Meaning |
 |-----|-------|---------|
 | `name` | `Power` | Store display name |
-| `version` | `1.27.0` | Add-on version; the **release trigger** (see Release Pipeline). HA compares this to installed to surface the Update button. |
+| `version` | *(current release)* | Add-on version; the **release trigger** (see Release Pipeline). HA compares this to installed to surface the Update button. |
 | `slug` | `ecoflow_panel` | Stable identifier — used in the HA add-on API path (`.../addons/local_ecoflow_panel/...` for a local install, or the store slug). Never change it. |
 | `arch` | `aarch64`, `amd64` | Supported CPU arches (Pi = aarch64) |
 | `image` | `ghcr.io/tesseractaz/{arch}-ecoflow-panel` | **Pre-built GHCR image**; `{arch}` substituted by Supervisor. Presence of this key means Supervisor *pulls* the image rather than building on the Pi. |
@@ -6536,10 +6549,24 @@ trailing `?` marks the field optional. Defaults are the values in the `options:`
 | `TUI_USERNAME` | empty | `str?` | Console login username (defaults to `operator` when empty and a password is set). |
 | `TUI_PASSWORD` | empty | `password?` | Console login password; empty disables the login prompt. Masked in the options UI. |
 
+#### Night-charge engine + tariff + heartbeat
+
+The night-charge option group (`NIGHT_CHARGE_ADVISOR_ENABLED`,
+`NIGHT_CHARGE_MODE` — `list(advisory|supervised|auto)`, default `advisory` —
+`ARB_OUTAGE_CUSHION_PCT`, `ARB_MIN_BUY_KWH`, `ARB_CHARGE_CAP_KW`,
+`ARB_LOAD_P90_FACTOR`, `NIGHT_CHARGE_NOTIFY_HOUR`/`_MINUTE`,
+`NIGHT_CHARGE_NOTIFY_ON_HOLD`) and the APS R-EV tariff options
+(`TARIFF_APS_*_CENTS` ×6, `TARIFF_APS_RATES_CONFIRMED`) are documented with
+full semantics, defaults, and ranges in the chapter that owns them —
+§15.10 — including the supervised/auto write-posture contract (§15.8b).
+`HEARTBEAT_URL` / `HEARTBEAT_INTERVAL_S` (dead-man's-switch pings to an
+external monitor; empty URL disables) are documented in §13.0c.
+
 #### Diagnostic / advanced
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
+| `RECORDER_RETENTION_DAYS` | `30` | `int(7,730)` | (v1.51.0) Raw-samples retention in days for the SQLite recorder. Runtime clamps to [7, 730] and falls back to 30 on a malformed value; the durable night-charge ledger and lifetime totals are never pruned regardless. |
 | `ECOFLOW_DEVICE_REACHABILITY` | `""` | `str?` | (v0.72.0) SN→HA-ping-entity JSON map for cloud-wedge vs real-outage detection. |
 | `WRITE_DEBUG_TOKEN` | `""` | `password?` | (v0.9.9) When non-empty, unlocks `POST /api/device/send-command`. Default empty = the debug write path is disabled. See Security. |
 
@@ -6614,9 +6641,13 @@ gated by **five** layers (`server/src/index.ts`, `server/src/ecoflow/commands.ts
    total keys, max 1 KB serialized; plus a **per-SN cooldown** `SEND_CMD_COOLDOWN_MS`
    (env, default `30000` ms) returning `429` while cooling down.
 
-The non-debug write (`POST /api/device/refresh-cloud/:sn`) is a true no-op cloud-presence
-refresh (re-sends the current `backupReserveSoc`) with its own `REFRESH_COOLDOWN_MS = 30_000`
-per-SN cooldown (`commands.ts`).
+The non-debug writes are: `POST /api/device/refresh-cloud/:sn`, a true no-op
+cloud-presence refresh (re-sends the current `backupReserveSoc`) with its own
+`REFRESH_COOLDOWN_MS = 30_000` per-SN cooldown; and, since v1.50.0, the
+supervised night-charge reserve write (`setBackupReserveSoc`, audit action
+`night-charge-reserve`, 5-min cooldown) — actuator-only, no direct HTTP
+surface (§15.8b). `POST /api/night-charge/cancel` (write-auth via
+`requireWriteAuth`) disarms or reverts tonight's supervised write.
 
 #### Audit log (`server/src/writeLog.ts`)
 
@@ -6798,6 +6829,7 @@ multi-arch image — it does **not** build on the Pi. Once the GitHub Release is
 - `audio/` — startup-generated klaxon WAVs (served at `/audio/*`).
 - `audio-render/` — on-demand rendered klaxon+TTS announcements (served at `/audio-render/*`, `wildcard:true`).
 - Operator-uploaded chimes dir (served at `/chimes/*`).
+- `.night-charge-latch.json` / `.night-charge-plan.json` / `.night-charge-actuation.json` — the evening-job day latch, the persisted pre-window plan snapshot, and the restart-surviving supervised-write actuation record (§15.8b; the actuation file is what lets a raised reserve be found and reverted across a restart).
 
 #### First-run setup
 
@@ -7737,11 +7769,11 @@ The subsystem spans six modules, all shipped incrementally (v1.36.0 tariff → v
 
 The binding safety invariants, enforced structurally rather than by convention:
 
-- **Read-only with respect to the alarm spine.** The advisor reads the same `projection.backupReserveSoc` the reserve-floor alarm (§5) defends — the *same field*, never a divergent copy — and produces **no** state the floor/runway/SoC alarms consume. A bug here can mis-recommend; it cannot mis-alarm.
+- **The alarm spine never consumes engine state.** The engine reads the same `projection.backupReserveSoc` the reserve-floor alarm (§5) defends — the *same field*, never a divergent copy — and produces **no** state the floor/runway/SoC alarms consume. In `advisory` mode (the default) nothing is ever written; in `supervised`/`auto` the actuator's one bounded write raises that reserve for the charge-window span and auto-restores it (§8b), while the floor alarms keep their own independent protection throughout — a bug here can mis-recommend or mis-charge within the [10, 50] clamp; it cannot mis-alarm.
 - **Under-buy is a safety miss, not a cost miss.** The outage cushion is an explicit resilience requirement; a confidently under-sized buy leaves the home at the floor with no cushion when an outage hits. Sizing therefore uses **worst-case inputs**: P10 (pessimistic-low) PV and P90 (pessimistic-high) load, with committed EV load placed as a worst-case block.
 - **The over-buy ceiling is the deliberate asymmetry.** The floor is sized with P10 PV (never under-buy); the "don't clip tomorrow morning's PV" ceiling is sized with **P90** PV (never over-buy into clipping). Where the two collide on a genuinely tight day, **resilience wins**: the buy is kept, the clip is accepted, and `bindingCap='overBuy'` is surfaced.
 - **Emit null over a fabricated number.** An incomplete, incoherent, thin, or climatology-only basis yields a *null plan* (`chargeTonight=false`, every numeric field `null`) — never a best-effort small number the operator might trust as cushion. The same discipline runs through the tariff (`ratesConfirmed=false` ⇒ every `$` output null), the scorer (zero telemetry samples ⇒ `null`, not a "measured" `0`), and the gate (null readiness ⇒ `write_ready` strictly `false`).
-- **The gate never enables a write.** `READY_TO_CONSIDER_WRITES` only unlocks *consideration*; the device write path is separately deferred behind a probe + owner toggle + the safety spine (design `docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md` §6, not yet built).
+- **The gate governs unattended writes only.** `writeReady` gates the `auto` mode alone (`effectiveActuationMode` structurally demotes `auto` to `supervised` until the gate graduates, §8); `supervised` is an explicit owner action in the add-on configuration with a per-night announced cancel window (§8b). The write path shipped in v1.50.0 per the 2026-07-31 amendment to `docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`.
 
 ---
 
@@ -7923,7 +7955,7 @@ The single source of truth for a plan date's spans, in fixed America/Phoenix ari
 
 #### The backfill sweep (`scoreCompletedNights`, `index.ts:2804`)
 
-Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last **60 days** of ledger rows (not exactly-yesterday — the old scorer orphaned any night left uncaptured across SHP2-wedge/downtime days forever, an uncounted MNAR exclusion), skipping rows already captured (`outcome_captured_at_ms != null` — idempotent) and rows still in flight. A night whose raw telemetry (~30-day retention) has aged out captures honestly as `scored=0` with null actuals — it does not stay uncaptured forever.
+Runs on the 30-min tick, the evening job, and the boot warm-up. Sweeps the last **60 days** of ledger rows (not exactly-yesterday — the old scorer orphaned any night left uncaptured across SHP2-wedge/downtime days forever, an uncounted MNAR exclusion), skipping rows already captured (`outcome_captured_at_ms != null` — idempotent) and rows still in flight. A night whose raw telemetry has aged past the configured samples retention (default 30 days) captures honestly as `scored=0` with null actuals — it does not stay uncaptured forever.
 
 #### Measuring one night (`scoreNightRow`, `index.ts:2840`)
 
@@ -8027,6 +8059,7 @@ Add-on options (`config.yaml` → env):
 | Option | Default | Range | Meaning |
 |---|---|---|---|
 | `NIGHT_CHARGE_ADVISOR_ENABLED` | `true` | bool | Master switch for the timers + surfaces (env compare is `!== 'false'`) |
+| `NIGHT_CHARGE_MODE` | `advisory` | list(advisory\|supervised\|auto) | Write posture (v1.50.0). `advisory` never writes; `supervised` runs the announced, cancellable, bounded, auto-reverting reserve write per charge night (§8b); `auto` is honored only after gate graduation and operates as supervised until then. Unknown values fail closed to `advisory`. |
 | `ARB_OUTAGE_CUSHION_PCT` | `15` | int 0–40 | Cushion % above the reserve floor the trough must hold; never changes the independent floor alarm |
 | `ARB_MIN_BUY_KWH` | `1` | float 0–50 | Below this recommended buy, the night is a "hold" |
 | `ARB_CHARGE_CAP_KW` | `7.2` | float 0–50 | Grid-charge power ceiling used by the feasibility cap (the live `chChargeWatt`); sizing only, no device is ever set |
@@ -8046,13 +8079,9 @@ Env-only knobs (not in the options form): `NIGHT_CHARGE_LATCH_PATH` (latch file 
 - **SHP2 offline / missing battery fields** ⇒ `recomputeNightChargePlan` returns null and the holder keeps the prior plan until the 12 h staleness guard nulls the surfaces and the ~25 h `expire_after` flips the HA entities to `unavailable`. The scorer likewise cannot source actuals while the SHP2 projection is absent; affected nights land as MNAR exclusions, which the gate's expected-nights denominator counts against readiness.
 - **Weekend tariff boundary (open question).** The model's per-instant weekday gating makes Friday's window Fri 23:00–24:00 only (Sat 00:00–05:00 is weekend off-peak) with the next window opening Mon 00:00 — a ~48 h carry sized against a 1-hour charge window (charge-power capped, `cushionShortfall` honestly flagged) on a mostly `mixed`-tier basis that never enters gate eligibility. Whether real APS billing extends Friday's overnight into Saturday morning can only be settled from a bill; if it does, the correction belongs in `tariff.ts` weekday gating. Rates are null until confirmed, so no `$` output depends on the answer.
 - **Hardware charge envelope is an open datum.** `ARB_CHARGE_CAP_KW` reflects the observed `chChargeWatt` (7.2 kW), not a verified hardware spec; the feasibility cap is only as accurate as this knob.
-- **Advisory-only, twice over.** The add-on performs no writes in any state, and `READY_TO_CONSIDER_WRITES` unlocks only *consideration* — the eventual write path is separately deferred behind a probe, an owner toggle, and the safety spine. During the advisory phase the realized-need counterfactual is defensible only on clean (near-zero-import) nights, so grid-propped nights are excluded from scoring rather than fabricated.
+- **Write posture is mode-gated and fail-closed.** In `advisory` (the default) the add-on performs no night-charge writes; `supervised` performs exactly one announced, cancellable, bounded, auto-reverting reserve write per charge night (§8b), and `auto` is demoted to supervised until the gate graduates (§8). On non-actuated nights the realized-need counterfactual is defensible only on clean (near-zero-import) nights, so grid-propped nights are excluded from scoring rather than fabricated; actuated nights score from the measured delivered charge instead.
 - **Pre-v1.39.0 ledger rows** carry no stored window and are permanently unscoreable (captured as `scored=0` with an explanatory note); nights whose raw telemetry has aged past the configured samples retention (default 30 days) capture honestly unscored rather than staying open forever.
 - **The calibration learner is not yet live.** `night_charge_calibration` (seasonal cushion, buy de-bias, EV-tail inflation) exists as schema + API only; the cushion remains the static `ARB_OUTAGE_CUSHION_PCT` until the learner ships as its own increment.
-
----
-
-All verification complete. Composing the appendix now from the verified consumer graph.
 
 ---
 
@@ -8213,7 +8242,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Runtime config two-layer | Env baseline + live override file; `resolveAnnounceVolume` (§10.11) | Operator PUT | Broadcast | measured-and-active |
 | Audible-delivery health | `broadcastHealth.ts` reachability probes → `audible_channel_status` + self-alert (§10.13) | MA/SIP probe results | HA sensors, alert monitor | measured-and-active |
 
-### A.10 Night-charge advisory stack (v1.36–v1.39; no chapter yet — `tariff.ts`, `nightChargeAdvisor.ts`, `nightChargeGate.ts`)
+### A.10 Night-charge engine stack (v1.36–v1.51 — `tariff.ts`, `nightChargeAdvisor.ts`, `nightChargeGate.ts`, `nightChargeActuator.ts`; chapter §15)
 
 | Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
 |---|---|---|---|---|
