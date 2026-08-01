@@ -1,3 +1,23 @@
+## v1.51.1 — documentation freshness pass
+
+A four-way audit of the long-form documentation against the v1.49.0–v1.51.0
+releases found the pre-supervised-write posture asserted throughout; this
+release corrects every instance. README, DOCS §15 (§1 posture, §10 config
+table, §11 failure modes), the §12 option reference (night-charge group,
+`NIGHT_CHARGE_MODE`, `RECORDER_RETENTION_DAYS`, heartbeat pointers), the §2
+write-framework enumeration, the §12 security posture (both non-debug writes
+and the cancel endpoint), the persistence inventory (night-charge state
+files), retention phrasings, the table of contents, and the A.10 appendix
+heading now describe the shipped mode-gated write posture and configurable
+retention. SECURITY.md no longer cites a nonexistent `write_actions_enabled`
+option and names the real posture. PERFORMANCE.md §3 records the gate-v2
+transition and the 2026-08-01 start of the actuated-evidence record.
+`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md` gains the Amendment of 2026-07-31
+(why the original I1/§5/§6 posture was revised, the amended write contract,
+and gate v2), with supersession markers on the retired sections. The add-on
+store description and repository metadata reflect the alarm spine and the
+night-charge engine. No code changes.
+
 ## v1.51.0 — configurable telemetry retention
 
 `RECORDER_RETENTION_DAYS` (default 30, range 7–730) replaces the hard-coded

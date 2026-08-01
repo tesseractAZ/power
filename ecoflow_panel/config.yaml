@@ -1,11 +1,13 @@
 name: Power
-version: "1.51.0"
+version: "1.51.1"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
-  Delta Pro Ultras; learned anomaly detection, day-ahead forecasting, and
-  per-pack capacity-fade → end-of-life projection.
-url: https://github.com/tesseractAZ/ecoflow-panel
+  Delta Pro Ultras; life-safety battery/grid alarms with spoken broadcast,
+  day-ahead forecasting, learned anomaly detection, per-pack capacity-fade
+  → end-of-life projection, and a TOU night-charge engine (advisory by
+  default; opt-in supervised charging).
+url: https://github.com/tesseractAZ/power
 arch:
   - aarch64
   - amd64

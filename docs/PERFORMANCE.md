@@ -2,7 +2,7 @@
 
 This document is the runtime-evidence companion to [`DOCS.md`](../ecoflow_panel/DOCS.md): where the engine reference specifies what the system does, this records **how it is doing** — measured event rates, realized forecast accuracy, learning-gate progress, and fleet health, taken from the production deployment's own durable ledgers. It is refreshed when the underlying data changes and snapshotted at each release; numbers are not projections and are never carried forward past their as-of stamp. All figures are measured on a **single production deployment** (one SHP2, three wired Delta Pro Ultra Cores of five packs each, two bench spares) and generalize only as an existence proof, not a distribution. Timestamps are America/Phoenix (MST, UTC−7, no DST). Where a metric has no data yet, this document says so and states when accrual began — null over fabrication, the same rule the engines themselves follow.
 
-Evidence sources: the cleared-alert ledger (`/api/alerts/history`, cap `CLEARED_LOG_MAX = 1500`), the night-charge ledger (`night_charge_ledger` via `/api/night-charge/status`), the probabilistic-band diagnostics (`/api/forecast/probabilistic`), and the live snapshot. Current data-as-of: **2026-07-21 17:05 MST**.
+Evidence sources: the cleared-alert ledger (`/api/alerts/history`, cap `CLEARED_LOG_MAX = 1500`), the night-charge ledger (`night_charge_ledger` via `/api/night-charge/status`), the probabilistic-band diagnostics (`/api/forecast/probabilistic`), and the live snapshot. Current data-as-of: **2026-07-21 17:05 MST** for the measured-rate sections (§1, §2, §4); the engine-posture section (§3) was refreshed **2026-08-01** for the v1.49.0–v1.51.0 releases.
 
 ---
 
@@ -68,18 +68,15 @@ The ledger's four rows to date, with their dispositions:
 | 2026-07-19 | Null plan — basis incomplete | Captured, `scored=0`, same reason. |
 | 2026-07-20 | Null plan — basis incomplete | Capture **pending** its completion gate at the time of writing (the first row recorded under v1.39.0 scoring rules). |
 
-**Write-readiness: `LEARNING`**, `writeReady=false` — the fail-closed posture while zero scored nights exist. The gate's current quantitative blockers (`nightChargeGate.ts`, thresholds pre-registered and frozen):
+**Write-readiness (gate v2, as of 2026-08-01): `LEARNING`**, `writeReady=false` — the fail-closed posture at the start of the actuated-evidence record. The v1 gate documented in earlier snapshots was retired in v1.50.0: its clean-islanded-baseline evidence base is structurally unreachable on a grid-tied home (`scoredDays` froze at 0), and `CURRENT_ALGO_VERSION` moved 1 → 2 with the v1.49.0 sizing-physics correction, excluding every v1-era row. Gate v2 graduates the unattended `auto` mode on actuated-night evidence (`nightChargeGate.ts`, thresholds pre-registered and frozen):
 
-- 0 scored forecast-backed nights; **≥ 60** required (`MIN_SCORED_ELIGIBLE_DAYS`).
-- Record spans 0 days; **≥ 90 in-season days** required (`REQUIRED_IN_SEASON_DAYS`, fail-closed).
-- Effective-N 0.0; **≥ 45** autocorrelation-adjusted independent nights required (`MIN_EFFECTIVE_N`).
-- Under-buy rate uncomputable (no scored buy errors); must reach **≤ 0.10**.
-- Buy bias unmeasured; must land in the slight-over-buy band **[0, 5] kWh**.
-- PV and load day-ahead accuracy unmeasured; each requires **MAE ≤ 0.20 and |bias| ≤ 0.10** (fractions of actual).
-- Band coverage unmeasured at gate granularity; must land in **[78%, 92%]**.
-- MNAR exclusion at **100%**, above the **35% cap** — expected while every row is an unscoreable pre-repair or pending night, since the denominator deliberately counts *expected* nights (v1.39.0) so downtime cannot shrink it.
+- 0 scored **actuated** nights; **≥ 21** required (`MIN_ACTUATED_NIGHTS`). Accrual begins with the first supervised night (supervised mode enabled 2026-08-01).
+- Under-buy rate uncomputable (no actuated buy errors); must reach **≤ 0.10** once ≥ 5 nights exist to judge it.
+- Delivery bias unmeasured; must land in the slight-over-buy band **[0, 5] kWh**.
+- Band coverage unmeasured at gate granularity; must land in **[78%, 92%]** over **≥ 14** verdict-bearing captured forecast nights.
+- Zero engine-fault strikes required (rolling **45-day** window; a strike needs a claimed-hold plan plus a trajectory or realized breach — `cushionShortfall`-disclosed shortfalls are exempt; **14** consecutive strike-free actuated nights clear the window).
 
-The advisory surfaces (HA `night_charge_*` sensors, the 21:30 notification, `/api/night-charge/status`) run regardless; no write path exists in the codebase. Every dollar field in the ledger emits null because tariff rates are unconfirmed (§6).
+The advisory surfaces (HA `night_charge_*` sensors, the 21:30 notification, `/api/night-charge/status`) run in every mode. Since v1.50.0 a supervised write path exists (`nightChargeActuator.ts`): one announced, cancellable, bounded, auto-reverting `backupReserveSoc` write per charge night, gated by the owner's `NIGHT_CHARGE_MODE` (default `advisory` — never writes); the gate governs only graduation to unattended `auto`. Every dollar field in the ledger emits null because tariff rates are unconfirmed (§6).
 
 ---
 
