@@ -47,15 +47,31 @@ interface NightChargeReadiness {
   effectiveN: number;
 }
 
+interface NightActuation {
+  day: string | null;
+  targetPct: number | null;
+  buyKwh: number | null;
+  windowStartMs: number | null;
+  windowEndMs: number | null;
+  cancelled: boolean;
+  appliedAtMs: number | null;
+  priorReservePct: number | null;
+  revertedAtMs: number | null;
+  revertAttempts: number;
+  lastError: string | null;
+  cancelDeadlineMs: number | null;
+}
+
 interface NightChargeStatus {
   enabled: boolean;
-  mode: 'advisory';
+  mode: 'advisory' | 'supervised' | 'auto';
   window: { startMs: number; endMs: number } | null;
   reserveFloorPercent: number | null;
   confidence: string | null;
   notify: { hour: number; minute: number; lastNotifyDay: string | null } | null;
   plan: NightChargePlan | null;
   readiness: NightChargeReadiness | null;
+  actuation?: NightActuation | null;
   recentOutcomes?: unknown;
 }
 
@@ -165,7 +181,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
           <span className="text-ink font-medium">{fmtSoc(plan.baselineMinSocPct)}</span> stays at/above the{' '}
           {floorCushionPct.toFixed(0)}% floor+cushion — no cheap-window buy required tonight.
         </div>
-        <AdvisoryNote />
+        <AdvisoryNote mode={status.mode} />
       </div>
     );
   }
@@ -203,6 +219,9 @@ export const NightChargeCard = memo(function NightChargeCard() {
         </div>
       )}
 
+      <ActuationBanner mode={status.mode} actuation={status.actuation ?? null} />
+
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         <Stat label="Trough without buy" value={fmtSoc(plan.baselineMinSocPct)} sub="P10 PV / P90 load" />
         <Stat label="Trough with buy" value={fmtSoc(plan.minProjSocPct)} sub={`floor+cushion ${floorCushionPct.toFixed(0)}%`} />
@@ -210,12 +229,84 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />
       </div>
 
-      <AdvisoryNote />
+      <AdvisoryNote mode={status.mode} />
     </div>
   );
 });
 
-function AdvisoryNote() {
+/**
+ * v1.50.0 — tonight's supervised-write state + the owner cancel control.
+ * Renders nothing in advisory mode or when nothing is armed for tonight. The
+ * cancel POST is optimistic-after-confirm: on 2xx the banner flips locally to
+ * "cancelled" immediately (the 60 s status poll converges the full card).
+ */
+function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode']; actuation: NightActuation | null }) {
+  const [busy, setBusy] = useState(false);
+  const [localCancelled, setLocalCancelled] = useState(false);
+  const [cancelErr, setCancelErr] = useState<string | null>(null);
+  if (mode === 'advisory' || !actuation || actuation.day == null) return null;
+
+  const cancelled = actuation.cancelled || localCancelled;
+  const deadline = phoenixHHMM(actuation.cancelDeadlineMs);
+  const doCancel = async () => {
+    setBusy(true);
+    setCancelErr(null);
+    try {
+      const r = await fetch(apiUrl('api/night-charge/cancel'), { method: 'POST' });
+      if (r.ok) setLocalCancelled(true);
+      else setCancelErr(`cancel failed (HTTP ${r.status})`);
+    } catch {
+      setCancelErr('cancel failed — network error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let text: string;
+  let showCancel = false;
+  if (actuation.revertedAtMs != null) {
+    text = `Completed — reserve restored to ${actuation.priorReservePct ?? '—'}%.`;
+  } else if (cancelled) {
+    text = actuation.appliedAtMs != null
+      ? 'Cancelled — the applied write reverts within a minute.'
+      : 'Cancelled — no write tonight.';
+  } else if (actuation.appliedAtMs != null) {
+    text = `Reserve raised to ${actuation.targetPct}% (was ${actuation.priorReservePct ?? '—'}%); auto-restores after the window closes.`;
+    showCancel = true;
+  } else {
+    text = `Supervised write armed — reserve → ${actuation.targetPct}%${deadline ? ` at ${deadline}` : ''}.`;
+    showCancel = true;
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-3 bg-panel2 border border-line rounded-md p-2 mb-3 text-xs">
+      <span className={actuation.revertedAtMs != null || cancelled ? 'text-muted' : 'text-warn'}>{text}</span>
+      <span className="flex items-center gap-2">
+        {cancelErr && <span className="text-crit">{cancelErr}</span>}
+        {showCancel && (
+          <button
+            className="px-2 py-1 rounded border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50"
+            disabled={busy}
+            onClick={doCancel}
+          >
+            {actuation.appliedAtMs != null ? 'Cancel & revert' : 'Cancel tonight'}
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function AdvisoryNote({ mode }: { mode: NightChargeStatus['mode'] }) {
+  if (mode !== 'advisory') {
+    return (
+      <div className="text-[11px] text-muted mt-3 leading-relaxed">
+        {mode === 'auto' ? 'Auto' : 'Supervised'} write mode — on charge nights the add-on performs one
+        bounded reserve write (announced each evening, cancellable above) and auto-restores the prior
+        reserve after the window. The reserve-floor alarms are independent of this path.
+      </div>
+    );
+  }
   return (
     <div className="text-[11px] text-muted mt-3 leading-relaxed">
       Advisory only — this add-on never charges the battery itself. Wire your own HA automation to the{' '}

@@ -245,6 +245,10 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
 export function buildNightChargeMessage(
   plan: NightChargePlan | null,
   shape: 'charge' | 'hold' | 'insufficient_basis',
+  /** v1.50.0 — set when tonight's supervised write is ARMED: the notification
+   *  then names the bounded write and its cancel deadline instead of the
+   *  advisory-only tail. null/omitted = advisory posture, unchanged. */
+  supervised?: { cancelDeadlineText: string; targetPct: number } | null,
 ): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_plan' };
 
@@ -283,6 +287,13 @@ export function buildNightChargeMessage(
   const overBuyNote = plan.bindingCap === 'overBuy'
     ? ' NOTE: the buy exceeds tomorrow morning’s PV headroom; a small clip is accepted to hold resilience.'
     : '';
+  const tail = supervised
+    ? `SUPERVISED: at ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
+      + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `
+      + 'Cancel from the night-charge card on the panel before then.'
+    : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
+      + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '
+      + 'and the night_charge_window_start/_end sensors.';
   return {
     ...base,
     title: `Night-charge: buy ~${kwh(plan.buyKwh)} tonight`,
@@ -291,9 +302,7 @@ export function buildNightChargeMessage(
       + `Without it, tomorrow’s projected low SoC falls to ~${pct(plan.baselineMinSocPct)}; `
       + `with it, ~${pct(plan.minProjSocPct)} (the floor+cushion line is ${floorCushion}%). `
       + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote} `
-      + 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
-      + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '
-      + 'and the night_charge_window_start/_end sensors.',
+      + tail,
   };
 }
 
