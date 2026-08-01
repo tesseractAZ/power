@@ -242,6 +242,9 @@ configuration:
   TUI_TRUSTED_ORIGINS:
     name: Console Trusted Origins
     description: Advanced. Comma-separated list of EXACT browser origins additionally allowed to open the /console web terminal (e.g. https://your-id.ui.nabu.casa for direct remote access). Leave empty (default) — the console is reachable on the LAN and through the Home Assistant sidebar without this. Each entry is an exact match, never a wildcard.
+  RECORDER_RETENTION_DAYS:
+    name: Telemetry Retention (days)
+    description: 'How many days of raw telemetry samples (charts, sparklines, forecast/model training windows) the add-on keeps before the hourly prune removes them. Default 30. Longer retention enables seasonal model comparisons and deeper backtests at the cost of database size — expect roughly 25–30 MB per day at a full fleet''s metric volume. The durable night-charge ledger and lifetime energy totals are never pruned regardless of this setting. Range 7–730.'
   ECOFLOW_DEVICE_REACHABILITY:
     name: Device LAN Reachability Map
     description: Optional JSON object mapping each device serial to an HA ping binary_sensor (device_class connectivity) that watches its LAN IP, e.g. {"GBC0314XXXXXXXX":"binary_sensor.core1_lan"}. A cloud-offline but LAN-reachable device is flagged a session wedge (don't power-cycle); unreachable is a real outage. Purely diagnostic — it only enriches the offline alert and a wedge-count sensor; empty (the default) or malformed JSON leaves it off.

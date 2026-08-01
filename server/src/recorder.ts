@@ -555,6 +555,20 @@ const NIGHT_CALIBRATION_COLUMNS: readonly (keyof NightCalibration)[] = [
 ];
 const NIGHT_CALIBRATION_COLUMN_SET = new Set<string>(NIGHT_CALIBRATION_COLUMNS as readonly string[]);
 
+/**
+ * v1.51.0 — samples retention from the RECORDER_RETENTION_DAYS option. PURE.
+ * Default 30 (the historical value; a fresh install behaves identically).
+ * Clamped to [7, 730]: below a week the chart windows and the 7-day load
+ * curves lose their inputs; above two years the cap bounds worst-case table
+ * size on small hosts. Malformed values fall back to the default — a config
+ * typo must never silently turn into a 0-day (delete-everything) retention.
+ */
+export function resolveRetentionDays(raw: string | undefined): number {
+  const n = Number(raw);
+  if (raw == null || raw === '' || !Number.isFinite(n)) return 30;
+  return Math.min(730, Math.max(7, Math.round(n)));
+}
+
 export function createRecorder(store: SnapshotStore, log: (m: string) => void): Recorder {
   const dbPath = resolve(process.cwd(), config.dbPath);
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -1114,9 +1128,14 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     });
   });
 
-  // Retention sweep every hour: drop samples > 30 days old.
+  // Retention sweep every hour: drop samples older than the configured
+  // retention (v1.51.0 — RECORDER_RETENTION_DAYS, default 30). The durable
+  // night-charge ledger/calibration and lifetime tables are never touched by
+  // this prune regardless of the setting.
   const prune = db.prepare(`DELETE FROM samples WHERE ts < ?`);
-  const RETAIN_MS = 30 * 24 * 60 * 60 * 1000;
+  const retentionDays = resolveRetentionDays(process.env.RECORDER_RETENTION_DAYS);
+  log(`recorder: samples retention ${retentionDays} days`);
+  const RETAIN_MS = retentionDays * 24 * 60 * 60 * 1000;
   setInterval(() => {
     try {
       const cutoff = Date.now() - RETAIN_MS;
