@@ -89,19 +89,22 @@ for (const [name, ov] of [
 
 // ── (b) Clean shortfall night: buy sizes the WITH-BUY trough to floor+cushion ──
 test('clean shortfall — buy sized so plan trough holds floor+cushion exactly', () => {
-  // socNow 30 kWh, 1 kWh/h drain, window ends B+9h.
-  // packAtWindowEnd(no buy) = 30 − 9 = 21; trough over [B+9h, B+23h] = 21 − 15 = 6 kWh.
-  // targetFloor = 25 kWh ⇒ requiredExtra = 19 kWh; target pack = 40 kWh (40%).
-  // buyKwh = 19 / 0.9 = 21.11 kWh; with-buy trough = 40 − 15 = 25 kWh = floor+cushion.
+  // socNow 30 kWh, 1 kWh/h pack drain (0.9 kW / 0.9 η), window [B+3h, B+9h].
+  // Baseline: packAtWindowEnd(no buy) = 30 − 9 = 21; trough over [B+9h, B+23h]
+  // = 21 − 15 = 6 kWh. targetFloor = 25 kWh ⇒ end-of-window pack must be 40.
+  // v1.49.0 model: charging (cap 100 kW) occupies L/90 h of the window with the
+  // house on grid bypass, so pack(L) = 27 + L − (6 − L/90) = 21 + L·(91/90).
+  // 21 + L·91/90 = 40 ⇒ L = 19·90/91 = 18.79 kWh; buy = 18.79/0.9 = 20.88;
+  // target pack = 40 kWh (40%); with-buy trough = 40 − 15 = 25 = floor+cushion.
   const p = computeNightChargePlan(baseInputs());
   assert.equal(p.chargeTonight, true);
   assert.equal(p.objective, 'resilience_cushion');
-  assert.equal(p.requiredExtraKwh, 19);
+  assert.equal(p.requiredExtraKwh, 18.79);
   assert.equal(p.baselineMinSocPct, 6);
   assert.equal(p.targetSocPct, 40);
   assert.equal(p.bindingCap, 'requirement');
   assert.equal(p.cushionShortfall, false);
-  assert.ok(Math.abs(p.buyKwh! - 19 / 0.9) < 0.02, `buyKwh ≈ 21.11, got ${p.buyKwh}`);
+  assert.ok(Math.abs(p.buyKwh! - 18.79 / 0.9) < 0.02, `buyKwh ≈ 20.88, got ${p.buyKwh}`);
   // THE safety property: the plan's own trough is AT the floor+cushion line, never below.
   assert.ok(Math.abs(p.minProjSocPct! - 25) < 0.05, `plan trough ≈ 25%, got ${p.minProjSocPct}`);
   assert.ok(p.minProjSocPct! >= 25 - 1e-6, 'plan trough must NOT fall below floor+cushion');
@@ -128,13 +131,61 @@ test('monotonicity — a heavier (EV) load night sizes a strictly bigger buy', (
 
 // ── (d1) Charge-power cap: tiny charger ⇒ bindingCap chargePower + cushionShortfall ──
 test('cap — charge-power limit bounds the buy below need and flags the shortfall', () => {
-  // chargeCapKw 1 over a 6 h window = 6 kWh gross; window house load 6·0.9 = 5.4 kWh;
-  // lift ≤ (6 − 5.4)·0.9 = 0.54 kWh ≪ required 19 ⇒ capped, cushion NOT met.
+  // chargeCapKw 1 over a 6 h window ⇒ charge-only lift cap 1·6·0.9 = 5.4 kWh
+  // (v1.49.0: house load rides grid bypass and never debits the charge budget);
+  // 5.4 ≪ required ~18.8 ⇒ capped, cushion NOT met.
   const p = computeNightChargePlan(baseInputs({ chargeCapKw: 1, minBuyKwh: 0.1 }));
   assert.equal(p.bindingCap, 'chargePower');
   assert.equal(p.cushionShortfall, true, 'caps prevented meeting floor+cushion — must be surfaced');
   assert.ok(p.minProjSocPct! < 25, 'with only the capped buy, trough stays below floor+cushion');
   assert.ok(/residual risk/i.test(p.rationale), 'rationale must disclose the residual risk');
+});
+
+// ── v1.49.0 MODEL DISCRIMINATORS: these fixtures produce DIFFERENT numbers under
+//    the corrected charge-only model vs the old shared-grid-budget model, so a
+//    regression to load-subtraction cannot pass silently. ──
+test('v1.49.0 — charge cap is CHARGE-ONLY: window house load never debits the charge budget', () => {
+  // cap 7.2 kW, 6 h window, 6 kW house load all night (pack drain 6.67 kWh/h).
+  // Correct: lift cap = 7.2·6·0.9 = 38.88 ⇒ meter buy 43.2 kWh.
+  // Old shared-budget model: (43.2 − 36)·0.9 = 6.48 lift ⇒ buy 7.2 — a 6× under-buy.
+  const p = computeNightChargePlan(baseInputs({ chargeCapKw: 7.2, horizon: mkHorizon(B, 24, 0, 6000), minBuyKwh: 0.1 }));
+  assert.equal(p.bindingCap, 'chargePower');
+  assert.ok(Math.abs(p.buyKwh! - 43.2) < 0.05, `meter buy ≈ 43.2 (charge-only cap), got ${p.buyKwh}`);
+  assert.ok(p.buyKwh! > 40, 'must decisively exceed the old shared-budget ceiling (~7.2)');
+});
+
+test('v1.49.0 — while charging, the house rides grid bypass (no pack drain in charging hours)', () => {
+  // cap 2 kW ⇒ cap lift 2·6·0.9 = 10.8 needs the FULL 6 h window, so every
+  // window hour is bypassed: target pack = packAtWindowStart 27 + 10.8 = 37.8.
+  // Old model: lift (12 − 5.4)·0.9 = 5.94 on top of the drained 21 ⇒ 26.94.
+  const p = computeNightChargePlan(baseInputs({ chargeCapKw: 2, minBuyKwh: 0.1 }));
+  assert.equal(p.bindingCap, 'chargePower');
+  assert.ok(Math.abs(p.buyKwh! - 10.8 / 0.9) < 0.02, `meter buy ≈ 12.0, got ${p.buyKwh}`);
+  assert.ok(Math.abs(p.targetSocPct! - 37.8) < 0.1, `target 37.8% (bypassed window drain), got ${p.targetSocPct}`);
+});
+
+// ── v1.49.0 REVIEW REGRESSION (HIGH): the achievable-model search domain must
+//    not stop at the stale fullKwh − noBuy bound — past it, more lift still buys
+//    more bypass hours. Scenario (verified by execution during review): near-full
+//    pack + heavy in-window load + heavy post-window drain. The stale bound
+//    declared 28 kWh "unmeetable" (trough 22, below the 25 floor+cushion) when
+//    34.46 kWh — inside the 38.88 charge-power cap — holds the line exactly. ──
+test('v1.49.0 — bisection searches the achievable plateau, not the stale pool bound (no false unmeetable)', () => {
+  const horizon = mkHorizon(B, 24, 0, [
+    ...Array.from({ length: 9 }, () => 2700),   // pre-window + window: 3 kWh/h pack drain
+    ...Array.from({ length: 15 }, () => 4500),  // post-window: 5 kWh/h pack drain
+  ]);
+  const p = computeNightChargePlan(baseInputs({ socNowPct: 99, chargeCapKw: 7.2, horizon, minBuyKwh: 0.1 }));
+  assert.equal(p.cushionShortfall, false, 'the cushion IS deliverable — must not be declared unmeetable');
+  assert.equal(p.bindingCap, 'requirement');
+  assert.ok(Math.abs(p.requiredExtraKwh! - 34.46) < 0.1, `required ≈ 34.46 (achievable-model), got ${p.requiredExtraKwh}`);
+  assert.ok(Math.abs(p.minProjSocPct! - 25) < 0.1, `plan trough holds 25%, got ${p.minProjSocPct}`);
+});
+
+test('v1.49.0 — chargeCapKw 0 yields no phantom bypass lift (honest zero-buy shortfall)', () => {
+  const p = computeNightChargePlan(baseInputs({ chargeCapKw: 0, minBuyKwh: 0.1 }));
+  assert.equal(p.chargeTonight, false, 'no charger ⇒ no buy');
+  assert.equal(p.cushionShortfall, true, 'and the unmet cushion is disclosed');
 });
 
 // ── (d2) Pool-headroom cap: pack already near full ⇒ can't add the needed lift ──
@@ -184,15 +235,20 @@ test('efficiency is injected, not hard-coded — real 0.86 RTE constants size co
 //    hid the true (below-empty) deficit and under-bought on the exact night the
 //    feature exists for. Sizing now solves against the with-buy re-sim trough. ──
 test('regression — deep shortfall (baseline drains below empty) sizes the FULL need, not a truncated buy', () => {
-  // socNow 10 kWh, 2 kWh/h drain: the no-buy trough clamps to 0 well before the
-  // real trough. True need to hold the 25 kWh floor+cushion against the 30 kWh
-  // post-window drain is a 55 kWh pack lift (meter ~61) — NOT the 25 kWh the old
-  // targetFloor-minus-clamped-baseline would have produced.
+  // socNow 10 kWh, 2 kWh/h pack drain: the no-buy trough clamps to 0 well before
+  // the real trough — the buy must size the FULL need via the with-buy re-sim.
+  // v1.49.0 model: packAtWindowStart = 10 − 3·2 = 4; front-loaded charging lifts
+  // the pack off the 0-clamp immediately, so the remaining window drain is REAL
+  // (bypass credits only the L/90 charging hours):
+  // pack(L) = 4 + L − (12 − 2·L/90) = −8 + L·(46/45). End-of-window must be 55
+  // (25 floor+cushion + 30 post-window drain) ⇒ L = 63·45/46 = 61.63 kWh
+  // (meter 68.5) — MORE than the old 55 because the old model let 8 kWh of
+  // window drain vanish into the baseline's 0-clamp before adding the lift.
   const p = computeNightChargePlan(baseInputs({ socNowPct: 10, horizon: mkHorizon(B, 24, 0, 1800) }));
   assert.equal(p.chargeTonight, true);
   assert.equal(p.cushionShortfall, false, 'the buy is feasible here — cushion IS met, not a shortfall');
-  assert.ok(Math.abs(p.requiredExtraKwh! - 55) < 0.1, `required pack lift ≈ 55 kWh (full need), got ${p.requiredExtraKwh}`);
-  assert.ok(Math.abs(p.buyKwh! - 55 / 0.9) < 0.1, `meter buy ≈ 61.1 kWh, got ${p.buyKwh}`);
+  assert.ok(Math.abs(p.requiredExtraKwh! - 61.63) < 0.1, `required pack lift ≈ 61.63 kWh (full need), got ${p.requiredExtraKwh}`);
+  assert.ok(Math.abs(p.buyKwh! - 61.63 / 0.9) < 0.1, `meter buy ≈ 68.5 kWh, got ${p.buyKwh}`);
   // The plan's own trajectory holds the line — never truncated below it.
   assert.ok(p.minProjSocPct! >= 25 - 0.05, `plan trough must hold 25%, got ${p.minProjSocPct}`);
 });
@@ -606,11 +662,12 @@ test('v1.39.0 — mid-window plan caps charge power by the REMAINING window hour
 
 test('v1.39.0 — pre-window evaluation still credits the full window (no regression)', () => {
   // Same clean shortfall as the canonical case (evaluated at B, window B+3..B+9):
-  // the remaining window IS the full window, so numbers are unchanged.
+  // the remaining window IS the full window, so numbers are unchanged
+  // (v1.49.0 canonical: requiredExtra 18.79 — see the clean-shortfall derivation).
   const p = computeNightChargePlan(baseInputs());
-  assert.equal(p.requiredExtraKwh, 19);
+  assert.equal(p.requiredExtraKwh, 18.79);
   assert.equal(p.bindingCap, 'requirement');
-  assert.ok(Math.abs(p.buyKwh! - 19 / 0.9) < 0.02);
+  assert.ok(Math.abs(p.buyKwh! - 18.79 / 0.9) < 0.02);
 });
 
 // ── LOW: non-finite floor/cushion must fail CLOSED, not max-buy ──
