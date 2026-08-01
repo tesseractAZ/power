@@ -18,7 +18,7 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
 92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
 time-of-use rate.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~7,600
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~8,300
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
@@ -38,7 +38,8 @@ time-of-use rate.
 - Reverse-engineered EcoFlow cloud MQTT ingest (per-SN raw merge across `cmdId`
   1/2/4/21/28) → a unified snapshot for every DPU Core, the SHP2, and the EVSE —
   including **SHP2-attributed data for Cores whose Wi-Fi is down**.
-- SQLite time-series (adaptive interval + value-epsilon dedup, ~30-day retention)
+- SQLite time-series (adaptive interval + value-epsilon dedup; retention
+  configurable via `RECORDER_RETENTION_DAYS`, default 30 days, up to 2 years)
   and monotonic lifetime-energy accumulators wired into the HA Energy Dashboard.
 
 **Forecasting**
@@ -63,13 +64,20 @@ time-of-use rate.
 **Energy, economics & dispatch**
 - Self-consumption decomposition (solar fraction, PV→load/battery), carbon
   accounting, time-of-use tariff + cost, and clipping/curtailment.
-- A **night-charge TOU-arbitrage advisor** *(advisory only — issues no device
-  commands)*: on a night a shortfall is anticipated, it sizes "buy N kWh → charge
+- A **night-charge TOU-arbitrage engine** with an owner-selected write posture
+  (`NIGHT_CHARGE_MODE: advisory | supervised | auto`, default advisory — never
+  writes): on a night a shortfall is anticipated, it sizes "buy N kWh → charge
   to X% in the cheap overnight window" so the pack holds `reserve + outage
-  cushion` to the next cheap window — worst-case sized (P10 solar / P90 load).
-  It **learns from night one**: a durable ledger records each prediction and its
-  next-day outcome, and a fail-closed write-readiness gate must prove accuracy
-  before any write is ever offered.
+  cushion` to the next cheap window — worst-case sized (P10 solar / P90 load),
+  with the charge cap modeled as charge-only (the home rides grid bypass while
+  the charger runs). **Supervised mode** performs one announced, cancellable,
+  bounded reserve write per charge night (clamped to the device's 10–50% range,
+  armed only after an announcement channel confirms delivery, auto-reverted
+  after the window, audit-logged). It **learns from night one**: a durable
+  ledger records each plan, its measured delivery, and its outcome, and a
+  fail-closed write-readiness gate graduates **auto** mode only on real
+  actuated-night evidence (≥21 scored nights, under-buy ≤10%, delivery bias in
+  [0, 5] kWh, band coverage 78–92%, zero engine-fault strikes).
 - Two advisory round-trip-aware dispatch planners (greedy + a model-predictive
   DP), compute-only, never auto-applied.
 
@@ -179,15 +187,16 @@ The real guardrail is process: **every** change to an engine or the alarm path
 ships through green tests **plus** an adversarial multi-agent review that
 actively tries to break it. That review earns its keep — e.g. the night-charge
 advisor's review caught safety-direction sizing bugs (an under-buy on charging
-nights, a truncated weekend horizon) *before* they shipped. New actuation stays
-advisory-only and must prove out-of-sample accuracy through the learning ledger
-before any device-writing capability is even offered.
+nights, a truncated weekend horizon) *before* they shipped. New actuation defaults
+to advisory; enabling the supervised write is an explicit owner action, and
+unattended (auto) operation is earned only through the learning ledger's
+actuated-night evidence.
 
 ## Security
 
 See [`SECURITY.md`](SECURITY.md) for the vulnerability-reporting policy and the
-security posture: AppArmor confinement, device writes off by default behind an
-audit log and auth-gated endpoints, the unauthenticated TUI off by default, and
+security posture: AppArmor confinement, device writes defaulting to off
+(`NIGHT_CHARGE_MODE: advisory`) behind an audit log and auth-gated endpoints, the unauthenticated TUI off by default, and
 secrets handled presence-only (never logged or echoed).
 
 ## License
