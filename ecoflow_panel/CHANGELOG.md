@@ -1,3 +1,57 @@
+## v1.50.0 — night-charge supervised write mode + write-readiness gate v2
+
+The night-charge engine gains an owner-selectable write posture,
+`NIGHT_CHARGE_MODE: advisory | supervised | auto` (default `advisory`,
+unchanged behavior). In `supervised` mode, each charge night runs one bounded,
+announced, cancellable, auto-reverting device write:
+
+- **~21:30** — the evening plan is announced with the intended buy, the
+  clamped reserve target, and the cancel deadline, on both the HA
+  notification channel and the audible broadcast (no phone-push dependency).
+  The write is armed **from the announced plan**; a fresher recompute never
+  silently substitutes different numbers.
+- **Window open − 5 min** — one audited write raises `backupReserveSoc` to
+  `min(round(target), 50)`, validated into the device's documented [10, 50]
+  range, via the same documented `PD303_APP_SET` shape the cloud-presence
+  refresh has round-tripped since v0.9.10. Every apply guard fails closed:
+  advisory mode, a cancelled night, a red alert condition, an incoherent SoC
+  read, an unknown/out-of-range current reserve, or a missed window ⇒ no
+  write.
+- **Window close + 5 min** — the prior reserve value auto-restores; the
+  revert runs regardless of mode (a mid-night option flip cannot orphan a
+  raised reserve), retries on failure, and escalates to a critical
+  annunciation after 3 consecutive failures while retries continue. A
+  morning summary reports plan vs applied vs restored.
+- **Cancel** — `POST /api/night-charge/cancel` (write-auth), surfaced as a
+  button on the night-charge card; before the apply it disarms, after the
+  apply it triggers an immediate revert.
+
+Actuated nights are scored without the clean-baseline requirement: the
+delivered buy is measured as window grid import minus the concurrent house
+pass-through, and the realized-need counterfactual is derived by subtracting
+the delivered charge from the measured trough — a measured counterfactual,
+recorded in new ledger columns (`cushion_shortfall`, `actuated`,
+`actuation_applied_at_ms`, `delivered_kwh`; additive migration).
+
+**Write-readiness gate v2.** The v1 gate could never open on a grid-tied
+home: its clean-islanded-baseline scoring froze `scoredDays` at 0, and §5.1
+floor-breach strikes never aged. v2 (a) bases graduation on actuated nights —
+≥ 21 scored actuated nights, under-buy ≤ 10 %, delivery bias in [0, 5] kWh,
+band coverage in [78 %, 92 %] over ≥ 14 verdict nights, zero engine-fault
+strikes; (b) redefines a strike as *plan claimed hold AND breached* — a plan
+that honestly disclosed `cushionShortfall` is physics, not fault, and exempt;
+(c) holds strikes in a rolling 45-day window cleared by 14 consecutive
+strike-free actuated nights; (d) bumps `CURRENT_ALGO_VERSION` to 2 — the
+v1.49.0 sizing-physics correction invalidates every v1 row per §0.2, which
+also retires the v1-era strikes recorded against the broken model.
+`writeReady` gates AUTO only; supervised is an explicit owner action.
+
+18 new tests (gate v2 semantics, every actuator guard, delivery-measurement
+helpers, reserve-write validation); 1,737 total. Five targeted mutations
+(dropped red-vitals guard, dropped cancel-revert, dropped shortfall
+exemption, altered clean-streak threshold, widened reserve clamp) each fail
+the suite. Public-repo hygiene: doc/test example IPs generalized.
+
 ## v1.49.0 — night-charge sizing corrected: the charge cap is charge-only
 
 The buy sizer modeled `chChargeWatt` (7.2 kW) as a total grid-input budget
