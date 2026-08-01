@@ -12,6 +12,8 @@ import {
   nightWindowBounds,
   fmtPhoenixDayHm,
   medianFilter3,
+  actuatedDeliveredKwh,
+  actuatedRealizedNeedBuyKwh,
   type NightChargeInputs,
   type NightChargeHour,
   type NightChargePlan,
@@ -817,4 +819,31 @@ test('v1.39.0/2 — in-progress hour is simulated (conservative), not dropped', 
   // Same horizon, same hours simulated (floor(now) = B) ⇒ identical sizing.
   assert.equal(midHour.requiredExtraKwh, aligned.requiredExtraKwh,
     'mid-hour evaluation must simulate the same hour set as the aligned one (full current hour, conservative)');
+});
+
+/* ── v1.50.0 actuated-night measurement helpers (PURE) ─────────────────────── */
+
+test('actuatedDeliveredKwh: window import minus house pass-through, clamped ≥ 0', () => {
+  assert.equal(actuatedDeliveredKwh(20, 12), 8);
+  assert.equal(actuatedDeliveredKwh(10, 12), 0); // load exceeded import — never negative
+  assert.equal(actuatedDeliveredKwh(null, 12), null);
+  assert.equal(actuatedDeliveredKwh(20, null), null);
+  assert.equal(actuatedDeliveredKwh(Number.NaN, 12), null);
+});
+
+test('actuatedRealizedNeedBuyKwh: measured counterfactual — subtract the delivered charge', () => {
+  // floor+cushion 27 kWh; realized trough 30 kWh WITH a 10 kWh meter buy
+  // (9.27 kWh pack-side at legEff 0.927) → no-buy trough 20.73 kWh →
+  // need = (27 − 20.73) / 0.927 ≈ 6.76 kWh at the meter.
+  const need = actuatedRealizedNeedBuyKwh({
+    targetFloorKwh: 27, actualMinPackKwh: 30, deliveredMeterKwh: 10, legEff: 0.927,
+  });
+  assert.ok(Math.abs(need - 6.76) < 0.01, `need ${need}`);
+});
+
+test('actuatedRealizedNeedBuyKwh: trough comfortably above floor even without the buy → 0', () => {
+  const need = actuatedRealizedNeedBuyKwh({
+    targetFloorKwh: 27, actualMinPackKwh: 60, deliveredMeterKwh: 10, legEff: 0.927,
+  });
+  assert.equal(need, 0);
 });

@@ -75,6 +75,7 @@ import { computePackRiskV2 } from './ml.js';
 import { initAnalyticsClient } from './analyticsClient.js';
 import {
   refreshShp2CloudPresence,
+  setBackupReserveSoc,
   debugSendCommand,
   isWriteDebugEnabled,
   checkWriteDebugToken,
@@ -135,6 +136,8 @@ import {
   scoreNightOutcome,
   nightWindowBounds,
   medianFilter3,
+  actuatedDeliveredKwh,
+  actuatedRealizedNeedBuyKwh,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -151,6 +154,16 @@ import {
   computeNightChargeReadiness,
   CURRENT_ALGO_VERSION,
 } from './nightChargeGate.js';
+import {
+  resolveNightChargeMode,
+  armFromPlan,
+  decideActuation,
+  emptyActuationState,
+  coerceActuationState,
+  APPLY_LEAD_MS,
+  REVERT_ESCALATE_AFTER,
+  type NightActuationState,
+} from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
 import { buildApsREvModel, rateAt, localParts, seasonOf, type ApsREvRates } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
@@ -2348,6 +2361,14 @@ const NIGHT_CHARGE_LATCH_PATH =
 // evening job's 21:30–23:00 record window no longer loses the night's plan row.
 const NIGHT_CHARGE_PLANSNAP_PATH =
   process.env.NIGHT_CHARGE_PLANSNAP_PATH ?? resolve(process.cwd(), config.dbPath, '..', '.night-charge-plan.json');
+// v1.50.0 — owner-selected write posture. Unknown/absent values fail closed to
+// 'advisory' (resolveNightChargeMode); 'supervised'/'auto' arm the bounded
+// nightly reserve write below.
+const NIGHT_CHARGE_MODE = resolveNightChargeMode(process.env.NIGHT_CHARGE_MODE);
+// Restart-persistent per-night actuation record — a raised reserve MUST be
+// findable (and revertable) across an add-on restart mid-window.
+const NIGHT_CHARGE_ACTUATION_PATH =
+  process.env.NIGHT_CHARGE_ACTUATION_PATH ?? resolve(process.cwd(), config.dbPath, '..', '.night-charge-actuation.json');
 const HOUR_MS = 3_600_000;
 
 function clampInt(v: number, lo: number, hi: number, dflt: number): number {
@@ -2386,6 +2407,36 @@ function writeNightChargeLatch(l: NightChargeLatch): void {
   } catch (e: any) {
     app.log.debug(`night-charge: latch persist failed (${e?.message ?? e})`);
   }
+}
+
+// v1.50.0 — in-memory mirror of the persisted actuation state, seeded once at
+// module load (same pattern as the notify latch: reads hit memory, writes go to
+// memory + disk in lock-step).
+let nightActuationMem: NightActuationState = (() => {
+  try {
+    return coerceActuationState(JSON.parse(readFileSync(NIGHT_CHARGE_ACTUATION_PATH, 'utf8')));
+  } catch {
+    return emptyActuationState();
+  }
+})();
+function persistNightActuation(s: NightActuationState): void {
+  nightActuationMem = s;
+  try {
+    atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH, JSON.stringify(s));
+  } catch (e: any) {
+    app.log.debug(`night-charge: actuation persist failed (${e?.message ?? e})`);
+  }
+}
+
+/** Clock text ("10:55 PM") of an instant in America/Phoenix, for the cancel
+ *  deadline in human-facing messages. */
+function fmtPhoenixClock(ms: number): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit',
+  }).formatToParts(new Date(ms));
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  const dp = get('dayPeriod');
+  return `${get('hour')}:${get('minute')}${dp ? ' ' + dp : ''}`;
 }
 
 // In-memory cache of the last 7 ledger rows for the read-only status route, so
@@ -2698,7 +2749,7 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     plan_date: planDate,
     issued_at_ms: plan.generatedAt,
     algo_version: String(CURRENT_ALGO_VERSION),
-    posture: 'advisory',
+    posture: NIGHT_CHARGE_MODE,
     objective: plan.objective,
     rationale: plan.rationale,
     confidence_tier: plan.confidenceTier,
@@ -2725,6 +2776,9 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     forecast_basis: extras.forecastBasis,
     weather_covered: extras.weatherCovered,
     tariff_snapshot: extras.tariffSnapshot,
+    // v1.50.0 — the plan-time cushionShortfall disclosure (§5.1 strike
+    // exemption: a disclosed shortfall is physics, not engine fault).
+    cushion_shortfall: plan.cushionShortfall ? 1 : 0,
   };
   // Only a plan with a real trajectory records min_proj_soc — a null-basis /
   // insufficient plan leaves it NULL so the scorer recognises "no basis".
@@ -2941,9 +2995,23 @@ function scoreNightRow(
   const cleanBaseline = windowImportKwh != null && windowImportKwh <= Number(process.env.ARB_MIN_BUY_KWH ?? 1);
   const covOk = winCoverage >= 0.9;
 
-  // Realized-need buy = the meter energy that WOULD have held floor+cushion,
-  // measured from the CLEAN no-buy trough. Defensible only on a clean, covered
-  // night with a coherent min-SoC read; else null → buy_err null → scored=0.
+  // v1.50.0 — actuated night: the supervised write DELIVERED the buy, so the
+  // realized-need counterfactual is measured by subtracting the delivered
+  // charge (window import minus the concurrent house pass-through); the
+  // clean-baseline requirement does not apply. `actuated` was stamped by the
+  // actuator at write time, never inferred here.
+  const wasActuated = y.actuated === 1 || (y.actuated as unknown) === true;
+  let deliveredKwh: number | null = null;
+  if (wasActuated) {
+    const windowLoadPts = recorder.query(shp2Sn, 'panel_load', windowStart, windowEnd);
+    const windowLoadKwh = windowLoadPts.length ? round2(integrateWh(windowLoadPts, false) / 1000) : null;
+    deliveredKwh = actuatedDeliveredKwh(windowImportKwh, windowLoadKwh);
+  }
+
+  // Realized-need buy = the meter energy that WOULD have held floor+cushion.
+  // Actuated nights measure it from the delivered-charge-subtracted trough;
+  // advisory nights only from the CLEAN no-buy trough. Else null → buy_err
+  // null → scored=0.
   let realizedNeedBuyKwh: number | null = null;
   let scored = 0;
   let scoreNotes: string;
@@ -2953,6 +3021,19 @@ function scoreNightRow(
     scoreNotes = `not scored — overnight grid_home_w coverage ${(winCoverage * 100).toFixed(0)}% < 90% (MNAR-excluded).`;
   } else if (actualMinSocPct == null) {
     scoreNotes = 'not scored — no backup_pct telemetry over the scored span.';
+  } else if (wasActuated) {
+    if (deliveredKwh == null) {
+      scoreNotes = 'not scored — actuated night without a measurable delivered-charge attribution (window panel_load unmeasured).';
+    } else {
+      const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
+      const targetFloorKwh = ((y.reserve_floor_pct + y.cushion_pct) / 100) * y.pool_full_kwh;
+      const actualMinPackKwh = (actualMinSocPct / 100) * y.pool_full_kwh;
+      realizedNeedBuyKwh = actuatedRealizedNeedBuyKwh({
+        targetFloorKwh, actualMinPackKwh, deliveredMeterKwh: deliveredKwh, legEff,
+      });
+      scored = 1;
+      scoreNotes = `scored — actuated night; delivered ~${deliveredKwh} kWh (window import minus house pass-through); realized-need from the delivered-subtracted trough.`;
+    }
   } else if (!cleanBaseline) {
     scoreNotes = `not scored — baseline propped by ${windowImportKwh} kWh overnight grid import; realized-need not defensible without an actuated counterfactual (§5).`;
   } else {
@@ -2974,7 +3055,7 @@ function scoreNightRow(
     targetSocPct: y.target_soc_pct ?? null,
     requiredExtraKwh: y.required_extra_kwh ?? null,
     bindingCap: (y.binding_cap as BindingCap) ?? null,
-    cushionShortfall: false,
+    cushionShortfall: y.cushion_shortfall === 1,
     minProjSocPct: y.min_proj_soc_pct ?? null,
     minProjSocTsMs: y.min_proj_soc_ts_ms ?? null,
     baselineMinSocPct: null,
@@ -3010,6 +3091,7 @@ function scoreNightRow(
     actual_min_soc_ts_ms: actualMinSocTsMs,
     plan_traj_floor_breached: score.planTrajFloorBreached == null ? null : (score.planTrajFloorBreached ? 1 : 0),
     cushion_breached: cushionBreached,
+    delivered_kwh: deliveredKwh,
     grid_home_coverage_frac: winCoverage,
     scored,
     score_notes: scoreNotes,
@@ -3121,9 +3203,47 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       app.log.info('night-charge: hold plan — notification suppressed (NIGHT_CHARGE_NOTIFY_ON_HOLD=false); latched.');
       return;
     }
+    // v1.50.0 — supervised arming: when the owner enabled a write mode and
+    // tonight's plan is a charge, arm the bounded write FROM THE ANNOUNCED
+    // PLAN (the cancel window runs against exactly these numbers; a fresher
+    // recompute never silently substitutes a different buy). Arming is
+    // refused while a prior applied night has not reverted.
+    let supervisedCtx: { cancelDeadlineText: string; targetPct: number } | null = null;
+    if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
+      const armed = armFromPlan(nightActuationMem, today, plan, nowMs);
+      if (armed) {
+        persistNightActuation(armed);
+        supervisedCtx = {
+          cancelDeadlineText: fmtPhoenixClock(armed.windowStartMs! - APPLY_LEAD_MS),
+          targetPct: armed.targetPct!,
+        };
+        app.log.info(
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armed.targetPct}% at ${new Date(armed.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan.buyKwh ?? '?'} kWh); cancellable until then.`,
+        );
+      } else if (nightActuationMem.appliedAtMs != null && nightActuationMem.revertedAtMs == null) {
+        app.log.warn("night-charge: supervised arming refused — a prior night's reserve write has not reverted yet.");
+      }
+    }
     const cfg = loadNotifyConfig();
-    const msg = buildNightChargeMessage(plan, shape);
+    const msg = buildNightChargeMessage(plan, shape, supervisedCtx);
     await sendNotification(cfg, msg); // direct — bypasses quiet-hours/min-severity (I10)
+    // The audible channel (reaches the owner without any phone-push
+    // dependency): announce the armed write once, at the same evening moment.
+    // Failure logs and never blocks the latch — the HA notification above
+    // already carries the full plan and deadline.
+    if (supervisedCtx && plan) {
+      const buyRounded = plan.buyKwh != null ? Math.round(plan.buyKwh) : 0;
+      const spoken =
+        `Night charge notice. Tonight the system plans to buy about ${buyRounded} kilowatt hours of overnight grid energy, ` +
+        `raising the backup reserve to ${supervisedCtx.targetPct} percent. The write happens automatically at ${supervisedCtx.cancelDeadlineText}. ` +
+        'To cancel, use the night charge card on the Power panel before then.';
+      try {
+        const a = await broadcast.announce('medium', spoken);
+        if (!a.ok) app.log.warn(`night-charge: supervised announce failed (${a.error ?? 'unknown'})`);
+      } catch (e: any) {
+        app.log.warn(`night-charge: supervised announce failed (${e?.message ?? e})`);
+      }
+    }
     writeNightChargeLatch({ lastNotifyDay: today }); // latch AFTER a successful send
     app.log.info(`night-charge: evening advisory sent (${shape}) and latched for ${today}.`);
   } catch (e: any) {
@@ -3182,6 +3302,124 @@ function repairPrematureNightOutcomes(): void {
   }
 }
 
+/**
+ * v1.50.0 — the supervised-write actuator tick (60 s). decideActuation is pure
+ * and fail-closed; this driver executes its action through the audited write
+ * helper (setBackupReserveSoc) and persists every observed transition. The
+ * REVERT side runs regardless of mode — a raised reserve must come back down
+ * even if the owner flips the option to advisory mid-night.
+ */
+let nightActuationInFlight = false;
+async function runNightActuationTick(): Promise<void> {
+  if (nightActuationInFlight) return;
+  nightActuationInFlight = true;
+  try {
+    await runNightActuationTickInner();
+  } catch (e: any) {
+    app.log.warn(`night-charge: actuation tick failed (${e?.message ?? e})`);
+  } finally {
+    nightActuationInFlight = false;
+  }
+}
+
+async function runNightActuationTickInner(): Promise<void> {
+  const state = nightActuationMem;
+  if (state.day == null) return;
+  const nowMs = Date.now();
+  const shp2 = findShp2(store.get().devices);
+  const sp: any = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection : null;
+  const fullWh: number | null = sp?.backupFullCapWh ?? null;
+  const socNowPct: number | null = sp?.backupBatPercent ?? null;
+  const remainWh: number | null = sp?.backupRemainWh ?? null;
+  // Same I11 coherence verdict the planner uses — a transient reconnect zero
+  // must never gate a write THROUGH nor a revert OUT.
+  const socCoherent =
+    fullWh != null && fullWh > 0 && socNowPct != null && remainWh != null &&
+    Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
+  const currentReservePct: number | null =
+    typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null;
+
+  const action = decideActuation(state, nowMs, {
+    mode: NIGHT_CHARGE_MODE,
+    currentReservePct,
+    socCoherent,
+    vitalsRed: currentAssessment()?.level === 'crit',
+  });
+  if (action.kind === 'none' || !shp2) return;
+
+  if (action.kind === 'apply') {
+    const r = await setBackupReserveSoc({
+      sn: shp2.sn, targetPct: action.targetPct, source: { ua: 'night-charge-supervised' },
+    });
+    if (r.outcome === 'success') {
+      persistNightActuation({ ...state, appliedAtMs: nowMs, priorReservePct: currentReservePct, lastError: null });
+      try { recorder.recordNightOutcome(state.day, { actuated: 1, actuation_applied_at_ms: nowMs }); }
+      catch (e: any) { app.log.warn(`night-charge: actuated stamp failed (${e?.message ?? e})`); }
+      app.log.info(
+        `night-charge: SUPERVISED WRITE APPLIED — backupReserveSoc ${currentReservePct}% → ${action.targetPct}% for ${state.day}; auto-reverts after window close.`,
+      );
+    } else if (!r.rateLimited) {
+      persistNightActuation({ ...state, lastError: r.message ?? r.code ?? 'write failed' });
+      app.log.warn(`night-charge: supervised write failed (${r.code}: ${r.message}); retrying within the apply window.`);
+    }
+    return;
+  }
+
+  // action.kind === 'revert'
+  const r = await setBackupReserveSoc({
+    sn: shp2.sn, targetPct: action.restorePct, source: { ua: 'night-charge-supervised-revert' },
+  });
+  if (r.outcome === 'success') {
+    persistNightActuation({ ...state, revertedAtMs: nowMs, lastError: null });
+    app.log.info(
+      `night-charge: reserve REVERTED to ${action.restorePct}% for ${state.day}${state.cancelled ? ' (owner cancel)' : ''}.`,
+    );
+    try {
+      await sendNotification(loadNotifyConfig(), {
+        severity: 'info',
+        dedupId: 'night_charge_actuation',
+        title: `Night-charge: reserve restored to ${action.restorePct}%`,
+        body:
+          `Supervised night charge for ${state.day} completed: reserve raised to ${state.targetPct}% `
+          + `(planned buy ~${state.buyKwh ?? '—'} kWh) and restored to ${action.restorePct}%. `
+          + "Delivery vs plan scores in the ledger at tomorrow evening's update.",
+      });
+    } catch (e: any) {
+      app.log.debug(`night-charge: morning summary notify failed (${e?.message ?? e})`);
+    }
+    return;
+  }
+  if (!r.rateLimited) {
+    const attempts = state.revertAttempts + 1;
+    let escalated = state.revertEscalated;
+    if (attempts >= REVERT_ESCALATE_AFTER && !escalated) {
+      escalated = true;
+      app.log.error(
+        `night-charge: reserve revert FAILED ${attempts}× — escalating; reserve is stuck at ${state.targetPct}% (floor alarms remain independently active). Retries continue.`,
+      );
+      try {
+        await broadcast.announce(
+          'critical',
+          `Critical. The night charge system could not restore the backup reserve after charging. The reserve is stuck at ${state.targetPct} percent. Retries continue. Check the Power panel.`,
+        );
+      } catch { /* annunciation best-effort; retries continue regardless */ }
+      try {
+        await sendNotification(loadNotifyConfig(), {
+          severity: 'critical',
+          dedupId: 'night_charge_revert_failure',
+          title: 'Night-charge: reserve revert FAILING',
+          body:
+            `The post-window restore of backupReserveSoc to ${action.restorePct}% has failed ${attempts} time(s) `
+            + `(${r.code}: ${r.message}). The write retries every few minutes. The floor/runway/SoC alarm spine is unaffected.`,
+        });
+      } catch { /* HA channel best-effort */ }
+    } else {
+      app.log.warn(`night-charge: reserve revert attempt ${attempts} failed (${r.code}: ${r.message}); will retry.`);
+    }
+    persistNightActuation({ ...state, revertAttempts: attempts, revertEscalated: escalated, lastError: r.message ?? r.code ?? 'revert failed' });
+  }
+}
+
 if (nightChargeEnabled) {
   // Periodic recompute (30 min, unref'd) so /api/ha-state + status always have a
   // ≤12 h-fresh plan even on days the evening job hasn't fired yet. Best-effort.
@@ -3222,6 +3460,10 @@ if (nightChargeEnabled) {
   // Evening job — minute-granular gate + day-keyed restart-persistent latch.
   const nightEveningTick = setInterval(() => { void runNightChargeEveningJob(); }, 60 * 1000);
   nightEveningTick.unref();
+  // v1.50.0 — supervised-write actuator (apply at window open − 5 min, revert
+  // at window close + 5 min; both fail-closed, both audited).
+  const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
+  nightActuationTick.unref();
 }
 
 // Read-only advisory status (design §4.4). No auth: exposes no secrets, actuates
@@ -3234,17 +3476,45 @@ app.get('/api/night-charge/status', async () => {
   const latch = readNightChargeLatch();
   return {
     enabled: nightChargeEnabled,
-    mode: 'advisory',
+    mode: NIGHT_CHARGE_MODE,
     window: plan?.window ?? null,
     reserveFloorPercent: sp?.backupReserveSoc ?? null,
     confidence: plan?.confidenceTier ?? null,
     notify: { hour: NIGHT_CHARGE_NOTIFY_HOUR, minute: NIGHT_CHARGE_NOTIFY_MINUTE, lastNotifyDay: latch.lastNotifyDay },
     plan,
     readiness: getLatestReadiness(),
+    // v1.50.0 — tonight's supervised-write record (armed/applied/cancelled/
+    // reverted), served from the in-memory mirror.
+    actuation: {
+      ...nightActuationMem,
+      cancelDeadlineMs:
+        nightActuationMem.windowStartMs != null ? nightActuationMem.windowStartMs - APPLY_LEAD_MS : null,
+    },
     // In-memory cache refreshed by the recompute tick / evening job — the route
     // must NOT read the ledger (DB/filesystem) inline (CWE-770).
     recentOutcomes: nightRecentOutcomesMem,
   };
+});
+
+// v1.50.0 — owner cancel for tonight's supervised write. Before the apply
+// moment this disarms; after a successful apply it triggers an immediate
+// revert on the next actuator tick (≤60 s). Same write auth as every other
+// actuating endpoint.
+app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (_req, reply) => {
+  const s = nightActuationMem;
+  if (s.day == null) {
+    reply.code(409);
+    return { ok: false, error: 'no supervised write is armed' };
+  }
+  if (s.revertedAtMs != null) {
+    reply.code(409);
+    return { ok: false, error: 'tonight’s write already completed and reverted' };
+  }
+  persistNightActuation({ ...s, cancelled: true });
+  app.log.info(
+    `night-charge: owner CANCELLED tonight's supervised write (${s.day})${s.appliedAtMs != null ? ' — the applied write reverts within a minute' : ''}.`,
+  );
+  return { ok: true, actuation: nightActuationMem };
 });
 
 // Diagnostics: the analytics worker is the cache warmer now (self-warming

@@ -119,6 +119,7 @@ options:
   LOAD_SHEDDING_RESTORE_MARGIN_H: 2.0
   # Night-charge TOU-arbitrage advisor (ADVISORY — never writes to any device)
   NIGHT_CHARGE_ADVISOR_ENABLED: true
+  NIGHT_CHARGE_MODE: advisory
   ARB_OUTAGE_CUSHION_PCT: 15
   ARB_MIN_BUY_KWH: 1
   ARB_CHARGE_CAP_KW: 7.2
@@ -216,6 +217,7 @@ schema:
   LOAD_SHEDDING_RESTORE_MARGIN_H: float(0,168)
   # Night-charge TOU-arbitrage advisor (ADVISORY — never writes to any device)
   NIGHT_CHARGE_ADVISOR_ENABLED: bool
+  NIGHT_CHARGE_MODE: list(advisory|supervised|auto)
   ARB_OUTAGE_CUSHION_PCT: int(0,40)
   ARB_MIN_BUY_KWH: float(0,50)
   ARB_CHARGE_CAP_KW: float(0,50)

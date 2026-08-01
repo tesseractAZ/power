@@ -114,7 +114,7 @@ test('LAN_ORIGIN_RE — v1.47.2: portless and any-port private origins match (re
 });
 
 test('v1.47.3 — buildSameOrigins includes IPv6 loopback', () => {
-  const same = buildSameOrigins('192.168.5.152', 8787);
+  const same = buildSameOrigins('192.168.1.50', 8787);
   assert.ok(same.has('http://[::1]:8787'));
   assert.ok(same.has('https://[::1]:8787'));
 });
@@ -196,7 +196,7 @@ test('requireWriteAuth — REJECT a forged X-Ingress-Path from a LAN client', as
     const res = await app.inject({
       method: 'POST',
       url: '/test/write',
-      remoteAddress: '192.168.6.58',
+      remoteAddress: '192.168.1.58',
       headers: { 'x-ingress-path': '/api/hassio_ingress/abc123def456' },
     });
     assert.equal(res.statusCode, 401);
@@ -215,7 +215,7 @@ test('isSupervisorSource — Supervisor hassio-net addresses (incl. IPv6-mapped)
 });
 
 test('isSupervisorSource — direct-LAN / external / empty are NOT the Supervisor', () => {
-  assert.equal(isSupervisorSource('192.168.6.58'), false);
+  assert.equal(isSupervisorSource('192.168.1.58'), false);
   assert.equal(isSupervisorSource('::ffff:192.168.1.50'), false);
   assert.equal(isSupervisorSource('10.0.0.4'), false);
   assert.equal(isSupervisorSource('172.30.34.1'), false); // outside the /23

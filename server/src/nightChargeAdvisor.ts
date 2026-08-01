@@ -880,6 +880,43 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   };
 }
 
+// --- v1.50.0 actuated-night measurement helpers (PURE) -----------------------
+
+/**
+ * Charge-attributable meter energy on an ACTUATED night: the window grid
+ * import minus the concurrent house pass-through. Under the bypass model the
+ * home runs on grid during charge hours, so window import = house load +
+ * battery charge; subtracting the measured window load isolates the delivered
+ * buy. Null when either side is unmeasured — never a fabricated delivery.
+ */
+export function actuatedDeliveredKwh(
+  windowImportKwh: number | null,
+  windowLoadKwh: number | null,
+): number | null {
+  if (windowImportKwh == null || windowLoadKwh == null) return null;
+  if (!Number.isFinite(windowImportKwh) || !Number.isFinite(windowLoadKwh)) return null;
+  return round2(Math.max(0, windowImportKwh - windowLoadKwh));
+}
+
+/**
+ * Realized-need buy on an ACTUATED night (§5 as amended 2026-07-31): the home
+ * ran WITH the delivered charge, so the no-buy counterfactual trough is the
+ * measured trough minus the pack-side delivered energy — a MEASURED
+ * counterfactual (subtract what was injected), not a modeled one. The need is
+ * the meter energy that would have lifted that counterfactual trough back to
+ * floor+cushion.
+ */
+export function actuatedRealizedNeedBuyKwh(opts: {
+  targetFloorKwh: number;
+  actualMinPackKwh: number;
+  deliveredMeterKwh: number;
+  legEff: number;
+}): number {
+  const deliveredPackKwh = opts.deliveredMeterKwh * opts.legEff;
+  const noBuyTroughKwh = opts.actualMinPackKwh - deliveredPackKwh;
+  return round2(Math.max(0, opts.targetFloorKwh - noBuyTroughKwh) / opts.legEff);
+}
+
 // --- scoreNightOutcome: the §3.1 score columns from a plan + measured actuals ---
 
 /** Measured next-evening actuals for scoring last night's plan (design §3.1). */

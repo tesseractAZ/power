@@ -72,7 +72,7 @@ configuration:
     description: Whether CRITICAL alarms can chime and push during quiet hours. Off by default, so quiet hours hold every tier overnight — the alert still appears on-screen immediately and is delivered in the morning digest, but nothing sounds until morning. Turn on to be woken for genuine emergencies; applies to both the audible and push channels.
   BROADCAST_AUDIO_BASE:
     name: Broadcast Audio Base URL
-    description: Base URL your speakers fetch the chime WAV files from; must be reachable from the speakers on your LAN. Default http://homeassistant.local:8787 uses mDNS; if mDNS is flaky, set your HA host IP instead, e.g. http://192.168.5.152:8787. A trailing slash is trimmed and a blank value falls back to the mDNS default.
+    description: Base URL your speakers fetch the chime WAV files from; must be reachable from the speakers on your LAN. Default http://homeassistant.local:8787 uses mDNS; if mDNS is flaky, set your HA host IP instead, e.g. http://192.168.1.50:8787. A trailing slash is trimmed and a blank value falls back to the mDNS default.
   BROADCAST_VOLUME:
     name: Broadcast Volume
     description: Speaker volume for audible alarm announcements, from 0.0 (silent) to 1.0 (full); default 0.5. This is also the level the spoken announcement plays at unless Announce Volume overrides it, and it can be adjusted live from the dashboard.
@@ -148,6 +148,9 @@ configuration:
   NIGHT_CHARGE_ADVISOR_ENABLED:
     name: Night-Charge Advisor
     description: 'Advisory-only: on days a shortfall is anticipated, recommends buying the right amount of grid energy in the cheap overnight window so the home never imports at the 4–7pm peak and keeps an outage cushion above the reserve floor. It NEVER charges or writes to any device — it publishes the suggestion as sensors/MQTT entities and a nightly notification, and your own HA automation decides whether to act. Default off in the add-on options — enable it here to listen on the telnet port. Learns and records from day one; write-eligibility stays off until the record proves accuracy.'
+  NIGHT_CHARGE_MODE:
+    name: Night-Charge Write Mode
+    description: 'How the night-charge engine may act on its own plan. "advisory" (default) — never writes; sensors and the nightly notification only. "supervised" — each evening the plan is announced (audible broadcast + HA notification) with a cancel deadline; unless cancelled from the panel, ONE bounded write raises the SHP2 backup reserve to the plan target (clamped to the device 10–50% range) just before the cheap window opens, and the prior value is automatically restored after the window closes. "auto" — the same bounded write without treating the evening announcement as a cancel checkpoint; the engine only honors auto once the write-readiness gate has graduated on real actuated-night evidence, and operates as supervised until then. Every write is audit-logged; the reserve-floor alarms are independent of this path.'
   ARB_OUTAGE_CUSHION_PCT:
     name: Outage Cushion (%)
     description: 'How much battery headroom, in percent of pool capacity, to keep ABOVE the reserve floor as resilience against an unexpected outage. The advisor sizes the overnight buy so the worst-case (low-PV / high-load) projection stays at or above floor+cushion. Default 15. This never changes the independent reserve-floor alarm — it only sizes the advisory recommendation.'
