@@ -1,3 +1,16 @@
+## v1.51.0 — configurable telemetry retention
+
+`RECORDER_RETENTION_DAYS` (default 30, range 7–730) replaces the hard-coded
+30-day samples prune. The historical default is unchanged — a fresh or
+upgraded install behaves identically until the option is raised. Longer
+retention enables seasonal model comparison, deeper backtests, and
+year-over-year degradation analysis on hosts with the disk for it (~25–30 MB
+per day at a full fleet's metric volume). The resolution is fail-safe: a
+malformed value falls back to the default, and the floor is 7 days so a typo
+can never become a delete-everything retention. The durable night-charge
+ledger, calibration, and lifetime-energy tables were never subject to this
+prune and remain so. Effective retention is logged at startup.
+
 ## v1.50.0 — night-charge supervised write mode + write-readiness gate v2
 
 The night-charge engine gains an owner-selectable write posture,
