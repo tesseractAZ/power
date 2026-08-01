@@ -153,6 +153,7 @@ export GRID_PRESENCE_ENTITY="$(bashio::config 'GRID_PRESENCE_ENTITY')"
 # on a browning-out host before it takes the whole monitor dark. Empty = dormant.
 export HOST_POWER_ENTITY="$(bashio::config 'HOST_POWER_ENTITY')"
 # v0.72.0 — optional SN->HA-ping-entity JSON map (cloud-wedge vs real-outage detection).
+export RECORDER_RETENTION_DAYS="$(bashio::config 'RECORDER_RETENTION_DAYS')"
 export ECOFLOW_DEVICE_REACHABILITY="$(bashio::config 'ECOFLOW_DEVICE_REACHABILITY')"
 # v0.23.0 — wire the battery-alarm enable toggles + re-announce cadence to env.
 # These were declared in config.yaml but never exported here, so the HA toggles
