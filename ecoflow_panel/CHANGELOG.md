@@ -46,11 +46,37 @@ v1.49.0 sizing-physics correction invalidates every v1 row per §0.2, which
 also retires the v1-era strikes recorded against the broken model.
 `writeReady` gates AUTO only; supervised is an explicit owner action.
 
-18 new tests (gate v2 semantics, every actuator guard, delivery-measurement
-helpers, reserve-write validation); 1,737 total. Five targeted mutations
-(dropped red-vitals guard, dropped cancel-revert, dropped shortfall
-exemption, altered clean-streak threshold, widened reserve clamp) each fail
-the suite. Public-repo hygiene: doc/test example IPs generalized.
+**Adversarial-review hardening (pre-release).** An independent review of the
+write path confirmed three defects, all corrected before release:
+
+1. **Auto-mode readiness enforcement point.** `effectiveActuationMode`
+   structurally DEMOTES `auto` to `supervised` while the readiness gate has
+   not graduated (`writeReady` false) — any future auto-only relaxation must
+   branch on the demoted mode, so it can never ship ungated. In this release
+   the two modes are operationally identical either way.
+2. **Lost-confirmation write adoption.** The apply is now a write-ahead
+   intent: the attempt (with its pre-write baseline) persists BEFORE the
+   device call, and a write whose confirmation was lost (device applied it,
+   response dropped) is detected when the live reserve reads back the
+   attempted target — the actuator ADOPTS it (stamping the applied state
+   from the attempt baseline) so the normal auto-revert takes over. Without
+   this, the "nothing to raise" guard would no-op forever and the raised
+   reserve would never revert. Re-arming a new night is refused while an
+   unconfirmed attempt is unresolved, unless the live reading proves the
+   write never landed.
+3. **Announcement-delivery-gated arming.** The armed state persists only
+   after at least one announcement channel confirms delivery — a
+   `NOTIFY_CHANNEL: none` no-op plus a failed audible broadcast leaves the
+   night advisory (logged at error level). A write the owner never heard
+   about cannot fire.
+
+26 new tests (gate v2 semantics, every actuator guard incl. adoption/demotion
+/attempt-refusal, delivery-measurement helpers, reserve-write validation);
+1,745 total. Eight targeted mutations (dropped red-vitals guard, dropped
+cancel-revert, dropped shortfall exemption, altered clean-streak threshold,
+widened reserve clamp, disabled adoption, removed auto demotion, removed
+attempt-refusal) each fail the suite. Public-repo hygiene: doc/test example
+IPs generalized.
 
 ## v1.49.0 — night-charge sizing corrected: the charge cap is charge-only
 

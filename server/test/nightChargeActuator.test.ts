@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveNightChargeMode,
+  effectiveActuationMode,
   clampReserveTarget,
   emptyActuationState,
   coerceActuationState,
@@ -40,13 +41,13 @@ function plan(overrides: Partial<ArmablePlan> = {}): ArmablePlan {
 }
 
 function armed(): NightActuationState {
-  const s = armFromPlan(emptyActuationState(), '2026-07-16', plan(), T0);
+  const s = armFromPlan(emptyActuationState(), '2026-07-16', plan(), T0, 10);
   assert.ok(s, 'fixture plan must arm');
   return s!;
 }
 
 function opts(overrides: Partial<ActuationTickOpts> = {}): ActuationTickOpts {
-  return { mode: 'supervised', currentReservePct: 10, socCoherent: true, vitalsRed: false, ...overrides };
+  return { mode: 'supervised', writeReady: false, currentReservePct: 10, socCoherent: true, vitalsRed: false, ...overrides };
 }
 
 // ── Mode + clamp ────────────────────────────────────────────────────────────
@@ -82,22 +83,22 @@ test('armFromPlan: a charge plan arms with the clamped target', () => {
 
 test('armFromPlan: hold / incomplete / windowless / zero-buy plans never arm', () => {
   const prev = emptyActuationState();
-  assert.equal(armFromPlan(prev, 'd', plan({ chargeTonight: false }), T0), null);
-  assert.equal(armFromPlan(prev, 'd', plan({ basisComplete: false }), T0), null);
-  assert.equal(armFromPlan(prev, 'd', plan({ window: null }), T0), null);
-  assert.equal(armFromPlan(prev, 'd', plan({ targetSocPct: null }), T0), null);
-  assert.equal(armFromPlan(prev, 'd', plan({ buyKwh: 0 }), T0), null);
-  assert.equal(armFromPlan(prev, 'd', plan({ buyKwh: null }), T0), null);
+  assert.equal(armFromPlan(prev, 'd', plan({ chargeTonight: false }), T0, 10), null);
+  assert.equal(armFromPlan(prev, 'd', plan({ basisComplete: false }), T0, 10), null);
+  assert.equal(armFromPlan(prev, 'd', plan({ window: null }), T0, 10), null);
+  assert.equal(armFromPlan(prev, 'd', plan({ targetSocPct: null }), T0, 10), null);
+  assert.equal(armFromPlan(prev, 'd', plan({ buyKwh: 0 }), T0, 10), null);
+  assert.equal(armFromPlan(prev, 'd', plan({ buyKwh: null }), T0, 10), null);
 });
 
 test('armFromPlan: refuses to replace an applied-but-unreverted night', () => {
   const prev: NightActuationState = { ...armed(), appliedAtMs: T0, priorReservePct: 10 };
-  assert.equal(armFromPlan(prev, '2026-07-17', plan(), T0), null);
+  assert.equal(armFromPlan(prev, '2026-07-17', plan(), T0, 10), null);
 });
 
 test('armFromPlan: replaces a resolved (reverted) prior night', () => {
   const prev: NightActuationState = { ...armed(), appliedAtMs: T0, priorReservePct: 10, revertedAtMs: T0 + 1 };
-  const s = armFromPlan(prev, '2026-07-17', plan(), T0);
+  const s = armFromPlan(prev, '2026-07-17', plan(), T0, 10);
   assert.ok(s);
   assert.equal(s!.day, '2026-07-17');
 });
@@ -186,4 +187,78 @@ test('coerceActuationState: garbage → idle; sound record round-trips', () => {
   const s = appliedState();
   const rt = coerceActuationState(JSON.parse(JSON.stringify(s)));
   assert.deepEqual(rt, s);
+});
+
+// ── v1.50.0 review fixes: auto-mode gating, unconfirmed-write adoption ──────
+
+test('effectiveActuationMode: auto is DEMOTED to supervised until writeReady', () => {
+  assert.equal(effectiveActuationMode('auto', false), 'supervised');
+  assert.equal(effectiveActuationMode('auto', true), 'auto');
+  assert.equal(effectiveActuationMode('supervised', false), 'supervised');
+  assert.equal(effectiveActuationMode('supervised', true), 'supervised');
+  assert.equal(effectiveActuationMode('advisory', true), 'advisory');
+});
+
+test('auto mode without writeReady still runs the supervised flow (evidence collection)', () => {
+  const s = armed();
+  assert.deepEqual(
+    decideActuation(s, WINDOW.startMs, opts({ mode: 'auto', writeReady: false })),
+    { kind: 'apply', targetPct: 43 },
+  );
+});
+
+function attemptedState(): NightActuationState {
+  // Write issued at window open with baseline 10, no success recorded.
+  return { ...armed(), applyAttemptedAtMs: WINDOW.startMs, attemptBaselinePct: 10 };
+}
+
+test('adopt: device reads the attempted target (≠ baseline) → the lost-confirmation write is adopted', () => {
+  const s = attemptedState();
+  assert.deepEqual(
+    decideActuation(s, WINDOW.startMs + 60_000, opts({ currentReservePct: 43 })),
+    { kind: 'adopt', priorPct: 10 },
+  );
+  // Mode-independent and time-independent: adoption still fires after the
+  // window (and even if the owner flipped to advisory) — the raised reserve
+  // must find its way back down.
+  assert.deepEqual(
+    decideActuation(s, WINDOW.endMs + 3_600_000, opts({ mode: 'advisory', currentReservePct: 43 })),
+    { kind: 'adopt', priorPct: 10 },
+  );
+});
+
+test('adopt does NOT fire when the reserve still reads the baseline (write truly failed) — retry applies instead', () => {
+  const s = attemptedState();
+  assert.deepEqual(
+    decideActuation(s, WINDOW.startMs + 60_000, opts({ currentReservePct: 10 })),
+    { kind: 'apply', targetPct: 43 },
+  );
+});
+
+test('adopt does NOT fire on a third-party reading (never guess a revert target)', () => {
+  const s = attemptedState();
+  assert.equal(decideActuation(s, WINDOW.startMs + 60_000, opts({ currentReservePct: 30 })).kind, 'apply');
+  assert.equal(decideActuation(s, WINDOW.endMs + 3_600_000, opts({ currentReservePct: 30 })).kind, 'none');
+});
+
+test('adopt is idempotent: an already-applied or reverted night never re-adopts', () => {
+  const appliedS: NightActuationState = { ...attemptedState(), appliedAtMs: WINDOW.startMs, priorReservePct: 10 };
+  assert.notEqual(decideActuation(appliedS, WINDOW.endMs + REVERT_LAG_MS, opts({ currentReservePct: 43 })).kind, 'adopt');
+  const revertedS: NightActuationState = { ...appliedS, revertedAtMs: WINDOW.endMs + REVERT_LAG_MS };
+  assert.equal(decideActuation(revertedS, WINDOW.endMs + 2 * REVERT_LAG_MS, opts({ currentReservePct: 43 })).kind, 'none');
+});
+
+test('armFromPlan: an unresolved unconfirmed attempt refuses re-arming unless provably un-applied', () => {
+  const prev = attemptedState();
+  // Live reading unknown → fail-closed, no re-arm.
+  assert.equal(armFromPlan(prev, '2026-07-17', plan(), T0, null), null);
+  // Live reading at the old target → the write landed; adoption must resolve it first.
+  assert.equal(armFromPlan(prev, '2026-07-17', plan(), T0, 43), null);
+  // Live reading still at the attempt baseline → the write provably never landed; safe to arm.
+  assert.ok(armFromPlan(prev, '2026-07-17', plan(), T0, 10));
+});
+
+test('coerceActuationState round-trips the attempt fields', () => {
+  const s = attemptedState();
+  assert.deepEqual(coerceActuationState(JSON.parse(JSON.stringify(s))), s);
 });

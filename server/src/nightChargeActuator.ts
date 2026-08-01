@@ -63,6 +63,13 @@ export interface NightActuationState {
   windowEndMs: number | null;
   /** Owner cancelled tonight's write (dashboard button / API). */
   cancelled: boolean;
+  /** Write-ahead intent: persisted BEFORE the apply write is issued, so a
+   *  write whose confirmation is lost (device applied it, response dropped)
+   *  is still reconcilable from the live reserve reading — a raised reserve
+   *  must never be orphaned by a lost HTTP response. */
+  applyAttemptedAtMs: number | null;
+  /** The live reserve read at attempt time — the adoption/revert baseline. */
+  attemptBaselinePct: number | null;
   appliedAtMs: number | null;
   /** The reserve value read immediately before the write — the revert target. */
   priorReservePct: number | null;
@@ -77,6 +84,7 @@ export function emptyActuationState(): NightActuationState {
   return {
     day: null, announcedAtMs: null, targetPct: null, buyKwh: null,
     windowStartMs: null, windowEndMs: null, cancelled: false,
+    applyAttemptedAtMs: null, attemptBaselinePct: null,
     appliedAtMs: null, priorReservePct: null, revertedAtMs: null,
     revertAttempts: 0, revertEscalated: false, lastError: null,
   };
@@ -103,6 +111,8 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     windowStartMs: num(o.windowStartMs),
     windowEndMs: num(o.windowEndMs),
     cancelled: o.cancelled === true,
+    applyAttemptedAtMs: num(o.applyAttemptedAtMs),
+    attemptBaselinePct: num(o.attemptBaselinePct),
     appliedAtMs: num(o.appliedAtMs),
     priorReservePct: num(o.priorReservePct),
     revertedAtMs: num(o.revertedAtMs),
@@ -125,16 +135,29 @@ export interface ArmablePlan {
  * Arm tonight's actuation from the evening job's announced plan. Returns the
  * armed state, or null when the plan is not actuatable (hold night,
  * incomplete basis, no window, no target). Arming REPLACES any prior state —
- * except a still-unresolved applied night (reserve raised, not yet reverted),
- * which must never be orphaned; arming is refused (null) until it reverts.
+ * except an unresolved night, which must never be orphaned:
+ *  - an applied-but-unreverted write always refuses re-arming;
+ *  - an ATTEMPTED-but-unconfirmed write (write issued, no success recorded)
+ *    refuses re-arming unless the live reserve reading proves the write never
+ *    landed (it still equals the attempt-time baseline). A lost confirmation
+ *    whose write actually applied is instead adopted by `decideActuation` and
+ *    reverts through the normal path before any new night may arm.
  */
 export function armFromPlan(
   prev: NightActuationState,
   day: string,
   plan: ArmablePlan,
   nowMs: number,
+  /** Live backupReserveSoc at arm time (null = unknown → fail-closed). */
+  liveReservePct: number | null,
 ): NightActuationState | null {
   if (prev.appliedAtMs != null && prev.revertedAtMs == null) return null; // unresolved night
+  if (
+    prev.applyAttemptedAtMs != null && prev.appliedAtMs == null && prev.revertedAtMs == null &&
+    !(liveReservePct != null && prev.attemptBaselinePct != null && liveReservePct === prev.attemptBaselinePct)
+  ) {
+    return null; // unconfirmed attempt not provably un-applied — never bury it
+  }
   if (!plan.chargeTonight || !plan.basisComplete) return null;
   if (plan.window == null || plan.targetSocPct == null) return null;
   if (plan.buyKwh == null || plan.buyKwh <= 0) return null;
@@ -153,10 +176,17 @@ export function armFromPlan(
 export type ActuationAction =
   | { kind: 'none' }
   | { kind: 'apply'; targetPct: number }
-  | { kind: 'revert'; restorePct: number };
+  | { kind: 'revert'; restorePct: number }
+  /** A write whose confirmation was lost is proven applied by the live reserve
+   *  reading — the driver stamps it as applied (priorPct = the attempt-time
+   *  baseline) so the normal revert path takes over. */
+  | { kind: 'adopt'; priorPct: number };
 
 export interface ActuationTickOpts {
   mode: NightChargeMode;
+  /** Readiness-gate verdict (getLatestReadiness()?.writeReady === true). Gates
+   *  ONLY the 'auto' differentiation — see effectiveActuationMode. */
+  writeReady: boolean;
   /** Live backupReserveSoc from the SHP2 projection (null = unknown). */
   currentReservePct: number | null;
   /** I11 SoC coherence verdict from the same snapshot. */
@@ -164,6 +194,20 @@ export interface ActuationTickOpts {
   /** True while the alert condition is red — no APPLY during an active
    *  critical (reverts still run; restoring the floor is the safe direction). */
   vitalsRed: boolean;
+}
+
+/**
+ * The readiness enforcement point for AUTO (binding): 'auto' carries its own
+ * semantics ONLY while the write-readiness gate has graduated (`writeReady`);
+ * otherwise it is structurally DEMOTED to 'supervised'. In this release the
+ * two modes are operationally identical (both run the announced, cancellable
+ * flow), so the demotion changes nothing yet — but any future auto-only
+ * relaxation (e.g. dropping the evening cancel checkpoint) MUST branch on the
+ * mode returned HERE, never on the raw config value, so it can never ship
+ * ungated.
+ */
+export function effectiveActuationMode(mode: NightChargeMode, writeReady: boolean): NightChargeMode {
+  return mode === 'auto' && !writeReady ? 'supervised' : mode;
 }
 
 /**
@@ -177,8 +221,28 @@ export function decideActuation(
   opts: ActuationTickOpts,
 ): ActuationAction {
   if (state.day == null) return { kind: 'none' };
+  const mode = effectiveActuationMode(opts.mode, opts.writeReady);
 
-  // ── REVERT (checked first — always allowed, mode-independent: a raised
+  // ── ADOPT (checked before everything — mode-independent, like revert): an
+  // attempted write with no recorded success whose target the device now
+  // READS BACK (and which differs from the attempt-time baseline) really did
+  // land — the confirmation was lost, not the write. Without adoption the
+  // "nothing to raise" guard would no-op forever and the raised reserve
+  // would never revert. Strict equality: any other reading means either the
+  // write truly failed (still at baseline → re-attempt/arm paths handle it)
+  // or outside interference (never guess a revert target from it). ──
+  if (
+    state.applyAttemptedAtMs != null && state.appliedAtMs == null && state.revertedAtMs == null &&
+    state.targetPct != null && state.attemptBaselinePct != null &&
+    opts.currentReservePct === state.targetPct &&
+    state.targetPct !== state.attemptBaselinePct &&
+    Number.isInteger(state.attemptBaselinePct) &&
+    state.attemptBaselinePct >= 10 && state.attemptBaselinePct <= 50
+  ) {
+    return { kind: 'adopt', priorPct: state.attemptBaselinePct };
+  }
+
+  // ── REVERT (checked next — always allowed, mode-independent: a raised
   // reserve must come back down even if the owner flipped to advisory). ──
   if (state.appliedAtMs != null && state.revertedAtMs == null) {
     const due =
@@ -193,7 +257,7 @@ export function decideActuation(
   }
 
   // ── APPLY. Every guard fail-closed. ──
-  if (opts.mode === 'advisory') return { kind: 'none' };
+  if (mode === 'advisory') return { kind: 'none' };
   if (state.cancelled || state.appliedAtMs != null) return { kind: 'none' };
   if (state.targetPct == null || state.windowStartMs == null) return { kind: 'none' };
   if (nowMs < state.windowStartMs - APPLY_LEAD_MS) return { kind: 'none' }; // too early

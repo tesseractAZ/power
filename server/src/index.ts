@@ -3204,33 +3204,37 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       return;
     }
     // v1.50.0 — supervised arming: when the owner enabled a write mode and
-    // tonight's plan is a charge, arm the bounded write FROM THE ANNOUNCED
+    // tonight's plan is a charge, the bounded write arms FROM THE ANNOUNCED
     // PLAN (the cancel window runs against exactly these numbers; a fresher
-    // recompute never silently substitutes a different buy). Arming is
-    // refused while a prior applied night has not reverted.
+    // recompute never silently substitutes a different buy). The candidate is
+    // computed here but PERSISTED only after at least one announcement
+    // channel confirms delivery — a write the owner never heard about must
+    // never fire. Arming is refused while a prior night is unresolved.
     let supervisedCtx: { cancelDeadlineText: string; targetPct: number } | null = null;
+    let armedCandidate: NightActuationState | null = null;
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
-      const armed = armFromPlan(nightActuationMem, today, plan, nowMs);
-      if (armed) {
-        persistNightActuation(armed);
+      armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
+      if (armedCandidate) {
         supervisedCtx = {
-          cancelDeadlineText: fmtPhoenixClock(armed.windowStartMs! - APPLY_LEAD_MS),
-          targetPct: armed.targetPct!,
+          cancelDeadlineText: fmtPhoenixClock(armedCandidate.windowStartMs! - APPLY_LEAD_MS),
+          targetPct: armedCandidate.targetPct!,
         };
-        app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armed.targetPct}% at ${new Date(armed.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan.buyKwh ?? '?'} kWh); cancellable until then.`,
-        );
-      } else if (nightActuationMem.appliedAtMs != null && nightActuationMem.revertedAtMs == null) {
-        app.log.warn("night-charge: supervised arming refused — a prior night's reserve write has not reverted yet.");
+      } else if (
+        (nightActuationMem.appliedAtMs != null || nightActuationMem.applyAttemptedAtMs != null) &&
+        nightActuationMem.revertedAtMs == null
+      ) {
+        app.log.warn("night-charge: supervised arming refused — a prior night's reserve write is unresolved (applied or unconfirmed-attempt, not yet reverted).");
       }
     }
     const cfg = loadNotifyConfig();
     const msg = buildNightChargeMessage(plan, shape, supervisedCtx);
     await sendNotification(cfg, msg); // direct — bypasses quiet-hours/min-severity (I10)
+    // NOTIFY_CHANNEL 'none' makes sendNotification a silent no-op — that is
+    // NOT a delivered announcement for arming purposes.
+    const haNotifyDelivered = cfg.channel !== 'none';
     // The audible channel (reaches the owner without any phone-push
     // dependency): announce the armed write once, at the same evening moment.
-    // Failure logs and never blocks the latch — the HA notification above
-    // already carries the full plan and deadline.
+    let audibleDelivered = false;
     if (supervisedCtx && plan) {
       const buyRounded = plan.buyKwh != null ? Math.round(plan.buyKwh) : 0;
       const spoken =
@@ -3239,9 +3243,22 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         'To cancel, use the night charge card on the Power panel before then.';
       try {
         const a = await broadcast.announce('medium', spoken);
+        audibleDelivered = a.ok === true;
         if (!a.ok) app.log.warn(`night-charge: supervised announce failed (${a.error ?? 'unknown'})`);
       } catch (e: any) {
         app.log.warn(`night-charge: supervised announce failed (${e?.message ?? e})`);
+      }
+    }
+    if (armedCandidate) {
+      if (haNotifyDelivered || audibleDelivered) {
+        persistNightActuation(armedCandidate);
+        app.log.info(
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.buyKwh ?? '?'} kWh); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment.`,
+        );
+      } else {
+        app.log.error(
+          `night-charge: supervised write NOT armed for ${today} — no announcement channel delivered (NOTIFY_CHANNEL='${cfg.channel}', audible failed). A write the owner never heard about must not fire; tonight stays advisory.`,
+        );
       }
     }
     writeNightChargeLatch({ lastNotifyDay: today }); // latch AFTER a successful send
@@ -3341,26 +3358,43 @@ async function runNightActuationTickInner(): Promise<void> {
 
   const action = decideActuation(state, nowMs, {
     mode: NIGHT_CHARGE_MODE,
+    writeReady: getLatestReadiness()?.writeReady === true,
     currentReservePct,
     socCoherent,
     vitalsRed: currentAssessment()?.level === 'crit',
   });
   if (action.kind === 'none' || !shp2) return;
 
+  if (action.kind === 'adopt') {
+    // A write whose confirmation was lost is proven applied by the live
+    // reading — stamp it so the normal revert path takes over. Without this a
+    // raised reserve would sit orphaned behind the "nothing to raise" guard.
+    persistNightActuation({ ...state, appliedAtMs: state.applyAttemptedAtMs ?? nowMs, priorReservePct: action.priorPct, lastError: null });
+    try { recorder.recordNightOutcome(state.day, { actuated: 1, actuation_applied_at_ms: state.applyAttemptedAtMs ?? nowMs }); }
+    catch (e: any) { app.log.warn(`night-charge: actuated stamp failed (${e?.message ?? e})`); }
+    app.log.warn(
+      `night-charge: ADOPTED an unconfirmed write — the device reads ${state.targetPct}% (attempt baseline ${action.priorPct}%); the apply succeeded but its confirmation was lost. Normal auto-revert takes over.`,
+    );
+    return;
+  }
+
   if (action.kind === 'apply') {
+    // Write-ahead intent: persist the attempt (with the pre-write baseline)
+    // BEFORE issuing the write, so a lost confirmation is reconcilable.
+    persistNightActuation({ ...state, applyAttemptedAtMs: nowMs, attemptBaselinePct: currentReservePct });
     const r = await setBackupReserveSoc({
       sn: shp2.sn, targetPct: action.targetPct, source: { ua: 'night-charge-supervised' },
     });
     if (r.outcome === 'success') {
-      persistNightActuation({ ...state, appliedAtMs: nowMs, priorReservePct: currentReservePct, lastError: null });
+      persistNightActuation({ ...nightActuationMem, appliedAtMs: nowMs, priorReservePct: currentReservePct, lastError: null });
       try { recorder.recordNightOutcome(state.day, { actuated: 1, actuation_applied_at_ms: nowMs }); }
       catch (e: any) { app.log.warn(`night-charge: actuated stamp failed (${e?.message ?? e})`); }
       app.log.info(
         `night-charge: SUPERVISED WRITE APPLIED — backupReserveSoc ${currentReservePct}% → ${action.targetPct}% for ${state.day}; auto-reverts after window close.`,
       );
     } else if (!r.rateLimited) {
-      persistNightActuation({ ...state, lastError: r.message ?? r.code ?? 'write failed' });
-      app.log.warn(`night-charge: supervised write failed (${r.code}: ${r.message}); retrying within the apply window.`);
+      persistNightActuation({ ...nightActuationMem, lastError: r.message ?? r.code ?? 'write failed' });
+      app.log.warn(`night-charge: supervised write failed (${r.code}: ${r.message}); retrying within the apply window (the attempt is recorded — a lost confirmation reconciles from the live reserve reading).`);
     }
     return;
   }
