@@ -186,6 +186,7 @@ if bashio::config.true 'NIGHT_CHARGE_ADVISOR_ENABLED'; then
 else
   export NIGHT_CHARGE_ADVISOR_ENABLED=false
 fi
+export NIGHT_CHARGE_MODE="$(bashio::config 'NIGHT_CHARGE_MODE')"
 export ARB_OUTAGE_CUSHION_PCT="$(bashio::config 'ARB_OUTAGE_CUSHION_PCT')"
 export ARB_MIN_BUY_KWH="$(bashio::config 'ARB_MIN_BUY_KWH')"
 export ARB_CHARGE_CAP_KW="$(bashio::config 'ARB_CHARGE_CAP_KW')"

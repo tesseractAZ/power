@@ -153,6 +153,50 @@ export async function refreshShp2CloudPresence(req: RefreshCloudRequest): Promis
   });
 }
 
+/* ─── Night-charge bounded reserve write (v1.50.0, supervised mode) ───── */
+
+/** One write per 5 min per SHP2 — the actuator applies once and reverts once
+ *  per night; the cooldown paces retries after a transient API failure. */
+export const NIGHT_RESERVE_COOLDOWN_MS = 5 * 60 * 1000;
+
+export interface ReserveWriteRequest extends Omit<CommandRequest, 'body'> {
+  /** New backupReserveSoc. VALIDATED (not silently clamped): integer in the
+   *  device's documented [10, 50] range, else the write is refused. */
+  targetPct: number;
+}
+
+/**
+ * The supervised night-charge write: set `backupReserveSoc` on the SHP2 —
+ * the SAME documented PD303_APP_SET shape the cloud-presence refresh has
+ * round-tripped safely since v0.9.10, with a changed value. Audited through
+ * the standard write log under action 'night-charge-reserve'.
+ */
+export async function setBackupReserveSoc(req: ReserveWriteRequest): Promise<CommandResult> {
+  if (!Number.isInteger(req.targetPct) || req.targetPct < 10 || req.targetPct > 50) {
+    return {
+      outcome: 'failure',
+      code: 'reserve-out-of-range',
+      message: `Refused: backupReserveSoc ${req.targetPct} outside the documented [10, 50] range.`,
+      durationMs: 0,
+    };
+  }
+  if (!checkAndReserve('night-charge-reserve', req.sn, { cooldownMs: NIGHT_RESERVE_COOLDOWN_MS })) {
+    const remaining = cooldownRemainingMs('night-charge-reserve', req.sn, NIGHT_RESERVE_COOLDOWN_MS);
+    return {
+      outcome: 'failure',
+      code: 'rate-limited',
+      message: `Wait ${Math.round(remaining / 1000)}s before another reserve write.`,
+      durationMs: 0,
+      rateLimited: true,
+    };
+  }
+  return runCommand('night-charge-reserve', {
+    sn: req.sn,
+    source: req.source,
+    body: { cmdCode: 'PD303_APP_SET', params: { backupReserveSoc: req.targetPct } },
+  });
+}
+
 /* ─── Debug: arbitrary command (admin-only) ──────────────────────────── */
 
 /**

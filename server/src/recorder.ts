@@ -448,6 +448,11 @@ export interface NightLedgerRow {
   // window. NULL on pre-v1.39.0 rows (those capture as scored=0, unpaired).
   window_start_ms: number | null;
   window_end_ms: number | null;
+  // v1.50.0: plan-time cushionShortfall disclosure (0/1). A night whose plan
+  // honestly disclosed it could not hold floor+cushion is EXEMPT from the §5.1
+  // engine-fault strike (physics, not fault). NULL on pre-v1.50.0 rows —
+  // treated as NOT disclosed (fail-closed: still strike-eligible).
+  cushion_shortfall: number | null;
 
   // ── OUTCOME (NULL until ~21:30 next evening) ──
   outcome_captured_at_ms: number | null;
@@ -461,6 +466,13 @@ export interface NightLedgerRow {
   actual_min_soc_ts_ms: number | null;
   plan_traj_floor_breached: number | null; // 0/1 — scored on the SIMULATED trajectory (§3.3)
   cushion_breached: number | null; // 0/1
+  // v1.50.0 — supervised-write actuation record. `actuated` is set the moment
+  // the bounded reserve write succeeds (NOT at scoring); `delivered_kwh` is the
+  // measured charge-attributable window import (meter kWh: window grid import
+  // minus the concurrent house pass-through), filled by the scorer.
+  actuated: number | null; // 0/1
+  actuation_applied_at_ms: number | null;
+  delivered_kwh: number | null;
   grid_home_coverage_frac: number | null;
   outage_during_day: number | null; // 0/1
   scored: number | null; // 0/1 (0 when coverage<0.9 or excluded)
@@ -521,11 +533,12 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'ev_p90_session_kwh', 'ev_session_count', 'min_proj_soc_pct',
   'min_proj_soc_ts_ms', 'pool_full_kwh', 'band_sigma_cal', 'cal_scored_days',
   'forecast_basis', 'weather_covered', 'tariff_snapshot',
-  'window_start_ms', 'window_end_ms',
+  'window_start_ms', 'window_end_ms', 'cushion_shortfall',
   'outcome_captured_at_ms', 'actual_pv_kwh', 'actual_load_kwh',
   'actual_window_import_kwh', 'actual_grid_to_battery_kwh',
   'actual_onpeak_import_kwh', 'onpeak_import_occurred', 'actual_min_soc_pct',
   'actual_min_soc_ts_ms', 'plan_traj_floor_breached', 'cushion_breached',
+  'actuated', 'actuation_applied_at_ms', 'delivered_kwh',
   'grid_home_coverage_frac', 'outage_during_day', 'scored', 'score_notes',
   'pv_err_frac', 'pv_in_band', 'load_err_frac', 'load_in_band', 'buy_err_kwh',
   'soc_min_err_pct', 'realized_cost_cents', 'counterfactual_cost_cents',
@@ -631,6 +644,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       tariff_snapshot TEXT,
       window_start_ms INTEGER,
       window_end_ms INTEGER,
+      cushion_shortfall INTEGER,
       -- OUTCOME (nullable until captured)
       outcome_captured_at_ms INTEGER,
       actual_pv_kwh REAL,
@@ -643,6 +657,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       actual_min_soc_ts_ms INTEGER,
       plan_traj_floor_breached INTEGER,
       cushion_breached INTEGER,
+      actuated INTEGER,
+      actuation_applied_at_ms INTEGER,
+      delivered_kwh REAL,
       grid_home_coverage_frac REAL,
       outage_during_day INTEGER,
       scored INTEGER,
@@ -681,7 +698,12 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // v1.39.0 migration — CREATE TABLE IF NOT EXISTS does not evolve columns on
   // an existing DB, so add the plan's ACTUAL resolved charge window columns
   // idempotently (ALTER fails harmlessly when the column already exists).
-  for (const col of ['window_start_ms INTEGER', 'window_end_ms INTEGER']) {
+  // v1.50.0 appends the supervised-write actuation columns the same way.
+  for (const col of [
+    'window_start_ms INTEGER', 'window_end_ms INTEGER',
+    'cushion_shortfall INTEGER', 'actuated INTEGER',
+    'actuation_applied_at_ms INTEGER', 'delivered_kwh REAL',
+  ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);
     } catch { /* column already exists */ }
