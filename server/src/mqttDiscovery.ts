@@ -172,10 +172,10 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_ac_import_watts', name: 'EcoFlow AC Import', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.ac_import_watts }}' },
   { unique_id: 'ecoflow_fleet_battery_net_watts', name: 'EcoFlow Battery Net', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.fleet_battery_net_watts }}' },
   // v0.48.0 — whole-home grid POWER at the SHP2 main (wattInfo.gridWatt). The
-  // power complement of the grid_to_home lifetime energy sensor (v0.44.0). The HA
-  // Energy Dashboard grid power_config.stat_rate currently points at DPU ac_in
-  // (grid charging the DPUs); this exposes total home grid so the operator can
-  // rewire the flow preview to it.
+  // power complement of the grid_to_home lifetime energy sensor (v0.44.0).
+  // v1.53.0 — the rewire this sensor existed to enable is DONE: the HA Energy
+  // Dashboard grid source now carries power_config.stat_rate = this sensor, not
+  // DPU ac_in. See §"HA Energy Dashboard wiring" in DOCS.md for the full mapping.
   { unique_id: 'ecoflow_grid_home_watts', name: 'EcoFlow Grid Power (Home)', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:transmission-tower', value_template: '{{ value_json.grid_home_watts }}' },
   // SHP2 backup pool
   { unique_id: 'ecoflow_backup_pool', name: 'EcoFlow Backup Pool', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', value_template: '{{ value_json.backup_pool_percent }}' },
