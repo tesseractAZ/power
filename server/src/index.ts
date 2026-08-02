@@ -2428,8 +2428,7 @@ function persistNightActuation(s: NightActuationState): void {
   }
 }
 
-/** Clock text ("10:55 PM") of an instant in America/Phoenix, for the cancel
- *  deadline in human-facing messages. */
+/** Clock text ("10:55 PM") of an instant in America/Phoenix. */
 function fmtPhoenixClock(ms: number): string {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit',
@@ -2437,6 +2436,33 @@ function fmtPhoenixClock(ms: number): string {
   const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
   const dp = get('dayPeriod');
   return `${get('hour')}:${get('minute')}${dp ? ' ' + dp : ''}`;
+}
+
+/** Phoenix weekday ("Sunday") of an instant. */
+function fmtPhoenixWeekday(ms: number): string {
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', weekday: 'long' })
+    .formatToParts(new Date(ms))
+    .find((p) => p.type === 'weekday')?.value ?? '';
+}
+
+/**
+ * DAY-QUALIFIED deadline text for the supervised announcement (v1.51.2).
+ *
+ * ★ The cancel deadline is the owner's control point, so it must never be
+ * ambiguous about WHICH night it names. Weekend tariff semantics routinely
+ * resolve a Saturday-evening plan's charge window to Monday 00:00 — the write
+ * moment is then ~28 h out, and a bare "11:55 PM" reads as tonight. This is the
+ * same failure v1.39.0 fixed for the published window entities via
+ * `fmtPhoenixDayHm`; the announcement needs the identical discipline.
+ *
+ * Beyond 24 h the weekday is spelled out ("on Sunday at 11:55 PM"); inside 24 h
+ * the bare clock time is unambiguous and reads naturally in speech.
+ */
+function fmtDeadlineSpoken(ms: number, nowMs: number): string {
+  const hm = fmtPhoenixClock(ms);
+  if (ms - nowMs < 24 * HOUR_MS) return `at ${hm}`;
+  const wd = fmtPhoenixWeekday(ms);
+  return wd ? `on ${wd} at ${hm}` : `at ${hm}`;
 }
 
 // In-memory cache of the last 7 ledger rows for the read-only status route, so
@@ -3216,7 +3242,9 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
       if (armedCandidate) {
         supervisedCtx = {
-          cancelDeadlineText: fmtPhoenixClock(armedCandidate.windowStartMs! - APPLY_LEAD_MS),
+          // Day-qualified: a weekend plan's window can be ~28 h out, and a bare
+          // clock time would read as tonight (see fmtDeadlineSpoken).
+          cancelDeadlineText: fmtDeadlineSpoken(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
         };
       } else if (
@@ -3237,10 +3265,16 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     let audibleDelivered = false;
     if (supervisedCtx && plan) {
       const buyRounded = plan.buyKwh != null ? Math.round(plan.buyKwh) : 0;
+      // Disclose a plan that cannot hold the cushion — the HA notification says
+      // so, and the audible channel (the one that reaches the owner without a
+      // phone) must not be quieter about residual risk than the text channel.
+      const shortfallSpoken = plan.cushionShortfall
+        ? ' Note: charge and pool limits prevent fully meeting the outage cushion, so residual risk remains.'
+        : '';
       const spoken =
-        `Night charge notice. Tonight the system plans to buy about ${buyRounded} kilowatt hours of overnight grid energy, ` +
-        `raising the backup reserve to ${supervisedCtx.targetPct} percent. The write happens automatically at ${supervisedCtx.cancelDeadlineText}. ` +
-        'To cancel, use the night charge card on the Power panel before then.';
+        `Night charge notice. The system plans to buy about ${buyRounded} kilowatt hours of overnight grid energy, ` +
+        `raising the backup reserve to ${supervisedCtx.targetPct} percent. The write happens automatically ${supervisedCtx.cancelDeadlineText}.` +
+        `${shortfallSpoken} To cancel, use the night charge card on the Power panel before then.`;
       try {
         const a = await broadcast.announce('medium', spoken);
         audibleDelivered = a.ok === true;

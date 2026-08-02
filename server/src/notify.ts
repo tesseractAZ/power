@@ -288,7 +288,7 @@ export function buildNightChargeMessage(
     ? ' NOTE: the buy exceeds tomorrow morning’s PV headroom; a small clip is accepted to hold resilience.'
     : '';
   const tail = supervised
-    ? `SUPERVISED: at ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
+    ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `
       + 'Cancel from the night-charge card on the panel before then.'
     : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
