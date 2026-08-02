@@ -215,7 +215,7 @@ fi
 # SUPERVISOR_TOKEN is provided automatically by the HA Supervisor —
 # no need to export it manually. The Node process inherits it.
 
-bashio::log.info "Starting EcoFlow Panel on :${PORT} (telnet :${TELNET_PORT}, db ${DB_PATH})…"
+bashio::log.info "Starting Power (ecoflow_panel) on :${PORT} (telnet :${TELNET_PORT}, db ${DB_PATH})…"
 
 cd /app/server
 exec npm start

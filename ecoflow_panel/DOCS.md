@@ -2,7 +2,7 @@
 
 This is the definitive technical reference for the **ecoflow-panel** Home Assistant add-on: a life-safety off-grid solar/battery monitor and depletion alarm for a Phoenix, AZ system (EcoFlow Smart Home Panel 2 + Delta Pro Ultra battery/inverter Cores + a 42-panel array + EVSE). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the endpoints and sensors it produces, the configuration knobs that tune it, and its edge-case guards.
 
-The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, a telnet TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
+The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQTT, persists a SQLite time-series, runs ~40 analytics engines in a worker thread, and exposes the results over an HTTP API (`:8787`), Home Assistant MQTT-discovery sensors, a React web dashboard, and a telnet TUI (`:2323`). It also drives an **audible** alarm (chimes + text-to-speech over Home Assistant media players and a SIP intercom) when the battery is projected to deplete.
 
 > Every constant, formula, endpoint path, and config key below was written directly from the source and independently completeness-/accuracy-checked against it. Where a value is a tunable default, that is noted. For the operator quick-start, install steps, and the option list, see the top of the **Configuration, Deployment, Security & Operations** chapter; for a high-level tour, see `README.md`.
 
@@ -19,7 +19,7 @@ The add-on is a Node/TypeScript server (`server/`) that ingests EcoFlow cloud MQ
 8. [Alerts, Anomaly Detection, Incidents & Learning Loop](#8-alerts-anomaly-detection-incidents--learning-loop)
 9. [The Online Learning Loop (shadow models, online regression, model health)](#9-the-online-learning-loop-shadow-models-online-regression-model-health)
 10. [Audible Broadcast, Chimes & Text-to-Speech](#10-audible-broadcast-chimes--text-to-speech)
-11. [User Interfaces: Web Dashboard, Telnet TUI & HACS Cards](#11-user-interfaces-web-dashboard-telnet-tui--hacs-cards)
+11. [User Interfaces: Web Dashboard & Telnet TUI](#11-user-interfaces-web-dashboard--telnet-tui)
 12. [Configuration, Deployment, Security & Operations](#12-configuration-deployment-security--operations)
 13. [Safety & Operational Plumbing](#13-safety--operational-plumbing)
 14. [Intelligent Lighting & HVAC Posture (energy-aware automation)](#14-intelligent-lighting--hvac-posture-energy-aware-automation)
@@ -347,8 +347,11 @@ on a SQLite scan.
 - WAL allows one writer + many concurrent readers across connections, so the
   worker's read connection sees the writer's committed rows with no locking.
 - `readRecorder.ts` is a faithful copy of `recorder.ts`'s read path (same SQL,
-  same bucketing); `test/readRecorder.test.ts` asserts byte-for-byte parity.
-  Read pragmas add `PRAGMA query_only = ON`. Write methods are stubbed.
+  same bucketing) — parity is maintained by convention, not by an automated
+  cross-module equivalence test. `test/worker-offload.test.ts` pins
+  `readRecorder`'s own read semantics (ts ordering, 60 s bucket averaging,
+  `queryMulti` batching, `listMetrics`) and that the write methods are stubbed
+  no-ops. Read pragmas add `PRAGMA query_only = ON`.
 
 #### 6.2 Worker message protocol
 
@@ -482,6 +485,7 @@ macOS resolves `.local` to IPv6). Notable endpoints:
 | `/api/health`, `/api/version`, `/api/panel-info` | trivial | none |
 | `/api/history?sn&metric&since&until&bucket` | `analytics.query()` | 15 s |
 | `/api/summary/today` | `analytics.report('totals', …)` | 30 s |
+| `/api/calendar.ics` | forecast + EV windows + active NWS alerts | none — a subscribable iCal feed; point a calendar client at it |
 | `/api/circuit/history?sn&(ch|pair)&days` | `analytics.report('circuitHistory')` | none (worker-cached) |
 | `/api/metrics?sn` | `analytics.listMetrics(sn)` | none |
 | `/api/forecast`, `/api/runway`, `/api/degradation`, … | `analytics.report(name)` | 60 s (runway 30 s) |
@@ -1421,6 +1425,7 @@ are cached (~30 min) on the worker.
 | `LOG_LEVEL` | `info` | `debug`/`trace` un-gates routine "poll ok" lines |
 | `TELNET_ENABLED` / `TELNET_HOST` / `TELNET_PORT` | on / `::` / `2323` | telnet TUI |
 | `TUI_USERNAME` / `TUI_PASSWORD` | empty | console login (empty password = prompt disabled) |
+| `TUI_TRUSTED_ORIGINS` | empty | comma-separated extra origins accepted **verbatim, with no validation** — entries need not be private-range or `.local`; a public HTTPS origin is accepted, which is the point (remote HA Cloud access is the use case). The same set gates the write-auth origin check, the `/ws` and `/console/ws` upgrades, and CORS. Built-in LAN matching is separate and automatic. |
 
 ---
 
@@ -4094,6 +4099,38 @@ at TOU rates.
 > **v0.9.58:** defaults to a **flat** rate — the prior 25¢/8¢ split implied a TOU
 > plan most APS customers lack and silently overstated both cost and solar value.
 > A TOU-plan user sets `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS`.
+>
+> The table above pins the **unconfigured-install** contract. On an install that
+> has confirmed its utility's rate table, §4.2b supersedes it — do not read the
+> `= flat (17)` rows as what a configured system prices at.
+
+#### 4.2b Rate resolution — `resolveTariffCents(nowMs)` (v1.52.0)
+
+Before v1.52.0 the cost engine and the dispatch planner each closed over their own
+module constants, so a confirmed utility rate table configured for the night-charge
+work priced correctly there and nowhere else. `resolveTariffCents` is the single
+exported resolver both now call; it returns `{ onPeakCents, offPeakCents, basis }`
+and picks the first tier that applies:
+
+| # | Tier | `basis` | Condition |
+|---|---|---|---|
+| 1 | Explicit override | `'explicit-override'` | `TARIFF_ON_PEAK_CENTS` / `TARIFF_OFF_PEAK_CENTS` set |
+| 2 | Confirmed seasonal utility table | `'aps_r_ev-summer'` / `'aps_r_ev-winter'` | `TARIFF_APS_RATES_CONFIRMED` true; season by month |
+| 3 | Flat default | `'flat-default'` | neither of the above |
+
+The resolved basis is published as `tariffBasis` on `/api/tariff` (§4.4) and is
+shared by the dispatch planner (§4.5), so the two engines can no longer disagree
+about what a kWh costs.
+
+**Seasonality** is a month test, not a date range — the summer table applies May
+through October inclusive. A plan generated in one season for a window that opens
+in the next resolves at *generation* time.
+
+★ **Edge worth knowing:** tier 1 is evaluated **per side**, as
+`onOverride ?? <fallback>`. A half-set legacy override — one side configured,
+the other not — is therefore honoured for the side that is set while `basis`
+still reports `'flat-default'`, because the basis label is chosen by which tier
+supplied the pair, not by which values ultimately won.
 
 `onPeakAt(ts)`: `dow` mapped 1=Mon…7=Sun; both hour and day ranges support
 wrap-around (`hStart > hEnd`). Returns `dayOk && hourOk`.
@@ -4413,7 +4450,7 @@ snapshot.devices ─► evaluateInner() (alertMonitor.ts) ├── forecastDayA
                             ├── broadcastHealthAlert() (audible self-alert)
                             └── rateFloorAlerts()      (msg-rate collapse)
                                        │
-                                       ├─► store.setAlerts()   → snapshot.alerts → /api/snapshot, WS, HACS cards
+                                       ├─► store.setAlerts()   → snapshot.alerts → /api/snapshot, WS
                                        ├─► buildIncidents()     → /api/incidents
                                        ├─► rising/falling edges → notify.ts (ntfy/Pushover/webhook/HA) + digest
                                        ├─► telemetry rollups     → /api/alert-telemetry (drives auto-silence)
@@ -6113,16 +6150,16 @@ JSON endpoints:
 
 ## 11. User Interfaces: Web Dashboard & Telnet TUI
 
-The ecoflow-panel add-on exposes the same underlying fleet telemetry through **three independent front ends**, each aimed at a different consumption context:
+The ecoflow-panel add-on exposes the same underlying fleet telemetry through **two independent front ends**, each aimed at a different consumption context:
 
 | UI | Transport | Where it runs | Auth posture |
 |---|---|---|---|
 | **React web dashboard (PWA)** | WebSocket `/ws` + REST `/api/*` | Browser at `:8787` or via HA Ingress sidebar | Same-origin; writes need ingress/same-origin/token |
 | **Control-room TUI** | Raw telnet TCP `:2323` **and** browser xterm.js at `/console` | `nc`/`telnet` client, or browser | LAN-trust by default; opt-in operator login via `TUI_PASSWORD` (§11 2.3) |
 
-All three read the **same `FleetSnapshot`** the server pushes ~1×/sec over `/ws`, plus the same analytics REST endpoints. This document is a features-and-navigation reference for each surface.
+Both read the **same `FleetSnapshot`** the server pushes ~1×/sec over `/ws`, plus the same analytics REST endpoints. This document is a features-and-navigation reference for each surface.
 
-The server that backs all three is a single Fastify instance (`server/src/index.ts`) listening on port **8787** (web + REST + WS), with the raw telnet listener on **2323**. Both ports are declared in the add-on `config.yaml`:
+The server that backs both is a single Fastify instance (`server/src/index.ts`) listening on port **8787** (web + REST + WS), with the raw telnet listener on **2323**. Both ports are declared in the add-on `config.yaml`:
 
 ```yaml
 ports:
@@ -6284,7 +6321,7 @@ nc <host> 2323          # or:  telnet <host> 2323
 
 Gated by `TELNET_ENABLED` (bare-env default on; the SHIPPED add-on options default is `TELNET_ENABLED: false` — enable it in the add-on configuration). Host defaults to `::`, port to `2323` (`config.ts`: `TELNET_HOST`, `TELNET_PORT`). The browser variant needs no client — open `/console`.
 
-By default the TUI is **unauthenticated** on both transports — read-only telemetry meant for a trusted LAN (the `ports_description` explicitly warns so); setting `TUI_PASSWORD` enables the operator login on both (§2.3). The `/console/ws` upgrade rejects a cross-origin `Origin` but accepts same-origin/LAN/Nabu-Casa/missing-Origin (so the panel_iframe and remote access work).
+By default the TUI is **unauthenticated** on both transports — read-only telemetry meant for a trusted LAN (the `ports_description` explicitly warns so); setting `TUI_PASSWORD` enables the operator login on both (§2.3). The `/console/ws` upgrade rejects a cross-origin `Origin`, accepting same-origin, LAN, and missing-Origin. The blanket `*.ui.nabu.casa` match was **removed in v1.47.3** as a CSWSH hole — a wildcard would let any HA Cloud tenant pass a gate that is not same-origin-protected. Remote access is via HA ingress (auth-gated) or an exact-match `TUI_TRUSTED_ORIGINS` entry.
 
 #### 2.2 Hardening (DoS guards)
 
@@ -6620,9 +6657,13 @@ external monitor; empty URL disables) are documented in §13.0c.
 ### Security posture
 
 The design principle: **read endpoints are open; every write is gated.** Read endpoints
-(snapshot, history, forecast, Lovelace card data) are unauthenticated by design because
-Lovelace cards fetch them cross-origin. Writes require one of three credentials, plus an
-extra lockdown on the raw device-command path. Defense-in-depth is layered on top with an
+(snapshot, history, forecast) are unauthenticated by design, and the binding reason is
+the audible alarm path, not any browser client: `/audio-render/*` and `/chimes/*` are
+plain static routes with no auth preHandler, and `BROADCAST_AUDIO_BASE` defaults to the
+add-on's own host, so Home Assistant media players, Music Assistant, and the SIP
+intercom all fetch klaxon and TTS WAVs unauthenticated at alarm time.
+★★★ **Do not gate these reads: a 401 to a speaker is a silent alarm.** Writes require
+one of three credentials, plus an extra lockdown on the raw device-command path. Defense-in-depth is layered on top with an
 AppArmor profile.
 
 #### Write-auth gate (`requireWriteAuth`, `server/src/auth.ts`)
@@ -7473,7 +7514,7 @@ Evaluation order (first match wins):
 6. **`surplus`** — if `curtailmentActive` → `surplus`, reason `"PV curtailment active —
    surplus energy available"`.
 
-7. **`normal`** (fallthrough) — reason `"dawn minimum {n}%"` if we have one, else `"no
+7. **`normal`** (fallthrough) — reason `"dawn minimum {n}%"` when a dawn minimum is available, else `"no
    depletion projected"`.
 
 ##### 1.3.2 Asymmetric hysteresis — `createPostureTracker()`
@@ -7839,7 +7880,7 @@ The binding safety invariants, enforced structurally rather than by convention:
         setLatestNightChargePlan(plan)  — in-process holder (12 h staleness guard)
           ├─→ /api/ha-state + MQTT state payload (nightChargeStateFields)
           ├─→ /api/night-charge/status (index.ts:3180)
-          ├─→ TUI Strategy screen "TONIGHT'S PLAN" · web NightChargeCard
+          ├─→ web NightChargeCard (Strategy panel)
           │
    ~21:30 evening job (once per Phoenix day, restart-persistent latch)
           ├─→ recordNightPlanRow() → night_charge_ledger (frozen PLAN columns)
@@ -8095,7 +8136,7 @@ The remaining gate diagnostics (`night_charge_under_buy_rate`, `night_charge_ban
 
 **Notification** (`buildNightChargeMessage`, `notify.ts:245`): three shapes — `charge` (buy kWh, target SoC, low-SoC without vs with the buy, floor+cushion line, confidence, honest shortfall/over-buy notes, and the advisory automation contract), `hold` (no charge needed), and `insufficient_basis` (sent so the *absence* of a plan is explicit — the owner never wonders if the job died; a null plan can only ever render this shape regardless of the requested one). All severity `info` with a single `dedupId: 'night_charge_plan'` so the nightly message lands in **one updating card**, and dispatched via a *direct* `sendNotification` that bypasses quiet-hours and min-severity (design I10) — a plan queued past the charge-window open is worse than none. `NIGHT_CHARGE_NOTIFY_ON_HOLD=false` suppresses hold-night sends (still latching the day).
 
-**TUI**: the Strategy screen renders a `TONIGHT'S PLAN` block (`telnet/screens.ts:1153`) from a 12 h staleness-gated accessor (`dataProvider.nightChargePlan` — present ∧ `basisComplete` ∧ fresh, else one grey line), formatted through the *same* `nightChargeStateFields` so the terminal and the HA entities never disagree. It is deliberately distinct from the adjacent `CHARGE SCHEDULE` block (the SHP2's native `timeTask` config). **Web**: `NightChargeCard` on the Strategy panel — zero-prop, self-fetching `/api/night-charge/status` on a 60 s poll, with its own matching 12 h client-side staleness guard; a null/incomplete/stale plan renders the grey "unavailable" shape, never a fabricated number.
+**Web**: `NightChargeCard` on the Strategy panel — zero-prop, self-fetching `/api/night-charge/status` on a 60 s poll, with its own matching 12 h client-side staleness guard; a null/incomplete/stale plan renders the grey "unavailable" shape, never a fabricated number.
 
 ---
 
@@ -8134,7 +8175,7 @@ Env-only knobs (not in the options form): `NIGHT_CHARGE_LATCH_PATH` (latch file 
 
 ## Appendix A — Feature Inventory (evidence linkage)
 
-Purpose: a pruning-oriented ledger of every substantive feature/engine, what math it runs, which field signals feed it, and — decisive for keeping it — **what actually consumes its output**. Consumer columns were verified by grepping the pinned source revision (`git grep … HEAD -- server/src web/src lovelace/src`), not by reading intent from comments. Evidence status is one of:
+Purpose: a pruning-oriented ledger of every substantive feature/engine, what math it runs, which field signals feed it, and — decisive for keeping it — **what actually consumes its output**. Consumer columns were verified by grepping the pinned source revision (`git grep … HEAD -- server/src web/src`), not by reading intent from comments. Evidence status is one of:
 
 - **measured-and-active** — output is consumed by at least one live surface (alarm, HA sensor, UI card, TUI screen, or another engine) and the math has operated on real field data.
 - **data-gated (…)** — wired and correct, but a stated gate holds the output at `null`/inactive until the field record satisfies it; the parenthetical names what unlocks it.
@@ -8184,8 +8225,8 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | EV-window prediction | `computeEvWindowPrediction` expected-value `evLoadByHour`; subtracted from the alarm load (safety invariant §5.1.5) | EVSE circuit history | Forecast load, runway (subtraction), calendar, insights cards | measured-and-active |
 | Forecast skill | Day-level replay MAE/bias/r² over covered days (§3.4) | Forecast archive vs actuals | Probabilistic band calibration, `/api/confidence.forecastDayR2`, repair issues, insights | measured-and-active |
 | Confidence snapshot | Medians of engine r² + forecast bias/MAE (§3.5, §8.10) | degradation, thermal, skill reports | `/api/confidence`, insights cards | measured-and-active |
-| Probabilistic P10/P90 SoC band | Per-hour sigma + coherent SoC ensemble; F30 self-calibrating shrink over `PV_BAND_CAL_WINDOW_DAYS = 30` (§3.6) | Forecast + skill | `/api/forecast/probabilistic`, Lovelace solar-card, MPC P10 envelope | measured-and-active; band **calibration** data-gated (needs ≥14 scored days in the 30-day window) |
-| Multi-day horizon | `computeMultiDayForecast` extends PV/SoC 2–3 days on typical-day curves (§3.7) | Forecast + weather | `/api/forecast/multi-day` only — no UI, TUI, HA, or engine consumer | **weak-linkage candidate** — output consumed by nothing |
+| Probabilistic P10/P90 SoC band | Per-hour sigma + coherent SoC ensemble; F30 self-calibrating shrink over `PV_BAND_CAL_WINDOW_DAYS = 30` (§3.6) | Forecast + skill | `/api/forecast/probabilistic`, MPC P10 envelope | measured-and-active; band **calibration** data-gated (needs ≥14 scored days in the 30-day window) |
+| Multi-day horizon | `computeMultiDayForecast` extends PV/SoC 2–3 days on typical-day curves (§3.7) | Forecast + weather | `/api/forecast/multi-day` **and** the night-charge planner (`index.ts` requests it at `days: 4` and maps it into `dayRollups`) | measured-and-active |
 | Open-Meteo ingestion | GHI + temp hourly fetch, cached (§3.8) | Open-Meteo API | Forecast, curtailment, thermal, shade | measured-and-active |
 | NWS NDFD ensemble | Opt-in second cloud source + disagreement metric (§3.8) | NWS NDFD (`NWS_ENABLED`) | `/api/weather/ensemble`, insights cards | data-gated (off unless `NWS_ENABLED`) |
 | NWS storm alerts | CAP alert fetch → alert/calendar/broadcast context (§8.3.4) | NWS CAP feed | `forecastDayAlerts`, calendar, insights cards | data-gated (off unless `NWS_ENABLED`) |
@@ -8244,7 +8285,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Two-grid-quantities discipline | `gridImport` (DPU `ac_in`) vs `gridToHome` (SHP2 `grid_home_w`); KPI picks trusted superset (§7.0.2) | Both grid metrics | selfConsumption, tariff, HA Energy wiring | measured-and-active |
 | Carbon accounting | `gridDisplacedKwh × 0.4990 kg/kWh` (`GRID_CO2_INTENSITY_LB_PER_MWH = 1100`); capped part-sum (§7.3) | selfConsumption output | `/api/carbon`, HA carbon sensor | measured-and-active |
 | Legacy tariff report | Hourly `onPeakAt` walk; `TARIFF_FLAT_CENTS_PER_KWH = 17` default; whole-home superset (audit #5) (§7.4) | Grid + load integrals | `/api/tariff`, HA `tariff_*` sensors | measured-and-active |
-| Greedy dispatch plan | Per-hour charge/discharge/import branches, `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY` (0.86 → ≈0.927), reserve guard on drawn amount (§7.5) | SoC, forecast, tariff constants | `/api/dispatch-plan`, Lovelace strategy-card | measured-and-active (advisory-only by design) |
+| Greedy dispatch plan | Per-hour charge/discharge/import branches, `legEff = √DISPATCH_ROUND_TRIP_EFFICIENCY` (0.86 → ≈0.927), reserve guard on drawn amount (§7.5) | SoC, forecast, tariff constants | `/api/dispatch-plan` only — no card, sensor, or engine consumer | **weak-linkage candidate** — advisory-only by design; `computeDispatchPlan` has exactly one caller (the route) |
 | MPC dispatch recommender | Rolling DP over 24 h with P10 risk branch, degrade detection, `reserveDipPenaltyUsdPerKwh = 1.0` (§7.6) | Forecast, probabilistic band, RTE, legacy flat-tariff env (not `tariff.ts`) | `/api/dispatch/recommend` only — no card, sensor, or engine | **weak-linkage candidate** — endpoint-only; tariff basis diverges from the canonical R-EV model |
 | SoC-saturation curtailment | Bayesian expected-PV gap vs live PV above dynamic charge ceiling `homeChargeCeilingPct()`; surplus W + kWh history (§7.8, §14.2) | SoC, `pv_total`, GHI, circuits | `pv_curtailment_*` sensors, `CurtailmentCard`, lighting posture `surplus` trigger, curtailment alerts | measured-and-active |
 
@@ -8265,7 +8306,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Cooldown auto-silence | Churn detection → temporary silence (§8.4.4) | Fire history | Monitor | measured-and-active |
 | Notification delivery | ntfy/Pushover/webhook/HA channels, dedupe, digest (§8.5) | Monitor decisions | Operator push | measured-and-active |
 | Feature snapshots | `featureSnapshot.ts` captures LR feature vector once per rise (§8.6, §9.1) | degradation/thermal/IR/chargeCurve reports | Outcome→LR training join | measured-and-active (scaffolding for the gated loop) |
-| Outcome capture | `POST /api/alerts/outcome` labels + family precision rollups (§8.6, §9.2) | Operator button presses (web/Lovelace) | LR update, `/api/alerts/outcomes/stats` | measured-and-active |
+| Outcome capture | `POST /api/alerts/outcome` labels + family precision rollups (§8.6, §9.2) | Operator button presses (web dashboard) | LR update, `/api/alerts/outcomes/stats` | measured-and-active |
 | Online LR (SGD) | `updateFromOutcome` shadow-only step + prequential loss (§9.3) | Snapshots + labels | Shadow model → pack-risk v2 gate | data-gated (gate floor 100 samples; no promotion path by design) |
 | Model health + gate | `computeGateDecision` samples/drift/precision policing (§9.4) | Shadow model state | `/api/models/health`; gate applied inside `computePackRiskV2` | data-gated (same floor; report endpoint has no other consumer) |
 | Machine alert telemetry | `alertTelemetry.ts` structured fire/resolve log (§8.6) | Monitor events | `/api/alert-telemetry` only | **weak-linkage candidate** — machine-readable diagnostic no tool ingests |
@@ -8326,7 +8367,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 
 Consumers verified at the pinned revision; deleting an engine also deletes its listed route/fields. Items are candidates for *review*, not verdicts — each line states the linkage failure.
 
-1. `server/src/analytics.ts:computeMultiDayForecast` (+ `multiDayForecast` builder, `/api/forecast/multi-day`) — no UI, TUI, HA, or engine consumer.
+1. ~~`server/src/analytics.ts:computeMultiDayForecast`~~ — **NOT a candidate; do not remove.** `recomputeNightChargePlan()` requests `multiDayForecast` at `days: 4` and maps it into `dayRollups`, which feed the night-charge plan (§15.2 shows this). ★★★ Analytics reports dispatch **by string**, so dropping the builder compiles clean, throws at runtime, and is swallowed by the caller's `.catch(() => null)` — `dayRollups` silently degrades to `[]` inside the engine that actuates a device write. Any future removal audit must grep the report NAME, not just the symbol.
 2. `server/src/dispatch/mpc.ts:recommendDispatch` (entire module + `/api/dispatch/recommend`) — endpoint-only; duplicates dispatch-plan territory on a legacy flat-tariff basis that diverges from `tariff.ts`.
 3. `server/src/analytics.ts:computePackRiskScores` + `server/src/ml.ts:computePackRiskV2` (+ `/api/pack-risk`, `/api/pack-risk/v2`) — nothing reads either endpoint. Removing v2 orphans the chain `server/src/models/onlineLR.ts` + `server/src/models/modelHealth.ts` + the LR-vector portion of `featureSnapshot.ts`; outcome capture itself should stay (it powers `/api/alerts/outcomes/stats` precision accounting).
 4. `server/src/models/hierarchicalBayes.ts:fitHierarchical` (+ `/api/models/hierarchical-pack-soh`) — endpoint-only referee; no automated cross-check.

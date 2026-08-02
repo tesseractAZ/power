@@ -1,3 +1,76 @@
+## v1.54.0 — repo hygiene: remove a published personal address, correct what the docs claim
+
+**Public-manifest privacy.** `repository.yaml` published a personal email address in
+its `maintainer:` field — the single exposure of it anywhere in the repository; all
+382 commits use the GitHub noreply author. It now uses the same address-free form the
+sibling repository already ships. The same file's `url:` still pointed at the
+pre-rename `ecoflow-panel` slug and worked only via GitHub's redirect.
+
+**Example addresses.** The Wyoming-host option's help text used a real private-range
+address as its example; it now uses the RFC 5737 documentation range, which is
+unambiguously an example. No real host address remains anywhere at HEAD.
+
+**Three false statements on the HA Configuration page.** The Night-Charge Advisor
+option claimed it "NEVER charges or writes to any device" — true of the default
+posture, but the write mode is a separate option and `supervised`/`auto` do write.
+It claimed "Default off" while shipping `true`, and carried a copy-pasted clause
+about listening on the telnet port that belongs to a different option. The Telnet TUI
+option claimed "Default on" while shipping `false`. Corrected, and write-eligibility
+is now scoped to `auto`, which is what the readiness gate actually governs.
+
+**README.** "serves the results four ways" lost its fourth surface when the card
+family was removed and kept the numeral. The dashboard tab list named seven tabs, of
+which three are wrong — one deleted, two that never existed. The quick-start told the
+operator to reach a telnet TUI that ships disabled. The test count was fifteen
+releases stale. The workflow table credited the tagging workflow with building and
+publishing the image, which a different workflow does, and named two of four
+workflows. `docs/` — which holds the measured-accuracy record and the binding design
+of record for the device-write path — was absent from the directory table entirely.
+
+**Container labels.** The published image carried `title` and `description` labels
+both reading "EcoFlow Panel" — a name where a description belongs — and the local
+build fallback carried the old slug.
+
+**Vulnerability reporting.** `SECURITY.md` gave no direct link and declared a
+directory deleted in v1.47.0 as in scope.
+
+**DOCS corrections.** Seventeen, of which two matter beyond tidiness:
+
+- Appendix A listed `computeMultiDayForecast` as a removal candidate with "no UI,
+  TUI, HA, or engine consumer". It is requested at `days: 4` inside the night-charge
+  plan recompute and mapped into `dayRollups`. ★★★ Because analytics reports dispatch
+  by **string**, acting on that line would have compiled clean, thrown at runtime,
+  and been swallowed by the caller's `.catch(() => null)` — silently degrading
+  `dayRollups` to `[]` inside the engine that actuates a device write. The entry is
+  now a labelled do-not-remove with that hazard stated.
+- The security-posture section justified unauthenticated reads with a rationale
+  deleted in v1.47.0 (cards fetching cross-origin) and omitted the real one: the
+  alarm audio routes are unauthenticated static paths that HA media players, Music
+  Assistant, and the SIP intercom fetch at alarm time. Now stated, with the
+  consequence spelled out — **a 401 to a speaker is a silent alarm**.
+
+Also: a documented TUI surface removed in v1.46.0; a cited test file that has never
+existed, replaced with the test that does pin those semantics; a dead table-of-
+contents anchor and two front-end counts left behind by the card removal; five
+consumer-ledger rows still crediting the removed cards; a first-person register
+violation; and a missing serial conjunction.
+
+**DOCS coverage added.** §4.2b documents `resolveTariffCents` — the v1.52.0 resolver
+both the cost engine and the dispatch planner now share — including its three tiers,
+the month-based seasonality, and the per-side fallback edge where a half-set legacy
+override is honoured while the reported basis still reads `flat-default`. §12 gains
+`TUI_TRUSTED_ORIGINS`, the only shipped option in neither the table nor a delegation,
+documented as accepting entries verbatim without validation. The endpoint table gains
+the subscribable iCal feed. The `/console/ws` origin description still described the
+blanket wildcard match removed in v1.47.3 as a CSWSH hole.
+
+**Removed.** `scripts/setup-ha-dashboard.mjs`, an installer for the v1.47.0-removed
+cards whose CDN fallback pinned a tag that was never pushed, and the `.gitignore`
+carve-out for the deleted directory.
+
+Documentation, manifest, and label changes only; no runtime behaviour changes beyond
+the request user-agent, which stops advertising a frozen version and the old slug.
+
 ## v1.53.0 — document the Energy Dashboard **power** wiring (`stat_rate`)
 
 **The gap this closes.** DOCS §2.6 documented the six `total_increasing` kWh

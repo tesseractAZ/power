@@ -6,7 +6,7 @@ EcoFlow off-grid system into a fully-instrumented, self-learning **control room*
 
 It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST + live MQTT),
 persists a per-metric SQLite time-series, runs **~40 analytics engines** in a
-worker thread, and serves the results four ways: a **React dashboard**, a
+worker thread, and serves the results three ways: a **React dashboard**, a
 **telnet "control-room" TUI**, **80+ Home Assistant MQTT-discovery entities**
 (sensors, binary sensors, and alarm-priority switches — plus dynamic
 per-circuit sensors and the Energy Dashboard). When the pack is
@@ -63,7 +63,11 @@ time-of-use rate.
 
 **Energy, economics & dispatch**
 - Self-consumption decomposition (solar fraction, PV→load/battery), carbon
-  accounting, time-of-use tariff + cost, and clipping/curtailment.
+  accounting, time-of-use tariff + cost, and clipping/curtailment. The cost
+  engine and the dispatch planner share one resolved rate basis — an explicit
+  override, else a **confirmed** seasonal utility table, else a flat default.
+  An unconfirmed table is refused rather than assumed, and the basis in force is
+  published alongside the numbers.
 - A **night-charge TOU-arbitrage engine** with an owner-selected write posture
   (`NIGHT_CHARGE_MODE: advisory | supervised | auto`, default advisory — never
   writes): on a night a shortfall is anticipated, it sizes "buy N kWh → charge
@@ -89,15 +93,19 @@ time-of-use rate.
   **online learning loop** (feature snapshots → realized outcomes → shadow models).
 - The **safety-critical runway engine**: an hour-by-hour DC-bus depletion sim
   (accounting for the DC→AC discharge loss), grid-aware severity, and a battery-
-  SoC floor ladder — driving the audible broadcast.
+  SoC floor ladder — driving the audible broadcast. Below the reserve floor it
+  says so rather than printing a countdown to a crossing already behind it, and
+  while the grid is carrying the load it states plainly that every time shown is
+  an **islanded** grid-loss projection, not a live countdown.
 
 **Delivery surfaces**
 - Audible **broadcast** pipeline: per-target volume pinning, a built-in tone
   library (+ uploads, per-level assignment), TTS (local Piper/Wyoming with a Cloud
   fallback), Music Assistant / `media_player`, and a **SIP** side-channel to an
   antique-phone intercom.
-- **Web dashboard** (Energy · Battery · Solar · EVSE · Strategy · Alerts ·
-  Predictive Insights) and **telnet TUI** (Plant-Operator console).
+- **Web dashboard** (Dashboard · Solar · Battery · Strategy · Alerts — the
+  predictive sections live on their home pages, and the Alert Console is a
+  sub-view of Alerts) and **telnet TUI** (Plant-Operator console).
 
 See the [DOCS.md table of contents](ecoflow_panel/DOCS.md#table-of-contents) for
 the full, math-level treatment of each of the above.
@@ -140,7 +148,9 @@ For a Pi running Home Assistant OS or Supervised:
    (seconds, not a local build). Open **Configuration**, paste your EcoFlow
    `ECOFLOW_ACCESS_KEY` / `ECOFLOW_SECRET_KEY` and site location, then **Start**.
 5. Open the add-on's **Web UI** (HA ingress), or reach the trusted-LAN data API at
-   `http://<host>:8787` and the telnet TUI at `nc <host> 2323`.
+   `http://<host>:8787`. The telnet TUI (`nc <host> 2323`) is **off by default** —
+   set `TELNET_ENABLED: true` in Configuration first (and, on a shared LAN, set
+   `TUI_PASSWORD` to require an operator login).
 
 Every configuration option is documented in
 [DOCS.md ch.12 — Configuration, Deployment, Security & Operations](ecoflow_panel/DOCS.md#12-configuration-deployment-security--operations).
@@ -155,12 +165,13 @@ Every configuration option is documented in
 | `web/` | React dashboard (Vite) |
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `DOCS.md`, `CHANGELOG.md` (+ archive), AppArmor profile |
 | `scripts/` | Docs builder (`build-docs-docx.py`), device probes |
-| `.github/workflows/` | CI (type-check ×2, Dockerfile smoke, docs `.docx`+`.pdf`, CodeQL) + tag-release → multi-arch GHCR publish |
+| `docs/` | `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
+| `.github/workflows/` | `ci.yml` (type-check ×2, Dockerfile smoke, docs `.docx`+`.pdf`) · `tag-release.yml` (tags a `Release …` merge) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch). CodeQL runs as GitHub default setup, no workflow file. |
 
 ## Development
 
 ```bash
-cd server && npm install && npm test     # ~1,600 tests
+cd server && npm install && npm test     # ~1,750 tests
 cd server && npx tsc --noEmit            # server type-check
 cd web    && npm install && npm run build
 ```
@@ -170,13 +181,15 @@ open a PR whose squash subject starts `Release vX.Y.Z …`. `main` is branch-
 protected: the CI checks (both type-checks, the Dockerfile smoke build, the docs
 `.docx`+`.pdf` build, and CodeQL) must pass, and every engine change also clears
 an **adversarial multi-agent review** before it can reach the alarm path. Merging
-a `Release …` subject fires `tag-release.yml`, which builds the multi-arch GHCR
+a `Release …` subject fires `tag-release.yml`, which creates the `vX.Y.Z` tag and
+dispatches `images.yml` — that workflow runs the test suite, builds the multi-arch GHCR
 image and cuts a GitHub Release (with the docs attached); the add-on then updates
 in place. Full runbook in DOCS.md ch.12.
 
 ## Quality & accuracy
 
-This is a life-safety system and is held to that bar. Engines are cross-validated
+This is a life-safety system and is held to that bar. The measured record lives in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Engines are cross-validated
 against **independent** ground truth — Open-Meteo GHI, first-principles array
 physics, energy conservation, and the system's own forecast backtest — with
 concrete results tracked over time (daily PV matches independent expectation to

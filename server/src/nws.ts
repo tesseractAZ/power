@@ -76,7 +76,7 @@ let cache: NwsAlertFeed | null = null;
 export const TTL_MS = 15 * 60 * 1000;
 
 const USER_AGENT =
-  'EcoFlowPanel/0.7.5 (https://github.com/tesseractAZ/ecoflow-panel)';
+  `EcoFlowPanel/${process.env.BUILD_VERSION || 'dev'} (https://github.com/tesseractAZ/power)`;
 
 export function isNwsEnabled(): boolean {
   return process.env.NWS_ENABLED === '1' || process.env.NWS_ENABLED?.toLowerCase() === 'true';
