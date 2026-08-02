@@ -1,3 +1,24 @@
+## v1.51.2 — supervised announcement: day-qualified deadline + shortfall disclosure
+
+The supervised evening announcement named its cancel deadline with a bare
+clock time. Weekend tariff semantics routinely resolve a Saturday-evening
+plan's charge window to Monday 00:00 — the write moment is then ~28 hours
+out, and "the write happens automatically at 11:55 PM," heard at 21:30 on
+Saturday, reads as tonight. The cancel deadline is the owner's control point,
+so an ambiguous night is a control defect, not a wording nit; it is also the
+same failure v1.39.0 corrected for the published window entities
+(`fmtPhoenixDayHm`), which the v1.50.0 announcement did not inherit. The
+deadline is now day-qualified beyond 24 hours ("on Sunday at 11:55 PM") in
+both the notification and the spoken broadcast.
+
+The spoken announcement also omitted `cushionShortfall` while the HA
+notification disclosed it — the audible channel, the one that reaches the
+owner without a phone, must not be quieter about residual risk than the text
+channel. It now speaks the same disclosure.
+
+4 new tests pin the day-qualified pass-through, the same-night phrasing, the
+unchanged advisory tail, and the shortfall disclosure; 1,754 total.
+
 ## v1.51.1 — documentation freshness pass
 
 A four-way audit of the long-form documentation against the v1.49.0–v1.51.0
