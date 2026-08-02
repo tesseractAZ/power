@@ -3974,6 +3974,51 @@ Per-circuit `ecoflow_circuit_<ch>_lifetime_kwh` sensors are enumerated from
 the MQTT payload emit per-circuit keys at startup — before the first poll — to
 match retained HA sensors from the prior run.
 
+#### 2.7 Energy Dashboard **power** wiring (`stat_rate`) — required for the Now tab
+
+The counters above drive the kWh views. The Energy dashboard's **"Now" tab**
+(`hui-power-sources-graph-card`) is a separate, easily-missed data path: it plots
+the per-source **power** statistic named by `stat_rate` on each energy source, and
+derives its "Consumption" line as `max(0, Σ plotted series)`. Consumption is
+therefore **not a measurement** — a source with no `stat_rate` is silently absent
+from both the graph and the "Power usage" badge (`_computeTotalPower` gates every
+term on `source.stat_rate`).
+
+Consequence, and the reason this section exists: with only solar and grid rated,
+`Consumption ≡ Solar + Grid` identically, the stacked grid band's upper edge *is*
+the consumption line at every x, and the number is wrong by the whole battery flow
+— overstating house load while the pack charges, understating it while it
+discharges. `energy/validate` does **not** flag a missing `stat_rate`.
+
+Complete mapping (all three sources must be rated):
+
+| Energy source | `stat_energy_from` / `_to` | `stat_rate` (power) | Basis |
+|---|---|---|---|
+| Solar | `ecoflow_pv_lifetime_kwh` | `ecoflow_fleet_pv_watts` | DC, MPPT input |
+| Grid | `ecoflow_grid_to_home_lifetime_kwh` | `ecoflow_grid_home_watts` (SHP2 `wattInfo.gridWatt`) | AC, service main |
+| Battery | out `…discharge…` / in `…charge…` | `ecoflow_fleet_battery_net_watts` | DC, pack terminals |
+
+- **Battery sign convention is "Standard"** — positive = discharging, negative =
+  charging, matching HA's own helper text. `fleet_battery_net_watts` already
+  follows it; do not select "Inverted".
+- **Grid must be rated to `grid_home_watts`, not `ac_import_watts`.** The latter is
+  DPU `ac_in` — grid energy that AC-*charges the packs* — a diagnostic sub-metric
+  that sits near zero on a solar-charged home (§ the `v0.44.0` naming-honesty note
+  in `mqttDiscovery.ts`).
+- **`power_config.stat_rate` vs top-level `stat_rate`:** the HA config dialog writes
+  the former, the graph reads the latter, and the backend mirrors one to the other.
+  After any programmatic `energy/save_prefs`, re-read `energy/get_prefs` and confirm
+  the **top-level** key is present rather than assuming the mirror ran.
+- **Irreducible residual — do not chase it.** Solar is metered at the MPPT DC input
+  and battery at the DC pack terminals, while grid is the AC main, so PV→battery
+  conversion loss lands in HA's node model as phantom load. Expect a roughly flat
+  offset that scales with PV throughput, not with house load. Ground truth for house
+  load is `panel_load` (Σ the SHP2 circuit CTs), never the derived consumption line.
+
+Per-circuit counters are eligible for `device_consumption` (the per-device
+breakdown). Because the circuit CTs sum to approximately whole-home load, HA's
+"untracked consumption" then reads as the conversion-loss residual above.
+
 ---
 
 ### 3. Carbon Accounting (`computeCarbonReport`)

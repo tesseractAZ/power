@@ -1,3 +1,38 @@
+## v1.53.0 — document the Energy Dashboard **power** wiring (`stat_rate`)
+
+**The gap this closes.** DOCS §2.6 documented the six `total_increasing` kWh
+counters that feed HA's Energy Dashboard, and stopped there. The dashboard's
+"Now" tab is a separate data path: `hui-power-sources-graph-card` plots the
+per-source *power* statistic named by `stat_rate`, and derives its "Consumption"
+trace as `max(0, Σ plotted series)` rather than reading any measured total. A
+source with no `stat_rate` is therefore absent from both that graph and the
+"Power usage" badge — silently, because `energy/validate` does not flag it.
+
+With only solar and grid rated, the identity `Consumption ≡ Solar + Grid` holds
+at every bucket, the stacked grid band's upper edge *is* the consumption trace
+(they cannot diverge, which reads as a rendering bug and is not one), and the
+plotted figure is wrong by the entire battery flow — overstating house load
+while the pack charges, understating it while it discharges. Neither error is
+detectable from the card itself; ground truth for house load is `panel_load`
+(Σ the SHP2 circuit CTs), never the derived consumption trace.
+
+New DOCS §2.7 gives the complete three-source mapping, the battery sign
+convention ("Standard": positive = discharging, matching
+`fleet_battery_net_watts`), the reason grid must be rated to `grid_home_watts`
+rather than the `ac_import_watts` sub-metric, the `power_config.stat_rate` vs
+top-level `stat_rate` mirroring caveat for programmatic `energy/save_prefs`
+callers, and the irreducible DC/AC basis residual that must not be chased —
+solar is metered at the MPPT DC input and battery at the DC pack terminals while
+grid is the AC main, so PV→battery conversion loss lands in HA's node model as
+phantom load. It also records that the per-circuit counters are eligible for
+`device_consumption`, where "untracked consumption" then reads as that residual.
+
+**Stale comment retired.** The `ecoflow_grid_home_watts` block in
+`mqttDiscovery.ts` still described, in the present tense, a rewire that has since
+happened — that the grid `power_config.stat_rate` "currently points at DPU ac_in
+… so the operator can rewire the flow preview to it". It now records the wiring
+as done and points at §2.7. Documentation only; no runtime behaviour changes.
+
 ## v1.52.0 — runway card tells the truth below the floor; cost engine uses the confirmed tariff
 
 **Runway, below the reserve floor.** The crossing detector only arms while the
