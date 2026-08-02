@@ -7,5 +7,5 @@
 # ecoflow_panel/config.yaml bumps — with no local-folder git workflow and none of
 # the local+image "hybrid" update friction.
 name: Power
-url: https://github.com/tesseractAZ/ecoflow-panel
-maintainer: tesseractAZ <epaschal@outlook.com>
+url: https://github.com/tesseractAZ/power
+maintainer: Eric Paschal (https://github.com/tesseractAZ)

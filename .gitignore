@@ -6,11 +6,10 @@ dist/
 web/dist/
 server/dist/
 *.tsbuildinfo
-# Exception: the Lovelace card under lovelace/dist/ is the SOURCE (no build
-# step — it's a self-contained Web Component) and MUST be committed so HACS
-# can serve it directly from the repo.
-!lovelace/dist/
-!lovelace/dist/**
+
+# working notes / one-off inventories kept beside the checkout, never published
+/*-inventory-*.md
+/*-proposal-*.md
 
 # env / secrets — never commit
 .env
