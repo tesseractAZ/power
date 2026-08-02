@@ -23,12 +23,12 @@ issue, and include the version (`GET /api/version` returns `{version, ref}`).
 
 **Please do not open a public GitHub issue for security problems.**
 
-Report privately via **GitHub Security Advisories** — on the repository, go to the
-**Security** tab → **Report a vulnerability** (GitHub Private Vulnerability
-Reporting). Include:
+Report privately via GitHub Private Vulnerability Reporting — open
+[**tesseractAZ/power → Security → Report a vulnerability**](https://github.com/tesseractAZ/power/security/advisories/new).
+Include:
 
 - affected version (`ref` SHA if known) and component (server API, MQTT ingest,
-  broadcast/TTS, config, telnet TUI, HACS card, …),
+  broadcast/TTS, config, telnet TUI, night-charge write path, …),
 - a description and, ideally, a minimal reproduction,
 - the impact you believe it has.
 
@@ -59,8 +59,7 @@ changelog if you'd like it.
 
 ## Scope
 
-In scope: the add-on server (`server/`), the web UI (`web/`), the HACS Lovelace
-cards (`lovelace/`), the MQTT/EcoFlow ingest, the broadcast/TTS pipeline, the
+In scope: the add-on server (`server/`), the web UI (`web/`), the MQTT/EcoFlow ingest, the broadcast/TTS pipeline, the
 telnet TUI, and the configuration/deploy surface. Out of scope: vulnerabilities in
 Home Assistant itself, the EcoFlow cloud/IoT platform, third-party dependencies
 (report those upstream; we track them via Dependabot), and issues that require

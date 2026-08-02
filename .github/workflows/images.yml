@@ -153,8 +153,8 @@ jobs:
             BUILD_FROM=${{ matrix.base }}
             BUILD_ARCH=${{ matrix.arch }}
             BUILD_DATE=${{ github.event.repository.updated_at }}
-            BUILD_DESCRIPTION=EcoFlow Panel
-            BUILD_NAME=EcoFlow Panel
+            BUILD_DESCRIPTION=Live dashboard + control-room TUI for an EcoFlow off-grid home — life-safety battery/grid alarms, forecasting, and a TOU night-charge engine
+            BUILD_NAME=Power
             BUILD_REF=${{ github.sha }}
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_VERSION=${{ needs.resolve.outputs.version }}

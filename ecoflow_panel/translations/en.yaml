@@ -102,7 +102,7 @@ configuration:
     description: How many times to retry the announcement when the speaker service call actually fails (not for missed audio). Range 0-3, default 1; set 0 to never retry.
   BROADCAST_WYOMING_HOST:
     name: Wyoming TTS Host
-    description: Hostname or IP of the Wyoming Protocol (Piper) TTS server that renders spoken alarms. Default core-piper reaches Home Assistant's Piper add-on; override only if Piper runs elsewhere, e.g. piper.lan or 192.168.5.10. A plain host, not a URL (no scheme or port).
+    description: Hostname or IP of the Wyoming Protocol (Piper) TTS server that renders spoken alarms. Default core-piper reaches Home Assistant's Piper add-on; override only if Piper runs elsewhere, e.g. piper.lan or 192.0.2.10. A plain host, not a URL (no scheme or port).
   BROADCAST_WYOMING_PORT:
     name: Wyoming TTS Port
     description: TCP port of the Wyoming/Piper TTS server, 0-65535. Default 10200 is Piper's standard Wyoming port; change only if your Piper host listens elsewhere.
@@ -147,7 +147,7 @@ configuration:
     description: 'Anti-flap buffer: after a shed, the counterfactual runway must reach the trigger threshold PLUS these extra hours before the shed is withdrawn, preventing rapid on/off recommendations. Default 2.0. Only matters when the advisor is on and actively recommending.'
   NIGHT_CHARGE_ADVISOR_ENABLED:
     name: Night-Charge Advisor
-    description: 'Advisory-only: on days a shortfall is anticipated, recommends buying the right amount of grid energy in the cheap overnight window so the home never imports at the 4–7pm peak and keeps an outage cushion above the reserve floor. It NEVER charges or writes to any device — it publishes the suggestion as sensors/MQTT entities and a nightly notification, and your own HA automation decides whether to act. Default off in the add-on options — enable it here to listen on the telnet port. Learns and records from day one; write-eligibility stays off until the record proves accuracy.'
+    description: 'Advisory-only: on days a shortfall is anticipated, recommends buying the right amount of grid energy in the cheap overnight window so the home never imports at the 4–7pm peak and keeps an outage cushion above the reserve floor. It publishes the suggestion as sensors/MQTT entities and a nightly notification. Whether the add-on may act on that plan is set by Night-Charge Write Mode below — the default 'advisory' never writes to any device. Default on. Learns and records from day one; 'auto' write-eligibility stays off until the record proves accuracy.'
   NIGHT_CHARGE_MODE:
     name: Night-Charge Write Mode
     description: 'How the night-charge engine may act on its own plan. "advisory" (default) — never writes; sensors and the nightly notification only. "supervised" — each evening the plan is announced (audible broadcast + HA notification) with a cancel deadline; unless cancelled from the panel, ONE bounded write raises the SHP2 backup reserve to the plan target (clamped to the device 10–50% range) just before the cheap window opens, and the prior value is automatically restored after the window closes. "auto" — the same bounded write without treating the evening announcement as a cancel checkpoint; the engine only honors auto once the write-readiness gate has graduated on real actuated-night evidence, and operates as supervised until then. Every write is audit-logged; the reserve-floor alarms are independent of this path.'
@@ -229,7 +229,7 @@ configuration:
     description: Topic prefix HA listens on for auto-discovery; must match your HA MQTT integration's discovery prefix. "homeassistant" is the HA default and almost always correct. Only used when MQTT Discovery is enabled. Default homeassistant.
   TELNET_ENABLED:
     name: Enable Telnet TUI
-    description: Turns on the raw telnet control-room TUI on the Telnet TUI Port (default 2323), a full-screen terminal dashboard reachable with any telnet client. This port is LAN-trust by default; set a Console Password to require login, so keep it on a trusted LAN. Default on.
+    description: Turns on the raw telnet control-room TUI on the Telnet TUI Port (default 2323), a full-screen terminal dashboard reachable with any telnet client. This port is LAN-trust by default; set a Console Password to require login, so keep it on a trusted LAN. Default off.
   TELNET_PORT:
     name: Telnet TUI Port
     description: TCP port the telnet control-room TUI listens on, e.g. 2323 (the default). If you change it, also change the 2323/tcp mapping in the add-on's Network section to match so it stays reachable. Ignored when Enable Telnet TUI is off.
