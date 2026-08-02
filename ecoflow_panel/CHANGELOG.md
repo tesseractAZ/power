@@ -17,7 +17,7 @@ owner without a phone, must not be quieter about residual risk than the text
 channel. It now speaks the same disclosure.
 
 4 new tests pin the day-qualified pass-through, the same-night phrasing, the
-unchanged advisory tail, and the shortfall disclosure; 1,754 total.
+unchanged advisory tail, and the shortfall disclosure; 1,750 total.
 
 ## v1.51.1 — documentation freshness pass
 
