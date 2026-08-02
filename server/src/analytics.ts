@@ -7142,8 +7142,60 @@ const TARIFF_TTL_MS = 15 * 60 * 1000; // v0.9.82 — staggered warm; 7-day cost 
 // TARIFF_OFF_PEAK_CENTS independently. For flat-rate users, the single override
 // `TARIFF_FLAT_CENTS_PER_KWH` sets both at once.
 const TARIFF_FLAT_CENTS = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
-const TARIFF_ON_PEAK_CENTS = Number(process.env.TARIFF_ON_PEAK_CENTS ?? TARIFF_FLAT_CENTS);
-const TARIFF_OFF_PEAK_CENTS = Number(process.env.TARIFF_OFF_PEAK_CENTS ?? TARIFF_FLAT_CENTS);
+
+/**
+ * v1.52.0 — RESOLVE the cost basis, don't assume it.
+ *
+ * The flat-rate default above encoded a v0.9.58 assumption ("the operator's APS
+ * plan is flat $0.17/kWh — no TOU split") that the night-charge work later
+ * disproved: the plan is APS **R-EV**, a genuine TOU tariff whose confirmed
+ * per-period cents live in the `TARIFF_APS_*_CENTS` options. While those rates
+ * are confirmed, this engine publishing a flat 17¢/17¢ contradicts the
+ * night-charge planner's own tariff snapshot on the same install — two engines
+ * disagreeing about the price of the same kilowatt-hour, with the cost/savings
+ * KPIs computed off the wrong one.
+ *
+ * Resolution order (per call — the season changes under a long-lived process):
+ *   1. Explicit TARIFF_ON_PEAK_CENTS / TARIFF_OFF_PEAK_CENTS overrides.
+ *   2. The confirmed APS R-EV table for the CURRENT season.
+ *   3. The flat default (unchanged behavior for a flat-rate install).
+ * Unconfirmed APS rates never feed the KPIs — the same null-over-fabrication
+ * discipline the tariff module itself applies to its dollar outputs.
+ */
+function apsSeasonIsSummer(nowMs: number): boolean {
+  const m = Number(
+    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', month: 'numeric' })
+      .formatToParts(new Date(nowMs))
+      .find((p) => p.type === 'month')?.value ?? '1',
+  );
+  return m >= 5 && m <= 10; // APS summer season: May–October
+}
+function apsCent(name: string): number | null {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+export function resolveTariffCents(nowMs: number): { onPeak: number; offPeak: number; basis: string } {
+  const onOverride = apsCent('TARIFF_ON_PEAK_CENTS');
+  const offOverride = apsCent('TARIFF_OFF_PEAK_CENTS');
+  if (onOverride != null && offOverride != null) {
+    return { onPeak: onOverride, offPeak: offOverride, basis: 'explicit-override' };
+  }
+  if (process.env.TARIFF_APS_RATES_CONFIRMED === 'true') {
+    const summer = apsSeasonIsSummer(nowMs);
+    const on = apsCent(summer ? 'TARIFF_APS_ONPEAK_SUMMER_CENTS' : 'TARIFF_APS_ONPEAK_WINTER_CENTS');
+    const off = apsCent(summer ? 'TARIFF_APS_OFFPEAK_SUMMER_CENTS' : 'TARIFF_APS_OFFPEAK_WINTER_CENTS');
+    if (on != null && off != null) {
+      return { onPeak: on, offPeak: off, basis: `aps_r_ev-${summer ? 'summer' : 'winter'}` };
+    }
+  }
+  return {
+    onPeak: onOverride ?? TARIFF_FLAT_CENTS,
+    offPeak: offOverride ?? TARIFF_FLAT_CENTS,
+    basis: 'flat-default',
+  };
+}
 const TARIFF_ON_PEAK_HOURS_ENV = process.env.TARIFF_ON_PEAK_HOURS ?? '15-20';
 const TARIFF_ON_PEAK_DAYS_ENV = process.env.TARIFF_ON_PEAK_DAYS ?? '1-5';
 
@@ -7172,6 +7224,10 @@ export interface TariffReport {
   generatedAt: number;
   onPeakCents: number;
   offPeakCents: number;
+  /** v1.52.0 — provenance of the cents above: 'aps_r_ev-summer' | 'aps_r_ev-winter'
+   *  | 'explicit-override' | 'flat-default'. Makes a disagreement with the
+   *  night-charge planner's own tariff snapshot visible instead of silent. */
+  tariffBasis?: string;
   onPeakHours: string;
   onPeakDays: string;
   // Last 7 days
@@ -7241,12 +7297,15 @@ export function computeTariffReport(
     gridHomeTrusted = gridHomeCoverageFrac >= GRID_HOME_MIN_COVERAGE;
   }
 
+  // v1.52.0 — resolve the cost basis once per report from the CONFIRMED tariff
+  // (APS R-EV when set), not the stale flat-rate assumption.
+  const tariffCents = resolveTariffCents(now);
   const tally = (sinceMs: number) => {
     let gridCost = 0;
     let loadValue = 0;
     for (let t = sinceMs; t < now; t += HOUR) {
       const tEnd = Math.min(t + HOUR, now);
-      const rate = (onPeakAt(t) ? TARIFF_ON_PEAK_CENTS : TARIFF_OFF_PEAK_CENTS) / 100;
+      const rate = (onPeakAt(t) ? tariffCents.onPeak : tariffCents.offPeak) / 100;
       let gridWh = 0;
       let loadWh = 0;
       for (const d of homeDpus) {
@@ -7275,8 +7334,9 @@ export function computeTariffReport(
   const todayTally = tally(todayStart);
   const value: TariffReport = {
     generatedAt: now,
-    onPeakCents: TARIFF_ON_PEAK_CENTS,
-    offPeakCents: TARIFF_OFF_PEAK_CENTS,
+    onPeakCents: tariffCents.onPeak,
+    offPeakCents: tariffCents.offPeak,
+    tariffBasis: tariffCents.basis,
     onPeakHours: TARIFF_ON_PEAK_HOURS_ENV,
     onPeakDays: TARIFF_ON_PEAK_DAYS_ENV,
     windowDays,
@@ -8154,11 +8214,14 @@ export function computeDispatchPlan(
   const hours: DispatchHour[] = [];
   let allGridCost = 0;
   let plannedCost = 0;
+  // v1.52.0 — same confirmed-tariff basis the cost report uses; the dispatch
+  // planner must not price its plan off a different table than the KPIs.
+  const dispatchCents = resolveTariffCents(Date.now());
   for (const h of forecast.hours) {
     const pvKwh = h.forecastPvW / 1000;
     const loadKwh = h.forecastLoadW / 1000;
     const onPeak = onPeakAt(h.ts);
-    const rate = (onPeak ? TARIFF_ON_PEAK_CENTS : TARIFF_OFF_PEAK_CENTS) / 100;
+    const rate = (onPeak ? dispatchCents.onPeak : dispatchCents.offPeak) / 100;
     const socStartPct = (socKwh / fullKwh) * 100;
 
     let action: DispatchHour['action'] = 'hold';

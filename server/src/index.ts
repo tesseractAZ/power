@@ -647,9 +647,25 @@ app.get('/api/degradation', async (req, reply) =>
   cached(req, reply, await analytics.report('degradation'), 60),
 );
 
-app.get('/api/runway', async (req, reply) =>
-  cached(req, reply, await analytics.report('runway'), 30),
-);
+// v1.52.0 — the runway report is an ISLANDED projection ("if the grid vanished
+// now"). The surfaces that consume it must be able to say so, and must be able
+// to tell that the pool is ALREADY at/under the reserve floor: the crossing
+// detector only arms while `stateKwh > reserveKwh`, so on a below-floor pool
+// `hoursToReserve` is the *next* crossing after a modelled solar recharge — a
+// true number that reads as false ("11.2 h until the floor" while under it).
+// The report itself stays pure; the grid context is attached here, at the edge,
+// from the same live backstop resolver the floor alarm uses.
+app.get('/api/runway', async (req, reply) => {
+  const report = await analytics.report<Record<string, unknown>>('runway');
+  const grid = liveGridBackstop(store.get().devices);
+  const remaining = report?.backupRemainingKwh;
+  const reserve = report?.backupReserveKwh;
+  const belowReserveFloor =
+    typeof remaining === 'number' && typeof reserve === 'number' && reserve > 0
+      ? remaining <= reserve
+      : null; // null = undeterminable, never a fabricated false
+  return cached(req, reply, { ...report, belowReserveFloor, grid }, 30);
+});
 
 app.get<{ Querystring: { days?: string } }>('/api/round-trip-efficiency', async (req, reply) => {
   const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7));

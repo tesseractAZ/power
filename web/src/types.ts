@@ -422,6 +422,15 @@ export interface RunwayProjection {
    *  implausibly empty and the whole horizon fell back to a flat observed-load
    *  estimate (post-restart worker race). Lower-fidelity than a healthy projection. */
   loadModelDegraded?: boolean;
+  /** v1.52.0 — true when the pool is ALREADY at/under the reserve floor. The
+   *  crossing detector only arms while the state is ABOVE the floor, so on a
+   *  below-floor pool `hoursToReserve` is the *next* crossing after a modelled
+   *  solar recharge — a true number that reads as false without this flag.
+   *  null = undeterminable (missing pool/reserve), never a fabricated false. */
+  belowReserveFloor?: boolean | null;
+  /** v1.52.0 — live grid context, so the card can qualify an ISLANDED
+   *  projection instead of presenting it as unconditional fact. */
+  grid?: { present?: boolean; backstopping?: boolean } | null;
 }
 
 export interface RoundTripDay {
