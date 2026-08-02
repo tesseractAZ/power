@@ -1,3 +1,34 @@
+## v1.52.0 — runway card tells the truth below the floor; cost engine uses the confirmed tariff
+
+**Runway, below the reserve floor.** The crossing detector only arms while the
+pool is ABOVE the floor, so on a pool that is already under it, `hoursToReserve`
+is the *next* crossing — after a modelled solar recharge. The math was right and
+independently reproducible; the card was not: it printed "11.2 h until the
+backup pool reaches the reserve floor" while the pool sat 0.31 kWh *below* that
+floor. The server already knew (`belowReserveFloor()` is true and a
+`shp2-below-reserve` alert was live) but `/api/runway` never carried the fact.
+The endpoint now publishes `belowReserveFloor` (null when undeterminable, never
+a fabricated false) plus live `grid` context, and the card leads with "at
+reserve floor", re-labels the projection as the post-recharge re-crossing it
+is, and — whenever the grid is backstopping — states plainly that every time on
+the card is an ISLANDED grid-loss projection rather than a live countdown. The
+alarm path was already correct and is untouched.
+
+**Cost basis.** `TARIFF_ON_PEAK_CENTS`/`TARIFF_OFF_PEAK_CENTS` were env-only,
+never surfaced in the add-on options, and defaulted to a flat 17¢ encoding a
+v0.9.58 assumption ("the operator's APS plan is flat — no TOU split") that the
+night-charge work has since disproven. The result was two engines disagreeing
+about the price of the same kilowatt-hour: the planner on confirmed APS R-EV
+(44.4¢ on-peak) and every cost/savings KPI on 17¢ flat. `resolveTariffCents`
+now resolves per call — explicit overrides, else the CONFIRMED APS R-EV table
+for the current season, else the flat default — and both the cost report and
+the dispatch planner read it. Unconfirmed or partial APS tables are never used
+(null-over-fabrication), unconfigured installs are unchanged, and the report
+publishes `tariffBasis` so the provenance is visible instead of silent.
+
+6 new tests (seasonal resolution, unconfirmed refusal, partial-table fallback,
+override precedence); 1,755 total.
+
 ## v1.51.2 — supervised announcement: day-qualified deadline + shortfall disclosure
 
 The supervised evening announcement named its cancel deadline with a bare

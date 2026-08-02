@@ -53,9 +53,20 @@ export const RunwayCard = memo(function RunwayCard() {
     );
   }
 
-  const headlineHours = runway.hoursToReserve ?? runway.hoursToEmpty;
-  const headlineLabel =
-    runway.hoursToReserve != null
+  // v1.52.0 — when the pool is ALREADY at/under the floor, "N h until the
+  // reserve floor" is false on its face: that crossing is the *next* one, after
+  // the modelled solar recharge. Lead with the present state and re-label the
+  // projection, rather than printing a number that contradicts the pool.
+  const below = runway.belowReserveFloor === true;
+  const gridBackstopping = runway.grid?.backstopping === true;
+  const headlineHours = below
+    ? null
+    : (runway.hoursToReserve ?? runway.hoursToEmpty);
+  const headlineLabel = below
+    ? (runway.hoursToReserve != null
+        ? `pool is at/under the reserve floor — islanded, it would recover on today's forecast solar and fall back through the floor in ${runway.hoursToReserve.toFixed(1)} h`
+        : 'pool is at/under the reserve floor')
+    : runway.hoursToReserve != null
       ? 'until the backup pool reaches the reserve floor'
       : runway.hoursToEmpty != null
         ? 'until the backup pool is empty'
@@ -85,7 +96,12 @@ export const RunwayCard = memo(function RunwayCard() {
         </span>
       </div>
 
-      {headlineHours != null ? (
+      {below ? (
+        <div className="flex items-baseline gap-4 mb-3 flex-wrap">
+          <div className="text-3xl font-bold tabular-nums text-warn">at reserve floor</div>
+          <div className="text-sm text-muted">{headlineLabel}</div>
+        </div>
+      ) : headlineHours != null ? (
         <div className="flex items-baseline gap-4 mb-3 flex-wrap">
           <div className={`text-4xl font-bold tabular-nums ${headlineColor}`}>
             {headlineHours.toFixed(1)}
@@ -97,6 +113,15 @@ export const RunwayCard = memo(function RunwayCard() {
         <div className="flex items-baseline gap-4 mb-3 flex-wrap">
           <div className="text-2xl font-bold tabular-nums text-ok">no dip in {runway.horizonHours} h</div>
           <div className="text-sm text-muted">{headlineLabel}</div>
+        </div>
+      )}
+
+      {/* v1.52.0 — every projection on this card is ISLANDED ("if the grid
+          vanished now"). While the grid is backstopping, say so, so the times
+          below are never read as an imminent real-world depletion. */}
+      {gridBackstopping && (
+        <div className="text-xs text-muted mb-3 -mt-1">
+          grid is carrying the load — these are islanded (grid-loss) projections, not a live countdown
         </div>
       )}
 
