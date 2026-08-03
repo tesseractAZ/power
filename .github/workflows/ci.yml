@@ -39,6 +39,24 @@ jobs:
         working-directory: ${{ matrix.project }}
         run: ./node_modules/.bin/tsc --noEmit -p tsconfig.json
 
+  addon-config:
+    name: Validate add-on config + translations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Install PyYAML
+        run: python3 -m pip install --no-cache-dir pyyaml
+
+      # HA renders the Configuration page's labels and help text from
+      # translations/en.yaml. When that file fails to parse, HA silently shows
+      # the page with NO descriptions at all and logs nothing an operator would
+      # notice — it stayed broken for a week before it was spotted by eye.
+      # Nothing else in CI parses this file: tsc doesn't, the test suite doesn't,
+      # and the Dockerfile smoke build only copies it.
+      - name: Validate
+        run: python3 scripts/validate-addon-config.py
+
   docker-smoke:
     # Build the Home Assistant add-on container (amd64 only) on every push/PR.
     # Catches Dockerfile regressions before they reach the Pi. Buildx cache
