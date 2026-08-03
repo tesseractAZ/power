@@ -1,3 +1,32 @@
+## v1.58.1 — pin the console's level vocabulary to the server's
+
+The last piece of groundwork before the severity ladder. **No behaviour change.**
+
+`web` and `server` share no types — the console casts `r.json()` responses to
+local interfaces — so nothing coupled the console's level vocabulary to
+`CHIME_LEVELS`. Worse, the three declarations that carry it lived inside
+`AlertConsolePanel.tsx` as module-private consts, which made them unreachable to
+any test: the server runner globs `test/**/*.test.ts` and cannot import a `.tsx`.
+
+The consequence in the change this precedes: widen the server's level union
+without widening the console's and it is invisible. Both packages typecheck (the
+cast hides it), every CI check passes, and the operator gets a console that
+silently cannot address the new rung — the "four listed, three selectable"
+complaint, reproduced with no signal.
+
+Moved to `web/src/alarmLevels.ts`, and pinned by a test that asserts the console's
+`LEVELS` equals the server's `CHIME_LEVELS`, and that each klaxon preview basename
+equals the server's `KLAXON_FOR_LEVEL` entry. That second one guards a subtler
+failure: a preview that plays a different sound than the alarm will teaches the
+operator the wrong association at the moment they are choosing tones. Verified by
+deliberately pointing `red` at `all-clear` — the test fails with
+`preview for 'red' points at all-clear.wav but the alarm plays red-alert.wav`.
+
+The move also caught the same defect the previous release fixed on the server
+side: the console's `LEVELS` was `readonly Level[]`, an annotation that accepts a
+SHORT array, so dropping a level would typecheck and simply never render. Now
+`as const satisfies`.
+
 ## v1.58.0 — make the alarm-severity widening impossible to ship quietly
 
 Groundwork for one unified severity ladder. **No behaviour changes**: the same

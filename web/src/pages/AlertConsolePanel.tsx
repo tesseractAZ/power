@@ -26,12 +26,12 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { type Level, LEVEL_TOKEN, KLAXON_FILE } from '../alarmLevels';
 import { apiUrl } from '../api';
 import { ALARM_PRIORITY_ORDER, PRIORITY_META, type AlarmPriority } from '../alertPriority';
 
 /* ─── types ────────────────────────────────────────────────────────── */
 
-type Level = 'red' | 'yellow' | 'green';
 type Assignment = { kind: 'builtin' } | { kind: 'named'; id: string } | { kind: 'custom'; id: string };
 
 interface ChimeMeta {
@@ -76,8 +76,6 @@ interface BroadcastConfigResponse {
   envBaseline: { enabled: boolean };
 }
 
-const LEVEL_TOKEN: Record<Level, string> = { red: 'bad', yellow: 'warn', green: 'ok' };
-const KLAXON_FILE: Record<Level, string> = { red: 'red-alert', yellow: 'yellow-alert', green: 'all-clear' };
 
 /* ─── component ────────────────────────────────────────────────────── */
 
