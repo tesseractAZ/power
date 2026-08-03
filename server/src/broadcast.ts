@@ -964,7 +964,10 @@ export function startBroadcastMonitor(
     // 1. Render combined announcement WAV (cache-aware). v0.15.23 — resolve the
     // operator-assigned chime for this level (custom tone or built-in klaxon);
     // resolveChime falls back to the built-in when a custom file is missing.
-    const chime = resolveChime(level as AnnouncementLevel, opts.klaxonDir);
+    // v1.58.0 — NO CAST. These unions coincide today; a cast here would let a
+    // future widening of AnnouncementLevel pass silently instead of failing the
+    // build at the one site that decides which tone an alarm plays.
+    const chime = resolveChime(level, opts.klaxonDir);
     if (chime.fellBack) log(`broadcast: assigned custom chime for ${level} missing — using built-in klaxon`);
     // v0.62.0 — bilingual second pass: play the message in English, then in
     // Spanish. Active only when a Spanish voice is configured (the voice must
@@ -1518,7 +1521,7 @@ export function startBroadcastMonitor(
       // v0.15.23 — preview must audition the SAME chime real broadcasts use,
       // so resolve it here too (otherwise a preview plays the built-in while a
       // real alarm plays the custom tone).
-      const previewChime = resolveChime(level as AnnouncementLevel, opts.klaxonDir);
+      const previewChime = resolveChime(level, opts.klaxonDir);  // v1.58.0 — no cast, see above
       const r = await renderAnnouncement({
         level,
         message: spokenText,
