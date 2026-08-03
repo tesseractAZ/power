@@ -2576,6 +2576,16 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   // Operator knobs.
   const cushionPct = Number(process.env.ARB_OUTAGE_CUSHION_PCT ?? 15);
   const chargeCapKw = Number(process.env.ARB_CHARGE_CAP_KW ?? 7.2);
+  // v1.60.0 — the SHARED grid-input envelope the charger and the house both draw
+  // from. Default 17 kW is the COEXISTENCE figure measured on 2026-08-02→03: at
+  // 03:00 `panel_load` held 14.0 kW (EVSE ~11.5 kW + ~2.5 kW baseline) while the
+  // packs still took ~2.8 kW (battery_net −2,757 W ⇒ ~3.0 kW at the meter after
+  // the charge leg) — 14.0 + 3.0 ≈ 17. The raw grid-input reading that night was
+  // ~19 kW; the lower coexistence figure is used deliberately, because
+  // UNDER-stating the envelope under-states the buy we can deliver, which is the
+  // safe (honest-shortfall) direction. Set ≤0 to disable contention modelling.
+  const gridInputCapKwRaw = Number(process.env.ARB_GRID_INPUT_CAP_KW ?? 17);
+  const gridInputCapKw = Number.isFinite(gridInputCapKwRaw) && gridInputCapKwRaw > 0 ? gridInputCapKwRaw : null;
   const loadP90Factor = Number(process.env.ARB_LOAD_P90_FACTOR ?? 1.15);
   const evMaxLoadW = Number(process.env.EV_MAX_LOAD_W ?? 11520);
   const minBuyKwh = Number(process.env.ARB_MIN_BUY_KWH ?? 1);
@@ -2709,7 +2719,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   const deps: NightChargeInputDeps = {
     nowMs,
     fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
-    legEff, dischargeEff, chargeCapKw,
+    legEff, dischargeEff, chargeCapKw, gridInputCapKw,
     periodIdAt, cheapPeriodId: NIGHT_CHEAP_PERIOD_ID, windowScanHours: 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
     ev, evMaxLoadW,
@@ -3095,9 +3105,20 @@ function scoreNightRow(
     chargeTonight: (y.buy_kwh ?? 0) > 0,
     buyKwh: y.buy_kwh ?? null,
     targetSocPct: y.target_soc_pct ?? null,
+    // The ledger freezes the PREDICTION (target_soc_pct) because that is what
+    // the scorer grades — soc_min_err/buy_err only detect an under-buy when
+    // they are compared against what the plan said the pack would reach. The
+    // write setpoint is recorded on the ACTUATION record instead (its
+    // targetPct), so a re-scored night can never mistake the ask for the
+    // forecast; null here is "not a scored column", never "no setpoint".
+    setpointSocPct: null,
     requiredExtraKwh: y.required_extra_kwh ?? null,
     bindingCap: (y.binding_cap as BindingCap) ?? null,
     cushionShortfall: y.cushion_shortfall === 1,
+    // The ledger does not freeze the contention disclosure (it is a plan-time
+    // narrative, not a score column) and the scorer never reads it — null here
+    // is "not reconstructed", never "no contention".
+    evContention: null,
     minProjSocPct: y.min_proj_soc_pct ?? null,
     minProjSocTsMs: y.min_proj_soc_ts_ms ?? null,
     baselineMinSocPct: null,

@@ -1,5 +1,5 @@
 name: Power
-version: "1.61.0"
+version: "1.62.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -126,6 +126,7 @@ options:
   ARB_OUTAGE_CUSHION_PCT: 15
   ARB_MIN_BUY_KWH: 1
   ARB_CHARGE_CAP_KW: 7.2
+  ARB_GRID_INPUT_CAP_KW: 17
   ARB_LOAD_P90_FACTOR: 1.15
   NIGHT_CHARGE_NOTIFY_HOUR: 21
   NIGHT_CHARGE_NOTIFY_MINUTE: 30
@@ -224,6 +225,7 @@ schema:
   ARB_OUTAGE_CUSHION_PCT: int(0,40)
   ARB_MIN_BUY_KWH: float(0,50)
   ARB_CHARGE_CAP_KW: float(0,50)
+  ARB_GRID_INPUT_CAP_KW: float(0,100)
   ARB_LOAD_P90_FACTOR: float(1,2)
   NIGHT_CHARGE_NOTIFY_HOUR: int(0,23)
   NIGHT_CHARGE_NOTIFY_MINUTE: int(0,59)

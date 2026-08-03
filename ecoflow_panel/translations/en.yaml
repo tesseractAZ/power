@@ -157,6 +157,9 @@ configuration:
   ARB_CHARGE_CAP_KW:
     name: Grid-Charge Power Cap (kW)
     description: The real SHP2 grid-charge power ceiling used to bound how much energy the overnight window can physically deliver. Default 7.2 kW (the live chChargeWatt). Only affects the advisory sizing math; no device is ever set.
+  ARB_GRID_INPUT_CAP_KW:
+    name: Shared Grid-Input Envelope (kW)
+    description: 'Total power the grid service/SHP2 input carries at once for house pass-through AND battery charging. The overnight charger only gets what the house leaves, so a big concurrent load — an EV charging session above all — cuts the deliverable buy: on 2026-08-02 a 14.0 kW house draw left the packs ~2.8 kW instead of the full 7.2 kW cap. The planner uses this to size the buy it can actually deliver and to disclose the shortfall honestly. Default 17 kW (the measured coexistence figure). Set 0 to disable contention modelling. Sizing only — no device is ever set, and the EV charger is never commanded.'
   ARB_LOAD_P90_FACTOR:
     name: Load P90 Factor
     description: 'Conservative multiplier applied to the day-ahead forecast load to get a pessimistic-high (P90) load for sizing — under-buy is treated as a safety miss, so the advisor sizes against a worst-case load. Default 1.15 (15% headroom). Range 1.0–2.0.'

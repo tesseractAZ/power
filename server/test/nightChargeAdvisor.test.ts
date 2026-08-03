@@ -60,6 +60,11 @@ function baseInputs(overrides: Partial<NightChargeInputs> = {}): NightChargeInpu
     legEff: 0.9,
     dischargeEff: 0.9,
     chargeCapKw: 100, // effectively unbounded unless a test shrinks it
+    // null = no grid-input envelope known ⇒ the contention model reduces exactly
+    // to the pre-v1.62.0 charge-rate model, which is what every assertion in this
+    // (older) file was written against. Contention itself is covered separately
+    // in nightChargeEvContention.test.ts.
+    gridInputCapKw: null,
     window: { startMs: B + 3 * HOUR, endMs: B + 9 * HOUR }, // 6-hour window
     horizon: mkHorizon(B, 24, 0, 900), // PV 0, load 900 W ⇒ 1 kWh/h drain
     morningPvSurplusP90Kwh: null,
@@ -322,6 +327,9 @@ const EVE = Date.parse('2026-07-18T04:00:00Z');
 
 function baseDeps(overrides: Partial<NightChargeInputDeps> = {}): NightChargeInputDeps {
   return {
+    // null = no grid-input envelope ⇒ contention reduces to the pre-v1.62.0
+    // charge-rate model, which is what this file's assertions were written against.
+    gridInputCapKw: null,
     nowMs: EVE,
     fullKwh: 100,
     socNowPct: 30,
@@ -617,6 +625,7 @@ test('regression — buildNightChargeInputs keeps embedded EV in load when NO co
     periodIdAt, cheapPeriodId: 'overnight', dayRollups: [], realizedDailyErrHalfFrac: 0.2, nextRechargeMs: null,
     evMaxLoadW: 11520, confidenceTier: 'forecast' as const, forecastPresent: true, calScoredDays: 20,
     minCalScoredDays: 14, bandCoverageFrac: 0.95, morningPvSurplusP90Kwh: null, minBuyKwh: 1,
+    gridInputCapKw: null, // as above — this block tests EV de-dup, not contention
   };
   const withoutEv = buildNightChargeInputs({ ...common, bandHours, ev: null });
   // With no committed block, the 2 kW embedded EV must NOT be stripped → 3000 W preserved.
@@ -789,7 +798,7 @@ for (const [name, bad] of [['zero', 0], ['negative', -5], ['NaN', NaN]] as const
     };
     const inputs = buildNightChargeInputs({
       nowMs: startMs, fullKwh: 92.16, socNowPct: 30, reserveFloorPct: 10, cushionPct: 15, socCoherent: true,
-      legEff: 0.927, dischargeEff: 0.94, chargeCapKw: 7.2,
+      legEff: 0.927, dischargeEff: 0.94, chargeCapKw: 7.2, gridInputCapKw: null,
       periodIdAt, cheapPeriodId: 'overnight', dayRollups: [], realizedDailyErrHalfFrac: 0.2, nextRechargeMs: null,
       evMaxLoadW: bad, confidenceTier: 'forecast', forecastPresent: true, calScoredDays: 20,
       minCalScoredDays: 14, bandCoverageFrac: 0.95, morningPvSurplusP90Kwh: null, minBuyKwh: 1,
