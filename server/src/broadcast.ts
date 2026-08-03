@@ -177,7 +177,11 @@ export function loadBroadcastConfig(): BroadcastConfig {
   const envVolume = clamp01(Number(process.env.BROADCAST_VOLUME ?? 0.5));
   const ov = getBroadcastRuntimeConfig();
   const enabled = ov.enabled != null ? ov.enabled : envEnabled;
-  const volume = ov.volume != null ? clamp01(ov.volume) : envVolume;
+  // v1.57.0 — volume has exactly ONE source: the BROADCAST_VOLUME add-on option.
+  // The live slider and its /data override are gone; two places to set one number
+  // meant the HA form could read 0.7 while the speakers played at 0.95, with
+  // nothing on either surface saying so.
+  const volume = envVolume;
   return {
     enabled,
     targets,

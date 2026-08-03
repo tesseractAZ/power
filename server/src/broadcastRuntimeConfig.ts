@@ -1,5 +1,9 @@
 /**
- * v0.18.0 — Runtime broadcast config (live enable + volume), persisted across
+ * v0.18.0 — Runtime broadcast config, persisted across restarts.
+ * v1.57.0 — VOLUME REMOVED: it now has exactly one source, the BROADCAST_VOLUME
+ * add-on option. Only the live enable/disable override remains here.
+ * (legacy header follows)
+ * Runtime broadcast config (live enable), persisted across
  * restarts. Mirrors alertSettings.ts exactly (in-memory cache + atomic write +
  * listeners).
  *
@@ -15,16 +19,6 @@
  * change takes effect within one tick with NO restart. Clearing a field back to
  * `null` restores the env baseline.
  *
- * IMPORTANT — `volume` here is the abstract 0..1 master level. What actually
- * reaches the speakers is `announceVolume` (0..100), which loadBroadcastConfig
- * recomputes from the EFFECTIVE volume; setting only `volume` here without that
- * recompute would be audibly inert (see broadcast.ts). When BROADCAST_ANNOUNCE_
- * VOLUME is pinned in env (a number or 'off'/'standing'), that advanced override
- * still wins and this slider has no audible effect — the API surfaces both so
- * the UI can disclose it.
- *
- * Storage: a single JSON object written atomically (temp + rename) so a crash
- * mid-write never corrupts it. Path sits next to the SQLite DB (i.e. /data).
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -34,8 +28,6 @@ import { config } from './config.js';
 export interface BroadcastRuntimeConfig {
   /** Override for whether broadcasts are enabled. null = use BROADCAST_ENABLED. */
   enabled: boolean | null;
-  /** Override for the 0..1 master volume. null = use BROADCAST_VOLUME. */
-  volume: number | null;
   /** Last mutation time (ms). */
   updatedAt: number;
   /** Where the last change came from ('web' | 'default'). */
@@ -46,15 +38,9 @@ const PATH = process.env.BROADCAST_RUNTIME_CONFIG_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'broadcast-runtime-config.json');
 
 function defaults(): BroadcastRuntimeConfig {
-  return { enabled: null, volume: null, updatedAt: 0, source: 'default' };
+  return { enabled: null, updatedAt: 0, source: 'default' };
 }
 
-/** Clamp a 0..1 volume; non-finite → null (defer to env). */
-function clampVol(n: unknown): number | null {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return null;
-  return Math.max(0, Math.min(1, v));
-}
 
 /** Coerce an arbitrary parsed object into a valid config, filling gaps from defaults.
  *  Every field is re-normalized into a FRESH primitive (`=== true` for the boolean,
@@ -65,7 +51,6 @@ function sanitize(raw: any, source: string): BroadcastRuntimeConfig {
   const base = defaults();
   if (raw && typeof raw === 'object') {
     if (typeof raw.enabled === 'boolean') base.enabled = raw.enabled === true;
-    if (raw.volume != null) base.volume = clampVol(raw.volume);
     if (typeof raw.updatedAt === 'number') base.updatedAt = Number(raw.updatedAt);
   }
   base.source = source;
@@ -113,14 +98,13 @@ function persist(c: BroadcastRuntimeConfig): void {
  * ABSENT from the patch is left unchanged. Returns the new resolved config.
  */
 export function updateBroadcastRuntimeConfig(
-  patch: { enabled?: boolean | null; volume?: number | null },
+  patch: { enabled?: boolean | null },
   source = 'web',
 ): BroadcastRuntimeConfig {
   const next = sanitize(getBroadcastRuntimeConfig(), source); // clone current
   // `=== true` re-normalizes the request-derived boolean into a fresh primitive
   // (see sanitize) — behavior-identical for booleans, non-booleans clear to null.
   if ('enabled' in patch) next.enabled = typeof patch.enabled === 'boolean' ? patch.enabled === true : null;
-  if ('volume' in patch) next.volume = patch.volume == null ? null : clampVol(patch.volume);
   next.updatedAt = Date.now();
   next.source = source;
   cache = next;
