@@ -9,10 +9,13 @@
  * Layout:
  *
  *     ┌─────────────┬───────────────────────┬────────────────────────────────────┐
- *     │ lead-in gap │ klaxon × N (default 2) │ piper TTS rendering of the message │
+ *     │ lead-in gap │ klaxon (plays once)   │ piper TTS rendering of the message │
  *     └─────────────┴───────────────────────┴────────────────────────────────────┘
  *      ~1.0 s silent  ~1.4 s (yellow/green)   ~0.5–6 s depending on message length
- *      (default)      ~3.0 s (red), × N       (N = getChimeRepeat(), part of cache key)
+ *      (default)      ~3.0 s (red)
+ *
+ * v1.60.0 — the operator-tunable chime repeat is GONE. The chime sounds exactly
+ * once per block; announceRepeat still repeats the whole (chime + message) block.
  *
  * Why the lead-in gap (v0.12.1):
  *
@@ -41,8 +44,8 @@
  *
  *   - Repeated alerts (same level, same message — e.g. the same offline-
  *     device alert re-firing every 10 min) skip the Wyoming roundtrip.
- *   - Cache key = sha1(version || level || chimeRepeat || message), so a
- *     message change OR a chime-repeat change busts the cache automatically.
+ *   - Cache key = sha1(version || level || … || message), so any change to the
+ *     level, message, or a rendering parameter busts the cache automatically.
  *   - Per-render version prefix in the key lets us invalidate every
  *     cached file by bumping the constant (without touching disk).
  *
@@ -66,7 +69,6 @@ export type { AlarmRung };
 import { resolve, basename } from 'node:path';
 import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
 import { verbalizeForTts, verbalizeForTtsEs } from './ttsService.js';
-import { getChimeRepeat } from './alertSettings.js';
 import { AUDIO_ASSETS_VERSION } from './audioAssets.js';
 
 /* ── v1.44.0 — TTS render health (the dead-voice self-alert) ────────────────
@@ -325,16 +327,18 @@ export async function prewarmTerminatorCache(opts: {
  *      fix (softened named-tone attacks), so any stale/short cached clip from
  *      the v0.17.0 tone rebuild is re-rendered with the corrected tones. The
  *      audio-asset version is ALSO folded into named/custom keys below so a
- *      future asset regeneration auto-invalidates dependent combined renders. */
+ *      future asset regeneration auto-invalidates dependent combined renders.
+ *
+ *  v1.60.0 removed the chime-repeat feature and with it the mandatory `x<N>`
+ *  key component — DELIBERATELY WITHOUT a bump. The `x<N>` token was never
+ *  omitted and sat at a fixed position (`v6|<level>|x2|r1|…`), so every new key
+ *  string now reads `v6|<level>|r1|…` and cannot reproduce any string this
+ *  version ever hashed: the character after the level separator was always `x`
+ *  and is now always `r`. Every cached render therefore self-invalidates, and a
+ *  bump would only be a second, redundant invalidation of the same set. The old
+ *  WAVs are orphaned, not stale-served, and pruneRenderCache reclaims them on
+ *  its existing age sweep. */
 export const RENDER_VERSION = 6;
-
-/** v0.15.4 — hard ceiling on the chime-repeat count at the allocation site.
- *  getChimeRepeat() is already clamped to ≤4 by alertSettings; this is a
- *  belt-and-suspenders bound (well above that max) so the Buffer arrays built
- *  from it can never allocate without limit, even if the upstream clamp changes.
- *  Applied identically in renderAnnouncement and renderCacheKey so the rendered
- *  audio and the predicted cache filename stay in lock-step. */
-const MAX_CHIME_REPEAT = 8;
 
 /** v0.61.0 — spoken terminator appended to the FINAL play of every announcement
  *  so the operator hears a clear close and isn't left waiting for more. Rendered
@@ -546,21 +550,10 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const { level, message, klaxonDir, cacheDir, wyomingHost, wyomingPort, wyomingVoice, log } = opts;
   const doRender = opts.renderTts ?? renderWyomingTts; // v1.47.4 — injectable for tests
 
-  // v0.11.0 — chime repeats getChimeRepeat() times (default 2) before the TTS.
-  // Resolve N once here so it's part of both the rendered audio AND the cache
-  // key — changing the repeat count must invalidate any previously cached file.
-  // v0.15.4 — re-assert a hard upper bound at the point of use. getChimeRepeat()
-  // is already clamped to ≤4 by clampChime(), but bounding locally guarantees the
-  // Array(chimeRepeat[*announceRepeat]) allocations below can never grow unbounded
-  // even if that distant clamp regresses — defense-in-depth on the alert path.
-  // The cap is well above the settings max, so it never changes real behaviour or
-  // the cache key. NOTE: this is written as an explicit comparison GUARD rather
-  // than Math.min() on purpose — CodeQL's js/resource-exhaustion taint tracker
-  // recognises a relational upper-bound check as a sanitizer, but not Math.min(),
-  // and the guard must be inline here (an interprocedural helper isn't trusted at
-  // the allocation sink).
-  let chimeRepeat = Math.max(1, Math.round(getChimeRepeat()));
-  if (chimeRepeat > MAX_CHIME_REPEAT) chimeRepeat = MAX_CHIME_REPEAT;
+  // v1.60.0 — the chime plays exactly ONCE per block. The operator-tunable
+  // repeat count (and the hard allocation ceiling it needed to stay off CodeQL's
+  // js/resource-exhaustion path) is gone with it, so the only remaining
+  // block multiplier is announceRepeat, clamped to ≤3 immediately below.
   // v0.15.4 — repeat the whole (chime + spoken message) block N times so a missed
   // first annunciation gets a second pass. Clamped 1..3; part of the cache key.
   const announceRepeat = Math.max(1, Math.min(3, Math.round(opts.announceRepeat ?? 1)));
@@ -587,17 +580,16 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const endOfMessagePhraseEs = (opts.endOfMessagePhraseEs ?? '').trim();
   const tailEnabled = endOfMessage && endOfMessagePhrase.length > 0;
 
-  // Cache key derivation: stable for the same (version, level, message, repeat,
-  // lead silence). Null message hashes distinctly from empty string so klaxon-
-  // only and empty-spoken-message don't share a cache slot. The repeat count
-  // and lead-in are part of the key so changing either busts the cache.
+  // Cache key derivation: stable for the same (version, level, message,
+  // announce-repeat, lead silence). Null message hashes distinctly from empty
+  // string so klaxon-only and empty-spoken-message don't share a cache slot.
   // v0.15.4 — single source of truth for the cache key (shared with the exported
   // renderCacheKey, which callers use to predict the served filename).
   // v0.15.23 — resolve the chime (custom tone or built-in klaxon) + its cache
   // tag. The tag is folded into the key so swapping a tone busts the cache; the
   // built-in tag is OMITTED from the key so default users see zero cache churn.
   const chimeTag = opts.chimeTag ?? BUILTIN_CHIME_TAG;
-  const hash = renderCacheKey(level, message, chimeRepeat, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs, opts.messages, wyomingVoice, endOfMessagePhraseEs);
+  const hash = renderCacheKey(level, message, leadMs, announceRepeat, repeatGapMs, chimeGapMs, chimeTag, endOfMessage, endOfMessagePhrase, endOfMessageGapMs, opts.messages, wyomingVoice, endOfMessagePhraseEs);
   const filename = `${hash}.wav`;
   const outPath = resolve(cacheDir, filename);
 
@@ -639,9 +631,8 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   }
 
   // No TTS → klaxon-only path. Cache the klaxon under the hash so the HTTP
-  // serving path is uniform. v0.11.0 — repeat the chime N times so a chime-
-  // only announcement matches the repeat applied on the chime+TTS path. When
-  // N == 1 this is byte-identical to the original klaxon WAV.
+  // serving path is uniform. The chime plays once per block, matching the
+  // chime+TTS path.
   // v0.62.0 — klaxon-only only when NEITHER the legacy message NOR any bilingual
   // pass has spoken text.
   const anySpoken = (message != null && message.trim().length > 0)
@@ -654,21 +645,20 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
     const tmpPath = `${outPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     try {
       await mkdir(cacheDir, { recursive: true });
-      // v0.12.1 — prepend the lead-in silence and repeat the chime. When
-      // leadMs == 0 && chimeRepeat == 1 this is byte-identical to the klaxon WAV.
+      // v0.12.1 — prepend the lead-in silence. When leadMs == 0 &&
+      // announceRepeat == 1 this is byte-identical to the klaxon WAV.
       const silence = makeSilencePcm(klaxonHeader, leadMs);
       let klaxonOnly = klaxonWav;
-      if (silence.length > 0 || chimeRepeat > 1 || announceRepeat > 1) {
+      if (silence.length > 0 || announceRepeat > 1) {
         const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
-        // v0.15.7 — emit announceRepeat blocks of chimeRepeat chimes, with a
-        // silence gap between blocks so a repeat is audibly separated. Bounded
-        // push-loops (chimeRepeat ≤ MAX_CHIME_REPEAT, announceRepeat ≤ 3) keep
-        // this off the resource-exhaustion path.
+        // v0.15.7 — emit announceRepeat blocks of ONE chime, with a silence gap
+        // between blocks so a repeat is audibly separated. announceRepeat ≤ 3
+        // keeps this off the resource-exhaustion path.
         const gap = makeSilencePcm(klaxonHeader, repeatGapMs);
         const chimeParts: Buffer[] = [silence];
         for (let r = 0; r < announceRepeat; r++) {
           if (r > 0 && gap.length > 0) chimeParts.push(gap);
-          for (let c = 0; c < chimeRepeat; c++) chimeParts.push(klaxonPcm);
+          chimeParts.push(klaxonPcm);
         }
         const pcm = Buffer.concat(chimeParts);
         klaxonOnly = pcmToWav(pcm, klaxonHeader.rate, klaxonHeader.width, klaxonHeader.channels);
@@ -747,18 +737,14 @@ export async function renderAnnouncement(opts: RenderOptions): Promise<RenderRes
   const droppedPass = survivingSpecs.length < passSpecs.length;
   log(`audioRenderer: rendered ${renderedPcm.size} spoken pass(es)${droppedPass ? ` (${passSpecs.length - survivingSpecs.length} dropped)` : ''} in ${firstTtsMs ?? 0}ms (first)`);
 
-  // Build one block (chime×chimeRepeat + post-chime gap + spoken pass) PER PASS.
+  // Build one block (chime + post-chime gap + spoken pass) PER PASS.
   // Legacy: the single surviving pass repeated announceRepeat times (reuses the
-  // same PCM buffers). Multi: each surviving pass once, in order. The chime list
-  // is a bounded push-loop (chimeRepeat ≤ MAX_CHIME_REPEAT) to stay off the
-  // resource-exhaustion path; for the monolingual case this is byte-identical to
-  // the prior single-block form.
+  // same PCM buffers). Multi: each surviving pass once, in order.
   const klaxonPcm = klaxonWav.subarray(klaxonHeader.dataOffset, klaxonHeader.dataOffset + klaxonHeader.dataLength);
   const silence = makeSilencePcm(klaxonHeader, leadMs);
   const chimeGap = makeSilencePcm(klaxonHeader, chimeGapMs);
   const buildBlock = (ttsPcm: Buffer): Buffer[] => {
-    const b: Buffer[] = [];
-    for (let i = 0; i < chimeRepeat; i++) b.push(klaxonPcm);
+    const b: Buffer[] = [klaxonPcm];
     if (chimeGap.length > 0) b.push(chimeGap);
     b.push(ttsPcm);
     return b;
@@ -934,14 +920,12 @@ export async function pruneRenderCache(cacheDir: string, maxAgeMs: number, log: 
 
 /**
  * Hash function exposed for tests so the cache-key format is pinned.
- * v0.11.0 — the chime-repeat count is part of the key (changing it busts the
- * cache). Defaults to the live getChimeRepeat() so callers/tests that don't
- * pass it match what renderAnnouncement() would produce.
+ * v1.60.0 — the chime-repeat component was dropped along with the feature; the
+ * chime always plays once, so it no longer varies and no longer keys.
  */
 export function renderCacheKey(
   level: AnnouncementLevel,
   message: string | null,
-  chimeRepeat?: number,
   leadSilenceMs?: number,
   announceRepeat?: number,
   repeatGapMs?: number,
@@ -960,10 +944,6 @@ export function renderCacheKey(
   // bilingual render whose two passes carry different-language terminators keys distinctly.
   endOfMessagePhraseEs?: string,
 ): string {
-  // v0.15.4 — same bound as renderAnnouncement so the predicted filename and the
-  // rendered audio agree, and so a caller-supplied chimeRepeat can't grow the key
-  // space without limit.
-  const repeat = Math.max(1, Math.min(MAX_CHIME_REPEAT, Math.round(chimeRepeat ?? getChimeRepeat())));
   // v0.15.4 — announce-repeat (whole chime+message block) is part of the key.
   const annRepeat = Math.max(1, Math.min(3, Math.round(announceRepeat ?? 1)));
   const leadMs = Math.max(0, Math.round(leadSilenceMs ?? 0));
@@ -1012,7 +992,7 @@ export function renderCacheKey(
   // a pinned voice makes the key distinct so swapping it re-renders.
   const voicePart = (!msgPart && wyomingVoice) ? `|V${wyomingVoice}` : '';
   return createHash('sha1')
-    .update(`v${RENDER_VERSION}|${level}|x${repeat}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}${eomPart}${msgPart}${voicePart}|${message ?? '<null>'}`)
+    .update(`v${RENDER_VERSION}|${level}|r${annRepeat}|s${leadMs}|g${gapMs}|c${cgMs}${tagPart}${eomPart}${msgPart}${voicePart}|${message ?? '<null>'}`)
     .digest('hex')
     .slice(0, 16);
 }

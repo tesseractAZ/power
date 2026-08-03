@@ -84,7 +84,7 @@ import {
 } from './ecoflow/commands.js';
 import { appendWriteLog, tailWriteLog } from './writeLog.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 alarm-priority Alert Settings + preview.
-import { getAlertSettings, updateAlertSettings, isPriorityEnabled, DEFAULT_CHIME_REPEAT } from './alertSettings.js';
+import { getAlertSettings, updateAlertSettings, isPriorityEnabled } from './alertSettings.js';
 import { getBroadcastRuntimeConfig, updateBroadcastRuntimeConfig } from './broadcastRuntimeConfig.js';
 // v0.15.23 — Alert Console: operator-uploaded chime tones + per-level assignment.
 import {
@@ -3754,7 +3754,7 @@ app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
 
 /* ──────────────────────────────────────────────────────────────────────
  * v0.11.0 — Alert Settings (ISA-18.2 / IEC 62682 alarm-priority annunciation
- * toggles + chime repeat) and per-priority announcement preview.
+ * toggles) and per-priority announcement preview.
  *
  * The internal Alert.severity union is unchanged; priority is DERIVED. These
  * routes expose the user-mutable annunciation layer (alertSettings.ts) and a
@@ -3779,10 +3779,6 @@ function alertSettingsResponse() {
         enabled: settings.priorityEnabled[id] !== false,
       };
     }),
-    chimeRepeat: settings.chimeRepeat,
-    // The add-on baseline, surfaced so the UI can show the real default instead
-    // of a hardcoded literal (mirrors the broadcast card's envBaseline).
-    chimeRepeatDefault: DEFAULT_CHIME_REPEAT,
     updatedAt: settings.updatedAt,
   };
 }
@@ -3799,21 +3795,18 @@ app.get(
   async () => alertSettingsResponse(),
 );
 
-// PUT — update per-priority enable flags and/or chime repeat. Write-gated.
-app.put<{ Body: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>>; chimeRepeat?: number } }>(
+// PUT — update per-priority enable flags. Write-gated.
+app.put<{ Body: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>> } }>(
   '/api/alert-settings',
   { preHandler: requireWriteAuth },
   async (req) => {
     const body = req.body ?? {};
-    const next = updateAlertSettings(
-      { priorityEnabled: body.priorityEnabled, chimeRepeat: body.chimeRepeat },
-      'web',
-    );
+    const next = updateAlertSettings({ priorityEnabled: body.priorityEnabled }, 'web');
     appendWriteLog({
       ts: Date.now(),
       action: 'alert-settings',
       sn: '', // not device-specific — settings are global annunciation toggles
-      params: { priorityEnabled: next.priorityEnabled, chimeRepeat: next.chimeRepeat },
+      params: { priorityEnabled: next.priorityEnabled },
       source: { ip: req.ip, ua: req.headers['user-agent']?.toString() },
       outcome: 'success',
     });

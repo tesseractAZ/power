@@ -429,7 +429,7 @@ export interface BroadcastMonitor {
   /**
    * v0.12.0 — fire a dedicated, edge-triggered audible announcement for one
    * backup-pool SoC threshold crossing. Renders chime(klaxonLevelForPriority)
-   * ×getChimeRepeat() + spoken `message` and plays it to BROADCAST_TARGETS via
+   * + spoken `message` and plays it to BROADCAST_TARGETS via
    * the SAME Music-Assistant path as runBroadcast()/test(). The SoC monitor
    * already edge-limits crossings, so this skips test()/preview() cooldowns.
    * No-ops (returns { ok:false, error:'broadcast disabled' }) when BROADCAST
@@ -1628,7 +1628,7 @@ export function startBroadcastMonitor(
     },
     // v0.12.0 — dedicated audible for one backup-SoC threshold crossing. Maps
     // priority → klaxon level, then reuses runBroadcast() so the render (chime
-    // ×getChimeRepeat() + TTS) and the Music-Assistant play path are IDENTICAL
+    // + TTS) and the Music-Assistant play path are IDENTICAL
     // to a real condition-transition broadcast. The SoC monitor edge-limits
     // crossings, so we deliberately apply NO cooldown here. Never throws.
     announce: async (priority: AlarmPriority, message: string, messageEs?: string): Promise<{ ok: boolean; error?: string }> => {
