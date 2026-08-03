@@ -6322,15 +6322,15 @@ The unified alarm-audio administration surface (v0.19.0), hosted inside the Aler
 
 **LAYOUT — one block per alert category (v1.60.0).** The page was previously organised by FUNCTION, which scattered a single severity's enable switch, tone and spoken preview across three separate cards. It is now:
 
-1. **Global, above** — broadcast master (enable, override-vs-env-baseline disclosure, warns when off); the Critical-silenced banner; the announcement **preview target** (browser vs speakers).
+1. **Global, above** — broadcast master (enable, override-vs-env-baseline disclosure, warns when off) and the Critical-silenced banner. **v1.61.0 removed the global preview-target toggle**: it was a MODE — set it to speakers once, forget, then press Preview on another card and get an unintended house-wide broadcast. Each category now carries its own **▶ In browser** and **▶ On speakers** buttons, so the click names its destination.
 2. **One card per rung**, in `data.levels` order (critical → high → medium → low → clear), each carrying that category's badge/label/ISA/response/description, enable switch, tone `<select>` + tone preview, spoken `Preview ▶` + status, and the resulting "Will announce: …" text.
-3. **Global, below** — the built-in tone audition grid and the uploaded tone library (upload/list/delete, with the "in use:" cross-reference).
+3. **Global, below** — the uploaded tone library (upload/list/delete, with the "in use:" cross-reference). **v1.61.0 removed the built-in tone audition grid**; the built-ins remain in every category's tone `<optgroup>`, and are auditioned in place with that category's **▶ Preview tone** button. One fewer place tones live.
 
 **The 4-vs-5 asymmetry is explicit, not smoothed over.** Tone assignment is per **rung** (five, `clear` included; driven by `data.levels`). The enable switch and the spoken preview are per **priority** (four; driven by `ALARM_PRIORITY_ORDER`, `settings.priorityEnabled`, and `POST /api/alert-preview`, which accepts an `AlarmPriority`). There is no `priorityEnabled.clear` and no preview endpoint for it, so the fifth card renders **tone-only** and states why on the card. `settings` failing to load degrades the same way: the category cards still render and tone assignment still works, only the per-priority controls are withheld.
 
 Tone choices per rung are the rung klaxon (`KLAXON_FILE` in `web/src/alarmLevels.ts`, mirroring the server's `KLAXON_FOR_LEVEL`, served from `audio/<file>.wav`; the mirror is pinned by `test/alarmLevelWebMirror.test.ts`), a named built-in tone, or an uploaded custom tone — each previewable in-browser via a HEAD precheck that distinguishes a missing file from an autoplay block. A bad/deleted tone falls back to the rung klaxon **server-side** — an alarm is never silenced by a missing file.
 
-**Error placement.** Page-level failures (upload, delete, broadcast master, library audition) render in the header. A failure that belongs to one category — a failed enable-toggle PUT, a failed tone assignment, a missing tone file — renders on that category's card, next to the control that raised it.
+**Error placement.** Page-level failures (upload, delete, broadcast master, library preview) render in the header. A failure that belongs to one category — a failed enable-toggle PUT, a failed tone assignment, a missing tone file — renders on that category's card, next to the control that raised it.
 
 #### 1.9 Glossary tooltips
 

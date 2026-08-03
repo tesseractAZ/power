@@ -1,3 +1,33 @@
+## v1.61.0 — Alert Console cleanup: no tone grid, no preview mode
+
+Two removals, both making the page say less and mean more.
+
+**The "Built-in tones" audition grid is gone.** It was a second place tones lived
+— a flat wall of buttons duplicating what every category's tone `<optgroup>`
+already offers. The built-ins are unchanged and still selectable everywhere; they
+are now auditioned in place with that category's **▶ Preview tone** button.
+
+**The global browser/speakers toggle is gone**, replaced by two buttons on each
+category: **▶ In browser** and **▶ On speakers**.
+
+That one is more than tidying — the toggle was a *mode*. You set it to speakers
+to test something, moved on, and the next time you pressed Preview on a different
+category you got an unintended house-wide broadcast. The destination was ambient
+state living in a card far from the button that consumed it. Now each button
+names where the sound comes out, and `runPreview(row, target)` takes the target as
+an argument rather than reading it from the component. The speakers button is
+styled apart from its neighbour because it is the loud one.
+
+`clear` still has no spoken preview — it is a rung, not an alarm tier, and
+`/api/alert-preview` takes an `AlarmPriority`. Unchanged, and still the reason the
+recovery card is tone-only.
+
+No server change: `/api/alert-preview` already took `target` in the body.
+
+Web `tsc` and `vite build` clean; server suite unchanged at 1,763 pass / 0 fail.
+
+---
+
 ## v1.60.0 — type-check the tests, one card per alert category, no chime-repeat knob
 
 ### `server/test/` is now type-checked, and gated in CI
