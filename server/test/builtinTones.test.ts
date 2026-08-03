@@ -66,8 +66,8 @@ test('resolveChime — a named tone resolves to its file + b:<id> tag, no fallba
   assert.ok(r.path.endsWith('gong.wav'));
   assert.equal(r.tag, 'b:gong');
   assert.equal(r.fellBack, false);
-  // Other levels untouched (still level-default klaxon).
-  assert.equal(resolveChime('green', audioDir).tag, BUILTIN_TAG);
+  // Other levels untouched — v1.56.0 the shipped default is the doorbell tone.
+  assert.equal(resolveChime('green', audioDir).tag, 'b:doorbell');
 });
 
 test('updateChimeConfig — rejects an unknown built-in tone and keeps the prior assignment', () => {
@@ -134,7 +134,8 @@ test('promoted pack klaxons — all six present, synthesized, and byte-identical
   // that is the whole premise of the promotion. The airport pack is the one
   // generateAudioAssets() rendered into the level-klaxon filenames here only if
   // BROADCAST_CHIME_PACK said so, so compare against whichever pack is active.
-  const pack = process.env.BROADCAST_CHIME_PACK === 'airport' ? 'airport' : 'powerplant';
+  // v1.56.0 — the pack option is gone; the level klaxons are the airport set.
+  const pack = 'airport';
   for (const [level, asset] of [['red-alert', 'red-alert'], ['yellow-alert', 'yellow-alert'], ['all-clear', 'all-clear']] as const) {
     const klaxon = readFileSync(resolve(audioDir, `${asset}.wav`));
     const promoted = readFileSync(resolve(audioDir, `${pack}-${level}.wav`));

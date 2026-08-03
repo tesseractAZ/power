@@ -1,3 +1,63 @@
+## v1.56.0 — the chime-pack option is removed; doorbell is the shipped default
+
+**`BROADCAST_CHIME_PACK` is gone** — option, schema entry, translation block,
+s6 env export, and every line of pack machinery. What it selected is not lost:
+v1.55.0 promoted all six pack klaxons into the named tone catalog, so each is
+individually assignable per level in the Alert Console. One setting, one place.
+
+`CHIME_PACKS` collapses to a flat `KLAXON_BUILDERS` table backing the four fixed
+assets. The surviving waveforms are the melodic struck-bell set, chosen because
+that is what live installs already hold on disk — the one forced regeneration
+rewrites the klaxons byte-identically, so the fallback tone does not change on a
+running system. `selectedChimePack()` and the `ChimePack` type are deleted;
+`process.env.BROADCAST_CHIME_PACK` had exactly one reader.
+
+**The shipped default assignment is now `named:doorbell`** for all three levels,
+replacing `{kind:'builtin'}`. `builtin` remains fully reachable — it is the
+operator-selectable level klaxon *and* the last-resort tone `resolveChime()`
+falls back to when an assigned tone's file is missing, so the anti-silent-alarm
+chain is unchanged. Only what a fresh install starts with moved; an existing
+`/data/chime-config.json` is never rewritten.
+
+**The `.assets-version` marker is version-only again** (`v6`, was `6:<pack>`).
+No marker any prior release wrote can equal it, so every install regenerates
+exactly once on the first boot after this update and none can carry stale
+klaxons. `AUDIO_ASSETS_VERSION` itself is unchanged.
+
+**Two claims in the v1.55.0 entry were wrong, and are corrected here.** That
+entry argued for retaining the key on two grounds; both were tested and both
+fail:
+
+- *"HA has no options migration, so removing the key reverts a saved value."*
+  The merge described there is real, but its output is then **filtered**.
+  Supervisor drops a persisted key the new schema does not declare — it logs
+  `Option '…' does not exist in the schema for …` and continues. Verified against
+  the running Supervisor (2026.07.5), and by repo precedent: an earlier release
+  deleted six option keys, three without the optional suffix, and shipped
+  continuously since.
+- *"The s6 run script exports it under `set -e`, so a surviving export aborts
+  startup."* It cannot. `bashio::config` returns success unconditionally — a
+  missing key yields the literal string `null` — and `export VAR="$(…)"` masks
+  the substitution's exit status under `set -e` regardless. The export is removed
+  for hygiene, not for survival.
+
+The persisted value remains in Supervisor's store, inert, until the Configuration
+form is next saved. **Do not reuse the identifier `BROADCAST_CHIME_PACK` for a
+different setting** — a re-added key would inherit the stale persisted value
+rather than its new default.
+
+`chimePack` is removed from the chime console response, and the level dropdown's
+klaxon option is relabelled: after this change `builtin` is no longer the
+default, so a label calling it one would state the opposite of the truth on the
+alarm administration surface.
+
+**Tests.** `chimePack.test.ts` is replaced by `klaxonAssets.test.ts`, which pins
+what that file was really protecting: every level klaxon synthesizes to a valid
+non-empty 22050 Hz WAV, a stale marker regenerates a corrupted klaxon, and every
+pre-v1.56.0 marker format reads as stale. The default-assignment test now asserts
+doorbell, and a new test pins that `builtin` stays reachable — making that state
+unreachable would take the fallback floor with it. 1,757 tests pass.
+
 ## v1.55.1 — restore the Configuration page's option descriptions
 
 **Every option description on the Home Assistant Configuration page has been

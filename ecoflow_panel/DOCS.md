@@ -5758,7 +5758,7 @@ mono** (`SAMPLE_RATE`/`BITS_PER_SAMPLE`/`NUM_CHANNELS`). The synth primitive
 attack/release envelopes; `addTone` floors the onset attack at ~4 ms to kill a
 sample-0 DC click.
 
-#### 5.1 The four level klaxons + chime packs
+#### 5.1 The four level klaxons
 
 There are four asset ids (`red-alert`, `yellow-alert`, `all-clear`, `boatswain`),
 written to `/data/audio/<id>.wav`, and mapped to levels by:
@@ -5767,7 +5767,10 @@ written to `/data/audio/<id>.wav`, and mapped to levels by:
 KLAXON_FOR_LEVEL = { red: 'red-alert.wav', yellow: 'yellow-alert.wav', green: 'all-clear.wav' }
 ```
 
-The waveforms depend on the selected **chime pack** (`BROADCAST_CHIME_PACK`):
+v1.56.0 — the `BROADCAST_CHIME_PACK` option is **removed**. The klaxons are one
+fixed set (the melodic struck-bell waveforms). Both historical sets survive
+individually as named tones, so an operator selects any of them per level in the
+Alert Console rather than choosing a set globally:
 
 | Pack | red | yellow | green |
 |------|-----|--------|-------|
@@ -5780,7 +5783,7 @@ advisory). `boatswain` (a two-tone sine sweep) is pack-independent.
 
 #### 5.2 Named built-in tone library (v0.17.0)
 
-A fixed, **selectable** library of 16 short tones (separate from the 4 klaxons),
+A fixed, **selectable** library of 22 short tones (separate from the 4 klaxons),
 synthesized once to `/data/audio/<id>.wav`, pack-independent. Catalog
 (`BUILTIN_TONES`, ordered as shown in the UI dropdown):
 
@@ -5801,7 +5804,7 @@ tone that writes no WAV). A named-tone id must match
 
 #### 5.3 Version-gated regeneration
 
-`AUDIO_ASSETS_VERSION = 5`. A marker file `/data/audio/.assets-version` stores
+`AUDIO_ASSETS_VERSION = 6`. A marker file `/data/audio/.assets-version` stores
 `"<version>:<pack>"` (e.g. `"5:powerplant"`). If it doesn't match, all WAVs are
 force-regenerated at boot (atomic tmp→rename). So bumping the version OR
 switching the pack regenerates without manual `/data/audio` cleanup.
@@ -6044,7 +6047,6 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_END_OF_MESSAGE_PHRASE` | `End of message` | English terminator (blank disables). |
 | `BROADCAST_END_OF_MESSAGE_PHRASE_ES` | `Fin del mensaje` | Spanish terminator. |
 | `BROADCAST_END_OF_MESSAGE_GAP_MS` | `700` | Pre-terminator gap, clamped 0..5000. |
-| `BROADCAST_CHIME_PACK` | `powerplant` | `powerplant` (ISA-18.2 cadences) or `airport` (melodic bells). |
 | `BROADCAST_BOOT_WARMUP_MS` | `600000` (10 min) | Restart-continuation + boot phantom-red window. |
 | `BROADCAST_HEALTH_PROBE_MS` | `60000` | Audible-health probe interval. |
 | `BROADCAST_UNREACHABLE_CONFIRM` | `3` | Consecutive-fail streak before confirming unreachable. |
@@ -6570,7 +6572,6 @@ trailing `?` marks the field optional. Defaults are the values in the `options:`
 | `CRITICAL_BREAKS_QUIET_HOURS` | `false` | `bool` (→ `true`/`false`) | (v0.23.0) When true, criticals break through quiet hours for both push and audible. Default false ⇒ quiet hours silence every tier (alert still shows on-screen + morning digest). Shared by alertMonitor (push) and broadcast (audible). |
 | `BROADCAST_AUDIO_BASE` | `http://homeassistant.local:8787` | `str?` | Base URL speakers fetch klaxon/announcement WAVs from. |
 | `BROADCAST_VOLUME` | `0.5` | `float(0,1)` | Broadcast (chime) volume. |
-| `BROADCAST_CHIME_PACK` | `powerplant` | `list(powerplant\|airport)?` | Built-in chime sound pack. |
 | `BROADCAST_ANNOUNCE_VOLUME` | `""` | `str?` | Optional separate volume for the spoken announcement. |
 | `BROADCAST_USE_PRE_ANNOUNCE` | `false` | `bool` (→ `true`/`false`) | Play the platform pre-announce tone before the message. |
 | `BROADCAST_LEAD_SILENCE_MS` | `1000` | `int(0,5000)?` | Lead-in silence; MA 2.9's faster AirPlay RAOP start needs it to avoid clipping the chime start. |
@@ -8323,7 +8324,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Alarm-storm gates | Identical-message and per-level repeat suppression; escalations always play (§10.2.3) | Broadcast history | Tick loop | measured-and-active |
 | MA + SIP dispatch | Media-player pre-flight + verification; per-target volume pin; `BROADCAST_SIP_TARGETS` side-channel (§10.3) | HA media players, SIP endpoint | Household audible path | measured-and-active |
 | Announcement renderer | Chime + TTS layout, per-language terminator, content-keyed cache (§10.4) | Level + message | Broadcast, browser/speaker test paths | measured-and-active |
-| Tone library + chime packs | Four level klaxons + named built-ins, version-gated regeneration (§10.5) | — | Renderer | measured-and-active |
+| Tone library | Four level klaxons + named built-ins, version-gated regeneration (§10.5) | — | Renderer | measured-and-active |
 | Operator tones + per-level assignment | `chimeStore.ts` uploads; `chimeConfig.ts` level→chime map (§10.6–10.7) | Operator uploads | Alert Console, renderer | measured-and-active |
 | TTS build + verbalizer | `buildAlertMessage` → `verbalizeForTts` (idempotent normalizer); optional second-language pass (§10.8) | Alert facts | Renderer | measured-and-active (second language data-gated on config) |
 | Wyoming/Piper client | Raw-PCM synth over Wyoming protocol, `en_US-lessac-medium` (§10.9) | Piper add-on | Renderer | measured-and-active |

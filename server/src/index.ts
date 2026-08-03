@@ -20,7 +20,7 @@ import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
 import { isConfigured } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
-import { generateAudioAssets, BUILTIN_TONES, selectedChimePack } from './audioAssets.js';
+import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
 import { getAllStates, getEntityState } from './haService.js';
 // v0.9.33 — Supervisor add-on + Core config-flow helpers
@@ -3866,12 +3866,6 @@ function chimeConsoleResponse() {
     // v0.17.0 — the named built-in tone library, selectable per level alongside
     // the level default and uploads. Preview each at /audio/<id>.wav.
     builtinTones: BUILTIN_TONES,
-    // v1.55.0 — which pack supplies the per-level "Default" klaxon (and the
-    // last-resort tone when an assigned tone's file is missing). Published so
-    // the console can name it instead of leaving the operator to discover in
-    // the HA options form that a setting there is being overridden here.
-    // Applies at restart: the packs are synthesized to /data/audio at boot.
-    chimePack: selectedChimePack(),
     updatedAt: cfg.updatedAt,
     maxUploadBytes: MAX_UPLOAD_BYTES,
   };
