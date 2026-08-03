@@ -34,7 +34,9 @@ function plan(overrides: Partial<ArmablePlan> = {}): ArmablePlan {
     chargeTonight: true,
     basisComplete: true,
     buyKwh: 40,
-    targetSocPct: 43.2,
+    // v1.60.0 — the write arms from the SETPOINT (the resilience requirement),
+    // never from the contention-derated arrival the plan predicts.
+    setpointSocPct: 43.2,
     window: { ...WINDOW },
     ...overrides,
   };
@@ -71,7 +73,7 @@ test('clampReserveTarget: rounds and clamps to the device [10, 50] range', () =>
 
 // ── Arming ──────────────────────────────────────────────────────────────────
 
-test('armFromPlan: a charge plan arms with the clamped target', () => {
+test('armFromPlan: a charge plan arms with the clamped SETPOINT', () => {
   const s = armed();
   assert.equal(s.day, '2026-07-16');
   assert.equal(s.targetPct, 43);
@@ -86,7 +88,7 @@ test('armFromPlan: hold / incomplete / windowless / zero-buy plans never arm', (
   assert.equal(armFromPlan(prev, 'd', plan({ chargeTonight: false }), T0, 10), null);
   assert.equal(armFromPlan(prev, 'd', plan({ basisComplete: false }), T0, 10), null);
   assert.equal(armFromPlan(prev, 'd', plan({ window: null }), T0, 10), null);
-  assert.equal(armFromPlan(prev, 'd', plan({ targetSocPct: null }), T0, 10), null);
+  assert.equal(armFromPlan(prev, 'd', plan({ setpointSocPct: null }), T0, 10), null);
   assert.equal(armFromPlan(prev, 'd', plan({ buyKwh: 0 }), T0, 10), null);
   assert.equal(armFromPlan(prev, 'd', plan({ buyKwh: null }), T0, 10), null);
 });

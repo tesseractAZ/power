@@ -295,7 +295,14 @@ export const SENSORS: SensorConfig[] = [
   // advisor still flips these to UNAVAILABLE the next day. Numeric fields emit
   // null (→ HA 'unknown') when the plan is stale/incomplete — never a fabricated
   // value. The AVAILABILITY spread is applied uniformly in publishDiscovery().
+  // v1.60.0 — Target SoC is the WRITE SETPOINT (the resilience requirement,
+  // already inside the device's [10,50] reserve bound): it is what an advisory-
+  // mode automation should set backupReserveSoc to. Expected SoC is the
+  // separate, contention-derated PREDICTION of where the pack actually lands.
+  // Keeping the ask on the existing entity means a wired automation keeps
+  // asking for the requirement instead of silently capping itself at a forecast.
   { unique_id: 'ecoflow_night_charge_target_soc', name: 'EcoFlow Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
+  { unique_id: 'ecoflow_night_charge_expected_soc', name: 'EcoFlow Night-Charge Expected SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
   // v1.42.0 — alarm-host SoC temperature (heat tripwire; HA recorder provides
   // the trend history). Null when the host exposes no readable thermal zone.
   { unique_id: 'ecoflow_host_evloop_lag', name: 'EcoFlow Host Event-Loop Lag', state_class: 'measurement', unit_of_measurement: 'ms', icon: 'mdi:timer-sand', entity_category: 'diagnostic', value_template: '{{ value_json.host_evloop_lag_ms }}' },

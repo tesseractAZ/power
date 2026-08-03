@@ -50,6 +50,12 @@
  * runway projection.
  * ═════════════════════════════════════════════════════════════════════════ */
 
+// The ONE definition of the reserve-write bound ([10,50], the device's own
+// clamp). Imported rather than re-stated so the value published to the HA
+// automation and the value the supervised path writes can never drift apart.
+// (nightChargeActuator.ts imports nothing — no cycle.)
+import { clampReserveTarget } from './nightChargeActuator.js';
+
 const HOUR_MS = 3_600_000;
 
 /** One hour of the CONSERVATIVE forecast the planner sizes against. PV is the
@@ -191,8 +197,30 @@ export interface NightChargePlan {
 
   /** Grid energy to buy at the meter, kWh. null when basis incomplete. */
   buyKwh: number | null;
-  /** Target pack SoC % to reach by window end (05:00). null when incomplete. */
+  /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
+   *  close, given every cap — including the v1.60.0 EV-contention derate. This
+   *  is the number the ledger scores (a systematic gap between this and the
+   *  measured arrival is what under-buy detection is made of).
+   *
+   *  ★★ NOT the write setpoint — see `setpointSocPct`. Do not merge them. */
   targetSocPct: number | null;
+  /** SETPOINT: the pack SoC % that MEETS floor+cushion — what the supervised
+   *  write asks the device for. Equals `targetSocPct` on any night nothing caps
+   *  the buy; it is HIGHER exactly when a cap (contention, charge power, pool)
+   *  means the requirement cannot be delivered.
+   *
+   *  ★★ WHY THE TWO DIFFER (v1.60.0 — the next reader WILL want to merge them):
+   *  `backupReserveSoc` is not a promise, it is an instruction — the device
+   *  charges as fast as physics allows and stops at the reserve. Writing the
+   *  contention-DERATED arrival would cap the charge at a guess: if the
+   *  predicted EV session never plugs in, the full rate was available all night
+   *  and the device would still have stopped at the derated number — a
+   *  model-induced under-buy on the resilience buy. Writing the REQUIREMENT can
+   *  only help: real contention simply means the device never reaches it (and
+   *  the normal auto-revert fires on schedule), no contention means we get the
+   *  reserve we actually wanted. Still bounded by the actuator's [10,50]
+   *  clampReserveTarget — the write envelope is unchanged. */
+  setpointSocPct: number | null;
   /** Pack-kWh the buy must ADD at the trough to hold floor+cushion. */
   requiredExtraKwh: number | null;
   /** Why buyKwh is what it is (which cap bound). */
@@ -297,6 +325,7 @@ function nullPlan(
     chargeTonight: false,
     buyKwh: null,
     targetSocPct: null,
+    setpointSocPct: null,
     requiredExtraKwh: null,
     bindingCap: null,
     cushionShortfall: false,
@@ -580,6 +609,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       buyKwh: 0,
       requiredExtraKwh: 0,
       targetSocPct: round1((packAtWindowEnd_noBuy / fullKwh) * 100),
+      // A hold night asks for nothing: the trough already holds the line, no
+      // write arms, and setpoint == prediction (there is no gap to disclose).
+      setpointSocPct: round1((packAtWindowEnd_noBuy / fullKwh) * 100),
       minProjSocPct: baselineMinSocPct,
       minProjSocTsMs: baselineTrough.minTs,
       baselineMinSocPct,
@@ -670,6 +702,44 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const targetSocPct = round1((targetPackKwh / fullKwh) * 100);
   const chargeTonight = buyKwh >= minBuyKwh;
 
+  // ── v1.60.0 — THE WRITE SETPOINT (see NightChargePlan.setpointSocPct) ──
+  // The pack level at window close whose post-window trough holds floor+cushion
+  // — derived from the REQUIREMENT, deliberately NOT from the deliverable
+  // `liftKwh`. Deriving it from the lift would hand the device the
+  // contention-derated arrival as an instruction and cap the charge there even
+  // on a night the car never plugs in (the model-induced under-buy this field
+  // exists to prevent).
+  //
+  // Stated on the trough itself rather than through a window walk: this is a
+  // property of the POST-window trajectory alone, so it cannot inherit the
+  // charge model's caps (a lift-based expression plateaus at the deliverable
+  // ceiling and silently collapses back into targetSocPct). trough(P) is
+  // monotone non-decreasing in P — the sim's [0, full] clamps preserve order —
+  // so the bisection is exact.
+  const troughFromPack = (p: number): number =>
+    simulate(p, fullKwh, postHours, dischargeEff, windowEnd, windowEnd).minPackKwh;
+  let requiredPackAtWindowEndKwh: number;
+  if (troughFromPack(fullKwh) < targetFloorKwh - 1e-9) {
+    requiredPackAtWindowEndKwh = fullKwh; // even a full pack cannot hold the line — ask for all of it
+  } else {
+    let lo = 0;
+    let hi = fullKwh;
+    for (let i = 0; i < 48; i++) {
+      const mid = (lo + hi) / 2;
+      if (troughFromPack(mid) >= targetFloorKwh) hi = mid;
+      else lo = mid;
+    }
+    requiredPackAtWindowEndKwh = hi;
+  }
+  // The setpoint can never sit BELOW the arrival we already predict — that
+  // would be strictly worse than the pre-v1.60.0 write and would cap a charge
+  // the window can demonstrably deliver. (Only bisection tolerance can put them
+  // out of order; the guard makes the ordering structural.)
+  const setpointSocPct = Math.max(
+    targetSocPct,
+    round1((requiredPackAtWindowEndKwh / fullKwh) * 100),
+  );
+
   // v1.60.0 — name the contention. Two MUTUALLY EXCLUSIVE shapes, and neither
   // may claim a prediction the planner does not have: either the EVSE forecast
   // covered the window and we quantify it, or it did not and we say the
@@ -680,8 +750,16 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       ? ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges overnight the packs will receive less than planned.'
       : '';
 
+  // v1.60.0 — when the ask and the expectation diverge, say BOTH. Naming only
+  // the setpoint would over-promise; naming only the expectation would hide
+  // what the device is actually being told to do. Identical numbers ⇒ silence,
+  // rather than a distinction that does not exist tonight.
+  const setpointNote = setpointSocPct > targetSocPct + 0.05
+    ? ` The reserve is set to ${setpointSocPct}% (the resilience requirement) but the window is only expected to reach ~${targetSocPct}%.`
+    : '';
+
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwh)} kWh overnight → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}. Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `Buy ~${round1(buyKwh)} kWh overnight → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     // The deliverable buy can be pushed under the minimum-buy threshold BY the
     // contention itself, so this branch must carry the shortfall disclosure too
     // — otherwise a night the window physically cannot serve would read as a
@@ -695,6 +773,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     chargeTonight,
     buyKwh: round2(buyKwh),
     targetSocPct,
+    setpointSocPct,
     requiredExtraKwh: round2(requiredExtraKwh),
     bindingCap,
     cushionShortfall,
@@ -787,6 +866,7 @@ export function nightChargeStateFields(
   nowMs: number = Date.now(),
 ): {
   night_charge_target_soc_percent: number | null;
+  night_charge_expected_soc_percent: number | null;
   night_charge_buy_kwh: number | null;
   night_charge_window_start: string | null;
   night_charge_window_end: string | null;
@@ -795,7 +875,19 @@ export function nightChargeStateFields(
   const fresh = !!plan && plan.basisComplete && nowMs - plan.generatedAt < PLAN_STALENESS_MS;
   const win = plan?.window ?? null;
   return {
-    night_charge_target_soc_percent: fresh ? plan!.targetSocPct : null,
+    // v1.60.0 — this entity is consumed as a WRITE VALUE: the advisory-mode HA
+    // automation sets backupReserveSoc from it. So it carries the SETPOINT (the
+    // requirement), not the contention-derated prediction — publishing the
+    // prediction here would leave the advisory path capping its own charge at a
+    // guess, the same defect the supervised path is being fixed for. It is
+    // passed through the actuator's own [10,50] bound so the automation is
+    // never handed a value the device cannot accept; the bound itself is
+    // unchanged, and it is the single definition (imported, not re-stated).
+    night_charge_target_soc_percent:
+      fresh && plan!.setpointSocPct != null ? clampReserveTarget(plan!.setpointSocPct) : null,
+    // …and the PREDICTION gets its own entity, so "what will the pack actually
+    // reach tonight" stays visible instead of being overwritten by the ask.
+    night_charge_expected_soc_percent: fresh ? plan!.targetSocPct : null,
     night_charge_buy_kwh: fresh ? plan!.buyKwh : null,
     // Window is informational (the automation gates on availability+charge_tonight
     // AND honors this window). Surfaced from plan.window whenever present; null on

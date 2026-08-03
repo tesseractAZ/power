@@ -3105,6 +3105,13 @@ function scoreNightRow(
     chargeTonight: (y.buy_kwh ?? 0) > 0,
     buyKwh: y.buy_kwh ?? null,
     targetSocPct: y.target_soc_pct ?? null,
+    // The ledger freezes the PREDICTION (target_soc_pct) because that is what
+    // the scorer grades — soc_min_err/buy_err only detect an under-buy when
+    // they are compared against what the plan said the pack would reach. The
+    // write setpoint is recorded on the ACTUATION record instead (its
+    // targetPct), so a re-scored night can never mistake the ask for the
+    // forecast; null here is "not a scored column", never "no setpoint".
+    setpointSocPct: null,
     requiredExtraKwh: y.required_extra_kwh ?? null,
     bindingCap: (y.binding_cap as BindingCap) ?? null,
     cushionShortfall: y.cushion_shortfall === 1,

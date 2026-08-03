@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   computeNightChargePlan,
   buildNightChargeInputs,
+  nightChargeStateFields,
   type NightChargeInputs,
   type NightChargeHour,
   type NightChargePlan,
@@ -11,6 +12,7 @@ import {
   BINDING_CAPS,
 } from '../src/nightChargeAdvisor.js';
 import { buildNightChargeMessage } from '../src/notify.js';
+import { armFromPlan, emptyActuationState, clampReserveTarget } from '../src/nightChargeActuator.js';
 import { nightChargePlanIfFresh } from '../src/telnet/dataProvider.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -344,6 +346,7 @@ function mkPlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     buyKwh: 36,
     targetSocPct: 66.4,
     requiredExtraKwh: 100,
+    setpointSocPct: 75,
     bindingCap: 'evContention',
     cushionShortfall: true,
     evContention: {
@@ -432,6 +435,109 @@ test('consumer (ledger/API) — the plan serializes with the contention block in
   ) as NightChargePlan;
   assert.ok('windowEvKwh' in unknown.evContention!, 'the null must survive serialization');
   assert.equal(unknown.evContention!.windowEvKwh, null);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (e) THE WRITE SETPOINT vs THE PREDICTION
+//
+// `backupReserveSoc` is an instruction, not a promise: the device charges as
+// fast as physics allows and stops at the reserve. Before contention modelling
+// the achievable arrival WAS the requirement whenever the buy was deliverable,
+// so one number served both roles. Once the arrival is derated they diverge,
+// and writing the derated number would cap the charge at a guess — if the
+// predicted EV session never plugs in, the full rate was available all night
+// and the device would still have stopped short. That is a model-induced
+// under-buy on the resilience buy, so the setpoint is derived from the
+// REQUIREMENT and the prediction keeps its own field.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('setpoint — the contended night asks for the requirement, predicts the arrival', () => {
+  const p = computeNightChargePlan(baseInputs());
+  // 15 post-window hours × 3.333 kWh/h = 50 kWh of drain below the 25 kWh
+  // floor+cushion line ⇒ the window must close at 75 kWh (75%) to hold it.
+  assert.equal(p.setpointSocPct, 75, 'the ask is the requirement, not the deliverable arrival');
+  assert.equal(p.targetSocPct, 66.4, 'the prediction stays the contention-derated arrival');
+  assert.ok(p.setpointSocPct! > p.targetSocPct!, 'a capped night must ask for more than it expects');
+  // …and the EV-blind planner, which CAN deliver the requirement, lands on the
+  // same ask — the setpoint is exactly what the pre-contention write asked for.
+  const blind = computeNightChargePlan(baseInputs({ gridInputCapKw: null }));
+  assert.equal(blind.setpointSocPct, 75, 'the setpoint must not regress below the pre-v1.60.0 write');
+  assert.match(p.rationale, /reserve is set to 75% \(the resilience requirement\)/);
+  assert.match(p.rationale, /only expected to reach ~66\.4%/);
+});
+
+test('setpoint — an uncapped night has NO divergence to disclose', () => {
+  const blind = computeNightChargePlan(baseInputs({ gridInputCapKw: null }));
+  assert.equal(blind.bindingCap, 'requirement');
+  assert.equal(blind.setpointSocPct, blind.targetSocPct, 'nothing capped the buy ⇒ ask == expectation');
+  assert.doesNotMatch(blind.rationale, /resilience requirement/, 'no spurious distinction');
+
+  const quiet = computeNightChargePlan(baseInputs({ horizon: mkHorizon({ withEv: false, evKnown: true }) }));
+  assert.equal(quiet.setpointSocPct, quiet.targetSocPct);
+});
+
+test('setpoint — never below the arrival we already predict, on any shape of night', () => {
+  const cases: Array<[string, Partial<NightChargeInputs>]> = [
+    ['contended', {}],
+    ['EV-blind', { gridInputCapKw: null }],
+    ['quiet window', { horizon: mkHorizon({ withEv: false, evKnown: true }) }],
+    ['unpredicted heavy window', { horizon: mkHorizon({ withEv: true, evKnown: false }) }],
+    ['hold night', { socNowPct: 95, horizon: mkHorizon({ withEv: false, evKnown: true }).map((h) => ({ ...h, loadP90W: 200 })) }],
+    ['tiny envelope', { gridInputCapKw: 13.05 }],
+  ];
+  for (const [name, ov] of cases) {
+    const p = computeNightChargePlan(baseInputs(ov));
+    if (p.setpointSocPct == null || p.targetSocPct == null) continue;
+    assert.ok(
+      p.setpointSocPct >= p.targetSocPct - 1e-9,
+      `${name}: setpoint ${p.setpointSocPct} must never sit below the predicted arrival ${p.targetSocPct}`,
+    );
+  }
+});
+
+test('consumer (actuator) — the bounded write arms from the SETPOINT, not the prediction', () => {
+  const p = mkPlan({ setpointSocPct: 41.2, targetSocPct: 31.4, window: { startMs: B + HOUR, endMs: B + 7 * HOUR } });
+  const armed = armFromPlan(emptyActuationState(), '2026-08-03', p, B, 10);
+  assert.ok(armed, 'a charge plan with a setpoint must arm');
+  assert.equal(armed!.targetPct, 41, 'clampReserveTarget(41.2) — the requirement, NOT the derated 31.4');
+  assert.notEqual(armed!.targetPct, clampReserveTarget(p.targetSocPct!), 'writing the prediction is the regression');
+  // The [10,50] envelope is untouched by any of this.
+  const huge = armFromPlan(emptyActuationState(), '2026-08-03', mkPlan({ setpointSocPct: 88, window: { startMs: B + HOUR, endMs: B + 7 * HOUR } }), B, 10);
+  assert.equal(huge!.targetPct, 50, 'the device bound still clamps the ask');
+  // A plan with no setpoint cannot arm at all (fail-closed, unchanged).
+  assert.equal(armFromPlan(emptyActuationState(), '2026-08-03', mkPlan({ setpointSocPct: null }), B, 10), null);
+});
+
+test('consumer (HA/MQTT) — the write entity carries the ask, a separate entity carries the expectation', () => {
+  const p = mkPlan({ setpointSocPct: 41.2, targetSocPct: 31.4, generatedAt: B });
+  const f = nightChargeStateFields(p, B);
+  assert.equal(f.night_charge_target_soc_percent, 41, 'the entity an automation WRITES from is the setpoint (clamped)');
+  assert.equal(f.night_charge_expected_soc_percent, 31.4, 'the prediction keeps its own entity');
+  // Out-of-range asks are published inside the device bound, so an automation
+  // is never handed a value backupReserveSoc cannot take.
+  assert.equal(nightChargeStateFields(mkPlan({ setpointSocPct: 88, generatedAt: B }), B).night_charge_target_soc_percent, 50);
+  // Stale / null plans still emit BOTH keys as null (never a missing key).
+  const stale = nightChargeStateFields(p, B + 13 * HOUR);
+  assert.equal(stale.night_charge_target_soc_percent, null);
+  assert.equal(stale.night_charge_expected_soc_percent, null);
+});
+
+test('consumer (notify) — the announcement names the ask AND the expectation when they differ', () => {
+  const sup = { cancelDeadlineText: 'tonight at 22:55', targetPct: 41 };
+  const diverged = buildNightChargeMessage(mkPlan({ setpointSocPct: 41.2, targetSocPct: 31.4 }), 'charge', sup);
+  assert.match(diverged.body, /raises the backup reserve to 41%/);
+  assert.match(diverged.body, /only expected to reach ~31\.4%/);
+  assert.match(diverged.body, /the reserve is the ask, not a forecast/);
+
+  // Equal numbers ⇒ no clutter.
+  const agreed = buildNightChargeMessage(mkPlan({ setpointSocPct: 41, targetSocPct: 41 }), 'charge', sup);
+  assert.match(agreed.body, /raises the backup reserve to 41%/);
+  assert.doesNotMatch(agreed.body, /expected to reach/);
+
+  // A prediction ABOVE the ask is just the [10,50] clamp talking — not a
+  // shortfall, and it must not produce a backwards "expect more than we ask".
+  const clamped = buildNightChargeMessage(mkPlan({ setpointSocPct: 88, targetSocPct: 75 }), 'charge', { ...sup, targetPct: 50 });
+  assert.doesNotMatch(clamped.body, /expected to reach/);
 });
 
 // ── The contention must never silently swallow a night ────────────────────────

@@ -299,9 +299,19 @@ export function buildNightChargeMessage(
       : ev?.basis === 'unavailable' && plan.cushionShortfall
         ? ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges overnight the packs will receive less than planned.'
         : '';
+  // v1.60.0 — the reserve we ASK for (the requirement) and the arrival we
+  // EXPECT (contention-derated) are different numbers whenever a cap bites. Say
+  // both, or the owner hears a promise the window cannot keep; say one when
+  // they agree, rather than inventing a distinction that does not exist
+  // tonight. Only "expect BELOW the ask" is worth a clause — the reverse is
+  // just the [10,50] write bound, which the sentence already states.
+  const expectNote =
+    supervised && plan.targetSocPct != null && plan.targetSocPct < supervised.targetPct - 0.5
+      ? ` The pack is only expected to reach ~${pct(plan.targetSocPct)} — the reserve is the ask, not a forecast.`
+      : '';
   const tail = supervised
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
-      + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes). `
+      + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes).${expectNote} `
       + 'Cancel from the night-charge card on the panel before then.'
     : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
       + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '

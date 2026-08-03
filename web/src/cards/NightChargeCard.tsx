@@ -25,7 +25,12 @@ interface NightChargePlan {
   objective: string;
   chargeTonight: boolean;
   buyKwh: number | null;
+  /** The contention-derated PREDICTION of where the pack lands. */
   targetSocPct: number | null;
+  /** v1.60.0 — the WRITE SETPOINT (the resilience requirement). Higher than
+   *  `targetSocPct` exactly when a cap prevents delivering the requirement; the
+   *  card shows both in that case so the ask is never read as a forecast. */
+  setpointSocPct: number | null;
   requiredExtraKwh: number | null;
   bindingCap: 'requirement' | 'chargePower' | 'evContention' | 'poolHeadroom' | 'overBuy' | null;
   cushionShortfall: boolean;
@@ -225,7 +230,7 @@ export const NightChargeCard = memo(function NightChargeCard() {
           <span className="text-2xl font-semibold ml-1">kWh</span>
         </div>
         <div className="text-sm text-muted">
-          buy overnight → target <span className="text-ink font-medium">{fmtSoc(plan.targetSocPct)}</span>
+          buy overnight → expect <span className="text-ink font-medium">{fmtSoc(plan.targetSocPct)}</span>
           {ws && we && (
             <>
               {' '}
@@ -270,9 +275,21 @@ export const NightChargeCard = memo(function NightChargeCard() {
         <Stat label="Trough without buy" value={fmtSoc(plan.baselineMinSocPct)} sub="P10 PV / P90 load" />
         <Stat label="Trough with buy" value={fmtSoc(plan.minProjSocPct)} sub={`floor+cushion ${floorCushionPct.toFixed(0)}%`} />
         <Stat
-          label="Target SoC"
+          label="Expected SoC"
           value={fmtSoc(plan.targetSocPct)}
-          sub={plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : undefined}
+          // v1.60.0 — the headline number is the PREDICTION; the reserve we ask
+          // the device for is shown alongside it only when the two diverge (a
+          // cap prevented delivering the requirement), never as a silent swap.
+          sub={
+            [
+              plan.setpointSocPct != null && plan.targetSocPct != null && plan.setpointSocPct > plan.targetSocPct + 0.5
+                ? `reserve set to ${plan.setpointSocPct.toFixed(0)}%`
+                : null,
+              plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ') || undefined
+          }
         />
         <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />
       </div>
