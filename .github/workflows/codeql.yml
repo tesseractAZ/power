@@ -1,0 +1,95 @@
+# CodeQL security scanning for the EcoFlow power add-on (JS/TS).
+#
+# Ported from zwave-tui / Switchboard so all three add-ons gate the same way.
+#
+# This repo was NOT unscanned before — it used GitHub's code-scanning DEFAULT
+# SETUP (configured 2026-07-21, extended suite, weekly). What default setup does
+# not do is FAIL A BUILD: it files alerts and nothing more, so a new
+# high-severity finding merges green. The sibling repos run this workflow
+# instead precisely for the gate below.
+#
+# The language matrix deliberately matches what default setup covered —
+# actions, javascript-typescript, python — so switching costs no coverage.
+# `actions` is not filler: it scans the workflow files themselves, which matter
+# more now that three of them can tag, build and publish.
+#
+# ORDER OF OPERATIONS: land this, confirm it runs green, and only then turn off
+# default setup. Running both is merely duplicative, but a gap with neither is a
+# window where nothing is scanned.
+#
+# The repo is PUBLIC, so code scanning is available at no cost and results are
+# UPLOADED to the Security tab alongside the Dependabot alerts.
+#
+# The SARIF artifact and the hard CI gate are DELIBERATE, not redundant: the
+# upload files an alert but does NOT fail the build, so without
+# check-sarif.mjs a new high-severity finding would merge green.
+name: CodeQL
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '13 6 * * 3'   # weekly, Wednesday 06:13 UTC
+
+permissions:
+  contents: read
+  actions: read            # CodeQL reads the workflow run for its analysis summary
+  security-events: write   # REQUIRED to upload SARIF; without it the upload 403s
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            sarif: actions.sarif
+          - language: javascript-typescript
+            sarif: javascript.sarif
+          - language: python
+            sarif: python.sarif
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended   # broader than default: more CodeQL-class rules
+          # Test code is excluded from ANALYSIS, not from the repo. Tests are not
+          # attack surface, and treating them as a taint SOURCE reports findings
+          # about production paths that cannot occur in production — a fixture
+          # feeds a value no real caller can supply.
+          config: |
+            paths-ignore:
+              - server/test/**
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+
+      - name: Perform CodeQL Analysis (uploads to the Security tab)
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          # `always` also writes the SARIF locally, so the artifact + the CI
+          # gate below keep working.
+          upload: always
+          output: sarif-results
+
+      - name: Publish SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results
+          if-no-files-found: warn
+
+      - name: Fail on actionable CodeQL findings
+        run: node .github/scripts/check-sarif.mjs sarif-results/${{ matrix.sarif }}
