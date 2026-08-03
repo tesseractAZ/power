@@ -59,8 +59,23 @@ PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "personal email address"),
     (re.compile(r"\+?1?[\s.\-()]*520[\s.\-()]*485[\s.\-()]*5554"),
      "the VoIP DID"),
-    (re.compile(r"voip\.?ms", re.I),
-     "VoIP.ms reference — credentials or account identifiers must not be committed"),
+    # NB: matches CREDENTIALS, not the bare service name. The first version of
+    # this rule flagged any occurrence of "voip.ms" and immediately failed CI on
+    # the CHANGELOG entry describing this very script. Prose naming the provider
+    # is fine; an account identifier or a secret next to it is not.
+    (re.compile(r"[\w.-]+:[^\s@/]{3,}@[\w.-]*voip\.?ms", re.I),
+     "VoIP.ms credentials embedded in a URI"),
+    (re.compile(r"voip\.?ms[^\n]{0,60}?(?:pass(?:word|wd)?|secret|api[_-]?key|auth[_-]?token)\s*[:=]\s*\S",
+                re.I),
+     "a secret assigned next to a VoIP.ms reference"),
+    (re.compile(r"(?:pass(?:word|wd)?|secret|api[_-]?key|auth[_-]?token)\s*[:=]\s*\S[^\n]{0,60}?voip\.?ms",
+                re.I),
+     "a secret assigned next to a VoIP.ms reference"),
+    # The sub-account half must contain a LETTER. Without that this collides with
+    # JavaScript numeric separators — `172800_000` (172.8 M ms) in battery.test.ts
+    # matched a digits-only version of this rule.
+    (re.compile(r"\b\d{6}_(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{2,}\b"),
+     "a VoIP.ms sub-account identifier (<account>_<subaccount>)"),
 ]
 
 # This file necessarily contains the patterns it hunts for.
