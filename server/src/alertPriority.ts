@@ -35,6 +35,28 @@ export type AlarmPriority = 'critical' | 'high' | 'medium' | 'low';
 /** Canonical order, most-severe → least. */
 export const ALARM_PRIORITY_ORDER: readonly AlarmPriority[] = ['critical', 'high', 'medium', 'low'] as const;
 
+/**
+ * v1.59.0 — the ONE ladder the operator sees and assigns a tone to.
+ *
+ * Four ISA priorities plus the all-clear. Until now these were two axes joined
+ * by a lossy collapse (`critical|high → red`, `medium|low → yellow`), so four
+ * severities were listed and three were assignable, and in the chime-only
+ * fallback a P1 and a P2 were byte-identical audio.
+ *
+ * ★★★ `clear` is a RUNG but deliberately NOT an `AlarmPriority`. Three reasons,
+ * each load-bearing:
+ *   1. `ALARM_PRIORITY_ORDER` drives RETAINED MQTT discovery — a fifth member
+ *      mints `switch.ecoflow_alarms_clear_p5` permanently, and nothing reaps it.
+ *   2. `ALARM_PRIORITY_META` requires an ISA designation; `clear` has none, and
+ *      the discovery builder calls `.toLowerCase()` on it.
+ *   3. `priorityOf` structurally cannot return `clear`, so a `clear` entry in
+ *      `priorityEnabled` would be a persisted mute toggle controlling nothing.
+ */
+export type AlarmRung = AlarmPriority | 'clear';
+
+/** Canonical rung order, most-severe → least, all-clear last. */
+export const ALARM_RUNG_ORDER = [...ALARM_PRIORITY_ORDER, 'clear'] as const satisfies readonly AlarmRung[];
+
 export interface AlarmPriorityMeta {
   /** Stable id (also the colour-token suffix and the HA switch object-id). */
   id: AlarmPriority;

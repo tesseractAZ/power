@@ -4502,14 +4502,25 @@ else if severity === 'warning'     → source === 'learned' ? 'medium' (P3) : 'h
 else                               → 'low'        (P4)
 ```
 
-| Priority | ISA | rank | colorToken | klaxon | Meaning |
-|----------|-----|------|-----------|--------|---------|
-| critical | P1  | 0 | bad  | red    | Immediate action to protect people/battery/plant |
-| high     | P2  | 1 | high | red    | Protective hardware limit crossed; prompt action |
-| medium   | P3  | 2 | warn | yellow | Learned/statistical anomaly; investigate |
-| low      | P4  | 3 | info | yellow | Advisory / situational awareness |
+| Priority | ISA | rank | colorToken | rung | klaxon asset | Meaning |
+|----------|-----|------|-----------|------|--------------|---------|
+| critical | P1  | 0 | bad  | `critical` | `red-alert.wav`               | Immediate action to protect people/battery/plant |
+| high     | P2  | 1 | high | `high`     | `powerplant-red-alert.wav`    | Protective hardware limit crossed; prompt action |
+| medium   | P3  | 2 | warn | `medium`   | `yellow-alert.wav`            | Learned/statistical anomaly; investigate |
+| low      | P4  | 3 | info | `low`      | `powerplant-yellow-alert.wav` | Advisory / situational awareness |
+| —        | —   | — | ok   | `clear`    | `all-clear.wav`               | Recovery — not a priority; see `AlarmRung` below |
 
-The High-vs-Medium split on `source` is itself ISA logic: a deterministic threshold breach is more certain and more actionable than a learned deviation. `klaxonLevelForPriority()` maps critical+high → `red`, medium+low → `yellow` (green is reserved for genuine recovery via `conditionFromAlerts`, never a priority). `notifyBracketPriority(alert, effectiveSeverity)` computes the `[Medium]`-style title bracket, honouring the explicit priority UNLESS auto-tune demoted the severity for this send (then the demoted severity drives the bracket → `[Low]`). The web app mirrors this file at `web/src/alertPriority.ts` and the two must stay in lockstep.
+The High-vs-Medium split on `source` is itself ISA logic: a deterministic threshold breach is more certain and more actionable than a learned deviation. `notifyBracketPriority(alert, effectiveSeverity)` computes the `[Medium]`-style title bracket, honouring the explicit priority UNLESS auto-tune demoted the severity for this send (then the demoted severity drives the bracket → `[Low]`). The web app mirrors this file at `web/src/alertPriority.ts` and the two must stay in lockstep.
+
+**`AlarmRung` (v1.59.0) — the audible vocabulary.** `type AlarmRung = AlarmPriority | 'clear'`, ordered by `ALARM_RUNG_ORDER`. Each of the four priorities now carries its **own** tone, plus a fifth rung for recovery. Before v1.59.0 the audible path collapsed to three levels (`red`/`yellow`/`green`) via `klaxonLevelForPriority()`, so P1 and P2 were audibly identical, as were P3 and P4 — the operator could not tell a critical from a high by ear, which matters most on the chime-only fallback where the tone is the entire message.
+
+`clear` is deliberately **NOT** a member of `AlarmPriority`, for three independent reasons:
+
+1. `ALARM_PRIORITY_ORDER` drives **retained** MQTT discovery (`mqttDiscovery.ts`). A fifth member mints `switch.ecoflow_alarms_clear_p5` permanently, and there is no reaper for retained discovery topics.
+2. `ALARM_PRIORITY_META` requires an `isa` string and the builder calls `.toLowerCase()` on it; a recovery has no ISA tier.
+3. `priorityOf()` structurally cannot return it — nothing classifies an alert as "cleared"; clearing is the *absence* of raised alerts.
+
+`klaxonLevelForPriority()` survives, but ONLY for legacy bookkeeping (`lastLevel`, cooldown/status reporting). It no longer selects a tone — every `resolveChime()` / `renderAnnouncement()` call site takes the rung. Do not reintroduce it on the audio path.
 
 ---
 
@@ -5397,7 +5408,7 @@ Source files covered:
 | `server/src/audioRenderer.ts` | Assembles chime + TTS PCM into one cached WAV; the cache key |
 | `server/src/audioAssets.ts` | Synthesizes the built-in klaxons + named tone library at boot |
 | `server/src/chimeStore.ts` | Operator WAV uploads: normalize-on-ingest + content-addressed storage |
-| `server/src/chimeConfig.ts` | Per-level tone assignment (`resolveChime`) |
+| `server/src/chimeConfig.ts` | Per-rung tone assignment (`resolveChime`) + the 3-level→5-rung migration |
 | `server/src/ttsService.ts` | Alert → spoken sentence; the TTS text normalizer (`verbalizeForTts`) |
 | `server/src/wyomingTts.ts` | Wyoming-protocol Piper TCP client + `pcmToWav` |
 | `server/src/broadcastRuntimeConfig.ts` | Live enable/volume override layer on top of env |
@@ -5417,7 +5428,7 @@ alert condition transition (or a dedicated announce()/test()/preview() call)
  gates: enabled? minSeverity? quiet hours? storm gate? restart/boot grace?
         │
         ▼
- resolveChime(level)      →  which WAV prepends this level
+ resolveChime(rung)       →  which WAV prepends this rung
         │
         ▼
  renderAnnouncement(...)  →  build (or cache-hit) the combined WAV:
@@ -5758,18 +5769,27 @@ mono** (`SAMPLE_RATE`/`BITS_PER_SAMPLE`/`NUM_CHANNELS`). The synth primitive
 attack/release envelopes; `addTone` floors the onset attack at ~4 ms to kill a
 sample-0 DC click.
 
-#### 5.1 The four level klaxons
+#### 5.1 The rung klaxons
 
-There are four asset ids (`red-alert`, `yellow-alert`, `all-clear`, `boatswain`),
-written to `/data/audio/<id>.wav`, and mapped to levels by:
+Asset ids are written to `/data/audio/<id>.wav` and mapped to rungs by:
 
 ```
-KLAXON_FOR_LEVEL = { red: 'red-alert.wav', yellow: 'yellow-alert.wav', green: 'all-clear.wav' }
+KLAXON_FOR_LEVEL = {
+  critical: 'red-alert.wav',              high: 'powerplant-red-alert.wav',
+  medium:   'yellow-alert.wav',           low:  'powerplant-yellow-alert.wav',
+  clear:    'all-clear.wav',
+}
 ```
+
+**v1.59.0** widened this from three entries to five, giving P1/P2 and P3/P4
+distinct klaxons. No `AUDIO_ASSETS_VERSION` bump was needed: all five WAVs were
+already synthesized on disk (the two `powerplant-*` ids were promoted to
+first-class named tones in v1.55.0), so this is a remap of existing assets, not
+new synthesis. `boatswain` remains an asset id but is not a rung klaxon.
 
 v1.56.0 — the `BROADCAST_CHIME_PACK` option is **removed**. The klaxons are one
 fixed set (the melodic struck-bell waveforms). Both historical sets survive
-individually as named tones, so an operator selects any of them per level in the
+individually as named tones, so an operator selects any of them per rung in the
 Alert Console rather than choosing a set globally:
 
 | Pack | red | yellow | green |
@@ -5839,24 +5859,39 @@ after manual file deletes (only surfaces entries whose file exists).
 
 ---
 
-### 7. Per-level chime assignment (`chimeConfig.ts`)
+### 7. Per-rung chime assignment (`chimeConfig.ts`)
 
 Persisted at `$CHIME_CONFIG_PATH` (default `chime-config.json` next to the DB).
-Stores a per-**level** (not per-priority) assignment for `red`/`yellow`/`green`:
+Stores one assignment per **rung** — `CHIME_LEVELS` = `critical` / `high` /
+`medium` / `low` / `clear`, pinned exhaustive against `AnnouncementLevel` by a
+compile-time `Exclude<>` check:
 
 ```
-{ kind: 'builtin' }        // the level's synthesized klaxon (default)
-{ kind: 'named', id }      // a named built-in tone
+{ kind: 'builtin' }        // the rung's synthesized klaxon
+{ kind: 'named', id }      // a named built-in tone (the shipped default)
 { kind: 'custom', id }     // an uploaded tone
 ```
 
-Granularity is per-level because every render call site is level-based
-(`AnnouncementLevel`), and `klaxonLevelForPriority` already collapses the 4 ISA
-priorities to these 3 levels. Default is all-`builtin`, so until the operator
-assigns a custom tone this module is a pure no-op and audio is byte-identical to
-pre-feature.
+Granularity is per-rung as of **v1.59.0**; it was per-level (`red`/`yellow`/
+`green`) before that, which made P1 indistinguishable from P2 by ear. Shipped
+defaults are one DISTINCT named tone per rung (`warble-fast`, `klaxon-honk`,
+`pulse-slow`, `doorbell`, `triad-up`) rather than all-`builtin` — on the
+chime-only fallback the tone is the *entire* message, so identical defaults
+would erase the severity distinction exactly when the spoken text is missing.
 
-**`resolveChime(level, klaxonDir)`** is the single resolution seam (used at
+**Migration (v1.59.0).** `sanitize()` fans a legacy 3-key file out across the
+five rungs — `red` → critical + high, `yellow` → medium + low, `green` → clear —
+the inverse of the old `klaxonLevelForPriority` collapse, so whatever played for
+a given alarm still plays for it. Resolution order per rung is: the rung's own
+key, else its legacy level, else the shipped default. It runs on the **read**
+path with no one-shot rewrite and is idempotent, which matters because /data
+loss and partial restores are demonstrated events on this host. A wrong
+migration fails silently — the file still parses, the console still renders, and
+the operator's hand-picked tones are quietly replaced by defaults with nothing
+logged. Pinned by `test/chimeConfigMigration.test.ts` (mutation-verified: the
+fan-out, its direction, and own-key precedence each have a killing test).
+
+**`resolveChime(rung, klaxonDir)`** is the single resolution seam (used at
 every render call site). It returns `{ path, tag, fellBack }`:
 
 | Assignment | path | tag |
@@ -6119,7 +6154,7 @@ JSON endpoints:
 | `POST /api/broadcast/test` | write | Fire a test broadcast at `{ level }` (default `red`). Bypasses all gates except the 10 s test cooldown (`TEST_COOLDOWN_MS`). 429 on cooldown, 502 on failure. |
 | `GET /api/broadcast/discover` | write | Enumerate every `media_player` HA knows (friendly name, inferred family, state, volume, `currently_configured`) so the operator picks targets from a real list. 503 if unsupervised/unreachable. |
 | `POST /api/broadcast/setup-piper` / `reset-piper` | write | Add/reset the Wyoming Protocol integration via config-flow helpers. |
-| `GET /api/chimes`, `GET /api/chime-config` | none | Console payload: levels, level labels, per-level `assignments`, uploaded `chimes`, `builtinTones`, `maxUploadBytes`. |
+| `GET /api/chimes`, `GET /api/chime-config` | none | Console payload: the five rungs, their labels, per-rung `assignments`, uploaded `chimes`, `builtinTones`, `maxUploadBytes`. |
 | `POST /api/chimes?name=` | write (rate-limited) | Upload a raw WAV body; `saveChime` validates + normalizes + stores. 400 on bad WAV / full library. |
 | `DELETE /api/chimes/:id` | write | Delete a tone; reverts any level assigned to it back to builtin. 404 if absent. |
 | `PUT /api/chime-config` | write | Assign tones per level (`{ assignments }`). 422 with `rejected[]` for unknown ids (prior value kept). |
@@ -6285,7 +6320,7 @@ The unified alarm-audio administration surface (v0.19.0), hosted inside the Aler
 - **`data`** ← `GET/PUT /api/chimes` + `/api/chime-config` — tone-level assignments, uploaded `.wav` tone library, built-in tones.
 - **`bcastCfg`** ← `GET/PUT /api/broadcast/config` — the broadcast master (audible on/off, live volume, override-vs-env-baseline).
 
-Sections: (1) broadcast master (enable + volume, warns when off); (2) per-priority annunciation with repeat and per-priority preview (`/api/alert-preview`); (3) tone-per-level assignment — the level klaxon (`KLAXON_FILE = { red: 'red-alert', yellow: 'yellow-alert', green: 'all-clear' }`, served from `audio/<file>.wav`), a named built-in tone, or an uploaded custom tone, each previewable in-browser; (4) tone library upload/list/delete. A bad/deleted tone falls back to the level klaxon **server-side** — an alarm is never silenced by a missing file.
+Sections: (1) broadcast master (enable + volume, warns when off); (2) per-priority annunciation with repeat and per-priority preview (`/api/alert-preview`); (3) tone-per-rung assignment across all five rungs — the rung klaxon (`KLAXON_FILE` in `web/src/alarmLevels.ts`, mirroring the server's `KLAXON_FOR_LEVEL`, served from `audio/<file>.wav`; the mirror is pinned by `test/alarmLevelWebMirror.test.ts`), a named built-in tone, or an uploaded custom tone, each previewable in-browser; (4) tone library upload/list/delete. A bad/deleted tone falls back to the rung klaxon **server-side** — an alarm is never silenced by a missing file.
 
 #### 1.9 Glossary tooltips
 
@@ -8321,11 +8356,11 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Feature | Core math / mechanism | Field-data inputs | Consumers | Evidence status |
 |---|---|---|---|---|
 | Condition derivation + tick | `conditionFromAlerts` → level; 10 s tick with boot-grace, priority and settings gates (§10.2) | Live alerts | Speaker/SIP announcements | measured-and-active |
-| Alarm-storm gates | Identical-message and per-level repeat suppression; escalations always play (§10.2.3) | Broadcast history | Tick loop | measured-and-active |
+| Alarm-storm gates | Identical-message and per-rung repeat suppression; escalations always play (§10.2.3) | Broadcast history | Tick loop | measured-and-active |
 | MA + SIP dispatch | Media-player pre-flight + verification; per-target volume pin; `BROADCAST_SIP_TARGETS` side-channel (§10.3) | HA media players, SIP endpoint | Household audible path | measured-and-active |
 | Announcement renderer | Chime + TTS layout, per-language terminator, content-keyed cache (§10.4) | Level + message | Broadcast, browser/speaker test paths | measured-and-active |
-| Tone library | Four level klaxons + named built-ins, version-gated regeneration (§10.5) | — | Renderer | measured-and-active |
-| Operator tones + per-level assignment | `chimeStore.ts` uploads; `chimeConfig.ts` level→chime map (§10.6–10.7) | Operator uploads | Alert Console, renderer | measured-and-active |
+| Tone library | Five rung klaxons + named built-ins, version-gated regeneration (§10.5) | — | Renderer | measured-and-active |
+| Operator tones + per-rung assignment | `chimeStore.ts` uploads; `chimeConfig.ts` rung→chime map + legacy migration (§10.6–10.7) | Operator uploads | Alert Console, renderer | measured-and-active |
 | TTS build + verbalizer | `buildAlertMessage` → `verbalizeForTts` (idempotent normalizer); optional second-language pass (§10.8) | Alert facts | Renderer | measured-and-active (second language data-gated on config) |
 | Wyoming/Piper client | Raw-PCM synth over Wyoming protocol, `en_US-lessac-medium` (§10.9) | Piper add-on | Renderer | measured-and-active |
 | Runtime config two-layer | Env baseline + live override file; `resolveAnnounceVolume` (§10.11) | Operator PUT | Broadcast | measured-and-active |

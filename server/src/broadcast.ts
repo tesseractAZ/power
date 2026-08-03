@@ -84,7 +84,9 @@ import { setBroadcastHealth } from './broadcastHealth.js';
 // "preview announcement" feature on the settings page.
 import {
   type AlarmPriority,
+  type AlarmRung,
   priorityOf,
+  priorityRank,
   klaxonLevelForPriority,
   previewMessageFor,
   priorityAnnouncementPrefix,
@@ -282,7 +284,9 @@ function clamp01(n: number): number {
 
 export type ConditionLevel = 'green' | 'yellow' | 'red';
 
-export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; crit: number; warn: number } {
+export function conditionFromAlerts(
+  alerts: Alert[],
+): { level: ConditionLevel; crit: number; warn: number; rung: AlarmRung } {
   // v0.12.0 — drop on-screen backup-SoC alerts (id starts with 'backup-soc')
   // before counting crit/warn. Their audible is the dedicated announce() path,
   // so excluding them here keeps the condition-transition broadcast from
@@ -322,7 +326,23 @@ export function conditionFromAlerts(alerts: Alert[]): { level: ConditionLevel; c
   const crit = counted.filter((a) => a.severity === 'critical').length;
   const warn = counted.filter((a) => a.severity === 'warning').length;
   const level: ConditionLevel = crit > 0 ? 'red' : warn > 0 ? 'yellow' : 'green';
-  return { level, crit, warn };
+
+  // v1.59.0 — the RUNG: the most severe ISA priority among the same counted pool,
+  // or `clear` when nothing is raised.
+  //
+  // ★★★ `clear` keys off crit === 0 && warn === 0 — NOT off `counted` being
+  // empty. Info-severity alerts sit in `counted` while moving NEITHER counter
+  // (`grid-offgrid` is a standing normal state here), so testing emptiness would
+  // make every recovery play the LOW advisory tone instead of the all-clear.
+  let rung: AlarmRung = 'clear';
+  if (crit > 0 || warn > 0) {
+    const raised = counted.filter((a) => a.severity === 'critical' || a.severity === 'warning');
+    rung = raised.reduce<AlarmRung>((worst, a) => {
+      const p = priorityOf(a);
+      return priorityRank(p) < priorityRank(worst as AlarmPriority) ? p : worst;
+    }, priorityOf(raised[0]));
+  }
+  return { level, crit, warn, rung };
 }
 
 // v0.58.0 — how long after boot the restart-continuation gate stays armed. Learned/
@@ -568,7 +588,7 @@ export function startBroadcastMonitor(
   // we re-fire SIP — for an ALARM channel a rare duplicate beats silence.
   let lastSipDispatchOk = true;
   const RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
-  const scheduleBroadcastRetry = (level: ConditionLevel, message: string | null, messageEs: string | null, reason: string) => {
+  const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string) => {
     if (retryAttempt >= RETRY_DELAYS_MS.length) {
       log(`broadcast: giving up after ${retryAttempt} deferred retries (${reason})`);
       retryAttempt = 0;
@@ -598,7 +618,7 @@ export function startBroadcastMonitor(
       // dispatch, so re-firing it would replay the identical alarm on the cordless.
       // v1.32.0 — but ONLY skip when the first SIP dispatch actually DELIVERED
       // (lastSipDispatchOk); a failed SIP dispatch is retried alongside MA.
-      void runBroadcast(level, message, false, messageEs, lastSipDispatchOk);
+      void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -927,6 +947,10 @@ export function startBroadcastMonitor(
    */
   const runBroadcastInner = async (
     level: ConditionLevel,
+    // v1.59.0 — the severity RUNG picks the tone; `level` stays the private
+    // annunciation-policy axis every suppression gate already speaks. Passing
+    // both keeps those gates byte-identical while the audio gains 5-way detail.
+    rung: AlarmRung,
     message: string | null,
     messageEs: string | null,
     bypassStormGate: boolean,
@@ -967,8 +991,8 @@ export function startBroadcastMonitor(
     // v1.58.0 — NO CAST. These unions coincide today; a cast here would let a
     // future widening of AnnouncementLevel pass silently instead of failing the
     // build at the one site that decides which tone an alarm plays.
-    const chime = resolveChime(level, opts.klaxonDir);
-    if (chime.fellBack) log(`broadcast: assigned custom chime for ${level} missing — using built-in klaxon`);
+    const chime = resolveChime(rung, opts.klaxonDir);
+    if (chime.fellBack) log(`broadcast: assigned chime for rung ${rung} missing — using built-in klaxon`);
     // v0.62.0 — bilingual second pass: play the message in English, then in
     // Spanish. Active only when a Spanish voice is configured (the voice must
     // exist on the Wyoming server) AND a Spanish text was supplied AND there's an
@@ -987,7 +1011,7 @@ export function startBroadcastMonitor(
         ]
       : undefined;
     const r = await renderAnnouncement({
-      level,
+      level: rung,
       message,
       messages, // v0.62.0 — present → multi-language passes (English then Spanish)
       klaxonDir: opts.klaxonDir,
@@ -1031,7 +1055,10 @@ export function startBroadcastMonitor(
       errors.push(`render: ${r.error ?? 'unknown'}`);
       if (message != null) {
         const fb = await renderAnnouncement({
-          level,
+          // v1.59.0 — SAME rung as the failed attempt. A different one here would
+          // make the degraded (chime-only) path announce a different severity
+          // than the alarm that actually fired.
+          level: rung,
           message: null,
           klaxonDir: opts.klaxonDir,
           chimePath: chime.path,
@@ -1125,7 +1152,7 @@ export function startBroadcastMonitor(
     const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
     if (usable === 0) {
       errors.push('all broadcast targets unavailable (HA/MA restarting?)');
-      scheduleBroadcastRetry(level, message, messageEs, 'all broadcast targets unavailable');
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'all broadcast targets unavailable');
       lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
       persistStatus();
       // v0.84.0 — a real broadcast that found ZERO reachable speakers is strong
@@ -1141,7 +1168,7 @@ export function startBroadcastMonitor(
     const call = await playAnnounce(url);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
-      scheduleBroadcastRetry(level, message, messageEs, 'play_announcement failed after in-call retries');
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries');
     }
 
     if (message && !spokenDropped) lastSpokenMessage = message;
@@ -1153,7 +1180,7 @@ export function startBroadcastMonitor(
     // and re-dispatch rather than report a success no one heard.
     if (call.ok && dt < 2000) {
       errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
-      scheduleBroadcastRetry(level, message, messageEs, `suspiciously fast completion (${dt}ms)`);
+      scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`);
     }
     if (call.ok && errors.length === 0) {
       retryAttempt = 0; // verified success resets the deferred-retry budget
@@ -1196,7 +1223,10 @@ export function startBroadcastMonitor(
   // from the condition spine). Absent ⇒ a condition broadcast; the retry
   // re-derives the message from the live alerts at fire time (v1.45.0 shape).
   let pendingSpokenRetry: {
-    level: ConditionLevel; failedAt: number;
+    // v1.59.0 — the rung rides along: a retry replays the SAME severity tone as
+    // the alarm whose speech failed. Storing only `level` would re-announce a
+    // P1 with the generic red tone.
+    level: ConditionLevel; rung: AlarmRung; failedAt: number;
     message?: string | null; messageEs?: string | null;
   } | null = null;
   // v1.48.0 — one scheduling seam for EVERY live alarm path. Saturday's live
@@ -1206,14 +1236,15 @@ export function startBroadcastMonitor(
   // path and announce() now share this.
   const noteSpokenRenderFailure = (
     level: ConditionLevel,
+    rung: AlarmRung,
     result: { ok: boolean; errors: string[] },
     message?: string | null,
     messageEs?: string | null,
   ): void => {
     if (result.ok || !result.errors.some((e) => e.startsWith('render:'))) return;
     pendingSpokenRetry = message !== undefined
-      ? { level, failedAt: Date.now(), message, messageEs: messageEs ?? null }
-      : { level, failedAt: Date.now() };
+      ? { level, rung, failedAt: Date.now(), message, messageEs: messageEs ?? null }
+      : { level, rung, failedAt: Date.now() };
     log(`broadcast: spoken render failed — one retry scheduled in ${SPOKEN_RETRY_DELAY_MS / 1000}s`);
   };
 
@@ -1225,13 +1256,14 @@ export function startBroadcastMonitor(
   let realAudibleInFlight = 0;
   const runBroadcast = (
     level: ConditionLevel,
+    rung: AlarmRung,
     message: string | null,
     bypassStormGate = false,
     messageEs: string | null = null,
     skipSip = false, // v1.25.0 — forwarded to runBroadcastInner; set by deferred MA retries.
   ): Promise<{ ok: boolean; errors: string[] }> => {
     realAudibleInFlight++;
-    const run = () => runBroadcastInner(level, message, messageEs, bypassStormGate, skipSip);
+    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     void p.then(() => { realAudibleInFlight--; }, () => { realAudibleInFlight--; });
@@ -1306,7 +1338,7 @@ export function startBroadcastMonitor(
     // The alerts stay in snapshot.alerts and remain visible in the UI — we only
     // gate the audible annunciation here.
     const alerts = ((store.get().alerts ?? []) as Alert[]).filter((a) => isPriorityEnabled(priorityOf(a)));
-    const { level, crit } = conditionFromAlerts(alerts);
+    const { level, crit, rung } = conditionFromAlerts(alerts);
     if (firstTick) {
       firstTick = false;
       prevLevel = level;
@@ -1321,6 +1353,7 @@ export function startBroadcastMonitor(
     // identical message is the whole point of the retry.
     if (pendingSpokenRetry && !tickInFlight && Date.now() - pendingSpokenRetry.failedAt >= SPOKEN_RETRY_DELAY_MS) {
       const want = pendingSpokenRetry.level;
+      const wantRung = pendingSpokenRetry.rung;
       // v1.48.0 — a dedicated-path retry carries its own text and replays it
       // verbatim; the condition-level match below only applies to condition
       // broadcasts (a SoC-ladder alarm is EXCLUDED from the condition spine,
@@ -1337,7 +1370,7 @@ export function startBroadcastMonitor(
           log(`broadcast: spoken retry after render failure → ${want}${stored ? ' (dedicated-path message replay)' : ''}`);
           const message = stored ? stored.message : messageFor(level, alerts);
           const messageEs = stored ? stored.messageEs : messageEsFor(level, alerts);
-          const result = await runBroadcast(want, message, true, messageEs);
+          const result = await runBroadcast(want, wantRung, message, true, messageEs);
           lastBroadcastAt = Date.now();
           lastLevel = level;
           lastOutcome = result.ok ? 'success' : 'partial';
@@ -1426,14 +1459,14 @@ export function startBroadcastMonitor(
       pendingSpokenRetry = null; // a fresh transition supersedes any queued retry
       const message = messageFor(level, alerts);
       const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
-      const result = await runBroadcast(level, message, false, messageEs);
+      const result = await runBroadcast(level, rung, message, false, messageEs);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       lastOutcome = result.ok ? 'success' : 'partial';
       lastErrors = result.errors;
       // v1.45.0 — a render failure (chime-only fallback or full skip) earns ONE
       // spoken retry after the stall window.
-      noteSpokenRenderFailure(level, result);
+      noteSpokenRenderFailure(level, rung, result);
     } finally {
       tickInFlight = false;
     }
@@ -1482,7 +1515,9 @@ export function startBroadcastMonitor(
         level === 'yellow' ? `${priorityAnnouncementPrefixEs('medium')} Transmisión de prueba. Esto es solo una prueba.` :
         'Todo despejado. Transmisión de prueba. Esto es solo una prueba.';
       // bypassStormGate — a test is operator-initiated and must always play.
-      const r = await runBroadcast(level, message, true, messageEs);
+      // v1.59.0 — a test auditions the rung a real alarm of that condition would use.
+      const testRung: AlarmRung = level === 'red' ? 'critical' : level === 'yellow' ? 'medium' : 'clear';
+      const r = await runBroadcast(level, testRung, message, true, messageEs);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       lastOutcome = r.ok ? 'success' : 'partial';
@@ -1501,6 +1536,9 @@ export function startBroadcastMonitor(
       cfg = loadBroadcastConfig();
       const spokenText = previewMessageFor(priority);
       const level = klaxonLevelForPriority(priority);
+      // v1.59.0 — preview auditions the rung the real alarm will use. `level` is
+      // still computed because the surrounding cooldown/policy code speaks it.
+      const previewRung: AlarmRung = priority;
 
       // Short, preview-only cooldown — independent of test()'s 10s gate.
       const remaining = Math.max(0, lastPreviewAt + PREVIEW_COOLDOWN_MS - Date.now());
@@ -1521,9 +1559,9 @@ export function startBroadcastMonitor(
       // v0.15.23 — preview must audition the SAME chime real broadcasts use,
       // so resolve it here too (otherwise a preview plays the built-in while a
       // real alarm plays the custom tone).
-      const previewChime = resolveChime(level, opts.klaxonDir);  // v1.58.0 — no cast, see above
+      const previewChime = resolveChime(previewRung, opts.klaxonDir);
       const r = await renderAnnouncement({
-        level,
+        level: previewRung,
         message: spokenText,
         klaxonDir: opts.klaxonDir,
         chimePath: previewChime.path,
@@ -1612,14 +1650,14 @@ export function startBroadcastMonitor(
           return { ok: false, error: 'suppressed: quiet hours' };
         }
         const level = klaxonLevelForPriority(priority);
-        const r = await runBroadcast(level, message, false, messageEs ?? null);
+        const r = await runBroadcast(level, priority, message, false, messageEs ?? null);
         lastBroadcastAt = Date.now();
         lastLevel = level;
         lastOutcome = r.ok ? 'success' : 'partial';
         lastErrors = r.errors;
         // v1.48.0 — dedicated-path alarms (SoC ladder / runway) earn the same
         // one-shot spoken retry as condition broadcasts, replaying THIS message.
-        noteSpokenRenderFailure(level, r, message, messageEs ?? null);
+        noteSpokenRenderFailure(level, priority, r, message, messageEs ?? null);
         return r.ok ? { ok: true } : { ok: false, error: r.errors.join('; ') || 'broadcast failed' };
       } catch (e: any) {
         const err = e?.message ?? String(e);

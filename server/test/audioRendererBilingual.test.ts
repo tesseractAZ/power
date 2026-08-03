@@ -29,7 +29,7 @@ async function withDirs(fn: (klaxonDir: string, cacheDir: string) => Promise<voi
 }
 
 const baseOpts = (klaxonDir: string, cacheDir: string) => ({
-  level: 'red' as const,
+  level: 'critical' as const,
   message: 'Critical alarm.',
   messages: [
     { text: 'Critical alarm.', voice: 'en_US-lessac-medium', lang: 'en' as const },

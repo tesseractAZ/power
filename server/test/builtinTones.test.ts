@@ -60,37 +60,38 @@ test('builtinTonePath — rejects unknown ids, traversal, and custom-hash shapes
 
 test('resolveChime — a named tone resolves to its file + b:<id> tag, no fallback', () => {
   _resetChimeConfigCacheForTest();
-  const { rejected } = updateChimeConfig({ red: { kind: 'named', id: 'gong' } }, 'web');
+  const { rejected } = updateChimeConfig({ critical: { kind: 'named', id: 'gong' } }, 'web');
   assert.deepEqual(rejected, []);
-  const r = resolveChime('red', audioDir);
+  const r = resolveChime('critical', audioDir);
   assert.ok(r.path.endsWith('gong.wav'));
   assert.equal(r.tag, 'b:gong');
   assert.equal(r.fellBack, false);
-  // Other levels untouched — v1.56.0 the shipped default is the doorbell tone.
-  assert.equal(resolveChime('green', audioDir).tag, 'b:doorbell');
+  // Other rungs untouched. v1.59.0 — each rung ships a DISTINCT default; the
+  // all-clear's is triad-up (doorbell moved to LOW, per operator preference).
+  assert.equal(resolveChime('clear', audioDir).tag, 'b:triad-up');
 });
 
 test('updateChimeConfig — rejects an unknown built-in tone and keeps the prior assignment', () => {
-  updateChimeConfig({ yellow: { kind: 'named', id: 'sonar-ping' } }, 'web');
-  const { rejected } = updateChimeConfig({ yellow: { kind: 'named', id: 'nope-tone' } }, 'web');
+  updateChimeConfig({ medium: { kind: 'named', id: 'sonar-ping' } }, 'web');
+  const { rejected } = updateChimeConfig({ medium: { kind: 'named', id: 'nope-tone' } }, 'web');
   assert.equal(rejected.length, 1);
-  assert.match(rejected[0], /yellow/);
-  assert.equal(resolveChime('yellow', audioDir).tag, 'b:sonar-ping');
+  assert.match(rejected[0], /medium/, 'the rejection names the rung it applies to');
+  assert.equal(resolveChime('medium', audioDir).tag, 'b:sonar-ping');
 });
 
 test('resolveChime — a named tone whose file is missing FALLS BACK to the klaxon (never silent)', () => {
   _resetChimeConfigCacheForTest();
-  updateChimeConfig({ green: { kind: 'named', id: 'doorbell' } }, 'web');
-  assert.equal(resolveChime('green', audioDir).tag, 'b:doorbell');
+  updateChimeConfig({ clear: { kind: 'named', id: 'doorbell' } }, 'web');
+  assert.equal(resolveChime('clear', audioDir).tag, 'b:doorbell');
   unlinkSync(resolve(audioDir, 'doorbell.wav')); // tone file vanishes
-  const r = resolveChime('green', audioDir);
+  const r = resolveChime('clear', audioDir);
   assert.equal(r.fellBack, true);
   assert.ok(r.path.endsWith('all-clear.wav'));
   assert.equal(r.tag, BUILTIN_TAG); // tag matches the klaxon actually returned
 });
 
 test('renderCacheKey — named tags distinct from the klaxon (omitted), customs, and each other', () => {
-  const key = (tag?: string) => renderCacheKey('red', 'Critical condition', 1, 0, 1, 0, 1000, tag);
+  const key = (tag?: string) => renderCacheKey('critical', 'Critical condition', 1, 0, 1, 0, 1000, tag);
   const klaxonImplicit = key();             // no tag
   const klaxonExplicit = key(BUILTIN_TAG);  // 'builtin' → omitted, same key
   const ping = key('b:ping-single');
