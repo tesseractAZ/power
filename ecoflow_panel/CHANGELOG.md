@@ -1,3 +1,98 @@
+## v1.60.0 — type-check the tests, one card per alert category, no chime-repeat knob
+
+### `server/test/` is now type-checked, and gated in CI
+
+Nothing type-checked the 188 test files. `tsx` strips types at runtime, so the
+suite stayed green while stubs drifted arbitrarily far from the interfaces they
+impersonate. v1.59.0 demonstrated the cost: widening a union produced 33 RUNTIME
+failures instead of 33 compile errors, and `renderCacheKey('red', …)` kept
+PASSING with a stale first argument — the tests compare keys against each other,
+so a self-consistent type-lie is invisible to every assertion.
+
+**67 reported errors was a floor, not a total.** TypeScript reports one
+incompatibility per object literal, so a nested-property error suppresses the
+enclosing missing-property error. Fixing to a fixed point took three waves:
+67 → 27 → 4 → 0.
+
+The dominant root cause was a single idiom: `{ …7 members } as unknown as Recorder`.
+The inner `as unknown` erased contextual typing (26 arrow params silently became
+`any`) AND suppressed the missing-property check — so as `Recorder` grew from 7
+to 17 members, not one of ~19 hand-rolled stubs complained. All were the same 10
+members behind. Replaced with `makeRecorderStub(overrides: Partial<Recorder>)`;
+`Partial` restores contextual typing and kills both families at once. All 21
+sites were converted, not just the 4 that happened to fail — the other 17
+compiled only because the cast suppresses everything, and leaving them would
+make the next `Recorder` member invisible to 17 files again.
+
+Marking those 10 members optional was rejected: production calls all ten
+unconditionally, so `?` would push `?.` guards into `src/` for a case that cannot
+occur, and would permanently disarm the drift detector that just caught this.
+
+**Two real defects surfaced that no test could see:**
+- `PackRiskScore.tier` was `'attention'` in two fixtures — a string that is not
+  in the tier union at all (`low|moderate|elevated|critical|no-data`). It flowed
+  through `computePackRiskV2` verbatim into the report shape.
+- `Alert.category` was lowercase against a capitalised union. Output is
+  byte-identical because `alm.ts` lowercases for grouping, but no real alert ever
+  carried those values.
+
+Escape hatches went DOWN, not up: `as unknown as Recorder` 29 → 0, `as unknown as`
+72 → 44, `as any` 241 → 239. No `@ts-expect-error`, no loosened `strict`.
+
+### The Alert Console is organised by alert category
+
+It was organised by FUNCTION — the enable switch, the tone, and the preview for
+one severity lived in three different cards. Now there is one card per rung, in
+`LEVELS` order, carrying everything about that rung: badge, ISA tier, response,
+description, enable switch, tone selector, tone preview, spoken preview, and the
+"Will announce…" text. Global controls (broadcast master, preview target, the
+tone library) stay separate, because they are not per-rung.
+
+**The asymmetry is stated, not papered over.** Tone assignment is per RUNG (5,
+including `clear`); the enable switch and spoken preview are per PRIORITY (4).
+A recovery has no enable field on the backend and no preview endpoint, so the
+recovery card renders tone-only and says why. The UI is double-guarded and the
+server independently rejects a non-priority preview.
+
+Errors belonging to one category now render inside that category's card instead
+of in the page header, far from the control that raised them.
+
+### The chime-repeat knob is gone
+
+Removed the `AlertSettings` field, the clamp, the getter, the PUT/GET plumbing,
+the UI stepper, both render loops and the cache-key component. The chime plays
+exactly once; both loops became straight-line pushes rather than one-iteration
+`for`s.
+
+**This is audible.** The live setting was 2, so critical and high alarms
+currently chime TWICE. They will now chime once.
+
+Removing the mandatory `x<N>` cache-key component changes the key of every render
+for every user. That is safe and cannot collide — the pre-image is positional and
+the token after the level separator was always `x`, now always `r`, so no
+post-change string can reproduce any string this `RENDER_VERSION` ever hashed.
+`RENDER_VERSION` deliberately stays at 6: its purpose is to invalidate when audio
+changes WITHOUT the key changing, and here the flush is already total. Expect one
+full render-cache miss on deploy.
+
+Migration-free: `sanitize()` builds from `defaults()` and copies only recognised
+keys, so a persisted settings file carrying the retired key loads cleanly and
+sheds it on the next write.
+
+### A guard against re-leaking personal data
+
+`scripts/check-no-secrets.py` + a CI job. This was the SECOND leak into the public
+repo — an earlier scrub filter-repo'd an address out, then v0.15.0 reintroduced
+one in a brand-new file where it sat for 258 of the next 422 commits. The scan
+covers the real home subnets, personal addresses, the DID and VoIP.ms references,
+and deliberately does NOT flag the HA Supervisor range `172.30.32.0/23` (public,
+and load-bearing in the ingress-source pin) or the placeholder subnets — a checker
+that cries wolf gets disabled, which is how it would happen a third time.
+
+Tests: 1,763 pass / 0 fail. Both `tsconfig.json` and `tsconfig.test.json` clean.
+
+---
+
 ## v1.59.0 — one severity ladder: a distinct tone per alarm rung
 
 Closes the "four alert types listed but only three can be selected" complaint,

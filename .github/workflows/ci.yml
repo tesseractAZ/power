@@ -93,6 +93,15 @@ jobs:
         working-directory: server
         run: npm test
 
+  no-secrets:
+    name: No personal data in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Scan tracked files for home addresses / personal identifiers
+        run: python3 scripts/check-no-secrets.py
+
   addon-config:
     name: Validate add-on config + translations
     runs-on: ubuntu-latest
