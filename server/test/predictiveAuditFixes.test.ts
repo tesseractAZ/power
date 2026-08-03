@@ -17,6 +17,7 @@ import {
   resetStringMismatchCache,
 } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import type { DayForecast } from '../src/analytics.js';
 
@@ -35,11 +36,7 @@ function shp2Draining(): Record<string, DeviceSnapshot> {
 function decliningRecorder(): Recorder {
   const now = Date.now();
   const pts = Array.from({ length: 13 }, (_, i) => ({ ts: now - (12 - i) * 900_000, value: 60 - i * (10 / 12) }));
-  return {
-    insertSnapshot: () => {}, query: (_sn, metric) => (metric === 'backup_pct' ? pts : []),
-    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
-    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  return makeRecorderStub({ query: (_sn, metric) => (metric === 'backup_pct' ? pts : []) });
 }
 const fc = (minProjectedSoc: number | null): DayForecast => ({ minProjectedSoc, reserveSoc: 10 } as unknown as DayForecast);
 const hasRuntimeAlert = (alerts: { id: string }[]) => alerts.some((a) => a.id.startsWith('forecast-runtime-'));
@@ -112,11 +109,9 @@ function twoDpuFleet(): Record<string, DeviceSnapshot> {
   };
 }
 function pvRecorder(perSn: Record<string, number>): Recorder {
-  return {
-    insertSnapshot: () => {}, query: (sn, metric) => (metric === 'pv_total' && perSn[sn] != null ? pvSamples(perSn[sn]) : []),
-    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
-    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  return makeRecorderStub({
+    query: (sn, metric) => (metric === 'pv_total' && perSn[sn] != null ? pvSamples(perSn[sn]) : []),
+  });
 }
 
 test('string-mismatch ratio is LEAVE-ONE-OUT (self excluded), not self-including', () => {
@@ -172,12 +167,7 @@ function dpuSoh(series: number[], curSoh: number, spanDays: number): { devs: Rec
       projection: { kind: 'dpu', packs: [{ num: 1, actSoh: curSoh, soh: Math.round(curSoh) }] } as any,
     } as any,
   };
-  const rec = {
-    insertSnapshot: () => {},
-    query: (_sn: string, metric: string) => (metric === 'pack1_soh' ? pts : []),
-    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
-    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  const rec = makeRecorderStub({ query: (_sn, metric) => (metric === 'pack1_soh' ? pts : []) });
   return { devs, rec };
 }
 /** Clean linear SoH decline from `start` to `end` across `n` evenly-spaced samples. */
@@ -235,11 +225,6 @@ test('forecast-imbalance — a fast cell-spread rise STILL fires at a ~7-day spa
       projection: { kind: 'dpu', packs: [{ num: 1, maxVolDiffMv: 30 }] } as any,
     } as any,
   };
-  const rec = {
-    insertSnapshot: () => {},
-    query: (_sn: string, metric: string) => (metric === 'pack1_vol_diff_mv' ? pts : []),
-    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
-    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  const rec = makeRecorderStub({ query: (_sn, metric) => (metric === 'pack1_vol_diff_mv' ? pts : []) });
   assert.equal(hasImbAlert(computeForecastAlerts(devs, rec, undefined)), true, 'imbalance early-warning must survive the SoH-only tightening');
 });

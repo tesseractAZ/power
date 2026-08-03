@@ -19,6 +19,7 @@ import {
   type DayForecast,
 } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import { recommendDispatch, type MpcInputs } from '../src/dispatch/mpc.js';
 
@@ -31,24 +32,22 @@ function mockRecorder(
   let queryCount = 0;
   let queryMultiCount = 0;
   return {
-    insertSnapshot: () => {},
-    query: (_sn, metric) => {
-      queryCount++;
-      return metricSeries[metric] ?? [];
-    },
-    queryMulti: (_sn, metrics) => {
-      queryMultiCount++;
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, metricSeries[k] ?? []);
-      return m;
-    },
-    listMetrics: () => Object.keys(metricSeries),
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({
+      query: (_sn, metric) => {
+        queryCount++;
+        return metricSeries[metric] ?? [];
+      },
+      queryMulti: (_sn, metrics) => {
+        queryMultiCount++;
+        const m = new Map<string, Array<{ ts: number; value: number }>>();
+        for (const k of metrics) m.set(k, metricSeries[k] ?? []);
+        return m;
+      },
+      listMetrics: () => Object.keys(metricSeries),
+    }),
     get queryCount() { return queryCount; },
     get queryMultiCount() { return queryMultiCount; },
-  } as Recorder & { queryCount: number; queryMultiCount: number };
+  };
 }
 
 /** Synthesize a fleet of N DPUs each with P packs. */
@@ -105,7 +104,21 @@ function emptyForecast(overrides: Partial<DayForecast> = {}): DayForecast {
     typicalPvWhPerDay: 50_000,
     minProjectedSoc: null,
     minProjectedSocTs: null,
-    solarModel: { hourly: [], peakCoeff: 0, pairCount: 0, historyDays: 30 },
+    // v0.75.0/v0.78.0 additions. The fixture has no SHP2, so the honest
+    // coverage basis is 0 connected / 0 reporting and never "partial"
+    // (coveragePartial requires an SHP2). The *Display fields and
+    // restoredSolarModel mirror the reporting-basis values, which is exactly
+    // what production emits when every connected Core is reporting — and what
+    // the `?? forecast.solarModel` / `?? fc.forecastPvWhNext24` fallbacks that
+    // ran while these fields were absent already resolved to, so behaviour is
+    // unchanged.
+    homeDpusConnected: 0,
+    homeDpusReporting: 0,
+    homeDpusCoveragePartial: false,
+    forecastPvWhNext24Display: 50_000,
+    typicalPvWhPerDayDisplay: 50_000,
+    solarModel: { hourly: [], peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30 },
+    restoredSolarModel: { hourly: [], peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30 },
     deviceModels: [],
     soiling: null,
     ...overrides,
@@ -282,6 +295,7 @@ test('computeClipping — empty fleet → empty estimate', async () => {
         observedMaxPvW: 15_000,
       })),
       peakCoeff: 5,
+      peakGateMinGhiWm2: 300,
       pairCount: 240,
       historyDays: 30,
     },
@@ -377,18 +391,12 @@ test('computeStringMismatch — flags an underperforming DPU vs peers', () => {
       }
     }
   }
-  const sm = computeStringMismatch(devices, {
-    insertSnapshot: () => {},
+  const sm = computeStringMismatch(devices, makeRecorderStub({
     query: (sn, metric) => {
       if (metric !== 'pv_total') return [];
       return sn === 'SN-DPU-0' ? slowSeries : healthySeries;
     },
-    queryMulti: () => new Map(),
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as Recorder);
+  }));
   const dpu0 = sm.devices.find((d) => d.sn === 'SN-DPU-0');
   assert.ok(dpu0, 'DPU-0 should appear in the report');
   assert.ok(dpu0!.ratio != null && dpu0!.ratio < 0.7, `DPU-0 ratio should be ~0.5, got ${dpu0!.ratio}`);
@@ -459,15 +467,9 @@ test('computeEvWindowPrediction — round-to-nearest-hour aggregates jittered se
   }
   series.sort((a, b) => a.ts - b.ts);
 
-  const rec: Recorder = {
-    insertSnapshot: () => {},
+  const rec: Recorder = makeRecorderStub({
     query: (_sn, metric) => (metric === 'pair7_w' ? series : []),
-    queryMulti: () => new Map(),
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  };
+  });
   const r = computeEvWindowPrediction(devices, rec);
 
   // Some sessions were extracted (extractEvSessions found ≥ the 4 Group-A ones).

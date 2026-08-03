@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { computeRoundTripEfficiency, resetRteCache } from '../src/analytics.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 // v0.65.0 — extended-lookback backstop for round-trip efficiency. On a sustained
@@ -39,19 +40,14 @@ function oneDpuOnePack(sn = 'SN-RTE-EXT'): Record<string, DeviceSnapshot> {
 }
 
 function recorderFor(series: Record<string, Array<{ ts: number; value: number }>>): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: (_sn: string, metric: string) => series[metric] ?? [],
-    queryMulti: (_sn: string, metrics: string[]) => {
+  return makeRecorderStub({
+    query: (_sn, metric) => series[metric] ?? [],
+    queryMulti: (_sn, metrics) => {
       const m = new Map<string, Array<{ ts: number; value: number }>>();
       for (const k of metrics) m.set(k, series[k] ?? []);
       return m;
     },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  });
 }
 
 function flat(startMs: number, spanMs: number, watts: number, stepMin = 5): Array<{ ts: number; value: number }> {

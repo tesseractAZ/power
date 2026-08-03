@@ -48,6 +48,7 @@ function modelWithCoeff(coeff: number): SolarResponseModel {
       observedMaxPvW: 10_000,
     })),
     peakCoeff: coeff,
+    peakGateMinGhiWm2: 300,
     pairCount: 240,
     historyDays: 30,
   };
@@ -106,7 +107,7 @@ test('computePvBiasCorrection — an UNFIT model (coeff null) never produces a p
   // cannot predict must never bias the alarm PV.
   const unfit: SolarResponseModel = {
     hourly: Array.from({ length: 24 }, (_, h) => ({ hour: h, coeff: null, r2: 0, samples: 0, observedMaxPvW: 0 })),
-    peakCoeff: 0, pairCount: 0, historyDays: 30,
+    peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30,
   };
   const { ghiByEpoch, pvBySn } = fixtures({ days: 5, ghiWm2: 500, actualWPerHour: 620 });
   const f = computePvBiasCorrection(unfit, ghiByEpoch, pvBySn, TODAY_START);

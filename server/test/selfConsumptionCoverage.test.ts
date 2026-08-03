@@ -7,6 +7,7 @@ import {
   resetDailyEnergyCache,
 } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 // v0.69.0 — guards the home-core coverage flag. The load-bearing case is the last
@@ -90,19 +91,9 @@ test('a device missing from the map counts as reporting (online undefined !== fa
  * ─────────────────────────────────────────────────────────────────────────── */
 
 function emptyRecorder(): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn: string, metrics: string[]) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  // Every member is the shared stub's no-op default; queryMulti already yields an
+  // empty array per requested metric.
+  return makeRecorderStub();
 }
 
 function dpuSnap(sn: string, online = true): DeviceSnapshot {

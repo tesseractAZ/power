@@ -32,6 +32,12 @@ function mkPlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     minProjSocPct: 25,
     minProjSocTsMs: NOW + 6 * 3_600_000,
     baselineMinSocPct: 12,
+    // v1.39.0 pre-window honesty fields. This plan's window opens an hour out, so
+    // a pre-window span exists and production would populate both. 30% carrying
+    // into the window with no dip below it is coherent with minProjSocPct 25
+    // (the trough lands after the window). nightChargePlanIfFresh reads neither.
+    projSocAtWindowStartPct: 30,
+    preWindowMinSocPct: 30,
     confidenceTier: 'forecast',
     window: { startMs: NOW + 3_600_000, endMs: NOW + 7 * 3_600_000 },
     reserveFloorPct: 10,

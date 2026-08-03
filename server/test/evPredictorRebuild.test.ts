@@ -24,6 +24,7 @@ import {
   resetEvWindowCache,
 } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 const MIN = 60_000;
@@ -47,9 +48,7 @@ function shp2With(circuits: number[]): Record<string, DeviceSnapshot> {
 }
 
 function recorderFor(series: Record<string, Array<{ ts: number; value: number }>>): Recorder {
-  return {
-    query: (_sn: string, metric: string) => series[metric] ?? [],
-  } as unknown as Recorder;
+  return makeRecorderStub({ query: (_sn, metric) => series[metric] ?? [] });
 }
 
 /** An AC-style duty cycle: `watts` for ~50 min starting at each given hour-of-day, daily. */
@@ -294,12 +293,12 @@ test('F6 — an EV-free (AC-only) site caches its empty result briefly instead o
   const dayStart = Date.now() - 20 * 24 * H;
   const acData = acSeries(dayStart, 18, 14, 3500);
   let wideQueries = 0;
-  const countingRecorder = {
-    query: (_sn: string, _metric: string, since: number, until: number) => {
+  const countingRecorder = makeRecorderStub({
+    query: (_sn, _metric, since, until) => {
       if (until - since > 24 * H) wideQueries++; // the 30-day mining fetch
       return acData;
     },
-  } as unknown as Recorder;
+  });
   computeEvWindowPrediction(shp2With([6]), countingRecorder);
   const after1 = wideQueries;
   computeEvWindowPrediction(shp2With([6]), countingRecorder);

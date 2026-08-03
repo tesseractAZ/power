@@ -117,6 +117,12 @@ function fakePlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     minProjSocPct: 26.4,
     minProjSocTsMs: Date.now() + 8 * 3_600_000,
     baselineMinSocPct: 7.2,
+    // v1.39.0 pre-window honesty fields. This fixture's window is {1, 2} — long
+    // past — i.e. the mid-window case, where computeNightChargePlan leaves both
+    // null by design (there is no pre-window span to describe). Neither
+    // buildNightChargeMessage nor nightChargeStateFields reads them.
+    projSocAtWindowStartPct: null,
+    preWindowMinSocPct: null,
     confidenceTier: 'forecast',
     window: { startMs: 1, endMs: 2 },
     reserveFloorPct: 10,

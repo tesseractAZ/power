@@ -16,7 +16,18 @@ const baseForecast: DayForecast = {
   typicalPvWhPerDay: 50_000,
   minProjectedSoc: null,
   minProjectedSocTs: null,
-  solarModel: { hourly: [], peakCoeff: 0, pairCount: 0, historyDays: 30 },
+  // v0.75.0/v0.78.0 additions. No SHP2 in this fixture, so the honest coverage
+  // basis is 0 connected / 0 reporting and never "partial"; the *Display fields
+  // and restoredSolarModel mirror the reporting-basis values, which is what
+  // production emits when every connected Core reports (and what the `??`
+  // fallbacks resolved to while these fields were absent).
+  homeDpusConnected: 0,
+  homeDpusReporting: 0,
+  homeDpusCoveragePartial: false,
+  forecastPvWhNext24Display: 50_000,
+  typicalPvWhPerDayDisplay: 50_000,
+  solarModel: { hourly: [], peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30 },
+  restoredSolarModel: { hourly: [], peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30 },
   deviceModels: [],
   soiling: null,
 };
@@ -58,6 +69,12 @@ test('buildCalendarIcs — escapes commas and semicolons per RFC5545', () => {
         certainty: 'Likely',
         urgency: 'Expected',
         onset: new Date(Date.now() + 3600 * 1000).toISOString(),
+        // NwsAlert declares all four CAP clocks; `effective`/`ends` are legitimately
+        // nullable (NWS omits them on plenty of products) and null is exactly what
+        // this fixture's absent fields already resolved to at runtime, so
+        // calendar.ts still pairs onset→expires as before.
+        effective: null,
+        ends: null,
         expires: new Date(Date.now() + 6 * 3600 * 1000).toISOString(),
         headline: 'A severe thunderstorm warning, gusts to 65 mph',
         description: null,
@@ -80,12 +97,23 @@ test('buildCalendarIcs — predicted EV charging session becomes a calendar even
       generatedAt: Date.now(),
       sessionsObserved: 8,
       patterns: [],
+      // v1.15.0 session-distribution stats. Coherent with 8 observed sessions over
+      // the 30-day window: ~14 kWh median at ~7 kW, a slightly fatter p90, ~1.9
+      // sessions/week. buildCalendarIcs reads only upcomingNext24h.
+      typicalSessionKwh: 14,
+      p90SessionKwh: 18,
+      typicalSessionWatts: 7000,
+      sessionsPerWeek: 1.9,
       upcomingNext24h: [
         {
           ts: Date.now() + 3 * 3600 * 1000,
           durationHours: 2,
           watts: 7000,
           dayOfWeek: new Date().getDay(),
+          // v1.x — mined predictions carry a confidence; 8 observed sessions on a
+          // stable weekday pattern is a high-confidence one. calendar.ts does not
+          // read it, so this only makes the fixture honest.
+          probability: 0.9,
         },
       ],
     },

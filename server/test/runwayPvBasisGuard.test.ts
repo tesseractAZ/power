@@ -18,6 +18,7 @@ import {
   type WeatherForecast,
 } from '../src/weather.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -112,28 +113,19 @@ function guardRecorder(pvBySn: Record<string, number>, panelLoadW: number): Reco
     for (let t = spanStart; t <= now; t += HOUR_MS) out.push({ ts: t, value: valuePerHour });
     return out;
   };
-  return {
-    insertSnapshot: () => {},
-    query: (sn: string, metric: string) => {
+  return makeRecorderStub({
+    query: (sn, metric) => {
       if (metric === 'panel_load') return seriesFor(panelLoadW);
       if (metric === 'pv_total') return seriesFor(pvBySn[sn] ?? 0);
       // No 'weather'/'ghi_wm2' history → model stays unfit → fallback PV path.
       return [];
     },
-    queryMulti: (sn: string, metrics: string[]) => {
+    queryMulti: (sn, metrics) => {
       const m = new Map<string, Array<{ ts: number; value: number }>>();
       for (const k of metrics) m.set(k, k === 'pv_total' ? seriesFor(pvBySn[sn] ?? 0) : []);
       return m;
     },
-    listMetrics: () => [],
-    telemetryGaps: () => [],
-    recordWeatherGhi: () => {},
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-    listLifetimeKeys: () => [],
-    batteryLifetimeDebug: () => ({} as any),
-  } as unknown as Recorder;
+  });
 }
 
 /** A next-24h weather cache with cloud cover set (so the FALLBACK PV path fires)
@@ -174,7 +166,7 @@ function forecastWithPv(pvW: number, loadW: number): DayForecast {
   }));
   const flatModel: SolarResponseModel = {
     hourly: Array.from({ length: 24 }, (_, h) => ({ hour: h, coeff: null, r2: 0, samples: 0, observedMaxPvW: 0 })),
-    peakCoeff: 0, pairCount: 0, historyDays: 30,
+    peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30,
   };
   return {
     generatedAt: now,
@@ -461,9 +453,8 @@ test('computeClipping — a cloud-wedged connected Core is RESTORED into observe
   const A_W = 4000;
   const B_W = 5000;
   // Recorder: A and B each return a constant pv_total across today's elapsed hours.
-  const rec = {
-    insertSnapshot: () => {},
-    query: (sn: string, metric: string) => {
+  const rec = makeRecorderStub({
+    query: (sn, metric) => {
       if (metric !== 'pv_total') return [];
       const pts: Array<{ ts: number; value: number }> = [];
       for (let h = 0; h < 24; h++) {
@@ -473,22 +464,14 @@ test('computeClipping — a cloud-wedged connected Core is RESTORED into observe
       }
       return pts;
     },
-    queryMulti: (_sn: string, metrics: string[]) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
     listMetrics: () => ['pv_total'],
-    telemetryGaps: () => [], recordWeatherGhi: () => {},
-    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-    listLifetimeKeys: () => [], batteryLifetimeDebug: () => ({} as any),
-  } as unknown as Recorder;
+  });
 
   // Forecast with a restored solar model whose observedMaxPvW ceiling covers A+B.
   const ceilingW = A_W + B_W;
   const mkModel = (obs: number): SolarResponseModel => ({
     hourly: Array.from({ length: 24 }, (_, h) => ({ hour: h, coeff: 30, r2: 0.95, samples: 100, observedMaxPvW: obs })),
-    peakCoeff: 30, pairCount: 240, historyDays: 30,
+    peakCoeff: 30, peakGateMinGhiWm2: 300, pairCount: 240, historyDays: 30,
   });
   const forecast = {
     generatedAt: now, hasWeather: true, historyDays: 30, reserveSoc: 15, hours: [],
