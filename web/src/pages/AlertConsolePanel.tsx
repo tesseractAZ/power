@@ -8,7 +8,6 @@
  * High do?" had to read three cards and hold the answer in their head. Now:
  *
  *   GLOBAL, above    — broadcast master (on/off, override disclosure)
- *                    — announcement preview target (browser vs speakers)
  *   ONE CARD PER CATEGORY, in rung order (critical → high → medium → low → clear)
  *   GLOBAL, below    — built-in tone audition grid, uploaded tone library
  *
@@ -137,11 +136,10 @@ interface CategoryCardProps {
   toggling: boolean;
   saveError?: string;
   preview?: PreviewState;
-  target: PreviewTarget;
   onAssign: (value: string) => void;
   onPreviewTone: () => void;
   onToggle: () => void;
-  onPreviewSpoken: () => void;
+  onPreviewSpoken: (target: PreviewTarget) => void;
 }
 
 function CategoryCard(p: CategoryCardProps) {
@@ -215,11 +213,18 @@ function CategoryCard(p: CategoryCardProps) {
         <>
           <div className="mt-3 pt-3 border-t border-line flex items-center gap-3 flex-wrap">
             <span className="text-[10px] uppercase tracking-widest text-muted shrink-0">Announcement</span>
-            <button type="button" onClick={p.onPreviewSpoken} disabled={pv?.busy}
+            <button type="button" onClick={() => p.onPreviewSpoken('browser')} disabled={pv?.busy}
               className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-50">
-              {pv?.busy ? 'Preview…' : 'Preview ▶'}
+              {pv?.busy ? '…' : '▶ In browser'}
             </button>
-            <span className="text-[11px] text-muted">{p.target === 'browser' ? 'plays in this browser' : 'broadcasts to speakers'}</span>
+            {/* Deliberately styled apart from the browser button: this one is
+              * LOUD and house-wide. One click, no mode, no ambiguity about which
+              * of the two you just pressed. */}
+            <button type="button" onClick={() => p.onPreviewSpoken('speakers')} disabled={pv?.busy}
+              className="badge badge-warn hover:bg-warn/20 transition-colors disabled:opacity-50"
+              title="Broadcasts aloud on the house speakers">
+              {pv?.busy ? '…' : '▶ On speakers'}
+            </button>
             {pv?.status && <span className="text-xs text-accent">{pv.status}</span>}
             {pv?.error && <span className="text-xs text-bad">{pv.error}</span>}
           </div>
@@ -251,7 +256,6 @@ export function AlertConsolePanel() {
   // next to the control that raised them, instead of in the page header.
   const [saveError, setSaveError] = useState<Partial<Record<AlarmPriority, string>>>({});
   const [levelError, setLevelError] = useState<Partial<Record<Level, string>>>({});
-  const [target, setTarget] = useState<PreviewTarget>('browser');
   const [preview, setPreview] = useState<Partial<Record<AlarmPriority, PreviewState>>>({});
   const [confirmDisableCritical, setConfirmDisableCritical] = useState(false);
 
@@ -354,7 +358,11 @@ export function AlertConsolePanel() {
     putSettings({ priorityEnabled: { critical: false } }, 'critical');
   };
 
-  const runPreview = async (row: PriorityRow) => {
+  // v1.61.0 — the target is an ARGUMENT, not ambient state. The old global
+  // browser/speakers toggle was a mode: set it once, forget, then click Preview
+  // on some other card and get a house-wide broadcast you did not intend. Each
+  // button now names its own destination, so the click and the outcome match.
+  const runPreview = async (row: PriorityRow, target: PreviewTarget) => {
     setPreview((p) => ({ ...p, [row.id]: { busy: true, status: 'Preparing…' } }));
     try {
       const r = await fetch(apiUrl('api/alert-preview'), {
@@ -590,23 +598,6 @@ export function AlertConsolePanel() {
         </div>
       )}
 
-      {/* ─── GLOBAL: where the spoken preview plays ─────────────────── */}
-      {settings && (
-        <div className="card">
-          <div className="card-title">Announcement preview</div>
-          <div className="text-xs text-muted mt-1 leading-relaxed">
-            Where the <span className="text-ink">Preview ▶</span> button on each category below plays that category’s
-            spoken announcement. Tone previews always play in this browser.
-          </div>
-          <div className="flex bg-panel border border-line rounded-lg overflow-hidden mt-2 w-max text-xs">
-            <button type="button" onClick={() => setTarget('browser')}
-              className={`px-3 py-1 transition-colors ${target === 'browser' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}>In browser</button>
-            <button type="button" onClick={() => setTarget('speakers')}
-              className={`px-3 py-1 transition-colors ${target === 'speakers' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}>On speakers</button>
-          </div>
-        </div>
-      )}
-
       {/* ─── ONE CARD PER ALERT CATEGORY ────────────────────────────────
         * Driven by `data.levels` (the server's CHIME_LEVELS) rather than the
         * local LEVELS constant, so a rung the server gains can never go
@@ -636,30 +627,13 @@ export function AlertConsolePanel() {
             toggling={!!priority && savingId === priority}
             saveError={priority ? saveError[priority] : undefined}
             preview={priority ? preview[priority] : undefined}
-            target={target}
             onAssign={(v) => void assign(lvl, v)}
             onPreviewTone={() => void previewAssigned(lvl, data.assignments[lvl])}
             onToggle={() => { if (row) toggle(row); }}
-            onPreviewSpoken={() => { if (row) void runPreview(row); }}
+            onPreviewSpoken={(t) => { if (row) void runPreview(row, t); }}
           />
         );
       })}
-
-      {/* ─── GLOBAL: audition the built-in tones ────────────────────── */}
-      <div className="card">
-        <div className="card-title">Built-in tones</div>
-        <p className="text-[11px] text-muted mt-1">Audition any system tone, then pick it for a category above.</p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {data.builtinTones.map((t) => (
-            <button key={t.id} type="button"
-              className="badge badge-muted hover:bg-muted/20 transition-colors"
-              onClick={() => void playUrl(apiUrl(`audio/${t.id}.wav`))}
-              title={t.id}>
-              ▶ {t.displayName}
-            </button>
-          ))}
-        </div>
-      </div>
 
       {/* ─── GLOBAL: tone library + upload ──────────────────────────── */}
       <div className="card">
