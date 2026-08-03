@@ -72,8 +72,8 @@ interface BroadcastConfigResponse {
   announceVolumePinned: boolean;
   source: string;
   updatedAt: number;
-  override: { enabled: boolean | null; volume: number | null };
-  envBaseline: { enabled: boolean; volume: number };
+  override: { enabled: boolean | null };
+  envBaseline: { enabled: boolean };
 }
 
 const LEVEL_TOKEN: Record<Level, string> = { red: 'bad', yellow: 'warn', green: 'ok' };
@@ -98,7 +98,6 @@ export function AlertConsolePanel() {
   const [target, setTarget] = useState<PreviewTarget>('browser');
   const [preview, setPreview] = useState<Partial<Record<AlarmPriority, PreviewState>>>({});
   const [confirmDisableCritical, setConfirmDisableCritical] = useState(false);
-  const [volDraft, setVolDraft] = useState<number | null>(null); // slider position while dragging (0..100)
 
   const liveRef = useRef(true);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -147,7 +146,7 @@ export function AlertConsolePanel() {
 
   /* ── broadcast master controls ─────────────────────────────────────── */
 
-  async function putBcast(patch: { enabled?: boolean | null; volume?: number | null }) {
+  async function putBcast(patch: { enabled?: boolean | null }) {
     setBusy('bcast'); setError(null); setNotice(null);
     try {
       const r = await fetch(apiUrl('api/broadcast/config'), {
@@ -159,7 +158,7 @@ export function AlertConsolePanel() {
     } catch (e: any) {
       if (liveRef.current) setError(String(e?.message ?? e));
     } finally {
-      if (liveRef.current) { setBusy(null); setVolDraft(null); }
+      if (liveRef.current) setBusy(null);
     }
   }
 
@@ -330,8 +329,7 @@ export function AlertConsolePanel() {
         response: PRIORITY_META[id].response, enabled: true,
       }));
   const criticalOff = rows.some((r) => r.id === 'critical' && !r.enabled);
-  const overrideActive = !!bcastCfg && (bcastCfg.override.enabled != null || bcastCfg.override.volume != null);
-  const effVolPct = bcastCfg ? Math.round(bcastCfg.volume * 100) : 0;
+  const overrideActive = !!bcastCfg && (bcastCfg.override.enabled != null);
 
   return (
     <div className="space-y-4">
@@ -342,7 +340,7 @@ export function AlertConsolePanel() {
           <span className="text-xs text-muted normal-case tracking-normal">broadcast · annunciation · tones</span>
         </div>
         <p className="text-sm text-muted mt-2 leading-relaxed">
-          Central control for alert audio: turn broadcasts on/off and set the volume, silence or sound each ISA
+          Central control for alert audio: turn broadcasts on/off, silence or sound each ISA
           priority, and choose the tone that <span className="text-ink">prepends</span> each alert level’s spoken
           announcement. A missing or deleted tone safely falls back to the built-in klaxon — an alarm is never silenced.
         </p>
@@ -376,37 +374,13 @@ export function AlertConsolePanel() {
               </button>
             </div>
 
-            {/* volume slider */}
-            <div className="bg-panel2/60 border border-line rounded-lg p-3">
-              <div className="flex items-center justify-between">
-                <div className="text-[10px] uppercase tracking-widest text-muted">Broadcast volume</div>
-                <div className="text-sm font-bold tabular-nums">{volDraft ?? effVolPct}%</div>
-              </div>
-              <input
-                type="range" min={0} max={100} step={1}
-                value={volDraft ?? effVolPct}
-                disabled={busy === 'bcast' || bcastCfg.announceVolumePinned}
-                onChange={(e) => setVolDraft(Number(e.target.value))}
-                onMouseUp={(e) => putBcast({ volume: Number((e.target as HTMLInputElement).value) / 100 })}
-                onTouchEnd={(e) => putBcast({ volume: Number((e.target as HTMLInputElement).value) / 100 })}
-                onKeyUp={(e) => { if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') putBcast({ volume: Number((e.target as HTMLInputElement).value) / 100 }); }}
-                className="w-full mt-2 accent-accent disabled:opacity-50"
-                aria-label="Broadcast volume"
-              />
-              {bcastCfg.announceVolumePinned && (
-                <div className="text-[11px] text-warn mt-1 leading-relaxed">
-                  Volume is pinned by <span className="font-mono">BROADCAST_ANNOUNCE_VOLUME</span> in the add-on config —
-                  this slider is informational until you clear it.
-                </div>
-              )}
-            </div>
           </div>
 
           {/* override / baseline disclosure */}
           <div className="flex items-center justify-between flex-wrap gap-2 mt-3">
             <div className="text-[11px] text-muted">
               {overrideActive ? (
-                <>Live override active · add-on default: <span className="text-ink">{bcastCfg.envBaseline.enabled ? 'on' : 'off'}, {Math.round(bcastCfg.envBaseline.volume * 100)}%</span></>
+                <>Live override active · add-on default: <span className="text-ink">{bcastCfg.envBaseline.enabled ? 'on' : 'off'}</span></>
               ) : (
                 <>Using the add-on default (Settings → Add-ons → Power).</>
               )}
@@ -414,7 +388,7 @@ export function AlertConsolePanel() {
             {overrideActive && (
               <button
                 type="button"
-                onClick={() => putBcast({ enabled: null, volume: null })}
+                onClick={() => putBcast({ enabled: null })}
                 disabled={busy === 'bcast'}
                 className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-50"
               >

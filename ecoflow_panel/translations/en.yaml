@@ -75,7 +75,7 @@ configuration:
     description: Base URL your speakers fetch the chime WAV files from; must be reachable from the speakers on your LAN. Default http://homeassistant.local:8787 uses mDNS; if mDNS is flaky, set your HA host IP instead, e.g. http://192.168.1.50:8787. A trailing slash is trimmed and a blank value falls back to the mDNS default.
   BROADCAST_VOLUME:
     name: Broadcast Volume
-    description: Speaker volume for audible alarm announcements, from 0.0 (silent) to 1.0 (full); default 0.5. This is also the level the spoken announcement plays at unless Announce Volume overrides it, and it can be adjusted live from the dashboard.
+    description: Speaker volume for audible alarm announcements, from 0.0 (silent) to 1.0 (full); default 0.5. This is the ONLY place broadcast volume is set — the Alert Console no longer carries a slider, so this value and what the speakers play can never disagree. Takes effect on restart. Announce Volume Override below can still pin a different announce level for speakers that need it.
   BROADCAST_ANNOUNCE_VOLUME:
     name: Announce Volume Override
     description: Speaker volume for the announcement. Leave empty (default) to play at Broadcast Volume x 100; enter 0-100 to force that exact level (e.g. 80); or enter off, none, or standing to omit the volume command and keep each speaker's current level. Any non-empty value pins the level, making the master Broadcast Volume slider informational only.

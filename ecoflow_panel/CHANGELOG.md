@@ -1,3 +1,34 @@
+## v1.57.0 — broadcast volume has exactly one source
+
+**The Alert Console's volume slider is removed, along with its `/data` override.**
+`BROADCAST_VOLUME` in the add-on options is now the only place the level is set.
+
+The two disagreed, silently and permanently. `broadcast.ts` resolved
+`ov.volume != null ? ov.volume : envVolume`, so the first touch of the slider
+persisted an override that outranked the option for good: the Home Assistant
+Configuration page read 0.7 while the speakers played at 0.95, with nothing on
+either surface saying which was in force. Two controls for one number is not a
+feature when neither discloses the other.
+
+`broadcastRuntimeConfig` keeps its live enable/disable override — that one is a
+kill switch worth having without a restart, and unlike volume it is disclosed in
+the console. Only `volume` is gone from the store, its persisted field, the PUT
+body, and the GET response.
+
+**Nothing else about loudness changed.** `BROADCAST_ANNOUNCE_VOLUME` remains what
+it always was — an escape hatch, not a second slider: empty (the shipped default)
+derives the announce level from `BROADCAST_VOLUME`, a number pins it, and
+`off`/`none`/`standing` omits the parameter entirely for speakers that ignore it.
+The pre-announce `volume_set` is still derived from that same resolved value, not
+a competing source.
+
+**Test.** The old pin — "volume override flows into announceVolume, not just
+cfg.volume" — protected a real property: `cfg.volume` is never sent to a speaker,
+`announceVolume` is, and a break in that link makes the configured volume
+silently inert (the v0.15.7 defect). The override is gone but the property is
+not, so it is re-pinned against the option instead, plus a regression test that
+no runtime override can shadow `BROADCAST_VOLUME` again. 1,757 tests pass.
+
 ## v1.56.0 — the chime-pack option is removed; doorbell is the shipped default
 
 **`BROADCAST_CHIME_PACK` is gone** — option, schema entry, translation block,
