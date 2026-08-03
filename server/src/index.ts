@@ -3858,9 +3858,11 @@ app.post<{ Body: { priority?: AlarmPriority; target?: 'browser' | 'speakers' } }
 // and renders an undefined label; this form is TS2739 the moment the level union
 // gains a member without a label here.
 const LEVEL_LABELS: Record<AnnouncementLevel, string> = {
-  red: 'Critical',
-  yellow: 'Caution',
-  green: 'All-clear / Recovery',
+  critical: 'Critical (P1)',
+  high: 'High (P2)',
+  medium: 'Medium (P3)',
+  low: 'Low (P4)',
+  clear: 'All-clear / Recovery',
 };
 
 function chimeConsoleResponse() {

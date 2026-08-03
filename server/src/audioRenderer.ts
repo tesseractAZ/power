@@ -61,6 +61,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile, writeFile, mkdir, access, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import type { AlarmRung } from './alertPriority.js';
+export type { AlarmRung };
 import { resolve, basename } from 'node:path';
 import { renderWyomingTts, pcmToWav } from './wyomingTts.js';
 import { verbalizeForTts, verbalizeForTtsEs } from './ttsService.js';
@@ -343,7 +345,9 @@ const MAX_CHIME_REPEAT = 8;
 export const END_OF_MESSAGE_PHRASE = 'End of message';
 export const END_OF_MESSAGE_GAP_MS = 700;
 
-export type AnnouncementLevel = 'red' | 'yellow' | 'green';
+// v1.59.0 — the audio level IS the severity rung now. Re-exported under the old
+// name so call sites read naturally; the underlying union widened 3 → 5.
+export type AnnouncementLevel = AlarmRung;
 
 export interface RenderOptions {
   level: AnnouncementLevel;
@@ -468,10 +472,17 @@ interface WavHeader {
   dataLength: number;
 }
 
-export const KLAXON_FOR_LEVEL: Record<AnnouncementLevel, string> = {
-  red: 'red-alert.wav',
-  yellow: 'yellow-alert.wav',
-  green: 'all-clear.wav',
+// v1.59.0 — one klaxon per rung. All five files already ship: the three legacy
+// level klaxons plus two of the promoted pack tones, so there is NO new
+// synthesis and no AUDIO_ASSETS_VERSION bump. This is the anti-silent-alarm
+// floor — `resolveChime` falls back here when an assigned tone's file is
+// missing, so every rung MUST name a file that exists.
+export const KLAXON_FOR_LEVEL: Record<AlarmRung, string> = {
+  critical: 'red-alert.wav',
+  high: 'powerplant-red-alert.wav',
+  medium: 'yellow-alert.wav',
+  low: 'powerplant-yellow-alert.wav',
+  clear: 'all-clear.wav',
 };
 
 /** v0.15.23 — cache-key tag for the built-in klaxon. A single fixed literal so

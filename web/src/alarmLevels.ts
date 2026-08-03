@@ -20,15 +20,21 @@
  * key-set equality against the server's `CHIME_LEVELS`. Keep them here.
  */
 
-export type Level = 'red' | 'yellow' | 'green';
+// v1.59.0 — ONE severity ladder. Was the three audio levels ('red'|'yellow'|
+// 'green'); now the four ISA priorities plus the all-clear, matching the server's
+// AlarmRung exactly. Pinned by server/test/alarmLevelWebMirror.test.ts.
+export type Level = 'critical' | 'high' | 'medium' | 'low' | 'clear';
 
 /** Display order — must match the server's `CHIME_LEVELS`. */
 // `as const satisfies` — NOT `: readonly Level[]`. An array annotation accepts a
 // SHORT array, so dropping a level would still typecheck and simply never render.
-export const LEVELS = ['red', 'yellow', 'green'] as const satisfies readonly Level[];
+export const LEVELS = ['critical', 'high', 'medium', 'low', 'clear'] as const satisfies readonly Level[];
 
 /** Theme colour token per level (presentation only). */
-export const LEVEL_TOKEN: Record<Level, string> = { red: 'bad', yellow: 'warn', green: 'ok' };
+// Colour tokens mirror ALARM_PRIORITY_META's colorToken, plus 'ok' for the all-clear.
+export const LEVEL_TOKEN: Record<Level, string> = {
+  critical: 'bad', high: 'high', medium: 'warn', low: 'info', clear: 'ok',
+};
 
 /**
  * Basename of the level's built-in klaxon, for the console's preview button.
@@ -36,7 +42,9 @@ export const LEVEL_TOKEN: Record<Level, string> = { red: 'bad', yellow: 'warn', 
  * makes preview play a different sound than the alarm actually will.
  */
 export const KLAXON_FILE: Record<Level, string> = {
-  red: 'red-alert',
-  yellow: 'yellow-alert',
-  green: 'all-clear',
+  critical: 'red-alert',
+  high: 'powerplant-red-alert',
+  medium: 'yellow-alert',
+  low: 'powerplant-yellow-alert',
+  clear: 'all-clear',
 };
