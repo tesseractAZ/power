@@ -1,3 +1,47 @@
+## v1.63.0 — the surplus posture had no debounce, and it drives the thermostats
+
+`sensor.ecoflow_lighting_posture` is an **actuation trigger**. The Home Assistant
+automation `EcoFlow HVAC — surplus pre-cool` fires on `→ surplus` and lowers every
+cool-mode setpoint; its sibling restores them on `→ normal`.
+
+That transition had **no debounce at all**. `surplus` and `normal` share rank 0 —
+correctly, since surplus is not a warning tier — but that routed every swap into
+the same-rank branch, which adopted it immediately. The 15-minute
+`DEESCALATE_HOLD_MS` only ever guarded CROSS-rank moves. The code said so in a
+comment: *"normal↔surplus swaps freely."*
+
+The upstream signal has no hysteresis either: `computeCurtailment` calls it
+curtailed when the gap clears `CURTAIL_MIN_SURPLUS_W` (300 W), recomputed every
+5 minutes. Surplus hovering near 300 W therefore flips `active` on each recompute
+— and each flip wrote both thermostats and then wrote them straight back.
+
+The one real firing on record, 2026-07-23, lasted **three seconds** end to end.
+
+`SURPLUS_DWELL_MS` (10 min) now gates the swap in **both** directions. Symmetric on
+purpose: debouncing only the entry would still let a momentary dip end a genuine
+surplus event, restoring setpoints and then re-cooling — the same thrash with the
+opposite sign. Staying pre-cooled a few minutes too long is cheap; oscillating a
+pair of ecobees is not.
+
+**It never delays a real escalation.** `surplus → conserve/amber/red/critical` is a
+rank increase, handled by the escalate branch, still applied on the very next tick
+— including straight out of a pending dwell. That is the safety property, and it
+has its own test.
+
+The dwell clock persists, so a restart mid-dwell resumes the countdown instead of
+restarting it — matching how the existing de-escalation hold already behaved.
+
+One pre-existing test asserted the old free-swap behaviour. It was **inverted, not
+deleted**: the same three ticks now prove the swap is refused inside the dwell.
+
+Mutation-verified — five planted defects, five killed: dwell disabled (3 fail),
+one-sided dwell (1), flap not resetting the clock (1), escalation forced to wait
+(1), dwell not persisted (1).
+
+Tests 1,787 → 1,795.
+
+---
+
 ## v1.62.0 — night-charge models EV contention, and stops conflating the ask with the forecast
 
 ### The charge-rate model was EV-blind
