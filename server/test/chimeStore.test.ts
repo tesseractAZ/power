@@ -174,7 +174,7 @@ test('deleteChime — hostile ids (__proto__/constructor) are rejected before an
     'AAAAAAAAAAAAAAAA',        // 16 chars but uppercase — fails the hex gate
     'deadbeefdeadbee',         // 15 chars — wrong length
     'deadbeefdeadbeef.wav',    // extension smuggling
-    '../../etc/passwd aa',
+    '../../etc/passwd\u0000aa',
   ]) {
     assert.equal(deleteChime(id), false, `hostile id must be rejected: ${JSON.stringify(id)}`);
   }

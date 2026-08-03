@@ -47,6 +47,7 @@ interface ConsoleResponse {
   assignments: Record<Level, Assignment>;
   chimes: ChimeMeta[];
   builtinTones: BuiltinTone[];
+  chimePack?: string;
   updatedAt: number;
   maxUploadBytes: number;
   rejected?: string[];
@@ -541,7 +542,7 @@ export function AlertConsolePanel() {
                   disabled={busy === lvl}
                   onChange={(e) => assign(lvl, e.target.value)}
                 >
-                  <option value="builtin">Default (level klaxon)</option>
+                  <option value="builtin">{`Default — ${data.chimePack ?? "pack"} level klaxon`}</option>
                   <optgroup label="Built-in tones">
                     {data.builtinTones.map((t) => (
                       <option key={t.id} value={`named:${t.id}`}>{t.displayName}</option>

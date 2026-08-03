@@ -32,8 +32,11 @@ await generateAudioAssets(audioDir, () => {});
 
 const SLUG = /^[a-z][a-z0-9-]{1,30}$/;
 
-test('catalog — 14-16 named tones, valid unique slugs, each synthesizes to 22050/16/mono', () => {
-  assert.ok(BUILTIN_TONES.length >= 14 && BUILTIN_TONES.length <= 16, `count ${BUILTIN_TONES.length}`);
+test('catalog — 20-24 named tones, valid unique slugs, each synthesizes to 22050/16/mono', () => {
+  // v1.55.0 — bound widened from 14-16 when the six pack klaxons were promoted
+  // to first-class tones (16 → 22). The bound exists to catch an accidental
+  // catalog explosion, not to pin an exact count.
+  assert.ok(BUILTIN_TONES.length >= 20 && BUILTIN_TONES.length <= 24, `count ${BUILTIN_TONES.length}`);
   const seen = new Set<string>();
   for (const t of BUILTIN_TONES) {
     assert.match(t.id, SLUG, t.id);
@@ -102,6 +105,40 @@ test('regenerateAudioAssets — rewrites the named tones we deleted', async () =
   await regenerateAudioAssets(audioDir, () => {});
   for (const t of BUILTIN_TONES) {
     assert.ok(existsSync(resolve(audioDir, `${t.id}.wav`)), `regenerate missed ${t.id}`);
+  }
+});
+
+/* v1.55.0 — the six promoted pack klaxons.
+ *
+ * These were previously reachable ONLY as the `builtin` level default, and then
+ * only for whichever pack BROADCAST_CHIME_PACK named. Promoting them made every
+ * one individually assignable. They are the only tones in the catalog designed
+ * as a SET — cadence encodes severity, all-clear resolves upward — so losing one
+ * silently would degrade an operator's ability to tell a critical from an
+ * all-clear BY EAR, which is exactly what the chime-only fallback relies on.
+ *
+ * There is no mutation harness in this repo, so this pin is the only thing
+ * standing between a careless catalog edit and that regression. */
+const PROMOTED = [
+  'airport-red-alert', 'airport-yellow-alert', 'airport-all-clear',
+  'powerplant-red-alert', 'powerplant-yellow-alert', 'powerplant-all-clear',
+] as const;
+
+test('promoted pack klaxons — all six present, synthesized, and byte-identical to their pack asset', () => {
+  for (const id of PROMOTED) {
+    assert.ok(BUILTIN_TONES.some((t) => t.id === id), `catalog is missing promoted tone ${id}`);
+    const p = builtinTonePath(id, audioDir);
+    assert.ok(p && existsSync(p), `no wav synthesized for promoted tone ${id}`);
+  }
+  // A promoted tone must be the SAME audio as the pack klaxon it came from —
+  // that is the whole premise of the promotion. The airport pack is the one
+  // generateAudioAssets() rendered into the level-klaxon filenames here only if
+  // BROADCAST_CHIME_PACK said so, so compare against whichever pack is active.
+  const pack = process.env.BROADCAST_CHIME_PACK === 'airport' ? 'airport' : 'powerplant';
+  for (const [level, asset] of [['red-alert', 'red-alert'], ['yellow-alert', 'yellow-alert'], ['all-clear', 'all-clear']] as const) {
+    const klaxon = readFileSync(resolve(audioDir, `${asset}.wav`));
+    const promoted = readFileSync(resolve(audioDir, `${pack}-${level}.wav`));
+    assert.ok(promoted.equals(klaxon), `${pack}-${level} differs from the ${pack} pack's ${asset}.wav`);
   }
 });
 
