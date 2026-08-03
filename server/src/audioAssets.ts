@@ -360,6 +360,15 @@ const C5 = 523.25, D5 = 587.33, E5 = 659.25, F5 = 698.46, G5 = 783.99;
 const C6 = 1046.5, E6 = 1318.5;
 
 const NAMED_TONE_BUILDERS: Record<string, () => { segs: Segment[]; totalSec: number }> = {
+  // v1.55.0 — pack klaxons as selectable tones. These reference the SAME
+  // builders CHIME_PACKS uses, so `airport-red-alert` is byte-identical to the
+  // red-alert.wav an airport-pack install renders for its level default.
+  'airport-red-alert': redAlertSegments,
+  'airport-yellow-alert': yellowAlertSegments,
+  'airport-all-clear': allClearSegments,
+  'powerplant-red-alert': ppRedAlertSegments,
+  'powerplant-yellow-alert': ppYellowAlertSegments,
+  'powerplant-all-clear': ppAllClearSegments,
   // Single struck-bell ping — bright, brief acknowledgement.
   'ping-single': () => ({
     segs: [{ startSec: 0, spec: { kind: 'bell', freq: C6, durSec: 0.42, gain: 0.55, decaySec: 0.35, harmonics: [1, 0.4] } }],
@@ -488,6 +497,18 @@ export interface BuiltinTone { id: string; displayName: string }
  * (see the immutability contract above).
  */
 export const BUILTIN_TONES: readonly BuiltinTone[] = [
+  // v1.55.0 — the six pack klaxons, promoted to first-class selectable tones.
+  // Previously reachable only as the `builtin` level default, and then only for
+  // whichever pack BROADCAST_CHIME_PACK named — so an operator could hear at
+  // most one pack's three sounds and could not mix them. They are the only
+  // tones in this catalog designed AS A SET: cadence encodes severity
+  // (ISA-18.2), and all-clear resolves upward. Listed first for that reason.
+  { id: 'airport-red-alert', displayName: 'Airport — Red Alert (critical)' },
+  { id: 'airport-yellow-alert', displayName: 'Airport — Yellow Alert (caution)' },
+  { id: 'airport-all-clear', displayName: 'Airport — All Clear' },
+  { id: 'powerplant-red-alert', displayName: 'Powerplant — Red Alert (critical)' },
+  { id: 'powerplant-yellow-alert', displayName: 'Powerplant — Yellow Alert (caution)' },
+  { id: 'powerplant-all-clear', displayName: 'Powerplant — All Clear' },
   { id: 'ping-single', displayName: 'Single Ping' },
   { id: 'ping-double', displayName: 'Double Ping' },
   { id: 'triad-bell', displayName: 'Triad Bell' },
@@ -591,7 +612,7 @@ const CHIME_PACKS: Record<ChimePack, Record<AudioAssetId, () => { segs: Segment[
  * sample-0 click on zero-attack tones that read as a clipped tone start; the
  * bump regenerates /data/audio so the softened tones replace the clicky ones.
  */
-export const AUDIO_ASSETS_VERSION = 5;
+export const AUDIO_ASSETS_VERSION = 6;
 
 /** v0.23.0 — write a WAV atomically (tmp → rename) so a deploy/boot interrupted
  *  mid-write can never leave a torn/short <id>.wav that the renderer would embed
