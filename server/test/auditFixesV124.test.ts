@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeForecastAlerts, resetForecastAlertsCache } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import type { DayForecast } from '../src/analytics.js';
 
@@ -28,11 +29,7 @@ function shp2(): Record<string, DeviceSnapshot> {
  *  (50-10)/3.33 ≈ 12h; >=8 pts so linregress is not thin-trend-nulled. */
 function decliningRecorder(): Recorder {
   const pts = Array.from({ length: 13 }, (_, i) => ({ ts: now - (12 - i) * 900_000, value: 60 - i * (10 / 12) }));
-  return {
-    insertSnapshot: () => {}, query: (_sn, metric) => (metric === 'backup_pct' ? pts : []),
-    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
-    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  return makeRecorderStub({ query: (_sn, metric) => (metric === 'backup_pct' ? pts : []) });
 }
 /** A DayForecast whose projectedSocPct first dips to/below the 10% reserve at
  *  `crossHour` hours out, bottoming at `minSoc`. */

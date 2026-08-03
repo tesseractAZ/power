@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
+import type { AnalyticsClient } from '../src/analyticsClient.js';
 
 /**
  * v0.9.58 / v0.9.59 ML-feedback tests.
@@ -65,14 +66,21 @@ const {
   computeInternalResistance: _cir,
   computeChargeCurveFingerprint: _ccf,
 } = await import('../src/analytics.js');
-const makeAnalyticsStub = (snap: any, recorder: any) => ({
-  report: async (name: string) => {
+// `AnalyticsClient.report` is CALLER-generic (`report<T = any>(name): Promise<T>`),
+// so a double has to declare the same type parameter; a plain
+// `(name: string) => Promise<FleetDegradation | …>` cannot satisfy it, because T
+// is chosen at the call site. The single `as T` per branch is the same widening
+// the real worker-backed client performs when it hands back a structured-cloned
+// message — the report NAME is what determines the shape, and that contract is
+// enforced at the call site, not here.
+const makeAnalyticsStub = (snap: any, recorder: any): Pick<AnalyticsClient, 'report'> => ({
+  report: async <T = any>(name: string): Promise<T> => {
     switch (name) {
-      case 'degradation': return await _cd(snap.devices, recorder);
-      case 'thermalEvents': return _cte(snap.devices, recorder);
-      case 'internalResistance': return _cir(snap.devices, recorder);
-      case 'chargeCurve': return _ccf(snap.devices, recorder);
-      default: return null;
+      case 'degradation': return (await _cd(snap.devices, recorder)) as T;
+      case 'thermalEvents': return _cte(snap.devices, recorder) as T;
+      case 'internalResistance': return _cir(snap.devices, recorder) as T;
+      case 'chargeCurve': return _ccf(snap.devices, recorder) as T;
+      default: return null as T;
     }
   },
 });
@@ -311,8 +319,15 @@ test('computePackRiskV2 — degraded gate pins trained score to heuristic per pa
     coreNum: 1,
     packNum: 1,
     score0to100: 60,
-    tier: 'attention' as const,
+    // 'attention' is NOT a PackRiskScore tier — the ladder is
+    // low/moderate/elevated/critical/no-data. 60 lands in 'elevated'
+    // (50 ≤ score < 75). computePackRiskV2 passes tier through verbatim, so this
+    // fixture had been feeding an impossible tier into the report shape.
+    tier: 'elevated' as const,
     topFactors: [],
+    allFactors: [],
+    generatedAt: 0,
+    modelVersion: 'heuristic-v1',
   }];
   // Devices map: one DPU with one pack matching the heuristic entry.
   const devices = {
@@ -402,8 +417,12 @@ test('computePackRiskV2 — v0.9.62: drift gate fires end-to-end via on-disk bas
     coreNum: 1,
     packNum: 1,
     score0to100: 42,
-    tier: 'attention' as const,
+    // See above: 'attention' is not a tier. 42 lands in 'moderate' (25 ≤ score < 50).
+    tier: 'moderate' as const,
     topFactors: [],
+    allFactors: [],
+    generatedAt: 0,
+    modelVersion: 'heuristic-v1',
   }];
   const devices = {
     TESTSN2: {

@@ -8,6 +8,7 @@ import {
 } from '../src/analytics.js';
 import type { DayForecast } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /**
@@ -69,11 +70,7 @@ function shp2(remainingKwh: number, reservePct: number, fullKwh: number): Record
 
 function loadRecorder(loadW: number): Recorder {
   const pts = [{ ts: -HOUR / 2, value: loadW }, { ts: -1, value: loadW }];
-  return {
-    insertSnapshot: () => {}, query: (_sn, metric) => (metric === 'panel_load' ? pts : []),
-    queryMulti: () => new Map(), listMetrics: () => [], listLifetimeKeys: () => [],
-    close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  return makeRecorderStub({ query: (_sn, metric) => (metric === 'panel_load' ? pts : []) });
 }
 
 /** Forecast: massive PV surplus for the first `surplusHours`, then dark. */

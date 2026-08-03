@@ -1,6 +1,12 @@
 /**
  * v0.11.0 — Runtime alert-annunciation settings (per-ISA-priority enable
- * flags + chime repeat), persisted across restarts.
+ * flags), persisted across restarts.
+ *
+ * v1.60.0 — the chime-repeat knob was REMOVED. The chime now plays exactly
+ * once before the spoken announcement. A persisted alert-settings.json written
+ * by an older build still carries that retired key, and that is harmless:
+ * sanitize() copies only RECOGNISED keys onto defaults(), so the stale field is
+ * ignored on read and disappears on the next write. No migration step is needed.
  *
  * The add-on's static config (NOTIFY_*, BROADCAST_* env vars from the HA
  * options UI) sets the BASELINE. This file adds a small, USER-mutable layer
@@ -28,8 +34,6 @@ import { ALARM_PRIORITY_ORDER, type AlarmPriority } from './alertPriority.js';
 export interface AlertSettings {
   /** Per-priority annunciation enable. true = notify + broadcast + chime; false = silenced (still visible). */
   priorityEnabled: Record<AlarmPriority, boolean>;
-  /** How many times the alert chime sounds before the spoken announcement (1–4). Default 2. */
-  chimeRepeat: number;
   /** Last mutation time (ms). */
   updatedAt: number;
   /** Where the last change came from, for the audit log ('web' | 'mqtt' | 'default'). */
@@ -39,23 +43,20 @@ export interface AlertSettings {
 const PATH = process.env.ALERT_SETTINGS_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'alert-settings.json');
 
-const CHIME_REPEAT_MIN = 1;
-const CHIME_REPEAT_MAX = 4;
-export const DEFAULT_CHIME_REPEAT = 2; // v0.11.0 — user requested the chime sound twice on a new alert.
-
 function defaults(): AlertSettings {
   const priorityEnabled = {} as Record<AlarmPriority, boolean>;
   for (const p of ALARM_PRIORITY_ORDER) priorityEnabled[p] = true;
-  return { priorityEnabled, chimeRepeat: DEFAULT_CHIME_REPEAT, updatedAt: 0, source: 'default' };
+  return { priorityEnabled, updatedAt: 0, source: 'default' };
 }
 
-function clampChime(n: unknown): number {
-  const v = Math.round(Number(n));
-  if (!Number.isFinite(v)) return DEFAULT_CHIME_REPEAT;
-  return Math.max(CHIME_REPEAT_MIN, Math.min(CHIME_REPEAT_MAX, v));
-}
-
-/** Coerce an arbitrary parsed object into a valid AlertSettings, filling gaps from defaults. */
+/**
+ * Coerce an arbitrary parsed object into a valid AlertSettings, filling gaps from defaults.
+ *
+ * Note the shape: we start from defaults() and copy across only the keys we
+ * recognise. An unknown key on disk (a knob retired by a later build, say) is
+ * dropped rather than carried, which is why removing a field needs no migration.
+ * Pinned by alertSettings.test.ts.
+ */
 function sanitize(raw: any, source: string): AlertSettings {
   const base = defaults();
   if (raw && typeof raw === 'object') {
@@ -64,7 +65,6 @@ function sanitize(raw: any, source: string): AlertSettings {
         if (typeof raw.priorityEnabled[p] === 'boolean') base.priorityEnabled[p] = raw.priorityEnabled[p];
       }
     }
-    if (raw.chimeRepeat != null) base.chimeRepeat = clampChime(raw.chimeRepeat);
     if (typeof raw.updatedAt === 'number') base.updatedAt = raw.updatedAt;
   }
   base.source = source;
@@ -95,11 +95,6 @@ export function isPriorityEnabled(p: AlarmPriority): boolean {
   return getAlertSettings().priorityEnabled[p] !== false;
 }
 
-/** Current chime-repeat count (1–4). */
-export function getChimeRepeat(): number {
-  return clampChime(getAlertSettings().chimeRepeat);
-}
-
 /** Subscribe to settings changes (e.g. to re-publish HA switch states). Returns an unsubscribe fn. */
 export function onAlertSettingsChange(fn: Listener): () => void {
   listeners.add(fn);
@@ -123,7 +118,7 @@ function persist(s: AlertSettings): void {
  * new, fully-resolved settings.
  */
 export function updateAlertSettings(
-  patch: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>>; chimeRepeat?: number },
+  patch: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>> },
   source = 'web',
 ): AlertSettings {
   const next = sanitize(getAlertSettings(), source); // clone current
@@ -132,7 +127,6 @@ export function updateAlertSettings(
       if (typeof patch.priorityEnabled[p] === 'boolean') next.priorityEnabled[p] = patch.priorityEnabled[p]!;
     }
   }
-  if (patch.chimeRepeat != null) next.chimeRepeat = clampChime(patch.chimeRepeat);
   next.updatedAt = Date.now();
   next.source = source;
   cache = next;

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { integrateWh, startOfLocalDayMs, circuitHistoryByDay, computeTotals } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { SnapshotStore } from '../src/snapshot.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
@@ -139,18 +140,16 @@ test('startOfLocalDayMs(specific date) — operates on supplied date, not now', 
 function mockRecorder(byMetric: Record<string, Array<{ ts: number; value: number }>>): Recorder & { lastMetric: string | null } {
   let lastMetric: string | null = null;
   return {
-    insertSnapshot: () => {},
-    query: (_sn, metric, sinceMs, untilMs) => {
-      lastMetric = metric;
-      const pts = byMetric[metric] ?? [];
-      return pts.filter((p) => p.ts >= sinceMs && p.ts <= untilMs);
-    },
-    listMetrics: () => Object.keys(byMetric),
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({
+      query: (_sn, metric, sinceMs, untilMs) => {
+        lastMetric = metric;
+        const pts = byMetric[metric] ?? [];
+        return pts.filter((p) => p.ts >= sinceMs && p.ts <= untilMs);
+      },
+      listMetrics: () => Object.keys(byMetric),
+    }),
     get lastMetric() { return lastMetric; },
-  } as Recorder & { lastMetric: string | null };
+  };
 }
 
 test('circuitHistoryByDay — defaults to ch${ch}_w metric', () => {
@@ -297,14 +296,13 @@ test('computeTotals — a non-SHP2-connected spare DPU does NOT dilute pvCoverag
   const dense = evenSamples(since, until, FIVE_MIN, 1000);                 // ~1.0 coverage
   const half = evenSamples(since, since + ONE_HOUR / 2, FIVE_MIN, 1000);   // ~0.5 coverage
   // Per-SN recorder: connected 'SN-HOME' has dense pv_total; spare 'SN-SPARE' half.
-  const rec = {
-    insertSnapshot() {}, listMetrics() { return ['pv_total']; }, close() {},
-    rollupLifetime() {}, getLifetimeTotals() { return {}; },
-    query(sn: string, metric: string, s: number, u: number) {
+  const rec = makeRecorderStub({
+    listMetrics: () => ['pv_total'],
+    query: (sn, metric, s, u) => {
       const pts = metric === 'pv_total' ? (sn === 'SN-SPARE' ? half : dense) : [];
       return pts.filter((p) => p.ts >= s && p.ts <= u);
     },
-  } as unknown as Recorder;
+  });
   // SHP2 lists ONLY SN-HOME as a source ⇒ SN-SPARE is a non-connected bench spare.
   const store = {
     get: () => ({

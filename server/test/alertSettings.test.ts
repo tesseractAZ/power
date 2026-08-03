@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -13,19 +13,16 @@ process.env.ALERT_SETTINGS_PATH = SETTINGS_PATH;
 const {
   getAlertSettings,
   isPriorityEnabled,
-  getChimeRepeat,
   updateAlertSettings,
   _resetAlertSettingsCacheForTest,
 } = await import('../src/alertSettings.js');
 
-test('defaults — all four priorities enabled, chimeRepeat === 2', () => {
+test('defaults — all four priorities enabled', () => {
   const s = getAlertSettings();
   assert.equal(s.priorityEnabled.critical, true);
   assert.equal(s.priorityEnabled.high, true);
   assert.equal(s.priorityEnabled.medium, true);
   assert.equal(s.priorityEnabled.low, true);
-  assert.equal(s.chimeRepeat, 2);
-  assert.equal(getChimeRepeat(), 2);
 });
 
 test('updateAlertSettings — disabling a priority persists to disk', () => {
@@ -40,11 +37,24 @@ test('updateAlertSettings — disabling a priority persists to disk', () => {
   assert.ok(existsSync(SETTINGS_PATH), 'settings file should be written');
 });
 
-test('chimeRepeat — clamps out-of-range values to 1..4', () => {
-  assert.equal(updateAlertSettings({ chimeRepeat: 99 }).chimeRepeat, 4);
-  assert.equal(getChimeRepeat(), 4);
-  assert.equal(updateAlertSettings({ chimeRepeat: 0 }).chimeRepeat, 1);
-  assert.equal(getChimeRepeat(), 1);
+// v1.60.0 — an alert-settings.json written by an OLDER build carries keys this
+// build no longer knows about (a retired knob, say). sanitize() starts from
+// defaults() and copies across only RECOGNISED keys, so a stale field is dropped
+// silently: it neither crashes the load nor survives onto the returned object.
+// That property is exactly what makes removing a settings field migration-free,
+// so it is asserted here rather than assumed.
+test('sanitize — an unrecognised key on disk is ignored, not carried through', () => {
+  writeFileSync(
+    SETTINGS_PATH,
+    JSON.stringify({ priorityEnabled: { low: false }, retiredKnob: 3, updatedAt: 42 }),
+  );
+  _resetAlertSettingsCacheForTest();
+  const s = getAlertSettings();
+  assert.equal(isPriorityEnabled('low'), false, 'recognised keys still load');
+  assert.equal(s.updatedAt, 42, 'recognised scalars still load');
+  assert.equal(Object.hasOwn(s, 'retiredKnob'), false, 'an unknown key must not survive sanitize()');
+  // Restore the state the next test expects (critical disabled + persisted).
+  updateAlertSettings({ priorityEnabled: { critical: false, low: true } });
 });
 
 test('_resetAlertSettingsCacheForTest — re-reads persisted value from disk', () => {
@@ -52,8 +62,6 @@ test('_resetAlertSettingsCacheForTest — re-reads persisted value from disk', (
   // next read must re-load from the file — the on-disk value should still hold.
   _resetAlertSettingsCacheForTest();
   assert.equal(isPriorityEnabled('critical'), false);
-  // The persisted chimeRepeat (1, from the previous test) is re-read too.
-  assert.equal(getChimeRepeat(), 1);
 });
 
 test('cleanup tmp file', () => {

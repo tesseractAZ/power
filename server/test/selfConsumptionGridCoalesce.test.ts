@@ -27,6 +27,7 @@ import {
 } from '../src/analytics.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ─── fixtures (mirror analyticsHealthFixes.test.ts) ─────────────────────── */
@@ -74,19 +75,14 @@ function shp2Snap(sn = 'SN-SC-SHP2', dpuSn = 'SN-SC-DPU'): Record<string, Device
 /** Recorder whose query/queryMulti serve a fixed metric→samples map (SN-agnostic;
  *  DPU metrics and SHP2 metrics are disjoint so one map serves both). */
 function recorderFor(series: Record<string, Array<{ ts: number; value: number }>>): Recorder {
-  return {
-    insertSnapshot: () => {},
+  return makeRecorderStub({
     query: (_sn, metric) => series[metric] ?? [],
     queryMulti: (_sn, metrics) => {
       const m = new Map<string, Array<{ ts: number; value: number }>>();
       for (const k of metrics) m.set(k, series[k] ?? []);
       return m;
     },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as Recorder;
+  });
 }
 
 /** Constant-watt samples every 5 min over `nDays` continuous days from `firstDayStart`. */

@@ -39,6 +39,7 @@ function modelWithCoeff(coeff: number): SolarResponseModel {
       hour: h, coeff, r2: 0.95, samples: 100, observedMaxPvW: 10_000,
     })),
     peakCoeff: coeff,
+    peakGateMinGhiWm2: 300,
     pairCount: 240,
     historyDays: 30,
   };

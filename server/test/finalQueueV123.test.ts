@@ -11,6 +11,7 @@ import type { ForecastSkillReport, DayForecast } from '../src/analytics.js';
 import { setWeatherCacheForTesting, clearWeatherTestOverride } from '../src/weather.js';
 import { parseTelemetryLine } from '../src/alertTelemetry.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 const HOUR = 3_600_000;
@@ -207,21 +208,14 @@ function backfillRecorder(sn: string): Recorder {
       pv.push({ ts, value: coeff * RAD[k] });
     }
   }
-  return {
-    insertSnapshot: () => {},
-    query: (qsn: string, metric: string) => {
+  return makeRecorderStub({
+    query: (qsn, metric) => {
       if (qsn === 'weather' && metric === 'ghi_wm2') return ghi;
       if (qsn === 'weather' && metric === 'cloud_pct') return ghi.map((g) => ({ ts: g.ts, value: 0 }));
       if (qsn === sn && metric === 'pv_total') return pv;
       return [];
     },
-    queryMulti: (_sn: string, metrics: string[]) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [], close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  });
 }
 
 test('F29 — soiling decomposition computes from RECORDER weather even when the live cache is empty', async () => {
@@ -246,17 +240,10 @@ test('F29 — with NO weather from either source the decomposition still bails e
   resetForecastCachesForTesting();
   setWeatherCacheForTesting(null);
   const sn = 'SN-SOIL-EMPTY';
-  const noWeather = {
-    insertSnapshot: () => {},
-    query: (qsn: string, metric: string) => (qsn === sn && metric === 'pv_total'
+  const noWeather = makeRecorderStub({
+    query: (qsn, metric) => (qsn === sn && metric === 'pv_total'
       ? [{ ts: Date.now() - DAY, value: 5000 }] : []),
-    queryMulti: (_sn: string, metrics: string[]) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [], close: () => {}, rollupLifetime: () => {}, getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  });
   const r = await computeSoilingDecomposition(dpuDevice(sn), noWeather);
   clearWeatherTestOverride();
   assert.equal(r.perDevice.length, 0, 'no weather → empty(), no per-device rows');

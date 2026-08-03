@@ -9,6 +9,7 @@ import {
   resetIrCache,
 } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /**
@@ -50,27 +51,25 @@ function mockRecorder(
   ) => pts.filter((p) => p.ts >= sinceMs && p.ts <= untilMs);
 
   return {
-    insertSnapshot: () => {},
-    query: (sn, metric, sinceMs, untilMs) => {
-      queryCalls.push({ sn, metric });
-      const series = data[sn]?.[metric] ?? [];
-      return pickRange(series, sinceMs, untilMs);
-    },
-    queryMulti: (sn, metrics, sinceMs, untilMs) => {
-      queryMultiCalls.push({ sn, metrics: [...metrics] });
-      const out = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const m of metrics) {
-        out.set(m, pickRange(data[sn]?.[m] ?? [], sinceMs, untilMs));
-      }
-      return out;
-    },
-    listMetrics: (sn) => Object.keys(data[sn] ?? {}),
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({
+      query: (sn, metric, sinceMs, untilMs) => {
+        queryCalls.push({ sn, metric });
+        const series = data[sn]?.[metric] ?? [];
+        return pickRange(series, sinceMs, untilMs);
+      },
+      queryMulti: (sn, metrics, sinceMs, untilMs) => {
+        queryMultiCalls.push({ sn, metrics: [...metrics] });
+        const out = new Map<string, Array<{ ts: number; value: number }>>();
+        for (const m of metrics) {
+          out.set(m, pickRange(data[sn]?.[m] ?? [], sinceMs, untilMs));
+        }
+        return out;
+      },
+      listMetrics: (sn) => Object.keys(data[sn] ?? {}),
+    }),
     queryCalls,
     queryMultiCalls,
-  } as MockRecorder;
+  };
 }
 
 /* ─── DPU/pack fixtures ──────────────────────────────────────────────── */

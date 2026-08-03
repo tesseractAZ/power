@@ -18,6 +18,7 @@ import { computeAlerts, type Alert } from '../src/alerts.js';
 import { backtestPvForecast } from '../src/backtest.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 
 const now = Date.now();
 const MIN = 60_000;
@@ -83,9 +84,7 @@ test('dpu-err — sysErrCode 0 never fires regardless of context', () => {
 
 /** A minimal Recorder stub returning a fixed pv_total series. */
 function recorderWith(series: Array<{ ts: number; value: number }>): Recorder {
-  return {
-    query: (_sn: string, metric: string) => (metric === 'pv_total' ? series : []),
-  } as unknown as Recorder;
+  return makeRecorderStub({ query: (_sn, metric) => (metric === 'pv_total' ? series : []) });
 }
 
 test('backtestPvForecast — a >10-min intra-hour gap is trapezoid-integrated, NOT scored as zero production', () => {

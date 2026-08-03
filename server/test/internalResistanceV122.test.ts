@@ -2,6 +2,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeInternalResistance, resetIrCache } from '../src/analytics.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ===================================================================
@@ -45,19 +46,15 @@ function events(
 }
 
 function mockRecorder(data: Record<string, Record<string, Array<{ ts: number; value: number }>>>): Recorder {
-  return {
-    queryMulti: (sn: string, metrics: string[]) => {
+  // (The pre-conversion literal carried an `insert: () => {}` member that
+  // Recorder has never declared — the double assertion hid the typo.)
+  return makeRecorderStub({
+    queryMulti: (sn, metrics) => {
       const out = new Map<string, Array<{ ts: number; value: number }>>();
       for (const m of metrics) out.set(m, data[sn]?.[m] ?? []);
       return out;
     },
-    query: () => [],
-    listMetrics: () => [],
-    insert: () => {},
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  });
 }
 
 function dpu(sn: string): Record<string, DeviceSnapshot> {

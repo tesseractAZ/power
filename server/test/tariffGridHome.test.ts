@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { computeTariffReport, resetTariffCache } from '../src/analytics.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ─── fixtures (mirror selfConsumptionGridCoalesce.test.ts) ──────────────── */
@@ -39,19 +40,14 @@ function shp2Snap(sn = 'SN-T-SHP2', dpuSn = 'SN-T-DPU'): Record<string, DeviceSn
 const fleet = () => ({ ...dpuSnap(), ...shp2Snap() });
 
 function recorderFor(series: Record<string, Array<{ ts: number; value: number }>>): Recorder {
-  return {
-    insertSnapshot: () => {},
+  return makeRecorderStub({
     query: (_sn, metric) => series[metric] ?? [],
     queryMulti: (_sn, metrics) => {
       const m = new Map<string, Array<{ ts: number; value: number }>>();
       for (const k of metrics) m.set(k, series[k] ?? []);
       return m;
     },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  });
 }
 
 /** Constant-watt samples every 5 min over `nDays` continuous days from `firstDayStart`. */

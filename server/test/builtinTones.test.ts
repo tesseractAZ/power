@@ -91,7 +91,7 @@ test('resolveChime — a named tone whose file is missing FALLS BACK to the klax
 });
 
 test('renderCacheKey — named tags distinct from the klaxon (omitted), customs, and each other', () => {
-  const key = (tag?: string) => renderCacheKey('critical', 'Critical condition', 1, 0, 1, 0, 1000, tag);
+  const key = (tag?: string) => renderCacheKey('critical', 'Critical condition', 0, 1, 0, 1000, tag);
   const klaxonImplicit = key();             // no tag
   const klaxonExplicit = key(BUILTIN_TAG);  // 'builtin' → omitted, same key
   const ping = key('b:ping-single');

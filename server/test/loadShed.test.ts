@@ -140,8 +140,12 @@ const LOW: RunwayLike = {
   generatedAt: 1000, hoursToReserve: 3, hoursToEmpty: 6, unavailable: null,
   backupRemainingKwh: 20, backupReserveKwh: 10,
 };
+// `available` (v0.15.18) records whether HA can read the entity at all — distinct
+// from `currentlyOn`. These fixtures model live, readable switches, so it is true
+// even in the `currentlyOn: false` case. computeAdvisory gates purely on
+// `currentlyOn !== true`, so supplying it does not change any outcome.
 const comp = (on: boolean, watts: number): LoadCompositionEntry[] => [
-  { entityId: 'switch.evse', label: 'EVSE', priority: 1, currentlyOn: on, measuredWatts: watts, source: 'estimated', flaggedKeyword: null },
+  { entityId: 'switch.evse', label: 'EVSE', priority: 1, currentlyOn: on, available: true, measuredWatts: watts, source: 'estimated', flaggedKeyword: null },
 ];
 
 test('computeAdvisory: healthy runway → no recommendation', () => {
@@ -177,8 +181,8 @@ test('computeAdvisory: an OFF load is never recommended (only shed what is on)',
 test('computeAdvisory: greedy stops once the counterfactual clears threshold+margin', () => {
   // Two big loads on; the first (2 kW) already lifts runway past 6 h target, so only one is recommended.
   const two: LoadCompositionEntry[] = [
-    { entityId: 'switch.a', label: 'A', priority: 1, currentlyOn: true, measuredWatts: 2000, source: 'estimated', flaggedKeyword: null },
-    { entityId: 'switch.b', label: 'B', priority: 2, currentlyOn: true, measuredWatts: 2000, source: 'estimated', flaggedKeyword: null },
+    { entityId: 'switch.a', label: 'A', priority: 1, currentlyOn: true, available: true, measuredWatts: 2000, source: 'estimated', flaggedKeyword: null },
+    { entityId: 'switch.b', label: 'B', priority: 2, currentlyOn: true, available: true, measuredWatts: 2000, source: 'estimated', flaggedKeyword: null },
   ];
   const a = computeAdvisory({ now: 1, runway: LOW, composition: two, thresholdHours: 4, restoreMarginHours: 2 });
   assert.equal(a.recommended.length, 1, 'one load already clears the target');

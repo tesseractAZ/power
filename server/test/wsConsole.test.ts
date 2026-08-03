@@ -19,23 +19,14 @@ import { TuiSession, _resetAuthThrottleForTest } from '../src/telnet/session.js'
 import type { TuiDataProvider } from '../src/telnet/session.js';
 import type { FleetSnapshot } from '../src/snapshot.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 
 /* ── fixtures ──────────────────────────────────────────────────────────── */
 
 function mockRecorder(): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn, metrics) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  // Every member is the shared stub's no-op default; queryMulti already yields an
+  // empty array per requested metric.
+  return makeRecorderStub();
 }
 
 function mockDataProvider(): TuiDataProvider {

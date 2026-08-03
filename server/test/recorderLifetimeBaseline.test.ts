@@ -73,7 +73,7 @@ test('packDeltaWh — discharge-favoring absolute registers, but deltas keep dis
 });
 
 test('packDeltaWh — missing baseline contributes nothing (pack not yet captured)', () => {
-  const pk = { num: 0, accuChgMah: 1_000_000, accuDsgMah: 1_200_000 };
+  const pk = { accuChgMah: 1_000_000, accuDsgMah: 1_200_000 };
   const { chgWh, dsgWh } = packDeltaWh(pk, undefined, PACK_MAH_TO_WH);
   assert.equal(chgWh, 0);
   assert.equal(dsgWh, 0);
@@ -82,7 +82,7 @@ test('packDeltaWh — missing baseline contributes nothing (pack not yet capture
 test('packDeltaWh — null registers (BMS readback dropout) yield zero, never negative', () => {
   const base: PackBaseline = { chgMah: 1_000_000, dsgMah: 1_200_000 };
   const { chgWh, dsgWh } = packDeltaWh(
-    { num: 0, accuChgMah: null, accuDsgMah: null },
+    { accuChgMah: null, accuDsgMah: null },
     base,
     PACK_MAH_TO_WH,
   );
@@ -94,7 +94,7 @@ test('packDeltaWh — register below baseline (corrupt/rolled-back read) is floo
   const base: PackBaseline = { chgMah: 1_000_000, dsgMah: 1_200_000 };
   // Both registers read BELOW their captured baseline.
   const { chgWh, dsgWh } = packDeltaWh(
-    { num: 0, accuChgMah: 990_000, accuDsgMah: 1_150_000 },
+    { accuChgMah: 990_000, accuDsgMah: 1_150_000 },
     base,
     PACK_MAH_TO_WH,
   );

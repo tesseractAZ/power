@@ -71,15 +71,21 @@ function baseInputs(overrides: Partial<NightChargeInputs> = {}): NightChargeInpu
 }
 
 // ── (a) Fail-safe gates → null plan, chargeTonight strictly false ──
-for (const [name, ov] of [
+// Annotated rather than `as const`: `as const` froze every entry readonly, so the
+// `{ horizon: [] }` case widened to `readonly []` and could not satisfy
+// `Partial<NightChargeInputs>` (whose horizon is a mutable NightChargeHour[]).
+// The annotation type-CHECKS each override against the real input shape instead —
+// strictly stronger than the assertion it replaces.
+const GATE_CASES: Array<[name: string, ov: Partial<NightChargeInputs>]> = [
   ['basis incomplete', { basisComplete: false }],
   ['SoC incoherent', { socCoherent: false }],
-  ['climatology-only', { confidenceTier: 'climatology' as const }],
+  ['climatology-only', { confidenceTier: 'climatology' }],
   ['no window', { window: null }],
   ['inverted window', { window: { startMs: B + 9 * HOUR, endMs: B + 3 * HOUR } }],
   ['empty horizon', { horizon: [] }],
   ['zero capacity', { fullKwh: 0 }],
-] as const) {
+];
+for (const [name, ov] of GATE_CASES) {
   test(`gate — ${name} → null plan (no charge, no fabricated number)`, () => {
     const p = computeNightChargePlan(baseInputs(ov));
     assert.equal(p.chargeTonight, false, 'chargeTonight must be false');
