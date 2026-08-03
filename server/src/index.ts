@@ -3738,7 +3738,7 @@ app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
   { preHandler: requireWriteAuth },
   async (req, reply) => {
     const level = req.body?.level ?? 'red';
-    if (!['red', 'yellow', 'green'].includes(level)) {
+    if (!(CHIME_LEVELS as readonly string[]).includes(level)) {
       reply.code(400);
       return { ok: false, error: 'level must be red, yellow, or green' };
     }
@@ -3854,12 +3854,21 @@ app.post<{ Body: { priority?: AlarmPriority; target?: 'browser' | 'speakers' } }
  * same-origin), audit-logged, and normalized + validated by chimeStore. A bad
  * or deleted tone degrades to the built-in klaxon (chimeConfig.resolveChime),
  * never a silent alarm. Browser preview plays /chimes/<id>.wav directly. */
+// v1.58.0 — ANNOTATED, not asserted. `as Record<…>` lets a missing key through
+// and renders an undefined label; this form is TS2739 the moment the level union
+// gains a member without a label here.
+const LEVEL_LABELS: Record<AnnouncementLevel, string> = {
+  red: 'Critical',
+  yellow: 'Caution',
+  green: 'All-clear / Recovery',
+};
+
 function chimeConsoleResponse() {
   const cfg = getChimeConfig();
   return {
     levels: CHIME_LEVELS,
     // UI labels for the 3 audio levels (the 4 ISA priorities collapse to these).
-    levelLabels: { red: 'Critical', yellow: 'Caution', green: 'All-clear / Recovery' } as Record<AnnouncementLevel, string>,
+    levelLabels: LEVEL_LABELS,
     assignments: cfg.assignments,
     chimes: listChimes(),
     // v0.17.0 — the named built-in tone library, selectable per level alongside
