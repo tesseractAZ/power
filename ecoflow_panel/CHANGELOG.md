@@ -1,3 +1,37 @@
+## v1.55.1 — restore the Configuration page's option descriptions
+
+**Every option description on the Home Assistant Configuration page has been
+blank since v1.48.0 (2026-07-27).** `translations/en.yaml` did not parse, and
+Home Assistant's response to an unparseable translation file is to render the
+page with no labels or help text at all — no error banner, no log line an
+operator would notice. The options themselves kept working; only their
+documentation vanished.
+
+Two independent YAML quoting faults, either sufficient on its own:
+
+- `BROADCAST_WYOMING_VOICE_ES` (v1.48.0) — an unquoted plain scalar containing
+  `works: switching`. A colon followed by a space is the mapping indicator, so
+  YAML ended the value there and then failed on the remainder.
+- `NIGHT_CHARGE_ADVISOR_ENABLED` (v1.54.0) — a single-quoted scalar into which
+  `'advisory'` and `'auto'` were inserted without doubling the apostrophes, which
+  is how a literal quote is escaped inside a single-quoted YAML scalar.
+
+Both are fixed. All 80 options now parse, and each has a non-empty name and
+description.
+
+**The reason this survived a week is that nothing checked.** `tsc` does not parse
+this file; the 1,756-test suite does not; the Dockerfile smoke build only copies
+it. `scripts/validate-addon-config.py` now does, wired into CI as a job that runs
+on every pull request. It parses both `config.yaml` and `translations/en.yaml`,
+asserts key parity in both directions — an option with no translation renders its
+raw key as the label; a translation for a deleted option is dead text — and
+asserts every entry carries a non-empty name and description. Verified against
+the pre-fix file: it fails with the exact line and column.
+
+CI job placement is deliberate. The server test suite runs on the release
+workflow, after merge, so it cannot gate a pull request; this check is a CI job
+precisely so it can.
+
 ## v1.55.0 — one tone list: the pack klaxons become selectable tones
 
 **The problem.** Two surfaces answered "what sound plays for a critical alert",
