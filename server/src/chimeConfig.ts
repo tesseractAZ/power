@@ -38,7 +38,7 @@ import { isBuiltinTone, builtinTonePath, BUILTIN_TONE_ID_RE } from './audioAsset
 // with it. `AnnouncementLevel[]` accepts a SHORT array; this does not — drop a
 // member and `satisfies` fails, add one to the union without listing it here and
 // the exhaustiveness assert below fails. Single source for every level loop.
-export const CHIME_LEVELS = ['red', 'yellow', 'green'] as const satisfies readonly AnnouncementLevel[];
+export const CHIME_LEVELS = ['critical', 'high', 'medium', 'low', 'clear'] as const satisfies readonly AnnouncementLevel[];
 // Exhaustiveness: errors if the union gains a member CHIME_LEVELS does not list.
 type _ChimeLevelsCoverUnion =
   Exclude<AnnouncementLevel, (typeof CHIME_LEVELS)[number]> extends never ? true : never;
@@ -71,7 +71,17 @@ function defaults(): ChimeConfig {
   // the last-resort fallback when an assigned tone's file is missing, so the
   // anti-silent-alarm chain is unchanged. Only what a FRESH install starts with
   // moved. Existing /data/chime-config.json files are untouched.
-  assignments: { red: { kind: 'named', id: 'doorbell' }, yellow: { kind: 'named', id: 'doorbell' }, green: { kind: 'named', id: 'doorbell' } },
+  // v1.59.0 — one tone per rung on a FRESH install. Cadence encodes severity:
+  // emergency warble → klaxon honk → slow caution pulse → soft advisory → rising
+  // all-clear. An existing /data/chime-config.json is never overwritten; it is
+  // migrated from the old 3-level shape in sanitize().
+  assignments: {
+    critical: { kind: 'named', id: 'warble-fast' },
+    high: { kind: 'named', id: 'klaxon-honk' },
+    medium: { kind: 'named', id: 'pulse-slow' },
+    low: { kind: 'named', id: 'doorbell' },
+    clear: { kind: 'named', id: 'triad-up' },
+  },
     updatedAt: 0,
     source: 'default',
   };
@@ -91,10 +101,35 @@ function sanitizeAssignment(raw: any): ChimeAssignment {
   return { kind: 'builtin' };
 }
 
+/**
+ * v1.59.0 — legacy (pre-ladder) key map. The old three audio levels each covered
+ * more than one rung, so the migration FANS OUT: whatever played for `red` now
+ * plays for both critical and high, and so on. Inverse of the collapse that used
+ * to live in `klaxonLevelForPriority`.
+ */
+const LEGACY_LEVEL_FOR_RUNG: Record<AnnouncementLevel, 'red' | 'yellow' | 'green'> = {
+  critical: 'red',
+  high: 'red',
+  medium: 'yellow',
+  low: 'yellow',
+  clear: 'green',
+};
+
 function sanitize(raw: any, source: string): ChimeConfig {
   const base = defaults();
-  if (raw && typeof raw === 'object' && raw.assignments && typeof raw.assignments === 'object') {
-    for (const lvl of CHIME_LEVELS) base.assignments[lvl] = sanitizeAssignment(raw.assignments[lvl]);
+  const a = raw && typeof raw === 'object' ? raw.assignments : null;
+  if (a && typeof a === 'object') {
+    // Migration is per-rung and idempotent: prefer the rung's own key, fall back
+    // to its legacy level, else keep the shipped default. Running this against an
+    // already-migrated file is a no-op, so it can live on the READ path and needs
+    // no one-shot rewrite — which matters because /data loss and partial restores
+    // are demonstrated events on this host.
+    for (const rung of CHIME_LEVELS) {
+      const own = a[rung];
+      const legacy = a[LEGACY_LEVEL_FOR_RUNG[rung]];
+      if (own !== undefined) base.assignments[rung] = sanitizeAssignment(own);
+      else if (legacy !== undefined) base.assignments[rung] = sanitizeAssignment(legacy);
+    }
     if (typeof raw.updatedAt === 'number') base.updatedAt = raw.updatedAt;
   }
   base.source = source;

@@ -1,3 +1,69 @@
+## v1.59.0 — one severity ladder: a distinct tone per alarm rung
+
+Closes the "four alert types listed but only three can be selected" complaint,
+and the deeper problem underneath it.
+
+**The problem.** The alarm engine has always classified on four ISA priorities
+(P1 critical / P2 high / P3 medium / P4 low), but the *audible* path collapsed
+them to three levels — `klaxonLevelForPriority()` mapped critical+high → `red`
+and medium+low → `yellow`. So P1 and P2 sounded identical, as did P3 and P4. The
+Alert Console listed four types because the engine has four; it offered three
+tone slots because the audio path had three. Both were telling the truth about
+different things.
+
+That collapse matters most on the path where it is least visible. When TTS is
+unavailable the system falls back to **chime-only** — the tone is the entire
+message. Two priorities sharing a tone means an operator woken at 3am cannot
+tell "protective limit crossed" from "immediate action to protect the plant" by
+ear, at exactly the moment there is no spoken text to disambiguate.
+
+**The change.** `type AlarmRung = AlarmPriority | 'clear'` — the four priorities
+each carry their own tone, plus a fifth rung for recovery. Threaded through the
+whole audible path: `conditionFromAlerts` now returns the worst raised rung
+alongside the legacy level, and `runBroadcast` / `scheduleBroadcastRetry` /
+`noteSpokenRenderFailure` / the chime-only fallback / preview / test all take it.
+Every `resolveChime()` and `renderAnnouncement()` call site resolves off the rung.
+
+`clear` is deliberately NOT a member of `AlarmPriority`. `ALARM_PRIORITY_ORDER`
+drives **retained** MQTT discovery, so a fifth member would mint
+`switch.ecoflow_alarms_clear_p5` permanently with no reaper; `ALARM_PRIORITY_META`
+requires an ISA string a recovery does not have; and `priorityOf()` structurally
+cannot return it, because clearing is the *absence* of raised alerts, not a
+classification of one.
+
+`klaxonLevelForPriority()` survives for legacy bookkeeping (`lastLevel`, cooldown
+and status reporting) but no longer selects a tone.
+
+**Migration.** A legacy 3-key `chime-config.json` fans out across the five rungs
+— `red` → critical + high, `yellow` → medium + low, `green` → clear — the inverse
+of the old collapse, so whatever played for a given alarm still plays for it. Per
+rung the order is: own key, else legacy level, else shipped default. It runs on
+the read path, is idempotent, and needs no one-shot rewrite, which matters because
+/data loss and partial restores are demonstrated events on this host.
+
+This is the failure mode the migration exists to prevent: get it wrong and the
+config still parses, the console still renders, and the operator's hand-picked
+tones are quietly swapped for defaults with nothing logged — discovered only when
+an alarm next sounds wrong. `test/chimeConfigMigration.test.ts` pins it, and was
+mutation-verified: deleting the migration, inverting the fan-out direction, and
+inverting own-key precedence each produce a failing test.
+
+**Shipped defaults are now one DISTINCT tone per rung** (`warble-fast`,
+`klaxon-honk`, `pulse-slow`, `doorbell`, `triad-up`) rather than all-doorbell —
+identical defaults would recreate the very ambiguity this release removes.
+
+`KLAXON_FOR_LEVEL` widened from three entries to five. No `AUDIO_ASSETS_VERSION`
+bump: all five WAVs were already on disk (the `powerplant-*` pair was promoted to
+named tones in v1.55.0), so this remaps existing assets rather than synthesizing.
+
+**No UI change was needed** — the Alert Console renders one row per entry in the
+server's `levels` payload, so widening `CHIME_LEVELS` widened the console. That is
+what v1.58.1's groundwork bought.
+
+Tests: 1,764 pass / 0 fail (1,759 + 5 migration). Both packages typecheck clean.
+
+---
+
 ## v1.58.1 — pin the console's level vocabulary to the server's
 
 The last piece of groundwork before the severity ladder. **No behaviour change.**

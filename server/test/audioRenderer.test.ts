@@ -67,22 +67,22 @@ function writeKlaxon(dir: string, name: string, rate: number, width: number, cha
 }
 
 test('renderCacheKey — same (version, level, message) → same hash', () => {
-  const a = renderCacheKey('red', 'hello');
-  const b = renderCacheKey('red', 'hello');
+  const a = renderCacheKey('critical', 'hello');
+  const b = renderCacheKey('critical', 'hello');
   assert.equal(a, b);
   assert.equal(a.length, 16);
   assert.match(a, /^[a-f0-9]{16}$/);
 });
 
 test('renderCacheKey — different level or message → different hash', () => {
-  const base = renderCacheKey('red', 'hello');
-  assert.notEqual(base, renderCacheKey('yellow', 'hello'));
-  assert.notEqual(base, renderCacheKey('red', 'hello!'));
-  assert.notEqual(base, renderCacheKey('red', null));
+  const base = renderCacheKey('critical', 'hello');
+  assert.notEqual(base, renderCacheKey('medium', 'hello'));
+  assert.notEqual(base, renderCacheKey('critical', 'hello!'));
+  assert.notEqual(base, renderCacheKey('critical', null));
 });
 
 test('renderCacheKey — null message hashes distinctly from empty string', () => {
-  assert.notEqual(renderCacheKey('red', null), renderCacheKey('red', ''));
+  assert.notEqual(renderCacheKey('critical', null), renderCacheKey('critical', ''));
 });
 
 test('parseWavHeader — extracts rate/width/channels/dataOffset/dataLength', () => {
@@ -108,7 +108,7 @@ test('renderAnnouncement — klaxon-only (null message) caches the klaxon as-is,
   try {
     writeKlaxon(klaxonDir, 'yellow-alert.wav', 22050, 2, 1, 1000);
     const r = await renderAnnouncement({
-      level: 'yellow',
+      level: 'medium',
       message: null,
       klaxonDir,
       cacheDir,
@@ -140,7 +140,7 @@ test('renderAnnouncement — klaxon + TTS combined into one WAV (PCM lengths sum
   const mock = await startMockWyoming(22050, 2, 1, ttsPcm);
   try {
     const r = await renderAnnouncement({
-      level: 'red',
+      level: 'critical',
       message: 'hello',
       klaxonDir,
       cacheDir,
@@ -177,7 +177,7 @@ test('renderAnnouncement — cache hit skips Wyoming call entirely', async () =>
   try {
     // First render — populates cache
     const r1 = await renderAnnouncement({
-      level: 'red', message: 'hi', klaxonDir, cacheDir,
+      level: 'critical', message: 'hi', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port, log: () => {},
     });
     assert.equal(r1.ok, true);
@@ -186,7 +186,7 @@ test('renderAnnouncement — cache hit skips Wyoming call entirely', async () =>
 
     // Second identical render — must hit cache, no new Wyoming call
     const r2 = await renderAnnouncement({
-      level: 'red', message: 'hi', klaxonDir, cacheDir,
+      level: 'critical', message: 'hi', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port, log: () => {},
     });
     assert.equal(r2.ok, true);
@@ -207,11 +207,11 @@ test('renderAnnouncement — different messages produce different cache files', 
   const mock = await startMockWyoming(22050, 2, 1, Buffer.alloc(50));
   try {
     const r1 = await renderAnnouncement({
-      level: 'red', message: 'message one', klaxonDir, cacheDir,
+      level: 'critical', message: 'message one', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port, log: () => {},
     });
     const r2 = await renderAnnouncement({
-      level: 'red', message: 'message two', klaxonDir, cacheDir,
+      level: 'critical', message: 'message two', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port, log: () => {},
     });
     assert.equal(r1.ok, true);
@@ -232,7 +232,7 @@ test('renderAnnouncement — format mismatch (klaxon 22050 vs TTS 16000) returns
   const mock = await startMockWyoming(16000, 2, 1, Buffer.alloc(50));
   try {
     const r = await renderAnnouncement({
-      level: 'red', message: 'hi', klaxonDir, cacheDir,
+      level: 'critical', message: 'hi', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port, log: () => {},
     });
     assert.equal(r.ok, false);
@@ -249,7 +249,7 @@ test('renderAnnouncement — missing klaxon file returns clear error', async () 
   const cacheDir = mkdtempSync(resolve(tmpdir(), 'cache-'));
   try {
     const r = await renderAnnouncement({
-      level: 'red', message: null, klaxonDir, cacheDir,
+      level: 'critical', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1, log: () => {},
     });
     assert.equal(r.ok, false);
@@ -314,11 +314,11 @@ function silenceBytes(rate: number, width: number, channels: number, ms: number)
 }
 
 test('renderCacheKey — lead-in silence is part of the key', () => {
-  const base = renderCacheKey('red', 'hello', 2, 0);
-  assert.equal(base, renderCacheKey('red', 'hello', 2, 0), 'same lead → same key');
-  assert.notEqual(base, renderCacheKey('red', 'hello', 2, 1000), 'different lead → different key');
+  const base = renderCacheKey('critical', 'hello', 2, 0);
+  assert.equal(base, renderCacheKey('critical', 'hello', 2, 0), 'same lead → same key');
+  assert.notEqual(base, renderCacheKey('critical', 'hello', 2, 1000), 'different lead → different key');
   // default (undefined) lead resolves to 0, matching an explicit 0
-  assert.equal(renderCacheKey('red', 'hello', 2), renderCacheKey('red', 'hello', 2, 0));
+  assert.equal(renderCacheKey('critical', 'hello', 2), renderCacheKey('critical', 'hello', 2, 0));
 });
 
 test('renderAnnouncement — leadSilenceMs prepends frame-aligned silence (klaxon-only)', async () => {
@@ -327,7 +327,7 @@ test('renderAnnouncement — leadSilenceMs prepends frame-aligned silence (klaxo
   try {
     writeKlaxon(klaxonDir, 'yellow-alert.wav', 22050, 2, 1, 1000);
     const r = await renderAnnouncement({
-      level: 'yellow', message: null, klaxonDir, cacheDir,
+      level: 'medium', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1, // would refuse — proves no Wyoming call
       leadSilenceMs: 1000, log: () => {},
     });
@@ -357,7 +357,7 @@ test('renderAnnouncement — leadSilenceMs prepends silence ahead of klaxon+TTS'
   const mock = await startMockWyoming(22050, 2, 1, ttsPcm);
   try {
     const r = await renderAnnouncement({
-      level: 'red', message: 'hello', klaxonDir, cacheDir,
+      level: 'critical', message: 'hello', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port,
       leadSilenceMs: 500, chimeGapMs: 0, log: () => {},
     });
@@ -386,11 +386,11 @@ test('renderAnnouncement — leadSilenceMs 0 vs undefined are the same cache fil
   try {
     writeKlaxon(klaxonDir, 'red-alert.wav', 22050, 2, 1, 300);
     const r0 = await renderAnnouncement({
-      level: 'red', message: null, klaxonDir, cacheDir,
+      level: 'critical', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1, leadSilenceMs: 0, log: () => {},
     });
     const rU = await renderAnnouncement({
-      level: 'red', message: null, klaxonDir, cacheDir,
+      level: 'critical', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1, log: () => {}, // leadSilenceMs undefined → 0
     });
     assert.equal(r0.ok, true);
@@ -428,11 +428,11 @@ test('cachedRenderPath — strict filename format check (no path traversal)', ()
 // cache key so repeat=1 and repeat=2 never alias.
 
 test('renderCacheKey — announceRepeat is part of the key', () => {
-  const base = renderCacheKey('red', 'hi', 2, 0, 1);
-  assert.equal(base, renderCacheKey('red', 'hi', 2, 0, 1), 'same announceRepeat → same key');
-  assert.notEqual(base, renderCacheKey('red', 'hi', 2, 0, 2), 'different announceRepeat → different key');
+  const base = renderCacheKey('critical', 'hi', 2, 0, 1);
+  assert.equal(base, renderCacheKey('critical', 'hi', 2, 0, 1), 'same announceRepeat → same key');
+  assert.notEqual(base, renderCacheKey('critical', 'hi', 2, 0, 2), 'different announceRepeat → different key');
   // default (undefined) announceRepeat resolves to 1, matching an explicit 1
-  assert.equal(renderCacheKey('red', 'hi', 2, 0), renderCacheKey('red', 'hi', 2, 0, 1));
+  assert.equal(renderCacheKey('critical', 'hi', 2, 0), renderCacheKey('critical', 'hi', 2, 0, 1));
 });
 
 // v0.15.4 — resource-exhaustion guard (CodeQL js/resource-exhaustion). The chime
@@ -445,20 +445,20 @@ test('renderCacheKey — chimeRepeat is bounded at the allocation ceiling (no un
   // Two absurd values collapse to the same key → the value is being clamped, not
   // used raw (a raw value would make these differ).
   assert.equal(
-    renderCacheKey('red', 'hi', 9999, 0, 1),
-    renderCacheKey('red', 'hi', 10000, 0, 1),
+    renderCacheKey('critical', 'hi', 9999, 0, 1),
+    renderCacheKey('critical', 'hi', 10000, 0, 1),
     'huge chimeRepeat values must clamp to the same ceiling',
   );
   // The clamped huge value equals the key at the documented ceiling (8)…
   assert.equal(
-    renderCacheKey('red', 'hi', 9999, 0, 1),
-    renderCacheKey('red', 'hi', 8, 0, 1),
+    renderCacheKey('critical', 'hi', 9999, 0, 1),
+    renderCacheKey('critical', 'hi', 8, 0, 1),
     'clamped value must equal the key at MAX_CHIME_REPEAT (8)',
   );
   // …and is distinct from a below-ceiling value, so the cap is a ceiling, not a floor.
   assert.notEqual(
-    renderCacheKey('red', 'hi', 8, 0, 1),
-    renderCacheKey('red', 'hi', 4, 0, 1),
+    renderCacheKey('critical', 'hi', 8, 0, 1),
+    renderCacheKey('critical', 'hi', 4, 0, 1),
     'below-ceiling repeat values must still be distinguished',
   );
 });
@@ -470,12 +470,12 @@ test('renderAnnouncement — announceRepeat repeats the chime block + busts the 
     writeKlaxon(klaxonDir, 'all-clear.wav', 22050, 2, 1, 200);
     const N = getChimeRepeat();
     const r1 = await renderAnnouncement({
-      level: 'green', message: null, klaxonDir, cacheDir,
+      level: 'clear', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1, // would refuse — proves no Wyoming call
       announceRepeat: 1, log: () => {},
     });
     const r2 = await renderAnnouncement({
-      level: 'green', message: null, klaxonDir, cacheDir,
+      level: 'clear', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1,
       announceRepeat: 2, log: () => {},
     });
@@ -499,11 +499,11 @@ test('renderAnnouncement — announceRepeat repeats the chime block + busts the 
 // repeating. Folded into the cache key; for announceRepeat=2 exactly ONE gap is
 // inserted (between the two blocks), so it adds exactly gapBytes to the PCM.
 test('renderCacheKey — repeatGapMs is part of the key', () => {
-  const base = renderCacheKey('red', 'hi', 2, 0, 2, 0);
-  assert.equal(base, renderCacheKey('red', 'hi', 2, 0, 2, 0), 'same gap → same key');
-  assert.notEqual(base, renderCacheKey('red', 'hi', 2, 0, 2, 500), 'different gap → different key');
+  const base = renderCacheKey('critical', 'hi', 2, 0, 2, 0);
+  assert.equal(base, renderCacheKey('critical', 'hi', 2, 0, 2, 0), 'same gap → same key');
+  assert.notEqual(base, renderCacheKey('critical', 'hi', 2, 0, 2, 500), 'different gap → different key');
   // default (undefined) gap resolves to 0
-  assert.equal(renderCacheKey('red', 'hi', 2, 0, 2), renderCacheKey('red', 'hi', 2, 0, 2, 0));
+  assert.equal(renderCacheKey('critical', 'hi', 2, 0, 2), renderCacheKey('critical', 'hi', 2, 0, 2, 0));
 });
 
 test('renderAnnouncement — repeatGapMs inserts one silence gap between two passes (klaxon-only)', async () => {
@@ -513,12 +513,12 @@ test('renderAnnouncement — repeatGapMs inserts one silence gap between two pas
     writeKlaxon(klaxonDir, 'all-clear.wav', 22050, 2, 1, 200);
     const N = getChimeRepeat();
     const noGap = await renderAnnouncement({
-      level: 'green', message: null, klaxonDir, cacheDir,
+      level: 'clear', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1, // would refuse — proves no Wyoming call
       announceRepeat: 2, repeatGapMs: 0, log: () => {},
     });
     const withGap = await renderAnnouncement({
-      level: 'green', message: null, klaxonDir, cacheDir,
+      level: 'clear', message: null, klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: 1,
       announceRepeat: 2, repeatGapMs: 500, log: () => {},
     });
@@ -548,11 +548,11 @@ test('renderAnnouncement — repeatGapMs inserts one silence gap between two pas
  * the chime). The gap folds into the cache key so 0 and 1000 never alias. */
 
 test('renderCacheKey — chimeGapMs is part of the key; undefined defaults to 1000', () => {
-  const base = renderCacheKey('red', 'hi', 2, 0, 1, 0, 1000);
-  assert.equal(base, renderCacheKey('red', 'hi', 2, 0, 1, 0, 1000), 'same gap → same key');
-  assert.notEqual(base, renderCacheKey('red', 'hi', 2, 0, 1, 0, 0), 'different gap → different key');
+  const base = renderCacheKey('critical', 'hi', 2, 0, 1, 0, 1000);
+  assert.equal(base, renderCacheKey('critical', 'hi', 2, 0, 1, 0, 1000), 'same gap → same key');
+  assert.notEqual(base, renderCacheKey('critical', 'hi', 2, 0, 1, 0, 0), 'different gap → different key');
   // default (undefined) resolves to 1000, matching an explicit 1000
-  assert.equal(renderCacheKey('red', 'hi', 2, 0, 1, 0), base);
+  assert.equal(renderCacheKey('critical', 'hi', 2, 0, 1, 0), base);
 });
 
 test('renderAnnouncement — chimeGapMs inserts all-zero silence between chime and TTS', async () => {
@@ -564,7 +564,7 @@ test('renderAnnouncement — chimeGapMs inserts all-zero silence between chime a
   const mock = await startMockWyoming(22050, 2, 1, ttsPcm);
   try {
     const r = await renderAnnouncement({
-      level: 'red', message: 'hello', klaxonDir, cacheDir,
+      level: 'critical', message: 'hello', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port,
       chimeGapMs: 1000, log: () => {},
     });
@@ -597,7 +597,7 @@ test('renderAnnouncement — default chimeGap (1s) applies when option omitted',
   const mock = await startMockWyoming(22050, 2, 1, ttsPcm);
   try {
     const r = await renderAnnouncement({
-      level: 'yellow', message: 'heads up', klaxonDir, cacheDir,
+      level: 'medium', message: 'heads up', klaxonDir, cacheDir,
       wyomingHost: '127.0.0.1', wyomingPort: mock.port, log: () => {},
     });
     assert.equal(r.ok, true, `render failed: ${r.error}`);
@@ -620,17 +620,17 @@ function tinyWav(freq: number, frames = 200): Buffer {
 }
 
 test('renderCacheKey — builtin tag is BYTE-IDENTICAL to the pre-feature key (zero churn)', () => {
-  const noTag = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000);
-  const builtin = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  const noTag = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000);
+  const builtin = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
   assert.equal(builtin, noTag, 'BUILTIN_CHIME_TAG must omit the tag component → unchanged keys for default users');
 });
 
 test('renderCacheKey — a custom chime tag busts the cache', () => {
-  const builtin = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
-  const custom = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, 'abc1230000000000');
+  const builtin = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  const custom = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, 'abc1230000000000');
   assert.notEqual(custom, builtin, 'a custom tone id must produce a distinct key');
   // Two different custom tones differ from each other too.
-  assert.notEqual(custom, renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, 'def4560000000000'));
+  assert.notEqual(custom, renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, 'def4560000000000'));
 });
 
 test('renderAnnouncement ↔ renderCacheKey lock-step for a custom chime (klaxon-only path)', async () => {
@@ -647,17 +647,17 @@ test('renderAnnouncement ↔ renderCacheKey lock-step for a custom chime (klaxon
     // message:null → klaxon-only (no Wyoming needed). The returned filename MUST
     // equal renderCacheKey(...) with the SAME tag — the lock-step the critic required.
     const r = await renderAnnouncement({
-      level: 'red', message: null, klaxonDir, cacheDir,
+      level: 'critical', message: null, klaxonDir, cacheDir,
       chimePath: customPath, chimeTag: tag,
       wyomingHost: 'unused', wyomingPort: 0, log: () => {},
     });
     assert.ok(r.ok, r.error);
-    const expected = renderCacheKey('red', null, getChimeRepeat(), 0, 1, 0, 1000, tag) + '.wav';
+    const expected = renderCacheKey('critical', null, getChimeRepeat(), 0, 1, 0, 1000, tag) + '.wav';
     assert.equal(r.filename, expected, 'rendered filename must match the predicted cache key for the custom tag');
 
     // A different tag → different filename (cache actually busts on swap).
     const r2 = await renderAnnouncement({
-      level: 'red', message: null, klaxonDir, cacheDir,
+      level: 'critical', message: null, klaxonDir, cacheDir,
       chimePath: customPath, chimeTag: BUILTIN_CHIME_TAG,
       wyomingHost: 'unused', wyomingPort: 0, log: () => {},
     });
@@ -673,7 +673,7 @@ test('renderAnnouncement — a missing custom chime FALLS BACK to the built-in k
   try {
     for (const f of Object.values(KLAXON_FOR_LEVEL)) writeFileSync(resolve(klaxonDir, f), tinyWav(440));
     const r = await renderAnnouncement({
-      level: 'red', message: null, klaxonDir, cacheDir,
+      level: 'critical', message: null, klaxonDir, cacheDir,
       chimePath: resolve(klaxonDir, 'does-not-exist.wav'), chimeTag: 'missing0000000000',
       wyomingHost: 'unused', wyomingPort: 0, log: () => {},
     });
@@ -743,23 +743,23 @@ test('assembleAnnouncementParts — bilingual with no terminator → English the
 });
 
 test('renderCacheKey — no messages is BYTE-IDENTICAL to the pre-feature key (zero churn)', () => {
-  const pre = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
-  const undef = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, undefined);
-  const empty = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, []);
+  const pre = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
+  const undef = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, undefined);
+  const empty = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, []);
   assert.equal(undef, pre, 'messages undefined → unchanged key');
   assert.equal(empty, pre, 'messages empty → unchanged key');
 });
 
 test('renderCacheKey — v0.67.0 Spanish terminator phrase folds when present, omitted when blank', () => {
-  const base = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined);
-  const withEs = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined, 'Fin del mensaje');
-  const blankEs = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined, '');
+  const base = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined);
+  const withEs = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined, 'Fin del mensaje');
+  const blankEs = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'End of message', 700, undefined, undefined, '');
   assert.notEqual(withEs, base, 'adding a Spanish terminator phrase changes the key → the bilingual two-terminator render re-renders');
   assert.equal(blankEs, base, 'a blank Spanish phrase is omitted → byte-identical to the single-terminator key (zero churn)');
 });
 
 test('renderCacheKey — bilingual messages bust the cache; voice / text / lang each matter', () => {
-  const base = (msgs?: any) => renderCacheKey('red', 'hello', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, msgs);
+  const base = (msgs?: any) => renderCacheKey('critical', 'hello', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, msgs);
   const mono = base();
   const bi = base([{ text: 'hello', lang: 'en' }, { text: 'hola', lang: 'es', voice: 'es_MX-claude-high' }]);
   assert.notEqual(bi, mono, 'adding a Spanish pass changes the audio → distinct key');
@@ -770,21 +770,21 @@ test('renderCacheKey — bilingual messages bust the cache; voice / text / lang 
 });
 
 test('renderCacheKey — terminator OFF is BYTE-IDENTICAL to the pre-feature key (zero churn)', () => {
-  const pre = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG); // 8-arg → eom undefined → off
-  const offExplicit = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
+  const pre = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG); // 8-arg → eom undefined → off
+  const offExplicit = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, false, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
   assert.equal(offExplicit, pre, 'endOfMessage:false omits the component → unchanged keys for the tail-off case');
 });
 
 test('renderCacheKey — enabling the terminator busts the cache; phrase + gap are part of the key', () => {
-  const off = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
-  const on = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
+  const off = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  const on = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS);
   assert.notEqual(on, off, 'turning the terminator on changes the audio → distinct key');
-  assert.notEqual(on, renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'All clear', END_OF_MESSAGE_GAP_MS), 'a different phrase re-renders');
-  assert.notEqual(on, renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, 250), 'a different pre-terminator gap re-renders');
+  assert.notEqual(on, renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, 'All clear', END_OF_MESSAGE_GAP_MS), 'a different phrase re-renders');
+  assert.notEqual(on, renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, END_OF_MESSAGE_PHRASE, 250), 'a different pre-terminator gap re-renders');
 });
 
 test('renderCacheKey — terminator ON with a blank phrase collapses to the OFF key (effective-disable)', () => {
-  const off = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
-  const blank = renderCacheKey('red', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, '   ', END_OF_MESSAGE_GAP_MS);
+  const off = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG);
+  const blank = renderCacheKey('critical', 'msg', 2, 1000, 1, 0, 1000, BUILTIN_CHIME_TAG, true, '   ', END_OF_MESSAGE_GAP_MS);
   assert.equal(blank, off, 'endOfMessage:true + blank phrase = nothing to say → component omitted (matches the render)');
 });
