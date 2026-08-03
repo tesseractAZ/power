@@ -125,7 +125,6 @@ fi
 # USE_MUSIC_ASSISTANT exports — those options no longer exist in config.yaml.)
 export BROADCAST_LEAD_SILENCE_MS="$(bashio::config 'BROADCAST_LEAD_SILENCE_MS')"
 export BROADCAST_CHIME_GAP_MS="$(bashio::config 'BROADCAST_CHIME_GAP_MS')"
-export BROADCAST_CHIME_PACK="$(bashio::config 'BROADCAST_CHIME_PACK')"
 export BROADCAST_WYOMING_HOST="$(bashio::config 'BROADCAST_WYOMING_HOST')"
 export BROADCAST_WYOMING_PORT="$(bashio::config 'BROADCAST_WYOMING_PORT')"
 export BROADCAST_WYOMING_VOICE="$(bashio::config 'BROADCAST_WYOMING_VOICE')"

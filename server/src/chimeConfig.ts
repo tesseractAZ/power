@@ -57,7 +57,12 @@ const PATH = process.env.CHIME_CONFIG_PATH
 
 function defaults(): ChimeConfig {
   return {
-    assignments: { red: { kind: 'builtin' }, yellow: { kind: 'builtin' }, green: { kind: 'builtin' } },
+    // v1.56.0 — the shipped default is the doorbell tone, not the level klaxon.
+  // `builtin` remains reachable: it is the operator-selectable level klaxon AND
+  // the last-resort fallback when an assigned tone's file is missing, so the
+  // anti-silent-alarm chain is unchanged. Only what a FRESH install starts with
+  // moved. Existing /data/chime-config.json files are untouched.
+  assignments: { red: { kind: 'named', id: 'doorbell' }, yellow: { kind: 'named', id: 'doorbell' }, green: { kind: 'named', id: 'doorbell' } },
     updatedAt: 0,
     source: 'default',
   };
