@@ -3872,8 +3872,20 @@ function chimeConsoleResponse() {
 }
 
 // List uploaded tones + current per-level assignments (read-only).
-app.get('/api/chimes', async () => ({ ok: true, ...chimeConsoleResponse() }));
-app.get('/api/chime-config', async () => ({ ok: true, ...chimeConsoleResponse() }));
+// Rate-limited like the other read endpoints (broadcast/config, alert-settings):
+// these two were the only ones that missed the pattern, which CodeQL's
+// js/missing-rate-limiting flagged the first time the scan ran here.
+const chimeConsoleReadRateLimit = makeRateLimiter(120, 60_000);
+app.get(
+  '/api/chimes',
+  { preHandler: chimeConsoleReadRateLimit },
+  async () => ({ ok: true, ...chimeConsoleResponse() }),
+);
+app.get(
+  '/api/chime-config',
+  { preHandler: chimeConsoleReadRateLimit },
+  async () => ({ ok: true, ...chimeConsoleResponse() }),
+);
 
 // Upload a tone — raw WAV bytes in the body, display name in ?name=. chimeStore
 // validates the RIFF/WAVE header, normalizes to 22050/16/mono, and stores it
