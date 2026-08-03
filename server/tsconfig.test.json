@@ -1,0 +1,26 @@
+// Type-checks the test suite alongside src/.
+//
+// The build config (tsconfig.json) deliberately includes ONLY src/**/*.ts —
+// it drives `outDir: dist`, and test/ must never be emitted. That is correct
+// and must stay that way. The consequence, though, was that nothing type-checked
+// test/ at all: 188 test files compiled by tsx at runtime with no static gate,
+// so stubs silently drifted behind the production interfaces they impersonate.
+//
+// This config closes that hole: same strict options, noEmit, and a rootDir wide
+// enough to hold every file the program reaches. It is check-only and never
+// produces output.
+//
+// rootDir is ".." (the repo root), not "." — test/alertPriorityWebMirror.test.ts
+// deliberately imports ../web/src/alertPriority.ts to prove the server and web
+// copies of the priority ladder agree, so the program legitimately spans both
+// packages. With noEmit, rootDir has no effect on output layout; it only drives
+// the containment check, and TS6059 would otherwise reject that cross-package
+// import. Narrowing it back to "." would mean deleting a real mirror test.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

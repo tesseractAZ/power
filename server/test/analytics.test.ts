@@ -22,6 +22,7 @@ import {
 import type { WeatherHour } from '../src/weather.js';
 import { integrateWh, startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 test('rootCausesFor — direct match against a graph leaf', () => {
@@ -80,7 +81,21 @@ function emptyForecast(overrides: Partial<DayForecast>): DayForecast {
     typicalPvWhPerDay: 50_000,
     minProjectedSoc: null,
     minProjectedSocTs: null,
-    solarModel: { hourly: [], peakCoeff: 0, pairCount: 0, historyDays: 30 },
+    // v0.75.0/v0.78.0 additions. The fixture has no SHP2, so the honest
+    // coverage basis is 0 connected / 0 reporting and never "partial"
+    // (coveragePartial requires an SHP2). The *Display fields and
+    // restoredSolarModel mirror the reporting-basis values, which is exactly
+    // what production emits when every connected Core is reporting — and what
+    // the `?? forecast.solarModel` / `?? fc.forecastPvWhNext24` fallbacks that
+    // ran while these fields were absent already resolved to, so behaviour is
+    // unchanged.
+    homeDpusConnected: 0,
+    homeDpusReporting: 0,
+    homeDpusCoveragePartial: false,
+    forecastPvWhNext24Display: 50_000,
+    typicalPvWhPerDayDisplay: 50_000,
+    solarModel: { hourly: [], peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30 },
+    restoredSolarModel: { hourly: [], peakCoeff: 0, peakGateMinGhiWm2: 300, pairCount: 0, historyDays: 30 },
     deviceModels: [],
     soiling: null,
     ...overrides,
@@ -273,21 +288,18 @@ function mockRecorder(): Recorder & { queryCount: number; queryMultiCount: numbe
   let queryCount = 0;
   let queryMultiCount = 0;
   return {
-    insertSnapshot: () => {},
-    query: () => { queryCount++; return []; },
-    queryMulti: (_sn, metrics) => {
-      queryMultiCount++;
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({
+      query: () => { queryCount++; return []; },
+      queryMulti: (_sn, metrics) => {
+        queryMultiCount++;
+        const m = new Map<string, Array<{ ts: number; value: number }>>();
+        for (const k of metrics) m.set(k, []);
+        return m;
+      },
+    }),
     get queryCount() { return queryCount; },
     get queryMultiCount() { return queryMultiCount; },
-  } as Recorder & { queryCount: number; queryMultiCount: number };
+  };
 }
 
 test('resetHaStateShortLivedCaches — forces compute on next call (cache cleared)', () => {
@@ -466,15 +478,7 @@ function loadHistory(baseW: number, recentW: number[]): Recorder {
   // recent real-time window: spread across the last ~28 min, oldest first.
   const span = recentW.length;
   recentW.forEach((v, i) => pts.push({ ts: now - (span - i) * 5 * 60_000 + 60_000, value: v }));
-  return {
-    insertSnapshot: () => {},
-    query: () => pts,
-    queryMulti: () => new Map(),
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  return makeRecorderStub({ query: () => pts });
 }
 
 const loadAlerts = (devices: Record<string, DeviceSnapshot>, rec: Recorder) =>
@@ -563,25 +567,21 @@ function energyRecorder(): Recorder & { queryMultiCount: number } {
   // Smooth, deterministic signal so trapezoidal integration is stable.
   const f = (ts: number) => 1000 + 500 * Math.sin(ts / 5_000_000);
   return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn, metrics, since, until, bucketSec) => {
-      n++;
-      const step = (bucketSec ?? 300) * 1000;
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const metric of metrics) {
-        const pts: Array<{ ts: number; value: number }> = [];
-        for (let t = Math.ceil(since / step) * step; t <= until; t += step) pts.push({ ts: t, value: f(t) });
-        m.set(metric, pts);
-      }
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({
+      queryMulti: (_sn, metrics, since, until, bucketSec) => {
+        n++;
+        const step = (bucketSec ?? 300) * 1000;
+        const m = new Map<string, Array<{ ts: number; value: number }>>();
+        for (const metric of metrics) {
+          const pts: Array<{ ts: number; value: number }> = [];
+          for (let t = Math.ceil(since / step) * step; t <= until; t += step) pts.push({ ts: t, value: f(t) });
+          m.set(metric, pts);
+        }
+        return m;
+      },
+    }),
     get queryMultiCount() { return n; },
-  } as Recorder & { queryMultiCount: number };
+  };
 }
 
 test('windowedEnergyWh — matches whole-window integral, memoizes completed days', () => {

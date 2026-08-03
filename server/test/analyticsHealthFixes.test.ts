@@ -31,6 +31,7 @@ import {
 import { setWeatherCacheForTesting, clearWeatherTestOverride } from '../src/weather.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ─── fixtures ───────────────────────────────────────────────────────── */
@@ -61,19 +62,14 @@ function oneDpuOnePack(sn = 'SN-RTE-0'): Record<string, DeviceSnapshot> {
 
 /** Recorder whose queryMulti serves a fixed map of metric → samples. */
 function recorderFor(series: Record<string, Array<{ ts: number; value: number }>>): Recorder {
-  return {
-    insertSnapshot: () => {},
+  return makeRecorderStub({
     query: (_sn, metric) => series[metric] ?? [],
     queryMulti: (_sn, metrics) => {
       const m = new Map<string, Array<{ ts: number; value: number }>>();
       for (const k of metrics) m.set(k, series[k] ?? []);
       return m;
     },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as Recorder;
+  });
 }
 
 /** Constant-watt samples every `stepMin` minutes over [startMs, startMs+spanMs). */
@@ -281,15 +277,9 @@ test('computeEvWindowPrediction — no spurious pattern from a single one-off cl
 function evCountingRecorder(series: Array<{ ts: number; value: number }> = []): Recorder & { queryCount: number } {
   let queryCount = 0;
   return {
-    insertSnapshot: () => {},
-    query: () => { queryCount++; return series; },
-    queryMulti: () => new Map(),
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({ query: () => { queryCount++; return series; } }),
     get queryCount() { return queryCount; },
-  } as unknown as Recorder & { queryCount: number };
+  };
 }
 
 test('computeEvWindowPrediction — an empty (0-session) result is returned but NOT cached (v0.56.1)', () => {
@@ -340,20 +330,16 @@ test('runwayHoursForPublish — null + healthy → sentinel; null + unavailable 
 function countingRecorder(): Recorder & { queryMultiCount: number } {
   let queryMultiCount = 0;
   return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn: string, metrics: string[]) => {
-      queryMultiCount++;
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({
+      queryMulti: (_sn, metrics) => {
+        queryMultiCount++;
+        const m = new Map<string, Array<{ ts: number; value: number }>>();
+        for (const k of metrics) m.set(k, []);
+        return m;
+      },
+    }),
     get queryMultiCount() { return queryMultiCount; },
-  } as unknown as Recorder & { queryMultiCount: number };
+  };
 }
 
 function shp2Snap(sn = 'SN-SC-SHP2'): Record<string, DeviceSnapshot> {
@@ -420,19 +406,9 @@ function forecastCountingRecorder(): Recorder & { queryCount: number } {
     { ts: now - 3_600_000, value: 100 },
   ];
   return {
-    insertSnapshot: () => {},
-    query: () => { queryCount++; return spanned; },
-    queryMulti: (_sn: string, metrics: string[]) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
+    ...makeRecorderStub({ query: () => { queryCount++; return spanned; } }),
     get queryCount() { return queryCount; },
-  } as unknown as Recorder & { queryCount: number };
+  };
 }
 
 /** An SHP2 wired to SN-FC-DPU (so it counts as a home-connected fleet member),

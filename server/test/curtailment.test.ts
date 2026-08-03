@@ -12,6 +12,7 @@ import {
   type WeatherForecast,
 } from '../src/weather.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ─── helpers ──────────────────────────────────────────────────────────
@@ -25,19 +26,9 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * ────────────────────────────────────────────────────────────────── */
 
 function emptyRecorder(): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn, metrics) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as Recorder;
+  // Every member is the shared stub's no-op default; queryMulti already yields an
+  // empty array per requested metric.
+  return makeRecorderStub();
 }
 
 /** Mock Bayesian posterior — wattsPerGHI is the μ for the current hour. */

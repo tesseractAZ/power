@@ -1,25 +1,38 @@
 /**
  * v0.19.0 — Unified Alert Console.
  *
- * One page for ALL alert-audio administration (merges the former Alert Settings
- * + Alert Console tabs):
+ * v1.60.0 — REORGANISED BY ALERT CATEGORY. The page used to be laid out by
+ * FUNCTION, which scattered everything about one severity across three separate
+ * cards: its enable switch in "Annunciation", its tone in "Tone per alert level",
+ * its spoken preview back in "Annunciation" again. An operator asking "what does
+ * High do?" had to read three cards and hold the answer in their head. Now:
  *
- *   1. Broadcast master controls — turn audible broadcasts on/off and set the
- *      volume LIVE (v0.18.0 /api/broadcast/config; env is the baseline, the
- *      override wins and persists).
- *   2. Annunciation — per-ISA-priority on/off switches (with the Critical-
- *      silence confirm), chime-repeat, and per-priority preview.
- *   3. Tone per alert level — assign the level's default klaxon, a named
- *      built-in tone (v0.17.0 library), or an uploaded custom tone; each
- *      previewable in the browser.
- *   4. Tone library — upload / list / delete custom .wav tones.
+ *   GLOBAL, above    — broadcast master (on/off, override disclosure)
+ *                    — announcement preview target (browser vs speakers)
+ *   ONE CARD PER CATEGORY, in rung order (critical → high → medium → low → clear)
+ *   GLOBAL, below    — built-in tone audition grid, uploaded tone library
+ *
+ * THE FOUR-VS-FIVE ASYMMETRY IS REAL AND IS NOT PAPERED OVER.
+ *
+ *   Tone assignment is per RUNG — five values, `clear` included; driven by
+ *   `data.levels` (the server's CHIME_LEVELS).
+ *   The enable switch and the spoken preview are per PRIORITY — four values;
+ *   driven by `ALARM_PRIORITY_ORDER`, `settings.priorityEnabled`, and
+ *   `POST /api/alert-preview`, which accepts an `AlarmPriority` only.
+ *
+ * There is no `priorityEnabled.clear` on the backend and no preview endpoint for
+ * it, so the fifth card renders TONE-ONLY and says why on the card. Inventing a
+ * dead toggle there would be a lie about what the server can do.
  *
  * THREE independent state objects, each bound to its own endpoint and replaced
  * wholesale on its own PUT — never merged, so one section's response can't
  * clobber another's:
- *   settings ← GET/PUT api/alert-settings   { priorities[], chimeRepeat }
+ *   settings ← GET/PUT api/alert-settings   { priorities[] }
  *   data     ← GET/PUT api/chimes,chime-config { levels, assignments, chimes[], builtinTones[] }
  *   bcastCfg ← GET/PUT api/broadcast/config  { enabled, volume, override, envBaseline, ... }
+ *
+ * `settings` failing to load degrades gracefully: the category cards still render
+ * and tone assignment still works — only the per-priority controls are withheld.
  *
  * All URLs are ingress-relative via apiUrl(). A bad/deleted/removed tone falls
  * back to the level klaxon server-side — an alarm is never silenced.
@@ -56,7 +69,7 @@ interface PriorityRow {
   id: AlarmPriority; label: string; isa: string; rank: number; tag: string;
   colorToken: string; description: string; response: string; enabled: boolean;
 }
-interface AlertSettingsResponse { priorities: PriorityRow[]; chimeRepeat: number; chimeRepeatDefault: number; updatedAt: number }
+interface AlertSettingsResponse { priorities: PriorityRow[]; updatedAt: number }
 
 type PreviewTarget = 'browser' | 'speakers';
 interface PreviewResponse {
@@ -76,6 +89,148 @@ interface BroadcastConfigResponse {
   envBaseline: { enabled: boolean };
 }
 
+/**
+ * Dot / ring / badge classes for a category card.
+ *
+ * Keyed by `LEVEL_TOKEN` — the RUNG colour vocabulary, which covers all five
+ * rungs. (`PRIORITY_META` carries the same colours but only for the four
+ * priorities, so it cannot dress the all-clear card.) The classes are written
+ * out as LITERALS rather than interpolated: `badge-*` are hand-authored in
+ * index.css and survive interpolation, but `bg-ok` / `border-ok/45` are real
+ * Tailwind utilities that only get emitted if the JIT scanner sees them here.
+ */
+interface Accent { dot: string; ring: string; badge: string }
+const ACCENT_BY_TOKEN: Record<string, Accent> = {
+  bad: { dot: 'bg-bad', ring: 'border-bad/45', badge: 'badge-bad' },
+  high: { dot: 'bg-high', ring: 'border-high/45', badge: 'badge-high' },
+  warn: { dot: 'bg-warn', ring: 'border-warn/45', badge: 'badge-warn' },
+  info: { dot: 'bg-info', ring: 'border-info/40', badge: 'badge-info' },
+  ok: { dot: 'bg-ok', ring: 'border-ok/45', badge: 'badge-ok' },
+};
+/** A rung this build doesn't know renders neutral rather than un-styled. */
+const UNKNOWN_ACCENT: Accent = { dot: 'bg-muted', ring: 'border-line', badge: 'badge-muted' };
+function accentFor(level: Level): Accent {
+  return ACCENT_BY_TOKEN[LEVEL_TOKEN[level]] ?? UNKNOWN_ACCENT;
+}
+
+/** The priority behind a rung, or null for rungs that have none (`clear`). */
+function priorityForLevel(level: Level): AlarmPriority | null {
+  return level === 'clear' ? null : level;
+}
+
+/* ─── one card per alert category ──────────────────────────────────── */
+
+interface CategoryCardProps {
+  level: Level;
+  /** Server-supplied rung label, e.g. "Critical (P1)" / "All-clear / Recovery". */
+  label: string;
+  accent: Accent;
+  /** The priority row, when this rung has one AND settings loaded. null → tone-only. */
+  row: PriorityRow | null;
+  /** Shown when `row` is null: WHY this card has no enable switch / spoken preview. */
+  toneOnlyNote?: string;
+  assignment: Assignment;
+  builtinTones: BuiltinTone[];
+  chimes: ChimeMeta[];
+  toneBusy: boolean;
+  toneError?: string;
+  toggling: boolean;
+  saveError?: string;
+  preview?: PreviewState;
+  target: PreviewTarget;
+  onAssign: (value: string) => void;
+  onPreviewTone: () => void;
+  onToggle: () => void;
+  onPreviewSpoken: () => void;
+}
+
+function CategoryCard(p: CategoryCardProps) {
+  const a = p.assignment;
+  const sel = a.kind === 'named' ? `named:${a.id}` : a.kind === 'custom' ? `custom:${a.id}` : 'builtin';
+  const pv = p.preview;
+  return (
+    <div className={`card border ${p.accent.ring}`}>
+      {/* identity + enable */}
+      <div className="flex items-start gap-3">
+        <span className={`mt-1.5 h-2.5 w-2.5 rounded-full inline-block shrink-0 ${p.accent.dot}`} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold">{p.label}</span>
+            <span className="text-[10px] uppercase tracking-widest text-muted">{p.level}</span>
+            {p.row && (
+              <>
+                <span className={`badge ${p.accent.badge} text-[10px]`}>{p.row.tag} · {p.row.isa}</span>
+                <span className="badge badge-muted text-[10px]">{p.row.response}</span>
+              </>
+            )}
+            {/* `clear` has no priority row and never will — it is a rung, not an
+              * alarm tier, so it has no ISA class and no response expectation.
+              * Any OTHER row-less card is a degraded priority (settings failed to
+              * load) and must NOT be dressed up as if it were the all-clear. */}
+            {p.level === 'clear' && <span className="badge badge-muted text-[10px]">No ISA priority</span>}
+          </div>
+          {p.row && <div className="text-xs text-muted mt-1 leading-relaxed">{p.row.description}</div>}
+          {p.toneOnlyNote && <div className="text-xs text-muted mt-1 leading-relaxed">{p.toneOnlyNote}</div>}
+        </div>
+        {p.row && (
+          <button type="button" onClick={p.onToggle} disabled={p.toggling}
+            role="switch" aria-checked={p.row.enabled}
+            aria-label={`${p.row.label} annunciation ${p.row.enabled ? 'on' : 'off'}`}
+            className={`badge shrink-0 self-start transition-colors disabled:opacity-50 ${p.row.enabled ? 'badge-ok' : 'badge-muted'}`}>
+            {p.toggling ? '…' : p.row.enabled ? 'ON' : 'OFF'}
+          </button>
+        )}
+      </div>
+      {/* the enable switch raised it, so the error belongs here — not in the page header */}
+      {p.saveError && <div className="mt-2 text-xs text-bad">Could not save: {p.saveError}</div>}
+
+      {/* tone — every rung, `clear` included */}
+      <div className="mt-3 pt-3 border-t border-line flex flex-wrap items-center gap-3">
+        <span className="text-[10px] uppercase tracking-widest text-muted shrink-0">Tone</span>
+        <select
+          className="bg-panel border border-line rounded px-2 py-1 text-sm text-ink min-w-[12rem]"
+          value={sel}
+          disabled={p.toneBusy}
+          aria-label={`Tone for ${p.label}`}
+          onChange={(e) => p.onAssign(e.target.value)}
+        >
+          <option value="builtin">Level klaxon (default)</option>
+          <optgroup label="Built-in tones">
+            {p.builtinTones.map((t) => <option key={t.id} value={`named:${t.id}`}>{t.displayName}</option>)}
+          </optgroup>
+          {p.chimes.length > 0 && (
+            <optgroup label="Uploaded tones">
+              {p.chimes.map((c) => <option key={c.id} value={`custom:${c.id}`}>{c.originalName}</option>)}
+            </optgroup>
+          )}
+        </select>
+        <button type="button" className="badge badge-muted hover:bg-muted/20 transition-colors"
+          onClick={p.onPreviewTone}>▶ Preview tone</button>
+        {p.toneBusy && <span className="text-[11px] text-muted">saving…</span>}
+      </div>
+      {p.toneError && <div className="mt-2 text-xs text-bad">{p.toneError}</div>}
+
+      {/* spoken announcement — priorities only (/api/alert-preview takes an AlarmPriority) */}
+      {p.row && (
+        <>
+          <div className="mt-3 pt-3 border-t border-line flex items-center gap-3 flex-wrap">
+            <span className="text-[10px] uppercase tracking-widest text-muted shrink-0">Announcement</span>
+            <button type="button" onClick={p.onPreviewSpoken} disabled={pv?.busy}
+              className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-50">
+              {pv?.busy ? 'Preview…' : 'Preview ▶'}
+            </button>
+            <span className="text-[11px] text-muted">{p.target === 'browser' ? 'plays in this browser' : 'broadcasts to speakers'}</span>
+            {pv?.status && <span className="text-xs text-accent">{pv.status}</span>}
+            {pv?.error && <span className="text-xs text-bad">{pv.error}</span>}
+          </div>
+          {pv?.spokenText && (
+            <div className="mt-1.5 text-xs text-muted leading-relaxed">Will announce: <span className="text-ink">“{pv.spokenText}”</span></div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 /* ─── component ────────────────────────────────────────────────────── */
 
@@ -88,11 +243,14 @@ export function AlertConsolePanel() {
   const [bcastCfg, setBcastCfg] = useState<BroadcastConfigResponse | null>(null);
 
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null); // a level id, 'upload', a chime id, 'bcast', or 'chime'/priority id
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null); // a level id, 'upload', a chime id, or 'bcast'
+  const [error, setError] = useState<string | null>(null);   // page-level (upload / delete / broadcast / library audition)
   const [notice, setNotice] = useState<string | null>(null);
-  const [savingId, setSavingId] = useState<AlarmPriority | 'chime' | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savingId, setSavingId] = useState<AlarmPriority | null>(null);
+  // Errors that belong to ONE category are rendered on that category's card,
+  // next to the control that raised them, instead of in the page header.
+  const [saveError, setSaveError] = useState<Partial<Record<AlarmPriority, string>>>({});
+  const [levelError, setLevelError] = useState<Partial<Record<Level, string>>>({});
   const [target, setTarget] = useState<PreviewTarget>('browser');
   const [preview, setPreview] = useState<Partial<Record<AlarmPriority, PreviewState>>>({});
   const [confirmDisableCritical, setConfirmDisableCritical] = useState(false);
@@ -125,7 +283,7 @@ export function AlertConsolePanel() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = (await r.json()) as AlertSettingsResponse;
       if (liveRef.current) setSettings(j);
-    } catch { /* the annunciation section just won't render */ }
+    } catch { /* per-priority controls degrade to tone-only; tone assignment still works */ }
   }
   async function loadBcast() {
     try {
@@ -141,6 +299,12 @@ export function AlertConsolePanel() {
     setData(j);
     if (j.rejected && j.rejected.length) setError(j.rejected.join('; '));
   }
+
+  /** Error sink scoped to one category card. Same shape as setError. */
+  const levelSink = (level: Level) => (msg: string | null) => {
+    if (!liveRef.current) return;
+    setLevelError((m) => ({ ...m, [level]: msg ?? undefined }));
+  };
 
   /* ── broadcast master controls ─────────────────────────────────────── */
 
@@ -160,13 +324,14 @@ export function AlertConsolePanel() {
     }
   }
 
-  /* ── per-priority annunciation (lifted from Alert Settings) ─────────── */
+  /* ── per-priority annunciation ─────────────────────────────────────── */
 
   const putSettings = async (
-    patch: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>>; chimeRepeat?: number },
-    saving: AlarmPriority | 'chime',
+    patch: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>> },
+    saving: AlarmPriority,
   ) => {
-    setSavingId(saving); setSaveError(null);
+    setSavingId(saving);
+    setSaveError((m) => ({ ...m, [saving]: undefined }));
     try {
       const r = await fetch(apiUrl('api/alert-settings'), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
@@ -175,7 +340,7 @@ export function AlertConsolePanel() {
       const j = (await r.json()) as AlertSettingsResponse;
       if (liveRef.current) setSettings(j);
     } catch (e: any) {
-      if (liveRef.current) setSaveError(String(e?.message ?? e));
+      if (liveRef.current) setSaveError((m) => ({ ...m, [saving]: String(e?.message ?? e) }));
     } finally {
       if (liveRef.current) setSavingId(null);
     }
@@ -187,11 +352,6 @@ export function AlertConsolePanel() {
   const confirmCriticalOff = () => {
     setConfirmDisableCritical(false);
     putSettings({ priorityEnabled: { critical: false } }, 'critical');
-  };
-  const setChime = (n: number) => {
-    const clamped = Math.max(1, Math.min(4, Math.round(n)));
-    if (settings && clamped === settings.chimeRepeat) return;
-    putSettings({ chimeRepeat: clamped }, 'chime');
   };
 
   const runPreview = async (row: PriorityRow) => {
@@ -228,7 +388,8 @@ export function AlertConsolePanel() {
   /* ── tone assignment + library ─────────────────────────────────────── */
 
   async function assign(level: Level, value: string) {
-    setBusy(level); setError(null); setNotice(null);
+    const sink = levelSink(level);
+    setBusy(level); sink(null); setNotice(null);
     let assignment: Assignment;
     if (value.startsWith('named:')) assignment = { kind: 'named', id: value.slice(6) };
     else if (value.startsWith('custom:')) assignment = { kind: 'custom', id: value.slice(7) };
@@ -241,7 +402,7 @@ export function AlertConsolePanel() {
       const j = (await r.json()) as ConsoleResponse;
       applyConsole(j);
     } catch (e: any) {
-      if (liveRef.current) setError(String(e?.message ?? e));
+      sink(String(e?.message ?? e));
     } finally {
       if (liveRef.current) setBusy(null);
     }
@@ -283,27 +444,32 @@ export function AlertConsolePanel() {
     }
   }
 
-  async function playUrl(url: string) {
-    setError(null);
+  /**
+   * Play a tone URL, reporting into `sink` — the page header for the global
+   * library/audition buttons, or the owning category card for its own preview.
+   */
+  async function playUrl(url: string, sink: (msg: string | null) => void = setError) {
+    sink(null);
     // Precheck the asset exists — a deleted/reassigned tone now hard-404s
     // (server SPA fallback no longer masks it as HTML 200). Distinguish a
     // genuinely-missing file from a browser autoplay block.
     try {
       const head = await fetch(url, { method: 'HEAD' });
       if (!head.ok) {
-        setError('Tone file missing — reassign or re-upload');
+        sink('Tone file missing — reassign or re-upload');
         return;
       }
     } catch {
-      setError('Tone file missing — reassign or re-upload');
+      sink('Tone file missing — reassign or re-upload');
       return;
     }
-    new Audio(url).play().catch(() => setError('Browser blocked autoplay — click Preview again.'));
+    new Audio(url).play().catch(() => sink('Browser blocked autoplay — click Preview again.'));
   }
   function previewAssigned(level: Level, a: Assignment) {
-    if (a.kind === 'named') return playUrl(apiUrl(`audio/${a.id}.wav`));
-    if (a.kind === 'custom') return playUrl(apiUrl(`chimes/${a.id}.wav`));
-    return playUrl(apiUrl(`audio/${KLAXON_FILE[level]}.wav`)); // default klaxon
+    const sink = levelSink(level);
+    if (a.kind === 'named') return playUrl(apiUrl(`audio/${a.id}.wav`), sink);
+    if (a.kind === 'custom') return playUrl(apiUrl(`chimes/${a.id}.wav`), sink);
+    return playUrl(apiUrl(`audio/${KLAXON_FILE[level]}.wav`), sink); // default klaxon
   }
 
   const fmtDur = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
@@ -319,13 +485,20 @@ export function AlertConsolePanel() {
   }
   if (!data) return <div className="card"><div className="card-title">Alert Console</div><div className="text-muted text-sm mt-2">Loading…</div></div>;
 
-  const rows: PriorityRow[] = settings && settings.priorities.length > 0
-    ? settings.priorities
-    : ALARM_PRIORITY_ORDER.map((id) => ({
-        id, label: PRIORITY_META[id].label, isa: PRIORITY_META[id].isa, rank: PRIORITY_META[id].rank,
-        tag: PRIORITY_META[id].tag, colorToken: '', description: PRIORITY_META[id].description,
-        response: PRIORITY_META[id].response, enabled: true,
-      }));
+  // Per-priority rows. ONLY populated when `settings` loaded — a failed load must
+  // withhold the enable switch and spoken preview rather than render an enable
+  // state we don't actually know. (When settings loaded but carries no rows, the
+  // PRIORITY_META fallback keeps the taxonomy visible, as before.)
+  const rows: PriorityRow[] = !settings
+    ? []
+    : settings.priorities.length > 0
+      ? settings.priorities
+      : ALARM_PRIORITY_ORDER.map((id) => ({
+          id, label: PRIORITY_META[id].label, isa: PRIORITY_META[id].isa, rank: PRIORITY_META[id].rank,
+          tag: PRIORITY_META[id].tag, colorToken: '', description: PRIORITY_META[id].description,
+          response: PRIORITY_META[id].response, enabled: true,
+        }));
+  const rowById = new Map<AlarmPriority, PriorityRow>(rows.map((r) => [r.id, r]));
   const criticalOff = rows.some((r) => r.id === 'critical' && !r.enabled);
   const overrideActive = !!bcastCfg && (bcastCfg.override.enabled != null);
 
@@ -338,15 +511,16 @@ export function AlertConsolePanel() {
           <span className="text-xs text-muted normal-case tracking-normal">broadcast · annunciation · tones</span>
         </div>
         <p className="text-sm text-muted mt-2 leading-relaxed">
-          Central control for alert audio: turn broadcasts on/off, silence or sound each ISA
-          priority, and choose the tone that <span className="text-ink">prepends</span> each alert level’s spoken
-          announcement. A missing or deleted tone safely falls back to the built-in klaxon — an alarm is never silenced.
+          Central control for alert audio, <span className="text-ink">one block per alert category</span>: silence or
+          sound each ISA priority, choose the tone that prepends its spoken announcement, and hear exactly what it will
+          say. A missing or deleted tone safely falls back to the built-in klaxon — an alarm is never silenced.
         </p>
+        {/* Page-level problems only. Anything a single category raised is shown on that card. */}
         {error && <div className="text-bad text-sm mt-2">✕ {error}</div>}
         {notice && <div className="text-ok text-sm mt-2">✓ {notice}</div>}
       </div>
 
-      {/* ─── 1. broadcast master controls ───────────────────────────── */}
+      {/* ─── GLOBAL: broadcast master controls ──────────────────────── */}
       {bcastCfg && (
         <div className="card">
           <div className="card-title">Audible broadcasts</div>
@@ -403,7 +577,7 @@ export function AlertConsolePanel() {
         </div>
       )}
 
-      {/* ─── 2. annunciation: critical-off banner ───────────────────── */}
+      {/* ─── critical-silenced banner ───────────────────────────────── */}
       {criticalOff && (
         <div className="card border border-bad/55 bg-bad/10">
           <div className="flex items-start gap-2 text-sm">
@@ -416,135 +590,70 @@ export function AlertConsolePanel() {
         </div>
       )}
 
-      {/* ─── 2. annunciation: chime repeat + preview target ─────────── */}
+      {/* ─── GLOBAL: where the spoken preview plays ─────────────────── */}
       {settings && (
         <div className="card">
-          <div className="card-title">Annunciation</div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-panel2/60 border border-line rounded-lg p-3">
-              <div className="text-[10px] uppercase tracking-widest text-muted">Chime repeats <span className="normal-case tracking-normal opacity-70">(default {settings.chimeRepeatDefault})</span></div>
-              <div className="text-xs text-muted mt-1 leading-relaxed">How many times the klaxon sounds before the spoken announcement on a new alarm.</div>
-              <div className="flex items-center gap-2 mt-2">
-                <button type="button" onClick={() => setChime(settings.chimeRepeat - 1)}
-                  disabled={savingId === 'chime' || settings.chimeRepeat <= 1}
-                  className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-40 text-base leading-none px-3"
-                  aria-label="Decrease chime repeats">−</button>
-                <span className="text-2xl font-bold tabular-nums w-8 text-center">{settings.chimeRepeat}</span>
-                <button type="button" onClick={() => setChime(settings.chimeRepeat + 1)}
-                  disabled={savingId === 'chime' || settings.chimeRepeat >= 4}
-                  className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-40 text-base leading-none px-3"
-                  aria-label="Increase chime repeats">+</button>
-                <span className="text-[11px] text-muted ml-1">min 1 · max 4</span>
-              </div>
-            </div>
-            <div className="bg-panel2/60 border border-line rounded-lg p-3">
-              <div className="text-[10px] uppercase tracking-widest text-muted">Preview target</div>
-              <div className="text-xs text-muted mt-1 leading-relaxed">Where the per-priority Preview plays the announcement.</div>
-              <div className="flex bg-panel border border-line rounded-lg overflow-hidden mt-2 w-max text-xs">
-                <button type="button" onClick={() => setTarget('browser')}
-                  className={`px-3 py-1 transition-colors ${target === 'browser' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}>In browser</button>
-                <button type="button" onClick={() => setTarget('speakers')}
-                  className={`px-3 py-1 transition-colors ${target === 'speakers' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}>On speakers</button>
-              </div>
-            </div>
+          <div className="card-title">Announcement preview</div>
+          <div className="text-xs text-muted mt-1 leading-relaxed">
+            Where the <span className="text-ink">Preview ▶</span> button on each category below plays that category’s
+            spoken announcement. Tone previews always play in this browser.
           </div>
-          {saveError && <div className="mt-3 text-xs text-bad">Could not save: {saveError}</div>}
+          <div className="flex bg-panel border border-line rounded-lg overflow-hidden mt-2 w-max text-xs">
+            <button type="button" onClick={() => setTarget('browser')}
+              className={`px-3 py-1 transition-colors ${target === 'browser' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}>In browser</button>
+            <button type="button" onClick={() => setTarget('speakers')}
+              className={`px-3 py-1 transition-colors ${target === 'speakers' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-ink'}`}>On speakers</button>
+          </div>
         </div>
       )}
 
-      {/* ─── 2. annunciation: per-priority switches + preview ───────── */}
-      {settings && rows.map((row) => {
-        const meta = PRIORITY_META[row.id];
-        const pv = preview[row.id];
-        const toggling = savingId === row.id;
+      {/* ─── ONE CARD PER ALERT CATEGORY ────────────────────────────────
+        * Driven by `data.levels` (the server's CHIME_LEVELS) rather than the
+        * local LEVELS constant, so a rung the server gains can never go
+        * silently unlisted. `alarmLevels.LEVELS` pins the expected order and
+        * membership — server/test/alarmLevelWebMirror.test.ts asserts they agree. */}
+      {data.levels.map((lvl) => {
+        const priority = priorityForLevel(lvl);
+        const row = priority ? rowById.get(priority) ?? null : null;
+        const toneOnlyNote = !row
+          ? priority
+            ? 'Annunciation settings didn’t load, so the enable switch and spoken preview are hidden. Tone assignment still works.'
+            : 'Recovery has no enable switch — an all-clear is the absence of an alarm, not one you can silence. It has no spoken preview either.'
+          : undefined;
         return (
-          <div key={row.id} className={`card border ${meta.ring}`}>
-            <div className="flex items-start gap-3">
-              <span className={`mt-1.5 h-2.5 w-2.5 rounded-full inline-block shrink-0 ${meta.dot}`} />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-sm font-semibold">{row.label}</span>
-                  <span className={`badge ${meta.badge} text-[10px]`}>{row.label} · {row.isa}</span>
-                  <span className="badge badge-muted text-[10px]">{row.response}</span>
-                </div>
-                <div className="text-xs text-muted mt-1 leading-relaxed">{row.description}</div>
-              </div>
-              <button type="button" onClick={() => toggle(row)} disabled={toggling}
-                role="switch" aria-checked={row.enabled}
-                aria-label={`${row.label} annunciation ${row.enabled ? 'on' : 'off'}`}
-                className={`badge shrink-0 self-start transition-colors disabled:opacity-50 ${row.enabled ? 'badge-ok' : 'badge-muted'}`}>
-                {toggling ? '…' : row.enabled ? 'ON' : 'OFF'}
-              </button>
-            </div>
-            <div className="mt-3 pt-3 border-t border-line flex items-center gap-3 flex-wrap">
-              <button type="button" onClick={() => runPreview(row)} disabled={pv?.busy}
-                className="badge badge-muted hover:bg-muted/20 transition-colors disabled:opacity-50">
-                {pv?.busy ? 'Preview…' : 'Preview ▶'}
-              </button>
-              <span className="text-[11px] text-muted">{target === 'browser' ? 'plays in this browser' : 'broadcasts to speakers'}</span>
-              {pv?.status && <span className="text-xs text-accent">{pv.status}</span>}
-              {pv?.error && <span className="text-xs text-bad">{pv.error}</span>}
-            </div>
-            {pv?.spokenText && (
-              <div className="mt-1.5 text-xs text-muted leading-relaxed">Will announce: <span className="text-ink">“{pv.spokenText}”</span></div>
-            )}
-          </div>
+          <CategoryCard
+            key={lvl}
+            level={lvl}
+            label={data.levelLabels[lvl] ?? lvl}
+            accent={accentFor(lvl)}
+            row={row}
+            toneOnlyNote={toneOnlyNote}
+            assignment={data.assignments[lvl]}
+            builtinTones={data.builtinTones}
+            chimes={data.chimes}
+            toneBusy={busy === lvl}
+            toneError={levelError[lvl]}
+            toggling={!!priority && savingId === priority}
+            saveError={priority ? saveError[priority] : undefined}
+            preview={priority ? preview[priority] : undefined}
+            target={target}
+            onAssign={(v) => void assign(lvl, v)}
+            onPreviewTone={() => void previewAssigned(lvl, data.assignments[lvl])}
+            onToggle={() => { if (row) toggle(row); }}
+            onPreviewSpoken={() => { if (row) void runPreview(row); }}
+          />
         );
       })}
 
-      {/* ─── 3. tone per alert level ────────────────────────────────── */}
-      <div className="card">
-        <div className="card-title">Tone per alert level</div>
-        <p className="text-[11px] text-muted mt-1 leading-relaxed">
-          Pick the default klaxon, a built-in tone, or one of your uploads to prepend each level’s announcement.
-          Critical/High → red · Medium/Low → yellow · green = recovery only.
-        </p>
-        <div className="mt-3 space-y-2">
-          {data.levels.map((lvl) => {
-            const a = data.assignments[lvl];
-            const sel = a.kind === 'named' ? `named:${a.id}` : a.kind === 'custom' ? `custom:${a.id}` : 'builtin';
-            return (
-              <div key={lvl} className="bg-panel2/60 border border-line rounded-lg p-3 flex flex-wrap items-center gap-3">
-                <span className={`badge badge-${LEVEL_TOKEN[lvl]} shrink-0`}>{data.levelLabels[lvl]}</span>
-                <span className="text-[10px] uppercase tracking-widest text-muted shrink-0">{lvl}</span>
-                <select
-                  className="bg-panel border border-line rounded px-2 py-1 text-sm text-ink min-w-[12rem]"
-                  value={sel}
-                  disabled={busy === lvl}
-                  onChange={(e) => assign(lvl, e.target.value)}
-                >
-                  <option value="builtin">Level klaxon (red / yellow / green)</option>
-                  <optgroup label="Built-in tones">
-                    {data.builtinTones.map((t) => (
-                      <option key={t.id} value={`named:${t.id}`}>{t.displayName}</option>
-                    ))}
-                  </optgroup>
-                  {data.chimes.length > 0 && (
-                    <optgroup label="Uploaded tones">
-                      {data.chimes.map((c) => (
-                        <option key={c.id} value={`custom:${c.id}`}>{c.originalName}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                </select>
-                <button type="button" className="badge badge-muted hover:bg-muted/20 transition-colors"
-                  onClick={() => previewAssigned(lvl, a)}>▶ Preview</button>
-                {busy === lvl && <span className="text-[11px] text-muted">saving…</span>}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ─── 3b. audition the built-in tones ────────────────────────── */}
+      {/* ─── GLOBAL: audition the built-in tones ────────────────────── */}
       <div className="card">
         <div className="card-title">Built-in tones</div>
-        <p className="text-[11px] text-muted mt-1">Audition any system tone, then pick it for a level above.</p>
+        <p className="text-[11px] text-muted mt-1">Audition any system tone, then pick it for a category above.</p>
         <div className="mt-3 flex flex-wrap gap-2">
           {data.builtinTones.map((t) => (
             <button key={t.id} type="button"
               className="badge badge-muted hover:bg-muted/20 transition-colors"
-              onClick={() => playUrl(apiUrl(`audio/${t.id}.wav`))}
+              onClick={() => void playUrl(apiUrl(`audio/${t.id}.wav`))}
               title={t.id}>
               ▶ {t.displayName}
             </button>
@@ -552,7 +661,7 @@ export function AlertConsolePanel() {
         </div>
       </div>
 
-      {/* ─── 4. tone library + upload ───────────────────────────────── */}
+      {/* ─── GLOBAL: tone library + upload ──────────────────────────── */}
       <div className="card">
         <div className="flex items-center justify-between gap-2">
           <div className="card-title">Tone library (your uploads)</div>
@@ -583,12 +692,12 @@ export function AlertConsolePanel() {
                   </span>
                 )}
                 {usedBy.length > 0 && (
-                  <span className="text-[10px] text-accent shrink-0">in use: {usedBy.map((l) => data.levelLabels[l]).join(', ')}</span>
+                  <span className="text-[10px] text-accent shrink-0">in use: {usedBy.map((l) => data.levelLabels[l] ?? l).join(', ')}</span>
                 )}
                 <button type="button" className="badge badge-muted hover:bg-muted/20 transition-colors"
-                  onClick={() => playUrl(apiUrl(`chimes/${c.id}.wav`))}>▶ Preview</button>
+                  onClick={() => void playUrl(apiUrl(`chimes/${c.id}.wav`))}>▶ Preview</button>
                 <button type="button" className="badge badge-bad hover:bg-bad/25 transition-colors disabled:opacity-50"
-                  disabled={busy === c.id} onClick={() => remove(c.id)}>{busy === c.id ? '…' : 'Delete'}</button>
+                  disabled={busy === c.id} onClick={() => void remove(c.id)}>{busy === c.id ? '…' : 'Delete'}</button>
               </div>
             );
           })}

@@ -27,6 +27,7 @@ import { visLen } from '../src/telnet/ansi.js';
 import type { FleetSnapshot, DeviceSnapshot } from '../src/snapshot.js';
 import type { DpuProjection, Shp2Projection } from '../src/ecoflow/project.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 
 /* ── fixture ───────────────────────────────────────────────────────────── */
 
@@ -130,7 +131,11 @@ function buildSnapshot(opts: { numDpus?: number; includeShp2?: boolean; numAlert
     ? Array.from({ length: opts.numAlerts }, (_, i) => ({
         id: `test-alert-${i}-${dpus[0].sn}`,
         severity: i === 0 ? 'critical' as const : i < 3 ? 'warning' as const : 'info' as const,
-        category: i === 0 ? 'thermal' : i < 3 ? 'battery' : 'connectivity',
+        // Alert.category is a capitalised union ('Battery' | 'Solar' | 'Thermal' |
+        // 'SHP2' | 'Grid' | 'Connectivity'); these fixtures had been emitting
+        // lowercase strings that no real alert ever carries. alm.ts lowercases for
+        // grouping and uppercases for display, so the rendered output is identical.
+        category: i === 0 ? ('Thermal' as const) : i < 3 ? ('Battery' as const) : ('Connectivity' as const),
         title: `Test alert ${i}`,
         detail: `Detailed description of alert ${i} for testing column truncation handling`,
         device: dpus[0].deviceName,
@@ -142,19 +147,9 @@ function buildSnapshot(opts: { numDpus?: number; includeShp2?: boolean; numAlert
 }
 
 function mockRecorder(): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn, metrics) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  };
+  // Every member is the shared stub's no-op default; queryMulti already yields an
+  // empty array per requested metric.
+  return makeRecorderStub();
 }
 
 function mockDegradation(): any {

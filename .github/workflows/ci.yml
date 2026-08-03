@@ -39,6 +39,36 @@ jobs:
         working-directory: ${{ matrix.project }}
         run: ./node_modules/.bin/tsc --noEmit -p tsconfig.json
 
+  typecheck-server-tests:
+    # server/tsconfig.json includes ONLY src/**/*.ts — correct, because it drives
+    # `outDir: dist` and test/ must never be emitted. The side effect was that
+    # NOTHING type-checked the 188 test files: tsx strips types at runtime, so the
+    # suite could go green while its stubs drifted arbitrarily far from the
+    # interfaces they impersonate. It had: every hand-rolled Recorder stub was 10
+    # required members behind, hidden by `… as unknown as Recorder`, and ~10
+    # fixtures were missing fields their production types had gained.
+    #
+    # tsconfig.test.json is check-only (noEmit) and covers src + test under the
+    # same strict options. This job is what keeps that from rotting again.
+    name: Type-check server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install
+        working-directory: server
+        run: npm ci
+
+      - name: tsc --noEmit (src + test)
+        working-directory: server
+        run: ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json
+
   server-tests:
     name: Server tests
     runs-on: ubuntu-latest
@@ -62,6 +92,15 @@ jobs:
       - name: npm test
         working-directory: server
         run: npm test
+
+  no-secrets:
+    name: No personal data in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Scan tracked files for home addresses / personal identifiers
+        run: python3 scripts/check-no-secrets.py
 
   addon-config:
     name: Validate add-on config + translations

@@ -12,6 +12,7 @@ import {
 } from '../src/weather.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ─── computeClipping — POSITIVE path ───────────────────────────────────
@@ -129,8 +130,7 @@ function buildWeather(ghi: number): WeatherForecast {
  */
 function recorderWithPv(wattsByHour: (hourOfDay: number) => number): Recorder {
   const todayStart = startOfLocalDayMs();
-  return {
-    insertSnapshot: () => {},
+  return makeRecorderStub({
     query: (_sn, metric) => {
       if (metric !== 'pv_total') return [];
       const pts: Array<{ ts: number; value: number }> = [];
@@ -141,16 +141,8 @@ function recorderWithPv(wattsByHour: (hourOfDay: number) => number): Recorder {
       }
       return pts;
     },
-    queryMulti: (_sn, metrics) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
     listMetrics: () => ['pv_total'],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  });
 }
 
 /** Local hours-of-day that are fully or partially elapsed at `now`. */

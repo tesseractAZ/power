@@ -38,7 +38,10 @@ function withEnv(env: Record<string, string | undefined>, fn: () => void) {
 }
 
 function clearOverride() {
-  updateBroadcastRuntimeConfig({ enabled: null, volume: null }, 'test');
+  // `volume` used to be part of the runtime override; it was dropped from
+  // BroadcastRuntimeConfig and updateBroadcastRuntimeConfig has ignored it ever
+  // since, so passing it was a silent no-op. Behaviour is unchanged by removing it.
+  updateBroadcastRuntimeConfig({ enabled: null }, 'test');
 }
 
 test('defaults — enabled is null (defer to env baseline)', () => {
@@ -123,15 +126,20 @@ test('persistence — override survives a cache reset (re-read from disk)', () =
 test('update notifies listeners synchronously (the closure-coherence mechanism)', () => {
   // broadcast.ts relies on this to refresh its closure cfg the instant a UI
   // toggle lands, so /api/broadcast/config echoes the change without a tick.
-  let seen: { enabled: boolean | null } | null = null;
-  const off = onBroadcastRuntimeConfigChange((c) => { seen = c; });
+  // Collected into an array rather than a `let … = null` sentinel: TypeScript's
+  // control-flow analysis cannot see that the listener ran, so it keeps the
+  // variable narrowed to `null` and `seen!.enabled` resolves against `never`.
+  // An array records the same evidence (fired / did not fire, with the payload)
+  // without fighting the narrowing.
+  const seen: Array<{ enabled: boolean | null }> = [];
+  const off = onBroadcastRuntimeConfigChange((c) => { seen.push(c); });
   updateBroadcastRuntimeConfig({ enabled: true }, 'test');
-  assert.ok(seen, 'listener fired synchronously on update');
-  assert.equal(seen!.enabled, true);
+  assert.equal(seen.length, 1, 'listener fired synchronously on update');
+  assert.equal(seen[0].enabled, true);
   off();
-  seen = null;
+  seen.length = 0;
   updateBroadcastRuntimeConfig({ enabled: false }, 'test');
-  assert.equal(seen, null, 'unsubscribed listener is not called');
+  assert.equal(seen.length, 0, 'unsubscribed listener is not called');
   clearOverride();
 });
 

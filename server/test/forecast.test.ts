@@ -28,6 +28,7 @@ import {
 } from '../src/weather.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /* ─── shared helpers ─────────────────────────────────────────────────
@@ -54,6 +55,7 @@ function flatSolarModel(overrides: Partial<Record<number, Partial<HourResponse>>
   return {
     hourly: flatSolarHourly(overrides),
     peakCoeff: 0,
+    peakGateMinGhiWm2: 300,
     pairCount: 0,
     historyDays: 30,
   };
@@ -70,7 +72,21 @@ function emptyForecast(overrides: Partial<DayForecast> = {}): DayForecast {
     typicalPvWhPerDay: 50_000,
     minProjectedSoc: null,
     minProjectedSocTs: null,
+    // v0.75.0/v0.78.0 additions. The fixture has no SHP2, so the honest
+    // coverage basis is 0 connected / 0 reporting and never "partial"
+    // (coveragePartial requires an SHP2). The *Display fields and
+    // restoredSolarModel mirror the reporting-basis values, which is exactly
+    // what production emits when every connected Core is reporting — and what
+    // the `?? forecast.solarModel` / `?? fc.forecastPvWhNext24` fallbacks that
+    // ran while these fields were absent already resolved to, so behaviour is
+    // unchanged.
+    homeDpusConnected: 0,
+    homeDpusReporting: 0,
+    homeDpusCoveragePartial: false,
+    forecastPvWhNext24Display: 50_000,
+    typicalPvWhPerDayDisplay: 50_000,
     solarModel: flatSolarModel(),
+    restoredSolarModel: flatSolarModel(),
     deviceModels: [],
     soiling: null,
     ...overrides,
@@ -131,19 +147,9 @@ function syntheticWeather(opts: {
  *  we're not exercising (skill needs actual PV samples; we test the empty
  *  edge cases). */
 function emptyRecorder(): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn, metrics) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as Recorder;
+  // Every member is the shared stub's no-op default; queryMulti already yields an
+  // empty array per requested metric.
+  return makeRecorderStub();
 }
 
 /** Tomorrow's local midnight, useful as a reproducible anchor for the

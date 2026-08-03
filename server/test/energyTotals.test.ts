@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { computeRoundTripEfficiency, resetRteCache } from '../src/analytics.js';
 import { integrateWh } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
+import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
 /**
@@ -29,9 +30,7 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * the whole RTE window. `inW` drives charge, `outW` drives discharge.
  */
 function fixedWattRecorder(inW: number, outW: number): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: () => [],
+  return makeRecorderStub({
     queryMulti: (_sn, metrics, since, until) => {
       const m = new Map<string, Array<{ ts: number; value: number }>>();
       const step = 5 * 60_000; // 5-min cadence, well under integrateWh's 10-min maxGap
@@ -44,27 +43,13 @@ function fixedWattRecorder(inW: number, outW: number): Recorder {
       }
       return m;
     },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  });
 }
 
 function emptyRecorder(): Recorder {
-  return {
-    insertSnapshot: () => {},
-    query: () => [],
-    queryMulti: (_sn, metrics) => {
-      const m = new Map<string, Array<{ ts: number; value: number }>>();
-      for (const k of metrics) m.set(k, []);
-      return m;
-    },
-    listMetrics: () => [],
-    close: () => {},
-    rollupLifetime: () => {},
-    getLifetimeTotals: () => ({}),
-  } as unknown as Recorder;
+  // The stub's default queryMulti already returns an empty array per requested
+  // metric, which is exactly what this fixture wants.
+  return makeRecorderStub();
 }
 
 function oneDpu(packs = 1): Record<string, DeviceSnapshot> {

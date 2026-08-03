@@ -4867,11 +4867,13 @@ Served at **`/api/root-cause?alertId=<id>`** → `{ causes }`.
 
 ### 11. Alert-annunciation settings — `alertSettings.ts`
 
-A small user-mutable layer on top of the env baseline, persisted atomically to `ALERT_SETTINGS_PATH` (default sibling of DB). `AlertSettings`: `priorityEnabled: Record<AlarmPriority, boolean>` (default all true) and `chimeRepeat` (1–4, `DEFAULT_CHIME_REPEAT` = 2).
+A small user-mutable layer on top of the env baseline, persisted atomically to `ALERT_SETTINGS_PATH` (default sibling of DB). `AlertSettings`: `priorityEnabled: Record<AlarmPriority, boolean>` (default all true).
 
-**SEMANTICS.** Disabling a priority silences its *annunciation* (push + audible + chime) — it does NOT hide the alarm (the alert stays in the lists, rendered muted). In the monitor's `dispatch()`, `isPriorityEnabled(priorityOf(alert))` false → the push is `'suppressed'`. `getChimeRepeat()` drives the audible path.
+`sanitize()` starts from `defaults()` and copies across only RECOGNISED keys, so a persisted file written by an older build (carrying a knob a later build retired) loads cleanly and the stale field disappears on the next write — removing a settings field needs no migration.
 
-Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-process, read-rate-limited 120/60 s) and **`PUT /api/alert-settings`** (`{priorityEnabled?, chimeRepeat?}`, write-auth-gated, audit-logged, notifies listeners e.g. to re-publish HA switch states).
+**SEMANTICS.** Disabling a priority silences its *annunciation* (push + audible + chime) — it does NOT hide the alarm (the alert stays in the lists, rendered muted). In the monitor's `dispatch()`, `isPriorityEnabled(priorityOf(alert))` false → the push is `'suppressed'`.
+
+Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-process, read-rate-limited 120/60 s) and **`PUT /api/alert-settings`** (`{priorityEnabled?}`, write-auth-gated, audit-logged, notifies listeners e.g. to re-publish HA switch states).
 
 ---
 
@@ -5617,7 +5619,7 @@ most need auditing.
 `renderAnnouncement(opts)` assembles one WAV, per repeated/language block:
 
 ```
-[lead-in silence][chime × chimeRepeat][chime gap][TTS pass] ... [terminator]
+[lead-in silence][chime][chime gap][TTS pass] ... [terminator]
 ```
 
 Multiple blocks are joined with `repeatGapMs` of silence. The full ordering is
@@ -5630,7 +5632,6 @@ Timing knobs (all resolved once and folded into the cache key):
 | Knob | Default | Meaning |
 |------|---------|---------|
 | `leadSilenceMs` | 1500 ms | Digital silence before the first chime so AirPlay/multi-room speakers sync up (prevents clipped chime starts + slow devices missing short clips). 0 disables. |
-| `chimeRepeat` (`getChimeRepeat()`) | 2 | Times the chime plays inside each block. Clamped 1..4 by settings; hard-capped at `MAX_CHIME_REPEAT = 8` at the allocation site. |
 | `chimeGapMs` | 1000 ms | Silence after the chime group, before the spoken message (chime decays first). |
 | `announceRepeat` (`cfg.repeat`) | 2 | Whole (chime+message) block repeats so a missed first pass gets a second. Clamped 1..3. **Ignored when bilingual** (the two languages ARE the redundancy). |
 | `repeatGapMs` | 1500 ms | Silence between repeated blocks. |
@@ -5689,9 +5690,9 @@ extra chunks (Piper sometimes emits a LIST chunk) by scanning for `data`.
 #### 4.5 Klaxon-only path
 
 If **no** pass has spoken text (`anySpoken === false`), the render is chime-only
-(lead silence + `announceRepeat` blocks of `chimeRepeat` chimes) — still cached,
-no Wyoming call. With `leadMs === 0 && chimeRepeat === 1 && announceRepeat === 1`
-this is byte-identical to the source klaxon WAV.
+(lead silence + `announceRepeat` blocks of one chime each) — still cached, no
+Wyoming call. With `leadMs === 0 && announceRepeat === 1` this is byte-identical
+to the source klaxon WAV.
 
 #### 4.6 Cache & the cache key
 
@@ -5703,7 +5704,7 @@ unpredictable temp name (`<path>.<pid>.<rand>.tmp`) + exclusive create (`flag:
 **`renderCacheKey(...)`** is `sha1(...).slice(0,16)` over a `|`-joined string:
 
 ```
-v<RENDER_VERSION>|<level>|x<chimeRepeat>|r<announceRepeat>|s<leadMs>|g<repeatGapMs>|c<chimeGapMs>
+v<RENDER_VERSION>|<level>|r<announceRepeat>|s<leadMs>|g<repeatGapMs>|c<chimeGapMs>
   <tagPart><eomPart><msgPart><voicePart>|<message ?? '<null>'>
 ```
 
@@ -6087,9 +6088,8 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_UNREACHABLE_CONFIRM` | `3` | Consecutive-fail streak before confirming unreachable. |
 | `DATA_DIR` / `CHIMES_DIR` / `CHIME_CONFIG_PATH` / `BROADCAST_RUNTIME_CONFIG_PATH` | `/data`-relative | Storage locations. |
 
-Alert-settings knobs consumed by rendering: **chime repeat** (`getChimeRepeat()`,
-`DEFAULT_CHIME_REPEAT = 2`, clamped `CHIME_REPEAT_MIN = 1`..`CHIME_REPEAT_MAX = 4`)
-and the per-priority annunciation enable flags.
+Alert-settings knob consumed by rendering: the per-priority annunciation enable
+flags. The chime itself plays exactly once per block and is not operator-tunable.
 
 ---
 
@@ -6158,7 +6158,7 @@ JSON endpoints:
 | `POST /api/chimes?name=` | write (rate-limited) | Upload a raw WAV body; `saveChime` validates + normalizes + stores. 400 on bad WAV / full library. |
 | `DELETE /api/chimes/:id` | write | Delete a tone; reverts any level assigned to it back to builtin. 404 if absent. |
 | `PUT /api/chime-config` | write | Assign tones per level (`{ assignments }`). 422 with `rejected[]` for unknown ids (prior value kept). |
-| `GET/PUT /api/alert-settings` | read/write | Per-priority enable flags + `chimeRepeat` (`DEFAULT_CHIME_REPEAT = 2`). |
+| `GET/PUT /api/alert-settings` | read/write | Per-priority enable flags. |
 | `POST /api/alert-preview` | write | Preview a `{ priority, target }` announcement. `browser` renders only (returns `audioPath` for the web app to play); `speakers` also plays to MA targets. Short 2 s cooldown (`PREVIEW_COOLDOWN_MS`). |
 
 #### The three operator-initiated render paths
@@ -6316,11 +6316,21 @@ Each active/learned alert row can carry a `PredictiveBadge`.
 
 The unified alarm-audio administration surface (v0.19.0), hosted inside the Alerts → Settings sub-view. It manages **three independent state objects**, each bound to its own endpoint and replaced wholesale on its own PUT (never merged, so one section can't clobber another):
 
-- **`settings`** ← `GET/PUT /api/alert-settings` — per-ISA-priority on/off switches (with a Critical-silence confirmation dialog) and chime-repeat.
+- **`settings`** ← `GET/PUT /api/alert-settings` — per-ISA-priority on/off switches (with a Critical-silence confirmation dialog).
 - **`data`** ← `GET/PUT /api/chimes` + `/api/chime-config` — tone-level assignments, uploaded `.wav` tone library, built-in tones.
 - **`bcastCfg`** ← `GET/PUT /api/broadcast/config` — the broadcast master (audible on/off, live volume, override-vs-env-baseline).
 
-Sections: (1) broadcast master (enable + volume, warns when off); (2) per-priority annunciation with repeat and per-priority preview (`/api/alert-preview`); (3) tone-per-rung assignment across all five rungs — the rung klaxon (`KLAXON_FILE` in `web/src/alarmLevels.ts`, mirroring the server's `KLAXON_FOR_LEVEL`, served from `audio/<file>.wav`; the mirror is pinned by `test/alarmLevelWebMirror.test.ts`), a named built-in tone, or an uploaded custom tone, each previewable in-browser; (4) tone library upload/list/delete. A bad/deleted tone falls back to the rung klaxon **server-side** — an alarm is never silenced by a missing file.
+**LAYOUT — one block per alert category (v1.60.0).** The page was previously organised by FUNCTION, which scattered a single severity's enable switch, tone and spoken preview across three separate cards. It is now:
+
+1. **Global, above** — broadcast master (enable, override-vs-env-baseline disclosure, warns when off); the Critical-silenced banner; the announcement **preview target** (browser vs speakers).
+2. **One card per rung**, in `data.levels` order (critical → high → medium → low → clear), each carrying that category's badge/label/ISA/response/description, enable switch, tone `<select>` + tone preview, spoken `Preview ▶` + status, and the resulting "Will announce: …" text.
+3. **Global, below** — the built-in tone audition grid and the uploaded tone library (upload/list/delete, with the "in use:" cross-reference).
+
+**The 4-vs-5 asymmetry is explicit, not smoothed over.** Tone assignment is per **rung** (five, `clear` included; driven by `data.levels`). The enable switch and the spoken preview are per **priority** (four; driven by `ALARM_PRIORITY_ORDER`, `settings.priorityEnabled`, and `POST /api/alert-preview`, which accepts an `AlarmPriority`). There is no `priorityEnabled.clear` and no preview endpoint for it, so the fifth card renders **tone-only** and states why on the card. `settings` failing to load degrades the same way: the category cards still render and tone assignment still works, only the per-priority controls are withheld.
+
+Tone choices per rung are the rung klaxon (`KLAXON_FILE` in `web/src/alarmLevels.ts`, mirroring the server's `KLAXON_FOR_LEVEL`, served from `audio/<file>.wav`; the mirror is pinned by `test/alarmLevelWebMirror.test.ts`), a named built-in tone, or an uploaded custom tone — each previewable in-browser via a HEAD precheck that distinguishes a missing file from an autoplay block. A bad/deleted tone falls back to the rung klaxon **server-side** — an alarm is never silenced by a missing file.
+
+**Error placement.** Page-level failures (upload, delete, broadcast master, library audition) render in the header. A failure that belongs to one category — a failed enable-toggle PUT, a failed tone assignment, a missing tone file — renders on that category's card, next to the control that raised it.
 
 #### 1.9 Glossary tooltips
 
@@ -8349,7 +8359,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Repair issues | `computeRepairIssues` composes degradation+soiling+equipmentHealth+skill into repair cards (§8.7) | Those four reports | `/api/repair-issues` only — no UI/HA surface renders it | **weak-linkage candidate** — endpoint-only composition of already-surfaced engines |
 | Zombie gate | Spare-DPU offline-alert gate via explicit SN allowlist (§8.8) | `SPARE_DPU_SNS` | Offline alerting | measured-and-active |
 | Root-cause map | `rootCausesFor(alertId)` static cause suggestions (§8.9) | Alert id | `/api/root-cause` only | **weak-linkage candidate** — no UI passes an alert id to it |
-| Annunciation settings | `alertSettings.ts` per-priority enable + chime repeat, MQTT-bidirectional (§8.11) | Operator toggles | Alert Console, HA switches, broadcast gating | measured-and-active |
+| Annunciation settings | `alertSettings.ts` per-priority enable, MQTT-bidirectional (§8.11) | Operator toggles | Alert Console, HA switches, broadcast gating | measured-and-active |
 
 ### A.9 Audible broadcast & TTS (§10)
 
