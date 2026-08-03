@@ -3686,8 +3686,8 @@ function broadcastConfigResponse() {
     announceVolumePinned,
     source: ov.source,
     updatedAt: ov.updatedAt,
-    override: { enabled: ov.enabled, volume: ov.volume }, // null = deferring to env
-    envBaseline: { enabled: envEnabled, volume: envVolume },
+    override: { enabled: ov.enabled }, // null = deferring to env
+    envBaseline: { enabled: envEnabled },
   };
 }
 
@@ -3709,24 +3709,23 @@ app.get(
 // limited (touches /data). A field present sets it (boolean/number overrides
 // env; explicit null clears back to the env baseline); an absent field is
 // unchanged.
-app.put<{ Body: { enabled?: boolean | null; volume?: number | null } }>(
+app.put<{ Body: { enabled?: boolean | null } }>(
   '/api/broadcast/config',
   { preHandler: [requireWriteAuth, broadcastConfigRateLimit] },
   async (req) => {
     // Guard the body SHAPE before the `in` operator — the raw JSON parser passes
     // primitives through, and `'enabled' in 42` throws. A non-object body is a
     // no-op patch (the response still echoes the current effective config).
-    const body: { enabled?: boolean | null; volume?: number | null } =
+    const body: { enabled?: boolean | null } =
       req.body && typeof req.body === 'object' ? req.body : {};
-    const patch: { enabled?: boolean | null; volume?: number | null } = {};
+    const patch: { enabled?: boolean | null } = {};
     if ('enabled' in body) patch.enabled = body.enabled;
-    if ('volume' in body) patch.volume = body.volume;
     const next = updateBroadcastRuntimeConfig(patch, 'web');
     appendWriteLog({
       ts: Date.now(),
       action: 'broadcast-config',
       sn: '', // global, not device-specific
-      params: { enabled: next.enabled, volume: next.volume },
+      params: { enabled: next.enabled },
       source: { ip: req.ip, ua: req.headers['user-agent']?.toString() },
       outcome: 'success',
     });

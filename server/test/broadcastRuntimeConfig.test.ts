@@ -41,11 +41,10 @@ function clearOverride() {
   updateBroadcastRuntimeConfig({ enabled: null, volume: null }, 'test');
 }
 
-test('defaults — both fields null (defer to env baseline)', () => {
+test('defaults — enabled is null (defer to env baseline)', () => {
   _resetBroadcastRuntimeConfigCacheForTest();
   const c = getBroadcastRuntimeConfig();
   assert.equal(c.enabled, null);
-  assert.equal(c.volume, null);
 });
 
 test('loadBroadcastConfig — uses env baseline when no override is set', () => {
@@ -69,64 +68,66 @@ test('loadBroadcastConfig — enable override wins over env', () => {
   });
 });
 
-test('CRITICAL — volume override flows into announceVolume, not just cfg.volume', () => {
+test('CRITICAL — BROADCAST_VOLUME reaches the speakers via announceVolume', () => {
+  // v1.57.0 — the live slider and its /data override are GONE; BROADCAST_VOLUME
+  // is the single source. The property this replaces the old override test with
+  // is the one that always mattered: cfg.volume is NEVER sent to a speaker
+  // (broadcast.ts) — announceVolume is. If that link breaks, the configured
+  // volume becomes silently inert, which is exactly the v0.15.7 defect.
   withEnv({ BROADCAST_ENABLED: 'true', BROADCAST_VOLUME: '0.5', BROADCAST_ANNOUNCE_VOLUME: undefined }, () => {
-    updateBroadcastRuntimeConfig({ volume: 0.9 }, 'test');
-    const cfg = loadBroadcastConfig();
-    assert.equal(cfg.volume, 0.9);
-    assert.equal(cfg.announceVolume, 90, 'announceVolume must track the override (90), not the env 50');
-    clearOverride();
-    assert.equal(loadBroadcastConfig().announceVolume, 50, 'cleared → env-derived 50');
+    assert.equal(loadBroadcastConfig().volume, 0.5);
+    assert.equal(loadBroadcastConfig().announceVolume, 50, 'announceVolume must derive from BROADCAST_VOLUME');
+  });
+  withEnv({ BROADCAST_ENABLED: 'true', BROADCAST_VOLUME: '0.9', BROADCAST_ANNOUNCE_VOLUME: undefined }, () => {
+    assert.equal(loadBroadcastConfig().announceVolume, 90, 'changing the option changes what speakers get');
   });
 });
 
-test('volume override is clamped to [0,1]', () => {
-  withEnv({ BROADCAST_VOLUME: '0.5' }, () => {
-    updateBroadcastRuntimeConfig({ volume: 1.5 }, 'test');
-    assert.equal(loadBroadcastConfig().volume, 1);
-    updateBroadcastRuntimeConfig({ volume: -0.3 }, 'test');
-    assert.equal(loadBroadcastConfig().volume, 0);
+test('no runtime override can shadow BROADCAST_VOLUME any more', () => {
+  // Regression pin for the defect that motivated the removal: the HA form read
+  // 0.7 while the speakers played 0.95, with nothing on either surface saying so.
+  withEnv({ BROADCAST_ENABLED: 'true', BROADCAST_VOLUME: '0.7', BROADCAST_ANNOUNCE_VOLUME: undefined }, () => {
+    updateBroadcastRuntimeConfig({ enabled: true }, 'test');   // the only override left
+    assert.equal(loadBroadcastConfig().volume, 0.7, 'volume follows the option, always');
+    assert.equal(loadBroadcastConfig().announceVolume, 70);
     clearOverride();
   });
 });
 
-test('an env-pinned BROADCAST_ANNOUNCE_VOLUME still wins over the slider (by design)', () => {
+test('an env-pinned BROADCAST_ANNOUNCE_VOLUME still pins the announce level (by design)', () => {
   // 'standing' → announceVolume omitted (null) regardless of the volume override.
   withEnv({ BROADCAST_VOLUME: '0.5', BROADCAST_ANNOUNCE_VOLUME: 'standing' }, () => {
-    updateBroadcastRuntimeConfig({ volume: 0.9 }, 'test');
+    updateBroadcastRuntimeConfig({ }, 'test');
     assert.equal(loadBroadcastConfig().announceVolume, null, "'standing' pins announce_volume off");
   });
   // a pinned number wins too.
   withEnv({ BROADCAST_VOLUME: '0.5', BROADCAST_ANNOUNCE_VOLUME: '42' }, () => {
-    updateBroadcastRuntimeConfig({ volume: 0.9 }, 'test');
+    updateBroadcastRuntimeConfig({ }, 'test');
     assert.equal(loadBroadcastConfig().announceVolume, 42, 'a pinned number wins over the slider');
   });
   clearOverride();
 });
 
 test('persistence — override survives a cache reset (re-read from disk)', () => {
-  updateBroadcastRuntimeConfig({ enabled: true, volume: 0.7 }, 'test');
+  updateBroadcastRuntimeConfig({ enabled: true }, 'test');
   assert.ok(existsSync(process.env.BROADCAST_RUNTIME_CONFIG_PATH!));
   _resetBroadcastRuntimeConfigCacheForTest();
   const c = getBroadcastRuntimeConfig();
   assert.equal(c.enabled, true);
-  assert.equal(c.volume, 0.7);
   // sanity: persisted JSON is well-formed
   const onDisk = JSON.parse(readFileSync(process.env.BROADCAST_RUNTIME_CONFIG_PATH!, 'utf8'));
   assert.equal(onDisk.enabled, true);
-  assert.equal(onDisk.volume, 0.7);
   clearOverride();
 });
 
 test('update notifies listeners synchronously (the closure-coherence mechanism)', () => {
   // broadcast.ts relies on this to refresh its closure cfg the instant a UI
   // toggle lands, so /api/broadcast/config echoes the change without a tick.
-  let seen: { enabled: boolean | null; volume: number | null } | null = null;
+  let seen: { enabled: boolean | null } | null = null;
   const off = onBroadcastRuntimeConfigChange((c) => { seen = c; });
-  updateBroadcastRuntimeConfig({ enabled: true, volume: 0.4 }, 'test');
+  updateBroadcastRuntimeConfig({ enabled: true }, 'test');
   assert.ok(seen, 'listener fired synchronously on update');
   assert.equal(seen!.enabled, true);
-  assert.equal(seen!.volume, 0.4);
   off();
   seen = null;
   updateBroadcastRuntimeConfig({ enabled: false }, 'test');
