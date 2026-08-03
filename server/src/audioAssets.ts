@@ -290,7 +290,7 @@ function boatswainSegments(): { segs: Segment[]; totalSec: number } {
  * fast warble = emergency, a slow pulse = caution, a single soft chime =
  * advisory. This pack implements that 3-tier annunciator language so the
  * operator can identify severity by ear without looking. Selected via the
- * BROADCAST_CHIME_PACK option (default "powerplant").
+ * level-klaxon set (see KLAXON_BUILDERS).
  *
  * Mapping to the existing klaxon levels (red/yellow/green from
  * klaxonLevelForPriority): red = Critical/High emergency, yellow = Medium
@@ -361,7 +361,7 @@ const C6 = 1046.5, E6 = 1318.5;
 
 const NAMED_TONE_BUILDERS: Record<string, () => { segs: Segment[]; totalSec: number }> = {
   // v1.55.0 — pack klaxons as selectable tones. These reference the SAME
-  // builders CHIME_PACKS uses, so `airport-red-alert` is byte-identical to the
+  // builders the level klaxons use, so `airport-red-alert` is byte-identical to the
   // red-alert.wav an airport-pack install renders for its level default.
   'airport-red-alert': redAlertSegments,
   'airport-yellow-alert': yellowAlertSegments,
@@ -566,30 +566,25 @@ export function builtinTonePath(id: string, audioDir: string): string | null {
 export const AUDIO_ASSETS = ['red-alert', 'yellow-alert', 'all-clear', 'boatswain'] as const;
 export type AudioAssetId = (typeof AUDIO_ASSETS)[number];
 
-/** Chime sound packs. "powerplant" (default) = ISA-18.2 industrial annunciator
+/** Level-klaxon synthesis. ONE fixed set — the melodic struck-bell waveforms.
+ *  v1.56.0: the BROADCAST_CHIME_PACK option is gone. Both historical sets
+ *  survive individually as named tones (BUILTIN_TONES), so nothing became
+ *  unreachable — an operator picks any of them per level in the Alert Console.
+ *  This set backs the `builtin` assignment: the operator-selectable level
+ *  klaxon, and the last-resort tone when an assigned tone's file is missing.
+ *  Kept as the airport waveforms because that is what live installs already
+ *  hold on disk, so the one forced regeneration is byte-identical here.
+ *  LEGACY (pre-v1.56.0) doc of the removed packs:  ISA-18.2 industrial annunciator
  *  cadences; "airport" = the v0.9.70 melodic struck-bell PA chimes. */
-export type ChimePack = 'powerplant' | 'airport';
 
-/** Resolve the active pack from the BROADCAST_CHIME_PACK option (default powerplant). */
-export function selectedChimePack(): ChimePack {
-  return process.env.BROADCAST_CHIME_PACK === 'airport' ? 'airport' : 'powerplant';
-}
 
 /** Per-pack synthesis. Same asset ids/filenames; only the waveform differs, so
  *  the broadcast/render pipeline is unchanged — switching packs just re-synthesizes. */
-const CHIME_PACKS: Record<ChimePack, Record<AudioAssetId, () => { segs: Segment[]; totalSec: number }>> = {
-  airport: {
-    'red-alert': redAlertSegments,
-    'yellow-alert': yellowAlertSegments,
-    'all-clear': allClearSegments,
-    'boatswain': boatswainSegments,
-  },
-  powerplant: {
-    'red-alert': ppRedAlertSegments,
-    'yellow-alert': ppYellowAlertSegments,
-    'all-clear': ppAllClearSegments,
-    'boatswain': boatswainSegments,
-  },
+const KLAXON_BUILDERS: Record<AudioAssetId, () => { segs: Segment[]; totalSec: number }> = {
+  'red-alert': redAlertSegments,
+  'yellow-alert': yellowAlertSegments,
+  'all-clear': allClearSegments,
+  'boatswain': boatswainSegments,
 };
 
 /**
@@ -629,11 +624,11 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
   if (!existsSync(outDir)) {
     await mkdir(outDir, { recursive: true });
   }
-  // v0.9.70 — version-gated regeneration. v0.13.0 — the marker now also carries
-  // the active chime PACK (e.g. "3:powerplant"), so switching BROADCAST_CHIME_PACK
-  // regenerates the WAVs on next boot just like a synthesis-param bump.
-  const pack = selectedChimePack();
-  const wantMarker = `${AUDIO_ASSETS_VERSION}:${pack}`;
+  // v0.9.70 — version-gated regeneration. v1.56.0 — the marker is version-only
+  // again now that the chime-pack option is gone. "v6" cannot equal any marker a
+  // prior release wrote ("<n>" pre-v0.13.0, "<n>:<pack>" after), so every install
+  // regenerates exactly once on the first boot after this update.
+  const wantMarker = `v${AUDIO_ASSETS_VERSION}`;
   const versionMarker = resolve(outDir, '.assets-version');
   // TOCTOU hardening (CodeQL js/file-system-race): read the marker directly —
   // absent and unreadable both land in the catch and read as '' (stale),
@@ -646,7 +641,7 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
   if (stale && onDiskMarker) {
     log(`audioAssets: marker "${onDiskMarker}" on disk, regenerating for "${wantMarker}"`);
   }
-  const defs = CHIME_PACKS[pack];
+  const defs = KLAXON_BUILDERS;
   for (const id of AUDIO_ASSETS) {
     const path = resolve(outDir, `${id}.wav`);
     if (!stale && existsSync(path)) continue;
@@ -655,10 +650,10 @@ export async function generateAudioAssets(outDir: string, log: (m: string) => vo
     const wav = buildWavBuffer(samples);
     await mkdir(dirname(path), { recursive: true });
     await writeWavAtomic(path, wav);
-    log(`audioAssets: wrote ${id}.wav [${pack}] (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
+    log(`audioAssets: wrote ${id}.wav (${(wav.length / 1024).toFixed(1)} KB, ${totalSec.toFixed(2)} s)`);
   }
   // v0.17.0 — the named built-in tone library, written alongside the klaxons
-  // (pack-independent: same bytes regardless of BROADCAST_CHIME_PACK).
+  // (fixed synthesis, independent of the level klaxons).
   for (const tone of BUILTIN_TONES) {
     const path = resolve(outDir, `${tone.id}.wav`);
     if (!stale && existsSync(path)) continue;

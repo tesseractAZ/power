@@ -1,5 +1,5 @@
 name: Power
-version: "1.55.1"
+version: "1.56.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -94,7 +94,6 @@ options:
   CRITICAL_BREAKS_QUIET_HOURS: false
   BROADCAST_AUDIO_BASE: "http://homeassistant.local:8787"
   BROADCAST_VOLUME: 0.5
-  BROADCAST_CHIME_PACK: powerplant
   BROADCAST_ANNOUNCE_VOLUME: ""
   BROADCAST_USE_PRE_ANNOUNCE: false
   BROADCAST_LEAD_SILENCE_MS: 1000
@@ -195,7 +194,6 @@ schema:
   CRITICAL_BREAKS_QUIET_HOURS: bool
   BROADCAST_AUDIO_BASE: "str?"
   BROADCAST_VOLUME: float(0,1)
-  BROADCAST_CHIME_PACK: list(powerplant|airport)?
   BROADCAST_ANNOUNCE_VOLUME: "str?"
   BROADCAST_USE_PRE_ANNOUNCE: bool
   BROADCAST_LEAD_SILENCE_MS: int(0,5000)?

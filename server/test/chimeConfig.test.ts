@@ -30,12 +30,24 @@ function aTone(freq: number): string {
   return r.meta!.id;
 }
 
-test('default config is all-builtin (a pure no-op until the operator assigns)', () => {
+test('default config is all-doorbell (v1.56.0 — was all-builtin)', () => {
   _resetChimeConfigCacheForTest();
   const cfg = getChimeConfig();
   for (const lvl of ['red', 'yellow', 'green'] as const) {
-    assert.deepEqual(cfg.assignments[lvl], { kind: 'builtin' });
+    assert.deepEqual(cfg.assignments[lvl], { kind: 'named', id: 'doorbell' });
   }
+});
+
+test('builtin stays REACHABLE after the default moved off it', () => {
+  // The default moving to doorbell must not orphan `builtin`: it is still the
+  // operator-selectable level klaxon AND the last-resort tone resolveChime()
+  // falls back to when an assigned tone's file is missing. If a refactor ever
+  // made this state unreachable, the anti-silent-alarm floor would go with it.
+  _resetChimeConfigCacheForTest();
+  const { rejected } = updateChimeConfig({ red: { kind: 'builtin' } }, 'test');
+  assert.deepEqual(rejected, []);
+  assert.deepEqual(getChimeConfig().assignments.red, { kind: 'builtin' });
+  _resetChimeConfigCacheForTest();
 });
 
 test('resolveChime — builtin → klaxon path + BUILTIN_TAG, no fallback', () => {
