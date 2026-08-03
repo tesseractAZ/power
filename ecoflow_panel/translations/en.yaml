@@ -78,7 +78,7 @@ configuration:
     description: Speaker volume for audible alarm announcements, from 0.0 (silent) to 1.0 (full); default 0.5. This is also the level the spoken announcement plays at unless Announce Volume overrides it, and it can be adjusted live from the dashboard.
   BROADCAST_CHIME_PACK:
     name: Alarm Chime Pack
-    description: Which alarm chime sound set the speakers use. 'powerplant' (default) is ISA-18.2 industrial annunciator cadences that signal priority by rhythm (emergency warble / caution pulse / advisory chime); 'airport' is the older melodic struck-bell PA chimes. Changing this regenerates the speaker WAVs on the next add-on restart.
+    description: Fallback klaxon set. Each alert level picks its own tone in the add-on's Alert Console (Web UI → Alerts → Alert Console), and every tone in both sets is selectable there individually. This option only decides which set supplies a level still set to "Default", and the last-resort tone if an assigned tone's file goes missing. Changing it takes effect on restart. 'powerplant' (default) is ISA-18.2 industrial annunciator cadences that signal priority by rhythm (emergency warble / caution pulse / advisory chime); 'airport' is the older melodic struck-bell PA chimes. Changing this regenerates the speaker WAVs on the next add-on restart.
   BROADCAST_ANNOUNCE_VOLUME:
     name: Announce Volume Override
     description: Speaker volume for the announcement. Leave empty (default) to play at Broadcast Volume x 100; enter 0-100 to force that exact level (e.g. 80); or enter off, none, or standing to omit the volume command and keep each speaker's current level. Any non-empty value pins the level, making the master Broadcast Volume slider informational only.

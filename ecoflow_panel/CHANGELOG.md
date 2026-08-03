@@ -1,3 +1,58 @@
+## v1.55.0 — one tone list: the pack klaxons become selectable tones
+
+**The problem.** Two surfaces answered "what sound plays for a critical alert",
+and only one of them won. `resolveChime()` consults the per-level assignment
+stored by the web Alert Console; it reaches the `BROADCAST_CHIME_PACK` klaxon
+only when a level is still set to `Default`. An operator who assigned a named
+tone to every level — the common case — had a pack selection in the Home
+Assistant options form that produced no audible difference, with nothing on
+either surface saying so.
+
+The pack was also the only way to hear those six waveforms, and it offered them
+three at a time: pick `airport` and the `powerplant` sounds are unreachable, and
+vice versa. They could not be mixed.
+
+**The change.** The six pack klaxons are now first-class entries in the named
+tone catalog — `airport-red-alert`, `airport-yellow-alert`, `airport-all-clear`
+and their `powerplant-` counterparts — bringing it from 16 tones to 22. Each is
+individually assignable to any level, alongside the existing tones and any
+uploads. They reference the same builders `CHIME_PACKS` uses, so a promoted tone
+is byte-identical to the pack klaxon of the same name; a test asserts that
+equality rather than trusting it.
+
+These six are the only tones in the catalog designed AS A SET: cadence encodes
+severity per ISA-18.2 and all-clear resolves upward. That property is why they
+are listed first, and why the promotion preserves them rather than retiring them
+in favour of the generic chimes.
+
+**`BROADCAST_CHIME_PACK` is retained, and its description now matches what it
+does** — it selects the fallback set: the klaxon for any level still on
+`Default`, and the last-resort tone when an assigned tone's file is missing. The
+key, its `list(powerplant|airport)?` schema and its `powerplant` default are
+untouched. Home Assistant has no add-on options migration — Supervisor
+shallow-merges new defaults *under* persisted options — so renaming or removing
+the key would silently revert a saved selection; and the s6 run script exports it
+via `bashio::config` under `set -e`, where a missing key aborts startup outright.
+Retention here is a safety property, not inertia.
+
+`chimeConsoleResponse()` now publishes `chimePack` (the id, never a path — both
+chime GETs are unauthenticated by design), and the console's level dropdown names
+the active pack in its `Default` option instead of leaving the interaction to be
+discovered.
+
+`AUDIO_ASSETS_VERSION` 5 to 6 so existing installs re-synthesize `/data/audio`
+and materialise the six new WAVs on first boot.
+
+**No assignment is rewritten and no configuration is reset.** Existing per-level
+assignments, uploads and the pack selection all carry forward untouched. The
+change is additive: six new options appear in a dropdown that already existed.
+
+**Also.** `server/test/chimeStore.test.ts` carried a literal NUL byte inside a
+path-traversal test vector, which made the entire file binary to `grep`,
+`ripgrep` and every text-based audit — silently excluding its security tests from
+any repository-wide search. The vector is now written as a unicode escape:
+identical at runtime, and the file is text again.
+
 ## v1.54.0 — repo hygiene: remove a published personal address, correct what the docs claim
 
 **Public-manifest privacy.** `repository.yaml` published a personal email address in
