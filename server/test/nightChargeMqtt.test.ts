@@ -114,6 +114,11 @@ function fakePlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     chargeTonight: true,
     buyKwh: 12.3,
     targetSocPct: 78,
+    // No contention in this fixture, so the ask equals the expectation.
+    // (v1.62.0 invariant: setpointSocPct >= targetSocPct, always.)
+    // evContention null = no EVSE prediction covered this window.
+    setpointSocPct: 78,
+    evContention: null,
     requiredExtraKwh: 10.1,
     bindingCap: 'requirement',
     cushionShortfall: false,
