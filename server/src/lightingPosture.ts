@@ -48,6 +48,37 @@ const RED_HOURS_TO_RESERVE = 4;
 /** A calmer posture must hold this long before the house relaxes. */
 export const DEESCALATE_HOLD_MS = 15 * 60 * 1000;
 
+/**
+ * A normal↔surplus swap must hold this long before it is adopted.
+ *
+ * WHY THIS EXISTS (v1.63.0)
+ * -------------------------
+ * `surplus` and `normal` share rank 0 — correctly, because surplus is not a
+ * warning tier. But that put every normal↔surplus swap in the same-rank branch
+ * below, which adopted it IMMEDIATELY. The 15-minute de-escalation hold only
+ * ever guarded CROSS-rank moves, so this transition had no debounce at all.
+ *
+ * That matters because posture is an ACTUATION trigger. The HA automation
+ * `EcoFlow HVAC — surplus pre-cool` fires on `→ surplus` and drops every
+ * cool-mode setpoint; its sibling restores them on `→ normal`. And the upstream
+ * signal is a bare threshold — `computeCurtailment` calls it curtailed when the
+ * gap clears `CURTAIL_MIN_SURPLUS_W` (300 W) with no hysteresis of its own, on a
+ * 5-minute recompute. Surplus hovering near 300 W therefore flips `active` every
+ * recompute, and each flip wrote both thermostats and then wrote them back.
+ *
+ * The observed 2026-07-23 event lasted THREE SECONDS end to end.
+ *
+ * The dwell is symmetric on purpose. Debouncing only the entry would still let a
+ * momentary dip end a real surplus event, restoring setpoints and then
+ * re-cooling — the same thrash wearing the opposite sign. Staying pre-cooled a
+ * few minutes too long is cheap; oscillating the thermostats is not.
+ *
+ * This never delays a real escalation: surplus→conserve/amber/red/critical is a
+ * RANK increase and is handled by the escalate branch, which still applies on the
+ * very next tick.
+ */
+export const SURPLUS_DWELL_MS = 10 * 60 * 1000;
+
 export interface PostureInputs {
   /** Pool currently at/below its reserve floor (runway.belowReserveFloor semantics). */
   belowReserveFloor: boolean;
@@ -141,6 +172,9 @@ interface PersistedPosture {
   reason: string;
   changedAtMs: number;
   calmerSinceMs: number | null;
+  /** v1.63.0 — when a same-rank normal<->surplus swap first appeared. Absent in
+   *  files written before this field existed; treated as null (dwell restarts). */
+  swapSinceMs?: number | null;
   savedAtMs: number;
 }
 
@@ -173,11 +207,17 @@ function savePersisted(path: string, s: Omit<PersistedPosture, 'savedAtMs'>): vo
  * `holdMs`. With a `statePath` the tracker survives restarts (writes only on
  * posture changes and hold-window transitions, not every tick — SD-card diet).
  */
-export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS, statePath?: string): PostureTracker {
+export function createPostureTracker(
+  holdMs = DEESCALATE_HOLD_MS,
+  statePath?: string,
+  dwellMs = SURPLUS_DWELL_MS,
+): PostureTracker {
   let current: PostureResult | null = null;
   let changedAtMs = 0;
   /** When the raw posture first went calmer than `current` (null = it hasn't). */
   let calmerSinceMs: number | null = null;
+  /** When a same-rank swap (normal<->surplus) first appeared (null = none pending). */
+  let swapSinceMs: number | null = null;
 
   if (statePath != null) {
     const persisted = loadPersisted(statePath);
@@ -185,12 +225,13 @@ export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS, statePath?: st
       current = { posture: persisted.posture, reason: persisted.reason };
       changedAtMs = persisted.changedAtMs;
       calmerSinceMs = persisted.calmerSinceMs;
+      swapSinceMs = persisted.swapSinceMs ?? null;
     }
   }
 
   const persist = () => {
     if (statePath != null && current != null) {
-      savePersisted(statePath, { ...current, changedAtMs, calmerSinceMs });
+      savePersisted(statePath, { ...current, changedAtMs, calmerSinceMs, swapSinceMs });
     }
   };
 
@@ -201,12 +242,14 @@ export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS, statePath?: st
         current = raw;
         changedAtMs = i.nowMs;
         calmerSinceMs = null;
+        swapSinceMs = null;
         persist();
       } else if (POSTURE_RANK[raw.posture] > POSTURE_RANK[current.posture]) {
         // Escalate immediately.
         current = raw;
         changedAtMs = i.nowMs;
         calmerSinceMs = null;
+        swapSinceMs = null;
         persist();
       } else if (POSTURE_RANK[raw.posture] < POSTURE_RANK[current.posture]) {
         const startedHold = calmerSinceMs == null;
@@ -221,15 +264,32 @@ export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS, statePath?: st
           // so a restart mid-hold resumes the countdown instead of resetting it.
           persist();
         }
-      } else {
-        // Same rank — adopt the fresh reason (and normal↔surplus swaps freely).
-        // The reason refreshes every tick, so don't write it to disk each time;
-        // a same-rank swap (normal↔surplus) does change the posture → persist.
-        const swapped = raw.posture !== current.posture;
-        const holdCleared = calmerSinceMs != null;
+      } else if (raw.posture === current.posture) {
+        // Same rank AND same posture — only the reason may have changed. It
+        // refreshes every tick, so don't write it to disk each time.
+        const holdCleared = calmerSinceMs != null || swapSinceMs != null;
         current = raw;
         calmerSinceMs = null;
-        if (swapped || holdCleared) persist();
+        swapSinceMs = null;
+        if (holdCleared) persist();
+      } else {
+        // Same rank, DIFFERENT posture — i.e. normal↔surplus. v1.63.0: this must
+        // DWELL. It is an actuation edge (the HA pre-cool automation triggers on
+        // it and moves every thermostat setpoint), and the upstream curtailment
+        // signal is a bare 300 W threshold with no hysteresis of its own, so an
+        // undebounced swap thrashes the house. See SURPLUS_DWELL_MS.
+        if (swapSinceMs == null) {
+          swapSinceMs = i.nowMs;
+          calmerSinceMs = null;
+          persist(); // so a restart mid-dwell resumes the countdown, not resets it
+        } else if (i.nowMs - swapSinceMs >= dwellMs) {
+          current = raw;
+          changedAtMs = i.nowMs;
+          swapSinceMs = null;
+          calmerSinceMs = null;
+          persist();
+        }
+        // else: dwell still running — hold the CURRENT posture, return it unchanged.
       }
       return { ...current, changedAtMs };
     },
@@ -237,6 +297,7 @@ export function createPostureTracker(holdMs = DEESCALATE_HOLD_MS, statePath?: st
       current = null;
       changedAtMs = 0;
       calmerSinceMs = null;
+      swapSinceMs = null;
     },
   };
 }

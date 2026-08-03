@@ -8,6 +8,7 @@ import {
   rawPosture,
   createPostureTracker,
   DEESCALATE_HOLD_MS,
+  SURPLUS_DWELL_MS,
   PERSIST_MAX_AGE_MS,
   type PostureInputs,
 } from '../src/lightingPosture.js';
@@ -144,10 +145,20 @@ test('tracker — after the hold, de-escalation adopts the current raw posture',
   assert.equal(r.posture, 'conserve');
 });
 
-test('tracker — normal ↔ surplus swap freely (same rank, no hold)', () => {
+// v1.63.0 — this test previously asserted that normal <-> surplus "swaps freely
+// (same rank, no hold)". That WAS the behaviour, and it was the defect: the
+// transition is an actuation edge that moves thermostat setpoints, and it had no
+// debounce at all. The assertion is inverted deliberately, not relaxed — the same
+// three ticks now prove the swap is REFUSED inside the dwell. Sustained-swap
+// adoption is covered by the dwell suite at the end of this file.
+test('tracker — normal <-> surplus does NOT swap freely; the dwell holds it', () => {
   const t = createPostureTracker();
   assert.equal(t.update(inputs({ dawnMinSocPct: 60, nowMs: 0 })).posture, 'normal');
-  assert.equal(t.update(inputs({ curtailmentActive: true, dawnMinSocPct: 80, nowMs: MIN })).posture, 'surplus');
+  assert.equal(
+    t.update(inputs({ curtailmentActive: true, dawnMinSocPct: 80, nowMs: MIN })).posture,
+    'normal',
+    'one tick of curtailment must not actuate the house',
+  );
   assert.equal(t.update(inputs({ dawnMinSocPct: 60, nowMs: 2 * MIN })).posture, 'normal');
 });
 
@@ -241,4 +252,110 @@ test('persistence — same-rank reason refreshes do NOT rewrite the file each ti
 
 test.after(() => {
   try { rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+});
+
+
+/* ─── tracker — normal<->surplus dwell (v1.63.0) ──────────────────────────
+ *
+ * This transition is an ACTUATION EDGE: the HA "surplus pre-cool" automation
+ * fires on -> surplus and moves every cool-mode thermostat setpoint; its sibling
+ * restores them on -> normal. Before v1.63.0 it had NO debounce, because surplus
+ * and normal share rank 0 and the 15-minute hold only ever guarded cross-rank
+ * moves. The live 2026-07-23 event lasted three seconds and wrote both
+ * thermostats twice.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+const surplusIn = (nowMs: number) => inputs({ dawnMinSocPct: 60, curtailmentActive: true, nowMs });
+const normalIn = (nowMs: number) => inputs({ dawnMinSocPct: 60, curtailmentActive: false, nowMs });
+
+test('dwell — a brief curtailment blip NEVER reaches surplus', () => {
+  const t = createPostureTracker();
+  assert.equal(t.update(normalIn(0)).posture, 'normal');
+  // The observed failure: active for one recompute, then gone.
+  assert.equal(t.update(surplusIn(3_000)).posture, 'normal', 'a 3s blip must not actuate');
+  assert.equal(t.update(normalIn(6_000)).posture, 'normal');
+  // And well past the dwell, with the blip long over, still normal.
+  assert.equal(t.update(normalIn(30 * MIN)).posture, 'normal');
+});
+
+test('dwell — sustained curtailment DOES reach surplus, after the dwell', () => {
+  const t = createPostureTracker();
+  t.update(normalIn(0));
+  assert.equal(t.update(surplusIn(1 * MIN)).posture, 'normal', 'dwell running');
+  assert.equal(t.update(surplusIn(9 * MIN)).posture, 'normal', 'still running');
+  const r = t.update(surplusIn(1 * MIN + SURPLUS_DWELL_MS));
+  assert.equal(r.posture, 'surplus', 'dwell elapsed from when the swap FIRST appeared');
+  assert.equal(r.changedAtMs, 1 * MIN + SURPLUS_DWELL_MS);
+});
+
+test('dwell — leaving surplus dwells too (a dip must not restore setpoints)', () => {
+  const t = createPostureTracker();
+  t.update(normalIn(0));
+  t.update(surplusIn(1 * MIN));
+  t.update(surplusIn(1 * MIN + SURPLUS_DWELL_MS)); // now surplus
+  const base = 1 * MIN + SURPLUS_DWELL_MS;
+  assert.equal(t.update(normalIn(base + 1 * MIN)).posture, 'surplus', 'a dip holds pre-cool');
+  assert.equal(t.update(normalIn(base + 9 * MIN)).posture, 'surplus');
+  assert.equal(t.update(normalIn(base + 1 * MIN + SURPLUS_DWELL_MS)).posture, 'normal');
+});
+
+test('dwell — a flap back resets the dwell clock (no accumulating credit)', () => {
+  const t = createPostureTracker();
+  t.update(normalIn(0));
+  t.update(surplusIn(1 * MIN));          // dwell starts
+  t.update(normalIn(5 * MIN));           // flap back — clock must clear
+  t.update(surplusIn(6 * MIN));          // dwell restarts here
+  assert.equal(t.update(surplusIn(6 * MIN + SURPLUS_DWELL_MS - 1)).posture, 'normal',
+    'the earlier partial dwell must not count toward this one');
+  assert.equal(t.update(surplusIn(6 * MIN + SURPLUS_DWELL_MS)).posture, 'surplus');
+});
+
+test('dwell — a REAL escalation out of surplus is still immediate', () => {
+  // THE safety property. Dwelling the swap must never delay the alarm ladder:
+  // surplus -> conserve/amber/red/critical is a RANK increase, not a swap.
+  const t = createPostureTracker();
+  t.update(normalIn(0));
+  t.update(surplusIn(1 * MIN));
+  t.update(surplusIn(1 * MIN + SURPLUS_DWELL_MS));
+  assert.equal(t.update(surplusIn(20 * MIN)).posture, 'surplus');
+  const r = t.update(inputs({ curtailmentActive: true, hoursToReserve: 2, nowMs: 21 * MIN }));
+  assert.equal(r.posture, 'red', 'escalation out of surplus must NOT wait for any dwell');
+  assert.equal(r.changedAtMs, 21 * MIN);
+});
+
+test('dwell — escalating straight from a PENDING swap is immediate too', () => {
+  const t = createPostureTracker();
+  t.update(normalIn(0));
+  t.update(surplusIn(1 * MIN)); // dwell pending, still reporting normal
+  const r = t.update(inputs({ curtailmentActive: true, belowReserveFloor: true, nowMs: 2 * MIN }));
+  assert.equal(r.posture, 'critical');
+  assert.equal(r.changedAtMs, 2 * MIN);
+});
+
+test('dwell — survives a restart mid-dwell instead of restarting the countdown', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'posture-dwell-'));
+  const path = join(dir, 'posture.json');
+  try {
+    const a = createPostureTracker(DEESCALATE_HOLD_MS, path);
+    a.update(normalIn(0));
+    a.update(surplusIn(1 * MIN)); // dwell begins and is persisted
+    // Restart: a fresh tracker reading the same file must resume, not reset.
+    const b = createPostureTracker(DEESCALATE_HOLD_MS, path);
+    assert.equal(b.update(surplusIn(1 * MIN + SURPLUS_DWELL_MS)).posture, 'surplus',
+      'the dwell that began before the restart must still count');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dwell — a same-posture reason refresh does not start or clear a dwell', () => {
+  const t = createPostureTracker();
+  t.update(inputs({ dawnMinSocPct: 60, nowMs: 0 }));
+  const r = t.update(inputs({ dawnMinSocPct: 42, nowMs: 1 * MIN })); // same posture, new reason
+  assert.equal(r.posture, 'normal');
+  assert.match(r.reason, /42/);
+  // A swap starting now must still serve the FULL dwell.
+  t.update(surplusIn(2 * MIN));
+  assert.equal(t.update(surplusIn(2 * MIN + SURPLUS_DWELL_MS - 1)).posture, 'normal');
+  assert.equal(t.update(surplusIn(2 * MIN + SURPLUS_DWELL_MS)).posture, 'surplus');
 });
