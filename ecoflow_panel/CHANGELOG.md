@@ -1,3 +1,71 @@
+## v1.62.0 — night-charge models EV contention, and stops conflating the ask with the forecast
+
+### The charge-rate model was EV-blind
+
+On 2026-08-02→03 the planner announced "buy ~36 kWh → 36%". At 03:00 `panel_load`
+was **14.0 kW** — the EVSE drawing ~11.5 kW plus baseline — leaving the packs ~2.8 kW.
+Arrival was ~31%, not 36%.
+
+The load *forecast* was never the problem: `buildNightChargeInputs` already folds
+the committed p90 EV block into `loadP90W`. The blindness was one layer down, in
+`packAtWindowEndWith`:
+
+```ts
+const gainKwh = chargeCapKw * legEff * chargeFrac;   // full 7.2 kW, always
+```
+
+v1.49.0 correctly established that house load on a grid-tied SHP2 is **pass-through**
+— it does not drain the pack while the charger runs — and then drew the wrong
+conclusion: that the charger therefore always gets its full rate. Pass-through and
+charging draw on the **same grid input**. The house held 14 kW of it.
+
+Now the deliverable rate is per-hour `clamp(gridInputCap − houseLoad, 0, chargeCap)`,
+driving both the window walk and the lift ceiling. With no envelope configured, or a
+quiet window, it reduces **exactly** to the old model.
+
+New `bindingCap: 'evContention'` (a more specific `chargePower`), an `evContention`
+plan block, and rationale text for both cases. Crucially, **absent ≠ zero**: a window
+with no EVSE prediction says the contention is *unmodelled* — never a reassuring "no
+EV expected".
+
+### `targetSocPct` was both the forecast and the write setpoint
+
+That conflation turned the fix above into a regression. `nightChargeActuator` writes
+`clampReserveTarget(plan.targetSocPct)`, so deriving the target from the contended
+lift made the setpoint **cap** the charge: predict contention, have the car not plug
+in, and the device stops below what the hardware could have delivered.
+
+They are different quantities:
+
+- **`setpointSocPct`** (new) — the **ask**. Solved directly on the post-window
+  trough by bisection, deliberately *not* from a window walk: any lift-based
+  expression plateaus at the deliverable ceiling and silently collapses back into
+  the forecast. Guarded `>= targetSocPct`, so it can never sit below the old write.
+- **`targetSocPct`** — the **forecast**, contention-derated. The scorer keeps grading
+  against it, which is what makes under-buy detection work.
+
+On the measured night: **ask 75%, expect 66.4%** — and the EV-blind counterfactual
+also asks 75%, so this is provably not a regression in either direction.
+
+`night_charge_target_soc_percent` now carries the **ask** (it is consumed as a write
+value by the advisory automation, where the forecast would have reproduced the same
+defect) and is newly clamped to [10,50] through the same `clampReserveTarget`. A new
+`night_charge_expected_soc_percent` carries the forecast.
+
+New add-on option `ARB_GRID_INPUT_CAP_KW`, default **17 kW** — calibrated from the
+measurement (14.0 house + ~3.0 meter-side charge). The raw 19 kW reading is
+deliberately *not* used: understating the envelope understates the deliverable buy,
+which is the safe direction.
+
+### Not done, deliberately
+
+No EV control action. This models contention; it does not fight it. The `[10,50]`
+write clamp and the announce/arm/revert machinery are untouched.
+
+Tests 1,763 → 1,787. Both tsconfigs clean.
+
+---
+
 ## v1.61.0 — Alert Console cleanup: no tone grid, no preview mode
 
 Two removals, both making the page say less and mean more.

@@ -28,10 +28,13 @@ function referencedKeys(value_template: string): string[] {
 const NIGHT_CHARGE_SENSORS = SENSORS.filter((s) => s.unique_id.startsWith('ecoflow_night_charge_'));
 const NIGHT_CHARGE_BINARY = BINARY_SENSORS.filter((s) => s.unique_id.startsWith('ecoflow_night_charge_'));
 
-test('night-charge: the expected 5 sensors + 2 binary_sensors are registered', () => {
+test('night-charge: the expected 6 sensors + 2 binary_sensors are registered', () => {
   const sensorIds = NIGHT_CHARGE_SENSORS.map((s) => s.unique_id).sort();
   assert.deepEqual(sensorIds, [
     'ecoflow_night_charge_buy_kwh',
+    // v1.60.0 — the contention-derated PREDICTION, published separately from
+    // the write setpoint on ..._target_soc so neither can shadow the other.
+    'ecoflow_night_charge_expected_soc',
     'ecoflow_night_charge_readiness',
     'ecoflow_night_charge_target_soc',
     'ecoflow_night_charge_window_end',
@@ -111,6 +114,11 @@ function fakePlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     chargeTonight: true,
     buyKwh: 12.3,
     targetSocPct: 78,
+    // No contention in this fixture, so the ask equals the expectation.
+    // (v1.62.0 invariant: setpointSocPct >= targetSocPct, always.)
+    // evContention null = no EVSE prediction covered this window.
+    setpointSocPct: 78,
+    evContention: null,
     requiredExtraKwh: 10.1,
     bindingCap: 'requirement',
     cushionShortfall: false,

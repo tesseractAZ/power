@@ -26,6 +26,11 @@ function mkPlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     chargeTonight: true,
     buyKwh: 3.2,
     targetSocPct: 85,
+    // No contention in this fixture, so the ask equals the expectation.
+    // (v1.62.0 invariant: setpointSocPct >= targetSocPct, always.)
+    // evContention null = no EVSE prediction covered this window.
+    setpointSocPct: 85,
+    evContention: null,
     requiredExtraKwh: 3,
     bindingCap: 'requirement',
     cushionShortfall: false,

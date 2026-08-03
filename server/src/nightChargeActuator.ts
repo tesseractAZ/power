@@ -10,7 +10,7 @@
  *
  * ★★ SAFETY POSTURE (binding):
  *  - ONE bounded write per night: raise `backupReserveSoc` to
- *    min(targetSocPct, 50), never above the device's own [10, 50] clamp,
+ *    min(setpointSocPct, 50), never above the device's own [10, 50] clamp,
  *    never touching any other field. The write is armed ONLY from the plan
  *    that was ANNOUNCED at the evening job (the owner's cancel window ran
  *    against those exact numbers) — a fresher recompute never silently
@@ -127,7 +127,16 @@ export interface ArmablePlan {
   chargeTonight: boolean;
   basisComplete: boolean;
   buyKwh: number | null;
-  targetSocPct: number | null;
+  /** v1.60.0 — the WRITE SETPOINT: the pack SoC % that meets floor+cushion.
+   *  ★ Deliberately NOT `targetSocPct`, which since v1.60.0 is the
+   *  contention-DERATED prediction of what the window will actually reach.
+   *  `backupReserveSoc` is an instruction, not a promise: the device charges as
+   *  fast as physics allows and stops at the reserve, so writing the derated
+   *  arrival would cap the charge at a guess — on a night the predicted EV
+   *  session never plugs in, the full rate was there all along and we would
+   *  still have stopped short. Ask for the requirement; let physics decide how
+   *  far it gets. Still clamped to [10,50] below. */
+  setpointSocPct: number | null;
   window: { startMs: number; endMs: number } | null;
 }
 
@@ -159,14 +168,14 @@ export function armFromPlan(
     return null; // unconfirmed attempt not provably un-applied — never bury it
   }
   if (!plan.chargeTonight || !plan.basisComplete) return null;
-  if (plan.window == null || plan.targetSocPct == null) return null;
+  if (plan.window == null || plan.setpointSocPct == null) return null;
   if (plan.buyKwh == null || plan.buyKwh <= 0) return null;
   if (plan.window.endMs <= plan.window.startMs || plan.window.startMs <= nowMs - APPLY_LATE_MS) return null;
   return {
     ...emptyActuationState(),
     day,
     announcedAtMs: nowMs,
-    targetPct: clampReserveTarget(plan.targetSocPct),
+    targetPct: clampReserveTarget(plan.setpointSocPct),
     buyKwh: plan.buyKwh,
     windowStartMs: plan.window.startMs,
     windowEndMs: plan.window.endMs,
