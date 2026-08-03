@@ -34,7 +34,16 @@ import { KLAXON_FOR_LEVEL, type AnnouncementLevel } from './audioRenderer.js';
 import { chimePath } from './chimeStore.js';
 import { isBuiltinTone, builtinTonePath, BUILTIN_TONE_ID_RE } from './audioAssets.js';
 
-export const CHIME_LEVELS: AnnouncementLevel[] = ['red', 'yellow', 'green'];
+// v1.58.0 — the array is CHECKED against the union rather than merely annotated
+// with it. `AnnouncementLevel[]` accepts a SHORT array; this does not — drop a
+// member and `satisfies` fails, add one to the union without listing it here and
+// the exhaustiveness assert below fails. Single source for every level loop.
+export const CHIME_LEVELS = ['red', 'yellow', 'green'] as const satisfies readonly AnnouncementLevel[];
+// Exhaustiveness: errors if the union gains a member CHIME_LEVELS does not list.
+type _ChimeLevelsCoverUnion =
+  Exclude<AnnouncementLevel, (typeof CHIME_LEVELS)[number]> extends never ? true : never;
+const _chimeLevelsExhaustive: _ChimeLevelsCoverUnion = true;
+void _chimeLevelsExhaustive;
 
 /** The cache-key tag for the built-in klaxon. Must stay a single fixed literal
  *  (NOT the klaxon filename) so builtin cache keys are byte-identical to the

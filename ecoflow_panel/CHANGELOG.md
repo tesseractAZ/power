@@ -1,3 +1,44 @@
+## v1.58.0 — make the alarm-severity widening impossible to ship quietly
+
+Groundwork for one unified severity ladder. **No behaviour changes**: the same
+three levels resolve to the same three tones, and the rendered audio is
+unchanged. What changes is that the *next* release cannot get it wrong silently.
+
+The alarm surface carries two axes today — four ISA priorities
+(`critical|high|medium|low`) for routing, three audio levels
+(`red|yellow|green`) for tone — joined by a lossy collapse, so four things are
+listed and three are assignable. Merging them means widening a string union that
+several sites consume as a *runtime string*, and three of those sites are
+invisible to `tsc` in exactly the commit that widens it:
+
+- two `as AnnouncementLevel` casts. `ConditionLevel` and `AnnouncementLevel`
+  coincide today, so the casts are vestigial — and they are precisely what would
+  let a widened union pass at the site that decides which tone plays. Removed.
+- `CHIME_LEVELS` was `AnnouncementLevel[] = [...]`. An array *annotation* accepts
+  a SHORT array, so a 3-element list would still satisfy a 5-member union and the
+  missing rung would simply never be iterated. Now `as const satisfies`, plus an
+  exhaustiveness type that fails if the union gains an unlisted member.
+- the console's level labels were `{...} as Record<AnnouncementLevel, string>`.
+  An assertion admits a missing key and renders `undefined`; the hoisted
+  `LEVEL_LABELS` is a real annotation, so a missing rung is a compile error.
+
+Also: the per-level allowlist in the chime PUT handler was a literal
+`['red','yellow','green']` independent of `CHIME_LEVELS`. Unwidened, it would
+have returned HTTP 200 with `rejected: []` and silently discarded the write —
+the operator sets a tone, the UI reports success, nothing changes. It now derives
+from the single source.
+
+**The suite gates pull requests.** `npm test` previously ran in exactly one
+place: the release workflow, *after* the tag. A behavioural regression reached
+`main` green and surfaced only after the release was cut — and did, twice today.
+1,757 tests take about ten seconds; on a life-safety alarm path they belong on
+the PR.
+
+Not done here, and required before the ladder lands: the web console's `Level`
+type and its token/filename maps are module-private in the `.tsx`, which the
+server test runner cannot import, so no test pins them against the server
+contract. They must move to a plain module first.
+
 ## v1.57.0 — broadcast volume has exactly one source
 
 **The Alert Console's volume slider is removed, along with its `/data` override.**
