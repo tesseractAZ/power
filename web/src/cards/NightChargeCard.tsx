@@ -27,8 +27,18 @@ interface NightChargePlan {
   buyKwh: number | null;
   targetSocPct: number | null;
   requiredExtraKwh: number | null;
-  bindingCap: 'requirement' | 'chargePower' | 'poolHeadroom' | 'overBuy' | null;
+  bindingCap: 'requirement' | 'chargePower' | 'evContention' | 'poolHeadroom' | 'overBuy' | null;
   cushionShortfall: boolean;
+  /** v1.60.0 — EV-contention disclosure. `basis: 'unavailable'` means no EVSE
+   *  prediction covered the window, so contention was NOT modelled — it is not
+   *  a prediction of zero, and the card must not render it as reassurance. */
+  evContention: {
+    basis: 'predicted' | 'unavailable';
+    windowEvKwh: number | null;
+    peakEvKw: number | null;
+    minChargeRateKw: number | null;
+    derateKwh: number | null;
+  } | null;
   minProjSocPct: number | null;
   minProjSocTsMs: number | null;
   baselineMinSocPct: number | null;
@@ -99,6 +109,18 @@ const READINESS_LABEL: Record<NightChargeReadiness['state'], string> = {
   LEARNING: 'learning',
   READY_TO_CONSIDER_WRITES: 'ready to consider writes',
   BLOCKED: 'blocked',
+};
+
+/** Human labels for the plan's binding cap. `Record<…>` over the union so a new
+ *  server-side cap cannot be added without a label landing here; the render
+ *  still falls back to the raw key, so an OLDER card served a NEWER server
+ *  shows `cap: evContention` rather than a blank or `undefined`. */
+const BINDING_CAP_LABEL: Record<NonNullable<NightChargePlan['bindingCap']>, string> = {
+  requirement: 'resilience requirement',
+  chargePower: 'charge power',
+  evContention: 'EV sharing the grid input',
+  poolHeadroom: 'pool headroom',
+  overBuy: 'morning-PV clip accepted',
 };
 
 export const NightChargeCard = memo(function NightChargeCard() {
@@ -219,13 +241,39 @@ export const NightChargeCard = memo(function NightChargeCard() {
         </div>
       )}
 
+      {/* v1.60.0 — EV contention. Either the predicted session is quantified, or
+          we say plainly that it is UNMODELLED; the absent-prediction line is a
+          warning, never a "no EV expected tonight". */}
+      {plan.bindingCap === 'evContention' && plan.evContention?.windowEvKwh != null && (
+        <div className="text-xs text-warn mb-3 -mt-1">
+          EV charging predicted in the window (~{plan.evContention.windowEvKwh.toFixed(1)} kWh
+          {plan.evContention.peakEvKw != null && <>, peak ~{plan.evContention.peakEvKw.toFixed(1)} kW</>}) — it
+          shares the grid input
+          {plan.evContention.minChargeRateKw != null && <>, leaving ~{plan.evContention.minChargeRateKw.toFixed(1)} kW for the packs</>}
+          {plan.evContention.derateKwh != null && plan.evContention.derateKwh > 0 && (
+            <> and cutting ~{plan.evContention.derateKwh.toFixed(1)} kWh off the deliverable buy</>
+          )}
+          .
+        </div>
+      )}
+      {plan.evContention?.basis === 'unavailable' && plan.cushionShortfall && (
+        <div className="text-xs text-muted mb-3 -mt-1">
+          no EVSE prediction covers this window — EV contention is not modelled; if the car charges
+          overnight the packs will receive less than planned
+        </div>
+      )}
+
       <ActuationBanner mode={status.mode} actuation={status.actuation ?? null} />
 
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         <Stat label="Trough without buy" value={fmtSoc(plan.baselineMinSocPct)} sub="P10 PV / P90 load" />
         <Stat label="Trough with buy" value={fmtSoc(plan.minProjSocPct)} sub={`floor+cushion ${floorCushionPct.toFixed(0)}%`} />
-        <Stat label="Target SoC" value={fmtSoc(plan.targetSocPct)} sub={plan.bindingCap ? `cap: ${plan.bindingCap}` : undefined} />
+        <Stat
+          label="Target SoC"
+          value={fmtSoc(plan.targetSocPct)}
+          sub={plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : undefined}
+        />
         <Stat label="Confidence" value={plan.confidenceTier} sub={ws && we ? `${ws}–${we}` : undefined} />
       </div>
 

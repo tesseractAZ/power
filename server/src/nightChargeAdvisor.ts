@@ -28,6 +28,14 @@
  *  - EMIT NULL over a fabricated number: any incomplete / incoherent / thin /
  *    climatology-only basis yields a null plan (chargeTonight=false, no buy),
  *    never a best-effort small number the owner might trust as cushion.
+ *  - CONTENDED CHARGE RATE (v1.60.0): the charger and the house share ONE grid
+ *    input, so an overnight EV session takes its draw straight out of the buy.
+ *    Modelling it can only LOWER the deliverable lift — the plan under-promises
+ *    and flags the shortfall rather than announcing a target the window cannot
+ *    reach. The planner NEVER commands the EVSE: it models contention, it does
+ *    not fight it. Where no EVSE prediction covers the window the model falls
+ *    back to the flat charge cap and SAYS the contention is unmodelled — a
+ *    missing prediction is never rendered as a predicted zero.
  *  - The over-buy CEILING (don't clip next-morning PV) is sized with P90 (high)
  *    PV — the deliberate asymmetry: floor with P10 so we never under-buy, ceiling
  *    with P90 so we never over-buy into clipping. On a genuinely tight day where
@@ -52,6 +60,16 @@ export interface NightChargeHour {
   ts: number;
   pvP10W: number;
   loadP90W: number;
+  /** v1.60.0 — the EV/EVSE component ALREADY INCLUDED in this hour's loadP90W,
+   *  watts. Used ONLY to attribute a charge-rate derate to EV charging (the
+   *  derate itself is driven by the total load — see chargeRateKwAt).
+   *
+   *  ★ null / absent ⇒ NO EV PREDICTION COVERS THIS HOUR. That is NOT the same
+   *  claim as `0` ("a prediction exists and says the car will not charge"), and
+   *  the two must never collapse: a null hour makes the plan report
+   *  evContention.basis='unavailable' (contention unmodelled, disclosed), while
+   *  a 0 hour is a real predicted-zero the plan may rely on. */
+  evP90W?: number | null;
 }
 
 export interface NightChargeInputs {
@@ -83,6 +101,14 @@ export interface NightChargeInputs {
   /** Real SHP2 grid-charge power ceiling, kW (chChargeWatt live 7.2 kW). The
    *  true hardware envelope is an OPEN datum; flagged in the design. */
   chargeCapKw: number;
+  /** v1.60.0 — the SHARED grid-input envelope, kW: the total the service/SHP2
+   *  input carries at once for house pass-through AND battery charging. The
+   *  charger only ever gets what the house leaves, so this is what makes the
+   *  charge rate contended (see chargeRateKwAt).
+   *
+   *  null / non-finite / ≤0 ⇒ NO envelope modelled: the charge rate falls back
+   *  to the flat chargeCapKw (pre-v1.60.0 behaviour). Never silently "0". */
+  gridInputCapKw: number | null;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -108,9 +134,48 @@ export interface NightChargeInputs {
 export type BindingCap =
   | 'requirement' // buy met the resilience requirement exactly
   | 'chargePower' // capped below requirement by the hardware charge rate
+  | 'evContention' // v1.60.0 — a MORE SPECIFIC chargePower: the charge rate that
+  //                   bound the buy was itself cut by predicted EV charging
+  //                   sharing the grid input during the window
   | 'poolHeadroom' // capped below requirement by pool capacity
   | 'overBuy' // requirement itself exceeds morning-PV headroom (clip accepted)
   | null;
+
+/** Every non-null BindingCap, in the order the sizing math resolves them.
+ *  Exported so the delivery surfaces can enumerate the vocabulary instead of
+ *  hand-copying it. The `_bindingCapsExhaustive` line below turns "added a cap
+ *  and forgot a surface" into a COMPILE error under `tsc --noEmit` (which covers
+ *  src/ — server/test/ is deliberately outside tsconfig's `include`). */
+export const BINDING_CAPS = ['requirement', 'chargePower', 'evContention', 'poolHeadroom', 'overBuy'] as const;
+const _bindingCapsExhaustive: Exclude<NonNullable<BindingCap>, (typeof BINDING_CAPS)[number]> extends never
+  ? true
+  : never = true;
+void _bindingCapsExhaustive;
+
+/** v1.60.0 — how much of tonight's window the EV is expected to take out of the
+ *  charger's share of the grid input, and whether that is a PREDICTION at all. */
+export interface NightChargeEvContention {
+  /** 'predicted'   — an EVSE prediction covers EVERY simulated window hour; the
+   *                  numbers below are real (windowEvKwh may legitimately be 0).
+   *  'unavailable' — no EVSE prediction covers the window (no history, EVSE
+   *                  offline, cloud gap, or the window lies past the predictor's
+   *                  24 h reach). Contention is NOT modelled and the plan says
+   *                  so — it never presents the fallback as a predicted zero. */
+  basis: 'predicted' | 'unavailable';
+  /** Predicted EV energy inside the window, kWh. null iff basis==='unavailable'. */
+  windowEvKwh: number | null;
+  /** Peak predicted EV draw inside the window, kW. null iff unavailable. */
+  peakEvKw: number | null;
+  /** Lowest deliverable GRID-side charge power across the window hours, kW —
+   *  what the packs are actually left with at the worst hour. null when no
+   *  grid-input envelope is modelled. */
+  minChargeRateKw: number | null;
+  /** Pack-kWh of lift the window CANNOT deliver because the grid input is
+   *  shared: (flat-chargeCapKw ceiling) − (per-hour contended ceiling). 0 when
+   *  nothing contends; null when no envelope is modelled. Reported whatever the
+   *  basis is — the derate is physics, not a prediction. */
+  derateKwh: number | null;
+}
 
 export type NightChargeObjective =
   | 'resilience_cushion' // a buy is needed to hold floor+cushion through the carry
@@ -135,6 +200,10 @@ export interface NightChargePlan {
   /** true when charge-power / pool caps prevented reaching floor+cushion —
    *  the cushion is NOT fully met and residual risk remains (surfaced honestly). */
   cushionShortfall: boolean;
+
+  /** v1.60.0 — EV-contention disclosure for tonight's window (see the type).
+   *  null only on a null plan (no window was even resolved). */
+  evContention: NightChargeEvContention | null;
 
   /** Simulated PLAN-trajectory minimum SoC % over [windowEnd, nextRecharge]
    *  WITH the buy applied — the number the learning ledger scores its
@@ -231,6 +300,9 @@ function nullPlan(
     requiredExtraKwh: null,
     bindingCap: null,
     cushionShortfall: false,
+    // A null plan resolved no window to contend over — 'unavailable' with a
+    // number would be a claim; null is the honest absence.
+    evContention: null,
     minProjSocPct: null,
     minProjSocTsMs: null,
     baselineMinSocPct: null,
@@ -258,7 +330,7 @@ function nullPlan(
 export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const {
     nowMs, fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
-    legEff, dischargeEff, chargeCapKw, window, horizon,
+    legEff, dischargeEff, chargeCapKw, gridInputCapKw, window, horizon,
     morningPvSurplusP90Kwh, basisComplete, minBuyKwh,
   } = inputs;
 
@@ -380,17 +452,114 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // charger runs, the home rides grid bypass (no pack drain); the rest of the
   // window drains normally. Per-hour clamps keep saturation/empty honest, and
   // pack(lift) is monotone non-decreasing in lift so the bisection stays exact.
+  // ★★ v1.60.0 — EV CONTENTION. Measured 2026-08-02→03: the plan announced
+  // 10% → 36% (~36 kWh buy); at 03:00 `panel_load` was 14.0 kW (EVSE ~11.5 kW +
+  // ~2.5 kW baseline) and the packs were taking only ~2.8 kW (battery_net
+  // −2,757 W) — arrival ~31–32%, not the promised 36%. The v1.49.0 model is
+  // right that house load is grid PASS-THROUGH and does not DRAIN the pack while
+  // the charger runs; it was wrong that the charger therefore always gets the
+  // full chChargeWatt. Pass-through and charging draw on the SAME grid input, so
+  // the charger only ever gets what the house leaves:
+  //
+  //     deliverable_kW(hour) = clamp(gridInputCap − houseLoad(hour), 0, chargeCap)
+  //
+  // With the measured 17 kW coexistence envelope and 14.0 kW of house load that
+  // is 3.0 kW at the meter ⇒ 3.0 × legEff ≈ 2.8 kW into the packs — the number
+  // actually observed. The house load used here is the P90 (high) curve WITH the
+  // committed-EV block already folded in (§2.3), so the EVSE is exactly what
+  // makes this bite: nothing else in this home approaches the envelope.
+  //
+  // Direction of the change is one-way SAFE: it can only LOWER the deliverable
+  // lift, so the plan under-promises and flags cushionShortfall instead of
+  // silently claiming a target the window cannot reach. It NEVER pauses,
+  // throttles, or reschedules the EVSE — that circuit is not this add-on's to
+  // command; the planner models the contention and reports it.
+  const envelopeKw =
+    gridInputCapKw != null && Number.isFinite(gridInputCapKw) && gridInputCapKw > 0 ? gridInputCapKw : null;
+  /** Deliverable GRID-side charge power in one window hour, kW. With no
+   *  envelope configured this is the flat cap — i.e. exactly pre-v1.60.0. */
+  const chargeRateKwAt = (h: NightChargeHour): number => {
+    if (envelopeKw == null) return chargeCapKw;
+    return Math.max(0, Math.min(chargeCapKw, envelopeKw - Math.max(0, h.loadP90W) / 1000));
+  };
+  // Per-hour {rate, wall-clock availability}. availH carries the mid-window
+  // partial hour the flat model used to fold into `chargeHours`.
+  const windowRates: Array<{ hour: NightChargeHour; rateKw: number; availH: number }> = [];
+  {
+    let hoursLeft = remainingWindowHours;
+    for (const h of windowHrs) {
+      const availH = Math.max(0, Math.min(1, hoursLeft));
+      hoursLeft -= 1;
+      windowRates.push({ hour: h, rateKw: chargeRateKwAt(h), availH });
+    }
+  }
+
+  // The deliverable-lift ceiling is now the SUM of the per-hour contended rates,
+  // not a flat rate × hours — an hour the EV is sharing contributes only its
+  // remainder. Credit is still bounded by BOTH the wall-clock remaining window
+  // and the simulable window buckets (availH), so a horizon gap inside the
+  // window can never bill grid energy the trajectory model cannot absorb.
+  const chargePowerLiftKwh = Math.max(
+    0,
+    windowRates.reduce((acc, w) => acc + w.rateKw * legEff * w.availH, 0),
+  );
+  // The same ceiling WITHOUT contention (the pre-v1.60.0 figure). Used ONLY to
+  // quantify the derate for the disclosure — never to size a buy.
+  const chargePowerLiftUncontendedKwh = Math.max(0, chargeCapKw * Math.min(remainingWindowHours, windowHrs.length) * legEff);
+  const contentionDerateKwh = Math.max(0, chargePowerLiftUncontendedKwh - chargePowerLiftKwh);
+
+  // ── The EV-contention DISCLOSURE (honesty, not sizing) ──
+  // basis='predicted' requires the EVSE predictor to cover EVERY simulated
+  // window hour. One uncovered hour (a weekend window past the predictor's 24 h
+  // reach, an EVSE cloud gap, a rollup-synthesized hour) means we do NOT know
+  // what the car will do — and a missing evP90W must never be read as a
+  // predicted 0 kW. The DERATE above still applies either way (it is driven by
+  // total load, which is physics); only the ATTRIBUTION needs a prediction.
+  const evCovered =
+    windowRates.length > 0 &&
+    windowRates.every((w) => w.hour.evP90W != null && Number.isFinite(w.hour.evP90W as number));
+  const evWindowKwh = evCovered
+    ? windowRates.reduce((acc, w) => acc + (Math.max(0, w.hour.evP90W as number) / 1000) * w.availH, 0)
+    : null;
+  const evPeakKw = evCovered
+    ? windowRates.reduce((m, w) => Math.max(m, w.availH > 0 ? Math.max(0, w.hour.evP90W as number) / 1000 : 0), 0)
+    : null;
+  const evContention: NightChargeEvContention = {
+    basis: evCovered ? 'predicted' : 'unavailable',
+    windowEvKwh: evWindowKwh == null ? null : round2(evWindowKwh),
+    peakEvKw: evPeakKw == null ? null : round1(evPeakKw),
+    minChargeRateKw:
+      envelopeKw == null || windowRates.length === 0
+        ? null
+        : round1(windowRates.reduce((m, w) => (w.availH > 0 ? Math.min(m, w.rateKw) : m), chargeCapKw)),
+    derateKwh: envelopeKw == null ? null : round2(contentionDerateKwh),
+  };
+  // The EV is nameable as the cause only when a prediction covers the window AND
+  // that prediction is non-zero AND the derate is material. A derate with no
+  // covering prediction is real and still sizes the buy — it is attributed to
+  // 'chargePower' and disclosed as UNMODELLED contention, never as a prediction.
+  const evAttributable = evCovered && (evWindowKwh ?? 0) > 0 && contentionDerateKwh > 1e-6;
+
+  // Charging still occupies the EARLIEST hours of the remaining window (that is
+  // what the device does once the reserve setpoint is raised) — but each hour
+  // now delivers only its OWN contended rate, so a lift that needs 2 h of a free
+  // window may need 5 h of a window the car is sharing. With a flat rate this
+  // reduces EXACTLY to the v1.49.0 "first chargeHours at chargeCapKw" walk.
   const packAtWindowEndWith = (lift: number): number => {
     if (lift <= 0 || chargeCapKw <= 0) return packAtWindowEnd_noBuy;
-    const chargeHours = Math.min(remainingWindowHours, lift / (chargeCapKw * legEff));
     let pack = packAtWindowStartKwh;
-    let hoursIn = 0;
-    for (const h of windowHrs) {
-      const chargeFrac = Math.max(0, Math.min(1, chargeHours - hoursIn));
-      hoursIn += 1;
+    let remainingLift = lift;
+    for (const { hour: h, rateKw, availH } of windowRates) {
+      // Pack-kWh a FULL hour of charging would add here (0 when the house has
+      // taken the whole envelope — that hour simply cannot charge).
+      const hourLiftKwh = rateKw * legEff;
+      const chargeFrac = hourLiftKwh > 0
+        ? Math.max(0, Math.min(availH, remainingLift / hourLiftKwh))
+        : 0;
+      const gainKwh = hourLiftKwh * chargeFrac;
+      remainingLift = Math.max(0, remainingLift - gainKwh);
       const pvKwh = h.pvP10W / 1000;
       const drainKwh = ((h.loadP90W / 1000) * (1 - chargeFrac)) / dischargeEff;
-      const gainKwh = chargeCapKw * legEff * chargeFrac;
       pack = Math.max(0, Math.min(fullKwh, pack + pvKwh + gainKwh - drainKwh));
     }
     return pack;
@@ -416,17 +585,14 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       baselineMinSocPct,
       projSocAtWindowStartPct,
       preWindowMinSocPct,
+      // Nothing was bought, but the contention basis is still a fact about
+      // tonight's window and the owner-facing surfaces may show it.
+      evContention,
     };
   }
 
   // Feasibility bounds on the lift.
-  // Charge-power (v1.49.0): chargeCapKw is the CHARGE-ONLY ceiling — the full
-  // remaining window is available to the charger and house load is grid
-  // pass-through (see packAtWindowEndWith above). Credit is bounded by BOTH the
-  // wall-clock remaining window and the simulable window buckets, so a horizon
-  // gap inside the window can never bill grid energy the trajectory model
-  // itself cannot absorb.
-  const chargePowerLiftKwh = Math.max(0, chargeCapKw * Math.min(remainingWindowHours, windowHrs.length) * legEff);
+  // Charge-power: the per-hour contended ceiling computed above (v1.60.0).
   // Pool headroom: the pack physically cannot hold more than full.
   const poolHeadroomLiftKwh = Math.max(0, fullKwh - packAtWindowEnd_noBuy);
 
@@ -479,6 +645,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     // attribute to the tighter physical bound so the flag is never 'requirement'.
     bindingCap = poolHeadroomLiftKwh <= chargePowerLiftKwh ? 'poolHeadroom' : 'chargePower';
   }
+  // v1.60.0 — refine the charge-rate cap to its actual cause. 'evContention' is
+  // a MORE SPECIFIC 'chargePower', not a parallel vocabulary: the rate that
+  // bound the buy was itself cut by the car sharing the grid input. It is
+  // claimed ONLY when a prediction covers the window (evAttributable), so a
+  // missing EVSE prediction can never masquerade as a modelled one.
+  if (bindingCap === 'chargePower' && evAttributable) bindingCap = 'evContention';
 
   const targetPackKwh = packAtWindowEndWith(liftKwh);
 
@@ -498,9 +670,23 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const targetSocPct = round1((targetPackKwh / fullKwh) * 100);
   const chargeTonight = buyKwh >= minBuyKwh;
 
+  // v1.60.0 — name the contention. Two MUTUALLY EXCLUSIVE shapes, and neither
+  // may claim a prediction the planner does not have: either the EVSE forecast
+  // covered the window and we quantify it, or it did not and we say the
+  // contention is unmodelled (a warning, never a reassuring "no EV expected").
+  const evNote = evAttributable
+    ? ` NOTE: EV charging is predicted inside the window (~${evContention.windowEvKwh} kWh, peak ~${evContention.peakEvKw} kW); it shares the grid input, leaving ~${evContention.minChargeRateKw} kW for the packs and cutting ~${round1(contentionDerateKwh)} kWh off the deliverable buy.`
+    : evContention.basis === 'unavailable' && (cushionShortfall || bindingCap === 'chargePower')
+      ? ' NOTE: no EVSE prediction covers this window, so EV contention is NOT modelled — if the car charges overnight the packs will receive less than planned.'
+      : '';
+
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwh)} kWh overnight → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}. Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${preWindowNote}`
-    : `Hold — the projected shortfall (${round1(buyKwh)} kWh) is below the ${round1(minBuyKwh)} kWh minimum-buy threshold; no meaningful charge.${preWindowNote}`;
+    ? `Buy ~${round1(buyKwh)} kWh overnight → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}. Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    // The deliverable buy can be pushed under the minimum-buy threshold BY the
+    // contention itself, so this branch must carry the shortfall disclosure too
+    // — otherwise a night the window physically cannot serve would read as a
+    // tidy "nothing worth buying".
+    : `Hold — the projected shortfall (${round1(buyKwh)} kWh) is below the ${round1(minBuyKwh)} kWh minimum-buy threshold; no meaningful charge.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
     generatedAt: nowMs,
@@ -512,6 +698,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     requiredExtraKwh: round2(requiredExtraKwh),
     bindingCap,
     cushionShortfall,
+    evContention,
     minProjSocPct,
     minProjSocTsMs: withBuy.minTs,
     baselineMinSocPct,
@@ -668,6 +855,9 @@ export interface NightChargeInputDeps {
   legEff: number; // √DISPATCH_ROUND_TRIP_EFFICIENCY
   dischargeEff: number; // RUNWAY_DISCHARGE_EFFICIENCY
   chargeCapKw: number;
+  /** v1.60.0 — shared grid-input envelope, kW (see NightChargeInputs). null ⇒
+   *  contention not modelled; passed through untouched. */
+  gridInputCapKw: number | null;
 
   // Cheap-window resolution: a tariff period resolver (rateAt(...).periodId) and
   // the id of the OVERNIGHT (23:00–05:00) cheap period. No tariff import here.
@@ -749,6 +939,10 @@ export function resolveCheapWindow(
  *  - Load = P90 base with the historical-EV component DE-DUPLICATED out, then the
  *    committed p90SessionKwh EV block placed from the predicted charge hour,
  *    clamped per-hour at evMaxLoadW (EV_MAX_LOAD_W).
+ *  - v1.60.0: each BAND hour also carries `evP90W` — how much of that hour's
+ *    load is the car — so the sizer can attribute a contended charge rate. Hours
+ *    with no covering EV prediction (no ev report at all; rollup-synthesized
+ *    hours beyond the band) leave it UNDEFINED, never 0.
  *  - Window from the injected tariff period resolver (OVERNIGHT tier).
  *  - basisComplete = forecast present AND not climatology AND calScoredDays ≥
  *    N_MIN AND band coverage ≥ 0.78 (write-gate floor); a false here forces a null plan downstream.
@@ -756,7 +950,7 @@ export function resolveCheapWindow(
 export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeInputs {
   const {
     nowMs, fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
-    legEff, dischargeEff, chargeCapKw,
+    legEff, dischargeEff, chargeCapKw, gridInputCapKw,
     periodIdAt, cheapPeriodId, windowScanHours = 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
     ev, evMaxLoadW,
@@ -789,12 +983,30 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
   // up front erased OTHER predicted sessions (e.g. tomorrow evening's mined
   // pattern) and any hours a truncated block never reached — an under-buy.
   // "Never strip without replacing" (§2.3) now holds PER-HOUR, not per-plan.
+  // v1.60.0 — is there an EVSE PREDICTION at all? `ev == null` means the
+  // evWindowPrediction report itself was unavailable (no EVSE history, EVSE
+  // offline, cloud gap, analytics failure) — NOT "the car will not charge". In
+  // that case every hour's evP90W stays undefined and the planner falls back to
+  // the EV-blind charge model while DISCLOSING that contention is unmodelled.
+  // An ev report that predicts nothing is a different, positive claim and does
+  // set evP90W = 0.
+  const evPredictionAvailable = ev != null;
+
   const embByTs = new Map<number, number>();
   const byTs = new Map<number, NightChargeHour>();
   for (const h of bandHours) {
     if (!Number.isFinite(h.ts)) continue;
-    if (evBlockWillPlace) embByTs.set(h.ts, Math.max(0, h.embeddedEvW ?? 0));
-    byTs.set(h.ts, { ts: h.ts, pvP10W: Math.max(0, h.pvP10W), loadP90W: Math.max(0, h.loadP90W) });
+    const embW = Math.max(0, h.embeddedEvW ?? 0);
+    embByTs.set(h.ts, embW);
+    byTs.set(h.ts, {
+      ts: h.ts,
+      pvP10W: Math.max(0, h.pvP10W),
+      loadP90W: Math.max(0, h.loadP90W),
+      // Within the band the EV component of the load IS known when a prediction
+      // exists: it is the day-ahead expected-value EV embedded in loadP90W,
+      // replaced hour-by-hour below wherever the committed p90 block lands.
+      evP90W: evPredictionAvailable ? embW : undefined,
+    });
   }
   for (const dr of dayRollups) {
     const da = Math.max(1, dr.daysAhead);
@@ -836,6 +1048,11 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
       const emb = embByTs.get(h.ts) ?? 0;
       const addW = Math.min(Math.max(0, evMaxLoadW), remainingKwh * 1000);
       h.loadP90W = Math.max(0, h.loadP90W - emb) + addW;
+      // v1.60.0 — keep the EV ATTRIBUTION atomic with the strip+re-add: this
+      // hour's EV component is now the committed block, not the expected-value
+      // EV it replaced. The charge-rate derate reads loadP90W (total load);
+      // this field only tells the plan how much of it is the car.
+      h.evP90W = addW;
       remainingKwh -= addW / 1000;
     }
   }
@@ -871,6 +1088,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     legEff,
     dischargeEff,
     chargeCapKw,
+    gridInputCapKw,
     window,
     horizon: trimmed,
     morningPvSurplusP90Kwh,
