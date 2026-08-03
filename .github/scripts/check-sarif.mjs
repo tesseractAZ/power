@@ -13,6 +13,20 @@
 // Usage: node check-sarif.mjs <path-to-sarif> [--fail-threshold <float>]
 import { readFileSync } from 'node:fs';
 
+// Reviewed + accepted findings (see .github/codeql-baseline.json). Matching is
+// on BOTH rule id and exact path, so the same rule in a new file still fails.
+// Absent/unreadable baseline = match nothing, i.e. fail closed.
+let BASELINE = [];
+try {
+  BASELINE = JSON.parse(
+    readFileSync(new URL('../codeql-baseline.json', import.meta.url), 'utf8'),
+  ).accepted ?? [];
+} catch {
+  BASELINE = [];
+}
+const isBaselined = (ruleId, path) =>
+  BASELINE.some((e) => e.rule === ruleId && (e.paths ?? []).includes(path));
+
 const args = process.argv.slice(2);
 const thrIdx = args.indexOf('--fail-threshold');
 const FAIL_SEVERITY = thrIdx >= 0 ? Number(args[thrIdx + 1]) : 7.0; // HIGH
@@ -40,6 +54,14 @@ const runs = Array.isArray(sarif.runs) ? sarif.runs : [];
 let total = 0;
 const failing = [];
 const byLevel = { error: 0, warning: 0, note: 0, none: 0 };
+
+// A result CodeQL considers suppressed (an in-source `# codeql[rule-id]`
+// comment) carries a non-empty `suppressions` array. Those are deliberate,
+// reviewed decisions documented at the code site, so the gate must skip them —
+// otherwise a justified suppression still breaks the build and the only way to
+// stay green is to weaken the threshold for everything.
+const isSuppressed = (r) => Array.isArray(r.suppressions) && r.suppressions.length > 0;
+let suppressed = 0;
 
 for (const run of runs) {
   // Build a ruleId -> {level, securitySeverity, name} index.
@@ -81,6 +103,14 @@ for (const run of runs) {
     process.exit(2);
   }
   for (const res of run.results ?? []) {
+    const resPath =
+      res.locations?.[0]?.physicalLocation?.artifactLocation?.uri ?? '';
+    if (isSuppressed(res) || isBaselined(res.ruleId, resPath)) {
+      // Reviewed + justified (in-source, or in codeql-baseline.json). Counted
+      // so the summary can never read "clean" when it means "all silenced".
+      suppressed += 1;
+      continue;
+    }
     total += 1;
     const meta = ruleMeta.get(res.ruleId) ?? {};
     const level = res.level ?? meta.level ?? 'warning';
@@ -99,7 +129,8 @@ for (const run of runs) {
 }
 
 console.log(
-  `\nCodeQL results: ${total} total  (error:${byLevel.error} warning:${byLevel.warning} note:${byLevel.note})`
+  `\nCodeQL results: ${total} total  (error:${byLevel.error} warning:${byLevel.warning} note:${byLevel.note})` +
+    (suppressed ? `  [+${suppressed} accepted via baseline/suppression]` : '')
 );
 
 if (failing.length) {
