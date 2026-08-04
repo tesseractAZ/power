@@ -476,7 +476,16 @@ export interface BroadcastMonitor {
    * No-ops (returns { ok:false, error:'broadcast disabled' }) when BROADCAST
    * is off. Never throws.
    */
-  announce: (priority: AlarmPriority, message: string, messageEs?: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * v1.67.0 — `messageEs` is REQUIRED, and `null` must be explicit. It used to be
+   * optional, and two call sites simply omitted it: the night-charge notice and the
+   * CRITICAL reserve-revert failure. A missing Spanish string does NOT produce a
+   * monolingual broadcast — `bilingual` requires a non-empty messageEs, so it falls
+   * through to the legacy `announceRepeat` path and plays ENGLISH TWICE. That shipped
+   * and the household heard it. Making the parameter required turns the omission into
+   * a compile error instead of a silently wrong broadcast.
+   */
+  announce: (priority: AlarmPriority, message: string, messageEs: string | null) => Promise<{ ok: boolean; error?: string }>;
   config: () => BroadcastConfig;
   status: () => BroadcastStatus;
   stop: () => void;
@@ -1072,6 +1081,15 @@ export function startBroadcastMonitor(
       && secondVoice.length > 0
       && message != null && message.trim().length > 0
       && messageEs != null && messageEs.trim().length > 0;
+    // v1.67.0 — when the system is CONFIGURED bilingual but a caller supplied no
+    // Spanish text, the render silently degrades to the legacy announceRepeat path
+    // and says the English twice. That is indistinguishable from a working bilingual
+    // broadcast in the log, which is how it went unnoticed. Say so.
+    if (cfg.bilingual && secondVoice.length > 0 && (messageEs == null || messageEs.trim().length === 0)
+        && message != null && message.trim().length > 0) {
+      log('broadcast: bilingual is configured but this message carried no Spanish text — '
+        + 'falling back to a monolingual pass (the English may repeat). This is a CALLER bug.');
+    }
     const messages = bilingual
       ? [
           { text: message!, lang: 'en' as const },                       // English, default voice
@@ -1749,7 +1767,7 @@ export function startBroadcastMonitor(
     // + TTS) and the Music-Assistant play path are IDENTICAL
     // to a real condition-transition broadcast. The SoC monitor edge-limits
     // crossings, so we deliberately apply NO cooldown here. Never throws.
-    announce: async (priority: AlarmPriority, message: string, messageEs?: string): Promise<{ ok: boolean; error?: string }> => {
+    announce: async (priority: AlarmPriority, message: string, messageEs: string | null): Promise<{ ok: boolean; error?: string }> => {
       try {
         cfg = loadBroadcastConfig();
         if (!cfg.enabled) return { ok: false, error: 'broadcast disabled' };
@@ -1768,14 +1786,14 @@ export function startBroadcastMonitor(
           return { ok: false, error: 'suppressed: quiet hours' };
         }
         const level = klaxonLevelForPriority(priority);
-        const r = await runBroadcast(level, priority, message, false, messageEs ?? null);
+        const r = await runBroadcast(level, priority, message, false, messageEs);
         lastBroadcastAt = Date.now();
         lastLevel = level;
         lastOutcome = r.ok ? 'success' : 'partial';
         lastErrors = r.errors;
         // v1.48.0 — dedicated-path alarms (SoC ladder / runway) earn the same
         // one-shot spoken retry as condition broadcasts, replaying THIS message.
-        noteSpokenRenderFailure(level, priority, r, message, messageEs ?? null);
+        noteSpokenRenderFailure(level, priority, r, message, messageEs);
         return r.ok ? { ok: true } : { ok: false, error: r.errors.join('; ') || 'broadcast failed' };
       } catch (e: any) {
         const err = e?.message ?? String(e);
