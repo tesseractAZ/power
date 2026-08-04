@@ -1,3 +1,48 @@
+## v1.67.0 — the night-charge announcement said everything twice in English
+
+The bilingual broadcast plays English, then Spanish. Last night's night-charge notice played
+English, then English again.
+
+Not a TTS fault and not a missing voice: **the Spanish pass was never requested.**
+`announce()` took Spanish as an OPTIONAL third argument —
+
+```ts
+announce: (priority, message, messageEs?: string) => ...
+```
+
+— and two call sites simply omitted it. With `messageEs` undefined the bilingual gate fails:
+
+```ts
+const bilingual = cfg.bilingual && secondVoice.length > 0
+  && message != null && message.trim().length > 0
+  && messageEs != null && messageEs.trim().length > 0;   // <- false
+```
+
+`messages` is then undefined, the render falls back to the legacy monolingual path, and on that
+path `announceRepeat` applies — which is set to 2. Hence the English twice. The comment on that
+line reads "ignored when bilingual", and that is exactly the trap: it stops being ignored the
+moment the Spanish text is missing.
+
+### The second site was worse
+
+The same bare two-argument call carried the CRITICAL reserve-revert failure — *"the night charge
+system could not restore the backup reserve… the reserve is stuck at N percent."* A Spanish-speaking
+member of the household would have heard that emergency in English only, twice.
+
+The three call sites that already passed Spanish (the SoC ladder and the runway alarm) were
+unaffected, which is why this only ever showed up on night-charge messages.
+
+### Fixed so it cannot recur
+
+Both night-charge messages now carry Spanish, including a Spanish spoken-deadline formatter
+(`fmtDeadlineSpokenEs`, weekday names translated, same clock string).
+
+More importantly `messageEs` is now **required** — `string | null`, with `null` written
+explicitly where a message is genuinely monolingual. Omitting it is a compile error rather than
+a silently wrong broadcast. And when the add-on is configured bilingual but a caller supplies no
+Spanish, the render now logs that it is degrading to a monolingual pass and names it a caller
+bug, instead of being indistinguishable from a working bilingual broadcast.
+
 ## v1.66.0 — the rate-floor detector was unreliable in BOTH directions
 
 `messageRateFloor.ts` is the only detector covering "a device still reports, but is
