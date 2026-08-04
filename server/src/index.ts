@@ -2536,6 +2536,20 @@ function fmtDeadlineSpoken(ms: number, nowMs: number): string {
   return wd ? `on ${wd} at ${hm}` : `at ${hm}`;
 }
 
+/** v1.67.0 — Spanish counterpart of fmtDeadlineSpoken for the bilingual second
+ *  pass. Same shape and the same clock string; only the framing is translated. */
+const WEEKDAY_ES: Record<string, string> = {
+  Sunday: 'domingo', Monday: 'lunes', Tuesday: 'martes', Wednesday: 'miércoles',
+  Thursday: 'jueves', Friday: 'viernes', Saturday: 'sábado',
+};
+function fmtDeadlineSpokenEs(ms: number, nowMs: number): string {
+  const hm = fmtPhoenixClock(ms);
+  if (ms - nowMs < 24 * HOUR_MS) return `a las ${hm}`;
+  const wd = fmtPhoenixWeekday(ms);
+  const es = wd ? WEEKDAY_ES[wd] : null;
+  return es ? `el ${es} a las ${hm}` : `a las ${hm}`;
+}
+
 // In-memory cache of the last 7 ledger rows for the read-only status route, so
 // that handler never performs a per-request SQLite (filesystem) read — CWE-770 /
 // CodeQL js/missing-rate-limiting. Refreshed by the background recompute tick /
@@ -3328,7 +3342,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // computed here but PERSISTED only after at least one announcement
     // channel confirms delivery — a write the owner never heard about must
     // never fire. Arming is refused while a prior night is unresolved.
-    let supervisedCtx: { cancelDeadlineText: string; targetPct: number } | null = null;
+    let supervisedCtx: { cancelDeadlineText: string; cancelDeadlineTextEs: string; targetPct: number } | null = null;
     let armedCandidate: NightActuationState | null = null;
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
       armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
@@ -3337,6 +3351,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           // Day-qualified: a weekend plan's window can be ~28 h out, and a bare
           // clock time would read as tonight (see fmtDeadlineSpoken).
           cancelDeadlineText: fmtDeadlineSpoken(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
+          cancelDeadlineTextEs: fmtDeadlineSpokenEs(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
         };
       } else if (
@@ -3367,8 +3382,19 @@ async function runNightChargeEveningJobInner(): Promise<void> {
         `Night charge notice. The system plans to buy about ${buyRounded} kilowatt hours of overnight grid energy, ` +
         `raising the backup reserve to ${supervisedCtx.targetPct} percent. The write happens automatically ${supervisedCtx.cancelDeadlineText}.` +
         `${shortfallSpoken} To cancel, use the night charge card on the Power panel before then.`;
+      // v1.67.0 — Spanish second pass. Omitting this is NOT a silent monolingual
+      // broadcast: `bilingual` requires a non-empty messageEs, so a missing one
+      // falls through to the legacy announceRepeat path and plays ENGLISH TWICE.
+      // That is exactly what shipped, and what the household heard.
+      const shortfallSpokenEs = plan.cushionShortfall
+        ? ' Nota: los límites de carga y de la reserva impiden cubrir por completo el margen de respaldo, por lo que queda un riesgo residual.'
+        : '';
+      const spokenEs =
+        `Aviso de carga nocturna. El sistema planea comprar unos ${buyRounded} kilovatios hora de energía de la red durante la noche, ` +
+        `elevando la reserva de respaldo al ${supervisedCtx.targetPct} por ciento. La escritura se realiza automáticamente ${supervisedCtx.cancelDeadlineTextEs}.` +
+        `${shortfallSpokenEs} Para cancelar, use la tarjeta de carga nocturna en el panel Power antes de esa hora.`;
       try {
-        const a = await broadcast.announce('medium', spoken);
+        const a = await broadcast.announce('medium', spoken, spokenEs);
         audibleDelivered = a.ok === true;
         if (!a.ok) app.log.warn(`night-charge: supervised announce failed (${a.error ?? 'unknown'})`);
       } catch (e: any) {
@@ -3561,6 +3587,10 @@ async function runNightActuationTickInner(): Promise<void> {
         await broadcast.announce(
           'critical',
           `Critical. The night charge system could not restore the backup reserve after charging. The reserve is stuck at ${state.targetPct} percent. Retries continue. Check the Power panel.`,
+          // v1.67.0 — Spanish second pass. Without it this CRITICAL plays English
+          // twice instead of bilingual (see the announce() contract).
+          `Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo restablecer la reserva de respaldo después de cargar. ` +
+          `La reserva está fija en ${state.targetPct} por ciento. Los reintentos continúan. Revise el panel Power.`,
         );
       } catch { /* annunciation best-effort; retries continue regardless */ }
       try {
