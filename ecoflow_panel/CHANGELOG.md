@@ -1,3 +1,154 @@
+## v1.64.0 — a standing critical klaxoned on every restart; the gate now knows WHICH fault
+
+`critical_alerts` has been **≥ 1 for 98.8 % of live coverage**. Core 3 Pack 1 carries
+a standing "Battery protection fault", and a RED is never restart-suppressed, so
+every add-on restart re-announced it aloud. On 2026-08-03 five deploys produced
+**five klaxons in four hours** — 5 of 5 restarts, 61–237 s after each. On 2026-08-02,
+10 of 11 restarts did the same.
+
+Each announcement was correct in isolation and worthless in aggregate. The loudest
+tone the system has was being spent, several times a day, on a fault the household
+already knew about — which is how an alarm becomes background noise.
+
+### Why the obvious fix was the wrong one
+
+`isRestartContinuation` suppresses a re-spoken yellow/green after a restart and
+returns `false` for red on purpose. Its comment gives two reasons, and the second
+is load-bearing: **that function sees only levels**. A rate limit keyed on level
+alone would match `red ≤ red` and swallow a **new, distinct critical** that fires
+during the warm-up window while a pre-restart red is still active — muting a fresh
+emergency behind a stale one. Extending it to red would have traded a nuisance for
+that.
+
+### ★ Why a gate keyed on the bare alert ID was ALSO unsafe
+
+An alert **`id` names the source, not the fault.** `dpu-err-<sn>` is emitted for
+**every value of `sysErrCode`** — alerts.ts holds that id constant on purpose (a
+standing fault must not re-raise as a new alert on upgrade) and flips only the
+*title* between "Battery protection fault" (5xx band) and "Inverter error code".
+`shp2-src-err-<slot>` is worse: its title never varies at all, so one id covers
+every code on that slot.
+
+So the standing Core-3 fault clearing and a **different, real** fault appearing on
+the same device are the *same id*. `DPU_ERR_DEBOUNCE_MS` is 3 min and re-baselines
+on a code change, so *drop → 3 min → re-raise with a new code* fits comfortably
+inside the 10-minute boot window. **A bare-id gate would have muted that new
+fault.** Read that sentence again before touching this file.
+
+### The identity that shipped: a fingerprint, not an id
+
+`conditionFromAlerts` already holds the full alert objects, so identity exists at
+that seam and is only lost downstream. It now returns `criticalFingerprints` —
+`alertFingerprint(a)` = **`id` + `title` + `fault`** for each critical actually
+counted into the level. `Alert.fault` is a new, optional, *discrete* sub-identity:
+the device-reported error code, threaded out explicitly at the two sites whose ids
+span multiple faults (`dpu-err`, `shp2-src-err`).
+
+Three fields, and each is there for a reason:
+
+| field | why it discriminates | why it is stable |
+|---|---|---|
+| `id` | the source: device / slot / pack | never varies for a given source |
+| `title` | flips when the meaning changes ("Battery protection fault" ↔ "Inverter error code") | a fixed vocabulary string; carries no measurement |
+| `fault` | the error CODE — the only discriminator when the title is constant | already debounced 3 min; a discrete device register, not a reading |
+
+**`detail` and `facts` are deliberately NOT folded in.** `vdiff-crit` prints a live
+`cell spread <n> mV` and `soh-crit` a percentage; hashing those would make every
+tick a new fault and turn this gate into a silent no-op — the failure mode that
+looks like it works and never suppresses anything. Both directions are tested: a
+code change on one id must announce, and a genuinely unchanged fault must stay
+suppressed while the telemetry around it moves.
+
+`criticalIds` still exists, for the **log line only**. Never hand it to the gate;
+the gate rejects anything that is not a well-formed fingerprint and degrades to
+*always announce*, so a miswiring here can only ever get louder.
+
+### ★ It records only what was actually SPOKEN
+
+`ttsService.buildAlertMessage` voices exactly **one** alert — `pickPrimaryAlert`'s
+choice. With two criticals active, the second is counted, displayed and pushed,
+but never named aloud. Recording "every critical that was active" would therefore
+file a never-spoken critical as *already announced*, and a post-restart red
+consisting solely of that critical would be muted. It measurably was.
+
+So the gate records the fingerprint of `pickPrimaryAlert`'s choice, and suppresses
+only when the critical that **would be voiced now** is that same fingerprint. The
+active-fingerprint set is still persisted, but only ever to *force* an announce
+when something unrecognised has appeared alongside it — never to justify one less.
+
+### Suppression conditions, in full
+
+A red still replays at reboot. It is suppressed **only when all of these hold**:
+
+1. inside the post-boot warm-up window (`BROADCAST_BOOT_WARMUP_MS`, 10 min);
+2. this red is **not an escalation** — the last verified-successful broadcast of
+   any level was itself a red (same `LEVEL_RANK` ladder the storm gate uses, now a
+   single shared definition rather than two copies);
+3. the critical that **would be spoken now** has the same fingerprint as the one
+   that **was spoken** at the last successful red announcement;
+4. no unrecognised critical is active alongside it; and
+5. that announcement was less than `BROADCAST_RED_REPLAY_MIN_GAP_MS` (**30 min**) ago.
+
+**A changed fault, a new fault, or an escalation announces immediately, at any
+age.** Thirty minutes elapsed announces. Outside the warm-up window the gate is
+inert. The live five-deploy sequence becomes three announcements instead of five,
+and a standing fault still gets a periodic spoken reminder rather than silence.
+
+### ★ Green resets it
+
+Reaching **green** destroys the evidence outright, in memory and on disk. An
+all-clear means the next red is a *new event*: a critical that clears and re-raises
+inside the 30-minute gap must klaxon, all-clear or not. Every path that commits a
+condition level goes through one `adoptLevel` helper so no future branch can adopt
+green and leave stale evidence behind. The one deliberate exception is `firstTick`
+— the first observation after a restart usually sees an empty alert store (green)
+purely because telemetry has not populated, which is not an all-clear.
+
+A verified **yellow** does not clear the record but demotes its `lastPlayedLevel`,
+which makes the next red an escalation by rule (2).
+
+### Fail open, always
+
+`{lastRedAnnouncedAtMs, voicedFingerprint, activeFingerprints, lastPlayedLevel}`
+persists to `broadcast-red-replay.json` via the shared atomic write (temp + rename,
+same directory) — including the clear, which writes a tombstone rather than
+unlinking, so a power cut mid-clear cannot leave the old state readable. Missing,
+unreadable, corrupt, type-invalid, **future-dated** (a pre-NTP backward clock step
+is routine on this host), or written by any earlier state shape all resolve to
+*announce* — today's behaviour. So does a red with no identifiable criticals, and a
+red where nothing would be named aloud. Every unknown resolves toward noise, never
+toward silence.
+
+Only a **verified-successful** dispatch is recorded, mirroring the storm gates and
+the restart baseline: a broadcast nobody heard must not buy thirty minutes of
+quiet. The deferred retry, the spoken retry, and the dedicated SoC/runway
+announcers deliberately do not record — not recording costs at most one extra
+klaxon.
+
+The gate runs **after** the boot phantom-red hold, so only a red that survived the
+one-tick confirmation can reach it; `holdBootRed`, quiet hours,
+`criticalBreakThrough`, the yellow/green continuation, the storm gates and every
+cooldown are untouched.
+
+### Verification
+
+Mutation-verified via the committed harness `scripts/mutate-red-replay.mjs` —
+**24 planted defects, 24 killed**, including every unsafe simplification this
+design exists to forbid: the fingerprint reduced back to a bare id; the fault
+code dropped at either emitting site; a drifting field (`detail`) folded in so the
+gate silently no-ops; suppression keyed on the recorded active set instead of the
+one alert actually spoken; the voiced identity taken from the first critical rather
+than `pickPrimaryAlert`'s; the return-to-green reset removed (in memory, on disk,
+or aimed at the wrong level); the escalation carve-out removed and the shared rank
+ladder mangled; plus the original nine (level-alone, inverted timer, fail-closed on
+missing state, no persistence, gate applied outside the window, partial dispatch
+recorded, empty set no longer failing open, clock-skew guard dropped, identity from
+raw instead of counted alerts).
+
+Tests 1,819 → 1,843.
+
+---
+
 ## v1.63.0 — the surplus posture had no debounce, and it drives the thermostats
 
 `sensor.ecoflow_lighting_posture` is an **actuation trigger**. The Home Assistant
