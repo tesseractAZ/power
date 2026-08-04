@@ -92,6 +92,20 @@ import {
   priorityAnnouncementPrefix,
 } from './alertPriority.js';
 import { isPriorityEnabled } from './alertSettings.js';
+// v1.64.0 — the identity-aware post-restart RED replay gate. It is a SEPARATE
+// module from isRestartContinuation on purpose: that one is level-only and must
+// stay that way (see its comment), this one is handed alert FINGERPRINTS.
+// LEVEL_RANK/isLevelEscalation live there too so the storm gate below and the
+// replay gate's escalation carve-out share ONE rank ladder.
+import {
+  alertFingerprint,
+  clearsRedReplayEvidence,
+  createRedReplayGate,
+  describeFingerprint,
+  isLevelEscalation,
+  isRecordableRedAnnounce,
+  voicedRedFingerprint,
+} from './redReplayGate.js';
 
 /* ─── config ──────────────────────────────────────────────────────── */
 
@@ -286,7 +300,7 @@ export type ConditionLevel = 'green' | 'yellow' | 'red';
 
 export function conditionFromAlerts(
   alerts: Alert[],
-): { level: ConditionLevel; crit: number; warn: number; rung: AlarmRung } {
+): { level: ConditionLevel; crit: number; warn: number; rung: AlarmRung; criticalIds: string[]; criticalFingerprints: string[] } {
   // v0.12.0 — drop on-screen backup-SoC alerts (id starts with 'backup-soc')
   // before counting crit/warn. Their audible is the dedicated announce() path,
   // so excluding them here keeps the condition-transition broadcast from
@@ -323,9 +337,28 @@ export function conditionFromAlerts(
       // by id here — same intent as the system-outage exclusion above.
       !a.id.startsWith('system-audible'),
   );
-  const crit = counted.filter((a) => a.severity === 'critical').length;
+  const criticals = counted.filter((a) => a.severity === 'critical');
+  const crit = criticals.length;
   const warn = counted.filter((a) => a.severity === 'warning').length;
   const level: ConditionLevel = crit > 0 ? 'red' : warn > 0 ? 'yellow' : 'green';
+
+  // v1.64.0 — the IDENTITY of the criticals behind a red, carried out of this
+  // seam because it exists here and nowhere downstream. redReplayGate needs it to
+  // tell "the same standing fault, announced minutes ago" from "a new, distinct
+  // emergency"; without it the only available discriminator is the LEVEL, and a
+  // level-keyed gate would mute a fresh critical behind a stale one. Sorted so the
+  // persisted set is order-stable across ticks.
+  //
+  // ★★★ TWO different things, and they are NOT interchangeable:
+  //   criticalIds          — for the LOG LINE and for human diagnostics ONLY.
+  //   criticalFingerprints — the gate's identity: id + title + fault.
+  // A bare id is the SOURCE, not the FAULT: `dpu-err-<sn>` is emitted for every
+  // value of sysErrCode (alerts.ts holds the id constant on purpose), so a
+  // standing fault clearing and a DIFFERENT real fault appearing on the same
+  // device share one id. NEVER feed criticalIds to redReplayGate — that is the
+  // defect this seam exists to prevent. See redReplayGate.alertFingerprint.
+  const criticalIds = criticals.map((a) => a.id).sort();
+  const criticalFingerprints = criticals.map((a) => alertFingerprint(a)).sort();
 
   // v1.59.0 — the RUNG: the most severe ISA priority among the same counted pool,
   // or `clear` when nothing is raised.
@@ -342,7 +375,7 @@ export function conditionFromAlerts(
       return priorityRank(p) < priorityRank(worst as AlarmPriority) ? p : worst;
     }, priorityOf(raised[0]));
   }
-  return { level, crit, warn, rung };
+  return { level, crit, warn, rung, criticalIds, criticalFingerprints };
 }
 
 // v0.58.0 — how long after boot the restart-continuation gate stays armed. Learned/
@@ -358,14 +391,22 @@ const BROADCAST_BOOT_WARMUP_MS = Number(process.env.BROADCAST_BOOT_WARMUP_MS) ||
  * (suppress) only for a yellow/green observation at or below the persisted
  * pre-restart `baseline`, within the post-boot warm-up window.
  *
- * SAFETY: a RED (critical) observation is NEVER a continuation — it always
+ * SAFETY: a RED (critical) observation is NEVER a continuation HERE — it always
  * returns false and broadcasts. Two reasons: (1) a critical that is still active
- * across a restart SHOULD be re-announced; (2) the broadcast path is level-based
- * with no alert identity, so a NEW, distinct critical firing during the warm-up
- * window while a pre-restart red was already active would otherwise be swallowed
- * by a same-rank (red≤red) match — an unacceptable risk of muting a fresh
- * emergency. The observed restart re-speak bug was a YELLOW advisory; that is all
- * we suppress. Pure + exported for tests.
+ * across a restart SHOULD be re-announced; (2) THIS function sees only levels, so
+ * a NEW, distinct critical firing during the warm-up window while a pre-restart
+ * red was already active would otherwise be swallowed by a same-rank (red≤red)
+ * match — an unacceptable risk of muting a fresh emergency. The restart re-speak
+ * bug observed in v0.58.0 was a YELLOW advisory; that is all this suppresses.
+ *
+ * ★★★ v1.64.0 — reason (2) is why the red re-announce rate limit lives in
+ * redReplayGate.ts and NOT in this function. That gate is IDENTITY-aware: it is
+ * handed the active critical alert ID SET from conditionFromAlerts, and refuses
+ * to suppress unless every active critical id was already in the set that was
+ * spoken aloud less than 30 min ago. Do NOT "simplify" it back into a red≤red
+ * level match here — that reintroduces exactly the mute described above.
+ *
+ * Pure + exported for tests.
  */
 export function isRestartContinuation(
   baseline: ConditionLevel | null,
@@ -569,6 +610,31 @@ export function startBroadcastMonitor(
   // operator heard it); a failed/never-played pre-restart broadcast must still re-fire.
   const bootMs = Date.now();
   const bootBaselineLevel: ConditionLevel | null = lastOutcome === 'success' ? lastLevel : null;
+  // v1.64.0 — identity-aware RED replay gate (see redReplayGate.ts). Constructed
+  // here so the state read happens once, at boot: that read IS the restart
+  // boundary. Note it is deliberately NOT keyed off bootBaselineLevel/lastOutcome
+  // above — it carries its own evidence (WHICH criticals were spoken, and WHEN),
+  // because a level alone cannot answer "is this the same fault?".
+  const redReplayGate = createRedReplayGate({ windowMs: BROADCAST_BOOT_WARMUP_MS });
+  /**
+   * v1.64.0 — the ONE place a condition level is committed as `prevLevel`.
+   *
+   * ★★★ Committing GREEN destroys the red-replay evidence. Reaching green is an
+   * ALL-CLEAR: whatever happens next is a NEW event, not a replay of the red we
+   * announced before it, and a red that cleared and re-raised inside the 30-min
+   * gap must klaxon. Every path that adopts a level goes through here so no
+   * future branch can adopt green and leave stale evidence behind.
+   *
+   * ★★★ `firstTick` deliberately does NOT use this. The very first observation
+   * after a restart usually sees an EMPTY alert store (green) purely because
+   * telemetry has not populated yet — that is not an all-clear, and wiping the
+   * state on it would turn this whole gate into a no-op on every boot.
+   */
+  const adoptLevel = (l: ConditionLevel, c: number): void => {
+    prevLevel = l;
+    prevCrit = c;
+    if (clearsRedReplayEvidence(l)) redReplayGate.noteConditionGreen();
+  };
 
   // v0.15.18 — single-slot deferred retry for broadcasts that could not be
   // verified (targets unavailable during an HA/MA restart, MA call failure,
@@ -637,7 +703,6 @@ export function startBroadcastMonitor(
   // never block their own retries. Test/preview paths bypass (deliberate).
   const SAME_LEVEL_GAP_MS = 2 * 60 * 1000;
   const SAME_MESSAGE_GAP_MS = 10 * 60 * 1000;
-  const LEVEL_RANK: Record<ConditionLevel, number> = { green: 0, yellow: 1, red: 2 };
   let lastPlayedAt = 0;
   let lastPlayedLevel: ConditionLevel | null = null;
   let lastPlayedMessage: string | null = null;
@@ -967,7 +1032,10 @@ export function startBroadcastMonitor(
     // v0.15.22 — storm gates (see constants above). Escalations always play.
     if (!bypassStormGate && lastPlayedAt > 0) {
       const since = Date.now() - lastPlayedAt;
-      const escalation = lastPlayedLevel == null || LEVEL_RANK[level] > LEVEL_RANK[lastPlayedLevel];
+      // v1.64.0 — the rank ladder moved to redReplayGate.ts and is IMPORTED here.
+      // Same comparison, byte for byte; the point is that there is now exactly ONE
+      // definition of "escalation", shared with the red replay gate's carve-out.
+      const escalation = isLevelEscalation(lastPlayedLevel, level);
       if (!escalation) {
         if (message != null && message === lastPlayedMessage && since < SAME_MESSAGE_GAP_MS) {
           stormSuppressedCount += 1;
@@ -1338,9 +1406,17 @@ export function startBroadcastMonitor(
     // The alerts stay in snapshot.alerts and remain visible in the UI — we only
     // gate the audible annunciation here.
     const alerts = ((store.get().alerts ?? []) as Alert[]).filter((a) => isPriorityEnabled(priorityOf(a)));
-    const { level, crit, rung } = conditionFromAlerts(alerts);
+    const { level, crit, rung, criticalIds, criticalFingerprints } = conditionFromAlerts(alerts);
+    // v1.64.0 — the fingerprint of the ONE critical this tick would actually SAY
+    // OUT LOUD. buildAlertMessage voices pickPrimaryAlert's choice and nothing
+    // else, so that choice — computed from the SAME `alerts` array messageFor()
+    // will be handed — is what the replay gate must compare. Null when nothing
+    // would be named, which the gate treats as "cannot prove sameness" ⇒ announce.
+    const voicedFingerprint = voicedRedFingerprint(level, alerts);
     if (firstTick) {
       firstTick = false;
+      // ★ NOT adoptLevel(): a boot-time green is almost always "the alert store
+      // has not populated yet", not an all-clear. See adoptLevel's docstring.
       prevLevel = level;
       prevCrit = crit;
       return;
@@ -1395,8 +1471,7 @@ export function startBroadcastMonitor(
     // (e.g. yellow→red across the restart) still passes through and broadcasts.
     if (transitioned && isRestartContinuation(bootBaselineLevel, level, Date.now() - bootMs)) {
       log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);
-      prevLevel = level;
-      prevCrit = crit;
+      adoptLevel(level, crit);
       return;
     }
     if (!transitioned && !newCrit) return;
@@ -1410,6 +1485,22 @@ export function startBroadcastMonitor(
     if (holdBootRed(level === 'red' && (transitioned || newCrit), Date.now() - bootMs, warmupRedSeen)) {
       warmupRedSeen = true;
       log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard)`);
+      return;
+    }
+    // v1.64.0 — post-restart RED replay gate. Placed AFTER holdBootRed so only a
+    // CONFIRMED red (one that survived the phantom-grace tick) is ever evaluated
+    // here; a one-tick populate phantom is still filtered upstream exactly as
+    // before, and can never be adopted as prevLevel by this branch.
+    //
+    // Suppresses ONLY when: inside the warm-up window, this red is not an
+    // ESCALATION over the last level actually played, the critical that would be
+    // SPOKEN now is the very one that was spoken then (same fingerprint — id +
+    // title + error code, NOT the bare id), no other critical has appeared
+    // alongside it, and that announcement was < 30 min ago. Anything else fires
+    // immediately at any age. See redReplayGate.ts.
+    if (redReplayGate.shouldSuppress({ observed: level, voicedFingerprint, activeFingerprints: criticalFingerprints, msSinceBoot: Date.now() - bootMs, nowMs: Date.now() })) {
+      log(`broadcast: red suppressed — the same standing fault was spoken <30 min ago (${voicedFingerprint ? describeFingerprint(voicedFingerprint) : '?'}; active: ${criticalIds.join(', ')})`);
+      adoptLevel(level, crit);
       return;
     }
     // v0.97.0 (re-audit #2) — check in-flight BEFORE committing prevLevel/prevCrit.
@@ -1427,8 +1518,11 @@ export function startBroadcastMonitor(
     }
     // Snapshot the transition state so a SAME-level re-arrival during the next
     // in-flight window doesn't re-fire (the `transitioned` check above handles it).
-    prevLevel = level;
-    prevCrit = crit;
+    // v1.64.0 — via adoptLevel, so a committed GREEN clears the red-replay
+    // evidence whether or not the all-clear is ultimately SPOKEN (disabled,
+    // quiet hours, or the critical-still-active gate below all return after this
+    // point — and in every one of them the condition genuinely reached green).
+    adoptLevel(level, crit);
     if (!cfg.enabled) return;
     // v1.17.0 (engine-review F14 follow-up) — never SPEAK an all-clear while a
     // critical-severity alert is active, even one excluded from the ambient
@@ -1464,6 +1558,30 @@ export function startBroadcastMonitor(
       lastLevel = level;
       lastOutcome = result.ok ? 'success' : 'partial';
       lastErrors = result.errors;
+      // v1.64.0 — record WHICH critical was actually SPOKEN and WHEN, so the next
+      // boot's replay gate has evidence. Only on a VERIFIED-successful dispatch,
+      // mirroring the bootBaselineLevel rule: a partial/failed broadcast means the
+      // operator may not have heard it, and un-heard is indistinguishable from
+      // never-said — it must not buy 30 minutes of silence. Every other red path
+      // (deferred retry, spoken retry, the dedicated SoC/runway announcers)
+      // deliberately does NOT record: not recording only ever costs one extra
+      // klaxon, which is the safe direction.
+      //
+      // ★★★ `voicedFingerprint` and NOT the whole critical set: this broadcast
+      // named exactly ONE alert aloud (pickPrimaryAlert's choice). Filing the
+      // others as "announced" would let a critical nobody ever heard be muted on
+      // the next boot. criticalFingerprints rides along as context only — the gate
+      // uses it solely to REQUIRE more announcements (something new appeared),
+      // never to justify one less.
+      if (isRecordableRedAnnounce(level, result.ok) && voicedFingerprint != null) {
+        redReplayGate.noteRedAnnounced({ voicedFingerprint, activeFingerprints: criticalFingerprints, nowMs: lastBroadcastAt });
+      } else if (result.ok && level !== 'red') {
+        // A verified yellow/green played AFTER a recorded red: the next red is an
+        // ESCALATION over it and must never be suppressed. Demote the recorded
+        // level so the carve-out sees it (green additionally wipes the state via
+        // adoptLevel above — this covers the yellow case).
+        redReplayGate.notePlayedBelowRed(level);
+      }
       // v1.45.0 — a render failure (chime-only fallback or full skip) earns ONE
       // spoken retry after the stall window.
       noteSpokenRenderFailure(level, rung, result);

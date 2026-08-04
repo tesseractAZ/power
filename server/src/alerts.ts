@@ -180,6 +180,27 @@ export interface Alert {
   /** Structured statistical breakdown — populated for learned alerts. */
   facts?: AlertFact[];
   /**
+   * ★★★ v1.64.0 — SUB-IDENTITY. A short, STABLE, machine-readable discriminator
+   * for WHICH fault this is, when the `id` is deliberately reused across
+   * materially different faults on the same source.
+   *
+   * WHY IT EXISTS: `dpu-err-<sn>` is emitted for EVERY value of `sysErrCode` —
+   * the id is held constant on purpose so a standing fault does not re-raise as a
+   * "new" alert on upgrade (v1.41.0). `shp2-src-err-<slot>` has the same property.
+   * That makes the bare id an unsafe identity for anything that must ask "is this
+   * the SAME fault I already announced?": a standing code clearing and a
+   * different, real code appearing on the same device produce the identical id.
+   * `redReplayGate.alertFingerprint` folds this field in, so a code change is a
+   * DIFFERENT fault and always announces.
+   *
+   * ★ MUST be stable for a genuinely unchanged fault. Put the error CODE (or an
+   * equally discrete state token) here — NEVER a live measurement (watts, mV,
+   * percent, temperature) or a timestamp: a value that drifts every tick would
+   * make every fingerprint unique and silently turn the replay gate into a no-op.
+   * Omit it entirely when the id already identifies exactly one fault.
+   */
+  fault?: string;
+  /**
    * v0.16.4 — annunciation gate. `false` = this condition stays VISIBLE in
    * snapshot.alerts (the UI still renders it) but must never produce an audible
    * broadcast, a push notification, or raise the broadcast condition level.
@@ -727,6 +748,12 @@ export function computeAlerts(
         out.push({
           id: `dpu-err-${d.sn}`, severity: 'critical', category: 'Battery', device: d.deviceName,
           title: batteryBand ? 'Battery protection fault' : 'Inverter error code',
+          // ★ v1.64.0 — the id above is CONSTANT across every error code; the code
+          // is the only thing that says WHICH fault this is. Carry it explicitly
+          // (see Alert.fault) so redReplayGate can tell "the same standing fault"
+          // from "a different fault on the same device". sysErrCode is a discrete
+          // device-reported code, already debounced above — stable, not drifting.
+          fault: `err${code}`,
           detail: `${d.deviceName} reports system error code ${code}${batteryBand ? ' (battery/BMS protection band)' : ''}.${srcNote}`,
           ...(errFacts.length ? { facts: [{ label: 'Error code', value: String(code) }, ...errFacts] } : {}),
         });
@@ -980,7 +1007,11 @@ export function computeAlerts(
         const srcOnset = connectivity?.shp2SrcErrOnsetBySlot?.get(`${shp2.sn}:${s.slot}`);
         const srcDebounced = srcOnset != null && srcOnset.count === n && (now - srcOnset.sinceMs) < DPU_ERR_DEBOUNCE_MS;
         if (!srcDebounced) {
-          out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', detail: `${tag} reports error code ${n}${n >= 500 && n < 600 ? ' (battery/BMS protection band)' : ''}.` });
+          // ★ v1.64.0 — `fault` carries the error CODE: this id is constant per
+          // slot across every code, and the TITLE never varies here at all, so the
+          // code is the ONLY discriminator between two different faults on the
+          // same slot. Same rule as dpu-err above (see Alert.fault).
+          out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', fault: `err${n}`, detail: `${tag} reports error code ${n}${n >= 500 && n < 600 ? ' (battery/BMS protection band)' : ''}.` });
         }
       }
       if (s.isConnected && !s.hwConnect) {

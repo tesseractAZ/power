@@ -4482,12 +4482,24 @@ interface Alert {
   coreNum?: number | null;                // subject identity: Core (DPU) number
   packNum?: number | null;                // subject identity: pack number
   facts?: AlertFact[];                    // { label, value } statistical breakdown
+  fault?: string;                         // v1.64.0 sub-identity: WHICH fault, when one id spans many
   annunciate?: boolean;                   // false = VISIBLE but never chime/push/raise-condition
 }
 ```
 
-Two fields carry most of the subtlety:
+Three fields carry most of the subtlety:
 
+- **`fault`** (v1.64.0) — a short, **stable**, machine-readable discriminator for
+  *which* fault this is, set only where the `id` is deliberately reused across
+  materially different faults. `dpu-err-<sn>` is emitted for **every** value of
+  `sysErrCode` (the id is held constant so a standing fault does not re-raise on
+  upgrade), and `shp2-src-err-<slot>` likewise — with a title that never varies at
+  all. Both set `fault: err<code>`. `redReplayGate.alertFingerprint` folds
+  `id + title + fault` into the identity the post-restart red replay gate compares,
+  so a code change is a *different fault* and always announces. ★ It must never
+  carry a live measurement (watts, mV, percent, temperature) or a timestamp: a
+  value that drifts every tick makes every fingerprint unique and silently turns
+  that gate into a no-op. Omit it when the id already names exactly one fault.
 - **`annunciate: false`** — the annunciation gate (v0.16.4). The condition still renders in `snapshot.alerts` (never hide an active alarm), but it must never produce an audible broadcast, a push, or raise the broadcast condition level. Used for expected steady states (a designated bench spare offline). Both annunciation channels honour it: `broadcast.conditionFromAlerts` (audible) and the monitor's rising-edge router (push/digest).
 - **`priority`** — explicit ISA-18.2 tier. When present, `priorityOf()` reads it FIRST and skips the severity+source heuristic. Lets a *real* measured threshold crossing reach ISA Medium without faking `source='learned'` (which would misroute it to the Predictive page).
 
@@ -5505,8 +5517,9 @@ The monitor polls `store.get().alerts` on a **10 s `setInterval`** and fires on
 | `firstTick` | The very first observation only records `prevLevel`/`prevCrit` and returns — joining an already-RED state at boot is silent. |
 | `transitioned` | `level !== prevLevel`. |
 | `newCrit` | `level === 'red' && crit > prevCrit` — a *new* critical while already red re-fires. |
-| **Restart continuation** (`isRestartContinuation`) | Within `BROADCAST_BOOT_WARMUP_MS` (default **10 min**), a yellow/green transition at or below the persisted pre-restart baseline is adopted silently (analytics warm-up re-presents an already-broadcast advisory as a fresh rise). **RED is never suppressed here.** |
+| **Restart continuation** (`isRestartContinuation`) | Within `BROADCAST_BOOT_WARMUP_MS` (default **10 min**), a yellow/green transition at or below the persisted pre-restart baseline is adopted silently (analytics warm-up re-presents an already-broadcast advisory as a fresh rise). **RED is never suppressed here** — this function sees only levels, and a level-only red≤red match would swallow a new critical behind a stale one. |
 | **Boot phantom-red hold** (`holdBootRed`) | Within the warm-up window, the *first* fresh red is held for **one tick** to confirm it is standing and not a telemetry-populate phantom (`prevLevel` is NOT advanced, so a persisting red re-fires ≤10 s late; a one-tick phantom clears and is never spoken). |
+| **Red replay gate** (`redReplayGate`, v1.64.0) | Runs *after* the phantom hold, so only a confirmed red reaches it. Suppresses a red re-announce **only when all of these hold**: inside the warm-up window; the last verified broadcast of any level was itself a red (so this is **not an escalation** — same `LEVEL_RANK` ladder as the storm gate); the critical that would be **spoken now** has the same **fingerprint** (`id` + `title` + `fault` code, ★ never the bare id — `dpu-err-<sn>` spans every `sysErrCode`) as the one that **was spoken** then; no unrecognised critical is active alongside it; and that announcement was < `BROADCAST_RED_REPLAY_MIN_GAP_MS` (**30 min**) ago. A changed fault, a new fault or an escalation announces immediately at any age. Reaching **green** destroys the evidence (all-clear ⇒ the next red is a new event). Missing/corrupt/future-dated/legacy-shape state ⇒ announce. Level adopted on suppression (no retry). |
 | **In-flight** (`tickInFlight`) | An MA announcement blocks 20–105 s (>> the 10 s tick). If a different level arrives mid-flight, the tick returns WITHOUT advancing `prevLevel`, so the missed transition re-presents next tick (prevents a lost yellow→green). |
 | `cfg.enabled` | Disabled → adopt level, no broadcast. |
 | **All-clear-vs-critical** | A `green` is adopted silently (no spoken all-clear) if any critical alert with `annunciate !== false` is still active — avoids a spoken "all clear" contradicting a runway-alarm critical on the same speakers. |
@@ -5609,6 +5622,24 @@ Outcome (`'success'` / `'partial'` / `'failure'`), errors, level, spoken message
 and last render diagnostics are persisted to `broadcast-last.json` (next to the
 SQLite DB) so "what played last and did it work" survives the very restarts that
 most need auditing.
+
+A second sidecar, `broadcast-red-replay.json`, records `{lastRedAnnouncedAtMs,
+voicedFingerprint, activeFingerprints, lastPlayedLevel}` on every
+**verified-successful RED** condition broadcast — the evidence the v1.64.0 red
+replay gate (§2.2) needs to tell *the same standing fault* from *a new emergency*
+after a restart. It is written only on `ok === true`, on the same reasoning as the
+storm gates: a dispatch nobody heard must not buy silence. No other red path writes
+it (deferred retry, spoken retry, and the dedicated SoC/runway announcers all leave
+it alone) — not recording costs at most one extra klaxon, which is the safe
+direction.
+
+★ `voicedFingerprint` is the fingerprint of the **one** alert that was actually
+said aloud — `ttsService.pickPrimaryAlert`'s choice, since `buildAlertMessage`
+voices exactly one. `activeFingerprints` is context only: it can force an extra
+announcement when something unrecognised appears, never justify one fewer, because
+a counted critical is not necessarily a *spoken* one. A verified **yellow** demotes
+`lastPlayedLevel` (making the next red an escalation); a **green** condition
+tombstones the whole file.
 
 ---
 
@@ -6083,7 +6114,9 @@ enabled/volume). Booleans accept `true`/`1`.
 | `BROADCAST_END_OF_MESSAGE_PHRASE` | `End of message` | English terminator (blank disables). |
 | `BROADCAST_END_OF_MESSAGE_PHRASE_ES` | `Fin del mensaje` | Spanish terminator. |
 | `BROADCAST_END_OF_MESSAGE_GAP_MS` | `700` | Pre-terminator gap, clamped 0..5000. |
-| `BROADCAST_BOOT_WARMUP_MS` | `600000` (10 min) | Restart-continuation + boot phantom-red window. |
+| `BROADCAST_BOOT_WARMUP_MS` | `600000` (10 min) | Restart-continuation + boot phantom-red + red-replay window. |
+| `BROADCAST_RED_REPLAY_MIN_GAP_MS` | `1800000` (30 min) | Minimum gap before a *standing* red re-announces across a restart. A changed/new fault, or an escalation, ignores it. |
+| `BROADCAST_RED_REPLAY_STATE_PATH` | `<db>/../broadcast-red-replay.json` | Persisted `{lastRedAnnouncedAtMs, voicedFingerprint, activeFingerprints, lastPlayedLevel}` — the only channel the gate has across a restart. |
 | `BROADCAST_HEALTH_PROBE_MS` | `60000` | Audible-health probe interval. |
 | `BROADCAST_UNREACHABLE_CONFIRM` | `3` | Consecutive-fail streak before confirming unreachable. |
 | `DATA_DIR` / `CHIMES_DIR` / `CHIME_CONFIG_PATH` / `BROADCAST_RUNTIME_CONFIG_PATH` | `/data`-relative | Storage locations. |
@@ -6180,7 +6213,7 @@ JSON endpoints:
 - **`audibleReachable = null`** (pre-probe / transient restart) never raises the self-alert — only a debounced `false` does.
 - **VOLUME_SET-incapable target** (cordless) → per-target pin isolates it so capable ecobees are still pinned.
 - **Renderer cache** keyed on version + every timing/tone/voice/message input; incomplete renders never occupy the complete key; hourly prune at 7-day age plus a 1-hour orphan-`.tmp` sweep.
-- **Restart** → boot warm-up (10 min) suppresses re-spoken yellow/green advisories but **never** a red; the first fresh red is held one tick to filter a telemetry-populate phantom.
+- **Restart** → boot warm-up (10 min) suppresses re-spoken yellow/green advisories; the first fresh red is held one tick to filter a telemetry-populate phantom. A red is **never** suppressed on level alone, and **never on the bare alert id** either (`dpu-err-<sn>` is emitted for every `sysErrCode`, so one id spans many faults) — only a red whose **spoken** critical carries the same `id`+`title`+`fault` fingerprint announced < 30 min ago, with nothing new alongside it and no escalation, is skipped for that boot (`redReplayGate`). A standing fault re-klaxoning on every deploy trains the household to ignore the loudest tone the system has; a changed fault, a new fault, an escalation, or an intervening all-clear always fires.
 
 
 ---
