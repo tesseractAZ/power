@@ -35,7 +35,12 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "ecoflow_panel" / "config.yaml"
-TRANS = ROOT / "ecoflow_panel" / "translations" / "en.yaml"
+TRANS_DIR = ROOT / "ecoflow_panel" / "translations"
+
+# v1.68.0 — validate EVERY translation file, not just English. es.yaml shipped in the
+# same release, and a second file that nothing checks is a second file that silently
+# drifts: a key renamed in config.yaml would keep rendering correctly in English while
+# Spanish speakers saw the raw KEY, with nothing failing anywhere.
 
 
 def load(path: Path) -> dict:
@@ -53,30 +58,42 @@ def load(path: Path) -> dict:
 
 def main() -> int:
     cfg = load(CONFIG)
-    trans = load(TRANS)
-
     options = cfg.get("options") or {}
-    entries = trans.get("configuration") or {}
     problems: list[str] = []
 
-    missing = sorted(set(options) - set(entries))
-    orphan = sorted(set(entries) - set(options))
-    if missing:
-        problems.append(
-            "options with no translation (HA shows the raw KEY as the label): "
-            + ", ".join(missing)
-        )
-    if orphan:
-        problems.append(
-            "translations for options that no longer exist (dead text): " + ", ".join(orphan)
-        )
+    files = sorted(TRANS_DIR.glob("*.yaml"))
+    if not files:
+        sys.exit("validate-addon-config: no translation files found")
+    if not any(f.name == "en.yaml" for f in files):
+        sys.exit("validate-addon-config: en.yaml is missing (HA's fallback language)")
 
-    for key in sorted(entries):
-        entry = entries[key] or {}
-        if not str(entry.get("name") or "").strip():
-            problems.append(f"{key}: missing `name`")
-        if not str(entry.get("description") or "").strip():
-            problems.append(f"{key}: missing `description`")
+    for path in files:
+        lang = path.stem
+        entries = (load(path).get("configuration") or {})
+
+        missing = sorted(set(options) - set(entries))
+        orphan = sorted(set(entries) - set(options))
+        if missing:
+            problems.append(
+                f"[{lang}] options with no translation (HA shows the raw KEY as the label): "
+                + ", ".join(missing)
+            )
+        if orphan:
+            problems.append(
+                f"[{lang}] translations for options that no longer exist (dead text): "
+                + ", ".join(orphan)
+            )
+
+        for key in sorted(entries):
+            entry = entries[key] or {}
+            if not str(entry.get("name") or "").strip():
+                problems.append(f"[{lang}] {key}: missing `name`")
+            if not str(entry.get("description") or "").strip():
+                problems.append(f"[{lang}] {key}: missing `description`")
+            # A newline inside either field breaks HA's single-line helper rendering.
+            for field in ("name", "description"):
+                if "\n" in str(entry.get(field) or ""):
+                    problems.append(f"[{lang}] {key}: `{field}` contains a newline")
 
     if problems:
         print("validate-addon-config: FAILED", file=sys.stderr)
@@ -84,7 +101,11 @@ def main() -> int:
             print(f"  - {p}", file=sys.stderr)
         return 1
 
-    print(f"validate-addon-config: OK — {len(options)} options, all named and described")
+    langs = ", ".join(f.stem for f in files)
+    print(
+        f"validate-addon-config: OK — {len(options)} options, all named and described "
+        f"in {len(files)} language(s): {langs}"
+    )
     return 0
 
 
