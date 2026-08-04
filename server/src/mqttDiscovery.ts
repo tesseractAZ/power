@@ -475,12 +475,44 @@ export interface CircuitDiscoveryPlan {
  * the configs to (re)publish, and the config topics to clear for circuits that
  * are no longer present.
  */
+/**
+ * v1.65.0 — Friendly name for one circuit's Energy sensor.
+ *
+ * The SHP2 stores a split-phase pair's user-set name on the PRIMARY (lower)
+ * channel only; the secondary's `chName` stays at the factory "Circuit N".
+ * Naming each leg from its own channel therefore published half the Energy
+ * Dashboard as "EcoFlow Circuit 3 Energy" — an entity the operator cannot map
+ * back to anything. Both legs are real, separately-metered conductors, so we
+ * keep two entities (merging would orphan six sensors' recorded statistics)
+ * and instead label them from the pair: "East Wing L1" / "East Wing L2".
+ *
+ * SAFE TO CHANGE: HA's `unique_id` is keyed to the CHANNEL, and `entity_id` is
+ * minted once at first discovery and persisted against that unique_id. Editing
+ * the discovery `name` moves the friendly name only — entity_id, Energy
+ * Dashboard config and long-term statistics all survive.
+ */
+function circuitDisplayName(
+  c: { ch: number; name?: string | null; linkCh?: number | null; linkMark?: boolean },
+  byCh: Map<number, { ch: number; name?: string | null }>,
+): string {
+  if (c.linkCh == null || !c.linkMark) return c.name || `Circuit ${c.ch}`;
+  const primaryCh = Math.min(c.ch, c.linkCh);
+  const base = byCh.get(primaryCh)?.name || `Circuit ${primaryCh}`;
+  return `${base} ${c.ch === primaryCh ? 'L1' : 'L2'}`;
+}
+
 export function planCircuitDiscovery(
   prefix: string,
   prevChannels: number[],
-  circuits: { ch: number; name?: string | null }[],
+  circuits: { ch: number; name?: string | null; linkCh?: number | null; linkMark?: boolean }[],
 ): CircuitDiscoveryPlan {
-  const sig = circuits.map((c) => `${c.ch}:${c.name ?? ''}`).join('|');
+  const byCh = new Map(circuits.map((c) => [c.ch, c]));
+  const display = new Map(circuits.map((c) => [c.ch, circuitDisplayName(c, byCh)]));
+  // The latch signature is built from the DERIVED name, not the raw one. A
+  // secondary leg's raw `chName` never changes ("Circuit 3" forever), so a
+  // sig over raw names would stay identical across this very change and the
+  // caller would skip republishing — the rename would never reach HA.
+  const sig = circuits.map((c) => `${c.ch}:${display.get(c.ch) ?? ''}`).join('|');
   const current = new Set(circuits.map((c) => c.ch));
   const clear = prevChannels
     .filter((ch) => !current.has(ch))
@@ -491,7 +523,7 @@ export function planCircuitDiscovery(
       topic: `${prefix}/sensor/${uniqueId}/config`,
       cfg: {
         unique_id: uniqueId,
-        name: `EcoFlow ${c.name || `Circuit ${c.ch}`} Energy`,
+        name: `EcoFlow ${display.get(c.ch)} Energy`,
         state_topic: STATE_TOPIC,
         ...AVAILABILITY_BASE,
         device_class: 'energy',
