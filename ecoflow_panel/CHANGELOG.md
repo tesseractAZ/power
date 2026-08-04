@@ -1,3 +1,45 @@
+## v1.65.0 — half the Energy Dashboard was named "Circuit N"
+
+The SHP2 wires all twelve breaker channels as six split-phase pairs, and it stores
+the operator's name on the **primary** (lower) channel only. The secondary keeps its
+factory `chName`. Per-circuit MQTT discovery named each leg from its own channel, so
+six of the twelve Energy sensors published as **"EcoFlow Circuit 3 Energy"**,
+"Circuit 4", "Circuit 7", "Circuit 8", "Circuit 11", "Circuit 12" — entities with no
+recoverable meaning in the Energy Dashboard, sitting next to the named half of the
+very same circuit.
+
+Both legs are separately metered conductors and both carry real energy, so the fix
+labels them from the pair rather than merging them: **"East Wing L1" / "East Wing L2"**.
+Merging into one entity per pair would have orphaned six sensors' worth of recorded
+long-term statistics.
+
+### Renaming is safe, and that was checked before it was written
+
+HA mints `entity_id` once, at first discovery, and persists it against `unique_id`.
+Here `unique_id` is `ecoflow_circuit_<ch>_lifetime_kwh` — keyed to the **channel
+number**, never to the name. Editing the discovery `name` therefore moves the friendly
+label only: `entity_id`, existing Energy Dashboard configuration and all long-term
+statistics survive untouched. Verified against the live entity registry before the
+change, not assumed.
+
+### The trap this could have shipped as a no-op
+
+`planCircuitDiscovery` is latched on a signature so a steady-state tick republishes
+nothing. That signature was built from the **raw** per-channel name — and a secondary
+leg's raw name is "Circuit 3" both before and after this change. A signature over raw
+names would have been byte-identical across the rename, the caller would have skipped
+publishing, and nothing would ever have reached HA. The signature is now built from the
+**derived** label, with a regression test that pairs two channels and asserts the key
+moves.
+
+Unrelated, same release: the Strategy page is reordered to lead with tonight's
+night-charge plan, then forecast & storm-prep, with circuit shed-order moved to the
+foot of the page.
+
+- 7 new tests (1850 total): pair naming, channel-order-not-array-order, unpaired
+  passthrough, unnamed primary, latch-key movement, primary rename propagating to both
+  legs, and `unique_id`/`value_template` immutability.
+
 ## v1.64.0 — a standing critical klaxoned on every restart; the gate now knows WHICH fault
 
 `critical_alerts` has been **≥ 1 for 98.8 % of live coverage**. Core 3 Pack 1 carries
