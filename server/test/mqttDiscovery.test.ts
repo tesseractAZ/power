@@ -256,6 +256,90 @@ test('planCircuitDiscovery: a removed circuit is cleared and the signature chang
   assert.notEqual(plan.sig, prev.sig, 'dropping a circuit changes the latch key');
 });
 
+/* v1.65.0 — split-phase leg naming. The SHP2 stores the user-set name on the
+ * PRIMARY (lower) channel only, so naming each leg from its own channel put
+ * "EcoFlow Circuit 3 Energy" in the Energy Dashboard for every secondary. */
+
+test('planCircuitDiscovery: a split-phase secondary is named from its PAIR, not its own blank channel', () => {
+  const plan = planCircuitDiscovery(PREFIX, [], [
+    { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
+    { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
+  ]);
+  const byCh = Object.fromEntries(plan.publish.map((p, i) => [i === 0 ? 1 : 3, p.cfg.name]));
+  assert.equal(byCh[1], 'EcoFlow East Wing L1 Energy');
+  assert.equal(byCh[3], 'EcoFlow East Wing L2 Energy', 'secondary inherits the primary name');
+});
+
+test('planCircuitDiscovery: leg suffix follows CHANNEL ORDER, not array order', () => {
+  // Same pair, secondary listed first — L1/L2 must still track min/max channel.
+  const plan = planCircuitDiscovery(PREFIX, [], [
+    { ch: 8, name: 'Circuit 8', linkCh: 6, linkMark: true },
+    { ch: 6, name: 'West Air conditioner', linkCh: 8, linkMark: true },
+  ]);
+  assert.equal(plan.publish[0].cfg.name, 'EcoFlow West Air conditioner L2 Energy', 'ch8 is the higher leg');
+  assert.equal(plan.publish[1].cfg.name, 'EcoFlow West Air conditioner L1 Energy', 'ch6 is the primary');
+});
+
+test('planCircuitDiscovery: an UNPAIRED circuit keeps its own name with no leg suffix', () => {
+  const plan = planCircuitDiscovery(PREFIX, [], [
+    { ch: 5, name: 'Well Pump' },
+    { ch: 9, name: 'Shed', linkCh: 11, linkMark: false }, // linkCh set but not marked → not a pair
+  ]);
+  assert.equal(plan.publish[0].cfg.name, 'EcoFlow Well Pump Energy');
+  assert.equal(plan.publish[1].cfg.name, 'EcoFlow Shed Energy', 'linkMark false ⇒ not split-phase');
+});
+
+test('planCircuitDiscovery: an unnamed PRIMARY still yields a stable pair label', () => {
+  const plan = planCircuitDiscovery(PREFIX, [], [
+    { ch: 2, linkCh: 4, linkMark: true },
+    { ch: 4, name: 'Circuit 4', linkCh: 2, linkMark: true },
+  ]);
+  assert.equal(plan.publish[0].cfg.name, 'EcoFlow Circuit 2 L1 Energy');
+  assert.equal(plan.publish[1].cfg.name, 'EcoFlow Circuit 2 L2 Energy');
+});
+
+test('planCircuitDiscovery: the latch key is built from the DERIVED name, so the leg rename actually republishes', () => {
+  // THE REGRESSION THIS GUARDS: a secondary's raw `chName` is "Circuit 3"
+  // before AND after this feature. A sig over raw names would be byte-identical
+  // across the change, the caller would no-op on the latch, and the rename would
+  // never reach HA. Pairing the channels MUST move the signature.
+  const unpaired = planCircuitDiscovery(PREFIX, [], [
+    { ch: 1, name: 'East Wing' },
+    { ch: 3, name: 'Circuit 3' },
+  ]);
+  const paired = planCircuitDiscovery(PREFIX, [1, 3], [
+    { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
+    { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
+  ]);
+  assert.notEqual(unpaired.sig, paired.sig, 'derived-name change must move the latch key');
+  assert.ok(paired.sig.includes('East Wing L2'), 'sig carries the derived label');
+});
+
+test('planCircuitDiscovery: renaming the PRIMARY relabels BOTH legs and moves the latch key', () => {
+  const before = planCircuitDiscovery(PREFIX, [], [
+    { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
+    { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
+  ]);
+  const after = planCircuitDiscovery(PREFIX, [1, 3], [
+    { ch: 1, name: 'Guest Wing', linkCh: 3, linkMark: true },
+    { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
+  ]);
+  assert.notEqual(before.sig, after.sig);
+  assert.equal(after.publish[0].cfg.name, 'EcoFlow Guest Wing L1 Energy');
+  assert.equal(after.publish[1].cfg.name, 'EcoFlow Guest Wing L2 Energy', 'secondary follows the rename');
+});
+
+test('planCircuitDiscovery: leg naming does NOT touch unique_id or value_template (entity_id + statistics survive)', () => {
+  const plan = planCircuitDiscovery(PREFIX, [], [
+    { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
+    { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
+  ]);
+  const secondary = plan.publish[1];
+  assert.equal(secondary.cfg.unique_id, 'ecoflow_circuit_3_lifetime_kwh', 'unique_id stays keyed to the CHANNEL');
+  assert.equal(secondary.topic, 'homeassistant/sensor/ecoflow_circuit_3_lifetime_kwh/config');
+  assert.equal(secondary.cfg.value_template, '{{ value_json.circuit_3_lifetime_kwh }}');
+});
+
 test('planCircuitDiscovery: empty circuit list publishes nothing and clears all previously-published channels', () => {
   const plan = planCircuitDiscovery(PREFIX, [4, 5], []);
   assert.equal(plan.sig, '', 'no circuits → empty signature');

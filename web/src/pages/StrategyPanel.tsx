@@ -53,6 +53,24 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
 
   return (
     <div className="space-y-4">
+      {/* Tonight's night-charge advisory (our planner — distinct from the SHP2's
+          native TOU schedule below). Self-fetching; renders its own unavailable
+          shape when no plan is live. */}
+      <NightChargeCard />
+
+      {/* ── Forward-looking strategy (relocated from the dissolved Predictive
+          tab in v0.85.0). Everything BELOW this point is live SHP2 state; these
+          two are model-driven and marked with the PredictiveBadge. Empty-by-design
+          when no EV pattern is detected and no NWS alert is active. */}
+      <div className="pt-2">
+        <SectionHeader
+          accent="grid"
+          title={<>Forecast &amp; storm-prep</>}
+          takeaway="EV-charging windows and active storm alerts — quiet when none are detected."
+        />
+      </div>
+      {predictions}
+
       {/* Load-shed strategy */}
       <div className="card">
         <div className="card-title flex items-center justify-between">
@@ -75,32 +93,12 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
         </div>
         {!s.loadShedEnabled && s.loadShedConfigured && (
           <div className="text-[11px] text-muted mt-3 leading-relaxed">
-            Priorities below are configured but the automatic load-shed strategy is currently switched off in the SHP2.
-            They define the intended shed order when enabled — the highest-numbered circuits drop first as the battery depletes.
+            The circuit priorities at the foot of this page are configured, but the automatic load-shed strategy is
+            currently switched off in the SHP2. They define the intended shed order when enabled — the highest-numbered
+            circuits drop first as the battery depletes.
           </div>
         )}
       </div>
-
-      {/* Circuit priority ranking */}
-      <div className="card">
-        <div className="card-title">Circuit priority — shed order</div>
-        <div className="space-y-2">
-          {ranked.map((c, i) => (
-            <PriorityRow key={c.primaryCh} circuit={c} rank={i + 1} total={ranked.length} />
-          ))}
-          {unranked.map((c) => (
-            <PriorityRow key={c.primaryCh} circuit={c} rank={null} total={ranked.length} />
-          ))}
-        </div>
-        <div className="text-[11px] text-muted mt-3">
-          #1 = highest priority (last to be shed, kept powered longest). Higher numbers shed earlier when backup runs low.
-        </div>
-      </div>
-
-      {/* Tonight's night-charge advisory (our planner — distinct from the SHP2's
-          native TOU schedule below). Self-fetching; renders its own unavailable
-          shape when no plan is live. */}
-      <NightChargeCard />
 
       {/* Charge schedule */}
       <div className="card">
@@ -143,18 +141,21 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
         )}
       </div>
 
-      {/* ── Forward-looking strategy (relocated from the dissolved Predictive
-          tab in v0.85.0). The config above is live SHP2 state; these are
-          model-driven and marked with the PredictiveBadge. Empty-by-design when
-          no EV pattern is detected and no NWS alert is active. */}
-      <div className="pt-2">
-        <SectionHeader
-          accent="grid"
-          title={<>Forecast &amp; storm-prep</>}
-          takeaway="EV-charging windows and active storm alerts — quiet when none are detected."
-        />
+      {/* Circuit priority ranking */}
+      <div className="card">
+        <div className="card-title">Circuit priority — shed order</div>
+        <div className="space-y-2">
+          {ranked.map((c, i) => (
+            <PriorityRow key={c.primaryCh} circuit={c} rank={i + 1} total={ranked.length} />
+          ))}
+          {unranked.map((c) => (
+            <PriorityRow key={c.primaryCh} circuit={c} rank={null} total={ranked.length} />
+          ))}
+        </div>
+        <div className="text-[11px] text-muted mt-3">
+          #1 = highest priority (last to be shed, kept powered longest). Higher numbers shed earlier when backup runs low.
+        </div>
       </div>
-      {predictions}
     </div>
   );
 }
