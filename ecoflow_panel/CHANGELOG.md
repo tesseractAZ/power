@@ -1,3 +1,44 @@
+## v1.68.0 — every Configuration field re-verified, and a Spanish translation
+
+Two things: the add-on's Configuration page now explains itself accurately, and it does so in
+Spanish as well as English.
+
+### The English was audited against the code, not polished
+
+All 80 option descriptions were re-derived by reading the code that actually consumes each
+option — the env var, `config.ts`, and the point of use — rather than by editing the previous
+text. 79 of 80 changed. The rewrite rule was: lead with the EFFECT on the system, name the real
+default and unit, and say plainly when an option is dangerous or only meaningful alongside
+another. Several descriptions were not merely vague but wrong:
+
+- **`BROADCAST_QUIET_HOURS`** claimed alerts held overnight arrive "in the morning digest".
+  They do not — the digest is driven by `NOTIFY_QUIET_HOURS` / `NOTIFY_DIGEST_HOUR` in
+  alertMonitor, a different subsystem. This gate holds only the SPOKEN announcement; the
+  on-screen alert appears immediately. On a life-safety option, a false reassurance about where
+  a suppressed critical resurfaces is the worst kind of documentation bug.
+- **`ARB_CHARGE_CAP_KW`** described 7.2 kW as the "real SHP2 grid-charge power ceiling". It is
+  the observed `chChargeWatt` on this install, not a published hardware spec.
+- **`BROADCAST_ANNOUNCE_RETRIES`** did not say that the retry fires only when the Music
+  Assistant service call itself errors — so it cannot recover an announcement you simply did
+  not hear, which is what an operator raising the number would be hoping for.
+
+### Spanish (Latin American)
+
+`translations/es.yaml`, 80 keys, in the same order as `config.yaml`. Neutral Latin American
+Spanish, formal *usted* for instructions. Product and proper nouns stay in English (EcoFlow,
+Home Assistant, Smart Home Panel 2, Music Assistant, Wyoming, Piper, Core), as do entity ids
+and literal config values. Home Assistant picks the file matching the user's profile language
+and falls back to English, so nothing changes for an English user.
+
+### The validator now guards every language, not just English
+
+`scripts/validate-addon-config.py` hardcoded `en.yaml`. A second translation file that nothing
+checks is a second file that silently drifts — rename a key in `config.yaml` and English keeps
+rendering correctly while Spanish speakers see the raw KEY, with CI green throughout. It now
+iterates every `translations/*.yaml`, requires `en.yaml` to exist as HA's fallback, and also
+rejects an embedded newline in either field (which breaks HA's single-line helper rendering).
+Verified by deliberately corrupting a key in `es.yaml` and confirming a non-zero exit.
+
 ## v1.67.0 — the night-charge announcement said everything twice in English
 
 The bilingual broadcast plays English, then Spanish. Last night's night-charge notice played
