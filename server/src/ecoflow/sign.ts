@@ -53,12 +53,17 @@ export interface SignedHeaders {
 }
 
 export function signRequest(opts: {
+  /** v1.69.0 — signing clock, offset-corrected. Defaults to the local clock. */
+  nowMs?: number;
   accessKey: string;
   secretKey: string;
   params?: AnyParams;
 }): SignedHeaders {
   const nonce = String(randomInt(100000, 999999));
-  const timestamp = String(Date.now());
+  // v1.69.0 — the signing clock is INJECTED so it can be corrected against the
+  // server's Date header (see clockOffset.ts). A Pi with no RTC boots with the
+  // wrong time after a power cut and every signature is then rejected with 8521.
+  const timestamp = String(opts.nowMs ?? Date.now());
   const flat: Map<string, Primitive> = opts.params ? flatten(opts.params) : new Map();
   // EcoFlow IoT Open API: business params sorted alphabetically, then literally
   // append &accessKey=X&nonce=Y&timestamp=Z (NOT sorted with the others).
