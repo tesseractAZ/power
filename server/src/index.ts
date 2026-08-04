@@ -4,7 +4,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import compress from '@fastify/compress';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
@@ -115,7 +115,7 @@ import {
 } from './deviceLink.js';
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
-import { RateFloorTracker } from './messageRateFloor.js';
+import { RateFloorTracker, type RateFloorPersisted } from './messageRateFloor.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
 // them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
 import { setRateFloorCollapses, type RateFloorCollapse } from './messageRateFloorAlert.js';
@@ -1939,7 +1939,10 @@ const startMqttWithRetry = async (attempt = 0): Promise<void> => {
 await startMqttWithRetry();
 
 // Alert monitor: computes fleet alerts, attaches to the snapshot, pushes notifications.
-const monitor = startAlertMonitor(store, recorder, (m) => app.log.info(m));
+// v1.66.0 — the `warn` sink. Without it every notify-DELIVERY failure logged at info,
+// so "count the level >= 40 lines" — the triage this project actually runs — reported a
+// clean bill of health while the alarm's only non-audible escape path was failing.
+const monitor = startAlertMonitor(store, recorder, (m) => app.log.info(m), (m) => app.log.warn(m));
 app.log.info(
   `notify: channel=${monitor.getConfig().channel} configured=${isConfigured(monitor.getConfig())}`,
 );
@@ -2308,6 +2311,31 @@ if (loadShedAdvisoryEnabled) {
 // it (v0.93.0 will promote this to a push/audible alert once wired into the alert
 // pipeline). Purely observational for now — cannot suppress or alter any existing alarm.
 const rateFloor = new RateFloorTracker();
+
+// v1.66.0 — persist the LEARNED hour-of-day baselines. The detector's comparison
+// baseline is now per-hour-of-day (see messageRateFloor.ts), and a bucket needs
+// ~30 healthy samples of that hour before it outranks the global fallback. This
+// add-on restarted 18 times in one 50 h window, so in-memory buckets would never
+// mature and the fix would be inert in production. Only what was LEARNED is
+// persisted — never in-flight collapse timers, so a restart cannot resurrect a
+// stale collapse. Fail-open on every path: a missing/corrupt file just means the
+// tracker cold-starts on the global baseline, i.e. exactly v0.92.0 behaviour.
+const RATE_FLOOR_STATE_PATH =
+  process.env.MSG_RATE_FLOOR_STATE_PATH ??
+  resolve(process.cwd(), config.dbPath, '..', 'msg-rate-floor.json');
+try {
+  if (existsSync(RATE_FLOOR_STATE_PATH)) {
+    rateFloor.hydrate(JSON.parse(readFileSync(RATE_FLOOR_STATE_PATH, 'utf8')) as RateFloorPersisted);
+    app.log.info(`msg-rate-floor: restored learned baselines from ${RATE_FLOOR_STATE_PATH}`);
+  } else {
+    app.log.info('msg-rate-floor: no prior baselines — learning from scratch (global fallback until hour buckets mature)');
+  }
+} catch (e: any) {
+  app.log.warn(`msg-rate-floor: could not restore baselines (${e?.message ?? e}) — learning from scratch`);
+}
+let rateFloorSaveFailLogged = false;
+let rateFloorTicks = 0;
+
 const rateFloorTick = setInterval(() => {
   try {
     const now = Date.now();
@@ -2327,14 +2355,41 @@ const rateFloorTick = setInterval(() => {
       if (r.collapsed) {
         app.log.warn(
           `msg-rate-floor: ${name} message rate collapsed to ` +
-          `${r.rate?.toFixed(2) ?? '?'} msg/min (baseline ~${r.baseline.toFixed(0)}) — device is barely reporting ` +
+          `${r.rate?.toFixed(2) ?? '?'} msg/min (baseline ~${r.baseline.toFixed(0)}` +
+          `${r.usedHourBucket ? ' for this hour' : ', global'}) — device is barely reporting ` +
           `while still appearing "fresh"; check the EcoFlow cloud session / power for ${sn}`,
         );
       } else if (r.recovered) {
         app.log.info(`msg-rate-floor: ${name} message rate recovered (${r.rate?.toFixed(1) ?? '?'} msg/min)`);
       }
+      // v1.66.0 — the transition that disarmed three Cores without a trace. When a
+      // device's baseline falls under minBaselineRate it stops being eligible and the
+      // detector goes quiet for it FOREVER (until genuinely healthy samples rebuild the
+      // baseline). v0.92.0 logged nothing at all here, so "no alert" and "no longer
+      // watching" were indistinguishable in the log.
+      if (r.eligibilityLost) {
+        app.log.warn(
+          `msg-rate-floor: ${name} is NO LONGER MONITORED — its learned baseline fell below the ` +
+          `eligibility floor (now ~${r.baseline.toFixed(1)} msg/min). A rate collapse on this device ` +
+          `will NOT raise an alert until its baseline recovers. ${sn}`,
+        );
+      }
     }
     setRateFloorCollapses(collapses);
+
+    // Persist learned baselines every ~10 min. Cheap (a few hundred bytes) and
+    // strictly best-effort — a write failure is latched to one log line so a
+    // read-only /data (the failing-SD-card case) cannot flood the log.
+    if (++rateFloorTicks % 10 === 0) {
+      try {
+        writeFileSync(RATE_FLOOR_STATE_PATH, JSON.stringify(rateFloor.toJSON()));
+      } catch (e: any) {
+        if (!rateFloorSaveFailLogged) {
+          rateFloorSaveFailLogged = true;
+          app.log.warn(`msg-rate-floor: cannot persist learned baselines (${e?.message ?? e}) — hour buckets will reset on restart`);
+        }
+      }
+    }
   } catch (e: any) {
     app.log.debug(`msg-rate-floor: tick skipped (${e?.message ?? e})`);
   }

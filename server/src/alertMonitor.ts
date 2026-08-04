@@ -875,7 +875,19 @@ export function saveClearedLog(path: string, logArr: ClearedAlert[], max: number
   }
 }
 
-export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log: (m: string) => void): AlertMonitor {
+/**
+ * v1.66.0 — `warn` exists so a genuine notify-DELIVERY failure lands at level >= 40
+ * instead of info. Every line in this module used to log at info via the single `log`
+ * sink, so the standard triage ritual (scan the add-on log for level >= 40) returned a
+ * clean bill of health even when the alarm's only non-audible escape path was failing.
+ * Same defect, same fix, same shape as startMqtt (ecoflow/mqtt.ts, v1.3.1).
+ *
+ * Deliberately NOT promoted: the per-tick analytics catches (forecast / storm-prep /
+ * curtailment / alert-signals / telemetry-replay). Those fire on transient upstream
+ * hiccups while the fleet is perfectly healthy, and flooding level 40 with them would
+ * destroy the very signal this change exists to create.
+ */
+export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log: (m: string) => void, warn: (m: string) => void = log): AlertMonitor {
   let cfg = loadNotifyConfig();
   const tracked = new Map<string, TrackedAlert>();
   const clearedLog: ClearedAlert[] = [];
@@ -1179,7 +1191,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     } catch (e: any) {
       // v0.80.0 — identity + retry intent in the failure line (the old
       // identity-free info line hid which push a real HTTP 400 ate).
-      log(`notify: WARNING — send failed for "${title}" — ${e?.message ?? e}; will retry next evaluate tick`);
+      warn(`notify: WARNING — send failed for "${title}" — ${e?.message ?? e}; will retry next evaluate tick`);
       return 'failed';
     }
   };
@@ -1195,7 +1207,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // configured: 58 queued warnings (incl. 17× cell-imbalance) dropped over
     // 50 h with nothing in the log. Now it says so, loudly, once per digest.
     if (!isConfigured(cfg)) {
-      log(
+      warn(
         `notify: WARNING — morning digest has ${quietQueue.length} queued alert(s) but no notify ` +
           `channel is configured (NOTIFY_CHANNEL=${cfg.channel}). Set NOTIFY_CHANNEL to ` +
           `"ha" (HA persistent notification, zero setup), ntfy, pushover, or webhook to receive them. Dropping queue.`,
@@ -1281,7 +1293,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     } catch (e: any) {
       // v0.80.0 — the queue is retained (cleared only in the success path) and
       // the caller retries next tick within the digest hour.
-      log(`notify: WARNING — morning digest failed — ${e?.message ?? e}; will retry next evaluate tick`);
+      warn(`notify: WARNING — morning digest failed — ${e?.message ?? e}; will retry next evaluate tick`);
       return false;
     }
   };
@@ -1816,7 +1828,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           });
           log(`notify: retired orphaned "${title}" (cleared across a restart)`);
         } catch (e: any) {
-          log(`notify: WARNING — orphan resolve failed for "${title}" — ${e?.message ?? e}`);
+          warn(`notify: WARNING — orphan resolve failed for "${title}" — ${e?.message ?? e}`);
         }
       }
       for (const id of drop) persistedNotified.delete(id);
@@ -1839,9 +1851,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     log(`alert-telemetry: replay failed — ${e?.message ?? e}`);
   }
 
-  evaluate().catch((e) => log(`alert-monitor: ${e?.message ?? e}`));
+  evaluate().catch((e) => warn(`alert-monitor: ${e?.message ?? e}`));
   const timer = setInterval(() => {
-    evaluate().catch((e) => log(`alert-monitor: ${e?.message ?? e}`));
+    evaluate().catch((e) => warn(`alert-monitor: ${e?.message ?? e}`));
   }, EVAL_INTERVAL_MS);
   timer.unref();
 

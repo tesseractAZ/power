@@ -1,3 +1,82 @@
+## v1.66.0 — the rate-floor detector was unreliable in BOTH directions
+
+`messageRateFloor.ts` is the only detector covering "a device still reports, but is
+starved" — the mode that defeats both the staleness alarm and the recorder-gap detector.
+Its v0.92.0 header asserted a property the code did not have:
+
+> The baseline is a slow EWMA updated ONLY from healthy samples, so a collapse cannot
+> drag the baseline down to meet itself.
+
+That was false. "Healthy" meant `rate >= 0.2 x baseline`, so every sample in the band
+`[0.2B, B)` still dragged the baseline down at alpha 0.2. Two failures follow from it, and
+the 2026-08-02→04 logs contain a worked example of each.
+
+**False negative.** Core baselines eroded 47 → 32 over two days. By 08-04 they had fallen
+far enough that an 11.7 h fleet-wide collapse — all three Cores pinned at 2.7-2.9 msg/min,
+~96 % of telemetry gone — fired nothing at all. The SHP2 fired only because it is flat-rate.
+
+**False positive.** 08-03 19:24 Core 2 fired at 4.0 msg/min against a baseline of ~40. But
+19:00-22:59 is the Cores' real idle window, measured at 4.4-6.2 msg/min every single day.
+Its baseline simply had not eroded yet.
+
+### One scalar cannot describe a 13x diurnal swing
+
+Measured hour-of-day medians, msg/min:
+
+| | 19:00-22:59 | 23:00-01:00 | 08:00-18:00 |
+|---|---|---|---|
+| Cores | 4.6-6.2 (idle) | 32-34 | 47-60 |
+| SHP2 | 30.0-30.7 | 30.0-30.7 | 30.0-30.7 |
+
+Legitimate Core idle (4.4) and a real collapse (2.1-2.9) are only ~1.5x apart, so no single
+global threshold separates them — but the hour-of-day does, cleanly. The comparison baseline
+is now a per-hour-of-day EWMA, matching the convention `analytics.ts` already uses for
+exactly this reason ("hour-of-day … so daily cycles don't false-alarm").
+
+The hour bucket is **asymmetric** — it rises at alpha but decays 10x slower — so a ramp-down
+cannot walk it down to meet the collapse. It is not frozen: a genuine permanent slowdown
+still converges, over days instead of minutes. That matters, because the diurnal swing is
+real and a frozen baseline would re-create the 19:24 false positive.
+
+### Both edges are dwelled now
+
+v0.92.0 took 20 minutes to fire but **one** 60-second sample to clear — a 20:1 asymmetry in
+the wrong direction for a safety detector. It cost 27 minutes of silence inside the 08-04
+episode (the 05:06 burst), and it meant a device emitting 5 messages once every <=19 minutes
+— about 1 % of baseline — reset the timer forever and never fired at all. A recovery must
+now persist too.
+
+### The transition that hid all of this
+
+When a baseline falls under `minBaselineRate` the device stops being eligible and the
+detector goes quiet for it. v0.92.0 logged **nothing** on that transition, so "no alert" and
+"no longer watching" were indistinguishable in the log. It now emits a WARN naming the device.
+
+### Learned baselines persist
+
+An hour bucket needs ~30 healthy samples of that hour before it outranks the global
+fallback. This add-on restarted 18 times in one 50 h window, so in-memory buckets would
+never mature and the fix would be inert in production. Only what was *learned* is persisted —
+never in-flight collapse timers, so a restart cannot resurrect a stale collapse. Every path
+fails open: a missing or corrupt file just cold-starts on the global baseline.
+
+### Notify failures are now visible to level-based triage
+
+`startAlertMonitor` took a single level-less sink, so all six of its genuine failure sites —
+including the top-level catch around the entire alert-evaluation cycle — logged at info.
+Scanning the add-on log for `level >= 40`, which is the triage this project actually runs,
+returned a clean bill of health while the alarm's only non-audible escape path was failing.
+Same defect, same fix, same shape as `startMqtt` (v1.3.1). The five per-tick analytics
+catches are deliberately NOT promoted — they fire on transient upstream hiccups while the
+fleet is healthy, and would drown the signal.
+
+- `scripts/mutate-rate-floor.mjs`, committed: **8/8 mutants killed**, every mutation
+  anchor-asserted so a mutation that fails to apply aborts the run instead of reporting green.
+  Mutant `iii` is a bug this rewrite actually introduced and the suite actually caught —
+  gating the hour bucket on the *global* view deadlocks the bootstrap, because an idle hour
+  looks like a collapse against a busy-hours global and so can never learn.
+- 9 new tests (1857 total).
+
 ## v1.65.0 — half the Energy Dashboard was named "Circuit N"
 
 The SHP2 wires all twelve breaker channels as six split-phase pairs, and it stores
