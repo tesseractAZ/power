@@ -81,8 +81,17 @@ export function buildAlertMessage(level: 'red' | 'yellow' | 'green', alerts: Ale
 
 /** Pick the most important alert to feature in the spoken message.
  *  Prefer critical over warning, then prefer ones with location, then
- *  by category importance (Battery > Solar > SHP2 > Grid > Thermal). */
-function pickPrimaryAlert(alerts: Alert[], level: 'red' | 'yellow'): Alert | null {
+ *  by category importance (Battery > Solar > SHP2 > Grid > Thermal).
+ *
+ *  ★★★ v1.64.0 — EXPORTED, and it is the ONLY definition of "which alert is
+ *  actually spoken". buildAlertMessage voices exactly ONE alert: this one. Every
+ *  other active critical is counted, displayed and pushed, but NEVER named aloud.
+ *  redReplayGate must therefore fingerprint THIS choice — a gate that recorded
+ *  "all the criticals that were active" would treat a critical that was never
+ *  said out loud as already-announced, and could mute it after a restart. Callers
+ *  must pass the SAME alerts array they hand buildAlertMessage, or the two answers
+ *  can disagree (pinned by the agreement test in redReplayGate.test.ts). */
+export function pickPrimaryAlert(alerts: Alert[], level: 'red' | 'yellow'): Alert | null {
   const targetSeverity = level === 'red' ? 'critical' : 'warning';
   // v0.16.4 — never feature a non-annunciating alert (annunciate === false, e.g.
   // an expected-offline bench spare) in the spoken message: it must not be heard
