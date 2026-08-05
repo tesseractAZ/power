@@ -1,3 +1,51 @@
+## v1.71.0 — correcting v1.70.0: the cause was per-unit "Charge Now", not the panel
+
+v1.70.0 attributed the on-peak grid draw to `smartBackupMode: 2` on the Smart Home
+Panel. **That was wrong.** The operator identified the real cause: **"Charge Now",
+a PER-DPU setting** in the EcoFlow app, enabled on individual Delta Pro Ultra units.
+
+The evidence is unambiguous. When Charge Now was switched off:
+
+```
+grid import      16.6 kW  ->  0 W
+smartBackupMode        2  ->  2      (unchanged)
+backupReserveSoc      10  ->  10     (unchanged)
+timeTask.isEnabled false  ->  false  (unchanged)
+```
+
+Every field in the SHP2 strategy blob was byte-identical across the transition. The
+setting was never on the panel at all — which also explains the ~16 kW magnitude:
+several Cores each pulling their own AC charge simultaneously, not one panel-level
+decision.
+
+### What this changes
+
+**Attribution corrected** throughout the module docs, the DOCS.md spec section, and —
+most importantly — the operator-facing alert text, which previously sent the reader to
+a Smart Home Panel setting that had nothing to do with it.
+
+**The alert now names WHICH Cores are drawing.** Because Charge Now is per-unit, "which
+Core" is the actionable part of the report. Attribution comes from each DPU's own
+`acInWatts` — the same field `aggregateFleetFlow` sums into `acIn`, so the parts always
+reconcile with the total. Cores below 500 W are treated as standby and not named.
+
+```
+Drawing   Core 1 (7.2 kW), Core 3 (4.4 kW)
+```
+
+### The design point this vindicates
+
+Nothing in the SHP2 strategy, and no DPU field this add-on projects, exposes Charge Now
+directly. It is **invisible in telemetry**. That is precisely why the detector infers
+from power flow rather than reading a mode flag: the only observable is the energy
+actually moving. A flag-reading implementation would have been unbuildable.
+
+### Proof
+
+`scripts/mutate-peak-grid-draw.mjs` extended to **15 mutants, 15/15 killed**, including
+two new ones on attribution: reversing the sort (pointing the operator at the least
+guilty Core first) and naming idle Cores as culprits.
+
 ## v1.70.0 — buying on-peak energy to fill a battery the night engine refills cheap
 
 At 17:22 MST on 2026-08-04 — inside the APS R-EV on-peak window — the plant was

@@ -2,6 +2,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assessPeakDraw, evaluatePeakDraw, gridToBatteryW, peakGridDrawAlerts, trackOnset, resetPeakDrawOnset,
+  attributeCores, CORE_ATTRIBUTION_MIN_W,
   PEAK_GRID_DRAW_ALERT_ID, DEFAULT_PEAK_DRAW_CONFIG,
   type PeakDrawInputs, type PeakDrawConfig,
 } from '../src/peakGridDraw.js';
@@ -35,6 +36,11 @@ const inputs = (o: Partial<PeakDrawInputs> = {}): PeakDrawInputs => ({
   gridImportW: 11614, panelLoadW: 6505, pvW: 1345,
   socPct: 41, reserveSocPct: 10,
   gridPresent: true,
+  coreDraws: [
+    { label: 'Core 1', acInWatts: 7200 },
+    { label: 'Core 3', acInWatts: 4414 },
+    { label: 'Core 2', acInWatts: 0 },
+  ],
   onsetMs: PEAK_TS - 15 * MIN, // already dwelled
   ...o,
 });
@@ -141,7 +147,7 @@ test('evaluatePeakDraw: a sustained condition reaches the dwell across ticks', (
   const tick = (minsFromStart: number) => evaluatePeakDraw({
     nowMs: PEAK_TS + minsFromStart * MIN,
     gridImportW: 11614, panelLoadW: 6505, pvW: 1345,
-    socPct: 41, reserveSocPct: 10, gridPresent: true,
+    socPct: 41, reserveSocPct: 10, gridPresent: true, coreDraws: [],
   }, TARIFF, CFG);
 
   assert.equal(tick(0).active, false, 'first sighting starts the dwell');
@@ -150,7 +156,7 @@ test('evaluatePeakDraw: a sustained condition reaches the dwell across ticks', (
 });
 
 test('evaluatePeakDraw: the dwell restarts after the condition clears', () => {
-  const base = { gridImportW: 11614, panelLoadW: 6505, pvW: 1345, socPct: 41, reserveSocPct: 10, gridPresent: true };
+  const base = { gridImportW: 11614, panelLoadW: 6505, pvW: 1345, socPct: 41, reserveSocPct: 10, gridPresent: true, coreDraws: [] };
   evaluatePeakDraw({ ...base, nowMs: PEAK_TS }, TARIFF, CFG);
   // Grid import collapses to house-only — nothing is charging any more.
   evaluatePeakDraw({ ...base, nowMs: PEAK_TS + 5 * MIN, gridImportW: 5160 }, TARIFF, CFG);
@@ -160,7 +166,7 @@ test('evaluatePeakDraw: the dwell restarts after the condition clears', () => {
 });
 
 test('evaluatePeakDraw: a suppressed condition never accrues dwell', () => {
-  const belowReserve = { gridImportW: 11614, panelLoadW: 6505, pvW: 1345, socPct: 12, reserveSocPct: 10, gridPresent: true };
+  const belowReserve = { gridImportW: 11614, panelLoadW: 6505, pvW: 1345, socPct: 12, reserveSocPct: 10, gridPresent: true, coreDraws: [] };
   for (const m of [0, 10, 20, 30]) {
     assert.equal(evaluatePeakDraw({ ...belowReserve, nowMs: PEAK_TS + m * MIN }, TARIFF, CFG).active, false,
       'a depleted pack must never age into a cost alert');
@@ -172,4 +178,44 @@ test('onset tracking resets the moment the condition clears', () => {
   assert.equal(trackOnset(true, PEAK_TS + 5 * MIN), PEAK_TS, 'onset is held, not advanced');
   assert.equal(trackOnset(false, PEAK_TS + 6 * MIN), null, 'clearing drops it');
   assert.equal(trackOnset(true, PEAK_TS + 7 * MIN), PEAK_TS + 7 * MIN, 'and the dwell restarts');
+});
+
+/* ─── v1.71.0 — per-Core attribution ──────────────────────────────────────── */
+
+test('attributeCores names the drawing units, biggest first', () => {
+  const out = attributeCores([
+    { label: 'Core 3', acInWatts: 4414 },
+    { label: 'Core 1', acInWatts: 7200 },
+  ]);
+  assert.equal(out, 'Core 1 (7.2 kW), Core 3 (4.4 kW)', 'ordered by draw, not by input order');
+});
+
+test('attributeCores ignores idle and standby-level Cores', () => {
+  assert.equal(attributeCores([
+    { label: 'Core 1', acInWatts: 7200 },
+    { label: 'Core 2', acInWatts: 0 },
+    { label: 'Core 3', acInWatts: CORE_ATTRIBUTION_MIN_W - 1 },
+  ]), 'Core 1 (7.2 kW)');
+  assert.equal(attributeCores([]), null, 'nothing to name');
+  assert.equal(attributeCores([{ label: 'Core 1', acInWatts: 10 }]), null, 'standby is not a culprit');
+});
+
+test('★ the alert names WHICH Cores — Charge Now is a per-unit setting', () => {
+  const v = assessPeakDraw(inputs(), TARIFF, CFG);
+  assert.equal(v.coreAttribution, 'Core 1 (7.2 kW), Core 3 (4.4 kW)');
+  const [a] = peakGridDrawAlerts(v, PEAK_TS);
+  assert.match(a.detail, /Charge Now/, 'names the real setting, not smartBackupMode');
+  assert.match(a.detail, /PER-UNIT/, 'tells the operator it is per-unit');
+  assert.ok(!/Smart Backup/i.test(a.detail), 'the v1.70.0 misattribution is gone');
+  assert.match(a.detail, /Core 1 \(7\.2 kW\)/, 'the culprits are in the operator-facing text');
+  const who = a.facts?.find((f) => f.label === 'Drawing');
+  assert.equal(who?.value, 'Core 1 (7.2 kW), Core 3 (4.4 kW)');
+});
+
+test('no dominant Core still produces a usable alert', () => {
+  const v = assessPeakDraw(inputs({ coreDraws: [] }), TARIFF, CFG);
+  assert.equal(v.coreAttribution, null);
+  const [a] = peakGridDrawAlerts(v, PEAK_TS);
+  assert.equal(a.facts?.find((f) => f.label === 'Drawing')?.value, 'no single Core dominant');
+  assert.ok(!/Drawing now:/.test(a.detail), 'no dangling empty clause');
 });
