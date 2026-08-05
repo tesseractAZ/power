@@ -8,7 +8,13 @@ import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { assessBlind, telemetryBlindAlerts, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
-import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare } from './shp2Membership.js';
+import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare,
+  aggregateFleetFlow, findShp2 } from './shp2Membership.js';
+// v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
+// index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
+// on-peak starts, and the SAME fleet flow aggregation the dashboard shows.
+import { apsREvModelFromEnv } from './tariff.js';
+import { evaluatePeakDraw, peakGridDrawAlerts } from './peakGridDraw.js';
 import {
   computeLearnedAlerts,
   computeBaselineAlerts,
@@ -1406,9 +1412,26 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     }
     const grid = liveGridBackstop(snap.devices);
 
+    // v1.70.0 — on-peak grid-to-battery. On 2026-08-04 the plant spent an on-peak
+    // afternoon importing ~16 kW into the packs at 44.4c/kWh with the house drawing
+    // 2.6 kW, and nothing noticed. Stays silent at/near the reserve, where buying
+    // on-peak is correct outage protection rather than waste.
+    const peakFlow = aggregateFleetFlow(snap.devices);
+    const peakShp2 = findShp2(snap.devices);
+    const peakDraw = evaluatePeakDraw({
+      nowMs: Date.now(),
+      gridImportW: peakFlow.acIn,
+      panelLoadW: peakFlow.panelLoad,
+      pvW: peakFlow.fleetPv,
+      socPct: peakShp2?.projection.backupBatPercent ?? null,
+      reserveSocPct: peakShp2?.projection.strategy?.backupReserveSoc ?? null,
+      gridPresent: grid.present,
+    }, apsREvModelFromEnv());
+
     const alerts = [
       ...computeAlerts(snap.devices, connectivity, grid),
       ...computeLearnedAlerts(snap.devices),
+      ...peakGridDrawAlerts(peakDraw, Date.now()),
       ...baselineAlerts,
       ...forecastAlerts,
       ...forecastDay,
