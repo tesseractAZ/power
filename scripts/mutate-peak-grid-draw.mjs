@@ -116,6 +116,18 @@ const MUTANTS = [
     to: '  const holds = probe.gridToBatteryW >= 0; /* MUTANT */',
     why: 'A depleted pack sitting below the reserve would age into a cost alert the moment it crossed the headroom.',
   },
+  {
+    id: 'xiv. ★ core attribution silently drops the biggest drawer',
+    find: '    .sort((a, b) => b.acInWatts - a.acInWatts);',
+    to: '    .sort((a, b) => a.acInWatts - b.acInWatts); /* MUTANT */',
+    why: 'The operator would be pointed at the least guilty Core first — worse than no attribution.',
+  },
+  {
+    id: 'xv. idle Cores are named as culprits',
+    find: '    .filter((c) => c.acInWatts >= CORE_ATTRIBUTION_MIN_W)',
+    to: '    .filter(() => true) /* MUTANT */',
+    why: 'Every Core would be listed, including ones at 0 W, making the report useless.',
+  },
 ];
 
 function run(files) {

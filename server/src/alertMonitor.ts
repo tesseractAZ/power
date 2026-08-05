@@ -1426,6 +1426,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       socPct: peakShp2?.projection.backupBatPercent ?? null,
       reserveSocPct: peakShp2?.projection.strategy?.backupReserveSoc ?? null,
       gridPresent: grid.present,
+      // v1.71.0 — Charge Now is a PER-DPU setting, so name the Cores actually
+      // drawing. Same acInWatts field aggregateFleetFlow sums, so parts == total.
+      coreDraws: Object.values(snap.devices)
+        .filter((d: any) => d?.projection?.kind === 'dpu')
+        .map((d: any) => ({
+          label: d.name ?? d.sn,
+          acInWatts: d.projection.acInWatts ?? 0,
+        })),
     }, apsREvModelFromEnv());
 
     const alerts = [

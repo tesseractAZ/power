@@ -10,12 +10,24 @@ import { rateAt, type TariffModel } from './tariff.js';
  * energy the night-charge engine would otherwise buy overnight at a fraction of
  * the price. Nothing detected it; the operator noticed by looking at the numbers.
  *
- * The trigger was `smartBackupMode: 2` on the SHP2 (outage-readiness top-up), set
- * device-side and NOT writable through this add-on's proven command path. Neither
- * knob this add-on can write was involved: `backupReserveSoc` was already at its
- * floor of 10 and the scheduled charge task was disabled. So this module's job is
- * to make the condition VISIBLE and quantified — the add-on cannot silently fix a
- * setting it does not own.
+ * ── What actually caused it (corrected in v1.71.0) ───────────────────────────
+ * The trigger was **"Charge Now", a PER-DPU setting** in the EcoFlow app — enabled
+ * on individual Delta Pro Ultra units, which is why the draw reached ~16 kW: several
+ * Cores each pulling their own AC charge at once.
+ *
+ * v1.70.0 shipped attributing this to `smartBackupMode: 2` on the SHP2. That was
+ * WRONG, and the evidence is unambiguous: when the operator turned Charge Now off,
+ * grid import fell to 0 W while `smartBackupMode` stayed at 2 and every other field
+ * in the SHP2 strategy blob was byte-identical. The setting is not on the panel at all.
+ *
+ * Two lessons encoded here deliberately:
+ *  1. NOTHING in the SHP2 strategy — and no DPU field we project — exposes Charge Now
+ *     directly. It is invisible in telemetry. That is precisely why this detector must
+ *     infer from POWER FLOW rather than read a mode flag: the only observable is the
+ *     energy actually moving.
+ *  2. Because it is per-DPU, the alert names WHICH Cores are drawing (from each DPU's
+ *     `acInWatts`), so the operator knows which units to go turn off rather than
+ *     hunting a panel-level setting that was never involved.
  *
  * ── Why this is a WARNING and never critical ──────────────────────────────────
  * Every critical in this system means "something may hurt you or the plant". This
@@ -69,8 +81,30 @@ export interface PeakDrawInputs {
   reserveSocPct: number | null;
   /** False when the grid is absent (outage) — nothing to buy. */
   gridPresent: boolean;
+  /** Per-Core AC input, so the alert can name which units are drawing. Charge Now
+   *  is a per-DPU setting, so "which Core" is the actionable part of the report. */
+  coreDraws: CoreDraw[];
   /** When this condition was first seen continuously, or null if not currently seen. */
   onsetMs: number | null;
+}
+
+/** One Core's grid intake. `acInWatts` is the DPU's own AC input — the same field
+ *  `aggregateFleetFlow` sums into `acIn`, so the parts always agree with the total. */
+export interface CoreDraw {
+  label: string;
+  acInWatts: number;
+}
+
+/** Cores pulling at least this much are worth naming; below it is standby draw. */
+export const CORE_ATTRIBUTION_MIN_W = 500;
+
+/** The Cores actually drawing, biggest first, formatted for the operator. */
+export function attributeCores(draws: CoreDraw[]): string | null {
+  const active = draws
+    .filter((c) => c.acInWatts >= CORE_ATTRIBUTION_MIN_W)
+    .sort((a, b) => b.acInWatts - a.acInWatts);
+  if (active.length === 0) return null;
+  return active.map((c) => `${c.label} (${(c.acInWatts / 1000).toFixed(1)} kW)`).join(', ');
 }
 
 export interface PeakDrawVerdict {
@@ -88,6 +122,8 @@ export interface PeakDrawVerdict {
   heldForMs: number;
   /** Set when detection was deliberately suppressed, for the log. */
   suppressed: 'below-reserve' | 'off-peak' | 'outage' | 'insufficient-data' | null;
+  /** Which Cores are drawing, or null when none are individually significant. */
+  coreAttribution: string | null;
 }
 
 /**
@@ -115,7 +151,7 @@ export function assessPeakDraw(
   const slice = rateAt(tariff, i.nowMs);
   const idle = (suppressed: PeakDrawVerdict['suppressed']): PeakDrawVerdict => ({
     active: false, gridToBatteryW: 0, onPeak: slice.isOnPeak, periodLabel: slice.periodLabel,
-    centsPerHour: null, heldForMs: 0, suppressed,
+    centsPerHour: null, heldForMs: 0, suppressed, coreAttribution: null,
   });
 
   if (!i.gridPresent) return idle('outage');
@@ -145,6 +181,7 @@ export function assessPeakDraw(
     centsPerHour,
     heldForMs,
     suppressed: null,
+    coreAttribution: attributeCores(i.coreDraws),
   };
 }
 
@@ -195,6 +232,7 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
     ? ' The tariff rates are not confirmed in config, so the cost is not estimated here.'
     : ` At the current ${v.periodLabel} rate that is about $${(v.centsPerHour / 100).toFixed(2)} per hour`
       + ` more than buying the same energy overnight.`;
+  const whoText = v.coreAttribution == null ? '' : ` Drawing now: ${v.coreAttribution}.`;
   return [{
     id: PEAK_GRID_DRAW_ALERT_ID,
     severity: 'warning' as const,
@@ -207,11 +245,13 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
     detail:
       `About ${kw} kW of grid import has been going into the pack rather than the house for ${mins} minutes, `
       + `while on-peak.${costText} The pack is comfortably above its reserve, so this is not outage protection — `
-      + `it is buying at the day's highest rate energy the overnight charge window would buy cheaply. `
-      + `The usual cause is Smart Backup on the Smart Home Panel topping the pack up for outage readiness; `
-      + `that setting is changed in the EcoFlow app, not from here.`,
+      + `it is buying at the day's highest rate energy the overnight charge window would buy cheaply.`
+      + `${whoText} The usual cause is "Charge Now" left enabled on one or more Delta Pro Ultra units — `
+      + `it is a PER-UNIT setting in the EcoFlow app, so check each Core listed above rather than the panel. `
+      + `Nothing in the telemetry reports that setting directly, which is why this is inferred from power flow.`,
     facts: [
       { label: 'Grid → battery', value: `${kw} kW` },
+      { label: 'Drawing', value: v.coreAttribution ?? 'no single Core dominant' },
       { label: 'Period', value: v.periodLabel },
       { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `$${(v.centsPerHour / 100).toFixed(2)}/h` },
       { label: 'Ongoing for', value: `${mins} min` },
