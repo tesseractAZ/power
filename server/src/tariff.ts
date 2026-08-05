@@ -291,6 +291,34 @@ export function buildApsREvModel(rates: ApsREvRates = {}): TariffModel {
   };
 }
 
+/** Read the APS R-EV per-period effective cents from the config env (all default
+ *  "" / unconfirmed → ratesConfirmed=false → every $ output null).
+ *
+ *  ★ v1.70.0 — moved here from index.ts. It was private there, so the on-peak
+ *  grid-draw detector in alertMonitor would have had to duplicate it, and two
+ *  copies of a tariff reader is exactly how two engines end up disagreeing about
+ *  when on-peak starts. One reader, one model, every consumer. */
+export function apsREvRatesFromEnv(): ApsREvRates {
+  const cent = (name: string): number | null => {
+    const raw = process.env[name];
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    onPeak: { summer: cent('TARIFF_APS_ONPEAK_SUMMER_CENTS'), winter: cent('TARIFF_APS_ONPEAK_WINTER_CENTS') },
+    offPeak: { summer: cent('TARIFF_APS_OFFPEAK_SUMMER_CENTS'), winter: cent('TARIFF_APS_OFFPEAK_WINTER_CENTS') },
+    overnight: { summer: cent('TARIFF_APS_OVERNIGHT_CENTS'), winter: cent('TARIFF_APS_OVERNIGHT_CENTS') },
+    superOffPeak: { summer: null, winter: cent('TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS') },
+    confirmed: process.env.TARIFF_APS_RATES_CONFIRMED === 'true',
+  };
+}
+
+/** The live APS R-EV model built from config env. THE shared tariff view. */
+export function apsREvModelFromEnv(): TariffModel {
+  return buildApsREvModel(apsREvRatesFromEnv());
+}
+
 /** A single-rate flat model — the legacy default (17¢ both bins) as a TariffModel,
  *  so the eventual consumer rewire is a behavior-preserving swap under flat rates. */
 export function flatTariffModel(centsPerKwh: number | null, timezone = 'America/Phoenix'): TariffModel {

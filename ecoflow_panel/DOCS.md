@@ -4431,6 +4431,72 @@ curtailing", not power-present), `ecoflow_pv_curtailment_surplus_watts`,
 - **Advisory ≠ control.** `computeDispatchPlan` and `recommendDispatch` are both
   recommend-only and touch no safety alarm or device write.
 
+### 7.9 On-peak grid-to-battery detection (`server/src/peakGridDraw.ts`)
+
+Detects the plant importing grid energy **into the battery** during the tariff's
+on-peak window — energy the overnight charge window buys at a fraction of the price.
+
+**Derivation.** The grid only has to cover what PV does not:
+
+```
+gridToBatteryW = max(0, gridImportW - max(0, panelLoadW - pvW))
+```
+
+Inputs come from `aggregateFleetFlow(devices)` (`acIn`, `panelLoad`, `fleetPv`) — the
+same aggregation the dashboard renders — and SoC/reserve from `findShp2().projection`
+(`backupBatPercent`, `strategy.backupReserveSoc`).
+
+> **Basis caveat (documented, not incidental).** This subtracts an SHP2-measured house
+> load from a DPU-measured grid import. Those are different meters, and this codebase
+> has previously been bitten by treating `fleet_grid_import_wh` (DPU `ac_in`) and
+> `fleet_grid_home_wh` (SHP2 `gridWatt`) as interchangeable. The residual therefore
+> carries both meters' error, which is why `minChargeW` sits well above nuisance level.
+> This is a "several kW of deliberate charging" detector, **not** an energy-balance
+> instrument, and must not be repurposed as one.
+
+**Tariff source.** `apsREvModelFromEnv()` in `tariff.ts` — the single model shared with
+`index.ts`, so no second reader can drift on when on-peak begins. On-peak resolves via
+`rateAt(model, ts).isOnPeak` (APS R-EV: 16:00–19:00 local, Mon–Fri, year-round).
+
+**Suppression conditions** (`PeakDrawVerdict.suppressed`), each a deliberate silence:
+
+| Value | Meaning |
+|---|---|
+| `outage` | `gridPresent` false — there is nothing to buy |
+| `off-peak` | Charging then is the desired behaviour |
+| `insufficient-data` | Any of import / load / PV is null — no verdict is fabricated |
+| `below-reserve` | SoC ≤ reserve + `reserveHeadroomPct` — **see below** |
+
+> **The below-reserve guard is a safety property, not a tuning choice.** At or near the
+> reserve, buying on-peak is *correct*: the plant is restoring its own outage protection,
+> which outranks the bill. An alert in that state would be advising the operator to trade
+> away outage margin for money. Removing this guard makes the detector strictly more
+> sensitive and is therefore invisible in review — it is covered by mutant `iii` of the
+> committed harness for exactly that reason.
+
+**Tuning** (env, all with defaults — no add-on config option):
+
+| Env | Default | Purpose |
+|---|---|---|
+| `PEAK_DRAW_MIN_CHARGE_W` | `800` | Floor below which the residual is meter noise |
+| `PEAK_DRAW_DWELL_MS` | `600000` | Hold time before alerting (a load step is not a buying pattern) |
+| `PEAK_DRAW_RESERVE_HEADROOM_PCT` | `10` | Band above the reserve still treated as outage preparation |
+
+**Entry point.** `evaluatePeakDraw(inputs, tariff, cfg)` is the only call sites should
+use. Assessing needs an onset, but whether the condition holds is known only *from* an
+assessment; `evaluatePeakDraw` resolves that internally (probe → `trackOnset` → assess).
+A caller that instead passed `onsetMs: null` each tick would leave the dwell permanently
+unmet and the alert permanently silent, with every unit test still green — mutant `xii`.
+
+**Alert.** Id `peak-grid-draw`, severity `warning`, category `Grid`, priority `low`.
+Deliberately below every physical-risk condition: this reports spend, not danger, and
+placing money in the critical tier devalues the tier that must never be discounted. The
+detail text names the EcoFlow-app setting that owns the behaviour (`smartBackupMode`),
+because the add-on cannot write it. Cost is emitted as `null` — never a guess — when
+`ratesConfirmed` is false.
+
+**Proof.** `scripts/mutate-peak-grid-draw.mjs`, 13 anchor-asserted mutants, 13/13 killed.
+
 
 ---
 
