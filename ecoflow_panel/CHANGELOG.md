@@ -1,3 +1,56 @@
+## v1.70.0 — buying on-peak energy to fill a battery the night engine refills cheap
+
+At 17:22 MST on 2026-08-04 — inside the APS R-EV on-peak window — the plant was
+importing 11.6 kW against a 6.5 kW house load with 1.3 kW of PV. Eleven minutes later
+the house load had fallen to 2.6 kW and the import had *risen* to 16.6 kW:
+
+```
+17:22  import 11.6 kW | load 6.5 kW | pv 1.3 kW | soc 41%  -> 6.5 kW into the pack
+17:33  import 16.6 kW | load 2.6 kW | pv 2.2 kW | soc 45%  -> 16.2 kW into the pack
+```
+
+At the confirmed on-peak rate of 44.4 c/kWh that is **$7.19/hour**, for energy the
+overnight window buys at 17c or less. Nothing in the system noticed. The operator did,
+by reading the numbers.
+
+**Cause.** `smartBackupMode: 2` on the SHP2 — outage-readiness top-up — after the panel
+reset. Neither knob this add-on can write was involved: `backupReserveSoc` was already
+at its floor of 10, and the scheduled charge task was `isEnabled: false` (its windows,
+10:40-14:40 and 15:40-16:00, are already designed to end exactly when on-peak begins).
+That setting is changed in the EcoFlow app; the add-on does not own it, so this release
+makes the condition **visible and quantified** rather than pretending to fix it.
+
+### On-peak grid-to-battery detection (`peakGridDraw.ts`)
+
+Raises a **warning** when meaningful grid import is going into the pack during on-peak.
+Deliberately a warning and never critical: every critical in this system means something
+may hurt you or the plant, and putting money in that tier teaches the operator to discount
+the tier that must never be discounted.
+
+**The guard matters more than the detection.** At or within 10 points of the reserve the
+detector stays silent, because buying on-peak *is correct* there — the plant is restoring
+its own outage protection, and in a Phoenix summer that outranks the bill. An alert in
+that state would be advising a genuinely unsafe trade.
+
+Also: a 10-minute dwell (an EV plugging in is not a buying pattern), an 800 W floor
+(the residual mixes a DPU-measured import with an SHP2-measured load, so it is a
+"several kW of deliberate charging" detector, not an energy-balance instrument), silence
+during an outage, and `null` rather than a fabricated cost when tariff rates are
+unconfirmed.
+
+### One tariff, every consumer
+
+`apsREvRatesFromEnv` moved from `index.ts` (where it was private) into `tariff.ts`, with
+a new `apsREvModelFromEnv()`. The detector reads the *same* model `index.ts` does, so the
+two engines cannot drift apart on when on-peak starts.
+
+### Proof
+
+`scripts/mutate-peak-grid-draw.mjs` — **13/13 mutants killed**. The three starred ones are
+the regressions that would be invisible in review: removing the below-reserve safety guard,
+fabricating a cost when rates are unconfirmed, and `evaluatePeakDraw` failing to thread the
+onset (which leaves every unit test green while the alert can never fire in production).
+
 ## v1.69.0 — the alarm system went blind for 22 minutes and reported healthy
 
 Eric powered the house down to reset the SHP2. The Pi has no battery-backed RTC, so it

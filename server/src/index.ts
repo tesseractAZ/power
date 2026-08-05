@@ -167,7 +167,7 @@ import {
   type NightActuationState,
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
-import { buildApsREvModel, rateAt, localParts, seasonOf, type ApsREvRates } from './tariff.js';
+import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
 import type { NightLedgerRow } from './recorder.js';
@@ -2613,23 +2613,8 @@ function phoenixMinuteOfDay(ms: number): number {
   return num('hour') * 60 + num('minute');
 }
 
-/** Read the APS R-EV per-period effective cents from the config env (all default
- *  "" / unconfirmed → ratesConfirmed=false → every $ output null). */
-function apsREvRatesFromEnv(): ApsREvRates {
-  const cent = (name: string): number | null => {
-    const raw = process.env[name];
-    if (raw == null || raw === '') return null;
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : null;
-  };
-  return {
-    onPeak: { summer: cent('TARIFF_APS_ONPEAK_SUMMER_CENTS'), winter: cent('TARIFF_APS_ONPEAK_WINTER_CENTS') },
-    offPeak: { summer: cent('TARIFF_APS_OFFPEAK_SUMMER_CENTS'), winter: cent('TARIFF_APS_OFFPEAK_WINTER_CENTS') },
-    overnight: { summer: cent('TARIFF_APS_OVERNIGHT_CENTS'), winter: cent('TARIFF_APS_OVERNIGHT_CENTS') },
-    superOffPeak: { summer: null, winter: cent('TARIFF_APS_SUPEROFFPEAK_WINTER_CENTS') },
-    confirmed: process.env.TARIFF_APS_RATES_CONFIRMED === 'true',
-  };
-}
+// v1.70.0 — apsREvRatesFromEnv moved to tariff.ts so alertMonitor's on-peak
+// grid-draw detector reads the SAME tariff this file does. See tariff.ts.
 
 /** Cheap-period id the advisor sizes the buy against (the OVERNIGHT R-EV tier). */
 const NIGHT_CHEAP_PERIOD_ID = 'overnight';
@@ -2703,7 +2688,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
 
   // Tariff period resolver (America/Phoenix, R-EV). Cents may be unconfirmed —
   // periodId is structural and needs no confirmed rate.
-  const tariffModel = buildApsREvModel(apsREvRatesFromEnv());
+  const tariffModel = apsREvModelFromEnv();
   const periodIdAt = (ts: number): string => rateAt(tariffModel, ts).periodId;
 
   // Live analytics reports (each best-effort — a missing report degrades the
