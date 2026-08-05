@@ -7,6 +7,7 @@ import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutag
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
+import { assessBlind, telemetryBlindAlerts, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare } from './shp2Membership.js';
 import {
   computeLearnedAlerts,
@@ -887,6 +888,9 @@ export function saveClearedLog(path: string, logArr: ClearedAlert[], max: number
  * hiccups while the fleet is perfectly healthy, and flooding level 40 with them would
  * destroy the very signal this change exists to create.
  */
+/** v1.69.0 — process start, for the telemetry-blind boot grace. */
+const PROCESS_BOOT_MS = Date.now();
+
 export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log: (m: string) => void, warn: (m: string) => void = log): AlertMonitor {
   let cfg = loadNotifyConfig();
   const tracked = new Map<string, TrackedAlert>();
@@ -1430,6 +1434,19 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // 60 s rate-floor tick in index.ts publishes the collapsing set; this turns
       // each into a WARNING push, riding the SAME notify path as offline/stale.
       ...rateFloorAlerts(getRateFloorCollapses()),
+      // v1.69.0 — "the add-on can see nothing" is itself an alarm condition, and the
+      // only one where silence is the dangerous outcome rather than the safe one.
+      ...telemetryBlindAlerts(
+        assessBlind({
+          nowMs: Date.now(),
+          bootMs: PROCESS_BOOT_MS,
+          projectedDeviceCount: Object.values(store.get().devices)
+            .filter((d: any) => d?.projection?.kind === 'dpu' || d?.projection?.kind === 'shp2').length,
+          ...pollState(),
+          lastHealAtMs: null, // heal is driven in index.ts; the alert only reports
+        }),
+        Date.now(),
+      ),
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
     // into the SHP2) is online for diagnostics but must NEVER chime/push. v0.16.4
