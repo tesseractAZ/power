@@ -4490,12 +4490,29 @@ unmet and the alert permanently silent, with every unit test still green — mut
 
 **Alert.** Id `peak-grid-draw`, severity `warning`, category `Grid`, priority `low`.
 Deliberately below every physical-risk condition: this reports spend, not danger, and
-placing money in the critical tier devalues the tier that must never be discounted. The
-detail text names the EcoFlow-app setting that owns the behaviour (`smartBackupMode`),
-because the add-on cannot write it. Cost is emitted as `null` — never a guess — when
-`ratesConfirmed` is false.
+placing money in the critical tier devalues the tier that must never be discounted. Cost
+is emitted as `null` — never a guess — when `ratesConfirmed` is false.
 
-**Proof.** `scripts/mutate-peak-grid-draw.mjs`, 13 anchor-asserted mutants, 13/13 killed.
+**Causing setting: "Charge Now", which is PER-DPU.** Enabled on individual Delta Pro
+Ultra units in the EcoFlow app, which is why the observed draw reached ~16 kW — several
+Cores charging at once, not one panel-level decision.
+
+> **Corrected in v1.71.0.** v1.70.0 attributed this to `smartBackupMode: 2` on the SHP2.
+> That was wrong. When Charge Now was switched off, grid import fell 16.6 kW → 0 W while
+> `smartBackupMode` stayed at `2` and every other field in the SHP2 strategy blob was
+> byte-identical. The setting is not on the panel.
+
+**Why inference, not a flag read.** Nothing in the SHP2 strategy and no projected DPU
+field exposes Charge Now. It is invisible in telemetry, so the only observable is the
+energy actually moving — which is why this detector is built on a power residual. A
+flag-reading implementation was never possible.
+
+**Per-Core attribution.** `attributeCores(draws)` names the units actually drawing,
+largest first, from each DPU's `acInWatts` (the same field `aggregateFleetFlow` sums into
+`acIn`, so parts reconcile with the total). Cores below `CORE_ATTRIBUTION_MIN_W` (500 W)
+are standby and are not named; when none qualify the fact reads `no single Core dominant`.
+
+**Proof.** `scripts/mutate-peak-grid-draw.mjs`, 15 anchor-asserted mutants, 15/15 killed.
 
 
 ---
