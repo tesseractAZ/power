@@ -5,6 +5,7 @@ import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
+import { notePollOk, notePollFailed } from './telemetryBlind.js';
 import { config } from './config.js';
 
 /** Local SN→name overrides from device-aliases.json (optional file). */
@@ -507,9 +508,14 @@ export function startPollLoop(
         log(`poll ok in ${tookMs}ms`);                // routine success: debug-gated
       }
       lastPollFailed = false;
+      notePollOk(Date.now()); // v1.69.0 — feeds the telemetry-blind detector
     } catch (e: any) {
-      warn(`poll failed: ${e?.message ?? e}`);
+      const emsg = e?.message ?? String(e);
+      warn(`poll failed: ${emsg}`);
       lastPollFailed = true;
+      // v1.69.0 — a failing poll is the alarm system losing its eyes. Record it so
+      // telemetryBlind can raise a CRITICAL if it persists; the old code only logged.
+      notePollFailed(emsg);
     }
     if (!stopped) timer = setTimeout(tick, intervalMs);
   };

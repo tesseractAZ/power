@@ -1,3 +1,64 @@
+## v1.69.0 — the alarm system went blind for 22 minutes and reported healthy
+
+Eric powered the house down to reset the SHP2. The Pi has no battery-backed RTC, so it
+booted with a stale clock, and DNS was still coming up (`EAI_AGAIN` at 16:20) so
+systemd-timesyncd could not sync. The clock sat **170 seconds behind**.
+
+EcoFlow signs every request with a timestamp. At −170 s every signature was rejected:
+
+```
+16:26:19 poll failed: EcoFlow API error 8521: signature is wrong
+...continuously until 16:43:22 poll ok (recovered)
+```
+
+For 22 minutes the add-on held **zero telemetry** — `/api/snapshot` had `generatedAt: 0`
+and an empty devices map — and could not have seen a fire, a grid loss or an empty
+battery. Meanwhile:
+
+```
+/api/health  →  { "ok": true, "vitalsLevel": "ok" }
+```
+
+Nothing alerted. It resolved only when NTP eventually caught up, and surfaced only
+because the operator asked for a log review.
+
+### Signing no longer trusts the local clock
+
+Restarting the client does **not** fix this — signatures are computed fresh per request
+from the same wrong clock, so a rebuild re-signs identically and fails identically. That
+was the obvious "self-heal" and it is useless here.
+
+Every HTTP response carries a `Date` header, **including the 8521 rejection itself**. So
+the first rejected request tells us exactly how far off we are, and the next one signs
+against corrected time. Recovery in one poll cycle instead of waiting on NTP.
+
+The offset is bounded (an absurd delta is a broken header, not a skewed Pi), has a
+deadband (sub-2 s deltas are latency, not skew), and is used **only** for request
+signing — it never touches recorder timestamps, alert onsets or night-charge windows,
+which must stay on the system clock or history would shift under them. An adopted
+correction logs at WARN naming the host clock, because a silent correction would hide
+the very fault it compensates for.
+
+### The blindness itself is now an alarm
+
+`telemetryBlind.ts` raises a **CRITICAL** when there is no usable telemetry past a grace
+window. It requires BOTH live devices and a recent successful poll — a stale device map
+left over from before an outage is not sight, and treating it as such is exactly how this
+hid. When the failure is auth-shaped the alert names the clock, not the credentials.
+
+`/api/health` no longer returns a hardcoded `ok: true`. It reports `ok: false` **and HTTP
+503** when blind, so the HA watchdog and any uptime probe can see it. A health endpoint
+that cannot say "unhealthy" is decoration.
+
+- `scripts/mutate-telemetry-blind.mjs`, committed: **9/9 mutants killed**, anchor-asserted.
+  Mutant `ix` is the one worth keeping: signing ignores the learned offset while still
+  measuring and logging it, so everything *looks* wired and the fix is a silent no-op.
+- 15 new tests (1872 total).
+
+**Still needs the host:** signing now self-heals, but the Pi's clock is still wrong after
+a power cut until NTP syncs, and everything else on the host inherits that. See the NTP
+hardening note in DOCS.
+
 ## v1.68.0 — every Configuration field re-verified, and a Spanish translation
 
 Two things: the add-on's Configuration page now explains itself accurately, and it does so in

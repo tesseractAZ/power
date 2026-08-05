@@ -116,6 +116,8 @@ import {
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker, type RateFloorPersisted } from './messageRateFloor.js';
+import { assessBlind, pollState } from './telemetryBlind.js';
+import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
 // them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
 import { setRateFloorCollapses, type RateFloorCollapse } from './messageRateFloorAlert.js';
@@ -500,6 +502,20 @@ function snapshotForClient(): FleetSnapshot {
   const devices = shp2Enriched ? { ...s.devices, [shp2!.sn]: shp2Enriched } : s.devices;
   return { ...s, devices, grid, off_grid };
 }
+/** v1.69.0 — process start, for the telemetry-blind boot grace. */
+const PROCESS_BOOT_MS = Date.now();
+// v1.69.0 — surface an adopted clock correction. A silent correction would hide the
+// very fault it compensates for: the operator would never learn the Pi's clock is
+// wrong, and would not know to fix NTP. Signing self-heals; the host still needs care.
+setClockOffsetLogger((offsetMs, previousMs) => {
+  const s = (offsetMs / 1000).toFixed(1);
+  app.log.warn(
+    `ecoflow: adopted a ${s}s clock correction for request signing (was ${(previousMs / 1000).toFixed(1)}s). `
+    + `The HOST clock is wrong by about that much — signing is now self-corrected, but fix NTP on the Pi: `
+    + `after a power cut it boots with no RTC and cannot sync until DNS is up.`,
+  );
+});
+
 const recorder = createRecorder(store, (m) => app.log.info(m));
 // v0.10.0 — analytics worker. Every heavy history scan (the cache-warmer's
 // reports + each /api/* analytics endpoint) runs on the worker's event loop
@@ -512,7 +528,33 @@ const analytics = initAnalyticsClient(resolve(process.cwd(), config.dbPath), (m)
 store.on('change', (snap) => analytics.pushSnapshot(snap));
 
 app.get('/api/snapshot', async () => snapshotForClient());
-app.get('/api/health', async () => ({ ok: true, vitalsLevel: currentAssessment()?.level ?? null, heartbeat: heartbeatStatus(), generatedAt: store.get().generatedAt }));
+// v1.69.0 — /api/health used to return a hardcoded `ok: true`. On 2026-08-04 the
+// add-on ran 22 minutes with an EMPTY device map and zero telemetry while this
+// endpoint reported ok:true / vitalsLevel:"ok". A health endpoint that cannot say
+// "unhealthy" is not a health endpoint; it is decoration, and it actively hid the
+// outage from the HA watchdog and from the operator. It now reflects whether the
+// add-on can actually SEE anything.
+app.get('/api/health', async (_req, reply) => {
+  const blind = assessBlind({
+    nowMs: Date.now(),
+    bootMs: PROCESS_BOOT_MS,
+    projectedDeviceCount: Object.values(store.get().devices)
+      .filter((d: any) => d?.projection?.kind === 'dpu' || d?.projection?.kind === 'shp2').length,
+    ...pollState(),
+    lastHealAtMs: null,
+  });
+  if (blind.blind) reply.code(503); // so the HA watchdog and any uptime probe SEE it
+  return {
+    ok: !blind.blind,
+    blind: blind.blind,
+    blindReason: blind.reason,
+    blindForMs: blind.blindForMs,
+    pollErrorKind: blind.errorKind,
+    vitalsLevel: currentAssessment()?.level ?? null,
+    heartbeat: heartbeatStatus(),
+    generatedAt: store.get().generatedAt,
+  };
+});
 
 /**
  * v0.9.74 — unauth version stamp. Quick debug surface to confirm which

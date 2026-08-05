@@ -1,6 +1,7 @@
 import { request } from 'undici';
 import { config } from '../config.js';
 import { buildQuery, signRequest } from './sign.js';
+import { noteServerDate, signingNowMs, currentOffsetMs } from './clockOffset.js';
 
 export interface EcoFlowResponse<T> {
   code: string; // "0" = success
@@ -25,11 +26,18 @@ export interface MqttCertification {
   protocol: string; // typically "mqtts"
 }
 
+/** v1.69.0 — set by index.ts so an adopted clock correction is visible in the log. */
+let onClockOffsetAdopted: ((offsetMs: number, previousMs: number) => void) | null = null;
+export function setClockOffsetLogger(fn: (offsetMs: number, previousMs: number) => void): void {
+  onClockOffsetAdopted = fn;
+}
+
 async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Record<string, unknown>): Promise<T> {
   const headers = signRequest({
     accessKey: config.accessKey,
     secretKey: config.secretKey,
     params: method === 'GET' ? params : params,
+    nowMs: signingNowMs(), // v1.69.0 — corrected against the server clock
   });
   const url =
     method === 'GET'
@@ -40,6 +48,18 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
   const reqHeaders: Record<string, string> = { ...headers };
   if (method !== 'GET') reqHeaders['Content-Type'] = 'application/json;charset=UTF-8';
   const res = await request(url, { method, headers: reqHeaders, body });
+  // v1.69.0 — learn the server clock from EVERY response, including error responses.
+  // The 8521 "signature is wrong" rejection carries a Date header too, so the very
+  // first rejection teaches us the offset and the NEXT request signs correctly. That
+  // turns a 22-minute blind outage into a one-poll-cycle blip.
+  const before = currentOffsetMs();
+  const upd = noteServerDate(
+    (res.headers as Record<string, string | string[] | undefined>)['date'] as string | undefined,
+    Date.now(),
+  );
+  if (upd.adopted) {
+    onClockOffsetAdopted?.(upd.offsetMs, before);
+  }
   const text = await res.body.text();
   let parsed: EcoFlowResponse<T>;
   try {
