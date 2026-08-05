@@ -1,3 +1,36 @@
+## v1.72.0 — dependency sweep: every open security alert closed
+
+Six open Dependabot PRs, all 11-13 commits behind main, four of them security. Merging
+them one at a time would have meant six CI cycles with each merge staling the next, and
+six separate partial test runs. Applied as ONE change instead, so the full suite runs
+once against all the updates **together** — which is the thing that actually proves the
+alarm engine still works.
+
+### Security (all HIGH unless noted)
+
+| Package | To | Advisory |
+|---|---|---|
+| `ip-address` | 10.4.0 | leading-zero octets decoded as decimal vs octal (SSRF / trust-boundary bypass); CIDR suffix suppresses special-use classification (medium); IPv4-mapped/NAT64 misclassification (medium) |
+| `fast-uri` | 3.1.5 **and** 4.1.2 | host confusion via backslash authority — both vulnerable ranges were present in the tree |
+| `brace-expansion` | 5.0.9 | DoS via unbounded intermediate arrays |
+
+`npm audit` on `server/`: **3 high → 0 vulnerabilities.** `web/` was already clean.
+
+### Non-security
+
+- `fastify` 5.10.0 → 5.11.0 (the HTTP server the whole alarm API runs on)
+- web dev tooling: `vite` 8.2.0, `postcss` 8.5.25, `@vitejs/plugin-react` 6.0.5
+- GitHub Actions (SHA-pinned): `codeql-action/{init,autobuild,analyze}` v4.37.4, `docker/login-action` v4.6.0
+
+### Verification
+
+- `npm audit` clean in both workspaces
+- `tsc` clean: server src, server test config, web
+- **1891 / 1891 tests pass** on fastify 5.11 and the new transitive tree
+- web production build succeeds on Vite 8.2
+
+Closes #279, #280, #281, #284, #285, #286.
+
 ## v1.71.0 — correcting v1.70.0: the cause was per-unit "Charge Now", not the panel
 
 v1.70.0 attributed the on-peak grid draw to `smartBackupMode: 2` on the Smart Home
