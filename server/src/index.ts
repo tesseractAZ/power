@@ -2399,16 +2399,19 @@ const rateFloorTick = setInterval(() => {
           `msg-rate-floor: ${name} message rate collapsed to ` +
           `${r.rate?.toFixed(2) ?? '?'} msg/min (baseline ~${r.baseline.toFixed(0)}` +
           `${r.usedHourBucket ? ' for this hour' : ', global'}) — device is barely reporting ` +
-          `while still appearing "fresh"; check the EcoFlow cloud session / power for ${sn}`,
+          `while still appearing "fresh"; check the EcoFlow cloud session / power for ${sn} ` +
+          `[eligibility mark ~${r.eligibilityPeak.toFixed(0)}]`,
         );
       } else if (r.recovered) {
         app.log.info(`msg-rate-floor: ${name} message rate recovered (${r.rate?.toFixed(1) ?? '?'} msg/min)`);
       }
-      // v1.66.0 — the transition that disarmed three Cores without a trace. When a
-      // device's baseline falls under minBaselineRate it stops being eligible and the
-      // detector goes quiet for it FOREVER (until genuinely healthy samples rebuild the
-      // baseline). v0.92.0 logged nothing at all here, so "no alert" and "no longer
-      // watching" were indistinguishable in the log.
+      // The transition that disarmed three Cores without a trace. v0.92.0 logged
+      // nothing here at all, so "no alert" and "no longer watching" read the same.
+      //
+      // As of the eligibility high-water mark this can no longer be triggered by a
+      // COLLAPSE — only by a device that has been genuinely quiet long enough for
+      // the mark to decay under the floor (days). If this line appears during an
+      // outage, the mark is not doing its job and that is a bug, not a status.
       if (r.eligibilityLost) {
         app.log.warn(
           `msg-rate-floor: ${name} is NO LONGER MONITORED — its learned baseline fell below the ` +
