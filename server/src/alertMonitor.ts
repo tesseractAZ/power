@@ -1431,7 +1431,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       coreDraws: Object.values(snap.devices)
         .filter((d: any) => d?.projection?.kind === 'dpu')
         .map((d: any) => ({
-          label: d.name ?? d.sn,
+          // v1.73.0 — the snapshot field is deviceName ("Core 1"), not name.
+          // d.name was always undefined, so v1.71.0 labeled Cores by raw serial.
+          label: d.deviceName ?? d.sn,
           acInWatts: d.projection.acInWatts ?? 0,
         })),
     }, apsREvModelFromEnv());

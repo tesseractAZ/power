@@ -8510,7 +8510,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | `hostPower` | Pi under-voltage interpretation with `HOST_POWER_MAX_AGE_MS = 120 000` staleness (§13.2) | HA entity named by `HOST_POWER_ENTITY` | Self-alert via `alerts.ts` | data-gated (inert until `HOST_POWER_ENTITY` is configured) |
 | `haStateCache` | TTL-gated entity-watts cache + `extractEntityWatts` (§13.3) | HA states API | Shed advisor, hostPower | measured-and-active |
 | `alertOnset` | Restart-persistent alarm onset timestamps, clear-then-rise semantics (§13.4) | Alert edges | Monitor, TUI ALM screen | measured-and-active |
-| Message-rate floor | Per-SN healthy-only EWMA baseline; collapse < 0.2× baseline sustained 20 min → edge-triggered P3 alert (§13.5) | Cumulative MQTT message counters | Alert monitor self-alert (defeats the "looks fresh" wedge trap) | measured-and-active |
+| Message-rate floor | Per-SN hour-of-day EWMA baselines; collapse < 0.2× baseline sustained 20 min → edge-triggered P3 alert. Eligibility from a 7-day-half-life high-water mark (`eligibilityPeak`) so a collapse cannot disarm the detector; a fired collapse clears only on dwelled traffic ≥ max(0.2× baseline, `minBaselineRate`) — losing eligibility is never reported as recovery (§13.5) | Cumulative MQTT message counters | Alert monitor self-alert (defeats the "looks fresh" wedge trap) | measured-and-active |
 | Log/format hygiene | `logCoalesce` storm suppression, `logSanitize` bounds, `mqttStartClassify` boot-grace levels, `haPayloadFmt` shared formatting (§13.6) | Log/publish paths | All logging + HA payloads | measured-and-active |
 
 ### A.12 UI surfaces & automation posture (§11, §14)
