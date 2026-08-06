@@ -22,6 +22,7 @@ const CFG: RateFloorConfig = {
   baselineAlpha: 0.5, // fast for test convergence
   baselineAlphaDown: 0.02,
   minHourSamples: 999_999, // legacy tests: force the global-baseline path
+  peakHalfLifeMs: 7 * 86_400_000, // eligibility high-water mark: 7-day half-life
 };
 const MIN = 60_000;
 /** Local-time timestamp for a given hour-of-day, TZ-independent. */
@@ -173,20 +174,86 @@ test('the hour bucket resists a RAMP-DOWN that eroded the old global baseline', 
   assert.ok(after > before * 0.9, `ramp must not walk the bucket down (${before.toFixed(1)} -> ${after.toFixed(1)})`);
 });
 
-test('eligibilityLost is signalled when a device stops being monitored', () => {
+/* ── the DISARM TRAPDOOR (2026-08-05) ──────────────────────────────────────
+ *
+ * Eligibility used to be read off the comparison baseline — the very quantity a
+ * collapse drives down — and the guard protecting the global baseline was itself
+ * gated on `baseline >= minBaselineRate`. Once the baseline fell under the floor
+ * that condition could never be true again, so the guard switched off and the
+ * estimator learned unguarded from the collapse, free-falling.
+ *
+ * Measured on the live fleet: three Cores starved at 1.6 msg/min (3-4 % of their
+ * ~43-51 baselines) for 8.5 h and raised NOTHING, because the detector had
+ * disarmed itself 01:02-01:06 while going quiet about it.
+ */
+
+test('A COLLAPSE CANNOT DISARM THE DETECTOR — the 2026-08-05 Core scenario', () => {
   const t = new RateFloorTracker(CFG);
   let now = 0, count = 0;
-  for (let i = 0; i < 10; i++) { now += MIN; count += 30; t.sample('SHP2', count, now); }
-  // Erode the GLOBAL baseline with samples that stay ABOVE the 20% collapse floor (so
-  // they count as "healthy" and DO update it) but below the baseline — the exact band
-  // the v0.92.0 header wrongly claimed could not drag the baseline down.
+  // Prove a healthy ~45 msg/min device.
+  for (let i = 0; i < 20; i++) { now += MIN; count += 45; t.sample('core1', count, now); }
+  assert.ok(t.baselineOf('core1') >= 40, 'learned a healthy baseline');
+
+  // 8.5 h starved at 1.6 msg/min — the measured live rate.
+  let firedOnce = false, everIneligible = false;
+  for (let i = 0; i < 510; i++) {
+    const r = t.sample('core1', (count += 1.6), (now += MIN));
+    if (r.collapsed) firedOnce = true;
+    if (r.eligibilityLost) everIneligible = true;
+    // The mark must never fall through the floor during ANY of it.
+    assert.ok(r.eligibilityPeak >= 10, `still eligible at minute ${i} (peak ${r.eligibilityPeak})`);
+  }
+  assert.equal(everIneligible, false, 'a collapse must NEVER cost the device its monitoring');
+  assert.ok(firedOnce, 'and the collapse it was built to catch actually fires');
+});
+
+test('the global baseline does not FREE-FALL during a collapse', () => {
+  // The second half of the trapdoor: with the guard gated on the eroding value,
+  // the baseline chased the collapse down to ~0.9 on a device whose norm is ~30.
+  const t = new RateFloorTracker(CFG);
+  let now = 0, count = 0;
+  for (let i = 0; i < 20; i++) { now += MIN; count += 30; t.sample('shp2', count, now); }
+  const healthy = t.baselineOf('shp2');
+  for (let i = 0; i < 300; i++) t.sample('shp2', (count += 0.2), (now += MIN));
+  assert.ok(t.baselineOf('shp2') >= healthy * 0.9,
+    `baseline held at ${t.baselineOf('shp2').toFixed(1)} (was ${healthy.toFixed(1)}), not dragged to the collapse`);
+});
+
+test('eligibility IS still lost when a device is GENUINELY quiet for days', () => {
+  // The mark must not be a one-way latch: a device truly reconfigured to be
+  // quiet has to age out, or the detector would nag about it forever.
+  const t = new RateFloorTracker(CFG);
+  let now = 0, count = 0;
+  for (let i = 0; i < 20; i++) { now += MIN; count += 30; t.sample('quiet', count, now); }
   let lost = 0;
-  for (let i = 0; i < 40; i++) {
-    const r = t.sample('SHP2', (count += 7), (now += MIN));
+  for (let h = 0; h < 24 * 14; h++) {
+    const r = t.sample('quiet', (count += 7 * 60), (now += 60 * MIN)); // 7 msg/min, hourly samples
     if (r.eligibilityLost) lost++;
   }
-  assert.equal(lost, 1, 'the un-monitored transition is signalled exactly once (edge)');
-  assert.ok(t.baselineOf('SHP2') < 10, 'baseline did erode below the eligibility floor');
+  assert.equal(lost, 1, 'the un-monitored transition is still signalled exactly once (edge)');
+});
+
+test('the eligibility mark decays on a multi-DAY half-life, not a multi-minute one', () => {
+  const t = new RateFloorTracker(CFG);
+  let now = 0, count = 0;
+  for (let i = 0; i < 20; i++) { now += MIN; count += 40; t.sample('d', count, now); }
+  // One 7-day half-life of total silence: the mark should halve, not vanish.
+  const r = t.sample('d', count, (now += 7 * 24 * 60 * MIN));
+  assert.ok(r.eligibilityPeak > 18 && r.eligibilityPeak < 22,
+    `one half-life halves the mark (got ${r.eligibilityPeak.toFixed(1)} from ~40)`);
+});
+
+test('hydrate SEEDS the mark from pre-upgrade files (no fleet-wide blind spot on deploy)', () => {
+  // Files written before the mark existed carry no `peak`. Defaulting it to 0
+  // would leave every device ineligible until it re-proved itself — a silent
+  // fleet-wide outage of the detector, caused by shipping its own fix.
+  const t = new RateFloorTracker(CFG);
+  t.hydrate({ shp2: { baseline: 31, hourly: new Array(24).fill(28), hourlyN: new Array(24).fill(50) } });
+  let now = 1_000_000, count = 0;
+  t.sample('shp2', count, now); // adopt the counter
+  const r = t.sample('shp2', (count += 30), (now += MIN));
+  assert.ok(r.eligibilityPeak >= 28, `seeded from learned state, got ${r.eligibilityPeak}`);
+  assert.equal(r.eligibilityLost, false, 'an upgrade must not disarm a healthy device');
 });
 
 test('hydrate/toJSON round-trips learned baselines without resurrecting a collapse', () => {
