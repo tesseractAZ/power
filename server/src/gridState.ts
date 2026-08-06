@@ -330,6 +330,21 @@ export function gridPresenceEntityId(): string {
   return (process.env.GRID_PRESENCE_ENTITY ?? '').trim();
 }
 
+/**
+ * v1.74.0 — the floor-hardening slack (percentage points above the reserve at
+ * which the resolver stops trusting a flow-less declared grid, and austerity can
+ * pre-arm). Read per call so tests and live config changes apply without a
+ * module reload. Empty/absent/garbage -> the historical 1.5; clamped to [0, 10]
+ * (0 = distrust only AT the floor; >10 would arm austerity in normal cycling).
+ */
+export function floorSlackPct(): number {
+  const raw = process.env.GRID_FLOOR_SLACK_PCT;
+  if (raw == null || raw.trim() === '' || raw === 'null') return 1.5;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 1.5;
+  return Math.min(10, Math.max(0, n));
+}
+
 export function liveGridBackstop(devices: Record<string, DeviceSnapshot>): GridBackstop {
   const entityId = gridPresenceEntityId();
   // v0.23.0 — getCacheAgeMs reports the age since the last SUCCESSFUL HA fetch
@@ -339,8 +354,14 @@ export function liveGridBackstop(devices: Record<string, DeviceSnapshot>): GridB
   const stale = entityId.length > 0 && haStateCache.getCacheAgeMs() > GRID_ENTITY_MAX_AGE_MS;
   // v0.36.0 — derive whether the SHP2 backup pool is at (or within a hair of) its
   // reserve floor, so the resolver can apply the floor-hardening (a flow-less
-  // declared grid is not trusted to backstop AT the floor). +1.5% slack absorbs
-  // SoC quantisation / sample jitter so we don't oscillate right at the boundary.
+  // declared grid is not trusted to backstop AT the floor). The slack above the
+  // reserve absorbs SoC quantisation / sample jitter so we don't oscillate right
+  // at the boundary — and it is ALSO the austerity pre-arm point: on 2026-08-05
+  // the lighting posture went red at 11% SoC (reserve 10 + slack 1.5) while the
+  // grid was up, because the pool was discharging into the floor with no proven
+  // grid flow yet. v1.74.0 makes the slack configurable (GRID_FLOOR_SLACK_PCT)
+  // so the operator can trade earlier warning against fewer grid-up dim events.
+  // At the observed evening drain (~7%/h) each 1% of slack is ~9 min of pre-arm.
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
@@ -351,7 +372,7 @@ export function liveGridBackstop(devices: Record<string, DeviceSnapshot>): GridB
       ? (backupRemainWh / backupFullCapWh) * 100
       : null;
   const reserveSoc = shp2?.projection.backupReserveSoc ?? null;
-  const atReserveFloor = socPct != null && reserveSoc != null && socPct <= reserveSoc + 1.5;
+  const atReserveFloor = socPct != null && reserveSoc != null && socPct <= reserveSoc + floorSlackPct();
   return resolveGridBackstop({
     devices,
     gridEntity: entityId ? haStateCache.getCachedEntity(entityId) : null,
