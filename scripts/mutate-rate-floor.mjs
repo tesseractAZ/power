@@ -45,16 +45,23 @@ const SUBSET = ['test/messageRateFloor.test.ts', 'test/messageRateFloorAlert.tes
 
 const MUTANTS = [
   {
-    id: 'i. clear dwell removed — ONE healthy sample clears a fired collapse (the v0.92.0 defect)',
-    find: '      if (nowMs - recoverSinceMs >= this.cfg.recoverMs) {',
-    to: '      if (true) { /* MUTANT */',
-    why: 'A single burst mid-episode buys silence. Cost 27 min inside the 08-04 collapse.',
+    id: 'i. fired-latch dwell removed — ONE healthy sample clears the collapse',
+    find: `        if (recoverSinceMs == null) recoverSinceMs = nowMs;
+        if (nowMs - recoverSinceMs >= this.cfg.recoverMs) {
+          recovered = true;`,
+    to: `        if (recoverSinceMs == null) recoverSinceMs = nowMs;
+        if (true) { /* MUTANT */
+          recovered = true;`,
+    why: 'A single burst would clear a latched collapse (the 08-04 05:06 defect, resurrected).',
   },
   {
     id: 'ii. pre-fire timer reset on any healthy sample (the "5 msgs every 19 min" evasion)',
-    find: '      if (recoverSinceMs == null) recoverSinceMs = nowMs;',
-    to: '      collapseSinceMs = null; fired = false; /* MUTANT */',
-    why: 'A device averaging ~1% of baseline never accumulates 20 min and never fires.',
+    find: `      if (collapseSinceMs != null) {
+        if (recoverSinceMs == null) recoverSinceMs = nowMs;`,
+    to: `      if (collapseSinceMs != null) {
+        collapseSinceMs = null; /* MUTANT */
+        if (recoverSinceMs == null) recoverSinceMs = nowMs;`,
+    why: 'Trickle traffic could park below the floor forever without ever accumulating the fire window.',
   },
   {
     id: 'iii. hour bucket gated on the GLOBAL view (bootstrap deadlock — a bug I wrote)',
@@ -91,6 +98,36 @@ const MUTANTS = [
     find: '      st.lastMs = -1; // sentinel: "no live sample yet"',
     to: '      st.lastMs = 0; /* MUTANT */',
     why: 'The message counter re-zeroes on restart; a carried-over lastMs computes garbage.',
+  },
+  {
+    id: 'ix. ★ the absolute recovery floor is dropped (the 19:35 false all-clear, resurrected)',
+    find: '      const genuineRecoveryRate = Math.max(this.cfg.floorFraction * cmpBaseline, this.cfg.minBaselineRate);',
+    to: '      const genuineRecoveryRate = this.cfg.floorFraction * cmpBaseline; /* MUTANT */',
+    why: 'A poisoned comparison baseline would again let a 95%-starved device announce "recovered".',
+  },
+  {
+    id: 'x. the latch clears on any non-collapsed sample (v1.66.0 control flow, resurrected)',
+    find: '      if (rate >= genuineRecoveryRate) {',
+    to: '      if (true) { /* MUTANT */',
+    why: 'Losing the ability to judge the device would again read as the device recovering.',
+  },
+  {
+    id: 'xi. ★ eligibility read off the comparison baseline again (the DISARM trapdoor)',
+    find: '    const eligible = peak >= this.cfg.minBaselineRate;',
+    to: '    const eligible = cmpBaseline >= this.cfg.minBaselineRate; /* MUTANT */',
+    why: 'A collapse could once more drive the very value that decides whether collapses are watched.',
+  },
+  {
+    id: 'xii. the eligibility mark never decays (one-way latch)',
+    find: '    const peak = Math.max(rate, prev.peak * Math.pow(0.5, dtMin / halfLifeMin));',
+    to: '    const peak = Math.max(rate, prev.peak); /* MUTANT */',
+    why: 'A device genuinely reconfigured to be quiet would be nagged about forever.',
+  },
+  {
+    id: 'xiii. ★ the learning guard reverts to the one-way trapdoor form',
+    find: '    const globalCollapsed = eligible && rate < this.cfg.floorFraction * prev.baseline;',
+    to: '    const globalCollapsed = prev.baseline >= this.cfg.minBaselineRate && rate < this.cfg.floorFraction * prev.baseline; /* MUTANT */',
+    why: 'Once the baseline slips under the floor the guard can never engage again — unguarded learning free-falls it to ~0.9.',
   },
 ];
 
