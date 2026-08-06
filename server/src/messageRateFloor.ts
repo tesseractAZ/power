@@ -81,6 +81,15 @@ export interface RateFloorConfig {
   baselineAlphaDown: number;
   /** Healthy samples an hour bucket needs before it outranks the global baseline. */
   minHourSamples: number;
+  /**
+   * Half-life of the ELIGIBILITY high-water mark (ms).
+   *
+   * Long on purpose: it must outlast any credible outage (so a collapse cannot
+   * disarm the detector) while still letting a device that is genuinely
+   * reconfigured to be quiet age out of monitoring within a couple of weeks.
+   * At 7 days an 8-hour blackout costs the mark ~3 %.
+   */
+  peakHalfLifeMs: number;
 }
 
 export const DEFAULT_RATE_FLOOR_CONFIG: RateFloorConfig = {
@@ -91,6 +100,7 @@ export const DEFAULT_RATE_FLOOR_CONFIG: RateFloorConfig = {
   baselineAlpha: 0.2,
   baselineAlphaDown: 0.02,
   minHourSamples: Number(process.env.MSG_RATE_FLOOR_MIN_HOUR_SAMPLES ?? 30),
+  peakHalfLifeMs: Number(process.env.MSG_RATE_FLOOR_PEAK_HALFLIFE_DAYS ?? 7) * 86_400_000,
 };
 
 export interface RateSampleResult {
@@ -112,6 +122,16 @@ export interface RateSampleResult {
    * without a single log line. The caller logs it.
    */
   eligibilityLost: boolean;
+  /**
+   * The collapse-proof high-water mark that decided eligibility, msg/min.
+   *
+   * Surfaced because NOTHING else could answer "is this device still being
+   * watched?": only `eligibilityLost` was ever logged, so silence was
+   * indistinguishable between "armed and healthy" and "disarmed hours ago".
+   * On 2026-08-05 three Cores sat starved at 1.6 msg/min for 8.5 h and the only
+   * way to tell was to diff the raw MQTT counters by hand.
+   */
+  eligibilityPeak: number;
 }
 
 interface SnState {
@@ -119,6 +139,23 @@ interface SnState {
   lastMs: number;
   /** Global EWMA — symmetric, tracks the diurnal swing, cold-start fallback only. */
   baseline: number;
+  /**
+   * Eligibility high-water mark (msg/min) — the fix for the DISARM TRAPDOOR.
+   *
+   * Eligibility used to be read off the comparison baseline, which is the very
+   * quantity a collapse drives down. Worse, the guard that protected the global
+   * baseline was itself gated on `baseline >= minBaselineRate`, so once the
+   * baseline fell under the floor the guard could never be true again: the
+   * estimator then learned unguarded from the collapse samples and free-fell
+   * (SHP2 reached ~0.9 msg/min from a healthy ~30). A detector that switches
+   * itself off by observing the thing it exists to observe.
+   *
+   * This mark only ever RISES to meet a live rate and otherwise decays on a
+   * half-life measured in days, so no outage can pull it below the floor. It is
+   * a fact about what the device has PROVEN it can do, not about what it is
+   * doing right now — which is exactly the question eligibility should ask.
+   */
+  peak: number;
   /** Per-hour-of-day EWMA, asymmetric (fast up / slow down). Index 0..23. */
   hourly: number[];
   /** Healthy-sample count per hour bucket; a bucket is trusted at minHourSamples. */
@@ -131,17 +168,18 @@ interface SnState {
 
 /** Serialisable form — the caller persists this so buckets survive the ~6 restarts/day. */
 export interface RateFloorPersisted {
-  [sn: string]: { baseline: number; hourly: number[]; hourlyN: number[] };
+  [sn: string]: { baseline: number; hourly: number[]; hourlyN: number[]; peak?: number };
 }
 
 const HOURS = 24;
 const zeros = (): number[] => new Array(HOURS).fill(0);
 
-function freshState(count: number, nowMs: number, baseline = 0): SnState {
+function freshState(count: number, nowMs: number, baseline = 0, peak = 0): SnState {
   return {
     lastCount: count,
     lastMs: nowMs,
     baseline,
+    peak,
     hourly: zeros(),
     hourlyN: zeros(),
     collapseSinceMs: null,
@@ -172,7 +210,14 @@ export class RateFloorTracker {
       const baseline = Number.isFinite(v.baseline) && v.baseline >= 0 ? v.baseline : 0;
       // lastCount/lastMs stay unset until the first live sample: the message counter
       // re-zeroes on restart, so any carried-over count would compute a bogus rate.
-      const st = freshState(0, 0, baseline);
+      // Back-compat: files written before the high-water mark existed have no
+      // `peak`. Seed it from the best thing already learned, so an upgrade does
+      // NOT silently start every device from zero and leave the fleet
+      // unmonitored until each one re-proves itself.
+      const peak = Number.isFinite(v.peak) && (v.peak as number) >= 0
+        ? (v.peak as number)
+        : Math.max(baseline, ...hourly);
+      const st = freshState(0, 0, baseline, peak);
       st.hourly = hourly;
       st.hourlyN = hourlyN;
       st.lastMs = -1; // sentinel: "no live sample yet"
@@ -184,7 +229,7 @@ export class RateFloorTracker {
   toJSON(): RateFloorPersisted {
     const out: RateFloorPersisted = {};
     for (const [sn, st] of this.bySn) {
-      out[sn] = { baseline: st.baseline, hourly: st.hourly.slice(), hourlyN: st.hourlyN.slice() };
+      out[sn] = { baseline: st.baseline, hourly: st.hourly.slice(), hourlyN: st.hourlyN.slice(), peak: st.peak };
     }
     return out;
   }
@@ -194,6 +239,7 @@ export class RateFloorTracker {
     const prev = this.bySn.get(sn);
     const idle = (baseline: number, usedHourBucket = false): RateSampleResult => ({
       rate: null, baseline, collapsed: false, recovered: false, collapsing: false, usedHourBucket, eligibilityLost: false,
+      eligibilityPeak: prev?.peak ?? 0,
     });
 
     if (!prev) {
@@ -227,7 +273,14 @@ export class RateFloorTracker {
     const usedHourBucket = prev.hourlyN[hour] >= this.cfg.minHourSamples && bucket > 0;
     const cmpBaseline = usedHourBucket ? bucket : prev.baseline;
 
-    const eligible = cmpBaseline >= this.cfg.minBaselineRate;
+    // THE HIGH-WATER MARK. Rises instantly to meet a live rate, decays on a
+    // multi-day half-life, so it answers "has this device PROVEN it is chatty?"
+    // rather than "is it chatty right now" — the second question is the one a
+    // collapse can answer with a lie.
+    const halfLifeMin = this.cfg.peakHalfLifeMs / 60_000;
+    const peak = Math.max(rate, prev.peak * Math.pow(0.5, dtMin / halfLifeMin));
+
+    const eligible = peak >= this.cfg.minBaselineRate;
     const isCollapsed = eligible && rate < this.cfg.floorFraction * cmpBaseline;
 
     // Learn only from samples that are NOT a collapse — but each estimator is gated on
@@ -245,7 +298,14 @@ export class RateFloorTracker {
     const hourlyN = prev.hourlyN.slice();
 
     // Global: symmetric — it must follow the diurnal swing while buckets are immature.
-    const globalCollapsed = prev.baseline >= this.cfg.minBaselineRate && rate < this.cfg.floorFraction * prev.baseline;
+    // ★ Gated on `eligible` (the high-water mark), NOT on `prev.baseline >=
+    //   minBaselineRate` as it was. That old form was a ONE-WAY TRAPDOOR: once
+    //   the baseline fell under the floor the condition could never be true
+    //   again, so this guard switched off and the estimator learned unguarded
+    //   from the collapse itself — free-falling to ~0.9 msg/min on a device
+    //   whose healthy rate is ~30. The guard was gated on the value the
+    //   collapse was destroying.
+    const globalCollapsed = eligible && rate < this.cfg.floorFraction * prev.baseline;
     if (!globalCollapsed) {
       baseline = prev.baseline === 0 ? rate : this.cfg.baselineAlpha * rate + (1 - this.cfg.baselineAlpha) * prev.baseline;
     }
@@ -270,27 +330,58 @@ export class RateFloorTracker {
     let collapsed = false;
     let recovered = false;
 
-    if (isCollapsed) {
+    if (fired) {
+      // ── THE LATCH. A fired collapse clears ONLY on genuinely healthy traffic.
+      //
+      // v1.66.0 cleared it whenever `isCollapsed` went false — but `isCollapsed`
+      // can go false for reasons that have nothing to do with the device getting
+      // better: an immature hour bucket learns the starved rate itself, matures
+      // low, and the comparison threshold collapses underneath the alarm. On
+      // 2026-08-04 19:35 that path announced "message rate recovered (2.0
+      // msg/min)" on a Core whose healthy rate is ~40-60 — a false all-clear at
+      // 95 % starvation, then again on the SHP2 at 1.0 msg/min against ~30.
+      //
+      // Losing the ability to JUDGE a device must never read as the device
+      // RECOVERING. So clearing demands an absolute bar as well as the relative
+      // one: the rate must beat both `floorFraction × cmpBaseline` (the normal
+      // relative test) and `minBaselineRate` (a rate that would qualify a device
+      // for monitoring in the first place — if it couldn't get monitored at this
+      // rate, it hasn't recovered at it either), dwelled for the usual window.
+      const genuineRecoveryRate = Math.max(this.cfg.floorFraction * cmpBaseline, this.cfg.minBaselineRate);
+      if (rate >= genuineRecoveryRate) {
+        if (recoverSinceMs == null) recoverSinceMs = nowMs;
+        if (nowMs - recoverSinceMs >= this.cfg.recoverMs) {
+          recovered = true;
+          fired = false;
+          collapseSinceMs = null;
+          recoverSinceMs = null;
+        }
+      } else {
+        // Still starved — including the poisoned-bucket case above and the
+        // eligibility-lapse case. The alarm stays latched; a burst no longer
+        // buys silence (the 08-04 05:06 lesson, kept).
+        recoverSinceMs = null;
+      }
+    } else if (isCollapsed) {
       recoverSinceMs = null;
       if (collapseSinceMs == null) collapseSinceMs = prev.lastMs; // count from the last healthy sample
-      if (!fired && nowMs - collapseSinceMs >= this.cfg.collapseMs) {
+      if (nowMs - collapseSinceMs >= this.cfg.collapseMs) {
         fired = true;
         collapsed = true;
       }
     } else {
-      // Dwell BOTH edges. A single healthy sample no longer resets the pre-fire timer
-      // (the "5 messages every 19 min" evasion) nor clears a fired collapse (the 08-04
-      // 05:06 burst, which bought 27 min of silence mid-episode).
-      if (recoverSinceMs == null) recoverSinceMs = nowMs;
-      if (nowMs - recoverSinceMs >= this.cfg.recoverMs) {
-        if (fired) recovered = true;
-        fired = false;
-        collapseSinceMs = null;
-        recoverSinceMs = null;
+      // Pre-fire: dwell before forgiving a pending collapse timer, so a single
+      // healthy sample cannot reset it (the "5 messages every 19 min" evasion).
+      if (collapseSinceMs != null) {
+        if (recoverSinceMs == null) recoverSinceMs = nowMs;
+        if (nowMs - recoverSinceMs >= this.cfg.recoverMs) {
+          collapseSinceMs = null;
+          recoverSinceMs = null;
+        }
       }
     }
 
-    this.bySn.set(sn, { lastCount: cumulativeCount, lastMs: nowMs, baseline, hourly, hourlyN, collapseSinceMs, recoverSinceMs, fired, wasEligible: eligible });
+    this.bySn.set(sn, { lastCount: cumulativeCount, lastMs: nowMs, baseline, peak, hourly, hourlyN, collapseSinceMs, recoverSinceMs, fired, wasEligible: eligible });
     return {
       rate,
       baseline: cmpBaseline,
@@ -299,6 +390,7 @@ export class RateFloorTracker {
       collapsing: fired,
       usedHourBucket,
       eligibilityLost: prev.wasEligible && !eligible,
+      eligibilityPeak: peak,
     };
   }
 

@@ -1,3 +1,53 @@
+## v1.73.0 — a collapse can no longer disarm the collapse detector
+
+`msg-rate-floor` is the only detector that catches a device REPORTING but STARVED —
+the failure that defeats both the staleness alarm and the recorder-gap detector,
+because the device keeps `lastUpdated` fresh while sending almost nothing.
+
+It had a trapdoor, and on 2026-08-05 it swallowed the whole fleet. Cores 1/2/3 were
+measured at **1.6 msg/min against ~43/51/46 baselines — 3-4 % of normal — for 8.5+
+hours**, and nothing fired. The detector had logged `NO LONGER MONITORED` for each of
+them at 01:02, 01:04 and 01:06, then gone silent.
+
+**The mechanism was one line.** Eligibility was read off the comparison baseline, and
+the guard protecting the global baseline was itself gated on it:
+
+    const globalCollapsed = prev.baseline >= minBaselineRate && rate < floorFraction * prev.baseline;
+    if (!globalCollapsed) { baseline = alpha*rate + (1-alpha)*prev.baseline; }
+
+Once `prev.baseline` fell under the floor, `globalCollapsed` could never be true again.
+The guard switched off, the estimator learned unguarded from the collapse samples, and
+the baseline free-fell — the SHP2 reached ~0.9 msg/min from a healthy ~30. The
+protection was gated on the value the collapse was destroying: observing the fault is
+what disabled the alarm for the next one.
+
+**The fix separates "has this device PROVEN it is chatty?" from "is it chatty right
+now?"** — the second question is the one a collapse can answer with a lie. Eligibility
+now comes from a high-water mark that only rises to meet a live rate and otherwise
+decays on a 7-day half-life, so an 8-hour blackout costs it ~3 % and cannot push it
+under the floor. The same mark gates the baseline guard, which closes the free-fall.
+
+It is deliberately NOT a latch: a device genuinely reconfigured to be quiet still ages
+out of monitoring in about eleven days, so the detector cannot nag forever about a
+change that was intentional.
+
+Two things that would have made this cheaper to find, both fixed:
+
+- `eligibilityPeak` is surfaced on every sample and printed with each collapse. There
+  was previously NO way to ask "is this device still being watched?" — only the
+  `eligibilityLost` edge was logged, so silence was identical for "armed and healthy"
+  and "disarmed six hours ago". Answering it required diffing raw MQTT counters by hand.
+- `hydrate` seeds the mark from already-learned state. Defaulting it to zero would have
+  left every device ineligible until it re-proved itself — a fleet-wide blind spot
+  caused by shipping the fix for a fleet-wide blind spot.
+
+Telemetry was restored operationally by restarting the add-on: Cores went 1.6 ->
+62.7 / 64.0 / 60.7 msg/min (38-40x) while the healthy SHP2 held at 29.6 -> 30.7. That
+control is what proves the fault was the add-on's cloud session, not the devices.
+
+1895 tests. The Core scenario is pinned as a test: 8.5 h at 1.6 msg/min must keep the
+device eligible AND fire the collapse.
+
 ## v1.72.0 — dependency sweep: every open security alert closed
 
 Six open Dependabot PRs, all 11-13 commits behind main, four of them security. Merging
