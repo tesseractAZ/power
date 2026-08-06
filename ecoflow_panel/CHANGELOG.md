@@ -1,3 +1,25 @@
+## v1.74.0 — the austerity pre-arm point is now yours to set
+
+On 2026-08-05 at 19:24 the lighting posture went RED at **11% SoC with the grid up**,
+dimmed the house for 19 minutes, and restored. Working as designed — but the arm point
+was hard-coded. The chain: the floor-hardening slack (+1.5% above the 10% reserve)
+declared the pool "at the floor" at 11.5%; the pool was still discharging with no
+measured grid flow (the SHP2 had not yet transferred), so the resolver refused to
+trust the declared grid — deliberately, because a wedged "Grid OK" reading must not
+mute a real at-floor outage — and the depletion-red fired.
+
+### New option: `GRID_FLOOR_SLACK_PCT` (default 1.5)
+
+Percentage points above the reserve at which floor-hardening (and therefore austerity
+pre-arm) engages. At the observed evening drain (~7%/h) each 1 point is ~9 minutes of
+earlier warning. `0.5` trims most grid-up dim events; `0` arms only at the reserve
+itself; clamped 0-10; blank keeps 1.5. Read per tick, so a config change applies on
+restart without a rebuild. The CRITICAL floor alarm's own +1.5% coherence check is
+untouched — this tunes the lighting/backstop pre-arm only.
+
+Suite 1900 tests (blank-option, garbage, and clamp edges pinned — `Number("")===0`
+would otherwise have silently turned a blank option into slack 0).
+
 ## v1.73.1 — proof and polish for v1.73.0
 
 The recovery-latch code itself shipped inside v1.73.0 (two work threads shared one
