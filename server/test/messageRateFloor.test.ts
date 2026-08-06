@@ -283,3 +283,90 @@ test('hydrate tolerates corrupt/absent state (fail-open, cold start)', () => {
   assert.equal(t.baselineOf('bad'), 0, 'garbage does not become a baseline');
   assert.equal(t.hourBaselineOf('bad', 3), 0, 'malformed buckets reset to zero');
 });
+
+/* ─── v1.73.0 — the FALSE "recovered" latch (the 08-04 19:35 incident) ────── */
+
+test('THE 19:35 INCIDENT: a poisoned hour bucket must not clear the latch as "recovered"', () => {
+  // How the false all-clear actually happened: the collapse spanned an hour whose
+  // bucket was immature. The bucket learned the STARVED rate, matured low, and the
+  // comparison threshold collapsed underneath the alarm — isCollapsed went false
+  // with the device still 95 % starved, and v1.66.0 routed that through the
+  // recovery branch: "message rate recovered (2.0 msg/min)" on a ~40 msg/min Core.
+  const cfg: RateFloorConfig = { ...CFG, minHourSamples: 3 }; // buckets mature fast
+  const t = new RateFloorTracker(cfg);
+  let now = at(18, 0);
+  let count = 0;
+  // Healthy hour 18: baseline + peak learn ~40.
+  for (let i = 0; i < 10; i++) { now += MIN; count += 40; t.sample('Core 1', count, now); }
+
+  // Hour 19 (immature bucket): collapse to ~2 msg/min for 70 minutes.
+  now = at(19, 0);
+  let sawRecovered = false;
+  let fired = false;
+  for (let i = 0; i < 70; i++) {
+    const r = t.sample('Core 1', (count += 2), (now += MIN));
+    if (r.collapsed) fired = true;
+    if (r.recovered) sawRecovered = true;
+    if (fired) assert.equal(r.collapsing, true, `latch must hold at minute ${i} (rate ~2 vs healthy ~40)`);
+  }
+  assert.equal(fired, true, 'the collapse fires');
+  assert.equal(sawRecovered, false, '★ NO false "recovered" while starved — the 19:35 bug');
+
+  // Real traffic returns → genuine recovery, once, after the dwell.
+  let recoveredAt = -1;
+  for (let i = 0; i < 10; i++) {
+    const r = t.sample('Core 1', (count += 40), (now += MIN));
+    if (r.recovered) { recoveredAt = i; break; }
+  }
+  assert.ok(recoveredAt >= 4, `recovers only after the dwell (${recoveredAt})`);
+});
+
+test('a rate below the eligibility floor is NEVER a recovery, whatever the baseline says', () => {
+  // If a device could not qualify for monitoring at this rate, it has not
+  // recovered at it either. 9 msg/min on a ~30 msg/min device stays latched even
+  // though it beats floorFraction × baseline.
+  const t = new RateFloorTracker(CFG);
+  let now = 0, count = 0;
+  for (let i = 0; i < 10; i++) { now += MIN; count += 30; t.sample('SHP2', count, now); }
+  for (let i = 0; i < 25; i++) t.sample('SHP2', (count += 0), (now += MIN)); // full collapse, fires
+  for (let i = 0; i < 30; i++) {
+    const r = t.sample('SHP2', (count += 9), (now += MIN)); // 9 < minBaselineRate 10
+    assert.equal(r.recovered, false, `9 msg/min must not clear the latch (minute ${i})`);
+    assert.equal(r.collapsing, true);
+  }
+  // 12 msg/min IS an absolutely healthy rate → dwelled genuine recovery.
+  let recovered = false;
+  for (let i = 0; i < 10; i++) recovered ||= t.sample('SHP2', (count += 12), (now += MIN)).recovered;
+  assert.equal(recovered, true);
+});
+
+test('one healthy burst does not clear the latch — the recovery dwell survives the rewrite', () => {
+  const t = new RateFloorTracker(CFG);
+  let now = 0, count = 0;
+  for (let i = 0; i < 10; i++) { now += MIN; count += 30; t.sample('SHP2', count, now); }
+  for (let i = 0; i < 25; i++) t.sample('SHP2', (count += 0), (now += MIN));
+  // Single healthy sample (the 08-04 05:06 burst shape)...
+  assert.equal(t.sample('SHP2', (count += 30), (now += MIN)).recovered, false, 'burst alone is not recovery');
+  // ...then starved again: the dwell clock must reset, not carry.
+  for (let i = 0; i < 20; i++) {
+    const r = t.sample('SHP2', (count += 1), (now += MIN));
+    assert.equal(r.recovered, false);
+    assert.equal(r.collapsing, true, 'still latched after the burst');
+  }
+});
+
+test('a baseline ALREADY under the floor: the guard holds and the collapse still fires', () => {
+  // The trapdoor\'s worst case: baseline 8 (under minBaselineRate 10) but the
+  // device has PROVEN ~40. The old guard (`prev.baseline >= minBaselineRate`)
+  // could never engage here, so learning ran unguarded and the baseline chased
+  // the collapse to ~1 — and eligibility read off the baseline meant the
+  // collapse could never fire at all. With peak-carried eligibility both hold.
+  const t = new RateFloorTracker(CFG);
+  t.hydrate({ core: { baseline: 8, hourly: new Array(24).fill(0), hourlyN: new Array(24).fill(0), peak: 40 } });
+  let now = 1_000_000, count = 0;
+  t.sample('core', count, now); // adopt the counter
+  let fired = false;
+  for (let i = 0; i < 30; i++) fired ||= t.sample('core', (count += 1), (now += MIN)).collapsed;
+  assert.equal(fired, true, 'peak carries eligibility — the collapse fires even at baseline 8');
+  assert.ok(t.baselineOf('core') >= 7.5, `guard held the baseline at ${t.baselineOf('core').toFixed(1)}, no free-fall`);
+});

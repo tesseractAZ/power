@@ -48,6 +48,38 @@ control is what proves the fault was the add-on's cloud session, not the devices
 1895 tests. The Core scenario is pinned as a test: 8.5 h at 1.6 msg/min must keep the
 device eligible AND fire the collapse.
 
+### The latch: losing the ability to judge is not recovery
+
+The disarm trapdoor had a twin on the CLEAR side, observed live on 2026-08-04:
+
+```
+18:44  Core 1 collapsed to 2.00 msg/min (baseline ~42)   <- correct detection
+19:35  Core 1 message rate recovered (2.0 msg/min)       <- FALSE all-clear, 95% starved
+20:28  Core 1 message rate recovered (21.0 msg/min)      <- the real recovery, 53 min later
+```
+
+A fired collapse used to clear whenever `isCollapsed` went false — but that can happen
+for reasons unrelated to the device improving: an immature hour bucket learns the
+starved rate itself, matures low, and the comparison threshold collapses underneath
+the alarm. Clearing now demands genuinely healthy traffic: the rate must beat BOTH the
+relative test and `minBaselineRate` absolute — if the device could not QUALIFY for
+monitoring at this rate, it has not RECOVERED at it — dwelled as before, with both
+dwell edges (the 05:06 burst lesson and the 5-msgs-per-19-min evasion) preserved.
+
+### Also
+
+- Per-Core attribution in the peak-grid-draw alert read `d.name`, which does not exist
+  on the snapshot (`deviceName` does) — the alert would have named Cores by raw serial.
+  Now "Core 1 (7.2 kW)".
+
+### Proof
+
+1899 tests. `scripts/mutate-rate-floor.mjs` extended **8 -> 13 anchor-asserted
+mutants**: the resurrected 19:35 false all-clear, the latch clearing on any
+non-collapsed sample, eligibility read off the comparison baseline again, a
+never-decaying mark, and the one-way guard form — plus a guard-below-the-floor killer
+test (baseline 8, proven 40: the guard must hold AND the collapse must still fire).
+
 ## v1.72.0 — dependency sweep: every open security alert closed
 
 Six open Dependabot PRs, all 11-13 commits behind main, four of them security. Merging
