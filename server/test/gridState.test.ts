@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  floorSlackPct,
   resolveGridBackstop,
   computeGridImportWatts,
   computeHomeGridWatts,
@@ -354,4 +355,30 @@ test('NOT at floor + declared + no flow → STILL backstopping (pre-floor grid-a
   const g = resolveGridBackstop({ devices, ...NO_DECL, gridAvailableFallback: true, atReserveFloor: false });
   assert.equal(g.declared, true);
   assert.equal(g.backstopping, true, 'away from the floor a flow-less declaration stays a valid backstop');
+});
+
+/* ─── v1.74.0 — configurable floor-hardening slack ────────────────────────── */
+
+test('floorSlackPct: default, override, garbage, clamp', () => {
+  const prev = process.env.GRID_FLOOR_SLACK_PCT;
+  try {
+    delete process.env.GRID_FLOOR_SLACK_PCT;
+    assert.equal(floorSlackPct(), 1.5, 'absent -> historical default');
+    process.env.GRID_FLOOR_SLACK_PCT = '';
+    assert.equal(floorSlackPct(), 1.5, 'blank option -> default, NOT Number("")===0');
+    process.env.GRID_FLOOR_SLACK_PCT = 'null';
+    assert.equal(floorSlackPct(), 1.5, 'bashio null literal -> default');
+    process.env.GRID_FLOOR_SLACK_PCT = '0.5';
+    assert.equal(floorSlackPct(), 0.5, 'operator override');
+    process.env.GRID_FLOOR_SLACK_PCT = '0';
+    assert.equal(floorSlackPct(), 0, 'zero = distrust only AT the floor');
+    process.env.GRID_FLOOR_SLACK_PCT = '25';
+    assert.equal(floorSlackPct(), 10, 'clamped high — must not arm austerity in normal cycling');
+    process.env.GRID_FLOOR_SLACK_PCT = '-3';
+    assert.equal(floorSlackPct(), 0, 'clamped low');
+    process.env.GRID_FLOOR_SLACK_PCT = 'banana';
+    assert.equal(floorSlackPct(), 1.5, 'garbage -> default, never NaN');
+  } finally {
+    if (prev === undefined) delete process.env.GRID_FLOOR_SLACK_PCT; else process.env.GRID_FLOOR_SLACK_PCT = prev;
+  }
 });

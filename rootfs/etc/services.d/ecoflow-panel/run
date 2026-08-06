@@ -140,6 +140,7 @@ if bashio::config.true 'BROADCAST_ENABLED'; then
 fi
 # v0.15.2 — off-grid honesty + intelligent load-shedding ADVISOR (read + advise;
 # HA automations actuate). GRID_AVAILABLE must be false for an islanded site.
+export GRID_FLOOR_SLACK_PCT="$(bashio::config 'GRID_FLOOR_SLACK_PCT')"
 if bashio::config.true 'GRID_AVAILABLE'; then
   export GRID_AVAILABLE=true
 else
