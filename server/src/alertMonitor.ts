@@ -606,6 +606,16 @@ export function orphanedNotifiedIds(p: {
   const drop: string[] = [];
   for (const [id, rec] of p.persisted) {
     if (p.currentIds.has(id) || p.trackedIds.has(id)) continue; // still active — not an orphan
+    // v1.75.0 — a msg-rate-floor orphan is DROPPED, never resolve-pushed. The
+    // collapse detector deliberately does not resurrect an in-flight collapse
+    // across a restart, so during a live starvation the id is neither firing nor
+    // tracked in the boot window — exactly this branch. On 08-05 two restarts
+    // each emitted "Resolved: barely reporting" while the Cores were still at
+    // 2-6 msg/min. Message rates are unknowable at boot, so there is no positive
+    // evidence to resolve ON; drop silently. A persisting starvation re-fires
+    // within its dwell and replaces the stale card; a real recovery costs only
+    // that one card lingering until then.
+    if (id.startsWith('msg-rate-floor-')) { drop.push(id); continue; }
     const owed = shouldSendResolve(
       { pushSent: rec.sent, notifiedSeverity: rec.sev, alert: { id, severity: rec.sev ?? 'warning' } },
       p.notifyResolved,
@@ -631,6 +641,60 @@ export function shouldSendResolve(
     notifyResolved &&
     qualifies(t.notifiedSeverity ?? t.alert.severity, minSeverity)
   );
+}
+
+/* ─── v1.75.0 — falling-edge EVIDENCE gate ─────────────────────────────────────
+ * On 2026-08-08 13:11-13:22 an EcoFlow cloud presence-flap storm plus an MQTT
+ * keepalive death made device projections unevaluable for minutes at a time. The
+ * falling-edge loop read "alert no longer computed" as "condition recovered" and
+ * emitted false "Resolved:" pushes for the STANDING Core 3 err533 battery-
+ * protection critical — then re-raised it when the flap passed. 12 pushes of
+ * churn, and worse: an operator taught that "Resolved: Battery protection fault"
+ * can be a lie. An alert may only resolve on POSITIVE evidence — the source
+ * device present with fresh telemetry showing the condition gone. Absence of
+ * data is absence of data. */
+
+/** How stale a device's telemetry may be before its alerts become UNEVALUABLE
+ *  (falling edges freeze). Matches the telemetry-blind staleMs default. */
+export const DEVICE_EVIDENCE_STALE_MS = Number(process.env.ALERT_EVIDENCE_STALE_MS ?? 300_000);
+
+/** The device SN an alert id embeds, or null. Ids carry their subject SN by
+ *  construction (dpu-err-<SN>, vdiff-crit-<SN>-1, soc-low-<SN>-4, ...); matching
+ *  against the ACTUAL roster is exact — no pattern list to drift. */
+export function alertSourceSn(id: string, deviceSns: readonly string[]): string | null {
+  for (const sn of deviceSns) if (sn.length >= 8 && id.includes(sn)) return sn;
+  return null;
+}
+
+/** Families whose SUBJECT is absence/starvation itself. Gating their resolve on
+ *  fresh evidence would hold them through the very condition they describe —
+ *  their clear is already computed from the signal that would gate here. */
+export function isEvidenceExemptFamily(id: string): boolean {
+  return id.startsWith('offline-') || id.startsWith('msg-rate-floor-') || id.startsWith('zombie-');
+}
+
+export function deviceEvidenceFresh(
+  dev: { lastUpdated?: number } | undefined,
+  nowMs: number,
+  staleMs: number = DEVICE_EVIDENCE_STALE_MS,
+): boolean {
+  return dev != null && Number.isFinite(dev.lastUpdated) && nowMs - (dev.lastUpdated as number) < staleMs;
+}
+
+/** The whole falling-edge freeze decision, pure. True = the alert is UNEVALUABLE
+ *  right now (source device absent/stale) and its falling edge must not advance.
+ *  An alert with no source SN (system alerts: telemetry-blind, peak-grid-draw)
+ *  is never frozen — it has no device whose absence could fake its recovery. */
+export function fallingEdgeFrozenByEvidence(p: {
+  id: string;
+  deviceSns: readonly string[];
+  devices: Record<string, { lastUpdated?: number }>;
+  nowMs: number;
+}): boolean {
+  const sn = alertSourceSn(p.id, p.deviceSns);
+  if (sn == null) return false;
+  if (isEvidenceExemptFamily(p.id)) return false;
+  return !deviceEvidenceFresh(p.devices[sn], p.nowMs);
 }
 
 /** v0.76.0 — has this alert ESCALATED above the severity it was last ACTED ON
@@ -903,6 +967,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const clearedLog: ClearedAlert[] = [];
   const telemetry = new Map<string, AlertActionStats>();
   const quietQueue: Alert[] = [];
+  // v1.75.0 — alerts that were HELD for the digest and then self-resolved
+  // before it fired. The 08-06 5h15m tri-Core starvation queued at 23:56, cleared
+  // at 05:11, and the 06:00 digest said "nothing to send" — a five-hour event the
+  // operator never saw. Visibility must survive self-resolution; dedup must not
+  // (these entries are informational and stamp NO notified-record, preserving the
+  // v0.97.0 re-fire-suppression fix this section coexists with).
+  const overnightResolved = new Map<string, { raisedAt: number; clearedAt: number }>();
   let currentIncidents: Incident[] = [];
   let sentSinceStart = 0;
   let firstRun = true;
@@ -1223,6 +1294,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           `"ha" (HA persistent notification, zero setup), ntfy, pushover, or webhook to receive them. Dropping queue.`,
       );
       quietQueue.length = 0;
+      overnightResolved.clear();
       return true;
     }
     // v0.97.0 (re-audit #3) — only digest alerts that are STILL legitimately held.
@@ -1234,9 +1306,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // day (alreadyNotified=true, no escalation → dispatched as 'none', never pushed).
     // Filter to entries whose tracked state is still queued+active; drop the rest.
     const pending = quietQueue.filter((a) => tracked.get(a.id)?.queued === true);
-    if (pending.length === 0) {
-      log(`notify: morning digest — all ${quietQueue.length} queued alert(s) self-resolved overnight; nothing to send`);
+    // v1.75.0 — the self-resolved are REPORTED, not dropped (see overnightResolved).
+    const seenResolved = new Set<string>();
+    const resolvedList = quietQueue.filter((a) => {
+      const r = overnightResolved.get(a.id);
+      if (!r || seenResolved.has(a.id)) return false;
+      seenResolved.add(a.id);
+      return true;
+    });
+    if (pending.length === 0 && resolvedList.length === 0) {
+      log(`notify: morning digest — ${quietQueue.length} queued alert(s), none pending or resolved-trackable; nothing to send`);
       quietQueue.length = 0;
+      overnightResolved.clear();
       return true;
     }
     // v1.3.0 (audit rank 6) — order the digest by SEVERITY, most severe first. `pending`
@@ -1258,10 +1339,29 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       const label = priorityMeta(notifyBracketPriority(a, a.severity)).label;
       return `• [${label}] ${a.title}${loc ? ` (${loc})` : ''}`;
     });
+    // v1.75.0 — the informational resolved-overnight section.
+    const fmtClock = (ms: number) =>
+      new Date(ms).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const fmtDur = (ms: number) => {
+      const m = Math.round(ms / 60_000);
+      return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m` : `${m}m`;
+    };
+    const resolvedLines = [...resolvedList]
+      .sort((a, b) => sevRank[a.severity] - sevRank[b.severity])
+      .map((a) => {
+        const r = overnightResolved.get(a.id)!;
+        const loc = notifyLocator(a);
+        const label = priorityMeta(notifyBracketPriority(a, a.severity)).label;
+        return `• [${label}] ${a.title}${loc ? ` (${loc})` : ''} — fired ${fmtClock(r.raisedAt)}, self-resolved ${fmtClock(r.clearedAt)} (${fmtDur(r.clearedAt - r.raisedAt)})`;
+      });
     try {
       await sendNotification(cfg, {
-        title: `EcoFlow · Morning digest (${pending.length} alert${pending.length === 1 ? '' : 's'})`,
-        body: `Held during overnight quiet hours:\n\n${lines.join('\n')}\n\n${
+        title: `EcoFlow · Morning digest (${pending.length} alert${pending.length === 1 ? '' : 's'}${resolvedLines.length ? ` + ${resolvedLines.length} resolved overnight` : ''})`,
+        body: `Held during overnight quiet hours:\n\n${lines.length ? lines.join('\n') : '(none still active)'}\n${
+          resolvedLines.length
+            ? `\nFired overnight and self-resolved (informational):\n\n${resolvedLines.join('\n')}\n`
+            : ''
+        }\n${
           CRITICAL_BREAKS_QUIET
             ? '(Critical alerts break through immediately; the items above are warning/info.)'
             : '(Every tier — including critical — was held overnight. Set CRITICAL_BREAKS_QUIET_HOURS=true to be woken for critical emergencies.)'
@@ -1299,6 +1399,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       }
       persistNotified();
       quietQueue.length = 0;
+      overnightResolved.clear();
       return true;
     } catch (e: any) {
       // v0.80.0 — the queue is retained (cleared only in the success path) and
@@ -1726,8 +1827,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     }
 
     // Falling edges — condition cleared
+    const deviceSnRoster = Object.keys(snap.devices);
     for (const [id, t] of [...tracked.entries()]) {
       if (currentIds.has(id)) continue;
+      // v1.75.0 — EVIDENCE gate: an alert vanishing because its source device
+      // went absent/stale is UNEVALUABLE, not recovered. See the pure
+      // fallingEdgeFrozenByEvidence + helpers above for the 08-08 flap-storm
+      // rationale. Freezing also resets any resolve-dwell already accrued —
+      // blindness must not count toward a clear.
+      if (fallingEdgeFrozenByEvidence({ id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now })) {
+        t.clearedSince = undefined;
+        continue;
+      }
       // v0.15.21 — learned/analytics alerts take ~1–2 min to warm after a
       // boot; absence in the early ticks is warm-up, not recovery. Hold the
       // falling edge through the grace window (the entry stays tracked and
@@ -1838,6 +1949,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // v0.9.59 — records shortClear / longActive events into the family rollup
       // and appends them to the persisted telemetry log.
       // v0.13.2 — moved out of the debounce-gated block (see above).
+      // v1.75.0 — a digest-held alert that self-resolves must stay VISIBLE in the
+      // morning digest (with its true duration), not silently vanish.
+      if (t.queued) overnightResolved.set(id, { raisedAt: t.firstSeen, clearedAt: now });
       recordClear(t.alert, duration, now);
       tracked.delete(id);
       // (v0.15.21's notified-state forget moved ABOVE the resolve attempt in
