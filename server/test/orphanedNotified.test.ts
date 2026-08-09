@@ -35,10 +35,22 @@ const sweep = (p: {
   });
 
 test('an alert that cleared across a restart is RESOLVED, retiring its stuck HA card', () => {
-  const persisted = new Map([['msg-rate-floor-SHP2', rec({ sev: 'warning' })]]);
+  // v1.75.0 — the exemplar changed from msg-rate-floor-SHP2 to a soc-low id: the
+  // starvation family is now ALWAYS dropped at boot (rates are unknowable in the
+  // boot window, and on 08-05 two restarts each emitted "Resolved: barely
+  // reporting" while the Cores were still starved at 2-6 msg/min). The general
+  // cleared-across-restart contract this test pins is unchanged.
+  const persisted = new Map([['soc-low-SHP2-1', rec({ sev: 'warning' })]]);
   const { resolve, drop } = sweep({ persisted }); // not firing, not tracked
-  assert.deepEqual(resolve, ['msg-rate-floor-SHP2']);
+  assert.deepEqual(resolve, ['soc-low-SHP2-1']);
   assert.deepEqual(drop, []);
+});
+
+test('v1.75.0 — a msg-rate-floor orphan is DROPPED at boot, never resolve-pushed', () => {
+  const persisted = new Map([['msg-rate-floor-SHP2', rec({ sev: 'warning' })]]);
+  const { resolve, drop } = sweep({ persisted });
+  assert.deepEqual(resolve, []);
+  assert.deepEqual(drop, ['msg-rate-floor-SHP2']);
 });
 
 test('a STILL-ACTIVE alert is left completely alone', () => {

@@ -1,3 +1,47 @@
+## v1.75.0 — an alert may only resolve on POSITIVE evidence
+
+Three delivery-integrity fixes from the 90-hour review, all in the alert monitor.
+
+### 1. The falling-edge evidence gate (the 08-08 flap storm)
+
+On 2026-08-08 13:11-13:22 an EcoFlow cloud presence flap made device projections
+unevaluable, and the monitor read "alert no longer computed" as "condition
+recovered" — emitting false **"Resolved:"** pushes for the STANDING Core 3 err533
+battery-protection critical, then re-raising it. 12 pushes of churn, and an
+operator taught that a resolve can be a lie.
+
+Now: an alert whose id names a source device resolves only when that device is
+present with fresh telemetry (`ALERT_EVIDENCE_STALE_MS`, default 5 min — the
+telemetry-blind bound). A device going absent/stale FREEZES its alerts' falling
+edges and resets any accrued resolve-dwell: unevaluable is not recovered.
+Families whose subject IS absence (`offline-*`, `msg-rate-floor-*`, `zombie-*`)
+are exempt — their clear is computed from the very signal that gates here — and
+system alerts with no source device are untouched.
+
+### 2. Starvation alerts never get a boot-time "Resolved:"
+
+The orphan sweep retired persisted notify-records at boot with a "Resolved:" push
+when owed. For msg-rate-floor that fired while the Cores were still starved (twice
+on 08-05) — rates are unknowable in the boot window, so there is no positive
+evidence to resolve on. Starvation orphans are now silently dropped; a persisting
+collapse re-fires within its dwell and replaces the stale card.
+
+### 3. The digest reports what self-resolved overnight
+
+The 08-06 5h15m tri-Core starvation queued at 23:56, self-resolved at 05:11, and
+the 06:00 digest said "nothing to send" — a five-hour event the operator never
+saw. Digest-held alerts that self-resolve are now reported in an informational
+section with fire time, clear time, and duration ("fired 23:56, self-resolved
+05:11 (5h15m)"), while stamping NO notified-record — preserving the v0.97.0
+re-fire-suppression fix this section coexists with.
+
+### Proof
+
+`scripts/mutate-resolve-evidence.mjs` — 7/7 mutants killed, including the three
+review-invisible ones: the gate silently becoming a no-op, the exempt list being
+"safely" emptied (which would freeze starvation resolves on their own gating
+signal), and boot resolve-pushes returning for starvation orphans. 1910 tests.
+
 ## v1.74.0 — the austerity pre-arm point is now yours to set
 
 On 2026-08-05 at 19:24 the lighting posture went RED at **11% SoC with the grid up**,
