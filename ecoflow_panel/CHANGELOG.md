@@ -1,3 +1,33 @@
+## v1.76.0 — cloud-session self-heal + dependency sweep
+
+### Session self-heal (`sessionSelfHeal.ts`)
+
+The 90.5h starvation record: episodes of 43m, 69m, 5h15m, 11h47m and ~9h, with
+recovery timing a lottery. The 11h47m night proved the transport CAN recover
+without a restart — but nothing forces it to. Now something does.
+
+When **>=2 devices** sit in a fired rate-collapse for **20 minutes**, the add-on
+rebuilds its own MQTT session: stop, certificate re-fetch, fresh connect. Guards,
+each mutation-proven load-bearing: multi-device threshold (one flaky device can
+never trigger it), the 20-min dwell (transients never heal), a **60-min cooldown**
+and a **6/day cap** (the 08-08 flap storm can never be reproduced by the healer
+itself), and post-heal onset reset (a rebuild gets time to prove itself).
+
+Read-path only: REST polling — the alarm data path — is untouched, and a failed
+rebuild falls back to the existing startMqttWithRetry backoff. Worst case equals
+the status quo; best case turns a 9-hour starvation into a ~20-minute one.
+Tuning via env: SELF_HEAL_MIN_DEVICES / SELF_HEAL_AFTER_MS / SELF_HEAL_COOLDOWN_MS
+/ SELF_HEAL_MAX_PER_DAY.
+
+Proof: `scripts/mutate-session-self-heal.mjs` — 7/7 mutants killed.
+
+### Dependency sweep (closes #304, #305, #306, #307)
+
+fastify 5.11.2, @fastify/static 10.1.3, ws 8.21.2, tsx 4.23.11, vite 8.2.1,
+postcss 8.5.26, codeql-action v4.37.6 (SHA-pinned). No security advisories this
+round; npm audit clean in both workspaces; full suite (1916) run once against
+the combined tree.
+
 ## v1.75.0 — an alert may only resolve on POSITIVE evidence
 
 Three delivery-integrity fixes from the 90-hour review, all in the alert monitor.
