@@ -116,6 +116,7 @@ import {
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker, type RateFloorPersisted } from './messageRateFloor.js';
+import { evaluateSelfHeal, freshSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
@@ -2353,6 +2354,8 @@ if (loadShedAdvisoryEnabled) {
 // it (v0.93.0 will promote this to a push/audible alert once wired into the alert
 // pipeline). Purely observational for now — cannot suppress or alter any existing alarm.
 const rateFloor = new RateFloorTracker();
+// v1.76.0 — cloud-session self-heal state (see sessionSelfHeal.ts).
+const selfHealState = freshSelfHealState();
 
 // v1.66.0 — persist the LEARNED hour-of-day baselines. The detector's comparison
 // baseline is now per-hour-of-day (see messageRateFloor.ts), and a bucket needs
@@ -2421,6 +2424,25 @@ const rateFloorTick = setInterval(() => {
       }
     }
     setRateFloorCollapses(collapses);
+
+    // v1.76.0 — SESSION SELF-HEAL. When the fleet has been starved (≥2 devices in
+    // a fired rate-collapse) for the dwell, rebuild our MQTT session: stop, null
+    // the handle, and let startMqttWithRetry re-fetch the certificate and connect
+    // fresh. Read-path only — REST polling (the alarm data path) is untouched, and
+    // a failed rebuild falls back to the existing retry backoff. Cooldown + daily
+    // cap make thrash impossible (the 08-08 flap storm is the sizing case).
+    // If a prior rebuild's retry chain is still running (stopMqtt === null), a
+    // duplicate chain is benign: whichever connects first wins, the loser sees
+    // stopMqtt set and returns.
+    const healVerdict = evaluateSelfHeal(now, collapses.length, selfHealState, DEFAULT_SELF_HEAL_CONFIG);
+    if (healVerdict.heal) {
+      app.log.warn(`self-heal: ${healVerdict.reason}`);
+      try { stopMqtt?.(); } catch (e: any) {
+        app.log.warn(`self-heal: old MQTT stop threw (continuing): ${e?.message ?? e}`);
+      }
+      stopMqtt = null;
+      void startMqttWithRetry();
+    }
 
     // Persist learned baselines every ~10 min. Cheap (a few hundred bytes) and
     // strictly best-effort — a write failure is latched to one log line so a
