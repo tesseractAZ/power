@@ -1,3 +1,25 @@
+## v1.76.1 — documentation register catch-up (docs only, no code changes)
+
+The spec register (DOCS.md) owed sections for four releases; all are now present
+and accurate against the shipped source:
+
+- **§2.14** Request-signing clock correction (v1.69.0) — the Date-header offset,
+  deadband/sanity bounds, signing-only scope.
+- **§2.15** Telemetry-blind self-alert (v1.69.0) — blind detection, honest
+  /api/health 503, auth/network classification.
+- **§2.16** Cloud-session self-heal (v1.76.0) — trigger/guards, and the measured
+  maiden-night verdict recorded plainly: mechanism exact-to-spec, ineffective for
+  the nightly starvation, which is upstream of the client session (recovery
+  anchored ~05:11 MST). Retained as a bounded probe, not a fix.
+- **§5 (grid backstop)** — GRID_FLOOR_SLACK_PCT (v1.74.0) documented at the
+  floor-hardening resolver where the slack actually acts.
+- **§8.9** Resolve integrity (v1.75.0) — the falling-edge evidence gate, the
+  starvation-orphan boot drop, and the digest resolved-overnight section,
+  including the known cosmetic log-line undercount.
+
+README: added the committed mutation-harness inventory (six harnesses) to the
+Quality section. No behavior changes.
+
 ## v1.76.0 — cloud-session self-heal + dependency sweep
 
 ### Session self-heal (`sessionSelfHeal.ts`)
