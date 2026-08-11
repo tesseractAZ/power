@@ -205,6 +205,12 @@ to advisory; enabling the supervised write is an explicit owner action, and
 unattended (auto) operation is earned only through the learning ledger's
 actuated-night evidence.
 
+Where a guard is subtle enough that a plausible refactor could silently disarm
+it, a **committed mutation harness** proves the tests would catch that exact
+regression: `scripts/mutate-{rate-floor,telemetry-blind,red-replay,peak-grid-draw,resolve-evidence,session-self-heal}.mjs`
+each apply anchor-asserted mutants to the live source and require the suite to
+kill every one.
+
 ## Security
 
 See [`SECURITY.md`](SECURITY.md) for the vulnerability-reporting policy and the

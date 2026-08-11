@@ -1453,6 +1453,58 @@ are cached (~30 min) on the worker.
 
 ---
 
+### 2.14 Request-signing clock correction (`server/src/ecoflow/clockOffset.ts`) — v1.69.0
+
+EcoFlow signs every REST request with a local-clock timestamp; a skewed host
+clock makes the cloud reject every call with `8521 signature is wrong`. On
+2026-08-04 a post-power-cut boot ran 170 s behind (no RTC battery then fitted)
+and the add-on held zero telemetry for 22 minutes while reporting healthy.
+
+Every HTTP response carries a `Date` header — **including the 8521 rejection
+itself** — so the first rejected request already reveals the skew. `noteServerDate`
+adopts the measured offset (deadband 2 s — sub-threshold deltas are round-trip
+latency, not skew; sanity bound 24 h — an absurd header is a broken proxy, not a
+skewed host) and `signingNowMs()` applies it **to signing only**. Recorder
+timestamps, alert onsets and night-charge windows always use the system clock.
+Recovery is within one poll cycle instead of waiting on NTP. Committed harness:
+`scripts/mutate-telemetry-blind.mjs` (its starred mutant is "learn only from
+successful responses", which silently restores the 22-minute outage).
+
+### 2.15 Telemetry-blind self-alert (`server/src/telemetryBlind.ts`) — v1.69.0
+
+The one condition where a quiet system is the most dangerous system: the add-on
+itself holding no telemetry. `assessBlind` raises the CRITICAL `telemetry-blind`
+alert when there is no usable device telemetry past the boot grace
+(`TELEMETRY_BLIND_BOOT_GRACE_MS`, 3 min) or freshness bound
+(`TELEMETRY_BLIND_STALE_MS`, 5 min). Health requires devices **and** a fresh
+successful poll — a device map left over from before an outage is not sight.
+`classifyPollError` splits `auth` (8521 / "signature is wrong" — on this
+hardware, clock skew, not credentials) from `network` from `other`; sustained
+auth-shaped failure recommends a client rebuild, cooldown-limited.
+`/api/health` returns `ok:false` **and HTTP 503** while blind, so the HA
+watchdog and any uptime probe see it.
+
+### 2.16 Cloud-session self-heal (`server/src/sessionSelfHeal.ts`) — v1.76.0
+
+When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a fired message-rate collapse
+for `SELF_HEAL_AFTER_MS` (20 min), the add-on rebuilds its own MQTT session:
+stop, certificate re-fetch, fresh connect. Guards, each mutation-proven
+load-bearing (`scripts/mutate-session-self-heal.mjs`, 7/7): the multi-device
+threshold, the dwell, a 60-min cooldown, a 6/day UTC-keyed cap, and a post-heal
+onset reset. Read-path only — REST polling is untouched, and a failed rebuild
+falls back to the existing `startMqttWithRetry` backoff.
+
+**Measured verdict (maiden night, 2026-08-11).** The mechanism ran exactly to
+spec — five rebuilds, each mechanically perfect (~1.4 s, all subscriptions
+restored) — and **did not shorten the starvation**: message rates stayed pinned
+through every heal window, and recovery arrived at ~05:11 MST, the same
+wall-clock minute as the prior heal-free night. The nightly starvation is
+therefore **upstream of the client session** (an EcoFlow cloud- or device-side
+window with jittered onset and recovery anchored near 05:11 MST); no client-side
+rebuild can end it. The healer is retained as a bounded, harmless probe for
+other session-wedge classes (e.g. the 08-08 keepalive death), not as a fix for
+the nightly window.
+
 ## 3. Solar & PV Forecast Engine
 
 This cluster covers everything that turns weather irradiance + recorded telemetry
@@ -3214,6 +3266,13 @@ present    = importLive OR declared OR shp2GridConnected===true
 
 - **`poolDischargingAtFloor`** — `poolDischarging && atReserveFloor`. `poolDischarging = (aggregateFleetFlow.fleetBatteryNet > POOL_DISCHARGE_WATTS=50) OR !homeCoreCoverage.complete`. At the reserve floor a present grid must have transferred and the pool must stop draining; if it keeps draining (or the roster is incomplete so drain is unobservable — v1.3.0 coverage gate: "we can PROVE discharge from a partial sum but never DISPROVE it"), the declared grid isn't really there. (The old `chargeWattPower < −50` check was permanently dead — that field is a non-negative configured charge *limit* ~7.2 kW even when idle.)
 - **`floorWithoutFlow`** — `atReserveFloor && importWatts==0 && homeGridWatts==0`. A stale "grid available" toggle with no measured flow must not mute a real at-floor outage.
+- **`atReserveFloor` slack is operator-configurable** (v1.74.0): `GRID_FLOOR_SLACK_PCT`
+  sets how many points above the reserve the pool counts as "at the floor" —
+  which is also the lighting-austerity pre-arm point. Default 1.5, clamped 0–10;
+  blank/garbage falls back to 1.5 (`floorSlackPct()`, tested against the
+  `Number("")===0` trap). 0 arms only at the reserve itself. At a typical evening
+  drain (~7 %/h) each point is ≈9 min of pre-arm warning; the trade-off is
+  documented in the option description (en+es).
 
 ```
 gridStaBackstop = shp2GridConnected===true && !poolDischargingAtFloor   # exempt from floorWithoutFlow (live device signal)
@@ -5005,6 +5064,37 @@ Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-pr
 
 
 ---
+
+### 8.9 Resolve integrity — positive evidence only (v1.75.0)
+
+On 2026-08-08 a cloud presence-flap made device projections unevaluable and the
+falling-edge loop read "alert no longer computed" as "condition recovered",
+emitting false **"Resolved:"** pushes for a standing battery-protection CRITICAL.
+Three rules now hold:
+
+- **Falling-edge evidence gate.** `fallingEdgeFrozenByEvidence` maps an alert id
+  to its source SN (exact match against the live device roster; ids carry their
+  subject SN by construction, and keys under 8 chars never bind). If the source
+  device is absent or its `lastUpdated` is older than `ALERT_EVIDENCE_STALE_MS`
+  (default 5 min, the telemetry-blind bound), the falling edge FREEZES and any
+  accrued resolve-dwell resets — unevaluable is not recovered. Exempt families
+  (`offline-*`, `msg-rate-floor-*`, `zombie-*`): their subject IS absence, so
+  their clear is computed from the very signal that gates here. System alerts
+  with no source SN never freeze — `telemetry-blind` resolving while devices are
+  absent is exactly its recovery.
+- **No boot-time "Resolved:" for starvation orphans.** The orphan sweep drops
+  `msg-rate-floor-*` records silently at boot instead of resolve-pushing them:
+  message rates are unknowable in the boot window, so there is no positive
+  evidence to resolve on. A persisting collapse re-fires within its dwell.
+- **The digest reports what self-resolved overnight.** Digest-held alerts that
+  clear before the digest hour are captured (`raisedAt`/`clearedAt`) and
+  rendered as an informational "fired overnight and self-resolved" section with
+  durations, stamping **no** notified-record — the v0.97.0 re-fire-suppression
+  fix is preserved. (Known cosmetic gap: the post-send log line counts only
+  still-pending items; the sent notification itself carries both sections.)
+
+Committed harness: `scripts/mutate-resolve-evidence.mjs` — 7/7, including
+gate-becomes-no-op, exempt-list-emptied, and the boot resolve-push returning.
 
 ## 9. The Online Learning Loop (shadow models, online regression, model health)
 
