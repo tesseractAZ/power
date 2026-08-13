@@ -681,6 +681,21 @@ export function deviceEvidenceFresh(
   return dev != null && Number.isFinite(dev.lastUpdated) && nowMs - (dev.lastUpdated as number) < staleMs;
 }
 
+/** v1.77.0 — POSITIVE evidence requires fresh telemetry AND not-currently-offline.
+ *  The 2026-08-12 04:17 blip: the SHP2 dropped off /status for 7 seconds while
+ *  REST kept its lastUpdated fresh — the freshness-only gate waved the falling
+ *  edge through and a false "Resolved: Energy source error" pushed at 4 AM for a
+ *  fault that never cleared. A device flagged offline is unevaluable regardless
+ *  of how fresh its last data is. `online === undefined` (no flag) stays neutral. */
+export function deviceEvidencePositive(
+  dev: { lastUpdated?: number; online?: boolean } | undefined,
+  nowMs: number,
+  staleMs: number = DEVICE_EVIDENCE_STALE_MS,
+): boolean {
+  if (dev?.online === false) return false;
+  return deviceEvidenceFresh(dev, nowMs, staleMs);
+}
+
 /** The whole falling-edge freeze decision, pure. True = the alert is UNEVALUABLE
  *  right now (source device absent/stale) and its falling edge must not advance.
  *  An alert with no source SN (system alerts: telemetry-blind, peak-grid-draw)
@@ -688,13 +703,13 @@ export function deviceEvidenceFresh(
 export function fallingEdgeFrozenByEvidence(p: {
   id: string;
   deviceSns: readonly string[];
-  devices: Record<string, { lastUpdated?: number }>;
+  devices: Record<string, { lastUpdated?: number; online?: boolean }>;
   nowMs: number;
 }): boolean {
   const sn = alertSourceSn(p.id, p.deviceSns);
   if (sn == null) return false;
   if (isEvidenceExemptFamily(p.id)) return false;
-  return !deviceEvidenceFresh(p.devices[sn], p.nowMs);
+  return !deviceEvidencePositive(p.devices[sn], p.nowMs);
 }
 
 /** v0.76.0 — has this alert ESCALATED above the severity it was last ACTED ON
