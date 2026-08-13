@@ -67,6 +67,12 @@ const MUTANTS = [
     why: 'A degenerate roster key could bind unrelated alerts to the wrong device’s freshness.',
   },
   {
+    id: 'viii. ★ the online flag is ignored (the 04:17 blip returns)',
+    find: "  if (dev?.online === false) return false;",
+    to: '  /* MUTANT */',
+    why: 'A 7-second /status blip with fresh REST data would again push a false "Resolved:" for a standing critical.',
+  },
+  {
     id: 'vii. ★ msg-rate-floor orphans resolve-push again at boot',
     find: "    if (id.startsWith('msg-rate-floor-')) { drop.push(id); continue; }",
     to: '    /* MUTANT */',

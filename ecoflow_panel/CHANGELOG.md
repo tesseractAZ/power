@@ -1,3 +1,28 @@
+## v1.77.0 — the 04:17 blip closed + the self-heal listener leak plugged
+
+### A /status-offline device is not positive evidence
+
+On 2026-08-12 04:17 the SHP2 dropped off the MQTT /status topic for 7 seconds
+while REST polling kept its `lastUpdated` fresh. The v1.75.0 evidence gate checks
+freshness only, so the falling edge sailed through and a false **"Resolved:
+Energy source error"** pushed at 4 AM — for the standing Core 3 err533 fault that
+never cleared, with the correcting re-raise only queued for the digest.
+
+`deviceEvidencePositive` now requires fresh telemetry **and** not-currently-
+offline. A device flagged offline is unevaluable regardless of data freshness;
+`online === undefined` stays neutral. Harness extended to 8 mutants, 8/8 killed —
+the new one ("the online flag is ignored") reproduces the 04:17 blip exactly.
+
+### SnapshotStore listener leak (v1.76.0 regression)
+
+Every MQTT session build registered a `store.on('change')` listener that
+`stop()` never detached. Harmless when sessions were built once per boot; with
+the self-heal rebuilding up to 7×/day, listeners accumulated without bound
+(MaxListenersExceededWarning at the 8th build, 2026-08-13 01:06) and each leaked
+closure pinned its dead client. The handler is now named and detached in
+`stop()`. Found by the daily adversarial log review — the healer's first side
+effect, caught within 32 hours of shipping it.
+
 ## v1.76.1 — documentation register catch-up (docs only, no code changes)
 
 The spec register (DOCS.md) owed sections for four releases; all are now present

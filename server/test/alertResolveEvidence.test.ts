@@ -90,3 +90,26 @@ test('orphan sweep: a msg-rate-floor orphan is DROPPED, never boot-"Resolved:"',
   assert.ok(!resolve.includes(`msg-rate-floor-${SN}`));
   assert.ok(resolve.includes(`soc-low-${SN}-1`), 'ordinary owed resolves are unchanged');
 });
+
+/* ─── v1.77.0 — a /status-offline device is not positive evidence ─────────── */
+
+test('THE 04:17 BLIP: fresh-but-offline device FREEZES its fault alert falling edge', () => {
+  // The SHP2 dropped off /status for 7 seconds while REST kept lastUpdated fresh.
+  // Freshness alone waved the resolve through; online:false must freeze it.
+  const frozen = fallingEdgeFrozenByEvidence({
+    id: `dpu-err-${SN}`, deviceSns: [...ROSTER],
+    devices: { [SN]: { lastUpdated: NOW - 10_000, online: false } }, nowMs: NOW,
+  });
+  assert.equal(frozen, true, 'a false "Resolved:" at 4 AM must be impossible');
+});
+
+test('online:true with fresh data resolves normally; missing flag stays neutral', () => {
+  assert.equal(fallingEdgeFrozenByEvidence({
+    id: `dpu-err-${SN}`, deviceSns: [...ROSTER],
+    devices: { [SN]: { lastUpdated: NOW - 10_000, online: true } }, nowMs: NOW,
+  }), false);
+  assert.equal(fallingEdgeFrozenByEvidence({
+    id: `dpu-err-${SN}`, deviceSns: [...ROSTER],
+    devices: { [SN]: { lastUpdated: NOW - 10_000 } }, nowMs: NOW,
+  }), false, 'no online flag = neutral, freshness decides');
+});

@@ -157,10 +157,15 @@ export async function startMqtt(
     for (const sn of Object.keys(store.get().devices)) subscribeForSn(sn);
   });
 
-  store.on('change', () => {
+  // v1.77.0 — NAMED handler so stop() can detach it. Before this, every session
+  // rebuild (boot, and since v1.76.0 up to ~7 self-heals/day) leaked one 'change'
+  // listener on the SnapshotStore: MaxListenersExceededWarning tripped at the 8th
+  // build on 2026-08-13 01:06, and each leaked closure pinned its dead client.
+  const onStoreChange = () => {
     if (!client.connected) return;
     for (const sn of Object.keys(store.get().devices)) subscribeForSn(sn);
-  });
+  };
+  store.on('change', onStoreChange);
 
   client.on('reconnect', () => stormLog.log('mqtt: reconnecting'));
   client.on('close', () => stormLog.log('mqtt: connection closed'));
@@ -240,6 +245,7 @@ export async function startMqtt(
   return {
     client,
     stop: () => {
+      store.off('change', onStoreChange); // v1.77.0 — see the leak note above
       try {
         client.end(true);
       } catch {
