@@ -2107,7 +2107,13 @@ const batterySocAlarm = createBatterySocAlarm({
       ? `Advisory. Backup pool at ${t.pct} percent — drawing from grid power, no action needed.`
       : socAlarmMessage(t);
     const messageEs = onGrid ? socAlarmAdvisoryEs(t.pct) : socAlarmMessageEs(t); // v0.62.0 — Spanish second pass
-    void broadcast.announce(priority, message, messageEs);
+    // v1.78.0 — surface the disposition: the 08-12 21:11 SoC-ladder suppression
+    // (deepest rung of the day) left NO log line and cost two audits a false
+    // timezone theory. Suppressions are config-correct; they must still be seen.
+    void broadcast.announce(priority, message, messageEs).then(
+      (a) => { if (!a.ok) app.log.info(`soc-alarm: audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
+      () => { /* announce() reports via its own path; never let a rejection escape a fire-and-forget */ },
+    );
   },
   log: (m) => app.log.info(m),
 });
@@ -2158,7 +2164,10 @@ store.on('change', (snap: FleetSnapshot) => {
     // so the exact v0.75.0-regressed path is exercised by a test driving the REAL
     // function instead of a hand-copied mirror.
     for (const { pct, priority } of reEscalateGridDrop(socDowngraded, soc, socGridForTick.backstopping, isPriorityEnabled)) {
-      void broadcast.announce(priority, socAlarmMessage({ pct, priority }), socAlarmMessageEs({ pct, priority }));
+      void broadcast.announce(priority, socAlarmMessage({ pct, priority }), socAlarmMessageEs({ pct, priority })).then(
+        (a) => { if (!a.ok) app.log.info(`soc-alarm: grid-drop re-escalation audible suppressed (${a.error ?? 'unknown'})`); },
+        () => { /* see soc-alarm note above */ },
+      );
     }
   })();
 });
@@ -2194,7 +2203,10 @@ const runwayAlarm = createRunwayAlarm({
       app.log.info('runway-alarm: audible suppressed — grid backstopping (push/on-screen unaffected)');
       return;
     }
-    void broadcast.announce(priority, message, messageEs); // v0.62.0 — Spanish second pass
+    void broadcast.announce(priority, message, messageEs).then( // v0.62.0 — Spanish second pass
+      (a) => { if (!a.ok) app.log.info(`runway-alarm: audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
+      () => { /* see soc-alarm note above */ },
+    );
   },
   log: (m) => app.log.info(m),
 });
@@ -2356,6 +2368,7 @@ if (loadShedAdvisoryEnabled) {
 const rateFloor = new RateFloorTracker();
 // v1.76.0 — cloud-session self-heal state (see sessionSelfHeal.ts).
 const selfHealState = freshSelfHealState();
+let selfHealCapLoggedDay: string | null = null; // v1.78.0 — one stand-down line per capped day
 
 // v1.66.0 — persist the LEARNED hour-of-day baselines. The detector's comparison
 // baseline is now per-hour-of-day (see messageRateFloor.ts), and a bucket needs
@@ -2435,6 +2448,13 @@ const rateFloorTick = setInterval(() => {
     // duplicate chain is benign: whichever connects first wins, the loser sees
     // stopMqtt set and returns.
     const healVerdict = evaluateSelfHeal(now, collapses.length, selfHealState, DEFAULT_SELF_HEAL_CONFIG);
+    // v1.78.0 — the daily-cap stand-down was computed and DISCARDED: on 08-14
+    // the cap emptied at 04:44 with recovery 27 min later, and nothing in the
+    // log said the healer had stood down. Log it once per capped day.
+    if (!healVerdict.heal && healVerdict.reason.startsWith('daily cap') && selfHealCapLoggedDay !== selfHealState.dayKey) {
+      selfHealCapLoggedDay = selfHealState.dayKey;
+      app.log.warn(`self-heal: standing down — ${healVerdict.reason} (starvation persisting; next heal after the UTC day rolls)`);
+    }
     if (healVerdict.heal) {
       app.log.warn(`self-heal: ${healVerdict.reason}`);
       try { stopMqtt?.(); } catch (e: any) {
@@ -3448,7 +3468,14 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       try {
         const a = await broadcast.announce('medium', spoken, spokenEs);
         audibleDelivered = a.ok === true;
-        if (!a.ok) app.log.warn(`night-charge: supervised announce failed (${a.error ?? 'unknown'})`);
+        // v1.78.0 — a config-mandated quiet-hours suppression is healthy, not a
+        // failure; logging it at WARN made 3/3 nightly arms read as broken and
+        // hid the signature a REAL audible breakage would share.
+        if (!a.ok && String(a.error ?? '').startsWith('suppressed')) {
+          app.log.info(`night-charge: supervised announce suppressed (${a.error}) — arm delivered via HA notify`);
+        } else if (!a.ok) {
+          app.log.warn(`night-charge: supervised announce failed (${a.error ?? 'unknown'})`);
+        }
       } catch (e: any) {
         app.log.warn(`night-charge: supervised announce failed (${e?.message ?? e})`);
       }

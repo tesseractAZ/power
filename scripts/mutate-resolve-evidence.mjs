@@ -32,8 +32,8 @@ const SUBSET = ['test/alertResolveEvidence.test.ts', 'test/orphanedNotified.test
 const MUTANTS = [
   {
     id: 'i. ★ the freeze decision always says "not frozen" (the gate becomes a no-op)',
-    find: '  const sn = alertSourceSn(p.id, p.deviceSns);\n  if (sn == null) return false;',
-    to: '  return false; /* MUTANT */\n  const sn = alertSourceSn(p.id, p.deviceSns);\n  if (sn == null) return false;',
+    find: '  const sn = p.sourceSn ?? alertSourceSn(p.id, p.deviceSns);\n  if (sn == null) return false;',
+    to: '  return false; /* MUTANT */\n  const sn = p.sourceSn ?? alertSourceSn(p.id, p.deviceSns);\n  if (sn == null) return false;',
     why: 'Everything still LOOKS wired, but a flap resolves standing criticals exactly as on 08-08.',
   },
   {
@@ -65,6 +65,18 @@ const MUTANTS = [
     find: '  for (const sn of deviceSns) if (sn.length >= 8 && id.includes(sn)) return sn;',
     to: '  for (const sn of deviceSns) if (id.includes(sn)) return sn; /* MUTANT */',
     why: 'A degenerate roster key could bind unrelated alerts to the wrong device’s freshness.',
+  },
+  {
+    id: 'ix. ★★★ the explicit sourceSn is ignored — the SN-less-id hole reopens',
+    find: "  const sn = p.sourceSn ?? alertSourceSn(p.id, p.deviceSns);",
+    to: "  const sn = alertSourceSn(p.id, p.deviceSns);",
+    why: 'shp2-src-err-<slot> carries no serial; without the declared source the gate exits before the evidence check and the 04:17 false "Resolved: Energy source error" recurs — the v1.77.0 harness passed 8/8 while missing exactly this.',
+  },
+  {
+    id: 'x. ★ a worsening band handoff resolves again ("Resolved: Backup pool low" mid-drawdown)',
+    find: "  if (!id.startsWith('backup-soc-')) return null;",
+    to: '  return null; /* MUTANT */',
+    why: 'The 08-16 19:22 false all-clear: the band vanishing INTO the active shp2 pair pushed "Resolved" while the pool drained 20->15->10 with no further pool push before the critical crossing.',
   },
   {
     id: 'viii. ★ the online flag is ignored (the 04:17 blip returns)',

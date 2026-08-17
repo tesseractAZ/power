@@ -705,11 +705,39 @@ export function fallingEdgeFrozenByEvidence(p: {
   deviceSns: readonly string[];
   devices: Record<string, { lastUpdated?: number; online?: boolean }>;
   nowMs: number;
+  /** v1.78.0 — the alert's own declared source device (Alert.sourceSn). The id
+   *  search below misses every SN-less id (`shp2-src-err-<slot>` — the very
+   *  alert the gate was built for), so an explicit declaration always wins. */
+  sourceSn?: string;
 }): boolean {
-  const sn = alertSourceSn(p.id, p.deviceSns);
-  if (sn == null) return false;
   if (isEvidenceExemptFamily(p.id)) return false;
+  const sn = p.sourceSn ?? alertSourceSn(p.id, p.deviceSns);
+  if (sn == null) return false;
   return !deviceEvidencePositive(p.devices[sn], p.nowMs);
+}
+
+/**
+ * v1.78.0 — OWNERSHIP HANDOFF detection for the falling-edge resolve push.
+ *
+ * The v0.44.0 band↔pair dedup makes `backup-soc-<pct>` vanish the moment
+ * `soc < reserve+10` — i.e. on a WORSENING transition — because the
+ * shp2-near/below-reserve pair takes over as the single on-screen producer. To
+ * the falling-edge loop that vanish is indistinguishable from a recovery, so on
+ * 2026-08-16 19:22:06 the operator's phone read "Resolved: Backup pool low —
+ * 20%" while the pool was actively draining to the 10% floor — and that false
+ * all-clear was the last pool push before the critical 10% crossing. (2026-08-05
+ * queue item "false all-clear during active drawdown", mechanism finally pinned.)
+ *
+ * When the vanished id's coverage successor is ACTIVE in the same tick, the
+ * story has transferred, not ended: retire the tracked entry normally but send
+ * no resolve push. A genuine recovery (soc back above the band with the pair
+ * gone) still resolves — the successor is absent then, so this returns null.
+ */
+export function resolveHandoffOwner(id: string, currentIds: ReadonlySet<string>): string | null {
+  if (!id.startsWith('backup-soc-')) return null;
+  if (currentIds.has('shp2-below-reserve')) return 'shp2-below-reserve';
+  if (currentIds.has('shp2-near-reserve')) return 'shp2-near-reserve';
+  return null;
 }
 
 /** v0.76.0 — has this alert ESCALATED above the severity it was last ACTED ON
@@ -1389,7 +1417,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         dedupId: 'digest',
       });
       sentSinceStart++;
-      log(`notify: morning digest sent (${pending.length} alerts) via ${cfg.channel}`);
+      // v1.78.0 — the line now mirrors the delivered title: a digest that was
+      // wholly resolved-overnight items logged "(0 alerts)" and read like a
+      // lost queue in three separate audits.
+      log(`notify: morning digest sent (${pending.length} alerts${resolvedLines.length ? ` + ${resolvedLines.length} resolved overnight` : ''}) via ${cfg.channel}`);
       // v0.76.0 — the held alerts have now ACTUALLY been delivered, so mark them
       // notified + persisted (deferred from queue-time so a pre-digest restart
       // couldn't silently drop them). Keyed by id; the tracked entry may already
@@ -1850,7 +1881,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // fallingEdgeFrozenByEvidence + helpers above for the 08-08 flap-storm
       // rationale. Freezing also resets any resolve-dwell already accrued —
       // blindness must not count toward a clear.
-      if (fallingEdgeFrozenByEvidence({ id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now })) {
+      if (fallingEdgeFrozenByEvidence({ id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now, sourceSn: t.alert.sourceSn })) {
         t.clearedSince = undefined;
         continue;
       }
@@ -1938,8 +1969,24 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // across a restart is the bounded, safe direction; eating a future fire
       // is not. Within-process retry is unaffected (it gates on the tracked
       // entry's pushSent, not the record).
+      // v1.78.0 — ownership handoff (see resolveHandoffOwner): the condition
+      // continues under its coverage successor, so retire the entry with NO
+      // resolve push — "Resolved" mid-drawdown is a false all-clear.
+      const handoffOwner = resolveHandoffOwner(id, currentIds);
+      // v1.78.0 — resolves are good news; good news does not wake the operator.
+      // Inside notify quiet hours, HOLD the entry (retry next tick) so the
+      // resolve — and the HA-card dismissal it carries — lands after the window
+      // opens. The 08-05 "quiet-hours inversion" queue item: resolve pushes
+      // consulted no quiet window and landed at 00:02/00:53 on 08-16.
+      if (
+        handoffOwner == null &&
+        QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW) &&
+        shouldSendResolve(t, cfg.notifyResolved, cfg.minSeverity)
+      ) continue;
       if (persistedNotified.delete(id)) persistNotified();
-      if (shouldSendResolve(t, cfg.notifyResolved, cfg.minSeverity)) {
+      if (handoffOwner != null) {
+        log(`alerts: resolve push withheld — "${id}" handed off to active "${handoffOwner}" (condition continues, not recovered)`);
+      } else if (shouldSendResolve(t, cfg.notifyResolved, cfg.minSeverity)) {
         if ((await dispatch(t.alert, 'resolved')) === 'failed') continue;
       }
       // v0.13.2 — account EVERY cleared rise in telemetry, not just clears that

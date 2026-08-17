@@ -201,6 +201,18 @@ export interface Alert {
    */
   fault?: string;
   /**
+   * v1.78.0 — the SERIAL of the device whose telemetry PROVES this condition,
+   * for alerts whose `id` does not embed it. The falling-edge evidence gate
+   * (alertMonitor.fallingEdgeFrozenByEvidence) resolves an alert's source
+   * device to decide whether a disappearance is a recovery or mere blindness;
+   * before this field it could only search the id string for a serial, which
+   * silently skipped every SN-less id — `shp2-src-err-<slot>` let a 7-second
+   * SHP2 /status blip push a false "Resolved: Energy source error" at 04:17 on
+   * 2026-08-12, the precise incident the gate was built for. Set it wherever
+   * the constructor has the device in hand; omission falls back to id search.
+   */
+  sourceSn?: string;
+  /**
    * v0.16.4 — annunciation gate. `false` = this condition stays VISIBLE in
    * snapshot.alerts (the UI still renders it) but must never produce an audible
    * broadcast, a push notification, or raise the broadcast condition level.
@@ -961,6 +973,7 @@ export function computeAlerts(
           severity: onGrid ? 'info' : 'critical',
           category: 'SHP2',
           device: shp2.deviceName,
+          sourceSn: shp2.sn,
           // v1.17.0 review — "at or below", never "at/below": these strings
           // reach Piper on the critical audible path and verbalizeForTts has
           // no generic slash rule (espeak speaks '/' literally).
@@ -980,6 +993,7 @@ export function computeAlerts(
           severity: onGrid ? 'info' : 'warning',
           category: 'SHP2',
           device: shp2.deviceName,
+          sourceSn: shp2.sn,
           title: 'Backup approaching reserve',
           detail: onGrid
             ? `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor — grid is backstopping, no action needed (${grid?.reason ?? 'grid backstopping'}).`
@@ -1011,11 +1025,11 @@ export function computeAlerts(
           // slot across every code, and the TITLE never varies here at all, so the
           // code is the ONLY discriminator between two different faults on the
           // same slot. Same rule as dpu-err above (see Alert.fault).
-          out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, title: 'Energy source error', fault: `err${n}`, detail: `${tag} reports error code ${n}${n >= 500 && n < 600 ? ' (battery/BMS protection band)' : ''}.` });
+          out.push({ id: `shp2-src-err-${s.slot}`, severity: 'critical', category: 'SHP2', device: shp2.deviceName, sourceSn: shp2.sn, title: 'Energy source error', fault: `err${n}`, detail: `${tag} reports error code ${n}${n >= 500 && n < 600 ? ' (battery/BMS protection band)' : ''}.` });
         }
       }
       if (s.isConnected && !s.hwConnect) {
-        out.push({ id: `shp2-src-hw-${s.slot}`, severity: 'warning', category: 'SHP2', device: shp2.deviceName, title: 'Source link issue', detail: `${tag} shows connected but no hardware link.` });
+        out.push({ id: `shp2-src-hw-${s.slot}`, severity: 'warning', category: 'SHP2', device: shp2.deviceName, sourceSn: shp2.sn, title: 'Source link issue', detail: `${tag} shows connected but no hardware link.` });
       }
     }
     for (const pc of sp.pairedCircuits) {
@@ -1136,6 +1150,9 @@ export function computeAlerts(
       priority,
       category: 'Battery',
       device: 'SHP2 backup pool',
+      // v1.78.0 — the band reads the SHP2's pool telemetry; without this the
+      // SN-less id bypassed the falling-edge evidence gate entirely.
+      ...(socShp2 ? { sourceSn: socShp2.sn } : {}),
       title: `Backup pool low — ${Math.round(soc)}%`,
       detail: onGridEmergency
         ? `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% threshold — drawing from grid power, no action needed.${heldNote}`

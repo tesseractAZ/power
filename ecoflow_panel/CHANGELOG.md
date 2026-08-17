@@ -1,3 +1,58 @@
+## v1.78.0 — alarm integrity: the operator's phone tells the truth
+
+Four defects from the 08-14/08-17 audits, all on the notification path of a
+life-safety system, all fixed at their mechanism.
+
+### The evidence gate now covers SN-less alerts (the hole v1.77.0 missed)
+
+`Alert.sourceSn` declares the device whose telemetry proves a condition.
+`fallingEdgeFrozenByEvidence` reads the declaration first and only falls back
+to searching the id for a serial — the fallback that silently skipped
+`shp2-src-err-<slot>`, the very alert the v1.75/v1.77 gate work was written
+for. All five SHP2-derived constructors declare their source. Harness: 10/10,
+including a mutant that drops the declaration ("the v1.77.0 harness passed 8/8
+while missing exactly this").
+
+### No more "Resolved: Backup pool low" while the pool is draining
+
+The v0.44.0 band↔pair dedup removes `backup-soc-<pct>` on a WORSENING
+transition (the shp2 near/below-reserve pair takes over), and the falling edge
+read that vanish as a recovery — 2026-08-16 19:22:06 pushed "Resolved: Backup
+pool low — 20%" three minutes before the pool sank to 15% and then to the 10%
+floor, the operator's last pool push of the night. `resolveHandoffOwner` now
+recognises an active coverage successor: the entry retires with no resolve
+push and one honest log line. A genuine recovery (successor absent) resolves
+exactly as before.
+
+### The siren replay gate keys on identity, not a stopwatch
+
+`RED_REPLAY_MIN_GAP_MS` defaults to Infinity: an UNCHANGED, verifiably
+announced fault does not replay at boot, however long ago it was announced.
+The 30-minute timer was measured to be luck — restart 2 on 08-13 escaped a
+full 56.7 s klaxon by 27.5 seconds, and the 08-15 reboot replayed a fault
+standing since 07-20. Every change still announces immediately: a new error
+code, a new sibling critical, an escalation, or a green in between. Set
+BROADCAST_RED_REPLAY_MIN_GAP_MS to restore the timed reminder.
+
+### Resolves respect quiet hours
+
+The falling-edge dispatch consulted no quiet window (raises did), so
+"Resolved:" pushes landed at 00:02/00:53 inside the accepted 22-05 window.
+A resolve owed during quiet hours now holds — the entry retries each tick —
+and delivers when the window opens. Good news does not wake the operator.
+
+### Log honesty (three audits' worth of invisible dispositions)
+
+- SoC-ladder, grid-drop and runway audible suppressions now log their
+  disposition (a silent 21:11 suppression cost two audits a false timezone
+  theory).
+- night-charge's config-mandated quiet-hours suppression logs at info as
+  "suppressed", no longer at warn as "failed".
+- The self-heal daily-cap stand-down logs once per capped day (on 08-14 the
+  cap emptied 27 minutes before recovery with no trace).
+- The morning-digest line carries the resolved-overnight count — "(0 alerts)"
+  for a digest of two resolved items read as a lost queue in three audits.
+
 ## v1.77.0 — the 04:17 blip closed + the self-heal listener leak plugged
 
 ### A /status-offline device is not positive evidence

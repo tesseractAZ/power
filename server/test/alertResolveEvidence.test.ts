@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   alertSourceSn, isEvidenceExemptFamily, deviceEvidenceFresh, fallingEdgeFrozenByEvidence,
-  orphanedNotifiedIds, DEVICE_EVIDENCE_STALE_MS,
+  orphanedNotifiedIds, DEVICE_EVIDENCE_STALE_MS, resolveHandoffOwner,
 } from '../src/alertMonitor.js';
 
 /**
@@ -112,4 +112,64 @@ test('online:true with fresh data resolves normally; missing flag stays neutral'
     id: `dpu-err-${SN}`, deviceSns: [...ROSTER],
     devices: { [SN]: { lastUpdated: NOW - 10_000 } }, nowMs: NOW,
   }), false, 'no online flag = neutral, freshness decides');
+});
+
+/* ─── v1.78.0 — explicit sourceSn closes the SN-less-id hole ──────────────── */
+
+const SHP2SN = 'HD31ZASAHH120432';
+
+test('THE MOTIVATING CASE: shp2-src-err-3 with sourceSn freezes on an offline-but-fresh SHP2', () => {
+  // v1.77.0 shipped to close the 04:17 false "Resolved: Energy source error"
+  // and MISSED it: the id carries no serial, alertSourceSn returned null, and
+  // the gate exited before the evidence check. The explicit declaration wins.
+  assert.equal(fallingEdgeFrozenByEvidence({
+    id: 'shp2-src-err-3', deviceSns: [...ROSTER, SHP2SN], sourceSn: SHP2SN,
+    devices: { [SHP2SN]: { lastUpdated: NOW - 5_000, online: false } }, nowMs: NOW,
+  }), true, 'a 7-second /status blip must freeze the falling edge, not resolve a standing critical');
+});
+
+test('sourceSn: stale device freezes; fresh+online device resolves normally', () => {
+  assert.equal(fallingEdgeFrozenByEvidence({
+    id: 'backup-soc-20', deviceSns: [SHP2SN], sourceSn: SHP2SN,
+    devices: { [SHP2SN]: { lastUpdated: NOW - 3_600_000, online: true } }, nowMs: NOW,
+  }), true, 'stale telemetry is blindness, not recovery');
+  assert.equal(fallingEdgeFrozenByEvidence({
+    id: 'shp2-src-err-3', deviceSns: [SHP2SN], sourceSn: SHP2SN,
+    devices: { [SHP2SN]: { lastUpdated: NOW - 5_000, online: true } }, nowMs: NOW,
+  }), false, 'fresh, online source = a genuine clear may resolve');
+});
+
+test('sourceSn on an evidence-EXEMPT family still never freezes', () => {
+  // offline-* exists to fall when the device is absent; an explicit sourceSn
+  // must not re-arm the gate for it.
+  assert.equal(fallingEdgeFrozenByEvidence({
+    id: `offline-${SHP2SN}`, deviceSns: [SHP2SN], sourceSn: SHP2SN,
+    devices: {}, nowMs: NOW,
+  }), false);
+});
+
+test('no sourceSn: the id search still protects SN-bearing ids (v1.75.0 contract intact)', () => {
+  assert.equal(fallingEdgeFrozenByEvidence({
+    id: `dpu-err-${SN}`, deviceSns: [...ROSTER],
+    devices: {}, nowMs: NOW,
+  }), true);
+});
+
+/* ─── v1.78.0 — ownership handoff: no resolve push on a worsening transition ── */
+
+test('backup-soc vanishing INTO an active shp2 pair alert is a handoff, not a recovery', () => {
+  assert.equal(resolveHandoffOwner('backup-soc-20', new Set(['shp2-near-reserve'])), 'shp2-near-reserve');
+  assert.equal(resolveHandoffOwner('backup-soc-20', new Set(['shp2-below-reserve'])), 'shp2-below-reserve');
+  // below outranks near when both are somehow present
+  assert.equal(resolveHandoffOwner('backup-soc-10', new Set(['shp2-below-reserve', 'shp2-near-reserve'])), 'shp2-below-reserve');
+});
+
+test('a GENUINE band recovery (successor absent) is not a handoff — the resolve still goes', () => {
+  assert.equal(resolveHandoffOwner('backup-soc-20', new Set(['soc-low-X'])), null);
+  assert.equal(resolveHandoffOwner('backup-soc-20', new Set()), null);
+});
+
+test('handoff detection is scoped to the band family only', () => {
+  assert.equal(resolveHandoffOwner('soc-low-A-1', new Set(['shp2-near-reserve'])), null);
+  assert.equal(resolveHandoffOwner(`dpu-err-${SN}`, new Set(['shp2-below-reserve'])), null);
 });
