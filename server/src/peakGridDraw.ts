@@ -84,6 +84,10 @@ export interface PeakDrawInputs {
   /** Per-Core AC input, so the alert can name which units are drawing. Charge Now
    *  is a per-DPU setting, so "which Core" is the actionable part of the report. */
   coreDraws: CoreDraw[];
+  /** v1.80.0 — per-slot force-charge ("Charge Now") state read from the SHP2
+   *  quota (ch{n}ForceCharge). label = the slot's Core name (or "AC{n}").
+   *  null/absent = the platform did not report it (older data). */
+  forceCharge?: { label: string; on: boolean }[] | null;
   /** When this condition was first seen continuously, or null if not currently seen. */
   onsetMs: number | null;
 }
@@ -124,6 +128,9 @@ export interface PeakDrawVerdict {
   suppressed: 'below-reserve' | 'off-peak' | 'outage' | 'insufficient-data' | null;
   /** Which Cores are drawing, or null when none are individually significant. */
   coreAttribution: string | null;
+  /** v1.80.0 — Core/channel labels whose force-charge reads ON; [] = all read
+   *  OFF; null = state unknown (not reported). The alert stops inferring. */
+  forceChargeOn: string[] | null;
 }
 
 /**
@@ -151,7 +158,7 @@ export function assessPeakDraw(
   const slice = rateAt(tariff, i.nowMs);
   const idle = (suppressed: PeakDrawVerdict['suppressed']): PeakDrawVerdict => ({
     active: false, gridToBatteryW: 0, onPeak: slice.isOnPeak, periodLabel: slice.periodLabel,
-    centsPerHour: null, heldForMs: 0, suppressed, coreAttribution: null,
+    centsPerHour: null, heldForMs: 0, suppressed, coreAttribution: null, forceChargeOn: null,
   });
 
   if (!i.gridPresent) return idle('outage');
@@ -182,6 +189,8 @@ export function assessPeakDraw(
     heldForMs,
     suppressed: null,
     coreAttribution: attributeCores(i.coreDraws),
+    forceChargeOn: i.forceCharge == null ? null
+      : i.forceCharge.filter((f) => f.on).map((f) => f.label),
   };
 }
 
@@ -224,6 +233,23 @@ export function evaluatePeakDraw(
 
 export const PEAK_GRID_DRAW_ALERT_ID = 'peak-grid-draw';
 
+/** v1.80.0 — the cause, READ from the platform instead of inferred. The PD303
+ *  doc names `ch{n}ForceCharge` as the per-channel "charge strength" switch —
+ *  which is the EcoFlow app's "Charge Now", the July incident's actual cause. */
+export function forceChargeText(on: string[] | null): string {
+  if (on == null) {
+    return ' The usual cause is "Charge Now" (force charge) left enabled on one or more Delta Pro Ultra'
+      + ' units — a PER-UNIT setting in the EcoFlow app. The platform did not report its state on this'
+      + ' tick, so this is inferred from power flow.';
+  }
+  if (on.length > 0) {
+    return ` The EcoFlow platform reports Charge Now (force charge) is ON for: ${on.join(', ')} — `
+      + 'turn it off in the EcoFlow app on that unit to stop the on-peak buying.';
+  }
+  return ' Charge Now (force charge) reads OFF on all three channels, so this draw comes from another'
+    + ' setting — check each unit\'s task mode and AC charging power in the EcoFlow app.';
+}
+
 export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
   if (!v.active) return [];
   const kw = (v.gridToBatteryW / 1000).toFixed(1);
@@ -246,12 +272,11 @@ export function peakGridDrawAlerts(v: PeakDrawVerdict, nowMs: number): Alert[] {
       `About ${kw} kW of grid import has been going into the pack rather than the house for ${mins} minutes, `
       + `while on-peak.${costText} The pack is comfortably above its reserve, so this is not outage protection — `
       + `it is buying at the day's highest rate energy the overnight charge window would buy cheaply.`
-      + `${whoText} The usual cause is "Charge Now" left enabled on one or more Delta Pro Ultra units — `
-      + `it is a PER-UNIT setting in the EcoFlow app, so check each Core listed above rather than the panel. `
-      + `Nothing in the telemetry reports that setting directly, which is why this is inferred from power flow.`,
+      + `${whoText}${forceChargeText(v.forceChargeOn)}`,
     facts: [
       { label: 'Grid → battery', value: `${kw} kW` },
       { label: 'Drawing', value: v.coreAttribution ?? 'no single Core dominant' },
+      { label: 'Charge Now (force charge)', value: v.forceChargeOn == null ? 'not reported' : (v.forceChargeOn.length ? `ON: ${v.forceChargeOn.join(', ')}` : 'off on all channels') },
       { label: 'Period', value: v.periodLabel },
       { label: 'Cost rate', value: v.centsPerHour == null ? 'rates unconfirmed' : `$${(v.centsPerHour / 100).toFixed(2)}/h` },
       { label: 'Ongoing for', value: `${mins} min` },

@@ -250,6 +250,15 @@ export interface DpuProjection {
   emsParaVolMinMv: number | null; // EMS parallel-operation pack-voltage floor
   chgMaxSoc: number | null;       // configured charge ceiling %
   dsgMinSoc: number | null;       // configured discharge floor %
+  /** v1.80.0 — task mode (0 default, 1 self-powered, 2 scheduled, 3 TOU). */
+  sysWordMode: number | null;
+  /** v1.80.0 — this unit's own backup reserve level. */
+  sysBackupSoc: number | null;
+  /** v1.80.0 — configured AC (C20) input charging power, W. High while grid-charging
+   *  on-peak = the Charge Now fingerprint on the unit side. */
+  chgC20SetWatts: number | null;
+  /** v1.80.0 — configured POWER IN/OUT (5.8kW port) charging power, W. */
+  chg5p8SetWatts: number | null;
 }
 
 export function projectDpu(q: Quota): DpuProjection {
@@ -340,6 +349,10 @@ export function projectDpu(q: Quota): DpuProjection {
     emsParaVolMinMv: num(q, 'hs_yj751_pd_backend_addr.emsParaVolMin'),
     chgMaxSoc: num(q, 'hs_yj751_pd_app_set_info_addr.chgMaxSoc'),
     dsgMinSoc: num(q, 'hs_yj751_pd_app_set_info_addr.dsgMinSoc'),
+    sysWordMode: num(q, 'hs_yj751_pd_app_set_info_addr.sysWordMode'),
+    sysBackupSoc: num(q, 'hs_yj751_pd_app_set_info_addr.sysBackupSoc'),
+    chgC20SetWatts: num(q, 'hs_yj751_pd_app_set_info_addr.chgC20SetWatts'),
+    chg5p8SetWatts: num(q, 'hs_yj751_pd_app_set_info_addr.chg5p8SetWatts'),
   };
 }
 
@@ -383,6 +396,11 @@ export interface Shp2EnergySource {
   emsBatTemp: number | null;
   hwConnect: boolean;
   errorCodeNum: number | null;
+  /** v1.80.0 — the vendor's per-channel "charge strength" switch, which IS the
+   *  EcoFlow app's "Charge Now" (FORCE_CHARGE_ON / FORCE_CHARGE_OFF). The July
+   *  on-peak grid-draw incident was this setting; until the PD303 doc named
+   *  `ch{n}ForceCharge` the alert could only infer it from power flow. */
+  forceCharge: string | null;
   /** v0.40.1 — OBSERVABILITY ONLY (set by snapshotForClient / read inline by the
    *  TUI via isSourceDpuStale): the SHP2 still counts this slot's battery in the
    *  backup pool, but the slot's underlying DPU is itself cloud-offline (its own
@@ -430,6 +448,12 @@ export interface Shp2Projection {
   backupDischargeTimeMin: number | null;
   backupReserveSoc: number | null;
   chargeWattPower: number | null;
+  /** v1.80.0 — `foceChargeHight` (sic, vendor key): force-charge SOC ceiling (80-100). */
+  forceChargeCeilingSoc: number | null;
+  /** v1.80.0 — `stormIsEnable`: EcoFlow's own storm-watch feature toggle. */
+  stormWatchEnabled: boolean | null;
+  /** v1.80.0 — `epsModeInfo`: EPS (fast-switchover) mode. */
+  epsMode: boolean | null;
   circuits: Shp2Circuit[];
   pairedCircuits: Shp2PairedCircuit[];
   sources: Shp2EnergySource[];
@@ -613,6 +637,7 @@ export function projectShp2(q: Quota): Shp2Projection {
       emsBatTemp: num(q, `${base}emsBatTemp`),
       hwConnect: num(q, `${base}hwConnect`) === 1,
       errorCodeNum: num(q, `${base}errorCodeNum`),
+      forceCharge: str(q, `ch${i}ForceCharge`) ?? str(q, `pd303_mc.ch${i}ForceCharge`),
     });
   }
   const sourceWatts = Array.isArray(q['backupInfo.chWatt'])
@@ -637,6 +662,9 @@ export function projectShp2(q: Quota): Shp2Projection {
     backupChargeTimeMin: num(q, 'backupInfo.backupChargeTime'),
     backupDischargeTimeMin: num(q, 'backupInfo.backupDischargeTime'),
     backupReserveSoc: num(q, 'backupReserveSoc'),
+    forceChargeCeilingSoc: num(q, 'foceChargeHight') ?? num(q, 'pd303_mc.foceChargeHight'),
+    stormWatchEnabled: typeof q['stormIsEnable'] === 'boolean' ? q['stormIsEnable'] as boolean : (typeof q['pd303_mc.stormIsEnable'] === 'boolean' ? q['pd303_mc.stormIsEnable'] as boolean : null),
+    epsMode: typeof q['epsModeInfo'] === 'boolean' ? q['epsModeInfo'] as boolean : (typeof q['pd303_mc.epsModeInfo'] === 'boolean' ? q['pd303_mc.epsModeInfo'] as boolean : null),
     chargeWattPower: num(q, 'chargeWattPower'),
     circuits,
     pairedCircuits,

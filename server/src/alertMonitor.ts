@@ -1583,6 +1583,17 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           label: d.deviceName ?? d.sn,
           acInWatts: d.projection.acInWatts ?? 0,
         })),
+      // v1.80.0 — ch{n}ForceCharge from the SHP2 quota: name each slot by its
+      // Core (via the slot's SN) so the alert can say WHICH unit has Charge Now
+      // on, instead of inferring the setting from power flow.
+      forceCharge: peakShp2?.projection.sources?.length
+        ? peakShp2.projection.sources
+            .filter((src: any) => typeof src.forceCharge === 'string')
+            .map((src: any) => ({
+              label: (src.sn && (snap.devices as any)[src.sn]?.deviceName) || `AC${src.slot}`,
+              on: src.forceCharge === 'FORCE_CHARGE_ON',
+            }))
+        : null,
     }, apsREvModelFromEnv());
 
     const alerts = [

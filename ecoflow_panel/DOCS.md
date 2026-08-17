@@ -4492,6 +4492,12 @@ curtailing", not power-present), `ecoflow_pv_curtailment_surplus_watts`,
 
 ### 7.9 On-peak grid-to-battery detection (`server/src/peakGridDraw.ts`)
 
+**v1.80.0 — the cause is read, not inferred.** `ch{n}ForceCharge` (PD303 quota)
+is the per-channel force-charge switch = the app's "Charge Now". The verdict
+carries `forceChargeOn` (labels with FORCE_CHARGE_ON, `[]` = all off, `null` =
+not reported → the inference wording remains as fallback). Slot → Core naming
+via `Shp2EnergySource.sn` against the device roster.
+
 Detects the plant importing grid energy **into the battery** during the tariff's
 on-peak window — energy the overnight charge window buys at a fraction of the price.
 
@@ -8661,3 +8667,27 @@ Consumers verified at the pinned revision; deleting an engine also deletes its l
 9. `server/src/alertTelemetry.ts` (+ `/api/alert-telemetry`) — marginal: machine-readable fire/resolve log with no ingesting tool; cheapest to keep, first to cut if the file grows.
 
 Not candidates despite thin linkage: the forecast backtest (`/api/backtest/forecast`) is the validation instrument for the alarm-facing PV model; `debugSendCommand` and the HVAC-posture stub are documented deliberate postures, not orphans.
+
+## 12. Vendor API notes (documented, not all used)
+
+From the official EcoFlow IoT Open Platform pages (DELTA Pro Ultra = YJ751,
+Smart Home Panel 2 = PD303), verified against live `quota/all` payloads on
+2026-08-17. Read-only keys in use are listed with their projection fields in
+the sections above. Documented but **not used yet**:
+
+- **Historical data**: `POST /iot-open/sign/device/quota/data` with PD303 codes
+  (`PD303-App-LOAD-…-Week`, `PD303-Dashboard-Circuits-Line-Week` with
+  `energy_hour_{grid,oil,bak}_ch{1-12}`, battery in/out, grid, solar,
+  generator, savings). Per-circuit energy split by SOURCE — a future
+  reconciliation/backfill engine for the local accumulators.
+- **Targeted reads**: `POST /iot-open/sign/device/quota` with
+  `params.quotas: [...]` returns single keys (e.g. `backupReserveSoc`) —
+  a lighter readback than `quota/all` if the actuator ever needs one.
+- **Control (write) command codes** — documented, deliberately unused beyond
+  `PD303_APP_SET backupReserveSoc`: `ch{n}EnableSet`, `ch{n}ForceCharge`,
+  `stormIsEnable`, `epsModeInfo`, `chargeWattPower`, `foceChargeHight`,
+  `masterCur`, `oilMaxOutputWatt`, per-branch `setAmp`/`chName`/`loadSta`;
+  YJ751: `YJ751_PD_AC_CHG_SET` (`chgC20Watts`/`chg5p8Watts`),
+  `CHG_SOC_MAX_SET`/`DSG_SOC_MIN_SET`, `AC_DSG_SET`, `AC_OFTEN_OPEN_SET`,
+  standby timers. Any future write goes through the audited write framework
+  with the v1.79.0 readback pattern.
