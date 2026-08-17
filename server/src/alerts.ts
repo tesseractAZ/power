@@ -970,7 +970,16 @@ export function computeAlerts(
         const onGrid = grid?.backstopping === true;
         out.push({
           id: 'shp2-below-reserve',
-          severity: onGrid ? 'info' : 'critical',
+          // v1.81.0 (08-05 queue #3) — the ON-GRID floor touch was 'info', so the
+          // deepest crossing of the record (10%, 2026-08-16 21:16:54) produced no
+          // push while the shallower 20% band pushed [Medium]. At the TRUE floor
+          // (reserve <= 15) this is now a warning: it pushes once per episode
+          // (with normal quiet-hours queueing) without chiming as an emergency.
+          // When the reserve is ARBITRAGE-RAISED (night-charge writes 50), pool <
+          // reserve is the charge window's normal filling state — that stays
+          // info, preserving the F14 "floor-riding must not page" contract.
+          severity: onGrid ? (reserve <= 15 ? 'warning' : 'info') : 'critical',
+          ...(onGrid && reserve <= 15 ? { priority: 'medium' as const } : {}),
           category: 'SHP2',
           device: shp2.deviceName,
           sourceSn: shp2.sn,

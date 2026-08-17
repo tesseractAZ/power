@@ -2369,7 +2369,35 @@ if (loadShedAdvisoryEnabled) {
 const rateFloor = new RateFloorTracker();
 // v1.76.0 — cloud-session self-heal state (see sessionSelfHeal.ts).
 const selfHealState = freshSelfHealState();
-let selfHealCapLoggedDay: string | null = null; // v1.78.0 — one stand-down line per capped day
+let selfHealCapLoggedDay: string | null = null;
+
+// v1.81.0 — event-loop lag observability (08-05 queue #8). The 08-05 review
+// found 3.5-9.7s stalls freezing all in-flight API requests — and alarm
+// evaluation shares this loop. Recent audits show none, likely thanks to the
+// v0.10.0 analytics worker; this monitor makes that claim measurable instead
+// of inferred from absence. 500ms cadence, warn at >1.5s observed lag,
+// throttled to one line per minute with the window maximum.
+{
+  const LAG_TICK_MS = 500;
+  const LAG_WARN_MS = 1_500;
+  let lagExpected = Date.now() + LAG_TICK_MS;
+  let lagWindowMax = 0;
+  let lagLastWarnMs = 0;
+  const lagTimer = setInterval(() => {
+    const now = Date.now();
+    const lag = now - lagExpected;
+    lagExpected = now + LAG_TICK_MS;
+    if (lag > lagWindowMax) lagWindowMax = lag;
+    if (lagWindowMax > LAG_WARN_MS && now - lagLastWarnMs > 60_000) {
+      app.log.warn(`event-loop: stalled ~${Math.round(lagWindowMax)}ms (max over the last minute) — in-flight API requests and alarm evaluation were frozen for that long`);
+      lagLastWarnMs = now;
+      lagWindowMax = 0;
+    } else if (now - lagLastWarnMs > 60_000) {
+      lagWindowMax = 0; // roll the window even when quiet
+    }
+  }, LAG_TICK_MS);
+  lagTimer.unref();
+} // v1.78.0 — one stand-down line per capped day
 
 // v1.66.0 — persist the LEARNED hour-of-day baselines. The detector's comparison
 // baseline is now per-hour-of-day (see messageRateFloor.ts), and a bucket needs
