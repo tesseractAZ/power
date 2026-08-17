@@ -213,7 +213,7 @@ export const Shp2Card = memo(function Shp2Card({
 
             <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1">
               <div className="kv"><span className="kv-k">Remain (disch)</span><span className="kv-v">{fmtMins(p.backupDischargeTimeMin)}</span></div>
-              <div className="kv"><span className="kv-k">Charge time</span><span className="kv-v">{fmtMins(p.backupChargeTimeMin)}</span></div>
+              <div className="kv"><span className="kv-k">Charge time</span><span className="kv-v">{(p.chargeWattPower ?? 0) > 50 ? fmtMins(p.backupChargeTimeMin) : '—'}</span></div>
               <div className="kv"><span className="kv-k">Capacity (full)</span><span className="kv-v">{fmtWh(p.backupFullCapWh)}</span></div>
               <div className="kv"><span className="kv-k">Capacity (now)</span><span className="kv-v">{fmtWh(p.backupRemainWh)}</span></div>
               <div className="kv"><span className="kv-k">Charge power</span><span className="kv-v">{fmtW(p.chargeWattPower)}</span></div>

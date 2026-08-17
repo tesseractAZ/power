@@ -1,3 +1,53 @@
+## v1.79.0 — a cloud ACK is not an actuation
+
+### Night-charge apply readback (the 08-16 phantom write)
+
+On 2026-08-16 23:55 MST the supervised reserve write (10% -> 50%) was accepted
+by the EcoFlow cloud and never took effect on the SHP2: the device-side
+strategy quota read 10% all night, the pool ran its drawdown on the true
+floor, ~13 kWh of planned 13.1c arbitrage silently never happened — and the
+ledger scored `actuated: 1`, because the only success criterion was the API
+response. Nothing in the process ever compared the device's reading to the
+target.
+
+`decideActuation` now runs READBACK VERIFICATION on every applied,
+unreverted, unverified night: the device reading matching the target stamps
+`applyVerifiedAtMs` (one log line); a mismatch 5 minutes after the latest
+attempt re-issues the write (2 retries, each earning a fresh window, never
+into a closing window); exhaustion warns the operator once ("write did not
+take effect", with the forfeited kWh), corrects the ledger to `actuated: 0`,
+and lets the night close through the normal no-op revert. Readback pauses on
+a null reading — never retries or escalates blind. Harness:
+`scripts/mutate-actuation-readback.mjs`, 5/5 killed, mutant i is the 08-16
+incident verbatim.
+
+### Grid-loss abort
+
+A raised reserve during a grid outage cannot buy anything and manufactures a
+false AT-RESERVE-FLOOR posture on top of a real emergency (the runway alarm
+reads the same live field the engine raised). Grid absence during an applied
+window now reverts immediately, flagged in the log as the abort path.
+`gridPresent: null` (unknown) never aborts — the normal schedule holds.
+
+### Honesty batch
+
+- Poll lines stop laundering timeouts: a poll with per-device fetch failures
+  logs at warn with the failing serials named, instead of "poll ok in
+  10486ms (slow)".
+- Learned baseline anomalies ("unusual for the hour") no longer raise from a
+  device in msg-rate collapse — the 08-16 07:01 batch fired minutes-old spot
+  values against a healthy-cadence baseline. Detection state untouched;
+  raises resume on recovery.
+- A prior evening's never-applied ARM being superseded (the normal weekend
+  pattern — Friday and Saturday both target the Monday window) now logs its
+  disposition; "3 ARMED vs 2 APPLIED" was untraceable.
+- `vitalsRed` documentation corrected to what the code has always done: it
+  gates writes on HOST vitals (a struggling process), not on the alert
+  condition — which would have disabled the engine for the month err533 has
+  stood.
+- Web SHP2 card: "Charge time" renders only while actually charging
+  (>50 W), closing the last consumer the v0.15.12 flow-direction fix missed.
+
 ## v1.78.0 — alarm integrity: the operator's phone tells the truth
 
 Four defects from the 08-14/08-17 audits, all on the notification path of a

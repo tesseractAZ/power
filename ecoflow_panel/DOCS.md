@@ -5818,6 +5818,15 @@ and last render diagnostics are persisted to `broadcast-last.json` (next to the
 SQLite DB) so "what played last and did it work" survives the very restarts that
 most need auditing.
 
+**v1.79.0 — apply readback:** the actuator no longer treats a cloud ACK as an
+actuation. An applied night carries `applyVerifiedAtMs` (device readback matched
+the target), up to 2 re-issues on readback failure (5-min windows, never into a
+closing charge window), and a once-per-night operator warning + `actuated: 0`
+ledger correction on exhaustion. Grid loss during an applied window reverts
+immediately (`gridLossAbort`). The `vitalsRed` gate is HOST-vitals (struggling
+process), not alert-condition — documented as such after the 08-17 audit.
+Harness: `scripts/mutate-actuation-readback.mjs` (5 mutants).
+
 A second sidecar, `broadcast-red-replay.json`, records `{lastRedAnnouncedAtMs,
 voicedFingerprint, activeFingerprints, lastPlayedLevel}` on every
 **verified-successful RED** condition broadcast — the evidence the v1.64.0 red

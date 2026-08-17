@@ -14,6 +14,8 @@ import {
   type NightActuationState,
   type ArmablePlan,
   type ActuationTickOpts,
+  APPLY_VERIFY_AFTER_MS,
+  APPLY_MAX_RETRIES,
 } from '../src/nightChargeActuator.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -49,7 +51,7 @@ function armed(): NightActuationState {
 }
 
 function opts(overrides: Partial<ActuationTickOpts> = {}): ActuationTickOpts {
-  return { mode: 'supervised', writeReady: false, currentReservePct: 10, socCoherent: true, vitalsRed: false, ...overrides };
+  return { mode: 'supervised', writeReady: false, currentReservePct: 10, socCoherent: true, vitalsRed: false, gridPresent: true, ...overrides };
 }
 
 // ── Mode + clamp ────────────────────────────────────────────────────────────
@@ -146,7 +148,10 @@ test('idle state → none', () => {
 // ── Revert (always allowed) ─────────────────────────────────────────────────
 
 function appliedState(): NightActuationState {
-  return { ...armed(), appliedAtMs: WINDOW.startMs, priorReservePct: 10 };
+  // v1.79.0 — applyVerifiedAtMs is set: these tests pin REVERT timing/refusal
+  // semantics in isolation, so the readback machinery (tested separately
+  // below) must not trip on the fixture's unverified-write shape.
+  return { ...armed(), appliedAtMs: WINDOW.startMs, applyVerifiedAtMs: WINDOW.startMs + 1, priorReservePct: 10 };
 }
 
 test('revert fires at window close + 5 min with the prior value', () => {
@@ -263,4 +268,80 @@ test('armFromPlan: an unresolved unconfirmed attempt refuses re-arming unless pr
 test('coerceActuationState round-trips the attempt fields', () => {
   const s = attemptedState();
   assert.deepEqual(coerceActuationState(JSON.parse(JSON.stringify(s))), s);
+});
+
+/* ═══ v1.79.0 — readback verification: a cloud ACK is not an actuation ═══════ */
+
+function ackedState(over: Partial<NightActuationState> = {}): NightActuationState {
+  // The 08-16 23:55 shape: write ACK'd (appliedAtMs set), device untouched.
+  return {
+    ...armed(), applyAttemptedAtMs: T0 + 1, appliedAtMs: T0 + 1, priorReservePct: 10,
+    ...over,
+  };
+}
+
+test('THE PHANTOM: device still reads the prior reserve after the grace — retry the write', () => {
+  const a = decideActuation(ackedState(), T0 + 1 + APPLY_VERIFY_AFTER_MS, opts({ currentReservePct: 10 }));
+  assert.deepEqual(a, { kind: 'retryApply', targetPct: 43 });
+});
+
+test('device readback shows the target — stamp verification (before or after the grace)', () => {
+  assert.deepEqual(decideActuation(ackedState(), T0 + 60_000, opts({ currentReservePct: 43 })), { kind: 'applyVerified' });
+  assert.deepEqual(decideActuation(ackedState(), T0 + 1 + APPLY_VERIFY_AFTER_MS + 60_000, opts({ currentReservePct: 43 })), { kind: 'applyVerified' });
+});
+
+test('retries exhausted and still not taken — applyFailed fires exactly once', () => {
+  const s = ackedState({ applyRetries: APPLY_MAX_RETRIES, applyLastAttemptMs: T0 + 1 });
+  assert.deepEqual(decideActuation(s, T0 + 1 + APPLY_VERIFY_AFTER_MS, opts({ currentReservePct: 10 })), { kind: 'applyFailed' });
+  assert.deepEqual(
+    decideActuation({ ...s, applyEscalated: true }, T0 + 1 + APPLY_VERIFY_AFTER_MS, opts({ currentReservePct: 10 })),
+    { kind: 'none' }, 'the warning goes once per night');
+});
+
+test('each retry earns a fresh verification window (measured from applyLastAttemptMs)', () => {
+  const s = ackedState({ applyRetries: 1, applyLastAttemptMs: T0 + 10 * 60_000 });
+  assert.deepEqual(
+    decideActuation(s, T0 + 10 * 60_000 + APPLY_VERIFY_AFTER_MS - 1_000, opts({ currentReservePct: 10 })),
+    { kind: 'none' }, 'still inside the retry grace');
+});
+
+test('no retry once the window is nearly over — escalate instead of writing into a closing window', () => {
+  const nearEnd = WINDOW.endMs - APPLY_VERIFY_AFTER_MS + 1;
+  const s = ackedState({ applyLastAttemptMs: nearEnd - APPLY_VERIFY_AFTER_MS });
+  assert.deepEqual(decideActuation(s, nearEnd, opts({ currentReservePct: 10 })), { kind: 'applyFailed' });
+});
+
+test('readback pauses on a null (unknown/starved) reading — never retries or escalates blind', () => {
+  assert.deepEqual(
+    decideActuation(ackedState(), T0 + 1 + 2 * APPLY_VERIFY_AFTER_MS, opts({ currentReservePct: null })),
+    { kind: 'none' });
+});
+
+test('a verified night skips the readback machinery entirely', () => {
+  const s = ackedState({ applyVerifiedAtMs: T0 + 2 });
+  assert.deepEqual(decideActuation(s, T0 + 1 + 2 * APPLY_VERIFY_AFTER_MS, opts({ currentReservePct: 10 })), { kind: 'none' });
+});
+
+/* ═══ v1.79.0 — grid-loss abort ═════════════════════════════════════════════ */
+
+test('grid lost mid-window: revert NOW, flagged as the abort path', () => {
+  const a = decideActuation(ackedState(), T0 + 60_000, opts({ gridPresent: false }));
+  assert.deepEqual(a, { kind: 'revert', restorePct: 10, gridLossAbort: true });
+});
+
+test('grid UNKNOWN never aborts — normal schedule holds', () => {
+  const a = decideActuation(ackedState(), T0 + 60_000, opts({ gridPresent: null, currentReservePct: 43 }));
+  assert.deepEqual(a, { kind: 'applyVerified' }, 'null grid falls through to the readback, not the abort');
+});
+
+test('grid-loss abort still beats the readback machinery (order: abort > due-revert > readback)', () => {
+  const s = ackedState({ applyRetries: APPLY_MAX_RETRIES });
+  assert.deepEqual(
+    decideActuation(s, T0 + 1 + APPLY_VERIFY_AFTER_MS, opts({ gridPresent: false, currentReservePct: 10 })),
+    { kind: 'revert', restorePct: 10, gridLossAbort: true });
+});
+
+test('window-close revert unchanged (no abort flag on the normal path)', () => {
+  const a = decideActuation(ackedState(), WINDOW.endMs + 5 * 60_000 + 1, opts({}));
+  assert.deepEqual(a, { kind: 'revert', restorePct: 10 });
 });
