@@ -1,3 +1,30 @@
+## v1.80.0 — Charge Now, read instead of inferred
+
+The vendor's PD303 (Smart Home Panel 2) documentation names `ch{n}ForceCharge`
+as the per-channel "charge strength" switch — which is the EcoFlow app's
+**Charge Now**, the setting behind the 2026-08-04 on-peak grid buy. The alert
+that watches for that event carried the sentence "Nothing in the telemetry
+reports that setting directly." The platform does report it; we just did not
+know the key. All keys below were verified live in `quota/all` before mapping.
+
+- **`peak-grid-draw` names its cause.** Each SHP2 slot's force-charge state is
+  projected (`Shp2EnergySource.forceCharge`) and threaded into the verdict:
+  the alert now says "Charge Now (force charge) is ON for: Core 3 — turn it
+  off in the EcoFlow app", or redirects to task-mode/charge-power settings
+  when all three channels read OFF, or falls back to the old inference wording
+  when the state is not reported. New fact row either way.
+- **New SHP2 projection fields:** `forceChargeCeilingSoc` (`foceChargeHight`),
+  `stormWatchEnabled` (`stormIsEnable`), `epsMode` (`epsModeInfo`).
+- **New DPU projection fields:** `sysWordMode` (task mode: 0 default,
+  1 self-powered, 2 scheduled, 3 TOU), `sysBackupSoc` (the unit's own reserve),
+  `chgC20SetWatts` / `chg5p8SetWatts` (configured AC charging power — the
+  unit-side fingerprint of a Charge Now event).
+
+Also recorded in DOCS §12: the vendor's historical-data endpoint
+(`POST /iot-open/sign/device/quota/data`, per-circuit energy split by
+grid/generator/battery source) and the documented control command codes —
+queued capabilities, not yet used.
+
 ## v1.79.0 — a cloud ACK is not an actuation
 
 ### Night-charge apply readback (the 08-16 phantom write)
