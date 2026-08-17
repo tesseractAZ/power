@@ -16,6 +16,7 @@ import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
+import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, type VendorDayRecord } from './energyHistory.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
 import { isConfigured } from './notify.js';
@@ -641,6 +642,27 @@ app.get<{ Querystring: { sn?: string; ch?: string; pair?: string; days?: string 
     return await analytics.report('circuitHistory', { sn, ch: chNum, days: daysNum, metric });
   },
 );
+
+/** v1.82.0 — the stored vendor energy ledger (see energyHistory.ts). */
+app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, reply) => {
+  const state = loadVendorEnergyState();
+  if (req.query.day) {
+    const rec = state.days[req.query.day];
+    if (!rec) { reply.code(404); return { error: `no vendor record for ${req.query.day}` }; }
+    return rec;
+  }
+  const days = Object.keys(state.days).sort();
+  return { lastRunDay: state.lastRunDay, days: days.map((d) => state.days[d]) };
+});
+
+/** v1.82.0 — live vendor fetch for one day, NOT stored (verification/debug). */
+app.get<{ Querystring: { day?: string } }>('/api/debug/vendor-history', async (req, reply) => {
+  const day = req.query.day;
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) { reply.code(400); return { error: 'day=YYYY-MM-DD required' }; }
+  const shp2 = findShp2(store.get().devices);
+  if (!shp2) { reply.code(503); return { error: 'no SHP2 in the roster' }; }
+  return await fetchVendorDay(shp2.sn, day, (m) => app.log.warn(m), 12);
+});
 
 app.get<{ Querystring: { sn?: string } }>('/api/debug/raw', async (req, reply) => {
   const sn = req.query.sn;
@@ -3595,6 +3617,60 @@ function repairPrematureNightOutcomes(): void {
  * even if the owner flips the option to advisory mid-night.
  */
 let nightActuationInFlight = false;
+/**
+ * v1.82.0 — vendor energy-history daily job. Fires once per Phoenix day in the
+ * [06:35, 09:00) window (after the digest, before solar ramps the poll budget's
+ * importance), fetching YESTERDAY's vendor ledger and reconciling the two
+ * like-basis pairs (home ↔ panelLoadWh, solar ↔ pvWh). Day-keyed latch in the
+ * sidecar survives restarts. ~19 sequential vendor requests, 400ms spacing.
+ */
+let vendorEnergyJobInFlight = false;
+async function runVendorEnergyJob(): Promise<void> {
+  if (vendorEnergyJobInFlight) return;
+  vendorEnergyJobInFlight = true;
+  try {
+    const nowMs = Date.now();
+    const today = localParts(nowMs, 'America/Phoenix').ymd;
+    const state = loadVendorEnergyState();
+    if (state.lastRunDay === today) return;
+    const nowMin = phoenixMinuteOfDay(nowMs);
+    if (nowMin < 6 * 60 + 35 || nowMin >= 9 * 60) return;
+    const shp2 = findShp2(store.get().devices);
+    if (!shp2) return;
+    const yesterdayYmd = localParts(nowMs - 24 * 3_600_000, 'America/Phoenix').ymd;
+    app.log.info(`energy-history: fetching the vendor ledger for ${yesterdayYmd}`);
+    const vendor = await fetchVendorDay(shp2.sn, yesterdayYmd, (m) => app.log.warn(m));
+    // Like-basis local totals for the same Phoenix day.
+    let local: VendorDayRecord['local'] = null;
+    try {
+      const dayStart = startOfLocalDayMs(new Date(nowMs - 24 * 3_600_000));
+      const t: any = await analytics.report('totals', { sinceMs: dayStart, untilMs: dayStart + 24 * 3_600_000 });
+      local = { panelLoadWh: t?.fleet?.panelLoadWh ?? null, pvWh: t?.fleet?.pvWh ?? null };
+    } catch (e: any) {
+      app.log.warn(`energy-history: local totals unavailable for ${yesterdayYmd} (${e?.message ?? e})`);
+    }
+    const rec: VendorDayRecord = {
+      ...vendor, local,
+      driftHomePct: driftPct(vendor.homeWh, local?.panelLoadWh ?? null),
+      driftSolarPct: driftPct(vendor.solarWh, local?.pvWh ?? null),
+    };
+    state.days[yesterdayYmd] = rec;
+    state.lastRunDay = today;
+    saveVendorEnergyState(state);
+    const kwh = (wh: number | null) => (wh == null ? '—' : (wh / 1000).toFixed(1));
+    app.log.info(
+      `energy-history: ${yesterdayYmd} vendor home ${kwh(rec.homeWh)} kWh (local ${kwh(local?.panelLoadWh ?? null)}, drift ${rec.driftHomePct ?? '—'}%), `
+      + `solar ${kwh(rec.solarWh)} (local ${kwh(local?.pvWh ?? null)}, drift ${rec.driftSolarPct ?? '—'}%), `
+      + `grid ${kwh(rec.gridWh)}, battery in ${kwh(rec.batteryInWh)} / out ${kwh(rec.batteryOutWh)}, `
+      + `generator ${kwh(rec.generatorWh)}, ${rec.circuits.length}/12 circuits.`,
+    );
+  } catch (e: any) {
+    app.log.warn(`energy-history: daily job failed (${e?.message ?? e}) — retries on the next tick within the window`);
+  } finally {
+    vendorEnergyJobInFlight = false;
+  }
+}
+
 async function runNightActuationTick(): Promise<void> {
   if (nightActuationInFlight) return;
   nightActuationInFlight = true;
@@ -3820,6 +3896,8 @@ if (nightChargeEnabled) {
   // v1.50.0 — supervised-write actuator (apply at window open − 5 min, revert
   // at window close + 5 min; both fail-closed, both audited).
   const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
+  const vendorEnergyTick = setInterval(() => { void runVendorEnergyJob(); }, 60 * 1000);
+  vendorEnergyTick.unref();
   nightActuationTick.unref();
 }
 
