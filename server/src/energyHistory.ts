@@ -1,0 +1,235 @@
+/**
+ * energyHistory.ts — v1.82.0. The vendor's own energy ledger, fetched daily and
+ * reconciled against the local accumulators.
+ *
+ * WHY: the local lifetime/day counters integrate live samples, so add-on
+ * downtime (deploys, host reboots, the 89.4h recorder blackout of 07-29) leaves
+ * holes that nothing could audit. The PD303 historical-data endpoint
+ * (`POST /iot-open/sign/device/quota/data`, documented 2026-08-17) serves the
+ * SHP2's OWN daily energy totals — home, grid, solar, generator, battery
+ * in/out — plus a per-circuit split by SOURCE (grid / generator / battery)
+ * that the add-on cannot compute locally at all.
+ *
+ * DESIGN CONSTRAINTS
+ *  - READ-ONLY vendor surface; one batch per day (~19 sequential requests with
+ *    spacing) — this must never compete with the alarm path's REST budget.
+ *  - Reconciliation compares LIKE BASES ONLY: vendor "home" ↔ local
+ *    panelLoadWh and vendor "solar" ↔ local pvWh. Vendor grid / generator /
+ *    battery are RECORDED but not scored against local numbers whose basis
+ *    differs (the two-grid-quantities trap: DPU ac_in vs SHP2 gridWatt).
+ *  - Vendor values are treated as claims, not truth: the record stores both
+ *    sides and the drift, and drift is surfaced in the log — no alert, no
+ *    alarm-path coupling, until a baseline of agreement is established.
+ *  - Times sent to the endpoint are device-local (the SHP2 lives in
+ *    America/Phoenix). Formatted manually — never Intl on the Pi image.
+ */
+
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { atomicWriteFileSync } from './atomicWrite.js';
+import { config } from './config.js';
+import { ecoflow } from './ecoflow/rest.js';
+
+/* ─── vendor request codes (PD303 doc, verbatim) ──────────────────────────── */
+
+export const VENDOR_FLOW_CODES = {
+  homeWh: 'PD303-App-LOAD-LOAD-ENERGY-FLOW-chart_general_value_no_filt-Week',
+  gridWh: 'PD303-App-GRID-GRID-ENERGY-FLOW-chart_grid_value-Week',
+  solarWh: 'PD303-App-SOLAR-SOLAR-ENERGY-FLOW-chart_general_value_no_filt-Week',
+  generatorWh: 'PD303-App-GENERATOR-GENERATOR-ENERGY-FLOW-chart_general_value_no_filt-Week',
+} as const;
+export const VENDOR_BATTERY_CODE =
+  'PD303-App-BATTERY-BATTERY-ENERGY-FLOW-chart_battery_value_dual-Week';
+export const VENDOR_CIRCUIT_CODE = 'PD303-Dashboard-Circuits-Line-Week';
+
+/* ─── shapes ──────────────────────────────────────────────────────────────── */
+
+export interface VendorCircuitDay {
+  circuit: number; // 1-12
+  gridWh: number;
+  generatorWh: number;
+  batteryWh: number;
+}
+
+export interface VendorDayRecord {
+  day: string; // YYYY-MM-DD, Phoenix
+  fetchedAtMs: number;
+  homeWh: number | null;
+  gridWh: number | null;
+  solarWh: number | null;
+  generatorWh: number | null;
+  batteryInWh: number | null;
+  batteryOutWh: number | null;
+  circuits: VendorCircuitDay[];
+  /** Like-basis local comparison, when local totals were available at fetch time. */
+  local: { panelLoadWh: number | null; pvWh: number | null } | null;
+  driftHomePct: number | null;
+  driftSolarPct: number | null;
+}
+
+/* ─── pure helpers (exported for tests + the harness) ─────────────────────── */
+
+/** Device-local day window strings, manually formatted (no Intl on the Pi). */
+export function dayWindow(ymd: string): { beginTime: string; endTime: string } {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) throw new Error(`bad day: ${ymd}`);
+  return { beginTime: `${ymd} 00:00:00`, endTime: `${ymd} 23:59:59` };
+}
+
+/** The endpoint double-nests: outer {code,data:{code,data:[...]}}. Unwrap
+ *  defensively — either level missing/failed returns null, never throws. */
+export function unwrapDataRows(resp: unknown): Array<Record<string, unknown>> | null {
+  if (resp == null || typeof resp !== 'object') return null;
+  let node: any = resp;
+  // The rest client already strips the OUTER envelope (call() returns .data),
+  // so `resp` is usually the inner {code,message,data:[...]} — but tolerate
+  // being handed the full envelope too.
+  for (let depth = 0; depth < 3; depth++) {
+    if (Array.isArray(node)) return node as Array<Record<string, unknown>>;
+    if (node?.data === undefined) return null;
+    if (node.code !== undefined && String(node.code) !== '0') return null;
+    node = node.data;
+  }
+  return Array.isArray(node) ? (node as Array<Record<string, unknown>>) : null;
+}
+
+/** Single-total flow responses: [{indexName:'master_data', indexValue:N, unit:'wh'}]. */
+export function parseFlowTotalWh(resp: unknown): number | null {
+  const rows = unwrapDataRows(resp);
+  if (!rows) return null;
+  const row = rows.find((r) => r['indexName'] === 'master_data') ?? rows[0];
+  const v = Number(row?.['indexValue']);
+  return Number.isFinite(v) ? v : null;
+}
+
+/** Battery dual response: extra '1' = input_total_bat, '2' = output_total_bat. */
+export function parseBatteryDualWh(resp: unknown): { inWh: number | null; outWh: number | null } {
+  const rows = unwrapDataRows(resp);
+  if (!rows) return { inWh: null, outWh: null };
+  const pick = (extra: string): number | null => {
+    const row = rows.find((r) => String(r['extra']) === extra);
+    const v = Number(row?.['indexValue']);
+    return Number.isFinite(v) ? v : null;
+  };
+  return { inWh: pick('1'), outWh: pick('2') };
+}
+
+/** Per-circuit rows: [{detailGrid:'0', detailBattery:'0', detailGenerator:'0',
+ *  time:'2025-05-01'}, …] — STRING numerals per the doc; sum with coercion. */
+export function parseCircuitDayWh(resp: unknown, circuit: number): VendorCircuitDay | null {
+  const rows = unwrapDataRows(resp);
+  if (!rows) return null;
+  const sum = (k: string): number =>
+    rows.reduce((s, r) => {
+      const v = Number(r[k]);
+      return s + (Number.isFinite(v) ? v : 0);
+    }, 0);
+  return {
+    circuit,
+    gridWh: sum('detailGrid'),
+    generatorWh: sum('detailGenerator'),
+    batteryWh: sum('detailBattery'),
+  };
+}
+
+/** Drift %, positive = vendor reads higher. Null unless both sides are
+ *  meaningful (>= 100 Wh each — percentage drift on near-zero days is noise). */
+export function driftPct(vendorWh: number | null, localWh: number | null): number | null {
+  if (vendorWh == null || localWh == null) return null;
+  if (vendorWh < 100 || localWh < 100) return null;
+  return Math.round(((vendorWh - localWh) / localWh) * 1000) / 10;
+}
+
+/* ─── persistence sidecar (the actuator pattern; capped, atomic) ──────────── */
+
+const SIDECAR = () =>
+  process.env.VENDOR_ENERGY_STATE_PATH
+    ?? resolve(process.cwd(), config.dbPath, '..', 'vendor-energy-daily.json');
+const KEEP_DAYS = 120;
+
+export interface VendorEnergyState {
+  lastRunDay: string | null;
+  days: Record<string, VendorDayRecord>;
+}
+
+export function loadVendorEnergyState(): VendorEnergyState {
+  try {
+    if (!existsSync(SIDECAR())) return { lastRunDay: null, days: {} };
+    const raw = JSON.parse(readFileSync(SIDECAR(), 'utf8'));
+    if (raw == null || typeof raw !== 'object') return { lastRunDay: null, days: {} };
+    return {
+      lastRunDay: typeof raw.lastRunDay === 'string' ? raw.lastRunDay : null,
+      days: raw.days != null && typeof raw.days === 'object' ? raw.days : {},
+    };
+  } catch {
+    return { lastRunDay: null, days: {} }; // unreadable = start fresh; refetch is cheap
+  }
+}
+
+export function saveVendorEnergyState(state: VendorEnergyState): void {
+  const keys = Object.keys(state.days).sort();
+  while (keys.length > KEEP_DAYS) {
+    const oldest = keys.shift()!;
+    delete state.days[oldest];
+  }
+  atomicWriteFileSync(SIDECAR(), JSON.stringify(state));
+}
+
+/* ─── the fetch batch ─────────────────────────────────────────────────────── */
+
+const INTER_REQUEST_MS = 400; // gentleness; the whole batch is once daily
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Fetch one Phoenix day's vendor energy record for the SHP2. ~19 sequential
+ * requests. Any individual failure leaves that field null and continues — a
+ * partial record beats none, and nulls are visible in the API response.
+ */
+export async function fetchVendorDay(
+  sn: string,
+  ymd: string,
+  log: (m: string) => void,
+  circuitCount = 12,
+): Promise<Omit<VendorDayRecord, 'local' | 'driftHomePct' | 'driftSolarPct'>> {
+  const win = dayWindow(ymd);
+  const out: Omit<VendorDayRecord, 'local' | 'driftHomePct' | 'driftSolarPct'> = {
+    day: ymd, fetchedAtMs: Date.now(),
+    homeWh: null, gridWh: null, solarWh: null, generatorWh: null,
+    batteryInWh: null, batteryOutWh: null, circuits: [],
+  };
+  for (const [field, code] of Object.entries(VENDOR_FLOW_CODES) as Array<[keyof typeof VENDOR_FLOW_CODES, string]>) {
+    try {
+      const resp = await ecoflow.getQuotaData(sn, { code, ...win });
+      (out as any)[field] = parseFlowTotalWh(resp);
+    } catch (e: any) {
+      log(`energy-history: ${field} fetch failed for ${ymd} (${e?.message ?? e})`);
+    }
+    await sleep(INTER_REQUEST_MS);
+  }
+  try {
+    const resp = await ecoflow.getQuotaData(sn, { code: VENDOR_BATTERY_CODE, ...win });
+    const dual = parseBatteryDualWh(resp);
+    out.batteryInWh = dual.inWh;
+    out.batteryOutWh = dual.outWh;
+  } catch (e: any) {
+    log(`energy-history: battery fetch failed for ${ymd} (${e?.message ?? e})`);
+  }
+  await sleep(INTER_REQUEST_MS);
+  for (let ch = 1; ch <= circuitCount; ch++) {
+    try {
+      const resp = await ecoflow.getQuotaData(sn, {
+        code: VENDOR_CIRCUIT_CODE,
+        field1: `energy_hour_grid_ch${ch}`,
+        field2: `energy_hour_oil_ch${ch}`,
+        field3: `energy_hour_bak_ch${ch}`,
+        ...win,
+      });
+      const row = parseCircuitDayWh(resp, ch);
+      if (row) out.circuits.push(row);
+    } catch (e: any) {
+      log(`energy-history: circuit ${ch} fetch failed for ${ymd} (${e?.message ?? e})`);
+    }
+    await sleep(INTER_REQUEST_MS);
+  }
+  return out;
+}

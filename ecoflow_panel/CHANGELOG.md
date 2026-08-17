@@ -1,3 +1,31 @@
+## v1.82.0 — the vendor's own energy ledger, fetched and reconciled
+
+New engine (`energyHistory.ts`): once per day, in the 06:35-09:00 window, the
+add-on fetches YESTERDAY's energy record from the SHP2's historical-data
+endpoint (`POST /iot-open/sign/device/quota/data`, documented 2026-08-17) —
+home, grid, solar, generator, battery in/out, plus the per-circuit split by
+SOURCE (grid / generator / battery) that cannot be computed locally at all.
+
+Each day's record is reconciled against the local accumulators on the two
+LIKE-BASIS pairs only — vendor home ↔ local panel-load Wh, vendor solar ↔
+local PV Wh — with a signed drift percentage (noise-floored at 100 Wh).
+Vendor grid/generator/battery values are recorded, not scored: the two-grid-
+quantities trap (DPU ac_in vs SHP2 gridWatt) is exactly the kind of basis
+mismatch that turns a reconciliation into a false alarm. Drift goes to the
+log and the API — deliberately NO alert until a baseline of agreement exists.
+
+Why it matters: local counters integrate live samples, so every deploy, host
+reboot, and the 89.4h recorder blackout of 07-29 left holes nothing could
+audit. The vendor ledger is the independent second opinion.
+
+- Storage: `/data/vendor-energy-daily.json` sidecar (atomic, 120-day cap).
+- API: `GET /api/energy-history` (all stored days), `?day=YYYY-MM-DD` (one),
+  `GET /api/debug/vendor-history?day=` (live fetch, not stored).
+- ~19 sequential vendor requests, 400 ms spacing, once daily; individual
+  failures leave nulls and continue (a partial record beats none).
+- Parsers are pinned to the doc's verbatim fixtures (double-nested envelope,
+  string-numeral circuit rows).
+
 ## v1.81.0 — defect batch: the 08-05 queue closes out
 
 - **The true reserve floor pushes (08-05 #3).** The on-grid 10% floor touch was

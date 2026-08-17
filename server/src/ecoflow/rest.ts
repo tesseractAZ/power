@@ -81,6 +81,11 @@ export const ecoflow = {
   /** Single-quota endpoint — works for some devices that block /quota/all (returns only requested keys). */
   getQuotaSpecific: (sn: string, quotas: string[]) =>
     call<Record<string, unknown>>('POST', '/iot-open/sign/device/quota', { sn, params: { quotas } }),
+  /** v1.82.0 — the PD303 historical-data endpoint (documented 2026-08-17):
+   *  daily/weekly energy series by flow (home/grid/solar/generator/battery)
+   *  and per-circuit split by source. READ-only despite the POST verb. */
+  getQuotaData: (sn: string, params: Record<string, unknown>) =>
+    call<unknown>('POST', '/iot-open/sign/device/quota/data', { sn, params }),
   getMqttCertification: () => call<MqttCertification>('GET', '/iot-open/sign/certification'),
   /**
    * v0.9.6 — WRITE-side: send an arbitrary command to a device.

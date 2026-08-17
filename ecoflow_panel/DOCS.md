@@ -8668,6 +8668,25 @@ Consumers verified at the pinned revision; deleting an engine also deletes its l
 
 Not candidates despite thin linkage: the forecast backtest (`/api/backtest/forecast`) is the validation instrument for the alarm-facing PV model; `debugSendCommand` and the HVAC-posture stub are documented deliberate postures, not orphans.
 
+## 12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)
+
+Daily job (06:35-09:00 Phoenix window, day-latched in the sidecar, restart
+safe) fetching yesterday's SHP2 historical-data record: `homeWh`, `gridWh`,
+`solarWh`, `generatorWh`, `batteryInWh`/`batteryOutWh` (extra 1/2), and 12
+per-circuit rows split by source (`energy_hour_{grid,oil,bak}_ch{n}`).
+
+Reconciliation scores LIKE BASES ONLY (`driftPct`, signed toward the vendor,
+null under 100 Wh on either side): vendor home ↔ local `fleet.panelLoadWh`,
+vendor solar ↔ local `fleet.pvWh` (both from the analytics `totals` report
+over the same Phoenix day). Grid/generator/battery are recorded unscored —
+see the two-grid-quantities note in §5. No alert is emitted from this engine.
+
+State: `/data/vendor-energy-daily.json` (atomic writes, 120-day cap, corrupt
+file = start fresh). API: `GET /api/energy-history[?day=]`,
+`GET /api/debug/vendor-history?day=` (live, unstored). Failure mode: any
+single fetch failure logs at warn, leaves that field null, and the batch
+continues; a failed batch retries each tick inside the window.
+
 ## 12. Vendor API notes (documented, not all used)
 
 From the official EcoFlow IoT Open Platform pages (DELTA Pro Ultra = YJ751,
