@@ -681,6 +681,9 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
                 ? [{ label: 'Implied draw', value: `${Math.round((-pctPerHour / 100) * sp.backupFullCapWh)} W avg` }]
                 : []),
               { label: 'Trailing window', value: '3 h regression' },
+              // v1.81.0 — the alert is served from a cache (up to FORECAST_TTL_MS
+              // old); the facts are self-consistent but can trail generatedAt.
+              { label: 'As of', value: new Date(now).toISOString() },
               { label: 'Fit quality (R²)', value: fit.r2.toFixed(2) },
               { label: 'Reserve floor', value: `${reserve}%` },
               { label: 'Time to reserve', value: `${hrs}h ${mins}m` },

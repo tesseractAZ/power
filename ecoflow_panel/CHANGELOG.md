@@ -1,3 +1,28 @@
+## v1.81.0 — defect batch: the 08-05 queue closes out
+
+- **The true reserve floor pushes (08-05 #3).** The on-grid 10% floor touch was
+  info-tier, so the deepest pool crossing on record (2026-08-16 21:16:54)
+  produced no push while the shallower 20% band pushed [Medium]. At the
+  genuine floor (reserve <= 15) `shp2-below-reserve` is now a warning with a
+  once-per-episode [Medium] push and normal quiet-hours queueing — still no
+  siren while the grid backstops. An arbitrage-raised reserve (night-charge
+  writes 50) keeps the quiet info advisory: a charge window filling the pool
+  must not page nightly (the F14 contract, preserved and now tested both ways).
+- **Clock samples are RTT-gated (08-05 #6).** A Date-header sample from a
+  request slower than max(2x median RTT, 3s) is rejected as latency, not
+  clock (the ±3s adopt-then-revise sawtooth rode 4.7s/3.8s polls; a 15.6s
+  post-reboot poll inflated one adoption by ~half its RTT). When RTT is
+  known, the return leg (rtt/2) is compensated out of the measurement. Cold
+  start keeps an 8s absolute ceiling only, so the v1.69.0 8521-recovery path
+  — the whole point of the offset — is never blocked.
+- **Event-loop lag monitor (08-05 #8).** 500ms cadence, one warn line per
+  minute with the observed maximum when lag exceeds 1.5s. The 08-05 review
+  measured 3.5-9.7s stalls; recent audits show none — this makes that claim
+  measurable instead of inferred from absence.
+- The replay-gate suppression line no longer says "spoken <30 min ago"
+  (stale since the v1.78.0 identity default); forecast-runtime alerts carry
+  an "As of" fact (they are served from a cache up to 10 minutes old).
+
 ## v1.80.0 — Charge Now, read instead of inferred
 
 The vendor's PD303 (Smart Home Panel 2) documentation names `ch{n}ForceCharge`

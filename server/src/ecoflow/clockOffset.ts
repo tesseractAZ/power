@@ -28,11 +28,30 @@
 
 /** Ignore deltas below this — that is round-trip latency, not clock skew. */
 export const OFFSET_DEADBAND_MS = 2_000;
+/** v1.81.0 — RTT gate: a sample from a slow request is latency, not clock.
+ *  Adoptions in the 08-05 audit coincided with 4.7s/3.8s polls against a ~0.5s
+ *  baseline (the ±3s adopt-then-revise sawtooth); a 15.6s poll after the 08-15
+ *  reboot inflated one adoption by ~half its RTT. Once >= RTT_MEDIAN_MIN_SAMPLES
+ *  are seen, reject samples whose RTT exceeds max(2x median, RTT_GATE_FLOOR_MS);
+ *  before that, only an absolute ceiling applies (never block the 8521-recovery
+ *  path, whose rejections arrive at normal RTT). */
+export const RTT_GATE_FLOOR_MS = 3_000;
+export const RTT_GATE_COLD_MS = 8_000;
+export const RTT_MEDIAN_MIN_SAMPLES = 5;
+const RTT_WINDOW = 15;
 /** Refuse deltas beyond this — a header that far out is not credible. */
 export const OFFSET_SANITY_LIMIT_MS = 24 * 60 * 60 * 1000;
 
 let offsetMs = 0;
 let adoptedAtMs: number | null = null;
+let rttWindow: number[] = [];
+
+
+function rttMedian(): number | null {
+  if (rttWindow.length < RTT_MEDIAN_MIN_SAMPLES) return null;
+  const sorted = [...rttWindow].sort((x, y) => x - y);
+  return sorted[Math.floor(sorted.length / 2)];
+}
 
 export interface OffsetUpdate {
   /** True when this response changed the offset we sign with. */
@@ -42,23 +61,36 @@ export interface OffsetUpdate {
   /** The raw measured delta for this response, null when unusable. */
   measuredMs: number | null;
   /** Why a measurement was rejected, for the log. */
-  rejected: 'no-header' | 'unparseable' | 'implausible' | 'within-deadband' | null;
+  rejected: 'no-header' | 'unparseable' | 'implausible' | 'within-deadband' | 'rtt-inflated' | null;
 }
 
 /**
  * Feed the `Date` header from any EcoFlow response. Pure w.r.t. its inputs — the
  * local time is injected so this unit-tests without a clock.
  */
-export function noteServerDate(header: string | null | undefined, localNowMs: number): OffsetUpdate {
+export function noteServerDate(header: string | null | undefined, localNowMs: number, rttMs?: number): OffsetUpdate {
   if (!header) return { adopted: false, offsetMs, measuredMs: null, rejected: 'no-header' };
   const serverMs = Date.parse(header);
   if (!Number.isFinite(serverMs)) {
     return { adopted: false, offsetMs, measuredMs: null, rejected: 'unparseable' };
   }
-  // The header is the moment the server generated the response, so it trails our
-  // send by roughly half the round trip. At the scale that matters here (seconds to
-  // minutes of skew) that bias is negligible, and the deadband absorbs it.
-  const measured = serverMs - localNowMs;
+  // v1.81.0 — RTT gate BEFORE the window learns from this sample: a
+  // latency-inflated response must neither adopt nor drag the median up.
+  if (rttMs != null && Number.isFinite(rttMs) && rttMs >= 0) {
+    const med = rttMedian();
+    const gate = med == null ? RTT_GATE_COLD_MS : Math.max(2 * med, RTT_GATE_FLOOR_MS);
+    if (rttMs > gate) {
+      return { adopted: false, offsetMs, measuredMs: null, rejected: 'rtt-inflated' };
+    }
+    rttWindow.push(rttMs);
+    if (rttWindow.length > RTT_WINDOW) rttWindow.shift();
+  }
+  // The header is the moment the server generated the response, which trails our
+  // send by roughly half the round trip; localNowMs is taken at RECEIVE. When the
+  // RTT is known, compensate the return leg instead of leaving it as bias — at a
+  // 0.5s poll it is noise inside the deadband, at a gated-borderline poll it is
+  // seconds. (v1.69.0 accepted the bias; v1.81.0 removes it where measurable.)
+  const measured = serverMs - localNowMs + (rttMs != null && Number.isFinite(rttMs) && rttMs >= 0 ? rttMs / 2 : 0);
   if (Math.abs(measured) > OFFSET_SANITY_LIMIT_MS) {
     return { adopted: false, offsetMs, measuredMs: measured, rejected: 'implausible' };
   }
@@ -85,4 +117,5 @@ export function offsetAdoptedAtMs(): number | null {
 export function resetClockOffset(): void {
   offsetMs = 0;
   adoptedAtMs = null;
+  rttWindow = []; // v1.81.0
 }

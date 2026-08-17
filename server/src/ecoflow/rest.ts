@@ -47,6 +47,7 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
 
   const reqHeaders: Record<string, string> = { ...headers };
   if (method !== 'GET') reqHeaders['Content-Type'] = 'application/json;charset=UTF-8';
+  const reqStartedMs = Date.now(); // v1.81.0 — RTT for the clock-sample gate
   const res = await request(url, { method, headers: reqHeaders, body });
   // v1.69.0 — learn the server clock from EVERY response, including error responses.
   // The 8521 "signature is wrong" rejection carries a Date header too, so the very
@@ -56,6 +57,7 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
   const upd = noteServerDate(
     (res.headers as Record<string, string | string[] | undefined>)['date'] as string | undefined,
     Date.now(),
+    Date.now() - reqStartedMs,
   );
   if (upd.adopted) {
     onClockOffsetAdopted?.(upd.offsetMs, before);
