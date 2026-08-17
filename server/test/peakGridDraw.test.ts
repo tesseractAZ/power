@@ -5,6 +5,7 @@ import {
   attributeCores, CORE_ATTRIBUTION_MIN_W,
   PEAK_GRID_DRAW_ALERT_ID, DEFAULT_PEAK_DRAW_CONFIG,
   type PeakDrawInputs, type PeakDrawConfig,
+  forceChargeText,
 } from '../src/peakGridDraw.js';
 import { buildApsREvModel } from '../src/tariff.js';
 
@@ -218,4 +219,48 @@ test('no dominant Core still produces a usable alert', () => {
   const [a] = peakGridDrawAlerts(v, PEAK_TS);
   assert.equal(a.facts?.find((f) => f.label === 'Drawing')?.value, 'no single Core dominant');
   assert.ok(!/Drawing now:/.test(a.detail), 'no dangling empty clause');
+});
+
+/* ═══ v1.80.0 — the cause is READ, not inferred (ch{n}ForceCharge) ══════════ */
+
+test('force-charge ON is named in the verdict and the alert text', () => {
+  resetPeakDrawOnset();
+  const tick = (minsFromStart: number) => evaluatePeakDraw({
+    nowMs: PEAK_TS + minsFromStart * MIN,
+    gridImportW: 11614, panelLoadW: 6505, pvW: 1345,
+    socPct: 41, reserveSocPct: 10, gridPresent: true,
+    coreDraws: [{ label: 'Core 3', acInWatts: 3100 }],
+    forceCharge: [
+      { label: 'Core 3', on: true },
+      { label: 'Core 1', on: false },
+      { label: 'AC3', on: false },
+    ],
+  }, TARIFF, CFG);
+  tick(0);
+  const v = tick(10);
+  resetPeakDrawOnset();
+  assert.equal(v.active, true);
+  assert.deepEqual(v.forceChargeOn, ['Core 3']);
+  const [alert] = peakGridDrawAlerts(v, PEAK_TS + 10 * MIN);
+  assert.ok(alert.detail.includes('Charge Now (force charge) is ON for: Core 3'),
+    'the alert names the cause read from the platform');
+  assert.ok(!alert.detail.includes('Nothing in the telemetry reports'), 'the inference-era text is gone');
+  const fact = alert.facts!.find((f) => f.label === 'Charge Now (force charge)');
+  assert.equal(fact?.value, 'ON: Core 3');
+});
+
+test('all channels OFF: the alert redirects to task mode / charge power', () => {
+  assert.equal(forceChargeText([]).includes('reads OFF on all three channels'), true);
+  assert.equal(forceChargeText([]).includes('task mode'), true);
+});
+
+test('state not reported (null): the inference wording survives as the fallback', () => {
+  assert.ok(forceChargeText(null).includes('inferred from power flow'));
+  const v = evaluatePeakDraw({
+    nowMs: PEAK_TS,
+    gridImportW: 11614, panelLoadW: 6505, pvW: 1345,
+    socPct: 41, reserveSocPct: 10, gridPresent: true, coreDraws: [],
+  }, TARIFF, CFG);
+  resetPeakDrawOnset();
+  assert.equal(v.forceChargeOn, null, 'absent input stays null, never fabricated');
 });

@@ -65,6 +65,7 @@ function buildDpu(idx: number, sn: string, opts: { soc?: number; pvW?: number; s
     sysErrCode: opts.sysErrCode ?? 0,
     emsParaVolMaxMv: 58_000, emsParaVolMinMv: 42_000,
     chgMaxSoc: 100, dsgMinSoc: 10,
+    sysWordMode: null, sysBackupSoc: null, chgC20SetWatts: null, chg5p8SetWatts: null,
   };
   return {
     sn, deviceName: `DELTA-PRO-ULTRA-${idx}`,
