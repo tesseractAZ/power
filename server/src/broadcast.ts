@@ -1517,7 +1517,7 @@ export function startBroadcastMonitor(
     // alongside it, and that announcement was < 30 min ago. Anything else fires
     // immediately at any age. See redReplayGate.ts.
     if (redReplayGate.shouldSuppress({ observed: level, voicedFingerprint, activeFingerprints: criticalFingerprints, msSinceBoot: Date.now() - bootMs, nowMs: Date.now() })) {
-      log(`broadcast: red suppressed — the same standing fault was spoken <30 min ago (${voicedFingerprint ? describeFingerprint(voicedFingerprint) : '?'}; active: ${criticalIds.join(', ')})`);
+      log(`broadcast: red suppressed — this standing fault was already announced, and nothing about it has changed (${voicedFingerprint ? describeFingerprint(voicedFingerprint) : '?'}; active: ${criticalIds.join(', ')})`);
       adoptLevel(level, crit);
       return;
     }

@@ -52,12 +52,28 @@ test('F14 — pool pinned at EXACTLY the reserve floor classifies at/below, not 
   assert.equal(nearReserve(alerts), undefined, 'shp2-near-reserve must NOT double-fire');
 });
 
-test('F14 — exactly-at-reserve while grid-backstopped stays a quiet info advisory', () => {
+test('F14/v1.81.0 — the TRUE floor on-grid is a warning (pushes once), never a siren', () => {
+  // Superseded contract: v1.17.0 pinned info here, and on 2026-08-16 21:16:54
+  // the deepest pool crossing of the record produced no push while the 20%
+  // band had pushed [Medium] — the 08-05 queue's confirmed defect #3. At the
+  // genuine reserve floor a once-per-episode [Medium] push is owed; the
+  // "must not page" concern lives on in the raised-reserve case below.
   resetOnScreenSocBandForTesting();
   const alerts = computeAlerts(devices(shp2(10, 10)), undefined, { backstopping: true, reason: 'grid present' });
   const below = belowReserve(alerts);
   assert.ok(below);
-  assert.equal(below?.severity, 'info', 'on-grid at-the-floor is info — nightly floor-riding must not page');
+  assert.equal(below?.severity, 'warning');
+  assert.equal(below?.priority, 'medium');
+});
+
+test('v1.81.0 — an ARBITRAGE-RAISED reserve (night-charge 50%) does NOT page while filling', () => {
+  // During a charge window the pool sits below the raised reserve by design;
+  // that is the F14 floor-riding case and it stays a quiet info advisory.
+  resetOnScreenSocBandForTesting();
+  const alerts = computeAlerts(devices(shp2(45, 50)), undefined, { backstopping: true, reason: 'grid present' });
+  const below = belowReserve(alerts);
+  assert.ok(below);
+  assert.equal(below?.severity, 'info', 'the charge window must not page nightly');
 });
 
 test('F14 — one point above reserve is still "approaching" (warning off-grid)', () => {

@@ -75,3 +75,49 @@ test('a clock AHEAD of the server is corrected too (negative offset)', () => {
   assert.ok(currentOffsetMs() < 0, 'negative offset');
   assert.ok(Math.abs(signingNowMs(LOCAL) - serverMs) < 1000);
 });
+
+/* ═══ v1.81.0 — the RTT gate: latency is not clock skew ═════════════════════ */
+
+test('a latency-inflated sample is rejected once a median exists (the 08-05 sawtooth)', () => {
+  resetClockOffset();
+  // Build a healthy median: five ~500ms polls, clock offset genuinely ~0.
+  for (let i = 0; i < 5; i++) {
+    noteServerDate(new Date(1_000_000 + i).toUTCString(), 1_000_000 + i, 500);
+  }
+  // A 4.7s poll (the audit's exact figure) carries a header that trails by
+  // seconds of LATENCY, not skew — the old code adopted a spurious offset here.
+  const upd = noteServerDate(new Date(1_000_000 - 4_000).toUTCString(), 1_000_000, 4_700);
+  assert.equal(upd.adopted, false);
+  assert.equal(upd.rejected, 'rtt-inflated');
+  assert.equal(currentOffsetMs(), 0, 'the sawtooth adoption is gone');
+  resetClockOffset();
+});
+
+test('cold start: only the absolute ceiling gates — 8521 recovery is never blocked', () => {
+  resetClockOffset();
+  // First-ever sample, normal RTT, genuinely skewed clock (the 2026-08-04 case):
+  // adoption must work immediately, no median required.
+  const skewMs = 170_000;
+  const upd = noteServerDate(new Date(2_000_000 + skewMs).toUTCString(), 2_000_000, 600);
+  assert.equal(upd.adopted, true, 'the whole point of v1.69.0 survives the gate');
+  assert.ok(Math.abs(currentOffsetMs() - (skewMs + 300)) < 1_500, 'offset ≈ skew + rtt/2 compensation');
+  resetClockOffset();
+});
+
+test('cold start: an absurd-RTT sample is still rejected', () => {
+  resetClockOffset();
+  const upd = noteServerDate(new Date(3_000_000 - 8_000).toUTCString(), 3_000_000, 15_581);
+  assert.equal(upd.rejected, 'rtt-inflated', 'the 08-15 15.6s poll cannot teach the clock anything');
+  resetClockOffset();
+});
+
+test('return-leg compensation: measured is corrected by +rtt/2 when RTT is known', () => {
+  resetClockOffset();
+  // Server header 3s behind receive-time, but 4s RTT (accepted cold, under 8s):
+  // half the RTT is return-leg, so true skew ≈ -3s + 2s = -1s — inside the
+  // deadband, NO adoption. The uncompensated code would have adopted -3s.
+  const upd = noteServerDate(new Date(4_000_000 - 3_000).toUTCString(), 4_000_000, 4_000);
+  assert.equal(upd.adopted, false);
+  assert.equal(upd.rejected, 'within-deadband');
+  resetClockOffset();
+});
