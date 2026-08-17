@@ -159,6 +159,7 @@ import {
 } from './nightChargeGate.js';
 import {
   resolveNightChargeMode,
+  APPLY_MAX_RETRIES,
   armFromPlan,
   decideActuation,
   emptyActuationState,
@@ -3419,6 +3420,14 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
       armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
       if (armedCandidate) {
+        // v1.79.0 — an earlier evening's never-applied ARM being replaced is a
+        // normal weekend pattern (Fri and Sat both target the Monday window),
+        // but 3 ARMED vs 2 APPLIED was untraceable without a disposition line.
+        if (nightActuationMem.day != null && nightActuationMem.day !== today &&
+            nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null &&
+            nightActuationMem.targetPct != null) {
+          app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, buy ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
+        }
         supervisedCtx = {
           // Day-qualified: a weekend plan's window can be ~28 h out, and a bare
           // clock time would read as tonight (see fmtDeadlineSpoken).
@@ -3587,12 +3596,14 @@ async function runNightActuationTickInner(): Promise<void> {
   const currentReservePct: number | null =
     typeof sp?.backupReserveSoc === 'number' ? sp.backupReserveSoc : null;
 
+  const gridNow = liveGridBackstop(store.get().devices);
   const action = decideActuation(state, nowMs, {
     mode: NIGHT_CHARGE_MODE,
     writeReady: getLatestReadiness()?.writeReady === true,
     currentReservePct,
     socCoherent,
     vitalsRed: currentAssessment()?.level === 'crit',
+    gridPresent: typeof gridNow.present === 'boolean' ? gridNow.present : null,
   });
   if (action.kind === 'none' || !shp2) return;
 
@@ -3630,7 +3641,56 @@ async function runNightActuationTickInner(): Promise<void> {
     return;
   }
 
+  if (action.kind === 'applyVerified') {
+    // v1.79.0 — the DEVICE now reads the target: the actuation is real, not
+    // merely cloud-ACK'd. One line, stamped once.
+    persistNightActuation({ ...state, applyVerifiedAtMs: nowMs, lastError: null });
+    app.log.info(`night-charge: write VERIFIED by device readback — backupReserveSoc reads ${state.targetPct}% for ${state.day}.`);
+    return;
+  }
+
+  if (action.kind === 'retryApply') {
+    // v1.79.0 — cloud ACK'd but the device never took it (the 08-16 phantom).
+    persistNightActuation({ ...state, applyRetries: state.applyRetries + 1, applyLastAttemptMs: nowMs });
+    app.log.warn(`night-charge: apply readback FAILED — device still reads ${currentReservePct ?? 'unknown'}% ${Math.round((nowMs - (state.applyLastAttemptMs ?? state.appliedAtMs ?? nowMs)) / 60_000)}m after the ACK'd write; re-issuing (retry ${state.applyRetries + 1}/${APPLY_MAX_RETRIES}).`);
+    const rr = await setBackupReserveSoc({
+      sn: shp2.sn, targetPct: action.targetPct, source: { ua: 'night-charge-supervised-retry' },
+    });
+    if (rr.outcome !== 'success' && !rr.rateLimited) {
+      persistNightActuation({ ...nightActuationMem, lastError: rr.message ?? rr.code ?? 'retry write failed' });
+    }
+    return;
+  }
+
+  if (action.kind === 'applyFailed') {
+    // v1.79.0 — retries exhausted; the ledger must not keep a phantom
+    // actuation and the operator must hear about the forfeited buy. The night
+    // still closes through the normal revert (a no-op restore).
+    persistNightActuation({ ...state, applyEscalated: true });
+    try { recorder.recordNightOutcome(state.day, { actuated: 0 }); }
+    catch (e: any) { app.log.warn(`night-charge: actuated correction failed (${e?.message ?? e})`); }
+    app.log.error(`night-charge: write NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${state.targetPct}% but the device still reads ${currentReservePct ?? 'unknown'}% after ${state.applyRetries} retries. Tonight's buy (~${state.buyKwh ?? '—'} kWh) is forfeited; ledger corrected to actuated:0.`);
+    try {
+      await sendNotification(loadNotifyConfig(), {
+        severity: 'warning',
+        dedupId: 'night_charge_apply_failure',
+        title: 'Night-charge: write did not take effect',
+        body:
+          `The supervised reserve write for ${state.day} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
+          + `still reads ${currentReservePct ?? 'unknown'}% (target ${state.targetPct}%) after ${state.applyRetries} re-issues. `
+          + `Tonight's planned buy (~${state.buyKwh ?? '—'} kWh) will not happen; the pool stays on its normal floor. `
+          + 'No action needed tonight — the panel is grid-backstopped — but if this repeats, check the SHP2 cloud link.',
+      });
+    } catch (e: any) {
+      app.log.warn(`night-charge: apply-failure notify failed (${e?.message ?? e})`);
+    }
+    return;
+  }
+
   // action.kind === 'revert'
+  if (action.gridLossAbort) {
+    app.log.warn(`night-charge: GRID LOST mid-window — aborting the buy and restoring the ${action.restorePct}% floor now (a raised reserve in an outage is a false AT-RESERVE-FLOOR posture).`);
+  }
   const r = await setBackupReserveSoc({
     sn: shp2.sn, targetPct: action.restorePct, source: { ua: 'night-charge-supervised-revert' },
   });

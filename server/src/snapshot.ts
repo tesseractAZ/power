@@ -420,10 +420,14 @@ function guessProductFromName(name: string): string {
 // debug breadcrumb below cannot become poll-cadence log spam.
 const quotaErrLogged = new Set<string>();
 
-export async function refreshAll(store: SnapshotStore, log: (m: string) => void = () => {}): Promise<void> {
+export async function refreshAll(store: SnapshotStore, log: (m: string) => void = () => {}): Promise<string[]> {
   store.markDeviceListAttempt();
   const list = await ecoflow.listDevices();
   store.setDeviceList(list);
+  // v1.79.0 — the tick's poll line must not say a bare "ok" when a device
+  // fetch inside it timed out (four 10.4-10.5 s polls logged "ok" across two
+  // audits with the failing device unnamed).
+  const failedSns: string[] = [];
   await Promise.all(
     list
       .filter((d) => d.online === 1)
@@ -434,6 +438,7 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
         } catch (e: any) {
           const msg = String(e?.message ?? e);
           store.setDeviceError(d.sn, msg);
+          failedSns.push(d.sn);
           // v1.40.0: debug-log once per device per session — persistent quota
           // failures (e.g. API code 1006, an account-permission limitation on
           // some device classes) previously surfaced ONLY in the snapshot,
@@ -445,6 +450,7 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
         }
       }),
   );
+  return failedSns;
 }
 
 /** Flatten nested object/array into a flat key map using dot/bracket notation. */
@@ -498,9 +504,14 @@ export function startPollLoop(
     if (stopped) return;
     const t0 = Date.now();
     try {
-      await refreshAll(store, log);
+      const failedSns = await refreshAll(store, log);
       const tookMs = Date.now() - t0;
-      if (lastPollFailed) {
+      // v1.79.0 — a poll with per-device fetch failures is not a bare "ok":
+      // name the devices at warn so the 10 s connect-timeout ceiling stops
+      // hiding inside "poll ok in 10486ms (slow)".
+      if (failedSns.length > 0) {
+        warn(`poll completed in ${tookMs}ms with ${failedSns.length} device fetch failure(s): ${failedSns.join(', ')} — serving from cache/presence`);
+      } else if (lastPollFailed) {
         log(`poll ok in ${tookMs}ms (recovered)`);   // failure→ok transition: keep at INFO
       } else if (tookMs >= SLOW_POLL_MS) {
         log(`poll ok in ${tookMs}ms (slow)`);         // latency anomaly: keep at INFO

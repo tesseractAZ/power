@@ -44,6 +44,16 @@ export function clampReserveTarget(targetSocPct: number): number {
  *  buys most of the night; later than that the announced sizing is stale). */
 export const APPLY_LEAD_MS = 5 * 60_000;
 export const APPLY_LATE_MS = 30 * 60_000;
+/** v1.79.0 - how long after an apply (or retry) the device readback must show
+ *  the target before we treat the write as not-taken. The strategy quota
+ *  refreshes on a minutes cadence; 5 min is ~3 refresh opportunities. */
+export const APPLY_VERIFY_AFTER_MS = 5 * 60_000;
+/** v1.79.0 - re-issue attempts after a cloud-ACK'd write fails readback. On
+ *  2026-08-16 the Sunday write was ACK'd and the device never took it; the
+ *  ledger scored a phantom actuation and ~13 kWh of arbitrage was silently
+ *  forfeited. Two retries span ~15 min of the window. */
+export const APPLY_MAX_RETRIES = 2;
+
 /** Revert fires 5 min after the plan's charge window closes. */
 export const REVERT_LAG_MS = 5 * 60_000;
 /** Consecutive revert failures before the critical escalation annunciates. */
@@ -74,6 +84,16 @@ export interface NightActuationState {
   /** The reserve value read immediately before the write — the revert target. */
   priorReservePct: number | null;
   revertedAtMs: number | null;
+  /** v1.79.0 - when the DEVICE readback first showed the target after apply.
+   *  null on an applied night = the write is cloud-ACK'd but not yet proven. */
+  applyVerifiedAtMs: number | null;
+  /** v1.79.0 - readback-failure re-issues of the apply (cap APPLY_MAX_RETRIES). */
+  applyRetries: number;
+  /** v1.79.0 - most recent apply attempt (initial or retry); readback is
+   *  measured from here so each retry gets its own verification window. */
+  applyLastAttemptMs: number | null;
+  /** v1.79.0 - the apply-failure warning already went (once per night). */
+  applyEscalated: boolean;
   revertAttempts: number;
   /** The critical revert-failure annunciation already fired (once per night). */
   revertEscalated: boolean;
@@ -86,6 +106,7 @@ export function emptyActuationState(): NightActuationState {
     windowStartMs: null, windowEndMs: null, cancelled: false,
     applyAttemptedAtMs: null, attemptBaselinePct: null,
     appliedAtMs: null, priorReservePct: null, revertedAtMs: null,
+    applyVerifiedAtMs: null, applyRetries: 0, applyLastAttemptMs: null, applyEscalated: false,
     revertAttempts: 0, revertEscalated: false, lastError: null,
   };
 }
@@ -116,6 +137,10 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     appliedAtMs: num(o.appliedAtMs),
     priorReservePct: num(o.priorReservePct),
     revertedAtMs: num(o.revertedAtMs),
+    applyVerifiedAtMs: num(o.applyVerifiedAtMs),
+    applyRetries: num(o.applyRetries) ?? 0,
+    applyLastAttemptMs: num(o.applyLastAttemptMs),
+    applyEscalated: o.applyEscalated === true,
     revertAttempts: num(o.revertAttempts) ?? 0,
     revertEscalated: o.revertEscalated === true,
     lastError: str(o.lastError),
@@ -185,11 +210,19 @@ export function armFromPlan(
 export type ActuationAction =
   | { kind: 'none' }
   | { kind: 'apply'; targetPct: number }
-  | { kind: 'revert'; restorePct: number }
+  | { kind: 'revert'; restorePct: number; gridLossAbort?: boolean }
   /** A write whose confirmation was lost is proven applied by the live reserve
    *  reading — the driver stamps it as applied (priorPct = the attempt-time
    *  baseline) so the normal revert path takes over. */
-  | { kind: 'adopt'; priorPct: number };
+  | { kind: 'adopt'; priorPct: number }
+  /** v1.79.0 - the device readback confirms the applied target: stamp it. */
+  | { kind: 'applyVerified' }
+  /** v1.79.0 - cloud ACK'd, device never took it; re-issue the write. */
+  | { kind: 'retryApply'; targetPct: number }
+  /** v1.79.0 - retries exhausted, device still reads the old reserve: warn the
+   *  operator once and correct the ledger (actuated:0). The night then closes
+   *  through the normal revert path (a no-op restore). */
+  | { kind: 'applyFailed' };
 
 export interface ActuationTickOpts {
   mode: NightChargeMode;
@@ -200,9 +233,16 @@ export interface ActuationTickOpts {
   currentReservePct: number | null;
   /** I11 SoC coherence verdict from the same snapshot. */
   socCoherent: boolean;
-  /** True while the alert condition is red — no APPLY during an active
-   *  critical (reverts still run; restoring the floor is the safe direction). */
+  /** v1.79.0 doc correction — this is the HOST-VITALS level (selfVitals
+   *  'crit': CPU/memory/loop pressure), NOT the alert condition. Deliberate:
+   *  gating on alert-critical would have disabled the engine for the entire
+   *  month the Core 3 err533 critical has stood. The name stays for state
+   *  compatibility; the semantic is "no device writes from a struggling
+   *  process" (reverts still run — restoring the floor is the safe direction). */
   vitalsRed: boolean;
+  /** v1.79.0 — live grid presence (gridSta-derived); null = unknown. False
+   *  during an applied window aborts the buy and reverts immediately. */
+  gridPresent: boolean | null;
 }
 
 /**
@@ -254,13 +294,38 @@ export function decideActuation(
   // ── REVERT (checked next — always allowed, mode-independent: a raised
   // reserve must come back down even if the owner flipped to advisory). ──
   if (state.appliedAtMs != null && state.revertedAtMs == null) {
+    const restorable = state.priorReservePct != null &&
+      Number.isInteger(state.priorReservePct) &&
+      state.priorReservePct >= 10 && state.priorReservePct <= 50;
+    // v1.79.0 — GRID-LOSS ABORT: with the grid gone the buy cannot happen and
+    // the raised reserve only manufactures a false AT-RESERVE-FLOOR posture on
+    // top of a real outage. Restore the true floor now. gridPresent === null
+    // (unknown) never aborts — fail to the normal schedule.
+    if (opts.gridPresent === false && restorable) {
+      return { kind: 'revert', restorePct: state.priorReservePct!, gridLossAbort: true };
+    }
     const due =
       state.cancelled ||
       (state.windowEndMs != null && nowMs >= state.windowEndMs + REVERT_LAG_MS);
-    if (due && state.priorReservePct != null &&
-        Number.isInteger(state.priorReservePct) &&
-        state.priorReservePct >= 10 && state.priorReservePct <= 50) {
-      return { kind: 'revert', restorePct: state.priorReservePct };
+    if (due && restorable) {
+      return { kind: 'revert', restorePct: state.priorReservePct! };
+    }
+    // v1.79.0 — READBACK VERIFICATION. A cloud ACK is not an actuation: on
+    // 2026-08-16 23:55 an ACK'd write never reached the SHP2, nothing compared
+    // the device's reserve to the target, and the night ran its drawdown on a
+    // floor the ledger said was raised. Strict equality against the DEVICE-side
+    // reading; measured from the latest attempt so each retry earns a fresh
+    // window. Readback pauses while the reading is null (starved/unknown).
+    if (state.applyVerifiedAtMs == null && state.targetPct != null) {
+      if (opts.currentReservePct === state.targetPct) return { kind: 'applyVerified' };
+      const attemptedAt = state.applyLastAttemptMs ?? state.appliedAtMs;
+      if (opts.currentReservePct != null && nowMs - attemptedAt >= APPLY_VERIFY_AFTER_MS) {
+        if (state.applyRetries < APPLY_MAX_RETRIES &&
+            (state.windowEndMs == null || nowMs < state.windowEndMs - APPLY_VERIFY_AFTER_MS)) {
+          return { kind: 'retryApply', targetPct: state.targetPct };
+        }
+        if (!state.applyEscalated) return { kind: 'applyFailed' };
+      }
     }
     return { kind: 'none' };
   }

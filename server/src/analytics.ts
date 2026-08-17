@@ -1,4 +1,5 @@
 import type { DeviceSnapshot } from './snapshot.js';
+import { getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { liveGridBackstop } from './gridState.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
@@ -377,6 +378,7 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
   const curHour = new Date().getHours();
   const windowHours = new Set([(curHour + 23) % 24, curHour, (curHour + 1) % 24]);
 
+  const starvedSnsForBaseline = new Set(getRateFloorCollapses().map((c) => c.sn)); // v1.79.0
   for (const t of buildBaselineTargets(devices)) {
     if (t.live == null || !Number.isFinite(t.live)) continue;
     const pts = recorder.query(t.sn, t.metric, now - BASELINE_HISTORY_MS, now);
@@ -455,6 +457,11 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     // figures the reader sees, not from the unrounded absDev, so the three
     // numbers always add up. Detection (the floor gate above and z-score) still
     // uses the full-precision absDev/med — only display changes here.
+    // v1.79.0 — no anomaly raises from a starved feed: on 2026-08-16 07:01 the
+    // MPPT-temp family fired off devices in msg-rate collapse (minutes-old
+    // spot values against a healthy-cadence baseline). Detection state is
+    // untouched; the raise resumes when the feed recovers.
+    if (starvedSnsForBaseline.has(t.sn)) continue;
     const dispLive = Math.round(t.live);
     const dispMed = Math.round(med);
     const dispAbsDev = Math.abs(dispLive - dispMed);
