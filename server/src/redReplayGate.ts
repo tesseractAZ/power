@@ -25,12 +25,12 @@
  *      that WAS spoken at the last successful red announcement;
  *   4. every active counted critical's fingerprint was already in the set present
  *      at that announcement — nothing new has appeared alongside it; and
- *   5. that announcement was less than RED_REPLAY_MIN_GAP_MS (30 min, the
- *      operator's explicit choice) ago.
+ *   5. the announcement is not older than RED_REPLAY_MIN_GAP_MS — which since
+ *      v1.78.0 defaults to Infinity ("announced since this fault began" — see
+ *      the constant's doc). Env-set, it restores the v1.64.0 timed reminder.
  *
- * Anything else => announce. A new/changed fault => announce immediately,
- * whatever the timer says. >= 30 min since the last red => announce. A green in
- * between wipes the state entirely => announce.
+ * Anything else => announce. A new/changed fault => announce immediately. A
+ * green in between wipes the state entirely => announce.
  *
  * ★★★ WHY A FINGERPRINT, NOT THE BARE ALERT ID
  * --------------------------------------------
@@ -205,12 +205,26 @@ export function parseRedAnnounceState(raw: unknown): RedAnnounceState | null {
 }
 
 /**
- * The operator's explicit choice: a standing red re-announces at reboot, but not
- * if it was already announced less than this ago. Env-tunable like the warm-up
- * window it pairs with (BROADCAST_BOOT_WARMUP_MS).
+ * v1.78.0 — the timer is GONE by default: an UNCHANGED fault that was verifiably
+ * announced does not replay at boot, however long ago that announcement was.
+ *
+ * The v1.64.0 30-minute default was measured and found to be a stopwatch, not a
+ * state check: the 2026-08-13 deploy's first restart replayed the full 56.7 s
+ * klaxon for a fault standing since 07-20, and the second restart escaped the
+ * same replay by 27.5 seconds of image-pull luck (29 m 32 s elapsed vs the
+ * 30-minute bar). The 08-15 host reboot replayed it again — three documented
+ * full replays for one already-acknowledged fault. Identity, not elapsed time,
+ * is what "already heard" means: conditions (2)-(4) already force an announce
+ * on ANY change — new code, new title, a second critical, an escalation, or a
+ * green in between — and outside the boot warm-up window the gate is inert.
+ *
+ * Setting BROADCAST_RED_REPLAY_MIN_GAP_MS restores the timed behaviour (that
+ * many ms of silence per announcement) for an operator who wants the reminder.
  */
 export const RED_REPLAY_MIN_GAP_MS =
-  Number(process.env.BROADCAST_RED_REPLAY_MIN_GAP_MS) || 30 * 60 * 1000;
+  Number(process.env.BROADCAST_RED_REPLAY_MIN_GAP_MS) > 0
+    ? Number(process.env.BROADCAST_RED_REPLAY_MIN_GAP_MS)
+    : Infinity;
 
 export interface RedReplayInputs {
   /** The condition level this tick would broadcast. */
@@ -271,7 +285,8 @@ export function isRedReplaySuppressed(i: RedReplayInputs): boolean {
   // announcements; it is never sufficient by itself to suppress one.)
   const known = new Set(i.persisted.activeFingerprints);
   if (!i.activeFingerprints.every((f) => known.has(f))) return false;
-  // (5) TIMER: only the last RED_REPLAY_MIN_GAP_MS of quiet earns silence.
+  // (5) AGE: with the v1.78.0 default (Infinity) any verified prior announce of
+  // this exact fault suppresses; an env-set gap restores the timed reminder.
   const elapsed = i.nowMs - i.persisted.lastRedAnnouncedAtMs;
   // Negative elapsed = persisted timestamp is in the future (clock stepped
   // backwards before NTP settled — routine on a Pi with no RTC). We cannot

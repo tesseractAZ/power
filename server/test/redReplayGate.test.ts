@@ -799,9 +799,12 @@ test('redReplayGate — noteRedAnnounced overwrites the timestamp, the voiced fa
   }
 });
 
-test('redReplayGate — the operator chose 30 minutes explicitly', () => {
+test('redReplayGate — v1.78.0 supersedes the v1.64.0 30-minute stopwatch', () => {
+  // The 30-minute default was measured to be timing luck: 2026-08-13 restart 2
+  // missed a full replay by 27.5 s, and the 08-15 reboot replayed a 3-week-old
+  // fault in full. Identity decides now; the env var restores the reminder.
   if (process.env.BROADCAST_RED_REPLAY_MIN_GAP_MS == null) {
-    assert.equal(RED_REPLAY_MIN_GAP_MS, 30 * 60 * 1000);
+    assert.equal(RED_REPLAY_MIN_GAP_MS, Infinity);
   }
 });
 
@@ -920,4 +923,49 @@ test('★ conditionFromAlerts — criticalFingerprints are STABLE while the deta
     { id: 'vdiff-crit-SN-1', severity: 'critical', category: 'Battery', device: 'Core 3', title: 'Cell imbalance', detail },
   ] as any).criticalFingerprints;
   assert.deepEqual(at('cell spread 92 mV'), at('cell spread 141 mV'), '★ otherwise the gate is a silent no-op');
+});
+
+/* ─── v1.78.0 — identity replaces the stopwatch ───────────────────────────── */
+
+test('v1.78.0 default: RED_REPLAY_MIN_GAP_MS is Infinity (announced since fault began)', () => {
+  // CI runs with the env var unset; an env-set value restores the timed reminder.
+  assert.equal(RED_REPLAY_MIN_GAP_MS, Infinity);
+});
+
+test('the 27.5-second-margin case: an identical fault suppresses at ANY gap', () => {
+  // 2026-08-13: restart 2 escaped a full 56.7s klaxon by 27.5s of image-pull
+  // luck (29m32s vs the old 30m bar). And the 08-15 reboot at a 44h gap
+  // replayed it in full. Identity now decides; elapsed time does not.
+  const fp = alertFingerprint({ id: 'dpu-err-Y711FAB59J234000', title: 'Battery protection fault', fault: 'err533' });
+  for (const gapMs of [29.5 * 60_000, 31 * 60_000, 44 * 3_600_000, 21 * 24 * 3_600_000]) {
+    assert.equal(isRedReplaySuppressed({
+      observed: 'red', voicedFingerprint: fp, activeFingerprints: [fp],
+      persisted: { lastRedAnnouncedAtMs: 1_000_000, voicedFingerprint: fp, activeFingerprints: [fp], lastPlayedLevel: 'red' },
+      msSinceBoot: 60_000, nowMs: 1_000_000 + gapMs, windowMs: 10 * 60_000, minGapMs: RED_REPLAY_MIN_GAP_MS,
+    }), true, `gap ${gapMs}ms must suppress an identical, already-announced fault`);
+  }
+});
+
+test('an env-style FINITE gap still enforces the timed reminder', () => {
+  const fp = alertFingerprint({ id: 'dpu-err-X', title: 'Battery protection fault', fault: 'err533' });
+  const base = { observed: 'red' as const, voicedFingerprint: fp, activeFingerprints: [fp],
+    persisted: { lastRedAnnouncedAtMs: 1_000_000, voicedFingerprint: fp, activeFingerprints: [fp], lastPlayedLevel: 'red' as const },
+    msSinceBoot: 60_000, windowMs: 10 * 60_000, minGapMs: 30 * 60_000 };
+  assert.equal(isRedReplaySuppressed({ ...base, nowMs: 1_000_000 + 29 * 60_000 }), true);
+  assert.equal(isRedReplaySuppressed({ ...base, nowMs: 1_000_000 + 31 * 60_000 }), false, 'past an explicit gap, the reminder replays');
+});
+
+test('identity still forces an announce at ANY gap: changed fault / new sibling / escalation / future clock', () => {
+  const spoken = alertFingerprint({ id: 'dpu-err-X', title: 'Battery protection fault', fault: 'err533' });
+  const changed = alertFingerprint({ id: 'dpu-err-X', title: 'Battery protection fault', fault: 'err461' });
+  const persisted = { lastRedAnnouncedAtMs: 1_000_000, voicedFingerprint: spoken, activeFingerprints: [spoken], lastPlayedLevel: 'red' as const };
+  const base = { observed: 'red' as const, msSinceBoot: 60_000, nowMs: 1_000_000 + 7 * 24 * 3_600_000, windowMs: 10 * 60_000, minGapMs: Infinity };
+  // a different error code on the same id is a DIFFERENT fault
+  assert.equal(isRedReplaySuppressed({ ...base, voicedFingerprint: changed, activeFingerprints: [changed], persisted }), false);
+  // a new critical alongside the spoken one
+  assert.equal(isRedReplaySuppressed({ ...base, voicedFingerprint: spoken, activeFingerprints: [spoken, changed], persisted }), false);
+  // last played below red = escalation
+  assert.equal(isRedReplaySuppressed({ ...base, voicedFingerprint: spoken, activeFingerprints: [spoken], persisted: { ...persisted, lastPlayedLevel: 'yellow' } }), false);
+  // future-dated evidence (clock stepped back) can never suppress
+  assert.equal(isRedReplaySuppressed({ ...base, nowMs: 999_000, voicedFingerprint: spoken, activeFingerprints: [spoken], persisted }), false);
 });
