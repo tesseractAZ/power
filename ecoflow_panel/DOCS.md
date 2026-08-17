@@ -5065,7 +5065,29 @@ Served at **`GET /api/alert-settings`** (`alertSettingsResponse()`, cached in-pr
 
 ---
 
-### 8.9 Resolve integrity — positive evidence only (v1.75.0)
+### 8.9 Resolve integrity — positive evidence only (v1.75.0, extended v1.77.0/v1.78.0)
+
+**v1.77.0** — a device flagged `online: false` is not positive evidence regardless of
+data freshness (`deviceEvidencePositive` = fresh **and** not currently offline);
+`online: undefined` stays neutral.
+
+**v1.78.0** — three extensions:
+
+- **`Alert.sourceSn`** — an alert constructor that knows its source device declares
+  it; `fallingEdgeFrozenByEvidence` reads the declaration first and falls back to
+  searching the id for a serial. The fallback silently skipped every SN-less id
+  (`shp2-src-err-<slot>`, `backup-soc-<pct>`), which is how a 7-second SHP2
+  `/status` blip pushed a false "Resolved: Energy source error" on 2026-08-12.
+  All five SHP2-derived constructors declare `sourceSn`. Evidence-exempt families
+  (`offline-*`, `msg-rate-floor-*`, `zombie-*`) stay exempt even when declared.
+- **Ownership handoff** (`resolveHandoffOwner`) — `backup-soc-<pct>` vanishing while
+  `shp2-below-reserve`/`shp2-near-reserve` is active in the same tick is the v0.44.0
+  dedup transferring the story on a *worsening* transition, not a recovery: the
+  tracked entry retires with **no resolve push** and one log line. A genuine band
+  recovery (successor absent) resolves unchanged.
+- **Resolves respect quiet hours** — a resolve owed inside `NOTIFY_QUIET_HOURS`
+  holds (the tracked entry retries each tick) and delivers when the window opens.
+  Fires were already gated; resolves were not, and landed at 00:02/00:53.
 
 On 2026-08-08 a cloud presence-flap made device projections unevaluable and the
 falling-edge loop read "alert no longer computed" as "condition recovered",
@@ -5692,7 +5714,7 @@ The monitor polls `store.get().alerts` on a **10 s `setInterval`** and fires on
 | `newCrit` | `level === 'red' && crit > prevCrit` — a *new* critical while already red re-fires. |
 | **Restart continuation** (`isRestartContinuation`) | Within `BROADCAST_BOOT_WARMUP_MS` (default **10 min**), a yellow/green transition at or below the persisted pre-restart baseline is adopted silently (analytics warm-up re-presents an already-broadcast advisory as a fresh rise). **RED is never suppressed here** — this function sees only levels, and a level-only red≤red match would swallow a new critical behind a stale one. |
 | **Boot phantom-red hold** (`holdBootRed`) | Within the warm-up window, the *first* fresh red is held for **one tick** to confirm it is standing and not a telemetry-populate phantom (`prevLevel` is NOT advanced, so a persisting red re-fires ≤10 s late; a one-tick phantom clears and is never spoken). |
-| **Red replay gate** (`redReplayGate`, v1.64.0) | Runs *after* the phantom hold, so only a confirmed red reaches it. Suppresses a red re-announce **only when all of these hold**: inside the warm-up window; the last verified broadcast of any level was itself a red (so this is **not an escalation** — same `LEVEL_RANK` ladder as the storm gate); the critical that would be **spoken now** has the same **fingerprint** (`id` + `title` + `fault` code, ★ never the bare id — `dpu-err-<sn>` spans every `sysErrCode`) as the one that **was spoken** then; no unrecognised critical is active alongside it; and that announcement was < `BROADCAST_RED_REPLAY_MIN_GAP_MS` (**30 min**) ago. A changed fault, a new fault or an escalation announces immediately at any age. Reaching **green** destroys the evidence (all-clear ⇒ the next red is a new event). Missing/corrupt/future-dated/legacy-shape state ⇒ announce. Level adopted on suppression (no retry). |
+| **Red replay gate** (`redReplayGate`, v1.64.0) | Runs *after* the phantom hold, so only a confirmed red reaches it. Suppresses a red re-announce **only when all of these hold**: inside the warm-up window; the last verified broadcast of any level was itself a red (so this is **not an escalation** — same `LEVEL_RANK` ladder as the storm gate); the critical that would be **spoken now** has the same **fingerprint** (`id` + `title` + `fault` code, ★ never the bare id — `dpu-err-<sn>` spans every `sysErrCode`) as the one that **was spoken** then; no unrecognised critical is active alongside it; and the announcement is not older than `BROADCAST_RED_REPLAY_MIN_GAP_MS` — **default `Infinity` since v1.78.0** ("announced since this fault began"): an unchanged, verifiably announced fault never replays at boot; setting the env var restores the v1.64.0 timed reminder. A changed fault, a new fault or an escalation announces immediately at any age. Reaching **green** destroys the evidence (all-clear ⇒ the next red is a new event). Missing/corrupt/future-dated/legacy-shape state ⇒ announce. Level adopted on suppression (no retry). |
 | **In-flight** (`tickInFlight`) | An MA announcement blocks 20–105 s (>> the 10 s tick). If a different level arrives mid-flight, the tick returns WITHOUT advancing `prevLevel`, so the missed transition re-presents next tick (prevents a lost yellow→green). |
 | `cfg.enabled` | Disabled → adopt level, no broadcast. |
 | **All-clear-vs-critical** | A `green` is adopted silently (no spoken all-clear) if any critical alert with `annunciate !== false` is still active — avoids a spoken "all clear" contradicting a runway-alarm critical on the same speakers. |
