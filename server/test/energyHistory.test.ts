@@ -66,3 +66,46 @@ test('driftPct: like-basis only, noise-floored, signed toward the vendor', () =>
   assert.equal(driftPct(50_000, null), null);
   assert.equal(driftPct(50, 40), null, 'near-zero days produce noise, not drift');
 });
+
+/* ═══ v1.85.0 — backfill day selection + empirical RTE (advisory) ═══════════ */
+
+import { prevYmd, missingDays, computeEmpiricalRte, MIN_RTE_SAMPLE_DAYS, RTE_MIN_DAY_IN_WH } from '../src/energyHistory.js';
+
+test('prevYmd: month/year boundaries without Intl', () => {
+  assert.equal(prevYmd('2026-08-17'), '2026-08-16');
+  assert.equal(prevYmd('2026-08-01'), '2026-07-31');
+  assert.equal(prevYmd('2026-01-01'), '2025-12-31');
+  assert.equal(prevYmd('2028-03-01'), '2028-02-29', 'leap year');
+});
+
+test('missingDays: walks backward from yesterday, skips stored, honors horizon + cap', () => {
+  const stored = new Set(['2026-08-16', '2026-08-14']);
+  assert.deepEqual(missingDays(stored, '2026-08-17', 5, 10),
+    ['2026-08-15', '2026-08-13', '2026-08-12']);
+  assert.deepEqual(missingDays(stored, '2026-08-17', 5, 1), ['2026-08-15'], 'cap bounds each run');
+  assert.deepEqual(missingDays(new Set(), '2026-08-17', 2, 10), ['2026-08-16', '2026-08-15']);
+});
+
+const rteDay = (inWh: number | null, outWh: number | null): any => ({
+  day: 'x', fetchedAtMs: 0, homeWh: null, gridWh: null, solarWh: null, generatorWh: null,
+  batteryInWh: inWh, batteryOutWh: outWh, circuits: [], local: null,
+  driftHomePct: null, driftSolarPct: null,
+});
+
+test('empirical RTE: only meaningful-charge days qualify; null until the sample floor', () => {
+  // Four qualifying days (floor is 5) → rte stays null however clean the math.
+  const four = Array.from({ length: 4 }, () => rteDay(10_000, 8_600));
+  assert.equal(computeEmpiricalRte(four).rte, null);
+  // Five qualifying days → 43_000/50_000 = 0.86.
+  const five = [...four, rteDay(10_000, 8_600)];
+  const r = computeEmpiricalRte(five);
+  assert.equal(r.sampleDays, MIN_RTE_SAMPLE_DAYS);
+  assert.equal(r.rte, 0.86);
+  // The 08-16 shape (batteryIn=0 on a sunny day) never qualifies — vendor
+  // "in" semantics are unproven and a zero-in day would explode the ratio.
+  const withZero = [...five, rteDay(0, 57_810)];
+  assert.equal(computeEmpiricalRte(withZero).sampleDays, MIN_RTE_SAMPLE_DAYS, 'the zero-in day is excluded');
+  assert.equal(RTE_MIN_DAY_IN_WH, 1_000);
+  // Null-in days (fetch failure) are excluded, never treated as zero.
+  assert.equal(computeEmpiricalRte([rteDay(null, 5_000)]).sampleDays, 0);
+});

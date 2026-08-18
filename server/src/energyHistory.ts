@@ -174,6 +174,73 @@ export function saveVendorEnergyState(state: VendorEnergyState): void {
   atomicWriteFileSync(SIDECAR(), JSON.stringify(state));
 }
 
+/* ─── v1.85.0: backfill day selection (pure) ──────────────────────────────── */
+
+/** Previous Phoenix day of a YYYY-MM-DD string — pure date arithmetic, no
+ *  Intl, DST-free (Phoenix). */
+export function prevYmd(ymd: string): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const t = Date.UTC(y, m - 1, d) - 86_400_000;
+  const p = new Date(t);
+  return `${p.getUTCFullYear()}-${String(p.getUTCMonth() + 1).padStart(2, '0')}-${String(p.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * The days a backfill run should fetch: walking backward from YESTERDAY,
+ * skipping days already stored, to at most `horizonDays` back, returning at
+ * most `cap` days per run (oldest last — recent history first).
+ */
+export function missingDays(
+  stored: ReadonlySet<string>,
+  todayYmd: string,
+  horizonDays: number,
+  cap: number,
+): string[] {
+  const out: string[] = [];
+  let day = prevYmd(todayYmd);
+  for (let back = 0; back < horizonDays && out.length < cap; back++) {
+    if (!stored.has(day)) out.push(day);
+    day = prevYmd(day);
+  }
+  return out;
+}
+
+/* ─── v1.85.0: empirical round-trip efficiency (ADVISORY — never wired into
+ * buy sizing until the vendor's battery-in semantics have a proven baseline;
+ * the first live day read batteryIn=0 on a sunny day, so their "in" may be
+ * grid-only. The report states its basis honestly.) ──────────────────────── */
+
+export interface EmpiricalRte {
+  sampleDays: number;
+  totalInWh: number;
+  totalOutWh: number;
+  /** out/in over qualifying days; null until >= MIN_RTE_SAMPLE_DAYS qualify. */
+  rte: number | null;
+}
+
+export const MIN_RTE_SAMPLE_DAYS = 5;
+/** A day qualifies only when the vendor recorded a meaningful charge. */
+export const RTE_MIN_DAY_IN_WH = 1_000;
+
+export function computeEmpiricalRte(days: ReadonlyArray<VendorDayRecord>): EmpiricalRte {
+  let totalInWh = 0;
+  let totalOutWh = 0;
+  let sampleDays = 0;
+  for (const d of days) {
+    if (d.batteryInWh == null || d.batteryOutWh == null) continue;
+    if (d.batteryInWh < RTE_MIN_DAY_IN_WH) continue;
+    sampleDays++;
+    totalInWh += d.batteryInWh;
+    totalOutWh += d.batteryOutWh;
+  }
+  return {
+    sampleDays, totalInWh, totalOutWh,
+    rte: sampleDays >= MIN_RTE_SAMPLE_DAYS && totalInWh > 0
+      ? Math.round((totalOutWh / totalInWh) * 1000) / 1000
+      : null,
+  };
+}
+
 /* ─── the fetch batch ─────────────────────────────────────────────────────── */
 
 const INTER_REQUEST_MS = 400; // gentleness; the whole batch is once daily

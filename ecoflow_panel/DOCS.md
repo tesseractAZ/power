@@ -8711,8 +8711,16 @@ over the same Phoenix day). Grid/generator/battery are recorded unscored —
 see the two-grid-quantities note in §5. No alert is emitted from this engine.
 
 State: `/data/vendor-energy-daily.json` (atomic writes, 120-day cap, corrupt
-file = start fresh). API: `GET /api/energy-history[?day=]`,
-`GET /api/debug/vendor-history?day=` (live, unstored). Failure mode: any
+file = start fresh). API: `GET /api/energy-history[?day=]` (includes the
+advisory `empiricalRte` summary since v1.85.0),
+`GET /api/debug/vendor-history?day=` (live, unstored),
+`POST /api/energy-history/backfill?days=N` (bounded manual backfill).
+**v1.85.0**: the morning job also backfills up to 10 older missing days
+(60-day horizon, per-day persistence) and reports empirical RTE
+(`computeEmpiricalRte`: qualifying days need ≥ 1 kWh vendor battery-in;
+≥ 5 qualifying days before any number is reported; advisory only —
+`DISPATCH_RTE` is untouched until the vendor's battery-in semantics have a
+proven baseline). Failure mode: any
 single fetch failure logs at warn, leaves that field null, and the batch
 continues; a failed batch retries each tick inside the window.
 
