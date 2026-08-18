@@ -14,7 +14,7 @@ import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare,
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
 // on-peak starts, and the SAME fleet flow aggregation the dashboard shows.
 import { apsREvModelFromEnv } from './tariff.js';
-import { evaluatePeakDraw, peakGridDrawAlerts } from './peakGridDraw.js';
+import { evaluatePeakDraw, peakGridDrawAlerts, setLastPeakDrawObservation } from './peakGridDraw.js';
 import {
   computeLearnedAlerts,
   computeBaselineAlerts,
@@ -1565,6 +1565,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // on-peak is correct outage protection rather than waste.
     const peakFlow = aggregateFleetFlow(snap.devices);
     const peakShp2 = findShp2(snap.devices);
+    const fcSlots = peakShp2?.projection.sources?.length
+      ? peakShp2.projection.sources
+          .filter((src: any) => typeof src.forceCharge === 'string')
+          .map((src: any) => ({
+            slot: src.slot as number,
+            label: ((src.sn && (snap.devices as any)[src.sn]?.deviceName) || `AC${src.slot}`) as string,
+            on: src.forceCharge === 'FORCE_CHARGE_ON',
+          }))
+      : null;
     const peakDraw = evaluatePeakDraw({
       nowMs: Date.now(),
       gridImportW: peakFlow.acIn,
@@ -1585,16 +1594,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         })),
       // v1.80.0 — ch{n}ForceCharge from the SHP2 quota: name each slot by its
       // Core (via the slot's SN) so the alert can say WHICH unit has Charge Now
-      // on, instead of inferring the setting from power flow.
-      forceCharge: peakShp2?.projection.sources?.length
-        ? peakShp2.projection.sources
-            .filter((src: any) => typeof src.forceCharge === 'string')
-            .map((src: any) => ({
-              label: (src.sn && (snap.devices as any)[src.sn]?.deviceName) || `AC${src.slot}`,
-              on: src.forceCharge === 'FORCE_CHARGE_ON',
-            }))
-        : null,
+      // on, instead of inferring the setting from power flow. (v1.84.0: built
+      // as fcSlots above the call so the responder gets channel numbers too.)
+      forceCharge: fcSlots?.map(({ label, on }) => ({ label, on })) ?? null,
     }, apsREvModelFromEnv());
+    // v1.84.0 — publish the observation (verdict + slot numbers) for the
+    // Charge Now responder's tick in index.ts. Same set/get pattern as
+    // messageRateFloorAlert.
+    setLastPeakDrawObservation({ verdict: peakDraw, forceChargeSlots: fcSlots, atMs: Date.now() });
 
     const alerts = [
       ...computeAlerts(snap.devices, connectivity, grid),

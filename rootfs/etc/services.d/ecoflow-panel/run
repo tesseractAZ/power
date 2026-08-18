@@ -141,6 +141,7 @@ fi
 # v0.15.2 — off-grid honesty + intelligent load-shedding ADVISOR (read + advise;
 # HA automations actuate). GRID_AVAILABLE must be false for an islanded site.
 export GRID_FLOOR_SLACK_PCT="$(bashio::config 'GRID_FLOOR_SLACK_PCT')"
+export CHARGE_NOW_RESPONSE="$(bashio::config 'CHARGE_NOW_RESPONSE')"
 if bashio::config.true 'GRID_AVAILABLE'; then
   export GRID_AVAILABLE=true
 else

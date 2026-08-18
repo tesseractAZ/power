@@ -1,3 +1,30 @@
+## v1.84.0 — Charge Now auto-off: the July ask, finally implementable safely
+
+New responder (`chargeNowResponder.ts`) closing the loop the vendor docs
+opened: when the peak-grid-draw alert fires WITH the SHP2 reporting force
+charge ("Charge Now") ON, the panel can now respond instead of only naming
+the culprit. New option **Charge Now Response** (`CHARGE_NOW_RESPONSE`):
+
+- **advisory** (default): one [Medium] push per episode naming the channel
+  and unit, with both fixes (the app, or flipping this option).
+- **supervised**: announces, writes `ch{n}ForceCharge = FORCE_CHARGE_OFF`
+  through the audited command path (`setChannelForceCharge`, 5-min
+  cooldown), then VERIFIES against the device — one retry, then an honest
+  failure push. A cloud ACK is not an actuation (v1.79.0's lesson applies
+  from day one).
+- **off**: inert.
+
+Safety rails, each pinned by the committed harness (5/5):
+- Fires only on an active peak-grid-draw verdict, which already encodes grid
+  present, genuinely on-peak, pool comfortably above reserve, and a 10-min
+  dwell. The responder never re-derives the economics.
+- STORM HOLD: any active storm-prep advisory stands the responder down —
+  an operator pre-charging ahead of weather outranks the bill.
+- One response per continuous episode; hard cap 2 supervised actions/day
+  (past it, it names the condition but writes nothing — the responder can
+  never fight a determined operator).
+- Turning force charge OFF is the only write it can ever issue.
+
 ## v1.83.0 — the settings-drift watchdog
 
 The 08-04 on-peak grid buy was a SETTING ("Charge Now") flipped in the app;
