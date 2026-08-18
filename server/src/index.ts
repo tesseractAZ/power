@@ -16,6 +16,12 @@ import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
+import {
+  extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
+  loadConfirmedSurface, saveConfirmedSurface, renderDriftPush,
+  type SettingChange, type SurfaceDevice,
+} from './settingsDrift.js';
+import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
 import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, type VendorDayRecord } from './energyHistory.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
@@ -3618,6 +3624,74 @@ function repairPrematureNightOutcomes(): void {
  */
 let nightActuationInFlight = false;
 /**
+ * v1.83.0 — settings-drift watchdog tick (see settingsDrift.ts). Read-only:
+ * extract the fleet's settings surface from the raw quota, confirm changes on
+ * two consecutive observations, classify the actuator's own reserve writes,
+ * and push one batched [Medium] notification for external changes — held
+ * through the notify quiet window like resolves are.
+ */
+const settingsDriftState = freshDriftState();
+settingsDriftState.confirmed = loadConfirmedSurface(); // null on first boot = silent adoption
+let driftPendingPush: SettingChange[] = [];
+const DRIFT_QUIET = parseNotifyQuiet(process.env.NOTIFY_QUIET_HOURS ?? '22-06');
+
+function settingsSurfaceDevices(): SurfaceDevice[] {
+  const snap = store.get();
+  const out: SurfaceDevice[] = [];
+  for (const d of Object.values(snap.devices) as any[]) {
+    const kind = d?.projection?.kind;
+    if (kind !== 'shp2' && kind !== 'dpu') continue;
+    out.push({ sn: d.sn, label: d.deviceName ?? d.sn, kind, raw: store.getRaw(d.sn) });
+  }
+  return out;
+}
+
+function runSettingsDriftTick(): void {
+  try {
+    const surface = extractSettingsSurface(settingsSurfaceDevices());
+    const evaln = evaluateDrift(settingsDriftState, surface);
+    if (evaln.adoptedBaseline) {
+      saveConfirmedSurface(settingsDriftState.confirmed!);
+      app.log.info(`settings-drift: baseline adopted (${Object.keys(settingsDriftState.confirmed!).length} keys) — changes announce from here on`);
+      return;
+    }
+    if (evaln.confirmedChanges.length > 0) {
+      const act = nightActuationMem;
+      const nowMs = Date.now();
+      const nightActive =
+        act.day != null &&
+        ((act.appliedAtMs != null && act.revertedAtMs == null) ||
+         (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
+         (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
+      const ctx = { targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive };
+      for (const c of evaln.confirmedChanges) {
+        if (classifyChange(c, ctx) === 'own-write') {
+          app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (this add-on's night-charge write — not announced)`);
+        } else {
+          app.log.warn(`settings-drift: EXTERNAL change — ${c.key} ${c.from} → ${c.to}`);
+          driftPendingPush.push(c);
+        }
+      }
+      saveConfirmedSurface(settingsDriftState.confirmed!);
+    }
+    if (driftPendingPush.length > 0 && !(DRIFT_QUIET != null && inNotifyQuiet(new Date(), DRIFT_QUIET))) {
+      const batch = driftPendingPush;
+      driftPendingPush = [];
+      const msg = renderDriftPush(batch);
+      void sendNotification(loadNotifyConfig(), {
+        severity: 'warning', dedupId: 'settings_drift', title: msg.title, body: msg.body,
+      }).catch((e: any) => {
+        // best-effort: on failure, requeue so the next tick retries
+        driftPendingPush.unshift(...batch);
+        app.log.warn(`settings-drift: push failed (${e?.message ?? e}) — will retry`);
+      });
+    }
+  } catch (e: any) {
+    app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`);
+  }
+}
+
+/**
  * v1.82.0 — vendor energy-history daily job. Fires once per Phoenix day in the
  * [06:35, 09:00) window (after the digest, before solar ramps the poll budget's
  * importance), fetching YESTERDAY's vendor ledger and reconciling the two
@@ -3898,6 +3972,8 @@ if (nightChargeEnabled) {
   const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
   const vendorEnergyTick = setInterval(() => { void runVendorEnergyJob(); }, 60 * 1000);
   vendorEnergyTick.unref();
+  const settingsDriftTick = setInterval(() => { runSettingsDriftTick(); }, 60 * 1000);
+  settingsDriftTick.unref();
   nightActuationTick.unref();
 }
 

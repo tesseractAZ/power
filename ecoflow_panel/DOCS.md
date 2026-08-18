@@ -8668,6 +8668,20 @@ Consumers verified at the pinned revision; deleting an engine also deletes its l
 
 Not candidates despite thin linkage: the forecast backtest (`/api/backtest/forecast`) is the validation instrument for the alarm-facing PV model; `debugSendCommand` and the HVAC-posture stub are documented deliberate postures, not orphans.
 
+## 12b. Settings-drift watchdog (`settingsDrift.ts`, v1.83.0)
+
+Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:
+`extractSettingsSurface` (flat-first with `pd303_mc.` fallback; DPU keys under
+`hs_yj751_pd_app_set_info_addr.`), `diffSurfaces` (both-sides rule — a key
+missing on either side is availability, never drift), `evaluateDrift`
+(2-observation debounce; confirmed baseline advances and persists),
+`classifyChange` (own-write = SHP2 `backupReserveSoc` moving to the actuator's
+target/restore while a night is in flight — logged, not pushed; everything
+else external). External changes batch into ONE [Medium] push (dedupId
+`settings_drift`) held through `NOTIFY_QUIET_HOURS`. First boot adopts
+silently. Sidecar `/data/settings-surface.json` (atomic; corrupt = silent
+re-adoption). Harness: `scripts/mutate-settings-drift.mjs` (5 mutants).
+
 ## 12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)
 
 Daily job (06:35-09:00 Phoenix window, day-latched in the sidecar, restart

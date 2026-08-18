@@ -1,3 +1,30 @@
+## v1.83.0 — the settings-drift watchdog
+
+The 08-04 on-peak grid buy was a SETTING ("Charge Now") flipped in the app;
+the 08-16 phantom write was a SETTING the cloud claimed to change and did
+not. Both were invisible until the power flow betrayed them. A new read-only
+engine (`settingsDrift.ts`) now watches the fleet's whole documented
+configuration surface — SHP2: force-charge x3, smartBackupMode, reserve,
+charge power, force-charge ceiling, storm switch, EPS, masterCur, generator
+watts; each DPU: task mode, unit reserve, AC/port charge powers, SOC
+ceiling/floor, AC-always-on, energy management — and announces any change
+with old → new and the device name.
+
+Discipline (each pinned by the committed harness, 5/5):
+- Two consecutive identical observations before a change confirms — a
+  single-poll transient never announces.
+- A key present on only one side is availability, not drift: Core 2 going
+  offline (or returning) announces nothing, while a value that CHANGED across
+  the offline gap is still caught on return.
+- The night-charge actuator's own reserve writes (10 ↔ 50 during a night in
+  flight) are classified own-write and logged, never pushed. The same reserve
+  moving with NO night active is external — the phantom-write mystery's
+  other side is now instrumented.
+- First boot adopts the surface silently as a baseline; the sidecar
+  (`/data/settings-surface.json`) survives restarts so nothing re-announces.
+- One batched [Medium] push per confirmed change set, held through the
+  notify quiet window like resolves are.
+
 ## v1.82.0 — the vendor's own energy ledger, fetched and reconciled
 
 New engine (`energyHistory.ts`): once per day, in the 06:35-09:00 window, the
