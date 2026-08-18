@@ -216,6 +216,13 @@ export interface EmpiricalRte {
   totalOutWh: number;
   /** out/in over qualifying days; null until >= MIN_RTE_SAMPLE_DAYS qualify. */
   rte: number | null;
+  /** v1.85.1 — what the ratio actually MEANS. The first 25-day backfill read
+   *  out/in = 2.41: physically impossible for a round trip, and the day shape
+   *  proves it (batteryIn ~= 0 on grid-free days, tracks grid on buy nights) —
+   *  the vendor's "battery in" counts GRID-SOURCED charging only, excluding
+   *  solar. A ratio near or above ~1.05 is therefore reported as the
+   *  grid-only interpretation, not as an efficiency. */
+  interpretation: 'rte' | 'vendor-in-is-grid-only' | 'insufficient-data';
 }
 
 export const MIN_RTE_SAMPLE_DAYS = 5;
@@ -233,11 +240,12 @@ export function computeEmpiricalRte(days: ReadonlyArray<VendorDayRecord>): Empir
     totalInWh += d.batteryInWh;
     totalOutWh += d.batteryOutWh;
   }
+  const rte = sampleDays >= MIN_RTE_SAMPLE_DAYS && totalInWh > 0
+    ? Math.round((totalOutWh / totalInWh) * 1000) / 1000
+    : null;
   return {
-    sampleDays, totalInWh, totalOutWh,
-    rte: sampleDays >= MIN_RTE_SAMPLE_DAYS && totalInWh > 0
-      ? Math.round((totalOutWh / totalInWh) * 1000) / 1000
-      : null,
+    sampleDays, totalInWh, totalOutWh, rte,
+    interpretation: rte == null ? 'insufficient-data' : rte > 1.05 ? 'vendor-in-is-grid-only' : 'rte',
   };
 }
 
