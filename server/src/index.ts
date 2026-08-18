@@ -27,7 +27,7 @@ import {
   type SettingChange, type SurfaceDevice,
 } from './settingsDrift.js';
 import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
-import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, type VendorDayRecord } from './energyHistory.js';
+import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, computeEmpiricalRte, type VendorDayRecord } from './energyHistory.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
 import { isConfigured } from './notify.js';
@@ -663,7 +663,16 @@ app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, re
     return rec;
   }
   const days = Object.keys(state.days).sort();
-  return { lastRunDay: state.lastRunDay, days: days.map((d) => state.days[d]) };
+  // v1.85.0 — advisory empirical RTE alongside the record (never buy-sizing).
+  const rte = computeEmpiricalRte(Object.values(state.days));
+  return { lastRunDay: state.lastRunDay, empiricalRte: rte, days: days.map((d) => state.days[d]) };
+});
+
+/** v1.85.0 — manual bounded backfill trigger (runs in the background). */
+app.post<{ Querystring: { days?: string } }>('/api/energy-history/backfill', async (req) => {
+  const cap = Math.max(1, Math.min(30, Number(req.query.days ?? 10) || 10));
+  void runVendorBackfill(cap).catch((e: any) => app.log.warn(`energy-history: manual backfill failed (${e?.message ?? e})`));
+  return { started: true, cap };
 });
 
 /** v1.82.0 — live vendor fetch for one day, NOT stored (verification/debug). */
@@ -3835,10 +3844,45 @@ async function runVendorEnergyJob(): Promise<void> {
       + `grid ${kwh(rec.gridWh)}, battery in ${kwh(rec.batteryInWh)} / out ${kwh(rec.batteryOutWh)}, `
       + `generator ${kwh(rec.generatorWh)}, ${rec.circuits.length}/12 circuits.`,
     );
+    // v1.85.0 — bounded backfill: up to 10 older missing days per morning,
+    // converging on the 60-day horizon in about a week without ever competing
+    // with the live poll budget outside this window.
+    await runVendorBackfill(10);
+    // v1.85.0 — empirical RTE (advisory): report what the vendor's own
+    // battery in/out imply, never wire it into buy sizing yet.
+    const all = loadVendorEnergyState();
+    const rte = computeEmpiricalRte(Object.values(all.days));
+    if (rte.rte != null) {
+      app.log.info(`energy-history: empirical RTE ${rte.rte} over ${rte.sampleDays} qualifying day(s) (in ${(rte.totalInWh / 1000).toFixed(1)} kWh, out ${(rte.totalOutWh / 1000).toFixed(1)} kWh) — DISPATCH_RTE stays 0.86 until this baseline is trusted.`);
+    }
   } catch (e: any) {
     app.log.warn(`energy-history: daily job failed (${e?.message ?? e}) — retries on the next tick within the window`);
   } finally {
     vendorEnergyJobInFlight = false;
+  }
+}
+
+let vendorBackfillInFlight = false;
+async function runVendorBackfill(cap: number): Promise<{ fetched: string[] }> {
+  if (vendorBackfillInFlight) return { fetched: [] };
+  vendorBackfillInFlight = true;
+  try {
+    const shp2 = findShp2(store.get().devices);
+    if (!shp2) return { fetched: [] };
+    const state = loadVendorEnergyState();
+    const today = localParts(Date.now(), 'America/Phoenix').ymd;
+    const targets = missingDays(new Set(Object.keys(state.days)), today, 60, cap);
+    const fetched: string[] = [];
+    for (const day of targets) {
+      const vendor = await fetchVendorDay(shp2.sn, day, (m) => app.log.warn(m));
+      state.days[day] = { ...vendor, local: null, driftHomePct: null, driftSolarPct: null };
+      fetched.push(day);
+      saveVendorEnergyState(state); // save per day — a crash keeps progress
+    }
+    if (fetched.length) app.log.info(`energy-history: backfilled ${fetched.length} day(s): ${fetched.join(', ')}`);
+    return { fetched };
+  } finally {
+    vendorBackfillInFlight = false;
   }
 }
 

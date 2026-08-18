@@ -1,3 +1,18 @@
+## v1.85.0 — ledger backfill + empirical round-trip efficiency (advisory)
+
+- **Backfill.** The vendor energy ledger now converges on a 60-day history:
+  each morning's job fetches up to 10 older missing days after the daily
+  record (progress saved per day), and `POST /api/energy-history/backfill?days=N`
+  (N ≤ 30) triggers a bounded manual run for immediate seeding.
+- **Empirical RTE (advisory only).** From stored days where the vendor
+  recorded a meaningful charge (≥ 1 kWh in), the engine reports measured
+  round-trip efficiency (out/in) — logged after the morning job and exposed
+  as `empiricalRte` on `/api/energy-history`. It needs ≥ 5 qualifying days
+  before it reports at all, zero-in days are excluded (the 08-16 record read
+  batteryIn=0 on a sunny day, so the vendor's "in" semantics are unproven —
+  possibly grid-only charging), and **DISPATCH_RTE stays 0.86**: nothing is
+  wired into buy sizing until this baseline is understood and trusted.
+
 ## v1.84.0 — Charge Now auto-off: the July ask, finally implementable safely
 
 New responder (`chargeNowResponder.ts`) closing the loop the vendor docs
