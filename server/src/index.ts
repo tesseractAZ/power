@@ -17,6 +17,11 @@ import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
 import {
+  decideChargeNowResponse, freshResponderState, resolveChargeNowMode,
+} from './chargeNowResponder.js';
+import { getLastPeakDrawObservation } from './peakGridDraw.js';
+import { setChannelForceCharge } from './ecoflow/commands.js';
+import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
   loadConfirmedSurface, saveConfirmedSurface, renderDriftPush,
   type SettingChange, type SurfaceDevice,
@@ -3624,6 +3629,98 @@ function repairPrematureNightOutcomes(): void {
  */
 let nightActuationInFlight = false;
 /**
+ * v1.84.0 — Charge Now responder tick (see chargeNowResponder.ts). Consumes
+ * the peak-grid-draw observation published by the alert monitor; never
+ * re-derives the economics. Supervised writes go through the audited
+ * setChannelForceCharge with device readback (a cloud ACK is not an
+ * actuation — v1.79.0's lesson applies here from day one).
+ */
+const chargeNowState = freshResponderState();
+const CHARGE_NOW_MODE = resolveChargeNowMode(process.env.CHARGE_NOW_RESPONSE);
+
+async function runChargeNowTick(): Promise<void> {
+  try {
+    const obs = getLastPeakDrawObservation();
+    const nowMs = Date.now();
+    if (!obs || nowMs - obs.atMs > 3 * 60_000) return; // stale basis = no action
+    const snap = store.get();
+    const stormPrepActive = (snap.alerts ?? []).some((a: any) => typeof a?.id === 'string' && a.id.startsWith('storm-'));
+    const action = decideChargeNowResponse(chargeNowState, {
+      mode: CHARGE_NOW_MODE,
+      verdictActive: obs.verdict.active,
+      slots: obs.forceChargeSlots,
+      stormPrepActive,
+      nowMs,
+      phoenixDay: localParts(nowMs, 'America/Phoenix').ymd,
+    });
+    if (action.kind === 'none') return;
+    const shp2 = findShp2(snap.devices);
+    const names = 'on' in action ? action.on.map((s) => `${s.label} (AC${s.slot})`).join(', ') : '';
+
+    if (action.kind === 'stormHold') {
+      app.log.info('charge-now: response HELD — a storm pre-charge advisory is active; an operator pre-charging ahead of weather outranks the bill.');
+      return;
+    }
+    if (action.kind === 'advise') {
+      app.log.warn(`charge-now: ADVISORY — force charge is ON during on-peak for ${names}; CHARGE_NOW_RESPONSE=advisory so no write is made.`);
+      await sendNotification(loadNotifyConfig(), {
+        severity: 'warning', dedupId: 'charge_now_response',
+        title: 'Charge Now is buying on-peak',
+        body:
+          `Force charge (the app's "Charge Now") is ON for ${names} while the plant buys grid power on-peak `
+          + 'with the pool comfortably above reserve. Turn it off in the EcoFlow app on that unit — or set '
+          + 'the add-on option "Charge Now Response" to supervised to have this handled automatically.',
+      });
+      return;
+    }
+    if (action.kind === 'turnOff' || action.kind === 'retryWrite') {
+      if (!shp2) return;
+      const slots = action.kind === 'turnOff' ? action.on.map((s) => s.slot) : action.slots;
+      app.log.warn(`charge-now: ${action.kind === 'turnOff' ? 'SUPERVISED OFF' : 'readback retry'} — writing FORCE_CHARGE_OFF for slot(s) ${slots.join(', ')}.`);
+      if (action.kind === 'turnOff') {
+        void broadcast.announce(
+          'medium',
+          `Advisory. Charge Now was buying grid power on peak for ${action.on.map((s) => s.label).join(' and ')}. The panel is turning it off now.`,
+          `Aviso. La carga inmediata estaba comprando energía de la red en horario punta para ${action.on.map((s) => s.label).join(' y ')}. El panel la está desactivando ahora.`,
+        ).then(
+          (a) => { if (!a.ok) app.log.info(`charge-now: announce suppressed (${a.error ?? 'unknown'})`); },
+          () => { /* fire-and-forget; result handled by announce's own logging */ },
+        );
+        await sendNotification(loadNotifyConfig(), {
+          severity: 'warning', dedupId: 'charge_now_response',
+          title: 'Charge Now: turning force charge OFF',
+          body:
+            `Force charge was ON for ${names} while buying on-peak with the pool above reserve. `
+            + 'The panel is writing FORCE_CHARGE_OFF through the audited path and will verify against the device.',
+        });
+      }
+      for (const slot of slots) {
+        const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: false, source: { ua: 'charge-now-responder' } });
+        if (r.outcome !== 'success') app.log.warn(`charge-now: slot ${slot} write ${r.outcome} (${r.code ?? ''} ${r.message ?? ''})`);
+      }
+      return;
+    }
+    if (action.kind === 'verified') {
+      app.log.info(`charge-now: VERIFIED by device readback — force charge OFF on slot(s) ${action.slots.join(', ')}; the on-peak buy ends with this poll cycle.`);
+      return;
+    }
+    if (action.kind === 'verifyFailed') {
+      app.log.error(`charge-now: write NEVER TOOK EFFECT — slot(s) ${action.slots.join(', ')} still read FORCE_CHARGE_ON after retries. Turn it off in the EcoFlow app.`);
+      await sendNotification(loadNotifyConfig(), {
+        severity: 'warning', dedupId: 'charge_now_response_failure',
+        title: 'Charge Now: force-charge OFF did not take effect',
+        body:
+          `The panel wrote FORCE_CHARGE_OFF but the device still reads ON for slot(s) ${action.slots.join(', ')} after a retry. `
+          + 'Turn Charge Now off in the EcoFlow app on that unit — and note this alongside the reserve-write issue for EcoFlow support.',
+      });
+      return;
+    }
+  } catch (e: any) {
+    app.log.warn(`charge-now: tick failed (${e?.message ?? e})`);
+  }
+}
+
+/**
  * v1.83.0 — settings-drift watchdog tick (see settingsDrift.ts). Read-only:
  * extract the fleet's settings surface from the raw quota, confirm changes on
  * two consecutive observations, classify the actuator's own reserve writes,
@@ -3974,6 +4071,8 @@ if (nightChargeEnabled) {
   vendorEnergyTick.unref();
   const settingsDriftTick = setInterval(() => { runSettingsDriftTick(); }, 60 * 1000);
   settingsDriftTick.unref();
+  const chargeNowTick = setInterval(() => { void runChargeNowTick(); }, 60 * 1000);
+  chargeNowTick.unref();
   nightActuationTick.unref();
 }
 

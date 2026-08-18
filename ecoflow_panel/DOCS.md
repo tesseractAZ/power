@@ -8668,6 +8668,21 @@ Consumers verified at the pinned revision; deleting an engine also deletes its l
 
 Not candidates despite thin linkage: the forecast backtest (`/api/backtest/forecast`) is the validation instrument for the alarm-facing PV model; `debugSendCommand` and the HVAC-posture stub are documented deliberate postures, not orphans.
 
+## 12c. Charge Now responder (`chargeNowResponder.ts`, v1.84.0)
+
+Consumes the peak-grid-draw observation (verdict + slot-numbered force-charge
+states) published by the alert monitor (`setLastPeakDrawObservation`) — never
+re-derives the economics; a stale observation (>3 min) is no basis to act.
+Modes via `CHARGE_NOW_RESPONSE` (fail-safe to `advisory`): advisory = one
+[Medium] push per episode; supervised = announce + audited
+`setChannelForceCharge` write (PD303_APP_SET, 5-min per-slot cooldown) +
+readback (device must show OFF within 3 min; 1 retry; honest failure push);
+off = inert. Rails: storm-prep hold (stand-down while any `storm-*` advisory
+is active, logged once per episode); episode latch (releases when the verdict
+clears or force charge reads OFF); daily cap 2 (past it: advise, never
+write); OFF is the only writable value. Harness:
+`scripts/mutate-charge-now.mjs` (5 mutants).
+
 ## 12b. Settings-drift watchdog (`settingsDrift.ts`, v1.83.0)
 
 Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:
