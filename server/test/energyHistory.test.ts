@@ -101,6 +101,7 @@ test('empirical RTE: only meaningful-charge days qualify; null until the sample 
   const r = computeEmpiricalRte(five);
   assert.equal(r.sampleDays, MIN_RTE_SAMPLE_DAYS);
   assert.equal(r.rte, 0.86);
+  assert.equal(r.interpretation, 'rte');
   // The 08-16 shape (batteryIn=0 on a sunny day) never qualifies — vendor
   // "in" semantics are unproven and a zero-in day would explode the ratio.
   const withZero = [...five, rteDay(0, 57_810)];
@@ -108,4 +109,14 @@ test('empirical RTE: only meaningful-charge days qualify; null until the sample 
   assert.equal(RTE_MIN_DAY_IN_WH, 1_000);
   // Null-in days (fetch failure) are excluded, never treated as zero.
   assert.equal(computeEmpiricalRte([rteDay(null, 5_000)]).sampleDays, 0);
+});
+
+test('v1.85.1 — the LIVE 25-day shape: out/in 2.41 is named grid-only, never an efficiency', () => {
+  // The real backfill numbers: 445.7 kWh in, 1074.3 kWh out. An "efficiency"
+  // above 1 is the vendor counting only grid-sourced charging as "in".
+  const days = Array.from({ length: 15 }, () => rteDay(29_710, 71_619));
+  const r = computeEmpiricalRte(days);
+  assert.ok(r.rte! > 2.3 && r.rte! < 2.5);
+  assert.equal(r.interpretation, 'vendor-in-is-grid-only');
+  assert.equal(computeEmpiricalRte([]).interpretation, 'insufficient-data');
 });
