@@ -197,6 +197,45 @@ export async function setBackupReserveSoc(req: ReserveWriteRequest): Promise<Com
   });
 }
 
+export const FORCE_CHARGE_COOLDOWN_MS = 5 * 60 * 1000;
+
+export interface ForceChargeWriteRequest extends Omit<CommandRequest, 'body'> {
+  /** SHP2 AC slot 1-3 (validated; the write is refused otherwise). */
+  slot: number;
+  /** Desired state — the responder only ever writes OFF, but the shape is
+   *  symmetric so a future storm pre-charge could use the same audited path. */
+  on: boolean;
+}
+
+/**
+ * v1.84.0 — the Charge Now responder's write: set `ch{n}ForceCharge` on the
+ * SHP2 (the documented PD303_APP_SET "charge strength" switch — the EcoFlow
+ * app's "Charge Now", the 2026-08-04 on-peak buy's cause). Same audited
+ * command path as the night-charge reserve write.
+ */
+export async function setChannelForceCharge(req: ForceChargeWriteRequest): Promise<CommandResult> {
+  if (!Number.isInteger(req.slot) || req.slot < 1 || req.slot > 3) {
+    return {
+      outcome: 'failure', code: 'slot-out-of-range',
+      message: `Refused: SHP2 AC slot ${req.slot} outside [1, 3].`, durationMs: 0,
+    };
+  }
+  const action = `charge-now-ch${req.slot}`;
+  if (!checkAndReserve(action, req.sn, { cooldownMs: FORCE_CHARGE_COOLDOWN_MS })) {
+    const remaining = cooldownRemainingMs(action, req.sn, FORCE_CHARGE_COOLDOWN_MS);
+    return {
+      outcome: 'failure', code: 'rate-limited',
+      message: `Wait ${Math.round(remaining / 1000)}s before another force-charge write on slot ${req.slot}.`,
+      durationMs: 0, rateLimited: true,
+    };
+  }
+  return runCommand(action, {
+    sn: req.sn,
+    source: req.source,
+    body: { cmdCode: 'PD303_APP_SET', params: { [`ch${req.slot}ForceCharge`]: req.on ? 'FORCE_CHARGE_ON' : 'FORCE_CHARGE_OFF' } },
+  });
+}
+
 /* ─── Debug: arbitrary command (admin-only) ──────────────────────────── */
 
 /**

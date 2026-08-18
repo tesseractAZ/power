@@ -229,6 +229,21 @@ export function evaluatePeakDraw(
   return assessPeakDraw({ ...i, onsetMs: onset }, tariff, cfg);
 }
 
+/* ─── the last observation (for the v1.84.0 Charge Now responder) ─────────── */
+
+export interface PeakDrawObservation {
+  verdict: PeakDrawVerdict;
+  /** Slot-numbered force-charge states (the responder needs channel numbers
+   *  to write; the verdict itself carries only labels). null = not reported. */
+  forceChargeSlots: { slot: number; label: string; on: boolean }[] | null;
+  atMs: number;
+}
+
+let lastObservation: PeakDrawObservation | null = null;
+/** Set by the alert monitor tick right after evaluation. */
+export function setLastPeakDrawObservation(o: PeakDrawObservation): void { lastObservation = o; }
+export function getLastPeakDrawObservation(): PeakDrawObservation | null { return lastObservation; }
+
 /* ─── the alert ───────────────────────────────────────────────────────────── */
 
 export const PEAK_GRID_DRAW_ALERT_ID = 'peak-grid-draw';
