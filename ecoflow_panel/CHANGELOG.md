@@ -1,3 +1,16 @@
+## v1.85.1 — the vendor's battery-in is grid-only: name it, don't misreport it
+
+The first 25-day backfill answered the semantics question within minutes of
+v1.85.0 deploying: out/in computed to 2.41 — impossible as an efficiency —
+and the day shape proves why (battery-in ≈ 0 on grid-free days, tracks the
+buy nights): the vendor counts only GRID-SOURCED charging as "battery in";
+solar charge is excluded. `EmpiricalRte` now carries an `interpretation`
+field (`rte` / `vendor-in-is-grid-only` / `insufficient-data`), the log line
+states the finding instead of printing a nonsense "RTE 2.411", and the
+grid-only series is kept for what it genuinely is: bought energy into the
+pool — the arbitrage volume. A true RTE needs the solar charge component;
+that remains future work on a different basis.
+
 ## v1.85.0 — ledger backfill + empirical round-trip efficiency (advisory)
 
 - **Backfill.** The vendor energy ledger now converges on a 60-day history:

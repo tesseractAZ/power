@@ -3852,8 +3852,10 @@ async function runVendorEnergyJob(): Promise<void> {
     // battery in/out imply, never wire it into buy sizing yet.
     const all = loadVendorEnergyState();
     const rte = computeEmpiricalRte(Object.values(all.days));
-    if (rte.rte != null) {
+    if (rte.rte != null && rte.interpretation === 'rte') {
       app.log.info(`energy-history: empirical RTE ${rte.rte} over ${rte.sampleDays} qualifying day(s) (in ${(rte.totalInWh / 1000).toFixed(1)} kWh, out ${(rte.totalOutWh / 1000).toFixed(1)} kWh) — DISPATCH_RTE stays 0.86 until this baseline is trusted.`);
+    } else if (rte.rte != null) {
+      app.log.info(`energy-history: vendor battery-in reads GRID-ONLY (out/in ${rte.rte} over ${rte.sampleDays} day(s) — impossible as an efficiency); treating it as bought-energy-into-the-pool, not an RTE input.`);
     }
   } catch (e: any) {
     app.log.warn(`energy-history: daily job failed (${e?.message ?? e}) — retries on the next tick within the window`);
