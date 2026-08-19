@@ -61,8 +61,16 @@ export interface VendorDayRecord {
   batteryInWh: number | null;
   batteryOutWh: number | null;
   circuits: VendorCircuitDay[];
-  /** Like-basis local comparison, when local totals were available at fetch time. */
-  local: { panelLoadWh: number | null; pvWh: number | null } | null;
+  /** Like-basis local comparison, when local totals were available at fetch time.
+   *  v1.87.0 adds pvCoverage (the fleet PV "% measured" for the same day) so a
+   *  structural drift (a cloud-dark Core) is distinguishable from meter
+   *  disagreement in the stored record — without it the +47% Core 2 drift was
+   *  indistinguishable from vendor error and the baseline could never converge. */
+  local: { panelLoadWh: number | null; pvWh: number | null; pvCoverage?: number | null } | null;
+  /** v1.87.0 — vendorSolarWh − localPvWh when the local basis is PARTIAL
+   *  (pvCoverage < 0.95): the implied production of the unmeasured (dark)
+   *  capacity — the only production observability for a cloud-dark Core. */
+  impliedDarkPvWh?: number | null;
   driftHomePct: number | null;
   driftSolarPct: number | null;
 }

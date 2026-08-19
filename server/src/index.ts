@@ -3827,14 +3827,19 @@ async function runVendorEnergyJob(): Promise<void> {
     try {
       const dayStart = startOfLocalDayMs(new Date(nowMs - 24 * 3_600_000));
       const t: any = await analytics.report('totals', { sinceMs: dayStart, untilMs: dayStart + 24 * 3_600_000 });
-      local = { panelLoadWh: t?.fleet?.panelLoadWh ?? null, pvWh: t?.fleet?.pvWh ?? null };
+      local = { panelLoadWh: t?.fleet?.panelLoadWh ?? null, pvWh: t?.fleet?.pvWh ?? null, pvCoverage: t?.fleet?.pvCoverage ?? null };
     } catch (e: any) {
       app.log.warn(`energy-history: local totals unavailable for ${yesterdayYmd} (${e?.message ?? e})`);
     }
+    const partialPv = local?.pvCoverage != null && local.pvCoverage < 0.95;
     const rec: VendorDayRecord = {
       ...vendor, local,
       driftHomePct: driftPct(vendor.homeWh, local?.panelLoadWh ?? null),
       driftSolarPct: driftPct(vendor.solarWh, local?.pvWh ?? null),
+      // v1.87.0 — with a partial local basis, the drift IS the dark capacity's
+      // production; record it as such instead of leaving an unexplained gap.
+      impliedDarkPvWh: partialPv && vendor.solarWh != null && local?.pvWh != null
+        ? Math.max(0, vendor.solarWh - local.pvWh) : null,
     };
     state.days[yesterdayYmd] = rec;
     state.lastRunDay = today;
@@ -3842,7 +3847,7 @@ async function runVendorEnergyJob(): Promise<void> {
     const kwh = (wh: number | null) => (wh == null ? '—' : (wh / 1000).toFixed(1));
     app.log.info(
       `energy-history: ${yesterdayYmd} vendor home ${kwh(rec.homeWh)} kWh (local ${kwh(local?.panelLoadWh ?? null)}, drift ${rec.driftHomePct ?? '—'}%), `
-      + `solar ${kwh(rec.solarWh)} (local ${kwh(local?.pvWh ?? null)}, drift ${rec.driftSolarPct ?? '—'}%), `
+      + `solar ${kwh(rec.solarWh)} (local ${kwh(local?.pvWh ?? null)}, drift ${rec.driftSolarPct ?? '—'}%${rec.impliedDarkPvWh != null ? `, PARTIAL basis pvCoverage ${(local?.pvCoverage ?? 0).toFixed(2)} — dark-core production ≈ ${kwh(rec.impliedDarkPvWh)} kWh` : ''}), `
       + `grid ${kwh(rec.gridWh)}, battery in ${kwh(rec.batteryInWh)} / out ${kwh(rec.batteryOutWh)}, `
       + `generator ${kwh(rec.generatorWh)}, ${rec.circuits.length}/12 circuits.`,
     );
