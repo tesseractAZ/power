@@ -195,14 +195,24 @@ export function missingDays(
   todayYmd: string,
   horizonDays: number,
   cap: number,
+  /** v1.86.0 — days stored but INCOMPLETE (a flagship field null, e.g.
+   *  2026-08-06's homeWh) are retried too; day-presence keying alone froze
+   *  every fetch-time null forever. */
+  incomplete: ReadonlySet<string> = new Set(),
 ): string[] {
   const out: string[] = [];
   let day = prevYmd(todayYmd);
   for (let back = 0; back < horizonDays && out.length < cap; back++) {
-    if (!stored.has(day)) out.push(day);
+    if (!stored.has(day) || incomplete.has(day)) out.push(day);
     day = prevYmd(day);
   }
   return out;
+}
+
+/** v1.86.0 — a record is incomplete when any flagship total is null. */
+export function isIncompleteDay(r: VendorDayRecord): boolean {
+  return r.homeWh == null || r.solarWh == null || r.gridWh == null
+    || r.batteryInWh == null || r.batteryOutWh == null;
 }
 
 /* ─── v1.85.0: empirical round-trip efficiency (ADVISORY — never wired into

@@ -27,6 +27,8 @@ export interface MqttCertification {
 }
 
 /** v1.69.0 — set by index.ts so an adopted clock correction is visible in the log. */
+let onClockSampleRejected: ((reason: string) => void) | null = null;
+export function setClockRejectLogger(fn: (reason: string) => void): void { onClockSampleRejected = fn; }
 let onClockOffsetAdopted: ((offsetMs: number, previousMs: number) => void) | null = null;
 export function setClockOffsetLogger(fn: (offsetMs: number, previousMs: number) => void): void {
   onClockOffsetAdopted = fn;
@@ -61,6 +63,11 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
   );
   if (upd.adopted) {
     onClockOffsetAdopted?.(upd.offsetMs, before);
+  } else if (upd.rejected === 'rtt-inflated') {
+    // v1.86.0 — the gate's rejections were silent, making "gate never needed"
+    // and "gate silently rejecting" indistinguishable in production. Rare by
+    // construction (unlike within-deadband), so one line each is cheap.
+    onClockSampleRejected?.('rtt-inflated');
   }
   const text = await res.body.text();
   let parsed: EcoFlowResponse<T>;

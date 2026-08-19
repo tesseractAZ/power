@@ -16,6 +16,7 @@ import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
+import { setClockRejectLogger } from './ecoflow/rest.js';
 import {
   decideChargeNowResponse, freshResponderState, resolveChargeNowMode,
 } from './chargeNowResponder.js';
@@ -27,7 +28,7 @@ import {
   type SettingChange, type SurfaceDevice,
 } from './settingsDrift.js';
 import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
-import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, computeEmpiricalRte, type VendorDayRecord } from './energyHistory.js';
+import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, type VendorDayRecord } from './energyHistory.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
 import { isConfigured } from './notify.js';
@@ -523,6 +524,7 @@ const PROCESS_BOOT_MS = Date.now();
 // wrong, and would not know to fix NTP. Signing self-heals; the host still needs care.
 setClockOffsetLogger((offsetMs, previousMs) => {
   const s = (offsetMs / 1000).toFixed(1);
+setClockRejectLogger((reason) => app.log.debug(`ecoflow: clock sample rejected (${reason}) — latency, not skew; offset unchanged`));
   app.log.warn(
     `ecoflow: adopted a ${s}s clock correction for request signing (was ${(previousMs / 1000).toFixed(1)}s). `
     + `The HOST clock is wrong by about that much — signing is now self-corrected, but fix NTP on the Pi: `
@@ -3873,7 +3875,8 @@ async function runVendorBackfill(cap: number): Promise<{ fetched: string[] }> {
     if (!shp2) return { fetched: [] };
     const state = loadVendorEnergyState();
     const today = localParts(Date.now(), 'America/Phoenix').ymd;
-    const targets = missingDays(new Set(Object.keys(state.days)), today, 60, cap);
+    const incomplete = new Set(Object.entries(state.days).filter(([, r]) => isIncompleteDay(r)).map(([d]) => d));
+    const targets = missingDays(new Set(Object.keys(state.days)), today, 60, cap, incomplete);
     const fetched: string[] = [];
     for (const day of targets) {
       const vendor = await fetchVendorDay(shp2.sn, day, (m) => app.log.warn(m));

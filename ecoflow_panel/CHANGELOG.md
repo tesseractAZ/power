@@ -1,3 +1,21 @@
+## v1.86.0 — resilience batch: the 08-17 audit findings close
+
+- **The digest's material survives restarts.** `quietQueue` and the
+  resolved-overnight map now persist to `/data/digest-queue.json` on every
+  mutation and rehydrate at boot — the 08-17 deploys destroyed three held
+  overnight fires with zero trace. The silent empty-queue digest return now
+  logs its disposition ("queue empty, nothing held overnight").
+- **Poll-failure warns fire on SET CHANGE only.** The four accessory devices
+  that reject `/quota/all` fail every poll; the per-poll warn ran 2,336 lines
+  in 40 h and buried the one real SHP2 failure. A stable set logs once (plus
+  an hourly info heartbeat); any membership change warns immediately;
+  recovery logs. And the telemetry-blind detector no longer counts an
+  SHP2-inclusive failure as a healthy poll (`notePollOk` gating).
+- **RTT-gate rejections are visible** (one debug line each — rare by
+  construction), closing "gate never needed" vs "gate silently rejecting".
+- **Backfill retries incomplete days**: a stored day with a null flagship
+  total (2026-08-06's homeWh) is re-fetched instead of frozen forever.
+
 ## v1.85.1 — the vendor's battery-in is grid-only: name it, don't misreport it
 
 The first 25-day backfill answered the semantics question within minutes of
