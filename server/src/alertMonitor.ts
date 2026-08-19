@@ -7,6 +7,7 @@ import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutag
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
+import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare,
   aggregateFleetFlow, findShp2 } from './shp2Membership.js';
@@ -1034,6 +1035,43 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     log(`notify: rehydrated ${persistedNotified.size} already-notified alert(s) from ${notifyStatePath}`);
   }
   const persistNotified = () => saveNotifiedState(notifyStatePath, persistedNotified);
+  // v1.86.0 — the digest's MATERIAL survives restarts. On 2026-08-17 the
+  // 04:30/04:52 deploys destroyed the in-memory quietQueue + overnightResolved,
+  // three overnight fires left zero trace, and the empty-queue digest returned
+  // silently. Persist both (atomic sidecar) on every mutation; rehydrate at
+  // boot. bootSeedNotified stays untouched (removing its firstRun seeding
+  // risks restart re-push storms); rehydration makes the seeding irrelevant
+  // for held alerts because their queue entries return with it.
+  const digestStatePath =
+    process.env.DIGEST_STATE_PATH ?? resolvePath(process.cwd(), config.dbPath, '..', 'digest-queue.json');
+  const persistDigestState = () => {
+    try {
+      atomicWriteFileSync(digestStatePath, JSON.stringify({
+        queue: quietQueue,
+        resolved: [...overnightResolved.entries()],
+      }));
+    } catch { /* best-effort; a failed persist degrades to pre-v1.86 behavior */ }
+  };
+  const rehydrateDigestState = () => {
+    try {
+      if (!existsSync(digestStatePath)) return;
+      const raw = JSON.parse(readFileSync(digestStatePath, 'utf8'));
+      if (Array.isArray(raw?.queue)) {
+        for (const a of raw.queue as Alert[]) {
+          if (a && typeof a.id === 'string' && !quietQueue.some((q) => q.id === a.id)) quietQueue.push(a);
+        }
+      }
+      if (Array.isArray(raw?.resolved)) {
+        for (const [id, rec] of raw.resolved as Array<[string, { raisedAt: number; clearedAt: number }]>) {
+          if (typeof id === 'string' && rec && typeof rec.clearedAt === 'number') overnightResolved.set(id, rec);
+        }
+      }
+      if (quietQueue.length || overnightResolved.size) {
+        log(`notify: rehydrated digest state — ${quietQueue.length} held alert(s), ${overnightResolved.size} resolved-overnight record(s)`);
+      }
+    } catch { /* corrupt sidecar = start empty, exactly pre-v1.86 behavior */ }
+  };
+  rehydrateDigestState();
 
   // v0.85.0 — cleared-alert history persistence. The in-memory clearedLog was
   // wiped on every restart, so on a host that power-cycles daily the operator
@@ -1326,7 +1364,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
    *  on every tick within the digest hour instead of silently waiting 24 h
    *  (the one delivery path the at-least-once rework had left fire-and-forget). */
   const dispatchDigest = async (): Promise<boolean> => {
-    if (quietQueue.length === 0) return true;
+    if (quietQueue.length === 0) {
+      // v1.86.0 — this return was SILENT, and on 2026-08-17 it made "the digest
+      // never fired" indistinguishable from "the digest ran on an empty queue".
+      log(`notify: morning digest — queue empty, nothing held overnight; no digest sent`);
+      return true;
+    }
     // v0.15.18 — the digest used to vanish without a trace when no channel was
     // configured: 58 queued warnings (incl. 17× cell-imbalance) dropped over
     // 50 h with nothing in the log. Now it says so, loudly, once per digest.
@@ -1337,6 +1380,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           `"ha" (HA persistent notification, zero setup), ntfy, pushover, or webhook to receive them. Dropping queue.`,
       );
       quietQueue.length = 0;
+      persistDigestState(); // v1.86.0
       overnightResolved.clear();
       return true;
     }
@@ -1360,6 +1404,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     if (pending.length === 0 && resolvedList.length === 0) {
       log(`notify: morning digest — ${quietQueue.length} queued alert(s), none pending or resolved-trackable; nothing to send`);
       quietQueue.length = 0;
+      persistDigestState(); // v1.86.0
       overnightResolved.clear();
       return true;
     }
@@ -1445,6 +1490,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       }
       persistNotified();
       quietQueue.length = 0;
+      persistDigestState(); // v1.86.0
       overnightResolved.clear();
       return true;
     } catch (e: any) {
@@ -1849,6 +1895,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         const queuedAt = quietQueue.findIndex((q) => q.id === a.id);
         if (queuedAt >= 0) quietQueue[queuedAt] = a;
         else quietQueue.push(a);
+        persistDigestState(); // v1.86.0 — held alerts survive restarts
         log(`notify: queued for morning digest — "${a.title}" (severity ${a.severity})`);
       } else if (action === 'dispatch') {
         // v0.80.0 — at-LEAST-once delivery: attempt the send FIRST; mark +
@@ -2031,7 +2078,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // v0.13.2 — moved out of the debounce-gated block (see above).
       // v1.75.0 — a digest-held alert that self-resolves must stay VISIBLE in the
       // morning digest (with its true duration), not silently vanish.
-      if (t.queued) overnightResolved.set(id, { raisedAt: t.firstSeen, clearedAt: now });
+      if (t.queued) {
+        overnightResolved.set(id, { raisedAt: t.firstSeen, clearedAt: now });
+        persistDigestState(); // v1.86.0
+      }
       recordClear(t.alert, duration, now);
       tracked.delete(id);
       // (v0.15.21's notified-state forget moved ABOVE the resolve attempt in
