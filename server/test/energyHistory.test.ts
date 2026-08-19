@@ -69,7 +69,7 @@ test('driftPct: like-basis only, noise-floored, signed toward the vendor', () =>
 
 /* ═══ v1.85.0 — backfill day selection + empirical RTE (advisory) ═══════════ */
 
-import { prevYmd, missingDays, computeEmpiricalRte, MIN_RTE_SAMPLE_DAYS, RTE_MIN_DAY_IN_WH } from '../src/energyHistory.js';
+import { prevYmd, missingDays, isIncompleteDay, computeEmpiricalRte, MIN_RTE_SAMPLE_DAYS, RTE_MIN_DAY_IN_WH } from '../src/energyHistory.js';
 
 test('prevYmd: month/year boundaries without Intl', () => {
   assert.equal(prevYmd('2026-08-17'), '2026-08-16');
@@ -119,4 +119,15 @@ test('v1.85.1 — the LIVE 25-day shape: out/in 2.41 is named grid-only, never a
   assert.ok(r.rte! > 2.3 && r.rte! < 2.5);
   assert.equal(r.interpretation, 'vendor-in-is-grid-only');
   assert.equal(computeEmpiricalRte([]).interpretation, 'insufficient-data');
+});
+
+test('v1.86.0 — incomplete stored days are retried; complete days are not', () => {
+  const stored = new Set(['2026-08-16', '2026-08-15']);
+  const incomplete = new Set(['2026-08-15']);
+  assert.deepEqual(missingDays(stored, '2026-08-17', 3, 10, incomplete),
+    ['2026-08-15', '2026-08-14'], 'the null-field day comes back; the complete day does not');
+  const full = rteDay(10_000, 8_600); full.homeWh = 1; full.solarWh = 1; full.gridWh = 1;
+  assert.equal(isIncompleteDay(full), false);
+  assert.equal(isIncompleteDay(rteDay(null, 5_000)), true);
+  assert.equal(isIncompleteDay({ ...rteDay(1, 1), homeWh: null }), true);
 });

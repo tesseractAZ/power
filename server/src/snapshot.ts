@@ -498,6 +498,8 @@ export function startPollLoop(
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   let lastPollFailed = false; // track failure→ok recovery for the one INFO line that matters
+  let lastFailedSetKey = ''; // v1.86.0 — poll-failure set-change dedupe
+  let lastFailedSetLoggedMs = 0;
   // Wire the per-SN state-transition logger into the store on first poll.
   store.setLogger(log);
   const tick = async () => {
@@ -510,16 +512,48 @@ export function startPollLoop(
       // name the devices at warn so the 10 s connect-timeout ceiling stops
       // hiding inside "poll ok in 10486ms (slow)".
       if (failedSns.length > 0) {
-        warn(`poll completed in ${tookMs}ms with ${failedSns.length} device fetch failure(s): ${failedSns.join(', ')} — serving from cache/presence`);
-      } else if (lastPollFailed) {
+        // v1.86.0 — log on failure-SET CHANGE only. The four accessory devices
+        // that reject /quota/all fail EVERY poll; the v1.79.0 per-poll warn ran
+        // 2,336 lines in 40h and buried the one real SHP2 failure among them.
+        // A stable set logs once at warn (and once per hour at info as a
+        // heartbeat); a CHANGED set — a new device failing, or one recovering —
+        // always logs at warn immediately.
+        const setKey = [...failedSns].sort().join(',');
+        if (setKey !== lastFailedSetKey) {
+          lastFailedSetKey = setKey;
+          lastFailedSetLoggedMs = Date.now();
+          warn(`poll completed in ${tookMs}ms with ${failedSns.length} device fetch failure(s): ${failedSns.join(', ')} — serving from cache/presence`);
+        } else if (Date.now() - lastFailedSetLoggedMs >= 60 * 60_000) {
+          lastFailedSetLoggedMs = Date.now();
+          log(`poll: ${failedSns.length} device fetch failure(s) persisting (${failedSns.join(', ')}) — hourly heartbeat, set unchanged`);
+        }
+      } else {
+        if (lastFailedSetKey !== '') {
+          lastFailedSetKey = '';
+          log(`poll: all device fetches recovered`);
+        }
+      }
+      if (failedSns.length === 0 && lastPollFailed) {
         log(`poll ok in ${tookMs}ms (recovered)`);   // failure→ok transition: keep at INFO
-      } else if (tookMs >= SLOW_POLL_MS) {
+      } else if (failedSns.length === 0 && tookMs >= SLOW_POLL_MS) {
         log(`poll ok in ${tookMs}ms (slow)`);         // latency anomaly: keep at INFO
-      } else if (POLL_DEBUG) {
+      } else if (failedSns.length === 0 && POLL_DEBUG) {
         log(`poll ok in ${tookMs}ms`);                // routine success: debug-gated
       }
       lastPollFailed = false;
-      notePollOk(Date.now()); // v1.69.0 — feeds the telemetry-blind detector
+      // v1.86.0 — the telemetry-blind detector must not count a poll whose
+      // ALARM-PATH device (the SHP2) failed as OK: notePollOk previously ran
+      // unconditionally, so an SHP2 fetch failure was invisible to the blind
+      // clock. Accessory-only failures still count OK (pool data arrived).
+      const shp2Failed = failedSns.some((sn) => {
+        const d = store.get().devices[sn];
+        return (d as any)?.projection?.kind === 'shp2';
+      });
+      if (shp2Failed) {
+        notePollFailed(`SHP2 quota fetch failed (${failedSns.join(', ')})`);
+      } else {
+        notePollOk(Date.now()); // v1.69.0 — feeds the telemetry-blind detector
+      }
     } catch (e: any) {
       const emsg = e?.message ?? String(e);
       warn(`poll failed: ${emsg}`);
