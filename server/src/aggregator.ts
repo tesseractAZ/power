@@ -253,6 +253,12 @@ export function computeTotals(
   // `/api/summary/today` (which powers the HA Today card) agrees with
   // the lifetime counters.
   const connected = shp2ConnectedDpuSns(snap.devices);
+  // v1.87.0 — SNs that actually entered the PV accumulation. A CONNECTED but
+  // PROJECTION-LESS Core (Core 2 through its 2026-08 cloud outage) was skipped
+  // by the `!p` guard below before ever reaching pvCoverageAccum, so the Solar
+  // "% measured" tile read 100% while the vendor ledger proved ~20 kWh/day
+  // (~1/3 of plant PV) invisible. Honest coverage counts that member as ZERO.
+  const pvAccumulatedSns = new Set<string>();
 
   for (const d of Object.values(snap.devices)) {
     const p = d.projection;
@@ -300,6 +306,7 @@ export function computeTotals(
         // the connected-only PV energy.
         const pvR = metrics['pv_total'];
         if (pvR && pvR.totalMs > 0) pvCoverageAccum.push(pvR.coverageMs / pvR.totalMs);
+        pvAccumulatedSns.add(d.sn); // v1.87.0 — membership actually measured
       }
     } else if (p.kind === 'shp2') {
       fleet.panelLoadWh += ingest('panel_load');
@@ -317,6 +324,25 @@ export function computeTotals(
     });
   }
 
+  // v1.87.0 — every SHP2-connected DPU that never entered the PV accumulation
+
+  // (cloud-dark: no projection, or zero recorded samples) is UNMEASURED
+
+  // CAPACITY, not a non-member. Count it as zero coverage — with one of
+
+  // three home Cores dark, the honest tile reads ~67%, not 100%.
+
+  for (const sn of connected) {
+
+    if (!pvAccumulatedSns.has(sn)) {
+
+      pvCoverageAccum.push(0);
+
+      coverageAccum.push(0);
+
+    }
+
+  }
   fleet.coverage = coverageAccum.length === 0 ? 0 : coverageAccum.reduce((s, v) => s + v, 0) / coverageAccum.length;
   // No PV metric / no expected PV samples → fall back to the all-metric coverage
   // (itself 0 in the fully-degenerate empty-window case) rather than emitting NaN.

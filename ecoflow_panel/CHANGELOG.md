@@ -1,3 +1,25 @@
+## v1.87.0 — coverage honesty: a dark Core is unmeasured capacity, not a non-member
+
+The reconciliation engine's first discovery (drift +47% on the solar pair,
+two mornings running, home pair at ±1%) proved Core 2 — cloud-dark since
+early August — physically produces ≈20 kWh/day that no local metric sees.
+Worse, the Solar "% measured" tile read **100%** the whole time: the
+`!projection` guard skipped the connected-but-dark Core before the coverage
+accumulators, so a third of plant PV was invisible *and unflagged*.
+
+- `computeTotals` now zero-fills every SHP2-connected DPU that never entered
+  the PV accumulation: with one of three home Cores dark, the tile honestly
+  reads ~67%.
+- The vendor reconciliation stores `local.pvCoverage` and, when the basis is
+  partial (< 0.95), records `impliedDarkPvWh` (vendor solar − local PV) —
+  the dark Core's implied production, its only production observability —
+  and annotates the morning log line ("PARTIAL basis pvCoverage 0.67 —
+  dark-core production ≈ 20.2 kWh") so structural drift can never again
+  masquerade as meter disagreement.
+
+Self-validating: when Core 2 returns (~Sept), local PV jumps ~20 kWh/day,
+the drift collapses, coverage returns to ~100%, and impliedDarkPvWh ends.
+
 ## v1.86.0 — resilience batch: the 08-17 audit findings close
 
 - **The digest's material survives restarts.** `quietQueue` and the
