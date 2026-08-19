@@ -321,3 +321,65 @@ test('computeTotals — a non-SHP2-connected spare DPU does NOT dilute pvCoverag
     `pvCoverage ${r.fleet.pvCoverage} must reflect only the SHP2-connected core (~1.0), not be diluted by the spare`,
   );
 });
+
+/* ─── v1.87.0 — a CONNECTED but PROJECTION-LESS Core is unmeasured capacity ──
+ *
+ * Core 2's 2026-08 cloud outage: the SHP2 counts it connected (slot 2,
+ * isConnected), it physically produces ~20 kWh/day into the pool, but with no
+ * projection the `!p` guard skipped it before the coverage accumulators — so
+ * the Solar "% measured" tile read 100% while ~1/3 of plant PV was invisible
+ * (proven by the vendor-ledger reconciliation: solar drift +47% two mornings
+ * running while home drift was ±1%). Honest coverage counts the dark member
+ * as ZERO.
+ */
+function twoConnectedOneDarkStore(): SnapshotStore {
+  const devices: Record<string, DeviceSnapshot> = {
+    'SN-LIVE': {
+      sn: 'SN-LIVE', deviceName: 'Core 1', online: true, lastSeenMs: Date.now(),
+      projection: { kind: 'dpu', soc: 80, packs: [{ num: 1, soc: 80 }] } as any,
+    } as any,
+    // Cloud-dark: NO projection at all — but present in the roster.
+    'SN-DARK': {
+      sn: 'SN-DARK', deviceName: 'Core 2', online: false, lastSeenMs: 0,
+    } as any,
+    // The SHP2 whose slots declare BOTH Cores connected.
+    'SN-SHP2': {
+      sn: 'SN-SHP2', deviceName: 'SHP2', online: true, lastSeenMs: Date.now(),
+      projection: {
+        kind: 'shp2',
+        sources: [
+          { slot: 1, sn: 'SN-LIVE', isConnected: true },
+          { slot: 2, sn: 'SN-DARK', isConnected: true },
+        ],
+      } as any,
+    } as any,
+  };
+  return { get: () => ({ devices }) } as unknown as SnapshotStore;
+}
+
+test('v1.87.0 — a dark connected Core drags pvCoverage to ~0.5, never lets the tile read 100%', () => {
+  const since = startOfLocalDayMs() - ONE_HOUR;
+  const until = startOfLocalDayMs();
+  const pvPts = evenSamples(since, until, FIVE_MIN, 1000);
+  const rec = mockRecorder({
+    pv_total: pvPts, ac_out: pvPts, total_in: pvPts, total_out: pvPts,
+    pack1_in: pvPts, pack1_out: pvPts, panel_load: pvPts,
+  });
+  const r = computeTotals(twoConnectedOneDarkStore(), rec, since, until);
+  // One fully-measured member + one dark member = mean ~0.5.
+  assert.ok(r.fleet.pvCoverage < 0.6, `pvCoverage ${r.fleet.pvCoverage} must count the dark Core as zero`);
+  assert.ok(r.fleet.pvCoverage > 0.4, `pvCoverage ${r.fleet.pvCoverage} should be ~0.5 with one of two dark`);
+  assert.ok(r.fleet.coverage < 0.95, 'overall coverage also reflects the dark member');
+});
+
+test('v1.87.0 — with every connected member measured, coverage is unchanged (no regression)', () => {
+  const since = startOfLocalDayMs() - ONE_HOUR;
+  const until = startOfLocalDayMs();
+  const pvPts = evenSamples(since, until, FIVE_MIN, 1000);
+  const rec = mockRecorder({
+    pv_total: pvPts, ac_out: pvPts, total_in: pvPts, total_out: pvPts,
+    pack1_in: pvPts, pack1_out: pvPts,
+  });
+  const r = computeTotals(oneDpuStore(), rec, since, until);
+  assert.ok(r.fleet.pvCoverage > 0.98, `pvCoverage ${r.fleet.pvCoverage} stays ~1.0 when all members report`);
+});
