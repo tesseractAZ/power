@@ -24,6 +24,11 @@ export interface FleetEnergyTotals {
     acOutWh: number;
     panelLoadWh: number;
     batteryNetWh: number; // positive = net discharged
+    /** v1.89.0 — GROSS pack-side flows (SHP2-connected DPUs, per-pack in/out
+     *  integrals). dischargeWh/chargeWh is the pack-DC round-trip ratio — NOT
+     *  the AC dispatch RTE (conversion losses excluded on both legs). */
+    batteryChargeWh: number;
+    batteryDischargeWh: number;
     coverage: number;     // 0..1 fraction of window covered (averaged across active metrics)
     pvCoverage: number;   // 0..1 fraction of window covered, PV metric (`pv_total`) ONLY — for the Solar-page "% measured" tile
   };
@@ -236,7 +241,7 @@ export function computeTotals(
 ): FleetEnergyTotals {
   const snap = store.get();
   const devices: EnergyTotals[] = [];
-  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, coverage: 0, pvCoverage: 0 };
+  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, batteryChargeWh: 0, batteryDischargeWh: 0, coverage: 0, pvCoverage: 0 };
   const coverageAccum: number[] = [];
   // v0.44.0 — PV-only coverage for the Solar-page "% measured" tile. The fleet
   // PV rollup is keyed on the per-DPU `pv_total` series of SHP2-CONNECTED DPUs
@@ -300,6 +305,8 @@ export function computeTotals(
         fleet.pvWh += pvWh;
         fleet.acOutWh += acOutWh;
         fleet.batteryNetWh += packDischargeWh - packChargeWh;
+        fleet.batteryChargeWh += packChargeWh;       // v1.89.0
+        fleet.batteryDischargeWh += packDischargeWh; // v1.89.0
         // v0.44.0 — PV coverage tracks the SAME membership as fleet.pvWh: only
         // SHP2-connected DPUs. A bench spare (no array, possibly 0 pv_total
         // samples) must not dilute the Solar "% measured" tile that annotates

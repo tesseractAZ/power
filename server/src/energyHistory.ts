@@ -66,7 +66,11 @@ export interface VendorDayRecord {
    *  structural drift (a cloud-dark Core) is distinguishable from meter
    *  disagreement in the stored record — without it the +47% Core 2 drift was
    *  indistinguishable from vendor error and the baseline could never converge. */
-  local: { panelLoadWh: number | null; pvWh: number | null; pvCoverage?: number | null } | null;
+  local: {
+    panelLoadWh: number | null; pvWh: number | null; pvCoverage?: number | null;
+    /** v1.89.0 — gross pack-DC flows for the same day (local recorder integrals). */
+    batteryChargeWh?: number | null; batteryDischargeWh?: number | null;
+  } | null;
   /** v1.87.0 — vendorSolarWh − localPvWh when the local basis is PARTIAL
    *  (pvCoverage < 0.95): the implied production of the unmeasured (dark)
    *  capacity — the only production observability for a cloud-dark Core. */
@@ -145,6 +149,40 @@ export function driftPct(vendorWh: number | null, localWh: number | null): numbe
   if (vendorWh == null || localWh == null) return null;
   if (vendorWh < 100 || localWh < 100) return null;
   return Math.round(((vendorWh - localWh) / localWh) * 1000) / 10;
+}
+
+/* ─── v1.89.0: LOCAL pack-DC round-trip ratio (B2 — the true-RTE ladder's
+ * first honest rung). Basis: per-pack in/out recorder integrals on the DC
+ * side, so this EXCLUDES charger + inverter conversion losses — it is the
+ * battery chemistry + BMS ratio, an UPPER BOUND on the AC dispatch RTE.
+ * DISPATCH_RTE (0.86, AC-to-AC) stays assumed until an AC-side basis exists;
+ * this series bounds it and watches for degradation trends. ──────────────── */
+
+export interface LocalPackRte {
+  sampleDays: number;
+  chargeWh: number;
+  dischargeWh: number;
+  /** discharge/charge over qualifying days; null until >= MIN_RTE_SAMPLE_DAYS. */
+  packDcRte: number | null;
+  basis: 'pack-dc';
+}
+
+export const RTE_MIN_DAY_CHARGE_WH = 2_000;
+
+export function computeLocalPackRte(days: ReadonlyArray<VendorDayRecord>): LocalPackRte {
+  let chargeWh = 0, dischargeWh = 0, sampleDays = 0;
+  for (const d of days) {
+    const c = d.local?.batteryChargeWh, x = d.local?.batteryDischargeWh;
+    if (c == null || x == null) continue;
+    if (c < RTE_MIN_DAY_CHARGE_WH) continue; // no meaningful charge = ratio noise
+    sampleDays++; chargeWh += c; dischargeWh += x;
+  }
+  return {
+    sampleDays, chargeWh, dischargeWh, basis: 'pack-dc',
+    packDcRte: sampleDays >= MIN_RTE_SAMPLE_DAYS && chargeWh > 0
+      ? Math.round((dischargeWh / chargeWh) * 1000) / 1000
+      : null,
+  };
 }
 
 /* ─── persistence sidecar (the actuator pattern; capped, atomic) ──────────── */
