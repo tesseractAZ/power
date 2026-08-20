@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
+import { loadVendorEnergyState, vendorDigestLine, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore } from './snapshot.js';
 import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
@@ -889,6 +890,9 @@ export interface AlertMonitor {
   getConfig: () => NotifyConfig;
   sendTest: () => Promise<void>;
   stats: () => { tracked: number; sentSinceStart: number; quietQueued: number };
+  /** v1.90.0 (B5) — the CURRENT live alert ids, read-only. The reconnect audit
+   *  measures "offline alert resolved" against the real tracked set. */
+  activeAlertIds: () => string[];
   history: () => ClearedAlert[];
   incidents: () => Incident[];
   telemetry: () => AlertActionStats[];
@@ -1468,9 +1472,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         return `• [${label}] ${a.title}${loc ? ` (${loc})` : ''} — fired ${fmtClock(r.raisedAt)}, self-resolved ${fmtClock(r.clearedAt)} (${fmtDur(r.clearedAt - r.raisedAt)})`;
       });
     try {
+      // v1.90.0 (B7) — yesterday's vendor-ledger line, when a record exists.
+      const digestNow = new Date();
+      const digestTodayYmd = `${digestNow.getFullYear()}-${String(digestNow.getMonth() + 1).padStart(2, '0')}-${String(digestNow.getDate()).padStart(2, '0')}`;
+      const digestLedgerLine = (() => {
+        try { return vendorDigestLine(loadVendorEnergyState().days[prevYmd(digestTodayYmd)]); }
+        catch { return null; }
+      })();
       await sendNotification(cfg, {
         title: `EcoFlow · Morning digest (${pending.length} alert${pending.length === 1 ? '' : 's'}${resolvedLines.length ? ` + ${resolvedLines.length} resolved overnight` : ''})`,
         body: `Held during overnight quiet hours:\n\n${lines.length ? lines.join('\n') : '(none still active)'}\n${
+          digestLedgerLine ? `\n${digestLedgerLine}\n` : ''
+        }${
           resolvedLines.length
             ? `\nFired overnight and self-resolved (informational):\n\n${resolvedLines.join('\n')}\n`
             : ''
@@ -2198,6 +2211,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       sentSinceStart++;
     },
     stats: () => ({ tracked: tracked.size, sentSinceStart, quietQueued: quietQueue.length }),
+    activeAlertIds: () => [...tracked.keys()],
     history: () => [...clearedLog],
     incidents: () => [...currentIncidents],
     telemetry: () => [...telemetry.values()],

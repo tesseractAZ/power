@@ -35,7 +35,10 @@ export interface SelfHealConfig {
   starvedForMs: number;
   /** Minimum gap between rebuilds — the anti-thrash guarantee for flap storms. */
   cooldownMs: number;
-  /** Hard daily cap; past it the healer stands down until the (UTC) day rolls. */
+  /** v1.90.0 — hard cap per ROLLING 24 h. The v1.76.0 UTC-day cap rolled at
+   *  17:00 MST — mid-evening, splitting every night's episode across two
+   *  budget days (night 9 spent 5 heals before 05:58 and banked the 6th into
+   *  the next "day" at 09:31). A rolling window matches the phenomenon. */
   maxPerDay: number;
 }
 
@@ -51,14 +54,16 @@ export interface SelfHealState {
   starvedSinceMs: number | null;
   /** Last rebuild we initiated. */
   lastHealMs: number | null;
-  /** UTC day key the counter belongs to (deterministic; no host-TZ dependence). */
-  dayKey: string | null;
-  healsToday: number;
+  /** v1.90.0 — timestamps of every heal in (at least) the last 24 h; pruned on
+   *  each evaluation. Replaces the UTC-day counter (dayKey/healsToday). */
+  healTimesMs: number[];
 }
 
 export function freshSelfHealState(): SelfHealState {
-  return { starvedSinceMs: null, lastHealMs: null, dayKey: null, healsToday: 0 };
+  return { starvedSinceMs: null, lastHealMs: null, healTimesMs: [] };
 }
+
+export const HEAL_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** UTC day key — deliberately NOT Intl/locale-based (locale data is incomplete
  *  on the Pi image and has bitten this codebase before). */
@@ -83,12 +88,8 @@ export function evaluateSelfHeal(
   state: SelfHealState,
   cfg: SelfHealConfig = DEFAULT_SELF_HEAL_CONFIG,
 ): SelfHealVerdict {
-  // Day rollover resets the cap.
-  const day = utcDayKey(nowMs);
-  if (state.dayKey !== day) {
-    state.dayKey = day;
-    state.healsToday = 0;
-  }
+  // v1.90.0 — prune the rolling window; the budget is heals within 24 h.
+  state.healTimesMs = state.healTimesMs.filter((t) => nowMs - t < HEAL_BUDGET_WINDOW_MS);
 
   // Onset tracking: the fleet-starved clock runs only while the condition holds.
   if (starvedCount < cfg.minStarvedDevices) {
@@ -104,17 +105,17 @@ export function evaluateSelfHeal(
   if (state.lastHealMs != null && nowMs - state.lastHealMs < cfg.cooldownMs) {
     return { heal: false, reason: `cooldown (${Math.round((nowMs - state.lastHealMs) / 60_000)}m since last heal < ${Math.round(cfg.cooldownMs / 60_000)}m)` };
   }
-  if (state.healsToday >= cfg.maxPerDay) {
-    return { heal: false, reason: `daily cap reached (${state.healsToday}/${cfg.maxPerDay})` };
+  if (state.healTimesMs.length >= cfg.maxPerDay) {
+    return { heal: false, reason: `daily cap reached (${state.healTimesMs.length}/${cfg.maxPerDay} in the rolling 24h)` };
   }
 
   // Heal. Reset the onset so a PERSISTING starvation must dwell again on top of
   // the cooldown before the next attempt — the rebuild deserves time to work.
   state.lastHealMs = nowMs;
-  state.healsToday += 1;
+  state.healTimesMs.push(nowMs);
   state.starvedSinceMs = null;
   return {
     heal: true,
-    reason: `${starvedCount} devices starved ${Math.round(starvedFor / 60_000)}m — rebuilding the EcoFlow MQTT session (heal ${state.healsToday}/${cfg.maxPerDay} today)`,
+    reason: `${starvedCount} devices starved ${Math.round(starvedFor / 60_000)}m — rebuilding the EcoFlow MQTT session (heal ${state.healTimesMs.length}/${cfg.maxPerDay} in the rolling 24h)`,
   };
 }

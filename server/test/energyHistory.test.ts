@@ -131,3 +131,38 @@ test('v1.86.0 — incomplete stored days are retried; complete days are not', ()
   assert.equal(isIncompleteDay(rteDay(null, 5_000)), true);
   assert.equal(isIncompleteDay({ ...rteDay(1, 1), homeWh: null }), true);
 });
+
+/* ─── v1.90.0 (B7) — the digest ledger line ──────────────────────────────── */
+
+import { vendorDigestLine, type VendorDayRecord } from '../src/energyHistory.js';
+
+function digestRec(over: Partial<VendorDayRecord> = {}): VendorDayRecord {
+  return {
+    day: '2026-08-18', fetchedAtMs: 1, homeWh: 61_400, gridWh: 2_100, solarWh: 48_300,
+    generatorWh: null, batteryInWh: 1_900, batteryOutWh: 22_700, circuits: [],
+    local: null, driftHomePct: 1.3, driftSolarPct: null, impliedDarkPvWh: 19_800,
+    ...over,
+  } as VendorDayRecord;
+}
+
+test('vendorDigestLine renders kWh, signed drift, and the dark-core estimate', () => {
+  const line = vendorDigestLine(digestRec());
+  assert.equal(
+    line,
+    'Yesterday per the EcoFlow ledger: home 61.4 kWh (home drift +1.3%), solar 48.3, grid 2.1, battery out 22.7 / grid-charge 1.9; dark-core PV ≈ 19.8 kWh.',
+  );
+});
+
+test('vendorDigestLine is null when the record is missing or empty — the digest must not carry a hollow line', () => {
+  assert.equal(vendorDigestLine(null), null);
+  assert.equal(vendorDigestLine(undefined), null);
+  assert.equal(vendorDigestLine(digestRec({ homeWh: null, solarWh: null, gridWh: null })), null);
+});
+
+test('vendorDigestLine omits optional clauses without leaving stubs', () => {
+  const line = vendorDigestLine(digestRec({ driftHomePct: null, impliedDarkPvWh: null }));
+  assert.equal(
+    line,
+    'Yesterday per the EcoFlow ledger: home 61.4 kWh, solar 48.3, grid 2.1, battery out 22.7 / grid-charge 1.9.',
+  );
+});
