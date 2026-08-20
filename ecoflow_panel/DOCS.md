@@ -8683,6 +8683,26 @@ clears or force charge reads OFF); daily cap 2 (past it: advise, never
 write); OFF is the only writable value. Harness:
 `scripts/mutate-charge-now.mjs` (5 mutants).
 
+## 12d. HA statistics export (`haStatistics.ts`, v1.89.0)
+
+Publishes the vendor ledger as EXTERNAL long-term statistics over the
+supervisor's Core WebSocket (`recorder/import_statistics`): five `Wh` series
+under source `ecoflow_panel` (`vendor_home_energy`, `vendor_solar_energy`,
+`vendor_grid_energy`, `vendor_battery_in_energy`, `vendor_battery_out_energy`).
+One hourly row per ledger day at 12:00 Phoenix (19:00 UTC — Arizona has no
+DST); `sum` cumulative in day order; null days skipped. Full idempotent
+re-import after each morning job + `POST /api/energy-history/export-ha`.
+Never writes `sensor.*` statistics — dashboard healing is by selecting the
+ledger series. Failures log and retry the next morning; a missing
+SUPERVISOR_TOKEN fails all series without throwing.
+
+**B2 (same release):** `computeTotals` exposes `fleet.batteryChargeWh` /
+`batteryDischargeWh` (gross pack-DC, SHP2-connected members); the daily job
+stores them per day and `computeLocalPackRte` (≥ 2 kWh charge/day, ≥ 5 days)
+reports the pack-DC round-trip ratio on `/api/energy-history` — declared
+`basis: 'pack-dc'`, an upper bound on the AC dispatch RTE. `DISPATCH_RTE`
+(0.86) is unchanged.
+
 ## 12b. Settings-drift watchdog (`settingsDrift.ts`, v1.83.0)
 
 Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:

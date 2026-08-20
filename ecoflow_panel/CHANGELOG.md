@@ -1,3 +1,34 @@
+## v1.89.0 — roadmap B1 + B2: the ledger gives back
+
+### B1 — gap-free history for the HA Energy dashboard
+
+The local sensors' HA statistics carry every hole the add-on's accumulators
+do — the 89.4 h July blackout, every deploy, the host reboots. The vendor
+ledger has none of them. A new exporter (`haStatistics.ts`) publishes the
+ledger as EXTERNAL statistics via `recorder/import_statistics` — five series
+under the `ecoflow_panel:` source (home, solar, grid, battery grid-charge,
+battery discharge), back to late June and growing daily.
+
+- Healing is by SUBSTITUTION: pick the "(EcoFlow ledger)" series in the
+  Energy dashboard; HA's own `sensor.*` statistics are never touched.
+- Idempotent full re-import after every morning job (upsert keyed on
+  statistic_id+start; a backfilled older day shifts the sums and the next
+  export corrects every later row). Null days are SKIPPED, never
+  zero-filled. One hourly row per day at noon Phoenix — daily/monthly
+  dashboard totals exact, intra-day curve deliberately not faked.
+- Manual full re-export: `POST /api/energy-history/export-ha`.
+
+### B2 — the true-RTE ladder's first honest rung
+
+The daily job now stores each day's gross pack-side charge/discharge
+(`fleet.batteryChargeWh`/`batteryDischargeWh`, new on `computeTotals`) and
+reports the **pack-DC round-trip ratio** (discharge/charge over qualifying
+days, ≥ 2 kWh charge each, ≥ 5 days) on `/api/energy-history` and in the
+morning log. Basis declared everywhere: this is the DC-side chemistry+BMS
+ratio, an UPPER BOUND on the AC dispatch RTE — conversion losses are
+excluded on both legs. **`DISPATCH_RTE` stays 0.86**; this series bounds it
+and watches for degradation trends until an AC-side basis exists.
+
 ## v1.88.0 — package A: the register's code queue closes
 
 - **A1 — the red retry paths are single-flighted.** On 2026-08-19 a degraded

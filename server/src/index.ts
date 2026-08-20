@@ -28,7 +28,8 @@ import {
   type SettingChange, type SurfaceDevice,
 } from './settingsDrift.js';
 import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
-import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, type VendorDayRecord } from './energyHistory.js';
+import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, computeLocalPackRte, type VendorDayRecord } from './energyHistory.js';
+import { exportVendorStatistics } from './haStatistics.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
 import { isConfigured } from './notify.js';
@@ -667,7 +668,16 @@ app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, re
   const days = Object.keys(state.days).sort();
   // v1.85.0 — advisory empirical RTE alongside the record (never buy-sizing).
   const rte = computeEmpiricalRte(Object.values(state.days));
-  return { lastRunDay: state.lastRunDay, empiricalRte: rte, days: days.map((d) => state.days[d]) };
+  // v1.89.0 — pack-DC round-trip ratio (B2; DC basis, upper bound on dispatch RTE).
+  const localPackRte = computeLocalPackRte(Object.values(state.days));
+  return { lastRunDay: state.lastRunDay, empiricalRte: rte, localPackRte, days: days.map((d) => state.days[d]) };
+});
+
+/** v1.89.0 (B1) — manual full re-export of the vendor ledger to HA statistics. */
+app.post('/api/energy-history/export-ha', async () => {
+  const state = loadVendorEnergyState();
+  const exp = await exportVendorStatistics(Object.values(state.days), (m) => app.log.warn(m));
+  return { exported: exp.exported, failed: exp.failed, days: Object.keys(state.days).length };
 });
 
 /** v1.85.0 — manual bounded backfill trigger (runs in the background). */
@@ -3840,7 +3850,11 @@ async function runVendorEnergyJob(): Promise<void> {
     try {
       const dayStart = startOfLocalDayMs(new Date(nowMs - 24 * 3_600_000));
       const t: any = await analytics.report('totals', { sinceMs: dayStart, untilMs: dayStart + 24 * 3_600_000 });
-      local = { panelLoadWh: t?.fleet?.panelLoadWh ?? null, pvWh: t?.fleet?.pvWh ?? null, pvCoverage: t?.fleet?.pvCoverage ?? null };
+      local = {
+        panelLoadWh: t?.fleet?.panelLoadWh ?? null, pvWh: t?.fleet?.pvWh ?? null, pvCoverage: t?.fleet?.pvCoverage ?? null,
+        // v1.89.0 — gross pack-DC flows for the local round-trip ratio (B2).
+        batteryChargeWh: t?.fleet?.batteryChargeWh ?? null, batteryDischargeWh: t?.fleet?.batteryDischargeWh ?? null,
+      };
     } catch (e: any) {
       app.log.warn(`energy-history: local totals unavailable for ${yesterdayYmd} (${e?.message ?? e})`);
     }
@@ -3871,6 +3885,20 @@ async function runVendorEnergyJob(): Promise<void> {
     // v1.85.0 — empirical RTE (advisory): report what the vendor's own
     // battery in/out imply, never wire it into buy sizing yet.
     const all = loadVendorEnergyState();
+    // v1.89.0 (B2) — the pack-DC round-trip ratio, an upper bound on dispatch
+    // RTE (conversion losses excluded). Advisory; DISPATCH_RTE stays 0.86.
+    const packRte = computeLocalPackRte(Object.values(all.days));
+    if (packRte.packDcRte != null) {
+      app.log.info(`energy-history: pack-DC round-trip ratio ${packRte.packDcRte} over ${packRte.sampleDays} day(s) (charge ${(packRte.chargeWh / 1000).toFixed(1)} kWh, discharge ${(packRte.dischargeWh / 1000).toFixed(1)} kWh) — DC basis: an UPPER BOUND on the 0.86 AC dispatch RTE, not a replacement.`);
+    }
+    // v1.89.0 (B1) — give the ledger back to HA as gap-free external
+    // statistics (idempotent full re-import; failures retry tomorrow).
+    try {
+      const exp = await exportVendorStatistics(Object.values(all.days), (m) => app.log.warn(m));
+      if (exp.exported.length) app.log.info(`ha-stats: exported ${exp.exported.length} vendor series to Home Assistant statistics (${Object.keys(all.days).length} days each; pick the "EcoFlow ledger" series in the Energy dashboard for gap-free history).`);
+    } catch (e: any) {
+      app.log.warn(`ha-stats: export failed (${e?.message ?? e}) — retries tomorrow`);
+    }
     const rte = computeEmpiricalRte(Object.values(all.days));
     if (rte.rte != null && rte.interpretation === 'rte') {
       app.log.info(`energy-history: empirical RTE ${rte.rte} over ${rte.sampleDays} qualifying day(s) (in ${(rte.totalInWh / 1000).toFixed(1)} kWh, out ${(rte.totalOutWh / 1000).toFixed(1)} kWh) — DISPATCH_RTE stays 0.86 until this baseline is trusted.`);
