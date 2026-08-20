@@ -71,6 +71,19 @@ import { syncAlertOnsets } from './alertOnset.js';
 const EVAL_INTERVAL_MS = Number(process.env.ALERT_EVAL_MS ?? 20_000);
 const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
 
+/** v1.88.0 — BMS-SETTLE families flap open→resolve on minutes-scale boundary
+ *  churn at deep discharge (25 of one audit window's 50 pushes; three ~5-min
+ *  cell-imbalance cycles on 2026-08-16 alone). Their PUSH waits until the
+ *  condition has stood 5 minutes — the on-screen alert, the audible path and
+ *  critical escalation (escDebounceMs=0) are untouched; only the notification
+ *  channel stops relaying settling noise. Pure + exported for the harness. */
+export const SETTLE_PUSH_DEBOUNCE_MS = 5 * 60_000;
+export function pushDebounceMsFor(id: string, defaultMs: number = DEBOUNCE_MS): number {
+  return /^(vdiff-crit-|peer-voldiff-|peer-soc-|soc-low-|dpu-imbalance-)/.test(id)
+    ? Math.max(defaultMs, SETTLE_PUSH_DEBOUNCE_MS)
+    : defaultMs;
+}
+
 // v0.83.0 — system data-gap / unplanned-outage alerting. The recorder records
 // telemetry blackouts (host power loss / add-on stop / MQTT stall > 15 min) into
 // its gaps sidecar; these surface each recent one as a push-worthy WARNING so the
@@ -290,6 +303,9 @@ interface TrackedAlert {
    *  critical when the grid drops out at the reserve floor) re-notifies instead
    *  of being silently swallowed by an already-true `notified`. */
   notifiedSeverity?: Severity;
+  /** v1.88.0 — the auto-tuned tier actually delivered ("[Low] … via auto-tune"
+   *  records 'info' here). Gates ONLY shouldSendResolve; never escalation. */
+  notifiedEffectiveSeverity?: Severity;
   /** v1.14.0 (review of F19) — the MOST SEVERE severity this alert reached while
    *  active. The cleared-alert record previously carried the FINAL tick's
    *  severity, so shp2-below-reserve (critical during a grid outage, info once
@@ -628,7 +644,7 @@ export function orphanedNotifiedIds(p: {
 }
 
 export function shouldSendResolve(
-  t: { pushSent?: boolean; notifiedSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity' | 'annunciate'> },
+  t: { pushSent?: boolean; notifiedSeverity?: Severity; notifiedEffectiveSeverity?: Severity; alert: Pick<Alert, 'id' | 'severity' | 'annunciate'> },
   notifyResolved: boolean,
   minSeverity: Severity,
 ): boolean {
@@ -640,7 +656,9 @@ export function shouldSendResolve(
     t.pushSent === true &&
     t.alert.annunciate !== false &&
     notifyResolved &&
-    qualifies(t.notifiedSeverity ?? t.alert.severity, minSeverity)
+    // v1.88.0 — the tier the operator SAW decides whether a resolve is owed:
+    // a fire auto-tuned down to info ("[Low]") owes no "Resolved:" push.
+    qualifies(t.notifiedEffectiveSeverity ?? t.notifiedSeverity ?? t.alert.severity, minSeverity)
   );
 }
 
@@ -1290,6 +1308,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
    *  durably persisted before the send, and the failure logged at info with no
    *  identity. At-least-once now: a crash between send and persist duplicates
    *  one push after restart — the right direction for the sole alarm channel. */
+  /** v1.88.0 — the auto-tuned tier of the most recent 'sent' dispatch. Read by
+   *  the rising edge IMMEDIATELY after the await (single-flight tick, no
+   *  interleaving) so the tracked entry can remember what tier the operator
+   *  actually saw — a fire delivered as "[Low] … via auto-tune" owes no
+   *  "Resolved:" push (the resolve of a demoted-to-info event is pure noise). */
+  let lastDispatchEffectiveSeverity: Severity | null = null;
   const dispatch = async (alert: Alert, kind: 'new' | 'resolved'): Promise<'sent' | 'suppressed' | 'failed'> => {
     if (!isConfigured(cfg)) return 'suppressed';
     // v0.9.59 — silencing is now family-keyed so a single noisy condition
@@ -1348,6 +1372,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         dedupId: notifyDedupId(alert),
       });
       sentSinceStart++;
+      lastDispatchEffectiveSeverity = effectiveSeverity; // v1.88.0
       log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune)` : ''}`);
       return 'sent';
     } catch (e: any) {
@@ -1855,7 +1880,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // break through. notifiedSeverity is recorded at BOTH dispatch and queue time,
       // so isAlertEscalation() (pure, tested) sees the queued severity too.
       const escalated = isAlertEscalation(existing, a.severity);
-      const escDebounceMs = escalated && a.severity === 'critical' ? 0 : debounceMs;
+      const escDebounceMs = escalated && a.severity === 'critical' ? 0 : pushDebounceMsFor(a.id, debounceMs); // v1.88.0 settle-family hold-down
       // Quiet hours: warning/info is always queued for the morning digest.
       // v0.23.0 — critical breaks through ONLY when CRITICAL_BREAKS_QUIET_HOURS
       // is opted in; default OFF ⇒ critical is also queued (surfaces at the
@@ -1915,7 +1940,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         if (outcome !== 'failed') {
           existing.notified = true;
           existing.notifiedSeverity = a.severity;
-          if (outcome === 'sent') existing.pushSent = true;
+          if (outcome === 'sent') {
+            existing.pushSent = true;
+            // v1.88.0 — remember the TIER THE OPERATOR SAW (auto-tune applied).
+            // notifiedSeverity must stay at source severity for the escalation
+            // contract; this separate field only gates the resolve push.
+            existing.notifiedEffectiveSeverity = lastDispatchEffectiveSeverity ?? a.severity;
+          }
           // v0.15.21 — record the push durably so a restart can't repeat it.
           // v0.80.0 — the record carries delivered-vs-suppressed + the severity,
           // so a restart rehydrates pushSent/notifiedSeverity faithfully.

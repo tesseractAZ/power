@@ -1908,7 +1908,20 @@ app.get('/ws', {
   socket.on('close', () => store.off('change', onChange));
 });
 
-const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m));
+const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m),
+  // v1.88.0 — the EcoFlow-enablement doorbell: a device whose quota fetch had
+  // been failing >= 30 min (the persistent 1006 class named in the submitted
+  // API ticket) just started answering. Tell the operator — this is the
+  // signal that EcoFlow's internal processing landed.
+  (sns) => {
+    const names = sns.map((sn) => (store.get().devices as any)[sn]?.deviceName ?? sn).join(', ');
+    app.log.info(`poll: LONG-FAILING device fetch recovered — ${names}. If these are the 1006-blocked accessories, EcoFlow's enablement may have landed; check /api/debug/raw for real quota data.`);
+    void sendNotification(loadNotifyConfig(), {
+      severity: 'info', dedupId: 'ecoflow_data_restored',
+      title: 'EcoFlow data restored',
+      body: `Quota data is flowing again for: ${names}. If these are the accessory devices from the API-access ticket, EcoFlow's enablement has landed — the panel will begin projecting them automatically where supported.`,
+    }).catch(() => { /* best-effort informational push */ });
+  });
 
 /* v1.2.0 — feed the per-pack rest tracker. `analyzePackLfp` needs to know when a pack
  * last moved current before it will trust pack voltage as a rested OCV; nothing was

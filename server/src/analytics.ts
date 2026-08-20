@@ -31,6 +31,10 @@ import { singleFlight } from './singleFlight.js';
  * not "emergency." Genuine danger is still caught by the static thresholds.
  */
 
+// v1.88.0 — pv-bias exclusion dedupe (see the exclusion log site).
+const pvBiasExclusionLogged = new Set<string>();
+/** Test seam. */
+export function resetPvBiasExclusionLogForTesting(): void { pvBiasExclusionLogged.clear(); }
 const Z_INFO = 3.5;
 const Z_WARN = 5;
 
@@ -5077,7 +5081,14 @@ export function computePvBiasCorrection(
     if (!dayHasGhiCoverage(ghiByEpoch, dayStart)) continue;
     const cov = coverage.get(dayStart);
     if (cov && !cov.covered) {
-      log?.(`pv-bias: excluded ${new Date(dayStart).toISOString().slice(0, 10)} — core ${cov.worstSn} reported ${Math.round((cov.worstFrac ?? 0) * 100)}% of daylight hours (telemetry gap, not weather)`);
+      // v1.88.0 — this fired on EVERY evaluation (96× per excluded day in the
+      // 08-05 review, 7% of log bytes). One line per (day, core) is the fact.
+      const exclKey = `${new Date(dayStart).toISOString().slice(0, 10)}:${cov.worstSn}`;
+      if (!pvBiasExclusionLogged.has(exclKey)) {
+        pvBiasExclusionLogged.add(exclKey);
+        if (pvBiasExclusionLogged.size > 64) pvBiasExclusionLogged.delete(pvBiasExclusionLogged.values().next().value!);
+        log?.(`pv-bias: excluded ${new Date(dayStart).toISOString().slice(0, 10)} — core ${cov.worstSn} reported ${Math.round((cov.worstFrac ?? 0) * 100)}% of daylight hours (telemetry gap, not weather)`);
+      }
       continue;
     }
     let predWh = 0, actWh = 0;

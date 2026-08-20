@@ -1,3 +1,31 @@
+## v1.88.0 — package A: the register's code queue closes
+
+- **A1 — the red retry paths are single-flighted.** On 2026-08-19 a degraded
+  boot (Piper DNS down, HA 502) armed both the deferred-target retry (30 s)
+  and the spoken-render retry (90 s); the first delivered the announcement
+  and the second replayed the identical red — ~130 s of klaxon. A VERIFIED
+  spoken delivery now cancels a matching pending spoken retry (condition-type
+  pendings match on level; dedicated-message pendings on text).
+- **A2 — BMS-settle noise leaves the push channel.** The settle families
+  (`vdiff-crit`, `peer-voldiff`, `peer-soc`, `soc-low`, `dpu-imbalance`) hold
+  their PUSH until the condition has stood 5 minutes (on-screen, audible and
+  critical-escalation paths untouched), and a fire the operator saw as
+  auto-tuned "[Low]" owes no "Resolved:" push (the delivered tier is now
+  remembered separately from the escalation-contract severity).
+- **A3** — the SHP2 card labels "Remain (disch, vendor)" — the raw vendor
+  estimate is now visibly a different basis from the learned forecast.
+- **A4** — pv-bias exclusion logs once per (day, core) instead of per
+  evaluation (was 96× per fact, 7% of log bytes).
+- **A5** — ladder boot double-fire: verified fixed by the v0.54.4 persisted
+  arming + lazy first-reading baseline; zero double-fires across this week's
+  eleven boots. Closed, no change.
+- **A6 — the EcoFlow-enablement doorbell.** A device whose quota fetch had
+  been failing ≥ 30 minutes (the persistent 1006 accessories named in the
+  submitted API ticket) starting to answer triggers an info push ("EcoFlow
+  data restored") — the signal that their internal processing landed.
+- **A7** — verified already covered: the quiet-hours suppression log line is
+  level-parameterized (yellow logs like red). Closed, no change.
+
 ## v1.87.0 — coverage honesty: a dark Core is unmeasured capacity, not a non-member
 
 The reconciliation engine's first discovery (drift +47% on the solar pair,
