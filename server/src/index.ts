@@ -4317,16 +4317,20 @@ if (nightChargeEnabled) {
   // v1.50.0 — supervised-write actuator (apply at window open − 5 min, revert
   // at window close + 5 min; both fail-closed, both audited).
   const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
-  const vendorEnergyTick = setInterval(() => { void runVendorEnergyJob(); }, 60 * 1000);
-  vendorEnergyTick.unref();
-  const settingsDriftTick = setInterval(() => { runSettingsDriftTick(); }, 60 * 1000);
-  settingsDriftTick.unref();
-  const reconnectWatchTick = setInterval(() => { void runReconnectWatchTick(); }, 60 * 1000);
-  reconnectWatchTick.unref();
-  const chargeNowTick = setInterval(() => { void runChargeNowTick(); }, 60 * 1000);
-  chargeNowTick.unref();
   nightActuationTick.unref();
 }
+
+// v1.91.0 — these four engines are independent of night charge and must run
+// even when NIGHT_CHARGE_ENABLED is off. They had accreted inside the block
+// above, so disabling night charge would have silently killed all four.
+const vendorEnergyTick = setInterval(() => { void runVendorEnergyJob(); }, 60 * 1000); // v1.82 vendor energy ledger
+vendorEnergyTick.unref();
+const settingsDriftTick = setInterval(() => { runSettingsDriftTick(); }, 60 * 1000); // v1.83 settings-drift watch
+settingsDriftTick.unref();
+const chargeNowTick = setInterval(() => { void runChargeNowTick(); }, 60 * 1000); // v1.84 charge-now responder
+chargeNowTick.unref();
+const reconnectWatchTick = setInterval(() => { void runReconnectWatchTick(); }, 60 * 1000); // v1.90 reconnect auto-audit
+reconnectWatchTick.unref();
 
 // Read-only advisory status (design §4.4). No auth: exposes no secrets, actuates
 // nothing. Mirrors /api/load-shedding/status. reserveFloorPercent is the SAME

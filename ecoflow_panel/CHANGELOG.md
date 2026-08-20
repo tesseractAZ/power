@@ -1,3 +1,21 @@
+## v1.91.0 — latent-coupling fix: four engines escape the night-charge conditional
+
+`vendorEnergyTick` (v1.82 vendor energy ledger), `settingsDriftTick` (v1.83
+settings-drift watch), `chargeNowTick` (v1.84 charge-now responder), and
+`reconnectWatchTick` (v1.90 reconnect auto-audit) were registered inside
+`if (nightChargeEnabled)` — none of them are night-charge features. Each had
+accreted there (v1.82 → v1.90) because the block was the convenient place to
+add a minute tick. With night charge enabled — the deployed reality — behavior
+was correct, but the coupling was latent: the day the operator flipped night
+charge off, all four engines would have silently died. No log line, no alert;
+the vendor ledger, the drift watch, the charge-now responder, and the
+reconnect audit just go dark. The four registrations now live at top level;
+the genuinely night-charge ticks (`nightRecomputeTick`, `nightWarm`,
+`nightEveningTick`, `nightActuationTick`) stay inside the conditional.
+
+**No behavior change while night charge stays enabled** — same eight timers,
+same cadences; only the registration site moved.
+
 ## v1.90.0 — five register items: the fleet audits itself
 
 ### B5 — Core 2 reconnect auto-audit (`reconnectAudit.ts`, new engine)
