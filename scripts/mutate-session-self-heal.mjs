@@ -49,10 +49,10 @@ const MUTANTS = [
     why: 'A persistent cloud outage would rebuild the session every dwell interval forever.',
   },
   {
-    id: 'v. daily cap removed',
-    find: '  if (state.healsToday >= cfg.maxPerDay) {',
+    id: 'v. rolling cap removed',
+    find: '  if (state.healTimesMs.length >= cfg.maxPerDay) {',
     to: '  if (false) { /* MUTANT */',
-    why: 'The bounded-blast-radius promise (max 6/day) silently evaporates.',
+    why: 'The bounded-blast-radius promise (max 6 per rolling 24h) silently evaporates.',
   },
   {
     id: 'vi. ★ onset NOT reset after healing (immediate re-heal at cooldown expiry)',
@@ -61,10 +61,16 @@ const MUTANTS = [
     why: 'The rebuild never gets its own dwell to prove itself; heals chain at exactly cooldown period.',
   },
   {
-    id: 'vii. day counter never resets (healer permanently dead after 6 heals ever)',
-    find: '  if (state.dayKey !== day) {\n    state.dayKey = day;\n    state.healsToday = 0;\n  }',
-    to: '  state.dayKey = day; /* MUTANT */',
-    why: 'After the first bad week the self-heal would be silently disabled for the lifetime of the process.',
+    id: 'viii. ★ heals never recorded (the cap counts nothing — unbounded rebuilds)',
+    find: '  state.healTimesMs.push(nowMs);',
+    to: '  /* MUTANT */',
+    why: 'Every cap check sees an empty window; the 6-per-24h promise is a no-op.',
+  },
+  {
+    id: 'vii. ★ the window never prunes (healer permanently dead after 6 heals ever)',
+    find: '  state.healTimesMs = state.healTimesMs.filter((t) => nowMs - t < HEAL_BUDGET_WINDOW_MS);',
+    to: '  /* MUTANT */',
+    why: 'After the first bad day the self-heal would be silently disabled for the lifetime of the process.',
   },
 ];
 

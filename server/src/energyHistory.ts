@@ -185,6 +185,20 @@ export function computeLocalPackRte(days: ReadonlyArray<VendorDayRecord>): Local
   };
 }
 
+/* ─── v1.90.0 (B7): the morning digest's ledger line ──────────────────────── */
+
+/** One human line summarizing a vendor day for the 06:00 digest, or null when
+ *  the record is missing/empty. Pure; kWh with one decimal; annotates a
+ *  partial PV basis with the dark core's implied production. */
+export function vendorDigestLine(rec: VendorDayRecord | undefined | null): string | null {
+  if (!rec) return null;
+  const k = (wh: number | null | undefined) => (wh == null ? '—' : (wh / 1000).toFixed(1));
+  if (rec.homeWh == null && rec.solarWh == null && rec.gridWh == null) return null;
+  const dark = rec.impliedDarkPvWh != null ? `; dark-core PV ≈ ${k(rec.impliedDarkPvWh)} kWh` : '';
+  const drift = rec.driftHomePct != null ? ` (home drift ${rec.driftHomePct > 0 ? '+' : ''}${rec.driftHomePct}%)` : '';
+  return `Yesterday per the EcoFlow ledger: home ${k(rec.homeWh)} kWh${drift}, solar ${k(rec.solarWh)}, grid ${k(rec.gridWh)}, battery out ${k(rec.batteryOutWh)} / grid-charge ${k(rec.batteryInWh)}${dark}.`;
+}
+
 /* ─── persistence sidecar (the actuator pattern; capped, atomic) ──────────── */
 
 const SIDECAR = () =>
