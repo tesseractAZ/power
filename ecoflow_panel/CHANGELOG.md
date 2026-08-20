@@ -1,3 +1,51 @@
+## v1.90.0 — five register items: the fleet audits itself
+
+### B5 — Core 2 reconnect auto-audit (`reconnectAudit.ts`, new engine)
+
+Core 2 returns ~Sept 1, and every review of a long outage has asked for the
+same transition audit by hand. Now the add-on runs it: any non-spare DPU back
+after ≥ 24 h continuously offline gets a 30-minute automated audit — online
+flip time, first-telemetry latency, `offline-<sn>` alert resolution latency
+(measured against the alert monitor's real tracked set), a pack SoC/spread
+table at +10 min, and fleet pvCoverage at flip vs. report (the dark-core
+blind-spot restoration signal). Exactly ONE [Medium] push per reconnect; a
+presence flap never audits; offline tenure persists in
+`/data/reconnect-watch.json` so a deploy cannot reset the 24 h clock.
+
+### B3 — warranty evidence export (`warrantyExport.ts`)
+
+`GET /api/warranty-export?sn=&format=md|csv|json` renders a paste-ready RMA
+bundle: device error code, EMS voltage window, per-pack table (SoC/SoH/pack
+voltage/spread/cycles/capacity/temp), the full per-cell voltage grid, and up
+to 200 persisted alert-history rows for the serial (admitted by
+id-contains-SN OR `sourceSn` — the v1.78.0 SN-less-id lesson). Spread comes
+from the real cell grid when present, falling back to `maxVolDiffMv`.
+
+### B6 — self-heal budget on a rolling 24 h window
+
+The 6-heal cap was UTC-day-keyed: it reset to zero at exactly 17:00 MST,
+granting a fresh burst mid-evening right before the nightly starvation
+window. Now a rolling 24 h window — capacity frees only as heals age out.
+Harness extended to 8/8 (`mutate-session-self-heal.mjs`): the prune filter
+and the heal-time push are both proven load-bearing.
+
+### B7 — the morning digest carries the ledger
+
+One line (`vendorDigestLine`, pure, tested): yesterday's home kWh with
+signed drift, solar, grid, battery out / grid-charge, and the dark-core PV
+estimate. Null when the record is empty — never a hollow line.
+
+### B10 — `-Month`/`-Year` history-code probe
+
+`GET /api/debug/vendor-history-probe?month=YYYY-MM` asks the historical-data
+endpoint whether month/year variants of the five documented `-Week` chart
+codes exist (400 ms spacing, raw outcomes returned). Read-only, on-demand —
+if any answer, per-circuit monthly energy becomes a one-call feature.
+
+Also: `monitor.activeAlertIds()` — a read-only accessor for the live alert
+set (the reconnect audit measures against the real alarms, not a parallel
+reimplementation).
+
 ## v1.89.0 — roadmap B1 + B2: the ledger gives back
 
 ### B1 — gap-free history for the HA Energy dashboard

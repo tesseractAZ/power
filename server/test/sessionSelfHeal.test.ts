@@ -30,7 +30,7 @@ test('THE EPISODE: 3 Cores starved — heals exactly once the dwell elapses', ()
   const v = evaluateSelfHeal(T0 + 20 * MIN, 3, st, CFG);
   assert.equal(v.heal, true);
   assert.match(v.reason, /3 devices starved 20m/);
-  assert.equal(st.healsToday, 1);
+  assert.equal(st.healTimesMs.length, 1); // v1.90.0 — rolling-window record
   assert.equal(st.starvedSinceMs, null, 'onset reset — the rebuild deserves time to work');
 });
 
@@ -60,7 +60,7 @@ test('cooldown: a persisting starvation must re-dwell AND wait out the cooldown'
   assert.equal(evaluateSelfHeal(T0 + 81 * MIN, 3, st, CFG).heal, true, 'heal #2 after cooldown');
 });
 
-test('daily cap: stands down at maxPerDay, resets on UTC day rollover', () => {
+test('cap: stands down at maxPerDay in a ROLLING 24h; capacity frees as heals age out (v1.90.0)', () => {
   const st = freshSelfHealState();
   let t = T0;
   for (let i = 0; i < CFG.maxPerDay; i++) {
@@ -72,14 +72,28 @@ test('daily cap: stands down at maxPerDay, resets on UTC day rollover', () => {
   const capped = evaluateSelfHeal(t + 20 * MIN, 3, st, CFG);
   assert.equal(capped.heal, false);
   assert.match(capped.reason, /daily cap/);
-  // Next UTC day: the cap resets — and because the starvation PERSISTED through
-  // the standdown (onset still latched, dwell long met, cooldown long past), the
-  // very first tick of the new day heals. A 12-hour starvation must not owe a
-  // fresh dwell just because midnight passed.
-  const nextDay = Date.UTC(2026, 7, 11, 0, 30);
-  const v = evaluateSelfHeal(nextDay, 3, st, CFG);
-  assert.equal(v.heal, true, 'cap lifted at rollover, all other gates long met');
-  assert.equal(st.healsToday, 1, 'the new day counter starts with this heal');
+  // v1.90.0 — the v1.76.0 UTC-day cap rolled at 17:00 MST, mid-evening: night
+  // 9 spent 5 heals before 05:58 and BANKED the 6th into the next budget day.
+  // The rolling window frees capacity exactly 24h after each heal instead. The
+  // first heal was at T0+20min; 24h+21min after T0 it has aged out — and the
+  // persisting starvation (onset latched, dwell long met, cooldown long past)
+  // heals on the first eligible tick. A 12-hour starvation must not owe a
+  // fresh dwell just because a budget boundary passed.
+  const freed = T0 + 24 * 60 * MIN + 21 * MIN;
+  const v = evaluateSelfHeal(freed, 3, st, CFG);
+  assert.equal(v.heal, true, 'capacity freed as the oldest heal aged past 24h; all other gates long met');
+  assert.equal(st.healTimesMs.length, CFG.maxPerDay, 'the window slid: oldest out, newest in');
+  // and one minute BEFORE the oldest aged out, the cap still held
+  const st2 = freshSelfHealState();
+  let t2 = T0;
+  for (let i = 0; i < CFG.maxPerDay; i++) {
+    evaluateSelfHeal(t2, 3, st2, CFG);
+    evaluateSelfHeal(t2 + 20 * MIN, 3, st2, CFG);
+    t2 += 81 * MIN;
+  }
+  evaluateSelfHeal(t2, 3, st2, CFG);
+  const still = evaluateSelfHeal(T0 + 24 * 60 * MIN + 19 * MIN, 3, st2, CFG);
+  assert.equal(still.heal, false, 'one minute before the oldest heal ages out, the cap holds');
 });
 
 test('utcDayKey is deterministic and TZ-independent', () => {

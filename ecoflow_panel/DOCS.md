@@ -1489,9 +1489,12 @@ watchdog and any uptime probe see it.
 When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a fired message-rate collapse
 for `SELF_HEAL_AFTER_MS` (20 min), the add-on rebuilds its own MQTT session:
 stop, certificate re-fetch, fresh connect. Guards, each mutation-proven
-load-bearing (`scripts/mutate-session-self-heal.mjs`, 7/7): the multi-device
-threshold, the dwell, a 60-min cooldown, a 6/day UTC-keyed cap, and a post-heal
-onset reset. Read-path only — REST polling is untouched, and a failed rebuild
+load-bearing (`scripts/mutate-session-self-heal.mjs`, 8/8): the multi-device
+threshold, the dwell, a 60-min cooldown, a 6-heal cap over a **rolling 24 h
+window** (v1.90.0 — previously UTC-day-keyed, which reset to zero at exactly
+17:00 MST and granted a fresh burst mid-evening; the rolling window frees one
+slot as each heal ages past 24 h, so the cap is a true rate limit), and a
+post-heal onset reset. Read-path only — REST polling is untouched, and a failed rebuild
 falls back to the existing `startMqttWithRetry` backoff.
 
 **Measured verdict (maiden night, 2026-08-11).** The mechanism ran exactly to
@@ -8703,7 +8706,50 @@ reports the pack-DC round-trip ratio on `/api/energy-history` — declared
 `basis: 'pack-dc'`, an upper bound on the AC dispatch RTE. `DISPATCH_RTE`
 (0.86) is unchanged.
 
-## 12b. Settings-drift watchdog (`settingsDrift.ts`, v1.83.0)
+## 12e. Long-offline reconnect auto-audit (`reconnectAudit.ts`, v1.90.0)
+
+Watches every non-spare DPU's cloud presence and, when one returns after
+≥ 24 h continuously offline, runs a 30-minute transition audit automatically —
+the checkpoints every manual review of a long outage has asked for: online
+flip time, first-telemetry latency, `offline-<sn>` alert resolution latency
+(measured against the alert monitor's real tracked set via
+`monitor.activeAlertIds()`), a pack SoC/spread table captured ≥ 10 min after
+the flip, and fleet `pvCoverage` at flip vs. at report (the dark-core
+blind-spot restoration signal). Exactly one `[Medium]` push per reconnect.
+
+- Pure decision core (`evaluateReconnectWatch`) over injected `DeviceObs`
+  snapshots; the index.ts driver ticks at 60 s and only feeds and dispatches.
+- A presence **flap never audits**: arming requires the full 24 h of
+  continuous offline; any earlier return silently clears the tenure clock.
+- Offline tenure and the armed-log latch persist in
+  `/data/reconnect-watch.json` (atomic write), so a deploy during a multi-day
+  outage cannot reset the arming clock. An in-flight 30-min audit does NOT
+  survive a restart by design (its checkpoint timestamps would be fiction).
+- `pvCoverage` is fetched from analytics at most once per 5 min, and only
+  while a tenure is armed or an audit is live — zero steady-state cost.
+- Kind classification falls back to `productName` when a device has no
+  projection (a device dark since boot has none — and is exactly the device
+  this watch exists for). Spare DPUs are excluded (expected-offline is the
+  zombie gate's domain).
+
+## 12f. Warranty evidence export (`warrantyExport.ts`, v1.90.0)
+
+`GET /api/warranty-export?sn=<SN>&format=md|csv|json` (default SN = Core 3,
+default format = markdown) renders a paste-ready RMA evidence bundle from the
+live projection plus the persisted `cleared-alerts.json` history: device error
+code, EMS parallel-voltage window, a per-pack table (pack SN, SoC, SoH, pack
+voltage, cell spread, cycles, remaining capacity, temperature), the full
+per-cell voltage grid (markdown lists or one-row-per-cell CSV), and up to 200
+alert-history rows for the serial (admitted by id-contains-SN **or**
+`sourceSn` — the v1.78.0 SN-less-id lesson). Spread is computed from the real
+cell grid when present (min/max), falling back to the projected
+`maxVolDiffMv`. Read-only; auth-gated like every `/api` route.
+
+**Discovery probe (same release):** `GET /api/debug/vendor-history-probe`
+(`?month=YYYY-MM`, default last month) asks the historical-data endpoint
+whether `-Month`/`-Year` variants of the five documented `-Week` chart codes
+exist, at 400 ms spacing, and returns the raw per-code outcomes. Read-only,
+on-demand only; results are recorded in §12 once known.
 
 Read-only 60 s tick over the raw quota of the SHP2 + every DPU. Pure core:
 `extractSettingsSurface` (flat-first with `pd303_mc.` fallback; DPU keys under
@@ -8743,6 +8789,11 @@ advisory `empiricalRte` summary since v1.85.0),
 proven baseline). Failure mode: any
 single fetch failure logs at warn, leaves that field null, and the batch
 continues; a failed batch retries each tick inside the window.
+**v1.90.0**: the morning digest carries a one-line ledger summary
+(`vendorDigestLine`, pure): yesterday's home (with signed home drift), solar,
+grid, battery out / grid-charge, and the dark-core PV estimate when present.
+Null when the record is missing or empty — the digest never carries a hollow
+line.
 
 ## 12. Vendor API notes (documented, not all used)
 

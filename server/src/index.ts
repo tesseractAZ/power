@@ -11,12 +11,17 @@ import { config } from './config.js';
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, SPARE_DPU_SNS } from './shp2Membership.js';
+import {
+  loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
+  renderReconnectReport, ARM_OFFLINE_MS as RECONNECT_ARM_MS, type DeviceObs as ReconnectDeviceObs,
+} from './reconnectAudit.js';
 import { startMqtt } from './ecoflow/mqtt.js';
 import { createRecorder } from './recorder.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { startOfLocalDayMs } from './aggregator.js';
-import { setClockRejectLogger } from './ecoflow/rest.js';
+import { setClockRejectLogger, ecoflow,
+} from './ecoflow/rest.js';
 import {
   decideChargeNowResponse, freshResponderState, resolveChargeNowMode,
 } from './chargeNowResponder.js';
@@ -30,6 +35,7 @@ import {
 import { parseQuietHours as parseNotifyQuiet, inQuietWindow as inNotifyQuiet } from './alertMonitor.js';
 import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct, missingDays, isIncompleteDay, computeEmpiricalRte, computeLocalPackRte, type VendorDayRecord } from './energyHistory.js';
 import { exportVendorStatistics } from './haStatistics.js';
+import { buildWarrantyBundle, renderWarrantyMarkdown, renderWarrantyCsv, loadClearedRecords } from './warrantyExport.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
 import { isConfigured } from './notify.js';
@@ -671,6 +677,63 @@ app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, re
   // v1.89.0 — pack-DC round-trip ratio (B2; DC basis, upper bound on dispatch RTE).
   const localPackRte = computeLocalPackRte(Object.values(state.days));
   return { lastRunDay: state.lastRunDay, empiricalRte: rte, localPackRte, days: days.map((d) => state.days[d]) };
+});
+
+/** v1.90.0 (B3) — the warranty evidence bundle: live per-pack + per-cell data
+ *  plus this serial's persisted alert history, as paste-ready markdown
+ *  (?format=csv for the per-cell grid). READ-ONLY. */
+app.get<{ Querystring: { sn?: string; format?: string } }>('/api/warranty-export', async (req, reply) => {
+  const sn = req.query.sn ?? 'Y711FAB59J234000';
+  const d: any = (store.get().devices as any)[sn];
+  if (!d?.projection) { reply.code(404); return { error: `no projection for ${sn}` }; }
+  const bundle = buildWarrantyBundle(d, loadClearedRecords() as any, new Date().toISOString());
+  if (req.query.format === 'csv') {
+    reply.type('text/csv').header('Content-Disposition', `attachment; filename="warranty-${sn}-cells.csv"`);
+    return renderWarrantyCsv(bundle);
+  }
+  if (req.query.format === 'json') return bundle;
+  reply.type('text/markdown').header('Content-Disposition', `attachment; filename="warranty-${sn}.md"`);
+  return renderWarrantyMarkdown(bundle);
+});
+
+/** v1.90.0 (B10) — DISCOVERY probe: do -Month/-Year variants of the documented
+ *  -Week history codes exist? Read-only; returns raw outcomes for the register.
+ *  ?month=YYYY-MM (default: last month). */
+app.get<{ Querystring: { month?: string } }>('/api/debug/vendor-history-probe', async (req, reply) => {
+  const shp2 = findShp2(store.get().devices);
+  if (!shp2) { reply.code(503); return { error: 'no SHP2' }; }
+  const m = req.query.month ?? (() => {
+    const d = new Date(Date.now() - 32 * 24 * 3_600_000);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  })();
+  if (!/^\d{4}-\d{2}$/.test(m)) { reply.code(400); return { error: 'month=YYYY-MM' }; }
+  const [y, mo] = m.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  const win = { beginTime: `${m}-01 00:00:00`, endTime: `${m}-${String(lastDay).padStart(2, '0')} 23:59:59` };
+  const bases = [
+    'PD303-App-LOAD-LOAD-ENERGY-FLOW-chart_general_value_no_filt',
+    'PD303-App-GRID-GRID-ENERGY-FLOW-chart_grid_value',
+    'PD303-App-SOLAR-SOLAR-ENERGY-FLOW-chart_general_value_no_filt',
+    'PD303-App-BATTERY-BATTERY-ENERGY-FLOW-chart_battery_value_dual',
+    'PD303-Dashboard-Circuits-Line',
+  ];
+  const out: Record<string, unknown> = {};
+  for (const base of bases) {
+    for (const suffix of ['Month', 'Year']) {
+      const code = `${base}-${suffix}`;
+      try {
+        const params: Record<string, unknown> = base.includes('Circuits')
+          ? { code, field1: 'energy_hour_grid_ch1', field2: 'energy_hour_oil_ch1', field3: 'energy_hour_bak_ch1', ...win }
+          : { code, ...win };
+        const resp = await ecoflow.getQuotaData(shp2.sn, params);
+        out[code] = { ok: true, sample: JSON.stringify(resp).slice(0, 400) };
+      } catch (e: any) {
+        out[code] = { ok: false, error: String(e?.message ?? e).slice(0, 200) };
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  return { month: m, window: win, results: out };
 });
 
 /** v1.89.0 (B1) — manual full re-export of the vendor ledger to HA statistics. */
@@ -2436,7 +2499,7 @@ if (loadShedAdvisoryEnabled) {
 const rateFloor = new RateFloorTracker();
 // v1.76.0 — cloud-session self-heal state (see sessionSelfHeal.ts).
 const selfHealState = freshSelfHealState();
-let selfHealCapLoggedDay: string | null = null;
+let selfHealCapLogged = false; // v1.90.0 — one stand-down line per capped episode
 
 // v1.81.0 — event-loop lag observability (08-05 queue #8). The 08-05 review
 // found 3.5-9.7s stalls freezing all in-flight API requests — and alarm
@@ -2547,9 +2610,15 @@ const rateFloorTick = setInterval(() => {
     // v1.78.0 — the daily-cap stand-down was computed and DISCARDED: on 08-14
     // the cap emptied at 04:44 with recovery 27 min later, and nothing in the
     // log said the healer had stood down. Log it once per capped day.
-    if (!healVerdict.heal && healVerdict.reason.startsWith('daily cap') && selfHealCapLoggedDay !== selfHealState.dayKey) {
-      selfHealCapLoggedDay = selfHealState.dayKey;
-      app.log.warn(`self-heal: standing down — ${healVerdict.reason} (starvation persisting; next heal after the UTC day rolls)`);
+    if (!healVerdict.heal && healVerdict.reason.startsWith('daily cap')) {
+      // v1.90.0 — rolling 24h budget: log the stand-down once per capped
+      // EPISODE; re-arm when the budget frees or a heal fires.
+      if (!selfHealCapLogged) {
+        selfHealCapLogged = true;
+        app.log.warn(`self-heal: standing down — ${healVerdict.reason} (starvation persisting; capacity frees as heals age past 24h)`);
+      }
+    } else {
+      selfHealCapLogged = false;
     }
     if (healVerdict.heal) {
       app.log.warn(`self-heal: ${healVerdict.reason}`);
@@ -3823,6 +3892,92 @@ function runSettingsDriftTick(): void {
 }
 
 /**
+ * v1.90.0 (B5) — long-offline reconnect auto-audit tick (see reconnectAudit.ts).
+ * Core 2 returns ~Sept 1; the transition audit must not depend on a human
+ * noticing the flip. Arms after 24h continuous offline (tenure persisted in a
+ * sidecar so a deploy during the wait cannot reset the clock), then on
+ * reconnect collects a 30-min checkpoint window and delivers ONE [Medium]
+ * report push. Spares are excluded — expected-offline is the zombie gate's
+ * domain, and a spare flip must never page.
+ */
+const reconnectWatchState = loadReconnectWatchState();
+let reconnectPvCache: { value: number | null; atMs: number } = { value: null, atMs: 0 };
+let reconnectTickInFlight = false;
+
+async function reconnectPvCoverage(nowMs: number): Promise<number | null> {
+  if (nowMs - reconnectPvCache.atMs < 5 * 60_000) return reconnectPvCache.value;
+  try {
+    const t: any = await analytics.report('totals', { sinceMs: nowMs - 24 * 3_600_000, untilMs: nowMs });
+    reconnectPvCache = { value: t?.fleet?.pvCoverage ?? null, atMs: nowMs };
+  } catch {
+    reconnectPvCache = { value: null, atMs: nowMs };
+  }
+  return reconnectPvCache.value;
+}
+
+function reconnectObsDevices(): ReconnectDeviceObs[] {
+  const out: ReconnectDeviceObs[] = [];
+  for (const d of Object.values(store.get().devices) as any[]) {
+    if (SPARE_DPU_SNS.has(d.sn)) continue;
+    // Kind falls back to the product name: a device cloud-dark since boot has
+    // no projection, and that is exactly the device this watch exists for.
+    const pk = d?.projection?.kind;
+    const kind: ReconnectDeviceObs['kind'] =
+      pk === 'dpu' || pk === 'shp2' ? pk
+      : /delta pro ultra/i.test(d.productName ?? '') ? 'dpu'
+      : /smart home panel/i.test(d.productName ?? '') ? 'shp2'
+      : 'other';
+    out.push({
+      sn: d.sn, name: d.deviceName ?? d.sn, kind,
+      online: d.online === true,
+      lastUpdatedMs: d.lastUpdated ?? 0,
+      packs: Array.isArray(d?.projection?.packs)
+        ? d.projection.packs.map((p: any, i: number) => ({
+            num: typeof p.num === 'number' ? p.num : i + 1,
+            socPct: typeof p.soc === 'number' ? p.soc : null,
+            spreadMv: typeof p.maxVolDiffMv === 'number' ? p.maxVolDiffMv : null,
+          }))
+        : undefined,
+    });
+  }
+  return out;
+}
+
+async function runReconnectWatchTick(): Promise<void> {
+  if (reconnectTickInFlight) return;
+  reconnectTickInFlight = true;
+  try {
+    const nowMs = Date.now();
+    const devices = reconnectObsDevices();
+    // pvCoverage is only consulted at the flip and in the report; fetch it only
+    // while an armed tenure or a live audit could consume it (multi-day
+    // outages — rare), at most once per 5 min.
+    const anyArmed = Object.values(reconnectWatchState.offlineSinceMs)
+      .some((t) => nowMs - t >= RECONNECT_ARM_MS);
+    const pv = anyArmed || reconnectWatchState.audit != null ? await reconnectPvCoverage(nowMs) : null;
+    const liveIds = new Set(monitor.activeAlertIds());
+    const offlineActiveBySn = new Set(devices.filter((d) => liveIds.has(`offline-${d.sn}`)).map((d) => d.sn));
+    const ev = evaluateReconnectWatch(reconnectWatchState, devices, offlineActiveBySn, pv, nowMs);
+    saveReconnectWatchState(reconnectWatchState);
+    if (ev.kind === 'armed') {
+      app.log.info(`reconnect-watch: ${ev.name} (${ev.sn}) offline ${(ev.offlineForMs / 3_600_000).toFixed(1)}h — audit ARMED for its return`);
+    } else if (ev.kind === 'auditStarted') {
+      app.log.warn(`reconnect-watch: ${ev.name} (${ev.sn}) is BACK after ${(ev.offlineForMs / 86_400_000).toFixed(1)} days — 30-min transition audit running`);
+    } else if (ev.kind === 'report') {
+      const msg = renderReconnectReport(ev.report);
+      app.log.warn(`reconnect-watch: ${msg.title} — ${msg.body}`);
+      await sendNotification(loadNotifyConfig(), {
+        severity: 'warning', dedupId: `reconnect_audit_${ev.report.sn}`, title: msg.title, body: msg.body,
+      }).catch((e: any) => app.log.warn(`reconnect-watch: report push failed (${e?.message ?? e}) — report is in the log above`));
+    }
+  } catch (e: any) {
+    app.log.warn(`reconnect-watch: tick failed (${e?.message ?? e})`);
+  } finally {
+    reconnectTickInFlight = false;
+  }
+}
+
+/**
  * v1.82.0 — vendor energy-history daily job. Fires once per Phoenix day in the
  * [06:35, 09:00) window (after the digest, before solar ramps the poll budget's
  * importance), fetching YESTERDAY's vendor ledger and reconciling the two
@@ -4166,6 +4321,8 @@ if (nightChargeEnabled) {
   vendorEnergyTick.unref();
   const settingsDriftTick = setInterval(() => { runSettingsDriftTick(); }, 60 * 1000);
   settingsDriftTick.unref();
+  const reconnectWatchTick = setInterval(() => { void runReconnectWatchTick(); }, 60 * 1000);
+  reconnectWatchTick.unref();
   const chargeNowTick = setInterval(() => { void runChargeNowTick(); }, 60 * 1000);
   chargeNowTick.unref();
   nightActuationTick.unref();
