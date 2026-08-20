@@ -494,12 +494,18 @@ export function startPollLoop(
   intervalMs: number,
   log: (msg: string) => void,
   warn: (msg: string) => void = log,
+  /** v1.88.0 — fired when a device that had been failing its quota fetch for a
+   *  LONG time (>= 30 min; i.e. the persistent 1006 class, not a one-poll blip)
+   *  starts answering. The EcoFlow ticket asking for exactly this enablement is
+   *  in their queue — this is the "it landed" doorbell. */
+  onLongFailureRecovered?: (sns: string[]) => void,
 ): () => void {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   let lastPollFailed = false; // track failure→ok recovery for the one INFO line that matters
   let lastFailedSetKey = ''; // v1.86.0 — poll-failure set-change dedupe
   let lastFailedSetLoggedMs = 0;
+  const failureFirstSeenMs = new Map<string, number>(); // v1.88.0 — tenure per failing SN
   // Wire the per-SN state-transition logger into the store on first poll.
   store.setLogger(log);
   const tick = async () => {
@@ -518,6 +524,17 @@ export function startPollLoop(
         // A stable set logs once at warn (and once per hour at info as a
         // heartbeat); a CHANGED set — a new device failing, or one recovering —
         // always logs at warn immediately.
+        // v1.88.0 — tenure bookkeeping + long-failure recovery detection.
+        const nowTick = Date.now();
+        for (const sn of failedSns) if (!failureFirstSeenMs.has(sn)) failureFirstSeenMs.set(sn, nowTick);
+        const recoveredLong: string[] = [];
+        for (const [sn, since] of failureFirstSeenMs) {
+          if (!failedSns.includes(sn)) {
+            if (nowTick - since >= 30 * 60_000) recoveredLong.push(sn);
+            failureFirstSeenMs.delete(sn);
+          }
+        }
+        if (recoveredLong.length) onLongFailureRecovered?.(recoveredLong);
         const setKey = [...failedSns].sort().join(',');
         if (setKey !== lastFailedSetKey) {
           lastFailedSetKey = setKey;
@@ -531,6 +548,13 @@ export function startPollLoop(
         if (lastFailedSetKey !== '') {
           lastFailedSetKey = '';
           log(`poll: all device fetches recovered`);
+          // v1.88.0 — full recovery: any long-tenured failures just ended.
+          const nowTick = Date.now();
+          const recoveredLong = [...failureFirstSeenMs.entries()]
+            .filter(([, since]) => nowTick - since >= 30 * 60_000)
+            .map(([sn]) => sn);
+          failureFirstSeenMs.clear();
+          if (recoveredLong.length) onLongFailureRecovered?.(recoveredLong);
         }
       }
       if (failedSns.length === 0 && lastPollFailed) {

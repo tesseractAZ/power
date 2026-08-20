@@ -173,3 +173,28 @@ test('handoff detection is scoped to the band family only', () => {
   assert.equal(resolveHandoffOwner('soc-low-A-1', new Set(['shp2-near-reserve'])), null);
   assert.equal(resolveHandoffOwner(`dpu-err-${SN}`, new Set(['shp2-below-reserve'])), null);
 });
+
+/* ═══ v1.88.0 — settle-family push debounce + auto-tuned resolve suppression ═ */
+
+import { pushDebounceMsFor, SETTLE_PUSH_DEBOUNCE_MS, shouldSendResolve } from '../src/alertMonitor.js';
+
+test('settle families hold their PUSH 5 minutes; everything else keeps the default', () => {
+  for (const id of ['vdiff-crit-SN-1', 'peer-voldiff-SN-2', 'peer-soc-SN-1', 'soc-low-SN-3', 'dpu-imbalance-SN']) {
+    assert.equal(pushDebounceMsFor(id, 60_000), SETTLE_PUSH_DEBOUNCE_MS, id);
+  }
+  assert.equal(pushDebounceMsFor('dpu-err-SN', 60_000), 60_000, 'a battery-protection fault is not settling noise');
+  assert.equal(pushDebounceMsFor('backup-soc-20', 60_000), 60_000);
+  assert.equal(pushDebounceMsFor('shp2-src-err-3', 60_000), 60_000);
+  // the default never SHRINKS a larger configured debounce
+  assert.equal(pushDebounceMsFor('vdiff-crit-SN-1', 10 * 60_000), 10 * 60_000);
+});
+
+test('a fire the operator saw as auto-tuned "[Low]" owes no "Resolved:" push', () => {
+  const base = { pushSent: true, notifiedSeverity: 'warning' as const, alert: { id: 'peer-soc-SN-1', severity: 'warning' as const } };
+  // delivered at source tier → resolve owed
+  assert.equal(shouldSendResolve({ ...base, notifiedEffectiveSeverity: 'warning' }, true, 'warning'), true);
+  // auto-tuned down to info at delivery → the resolve of a demoted event is noise
+  assert.equal(shouldSendResolve({ ...base, notifiedEffectiveSeverity: 'info' }, true, 'warning'), false);
+  // legacy entries without the field keep the old behavior (notifiedSeverity decides)
+  assert.equal(shouldSendResolve(base, true, 'warning'), true);
+});
