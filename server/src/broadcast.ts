@@ -1275,6 +1275,26 @@ export function startBroadcastMonitor(
       lastPlayedAt = Date.now();
       lastPlayedLevel = level;
       lastPlayedMessage = message;
+      // v1.88.0 — SINGLE-FLIGHT the two red retry paths. On 2026-08-19 15:02
+      // a degraded boot (Piper DNS down + HA 502) armed BOTH the deferred-
+      // target retry (30s) and the spoken-render retry (90s); the deferred one
+      // delivered the full announcement at 15:02:45 and the spoken retry then
+      // played the identical red AGAIN at 15:03:44 — ~130s of klaxon for one
+      // condition. A VERIFIED spoken delivery of the same level and text
+      // satisfies the pending spoken retry's entire purpose; cancel it.
+      // A condition-type pending (message === undefined, v1.48.0 shape) is
+      // satisfied by ANY verified spoken delivery at its level — the condition
+      // speech re-derives at fire time, so exact text equality would never
+      // match. A dedicated-message pending must match its stored text.
+      if (
+        pendingSpokenRetry != null &&
+        pendingSpokenRetry.level === level &&
+        (pendingSpokenRetry.message === undefined ||
+          (pendingSpokenRetry.message ?? null) === (message ?? null))
+      ) {
+        pendingSpokenRetry = null;
+        log('broadcast: pending spoken retry cancelled — this verified delivery already carried the announcement');
+      }
     }
     const renderTag = rr.fromCache ? 'cached' : `rendered+${rr.ttsRenderMs ?? 0}ms`;
     if (errors.length === 0) {

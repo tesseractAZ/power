@@ -22,6 +22,7 @@ import {
   fullCoverageFleetPv,
   SOLAR_FIT_MIN_FULL_COVERAGE_HOURS,
   type SolarResponseModel,
+  resetPvBiasExclusionLogForTesting,
 } from '../src/analytics.js';
 
 const HOUR_MS = 3_600_000;
@@ -175,7 +176,8 @@ test('bias gate — a core dark the ENTIRE window yields the neutral 1.0 no-op (
   assert.equal(computePvBiasCorrection(MODEL, ghi, pvBySn, TODAY_START), 1.0);
 });
 
-test('bias gate — excluded days are reported through the log hook', () => {
+test('bias gate — excluded days are reported ONCE per (day, core), then deduped (v1.88.0)', () => {
+  resetPvBiasExclusionLogForTesting();
   const ghi = ghiWindow(7);
   const pvBySn = new Map([
     ['A', snSamples(7, () => 500)],
@@ -185,4 +187,8 @@ test('bias gate — excluded days are reported through the log hook', () => {
   computePvBiasCorrection(MODEL, ghi, pvBySn, TODAY_START, undefined, (m) => lines.push(m));
   assert.equal(lines.length, 1);
   assert.match(lines[0], /pv-bias: excluded .* core B reported 0% of daylight hours/);
+  // v1.88.0 — the same exclusion fact re-evaluated (96x per day in the 08-05
+  // review, 7% of log bytes) logs NOTHING further.
+  computePvBiasCorrection(MODEL, ghi, pvBySn, TODAY_START, undefined, (m) => lines.push(m));
+  assert.equal(lines.length, 1, 're-evaluation of a known exclusion is silent');
 });
