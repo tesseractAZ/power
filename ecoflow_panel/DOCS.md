@@ -1047,6 +1047,7 @@ the home bus. Every fleet aggregation must exclude spares.
   reporting. Core principle: *we can PROVE discharge from a partial sum; we can never
   DISPROVE it.* An empty roster means no home cores exist at all → `complete` is vacuously
   true.
+- **`isHomePoolDpu(sn, connectedOrDevices)`** — v1.92.0; is this DPU wired into the backup pool right now (SHP2 roster, literal only as the unknown-roster fallback).
 - **`homeFleetMeanSoc(devices)`** — reserve-alarm SHP2-blind fallback: mean SoC of home
   cores still reporting (spares + offline cores excluded). Used when the SHP2 nulls
   `backupBatPercent` while cloud-offline, so the audible reserve ladder keeps firing on
@@ -3237,6 +3238,8 @@ The guard **only** fires from a *fresh, healthy* baseline: a real deep discharge
 #### 3.7 SHP2-blind failover (index.ts, v1.8.0/F3)
 
 The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes cloud-offline; the 30-day review found blackouts (42.2 h, 25.8 h) in which the pool crossed 50/40/30/20 % while the ladder sat dark for 17.8–20.8 h. When `backupBatPercent` is null, index.ts falls back to `homeFleetMeanSoc(devices)` (the pool *is* those batteries). It returns null only when no Core is reporting, where `update(null)` is a safe no-op and the reserve-blind warning + offline alerts are the signal.
+
+**v1.92.0 — pool membership is resolved from the SHP2's own connected-source roster, not from the static `SPARE_DPU_SNS` literal.** `isHomePoolDpu(sn, connectedOrDevices)` returns `connected.has(sn)` when the roster is known and falls back to `!SPARE_DPU_SNS.has(sn)` only when it is empty (the panel itself cloud-dark), which errs toward *including* a device. Motivating incident: a physical reconfiguration moved an allowlisted bench unit onto a panel slot and a home Core off it, inverting the literal. The allowlist-only filter then averaged the bench unit and dropped a live pool member — and because a bench unit charges independently, the reported mean acquired a hard floor of `benchSoc / 3`. Measured with the bench unit at 63 %, the fallback could not read below 21 %, so the 15/10/8/4/2 % rungs — the entire critical half of the ladder — were unreachable during exactly the SHP2-blind window the fallback exists to cover. Guards are mutation-proven load-bearing (`scripts/mutate-pool-membership.mjs`, 6/6), including an exemplar that reproduces the shipped defect verbatim. The same resolver now gates the reconnect auto-audit's device set (§12e), which previously exempted a live home Core while watching a bench unit.
 
 ---
 
