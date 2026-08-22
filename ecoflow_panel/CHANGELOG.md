@@ -1,3 +1,36 @@
+## v1.99.0 — EV recurrence probability was 7.5x too high
+
+The recurrence denominator counted days on which ANY EV session occurred, not
+calendar days in the window. With 4-5 charging days in a 30-day window that
+inflated every pattern's confidence weight by ~30/4, and the inflated block was
+added to the day-ahead load forecast every night.
+
+Measured live before the fix: `sessionsObserved: 5`, one pattern with
+`recurrences: 3`, reporting `probability: 0.6` — i.e. 3/5, where the honest
+figure is 3/30 = 0.10. On a 10.19 kW plateau the audit measured
+`predictedEvLoadW: 7643` across four consecutive day-ahead hours. This single
+defect accounted for essentially the whole load-forecast bias (`loadBias`
+-0.241, load OVER-forecast by ~24%).
+
+v0.56.0's own comment always described the intended behaviour — *"A 3-of-28-days
+charger projects at ~0.11, not 1.0"* — and the code did something else. The
+weekday-keyed branch carried the identical defect (`observedDaysByDow` counted
+observed EV days of that weekday rather than calendar occurrences of it) and is
+fixed the same way.
+
+**Bounded by REAL history.** A recorder holding only 10 days divides by 10, not
+30 — otherwise a young install would under-predict a genuinely frequent charger
+just as badly as the old bug over-predicted a sparse one.
+
+**Expected effect on night-charge sizing:** predicted load falls, so the planner
+buys LESS. That is the correct direction — the phantom EV block was inflating
+the requirement — but it is a real behavioural change, not a pure accuracy win.
+The supervised write clamp ([10,50]) bounds it either way.
+
+The pre-existing test that asserted `3/12 = 0.25` encoded the defect and has been
+corrected to `3/28`; three new tests pin the sparse-charger case, the
+expected-value lift, and the young-install bound.
+
 ## v1.98.0 — the lifetime freeze, actually repaired
 
 v1.96.0 keyed the lifetime-floor re-seed solely on a CHANGE of the SHP2

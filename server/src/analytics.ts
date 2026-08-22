@@ -4083,12 +4083,19 @@ function computeMinedEvWindowPrediction(
   const since = now - EV_WINDOW_HISTORY_MS;
 
   const sessions: Array<EvSessionRaw & { sn: string; circuit: number }> = [];
+  let earliestSampleTs: number | null = null;
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
   if (shp2) {
     for (const pc of shp2.projection.pairedCircuits) {
       const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, since, now);
+      // v1.99.0 — how far back the recorder actually goes, so the recurrence
+      // denominator is CALENDAR days of real history, not a nominal 30.
+      if (pts.length > 0) {
+        const t0 = pts[0].ts;
+        if (earliestSampleTs === null || t0 < earliestSampleTs) earliestSampleTs = t0;
+      }
       for (const s of extractEvSessions(pts)) {
         // v1.15.0 (review F6) — plateau discriminator: only sessions whose average
         // power clears EV_PLATEAU_MIN_W are EV. This is what stops the two air
@@ -4101,15 +4108,35 @@ function computeMinedEvWindowPrediction(
     }
   }
 
-  // v0.56.0 — recurrence-probability denominator. Distinct calendar days on which ANY EV
-  // session was observed in the window; a pattern seen on N of these days fired ~N/observedDays
-  // of the time, so we confidence-weight its projected watts (expected-value load) rather than
-  // assume it fires every night. A ~10 kW session seen 3 of ~28 days contributes ~1.1 kW.
-  const observedDayKeys = new Set(sessions.map((s) => new Date(s.startTs).toDateString()));
-  const observedDays = Math.max(1, observedDayKeys.size);
-  const observedDaysByDow = new Map<number, number>(); // for weekday-keyed patterns: a Tue charger can only fire on observed Tuesdays
-  for (const k of observedDayKeys) {
-    const dow = new Date(k).getDay();
+  // v0.56.0 — recurrence-probability denominator. A pattern seen on N days fired
+  // ~N/observedDays of the time, so we confidence-weight its projected watts
+  // (expected-value load) rather than assume it fires every night. A ~10 kW
+  // session seen 3 of ~28 days contributes ~1.1 kW.
+  //
+  // v1.99.0 — the denominator was the number of days on which ANY EV session was
+  // seen, NOT the number of calendar days in the window. With 4 charging days in
+  // a 30-day window that made every probability 30/4 = 7.5x too high: a
+  // 3-of-30-days charger reported 0.75 instead of 0.10, and the inflated block
+  // was added to the day-ahead load forecast every night (measured live:
+  // predictedEvLoadW 7643 for four consecutive hours, from a 10.19 kW pattern
+  // with 3 recurrences). This single defect accounted for essentially the whole
+  // load-forecast bias. The comment above always described the intended
+  // behaviour; the code did something else.
+  //
+  // Bounded by REAL history: a recorder holding only 10 days must divide by 10,
+  // not 30, or a young install would under-predict just as badly.
+  const historyStartMs = earliestSampleTs !== null ? Math.max(since, earliestSampleTs) : since;
+  const calendarDays = Math.min(
+    EV_WINDOW_HISTORY_MS / 86_400_000,
+    Math.max(1, Math.round((now - historyStartMs) / 86_400_000)),
+  );
+  const observedDays = Math.max(1, calendarDays);
+  // Weekday-keyed patterns divide by the calendar occurrences of THAT weekday in
+  // the covered span — previously the observed EV days of that weekday, which
+  // carried the identical defect.
+  const observedDaysByDow = new Map<number, number>();
+  for (let d = 0; d < calendarDays; d++) {
+    const dow = new Date(now - d * 86_400_000).getDay();
     observedDaysByDow.set(dow, (observedDaysByDow.get(dow) ?? 0) + 1);
   }
 

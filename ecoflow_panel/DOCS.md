@@ -3043,6 +3043,8 @@ Two overarching **safety invariants** govern the whole cluster and are repeated 
 | `forecast.hours[h].forecastLoadW` | `getDayForecast` diurnal/day-of-week load curve | Per-hour load |
 | `forecast.hours[h].predictedEvLoadW` | `getDayForecast` EV window prediction | **Subtracted out** of the alarm load (see §1.5) |
 
+**v1.99.0 — EV recurrence probability divides by CALENDAR days.** A mined pattern is confidence-weighted by how often it actually fires, so a sparse charger contributes its expected value rather than its full plateau. The denominator counted days on which ANY EV session occurred, not calendar days in the window — with 4-5 charging days in 30, every probability was ~7.5x too high (measured live: `recurrences: 3` reporting `probability: 0.6` where 3/30 = 0.10 is honest, putting `predictedEvLoadW: 7643` from a 10.19 kW plateau into four consecutive day-ahead hours). This accounted for essentially the whole load-forecast bias (`loadBias` -0.241, load OVER-forecast by ~24%). The weekday-keyed branch carried the identical defect and is fixed the same way. The denominator is bounded by REAL history — a recorder holding 10 days divides by 10, not 30, so a young install does not under-predict a genuinely frequent charger. Net effect on night-charge sizing: predicted load falls, so the planner buys less; the supervised write clamp `[10,50]` bounds it either way.
+
 #### 1.3 The calculation, step by step
 
 **Step 0 — cache.** Returns the cached projection if it is younger than `RUNWAY_TTL_MS` = 60 s.

@@ -137,10 +137,15 @@ test('F6 — scattered real-world sessions yield ZERO patterns but HONEST distri
 
 test('F6 — a weak same-hour tendency (3 scattered days at one hour) yields a probability-DISCOUNTED daily pattern, never a full-watts lift', () => {
   // The real fleet data has exactly this shape: 3 of 12 sessions round to hour 13.
-  // The daily detector legitimately fires, but v0.56.0's probability weighting
-  // (3 of 12 observed charging days = 0.25) keeps the expected-value lift at a
-  // fraction of the plateau — this is a real (weak) tendency of the actual EV,
-  // not AC contamination, and it errs mildly conservative for SoC projection.
+  // The daily detector legitimately fires, but the probability weighting keeps the
+  // expected-value lift at a fraction of the plateau — this is a real (weak)
+  // tendency of the actual EV, not AC contamination.
+  //
+  // v1.99.0 — this assertion used to read 3/12 = 0.25, encoding the very defect
+  // v0.56.0's own comment warned against ("A 3-of-28-days charger projects at
+  // ~0.11, not 1.0"): the denominator counted days on which ANY EV session
+  // occurred, not calendar days. The series below spans 28 days, so the honest
+  // figure is 3/28.
   resetEvWindowCache();
   const now = Date.now();
   const days = [28, 26, 23, 20, 19, 18, 13, 12, 11, 8, 6, 2];
@@ -155,7 +160,7 @@ test('F6 — a weak same-hour tendency (3 scattered days at one hour) yields a p
   const r = computeEvWindowPrediction(shp2With([5]), recorderFor({ pair5_w: series }));
   const p13 = r.patterns.find((p) => p.startHour === 13);
   assert.ok(p13, 'the 3-day hour-13 tendency surfaces as a daily pattern');
-  assert.ok(Math.abs(p13!.probability - 0.25) < 0.01, `probability = 3/12 observed days (got ${p13!.probability})`);
+  assert.ok(Math.abs(p13!.probability - 3 / 28) < 0.02, `probability = 3/28 CALENDAR days (got ${p13!.probability})`);
   const map = evLoadByHour(r.upcomingNext24h);
   const lifted = [...map.values()].filter((w) => w > 0);
   assert.ok(lifted.every((w) => w < 3500), `expected-value lift stays a fraction of the 10.5 kW plateau (max ${Math.max(...lifted, 0)})`);
@@ -304,4 +309,72 @@ test('F6 — an EV-free (AC-only) site caches its empty result briefly instead o
   computeEvWindowPrediction(shp2With([6]), countingRecorder);
   assert.equal(wideQueries, after1, 'second call within the short empty-TTL serves from cache — no 30-day re-mine');
   assert.ok(after1 >= 1, 'first call actually mined');
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.99.0 — recurrence probability divides by CALENDAR days, not EV-active days.
+ *
+ * MEASURED LIVE (2026-08-21): `sessionsObserved: 4` over a 30-day window, and a
+ * single pattern with `recurrences: 3` reported `probability: 0.75` — i.e. 3/4,
+ * not 3/30 = 0.10. A 7.5x inflation, applied to a 10.19 kW plateau, put
+ * `predictedEvLoadW: 7643` into four consecutive day-ahead hours every night.
+ * This accounted for essentially the whole load-forecast bias.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('v1.99.0 — a sparse charger is NOT inflated by its own sparseness', () => {
+  resetEvWindowCache();
+  const now = Date.now();
+  // 3 sessions at the same hour, spread across a 30-day window: only 3 EV-active
+  // days exist, so the old denominator produced 3/3 = 1.0 — a phantom nightly EV.
+  const series: Array<{ ts: number; value: number }> = [];
+  for (const d of [28, 15, 3]) {
+    const t = new Date(now - d * 24 * H);
+    t.setHours(2, 0, 0, 0);
+    series.push(...evSession(t.getTime(), 60));
+  }
+  series.sort((a, b) => a.ts - b.ts);
+  const r = computeEvWindowPrediction(shp2With([5]), recorderFor({ pair5_w: series }));
+  for (const p of r.patterns) {
+    assert.ok(p.probability <= 0.2,
+      `a 3-of-~28-day charger must stay near 0.1, not approach 1.0 (got ${p.probability} for hour ${p.startHour})`);
+  }
+});
+
+test('v1.99.0 — the projected EV lift is a fraction of the plateau, not the whole thing', () => {
+  resetEvWindowCache();
+  const now = Date.now();
+  const series: Array<{ ts: number; value: number }> = [];
+  for (const d of [26, 20, 9, 4]) {
+    const t = new Date(now - d * 24 * H);
+    t.setHours(1, 0, 0, 0);
+    series.push(...evSession(t.getTime(), 120));
+  }
+  series.sort((a, b) => a.ts - b.ts);
+  const r = computeEvWindowPrediction(shp2With([5]), recorderFor({ pair5_w: series }));
+  const lifted = [...evLoadByHour(r.upcomingNext24h).values()].filter((w) => w > 0);
+  if (lifted.length > 0) {
+    assert.ok(Math.max(...lifted) < 3000,
+      `4 sessions in ~26 days must lift well under the ~10.5 kW plateau (max ${Math.max(...lifted)})`);
+  }
+});
+
+test('v1.99.0 — a young install divides by AVAILABLE history, not a nominal 30 days', () => {
+  resetEvWindowCache();
+  const now = Date.now();
+  // Only 6 days of recorder history, charging on 3 of them. Dividing by 30 would
+  // under-predict a genuinely frequent charger just as badly as the old bug
+  // over-predicted a sparse one.
+  const series: Array<{ ts: number; value: number }> = [];
+  for (const d of [5, 3, 1]) {
+    const t = new Date(now - d * 24 * H);
+    t.setHours(23, 0, 0, 0);
+    series.push(...evSession(t.getTime(), 60));
+  }
+  series.sort((a, b) => a.ts - b.ts);
+  const r = computeEvWindowPrediction(shp2With([5]), recorderFor({ pair5_w: series }));
+  const p = r.patterns.find((x) => x.startHour === 23);
+  if (p) {
+    assert.ok(p.probability > 0.25,
+      `3 of ~5 available days is a frequent charger — must not be diluted to 3/30 (got ${p.probability})`);
+  }
 });
