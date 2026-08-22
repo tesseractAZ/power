@@ -1,3 +1,53 @@
+## v1.95.0 — alarm coverage: the SHP2 blind spot, and silence for bench hardware
+
+### The single-point-critical data source could go dark for 17 minutes unnoticed
+
+On 2026-08-21 the SHP2 — the source every reserve, runway and SoC alarm reads —
+delivered **2 messages in 600 s** (0.20 msg/min against a 30.2 norm, a 150x
+collapse) and **nothing fired**. It fell between both detectors: far shorter than
+the 20-minute collapse dwell, and never silent long enough for the 180 s
+staleness alarm. Four more instances appear in the preceding four days, one with
+the last message 319 s old.
+
+The 20-minute dwell exists for exactly one reason: separating legitimate Core
+idle (4.4 msg/min) from a real collapse (2.1-2.9) — a 1.5x discrimination
+problem created by the Cores' 13x diurnal swing. **A device with no diurnal
+component has no such problem.** The dwell is now chosen from each device's OWN
+measured hour-of-day profile: a flat profile (coefficient of variation ≤ 0.15
+across ≥ 18 mature buckets) fires on `MSG_RATE_FLOOR_FLAT_COLLAPSE_MIN` (4 min);
+everything else keeps the 20-minute dwell. No SN lists, no device-kind plumbing,
+and flatness must be EARNED — thin evidence always gets the conservative dwell.
+
+### Rate collapse no longer reports devices that are simply offline
+
+The detector's stated purpose is catching a device "barely reporting while still
+appearing FRESH". It had no offline gate, so when a Core was physically
+unplugged it told the operator to "check the EcoFlow cloud session / power" for
+hardware he had just disconnected himself. It still samples offline devices (so
+baselines stay honest) but no longer surfaces a collapse for them — the
+offline/stale alert owns that case.
+
+### Off-panel hardware stops annunciating
+
+Annunciation was gated solely by the static `SPARE_DPU_SNS` literal, which the
+2026-08-20 reconfiguration inverted: a benched Core absent from the literal
+chimed at full volume while a live home Core sat inside it. In one 3h34m window
+**19 of 19 pushes and 48 of 67 seconds of audio** concerned hardware that cannot
+deliver a watt to the house.
+
+A DPU absent from a **non-empty** SHP2 roster is now demoted — with guards:
+
+- **Hysteresis**: `OFF_PANEL_DEMOTE_TICKS` (3) consecutive absences to demote,
+  but **one** sighting re-arms instantly. The asymmetry always favours noise, so
+  a flickering `isConnect` can never silence a live home Core.
+- **Empty roster demotes nobody.** If the panel itself is unreadable, trust
+  nothing.
+- **Thermal-critical carve-out.** A critical `Thermal` alert is never demoted: a
+  bench pack that is overheating must page regardless of where it is wired.
+
+Harness `scripts/mutate-off-panel-annunciation.mjs` (6/6) proves each guard
+load-bearing. Tests 2023 pass.
+
 ## v1.94.0 — coverage gate, corrected: fleet membership is per-DAY
 
 v1.93.0's coverage fix was under-implemented and **did not work**. It skipped

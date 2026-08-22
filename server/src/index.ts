@@ -2572,6 +2572,13 @@ const rateFloorTick = setInterval(() => {
     for (const [sn, count] of store.mqttMsgCountBySn) {
       const r = rateFloor.sample(sn, count, now);
       const name = devices[sn]?.deviceName ?? sn;
+      // v1.95.0 — this detector exists to catch a device that is "barely
+      // reporting while still appearing FRESH". A device that is actually
+      // offline is the offline/stale alert's business, and reporting it here
+      // told the operator to "check the EcoFlow cloud session / power" for
+      // hardware he had just unplugged himself. Keep SAMPLING (so baselines
+      // stay honest) but never surface a collapse for an offline device.
+      if (devices[sn]?.online !== true) continue;
       if (r.collapsing) {
         collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });
       }
