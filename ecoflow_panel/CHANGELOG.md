@@ -1,3 +1,25 @@
+## v1.100.0 — the digest ledger line, which had never once rendered
+
+v1.90.0 added a one-line vendor-ledger summary to the morning digest. It has
+never appeared. The digest fires at `NOTIFY_DIGEST_HOUR` (06:00 local) and the
+vendor ledger job is gated to 06:35-09:00 Phoenix — deliberately AFTER the
+digest, so yesterday's record does not exist yet when the digest is assembled.
+Keyed strictly to `prevYmd(today)`, the lookup missed every single morning and
+`vendorDigestLine` silently returned null. Confirmed on two consecutive days.
+
+The line now falls back to the most recent stored day and NAMES it: "Yesterday
+per the EcoFlow ledger: …" when the record genuinely is yesterday, and "Per the
+EcoFlow ledger (2026-08-20): …" otherwise. It therefore always carries real
+numbers and can never mislabel an older day as yesterday.
+
+This was the honest fix rather than moving the ledger job earlier: the 06:35
+window exists so the ~19 sequential vendor requests do not compete with the
+morning poll budget, and the vendor's own daily record is not reliably complete
+before then.
+
+Tests 2034 pass. The two pre-existing assertions asserted the bare "Yesterday"
+prefix and now exercise that path explicitly.
+
 ## v1.99.0 — EV recurrence probability was 7.5x too high
 
 The recurrence denominator counted days on which ANY EV session occurred, not

@@ -134,7 +134,7 @@ test('v1.86.0 — incomplete stored days are retried; complete days are not', ()
 
 /* ─── v1.90.0 (B7) — the digest ledger line ──────────────────────────────── */
 
-import { vendorDigestLine, type VendorDayRecord } from '../src/energyHistory.js';
+import { vendorDigestLine, latestVendorDay, type VendorDayRecord } from '../src/energyHistory.js';
 
 function digestRec(over: Partial<VendorDayRecord> = {}): VendorDayRecord {
   return {
@@ -146,7 +146,7 @@ function digestRec(over: Partial<VendorDayRecord> = {}): VendorDayRecord {
 }
 
 test('vendorDigestLine renders kWh, signed drift, and the dark-core estimate', () => {
-  const line = vendorDigestLine(digestRec());
+  const line = vendorDigestLine(digestRec(), '2026-08-19');  // record is 08-18 => genuinely yesterday
   assert.equal(
     line,
     'Yesterday per the EcoFlow ledger: home 61.4 kWh (home drift +1.3%), solar 48.3, grid 2.1, battery out 22.7 / grid-charge 1.9; dark-core PV ≈ 19.8 kWh.',
@@ -160,9 +160,50 @@ test('vendorDigestLine is null when the record is missing or empty — the diges
 });
 
 test('vendorDigestLine omits optional clauses without leaving stubs', () => {
-  const line = vendorDigestLine(digestRec({ driftHomePct: null, impliedDarkPvWh: null }));
+  const line = vendorDigestLine(digestRec({ driftHomePct: null, impliedDarkPvWh: null }), '2026-08-19');
   assert.equal(
     line,
     'Yesterday per the EcoFlow ledger: home 61.4 kWh, solar 48.3, grid 2.1, battery out 22.7 / grid-charge 1.9.',
   );
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.100.0 — the digest ledger line had NEVER rendered.
+ *
+ * The digest fires at NOTIFY_DIGEST_HOUR (06:00 local); the vendor ledger job is
+ * gated to 06:35-09:00 Phoenix — deliberately AFTER the digest, so yesterday's
+ * record does not exist yet when the digest is assembled. Keyed strictly to
+ * prevYmd(today), the lookup missed every single morning and `vendorDigestLine`
+ * silently returned null. Two consecutive days were confirmed live.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('latestVendorDay — returns the newest day that actually carries numbers', () => {
+  const state: any = { lastRunDay: null, days: {
+    '2026-08-18': digestRec({ day: '2026-08-18' }),
+    '2026-08-20': digestRec({ day: '2026-08-20' }),
+    '2026-08-21': digestRec({ day: '2026-08-21', homeWh: null, solarWh: null, gridWh: null }), // empty
+  } };
+  assert.equal(latestVendorDay(state)!.day, '2026-08-20', 'skips the empty newest day');
+  assert.equal(latestVendorDay({ lastRunDay: null, days: {} } as any), null);
+  assert.equal(latestVendorDay(null), null);
+});
+
+test('vendorDigestLine — says "Yesterday" only when the record really IS yesterday', () => {
+  const rec = digestRec({ day: '2026-08-21' });
+  assert.match(vendorDigestLine(rec, '2026-08-22')!, /^Yesterday per the EcoFlow ledger:/);
+});
+
+test('vendorDigestLine — names the date when the newest stored day is older than yesterday', () => {
+  // The live case: at 06:00 the ledger job has not yet fetched yesterday, so the
+  // newest stored day is the day before. The line must still render, and must NOT
+  // claim to be yesterday.
+  const rec = digestRec({ day: '2026-08-20' });
+  const line = vendorDigestLine(rec, '2026-08-22')!;
+  assert.match(line, /^Per the EcoFlow ledger \(2026-08-20\):/);
+  assert.doesNotMatch(line, /Yesterday/, 'must never mislabel an older day as yesterday');
+  assert.match(line, /home 61\.4 kWh/, 'still carries the real numbers');
+});
+
+test('vendorDigestLine — with no todayYmd it names the date rather than guessing', () => {
+  assert.match(vendorDigestLine(digestRec({ day: '2026-08-19' }))!, /^Per the EcoFlow ledger \(2026-08-19\):/);
 });

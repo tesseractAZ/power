@@ -190,13 +190,38 @@ export function computeLocalPackRte(days: ReadonlyArray<VendorDayRecord>): Local
 /** One human line summarizing a vendor day for the 06:00 digest, or null when
  *  the record is missing/empty. Pure; kWh with one decimal; annotates a
  *  partial PV basis with the dark core's implied production. */
-export function vendorDigestLine(rec: VendorDayRecord | undefined | null): string | null {
+export function vendorDigestLine(rec: VendorDayRecord | undefined | null, todayYmd?: string): string | null {
   if (!rec) return null;
   const k = (wh: number | null | undefined) => (wh == null ? '—' : (wh / 1000).toFixed(1));
   if (rec.homeWh == null && rec.solarWh == null && rec.gridWh == null) return null;
   const dark = rec.impliedDarkPvWh != null ? `; dark-core PV ≈ ${k(rec.impliedDarkPvWh)} kWh` : '';
   const drift = rec.driftHomePct != null ? ` (home drift ${rec.driftHomePct > 0 ? '+' : ''}${rec.driftHomePct}%)` : '';
-  return `Yesterday per the EcoFlow ledger: home ${k(rec.homeWh)} kWh${drift}, solar ${k(rec.solarWh)}, grid ${k(rec.gridWh)}, battery out ${k(rec.batteryOutWh)} / grid-charge ${k(rec.batteryInWh)}${dark}.`;
+  // v1.100.0 — name the day instead of asserting "Yesterday". The digest fires at
+  // NOTIFY_DIGEST_HOUR (06:00 local) but the vendor ledger job is gated to
+  // 06:35-09:00 Phoenix — deliberately AFTER the digest, so yesterday's record
+  // does not exist yet when the digest is assembled. Keyed to `prevYmd(today)`
+  // the lookup therefore missed every single morning and the line silently never
+  // rendered. It now reports the MOST RECENT stored day and says which one, so it
+  // always carries real numbers and never mislabels them.
+  const label = todayYmd != null && rec.day === prevYmd(todayYmd)
+    ? 'Yesterday per the EcoFlow ledger:'
+    : `Per the EcoFlow ledger (${rec.day}):`;
+  return `${label} home ${k(rec.homeWh)} kWh${drift}, solar ${k(rec.solarWh)}, grid ${k(rec.gridWh)}, battery out ${k(rec.batteryOutWh)} / grid-charge ${k(rec.batteryInWh)}${dark}.`;
+}
+
+/**
+ * v1.100.0 — the newest stored ledger day that actually carries numbers.
+ * Pure; exported for tests.
+ */
+export function latestVendorDay(state: VendorEnergyState | null | undefined): VendorDayRecord | null {
+  const days = state?.days;
+  if (!days) return null;
+  let best: VendorDayRecord | null = null;
+  for (const rec of Object.values(days)) {
+    if (!rec || (rec.homeWh == null && rec.solarWh == null && rec.gridWh == null)) continue;
+    if (best === null || rec.day > best.day) best = rec;
+  }
+  return best;
 }
 
 /* ─── persistence sidecar (the actuator pattern; capped, atomic) ──────────── */

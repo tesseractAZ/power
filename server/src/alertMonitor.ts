@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
-import { loadVendorEnergyState, vendorDigestLine, prevYmd } from './energyHistory.js';
+import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
 import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
@@ -1527,7 +1527,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       const digestNow = new Date();
       const digestTodayYmd = `${digestNow.getFullYear()}-${String(digestNow.getMonth() + 1).padStart(2, '0')}-${String(digestNow.getDate()).padStart(2, '0')}`;
       const digestLedgerLine = (() => {
-        try { return vendorDigestLine(loadVendorEnergyState().days[prevYmd(digestTodayYmd)]); }
+        // v1.100.0 — fall back to the newest stored day. The ledger job runs
+        // AFTER the digest by design, so keying strictly on prevYmd(today) meant
+        // the line never rendered even once.
+        try {
+          const st = loadVendorEnergyState();
+          const rec = st.days[prevYmd(digestTodayYmd)] ?? latestVendorDay(st);
+          return vendorDigestLine(rec, digestTodayYmd);
+        }
         catch { return null; }
       })();
       await sendNotification(cfg, {
