@@ -1,3 +1,19 @@
+## v1.97.0 — repair the lifetime freeze that v1.96.0 only prevented
+
+v1.96.0 re-seeds the lifetime battery floors whenever the SHP2 source set
+changes, but it recorded the fingerprint on its FIRST observation without
+re-seeding — reasoning that a fresh install must not clobber a legitimate floor.
+That protected future rollovers and left the EXISTING freeze in place, which was
+the entire motivation for the release. Live verification after deploy: the
+emitted floor still sat **~902 MWh above the live sum**, unchanged.
+
+On the first observation the floors are now re-seeded too, but only when the gap
+is unambiguous — greater than `BMS_RESEED_MIN_GAP_WH` (50 kWh, about 1.6x a
+single pack). A gap that size cannot be the transient offline dip the held-carry
+machinery exists to smooth; it means the floor was seeded against a different set
+of batteries. Below the threshold, a fresh install adopts the fingerprint
+silently and the floor is left alone.
+
 ## v1.96.0 — lifetime counters survive a fleet reconfiguration
 
 Two data-integrity defects the 2026-08-20 pack/DPU swap exposed. Neither is on
