@@ -284,6 +284,28 @@ Two kinds of lifetime keys:
    window ending below the baseline SoC, cumulative discharge legitimately
    exceeds charge; HA ingests the two as independent `total_increasing` sensors.
 
+   **v1.96.0 — membership rollover.** A monotone floor is correct while the pool
+   is stable and wrong the moment its membership changes: when a Core leaves the
+   SHP2 source list its packs drop out of the live sum, which can land far BELOW
+   the pinned floor (measured ~904 kWh after the 2026-08-20 reconfiguration), so
+   both counters read FLAT — silently, for an estimated ~35 days — until the new
+   pool climbs back over the old mark. The floors now RE-SEED from the live sum
+   whenever the source set changes, keyed on a fingerprint persisted to
+   `/data/bms-membership.json` (v0.9.74 established this shape as a one-time
+   marker; a fingerprint generalises it, since membership can change again). HA
+   reads the step down as a meter reset, which is honest — the series is now
+   measuring a different set of batteries. A stable roster still ratchets
+   monotonically, so a transiently-offline device re-seeds nothing.
+
+   **v1.96.0 — orphaned held rows.** Held per-pack rows are keyed
+   `(chassisSn, packSn)` but the carry gate checked only the CHASSIS, so after
+   packs are physically moved the old chassis keeps rows for packs it no longer
+   holds (five rows, ~937 kWh, after the same reconfiguration). They are dormant
+   only while that chassis is off-panel — re-wiring it would re-add all five in
+   ONE 5-minute rollup, ~520x the fleet's physical charge ceiling, with no rate
+   guard. A `packSn` observed in a DIFFERENT chassis this snapshot proves the row
+   is stale, so it is never carried; the skip logs once per change.
+
 The read-only worker reproduces these via the persisted table only
 (`getLifetimeTotals`), reporting `persistedWh` with `pendingWh = 0` — it lags by
 at most one rollup interval, negligible against a forever-accumulating total.

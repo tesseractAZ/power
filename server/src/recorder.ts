@@ -1753,6 +1753,15 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // a pack is never discoverable under BOTH shapes at once (no double-count).
     // Device/pack serials never contain ':' or '|', so the two shapes never
     // collide with each other.
+    // v1.96.0 — which chassis physically holds each packSn RIGHT NOW.
+    const packChassisThisSnapshot = new Map<string, string>();
+    for (const d of Object.values(snap.devices)) {
+      if (d.projection?.kind !== 'dpu') continue;
+      for (const pk of (d.projection as DpuProjection).packs) {
+        if (pk.packSn) packChassisThisSnapshot.set(pk.packSn, d.sn);
+      }
+    }
+    const orphanedPackRows: string[] = [];
     for (const key of listLifetimeKeys()) {
       const legacy = key.match(/^pack_lastwh_(.+)_(\d+)_chg$/);
       if (legacy) { heldKeys.add(`${legacy[1]}|${Number(legacy[2])}`); continue; }
@@ -1769,6 +1778,22 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       const num = isStable ? NaN : Number(cacheKey.slice(legacySep + 1));
       // Never resurrect a spare: if the SHP2 currently excludes this SN, skip it.
       if (!isHomeMember(sn)) continue;
+      // v1.96.0 — ORPHAN GUARD. The held-row key is (chassisSn, packSn) but this
+      // gate only ever checked the CHASSIS. When packs are physically moved
+      // between chassis the old chassis keeps rows for packs it no longer holds:
+      // on 2026-08-20 five such rows (~937 kWh) were left under Core 3 after its
+      // whole set moved to Core 4. They are dormant only while that chassis is
+      // off-panel — re-wiring it would re-add all five in ONE 5-minute rollup
+      // (~520x the fleet's physical charge ceiling) and ratchet the emitted
+      // total_increasing floor with no rate guard. A packSn seen in a DIFFERENT
+      // chassis this snapshot PROVES the row is stale, so never carry it.
+      if (packSn != null) {
+        const nowIn = packChassisThisSnapshot.get(packSn);
+        if (nowIn != null && nowIn !== sn) {
+          orphanedPackRows.push(`${cacheKey} (now in ${nowIn})`);
+          continue;
+        }
+      }
       const held = bmsLastPackWh.get(cacheKey) ?? loadPackLastWh(sn, { packSn, num }, opts.mutate);
       if (!held) continue;
       chargeWh += held.chgWh;
@@ -1789,6 +1814,21 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         backfilledFromHistory: backfilledThisCall.has(cacheKey),
       });
     }
+
+    if (orphanedPackRows.length > 0 && opts.mutate) {
+
+      const sig = orphanedPackRows.join(',');
+
+      if (sig !== lastOrphanSignature) {
+
+        lastOrphanSignature = sig;
+
+        log(`recorder: v1.96.0 skipped ${orphanedPackRows.length} ORPHANED held pack row(s) — the pack now lives in another chassis, so carrying them would double-count: ${orphanedPackRows.join('; ')}`);
+
+      }
+
+    }
+
 
     return { chargeWh, dischargeWh, packs, offlineHeldMembers };
   };
@@ -1906,6 +1946,20 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   // log in rollupLifetime to one line per transition into the (expected) deficit
   // state. Starts false so the first deficit, if any, logs once.
   let bmsClampActive = false;
+  /** v1.96.0 — dedupe the orphaned-held-row notice to one line per change. */
+  let lastOrphanSignature: string | null = null;
+
+  /** v1.96.0 — persisted fingerprint of the SHP2 source set the lifetime battery
+   *  floors were last seeded against. A change means the floors describe a
+   *  different set of batteries and must be re-seeded, or the emitted counters
+   *  freeze until the new live sum climbs back over the old high-water mark. */
+  const BMS_MEMBERSHIP_PATH = resolve(dirname(dbPath), 'bms-membership.json');
+  let bmsMembershipFp: string | null = (() => {
+    try {
+      const raw = JSON.parse(readFileSync(BMS_MEMBERSHIP_PATH, 'utf8'));
+      return typeof raw?.fp === 'string' ? raw.fp : null;
+    } catch { return null; }
+  })();
   // Seed the floors from whatever was last persisted (a fresh process must
   // not regress the persisted Wh number; HA reads that with state_class:
   // total_increasing and would treat a step-down as a reset).
@@ -1954,6 +2008,39 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // the v0.81.0 reconnect re-baseline advances its suspect streak on THIS periodic
     // cadence only (getLifetimeTotals mutates on reads but must NOT drive the streak).
     const bms = computeBmsBatteryTotals(snap, { rollup: true });
+    // v1.96.0 — MEMBERSHIP ROLLOVER RE-SEED.
+    //
+    // The emitted counters are a monotone high-water floor, which is right while
+    // the pool is stable but wrong the moment its membership changes: when Core 3
+    // left the SHP2 source list on 2026-08-20 its five packs dropped out of the
+    // live sum, leaving the live value ~904 kWh BELOW the pinned floor. The
+    // emitted `fleet_battery_charge_wh` / `_discharge_wh` then read flat for an
+    // estimated ~35 days with no log line and no alert while the live sum slowly
+    // caught back up. v0.9.74 already established the fix shape for the ONE-TIME
+    // SHP2-filter rollover; membership can change again, so this keys on a
+    // fingerprint of the source set rather than a one-shot marker file.
+    //
+    // HA's `state_class: total_increasing` treats the resulting step DOWN as a
+    // meter reset, which is the honest reading: the series is now measuring a
+    // different set of batteries.
+    const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
+    if (membershipFp !== '' && membershipFp !== bmsMembershipFp) {
+      if (bmsMembershipFp !== null) {
+        log(
+          `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — ` +
+          `re-seeding lifetime battery floors from the new live sum ` +
+          `(charge ${bmsChargeFloor.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
+          `discharge ${bmsDischargeFloor.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
+          `HA reads the step as a meter reset; the series now measures a different set of batteries.`,
+        );
+        bmsChargeFloor = bms.chargeWh;
+        bmsDischargeFloor = bms.dischargeWh;
+      }
+      bmsMembershipFp = membershipFp;
+      try {
+        writeFileSync(BMS_MEMBERSHIP_PATH, JSON.stringify({ fp: membershipFp, at: new Date(now).toISOString() }), { mode: 0o644 });
+      } catch { /* advisory: an unwritable marker just re-logs next boot */ }
+    }
     if (bms.chargeWh > bmsChargeFloor) bmsChargeFloor = bms.chargeWh;
     if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;
     // v0.45.0 — REMOVED the discharge≤charge clamp. accuChgMah/accuDsgMah are
