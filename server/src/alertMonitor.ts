@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
-import { SnapshotStore } from './snapshot.js';
+import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
 import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
@@ -78,6 +78,55 @@ const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
  *  condition has stood 5 minutes — the on-screen alert, the audible path and
  *  critical escalation (escDebounceMs=0) are untouched; only the notification
  *  channel stops relaying settling noise. Pure + exported for the harness. */
+/**
+ * v1.95.0 — consecutive ticks a DPU must be absent from a non-empty SHP2 roster
+ * before its alerts stop annunciating. Re-arming is immediate on the first
+ * sighting, so the asymmetry always favours making noise.
+ */
+export const OFF_PANEL_DEMOTE_TICKS = Number(process.env.OFF_PANEL_DEMOTE_TICKS ?? 3);
+
+/**
+ * v1.95.0 — advance the off-panel streaks and return the SNs that have been
+ * absent from a NON-EMPTY SHP2 roster for `ticks` consecutive evaluations.
+ * MUTATES `streak` (same convention as evaluateReconnectWatch). Exported for tests.
+ *
+ * Asymmetric by design: one sighting clears the streak instantly, so a flickering
+ * `isConnect` can never silence a live home Core; only sustained absence demotes.
+ * An empty roster means the panel itself is unreadable — demote NOBODY then.
+ */
+export function advanceOffPanelStreaks(
+  devices: Record<string, DeviceSnapshot>,
+  connectedSns: ReadonlySet<string>,
+  streak: Map<string, number>,
+  ticks: number = OFF_PANEL_DEMOTE_TICKS,
+): string[] {
+  if (connectedSns.size === 0) { streak.clear(); return []; }
+  const out: string[] = [];
+  for (const d of Object.values(devices)) {
+    if (d.projection?.kind !== 'dpu') continue;
+    if (connectedSns.has(d.sn)) { streak.delete(d.sn); continue; }
+    const n = (streak.get(d.sn) ?? 0) + 1;
+    streak.set(d.sn, n);
+    if (n >= ticks) out.push(d.sn);
+  }
+  return out;
+}
+
+/**
+ * v1.95.0 — should this alert stop annunciating because its hardware is not
+ * wired into the home pool? A critical Thermal alert is NEVER demoted: a bench
+ * pack that is overheating must page regardless of where it is wired.
+ * Pure; exported for tests.
+ */
+export function shouldDemoteAnnunciation(
+  alert: Pick<Alert, 'id' | 'severity' | 'category' | 'annunciate'>,
+  mutedSns: readonly string[],
+): boolean {
+  if (alert.annunciate === false) return false;
+  if (alert.severity === 'critical' && alert.category === 'Thermal') return false;
+  return mutedSns.some((sn) => alert.id.includes(sn));
+}
+
 export const SETTLE_PUSH_DEBOUNCE_MS = 5 * 60_000;
 export function pushDebounceMsFor(id: string, defaultMs: number = DEBOUNCE_MS): number {
   return /^(vdiff-crit-|peer-voldiff-|peer-soc-|soc-low-|dpu-imbalance-)/.test(id)
@@ -1047,6 +1096,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const bootMs = Date.now();
   let orphanSweepDone = false;
   let lastDigestHour = -1;
+  /** v1.95.0 — consecutive ticks a DPU has been absent from a non-empty SHP2 roster. */
+  const offPanelStreak = new Map<string, number>();
   const monitorStartMs = Date.now();
 
   // v0.15.21 — notified-state persistence (see loadNotifiedState above).
@@ -1741,13 +1792,25 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     {
       const connectedSns = shp2ConnectedDpuSns(snap.devices);
       const mutedSpares = [...SPARE_DPU_SNS].filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
-      if (mutedSpares.length > 0) {
-        for (const a of alerts) {
-          if (a.annunciate !== false && mutedSpares.some((sn) => a.id.includes(sn))) {
-            a.annunciate = false;
-          }
-        }
-      }
+      // v1.95.0 — OFF-PANEL demotion. The static allowlist only ever described
+      // the bench at the moment it was written. After the 2026-08-20 physical
+      // reconfiguration it was inverted: a benched Core that is NOT in the
+      // literal annunciated at full volume (19 of 19 pushes in one audit window
+      // and 48 of 67 seconds of audio were hardware that cannot deliver a watt
+      // to the house), while a live home Core sat in the literal.
+      //
+      // A DPU absent from a NON-EMPTY SHP2 roster is off-panel. HYSTERESIS is
+      // mandatory: a single flickering `isConnect` must never silence a real
+      // home Core, so demotion requires OFF_PANEL_DEMOTE_TICKS consecutive
+      // absences while re-arming happens on the FIRST sighting — fast to arm,
+      // slow to disarm.
+      //
+      // CARVE-OUT: a critical Thermal alert is NEVER demoted. A bench pack that
+      // is overheating is exactly the case where the operator must be paged
+      // regardless of where the hardware is wired.
+      const offPanel = advanceOffPanelStreaks(snap.devices, connectedSns, offPanelStreak);
+      const muted = [...new Set([...mutedSpares, ...offPanel])];
+      for (const a of alerts) if (shouldDemoteAnnunciation(a, muted)) a.annunciate = false;
     }
     store.setAlerts(alerts);
     currentIncidents = buildIncidents(alerts);

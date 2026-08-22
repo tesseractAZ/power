@@ -73,6 +73,28 @@ export interface RateFloorConfig {
   floorFraction: number;
   /** A collapse must persist at least this long before it fires. */
   collapseMs: number;
+  /**
+   * v1.95.0 — the dwell for devices whose OWN measured hour-of-day profile is
+   * FLAT. The 20-min dwell exists solely to separate legitimate Core idle
+   * (4.4 msg/min) from a real collapse (2.1-2.9) — a 1.5x discrimination
+   * problem created by the Cores' 13x diurnal swing. A device with no diurnal
+   * component has no such problem, and making it wait 20 minutes is pure
+   * blindness: on 2026-08-21 the SHP2 — the single-point-critical alarm data
+   * source — ran at 0.20 msg/min against a 30.2 norm (a 150x collapse) for
+   * ~17 min and NOTHING fired. It slipped between both detectors: too short
+   * for this dwell, and never silent long enough for the 180 s staleness
+   * alarm. Four more instances appear in the preceding four days, one with the
+   * last message 319 s old.
+   */
+  flatCollapseMs: number;
+  /**
+   * Max coefficient of variation across mature hour buckets for a device to be
+   * treated as flat. Measured: SHP2 cv ~= 0.022 over 75 intervals; the Cores
+   * are an order of magnitude above this.
+   */
+  flatnessMaxCv: number;
+  /** Mature hour buckets required before flatness is trusted at all. */
+  flatnessMinMatureHours: number;
   /** A recovery must persist at least this long before a fired collapse clears. */
   recoverMs: number;
   /** EWMA smoothing for the baseline when the rate is AT OR ABOVE it (0..1). */
@@ -96,6 +118,9 @@ export const DEFAULT_RATE_FLOOR_CONFIG: RateFloorConfig = {
   minBaselineRate: Number(process.env.MSG_RATE_FLOOR_MIN_BASELINE ?? 10),
   floorFraction: Number(process.env.MSG_RATE_FLOOR_FRACTION ?? 0.2),
   collapseMs: Number(process.env.MSG_RATE_FLOOR_COLLAPSE_MIN ?? 20) * 60_000,
+  flatCollapseMs: Number(process.env.MSG_RATE_FLOOR_FLAT_COLLAPSE_MIN ?? 4) * 60_000,
+  flatnessMaxCv: Number(process.env.MSG_RATE_FLOOR_FLATNESS_MAX_CV ?? 0.15),
+  flatnessMinMatureHours: Number(process.env.MSG_RATE_FLOOR_FLATNESS_MIN_HOURS ?? 18),
   recoverMs: Number(process.env.MSG_RATE_FLOOR_RECOVER_MIN ?? 5) * 60_000,
   baselineAlpha: 0.2,
   baselineAlphaDown: 0.02,
@@ -187,6 +212,32 @@ function freshState(count: number, nowMs: number, baseline = 0, peak = 0): SnSta
     fired: false,
     wasEligible: false,
   };
+}
+
+/**
+ * v1.95.0 — is this device's hour-of-day profile FLAT enough to skip the long
+ * collapse dwell? Pure; exported for tests.
+ *
+ * Returns false until `minMatureHours` buckets have matured, so a device is
+ * never granted the short dwell on thin evidence — the conservative long dwell
+ * is the default and flatness must be EARNED from the device's own history.
+ */
+export function isFlatProfile(
+  hourly: readonly number[],
+  hourlyN: readonly number[],
+  minHourSamples: number,
+  maxCv: number,
+  minMatureHours: number,
+): boolean {
+  const mature: number[] = [];
+  for (let h = 0; h < hourly.length; h++) {
+    if ((hourlyN[h] ?? 0) >= minHourSamples && hourly[h] > 0) mature.push(hourly[h]);
+  }
+  if (mature.length < minMatureHours) return false;
+  const mean = mature.reduce((a, b) => a + b, 0) / mature.length;
+  if (!(mean > 0)) return false;
+  const variance = mature.reduce((a, b) => a + (b - mean) ** 2, 0) / mature.length;
+  return Math.sqrt(variance) / mean <= maxCv;
 }
 
 export class RateFloorTracker {
@@ -365,7 +416,13 @@ export class RateFloorTracker {
     } else if (isCollapsed) {
       recoverSinceMs = null;
       if (collapseSinceMs == null) collapseSinceMs = prev.lastMs; // count from the last healthy sample
-      if (nowMs - collapseSinceMs >= this.cfg.collapseMs) {
+      // v1.95.0 — a flat-profile device (no diurnal swing, so no idle-vs-collapse
+      // ambiguity) fires on the much shorter dwell. Everything else keeps the
+      // 20-min dwell that exists to avoid the 08-03 19:24 Core false positive.
+      const dwellMs = isFlatProfile(
+        hourly, hourlyN, this.cfg.minHourSamples, this.cfg.flatnessMaxCv, this.cfg.flatnessMinMatureHours,
+      ) ? this.cfg.flatCollapseMs : this.cfg.collapseMs;
+      if (nowMs - collapseSinceMs >= dwellMs) {
         fired = true;
         collapsed = true;
       }
