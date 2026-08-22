@@ -1845,7 +1845,7 @@ For each of the last `windowDays = 7` days that (a) has any GHI coverage
 `coreCoverageByDay` — every wired core must report ≥ `PV_COVERAGE_MIN_FRAC = 80%`
 of the day's daylight hours):
 
-**v1.93.0 — `coreCoverageByDay(…, skipNeverReporting)`.** The map has two
+**v1.94.0 — `coreCoverageByDay(…, skipBeforeJoin)`.** The map has two
 consumers that need different verdicts for a core which produced NOTHING
 anywhere in the window. The **pv-bias factor** (default `false`) keeps the strict
 all-cores gate: a wholly-dark core fails every day, driving the factor to its
@@ -1856,9 +1856,12 @@ day's fleet, and treating it as a gap nulls that day's `errorPct`. Conflating th
 two cost 14 nights of night-charge: a fleet reconfiguration added two cores with
 no history, every hindcast day became a gap, `calScoredDays` fell 26 → 0 against
 a floor of 14, and `basisComplete` (§15) stayed false so the planner produced no
-plan at all. The relaxation is narrow — a core that DID report and then went dark
-for a day still fails that day, and "reported" means at least one sample inside
-the window, so out-of-window-only history counts as never-reporting. The sibling
+plan at all. The relaxation is narrow and per-DAY: a core is excluded from a day's
+requirement only until its FIRST in-window sample, and once joined it is held to
+the requirement normally, so a real blackout on a later day still gaps that day.
+(v1.93.0 first shipped this as a global "zero samples anywhere" skip, which did
+nothing once the new core logged one day — every earlier absent day became a gap
+again. v1.94.0 is the corrected form.) The sibling
 `fullCoverageFleetPv` has always had this escape hatch (its `contributing`
 filter); this brings the skill path into line without loosening the bias gate.
 

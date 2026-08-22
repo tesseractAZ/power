@@ -194,7 +194,7 @@ test('bias gate — excluded days are reported ONCE per (day, core), then dedupe
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
- * v1.93.0 — skipNeverReporting: the two consumers of coreCoverageByDay want
+ * v1.93.0 — skipBeforeJoin: the two consumers of coreCoverageByDay want
  * different things from a core that produced NOTHING anywhere in the window.
  *
  * MOTIVATING INCIDENT (2026-08-20). A physical reconfiguration put two cores
@@ -220,7 +220,7 @@ test('coreCoverageByDay — a NEVER-reporting core fails every day under the str
   assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.worstSn, 'NEWCORE');
 });
 
-test('coreCoverageByDay — skipNeverReporting excludes it, so the skill path can still score the window', () => {
+test('coreCoverageByDay — skipBeforeJoin excludes it, so the skill path can still score the window', () => {
   const ghi = ghiWindow(7);
   const pvBySn = new Map([
     ['A', snSamples(7, () => 500)],
@@ -232,7 +232,7 @@ test('coreCoverageByDay — skipNeverReporting excludes it, so the skill path ca
   }
 });
 
-test('coreCoverageByDay — skipNeverReporting still fails a day a REPORTING core actually missed', () => {
+test('coreCoverageByDay — skipBeforeJoin still fails a day a REPORTING core actually missed', () => {
   // The relaxation must not become "ignore all gaps": a core with history that
   // went dark for one day is a real coverage gap and must still fail that day.
   const ghi = ghiWindow(7);
@@ -259,4 +259,41 @@ test('coreCoverageByDay — a core whose only samples fall OUTSIDE the window co
     coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true).get(TODAY_START - 2 * DAY_MS)!.covered, true,
     'out-of-window-only history is the same case as no history',
   );
+});
+
+/* v1.94.0 — the case v1.93.0 got WRONG. Skipping only cores with ZERO in-window
+ * samples fixed nothing in practice: the moment the newly-added core logged its
+ * first day, it stopped being "never reporting" and every one of its earlier
+ * absent days became a coverage gap again. Verified live — basisComplete was
+ * still false after v1.93.0 deployed. The gate must be per-DAY against each
+ * core's first in-window sample. */
+
+test('coreCoverageByDay — a core that JOINS mid-window does not retro-gap the days before it joined', () => {
+  const ghi = ghiWindow(7);
+  // NEWCORE reports only on the two most recent days (i = 2 and 1).
+  const joined = snSamples(7, (i) => (i <= 2 ? 500 : null));
+  const pvBySn = new Map([['A', snSamples(7, () => 500)], ['NEWCORE', joined]]);
+
+  const strict = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7);
+  assert.equal(strict.get(TODAY_START - 5 * DAY_MS)!.covered, false,
+    'strict (pv-bias) still gaps the pre-join days — unchanged, by design');
+
+  const skill = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
+  for (const i of [7, 6, 5, 4, 3]) {
+    assert.equal(skill.get(TODAY_START - i * DAY_MS)!.covered, true,
+      `day-${i} predates NEWCORE joining and must stay scoreable`);
+  }
+  assert.equal(skill.get(TODAY_START - 2 * DAY_MS)!.covered, true, 'first joined day covered');
+  assert.equal(skill.get(TODAY_START - 1 * DAY_MS)!.covered, true, 'second joined day covered');
+});
+
+test('coreCoverageByDay — once joined, a core IS held to the requirement on later days', () => {
+  const ghi = ghiWindow(7);
+  // Joins on day 5, then blacks out on day 2 — that blackout is a real gap.
+  const flaky = snSamples(7, (i) => (i > 5 ? null : i === 2 ? null : 500));
+  const pvBySn = new Map([['A', snSamples(7, () => 500)], ['LATE', flaky]]);
+  const skill = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
+  assert.equal(skill.get(TODAY_START - 6 * DAY_MS)!.covered, true, 'pre-join day scoreable');
+  assert.equal(skill.get(TODAY_START - 2 * DAY_MS)!.covered, false, 'post-join blackout is a REAL gap');
+  assert.equal(skill.get(TODAY_START - 2 * DAY_MS)!.worstSn, 'LATE');
 });

@@ -1,3 +1,26 @@
+## v1.94.0 — coverage gate, corrected: fleet membership is per-DAY
+
+v1.93.0's coverage fix was under-implemented and **did not work**. It skipped
+only cores with ZERO samples anywhere in the window; but the moment the
+newly-added core logged a single day it stopped being "never reporting", and all
+of its earlier absent days became coverage gaps again. Verified live: after
+v1.93.0 deployed, `basisComplete` was still false and the planner still emitted
+`No plan — forecast/telemetry basis incomplete`.
+
+The gate is now per-DAY against each core's first in-window sample: a core is
+excluded from a day's coverage requirement until it has actually **joined** the
+fleet. A core that had not joined yet cannot make that day's actual wrong — it
+contributed nothing to it. Once joined, it is held to the requirement normally,
+so a real blackout on a later day still gaps that day.
+
+Unchanged: the pv-bias path keeps the strict all-cores gate (`skipBeforeJoin`
+defaults to false), because a wholly-dark core genuinely does make the fleet
+actual unmeasurable and the neutral 1.0 no-op is the right posture there.
+
+Tests 2012 pass, including a case that pins the exact v1.93.0 failure (a core
+joining mid-window must not retro-gap the days before it joined) and one that
+pins the guard (a post-join blackout is still a real gap).
+
 ## v1.93.0 — the night-charge basis un-sticks, and the heal budget survives a restart
 
 ### The coverage gate cost 14 nights of night-charge
