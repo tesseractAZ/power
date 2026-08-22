@@ -1,3 +1,31 @@
+## v1.98.0 — the lifetime freeze, actually repaired
+
+v1.96.0 keyed the lifetime-floor re-seed solely on a CHANGE of the SHP2
+source-set fingerprint, and recorded that fingerprint on its first observation
+without repairing. Once written, `membershipFp === bmsMembershipFp` on every
+subsequent boot — so the entire branch, **including v1.97.0's first-run repair
+bolted inside it**, became unreachable. The ~902 MWh freeze survived both
+releases; live verification caught it both times.
+
+The property that matters is not *"did membership change"* but *"does the emitted
+floor still describe the batteries we are measuring"*. That is now checked
+directly and independently of the fingerprint: when the floor sits more than
+`BMS_RESEED_MIN_GAP_WH` (50 kWh) above the live sum for
+`BMS_RESEED_SUSTAINED_ROLLUPS` (2, ≈10 min) consecutive rollups, the floor is
+re-seeded — at most once per process.
+
+Requiring the gap to PERSIST is what makes this safe. A single rollup's timing
+can never trigger it, and a genuinely-offline device cannot either: the
+held-carry machinery keeps its last-known Wh in the live sum precisely so that
+gap never opens. A sustained gap of that size means the packs are gone for good.
+
+The fingerprint path is retained for explicit membership changes, where it
+repairs immediately rather than waiting out the dwell.
+
+Tests 2027 pass, including a faithful reproduction of the live condition: a floor
+built by a larger pool, the fingerprint then poisoned to match the smaller one,
+and the repair driven purely by the gap.
+
 ## v1.97.0 — repair the lifetime freeze that v1.96.0 only prevented
 
 v1.96.0 re-seeds the lifetime battery floors whenever the SHP2 source set

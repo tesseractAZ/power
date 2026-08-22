@@ -1957,6 +1957,13 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
    *  (the held-carry machinery smooths those); it means the floor was seeded
    *  against a different set of batteries. 50 kWh is ~1.6x a single pack. */
   const RESEED_MIN_GAP_WH = Number(process.env.BMS_RESEED_MIN_GAP_WH ?? 50_000);
+  /** v1.98.0 — consecutive rollups the gap must persist before repairing. At the
+   *  5-min rollup cadence this is ~10 min, long enough that no single rollup's
+   *  timing can trigger it and short enough to repair within one boot. */
+  const RESEED_SUSTAINED_ROLLUPS = Number(process.env.BMS_RESEED_SUSTAINED_ROLLUPS ?? 2);
+  let sustainedFloorGapRollups = 0;
+  /** Repair at most once per process — a latch, not a loop. */
+  let floorGapRepaired = false;
   const BMS_MEMBERSHIP_PATH = resolve(dirname(dbPath), 'bms-membership.json');
   let bmsMembershipFp: string | null = (() => {
     try {
@@ -2029,25 +2036,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // different set of batteries.
     const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
     if (membershipFp !== '' && membershipFp !== bmsMembershipFp) {
-      // v1.97.0 — FIRST-RUN REPAIR. v1.96.0 recorded the fingerprint on its first
-      // observation without re-seeding, on the reasoning that a fresh install
-      // must not clobber a legitimate floor. That protected future rollovers but
-      // left the EXISTING freeze — the very thing it was written for — in place:
-      // live-verified after deploy, the emitted floor still sat ~902 MWh above
-      // the live sum. A gap that large is not the transient dip the held-carry
-      // machinery exists to smooth; it is the signature of a membership change
-      // that happened before the fingerprint existed. So on the FIRST
-      // observation, re-seed too — but only when the gap is unambiguous.
-      const firstObservation = bmsMembershipFp === null;
-      const gapWh = Math.max(bmsChargeFloor - bms.chargeWh, bmsDischargeFloor - bms.dischargeWh);
-      const unrepairedRollover = firstObservation && gapWh > RESEED_MIN_GAP_WH;
-      if (firstObservation && !unrepairedRollover) {
-        // Fresh install or an already-consistent floor: adopt the fingerprint silently.
-      } else if (bmsMembershipFp !== null || unrepairedRollover) {
+      if (bmsMembershipFp !== null) {
         log(
-          (unrepairedRollover
-            ? `recorder: v1.97.0 lifetime battery floors sit ${(gapWh / 1000).toFixed(0)} kWh ABOVE the live sum for pool [${membershipFp}] — repairing an unrecorded membership rollover. `
-            : `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — `) +
+          `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — ` +
           `re-seeding lifetime battery floors from the new live sum ` +
           `(charge ${bmsChargeFloor.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
           `discharge ${bmsDischargeFloor.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
@@ -2060,6 +2051,36 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       try {
         writeFileSync(BMS_MEMBERSHIP_PATH, JSON.stringify({ fp: membershipFp, at: new Date(now).toISOString() }), { mode: 0o644 });
       } catch { /* advisory: an unwritable marker just re-logs next boot */ }
+    }
+    // v1.98.0 — FLOOR/LIVE GAP INVARIANT, independent of the fingerprint.
+    //
+    // v1.96.0 keyed the re-seed solely on a CHANGE of the source-set fingerprint,
+    // and recorded that fingerprint on its first observation without repairing.
+    // Once written, `membershipFp === bmsMembershipFp` forever after, so the whole
+    // branch — including v1.97.0's first-run repair bolted inside it — became
+    // unreachable and the existing ~902 MWh freeze survived BOTH releases. Live
+    // verification caught it twice.
+    //
+    // The property that actually matters is not "did membership change" but "does
+    // the emitted floor still describe the batteries we are measuring". A floor
+    // sitting far above the live sum for SUSTAINED rollups cannot be the transient
+    // offline dip held-carry exists to smooth — held-carry keeps the live sum up
+    // precisely so that gap never opens. So check the gap directly, require it to
+    // persist, and repair at most once per process.
+    const gapWh = Math.max(bmsChargeFloor - bms.chargeWh, bmsDischargeFloor - bms.dischargeWh);
+    if (gapWh > RESEED_MIN_GAP_WH) sustainedFloorGapRollups += 1;
+    else sustainedFloorGapRollups = 0;
+    if (!floorGapRepaired && sustainedFloorGapRollups >= RESEED_SUSTAINED_ROLLUPS) {
+      floorGapRepaired = true;
+      log(
+        `recorder: v1.98.0 lifetime battery floor sat ${(gapWh / 1000).toFixed(0)} kWh above the live sum for ` +
+        `${sustainedFloorGapRollups} consecutive rollups — the floor describes a pool that no longer exists. ` +
+        `Re-seeding (charge ${bmsChargeFloor.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
+        `discharge ${bmsDischargeFloor.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
+        `HA reads the step as a meter reset.`,
+      );
+      bmsChargeFloor = bms.chargeWh;
+      bmsDischargeFloor = bms.dischargeWh;
     }
     if (bms.chargeWh > bmsChargeFloor) bmsChargeFloor = bms.chargeWh;
     if (bms.dischargeWh > bmsDischargeFloor) bmsDischargeFloor = bms.dischargeWh;
