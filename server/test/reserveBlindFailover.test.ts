@@ -24,7 +24,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeAlerts, type Alert } from '../src/alerts.js';
-import { homeFleetMeanSoc } from '../src/shp2Membership.js';
+import { homeFleetMeanSoc, isHomePoolDpu, shp2ConnectedDpuSns } from '../src/shp2Membership.js';
 import { applySilencingRules, ENERGY_STATE_FAMILIES, type AlertActionStats } from '../src/alertMonitor.js';
 import { familyOf } from '../src/alertOutcomes.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -236,4 +236,85 @@ test('re-derive — a latch whose conditions STILL hold is unchanged (rules are 
   assert.equal(t.downgradedSilenced, true);
   applySilencingRules(t); // idempotent re-evaluation
   assert.equal(t.downgradedSilenced, true, 're-deriving never weakens a live latch');
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.92.0 — pool membership comes from the SHP2 ROSTER, not the static literal.
+ *
+ * MOTIVATING INCIDENT (2026-08-20). The plant was physically reconfigured:
+ * Core 5 (in SPARE_DPU_SNS) took SHP2 slot 3, and Core 3 (a home Core) moved to
+ * the bench. The allowlist-only filter then averaged the BENCH unit and dropped
+ * a LIVE pool member. Because a bench unit charges on its own, the reported mean
+ * acquired a hard floor of benchSoc/3: with the bench at 63% the ladder could
+ * not read below 21%, so every critical rung (15/10/8/4/2%) was unreachable
+ * during exactly the SHP2-blind window this fallback exists to cover.
+ *
+ * Every fixture below carries a NON-EMPTY sources[] that CONTRADICTS the
+ * literal — the case the pre-existing suite could never reach (`sources: []`).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+const CORE3 = 'Y711FAB59J234000';   // home Core pre-swap; BENCH after
+const CORE5 = 'Y711ZAB59G9P0090';   // in SPARE_DPU_SNS; a LIVE pool member after
+
+/** SHP2 whose roster names the three DPUs actually wired to the panel. */
+function shp2WithRoster(pool: number | null, snsConnected: string[]): DeviceSnapshot {
+  return {
+    sn: 'HD31ZASAHH120432', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
+    online: true, lastUpdated: now,
+    projection: {
+      kind: 'shp2', backupBatPercent: pool, backupReserveSoc: 15, pairedCircuits: [],
+      sources: snsConnected.map((sn, i) => ({ slot: i + 1, sn, isConnected: true })),
+    } as any,
+  } as DeviceSnapshot;
+}
+
+test('isHomePoolDpu — a KNOWN roster overrides the static allowlist in both directions', () => {
+  const d = devices(
+    dpu(CORE1, 20), dpu(CORE2, 20), dpu(CORE5, 20), dpu(CORE3, 63),
+    shp2WithRoster(20, [CORE1, CORE2, CORE5]),
+  );
+  const roster = shp2ConnectedDpuSns(d);
+  assert.equal(isHomePoolDpu(CORE5, roster), true, 'allowlisted spare wired into the panel IS in the pool');
+  assert.equal(isHomePoolDpu(CORE3, roster), false, 'home Core moved to the bench is NOT in the pool');
+  assert.equal(isHomePoolDpu(SPARE4, roster), false, 'bench spare absent from the roster stays out');
+});
+
+test('isHomePoolDpu — an UNKNOWN (empty) roster falls back to the literal, erring toward inclusion', () => {
+  const empty = new Set<string>();
+  assert.equal(isHomePoolDpu(CORE1, empty), true);
+  assert.equal(isHomePoolDpu(CORE3, empty), true, 'unknown roster must not silently drop a home Core');
+  assert.equal(isHomePoolDpu(SPARE4, empty), false, 'literal still excludes a known bench spare');
+});
+
+test('homeFleetMeanSoc — follows the roster: includes the wired ex-spare, excludes the benched Core', () => {
+  const d = devices(
+    dpu(CORE1, 26), dpu(CORE2, 25), dpu(CORE5, 26),
+    dpu(CORE3, 13),                       // bench, charging independently
+    shp2WithRoster(26, [CORE1, CORE2, CORE5]),
+  );
+  // True pool mean (26+25+26)/3 = 25.67. The pre-fix allowlist path returned
+  // (26+25+13)/3 = 21.33 — it swapped the bench unit in for a live member.
+  assert.equal(Math.round(homeFleetMeanSoc(d)! * 100) / 100, 25.67);
+});
+
+test('homeFleetMeanSoc — REGRESSION: a charged bench unit can no longer floor the ladder', () => {
+  // The detonated case: home pool genuinely at the reserve floor while the
+  // benched Core sits at 63%. Pre-fix this read (2+2+63)/3 = 22.3% and the
+  // 15/10/8/4/2% rungs could never fire; it must now read the true 2%.
+  const d = devices(
+    dpu(CORE1, 2), dpu(CORE2, 2), dpu(CORE5, 2),
+    dpu(CORE3, 63),
+    shp2WithRoster(null, [CORE1, CORE2, CORE5]),   // pool null => this fallback is LIVE
+  );
+  const mean = homeFleetMeanSoc(d)!;
+  assert.equal(mean, 2);
+  assert.ok(mean < 4, 'the deepest critical rungs must remain reachable');
+});
+
+test('homeFleetMeanSoc — an offline roster member is still excluded (stale soc), roster or not', () => {
+  const d = devices(
+    dpu(CORE1, 30), dpu(CORE2, 10, false), dpu(CORE5, 30),
+    shp2WithRoster(null, [CORE1, CORE2, CORE5]),
+  );
+  assert.equal(homeFleetMeanSoc(d), 30, 'offline Core2 excluded; mean of the two reporting members');
 });

@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, SPARE_DPU_SNS } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu } from './shp2Membership.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
   renderReconnectReport, ARM_OFFLINE_MS as RECONNECT_ARM_MS, type DeviceObs as ReconnectDeviceObs,
@@ -3917,8 +3917,15 @@ async function reconnectPvCoverage(nowMs: number): Promise<number | null> {
 
 function reconnectObsDevices(): ReconnectDeviceObs[] {
   const out: ReconnectDeviceObs[] = [];
-  for (const d of Object.values(store.get().devices) as any[]) {
-    if (SPARE_DPU_SNS.has(d.sn)) continue;
+  // v1.92.0 — pool membership from the SHP2 roster, not the static literal. The
+  // 2026-08-20 reconfiguration inverted that literal (Core 5 took a panel slot,
+  // Core 3 went to the bench), so the bare allowlist check exempted a live home
+  // Core from auditing while watching a bench unit — and powering that bench
+  // unit down for service would have fired a pointless 30-min audit and push.
+  const devices = store.get().devices;
+  const roster = shp2ConnectedDpuSns(devices as any);
+  for (const d of Object.values(devices) as any[]) {
+    if (!isHomePoolDpu(d.sn, roster)) continue;
     // Kind falls back to the product name: a device cloud-dark since boot has
     // no projection, and that is exactly the device this watch exists for.
     const pk = d?.projection?.kind;

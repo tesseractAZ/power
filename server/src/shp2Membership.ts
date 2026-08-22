@@ -264,11 +264,43 @@ export function homeCoreCoverage(devices: Record<string, DeviceSnapshot>): {
  * Core is reporting — in which case the reserve-blind warning + offline alerts
  * are the operator's signal, not a fabricated number.
  */
+/**
+ * v1.92.0 — "is this DPU wired into the home pool right now?", resolved from the
+ * SHP2's OWN connected-source roster with the static allowlist as the
+ * unknown-roster fallback. Use this for pool-membership questions (who counts
+ * toward the pool, who gets audited); `isExpectedOfflineSpare` above keeps its
+ * narrower "this SN's absence is expected" meaning for the offline-alert split.
+ *
+ * Fallback direction matters: when the SHP2 roster is unknown (empty — the panel
+ * itself is cloud-dark) we fall back to the literal, which errs toward INCLUDING
+ * a device. For a mean-SoC or audit decision that is the conservative side.
+ */
+export function isHomePoolDpu(
+  sn: string,
+  connectedOrDevices: Set<string> | Record<string, DeviceSnapshot>,
+): boolean {
+  const connected =
+    connectedOrDevices instanceof Set ? connectedOrDevices : shp2ConnectedDpuSns(connectedOrDevices);
+  return connected.size > 0 ? connected.has(sn) : !SPARE_DPU_SNS.has(sn);
+}
+
 export function homeFleetMeanSoc(devices: Record<string, DeviceSnapshot>): number | null {
+  // v1.92.0 — membership comes from the SHP2's OWN connected-source roster, not
+  // from the static SPARE_DPU_SNS literal (which only describes the bench at the
+  // time it was written). On 2026-08-20 the plant was physically reconfigured:
+  // Core 5 took SHP2 slot 3 while Core 3 moved to the bench, inverting the
+  // literal. The allowlist-only filter then averaged a bench DPU and DROPPED a
+  // live pool member, and because a bench unit charges independently the mean
+  // acquired a hard floor of benchSoc/3 — with the bench unit at 63% the ladder
+  // could not read below 21%, making every critical rung (15/10/8/4/2%)
+  // unreachable during exactly the SHP2-blind window this fallback exists for.
+  // Same roster resolution as homeCoreCoverage above: trust the panel, and fall
+  // back to the literal only when the roster is unknown (empty).
+  const roster = shp2ConnectedDpuSns(devices);
   const socs: number[] = [];
   for (const d of Object.values(devices)) {
     if (d.projection?.kind !== 'dpu') continue;
-    if (SPARE_DPU_SNS.has(d.sn)) continue; // spares are not wired into the backup pool
+    if (!isHomePoolDpu(d.sn, roster)) continue; // only DPUs actually wired into the backup pool
     if (!d.online) continue;               // only Cores currently reporting fresh telemetry
     const s = d.projection.soc;
     if (s != null && Number.isFinite(s)) socs.push(s);

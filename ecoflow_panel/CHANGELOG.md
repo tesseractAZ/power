@@ -1,3 +1,38 @@
+## v1.92.0 — pool membership follows the panel, not a hardcoded list
+
+The SoC ladder's SHP2-blind fallback (`homeFleetMeanSoc`) and the v1.90.0
+reconnect auto-audit both decided "is this DPU part of the home pool?" from the
+static `SPARE_DPU_SNS` literal. That literal only ever described the bench at
+the moment it was written, and a physical reconfiguration inverted it: an
+allowlisted bench unit took a panel slot while a home Core moved to the bench.
+
+**Consequence, measured on the live plant.** The fallback averaged the BENCH
+unit and dropped a live pool member. A bench unit charges independently, so the
+reported mean acquired a hard floor of `benchSoc / 3` — with the bench unit at
+63 % the ladder could not read below 21 %, making the 15/10/8/4/2 % rungs (the
+entire critical half, all four `critical`-priority) unreachable during exactly
+the SHP2-blind window this fallback exists to cover. The plant sat at its 10 %
+reserve floor for six hours that same night; had the panel gone blind then, the
+ladder would have read ~37 % against a true 23.7 % and stayed silent.
+
+- New `isHomePoolDpu(sn, connectedOrDevices)` resolves membership from the
+  SHP2's own connected-source roster, falling back to the literal ONLY when the
+  roster is empty (panel cloud-dark) — a direction that errs toward including a
+  device rather than silently emptying the pool.
+- `homeFleetMeanSoc` and the reconnect auto-audit's device set both use it. The
+  audit previously exempted a live home Core from watching while watching a
+  bench unit, so powering that bench unit down for service would have fired a
+  pointless 30-minute audit and a misleading [Medium] push.
+- Verified against live telemetry: the fallback now reports 23.67 % (the true
+  pool mean) where it had been reporting 36.7 %.
+- Harness `scripts/mutate-pool-membership.mjs` (6/6 killed), including a mutant
+  that reproduces the shipped defect verbatim, plus one pinning the
+  empty-roster fallback and one pinning the online filter. Five new tests carry
+  a non-empty `sources[]` that CONTRADICTS the literal — a case the previous
+  suite could not reach, since every existing fixture used `sources: []`.
+
+No behaviour change while the roster matches the literal.
+
 ## v1.91.0 — latent-coupling fix: four engines escape the night-charge conditional
 
 `vendorEnergyTick` (v1.82 vendor energy ledger), `settingsDriftTick` (v1.83
