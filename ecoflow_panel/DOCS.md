@@ -1492,7 +1492,12 @@ for `SELF_HEAL_AFTER_MS` (20 min), the add-on rebuilds its own MQTT session:
 stop, certificate re-fetch, fresh connect. Guards, each mutation-proven
 load-bearing (`scripts/mutate-session-self-heal.mjs`, 8/8): the multi-device
 threshold, the dwell, a 60-min cooldown, a 6-heal cap over a **rolling 24 h
-window** (v1.90.0 — previously UTC-day-keyed, which reset to zero at exactly
+window persisted to `/data/self-heal-budget.json`** (v1.93.0 — it was previously
+process-local, so the cap was really "6 per process lifetime"; with this add-on's
+restart cadence that yielded 10 rebuilds in 22 h against a nominal cap of 6.
+`lastHealMs` persists with it so the cooldown also survives a restart, while
+`starvedSinceMs` deliberately does not — the dwell is re-earned against live
+telemetry) (v1.90.0 — previously UTC-day-keyed, which reset to zero at exactly
 17:00 MST and granted a fresh burst mid-evening; the rolling window frees one
 slot as each heal ages past 24 h, so the cap is a true rate limit), and a
 post-heal onset reset. Read-path only — REST polling is untouched, and a failed rebuild
@@ -1839,6 +1844,23 @@ For each of the last `windowDays = 7` days that (a) has any GHI coverage
 (`dayHasGhiCoverage`) and (b) is NOT a telemetry-gap day (per
 `coreCoverageByDay` — every wired core must report ≥ `PV_COVERAGE_MIN_FRAC = 80%`
 of the day's daylight hours):
+
+**v1.93.0 — `coreCoverageByDay(…, skipNeverReporting)`.** The map has two
+consumers that need different verdicts for a core which produced NOTHING
+anywhere in the window. The **pv-bias factor** (default `false`) keeps the strict
+all-cores gate: a wholly-dark core fails every day, driving the factor to its
+neutral 1.0 no-op, which is the safe posture when the fleet actual is
+unmeasurable. **`computeForecastSkill`** passes `true`: a core that never
+reported cannot make a PAST day's actual wrong — it simply was not part of that
+day's fleet, and treating it as a gap nulls that day's `errorPct`. Conflating the
+two cost 14 nights of night-charge: a fleet reconfiguration added two cores with
+no history, every hindcast day became a gap, `calScoredDays` fell 26 → 0 against
+a floor of 14, and `basisComplete` (§15) stayed false so the planner produced no
+plan at all. The relaxation is narrow — a core that DID report and then went dark
+for a day still fails that day, and "reported" means at least one sample inside
+the window, so out-of-window-only history counts as never-reporting. The sibling
+`fullCoverageFleetPv` has always had this escape hatch (its `contributing`
+filter); this brings the skill path into line without loosening the bias gate.
 
 ```
 predWh = Σ_h  resp[hod].coeff · ghi(h)          // where coeff != null

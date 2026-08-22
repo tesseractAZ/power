@@ -26,6 +26,11 @@
  * without a clock and the harness can mutate it meaningfully.
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { atomicWriteFileSync } from './atomicWrite.js';
+import { config } from './config.js';
+
 export interface SelfHealConfig {
   /** Devices simultaneously in a fired rate-collapse before the fleet counts as starved.
    *  2 = a single flaky device can never trigger a session rebuild. */
@@ -57,6 +62,51 @@ export interface SelfHealState {
   /** v1.90.0 — timestamps of every heal in (at least) the last 24 h; pruned on
    *  each evaluation. Replaces the UTC-day counter (dayKey/healsToday). */
   healTimesMs: number[];
+}
+
+/* ─── budget sidecar ──────────────────────────────────────────────────────
+ * v1.93.0 — `healTimesMs` used to live only in process memory, so the "6 per
+ * rolling 24 h" anti-thrash guarantee was really "6 per PROCESS LIFETIME". This
+ * add-on restarts several times a day (deploys, supervisor updates), and on
+ * 2026-08-20/21 that produced 10 rebuilds in 22 h 14 m against a nominal cap of
+ * 6: heals at 02:02/03:02/04:02/05:02, a restart at 09:53, then a fresh budget
+ * that reported "heal 1/6" at 19:16 while 02:02 was still inside the window.
+ * Persist it the way messageRateFloor persists its learned baselines.
+ * ─────────────────────────────────────────────────────────────────────── */
+
+const SIDECAR = (): string =>
+  process.env.SELF_HEAL_STATE_PATH
+  ?? resolve(process.cwd(), config.dbPath, '..', 'self-heal-budget.json');
+
+/** Load the persisted heal budget, pruned to the rolling window. Never throws. */
+export function loadSelfHealState(nowMs: number = Date.now()): SelfHealState {
+  const fresh = freshSelfHealState();
+  try {
+    if (!existsSync(SIDECAR())) return fresh;
+    const raw = JSON.parse(readFileSync(SIDECAR(), 'utf8'));
+    if (Array.isArray(raw?.healTimesMs)) {
+      fresh.healTimesMs = raw.healTimesMs
+        .filter((t: unknown): t is number => typeof t === 'number' && Number.isFinite(t))
+        .filter((t: number) => nowMs - t < HEAL_BUDGET_WINDOW_MS)
+        .sort((a: number, b: number) => a - b);
+    }
+    if (typeof raw?.lastHealMs === 'number' && Number.isFinite(raw.lastHealMs)) {
+      fresh.lastHealMs = raw.lastHealMs;  // the cooldown must also survive a restart
+    }
+    // starvedSinceMs is deliberately NOT restored: the dwell must be re-earned
+    // against live telemetry after a restart, not inherited from a dead process.
+    return fresh;
+  } catch {
+    return fresh;
+  }
+}
+
+export function saveSelfHealState(state: SelfHealState): void {
+  try {
+    atomicWriteFileSync(SIDECAR(), JSON.stringify({
+      healTimesMs: state.healTimesMs, lastHealMs: state.lastHealMs,
+    }));
+  } catch { /* best-effort: the budget is a guard, never a data source */ }
 }
 
 export function freshSelfHealState(): SelfHealState {
