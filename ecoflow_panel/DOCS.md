@@ -295,7 +295,7 @@ Two kinds of lifetime keys:
    marker; a fingerprint generalises it, since membership can change again). HA
    reads the step down as a meter reset, which is honest — the series is now
    measuring a different set of batteries. A stable roster still ratchets
-   monotonically, so a transiently-offline device re-seeds nothing.
+   monotonically, so a transiently-offline device re-seeds nothing. **v1.97.0** extends this to the FIRST observation: if no fingerprint exists yet and the floor sits more than `BMS_RESEED_MIN_GAP_WH` (50 kWh) above the live sum, that is an unrecorded rollover and the floor is repaired. v1.96.0 recorded the fingerprint without re-seeding on first run, which protected future changes but left the existing freeze untouched — caught by live verification.
 
    **v1.96.0 — orphaned held rows.** Held per-pack rows are keyed
    `(chassisSn, packSn)` but the carry gate checked only the CHASSIS, so after
