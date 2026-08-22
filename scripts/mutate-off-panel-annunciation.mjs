@@ -45,10 +45,10 @@ const MUTANTS = [
     why: 'When the SHP2 goes cloud-dark the roster is empty, so EVERY DPU would be silenced at once.',
   },
   {
-    id: 'iv. ★ thermal-critical carve-out removed — an overheating bench pack goes silent',
-    find: "  if (alert.severity === 'critical' && alert.category === 'Thermal') return false;",
+    id: 'iv. ★ never-muted carve-out removed — the overheating bench pack AND the confirmed-defective pack both go silent',
+    find: '  if (isNeverMutedAlert(alert)) return false;',
     to: '  /* MUTANT */',
-    why: 'A lithium pack overheating on the bench is precisely the case that must page regardless of wiring.',
+    why: 'Drops BOTH exemptions at once: a lithium pack overheating on the bench, and the one battery known to be broken.',
   },
   {
     id: 'v. non-DPU devices demoted too (the SHP2 could silence itself)',

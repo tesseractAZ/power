@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
@@ -123,7 +123,9 @@ export function shouldDemoteAnnunciation(
   mutedSns: readonly string[],
 ): boolean {
   if (alert.annunciate === false) return false;
-  if (alert.severity === 'critical' && alert.category === 'Thermal') return false;
+  // v1.101.0 — one shared predicate with alerts.ts so the two demotion paths
+  // can never disagree about what must always be heard.
+  if (isNeverMutedAlert(alert)) return false;
   return mutedSns.some((sn) => alert.id.includes(sn));
 }
 

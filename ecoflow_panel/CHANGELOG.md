@@ -1,3 +1,39 @@
+## v1.101.0 — the quiet half of the severity inversion
+
+v1.95.0 fixed the loud half: off-panel hardware stopped chiming. The quiet half
+remained, and it was the worse one. When the defective warranty pack moved onto a
+bench chassis, every alert it raised was demoted to `annunciate:false` — so the
+one battery in the fleet that is actually broken became the only one the operator
+was never paged about, while its healthy 29-cycle replacement, on a panel-wired
+chassis, pushed [High] cell-imbalance to his phone. Alarm loudness had become
+inversely correlated with physical severity.
+
+A new standing alert, `pack-defective-<sn>-<pack>`, fires on an unambiguous
+TWO-LEG signature and is exempt from both demotion paths:
+
+- **Leg 1 — BMS protection latch** (`packLatchSignature`): SoC ≥ 20 points below
+  the sibling median, exchanging < 25 W, while siblings move ≥ 100 W. All three
+  conditions must hold, so an idle pack alongside idle siblings is not latched.
+- **Leg 2 — an identified deviant cell** at least `DEFECTIVE_PACK_MIN_DEVIANT_MV`
+  (50 mV, matching the cell-imbalance critical bar) from the pack median.
+  `packCellForensics` names its most-deviant cell even on a perfectly matched
+  pack, so this leg had to be a THRESHOLD rather than a null check — otherwise it
+  was vacuous and the detail would have read "0 mV from the pack median".
+
+It is deliberately NOT the per-tick vdiff family: one standing alert per
+(device, pack), deduped by the notify layer to a single push, resolving when the
+pack is replaced.
+
+Both demotion paths — the bench-spare stamp in `alerts.ts` and the v1.95.0
+off-panel demotion in `alertMonitor.ts` — now consult one shared predicate,
+`isNeverMutedAlert`, so they can never drift apart about what must always be
+heard: a critical Thermal alert, and a confirmed-defective pack.
+
+Harnesses: `mutate-never-muted.mjs` (6/6, new) and `mutate-off-panel-annunciation.mjs`
+(6/6). The new harness earned its keep immediately — three mutants survived a
+suite that tested only the pure helpers, which is exactly the emission path the
+tests were missing. Tests 2045 pass.
+
 ## v1.100.0 — the digest ledger line, which had never once rendered
 
 v1.90.0 added a one-line vendor-ledger summary to the morning digest. It has
