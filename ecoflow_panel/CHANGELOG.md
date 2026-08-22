@@ -1,3 +1,47 @@
+## v1.93.0 — the night-charge basis un-sticks, and the heal budget survives a restart
+
+### The coverage gate cost 14 nights of night-charge
+
+`coreCoverageByDay` is consumed by two engines that want different things from a
+core which produced NOTHING anywhere in the window. For the **pv-bias factor** a
+wholly-dark core SHOULD fail every day — the fleet actual is unmeasurable, so the
+bias degrades to its neutral 1.0 no-op, and the function's docstring reasons
+exactly that way. But `computeForecastSkill` reuses the same map to null each
+day's `errorPct`, and a core that has never reported cannot make a PAST day's
+actual wrong; it simply was not part of that day's fleet. The second consumer was
+never in view when the fail-closed posture was chosen.
+
+On 2026-08-20 a physical reconfiguration put two cores into the PV-hindcast core
+set for the first time with zero history behind them. Every one of the 30
+hindcast days was marked a coverage gap, `calScoredDays` went **26 → 0** against a
+hard floor of 14, `basisComplete` went false, and the planner emitted a strict
+null plan — `chargeTonight=false`, `insufficient_basis` — for what would have
+been **14 consecutive nights**. Measured cost of the first miss: outage
+ride-through fell from ~19 h to ~2.4 h (the dollar cost was ~$0.38; this is a
+resilience defect, not a billing one).
+
+`coreCoverageByDay` now takes `skipNeverReporting`, default **false** so the
+pv-bias gate is untouched, and `computeForecastSkill` passes **true**. A core with
+no sample anywhere inside the window is excluded from the requirement — the same
+escape hatch its sibling `fullCoverageFleetPv` has always had. A core that DID
+report and then went dark for a day still fails that day, as it must.
+
+### The rolling-24h heal budget was never persisted
+
+`healTimesMs` lived only in process memory, so v1.90.0's "6 rebuilds per rolling
+24 h" anti-thrash guarantee was really "6 per PROCESS LIFETIME". This add-on
+restarts several times a day. On 2026-08-20/21 that produced **10 rebuilds in
+22 h 14 m**: heals at 02:02/03:02/04:02/05:02 MST, a restart at 09:53, then a
+fresh budget that reported "heal 1/6 in the rolling 24h" while 02:02 was still
+inside the window.
+
+The budget now persists to `/data/self-heal-budget.json` (atomic write) and is
+hydrated on boot, pruned to the window on load. `lastHealMs` persists too, so the
+cooldown also survives. `starvedSinceMs` deliberately does NOT — the dwell must
+be re-earned against live telemetry rather than inherited from a dead process.
+
+Tests: 2011 pass. Harness `scripts/mutate-session-self-heal.mjs` 8/8 unchanged.
+
 ## v1.92.0 — pool membership follows the panel, not a hardcoded list
 
 The SoC ladder's SHP2-blind fallback (`homeFleetMeanSoc`) and the v1.90.0

@@ -192,3 +192,71 @@ test('bias gate — excluded days are reported ONCE per (day, core), then dedupe
   computePvBiasCorrection(MODEL, ghi, pvBySn, TODAY_START, undefined, (m) => lines.push(m));
   assert.equal(lines.length, 1, 're-evaluation of a known exclusion is silent');
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.93.0 — skipNeverReporting: the two consumers of coreCoverageByDay want
+ * different things from a core that produced NOTHING anywhere in the window.
+ *
+ * MOTIVATING INCIDENT (2026-08-20). A physical reconfiguration put two cores
+ * into the PV-hindcast core set for the first time, with zero history behind
+ * them. Under the strict gate every one of the 30 hindcast days was marked a
+ * coverage gap, which nulls each day's errorPct, which emptied calErrs and drove
+ * calScoredDays 26 -> 0 against a hard floor of 14. `basisComplete` went false
+ * and the night-charge planner produced NO plan for 14 nights — while the
+ * pv-bias factor, the only consumer the strict posture was ever reasoned about,
+ * merely degraded to its intended neutral 1.0.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('coreCoverageByDay — a NEVER-reporting core fails every day under the strict (pv-bias) default', () => {
+  const ghi = ghiWindow(7);
+  const pvBySn = new Map([
+    ['A', snSamples(7, () => 500)],
+    ['NEWCORE', [] as Array<{ ts: number; value: number }>], // joined the fleet today; no history
+  ]);
+  const cov = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7);
+  for (let i = 7; i >= 1; i--) {
+    assert.equal(cov.get(TODAY_START - i * DAY_MS)!.covered, false, `day-${i} must fail the strict gate`);
+  }
+  assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.worstSn, 'NEWCORE');
+});
+
+test('coreCoverageByDay — skipNeverReporting excludes it, so the skill path can still score the window', () => {
+  const ghi = ghiWindow(7);
+  const pvBySn = new Map([
+    ['A', snSamples(7, () => 500)],
+    ['NEWCORE', [] as Array<{ ts: number; value: number }>],
+  ]);
+  const cov = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
+  for (let i = 7; i >= 1; i--) {
+    assert.equal(cov.get(TODAY_START - i * DAY_MS)!.covered, true, `day-${i} scoreable once the absent core is skipped`);
+  }
+});
+
+test('coreCoverageByDay — skipNeverReporting still fails a day a REPORTING core actually missed', () => {
+  // The relaxation must not become "ignore all gaps": a core with history that
+  // went dark for one day is a real coverage gap and must still fail that day.
+  const ghi = ghiWindow(7);
+  const pvBySn = new Map([
+    ['A', snSamples(7, () => 500)],
+    ['B', snSamples(7, (i) => (i === 3 ? null : 500))],   // real one-day blackout
+    ['NEWCORE', [] as Array<{ ts: number; value: number }>],
+  ]);
+  const cov = coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true);
+  assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.covered, false, "B's real blackout still fails");
+  assert.equal(cov.get(TODAY_START - 3 * DAY_MS)!.worstSn, 'B');
+  assert.equal(cov.get(TODAY_START - 5 * DAY_MS)!.covered, true, 'other days unaffected');
+});
+
+test('coreCoverageByDay — a core whose only samples fall OUTSIDE the window counts as never-reporting', () => {
+  const ghi = ghiWindow(7);
+  const stale = [{ ts: TODAY_START - 60 * DAY_MS, value: 500 }]; // ancient, well outside
+  const pvBySn = new Map([
+    ['A', snSamples(7, () => 500)],
+    ['OLD', stale],
+  ]);
+  assert.equal(coreCoverageByDay(ghi, pvBySn, TODAY_START, 7).get(TODAY_START - 2 * DAY_MS)!.covered, false);
+  assert.equal(
+    coreCoverageByDay(ghi, pvBySn, TODAY_START, 7, undefined, true).get(TODAY_START - 2 * DAY_MS)!.covered, true,
+    'out-of-window-only history is the same case as no history',
+  );
+});
