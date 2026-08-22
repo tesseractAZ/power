@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   advanceOffPanelStreaks, shouldDemoteAnnunciation, OFF_PANEL_DEMOTE_TICKS,
 } from '../src/alertMonitor.js';
+import { isNeverMutedAlert } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 import type { Alert } from '../src/alerts.js';
 
@@ -96,4 +97,37 @@ test('demotion — home hardware and already-demoted alerts are left alone', () 
     shouldDemoteAnnunciation(alert(`vdiff-crit-${BENCH}-1`, { annunciate: false }), [BENCH]), false,
     'already demoted — no double work');
   assert.equal(shouldDemoteAnnunciation(alert('storm-Extreme_Heat_Warning'), [BENCH]), false, 'fleet-wide alert untouched');
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.101.0 — the QUIET half of the severity inversion.
+ *
+ * v1.95.0 fixed the noisy half: off-panel hardware stopped chiming. The quiet
+ * half remained — the genuinely defective warranty pack sat on a bench chassis
+ * where every alert it raised was demoted, so the only battery that is actually
+ * broken was the only one the operator was never paged about. A confirmed BMS
+ * protection latch with an identified deviant cell now annunciates from
+ * anywhere, because "this battery is broken" is true wherever it is wired.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('never-muted — a confirmed-defective pack annunciates from bench hardware', () => {
+  const muted = [BENCH];
+  assert.equal(
+    shouldDemoteAnnunciation(alert(`pack-defective-${BENCH}-1`, { severity: 'warning', category: 'Battery' }), muted),
+    false, 'the one pack that is actually broken must not be silenced by its location');
+  // ...while the ordinary per-tick families on the same hardware still go quiet.
+  assert.equal(shouldDemoteAnnunciation(alert(`vdiff-warn-${BENCH}-1`), muted), true);
+  assert.equal(shouldDemoteAnnunciation(alert(`soc-low-${BENCH}-1`), muted), true);
+});
+
+test('never-muted — the predicate is shared, so both demotion paths agree', () => {
+  const defective = alert(`pack-defective-${BENCH}-1`, { severity: 'warning', category: 'Battery' });
+  const thermalCrit = alert(`temp-cell-${BENCH}-1-critical`, { severity: 'critical', category: 'Thermal' });
+  const ordinary = alert(`vdiff-crit-${BENCH}-1`, { severity: 'critical', category: 'Battery' });
+  for (const a of [defective, thermalCrit]) {
+    assert.equal(isNeverMutedAlert(a), true, `${a.id} must always be heard`);
+    assert.equal(shouldDemoteAnnunciation(a, [BENCH]), false, `${a.id} demotion must agree with the predicate`);
+  }
+  assert.equal(isNeverMutedAlert(ordinary), false);
+  assert.equal(shouldDemoteAnnunciation(ordinary, [BENCH]), true);
 });
