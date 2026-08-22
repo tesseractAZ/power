@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RateFloorTracker, type RateFloorConfig } from '../src/messageRateFloor.js';
+import { RateFloorTracker, isFlatProfile, type RateFloorConfig } from '../src/messageRateFloor.js';
 
 /**
  * v0.92.0 — message-rate floor detector (audit finding #1). Reproduces the SHP2
@@ -23,6 +23,9 @@ const CFG: RateFloorConfig = {
   baselineAlphaDown: 0.02,
   minHourSamples: 999_999, // legacy tests: force the global-baseline path
   peakHalfLifeMs: 7 * 86_400_000, // eligibility high-water mark: 7-day half-life
+  flatCollapseMs: 4 * 60_000,   // v1.95.0 short dwell for flat-profile devices
+  flatnessMaxCv: 0.15,
+  flatnessMinMatureHours: 18,
 };
 const MIN = 60_000;
 /** Local-time timestamp for a given hour-of-day, TZ-independent. */
@@ -369,4 +372,74 @@ test('a baseline ALREADY under the floor: the guard holds and the collapse still
   for (let i = 0; i < 30; i++) fired ||= t.sample('core', (count += 1), (now += MIN)).collapsed;
   assert.equal(fired, true, 'peak carries eligibility — the collapse fires even at baseline 8');
   assert.ok(t.baselineOf('core') >= 7.5, `guard held the baseline at ${t.baselineOf('core').toFixed(1)}, no free-fall`);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.95.0 — FLAT-PROFILE devices fire on a short dwell.
+ *
+ * MOTIVATING INCIDENT (2026-08-21 13:0x MST). The SHP2 — the single-point-
+ * critical alarm data source — delivered 2 messages in 600 s (0.20 msg/min
+ * against a 30.2 norm, a 150x collapse) and NOTHING fired. It fell between both
+ * detectors: shorter than the 20-min collapse dwell, and never silent long
+ * enough for the 180 s staleness alarm. Four more instances in the preceding
+ * four days, one with the last message 319 s old.
+ *
+ * The 20-min dwell exists ONLY to separate legitimate Core idle (4.4 msg/min)
+ * from a real collapse (2.1-2.9) — a 1.5x discrimination problem created by the
+ * Cores' 13x diurnal swing. A device whose own profile is flat has no such
+ * problem, so it earns the short dwell from its OWN measured history.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('isFlatProfile — a flat device qualifies; a diurnal one never does', () => {
+  const flat = new Array(24).fill(30).map((v, h) => v + (h % 3) * 0.5); // cv ~0.02
+  const mature = new Array(24).fill(50);
+  assert.equal(isFlatProfile(flat, mature, 30, 0.15, 18), true, 'SHP2-like flat profile');
+
+  const diurnal = [32, 33, 34, 30, 28, 20, 12, 10, 47, 50, 55, 58, 60, 60, 58, 55, 52, 50, 6, 5, 4.6, 5, 30, 32];
+  assert.equal(isFlatProfile(diurnal, mature, 30, 0.15, 18), false, 'Core-like 13x swing');
+});
+
+test('isFlatProfile — flatness must be EARNED: thin evidence never qualifies', () => {
+  const flat = new Array(24).fill(30);
+  const immature = new Array(24).fill(5);            // below minHourSamples
+  assert.equal(isFlatProfile(flat, immature, 30, 0.15, 18), false, 'no mature buckets');
+
+  const fewMature = new Array(24).fill(0).map((_, h) => (h < 10 ? 50 : 0)); // only 10 mature
+  assert.equal(isFlatProfile(flat, fewMature, 30, 0.15, 18), false, 'fewer than minMatureHours');
+});
+
+test('isFlatProfile — a zeroed profile is not "flat" (guards against div-by-zero)', () => {
+  assert.equal(isFlatProfile(new Array(24).fill(0), new Array(24).fill(50), 30, 0.15, 18), false);
+});
+
+test('rate floor — a FLAT device fires on the short dwell (the SHP2 blind spot)', () => {
+  const t = new RateFloorTracker({ ...CFG, minHourSamples: 1, flatnessMinMatureHours: 2 });
+  const SN = 'HD31ZASAHH120432';
+  const base = new Date(2026, 7, 21, 6, 0, 0).getTime();
+  const MIN = 60_000;
+  // Learn a flat ~30 msg/min profile across enough hours to mature the buckets.
+  let count = 0, ts = base;
+  for (let i = 0; i < 240; i++) { count += 30; ts += MIN; t.sample(SN, count, ts); }
+
+  // Collapse to ~0.2 msg/min. At 5 min it must have fired (short dwell = 4 min),
+  // where the legacy 20-min dwell would still have been silent.
+  let fired = false;
+  for (let m = 1; m <= 5; m++) { ts += MIN; count += 0; const r = t.sample(SN, count, ts); if (r.collapsed) fired = true; }
+  assert.equal(fired, true, 'flat-profile device fires within ~5 min, not 20');
+});
+
+test('rate floor — a DIURNAL device still gets the long dwell (no new false positives)', () => {
+  const t = new RateFloorTracker({ ...CFG, minHourSamples: 1, flatnessMinMatureHours: 2 });
+  const SN = 'Y711ZAB59GBC0314';
+  const MIN = 60_000;
+  // Teach a swinging profile: alternating fast/slow hours -> cv well above 0.15.
+  let count = 0, ts = new Date(2026, 7, 21, 0, 0, 0).getTime();
+  for (let h = 0; h < 10; h++) {
+    const rate = h % 2 === 0 ? 60 : 12;
+    for (let i = 0; i < 60; i++) { count += rate; ts += MIN; t.sample(SN, count, ts); }
+  }
+  // Now collapse. At 5 min it must NOT have fired — the long dwell still applies.
+  let firedEarly = false;
+  for (let m = 1; m <= 5; m++) { ts += MIN; const r = t.sample(SN, count, ts); if (r.collapsed) firedEarly = true; }
+  assert.equal(firedEarly, false, 'diurnal device keeps the 20-min dwell');
 });
