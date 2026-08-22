@@ -4991,7 +4991,8 @@ export function coreCoverageByDay(
   windowDays: number,
   minFrac = PV_COVERAGE_MIN_FRAC,
   /**
-   * v1.93.0 — skip cores that produced NO samples anywhere in the window.
+   * v1.94.0 — exclude a core from a day's coverage requirement until it has
+   * actually JOINED the fleet (its first in-window sample is before that day).
    *
    * The two consumers of this map want different things from a never-reporting
    * core, and conflating them cost 14 nights of night-charge. For the pv-bias
@@ -5006,24 +5007,31 @@ export function coreCoverageByDay(
    * all. The sibling `fullCoverageFleetPv` already skips zero-sample cores for
    * exactly this reason (see its `contributing` filter); this brings the skill
    * path into line without loosening the bias gate.
+   *
+   * v1.94.0 corrects a v1.93.0 under-implementation: skipping only cores with
+   * ZERO in-window samples fixed nothing once the new core had logged a single
+   * day, because all of its earlier absent days became gaps again. The gate is
+   * therefore per-DAY against each core's first in-window sample, not a global
+   * all-or-nothing skip.
    */
-  skipNeverReporting = false,
+  skipBeforeJoin = false,
 ): Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }> {
   // Bucket each SN's samples once into hour-epoch presence sets.
   const presentBySn = new Map<string, Set<number>>();
+  const firstInWindowMs = new Map<string, number>();
   const windowStartMs = todayStartMs - windowDays * 86_400_000;
   for (const [sn, pts] of pvBySn) {
     const set = new Set<number>();
-    let inWindow = 0;
+    let first: number | null = null;
     for (const p of pts) {
       set.add(Math.floor(p.ts / 3_600_000));
-      if (p.ts >= windowStartMs && p.ts < todayStartMs) inWindow++;
+      if (p.ts >= windowStartMs && p.ts < todayStartMs && (first == null || p.ts < first)) first = p.ts;
     }
     // A core with no sample anywhere INSIDE the window never contributed to any
-    // of these days' actuals — for the skill path that is "not part of this
-    // fleet then", not "this day is unmeasurable". Samples that exist only
-    // outside the window are the same case as no samples at all.
-    if (skipNeverReporting && inWindow === 0) continue;
+    // of these days' actuals. Samples that exist only outside the window are the
+    // same case as no samples at all.
+    if (skipBeforeJoin && first == null) continue;
+    if (first != null) firstInWindowMs.set(sn, first);
     presentBySn.set(sn, set);
   }
   const out = new Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }>();
@@ -5042,7 +5050,16 @@ export function coreCoverageByDay(
     let covered = true;
     let worstSn: string | null = null;
     let worstFrac: number | null = null;
+    const dayEnd = dayStart + 86_400_000;
     for (const [sn, present] of presentBySn) {
+      // v1.94.0 — a core that had not JOINED the fleet yet on this day cannot
+      // make this day's actual wrong. Requiring it turns every pre-join day
+      // into a coverage gap the moment a core is added, which is what emptied
+      // the skill window. Only applied on the skill path (skipBeforeJoin).
+      if (skipBeforeJoin) {
+        const joined = firstInWindowMs.get(sn);
+        if (joined == null || joined >= dayEnd) continue;
+      }
       const hit = daylight.reduce((n, he) => n + (present.has(he) ? 1 : 0), 0);
       const frac = hit / daylight.length;
       if (worstFrac == null || frac < worstFrac) { worstFrac = frac; worstSn = sn; }
