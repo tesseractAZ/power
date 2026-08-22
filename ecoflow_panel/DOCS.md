@@ -8846,10 +8846,18 @@ proven baseline). Failure mode: any
 single fetch failure logs at warn, leaves that field null, and the batch
 continues; a failed batch retries each tick inside the window.
 **v1.90.0**: the morning digest carries a one-line ledger summary
-(`vendorDigestLine`, pure): yesterday's home (with signed home drift), solar,
-grid, battery out / grid-charge, and the dark-core PV estimate when present.
-Null when the record is missing or empty — the digest never carries a hollow
-line.
+(`vendorDigestLine`, pure): home (with signed home drift), solar, grid, battery
+out / grid-charge, and the dark-core PV estimate when present. Null when the
+record is missing or empty — the digest never carries a hollow line.
+**v1.100.0**: the line had never rendered. The digest fires at
+`NOTIFY_DIGEST_HOUR` (06:00 local) while this job is gated to 06:35-09:00
+Phoenix — deliberately AFTER the digest — so `prevYmd(today)` was never present
+at digest time. It now falls back to `latestVendorDay(state)` and NAMES the day:
+"Yesterday per the EcoFlow ledger: …" only when the record genuinely is
+yesterday, otherwise "Per the EcoFlow ledger (YYYY-MM-DD): …". Moving the job
+earlier was rejected — the 06:35 window exists so ~19 sequential vendor requests
+do not compete with the morning poll budget, and the vendor's daily record is
+not reliably complete before then.
 
 ## 12. Vendor API notes (documented, not all used)
 
