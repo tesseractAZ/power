@@ -4990,12 +4990,40 @@ export function coreCoverageByDay(
   todayStartMs: number,
   windowDays: number,
   minFrac = PV_COVERAGE_MIN_FRAC,
+  /**
+   * v1.93.0 — skip cores that produced NO samples anywhere in the window.
+   *
+   * The two consumers of this map want different things from a never-reporting
+   * core, and conflating them cost 14 nights of night-charge. For the pv-bias
+   * factor (default, false) a wholly-dark core SHOULD fail every day: the fleet
+   * actual is unmeasurable, so the bias degrades to its neutral 1.0 no-op. But
+   * `computeForecastSkill` reuses the same map to null each day's errorPct, and
+   * a core that has never reported cannot make a PAST day's actual wrong — it
+   * simply was not part of that day's fleet. On 2026-08-20 two cores entered
+   * the set with zero history behind them, every one of the 30 hindcast days
+   * was marked a coverage gap, calScoredDays went 26 -> 0 against a floor of
+   * 14, and `basisComplete` stayed false — so the planner produced no plan at
+   * all. The sibling `fullCoverageFleetPv` already skips zero-sample cores for
+   * exactly this reason (see its `contributing` filter); this brings the skill
+   * path into line without loosening the bias gate.
+   */
+  skipNeverReporting = false,
 ): Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }> {
   // Bucket each SN's samples once into hour-epoch presence sets.
   const presentBySn = new Map<string, Set<number>>();
+  const windowStartMs = todayStartMs - windowDays * 86_400_000;
   for (const [sn, pts] of pvBySn) {
     const set = new Set<number>();
-    for (const p of pts) set.add(Math.floor(p.ts / 3_600_000));
+    let inWindow = 0;
+    for (const p of pts) {
+      set.add(Math.floor(p.ts / 3_600_000));
+      if (p.ts >= windowStartMs && p.ts < todayStartMs) inWindow++;
+    }
+    // A core with no sample anywhere INSIDE the window never contributed to any
+    // of these days' actuals — for the skill path that is "not part of this
+    // fleet then", not "this day is unmeasurable". Samples that exist only
+    // outside the window are the same case as no samples at all.
+    if (skipNeverReporting && inWindow === 0) continue;
     presentBySn.set(sn, set);
   }
   const out = new Map<number, { covered: boolean; daylightHours: number; worstSn: string | null; worstFrac: number | null }>();
@@ -5173,7 +5201,10 @@ export async function computeForecastSkill(
   // missing telemetry, not missing sunlight. Such days previously passed the
   // maturity gate and injected phantom over-forecast errors into MAE/bias
   // (07-04: +29.1% "error" while Core2 recorded zero rows).
-  const dayCoverage = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, windowDays);
+  // v1.93.0 — skill scoring excludes never-reporting cores from the coverage
+  // requirement (a core with no history cannot invalidate a past day's actual).
+  // The pv-bias call above deliberately keeps the strict all-cores gate.
+  const dayCoverage = coreCoverageByDay(ghiByEpoch, pvBySn, todayStart, windowDays, PV_COVERAGE_MIN_FRAC, true);
 
   const days: ForecastSkillDay[] = [];
   let totalPred = 0, totalAct = 0, errSum = 0, errCount = 0;

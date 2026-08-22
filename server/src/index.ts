@@ -136,7 +136,7 @@ import {
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker, type RateFloorPersisted } from './messageRateFloor.js';
-import { evaluateSelfHeal, freshSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
+import { evaluateSelfHeal, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
@@ -2498,7 +2498,13 @@ if (loadShedAdvisoryEnabled) {
 // pipeline). Purely observational for now — cannot suppress or alter any existing alarm.
 const rateFloor = new RateFloorTracker();
 // v1.76.0 — cloud-session self-heal state (see sessionSelfHeal.ts).
-const selfHealState = freshSelfHealState();
+// v1.93.0 — hydrate the rolling-24h heal budget from /data: it used to be
+// process-local, so the cap was really "6 per process lifetime" and a restart
+// silently granted a fresh six.
+const selfHealState = loadSelfHealState();
+if (selfHealState.healTimesMs.length > 0) {
+  app.log.info(`self-heal: restored ${selfHealState.healTimesMs.length} heal(s) still inside the rolling 24h budget`);
+}
 let selfHealCapLogged = false; // v1.90.0 — one stand-down line per capped episode
 
 // v1.81.0 — event-loop lag observability (08-05 queue #8). The 08-05 review
@@ -2621,6 +2627,7 @@ const rateFloorTick = setInterval(() => {
       selfHealCapLogged = false;
     }
     if (healVerdict.heal) {
+      saveSelfHealState(selfHealState); // persist the budget BEFORE the rebuild
       app.log.warn(`self-heal: ${healVerdict.reason}`);
       try { stopMqtt?.(); } catch (e: any) {
         app.log.warn(`self-heal: old MQTT stop threw (continuing): ${e?.message ?? e}`);
