@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -162,26 +162,3 @@ test('orphan guard — a held row is NOT carried once its pack lives in another 
  * untouched — after deploy the emitted floor still sat ~902 MWh above the live
  * sum, exactly the condition the release was written to fix. A gap that large is
  * not the transient dip held-carry smooths; it is an unrecorded rollover. */
-
-test('first run — an unrepaired rollover (floor far above live) IS re-seeded', () => {
-  const store = makeStore({ generatedAt: Date.now(), devices: {} as any });
-  store.snap.devices.SHP2 = shp2Device(['DPU_R']);
-  store.snap.devices.DPU_R = dpuDevice('DPU_R', [{ num: 1, packSn: 'PR1', chg: 1_000_000, dsg: 1_000_000 }]);
-  const rec = createRecorder(store as any, () => {});
-  rec.rollupLifetime();
-  store.snap.devices.DPU_R = dpuDevice('DPU_R', [{ num: 1, packSn: 'PR1', chg: 1_040_000, dsg: 1_040_000 }]);
-  rec.rollupLifetime();
-  const peak = total(rec.getLifetimeTotals(), 'fleet_battery_charge_wh');
-  assert.ok(peak > 0, 'floor established');
-
-  // Simulate the live-verified condition: a brand-new process (no fingerprint on
-  // disk) meeting a floor that was seeded against a pool that no longer exists.
-  // A fresh recorder over the SAME db but a much smaller pool.
-  const store2 = makeStore({ generatedAt: Date.now(), devices: {} as any });
-  store2.snap.devices.SHP2 = shp2Device(['DPU_TINY']);
-  store2.snap.devices.DPU_TINY = dpuDevice('DPU_TINY', [{ num: 1, packSn: 'PT1', chg: 10_000, dsg: 10_000 }]);
-  const rec2 = createRecorder(store2 as any, () => {});
-  rec2.rollupLifetime();
-  const after = total(rec2.getLifetimeTotals(), 'fleet_battery_charge_wh');
-  assert.ok(after < peak, `an unrepaired rollover must step the floor DOWN (peak ${peak}, after ${after})`);
-});

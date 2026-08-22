@@ -295,7 +295,9 @@ Two kinds of lifetime keys:
    marker; a fingerprint generalises it, since membership can change again). HA
    reads the step down as a meter reset, which is honest — the series is now
    measuring a different set of batteries. A stable roster still ratchets
-   monotonically, so a transiently-offline device re-seeds nothing. **v1.97.0** extends this to the FIRST observation: if no fingerprint exists yet and the floor sits more than `BMS_RESEED_MIN_GAP_WH` (50 kWh) above the live sum, that is an unrecorded rollover and the floor is repaired. v1.96.0 recorded the fingerprint without re-seeding on first run, which protected future changes but left the existing freeze untouched — caught by live verification.
+   monotonically, so a transiently-offline device re-seeds nothing.
+
+   **v1.98.0 — the gap invariant.** Keying the repair on a fingerprint CHANGE was insufficient: v1.96.0 wrote the fingerprint on first observation without repairing, so on every later boot the fingerprint matched and the branch (with v1.97.0's first-run repair inside it) was unreachable — the freeze survived both releases. The floor/live gap is therefore now checked DIRECTLY: when the floor sits more than `BMS_RESEED_MIN_GAP_WH` (50 kWh) above the live sum for `BMS_RESEED_SUSTAINED_ROLLUPS` (2, ~10 min) consecutive rollups, it is re-seeded, at most once per process. Requiring persistence is what makes it safe — a genuinely-offline device cannot open that gap, because held-carry keeps its last-known Wh in the live sum for exactly that reason. The fingerprint path is kept for explicit membership changes, where it repairs immediately instead of waiting out the dwell.
 
    **v1.96.0 — orphaned held rows.** Held per-pack rows are keyed
    `(chassisSn, packSn)` but the carry gate checked only the CHASSIS, so after
