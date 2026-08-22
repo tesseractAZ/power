@@ -110,6 +110,29 @@ export interface PackLatchSignature {
  *  (≥ 20 pts below the sibling median) while exchanging ~no power (< 25 W)
  *  during active sibling flow (sibling median ≥ 100 W). All three legs must
  *  hold — a pack idling alongside idle siblings is NOT latched. */
+/**
+ * v1.101.0 — alerts that must annunciate regardless of where the hardware is
+ * wired. Shared by the bench-spare stamp (alerts.ts) and the off-panel demotion
+ * (alertMonitor.ts) so the two can never drift apart.
+ *
+ *  - a CRITICAL Thermal alert: an overheating pack must page from anywhere.
+ *  - `pack-defective-*`: a confirmed BMS protection latch with an identified
+ *    deviant cell. Muting this is how the defective warranty pack went silent
+ *    while its healthy replacement pushed [High] to the operator's phone.
+ */
+/** v1.101.0 — how far the deviant cell must sit from the pack median before the
+ *  standing defective-pack alert will fire. Matches the cell-imbalance critical
+ *  threshold: below this the "deviant" cell is just the most-deviant of a
+ *  healthy set. */
+export const DEFECTIVE_PACK_MIN_DEVIANT_MV = 50;
+
+export function isNeverMutedAlert(
+  a: Pick<Alert, 'id' | 'severity' | 'category'>,
+): boolean {
+  if (a.severity === 'critical' && a.category === 'Thermal') return true;
+  return a.id.startsWith('pack-defective-');
+}
+
 export function packLatchSignature(
   packs: ReadonlyArray<{ num: number; soc: number | null; inputWatts: number | null; outputWatts: number | null }>,
   packNum: number,
@@ -907,6 +930,50 @@ export function computeAlerts(
           out.push({ id: `vdiff-warn-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Cell imbalance', detail: `${tag} cell spread ${pk.maxVolDiffMv} mV (warning fires ≥ ${VOL_DIFF_WARN_RISE_MV} mV, holds ≥ ${VOL_DIFF_WARN_MV} mV).${cellNote}${balanceNote}${plateauNote}`, ...facts, ...annun });
         }
       }
+      // v1.101.0 — STANDING "confirmed defective pack" alert.
+      //
+      // The 2026-08-20 pack swap produced a severity inversion: the genuinely
+      // defective warranty pack moved onto a bench chassis, where every alert it
+      // raises is demoted to annunciate:false, while its healthy replacement on a
+      // panel-wired chassis pushed [High] cell-imbalance to the operator. The
+      // system's loudness became inversely correlated with physical severity, and
+      // the one pack that is actually broken went silent — leaving the RMA's only
+      // evidence trail on a dashboard nobody is paged to look at.
+      //
+      // This is deliberately NOT the per-tick vdiff family. It fires only on an
+      // unambiguous two-leg signature — a BMS protection latch (SoC >= 20 pts
+      // below the sibling median while exchanging < 25 W during active sibling
+      // flow) AND an identified deviant cell — and it is exempt from both the
+      // bench-spare stamp below and the v1.95.0 off-panel demotion, because
+      // "this battery is broken" is true wherever the hardware happens to be
+      // wired. One standing alert per (device, pack); the notify layer dedups it
+      // to a single push that resolves when the pack is replaced.
+      // Computed independently of the vdiff branch above: a latched pack must be
+      // reported whether or not its spread happens to clear a vdiff threshold.
+      const dLatch = packLatchSignature(p.packs, pk.num);
+      const dFx = packCellForensics(p.packs, pk.num);
+      // packCellForensics always names its most-deviant cell, even on a perfectly
+      // matched pack, so the second leg must require a MEANINGFUL deviation —
+      // otherwise the leg is vacuous and the detail would read "0 mV from the
+      // pack median". DEFECTIVE_PACK_MIN_DEVIANT_MV matches the cell-imbalance
+      // critical threshold.
+      if (dLatch != null && dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV) {
+        const dl = dLatch; const dfx = dFx;
+        out.push({
+          id: `pack-defective-${d.sn}-${pk.num}`,
+          severity: 'warning',
+          category: 'Battery',
+          device: d.deviceName,
+          title: 'Pack confirmed defective — service required',
+          detail:
+            `${tag} is latched out by its own BMS: ${dl.socPct}% SoC against a sibling median of ${dl.siblingMedianSocPct}%, `
+            + `exchanging ${dl.packAbsW} W while its siblings move ${dl.siblingMedianAbsW} W. Deviant cell #${dfx.deviantCell} `
+            + `sits ${dfx.deltaMv > 0 ? '+' : ''}${dfx.deltaMv} mV from the pack median. The pack cannot recover on its own — `
+            + `it is below the parallel-operation window, so it accepts no charge, so it cannot climb back into the window. `
+            + `Capture evidence with /api/warranty-export.`,
+          annunciate: true,
+        });
+      }
       if (balancing) {
         out.push({ id: `balancing-${d.sn}-${pk.num}`, severity: 'info', category: 'Battery', device: d.deviceName, title: 'Pack balancing cells', detail: `${tag} BMS is actively balancing — normal housekeeping, no action needed.` });
       }
@@ -939,6 +1006,10 @@ export function computeAlerts(
     // it's wired into an SHP2 (shp2ConnectedDpuSns then includes it).
     if (isExpectedOfflineSpare(d.sn)) {
       for (let i = dpuStart; i < out.length; i++) {
+        // v1.101.0 — a confirmed-defective pack is exempt. "This battery is
+        // broken" is true wherever the hardware happens to be wired, and muting
+        // it is exactly how the 2026-08-20 severity inversion arose.
+        if (isNeverMutedAlert(out[i])) continue;
         if (out[i].annunciate !== false) out[i].annunciate = false;
       }
     }
