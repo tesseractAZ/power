@@ -1,3 +1,43 @@
+## v1.96.0 — lifetime counters survive a fleet reconfiguration
+
+Two data-integrity defects the 2026-08-20 pack/DPU swap exposed. Neither is on
+an alarm path — SoC, reserve and runway read the SHP2 pool, and round-trip
+efficiency is computed separately — but both silently corrupt the energy record.
+
+### The counters froze for an estimated ~35 days, silently
+
+The emitted lifetime battery totals are a monotone high-water floor, which is
+correct while the pool is stable and wrong the moment its membership changes.
+When Core 3 left the SHP2 source list its five packs dropped out of the live sum,
+leaving the live value **~904 kWh below the pinned floor**. `fleet_battery_charge_wh`
+and `_discharge_wh` — and the HA Energy Dashboard tiles they feed — therefore read
+FLAT while the new pool slowly climbed back over the old mark, closing at only
+~26 kWh/day. There was no log line and no alert.
+
+The floors now re-seed from the live sum whenever the SHP2 source set changes,
+keyed on a fingerprint of that set persisted to `/data/bms-membership.json`.
+v0.9.74 established this fix shape for the one-time SHP2-filter rollover; a
+fingerprint generalises it, because membership can change again. HA's
+`state_class: total_increasing` reads the step down as a meter reset, which is
+the honest interpretation: the series is now measuring a different set of
+batteries. A STABLE roster still ratchets monotonically — a device that goes
+transiently offline does not re-seed anything.
+
+### Orphaned held rows were armed to inject ~937 kWh
+
+Held per-pack rows are keyed `(chassisSn, packSn)` but the carry gate only ever
+checked the CHASSIS. After the swap, five rows worth ~937 kWh sat under Core 3
+for packs that now live in Core 4, dormant only because Core 3 is off-panel.
+Re-wiring it would have re-added all five in ONE 5-minute rollup — roughly 520x
+the fleet's physical charge ceiling — and ratcheted the emitted
+`total_increasing` floor with no rate guard.
+
+A packSn observed in a DIFFERENT chassis this snapshot proves the row is stale,
+so it is never carried. The skip is logged once per change rather than per
+rollup.
+
+Tests 2026 pass.
+
 ## v1.95.0 — alarm coverage: the SHP2 blind spot, and silence for bench hardware
 
 ### The single-point-critical data source could go dark for 17 minutes unnoticed
