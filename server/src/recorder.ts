@@ -1953,6 +1953,10 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
    *  floors were last seeded against. A change means the floors describe a
    *  different set of batteries and must be re-seeded, or the emitted counters
    *  freeze until the new live sum climbs back over the old high-water mark. */
+  /** v1.97.0 — a floor-vs-live gap this large cannot be a transient offline dip
+   *  (the held-carry machinery smooths those); it means the floor was seeded
+   *  against a different set of batteries. 50 kWh is ~1.6x a single pack. */
+  const RESEED_MIN_GAP_WH = Number(process.env.BMS_RESEED_MIN_GAP_WH ?? 50_000);
   const BMS_MEMBERSHIP_PATH = resolve(dirname(dbPath), 'bms-membership.json');
   let bmsMembershipFp: string | null = (() => {
     try {
@@ -2025,9 +2029,25 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // different set of batteries.
     const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
     if (membershipFp !== '' && membershipFp !== bmsMembershipFp) {
-      if (bmsMembershipFp !== null) {
+      // v1.97.0 — FIRST-RUN REPAIR. v1.96.0 recorded the fingerprint on its first
+      // observation without re-seeding, on the reasoning that a fresh install
+      // must not clobber a legitimate floor. That protected future rollovers but
+      // left the EXISTING freeze — the very thing it was written for — in place:
+      // live-verified after deploy, the emitted floor still sat ~902 MWh above
+      // the live sum. A gap that large is not the transient dip the held-carry
+      // machinery exists to smooth; it is the signature of a membership change
+      // that happened before the fingerprint existed. So on the FIRST
+      // observation, re-seed too — but only when the gap is unambiguous.
+      const firstObservation = bmsMembershipFp === null;
+      const gapWh = Math.max(bmsChargeFloor - bms.chargeWh, bmsDischargeFloor - bms.dischargeWh);
+      const unrepairedRollover = firstObservation && gapWh > RESEED_MIN_GAP_WH;
+      if (firstObservation && !unrepairedRollover) {
+        // Fresh install or an already-consistent floor: adopt the fingerprint silently.
+      } else if (bmsMembershipFp !== null || unrepairedRollover) {
         log(
-          `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — ` +
+          (unrepairedRollover
+            ? `recorder: v1.97.0 lifetime battery floors sit ${(gapWh / 1000).toFixed(0)} kWh ABOVE the live sum for pool [${membershipFp}] — repairing an unrecorded membership rollover. `
+            : `recorder: v1.96.0 SHP2 pool membership changed (${bmsMembershipFp || '(none)'} -> ${membershipFp}) — `) +
           `re-seeding lifetime battery floors from the new live sum ` +
           `(charge ${bmsChargeFloor.toFixed(0)} -> ${bms.chargeWh.toFixed(0)} Wh, ` +
           `discharge ${bmsDischargeFloor.toFixed(0)} -> ${bms.dischargeWh.toFixed(0)} Wh). ` +
