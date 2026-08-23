@@ -18,6 +18,17 @@ export interface EnergyTotals {
 export interface FleetEnergyTotals {
   sinceMs: number;
   untilMs: number;
+  /**
+   * v1.103.0 — the SHP2 pool membership this rollup was computed against,
+   * resolved from the LIVE snapshot and applied across the whole window.
+   *
+   * Declared rather than assumed: for a window that spans a reconfiguration
+   * this basis is wrong, and the roster for a past window cannot be
+   * reconstructed (nothing recorded it before v1.103.0). Consumers that need a
+   * trustworthy per-window figure — notably the pack-DC RTE — check
+   * `membershipHistory.membershipVerdict` and refuse anything not `stable`.
+   */
+  membershipBasis: string;
   devices: EnergyTotals[];
   fleet: {
     pvWh: number;
@@ -257,6 +268,13 @@ export function computeTotals(
   // rollup — mirrors v0.9.74's recorder.ts contributor filter so
   // `/api/summary/today` (which powers the HA Today card) agrees with
   // the lifetime counters.
+  // v1.103.0 — membership is resolved ONCE from the LIVE snapshot and then
+  // applied across [sinceMs, untilMs]. That is correct for a window inside a
+  // single membership and WRONG for one that spans a reconfiguration: the 08-20
+  // swap made this attribute one fleet's energy under another's roster. The
+  // roster itself cannot be reconstructed for a past window — nothing recorded
+  // it before v1.103.0 — so rather than pretend, the result now DECLARES what
+  // basis it used, and callers that care (the pack-DC RTE) refuse the day.
   const connected = shp2ConnectedDpuSns(snap.devices);
   // v1.87.0 — SNs that actually entered the PV accumulation. A CONNECTED but
   // PROJECTION-LESS Core (Core 2 through its 2026-08 cloud outage) was skipped
@@ -356,5 +374,5 @@ export function computeTotals(
   fleet.pvCoverage = pvCoverageAccum.length === 0
     ? fleet.coverage
     : pvCoverageAccum.reduce((s, v) => s + v, 0) / pvCoverageAccum.length;
-  return { sinceMs, untilMs, devices, fleet };
+  return { sinceMs, untilMs, membershipBasis: [...connected].sort().join(','), devices, fleet };
 }

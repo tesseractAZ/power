@@ -6,6 +6,7 @@ import { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
 import { SPARE_DPU_SNS, shp2ConnectedDpuSns } from './shp2Membership.js';
+import { loadMembershipHistory, saveMembershipHistory, recordMembership } from './membershipHistory.js';
 // v1.38.0 (WS2) — Phoenix calendar-date resolution for the night-charge ledger
 // read cutoff. tariff.ts is a pure, import-free module (no circular dependency);
 // `.ymd` is the same America/Phoenix YYYY-MM-DD key the ledger stores plan_date as.
@@ -1965,6 +1966,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
   /** Repair at most once per process — a latch, not a loop. */
   let floorGapRepaired = false;
   const BMS_MEMBERSHIP_PATH = resolve(dirname(dbPath), 'bms-membership.json');
+  /** v1.103.0 — timestamped membership record (see membershipHistory.ts). */
+  const MEMBERSHIP_HISTORY_PATH = resolve(dirname(dbPath), 'membership-history.json');
+  const membershipHistory = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
   let bmsMembershipFp: string | null = (() => {
     try {
       const raw = JSON.parse(readFileSync(BMS_MEMBERSHIP_PATH, 'utf8'));
@@ -2035,6 +2039,14 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // meter reset, which is the honest reading: the series is now measuring a
     // different set of batteries.
     const membershipFp = [...sourceSnsOf(snap)].sort().join(',');
+    // v1.103.0 — append to the timestamped history on EVERY rollup, not only on
+    // a detected change. `recordMembership` is idempotent (it no-ops when the
+    // fingerprint matches the newest entry), and recording the STATE rather than
+    // the EVENT is what makes the first entry appear on a stable plant at all —
+    // the same trap that made v1.96.0/v1.97.0's floor repair unreachable.
+    if (recordMembership(membershipHistory, membershipFp, now)) {
+      saveMembershipHistory(MEMBERSHIP_HISTORY_PATH, membershipHistory);
+    }
     if (membershipFp !== '' && membershipFp !== bmsMembershipFp) {
       if (bmsMembershipFp !== null) {
         log(
