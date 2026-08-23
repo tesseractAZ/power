@@ -1265,6 +1265,47 @@ export function actuatedRealizedNeedBuyKwh(opts: {
  * `buy_err < 0` is the asymmetric safety miss. It contains no delivered term,
  * no trough, and no reverted setpoint: it measures the planner and nothing else.
  */
+/**
+ * v1.106.0 — a CALIBRATED half-width for the load band, from realized error.
+ *
+ * `loadP10Kwh`/`loadP90Kwh` were `P50 ÷ 1.15` and `P50 × 1.15`: a hand-set ±15%
+ * sizing multiplier that nothing estimated from data, named P10/P90 and graded
+ * by the readiness gate as if it were a calibrated 80% interval. Measured on the
+ * live ledger it contained the actual **14%** of the time (a calibrated band
+ * should be ~80%), and realized load errors of −28% sat far outside it.
+ *
+ * The factor is now the empirical band that WOULD have contained ~80% of past
+ * realized errors, with two guards:
+ *
+ *  - FLOOR at the historical 1.15, so this can only ever WIDEN the band. On the
+ *    sizing side only `loadP90W` matters (it drives the projected drain), and a
+ *    wider P90 buys more — under-buy is the asymmetric safety miss, so the
+ *    monotone direction of this change is the safe one.
+ *  - CAP, so a handful of pathological nights cannot run the band away.
+ *
+ * Below `minSamples` it returns the floor and says so, rather than calibrating
+ * on noise.
+ */
+export function calibratedLoadBandFactor(
+  errFracs: ReadonlyArray<number | null | undefined>,
+  opts: { floor?: number; cap?: number; minSamples?: number; quantile?: number } = {},
+): { factor: number; basis: 'measured' | 'default'; samples: number } {
+  const floor = opts.floor ?? 1.15;
+  const cap = opts.cap ?? 2.0;
+  const minSamples = opts.minSamples ?? 10;
+  const q = opts.quantile ?? 0.8;
+  const abs = errFracs
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+    .map((v) => Math.abs(v))
+    .sort((a, b) => a - b);
+  if (abs.length < minSamples) return { factor: floor, basis: 'default', samples: abs.length };
+  // Nearest-rank quantile: the half-width that would have covered `q` of them.
+  const idx = Math.min(abs.length - 1, Math.max(0, Math.ceil(q * abs.length) - 1));
+  const halfWidth = abs[idx];
+  const factor = Math.min(cap, Math.max(floor, 1 + halfWidth));
+  return { factor: Math.round(factor * 1000) / 1000, basis: 'measured', samples: abs.length };
+}
+
 export function plannerSizingNeedBuyKwh(opts: {
   planBuyKwh: number;
   forecastPvKwh: number;

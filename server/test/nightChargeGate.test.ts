@@ -378,3 +378,55 @@ test('v1.105.0 — algo v2 rows are excluded; the evidence clock resets', () => 
   assert.equal(g.metrics.scoredDays, 0, 'v2 values are not comparable with v3 and must not be judged');
   assert.notEqual(g.state, 'READY');
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.106.0 — band coverage graded PER MARGINAL, not on their AND.
+ *
+ * Each of pv_in_band / load_in_band is measured against a P10-P90 band, which
+ * by construction contains the actual ~80% of the time when calibrated. The
+ * gate took their AND and graded THAT against [78%, 92%] — a marginal target
+ * applied to a joint statistic. For two independent 80% marginals the joint is
+ * 0.64, and the Fréchet bounds put it in [0.60, 0.80]: the entire upper half of
+ * the target was UNREACHABLE by construction.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('v1.106.0 — two well-calibrated INDEPENDENT marginals now pass (the old AND could not)', () => {
+  // PV in-band 80%, load in-band 80%, deliberately anti-correlated so the joint
+  // is far below either marginal — the exact case the old grading failed.
+  const rows = actuatedLedger(25, (r, i) => {
+    r.pv_in_band = i % 5 === 0 ? 0 : 1;      // 80%
+    r.load_in_band = i % 5 === 1 ? 0 : 1;    // 80%, missing on a DIFFERENT night
+    r.cushion_shortfall = 0;
+    r.buy_err_kwh = 0.5;
+  });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.pvBandCoverage, 0.8);
+  assert.equal(g.metrics.loadBandCoverage, 0.8);
+  assert.ok(g.metrics.bandCoverage! < 0.78, `the joint is ${g.metrics.bandCoverage} — below the old bar`);
+  assert.ok(!g.blocking.some((b) => /band coverage/.test(b)),
+    `well-calibrated marginals must not be blocked; got ${JSON.stringify(g.blocking)}`);
+});
+
+test('v1.106.0 — a genuinely miscalibrated LOAD band still blocks, and is NAMED', () => {
+  const rows = actuatedLedger(25, (r, i) => {
+    r.pv_in_band = i % 5 === 0 ? 0 : 1;   // 80% — fine
+    r.load_in_band = i % 7 === 0 ? 1 : 0; // ~14% — the live figure
+    r.cushion_shortfall = 0;
+    r.buy_err_kwh = 0.5;
+  });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.ok(g.metrics.loadBandCoverage! < 0.3);
+  const line = g.blocking.find((b) => /band coverage/.test(b));
+  assert.ok(line, 'must still block');
+  assert.match(line!, /load \d+%/, 'and must name WHICH marginal is broken');
+  assert.match(line!, /PV \d+%/, 'reporting both so the diagnosis is legible');
+});
+
+test('v1.106.0 — an over-wide band (100% coverage) still fails the upper bound', () => {
+  const rows = actuatedLedger(25, (r) => {
+    r.pv_in_band = 1; r.load_in_band = 1; r.cushion_shortfall = 0; r.buy_err_kwh = 0.5;
+  });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.pvBandCoverage, 1);
+  assert.ok(g.blocking.some((b) => /band coverage/.test(b)), 'over-covering is still mis-calibration');
+});

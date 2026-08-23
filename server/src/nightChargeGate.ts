@@ -265,14 +265,31 @@ export function computeNightChargeReadiness(
   const loadMae = mean(loadErrs.map(Math.abs));
   const loadBias = mean(loadErrs);
 
-  // Band coverage: realized fraction where BOTH PV and load landed in-band,
-  // over nights where both verdicts exist (a null verdict is missing data, not
-  // an out-of-band miss).
-  const bandFlags = forecastPool
-    .filter((r) => r.pv_in_band != null && r.load_in_band != null)
-    .map((r) => truthy(r.pv_in_band) && truthy(r.load_in_band));
-  const coverageNights = bandFlags.length;
-  const bandCoverage = coverageNights > 0 ? bandFlags.filter(Boolean).length / coverageNights : null;
+  // Band coverage. v1.106.0 — graded PER MARGINAL, not on their AND.
+  //
+  // `pv_in_band` and `load_in_band` are each measured against a P10-P90 band,
+  // which by construction contains the actual ~80% of the time when calibrated.
+  // The gate took the AND of the two and graded THAT against [78%, 92%] — a
+  // marginal target applied to a joint statistic. For two independent
+  // 80%-calibrated marginals the joint is 0.64, and the Fréchet bounds put it in
+  // [0.60, 0.80] — so the entire upper half of the target, 0.80-0.92, was
+  // UNREACHABLE by construction and a perfectly calibrated pair could never pass.
+  //
+  // They are also two separate questions: whether the PV band is well-sized has
+  // nothing to do with whether the load band is. Conflating them hid WHICH input
+  // was broken — the live joint read 9.5% while the marginals were PV 57% and
+  // load 14%, and only the second is badly wrong.
+  const pvFlags = forecastPool.filter((r) => r.pv_in_band != null).map((r) => truthy(r.pv_in_band));
+  const loadFlags = forecastPool.filter((r) => r.load_in_band != null).map((r) => truthy(r.load_in_band));
+  const frac = (f: boolean[]): number | null => (f.length > 0 ? f.filter(Boolean).length / f.length : null);
+  const pvBandCoverage = frac(pvFlags);
+  const loadBandCoverage = frac(loadFlags);
+  // Nights with BOTH verdicts still define the sample size, and the joint is kept
+  // as an informational figure — it is no longer graded.
+  const coverageNights = forecastPool.filter((r) => r.pv_in_band != null && r.load_in_band != null).length;
+  const bandCoverage = coverageNights > 0
+    ? forecastPool.filter((r) => truthy(r.pv_in_band) && truthy(r.load_in_band)).length / coverageNights
+    : null;
 
   // ── ACTUATED pool (chronological; YYYY-MM-DD sorts lexically = by date). ──
   const actuated = currentAlgo
@@ -356,6 +373,8 @@ export function computeNightChargeReadiness(
     loadMae: loadMae != null ? round(loadMae) : null,
     loadBias: loadBias != null ? round(loadBias) : null,
     bandCoverage: bandCoverage != null ? round(bandCoverage) : null,
+    pvBandCoverage: pvBandCoverage != null ? round(pvBandCoverage) : null,
+    loadBandCoverage: loadBandCoverage != null ? round(loadBandCoverage) : null,
     bandCoveragePct: bandCoverage != null ? round(bandCoverage * 100, 1) : null,
     coverageNights,
     forecastBasisPct: forecastBasisPct != null ? round(forecastBasisPct, 1) : null,
@@ -410,9 +429,15 @@ export function computeNightChargeReadiness(
     blocking.push(
       `band coverage judged on ${coverageNights} captured forecast night(s); need ≥ ${MIN_COVERAGE_NIGHTS}.`,
     );
-  } else if (bandCoverage == null || bandCoverage < BAND_COVERAGE_MIN || bandCoverage > BAND_COVERAGE_MAX) {
+  } else if (
+    pvBandCoverage == null || pvBandCoverage < BAND_COVERAGE_MIN || pvBandCoverage > BAND_COVERAGE_MAX
+    || loadBandCoverage == null || loadBandCoverage < BAND_COVERAGE_MIN || loadBandCoverage > BAND_COVERAGE_MAX
+  ) {
     blocking.push(
-      `band coverage ${bandCoverage != null ? (bandCoverage * 100).toFixed(0) + '%' : 'n/a'} outside [${(BAND_COVERAGE_MIN * 100).toFixed(0)}%, ${(BAND_COVERAGE_MAX * 100).toFixed(0)}%].`,
+      `band coverage outside [${(BAND_COVERAGE_MIN * 100).toFixed(0)}%, ${(BAND_COVERAGE_MAX * 100).toFixed(0)}%] — `
+      + `PV ${pvBandCoverage != null ? (pvBandCoverage * 100).toFixed(0) + '%' : 'n/a'}, `
+      + `load ${loadBandCoverage != null ? (loadBandCoverage * 100).toFixed(0) + '%' : 'n/a'} `
+      + `(graded per marginal since v1.106.0; the joint reads ${bandCoverage != null ? (bandCoverage * 100).toFixed(0) + '%' : 'n/a'}).`,
     );
   }
 

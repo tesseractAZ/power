@@ -1,3 +1,59 @@
+## v1.106.0 — the forecast bands: graded per marginal, and the load band is finally a quantile
+
+### Band coverage was graded on an AND, against a marginal target
+
+`pv_in_band` and `load_in_band` are each measured against a P10-P90 band, which
+by construction contains the actual ~80% of the time when calibrated. The gate
+took the **AND** of the two and graded that against **[78%, 92%]** — a marginal
+target applied to a joint statistic.
+
+For two independent 80%-calibrated marginals the joint is 0.64, and the Fréchet
+bounds put it in **[0.60, 0.80]**: the entire upper half of the target was
+**unreachable by construction**, and a perfectly calibrated pair could never
+pass. Conflating them also hid WHICH input was broken — the live joint read 9.5%
+while the marginals were PV 57% and load 14%.
+
+Each marginal is now graded separately, both are reported by name in the
+blocking line, and the joint is kept as an informational figure only.
+
+### The load "P10/P90" was never a quantile
+
+```
+loadP10Kwh = loadP50 / 1.15      loadP90Kwh = loadP50 * 1.15
+```
+
+A hand-set ±15% sizing multiplier that nothing estimated from data — yet named
+P10/P90 and graded as a calibrated 80% interval. Measured on the live ledger it
+contained the actual **14%** of the time, and realized load errors of −28% sat
+far outside it.
+
+`calibratedLoadBandFactor` now derives the half-width from realized
+`load_err_frac` history (nearest-rank 80th percentile of absolute error), with
+two guards:
+
+- **FLOOR at the historical 1.15**, so this can only ever WIDEN the band. On the
+  sizing side only `loadP90W` matters — it drives the projected drain — and a
+  wider P90 buys more. Under-buy is the asymmetric safety miss, so the monotone
+  direction of this change is the safe one.
+- **CAP** (default 2.0), so a handful of pathological nights cannot run the band
+  away.
+
+Below 10 samples it returns the floor and reports `basis: 'default'` rather than
+calibrating on noise. When it does widen, one log line records the new
+half-width, the sample count, and that it only widens.
+
+**This is a real behavioural change**: a wider P90 means larger projected drain
+and therefore larger buys. It is bounded, monotone toward safety, and auditable.
+
+### Not changed, deliberately
+
+The actuator clamp and the setpoint/target split. They look like the cause of
+the over-delivery, but the setpoint is derived from the REQUIREMENT rather than
+the derated deliverable by design — that is the resilience posture, and the
+defect was in the measurement (fixed in v1.105.0), not the write.
+
+Tests 2085 pass.
+
 ## v1.105.0 — buy_err_kwh answers ONE question: did the planner size right?
 
 `buy_err_kwh` was `planBuy − (delivered + troughDeficit)` — the DIFFERENCE of the
