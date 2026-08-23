@@ -1,3 +1,40 @@
+## v1.107.0 — the recorder database, readable from outside the add-on
+
+### /data is a locked room
+
+`/data/ecoflow.db` holds every recorded sample, but `/data` is private per
+add-on: the panel maps only `data:rw`, so sqlite-web — or any other viewer —
+has no path it can open. Inspecting the recorder meant going through the
+panel's own endpoints or not at all.
+
+### A snapshot, not a share
+
+`POST /api/db-export` publishes a point-in-time copy to
+`/share/ecoflow-panel/ecoflow-snapshot.db`, a path every add-on can read.
+`GET /api/db-export` reports where that copy is and how fresh it is without
+producing a new one. The live database is never exposed; only a copy is.
+
+Three things this deliberately is not:
+
+- **Not `cp`.** The database is WAL, so a copy of the main file silently omits
+  every row still sitting in `-wal` — the newest samples, exactly the ones an
+  investigation wants. `VACUUM INTO` takes a transactionally consistent copy and
+  writes it as a single defragmented, WAL-free file.
+- **Not on an existing thread.** `DatabaseSync` is synchronous, so the vacuum
+  pins whichever event loop runs it. The alarm engine is on the main thread and
+  every dashboard panel is behind the analytics worker, so the export runs on
+  its own short-lived third thread and exits. It opens its own handle too: the
+  read connection sets `query_only = ON`, and SQLite refuses `VACUUM INTO` there
+  by statement class even though the source is never written.
+- **Not written in place.** The copy goes to a temp path and is renamed in, so
+  the published path always holds a complete database and a failed export leaves
+  the previous good snapshot alone.
+
+Write-auth gated, rate-limited to 6/hour, single-flighted, and the one
+caller-controlled path component is a validated bare filename. `share:rw` added
+to the add-on map, used only to write the snapshot. Harness:
+`scripts/mutate-db-export.mjs`, 8/8.
+
 ## v1.106.0 — the forecast bands: graded per marginal, and the load band is finally a quantile
 
 ### Band coverage was graded on an AND, against a marginal target
