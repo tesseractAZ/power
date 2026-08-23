@@ -134,7 +134,7 @@ test('v1.86.0 — incomplete stored days are retried; complete days are not', ()
 
 /* ─── v1.90.0 (B7) — the digest ledger line ──────────────────────────────── */
 
-import { vendorDigestLine, latestVendorDay, type VendorDayRecord } from '../src/energyHistory.js';
+import { vendorDigestLine, latestVendorDay, computeLocalPackRte, type VendorDayRecord } from '../src/energyHistory.js';
 
 function digestRec(over: Partial<VendorDayRecord> = {}): VendorDayRecord {
   return {
@@ -206,4 +206,53 @@ test('vendorDigestLine — names the date when the newest stored day is older th
 
 test('vendorDigestLine — with no todayYmd it names the date rather than guessing', () => {
   assert.match(vendorDigestLine(digestRec({ day: '2026-08-19' }))!, /^Per the EcoFlow ledger \(2026-08-19\):/);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.103.0 — the pack-DC RTE excludes days whose pool membership moved.
+ *
+ * After the 2026-08-20 swap this accumulated 77,218 Wh in against 92,676 Wh out
+ * — a round-trip "efficiency" of 1.20, physically impossible, because the two
+ * legs of the same day were measured over DIFFERENT sets of batteries. Nothing
+ * was published (packDcRte stays null below MIN_RTE_SAMPLE_DAYS), but every
+ * accumulating sample was poison.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+function rteDayFor(day: string, chg: number, dsg: number): VendorDayRecord {
+  return {
+    day, fetchedAtMs: 1, homeWh: 1, gridWh: 1, solarWh: 1, generatorWh: null,
+    batteryInWh: 1, batteryOutWh: 1, circuits: [],
+    local: { panelLoadWh: 1, pvWh: 1, batteryChargeWh: chg, batteryDischargeWh: dsg },
+    driftHomePct: null, driftSolarPct: null,
+  } as VendorDayRecord;
+}
+
+test('pack RTE — a membership-unstable day is EXCLUDED, not averaged in', () => {
+  const days = [
+    rteDayFor('2026-08-18', 10_000, 8_600),
+    rteDayFor('2026-08-19', 10_000, 8_600),
+    rteDayFor('2026-08-20', 10_000, 25_000),   // the swap day: impossible ratio
+  ];
+  const stable = (d: string) => d !== '2026-08-20';
+  const r = computeLocalPackRte(days, stable);
+  assert.equal(r.sampleDays, 2, 'the swap day is dropped');
+  assert.equal(r.excludedDays, 1, 'and the exclusion is reported, not silent');
+  assert.equal(r.chargeWh, 20_000);
+  assert.equal(r.dischargeWh, 17_200, 'the impossible discharge leg never enters the sum');
+});
+
+test('pack RTE — with no membership gate the old behaviour is preserved', () => {
+  const days = [rteDayFor('2026-08-18', 10_000, 8_600), rteDayFor('2026-08-20', 10_000, 25_000)];
+  const r = computeLocalPackRte(days);
+  assert.equal(r.sampleDays, 2, 'callers that pass no gate are unchanged');
+  assert.equal(r.excludedDays, 0);
+});
+
+test('pack RTE — an UNKNOWN-membership day is refused too (never assumed clean)', () => {
+  const days = [rteDayFor('2026-07-01', 10_000, 8_600), rteDayFor('2026-08-19', 10_000, 8_600)];
+  // A day predating the membership record returns false from the gate.
+  const gate = (d: string) => d >= '2026-08-01';
+  const r = computeLocalPackRte(days, gate);
+  assert.equal(r.sampleDays, 1);
+  assert.equal(r.excludedDays, 1, 'unrecorded history is not evidence of stability');
 });
