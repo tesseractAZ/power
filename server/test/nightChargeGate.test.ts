@@ -349,3 +349,32 @@ test('v1.104.0 — a MIXED ledger judges only the admissible nights', () => {
   assert.equal(g.metrics.underBuyRate, 0, 'the 15 admissible nights all over-bought');
   assert.ok(!g.blocking.some((b) => /under-buy/.test(b)), 'no under-buy complaint from clean evidence');
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.105.0 (algo v3) — the under-buy classifier carries a kWh deadband.
+ *
+ * `e < 0` was untoleranced: a −0.01 kWh rounding residual scored as a
+ * life-safety miss identical to a −31.02 kWh one.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('v1.105.0 — a rounding-scale negative residual is NOT a safety miss', () => {
+  const rows = actuatedLedger(25, (r) => { r.buy_err_kwh = -0.01; });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.underBuyRate, 0, '-0.01 kWh is noise, not an under-buy');
+  assert.ok(!g.blocking.some((b) => /under-buy rate \d+% exceeds/.test(b)));
+});
+
+test('v1.105.0 — a physically meaningful shortfall still counts', () => {
+  const rows = actuatedLedger(25, (r) => { r.buy_err_kwh = -3.0; });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.underBuyRate, 1, '3 kWh short is a real miss');
+  assert.equal(g.state, 'BLOCKED');
+});
+
+test('v1.105.0 — algo v2 rows are excluded; the evidence clock resets', () => {
+  // Every row produced under the old hybrid buy_err definition.
+  const rows = actuatedLedger(25, (r) => { r.algo_version = 2; r.buy_err_kwh = -12; });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.scoredDays, 0, 'v2 values are not comparable with v3 and must not be judged');
+  assert.notEqual(g.state, 'READY');
+});

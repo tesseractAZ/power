@@ -78,8 +78,18 @@ function maxYmd(a: string, b: string): string { return a >= b ? a : b; }
  *  rows are excluded and the evidence clock resets. v2: the v1.49.0 sizing
  *  correction (charge cap is CHARGE-ONLY; the home bypasses to grid during
  *  charge hours) — every v1 row's plan, trajectory, and strike verdict was
- *  produced by the superseded physics. */
-export const CURRENT_ALGO_VERSION = 2;
+ *  produced by the superseded physics.
+ *
+ *  v3 (v1.105.0): `buy_err_kwh` REDEFINED onto the planner-sizing basis. Every
+ *  v2 row's value was `planBuy − (delivered + troughDeficit)` — a hybrid that
+ *  answered neither "did the planner size right?" nor "did delivery meet the
+ *  need?", counted the actuator's by-design over-delivery as under-buy, and
+ *  anchored on a trough that is really the reverted reserve setpoint. Those
+ *  values are not comparable with v3's, so they are excluded and the evidence
+ *  clock resets to zero. This is the cost of the correction and it is
+ *  deliberate: 16 nights of an unusable metric are worth less than a clean
+ *  start on a sound one. */
+export const CURRENT_ALGO_VERSION = 3;
 
 /** Graduation floor: scored ACTUATED nights (a bounded reserve write applied,
  *  delivery measured) before AUTO is considerable. ~3 weeks at one per night. */
@@ -92,6 +102,10 @@ const MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5;
 /** Under-buy is a SAFETY miss (§5.1 HARD, asymmetric): recommended kWh must be
  *  ≥ realized need on ≥90% of actuated nights → under-buy fraction ≤ 0.10. */
 const MAX_UNDERBUY_RATE = 0.10;
+
+/** v1.105.0 — kWh deadband on the under-buy classifier. Below this a negative
+ *  residual is rounding noise, not a safety miss. */
+const UNDERBUY_DEADBAND_KWH = 0.5;
 
 /** Signed delivery bias must sit in a SLIGHT over-buy band (§5.1): never net
  *  under, never a gross over-buy. kWh at the meter. */
@@ -286,7 +300,12 @@ export function computeNightChargeReadiness(
   // asserting bad evidence. No write behaviour changes.
   const underBuyPool = actuated.filter((r) => !truthy(r.cushion_shortfall));
   const buyErrs = underBuyPool.map((r) => asNum(r.buy_err_kwh)).filter((v): v is number => v != null);
-  const underBuyCount = buyErrs.filter((e) => e < 0).length;
+  // v1.105.0 — DEADBAND. `e < 0` was untoleranced, so a −0.01 kWh rounding
+  // residual scored as a life-safety miss identical to a −31 kWh one. A safety
+  // metric needs a threshold below which the miss is not physically meaningful:
+  // UNDERBUY_DEADBAND_KWH is well under any real margin but comfortably above
+  // the round2() noise floor of the inputs.
+  const underBuyCount = buyErrs.filter((e) => e < -UNDERBUY_DEADBAND_KWH).length;
   const underBuyRate = buyErrs.length > 0 ? underBuyCount / buyErrs.length : null;
   const buyBiasKwh = mean(buyErrs);
   /** v1.104.0 — actuated nights excluded from the under-buy judgement as disclosed shortfalls. */
