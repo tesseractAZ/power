@@ -162,6 +162,7 @@ import {
   medianFilter3,
   actuatedDeliveredKwh,
   plannerSizingNeedBuyKwh,
+  calibratedLoadBandFactor,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -2931,7 +2932,26 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   // safe (honest-shortfall) direction. Set ≤0 to disable contention modelling.
   const gridInputCapKwRaw = Number(process.env.ARB_GRID_INPUT_CAP_KW ?? 17);
   const gridInputCapKw = Number.isFinite(gridInputCapKwRaw) && gridInputCapKwRaw > 0 ? gridInputCapKwRaw : null;
-  const loadP90Factor = Number(process.env.ARB_LOAD_P90_FACTOR ?? 1.15);
+  // v1.106.0 — the load band is calibrated from realized error, floored at the
+  // historical hand-set 1.15 so it can only widen. Only loadP90W feeds sizing,
+  // and a wider P90 buys more — the safe direction for an asymmetric under-buy
+  // miss. `basis` is surfaced on the plan so the number is auditable.
+  const loadBandFloor = Number(process.env.ARB_LOAD_P90_FACTOR ?? 1.15);
+  const loadBandCal = calibratedLoadBandFactor(
+    (() => {
+      try { return recorder.readNightLedger(120).map((r: any) => r.load_err_frac as number | null); }
+      catch { return []; }
+    })(),
+    { floor: loadBandFloor, cap: Number(process.env.ARB_LOAD_P90_CAP ?? 2.0) },
+  );
+  const loadP90Factor = loadBandCal.factor;
+  if (loadBandCal.basis === 'measured' && loadBandCal.factor > loadBandFloor) {
+    app.log.info(
+      `night-charge: load band calibrated to ±${((loadBandCal.factor - 1) * 100).toFixed(0)}% `
+      + `from ${loadBandCal.samples} realized night(s) (was the hand-set ±${((loadBandFloor - 1) * 100).toFixed(0)}%; `
+      + `only widens, and only loadP90 feeds sizing)`,
+    );
+  }
   const evMaxLoadW = Number(process.env.EV_MAX_LOAD_W ?? 11520);
   const minBuyKwh = Number(process.env.ARB_MIN_BUY_KWH ?? 1);
 
