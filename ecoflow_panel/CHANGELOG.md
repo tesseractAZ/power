@@ -1,3 +1,44 @@
+## v1.104.0 — a disclosed cushion shortfall is not under-buy evidence
+
+The write-readiness gate has been hard-BLOCKED on "under-buy rate 56% exceeds the
+10% cap". Investigation showed the forecast is the wrong lever entirely: an
+honest load correction LOWERS the planned buy and makes the residual MORE
+negative, and roughly half the negative mass is a fixed trough-deficit term that
+no forecast change can touch.
+
+The immediate defect is narrower and internal. Two rules fifteen lines apart in
+`nightChargeGate.ts` judged the same night two different ways:
+
+- the strike rule exempts it explicitly — `if (truthy(r.cushion_shortfall))
+  return false; // disclosed — physics, not fault`
+- the under-buy rule had no such exemption
+
+So a night whose plan had ALREADY declared it could not meet the cushion (charge
+and pool caps prevent it — the rationale says so in as many words) was then
+scored as a life-safety miss for failing to deliver exactly that. On the live
+ledger **all four** actuated+scored nights carry `cushion_shortfall = 1`.
+
+The under-buy pool now applies the same exemption, and `underBuyExcluded` is
+surfaced so a suddenly-uncomputable rate is explainable rather than mysterious.
+
+**This does not open the gate.** With the pool empty the rate becomes null, which
+the graduation criteria already treat as blocking — so the state falls from a
+FALSE hard BLOCKED to LEARNING. Fail-closed, and honest about having no evidence
+rather than asserting bad evidence. No write behaviour changes.
+
+### Not fixed here, deliberately
+
+`buy_err_kwh` itself is a hybrid residual: it adds the actuator's own delivered
+energy back into "realized need", so actuator over-delivery is arithmetically
+indistinguishable from planner under-sizing, and it anchors its counterfactual on
+a trough that is really the reverted reserve setpoint. Redefining it means
+choosing which question it answers ("did the planner size right?" vs "did the
+night end safe?") and bumping `CURRENT_ALGO_VERSION`, which invalidates every
+existing row and resets the evidence clock to zero. That is an owner decision,
+not a bug fix.
+
+Tests 2065 pass.
+
 ## v1.103.0 — record WHEN pool membership changed, and stop poisoning the pack RTE
 
 Two engines resolved SHP2 pool membership ONCE from the live snapshot and then
