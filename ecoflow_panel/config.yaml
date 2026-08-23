@@ -1,5 +1,5 @@
 name: Power
-version: "1.106.0"
+version: "1.107.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -41,6 +41,11 @@ panel_title: Power
 panel_admin: false
 map:
   - data:rw
+  # v1.107.0 — publish a consistent SQLite snapshot to /share so an
+  # external viewer (sqlite-web et al) can open it. /data is private to
+  # this add-on and no other add-on can ever read it; /share is the
+  # cross-add-on interchange point. We only ever WRITE the snapshot here.
+  - share:rw
 # v0.9.20 — request access to Home Assistant's Core REST API so the
 # add-on can call media_player.play_media (HomePod/Sonos broadcasts),
 # enumerate media_player entities for the SHIPWIDE INTERCOM discovery
