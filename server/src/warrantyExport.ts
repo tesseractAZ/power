@@ -45,8 +45,10 @@ const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 /** Pure: build the bundle from a device row + the cleared-alert records. */
 export function buildWarrantyBundle(
   device: { sn: string; deviceName?: string; projection?: any },
-  clearedRecords: Array<{ alert?: { id?: string; severity?: string; title?: string; fault?: string; sourceSn?: string }; raisedAt?: number; clearedAt?: number; durationMs?: number }>,
+  clearedRecords: Array<{ alert?: { id?: string; severity?: string; title?: string; fault?: string; sourceSn?: string; sourcePackSn?: string }; raisedAt?: number; clearedAt?: number; durationMs?: number }>,
   nowIso: string,
+  /** v1.102.0 — narrow the history to ONE pack serial, wherever it has lived. */
+  focusPackSn?: string,
 ): WarrantyBundle {
   const p = device.projection ?? {};
   const packs: WarrantyPackRow[] = (Array.isArray(p.packs) ? p.packs : []).map((pk: any, i: number) => {
@@ -67,9 +69,23 @@ export function buildWarrantyBundle(
       cellVoltagesMv: cells,
     };
   });
+  // v1.102.0 — follow the PACK, not just the chassis.
+  //
+  // History was admitted by chassis serial alone, so a pack that moves between
+  // chassis has its record split at the swap: the receiving chassis shows a
+  // near-empty history while the month of evidence stays filed under the old
+  // one. For an RMA that is the wrong way round — the claim is about the pack.
+  // Records now also match on the pack serials this device currently holds, and
+  // a `?packSn=` query narrows the bundle to ONE pack's history wherever it has
+  // lived.
+  const heldPackSns = new Set(packs.map((p) => p.packSn).filter((x): x is string => !!x));
+  const wantPackSn = focusPackSn ?? null;
   const history = clearedRecords
     .filter((r) => {
       const id = r.alert?.id ?? '';
+      const recPack = r.alert?.sourcePackSn;
+      if (wantPackSn != null) return recPack === wantPackSn;
+      if (recPack != null && heldPackSns.has(recPack)) return true;
       return id.includes(device.sn) || r.alert?.sourceSn === device.sn;
     })
     .sort((a, b) => (b.clearedAt ?? 0) - (a.clearedAt ?? 0))

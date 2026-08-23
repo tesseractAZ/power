@@ -1826,12 +1826,76 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
 
     const now = Date.now();
     const nowDate = new Date(now);
+    /**
+     * Close out a tracked alert: cleared-log record (debounce-gated), digest
+     * visibility, telemetry, and removal from `tracked`.
+     *
+     * v1.102.0 — extracted so the pack-residency check below can retire an
+     * alert through the EXACT same path a natural clear uses. Sharing the path
+     * is the point: a residency change must produce an honest closed record,
+     * not a silently-dropped entry.
+     */
+    const retireTrackedAlert = (id: string, t: TrackedAlert, nowMs: number): void => {
+      const duration = nowMs - t.firstSeen;
+      if (duration >= DEBOUNCE_MS) {
+        // v1.14.0 — persist the alert at its PEAK severity over its life, so a
+        // dual-severity alert that de-escalated before clearing keeps its
+        // critical-history record (and eviction protection).
+        const peak = t.peakSeverity != null ? moreSevere(t.peakSeverity, t.alert.severity) : t.alert.severity;
+        const recordedAlert = peak !== t.alert.severity ? { ...t.alert, severity: peak } : t.alert;
+        clearedLog.unshift({ alert: recordedAlert, raisedAt: t.firstSeen, clearedAt: nowMs, durationMs: duration });
+        if (clearedLog.length > CLEARED_LOG_MAX) evictOldestCleared(); // v1.12.0 (F19) — noise-first eviction
+        persistClearedLog(); // v0.85.0 — survive restarts (the daily Pi power cut)
+      }
+      // v0.9.59 — records shortClear / longActive events into the family rollup
+      // and appends them to the persisted telemetry log.
+      // v1.75.0 — a digest-held alert that self-resolves must stay VISIBLE in the
+      // morning digest (with its true duration), not silently vanish.
+      if (t.queued) {
+        overnightResolved.set(id, { raisedAt: t.firstSeen, clearedAt: nowMs });
+        persistDigestState(); // v1.86.0
+      }
+      recordClear(t.alert, duration, nowMs);
+      tracked.delete(id);
+    };
+
+    const packResidencyChanges: Array<{ id: string; from: string; to: string }> = [];
     const currentIds = new Set(alerts.map((a) => a.id));
+
+    // v1.102.0 — PACK-RESIDENCY CHECK. Alert ids are keyed (chassis, slot), so
+    // when a pack is physically moved the same id silently continues onto
+    // different hardware: on 2026-08-20 `vdiff-crit-<sn>-1` carried straight
+    // through a swap with no resolve and no re-raise, its detail changing from
+    // "Deviant cell #31 (-105 mV)" to "cell #32 (-84 mV)" mid-episode. One
+    // cleared-alert record then described two different batteries — which is
+    // exactly the evidence trail an RMA depends on.
+    //
+    // The BMS reports packSn on every read, so a change under a live id means
+    // the subject was replaced. Retire the tracked entry through the SAME path a
+    // real clear uses (so the old episode closes with an honest duration and
+    // lands in the cleared log) and let the rising-edge loop below open a fresh
+    // one for the new hardware.
+    for (const a of alerts) {
+      const t = tracked.get(a.id);
+      if (t == null) continue;
+      const before = t.alert.sourcePackSn;
+      const after = a.sourcePackSn;
+      if (before != null && after != null && before !== after) {
+        packResidencyChanges.push({ id: a.id, from: before, to: after });
+        retireTrackedAlert(a.id, t, now);
+      }
+    }
     // v1.x (r25) — the restart-persistent onset sidecar is synced AFTER the
     // falling-edge/dwell loop below (see the syncAlertOnsets call there) so it
     // keys on the POST-dwell surviving roster (`tracked`), not the raw per-tick
     // `currentIds`: an alert held through a resolve-dwell (briefly absent, then
     // back) keeps its true onset instead of being pruned and re-stamped.
+
+    if (packResidencyChanges.length > 0) {
+      for (const c of packResidencyChanges) {
+        log(`alerts: ${c.id} — pack replaced (${c.from} -> ${c.to}); closing that episode and opening a new one so one record never describes two batteries`);
+      }
+    }
 
     // Rising edges + debounce
     for (const a of alerts) {
@@ -2179,27 +2243,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // MOST transient outcome and is exactly what shortClear should capture.
       // The visible-history push stays gated by duration (a 5s blip isn't worth
       // surfacing in the cleared-alert UI), but telemetry counts the clear.
-      if (duration >= DEBOUNCE_MS) {
-        // v1.14.0 — persist the alert at its PEAK severity over its life, so a
-        // dual-severity alert that de-escalated before clearing keeps its
-        // critical-history record (and eviction protection).
-        const peak = t.peakSeverity != null ? moreSevere(t.peakSeverity, t.alert.severity) : t.alert.severity;
-        const recordedAlert = peak !== t.alert.severity ? { ...t.alert, severity: peak } : t.alert;
-        clearedLog.unshift({ alert: recordedAlert, raisedAt: t.firstSeen, clearedAt: now, durationMs: duration });
-        if (clearedLog.length > CLEARED_LOG_MAX) evictOldestCleared(); // v1.12.0 (F19) — noise-first eviction
-        persistClearedLog(); // v0.85.0 — survive restarts (the daily Pi power cut)
-      }
-      // v0.9.59 — records shortClear / longActive events into the family rollup
-      // and appends them to the persisted telemetry log.
-      // v0.13.2 — moved out of the debounce-gated block (see above).
-      // v1.75.0 — a digest-held alert that self-resolves must stay VISIBLE in the
-      // morning digest (with its true duration), not silently vanish.
-      if (t.queued) {
-        overnightResolved.set(id, { raisedAt: t.firstSeen, clearedAt: now });
-        persistDigestState(); // v1.86.0
-      }
-      recordClear(t.alert, duration, now);
-      tracked.delete(id);
+      retireTrackedAlert(id, t, now);
       // (v0.15.21's notified-state forget moved ABOVE the resolve attempt in
       // v0.80.0 — see the comment there.)
     }
