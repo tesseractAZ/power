@@ -1227,6 +1227,56 @@ export function actuatedRealizedNeedBuyKwh(opts: {
   return round2(Math.max(0, opts.targetFloorKwh - noBuyTroughKwh) / opts.legEff);
 }
 
+/**
+ * v1.105.0 (algo v3) — the realized need on the PLANNER-SIZING basis.
+ *
+ * `buy_err_kwh` now answers exactly one question: **did the planner size the
+ * buy correctly?** The previous definition answered neither of the two
+ * available questions. It computed `planBuy − (delivered + troughDeficit)`,
+ * which is the DIFFERENCE of "did the planner size right?" and "did delivery
+ * meet the need?", so:
+ *
+ *  - it added the ACTUATOR'S OWN delivered energy back into "realized need",
+ *    making actuator over-delivery arithmetically indistinguishable from
+ *    planner under-sizing. The actuator over-delivers BY DESIGN — the device is
+ *    handed a setpoint derived from the requirement, deliberately not from the
+ *    derated deliverable (see the header at the buyKwh/setpointSocPct split) —
+ *    so this term was systematically negative;
+ *  - and it anchored its counterfactual on a trough read 16 h past window
+ *    close, by which time the pack is resting on the REVERTED reserve setpoint.
+ *    That trough is a control variable, not a free energy variable: injecting
+ *    38 kWh overnight does not raise where the pack bottoms out, it delays it.
+ *    At a 10 % trough this contributed a fixed −14.9 kWh regardless of anything
+ *    the planner did.
+ *
+ * Between them those two terms produced a 56 % "under-buy rate" that hard-blocked
+ * promotion and that no forecast improvement could ever move — an honest load
+ * correction LOWERS the planned buy and makes the residual MORE negative.
+ *
+ * THE PLANNER-SIZING BASIS. A planner sizes the buy from its forecast. Its
+ * sizing error is therefore its FORECAST error, expressed in kWh:
+ *
+ *   netMissKwh = (forecastPv − actualPv) + (actualLoad − forecastLoad)
+ *   realizedNeed = planBuy + netMissKwh / legEff
+ *   buy_err = planBuy − realizedNeed = −netMissKwh / legEff
+ *
+ * Less PV than forecast, or more load, means the true requirement exceeded the
+ * plan — an under-buy, negative, preserving the existing sign convention that
+ * `buy_err < 0` is the asymmetric safety miss. It contains no delivered term,
+ * no trough, and no reverted setpoint: it measures the planner and nothing else.
+ */
+export function plannerSizingNeedBuyKwh(opts: {
+  planBuyKwh: number;
+  forecastPvKwh: number;
+  actualPvKwh: number;
+  forecastLoadKwh: number;
+  actualLoadKwh: number;
+  legEff: number;
+}): number {
+  const netMissKwh = (opts.forecastPvKwh - opts.actualPvKwh) + (opts.actualLoadKwh - opts.forecastLoadKwh);
+  return round2(opts.planBuyKwh + netMissKwh / opts.legEff);
+}
+
 // --- scoreNightOutcome: the §3.1 score columns from a plan + measured actuals ---
 
 /** Measured next-evening actuals for scoring last night's plan (design §3.1). */

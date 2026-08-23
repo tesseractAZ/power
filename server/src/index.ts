@@ -161,7 +161,7 @@ import {
   nightWindowBounds,
   medianFilter3,
   actuatedDeliveredKwh,
-  actuatedRealizedNeedBuyKwh,
+  plannerSizingNeedBuyKwh,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -3405,41 +3405,46 @@ function scoreNightRow(
     deliveredKwh = actuatedDeliveredKwh(windowImportKwh, windowLoadKwh);
   }
 
-  // Realized-need buy = the meter energy that WOULD have held floor+cushion.
-  // Actuated nights measure it from the delivered-charge-subtracted trough;
-  // advisory nights only from the CLEAN no-buy trough. Else null → buy_err
-  // null → scored=0.
+  // v1.105.0 (algo v3) — realized need on the PLANNER-SIZING basis.
+  //
+  // `buy_err_kwh` now answers exactly ONE question: did the planner size the buy
+  // correctly? A planner sizes from its forecast, so its sizing error IS its
+  // forecast error in kWh. The previous definition mixed in the actuator's own
+  // delivered energy (over-delivery is BY DESIGN and was scored as under-buy)
+  // and anchored on a 16h-post-window trough that is really the reverted reserve
+  // setpoint — together a systematic −62 kWh across four nights that produced a
+  // 56% "under-buy rate" no forecast improvement could ever move.
+  //
+  // The same basis is used for actuated and advisory nights, deliberately: one
+  // column must mean one thing. Delivery quality is a SEPARATE question and is
+  // not what this metric is for.
   let realizedNeedBuyKwh: number | null = null;
   let scored = 0;
   let scoreNotes: string;
+  const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
+  const fcPv = y.pv_p50_kwh ?? null;
+  const fcLoad = y.load_p50_kwh ?? null;
   if (!hadBasis) {
     scoreNotes = 'not scored — plan basis was incomplete (no trajectory to score).';
   } else if (!covOk) {
     scoreNotes = `not scored — overnight grid_home_w coverage ${(winCoverage * 100).toFixed(0)}% < 90% (MNAR-excluded).`;
   } else if (actualMinSocPct == null) {
     scoreNotes = 'not scored — no backup_pct telemetry over the scored span.';
-  } else if (wasActuated) {
-    if (deliveredKwh == null) {
-      scoreNotes = 'not scored — actuated night without a measurable delivered-charge attribution (window panel_load unmeasured).';
-    } else {
-      const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
-      const targetFloorKwh = ((y.reserve_floor_pct + y.cushion_pct) / 100) * y.pool_full_kwh;
-      const actualMinPackKwh = (actualMinSocPct / 100) * y.pool_full_kwh;
-      realizedNeedBuyKwh = actuatedRealizedNeedBuyKwh({
-        targetFloorKwh, actualMinPackKwh, deliveredMeterKwh: deliveredKwh, legEff,
-      });
-      scored = 1;
-      scoreNotes = `scored — actuated night; delivered ~${deliveredKwh} kWh (window import minus house pass-through); realized-need from the delivered-subtracted trough.`;
-    }
-  } else if (!cleanBaseline) {
-    scoreNotes = `not scored — baseline propped by ${windowImportKwh} kWh overnight grid import; realized-need not defensible without an actuated counterfactual (§5).`;
+  } else if (actualPvKwh == null || actualLoadKwh == null || fcPv == null || fcLoad == null) {
+    scoreNotes = 'not scored — planner-sizing basis needs both the P50 forecast and the realized PV/load totals (§3.1).';
   } else {
-    const legEff = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
-    const targetFloorKwh = ((y.reserve_floor_pct + y.cushion_pct) / 100) * y.pool_full_kwh;
-    const actualMinPackKwh = (actualMinSocPct / 100) * y.pool_full_kwh;
-    realizedNeedBuyKwh = round2(Math.max(0, targetFloorKwh - actualMinPackKwh) / legEff);
+    realizedNeedBuyKwh = plannerSizingNeedBuyKwh({
+      planBuyKwh: y.buy_kwh ?? 0,
+      forecastPvKwh: fcPv, actualPvKwh,
+      forecastLoadKwh: fcLoad, actualLoadKwh,
+      legEff,
+    });
     scored = 1;
-    scoreNotes = 'scored — clean islanded baseline; realized-need from measured no-buy trough.';
+    const missKwh = round2((fcPv - actualPvKwh) + (actualLoadKwh - fcLoad));
+    scoreNotes =
+      `scored — planner-sizing basis (algo v3): net forecast miss ${missKwh} kWh `
+      + `(PV ${fcPv}→${actualPvKwh}, load ${fcLoad}→${actualLoadKwh})`
+      + `${wasActuated ? `; delivered ~${deliveredKwh ?? '?'} kWh, deliberately NOT part of this metric` : '; advisory night'}.`;
   }
 
   // Reconstruct just the plan fields the scorer reads.
