@@ -266,10 +266,31 @@ export function computeNightChargeReadiness(
     .sort((a, b) => String(a.plan_date).localeCompare(String(b.plan_date)));
   const actuatedNights = actuated.length;
 
-  const buyErrs = actuated.map((r) => asNum(r.buy_err_kwh)).filter((v): v is number => v != null);
+  // v1.104.0 — a night whose plan DISCLOSED it could not meet the cushion is not
+  // evidence that the engine under-bought. The strike rule fifteen lines below
+  // already says exactly this — `if (truthy(r.cushion_shortfall)) return false;
+  // // disclosed — physics, not fault` — but the under-buy rule had no such
+  // exemption, so one and the same night was "physics, not fault" for strikes
+  // and "a life-safety miss" for under-buy.
+  //
+  // On the live ledger all four actuated+scored nights carry
+  // cushion_shortfall = 1: the planner said up front that charge/pool caps
+  // prevented meeting the cushion, and was then scored down for not delivering
+  // what it had explicitly declared undeliverable. That produced the 56%
+  // under-buy rate blocking promotion.
+  //
+  // This does NOT open the gate. With the pool empty `underBuyRate` becomes
+  // null, which the graduation criteria below treat as blocking ("under-buy
+  // rate uncomputable"), so the state falls from a FALSE hard BLOCKED to
+  // LEARNING — fail-closed, and honest about having no evidence rather than
+  // asserting bad evidence. No write behaviour changes.
+  const underBuyPool = actuated.filter((r) => !truthy(r.cushion_shortfall));
+  const buyErrs = underBuyPool.map((r) => asNum(r.buy_err_kwh)).filter((v): v is number => v != null);
   const underBuyCount = buyErrs.filter((e) => e < 0).length;
   const underBuyRate = buyErrs.length > 0 ? underBuyCount / buyErrs.length : null;
   const buyBiasKwh = mean(buyErrs);
+  /** v1.104.0 — actuated nights excluded from the under-buy judgement as disclosed shortfalls. */
+  const underBuyExcluded = actuated.length - underBuyPool.length;
 
   // ── Engine-fault strikes (v2 §5.1). A strike requires the plan to have
   // CLAIMED hold (`cushion_shortfall` falsy — NULL counts as claimed,
@@ -309,6 +330,7 @@ export function computeNightChargeReadiness(
     strikeFreeStreak,
     strikesCleared: strikesCleared ? 1 : 0,
     underBuyRate: underBuyRate != null ? round(underBuyRate) : null,
+    underBuyExcluded, // v1.104.0 — actuated nights dropped as disclosed cushion shortfalls
     buyBiasKwh: buyBiasKwh != null ? round(buyBiasKwh) : null,
     pvMae: pvMae != null ? round(pvMae) : null,
     pvBias: pvBias != null ? round(pvBias) : null,
@@ -352,7 +374,11 @@ export function computeNightChargeReadiness(
     blocking.push(`only ${actuatedNights} scored actuated night(s); need ≥ ${MIN_ACTUATED_NIGHTS}.`);
   }
   if (underBuyRate == null) {
-    blocking.push('under-buy rate uncomputable (no actuated buy errors yet).');
+    blocking.push(
+      underBuyExcluded > 0
+        ? `under-buy rate uncomputable — all ${underBuyExcluded} actuated night(s) disclosed a cushion shortfall, so none is evidence about sizing (§5.1).`
+        : 'under-buy rate uncomputable (no actuated buy errors yet).',
+    );
   } else if (underBuyRate > MAX_UNDERBUY_RATE) {
     blocking.push(`under-buy rate ${(underBuyRate * 100).toFixed(0)}% exceeds ${(MAX_UNDERBUY_RATE * 100).toFixed(0)}%.`);
   }

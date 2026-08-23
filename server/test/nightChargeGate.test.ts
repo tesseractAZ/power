@@ -286,3 +286,66 @@ test('latest-readiness holder get/set round-trips', () => {
   setLatestReadiness(r);
   assert.equal(getLatestReadiness(), r);
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * v1.104.0 — a DISCLOSED cushion shortfall is not under-buy evidence.
+ *
+ * Two rules fifteen lines apart judged the same night two different ways. The
+ * strike rule exempts it explicitly — `if (truthy(r.cushion_shortfall)) return
+ * false; // disclosed — physics, not fault` — while the under-buy rule had no
+ * such exemption, so a night the planner had ALREADY declared undeliverable
+ * (charge/pool caps prevent meeting the cushion) was scored as a life-safety
+ * miss for failing to deliver it.
+ *
+ * On the live ledger all four actuated+scored nights carried
+ * cushion_shortfall = 1, producing the 56% under-buy rate that hard-blocked
+ * promotion. Note this must FAIL CLOSED: removing bad evidence leaves NO
+ * evidence, which is LEARNING, not READY.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('v1.104.0 — disclosed-shortfall nights are excluded from the under-buy judgement', () => {
+  // Every actuated night both under-bought AND disclosed it could not hold.
+  const rows = actuatedLedger(25, (r) => { r.buy_err_kwh = -12; r.cushion_shortfall = 1; });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.underBuyRate, null, 'no night in the pool ⇒ rate uncomputable');
+  assert.equal(g.metrics.underBuyExcluded, 25, 'and the exclusion is reported, not silent');
+  assert.ok(
+    !g.blocking.some((b) => /under-buy rate \d+% exceeds/.test(b)),
+    'must NOT hard-block on evidence it just decided was inadmissible',
+  );
+});
+
+test('v1.104.0 — removing bad evidence FAILS CLOSED: LEARNING, never READY', () => {
+  const rows = actuatedLedger(25, (r) => { r.buy_err_kwh = -12; r.cushion_shortfall = 1; });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.notEqual(g.state, 'READY', 'an empty pool is absence of evidence, not evidence of safety');
+  assert.equal(g.writeReady, false);
+  assert.ok(
+    g.blocking.some((b) => /uncomputable/.test(b) && /disclosed a cushion shortfall/.test(b)),
+    `the reason must name itself; got ${JSON.stringify(g.blocking)}`,
+  );
+});
+
+test('v1.104.0 — a night that did NOT disclose a shortfall still counts against under-buy', () => {
+  // The exemption must be narrow: an undisclosed under-buy is still a real miss.
+  const rows = actuatedLedger(25, (r, i) => {
+    r.cushion_shortfall = 0;
+    r.buy_err_kwh = i < 20 ? -12 : 0.5;   // 80% genuine under-buy
+  });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.underBuyExcluded, 0);
+  assert.equal(g.state, 'BLOCKED', 'genuine, undisclosed under-buy must still hard-block');
+  assert.ok(g.blocking.some((b) => /under-buy rate 80% exceeds/.test(b)));
+});
+
+test('v1.104.0 — a MIXED ledger judges only the admissible nights', () => {
+  // 10 disclosed shortfalls (all badly under), 15 clean nights (all fine).
+  const rows = actuatedLedger(25, (r, i) => {
+    if (i < 10) { r.cushion_shortfall = 1; r.buy_err_kwh = -30; }
+    else { r.cushion_shortfall = 0; r.buy_err_kwh = 0.5; }
+  });
+  const g = computeNightChargeReadiness(rows, NOW, { algoVersion: CURRENT_ALGO_VERSION });
+  assert.equal(g.metrics.underBuyExcluded, 10);
+  assert.equal(g.metrics.underBuyRate, 0, 'the 15 admissible nights all over-bought');
+  assert.ok(!g.blocking.some((b) => /under-buy/.test(b)), 'no under-buy complaint from clean evidence');
+});
