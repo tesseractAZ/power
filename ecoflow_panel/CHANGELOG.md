@@ -1,3 +1,61 @@
+## v1.105.0 — buy_err_kwh answers ONE question: did the planner size right?
+
+`buy_err_kwh` was `planBuy − (delivered + troughDeficit)` — the DIFFERENCE of the
+two questions available, answering neither:
+
+- it added the **actuator's own delivered energy** back into "realized need", so
+  over-delivery was arithmetically indistinguishable from planner under-sizing.
+  The actuator over-delivers BY DESIGN: the device is handed a setpoint derived
+  from the requirement, deliberately not from the derated deliverable, so it
+  charged 29-41 kWh against plans of 21-22 kWh.
+- it anchored its counterfactual on a trough read 16 h past window close, by
+  which time the pack rests on the **reverted reserve setpoint** — a control
+  variable, not a free energy variable. At a 10% trough that contributed a fixed
+  −14.9 kWh regardless of anything the planner did.
+
+Measured across four live nights: −62.13 kWh of residual, 52% actuator
+over-delivery and 48% trough deficit. The resulting 56% "under-buy rate"
+hard-blocked promotion and no forecast improvement could have moved it — an
+honest load correction LOWERS the planned buy and makes the residual MORE
+negative.
+
+### The planner-sizing basis
+
+A planner sizes the buy from its forecast, so its sizing error IS its forecast
+error in kWh:
+
+```
+netMissKwh   = (forecastPv − actualPv) + (actualLoad − forecastLoad)
+realizedNeed = planBuy + netMissKwh / legEff
+buy_err      = planBuy − realizedNeed = −netMissKwh / legEff
+```
+
+Less PV than forecast, or more load, means the true requirement exceeded the
+plan — negative, preserving the convention that `buy_err < 0` is the asymmetric
+safety miss. No delivered term, no trough, no reverted setpoint: it measures the
+planner and nothing else. A test asserts the signature contains no such
+parameter, so the contamination cannot return by accident.
+
+Actuated and advisory nights now use the SAME basis, deliberately: one column
+must mean one thing. **Delivery quality is a separate question and this metric
+is not for it.**
+
+### Also
+
+- **Under-buy deadband.** `e < 0` was untoleranced, so a −0.01 kWh rounding
+  residual scored as a life-safety miss identical to a −31 kWh one. Negative
+  residuals within `UNDERBUY_DEADBAND_KWH` (0.5) are noise, not misses.
+- **`CURRENT_ALGO_VERSION` 2 → 3.** Every v2 row's `buy_err_kwh` was produced by
+  the superseded definition and is not comparable, so all 16 are excluded and
+  the evidence clock resets to zero. That is the deliberate cost: 16 nights of
+  an unusable metric are worth less than a clean start on a sound one. Expect
+  LEARNING for ~3 weeks while `MIN_ACTUATED_NIGHTS = 21` refills.
+
+Not touched, on purpose: the actuator clamp and the setpoint/target split are the
+resilience design, not the defect. The defect was in the measurement.
+
+Tests 2075 pass.
+
 ## v1.104.0 — a disclosed cushion shortfall is not under-buy evidence
 
 The write-readiness gate has been hard-BLOCKED on "under-buy rate 56% exceeds the
