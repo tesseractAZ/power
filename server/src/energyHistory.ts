@@ -165,20 +165,34 @@ export interface LocalPackRte {
   /** discharge/charge over qualifying days; null until >= MIN_RTE_SAMPLE_DAYS. */
   packDcRte: number | null;
   basis: 'pack-dc';
+  /** v1.103.0 — days dropped because pool membership was unstable or unrecorded
+   *  for that day. Surfaced so a low sampleDays is explainable rather than
+   *  mysterious. */
+  excludedDays?: number;
 }
 
 export const RTE_MIN_DAY_CHARGE_WH = 2_000;
 
-export function computeLocalPackRte(days: ReadonlyArray<VendorDayRecord>): LocalPackRte {
-  let chargeWh = 0, dischargeWh = 0, sampleDays = 0;
+export function computeLocalPackRte(
+  days: ReadonlyArray<VendorDayRecord>,
+  /** v1.103.0 — days whose pool membership was not stable are excluded. */
+  membershipOk?: (day: string) => boolean,
+): LocalPackRte {
+  let chargeWh = 0, dischargeWh = 0, sampleDays = 0, excludedDays = 0;
   for (const d of days) {
     const c = d.local?.batteryChargeWh, x = d.local?.batteryDischargeWh;
     if (c == null || x == null) continue;
     if (c < RTE_MIN_DAY_CHARGE_WH) continue; // no meaningful charge = ratio noise
+    // v1.103.0 — a day whose pool membership CHANGED (or is unrecorded) measures
+    // its charge and discharge legs over DIFFERENT sets of batteries, so the
+    // ratio is meaningless. After the 2026-08-20 swap this accumulated 77,218 Wh
+    // in against 92,676 Wh out — a "round-trip efficiency" of 1.20, which is
+    // physically impossible and was quietly poisoning every future sample.
+    if (membershipOk != null && !membershipOk(d.day)) { excludedDays++; continue; }
     sampleDays++; chargeWh += c; dischargeWh += x;
   }
   return {
-    sampleDays, chargeWh, dischargeWh, basis: 'pack-dc',
+    sampleDays, chargeWh, dischargeWh, basis: 'pack-dc', excludedDays,
     packDcRte: sampleDays >= MIN_RTE_SAMPLE_DAYS && chargeWh > 0
       ? Math.round((dischargeWh / chargeWh) * 1000) / 1000
       : null,

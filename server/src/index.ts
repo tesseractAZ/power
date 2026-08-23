@@ -12,6 +12,7 @@ import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
 import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu } from './shp2Membership.js';
+import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
   renderReconnectReport, ARM_OFFLINE_MS as RECONNECT_ARM_MS, type DeviceObs as ReconnectDeviceObs,
@@ -664,6 +665,28 @@ app.get<{ Querystring: { sn?: string; ch?: string; pair?: string; days?: string 
 );
 
 /** v1.82.0 — the stored vendor energy ledger (see energyHistory.ts). */
+/**
+ * v1.103.0 — "was pool membership stable across this Phoenix day?" for the
+ * pack-DC RTE. A day that spans a reconfiguration measures its charge and
+ * discharge legs over different batteries, so its ratio is meaningless; a day
+ * predating the membership record is `unknown`, which we also refuse rather
+ * than assume clean.
+ */
+const MEMBERSHIP_HISTORY_PATH = resolve(process.cwd(), config.dbPath, '..', 'membership-history.json');
+
+function membershipStableOnDay(day: string): boolean {
+  try {
+    const h = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
+    const [y, m, d] = day.split('-').map(Number);
+    if (!y || !m || !d) return false;
+    // Phoenix is UTC-7 year-round (no DST), so the local day is [07:00Z, 07:00Z).
+    const startMs = Date.UTC(y, m - 1, d, 7, 0, 0);
+    return membershipVerdict(h, startMs, startMs + 86_400_000) === 'stable';
+  } catch {
+    return false;
+  }
+}
+
 app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, reply) => {
   const state = loadVendorEnergyState();
   if (req.query.day) {
@@ -675,7 +698,7 @@ app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, re
   // v1.85.0 — advisory empirical RTE alongside the record (never buy-sizing).
   const rte = computeEmpiricalRte(Object.values(state.days));
   // v1.89.0 — pack-DC round-trip ratio (B2; DC basis, upper bound on dispatch RTE).
-  const localPackRte = computeLocalPackRte(Object.values(state.days));
+  const localPackRte = computeLocalPackRte(Object.values(state.days), membershipStableOnDay);
   return { lastRunDay: state.lastRunDay, empiricalRte: rte, localPackRte, days: days.map((d) => state.days[d]) };
 });
 
@@ -4065,7 +4088,7 @@ async function runVendorEnergyJob(): Promise<void> {
     const all = loadVendorEnergyState();
     // v1.89.0 (B2) — the pack-DC round-trip ratio, an upper bound on dispatch
     // RTE (conversion losses excluded). Advisory; DISPATCH_RTE stays 0.86.
-    const packRte = computeLocalPackRte(Object.values(all.days));
+    const packRte = computeLocalPackRte(Object.values(all.days), membershipStableOnDay);
     if (packRte.packDcRte != null) {
       app.log.info(`energy-history: pack-DC round-trip ratio ${packRte.packDcRte} over ${packRte.sampleDays} day(s) (charge ${(packRte.chargeWh / 1000).toFixed(1)} kWh, discharge ${(packRte.dischargeWh / 1000).toFixed(1)} kWh) — DC basis: an UPPER BOUND on the 0.86 AC dispatch RTE, not a replacement.`);
     }

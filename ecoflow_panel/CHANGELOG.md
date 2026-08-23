@@ -1,3 +1,49 @@
+## v1.103.0 — record WHEN pool membership changed, and stop poisoning the pack RTE
+
+Two engines resolved SHP2 pool membership ONCE from the live snapshot and then
+applied it across a historical window. Neither could be fixed by reasoning
+harder about the current roster: the missing information was **when** membership
+changed, and nothing was recording it.
+
+### The pack-DC RTE was accumulating impossible samples
+
+`computeLocalPackRte` sums per-day charge and discharge from those totals. After
+the 2026-08-20 swap it reached **77,218 Wh in against 92,676 Wh out** — a
+round-trip ratio of **1.20**, physically impossible, because the two legs of the
+same day were measured over different sets of batteries. Nothing wrong was ever
+published (`packDcRte` stays null below `MIN_RTE_SAMPLE_DAYS`), but every
+accumulating sample was poison and the series would have gone live wrong.
+
+Days whose membership was not stable are now excluded, and the count is reported
+as `excludedDays` so a low `sampleDays` is explainable rather than mysterious.
+
+### New: `membershipHistory.ts`
+
+A small timestamped record of which DPUs were in the pool. Recorded on **every**
+rollup rather than only on a detected change — `recordMembership` is idempotent,
+and recording the STATE rather than the EVENT is what makes the first entry
+appear on a stable plant at all. That is the same trap that made v1.96.0 and
+v1.97.0's floor repair unreachable, so it is worth naming.
+
+`membershipVerdict(from, to)` returns `stable`, `changed`, or **`unknown`** —
+and `unknown` is load-bearing. A window predating the record is refused, not
+assumed clean. An empty fingerprint (the panel itself unreadable) is never
+recorded, because absence of evidence is not a membership change.
+
+### `computeTotals` now declares its basis
+
+`FleetEnergyTotals.membershipBasis` names the roster the rollup was computed
+against. The roster for a past window cannot be reconstructed — nothing recorded
+it before this release — so rather than pretend, the result says what it used and
+consumers that need a trustworthy per-window figure check the verdict.
+
+**Honest limit:** this records changes from the moment it ships. It cannot
+reconstruct history that was never observed, so windows before today report
+`unknown`. Same discipline as the warranty export, which will not invent pack
+provenance for records whose hardware identity was never captured.
+
+Tests 2061 pass.
+
 ## v1.102.0 — pack identity follows the hardware
 
 The last item from the 2026-08-20 defect cluster, and the root cause behind
