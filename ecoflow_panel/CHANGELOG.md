@@ -1,3 +1,40 @@
+## v1.102.0 — pack identity follows the hardware
+
+The last item from the 2026-08-20 defect cluster, and the root cause behind
+several symptoms patched individually since.
+
+Alert ids are keyed `(chassis, slot)`. That is stable and cheap right up until
+the thing in that slot is replaced — and then it is silently wrong. When packs
+were physically moved between chassis, `vdiff-crit-<sn>-1` carried straight
+through the swap with NO resolve and NO re-raise: its detail changed from
+"Deviant cell #31 (-105 mV)" to "cell #32 (-84 mV)" mid-episode, so ONE
+cleared-alert record described two different batteries. That record is the RMA
+evidence trail.
+
+The BMS reports `packSn` on every read. Three changes make identity follow it:
+
+- **`Alert.sourcePackSn`** — every pack-scoped alert now carries the physical
+  serial it is about, alongside the slot number it is keyed by.
+- **Pack-residency check** (`alertMonitor`) — when the serial under a live alert
+  id changes, that episode is retired through the SAME path a natural clear
+  uses, so it closes with an honest duration and lands in the cleared log, and
+  the rising-edge pass opens a fresh episode for the new hardware. The retire
+  logic was extracted into one helper precisely so the two paths cannot drift.
+- **Warranty export follows the pack** — history was admitted by chassis serial
+  alone, so a moved pack had its record split at the swap: the receiving chassis
+  showed three rows from that day while a month of evidence stayed filed under
+  the old one. Records now also match the pack serials a device currently holds,
+  and `GET /api/warranty-export?packSn=<SN>` narrows the bundle to ONE pack's
+  history wherever it has lived. Records predating this field still fall back to
+  the chassis match, so nothing is lost.
+
+Alert ids are deliberately UNCHANGED. Re-keying them would have forced a
+one-time resolve/re-raise across the whole fleet and broken the persisted
+notified-state dedup — a large blast radius to fix a narrow correctness problem.
+Carrying the serial gets the same guarantee with none of the churn.
+
+Tests 2051 pass; harnesses mutate-never-muted 6/6, mutate-resolve-evidence 10/10.
+
 ## v1.101.0 — the quiet half of the severity inversion
 
 v1.95.0 fixed the loud half: off-panel hardware stopped chiming. The quiet half

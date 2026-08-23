@@ -682,11 +682,13 @@ app.get<{ Querystring: { day?: string } }>('/api/energy-history', async (req, re
 /** v1.90.0 (B3) — the warranty evidence bundle: live per-pack + per-cell data
  *  plus this serial's persisted alert history, as paste-ready markdown
  *  (?format=csv for the per-cell grid). READ-ONLY. */
-app.get<{ Querystring: { sn?: string; format?: string } }>('/api/warranty-export', async (req, reply) => {
+app.get<{ Querystring: { sn?: string; format?: string; packSn?: string } }>('/api/warranty-export', async (req, reply) => {
   const sn = req.query.sn ?? 'Y711FAB59J234000';
   const d: any = (store.get().devices as any)[sn];
   if (!d?.projection) { reply.code(404); return { error: `no projection for ${sn}` }; }
-  const bundle = buildWarrantyBundle(d, loadClearedRecords() as any, new Date().toISOString());
+  // v1.102.0 — `?packSn=` follows ONE pack's history across every chassis it has
+  // lived in; omitted, the bundle covers this chassis and the packs it holds now.
+  const bundle = buildWarrantyBundle(d, loadClearedRecords() as any, new Date().toISOString(), req.query.packSn);
   if (req.query.format === 'csv') {
     reply.type('text/csv').header('Content-Disposition', `attachment; filename="warranty-${sn}-cells.csv"`);
     return renderWarrantyCsv(bundle);

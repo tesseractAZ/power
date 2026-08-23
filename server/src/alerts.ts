@@ -236,6 +236,18 @@ export interface Alert {
    */
   sourceSn?: string;
   /**
+   * v1.102.0 — the PHYSICAL pack this alert is about, when it is pack-scoped.
+   *
+   * `packNum` is a SLOT number, so `(sourceSn, packNum)` names a position, not a
+   * battery. When packs are physically moved between chassis that distinction
+   * stops being academic: the same alert id silently follows the slot onto
+   * different hardware. Carrying the BMS-reported serial lets the monitor close
+   * one episode and open another (see alertMonitor's pack-residency check), and
+   * lets the warranty export follow a pack across chassis instead of splitting
+   * its history at the swap.
+   */
+  sourcePackSn?: string;
+  /**
    * v0.16.4 — annunciation gate. `false` = this condition stays VISIBLE in
    * snapshot.alerts (the UI still renders it) but must never produce an audible
    * broadcast, a push notification, or raise the broadcast condition level.
@@ -995,7 +1007,19 @@ export function computeAlerts(
       if (pk.soc != null && pk.soc <= PACK_SOC_LOW_PCT) {
         out.push({ id: `soc-low-${d.sn}-${pk.num}`, severity: 'warning', category: 'Battery', device: d.deviceName, title: 'Pack nearly empty', detail: `${tag} at ${pk.soc}% state of charge.` });
       }
-      for (let i = packStart; i < out.length; i++) out[i].packNum = pk.num;
+      for (let i = packStart; i < out.length; i++) {
+        out[i].packNum = pk.num;
+        // v1.102.0 — stamp the PHYSICAL pack identity alongside the slot number.
+        // Alert ids are keyed (chassis, slot), which is stable and cheap right
+        // up until the thing in that slot is replaced: on 2026-08-20 a pack swap
+        // silently re-pointed `vdiff-crit-<sn>-1` at a different battery with no
+        // resolve and no re-raise — its detail changed from "Deviant cell #31
+        // (-105 mV)" to "cell #32 (-84 mV)" mid-episode, merging two physical
+        // packs into one cleared-alert record and one live alert. The BMS
+        // reports packSn on every read; carrying it makes identity follow the
+        // hardware, which is what the RMA evidence trail needs.
+        if (pk.packSn) out[i].sourcePackSn = pk.packSn;
+      }
     }
     for (let i = dpuStart; i < out.length; i++) out[i].coreNum = coreNum;
     // v0.26.0 — a bench spare (in SPARE_DPU_SNS, not wired into the SHP2) stays
