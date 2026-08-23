@@ -8,6 +8,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
+import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPORT_DIR } from './dbExport.js';
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
@@ -329,6 +330,9 @@ function makeRateLimiter(maxPerWindow: number, windowMs: number) {
   };
 }
 const chimeWriteRateLimit = makeRateLimiter(30, 60_000);
+// v1.107.0 — a full VACUUM INTO is real disk I/O; a handful an hour is ample
+// for a human pointing a viewer at the snapshot.
+const dbExportRateLimit = makeRateLimiter(6, 60 * 60_000);
 
 await app.register(cors, {
   // Callback form: same-origin requests (no Origin header) get echoed
@@ -4837,6 +4841,47 @@ app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignmen
  * + role `manager` (added in v0.9.33). Used to verify the Piper add-on
  * is actually running before we attempt to bridge it via Wyoming Protocol.
  */
+/**
+ * v1.107.0 — DB snapshot for external viewers (sqlite-web et al).
+ *
+ * `/data/ecoflow.db` is private to this add-on, so no viewer can open it. POST
+ * here to publish a transactionally consistent copy to a `/share` path any
+ * add-on can read; GET reports where that copy is and how fresh it is without
+ * producing a new one.
+ *
+ * Gated + rate-limited because it is a filesystem-touching write that costs
+ * real disk I/O — same treatment as the chime write routes.
+ */
+app.get('/api/db-export', async () => {
+  const existing = describeExistingExport();
+  return {
+    ok: true,
+    ...existing,
+    dir: DEFAULT_EXPORT_DIR,
+    inProgress: exportInProgress(),
+    sourcePath: resolve(process.cwd(), config.dbPath),
+  };
+});
+
+app.post<{ Querystring: { name?: string } }>(
+  '/api/db-export',
+  { preHandler: [requireWriteAuth, dbExportRateLimit] },
+  async (req, reply) => {
+    try {
+      const result = await exportDatabase({
+        sourcePath: resolve(process.cwd(), config.dbPath),
+        name: req.query.name,
+        log: (m) => app.log.info(m),
+      });
+      return { ok: true, ...result, generatedAt: new Date().toISOString() };
+    } catch (e: any) {
+      app.log.warn(`db-export failed: ${e?.message ?? e}`);
+      reply.code(500);
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  },
+);
+
 app.get('/api/admin/addons', { preHandler: requireWriteAuth }, async (_req, reply) => {
   const addons = await listAddons();
   if (!addons) {

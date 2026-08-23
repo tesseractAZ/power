@@ -8827,6 +8827,45 @@ else external). External changes batch into ONE [Medium] push (dedupId
 silently. Sidecar `/data/settings-surface.json` (atomic; corrupt = silent
 re-adoption). Harness: `scripts/mutate-settings-drift.mjs` (5 mutants).
 
+## 12g. SQLite snapshot for external viewers (`dbExport.ts`, v1.107.0)
+
+The recorder database lives at `/data/ecoflow.db`. `/data` is **private per
+add-on** — no other add-on can open it, so a viewer such as sqlite-web has no
+path to point at. This publishes a point-in-time copy to `/share`, which every
+add-on can read; `share:rw` was added to the add-on `map:` in the same release
+and is used only to write the snapshot.
+
+`POST /api/db-export` (write-auth + rate-limited to 6/hour) produces the copy
+and returns `{path, bytes, sourceBytes, elapsedMs, generatedAt}`. Optional
+`?name=` overrides the filename. `GET /api/db-export` reports the currently
+published snapshot — path, size, mtime, whether an export is in flight — without
+producing a new one. Default output: `/share/ecoflow-panel/ecoflow-snapshot.db`
+(`DB_EXPORT_DIR` overrides the directory).
+
+Three design constraints, each load-bearing:
+
+- **`VACUUM INTO`, not `cp`.** The live DB is WAL. Copying the main file drops
+  everything still in `-wal` — the newest samples — and copying the file set
+  non-atomically can tear it. `VACUUM INTO` yields a transactionally consistent,
+  defragmented, WAL-free single file, which is also the shape a viewer wants.
+- **Its own worker thread.** `DatabaseSync` is synchronous, so whichever thread
+  vacuums has its event loop pinned for the copy. The main thread runs the alarm
+  engine and the analytics worker backs every dashboard panel, so the export gets
+  a third, short-lived thread that exits when done. It also opens its **own**
+  handle: `readRecorder.ts` sets `query_only = ON`, and SQLite refuses
+  `VACUUM INTO` on such a connection by statement *class* — reporting "attempt to
+  write a readonly database" even though the source is never written.
+- **Temp + rename.** `VACUUM INTO` refuses an existing target, so the copy is
+  written to `.<name>.tmp` and renamed into place. The published path therefore
+  always holds a complete, openable database; a failed or killed export leaves
+  the previous good snapshot untouched. A stale temp is cleared unconditionally
+  first, since a leftover one would otherwise wedge every future export.
+
+The single caller-controlled path component is validated by
+`sanitizeExportName` (`[A-Za-z0-9._-]+\.db`, no dotfiles, ≤100 chars); exports
+are single-flighted so concurrent requests join one run rather than racing onto
+the shared temp path. Harness: `scripts/mutate-db-export.mjs` (8 mutants).
+
 ## 12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)
 
 Daily job (06:35-09:00 Phoenix window, day-latched in the sidecar, restart
