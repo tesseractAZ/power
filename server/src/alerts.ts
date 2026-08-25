@@ -20,6 +20,7 @@ export function resetVdiffWarnHoldForTesting(): void {
 }
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
+import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
 import { currentAssessment } from './selfVitals.js';
 import { ttsRenderHealth } from './audioRenderer.js';
@@ -969,7 +970,31 @@ export function computeAlerts(
       // otherwise the leg is vacuous and the detail would read "0 mV from the
       // pack median". DEFECTIVE_PACK_MIN_DEVIANT_MV matches the cell-imbalance
       // critical threshold.
-      if (dLatch != null && dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV) {
+      const defectiveLegsLive = dLatch != null && dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV;
+      // v1.108.0 — LATCH THE DIAGNOSIS. On 2026-08-24, the first day the TOU
+      // window let the bench bank charge, this alert fired and resolved three
+      // times in one day: leg 3 of the signature (sibling median >= 100 W)
+      // tracks the charger's burst duty cycle, so the alert cleared every time
+      // a burst ended. "Confirmed defective" is a diagnosis, not a live
+      // condition — once the full signature has been observed for a PHYSICAL
+      // pack (keyed by packSn; the 08-20 swap proved faults travel with the
+      // pack), the standing alert holds as long as that pack is present in the
+      // fleet. It clears when the pack leaves (RMA) or via the operator's
+      // explicit /api/defective-packs/clear. Without a packSn the legs-only
+      // v1.101.0 behavior stands — never latch on a slot alone.
+      if (pk.packSn) {
+        markPackPresent(pk.packSn, now);
+        if (defectiveLegsLive) {
+          confirmDefectivePack({
+            packSn: pk.packSn, deviceSn: d.sn, deviceName: d.deviceName, packNum: pk.num,
+            socPct: dLatch.socPct, siblingMedianSocPct: dLatch.siblingMedianSocPct,
+            packAbsW: dLatch.packAbsW, siblingMedianAbsW: dLatch.siblingMedianAbsW,
+            deviantCell: dFx.deviantCell, deltaMv: dFx.deltaMv,
+          }, now);
+        }
+      }
+      const dConfirmed = pk.packSn ? getConfirmedRecord(pk.packSn) : null;
+      if (defectiveLegsLive) {
         const dl = dLatch; const dfx = dFx;
         out.push({
           id: `pack-defective-${d.sn}-${pk.num}`,
@@ -983,6 +1008,24 @@ export function computeAlerts(
             + `sits ${dfx.deltaMv > 0 ? '+' : ''}${dfx.deltaMv} mV from the pack median. The pack cannot recover on its own — `
             + `it is below the parallel-operation window, so it accepts no charge, so it cannot climb back into the window. `
             + `Capture evidence with /api/warranty-export.`,
+          annunciate: true,
+        });
+      } else if (dConfirmed) {
+        // Quiescent latch: the legs are not currently observable (typically the
+        // bank is idle, so leg 3 cannot hold), but the diagnosis stands.
+        out.push({
+          id: `pack-defective-${d.sn}-${pk.num}`,
+          severity: 'warning',
+          category: 'Battery',
+          device: d.deviceName,
+          title: 'Pack confirmed defective — service required',
+          detail:
+            `${tag} was confirmed defective on ${new Date(dConfirmed.confirmedAtMs).toISOString().slice(0, 10)}: `
+            + `${dConfirmed.socPct}% SoC against a sibling median of ${dConfirmed.siblingMedianSocPct}%, exchanging `
+            + `${dConfirmed.packAbsW} W while its siblings moved ${dConfirmed.siblingMedianAbsW} W; deviant cell `
+            + `#${dConfirmed.deviantCell} at ${dConfirmed.deltaMv > 0 ? '+' : ''}${dConfirmed.deltaMv} mV from the pack median. `
+            + `The bank is currently quiescent, so the live signature cannot re-verify — the diagnosis is latched until the `
+            + `pack is removed or explicitly cleared (POST /api/defective-packs/clear). Capture evidence with /api/warranty-export.`,
           annunciate: true,
         });
       }
@@ -1046,6 +1089,8 @@ export function computeAlerts(
   for (const k of heldVdiffWarnKeys) {
     if (!seenVdiffKeys.has(k)) heldVdiffWarnKeys.delete(k);
   }
+  // v1.108.0 — retire defective-pack confirmations whose pack has left the fleet.
+  retireAbsentPacks(now);
 
   if (shp2?.online && shp2.projection) {
     const sp = shp2.projection;

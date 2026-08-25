@@ -272,6 +272,8 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
   let initialized = armed.size === BATTERY_SOC_THRESHOLDS.length;
   let lastSoc: number | null = persisted?.lastSoc ?? null;
   let lastSocAtMs: number | null = persisted?.lastSocAtMs ?? null;
+  // v1.108.0 — rate-limit for the implausible-drop suppression log.
+  let lastImplausibleLogMs = 0;
   // v0.54.4 — the on-disk baseline must stay fresh enough that the plausibility guard is still
   // active on the FIRST reading after a quick restart (SHP2 reconnects often coincide with
   // add-on restart boundaries). Without this, a long quiet period (no crossings → no persist)
@@ -303,7 +305,13 @@ export function createBatterySocAlarm(opts: BatterySocAlarmOptions): BatterySocA
         lastSoc >= HEALTHY_BASELINE_PCT &&
         lastSoc - soc > MAX_PLAUSIBLE_DROP_PCT
       ) {
-        log(`battery-soc-alarm: ignoring implausible ${lastSoc.toFixed(1)}→${soc.toFixed(1)}% single-tick drop (stale reconnect?)`);
+        // v1.108.0 — one line per episode, not one per evaluation: the 08-23
+        // host reboots produced 11 identical lines in 3 s as every consumer of
+        // the alarm hit the same stale read.
+        if (nowMs - lastImplausibleLogMs > 60_000) {
+          lastImplausibleLogMs = nowMs;
+          log(`battery-soc-alarm: ignoring implausible ${lastSoc.toFixed(1)}→${soc.toFixed(1)}% single-tick drop (stale reconnect?)`);
+        }
         return;
       }
 

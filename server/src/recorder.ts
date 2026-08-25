@@ -567,7 +567,9 @@ const NIGHT_CALIBRATION_COLUMN_SET = new Set<string>(NIGHT_CALIBRATION_COLUMNS a
 export function resolveRetentionDays(raw: string | undefined): number {
   const n = Number(raw);
   if (raw == null || raw === '' || !Number.isFinite(n)) return 30;
-  return Math.min(730, Math.max(7, Math.round(n)));
+  // v1.108.0 — cap raised 730 → 3650: the operator runs multi-year retention
+  // (currently 5 y) for the long-horizon SoH/energy analytics; disk is NVMe.
+  return Math.min(3650, Math.max(7, Math.round(n)));
 }
 
 export function createRecorder(store: SnapshotStore, log: (m: string) => void): Recorder {

@@ -137,7 +137,8 @@ import {
 } from './deviceLink.js';
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
-import { RateFloorTracker, type RateFloorPersisted } from './messageRateFloor.js';
+import { RateFloorTracker, isElectricallyIdle, type RateFloorPersisted } from './messageRateFloor.js';
+import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
 import { evaluateSelfHeal, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
@@ -2588,6 +2589,8 @@ try {
 }
 let rateFloorSaveFailLogged = false;
 let rateFloorTicks = 0;
+// v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
+let lastLoggedLoadBandKey: string | null = null;
 
 const rateFloorTick = setInterval(() => {
   try {
@@ -2609,6 +2612,15 @@ const rateFloorTick = setInterval(() => {
       // hardware he had just unplugged himself. Keep SAMPLING (so baselines
       // stay honest) but never surface a collapse for an offline device.
       if (devices[sn]?.online !== true) continue;
+      // v1.108.0 — an electrically idle device (off-panel spare parked at its
+      // cap, an on-grid Core at night) messages at a fraction of its active
+      // baseline BY DESIGN; suppress surfacing (push + warn) while idle, but
+      // keep sampling so the learned buckets stay honest. A real session wedge
+      // on hardware that is moving power still surfaces, and the SHP2 — the
+      // alarm-critical source — never reads idle. Side effect, intended: the
+      // nightly all-idle vendor window no longer burns the self-heal budget.
+      const projW: any = devices[sn]?.projection;
+      if (isElectricallyIdle(projW?.totalInWatts, projW?.totalOutWatts)) continue;
       if (r.collapsing) {
         collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });
       }
@@ -2950,11 +2962,18 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   );
   const loadP90Factor = loadBandCal.factor;
   if (loadBandCal.basis === 'measured' && loadBandCal.factor > loadBandFloor) {
-    app.log.info(
-      `night-charge: load band calibrated to ±${((loadBandCal.factor - 1) * 100).toFixed(0)}% `
-      + `from ${loadBandCal.samples} realized night(s) (was the hand-set ±${((loadBandFloor - 1) * 100).toFixed(0)}%; `
-      + `only widens, and only loadP90 feeds sizing)`,
-    );
+    // v1.108.0 — this evaluation runs every 30 min; the calibration only moves
+    // when the night ledger grows. Log on CHANGE, not on every look (the 08-24
+    // audit counted 48 identical lines/day).
+    const bandKey = `${loadBandCal.factor.toFixed(3)}:${loadBandCal.samples}`;
+    if (bandKey !== lastLoggedLoadBandKey) {
+      lastLoggedLoadBandKey = bandKey;
+      app.log.info(
+        `night-charge: load band calibrated to ±${((loadBandCal.factor - 1) * 100).toFixed(0)}% `
+        + `from ${loadBandCal.samples} realized night(s) (was the hand-set ±${((loadBandFloor - 1) * 100).toFixed(0)}%; `
+        + `only widens, and only loadP90 feeds sizing)`,
+      );
+    }
   }
   const evMaxLoadW = Number(process.env.EV_MAX_LOAD_W ?? 11520);
   const minBuyKwh = Number(process.env.ARB_MIN_BUY_KWH ?? 1);
@@ -4852,6 +4871,25 @@ app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignmen
  * Gated + rate-limited because it is a filesystem-touching write that costs
  * real disk I/O — same treatment as the chime write routes.
  */
+/**
+ * v1.108.0 — the defective-pack latch registry (see defectivePackLatch.ts).
+ * GET lists latched confirmations; POST clear removes one (operator false-
+ * positive path). The latch otherwise retires on its own 48 h after the pack
+ * leaves the fleet.
+ */
+app.get('/api/defective-packs', async () => ({ ok: true, packs: listConfirmedRecords() }));
+app.post<{ Querystring: { packSn?: string } }>(
+  '/api/defective-packs/clear',
+  { preHandler: requireWriteAuth },
+  async (req, reply) => {
+    const packSn = req.query.packSn;
+    if (!packSn) { reply.code(400); return { ok: false, error: 'packSn required' }; }
+    const cleared = clearConfirmedPack(packSn);
+    app.log.info(`defective-pack latch: operator ${cleared ? 'cleared' : 'tried to clear unknown'} ${packSn}`);
+    return { ok: true, cleared };
+  },
+);
+
 app.get('/api/db-export', async () => {
   const existing = describeExistingExport();
   return {
