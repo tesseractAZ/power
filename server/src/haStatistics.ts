@@ -58,6 +58,8 @@ export interface ImportStatisticsMessage {
     source: string;
     statistic_id: string;
     unit_of_measurement: 'Wh';
+    /** v1.108.0 — HA 2026.x warns when import_statistics omits the unit class. */
+    unit_class: 'energy';
   };
   stats: Array<{ start: string; state: number; sum: number }>;
 }
@@ -87,7 +89,7 @@ export function buildImportMessage(
     metadata: {
       has_mean: false, has_sum: true,
       name: series.name, source: HA_STATS_SOURCE,
-      statistic_id: series.id, unit_of_measurement: 'Wh',
+      statistic_id: series.id, unit_of_measurement: 'Wh', unit_class: 'energy',
     },
     stats,
   };

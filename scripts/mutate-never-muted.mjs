@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const MOD = resolve(SERVER, 'src/alerts.ts');
-const SUBSET = ['test/defectivePackAlert.test.ts', 'test/offPanelAnnunciation.test.ts'];
+const SUBSET = ['test/defectivePackAlert.test.ts', 'test/offPanelAnnunciation.test.ts', 'test/defectivePackLatch.test.ts'];
 
 const MUTANTS = [
   {
@@ -50,15 +50,27 @@ const MUTANTS = [
   },
   {
     id: 'v. ★ deviant-cell leg dropped (a latched but cell-matched pack reports a phantom deviant cell)',
-    find: '      if (dLatch != null && dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV) {',
-    to: '      if (dLatch != null && dFx != null) { /* MUTANT */',
+    find: '      const defectiveLegsLive = dLatch != null && dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV;',
+    to: '      const defectiveLegsLive = dLatch != null && dFx != null; /* MUTANT */',
     why: 'packCellForensics names a deviant cell even on a matched pack, so the alert would claim "0 mV from the pack median".',
   },
   {
     id: 'vi. ★ latch leg dropped (any pack with a deviant cell is called defective)',
-    find: '      if (dLatch != null && dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV) {',
-    to: '      if (dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV) { /* MUTANT */',
+    find: '      const defectiveLegsLive = dLatch != null && dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV;',
+    to: '      const defectiveLegsLive = dFx != null && Math.abs(dFx.deltaMv) >= DEFECTIVE_PACK_MIN_DEVIANT_MV; /* MUTANT */',
     why: 'A healthy pack at the low-SoC knee would be declared defective and page the operator.',
+  },
+  {
+    id: 'vii. ★ LATCH quiescent emission dropped — the 08-24 flap returns',
+    find: '      } else if (dConfirmed) {',
+    to: '      } else if (false && dConfirmed) { /* MUTANT */',
+    why: 'The alert resolves the moment a charge burst ends and re-pushes [High] on the next one — 3 push/resolve pairs in one day.',
+  },
+  {
+    id: 'viii. ★ confirmation never recorded — the latch is inert',
+    find: '        if (defectiveLegsLive) {\n          confirmDefectivePack({',
+    to: '        if (false && defectiveLegsLive) { /* MUTANT */\n          confirmDefectivePack({',
+    why: 'With nothing ever confirmed, the quiescent branch is unreachable and behavior silently reverts to the flapping v1.101.0.',
   },
 ];
 

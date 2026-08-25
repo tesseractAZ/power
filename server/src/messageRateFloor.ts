@@ -240,6 +240,28 @@ export function isFlatProfile(
   return Math.sqrt(variance) / mean <= maxCv;
 }
 
+/**
+ * v1.108.0 — electrical-idleness gate for SURFACING (never for sampling).
+ *
+ * The 08-24 audit found the detector repeatedly flagging an off-panel spare
+ * (xxCore 3, idle at 96-100% SoC) at 2-4 msg/min against a ~26-36 baseline
+ * learned while it was panel-wired and active: EcoFlow devices message in
+ * proportion to electrical ACTIVITY, so an idle device's rate collapse is
+ * explained by idleness, not by a wedged session. A device moving real power
+ * with a collapsed rate is the genuine emergency this detector exists for
+ * (the SHP2 13 h crawl), and the SHP2 itself never reads idle (house load).
+ *
+ * Nulls fail toward NOT idle — missing telemetry must never mute the monitor.
+ */
+export const IDLE_SURFACE_SUPPRESS_W = 30;
+export function isElectricallyIdle(
+  totalInWatts: number | null | undefined,
+  totalOutWatts: number | null | undefined,
+): boolean {
+  if (totalInWatts == null || totalOutWatts == null) return false;
+  return Math.abs(totalInWatts) + Math.abs(totalOutWatts) < IDLE_SURFACE_SUPPRESS_W;
+}
+
 export class RateFloorTracker {
   private readonly cfg: RateFloorConfig;
   private readonly bySn = new Map<string, SnState>();
