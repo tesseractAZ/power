@@ -22,6 +22,8 @@ test('B1: cumulative sums in day order, whatever order the store hands back', ()
   assert.ok(msg);
   assert.equal(msg!.metadata.statistic_id, `${HA_STATS_SOURCE}:vendor_home_energy`);
   assert.equal(msg!.metadata.source, HA_STATS_SOURCE);
+  // v1.108.0 — HA 2026.x warns when import_statistics omits the unit class.
+  assert.equal(msg!.metadata.unit_class, 'energy');
   assert.deepEqual(msg!.stats.map((s) => s.start), [
     noonPhoenixIso('2026-08-15'), noonPhoenixIso('2026-08-16'), noonPhoenixIso('2026-08-17'),
   ]);

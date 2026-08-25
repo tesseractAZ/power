@@ -1,5 +1,5 @@
 name: Power
-version: "1.107.0"
+version: "1.108.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -265,6 +265,6 @@ schema:
   TUI_PASSWORD: password?
   TUI_TRUSTED_ORIGINS: str?
   # Diagnostic / advanced (leave default unless you know you need them)
-  RECORDER_RETENTION_DAYS: int(7,730)
+  RECORDER_RETENTION_DAYS: int(7,3650)
   ECOFLOW_DEVICE_REACHABILITY: "str?"
   WRITE_DEBUG_TOKEN: "password?"

@@ -443,3 +443,28 @@ test('rate floor — a DIURNAL device still gets the long dwell (no new false po
   for (let m = 1; m <= 5; m++) { ts += MIN; const r = t.sample(SN, count, ts); if (r.collapsed) firedEarly = true; }
   assert.equal(firedEarly, false, 'diurnal device keeps the 20-min dwell');
 });
+
+// ── v1.108.0: the electrical-idleness surface gate ───────────────────────────
+import { isElectricallyIdle, IDLE_SURFACE_SUPPRESS_W } from '../src/messageRateFloor.js';
+
+test('isElectricallyIdle: idle spare (xxCore 3 parked at cap) is idle', () => {
+  assert.equal(isElectricallyIdle(0, 0), true);
+  assert.equal(isElectricallyIdle(5, 10), true);
+});
+
+test('isElectricallyIdle: real power in EITHER direction defeats idleness', () => {
+  assert.equal(isElectricallyIdle(1770, 0), false, 'charging burst');
+  assert.equal(isElectricallyIdle(0, 250), false, 'discharging (islanded night) stays monitored');
+  assert.equal(isElectricallyIdle(-40, 0), false, 'sign must not hide magnitude');
+});
+
+test('isElectricallyIdle: missing telemetry fails toward MONITORED, never muted', () => {
+  assert.equal(isElectricallyIdle(null, 0), false);
+  assert.equal(isElectricallyIdle(0, undefined), false);
+  assert.equal(isElectricallyIdle(null, null), false, 'the SHP2 shape (no watt fields) stays monitored');
+});
+
+test('isElectricallyIdle: threshold is a sum, just under/over the line', () => {
+  assert.equal(isElectricallyIdle(14, 15), true,  `sum 29 < ${IDLE_SURFACE_SUPPRESS_W}`);
+  assert.equal(isElectricallyIdle(15, 15), false, `sum 30 >= ${IDLE_SURFACE_SUPPRESS_W}`);
+});

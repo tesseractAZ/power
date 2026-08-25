@@ -1,3 +1,46 @@
+## v1.108.0 — the diagnosis latch, and four audit fixes
+
+### A confirmed-defective pack un-confirmed itself three times in one day
+
+The first day the TOU window let the bench bank charge (08-24), the
+`pack-defective-*` alert — the one alert exempt from every mute path — fired
+and resolved three times: leg 3 of its live signature (siblings ≥ 100 W)
+tracks the charger's burst duty cycle, so the "diagnosis" cleared every time a
+burst ended. One [High] push plus one Resolved push per burst is a cry-wolf
+cadence on exactly the alert an operator must never learn to ignore.
+
+**The latch** (`defectivePackLatch.ts`): the first full-signature observation
+is recorded per PHYSICAL pack serial and survives restarts. From then on the
+standing alert holds whenever that pack is present in the fleet — legs or no
+legs — and clears only when the pack leaves (RMA; the record retires 48 h
+later) or on an explicit `POST /api/defective-packs/clear`. `GET
+/api/defective-packs` lists latched records. No packSn ⇒ legs-only v1.101.0
+behavior: nothing may latch on a slot alone. Harness extended to 8/8 with the
+two silent failure modes (quiescent emission dropped ⇒ flap returns;
+confirmation never recorded ⇒ latch inert).
+
+### Rate-floor: idleness is not a wedge
+
+The detector repeatedly flagged an off-panel spare parked at its charge cap —
+2–4 msg/min against a baseline learned while it was panel-wired — and the
+nightly all-idle vendor window burned the self-heal budget (6/6) every night
+on a condition a session rebuild has never fixed. EcoFlow devices message in
+proportion to electrical activity, so the tick now suppresses SURFACING for a
+device moving < 30 W total (`isElectricallyIdle`) while still sampling it.
+Nulls fail toward monitored; the SHP2 is never idle-suppressed; a discharging
+Core is not idle. A wedge on hardware moving real power still pages.
+
+### Smaller fixes from the 08-24 log audit
+
+- **Retention ceiling 730 → 3650 days** (code clamp + option schema): the
+  operator runs 5-year retention for long-horizon SoH/energy analytics.
+- **`recorder/import_statistics` now sends `unit_class: "energy"`** — HA
+  2026.x warns when it is omitted.
+- **Log hygiene**: the night-charge load-band calibration line logs on CHANGE
+  only (was 48 identical lines/day); the battery-SoC implausible-drop
+  suppression logs once per minute per episode (was 11 lines in 3 s across the
+  08-23 host reboots).
+
 ## v1.107.0 — the recorder database, readable from outside the add-on
 
 ### /data is a locked room
