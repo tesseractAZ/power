@@ -1,3 +1,17 @@
+## v1.110.0 — CodeQL rate-limit sweep + dependency bumps
+
+Three open `js/missing-rate-limiting` findings closed:
+
+- `POST /api/energy-history/export-ha` (v1.89.0) had shipped **un-gated** —
+  it writes the whole vendor ledger into HA's statistics store and pre-dated
+  the every-write-gated convention. Now `requireWriteAuth` + 6/hour (the
+  dashboard reaches it through ingress, which passes the gate).
+- `GET /api/defective-packs` → 60/min; `POST /api/defective-packs/clear` →
+  write-auth + 10/hour.
+
+Rides with the week's Dependabot bumps: fastify 5.12.1 (server, production),
+web dev group, pinned-SHA actions group (CodeQL action v4.37.8).
+
 ## v1.109.0 — a rejection outranks the deadband
 
 ### Six minutes of failed polls, with the fix arriving in every failure

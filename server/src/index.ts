@@ -331,6 +331,16 @@ function makeRateLimiter(maxPerWindow: number, windowMs: number) {
   };
 }
 const chimeWriteRateLimit = makeRateLimiter(30, 60_000);
+// v1.110.0 — CodeQL js/missing-rate-limiting sweep. Same rationale as the
+// chime limiters: operator-only surfaces, but a fixed cap bounds CPU/disk if a
+// compromised same-origin session floods them.
+//  - export-ha replays the whole vendor ledger into HA statistics (WS writes):
+//    a handful an hour is ample for a manual re-export.
+//  - the defective-pack latch endpoints touch a sidecar file; reads are cheap
+//    but unbounded reads are still CodeQL-visible I/O.
+const exportHaRateLimit = makeRateLimiter(6, 60 * 60_000);
+const latchReadRateLimit = makeRateLimiter(60, 60_000);
+const latchWriteRateLimit = makeRateLimiter(10, 60 * 60_000);
 // v1.107.0 — a full VACUUM INTO is real disk I/O; a handful an hour is ample
 // for a human pointing a viewer at the snapshot.
 const dbExportRateLimit = makeRateLimiter(6, 60 * 60_000);
@@ -767,8 +777,11 @@ app.get<{ Querystring: { month?: string } }>('/api/debug/vendor-history-probe', 
   return { month: m, window: win, results: out };
 });
 
-/** v1.89.0 (B1) — manual full re-export of the vendor ledger to HA statistics. */
-app.post('/api/energy-history/export-ha', async () => {
+/** v1.89.0 (B1) — manual full re-export of the vendor ledger to HA statistics.
+ *  v1.110.0 — write-auth + rate limit: this WRITES to HA's statistics store and
+ *  had shipped un-gated (pre-dating the every-write-gated convention); the
+ *  dashboard reaches it through ingress, which passes requireWriteAuth. */
+app.post('/api/energy-history/export-ha', { preHandler: [requireWriteAuth, exportHaRateLimit] }, async () => {
   const state = loadVendorEnergyState();
   const exp = await exportVendorStatistics(Object.values(state.days), (m) => app.log.warn(m));
   return { exported: exp.exported, failed: exp.failed, days: Object.keys(state.days).length };
@@ -4877,10 +4890,10 @@ app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignmen
  * positive path). The latch otherwise retires on its own 48 h after the pack
  * leaves the fleet.
  */
-app.get('/api/defective-packs', async () => ({ ok: true, packs: listConfirmedRecords() }));
+app.get('/api/defective-packs', { preHandler: latchReadRateLimit }, async () => ({ ok: true, packs: listConfirmedRecords() }));
 app.post<{ Querystring: { packSn?: string } }>(
   '/api/defective-packs/clear',
-  { preHandler: requireWriteAuth },
+  { preHandler: [requireWriteAuth, latchWriteRateLimit] },
   async (req, reply) => {
     const packSn = req.query.packSn;
     if (!packSn) { reply.code(400); return { ok: false, error: 'packSn required' }; }
