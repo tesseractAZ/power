@@ -1,3 +1,11 @@
+## v1.110.1 — the db-export status route joins the rate-limit sweep
+
+`GET /api/db-export` (the snapshot-status read, v1.107.0) was the one flagged
+route that genuinely lacked a limiter — it stats the published snapshot on
+every call. It now shares the 60/min read bucket. The other two open CodeQL
+findings were false positives (routes that DO carry `preHandler` limiters the
+query cannot model) and are dismissed with the documented precedent.
+
 ## v1.110.0 — CodeQL rate-limit sweep + dependency bumps
 
 Three open `js/missing-rate-limiting` findings closed:
