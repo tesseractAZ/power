@@ -1013,6 +1013,9 @@ export function computeAlerts(
       } else if (dConfirmed) {
         // Quiescent latch: the legs are not currently observable (typically the
         // bank is idle, so leg 3 cannot hold), but the diagnosis stands.
+        // Date below is Phoenix-local (fixed UTC−7, AZ has no DST — and never
+        // Intl on the Pi): the 08-24 23:01 MST confirmation rendered as "08-25"
+        // with a bare toISOString.
         out.push({
           id: `pack-defective-${d.sn}-${pk.num}`,
           severity: 'warning',
@@ -1020,7 +1023,7 @@ export function computeAlerts(
           device: d.deviceName,
           title: 'Pack confirmed defective — service required',
           detail:
-            `${tag} was confirmed defective on ${new Date(dConfirmed.confirmedAtMs).toISOString().slice(0, 10)}: `
+            `${tag} was confirmed defective on ${new Date(dConfirmed.confirmedAtMs - 7 * 3_600_000).toISOString().slice(0, 10)}: `
             + `${dConfirmed.socPct}% SoC against a sibling median of ${dConfirmed.siblingMedianSocPct}%, exchanging `
             + `${dConfirmed.packAbsW} W while its siblings moved ${dConfirmed.siblingMedianAbsW} W; deviant cell `
             + `#${dConfirmed.deviantCell} at ${dConfirmed.deltaMv > 0 ? '+' : ''}${dConfirmed.deltaMv} mV from the pack median. `

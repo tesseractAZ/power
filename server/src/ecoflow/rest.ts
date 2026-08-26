@@ -1,7 +1,7 @@
 import { request } from 'undici';
 import { config } from '../config.js';
 import { buildQuery, signRequest } from './sign.js';
-import { noteServerDate, signingNowMs, currentOffsetMs } from './clockOffset.js';
+import { noteServerDate, noteTimestampRejection, signingNowMs, currentOffsetMs } from './clockOffset.js';
 
 export interface EcoFlowResponse<T> {
   code: string; // "0" = success
@@ -56,11 +56,9 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
   // first rejection teaches us the offset and the NEXT request signs correctly. That
   // turns a 22-minute blind outage into a one-poll-cycle blip.
   const before = currentOffsetMs();
-  const upd = noteServerDate(
-    (res.headers as Record<string, string | string[] | undefined>)['date'] as string | undefined,
-    Date.now(),
-    Date.now() - reqStartedMs,
-  );
+  const dateHeader = (res.headers as Record<string, string | string[] | undefined>)['date'] as string | undefined;
+  const rttMs = Date.now() - reqStartedMs;
+  const upd = noteServerDate(dateHeader, Date.now(), rttMs);
   if (upd.adopted) {
     onClockOffsetAdopted?.(upd.offsetMs, before);
   } else if (upd.rejected === 'rtt-inflated') {
@@ -77,6 +75,15 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
     throw new Error(`EcoFlow API non-JSON response (status ${res.statusCode}): ${text.slice(0, 200)}`);
   }
   if (parsed.code !== '0' && parsed.code !== 0 + ('' as any)) {
+    // v1.109.0 — a timestamp-class rejection (8521 signature / 8524 timestamp)
+    // is the vendor telling us our signing clock is WRONG; feed its Date header
+    // back with the deadband bypassed so recovery takes one poll, not six
+    // minutes of "within-deadband" stalemate (2026-08-25 02:46 incident).
+    if (String(parsed.code) === '8521' || String(parsed.code) === '8524') {
+      const b2 = currentOffsetMs();
+      const u2 = noteTimestampRejection(dateHeader, Date.now(), rttMs);
+      if (u2.adopted) onClockOffsetAdopted?.(u2.offsetMs, b2);
+    }
     throw new Error(`EcoFlow API error ${parsed.code}: ${parsed.message} (trace ${parsed.eagleEyeTraceId ?? 'n/a'})`);
   }
   return parsed.data;

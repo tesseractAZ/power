@@ -121,3 +121,58 @@ test('return-leg compensation: measured is corrected by +rtt/2 when RTT is known
   assert.equal(upd.rejected, 'within-deadband');
   resetClockOffset();
 });
+
+// ── v1.109.0: the 2026-08-25 02:46 incident — rejection bypasses the deadband ──
+import { noteTimestampRejection } from '../src/ecoflow/clockOffset.js';
+
+test('INCIDENT REPLAY: a bad marginal adoption + tight vendor tolerance recovers in ONE rejection, not six minutes', () => {
+  resetClockOffset();
+  // Second-aligned constants: HTTP Date has 1 s granularity, and the live
+  // incident sat almost exactly ON the deadband boundary — the test must sit
+  // clearly inside it. Bad stale header at RTT 1 s: measured −3.0 + 0.5 (return
+  // leg) = −2.5 s, over the deadband ⇒ adopted. The honest headers then measure
+  // −1.0 s — a 1.5 s correction, INSIDE the deadband, so the regular path stays
+  // stuck (what held signing broken for six minutes live on 2026-08-25).
+  const t0 = 1_787_000_000_000;
+  const bad = noteServerDate(new Date(t0 - 3_000).toUTCString(), t0, 1_000);
+  assert.equal(bad.adopted, true);
+  assert.equal(bad.offsetMs, -2_500);
+  const t1 = t0 + 60_000;
+  const stuck = noteServerDate(new Date(t1 - 1_000).toUTCString(), t1, 0);
+  assert.equal(stuck.adopted, false);
+  assert.equal(stuck.rejected, 'within-deadband');
+  // The 8524 rejection carries the same honest header; the rejection feed must adopt it.
+  const fixed = noteTimestampRejection(new Date(t1 - 1_000).toUTCString(), t1, 0);
+  assert.equal(fixed.adopted, true);
+  assert.equal(fixed.offsetMs, -1_000, 'offset restored to the honest measurement in ONE poll');
+});
+
+test('rejection feed still refuses garbage: no header, unparseable, implausible', () => {
+  resetClockOffset();
+  assert.equal(noteTimestampRejection(null, 1_000).rejected, 'no-header');
+  assert.equal(noteTimestampRejection('not a date', 1_000).rejected, 'unparseable');
+  const t0 = 1_787_000_000_000;
+  const r = noteTimestampRejection(new Date(t0 + 48 * 3_600_000).toUTCString(), t0, 200);
+  assert.equal(r.rejected, 'implausible');
+  assert.equal(r.adopted, false);
+});
+
+test('rejection feed keeps only the absolute RTT ceiling — a slow degraded-window rejection still teaches, a pathological one does not', () => {
+  resetClockOffset();
+  const t0 = 1_787_000_000_000;
+  // 6 s RTT: over the regular 2×-median gate territory, UNDER the 8 s cold ceiling ⇒ accepted.
+  const slow = noteTimestampRejection(new Date(t0 - 4_000).toUTCString(), t0, 6_000);
+  assert.equal(slow.adopted, true, 'recovery must work from the degraded window itself');
+  // 9 s RTT: over the cold ceiling ⇒ rejected.
+  const patho = noteTimestampRejection(new Date(t0 - 4_000).toUTCString(), t0, 9_000);
+  assert.equal(patho.rejected, 'rtt-inflated');
+});
+
+test('a rejection whose measurement matches the current offset adopts nothing (no churn)', () => {
+  resetClockOffset();
+  const t0 = 1_787_000_000_000;
+  const r1 = noteTimestampRejection(new Date(t0).toUTCString(), t0);
+  // measured 0 === offset 0 ⇒ no adoption, no rejection reason
+  assert.equal(r1.adopted, false);
+  assert.equal(r1.rejected, null);
+});
