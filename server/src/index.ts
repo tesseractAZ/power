@@ -339,6 +339,7 @@ const chimeWriteRateLimit = makeRateLimiter(30, 60_000);
 //  - the defective-pack latch endpoints touch a sidecar file; reads are cheap
 //    but unbounded reads are still CodeQL-visible I/O.
 const exportHaRateLimit = makeRateLimiter(6, 60 * 60_000);
+// (shared by GET /api/db-export status — same cheap-statSync class of read)
 const latchReadRateLimit = makeRateLimiter(60, 60_000);
 const latchWriteRateLimit = makeRateLimiter(10, 60 * 60_000);
 // v1.107.0 — a full VACUUM INTO is real disk I/O; a handful an hour is ample
@@ -4903,7 +4904,7 @@ app.post<{ Querystring: { packSn?: string } }>(
   },
 );
 
-app.get('/api/db-export', async () => {
+app.get('/api/db-export', { preHandler: latchReadRateLimit }, async () => {
   const existing = describeExistingExport();
   return {
     ok: true,
