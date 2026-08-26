@@ -1497,6 +1497,21 @@ Recovery is within one poll cycle instead of waiting on NTP. Committed harness:
 `scripts/mutate-telemetry-blind.mjs` (its starred mutant is "learn only from
 successful responses", which silently restores the 22-minute outage).
 
+**v1.109.0 — the deadband must yield to a rejection.** On 2026-08-25 02:46 a
+marginal −2.1 s adoption crossed the vendor's (evidently tight) timestamp
+tolerance and every poll failed `8524 timestamp's value is invalid` for six
+minutes: each rejection's own Date header measured the true offset, but the
+correction differed from the bad offset by ~2.0 s — just inside the 2 s
+deadband — so the very evidence that would have fixed signing was discarded as
+jitter. `noteTimestampRejection` (fed by `rest.ts` whenever the response code
+is 8521/8524) adopts any finite, plausible measurement with the deadband
+bypassed; the RTT gate keeps only its absolute cold ceiling there, because the
+vendor's degraded window produces uniformly slow responses and a 2×-median
+gate could starve recovery exactly when it is needed. Backdrop worth knowing:
+HAOS restarts systemd-timesyncd on every 2-hourly DHCP renewal, and each
+restart performs an "Initial clock synchronization" step — small host-clock
+steps are routine on this Pi, not exceptional.
+
 ### 2.15 Telemetry-blind self-alert (`server/src/telemetryBlind.ts`) — v1.69.0
 
 The one condition where a quiet system is the most dangerous system: the add-on

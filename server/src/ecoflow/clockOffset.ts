@@ -102,6 +102,52 @@ export function noteServerDate(header: string | null | undefined, localNowMs: nu
   return { adopted: true, offsetMs, measuredMs: measured, rejected: null };
 }
 
+/**
+ * v1.109.0 — timestamp-class REJECTION feed (8521 signature-wrong / 8524
+ * timestamp-invalid). On 2026-08-25 02:46 a marginal −2.1 s adoption crossed the
+ * vendor's (evidently tight) timestamp tolerance and every poll failed 8524 for
+ * SIX MINUTES: each rejection's Date header measured the true offset (~−0.1 s),
+ * but the correction differed from the bad offset by ~2.0 s — just inside
+ * OFFSET_DEADBAND_MS — so "within-deadband" blocked the very evidence that
+ * would have fixed signing. The deadband exists to stop latency jitter from
+ * rewriting a WORKING offset; when the vendor has just REJECTED our timestamp,
+ * the offset is proven non-working and the deadband's premise is void.
+ *
+ * Differences from noteServerDate, each deliberate:
+ *  - No deadband: any finite, plausible measurement is adopted.
+ *  - RTT gate uses only the absolute cold ceiling (RTT_GATE_COLD_MS): the
+ *    vendor's degraded window produces uniformly slow responses, and a
+ *    2×-median gate could starve the recovery path exactly when it is needed
+ *    (the v1.69.0 origin story — recovery MUST work from the rejection itself).
+ *  - The sample is NOT pushed into the RTT window: the regular per-response
+ *    noteServerDate call already recorded this response's RTT.
+ */
+export function noteTimestampRejection(
+  header: string | null | undefined,
+  localNowMs: number,
+  rttMs?: number,
+): OffsetUpdate {
+  if (!header) return { adopted: false, offsetMs, measuredMs: null, rejected: 'no-header' };
+  const serverMs = Date.parse(header);
+  if (!Number.isFinite(serverMs)) {
+    return { adopted: false, offsetMs, measuredMs: null, rejected: 'unparseable' };
+  }
+  const rttOk = rttMs != null && Number.isFinite(rttMs) && rttMs >= 0;
+  if (rttOk && rttMs! > RTT_GATE_COLD_MS) {
+    return { adopted: false, offsetMs, measuredMs: null, rejected: 'rtt-inflated' };
+  }
+  const measured = serverMs - localNowMs + (rttOk ? rttMs! / 2 : 0);
+  if (Math.abs(measured) > OFFSET_SANITY_LIMIT_MS) {
+    return { adopted: false, offsetMs, measuredMs: measured, rejected: 'implausible' };
+  }
+  if (measured === offsetMs) {
+    return { adopted: false, offsetMs, measuredMs: measured, rejected: null };
+  }
+  offsetMs = measured;
+  adoptedAtMs = localNowMs;
+  return { adopted: true, offsetMs, measuredMs: measured, rejected: null };
+}
+
 /** The timestamp to SIGN with. Never use this for anything the operator sees. */
 export function signingNowMs(localNowMs: number = Date.now()): number {
   return localNowMs + offsetMs;

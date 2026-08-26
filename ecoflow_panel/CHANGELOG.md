@@ -1,3 +1,31 @@
+## v1.109.0 — a rejection outranks the deadband
+
+### Six minutes of failed polls, with the fix arriving in every failure
+
+At 02:46 on 08-25 the signing-clock estimator adopted a marginal −2.1 s offset
+(the host clock steps a little every two hours — HAOS restarts timesyncd on
+each DHCP renewal). The vendor's timestamp tolerance turned out to be tighter
+than that: every poll for the next six minutes failed `8524 timestamp's value
+is invalid`. Each rejection carried a Date header measuring the true offset —
+and each measurement was discarded, because it differed from the bad offset by
+~2.0 s, just inside the 2 s deadband that exists to keep latency jitter from
+rewriting a working offset.
+
+A rejection voids the deadband's premise: the offset is proven non-working.
+`noteTimestampRejection` now feeds the 8521/8524 response's own header back
+with the deadband bypassed (RTT-gated only by the absolute cold ceiling, since
+the degraded vendor window is uniformly slow). Recovery: one poll.
+
+### Corrections
+
+- The HA statistics export now sends `mean_type: 0` — the actual HA 2026.11
+  deprecation. v1.108.0's `unit_class` addition fixed a different field,
+  misread from a truncated log line; both are now present and the 06:35
+  export warning is expected to stop.
+- The latched defective-pack detail dates the confirmation in Phoenix local
+  time (fixed UTC−7): the 08-24 23:01 MST confirmation had rendered as
+  "2026-08-25".
+
 ## v1.108.0 — the diagnosis latch, and four audit fixes
 
 ### A confirmed-defective pack un-confirmed itself three times in one day

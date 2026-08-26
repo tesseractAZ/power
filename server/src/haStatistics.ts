@@ -53,6 +53,10 @@ export interface ImportStatisticsMessage {
   type: 'recorder/import_statistics';
   metadata: {
     has_mean: false;
+    /** v1.109.0 — the ACTUAL HA 2026.11 deprecation (yesterday's unit_class fix
+     *  addressed a different, truncated-in-the-log warning): mean_type replaces
+     *  has_mean; 0 = StatisticMeanType.NONE (sum-only series). */
+    mean_type: 0;
     has_sum: true;
     name: string;
     source: string;
@@ -87,7 +91,7 @@ export function buildImportMessage(
   return {
     type: 'recorder/import_statistics',
     metadata: {
-      has_mean: false, has_sum: true,
+      has_mean: false, mean_type: 0, has_sum: true,
       name: series.name, source: HA_STATS_SOURCE,
       statistic_id: series.id, unit_of_measurement: 'Wh', unit_class: 'energy',
     },
