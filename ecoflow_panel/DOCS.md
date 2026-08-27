@@ -1530,6 +1530,17 @@ watchdog and any uptime probe see it.
 
 **v1.108.0 — electrical-idleness gate.** EcoFlow devices message in proportion to electrical activity, so an idle device's collapsed rate is explained by idleness, not a wedged session: the 08-24 audit found the detector repeatedly flagging an off-panel spare parked at its charge cap (2–4 msg/min against a baseline learned while panel-wired) and burning the nightly self-heal budget on an all-idle fleet. The tick now skips SURFACING (push + warn) for a device whose `|totalInWatts| + |totalOutWatts| < 30 W` (`isElectricallyIdle`, messageRateFloor.ts) while still SAMPLING it, so learned baselines stay honest. Nulls fail toward monitored — the SHP2's projection has no such fields and is therefore never idle-suppressed; a discharging (islanded) Core is never idle; a wedge on hardware moving real power still surfaces. Side effect, intended: the nightly all-idle vendor window no longer consumes self-heal budget.
 
+**v1.111.0 — idleness gates ENTRY, never eviction.** The v1.108.0 gate was
+stateless per tick, so a brief idle spell mid-collapse EVICTED the standing
+alert: silent resolve, duplicate push on re-fire, and — because the tracker's
+fired-edge had been consumed while suppressed — pushes with no matching warn
+line (six pushes, zero warns on the night of 08-26, aligned to the night-charge
+write edges that woke the fleet). `decideCollapseSurfacing` (pure) now owns the
+decision: offline evicts (the offline alert's business), recovery evicts,
+idleness only blocks initial entry; the collapse warn logs exactly once per
+surfaced episode, even when the edge passed during an idle spell. Harness
+extended to 16 mutants.
+
 When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a fired message-rate collapse
 for `SELF_HEAL_AFTER_MS` (20 min), the add-on rebuilds its own MQTT session:
 stop, certificate re-fetch, fresh connect. Guards, each mutation-proven

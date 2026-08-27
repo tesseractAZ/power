@@ -137,7 +137,7 @@ import {
 } from './deviceLink.js';
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
-import { RateFloorTracker, isElectricallyIdle, type RateFloorPersisted } from './messageRateFloor.js';
+import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, type RateFloorPersisted } from './messageRateFloor.js';
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
 import { evaluateSelfHeal, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState } from './telemetryBlind.js';
@@ -2603,6 +2603,9 @@ try {
 }
 let rateFloorSaveFailLogged = false;
 let rateFloorTicks = 0;
+// v1.111.0 — devices whose CURRENT collapse episode has surfaced (see
+// decideCollapseSurfacing): idleness gates entry, never eviction.
+const surfacedCollapses = new Set<string>();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
 
@@ -2625,20 +2628,25 @@ const rateFloorTick = setInterval(() => {
       // told the operator to "check the EcoFlow cloud session / power" for
       // hardware he had just unplugged himself. Keep SAMPLING (so baselines
       // stay honest) but never surface a collapse for an offline device.
-      if (devices[sn]?.online !== true) continue;
-      // v1.108.0 — an electrically idle device (off-panel spare parked at its
-      // cap, an on-grid Core at night) messages at a fraction of its active
-      // baseline BY DESIGN; suppress surfacing (push + warn) while idle, but
-      // keep sampling so the learned buckets stay honest. A real session wedge
-      // on hardware that is moving power still surfaces, and the SHP2 — the
-      // alarm-critical source — never reads idle. Side effect, intended: the
-      // nightly all-idle vendor window no longer burns the self-heal budget.
+      // v1.108.0 gated surfacing on idleness statelessly, which let a brief
+      // idle spell mid-collapse EVICT the standing alert (silent resolve →
+      // duplicate push on re-fire, warn trail lost — the 08-25/26 audit
+      // minors). v1.111.0 — decideCollapseSurfacing (pure, tested): offline
+      // evicts (the offline alert owns that), recovery evicts, idleness gates
+      // ENTRY only; the collapse warn logs exactly once per surfaced episode,
+      // even when the tracker edge was consumed during an idle spell.
       const projW: any = devices[sn]?.projection;
-      if (isElectricallyIdle(projW?.totalInWatts, projW?.totalOutWatts)) continue;
-      if (r.collapsing) {
+      const online = devices[sn]?.online === true;
+      const idle = isElectricallyIdle(projW?.totalInWatts, projW?.totalOutWatts);
+      const dec = decideCollapseSurfacing(r.collapsing, online, idle, surfacedCollapses.has(sn));
+      if (!online) { surfacedCollapses.delete(sn); continue; }
+      if (dec.surfaced) {
+        surfacedCollapses.add(sn);
         collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });
+      } else if (!r.collapsing) {
+        surfacedCollapses.delete(sn);
       }
-      if (r.collapsed) {
+      if (dec.logCollapse) {
         app.log.warn(
           `msg-rate-floor: ${name} message rate collapsed to ` +
           `${r.rate?.toFixed(2) ?? '?'} msg/min (baseline ~${r.baseline.toFixed(0)}` +
