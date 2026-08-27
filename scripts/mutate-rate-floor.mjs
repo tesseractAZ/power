@@ -129,6 +129,24 @@ const MUTANTS = [
     to: '    const globalCollapsed = prev.baseline >= this.cfg.minBaselineRate && rate < this.cfg.floorFraction * prev.baseline; /* MUTANT */',
     why: 'Once the baseline slips under the floor the guard can never engage again — unguarded learning free-falls it to ~0.9.',
   },
+  {
+    id: 'xi. \u2605 idle EVICTS a surfaced collapse \u2014 the silent resolve\u2192refire flap returns',
+    find: '  if (idle && !alreadySurfaced) return { surfaced: false, logCollapse: false };',
+    to: '  if (idle) return { surfaced: false, logCollapse: false }; /* MUTANT */',
+    why: 'A brief idle spell mid-collapse resolves the standing alert with no trail and re-pushes on wake \u2014 the 08-25/26 duplicate-push minors.',
+  },
+  {
+    id: 'xii. collapse warn logs on EVERY surfaced tick',
+    find: '  return { surfaced: true, logCollapse: !alreadySurfaced };',
+    to: '  return { surfaced: true, logCollapse: true }; /* MUTANT */',
+    why: 'One warn per minute for the length of every episode \u2014 log spam that buries the real signal.',
+  },
+  {
+    id: 'xiii. offline no longer evicts a surfaced collapse',
+    find: '  if (!online) return { surfaced: false, logCollapse: false };',
+    to: '  /* MUTANT */',
+    why: 'An unplugged device keeps a phantom rate-collapse alert alongside its offline alert.',
+  },
 ];
 
 function run(files) {
