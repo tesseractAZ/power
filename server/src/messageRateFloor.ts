@@ -262,6 +262,37 @@ export function isElectricallyIdle(
   return Math.abs(totalInWatts) + Math.abs(totalOutWatts) < IDLE_SURFACE_SUPPRESS_W;
 }
 
+/**
+ * v1.111.0 — collapse SURFACING decision (pure; the 60 s tick owns the Set).
+ *
+ * The v1.108.0 idle gate skipped surfacing whenever a device was idle — every
+ * tick, statelessly. On 2026-08-25/26 that produced a silent resolve→refire
+ * cycle: a device in a live collapse went briefly idle (a charge burst ended),
+ * dropped out of the published collapse set, its standing alert resolved with
+ * no log trail, and when power flowed again the alert re-fired as a brand-new
+ * push — duplicate "barely reporting" pushes ~69 min apart, and pushes with no
+ * matching collapse warn (the tracker's fired-edge had been consumed while
+ * idle-suppressed).
+ *
+ * Idleness EXPLAINS a quiet device, so it gates ENTRY into the surfaced set —
+ * but it must never EVICT a collapse that already surfaced while the device
+ * was provably active: the episode is the same episode. Eviction is earned by
+ * recovery (the collapse actually ended) or by going offline (the offline
+ * alert's business). `logCollapse` is true exactly once per surfaced episode,
+ * so a late surface (edge consumed while idle) still leaves a warn trail.
+ */
+export function decideCollapseSurfacing(
+  collapsing: boolean,
+  online: boolean,
+  idle: boolean,
+  alreadySurfaced: boolean,
+): { surfaced: boolean; logCollapse: boolean } {
+  if (!online) return { surfaced: false, logCollapse: false };
+  if (!collapsing) return { surfaced: false, logCollapse: false };
+  if (idle && !alreadySurfaced) return { surfaced: false, logCollapse: false };
+  return { surfaced: true, logCollapse: !alreadySurfaced };
+}
+
 export class RateFloorTracker {
   private readonly cfg: RateFloorConfig;
   private readonly bySn = new Map<string, SnState>();

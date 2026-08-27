@@ -468,3 +468,43 @@ test('isElectricallyIdle: threshold is a sum, just under/over the line', () => {
   assert.equal(isElectricallyIdle(14, 15), true,  `sum 29 < ${IDLE_SURFACE_SUPPRESS_W}`);
   assert.equal(isElectricallyIdle(15, 15), false, `sum 30 >= ${IDLE_SURFACE_SUPPRESS_W}`);
 });
+
+// ── v1.111.0: surfacing decision — idleness gates entry, never eviction ──────
+import { decideCollapseSurfacing } from '../src/messageRateFloor.js';
+
+test('surfacing: an idle device cannot ENTER the surfaced set (v1.108.0 behavior preserved)', () => {
+  const d = decideCollapseSurfacing(true, true, true, false);
+  assert.equal(d.surfaced, false);
+  assert.equal(d.logCollapse, false);
+});
+
+test('surfacing: THE FLAP KILL — a surfaced collapse survives an idle spell', () => {
+  // Active device surfaces (and logs once)...
+  const enter = decideCollapseSurfacing(true, true, false, false);
+  assert.deepEqual(enter, { surfaced: true, logCollapse: true });
+  // ...then the charge burst ends (idle) mid-collapse: the episode must HOLD —
+  // eviction here is the silent resolve→refire that produced duplicate pushes
+  // ~69 min apart on 08-25/26.
+  const hold = decideCollapseSurfacing(true, true, true, true);
+  assert.equal(hold.surfaced, true, 'idleness must not evict a surfaced episode');
+  assert.equal(hold.logCollapse, false, 'and it logs only once per episode');
+});
+
+test('surfacing: recovery ends the episode; a NEW collapse logs again', () => {
+  assert.equal(decideCollapseSurfacing(false, true, false, true).surfaced, false);
+  // after recovery the set is cleared by the tick, so the next episode re-enters fresh
+  const again = decideCollapseSurfacing(true, true, false, false);
+  assert.deepEqual(again, { surfaced: true, logCollapse: true });
+});
+
+test('surfacing: offline evicts even a surfaced episode (the offline alert owns it)', () => {
+  const d = decideCollapseSurfacing(true, false, false, true);
+  assert.equal(d.surfaced, false);
+});
+
+test('surfacing: a late surface (edge consumed while idle) still logs the warn', () => {
+  // Collapse fired while idle (never surfaced), device wakes while still collapsing:
+  const late = decideCollapseSurfacing(true, true, false, false);
+  assert.equal(late.surfaced, true);
+  assert.equal(late.logCollapse, true, 'the 08-26 05:07 pushes-without-warns hole');
+});

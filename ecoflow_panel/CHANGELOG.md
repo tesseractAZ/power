@@ -1,3 +1,24 @@
+## v1.111.0 — a surfaced collapse survives an idle spell
+
+### Six pushes, zero warns
+
+The v1.108.0 idle gate decided surfacing per tick, statelessly. A device in a
+live rate collapse that went briefly idle — a charge burst ending, the
+night-charge write flipping the fleet's power state — dropped out of the
+published collapse set, silently resolving its standing alert; when power moved
+again the alert re-fired as a brand-new push. The 08-26 night showed the full
+signature: six "barely reporting" pushes with zero level-40 collapse warns
+(the tracker's fired-edge had been consumed while suppressed), aligned to the
+22:55 apply and 05:05 revert edges, plus the prior night's duplicate pushes
+69 minutes apart.
+
+Idleness explains a QUIET device, so it gates entry into the surfaced set —
+it must never evict an episode that already proved itself on an active device.
+`decideCollapseSurfacing` (pure, tested) now owns the call: offline evicts,
+recovery evicts, idleness only blocks entry, and the collapse warn logs exactly
+once per surfaced episode even when the edge passed during an idle spell.
+`mutate-rate-floor.mjs` extended with the three silent failure modes (16/16).
+
 ## v1.110.1 — the db-export status route joins the rate-limit sweep
 
 `GET /api/db-export` (the snapshot-status read, v1.107.0) was the one flagged
