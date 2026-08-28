@@ -164,7 +164,7 @@ import {
   medianFilter3,
   actuatedDeliveredKwh,
   plannerSizingNeedBuyKwh,
-  calibratedLoadBandFactor,
+  calibratedLoadBandFactor, calibratedBuyDebiasFactor,
   type NightChargePlan,
   type NightChargeInputDeps,
   type NightForecastHour,
@@ -2608,6 +2608,7 @@ let rateFloorTicks = 0;
 const surfacedCollapses = new Set<string>();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
+let lastLoggedBuyDebiasKey: string | null = null;
 
 const rateFloorTick = setInterval(() => {
   try {
@@ -2983,6 +2984,21 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     { floor: loadBandFloor, cap: Number(process.env.ARB_LOAD_P90_CAP ?? 2.0) },
   );
   const loadP90Factor = loadBandCal.factor;
+  // v1.112.0 — buy de-bias from realized nights (announcement-only; see
+  // calibratedBuyDebiasFactor). Log on change, like the load band.
+  const buyDebiasCal = calibratedBuyDebiasFactor(
+    (() => { try { return recorder.readNightLedger(120); } catch { return []; } })(),
+  );
+  if (buyDebiasCal.basis === 'measured' && buyDebiasCal.factor > 1.005) {
+    const key = `${buyDebiasCal.factor.toFixed(3)}:${buyDebiasCal.samples}`;
+    if (key !== lastLoggedBuyDebiasKey) {
+      lastLoggedBuyDebiasKey = key;
+      app.log.info(
+        `night-charge: announced buy calibrated ×${buyDebiasCal.factor.toFixed(2)} from ${buyDebiasCal.samples} realized night(s) `
+        + `(raw plan figure is unchanged in the ledger; median delivered/planned, floor 1.0 — only ever raises the announcement)`,
+      );
+    }
+  }
   if (loadBandCal.basis === 'measured' && loadBandCal.factor > loadBandFloor) {
     // v1.108.0 — this evaluation runs every 30 min; the calibration only moves
     // when the night ledger grows. Log on CHANGE, not on every look (the 08-24
@@ -3135,6 +3151,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh,
+    buyDebiasFactor: buyDebiasCal.factor,
   };
 
   const inputs = buildNightChargeInputs(deps);
@@ -3218,7 +3235,7 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     horizon_hours: extras.horizonHours,
     soc_now_pct: round1(extras.socNowPct),
     target_soc_pct: plan.targetSocPct ?? 0,
-    buy_kwh: plan.buyKwh ?? 0,
+    buy_kwh: plan.buyKwh ?? 0,  // ★ RAW, never buyKwhDebiased — the learner reads this column; feeding it the debiased figure would collapse the calibration onto its own output (ratio→1).
     required_extra_kwh: plan.requiredExtraKwh ?? 0,
     reserve_floor_pct: plan.reserveFloorPct,
     cushion_pct: plan.cushionPct,
@@ -3519,6 +3536,10 @@ function scoreNightRow(
     objective: y.objective as NightChargeObjective,
     chargeTonight: (y.buy_kwh ?? 0) > 0,
     buyKwh: y.buy_kwh ?? null,
+    // Scorer reconstruction: the ledger holds only the RAW buy (by design —
+    // the de-bias must never feed on its own output), so factor 1 here.
+    buyKwhDebiased: y.buy_kwh ?? null,
+    buyDebiasFactor: 1,
     targetSocPct: y.target_soc_pct ?? null,
     // The ledger freezes the PREDICTION (target_soc_pct) because that is what
     // the scorer grades — soc_min_err/buy_err only detect an under-buy when
@@ -3766,7 +3787,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       if (haNotifyDelivered || audibleDelivered) {
         persistNightActuation(armedCandidate);
         app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.buyKwh ?? '?'} kWh); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment.`,
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.buyKwhDebiased ?? plan?.buyKwh ?? '?'} kWh); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment.`,
         );
       } else {
         app.log.error(

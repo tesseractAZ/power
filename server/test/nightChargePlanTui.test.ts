@@ -24,6 +24,8 @@ function mkPlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     basisComplete: true,
     objective: 'resilience_cushion',
     chargeTonight: true,
+    buyKwhDebiased: null,
+    buyDebiasFactor: 1,
     buyKwh: 3.2,
     targetSocPct: 85,
     // No contention in this fixture, so the ask equals the expectation.

@@ -343,6 +343,8 @@ function mkPlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     basisComplete: true,
     objective: 'resilience_cushion',
     chargeTonight: true,
+    buyKwhDebiased: null,
+    buyDebiasFactor: 1,
     buyKwh: 36,
     targetSocPct: 66.4,
     requiredExtraKwh: 100,
