@@ -112,6 +112,8 @@ function fakePlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     basisComplete: true,
     objective: 'resilience_cushion',
     chargeTonight: true,
+    buyKwhDebiased: null,
+    buyDebiasFactor: 1,
     buyKwh: 12.3,
     targetSocPct: 78,
     // No contention in this fixture, so the ask equals the expectation.

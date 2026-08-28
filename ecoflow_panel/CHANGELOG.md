@@ -1,3 +1,26 @@
+## v1.112.0 — the announced buy learns from realized nights
+
+### "Buy ~21.6 kWh" bought 35.8
+
+The night-charge advisory's buy figure under-predicted by 1.66× on 08-26/27.
+The actuation was correctly bounded by the reserve setpoint — the miss is in
+the announcement, and an announcement the operator learns to distrust stops
+informing anything.
+
+`calibratedBuyDebiasFactor`: median of delivered/planned over eligible ledger
+nights (actuated, scored, no disclosed shortfall, plan ≥ 3 kWh), floored at
+1.0 (only ever raises the announcement), capped at 1.75, silent below 7
+samples. It corrects the ANNOUNCED figure only — the ledger keeps recording
+the raw estimate (the learner must never feed on its own output) and
+`chargeTonight` still thresholds on the raw figure, so learned data can never
+flip a decision, only make the disclosure honest. The evening ARM line and the
+plan rationale name the calibration when it is active.
+
+Also: the Core 4 charge-cap advisory from the 08-27 audit (healthy siblings
+riding ~99% because the cap is a device MEAN that the frozen warranty pack
+drags down) needs the EcoFlow app — the DPU write payload is undocumented and
+this add-on does not guess writes against live batteries.
+
 ## v1.111.0 — a surfaced collapse survives an idle spell
 
 ### Six pushes, zero warns
