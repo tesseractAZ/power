@@ -116,6 +116,12 @@ export interface NightChargeInputs {
    *  to the flat chargeCapKw (pre-v1.60.0 behaviour). Never silently "0". */
   gridInputCapKw: number | null;
 
+  /** v1.112.0 — learned buy de-bias (calibratedBuyDebiasFactor). Multiplies the
+   *  ANNOUNCED buy only; buyKwh itself stays raw (ledger + learner input), and
+   *  chargeTonight thresholds on the raw figure so learned data never flips the
+   *  decision, only the disclosure. Default 1 (no calibration). */
+  buyDebiasFactor?: number;
+
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
 
@@ -195,8 +201,14 @@ export interface NightChargePlan {
   /** The single owner-facing decision. NEVER null (defaults false). */
   chargeTonight: boolean;
 
-  /** Grid energy to buy at the meter, kWh. null when basis incomplete. */
+  /** Grid energy to buy at the meter, kWh. null when basis incomplete.
+   *  ★ RAW physics-derived estimate — the ledger records THIS (learner input). */
   buyKwh: number | null;
+  /** v1.112.0 — buyKwh x the learned de-bias, for announcement surfaces. Equals
+   *  buyKwh when uncalibrated. null iff buyKwh is null. */
+  buyKwhDebiased: number | null;
+  /** The factor applied above (1 = uncalibrated). */
+  buyDebiasFactor: number;
   /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
    *  close, given every cap — including the v1.60.0 EV-contention derate. This
    *  is the number the ledger scores (a systematic gap between this and the
@@ -321,6 +333,8 @@ function nullPlan(
   return {
     generatedAt: inputs.nowMs,
     basisComplete,
+    buyKwhDebiased: null,
+    buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
     objective: 'none',
     chargeTonight: false,
     buyKwh: null,
@@ -607,6 +621,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       ...nullPlan(inputs, true, `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above the ${round1(reserveFloorPct + cushionPct)}% floor+cushion; no charge needed.${preWindowNote}`),
       objective: 'none',
       buyKwh: 0,
+      buyKwhDebiased: 0,
+      buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
       requiredExtraKwh: 0,
       targetSocPct: round1((packAtWindowEnd_noBuy / fullKwh) * 100),
       // A hold night asks for nothing: the trough already holds the line, no
@@ -758,8 +774,13 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ? ` The reserve is set to ${setpointSocPct}% (the resilience requirement) but the window is only expected to reach ~${targetSocPct}%.`
     : '';
 
+  // v1.112.0 — the ANNOUNCED buy carries the learned de-bias; the raw figure
+  // stays on buyKwh (ledger + learner input) and still owns chargeTonight.
+  const buyDebiasFactor = inputs.buyDebiasFactor ?? 1;
+  const buyKwhDebiased = round2(buyKwh * buyDebiasFactor);
+  const calNote = buyDebiasFactor > 1.005 ? ` (raw estimate ${round1(buyKwh)} kWh × ${buyDebiasFactor.toFixed(2)} realized-buy calibration)` : '';
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwh)} kWh overnight → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     // The deliverable buy can be pushed under the minimum-buy threshold BY the
     // contention itself, so this branch must carry the shortfall disclosure too
     // — otherwise a night the window physically cannot serve would read as a
@@ -772,6 +793,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     objective: chargeTonight ? 'resilience_cushion' : 'none',
     chargeTonight,
     buyKwh: round2(buyKwh),
+    buyKwhDebiased,
+    buyDebiasFactor,
     targetSocPct,
     setpointSocPct,
     requiredExtraKwh: round2(requiredExtraKwh),
@@ -977,6 +1000,8 @@ export interface NightChargeInputDeps {
 
   morningPvSurplusP90Kwh: number | null;
   minBuyKwh: number;
+  /** v1.112.0 — learned buy de-bias, forwarded verbatim to the inputs. */
+  buyDebiasFactor?: number;
 }
 
 /**
@@ -1047,7 +1072,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays, bandCoverageFrac,
-    morningPvSurplusP90Kwh, minBuyKwh,
+    morningPvSurplusP90Kwh, minBuyKwh, buyDebiasFactor,
   } = deps;
 
   const window = resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
@@ -1184,6 +1209,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     window,
     horizon: trimmed,
     morningPvSurplusP90Kwh,
+    buyDebiasFactor,
     confidenceTier,
     basisComplete,
     minBuyKwh,
@@ -1304,6 +1330,61 @@ export function calibratedLoadBandFactor(
   const halfWidth = abs[idx];
   const factor = Math.min(cap, Math.max(floor, 1 + halfWidth));
   return { factor: Math.round(factor * 1000) / 1000, basis: 'measured', samples: abs.length };
+}
+
+/**
+ * v1.112.0 — BUY DE-BIAS from realized nights (design §3.4's "buy de-bias",
+ * first live producer/consumer for that lane).
+ *
+ * The 08-26/27 night announced "buy ~21.6 kWh" and delivered ~35.8 kWh — a
+ * 1.66x under-PREDICTION. The actuation itself is bounded by the reserve
+ * setpoint, so nothing unsafe happened; but the announcement is the advisory's
+ * product, and a number the operator learns to distrust is a number that stops
+ * informing decisions.
+ *
+ * The factor is the MEDIAN of realized/planned buy over eligible nights
+ * (actuated, scored, no disclosed cushion shortfall, plan large enough that the
+ * ratio is meaningful), with the load-band guards:
+ *  - FLOOR at 1.0 — the calibration only ever RAISES the announced buy. The
+ *    raw physics-derived estimate stays the lower bound; shrinking it on
+ *    learned data would import forecast noise into the safe direction's
+ *    denominator.
+ *  - CAP so a few pathological nights cannot run the announcement away.
+ *  - minSamples before trusting it at all.
+ *
+ * ★ SELF-REFERENCE GUARD: the ledger's `buy_kwh` column must keep recording
+ * the RAW plan buy (recordNightPlanRow does — see the test pinning it).
+ * Feeding the DEBIASED figure back into the ledger would make each night's
+ * ratio ≈1 and decay the factor toward nothing — the learner eating its own
+ * output. The debiased figure exists ONLY on the announcement surfaces.
+ */
+export function calibratedBuyDebiasFactor(
+  rows: ReadonlyArray<{
+    buy_kwh?: number | null;
+    delivered_kwh?: number | null;
+    actuated?: number | null;
+    scored?: number | null;
+    cushion_shortfall?: number | null;
+  }>,
+  opts: { floor?: number; cap?: number; minSamples?: number; minPlanKwh?: number } = {},
+): { factor: number; basis: 'measured' | 'default'; samples: number } {
+  const floor = opts.floor ?? 1.0;
+  const cap = opts.cap ?? 1.75;
+  const minSamples = opts.minSamples ?? 7;
+  const minPlanKwh = opts.minPlanKwh ?? 3;
+  const ratios = rows
+    .filter((r) =>
+      r.actuated === 1 &&
+      r.scored === 1 &&
+      !(r.cushion_shortfall === 1) &&
+      typeof r.buy_kwh === 'number' && Number.isFinite(r.buy_kwh) && r.buy_kwh >= minPlanKwh &&
+      typeof r.delivered_kwh === 'number' && Number.isFinite(r.delivered_kwh) && r.delivered_kwh >= 0)
+    .map((r) => (r.delivered_kwh as number) / (r.buy_kwh as number))
+    .sort((a, b) => a - b);
+  if (ratios.length < minSamples) return { factor: floor, basis: 'default', samples: ratios.length };
+  const median = ratios[Math.floor(ratios.length / 2)];
+  const factor = Math.min(cap, Math.max(floor, median));
+  return { factor: Math.round(factor * 1000) / 1000, basis: 'measured', samples: ratios.length };
 }
 
 export function plannerSizingNeedBuyKwh(opts: {

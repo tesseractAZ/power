@@ -8559,6 +8559,23 @@ Env-only knobs (not in the options form): `NIGHT_CHARGE_LATCH_PATH` (latch file 
 
 ---
 
+### 15.x Announced-buy de-bias (`calibratedBuyDebiasFactor`, v1.112.0)
+
+The 08-26/27 night announced "buy ~21.6 kWh" and delivered ~35.8 — a 1.66×
+under-prediction. Actuation is bounded by the reserve setpoint so nothing
+unsafe happened, but the announcement is the advisory's product. The factor is
+the MEDIAN of `delivered_kwh / buy_kwh` over eligible ledger nights (actuated,
+scored, no disclosed cushion shortfall, plan ≥ 3 kWh), FLOOR 1.0 (only ever
+raises the announcement — the raw physics estimate is the lower bound), CAP
+1.75, minSamples 7. It multiplies the ANNOUNCED figure only: `plan.buyKwh`
+stays raw and is what the ledger records (★ the self-reference guard — feeding
+the debiased figure back would collapse each night's ratio to ~1 and the
+learner would eat its own output), and `chargeTonight` thresholds on the raw
+figure so learned data can never flip the decision, only the disclosure. New
+plan fields `buyKwhDebiased` / `buyDebiasFactor`; the rationale and the ARM
+announcement disclose the calibration when active. This is the first live
+producer/consumer for the design §3.4 "buy de-bias" lane.
+
 ## Appendix A — Feature Inventory (evidence linkage)
 
 Purpose: a pruning-oriented ledger of every substantive feature/engine, what math it runs, which field signals feed it, and — decisive for keeping it — **what actually consumes its output**. Consumer columns were verified by grepping the pinned source revision (`git grep … HEAD -- server/src web/src`), not by reading intent from comments. Evidence status is one of:
