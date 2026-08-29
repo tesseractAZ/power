@@ -473,38 +473,61 @@ test('isElectricallyIdle: threshold is a sum, just under/over the line', () => {
 import { decideCollapseSurfacing } from '../src/messageRateFloor.js';
 
 test('surfacing: an idle device cannot ENTER the surfaced set (v1.108.0 behavior preserved)', () => {
-  const d = decideCollapseSurfacing(true, true, true, false);
+  const d = decideCollapseSurfacing(true, true, true, false, true);
   assert.equal(d.surfaced, false);
   assert.equal(d.logCollapse, false);
 });
 
 test('surfacing: THE FLAP KILL — a surfaced collapse survives an idle spell', () => {
   // Active device surfaces (and logs once)...
-  const enter = decideCollapseSurfacing(true, true, false, false);
+  const enter = decideCollapseSurfacing(true, true, false, false, true);
   assert.deepEqual(enter, { surfaced: true, logCollapse: true });
   // ...then the charge burst ends (idle) mid-collapse: the episode must HOLD —
   // eviction here is the silent resolve→refire that produced duplicate pushes
   // ~69 min apart on 08-25/26.
-  const hold = decideCollapseSurfacing(true, true, true, true);
+  const hold = decideCollapseSurfacing(true, true, true, true, true);
   assert.equal(hold.surfaced, true, 'idleness must not evict a surfaced episode');
   assert.equal(hold.logCollapse, false, 'and it logs only once per episode');
 });
 
 test('surfacing: recovery ends the episode; a NEW collapse logs again', () => {
-  assert.equal(decideCollapseSurfacing(false, true, false, true).surfaced, false);
+  assert.equal(decideCollapseSurfacing(false, true, false, true, true).surfaced, false);
   // after recovery the set is cleared by the tick, so the next episode re-enters fresh
-  const again = decideCollapseSurfacing(true, true, false, false);
+  const again = decideCollapseSurfacing(true, true, false, false, true);
   assert.deepEqual(again, { surfaced: true, logCollapse: true });
 });
 
 test('surfacing: offline evicts even a surfaced episode (the offline alert owns it)', () => {
-  const d = decideCollapseSurfacing(true, false, false, true);
+  const d = decideCollapseSurfacing(true, false, false, true, true);
   assert.equal(d.surfaced, false);
 });
 
 test('surfacing: a late surface (edge consumed while idle) still logs the warn', () => {
   // Collapse fired while idle (never surfaced), device wakes while still collapsing:
-  const late = decideCollapseSurfacing(true, true, false, false);
+  const late = decideCollapseSurfacing(true, true, false, false, true);
   assert.equal(late.surfaced, true);
   assert.equal(late.logCollapse, true, 'the 08-26 05:07 pushes-without-warns hole');
+});
+
+// ── v1.112.1: entry additionally requires starved-RIGHT-NOW ──────────────────
+
+test('surfacing: a late surface during RECOVERY dwell is suppressed (the 08-27 22:56 noise)', () => {
+  // Device woke at the write edge, rate already rebounded (34 vs baseline 15):
+  // collapsing is still true only because the recovery dwell has not elapsed.
+  const d = decideCollapseSurfacing(true, true, false, false, false);
+  assert.equal(d.surfaced, false, 'an episode that is already ending needs no operator');
+  assert.equal(d.logCollapse, false);
+});
+
+test('surfacing: a late surface on a STILL-starved active device fires (the SHP2-crawl case)', () => {
+  const d = decideCollapseSurfacing(true, true, false, false, true);
+  assert.deepEqual(d, { surfaced: true, logCollapse: true });
+});
+
+test('surfacing: holding ignores starvedNow — recovery or offline are the only exits', () => {
+  // Surfaced episode whose rate momentarily pops above the floor mid-collapse:
+  // must hold (evicting here is the v1.108.0 flap all over again).
+  const d = decideCollapseSurfacing(true, true, false, true, false);
+  assert.equal(d.surfaced, true);
+  assert.equal(d.logCollapse, false);
 });

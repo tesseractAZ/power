@@ -1,3 +1,21 @@
+## v1.112.1 — a collapse that has already rebounded needs no operator
+
+v1.111.0's first live night passed its pairing test (every push had a warn, no
+duplicates) — and exposed the next layer: every late surface fired during the
+RECOVERY dwell. The device woke at the night-charge write edge, its message
+rate rebounded instantly, and the warn read "collapsed to 34 msg/min (baseline
+~15)" — self-contradicting — while the push stood for the ~4 minutes the
+tracker needed to confirm recovery. One episode (Core 4) idled open for 7 h on
+the same mechanism. All 8 of the night's warn+push pairs were episodes that
+were already ending.
+
+Surfacing ENTRY now additionally requires the device to be starved right now
+(current rate under the collapse floor; nulls fail toward starved). A rebound
+closes silently via the recovery dwell; a still-starved active device — the
+SHP2-crawl case this detector exists for — surfaces exactly as before; holding
+is untouched (only recovery or offline end a surfaced episode). Harness
+`mutate-rate-floor.mjs` 17/17.
+
 ## v1.112.0 — the announced buy learns from realized nights
 
 ### "Buy ~21.6 kWh" bought 35.8

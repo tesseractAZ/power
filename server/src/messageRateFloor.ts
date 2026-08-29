@@ -286,10 +286,21 @@ export function decideCollapseSurfacing(
   online: boolean,
   idle: boolean,
   alreadySurfaced: boolean,
+  starvedNow: boolean,
 ): { surfaced: boolean; logCollapse: boolean } {
   if (!online) return { surfaced: false, logCollapse: false };
   if (!collapsing) return { surfaced: false, logCollapse: false };
-  if (idle && !alreadySurfaced) return { surfaced: false, logCollapse: false };
+  // v1.112.1 — ENTRY additionally requires the device to be starved RIGHT NOW
+  // (current rate under the collapse floor). On v1.111.0's first live night
+  // every late surface fired during the RECOVERY dwell: the device woke at the
+  // night-charge write edge, its rate jumped (22:56 read "collapsed to 34
+  // msg/min, baseline ~15" — self-contradicting), and the alert pushed for the
+  // ~4 minutes the tracker needed to confirm recovery. An episode whose rate
+  // has already rebounded needs no operator; the recovery dwell closes it
+  // silently. A late surface on a STILL-starved active device (the SHP2-crawl
+  // case this detector exists for) is untouched. Holding is also untouched:
+  // once surfaced, only recovery or offline ends the episode.
+  if (!alreadySurfaced && (idle || !starvedNow)) return { surfaced: false, logCollapse: false };
   return { surfaced: true, logCollapse: !alreadySurfaced };
 }
 
