@@ -137,7 +137,7 @@ import {
 } from './deviceLink.js';
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
-import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, type RateFloorPersisted } from './messageRateFloor.js';
+import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, DEFAULT_RATE_FLOOR_CONFIG, type RateFloorPersisted } from './messageRateFloor.js';
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
 import { evaluateSelfHeal, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState } from './telemetryBlind.js';
@@ -2639,7 +2639,11 @@ const rateFloorTick = setInterval(() => {
       const projW: any = devices[sn]?.projection;
       const online = devices[sn]?.online === true;
       const idle = isElectricallyIdle(projW?.totalInWatts, projW?.totalOutWatts);
-      const dec = decideCollapseSurfacing(r.collapsing, online, idle, surfacedCollapses.has(sn));
+      // v1.112.1 — "starved right now": current rate under the collapse floor.
+      // Nulls fail toward starved (never let missing data mute a real episode).
+      const starvedNow = r.rate == null || r.baseline <= 0
+        || r.rate < DEFAULT_RATE_FLOOR_CONFIG.floorFraction * r.baseline;
+      const dec = decideCollapseSurfacing(r.collapsing, online, idle, surfacedCollapses.has(sn), starvedNow);
       if (!online) { surfacedCollapses.delete(sn); continue; }
       if (dec.surfaced) {
         surfacedCollapses.add(sn);

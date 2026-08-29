@@ -1541,6 +1541,17 @@ idleness only blocks initial entry; the collapse warn logs exactly once per
 surfaced episode, even when the edge passed during an idle spell. Harness
 extended to 16 mutants.
 
+**v1.112.1 — entry additionally requires starved-RIGHT-NOW.** v1.111.0's first
+live night showed every late surface firing during the RECOVERY dwell: the
+device woke at the night-charge write edge, its rate rebounded instantly, and
+the warn read "collapsed to 34 msg/min (baseline ~15)" — self-contradicting —
+while the alert pushed for the ~4 minutes the tracker needed to confirm
+recovery (one episode idled open 7 h that way). Entry now also requires the
+current rate to sit under the collapse floor (`floorFraction x baseline`;
+nulls fail toward starved): an episode that has already rebounded closes
+silently via the recovery dwell, a still-starved active device (the SHP2-crawl
+case) surfaces exactly as before, and holding is untouched. Harness 17/17.
+
 When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a fired message-rate collapse
 for `SELF_HEAL_AFTER_MS` (20 min), the add-on rebuilds its own MQTT session:
 stop, certificate re-fetch, fresh connect. Guards, each mutation-proven
