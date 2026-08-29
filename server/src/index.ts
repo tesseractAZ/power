@@ -188,6 +188,8 @@ import {
   decideActuation,
   emptyActuationState,
   coerceActuationState,
+  isReserveArbitrageRaised,
+  setReserveArbitrageRaised,
   APPLY_LEAD_MS,
   REVERT_ESCALATE_AFTER,
   type NightActuationState,
@@ -2825,8 +2827,14 @@ let nightActuationMem: NightActuationState = (() => {
     return emptyActuationState();
   }
 })();
+// v1.113.0 — seed the posture from persisted state so a restart mid-window
+// does not momentarily present an arbitrage-raised reserve as a genuine floor.
+setReserveArbitrageRaised(isReserveArbitrageRaised(nightActuationMem));
 function persistNightActuation(s: NightActuationState): void {
   nightActuationMem = s;
+  // v1.113.0 — keep the alert engine's reserve-posture flag in lockstep with
+  // every actuation-state write (apply, revert, cancel, abort).
+  setReserveArbitrageRaised(isReserveArbitrageRaised(s));
   try {
     atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH, JSON.stringify(s));
   } catch (e: any) {

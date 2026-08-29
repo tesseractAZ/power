@@ -138,6 +138,16 @@ jobs:
           echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" \
             >> "$GITHUB_OUTPUT"
 
+      # v1.113.0 — BUILD_DATE was `github.event.repository.updated_at`, a
+      # REPOSITORY-metadata timestamp that does not advance per build: every
+      # image carried whatever value the triggering event payload happened to
+      # hold, so /api/version reported a builtAt that never moved and could not
+      # be used to tell two images apart (the `ref` SHA was the only real
+      # discriminator). Stamp the actual build instant instead.
+      - name: Build timestamp
+        id: stamp
+        run: echo "iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         id: build
         with:
@@ -152,7 +162,7 @@ jobs:
           build-args: |
             BUILD_FROM=${{ matrix.base }}
             BUILD_ARCH=${{ matrix.arch }}
-            BUILD_DATE=${{ github.event.repository.updated_at }}
+            BUILD_DATE=${{ steps.stamp.outputs.iso }}
             BUILD_DESCRIPTION=Live dashboard + control-room TUI for an EcoFlow off-grid home — life-safety battery/grid alarms, forecasting, and a TOU night-charge engine
             BUILD_NAME=Power
             BUILD_REF=${{ github.sha }}
