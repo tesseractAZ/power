@@ -20,6 +20,7 @@ export function resetVdiffWarnHoldForTesting(): void {
 }
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
+import { getReserveArbitrageRaised } from './nightChargeActuator.js';
 import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
 import { currentAssessment } from './selfVitals.js';
@@ -1098,6 +1099,9 @@ export function computeAlerts(
   if (shp2?.online && shp2.projection) {
     const sp = shp2.projection;
     const reserve = sp.backupReserveSoc ?? 15;
+    // v1.113.0 — true only while OUR night-charge write is holding the reserve
+    // up (applied, not yet reverted); persisted across restarts by the actuator.
+    const arbitrageRaised = getReserveArbitrageRaised();
     if (sp.backupBatPercent != null) {
       // v1.17.0 (engine-review F14) — INCLUSIVE floor comparison, matching
       // runwayAlarm.belowReserveFloor's `<=`. The pool pins at EXACTLY the
@@ -1121,8 +1125,13 @@ export function computeAlerts(
           // When the reserve is ARBITRAGE-RAISED (night-charge writes 50), pool <
           // reserve is the charge window's normal filling state — that stays
           // info, preserving the F14 "floor-riding must not page" contract.
-          severity: onGrid ? (reserve <= 15 ? 'warning' : 'info') : 'critical',
-          ...(onGrid && reserve <= 15 ? { priority: 'medium' as const } : {}),
+          // v1.113.0 — the discriminator is the actuator's POSTURE, not the
+          // reserve's magnitude. `reserve <= 15` worked only while the owner's
+          // floor sat below 15; raising the floor to 20 for MORE buffer would
+          // have silently reclassified a genuine breach as arbitrage filling
+          // and dropped the push. See isReserveArbitrageRaised.
+          severity: onGrid ? (arbitrageRaised ? 'info' : 'warning') : 'critical',
+          ...(onGrid && !arbitrageRaised ? { priority: 'medium' as const } : {}),
           category: 'SHP2',
           device: shp2.deviceName,
           sourceSn: shp2.sn,

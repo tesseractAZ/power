@@ -1,3 +1,33 @@
+## v1.113.0 — the reserve floor is what the owner set, not what a number implies
+
+### Raising the floor would have made the alarm quieter
+
+The owner raised the SHP2 reserve floor from 10% to 20% for more outage
+buffer. The below-reserve alert decided "genuine floor breach" (warning +
+one [Medium] push per episode) versus "night-charge is filling the pool"
+(silent info) with `reserve <= 15` — a proxy that holds only while the
+owner's floor sits below 15. At a floor of 20 it inverts: a real breach of
+the new, more conservative floor classifies as arbitrage filling and stops
+pushing. Asking for more protection would have bought less.
+
+The actuator already knows the answer as a fact — it applied the raise, it
+recorded the value it will restore, and that state is persisted across
+restarts. `isReserveArbitrageRaised` keys on it, published to the alert
+engine on every actuation-state write and seeded at boot. The F14
+"floor-riding must not page" contract is preserved exactly; it is now
+established by posture rather than inferred from magnitude. New harness
+`scripts/mutate-reserve-posture.mjs` (6/6) covers both silent inversions.
+
+The pre-existing v1.81.0 test asserted the arbitrage case through the
+magnitude proxy; its intent is unchanged and it now states the posture.
+
+### Also
+
+`BUILD_DATE` was `github.event.repository.updated_at`, repository metadata
+that does not advance per build — every image reported a `builtAt` that never
+moved, leaving the commit SHA as the only way to tell two images apart. The
+workflow now stamps the actual build instant.
+
 ## v1.112.1 — a collapse that has already rebounded needs no operator
 
 v1.111.0's first live night passed its pairing test (every push had a warn, no

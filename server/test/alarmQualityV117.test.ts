@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { computeAlerts, resetOnScreenSocBandForTesting, type Alert } from '../src/alerts.js';
 import { activeSocBandWithHysteresis } from '../src/batterySocAlarm.js';
 import { isForecastDipResolveDwellFamily } from '../src/alertMonitor.js';
+import { setReserveArbitrageRaised, resetReserveArbitrageRaised } from '../src/nightChargeActuator.js';
 import { computeLearnedAlerts, _resetPeerHitCounts } from '../src/analytics.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
@@ -69,11 +70,23 @@ test('F14/v1.81.0 — the TRUE floor on-grid is a warning (pushes once), never a
 test('v1.81.0 — an ARBITRAGE-RAISED reserve (night-charge 50%) does NOT page while filling', () => {
   // During a charge window the pool sits below the raised reserve by design;
   // that is the F14 floor-riding case and it stays a quiet info advisory.
+  //
+  // v1.113.0 — the INTENT is unchanged; only how "arbitrage-raised" is
+  // established has. v1.81.0 inferred it from the reserve's magnitude
+  // (`reserve <= 15` ⇒ true floor, higher ⇒ arbitrage), which silently
+  // misclassified an owner floor raised above 15 — the 20% change of
+  // 2026-08-28. The discriminator is now the actuator's recorded posture, so
+  // the test must state it rather than smuggle it in through the number.
   resetOnScreenSocBandForTesting();
-  const alerts = computeAlerts(devices(shp2(45, 50)), undefined, { backstopping: true, reason: 'grid present' });
-  const below = belowReserve(alerts);
-  assert.ok(below);
-  assert.equal(below?.severity, 'info', 'the charge window must not page nightly');
+  setReserveArbitrageRaised(true);
+  try {
+    const alerts = computeAlerts(devices(shp2(45, 50)), undefined, { backstopping: true, reason: 'grid present' });
+    const below = belowReserve(alerts);
+    assert.ok(below);
+    assert.equal(below?.severity, 'info', 'the charge window must not page nightly');
+  } finally {
+    resetReserveArbitrageRaised();
+  }
 });
 
 test('F14 — one point above reserve is still "approaching" (warning off-grid)', () => {
