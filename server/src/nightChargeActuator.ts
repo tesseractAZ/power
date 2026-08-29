@@ -35,6 +35,38 @@ export function resolveNightChargeMode(raw: string | undefined | null): NightCha
 
 /** The device clamp for backupReserveSoc plus the supervised ceiling: the
  *  write never raises the reserve above 50% regardless of the plan target. */
+/**
+ * v1.113.0 — is the SHP2's reserve CURRENTLY raised by our own night-charge
+ * write? PURE.
+ *
+ * The below-reserve alert used to answer this with a magic number: an on-grid
+ * pool at/below a reserve of <= 15 was the TRUE floor (warning + one [Medium]
+ * push per episode), and anything higher was assumed to be the charge window's
+ * normal filling state (silent info, the F14 "floor-riding must not page"
+ * contract). That proxy holds only while the owner's floor happens to sit
+ * below 15. The moment the owner RAISES the floor for more buffer — 20% on
+ * 2026-08-28 — the proxy inverts: a genuine floor breach at the new, higher,
+ * more conservative floor would be classified as arbitrage and go silent,
+ * so asking for more protection would have bought less.
+ *
+ * The actuator already knows the answer as a fact: it applied the raise, it
+ * recorded the value it will restore, and its state is persisted across
+ * restarts. Key on that, never on the number.
+ */
+export function isReserveArbitrageRaised(
+  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs'>,
+): boolean {
+  return state.appliedAtMs != null && state.revertedAtMs == null;
+}
+
+/** v1.113.0 — publisher so the alert engine can read the actuator's posture
+ *  without importing index.ts (mirrors messageRateFloorAlert's set/get). */
+let reserveArbitrageRaised = false;
+export function setReserveArbitrageRaised(v: boolean): void { reserveArbitrageRaised = v; }
+export function getReserveArbitrageRaised(): boolean { return reserveArbitrageRaised; }
+/** Test seam. */
+export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = false; }
+
 export function clampReserveTarget(targetSocPct: number): number {
   return Math.min(50, Math.max(10, Math.round(targetSocPct)));
 }
