@@ -131,8 +131,8 @@ const MUTANTS = [
   },
   {
     id: 'xi. \u2605 idle EVICTS a surfaced collapse \u2014 the silent resolve\u2192refire flap returns',
-    find: '  if (idle && !alreadySurfaced) return { surfaced: false, logCollapse: false };',
-    to: '  if (idle) return { surfaced: false, logCollapse: false }; /* MUTANT */',
+    find: '  if (!alreadySurfaced && (idle || !starvedNow)) return { surfaced: false, logCollapse: false };',
+    to: '  if (idle || !starvedNow) return { surfaced: false, logCollapse: false }; /* MUTANT */',
     why: 'A brief idle spell mid-collapse resolves the standing alert with no trail and re-pushes on wake \u2014 the 08-25/26 duplicate-push minors.',
   },
   {
@@ -146,6 +146,12 @@ const MUTANTS = [
     find: '  if (!online) return { surfaced: false, logCollapse: false };',
     to: '  /* MUTANT */',
     why: 'An unplugged device keeps a phantom rate-collapse alert alongside its offline alert.',
+  },
+  {
+    id: 'xiv. \u2605 entry ignores starvedNow \u2014 recovery-dwell noise returns',
+    find: '  if (!alreadySurfaced && (idle || !starvedNow)) return { surfaced: false, logCollapse: false };',
+    to: '  if (!alreadySurfaced && idle) return { surfaced: false, logCollapse: false }; /* MUTANT */',
+    why: 'Every write-edge wake surfaces a push for the ~4 min the tracker needs to confirm recovery \u2014 the 08-27 first-night noise (8 warn+push pairs, all for episodes that were ending).',
   },
 ];
 
