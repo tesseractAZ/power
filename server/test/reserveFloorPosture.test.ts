@@ -86,3 +86,22 @@ test('inclusive floor comparison survives (v1.17.0 F14): pool EXACTLY at the flo
   setReserveArbitrageRaised(false);
   assert.ok(below(computeAlerts(fleet(20, 20), undefined, onGrid)), 'pool == reserve must alert');
 });
+
+// ── v1.114.0: the owner reserve-floor guard (pure parts) ────────────────────
+import { clampReserveTarget } from '../src/nightChargeActuator.js';
+
+test('owner floor: the [10,50] envelope is the device clamp, unchanged', () => {
+  assert.equal(clampReserveTarget(20), 20, 'the new owner floor is inside the envelope');
+  assert.equal(clampReserveTarget(9), 10);
+  assert.equal(clampReserveTarget(60), 50);
+});
+
+test('owner floor: a mid-window change must be refused — the revert would undo it', () => {
+  // The endpoint refuses when isReserveArbitrageRaised(state) is true. Pinning
+  // the predicate that gates it: the actuator restores priorReservePct at
+  // window close, so a floor change applied underneath a live write would be
+  // silently reverted to the OLD floor hours later.
+  assert.equal(isReserveArbitrageRaised({ appliedAtMs: 1_000, revertedAtMs: null }), true, 'refuse');
+  assert.equal(isReserveArbitrageRaised({ appliedAtMs: 1_000, revertedAtMs: 2_000 }), false, 'allow after revert');
+  assert.equal(isReserveArbitrageRaised({ appliedAtMs: null, revertedAtMs: null }), false, 'allow when idle');
+});
