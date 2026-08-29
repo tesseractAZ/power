@@ -1,3 +1,17 @@
+## v1.114.0 — the owner can set his own reserve floor
+
+The panel could raise `backupReserveSoc` for night-charge arbitrage, but the
+owner had no way to set his OWN floor through it — a buffer change meant the
+vendor app and a settings-drift line after the fact.
+
+`POST /api/reserve-floor?pct=N` (write-auth, rate-limited) uses the same
+audited helper the nightly actuator uses, with the same [10,50] envelope.
+
+★ It REFUSES (409) while a night-charge write is in flight. The actuator
+captured `priorReservePct` at apply time and restores exactly that at window
+close, so changing the floor underneath a live write would silently revert to
+the OLD floor hours later. Retry after the revert, or cancel the night first.
+
 ## v1.113.0 — the reserve floor is what the owner set, not what a number implies
 
 ### Raising the floor would have made the alarm quieter

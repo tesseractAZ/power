@@ -190,6 +190,7 @@ import {
   coerceActuationState,
   isReserveArbitrageRaised,
   setReserveArbitrageRaised,
+  clampReserveTarget,
   APPLY_LEAD_MS,
   REVERT_ESCALATE_AFTER,
   type NightActuationState,
@@ -4932,6 +4933,57 @@ app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignmen
  * positive path). The latch otherwise retires on its own 48 h after the pack
  * leaves the fleet.
  */
+/**
+ * v1.114.0 — OWNER RESERVE FLOOR. The panel could raise `backupReserveSoc` for
+ * night-charge arbitrage but the owner had no way to set his OWN floor through
+ * it, so a buffer change meant the vendor app and a settings-drift line after
+ * the fact. Same audited helper the nightly actuator uses (clamped, readback is
+ * observed on the next poll, written to the write log).
+ *
+ * ★ REFUSED WHILE A NIGHT-CHARGE WRITE IS IN FLIGHT. The actuator captured
+ * `priorReservePct` at apply time and restores exactly that at window close;
+ * changing the floor underneath it would make the revert restore the OLD floor
+ * hours later, silently undoing the owner's change. Wait for the revert (~05:05)
+ * or cancel the night via /api/night-charge/cancel.
+ */
+app.post<{ Querystring: { pct?: string } }>(
+  '/api/reserve-floor',
+  { preHandler: [requireWriteAuth, latchWriteRateLimit] },
+  async (req, reply) => {
+    const raw = Number(req.query.pct);
+    if (!Number.isFinite(raw) || !Number.isInteger(raw)) {
+      reply.code(400); return { ok: false, error: 'pct must be an integer' };
+    }
+    const targetPct = clampReserveTarget(raw);
+    if (targetPct !== raw) {
+      reply.code(400);
+      return { ok: false, error: `pct ${raw} outside the supported [10,50] reserve envelope` };
+    }
+    if (isReserveArbitrageRaised(nightActuationMem)) {
+      reply.code(409);
+      return {
+        ok: false,
+        error: 'a night-charge write is currently holding the reserve up; it would revert to the old floor at window close',
+        priorReservePct: nightActuationMem.priorReservePct,
+        hint: 'retry after the scheduled revert, or POST /api/night-charge/cancel first',
+      };
+    }
+    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    if (!shp2) { reply.code(503); return { ok: false, error: 'SHP2 not present in the snapshot' }; }
+    const before = (shp2.projection as any)?.backupReserveSoc ?? null;
+    const r = await setBackupReserveSoc({ sn: shp2.sn, targetPct, source: { ua: 'owner-reserve-floor' } });
+    if (r.outcome !== 'success') {
+      reply.code(502);
+      return { ok: false, error: r.message ?? r.code ?? 'write failed', rateLimited: r.rateLimited === true };
+    }
+    app.log.warn(
+      `reserve-floor: OWNER set backupReserveSoc ${before ?? '?'}% → ${targetPct}% (this is the floor the reserve alarm defends `
+      + `and the night-charge planner sizes against; the nightly write will now restore ${targetPct}% at window close).`,
+    );
+    return { ok: true, previousPct: before, targetPct, note: 'device readback appears in the next poll (~60s)' };
+  },
+);
+
 app.get('/api/defective-packs', { preHandler: latchReadRateLimit }, async () => ({ ok: true, packs: listConfirmedRecords() }));
 app.post<{ Querystring: { packSn?: string } }>(
   '/api/defective-packs/clear',
