@@ -1,4 +1,5 @@
 import type { DeviceSnapshot } from './snapshot.js';
+import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import { getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { liveGridBackstop } from './gridState.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
@@ -3053,7 +3054,12 @@ export function computeRunway(
 
   const backupRemainingKwh = shp2.projection.backupRemainWh / 1000;
   const backupFullKwh = shp2.projection.backupFullCapWh / 1000;
-  const reservePct = shp2.projection.backupReserveSoc ?? 15;
+  // v1.115.0 — the OWNER's floor, not the device's current instruction. While
+  // the night-charge actuator holds the reserve at 50 the device reports 50,
+  // and reading it here manufactured an "AT RESERVE FLOOR" posture for the
+  // whole charge window, every night. Same fact v1.113.0 gave the below-reserve
+  // alert, now shared (ownerReserveFloorPct); falls back to the live value.
+  const reservePct = getOwnerReserveFloorPct() ?? shp2.projection.backupReserveSoc ?? 15;
   const backupReserveKwh = (backupFullKwh * reservePct) / 100;
 
   // Recent load — average SHP2 panel_load over the last hour. (Loads wired

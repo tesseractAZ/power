@@ -59,6 +59,39 @@ export function isReserveArbitrageRaised(
   return state.appliedAtMs != null && state.revertedAtMs == null;
 }
 
+/**
+ * v1.115.0 — the OWNER's reserve floor, as distinct from whatever the device
+ * currently reports. PURE.
+ *
+ * While the night-charge actuator holds the reserve at its target (typically
+ * 50%), `backupReserveSoc` is OUR instruction, not the owner's floor — the
+ * actuator recorded the real floor as `priorReservePct` and restores it at
+ * window close. Any consumer that asks "is the pool at its floor?" must ask
+ * about the OWNER's floor, or it manufactures an at-the-floor posture for the
+ * whole charge window every night (the runway alarm did exactly that, a
+ * documented ~6 h nightly artifact).
+ *
+ * v1.113.0 fixed this in `shp2-below-reserve`; this is the same fact, shared
+ * so the sibling consumers cannot drift apart from it again.
+ */
+export function ownerReserveFloorPct(
+  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs' | 'priorReservePct'>,
+  liveReservePct: number | null,
+): number | null {
+  if (isReserveArbitrageRaised(state)) {
+    const prior = state.priorReservePct;
+    if (prior != null && Number.isInteger(prior) && prior >= 10 && prior <= 50) return prior;
+  }
+  return liveReservePct;
+}
+
+/** v1.115.0 — publisher for the owner floor (same set/get pattern as the
+ *  posture flag; analytics reads it without importing index.ts). */
+let ownerFloorPct: number | null = null;
+export function setOwnerReserveFloorPct(v: number | null): void { ownerFloorPct = v; }
+export function getOwnerReserveFloorPct(): number | null { return ownerFloorPct; }
+export function resetOwnerReserveFloorPct(): void { ownerFloorPct = null; }
+
 /** v1.113.0 — publisher so the alert engine can read the actuator's posture
  *  without importing index.ts (mirrors messageRateFloorAlert's set/get). */
 let reserveArbitrageRaised = false;

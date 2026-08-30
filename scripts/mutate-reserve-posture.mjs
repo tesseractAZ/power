@@ -21,7 +21,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const ALERTS = resolve(SERVER, 'src/alerts.ts');
 const ACT = resolve(SERVER, 'src/nightChargeActuator.ts');
-const SUBSET = ['test/reserveFloorPosture.test.ts'];
+const SUBSET = ['test/reserveFloorPosture.test.ts', 'test/ownerFloorAttribution.test.ts'];
 
 const MUTANTS = [
   {
@@ -65,6 +65,20 @@ const MUTANTS = [
     find: '  return state.appliedAtMs != null && state.revertedAtMs == null;',
     to: '  return false; /* MUTANT */',
     why: 'The nightly charge window pages as a floor breach.',
+  },
+  {
+    id: 'vii. \u2605 runway alarm reads the DEVICE reserve again (nightly phantom AT-RESERVE-FLOOR)',
+    file: ACT,
+    find: '  if (isReserveArbitrageRaised(state)) {',
+    to: '  if (false) { /* MUTANT */',
+    why: 'ownerReserveFloorPct returns the actuator\u2019s own 50% instruction, so the runway alarm reports AT RESERVE FLOOR for the whole charge window every night.',
+  },
+  {
+    id: 'viii. owner floor trusts an out-of-envelope prior',
+    file: ACT,
+    find: '    if (prior != null && Number.isInteger(prior) && prior >= 10 && prior <= 50) return prior;',
+    to: '    if (prior != null) return prior; /* MUTANT */',
+    why: 'A corrupt persisted prior becomes the floor every consumer measures against.',
   },
 ];
 
