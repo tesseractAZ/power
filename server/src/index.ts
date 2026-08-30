@@ -2662,7 +2662,8 @@ const rateFloorTick = setInterval(() => {
       // Nulls fail toward starved (never let missing data mute a real episode).
       const starvedNow = r.rate == null || r.baseline <= 0
         || r.rate < DEFAULT_RATE_FLOOR_CONFIG.floorFraction * r.baseline;
-      const dec = decideCollapseSurfacing(r.collapsing, online, idle, surfacedCollapses.has(sn), starvedNow);
+      const wasSurfaced = surfacedCollapses.has(sn);
+      const dec = decideCollapseSurfacing(r.collapsing, online, idle, wasSurfaced, starvedNow);
       if (!online) { surfacedCollapses.delete(sn); continue; }
       if (dec.surfaced) {
         surfacedCollapses.add(sn);
@@ -2678,7 +2679,13 @@ const rateFloorTick = setInterval(() => {
           `while still appearing "fresh"; check the EcoFlow cloud session / power for ${sn} ` +
           `[eligibility mark ~${r.eligibilityPeak.toFixed(0)}]`,
         );
-      } else if (r.recovered) {
+      } else if (r.recovered && wasSurfaced) {
+        // v1.116.0 — a recovery is only newsworthy for an episode the operator
+        // was actually told about. The 08-28/29 night logged SIX "message rate
+        // recovered" lines with ZERO matching "collapsed" lines (the entry gate
+        // correctly suppressed idle/rebounding collapses, but the exit line was
+        // ungated), so the journal read as recoveries from nowhere — and the
+        // asymmetry is exactly what makes a suppressed episode hard to audit.
         app.log.info(`msg-rate-floor: ${name} message rate recovered (${r.rate?.toFixed(1) ?? '?'} msg/min)`);
       }
       // The transition that disarmed three Cores without a trace. v0.92.0 logged
@@ -2979,7 +2986,14 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   const fullWh: number | null = sp.backupFullCapWh ?? null;
   const socNowPct: number | null = sp.backupBatPercent ?? null;
   const remainWh: number | null = sp.backupRemainWh ?? null;
-  const reserveFloorPct: number | null = sp.backupReserveSoc ?? null;
+  // v1.116.0 — the OWNER's floor, not the device's current instruction. The
+  // plan is recomputed every ~30 min, INCLUDING while our own night-charge
+  // write holds the reserve at 50 — so a mid-window recompute sized against
+  // floor+cushion = 50+15 = 65%, treating our instruction as the owner's
+  // requirement. Third sibling of the same defect: v1.113.0 fixed the
+  // below-reserve alert, v1.115.0 the runway alarm, this is the planner.
+  const reserveFloorPct: number | null =
+    ownerReserveFloorPct(nightActuationMem, sp.backupReserveSoc ?? null);
   if (fullWh == null || fullWh <= 0 || socNowPct == null || reserveFloorPct == null) return null; // I5
   const fullKwh = fullWh / 1000;
 

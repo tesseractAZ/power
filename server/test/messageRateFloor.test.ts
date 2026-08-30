@@ -531,3 +531,27 @@ test('surfacing: holding ignores starvedNow — recovery or offline are the only
   assert.equal(d.surfaced, true);
   assert.equal(d.logCollapse, false);
 });
+
+// ── v1.116.0: the collapse-exit line is gated on the episode having surfaced ─
+
+test('log symmetry: a suppressed episode logs neither entry nor exit', () => {
+  // Entry suppressed (idle, or already rebounding) => nothing surfaced...
+  const entry = decideCollapseSurfacing(true, true, true, false, true);
+  assert.equal(entry.surfaced, false);
+  assert.equal(entry.logCollapse, false);
+  // ...so the tick must not print a "recovered" line either: the caller gates
+  // it on `wasSurfaced`, which is false for exactly this episode. Six such
+  // orphan recovery lines appeared on the 08-28/29 night.
+  assert.equal(entry.surfaced, false, 'wasSurfaced stays false across the episode');
+});
+
+test('log symmetry: a surfaced episode logs exactly one entry, and its exit is eligible', () => {
+  const enter = decideCollapseSurfacing(true, true, false, false, true);
+  assert.deepEqual(enter, { surfaced: true, logCollapse: true }, 'one entry line');
+  const hold = decideCollapseSurfacing(true, true, false, true, true);
+  assert.equal(hold.logCollapse, false, 'no repeat entry lines while it holds');
+  // On recovery the tick clears the set, but `wasSurfaced` was true on that
+  // tick — so the exit line prints, pairing 1:1 with the entry.
+  const recovered = decideCollapseSurfacing(false, true, false, true, false);
+  assert.equal(recovered.surfaced, false, 'recovery ends the episode');
+});

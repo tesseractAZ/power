@@ -1,3 +1,40 @@
+## v1.116.0 — the planner was the third sibling, and the 0% now says what it is
+
+### A mid-window recompute sized against our own instruction
+
+The night-charge plan is recomputed roughly every 30 minutes, INCLUDING while
+the actuator's own write holds the reserve at 50%. The planner read
+`backupReserveSoc` directly, so those recomputes sized against
+floor + cushion = 50 + 15 = **65%** — the add-on treating its own instruction
+as the owner's requirement. This is the third consumer with the same defect:
+v1.113.0 fixed the below-reserve alert, v1.115.0 the runway alarm, and all
+three now derive the floor from one helper (`ownerReserveFloorPct`) so they
+cannot drift apart again.
+
+### The pre-window "0%" is a worst case, and now says so
+
+An analysis proposed clamping the pre-window carry at the reserve floor, since
+a grid-connected pool physically cannot fall below it. **Rejected for the
+sizing path**, on measurement: `simulate()` is deliberately grid-blind because
+the advisor sizes for the ISLANDING case, and over 2240 historical nights the
+clamp buys strictly less — worst −12.49 kWh, with 12 nights losing their
+reserve write outright. Assuming the grid holds until the window is exactly
+the assumption that fails during the outage the cushion exists for.
+
+What was actually wrong was the narrative: "projected to dip to ~0%" with
+nothing saying that is the islanded counterfactual, while the grid-present
+pool will hold the reserve. The note now labels the figure as the islanded
+worst case and names what the SHP2 will actually defend. No value reaching
+the sizing anchor changed — pinned by test.
+
+### Also
+
+The msg-rate-floor recovery line is now gated on the episode having surfaced.
+The 08-28/29 night logged six "message rate recovered" lines with zero
+matching "collapsed" lines (the entry gate correctly suppressed idle and
+rebounding collapses; the exit line was ungated), so the journal read as
+recoveries from nowhere.
+
 ## v1.115.0 — three consumers that read the device instead of the owner
 
 The 2026-08-29 analysis found the same mistake in three places: a consumer
