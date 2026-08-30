@@ -191,6 +191,9 @@ import {
   isReserveArbitrageRaised,
   setReserveArbitrageRaised,
   clampReserveTarget,
+  ownerReserveFloorPct,
+  setOwnerReserveFloorPct,
+  REVERT_LAG_MS,
   APPLY_LEAD_MS,
   REVERT_ESCALATE_AFTER,
   type NightActuationState,
@@ -2612,6 +2615,19 @@ const surfacedCollapses = new Set<string>();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
 let lastLoggedBuyDebiasKey: string | null = null;
+// v1.115.0 — the SHP2's currently-reported reserve, for ownerReserveFloorPct's
+// fallback. Null before the first poll populates the snapshot.
+// v1.115.0 — the owner's most recent /api/reserve-floor write. The device
+// echoes it back through the settings surface a poll or two later; within this
+// grace window that echo is OURS, not drift. Deliberately in-memory: a restart
+// losing it costs one spurious drift warn, never a missed real change.
+export const OWNER_FLOOR_WRITE_GRACE_MS = 15 * 60_000;
+let ownerFloorWrite: { pct: number; atMs: number } | null = null;
+
+function liveReserveSocPct(): number | null {
+  const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+  return (shp2?.projection as any)?.backupReserveSoc ?? null;
+}
 
 const rateFloorTick = setInterval(() => {
   try {
@@ -2831,11 +2847,14 @@ let nightActuationMem: NightActuationState = (() => {
 // v1.113.0 — seed the posture from persisted state so a restart mid-window
 // does not momentarily present an arbitrage-raised reserve as a genuine floor.
 setReserveArbitrageRaised(isReserveArbitrageRaised(nightActuationMem));
+setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
 function persistNightActuation(s: NightActuationState): void {
   nightActuationMem = s;
   // v1.113.0 — keep the alert engine's reserve-posture flag in lockstep with
   // every actuation-state write (apply, revert, cancel, abort).
   setReserveArbitrageRaised(isReserveArbitrageRaised(s));
+  // v1.115.0 — and the owner floor the runway alarm measures against.
+  setOwnerReserveFloorPct(ownerReserveFloorPct(s, liveReserveSocPct()));
   try {
     atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH, JSON.stringify(s));
   } catch (e: any) {
@@ -3495,9 +3514,20 @@ function scoreNightRow(
   const wasActuated = y.actuated === 1 || (y.actuated as unknown) === true;
   let deliveredKwh: number | null = null;
   if (wasActuated) {
-    const windowLoadPts = recorder.query(shp2Sn, 'panel_load', windowStart, windowEnd);
-    const windowLoadKwh = windowLoadPts.length ? round2(integrateWh(windowLoadPts, false) / 1000) : null;
-    deliveredKwh = actuatedDeliveredKwh(windowImportKwh, windowLoadKwh);
+    // v1.115.0 — integrate the span the write was actually HELD, not the plan's
+    // nominal window. The apply fires up to APPLY_LEAD before the window opens
+    // and the revert lands REVERT_LAG after it closes, so on the 08-28 night
+    // (hold 22:55:55-00:05:55 vs nominal 23:00-00:00) ~16% of the purchased
+    // energy fell outside the nominal bounds and was silently dropped. This
+    // column feeds the v1.112.0 buy de-bias calibrator, so a biased delivered
+    // figure trains a biased correction.
+    const holdStart = Math.min(y.actuation_applied_at_ms ?? windowStart, windowStart);
+    const holdEnd = windowEnd + REVERT_LAG_MS;
+    const holdImportPts = recorder.query(shp2Sn, 'grid_home_w', holdStart, holdEnd);
+    const holdImportKwh = holdImportPts.length ? round2(integrateWh(holdImportPts, true) / 1000) : null;
+    const holdLoadPts = recorder.query(shp2Sn, 'panel_load', holdStart, holdEnd);
+    const holdLoadKwh = holdLoadPts.length ? round2(integrateWh(holdLoadPts, false) / 1000) : null;
+    deliveredKwh = actuatedDeliveredKwh(holdImportKwh, holdLoadKwh);
   }
 
   // v1.105.0 (algo v3) — realized need on the PLANNER-SIZING basis.
@@ -3689,7 +3719,15 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       refreshNightRecentOutcomes();
       // v1.40.0: the subsystem previously logged nothing at info level — an
       // incident left zero breadcrumbs. One line per nightly lifecycle event.
-      app.log.info(`night-charge: plan row recorded for ${today} — chargeTonight=${fresh.plan.chargeTonight} buyKwh=${fresh.plan.buyKwh ?? 'null'} window=${fresh.plan.window ? new Date(fresh.plan.window.startMs).toISOString() : 'none'}`);
+      // v1.115.0 — print the window's END and DURATION, not just its start. A
+      // 1 h Friday window (the Mon-Fri overnight period ends at Sat 00:00) was
+      // indistinguishable in the journal from the usual 6 h one, and the short
+      // window is exactly what explains an unusually small buy.
+      const w = fresh.plan.window;
+      const winStr = w
+        ? `${new Date(w.startMs).toISOString()}→${new Date(w.endMs).toISOString()} (${round1((w.endMs - w.startMs) / 3_600_000)}h)`
+        : 'none';
+      app.log.info(`night-charge: plan row recorded for ${today} — chargeTonight=${fresh.plan.chargeTonight} buyKwh=${fresh.plan.buyKwh ?? 'null'} window=${winStr}`);
     } else {
       app.log.info(`night-charge: no plan row for ${today} — inputs unavailable (SHP2 offline / missing battery fields); the night will count as an exclusion.`);
     }
@@ -4006,7 +4044,16 @@ function runSettingsDriftTick(): void {
         ((act.appliedAtMs != null && act.revertedAtMs == null) ||
          (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
          (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
-      const ctx = { targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive };
+      // v1.115.0 — the owner's OWN /api/reserve-floor write was being reported
+      // back to him as an EXTERNAL change at warn level ~3 min later (the
+      // add-on flagging its own write as third-party tampering). Own-write
+      // attribution covered the night-charge path only. The grace window is
+      // supplied here so classifyChange stays clock-free.
+      const ownerFloorPct =
+        ownerFloorWrite != null && nowMs - ownerFloorWrite.atMs <= OWNER_FLOOR_WRITE_GRACE_MS
+          ? ownerFloorWrite.pct
+          : null;
+      const ctx = { targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct };
       for (const c of evaln.confirmedChanges) {
         if (classifyChange(c, ctx) === 'own-write') {
           app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (this add-on's night-charge write — not announced)`);
@@ -4976,6 +5023,8 @@ app.post<{ Querystring: { pct?: string } }>(
       reply.code(502);
       return { ok: false, error: r.message ?? r.code ?? 'write failed', rateLimited: r.rateLimited === true };
     }
+    ownerFloorWrite = { pct: targetPct, atMs: Date.now() };
+    setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, targetPct));
     app.log.warn(
       `reserve-floor: OWNER set backupReserveSoc ${before ?? '?'}% → ${targetPct}% (this is the floor the reserve alarm defends `
       + `and the night-charge planner sizes against; the nightly write will now restore ${targetPct}% at window close).`,

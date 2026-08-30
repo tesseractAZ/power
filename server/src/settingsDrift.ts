@@ -169,6 +169,10 @@ export interface ActuatorContext {
   /** True while a night is in flight (armed/applied/unresolved) or a revert
    *  landed within the last 15 minutes. */
   nightActive: boolean;
+  /** v1.115.0 — the value the OWNER just wrote via /api/reserve-floor, or null
+   *  when no such write is inside its grace window. The caller applies the
+   *  grace (this module stays clock-free). */
+  ownerFloorPct?: number | null;
 }
 
 /**
@@ -179,6 +183,10 @@ export interface ActuatorContext {
  */
 export function classifyChange(c: SettingChange, act: ActuatorContext): 'own-write' | 'external' {
   if (!c.key.endsWith(' · backupReserveSoc')) return 'external';
+  // v1.115.0 — the owner's own reserve-floor write echoes back through the
+  // settings surface a poll or two later. It is OURS, and it happens with no
+  // night in flight, so it must be recognised BEFORE the nightActive gate.
+  if (act.ownerFloorPct != null && c.to === act.ownerFloorPct) return 'own-write';
   if (!act.nightActive) return 'external';
   if (c.to === act.targetPct || c.to === act.priorReservePct) return 'own-write';
   return 'external';
