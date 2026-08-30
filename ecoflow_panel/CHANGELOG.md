@@ -1,3 +1,46 @@
+## v1.115.0 — three consumers that read the device instead of the owner
+
+The 2026-08-29 analysis found the same mistake in three places: a consumer
+reading what the DEVICE currently reports, when it needed what the OWNER
+actually set (or what the actuator actually did).
+
+### The add-on reported its own write back as tampering
+
+`POST /api/reserve-floor` (v1.114.0) echoes through the settings surface a
+poll or two later, and own-write attribution covered only the night-charge
+path — so the owner's own floor change came back ~3 minutes later as an
+**EXTERNAL change at warn level**. `classifyChange` now recognises the owner's
+pending write before the night-active gate; the grace window is applied by the
+caller so the classifier stays clock-free.
+
+### The runway alarm measured against our own instruction
+
+While the actuator holds the reserve at 50%, `backupReserveSoc` is the
+add-on's instruction, not the floor — and the runway alarm read it directly,
+manufacturing an "AT RESERVE FLOOR" posture for the whole charge window, every
+night (a documented ~6 h nightly artifact). v1.113.0 fixed exactly this in the
+below-reserve alert; `ownerReserveFloorPct` now shares the fact so the sibling
+consumers cannot drift apart from it again. Out-of-envelope or missing restore
+values fall back to the live reading rather than inventing a floor.
+
+### delivered_kwh dropped energy bought outside the nominal window
+
+The scorer integrated the plan's nominal window while the write is actually
+held from the apply (up to 5 min early) to the revert (5 min late). On the
+08-28 night — hold 22:55:55-00:05:55 against a nominal 23:00-00:00 — that
+dropped ~16% of the purchased energy. **This column feeds the v1.112.0 buy
+de-bias calibrator**, so a biased delivered figure trains a biased correction.
+It now integrates the real hold span.
+
+### Also
+
+The plan row logged the charge window's START only, so a 1 h Friday window
+(the Mon-Fri overnight period ends at Sat 00:00) was indistinguishable in the
+journal from the usual 6 h one — and the short window is exactly what explains
+an unusually small buy. It now prints start→end and duration.
+
+Harness `mutate-reserve-posture.mjs` extended to 8/8.
+
 ## v1.114.0 — the owner can set his own reserve floor
 
 The panel could raise `backupReserveSoc` for night-charge arbitrage, but the
