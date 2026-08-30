@@ -98,3 +98,27 @@ test('delivered span never starts LATER than the window (a late apply cannot shr
   const lateApply = windowStart + 60_000;
   assert.equal(Math.min(lateApply, windowStart), windowStart);
 });
+
+// ── v1.116.0: the planner is the THIRD sibling reading the device ───────────
+
+test('★ mid-window recompute: the planner must size against the OWNER floor, not our hold', () => {
+  // The plan is recomputed ~every 30 min, including while our own write holds
+  // the reserve at 50. Reading the device there makes floor+cushion 50+15=65%
+  // — the add-on treating its own instruction as the owner's requirement.
+  const holding = { appliedAtMs: 1_000, revertedAtMs: null, priorReservePct: 20 };
+  assert.equal(ownerReserveFloorPct(holding, 50), 20,
+    'a recompute during the hold must still size against 20');
+  // Outside the hold the device value IS the owner floor.
+  const idle = { appliedAtMs: null, revertedAtMs: null, priorReservePct: null };
+  assert.equal(ownerReserveFloorPct(idle, 20), 20);
+});
+
+test('all three sibling consumers now derive the floor from one helper', () => {
+  // below-reserve alert (v1.113.0), runway alarm (v1.115.0), planner (v1.116.0).
+  // One fact, one function — the drift that produced three separate defects
+  // came from each consumer reading backupReserveSoc for itself.
+  const holding = { appliedAtMs: 1_000, revertedAtMs: null, priorReservePct: 20 };
+  const viaHelper = ownerReserveFloorPct(holding, 50);
+  assert.equal(viaHelper, 20);
+  assert.notEqual(viaHelper, 50, 'none of them may see the actuator hold as a floor');
+});

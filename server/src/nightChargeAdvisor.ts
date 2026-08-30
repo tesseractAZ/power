@@ -466,7 +466,24 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     projSocAtWindowStartPct = round1((preWindow.packAtMarkKwh / fullKwh) * 100);
     preWindowMinSocPct = round1((preWindow.minPackKwh / fullKwh) * 100);
     if (preWindowMinSocPct < round1(reserveFloorPct + cushionPct)) {
-      preWindowNote = ` NOTE: before the charge window opens (${fmtPhoenixDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% — a dip tonight's buy cannot prevent; the floor alarm owns that span.`;
+      // v1.116.0 — LABEL THE BASIS. `simulate()` is deliberately grid-blind:
+      // its only clamp is [0, full] (no reserve floor, no pass-through), because
+      // the whole advisor sizes for the ISLANDED case — assuming the grid holds
+      // until the window is precisely the assumption that fails during the
+      // outage the cushion exists for. So this figure is a worst case, not a
+      // prediction, and it reads alarmingly (0% is routine) with nothing saying
+      // so. While the grid is present the SHP2 defends the reserve, so the pool
+      // will not actually fall below `reserveFloorPct`.
+      //
+      // ★ DISCLOSURE ONLY. Both figures are text; neither reaches the sizing
+      // anchor (packAtWindowStartKwh), and the anchor must stay unclamped —
+      // measured over 2240 historical nights, clamping it buys strictly less
+      // (worst −12.49 kWh) and costs 12 nights their reserve write outright.
+      const gridHeldMinPct = round1(Math.max(preWindowMinSocPct, reserveFloorPct));
+      const gridHeldNote = gridHeldMinPct > preWindowMinSocPct
+        ? ` With the grid present the SHP2 defends the ${round1(reserveFloorPct)}% reserve, so the pool should hold ~${gridHeldMinPct}% — the ${preWindowMinSocPct}% figure is the islanded worst case this plan is sized against.`
+        : '';
+      preWindowNote = ` NOTE: before the charge window opens (${fmtPhoenixDayHm(windowStart, nowMs)}) the pack is projected to dip to ~${preWindowMinSocPct}% if islanded — a dip tonight's buy cannot prevent; the floor alarm owns that span.${gridHeldNote}`;
     }
   }
 
