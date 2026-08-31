@@ -697,6 +697,32 @@ app.get<{ Querystring: { sn?: string; ch?: string; pair?: string; days?: string 
  */
 const MEMBERSHIP_HISTORY_PATH = resolve(process.cwd(), config.dbPath, '..', 'membership-history.json');
 
+// v1.117.0 — LAST-KNOWN SHP2 ROSTER. The connected-source roster is durable
+// state, but it is re-derived from the live SHP2 projection every tick, so it
+// reads EMPTY for the first tick after a boot (projection not yet hydrated) and
+// for any SHP2 cloud-blind window. Membership consumers then fell through to the
+// static SPARE_DPU_SNS literal, which has been stale since the 08-20 swap — and
+// on 2026-08-29 that admitted the off-panel Core 3 into the pool mean, whose
+// phantom 75% re-armed the SoC ladder and replayed a 30% rung to the speakers on
+// both deploys. Seed from the persisted membership fingerprint (a sorted,
+// comma-joined SN list) so the roster is known from the very first tick, and
+// refresh it whenever the live roster is non-empty.
+let lastKnownRoster: Set<string> = (() => {
+  try {
+    const h = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
+    const fp = h.entries.length ? h.entries[h.entries.length - 1].fp : '';
+    return new Set(fp ? fp.split(',').filter(Boolean) : []);
+  } catch {
+    return new Set<string>();
+  }
+})();
+export function noteLiveRoster(roster: ReadonlySet<string>): void {
+  if (roster.size > 0) lastKnownRoster = new Set(roster);
+}
+export function getLastKnownRoster(): ReadonlySet<string> {
+  return lastKnownRoster;
+}
+
 function membershipStableOnDay(day: string): boolean {
   try {
     const h = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
@@ -2313,7 +2339,10 @@ store.on('change', (snap: FleetSnapshot) => {
   // + the offline alerts are the signal, and update(null) is a safe no-op. The
   // engine's own coherence guard still rejects an implausible drop from a fresh
   // baseline, so a bad fallback read can't ladder falsely.
-  const soc = shp2Soc != null ? shp2Soc : homeFleetMeanSoc(snap.devices);
+  // v1.117.0 — keep the durable roster fresh, and hand it to the fallback so an
+  // unhydrated tick can never admit a bench spare into the pool mean.
+  noteLiveRoster(shp2ConnectedDpuSns(snap.devices));
+  const soc = shp2Soc != null ? shp2Soc : homeFleetMeanSoc(snap.devices, lastKnownRoster);
   void (async () => {
     // Keep the grid-presence entity fresh (TTL-gated) so onCross + the
     // re-escalation below see live grid state. Assign + update run synchronously

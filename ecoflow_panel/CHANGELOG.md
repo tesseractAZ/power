@@ -1,3 +1,44 @@
+## v1.117.0 — a deploy stopped waking the speakers
+
+### One 30% crossing, three audible announcements
+
+Both 08-29 deploys replayed an already-announced SoC rung to two Music
+Assistant speakers and the cordless handset. The mechanism, reproduced
+identically on both boots and firing 10m01s after each:
+
+On the first tick after a boot the SHP2 projection is not yet hydrated, so the
+connected-source roster reads EMPTY. Membership then fell through to the static
+`SPARE_DPU_SNS` literal — stale since the 08-20 swap moved Core 3 off-panel
+without adding it — which admitted that off-panel Core 3 at **75%** into the
+pool mean while the real pool sat at **21%**. The phantom re-armed the 50/40/30
+rungs and rewrote the slew baseline; the true 21% was then rejected as
+implausible (75−21 = 54 > the 25-point cap) for exactly the 10-minute baseline
+lifetime, and on expiry three rungs crossed in one tick and announced.
+
+The roster is durable STATE, so it is now remembered: seeded at boot from the
+persisted membership fingerprint (already a sorted, comma-joined SN list) and
+refreshed whenever the live roster is non-empty. The static literal survives
+only as the last resort on a first-ever boot. An unhydrated tick now yields
+NO pool SoC — a safe no-op — instead of a bench spare's.
+
+Deliberately NOT fixed by a restart gate: `isRestartContinuation` did fire on
+the yellow-advisory path both boots; the ladder calls `announce` directly and
+goes around it. Gating there would mask the phantom re-arm, which can equally
+misfire in any mid-run SHP2-blind window. The v1.8.0 failover itself is intact
+and tested — it is what the fallback exists for.
+
+Harness `scripts/mutate-roster-fallback.mjs` (4/4) covers both directions:
+the stale literal returning, and the fallback over-tightening until the
+SHP2-blind failover goes dark.
+
+### The reserve setpoint now has a time series
+
+`backup_reserve` is recorded alongside `backup_pct`. It was the one value the
+owner sets (10 → 20 on 08-28) and the engine rewrites twice nightly, and it had
+no history at all — the 08-30 audit could confirm it read 20 *now* but could not
+verify from data that it held overnight. A bad revert was invisible to any
+historical query.
+
 ## v1.116.0 — the planner was the third sibling, and the 0% now says what it is
 
 ### A mid-window recompute sized against our own instruction
