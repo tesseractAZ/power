@@ -1,3 +1,28 @@
+## v1.118.1 — a timeout is terminal-unknown: stop, do not retry
+
+v1.118.0 tried to settle a timed-out announcement by probing the players'
+state, copying the v1.48.3 SIP fix. That probe cannot work on this path, and
+made the incident worse. Measured live 20:59-21:01 on 2026-08-30:
+
+- The service call blocks for its full ~80 s timeout, so the probe runs ~88 s
+  after dispatch — by which point a few-seconds-long announcement has finished
+  and every player reads `idle`.
+- The probe uses the same HA API that just timed out, so under the very load
+  that caused the timeout it returns null and reads as "not playing".
+
+Both failure modes resolve to "real miss" and retry — the exact duplication
+being fixed. The Music Assistant log settles what actually happens: it received
+and PLAYED every timed-out call ("Playback announcement to player … Streaming
+via AirPlay 2"). A Headers Timeout means the request was accepted and the
+RESPONSE was slow. A hard-down MA refuses the connection instead — a
+non-timeout error, which still retries, unchanged.
+
+So a timeout-classed dispatch now stops: no in-call retry, no deferred retry.
+The asymmetry that settles it — the HA push notification is dispatched
+separately and succeeded throughout the incident, so the operator is informed
+either way. Audio is the redundant channel, and one possibly missed
+announcement beats six duplicates of a storm warning.
+
 ## v1.118.0 — a lost HTTP response is not a failed announcement
 
 ### Six announcements of one storm warning, during the storm

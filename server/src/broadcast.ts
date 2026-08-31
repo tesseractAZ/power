@@ -1009,16 +1009,33 @@ export function startBroadcastMonitor(
       // non-timeout failure (4xx/5xx/refused) is still a definite miss and
       // still retries — that path is unchanged.
       if (dispatchTimeoutLike(last.error)) {
-        const states = await Promise.all(
-          cfg.targets.map((t) => new Promise<{ state: string } | null>((res) => {
-            setTimeout(() => { void getEntityState(t).then(res).catch(() => res(null)); }, 8_000);
-          })),
+        // v1.118.1 — a timeout is TERMINAL-UNKNOWN: stop, do not retry.
+        //
+        // v1.118.0 tried to settle it by probing the players' state, copying
+        // the SIP fix. That probe cannot work here and made things worse: the
+        // service call itself blocks for its full ~80 s timeout, so the probe
+        // runs ~88 s after dispatch — by which point a few-seconds-long
+        // announcement has finished and every player reads `idle`. Worse, the
+        // probe uses the same HA API that just timed out, so under the load
+        // that CAUSED the timeout it returns null and reads as "not playing".
+        // Both failure modes resolve to "real miss" and retry — the exact
+        // duplication being fixed. Measured live 2026-08-30 20:59-21:01.
+        //
+        // What the vendor log proves: MA received and PLAYED every timed-out
+        // call ("Playback announcement to player ... Streaming via AirPlay 2").
+        // A Headers Timeout means the request was accepted and the RESPONSE was
+        // slow — not that the service failed. A hard-down MA refuses the
+        // connection instead, which is a non-timeout error and still retries.
+        //
+        // The asymmetry that settles it: the HA push notification is dispatched
+        // separately and succeeded throughout this incident, so the operator is
+        // informed either way. Audio is the redundant channel. One possibly
+        // missed announcement beats six duplicates of a storm warning.
+        log(
+          'broadcast: play_announcement timed out — delivery UNKNOWN (MA answers slowly under load but does play); ' +
+          'not retrying, so the alert cannot announce twice. The HA push notification is the guaranteed channel.',
         );
-        if (states.some((st) => st != null && (st.state === 'playing' || st.state === 'on'))) {
-          log('broadcast: play_announcement timed out but a target IS playing — delivery confirmed, duplicate suppressed');
-          return { ok: true };
-        }
-        log('broadcast: play_announcement timed out and no target is playing — treating as a real miss');
+        return { ok: true };
       }
       if (attempt < cfg.announceRetries) {
         log(`broadcast: play_announcement failed (attempt ${attempt + 1}/${cfg.announceRetries + 1}), retrying — ${last.error ?? last.status}`);
