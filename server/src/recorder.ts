@@ -1077,6 +1077,13 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       } else if (p.kind === 'shp2') {
         const shp = p as Shp2Projection;
         push('backup_pct', shp.backupBatPercent);
+        // v1.117.0 — the reserve SETPOINT had no time series at all, despite
+        // being the one value the owner sets (10 -> 20 on 08-28) and the engine
+        // rewrites twice nightly (owner floor -> 50 -> owner floor). A bad
+        // revert or an external change could only ever be confirmed from log
+        // lines, never from history — the 08-30 audit could not verify from
+        // data that the floor held at 20 overnight. One row per rollup.
+        push('backup_reserve', shp.backupReserveSoc);
         push('backup_remain_min', shp.backupDischargeTimeMin);
         push('backup_charge_min', shp.backupChargeTimeMin);
         let panelLoad = 0;
