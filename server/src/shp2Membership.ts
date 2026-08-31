@@ -278,13 +278,28 @@ export function homeCoreCoverage(devices: Record<string, DeviceSnapshot>): {
 export function isHomePoolDpu(
   sn: string,
   connectedOrDevices: Set<string> | Record<string, DeviceSnapshot>,
+  lastKnownRoster?: ReadonlySet<string> | null,
 ): boolean {
   const connected =
     connectedOrDevices instanceof Set ? connectedOrDevices : shp2ConnectedDpuSns(connectedOrDevices);
-  return connected.size > 0 ? connected.has(sn) : !SPARE_DPU_SNS.has(sn);
+  if (connected.size > 0) return connected.has(sn);
+  // v1.117.0 — LAST-KNOWN ROSTER before the static literal. The literal only
+  // describes the bench at the moment it was written, and it has been wrong
+  // since the 2026-08-20 swap moved Core 3 off-panel without being added to it.
+  // On 2026-08-29 that staleness turned audible: during the first tick after a
+  // deploy the SHP2 projection is not yet hydrated, so `connected` is empty,
+  // the literal admitted the off-panel Core 3 (75%), and that phantom re-armed
+  // the SoC ladder — replaying an already-announced 30% rung to the speakers on
+  // BOTH deploys. The roster is durable STATE, so remember it rather than
+  // re-deriving a guess from a hardcoded list every time the panel goes quiet.
+  if (lastKnownRoster && lastKnownRoster.size > 0) return lastKnownRoster.has(sn);
+  return !SPARE_DPU_SNS.has(sn);
 }
 
-export function homeFleetMeanSoc(devices: Record<string, DeviceSnapshot>): number | null {
+export function homeFleetMeanSoc(
+  devices: Record<string, DeviceSnapshot>,
+  lastKnownRoster?: ReadonlySet<string> | null,
+): number | null {
   // v1.92.0 — membership comes from the SHP2's OWN connected-source roster, not
   // from the static SPARE_DPU_SNS literal (which only describes the bench at the
   // time it was written). On 2026-08-20 the plant was physically reconfigured:
@@ -300,7 +315,7 @@ export function homeFleetMeanSoc(devices: Record<string, DeviceSnapshot>): numbe
   const socs: number[] = [];
   for (const d of Object.values(devices)) {
     if (d.projection?.kind !== 'dpu') continue;
-    if (!isHomePoolDpu(d.sn, roster)) continue; // only DPUs actually wired into the backup pool
+    if (!isHomePoolDpu(d.sn, roster, lastKnownRoster)) continue; // only DPUs actually wired into the backup pool
     if (!d.online) continue;               // only Cores currently reporting fresh telemetry
     const s = d.projection.soc;
     if (s != null && Number.isFinite(s)) socs.push(s);
