@@ -1,3 +1,30 @@
+## v1.118.0 — a lost HTTP response is not a failed announcement
+
+### Six announcements of one storm warning, during the storm
+
+2026-08-30 20:39 MST: a Severe Thunderstorm Warning raised a red. Every
+`music_assistant.play_announcement` call returned "Headers Timeout Error" —
+while the audio played each time. The Music Assistant path treated each
+timeout as a miss, so it retried: 2 in-call attempts x 3 deferred rounds =
+~6 announcements of the same alert into the house, during the storm the
+alert was warning about. The log read "failed" throughout; the operator
+reported "lots of announcements playing".
+
+v1.48.3 had already learned this on the SIP path — a duplicate arriving
+mid-call made the cordless RING instead of auto-answering — and fixed it by
+verifying against entity state before re-firing. The MA path never got that
+treatment.
+
+Now it does: a timeout-classed dispatch error means delivery is UNKNOWN, not
+missed. The players' real state is probed (~8 s in, mid-announce for any real
+playback) and confirmed playback counts as success. A non-timeout failure
+(4xx/5xx/refused) is still a definite miss and still retries — unchanged.
+
+Both paths now share ONE classifier so they cannot drift apart, and it covers
+`ETIMEDOUT`, which has no word break and the original `/timeout|abort/` missed.
+Widening is safe in both callers: a positive verdict only means "unknown", and
+is always followed by the entity-state probe.
+
 ## v1.117.0 — a deploy stopped waking the speakers
 
 ### One 30% crossing, three audible announcements

@@ -554,8 +554,23 @@ export interface BroadcastMonitorOpts {
  *  up, so delivery is UNKNOWN (verified against entity state) rather than
  *  failed. Any non-timeout failure in the set makes the whole dispatch a
  *  definite miss. Exported for tests. */
+/** v1.118.0 — ONE classifier for one question, shared by both dispatch paths so
+ *  they cannot drift apart. `ETIMEDOUT` has no word break, which the original
+ *  /timeout|abort/ missed. Widening is safe in both callers because a positive
+ *  verdict only means "delivery UNKNOWN" — it is always followed by an
+ *  entity-state probe, and a target that is NOT playing still counts as a real
+ *  miss and still retries. */
+const TIMEOUT_LIKE = /timeout|timed\s?out|abort/i;
+
 export function sipTimeoutLike(errors: string[]): boolean {
-  return errors.length > 0 && errors.every((e) => /timeout|abort/i.test(e));
+  return errors.length > 0 && errors.every((e) => TIMEOUT_LIKE.test(e));
+}
+
+/** v1.118.0 — the same question for a SINGLE dispatch error (the Music
+ *  Assistant path). A timeout/abort means the HTTP response was lost, NOT that
+ *  the service failed to run. Exported for tests. */
+export function dispatchTimeoutLike(error: string | undefined): boolean {
+  return error != null && TIMEOUT_LIKE.test(error);
 }
 
 export function startBroadcastMonitor(
@@ -977,6 +992,34 @@ export function startBroadcastMonitor(
     for (let attempt = 0; attempt <= cfg.announceRetries; attempt++) {
       last = await callHaService('music_assistant', 'play_announcement', params);
       if (last.ok) return { ok: true };
+      // v1.118.0 — A TIMEOUT IS NOT A FAILURE. Same lesson v1.48.3 learned on
+      // the SIP path, which this path never got: under load Music Assistant
+      // regularly starts playing and answers the HTTP call late, so a
+      // "Headers Timeout Error" means delivery is UNKNOWN, not missed.
+      // Retrying it re-plays audio that is already sounding.
+      //
+      // LIVE INCIDENT 2026-08-30 20:39 MST: a Severe Thunderstorm Warning red
+      // timed out on every attempt while the audio played each time — 2 in-call
+      // attempts x 3 deferred rounds = ~6 announcements of the same alert into
+      // the house, during the storm the alert was warning about. The operator
+      // reported "lots of announcements playing" while the log read "failed".
+      //
+      // So: verify against the players' real state (~8 s in, mid-announce for
+      // any real playback) and treat confirmed playback as success. A
+      // non-timeout failure (4xx/5xx/refused) is still a definite miss and
+      // still retries — that path is unchanged.
+      if (dispatchTimeoutLike(last.error)) {
+        const states = await Promise.all(
+          cfg.targets.map((t) => new Promise<{ state: string } | null>((res) => {
+            setTimeout(() => { void getEntityState(t).then(res).catch(() => res(null)); }, 8_000);
+          })),
+        );
+        if (states.some((st) => st != null && (st.state === 'playing' || st.state === 'on'))) {
+          log('broadcast: play_announcement timed out but a target IS playing — delivery confirmed, duplicate suppressed');
+          return { ok: true };
+        }
+        log('broadcast: play_announcement timed out and no target is playing — treating as a real miss');
+      }
       if (attempt < cfg.announceRetries) {
         log(`broadcast: play_announcement failed (attempt ${attempt + 1}/${cfg.announceRetries + 1}), retrying — ${last.error ?? last.status}`);
         await new Promise((res) => setTimeout(res, 1500));
