@@ -562,6 +562,34 @@ export interface BroadcastMonitorOpts {
  *  miss and still retries. */
 const TIMEOUT_LIKE = /timeout|timed\s?out|abort/i;
 
+/**
+ * v1.119.0 — the announce HTTP budget, DERIVED from the clip instead of guessed.
+ *
+ * `music_assistant.play_announcement` does not return until playback FINISHES,
+ * so the only honest budget is "however long this clip plays, plus room for MA
+ * queueing and AirPlay/RAOP setup on slow targets". A fixed constant has now
+ * rotted three times as clips grew (5 s -> 30 s -> 75 s), most recently on
+ * 2026-08-30 when a 68.5 s red clip against a 75 s ceiling made EVERY red time
+ * out and get retried — 15 announcements of one storm warning.
+ *
+ * WAV is 16-bit mono @22050 Hz = 44100 bytes/sec, so bytes give the duration
+ * directly. Unknown size falls back to the old ceiling (never tighter than
+ * today). PURE.
+ */
+export const WAV_BYTES_PER_SEC = 44_100;
+export const ANNOUNCE_SETUP_MARGIN_MS = 45_000;
+export const ANNOUNCE_TIMEOUT_FLOOR_MS = 75_000;
+export const ANNOUNCE_TIMEOUT_CEILING_MS = 10 * 60_000;
+
+export function announceTimeoutMs(sizeBytes: number | null | undefined): number {
+  if (sizeBytes == null || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    return ANNOUNCE_TIMEOUT_FLOOR_MS;
+  }
+  const playMs = (sizeBytes / WAV_BYTES_PER_SEC) * 1000;
+  const budget = playMs + ANNOUNCE_SETUP_MARGIN_MS;
+  return Math.min(ANNOUNCE_TIMEOUT_CEILING_MS, Math.max(ANNOUNCE_TIMEOUT_FLOOR_MS, Math.round(budget)));
+}
+
 export function sipTimeoutLike(errors: string[]): boolean {
   return errors.length > 0 && errors.every((e) => TIMEOUT_LIKE.test(e));
 }
@@ -951,7 +979,7 @@ export function startBroadcastMonitor(
    * pre-announce wake tone, with up to cfg.announceRetries retries on an actual
    * call failure. Targets are always exactly cfg.targets (BROADCAST_TARGETS).
    */
-  const playAnnounce = async (url: string): Promise<{ ok: boolean; error?: string }> => {
+  const playAnnounce = async (url: string, sizeBytes?: number | null): Promise<{ ok: boolean; error?: string }> => {
     // v0.24.1 — pin each target's STANDING volume from config BEFORE announcing.
     // RAOP/AirPlay speakers (ecobee in particular) handle MA's announce_volume
     // set→play→restore unreliably and fall back to their standing volume — which
@@ -990,7 +1018,13 @@ export function startBroadcastMonitor(
     if (cfg.announceVolume != null) params.announce_volume = cfg.announceVolume;
     let last: { ok: boolean; error?: string; status?: number } = { ok: false, error: 'no attempt' };
     for (let attempt = 0; attempt <= cfg.announceRetries; attempt++) {
-      last = await callHaService('music_assistant', 'play_announcement', params);
+      // v1.119.0 — budget sized to THIS clip (see announceTimeoutMs), so a long
+      // announcement completes instead of timing out and being replayed.
+      const budgetMs = announceTimeoutMs(sizeBytes);
+      last = await callHaService('music_assistant', 'play_announcement', params, {
+        headersTimeoutMs: budgetMs,
+        bodyTimeoutMs: budgetMs + 45_000,
+      });
       if (last.ok) return { ok: true };
       // v1.118.0 — A TIMEOUT IS NOT A FAILURE. Same lesson v1.48.3 learned on
       // the SIP path, which this path never got: under load Music Assistant
@@ -1311,7 +1345,7 @@ export function startBroadcastMonitor(
 
     // 3. Single MA play_announcement to every MA target (the SIP side-channel was
     // already dispatched, fire-and-forget, above).
-    const call = await playAnnounce(url);
+    const call = await playAnnounce(url, rr.sizeBytes);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
       scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries');
@@ -1828,7 +1862,7 @@ export function startBroadcastMonitor(
       }
       await detectMusicAssistant();
       const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
-      const call = await playAnnounce(url);
+      const call = await playAnnounce(url, r.sizeBytes);
       lastBroadcastAt = Date.now();
       lastLevel = level;
       if (!call.ok) {

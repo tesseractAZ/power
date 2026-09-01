@@ -54,6 +54,10 @@ export async function callHaService(
   domain: string,
   service: string,
   data: Record<string, unknown>,
+  /** v1.119.0 — announce-path override: the caller knows how long the rendered
+   *  clip is, and `play_announcement` does not return until playback FINISHES,
+   *  so only the caller can size this budget honestly. See announceTimeoutMs. */
+  timeouts?: { headersTimeoutMs?: number; bodyTimeoutMs?: number },
 ): Promise<ServiceCallResult> {
   const t = token();
   if (!t) return { ok: false, error: 'SUPERVISOR_TOKEN not set (running outside Home Assistant?)' };
@@ -75,9 +79,21 @@ export async function callHaService(
   //   `partial` with "Headers Timeout Error" even though the audio likely
   //   played. Raise the announce ceiling to 75 s / 120 s so a long repeated
   //   announcement to slow targets completes rather than aborting partial.
+  // v1.119.0 — THE CONSTANT ROTTED A THIRD TIME. History above: 5 s -> 30 s
+  // (clips ~271 KB) -> 75 s (clips ~2.2 MB / ~24 s). By 2026-08-30 the red
+  // clip was 3,020,422 B = 68.5 s of audio, and since play_announcement does
+  // not return until playback FINISHES, a red needed 68.5 s + MA queueing +
+  // AirPlay setup against a 75 s budget. EVERY red timed out; the one observed
+  // "success" returned at 75.4 s, i.e. AT the limit. Each timeout was then
+  // retried and played AGAIN — 15 announcements of one storm warning.
+  //
+  // Picking a bigger constant would just set the next rot date. The caller
+  // renders the clip and therefore knows its duration, so it passes a budget
+  // derived from it (announceTimeoutMs); this stays as the floor for callers
+  // that do not.
   const isMaAnnounce = domain === 'music_assistant' && service === 'play_announcement';
-  const headersTimeoutMs = isMaAnnounce ? 75_000 : 5000;
-  const bodyTimeoutMs = isMaAnnounce ? 120_000 : 10_000;
+  const headersTimeoutMs = timeouts?.headersTimeoutMs ?? (isMaAnnounce ? 75_000 : 5000);
+  const bodyTimeoutMs = timeouts?.bodyTimeoutMs ?? (isMaAnnounce ? 120_000 : 10_000);
   try {
     const res = await request(url, {
       method: 'POST',
