@@ -1,5 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { createReadRecorder } from './readRecorder.js';
+import { setOwnerReserveFloorPct } from './nightChargeActuator.js';
 import { buildReport, WARM_REPORTS } from './reports.js';
 import type { FleetSnapshot } from './snapshot.js';
 
@@ -37,6 +38,12 @@ port.on('message', async (msg: any) => {
     switch (msg?.kind) {
       case 'snapshot':
         snapshot = msg.snapshot;
+        return;
+      // v1.119.0 — the OWNER reserve floor, published from the main thread.
+      // The runway model must measure against the floor the owner actually set,
+      // not the reserve our own night-charge write temporarily raised.
+      case 'ownerFloor':
+        setOwnerReserveFloorPct(msg.pct ?? null);
         return;
       case 'report': {
         const result = await buildReport(msg.name, ctx(), msg.args ?? {});
