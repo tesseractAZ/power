@@ -1,3 +1,50 @@
+## v1.119.0 — the announce budget follows the clip; the owner floor crosses the worker
+
+### The storm's root cause: a constant the clips outgrew
+
+`music_assistant.play_announcement` does not return until playback FINISHES, and
+the HTTP budget was a constant sized when clips were ~24 s. By 2026-08-30 the
+red clip was 3,020,422 bytes = **68.5 s** against a **75 s** ceiling, so a red
+needed 68.5 s of playback plus MA queueing and AirPlay setup inside 75 s. Every
+red timed out — the single observed "success" returned at 75.4 s, AT the limit —
+and each timeout was retried and PLAYED AGAIN. Music Assistant's own log is the
+ground truth: **15 announcements** of one storm warning, ~17 minutes of audio in
+a 32-minute span. (The panel log undercounts 2.5x because it records only
+condition transitions, not the retries that also sounded.)
+
+The constant has rotted three times now (5 s → 30 s → 75 s), always because
+clips grew. `announceTimeoutMs` derives it instead: WAV bytes ÷ 44100 gives the
+duration, plus a 45 s setup margin, floored at the old 75 s so nothing gets
+tighter, capped at 10 min so a genuinely wedged call still surfaces.
+
+This also re-arms v1.118.1. That release made a timeout terminal (no retry),
+which was right — but sitting on a timeout that fired for EVERY red, it made a
+genuine red delivery failure indistinguishable from the routine false one.
+With the budget honest, a timeout means something again.
+
+### The runway alarm's owner floor never reached the worker
+
+v1.115.0 published the owner reserve floor through a module-level variable and
+read it in analytics.ts — which runs in the ANALYTICS WORKER THREAD, where
+main-thread module state does not exist. It read null and fell back to the
+device's reserve, i.e. the actuator's own raised 50. Measured live on 08-30/31:
+the pool sat at 41-49% against an owner floor of 40 while the runway alarm
+logged "AT RESERVE FLOOR" five times overnight — the exact artifact the fix was
+meant to remove.
+
+The floor is now pushed across the boundary explicitly (a worker message,
+replayed on respawn) and republished on every snapshot, not only on an
+actuation write — because the floor has three possible authors: the owner, our
+own actuator, and EcoFlow Storm Guard.
+
+### An external reserve-floor change now says so, and the push is auditable
+
+Storm Guard raised the floor 20 → 40 during the thunderstorm warning. The drift
+push path logged NOTHING on success or failure, so whether the operator was ever
+told is unanswerable from any artifact. It now logs its outcome, and a
+`backupReserveSoc` change gets its own dedupId and a title naming the
+consequence, so it can never be coalesced away behind unrelated settings drift.
+
 ## v1.118.1 — a timeout is terminal-unknown: stop, do not retry
 
 v1.118.0 tried to settle a timed-out announcement by probing the players'

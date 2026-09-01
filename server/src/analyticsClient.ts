@@ -24,6 +24,12 @@ export interface AnalyticsClient {
   listMetrics(sn: string): Promise<string[]>;
   /** Hand the worker the latest snapshot (throttled internally). */
   pushSnapshot(snap: FleetSnapshot): void;
+  /** v1.119.0 — publish the OWNER reserve floor to the worker. Module-level
+   *  publishers do NOT cross a worker boundary: v1.115.0 set one on the main
+   *  thread and analytics.ts read it inside the worker, where it was always
+   *  null — so the runway alarm kept measuring against the actuator's raised
+   *  50 and logged 5 h of phantom "AT RESERVE FLOOR" per charge window. */
+  pushOwnerFloor(pct: number | null): void;
   stop(): void;
 }
 
@@ -101,6 +107,7 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
   const reportCache = new Map<string, ReportCacheEntry>();
   const inflightReport = new Map<string, Promise<unknown>>();
   let lastSnapshot: FleetSnapshot | null = null;
+  let lastOwnerFloor: number | null = null;
   let dirty = false;
 
   // Spawn the .mjs bootstrap (loads natively), which registers tsx's loader
@@ -115,6 +122,9 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
       if (msg?.kind === 'log') { log(msg.message); return; }
       if (msg?.kind === 'ready') {
         if (lastSnapshot) { try { worker.postMessage({ kind: 'snapshot', snapshot: lastSnapshot }); } catch { /* */ } }
+        // v1.119.0 — a respawned worker starts with no owner floor; replay it
+        // or the runway alarm silently reverts to reading the device value.
+        try { worker.postMessage({ kind: 'ownerFloor', pct: lastOwnerFloor }); } catch { /* */ }
         return;
       }
       if (msg?.kind === 'result') {
@@ -211,6 +221,11 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
       requestWithRetry({ kind: 'query', sn, metric, sinceMs, untilMs, bucketSec }),
     listMetrics: (sn) => requestWithRetry({ kind: 'listMetrics', sn }),
     pushSnapshot: (snap) => { lastSnapshot = snap; dirty = true; },
+    pushOwnerFloor: (pct) => {
+      if (pct === lastOwnerFloor) return;      // idempotent; changes are rare
+      lastOwnerFloor = pct;
+      try { worker?.postMessage({ kind: 'ownerFloor', pct }); } catch { /* worker mid-respawn; replayed on ready */ }
+    },
     stop: () => {
       stopped = true;
       clearInterval(pushTimer);

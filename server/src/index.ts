@@ -572,7 +572,17 @@ const recorder = createRecorder(store, (m) => app.log.info(m));
 // starving the HTTP port and tripping the Supervisor watchdog. The worker
 // self-warms its report caches, so the old main-thread cache-warmer is gone.
 const analytics = initAnalyticsClient(resolve(process.cwd(), config.dbPath), (m) => app.log.info(m));
-store.on('change', (snap) => analytics.pushSnapshot(snap));
+store.on('change', (snap: FleetSnapshot) => {
+  analytics.pushSnapshot(snap);
+  // v1.119.0 — republish the OWNER floor on every snapshot too, not only on an
+  // actuation-state write. The floor has three possible authors: the owner, our
+  // own night-charge actuator, and EcoFlow Storm Guard (which moved it 20 -> 40
+  // on 2026-08-30 with no actuation event at all). pushOwnerFloor is idempotent,
+  // so this is a no-op except when the value actually moves.
+  const sp = findShp2(snap.devices);
+  const live = sp?.projection?.kind === 'shp2' ? (sp.projection.backupReserveSoc ?? null) : null;
+  analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, live));
+});
 
 app.get('/api/snapshot', async () => snapshotForClient());
 // v1.69.0 — /api/health used to return a hardcoded `ok: true`. On 2026-08-04 the
@@ -2884,13 +2894,18 @@ let nightActuationMem: NightActuationState = (() => {
 // does not momentarily present an arbitrage-raised reserve as a genuine floor.
 setReserveArbitrageRaised(isReserveArbitrageRaised(nightActuationMem));
 setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
+analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
 function persistNightActuation(s: NightActuationState): void {
   nightActuationMem = s;
   // v1.113.0 — keep the alert engine's reserve-posture flag in lockstep with
   // every actuation-state write (apply, revert, cancel, abort).
   setReserveArbitrageRaised(isReserveArbitrageRaised(s));
   // v1.115.0 — and the owner floor the runway alarm measures against.
-  setOwnerReserveFloorPct(ownerReserveFloorPct(s, liveReserveSocPct()));
+  // v1.119.0 — ALSO push it across the worker boundary: the runway report runs
+  // in the analytics worker, where a main-thread module publisher is invisible.
+  const ownerFloor = ownerReserveFloorPct(s, liveReserveSocPct());
+  setOwnerReserveFloorPct(ownerFloor);
+  analytics.pushOwnerFloor(ownerFloor);
   try {
     atomicWriteFileSync(NIGHT_CHARGE_ACTUATION_PATH, JSON.stringify(s));
   } catch (e: any) {
@@ -4111,13 +4126,34 @@ function runSettingsDriftTick(): void {
       const batch = driftPendingPush;
       driftPendingPush = [];
       const msg = renderDriftPush(batch);
-      void sendNotification(loadNotifyConfig(), {
-        severity: 'warning', dedupId: 'settings_drift', title: msg.title, body: msg.body,
-      }).catch((e: any) => {
-        // best-effort: on failure, requeue so the next tick retries
-        driftPendingPush.unshift(...batch);
-        app.log.warn(`settings-drift: push failed (${e?.message ?? e}) — will retry`);
-      });
+      // v1.119.0 — a reserve-floor change is NOT cosmetic drift: it moves the
+      // value the floor alarm defends and the night-charge planner sizes
+      // against. On 2026-08-30 EcoFlow Storm Guard raised it 20 -> 40 and the
+      // operator only learned of it from a later audit. Give it its own dedupId
+      // so it can never be coalesced away behind an unrelated settings batch,
+      // and name the consequence in the title.
+      const floorChange = batch.find((c) => c.key.endsWith(' · backupReserveSoc'));
+      const dedupId = floorChange ? 'settings_drift_reserve_floor' : 'settings_drift';
+      const title = floorChange
+        ? `Reserve floor changed externally: ${floorChange.from}% → ${floorChange.to}%`
+        : msg.title;
+      const body = floorChange
+        ? `${msg.body}\n\nThis is the floor the backup-pool alarm defends and the night-charge planner sizes against. `
+          + 'It was not written by this add-on — EcoFlow Storm Guard and the vendor app can both move it.'
+        : msg.body;
+      // v1.119.0 — LOG THE OUTCOME. This path previously logged nothing on
+      // success and nothing on a non-throwing failure, so "was the operator
+      // told?" was unanswerable from any artifact — the exact question the
+      // 08-31 audit could not settle. Mirrors alertMonitor's "notify: sent".
+      void sendNotification(loadNotifyConfig(), { severity: 'warning', dedupId, title, body })
+        .then(() => {
+          app.log.info(`settings-drift: push sent — ${title} (${batch.length} change(s), dedupId ${dedupId})`);
+        })
+        .catch((e: any) => {
+          // best-effort: on failure, requeue so the next tick retries
+          driftPendingPush.unshift(...batch);
+          app.log.warn(`settings-drift: push failed (${e?.message ?? e}) — will retry`);
+        });
     }
   } catch (e: any) {
     app.log.warn(`settings-drift: tick failed (${e?.message ?? e})`);
@@ -5068,6 +5104,7 @@ app.post<{ Querystring: { pct?: string } }>(
     }
     ownerFloorWrite = { pct: targetPct, atMs: Date.now() };
     setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, targetPct));
+    analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, targetPct));
     app.log.warn(
       `reserve-floor: OWNER set backupReserveSoc ${before ?? '?'}% → ${targetPct}% (this is the floor the reserve alarm defends `
       + `and the night-charge planner sizes against; the nightly write will now restore ${targetPct}% at window close).`,
