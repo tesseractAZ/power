@@ -7,7 +7,7 @@ EcoFlow off-grid system into a fully-instrumented, self-learning **control room*
 It ingests EcoFlow IoT-Open telemetry (HMAC-SHA256-signed REST + live MQTT),
 persists a per-metric SQLite time-series, runs **~40 analytics engines** in a
 worker thread, and serves the results three ways: a **React dashboard**, a
-**telnet "control-room" TUI**, **80+ Home Assistant MQTT-discovery entities**
+**telnet "control-room" TUI**, **120+ Home Assistant MQTT-discovery entities**
 (sensors, binary sensors, and alarm-priority switches — plus dynamic
 per-circuit sensors and the Energy Dashboard). When the pack is
 projected to reach its reserve floor, it raises an **audible alarm** — chimes +
@@ -18,7 +18,7 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
 92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
 time-of-use rate.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~8,300
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~9,100
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
