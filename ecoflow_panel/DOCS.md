@@ -8924,6 +8924,135 @@ The single caller-controlled path component is validated by
 are single-flighted so concurrent requests join one run rather than racing onto
 the shared temp path. Harness: `scripts/mutate-db-export.mjs` (8 mutants).
 
+## 12h. The owner reserve floor, and who is allowed to define it (v1.113.0–v1.116.0, v1.119.0)
+
+`backupReserveSoc` has **three possible authors** — the owner, this add-on's
+night-charge actuator, and EcoFlow Storm Guard (which raised it 20 → 40
+unprompted during a 2026-08-30 thunderstorm warning). A consumer that reads the
+device field is therefore asking "what is the reserve right now", when almost
+every consumer means "what floor did the OWNER set". Four separate defects came
+from that conflation; they are fixed by one shared fact.
+
+**`ownerReserveFloorPct(actuationState, liveReservePct)`** (`nightChargeActuator.ts`)
+returns `priorReservePct` while our own write is holding the reserve up
+(`isReserveArbitrageRaised` = applied && !reverted, persisted across restarts),
+and the live value otherwise. Out-of-envelope or missing restore values fall
+back to the live reading rather than inventing a floor.
+
+Consumers, each of which had the bug independently:
+
+- **`shp2-below-reserve` severity (v1.113.0).** Chose "genuine breach" vs
+  "night-charge filling the pool" with `reserve <= 15` — a proxy valid only
+  while the owner's floor sits below 15. At the 20 % floor set on 08-28 it
+  INVERTS: a real breach classifies as arbitrage and stops pushing, so raising
+  the floor for safety would have reduced coverage. Now keyed on posture.
+- **The runway alarm (v1.115.0, actually fixed v1.119.0).** Read the device
+  field and so manufactured "AT RESERVE FLOOR" for the whole charge window,
+  nightly. v1.115.0's fix was INERT: it published through a module-level
+  variable and read it in `analytics.ts`, which runs in the **analytics worker
+  thread**, where main-thread module state does not exist. v1.119.0 pushes the
+  floor across as a worker message (`{kind:'ownerFloor'}`), replayed on worker
+  respawn and republished on every snapshot — not only on an actuation write,
+  because Storm Guard moves the floor with no actuation event at all.
+- **The night-charge planner (v1.116.0).** Plans recompute every ~30 min,
+  INCLUDING mid-hold, so recomputes sized against floor+cushion = 50+15 = 65 %.
+- **Settings-drift attribution (v1.115.0).** The owner's own write echoed back
+  through the settings surface as an EXTERNAL change at warn level ~3 min later.
+  `classifyChange` recognises a pending owner write before the night-active
+  gate; the grace window is applied by the caller so the classifier stays
+  clock-free.
+
+**`POST /api/reserve-floor?pct=N` (v1.114.0)** lets the owner set the floor
+through the add-on (write-auth, rate-limited, same audited helper and `[10,50]`
+envelope as the actuator). It **refuses with 409 while a night-charge write is
+in flight**: the actuator restores `priorReservePct` at window close, so a
+change made underneath a live write would be silently reverted hours later.
+`GET` is not provided — the device value is authoritative and already published.
+
+**Drift disclosure (v1.119.0).** A `backupReserveSoc` change carries its own
+dedupId (`settings_drift_reserve_floor`) and a title naming the consequence, so
+a floor move can never be coalesced behind unrelated settings drift; the push
+path logs its outcome, because it previously logged nothing on success OR on a
+non-throwing failure and "was the operator told" was unanswerable from any
+artifact. ★ An add-on write always appears in the write log — an EXTERNAL move
+is provable by that log being empty for the transition.
+
+Harness: `scripts/mutate-reserve-posture.mjs` (8 mutants) covers both silent
+inversions — the magnitude proxy returning, and the arbitrage window paging
+nightly — plus the runway regression and a corrupt-prior fallback.
+
+## 12i. Announcement delivery: what a timeout means (v1.118.0–v1.119.0)
+
+`music_assistant.play_announcement` **does not return until playback finishes**.
+Two consequences the pipeline had to learn the hard way, both on 2026-08-30 when
+a Severe Thunderstorm Warning announced itself **15 times** (Music Assistant's
+own log is the ground truth; the panel log undercounts 2.5x because it records
+only condition transitions, not the retries that also sounded).
+
+**The budget must follow the clip (v1.119.0).** The HTTP budget was a constant,
+sized when clips were ~24 s. The red clip is 3,020,422 bytes = **68.5 s**
+against a **75 s** ceiling, so every red timed out — and each timeout was
+retried and played again. `announceTimeoutMs(sizeBytes)` derives it: WAV is
+16-bit mono @22050 Hz = 44100 B/s, so bytes give the duration; plus a 45 s setup
+margin for MA queueing and AirPlay/RAOP, floored at the retired 75 s so nothing
+gets tighter, capped at 10 min so a genuinely wedged call still surfaces.
+`callHaService` takes the caller's budget because only the caller knows the clip.
+★ The constant rotted three times (5 s → 30 s → 75 s), always because clips
+grew; a regression test asserts any future clip length still gets playback +
+margin. Do not replace it with a fourth constant.
+
+**A timeout is terminal-unknown (v1.118.1).** A timeout means the response was
+lost, not that the service failed — MA received and PLAYED every timed-out call.
+So a timeout-classed dispatch stops: no in-call retry, no deferred retry. The
+asymmetry that settles it is that the HA push notification is dispatched
+separately and succeeds independently, so the operator is informed either way —
+audio is the REDUNDANT channel, and one possibly missed announcement beats six
+duplicates. A hard-down MA REFUSES the connection, which is a non-timeout error
+and still retries. One shared classifier serves both the MA and SIP paths
+(`TIMEOUT_LIKE`), and covers `ETIMEDOUT`, which has no word break and the
+original `/timeout|abort/` silently missed.
+
+★ v1.118.0 first tried to settle this by probing player state, copying the
+v1.48.3 SIP fix. **That probe cannot work here**: the service call blocks for its
+full timeout, so the probe runs ~88 s after dispatch — a few-second announcement
+has finished and every player reads `idle` — and it uses the same HA API that
+just timed out, so under the causing load it returns null and also reads as "not
+playing". Both roads led back to "retry". A verification probe that shares the
+failing dependency, and runs after the failing call's own timeout, verifies
+nothing.
+
+## 12j. Roster durability, and the audible cost of guessing (v1.117.0)
+
+The SHP2 connected-source roster is derived from the live projection every tick,
+so it reads EMPTY for the first tick after a boot and through any SHP2
+cloud-blind window. Membership then fell through to the static `SPARE_DPU_SNS`
+literal — stale since the 08-20 swap moved Core 3 off-panel without adding it —
+which admitted that off-panel Core 3 at 75 % into the pool mean while the real
+pool sat at 21 %. The phantom re-armed the SoC ladder's 50/40/30 rungs and
+rewrote its slew baseline; the true 21 % was then rejected as implausible for
+exactly the 10-minute baseline lifetime, and on expiry three rungs crossed at
+once and ANNOUNCED. Reproduced identically on both 08-29 deploys, firing
+10 m 01 s after each.
+
+The roster is durable STATE, so it is remembered: seeded at boot from the
+persisted membership fingerprint (already a sorted, comma-joined SN list) and
+refreshed whenever the live roster is non-empty. `isHomePoolDpu` and
+`homeFleetMeanSoc` take it as an optional last-known set; the literal survives
+only as a first-ever-boot last resort. An unhydrated tick now yields NO pool
+SoC — a safe no-op — instead of a bench spare's.
+
+★ Deliberately NOT fixed with a restart gate: `isRestartContinuation` DID fire on
+the yellow-advisory path both boots; the ladder calls `broadcast.announce`
+directly and goes around it. Gating there would mask the phantom re-arm, which
+can equally misfire in any mid-run SHP2-blind window. Harness:
+`scripts/mutate-roster-fallback.mjs` (4 mutants), covering both the stale
+literal returning AND the fallback over-tightening until the v1.8.0 SHP2-blind
+failover goes dark.
+
+**Also v1.117.0:** `backup_reserve` is recorded alongside `backup_pct`. The
+reserve setpoint — owner-set and rewritten twice nightly — had no time series at
+all, so a bad revert was invisible to every historical query.
+
 ## 12a. Vendor energy ledger (`energyHistory.ts`, v1.82.0)
 
 Daily job (06:35-09:00 Phoenix window, day-latched in the sidecar, restart

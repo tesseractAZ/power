@@ -1,3 +1,26 @@
+## v1.119.1 — the docs register catches up
+
+Seven releases (v1.113.0 → v1.119.0) had landed in CHANGELOG.md without a
+corresponding DOCS.md section, against the standing rule that a new engine gets
+its full section in the same release. Three sections close the gap:
+
+- **§12h — the owner reserve floor, and who is allowed to define it.**
+  `backupReserveSoc` has three possible authors (owner, our actuator, EcoFlow
+  Storm Guard), and four separate defects came from consumers reading the device
+  field when they meant the owner's floor. Documents `ownerReserveFloorPct`, the
+  four consumers, `POST /api/reserve-floor`, and the drift-attribution rules.
+- **§12i — announcement delivery: what a timeout means.** `play_announcement`
+  does not return until playback finishes; the clip-derived budget, the
+  terminal-unknown rule, and why the v1.118.0 entity probe could not work.
+- **§12j — roster durability.** The last-known SHP2 roster, the audible
+  phantom re-arm it prevents, and why a restart gate was the wrong fix.
+
+README: DOCS.md size ~8,300 → ~9,100 lines, and the HA entity count 80+ → 120+
+(the live surface now exposes 121).
+
+Also carries this week's dependency bumps (actions group incl. codeql-action
+v4.37.9, and @vitejs/plugin-react 6.1.1 in the web dev group).
+
 ## v1.119.0 — the announce budget follows the clip; the owner floor crosses the worker
 
 ### The storm's root cause: a constant the clips outgrew
