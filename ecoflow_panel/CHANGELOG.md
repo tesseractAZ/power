@@ -1,3 +1,19 @@
+## v1.119.3 — seven advisories, one of them shipping in the image
+
+GitHub raised 7 Dependabot advisories on main (6 high, 1 low). One class is
+RUNTIME and therefore ships in the add-on image:
+
+- **fast-uri 4.1.2 → 4.1.4** (high, runtime, `server/`) — SSRF via repeated
+  hostname percent-decoding (GHSA-fph4-wmhf-6fwf) and host confusion via
+  percent-encoded scheme normalisation (GHSA-jqff-g426-hqxp). Transitive under
+  fastify. The 3.x copy also moved 3.1.5 → 3.1.7.
+- **browserslist 4.28.6 → 4.28.8** (high, dev, `web/`).
+- **postcss-selector-parser 6.1.2 → 6.1.4** (low, dev, `web/`).
+
+Lockfile-only updates — no `package.json` churn. Server suite 2180/2180 and the
+web production build both verified against the new tree; `npm audit` reports
+zero vulnerabilities in both workspaces.
+
 ## v1.119.2 — the first poll after every boot was failing
 
 v1.119.0 registered a `store.on('change')` handler near the top of index.ts that
