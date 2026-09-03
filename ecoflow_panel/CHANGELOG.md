@@ -1,3 +1,24 @@
+## v1.119.2 — the first poll after every boot was failing
+
+v1.119.0 registered a `store.on('change')` handler near the top of index.ts that
+read `nightActuationMem` — a `let` declared ~2300 lines below it. The first
+store change arriving during module evaluation hit the temporal dead zone:
+
+    poll failed: Cannot access 'nightActuationMem' before initialization
+
+The whole poll failed. One lost snapshot on every boot of a life-safety system,
+at exactly the moment it is coming up. Observed once per boot since v1.119.0
+(2026-09-01 19:47:18); the next poll recovered each time, which is why it read
+as a single benign warn rather than a regression.
+
+The owner-floor publish is now registered AFTER the declaration it depends on.
+TypeScript cannot catch this — the closure is legal and only the runtime order
+is wrong — and no behavioural test can, because it needs a store event mid
+module-evaluation. So the invariant is asserted where it lives, in source order:
+`moduleInitOrder.test.ts` fails if any guarded module-scope binding is read
+above its declaration, and carries a companion test proving the check is
+load-bearing rather than vacuously true.
+
 ## v1.119.1 — the docs register catches up
 
 Seven releases (v1.113.0 → v1.119.0) had landed in CHANGELOG.md without a
