@@ -572,17 +572,7 @@ const recorder = createRecorder(store, (m) => app.log.info(m));
 // starving the HTTP port and tripping the Supervisor watchdog. The worker
 // self-warms its report caches, so the old main-thread cache-warmer is gone.
 const analytics = initAnalyticsClient(resolve(process.cwd(), config.dbPath), (m) => app.log.info(m));
-store.on('change', (snap: FleetSnapshot) => {
-  analytics.pushSnapshot(snap);
-  // v1.119.0 — republish the OWNER floor on every snapshot too, not only on an
-  // actuation-state write. The floor has three possible authors: the owner, our
-  // own night-charge actuator, and EcoFlow Storm Guard (which moved it 20 -> 40
-  // on 2026-08-30 with no actuation event at all). pushOwnerFloor is idempotent,
-  // so this is a no-op except when the value actually moves.
-  const sp = findShp2(snap.devices);
-  const live = sp?.projection?.kind === 'shp2' ? (sp.projection.backupReserveSoc ?? null) : null;
-  analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, live));
-});
+store.on('change', (snap) => analytics.pushSnapshot(snap));
 
 app.get('/api/snapshot', async () => snapshotForClient());
 // v1.69.0 — /api/health used to return a hardcoded `ok: true`. On 2026-08-04 the
@@ -2895,6 +2885,25 @@ let nightActuationMem: NightActuationState = (() => {
 setReserveArbitrageRaised(isReserveArbitrageRaised(nightActuationMem));
 setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
 analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
+
+// v1.119.2 — republish the OWNER floor on every snapshot, not only on an
+// actuation-state write: the floor has three possible authors — the owner, our
+// own actuator, and EcoFlow Storm Guard (which moved it 20 -> 40 on 2026-08-30
+// with no actuation event at all). pushOwnerFloor is idempotent, so this is a
+// no-op except when the value actually moves.
+//
+// ★ REGISTERED HERE, NOT beside the pushSnapshot handler near the top of this
+// file. v1.119.0 put it there and the handler closed over `nightActuationMem`,
+// a `let` declared ~2300 lines further down — so the first store 'change' that
+// arrived during module evaluation threw
+// `ReferenceError: Cannot access 'nightActuationMem' before initialization`
+// and FAILED THE WHOLE POLL. Observed once per boot (2026-09-01 19:47:18).
+// A handler that reads module state must be registered after that state exists.
+store.on('change', (snap: FleetSnapshot) => {
+  const sp = findShp2(snap.devices);
+  const live = sp?.projection?.kind === 'shp2' ? (sp.projection.backupReserveSoc ?? null) : null;
+  analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, live));
+});
 function persistNightActuation(s: NightActuationState): void {
   nightActuationMem = s;
   // v1.113.0 — keep the alert engine's reserve-posture flag in lockstep with
