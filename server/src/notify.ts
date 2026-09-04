@@ -3,6 +3,26 @@ import type { Severity } from './alerts.js';
 import type { NightChargePlan } from './nightChargeAdvisor.js';
 
 /**
+ * v1.120.0 — NOTIFY HTTP BUDGETS.
+ *
+ * Every request in this module was issued with no headersTimeout / bodyTimeout,
+ * so undici's 300 s defaults applied (300 s headers + 300 s body). That matters
+ * because sendNotification is awaited INLINE inside alertMonitor's evaluateInner,
+ * which is serialised behind a re-entrancy latch on a 20 s tick: one wedged
+ * Supervisor->Core proxy request therefore stalls ALL alarm evaluation — battery,
+ * reserve floor, grid loss — for up to five minutes per hung notification, and
+ * several notifications can be dispatched in a single cycle. haService.ts was
+ * capped across v0.9.57 / v0.23.0 / v0.73.0; this module has its own `request`
+ * import and was missed by that sweep.
+ *
+ * A notification that has not been accepted in 10 s is not going to be useful to
+ * a life-safety alarm loop; failing fast lets the next tick re-evaluate.
+ */
+export const NOTIFY_HEADERS_TIMEOUT_MS = 5_000;
+export const NOTIFY_BODY_TIMEOUT_MS = 10_000;
+
+
+/**
  * Notification dispatch. Supports ntfy (default — free, no account), Pushover,
  * and a generic JSON webhook. Channel + credentials come from env.
  */
@@ -142,6 +162,8 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
     if (!cfg.ntfyTopic) throw new Error('ntfy topic not set');
     const url = `${cfg.ntfyServer.replace(/\/$/, '')}/${cfg.ntfyTopic}`;
     const res = await request(url, {
+      headersTimeout: NOTIFY_HEADERS_TIMEOUT_MS,
+      bodyTimeout: NOTIFY_BODY_TIMEOUT_MS,
       method: 'POST',
       headers: {
         Title: msg.title,
@@ -166,6 +188,8 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
       priority: String(PUSHOVER_PRIORITY[msg.severity]),
     });
     const res = await request('https://api.pushover.net/1/messages.json', {
+      headersTimeout: NOTIFY_HEADERS_TIMEOUT_MS,
+      bodyTimeout: NOTIFY_BODY_TIMEOUT_MS,
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
@@ -179,6 +203,8 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
   if (cfg.channel === 'webhook') {
     if (!cfg.webhookUrl) throw new Error('Webhook URL not set');
     const res = await request(cfg.webhookUrl, {
+      headersTimeout: NOTIFY_HEADERS_TIMEOUT_MS,
+      bodyTimeout: NOTIFY_BODY_TIMEOUT_MS,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: msg.title, body: msg.body, severity: msg.severity, ts: Date.now() }),
@@ -207,6 +233,8 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
       ? { notification_id: notificationId }
       : { title: msg.title, message: msg.body, notification_id: notificationId };
     const res = await request(`http://supervisor/core/api/services/persistent_notification/${service}`, {
+      headersTimeout: NOTIFY_HEADERS_TIMEOUT_MS,
+      bodyTimeout: NOTIFY_BODY_TIMEOUT_MS,
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

@@ -9116,3 +9116,50 @@ the sections above. Documented but **not used yet**:
   `CHG_SOC_MAX_SET`/`DSG_SOC_MIN_SET`, `AC_DSG_SET`, `AC_OFTEN_OPEN_SET`,
   standby timers. Any future write goes through the audited write framework
   with the v1.79.0 readback pattern.
+
+### 12k. Detectors that could not fire (v1.120.0)
+
+A 2026-09-03 audit of 49 h of logs found five mechanisms each gated on a condition
+that is a *constant* in this deployment. Each reported "nothing to see" for a reason
+unrelated to whether there was anything to see. A detector that cannot fire and a
+detector that found nothing emit identical telemetry.
+
+- **Poll latency.** The `SLOW_POLL_MS` branch required an empty device-fetch-failure
+  set, but four accessory devices reject `/quota/all` on every poll by design, so the
+  failure set is never empty. Poll duration is now reported independently of the
+  failure set (`pollLogLines`). The one 10,488 ms excursion in the window — 21x the
+  ~490 ms baseline, and above the 8 s ceiling that decides whether a clock sample may
+  teach the offset learner — had surfaced only because its failure *set* happened to
+  change on that tick.
+- **Clock-sample rejections.** `setClockRejectLogger` was registered inside the
+  `setClockOffsetLogger` callback body, so it only installed after a first offset
+  *adoption*. Adoptions are rare by design, so the reject logger was never installed
+  and every RTT-gate rejection was invisible — the exact ambiguity v1.86.0 shipped to
+  remove. Now registered at module scope.
+- **Rate-collapse pushes.** `msg-rate-floor` was missing from `ENERGY_STATE_FAMILIES`,
+  so the high-volume churn rule demoted it: all 16 rate-collapse pushes in the window
+  arrived as "[Low] … No immediate action expected", for a family whose 30-day record
+  includes an episode lasting 12.2 h. It is the only detector that sees a device
+  "barely reporting while still appearing fresh" — the crawl that defeats both the
+  180 s staleness alarm and the gap detector. The omission was self-reinforcing:
+  self-heal shortens episodes, which drives the churn ratio down, which keeps the rule
+  latched harder.
+- **The reserve-revert readback race.** The revert stamps `revertedAtMs` on the cloud
+  ACK, but the SHP2 keeps reporting the raised reserve for another ~20-60 s. With the
+  arbitrage posture already false, the engine read a 49 % pool against a still-raised
+  50 % reserve and pushed a false "[Medium] Backup at reserve", resolving itself ~40 s
+  later — at 05:06, against an owner floor of 16 %. `isRevertSettling` now holds the
+  posture for exactly as long as the device still echoes the target we wrote, bounded
+  by `REVERT_READBACK_GRACE_MS` so a genuine owner change is never masked.
+- **Notification timeouts.** Every `request()` in `notify.ts` was uncapped, so undici's
+  300 s defaults applied. `sendNotification` is awaited inline inside the alarm
+  evaluator, which is serialised behind a re-entrancy latch on a 20 s tick, so one
+  wedged Supervisor→Core request could stall *all* alarm evaluation for minutes.
+  `haService.ts` was capped across v0.9.57 / v0.23.0 / v0.73.0; this module has its own
+  `request` import and was missed. Now capped at 5 s headers / 10 s body.
+
+Also fixed: `dbExport.test.ts` was flaky on ~40 % of runs (2/5 on clean main). The
+fixture meant to hold the source DB handle open — the state a live recorder is always
+in — but the handle was a local that V8 could finalize mid-test, closing it and letting
+the export's own close checkpoint the WAL, which writes the source. Handles are now
+pinned for the file's lifetime.

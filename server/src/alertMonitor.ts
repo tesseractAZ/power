@@ -493,6 +493,21 @@ export const ENERGY_STATE_FAMILIES: ReadonlySet<string> = new Set([
   // 'stale-spare' — NOT listed here, so spare churn can still be auto-tuned).
   'offline',
   'stale',
+  // v1.120.0 — the THIRD connectivity family, omitted when v1.8.0 added the other
+  // two. msg-rate-floor is the only detector that can see a device "barely
+  // reporting while still appearing fresh" — the crawl that defeats BOTH the 180 s
+  // staleness alarm and the 15-min gap detector, and the one the SHP2 (the alarm
+  // chain's single-point-critical input) actually exhibits. Its live telemetry had
+  // riseCount 207 with neverCleared 34/207 = 16.4% ≤ 20%, so churn Rule 4 latched
+  // and warningDemotedToInfo went true: all 16 rate-collapse pushes in the 49 h
+  // audit window arrived as "[Low] … No immediate action expected", for episodes
+  // whose 30-day record includes one lasting 12.2 h.
+  //
+  // The omission was self-reinforcing: self-heal shortens episodes, which drives
+  // neverCleared/rise DOWN, which keeps Rule 4 latched harder. Exactly the v1.8.0
+  // rationale two comments up — "the connectivity families ARE the wedge signal …
+  // their fast clears are genuine recoveries, not sensor jitter".
+  'msg-rate-floor',
   'forecast-soc-dip',    // projected SoC dip — energy-state; was silenced same-day it last pushed
   'reserve-alarm-blind', // v1.8.0 F3 compensating alert — must never be eaten by its own monitor
 ]);

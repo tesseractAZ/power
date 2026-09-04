@@ -192,6 +192,7 @@ import {
   setReserveArbitrageRaised,
   clampReserveTarget,
   ownerReserveFloorPct,
+  isRevertSettling,
   setOwnerReserveFloorPct,
   REVERT_LAG_MS,
   APPLY_LEAD_MS,
@@ -553,9 +554,16 @@ const PROCESS_BOOT_MS = Date.now();
 // v1.69.0 — surface an adopted clock correction. A silent correction would hide the
 // very fault it compensates for: the operator would never learn the Pi's clock is
 // wrong, and would not know to fix NTP. Signing self-heals; the host still needs care.
+// v1.120.0 — this registration used to sit INSIDE the setClockOffsetLogger callback body
+// (one line, zero-indented, easy to miss), so the reject logger was only installed AFTER a
+// first offset ADOPTION. Adoptions are rare by design, so in practice onClockSampleRejected
+// stayed null for the whole process lifetime and every RTT-gate rejection was invisible —
+// which is the exact ambiguity v1.86.0 shipped to remove: "gate never needed" and "gate
+// silently rejecting" looked identical in production. It must be registered at module scope.
+setClockRejectLogger((reason) => app.log.debug(`ecoflow: clock sample rejected (${reason}) — latency, not skew; offset unchanged`));
+
 setClockOffsetLogger((offsetMs, previousMs) => {
   const s = (offsetMs / 1000).toFixed(1);
-setClockRejectLogger((reason) => app.log.debug(`ecoflow: clock sample rejected (${reason}) — latency, not skew; offset unchanged`));
   app.log.warn(
     `ecoflow: adopted a ${s}s clock correction for request signing (was ${(previousMs / 1000).toFixed(1)}s). `
     + `The HOST clock is wrong by about that much — signing is now self-corrected, but fix NTP on the Pi: `
@@ -2882,7 +2890,7 @@ let nightActuationMem: NightActuationState = (() => {
 })();
 // v1.113.0 — seed the posture from persisted state so a restart mid-window
 // does not momentarily present an arbitrage-raised reserve as a genuine floor.
-setReserveArbitrageRaised(isReserveArbitrageRaised(nightActuationMem));
+setReserveArbitrageRaised(effectiveArbitragePosture(nightActuationMem, liveReserveSocPct(), Date.now()));
 setOwnerReserveFloorPct(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
 analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, liveReserveSocPct()));
 
@@ -2899,16 +2907,32 @@ analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, liveReserveSocP
 // `ReferenceError: Cannot access 'nightActuationMem' before initialization`
 // and FAILED THE WHOLE POLL. Observed once per boot (2026-09-01 19:47:18).
 // A handler that reads module state must be registered after that state exists.
+// v1.120.0 — the arbitrage POSTURE must survive the revert readback lag. The
+// revert stamps revertedAtMs on the cloud ACK, but the SHP2 keeps reporting the
+// raised reserve for another ~20-60 s; with the posture already false the alert
+// engine reads pool 49% against a still-raised reserve of 50 and pushes a false
+// "[Medium] Backup at reserve" that resolves itself ~40 s later (live 2026-09-03
+// 05:06:16, and in the ledger for 08-31 and 09-01). isRevertSettling holds the
+// posture true for exactly as long as the device still echoes OUR target.
+function effectiveArbitragePosture(
+  s: NightActuationState, liveReservePct: number | null, nowMs: number,
+): boolean {
+  return isReserveArbitrageRaised(s) || isRevertSettling(s, liveReservePct, nowMs);
+}
+
 store.on('change', (snap: FleetSnapshot) => {
   const sp = findShp2(snap.devices);
   const live = sp?.projection?.kind === 'shp2' ? (sp.projection.backupReserveSoc ?? null) : null;
   analytics.pushOwnerFloor(ownerReserveFloorPct(nightActuationMem, live));
+  // Re-evaluate the posture per snapshot: the settling window ENDS on a device
+  // readback, which is a snapshot event, not an actuation-state write.
+  setReserveArbitrageRaised(effectiveArbitragePosture(nightActuationMem, live, Date.now()));
 });
 function persistNightActuation(s: NightActuationState): void {
   nightActuationMem = s;
   // v1.113.0 — keep the alert engine's reserve-posture flag in lockstep with
   // every actuation-state write (apply, revert, cancel, abort).
-  setReserveArbitrageRaised(isReserveArbitrageRaised(s));
+  setReserveArbitrageRaised(effectiveArbitragePosture(s, liveReserveSocPct(), Date.now()));
   // v1.115.0 — and the owner floor the runway alarm measures against.
   // v1.119.0 — ALSO push it across the worker boundary: the runway report runs
   // in the analytics worker, where a main-thread module publisher is invisible.

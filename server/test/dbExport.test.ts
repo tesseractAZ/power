@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, existsSync, writeFileSync, readdirSync, statSync } from 'node:fs';
@@ -29,6 +29,11 @@ import {
  */
 
 /** A WAL database with rows deliberately left UN-CHECKPOINTED. */
+/** v1.120.0 — strong refs to every fixture source handle, so none is finalized
+ *  (and thus closed, and thus WAL-checkpointed) while a test is still running. */
+const OPEN_HANDLES: DatabaseSync[] = [];
+after(() => { for (const h of OPEN_HANDLES) { try { h.close(); } catch { /* already closed */ } } });
+
 function makeSourceDb(dir: string): { path: string; rows: number } {
   const path = join(dir, 'ecoflow.db');
   const db = new DatabaseSync(path);
@@ -38,6 +43,17 @@ function makeSourceDb(dir: string): { path: string; rows: number } {
   for (let i = 0; i < 2000; i++) ins.run(i, 'SN-A', 'soc', i * 0.5);
   // Leave the handle OPEN so the WAL is not checkpointed on close: this is the
   // state a live recorder is always in.
+  //
+  // v1.120.0 — and PIN it. `db` used to be a local that fell out of scope here,
+  // so V8 was free to finalize the DatabaseSync mid-test; node:sqlite closes the
+  // handle on finalization, and if that happened before exportDatabase's own
+  // connection closed, the export's close became the LAST connection and SQLite
+  // checkpointed the WAL — which writes the source and moved its mtime. That
+  // made "export must not write the source" fail on roughly 40 % of runs (2/5 on
+  // clean main at 7333f0f, 3/5 on this branch) purely on GC timing. Production
+  // never sees it: the recorder holds its connection for the process lifetime,
+  // which is exactly the state this fixture is trying to model.
+  OPEN_HANDLES.push(db);
   assert.ok(existsSync(path + '-wal'), 'precondition: source must have a live WAL');
   return { path, rows: 2000 };
 }
