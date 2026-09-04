@@ -85,6 +85,46 @@ export function ownerReserveFloorPct(
   return liveReservePct;
 }
 
+/**
+ * v1.120.0 — REVERT READBACK LAG.
+ *
+ * The revert stamps `revertedAtMs` the moment the CLOUD acknowledges the write,
+ * but the SHP2's projection keeps reporting the RAISED reserve for another
+ * ~20-60 s until the next device readback lands. `isReserveArbitrageRaised`
+ * goes false immediately, so for that window the alert engine sees
+ * arbitrageRaised=false against a still-raised reserve of 50 and classifies a
+ * pool sitting at ~49% as a genuine floor breach — a false "[Medium] Backup at
+ * reserve" push, followed by its own resolve ~40 s later.
+ *
+ * Observed live on 2026-09-03: revert 05:05:56 -> push 05:06:16 -> resolve
+ * 05:06:56, with the owner's real floor at 16% and the pool at 49%. The same
+ * pattern is in the cleared-alert ledger for 08-31 and 09-01. It recurs on any
+ * night the pool is at or under the raised reserve when the window closes.
+ *
+ * The apply side races the same way but in the SAFE direction (the flag is set
+ * before the device shows the raise), so only the revert is exposed.
+ *
+ * This predicate holds the posture true through the settling window, and is
+ * deliberately narrow: it requires the live reading to still be EXACTLY the
+ * target we wrote, and expires after REVERT_READBACK_GRACE_MS so a genuine
+ * owner change made just after a revert is never masked for long.
+ */
+export const REVERT_READBACK_GRACE_MS = 5 * 60_000;
+
+export function isRevertSettling(
+  state: Pick<NightActuationState, 'appliedAtMs' | 'revertedAtMs' | 'priorReservePct' | 'targetPct'>,
+  liveReservePct: number | null,
+  nowMs: number,
+): boolean {
+  const { appliedAtMs, revertedAtMs, priorReservePct, targetPct } = state;
+  if (appliedAtMs == null || revertedAtMs == null) return false;
+  if (priorReservePct == null || targetPct == null || liveReservePct == null) return false;
+  if (targetPct === priorReservePct) return false;      // nothing was actually raised
+  if (liveReservePct !== targetPct) return false;       // readback already caught up (or owner moved it)
+  const since = nowMs - revertedAtMs;
+  return since >= 0 && since <= REVERT_READBACK_GRACE_MS;
+}
+
 /** v1.115.0 — publisher for the owner floor (same set/get pattern as the
  *  posture flag; analytics reads it without importing index.ts). */
 let ownerFloorPct: number | null = null;

@@ -481,6 +481,47 @@ function flattenInto(input: unknown, prefix: string, out: Record<string, unknown
 // (visible only at LOG_LEVEL=debug/trace); the recovery and slow-poll lines
 // stay at INFO so a grep during an incident still surfaces them.
 const POLL_DEBUG = /^(debug|trace)$/i.test(config.logLevel);
+/**
+ * v1.120.0 — which poll lines to emit, as a pure function.
+ *
+ * THE DEFECT THIS REPLACES: all three log branches were gated on
+ * `failedSns.length === 0`. That guard was written for a fleet where fetch
+ * failures are exceptional. On this fleet they are not: four accessory devices
+ * (EVSE, PowerInsight, BACC Delta 2 Plus, SEC River 2 Plus) reject /quota/all on
+ * EVERY poll — the branch immediately above says so in as many words — so the
+ * failure set is never empty and the SLOW_POLL_MS latency detector could never
+ * fire. The one 10,488 ms excursion in the 49 h audit window (21x the ~490 ms
+ * baseline, and above the 8 s RTT-gate ceiling that decides whether a clock
+ * sample is allowed to teach the offset learner) surfaced only by luck, because
+ * its failure SET happened to change on that tick.
+ *
+ * Poll DURATION is a property of the poll. It does not depend on whether some
+ * accessory answered, so it is no longer gated on the failure set. The recovery
+ * and debug lines keep their original semantics.
+ */
+export function pollLogLines(o: {
+  tookMs: number;
+  failedCount: number;
+  lastPollFailed: boolean;
+  slowMs: number;
+  pollDebug: boolean;
+}): string[] {
+  const lines: string[] = [];
+  if (o.failedCount === 0 && o.lastPollFailed) {
+    lines.push(`poll ok in ${o.tookMs}ms (recovered)`);
+  } else if (o.failedCount === 0 && o.pollDebug) {
+    lines.push(`poll ok in ${o.tookMs}ms`);
+  }
+  // Unconditional on the failure set — that is the whole point of the fix.
+  if (o.tookMs >= o.slowMs) {
+    lines.push(
+      `poll slow: ${o.tookMs}ms`
+      + (o.failedCount > 0 ? ` (${o.failedCount} device fetch failure(s) — the standing accessory set)` : ''),
+    );
+  }
+  return lines;
+}
+
 const SLOW_POLL_MS = 5_000;
 
 /**
@@ -557,13 +598,9 @@ export function startPollLoop(
           if (recoveredLong.length) onLongFailureRecovered?.(recoveredLong);
         }
       }
-      if (failedSns.length === 0 && lastPollFailed) {
-        log(`poll ok in ${tookMs}ms (recovered)`);   // failure→ok transition: keep at INFO
-      } else if (failedSns.length === 0 && tookMs >= SLOW_POLL_MS) {
-        log(`poll ok in ${tookMs}ms (slow)`);         // latency anomaly: keep at INFO
-      } else if (failedSns.length === 0 && POLL_DEBUG) {
-        log(`poll ok in ${tookMs}ms`);                // routine success: debug-gated
-      }
+      for (const line of pollLogLines({
+        tookMs, failedCount: failedSns.length, lastPollFailed, slowMs: SLOW_POLL_MS, pollDebug: POLL_DEBUG,
+      })) log(line);
       lastPollFailed = false;
       // v1.86.0 — the telemetry-blind detector must not count a poll whose
       // ALARM-PATH device (the SHP2) failed as OK: notePollOk previously ran
