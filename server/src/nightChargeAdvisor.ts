@@ -1536,8 +1536,8 @@ export function calibratedBuyDebiasFactor(
  * legacy whole-house trough both stand, which keeps the old (permanently
  * shortfalling) behaviour rather than silently granting a weaker guarantee.
  */
-export const DEFAULT_OUTAGE_CUSHION_HOURS = 8;
-export const DEFAULT_ISLANDED_LOAD_SAFETY = 1.5;
+export const DEFAULT_OUTAGE_CUSHION_HOURS = 4;
+export const DEFAULT_ISLANDED_LOAD_SAFETY = 1.25;
 
 export function outageCushionKwh(o: {
   islandedLoadKw: number | null | undefined;

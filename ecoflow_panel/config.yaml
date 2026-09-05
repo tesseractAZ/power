@@ -1,5 +1,5 @@
 name: Power
-version: "1.125.0"
+version: "1.125.1"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -128,8 +128,8 @@ options:
   NIGHT_CHARGE_ADVISOR_ENABLED: true
   NIGHT_CHARGE_MODE: advisory
   ARB_OUTAGE_CUSHION_PCT: 15
-  ARB_OUTAGE_CUSHION_HOURS: 8
-  ARB_ISLANDED_LOAD_SAFETY: 1.5
+  ARB_OUTAGE_CUSHION_HOURS: 4
+  ARB_ISLANDED_LOAD_SAFETY: 1.25
   ARB_MIN_BUY_KWH: 1
   ARB_CHARGE_CAP_KW: 7.2
   ARB_GRID_INPUT_CAP_KW: 17
