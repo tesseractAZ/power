@@ -485,7 +485,10 @@ export interface BroadcastMonitor {
    * and the household heard it. Making the parameter required turns the omission into
    * a compile error instead of a silently wrong broadcast.
    */
-  announce: (priority: AlarmPriority, message: string, messageEs: string | null) => Promise<{ ok: boolean; error?: string }>;
+  announce: (
+    priority: AlarmPriority, message: string, messageEs: string | null,
+    opts?: { consentNotice?: boolean },
+  ) => Promise<{ ok: boolean; error?: string }>;
   config: () => BroadcastConfig;
   status: () => BroadcastStatus;
   stop: () => void;
@@ -561,6 +564,46 @@ export interface BroadcastMonitorOpts {
  *  entity-state probe, and a target that is NOT playing still counts as a real
  *  miss and still retries. */
 const TIMEOUT_LIKE = /timeout|timed\s?out|abort/i;
+
+/** Severity ladder for the deferred-retry slot. */
+export const RETRY_LEVEL_RANK: Record<ConditionLevel, number> = { green: 0, yellow: 1, red: 2 };
+
+/**
+ * v1.122.0 — who owns the single deferred-retry slot.
+ *
+ * THE DEFECT: there was one `retryTimer` and one `retryAttempt` for the whole
+ * monitor, but runBroadcastInner serves both the condition-transition path AND
+ * the dedicated announce() path used by the SoC ladder, the runway alarm and the
+ * night-charge notice. The retry exists for an HA/MA restart window in which
+ * every speaker is briefly unavailable — precisely a window in which SEVERAL
+ * alarms defer in a row. A critical deferred at T+0 was erased at T+25 s by a
+ * routine yellow deferral (clearTimeout, nothing logged), and the household heard
+ * only the yellow. The shared counter compounded it: three yellow deferrals
+ * exhausted the budget, so the next red got "giving up after 3 deferred retries"
+ * without a single attempt.
+ *
+ * Pure so the precedence rule is testable on its own.
+ */
+export function retrySlotDecision(
+  pending: { level: ConditionLevel; attempt: number } | null,
+  incoming: ConditionLevel,
+  maxAttempts: number,
+): { action: 'keep-pending' | 'arm' | 'give-up'; attempt: number } {
+  // A pending retry for a MORE severe level is never superseded by a less severe
+  // one: un-heard is indistinguishable from never-said, so the more severe
+  // message is the one that must survive the contention.
+  if (pending && RETRY_LEVEL_RANK[incoming] < RETRY_LEVEL_RANK[pending.level]) {
+    return { action: 'keep-pending', attempt: pending.attempt };
+  }
+  // A MORE severe condition gets a fresh budget — yellow churn must not spend
+  // the red's retries.
+  const attempt = pending && RETRY_LEVEL_RANK[incoming] > RETRY_LEVEL_RANK[pending.level]
+    ? 0
+    : pending?.attempt ?? 0;
+  if (attempt >= maxAttempts) return { action: 'give-up', attempt: 0 };
+  return { action: 'arm', attempt: attempt + 1 };
+}
+
 
 /**
  * v1.119.0 — the announce HTTP budget, DERIVED from the clip instead of guessed.
@@ -694,6 +737,19 @@ export function startBroadcastMonitor(
   // broadcast supersedes the pending retry.
   let retryTimer: NodeJS.Timeout | null = null;
   let retryAttempt = 0;
+  // v1.122.0 — the level the PENDING retry belongs to (null when none is armed).
+  //
+  // THE DEFECT: this was one slot and one counter for the whole monitor, but
+  // runBroadcastInner serves both the condition-transition path AND the dedicated
+  // announce() path used by the SoC ladder, the runway alarm and the night-charge
+  // notice. The scenario the retry exists for is an HA/MA restart window in which
+  // every speaker is briefly unavailable — precisely a window in which SEVERAL
+  // alarms defer in a row. A critical announcement deferred at T+0 was then erased
+  // at T+25 s by a routine yellow deferral (clearTimeout with nothing logged), and
+  // the household heard only the yellow. The shared counter compounded it: three
+  // yellow deferrals exhausted the budget, so the next red got
+  // "giving up after 3 deferred retries" without a single attempt.
+  let retryLevel: ConditionLevel | null = null;
   // v1.32.0 (cross-model review) — track whether the LAST SIP dispatch actually
   // DELIVERED (ok > 0), not merely that it was attempted. v1.25.0's skipSip
   // conflated "dispatched" with "delivered": a failed first SIP dispatch was
@@ -707,17 +763,32 @@ export function startBroadcastMonitor(
   let lastSipDispatchOk = true;
   const RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
   const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string) => {
-    if (retryAttempt >= RETRY_DELAYS_MS.length) {
-      log(`broadcast: giving up after ${retryAttempt} deferred retries (${reason})`);
-      retryAttempt = 0;
+    const pending = retryTimer != null && retryLevel != null
+      ? { level: retryLevel, attempt: retryAttempt }
+      : retryLevel != null ? { level: retryLevel, attempt: retryAttempt } : null;
+    const decision = retrySlotDecision(pending, level, RETRY_DELAYS_MS.length);
+    if (decision.action === 'keep-pending') {
+      log(`broadcast: keeping the pending ${retryLevel} retry — a ${level} deferral does not supersede it (${reason})`);
       return;
     }
-    const delay = RETRY_DELAYS_MS[retryAttempt];
-    retryAttempt += 1;
-    if (retryTimer) clearTimeout(retryTimer);
+    if (decision.action === 'give-up') {
+      log(`broadcast: giving up after ${RETRY_DELAYS_MS.length} deferred ${level} retries (${reason})`);
+      retryAttempt = 0;
+      retryLevel = null;
+      return;
+    }
+    const delay = RETRY_DELAYS_MS[decision.attempt - 1];
+    retryAttempt = decision.attempt;
+    if (retryTimer) {
+      // v1.122.0 — say so. This used to discard a pending retry in silence.
+      log(`broadcast: superseding the pending ${retryLevel ?? '?'} retry with ${level}`);
+      clearTimeout(retryTimer);
+    }
+    retryLevel = level;
     log(`broadcast: ${reason} — deferred retry ${retryAttempt}/${RETRY_DELAYS_MS.length} in ${Math.round(delay / 1000)}s`);
     retryTimer = setTimeout(() => {
       retryTimer = null;
+      retryLevel = null;
       if (stopped) return;
       // v0.18.0 — a deferred retry is an AUTOMATIC condition-transition
       // broadcast, so it must honour the same enable gate as tick(). With
@@ -729,6 +800,7 @@ export function startBroadcastMonitor(
       if (!cfg.enabled) {
         log('broadcast: deferred retry cancelled — broadcasts disabled');
         retryAttempt = 0;
+        retryLevel = null;
         return;
       }
       // v1.25.0 — skipSip: this retry exists to reach the MA targets that were
@@ -979,7 +1051,19 @@ export function startBroadcastMonitor(
    * pre-announce wake tone, with up to cfg.announceRetries retries on an actual
    * call failure. Targets are always exactly cfg.targets (BROADCAST_TARGETS).
    */
-  const playAnnounce = async (url: string, sizeBytes?: number | null): Promise<{ ok: boolean; error?: string }> => {
+  // v1.122.0 — `verified` is a THIRD state, distinct from ok.
+  //
+  // v1.118.1 correctly stopped RETRYING on a timeout by returning ok:true, but
+  // ok:true is also the sole input to two downstream "this was verifiably heard"
+  // decisions: redReplayGate.noteRedAnnounced and the storm gate's lastPlayed
+  // commit. One flag was carrying two meanings — "do not retry" and "the
+  // household heard it" — and the timeout path is exactly the case where the
+  // second is unknown. The log line at that branch literally says "delivery
+  // UNKNOWN" while the code files it as heard.
+  //
+  // ok=true, verified=false means: do not retry (a retry storm is worse), but do
+  // not spend this as evidence that the alarm was delivered either.
+  const playAnnounce = async (url: string, sizeBytes?: number | null): Promise<{ ok: boolean; verified: boolean; error?: string }> => {
     // v0.24.1 — pin each target's STANDING volume from config BEFORE announcing.
     // RAOP/AirPlay speakers (ecobee in particular) handle MA's announce_volume
     // set→play→restore unreliably and fall back to their standing volume — which
@@ -1025,7 +1109,7 @@ export function startBroadcastMonitor(
         headersTimeoutMs: budgetMs,
         bodyTimeoutMs: budgetMs + 45_000,
       });
-      if (last.ok) return { ok: true };
+      if (last.ok) return { ok: true, verified: true };
       // v1.118.0 — A TIMEOUT IS NOT A FAILURE. Same lesson v1.48.3 learned on
       // the SIP path, which this path never got: under load Music Assistant
       // regularly starts playing and answers the HTTP call late, so a
@@ -1069,14 +1153,14 @@ export function startBroadcastMonitor(
           'broadcast: play_announcement timed out — delivery UNKNOWN (MA answers slowly under load but does play); ' +
           'not retrying, so the alert cannot announce twice. The HA push notification is the guaranteed channel.',
         );
-        return { ok: true };
+        return { ok: true, verified: false };
       }
       if (attempt < cfg.announceRetries) {
         log(`broadcast: play_announcement failed (attempt ${attempt + 1}/${cfg.announceRetries + 1}), retrying — ${last.error ?? last.status}`);
         await new Promise((res) => setTimeout(res, 1500));
       }
     }
-    return { ok: false, error: `${last.error ?? last.status}` };
+    return { ok: false, verified: false, error: `${last.error ?? last.status}` };
   };
 
   /**
@@ -1123,7 +1207,7 @@ export function startBroadcastMonitor(
     messageEs: string | null,
     bypassStormGate: boolean,
     skipSip = false, // v1.25.0 — true on a deferred MA retry: SIP already got the first dispatch.
-  ): Promise<{ ok: boolean; errors: string[] }> => {
+  ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     if (!supervised) return { ok: false, errors: ['not supervised'] };
     // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
     // ADD-ON channel, not a standalone one): it keeps the audible-health self-alert +
@@ -1154,6 +1238,8 @@ export function startBroadcastMonitor(
     }
 
     const errors: string[] = [];
+    /** v1.122.0 — a dispatch whose delivery is UNKNOWN (MA timeout). */
+    let deliveryUnverified = false;
     const t0 = Date.now();
 
     // 1. Render combined announcement WAV (cache-aware). v0.15.23 — resolve the
@@ -1349,6 +1435,9 @@ export function startBroadcastMonitor(
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
       scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries');
+    } else if (!call.verified) {
+      // Dispatched, outcome unknown. No retry (v1.118.1) and no verification credit.
+      deliveryUnverified = true;
     }
 
     if (message && !spokenDropped) lastSpokenMessage = message;
@@ -1400,7 +1489,7 @@ export function startBroadcastMonitor(
     lastOutcome = errors.length === 0 ? 'success' : 'partial';
     lastErrors = errors;
     persistStatus();
-    return { ok: errors.length === 0, errors };
+    return { ok: errors.length === 0, errors, verified: errors.length === 0 && !deliveryUnverified };
   };
 
   // v0.15.22 — single-flight: every broadcast (runway alarm, SoC alarm, alert
@@ -1437,7 +1526,7 @@ export function startBroadcastMonitor(
   const noteSpokenRenderFailure = (
     level: ConditionLevel,
     rung: AlarmRung,
-    result: { ok: boolean; errors: string[] },
+    result: { ok: boolean; errors: string[]; verified?: boolean },
     message?: string | null,
     messageEs?: string | null,
   ): void => {
@@ -1461,7 +1550,7 @@ export function startBroadcastMonitor(
     bypassStormGate = false,
     messageEs: string | null = null,
     skipSip = false, // v1.25.0 — forwarded to runBroadcastInner; set by deferred MA retries.
-  ): Promise<{ ok: boolean; errors: string[] }> => {
+  ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     realAudibleInFlight++;
     const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip);
     const p = broadcastChain.then(run, run);
@@ -1705,9 +1794,18 @@ export function startBroadcastMonitor(
       // the next boot. criticalFingerprints rides along as context only — the gate
       // uses it solely to REQUIRE more announcements (something new appeared),
       // never to justify one less.
-      if (isRecordableRedAnnounce(level, result.ok) && voicedFingerprint != null) {
+      // v1.122.0 — VERIFIED, not merely ok. A timed-out dispatch returns ok:true
+      // (so it is not retried) but verified:false, because "delivery UNKNOWN" is
+      // exactly the state in which nobody may have heard it. Granting it
+      // verification credit would let one unlucky timeout suppress a standing
+      // critical's klaxon replay — and on this plant standing faults keep the same
+      // fingerprint for weeks. The intent is stated verbatim a few lines above:
+      // "a partial/failed broadcast means the operator may not have heard it, and
+      // un-heard is indistinguishable from never-said".
+      const deliveryVerified = result.ok && result.verified !== false;
+      if (isRecordableRedAnnounce(level, deliveryVerified) && voicedFingerprint != null) {
         redReplayGate.noteRedAnnounced({ voicedFingerprint, activeFingerprints: criticalFingerprints, nowMs: lastBroadcastAt });
-      } else if (result.ok && level !== 'red') {
+      } else if (deliveryVerified && level !== 'red') {
         // A verified yellow/green played AFTER a recorded red: the next red is an
         // ESCALATION over it and must never be suppressed. Demote the recorded
         // level so the carve-out sees it (green additionally wipes the state via
@@ -1881,7 +1979,28 @@ export function startBroadcastMonitor(
     // + TTS) and the Music-Assistant play path are IDENTICAL
     // to a real condition-transition broadcast. The SoC monitor edge-limits
     // crossings, so we deliberately apply NO cooldown here. Never throws.
-    announce: async (priority: AlarmPriority, message: string, messageEs: string | null): Promise<{ ok: boolean; error?: string }> => {
+    /**
+     * @param opts.consentNotice v1.122.0 — this announcement is a CONSENT
+     * CHECKPOINT (the supervised night-charge arm/cancel), not a repeat of a
+     * standing condition, so it bypasses the same-level storm gate.
+     *
+     * THE DEFECT: the evening arm job is pinned at 21:30 and the SoC ladder
+     * routinely chimes in the same minute band (09-01 21:28:29, 09-02 20:09:23).
+     * SAME_LEVEL_GAP_MS is 2 min and a 'medium' arm notice after a 'medium' SoC
+     * chime is not an escalation, so on 2026-09-01 the arm was dropped 107 s
+     * after the ladder — "supervised announce suppressed (suppressed:
+     * same-or-lower level within gap) — arm delivered via HA notify". The whole
+     * safety story of the supervised posture is that the owner is TOLD before a
+     * device write and can cancel until the write moment; that checkpoint
+     * silently degraded to a phone-only channel. It fires at most twice a night
+     * (arm, cancel), so it cannot storm.
+     */
+    announce: async (
+      priority: AlarmPriority,
+      message: string,
+      messageEs: string | null,
+      opts?: { consentNotice?: boolean },
+    ): Promise<{ ok: boolean; error?: string }> => {
       try {
         cfg = loadBroadcastConfig();
         if (!cfg.enabled) return { ok: false, error: 'broadcast disabled' };
@@ -1900,7 +2019,7 @@ export function startBroadcastMonitor(
           return { ok: false, error: 'suppressed: quiet hours' };
         }
         const level = klaxonLevelForPriority(priority);
-        const r = await runBroadcast(level, priority, message, false, messageEs);
+        const r = await runBroadcast(level, priority, message, opts?.consentNotice === true, messageEs);
         lastBroadcastAt = Date.now();
         lastLevel = level;
         lastOutcome = r.ok ? 'success' : 'partial';
