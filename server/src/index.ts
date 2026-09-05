@@ -193,6 +193,7 @@ import {
   clampReserveTarget,
   ownerReserveFloorPct,
   isRevertSettling,
+  nightChargeSpokenNotice,
   setOwnerReserveFloorPct,
   REVERT_LAG_MS,
   APPLY_LEAD_MS,
@@ -3906,26 +3907,20 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       // Disclose a plan that cannot hold the cushion — the HA notification says
       // so, and the audible channel (the one that reaches the owner without a
       // phone) must not be quieter about residual risk than the text channel.
-      const shortfallSpoken = plan.cushionShortfall
-        ? ' Note: charge and pool limits prevent fully meeting the outage cushion, so residual risk remains.'
-        : '';
-      const spoken =
-        `Night charge notice. The system plans to buy about ${buyRounded} kilowatt hours of overnight grid energy, ` +
-        `raising the backup reserve to ${supervisedCtx.targetPct} percent. The write happens automatically ${supervisedCtx.cancelDeadlineText}.` +
-        `${shortfallSpoken} To cancel, use the night charge card on the Power panel before then.`;
-      // v1.67.0 — Spanish second pass. Omitting this is NOT a silent monolingual
-      // broadcast: `bilingual` requires a non-empty messageEs, so a missing one
-      // falls through to the legacy announceRepeat path and plays ENGLISH TWICE.
-      // That is exactly what shipped, and what the household heard.
-      const shortfallSpokenEs = plan.cushionShortfall
-        ? ' Nota: los límites de carga y de la reserva impiden cubrir por completo el margen de respaldo, por lo que queda un riesgo residual.'
-        : '';
-      const spokenEs =
-        `Aviso de carga nocturna. El sistema planea comprar unos ${buyRounded} kilovatios hora de energía de la red durante la noche, ` +
-        `elevando la reserva de respaldo al ${supervisedCtx.targetPct} por ciento. La escritura se realiza automáticamente ${supervisedCtx.cancelDeadlineTextEs}.` +
-        `${shortfallSpokenEs} Para cancelar, use la tarjeta de carga nocturna en el panel Power antes de esa hora.`;
+      // v1.122.0 — the SPOKEN variant is deliberately shorter than the push, and
+      // its length is bounded by a test. See nightChargeSpokenNotice.
+      const spokenPair = nightChargeSpokenNotice({
+        buyKwhRounded: buyRounded,
+        targetPct: supervisedCtx.targetPct,
+        deadlineText: supervisedCtx.cancelDeadlineText,
+        deadlineTextEs: supervisedCtx.cancelDeadlineTextEs,
+        cushionShortfall: plan.cushionShortfall === true,
+      });
+      const spoken = spokenPair.en;
+      const spokenEs = spokenPair.es;
       try {
-        const a = await broadcast.announce('medium', spoken, spokenEs);
+        // v1.122.0 — consent checkpoint: never dropped by the same-level storm gate.
+        const a = await broadcast.announce('medium', spoken, spokenEs, { consentNotice: true });
         audibleDelivered = a.ok === true;
         // v1.78.0 — a config-mandated quiet-hours suppression is healthy, not a
         // failure; logging it at WARN made 3/3 nightly arms read as broken and

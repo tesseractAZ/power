@@ -9207,3 +9207,46 @@ The SHP2 now satisfies the quorum on its own. Everything else is untouched — t
 apply, so this cannot thrash; it only lets the clock start. In the four fleet-wide
 episodes observed in the audit window the SHP2 fired ~16 minutes before the Cores
 reached quorum, and that head start was discarded.
+
+### 12n. The announce path (v1.122.0)
+
+Four audit findings in the one channel that reaches the household without a phone.
+
+- **One retry slot for every alarm source.** `retryTimer` and `retryAttempt` were
+  single, but `runBroadcastInner` serves both the condition-transition path and the
+  dedicated `announce()` path used by the SoC ladder, the runway alarm and the
+  night-charge notice. The retry exists for an HA/MA restart window in which every
+  speaker is briefly unavailable — precisely a window in which several alarms defer
+  in a row. A critical deferred at T+0 was erased at T+25 s by a routine yellow
+  deferral, with nothing logged, and the household heard only the yellow. The shared
+  counter compounded it: three yellow deferrals exhausted the budget, so the next red
+  got "giving up after 3 deferred retries" without a single attempt. The precedence
+  rule is now a pure, tested function (`retrySlotDecision`): a less severe deferral
+  never supersedes a more severe pending retry, a more severe condition gets a fresh
+  budget, and superseding is logged.
+- **A timed-out announcement was filed as verifiably heard.** v1.118.1 correctly
+  stopped *retrying* on a timeout by returning `ok: true`, but `ok` was also the sole
+  input to two "this was heard" decisions. The timeout branch logs "delivery UNKNOWN"
+  while the code granted it verification credit, which can suppress a standing
+  critical's klaxon replay — and on this plant standing faults keep the same
+  fingerprint for weeks. `playAnnounce` now returns a third state: `ok: true,
+  verified: false` — do not retry, but do not claim it was delivered.
+- **The supervised consent notice was eaten by the storm gate.** The evening arm job
+  is pinned at 21:30 and the SoC ladder routinely chimes in the same minute band. A
+  `medium` arm notice after a `medium` SoC chime is not an escalation, so on
+  2026-09-01 it was dropped 107 s later: "supervised announce suppressed … arm
+  delivered via HA notify". The whole safety story of the supervised posture is that
+  the owner is told before a device write and can cancel until the write moment; that
+  checkpoint silently degraded to phone-only. It now bypasses the same-level gate,
+  and it fires at most twice a night so it cannot storm.
+- **The nightly advisory held both alarm speakers for a full minute.** The prose
+  written for the text push was reused verbatim as TTS and doubled by the bilingual
+  pass: the 2026-09-02 clip was 2,643,918 bytes = 59.95 s, 3.3x every other clip in
+  the corpus. Broadcasts are serialised through one promise chain, so a red arising
+  in that window could not be spoken until it finished — an announcement-latency
+  floor of a minute on a life-safety channel, imposed by the least urgent message the
+  system produces. The spoken variant is now built by `nightChargeSpokenNotice` and
+  bounded by `MAX_SPOKEN_ADVISORY_CHARS` (asserted by test): ~46 % shorter, roughly
+  32 s. The text channel keeps the full prose, and the shortfall disclosure stays on
+  the audible path as a clause — audible must never be quieter about residual risk
+  than text.
