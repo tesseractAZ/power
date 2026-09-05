@@ -213,9 +213,17 @@ jobs:
           version = os.environ["NEXT"]
           with open("ecoflow_panel/CHANGELOG.md") as f:
               content = f.read()
-          # Match the "## <version> …" header through end of section (next "## " or EOF)
+          # Match the "## <version> …" header through end of section (next "## " or EOF).
+          #
+          # The `v` prefix is OPTIONAL here and that is the whole point: this job
+          # receives the bare version from config.yaml ("1.126.0") while every
+          # CHANGELOG header is written "## v1.126.0 — …". The original pattern
+          # required an exact match, so it never matched ANY release and every
+          # GitHub Release since this workflow was written carried the
+          # "_(see CHANGELOG.md)_" placeholder instead of its notes. Nothing
+          # failed, so nothing surfaced it.
           pattern = re.compile(
-              rf"^## {re.escape(version)}\b.*?(?=^## |\Z)",
+              rf"^## v?{re.escape(version)}\b.*?(?=^## |\Z)",
               re.MULTILINE | re.DOTALL,
           )
           m = pattern.search(content)
@@ -224,7 +232,15 @@ jobs:
               body = m.group(0).split("\n", 1)[1].strip()
               print(body)
           else:
-              print("_(see CHANGELOG.md)_")
+              # FAIL LOUDLY. A silent placeholder is how this went unnoticed for
+              # every release to date: a missing CHANGELOG section is an authoring
+              # mistake, and shipping a Release with no notes should not be the
+              # quiet default.
+              raise SystemExit(
+                  f"::error::No CHANGELOG.md section found for {version} "
+                  f"(expected a '## {version}' or '## v{version}' header). "
+                  f"Add the section before releasing."
+              )
           PY
           echo "── notes preview ────────────────────────────"
           cat /tmp/notes.md
