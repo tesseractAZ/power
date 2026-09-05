@@ -480,6 +480,19 @@ export interface NightLedgerRow {
   outage_during_day: number | null; // 0/1
   scored: number | null; // 0/1 (0 when coverage<0.9 or excluded)
   score_notes: string | null;
+  /** v1.132.0 — why this night's ARM never became an actuation. `actuated`
+   *  alone is over-loaded: null means "no actuation row", which covers at least
+   *  five different dispositions (superseded by a later plan, held below the
+   *  minimum buy, no window resolved, advisory mode, apply guards refused). The
+   *  2026-08-29 row sat at actuated=null with buy_kwh=36 and was indistinguishable
+   *  from a failure. Null on rows written before v1.132.0. */
+  arm_disposition: string | null;
+  /** v1.132.0 — 'pv-headroom' | 'max-soc' | null. Cost mode floors at the
+   *  resilience answer and only raises under a strict inequality, so a row
+   *  labelled objective='cost_arbitrage' can still have had ZERO cost-mode
+   *  contribution. This is the field that discriminates, and it was computed but
+   *  never persisted, leaving cost mode unauditable from the ledger. */
+  cost_ceiling_basis: string | null;
 
   // ── SCORE (NULL until scored) ──
   pv_err_frac: number | null;
@@ -547,6 +560,7 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'soc_min_err_pct', 'realized_cost_cents', 'counterfactual_cost_cents',
   'realized_savings_cents', 'demand_charge_savings_cents',
   'would_have_peak_imported',
+  'arm_disposition', 'cost_ceiling_basis',
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
 
@@ -722,6 +736,9 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     'window_start_ms INTEGER', 'window_end_ms INTEGER',
     'cushion_shortfall INTEGER', 'actuated INTEGER',
     'actuation_applied_at_ms INTEGER', 'delivered_kwh REAL',
+    // v1.132.0 — the two fields that make a null `actuated` and a
+    // `cost_arbitrage` label legible after the fact.
+    'arm_disposition TEXT', 'cost_ceiling_basis TEXT',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);
