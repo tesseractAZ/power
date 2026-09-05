@@ -499,6 +499,12 @@ const POLL_DEBUG = /^(debug|trace)$/i.test(config.logLevel);
  * accessory answered, so it is no longer gated on the failure set. The recovery
  * and debug lines keep their original semantics.
  */
+/** v1.123.0 — the delay until the next poll, holding a constant period. */
+export function nextPollDelayMs(intervalMs: number, tookMs: number): number {
+  if (!Number.isFinite(tookMs) || tookMs < 0) return intervalMs;
+  return Math.max(0, intervalMs - tookMs);
+}
+
 export function pollLogLines(o: {
   tookMs: number;
   failedCount: number;
@@ -623,7 +629,15 @@ export function startPollLoop(
       // telemetryBlind can raise a CRITICAL if it persists; the old code only logged.
       notePollFailed(emsg);
     }
-    if (!stopped) timer = setTimeout(tick, intervalMs);
+    // v1.123.0 — DEADLINE-COMPENSATED. Arming the next tick at the END of this
+    // one made the wall-clock period (intervalMs + poll duration): measured
+    // 3,626-3,638 s against a 3,600 s nominal hour, ~0.8% slow. Small, but the
+    // COUPLING is the point — the poll cadence degrades in lockstep with the
+    // vendor's own slowness, so telemetry is least fresh exactly when the cloud
+    // is misbehaving, which is the nightly starvation window. Subtracting the
+    // elapsed time holds the period constant while keeping the no-overlap
+    // property a setTimeout chain gives us (and setInterval would not).
+    if (!stopped) timer = setTimeout(tick, nextPollDelayMs(intervalMs, Date.now() - t0));
   };
   tick();
 

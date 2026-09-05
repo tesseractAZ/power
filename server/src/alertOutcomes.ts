@@ -24,6 +24,10 @@ import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import { cleanText, cleanMultilineText, finiteNumber } from './logSanitize.js';
 
+/** v1.123.0 — decided-outcome floor for a per-family precision to be a
+ *  measurement rather than an artifact. Mirrors PACK_RISK_MIN_DECIDED_OUTCOMES. */
+const FAMILY_MIN_DECIDED_OUTCOMES = 3;
+
 export type AlertOutcome = 'ack' | 'dismiss' | 'failed' | 'resolved';
 
 export interface AlertOutcomeEntry {
@@ -250,6 +254,31 @@ export function familyOf(alertId: string): string {
   return familyParts.join('-');
 }
 
+/**
+ * v1.123.0 — per-family precision, with the SAME evidence guard the aggregate
+ * already applies (ml.ts, PACK_RISK_MIN_DECIDED_OUTCOMES).
+ *
+ * THE DEFECT: v1.18.0 put that guard on the aggregate but never pushed it down
+ * here, so /api/models-health published `overallPrecision: null` — correctly
+ * declining to measure — beside ten alertFamilies rows every one of which read
+ * `precision: 1` with `dismiss: 0`. Those 1.0s are an artifact of nobody ever
+ * pressing dismiss, not evidence of a perfect alarm engine, and the Model Health
+ * panel is exactly where a degrading engine is supposed to become visible: a real
+ * precision collapse in one family would have had to compete with nine
+ * neighbours all reporting perfection.
+ *
+ * Dismissals are the informative class — every genuinely poor stream contains
+ * them — so this can delay a true degrade by at most a couple of outcomes, never
+ * hide one. The raw counts are still published; only the derived claim is
+ * withheld when the stream cannot support it.
+ */
+export function familyPrecision(o: { ack: number; dismiss: number; failed: number }): number | null {
+  const realCount = o.ack + o.failed;
+  const decidedCount = o.ack + o.failed + o.dismiss;
+  if (o.dismiss <= 0 || decidedCount < FAMILY_MIN_DECIDED_OUTCOMES) return null;
+  return realCount / decidedCount;
+}
+
 export function computeFamilyStats(): AlertFamilyStats[] {
   const entries = readAllAlertOutcomes();
   const grouped = new Map<string, AlertOutcomeEntry[]>();
@@ -274,7 +303,7 @@ export function computeFamilyStats(): AlertFamilyStats[] {
     }
     const realCount = ack + failed;
     const decidedCount = ack + failed + dismiss;
-    const precision = decidedCount > 0 ? realCount / decidedCount : null;
+    const precision = familyPrecision({ ack, dismiss, failed });
     ttas.sort((a, b) => a - b);
     // v0.13.2 — null out time-to-action for continuously-active families:
     // their alertFiredAt is the condition's first-ever fire, so the delta is

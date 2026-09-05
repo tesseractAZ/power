@@ -367,6 +367,24 @@ export function computeNightChargeReadiness(
     strikesCleared: strikesCleared ? 1 : 0,
     underBuyRate: underBuyRate != null ? round(underBuyRate) : null,
     underBuyExcluded, // v1.104.0 — actuated nights dropped as disclosed cushion shortfalls
+    // v1.123.0 — MEASURABILITY, published beside the measurements.
+    //
+    // `cushion_shortfall` is the exemption key for three separate mechanisms
+    // (this under-buy pool, the buy de-bias learner, and the strike detector
+    // below), and on this plant it is pinned TRUE by arithmetic: the pool holds
+    // 92.16 kWh while the worst-case day the planner sizes against drains
+    // 128-152 kWh, so the cushion cannot be met from ANY starting SoC and the
+    // flag is a constant, not a signal. With every actuated night exempt,
+    // `underBuyRate` and `activeStrikes` are not "clean" — they are UNMEASURED.
+    // A detector that cannot fire and a detector that found nothing publish
+    // identical telemetry, so the difference is published explicitly rather than
+    // left for a reader to infer from a null.
+    //
+    // This deliberately does NOT loosen any criterion: re-scoping the cushion is
+    // an owner policy decision, and until it is made, fail-closed with an honest
+    // label is the correct posture.
+    underBuyMeasurable: actuatedNights > 0 && underBuyPool.length > 0 ? 1 : 0,
+    strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)) ? 1 : 0,
     buyBiasKwh: buyBiasKwh != null ? round(buyBiasKwh) : null,
     pvMae: pvMae != null ? round(pvMae) : null,
     pvBias: pvBias != null ? round(pvBias) : null,
@@ -413,9 +431,15 @@ export function computeNightChargeReadiness(
   }
   if (underBuyRate == null) {
     blocking.push(
-      underBuyExcluded > 0
-        ? `under-buy rate uncomputable — all ${underBuyExcluded} actuated night(s) disclosed a cushion shortfall, so none is evidence about sizing (§5.1).`
-        : 'under-buy rate uncomputable (no actuated buy errors yet).',
+      underBuyExcluded > 0 && underBuyExcluded === actuatedNights
+        ? `under-buy rate UNREACHABLE, not merely thin — all ${underBuyExcluded} of ${actuatedNights} actuated night(s) `
+          + 'disclosed a cushion shortfall and are therefore exempt from the sizing judgement (§5.1). The cushion '
+          + 'requirement is not satisfiable on this plant (the worst-case day drains more than the pool holds), so '
+          + 'the flag is a constant and more nights will not change this. Re-scoping the cushion is an owner decision; '
+          + 'until then this criterion cannot be met and the gate stays closed.'
+        : underBuyExcluded > 0
+          ? `under-buy rate uncomputable — all ${underBuyExcluded} actuated night(s) disclosed a cushion shortfall, so none is evidence about sizing (§5.1).`
+          : 'under-buy rate uncomputable (no actuated buy errors yet).',
     );
   } else if (underBuyRate > MAX_UNDERBUY_RATE) {
     blocking.push(`under-buy rate ${(underBuyRate * 100).toFixed(0)}% exceeds ${(MAX_UNDERBUY_RATE * 100).toFixed(0)}%.`);

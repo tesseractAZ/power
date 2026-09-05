@@ -321,9 +321,18 @@ test('v1.104.0 — removing bad evidence FAILS CLOSED: LEARNING, never READY', (
   assert.notEqual(g.state, 'READY', 'an empty pool is absence of evidence, not evidence of safety');
   assert.equal(g.writeReady, false);
   assert.ok(
-    g.blocking.some((b) => /uncomputable/.test(b) && /disclosed a cushion shortfall/.test(b)),
+    // v1.123.0 — the wording strengthened from "uncomputable" (which reads like a
+    // temporary data shortage) to "UNREACHABLE, not merely thin" when EVERY
+    // actuated night is exempt, because on this plant the cushion flag is pinned
+    // true by arithmetic and more nights cannot change it. Either phrasing
+    // satisfies the original intent: the reason must name itself.
+    g.blocking.some((b) => /(uncomputable|UNREACHABLE)/.test(b) && /disclosed a cushion shortfall/.test(b)),
     `the reason must name itself; got ${JSON.stringify(g.blocking)}`,
   );
+  // v1.123.0 — and the measurability is published, so "0 strikes / null rate"
+  // cannot be misread as a clean bill of health.
+  assert.equal(g.metrics.underBuyMeasurable, 0, 'an all-exempt pool is UNMEASURED, not clean');
+  assert.equal(g.metrics.strikesMeasurable, 0, 'the strike detector cannot fire either');
 });
 
 test('v1.104.0 — a night that did NOT disclose a shortfall still counts against under-buy', () => {
