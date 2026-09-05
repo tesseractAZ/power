@@ -48,11 +48,18 @@ if bashio::config.true 'NOTIFY_RESOLVED'; then
 else
   export NOTIFY_RESOLVED=0
 fi
-export NOTIFY_NTFY_SERVER="$(bashio::config 'NOTIFY_NTFY_SERVER')"
-export NOTIFY_NTFY_TOPIC="$(bashio::config 'NOTIFY_NTFY_TOPIC')"
-export NOTIFY_PUSHOVER_TOKEN="$(bashio::config 'NOTIFY_PUSHOVER_TOKEN')"
-export NOTIFY_PUSHOVER_USER="$(bashio::config 'NOTIFY_PUSHOVER_USER')"
-export NOTIFY_WEBHOOK_URL="$(bashio::config 'NOTIFY_WEBHOOK_URL')"
+# v1.124.2 — the ntfy / Pushover / webhook exports are gone with their options.
+# NOTIFY_HA_PUSH_TARGETS is the list of HA notify services that receive the actual
+# phone push; without it the 'ha' channel only writes a drawer card.
+export NOTIFY_HA_PUSH_TARGETS="$(bashio::config 'NOTIFY_HA_PUSH_TARGETS')"
+# Bool: the 1/0 convention, matching NOTIFY_RESOLVED above (this file uses TWO
+# conventions — the night-charge block below uses true/false — and notify.ts reads
+# `!== '0'`, so it must be this one).
+if bashio::config.true 'NOTIFY_CRITICAL_BYPASS_DND'; then
+  export NOTIFY_CRITICAL_BYPASS_DND=1
+else
+  export NOTIFY_CRITICAL_BYPASS_DND=0
+fi
 
 # ── v0.7.5 quiet-hours digest ────────────────────────────────────────────────
 export NOTIFY_QUIET_HOURS="$(bashio::config 'NOTIFY_QUIET_HOURS')"
