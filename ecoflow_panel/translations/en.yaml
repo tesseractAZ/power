@@ -158,6 +158,12 @@ configuration:
   ARB_ISLANDED_LOAD_SAFETY:
     name: Islanded Load Safety Factor
     description: 'Multiplier applied to the measured panel load when sizing the outage cushion; default 1.25. The measurement is a spot reading and the load during an outage is not constant, so the plan deliberately assumes more draw than it currently sees. HIGHER IS STRICTER — 2.0 makes the cushion harder to meet and buys more; 1.0 trusts the live reading exactly. It is not a fudge factor for optimism.'
+  ARB_OBJECTIVE:
+    name: Night-Charge Objective
+    description: 'What the overnight purchase is sized for. ''resilience'' (the default) buys only enough to hold the reserve floor plus the outage cushion. ''cost'' buys to minimise your bill: it stores cheap overnight energy to displace the dearer energy you would otherwise import later, filling toward the ceiling set by tomorrow''s expected morning solar (or by Cost Mode Maximum State of Charge when the forecast cannot see that far). Cost mode is bounded BELOW by the resilience answer, so switching to it can never buy less or shrink your safety margin — the only direction it moves the purchase is up. It needs your tariff rates entered and confirmed to be meaningful.'
+  ARB_COST_MAX_SOC_PCT:
+    name: Cost Mode Maximum State of Charge
+    description: 'The hard ceiling cost mode charges to, as a percentage; default 90. It exists because the real limit on an overnight purchase is not money but sunlight: a pack too full to accept the morning''s solar wastes that solar, and the wasted kWh costs the full price of the grid kWh sitting in its place. When the forecast covers tomorrow morning the expected solar surplus sets a lower ceiling than this and wins; this value is the fallback for when it cannot see that far, so the plan never fills to the brim merely because it could not check. Ignored entirely in resilience mode.'
   ARB_MIN_BUY_KWH:
     name: Minimum Buy (kWh)
     description: 'Below this recommended buy size the advisor calls the night a "hold" instead of nagging about a trivial top-up. Default 1.0 kWh; the field accepts 0-50 and roughly 0.5 to 3 is sensible. The same number doubles as the clean-baseline test in the morning hindsight score: on a night the engine did NOT actuate, overnight grid import above this figure leaves the night unscored rather than graded against a baseline the grid already propped up.'

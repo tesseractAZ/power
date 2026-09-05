@@ -100,6 +100,12 @@ export interface NightChargeInputs {
   outageCushionHours?: number;
   /** v1.125.0 — multiplier on the observed islanded load. Higher = stricter. */
   islandedLoadSafety?: number;
+  /** v1.127.0 — 'cost' sizes the buy to minimise the bill; 'resilience' (the
+   *  legacy behaviour) sizes it to hold floor+cushion. Cost mode is bounded
+   *  BELOW by the resilience answer, so it can never buy less. */
+  objectiveMode?: 'resilience' | 'cost';
+  /** v1.127.0 — hard SoC ceiling for cost mode when no PV surplus is known. */
+  costMaxSocPct?: number;
   /** SoC coherence check (% vs remainWh/fullCapWh) passed upstream (I11).
    *  false ⇒ null plan. */
   socCoherent: boolean;
@@ -199,7 +205,8 @@ export interface NightChargeEvContention {
 
 export type NightChargeObjective =
   | 'resilience_cushion' // a buy is needed to hold floor+cushion through the carry
-  | 'none'; // projected trough already ≥ floor+cushion, or basis incomplete
+  | 'cost_arbitrage'     // v1.127.0 — buy to minimise the bill, not to hold a cushion
+  | 'none'; // nothing to buy, or basis incomplete
 
 export interface NightChargePlan {
   generatedAt: number;
@@ -280,6 +287,8 @@ export interface NightChargePlan {
   /** v1.125.0 — the cushion in kWh, as actually applied. */
   cushionKwh?: number;
   cushionBasis?: 'islanded-outage' | 'legacy-pct';
+  /** v1.127.0 — which ceiling bound the cost-mode target. */
+  costCeilingBasis?: 'pv-headroom' | 'max-soc' | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
   cushionOutageHours?: number;
   rationale: string;
@@ -793,11 +802,58 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     !cushionShortfall &&
     targetPackKwh > fullKwh - morningPvSurplusP90Kwh + 1e-6
   ) {
-    bindingCap = 'overBuy';
+    // v1.127.0 — in COST mode the PV headroom is the ceiling the target is built
+    // from, not a line it accidentally crossed, so crossing it here would be a
+    // contradiction. costModeTargetKwh keeps the target at or under it.
+    if (inputs.objectiveMode !== 'cost') bindingCap = 'overBuy';
   }
 
-  const buyKwh = liftKwh / legEff; // meter sees more than the pack stores
-  const targetSocPct = round1((targetPackKwh / fullKwh) * 100);
+  // ── v1.127.0 — COST OBJECTIVE ─────────────────────────────────────────────
+  //
+  // Resilience mode has now sized `liftKwh` to hold floor+cushion. Cost mode asks
+  // a different question — how much cheap energy is worth storing to displace
+  // dearer energy later — and answers it by raising the target toward the
+  // solar-headroom ceiling. It is bounded BELOW by the resilience answer, so the
+  // safety margin can never shrink when the objective changes; the only direction
+  // this moves the buy is up.
+  //
+  // Everything downstream is unchanged: the charge-power and pool-headroom caps
+  // still bind, the cushion is still computed and disclosed, and the reserve floor
+  // is still a hard minimum.
+  const costMode = inputs.objectiveMode === 'cost';
+  let costCeilingBasis: 'pv-headroom' | 'max-soc' | null = null;
+  let effLiftKwh = liftKwh;
+  let effTargetPackKwh = targetPackKwh;
+  if (costMode) {
+    const ct = costModeTargetKwh({
+      fullKwh,
+      reserveKwh,
+      morningPvSurplusP90Kwh,
+      maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
+      resilienceTargetKwh: targetPackKwh,
+    });
+    costCeilingBasis = ct.ceilingBasis;
+    // Convert the desired pack level back into a lift, then re-apply the SAME
+    // physical caps the resilience path uses. `packAtWindowEndWith` is monotone
+    // in lift and already clamps to [0, full], so bisecting is exact.
+    let lo = 0;
+    let hi = Math.max(chargePowerLiftKwh, poolHeadroomLiftKwh);
+    for (let i = 0; i < 48; i++) {
+      const mid = (lo + hi) / 2;
+      if (packAtWindowEndWith(mid) >= ct.targetKwh) hi = mid; else lo = mid;
+    }
+    const wanted = Math.min(hi, chargePowerLiftKwh);
+    if (wanted > effLiftKwh) {
+      effLiftKwh = wanted;
+      effTargetPackKwh = packAtWindowEndWith(effLiftKwh);
+      // The cost target is bounded by the same charge-rate reality as any other
+      // buy; say so rather than presenting an undeliverable number.
+      if (chargePowerLiftKwh < hi - 1e-6) bindingCap = evAttributable ? 'evContention' : 'chargePower';
+    }
+  }
+
+  const buyKwh = effLiftKwh / legEff; // meter sees more than the pack stores
+  const targetSocPct = round1((effTargetPackKwh / fullKwh) * 100);
   const chargeTonight = buyKwh >= minBuyKwh;
 
   // ── v1.60.0 — THE WRITE SETPOINT (see NightChargePlan.setpointSocPct) ──
@@ -862,7 +918,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const buyKwhDebiased = round2(buyKwh * buyDebiasFactor);
   const calNote = buyDebiasFactor > 1.005 ? ` (raw estimate ${round1(buyKwh)} kWh × ${buyDebiasFactor.toFixed(2)} realized-buy calibration)` : '';
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     // The deliverable buy can be pushed under the minimum-buy threshold BY the
     // contention itself, so this branch must carry the shortfall disclosure too
     // — otherwise a night the window physically cannot serve would read as a
@@ -872,7 +928,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   return {
     generatedAt: nowMs,
     basisComplete: true,
-    objective: chargeTonight ? 'resilience_cushion' : 'none',
+    objective: chargeTonight ? (costMode ? 'cost_arbitrage' : 'resilience_cushion') : 'none',
     chargeTonight,
     buyKwh: round2(buyKwh),
     buyKwhDebiased,
@@ -893,6 +949,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     reserveFloorPct,
     cushionPct,
     cushionKwh: round2(cushionKwh),
+    /** v1.127.0 — which ceiling bound the cost-mode target (null in resilience mode). */
+    costCeilingBasis,
     // v1.125.0 — how the cushion was derived, so a reader can tell a bounded
     // islanded-outage requirement from the legacy flat band at a glance.
     cushionBasis,
@@ -1050,6 +1108,10 @@ export interface NightChargeInputDeps {
   outageCushionHours?: number;
   /** v1.125.0 — multiplier on the observed islanded load. Higher = stricter. */
   islandedLoadSafety?: number;
+  /** v1.127.0 — buy sizing objective; cost mode is bounded below by resilience. */
+  objectiveMode?: 'resilience' | 'cost';
+  /** v1.127.0 — hard SoC ceiling for cost mode when no PV surplus is known. */
+  costMaxSocPct?: number;
   nowMs: number;
 
   // Battery state (from the SHP2 projection upstream).
@@ -1174,6 +1236,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     // only the end-to-end test caught it — the unit tests of the pure cushion
     // function all passed.
     islandedLoadKw, outageCushionHours, islandedLoadSafety,
+    objectiveMode, costMaxSocPct,
   } = deps;
 
   const window = resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
@@ -1306,6 +1369,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     islandedLoadKw,
     outageCushionHours,
     islandedLoadSafety,
+    objectiveMode,
+    costMaxSocPct,
     socCoherent,
     legEff,
     dischargeEff,
@@ -1536,6 +1601,60 @@ export function calibratedBuyDebiasFactor(
  * legacy whole-house trough both stand, which keeps the old (permanently
  * shortfalling) behaviour rather than silently granting a weaker guarantee.
  */
+/**
+ * v1.127.0 — COST OBJECTIVE: size the buy to minimise the bill.
+ *
+ * MEASURED ON THIS PLANT (2026-09-05), which is what makes this worth doing:
+ *   overnight 13.1c/kWh · off-peak 17.0c · on-peak summer 41.6c · RTE 0.86
+ *   => a kWh bought overnight delivers at 13.1/0.86 = 15.23c, so it beats
+ *      off-peak by +1.77c and on-peak by +26.37c.
+ *   7-day import 453.89 kWh at $81.36 = 17.9c/kWh average, against a 13.1c
+ *      overnight rate — every kWh shifted into the window is worth ~4.8c.
+ *   On-peak import is 0 on most days but was 22.89 kWh on Fri 08-28, the day
+ *      whose charge window is truncated to ONE hour by the weekend DOW boundary
+ *      (~$6 of avoidable on-peak, weekly).
+ *
+ * THE BINDING CONSTRAINT IS NOT MONEY, IT IS SUNLIGHT. Every one of those rates
+ * beats 15.23c, so the naive answer is "always fill completely" — and that is
+ * wrong. A pack too full to accept the morning's solar curtails it, and a
+ * curtailed kWh costs the full 15.23c we paid for the grid kWh occupying its
+ * place. That is 8.6x the weekend-carry gain, so the ceiling matters far more
+ * than the floor.
+ *
+ * Ceiling, most-preferred first:
+ *   1. `fullKwh - morningPvSurplusP90Kwh` — leave room for tomorrow's P90 surplus.
+ *   2. `maxSocPct` of pool — a hard cap for when the forecast band does not
+ *      cover window-end +14 h, which is exactly when the surplus is null. Never
+ *      "fill to 100% because we could not see the sun".
+ * The two are combined with `min`, so a present forecast can only ever make the
+ * ceiling LOWER.
+ *
+ * The reserve floor remains a hard minimum: cost mode may buy more than
+ * resilience mode, never less. Switching objective can therefore never reduce
+ * the safety margin — a property asserted by test.
+ */
+export const DEFAULT_COST_MAX_SOC_PCT = 90;
+
+export function costModeTargetKwh(o: {
+  fullKwh: number;
+  reserveKwh: number;
+  morningPvSurplusP90Kwh: number | null | undefined;
+  maxSocPct: number;
+  /** The resilience target, so cost mode can never sit BELOW it. */
+  resilienceTargetKwh: number;
+}): { targetKwh: number; ceilingBasis: 'pv-headroom' | 'max-soc' } {
+  const { fullKwh, reserveKwh, morningPvSurplusP90Kwh, maxSocPct, resilienceTargetKwh } = o;
+  const socCap = (fullKwh * Math.max(0, Math.min(100, maxSocPct))) / 100;
+  const pvCap = morningPvSurplusP90Kwh != null && Number.isFinite(morningPvSurplusP90Kwh)
+    ? fullKwh - Math.max(0, morningPvSurplusP90Kwh)
+    : null;
+  const ceiling = pvCap != null ? Math.min(socCap, pvCap) : socCap;
+  const basis: 'pv-headroom' | 'max-soc' = pvCap != null && pvCap <= socCap ? 'pv-headroom' : 'max-soc';
+  // Never below the reserve floor, and never below what resilience would have asked.
+  const targetKwh = Math.max(reserveKwh, resilienceTargetKwh, Math.min(ceiling, fullKwh));
+  return { targetKwh: round2(targetKwh), ceilingBasis: basis };
+}
+
 export const DEFAULT_OUTAGE_CUSHION_HOURS = 4;
 export const DEFAULT_ISLANDED_LOAD_SAFETY = 1.25;
 
