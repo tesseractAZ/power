@@ -100,11 +100,22 @@ test('the gate is made visible, NOT loosened', () => {
 
 /* ── the notify channel's own description must not promise a push ─────────── */
 
-test('the config text no longer implies the ha channel reaches a phone', () => {
+test('the config text is honest about what each setting actually delivers', () => {
+  // v1.124.0 — this test previously required the text to say the ha channel does
+  // NOT send a phone push, which was true when persistent_notification was the
+  // whole transport. It now CAN push, so the honest claim changed: the drawer-only
+  // case (no targets configured) is the one that reaches nobody, and the text must
+  // say so rather than letting "channel: ha" read as "alerts are set up".
   const y = readFileSync(resolve(import.meta.dirname, '../../ecoflow_panel/translations/en.yaml'), 'utf8');
   const i = y.indexOf('NOTIFY_CHANNEL:');
-  const block = y.slice(i, i + 1400);
-  assert.match(block, /does NOT send a phone push/i,
-    'persistent_notification raises no OS push — the description must say so');
-  assert.match(block, /ntfy/, 'and must point at the channels that do');
+  const block = y.slice(i, i + 1600);
+  assert.match(block, /drawer card only/i,
+    'the no-targets case must be named explicitly');
+  assert.match(block, /no lock-screen alert, no sound/i,
+    'and its consequence spelled out');
+  assert.match(block, /Notify Push Targets/,
+    'and must point at the setting that fixes it');
+  const t = y.slice(y.indexOf('NOTIFY_HA_PUSH_TARGETS:'));
+  assert.match(t.slice(0, 1400), /mobile_app_iphone/,
+    'the targets option should name a real service from this system');
 });

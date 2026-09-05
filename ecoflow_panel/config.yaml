@@ -1,5 +1,5 @@
 name: Power
-version: "1.123.0"
+version: "1.124.0"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -83,11 +83,8 @@ options:
   NOTIFY_CHANNEL: none
   NOTIFY_MIN_SEVERITY: warning
   NOTIFY_RESOLVED: true
-  NOTIFY_NTFY_SERVER: https://ntfy.sh
-  NOTIFY_NTFY_TOPIC: ""
-  NOTIFY_PUSHOVER_TOKEN: ""
-  NOTIFY_PUSHOVER_USER: ""
-  NOTIFY_WEBHOOK_URL: ""
+  NOTIFY_HA_PUSH_TARGETS: ""
+  NOTIFY_CRITICAL_BYPASS_DND: true
   NOTIFY_QUIET_HOURS: "22-06"
   NOTIFY_DIGEST_HOUR: 7
   # Audible broadcast — spoken alarms + chimes over HA media_player speakers
@@ -179,18 +176,11 @@ schema:
   FORECAST_LAT: float(-90,90)
   FORECAST_LON: float(-180,180)
   # Notifications — per-alert push (see DOCS.md “Options” for per-field help)
-  NOTIFY_CHANNEL: list(none|ntfy|pushover|webhook|ha)
+  NOTIFY_CHANNEL: list(none|ha)
   NOTIFY_MIN_SEVERITY: list(warning|critical)
   NOTIFY_RESOLVED: bool
-  # NOTIFY_NTFY_SERVER / NOTIFY_WEBHOOK_URL use str? (not url?) on purpose:
-  # HA's voluptuous url? rejects an empty default on Save, and both ship empty
-  # (only filled when their channel is used). The runtime validates the URL at
-  # send time. Do not “tidy” these to url?.
-  NOTIFY_NTFY_SERVER: "str?"
-  NOTIFY_NTFY_TOPIC: "str?"
-  NOTIFY_PUSHOVER_TOKEN: "password?"
-  NOTIFY_PUSHOVER_USER: "password?"
-  NOTIFY_WEBHOOK_URL: "str?"
+  NOTIFY_HA_PUSH_TARGETS: "str?"
+  NOTIFY_CRITICAL_BYPASS_DND: bool
   NOTIFY_QUIET_HOURS: "str?"
   NOTIFY_DIGEST_HOUR: int(0,23)?
   # Audible broadcast — spoken alarms + chimes over HA media_player speakers

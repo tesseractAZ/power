@@ -119,11 +119,20 @@ test('THE DEFECT: setClockRejectLogger is registered at module scope, not inside
 /* ── #10 the notify transport was the one uncapped HTTP call ──────────────── */
 
 test('THE DEFECT: every notify HTTP call carries an explicit timeout', () => {
+  // v1.124.0 — the ntfy / Pushover / webhook transports were REMOVED, so the raw
+  // `request()` count dropped from four to one (persistent_notification). The
+  // invariant is unchanged and still exactly as strict: nothing in this module
+  // may reach the network on undici's 300 s defaults, because sendNotification is
+  // awaited inline inside the alarm evaluator's re-entrancy latch.
   const src = readFileSync(resolve(import.meta.dirname, '../src/notify.ts'), 'utf8');
   const calls = (src.match(/await request\(/g) ?? []).length;
-  assert.ok(calls >= 4, `expected the four channel transports, found ${calls}`);
+  assert.ok(calls >= 1, `expected at least the persistent_notification call, found ${calls}`);
   const headers = (src.match(/headersTimeout:/g) ?? []).length;
   const bodies = (src.match(/bodyTimeout:/g) ?? []).length;
   assert.equal(headers, calls, 'every request() must cap headersTimeout (undici defaults to 300 s)');
   assert.equal(bodies, calls, 'every request() must cap bodyTimeout');
+  // And the push half, which goes through haService rather than raw undici, must
+  // pass its budget explicitly instead of inheriting that module's defaults.
+  assert.match(src, /callHaService\('notify', target, payload, \{\s*\n?\s*headersTimeoutMs: NOTIFY_HEADERS_TIMEOUT_MS,/,
+    'the mobile push must carry the same explicit budget');
 });

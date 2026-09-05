@@ -9298,3 +9298,51 @@ Also corrected: the Notify Channel description implied `ha` delivers a phone pus
 does not — `persistent_notification.create` creates a card in the HA drawer with no
 OS alert and no sound. The description now says so and points at ntfy / pushover /
 webhook, which do.
+
+### 13. Notifications are Home-Assistant-native (v1.124.0)
+
+Before this release the live channel was `ha`, whose entire transport was
+`persistent_notification.create` — a card in the HA notification drawer. The companion
+app shows those cards only when you open it: no OS push, no lock-screen alert, no
+sound. There was no `mobile_app` reference anywhere in the repository. Combined with
+in-house-only speakers and quiet hours, an owner who was away or asleep received
+**nothing** for a critical battery, reserve-floor or grid event — and the add-on's own
+config text implied the opposite.
+
+The `ntfy` / Pushover / webhook channels existed to fill that gap and were never
+configured. They are **removed** rather than fixed. Home Assistant already owns a
+notification system with a first-party app, per-device targeting and a documented
+Do-Not-Disturb bypass; running a second delivery stack beside it means two things to
+configure, two things to keep alive, and a second set of credentials living in add-on
+options.
+
+The `ha` channel now does both halves of what HA offers:
+
+1. **`persistent_notification`** — the durable drawer record, unchanged, still keyed by
+   `dedupId` so a resolve dismisses the card it fired on.
+2. **`notify.mobile_app_*`** — the actual push, to every service listed in
+   **Notify Push Targets**.
+
+**Critical alerts break Do Not Disturb.** A `critical` alert — and only a critical one —
+carries the companion app's documented payload: `data.push.sound = {name: default,
+critical: 1, volume: 1.0}` for iOS, and `data.ttl: 0` / `priority: high` /
+`channel: alarm_stream` for Android. One payload serves both platforms, since each
+ignores the other's keys. Warnings and advisories arrive as ordinary pushes that respect
+the phone's settings. That asymmetry is deliberate: a warning that behaves like an
+emergency teaches the owner to silence the channel carrying the emergencies. The bypass
+is on by default and can be switched off.
+
+Phone notifications reuse the drawer card's id as their `tag`, so a notification for the
+same subject replaces its predecessor rather than stacking, and a resolve supersedes the
+alert it closes.
+
+**`reachesAPhone` is now a distinct question from `isConfigured`.** The old
+`configured: true` was satisfied by a supervisor token alone, while delivering only a
+drawer card — which is exactly how "alerts are configured" and "alerts reach nobody"
+became indistinguishable. `/api/notify/status` reports both, plus the resolved target
+list and any per-target push failures.
+
+Removing the five dead options was verified safe before shipping: posting the option set
+without them and re-reading it returned all five, proving `info.options` is the effective
+set with `config.yaml` defaults merged in — so they were defaults, never stored user
+data, and dropping them from the schema leaves nothing stale behind.

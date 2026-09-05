@@ -1500,7 +1500,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       warn(
         `notify: WARNING — morning digest has ${quietQueue.length} queued alert(s) but no notify ` +
           `channel is configured (NOTIFY_CHANNEL=${cfg.channel}). Set NOTIFY_CHANNEL to ` +
-          `"ha" (HA persistent notification, zero setup), ntfy, pushover, or webhook to receive them. Dropping queue.`,
+          `"ha" and add at least one HA notify target (e.g. notify.mobile_app_iphone) to receive them. Dropping queue.`,
       );
       quietQueue.length = 0;
       persistDigestState(); // v1.86.0
