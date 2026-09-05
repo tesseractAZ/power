@@ -86,6 +86,46 @@ export function ownerReserveFloorPct(
 }
 
 /**
+ * v1.122.0 — the SPOKEN night-charge advisory, bounded.
+ *
+ * The prose that goes to the HA push was reused verbatim as TTS, and the
+ * bilingual pass doubles it. On 2026-09-02 that rendered a 2,643,918-byte clip =
+ * 59.95 s of audio, 3.3x every other clip in the corpus. Because every broadcast
+ * is serialised through one promise chain, the two alarm speakers were held for a
+ * full minute each evening by the least urgent message the system produces, and a
+ * red arising in that window could not be spoken until it finished.
+ *
+ * Speech keeps only what the listener must act on. The bound below is asserted by
+ * a test so this cannot rot back: at ~44,100 bytes/s of rendered WAV the
+ * bilingual pair must stay well under ANNOUNCE_TIMEOUT_FLOOR_MS (75 s).
+ */
+export const MAX_SPOKEN_ADVISORY_CHARS = 560;
+
+export function nightChargeSpokenNotice(o: {
+  buyKwhRounded: number;
+  targetPct: number;
+  deadlineText: string;
+  deadlineTextEs: string;
+  cushionShortfall: boolean;
+}): { en: string; es: string } {
+  // The shortfall clause stays on the audible path — it must never be quieter
+  // about residual risk than the text channel — but as a clause, not a sentence,
+  // because it discloses on every single plan.
+  const shortEn = o.cushionShortfall ? ' Outage cushion not fully met.' : '';
+  const shortEs = o.cushionShortfall ? ' Margen de respaldo no cubierto por completo.' : '';
+  return {
+    en:
+      `Night charge notice. Buying about ${o.buyKwhRounded} kilowatt hours overnight, `
+      + `raising backup reserve to ${o.targetPct} percent ${o.deadlineText}.`
+      + `${shortEn} Cancel on the Power panel before then.`,
+    es:
+      `Aviso de carga nocturna. Comprando unos ${o.buyKwhRounded} kilovatios hora durante la noche, `
+      + `elevando la reserva de respaldo al ${o.targetPct} por ciento ${o.deadlineTextEs}.`
+      + `${shortEs} Cancele en el panel Power antes de esa hora.`,
+  };
+}
+
+/**
  * v1.120.0 — REVERT READBACK LAG.
  *
  * The revert stamps `revertedAtMs` the moment the CLOUD acknowledges the write,
