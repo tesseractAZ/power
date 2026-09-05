@@ -1,3 +1,45 @@
+## v1.127.0 — a cost objective for the overnight buy
+
+The night-charge advisor has only ever had one objective: hold the reserve floor plus
+the outage cushion. It knew nothing about rates — no `cents`, `rate` or `tariff`
+reference appeared anywhere in its sizing. `index.ts` already resolved the tariff to
+pass the advisor a period *identity*, and discarded the price.
+
+`ARB_OBJECTIVE: resilience | cost` (default `resilience`, unchanged) adds the missing
+one.
+
+**The measured economics.** Rates are configured and confirmed on this plant:
+overnight 13.1 ¢/kWh, off-peak 17.0 ¢, on-peak summer 41.6 ¢, round-trip 0.86. A kWh
+bought overnight delivers from the pack at 15.23 ¢, so it beats off-peak by **+1.77 ¢**
+and on-peak by **+26.37 ¢**. Seven-day import is 453.89 kWh at $81.36 = **17.9 ¢/kWh
+average** against a 13.1 ¢ window rate.
+
+**The binding constraint is not money, it is sunlight.** Every rate beats 15.23 ¢, so
+the naive answer is "always fill" — and it is wrong. A pack too full to accept the
+morning's solar curtails it, and a curtailed kWh costs the full 15.23 ¢ paid for the
+grid kWh occupying its place: **8.6× the weekend-carry gain.** So cost mode fills to a
+ceiling, most-preferred first:
+
+1. `fullKwh − morningPvSurplusP90Kwh` — room for tomorrow's P90 surplus.
+2. `ARB_COST_MAX_SOC_PCT` (default 90) — a hard cap for when the forecast band does not
+   reach window-end +14 h, which is exactly when that surplus reads null. The plan never
+   fills to the brim merely because it could not check.
+
+The two combine with `min`, so a present forecast can only ever lower the ceiling.
+
+**Cost mode is bounded below by the resilience answer**, so switching objective can
+never buy less or shrink the safety margin — the only direction it moves the purchase is
+up. There is a test sweeping resilience targets and forecast states asserting exactly
+that, and it is the mutant that dies first if the bound is removed.
+
+Why this matters for the weekend: on-peak import is 0 on most days but was **22.89 kWh
+on Fri 08-28** — the day whose charge window is truncated to one hour by the weekend
+day-of-week boundary. At 41.6 ¢ against 13.1 ¢ that is roughly **$6 of avoidable on-peak
+in a single Friday**, and it recurs weekly. Filling toward the ceiling on Thursday and
+Friday is what carries the pack across a weekend that has no overnight window at all.
+
+Mutation-verified 3/3. Suite 2274/2274.
+
 ## v1.126.1 — every GitHub Release has been shipping empty notes
 
 The release-notes extractor in `images.yml` matched `^## <version>` against a
