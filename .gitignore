@@ -1,5 +1,10 @@
 # dependencies
 node_modules/
+# ...and a bare entry, so a SYMLINK named node_modules is ignored too. The
+# trailing-slash form matches a directory only: on 2026-09-04 a self-referential
+# symlink (server/node_modules -> itself) slipped past it, got committed, and
+# broke `tsc` with ELOOP on every checkout that had it.
+node_modules
 
 # build artifacts
 dist/

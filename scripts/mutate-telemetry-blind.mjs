@@ -87,8 +87,12 @@ const MUTANTS = [
   {
     id: 'viii. sanity limit removed (adopts an absurd header)',
     file: OFFSET,
-    find: '  if (Math.abs(measured) > OFFSET_SANITY_LIMIT_MS) {',
-    to: '  if (false) { /* MUTANT */',
+    // v1.129.0 — repointed for UNIQUENESS. The sanity guard now appears twice
+    // (warm and cold paths), so the bare line matched 2 sites and the harness
+    // aborted on "expected exactly 1". Anchored to the warm path by including
+    // the RTT-compensated `measured` binding that precedes only that one.
+    find: '  const measured = serverMs - localNowMs + (rttMs != null && Number.isFinite(rttMs) && rttMs >= 0 ? rttMs / 2 : 0);\n  if (Math.abs(measured) > OFFSET_SANITY_LIMIT_MS) {',
+    to: '  const measured = serverMs - localNowMs + (rttMs != null && Number.isFinite(rttMs) && rttMs >= 0 ? rttMs / 2 : 0);\n  if (false) { /* MUTANT */',
     why: 'A broken or proxied Date header would break signing that currently works.',
   },
   {

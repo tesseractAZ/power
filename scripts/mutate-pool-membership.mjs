@@ -4,6 +4,15 @@
  * membership resolver (server/src/shp2Membership.ts: isHomePoolDpu +
  * homeFleetMeanSoc).
  *
+ * v1.129.0 — ANCHORS REPOINTED. Mutants i-iii targeted the single-line ternary
+ * `return connected.size > 0 ? connected.has(sn) : !SPARE_DPU_SNS.has(sn);`.
+ * v1.117.0 split that into three lines to insert the last-known-roster tier, and
+ * every one of those anchors silently stopped matching. The harness has ABORTED
+ * on its first mutant ever since — it was not passing, it was not running, and
+ * an aborted harness reads exactly like a clean one unless you read the output.
+ * The guarantee it exists to hold (the 2026-08-20 roster defect) was uncovered
+ * that whole time.
+ *
  * WHY COMMITTED: homeFleetMeanSoc is the SoC ladder's ONLY low-pool channel
  * during an SHP2-blind window — when `backupBatPercent` is null, every other
  * reserve producer is null-gated too. On 2026-08-20 a physical reconfiguration
@@ -36,25 +45,25 @@ const SUBSET = ['test/reserveBlindFailover.test.ts'];
 const MUTANTS = [
   {
     id: 'i. ★ roster ignored — back to the static literal (the 08-20 defect verbatim)',
-    find: '  return connected.size > 0 ? connected.has(sn) : !SPARE_DPU_SNS.has(sn);',
-    to: '  return !SPARE_DPU_SNS.has(sn); /* MUTANT */',
+    find: '  if (connected.size > 0) return connected.has(sn);',
+    to: '  /* MUTANT */',
     why: 'This IS the shipped bug: a benched Core is averaged in and a wired ex-spare is dropped.',
   },
   {
     id: 'ii. ★ empty-roster fallback removed (a cloud-dark panel empties the pool)',
-    find: '  return connected.size > 0 ? connected.has(sn) : !SPARE_DPU_SNS.has(sn);',
+    find: '  if (connected.size > 0) return connected.has(sn);',
     to: '  return connected.has(sn); /* MUTANT */',
     why: 'When the SHP2 itself goes dark the roster is empty, so every Core would be excluded and the fallback would return null exactly when it is needed.',
   },
   {
     id: 'iii. roster inverted (pool membership exactly backwards)',
-    find: '  return connected.size > 0 ? connected.has(sn) : !SPARE_DPU_SNS.has(sn);',
-    to: '  return connected.size > 0 ? !connected.has(sn) : !SPARE_DPU_SNS.has(sn); /* MUTANT */',
+    find: '  if (connected.size > 0) return connected.has(sn);',
+    to: '  if (connected.size > 0) return !connected.has(sn); /* MUTANT */',
     why: 'The mean would be taken over precisely the DPUs that are NOT wired to the panel.',
   },
   {
     id: 'iv. ★ membership filter dropped from the mean entirely',
-    find: '    if (!isHomePoolDpu(d.sn, roster)) continue; // only DPUs actually wired into the backup pool',
+    find: '    if (!isHomePoolDpu(d.sn, roster, lastKnownRoster)) continue; // only DPUs actually wired into the backup pool',
     to: '    /* MUTANT */',
     why: 'Every DPU on the bench would be averaged into the life-safety reserve figure.',
   },

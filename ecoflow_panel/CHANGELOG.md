@@ -1,3 +1,50 @@
+## v1.129.2 — a second smart panel now fails loudly, and three dead mutation harnesses
+
+A second SHP2 is planned; it will carry the EV charger and the garage AC. The app
+resolves ONE panel via `find(kind === 'shp2')`, so on the day panel #2 is energised its
+Cores are absent from panel #1's `sources[]`, read as off-panel hardware, and — three
+20-second ticks later, and again after every restart — every alert carrying their SNs is
+stamped `annunciate: false`. No chime, no speech, no push, for every fault class except
+overheating. That includes `dpu-err-<sn>`: the error-533 family that has already failed
+on this plant.
+
+An audit of all 20+ files found **75 singleton assumptions, 40 of them silent-safety**.
+The full refactor is not in this release, because nothing is broken today and rewriting a
+live alarm system for hardware that does not exist yet is its own risk. What ships is the
+part that removes the SILENCE:
+
+- **A critical `shp2-multi-panel` alert**, raised on STATE so it fires whenever the panel
+  appears rather than needing anyone to be watching, and keyed on product identity as
+  well as projection so it is already standing during the pre-hydration window in which
+  the demotion streaks are accumulating. It is registered in `isNeverMutedAlert` and
+  carries no SN in its id, so nothing can mute it.
+- **The muting is disarmed while it stands.** Both mute lists derive from the membership
+  model, and with two panels that model is known unsound — a Core is absent for a WIRING
+  reason, not because it is bench hardware.
+- **Supervised writes are blocked** — none of them pins the SN it writes to, so a
+  wrong-panel write is a real hazard. The REVERT direction is deliberately still allowed:
+  blocking an apply is fail-safe, blocking a revert would strand the pool at a raised
+  reserve with a third of house capacity withheld during an outage.
+- **The membership roster is now the UNION across every panel** (Phase 1), so "off-panel"
+  means "on no known panel". Provably identical on a one-panel plant — a union over a
+  one-element list is that element — which is why it is safe to ship ahead of the
+  hardware. `findShp2` now pins the lowest SN instead of first-in-map, so which panel the
+  singleton paths describe cannot change between restarts.
+
+### Three mutation harnesses were dead, and nothing said so
+
+`mutate-pool-membership` aborted on its first mutant from v1.117.0 until now: that
+release split a one-line ternary into three lines, orphaning four of its six anchors.
+`mutate-session-self-heal` and `mutate-telemetry-blind` were dead too — one anchor moved
+into a new binding, one became ambiguous when its guard was duplicated. All three are
+repointed and killing again (6/6, 8/8, 7/7).
+
+The reason nobody noticed is that **CI never ran the harnesses**, and an aborted harness
+reads exactly like a clean one. Running them in CI is too slow — each replays the full
+2283-test suite once per mutant — but checking that their anchors still RESOLVE is nearly
+free. `scripts/check-mutant-anchors.mjs` does that for all 85 anchors across 15
+harnesses, and now runs on every push. A refactor that moves code out from under a mutant
+fails CI instead of silently disarming it.
 ## v1.129.1 — the boot seed retried, and no longer silent
 
 v1.129.0's islanded-load boot seed made one immediate attempt wrapped in an empty
