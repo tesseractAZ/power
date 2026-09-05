@@ -90,6 +90,42 @@ export function shp2ConnectedDpuSns(devices: Record<string, DeviceSnapshot>): Se
 }
 
 /**
+ * v1.129.0 — the SHP2 census. Answers "how many smart panels does this plant
+ * have?", which the rest of the app has never asked.
+ *
+ * Membership is deliberately WIDER than `projection.kind === 'shp2'`: a panel
+ * that is in /device/list but whose /quota has not hydrated yet has no
+ * projection at all, and that is precisely the window in which its Cores are
+ * already accumulating off-panel streaks. The identity clause is byte-for-byte
+ * the predicate `projectByProduct` uses (ecoflow/project.ts), so the census
+ * cannot disagree with the projector about what an SHP2 is.
+ *
+ * `sns` is deduped and SORTED, and `primarySn` is its first element, so the
+ * panel whose numbers the singleton paths report is PINNED rather than dependent
+ * on device-map iteration order.
+ */
+export function shp2Panels(devices: Record<string, DeviceSnapshot>): {
+  sns: string[];
+  primarySn: string | undefined;
+  projectedCount: number;
+  identityCount: number;
+} {
+  const sns = new Set<string>();
+  let projectedCount = 0;
+  let identityCount = 0;
+  for (const d of Object.values(devices)) {
+    const projected = d.projection?.kind === 'shp2';
+    const byName = (d.productName ?? '').toLowerCase().includes('smart home panel');
+    if (!projected && !byName) continue;
+    if (projected) projectedCount += 1;
+    if (byName) identityCount += 1;
+    if (d.sn) sns.add(d.sn);
+  }
+  const sorted = [...sns].sort();
+  return { sns: sorted, primarySn: sorted[0], projectedCount, identityCount };
+}
+
+/**
  * True iff `sn` should be included in fleet aggregations.
  *
  * IMPORTANT — fallback semantics: when `connected` is empty (no SHP2
@@ -243,7 +279,12 @@ export function isSourceDpuStale(
   devices: Record<string, DeviceSnapshot>,
 ): boolean {
   if (!source.isConnected || !source.sn) return false;
-  if (SPARE_DPU_SNS.has(source.sn)) return false;
+  // v1.129.0 — roster-aware. Every other consumer migrated to isBenchSpareSn in
+  // v1.121.0; this one was left on the raw SPARE_DPU_SNS literal, which the
+  // module's own comment records as STALE since the 2026-08-20 swap. A Core that
+  // the literal still calls a spare but which is a live connected source would
+  // have had its staleness check skipped here.
+  if (isBenchSpareSn(source.sn)) return false;
   const dpu = devices[source.sn];
   return dpu != null && dpu.online === false;
 }
@@ -257,9 +298,19 @@ export function isSourceDpuStale(
 export function findShp2(
   devices: Record<string, DeviceSnapshot>,
 ): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {
-  return Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  // v1.129.0 — lowest SN wins rather than first-in-map. With one panel this is
+  // that panel, unchanged. With two, first-in-map meant the panel whose backup
+  // pool, reserve floor and grid numbers the whole app reports could change
+  // between restarts with no indication; pinning it makes the singleton paths at
+  // least CONSISTENTLY wrong, which is diagnosable. Single pass — no allocation
+  // on a hot path.
+  let best: (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
+  for (const d of Object.values(devices)) {
+    if (d.projection?.kind !== 'shp2') continue;
+    const cand = d as DeviceSnapshot & { projection: Shp2Projection };
+    if (!best || (cand.sn ?? '') < (best.sn ?? '')) best = cand;
+  }
+  return best;
 }
 
 /**

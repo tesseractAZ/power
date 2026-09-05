@@ -26,8 +26,12 @@ const SUBSET = ['test/sessionSelfHeal.test.ts'];
 const MUTANTS = [
   {
     id: 'i. ★ single-device transient heals (threshold removed)',
-    find: '  if (starvedCount < cfg.minStarvedDevices) {',
-    to: '  if (false) { /* MUTANT */',
+    // v1.129.0 — repointed. The threshold moved out of an `if` and into a
+    // `quorumMet` binding when the alarm-critical override was added; the old
+    // anchor stopped matching and this harness aborted on its FIRST mutant,
+    // silently uncovering all eight.
+    find: '  const quorumMet = starvedCount >= cfg.minStarvedDevices || opts?.alarmCriticalStarved === true;',
+    to: '  const quorumMet = true; /* MUTANT */',
     why: 'One flaky device would trigger session rebuilds — churn on the healthiest fleet.',
   },
   {

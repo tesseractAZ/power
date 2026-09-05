@@ -18,7 +18,7 @@ const heldVdiffWarnKeys = new Set<string>();
 export function resetVdiffWarnHoldForTesting(): void {
   heldVdiffWarnKeys.clear();
 }
-import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc, shp2Panels, findShp2 } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
 import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
@@ -132,6 +132,10 @@ export function isNeverMutedAlert(
   a: Pick<Alert, 'id' | 'severity' | 'category'>,
 ): boolean {
   if (a.severity === 'critical' && a.category === 'Thermal') return true;
+  // v1.129.0 — the multi-panel guard exists to say the monitoring model is
+  // unsound. Anything that could mute it is, by construction, one of the
+  // mechanisms it is warning about.
+  if (a.id === 'shp2-multi-panel') return true;
   return a.id.startsWith('pack-defective-');
 }
 
@@ -511,8 +515,66 @@ export function computeAlerts(
     }
   }
 
+  // v1.129.0 — MULTI-PANEL GUARD. Everything below this line resolves ONE SHP2
+  // and reports its pool, reserve floor, runway and grid numbers as if they were
+  // the plant's. That is true for one panel and silently false for two, and the
+  // silence is the dangerous part: Cores wired to a second panel are absent from
+  // the primary panel's sources[], so they read as off-panel hardware and their
+  // alerts are demoted to annunciate:false — no chime, no speech, no push — for
+  // every fault class except overheating.
+  //
+  // This does not try to make the numbers right. It says LOUDLY that they
+  // describe one panel, and (see alertMonitor + the write interlock) withdraws
+  // the app's licence to mute the other panel's hardware or write to a panel it
+  // cannot identify. Detected on STATE, so it fires whenever the second panel
+  // appears rather than needing anyone to be watching; and detected on product
+  // identity as well as projection, so it is already standing during the
+  // pre-hydration window in which the demotion streaks are accumulating.
+  const panels = shp2Panels(devices);
+  if (panels.sns.length > 1) {
+    const primary = panels.primarySn;
+    const primaryPanel = primary ? devices[primary] : undefined;
+    const primarySources = new Set(
+      ((primaryPanel?.projection?.kind === 'shp2'
+        ? (primaryPanel.projection as Shp2Projection).sources
+        : undefined) ?? []
+      ).map((s) => s.sn).filter((sn): sn is string => !!sn),
+    );
+    const strandedDpus = list
+      .filter((d) => d.projection?.kind === 'dpu' && !primarySources.has(d.sn))
+      .map((d) => d.sn);
+    out.push({
+      id: 'shp2-multi-panel',
+      severity: 'critical',
+      category: 'SHP2',
+      priority: 'critical',
+      device: 'System',
+      sourceSn: primary,
+      title: 'Second smart panel detected',
+      detail:
+        'Two Smart Home Panels are present on this account. This monitor was built ' +
+        'for one. Every backup pool, reserve floor, runway and grid number below ' +
+        'describes ONE panel, and battery Cores wired to the other panel are treated ' +
+        'as off-panel hardware.',
+      facts: [
+        // Serials live in facts, never in the spoken title/detail — verbalizeForTts
+        // should never have to read one aloud.
+        { label: 'Panels', value: panels.sns.join(', ') },
+        { label: 'Numbers describe', value: primary ?? 'unknown' },
+        { label: 'Cores not on that panel', value: strandedDpus.length ? strandedDpus.join(', ') : 'none' },
+        { label: 'Hydrated projections', value: `${panels.projectedCount} of ${panels.sns.length}` },
+        {
+          label: 'While this stands',
+          value:
+            'annunciation demotion and bench-spare muting are disabled, and supervised ' +
+            'reserve / Charge-Now writes are blocked (revert still allowed)',
+        },
+      ],
+    });
+  }
+
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<DeviceSnapshot & { projection: DpuProjection }>;
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
+  const shp2 = findShp2(devices) as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
 
   // Grid-tied = AC input on an SHP2-bound DPU (the house's grid path). A spare
   // DPU plugged into a wall to self-charge must NOT register as grid power.

@@ -69,6 +69,27 @@ jobs:
         working-directory: server
         run: ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json
 
+  mutant-anchors:
+    # The committed scripts/mutate-*.mjs harnesses pin their mutants to literal
+    # source strings and ABORT when one stops matching. That abort is loud, but
+    # nothing runs the harnesses, so nobody sees it: mutate-pool-membership was
+    # dead from v1.117.0 to v1.129.0, and mutate-session-self-heal and
+    # mutate-telemetry-blind were dead too. An aborted harness reads exactly like
+    # a clean one. Running the harnesses in CI is too slow (each replays the full
+    # suite once per mutant); checking that their anchors still RESOLVE is nearly
+    # free and catches the whole failure mode.
+    name: Mutant anchors resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+
+      - name: Every mutant anchor still matches exactly one source site
+        run: node scripts/check-mutant-anchors.mjs
+
   server-tests:
     name: Server tests
     runs-on: ubuntu-latest

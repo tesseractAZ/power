@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -4108,6 +4108,28 @@ function repairPrematureNightOutcomes(): void {
 }
 
 /**
+ * v1.129.0 — supervised-write interlock for a multi-panel plant.
+ *
+ * Every hardware write below resolves its target panel by re-running the
+ * singleton lookup on the CURRENT snapshot; none of them pins the SN they wrote
+ * to. With two panels that is a wrong-panel write waiting to happen: apply to
+ * panel A, restart, and the retry or revert lands on panel B — leaving panel A
+ * pinned at a raised reserve with a third of the house pool withheld during an
+ * outage, and nothing that will ever bring it down.
+ *
+ * So while the census sees more than one panel, APPLY-direction writes are
+ * refused. The REVERT direction is deliberately NOT interlocked: blocking an
+ * apply is fail-safe, blocking a revert is not — it would strand exactly the
+ * pinned-reserve state this is meant to avoid. Retired by Phase 4, which pins
+ * the SN into the actuation state.
+ */
+function multiPanelWriteBlock(): string | null {
+  const panels = shp2Panels(store.get().devices);
+  if (panels.sns.length <= 1) return null;
+  return `two smart panels present (${panels.sns.join(', ')}) — supervised writes are blocked because the target panel is not pinned; revert remains enabled`;
+}
+
+/**
  * v1.50.0 — the supervised-write actuator tick (60 s). decideActuation is pure
  * and fail-closed; this driver executes its action through the audited write
  * helper (setBackupReserveSoc) and persists every observed transition. The
@@ -4182,6 +4204,8 @@ async function runChargeNowTick(): Promise<void> {
         });
       }
       for (const slot of slots) {
+        const cnBlocked = multiPanelWriteBlock();
+        if (cnBlocked) { app.log.warn(`charge-now: clear refused — ${cnBlocked}`); continue; }
         const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: false, source: { ua: 'charge-now-responder' } });
         if (r.outcome !== 'success') app.log.warn(`charge-now: slot ${slot} write ${r.outcome} (${r.code ?? ''} ${r.message ?? ''})`);
       }
@@ -4567,6 +4591,8 @@ async function runNightActuationTickInner(): Promise<void> {
   }
 
   if (action.kind === 'apply') {
+    const blocked = multiPanelWriteBlock();
+    if (blocked) { app.log.warn(`night-charge: APPLY refused — ${blocked}`); return; }
     // Write-ahead intent: persist the attempt (with the pre-write baseline)
     // BEFORE issuing the write, so a lost confirmation is reconcilable.
     persistNightActuation({ ...state, applyAttemptedAtMs: nowMs, attemptBaselinePct: currentReservePct });
@@ -4596,6 +4622,8 @@ async function runNightActuationTickInner(): Promise<void> {
   }
 
   if (action.kind === 'retryApply') {
+    const blockedRetry = multiPanelWriteBlock();
+    if (blockedRetry) { app.log.warn(`night-charge: APPLY RETRY refused — ${blockedRetry}`); return; }
     // v1.79.0 — cloud ACK'd but the device never took it (the 08-16 phantom).
     persistNightActuation({ ...state, applyRetries: state.applyRetries + 1, applyLastAttemptMs: nowMs });
     app.log.warn(`night-charge: apply readback FAILED — device still reads ${currentReservePct ?? 'unknown'}% ${Math.round((nowMs - (state.applyLastAttemptMs ?? state.appliedAtMs ?? nowMs)) / 60_000)}m after the ACK'd write; re-issuing (retry ${state.applyRetries + 1}/${APPLY_MAX_RETRIES}).`);
@@ -5286,7 +5314,9 @@ app.post<{ Querystring: { pct?: string } }>(
         hint: 'retry after the scheduled revert, or POST /api/night-charge/cancel first',
       };
     }
-    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    const floorBlocked = multiPanelWriteBlock();
+    if (floorBlocked) { reply.code(409); return { ok: false, error: floorBlocked }; }
+    const shp2 = findShp2(store.get().devices);
     if (!shp2) { reply.code(503); return { ok: false, error: 'SHP2 not present in the snapshot' }; }
     const before = (shp2.projection as any)?.backupReserveSoc ?? null;
     const r = await setBackupReserveSoc({ sn: shp2.sn, targetPct, source: { ua: 'owner-reserve-floor' } });

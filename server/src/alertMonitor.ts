@@ -11,7 +11,7 @@ import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.
 import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { benchSpareSns, shp2ConnectedDpuSns, isExpectedOfflineSpare,
-  aggregateFleetFlow, findShp2 } from './shp2Membership.js';
+  aggregateFleetFlow, findShp2, shp2Panels } from './shp2Membership.js';
 // v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
 // on-peak starts, and the SAME fleet flow aggregation the dashboard shows.
@@ -1884,7 +1884,17 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // is overheating is exactly the case where the operator must be paged
       // regardless of where the hardware is wired.
       const offPanel = advanceOffPanelStreaks(snap.devices, connectedSns, offPanelStreak);
-      const muted = [...new Set([...mutedSpares, ...offPanel])];
+      // v1.129.0 — MULTI-PANEL DISARM. Both mute lists are derived from the
+      // membership model, and with a second panel present that model is known
+      // unsound: a Core wired to panel #2 is absent from the roster for a WIRING
+      // reason, not because it is bench hardware. Demoting on that basis is
+      // exactly the silent-unmonitoring failure the guard alert is raised to
+      // announce, so while it stands the app does not get to mute anything.
+      // Streaks still advance (so the moment the census returns to one panel the
+      // hysteresis is already warm), and the guard alert itself is exempt via
+      // isNeverMutedAlert regardless.
+      const multiPanel = shp2Panels(snap.devices).sns.length > 1;
+      const muted = multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
       for (const a of alerts) if (shouldDemoteAnnunciation(a, muted)) a.annunciate = false;
     }
     store.setAlerts(alerts);
