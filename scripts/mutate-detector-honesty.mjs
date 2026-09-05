@@ -69,6 +69,21 @@ const MUTANTS = [
     why: 'One stray sample would become a whole day\'s floor and steer the trend.',
   },
 
+  {
+    id: 'va. ★ the empty state goes silent again (v1.131.1)',
+    file: ANALYTICS,
+    find: '  if (idleCount >= minSamples) return null;\n  if (aoValues.length === 0) return \'no-ac-out-history\';',
+    to: '  return null; /* MUTANT */\n  if (aoValues.length === 0) return \'no-ac-out-history\';',
+    why: 'A blank standby row reads exactly like a healthy one — which is how this detector hid for its whole life.',
+  },
+  {
+    id: 'vb. a dead AC-output stage is misreported as thin data',
+    file: ANALYTICS,
+    find: "  if (aoValues.every((v) => v === 0)) return 'ac-output-stage-idle';",
+    to: "  /* MUTANT */",
+    why: 'The operator would wait for samples that can never arrive on this topology.',
+  },
+
   /* ── 2. the alert-telemetry exemplar ──────────────────────────────────── */
   {
     id: 'vi. ★ the exemplar id stops following the title it belongs to',

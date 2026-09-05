@@ -6,6 +6,8 @@ import {
   dailyIdleFloors,
   INVERTER_IDLE_PV_DARK_W,
   INVERTER_IDLE_AC_MAX_W,
+  standbyBlockedReason,
+  MIN_IDLE_SAMPLES,
 } from '../src/analytics.js';
 import { replaySeedExemplar, familyMetaFor } from '../src/alertMonitor.js';
 import { rateFloorSampleSet } from '../src/messageRateFloor.js';
@@ -109,6 +111,39 @@ test('floors come back in chronological order regardless of input order', () => 
   const floors = dailyIdleFloors(shuffled);
   assert.deepEqual(floors.map((f) => f.value), [44, 51, 62]);
   assert.ok(floors[0].ts < floors[1].ts && floors[1].ts < floors[2].ts);
+});
+
+/* ── v1.131.1: the empty state has to say which empty it is ──────────────── */
+
+test('THE LIVE FINDING: ac_out is dead on this topology, and now says so', () => {
+  // Measured 2026-09-05, all five DPUs: acOutWatts 0 AND acOutVol 0. The Delta
+  // Pro Ultras feed the house through the SHP2 link, not their own AC output
+  // port, so the register the detector reads is structurally zero. v1.131.0
+  // removed an unreachable whole-house gate; this is a SECOND, independent
+  // reason the detector cannot fire, found by querying the device instead of
+  // reasoning about the gate.
+  const allZero = new Array(3000).fill(0);
+  assert.equal(standbyBlockedReason(allZero, 0, MIN_IDLE_SAMPLES), 'ac-output-stage-idle');
+});
+
+test('an empty history is distinguished from a dead output stage', () => {
+  assert.equal(standbyBlockedReason([], 0, MIN_IDLE_SAMPLES), 'no-ac-out-history');
+});
+
+test('a genuinely thin sample set says so rather than blaming the hardware', () => {
+  // The register works — some samples are non-zero — there just are not enough
+  // qualifying quiet-night ones yet.
+  assert.equal(standbyBlockedReason([0, 0, 48, 51, 0], 4, MIN_IDLE_SAMPLES), 'insufficient-idle-samples');
+});
+
+test('★ a published figure is never accompanied by a reason, and vice versa', () => {
+  // The invariant the card renders on: exactly one of {figure, reason}.
+  for (const idleCount of [0, 1, 9, 10, 11, 500]) {
+    for (const values of [[], [0, 0, 0], [0, 45, 60]]) {
+      const reason = standbyBlockedReason(values, idleCount, MIN_IDLE_SAMPLES);
+      assert.equal(reason == null, idleCount >= MIN_IDLE_SAMPLES, `idleCount=${idleCount}`);
+    }
+  }
 });
 
 /* ══ 2. the exemplar must describe one alert, not two ════════════════════ */

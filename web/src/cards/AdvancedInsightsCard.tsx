@@ -18,6 +18,19 @@ import type {
 import { apiUrl } from '../api';
 import { PredictiveBadge, type PredictiveKind } from '../components/PredictiveBadge';
 import { HowItWorks } from '../components/sections';
+import type { StandbyBlockedReason } from '../types';
+
+/**
+ * v1.131.1 — the empty states, spelled out. `ac-output-stage-idle` is the live
+ * one here: the Delta Pro Ultras feed the house through the SHP2 link, not their
+ * own AC output port, so `ac_out` sits at 0 permanently and the inverter's idle
+ * draw is not exposed on that register at all.
+ */
+const STANDBY_BLOCKED_TEXT: Record<StandbyBlockedReason, string> = {
+  'no-ac-out-history': 'no AC-output history recorded',
+  'ac-output-stage-idle': 'AC output unused (fed via SHP2) — standby not measurable here',
+  'insufficient-idle-samples': 'not enough quiet-night samples yet',
+};
 
 /**
  * Advanced Insights (v0.7.5) — surfaces the dozen new analytics functions
@@ -248,7 +261,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
         </Section>
       )}
 
-      {show('equipment-health') && equip && (equip.mpptStrings.some((s) => s.driftPctPts != null) || equip.inverterStandby.some((s) => s.idleWatts != null)) && (
+      {show('equipment-health') && equip && (equip.mpptStrings.some((s) => s.driftPctPts != null) || equip.inverterStandby.length > 0) && (
         <Section title="Equipment health" subtitle="MPPT conversion drift + inverter idle losses">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <div>
@@ -268,13 +281,22 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
             </div>
             <div>
               <div className="text-[11px] uppercase tracking-wider text-muted mb-1">Inverter standby</div>
-              {equip.inverterStandby.filter((s) => s.idleWatts != null).map((s) => (
+              {equip.inverterStandby.map((s) => (
                 <div key={s.sn} className="text-xs flex items-baseline gap-2 py-0.5">
                   <span className="w-24 shrink-0">Core {s.coreNum}</span>
-                  <span className="font-mono tabular-nums">{s.idleWatts} W idle (base {s.baselineIdleWatts})</span>
-                  <span className="text-[10px] text-muted">
-                    {s.trendWattsPerWeek != null ? `${s.trendWattsPerWeek >= 0 ? '+' : ''}${s.trendWattsPerWeek} W/wk` : ''}
-                  </span>
+                  {/* v1.131.1 — a blank row reads as a healthy one. This detector
+                       published nothing for its entire life and looked fine doing
+                       it, so the empty state now says which empty it is. */}
+                  {s.idleWatts != null ? (
+                    <>
+                      <span className="font-mono tabular-nums">{s.idleWatts} W idle (base {s.baselineIdleWatts})</span>
+                      <span className="text-[10px] text-muted">
+                        {s.trendWattsPerWeek != null ? `${s.trendWattsPerWeek >= 0 ? '+' : ''}${s.trendWattsPerWeek} W/wk` : ''}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-muted">{STANDBY_BLOCKED_TEXT[s.blockedReason ?? 'insufficient-idle-samples']}</span>
+                  )}
                 </div>
               ))}
             </div>

@@ -538,6 +538,11 @@ export interface MpptString {
   spanDays: number;
 }
 
+export type StandbyBlockedReason =
+  | 'no-ac-out-history'
+  | 'ac-output-stage-idle'
+  | 'insufficient-idle-samples';
+
 export interface InverterStandby {
   sn: string;
   device: string;
@@ -546,6 +551,8 @@ export interface InverterStandby {
   baselineIdleWatts: number | null;
   trendWattsPerWeek: number | null;
   samples: number;
+  /** v1.131.1 — null when a figure is published; otherwise why there is none. */
+  blockedReason: StandbyBlockedReason | null;
 }
 
 export interface EquipmentHealth {
