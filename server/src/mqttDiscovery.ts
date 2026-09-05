@@ -508,11 +508,23 @@ export function planCircuitDiscovery(
 ): CircuitDiscoveryPlan {
   const byCh = new Map(circuits.map((c) => [c.ch, c]));
   const display = new Map(circuits.map((c) => [c.ch, circuitDisplayName(c, byCh)]));
-  // The latch signature is built from the DERIVED name, not the raw one. A
-  // secondary leg's raw `chName` never changes ("Circuit 3" forever), so a
-  // sig over raw names would stay identical across this very change and the
-  // caller would skip republishing — the rename would never reach HA.
-  const sig = circuits.map((c) => `${c.ch}:${display.get(c.ch) ?? ''}`).join('|');
+  // `entityName` is the string actually published, and the latch signature is
+  // built from THAT — not from the raw channel name, and not from the derived
+  // display name either.
+  //
+  // Raw is wrong because a secondary leg's `chName` never changes ("Circuit 3"
+  // forever), so a rename of the primary would never reach HA. Derived is also
+  // wrong, and did bite: v1.128.0 dropped a redundant "EcoFlow " from the
+  // TEMPLATE around the display name. The display name was untouched, so the
+  // signature was identical, so the caller skipped republishing and the twelve
+  // circuit sensors kept their old doubled names in HA while every other entity
+  // was renamed.
+  //
+  // Signing the published string closes the whole class: any change to what is
+  // published — the template, a suffix, the display name — necessarily changes
+  // the signature.
+  const entityName = new Map(circuits.map((c) => [c.ch, `${display.get(c.ch)} Energy`]));
+  const sig = circuits.map((c) => `${c.ch}:${entityName.get(c.ch) ?? ''}`).join('|');
   const current = new Set(circuits.map((c) => c.ch));
   const clear = prevChannels
     .filter((ch) => !current.has(ch))
@@ -523,7 +535,7 @@ export function planCircuitDiscovery(
       topic: `${prefix}/sensor/${uniqueId}/config`,
       cfg: {
         unique_id: uniqueId,
-        name: `${display.get(c.ch)} Energy`,
+        name: entityName.get(c.ch),
         state_topic: STATE_TOPIC,
         ...AVAILABILITY_BASE,
         device_class: 'energy',

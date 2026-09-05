@@ -1,3 +1,23 @@
+## v1.128.1 — the twelve circuit sensors the rename did not reach
+
+v1.128.0 renamed 84 entities and missed 12. Live-confirmed: 96 doubled names became
+12, and the survivors were exactly the per-circuit energy sensors.
+
+The circuit sensors are republished only when a latch signature changes, and that
+signature was built from the *derived display name* — an intermediate. v1.128.0
+changed the template **around** that name, not the name itself, so the signature was
+byte-identical and the caller correctly concluded there was nothing to republish. The
+rename never reached Home Assistant for those twelve.
+
+The signature is now built from the string that is actually published. Any change to
+what goes out — the template, a suffix, or the display name — necessarily changes the
+signature. The regression test asserts that structural property directly: every
+published `name` must appear in the signature. Mutation-verified 4/4, including a
+revert to the derived name (this bug) and a revert to the raw channel name (the older
+bug the code comment already warned about).
+
+Entity IDs are unchanged, as in v1.128.0.
+
 ## v1.128.0 — entity names no longer repeat the device name
 
 Home Assistant composes a friendly name as `${device.name} ${entity.name}`. The device

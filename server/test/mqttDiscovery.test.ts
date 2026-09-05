@@ -628,3 +628,32 @@ test('no entity name repeats the device name — Home Assistant already prepends
     'the templated circuit name must not re-prefix "EcoFlow" either',
   );
 });
+
+test('planCircuitDiscovery: the latch signature covers the PUBLISHED name, not an intermediate', () => {
+  // v1.128.0 shipped a fix that changed only the TEMPLATE around the display
+  // name (dropping a redundant "EcoFlow "). The signature was built from the
+  // display name, which had not changed — so the caller skipped republishing
+  // and twelve circuit sensors kept their old doubled names in Home Assistant
+  // while all 84 other entities were correctly renamed. Live-confirmed before
+  // this fix: 96 doubled names became 12, and the 12 were exactly these.
+  //
+  // The invariant that prevents the whole class: whatever string is published
+  // as `name` must appear in the signature. Then ANY change to what is
+  // published — template, suffix, or display name — necessarily changes the
+  // signature and forces a republish.
+  const plan = planCircuitDiscovery('ha', [], [
+    { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
+    { ch: 3, name: null, linkCh: 1, linkMark: true },
+    { ch: 7, name: 'Well Pump' },
+  ]);
+  for (const p of plan.publish) {
+    assert.ok(
+      plan.sig.includes(String(p.cfg.name)),
+      `signature must contain the published name ${JSON.stringify(p.cfg.name)} — otherwise a change to it cannot trigger a republish (sig=${plan.sig})`,
+    );
+  }
+  // And the names themselves still follow the device-prefix rule.
+  for (const p of plan.publish) {
+    assert.ok(!/^EcoFlow\b/i.test(String(p.cfg.name)), `circuit name must not re-prefix the device: ${p.cfg.name}`);
+  }
+});
