@@ -117,19 +117,42 @@ test('no ntfy / pushover / webhook transport survives in the source', () => {
   }
 });
 
+test('EVERY language file tracks the schema — not just English', () => {
+  // v1.124.1 — the local suite passed 2244/2244 while es.yaml still described five
+  // deleted options and lacked the two new ones. CI's validate-addon-config caught
+  // it; the local suite did not, so the gap was invisible until after merge. A
+  // translation key that no longer exists renders as dead text, and an option with
+  // no translation shows its raw KEY as the label in that language's config UI.
+  const root = resolve(import.meta.dirname, '../../ecoflow_panel');
+  const cfg = readFileSync(resolve(root, 'config.yaml'), 'utf8');
+  const schemaKeys = (cfg.slice(cfg.indexOf('\nschema:')).match(/^  ([A-Z][A-Z0-9_]+):/gm) ?? [])
+    .map((m) => m.trim().replace(':', ''));
+  assert.ok(schemaKeys.length > 50, `parsed ${schemaKeys.length} schema keys`);
+  for (const lang of ['en', 'es']) {
+    const tr = readFileSync(resolve(root, `translations/${lang}.yaml`), 'utf8');
+    const trKeys = (tr.match(/^  ([A-Z][A-Z0-9_]+):/gm) ?? []).map((m) => m.trim().replace(':', ''));
+    const missing = schemaKeys.filter((k) => !trKeys.includes(k));
+    const dead = trKeys.filter((k) => !schemaKeys.includes(k));
+    assert.deepEqual(missing, [], `[${lang}] options with no translation (raw KEY shown as label)`);
+    assert.deepEqual(dead, [], `[${lang}] translations for options that no longer exist`);
+  }
+});
+
 test('the add-on schema, defaults and translations agree exactly', () => {
   // A translation key that does not byte-match a schema key silently loses its
   // label in the config UI; a stored option with no schema entry blocks startup.
   const root = resolve(import.meta.dirname, '../../ecoflow_panel');
   const cfg = readFileSync(resolve(root, 'config.yaml'), 'utf8');
-  const tr = readFileSync(resolve(root, 'translations/en.yaml'), 'utf8');
-  for (const dead of ['NOTIFY_NTFY_SERVER', 'NOTIFY_NTFY_TOPIC', 'NOTIFY_PUSHOVER_TOKEN',
-    'NOTIFY_PUSHOVER_USER', 'NOTIFY_WEBHOOK_URL']) {
-    assert.ok(!cfg.includes(dead), `${dead} still in config.yaml`);
-    assert.ok(!tr.includes(dead), `${dead} still in translations`);
-  }
-  for (const added of ['NOTIFY_HA_PUSH_TARGETS', 'NOTIFY_CRITICAL_BYPASS_DND']) {
-    assert.ok(cfg.includes(added) && tr.includes(added), `${added} must be in both`);
+  for (const lang of ['en', 'es']) {
+    const tr = readFileSync(resolve(root, `translations/${lang}.yaml`), 'utf8');
+    for (const dead of ['NOTIFY_NTFY_SERVER', 'NOTIFY_NTFY_TOPIC', 'NOTIFY_PUSHOVER_TOKEN',
+      'NOTIFY_PUSHOVER_USER', 'NOTIFY_WEBHOOK_URL']) {
+      assert.ok(!cfg.includes(dead), `${dead} still in config.yaml`);
+      assert.ok(!tr.includes(dead), `[${lang}] ${dead} still translated`);
+    }
+    for (const added of ['NOTIFY_HA_PUSH_TARGETS', 'NOTIFY_CRITICAL_BYPASS_DND']) {
+      assert.ok(cfg.includes(added) && tr.includes(added), `[${lang}] ${added} must be in both`);
+    }
   }
   assert.ok(cfg.includes('NOTIFY_CHANNEL: list(none|ha)'), 'the channel list must be narrowed');
 });
