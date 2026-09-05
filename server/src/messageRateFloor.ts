@@ -525,3 +525,37 @@ export class RateFloorTracker {
     return this.bySn.get(sn)?.hourly[hour] ?? 0;
   }
 }
+
+/**
+ * v1.131.0 — which serial numbers this tick must sample, and with what count.
+ *
+ * The caller used to iterate the MQTT ingest counter map directly. That map
+ * gains an entry only when a message arrives, so a device that has produced
+ * ZERO messages since process start is simply absent from it and was never
+ * sampled. The detector was armed for a 0.2 msg/min collapse and blind to a
+ * 0.0 msg/min one — and a restart is exactly what turns the first into the
+ * second, which is how a totally silent SHP2 (the single-point-critical alarm
+ * data source this detector exists to watch) fell into its blind spot.
+ *
+ * Driving from the device roster with `?? 0` makes silence the rate-0 sample it
+ * is, and the existing dwell/eligibility logic handles it from there. Serials
+ * present in the counter map but not in the roster are still sampled: a device
+ * that dropped out of the roster mid-run must not silently stop being watched.
+ *
+ * Pure + exported for testing.
+ */
+export function rateFloorSampleSet(
+  rosterSns: Iterable<string>,
+  counts: ReadonlyMap<string, number>,
+): Array<{ sn: string; count: number }> {
+  const out: Array<{ sn: string; count: number }> = [];
+  const seen = new Set<string>();
+  for (const sn of rosterSns) {
+    seen.add(sn);
+    out.push({ sn, count: counts.get(sn) ?? 0 });
+  }
+  for (const [sn, count] of counts) {
+    if (!seen.has(sn)) out.push({ sn, count });
+  }
+  return out;
+}

@@ -201,8 +201,19 @@ export const APPLY_MAX_RETRIES = 2;
 
 /** Revert fires 5 min after the plan's charge window closes. */
 export const REVERT_LAG_MS = 5 * 60_000;
-/** Consecutive revert failures before the critical escalation annunciates. */
+/** Consecutive revert failures before the critical escalation annunciates.
+ *  This counts CLOUD-REJECTED writes; a write the cloud ACCEPTS but the device
+ *  ignores is the readback path below. */
 export const REVERT_ESCALATE_AFTER = 3;
+/** v1.131.0 - how long after a revert (or revert retry) the device readback
+ *  must show the restored floor before we treat the restore as not-taken.
+ *  Deliberately the same as REVERT_READBACK_GRACE_MS: that constant is the
+ *  measured settling lag during which the projection legitimately still reports
+ *  the raised value, so a verdict may not be reached before it expires. */
+export const REVERT_VERIFY_AFTER_MS = REVERT_READBACK_GRACE_MS;
+/** v1.131.0 - re-issues of the restore after a cloud-ACK'd revert fails
+ *  readback. Mirrors APPLY_MAX_RETRIES. */
+export const REVERT_MAX_RETRIES = 2;
 
 /** Restart-persistent per-night actuation record (one file, day-keyed). */
 export interface NightActuationState {
@@ -242,6 +253,18 @@ export interface NightActuationState {
   revertAttempts: number;
   /** The critical revert-failure annunciation already fired (once per night). */
   revertEscalated: boolean;
+  /** v1.131.0 - when the DEVICE readback first showed the restored floor.
+   *  null on a reverted night = the restore is cloud-ACK'd but not yet proven,
+   *  exactly the state applyVerifiedAtMs describes on the apply side. */
+  revertVerifiedAtMs: number | null;
+  /** v1.131.0 - readback-failure re-issues of the revert (cap REVERT_MAX_RETRIES). */
+  revertRetries: number;
+  /** v1.131.0 - most recent revert attempt (initial or retry); readback is
+   *  measured from here so each retry gets its own verification window. */
+  revertLastAttemptMs: number | null;
+  /** v1.131.0 - the revert-READBACK-failure escalation already fired (once per
+   *  night). Distinct from revertEscalated, which counts cloud rejections. */
+  revertReadbackEscalated: boolean;
   lastError: string | null;
 }
 
@@ -252,7 +275,9 @@ export function emptyActuationState(): NightActuationState {
     applyAttemptedAtMs: null, attemptBaselinePct: null,
     appliedAtMs: null, priorReservePct: null, revertedAtMs: null,
     applyVerifiedAtMs: null, applyRetries: 0, applyLastAttemptMs: null, applyEscalated: false,
-    revertAttempts: 0, revertEscalated: false, lastError: null,
+    revertAttempts: 0, revertEscalated: false,
+    revertVerifiedAtMs: null, revertRetries: 0, revertLastAttemptMs: null, revertReadbackEscalated: false,
+    lastError: null,
   };
 }
 
@@ -288,6 +313,10 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     applyEscalated: o.applyEscalated === true,
     revertAttempts: num(o.revertAttempts) ?? 0,
     revertEscalated: o.revertEscalated === true,
+    revertVerifiedAtMs: num(o.revertVerifiedAtMs),
+    revertRetries: num(o.revertRetries) ?? 0,
+    revertLastAttemptMs: num(o.revertLastAttemptMs),
+    revertReadbackEscalated: o.revertReadbackEscalated === true,
     lastError: str(o.lastError),
   };
 }
@@ -367,7 +396,16 @@ export type ActuationAction =
   /** v1.79.0 - retries exhausted, device still reads the old reserve: warn the
    *  operator once and correct the ledger (actuated:0). The night then closes
    *  through the normal revert path (a no-op restore). */
-  | { kind: 'applyFailed' };
+  | { kind: 'applyFailed' }
+  /** v1.131.0 - the device readback confirms the restored floor: stamp it. */
+  | { kind: 'revertVerified' }
+  /** v1.131.0 - the revert was cloud-ACK'd but the device still reads the
+   *  RAISED target; re-issue the restore. */
+  | { kind: 'retryRevert'; restorePct: number }
+  /** v1.131.0 - revert retries exhausted and the reserve is still stuck raised.
+   *  Escalate once: this is the expensive end state (the panel holds the raised
+   *  floor, so it buys grid instead of discharging) and it does not self-heal. */
+  | { kind: 'revertFailed'; restorePct: number };
 
 export interface ActuationTickOpts {
   mode: NightChargeMode;
@@ -473,6 +511,40 @@ export function decideActuation(
       }
     }
     return { kind: 'none' };
+  }
+
+  // ── REVERT READBACK (v1.131.0). ──
+  // The revert stamped `revertedAtMs` on the CLOUD ACK, which is exactly the
+  // evidence v1.79.0 ruled insufficient on the apply side — and the branch
+  // above stops looking at the device the moment that stamp lands. A restore
+  // the SHP2 ignores therefore leaves the reserve pinned at the raised target
+  // with the ledger recording a clean, completed night. That is the expensive
+  // failure: the panel holds the raised floor, so it buys grid at on-peak
+  // instead of discharging the pack it just paid overnight rates to fill.
+  //
+  // Falls THROUGH rather than returning 'none'. Today that is defensive only —
+  // the APPLY branch below refuses anything with a non-null appliedAtMs, and
+  // armFromPlan rebuilds from emptyActuationState(), so a newly armed night can
+  // never be inside this block. Written as a fall-through anyway because the
+  // alternative is a `return` whose safety depends on a guard two branches away.
+  if (
+    state.appliedAtMs != null && state.revertedAtMs != null &&
+    state.revertVerifiedAtMs == null && state.priorReservePct != null && state.targetPct != null
+  ) {
+    const restorePct = state.priorReservePct;
+    if (opts.currentReservePct === restorePct) return { kind: 'revertVerified' };
+    // Strict equality against the RAISED target for the failure verdict, the
+    // same discipline as ADOPT: a reading that is neither value means the owner
+    // (or the app) moved the floor themselves, and re-issuing our restore would
+    // overwrite their change. Fall through — never guess at interference.
+    const attemptedAt = state.revertLastAttemptMs ?? state.revertedAtMs;
+    if (
+      opts.currentReservePct === state.targetPct && state.targetPct !== restorePct &&
+      nowMs - attemptedAt >= REVERT_VERIFY_AFTER_MS
+    ) {
+      if (state.revertRetries < REVERT_MAX_RETRIES) return { kind: 'retryRevert', restorePct };
+      if (!state.revertReadbackEscalated) return { kind: 'revertFailed', restorePct };
+    }
   }
 
   // ── APPLY. Every guard fail-closed. ──
