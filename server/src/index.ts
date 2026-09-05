@@ -4731,17 +4731,37 @@ if (nightChargeEnabled) {
   nightRecomputeTick.unref();
 
   // v1.129.0 — and once at boot, so the FIRST plan after a deploy is sized on the
-  // real islanded load rather than the legacy band. The persisted seed above
-  // usually covers this; this closes the first-ever-boot case and refreshes a
-  // seed that is close to its 6 h staleness limit.
+  // real islanded load rather than the legacy band.
+  //
+  // v1.129.1 — RETRIED, AND NEVER SILENT. The v1.129.0 cut ran once with an empty
+  // `catch {}`; on the 2026-09-04 20:23 boot it produced no log line and the plan
+  // stayed on the legacy band, and the swallowed error made it impossible to tell
+  // whether the call had failed or never run. The analytics worker is cold at
+  // boot, so one immediate attempt is the wrong shape — and a diagnostic path that
+  // hides its own failure is the exact pattern this release series has been
+  // removing everywhere else.
   void (async () => {
-    try {
-      const sc: any = await analytics.report('selfConsumption');
-      if (Number.isFinite(sc?.loadKwh) && (sc?.loadKwh ?? 0) > 0) {
-        noteIslandedLoadKw((sc.loadKwh as number) / (7 * 24));
-        app.log.info(`night-charge: islanded load ${((sc.loadKwh as number) / (7 * 24)).toFixed(2)} kW (7-day mean panel load) — outage cushion sized on it`);
+    const delays = [0, 15_000, 60_000, 180_000];
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i] > 0) await new Promise((r) => setTimeout(r, delays[i]));
+      try {
+        const sc: any = await analytics.report('selfConsumption');
+        const kw = Number.isFinite(sc?.loadKwh) && (sc?.loadKwh ?? 0) > 0
+          ? (sc.loadKwh as number) / (7 * 24)
+          : null;
+        if (kw != null) {
+          noteIslandedLoadKw(kw);
+          app.log.info(`night-charge: islanded load ${kw.toFixed(2)} kW (7-day mean panel load) — outage cushion sized on it`);
+          return;
+        }
+        app.log.debug(`night-charge: islanded-load seed attempt ${i + 1} returned no usable loadKwh`);
+      } catch (e: any) {
+        app.log.debug(`night-charge: islanded-load seed attempt ${i + 1} failed (${e?.message ?? e})`);
       }
-    } catch { /* the persisted seed, or the legacy band, carries us */ }
+    }
+    // Not fatal: the 30-minute recompute tick refreshes it, and until then the
+    // cushion falls back to its legacy band — fail-closed, just less precise.
+    app.log.info('night-charge: islanded-load seed did not settle at boot; the 30-minute recompute will carry it');
   })();
   // A gentle first warm-up a minute after boot (analytics worker warm) so the
   // holder + status cache aren't empty before the first scheduled tick.
