@@ -156,9 +156,6 @@ export function signingNowMs(localNowMs: number = Date.now()): number {
 export function currentOffsetMs(): number {
   return offsetMs;
 }
-export function offsetAdoptedAtMs(): number | null {
-  return adoptedAtMs;
-}
 /** Test seam. */
 export function resetClockOffset(): void {
   offsetMs = 0;

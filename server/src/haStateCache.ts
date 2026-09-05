@@ -92,9 +92,3 @@ export function getCacheAgeMs(now: number = Date.now()): number {
   return lastFetchedAt ? now - lastFetchedAt : Number.POSITIVE_INFINITY;
 }
 
-/** Test/reset hook. */
-export function __resetHaStateCache(): void {
-  cache = new Map();
-  lastFetchedAt = 0;
-  inflight = null;
-}

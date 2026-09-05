@@ -158,10 +158,6 @@ export function notePollFailed(message: string): void {
 export function pollState(): { lastPollOkMs: number | null; consecutiveFailures: number; lastError: string | null } {
   return { lastPollOkMs, consecutiveFailures, lastError };
 }
-/** Test seam. */
-export function resetPollState(): void {
-  lastPollOkMs = null; consecutiveFailures = 0; lastError = null;
-}
 
 /* ─── the alert ───────────────────────────────────────────────────────────── */
 
