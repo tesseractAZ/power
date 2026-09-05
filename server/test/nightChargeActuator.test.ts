@@ -180,9 +180,16 @@ test('revert refuses an invalid restore value (never writes garbage back)', () =
   assert.equal(decideActuation(oob, WINDOW.endMs + REVERT_LAG_MS, opts()).kind, 'none');
 });
 
-test('already-reverted night → none (idempotent)', () => {
+test('already-reverted night → never a second revert (idempotent)', () => {
+  // v1.131.0 — the device reads the restored 10%, so the first tick after the
+  // revert now STAMPS that confirmation (it used to return 'none' and stop
+  // looking at the panel entirely). What this test pins is unchanged: a
+  // reverted night never issues a second restore.
   const s: NightActuationState = { ...appliedState(), revertedAtMs: WINDOW.endMs + REVERT_LAG_MS };
-  assert.equal(decideActuation(s, WINDOW.endMs + 2 * REVERT_LAG_MS, opts()).kind, 'none');
+  const first = decideActuation(s, WINDOW.endMs + 2 * REVERT_LAG_MS, opts());
+  assert.equal(first.kind, 'revertVerified');
+  const confirmed: NightActuationState = { ...s, revertVerifiedAtMs: WINDOW.endMs + 2 * REVERT_LAG_MS };
+  assert.equal(decideActuation(confirmed, WINDOW.endMs + 3 * REVERT_LAG_MS, opts()).kind, 'none');
 });
 
 // ── Persistence coercion ────────────────────────────────────────────────────
@@ -252,7 +259,10 @@ test('adopt is idempotent: an already-applied or reverted night never re-adopts'
   const appliedS: NightActuationState = { ...attemptedState(), appliedAtMs: WINDOW.startMs, priorReservePct: 10 };
   assert.notEqual(decideActuation(appliedS, WINDOW.endMs + REVERT_LAG_MS, opts({ currentReservePct: 43 })).kind, 'adopt');
   const revertedS: NightActuationState = { ...appliedS, revertedAtMs: WINDOW.endMs + REVERT_LAG_MS };
-  assert.equal(decideActuation(revertedS, WINDOW.endMs + 2 * REVERT_LAG_MS, opts({ currentReservePct: 43 })).kind, 'none');
+  // v1.131.0 — this reading (43% = the RAISED target, well past the settling
+  // window) is now a failed restore and earns a retry. It is still never an
+  // adopt, which is what this test is about.
+  assert.notEqual(decideActuation(revertedS, WINDOW.endMs + 2 * REVERT_LAG_MS, opts({ currentReservePct: 43 })).kind, 'adopt');
 });
 
 test('armFromPlan: an unresolved unconfirmed attempt refuses re-arming unless provably un-applied', () => {

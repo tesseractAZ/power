@@ -2038,8 +2038,17 @@ export function startBroadcastMonitor(
     status: () => ({
       supervised,
       enabled: cfg.enabled,
-      targetCount: cfg.targets.length,
+      // v1.131.0 — report the SIP cordless too. cfg.sipTargets was added in
+      // v1.25.0 and threaded through dispatch and the log lines ("2 MA + 1 SIP")
+      // but status() kept the pre-v1.25.0 single-list shape, so /api/broadcast
+      // named two of three speakers — and the one it omitted is specifically the
+      // redundant channel designed to work when Music Assistant is down. An
+      // operator reading targetCount:2 during an MA outage would conclude the
+      // audible channel was fully dead.
+      targetCount: cfg.targets.length + cfg.sipTargets.length,
       targets: cfg.targets,
+      maTargets: cfg.targets,
+      sipTargets: cfg.sipTargets,
       lastBroadcastAt,
       lastLevel,
       lastOutcome,

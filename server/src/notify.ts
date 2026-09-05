@@ -267,22 +267,14 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
     // one unreachable device must not cost the drawer record or abort the other
     // targets, and sendNotification is awaited inline inside the alarm evaluator.
     if (cfg.pushTargets.length > 0) {
-      const payload = buildMobilePushPayload(msg, { criticalBypassDnd: cfg.criticalBypassDnd });
-      const failures: string[] = [];
-      for (const target of cfg.pushTargets) {
-        const r = await callHaService('notify', target, payload, {
+      await dispatchMobilePush(
+        cfg.pushTargets,
+        buildMobilePushPayload(msg, { criticalBypassDnd: cfg.criticalBypassDnd }),
+        (target, payload) => callHaService('notify', target, payload, {
           headersTimeoutMs: NOTIFY_HEADERS_TIMEOUT_MS,
           bodyTimeoutMs: NOTIFY_BODY_TIMEOUT_MS,
-        });
-        if (!r.ok) failures.push(`${target}: ${r.error ?? r.status}`);
-      }
-      if (failures.length === cfg.pushTargets.length) {
-        // EVERY target failed — the push channel is down, and the caller's
-        // catch logs it. A partial failure is left to the per-target report.
-        throw new Error(`HA push failed on all ${failures.length} target(s): ${failures.join('; ')}`);
-      }
-      if (failures.length > 0) lastPushFailures = failures;
-      else lastPushFailures = [];
+        }),
+      );
     }
     return;
   }
@@ -291,6 +283,39 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
 /** v1.124.0 — most recent per-target push failures (partial), for the status route. */
 let lastPushFailures: string[] = [];
 export function getLastPushFailures(): string[] { return [...lastPushFailures]; }
+/** Test seam. */
+export function resetLastPushFailures(): void { lastPushFailures = []; }
+
+/**
+ * v1.131.0 — send one payload to every phone target, RECORDING BEFORE THROWING.
+ *
+ * The record used to be written after the all-targets-failed throw. In the live
+ * single-target configuration that made it dead code: with one target, 100%
+ * down is the ONLY way to fail, and that path threw first. `lastPushFailures`
+ * therefore read `[]` both when the push channel was healthy and when it was
+ * completely dead — and it is the only machine-readable push-health signal the
+ * system exposes, surfaced on /api/notify/status beside `reachesAPhone: true`.
+ *
+ * The throw is still correct and deliberate: the caller's dispatch marks the
+ * alert failed so the next evaluate tick retries it. Both things must happen,
+ * in that order. Extracted with the service call injected so the ordering is
+ * directly testable rather than asserted about the source text.
+ */
+export async function dispatchMobilePush(
+  targets: string[],
+  payload: Record<string, unknown>,
+  call: (target: string, payload: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; status?: number }>,
+): Promise<void> {
+  const failures: string[] = [];
+  for (const target of targets) {
+    const r = await call(target, payload);
+    if (!r.ok) failures.push(`${target}: ${r.error ?? r.status}`);
+  }
+  lastPushFailures = failures;
+  if (targets.length > 0 && failures.length === targets.length) {
+    throw new Error(`HA push failed on all ${failures.length} target(s): ${failures.join('; ')}`);
+  }
+}
 
 /**
  * v1.38.0 — build the ~21:30 night-charge advisory notification (design §4.2).

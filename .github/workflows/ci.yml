@@ -123,6 +123,23 @@ jobs:
       - name: Scan tracked files for home addresses / personal identifiers
         run: python3 scripts/check-no-secrets.py
 
+  release-pr:
+    name: Release PR declares the version it names
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      # v1.131.0 — the release pipeline's one silent step. tag-release.yml is
+      # paths-filtered on ecoflow_panel/config.yaml, so a "Release vX.Y.Z" merge
+      # that forgets the bump does not fail it — it never runs it. v1.130.0
+      # shipped that way: code and CHANGELOG on main, no tag, no image, HA still
+      # offering 1.129.2, and every workflow green.
+      - name: Version bump + CHANGELOG section present
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/check-release-pr.py
+
   addon-config:
     name: Validate add-on config + translations
     runs-on: ubuntu-latest
