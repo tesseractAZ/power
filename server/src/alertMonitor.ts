@@ -38,7 +38,7 @@ import { familyOf } from './alertOutcomes.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
-import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta } from './alertTelemetry.js';
+import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, type FamilyMeta } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
@@ -467,6 +467,51 @@ export function pruneOldestNonSignificant(
  * stats object retains an EXEMPLAR id from the most-recently-seen alert
  * — useful for the UI/API but no longer a primary key.
  */
+/**
+ * v1.131.0 — the family's descriptive tuple, assembled in ONE place.
+ *
+ * alertId/title/severity/category describe a single alert and are only coherent
+ * if they are written together from a single alert. The sidecar upsert used to
+ * spell three of them out at the call site, which is how the fourth came to be
+ * missing for the sidecar's whole existence. Assembling here means a field can
+ * only be dropped by editing this function, where the invariant is stated.
+ *
+ * Pure + exported for testing.
+ */
+export function familyMetaFor(
+  alert: Pick<Alert, 'id' | 'title' | 'severity' | 'category'>,
+): FamilyMeta {
+  return { title: alert.title, severity: alert.severity, category: alert.category, alertId: alert.id };
+}
+
+/**
+ * v1.131.0 — pick the replay-seed exemplar for a family, keeping the id and the
+ * title describing the SAME alert.
+ *
+ * On the live path all four descriptive fields (alertId/title/severity/category)
+ * are written together from one Alert, so they are coherent by construction.
+ * Replay had no such guarantee: the title came from the sidecar (the family's
+ * most recent member) while the alertId came from the first event in the JSONL
+ * (whatever fired earliest in the window, frequently a different device).
+ * `/api/alert-telemetry` then published Core 3's title beside Core 1's id.
+ *
+ * `pinned: true` means the id is the sidecar's and must not be overwritten by
+ * later events — it is the id that belongs to the sidecar title. `pinned: false`
+ * means we are falling back to event data (a pre-v1.131.0 sidecar, or a family
+ * the sidecar has never seen), and the caller advances it to the LAST event so
+ * the exemplar is at least the family's most recent member, as documented.
+ *
+ * Pure + exported for testing.
+ */
+export function replaySeedExemplar(
+  meta: { title?: string; alertId?: string } | undefined,
+  eventAlertId: string,
+  familyKey: string,
+): { alertId: string; title: string; pinned: boolean } {
+  if (meta?.alertId) return { alertId: meta.alertId, title: meta.title ?? familyKey, pinned: true };
+  return { alertId: eventAlertId, title: meta?.title ?? familyKey, pinned: false };
+}
+
 export interface AlertActionStats {
   /** v0.9.59 — primary key. e.g. `pack-hot`, `cell-imbalance`, `mppt-hot`. */
   familyKey: string;
@@ -1327,7 +1372,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // seeds the rollup with a true title/severity/category instead of the
     // familyKey/'info'/'Battery' placeholder. Change-detected ⇒ a no-op write
     // on the steady-state hot path.
-    upsertFamilyMeta(familyKey, { title: alert.title, severity: alert.severity, category: alert.category });
+    upsertFamilyMeta(familyKey, familyMetaFor(alert));
     return t;
   };
 
@@ -1400,11 +1445,22 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
    * first time the alert fires post-boot. Until then the rollup carries
    * counts but `severity` defaults to 'info' so silencing rules behave
    * conservatively (least aggressive silencing).
+   *
+   * v1.131.0 — the exemplar alertId now comes from the sidecar too, so it
+   * describes the SAME alert as the title beside it. Only a sidecar written
+   * before v1.131.0 (no `alertId` field) still needs a fallback, and that
+   * fallback advances to the LAST replayed event rather than freezing on the
+   * first: the exemplar is documented as "the most recent member of the
+   * family", and the family's newest event is the closest thing the JSONL has
+   * to that.
    */
   const replayPersistedTelemetry = () => {
     const events = readRecentTelemetry();
     if (events.length === 0) return;
     const familyMeta = loadFamilyMeta(); // v0.31.0 — real title/severity/category, if the sidecar knows this family
+    // Families whose exemplar id came from the sidecar — pinned, because it is
+    // the id that matches the sidecar title. Everything else tracks the last event.
+    const exemplarFromSidecar = new Set<string>();
     let n = 0;
     for (const e of events) {
       // Defensive shape check — guards against schema drift.
@@ -1418,10 +1474,12 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // Real severity here also keeps the post-replay batch silencing pass
         // from running against a wrong 'info' default.
         const meta = familyMeta[e.familyKey];
+        const exemplar = replaySeedExemplar(meta, e.alertId, e.familyKey);
+        if (exemplar.pinned) exemplarFromSidecar.add(e.familyKey);
         t = {
           familyKey: e.familyKey,
-          alertId: e.alertId,
-          title: meta?.title ?? e.familyKey,
+          alertId: exemplar.alertId,
+          title: exemplar.title,
           severity: (meta?.severity as Severity) ?? 'info',
           category: (meta?.category as Alert['category']) ?? ('Battery' as Alert['category']),
           riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
@@ -1449,6 +1507,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           }
           break;
       }
+      if (!exemplarFromSidecar.has(e.familyKey)) t.alertId = e.alertId;
       t.lastSeenAt = e.ts;
       n++;
     }

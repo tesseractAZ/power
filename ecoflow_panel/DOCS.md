@@ -3793,13 +3793,38 @@ Uses the **restored display basis** (`forecast.restoredSolarModel ?? forecast.so
 ### 14. Equipment health — MPPT + inverter standby (`computeEquipmentHealth` via `ratioSeries` / `cappedMedianEffPct`)
 
 #### What + why
-Two DPU-electronics KPIs: **MPPT conversion efficiency** (DC-side V·A vs AC-side W — really a register-consistency ratio, capped 100%; a sustained drop is earliest electronics aging) per HV/LV string, and **inverter standby loss** (residual `ac_out` when PV is dark and load ≈ 0 — the inverter's own idle draw), trended week-over-week.
+Two DPU-electronics KPIs: **MPPT conversion efficiency** (DC-side V·A vs AC-side W — really a register-consistency ratio, capped 100%; a sustained drop is earliest electronics aging) per HV/LV string, and **inverter standby loss** (residual `ac_out` while that DPU's PV is dark — the inverter's own idle draw), trended week-over-week.
 
 #### Inputs / constants
 `ratioSeries` pulls `{watts, volts, amps}` per string via `queryMulti` at `EQ_HEALTH_BUCKET_SEC = 300 s` over the equipment-health history window; snaps V/A to nearest W ts within the bucket size. Per-sample ratios >100.5% are dropped; `cappedMedianEffPct(effs) = effs.length ? min(100, median(effs)) : null`. `MPPT_EFF_TTL_MS = 10 min`.
 
 #### Output
-`GET /api/equipment-health` → `EquipmentHealth { generatedAt, mpptStrings: MpptString[], inverterStandby: InverterStandby[] }`. Per string: `recentEffPct`, `baselineEffPct` (earliest 30% of history), `driftPctPts` (recent − baseline; negative = drift), `samples`, `spanDays`. Per DPU standby: `idleWatts` (recent median ac_out when PV<20W & panel-load<20W), `baselineIdleWatts`, `trendWattsPerWeek`, `samples`. Feeds `/api/repair-issues`.
+`GET /api/equipment-health` → `EquipmentHealth { generatedAt, mpptStrings: MpptString[], inverterStandby: InverterStandby[] }`. Per string: `recentEffPct`, `baselineEffPct` (earliest 30% of history), `driftPctPts` (recent − baseline; negative = drift), `samples`, `spanDays`. Per DPU standby: `idleWatts` (recent standby FLOOR of ac_out — see below), `baselineIdleWatts`, `trendWattsPerWeek`, `samples`. Feeds `/api/repair-issues`.
+
+**v1.131.0 — the standby detector could not fire.** The idle-sample gate was
+`pv < 20 W && panel_load < 20 W && 0 < ac_out < 200 W`, where `panel_load` is the
+SHP2's whole-panel draw. That panel carries the backup circuits of an occupied
+house and never drops below roughly 1.4 kW (live 7-day mean 1,445 W), so the
+conjunct was false at every sample: `idleSeries` stayed empty, every DPU reported
+`idleWatts: null`, and the Advanced-Insights card rendered as *nothing to
+report* for the entire life of the feature. The surviving conditions are both
+about the DPU itself — `isInverterIdleSample({pvW, acOutW})` requires only that
+this DPU's PV is dark and its own AC output sits in the standby window — and the
+SHP2 `panel_load` query the loop used to make is gone.
+
+Removing the house gate changes what the window contains, so the statistic
+changed with it. The (0, 200 W) window still admits small real loads, so the
+headline is now the **p10 floor** of the population (`idleFloorWatts`), not its
+median: on a night with three samples at the true ~45 W floor and seven on real
+load, a median publishes ~140 W of household draw as inverter overhead. The
+trend is likewise fitted to **one floor per day** (`dailyIdleFloors`, ≥ 3 samples
+per day) rather than to raw samples, so it tracks the inverter rather than how
+many small loads happened to land inside the window on a given night. Buckets
+are UTC days deliberately: the plant runs on MST (UTC−7, no DST), so a local
+19:00→06:00 night falls at 02:00→13:00 UTC inside one UTC date, while a
+local-midnight bucket would split every night in two. Guards are
+mutation-proven load-bearing (`scripts/mutate-detector-honesty.mjs`, mutants
+i–v), including an exemplar that reproduces the shipped gate verbatim.
 
 ---
 
@@ -5101,7 +5126,26 @@ The operator's response is the ground-truth label. `AlertOutcome ∈ {ack, dismi
 
 #### Machine telemetry — `alertTelemetry.ts`
 
-Separate from outcomes (machine-generated, valuable ~weeks). `appendTelemetryEvent()` writes `{familyKey, alertId, event: 'rise'|'shortClear'|'longActive', ts, durationMs?}` JSONL to `ALERT_TELEMETRY_PATH`. On boot `replayPersistedTelemetry()` re-hydrates rollups from the last `REPLAY_WINDOW_MS` (30 d) / `REPLAY_MAX_BYTES` (4 MB) so auto-silencing survives restarts; the file rotates past `ROTATE_AT_BYTES` (8 MB). `parseTelemetryLine()` strips a leading NUL run (F31 — recovers records torn by the daily power-cut mid-append). A `FamilyMeta` sidecar (`ALERT_FAMILY_META_PATH`) persists real title/severity/category so a replayed family boots with true metadata instead of the `familyKey`/`info`/`Battery` placeholder. Served at **`/api/alert-telemetry`** (`{ telemetry }`, cached 30 s).
+Separate from outcomes (machine-generated, valuable ~weeks). `appendTelemetryEvent()` writes `{familyKey, alertId, event: 'rise'|'shortClear'|'longActive', ts, durationMs?}` JSONL to `ALERT_TELEMETRY_PATH`. On boot `replayPersistedTelemetry()` re-hydrates rollups from the last `REPLAY_WINDOW_MS` (30 d) / `REPLAY_MAX_BYTES` (4 MB) so auto-silencing survives restarts; the file rotates past `ROTATE_AT_BYTES` (8 MB). `parseTelemetryLine()` strips a leading NUL run (F31 — recovers records torn by the daily power-cut mid-append). A `FamilyMeta` sidecar (`ALERT_FAMILY_META_PATH`) persists real title/severity/category **and (v1.131.0) the exemplar `alertId`** so a replayed family boots with true metadata instead of the `familyKey`/`info`/`Battery` placeholder. Served at **`/api/alert-telemetry`** (`{ telemetry }`, cached 30 s).
+
+**v1.131.0 — the exemplar described two different alerts.** A rollup's
+`alertId`/`title`/`severity`/`category` are one tuple: on the live path they are
+always written together from a single `Alert`, so they are coherent by
+construction. The sidecar persisted only three of the four, so a replay restored
+the title/severity/category of the family's most recent member while taking
+`alertId` from whichever event happened to come first in the JSONL window —
+routinely a different device. `/api/alert-telemetry` therefore published, for
+instance, Core 3's title next to Core 1's id, and anything keying off `alertId` to
+reach the alert landed on the wrong subject. `familyMetaFor(alert)` now assembles
+the tuple in one place so a field can only go missing by editing the invariant,
+and `replaySeedExemplar(meta, eventAlertId, familyKey)` returns `pinned: true`
+when the id comes from the sidecar — later events must not move it, because it is
+the id that belongs to the sidecar's title. Sidecars written before v1.131.0 have
+no `alertId`; those seed `pinned: false` (title falls back to the subject-neutral
+`familyKey`, id tracks the family's LAST replayed event, matching the documented
+"most recent member" contract) and self-heal on the family's first live sighting.
+Mutation-proven load-bearing (`scripts/mutate-detector-honesty.mjs`, mutants
+vi–viii).
 
 ---
 
@@ -6518,7 +6562,7 @@ JSON endpoints:
 
 | Method + path | Auth | Purpose |
 |---------------|------|---------|
-| `GET /api/broadcast/status` | none (read-only) | Full status snapshot: `enabled`, `targets`, `lastBroadcastAt/Level/Outcome/Errors`, `musicAssistantAvailable` (honest: present AND not confirmed-unreachable), `wyomingReachable`, `stormSuppressedCount`, `audibleReachable`/`audibleUsableTargets`/`audibleReason`, `lastRender` (filename/bytes/ttsRenderMs/fromCache/error), live `grid` backstop, and a resolved `config` block (all knobs + `announceVolume`). |
+| `GET /api/broadcast/status` | none (read-only) | Full status snapshot: `enabled`, `targetCount` (**v1.131.0**: Music-Assistant **plus** SIP targets, itemised as `maTargets`/`sipTargets`; `targets` is retained for back-compat and still lists the MA set only), `lastBroadcastAt/Level/Outcome/Errors`, `musicAssistantAvailable` (honest: present AND not confirmed-unreachable), `wyomingReachable`, `stormSuppressedCount`, `audibleReachable`/`audibleUsableTargets`/`audibleReason`, `lastRender` (filename/bytes/ttsRenderMs/fromCache/error), live `grid` backstop, and a resolved `config` block (all knobs + `announceVolume`). `sipTargets` arrived in v1.25.0 and was threaded through dispatch and the log lines ("2 MA + 1 SIP") but not through `status()`, so the route named two of three speakers — and the one it omitted is specifically the redundant channel designed to work when Music Assistant is down, which is exactly when an operator reads this. |
 | `GET /api/broadcast/config` | none (120/min bucket) | Effective enable/volume + `announceVolume` + `announceVolumePinned` + `override` + `envBaseline`. |
 | `PUT /api/broadcast/config` | write (30/min) | Set/clear the runtime `enabled`/`volume` override (`null` clears to env). Audit-logged. |
 | `POST /api/broadcast/test` | write | Fire a test broadcast at `{ level }` (default `red`). Bypasses all gates except the 10 s test cooldown (`TEST_COOLDOWN_MS`). 429 on cooldown, 502 on failure. |
@@ -7704,13 +7748,27 @@ v0.92.0 only `app.log.warn`-ed a collapse — invisible to the operator. v0.93.0
 `index.ts:2204–2236` — `const rateFloor = new RateFloorTracker()` plus a 60 s `setInterval` (`.unref()`-ed):
 
 ```
-for [sn, count] of store.mqttMsgCountBySn:
+for {sn, count} of rateFloorSampleSet(Object.keys(devices), store.mqttMsgCountBySn):
     r = rateFloor.sample(sn, count, now)
     if r.collapsing → push {sn, deviceName, rate, baseline} into collapses
     if r.collapsed  → app.log.warn(...)      // preserved verbatim
     else if r.recovered → app.log.info(...)
 setRateFloorCollapses(collapses)
 ```
+
+**v1.131.0 — sample the roster, not the observation map.** The tick used to
+iterate `store.mqttMsgCountBySn` directly. That map gains an entry only inside the
+MQTT ingest path, so a device that has produced **zero** messages since process
+start is simply absent from it and was never sampled at all: the detector was
+armed for a 0.2 msg/min collapse and blind to a 0.0 msg/min one — and a restart is
+precisely what converts the first into the second. The blind spot landed on the
+one device the section above calls "the single-point-critical alarm data source".
+`rateFloorSampleSet(rosterSns, counts)` (`messageRateFloor.ts`) drives from the
+device roster with `counts.get(sn) ?? 0`, so silence enters the existing dwell and
+eligibility logic as the rate-0 sample it is; serials present in the counter map
+but absent from the roster are still sampled, so a mid-run roster change cannot
+silently drop a device out of monitoring. Mutation-proven load-bearing
+(`scripts/mutate-detector-honesty.mjs`, mutants xiv–xv).
 
 Errors in the tick are caught and logged at DEBUG (`tick skipped`). The tick is purely observational — it **cannot suppress or alter any existing alarm**.
 
@@ -8519,7 +8577,26 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
 
 1. **Announce + arm (~21:30, inside the evening job).** When the recorded plan is a charge with a complete basis, a resolved window, and a positive buy, the actuation candidate is computed **from the announced plan** — a fresher recompute never silently substitutes a different buy, because the owner's cancel window runs against the announced numbers. The evening notification names the write, the clamped target, and the cancel deadline; the audible broadcast channel announces the same (no phone-push dependency). The armed state **persists only after at least one announcement channel confirms delivery** (`NOTIFY_CHANNEL` other than `none`, or a successful audible announce) — a write the owner never heard about cannot fire; an undelivered night stays advisory and logs at error level. Arming is refused while a prior night is unresolved (applied-unreverted, or an unconfirmed attempt not provably un-applied — a raised reserve is never orphaned or buried).
 2. **Apply (window open − 5 min, tolerance +30 min).** The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline BEFORE the device call. One write raises `backupReserveSoc` to `min(round(targetSocPct), 50)` — validated (not silently clamped) into the device's documented `[10, 50]` range by `setBackupReserveSoc` (`ecoflow/commands.ts`), the same documented `PD303_APP_SET` shape the cloud-presence refresh has round-tripped since v0.9.10, audit-logged under `night-charge-reserve` with a 5-min retry cooldown. Every apply guard fails closed: advisory mode, a cancelled night, a red alert condition, an incoherent SoC read (I11), an unknown/out-of-range current reserve, a missed window, or a target at/below the current reserve ⇒ no write. The row is stamped `actuated=1` at write time. **Lost-confirmation adoption:** when an attempted write reports failure but the live reserve later reads back exactly the attempted target (≠ the attempt baseline), the write is proven applied — the actuator adopts it (applied state stamped from the attempt baseline) and the normal auto-revert takes over.
-3. **Revert (window close + 5 min, or immediately on a post-apply cancel).** The prior reserve value is restored. The revert path is mode-independent — it runs even if the owner flips the option back to advisory mid-night — and refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive failures it annunciates a critical (audible + HA notification) once and keeps retrying; the floor/runway/SoC alarm spine is fully independent throughout. A successful revert sends a morning summary notification.
+3. **Revert (window close + 5 min, or immediately on a post-apply cancel).** The prior reserve value is restored. The revert path is mode-independent — it runs even if the owner flips the option back to advisory mid-night — and refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive CLOUD-REJECTED writes it annunciates a critical (audible + HA notification) once and keeps retrying; the floor/runway/SoC alarm spine is fully independent throughout. A successful revert sends a morning summary notification.
+
+   **v1.131.0 — revert readback.** The revert stamped `revertedAtMs` the moment the cloud
+   ACK'd, which is exactly the evidence v1.79.0 ruled insufficient on the apply side, and
+   the revert branch is gated on `revertedAtMs == null` — so the stamp also stopped the
+   actuator looking at the panel at all. A restore the SHP2 accepted-then-ignored therefore
+   left the reserve pinned at the raised target with the ledger recording a clean, completed
+   night. That is the expensive end state: the panel holds the raised value as its floor, so
+   it buys grid at on-peak instead of discharging the pack the plan had just paid overnight
+   rates to fill, and the floor alarm reads a false AT-RESERVE-FLOOR posture. A reverted
+   night now verifies against the DEVICE: reading the restored floor stamps
+   `revertVerifiedAtMs`; still reading the RAISED target after `REVERT_VERIFY_AFTER_MS`
+   (= `REVERT_READBACK_GRACE_MS` = 5 min, so a verdict can never be reached inside the
+   settling window `isRevertSettling` exists to cover) re-issues the restore up to
+   `REVERT_MAX_RETRIES = 2`, then escalates once — critical announce plus a critical HA push
+   naming the manual fix. Strict equality on both sides: a reading that is *neither* the
+   restore target nor the raised target means the owner moved the floor themselves, and the
+   actuator falls through rather than overwriting their change (the same "never guess"
+   discipline as adoption). Guards are mutation-proven load-bearing
+   (`scripts/mutate-detector-honesty.mjs`, mutants ix–xii).
 4. **Score.** The scorer's actuated branch (§7) measures the delivered buy as window grid import minus the concurrent house pass-through (`actuatedDeliveredKwh`), derives the realized-need counterfactual by subtracting the delivered charge from the measured trough (`actuatedRealizedNeedBuyKwh`) — a *measured* counterfactual, no clean-baseline requirement — and records `delivered_kwh`, feeding the gate's actuated pool.
 
 **Deadline phrasing (v1.51.2).** The announced cancel deadline is **day-qualified beyond 24 h** ("on Sunday at 11:55 PM") in both the notification and the spoken broadcast: weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00, putting the write moment ~28 h out, where a bare clock time would read as tonight. The spoken text also carries the `cushionShortfall` disclosure whenever the plan discloses one — the audible channel is never quieter about residual risk than the text channel.
@@ -9363,6 +9440,19 @@ alert it closes.
 drawer card — which is exactly how "alerts are configured" and "alerts reach nobody"
 became indistinguishable. `/api/notify/status` reports both, plus the resolved target
 list and any per-target push failures.
+
+**v1.131.0 — the failure record is written before the throw.** `lastPushFailures`
+used to be assigned *after* the all-targets-failed `throw`. In the live
+single-target configuration that made the assignment unreachable on the only path
+that can fail: with one target, 100% down is the sole way to fail. The field
+therefore read `[]` both when the push channel was healthy and when it was
+completely dead — beside `reachesAPhone: true` — and it is the only
+machine-readable push-health signal the add-on exposes. The dispatch loop is now
+`dispatchMobilePush(targets, payload, call)` with the service call injected: it
+records, then throws if every target failed (the throw is deliberate — the
+caller's dispatch marks the alert failed so the next evaluate tick retries it).
+Mutation-proven load-bearing (`scripts/mutate-detector-honesty.mjs`, mutants
+xvi–xvii).
 
 Removing the five dead options was verified safe before shipping: posting the option set
 without them and re-reading it returned all five, proving `info.options` is the effective

@@ -1,3 +1,88 @@
+## v1.131.0 — five signals that were never earned, and a release that never happened
+
+Every defect in this batch is the same shape: a detector or a status field that
+**cannot report the thing it claims to report**, whose silence is indistinguishable
+from health. Three had been shipping that way since the feature was written.
+
+**The inverter-standby detector could not fire.** Its idle-sample gate was
+`pv < 20 W && panel_load < 20 W && 0 < ac_out < 200 W`, where `panel_load` is the
+SHP2's whole-panel draw. That panel carries the backup circuits of an occupied
+house and never drops below roughly 1.4 kW — live 7-day mean **1,445 W** — so the
+conjunct was false at every sample, for every DPU, for the entire life of the
+feature. The sample set stayed empty, `idleWatts` was permanently `null`, and the
+Advanced-Insights card rendered as *nothing to report*. Both surviving conditions
+are about the DPU itself: its own PV dark, its own AC output in the standby window.
+The SHP2 query that fed the dead conjunct is gone with it.
+
+Removing the house gate changes what the window contains, so the statistic changed
+with it. The (0, 200 W) window still admits small real loads, so the headline is now
+the **p10 floor** rather than the median: on a night with three samples at the true
+~45 W floor and seven on real load, a median publishes ~140 W of household draw as
+inverter overhead. The trend is fitted to one floor per day rather than to raw
+samples, so it tracks the inverter instead of how many small loads happened to land
+inside the window that night. Day buckets are UTC on purpose — the plant runs on MST
+(UTC−7, no DST), so a local 19:00→06:00 night falls inside one UTC date, while a
+local-midnight bucket would split every night in two.
+
+**The night-charge revert closed on a cloud ACK.** v1.79.0 established on the apply
+side that an ACK is not an actuation, after a write the SHP2 never took scored a
+phantom actuation and forfeited ~13 kWh. The mirror path kept the original bug: the
+revert stamped `revertedAtMs` on the ACK, and because the revert branch is gated on
+that stamp being null, the actuator then stopped looking at the panel entirely. A
+restore the panel accepted-and-ignored left the reserve pinned at the raised target
+with the ledger recording a clean, completed night — and that is the expensive end
+state, because the panel holds the raised value as its floor and buys grid at on-peak
+instead of discharging the pack the plan had just paid overnight rates to fill.
+A reverted night now verifies against the device, retries twice, then escalates once
+with a critical announce and a critical push naming the manual fix. A reading that is
+*neither* the restore target nor the raised target is treated as the owner moving
+their own floor: the actuator falls through rather than overwriting it.
+
+**The message-rate collapse detector never sampled a silent device.** It iterated the
+MQTT ingest counter map, which gains an entry only when a message arrives — so a
+device that has produced zero messages since process start is absent from it and was
+never sampled. The detector was armed for a 0.2 msg/min collapse and blind to a
+0.0 msg/min one, and a restart is exactly what converts the first into the second.
+Its own documentation calls the SHP2 "the single-point-critical alarm data source, so
+a silent rate-collapse is a real blind spot"; a totally silent SHP2 was the one case
+it could not see. Sampling is now driven from the device roster, so silence enters the
+existing dwell logic as the rate-0 reading it is.
+
+**The alert-telemetry exemplar described two different alerts.** A rollup's
+`alertId`/`title`/`severity`/`category` are one tuple, always written together from a
+single alert on the live path. The restart sidecar persisted three of the four, so a
+replay restored the most recent member's title while taking the id from whichever
+event came first in the JSONL window — routinely a different device.
+`/api/alert-telemetry` published Core 3's title beside Core 1's id. The tuple is now
+assembled in one function and persisted whole.
+
+**A dead push channel reported no failures.** `lastPushFailures` was assigned *after*
+the all-targets-failed throw. In the live single-target configuration that made the
+assignment unreachable on the only path that can fail — with one target, 100% down is
+the sole way to fail — so the field read `[]` both when the push channel was healthy
+and when it was completely dead, beside `reachesAPhone: true`. It is the only
+machine-readable push-health signal the add-on exposes.
+
+**`/api/broadcast/status` named two of three speakers.** `sipTargets` arrived in
+v1.25.0 and was threaded through dispatch and the log lines ("2 MA + 1 SIP") but not
+through `status()`. The omitted target is specifically the redundant channel designed
+to work when Music Assistant is down — which is exactly when an operator reads this
+route.
+
+**And v1.130.0 never actually shipped.** Its merge landed the code and the CHANGELOG
+section but not the `config.yaml` version bump. `tag-release.yml` is paths-filtered on
+that one file, so it was never evaluated: no tag, no image, no GitHub Release, and
+Home Assistant kept offering 1.129.2 — while every workflow on `main` reported green,
+because everything that ran did pass. The release did not fail; it silently did not
+happen. A `Release v…` PR must now declare the version it names in `config.yaml` and
+carry a CHANGELOG section for it, or CI fails (`scripts/check-release-pr.py`). The
+check was verified against the tree that actually failed.
+
+Sixteen mutants, 16/16 killed (`scripts/mutate-detector-honesty.mjs`), including an
+exemplar reproducing each of the five shipped defects verbatim. A seventeenth was
+written, run, and removed as provably equivalent rather than left standing as a
+permanent survivor.
+
 ## v1.130.0 — what fifteen restarts did to the alarm telemetry
 
 The 2026-09-04 release run shipped thirteen versions. Each restart was individually

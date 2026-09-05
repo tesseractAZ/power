@@ -137,7 +137,7 @@ import {
 } from './deviceLink.js';
 import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
-import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, DEFAULT_RATE_FLOOR_CONFIG, type RateFloorPersisted } from './messageRateFloor.js';
+import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, rateFloorSampleSet, DEFAULT_RATE_FLOOR_CONFIG, type RateFloorPersisted } from './messageRateFloor.js';
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
 import { evaluateSelfHeal, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState } from './telemetryBlind.js';
@@ -198,6 +198,7 @@ import {
   REVERT_LAG_MS,
   APPLY_LEAD_MS,
   REVERT_ESCALATE_AFTER,
+  REVERT_MAX_RETRIES,
   type NightActuationState,
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
@@ -2757,7 +2758,19 @@ const rateFloorTick = setInterval(() => {
     // so the set is stable across ticks (dedup) and empties on recovery. The WARN
     // log is preserved below exactly as before.
     const collapses: RateFloorCollapse[] = [];
-    for (const [sn, count] of store.mqttMsgCountBySn) {
+    // v1.131.0 — ITERATE THE ROSTER, NOT THE OBSERVATION MAP.
+    //
+    // `mqttMsgCountBySn` gains an entry only inside the MQTT ingest path, so a
+    // device that has produced ZERO messages since process start is absent from
+    // it and was never sampled at all. The detector was armed for a 0.2 msg/min
+    // collapse and disarmed for a 0.0 msg/min one — and a restart is exactly what
+    // converts the first into the second. Its own header calls the SHP2 "the
+    // single-point-critical alarm DATA SOURCE, so a silent rate-collapse is a real
+    // blind spot"; a totally silent SHP2 was the one case it could not see.
+    //
+    // Sampling the known devices with `?? 0` lets the existing dwell and
+    // eligibility logic treat silence as the rate-0 collapse it is.
+    for (const { sn, count } of rateFloorSampleSet(Object.keys(devices), store.mqttMsgCountBySn)) {
       const r = rateFloor.sample(sn, count, now);
       const name = devices[sn]?.deviceName ?? sn;
       // v1.95.0 — this detector exists to catch a device that is "barely
@@ -4661,6 +4674,66 @@ async function runNightActuationTickInner(): Promise<void> {
     return;
   }
 
+  if (action.kind === 'revertVerified') {
+    // v1.131.0 — the DEVICE now reads the restored floor: the night is really
+    // closed, not merely cloud-ACK'd. One line, stamped once.
+    persistNightActuation({ ...state, revertVerifiedAtMs: nowMs, lastError: null });
+    app.log.info(`night-charge: revert VERIFIED by device readback — backupReserveSoc reads ${state.priorReservePct}% for ${state.day}.`);
+    return;
+  }
+
+  if (action.kind === 'retryRevert') {
+    const blockedRevertRetry = multiPanelWriteBlock();
+    if (blockedRevertRetry) { app.log.warn(`night-charge: REVERT RETRY refused — ${blockedRevertRetry}`); return; }
+    persistNightActuation({ ...state, revertRetries: state.revertRetries + 1, revertLastAttemptMs: nowMs });
+    app.log.warn(`night-charge: revert readback FAILED — device still reads the raised ${state.targetPct}% ${Math.round((nowMs - (state.revertLastAttemptMs ?? state.revertedAtMs ?? nowMs)) / 60_000)}m after the ACK'd restore; re-issuing ${action.restorePct}% (retry ${state.revertRetries + 1}/${REVERT_MAX_RETRIES}).`);
+    const rv = await setBackupReserveSoc({
+      sn: shp2.sn, targetPct: action.restorePct, source: { ua: 'night-charge-supervised-revert-retry' },
+    });
+    if (rv.outcome !== 'success' && !rv.rateLimited) {
+      persistNightActuation({ ...nightActuationMem, lastError: rv.message ?? rv.code ?? 'revert retry write failed' });
+    }
+    return;
+  }
+
+  if (action.kind === 'revertFailed') {
+    // v1.131.0 — the restore was accepted by the cloud, re-issued, and the
+    // panel still holds the raised floor. This does NOT self-heal and it costs
+    // money every on-peak hour it persists, so it escalates the same way a
+    // cloud-rejected revert does at REVERT_ESCALATE_AFTER.
+    persistNightActuation({ ...state, revertReadbackEscalated: true });
+    app.log.error(`night-charge: revert NEVER TOOK EFFECT — the cloud ACK'd backupReserveSoc ${action.restorePct}% but the panel still reads the raised ${state.targetPct}% after ${state.revertRetries} re-issues. The panel will hold ${state.targetPct}% as its floor and buy grid instead of discharging until the reserve is corrected.`);
+    try {
+      await broadcast.announce(
+        'critical',
+        `Critical. The night charge system restored the backup reserve but the panel did not accept it. The reserve is stuck at ${state.targetPct} percent instead of ${action.restorePct} percent. The house will buy grid power instead of using the battery. Check the Power panel.`,
+        // Spanish second pass — without it this CRITICAL plays English twice
+        // instead of bilingual (see the announce() contract).
+        `Alarma crítica. Alarma crítica. El sistema de carga nocturna restableció la reserva de respaldo pero el panel no la aceptó. ` +
+        `La reserva está fija en ${state.targetPct} por ciento en lugar de ${action.restorePct} por ciento. ` +
+        `La casa comprará energía de la red en lugar de usar la batería. Revise el panel Power.`,
+      );
+    } catch (e: any) {
+      app.log.warn(`night-charge: revert-readback escalation announce failed (${e?.message ?? e})`);
+    }
+    try {
+      await sendNotification(loadNotifyConfig(), {
+        severity: 'critical',
+        dedupId: 'night_charge_revert_readback_failure',
+        title: 'Night-charge: reserve stuck raised',
+        body:
+          `The morning restore for ${state.day} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
+          + `still reads ${state.targetPct}% instead of ${action.restorePct}%, after ${state.revertRetries} re-issues. `
+          + `While the reserve stays raised the panel treats ${state.targetPct}% as its floor and buys grid power `
+          + 'rather than discharging the pack. Set the backup reserve back manually in the EcoFlow app, '
+          + 'or check the SHP2 cloud link.',
+      });
+    } catch (e: any) {
+      app.log.warn(`night-charge: revert-readback escalation notify failed (${e?.message ?? e})`);
+    }
+    return;
+  }
+
   // action.kind === 'revert'
   if (action.gridLossAbort) {
     app.log.warn(`night-charge: GRID LOST mid-window — aborting the buy and restoring the ${action.restorePct}% floor now (a raised reserve in an outage is a false AT-RESERVE-FLOOR posture).`);
@@ -4715,7 +4788,15 @@ async function runNightActuationTickInner(): Promise<void> {
             `The post-window restore of backupReserveSoc to ${action.restorePct}% has failed ${attempts} time(s) `
             + `(${r.code}: ${r.message}). The write retries every few minutes. The floor/runway/SoC alarm spine is unaffected.`,
         });
-      } catch { /* HA channel best-effort */ }
+      } catch (e: any) {
+        // v1.131.0 — this was a bare `catch {}`. It is the ONLY critical-severity
+        // push outside the alert engine, and it fires when a supervised write has
+        // left backupReserveSoc STUCK at an elevated value — a state the code
+        // itself escalates with a spoken "Critical" broadcast. Since v1.124.0
+        // sendNotification THROWS whenever every push target fails, so the one
+        // path that most needs to know it failed was the one discarding the news.
+        app.log.error(`night-charge: reserve-revert escalation push FAILED — ${e?.message ?? e}. The spoken broadcast is now the only channel carrying this.`);
+      }
     } else {
       app.log.warn(`night-charge: reserve revert attempt ${attempts} failed (${r.code}: ${r.message}); will retry.`);
     }

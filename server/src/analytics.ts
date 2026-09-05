@@ -6104,7 +6104,7 @@ export interface InverterStandby {
   sn: string;
   device: string;
   coreNum: number | null;
-  idleWatts: number | null;       // recent median ac_out when PV<20W and panel-load<20W
+  idleWatts: number | null;       // recent standby FLOOR (p10) of ac_out while this DPU's PV is dark
   baselineIdleWatts: number | null;
   trendWattsPerWeek: number | null;
   samples: number;
@@ -6118,6 +6118,73 @@ export interface InverterStandby {
  */
 export function cappedMedianEffPct(effs: number[]): number | null {
   return effs.length ? Math.min(100, median(effs)) : null;
+}
+
+export const INVERTER_IDLE_PV_DARK_W = 20;
+export const INVERTER_IDLE_AC_MAX_W = 200;
+
+/**
+ * v1.131.0 — does one ac_out sample count as an inverter-idle observation?
+ *
+ * Both conditions are about THIS DPU: its own PV is dark, and its own AC output
+ * sits in the standby window. Before v1.131.0 the gate also required the SHP2's
+ * whole-panel `panel_load` to be under 20 W. That panel carries the backup
+ * circuits of an occupied house and never drops below roughly 1.4 kW, so the
+ * conjunct was false at every single sample and every DPU reported
+ * `idleWatts: null` for the entire life of the detector — a card that could not
+ * fire, reading as "nothing to report". Pure + exported for testing.
+ */
+export function isInverterIdleSample(p: { pvW: number; acOutW: number }): boolean {
+  return p.pvW < INVERTER_IDLE_PV_DARK_W
+    && p.acOutW > 0
+    && p.acOutW < INVERTER_IDLE_AC_MAX_W;
+}
+
+/**
+ * Standby draw is the FLOOR of the in-window population, not its middle.
+ * With the whole-house gate gone the (0, 200 W) window still admits small real
+ * loads, so a median would report those rather than the inverter's own
+ * overhead; p10 tracks the quiet bottom. Returns null for an empty input.
+ * Pure + exported for testing.
+ */
+export function idleFloorWatts(watts: number[]): number | null {
+  if (watts.length === 0) return null;
+  const sorted = [...watts].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.1))];
+}
+
+/**
+ * One standby floor per day, chronological — the series the trend is fitted to.
+ *
+ * Regressing the raw samples fits the house's occupancy (how many small loads
+ * happened to land inside the window on a given night), not the inverter. One
+ * floor per day fits the thing that actually drifts. Days with fewer than
+ * `minPerDay` samples are dropped rather than contributing a floor computed
+ * from noise.
+ *
+ * Buckets are UTC days on purpose: the plant runs on MST (UTC-7, no DST), so a
+ * local night of 19:00 -> 06:00 lands at 02:00 -> 13:00 UTC inside ONE UTC
+ * date. A local-midnight bucket would split every night in half. Pure +
+ * exported for testing.
+ */
+export function dailyIdleFloors(
+  series: Array<{ ts: number; w: number }>,
+  minPerDay = 3,
+): Array<{ ts: number; value: number }> {
+  const byDay = new Map<number, number[]>();
+  for (const p of series) {
+    const day = Math.floor(p.ts / 86_400_000);
+    const bucket = byDay.get(day);
+    if (bucket) bucket.push(p.w);
+    else byDay.set(day, [p.w]);
+  }
+  const out: Array<{ ts: number; value: number }> = [];
+  for (const [day, watts] of [...byDay.entries()].sort((a, b) => a[0] - b[0])) {
+    if (watts.length < minPerDay) continue;
+    const floor = idleFloorWatts(watts);
+    if (floor != null) out.push({ ts: day * 86_400_000, value: floor });
+  }
+  return out;
 }
 
 export interface EquipmentHealth {
@@ -6229,17 +6296,11 @@ export function computeEquipmentHealth(
     }
   }
 
-  // Inverter standby: ac_out when PV is dark (<20W) and panel_load is dark.
+  // Inverter standby: this DPU's ac_out while its own PV is dark (<20 W).
   // Snap on the AC-out series; check PV at the same ts (within 5 min, the
-  // bucket size). v0.9.29 — same 5-min bucketing as ratioSeries; load
-  // pulled once per cycle and reused across DPUs.
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
-  const baselineSinceForLoad = now - BASELINE_MS;
-  const loadPts = shp2
-    ? recorder.query(shp2.sn, 'panel_load', baselineSinceForLoad, now, EQ_HEALTH_BUCKET_SEC)
-    : [];
+  // bucket size). v0.9.29 — same 5-min bucketing as ratioSeries.
+  // v1.131.0 — the whole-house `panel_load` conjunct (and the SHP2 query that
+  // fed it) is gone: see isInverterIdleSample for why it could never be true.
   const inverterStandby: InverterStandby[] = [];
   for (const d of dpus) {
     const baselineSince = now - BASELINE_MS;
@@ -6255,13 +6316,10 @@ export function computeEquipmentHealth(
       continue;
     }
     const idleSeries: Array<{ ts: number; w: number }> = [];
-    let pvi = 0, li = 0;
+    let pvi = 0;
     for (const ao of aoPts) {
       while (pvi + 1 < pvPts.length && Math.abs(pvPts[pvi + 1].ts - ao.ts) < Math.abs(pvPts[pvi].ts - ao.ts)) pvi++;
-      while (li + 1 < loadPts.length && Math.abs(loadPts[li + 1].ts - ao.ts) < Math.abs(loadPts[li].ts - ao.ts)) li++;
-      const pv = pvPts[pvi]?.value ?? 0;
-      const load = loadPts[li]?.value ?? 0;
-      if (pv < 20 && load < 20 && ao.value > 0 && ao.value < 200) {
+      if (isInverterIdleSample({ pvW: pvPts[pvi]?.value ?? 0, acOutW: ao.value })) {
         idleSeries.push({ ts: ao.ts, w: ao.value });
       }
     }
@@ -6274,11 +6332,13 @@ export function computeEquipmentHealth(
     }
     const recent = idleSeries.filter((p) => p.ts >= now - RECENT_MS).map((p) => p.w);
     const baseline = idleSeries.slice(0, Math.max(5, Math.floor(idleSeries.length * 0.3))).map((p) => p.w);
-    const fit = linregress(idleSeries.map((p) => ({ ts: p.ts, value: p.w })));
+    const recentFloor = idleFloorWatts(recent);
+    const baselineFloor = idleFloorWatts(baseline);
+    const fit = linregress(dailyIdleFloors(idleSeries));
     inverterStandby.push({
       sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
-      idleWatts: recent.length ? round1(median(recent)) : null,
-      baselineIdleWatts: baseline.length ? round1(median(baseline)) : null,
+      idleWatts: recentFloor != null ? round1(recentFloor) : null,
+      baselineIdleWatts: baselineFloor != null ? round1(baselineFloor) : null,
       trendWattsPerWeek: fit ? round2(fit.slopePerMs * 604_800_000) : null,
       samples: idleSeries.length,
     });

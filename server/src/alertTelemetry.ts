@@ -207,6 +207,20 @@ export interface FamilyMeta {
   title: string;
   severity: string;   // kept as string here to avoid importing alert types into this leaf module
   category: string;
+  /**
+   * v1.131.0 — the exemplar alertId, persisted WITH the title it belongs to.
+   *
+   * The rollup's four descriptive fields (alertId, title, severity, category)
+   * are one tuple: on the live path they are always written together from a
+   * single Alert. The sidecar used to persist only three of them, so a replay
+   * restored the title/severity/category of the family's most recent member
+   * while taking alertId from whichever event happened to come first in the
+   * JSONL — a different device. `/api/alert-telemetry` then published, say,
+   * Core 3's title next to Core 1's id. Optional because sidecars written
+   * before this version don't have it; those self-heal on the family's first
+   * live sighting.
+   */
+  alertId?: string;
 }
 
 const FAMILY_META_PATH = process.env.ALERT_FAMILY_META_PATH
@@ -239,7 +253,11 @@ export function loadFamilyMeta(): Record<string, FamilyMeta> {
 export function upsertFamilyMeta(familyKey: string, meta: FamilyMeta): boolean {
   const cache = loadFamilyMeta();
   const prev = cache[familyKey];
-  if (prev && prev.title === meta.title && prev.severity === meta.severity && prev.category === meta.category) {
+  if (prev
+    && prev.title === meta.title
+    && prev.severity === meta.severity
+    && prev.category === meta.category
+    && prev.alertId === meta.alertId) {
     return false;
   }
   cache[familyKey] = meta;
