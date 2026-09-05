@@ -5,7 +5,7 @@ import { config } from './config.js';
 import { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
-import { SPARE_DPU_SNS, shp2ConnectedDpuSns } from './shp2Membership.js';
+import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns } from './shp2Membership.js';
 import { loadMembershipHistory, saveMembershipHistory, recordMembership } from './membershipHistory.js';
 // v1.38.0 (WS2) — Phoenix calendar-date resolution for the night-charge ledger
 // read cutoff. tariff.ts is a pure, import-free module (no circular dependency);
@@ -879,7 +879,8 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     // synthetic SN and are wall-clock-stamped off-cadence, so (like WEATHER/
     // FORECAST) they must not pull MAX(ts) past the last real home sample and
     // mask a pre-crash telemetry stall this detector exists to ledger.
-    const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, NIGHT_CHARGE_SN, ...SPARE_DPU_SNS];
+    // v1.121.0 — roster-aware bench set (the static literal is stale since 08-20).
+    const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, NIGHT_CHARGE_SN, ...benchSpareSns()];
     const row = db.prepare(
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
@@ -952,7 +953,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
         insert.run(now, s.sn, s.metric, s.value);
         last.set(`${s.sn}|${s.metric}`, { ts: now, value: s.value });
         written++;
-        if (!SPARE_DPU_SNS.has(s.sn)) sawHomeInsert = true;
+        if (!isBenchSpareSn(s.sn)) sawHomeInsert = true;
       }
       db.prepare('COMMIT').run();
     } catch (e) {

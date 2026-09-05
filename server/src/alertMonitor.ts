@@ -10,7 +10,7 @@ import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
-import { SPARE_DPU_SNS, shp2ConnectedDpuSns, isExpectedOfflineSpare,
+import { benchSpareSns, shp2ConnectedDpuSns, isExpectedOfflineSpare,
   aggregateFleetFlow, findShp2 } from './shp2Membership.js';
 // v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
@@ -1815,7 +1815,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // spare is wired into an SHP2 (shp2ConnectedDpuSns then includes it).
     {
       const connectedSns = shp2ConnectedDpuSns(snap.devices);
-      const mutedSpares = [...SPARE_DPU_SNS].filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
+      const mutedSpares = benchSpareSns().filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
       // v1.95.0 — OFF-PANEL demotion. The static allowlist only ever described
       // the bench at the moment it was written. After the 2026-08-20 physical
       // reconfiguration it was inverted: a benched Core that is NOT in the

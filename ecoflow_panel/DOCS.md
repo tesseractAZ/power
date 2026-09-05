@@ -9163,3 +9163,47 @@ fixture meant to hold the source DB handle open — the state a live recorder is
 in — but the handle was a local that V8 could finalize mid-test, closing it and letting
 the export's own close checkpoint the WAL, which writes the source. Handles are now
 pinned for the file's lifetime.
+
+### 12l. The spare-DPU list has been inverted since 2026-08-20 (v1.121.0)
+
+The 08-20 swap put **Core 5 into SHP2 slot 3** and moved **Core 3 to the bench**,
+inverting the hardcoded `SPARE_DPU_SNS` literal: it still calls Core 5 a spare (it
+was measured on 2026-09-03 delivering ~1.87 kW as a connected source) and does not
+name the actual bench unit at all.
+
+`isExpectedOfflineSpare`'s positive connected-source check hid this while the SHP2
+was reporting — Core 5 *is* a connected source, so it was not muted. The hole opens
+exactly when the SHP2 goes cloud-dark, a documented recurring state: `connected`
+empties, the literal is consulted alone, and Core 5's genuine offline alarm is muted
+as an "expected" bench state — during the window when the alarm chain is already
+degraded. `homeCoreCoverage`'s SHP2-blind fallback had the mirror-image problem: it
+built the roster {Core 1, Core 2, **Core 3**}, counting bench hardware as a reporting
+home Core while dropping a live pool member, so coverage could read `complete` with a
+real member unobserved — and `gridState` uses exactly that flag to decide whether to
+withhold the at-floor grid backstop.
+
+v1.117.0 had already built the right answer for `isHomePoolDpu` (live roster →
+persisted last-known roster → literal); the other consumers never received it. They
+now share one roster-aware predicate, `isBenchSpareSn`, fed by a publisher that
+index.ts keeps current. **The roster can only ever remove spare status** — it adds a
+conjunct, never relaxes one — so the change is monotone toward fail-loud: the worst
+case is an unnecessary offline alarm for genuine bench hardware, never a silenced one
+for a live pool member. Consumers updated: the offline-spare mute (alerts,
+alertMonitor), `homeCoreCoverage` (gridState, telnet console), `repairIssues`, and the
+recorder's restart-gap accounting.
+
+### 12m. The SHP2 alone could not trigger self-heal (v1.121.0)
+
+`minStarvedDevices: 2` is an anti-thrash guard sized against "one flaky device". But
+the SHP2 is the single-point-critical input for the floor / SoC / runway alarm chain,
+and `messageRateFloor`'s own header cites the case of it crawling at 0.24 msg/min for
+~13 h **alone**. A wedge confined to it could never reach a two-device quorum, so
+`starvedSinceMs` was reset every tick and no rebuild was ever attempted: the one
+device whose silence blinds the alarms was also the one device that could not trigger
+the remedy.
+
+The SHP2 now satisfies the quorum on its own. Everything else is untouched — the
+20-minute dwell, the 60-minute cooldown and the 6-per-rolling-24 h budget all still
+apply, so this cannot thrash; it only lets the clock start. In the four fleet-wide
+episodes observed in the audit window the SHP2 fired ~16 minutes before the Cores
+reached quorum, and that head start was discarded.

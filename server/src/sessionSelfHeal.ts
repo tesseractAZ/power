@@ -137,12 +137,29 @@ export function evaluateSelfHeal(
   starvedCount: number,
   state: SelfHealState,
   cfg: SelfHealConfig = DEFAULT_SELF_HEAL_CONFIG,
+  opts?: { alarmCriticalStarved?: boolean },
 ): SelfHealVerdict {
   // v1.90.0 — prune the rolling window; the budget is heals within 24 h.
   state.healTimesMs = state.healTimesMs.filter((t) => nowMs - t < HEAL_BUDGET_WINDOW_MS);
 
   // Onset tracking: the fleet-starved clock runs only while the condition holds.
-  if (starvedCount < cfg.minStarvedDevices) {
+  // v1.121.0 — THE QUORUM HAS AN EXCEPTION, because the fleet's most important
+  // device is a single device.
+  //
+  // `minStarvedDevices` (2) is an anti-thrash guard sized against "one flaky
+  // device". But the SHP2 is the single-point-critical input for the floor / SoC
+  // / runway alarm chain, and messageRateFloor's own header cites the case of the
+  // SHP2 crawling at 0.24 msg/min for ~13 h ALONE. A wedge confined to it can
+  // never reach a 2-device quorum, so `starvedSinceMs` was reset to null on every
+  // tick and no rebuild was ever attempted — the one device whose silence blinds
+  // the alarms was also the one device that could not trigger the remedy.
+  //
+  // Everything else still applies: the 20-min dwell, the 60-min cooldown and the
+  // 6-per-rolling-24h budget are untouched, so this cannot thrash. It only lets
+  // the clock START. In the fleet-wide episodes actually observed, the SHP2 fired
+  // 16 minutes before the Cores reached quorum; that head start was discarded.
+  const quorumMet = starvedCount >= cfg.minStarvedDevices || opts?.alarmCriticalStarved === true;
+  if (!quorumMet) {
     state.starvedSinceMs = null;
     return { heal: false, reason: `only ${starvedCount} device(s) starved (< ${cfg.minStarvedDevices})` };
   }

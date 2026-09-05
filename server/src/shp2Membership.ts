@@ -105,6 +105,62 @@ export const SPARE_DPU_SNS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * v1.121.0 — THE LITERAL ABOVE IS STALE, AND HAS BEEN SINCE 2026-08-20.
+ *
+ * That swap put Core 5 into SHP2 slot 3 and moved Core 3 to the bench, inverting
+ * it: Core 5 is a live home-pool source (measured 2026-09-03 delivering ~1.87 kW
+ * on slot 3) while the literal still calls it a spare, and the actual bench unit
+ * (Core 3) is not listed at all.
+ *
+ * `isExpectedOfflineSpare`'s positive connected-source check hides this while the
+ * SHP2 is reporting — Core 5 IS a connected source, so it is not muted. The hole
+ * opens exactly when the SHP2 goes cloud-dark, a documented recurring state on
+ * this plant: `connected` empties, the literal is consulted alone, and Core 5's
+ * genuine offline alarm is muted as an "expected" bench state — during the window
+ * where the alarm chain is already degraded.
+ *
+ * v1.117.0 built the right answer for `isHomePoolDpu` (live roster -> persisted
+ * last-known roster -> literal) but the other consumers never got it. This is the
+ * publisher that lets them share it without importing index.ts (same set/get
+ * pattern as the actuator's posture flag).
+ */
+let publishedRoster: ReadonlySet<string> | null = null;
+
+/** Feed the durable last-known home roster in (index.ts owns its persistence). */
+export function setLastKnownHomeRoster(roster: ReadonlySet<string> | null | undefined): void {
+  publishedRoster = roster && roster.size > 0 ? new Set(roster) : null;
+}
+export function getLastKnownHomeRoster(): ReadonlySet<string> | null { return publishedRoster; }
+export function resetLastKnownHomeRoster(): void { publishedRoster = null; }
+
+/** Explicit arg wins (tests, pure callers); otherwise the published roster. */
+function rosterOf(explicit?: ReadonlySet<string> | null): ReadonlySet<string> | null {
+  if (explicit && explicit.size > 0) return explicit;
+  return publishedRoster && publishedRoster.size > 0 ? publishedRoster : null;
+}
+
+/**
+ * v1.121.0 — "is this SN a bench spare?", resolved WITHOUT needing the device map.
+ *
+ * The literal is the safety floor (a DPU it does not name is never a spare), and
+ * the durable last-known roster overrides it (a DPU the SHP2 most recently
+ * reported as a home-pool source is not a spare, whatever the literal says).
+ * Both conditions must agree before anything is treated as bench hardware, so
+ * this can only ever REMOVE spare status — monotone in the fail-loud direction.
+ */
+export function isBenchSpareSn(sn: string, lastKnownRoster?: ReadonlySet<string> | null): boolean {
+  if (!SPARE_DPU_SNS.has(sn)) return false;
+  const roster = rosterOf(lastKnownRoster);
+  if (roster && roster.has(sn)) return false;
+  return true;
+}
+
+/** Every SN currently considered bench hardware (roster-aware). */
+export function benchSpareSns(lastKnownRoster?: ReadonlySet<string> | null): string[] {
+  return [...SPARE_DPU_SNS].filter((sn) => isBenchSpareSn(sn, lastKnownRoster));
+}
+
+/**
  * v0.52.0 — single source of truth for "this SN is a designated bench spare
  * whose EcoFlow-offline state is the EXPECTED steady state" (so its
  * connectivity / learned / forecast alerts are emitted non-annunciating).
@@ -120,15 +176,20 @@ export const SPARE_DPU_SNS: ReadonlySet<string> = new Set([
  * Set and avoid rescanning `devices` per call, while a one-shot caller can pass
  * the raw devices Record and let the helper resolve membership once.
  */
-export function isExpectedOfflineSpare(sn: string, connected: Set<string>): boolean;
-export function isExpectedOfflineSpare(sn: string, devices: Record<string, DeviceSnapshot>): boolean;
+export function isExpectedOfflineSpare(
+  sn: string, connected: Set<string>, lastKnownRoster?: ReadonlySet<string> | null): boolean;
+export function isExpectedOfflineSpare(
+  sn: string, devices: Record<string, DeviceSnapshot>, lastKnownRoster?: ReadonlySet<string> | null): boolean;
 export function isExpectedOfflineSpare(
   sn: string,
   connectedOrDevices: Set<string> | Record<string, DeviceSnapshot>,
+  lastKnownRoster?: ReadonlySet<string> | null,
 ): boolean {
   const connected =
     connectedOrDevices instanceof Set ? connectedOrDevices : shp2ConnectedDpuSns(connectedOrDevices);
-  return SPARE_DPU_SNS.has(sn) && !connected.has(sn);
+  if (connected.has(sn)) return false;  // live source — re-armed, unchanged
+  // v1.121.0 — when the SHP2 is dark the literal is no longer the last word.
+  return isBenchSpareSn(sn, lastKnownRoster);
 }
 
 /**
@@ -229,17 +290,30 @@ export function onlineDpus(
  * NOT the "empty set looks fine" trap of [[project_audit_v069_v070]]: there, an empty
  * roster meant the observations were missing; here it means the subjects are.
  */
-export function homeCoreCoverage(devices: Record<string, DeviceSnapshot>): {
+export function homeCoreCoverage(
+  devices: Record<string, DeviceSnapshot>,
+  lastKnownRoster?: ReadonlySet<string> | null,
+): {
   connected: number;
   reporting: number;
   complete: boolean;
 } {
   const connected = shp2ConnectedDpuSns(devices);
+  // v1.121.0 — the SHP2-blind fallback used the stale literal, so it built the
+  // roster {Core 1, Core 2, Core 3}: it counted BENCH Core 3 as a reporting home
+  // Core and DROPPED live pool member Core 5. Coverage could therefore read
+  // `complete` while a real pool member was unobserved, and gridState uses
+  // exactly that flag to decide whether to withhold the at-floor grid backstop.
+  // Roster SNs absent from `devices` are deliberately NOT filtered out: they
+  // cannot be online, so they push `complete` false — the conservative direction.
+  const remembered = rosterOf(lastKnownRoster);
   const roster: string[] = connected.size > 0
     ? [...connected]
-    : Object.values(devices)
-        .filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn))
-        .map((d) => d.sn);
+    : remembered
+      ? [...remembered]
+      : Object.values(devices)
+          .filter((d) => d.projection?.kind === 'dpu' && !SPARE_DPU_SNS.has(d.sn))
+          .map((d) => d.sn);
   if (roster.length === 0) return { connected: 0, reporting: 0, complete: true };
   const online = new Set(onlineDpus(devices).map((d) => d.sn));
   const reporting = roster.filter((sn) => online.has(sn)).length;
