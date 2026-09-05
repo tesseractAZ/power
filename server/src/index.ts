@@ -201,7 +201,7 @@ import {
   type NightActuationState,
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
-import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY } from './nightChargeAdvisor.js';
+import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -3140,6 +3140,11 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   // the observed islanded load. See outageCushionKwh for why the cushion is no
   // longer a flat share of pool measured against a whole-house forward sim.
   const outageCushionHours = Number(process.env.ARB_OUTAGE_CUSHION_HOURS ?? DEFAULT_OUTAGE_CUSHION_HOURS);
+  // v1.127.0 — buy objective. 'cost' maximises arbitrage against the configured
+  // tariff; 'resilience' (legacy) sizes only to hold floor+cushion. Cost mode is
+  // bounded below by the resilience answer, so it can never buy less.
+  const objectiveMode = (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const;
+  const costMaxSocPct = Number(process.env.ARB_COST_MAX_SOC_PCT ?? DEFAULT_COST_MAX_SOC_PCT);
   const islandedLoadSafety = Number(process.env.ARB_ISLANDED_LOAD_SAFETY ?? DEFAULT_ISLANDED_LOAD_SAFETY);
   const chargeCapKw = Number(process.env.ARB_CHARGE_CAP_KW ?? 7.2);
   // v1.60.0 — the SHARED grid-input envelope the charger and the house both draw
@@ -3330,7 +3335,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     // run when the grid drops. Null when the SHP2 is not reporting, which fails
     // closed to the legacy flat band rather than granting a weaker guarantee.
     islandedLoadKw: islandedLoadKwNow(),
-    outageCushionHours, islandedLoadSafety,
+    outageCushionHours, islandedLoadSafety, objectiveMode, costMaxSocPct,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw,
     periodIdAt, cheapPeriodId: NIGHT_CHEAP_PERIOD_ID, windowScanHours: 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,

@@ -201,6 +201,10 @@ export ARB_OUTAGE_CUSHION_PCT="$(bashio::config 'ARB_OUTAGE_CUSHION_PCT')"
 # not a flat share of pool tested against a whole-house forward simulation.
 export ARB_OUTAGE_CUSHION_HOURS="$(bashio::config 'ARB_OUTAGE_CUSHION_HOURS')"
 export ARB_ISLANDED_LOAD_SAFETY="$(bashio::config 'ARB_ISLANDED_LOAD_SAFETY')"
+# v1.127.0 — buy objective: 'cost' maximises tariff arbitrage, 'resilience' sizes
+# only to hold floor+cushion. Cost mode is bounded below by resilience.
+export ARB_OBJECTIVE="$(bashio::config 'ARB_OBJECTIVE')"
+export ARB_COST_MAX_SOC_PCT="$(bashio::config 'ARB_COST_MAX_SOC_PCT')"
 export ARB_MIN_BUY_KWH="$(bashio::config 'ARB_MIN_BUY_KWH')"
 export ARB_CHARGE_CAP_KW="$(bashio::config 'ARB_CHARGE_CAP_KW')"
 export ARB_GRID_INPUT_CAP_KW="$(bashio::config 'ARB_GRID_INPUT_CAP_KW')"
