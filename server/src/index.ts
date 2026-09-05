@@ -5628,6 +5628,18 @@ function familyOf(entityId: string, attrs: Record<string, unknown>): string {
 
 await app.listen({ host: config.host, port: config.port });
 app.log.info(`EcoFlow panel API listening on http://${config.host}:${config.port}`);
+// v1.130.0 — SAY WHICH BUILD THIS IS. The banner predates the release cadence and
+// never carried a version, so after 13 releases and 15 restarts on 2026-09-04 no
+// line in the add-on's own log could say which build produced any given behaviour.
+// The 09-04 audit had to date the v1.124.x cutover indirectly, by inferring it from
+// an HA Core schema-validation error. A log that cannot identify its own build
+// cannot answer "did that fix take?" — the central question after any deploy.
+app.log.info(
+  `ecoflow-panel v${process.env.BUILD_VERSION || 'dev'}`
+  + `${process.env.BUILD_REF ? ` (ref ${String(process.env.BUILD_REF).slice(0, 7)})` : ''}`
+  + `${process.env.BUILD_DATE ? ` built ${process.env.BUILD_DATE}` : ''}`
+  + ` — node ${process.version}, pid ${process.pid}`,
+);
 
 // v0.60.0 — survive a transient DNS/network bounce (the daily CoreDNS/AppArmor
 // maintenance window crashed the add-on with exit 255) but re-raise a genuinely

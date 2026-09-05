@@ -51,7 +51,7 @@ import * as haStateCache from './haStateCache.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 // v1.x — restart-persistent per-alert onset (first-seen) timestamps for the
 // ALM screen; see alertOnset.ts.
-import { syncAlertOnsets } from './alertOnset.js';
+import { syncAlertOnsets, getAlertOnset } from './alertOnset.js';
 
 /**
  * Watches the fleet, attaches computed alerts to the snapshot, and pushes a
@@ -362,6 +362,8 @@ interface TrackedAlert {
   /** v1.88.0 — the auto-tuned tier actually delivered ("[Low] … via auto-tune"
    *  records 'info' here). Gates ONLY shouldSendResolve; never escalation. */
   notifiedEffectiveSeverity?: Severity;
+  /** v1.130.0 — this hold was restored from disk, not queued by this process. */
+  queuedRehydrated?: boolean;
   /** v1.14.0 (review of F19) — the MOST SEVERE severity this alert reached while
    *  active. The cleared-alert record previously carried the FINAL tick's
    *  severity, so shp2-below-reserve (critical during a grid outage, info once
@@ -677,6 +679,35 @@ export function moreSevere(a: Severity, b: Severity): Severity {
  * is unit-testable. Behaviour is IDENTICAL to the old `firstRun || alreadyNotified`
  * for every non-outage alert.
  */
+/**
+ * v1.130.0 — A RESTART IS NOT A RISING EDGE.
+ *
+ * `recordRise` sits in the `if (!existing)` new-alert branch, which on `firstRun`
+ * is reached for EVERY currently-active alert. So each boot appended one phantom
+ * rise per standing alert to the 30-day auto-silencer counters. Measured on
+ * 2026-09-04: the replay counter went 3862 -> 4031 across 15 deploy restarts —
+ * **+169 rises in 3.5 h against +32 in the preceding 18 h**, a ~28x rate increase
+ * caused purely by restarting.
+ *
+ * That is doubly wrong for the tuner. Rule 4 latches on rise VOLUME against a low
+ * long-active fraction, and a restart adds a rise while never adding a longActive
+ * clear — so restarts drive a family toward auto-silence from both directions at
+ * once. Families on the two faulted Cores are already latched, and
+ * `pack-defective-*` — the alert carrying the RMA evidence — is in the same
+ * population.
+ *
+ * The durable onset sidecar already knows the answer: if this id has a persisted
+ * onset from BEFORE this process started, the condition predates the restart and
+ * this tick is a re-track, not a rise.
+ */
+export function isBootRetrack(p: {
+  firstRun: boolean;
+  priorOnsetMs: number | undefined;
+  bootMs: number;
+}): boolean {
+  return p.firstRun && p.priorOnsetMs != null && p.priorOnsetMs < p.bootMs;
+}
+
 export function bootSeedNotified(p: { alert: Pick<Alert, 'id'>; firstRun: boolean; alreadyNotified: boolean }): boolean {
   if (isOutageEventFamily(p.alert)) return p.alreadyNotified;
   return p.firstRun || p.alreadyNotified;
@@ -1150,6 +1181,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const clearedLog: ClearedAlert[] = [];
   const telemetry = new Map<string, AlertActionStats>();
   const quietQueue: Alert[] = [];
+  /** v1.130.0 — ids restored from digest-queue.json, whose in-memory `queued` flag
+   *  this process never set. They are still held. */
+  const rehydratedHolds = new Set<string>();
   // v1.75.0 — alerts that were HELD for the digest and then self-resolved
   // before it fired. The 08-06 5h15m tri-Core starvation queued at 23:56, cleared
   // at 05:11, and the 06:00 digest said "nothing to send" — a five-hour event the
@@ -1199,7 +1233,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       const raw = JSON.parse(readFileSync(digestStatePath, 'utf8'));
       if (Array.isArray(raw?.queue)) {
         for (const a of raw.queue as Alert[]) {
-          if (a && typeof a.id === 'string' && !quietQueue.some((q) => q.id === a.id)) quietQueue.push(a);
+          if (a && typeof a.id === 'string' && !quietQueue.some((q) => q.id === a.id)) {
+            quietQueue.push(a);
+            rehydratedHolds.add(a.id);   // v1.130.0 — see the `pending` filter
+          }
         }
       }
       if (Array.isArray(raw?.resolved)) {
@@ -1528,8 +1565,16 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           `"ha" and add at least one HA notify target (e.g. notify.mobile_app_iphone) to receive them. Dropping queue.`,
       );
       quietQueue.length = 0;
-      persistDigestState(); // v1.86.0
+      // v1.130.0 — CLEAR BEFORE PERSIST. Every exit branch persisted the digest
+      // state and THEN cleared overnightResolved in memory, so the cleared map was
+      // never written: all 17 boots in the 2026-09-04 corpus logged the identical
+      // "rehydrated digest state — 0 held alert(s), 16 resolved-overnight
+      // record(s)", including the five boots AFTER a digest had been sent. A stale
+      // id queued again on a later night while STILL ACTIVE would then appear in
+      // the digest twice — once as held, once as "fired overnight and
+      // self-resolved" — stamped with clock times from a previous night.
       overnightResolved.clear();
+      persistDigestState(); // v1.86.0
       return true;
     }
     // v0.97.0 (re-audit #3) — only digest alerts that are STILL legitimately held.
@@ -1540,7 +1585,28 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // silently suppressing a genuine NEW rise of the same single-severity id later that
     // day (alreadyNotified=true, no escalation → dispatched as 'none', never pushed).
     // Filter to entries whose tracked state is still queued+active; drop the rest.
-    const pending = quietQueue.filter((a) => tracked.get(a.id)?.queued === true);
+    // v1.130.0 — A REHYDRATED HOLD IS STILL A HOLD.
+    //
+    // `queued` is an in-memory flag. v1.86.0 persists quietQueue + overnightResolved
+    // to digest-queue.json and its comment asserts "rehydration makes the seeding
+    // irrelevant for held alerts because their queue entries return with it" — but
+    // this filter keys on `tracked.get(id).queued`, which rehydration does NOT
+    // restore, and bootSeedNotified's firstRun seed then marks the re-tracked entry
+    // notified. So a held alert came back in the queue and could never re-enter
+    // `pending`: silently dropped from the digest and never pushed.
+    //
+    // With CRITICAL_BREAKS_QUIET_HOURS off — the owner's accepted posture — the
+    // 06:00 digest is the ONLY delivery for anything firing between 23:00 and 05:00,
+    // CRITICALS INCLUDED. This host took 15 restarts in one evening; a restart
+    // inside the quiet window silently voided the night's alarms.
+    //
+    // An entry that is still in the queue AND still active is still held, whether or
+    // not this process is the one that queued it.
+    const pending = quietQueue.filter((a) => {
+      const t = tracked.get(a.id);
+      if (!t) return false;                    // no longer active — the resolved list owns it
+      return t.queued === true || t.queuedRehydrated === true;
+    });
     // v1.75.0 — the self-resolved are REPORTED, not dropped (see overnightResolved).
     const seenResolved = new Set<string>();
     const resolvedList = quietQueue.filter((a) => {
@@ -1552,8 +1618,16 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     if (pending.length === 0 && resolvedList.length === 0) {
       log(`notify: morning digest — ${quietQueue.length} queued alert(s), none pending or resolved-trackable; nothing to send`);
       quietQueue.length = 0;
-      persistDigestState(); // v1.86.0
+      // v1.130.0 — CLEAR BEFORE PERSIST. Every exit branch persisted the digest
+      // state and THEN cleared overnightResolved in memory, so the cleared map was
+      // never written: all 17 boots in the 2026-09-04 corpus logged the identical
+      // "rehydrated digest state — 0 held alert(s), 16 resolved-overnight
+      // record(s)", including the five boots AFTER a digest had been sent. A stale
+      // id queued again on a later night while STILL ACTIVE would then appear in
+      // the digest twice — once as held, once as "fired overnight and
+      // self-resolved" — stamped with clock times from a previous night.
       overnightResolved.clear();
+      persistDigestState(); // v1.86.0
       return true;
     }
     // v1.3.0 (audit rank 6) — order the digest by SEVERITY, most severe first. `pending`
@@ -1654,8 +1728,16 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       }
       persistNotified();
       quietQueue.length = 0;
-      persistDigestState(); // v1.86.0
+      // v1.130.0 — CLEAR BEFORE PERSIST. Every exit branch persisted the digest
+      // state and THEN cleared overnightResolved in memory, so the cleared map was
+      // never written: all 17 boots in the 2026-09-04 corpus logged the identical
+      // "rehydrated digest state — 0 held alert(s), 16 resolved-overnight
+      // record(s)", including the five boots AFTER a digest had been sent. A stale
+      // id queued again on a later night while STILL ACTIVE would then appear in
+      // the digest twice — once as held, once as "fired overnight and
+      // self-resolved" — stamped with clock times from a previous night.
       overnightResolved.clear();
+      persistDigestState(); // v1.86.0
       return true;
     } catch (e: any) {
       // v0.80.0 — the queue is retained (cleared only in the success path) and
@@ -1912,7 +1994,25 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
      * not a silently-dropped entry.
      */
     const retireTrackedAlert = (id: string, t: TrackedAlert, nowMs: number): void => {
-      const duration = nowMs - t.firstSeen;
+      // v1.130.0 — the TRUE onset, not the in-memory one.
+      //
+      // `t.firstSeen` is re-stamped by the firstRun re-track on every boot, so any
+      // episode spanning a restart was recorded from the restart. Measured
+      // 2026-09-04: a backup-soc-40 episode continuously true from 17:55:07 was
+      // filed as raisedAt 19:45:14 / durationMs 127883 — **128 seconds for a
+      // 1 h 52 m condition, a 52x truncation**, because a restart landed 12 s
+      // before the clear.
+      //
+      // Two harms. Forensically the RMA evidence trail understates how long a
+      // fault stood. Worse for the tuner: `neverClearedCount` (longActive) is the
+      // only numerator holding a family below Rule 4's 0.2 threshold, so
+      // truncation makes a genuinely multi-hour episode count as a shortClear and
+      // pushes the family toward auto-silence.
+      //
+      // alertOnset.ts exists precisely for this — it persists true onset across
+      // restarts — and retireTrackedAlert simply predates it.
+      const trueFirstSeen = getAlertOnset(id) ?? t.firstSeen;
+      const duration = nowMs - trueFirstSeen;
       if (duration >= DEBOUNCE_MS) {
         // v1.14.0 — persist the alert at its PEAK severity over its life, so a
         // dual-severity alert that de-escalated before clearing keeps its
@@ -1934,7 +2034,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           ...(changed
             ? { closedAs: { title: t.alert.title, detail: t.alert.detail, severity: t.alert.severity } }
             : {}),
-          raisedAt: t.firstSeen,
+          raisedAt: trueFirstSeen,
           clearedAt: nowMs,
           durationMs: duration,
         });
@@ -1946,7 +2046,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // v1.75.0 — a digest-held alert that self-resolves must stay VISIBLE in the
       // morning digest (with its true duration), not silently vanish.
       if (t.queued) {
-        overnightResolved.set(id, { raisedAt: t.firstSeen, clearedAt: nowMs });
+        overnightResolved.set(id, { raisedAt: trueFirstSeen, clearedAt: nowMs });
         persistDigestState(); // v1.86.0
       }
       recordClear(t.alert, duration, nowMs);
@@ -2028,7 +2128,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // Previously rise counts were only incremented at clear time,
         // which made the chronic-noise rule blind to permanently-active
         // alerts (they never cleared, so never got counted).
-        recordRise(a, now);
+        // v1.130.0 — but NOT for an alert that was already standing before this
+        // process started: that is a re-track, not a rising edge. See isBootRetrack.
+        if (isBootRetrack({ firstRun, priorOnsetMs: getAlertOnset(a.id), bootMs })) {
+          log(`alerts: "${a.id}" re-tracked across a restart — not counting a rise (condition predates this process)`);
+        } else {
+          recordRise(a, now);
+        }
         // v0.15.21 — an alert already pushed (recorded in notify-state.json) must
         // not re-push when it "rises" again here: analytics warm-up re-deriving
         // it post-boot, OR its tracked entry having been dropped and recreated
@@ -2050,6 +2156,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         tracked.set(a.id, {
           alert: a,
           openingAlert: { ...a },   // v1.123.0 — frozen at raisedAt
+          // v1.130.0 — carry the restored hold onto the tracked entry, so the 06:00
+          // digest's `pending` filter can see that this alert is still held even
+          // though THIS process never queued it. Without it a quiet-hours hold
+          // spanning a restart was silently dropped.
+          queuedRehydrated: rehydratedHolds.has(a.id) || undefined,
           firstSeen: now,
           peakSeverity: a.severity,
           notified: seeded,
