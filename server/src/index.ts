@@ -3051,7 +3051,7 @@ interface NightPlanExtras {
   horizonHours: number;
   pvP10Kwh: number; pvP50Kwh: number; pvP90Kwh: number;
   loadP10Kwh: number; loadP50Kwh: number; loadP90Kwh: number;
-  evP90SessionKwh: number; evSessionCount: number;
+  evP90SessionKwh: number | null; evSessionCount: number | null;
   bandSigmaCal: number;
   calScoredDays: number;
   forecastBasis: string;
@@ -3330,8 +3330,19 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     horizonHours: inputs.horizon.length,
     pvP10Kwh: round2(pvP10), pvP50Kwh: round2(pvP50), pvP90Kwh: round2(pvP90),
     loadP10Kwh: round2(loadP50 / loadP90Factor), loadP50Kwh: round2(loadP50), loadP90Kwh: round2(loadP50 * loadP90Factor),
-    evP90SessionKwh: ev?.p90SessionKwh ?? 0,
-    evSessionCount: ev?.sessionCount ?? 0,
+    // v1.123.0 — NULL, not 0. `?? 0` collapsed "no EVSE prediction available"
+    // (no history, an EVSE cloud gap, an analytics failure) into a confident
+    // "the car will not charge". The ledger shows the artifact directly: the
+    // 2026-08-27 row records 0 sessions / 0 kWh and the very next row records 6
+    // sessions / 45.1 kWh — a 30-day rolling mining window cannot legitimately
+    // gain six historical sessions overnight, so the zeros recorded an
+    // unavailable report, not an EV-free history. The advisor's own contract
+    // already forbids this read ("a missing evP90W must never be read as zero");
+    // the plan-time surface honours it, the recorded row did not. This ledger is
+    // the permanent evidence base the readiness gate reduces over, and it is the
+    // one column that cannot be reconstructed after the fact.
+    evP90SessionKwh: ev?.p90SessionKwh ?? null,
+    evSessionCount: ev?.sessionCount ?? null,
     bandSigmaCal: prob?.bandSigmaCal ?? 1,
     calScoredDays,
     forecastBasis: confidenceTier,
@@ -3385,7 +3396,7 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     load_p10_kwh: extras.loadP10Kwh,
     load_p50_kwh: extras.loadP50Kwh,
     load_p90_kwh: extras.loadP90Kwh,
-    ev_p90_session_kwh: round2(extras.evP90SessionKwh),
+    ev_p90_session_kwh: extras.evP90SessionKwh == null ? null : round2(extras.evP90SessionKwh),
     ev_session_count: extras.evSessionCount,
     pool_full_kwh: round2(extras.fullKwh),
     band_sigma_cal: extras.bandSigmaCal,

@@ -9250,3 +9250,51 @@ Four audit findings in the one channel that reaches the household without a phon
   32 s. The text channel keeps the full prose, and the shortfall disclosure stays on
   the audible path as a clause — audible must never be quieter about residual risk
   than text.
+
+### 12o. Reports that claimed more than they knew (v1.123.0)
+
+- **The cleared-alert ledger recorded the closing body against the opening
+  timestamp.** `TrackedAlert.alert` is refreshed every tick so the live view shows
+  current values, and the retirement path reused that same mutable reference for the
+  permanent record. A live row reads `raisedAt 09-02 22:56:56` with detail "Backup
+  pool 49% is at or under the 50% reserve floor" — but the pool was ~28 % at
+  22:56:56; 49 % is where it ended up six hours later. It looks like a physically
+  impossible 19-point jump in one poll, and it cost this audit a wrong intermediate
+  conclusion. This ledger is what `/api/warranty-export` draws on for the EcoFlow
+  RMA, so the opening state is now frozen at first sighting and the closing state is
+  preserved separately in `closedAs`. v1.14.0 had recognised exactly this hazard for
+  `severity` and repaired that one field.
+- **Per-family precision was 1.0 by construction.** The aggregate correctly declines
+  to measure a one-class stream, but that guard was never pushed down into the family
+  rollup — so Model Health published `overallPrecision: null` beside ten families all
+  reading `precision: 1, dismiss: 0`. A real collapse in one family would have had to
+  compete with nine neighbours reporting perfection. `familyPrecision` now applies the
+  same evidence floor; the raw counts are still published, only the derived claim is
+  withheld.
+- **A missing EVSE prediction was recorded as "0 sessions, 0 kWh"** — indistinguishable
+  from a confident "the car will not charge". The ledger shows the artifact: 08-27
+  records 0 sessions, 08-28 records 6 sessions / 45.1 kWh, and a 30-day rolling window
+  cannot gain six historical sessions overnight. The advisor's own contract already
+  forbids this read; the plan-time surface honoured it, the recorded row did not. It
+  is now `null`.
+- **The poll period absorbed the poll duration** — measured 3,626-3,638 s against a
+  3,600 s nominal hour. Small, but the coupling is the point: cadence degraded in
+  lockstep with the vendor's own slowness, so telemetry was least fresh exactly during
+  the nightly starvation window. `nextPollDelayMs` compensates against a fixed
+  deadline while keeping the no-overlap property.
+
+**Readiness is now honest about what it cannot measure.** `cushion_shortfall` is the
+exemption key for three mechanisms — the under-buy pool, the buy de-bias learner and
+the engine-fault strike detector — and on this plant it is pinned true by arithmetic:
+the pool holds 92.16 kWh while the worst-case day drains 128-152 kWh, so the cushion
+cannot be met from any starting SoC. `underBuyRate: null` and `activeStrikes: 0` are
+therefore not a clean bill of health; they are **unmeasured**. The gate now publishes
+`underBuyMeasurable` / `strikesMeasurable` beside them and says so in the blocking
+line. **No criterion was loosened** — re-scoping the cushion is an owner policy
+decision, and until it is made, fail-closed with an honest label is the correct
+posture.
+
+Also corrected: the Notify Channel description implied `ha` delivers a phone push. It
+does not — `persistent_notification.create` creates a card in the HA drawer with no
+OS alert and no sound. The description now says so and points at ntfy / pushover /
+webhook, which do.
