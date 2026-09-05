@@ -348,6 +348,10 @@ export function classifyClearDuration(durationMs: number): { shortClear: boolean
 
 interface TrackedAlert {
   alert: Alert;
+  /** v1.123.0 — an IMMUTABLE copy of the alert as first seen. `alert` above is
+   *  refreshed every tick; this is what the permanent cleared record must carry,
+   *  because it is the body that belongs to `firstSeen`. */
+  openingAlert?: Alert;
   firstSeen: number;
   notified: boolean;
   /** v0.23.0 — severity at which this alert was last dispatched to the push
@@ -392,7 +396,29 @@ interface TrackedAlert {
 
 /** A historical record of an alert that was raised and later cleared. */
 export interface ClearedAlert {
+  /**
+   * v1.123.0 — the alert AS IT WAS AT `raisedAt`.
+   *
+   * THE DEFECT: `TrackedAlert.alert` is refreshed on every evaluation tick so the
+   * live view shows current values, and the retirement path reused that same
+   * mutable reference for the PERMANENT record. Every historical row therefore
+   * paired the LAST tick's body with the FIRST tick's timestamp. Live example
+   * from the ledger: raisedAt 09-02 22:56:56, detail "Backup pool 49% is at or
+   * under the 50% reserve floor" — but the pool was ~28% at 22:56:56 (the same
+   * tick that logged the 30% SoC crossing); 49% is where it ended up six hours
+   * later. It reads as a physically impossible 19-point jump in one poll, and it
+   * cost this audit a wrong intermediate conclusion.
+   *
+   * This ledger is the forensic record — it is what /api/warranty-export draws on
+   * for the pending EcoFlow RMA — so the opening state is the one that must be
+   * attributable to the opening timestamp. v1.14.0 recognised exactly this hazard
+   * for `severity` and repaired that one field; the title/detail/facts body was
+   * left on the last tick.
+   */
   alert: Alert;
+  /** v1.123.0 — the alert as it was at `clearedAt`, when that differs from the
+   *  opening body. Nothing is lost; it is simply no longer mislabelled. */
+  closedAs?: Pick<Alert, 'title' | 'detail' | 'severity'>;
   raisedAt: number;
   clearedAt: number;
   durationMs: number;
@@ -1857,8 +1883,26 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // dual-severity alert that de-escalated before clearing keeps its
         // critical-history record (and eviction protection).
         const peak = t.peakSeverity != null ? moreSevere(t.peakSeverity, t.alert.severity) : t.alert.severity;
-        const recordedAlert = peak !== t.alert.severity ? { ...t.alert, severity: peak } : t.alert;
-        clearedLog.unshift({ alert: recordedAlert, raisedAt: t.firstSeen, clearedAt: nowMs, durationMs: duration });
+        // v1.123.0 — the record's body is the OPENING one (it belongs to
+        // `raisedAt`), carried at the episode's PEAK severity (v1.14.0). The
+        // closing body is preserved separately rather than overwriting it.
+        // `openingAlert` is optional so records rehydrated from a pre-v1.123.0
+        // persisted log still retire correctly, falling back to the old behaviour.
+        const opening = t.openingAlert ?? t.alert;
+        const recordedAlert = peak !== opening.severity ? { ...opening, severity: peak } : opening;
+        const changed =
+          opening.title !== t.alert.title
+          || opening.detail !== t.alert.detail
+          || opening.severity !== t.alert.severity;
+        clearedLog.unshift({
+          alert: recordedAlert,
+          ...(changed
+            ? { closedAs: { title: t.alert.title, detail: t.alert.detail, severity: t.alert.severity } }
+            : {}),
+          raisedAt: t.firstSeen,
+          clearedAt: nowMs,
+          durationMs: duration,
+        });
         if (clearedLog.length > CLEARED_LOG_MAX) evictOldestCleared(); // v1.12.0 (F19) — noise-first eviction
         persistClearedLog(); // v0.85.0 — survive restarts (the daily Pi power cut)
       }
@@ -1970,6 +2014,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         const seeded = bootSeedNotified({ alert: a, firstRun, alreadyNotified });
         tracked.set(a.id, {
           alert: a,
+          openingAlert: { ...a },   // v1.123.0 — frozen at raisedAt
           firstSeen: now,
           peakSeverity: a.severity,
           notified: seeded,

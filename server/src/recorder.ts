@@ -433,8 +433,10 @@ export interface NightLedgerRow {
   load_p10_kwh: number;
   load_p50_kwh: number;
   load_p90_kwh: number;
-  ev_p90_session_kwh: number;
-  ev_session_count: number; // tail-sufficiency for the EV p90
+  /** v1.123.0 — NULL means "no EVSE prediction was available", which is not
+   *  the same claim as a confident zero. See the note at the index.ts call site. */
+  ev_p90_session_kwh: number | null;
+  ev_session_count: number | null; // tail-sufficiency for the EV p90
   min_proj_soc_pct: number; // from the SIMULATED plan trajectory (design §3.3)
   min_proj_soc_ts_ms: number;
   pool_full_kwh: number;
