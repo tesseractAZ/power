@@ -1488,6 +1488,19 @@ app.get('/api/ha-state', async (req, reply) => {
     analytics.report('carbon'),
     analytics.report('tariff'),
   ]);
+
+  // v1.125.1 — cache the REPRESENTATIVE islanded load for the outage cushion.
+  //
+  // v1.125.0 read the instantaneous panel load, which is wrong twice over: it
+  // swings ~3x across the day (measured 1445 W at 00:50 MST, 3971-4038 W at
+  // 18:00), so the cushion — and therefore the nightly buy — would depend on
+  // WHEN the plan happened to run; and a single quiet-moment sample understates
+  // the load an outage would actually see. selfCons.loadKwh is already the SHP2
+  // panel_load energy over 7 days (analytics.ts: `shp2Wh.get('panel_load')`), so
+  // its mean is both representative and free — it is fetched here anyway.
+  if (Number.isFinite(selfCons?.loadKwh) && (selfCons?.loadKwh ?? 0) > 0) {
+    islandedLoadKwCache = { kw: (selfCons.loadKwh as number) / (7 * 24), atMs: Date.now() };
+  }
   const lifetime = recorder.getLifetimeTotals();
   const lifetimeKwh = makeLifetimeKwh(lifetime);
   // v0.8.0 additions — carbon + tariff fetched in the Promise.all above.
@@ -2677,15 +2690,15 @@ let lastLoggedBuyDebiasKey: string | null = null;
  * Returns null when the SHP2 is not reporting, which fails the cushion CLOSED to
  * its legacy form rather than silently sizing against a missing measurement.
  */
+let islandedLoadKwCache: { kw: number; atMs: number } | null = null;
+/** Stale after this long the cushion falls back to its legacy form rather than
+ *  sizing against a figure nobody has refreshed. */
+const ISLANDED_LOAD_MAX_AGE_MS = 6 * 3_600_000;
+
 function islandedLoadKwNow(): number | null {
-  try {
-    const snap = store.get();
-    const sp = findShp2(snap.devices);
-    if (!sp || !sp.online) return null;
-    const { panelLoad } = aggregateFleetFlow(snap.devices);
-    if (!Number.isFinite(panelLoad) || panelLoad <= 0) return null;
-    return panelLoad / 1000;
-  } catch { return null; }
+  if (!islandedLoadKwCache) return null;
+  if (Date.now() - islandedLoadKwCache.atMs > ISLANDED_LOAD_MAX_AGE_MS) return null;
+  return islandedLoadKwCache.kw;
 }
 
 // v1.115.0 — the SHP2's currently-reported reserve, for ownerReserveFloorPct's
