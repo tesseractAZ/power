@@ -1,3 +1,24 @@
+## v1.126.1 — every GitHub Release has been shipping empty notes
+
+The release-notes extractor in `images.yml` matched `^## <version>` against a
+CHANGELOG whose headers are all written `## v<version>`. The `v` prefix meant it
+never matched **any** release, so every GitHub Release ever cut by this pipeline
+carried the `_(see CHANGELOG.md)_` placeholder instead of its notes. Nothing failed,
+which is exactly why it went unnoticed.
+
+- The pattern now accepts an optional `v`.
+- A missing section **fails the job loudly** instead of falling back to a placeholder.
+  A silent default is how this hid; shipping a Release with no notes should not be the
+  quiet outcome of an authoring mistake.
+
+Also backfilled: v1.120.0 through v1.125.1 were released during a single long session
+and never got CHANGELOG sections at all — they were documented in DOCS.md and in their
+pull requests, but not where the release pipeline looks. Nine sections written, and the
+nine GitHub Releases re-published from them.
+
+The repository description now mentions companion-app push, since v1.124.0 made that a
+real delivery channel rather than a drawer card.
+
 ## v1.126.0 — dead code removed, documentation caught up
 
 Housekeeping after the v1.120–v1.125 run.
@@ -32,6 +53,210 @@ Not touched: `dead-code-inventory-2026-07-27.md` and
 working documents, not repository content.
 
 No behaviour change. Suite 2263/2263.
+
+## v1.125.1 — size the cushion on the representative load, not a spot reading
+
+Live verification of v1.125.0 caught its own calibration error. The shipped plan
+reported `cushionKwh: 50.7`, which back-solves to an islanded load of 3.97 kW — while
+the release had been calibrated against 1.445 kW.
+
+Both readings were real. Panel load swings ~3x across a day (1,445 W at 00:50 MST;
+3,971–4,038 W the same evening), so reading it instantaneously made the cushion, and
+therefore the nightly purchase, depend on *when* the plan happened to run — and the
+sample used was a quiet-hour trough.
+
+The basis is now the 7-day mean: `selfCons.loadKwh` is already the SHP2 `panel_load`
+energy over seven days and is fetched on the HA-state path anyway, so it costs nothing.
+**751.36 kWh / (7 × 24) = 4.47 kW.** The cache goes stale after 6 h, falling back to the
+legacy cushion rather than sizing against a figure nobody refreshed.
+
+Defaults recalibrated against what the plant can reach. The charger delivers at most
+7.2 kW × 6 h = 43.2 kWh, so from a 25% evening SoC a clean night reaches ~72%. Eight
+hours at 1.5x needed **78%** — a different permanently-true flag, which is the bug the
+re-scope exists to remove. **Four hours at 1.25x needs ~42%**: reachable on a clean
+night, missed when the EV contends for the grid input. A test pins the default inside
+the reachable band in both directions.
+
+The honest headline: this plant carries its protected panel for about **four hours** at
+a typical post-charge state, not a day.
+
+## v1.125.0 — the outage cushion, re-scoped to something reachable
+
+`ARB_OUTAGE_CUSHION_PCT` was a flat 15% of pool tested against a grid-blind forward
+simulation that runs the **whole house** off the battery for the entire remaining 25–49 h
+forecast. On this plant that is P90 load 156–185 kWh/day against a 92.16 kWh pool, so the
+trough hit zero 1–8 h after window close on **7 of 7 nights** and `cushionShortfall` was
+pinned true by arithmetic. Being a constant, it silently exempted every night from three
+mechanisms at once — the under-buy pool, the buy de-bias learner, and the engine-fault
+strike detector.
+
+The model described something the hardware does not do. When the grid drops the SHP2
+carries its **backup circuits**; the rest of the house is dead. Measured live:
+`panel_load_watts` 1,445 W against `runway_recent_load_watts` 4,863 W.
+
+The cushion is now `outageHours × islandedLoadKw × safetyFactor / dischargeEff`, tested
+against the pack at window close. New options `ARB_OUTAGE_CUSHION_HOURS` and
+`ARB_ISLANDED_LOAD_SAFETY` (monotone the **strict** way — raising it buys more). No PV is
+credited: an outage can begin at dusk.
+
+**Fail-closed**: with no islanded measurement the legacy band *and* the legacy
+whole-house trough both stand; the pair is never mixed. The whole-house trough is still
+disclosed as `minProjSocPct`.
+
+Mutation-verified 3/3, including the bridge bug this change hit:
+`buildNightChargeInputs` destructures field-by-field, so inputs added to both interfaces
+still arrived `undefined` and took the legacy path. Only the end-to-end test caught it.
+
+## v1.124.2 — wire the notify options to the process, and guard the bridge
+
+v1.124.0 shipped `NOTIFY_HA_PUSH_TARGETS` and `NOTIFY_CRITICAL_BYPASS_DND` into the
+schema, the config UI and the code — but not into `rootfs/etc/services.d/ecoflow-panel/run`,
+which is what turns an add-on option into an environment variable. The option was stored
+correctly and the server saw nothing: `/api/notify/status` reported `pushTargets: []` with
+the target sitting in the add-on config.
+
+Nothing in the build could catch it — TypeScript cannot see a shell script, and every unit
+test passes because it sets `process.env` directly. The suite was green. It surfaced only
+from checking the *feature* on the live system.
+
+Second occurrence of this shape (v0.33 shipped a keybinding wired everywhere except the
+literal that reaches production), so the fix includes guards for the class: every schema
+option must be exported or explicitly exempted; the run script must not export keys the
+schema no longer declares; and `NOTIFY_CRITICAL_BYPASS_DND` must use the `1/0` convention,
+because this file uses two and `notify.ts` reads `!== '0'` — exporting `"false"` would read
+as **true** and silently keep the DND bypass on.
+
+## v1.124.1 — the Spanish config UI, and a local guard for it
+
+v1.124.0 updated `en.yaml` but not `es.yaml`, so the Spanish config UI would have shown
+five descriptions for options that no longer exist and the raw KEY as the label for the two
+new ones. The repo's own `validate-addon-config` caught it in CI.
+
+The real mistake was merging past a red CI: the merge step ran unconditionally after the
+polling loop instead of gating on the conclusion, so a check doing its job exactly right was
+bypassed.
+
+New test `EVERY language file tracks the schema — not just English` walks schema keys
+against every `translations/*.yaml` in both directions. The local suite passed 2244/2244
+while `es.yaml` was broken; it now fails, verified by deleting a key and watching it go red.
+
+## v1.124.0 — notifications are Home-Assistant-native
+
+The live `ha` channel's entire transport was `persistent_notification.create`: a card in the
+HA drawer, which the companion app shows only when opened. No OS push, no lock-screen alert,
+no sound, and no `mobile_app` reference anywhere in the repo. With in-house-only speakers and
+quiet hours, an away or sleeping owner received **nothing** for a critical battery,
+reserve-floor or grid event — and the config text implied the opposite.
+
+The ntfy / Pushover / webhook channels existed to fill that gap and were never configured.
+**Removed rather than fixed**: Home Assistant already owns a notification system with a
+first-party app, per-device targeting and a documented Do-Not-Disturb bypass.
+
+The `ha` channel now does both halves — `persistent_notification` for the durable drawer
+record, and `notify.mobile_app_*` for the actual push. Critical alerts (and only critical)
+carry the companion app's documented payload: iOS `data.push.sound {critical: 1, volume: 1.0}`,
+Android `ttl: 0` / `priority: high` / `channel: alarm_stream`. One payload serves both
+platforms. A warning that behaves like an emergency teaches the owner to silence the channel
+that carries the emergencies, so warnings stay ordinary.
+
+`reachesAPhone()` is now a separate question from `isConfigured()`, because "configured" was
+true with a supervisor token alone while delivering nothing.
+
+Options removed: `NOTIFY_NTFY_SERVER`/`_TOPIC`, `NOTIFY_PUSHOVER_TOKEN`/`_USER`,
+`NOTIFY_WEBHOOK_URL`. Added: `NOTIFY_HA_PUSH_TARGETS`, `NOTIFY_CRITICAL_BYPASS_DND`.
+`NOTIFY_CHANNEL` narrowed to `list(none|ha)`; a stale stored value fails **safe to `none`**.
+
+Verified safe before shipping: posting the option set *without* those five keys and
+re-reading returned all five, proving `info.options` is the effective set with `config.yaml`
+defaults merged in — they were defaults, never stored user data.
+
+## v1.123.0 — reports that claimed more than they knew
+
+- **The cleared-alert ledger paired the last tick's body with the first tick's timestamp.**
+  A live row reads `raisedAt 09-02 22:56:56` with detail "Backup pool 49%" — but the pool was
+  ~28% then; 49% is six hours later. This ledger feeds `/api/warranty-export` for the EcoFlow
+  RMA. The opening body is now frozen at first sighting; the closing body is preserved in
+  `closedAs`.
+- **Per-family precision was 1.0 by construction.** The aggregate declines to measure a
+  one-class stream; that guard was never pushed into the family rollup, so Model Health showed
+  `overallPrecision: null` beside ten families all at `precision: 1, dismiss: 0`.
+- **A missing EVSE prediction was recorded as "0 sessions, 0 kWh"** — indistinguishable from a
+  confident "the car will not charge". 08-27 records 0 sessions and 08-28 records 6; a 30-day
+  window cannot gain six sessions overnight. Now `null`.
+- **The poll period absorbed the poll duration** (3,626–3,638 s against 3,600 s), so cadence
+  degraded in lockstep with vendor slowness — least fresh exactly during the nightly starvation
+  window. Now deadline-compensated.
+- **Readiness publishes `underBuyMeasurable` / `strikesMeasurable`** and says "UNREACHABLE, not
+  merely thin". `cushion_shortfall` is pinned true by arithmetic, so `activeStrikes: 0` meant
+  *cannot count*, not *no faults*. **No criterion was loosened** — that was an owner decision,
+  taken later in v1.125.0.
+
+## v1.122.0 — the announce path
+
+Four findings in the channel that reaches the household without a phone.
+
+- **One retry slot for every alarm source.** `runBroadcastInner` serves both the condition path
+  and the dedicated `announce()` path (SoC ladder, runway alarm, night-charge notice), but
+  `retryTimer`/`retryAttempt` were single. A critical deferred at T+0 was erased at T+25 s by a
+  routine yellow deferral, silently, and three yellow deferrals exhausted the budget so the next
+  red got "giving up after 3 deferred retries" with no attempt. Precedence is now a pure tested
+  function.
+- **A timed-out announcement was filed as verifiably heard.** `ok: true` carried two meanings —
+  "do not retry" and "the household heard it" — and the timeout path is exactly where the second
+  is unknown; its own log line says "delivery UNKNOWN". `playAnnounce` now returns
+  `ok: true, verified: false`.
+- **The supervised consent notice was eaten by the storm gate.** The arm job is pinned at 21:30
+  and the SoC ladder chimes in the same minute band; a medium arm after a medium chime is not an
+  escalation, so on 09-01 it was dropped 107 s later. The consent checkpoint silently degraded to
+  phone-only.
+- **The nightly advisory held both alarm speakers for 60 s** (2,643,918 B = 59.95 s, 3.3x every
+  other clip) while broadcasts are serialised through one chain, so a red could not be spoken
+  until it finished. The spoken variant is now bounded by a tested constant: ~46% shorter, ~32 s.
+
+## v1.121.0 — roster-aware spares, and the SHP2 can heal itself
+
+`SPARE_DPU_SNS` has been inverted since the 2026-08-20 swap: it calls Core 5 a spare (measured
+delivering ~1.87 kW on SHP2 slot 3) and does not name the actual bench unit, Core 3. The positive
+connected-source check hid this while the SHP2 was reporting; the hole opens when the SHP2 goes
+cloud-dark, muting a live pool member's offline alarm exactly when the alarm chain is degraded.
+`homeCoreCoverage`'s blind fallback had the mirror problem — it counted bench Core 3 as a
+reporting home Core and dropped live Core 5, so coverage could read `complete` with a real member
+unobserved, which is the flag `gridState` uses to decide whether to withhold the at-floor grid
+backstop.
+
+v1.117.0 built the right answer for `isHomePoolDpu`; four other consumers never got it. They now
+share one roster-aware predicate, `isBenchSpareSn`. **The roster can only remove spare status**, so
+the change is monotone toward fail-loud.
+
+Separately: `minStarvedDevices: 2` meant a wedge confined to the SHP2 could never reach quorum, so
+the one device whose silence blinds the alarms was the one device that could not trigger the
+remedy. It now satisfies the quorum alone; dwell, cooldown and the rolling budget are unchanged.
+
+## v1.120.0 — detectors that could not fire
+
+A 49 h log audit found five mechanisms each gated on a condition that is a **constant** in this
+deployment, so each reported "nothing to see" for a reason unrelated to whether there was anything
+to see.
+
+- **Poll latency**: the `SLOW_POLL_MS` branch required an empty fetch-failure set, but four
+  accessory devices fail every poll by design. Duration is now reported independently.
+- **Clock-sample rejections**: `setClockRejectLogger` sat *inside* the `setClockOffsetLogger`
+  callback body, so it installed only after a first offset adoption — which never happens. Every
+  RTT-gate rejection was invisible, which is why "the v1.109.0 fast path has had no live trigger"
+  was unfalsifiable rather than reassuring.
+- **Rate-collapse pushes**: `msg-rate-floor` was missing from `ENERGY_STATE_FAMILIES`, so churn
+  Rule 4 demoted all 16 pushes in the window to "[Low] no immediate action expected" — for a family
+  whose 30-day record includes a 12.2 h episode.
+- **The reserve-revert readback race**: the posture flag dropped on the cloud ACK while the SHP2
+  still echoed the raised reserve, so a 49% pool read as a floor breach and pushed a false
+  `[Medium]` at 05:06 against a 16% owner floor.
+- **Notify timeouts**: every `request()` in `notify.ts` was uncapped (undici defaults to 300 s) and
+  is awaited inline inside the alarm evaluator's re-entrancy latch, so one wedged request could
+  stall *all* alarm evaluation for minutes.
+
+Also fixed a flaky test: `dbExport.test.ts` failed ~40% of runs (2/5 on clean main, verified in a
+separate worktree). The fixture's source-DB handle was a local V8 could finalize mid-test, letting
+the export's close checkpoint the WAL and write the source.
 
 ## v1.119.3 — seven advisories, one of them shipping in the image
 
