@@ -1,3 +1,25 @@
+## v1.128.0 — entity names no longer repeat the device name
+
+Home Assistant composes a friendly name as `${device.name} ${entity.name}`. The device
+is "EcoFlow Panel" and every entity was *also* named "EcoFlow …", so the fleet rendered
+as **"EcoFlow Panel EcoFlow Home Consumption"**. Forty of the entities exposed to the
+house voice assistant read that way, and a spoken query had to say the whole thing:
+*"what is the ecoflow panel ecoflow home consumption"*.
+
+The alarm switches already had it right (`Alarms — Critical (P1)` renders as "EcoFlow
+Panel Alarms — Critical (P1)"), which is what established the rule rather than guessing
+at Home Assistant's behaviour. Eighty-four static entity names and the templated
+circuit-energy name now follow the same convention.
+
+**Entity IDs are unchanged.** Discovery entities are keyed on `unique_id`; all 84 are
+byte-identical and the dedup version is untouched, so dashboards, automations, recorder
+history and the Assist exposure list keep working. Only the displayed name changes. An
+entity renamed by hand in the UI keeps that name, as before.
+
+The regression test asserts the rule over the whole entity set rather than per entity,
+because the defect is one entry disagreeing with its peers — which no single-entity
+assertion can express. Mutation-verified 4/4, including a lowercase variant.
+
 ## v1.127.0 — a cost objective for the overnight buy
 
 The night-charge advisor has only ever had one objective: hold the reserve floor plus

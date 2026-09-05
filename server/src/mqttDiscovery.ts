@@ -167,69 +167,69 @@ export interface SensorConfig {
 
 export const SENSORS: SensorConfig[] = [
   // Power flow
-  { unique_id: 'ecoflow_fleet_pv_watts', name: 'EcoFlow Fleet PV', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.fleet_pv_watts }}' },
-  { unique_id: 'ecoflow_panel_load_watts', name: 'EcoFlow Panel Load', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.panel_load_watts }}' },
-  { unique_id: 'ecoflow_ac_import_watts', name: 'EcoFlow AC Import', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.ac_import_watts }}' },
-  { unique_id: 'ecoflow_fleet_battery_net_watts', name: 'EcoFlow Battery Net', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.fleet_battery_net_watts }}' },
+  { unique_id: 'ecoflow_fleet_pv_watts', name: 'Fleet PV', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.fleet_pv_watts }}' },
+  { unique_id: 'ecoflow_panel_load_watts', name: 'Panel Load', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.panel_load_watts }}' },
+  { unique_id: 'ecoflow_ac_import_watts', name: 'AC Import', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.ac_import_watts }}' },
+  { unique_id: 'ecoflow_fleet_battery_net_watts', name: 'Battery Net', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.fleet_battery_net_watts }}' },
   // v0.48.0 — whole-home grid POWER at the SHP2 main (wattInfo.gridWatt). The
   // power complement of the grid_to_home lifetime energy sensor (v0.44.0).
   // v1.53.0 — the rewire this sensor existed to enable is DONE: the HA Energy
   // Dashboard grid source now carries power_config.stat_rate = this sensor, not
   // DPU ac_in. See §"HA Energy Dashboard wiring" in DOCS.md for the full mapping.
-  { unique_id: 'ecoflow_grid_home_watts', name: 'EcoFlow Grid Power (Home)', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:transmission-tower', value_template: '{{ value_json.grid_home_watts }}' },
+  { unique_id: 'ecoflow_grid_home_watts', name: 'Grid Power (Home)', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:transmission-tower', value_template: '{{ value_json.grid_home_watts }}' },
   // SHP2 backup pool
-  { unique_id: 'ecoflow_backup_pool', name: 'EcoFlow Backup Pool', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', value_template: '{{ value_json.backup_pool_percent }}' },
-  { unique_id: 'ecoflow_backup_remaining_kwh', name: 'EcoFlow Backup Remaining', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_remaining_kwh }}' },
+  { unique_id: 'ecoflow_backup_pool', name: 'Backup Pool', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', value_template: '{{ value_json.backup_pool_percent }}' },
+  { unique_id: 'ecoflow_backup_remaining_kwh', name: 'Backup Remaining', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_remaining_kwh }}' },
   // v1.2.0 — `energy_storage`, matching its sibling `backup_remaining_kwh` one line up.
   // Without it HA treats a stored-energy kWh as a bare measurement: wrong default icon,
   // and it can't be picked in pickers that filter on the storage device class.
-  { unique_id: 'ecoflow_backup_full_capacity_kwh', name: 'EcoFlow Backup Capacity', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_full_capacity_kwh }}' },
+  { unique_id: 'ecoflow_backup_full_capacity_kwh', name: 'Backup Capacity', device_class: 'energy_storage', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.backup_full_capacity_kwh }}' },
   // Forecast
   // v0.15.3 — no device_class: a forecast/rolling kWh is a `measurement` (goes up
   // AND down); device_class energy forces total/total_increasing → HA rejects it.
-  { unique_id: 'ecoflow_forecast_pv_next_24h_kwh', name: 'EcoFlow Forecast PV Next 24h', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.forecast_pv_next_24h_kwh }}' },
-  { unique_id: 'ecoflow_projected_low_soc', name: 'EcoFlow Projected Low SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-low', value_template: '{{ value_json.projected_low_soc_percent }}' },
-  { unique_id: 'ecoflow_soiling_drop_percent', name: 'EcoFlow Solar Soiling', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:weather-dust', value_template: '{{ value_json.soiling_drop_percent }}' },
+  { unique_id: 'ecoflow_forecast_pv_next_24h_kwh', name: 'Forecast PV Next 24h', state_class: 'measurement', unit_of_measurement: 'kWh', value_template: '{{ value_json.forecast_pv_next_24h_kwh }}' },
+  { unique_id: 'ecoflow_projected_low_soc', name: 'Projected Low SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-low', value_template: '{{ value_json.projected_low_soc_percent }}' },
+  { unique_id: 'ecoflow_soiling_drop_percent', name: 'Solar Soiling', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:weather-dust', value_template: '{{ value_json.soiling_drop_percent }}' },
   // Degradation
-  { unique_id: 'ecoflow_degradation_soonest_eol_years', name: 'EcoFlow Soonest Pack EOL', state_class: 'measurement', unit_of_measurement: 'yr', icon: 'mdi:battery-clock', value_template: '{{ value_json.degradation_soonest_eol_years }}' },
-  { unique_id: 'ecoflow_degradation_peer_outliers', name: 'EcoFlow Peer-Outlier Packs', state_class: 'measurement', icon: 'mdi:alert-decagram-outline', value_template: '{{ value_json.degradation_peer_outliers }}' },
+  { unique_id: 'ecoflow_degradation_soonest_eol_years', name: 'Soonest Pack EOL', state_class: 'measurement', unit_of_measurement: 'yr', icon: 'mdi:battery-clock', value_template: '{{ value_json.degradation_soonest_eol_years }}' },
+  { unique_id: 'ecoflow_degradation_peer_outliers', name: 'Peer-Outlier Packs', state_class: 'measurement', icon: 'mdi:alert-decagram-outline', value_template: '{{ value_json.degradation_peer_outliers }}' },
   // Runway
-  { unique_id: 'ecoflow_runway_to_reserve_hours', name: 'EcoFlow Runway to Reserve', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-sand', value_template: '{{ value_json.runway_to_reserve_hours }}' },
-  { unique_id: 'ecoflow_runway_to_empty_hours', name: 'EcoFlow Runway to Empty', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-off', value_template: '{{ value_json.runway_to_empty_hours }}' },
+  { unique_id: 'ecoflow_runway_to_reserve_hours', name: 'Runway to Reserve', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-sand', value_template: '{{ value_json.runway_to_reserve_hours }}' },
+  { unique_id: 'ecoflow_runway_to_empty_hours', name: 'Runway to Empty', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-off', value_template: '{{ value_json.runway_to_empty_hours }}' },
   // RTE
-  { unique_id: 'ecoflow_round_trip_efficiency', name: 'EcoFlow Round-Trip Efficiency', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-sync-outline', value_template: '{{ value_json.round_trip_efficiency_percent }}' },
+  { unique_id: 'ecoflow_round_trip_efficiency', name: 'Round-Trip Efficiency', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-sync-outline', value_template: '{{ value_json.round_trip_efficiency_percent }}' },
   // Clipping
-  { unique_id: 'ecoflow_pv_clipped_kwh_today', name: 'EcoFlow PV Clipped Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_clipped_kwh_today }}' },
-  { unique_id: 'ecoflow_pv_array_peak_watts', name: 'EcoFlow PV Array Peak', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.pv_array_peak_watts }}', entity_category: 'diagnostic' },
+  { unique_id: 'ecoflow_pv_clipped_kwh_today', name: 'PV Clipped Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_clipped_kwh_today }}' },
+  { unique_id: 'ecoflow_pv_array_peak_watts', name: 'PV Array Peak', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', value_template: '{{ value_json.pv_array_peak_watts }}', entity_category: 'diagnostic' },
   // v0.9.77 — SoC-saturation curtailment ("batteries full, panels throttled")
-  { unique_id: 'ecoflow_pv_curtailment_surplus_watts', name: 'EcoFlow PV Curtailment Surplus', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:solar-power-variant', value_template: '{{ value_json.pv_curtailment_surplus_watts }}' },
-  { unique_id: 'ecoflow_pv_curtailment_kwh_today', name: 'EcoFlow PV Curtailed Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_today }}' },
+  { unique_id: 'ecoflow_pv_curtailment_surplus_watts', name: 'PV Curtailment Surplus', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:solar-power-variant', value_template: '{{ value_json.pv_curtailment_surplus_watts }}' },
+  { unique_id: 'ecoflow_pv_curtailment_kwh_today', name: 'PV Curtailed Today', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_today }}' },
   // v0.15.3 — measurement (rolling 7-day window goes up and down) → no device_class energy.
-  { unique_id: 'ecoflow_pv_curtailment_kwh_7d', name: 'EcoFlow PV Curtailed 7d', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_7d }}' },
-  { unique_id: 'ecoflow_charge_ceiling', name: 'EcoFlow Charge Ceiling', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-100', value_template: '{{ value_json.pv_curtailment_charge_ceiling_pct }}', entity_category: 'diagnostic' },
+  { unique_id: 'ecoflow_pv_curtailment_kwh_7d', name: 'PV Curtailed 7d', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:solar-power-variant-outline', value_template: '{{ value_json.pv_curtailment_kwh_7d }}' },
+  { unique_id: 'ecoflow_charge_ceiling', name: 'Charge Ceiling', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-100', value_template: '{{ value_json.pv_curtailment_charge_ceiling_pct }}', entity_category: 'diagnostic' },
   // Self-consumption (v0.7.5)
-  { unique_id: 'ecoflow_solar_fraction_of_load', name: 'EcoFlow Solar Fraction of Load', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power', value_template: '{{ value_json.solar_fraction_of_load_percent }}' },
-  { unique_id: 'ecoflow_direct_use_ratio', name: 'EcoFlow PV Direct Use Ratio', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.direct_use_ratio_percent }}' },
+  { unique_id: 'ecoflow_solar_fraction_of_load', name: 'Solar Fraction of Load', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power', value_template: '{{ value_json.solar_fraction_of_load_percent }}' },
+  { unique_id: 'ecoflow_direct_use_ratio', name: 'PV Direct Use Ratio', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.direct_use_ratio_percent }}' },
   // Alert counts — these legacy entity-ids are load-bearing (HA history depends
   // on them); do NOT rename or remove.
-  { unique_id: 'ecoflow_alert_critical_count', name: 'EcoFlow Critical Alerts', state_class: 'measurement', icon: 'mdi:alert-octagon', value_template: '{{ value_json.alert_critical_count }}' },
-  { unique_id: 'ecoflow_alert_warning_count', name: 'EcoFlow Warning Alerts', state_class: 'measurement', icon: 'mdi:alert', value_template: '{{ value_json.alert_warning_count }}' },
-  { unique_id: 'ecoflow_learned_warning_count', name: 'EcoFlow Learned Warnings', state_class: 'measurement', icon: 'mdi:lightbulb-on', value_template: '{{ value_json.learned_warning_count }}' },
+  { unique_id: 'ecoflow_alert_critical_count', name: 'Critical Alerts', state_class: 'measurement', icon: 'mdi:alert-octagon', value_template: '{{ value_json.alert_critical_count }}' },
+  { unique_id: 'ecoflow_alert_warning_count', name: 'Warning Alerts', state_class: 'measurement', icon: 'mdi:alert', value_template: '{{ value_json.alert_warning_count }}' },
+  { unique_id: 'ecoflow_learned_warning_count', name: 'Learned Warnings', state_class: 'measurement', icon: 'mdi:lightbulb-on', value_template: '{{ value_json.learned_warning_count }}' },
   // v0.11.0 — additive per-ISA-priority alarm counts (Critical already exposed
   // above via alert_critical_count; these cover High/Medium/Low). Derived from
   // priorityOf(alert) so they track the same 4-tier taxonomy as the switches.
-  { unique_id: 'ecoflow_alert_high_count', name: 'EcoFlow High Priority Alarms (P2)', state_class: 'measurement', icon: 'mdi:alert', value_template: '{{ value_json.alert_high_count }}' },
-  { unique_id: 'ecoflow_alert_medium_count', name: 'EcoFlow Medium Priority Alarms (P3)', state_class: 'measurement', icon: 'mdi:alert-outline', value_template: '{{ value_json.alert_medium_count }}' },
-  { unique_id: 'ecoflow_alert_low_count', name: 'EcoFlow Low Priority Alarms (P4)', state_class: 'measurement', icon: 'mdi:information-outline', value_template: '{{ value_json.alert_low_count }}' },
+  { unique_id: 'ecoflow_alert_high_count', name: 'High Priority Alarms (P2)', state_class: 'measurement', icon: 'mdi:alert', value_template: '{{ value_json.alert_high_count }}' },
+  { unique_id: 'ecoflow_alert_medium_count', name: 'Medium Priority Alarms (P3)', state_class: 'measurement', icon: 'mdi:alert-outline', value_template: '{{ value_json.alert_medium_count }}' },
+  { unique_id: 'ecoflow_alert_low_count', name: 'Low Priority Alarms (P4)', state_class: 'measurement', icon: 'mdi:information-outline', value_template: '{{ value_json.alert_low_count }}' },
   // Fleet
-  { unique_id: 'ecoflow_fleet_devices_online', name: 'EcoFlow Fleet Devices Online', state_class: 'measurement', icon: 'mdi:home-battery', value_template: '{{ value_json.fleet_devices_online }}' },
+  { unique_id: 'ecoflow_fleet_devices_online', name: 'Fleet Devices Online', state_class: 'measurement', icon: 'mdi:home-battery', value_template: '{{ value_json.fleet_devices_online }}' },
   // Cloud-wedge diagnostic: count of devices the EcoFlow cloud reports OFFLINE but
   // that are still reachable on the LAN (per the operator's HA ping binary_sensors
   // mapped via ECOFLOW_DEVICE_REACHABILITY) — i.e. an EcoFlow cloud-session/MQTT
   // wedge rather than a real power/network outage. Reads 0 when the feature is
   // unconfigured. Diagnostic so it sits under the device's diagnostics, not the
   // primary controls.
-  { unique_id: 'ecoflow_cloud_wedge_count', name: 'EcoFlow Cloud-Wedged Devices', state_class: 'measurement', icon: 'mdi:cloud-alert', entity_category: 'diagnostic', value_template: '{{ value_json.ecoflow_cloud_wedge_count }}' },
+  { unique_id: 'ecoflow_cloud_wedge_count', name: 'Cloud-Wedged Devices', state_class: 'measurement', icon: 'mdi:cloud-alert', entity_category: 'diagnostic', value_template: '{{ value_json.ecoflow_cloud_wedge_count }}' },
   // v0.83.0 — system data-gap / unplanned-outage TRACKING (24 h). Recorded
   // telemetry blackouts (restart-spanning gaps ≥ 5 min — power loss, add-on stop,
   // or deploy — and in-process MQTT stalls > 15 min). A binary "system outage in
@@ -237,52 +237,52 @@ export const SENSORS: SensorConfig[] = [
   // trend after a UPS/power fix. Diagnostic; all 0 = clean.
   // Plain ON/OFF diagnostic (no device_class 'problem' — matches the coverage_partial
   // sibling convention; the operator FLAG is the push alert, this is a status tile).
-  { unique_id: 'ecoflow_system_outage_24h', name: 'EcoFlow System Outage (24h)', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.system_outage_active_24h else "OFF" }}' },
-  { unique_id: 'ecoflow_system_outage_count_24h', name: 'EcoFlow System Outages 24h', state_class: 'measurement', icon: 'mdi:counter', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_count_24h }}' },
+  { unique_id: 'ecoflow_system_outage_24h', name: 'System Outage (24h)', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.system_outage_active_24h else "OFF" }}' },
+  { unique_id: 'ecoflow_system_outage_count_24h', name: 'System Outages 24h', state_class: 'measurement', icon: 'mdi:counter', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_count_24h }}' },
   // v1.4.1 (daytime-review #4) — split the 24h total by cause so a cloud/MQTT stall (process
   // stayed up) is not read as a power event (add-on/host was down across the gap).
-  { unique_id: 'ecoflow_system_power_outage_count_24h', name: 'EcoFlow Power Outages 24h', state_class: 'measurement', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ value_json.system_power_outage_count_24h }}' },
-  { unique_id: 'ecoflow_system_telemetry_gap_count_24h', name: 'EcoFlow Telemetry Gaps 24h', state_class: 'measurement', icon: 'mdi:cloud-off-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_telemetry_gap_count_24h }}' },
-  { unique_id: 'ecoflow_system_outage_minutes_24h', name: 'EcoFlow System Outage Minutes 24h', state_class: 'measurement', unit_of_measurement: 'min', icon: 'mdi:timer-alert-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_total_minutes_24h }}' },
+  { unique_id: 'ecoflow_system_power_outage_count_24h', name: 'Power Outages 24h', state_class: 'measurement', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ value_json.system_power_outage_count_24h }}' },
+  { unique_id: 'ecoflow_system_telemetry_gap_count_24h', name: 'Telemetry Gaps 24h', state_class: 'measurement', icon: 'mdi:cloud-off-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_telemetry_gap_count_24h }}' },
+  { unique_id: 'ecoflow_system_outage_minutes_24h', name: 'System Outage Minutes 24h', state_class: 'measurement', unit_of_measurement: 'min', icon: 'mdi:timer-alert-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_total_minutes_24h }}' },
   // v0.84.0 — audible-delivery health. `audible_status` is reachable / UNREACHABLE
   // / disabled / unknown so an operator can alert on a dead audible channel (MA
   // down → speakers unavailable) that would otherwise be invisible; the paired
   // count shows how many configured speakers are currently reachable.
-  { unique_id: 'ecoflow_audible_channel_status', name: 'EcoFlow Audible Alarm Channel', icon: 'mdi:speaker-wireless', entity_category: 'diagnostic', value_template: '{{ value_json.audible_status }}' },
-  { unique_id: 'ecoflow_audible_speakers_reachable', name: 'EcoFlow Audible Speakers Reachable', state_class: 'measurement', icon: 'mdi:speaker-multiple', entity_category: 'diagnostic', value_template: '{{ value_json.audible_usable_speakers }}' },
+  { unique_id: 'ecoflow_audible_channel_status', name: 'Audible Alarm Channel', icon: 'mdi:speaker-wireless', entity_category: 'diagnostic', value_template: '{{ value_json.audible_status }}' },
+  { unique_id: 'ecoflow_audible_speakers_reachable', name: 'Audible Speakers Reachable', state_class: 'measurement', icon: 'mdi:speaker-multiple', entity_category: 'diagnostic', value_template: '{{ value_json.audible_usable_speakers }}' },
   // ─── HA Energy Dashboard — monotonic lifetime counters (v0.7.6) ──────────
   // state_class: total_increasing tells HA to treat decreases as resets and
   // accumulate the per-hour delta into long-term Energy statistics.
-  { unique_id: 'ecoflow_pv_lifetime_kwh', name: 'EcoFlow PV Production', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power', value_template: '{{ value_json.pv_lifetime_kwh }}' },
-  { unique_id: 'ecoflow_load_lifetime_kwh', name: 'EcoFlow Home Consumption', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:home-lightning-bolt', value_template: '{{ value_json.load_lifetime_kwh }}' },
+  { unique_id: 'ecoflow_pv_lifetime_kwh', name: 'PV Production', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:solar-power', value_template: '{{ value_json.pv_lifetime_kwh }}' },
+  { unique_id: 'ecoflow_load_lifetime_kwh', name: 'Home Consumption', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:home-lightning-bolt', value_template: '{{ value_json.load_lifetime_kwh }}' },
   // v0.44.0 — naming honesty for the HA Energy Dashboard "Grid consumption" slot.
   // `grid_import_lifetime_kwh` is DPU `ac_in` — grid energy that AC-CHARGES the
   // batteries — NOT whole-home grid import. On a solar-charged home it sits near
   // zero, so wiring it as grid consumption shows ~0 kWh. It's a diagnostic
   // sub-metric, renamed + demoted so it's no longer the obvious (wrong) pick.
-  { unique_id: 'ecoflow_grid_import_lifetime_kwh', name: 'EcoFlow Grid to Battery Charge', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-charging-outline', entity_category: 'diagnostic', value_template: '{{ value_json.grid_import_lifetime_kwh }}' },
+  { unique_id: 'ecoflow_grid_import_lifetime_kwh', name: 'Grid to Battery Charge', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-charging-outline', entity_category: 'diagnostic', value_template: '{{ value_json.grid_import_lifetime_kwh }}' },
   // `grid_to_home_lifetime_kwh` is the SHP2-main meter (wattInfo.gridWatt) — the
   // TRUE whole-home grid import. This is the sensor to wire into HA Energy →
   // Grid consumption. Named/iconed as the canonical "Grid Import" accordingly.
-  { unique_id: 'ecoflow_grid_to_home_lifetime_kwh', name: 'EcoFlow Grid Import (Home)', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.grid_to_home_lifetime_kwh }}' },
-  { unique_id: 'ecoflow_battery_charge_lifetime_kwh', name: 'EcoFlow Battery Energy In', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-charging', value_template: '{{ value_json.battery_charge_lifetime_kwh }}' },
-  { unique_id: 'ecoflow_battery_discharge_lifetime_kwh', name: 'EcoFlow Battery Energy Out', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-arrow-down', value_template: '{{ value_json.battery_discharge_lifetime_kwh }}' },
+  { unique_id: 'ecoflow_grid_to_home_lifetime_kwh', name: 'Grid Import (Home)', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', value_template: '{{ value_json.grid_to_home_lifetime_kwh }}' },
+  { unique_id: 'ecoflow_battery_charge_lifetime_kwh', name: 'Battery Energy In', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-charging', value_template: '{{ value_json.battery_charge_lifetime_kwh }}' },
+  { unique_id: 'ecoflow_battery_discharge_lifetime_kwh', name: 'Battery Energy Out', device_class: 'energy', state_class: 'total_increasing', unit_of_measurement: 'kWh', icon: 'mdi:battery-arrow-down', value_template: '{{ value_json.battery_discharge_lifetime_kwh }}' },
 
   // ─── v0.8.0 sustainability + tariff ──────────────────────────────────────
-  { unique_id: 'ecoflow_carbon_kg_avoided_7d', name: 'EcoFlow CO2 Avoided (7d)', state_class: 'measurement', unit_of_measurement: 'kg', icon: 'mdi:leaf', value_template: '{{ value_json.carbon_kg_avoided_7d }}' },
-  { unique_id: 'ecoflow_carbon_lifetime_kg', name: 'EcoFlow CO2 Avoided Lifetime', state_class: 'total_increasing', unit_of_measurement: 'kg', icon: 'mdi:leaf', value_template: '{{ value_json.carbon_lifetime_kg_avoided }}' },
-  { unique_id: 'ecoflow_carbon_lifetime_miles', name: 'EcoFlow Equivalent Miles Not Driven', state_class: 'total_increasing', unit_of_measurement: 'mi', icon: 'mdi:car-electric', value_template: '{{ value_json.carbon_lifetime_miles_not_driven }}' },
-  { unique_id: 'ecoflow_tariff_today_cost', name: 'EcoFlow Grid Cost Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash', value_template: '{{ value_json.tariff_today_grid_cost_dollars }}' },
-  { unique_id: 'ecoflow_tariff_today_saved', name: 'EcoFlow Solar Value Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-plus', value_template: '{{ value_json.tariff_today_solar_value_dollars }}' },
-  { unique_id: 'ecoflow_tariff_savings_7d', name: 'EcoFlow Net Savings (7d)', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-check', value_template: '{{ value_json.tariff_net_savings_7d_dollars }}' },
+  { unique_id: 'ecoflow_carbon_kg_avoided_7d', name: 'CO2 Avoided (7d)', state_class: 'measurement', unit_of_measurement: 'kg', icon: 'mdi:leaf', value_template: '{{ value_json.carbon_kg_avoided_7d }}' },
+  { unique_id: 'ecoflow_carbon_lifetime_kg', name: 'CO2 Avoided Lifetime', state_class: 'total_increasing', unit_of_measurement: 'kg', icon: 'mdi:leaf', value_template: '{{ value_json.carbon_lifetime_kg_avoided }}' },
+  { unique_id: 'ecoflow_carbon_lifetime_miles', name: 'Equivalent Miles Not Driven', state_class: 'total_increasing', unit_of_measurement: 'mi', icon: 'mdi:car-electric', value_template: '{{ value_json.carbon_lifetime_miles_not_driven }}' },
+  { unique_id: 'ecoflow_tariff_today_cost', name: 'Grid Cost Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash', value_template: '{{ value_json.tariff_today_grid_cost_dollars }}' },
+  { unique_id: 'ecoflow_tariff_today_saved', name: 'Solar Value Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-plus', value_template: '{{ value_json.tariff_today_solar_value_dollars }}' },
+  { unique_id: 'ecoflow_tariff_savings_7d', name: 'Net Savings (7d)', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-check', value_template: '{{ value_json.tariff_net_savings_7d_dollars }}' },
 
   // ─── v0.15.2 load-shedding advisory (read + advise; HA automations actuate) ─
   // The advisor recommends which allowlisted loads to shed when runway is low,
   // with an upper-bound counterfactual. Gate your HA automations on these:
   // e.g. "if load_shed_recommended ON for 5 min then turn off switch.pool_pump".
-  { unique_id: 'ecoflow_runway_to_reserve_if_shed_hours', name: 'EcoFlow Runway to Reserve (if shed)', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-sand-complete', value_template: '{{ value_json.runway_to_reserve_if_shed_hours }}' },
-  { unique_id: 'ecoflow_load_shed_recommended_count', name: 'EcoFlow Load-Shed Recommended Count', state_class: 'measurement', icon: 'mdi:power-plug-off', value_template: '{{ value_json.load_shed_recommended_count }}' },
-  { unique_id: 'ecoflow_load_shed_recommended_watts', name: 'EcoFlow Load-Shed Recommended Watts', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:power-plug-off-outline', value_template: '{{ value_json.load_shed_recommended_watts }}' },
+  { unique_id: 'ecoflow_runway_to_reserve_if_shed_hours', name: 'Runway to Reserve (if shed)', state_class: 'measurement', unit_of_measurement: 'h', icon: 'mdi:timer-sand-complete', value_template: '{{ value_json.runway_to_reserve_if_shed_hours }}' },
+  { unique_id: 'ecoflow_load_shed_recommended_count', name: 'Load-Shed Recommended Count', state_class: 'measurement', icon: 'mdi:power-plug-off', value_template: '{{ value_json.load_shed_recommended_count }}' },
+  { unique_id: 'ecoflow_load_shed_recommended_watts', name: 'Load-Shed Recommended Watts', device_class: 'power', state_class: 'measurement', unit_of_measurement: 'W', icon: 'mdi:power-plug-off-outline', value_template: '{{ value_json.load_shed_recommended_watts }}' },
 
   // ─── v1.38.0 night-charge TOU-arbitrage advisory (ADVISORY / no-write) ──────
   // The advisor sizes an optional cheap-overnight grid buy (APS R-EV 11pm–5am)
@@ -301,27 +301,27 @@ export const SENSORS: SensorConfig[] = [
   // separate, contention-derated PREDICTION of where the pack actually lands.
   // Keeping the ask on the existing entity means a wired automation keeps
   // asking for the requirement instead of silently capping itself at a forecast.
-  { unique_id: 'ecoflow_night_charge_target_soc', name: 'EcoFlow Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
-  { unique_id: 'ecoflow_night_charge_expected_soc', name: 'EcoFlow Night-Charge Expected SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
+  { unique_id: 'ecoflow_night_charge_target_soc', name: 'Night-Charge Target SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-charging-90', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_target_soc_percent }}' },
+  { unique_id: 'ecoflow_night_charge_expected_soc', name: 'Night-Charge Expected SoC', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-clock', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_expected_soc_percent }}' },
   // v1.42.0 — alarm-host SoC temperature (heat tripwire; HA recorder provides
   // the trend history). Null when the host exposes no readable thermal zone.
-  { unique_id: 'ecoflow_host_evloop_lag', name: 'EcoFlow Host Event-Loop Lag', state_class: 'measurement', unit_of_measurement: 'ms', icon: 'mdi:timer-sand', entity_category: 'diagnostic', value_template: '{{ value_json.host_evloop_lag_ms }}' },
-  { unique_id: 'ecoflow_host_mem_available', name: 'EcoFlow Host Memory Available', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:memory', entity_category: 'diagnostic', value_template: '{{ value_json.host_mem_available_mb }}' },
-  { unique_id: 'ecoflow_host_disk_free', name: 'EcoFlow Host Data Disk Free', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:harddisk', entity_category: 'diagnostic', value_template: '{{ value_json.host_data_disk_free_mb }}' },
-  { unique_id: 'ecoflow_host_load_1m', name: 'EcoFlow Host Load (1m)', state_class: 'measurement', icon: 'mdi:chip', entity_category: 'diagnostic', value_template: '{{ value_json.host_load_1m }}' },
-  { unique_id: 'ecoflow_host_soc_temp', name: 'EcoFlow Host SoC Temperature', device_class: 'temperature', state_class: 'measurement', unit_of_measurement: '°C', entity_category: 'diagnostic', value_template: '{{ value_json.host_soc_temp_c }}' },
-  { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'EcoFlow Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
-  { unique_id: 'ecoflow_night_charge_readiness', name: 'EcoFlow Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
-  { unique_id: 'ecoflow_night_charge_window_start', name: 'EcoFlow Night-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_start }}' },
-  { unique_id: 'ecoflow_night_charge_window_end', name: 'EcoFlow Night-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_end }}' },
+  { unique_id: 'ecoflow_host_evloop_lag', name: 'Host Event-Loop Lag', state_class: 'measurement', unit_of_measurement: 'ms', icon: 'mdi:timer-sand', entity_category: 'diagnostic', value_template: '{{ value_json.host_evloop_lag_ms }}' },
+  { unique_id: 'ecoflow_host_mem_available', name: 'Host Memory Available', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:memory', entity_category: 'diagnostic', value_template: '{{ value_json.host_mem_available_mb }}' },
+  { unique_id: 'ecoflow_host_disk_free', name: 'Host Data Disk Free', state_class: 'measurement', unit_of_measurement: 'MB', icon: 'mdi:harddisk', entity_category: 'diagnostic', value_template: '{{ value_json.host_data_disk_free_mb }}' },
+  { unique_id: 'ecoflow_host_load_1m', name: 'Host Load (1m)', state_class: 'measurement', icon: 'mdi:chip', entity_category: 'diagnostic', value_template: '{{ value_json.host_load_1m }}' },
+  { unique_id: 'ecoflow_host_soc_temp', name: 'Host SoC Temperature', device_class: 'temperature', state_class: 'measurement', unit_of_measurement: '°C', entity_category: 'diagnostic', value_template: '{{ value_json.host_soc_temp_c }}' },
+  { unique_id: 'ecoflow_night_charge_buy_kwh', name: 'Night-Charge Buy', state_class: 'measurement', unit_of_measurement: 'kWh', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_buy_kwh }}' },
+  { unique_id: 'ecoflow_night_charge_readiness', name: 'Night-Charge Readiness', icon: 'mdi:clipboard-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_readiness }}' },
+  { unique_id: 'ecoflow_night_charge_window_start', name: 'Night-Charge Window Start', icon: 'mdi:clock-start', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_start }}' },
+  { unique_id: 'ecoflow_night_charge_window_end', name: 'Night-Charge Window End', icon: 'mdi:clock-end', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ value_json.night_charge_window_end }}' },
 
   // ─── v0.15.19 lighting energy posture (publish-only; HA automations actuate) ─
   // One runway-derived enum (surplus|normal|conserve|amber|red|critical) the
   // home's lighting keys off. Escalation is immediate; de-escalation holds
   // 15 min (lightingPosture.ts). Gate consumers in HA behind
   // input_boolean.lighting_postures_enabled — the add-on never toggles a light.
-  { unique_id: 'ecoflow_lighting_posture', name: 'EcoFlow Lighting Posture', icon: 'mdi:lightbulb-auto', value_template: '{{ value_json.lighting_posture }}' },
-  { unique_id: 'ecoflow_lighting_posture_reason', name: 'EcoFlow Lighting Posture Reason', icon: 'mdi:information-outline', entity_category: 'diagnostic', value_template: '{{ value_json.lighting_posture_reason }}' },
+  { unique_id: 'ecoflow_lighting_posture', name: 'Lighting Posture', icon: 'mdi:lightbulb-auto', value_template: '{{ value_json.lighting_posture }}' },
+  { unique_id: 'ecoflow_lighting_posture_reason', name: 'Lighting Posture Reason', icon: 'mdi:information-outline', entity_category: 'diagnostic', value_template: '{{ value_json.lighting_posture_reason }}' },
   // ─── v0.89.0 — SHP2 operating-mode / reserve strategy (diagnostic; publish-only) ──
   // Surface the SHP2's OWN strategy config + grid-line flag as read-only HA
   // diagnostics so an operator/automation can see the backup posture, reserve floor,
@@ -334,17 +334,17 @@ export const SENSORS: SensorConfig[] = [
   // fabricated labels. Numeric-null fields emit null → HA 'unknown' when the SHP2 is
   // cloud-offline (by design, never substitute 0). Use /api/debug/raw?sn=<SHP2> to
   // field-research the codes against the EcoFlow app.
-  { unique_id: 'ecoflow_shp2_grid_sta', name: 'EcoFlow SHP2 Grid Status', icon: 'mdi:transmission-tower', entity_category: 'diagnostic', value_template: '{{ value_json.shp2_grid_status }}' },
-  { unique_id: 'ecoflow_backup_reserve_percent', name: 'EcoFlow Backup Reserve Floor', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-lock', entity_category: 'diagnostic', value_template: '{{ value_json.backup_reserve_percent }}' },
-  { unique_id: 'ecoflow_solar_backup_reserve_percent', name: 'EcoFlow Solar Backup Reserve', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power-variant', entity_category: 'diagnostic', value_template: '{{ value_json.solar_backup_reserve_percent }}' },
+  { unique_id: 'ecoflow_shp2_grid_sta', name: 'SHP2 Grid Status', icon: 'mdi:transmission-tower', entity_category: 'diagnostic', value_template: '{{ value_json.shp2_grid_status }}' },
+  { unique_id: 'ecoflow_backup_reserve_percent', name: 'Backup Reserve Floor', device_class: 'battery', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:battery-lock', entity_category: 'diagnostic', value_template: '{{ value_json.backup_reserve_percent }}' },
+  { unique_id: 'ecoflow_solar_backup_reserve_percent', name: 'Solar Backup Reserve', state_class: 'measurement', unit_of_measurement: '%', icon: 'mdi:solar-power-variant', entity_category: 'diagnostic', value_template: '{{ value_json.solar_backup_reserve_percent }}' },
   // v1.3.0 (audit rank 13) — the old template `{{ "ON" if ... else "OFF" }}` collapsed a
   // NULL (SHP2 cloud-offline → no strategy object) into "OFF": it asserted that the backup
   // reserve floor is DISABLED at exactly the moment we cannot see it. A data gap must read
   // `unknown`, never a fabricated safety-off. Matches the null-safe neighbours above.
-  { unique_id: 'ecoflow_backup_reserve_enabled', name: 'EcoFlow Backup Reserve Enabled', icon: 'mdi:battery-lock-open', entity_category: 'diagnostic', value_template: '{{ "unknown" if value_json.backup_reserve_enabled is none else ("ON" if value_json.backup_reserve_enabled else "OFF") }}' },
-  { unique_id: 'ecoflow_smart_backup_mode_code', name: 'EcoFlow Smart Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery', entity_category: 'diagnostic', value_template: '{{ value_json.smart_backup_mode_code }}' },
-  { unique_id: 'ecoflow_backup_mode_code', name: 'EcoFlow Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery-outline', entity_category: 'diagnostic', value_template: '{{ value_json.backup_mode_code }}' },
-  { unique_id: 'ecoflow_overload_mode_code', name: 'EcoFlow Overload Mode (code)', state_class: 'measurement', icon: 'mdi:flash-alert', entity_category: 'diagnostic', value_template: '{{ value_json.overload_mode_code }}' },
+  { unique_id: 'ecoflow_backup_reserve_enabled', name: 'Backup Reserve Enabled', icon: 'mdi:battery-lock-open', entity_category: 'diagnostic', value_template: '{{ "unknown" if value_json.backup_reserve_enabled is none else ("ON" if value_json.backup_reserve_enabled else "OFF") }}' },
+  { unique_id: 'ecoflow_smart_backup_mode_code', name: 'Smart Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery', entity_category: 'diagnostic', value_template: '{{ value_json.smart_backup_mode_code }}' },
+  { unique_id: 'ecoflow_backup_mode_code', name: 'Backup Mode (code)', state_class: 'measurement', icon: 'mdi:home-battery-outline', entity_category: 'diagnostic', value_template: '{{ value_json.backup_mode_code }}' },
+  { unique_id: 'ecoflow_overload_mode_code', name: 'Overload Mode (code)', state_class: 'measurement', icon: 'mdi:flash-alert', entity_category: 'diagnostic', value_template: '{{ value_json.overload_mode_code }}' },
 ];
 
 export interface BinarySensorConfig {
@@ -363,22 +363,22 @@ export const BINARY_SENSORS: BinarySensorConfig[] = [
   // v0.40.0 — no device_class: 'connectivity' here. That class means ON=connected, which
   // INVERTS this sensor's meaning (off_grid=true → ON would read as "connected"). A plain
   // binary sensor keeps ON=off-grid unambiguous; the tower-off icon conveys state.
-  { unique_id: 'ecoflow_off_grid', name: 'EcoFlow Off-Grid', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
+  { unique_id: 'ecoflow_off_grid', name: 'Off-Grid', icon: 'mdi:transmission-tower-off', value_template: '{{ "ON" if value_json.off_grid else "OFF" }}' },
   // v0.89.0 — the SHP2's OWN direct grid-line flag (pd303_mc.masterIncreInfo.gridSta=Grid OK,
   // online-gated). ON=grid connected. Unlike off_grid (which can flip during the SHP2's
   // between-burst gaps when measured flow momentarily reads 0), this stays ON through the
   // gaps and drops the instant the utility is lost. `unknown` (no template value) when the
   // SHP2 is cloud-offline or the field is absent — do NOT infer a grid state from unknown.
-  { unique_id: 'ecoflow_shp2_grid_connected', name: 'EcoFlow SHP2 Grid Connected', icon: 'mdi:transmission-tower', value_template: '{{ value_json.shp2_grid_connected }}' },
+  { unique_id: 'ecoflow_shp2_grid_connected', name: 'SHP2 Grid Connected', icon: 'mdi:transmission-tower', value_template: '{{ value_json.shp2_grid_connected }}' },
   // v0.59.0 — ON when the runway / projected-low-SoC numbers only apply to the
   // ISLANDED case (the grid is actively backstopping the load now). Gate HA
   // "runway < threshold" automations on this so a 0% / low-hour projection during
   // a grid-tied cycle isn't treated as an imminent-depletion emergency.
-  { unique_id: 'ecoflow_runway_projection_islanded_only', name: 'EcoFlow Runway Projection Islanded-Only', icon: 'mdi:transmission-tower-import', value_template: '{{ "ON" if value_json.runway_projection_islanded_only else "OFF" }}' },
+  { unique_id: 'ecoflow_runway_projection_islanded_only', name: 'Runway Projection Islanded-Only', icon: 'mdi:transmission-tower-import', value_template: '{{ "ON" if value_json.runway_projection_islanded_only else "OFF" }}' },
   // v0.69.0 — companion to the runway flag, scoped to the Projected Low SoC sensor:
   // ON when that 0%/low projection only applies to the islanded case (grid backstopping
   // now). Gate HA `projected_low_soc < N` automations on this to drop grid-tied false alarms.
-  { unique_id: 'ecoflow_projected_low_soc_islanded_only', name: 'EcoFlow Projected Low SoC Islanded-Only', icon: 'mdi:battery-alert-variant-outline', value_template: '{{ "ON" if value_json.projected_low_soc_islanded_only else "OFF" }}' },
+  { unique_id: 'ecoflow_projected_low_soc_islanded_only', name: 'Projected Low SoC Islanded-Only', icon: 'mdi:battery-alert-variant-outline', value_template: '{{ "ON" if value_json.projected_low_soc_islanded_only else "OFF" }}' },
   // v0.9.77 — fires when the system is actively curtailing PV (batteries
   // full + home load < expected PV). HA can trigger automations off this
   // — e.g. "if curtailing for 10 min then turn pool pump on full speed."
@@ -387,11 +387,11 @@ export const BINARY_SENSORS: BinarySensorConfig[] = [
   // means "we are curtailing", not "power is present". It also relabels the state text. The
   // sibling advisory flags above (islanded-only) correctly carry no device_class; the icon
   // conveys meaning. Same for load-shed below.
-  { unique_id: 'ecoflow_pv_curtailment_active', name: 'EcoFlow PV Curtailment Active', icon: 'mdi:solar-power-variant', value_template: '{{ "ON" if value_json.pv_curtailment_active else "OFF" }}' },
+  { unique_id: 'ecoflow_pv_curtailment_active', name: 'PV Curtailment Active', icon: 'mdi:solar-power-variant', value_template: '{{ "ON" if value_json.pv_curtailment_active else "OFF" }}' },
   // v0.15.2 — ON when the load-shed advisor recommends shedding ≥1 load to
   // extend runway. The operator's HA automations actuate off this (advisory
   // model); the add-on never toggles a load itself.
-  { unique_id: 'ecoflow_load_shed_recommended', name: 'EcoFlow Load Shed Recommended', icon: 'mdi:power-plug-off', value_template: '{{ "ON" if value_json.load_shed_recommended else "OFF" }}' },
+  { unique_id: 'ecoflow_load_shed_recommended', name: 'Load Shed Recommended', icon: 'mdi:power-plug-off', value_template: '{{ "ON" if value_json.load_shed_recommended else "OFF" }}' },
   // ─── v1.38.0 night-charge advisory (ADVISORY / no-write) ────────────────────
   // ON when tonight's advisor recommends a cheap-overnight grid buy. CLONE of
   // ecoflow_load_shed_recommended: NO device_class (ON here means "charge is
@@ -401,19 +401,19 @@ export const BINARY_SENSORS: BinarySensorConfig[] = [
   // night_charge_write_ready + the window_start/_end sensors, never on this alone.
   // Long expire_after (I12) so a dead advisor's retained ON is marked UNAVAILABLE,
   // never trusted as a live ON.
-  { unique_id: 'ecoflow_night_charge_recommended', name: 'EcoFlow Night-Charge Recommended', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.charge_tonight else "OFF" }}' },
+  { unique_id: 'ecoflow_night_charge_recommended', name: 'Night-Charge Recommended', icon: 'mdi:transmission-tower-import', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.charge_tonight else "OFF" }}' },
   // Write-readiness gate (§5). FAIL-CLOSED: nightChargeGateFields emits this
   // strictly false on a null readiness (never null-as-true) and always emits the
   // key, so a data gap reads OFF, not a stale retained ON. NO device_class.
-  { unique_id: 'ecoflow_night_charge_write_ready', name: 'EcoFlow Night-Charge Write Ready', icon: 'mdi:shield-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.night_charge_write_ready else "OFF" }}' },
+  { unique_id: 'ecoflow_night_charge_write_ready', name: 'Night-Charge Write Ready', icon: 'mdi:shield-check-outline', entity_category: 'diagnostic', expire_after: NIGHT_CHARGE_EXPIRE_AFTER_S, value_template: '{{ "ON" if value_json.night_charge_write_ready else "OFF" }}' },
   // v0.69.0 — ON when a SHP2-wired home core's own telemetry is missing from the
   // self-consumption integral (cloud-offline / projection-less), so solar_fraction /
   // direct-use undercount. Diagnostic: discount those KPIs while this reads ON.
-  { unique_id: 'ecoflow_self_consumption_coverage_partial', name: 'EcoFlow Self-Consumption Coverage Partial', icon: 'mdi:gauge-low', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.self_consumption_coverage_partial else "OFF" }}' },
+  { unique_id: 'ecoflow_self_consumption_coverage_partial', name: 'Self-Consumption Coverage Partial', icon: 'mdi:gauge-low', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.self_consumption_coverage_partial else "OFF" }}' },
   // v0.77.0 — forecast built on an incomplete basis (cold history / no SoC basis while the SHP2 or home Cores are cloud-offline).
   // No device_class (matches the coverage_partial sibling): a plain diagnostic on/off, not a HA "problem" indicator that would sit
   // persistently red during a Core cloud-wedge. The point is operator-visibility of a degraded forecast basis, not an alarm.
-  { unique_id: 'ecoflow_forecast_basis_incomplete', name: 'EcoFlow Forecast Basis Incomplete', icon: 'mdi:cloud-question', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.forecast_structurally_incomplete else "OFF" }}' },
+  { unique_id: 'ecoflow_forecast_basis_incomplete', name: 'Forecast Basis Incomplete', icon: 'mdi:cloud-question', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.forecast_structurally_incomplete else "OFF" }}' },
 ];
 
 /**
@@ -523,7 +523,7 @@ export function planCircuitDiscovery(
       topic: `${prefix}/sensor/${uniqueId}/config`,
       cfg: {
         unique_id: uniqueId,
-        name: `EcoFlow ${display.get(c.ch)} Energy`,
+        name: `${display.get(c.ch)} Energy`,
         state_topic: STATE_TOPIC,
         ...AVAILABILITY_BASE,
         device_class: 'energy',
