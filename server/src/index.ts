@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -724,8 +724,15 @@ let lastKnownRoster: Set<string> = (() => {
     return new Set<string>();
   }
 })();
+// Seed the shared publisher from the persisted fingerprint so the roster is known
+// from the very first tick, before any live projection has hydrated.
+setLastKnownHomeRoster(lastKnownRoster);
 export function noteLiveRoster(roster: ReadonlySet<string>): void {
   if (roster.size > 0) lastKnownRoster = new Set(roster);
+  // v1.121.0 — publish it to the membership module so the OTHER consumers of the
+  // stale SPARE_DPU_SNS literal (the offline-spare mute and homeCoreCoverage's
+  // SHP2-blind fallback) share the same durable answer isHomePoolDpu already had.
+  setLastKnownHomeRoster(lastKnownRoster);
 }
 export function getLastKnownRoster(): ReadonlySet<string> {
   return lastKnownRoster;
@@ -2751,7 +2758,14 @@ const rateFloorTick = setInterval(() => {
     // If a prior rebuild's retry chain is still running (stopMqtt === null), a
     // duplicate chain is benign: whichever connects first wins, the loser sees
     // stopMqtt set and returns.
-    const healVerdict = evaluateSelfHeal(now, collapses.length, selfHealState, DEFAULT_SELF_HEAL_CONFIG);
+    // v1.121.0 — the SHP2 alone satisfies the quorum (see evaluateSelfHeal): it is
+    // the alarm chain's single-point-critical input, so a wedge confined to it must
+    // be able to start the heal clock. Dwell/cooldown/budget are unchanged.
+    const shp2SnNow = findShp2(devices)?.sn ?? null;
+    const alarmCriticalStarved = shp2SnNow != null && collapses.some((c) => c.sn === shp2SnNow);
+    const healVerdict = evaluateSelfHeal(
+      now, collapses.length, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },
+    );
     // v1.78.0 — the daily-cap stand-down was computed and DISCARDED: on 08-14
     // the cap emptied at 04:44 with recovery 27 min later, and nothing in the
     // log said the healer had stood down. Log it once per capped day.

@@ -2,7 +2,7 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection, DpuProjection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { FleetDegradation, SoilingDecomposition, EquipmentHealth, ForecastSkillReport } from './analytics.js';
-import { SPARE_DPU_SNS } from './shp2Membership.js';
+import { isBenchSpareSn } from './shp2Membership.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
@@ -122,8 +122,10 @@ export function computeRepairIssues(ctx: RepairContext): RepairIssuesReport {
   // Cloud-offline devices (EcoFlow Cloud says offline) — actionable as a reconnect/power-cycle.
   for (const d of Object.values(ctx.devices)) {
     if (!d.online) {
-      // v0.10.4 — skip intentionally-offline bench spares (Core4, Core5).
-      if (SPARE_DPU_SNS.has(d.sn)) continue;
+      // v0.10.4 — skip intentionally-offline bench spares.
+      // v1.121.0 — roster-aware: the literal has been inverted since the 08-20
+      // swap, so a live pool member (Core 5) was having its repair card skipped.
+      if (isBenchSpareSn(d.sn)) continue;
       const id = `cloud-offline-${d.sn}`;
       // v0.76.0 — severity must match the alert engine for the SAME offline event:
       // Cores + the SHP2 are 'warning'; peripherals (Smart Generator, WAVE 2, EVSE)
