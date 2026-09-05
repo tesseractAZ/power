@@ -59,9 +59,6 @@ export function nightChargePlanIfFresh(
  * a read-through — always reflecting the freshest plan and never holding a
  * leaked timer. Fail-safe: stale / incomplete / absent → null (grey line).
  */
-export function nightChargePlan(nowMs: number = Date.now()): NightChargePlan | null {
-  return nightChargePlanIfFresh(getLatestNightChargePlan(), nowMs);
-}
 
 export interface CreateTuiDataProviderOptions {
   store: SnapshotStore;

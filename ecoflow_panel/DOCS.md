@@ -4698,7 +4698,7 @@ snapshot.devices ─► evaluateInner() (alertMonitor.ts) ├── forecastDayA
                                        │
                                        ├─► store.setAlerts()   → snapshot.alerts → /api/snapshot, WS
                                        ├─► buildIncidents()     → /api/incidents
-                                       ├─► rising/falling edges → notify.ts (ntfy/Pushover/webhook/HA) + digest
+                                       ├─► rising/falling edges → notify.ts (HA drawer + mobile_app push) + digest
                                        ├─► telemetry rollups     → /api/alert-telemetry (drives auto-silence)
                                        ├─► featureSnapshot capture → learning loop
                                        └─► cleared log            → /api/alerts/history
@@ -5038,23 +5038,44 @@ The `AlertMonitor` handle exposes `incidents()`, `telemetry()`, `history()`, `st
 
 ### 5. Notification delivery, dedupe, digest — `notify.ts`
 
-**Channels** (`NOTIFY_CHANNEL`, default `none`): `ntfy`, `pushover`, `webhook`, `ha`, `none`. `isConfigured()` checks the channel's required creds; `ha` requires `SUPERVISOR_TOKEN`.
+**Channels** (`NOTIFY_CHANNEL`, default `none`): `ha` or `none`. Home Assistant owns the
+delivery; the add-on does not run a second push stack. A stored value from before
+v1.124.0 (`ntfy` / `pushover` / `webhook`) fails **safe to `none`** rather than pretending
+to deliver.
+
+The `ha` channel does two things:
+
+1. **`persistent_notification`** — the durable drawer card, one per active condition,
+   dismissed when the condition clears.
+2. **`notify.mobile_app_*`** — the actual phone push, to every service listed in
+   `NOTIFY_HA_PUSH_TARGETS`. **With no targets there is no push at all** — only the
+   drawer card, which the companion app shows when you open it: no lock-screen alert and
+   no sound. `isConfigured()` answers "can we dispatch"; `reachesAPhone()` answers "does
+   anything actually arrive", and they are deliberately separate questions.
 
 **Config** (`loadNotifyConfig`):
 
 | Env | Field | Default |
 |-----|-------|---------|
-| `NOTIFY_CHANNEL` | channel | `none` |
+| `NOTIFY_CHANNEL` | channel (`ha` \| `none`) | `none` |
 | `NOTIFY_MIN_SEVERITY` | minSeverity (`warning`=warn+crit, `critical`=crit only) | `warning` |
 | `NOTIFY_RESOLVED` | notifyResolved (`!= '0'`) | true |
-| `NOTIFY_NTFY_SERVER` / `NOTIFY_NTFY_TOPIC` | ntfy | `https://ntfy.sh` / `''` |
-| `NOTIFY_PUSHOVER_TOKEN` / `NOTIFY_PUSHOVER_USER` | pushover | `''` |
-| `NOTIFY_WEBHOOK_URL` | webhook | `''` |
+| `NOTIFY_HA_PUSH_TARGETS` | pushTargets (comma-separated, `notify.` prefix optional) | `''` |
+| `NOTIFY_CRITICAL_BYPASS_DND` | criticalBypassDnd (`!= '0'`) | true |
 
-**Severity → channel priority maps:**
+**Critical alerts break Do Not Disturb.** `buildMobilePushPayload` emits one payload that
+serves both platforms, since each ignores the other's keys:
 
-- ntfy `Priority` header: critical `5`, warning `4`, info `3`, resolved `2`; `Tags`: `rotating_light`/`warning`/`information_source`/`white_check_mark`.
-- Pushover `priority`: critical `1`, warning `0`, info `-1`, resolved `-1`.
+| Platform | Keys |
+|---|---|
+| iOS | `data.push.sound = { name: 'default', critical: 1, volume: 1.0 }` |
+| Android | `data.ttl: 0`, `data.priority: 'high'`, `data.channel: 'alarm_stream'` |
+
+Only `critical` gets it, and only while `NOTIFY_CRITICAL_BYPASS_DND` is on; with the
+bypass off a critical still goes out promptly (`ttl 0`, `priority high`) but respects the
+phone's settings. Warnings and advisories are always ordinary pushes — a warning that
+behaves like an emergency teaches the owner to silence the channel that carries the
+emergencies.
 
 **Dedupe.** `NotifyMessage.dedupId` (= `notifyDedupId(alert)` = the alert id) drives per-subject card identity for the HA channel. `haNotificationId(dedupId, severity)` slugs the dedupId to `[a-z0-9_]` (≤96 chars, prefixed `ecoflow_panel_`); without a dedupId it falls back to the legacy per-severity id. `haNotifyCall(msg)`: a "Resolved:" with a dedupId issues `persistent_notification.dismiss` (drawer shows ACTIVE conditions only); a fire issues `create`. The title carries the ISA bracket and a device locator (`notifyLocator`), e.g. `EcoFlow · [Medium] Pack nearly empty — Core 3 pack 1`. The morning digest, the manual test push, and the `digest`/`test` cards each get distinct dedupIds so they never overwrite each other.
 
@@ -6943,14 +6964,11 @@ trailing `?` marks the field optional. Defaults are the values in the `options:`
 
 | Option / Env | Default | Schema | Purpose |
 |--------------|---------|--------|---------|
-| `NOTIFY_CHANNEL` | `none` | `list(none\|ntfy\|pushover\|webhook\|ha)` | Per-alert push channel. |
+| `NOTIFY_CHANNEL` | `none` | `list(none\|ha)` | Home Assistant notifications on/off. |
 | `NOTIFY_MIN_SEVERITY` | `warning` | `list(warning\|critical)` | Minimum severity that triggers a push. |
 | `NOTIFY_RESOLVED` | `true` | `bool` (→ `1`/`0`) | Also send a push when an alert clears. |
-| `NOTIFY_NTFY_SERVER` | `https://ntfy.sh` | `str?` | ntfy server base. **`str?` not `url?` on purpose** — HA's `url?` rejects an empty default at Save; the runtime validates at send time. Do not "tidy" to `url?`. |
-| `NOTIFY_NTFY_TOPIC` | `""` | `str?` | ntfy topic. |
-| `NOTIFY_PUSHOVER_TOKEN` | `""` | `password?` | Pushover application token. |
-| `NOTIFY_PUSHOVER_USER` | `""` | `password?` | Pushover user/group key. |
-| `NOTIFY_WEBHOOK_URL` | `""` | `str?` | Generic webhook URL (same `str?` rationale as ntfy). |
+| `NOTIFY_HA_PUSH_TARGETS` | `""` | `str?` | HA notify services that receive the push, e.g. `notify.mobile_app_iphone`, or `notify.notify` for every registered device. Empty = drawer card only, no push. |
+| `NOTIFY_CRITICAL_BYPASS_DND` | `true` | `bool` (→ `1`/`0`) | Critical alerts carry the companion app's critical payload and sound through Do Not Disturb. Warnings never do. |
 | `NOTIFY_QUIET_HOURS` | `"22-06"` | `str?` | Quiet window `HH-HH`; pushes gated to the digest (see below). |
 | `NOTIFY_DIGEST_HOUR` | `7` | `int(0,23)?` | Hour the morning digest of quiet-hours-suppressed alerts is sent. |
 
@@ -8718,7 +8736,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Quiet hours + morning digest | `NOTIFY_QUIET_HOURS` (default `22-06`), `CRITICAL_BREAKS_QUIET_HOURS` (default false), digest at `NOTIFY_DIGEST_HOUR = 7` (§8.4.2) | Wall clock | notify queue | measured-and-active |
 | Incident clustering | `buildIncidents(alerts)` correlation grouping (§8.4.3) | Live alerts | `/api/incidents`, insights cards | measured-and-active |
 | Cooldown auto-silence | Churn detection → temporary silence (§8.4.4) | Fire history | Monitor | measured-and-active |
-| Notification delivery | ntfy/Pushover/webhook/HA channels, dedupe, digest (§8.5) | Monitor decisions | Operator push | measured-and-active |
+| Notification delivery | HA drawer card + `notify.mobile_app_*` push, dedupe, digest (§8.5) | Monitor decisions | Operator push | measured-and-active |
 | Feature snapshots | `featureSnapshot.ts` captures LR feature vector once per rise (§8.6, §9.1) | degradation/thermal/IR/chargeCurve reports | Outcome→LR training join | measured-and-active (scaffolding for the gated loop) |
 | Outcome capture | `POST /api/alerts/outcome` labels + family precision rollups (§8.6, §9.2) | Operator button presses (web dashboard) | LR update, `/api/alerts/outcomes/stats` | measured-and-active |
 | Online LR (SGD) | `updateFromOutcome` shadow-only step + prequential loss (§9.3) | Snapshots + labels | Shadow model → pack-risk v2 gate | data-gated (gate floor 100 samples; no promotion path by design) |
@@ -9295,9 +9313,13 @@ decision, and until it is made, fail-closed with an honest label is the correct
 posture.
 
 Also corrected: the Notify Channel description implied `ha` delivers a phone push. It
-does not — `persistent_notification.create` creates a card in the HA drawer with no
-OS alert and no sound. The description now says so and points at ntfy / pushover /
-webhook, which do.
+did not — `persistent_notification.create` creates a card in the HA drawer with no OS
+alert and no sound.
+
+> **Superseded by §13 (v1.124.0).** That release made the `ha` channel deliver a real
+> push via `notify.mobile_app_*`, so the claim this section corrected is true again —
+> but only when `NOTIFY_HA_PUSH_TARGETS` names at least one service. The ntfy /
+> Pushover / webhook channels this section pointed at no longer exist.
 
 ### 13. Notifications are Home-Assistant-native (v1.124.0)
 

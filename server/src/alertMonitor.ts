@@ -1431,7 +1431,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // UI — we silence the annunciation, never hide an active alarm).
     if (!isPriorityEnabled(priorityOf(alert))) return 'suppressed';
     // v0.9.3 warning→info demotion — alert still notifies but at info priority
-    // (no [CRITICAL] prefix, lower ntfy priority). The decision applies only
+    // (no [CRITICAL] prefix, no DND-bypass payload). The decision applies only
     // to new alerts, not resolved-cleared notifications.
     const effectiveSeverity: Severity =
       t?.warningDemotedToInfo && alert.severity === 'warning' && kind === 'new'
@@ -1441,7 +1441,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // for ALL priorities (e.g. "[Critical] …", "[High] …", "[Medium] …",
     // "[Low] …"), replacing the old critical-only "[CRITICAL] " prefix. This is
     // purely presentational — the NotifyMessage.severity passed onward below
-    // stays critical/warning/info so the ntfy/Pushover priority maps are
+    // stays critical/warning/info so the notify severity mapping is
     // unchanged. Priority is derived from the EFFECTIVE severity (so a
     // warning→info auto-demotion shows "[Low]").
     // v0.74.0 — append a device locator so the same condition on different

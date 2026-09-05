@@ -1,3 +1,38 @@
+## v1.126.0 — dead code removed, documentation caught up
+
+Housekeeping after the v1.120–v1.125 run.
+
+**Dead code.** A fresh unused-export sweep over `server/src` found 8 exports of
+1,212 referenced nowhere — including in tests and `scripts/`. Seven were removed;
+`saveModel` was kept because `scripts/train-pack-risk.ts` uses it, which the first
+pass missed by scanning only `src` and `test`. Re-scan: **0 unreferenced of 1,205.**
+
+- `ALARM_RUNG_ORDER` (alertPriority) — derived constant nothing read.
+- `offsetAdoptedAtMs` (clockOffset) — observability accessor with no consumer.
+- `__resetHaStateCache`, `resetPollState` — test seams no test used.
+- `getLastKnownRoster` (index) — superseded by the v1.121.0 membership publisher.
+- `getLastKnownHomeRoster` (shp2Membership) — added in v1.121.0 and never called;
+  dead on arrival. Its `set`/`reset` siblings are used and stay.
+- `nightChargePlan` (telnet/dataProvider) — a thin wrapper over
+  `nightChargePlanIfFresh`, which is the one actually used.
+
+**Documentation.** DOCS.md still described the ntfy / Pushover / webhook channels
+that v1.124.0 deleted — including a config table listing five options that no longer
+exist and a severity→priority map for transports that are gone. Rewritten to describe
+what actually ships: the HA drawer card, the `notify.mobile_app_*` push, and the
+critical-only Do-Not-Disturb payload. The v1.123.0 section that told the reader `ha`
+cannot reach a phone now carries a superseded-by marker rather than standing as a
+contradiction. README gained the notification model and the re-scoped outage cushion.
+Stale comments in `alertMonitor.ts` and `alertPriority.ts` referring to the deleted
+priority maps were corrected.
+
+Not touched: `dead-code-inventory-2026-07-27.md` and
+`night-charge-write-path-proposal-2026-07-31.md` at the repo root are matched by
+`.gitignore` (`/*-inventory-*.md`, `/*-proposal-*.md`) and are deliberately local
+working documents, not repository content.
+
+No behaviour change. Suite 2263/2263.
+
 ## v1.119.3 — seven advisories, one of them shipping in the image
 
 GitHub raised 7 Dependabot advisories on main (6 high, 1 low). One class is

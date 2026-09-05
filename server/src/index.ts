@@ -736,9 +736,6 @@ export function noteLiveRoster(roster: ReadonlySet<string>): void {
   // SHP2-blind fallback) share the same durable answer isHomePoolDpu already had.
   setLastKnownHomeRoster(lastKnownRoster);
 }
-export function getLastKnownRoster(): ReadonlySet<string> {
-  return lastKnownRoster;
-}
 
 function membershipStableOnDay(day: string): boolean {
   try {

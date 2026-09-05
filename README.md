@@ -72,9 +72,13 @@ time-of-use rate.
   (`NIGHT_CHARGE_MODE: advisory | supervised | auto`, default advisory — never
   writes): on a night a shortfall is anticipated, it sizes "buy N kWh → charge
   to X% in the cheap overnight window" so the pack holds `reserve + outage
-  cushion` to the next cheap window — worst-case sized (P10 solar / P90 load),
-  with the charge cap modeled as charge-only (the home rides grid bypass while
-  the charger runs). **Supervised mode** performs one announced, cancellable,
+  cushion` — worst-case sized (P10 solar / P90 load), with the charge cap modeled
+  as charge-only (the home rides grid bypass while the charger runs). The **outage
+  cushion is the energy to carry the *islanded* load** — the Smart Home Panel's own
+  backup circuits, which are what actually run when the grid drops — for a bounded
+  outage (`ARB_OUTAGE_CUSHION_HOURS`, default 4). Sizing it against whole-house
+  consumption instead described an island the hardware cannot create, and made the
+  requirement permanently unsatisfiable. **Supervised mode** performs one announced, cancellable,
   bounded reserve write per charge night (clamped to the device's 10–50% range,
   armed only after an announcement channel confirms delivery, auto-reverted
   after the window, audit-logged). It **learns from night one**: a durable
@@ -89,8 +93,16 @@ time-of-use rate.
 - Threshold + four families of **learned** alerts (peer-comparison, self-baseline,
   degradation/runtime forecast, solar/load forecast), an alert **monitor**
   (transition debounce, incident clustering, churn auto-silence, quiet hours),
-  HA notifications with dedupe + morning digest, a **repair-issues** feed, and an
-  **online learning loop** (feature snapshots → realized outcomes → shadow models).
+  a **repair-issues** feed, and an **online learning loop** (feature snapshots →
+  realized outcomes → shadow models).
+- **Notifications are Home-Assistant-native.** Every alert becomes a card in the HA
+  notification drawer (dedupe + morning digest, dismissed when the condition clears)
+  and, for each service named in `NOTIFY_HA_PUSH_TARGETS`, a real push to the
+  companion app. **Critical alerts — and only critical ones — carry the companion
+  app's documented critical payload**, so a genuine battery, reserve-floor or
+  grid-loss emergency sounds through Do Not Disturb and the silent switch; warnings
+  arrive as ordinary pushes that respect the phone's settings. There is no second
+  delivery stack to configure or keep alive.
 - The **safety-critical runway engine**: an hour-by-hour DC-bus depletion sim
   (accounting for the DC→AC discharge loss), grid-aware severity, and a battery-
   SoC floor ladder — driving the audible broadcast. Below the reserve floor it

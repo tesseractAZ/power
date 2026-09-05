@@ -4,7 +4,7 @@
  * The alert engine internally classifies every alert with a `severity`
  * ('critical' | 'warning' | 'info') and a `source` ('threshold' | 'learned').
  * Those internal literals are load-bearing in ~200 places (object keys, MQTT
- * entity ids like `alert_critical_count`, ntfy/Pushover priority maps, tests)
+ * entity ids like `alert_critical_count`, the notify severity mapping, tests)
  * — renaming them would break Home Assistant history and external tooling.
  *
  * Instead this module is a PRESENTATION layer: it derives a 4-tier industrial
@@ -53,9 +53,6 @@ export const ALARM_PRIORITY_ORDER: readonly AlarmPriority[] = ['critical', 'high
  *      `priorityEnabled` would be a persisted mute toggle controlling nothing.
  */
 export type AlarmRung = AlarmPriority | 'clear';
-
-/** Canonical rung order, most-severe → least, all-clear last. */
-export const ALARM_RUNG_ORDER = [...ALARM_PRIORITY_ORDER, 'clear'] as const satisfies readonly AlarmRung[];
 
 export interface AlarmPriorityMeta {
   /** Stable id (also the colour-token suffix and the HA switch object-id). */

@@ -130,7 +130,6 @@ let publishedRoster: ReadonlySet<string> | null = null;
 export function setLastKnownHomeRoster(roster: ReadonlySet<string> | null | undefined): void {
   publishedRoster = roster && roster.size > 0 ? new Set(roster) : null;
 }
-export function getLastKnownHomeRoster(): ReadonlySet<string> | null { return publishedRoster; }
 export function resetLastKnownHomeRoster(): void { publishedRoster = null; }
 
 /** Explicit arg wins (tests, pure callers); otherwise the published roster. */
