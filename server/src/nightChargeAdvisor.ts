@@ -394,6 +394,32 @@ function nullPlan(
  * (3) CEILING so a too-full pack doesn't clip morning PV. Sizing sub-steps map
  * to design §2.2.
  */
+/**
+ * v1.132.0 — is this hold a window that CANNOT SERVE, or a night with little to buy?
+ *
+ * The two look identical in the ledger and mean opposite things. The
+ * discriminator is deliberately NOT `bindingCap`: `poolHeadroom` is the label on
+ * both a starved window and a nearly-full pack. It is whether the deliverable
+ * actually falls short of the requirement — plus `!meetable`, which is the
+ * strongest "cannot serve" there is (no amount of effort holds the line) and
+ * carries a placeholder requirement that would otherwise compare as covered.
+ *
+ * Both quantities are converted to the METER side before comparing:
+ * `requiredExtraKwh` is pack-side lift, `deliverableKwh` is what the meter
+ * passes. Comparing them directly would understate the shortfall by `legEff`.
+ *
+ * Pure + exported for testing.
+ */
+export function holdIsStarved(o: {
+  meetable: boolean;
+  requiredExtraKwh: number;
+  deliverableKwh: number;
+  legEff: number;
+}): boolean {
+  if (!o.meetable) return true;
+  return o.requiredExtraKwh / o.legEff > o.deliverableKwh + 1e-6;
+}
+
 export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePlan {
   const {
     nowMs, fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
@@ -406,7 +432,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   if (!basisComplete) return nullPlan(inputs, false, 'No plan — forecast/telemetry basis incomplete; nothing will be charged.');
   if (!socCoherent) return nullPlan(inputs, false, 'No plan — SoC telemetry incoherent (% vs remaining/full mismatch).');
   if (inputs.confidenceTier === 'climatology') return nullPlan(inputs, false, 'No plan — horizon is climatology-only (no real forecast); will not size a buy on a guessed sky.');
-  if (!window || !(window.endMs > window.startMs)) return nullPlan(inputs, false, 'No plan — no valid cheap charge window resolved for tonight.');
+  // v1.132.0 — basisComplete TRUE here: the forecast/telemetry basis is fine,
+  // there is simply no cheap window tonight (Saturday has none on this tariff).
+  // Reporting basisComplete:false made HA say "basis incomplete" about a healthy
+  // basis, and conflated a normal windowless night with a genuine data outage.
+  if (!window || !(window.endMs > window.startMs)) return nullPlan(inputs, true, 'No plan — no valid cheap charge window resolved for tonight.');
   if (!Number.isFinite(fullKwh) || fullKwh <= 0) return nullPlan(inputs, false, 'No plan — pool capacity unavailable.');
   if (!Number.isFinite(socNowPct)) return nullPlan(inputs, false, 'No plan — current SoC unavailable.');
   // v1.39.0 review fix: a non-finite floor/cushion made targetFloorKwh NaN,
@@ -917,13 +947,32 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const buyDebiasFactor = inputs.buyDebiasFactor ?? 1;
   const buyKwhDebiased = round2(buyKwh * buyDebiasFactor);
   const calNote = buyDebiasFactor > 1.005 ? ` (raw estimate ${round1(buyKwh)} kWh × ${buyDebiasFactor.toFixed(2)} realized-buy calibration)` : '';
+  // v1.132.0 — SAY WHICH HOLD THIS IS.
+  //
+  // This branch used to print `buyKwh` labelled "the projected shortfall". It is
+  // not the shortfall: it is the DELIVERABLE — the meter-side energy this window
+  // can actually pass after the charge-rate and contention caps. On 2026-09-04 a
+  // Friday 1-hour window produced a ~0 kWh deliverable against a whole-pool
+  // requirement, and the ledger row read as a tidy "no meaningful charge" — the
+  // exact opposite of what happened. The two holds have opposite meanings and an
+  // operator must be able to tell them apart:
+  //   - a cap bound the buy  ⇒ the window CANNOT serve the need
+  //   - no cap bound it      ⇒ the need is genuinely small
+  // The discriminator is NOT which cap is labelled — `poolHeadroom` binds both a
+  // starved window AND a nearly-full pack, which are opposite situations. It is
+  // whether the deliverable actually falls short of the requirement.
+  const starved = holdIsStarved({ meetable, requiredExtraKwh, deliverableKwh: buyKwh, legEff });
+  const holdCapName =
+    bindingCap === 'evContention' ? ' because EV charging contention binds it'
+    : bindingCap === 'chargePower' ? ' because the charge-rate ceiling over this window binds it'
+    : bindingCap === 'poolHeadroom' ? ' because available pool headroom binds it'
+    : '';
+  const holdReason = starved
+    ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
+    : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
     ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
-    // The deliverable buy can be pushed under the minimum-buy threshold BY the
-    // contention itself, so this branch must carry the shortfall disclosure too
-    // — otherwise a night the window physically cannot serve would read as a
-    // tidy "nothing worth buying".
-    : `Hold — the projected shortfall (${round1(buyKwh)} kWh) is below the ${round1(minBuyKwh)} kWh minimum-buy threshold; no meaningful charge.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
+    : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
     generatedAt: nowMs,
