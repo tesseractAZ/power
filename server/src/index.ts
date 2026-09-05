@@ -40,7 +40,7 @@ import { exportVendorStatistics } from './haStatistics.js';
 import { buildWarrantyBundle, renderWarrantyMarkdown, renderWarrantyCsv, loadClearedRecords } from './warrantyExport.js';
 import { startAlertMonitor } from './alertMonitor.js';
 import { systemOutageFields } from './alerts.js';
-import { isConfigured } from './notify.js';
+import { isConfigured, reachesAPhone, getLastPushFailures } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
 import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
 import { startBroadcastMonitor } from './broadcast.js';
@@ -1724,9 +1724,14 @@ app.get('/api/notify/status', async () => {
     configured: isConfigured(cfg),
     minSeverity: cfg.minSeverity,
     notifyResolved: cfg.notifyResolved,
-    // ntfy topic is shown so the user knows what to subscribe to; it's a LAN-only dashboard.
-    ntfyServer: cfg.channel === 'ntfy' ? cfg.ntfyServer : undefined,
-    ntfyTopic: cfg.channel === 'ntfy' ? cfg.ntfyTopic : undefined,
+    // v1.124.0 — the question that actually matters. `configured` has always meant
+    // "can we dispatch", which for the 'ha' channel was true with nothing but a
+    // supervisor token while delivering only a drawer card — which is exactly how
+    // "alerts are configured" and "alerts reach nobody" became indistinguishable.
+    reachesAPhone: reachesAPhone(cfg),
+    pushTargets: cfg.pushTargets.map((t) => `notify.${t}`),
+    criticalBypassDnd: cfg.criticalBypassDnd,
+    lastPushFailures: getLastPushFailures(),
     ...monitor.stats(),
   };
 });
