@@ -152,6 +152,12 @@ configuration:
   ARB_OUTAGE_CUSHION_PCT:
     name: Outage Cushion (%)
     description: Battery headroom to hold above the reserve floor as insurance against an unexpected outage, in percent of total pool capacity (0-40, default 15). The night-charge advisor sizes the overnight buy so its worst-case low-solar, high-load projection still ends at or above floor plus cushion; raise it for more resilience and a bigger overnight buy, lower it to buy less. In supervised or auto Night-Charge Write Mode it also raises the reserve setpoint actually written to the Smart Home Panel 2, though the write is still clamped to the device's 10-50% range; the independent reserve-floor alarm is never affected.
+  ARB_OUTAGE_CUSHION_HOURS:
+    name: Outage Cushion Hours
+    description: 'How long the backup pack must be able to run your protected circuits after the charge window closes, on top of the reserve floor. This is what the nightly plan sizes its purchase against. The energy needed is computed from the load the Smart Home Panel is actually carrying — when the grid drops, the panel powers its own circuits and the rest of the house is dead, so whole-house consumption is not the right figure and using it made the target impossible to reach. Default 8 hours. Raise it for a longer guarantee and the plan will buy more; lower it and it will buy less. Set it to 0 to disable the cushion entirely and defend only the reserve floor.'
+  ARB_ISLANDED_LOAD_SAFETY:
+    name: Islanded Load Safety Factor
+    description: 'Multiplier applied to the measured panel load when sizing the outage cushion; default 1.5. The measurement is a spot reading and the load during an outage is not constant, so the plan deliberately assumes more draw than it currently sees. HIGHER IS STRICTER — 2.0 makes the cushion harder to meet and buys more; 1.0 trusts the live reading exactly. It is not a fudge factor for optimism.'
   ARB_MIN_BUY_KWH:
     name: Minimum Buy (kWh)
     description: 'Below this recommended buy size the advisor calls the night a "hold" instead of nagging about a trivial top-up. Default 1.0 kWh; the field accepts 0-50 and roughly 0.5 to 3 is sensible. The same number doubles as the clean-baseline test in the morning hindsight score: on a night the engine did NOT actuate, overnight grid import above this figure leaves the night unscored rather than graded against a baseline the grid already propped up.'

@@ -92,6 +92,14 @@ export interface NightChargeInputs {
   reserveFloorPct: number;
   /** Outage cushion % ABOVE the floor (owner default 15; later learned). */
   cushionPct: number;
+  /** v1.125.0 — observed ISLANDED load (the SHP2's backup circuits), kW. When the
+   *  grid drops this is what actually runs; the whole-house figure is not. Null
+   *  when unmeasured, which fails closed to the legacy flat band. */
+  islandedLoadKw?: number | null;
+  /** v1.125.0 — bounded outage the cushion must survive, hours. */
+  outageCushionHours?: number;
+  /** v1.125.0 — multiplier on the observed islanded load. Higher = stricter. */
+  islandedLoadSafety?: number;
   /** SoC coherence check (% vs remainWh/fullCapWh) passed upstream (I11).
    *  false ⇒ null plan. */
   socCoherent: boolean;
@@ -267,6 +275,13 @@ export interface NightChargePlan {
   window: { startMs: number; endMs: number } | null;
   reserveFloorPct: number;
   cushionPct: number;
+  /** v1.125.0 — how cushionKwh was derived: the bounded islanded-outage energy,
+   *  or the legacy flat band when no islanded-load measurement was available. */
+  /** v1.125.0 — the cushion in kWh, as actually applied. */
+  cushionKwh?: number;
+  cushionBasis?: 'islanded-outage' | 'legacy-pct';
+  /** v1.125.0 — the outage this cushion is sized to survive, hours. */
+  cushionOutageHours?: number;
   rationale: string;
 }
 
@@ -398,8 +413,20 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 
   const fullWh = fullKwh * 1000;
   const reserveKwh = (fullKwh * reserveFloorPct) / 100;
-  const cushionKwh = (fullKwh * cushionPct) / 100;
-  const targetFloorKwh = reserveKwh + cushionKwh; // the line the trough must hold
+  // v1.125.0 — the cushion is the energy to carry the ISLANDED load through a
+  // bounded outage, not a flat share of pool measured against a whole-house
+  // forward simulation. See outageCushionKwh for why the old form was unmeetable.
+  const legacyCushionKwh = (fullKwh * cushionPct) / 100;
+  const cushion = outageCushionKwh({
+    islandedLoadKw: inputs.islandedLoadKw,
+    outageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
+    safetyFactor: inputs.islandedLoadSafety ?? DEFAULT_ISLANDED_LOAD_SAFETY,
+    dischargeEff,
+    legacyCushionKwh,
+  });
+  const cushionKwh = cushion.kwh;
+  const cushionBasis = cushion.basis;
+  const targetFloorKwh = reserveKwh + cushionKwh; // the line the pack must hold
 
   const socNowKwh = (fullKwh * socNowPct) / 100;
   const windowStart = window.startMs;
@@ -624,19 +651,55 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     }
     return pack;
   };
-  const troughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
+  /** The legacy whole-house forward trough. RETAINED for disclosure only
+   *  (minProjSocPct / baselineMinSocPct): it is still the honest answer to "what
+   *  if the whole house ran off the pack", it is just not the cushion test. */
+  const houseTroughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
     const r = simulate(packAtWindowEndWith(lift), fullKwh, postHours, dischargeEff, windowEnd, windowEnd);
     return { minKwh: r.minPackKwh, minTs: r.minTsMs };
   };
 
+  /**
+   * v1.125.0 — the CUSHION trough: a bounded outage at islanded load, starting at
+   * window close. Monotone decreasing in time, so the minimum is at the end; the
+   * pack level is monotone in lift, so the bisection below stays exact.
+   *
+   * When no islanded-load measurement is available, outageCushionKwh has already
+   * fallen back to the legacy band, and this falls back to the legacy trough with
+   * it — the pair must not be mixed, or a bounded drain would be tested against a
+   * flat band and quietly grant a weaker guarantee than either form intends.
+   */
+  const troughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
+    if (cushionBasis === 'legacy-pct') return houseTroughAtLift(lift);
+    // The pack AT OUTAGE ONSET. The outage energy itself lives in targetFloorKwh
+    // (reserve + cushion), so subtracting it here too would double-count it and
+    // demand twice the cushion.
+    return { minKwh: packAtWindowEndWith(lift), minTs: windowEnd };
+  };
+
+  // v1.125.0 — one phrase describing what the cushion IS, so both rationales
+  // below describe the test that actually ran rather than the legacy band.
+  const cushionDesc = cushionBasis === 'islanded-outage'
+    ? `the ${reserveFloorPct}% reserve floor plus ${round1(inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS)} h of islanded backup load (${round1(cushionKwh)} kWh)`
+    : `the ${round1(reserveFloorPct + cushionPct)}% floor+cushion`;
   const baselineTrough = troughAtLift(0);
-  const baselineMinSocPct = round1((baselineTrough.minKwh / fullKwh) * 100);
+  // v1.125.0 — the DISCLOSED trough stays the whole-house one: "if the entire
+  // house ran off the pack" is still a true and useful thing to report, it is
+  // just not what the cushion is sized against any more.
+  const baselineMinSocPct = round1((houseTroughAtLift(0).minKwh / fullKwh) * 100);
 
   // No shortfall projected → HOLD (no buy). Honest "you don't need to charge".
   if (baselineTrough.minKwh >= targetFloorKwh - 1e-9) {
     return {
-      ...nullPlan(inputs, true, `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above the ${round1(reserveFloorPct + cushionPct)}% floor+cushion; no charge needed.${preWindowNote}`),
+      ...nullPlan(inputs, true, cushionBasis === 'islanded-outage'
+        ? `Hold — the pack at window close (${round1((packAtWindowEnd_noBuy / fullKwh) * 100)}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`
+        : `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}; no charge needed.${preWindowNote}`),
       objective: 'none',
+      // v1.125.0 — the hold path returns nullPlan(), which has no cushion scope;
+      // carry the applied cushion here too or a HOLD night reports none.
+      cushionKwh: round2(cushionKwh),
+      cushionBasis,
+      cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
       buyKwh: 0,
       buyKwhDebiased: 0,
       buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
@@ -646,7 +709,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       // write arms, and setpoint == prediction (there is no gap to disclose).
       setpointSocPct: round1((packAtWindowEnd_noBuy / fullKwh) * 100),
       minProjSocPct: baselineMinSocPct,
-      minProjSocTsMs: baselineTrough.minTs,
+      minProjSocTsMs: houseTroughAtLift(0).minTs,   // v1.125.0 — matches the disclosed house trough
       baselineMinSocPct,
       projSocAtWindowStartPct,
       preWindowMinSocPct,
@@ -703,7 +766,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // below-empty deficit can present as "requirement met" (fixes both criticals).
   const withBuy = troughAtLift(liftKwh);
   const minProjKwh = withBuy.minKwh;
-  const minProjSocPct = round1((minProjKwh / fullKwh) * 100);
+  // Disclosure: the whole-house trough under the lift we can actually deliver.
+  const houseWithBuy = houseTroughAtLift(liftKwh);
+  const minProjSocPct = round1((houseWithBuy.minKwh / fullKwh) * 100);
   const cushionShortfall = minProjKwh < targetFloorKwh - 1e-6;
   if (cushionShortfall && bindingCap === 'requirement') {
     // A clamp (saturation / below-empty), not a linear cap, is the limiter;
@@ -797,7 +862,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const buyKwhDebiased = round2(buyKwh * buyDebiasFactor);
   const calNote = buyDebiasFactor > 1.005 ? ` (raw estimate ${round1(buyKwh)} kWh × ${buyDebiasFactor.toFixed(2)} realized-buy calibration)` : '';
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} Without it the P10-PV/P90-load trough falls to ~${baselineMinSocPct}% (floor+cushion is ${round1(reserveFloorPct + cushionPct)}%).${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     // The deliverable buy can be pushed under the minimum-buy threshold BY the
     // contention itself, so this branch must carry the shortfall disclosure too
     // — otherwise a night the window physically cannot serve would read as a
@@ -819,7 +884,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     cushionShortfall,
     evContention,
     minProjSocPct,
-    minProjSocTsMs: withBuy.minTs,
+    minProjSocTsMs: houseWithBuy.minTs,   // v1.125.0 — matches the disclosed house trough
     baselineMinSocPct,
     projSocAtWindowStartPct,
     preWindowMinSocPct,
@@ -827,6 +892,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     window,
     reserveFloorPct,
     cushionPct,
+    cushionKwh: round2(cushionKwh),
+    // v1.125.0 — how the cushion was derived, so a reader can tell a bounded
+    // islanded-outage requirement from the legacy flat band at a glance.
+    cushionBasis,
+    cushionOutageHours: inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS,
     rationale,
   };
 }
@@ -974,6 +1044,12 @@ export interface NightEvCommit {
 }
 
 export interface NightChargeInputDeps {
+  /** v1.125.0 — observed ISLANDED load (the SHP2's backup circuits), kW. */
+  islandedLoadKw?: number | null;
+  /** v1.125.0 — bounded outage the cushion must survive, hours. */
+  outageCushionHours?: number;
+  /** v1.125.0 — multiplier on the observed islanded load. Higher = stricter. */
+  islandedLoadSafety?: number;
   nowMs: number;
 
   // Battery state (from the SHP2 projection upstream).
@@ -1090,6 +1166,14 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh, buyDebiasFactor,
+    // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
+    // decoration: NightChargeInputs is built field-by-field below, so a field
+    // added to the deps interface and to the inputs interface but NOT copied
+    // through this function arrives as `undefined` and silently takes the legacy
+    // path. That is exactly what happened on the first cut of this change, and
+    // only the end-to-end test caught it — the unit tests of the pure cushion
+    // function all passed.
+    islandedLoadKw, outageCushionHours, islandedLoadSafety,
   } = deps;
 
   const window = resolveCheapWindow(periodIdAt, nowMs, cheapPeriodId, windowScanHours);
@@ -1218,6 +1302,10 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     socNowPct,
     reserveFloorPct,
     cushionPct,
+    // v1.125.0 — carried through explicitly; see the destructure note above.
+    islandedLoadKw,
+    outageCushionHours,
+    islandedLoadSafety,
     socCoherent,
     legEff,
     dischargeEff,
@@ -1402,6 +1490,76 @@ export function calibratedBuyDebiasFactor(
   const median = ratios[Math.floor(ratios.length / 2)];
   const factor = Math.min(cap, Math.max(floor, median));
   return { factor: Math.round(factor * 1000) / 1000, basis: 'measured', samples: ratios.length };
+}
+
+/**
+ * v1.125.0 — THE OUTAGE CUSHION, RE-SCOPED TO SOMETHING THAT CAN BE MET.
+ *
+ * WHAT WAS WRONG. `ARB_OUTAGE_CUSHION_PCT` was a flat 15 % of pool, and the test
+ * asked whether a deliberately grid-blind forward simulation stayed above
+ * floor+cushion. That simulation runs the WHOLE HOUSE off the battery for the
+ * entire remaining forecast horizon — 25 to 49 hours. Measured on this plant:
+ * P90 load 156-185 kWh/day against a 92.16 kWh pool, so the trough hit zero 1-8
+ * hours after window close on 7 of 7 nights and `cushionShortfall` was pinned
+ * TRUE by arithmetic. Being a constant, it silently exempted every night from
+ * three separate mechanisms (the under-buy pool, the buy de-bias learner, and the
+ * engine-fault strike detector), so each reported "nothing to see" for a reason
+ * unrelated to whether there was anything to see.
+ *
+ * WHY IT COULD NEVER BE MET. The model was of a scenario that cannot happen. When
+ * the grid drops, the SHP2 carries its BACKUP CIRCUITS; the rest of the house is
+ * simply dead. Measured live 2026-09-05: `panel_load_watts` 1445 W against
+ * `runway_recent_load_watts` 4863 W — a 3.4x difference. Draining the pack at
+ * whole-house load modelled an island that the hardware does not create.
+ *
+ * THE RE-SCOPE. The cushion is now the energy to carry the ISLANDED load for a
+ * bounded outage:
+ *
+ *     cushionKwh = outageHours x islandedLoadKw x safetyFactor / dischargeEff
+ *
+ * and the test is whether the pack at window close clears reserve + that. At
+ * 1.445 kW islanded, 8 h and a 1.5x factor that is ~18.7 kWh — comparable to the
+ * old flat 13.8 kWh band, so this is not a loosening in magnitude. What changes is
+ * that it is now a REACHABLE, physically meaningful statement ("we can run the
+ * backup circuits for 8 hours") instead of an unreachable one ("we can run the
+ * whole house for two days"), so the flag becomes a signal again.
+ *
+ * NO PV CREDIT, deliberately: an outage can begin at dusk, and crediting P10 PV
+ * over a bounded window would weaken the guarantee for a few kWh.
+ *
+ * SAFETY FACTOR. `panel_load_watts` is a spot reading of circuits whose ch1
+ * scaling is a known open question on this plant, and islanded load is not
+ * constant. The multiplier absorbs both. It is NOT a fudge for optimism: raising
+ * it makes the requirement harder.
+ *
+ * FAIL-CLOSED. With no islanded-load measurement the legacy flat band and the
+ * legacy whole-house trough both stand, which keeps the old (permanently
+ * shortfalling) behaviour rather than silently granting a weaker guarantee.
+ */
+export const DEFAULT_OUTAGE_CUSHION_HOURS = 8;
+export const DEFAULT_ISLANDED_LOAD_SAFETY = 1.5;
+
+export function outageCushionKwh(o: {
+  islandedLoadKw: number | null | undefined;
+  outageHours: number;
+  safetyFactor: number;
+  dischargeEff: number;
+  /** Legacy flat band, used when no islanded-load measurement is available. */
+  legacyCushionKwh: number;
+}): { kwh: number; basis: 'islanded-outage' | 'legacy-pct' } {
+  const { islandedLoadKw, outageHours, safetyFactor, dischargeEff, legacyCushionKwh } = o;
+  if (
+    islandedLoadKw == null || !Number.isFinite(islandedLoadKw) || islandedLoadKw <= 0
+    || !Number.isFinite(outageHours) || outageHours <= 0
+    || !Number.isFinite(safetyFactor) || safetyFactor <= 0
+    || !Number.isFinite(dischargeEff) || dischargeEff <= 0
+  ) {
+    return { kwh: legacyCushionKwh, basis: 'legacy-pct' };
+  }
+  return {
+    kwh: round2((outageHours * islandedLoadKw * safetyFactor) / dischargeEff),
+    basis: 'islanded-outage',
+  };
 }
 
 export function plannerSizingNeedBuyKwh(opts: {

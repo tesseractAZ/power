@@ -201,6 +201,7 @@ import {
   type NightActuationState,
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
+import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -2665,6 +2666,28 @@ const surfacedCollapses = new Set<string>();
 // v1.108.0 — night-charge load-band calibration: last logged value (log on change only).
 let lastLoggedLoadBandKey: string | null = null;
 let lastLoggedBuyDebiasKey: string | null = null;
+/**
+ * v1.125.0 — the ISLANDED load, kW: the SHP2's own circuit sum.
+ *
+ * When the grid drops the SHP2 carries its backup circuits and the rest of the
+ * house is dead, so this — not the whole-house figure — is the load an outage
+ * cushion has to survive. Measured live 2026-09-05: panel_load 1445 W against a
+ * whole-house 4863 W.
+ *
+ * Returns null when the SHP2 is not reporting, which fails the cushion CLOSED to
+ * its legacy form rather than silently sizing against a missing measurement.
+ */
+function islandedLoadKwNow(): number | null {
+  try {
+    const snap = store.get();
+    const sp = findShp2(snap.devices);
+    if (!sp || !sp.online) return null;
+    const { panelLoad } = aggregateFleetFlow(snap.devices);
+    if (!Number.isFinite(panelLoad) || panelLoad <= 0) return null;
+    return panelLoad / 1000;
+  } catch { return null; }
+}
+
 // v1.115.0 — the SHP2's currently-reported reserve, for ownerReserveFloorPct's
 // fallback. Null before the first poll populates the snapshot.
 // v1.115.0 — the owner's most recent /api/reserve-floor write. The device
@@ -3103,6 +3126,11 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
 
   // Operator knobs.
   const cushionPct = Number(process.env.ARB_OUTAGE_CUSHION_PCT ?? 15);
+  // v1.125.0 — the outage the cushion is sized to survive, and the multiplier on
+  // the observed islanded load. See outageCushionKwh for why the cushion is no
+  // longer a flat share of pool measured against a whole-house forward sim.
+  const outageCushionHours = Number(process.env.ARB_OUTAGE_CUSHION_HOURS ?? DEFAULT_OUTAGE_CUSHION_HOURS);
+  const islandedLoadSafety = Number(process.env.ARB_ISLANDED_LOAD_SAFETY ?? DEFAULT_ISLANDED_LOAD_SAFETY);
   const chargeCapKw = Number(process.env.ARB_CHARGE_CAP_KW ?? 7.2);
   // v1.60.0 — the SHARED grid-input envelope the charger and the house both draw
   // from. Default 17 kW is the COEXISTENCE figure measured on 2026-08-02→03: at
@@ -3288,6 +3316,11 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   const deps: NightChargeInputDeps = {
     nowMs,
     fullKwh, socNowPct, reserveFloorPct, cushionPct, socCoherent,
+    // v1.125.0 — ISLANDED load: the SHP2's own circuits, which are what actually
+    // run when the grid drops. Null when the SHP2 is not reporting, which fails
+    // closed to the legacy flat band rather than granting a weaker guarantee.
+    islandedLoadKw: islandedLoadKwNow(),
+    outageCushionHours, islandedLoadSafety,
     legEff, dischargeEff, chargeCapKw, gridInputCapKw,
     periodIdAt, cheapPeriodId: NIGHT_CHEAP_PERIOD_ID, windowScanHours: 30,
     bandHours, dayRollups, realizedDailyErrHalfFrac, nextRechargeMs,
@@ -3331,7 +3364,11 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     socNowPct,
     fullKwh,
     cushionPct,
-    cushionKwh: round2((fullKwh * cushionPct) / 100),
+    // v1.125.0 — record the cushion the plan ACTUALLY applied, not the legacy
+    // flat band. The ledger is the evidence base the readiness gate reduces over,
+    // so a row that says 15%-of-pool when an islanded-outage cushion was used
+    // would misattribute every downstream conclusion.
+    cushionKwh: plan.cushionKwh ?? round2((fullKwh * cushionPct) / 100),
     horizonHours: inputs.horizon.length,
     pvP10Kwh: round2(pvP10), pvP50Kwh: round2(pvP50), pvP90Kwh: round2(pvP90),
     loadP10Kwh: round2(loadP50 / loadP90Factor), loadP50Kwh: round2(loadP50), loadP90Kwh: round2(loadP50 * loadP90Factor),

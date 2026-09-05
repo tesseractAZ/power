@@ -9346,3 +9346,50 @@ Removing the five dead options was verified safe before shipping: posting the op
 without them and re-reading it returned all five, proving `info.options` is the effective
 set with `config.yaml` defaults merged in — so they were defaults, never stored user
 data, and dropping them from the schema leaves nothing stale behind.
+
+### 14. The outage cushion, re-scoped (v1.125.0)
+
+`ARB_OUTAGE_CUSHION_PCT` was a flat 15 % of pool, and the test asked whether a
+deliberately grid-blind forward simulation stayed above floor+cushion. That
+simulation runs the **whole house** off the battery for the entire remaining
+forecast horizon — 25 to 49 hours. On this plant that is P90 load of 156–185 kWh/day
+against a 92.16 kWh pool, so the trough hit zero 1–8 hours after window close on 7 of
+7 nights and `cushionShortfall` was pinned **true by arithmetic**.
+
+Being a constant, it silently exempted every night from three separate mechanisms —
+the under-buy pool, the buy de-bias learner, and the engine-fault strike detector — so
+each reported "nothing to see" for a reason unrelated to whether there was anything to
+see.
+
+**Why it could never be met.** The model described a scenario the hardware does not
+create. When the grid drops, the SHP2 carries its *backup circuits*; the rest of the
+house is dead. Measured live on 2026-09-05: `panel_load_watts` **1445 W** against
+`runway_recent_load_watts` **4863 W** — a 3.4× difference. Draining the pack at
+whole-house load was modelling an island that cannot happen.
+
+**The re-scope.** The cushion is now the energy to carry the islanded load through a
+bounded outage:
+
+```
+cushionKwh = outageHours × islandedLoadKw × safetyFactor / dischargeEff
+```
+
+tested against the pack at window close. At 1.445 kW, 8 h and a 1.5× factor that is
+~18.5 kWh — *larger* than the old flat 13.8 kWh band, so this is not a loosening in
+magnitude. What changes is that it is a reachable, physically meaningful statement
+("we can run the backup circuits for eight hours") instead of an unreachable one ("we
+can run the whole house for two days"), so the flag becomes a signal again and the
+three disarmed mechanisms re-arm.
+
+Two knobs: `ARB_OUTAGE_CUSHION_HOURS` (default 8) and `ARB_ISLANDED_LOAD_SAFETY`
+(default 1.5). The safety factor is **monotone the strict way** — raising it makes the
+requirement harder and buys more. No PV is credited, deliberately: an outage can begin
+at dusk.
+
+**Fail-closed.** With no islanded-load measurement — an SHP2 that is not reporting —
+both the legacy flat band and the legacy whole-house trough stand, preserving the old
+behaviour rather than silently granting a weaker guarantee. The pair is never mixed.
+
+The whole-house forward trough is still computed and still reported as
+`minProjSocPct` / `baselineMinSocPct`: "what if the entire house ran off the pack" is a
+true and useful thing to disclose, it is simply not what the cushion is sized against.
