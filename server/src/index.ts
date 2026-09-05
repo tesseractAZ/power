@@ -3495,6 +3495,12 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     cushion_pct: plan.cushionPct,
     cushion_kwh: extras.cushionKwh,
     binding_cap: plan.bindingCap,
+    // v1.132.0 — the discriminating field for cost mode. `objective` only says
+    // which mode was CONFIGURED plus buy/no-buy; costModeTargetKwh floors at the
+    // resilience answer and raises only under a strict inequality, so a
+    // 'cost_arbitrage' row can carry zero cost-mode contribution. Persisting the
+    // ceiling basis is what makes that answerable from the ledger.
+    cost_ceiling_basis: plan.costCeilingBasis ?? null,
     pv_p10_kwh: extras.pvP10Kwh,
     pv_p50_kwh: extras.pvP50Kwh,
     pv_p90_kwh: extras.pvP90Kwh,
@@ -3664,11 +3670,21 @@ function scoreNightRow(
   // different night entirely). Capture honestly as unscored; never fabricate a
   // cross-span comparison the gate would then learn from.
   if (!s.windowKnown) {
+    // v1.132.0 — two different things reach here and they used to print the same
+    // note. A row with NO window because the tariff offered none that night
+    // (Saturday, on this plan) is a correct, complete row; only a row predating
+    // v1.39.0's window columns is a data-vintage problem. Calling a normal
+    // windowless Saturday a "pre-v1.39.0 row" sent anyone reading the ledger
+    // looking for a migration bug that isn't there.
+    const noWindowByDesign = typeof y.window_start_ms !== 'number'
+      && typeof y.window_end_ms !== 'number'
+      && String(y.algo_version) === String(CURRENT_ALGO_VERSION);
     recorder.recordNightOutcome(yDate, {
       outcome_captured_at_ms: nowMs,
       scored: 0,
-      score_notes:
-        "not scored — the plan's resolved charge window was not recorded (pre-v1.39.0 row); actuals cannot be paired to the real window.",
+      score_notes: noWindowByDesign
+        ? 'not scored — no cheap charge window was resolved for this night, so there is no window to pair actuals to. Expected on a tariff day that offers none; not a defect.'
+        : "not scored — the plan's resolved charge window was not recorded (pre-v1.39.0 row); actuals cannot be paired to the real window.",
     });
     return;
   }
@@ -3988,12 +4004,29 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
       if (armedCandidate) {
         // v1.79.0 — an earlier evening's never-applied ARM being replaced is a
-        // normal weekend pattern (Fri and Sat both target the Monday window),
-        // but 3 ARMED vs 2 APPLIED was untraceable without a disposition line.
+        // normal weekend pattern, but 3 ARMED vs 2 APPLIED was untraceable
+        // without a disposition line.
+        // v1.132.0 — this comment said "Fri and Sat both target the Monday
+        // window". Wrong for this tariff: FRIDAY has its own window (23:00 →
+        // 00:00, one hour, since the weekday rule is evaluated per-instant).
+        // The pair that genuinely shares a window is SAT + SUN, both resolving
+        // to Mon 00:00 → 05:00, because Saturday has no window of its own.
         if (nightActuationMem.day != null && nightActuationMem.day !== today &&
             nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null &&
             nightActuationMem.targetPct != null) {
           app.log.info(`night-charge: prior ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%, buy ~${nightActuationMem.buyKwh ?? '—'} kWh) superseded by tonight's plan — one write fires at the shared window.`);
+          // v1.132.0 — and STAMP it. A log line is not the ledger: the superseded
+          // night keeps actuated=null forever, indistinguishable from four other
+          // dispositions (held below minimum buy, no window, advisory mode, apply
+          // guards refused). 2026-08-29 sat that way with buy_kwh=36, reading like
+          // a failed 36 kWh buy when it was a normal shared-window supersede.
+          try {
+            recorder.recordNightOutcome(nightActuationMem.day, {
+              arm_disposition: `superseded by the ${today} plan — Sat/Sun share one Monday window, so only the later arm writes`,
+            });
+          } catch (e: any) {
+            app.log.warn(`night-charge: supersede stamp failed for ${nightActuationMem.day} (${e?.message ?? e})`);
+          }
         }
         supervisedCtx = {
           // Day-qualified: a weekend plan's window can be ~28 h out, and a bare
