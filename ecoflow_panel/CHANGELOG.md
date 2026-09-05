@@ -1,3 +1,56 @@
+## v1.130.0 — what fifteen restarts did to the alarm telemetry
+
+The 2026-09-04 release run shipped thirteen versions. Each restart was individually
+cheap — ~7.5 s of downtime, no log-silence gap over 20 s, every boot polling inside a
+second. Collectively they corrupted the counters the auto-silencer reasons over and
+could void a night's held alarms. Four defects, all pre-existing, all amplified by
+cadence.
+
+**A restart was counted as a rising edge.** `recordRise` sits in the `if (!existing)`
+new-alert branch, which on `firstRun` is reached for every currently-active alert. The
+replay counter went 3862 → 4031 across the fifteen restarts: **+169 rises in 3.5 h
+against +32 in the preceding 18 h**, a ~28× rate increase caused purely by restarting.
+Rule 4 latches on rise volume against a low long-active fraction, so a restart pushes a
+family toward auto-silence from both directions at once — it adds a rise and can never
+add a longActive clear. Families on the two faulted Cores are already latched, and
+`pack-defective-*`, the alert carrying the RMA evidence, is in the same population. The
+durable onset sidecar already knew the answer: an id with a persisted onset from before
+this process started is a re-track, not a rise.
+
+**Episode durations were stamped from the in-memory `firstSeen`,** which every boot
+re-stamps. A `backup-soc-40` episode continuously true from 17:55:07 is on record as
+`raisedAt 19:45:14, durationMs 127883` — **128 seconds for a 1 h 52 m condition, a 52×
+truncation** — because a restart landed 12 s before the clear. That understates the RMA
+evidence trail, and worse, `neverClearedCount` is the only numerator holding a family
+below Rule 4's threshold, so truncation turns a multi-hour episode into a "shortClear"
+and accelerates auto-silencing. `alertOnset.ts` exists precisely to persist true onset;
+`retireTrackedAlert` simply predates it.
+
+**A quiet-hours hold spanning a restart was silently dropped.** With
+`CRITICAL_BREAKS_QUIET_HOURS` off — the owner's accepted posture — the 06:00 digest is
+the *only* delivery for anything firing between 23:00 and 05:00, criticals included.
+v1.86.0 persists the queue and its comment asserts rehydration is sufficient; v0.97.0's
+`pending` filter keys on an in-memory `queued` flag that rehydration does not restore,
+and `bootSeedNotified` then marks the re-tracked entry notified. The alert came back in
+the queue and could never re-enter `pending`. A restart inside the quiet window voided
+the night. An entry still queued and still active is still held, whichever process
+queued it.
+
+**The digest sidecar never emptied on disk.** Every exit branch persisted and *then*
+cleared `overnightResolved`, so all seventeen boots logged the identical "16
+resolved-overnight record(s)" — including the five after a digest had been sent. A stale
+id queued again on a later night while still active would appear in the digest twice,
+stamped with clock times from a previous night. Clear now precedes persist in all three
+branches.
+
+**And the add-on now names its own build at boot.** After thirteen releases and fifteen
+restarts, no line in its log could say which build produced any given behaviour; the
+audit had to date the v1.124.x cutover by inferring it from an HA Core schema-validation
+error. A log that cannot identify its own build cannot answer "did that fix take?" —
+which is the only question that matters after a deploy.
+
+Mutation-verified 6/6. Suite 2313/2313.
+
 ## v1.129.2 — a second smart panel now fails loudly, and three dead mutation harnesses
 
 A second SHP2 is planned; it will carry the EV charger and the garage AC. The app
