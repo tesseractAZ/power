@@ -1633,6 +1633,60 @@ export function calibratedBuyDebiasFactor(
  * resilience mode, never less. Switching objective can therefore never reduce
  * the safety margin — a property asserted by test.
  */
+/**
+ * v1.129.0 — parse a persisted islanded-load seed.
+ *
+ * Pure so the shape checks are testable: a corrupt or half-written sidecar must
+ * yield null (falling the cushion back to its legacy band) rather than seeding a
+ * NaN, a negative, or a stale-typed value into safety-relevant sizing.
+ */
+/**
+ * v1.129.0 — the runway pair must be COHERENT: empty can never precede reserve.
+ *
+ * Reported 2026-08-05: the alarm printed "time to empty 1 h" beside "time to
+ * reserve 20.5 h". The pool drains through the reserve floor on its way to empty,
+ * so reserve must come first or the pair is nonsense.
+ *
+ * Two mechanisms produce it, and they need different answers:
+ *
+ *  - BELOW THE FLOOR the pair is not incoherent at all. The reserve detector arms
+ *    only while the pool is ABOVE the floor, so once under it the reserve figure is
+ *    the NEXT crossing after a modelled solar recharge — genuinely later than empty.
+ *    Leave that alone; it is correctly labelled elsewhere.
+ *  - ABOVE THE FLOOR it is a real contradiction, and the usual cause is the empty
+ *    HYSTERESIS latch holding a stale finite `hoursToEmpty` for a couple of
+ *    recomputes after the crossing has gone, while `hoursToReserve` comes from the
+ *    current simulation.
+ *
+ * The rule is one-directional and alarm-safe: it may only make the runway SHORTER
+ * or leave it alone, never longer, and it never turns a finite projection into
+ * null. Clamping reserve down to empty is the conservative repair — it says the
+ * floor arrives no later than empty, which is always true.
+ */
+export function coherentRunwayPair(o: {
+  hoursToReserve: number | null;
+  hoursToEmpty: number | null;
+  belowFloor: boolean;
+}): { hoursToReserve: number | null; hoursToEmpty: number | null; clamped: boolean } {
+  const { hoursToReserve, hoursToEmpty, belowFloor } = o;
+  if (belowFloor) return { hoursToReserve, hoursToEmpty, clamped: false };
+  if (hoursToReserve == null || hoursToEmpty == null) return { hoursToReserve, hoursToEmpty, clamped: false };
+  if (!Number.isFinite(hoursToReserve) || !Number.isFinite(hoursToEmpty)) {
+    return { hoursToReserve, hoursToEmpty, clamped: false };
+  }
+  if (hoursToEmpty >= hoursToReserve) return { hoursToReserve, hoursToEmpty, clamped: false };
+  // Impossible above the floor. Pull reserve back to empty — shortens, never lengthens.
+  return { hoursToReserve: hoursToEmpty, hoursToEmpty, clamped: true };
+}
+
+export function parsePersistedIslandedLoad(raw: unknown): { kw: number; atMs: number } | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const o = raw as { kw?: unknown; atMs?: unknown };
+  if (typeof o.kw !== 'number' || !Number.isFinite(o.kw) || o.kw <= 0) return null;
+  if (typeof o.atMs !== 'number' || !Number.isFinite(o.atMs) || o.atMs <= 0) return null;
+  return { kw: o.kw, atMs: o.atMs };
+}
+
 export const DEFAULT_COST_MAX_SOC_PCT = 90;
 
 export function costModeTargetKwh(o: {

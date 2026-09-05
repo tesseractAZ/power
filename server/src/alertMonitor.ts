@@ -755,6 +755,31 @@ export function shouldSendResolve(
   );
 }
 
+/**
+ * v1.129.0 — should an owed resolve be HELD until quiet hours end?
+ *
+ * v1.78.0 added this rule to the falling-edge path inline, and it worked — but it
+ * was never extracted or tested, so a refactor that reordered the `continue` past
+ * `retireTrackedAlert` would silently reopen the defect with a green suite. It is
+ * also the reason the ONE path that skipped it went unnoticed: the once-per-boot
+ * orphan sweep called sendNotification directly with no quiet check at all.
+ *
+ * That gap mattered more after v1.124.0, which made a resolve reach the phone for
+ * real. A restart inside the quiet window — this host takes deploys at all hours —
+ * whose condition cleared while the process was down would push
+ * "Resolved: <title>" to the handset around ten minutes after boot: exactly the
+ * "good news wakes you" inversion v1.78.0 closed everywhere else.
+ *
+ * HOLD, never DROP. Both callers must retry rather than discard, so the resolve —
+ * and the HA-card dismissal it carries — still lands once the window opens.
+ */
+export function holdResolveForQuietHours(
+  owed: boolean,
+  inQuiet: boolean,
+): boolean {
+  return owed && inQuiet;
+}
+
 /* ─── v1.75.0 — falling-edge EVIDENCE gate ─────────────────────────────────────
  * On 2026-08-08 13:11-13:22 an EcoFlow cloud presence-flap storm plus an MQTT
  * keepalive death made device projections unevaluable for minutes at a time. The
@@ -2285,8 +2310,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // consulted no quiet window and landed at 00:02/00:53 on 08-16.
       if (
         handoffOwner == null &&
-        QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW) &&
-        shouldSendResolve(t, cfg.notifyResolved, cfg.minSeverity)
+        holdResolveForQuietHours(
+          shouldSendResolve(t, cfg.notifyResolved, cfg.minSeverity),
+          QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW),
+        )
       ) continue;
       if (persistedNotified.delete(id)) persistNotified();
       if (handoffOwner != null) {
@@ -2319,6 +2346,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // boot, and only after the engine is warm, so a cold analytics worker can never look
     // like "the alert recovered". See orphanedNotifiedIds for the full rationale.
     if (!orphanSweepDone && now - bootMs >= LEARNED_RESOLVE_GRACE_MS) {
+      // v1.129.0 — the one resolve path that bypassed the v1.78.0 quiet-hours rule.
+      // Hold the whole sweep (do NOT latch orphanSweepDone) so it re-runs after the
+      // window opens; latching here would DROP the resolves instead of deferring
+      // them, and the drop leg below would take the records with it.
+      //
+      // Structured as an else-branch rather than an early return ON PURPOSE: the
+      // only statement after this block is `firstRun = false`, and returning past
+      // it would leave firstRun true, so the NEXT tick would re-run boot seeding
+      // and suppress genuine pushes. Deferring must not skip it.
+      if (QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW)) {
+        log('notify: orphan resolve sweep held — quiet hours (will run when the window opens)');
+      } else {
       orphanSweepDone = true;
       const { resolve, drop } = orphanedNotifiedIds({
         persisted: persistedNotified,
@@ -2349,6 +2388,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       if (resolve.length || drop.length) {
         persistNotified();
         log(`notify: boot reconcile — resolved ${resolve.length}, dropped ${drop.length} orphaned record(s)`);
+      }
       }
     }
 

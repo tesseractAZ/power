@@ -48,20 +48,45 @@ import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
  * should pass that empty Set through `isShp2Connected` rather than
  * treating empty as "nothing connected" (see fallback behavior above).
  */
+/**
+ * v1.129.0 — EVERY Smart Home Panel in the snapshot, not just the first one found.
+ *
+ * A second SHP2 is planned for this plant (it will carry the EV charger and the
+ * garage bank). Until now every roster question resolved through a single
+ * `find(kind === 'shp2')`, so a second panel would simply not exist: its DPUs
+ * would be absent from `shp2ConnectedDpuSns`, `advanceOffPanelStreaks` would see
+ * them as off-panel, and after three ticks their alerts would be demoted to
+ * `annunciate: false` — a whole battery bank silently unmonitored, with no
+ * warning, no alert and no log line to say so.
+ *
+ * `find` also picks by `/device/list` arrival order, so on a two-panel plant it
+ * is not even stable which panel wins across a restart.
+ */
+export function allShp2s(
+  devices: Record<string, DeviceSnapshot>,
+): Array<DeviceSnapshot & { projection: Shp2Projection }> {
+  return Object.values(devices).filter(
+    (d) => d.projection?.kind === 'shp2',
+  ) as Array<DeviceSnapshot & { projection: Shp2Projection }>;
+}
+
 export function shp2ConnectedDpuSns(devices: Record<string, DeviceSnapshot>): Set<string> {
-  const list = Object.values(devices);
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2');
-  if (!shp2 || shp2.projection?.kind !== 'shp2') return new Set();
-  const proj = shp2.projection as Shp2Projection;
-  // v0.98.0 — `?? []` so a partial SHP2 projection with no sources[] subtree (e.g. a
-  // /quota/all that returns the backup SoC but omits pd303_mc sources) can't throw. This
-  // matches computeGridImportWatts's existing guard and matters now that aggregateFleetFlow
-  // (which calls this) is also reached from the grid-backstop resolver.
-  return new Set(
-    (proj.sources ?? [])
-      .filter((s) => s.isConnected && s.sn)
-      .map((s) => s.sn as string),
-  );
+  // v1.129.0 — UNION across every panel. This one line is the largest lever on
+  // the second-SHP2 problem: it repairs isShp2Connected, isExpectedOfflineSpare,
+  // isHomePoolDpu, homeCoreCoverage, homeFleetMeanSoc, aggregateFleetFlow's grid
+  // DPUs, and — the one that matters most — alertMonitor's off-panel annunciation
+  // demotion, so a second panel's DPUs keep alarming.
+  const out = new Set<string>();
+  for (const panel of allShp2s(devices)) {
+    // v0.98.0 — `?? []` so a partial SHP2 projection with no sources[] subtree (e.g. a
+    // /quota/all that returns the backup SoC but omits pd303_mc sources) can't throw. This
+    // matches computeGridImportWatts's existing guard and matters now that aggregateFleetFlow
+    // (which calls this) is also reached from the grid-backstop resolver.
+    for (const src of panel.projection.sources ?? []) {
+      if (src.isConnected && src.sn) out.add(src.sn);
+    }
+  }
+  return out;
 }
 
 /**

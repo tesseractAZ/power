@@ -201,7 +201,7 @@ import {
   type NightActuationState,
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
-import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT } from './nightChargeAdvisor.js';
+import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -1496,7 +1496,7 @@ app.get('/api/ha-state', async (req, reply) => {
   // panel_load energy over 7 days (analytics.ts: `shp2Wh.get('panel_load')`), so
   // its mean is both representative and free — it is fetched here anyway.
   if (Number.isFinite(selfCons?.loadKwh) && (selfCons?.loadKwh ?? 0) > 0) {
-    islandedLoadKwCache = { kw: (selfCons.loadKwh as number) / (7 * 24), atMs: Date.now() };
+    noteIslandedLoadKw((selfCons.loadKwh as number) / (7 * 24));
   }
   const lifetime = recorder.getLifetimeTotals();
   const lifetimeKwh = makeLifetimeKwh(lifetime);
@@ -2687,10 +2687,45 @@ let lastLoggedBuyDebiasKey: string | null = null;
  * Returns null when the SHP2 is not reporting, which fails the cushion CLOSED to
  * its legacy form rather than silently sizing against a missing measurement.
  */
-let islandedLoadKwCache: { kw: number; atMs: number } | null = null;
+/**
+ * v1.129.0 — PERSISTED, AND REFRESHED ON A TIMER RATHER THAN BY A WEB REQUEST.
+ *
+ * v1.125.1 populated this cache as a SIDE EFFECT of the /api/ha-state handler.
+ * Two consequences, both observed live on 2026-09-05:
+ *
+ *  - Every restart emptied it, so `outageCushionKwh` fell back to the legacy flat
+ *    band until someone happened to request that endpoint. After the v1.128.1
+ *    deploy the plan still read `cushionBasis: legacy-pct` more than an hour
+ *    later. Deploys are frequent, so this was not a rare edge.
+ *  - Safety-relevant sizing depended on an unrelated HTTP route being hit. That
+ *    is the same shape as the defects this codebase keeps finding: a mechanism
+ *    whose liveness rests on something nobody guaranteed.
+ *
+ * The value is durable state — a 7-day mean does not change materially across a
+ * restart — so it is persisted and seeded at boot, and refreshed on the
+ * night-charge recompute tick that already runs every 30 minutes. The ha-state
+ * handler still updates it opportunistically; it is simply no longer the only
+ * path. Staleness still fails the cushion CLOSED to its legacy form.
+ */
+const ISLANDED_LOAD_PATH = resolve(process.cwd(), config.dbPath, '..', 'islanded-load.json');
 /** Stale after this long the cushion falls back to its legacy form rather than
  *  sizing against a figure nobody has refreshed. */
 const ISLANDED_LOAD_MAX_AGE_MS = 6 * 3_600_000;
+
+let islandedLoadKwCache: { kw: number; atMs: number } | null = (() => {
+  try {
+    return parsePersistedIslandedLoad(JSON.parse(readFileSync(ISLANDED_LOAD_PATH, 'utf8')));
+  } catch { /* absent or corrupt — fall back to legacy until a refresh lands */ }
+  return null;
+})();
+
+/** Record a fresh islanded-load measurement and make it survive a restart. */
+function noteIslandedLoadKw(kw: number): void {
+  if (!Number.isFinite(kw) || kw <= 0) return;
+  islandedLoadKwCache = { kw, atMs: Date.now() };
+  try { atomicWriteFileSync(ISLANDED_LOAD_PATH, JSON.stringify(islandedLoadKwCache)); }
+  catch { /* a lost write costs one restart's freshness, never correctness */ }
+}
 
 function islandedLoadKwNow(): number | null {
   if (!islandedLoadKwCache) return null;
@@ -4674,6 +4709,19 @@ if (nightChargeEnabled) {
       // missed window can't silently drop a night (an MNAR bias in the gate).
       try { scoreCompletedNights(Date.now()); }
       catch (e: any) { app.log.debug(`night-charge: tick scoring skipped (${e?.message ?? e})`); }
+      // v1.129.0 — refresh the ISLANDED LOAD here, on the same timer that
+      // recomputes the plan that consumes it. Until now this was only ever
+      // populated as a side effect of the /api/ha-state handler, so after a
+      // restart the outage cushion silently fell back to its legacy flat band
+      // until something happened to request that endpoint — observed still
+      // legacy more than an hour after the v1.128.1 deploy. Safety-relevant
+      // sizing must not depend on an unrelated route being hit.
+      try {
+        const sc: any = await analytics.report('selfConsumption');
+        if (Number.isFinite(sc?.loadKwh) && (sc?.loadKwh ?? 0) > 0) {
+          noteIslandedLoadKw((sc.loadKwh as number) / (7 * 24));
+        }
+      } catch (e: any) { app.log.debug(`night-charge: islanded-load refresh skipped (${e?.message ?? e})`); }
       try {
         setLatestReadiness(computeNightChargeReadiness(recorder.readNightLedger(400), Date.now(), { algoVersion: CURRENT_ALGO_VERSION }));
       } catch (e: any) { app.log.debug(`night-charge: tick readiness recompute failed (${e?.message ?? e})`); }
@@ -4681,6 +4729,20 @@ if (nightChargeEnabled) {
     })();
   }, 30 * 60 * 1000);
   nightRecomputeTick.unref();
+
+  // v1.129.0 — and once at boot, so the FIRST plan after a deploy is sized on the
+  // real islanded load rather than the legacy band. The persisted seed above
+  // usually covers this; this closes the first-ever-boot case and refreshes a
+  // seed that is close to its 6 h staleness limit.
+  void (async () => {
+    try {
+      const sc: any = await analytics.report('selfConsumption');
+      if (Number.isFinite(sc?.loadKwh) && (sc?.loadKwh ?? 0) > 0) {
+        noteIslandedLoadKw((sc.loadKwh as number) / (7 * 24));
+        app.log.info(`night-charge: islanded load ${((sc.loadKwh as number) / (7 * 24)).toFixed(2)} kW (7-day mean panel load) — outage cushion sized on it`);
+      }
+    } catch { /* the persisted seed, or the legacy band, carries us */ }
+  })();
   // A gentle first warm-up a minute after boot (analytics worker warm) so the
   // holder + status cache aren't empty before the first scheduled tick.
   // v1.39.0: the warm path now also (a) repairs prematurely-captured outcome
