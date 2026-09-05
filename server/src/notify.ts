@@ -1,4 +1,5 @@
 import { request } from 'undici';
+import { callHaService } from './haService.js';
 import type { Severity } from './alerts.js';
 import type { NightChargePlan } from './nightChargeAdvisor.js';
 
@@ -23,34 +24,74 @@ export const NOTIFY_BODY_TIMEOUT_MS = 10_000;
 
 
 /**
- * Notification dispatch. Supports ntfy (default — free, no account), Pushover,
- * and a generic JSON webhook. Channel + credentials come from env.
+ * v1.124.0 — NOTIFICATION DISPATCH IS NOW HOME-ASSISTANT-NATIVE, AND ONLY THAT.
+ *
+ * THE DEFECT THIS REPLACES: the live channel was 'ha', whose entire transport was
+ * `persistent_notification.create` — a card in the HA notification drawer. The
+ * companion app shows those cards only when you open it; it raises no OS push, no
+ * lock-screen alert and no sound. There was no `mobile_app` reference anywhere in
+ * this repo. Combined with in-house-only speakers and quiet hours 23-05, an owner
+ * who was away or asleep received NOTHING for a critical battery, reserve-floor or
+ * grid event. The add-on's own config text implied the opposite.
+ *
+ * The ntfy / Pushover / webhook channels existed to fill that gap and were never
+ * configured (their options were present but empty). They are REMOVED rather than
+ * fixed: Home Assistant already owns a notification system with a first-party app,
+ * per-device targeting, and a documented Do-Not-Disturb bypass. Re-implementing a
+ * second delivery stack beside it means two things to configure, two things to
+ * keep alive, and a second set of credentials living in add-on options.
+ *
+ * So the 'ha' channel now does BOTH halves of what HA offers:
+ *   1. `persistent_notification` — the durable drawer record, unchanged, still
+ *      keyed by dedupId so a resolve dismisses the card it fired on.
+ *   2. `notify.mobile_app_*` (or any notify service) — the ACTUAL push, with the
+ *      documented critical payload so a life-safety alert can break through Do Not
+ *      Disturb and the ringer switch.
+ *
+ * Discovered live on this system: notify.mobile_app_iphone, .mobile_app_ipad,
+ * .mobile_app_ipad2, .mobile_app_erics_macbook_air, and notify.notify (all
+ * registered devices at once).
  */
 
-export type NotifyChannel = 'ntfy' | 'pushover' | 'webhook' | 'ha' | 'none';
+export type NotifyChannel = 'ha' | 'none';
 
 export interface NotifyConfig {
   channel: NotifyChannel;
   minSeverity: Severity;        // 'warning' = warning+critical; 'critical' = critical only
   notifyResolved: boolean;      // also send when an alert clears
-  ntfyServer: string;
-  ntfyTopic: string;
-  pushoverToken: string;
-  pushoverUser: string;
-  webhookUrl: string;
+  /**
+   * HA notify services to push to, WITHOUT the `notify.` domain prefix
+   * (e.g. `mobile_app_iphone`). Empty = drawer card only, no push — which is the
+   * pre-v1.124.0 behaviour and is called out as such in the config UI.
+   */
+  pushTargets: string[];
+  /**
+   * Attach the companion app's documented critical payload to CRITICAL alerts so
+   * they sound through Do Not Disturb / silent mode. Warnings never get it.
+   */
+  criticalBypassDnd: boolean;
+}
+
+/** Accepts "notify.mobile_app_iphone, mobile_app_ipad" and normalises to service names. */
+export function parsePushTargets(raw: string | undefined): string[] {
+  return (raw ?? '')
+    .split(',')
+    .map((t) => t.trim().replace(/^notify\./i, ''))
+    .filter((t) => /^[a-z0-9_]+$/i.test(t));
 }
 
 export function loadNotifyConfig(): NotifyConfig {
   const sev = (process.env.NOTIFY_MIN_SEVERITY ?? 'warning').toLowerCase();
+  const ch = (process.env.NOTIFY_CHANNEL ?? 'none').toLowerCase();
   return {
-    channel: (process.env.NOTIFY_CHANNEL ?? 'none').toLowerCase() as NotifyChannel,
+    // v1.124.0 — anything that is not an explicit 'ha' is off. A stored value of
+    // 'ntfy'/'pushover'/'webhook' from before this release therefore fails SAFE to
+    // 'none' rather than silently pretending to deliver.
+    channel: ch === 'ha' ? 'ha' : 'none',
     minSeverity: sev === 'critical' ? 'critical' : 'warning',
     notifyResolved: process.env.NOTIFY_RESOLVED !== '0',
-    ntfyServer: process.env.NOTIFY_NTFY_SERVER ?? 'https://ntfy.sh',
-    ntfyTopic: process.env.NOTIFY_NTFY_TOPIC ?? '',
-    pushoverToken: process.env.NOTIFY_PUSHOVER_TOKEN ?? '',
-    pushoverUser: process.env.NOTIFY_PUSHOVER_USER ?? '',
-    webhookUrl: process.env.NOTIFY_WEBHOOK_URL ?? '',
+    pushTargets: parsePushTargets(process.env.NOTIFY_HA_PUSH_TARGETS),
+    criticalBypassDnd: process.env.NOTIFY_CRITICAL_BYPASS_DND !== '0',
   };
 }
 
@@ -72,41 +113,22 @@ export interface NotifyMessage {
 
 /** True if the channel is configured well enough to actually send. */
 export function isConfigured(cfg: NotifyConfig): boolean {
-  switch (cfg.channel) {
-    case 'ntfy':
-      return !!cfg.ntfyTopic;
-    case 'pushover':
-      return !!cfg.pushoverToken && !!cfg.pushoverUser;
-    case 'webhook':
-      return !!cfg.webhookUrl;
-    // v0.15.18 — 'ha' posts a Home Assistant persistent notification through
-    // the Supervisor proxy. Zero external accounts; visible in the HA UI and
-    // mirrored to the companion app. Needs only the supervised environment.
-    case 'ha':
-      return !!process.env.SUPERVISOR_TOKEN;
-    default:
-      return false;
-  }
+  return cfg.channel === 'ha' && !!process.env.SUPERVISOR_TOKEN;
 }
 
-const NTFY_PRIORITY: Record<NotifyMessage['severity'], string> = {
-  critical: '5',
-  warning: '4',
-  info: '3',
-  resolved: '2',
-};
-const NTFY_TAGS: Record<NotifyMessage['severity'], string> = {
-  critical: 'rotating_light',
-  warning: 'warning',
-  info: 'information_source',
-  resolved: 'white_check_mark',
-};
-const PUSHOVER_PRIORITY: Record<NotifyMessage['severity'], number> = {
-  critical: 1,
-  warning: 0,
-  info: -1,
-  resolved: -1,
-};
+/**
+ * v1.124.0 — does this configuration actually REACH A PHONE?
+ *
+ * `isConfigured` has always answered "can we dispatch", which for the 'ha'
+ * channel was true with nothing but a supervisor token — while delivering only a
+ * drawer card. That is precisely how "alerts are configured" and "alerts reach
+ * nobody" became indistinguishable. This is the second question, asked
+ * separately, and it is what the status route and the self-alert report.
+ */
+export function reachesAPhone(cfg: NotifyConfig): boolean {
+  return isConfigured(cfg) && cfg.pushTargets.length > 0;
+}
+
 
 /**
  * v0.74.0 — derive the HA persistent-notification `notification_id`. With a
@@ -155,65 +177,60 @@ export function haNotificationId(dedupId: string | undefined, severity: NotifyMe
   return `ecoflow_panel_${slug || severity}`;
 }
 
+/**
+ * v1.124.0 — the companion-app push payload, per the documented spec.
+ *
+ * ONE payload serves both platforms: iOS reads `data.push.*` and ignores the
+ * Android keys, Android reads `data.ttl/priority/channel` and ignores the Apple
+ * ones. That is the documented cross-platform approach, and it means we do not
+ * have to know which device a target is.
+ *
+ * CRITICAL (life-safety) — only for severity 'critical', and only when the owner
+ * has left the bypass on:
+ *   iOS      data.push.sound = { name: 'default', critical: 1, volume: 1.0 }
+ *            "Critical alerts always appear at the top of your lock screen above
+ *            all other notifications, and play a sound even if Do Not Disturb is
+ *            enabled or the iPhone is muted."
+ *   Android  data.ttl = 0, data.priority = 'high', data.channel = 'alarm_stream'
+ *            — alarm_stream sounds regardless of ringer mode.
+ *
+ * Everything below critical is an ordinary push: it must NOT wake the household.
+ * That asymmetry is the whole point — a warning that behaves like an emergency
+ * trains the owner to silence the channel that carries the emergencies.
+ *
+ * `tag`/`group` reuse the persistent-notification id so a phone notification for
+ * the same subject REPLACES its predecessor instead of stacking, mirroring the
+ * drawer card's dedupe. A resolve therefore lands on the same tag and supersedes
+ * the alert it closes.
+ *
+ * Pure + exported for tests.
+ */
+export function buildMobilePushPayload(
+  msg: NotifyMessage,
+  opts: { criticalBypassDnd: boolean },
+): Record<string, unknown> {
+  const tag = haNotificationId(msg.dedupId, msg.severity);
+  const data: Record<string, unknown> = { tag, group: 'ecoflow-panel' };
+
+  if (msg.severity === 'critical' && opts.criticalBypassDnd) {
+    // iOS
+    data.push = { sound: { name: 'default', critical: 1, volume: 1.0 } };
+    // Android
+    data.ttl = 0;
+    data.priority = 'high';
+    data.channel = 'alarm_stream';
+  } else if (msg.severity === 'critical') {
+    // Bypass switched off by the owner: still deliver promptly, just don't
+    // override Do Not Disturb.
+    data.ttl = 0;
+    data.priority = 'high';
+  }
+
+  return { title: msg.title, message: msg.body, data };
+}
+
 export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): Promise<void> {
   if (cfg.channel === 'none') return;
-
-  if (cfg.channel === 'ntfy') {
-    if (!cfg.ntfyTopic) throw new Error('ntfy topic not set');
-    const url = `${cfg.ntfyServer.replace(/\/$/, '')}/${cfg.ntfyTopic}`;
-    const res = await request(url, {
-      headersTimeout: NOTIFY_HEADERS_TIMEOUT_MS,
-      bodyTimeout: NOTIFY_BODY_TIMEOUT_MS,
-      method: 'POST',
-      headers: {
-        Title: msg.title,
-        Priority: NTFY_PRIORITY[msg.severity],
-        Tags: NTFY_TAGS[msg.severity],
-      },
-      body: msg.body,
-    });
-    if (res.statusCode >= 300) {
-      throw new Error(`ntfy returned HTTP ${res.statusCode}`);
-    }
-    return;
-  }
-
-  if (cfg.channel === 'pushover') {
-    if (!cfg.pushoverToken || !cfg.pushoverUser) throw new Error('Pushover token/user not set');
-    const form = new URLSearchParams({
-      token: cfg.pushoverToken,
-      user: cfg.pushoverUser,
-      title: msg.title,
-      message: msg.body,
-      priority: String(PUSHOVER_PRIORITY[msg.severity]),
-    });
-    const res = await request('https://api.pushover.net/1/messages.json', {
-      headersTimeout: NOTIFY_HEADERS_TIMEOUT_MS,
-      bodyTimeout: NOTIFY_BODY_TIMEOUT_MS,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
-    });
-    if (res.statusCode >= 300) {
-      throw new Error(`Pushover returned HTTP ${res.statusCode}`);
-    }
-    return;
-  }
-
-  if (cfg.channel === 'webhook') {
-    if (!cfg.webhookUrl) throw new Error('Webhook URL not set');
-    const res = await request(cfg.webhookUrl, {
-      headersTimeout: NOTIFY_HEADERS_TIMEOUT_MS,
-      bodyTimeout: NOTIFY_BODY_TIMEOUT_MS,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: msg.title, body: msg.body, severity: msg.severity, ts: Date.now() }),
-    });
-    if (res.statusCode >= 300) {
-      throw new Error(`Webhook returned HTTP ${res.statusCode}`);
-    }
-    return;
-  }
 
   if (cfg.channel === 'ha') {
     // v0.15.18 — persistent_notification.create via the Supervisor's Core API
@@ -242,9 +259,38 @@ export async function sendNotification(cfg: NotifyConfig, msg: NotifyMessage): P
     if (res.statusCode >= 300) {
       throw new Error(`HA persistent_notification.${service} returned HTTP ${res.statusCode}`);
     }
+
+    // v1.124.0 — SECOND HALF: the actual phone push.
+    //
+    // The drawer card above is a durable record; it is NOT an alert. This is the
+    // part that lights a locked screen. Failures here are reported, never thrown:
+    // one unreachable device must not cost the drawer record or abort the other
+    // targets, and sendNotification is awaited inline inside the alarm evaluator.
+    if (cfg.pushTargets.length > 0) {
+      const payload = buildMobilePushPayload(msg, { criticalBypassDnd: cfg.criticalBypassDnd });
+      const failures: string[] = [];
+      for (const target of cfg.pushTargets) {
+        const r = await callHaService('notify', target, payload, {
+          headersTimeoutMs: NOTIFY_HEADERS_TIMEOUT_MS,
+          bodyTimeoutMs: NOTIFY_BODY_TIMEOUT_MS,
+        });
+        if (!r.ok) failures.push(`${target}: ${r.error ?? r.status}`);
+      }
+      if (failures.length === cfg.pushTargets.length) {
+        // EVERY target failed — the push channel is down, and the caller's
+        // catch logs it. A partial failure is left to the per-target report.
+        throw new Error(`HA push failed on all ${failures.length} target(s): ${failures.join('; ')}`);
+      }
+      if (failures.length > 0) lastPushFailures = failures;
+      else lastPushFailures = [];
+    }
     return;
   }
 }
+
+/** v1.124.0 — most recent per-target push failures (partial), for the status route. */
+let lastPushFailures: string[] = [];
+export function getLastPushFailures(): string[] { return [...lastPushFailures]; }
 
 /**
  * v1.38.0 — build the ~21:30 night-charge advisory notification (design §4.2).
