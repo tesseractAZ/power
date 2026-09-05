@@ -9381,10 +9381,30 @@ magnitude. What changes is that it is a reachable, physically meaningful stateme
 can run the whole house for two days"), so the flag becomes a signal again and the
 three disarmed mechanisms re-arm.
 
-Two knobs: `ARB_OUTAGE_CUSHION_HOURS` (default 8) and `ARB_ISLANDED_LOAD_SAFETY`
-(default 1.5). The safety factor is **monotone the strict way** — raising it makes the
+Two knobs: `ARB_OUTAGE_CUSHION_HOURS` (default 4) and `ARB_ISLANDED_LOAD_SAFETY`
+(default 1.25). The safety factor is **monotone the strict way** — raising it makes the
 requirement harder and buys more. No PV is credited, deliberately: an outage can begin
 at dusk.
+
+**The load basis is the 7-day mean, not a spot reading.** Panel load swings roughly 3×
+across a day — measured 1,445 W at 00:50 MST and 3,971–4,038 W the same evening — so an
+instantaneous sample would make the cushion, and therefore the nightly purchase, depend
+on *when* the plan happened to run, and a quiet-hour sample would understate it
+threefold. `selfCons.loadKwh` is already the SHP2 `panel_load` energy over seven days;
+its mean is **4.47 kW** on this plant.
+
+**The defaults were calibrated against what the plant can actually reach.** The
+overnight charger delivers at most 7.2 kW × 6 h = 43.2 kWh, so from a 25 % evening SoC a
+clean night reaches about 72 %. Four hours at 1.25× needs ~42 % at window close:
+comfortably reachable on a clean night, missed when the EV contends for the grid input —
+which is exactly the discrimination that makes the flag informative again. Eight hours
+at 1.5× would have needed **78 %**, which is simply a different permanently-true flag.
+A test pins the default inside the reachable band in both directions, so a future change
+cannot quietly make it unreachable *or* trivially satisfiable.
+
+Worth knowing plainly: this plant can carry its protected panel for roughly **four hours**
+at a typical post-charge state, not a day. Raising `ARB_OUTAGE_CUSHION_HOURS` will make
+the planner buy more, but it cannot exceed what the charger and the pack can hold.
 
 **Fail-closed.** With no islanded-load measurement — an SHP2 that is not reporting —
 both the legacy flat band and the legacy whole-house trough stand, preserving the old

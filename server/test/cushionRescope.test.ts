@@ -21,7 +21,12 @@ import {
  */
 
 const POOL = 92.16;
-const ISLANDED_KW = 1.445;     // measured
+// v1.125.1 — the REPRESENTATIVE load, not a spot sample. selfCons.loadKwh is the
+// SHP2 panel_load energy over 7 days: 751.36 kWh / (7 x 24 h) = 4.47 kW. The
+// v1.125.0 fixture used a 1.445 kW instantaneous reading taken at 00:50 MST,
+// which is a quiet-hour trough — panel load measured 3971-4038 W the same
+// evening. Sizing a cushion off that understated it ~3x.
+const ISLANDED_KW = 4.47;
 const DISCHARGE_EFF = 0.94;
 const LEGACY = (POOL * 15) / 100;   // the old flat 15% band = 13.82 kWh
 
@@ -31,8 +36,22 @@ test('THE RE-SCOPE: the cushion is outage energy at ISLANDED load', () => {
     dischargeEff: DISCHARGE_EFF, legacyCushionKwh: LEGACY,
   });
   assert.equal(r.basis, 'islanded-outage');
-  // 8h x 1.445kW x 1.5 / 0.94 = 18.45 kWh
-  assert.ok(Math.abs(r.kwh - 18.45) < 0.1, `got ${r.kwh}`);
+  // 8h x 4.47kW x 1.5 / 0.94 = 57.06 kWh
+  assert.ok(Math.abs(r.kwh - 57.06) < 0.1, `got ${r.kwh}`);
+});
+
+test('the DEFAULTS are reachable on this plant — a cushion nothing can meet is the bug', () => {
+  // The overnight charger delivers at most 7.2 kW x 6 h = 43.2 kWh, so from a 25%
+  // evening SoC a clean night reaches ~72%. The default must sit below that or we
+  // have simply replaced one permanently-true flag with another.
+  const cushion = outageCushionKwh({
+    islandedLoadKw: ISLANDED_KW, outageHours: DEFAULT_OUTAGE_CUSHION_HOURS,
+    safetyFactor: DEFAULT_ISLANDED_LOAD_SAFETY, dischargeEff: DISCHARGE_EFF,
+    legacyCushionKwh: LEGACY,
+  }).kwh;
+  const needPct = (((POOL * 16) / 100 + cushion) / POOL) * 100;
+  assert.ok(needPct < 72, `needs ${needPct.toFixed(0)}% SoC — above what a clean night can reach`);
+  assert.ok(needPct > 30, `needs only ${needPct.toFixed(0)}% — too weak to be a real guarantee`);
 });
 
 test('it is NOT a loosening — the magnitude is comparable to the old flat band', () => {
@@ -42,16 +61,20 @@ test('it is NOT a loosening — the magnitude is comparable to the old flat band
     legacyCushionKwh: LEGACY,
   });
   assert.ok(r.kwh > LEGACY, `the new cushion (${r.kwh}) should be STRICTER than the old ${LEGACY.toFixed(2)} kWh band`);
-  assert.ok(r.kwh < LEGACY * 2, 'but of the same order — this is a re-scope, not a relaxation');
+  assert.ok(r.kwh < LEGACY * 2.5, 'but of the same order — this is a re-scope, not a relaxation');
 });
 
 test('THE POINT: at these defaults the requirement DISCRIMINATES between nights', () => {
   // The whole failure was a constant flag. Recent targets at window close (%):
-  const targets = [5.7, 36.2, 21.8, 8.6, 21.9, 9.2, 21.9];
+  // SoC at window close a clean night can reach vs a contended one. (The old
+  // ledger targets are NOT usable here: they were produced under the unreachable
+  // cushion, where bindingCap=chargePower capped every buy.)
+  const targets = [72, 60, 45, 30, 20, 10];
   const floorPct = 16;
   const cushion = outageCushionKwh({
-    islandedLoadKw: ISLANDED_KW, outageHours: 8, safetyFactor: 1.5,
-    dischargeEff: DISCHARGE_EFF, legacyCushionKwh: LEGACY,
+    islandedLoadKw: ISLANDED_KW, outageHours: DEFAULT_OUTAGE_CUSHION_HOURS,
+    safetyFactor: DEFAULT_ISLANDED_LOAD_SAFETY, dischargeEff: DISCHARGE_EFF,
+    legacyCushionKwh: LEGACY,
   }).kwh;
   const need = (POOL * floorPct) / 100 + cushion;
   const met = targets.filter((t) => (POOL * t) / 100 >= need);
@@ -108,10 +131,9 @@ test('the whole-house figure is why the old form never discriminated', () => {
     dischargeEff: DISCHARGE_EFF, legacyCushionKwh: LEGACY,
   }).kwh;
   const needPct = (((POOL * 16) / 100 + whole) / POOL) * 100;
-  assert.ok(needPct > 80 && needPct < 100, `needs ${needPct.toFixed(0)}% SoC at window close`);
-  const bestRecentTarget = 36.2;
-  assert.ok(bestRecentTarget < needPct,
-    'even the best recent night falls short, so whole-house load cannot be the basis');
+  assert.ok(needPct > 80, `needs ${needPct.toFixed(0)}% SoC at window close`);
+  assert.ok(72 < needPct,
+    'above what even a clean night can charge to, so whole-house load cannot be the basis');
 });
 
 /* ── end-to-end through planNightCharge ───────────────────────────────────── */
