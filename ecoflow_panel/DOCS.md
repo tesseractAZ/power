@@ -3826,14 +3826,25 @@ local-midnight bucket would split every night in two. Guards are
 mutation-proven load-bearing (`scripts/mutate-detector-honesty.mjs`, mutants
 i–v), including an exemplar that reproduces the shipped gate verbatim.
 
-**v1.131.1 — and the register is dead on this topology.** Live-verifying v1.131.0
-found every DPU still reporting `idleWatts: null`: `ac_out` reads **0 on all five
-Cores, with `acOutVol` also 0**, because the Delta Pro Ultras feed the house
-through the SHP2 link rather than their own AC output port. The output inverter
-is never energised, so the register the detector reads is structurally zero and
-`ac_out > 0` can never hold — a second blocker, independent of the whole-house
-gate, that was only visible by querying the device instead of reasoning about the
-code. Standby self-consumption is real but is not exposed here; it would have to
+**v1.131.1 — and the register carries no standby plateau.** Live-verifying
+v1.131.0 found every DPU still reporting `idleWatts: null`: `ac_out` reads **0 on
+all five Cores, with `acOutVol` also 0**, because the Delta Pro Ultras feed the
+house through the SHP2 link rather than their own AC output port, so in normal
+grid-tied operation that inverter stage is not energised. A second blocker,
+independent of the whole-house gate, and visible only by querying the device
+rather than reasoning about the code.
+
+**The `blockedReason` field then corrected the first version of this paragraph,
+which is what it is for.** It was written asserting the register is *structurally*
+zero; the live classification disagreed. Over the 60-day window only **Core 4**
+has an all-zero series (`ac-output-stage-idle`). The other four report
+`insufficient-idle-samples`, meaning at least one non-zero sample exists — the
+output stage has been energised, presumably while islanding — but fewer than ten
+samples land inside the (0, 200 W) standby window with PV dark. The register is
+effectively bimodal: exactly 0 when grid-tied, kilowatts when islanded, with no
+idle plateau in between, because an inverter that is off reads 0 rather than its
+own self-consumption. The conclusion is unchanged and the reasoning behind it is
+now the measured one. Standby self-consumption is real but is not exposed here; it would have to
 be inferred from pack drain (`bat_amp × bat_vol` while PV is dark and output is
 zero), which is a different measurement and a separate piece of work.
 
