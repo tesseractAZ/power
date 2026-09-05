@@ -211,7 +211,7 @@ test('planCircuitDiscovery: fresh set publishes one well-formed config per circu
   const first = plan.publish[0];
   assert.equal(first.topic, 'homeassistant/sensor/ecoflow_circuit_1_lifetime_kwh/config');
   assert.equal(first.cfg.unique_id, 'ecoflow_circuit_1_lifetime_kwh');
-  assert.equal(first.cfg.name, 'EcoFlow Kitchen Energy');
+  assert.equal(first.cfg.name, 'Kitchen Energy');
   assert.equal(first.cfg.device_class, 'energy');
   assert.equal(first.cfg.state_class, 'total_increasing'); // → no expire_after, never goes unavailable
   assert.equal(first.cfg.value_template, '{{ value_json.circuit_1_lifetime_kwh }}');
@@ -225,7 +225,7 @@ test('planCircuitDiscovery: fresh set publishes one well-formed config per circu
 
 test('planCircuitDiscovery: unnamed circuit falls back to "Circuit N"', () => {
   const plan = planCircuitDiscovery(PREFIX, [], [{ ch: 7 }]);
-  assert.equal(plan.publish[0].cfg.name, 'EcoFlow Circuit 7 Energy');
+  assert.equal(plan.publish[0].cfg.name, 'Circuit 7 Energy');
 });
 
 test('planCircuitDiscovery: identical circuit set → identical signature (caller no-ops, no churn)', () => {
@@ -240,7 +240,7 @@ test('planCircuitDiscovery: a renamed circuit changes the signature (re-publishe
   const before = planCircuitDiscovery(PREFIX, [], [{ ch: 1, name: 'Old Name' }]);
   const after = planCircuitDiscovery(PREFIX, [1], [{ ch: 1, name: 'New Name' }]);
   assert.notEqual(before.sig, after.sig, 'a rename must re-assert the config');
-  assert.equal(after.publish[0].cfg.name, 'EcoFlow New Name Energy');
+  assert.equal(after.publish[0].cfg.name, 'New Name Energy');
 });
 
 test('planCircuitDiscovery: a removed circuit is cleared and the signature changes', () => {
@@ -266,8 +266,8 @@ test('planCircuitDiscovery: a split-phase secondary is named from its PAIR, not 
     { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
   ]);
   const byCh = Object.fromEntries(plan.publish.map((p, i) => [i === 0 ? 1 : 3, p.cfg.name]));
-  assert.equal(byCh[1], 'EcoFlow East Wing L1 Energy');
-  assert.equal(byCh[3], 'EcoFlow East Wing L2 Energy', 'secondary inherits the primary name');
+  assert.equal(byCh[1], 'East Wing L1 Energy');
+  assert.equal(byCh[3], 'East Wing L2 Energy', 'secondary inherits the primary name');
 });
 
 test('planCircuitDiscovery: leg suffix follows CHANNEL ORDER, not array order', () => {
@@ -276,8 +276,8 @@ test('planCircuitDiscovery: leg suffix follows CHANNEL ORDER, not array order', 
     { ch: 8, name: 'Circuit 8', linkCh: 6, linkMark: true },
     { ch: 6, name: 'West Air conditioner', linkCh: 8, linkMark: true },
   ]);
-  assert.equal(plan.publish[0].cfg.name, 'EcoFlow West Air conditioner L2 Energy', 'ch8 is the higher leg');
-  assert.equal(plan.publish[1].cfg.name, 'EcoFlow West Air conditioner L1 Energy', 'ch6 is the primary');
+  assert.equal(plan.publish[0].cfg.name, 'West Air conditioner L2 Energy', 'ch8 is the higher leg');
+  assert.equal(plan.publish[1].cfg.name, 'West Air conditioner L1 Energy', 'ch6 is the primary');
 });
 
 test('planCircuitDiscovery: an UNPAIRED circuit keeps its own name with no leg suffix', () => {
@@ -285,8 +285,8 @@ test('planCircuitDiscovery: an UNPAIRED circuit keeps its own name with no leg s
     { ch: 5, name: 'Well Pump' },
     { ch: 9, name: 'Shed', linkCh: 11, linkMark: false }, // linkCh set but not marked → not a pair
   ]);
-  assert.equal(plan.publish[0].cfg.name, 'EcoFlow Well Pump Energy');
-  assert.equal(plan.publish[1].cfg.name, 'EcoFlow Shed Energy', 'linkMark false ⇒ not split-phase');
+  assert.equal(plan.publish[0].cfg.name, 'Well Pump Energy');
+  assert.equal(plan.publish[1].cfg.name, 'Shed Energy', 'linkMark false ⇒ not split-phase');
 });
 
 test('planCircuitDiscovery: an unnamed PRIMARY still yields a stable pair label', () => {
@@ -294,8 +294,8 @@ test('planCircuitDiscovery: an unnamed PRIMARY still yields a stable pair label'
     { ch: 2, linkCh: 4, linkMark: true },
     { ch: 4, name: 'Circuit 4', linkCh: 2, linkMark: true },
   ]);
-  assert.equal(plan.publish[0].cfg.name, 'EcoFlow Circuit 2 L1 Energy');
-  assert.equal(plan.publish[1].cfg.name, 'EcoFlow Circuit 2 L2 Energy');
+  assert.equal(plan.publish[0].cfg.name, 'Circuit 2 L1 Energy');
+  assert.equal(plan.publish[1].cfg.name, 'Circuit 2 L2 Energy');
 });
 
 test('planCircuitDiscovery: the latch key is built from the DERIVED name, so the leg rename actually republishes', () => {
@@ -325,8 +325,8 @@ test('planCircuitDiscovery: renaming the PRIMARY relabels BOTH legs and moves th
     { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
   ]);
   assert.notEqual(before.sig, after.sig);
-  assert.equal(after.publish[0].cfg.name, 'EcoFlow Guest Wing L1 Energy');
-  assert.equal(after.publish[1].cfg.name, 'EcoFlow Guest Wing L2 Energy', 'secondary follows the rename');
+  assert.equal(after.publish[0].cfg.name, 'Guest Wing L1 Energy');
+  assert.equal(after.publish[1].cfg.name, 'Guest Wing L2 Energy', 'secondary follows the rename');
 });
 
 test('planCircuitDiscovery: leg naming does NOT touch unique_id or value_template (entity_id + statistics survive)', () => {
@@ -593,5 +593,38 @@ test("mqtt availability: 'online' is republished on EVERY connect, outside the o
     src,
     /will:\s*\{\s*topic:\s*AVAILABILITY_TOPIC,\s*payload:\s*'offline',\s*retain:\s*true/,
     "the LWT must retain 'offline' — with the every-connect 'online' republish this pair is self-healing",
+  );
+});
+
+test('no entity name repeats the device name — Home Assistant already prepends it', () => {
+  // Home Assistant composes a friendly name as `${device.name} ${entity.name}`.
+  // The device here is "EcoFlow Panel", so an entity ALSO named "EcoFlow Foo"
+  // renders as "EcoFlow Panel EcoFlow Foo" — and that is what a voice assistant
+  // has to be told, verbatim: "what is the ecoflow panel ecoflow home
+  // consumption". 40 of the exposed entities read that way before this rule.
+  //
+  // The alarm switches already got this right (`Alarms — Critical (P1)`), which
+  // is what proves the mechanism rather than just asserting it: they render as
+  // "EcoFlow Panel Alarms — Critical (P1)", with exactly one "EcoFlow".
+  //
+  // Asserted over the whole set rather than per entity: the bug is one entry
+  // disagreeing with its peers, which no single-entity check can express.
+  const offenders = [...SENSORS, ...BINARY_SENSORS]
+    .filter((s) => /^EcoFlow\b/i.test(s.name))
+    .map((s) => `${s.unique_id} -> "${s.name}"`);
+  assert.deepEqual(
+    offenders,
+    [],
+    'entity names must not start with "EcoFlow" — the device is already "EcoFlow Panel"',
+  );
+
+  // And the dynamic circuit-energy names must follow the same rule.
+  const src = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../src/mqttDiscovery.ts'),
+    'utf8',
+  );
+  assert.ok(
+    !/name:\s*`EcoFlow\s/.test(src),
+    'the templated circuit name must not re-prefix "EcoFlow" either',
   );
 });
