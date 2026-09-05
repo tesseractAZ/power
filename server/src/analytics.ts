@@ -6100,6 +6100,24 @@ export interface MpptString {
   spanDays: number;
 }
 
+/**
+ * v1.131.1 — why a DPU has no standby figure, when it has none.
+ *
+ *  - `no-ac-out-history`      nothing recorded for the metric at all.
+ *  - `ac-output-stage-idle`   every recorded sample is exactly 0 W. On this
+ *                             installation the Delta Pro Ultras feed the house
+ *                             through the SHP2 link, not their own AC output
+ *                             port, so `ac_out` (and `acOutVol`) sit at 0
+ *                             permanently — standby draw is not exposed on this
+ *                             register at all. Measured live 2026-09-05: all
+ *                             five DPUs at acOutWatts 0 / acOutVol 0.
+ *  - `insufficient-idle-samples` fewer than 10 qualifying night samples.
+ */
+export type StandbyBlockedReason =
+  | 'no-ac-out-history'
+  | 'ac-output-stage-idle'
+  | 'insufficient-idle-samples';
+
 export interface InverterStandby {
   sn: string;
   device: string;
@@ -6108,7 +6126,35 @@ export interface InverterStandby {
   baselineIdleWatts: number | null;
   trendWattsPerWeek: number | null;
   samples: number;
+  /**
+   * v1.131.1 — null when a figure is published; otherwise WHY not. A blank row
+   * is indistinguishable from a healthy one, and this detector spent its whole
+   * life blank: v1.131.0 removed an unreachable whole-house gate, and the live
+   * check that followed found the register itself is dead on this topology.
+   * The empty state has to say which.
+   */
+  blockedReason: StandbyBlockedReason | null;
 }
+
+/**
+ * v1.131.1 — classify an empty standby result. Pure + exported for testing.
+ *
+ * `aoPts` is the recorded `ac_out` series for one DPU over the baseline window;
+ * `idleCount` is how many of its samples passed `isInverterIdleSample`.
+ */
+export function standbyBlockedReason(
+  aoValues: readonly number[],
+  idleCount: number,
+  minSamples: number,
+): StandbyBlockedReason | null {
+  if (idleCount >= minSamples) return null;
+  if (aoValues.length === 0) return 'no-ac-out-history';
+  if (aoValues.every((v) => v === 0)) return 'ac-output-stage-idle';
+  return 'insufficient-idle-samples';
+}
+
+/** Minimum qualifying night samples before a standby figure is published. */
+export const MIN_IDLE_SAMPLES = 10;
 
 /**
  * v0.13.1 — median register-consistency ratio (W vs V·A), capped at 100%.
@@ -6312,6 +6358,7 @@ export function computeEquipmentHealth(
       inverterStandby.push({
         sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
         idleWatts: null, baselineIdleWatts: null, trendWattsPerWeek: null, samples: 0,
+        blockedReason: 'no-ac-out-history',
       });
       continue;
     }
@@ -6323,10 +6370,11 @@ export function computeEquipmentHealth(
         idleSeries.push({ ts: ao.ts, w: ao.value });
       }
     }
-    if (idleSeries.length < 10) {
+    if (idleSeries.length < MIN_IDLE_SAMPLES) {
       inverterStandby.push({
         sn: d.sn, device: d.deviceName, coreNum: dpuNum(d.deviceName),
         idleWatts: null, baselineIdleWatts: null, trendWattsPerWeek: null, samples: idleSeries.length,
+        blockedReason: standbyBlockedReason(aoPts.map((p) => p.value), idleSeries.length, MIN_IDLE_SAMPLES),
       });
       continue;
     }
@@ -6341,6 +6389,7 @@ export function computeEquipmentHealth(
       baselineIdleWatts: baselineFloor != null ? round1(baselineFloor) : null,
       trendWattsPerWeek: fit ? round2(fit.slopePerMs * 604_800_000) : null,
       samples: idleSeries.length,
+      blockedReason: null,
     });
   }
 

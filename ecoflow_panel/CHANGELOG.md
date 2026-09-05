@@ -1,3 +1,33 @@
+## v1.131.1 — the standby detector was blind twice
+
+v1.131.0 removed the whole-house gate that made the inverter-standby detector
+unsatisfiable. Live-verifying it found every DPU **still** reporting
+`idleWatts: null` — and the reason is a second blocker the code review could not
+have found, because it is not in the code.
+
+`ac_out` reads **0 on all five Cores, with `acOutVol` also 0**. The Delta Pro
+Ultras feed the house through the SHP2 link, not their own AC output port, so
+that inverter stage is never energised and the register the detector trends is
+structurally zero. `ac_out > 0` cannot hold on this installation. The v1.131.0
+fix was necessary and is not sufficient; the detector's data source is simply the
+wrong one for this topology.
+
+Standby self-consumption is real and is not exposed on that register. Inferring
+it from pack drain (`bat_amp × bat_vol` while PV is dark and output is zero) is a
+different measurement and separate work, not something to improvise into a
+life-safety release the same afternoon.
+
+What ships now is the honest empty state. `InverterStandby.blockedReason` is
+`null` when a figure is published and otherwise says which empty it is —
+`no-ac-out-history`, `ac-output-stage-idle` (the live case), or
+`insufficient-idle-samples` — and the Advanced-Insights card prints that reason
+in place of the value instead of dropping the row. That is the entire point of
+this batch: a blank row reads exactly like a healthy one, which is how this
+detector hid for its whole life, and how it would have gone on hiding after a fix
+that looked correct in review and changed nothing on the device.
+
+18/18 mutants killed, including two new ones on the empty state itself.
+
 ## v1.131.0 — five signals that were never earned, and a release that never happened
 
 Every defect in this batch is the same shape: a detector or a status field that

@@ -3799,7 +3799,7 @@ Two DPU-electronics KPIs: **MPPT conversion efficiency** (DC-side V·A vs AC-sid
 `ratioSeries` pulls `{watts, volts, amps}` per string via `queryMulti` at `EQ_HEALTH_BUCKET_SEC = 300 s` over the equipment-health history window; snaps V/A to nearest W ts within the bucket size. Per-sample ratios >100.5% are dropped; `cappedMedianEffPct(effs) = effs.length ? min(100, median(effs)) : null`. `MPPT_EFF_TTL_MS = 10 min`.
 
 #### Output
-`GET /api/equipment-health` → `EquipmentHealth { generatedAt, mpptStrings: MpptString[], inverterStandby: InverterStandby[] }`. Per string: `recentEffPct`, `baselineEffPct` (earliest 30% of history), `driftPctPts` (recent − baseline; negative = drift), `samples`, `spanDays`. Per DPU standby: `idleWatts` (recent standby FLOOR of ac_out — see below), `baselineIdleWatts`, `trendWattsPerWeek`, `samples`. Feeds `/api/repair-issues`.
+`GET /api/equipment-health` → `EquipmentHealth { generatedAt, mpptStrings: MpptString[], inverterStandby: InverterStandby[] }`. Per string: `recentEffPct`, `baselineEffPct` (earliest 30% of history), `driftPctPts` (recent − baseline; negative = drift), `samples`, `spanDays`. Per DPU standby: `idleWatts` (recent standby FLOOR of ac_out — see below), `baselineIdleWatts`, `trendWattsPerWeek`, `samples`, `blockedReason` (**v1.131.1**; `null` when a figure is published). Feeds `/api/repair-issues`.
 
 **v1.131.0 — the standby detector could not fire.** The idle-sample gate was
 `pv < 20 W && panel_load < 20 W && 0 < ac_out < 200 W`, where `panel_load` is the
@@ -3825,6 +3825,24 @@ are UTC days deliberately: the plant runs on MST (UTC−7, no DST), so a local
 local-midnight bucket would split every night in two. Guards are
 mutation-proven load-bearing (`scripts/mutate-detector-honesty.mjs`, mutants
 i–v), including an exemplar that reproduces the shipped gate verbatim.
+
+**v1.131.1 — and the register is dead on this topology.** Live-verifying v1.131.0
+found every DPU still reporting `idleWatts: null`: `ac_out` reads **0 on all five
+Cores, with `acOutVol` also 0**, because the Delta Pro Ultras feed the house
+through the SHP2 link rather than their own AC output port. The output inverter
+is never energised, so the register the detector reads is structurally zero and
+`ac_out > 0` can never hold — a second blocker, independent of the whole-house
+gate, that was only visible by querying the device instead of reasoning about the
+code. Standby self-consumption is real but is not exposed here; it would have to
+be inferred from pack drain (`bat_amp × bat_vol` while PV is dark and output is
+zero), which is a different measurement and a separate piece of work.
+
+Until then the detector states its own blindness rather than rendering blank:
+`InverterStandby.blockedReason` is `null` when a figure is published and
+otherwise one of `no-ac-out-history`, `ac-output-stage-idle` (the live case), or
+`insufficient-idle-samples`, and the Advanced-Insights card prints the reason in
+place of the value. This is the point of the whole batch — a blank row reads
+exactly like a healthy one, which is how this detector hid for its entire life.
 
 ---
 
