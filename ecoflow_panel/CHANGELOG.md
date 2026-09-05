@@ -1,3 +1,20 @@
+## v1.129.1 — the boot seed retried, and no longer silent
+
+v1.129.0's islanded-load boot seed made one immediate attempt wrapped in an empty
+`catch {}`. On the 2026-09-04 20:23 boot it emitted no log line at all and the plan
+stayed on the legacy cushion band — and the swallowed error made it impossible to
+tell whether the call had failed or never run. The analytics worker is cold at
+boot, so a single immediate attempt was the wrong shape; and a diagnostic path
+that hides its own failure is precisely the pattern this release series has spent
+its time removing everywhere else.
+
+The seed now retries at 0 s / 15 s / 60 s / 180 s, stops at the first success, logs
+each failed attempt at debug, and says so plainly if it exhausts them — at which
+point the 30-minute recompute tick carries it and the cushion falls back to its
+legacy band, which is fail-closed, just less precise.
+
+Suite 2295/2295.
+
 ## v1.129.0 — the four items that were actually still open
 
 A 15-item sweep of the tracked open queue (2026-08-05 → 08-17) against v1.128.1,

@@ -193,3 +193,27 @@ test('a panel with no sources subtree cannot throw', () => {
   const partial = { P: { sn: 'P', deviceName: 'P', online: true, projection: { kind: 'shp2' } } } as never;
   assert.equal(shp2ConnectedDpuSns(partial).size, 0);
 });
+
+/* ── v1.129.1 — the boot seed must retry, and must never fail silently ────── */
+
+test('THE FLAW I SHIPPED: the boot seed no longer swallows its own failure', () => {
+  // v1.129.0 wrapped the seed in `catch { }`. On the 2026-09-04 20:23 boot it
+  // emitted no log line at all, so there was no way to tell whether the call had
+  // failed or never run — after a whole release series spent removing exactly
+  // that pattern.
+  const seed = IDX.slice(IDX.indexOf('islanded-load seed'));
+  const block = IDX.slice(IDX.indexOf('and once at boot'), IDX.indexOf('and once at boot') + 2200);
+  assert.ok(!/catch \{ \/\* the persisted seed/.test(IDX), 'the empty catch must be gone');
+  assert.match(block, /islanded-load seed attempt \$\{i \+ 1\} failed/,
+    'a failed attempt must say so');
+  assert.match(block, /did not settle at boot/,
+    'and exhausting every attempt must be stated, not silent');
+  assert.ok(seed.length > 0);
+});
+
+test('the boot seed retries with backoff, because analytics is cold at boot', () => {
+  const block = IDX.slice(IDX.indexOf('and once at boot'), IDX.indexOf('and once at boot') + 2200);
+  assert.match(block, /const delays = \[0, 15_000, 60_000, 180_000\]/,
+    'one immediate attempt is the wrong shape against a cold worker');
+  assert.match(block, /return;/, 'and it must stop as soon as one succeeds');
+});
