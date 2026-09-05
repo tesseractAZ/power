@@ -1,3 +1,58 @@
+## v1.129.0 — the four items that were actually still open
+
+A 15-item sweep of the tracked open queue (2026-08-05 → 08-17) against v1.128.1,
+each verdict given an adversarial second opinion. **Eleven were already fixed** by
+releases in between — including both HIGH items, which is worth recording:
+phantom actuation closed in v1.79.0 (the readback path; the live record shows
+applied 22:55:14 → verified 22:56:14), and the false all-clear during drawdown
+closed in v1.78.0 by `resolveHandoffOwner`. Four remained, all four fixed here.
+
+**The second SHP2 (HIGH).** `shp2ConnectedDpuSns` resolved through a single
+`find(kind === 'shp2')`, so a second panel simply would not exist: its DPUs would
+be absent from the roster, `advanceOffPanelStreaks` would read them as off-panel,
+and after three ticks their alerts would be demoted to `annunciate: false` — a
+whole battery bank silently unmonitored, with no warning, no alert and no log
+line. `find` also picks by device-list arrival order, so on a two-panel plant it
+is not even stable which panel wins across a restart. The oracle now UNIONs
+`sources[]` across every panel (`allShp2s`), which in one place repairs
+`isShp2Connected`, `isExpectedOfflineSpare`, `isHomePoolDpu`, `homeCoreCoverage`,
+`homeFleetMeanSoc`, `aggregateFleetFlow` and the off-panel annunciation demotion.
+Single-panel behaviour is byte-identical, asserted by test.
+
+**Runway coherence (MED).** The alarm could print "time to empty 1 h" beside
+"time to reserve 20.5 h" — the pool drains *through* the floor on its way to
+empty, so above the floor that pair is impossible. Usual cause is the empty
+hysteresis latch holding a stale finite while reserve comes from the current sim.
+`coherentRunwayPair` clamps reserve back to empty above the floor and leaves the
+pair alone below it, where it is legitimate (the reserve detector only arms above
+the floor, so under it the figure is the next crossing after a modelled recharge).
+The repair is one-directional — it may only SHORTEN the runway, never lengthen it,
+and never turns a finite projection into null — with a sweep asserting that.
+`runwayPairClamped` surfaces on `/api/runway` so the repair is auditable.
+
+**Quiet-hours inversion, residual (LOW).** v1.78.0 held owed resolves inside the
+notify quiet window on the falling-edge path, but the once-per-boot orphan sweep
+called `sendNotification` directly with no quiet check at all. That mattered more
+after v1.124.0 made a resolve reach the phone for real: a restart inside the
+window whose condition cleared while the process was down pushed
+"Resolved: …" to the handset ten minutes after boot — the exact "good news wakes
+you" inversion v1.78.0 closed everywhere else. The sweep now honours the same rule
+and DEFERS rather than drops (it does not latch `orphanSweepDone` while holding).
+The rule itself is extracted as `holdResolveForQuietHours` and finally has a test;
+it had none, so a refactor could have reopened it with a green suite.
+
+**Islanded-load durability (MED).** v1.125.1 populated the outage-cushion input as
+a side effect of the `/api/ha-state` handler, so every restart dropped the cushion
+back to its legacy flat band until something happened to request that route —
+observed still `legacy-pct` more than an hour after the v1.128.1 deploy, and
+unchanged across a three-minute probe after priming it, because the plan only
+recomputes every 30 minutes. Safety-relevant sizing must not rest on an unrelated
+route being hit. It is now persisted to a sidecar and seeded at boot, refreshed on
+the same 30-minute tick that recomputes the plan consuming it, and seeded once at
+startup. Staleness still fails closed at 6 h.
+
+Mutation-verified 5/5. Suite 2293/2293.
+
 ## v1.128.1 — the twelve circuit sensors the rename did not reach
 
 v1.128.0 renamed 84 entities and missed 12. Live-confirmed: 96 doubled names became

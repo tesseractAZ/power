@@ -14,6 +14,7 @@ import { PHOENIX_SITE } from './physics/clearSky.js';
 import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, round2, clamp01, type LinFit } from './analytics/mathHelpers.js';
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
 import { singleFlight } from './singleFlight.js';
+import { coherentRunwayPair } from './nightChargeAdvisor.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -2944,6 +2945,10 @@ export const RUNWAY_DISCHARGE_EFFICIENCY = Math.min(
 );
 
 export interface RunwayProjection {
+  /** v1.129.0 — true when the published pair was repaired because empty
+   *  preceded reserve above the floor (physically impossible). Visible in
+   *  /api/runway so the repair is auditable rather than silent. */
+  runwayPairClamped?: boolean;
   generatedAt: number;
   backupRemainingKwh: number | null;
   backupReserveKwh: number | null;
@@ -3208,19 +3213,33 @@ export function computeRunway(
   // finite is pessimistic (over-warns), never optimistic.
   const pubHoursToEmpty = applyEmptyHysteresis(hoursToEmpty, runwayEmptyState);
 
+  // v1.129.0 — enforce the ordering invariant before publishing. The pool drains
+  // THROUGH the reserve floor on its way to empty, so "empty 1 h / reserve 20.5 h"
+  // (observed 2026-08-05) cannot both be true above the floor. See
+  // coherentRunwayPair: below the floor the pair is legitimate and untouched, and
+  // the repair only ever SHORTENS the runway.
+  const belowFloorNow = backupReserveKwh > 0 && backupRemainingKwh <= backupReserveKwh;
+  const coherent = coherentRunwayPair({
+    hoursToReserve, hoursToEmpty: pubHoursToEmpty, belowFloor: belowFloorNow,
+  });
+  // NOTE: no logger is in scope here (computeRunway is pure over its inputs); the
+  // clamp is instead surfaced on the projection itself as `runwayPairClamped`, so
+  // it is visible in /api/runway rather than only in a log line.
+
   const value: RunwayProjection = {
     generatedAt: now,
     backupRemainingKwh: round2(backupRemainingKwh),
     backupReserveKwh: round2(backupReserveKwh),
     backupFullKwh: round2(backupFullKwh),
     recentLoadWatts: Math.round(loadAvgWatts),
-    hoursToReserve: hoursToReserve != null ? round1(hoursToReserve) : null,
+    hoursToReserve: coherent.hoursToReserve != null ? round1(coherent.hoursToReserve) : null,
     hoursToEmpty: pubHoursToEmpty != null ? round1(pubHoursToEmpty) : null,
-    reserveAtMs: hoursToReserve != null ? Math.round(now + hoursToReserve * 3_600_000) : null,
+    reserveAtMs: coherent.hoursToReserve != null ? Math.round(now + coherent.hoursToReserve * 3_600_000) : null,
     emptyAtMs: pubHoursToEmpty != null ? Math.round(now + pubHoursToEmpty * 3_600_000) : null,
     forecastPvUsedKwh: round2(totalForecastPv),
     loadHorizonKwh: round2(totalLoad),
     horizonHours: RUNWAY_HORIZON_HOURS,
+    runwayPairClamped: coherent.clamped || undefined,
     unavailable: null,
     loadModelDegraded,
   };
