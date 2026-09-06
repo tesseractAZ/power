@@ -25,8 +25,9 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const ADVISOR = resolve(SERVER, 'src/nightChargeAdvisor.ts');
+const ACTUATOR = resolve(SERVER, 'src/nightChargeActuator.ts');
 
-const SUBSET = ['test/zeroCushion.test.ts', 'test/cushionRescope.test.ts'];
+const SUBSET = ['test/zeroCushion.test.ts', 'test/cushionRescope.test.ts', 'test/nightChargeEvContention.test.ts'];
 
 const MUTANTS = [
   {
@@ -63,6 +64,27 @@ const MUTANTS = [
     find: "    if (cushionBasis === 'legacy-pct') return houseTroughAtLift(lift);",
     to: "    if (cushionBasis !== 'islanded-outage') return houseTroughAtLift(lift); /* MUTANT */",
     why: 'Disabling the cushion would apply the HARSHER whole-house test, raising the requirement instead of lowering it.',
+  },
+  {
+    id: 'vii. ★ the announced reserve goes back to the un-clamped setpoint',
+    file: ADVISOR,
+    find: '  const writtenPct = clampReserveTarget(setpointSocPct);',
+    to: '  const writtenPct = setpointSocPct; /* MUTANT */',
+    why: 'This IS the shipped over-promise: the 21:30 notification and the SPOKEN broadcast said "the reserve is set to 100%" while the panel was told 50.',
+  },
+  {
+    id: 'viii. the truncation disclosure is dropped',
+    file: ADVISOR,
+    find: '  const truncated = setpointSocPct > writtenPct + 0.05;',
+    to: '  const truncated = false; /* MUTANT */',
+    why: 'The operator would hear a correct 50% with no hint that the requirement was 75% and got cut — a true number that hides the shortfall.',
+  },
+  {
+    id: 'ix. the write envelope constant is widened',
+    file: ACTUATOR,
+    find: 'export const RESERVE_WRITE_MAX_PCT = 50;',
+    to: 'export const RESERVE_WRITE_MAX_PCT = 100; /* MUTANT */',
+    why: 'Every announced reserve would exceed what the device accepts, and clampReserveTarget would stop clamping.',
   },
   {
     id: 'vi. a disabled cushion reports a non-zero kWh',

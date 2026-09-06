@@ -176,3 +176,50 @@ test('the disabled path keeps the islanded trough form, not the whole-house one'
   assert.equal(disabled.cushionKwh, 0);
   assert.equal(legacy.cushionKwh, 0);
 });
+
+/* ══ v1.133.1 — the announced reserve is the one that gets written ══════ */
+
+test('THE MEASURED DEFECT: the plan announced 100% while the panel was told 50', () => {
+  // Live 2026-09-06: setpointSocPct 100, actuation targetPct 50. The sentence
+  // went into the 21:30 notification AND the spoken broadcast, describing an
+  // internal quantity as though it were the instruction.
+  // A deep shortfall with a throttled window: the resilience requirement asks
+  // for a 75% setpoint while the window is only expected to reach ~20%.
+  const p = computeNightChargePlan(baseInputs({
+    socNowPct: 20, reserveFloorPct: 10, cushionPct: 40, chargeCapKw: 1,
+    horizon: mkHorizon(B, 24, 0, 1500),
+  }));
+  assert.equal(p.chargeTonight, true, 'premise: this night buys');
+  assert.equal(p.setpointSocPct, 75, 'premise: the requirement exceeds the write envelope');
+  assert.match(p.rationale, /The reserve is set to 50%/, 'announces the WRITTEN value');
+  assert.doesNotMatch(p.rationale, /The reserve is set to 75%/, 'never the un-clamped setpoint');
+  assert.match(p.rationale, /the resilience requirement asks for 75%/, 'the real ask is still disclosed');
+  assert.match(p.rationale, /only accepts a backup reserve up to 50%/, 'and why it was truncated');
+});
+
+test('an untruncated setpoint reads exactly as before', () => {
+  // The disclosure must appear ONLY when the envelope actually bit; otherwise it
+  // is noise on every ordinary night.
+  const p = computeNightChargePlan(baseInputs({ socNowPct: 25, reserveFloorPct: 10, cushionPct: 10 }));
+  if (!p.chargeTonight) return;
+  const sp = p.setpointSocPct ?? 0;
+  if (sp > 50) return; // truncated case is covered above
+  assert.doesNotMatch(p.rationale, /only accepts a backup reserve up to/);
+});
+
+test('★ the announced reserve NEVER exceeds what the device can be told', () => {
+  // Exhaustive over shapes that push the setpoint hard. Whatever the planner
+  // computes internally, the sentence an operator hears must be writable.
+  for (const socNowPct of [2, 5, 15, 30, 60]) {
+    for (const cushionPct of [10, 25, 40]) {
+      const p = computeNightChargePlan(baseInputs({
+        socNowPct, cushionPct, reserveFloorPct: 10, horizon: mkHorizon(B, 24, 0, 2500),
+      }));
+      const m = /The reserve is set to (\d+(?:\.\d+)?)%/.exec(p.rationale);
+      if (!m) continue;
+      const announced = Number(m[1]);
+      assert.ok(announced <= 50, `announced ${announced}% exceeds the write envelope (soc=${socNowPct} cushion=${cushionPct})`);
+      assert.ok(announced >= 10, `announced ${announced}% is below the write envelope`);
+    }
+  }
+});

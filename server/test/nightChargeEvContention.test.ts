@@ -464,7 +464,12 @@ test('setpoint — the contended night asks for the requirement, predicts the ar
   // same ask — the setpoint is exactly what the pre-contention write asked for.
   const blind = computeNightChargePlan(baseInputs({ gridInputCapKw: null }));
   assert.equal(blind.setpointSocPct, 75, 'the setpoint must not regress below the pre-v1.60.0 write');
-  assert.match(p.rationale, /reserve is set to 75% \(the resilience requirement\)/);
+  // v1.133.1 — the sentence now announces the value the DEVICE is told (50, the
+  // top of the [10,50] write envelope) and discloses the 75% requirement beside
+  // it. This test's subject is unchanged: the setpoint tracks the REQUIREMENT,
+  // not the contention-derated arrival, and both numbers are still stated.
+  assert.match(p.rationale, /reserve is set to 50%/, 'announces what is actually written');
+  assert.match(p.rationale, /the resilience requirement asks for 75%/, 'and still discloses the ask');
   assert.match(p.rationale, /only expected to reach ~66\.4%/);
 });
 
