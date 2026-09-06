@@ -1,3 +1,36 @@
+## v1.133.1 — the reserve it announced was not the reserve it wrote
+
+The plan rationale said *"The reserve is set to 100%"*. The panel was being told
+**50**. That sentence goes into the 21:30 notification **and the spoken
+broadcast**, so the number an operator heard was an internal quantity, not an
+instruction — caught by reading a live plan on 2026-09-06 (`setpointSocPct 100`
+against an actuation `targetPct 50`).
+
+`setpointSocPct` is the resilience requirement expressed as a pack level, and it
+is deliberately un-capped — deriving it from the deliverable would let contention
+cap a charge the window could otherwise supply, which is the under-buy v1.60.0
+exists to prevent. The error was reporting it as though it were the setting. The
+sentence now names three quantities for what they are: what the device is **told**
+(the clamped value), what the requirement **asked for** when the envelope
+truncated it, and what the window is expected to **reach**.
+
+The write envelope also gets a name. `[10, 50]` was a bare pair of literals inside
+`clampReserveTarget` and a second pair inside `setBackupReserveSoc`'s range check,
+so nothing in the codebase said out loud that 50 is the ceiling on everything this
+engine can achieve — which is how `ARB_COST_MAX_SOC_PCT`, schema `int(50,100)`,
+came to ship with a minimum equal to that maximum. It is now
+`RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT`, and anything reporting a
+reserve figure reconciles against them.
+
+A v1.60.0 test pinned the old wording. Its subject — that the setpoint tracks the
+requirement rather than the contention-derated arrival — is unchanged and still
+asserted; only the sentence moved, so the assertion was updated rather than the
+disclosure dropped.
+
+2,378 tests. 9/9 mutants (`scripts/mutate-zero-cushion.mjs`), including one that
+restores the un-clamped announcement verbatim and one that keeps the number right
+while dropping the disclosure — a true figure that hides the shortfall.
+
 ## v1.133.0 — zero cushion now means zero
 
 Setting `ARB_OUTAGE_CUSHION_HOURS` to `0` did not disable the outage cushion. The

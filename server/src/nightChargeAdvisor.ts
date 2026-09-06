@@ -54,7 +54,7 @@
 // clamp). Imported rather than re-stated so the value published to the HA
 // automation and the value the supervised path writes can never drift apart.
 // (nightChargeActuator.ts imports nothing — no cycle.)
-import { clampReserveTarget } from './nightChargeActuator.js';
+import { clampReserveTarget, RESERVE_WRITE_MAX_PCT } from './nightChargeActuator.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -946,8 +946,22 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // the setpoint would over-promise; naming only the expectation would hide
   // what the device is actually being told to do. Identical numbers ⇒ silence,
   // rather than a distinction that does not exist tonight.
+  // v1.133.1 — ANNOUNCE THE NUMBER THAT IS ACTUALLY WRITTEN.
+  //
+  // This said "The reserve is set to ${setpointSocPct}%" using the UN-CLAMPED
+  // setpoint. The actuator writes clampReserveTarget(setpointSocPct), which the
+  // device accepts only in [10, 50] — so on 2026-09-06 the live plan announced
+  // "the reserve is set to 100%" (in the 21:30 notification AND the spoken
+  // broadcast) while the panel was being told 50. The sentence was describing an
+  // internal quantity as though it were the instruction.
+  //
+  // Three numbers now, each named for what it is: what the device is TOLD, what
+  // the resilience requirement ASKED for when the envelope truncated it, and
+  // what the window is expected to REACH.
+  const writtenPct = clampReserveTarget(setpointSocPct);
+  const truncated = setpointSocPct > writtenPct + 0.05;
   const setpointNote = setpointSocPct > targetSocPct + 0.05
-    ? ` The reserve is set to ${setpointSocPct}% (the resilience requirement) but the window is only expected to reach ~${targetSocPct}%.`
+    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — the resilience requirement asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ' (the resilience requirement)'}, and the window is only expected to reach ~${targetSocPct}%.`
     : '';
 
   // v1.112.0 — the ANNOUNCED buy carries the learned de-bias; the raw figure

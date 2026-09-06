@@ -180,8 +180,22 @@ export function getReserveArbitrageRaised(): boolean { return reserveArbitrageRa
 /** Test seam. */
 export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = false; }
 
+/**
+ * v1.133.1 — the device's backup-reserve write envelope, named.
+ *
+ * The panel accepts a backup reserve only in [10, 50]. That bound was a bare
+ * `50` inside clampReserveTarget and a second literal inside
+ * setBackupReserveSoc's range check, so nothing in the codebase said out loud
+ * that it is the ceiling on everything the night-charge engine can achieve —
+ * which is how `ARB_COST_MAX_SOC_PCT`, schema `int(50,100)`, came to ship with a
+ * minimum equal to this maximum (see DOCS.md §8b). Anything that reports a
+ * reserve figure to an operator must reconcile against these.
+ */
+export const RESERVE_WRITE_MIN_PCT = 10;
+export const RESERVE_WRITE_MAX_PCT = 50;
+
 export function clampReserveTarget(targetSocPct: number): number {
-  return Math.min(50, Math.max(10, Math.round(targetSocPct)));
+  return Math.min(RESERVE_WRITE_MAX_PCT, Math.max(RESERVE_WRITE_MIN_PCT, Math.round(targetSocPct)));
 }
 
 /** Apply window: the write may fire from 5 min before the plan's charge
