@@ -8633,6 +8633,36 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
 
 **Deadline phrasing (v1.51.2).** The announced cancel deadline is **day-qualified beyond 24 h** ("on Sunday at 11:55 PM") in both the notification and the spoken broadcast: weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00, putting the write moment ~28 h out, where a bare clock time would read as tonight. The spoken text also carries the `cushionShortfall` disclosure whenever the plan discloses one — the audible channel is never quieter about residual risk than the text channel.
 
+**Disabling the outage cushion (`ARB_OUTAGE_CUSHION_HOURS: 0`) — v1.133.0.**
+
+`outageCushionKwh` returns a `CushionBasis` of `islanded-outage`, `legacy-pct` or
+**`disabled`**, and the three are genuinely different states that one number cannot
+distinguish:
+
+| basis | meaning | trough test |
+|---|---|---|
+| `islanded-outage` | sized from a measured islanded load over a bounded outage — the intended path | pack **at window close** (outage onset) |
+| `legacy-pct` | no usable islanded-load measurement; the flat percentage-of-pool band stands in | whole-house **forward trough** (harsher) |
+| `disabled` | the owner set the cushion to zero — the plan stops sizing for an outage entirely | pack **at window close** |
+
+**Before v1.133.0 an exact `0` was not a decision, it was a fallback.** The guard folded
+`outageHours <= 0` into the same branch as "no measurement available", so setting the option
+to 0 silently delivered the legacy band (15% of pool ≈ 13.8 kWh on this plant) — the option
+was accepted, `validate-addon-config` passed, and the setting did not take effect. It was
+worse than inert: the legacy basis also switches the cushion test to the whole-house forward
+trough, so **asking for no cushion made the requirement larger**. An exact `0` is now honoured,
+and is checked FIRST — a disabled cushion does not depend on an islanded-load reading, so a
+missing measurement cannot resurrect the legacy band underneath it. Anything else nonsensical
+(negative, `NaN`, `Infinity`) still falls back: fail toward more cushion, never less.
+
+**A disabled cushion announces itself in the rationale** — "the N% reserve floor alone — the
+outage cushion is DISABLED, so nothing is held back for an outage". Without that, a night with
+no outage margin reads as one whose floor+cushion was comfortably covered, which is a standard
+that was lowered being reported as one that was met. Note also that `cushionShortfall` changes
+meaning under `disabled`: with the cushion at zero it fires only when the pack cannot hold the
+**reserve floor itself**, which is a stronger and rarer signal than the pre-v1.133.0 flag.
+Guards are mutation-proven load-bearing (`scripts/mutate-zero-cushion.mjs`, 6/6).
+
 **Objective mode: resilience vs cost (`ARB_OBJECTIVE`, `ARB_COST_MAX_SOC_PCT`) — v1.127.0, documented v1.132.1.**
 
 The planner sizes a buy against one of two objectives, selected by `ARB_OBJECTIVE`

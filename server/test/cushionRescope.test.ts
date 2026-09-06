@@ -88,7 +88,21 @@ test('a longer outage demands more, a shorter one less — monotone in hours', (
     dischargeEff: DISCHARGE_EFF, legacyCushionKwh: LEGACY,
   }).kwh;
   assert.ok(at(4) < at(8) && at(8) < at(24));
-  assert.equal(at(0), LEGACY, 'zero hours falls back rather than yielding a zero cushion by accident');
+  // v1.133.0 — this line used to assert `at(0) === LEGACY`, on the reasoning that
+  // a zero was more likely a slip than a decision. The owner has since made it a
+  // decision (2026-09-06: 10% floor, cushion off), so an exact 0 now yields a
+  // genuine zero on the `disabled` basis. The guard the old assertion was really
+  // protecting — that a MALFORMED value stays conservative — is unchanged and is
+  // now pinned against negative/non-finite hours in zeroCushion.test.ts.
+  assert.equal(at(0), 0, 'an exact zero is a decision and is honoured as one');
+  assert.equal(
+    outageCushionKwh({
+      islandedLoadKw: ISLANDED_KW, outageHours: -1, safetyFactor: 1.5,
+      dischargeEff: DISCHARGE_EFF, legacyCushionKwh: LEGACY,
+    }).kwh,
+    LEGACY,
+    'a malformed hours value still falls back — fail toward more cushion, never less',
+  );
 });
 
 test('the safety factor is monotone the STRICT way', () => {

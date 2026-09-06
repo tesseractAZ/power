@@ -286,7 +286,7 @@ export interface NightChargePlan {
    *  or the legacy flat band when no islanded-load measurement was available. */
   /** v1.125.0 — the cushion in kWh, as actually applied. */
   cushionKwh?: number;
-  cushionBasis?: 'islanded-outage' | 'legacy-pct';
+  cushionBasis?: CushionBasis;
   /** v1.127.0 — which ceiling bound the cost-mode target. */
   costCeilingBasis?: 'pv-headroom' | 'max-soc' | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
@@ -709,6 +709,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
    * flat band and quietly grant a weaker guarantee than either form intends.
    */
   const troughAtLift = (lift: number): { minKwh: number; minTs: number | null } => {
+    // v1.133.0 — ONLY the legacy fallback uses the whole-house trough. A
+    // `disabled` cushion keeps this form: the reserve floor is still the line,
+    // there is simply no margin above it.
     if (cushionBasis === 'legacy-pct') return houseTroughAtLift(lift);
     // The pack AT OUTAGE ONSET. The outage energy itself lives in targetFloorKwh
     // (reserve + cushion), so subtracting it here too would double-count it and
@@ -718,9 +721,14 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 
   // v1.125.0 — one phrase describing what the cushion IS, so both rationales
   // below describe the test that actually ran rather than the legacy band.
-  const cushionDesc = cushionBasis === 'islanded-outage'
-    ? `the ${reserveFloorPct}% reserve floor plus ${round1(inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS)} h of islanded backup load (${round1(cushionKwh)} kWh)`
-    : `the ${round1(reserveFloorPct + cushionPct)}% floor+cushion`;
+  // v1.133.0 — a disabled cushion MUST announce itself. Without this branch a
+  // night with no outage margin at all reads as "already covers the floor+cushion",
+  // which is true of a standard that was lowered rather than met.
+  const cushionDesc = cushionBasis === 'disabled'
+    ? `the ${reserveFloorPct}% reserve floor alone — the outage cushion is DISABLED, so nothing is held back for an outage`
+    : cushionBasis === 'islanded-outage'
+      ? `the ${reserveFloorPct}% reserve floor plus ${round1(inputs.outageCushionHours ?? DEFAULT_OUTAGE_CUSHION_HOURS)} h of islanded backup load (${round1(cushionKwh)} kWh)`
+      : `the ${round1(reserveFloorPct + cushionPct)}% floor+cushion`;
   const baselineTrough = troughAtLift(0);
   // v1.125.0 — the DISCLOSED trough stays the whole-house one: "if the entire
   // house ran off the pack" is still a true and useful thing to report, it is
@@ -730,9 +738,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // No shortfall projected → HOLD (no buy). Honest "you don't need to charge".
   if (baselineTrough.minKwh >= targetFloorKwh - 1e-9) {
     return {
-      ...nullPlan(inputs, true, cushionBasis === 'islanded-outage'
-        ? `Hold — the pack at window close (${round1((packAtWindowEnd_noBuy / fullKwh) * 100)}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`
-        : `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}; no charge needed.${preWindowNote}`),
+      ...nullPlan(inputs, true, cushionBasis === 'legacy-pct'
+        ? `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}; no charge needed.${preWindowNote}`
+        : `Hold — the pack at window close (${round1((packAtWindowEnd_noBuy / fullKwh) * 100)}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`),
       objective: 'none',
       // v1.125.0 — the hold path returns nullPlan(), which has no cushion scope;
       // carry the applied cushion here too or a HOLD night reports none.
@@ -1761,6 +1769,22 @@ export function costModeTargetKwh(o: {
 export const DEFAULT_OUTAGE_CUSHION_HOURS = 4;
 export const DEFAULT_ISLANDED_LOAD_SAFETY = 1.25;
 
+/**
+ * v1.133.0 — how the outage cushion was arrived at. Three genuinely different
+ * states that a single number cannot distinguish:
+ *
+ *  - `islanded-outage` — sized from a measured islanded load over a bounded
+ *    outage. The intended path.
+ *  - `legacy-pct` — no usable islanded-load measurement, so the flat
+ *    percentage-of-pool band stands in. Conservative fallback; also switches the
+ *    cushion test to the whole-house forward trough.
+ *  - `disabled` — the owner set the cushion to zero. NOT a measurement of zero
+ *    and NOT a fallback: the plan stops sizing for an outage at all. It keeps
+ *    the islanded-outage trough form, because the reserve floor is still the
+ *    line being held; only the margin above it is gone.
+ */
+export type CushionBasis = 'islanded-outage' | 'legacy-pct' | 'disabled';
+
 export function outageCushionKwh(o: {
   islandedLoadKw: number | null | undefined;
   outageHours: number;
@@ -1768,8 +1792,23 @@ export function outageCushionKwh(o: {
   dischargeEff: number;
   /** Legacy flat band, used when no islanded-load measurement is available. */
   legacyCushionKwh: number;
-}): { kwh: number; basis: 'islanded-outage' | 'legacy-pct' } {
+}): { kwh: number; basis: CushionBasis } {
   const { islandedLoadKw, outageHours, safetyFactor, dischargeEff, legacyCushionKwh } = o;
+
+  // v1.133.0 — DELIBERATELY ZERO IS NOT THE SAME AS UNMEASURABLE.
+  //
+  // The pre-v1.133.0 guard folded `outageHours <= 0` into the unmeasurable
+  // branch, so an owner who set the cushion to 0 h silently got the LEGACY FLAT
+  // BAND instead (15% of pool = 13.8 kWh on this plant) — the option was
+  // accepted, validation passed, and the setting did not take effect. Worse, the
+  // legacy basis also flips the cushion test to the whole-house forward trough,
+  // which is HARSHER, so asking for no cushion made the requirement larger.
+  //
+  // An explicit zero is a decision and is honoured as one. It is checked FIRST:
+  // a disabled cushion does not depend on an islanded-load measurement, so a
+  // missing measurement must not resurrect the legacy band underneath it.
+  if (outageHours === 0) return { kwh: 0, basis: 'disabled' };
+
   if (
     islandedLoadKw == null || !Number.isFinite(islandedLoadKw) || islandedLoadKw <= 0
     || !Number.isFinite(outageHours) || outageHours <= 0
