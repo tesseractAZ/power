@@ -1,3 +1,47 @@
+## v1.133.0 — zero cushion now means zero
+
+Setting `ARB_OUTAGE_CUSHION_HOURS` to `0` did not disable the outage cushion. The
+guard folded `outageHours <= 0` into the same branch as *"no islanded-load
+measurement available"*, so an owner asking for no cushion silently received the
+**legacy flat band instead** — 15% of pool, 13.8 kWh on this plant. The option was
+accepted, `validate-addon-config` passed, and the decision did not take effect.
+
+It was worse than inert. The legacy basis also switches the cushion test from the
+islanded-outage trough (the pack at window close) to the whole-house forward
+trough, which is **harsher** — so asking for *no* cushion made the requirement
+*larger*. Both halves of the setting inverted.
+
+An exact `0` is now a decision and is honoured as one, on a third basis value:
+`disabled`, alongside `islanded-outage` and `legacy-pct`. It is checked **first** —
+a disabled cushion does not depend on a load measurement, so a missing reading
+cannot resurrect the legacy band underneath a deliberate zero. Anything else
+nonsensical — negative, `NaN`, `Infinity` — still falls back, because a malformed
+value is not a decision: fail toward more cushion, never less.
+
+**A disabled cushion announces itself.** The rationale now reads "the N% reserve
+floor alone — the outage cushion is DISABLED, so nothing is held back for an
+outage". Without that branch, a night carrying no outage margin at all would read
+as one whose floor-plus-cushion was comfortably covered — a standard that was
+lowered, reported as one that was met. That distinction is the entire point of the
+change, and it is the same hazard v1.131.1 and v1.132.0 exist to remove.
+
+One consequence worth stating plainly: under `disabled`, `cushionShortfall` changes
+meaning. It no longer flags "could not fully meet the outage margin"; it fires only
+when the pack cannot hold the **reserve floor itself** — a stronger, rarer signal.
+Anything reading that flag as a proxy for outage readiness needs to know the
+standard moved underneath it.
+
+A v1.125.x test had pinned the old behaviour deliberately (`assert.equal(at(0),
+LEGACY, 'zero hours falls back rather than yielding a zero cushion by accident')`).
+That reasoning was defensible when nobody had asked for a zero cushion; it is now
+superseded by an explicit owner decision, so the assertion was updated rather than
+the fix weakened — and the guard it was really protecting, that a *malformed* value
+stays conservative, is now pinned separately against negative and non-finite hours.
+
+2,375 tests. 6/6 mutants killed (`scripts/mutate-zero-cushion.mjs`), including an
+exemplar reproducing the shipped fold-back verbatim and one that would silently
+apply the harsher whole-house trough to a disabled cushion.
+
 ## v1.132.1 — the option that could not reach the device
 
 `ARB_OBJECTIVE` and `ARB_COST_MAX_SOC_PCT` shipped in v1.127.0 with **no DOCS.md
