@@ -207,3 +207,516 @@ carried it. Also worth keeping for what it demonstrates: the honest empty state
 earned its keep within one deploy of existing, by contradicting the person who
 wrote it.
 
+## v1.131.1 — the standby detector was blind twice
+
+v1.131.0 removed the whole-house gate that made the inverter-standby detector
+unsatisfiable. Live-verifying it found every DPU **still** reporting
+`idleWatts: null` — and the reason is a second blocker the code review could not
+have found, because it is not in the code.
+
+`ac_out` reads **0 on all five Cores, with `acOutVol` also 0**. The Delta Pro
+Ultras feed the house through the SHP2 link, not their own AC output port, so
+that inverter stage is never energised and the register the detector trends is
+structurally zero. `ac_out > 0` cannot hold on this installation. The v1.131.0
+fix was necessary and is not sufficient; the detector's data source is simply the
+wrong one for this topology.
+
+Standby self-consumption is real and is not exposed on that register. Inferring
+it from pack drain (`bat_amp × bat_vol` while PV is dark and output is zero) is a
+different measurement and separate work, not something to improvise into a
+life-safety release the same afternoon.
+
+What ships now is the honest empty state. `InverterStandby.blockedReason` is
+`null` when a figure is published and otherwise says which empty it is —
+`no-ac-out-history`, `ac-output-stage-idle` (the live case), or
+`insufficient-idle-samples` — and the Advanced-Insights card prints that reason
+in place of the value instead of dropping the row. That is the entire point of
+this batch: a blank row reads exactly like a healthy one, which is how this
+detector hid for its whole life, and how it would have gone on hiding after a fix
+that looked correct in review and changed nothing on the device.
+
+18/18 mutants killed, including two new ones on the empty state itself.
+
+## v1.131.0 — five signals that were never earned, and a release that never happened
+
+Every defect in this batch is the same shape: a detector or a status field that
+**cannot report the thing it claims to report**, whose silence is indistinguishable
+from health. Three had been shipping that way since the feature was written.
+
+**The inverter-standby detector could not fire.** Its idle-sample gate was
+`pv < 20 W && panel_load < 20 W && 0 < ac_out < 200 W`, where `panel_load` is the
+SHP2's whole-panel draw. That panel carries the backup circuits of an occupied
+house and never drops below roughly 1.4 kW — live 7-day mean **1,445 W** — so the
+conjunct was false at every sample, for every DPU, for the entire life of the
+feature. The sample set stayed empty, `idleWatts` was permanently `null`, and the
+Advanced-Insights card rendered as *nothing to report*. Both surviving conditions
+are about the DPU itself: its own PV dark, its own AC output in the standby window.
+The SHP2 query that fed the dead conjunct is gone with it.
+
+Removing the house gate changes what the window contains, so the statistic changed
+with it. The (0, 200 W) window still admits small real loads, so the headline is now
+the **p10 floor** rather than the median: on a night with three samples at the true
+~45 W floor and seven on real load, a median publishes ~140 W of household draw as
+inverter overhead. The trend is fitted to one floor per day rather than to raw
+samples, so it tracks the inverter instead of how many small loads happened to land
+inside the window that night. Day buckets are UTC on purpose — the plant runs on MST
+(UTC−7, no DST), so a local 19:00→06:00 night falls inside one UTC date, while a
+local-midnight bucket would split every night in two.
+
+**The night-charge revert closed on a cloud ACK.** v1.79.0 established on the apply
+side that an ACK is not an actuation, after a write the SHP2 never took scored a
+phantom actuation and forfeited ~13 kWh. The mirror path kept the original bug: the
+revert stamped `revertedAtMs` on the ACK, and because the revert branch is gated on
+that stamp being null, the actuator then stopped looking at the panel entirely. A
+restore the panel accepted-and-ignored left the reserve pinned at the raised target
+with the ledger recording a clean, completed night — and that is the expensive end
+state, because the panel holds the raised value as its floor and buys grid at on-peak
+instead of discharging the pack the plan had just paid overnight rates to fill.
+A reverted night now verifies against the device, retries twice, then escalates once
+with a critical announce and a critical push naming the manual fix. A reading that is
+*neither* the restore target nor the raised target is treated as the owner moving
+their own floor: the actuator falls through rather than overwriting it.
+
+**The message-rate collapse detector never sampled a silent device.** It iterated the
+MQTT ingest counter map, which gains an entry only when a message arrives — so a
+device that has produced zero messages since process start is absent from it and was
+never sampled. The detector was armed for a 0.2 msg/min collapse and blind to a
+0.0 msg/min one, and a restart is exactly what converts the first into the second.
+Its own documentation calls the SHP2 "the single-point-critical alarm data source, so
+a silent rate-collapse is a real blind spot"; a totally silent SHP2 was the one case
+it could not see. Sampling is now driven from the device roster, so silence enters the
+existing dwell logic as the rate-0 reading it is.
+
+**The alert-telemetry exemplar described two different alerts.** A rollup's
+`alertId`/`title`/`severity`/`category` are one tuple, always written together from a
+single alert on the live path. The restart sidecar persisted three of the four, so a
+replay restored the most recent member's title while taking the id from whichever
+event came first in the JSONL window — routinely a different device.
+`/api/alert-telemetry` published Core 3's title beside Core 1's id. The tuple is now
+assembled in one function and persisted whole.
+
+**A dead push channel reported no failures.** `lastPushFailures` was assigned *after*
+the all-targets-failed throw. In the live single-target configuration that made the
+assignment unreachable on the only path that can fail — with one target, 100% down is
+the sole way to fail — so the field read `[]` both when the push channel was healthy
+and when it was completely dead, beside `reachesAPhone: true`. It is the only
+machine-readable push-health signal the add-on exposes.
+
+**`/api/broadcast/status` named two of three speakers.** `sipTargets` arrived in
+v1.25.0 and was threaded through dispatch and the log lines ("2 MA + 1 SIP") but not
+through `status()`. The omitted target is specifically the redundant channel designed
+to work when Music Assistant is down — which is exactly when an operator reads this
+route.
+
+**And v1.130.0 never actually shipped.** Its merge landed the code and the CHANGELOG
+section but not the `config.yaml` version bump. `tag-release.yml` is paths-filtered on
+that one file, so it was never evaluated: no tag, no image, no GitHub Release, and
+Home Assistant kept offering 1.129.2 — while every workflow on `main` reported green,
+because everything that ran did pass. The release did not fail; it silently did not
+happen. A `Release v…` PR must now declare the version it names in `config.yaml` and
+carry a CHANGELOG section for it, or CI fails (`scripts/check-release-pr.py`). The
+check was verified against the tree that actually failed.
+
+Sixteen mutants, 16/16 killed (`scripts/mutate-detector-honesty.mjs`), including an
+exemplar reproducing each of the five shipped defects verbatim. A seventeenth was
+written, run, and removed as provably equivalent rather than left standing as a
+permanent survivor.
+
+## v1.130.0 — what fifteen restarts did to the alarm telemetry
+
+The 2026-09-04 release run shipped thirteen versions. Each restart was individually
+cheap — ~7.5 s of downtime, no log-silence gap over 20 s, every boot polling inside a
+second. Collectively they corrupted the counters the auto-silencer reasons over and
+could void a night's held alarms. Four defects, all pre-existing, all amplified by
+cadence.
+
+**A restart was counted as a rising edge.** `recordRise` sits in the `if (!existing)`
+new-alert branch, which on `firstRun` is reached for every currently-active alert. The
+replay counter went 3862 → 4031 across the fifteen restarts: **+169 rises in 3.5 h
+against +32 in the preceding 18 h**, a ~28× rate increase caused purely by restarting.
+Rule 4 latches on rise volume against a low long-active fraction, so a restart pushes a
+family toward auto-silence from both directions at once — it adds a rise and can never
+add a longActive clear. Families on the two faulted Cores are already latched, and
+`pack-defective-*`, the alert carrying the RMA evidence, is in the same population. The
+durable onset sidecar already knew the answer: an id with a persisted onset from before
+this process started is a re-track, not a rise.
+
+**Episode durations were stamped from the in-memory `firstSeen`,** which every boot
+re-stamps. A `backup-soc-40` episode continuously true from 17:55:07 is on record as
+`raisedAt 19:45:14, durationMs 127883` — **128 seconds for a 1 h 52 m condition, a 52×
+truncation** — because a restart landed 12 s before the clear. That understates the RMA
+evidence trail, and worse, `neverClearedCount` is the only numerator holding a family
+below Rule 4's threshold, so truncation turns a multi-hour episode into a "shortClear"
+and accelerates auto-silencing. `alertOnset.ts` exists precisely to persist true onset;
+`retireTrackedAlert` simply predates it.
+
+**A quiet-hours hold spanning a restart was silently dropped.** With
+`CRITICAL_BREAKS_QUIET_HOURS` off — the owner's accepted posture — the 06:00 digest is
+the *only* delivery for anything firing between 23:00 and 05:00, criticals included.
+v1.86.0 persists the queue and its comment asserts rehydration is sufficient; v0.97.0's
+`pending` filter keys on an in-memory `queued` flag that rehydration does not restore,
+and `bootSeedNotified` then marks the re-tracked entry notified. The alert came back in
+the queue and could never re-enter `pending`. A restart inside the quiet window voided
+the night. An entry still queued and still active is still held, whichever process
+queued it.
+
+**The digest sidecar never emptied on disk.** Every exit branch persisted and *then*
+cleared `overnightResolved`, so all seventeen boots logged the identical "16
+resolved-overnight record(s)" — including the five after a digest had been sent. A stale
+id queued again on a later night while still active would appear in the digest twice,
+stamped with clock times from a previous night. Clear now precedes persist in all three
+branches.
+
+**And the add-on now names its own build at boot.** After thirteen releases and fifteen
+restarts, no line in its log could say which build produced any given behaviour; the
+audit had to date the v1.124.x cutover by inferring it from an HA Core schema-validation
+error. A log that cannot identify its own build cannot answer "did that fix take?" —
+which is the only question that matters after a deploy.
+
+Mutation-verified 6/6. Suite 2313/2313.
+
+## v1.129.2 — a second smart panel now fails loudly, and three dead mutation harnesses
+
+A second SHP2 is planned; it will carry the EV charger and the garage AC. The app
+resolves ONE panel via `find(kind === 'shp2')`, so on the day panel #2 is energised its
+Cores are absent from panel #1's `sources[]`, read as off-panel hardware, and — three
+20-second ticks later, and again after every restart — every alert carrying their SNs is
+stamped `annunciate: false`. No chime, no speech, no push, for every fault class except
+overheating. That includes `dpu-err-<sn>`: the error-533 family that has already failed
+on this plant.
+
+An audit of all 20+ files found **75 singleton assumptions, 40 of them silent-safety**.
+The full refactor is not in this release, because nothing is broken today and rewriting a
+live alarm system for hardware that does not exist yet is its own risk. What ships is the
+part that removes the SILENCE:
+
+- **A critical `shp2-multi-panel` alert**, raised on STATE so it fires whenever the panel
+  appears rather than needing anyone to be watching, and keyed on product identity as
+  well as projection so it is already standing during the pre-hydration window in which
+  the demotion streaks are accumulating. It is registered in `isNeverMutedAlert` and
+  carries no SN in its id, so nothing can mute it.
+- **The muting is disarmed while it stands.** Both mute lists derive from the membership
+  model, and with two panels that model is known unsound — a Core is absent for a WIRING
+  reason, not because it is bench hardware.
+- **Supervised writes are blocked** — none of them pins the SN it writes to, so a
+  wrong-panel write is a real hazard. The REVERT direction is deliberately still allowed:
+  blocking an apply is fail-safe, blocking a revert would strand the pool at a raised
+  reserve with a third of house capacity withheld during an outage.
+- **The membership roster is now the UNION across every panel** (Phase 1), so "off-panel"
+  means "on no known panel". Provably identical on a one-panel plant — a union over a
+  one-element list is that element — which is why it is safe to ship ahead of the
+  hardware. `findShp2` now pins the lowest SN instead of first-in-map, so which panel the
+  singleton paths describe cannot change between restarts.
+
+### Three mutation harnesses were dead, and nothing said so
+
+`mutate-pool-membership` aborted on its first mutant from v1.117.0 until now: that
+release split a one-line ternary into three lines, orphaning four of its six anchors.
+`mutate-session-self-heal` and `mutate-telemetry-blind` were dead too — one anchor moved
+into a new binding, one became ambiguous when its guard was duplicated. All three are
+repointed and killing again (6/6, 8/8, 7/7).
+
+The reason nobody noticed is that **CI never ran the harnesses**, and an aborted harness
+reads exactly like a clean one. Running them in CI is too slow — each replays the full
+2283-test suite once per mutant — but checking that their anchors still RESOLVE is nearly
+free. `scripts/check-mutant-anchors.mjs` does that for all 85 anchors across 15
+harnesses, and now runs on every push. A refactor that moves code out from under a mutant
+fails CI instead of silently disarming it.
+## v1.129.1 — the boot seed retried, and no longer silent
+
+v1.129.0's islanded-load boot seed made one immediate attempt wrapped in an empty
+`catch {}`. On the 2026-09-04 20:23 boot it emitted no log line at all and the plan
+stayed on the legacy cushion band — and the swallowed error made it impossible to
+tell whether the call had failed or never run. The analytics worker is cold at
+boot, so a single immediate attempt was the wrong shape; and a diagnostic path
+that hides its own failure is precisely the pattern this release series has spent
+its time removing everywhere else.
+
+The seed now retries at 0 s / 15 s / 60 s / 180 s, stops at the first success, logs
+each failed attempt at debug, and says so plainly if it exhausts them — at which
+point the 30-minute recompute tick carries it and the cushion falls back to its
+legacy band, which is fail-closed, just less precise.
+
+Suite 2295/2295.
+
+## v1.129.0 — the four items that were actually still open
+
+A 15-item sweep of the tracked open queue (2026-08-05 → 08-17) against v1.128.1,
+each verdict given an adversarial second opinion. **Eleven were already fixed** by
+releases in between — including both HIGH items, which is worth recording:
+phantom actuation closed in v1.79.0 (the readback path; the live record shows
+applied 22:55:14 → verified 22:56:14), and the false all-clear during drawdown
+closed in v1.78.0 by `resolveHandoffOwner`. Four remained, all four fixed here.
+
+**The second SHP2 (HIGH).** `shp2ConnectedDpuSns` resolved through a single
+`find(kind === 'shp2')`, so a second panel simply would not exist: its DPUs would
+be absent from the roster, `advanceOffPanelStreaks` would read them as off-panel,
+and after three ticks their alerts would be demoted to `annunciate: false` — a
+whole battery bank silently unmonitored, with no warning, no alert and no log
+line. `find` also picks by device-list arrival order, so on a two-panel plant it
+is not even stable which panel wins across a restart. The oracle now UNIONs
+`sources[]` across every panel (`allShp2s`), which in one place repairs
+`isShp2Connected`, `isExpectedOfflineSpare`, `isHomePoolDpu`, `homeCoreCoverage`,
+`homeFleetMeanSoc`, `aggregateFleetFlow` and the off-panel annunciation demotion.
+Single-panel behaviour is byte-identical, asserted by test.
+
+**Runway coherence (MED).** The alarm could print "time to empty 1 h" beside
+"time to reserve 20.5 h" — the pool drains *through* the floor on its way to
+empty, so above the floor that pair is impossible. Usual cause is the empty
+hysteresis latch holding a stale finite while reserve comes from the current sim.
+`coherentRunwayPair` clamps reserve back to empty above the floor and leaves the
+pair alone below it, where it is legitimate (the reserve detector only arms above
+the floor, so under it the figure is the next crossing after a modelled recharge).
+The repair is one-directional — it may only SHORTEN the runway, never lengthen it,
+and never turns a finite projection into null — with a sweep asserting that.
+`runwayPairClamped` surfaces on `/api/runway` so the repair is auditable.
+
+**Quiet-hours inversion, residual (LOW).** v1.78.0 held owed resolves inside the
+notify quiet window on the falling-edge path, but the once-per-boot orphan sweep
+called `sendNotification` directly with no quiet check at all. That mattered more
+after v1.124.0 made a resolve reach the phone for real: a restart inside the
+window whose condition cleared while the process was down pushed
+"Resolved: …" to the handset ten minutes after boot — the exact "good news wakes
+you" inversion v1.78.0 closed everywhere else. The sweep now honours the same rule
+and DEFERS rather than drops (it does not latch `orphanSweepDone` while holding).
+The rule itself is extracted as `holdResolveForQuietHours` and finally has a test;
+it had none, so a refactor could have reopened it with a green suite.
+
+**Islanded-load durability (MED).** v1.125.1 populated the outage-cushion input as
+a side effect of the `/api/ha-state` handler, so every restart dropped the cushion
+back to its legacy flat band until something happened to request that route —
+observed still `legacy-pct` more than an hour after the v1.128.1 deploy, and
+unchanged across a three-minute probe after priming it, because the plan only
+recomputes every 30 minutes. Safety-relevant sizing must not rest on an unrelated
+route being hit. It is now persisted to a sidecar and seeded at boot, refreshed on
+the same 30-minute tick that recomputes the plan consuming it, and seeded once at
+startup. Staleness still fails closed at 6 h.
+
+Mutation-verified 5/5. Suite 2293/2293.
+
+## v1.128.1 — the twelve circuit sensors the rename did not reach
+
+v1.128.0 renamed 84 entities and missed 12. Live-confirmed: 96 doubled names became
+12, and the survivors were exactly the per-circuit energy sensors.
+
+The circuit sensors are republished only when a latch signature changes, and that
+signature was built from the *derived display name* — an intermediate. v1.128.0
+changed the template **around** that name, not the name itself, so the signature was
+byte-identical and the caller correctly concluded there was nothing to republish. The
+rename never reached Home Assistant for those twelve.
+
+The signature is now built from the string that is actually published. Any change to
+what goes out — the template, a suffix, or the display name — necessarily changes the
+signature. The regression test asserts that structural property directly: every
+published `name` must appear in the signature. Mutation-verified 4/4, including a
+revert to the derived name (this bug) and a revert to the raw channel name (the older
+bug the code comment already warned about).
+
+Entity IDs are unchanged, as in v1.128.0.
+
+## v1.128.0 — entity names no longer repeat the device name
+
+Home Assistant composes a friendly name as `${device.name} ${entity.name}`. The device
+is "EcoFlow Panel" and every entity was *also* named "EcoFlow …", so the fleet rendered
+as **"EcoFlow Panel EcoFlow Home Consumption"**. Forty of the entities exposed to the
+house voice assistant read that way, and a spoken query had to say the whole thing:
+*"what is the ecoflow panel ecoflow home consumption"*.
+
+The alarm switches already had it right (`Alarms — Critical (P1)` renders as "EcoFlow
+Panel Alarms — Critical (P1)"), which is what established the rule rather than guessing
+at Home Assistant's behaviour. Eighty-four static entity names and the templated
+circuit-energy name now follow the same convention.
+
+**Entity IDs are unchanged.** Discovery entities are keyed on `unique_id`; all 84 are
+byte-identical and the dedup version is untouched, so dashboards, automations, recorder
+history and the Assist exposure list keep working. Only the displayed name changes. An
+entity renamed by hand in the UI keeps that name, as before.
+
+The regression test asserts the rule over the whole entity set rather than per entity,
+because the defect is one entry disagreeing with its peers — which no single-entity
+assertion can express. Mutation-verified 4/4, including a lowercase variant.
+
+## v1.127.0 — a cost objective for the overnight buy
+
+The night-charge advisor has only ever had one objective: hold the reserve floor plus
+the outage cushion. It knew nothing about rates — no `cents`, `rate` or `tariff`
+reference appeared anywhere in its sizing. `index.ts` already resolved the tariff to
+pass the advisor a period *identity*, and discarded the price.
+
+`ARB_OBJECTIVE: resilience | cost` (default `resilience`, unchanged) adds the missing
+one.
+
+**The measured economics.** Rates are configured and confirmed on this plant:
+overnight 13.1 ¢/kWh, off-peak 17.0 ¢, on-peak summer 41.6 ¢, round-trip 0.86. A kWh
+bought overnight delivers from the pack at 15.23 ¢, so it beats off-peak by **+1.77 ¢**
+and on-peak by **+26.37 ¢**. Seven-day import is 453.89 kWh at $81.36 = **17.9 ¢/kWh
+average** against a 13.1 ¢ window rate.
+
+**The binding constraint is not money, it is sunlight.** Every rate beats 15.23 ¢, so
+the naive answer is "always fill" — and it is wrong. A pack too full to accept the
+morning's solar curtails it, and a curtailed kWh costs the full 15.23 ¢ paid for the
+grid kWh occupying its place: **8.6× the weekend-carry gain.** So cost mode fills to a
+ceiling, most-preferred first:
+
+1. `fullKwh − morningPvSurplusP90Kwh` — room for tomorrow's P90 surplus.
+2. `ARB_COST_MAX_SOC_PCT` (default 90) — a hard cap for when the forecast band does not
+   reach window-end +14 h, which is exactly when that surplus reads null. The plan never
+   fills to the brim merely because it could not check.
+
+The two combine with `min`, so a present forecast can only ever lower the ceiling.
+
+**Cost mode is bounded below by the resilience answer**, so switching objective can
+never buy less or shrink the safety margin — the only direction it moves the purchase is
+up. There is a test sweeping resilience targets and forecast states asserting exactly
+that, and it is the mutant that dies first if the bound is removed.
+
+Why this matters for the weekend: on-peak import is 0 on most days but was **22.89 kWh
+on Fri 08-28** — the day whose charge window is truncated to one hour by the weekend
+day-of-week boundary. At 41.6 ¢ against 13.1 ¢ that is roughly **$6 of avoidable on-peak
+in a single Friday**, and it recurs weekly. Filling toward the ceiling on Thursday and
+Friday is what carries the pack across a weekend that has no overnight window at all.
+
+Mutation-verified 3/3. Suite 2274/2274.
+
+## v1.126.1 — every GitHub Release has been shipping empty notes
+
+The release-notes extractor in `images.yml` matched `^## <version>` against a
+CHANGELOG whose headers are all written `## v<version>`. The `v` prefix meant it
+never matched **any** release, so every GitHub Release ever cut by this pipeline
+carried the `_(see CHANGELOG.md)_` placeholder instead of its notes. Nothing failed,
+which is exactly why it went unnoticed.
+
+- The pattern now accepts an optional `v`.
+- A missing section **fails the job loudly** instead of falling back to a placeholder.
+  A silent default is how this hid; shipping a Release with no notes should not be the
+  quiet outcome of an authoring mistake.
+
+Also backfilled: v1.120.0 through v1.125.1 were released during a single long session
+and never got CHANGELOG sections at all — they were documented in DOCS.md and in their
+pull requests, but not where the release pipeline looks. Nine sections written, and the
+nine GitHub Releases re-published from them.
+
+The repository description now mentions companion-app push, since v1.124.0 made that a
+real delivery channel rather than a drawer card.
+
+## v1.126.0 — dead code removed, documentation caught up
+
+Housekeeping after the v1.120–v1.125 run.
+
+**Dead code.** A fresh unused-export sweep over `server/src` found 8 exports of
+1,212 referenced nowhere — including in tests and `scripts/`. Seven were removed;
+`saveModel` was kept because `scripts/train-pack-risk.ts` uses it, which the first
+pass missed by scanning only `src` and `test`. Re-scan: **0 unreferenced of 1,205.**
+
+- `ALARM_RUNG_ORDER` (alertPriority) — derived constant nothing read.
+- `offsetAdoptedAtMs` (clockOffset) — observability accessor with no consumer.
+- `__resetHaStateCache`, `resetPollState` — test seams no test used.
+- `getLastKnownRoster` (index) — superseded by the v1.121.0 membership publisher.
+- `getLastKnownHomeRoster` (shp2Membership) — added in v1.121.0 and never called;
+  dead on arrival. Its `set`/`reset` siblings are used and stay.
+- `nightChargePlan` (telnet/dataProvider) — a thin wrapper over
+  `nightChargePlanIfFresh`, which is the one actually used.
+
+**Documentation.** DOCS.md still described the ntfy / Pushover / webhook channels
+that v1.124.0 deleted — including a config table listing five options that no longer
+exist and a severity→priority map for transports that are gone. Rewritten to describe
+what actually ships: the HA drawer card, the `notify.mobile_app_*` push, and the
+critical-only Do-Not-Disturb payload. The v1.123.0 section that told the reader `ha`
+cannot reach a phone now carries a superseded-by marker rather than standing as a
+contradiction. README gained the notification model and the re-scoped outage cushion.
+Stale comments in `alertMonitor.ts` and `alertPriority.ts` referring to the deleted
+priority maps were corrected.
+
+Not touched: `dead-code-inventory-2026-07-27.md` and
+`night-charge-write-path-proposal-2026-07-31.md` at the repo root are matched by
+`.gitignore` (`/*-inventory-*.md`, `/*-proposal-*.md`) and are deliberately local
+working documents, not repository content.
+
+No behaviour change. Suite 2263/2263.
+
+## v1.125.1 — size the cushion on the representative load, not a spot reading
+
+Live verification of v1.125.0 caught its own calibration error. The shipped plan
+reported `cushionKwh: 50.7`, which back-solves to an islanded load of 3.97 kW — while
+the release had been calibrated against 1.445 kW.
+
+Both readings were real. Panel load swings ~3x across a day (1,445 W at 00:50 MST;
+3,971–4,038 W the same evening), so reading it instantaneously made the cushion, and
+therefore the nightly purchase, depend on *when* the plan happened to run — and the
+sample used was a quiet-hour trough.
+
+The basis is now the 7-day mean: `selfCons.loadKwh` is already the SHP2 `panel_load`
+energy over seven days and is fetched on the HA-state path anyway, so it costs nothing.
+**751.36 kWh / (7 × 24) = 4.47 kW.** The cache goes stale after 6 h, falling back to the
+legacy cushion rather than sizing against a figure nobody refreshed.
+
+Defaults recalibrated against what the plant can reach. The charger delivers at most
+7.2 kW × 6 h = 43.2 kWh, so from a 25% evening SoC a clean night reaches ~72%. Eight
+hours at 1.5x needed **78%** — a different permanently-true flag, which is the bug the
+re-scope exists to remove. **Four hours at 1.25x needs ~42%**: reachable on a clean
+night, missed when the EV contends for the grid input. A test pins the default inside
+the reachable band in both directions.
+
+The honest headline: this plant carries its protected panel for about **four hours** at
+a typical post-charge state, not a day.
+
+## v1.125.0 — the outage cushion, re-scoped to something reachable
+
+`ARB_OUTAGE_CUSHION_PCT` was a flat 15% of pool tested against a grid-blind forward
+simulation that runs the **whole house** off the battery for the entire remaining 25–49 h
+forecast. On this plant that is P90 load 156–185 kWh/day against a 92.16 kWh pool, so the
+trough hit zero 1–8 h after window close on **7 of 7 nights** and `cushionShortfall` was
+pinned true by arithmetic. Being a constant, it silently exempted every night from three
+mechanisms at once — the under-buy pool, the buy de-bias learner, and the engine-fault
+strike detector.
+
+The model described something the hardware does not do. When the grid drops the SHP2
+carries its **backup circuits**; the rest of the house is dead. Measured live:
+`panel_load_watts` 1,445 W against `runway_recent_load_watts` 4,863 W.
+
+The cushion is now `outageHours × islandedLoadKw × safetyFactor / dischargeEff`, tested
+against the pack at window close. New options `ARB_OUTAGE_CUSHION_HOURS` and
+`ARB_ISLANDED_LOAD_SAFETY` (monotone the **strict** way — raising it buys more). No PV is
+credited: an outage can begin at dusk.
+
+**Fail-closed**: with no islanded measurement the legacy band *and* the legacy
+whole-house trough both stand; the pair is never mixed. The whole-house trough is still
+disclosed as `minProjSocPct`.
+
+Mutation-verified 3/3, including the bridge bug this change hit:
+`buildNightChargeInputs` destructures field-by-field, so inputs added to both interfaces
+still arrived `undefined` and took the legacy path. Only the end-to-end test caught it.
+
+## v1.124.2 — wire the notify options to the process, and guard the bridge
+
+v1.124.0 shipped `NOTIFY_HA_PUSH_TARGETS` and `NOTIFY_CRITICAL_BYPASS_DND` into the
+schema, the config UI and the code — but not into `rootfs/etc/services.d/ecoflow-panel/run`,
+which is what turns an add-on option into an environment variable. The option was stored
+correctly and the server saw nothing: `/api/notify/status` reported `pushTargets: []` with
+the target sitting in the add-on config.
+
+Nothing in the build could catch it — TypeScript cannot see a shell script, and every unit
+test passes because it sets `process.env` directly. The suite was green. It surfaced only
+from checking the *feature* on the live system.
+
+Second occurrence of this shape (v0.33 shipped a keybinding wired everywhere except the
+literal that reaches production), so the fix includes guards for the class: every schema
+option must be exported or explicitly exempted; the run script must not export keys the
+schema no longer declares; and `NOTIFY_CRITICAL_BYPASS_DND` must use the `1/0` convention,
+because this file uses two and `notify.ts` reads `!== '0'` — exporting `"false"` would read
+as **true** and silently keep the DND bypass on.
+
+## v1.124.1 — the Spanish config UI, and a local guard for it
+
+v1.124.0 updated `en.yaml` but not `es.yaml`, so the Spanish config UI would have shown
+five descriptions for options that no longer exist and the raw KEY as the label for the two
+new ones. The repo's own `validate-addon-config` caught it in CI.
+
+The real mistake was merging past a red CI: the merge step ran unconditionally after the
+polling loop instead of gating on the conclusion, so a check doing its job exactly right was
+bypassed.
+
+New test `EVERY language file tracks the schema — not just English` walks schema keys
+against every `translations/*.yaml` in both directions. The local suite passed 2244/2244
+while `es.yaml` was broken; it now fails, verified by deleting a key and watching it go red.
+
