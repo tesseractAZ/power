@@ -1,3 +1,42 @@
+## v1.132.1 — the option that could not reach the device
+
+`ARB_OBJECTIVE` and `ARB_COST_MAX_SOC_PCT` shipped in v1.127.0 with **no DOCS.md
+section at all** — `grep -c` returned 0. A whole engine mode arrived undocumented,
+and that omission is why a value could be chosen that does nothing.
+
+**`ARB_COST_MAX_SOC_PCT` is not deliverable above 50.** The actuator writes exactly
+one field — the panel's backup-reserve setpoint — and it is capped at 50 in two
+independent places: `clampReserveTarget` in the actuator, and `setBackupReserveSoc`'s
+own range check, which refuses out-of-range before any network call. The option's
+schema is `int(50,100)`: **its minimum equals the write's maximum**, so every legal
+value produces the identical instruction. Charge power binds first in any case — a
+six-hour weeknight tops out near 60% SoC even with the clamp removed — so the
+documented 90% ceiling is unreachable by two independent limits. Live corroboration:
+an armed plan carrying `setpointSocPct = 100` produced an actuation `targetPct = 50`.
+
+The option's own description promised "the hard ceiling cost mode charges to" and said
+nothing about the envelope. It now discloses it, in both languages. `ARB_GRID_INPUT_CAP_KW`
+already documented this kind of coupling; this option should have from the start.
+
+**Cost mode is also rate-blind**, which the name does not suggest: `costModeTargetKwh`
+reads no tariff. "Cost" means *fill further*, on the premise that overnight energy is the
+cheapest the day offers — not that the planner optimises against the rate table.
+
+**And the config block header was false.** It read *"Night-charge TOU-arbitrage advisor
+(ADVISORY — never writes to any device)"* above a block containing `NIGHT_CHARGE_MODE`,
+whose live value on this deployment is `supervised`. It now states when the engine writes
+and what it writes.
+
+**The cost-check reorder was investigated and not shipped.** Moving the objective check
+above the no-shortfall hold would let cost mode fire on nights that currently return early.
+Measured over the trailing seven ledger rows: exactly **one** held, and it held because a
+one-hour Friday window could not serve the requirement — not because the night was
+comfortable. The addressable population is close to empty, `actual_onpeak_import_kwh` is 0
+on every scored night, and the per-night ceiling is 8.09 kWh of pack (the gap between the
+41.2% hold bar and the 50% write clamp). Documented rather than built.
+
+Documentation and option text only — no code, no behaviour change. 2,364 tests.
+
 ## v1.132.0 — five true records that read as false ones
 
 Nothing here computes a wrong number. Every value was already correct; each was
