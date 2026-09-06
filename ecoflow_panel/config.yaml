@@ -1,5 +1,5 @@
 name: Power
-version: "1.132.0"
+version: "1.132.1"
 slug: ecoflow_panel
 description: >-
   Live dashboard + control-room TUI for an EcoFlow off-grid home — SHP2,
@@ -222,7 +222,9 @@ schema:
   LOAD_SHEDDING_SHED_ENTITIES: "str?"
   LOAD_SHEDDING_RUNWAY_THRESHOLD_H: float(0,168)
   LOAD_SHEDDING_RESTORE_MARGIN_H: float(0,168)
-  # Night-charge TOU-arbitrage advisor (ADVISORY — never writes to any device)
+  # Night-charge TOU-arbitrage engine. Writes ONLY when NIGHT_CHARGE_MODE is
+  # supervised or auto (default advisory writes nothing); the single write is the
+  # panel backup-reserve setpoint, clamped to 10-50. See DOCS.md §8b.
   NIGHT_CHARGE_ADVISOR_ENABLED: bool
   NIGHT_CHARGE_MODE: list(advisory|supervised|auto)
   ARB_OUTAGE_CUSHION_PCT: int(0,40)

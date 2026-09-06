@@ -8633,6 +8633,44 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
 
 **Deadline phrasing (v1.51.2).** The announced cancel deadline is **day-qualified beyond 24 h** ("on Sunday at 11:55 PM") in both the notification and the spoken broadcast: weekend tariff semantics routinely resolve a Saturday-evening plan's window to Monday 00:00, putting the write moment ~28 h out, where a bare clock time would read as tonight. The spoken text also carries the `cushionShortfall` disclosure whenever the plan discloses one — the audible channel is never quieter about residual risk than the text channel.
 
+**Objective mode: resilience vs cost (`ARB_OBJECTIVE`, `ARB_COST_MAX_SOC_PCT`) — v1.127.0, documented v1.132.1.**
+
+The planner sizes a buy against one of two objectives, selected by `ARB_OBJECTIVE`
+(`resilience` | `cost`, default `resilience`):
+
+- **`resilience`** — buy exactly enough that the post-window trough holds the reserve floor
+  plus the outage cushion. The buy is a *requirement*; anything beyond it is waste.
+- **`cost`** — the resilience answer is a **floor**, not a target. `costModeTargetKwh`
+  (`nightChargeAdvisor.ts`) raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool,
+  pool − morning-PV-surplus P90)` and records which of the two bound it in the ledger's
+  `cost_ceiling_basis` column (`'max-soc'` | `'pv-headroom'`). It is bounded below by the
+  resilience target, so **the safety margin can never shrink when the objective changes**;
+  the only direction cost mode moves a buy is up. Every physical cap downstream — charge
+  power, pool headroom, EV contention — is re-applied unchanged.
+
+Three properties an operator needs before setting these:
+
+1. **`ARB_COST_MAX_SOC_PCT` is not deliverable above 50.** The actuator's only write is the
+   panel's backup-reserve setpoint, and both `clampReserveTarget` (`nightChargeActuator.ts`,
+   `Math.min(50, Math.max(10, …))`) and `setBackupReserveSoc`'s own range check
+   (`ecoflow/commands.ts`) cap it at 50. The option's schema is `int(50,100)` — its minimum
+   equals the write's maximum — so **every legal value produces the same instruction**, and
+   anything above 50 is advisory-only. Charge power binds first regardless: a six-hour
+   weeknight tops out near 60% SoC even with the clamp removed. Raising the achievable
+   ceiling would need a force-charge write path, which this engine does not have
+   (`setChannelForceCharge` exists but is only ever called with `on: false`).
+2. **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" here means *fill
+   further*, on the premise that overnight energy is the cheapest the day will offer — not
+   that the planner optimises against the rate table. The tariff model informs the *window*,
+   not the *target*.
+3. **The cost question is only asked on nights that need a buy.** The no-shortfall hold
+   returns before the objective is read, so on a night whose projected trough already clears
+   floor + cushion, `ARB_OBJECTIVE` has no effect. Measured 2026-09-06 over the trailing
+   seven ledger rows: **one** row held, and it held because a one-hour Friday window could
+   not serve the requirement — not because the night was comfortable. On this plant the
+   comfortable-hold case is rare, so moving the objective check earlier would address a
+   population that is close to empty (see `docs/PERFORMANCE.md` §3).
+
 **Owner cancel:** `POST /api/night-charge/cancel` (write-auth; surfaced as a button on the `NightChargeCard`). Before the apply moment it disarms; after a successful apply it triggers an immediate revert on the next actuator tick.
 
 **`auto` semantics:** `effectiveActuationMode(mode, writeReady)` is the binding enforcement point — `auto` is structurally demoted to `supervised` while the readiness gate has not graduated, and any future auto-only relaxation (e.g. dropping the evening cancel checkpoint) must branch on the demoted mode, never the raw config value. `advisory` remains the default; enabling a write mode is an explicit owner action in the add-on configuration.
