@@ -86,6 +86,15 @@ time-of-use rate.
   fail-closed write-readiness gate graduates **auto** mode only on real
   actuated-night evidence (≥21 scored nights, under-buy ≤10%, delivery bias in
   [0, 5] kWh, band coverage 78–92%, zero engine-fault strikes).
+  `ARB_OBJECTIVE` selects the sizing objective: **`resilience`** buys exactly the
+  requirement, **`cost`** treats that requirement as a floor and fills further
+  toward a solar-headroom or state-of-charge ceiling — bounded below by the
+  resilience answer, so the safety margin can never shrink when the objective
+  changes. Two honest caveats, both documented in
+  [`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md`](docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md):
+  cost mode **fills further, it does not price** — it reads no tariff — and its
+  ceiling option cannot exceed the device's 50% reserve write envelope, so values
+  above that are advisory only.
 - Two advisory round-trip-aware dispatch planners (greedy + a model-predictive
   DP), compute-only, never auto-applied.
 
@@ -183,20 +192,29 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # ~1,750 tests
-cd server && npx tsc --noEmit            # server type-check
+cd server && npm install && npm test     # ~2,380 tests
+cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
+cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
 ```
 
 **Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
 open a PR whose squash subject starts `Release vX.Y.Z …`. `main` is branch-
-protected: the CI checks (both type-checks, the Dockerfile smoke build, the docs
-`.docx`+`.pdf` build, and CodeQL) must pass, and every engine change also clears
-an **adversarial multi-agent review** before it can reach the alarm path. Merging
+protected: the CI checks (both type-checks, the test suite, the mutation-harness
+anchor check, the secrets scan, the add-on config/translation validator, the
+Dockerfile smoke build, the docs `.docx`+`.pdf` build, and CodeQL) must pass, and
+every engine change also clears an **adversarial multi-agent review** before it
+can reach the alarm path. Merging
 a `Release …` subject fires `tag-release.yml`, which creates the `vX.Y.Z` tag and
 dispatches `images.yml` — that workflow runs the test suite, builds the multi-arch GHCR
 image and cuts a GitHub Release (with the docs attached); the add-on then updates
 in place. Full runbook in DOCS.md ch.12.
+
+⚠️ **`tag-release.yml` is paths-filtered on `ecoflow_panel/config.yaml`.** A release PR that
+forgets the version bump does not fail — the workflow is never evaluated, so there is no tag, no
+image and no Release, while every check on `main` stays green. `scripts/check-release-pr.py`
+(CI job *"Release PR declares the version it names"*) now fails any `Release vX.Y.Z` PR whose
+`config.yaml` version or CHANGELOG section does not match the title.
 
 ## Quality & accuracy
 
@@ -219,9 +237,20 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression: `scripts/mutate-{rate-floor,telemetry-blind,red-replay,peak-grid-draw,resolve-evidence,session-self-heal}.mjs`
-each apply anchor-asserted mutants to the live source and require the suite to
-kill every one.
+regression. There are **18 harnesses** (`scripts/mutate-*.mjs`) holding **100+
+anchor-asserted mutants**; each reverts a guard in the live source and requires the
+suite to kill it. A harness aborts loudly rather than reporting green if an anchor
+stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
+reason — a harness whose anchors have drifted does not fail, it stops running, and
+an aborted harness reads identically to a clean one.
+
+The recurring failure this codebase is built against is **silence that looks like
+health**: a detector whose gate can never be true, a release that never ran, a
+status field computed and then published in a shape nothing can consume. Empty
+states are therefore required to say *which* empty they are — `blockedReason`,
+`arm_disposition`, `cost_ceiling_basis`, `CushionBasis` — rather than rendering
+blank. `docs/PERFORMANCE.md` §6 keeps a standing register of what is currently
+inert or unreachable, so a quiet reading is not mistaken for a healthy one.
 
 ## Security
 

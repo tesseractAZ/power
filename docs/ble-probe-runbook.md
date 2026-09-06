@@ -1,9 +1,24 @@
 # BLE probe runbook — optional cloud-independent DPU cross-check
 
-> **Status: experimental, diagnostic-only.** This is the procedure to evaluate reverse-engineered
-> EcoFlow BLE as an *optional secondary* telemetry source. BLE is **never** an alarm authority on
-> this system (see the hard rules at the bottom). Run the probe to gather evidence; do **not** wire
-> BLE into the alarm path without passing every decision gate below.
+> **Status: NOT PURSUED — retained as a reference procedure (reviewed 2026-09-06).**
+>
+> This runbook was written 2026-06-25 (v0.72.0) to evaluate reverse-engineered EcoFlow BLE as an
+> *optional secondary* telemetry source. **The motivating problem was solved another way and the
+> probe was never carried through**, so nothing below has been executed against this fleet — treat
+> every step as untried.
+>
+> Two things settled it. First, the recurring "cloud-offline" pain that prompted it turned out to
+> be an EcoFlow cloud **session** wedge rather than radio loss, and the fix that shipped is the
+> cloud-wedge-vs-real-outage classification plus LAN reachability per DPU — see the closing
+> section. Second, the decision gates below were never going to be passed by a source with BLE's
+> range, decode fragility and per-firmware breakage: it can never be an alarm authority here, and
+> the *only* role left for it was a nice-to-have cross-check nobody needed once the real cause was
+> understood.
+>
+> It is kept because the research is sound and the constraint it documents is durable — the DPU
+> and SHP2 expose **no LAN-IP protocol at all**, so if a cloud-independent path is ever wanted
+> again, this is the only one that exists and these are the gates it would have to clear. Do
+> **not** read it as an open invitation to run the probe.
 
 ## Why BLE (and why only as a cross-check)
 Research (2026-06-25, see `memory/project_ecoflow_lan_feasibility.md`) established that the Delta Pro
