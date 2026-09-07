@@ -10,6 +10,7 @@ import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 // the device's own schedule sit together but are never confused.
 import { NightChargeCard } from '../cards/NightChargeCard';
 import { SectionHeader } from '../components/sections';
+import { DbExportButton } from '../components/DbExportButton';
 
 /**
  * SHP2 strategy view: per-circuit load-shed priorities and the time-of-use
@@ -70,6 +71,22 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
         />
       </div>
       {predictions}
+
+      {/* ── Maintenance (v1.135.0) ────────────────────────────────────────
+          The database snapshot is a COPY, not a mirror: it only changes when
+          someone asks. It sat two weeks stale and was browsed as though live,
+          missing every night in between. Surfacing its AGE is the point of
+          putting it here — the button is the easy half. */}
+      <div className="pt-2">
+        <SectionHeader
+          accent="grid"
+          title={<>Maintenance</>}
+          takeaway="The published database copy, and how old it is."
+        />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <DbExportButton />
+      </div>
 
       {/* Load-shed strategy */}
       <div className="card">
