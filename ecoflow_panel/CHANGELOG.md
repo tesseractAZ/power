@@ -1,3 +1,57 @@
+## v1.134.0 — the Energy page can finally show money
+
+The HA Energy Dashboard showed **no cost at all**. `stat_cost`,
+`entity_energy_price` and `number_energy_price` were all null on the grid source,
+so every money column was blank despite a confirmed five-rate tariff. The three
+USD sensors that exist could not be used: they are published `state_class:
+measurement` with no `device_class`, which compiles mean/min/max and no sum, and
+the Energy cost column reads the sum. Computed, then published in a shape nothing
+can consume — the same pattern as v1.130–v1.133.
+
+**`entity_energy_price` is the only one of HA's three options that is correct on a
+time-of-use plan.** HA's own cost sensor accrues `(energy − previous) × price` on
+every state change of the *energy* entity, sampling the price fresh each time, so
+each delta is multiplied by the rate in force **while it flowed**. A single
+`number_energy_price` against an 8.2–44.2 c/kWh spread is wrong by construction: a
+10 kWh overnight + 10 kWh on-peak day truly costs $5.72, and one scalar gives
+20p — right only at p = $0.286 and only for that exact mix. `stat_cost` would
+need a monotonic monetary accumulator that does not exist, and the add-on's own
+cost integrates a *superset* of the mapped grid statistic, so money and kWh would
+never reconcile to any rate.
+
+New sensor `ecoflow_grid_price_now` — **`USD/kWh`, not `USD`**, and deliberately
+no `device_class`: `monetary` describes an amount of money, not a price, and HA
+mints its own monetary/total cost sensor from this one. It emits **null** rather
+than a fallback rate when the tariff is unconfirmed; a silent off-peak default
+would reintroduce exactly the mispricing the entity exists to remove.
+
+**The tariff rates were also wrong, and the September bill says how wrong.** APS
+prints a per-tier base rate that is not what you pay: a uniform Adjustors line
+($56.87 / 2,012 kWh = 2.827 c/kWh, **20.5% of the energy cost**) and then Taxes
+and Fees at 11.457% on top. All-in marginal rates, reconciled against the bill to
+within one cent:
+
+| tier | all-in | was configured | |
+|---|---|---|---|
+| on-peak (summer) | **44.20 c** | 41.6 c | −5.9% |
+| off-peak (summer) | **16.91 c** | 17.0 c | +0.5% |
+| overnight | **12.59 c** | 13.1 c | +4.1% |
+
+Applied to the live add-on. **Winter tiers are untouched** — this is an
+August–September bill and carries no winter evidence; a winter bill would settle
+them. The derivation is now in the option's own description in both languages, so
+the next bill is a mechanical update rather than a re-investigation.
+
+Consequence for the arbitrage arithmetic: stored overnight energy delivers at
+**14.44 c**, so the true spreads are **+2.47 c/kWh** against off-peak and
+**+29.76 c/kWh** against on-peak — both slightly better than previously stated.
+
+Also in this release: the HA device page reported `sw_version: '0.8.0'` against a
+shipping 1.133.x — about 125 releases stale — because it was a hardcoded literal.
+It now reads `BUILD_VERSION`, the same env `/api/version` already uses.
+
+2,382 tests.
+
 ## v1.133.3 — a vulnerability signal that does not depend on GitHub
 
 v1.133.2 shipped a fastify security release that reached this system only because

@@ -9,6 +9,7 @@ import { getAnalytics } from './analyticsClient.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { aggregateFleetFlow } from './shp2Membership.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
+import { rateAt, apsREvModelFromEnv } from './tariff.js';
 import {
   getDayForecast,
   computeDegradation,
@@ -58,12 +59,16 @@ import { getBroadcastHealth } from './broadcastHealth.js';
  * every entity at once.
  */
 
-const DEVICE_INFO = {
+export const DEVICE_INFO = {
   identifiers: ['ecoflow_panel'],
   name: 'EcoFlow Panel',
   model: 'SHP2 + Delta Pro Ultra fleet dashboard',
   manufacturer: 'EcoFlow Panel (add-on)',
-  sw_version: '0.8.0',
+  // v1.134.0 — was the literal '0.8.0' against a shipping 1.133.x, so the HA
+  // device page reported a version from ~125 releases earlier. BUILD_VERSION is
+  // already a container ENV (Dockerfile) and already read by /api/version.
+  // NOT package.json — that reads 0.1.0.
+  sw_version: process.env.BUILD_VERSION || 'dev',
 };
 
 const STATE_TOPIC = 'ecoflow_panel/state';
@@ -275,6 +280,29 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_tariff_today_cost', name: 'Grid Cost Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash', value_template: '{{ value_json.tariff_today_grid_cost_dollars }}' },
   { unique_id: 'ecoflow_tariff_today_saved', name: 'Solar Value Today', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-plus', value_template: '{{ value_json.tariff_today_solar_value_dollars }}' },
   { unique_id: 'ecoflow_tariff_savings_7d', name: 'Net Savings (7d)', state_class: 'measurement', unit_of_measurement: 'USD', icon: 'mdi:cash-check', value_template: '{{ value_json.tariff_net_savings_7d_dollars }}' },
+
+  // ─── v1.134.0 — the live per-kWh rate, for HA's Energy Dashboard ──────────
+  //
+  // This is the ENABLING entity for grid cost on the Energy page. HA renders a
+  // cost column only if one of `stat_cost`, `entity_energy_price` or
+  // `number_energy_price` is set on the grid source; all three were null, so the
+  // page showed no money at all despite a confirmed five-rate tariff.
+  //
+  // `entity_energy_price` is the only one of the three that is correct on a TOU
+  // plan: HA's own cost sensor accrues `(energy − prev) × price` on every state
+  // change of the ENERGY entity, sampling this rate fresh each time, so each
+  // delta is multiplied by the rate in force while it flowed. A single
+  // `number_energy_price` against 8.2–41.6 c/kWh is wrong by construction (a
+  // 10 kWh overnight + 10 kWh on-peak day is $5.47; one scalar gives 20p, right
+  // only at p = $0.2735 and only for that mix). `stat_cost` would need a
+  // monotonic monetary accumulator that does not exist, and the add-on's own
+  // cost integrates a SUPERSET of the mapped grid statistic, so money and kWh
+  // would not reconcile to any rate.
+  //
+  // Units are USD/kWh, NOT USD, and there is deliberately no device_class:
+  // `monetary` is for an amount of money, not a price, and HA mints its own
+  // monetary/total cost sensor from this one.
+  { unique_id: 'ecoflow_grid_price_now', name: 'Grid Rate Now', state_class: 'measurement', unit_of_measurement: 'USD/kWh', icon: 'mdi:cash-clock', value_template: '{{ value_json.tariff_rate_now_usd_per_kwh }}' },
 
   // ─── v0.15.2 load-shedding advisory (read + advise; HA automations actuate) ─
   // The advisor recommends which allowlisted loads to shed when runway is low,
@@ -909,6 +937,15 @@ export async function startMqttDiscovery(
       tariff_today_grid_cost_dollars: tariff.todayGridImportCostDollars,
       tariff_today_solar_value_dollars: tariff.todaySolarLoadValueDollars,
       tariff_net_savings_7d_dollars: tariff.netSavingsDollars,
+      // v1.134.0 — dollars per kWh, in force right now. NULL (never a fallback
+      // rate) when the tariff is unconfirmed or the matched period has no season
+      // rate: a silent off-peak default would reintroduce exactly the mispricing
+      // this entity exists to remove, and HA correctly declines to accrue cost
+      // from an unavailable price rather than accruing a wrong one.
+      tariff_rate_now_usd_per_kwh: (() => {
+        const cents = rateAt(apsREvModelFromEnv(), Date.now()).centsPerKwh;
+        return cents == null ? null : Math.round((cents / 100) * 1e4) / 1e4;
+      })(),
       alert_critical_count: cnt('threshold', 'critical'),
       alert_warning_count: cnt('threshold', 'warning'),
       learned_warning_count: cnt('learned', 'warning'),
