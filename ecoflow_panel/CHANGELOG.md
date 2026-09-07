@@ -1,3 +1,33 @@
+## v1.133.2 — fastify security release, actually deployed
+
+Four Dependabot updates merged, one of which matters: **fastify 5.12.1 → 5.12.3
+is a security release** carrying fixes for `GHSA-9q9j-q6p8-xq58`,
+`GHSA-hwr6-493r-vm6h`, `GHSA-p68q-wchp-6fh7` and `GHSA-667r-xxjv-c9mm`. Fastify is
+the HTTP server behind the alarm API, the ingress panel and every status route, so
+it is not a background dependency on this system.
+
+The others are routine and non-production: `tsx` 4.23.12 → 4.23.13 (server dev),
+`postcss` 8.5.26 → 8.5.28 (web dev), `docker/setup-qemu-action` 4.2.0 → 4.3.0 (CI).
+
+**This release exists because merging is not deploying.** The add-on runs a
+prebuilt GHCR image; a dependency bump on `main` changes nothing on the Pi until a
+version bump triggers `tag-release.yml` and a new image is built. Left unreleased,
+the security fix would have sat on `main` looking done while the alarm API kept
+serving on the vulnerable version — the same shape as the v1.130.0 release that
+silently never happened.
+
+Verified against the installed tree rather than the lockfile: `fastify` resolves
+to 5.12.3 in `node_modules`, 2,378 tests pass, typecheck clean.
+
+Worth recording separately: **GitHub is not alerting on these.** Dependabot
+*version* PRs arrive, but the vulnerability **alerts** endpoint returns empty and
+code scanning returns empty, consistent with GHAS being unavailable on a private
+personal repository (the same limitation that made CodeQL a self-contained CI job
+rather than an alerting integration). A vulnerable dependency that does not happen
+to receive a routine version bump would therefore not surface at all. The advisory
+IDs above also 404 against the global advisory API, so their severities could not
+be retrieved and are deliberately not stated here.
+
 ## v1.133.1 — the reserve it announced was not the reserve it wrote
 
 The plan rationale said *"The reserve is set to 100%"*. The panel was being told
