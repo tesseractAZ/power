@@ -123,6 +123,30 @@ jobs:
       - name: Scan tracked files for home addresses / personal identifiers
         run: python3 scripts/check-no-secrets.py
 
+  npm-audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # v1.133.3 — GHAS is unavailable on this repository: /dependabot/alerts and
+      # /code-scanning/alerts both return empty, which is why CodeQL is a
+      # self-contained CI job here rather than an alerting integration. The only
+      # security signal arriving today is a Dependabot VERSION pr that happens to
+      # carry a fix (that is how fastify's four GHSA advisories reached us in
+      # v1.133.2). A vulnerable dependency that never receives a routine bump
+      # would not surface at all. This does not depend on GHAS.
+      #
+      # The script self-tests its own policy before auditing, because a clean
+      # `npm audit` is indistinguishable from a broken gate unless the gate has
+      # been shown to fire.
+      - name: Advisories in dependency trees
+        run: node scripts/check-npm-audit.mjs
+
   release-pr:
     name: Release PR declares the version it names
     if: github.event_name == 'pull_request'
