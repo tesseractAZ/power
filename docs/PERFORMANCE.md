@@ -106,7 +106,28 @@ This is the single most important line in this document. **Accruing more nights 
 
 **Actuation integrity.** The supervised write path applies, verifies against device readback, retries, and escalates. v1.131.0 extended readback verification to the **revert** side, which had been closing on a cloud ACK — the exact evidence v1.79.0 ruled insufficient on the apply side. It was exercised on live state within minutes of deploying: the 2026-09-03 night was found reverted-but-unverified, the panel was read at 16%, and `revertVerifiedAtMs` was stamped.
 
-**A known over-promise, unfixed at time of writing.** The plan rationale — which feeds the 21:30 notification and the spoken broadcast — prints `setpointSocPct` un-clamped. Tonight's armed plan announces *"The reserve is set to 100%"* while `clampReserveTarget` writes **50** (`nightChargeActuator.ts:183`, `Math.min(50, …)`). The announced number is not the number sent to the device. Logged here because it is the same defect family as §5's v1.132.0 work and has not yet been corrected.
+**An over-promise, logged here at 10:39 MST and FIXED in v1.133.1 the same day.** The plan
+rationale — which feeds the 21:30 notification and the spoken broadcast — printed
+`setpointSocPct` un-clamped, so an armed plan announced *"The reserve is set to 100%"* while
+`clampReserveTarget` wrote **50**. The announced number was not the number sent to the device.
+
+It now names three quantities for what each is: what the device is **told**, what the
+requirement **asked for** when the envelope truncated it, and what the window is expected to
+**reach**. Verified live on the identical case — `setpointSocPct` still resolves to 100, and the
+announcement reads:
+
+> The reserve is set to **50%** — the resilience requirement asks for 100%, but the panel only
+> accepts a backup reserve up to 50%, and the window is only expected to reach ~29.6%.
+
+The truncation clause appears only when the envelope actually bit, so an ordinary night reads as
+before. The `[10, 50]` bound also stopped being an anonymous literal in two places and became
+`RESERVE_WRITE_MIN_PCT` / `RESERVE_WRITE_MAX_PCT` — that anonymity is how `ARB_COST_MAX_SOC_PCT`
+came to ship with a schema minimum equal to the write maximum (§6).
+
+*Recording the sequence because it is the point of this document: the defect was found by
+reading a live plan, not by reading code; it was logged here as unfixed while it was unfixed;
+and this paragraph itself sat stale for the several hours between the fix shipping and someone
+asking whether it had.*
 
 ---
 
@@ -170,7 +191,19 @@ Conditions below read as gaps by design. They are listed so an `unknown`/null re
 - **Expected-unknown sensors on a near-new fleet** (DOCS.md §6) — *unchanged*: `..._soonest_pack_eol`, coulombic efficiency, predictive SoH and the immature internal-resistance trend all publish `unknown` until genuine aging signal exists; `..._runway_to_reserve_if_shed` is null whenever no shed scenario is advisable. Null over a fabricated number, in every case.
 - **~~Tariff rates unconfirmed~~ — RESOLVED.** The prior snapshot recorded every dollar field as null pending rates from a bill. The APS R-EV rates are now entered and confirmed: overnight super-off-peak **13.1 ¢/kWh**, off-peak **17.0 ¢**, summer on-peak **41.6 ¢**, winter on-peak **39.5 ¢**, winter super-off-peak **8.2 ¢**. On-peak is **Mon–Fri 16:00–19:00 only**; every weekend hour is off-peak. At `DISPATCH_ROUND_TRIP_EFFICIENCY = 0.86` (charge leg `√0.86 = 0.9274`, discharge leg 0.94, product 0.872) stored overnight energy delivers at **15.02 ¢/kWh** — cheaper than off-peak by 1.98 ¢ and than on-peak by 26.6 ¢. **Rates are manual and carry no expiry check**; a tariff change would be silently stale.
 - **Inverter standby is not measurable on this topology** — *new, v1.131.1*. The Delta Pro Ultras feed the house through the SHP2 link rather than their own AC output port, so `ac_out` reads 0 (with `acOutVol` 0) in normal grid-tied operation and kilowatts while islanding — a bimodal register with no idle plateau, because an inverter that is off reports 0 rather than its own self-consumption. `idleWatts` therefore publishes null with an explicit `blockedReason` (`ac-output-stage-idle` on Core 4, `insufficient-idle-samples` on the rest) instead of rendering blank. Recovering standby draw would mean inferring it from pack drain (`bat_amp × bat_vol` while PV is dark and output is zero) — a different measurement, not a re-point.
-- **The write-readiness gate cannot open on current inputs** — *new, and the most consequential item here*. See §3: the gate's own blocking text reports the under-buy criterion as **UNREACHABLE**, not thin, because all 11 actuated nights disclose a cushion shortfall and are exempt from the sizing judgement. More nights will not change it. This is an owner decision (re-scope the cushion) rather than a data-accrual wait, and until it is taken, `auto` mode cannot graduate.
+- **The write-readiness gate cannot open on current inputs** — *the most consequential item here*. See §3: the gate's own blocking text reports the under-buy criterion as **UNREACHABLE**, not thin, because all 11 actuated nights disclose a cushion shortfall and are exempt from the sizing judgement. More nights will not change it. This is an owner decision (re-scope the cushion) rather than a data-accrual wait. *The owner took that decision on 2026-09-06 — a 10% total protected floor with the cushion disabled — and v1.133.0 made the engine able to express it; the settings are deliberately not yet applied, pending the rate-aware objective. When they are, expect this block to clear — and note that it will clear because the standard was **lowered**, not because it was met.*
+- **~~A zero outage cushion silently became the legacy band~~ — RESOLVED v1.133.0.** Setting
+  `ARB_OUTAGE_CUSHION_HOURS: 0` did not disable the cushion: the guard folded `outageHours <= 0`
+  into the same branch as *"no islanded-load measurement available"*, so a deliberate zero
+  returned the flat 15%-of-pool band (13.8 kWh here). The option was accepted, the config
+  validator passed, and the setting did not take effect. It was worse than inert — the legacy
+  basis also switches the cushion test to the whole-house forward trough, which is harsher, so
+  **asking for no cushion made the requirement larger**. There is now a distinct `disabled`
+  basis, checked before the unmeasurable branch, and a disabled cushion announces itself in the
+  rationale rather than reading as a floor-plus-cushion that was comfortably covered. Malformed
+  values (negative, `NaN`, `Infinity`) still fall back conservatively. Listed here rather than
+  deleted because it is the same shape as the three items below: work that was done, plumbed
+  somewhere it could not take effect, with nothing failing to say so.
 - **A `0` that means "cannot count"** — *new*. `activeStrikes: 0` sits alongside `strikesMeasurable: 0`; the engine-fault strike detector is not reporting an absence of faults, it is reporting an inability to count. The same caution applies to any zero in `readiness.metrics` whose companion `*Measurable` field is also zero.
 - **`grid_home` coverage gate** — *unchanged*: whole-home grid accounting trusts `grid_home_w` only at `GRID_HOME_MIN_COVERAGE = 0.9` of panel-load coverage; below that the KPIs fall back to the DPU-side basis and `grid_home_coverage_frac` reads null. Cloud-offline SHP2 windows are the dominant cause. All six recent ledger rows read coverage 1.0.
 - **~~Band coverage vs. the advisor~~ — RECLASSIFIED.** The prior snapshot described the 90% basis gate holding every plan at null. The gate is **0.78** (§2) and at 84% coverage the basis is satisfied; plans are sized. The genuinely binding forecast constraint is now `loadBandCoverage` at 0.769, which is what holds `bandCoveragePct` (76.9%) below the gate's [78%, 92%] readiness band.
