@@ -15,6 +15,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] `python3 scripts/check-no-secrets.py` — no home IPs, DIDs, VoIP credentials or personal email in tracked files
 - [ ] If `config.yaml` options/schema changed: `python3 scripts/validate-addon-config.py` — **every option needs `en` AND `es`** entries and a `config.yaml` default
 - [ ] `node scripts/check-mutant-anchors.mjs` — all mutation-harness anchors still resolve
+- [ ] `node scripts/check-npm-audit.mjs` — no high/critical advisories in the production dependency tree, no expired waivers
 - [ ] CI green: typecheck matrix · server tests · mutant anchors · no-secrets · add-on config · Docker smoke build · docs build · CodeQL
 - [ ] Tested against live EcoFlow data, or N/A (docs / CI-only change)
 - [ ] If UI changed: screenshot or short clip attached below

@@ -1,3 +1,41 @@
+## v1.133.3 — a vulnerability signal that does not depend on GitHub
+
+v1.133.2 shipped a fastify security release that reached this system only because
+Dependabot happened to raise a routine version bump carrying it. That is the whole
+security pipeline today, and it has a hole: **GitHub is not alerting on this
+repository.** `/dependabot/alerts` and `/code-scanning/alerts` both return empty —
+consistent with GHAS being unavailable on a private personal repo, the same
+limitation that made CodeQL a self-contained CI job here rather than an alerting
+integration. A vulnerable dependency that never receives a routine bump would not
+surface at all.
+
+`scripts/check-npm-audit.mjs` closes that, gated in CI as *Dependency advisories*.
+The policy is deliberately asymmetric: **high or critical in the PRODUCTION tree
+fails the build**; production moderate/low and anything dev-only is reported and
+does not. Fastify serves the alarm API, so a high there is not a backlog item — but
+dev-tree noise blocking an unrelated PR trains people to bypass the gate, which is
+worse than the finding.
+
+**Waivers expire.** `scripts/npm-audit-allowlist.json` can suppress a specific
+advisory, but every entry must carry a reason *and* an `expires` date, and an
+**expired waiver fails the build**. An undated allowlist is how a temporary
+exception becomes permanent silence — the exact failure this codebase keeps
+finding elsewhere. Waivers for advisories that are no longer present are reported
+as stale so the file cannot accumulate cruft.
+
+**It fails closed.** No lockfile, an unreachable registry, or unparseable output
+exits non-zero naming itself an infrastructure failure. A check that passes when it
+could not run is not a check.
+
+**And it proves it can fire.** The policy is a pure `classify()` exercised by an
+11-case self-test that runs *before* every audit — because a clean `npm audit` is
+indistinguishable from a broken gate unless the gate has been shown to fail.
+Verified by mutation: dropping `high` from the blocking set, ignoring the waiver
+expiry, and letting dev findings block were each introduced and each killed by the
+self-test (3/3).
+
+Current state: **0 advisories** across server and web, production and dev.
+
 ## v1.133.2 — fastify security release, actually deployed
 
 Four Dependabot updates merged, one of which matters: **fastify 5.12.1 → 5.12.3
