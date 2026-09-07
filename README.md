@@ -201,8 +201,9 @@ cd web    && npm install && npm run build
 **Release pipeline.** Bump `ecoflow_panel/config.yaml` + prepend `CHANGELOG.md` →
 open a PR whose squash subject starts `Release vX.Y.Z …`. `main` is branch-
 protected: the CI checks (both type-checks, the test suite, the mutation-harness
-anchor check, the secrets scan, the add-on config/translation validator, the
-Dockerfile smoke build, the docs `.docx`+`.pdf` build, and CodeQL) must pass, and
+anchor check, the secrets scan, the dependency-advisory gate, the add-on
+config/translation validator, the Dockerfile smoke build, the docs `.docx`+`.pdf`
+build, and CodeQL) must pass, and
 every engine change also clears an **adversarial multi-agent review** before it
 can reach the alarm path. Merging
 a `Release …` subject fires `tag-release.yml`, which creates the `vX.Y.Z` tag and
@@ -243,6 +244,16 @@ suite to kill it. A harness aborts loudly rather than reporting green if an anch
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
 reason — a harness whose anchors have drifted does not fail, it stops running, and
 an aborted harness reads identically to a clean one.
+
+Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
+**high or critical in the production tree** and reports the rest. It exists because
+GitHub's own alerting is unavailable here — `/dependabot/alerts` and
+`/code-scanning/alerts` both return empty on a private personal repository — so the
+only security signal otherwise arriving is a routine version bump that happens to
+carry a fix. Waivers must carry a reason **and an expiry date**, and an expired
+waiver fails the build. The script **self-tests its own policy before auditing**,
+because a clean `npm audit` is indistinguishable from a broken gate unless the gate
+has been shown to fire.
 
 The recurring failure this codebase is built against is **silence that looks like
 health**: a detector whose gate can never be true, a release that never ran, a

@@ -1,0 +1,10 @@
+{
+  "$comment": "Waivers for scripts/check-npm-audit.mjs. Every entry MUST have a reason and an expires date (YYYY-MM-DD); an EXPIRED entry fails the build, so a temporary exception cannot become permanent silence. Remove entries the checker reports as stale.",
+  "$example": {
+    "GHSA-0000-0000-0000": {
+      "package": "example",
+      "reason": "Why this is not exploitable here, or why the fix cannot be taken yet.",
+      "expires": "2026-01-01"
+    }
+  }
+}
