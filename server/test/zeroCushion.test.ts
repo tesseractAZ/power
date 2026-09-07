@@ -223,3 +223,55 @@ test('★ the announced reserve NEVER exceeds what the device can be told', () =
     }
   }
 });
+
+/* ══ v1.134.0 — the HA Energy price sensor ═══════════════════════════════ */
+
+test('THE ENABLING ENTITY: a USD/kWh price sensor, not a USD amount', async () => {
+  // HA renders grid cost only if stat_cost, entity_energy_price or
+  // number_energy_price is set; all three were null, so the Energy page showed
+  // no money at all despite a confirmed five-rate tariff. entity_energy_price is
+  // the only one of the three that is TOU-correct: HA multiplies each energy
+  // delta by the rate in force WHILE IT FLOWED.
+  const { SENSORS } = await import('../src/mqttDiscovery.js');
+  const price = SENSORS.find((s: any) => s.unique_id === 'ecoflow_grid_price_now');
+  assert.ok(price, 'the price sensor exists');
+  assert.equal(price!.unit_of_measurement, 'USD/kWh', 'a PRICE, not an amount of money');
+  assert.equal(price!.state_class, 'measurement');
+  assert.equal((price as any).device_class, undefined, 'monetary is for an amount, not a rate — HA mints its own cost sensor');
+});
+
+test('★ the rate is published in DOLLARS, not cents', async () => {
+  // The single likeliest defect: 41.6 where 0.416 is meant. A 100x price error
+  // would be invisible on the sensor and catastrophic on the cost column.
+  const { rateAt, buildApsREvModel } = await import('../src/tariff.js');
+  const model = buildApsREvModel({
+    onPeak: { summer: 44.2, winter: 39.5 },
+    offPeak: { summer: 16.91, winter: 17.0 },
+    overnight: { summer: 12.59, winter: 12.59 },
+    confirmed: true,
+  });
+  // A summer weekday inside 16:00-19:00 Phoenix → on-peak.
+  const onPeak = new Date('2026-08-04T23:30:00Z').getTime(); // 16:30 MST Tue
+  const cents = rateAt(model, onPeak).centsPerKwh;
+  assert.equal(cents, 44.2, 'premise: the model returns CENTS');
+  const dollars = cents == null ? null : Math.round((cents / 100) * 1e4) / 1e4;
+  assert.equal(dollars, 0.442, 'the published value is dollars per kWh');
+  assert.ok(dollars! < 1, 'a USD/kWh price is well under 1 — 44.2 would be a 100x error');
+});
+
+test('an unconfirmed tariff publishes NULL, never a fallback rate', async () => {
+  // A silent off-peak default would reintroduce exactly the mispricing this
+  // entity removes, and would do it invisibly. HA declines to accrue cost from
+  // an unavailable price, which is the correct behaviour.
+  const { rateAt, buildApsREvModel } = await import('../src/tariff.js');
+  const unconfirmed = buildApsREvModel({ confirmed: false });
+  const cents = rateAt(unconfirmed, Date.now()).centsPerKwh;
+  assert.equal(cents, null);
+  assert.equal(cents == null ? null : cents / 100, null, 'null propagates — never 0, which JS would give from null/100');
+});
+
+test('the HA device reports the running version, not a v0.8.0 literal', async () => {
+  const { DEVICE_INFO } = await import('../src/mqttDiscovery.js');
+  assert.notEqual(DEVICE_INFO.sw_version, '0.8.0', 'was hardcoded ~125 releases behind');
+  assert.equal(DEVICE_INFO.sw_version, process.env.BUILD_VERSION || 'dev');
+});
