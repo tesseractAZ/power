@@ -1,3 +1,30 @@
+## v1.135.0 — the database snapshot says how old it is
+
+`/share/ecoflow-panel/ecoflow-snapshot.db` is a **copy, not a mirror**. The live
+database is add-on-private at `/data/ecoflow.db`, so nothing outside the container
+can read it; `POST /api/db-export` publishes a copy on request, and that copy
+changes only when someone asks.
+
+Which is how it went stale. The export ran once on **2026-08-23** and was then
+browsed in SQLite Web two weeks later as though it were live — missing all
+eleven actuated nights, the v1.132.0 disposition columns, and every ledger row
+after 08-23. Identical created and modified timestamps were the only tell, and
+nothing in the UI said otherwise.
+
+The new **Maintenance** section on the Strategy panel shows the snapshot's size
+and, more importantly, **its age** — amber past twelve hours, and "never
+exported" when there is none. The refresh button is the easy half; the age is the
+part that would have prevented reading a fortnight-old ledger as current.
+
+The confirmation states the real cost before you commit (~1.7 GB, 20–30 s) and
+says plainly that the copy is read-only with respect to the live database. The
+result reports what actually landed — bytes written and elapsed time from the
+response body, not an assumption drawn from the HTTP status.
+
+No scheduling. A periodic export would write ~1.7 GB on a cadence nobody asked
+for, and the honest fix for "I was reading stale data" is to make the staleness
+visible, not to hide it behind a timer.
+
 ## v1.134.0 — the Energy page can finally show money
 
 The HA Energy Dashboard showed **no cost at all**. `stat_cost`,
