@@ -1,3 +1,76 @@
+## 1.137.0
+
+### The discovery table can no longer lie about what HA will do with it
+
+Two failure modes in `mqttDiscovery.ts` are silent by construction — the publish
+succeeds, the topic retains, and the damage only shows up inside Home Assistant.
+
+**Table invariants (`auditDiscoveryTables`).** HA does not loudly reject an
+incoherent `(device_class, state_class, unit_of_measurement)` triple. It either
+drops the entity with one log line, or accepts it and compiles the wrong
+statistic. Both have bitten this add-on: five `pv_curtailment_*` sensors sat
+permanently `unknown` (v0.15.3), and the three `USD` sensors carry
+`state_class: measurement`, so HA compiles a **mean** and they can never be an
+Energy-Dashboard cost source — correct for a dashboard readout, fatal for a cost
+source, and nothing in the table said which was intended. A pure audit now runs
+over the whole table in CI and returns violations the suite asserts are empty.
+Deliberate departures need a waiver **with a reason**; the reason text is the
+only place the intent is recorded, so adding a fourth `USD` sensor forces the
+author to say which behaviour they want. A waiver for a violation that no longer
+exists fails the build rather than quietly outliving it.
+
+`USD/kWh` is deliberately not swept in: that is a *price*, not an amount of
+money.
+
+**Discovery re-asserts on every broker connect.** Discovery configs are
+retained, so the case that breaks is the **broker** losing its retained store — a
+Mosquitto restart without persistence, a re-created container. The configs
+vanish, and the one-time `published` latch meant the add-on never republished
+them: HA kept only what was already in its registry, and a fresh HA would never
+have learned the entities at all. The connect sequence is now extracted into
+`runBrokerConnect`, which re-asserts discovery and invalidates the per-circuit
+signature every time, while keeping the retired-unique_id cleanup latched to the
+first connect.
+
+The per-circuit **orphan ledger** is deliberately never reset. It is not a latch;
+it is the memory of which circuits have been published, used to clear the config
+topic of one that disappears. Resetting it on connect would strand a removed
+circuit's retained config on the broker with nothing left to remove it.
+
+`scripts/mutate-discovery-invariants.mjs` — 17 mutants, 17 killed — includes one
+that leaves `runBrokerConnect` correct while making the real `client.on('connect')`
+handler inert, and one that resets the orphan ledger.
+
+### Documentation corrections
+
+- **The `charge == discharge` RTE clamp does not exist.** Two places described
+  `/api/lifetime-energy` as holding lifetime charge and discharge exactly equal
+  via a steady-state clamp. That clamp was removed in v0.45.0. Measured
+  2026-09-07: 2,154.541 kWh charged against 2,169.44 kWh discharged — a 14.9 kWh
+  *excess* on the discharge side, an RTE above 100%. These are coulomb counters
+  re-zeroed at one instant and mediated by delta-SoC; their ratio breathes with
+  pack SoC and sits either side of unity. Near-equality is coulombic efficiency,
+  not an invariant.
+- **"Untracked consumption" is not the conversion-loss residual.** The docs
+  claimed the SHP2 circuit CTs sum to approximately whole-home load, so HA's
+  untracked figure would read as PV→battery conversion loss. The SHP2 meters the
+  *backup-circuit subset*, not the service, so non-backup load lands in the same
+  bucket; and channel 1 remains unreconciled (0.147 kWh lifetime against channel
+  3's 66.6 kWh), which telemetry cannot settle. Treat it as an upper bound, never
+  a measurement.
+- **§4.2b now records what v1.136.0 superseded.** `resolveTariffCents` returns
+  two tiers; the KPI tally and dispatch planner now price hours through
+  `hourlyRateCents` / `isOnPeakHour` against the four-period rate table.
+
+### Test hygiene
+
+The v1.14.1 availability test asserted on **source text** — that `'online'` was
+published before the `if (!published)` gate. Removing that gate strengthens the
+property the test protects, and the test failed anyway. Its ordering claim is now
+made behaviourally against `runBrokerConnect`; only the parts that genuinely
+cannot be reached from a test (the `mqtt.connect()` LWT options, the un-exported
+closure) remain source inspection.
+
 ## v1.136.0 — one rate table, four periods
 
 `resolveTariffCents` returns `{onPeak, offPeak}` — **two** tiers. APS R-EV has

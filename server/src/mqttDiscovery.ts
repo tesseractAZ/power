@@ -375,6 +375,220 @@ export const SENSORS: SensorConfig[] = [
   { unique_id: 'ecoflow_overload_mode_code', name: 'Overload Mode (code)', state_class: 'measurement', icon: 'mdi:flash-alert', entity_category: 'diagnostic', value_template: '{{ value_json.overload_mode_code }}' },
 ];
 
+/**
+ * v1.137.0 — Table-wide discovery invariants (B3).
+ *
+ * Home Assistant does not reject an incoherent (device_class, state_class,
+ * unit) triple loudly. It either drops the entity with one line in a log
+ * nobody reads, or — worse — accepts it and silently compiles the WRONG
+ * statistic. Both failures present identically from the add-on's side: the
+ * publish succeeds, the topic is retained, and the sensor looks fine.
+ *
+ * Two live defects came out of exactly this gap:
+ *   - v0.15.3: five pv_curtailment_* sensors referenced value_json keys that
+ *     buildState never emitted → permanent "unknown".
+ *   - v1.134.0: the three USD sensors carry `state_class: measurement` with no
+ *     device_class, so HA compiles a MEAN and never a SUM. That is correct for
+ *     a dashboard readout and fatal for an Energy-Dashboard cost source — and
+ *     nothing in the table said which one was intended.
+ *
+ * So the rules are asserted over the whole table rather than per-sensor, and a
+ * deliberate departure has to be written down as a waiver with a reason. The
+ * waiver list is the documentation: adding a fourth USD sensor now forces the
+ * author to state which of the two behaviours they want.
+ *
+ * Pure. Takes the tables as arguments so a test can feed it mutants.
+ */
+export interface DiscoveryViolation {
+  unique_id: string;
+  rule: string;
+  detail: string;
+}
+
+/** device_class -> the state_classes HA permits for it. */
+const DEVICE_CLASS_STATE_CLASSES: Record<string, readonly string[]> = {
+  battery: ['measurement'],
+  energy: ['total', 'total_increasing'],
+  energy_storage: ['measurement'],
+  monetary: ['total'],
+  power: ['measurement'],
+  temperature: ['measurement'],
+};
+
+/** device_class -> the units HA permits for it (restricted to ones we ship). */
+const DEVICE_CLASS_UNITS: Record<string, readonly string[]> = {
+  battery: ['%'],
+  energy: ['Wh', 'kWh', 'MWh'],
+  energy_storage: ['Wh', 'kWh', 'MWh'],
+  power: ['W', 'kW', 'MW'],
+  temperature: ['°C', '°F', 'K'],
+};
+
+/**
+ * Units that denote an AMOUNT of money. A sensor carrying one is either an
+ * Energy-Dashboard cost source (device_class monetary + state_class total, the
+ * only combination HA will sum) or a plain dashboard readout — and which one it
+ * is must be stated, not inferred. `USD/kWh` is deliberately absent: that is a
+ * PRICE, not an amount, and `monetary` does not apply to it.
+ */
+const CURRENCY_UNITS: readonly string[] = ['USD', 'EUR', 'GBP', 'CAD', 'AUD'];
+
+/**
+ * Sensors that break a rule on purpose. Each needs a reason, and the reason is
+ * the only place the intent is recorded.
+ */
+const DISCOVERY_WAIVERS: Record<string, { rule: string; reason: string }> = {
+  ecoflow_tariff_today_cost: {
+    rule: 'currency-needs-monetary-total',
+    reason:
+      'Dashboard readout, not an Energy-Dashboard source. Resets to 0 each midnight, so it is not monotonic and `total` would make HA book a meter reset every day. HA mints its own monetary/total cost entity from ecoflow_grid_price_now instead (v1.134.0).',
+  },
+  ecoflow_tariff_today_saved: {
+    rule: 'currency-needs-monetary-total',
+    reason: 'Same as ecoflow_tariff_today_cost — daily-resetting readout.',
+  },
+  ecoflow_tariff_savings_7d: {
+    rule: 'currency-needs-monetary-total',
+    reason:
+      'A rolling 7-day window: goes up AND down, so it is a measurement by construction. Never a sum.',
+  },
+};
+
+/**
+ * Returns every violation in the two tables. Empty array = the tables are
+ * coherent. Callers should assert emptiness rather than a count, so a NEW
+ * violation cannot be masked by removing an old one.
+ */
+/**
+ * v1.137.0 — What has to happen on every broker connect, and what only once (B5).
+ *
+ * Discovery configs are published RETAINED, so in the ordinary case HA re-reads
+ * them from the broker without our help. The case that breaks is when the
+ * BROKER loses its retained store — a Mosquitto restart without persistence, a
+ * reset persistence file, a re-created container. The retained configs are then
+ * gone, and the add-on's one-time `published` latch meant it never re-asserted
+ * them: HA would keep whatever it had in its own registry until someone
+ * restarted the add-on, and a fresh HA would never learn the entities at all.
+ *
+ * So `publishDiscovery` runs on EVERY connect. It is ~90 small retained
+ * publishes of identical payloads; HA re-processes them as no-ops because the
+ * unique_ids and configs are unchanged.
+ *
+ * Three things deliberately do NOT follow that rule:
+ *
+ *   - `clearLegacyDiscovery` stays latched. It publishes empty payloads to the
+ *     config topics of unique_ids we RETIRED. Those need saying once; repeating
+ *     them on every reconnect is pure traffic and would never stop.
+ *
+ *   - the per-circuit signature IS invalidated, because the circuit configs are
+ *     retained on the same broker and vanish with the same store. Its own latch
+ *     (`circuitDiscoverySig`) is what gates re-assertion, so clearing it is what
+ *     makes the circuits come back.
+ *
+ *   - the per-circuit CHANNEL LEDGER (`publishedCircuitChannels`) is left
+ *     alone. It is not an assert-latch; it is the memory of which circuits we
+ *     have published so we can clear the config topic of one that goes away.
+ *     Resetting it on connect would forget those, and an orphaned circuit's
+ *     retained config would sit on the broker forever with nothing left to
+ *     remove it.
+ *
+ * Takes its effects as callbacks so the sequence is testable without a broker.
+ */
+export interface ConnectLatch {
+  legacyCleared: boolean;
+}
+
+export interface ConnectEffects {
+  publishAvailability: () => void;
+  clearLegacyDiscovery: () => void;
+  publishDiscovery: () => void;
+  invalidateCircuitDiscovery: () => void;
+  subscribeSwitchCommands: () => void;
+  publishState: () => void;
+  publishSwitchStates: () => void;
+}
+
+export function runBrokerConnect(latch: ConnectLatch, fx: ConnectEffects): void {
+  // v1.14.1 — availability FIRST and unconditionally. The broker's LWT retains
+  // 'offline' when it times the session out (live: a ~95 s event-loop stall at
+  // 05:41 on 2026-07-12); leaving that in place holds every entity unavailable.
+  fx.publishAvailability();
+  if (!latch.legacyCleared) {
+    // Retired unique_ids go out BEFORE the canonical configs so HA processes
+    // the removal and the (re)publish in the same session.
+    fx.clearLegacyDiscovery();
+    latch.legacyCleared = true;
+  }
+  fx.publishDiscovery();
+  fx.invalidateCircuitDiscovery();
+  // MQTT subscriptions do not survive a clean-session reconnect.
+  fx.subscribeSwitchCommands();
+  fx.publishState();
+  fx.publishSwitchStates();
+}
+
+export function auditDiscoveryTables(
+  sensors: readonly SensorConfig[],
+  binarySensors: readonly BinarySensorConfig[],
+  waivers: Record<string, { rule: string; reason: string }> = DISCOVERY_WAIVERS,
+): DiscoveryViolation[] {
+  const out: DiscoveryViolation[] = [];
+  const waived = (unique_id: string, rule: string) =>
+    waivers[unique_id]?.rule === rule && (waivers[unique_id]?.reason ?? '').trim().length > 0;
+  const add = (unique_id: string, rule: string, detail: string) => {
+    if (!waived(unique_id, rule)) out.push({ unique_id, rule, detail });
+  };
+
+  // unique_id collisions across BOTH tables: HA keys the entity registry on
+  // unique_id per platform, but a collision within a platform silently drops
+  // one of the two entities.
+  const seenSensor = new Set<string>();
+  for (const s of sensors) {
+    if (seenSensor.has(s.unique_id)) add(s.unique_id, 'duplicate-unique-id', 'appears twice in SENSORS');
+    seenSensor.add(s.unique_id);
+  }
+  const seenBinary = new Set<string>();
+  for (const b of binarySensors) {
+    if (seenBinary.has(b.unique_id)) add(b.unique_id, 'duplicate-unique-id', 'appears twice in BINARY_SENSORS');
+    seenBinary.add(b.unique_id);
+  }
+
+  for (const s of sensors) {
+    const { unique_id, device_class: dc, state_class: sc, unit_of_measurement: unit } = s;
+
+    if (dc) {
+      const allowedSc = DEVICE_CLASS_STATE_CLASSES[dc];
+      if (allowedSc && (!sc || !allowedSc.includes(sc))) {
+        add(unique_id, 'device-class-state-class', `device_class '${dc}' requires state_class in [${allowedSc.join(', ')}], got '${sc ?? 'none'}'`);
+      }
+      const allowedUnits = DEVICE_CLASS_UNITS[dc];
+      if (allowedUnits && (!unit || !allowedUnits.includes(unit))) {
+        add(unique_id, 'device-class-unit', `device_class '${dc}' requires unit in [${allowedUnits.join(', ')}], got '${unit ?? 'none'}'`);
+      }
+    }
+
+    // A unit with no state_class compiles NO long-term statistics at all. That
+    // is almost never intended for a numeric sensor and is invisible until
+    // someone opens the Statistics developer tool.
+    if (unit && !sc) {
+      add(unique_id, 'unit-without-state-class', `unit '${unit}' with no state_class compiles no statistics`);
+    }
+
+    // `total_increasing` on a dimensionless sensor sums a unitless number,
+    // which the Energy Dashboard cannot consume and the history graph
+    // mis-labels.
+    if (sc === 'total_increasing' && !unit) {
+      add(unique_id, 'total-increasing-without-unit', 'state_class total_increasing requires a unit');
+    }
+
+    if (unit && CURRENCY_UNITS.includes(unit) && !(dc === 'monetary' && sc === 'total')) {
+      add(unique_id, 'currency-needs-monetary-total', `unit '${unit}' is an amount of money; HA sums it only as device_class 'monetary' + state_class 'total' (got '${dc ?? 'none'}' / '${sc ?? 'none'}')`);
+    }
+  }
+
+  return out;
+}
+
 export interface BinarySensorConfig {
   unique_id: string;
   name: string;
@@ -663,7 +877,7 @@ export async function startMqttDiscovery(
     will: { topic: AVAILABILITY_TOPIC, payload: 'offline', retain: true, qos: 0 },
   });
 
-  let published = false;
+  const connectLatch: ConnectLatch = { legacyCleared: false };
   let timer: NodeJS.Timeout | null = null;
 
   // One-time cleanup: clear retained discovery configs for legacy unique_ids
@@ -1092,29 +1306,29 @@ export async function startMqttDiscovery(
 
   client.on('connect', () => {
     log(`mqtt-discovery: connected to ${url}`);
-    // v1.14.1 — republish availability on EVERY connect, unconditionally. The
-    // broker's LWT retains 'offline' when it times the session out (live: a ~95s
-    // event-loop stall at 05:41 on 2026-07-12); 'online' used to be published only
-    // inside the one-time discovery block below, so every reconnect left the
-    // retained 'offline' in place and HA held all 87 entities unavailable until
-    // an add-on restart. Retained, so HA sees it even if it reconnects later.
-    client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 });
-    if (!published) {
-      // Clear legacy unique_ids FIRST so HA processes the removal alongside
-      // the (re)publish of the canonical configs in the same session.
-      clearLegacyDiscovery();
-      publishDiscovery();
-      published = true;
-    }
-    // Subscribe to every switch command topic (re-subscribe on each reconnect —
-    // MQTT subscriptions don't survive a clean session reconnect).
-    for (const p of ALARM_PRIORITY_ORDER) {
-      client.subscribe(alertSwitchCommandTopic(p), { qos: 0 }, (err) => {
-        if (err) log(`mqtt-discovery: subscribe ${alertSwitchCommandTopic(p)} failed — ${err.message}`);
-      });
-    }
-    publishState();
-    publishSwitchStates();
+    // v1.137.0 — the whole connect sequence, and which parts of it are latched,
+    // now live in runBrokerConnect. See its comment for why discovery re-asserts
+    // on every connect while the legacy clear and the circuit ledger do not.
+    runBrokerConnect(connectLatch, {
+      publishAvailability: () => client.publish(AVAILABILITY_TOPIC, 'online', { retain: true, qos: 0 }),
+      clearLegacyDiscovery,
+      publishDiscovery,
+      invalidateCircuitDiscovery: () => {
+        // Force the next publishCircuitDiscovery() tick to re-assert. Do NOT
+        // touch publishedCircuitChannels — that is the orphan ledger, not a
+        // latch.
+        circuitDiscoverySig = null;
+      },
+      subscribeSwitchCommands: () => {
+        for (const p of ALARM_PRIORITY_ORDER) {
+          client.subscribe(alertSwitchCommandTopic(p), { qos: 0 }, (err) => {
+            if (err) log(`mqtt-discovery: subscribe ${alertSwitchCommandTopic(p)} failed — ${err.message}`);
+          });
+        }
+      },
+      publishState,
+      publishSwitchStates,
+    });
   });
   client.on('error', (e) => log(`mqtt-discovery: ${e.message}`));
   client.on('reconnect', () => log('mqtt-discovery: reconnecting'));
