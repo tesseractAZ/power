@@ -30,7 +30,17 @@ arithmetically rather than through `Intl` — Phoenix is a fixed UTC−7 with no
 and this codebase has already been bitten once by a locale behaving differently on
 the Pi than on a laptop.
 
-2,387 tests. `scripts/mutate-rate-table.mjs`: **5 of 6 mutants killed, and the
+2,393 tests, verified under **both** `TZ=UTC` and `TZ=America/Phoenix`. The first
+draft of one test asserted the legacy gate's behaviour at a fixed Phoenix hour; it
+passed here and **failed in CI**, because `onPeakAt` reads `new Date(ts).getHours()`
+— the host clock — and the runner is UTC. That failure is evidence for the very
+defect described above, so the assertion was changed to the property that is
+actually true (on an unconfirmed tariff the gate *delegates* to `onPeakAt`, whatever
+it says) rather than to a timestamp that happened to work. A companion test pins
+the complement: with rates confirmed, the gate comes from the Phoenix-pinned table
+and gives the same answer on any host.
+
+`scripts/mutate-rate-table.mjs`: **5 of 6 mutants killed, and the
 sixth is declared in the harness rather than deleted.** The KPI tally's call site
 is not pinned — its integration window means a fixture hour old enough to have a
 known tariff period contributes no energy, and with zero energy both pricing paths

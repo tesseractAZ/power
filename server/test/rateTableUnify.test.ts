@@ -133,9 +133,36 @@ test('the discharge gate and the price never disagree', async () => {
 });
 
 test('an unconfirmed tariff leaves the discharge gate on the legacy window', async () => {
+  // NOTE the first draft of this asserted `isOnPeakHour(15:30 Phoenix) === true`.
+  // It passed locally and FAILED in CI — because `onPeakAt` reads
+  // `new Date(ts).getHours()`, the HOST clock, and the runner is UTC while this
+  // machine is Phoenix. That failure is evidence for the very defect the
+  // production comment describes, so the fix is to assert the property that is
+  // actually true rather than to pick a timestamp that happens to work: on an
+  // unconfirmed tariff the gate DELEGATES to onPeakAt, whatever onPeakAt says.
   await withEnv({ ...CONFIRMED, TARIFF_APS_RATES_CONFIRMED: 'false' }, async () => {
+    const { isOnPeakHour, onPeakAt } = await import('../src/analytics.js');
+    for (let h = 0; h < 24; h++) {
+      const ts = phx(`2026-08-04T${String(h).padStart(2, '0')}:30:00`);
+      assert.equal(isOnPeakHour(ts), onPeakAt(ts), `hour ${h}: unconfirmed gate must delegate to onPeakAt`);
+    }
+  });
+});
+
+test('★ and with a CONFIRMED tariff the gate stops following the host clock', async () => {
+  // The complement, and the point of the change: once rates are confirmed the
+  // gate comes from the Phoenix-pinned table, so it no longer varies with the
+  // machine's timezone. This assertion is host-independent by construction.
+  await withEnv(CONFIRMED, async () => {
     const { isOnPeakHour } = await import('../src/analytics.js');
-    assert.equal(isOnPeakHour(phx('2026-08-04T15:30:00')), true, 'legacy 15-20 window still applies');
+    const on = [16, 17, 18];
+    for (let h = 0; h < 24; h++) {
+      assert.equal(
+        isOnPeakHour(phx(`2026-08-04T${String(h).padStart(2, '0')}:30:00`)),
+        on.includes(h),
+        `Phoenix hour ${h} — same answer on any host`,
+      );
+    }
   });
 });
 
