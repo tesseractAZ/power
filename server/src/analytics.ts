@@ -1,4 +1,5 @@
 import type { DeviceSnapshot } from './snapshot.js';
+import { rateAt, apsREvModelFromEnv } from './tariff.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import { getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { liveGridBackstop } from './gridState.js';
@@ -7406,6 +7407,50 @@ function apsCent(name: string): number | null {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
+/**
+ * v1.136.0 — the per-hour rate, from the FULL tariff table.
+ *
+ * THE DEFECT THIS REPLACES: `resolveTariffCents` returns `{onPeak, offPeak}` — a
+ * two-tier model — and both the KPI tally and the dispatch planner priced every
+ * hour with `onPeakAt(t) ? onPeak : offPeak`. APS R-EV has FOUR priced periods,
+ * so **every overnight kWh was billed at the off-peak rate**: 16.91 c instead of
+ * 12.59 c on this plant. Against the 1,109 overnight kWh on the September bill
+ * that is $47.91/month of pure over-statement in `Grid Cost Today` and every
+ * figure downstream of it. The winter 10:00-15:00 super-off-peak tier (8.2 c) had
+ * no representation at all.
+ *
+ * `rateAt` also pins America/Phoenix, where `onPeakAt` read `new Date().getHours()`
+ * — the HOST clock. Same answer on this Pi, wrong on any host in another zone.
+ *
+ * FALLBACK IS DELIBERATE AND EXPLICIT. `rateAt(...).centsPerKwh` is `number | null`
+ * (null when rates are unconfirmed), and `null / 100 === 0` in JS — so a bare
+ * conversion would silently price an unconfirmed install's every kWh at $0. This
+ * falls back to the legacy two-tier ladder instead, which is wrong in the same way
+ * it always was but is at least non-zero and matches the documented basis.
+ */
+export function hourlyRateCents(
+  tsMs: number,
+  fallback: { onPeak: number; offPeak: number },
+): number {
+  const slice = rateAt(apsREvModelFromEnv(), tsMs);
+  if (slice.centsPerKwh != null) return slice.centsPerKwh;
+  return onPeakAt(tsMs) ? fallback.onPeak : fallback.offPeak;
+}
+
+/**
+ * v1.136.0 — is this hour on-peak, from the SAME table that prices it?
+ *
+ * The dispatch planner gated discharge on `onPeakAt`, whose default window is
+ * `15-20` — five hours. APS R-EV rewards **16:00-19:00**, three. So the planner
+ * recommended discharging the pack across two hours that earn the off-peak rate,
+ * spending cycle life for no arbitrage. Falls back to `onPeakAt` on an
+ * unconfirmed tariff, exactly as the pricing does, so the two never disagree.
+ */
+export function isOnPeakHour(tsMs: number): boolean {
+  const slice = rateAt(apsREvModelFromEnv(), tsMs);
+  return slice.ratesConfirmed ? slice.isOnPeak : onPeakAt(tsMs);
+}
+
 export function resolveTariffCents(nowMs: number): { onPeak: number; offPeak: number; basis: string } {
   const onOverride = apsCent('TARIFF_ON_PEAK_CENTS');
   const offOverride = apsCent('TARIFF_OFF_PEAK_CENTS');
@@ -7535,7 +7580,7 @@ export function computeTariffReport(
     let loadValue = 0;
     for (let t = sinceMs; t < now; t += HOUR) {
       const tEnd = Math.min(t + HOUR, now);
-      const rate = (onPeakAt(t) ? tariffCents.onPeak : tariffCents.offPeak) / 100;
+      const rate = hourlyRateCents(t, tariffCents) / 100;
       let gridWh = 0;
       let loadWh = 0;
       for (const d of homeDpus) {
@@ -8450,8 +8495,12 @@ export function computeDispatchPlan(
   for (const h of forecast.hours) {
     const pvKwh = h.forecastPvW / 1000;
     const loadKwh = h.forecastLoadW / 1000;
-    const onPeak = onPeakAt(h.ts);
-    const rate = (onPeak ? dispatchCents.onPeak : dispatchCents.offPeak) / 100;
+    // v1.136.0 — the discharge trigger now comes from the SAME table that prices
+    // the hour. It was `onPeakAt`, default window `15-20`, against an R-EV
+    // on-peak of 16:00-19:00 — so the plan discharged across two hours that earn
+    // the off-peak rate, spending cycle life for no arbitrage.
+    const onPeak = isOnPeakHour(h.ts);
+    const rate = hourlyRateCents(h.ts, dispatchCents) / 100;
     const socStartPct = (socKwh / fullKwh) * 100;
 
     let action: DispatchHour['action'] = 'hold';
