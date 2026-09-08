@@ -1285,6 +1285,60 @@ broadcast health. It is **byte-aligned with `/api/ha-state`** for the shared fie
 
 ---
 
+#### Table invariants + connect re-assertion (v1.137.0)
+
+Two failure modes in this file are silent by construction: the publish succeeds,
+the topic retains, and the damage shows up only in Home Assistant.
+
+**`auditDiscoveryTables(sensors, binarySensors, waivers?)`** — pure; returns a
+`DiscoveryViolation[]` that callers assert is **empty** (never a count, so a new
+violation cannot be masked by removing an old one). HA does not reject an
+incoherent `(device_class, state_class, unit_of_measurement)` triple loudly: it
+either drops the entity with one log line, or accepts it and compiles the wrong
+statistic. Rules enforced over the whole table:
+
+| Rule | What it catches |
+|---|---|
+| `device-class-state-class` | e.g. `energy` + `measurement`, which HA refuses outright |
+| `device-class-unit` | e.g. `power` carrying `kWh` |
+| `unit-without-state-class` | compiles **no** long-term statistics at all |
+| `total-increasing-without-unit` | a unitless sum the Energy Dashboard cannot consume |
+| `currency-needs-monetary-total` | a currency amount that is not `monetary` + `total`, so HA compiles a **mean** and it can never be an Energy-Dashboard cost source |
+| `duplicate-unique-id` | a collision silently drops one of the two entities |
+
+`USD/kWh` is deliberately **not** treated as a currency: that is a *price*, not an
+amount of money, and `monetary` does not apply to it. `ecoflow_grid_price_now`
+ships exactly that shape, and HA mints its own `monetary`/`total` cost entity
+from it.
+
+Deliberate departures live in `DISCOVERY_WAIVERS`, and **a waiver with an empty
+reason is not a waiver**. The reason text is the only place the intent is
+recorded, so adding a fourth `USD` sensor forces the author to state whether it
+is a dashboard readout or a cost source. The three shipped waivers are the
+daily-resetting / rolling-window tariff readouts, none of which is monotonic.
+
+**`runBrokerConnect(latch, effects)`** — the connect sequence, extracted so it is
+testable without a broker. Discovery configs are retained, so the case that
+breaks is the **broker** losing its retained store (a Mosquitto restart without
+persistence, a re-created container). The configs vanish, and the previous
+one-time `published` latch meant the add-on never re-asserted them: HA kept only
+what was already in its registry, and a fresh HA never learned the entities at
+all. So:
+
+| Step | Every connect? | Why |
+|---|---|---|
+| availability `online` | yes, **first** | a retained LWT `offline` holds every entity unavailable regardless of what follows (live: 9+ h, 2026-07-12) |
+| `clearLegacyDiscovery()` | **no — once** | empty payloads to *retired* config topics need saying once; repeating them forever is traffic that never stops |
+| `publishDiscovery()` | yes | ~90 retained publishes of unchanged payloads; HA re-processes them as no-ops |
+| invalidate circuit signature | yes | the per-circuit configs are retained on the same broker and vanish with the same store |
+| `publishedCircuitChannels` | **never reset** | not a latch — it is the *orphan ledger*, the memory of which circuits to clear a config topic for. Reset it and a removed circuit's retained config sits on the broker forever with nothing left to remove it |
+| switch subscriptions | yes | MQTT subscriptions do not survive a clean-session reconnect |
+
+Proven by `scripts/mutate-discovery-invariants.mjs` (17/17 killed), which includes
+a mutant that leaves `runBrokerConnect` correct while making the **real**
+`client.on('connect')` handler inert — the failure mode where a wired, tested,
+mutation-proven mechanism never reaches production.
+
 ### The write-command framework + audit log + rate limits (`ecoflow/commands.ts`, `writeLog.ts`)
 
 #### Design posture
@@ -3556,7 +3610,7 @@ Included days accumulate into `totalCharged`/`totalDischarged`. **Steady-state c
 **Extended-lookback backstop (v0.65.0):** if the primary window found no balanced day (`effPct == null` — typically a sustained drawdown), it recurses once over `RTE_EXTENDED_WINDOW_DAYS` (`max(7, env RTE_EXTENDED_WINDOW_DAYS ?? 30)`) at coarse buckets and reports the most-recent real balanced cycles. Stateless, self-terminating, still ≤100%, honest `null` if even the wide window has none.
 
 #### Outputs
-`GET /api/round-trip-efficiency?days=N` (N clamped 1–30, default 7) → `RoundTripEfficiency { generatedAt, windowDays, daysWithData, totalChargedKwh, totalDischargedKwh, efficiencyPct, perDay: RoundTripDay[] }`. Feeds the RTE HA sensor and (as a display annotation, *not* a divisor) informs the runway DC-drain factor. **Related invariant:** `/api/lifetime-energy` reports `charge == discharge` exactly (RTE=100%) as a steady-state clamp — that is deliberate, not sign-mixing.
+`GET /api/round-trip-efficiency?days=N` (N clamped 1–30, default 7) → `RoundTripEfficiency { generatedAt, windowDays, daysWithData, totalChargedKwh, totalDischargedKwh, efficiencyPct, perDay: RoundTripDay[] }`. Feeds the RTE HA sensor and (as a display annotation, *not* a divisor) informs the runway DC-drain factor. **Corrected in v1.137.0:** this previously described `/api/lifetime-energy` as reporting `charge == discharge` exactly, held there by a steady-state clamp. That clamp was removed in v0.45.0 and the claim is false — measured 2026-09-07, lifetime charge is 2,154.541 kWh against 2,169.44 kWh discharged, a 14.9 kWh *excess* on the discharge side. The two counters are coulomb accumulators re-zeroed at one instant and mediated by delta-SoC, so their ratio breathes with pack SoC and can sit either side of unity. Near-equality is coulombic efficiency, not an invariant; do not treat a departure from it as a defect, and do not substitute the watt integral, which measures a different quantity.
 
 #### Config / edge cases
 `RTE_EXTENDED_WINDOW_DAYS` env. `daysWithData` counts only days with a non-null `efficiencyPct`. Cache keyed by `d${windowDays}`.
@@ -4232,8 +4286,22 @@ Complete mapping (all three sources must be rated):
   load is `panel_load` (Σ the SHP2 circuit CTs), never the derived consumption line.
 
 Per-circuit counters are eligible for `device_consumption` (the per-device
-breakdown). Because the circuit CTs sum to approximately whole-home load, HA's
-"untracked consumption" then reads as the conversion-loss residual above.
+breakdown), but **the residual they leave is not the conversion loss.** This
+paragraph used to claim the circuit CTs sum to approximately whole-home load, so
+that "untracked consumption" would read as the PV→battery conversion residual
+above. Two things break that:
+
+- The SHP2 meters the **backup-circuit subset**, not the service. Anything on a
+  non-backup branch is invisible to the CT sum but present in the grid main, so
+  the untracked figure carries real load as well as conversion loss.
+- Channel 1 has never been reconciled. It reads 0.147 kWh lifetime against
+  channel 3's 66.6 kWh on a pairing that should be comparable, and telemetry
+  cannot settle whether that is a dead CT or a genuinely idle branch — it needs a
+  physical check at the panel. Until it is settled, one channel of the sum is of
+  unknown validity.
+
+So treat "untracked consumption" as an upper bound on conversion loss, never as a
+measurement of it, and do not tune anything against its absolute value.
 
 ---
 
@@ -4322,6 +4390,16 @@ module constants, so a confirmed utility rate table configured for the night-cha
 work priced correctly there and nowhere else. `resolveTariffCents` is the single
 exported resolver both now call; it returns `{ onPeakCents, offPeakCents, basis }`
 and picks the first tier that applies:
+
+> **Superseded in part by v1.136.0.** `resolveTariffCents` returns TWO tiers, and
+> both call sites used to price every hour as `onPeakAt(t) ? onPeak : offPeak`.
+> APS R-EV has **four** priced periods, so every overnight kWh was billed at the
+> off-peak rate — 16.91¢ instead of 12.59¢. The KPI tally and the dispatch planner
+> now call `hourlyRateCents(tsMs, fallback)` and `isOnPeakHour(tsMs)`, which read
+> the confirmed rate table's period for that hour and fall back to the two-tier
+> answer only when no table is configured. `resolveTariffCents` remains correct
+> for the two-tier fallback it describes; it is no longer the whole story for a
+> configured install.
 
 | # | Tier | `basis` | Condition |
 |---|---|---|---|
@@ -8802,7 +8880,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Product projections | `projectByProduct()` → typed dpu/shp2/generic `Projection` (§2) | Raw quota maps | Every engine, UI, sensors | measured-and-active |
 | Backup-pool grace-hold + slew guard | `backupPoolWithGraceHold` holds last-good pool through transient nulls; slew-limits implausible jumps (§2) | SHP2 `backupIncreInfo.*` (aggregate `backup{Remain,FullCap}Wh`, `backupBatPercent`) | Runway, SoC alarm, HA `backup_pool` sensors | measured-and-active |
 | SQLite recorder | `record(extract(snap))` with dedupe/heartbeat, retention, WAL; read-only worker twin `readRecorder.ts` byte-parity-tested (§1.4) | All projected metrics | Every history-driven engine | measured-and-active |
-| Lifetime accumulators | `rollupLifetime()` monotonic Wh counters; steady-state RTE clamp (`charge == discharge` by design) + micro-dip clamp `clampLifetimeDip` (§1.4.6, §7.2) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | `/api/lifetime-energy`, HA Energy Dashboard `*_lifetime_kwh` | measured-and-active |
+| Lifetime accumulators | `rollupLifetime()` monotonic Wh counters; micro-dip clamp `clampLifetimeDip` (§1.4.6, §7.2). The steady-state RTE clamp this row used to name was removed in v0.45.0 — `charge == discharge` is NOT an invariant (see §1.4.6) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | `/api/lifetime-energy`, HA Energy Dashboard `*_lifetime_kwh` | measured-and-active |
 | Telemetry-gap detection | Recorder gap scan → outage/gap events (§1.4.7) | Sample timestamps | `/api/telemetry-gaps`, `outageAlerts()`, HA `system_outage_*` / `system_telemetry_gap_count_24h` | measured-and-active |
 | Trapezoidal integration | `integrateWh` gap-aware trapezoid; shared day-boundary endpoint (§1.5, §7.0.1) | Any W-metric series | selfConsumption, RTE, tariff, carbon, totals, circuit history | measured-and-active |
 | Analytics worker + report registry | Worker thread, `BUILDERS` registry, coalesce + TTL cache, `WARM_REPORTS` self-warm (§1.6, §1.8) | — (infrastructure) | All `/api/<report>` routes, MQTT state, TUI | measured-and-active |
