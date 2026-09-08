@@ -80,6 +80,7 @@ import {
   // dischargeEff = the DC-bus discharge tax.
   DISPATCH_ROUND_TRIP_EFFICIENCY,
   RUNWAY_DISCHARGE_EFFICIENCY,
+  hourlyRateCents,
 } from './analytics.js';
 import type {
   ProbabilisticForecast, MultiDayForecast, DayForecast, EvWindowPrediction, ForecastHour,
@@ -1968,8 +1969,23 @@ app.get('/api/dispatch/recommend', async (req, reply) => {
   const flatCents = Number(process.env.TARIFF_FLAT_CENTS_PER_KWH ?? 17);
   const onPeak = Number(process.env.TARIFF_ON_PEAK_CENTS_PER_KWH ?? flatCents);
   const offPeak = Number(process.env.TARIFF_OFF_PEAK_CENTS_PER_KWH ?? flatCents);
+  // v1.136.0 — THIRD copy of the on-peak window, now retired. This hardcoded
+  // `h >= 15 && h < 20` was a two-tier ladder with no DOW gate at all, so it
+  // priced weekend afternoons as on-peak and every overnight hour as off-peak,
+  // on a plan whose on-peak is Mon-Fri 16:00-19:00 only. It also read the HOST
+  // clock. `hourlyRateCents` resolves the full table in America/Phoenix and falls
+  // back to this same two-tier pair when rates are unconfirmed.
+  //
+  // Local midnight is computed ARITHMETICALLY, not via Intl: Phoenix is a fixed
+  // UTC-7 with no DST, and this codebase has already been bitten once by an Intl
+  // locale behaving differently on the Pi than on a laptop. No formatter, no
+  // locale data, no divergence.
+  const HOUR_MS = 3_600_000;
+  const PHX_OFFSET_MS = 7 * HOUR_MS;
+  const phxMidnightUtcMs =
+    Math.floor((Date.now() - PHX_OFFSET_MS) / 86_400_000) * 86_400_000 + PHX_OFFSET_MS;
   const tariffByHour: number[] = Array.from({ length: 24 }, (_, h) =>
-    h >= 15 && h < 20 ? onPeak : offPeak);
+    hourlyRateCents(phxMidnightUtcMs + h * HOUR_MS, { onPeak, offPeak }));
   // v0.15.2 — off-grid honesty fix. The hardcoded gridAvailable:true let the
   // optimizer "assume away" reserve dips via grid imports that physically don't
   // exist on this islanded site, producing dangerously optimistic plans. Default

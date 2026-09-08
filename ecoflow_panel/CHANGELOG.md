@@ -1,3 +1,53 @@
+## v1.136.0 — one rate table, four periods
+
+`resolveTariffCents` returns `{onPeak, offPeak}` — **two** tiers. APS R-EV has
+four priced periods, and both the KPI tally and the dispatch planner priced every
+hour with `onPeakAt(t) ? onPeak : offPeak`. So **every overnight kWh was billed at
+the off-peak rate**: 16.91 c instead of 12.59 c.
+
+Against the **1,109 overnight kWh** on the September bill that is **$47.91 a month**
+of pure over-statement in `Grid Cost Today` and everything downstream of it —
+about $575/yr of a number that was never real. The winter 10:00–15:00
+super-off-peak tier (8.2 c) had no representation at all. Nothing failed, because
+a pricing error produces a plausible number rather than an exception.
+
+There were **three** copies of the on-peak window. The third, in the MPC feed, was
+a hardcoded `h >= 15 && h < 20` with **no day-of-week gate at all**, so it priced
+weekend afternoons as on-peak on a plan whose on-peak is Mon–Fri only. All three
+now resolve through `hourlyRateCents`, which reads the full table.
+
+**The planner was also discharging into hours it was not paid for.** Its gate was
+`onPeakAt`, default window `15-20` — five hours against an R-EV on-peak of
+16:00–19:00. Two of those five earn the off-peak rate, so the plan spent cycle
+life for no arbitrage. `isOnPeakHour` now derives the gate from the same table
+that prices the hour, so the two can no longer disagree.
+
+Two deliberate details. The fallback is explicit: `rateAt(...).centsPerKwh` is
+`number | null` and `null / 100 === 0` in JavaScript, so a bare conversion would
+have silently priced every kWh at **$0** on an unconfirmed install; it falls back
+to the legacy ladder instead. And local midnight in the MPC feed is computed
+arithmetically rather than through `Intl` — Phoenix is a fixed UTC−7 with no DST,
+and this codebase has already been bitten once by a locale behaving differently on
+the Pi than on a laptop.
+
+2,393 tests, verified under **both** `TZ=UTC` and `TZ=America/Phoenix`. The first
+draft of one test asserted the legacy gate's behaviour at a fixed Phoenix hour; it
+passed here and **failed in CI**, because `onPeakAt` reads `new Date(ts).getHours()`
+— the host clock — and the runner is UTC. That failure is evidence for the very
+defect described above, so the assertion was changed to the property that is
+actually true (on an unconfirmed tariff the gate *delegates* to `onPeakAt`, whatever
+it says) rather than to a timestamp that happened to work. A companion test pins
+the complement: with rates confirmed, the gate comes from the Phoenix-pinned table
+and gives the same answer on any host.
+
+`scripts/mutate-rate-table.mjs`: **5 of 6 mutants killed, and the
+sixth is declared in the harness rather than deleted.** The KPI tally's call site
+is not pinned — its integration window means a fixture hour old enough to have a
+known tariff period contributes no energy, and with zero energy both pricing paths
+return 0. The dispatch call site and both pure helpers are pinned. The harness now
+fails on an *undeclared* survivor and passes on a declared one, so the gap is
+visible in the output rather than hidden by a better-looking score.
+
 ## v1.135.0 — the database snapshot says how old it is
 
 `/share/ecoflow-panel/ecoflow-snapshot.db` is a **copy, not a mirror**. The live
