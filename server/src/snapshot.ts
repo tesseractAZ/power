@@ -462,7 +462,7 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
           store.setDeviceError(d.sn, msg);
           failedSns.push(d.sn);
           // v1.40.0: debug-log once per device per session — persistent quota
-          // failures (e.g. API code 1006, an account-permission limitation on
+          // failures (e.g. API code 1006, a PRODUCT-CLASS limitation on
           // some device classes) previously surfaced ONLY in the snapshot,
           // leaving no log breadcrumb at all (silent-catch rule).
           if (!quotaErrLogged.has(d.sn)) {
@@ -527,65 +527,41 @@ export function nextPollDelayMs(intervalMs: number, tookMs: number): number {
   return Math.max(0, intervalMs - tookMs);
 }
 
-/** v1.138.0 — a failure must persist this long before a recovery is newsworthy. */
-export const LONG_FAILURE_TENURE_MS = 30 * 60_000;
-
 /**
- * v1.138.0 — which long-failing devices genuinely RECOVERED this poll.
+ * v1.139.0 — THE ENABLEMENT DOORBELL IS DELETED. Do not reinstate it.
  *
- * THE DEFECT THIS REPLACES (observed live, 2026-09-08 15:52:31 MST): the
- * detector asked `if (!failedSns.includes(sn))` and treated a true as "this
- * device succeeded". `BACC - Delta 3 Plus` had been 1006-blocked for well over
- * the tenure gate when EcoFlow's cloud reported it OFFLINE; it dropped out of
- * the fetch set, vanished from `failedSns`, and 302 ms later — same poll tick,
- * same `/device/list` payload — the operator's phone said "EcoFlow data
- * restored — quota data is flowing again". Nothing had been restored. The
- * device's `lastUpdated` was 0 then and is 0 now: no quota fetch has EVER
- * succeeded for that SN.
+ * v1.88.0 added a detector to announce the moment the four 1006-blocked
+ * accessories (EVSE, PowerInsight, BACC Delta 3 Plus, SEC River 3 Plus) started
+ * answering `/quota/all` — the signal that an API-access request to EcoFlow had
+ * been granted. v1.138.0 fixed it firing falsely. This release removes it,
+ * because the premise it rested on is false.
  *
- * Absence from a failure list has three causes and only one of them is success:
- *   1. the fetch succeeded                      → a real recovery
- *   2. the device went offline, so was not asked → UNEVALUABLE
- *   3. it fell out of /device/list entirely      → UNEVALUABLE
+ * **API error 1006 is a PRODUCT-CLASS limit, not a grantable account
+ * permission.** The owner settled this on 2026-09-08: EcoFlow is not expected to
+ * extend API coverage to these device classes. The vendor's own wording scopes
+ * the denial to the device — "current DEVICE is not allowed to get device info"
+ * — and the same credentials read every Delta Pro Ultra and the SHP2 without
+ * trouble. So the condition the doorbell watched for cannot occur, and a
+ * detector that can only ever fire falsely is worse than no detector: it trains
+ * the operator to discount a push on a life-safety system.
  *
- * So a recovery now requires POSITIVE evidence — `attempted && !failed`. An SN
- * that was not attempted is HELD: its clock is neither read as a recovery, nor
- * reset, nor deleted.
+ * The repo previously asserted BOTH readings — DOCS.md said "by design" while a
+ * v1.40.0 comment here said "account-permission limitation". That contradiction
+ * is what allowed the feature to be built at all. It is now reconciled to one
+ * reading everywhere.
  *
- * Holding is not cosmetic. The old code deleted the entry on every absence,
- * outside the tenure test, which made the bug bidirectional: had EcoFlow's real
- * enablement landed during an offline window, the device would have come back
- * succeeding, never re-accumulated 30 minutes of failure, and the true doorbell
- * would never have rung. It cried wolf AND would have stayed silent for the wolf.
+ * WHAT SURVIVES, and why it is not part of the doorbell:
+ *   - `refreshAll` still returns `{ attemptedSns, failedSns }`. The attempt set
+ *     is what makes "never asked" distinguishable from "asked and failed", and
+ *     `pollHealthVerdict` below depends on it.
+ *   - `pollHealthVerdict` (S1) stays. It closed the same faulty inference where
+ *     it actually mattered — a cloud-offline SHP2 counting as a healthy poll and
+ *     disarming the telemetry-blind CRITICAL for the whole dark window.
  *
- * Pure apart from the deliberate in-place mutation of `tenureMs`, which is the
- * caller's long-lived map. Returns the SNs to announce.
+ * If EcoFlow ever does extend coverage, the honest signal is already present
+ * without a detector: the device stops erroring and `lastUpdated` advances.
+ * Look at `/api/debug/raw`, do not rebuild a push.
  */
-export function longFailureRecoveries(o: {
-  nowMs: number;
-  /** sn -> first-failed-at ms. MUTATED IN PLACE (entries started, held, or retired). */
-  tenureMs: Map<string, number>;
-  attemptedSns: readonly string[];
-  failedSns: readonly string[];
-  minTenureMs?: number;
-}): string[] {
-  const minTenure = o.minTenureMs ?? LONG_FAILURE_TENURE_MS;
-  const attempted = new Set(o.attemptedSns);
-  const failed = new Set(o.failedSns);
-
-  // Start the clock for a device we have not seen fail before.
-  for (const sn of o.failedSns) if (!o.tenureMs.has(sn)) o.tenureMs.set(sn, o.nowMs);
-
-  const recovered: string[] = [];
-  for (const [sn, since] of [...o.tenureMs]) {
-    if (failed.has(sn)) continue;      // still failing — clock runs on
-    if (!attempted.has(sn)) continue;  // ★ NEVER ASKED — hold, do not judge
-    // Attempted this poll and did not throw: quota data demonstrably arrived.
-    if (o.nowMs - since >= minTenure) recovered.push(sn);
-    o.tenureMs.delete(sn);
-  }
-  return recovered;
-}
 
 /**
  * v1.138.0 — is this poll evidence that the alarm path can still see? (S1)
@@ -671,14 +647,12 @@ export function startPollLoop(
    *  LONG time (>= 30 min; i.e. the persistent 1006 class, not a one-poll blip)
    *  starts answering. The EcoFlow ticket asking for exactly this enablement is
    *  in their queue — this is the "it landed" doorbell. */
-  onLongFailureRecovered?: (sns: string[]) => void,
 ): () => void {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   let lastPollFailed = false; // track failure→ok recovery for the one INFO line that matters
   let lastFailedSetKey = ''; // v1.86.0 — poll-failure set-change dedupe
   let lastFailedSetLoggedMs = 0;
-  const failureFirstSeenMs = new Map<string, number>(); // v1.88.0 — tenure per failing SN
   // Wire the per-SN state-transition logger into the store on first poll.
   store.setLogger(log);
   const tick = async () => {
@@ -687,16 +661,6 @@ export function startPollLoop(
     try {
       const { attemptedSns, failedSns } = await refreshAll(store, log);
       const tookMs = Date.now() - t0;
-      // v1.138.0 — ONE attribution call for the whole tick, replacing the two
-      // separate doorbell sites below. The old `else` branch (failedSns empty)
-      // fired for EVERY long-tenured SN at once and then .clear()'d the map with
-      // no per-device check at all — so an empty or short /device/list would
-      // have announced all four 1006-blocked accessories as restored
-      // simultaneously: a telemetry blackout rendered as good news.
-      const recoveredLong = longFailureRecoveries({
-        nowMs: Date.now(), tenureMs: failureFirstSeenMs, attemptedSns, failedSns,
-      });
-      if (recoveredLong.length) onLongFailureRecovered?.(recoveredLong);
       // v1.79.0 — a poll with per-device fetch failures is not a bare "ok":
       // name the devices at warn so the 10 s connect-timeout ceiling stops
       // hiding inside "poll ok in 10486ms (slow)".
