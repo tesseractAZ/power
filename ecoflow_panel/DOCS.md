@@ -946,6 +946,39 @@ restored" to the operator's phone 302 ms after the device went OFFLINE. A detect
 can only fire falsely is worse than none on a life-safety system: it teaches the operator
 to discount the push. A source pin in `pollHealthAttribution.test.ts` keeps it deleted.
 
+##### The evidence doctrine (v1.140.0)
+
+Four detectors read absence from a filtered collection as evidence of success.
+They are now gated on the same rule the alert falling edge already states as
+`fallingEdgeFrozenByEvidence`: **a thing that was never observed is unevaluable,
+not recovered.**
+
+| Gate | Was | Now |
+|---|---|---|
+| `alarmPathShp2Sns()` | roster filtered on `projection.kind === 'shp2'` — a projection only exists after a SUCCESSFUL fetch, so a restart while the panel was dark left it `[]` for the whole window | resolved by IDENTITY via `shp2Panels` (`productName`), which `setDeviceList` keeps for offline devices |
+| `shp2ReadbackFresh()` | the actuator compared a FROZEN projection to its target by strict equality | a control readback requires `online === true` and a sample newer than `SHP2_READBACK_STALE_MS` |
+| `orphanedNotifiedIds()` | any persisted id absent from (current ∪ tracked) was resolve-pushed at boot | ids whose source device is absent/stale are **held**; the hold has a deadline and expiry **drops**, never resolves |
+| `retireAbsentPacks()` | deleted a confirmed record after 48 h of absence, however that absence arose | retirement requires the pack's LAST SEEN chassis to be online and reporting; a `DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS` backstop bounds the hold |
+
+Two properties are load-bearing and easy to lose:
+
+- **Holds need deadlines.** Several devices are permanently unevaluable — an
+  RMA'd Core (`setDeviceList` never deletes, so it sits at `online:false` for the
+  process lifetime), a bench spare whose offline state is by design, and the 1006
+  accessories which report `online:true` with `lastUpdated:0`. Without a deadline
+  their notifications would linger forever.
+- **A never-pushed record is dropped before the evidence test.** A `sent:false`
+  record cannot produce a false all-clear, and holding those would stop the sweep
+  collecting for exactly the noisiest families it exists to clean up.
+
+`sensor.ecoflow_panel_poll_health` publishes the poll verdict (`ok`, or
+`shp2-fetch-failed` / `shp2-not-polled`). It exists because the SHP2 half of this
+had to be argued from code reading: the value was computed every 60 s and stored
+nowhere, so no amount of history could show whether it had ever manifested.
+
+Proven by `scripts/mutate-absence-evidence.mjs` (18/18 killed), including four
+mutants that leave every pure function correct while reverting a live call site.
+
 > If EcoFlow ever does extend coverage, the honest signal needs no detector: the device
 > stops erroring and `lastUpdated` advances. Check `/api/debug/raw`. Note also that an
 > accessory contributes **no** alarms, energy totals or HA entities even when its data

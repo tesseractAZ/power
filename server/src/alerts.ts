@@ -469,6 +469,16 @@ export function hostPressureCritSustained(level: 'ok' | 'warn' | 'crit', now: nu
 }
 export function _resetHostPressureDwellForTest(): void { hostPressureCritSinceMs = null; }
 
+/**
+ * v1.140.0 — is this DPU evaluable this tick? Shared by the pack loop and the
+ * defective-pack retirement set so the two cannot drift: retirement reads a
+ * collection built by this filter, and if it disagreed with the loop gate the
+ * fix would reintroduce the defect it closes.
+ */
+function isDpuEvaluable(d: DeviceSnapshot): boolean {
+  return !!d.online && !!d.projection;
+}
+
 export function computeAlerts(
   devices: Record<string, DeviceSnapshot>,
   connectivity?: ConnectivityContext,
@@ -820,7 +830,7 @@ export function computeAlerts(
   }
 
   for (const d of dpus) {
-    if (!d.online || !d.projection) continue;
+    if (!isDpuEvaluable(d)) continue;
     const p = d.projection;
     const coreNum = dpuNum(d.deviceName);
     const dpuStart = out.length;
@@ -1046,7 +1056,7 @@ export function computeAlerts(
       // explicit /api/defective-packs/clear. Without a packSn the legs-only
       // v1.101.0 behavior stands — never latch on a slot alone.
       if (pk.packSn) {
-        markPackPresent(pk.packSn, now);
+        markPackPresent(pk.packSn, now, d.sn);
         if (defectiveLegsLive) {
           confirmDefectivePack({
             packSn: pk.packSn, deviceSn: d.sn, deviceName: d.deviceName, packNum: pk.num,
@@ -1131,6 +1141,13 @@ export function computeAlerts(
       }
     }
     for (let i = dpuStart; i < out.length; i++) out[i].coreNum = coreNum;
+    // v1.140.0 — stamp the source device on EVERY alert this DPU emitted, the
+    // same way coreNum is stamped one line up. The boot orphan sweep persists
+    // this and asks whether the device is evaluable before treating the alert's
+    // disappearance as a recovery; without it, fallingEdgeFrozenByEvidence falls
+    // back to scanning the id, which resolves nothing for dpu-err-* / vdiff-* on
+    // a restart. Set only where absent so a more specific stamp above wins.
+    for (let i = dpuStart; i < out.length; i++) if (!out[i].sourceSn) out[i].sourceSn = d.sn;
     // v0.26.0 — a bench spare (in SPARE_DPU_SNS, not wired into the SHP2) stays
     // online for diagnostics but must NEVER chime/push. The v0.16.4 gate only
     // covered the offline/stale branches; stamp annunciate:false on everything
@@ -1156,7 +1173,16 @@ export function computeAlerts(
     if (!seenVdiffKeys.has(k)) heldVdiffWarnKeys.delete(k);
   }
   // v1.108.0 — retire defective-pack confirmations whose pack has left the fleet.
-  retireAbsentPacks(now);
+  // v1.140.0 — but only where its absence is EVIDENCE. The evaluable set is
+  // built from the SAME predicate that gates the pack loop above; if the two
+  // drifted, this would be a filtered collection given meaning for the whole
+  // fleet, which is the exact shape being fixed.
+  for (const rec of retireAbsentPacks({
+    nowMs: now,
+    evaluableDeviceSns: new Set(dpus.filter(isDpuEvaluable).map((d) => d.sn)),
+  })) {
+    void rec; // already logged with its full evidence snapshot by the latch
+  }
 
   if (shp2?.online && shp2.projection) {
     const sp = shp2.projection;

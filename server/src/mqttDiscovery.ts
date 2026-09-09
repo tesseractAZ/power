@@ -40,6 +40,7 @@ import { liveGridBackstop } from './gridState.js';
 import { countCloudWedges } from './deviceLink.js';
 import { systemOutageFields } from './alerts.js';
 import { getBroadcastHealth } from './broadcastHealth.js';
+import { pollHealth } from './telemetryBlind.js';
 
 /**
  * MQTT Discovery publisher for Home Assistant (v0.7.5).
@@ -235,6 +236,10 @@ export const SENSORS: SensorConfig[] = [
   // unconfigured. Diagnostic so it sits under the device's diagnostics, not the
   // primary controls.
   { unique_id: 'ecoflow_cloud_wedge_count', name: 'Cloud-Wedged Devices', state_class: 'measurement', icon: 'mdi:cloud-alert', entity_category: 'diagnostic', value_template: '{{ value_json.ecoflow_cloud_wedge_count }}' },
+  // v1.140.0 — the poll-health verdict, so an SHP2-dark window leaves EVIDENCE
+  // rather than an inference. S1 had to be argued from code reading because this
+  // value was computed every 60 s and stored nowhere. No unit: it is an enum.
+  { unique_id: 'ecoflow_poll_health', name: 'Poll Health', icon: 'mdi:radar', entity_category: 'diagnostic', value_template: '{{ value_json.poll_health }}' },
   // v0.83.0 — system data-gap / unplanned-outage TRACKING (24 h). Recorded
   // telemetry blackouts (restart-spanning gaps ≥ 5 min — power loss, add-on stop,
   // or deploy — and in-process MQTT stalls > 15 min). A binary "system outage in
@@ -1172,6 +1177,8 @@ export async function startMqttDiscovery(
       // configured HA ping binary_sensors. 0 when ECOFLOW_DEVICE_REACHABILITY is
       // unset (every offline device classifies 'unknown', never 'cloud_wedge').
       ecoflow_cloud_wedge_count: countCloudWedges(devices),
+      // 'ok' or the reason the alarm path could not be observed this poll.
+      poll_health: (() => { const h = pollHealth(); return h.ok ? 'ok' : h.reason ?? 'not-ok'; })(),
       // v0.83.0 — system data-gap / unplanned-outage tracking (24 h). Mirrors the
       // /api/ha-state tiles so the MQTT diagnostic sensors have data.
       // v1.14.0 — single-sourced with /api/ha-state (alerts.ts systemOutageFields).
