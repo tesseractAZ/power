@@ -2107,54 +2107,21 @@ app.get('/ws', {
   socket.on('close', () => store.off('change', onChange));
 });
 
-const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m),
-  // v1.88.0 — the EcoFlow-enablement doorbell: a device whose quota fetch had
-  // been failing >= 30 min (the persistent 1006 class named in the submitted
-  // API ticket) just started answering.
-  //
-  // v1.138.0 — this callback now only ever receives devices that were ACTUALLY
-  // POLLED and did not throw (see longFailureRecoveries), so "quota data
-  // arrived" is a fact rather than an inference. Two things still needed fixing
-  // in the message itself:
-  //
-  //   D4 — the recovery set was not filtered by device class, so a DPU Core or
-  //   the SHP2 recovering from a DNS EAI_AGAIN or a cloud 5xx would push a
-  //   false VENDOR-ENTITLEMENT claim about a core alarm-path device. The prose
-  //   hedge "if these are the accessory devices" was doing work the code never
-  //   did. Core devices now get a log line and no push at all — their recovery
-  //   is already covered by the telemetry-blind detector.
-  //
-  //   The body asserted "EcoFlow's enablement has landed" and that the panel
-  //   "will begin projecting them automatically". The first is an inference
-  //   from one poll; the second is true only for device classes with a tailored
-  //   projection, which is none of the ticketed accessories — projectByProduct
-  //   has branches for 'delta pro ultra' and 'smart home panel' and nothing
-  //   else, and zero server-side consumers read a 'generic' projection. The
-  //   speculation belongs in the log; the push gets only what was observed.
-  (sns) => {
-    const devices = store.get().devices as any;
-    const nameOf = (sn: string) => devices[sn]?.deviceName ?? sn;
-    const isCore = (sn: string) => {
-      const k = devices[sn]?.projection?.kind;
-      return k === 'dpu' || k === 'shp2';
-    };
-    const core = sns.filter(isCore);
-    const accessories = sns.filter((sn) => !isCore(sn));
-
-    if (core.length) {
-      // Not an entitlement event — a transport failure that ended.
-      app.log.info(`poll: core device fetch recovered after a long failure — ${core.map(nameOf).join(', ')}. Transport/cloud recovery, NOT an API-access change; no push sent.`);
-    }
-    if (!accessories.length) return;
-
-    const names = accessories.map(nameOf).join(', ');
-    app.log.info(`poll: LONG-FAILING accessory fetch recovered — ${names}. Quota data was received this poll. This MAY be the API-access enablement landing, or a transient success; check /api/debug/raw and whether it persists.`);
-    void sendNotification(loadNotifyConfig(), {
-      severity: 'info', dedupId: 'ecoflow_data_restored',
-      title: 'EcoFlow accessory data received',
-      body: `Quota data arrived this poll for: ${names}, after a sustained run of failures. This may be the API-access enablement landing, or a one-off success — it is not confirmed either way. Note the panel has tailored projections only for Delta Pro Ultra and Smart Home Panel 2, so an accessory contributes no alarms, energy totals or HA entities even when its data flows.`,
-    }).catch(() => { /* best-effort informational push */ });
-  });
+// v1.139.0 — the EcoFlow-enablement doorbell (v1.88.0) is DELETED, along with
+// the long-failure-recovered callback it was wired to. It watched for the 1006-blocked
+// accessories to start answering `/quota/all`, on the theory that 1006 was a
+// grantable account permission an API-access request could lift. It is not: 1006
+// is a PRODUCT-CLASS limit, settled by the owner on 2026-09-08 — EcoFlow is not
+// expected to extend API coverage to these device classes.
+//
+// So the condition it watched for cannot occur, and every firing it ever
+// produced was necessarily false. v1.138.0 fixed the mechanism; this removes the
+// feature, because a detector that can only fire falsely is worse than none on a
+// life-safety system — it teaches the operator to discount the push.
+//
+// See the tombstone above `pollHealthVerdict` in snapshot.ts for what survives
+// and why (the attempt set and the S1 telemetry-blind fix are unrelated to this).
+const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m));
 
 /* v1.2.0 — feed the per-pack rest tracker. `analyzePackLfp` needs to know when a pack
  * last moved current before it will trust pack voltage as a rested OCV; nothing was

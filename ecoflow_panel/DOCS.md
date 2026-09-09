@@ -936,37 +936,26 @@ one of them is success:
 Two detectors previously read absence as success. Both are now pure exported
 functions taking `attemptedSns` explicitly:
 
-**`longFailureRecoveries({ nowMs, tenureMs, attemptedSns, failedSns, minTenureMs? })`**
-— the EcoFlow-enablement doorbell. A recovery requires `attempted && !failed`. An SN
-that was not attempted is **HELD**: its tenure clock is neither read as a recovery, nor
-reset, nor deleted. Holding is required, not cosmetic — deleting on absence made the
-defect bidirectional, silencing a genuine enablement that landed during an offline
-window because the device would return succeeding and never re-accrue tenure. One call
-replaces the two former call sites, including an `else`-branch doorbell that fired for
-every long-tenured SN at once and then cleared the map, so an empty or short
-`/device/list` would have announced all four 1006-blocked accessories as restored — a
-telemetry blackout rendered as good news.
+**`longFailureRecoveries(...)` was REMOVED in v1.139.0.** It announced the moment a
+1006-blocked accessory started answering — the "EcoFlow enablement doorbell". The premise
+was false: **API error 1006 is a product-class limit, not a grantable account
+permission** (settled by the owner 2026-09-08; EcoFlow is not expected to extend API
+coverage to these device classes). The condition it watched for cannot occur, so every
+firing it could produce was necessarily false — and it did fire, pushing "EcoFlow data
+restored" to the operator's phone 302 ms after the device went OFFLINE. A detector that
+can only fire falsely is worse than none on a life-safety system: it teaches the operator
+to discount the push. A source pin in `pollHealthAttribution.test.ts` keeps it deleted.
 
-**`pollHealthVerdict({ knownShp2Sns, attemptedSns, failedSns })`** — whether a poll is
-evidence the alarm path can still see. Returns `{ok: true}` or a reason of
-`'shp2-fetch-failed'` / `'shp2-not-polled'`. The old `failedSns.some(isShp2)` could not
-see an SHP2 that was never **asked**: a cloud-offline panel left `notePollOk()` running,
-and because `assessBlind`'s other input counts devices carrying a projection regardless
-of `online` — and `setDeviceList` deliberately preserves `projection` across the
-transition — the telemetry-blind CRITICAL stayed disarmed for the entire dark window.
-Fails **open** only at bootstrap (no SHP2 known yet, so blindness cannot be asserted);
-once any SHP2 is known, **every** one must have been asked and answered, because a
-partially-dark multi-panel fleet is partial blindness (cf. §the second-SHP2 singleton).
+> If EcoFlow ever does extend coverage, the honest signal needs no detector: the device
+> stops erroring and `lastUpdated` advances. Check `/api/debug/raw`. Note also that an
+> accessory contributes **no** alarms, energy totals or HA entities even when its data
+> flows — there are zero server-side consumers of a `generic` projection (see
+> §Projections), and for PowerInsight and the EVSE an all-null projection would actively
+> regress the UI by replacing `SmallDeviceCard`'s honest "app-only device" badge.
 
-> **The doorbell announces receipt, not entitlement.** It fires only for devices with no
-> tailored projection (`kind` neither `dpu` nor `shp2`); a Core or SHP2 recovering from a
-> transport failure logs and does not push. The push states only what was observed —
-> quota data arrived this poll — and explicitly does not claim the API-access enablement
-> landed, because one successful poll cannot establish that. See §Projections for why an
-> accessory contributes no alarms, energy totals or HA entities even when its data flows.
-
-Proven by `scripts/mutate-poll-recovery-attribution.mjs` (15/15 killed), including three
-mutants that leave both pure functions correct while making the real `tick()` inert.
+Proven by `scripts/mutate-poll-health-attribution.mjs` (8/8 killed), including mutants
+that leave `pollHealthVerdict` correct while making the real `tick()` inert, and one that
+reinstates the deleted doorbell's machinery.
 
 ---
 

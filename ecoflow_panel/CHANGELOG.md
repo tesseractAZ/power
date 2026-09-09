@@ -1,3 +1,47 @@
+## 1.139.0
+
+### The EcoFlow enablement doorbell is deleted
+
+v1.88.0 added a detector to announce the moment the four 1006-blocked accessories
+(EVSE, PowerInsight, BACC Delta 3 Plus, SEC River 3 Plus) started answering
+`/quota/all` — the signal that an API-access request to EcoFlow had been granted.
+v1.138.0 fixed it firing falsely. This removes it, because the premise it rested on is
+false.
+
+**API error 1006 is a product-class limit, not a grantable account permission.** The
+owner settled this on 2026-09-08: EcoFlow is not expected to extend API coverage to
+these device classes. The vendor's own wording scopes the denial to the device — *"current
+**device** is not allowed to get device info"* — and the same credentials read every
+Delta Pro Ultra and the SHP2 without trouble.
+
+So the condition the doorbell watched for cannot occur, and every firing it could produce
+was necessarily false. It did fire: on 2026-09-08 it pushed *"EcoFlow data restored"* to
+the operator's phone 302 ms after the device went **offline**. A detector that can only
+fire falsely is worse than no detector on a life-safety system — it teaches the operator
+to discount the push.
+
+The repo previously asserted **both** readings of 1006 in different releases — `DOCS.md`
+said these devices reject "by design" while a v1.40.0 source comment called it "an
+account-permission limitation". That unreconciled contradiction is what allowed the
+feature to be built at all. It now reads one way everywhere, and a source pin in
+`pollHealthAttribution.test.ts` fails the build if the detector's machinery returns.
+
+If EcoFlow ever does extend coverage, the honest signal needs no detector: the device
+stops erroring and `lastUpdated` advances.
+
+### What survives, and why it is unrelated
+
+- **`refreshAll()` still returns `{ attemptedSns, failedSns }`.** The attempt set is what
+  makes "never asked" distinguishable from "asked and failed".
+- **`pollHealthVerdict()` stays.** It closed the same faulty inference where it actually
+  mattered: a cloud-offline SHP2 counted as a healthy poll, leaving the telemetry-blind
+  CRITICAL disarmed for the entire dark window. That has nothing to do with EcoFlow's
+  entitlement policy.
+
+`scripts/mutate-poll-recovery-attribution.mjs` is retargeted and renamed to
+`scripts/mutate-poll-health-attribution.mjs` — 8 mutants, 8 killed, including one that
+reinstates the deleted doorbell's machinery.
+
 ## 1.138.0
 
 ### A device going offline announced itself as restored
