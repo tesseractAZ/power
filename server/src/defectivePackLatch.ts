@@ -50,6 +50,12 @@ export interface DefectivePackRecord {
 
 /** Absence horizon after which a confirmation retires (pack left the fleet). */
 export const DEFECTIVE_PACK_ABSENT_RETIRE_MS = 48 * 60 * 60 * 1000;
+/**
+ * v1.140.0 — hard ceiling on the unevaluable HOLD above. The realistic RMA ships
+ * the chassis with the pack, so its host SN may never return; without this a
+ * record could never retire at all.
+ */
+export const DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS = 90 * 24 * 60 * 60 * 1000;
 
 const defaultPath = (): string =>
   process.env.DEFECTIVE_PACK_LATCH_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'defective-pack-latch.json');
@@ -58,6 +64,18 @@ let statePath: string | null = null;
 let records: Map<string, DefectivePackRecord> | null = null;
 /** In-memory only — see PERSISTENCE note above. */
 const lastPresentMs = new Map<string, number>();
+/**
+ * v1.140.0 — packSn -> the chassis it was LAST SEEN in.
+ *
+ * `rec.deviceSn` is frozen at first confirmation, and this plant's motivating
+ * history is a pack that MOVED chassis (the 2026-08-20 swap, where the fault
+ * followed the pack to another Core). Keying the evaluability test on
+ * `rec.deviceSn` would mean a pack confirmed in Core A, moved to Core B, with
+ * Core A decommissioned, could NEVER retire — a guaranteed never-retire path.
+ */
+const lastSeenDeviceSn = new Map<string, string>();
+/** v1.140.0 — packSn -> when its host first became unevaluable. Backstop clock. */
+const frozenSinceMs = new Map<string, number>();
 
 function ensureLoaded(): Map<string, DefectivePackRecord> {
   if (records) return records;
@@ -95,6 +113,8 @@ function save(): void {
 export function confirmDefectivePack(rec: Omit<DefectivePackRecord, 'confirmedAtMs'>, nowMs: number): void {
   const m = ensureLoaded();
   lastPresentMs.set(rec.packSn, nowMs);
+  lastSeenDeviceSn.set(rec.packSn, rec.deviceSn);
+  frozenSinceMs.delete(rec.packSn);
   if (m.has(rec.packSn)) return;
   m.set(rec.packSn, { ...rec, confirmedAtMs: nowMs });
   save();
@@ -102,8 +122,11 @@ export function confirmDefectivePack(rec: Omit<DefectivePackRecord, 'confirmedAt
 
 /** Refresh the absence clock for a CONFIRMED pack seen in the fleet. No-op for
  *  unconfirmed SNs, so the map cannot grow with ordinary healthy hardware. */
-export function markPackPresent(packSn: string, nowMs: number): void {
-  if (ensureLoaded().has(packSn)) lastPresentMs.set(packSn, nowMs);
+export function markPackPresent(packSn: string, nowMs: number, deviceSn: string): void {
+  if (!ensureLoaded().has(packSn)) return;
+  lastPresentMs.set(packSn, nowMs);
+  lastSeenDeviceSn.set(packSn, deviceSn);
+  frozenSinceMs.delete(packSn);
 }
 
 export function getConfirmedRecord(packSn: string): DefectivePackRecord | null {
@@ -114,21 +137,72 @@ export function listConfirmedRecords(): DefectivePackRecord[] {
   return [...ensureLoaded().values()];
 }
 
-/** Retire confirmations whose pack has been absent past the horizon. */
-export function retireAbsentPacks(nowMs: number): void {
+/**
+ * v1.140.0 — an absent pack is only RETIRED when its absence is EVIDENCE.
+ *
+ * THE DEFECT THIS REPLACES: presence was harvested inside the DPU loop, whose
+ * first statement is `if (!d.online || !d.projection) continue;` — while THIS
+ * function ran unconditionally on every tick. One side of the decision was gated
+ * on evidence and the other was not, so "the chassis is cloud-dark" and "the
+ * pack was physically removed" produced byte-identical input: an absence. The
+ * perverse case is the likely one — a Core powered down and boxed FOR RMA is
+ * exactly the Core that stays dark for days, so the warranty diagnosis it was
+ * pulled for is what gets deleted.
+ *
+ * Retirement now requires positive evidence: the pack's LAST SEEN chassis was
+ * online and reported a pack list this tick, and that list did not contain it.
+ * While the host is unevaluable the 48 h clock is HELD, not reset and not read.
+ *
+ * `DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS` is the backstop for the opposite failure.
+ * The realistic RMA ships the chassis WITH the pack, so the host SN may never
+ * re-enter the evaluable set — without a backstop such a record could never
+ * retire, and if a repaired pack ever returned under the same serial it would
+ * re-attach a standing `annunciate: true` warning that `isNeverMutedAlert`
+ * exempts from every mute path.
+ *
+ * Returns the retired records so the caller can log them. Deleting a warranty
+ * diagnosis with no breadcrumb is why this had to be settled by code reading.
+ */
+export function retireAbsentPacks(p: {
+  nowMs: number;
+  /**
+   * Chassis that are ONLINE and reported a pack list this tick — the only
+   * chassis whose silence about a pack is positive evidence of departure.
+   */
+  evaluableDeviceSns: ReadonlySet<string>;
+}): DefectivePackRecord[] {
   const m = ensureLoaded();
-  let changed = false;
+  const retired: DefectivePackRecord[] = [];
   for (const [sn, rec] of m) {
     const seen = lastPresentMs.get(sn);
-    if (seen == null) { lastPresentMs.set(sn, nowMs); continue; } // first sighting of the record this process: arm the clock
-    if (nowMs - seen > DEFECTIVE_PACK_ABSENT_RETIRE_MS) {
+    if (seen == null) { lastPresentMs.set(sn, p.nowMs); continue; } // first pass this process: arm the clock
+
+    const host = lastSeenDeviceSn.get(sn) ?? rec.deviceSn;
+    if (!p.evaluableDeviceSns.has(host)) {
+      let frozen = frozenSinceMs.get(sn);
+      if (frozen == null) { frozen = p.nowMs; frozenSinceMs.set(sn, frozen); }
+      if (p.nowMs - frozen <= DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS) {
+        lastPresentMs.set(sn, p.nowMs); // UNEVALUABLE — hold the absence clock
+        continue;
+      }
+      // else: fall through to the absolute backstop
+    } else {
+      frozenSinceMs.delete(sn);
+    }
+
+    if (p.nowMs - seen > DEFECTIVE_PACK_ABSENT_RETIRE_MS) {
+      // Log BEFORE deleting: this is a warranty diagnosis and the record is the
+      // only place the original evidence snapshot lives.
+      console.warn(`defective-pack: RETIRING confirmed record ${JSON.stringify(rec)}`);
       m.delete(sn);
       lastPresentMs.delete(sn);
-      changed = true;
-      void rec;
+      lastSeenDeviceSn.delete(sn);
+      frozenSinceMs.delete(sn);
+      retired.push(rec);
     }
   }
-  if (changed) save();
+  if (retired.length) save();
+  return retired;
 }
 
 /** Operator clear for the false-positive case. Returns true if a record existed. */
@@ -136,6 +210,8 @@ export function clearConfirmedPack(packSn: string): boolean {
   const m = ensureLoaded();
   const had = m.delete(packSn);
   lastPresentMs.delete(packSn);
+  lastSeenDeviceSn.delete(packSn);
+  frozenSinceMs.delete(packSn);
   if (had) save();
   return had;
 }
@@ -145,5 +221,7 @@ export function _resetDefectivePackLatchForTests(path?: string): void {
   records = null;
   statePath = null;
   lastPresentMs.clear();
+  lastSeenDeviceSn.clear();
+  frozenSinceMs.clear();
   if (path) process.env.DEFECTIVE_PACK_LATCH_PATH = path;
 }

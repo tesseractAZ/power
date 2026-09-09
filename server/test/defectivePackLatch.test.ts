@@ -8,6 +8,7 @@ import {
   confirmDefectivePack, markPackPresent, getConfirmedRecord, listConfirmedRecords,
   retireAbsentPacks, clearConfirmedPack, _resetDefectivePackLatchForTests,
   DEFECTIVE_PACK_ABSENT_RETIRE_MS,
+  DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS,
 } from '../src/defectivePackLatch.js';
 import { computeAlerts } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -66,13 +67,116 @@ test('a corrupt sidecar fails toward v1.101.0 behavior (empty, never throws)', (
   assert.equal(JSON.parse(readFileSync(path, 'utf8'))[0].packSn, PACK_SN);
 });
 
+/** The chassis is online and reported a pack list — its silence IS evidence. */
+const evaluable = (...sns: string[]) => ({ evaluableDeviceSns: new Set(sns) });
+const CORE = rec().deviceSn;
+
 test('retire: a pack absent past the horizon retires; a present one never does', () => {
   confirmDefectivePack(rec(), 1_000);
-  markPackPresent(PACK_SN, 10_000);
-  retireAbsentPacks(10_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS - 1);
+  markPackPresent(PACK_SN, 10_000, CORE);
+  retireAbsentPacks({ nowMs: 10_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS - 1, ...evaluable(CORE) });
   assert.ok(getConfirmedRecord(PACK_SN), 'inside the horizon: kept');
-  retireAbsentPacks(10_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1);
+  const retired = retireAbsentPacks({ nowMs: 10_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1, ...evaluable(CORE) });
   assert.equal(getConfirmedRecord(PACK_SN), null, 'past the horizon: retired');
+  assert.deepEqual(retired.map((r) => r.packSn), [PACK_SN], 'the retired record is returned for logging');
+});
+
+test('★ THE DEFECT: an absent pack whose CHASSIS is dark is HELD, never retired', () => {
+  // A Core powered down and boxed for RMA is exactly the Core that stays
+  // cloud-dark for days — so the warranty diagnosis it was pulled for was what
+  // got deleted. markPackPresent lives inside a loop gated on
+  // `!d.online || !d.projection`, while retireAbsentPacks ran unconditionally:
+  // one side of the decision was gated on evidence and the other was not.
+  confirmDefectivePack(rec(), 1_000);
+  markPackPresent(PACK_SN, 10_000, CORE);
+  for (let t = 1; t <= 60; t++) {
+    retireAbsentPacks({ nowMs: 10_000 + t * 60 * 60_000, ...evaluable() }); // chassis dark
+  }
+  assert.ok(
+    getConfirmedRecord(PACK_SN),
+    'the record must survive 60 h of chassis darkness — absence of evidence is not evidence of departure',
+  );
+});
+
+test('★ a pack MOVED to another chassis is judged by where it was LAST SEEN', () => {
+  // rec().deviceSn is frozen at first confirmation, and this plant's motivating
+  // history is a pack that moved chassis (2026-08-20: the fault followed the
+  // pack to another Core). Keying on rec.deviceSn would mean a pack confirmed
+  // in Core A, moved to Core B, with Core A gone, could NEVER retire.
+  confirmDefectivePack(rec(), 1_000);   // confirmed in CORE (== rec().deviceSn)
+  const CORE_B = 'Y711ZABA9H3T9999';
+  markPackPresent(PACK_SN, 10_000, CORE_B);   // then moved to CORE_B
+
+  // While CORE_B keeps reporting it, the clock refreshes and it is kept.
+  markPackPresent(PACK_SN, 10_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS, CORE_B);
+  retireAbsentPacks({ nowMs: 10_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1, ...evaluable(CORE_B) });
+  assert.ok(getConfirmedRecord(PACK_SN), 'still reported by its new chassis: kept');
+
+  // Now the discriminating case. CORE_B is online and has stopped reporting the
+  // pack; CORE (the ORIGINAL chassis, frozen in rec.deviceSn) is decommissioned
+  // and absent from the evaluable set. Keying on rec.deviceSn would find an
+  // unevaluable host and HOLD FOREVER — a guaranteed never-retire path. Keying
+  // on the last-seen chassis correctly reads CORE_B's silence as evidence.
+  retireAbsentPacks({ nowMs: 10_000 + 4 * DEFECTIVE_PACK_ABSENT_RETIRE_MS, ...evaluable(CORE_B) });
+  assert.equal(
+    getConfirmedRecord(PACK_SN), null,
+    'the LAST SEEN chassis is evaluable and silent about the pack: retired',
+  );
+});
+
+test('the absolute backstop retires a record whose chassis never returns', () => {
+  // The realistic RMA ships the chassis WITH the pack, so the host SN may never
+  // re-enter the evaluable set. Without this a record could never retire, and a
+  // repaired pack returning under the same serial would re-attach a standing
+  // annunciate:true warning that isNeverMutedAlert exempts from every mute path.
+  confirmDefectivePack(rec(), 1_000);
+  markPackPresent(PACK_SN, 10_000, CORE);
+  retireAbsentPacks({ nowMs: 20_000, ...evaluable() });   // arms the frozen clock
+  assert.ok(getConfirmedRecord(PACK_SN), 'held while inside the backstop');
+  const retired = retireAbsentPacks({
+    nowMs: 20_000 + DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS + 1, ...evaluable(),
+  });
+  assert.equal(getConfirmedRecord(PACK_SN), null, 'past the absolute backstop: retired');
+  assert.equal(retired.length, 1);
+});
+
+test('★ an evaluable chassis CLEARS the frozen clock — darkness must be CONTINUOUS', () => {
+  // The clearing must happen on the evaluable branch of retireAbsentPacks itself.
+  // Routing it through markPackPresent (which also clears) would leave the branch
+  // untested — the chassis has to come back WITHOUT the pack being re-seen.
+  const H = 60 * 60_000;
+  confirmDefectivePack(rec(), 0);
+  markPackPresent(PACK_SN, 0, CORE);                       // seen = 0
+  retireAbsentPacks({ nowMs: 1 * H, ...evaluable() });      // dark: freeze armed at 1 h
+  retireAbsentPacks({ nowMs: 2 * H, ...evaluable(CORE) });  // chassis back (pack NOT seen) -> freeze cleared
+  retireAbsentPacks({ nowMs: 3 * H, ...evaluable() });      // dark again: freeze re-armed at 3 h
+
+  // Just past the backstop measured from the FIRST arming. Cumulative reading
+  // would retire here; continuous reading still has 2 h to run.
+  retireAbsentPacks({ nowMs: 1 * H + DEFECTIVE_PACK_ABSOLUTE_RETIRE_MS + 1, ...evaluable() });
+  assert.ok(
+    getConfirmedRecord(PACK_SN),
+    'the backstop measures CONTINUOUS unevaluability, not cumulative',
+  );
+});
+
+test('★ retirement is LOGGED with its full evidence snapshot before the delete', () => {
+  // A warranty diagnosis destroyed with no breadcrumb is why this had to be
+  // settled by reading code rather than by looking at the system.
+  const lines: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+  try {
+    confirmDefectivePack(rec(), 1_000);
+    markPackPresent(PACK_SN, 10_000, CORE);
+    retireAbsentPacks({ nowMs: 10_000 + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1, ...evaluable(CORE) });
+  } finally {
+    console.warn = orig;
+  }
+  const line = lines.find((l) => l.includes('RETIRING'));
+  assert.ok(line, `expected a RETIRING warn line, got ${JSON.stringify(lines)}`);
+  assert.ok(line!.includes(PACK_SN), 'the log must carry the pack serial');
+  assert.ok(line!.includes('confirmedAtMs'), 'the log must carry the evidence snapshot, not just the id');
 });
 
 test('retire clock arms at first sighting after a restart, not at epoch', () => {
@@ -80,14 +184,14 @@ test('retire clock arms at first sighting after a restart, not at epoch', () => 
   confirmDefectivePack(rec(), 1_000);
   _resetDefectivePackLatchForTests(path); // restart drops the in-memory presence clock
   const now = 100 * DEFECTIVE_PACK_ABSENT_RETIRE_MS;
-  retireAbsentPacks(now);              // first pass ARMS the clock
+  retireAbsentPacks({ nowMs: now, ...evaluable(CORE) });  // first pass ARMS the clock
   assert.ok(getConfirmedRecord(PACK_SN), 'must not retire on the arming pass');
-  retireAbsentPacks(now + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1);
+  retireAbsentPacks({ nowMs: now + DEFECTIVE_PACK_ABSENT_RETIRE_MS + 1, ...evaluable(CORE) });
   assert.equal(getConfirmedRecord(PACK_SN), null);
 });
 
 test('markPackPresent is a no-op for unconfirmed SNs (healthy fleet never accumulates)', () => {
-  markPackPresent('Y712ZABA4H350028', 1_000);
+  markPackPresent('Y712ZABA4H350028', 1_000, 'Y711ZABA9H3T0489');
   assert.equal(listConfirmedRecords().length, 0);
 });
 

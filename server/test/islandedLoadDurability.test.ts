@@ -141,15 +141,28 @@ test('THE v1.78.0 RULE, finally pinned: an owed resolve is HELD in quiet hours',
 
 test('the orphan sweep honours the same rule and DEFERS rather than drops', () => {
   const src = readFileSync(resolve(import.meta.dirname, '../src/alertMonitor.ts'), 'utf8');
-  const sweep = src.slice(src.indexOf('orphanSweepDone && now - bootMs'));
-  const head = sweep.slice(0, 1200);
+  // Bound the window on the BLOCK, not a byte count. A fixed 1200-char slice
+  // stopped reaching the branch the moment the block grew a comment (v1.140.0),
+  // which fails the test for a reason that has nothing to do with the invariant.
+  const start = src.indexOf('orphanSweepDone && now - bootMs');
+  assert.ok(start > 0, 'orphan sweep guard located');
+  const end = src.indexOf('boot reconcile', start);
+  assert.ok(end > start, 'orphan sweep block located');
+  const head = src.slice(start, end);
   assert.match(head, /inQuietWindow\(nowDate, QUIET_WINDOW\)/,
     'the once-per-boot orphan sweep must consult the quiet window too');
-  // It must NOT latch orphanSweepDone on the held branch, or the resolves are dropped.
+  // It must NOT latch orphanSweepDone on the quiet-hours branch, or the resolves
+  // are dropped rather than deferred.
+  // v1.140.0 — the latch is no longer an unconditional `= true`: it is
+  // `= hold.length === 0`, so an orphan held on an unevaluable device also keeps
+  // the sweep open. The invariant this test pins is unchanged — the quiet-hours
+  // branch must be reached without assigning the latch at all.
   const heldIdx = head.indexOf('orphan resolve sweep held');
-  const latchIdx = head.indexOf('orphanSweepDone = true');
+  const latchIdx = head.search(/orphanSweepDone = /);
   assert.ok(heldIdx !== -1 && latchIdx !== -1 && heldIdx < latchIdx,
-    'the hold must come BEFORE the latch, so the sweep re-runs when the window opens');
+    'the quiet-hours hold must come BEFORE any latch assignment, so the sweep re-runs when the window opens');
+  assert.ok(!/orphanSweepDone = true\b/.test(head),
+    'the latch must be conditional on nothing being held, never an unconditional true');
   assert.ok(!/return;\s*\n\s*}\s*\n\s*orphanSweepDone = true/.test(head),
     'must not early-return past `firstRun = false`');
 });

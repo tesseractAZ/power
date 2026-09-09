@@ -104,6 +104,45 @@ export function shp2ConnectedDpuSns(devices: Record<string, DeviceSnapshot>): Se
  * panel whose numbers the singleton paths report is PINNED rather than dependent
  * on device-map iteration order.
  */
+/** v1.140.0 — how stale an SHP2 sample may be and still be a DEVICE READING. */
+export const SHP2_READBACK_STALE_MS = 300_000;
+
+/**
+ * v1.140.0 — R3: is this SHP2 sample a live reading, or a frozen one?
+ *
+ * `setDeviceList` preserves `projection` VERBATIM across an offline transition,
+ * by design, so every consumer that reads `shp2.projection` keeps seeing the
+ * last successful sample for as long as the panel stays cloud-dark. For display
+ * that is correct. For a CONTROL READBACK it is not: the night-charge actuator
+ * compares `backupReserveSoc` by strict equality to decide whether a write took
+ * effect, so over one dark night a frozen pre-write value never equals the
+ * target — `retryApply`, then `applyFailed`, which is a critical push saying the
+ * write NEVER TOOK EFFECT — and the scheduled revert then finds
+ * `currentReservePct === priorReservePct` and stamps `revertVerified` for a
+ * revert no device confirmed. Frozen at the raised target instead, the revert
+ * escalates to `revertFailed`: a spoken bilingual CRITICAL broadcast, from a
+ * sample that may be hours old.
+ *
+ * `gridState.ts` already applies exactly this gate to sibling fields on the same
+ * projection, for exactly this stated reason. This is that precedent, named and
+ * shared, so the two cannot drift.
+ *
+ * Callers should null the WHOLE readback group together — a half-gated read
+ * leaves the coherence verdict judging frozen data. Every `decideActuation`
+ * branch already treats null as "do nothing", which is the pause the actuator's
+ * own comment promises.
+ */
+export function shp2ReadbackFresh(
+  d: { online?: boolean; lastUpdated?: number } | undefined | null,
+  nowMs: number,
+  staleMs: number = SHP2_READBACK_STALE_MS,
+): boolean {
+  if (!d || d.online !== true) return false;
+  const lu = d.lastUpdated;
+  if (typeof lu !== 'number' || !Number.isFinite(lu) || lu <= 0) return false;
+  return nowMs - lu <= staleMs;
+}
+
 export function shp2Panels(devices: Record<string, DeviceSnapshot>): {
   sns: string[];
   primarySn: string | undefined;

@@ -1,3 +1,92 @@
+## 1.140.0
+
+### Four detectors that read silence as good news
+
+Every one of these is the same shape as the v1.138.0/v1.139.0 doorbell: a
+collection built from a filtered subset, then absence from it given meaning for
+the whole set. All four fail silently — the add-on reports itself healthy, the
+push says the fault cleared, the ledger says the write was verified, the warranty
+record is simply gone. Three had to be found by reading code, because nothing
+throws and nothing is logged.
+
+The codebase already names the correct rule, as `fallingEdgeFrozenByEvidence`:
+*an alert vanishing because its source went absent is UNEVALUABLE, not recovered.*
+It was applied on one path and nowhere else.
+
+**The telemetry-blind fix from v1.138.0 was itself half-closed.** The SHP2 roster
+was built by filtering on `projection.kind === 'shp2'` — but a projection only
+exists after a **successful** quota fetch, and the store is in-memory. So after
+any restart while the panel was cloud-dark the roster was `[]`, not merely at
+bootstrap but for as long as the darkness lasted; `pollHealthVerdict` took its
+fail-open branch and the CRITICAL stayed disarmed. Exactly the outcome v1.138.0
+was written to prevent, re-entered through the restart door — and a restart is
+not rare: nine were measured in one 50-hour window. The roster is now resolved by
+device IDENTITY (`productName`), which `setDeviceList` keeps for offline devices.
+
+**A restart while a Core was dark falsely resolved its standing faults.**
+`computeAlerts` skips offline DPUs wholesale, so a cloud-dark Core contributes
+zero alerts — and the boot sweep read that as "everything on this device
+cleared", pushed *"Resolved: …"* to the phone and dismissed the HA card. Two
+CRITICALs and six warnings on Core 4 were exposed to this. Orphans whose source
+device is absent or stale are now **held**. The hold has a deadline, because
+several devices are permanently unevaluable (an RMA'd Core, a bench spare, the
+1006 accessories), and expiry **drops silently** — there is still no evidence to
+resolve on. A never-pushed record is dropped before the gate is consulted, so the
+sweep keeps collecting for the noisy families it exists to clean up.
+
+**The night-charge actuator compared a frozen projection to its target.**
+`setDeviceList` preserves `projection` verbatim across an offline transition, by
+design, and the actuator tests `backupReserveSoc` by strict equality. Over one
+cloud-dark night a frozen pre-write value never equals the target: `retryApply`,
+then `applyFailed` — a critical push saying the write NEVER TOOK EFFECT. The
+revert then finds `current === prior` and stamps `revertVerified` for a revert no
+device confirmed. Frozen at the raised target instead, it escalates to
+`revertFailed`, which **speaks a bilingual critical broadcast**, from a sample
+that may be hours old. A control readback now requires a live reading;
+`decideActuation` already treats null as "do nothing", which is the pause the
+actuator's own comment promised.
+
+**A defective-pack record could be deleted because its Core was dark.** Presence
+was harvested inside a loop gated on `online && projection`, while retirement ran
+unconditionally — one side of the decision gated on evidence, the other not. The
+perverse case is the likely one: a Core powered down and boxed **for RMA** is
+exactly the Core that stays dark for days, so the warranty diagnosis it was
+pulled for is what gets deleted. Retirement now requires the pack's **last seen**
+chassis to be online and reporting — last-seen, not the `deviceSn` frozen at
+confirmation, because this plant's own history is a pack that moved chassis
+(2026-08-20, where the fault followed the pack). A 90-day backstop bounds the
+opposite failure, since the realistic RMA ships the chassis with the pack and its
+SN may never return. Retirement is also now **logged with its full evidence
+snapshot before the delete** — previously a warranty diagnosis was destroyed with
+no breadcrumb at all, which is why this had to be settled by reading code.
+
+The live record at the time of writing — Core 4 pack 1, confirmed 2026-08-24,
+1% SoC against a sibling median of 86% — was intact and never at imminent risk,
+but was exposed in exactly the scenario the latch exists to serve.
+
+### The poll verdict is now recorded
+
+`sensor.ecoflow_panel_poll_health` publishes `ok`, `shp2-fetch-failed` or
+`shp2-not-polled`. The SHP2 case above had to be argued from code reading rather
+than observation: the verdict was computed every 60 seconds and stored nowhere,
+and the detector shipped five weeks after the last confirmed dark window. Six
+such windows are visible in HA's own long-term statistics between 2026-06-21 and
+07-05 — one of 41 hours, another frozen at exactly 53% across a full solar day —
+with zero critical alerts in any hour of any of them. That is a real, dated
+precondition; whether the detector would have said `blind:false` in them is a
+counterfactual, and this release is what makes the next one answerable.
+
+### Also
+
+- `scripts/mutate-absence-evidence.mjs` — 18 mutants, 18 killed. Seven survived
+  the first run: four were genuine wiring gaps where every pure function stayed
+  correct while a live call site was reverted, and three were errors in my own
+  test construction (one cleared the state under test through a different code
+  path than the branch being exercised). All were closed rather than accepted.
+- A source-scan test that bounded its window at a fixed 1,200 characters stopped
+  reaching the code it checked as soon as that block grew a comment. It now
+  bounds on the block.
+
 ## 1.139.0
 
 ### The EcoFlow enablement doorbell is deleted

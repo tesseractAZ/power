@@ -78,8 +78,11 @@ const MUTANTS = [
   {
     id: 'vi. ★ the live tick reverts S1 to the failure-set read',
     file: SNAP,
-    find: '      const health = pollHealthVerdict({ knownShp2Sns, attemptedSns, failedSns });',
-    to: '      const health = pollHealthVerdict({ knownShp2Sns, attemptedSns: knownShp2Sns, failedSns }); /* MUTANT */',
+    // v1.140.0 — repointed: R1 reformatted this call site across lines and made
+    // the roster an expression. The property is unchanged — alias attemptedSns to
+    // the roster and the SHP2 always counts as asked, i.e. the pre-fix behaviour.
+    find: '        knownShp2Sns: alarmPathShp2Sns(devicesNow), attemptedSns, failedSns,',
+    to: '        knownShp2Sns: alarmPathShp2Sns(devicesNow), attemptedSns: alarmPathShp2Sns(devicesNow), failedSns, /* MUTANT */',
     why: 'pollHealthVerdict would be correct and unreachable — the SHP2 always counted as asked, which is exactly the pre-fix behaviour.',
   },
   {

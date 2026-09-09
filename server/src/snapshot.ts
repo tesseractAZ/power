@@ -4,8 +4,9 @@ import { resolve } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
+import { shp2Panels } from './shp2Membership.js';
 import type { Alert } from './alerts.js';
-import { notePollOk, notePollFailed } from './telemetryBlind.js';
+import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
 import { config } from './config.js';
 
 /** Local SN→name overrides from device-aliases.json (optional file). */
@@ -588,6 +589,38 @@ export function nextPollDelayMs(intervalMs: number, tookMs: number): number {
  * partially-dark multi-panel fleet is partial blindness, and v1.129.0 exists
  * because this fleet can have two panels.
  */
+/**
+ * v1.140.0 — R1: resolve the alarm-path panel roster by IDENTITY, not projection.
+ *
+ * THE DEFECT THIS REPLACES, and it is v1.138.0's own: the roster was built as
+ * `Object.keys(devices).filter(sn => devices[sn]?.projection?.kind === 'shp2')`.
+ * A projection only exists after a SUCCESSFUL quota fetch, and the store is
+ * in-memory. So after any add-on restart while the SHP2 is cloud-dark the roster
+ * is `[]` — not just at bootstrap but for as long as the panel stays dark —
+ * `pollHealthVerdict` takes its documented `length === 0 → {ok:true}` branch,
+ * `notePollOk` runs every 60 s, and `assessBlind` returns `{blind:false}`.
+ *
+ * That is the exact outcome v1.138.0 was written to prevent, re-entered through
+ * the restart door. `pollHealthVerdict` was never wrong; the caller handed it a
+ * collection filtered on the very evidence whose absence was the problem — the
+ * same shape as `failedSns` one release earlier. The measured population is 9
+ * restarts in one 50 h window, so "restart while the panel is dark" is not a
+ * remote case.
+ *
+ * `shp2Panels` is the right census and its docstring was written for precisely
+ * this window: "a panel that is in /device/list but whose /quota has not
+ * hydrated yet has no projection at all". `setDeviceList` stores offline devices
+ * with their `productName`, and its `smart home panel` test is byte-identical to
+ * the projector's own predicate in `ecoflow/project.ts`.
+ *
+ * Exported and called from both the poll loop and the tests: a source-scan
+ * bridge assertion is not a test, so the extraction is what makes the wiring
+ * provable.
+ */
+export function alarmPathShp2Sns(devices: Record<string, DeviceSnapshot>): string[] {
+  return shp2Panels(devices).sns;
+}
+
 export function pollHealthVerdict(o: {
   /** Every SN currently projected as an SHP2, online or not. */
   knownShp2Sns: readonly string[];
@@ -699,10 +732,10 @@ export function startPollLoop(
       // so the telemetry-blind CRITICAL stayed disarmed for the entire dark
       // window. pollHealthVerdict distinguishes asked-and-failed from never-asked.
       const devicesNow = store.get().devices;
-      const knownShp2Sns = Object.keys(devicesNow).filter(
-        (sn) => (devicesNow[sn] as any)?.projection?.kind === 'shp2',
-      );
-      const health = pollHealthVerdict({ knownShp2Sns, attemptedSns, failedSns });
+      const health = pollHealthVerdict({
+        knownShp2Sns: alarmPathShp2Sns(devicesNow), attemptedSns, failedSns,
+      });
+      notePollHealth(health.ok, health.ok ? null : health.reason);
       if (!health.ok) {
         notePollFailed(
           health.reason === 'shp2-fetch-failed'

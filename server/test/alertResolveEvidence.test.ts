@@ -85,6 +85,8 @@ test('orphan sweep: a msg-rate-floor orphan is DROPPED, never boot-"Resolved:"',
   const { resolve, drop } = orphanedNotifiedIds({
     persisted, currentIds: new Set(), trackedIds: new Set(),
     notifyResolved: true, minSeverity: 'info',
+    nowMs: 0, holdUntilMs: Number.MAX_SAFE_INTEGER,
+    unevaluable: () => false, // both sources evaluable — pins the pre-v1.140.0 contract
   });
   assert.ok(drop.includes(`msg-rate-floor-${SN}`), 'rates are unknowable at boot — no positive evidence to resolve on');
   assert.ok(!resolve.includes(`msg-rate-floor-${SN}`));

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pollHealthVerdict } from '../src/snapshot.js';
+import { pollHealthVerdict, alarmPathShp2Sns } from '../src/snapshot.js';
 
 /**
  * v1.138.0 / v1.139.0 — "was this poll evidence the alarm path can still see?"
@@ -151,4 +151,41 @@ test('★ the enablement doorbell stays deleted', () => {
   // The reasoning must survive the deletion, or someone rebuilds it.
   assert.match(snap, /PRODUCT-CLASS limit, not a grantable account/,
     'snapshot.ts must keep the tombstone explaining why the doorbell cannot exist');
+});
+
+// ── R1: the roster itself must not be filtered on the missing evidence ───────
+/**
+ * v1.140.0 — v1.138.0's own fix was half-closed. The roster was built as
+ * `filter(sn => devices[sn]?.projection?.kind === 'shp2')`, but a projection
+ * only exists after a SUCCESSFUL quota fetch and the store is in-memory. So
+ * after any restart while the SHP2 is cloud-dark the roster is [] — not just at
+ * bootstrap but for as long as the panel stays dark — pollHealthVerdict takes
+ * its documented length===0 fail-open branch, and the telemetry-blind CRITICAL
+ * is disarmed for the whole window. Exactly the outcome v1.138.0 prevented,
+ * re-entered through the restart door. Measured: 9 restarts in one 50 h window.
+ */
+const dev = (o: Partial<Record<string, unknown>>) => o as never;
+
+test('★ R1: a dark, never-hydrated SHP2 is still on the roster', () => {
+  const devices = {
+    [SHP2]: dev({ sn: SHP2, online: false, productName: 'Smart Home Panel 2' }), // no projection
+    D1: dev({ sn: 'D1', online: true, productName: 'DELTA Pro Ultra', projection: { kind: 'dpu' } }),
+  };
+  assert.deepEqual(alarmPathShp2Sns(devices), [SHP2], 'identity, not projection');
+  const v = pollHealthVerdict({
+    knownShp2Sns: alarmPathShp2Sns(devices), attemptedSns: ['D1'], failedSns: [],
+  });
+  assert.equal(v.ok, false, 'the alarm path was not observed this poll');
+  assert.equal(v.ok === false && v.reason, 'shp2-not-polled');
+});
+
+test('R1: a hydrated SHP2 is found by projection as well', () => {
+  const devices = { [SHP2]: dev({ sn: SHP2, online: true, projection: { kind: 'shp2' } }) };
+  assert.deepEqual(alarmPathShp2Sns(devices), [SHP2]);
+});
+
+test('R1: a DPU-only fleet still fails open — bootstrap preserved', () => {
+  const devices = { D1: dev({ sn: 'D1', online: true, projection: { kind: 'dpu' } }) };
+  assert.deepEqual(alarmPathShp2Sns(devices), []);
+  assert.equal(pollHealthVerdict({ knownShp2Sns: [], attemptedSns: ['D1'], failedSns: [] }).ok, true);
 });

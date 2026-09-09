@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -4617,7 +4617,18 @@ async function runNightActuationTickInner(): Promise<void> {
   if (state.day == null) return;
   const nowMs = Date.now();
   const shp2 = findShp2(store.get().devices);
-  const sp: any = shp2 && shp2.projection?.kind === 'shp2' ? shp2.projection : null;
+  // v1.140.0 — R3: a CONTROL READBACK must be a live reading, never a frozen
+  // projection. setDeviceList preserves `projection` verbatim across an offline
+  // transition, so a cloud-dark panel keeps serving its last sample; comparing
+  // that to the target by strict equality manufactures verdicts — applyFailed
+  // ("the write NEVER TOOK EFFECT") or revertFailed, which speaks a bilingual
+  // CRITICAL broadcast. Nulling the whole group together makes every
+  // decideActuation branch return 'none', which is the pause the actuator's own
+  // comment already promises for an unknown reading.
+  const sp: any =
+    shp2 && shp2.projection?.kind === 'shp2' && shp2ReadbackFresh(shp2, nowMs)
+      ? shp2.projection
+      : null;
   const fullWh: number | null = sp?.backupFullCapWh ?? null;
   const socNowPct: number | null = sp?.backupBatPercent ?? null;
   const remainWh: number | null = sp?.backupRemainWh ?? null;
