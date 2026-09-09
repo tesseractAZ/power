@@ -918,6 +918,56 @@ alarm keys on this (`STALE_MS = 3 min` in `alerts.ts`), so several guards protec
 logs at **warn**. Every 10 min a bounded **fleet-status** line dumps per-SN
 `ON/<count>msg/<age>s` (or `OFF` / `API-online/no-MQTT`).
 
+##### Attempted vs failed — the three-state rule (v1.138.0)
+
+`refreshAll()` returns `{ attemptedSns, failedSns }`, **not** a bare failure list.
+`attemptedSns` is the `online === 1` filtered set — the devices this poll actually
+asked. `failedSns` is always a subset of it.
+
+The distinction is load-bearing. Absence from `failedSns` has three causes and only
+one of them is success:
+
+| Cause | Meaning |
+|---|---|
+| the fetch resolved | a real recovery |
+| the device was `online: 0`, so never fetched | **unevaluable** |
+| it fell out of `/device/list` entirely | **unevaluable** |
+
+Two detectors previously read absence as success. Both are now pure exported
+functions taking `attemptedSns` explicitly:
+
+**`longFailureRecoveries({ nowMs, tenureMs, attemptedSns, failedSns, minTenureMs? })`**
+— the EcoFlow-enablement doorbell. A recovery requires `attempted && !failed`. An SN
+that was not attempted is **HELD**: its tenure clock is neither read as a recovery, nor
+reset, nor deleted. Holding is required, not cosmetic — deleting on absence made the
+defect bidirectional, silencing a genuine enablement that landed during an offline
+window because the device would return succeeding and never re-accrue tenure. One call
+replaces the two former call sites, including an `else`-branch doorbell that fired for
+every long-tenured SN at once and then cleared the map, so an empty or short
+`/device/list` would have announced all four 1006-blocked accessories as restored — a
+telemetry blackout rendered as good news.
+
+**`pollHealthVerdict({ knownShp2Sns, attemptedSns, failedSns })`** — whether a poll is
+evidence the alarm path can still see. Returns `{ok: true}` or a reason of
+`'shp2-fetch-failed'` / `'shp2-not-polled'`. The old `failedSns.some(isShp2)` could not
+see an SHP2 that was never **asked**: a cloud-offline panel left `notePollOk()` running,
+and because `assessBlind`'s other input counts devices carrying a projection regardless
+of `online` — and `setDeviceList` deliberately preserves `projection` across the
+transition — the telemetry-blind CRITICAL stayed disarmed for the entire dark window.
+Fails **open** only at bootstrap (no SHP2 known yet, so blindness cannot be asserted);
+once any SHP2 is known, **every** one must have been asked and answered, because a
+partially-dark multi-panel fleet is partial blindness (cf. §the second-SHP2 singleton).
+
+> **The doorbell announces receipt, not entitlement.** It fires only for devices with no
+> tailored projection (`kind` neither `dpu` nor `shp2`); a Core or SHP2 recovering from a
+> transport failure logs and does not push. The push states only what was observed —
+> quota data arrived this poll — and explicitly does not claim the API-access enablement
+> landed, because one successful poll cannot establish that. See §Projections for why an
+> accessory contributes no alarms, energy totals or HA entities even when its data flows.
+
+Proven by `scripts/mutate-poll-recovery-attribution.mjs` (15/15 killed), including three
+mutants that leave both pure functions correct while making the real `tick()` inert.
+
 ---
 
 ### Projections (`ecoflow/project.ts`)

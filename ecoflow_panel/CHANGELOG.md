@@ -1,3 +1,88 @@
+## 1.138.0
+
+### A device going offline announced itself as restored
+
+On 2026-09-08 at 15:52:31 MST, EcoFlow's cloud reported `BACC - Delta 3 Plus` offline.
+**302 milliseconds later — same poll tick, same `/device/list` payload — the panel
+pushed "EcoFlow data restored — quota data is flowing again" to the operator's phone.**
+Sixty seconds later the device was online again and immediately failing again. Nothing
+had been restored: that serial's `lastUpdated` was 0 then and is 0 now, and
+`/api/debug/raw` returns `raw: null`, `mqttMsgCount: 0`. No quota fetch has ever
+succeeded for it.
+
+`refreshAll()` fetches only `list.filter((d) => d.online === 1)`, so `failedSns` can
+only ever contain devices the poll actually **asked**. Two detectors read absence from
+that array as evidence of success. It is not: a device that went offline is absent for
+the same reason a healthy one is.
+
+`refreshAll()` now returns `{ attemptedSns, failedSns }`, and both detectors are pure
+exported functions that take the attempt set explicitly. A device that was never asked
+is neither recovered nor failing — it is **unevaluable**. That is the doctrine the
+codebase already states for the alert falling edge under the name
+`fallingEdgeFrozenByEvidence`; these two call sites never got it.
+
+- **`longFailureRecoveries()`** — a recovery requires `attempted && !failed`. An
+  unattempted SN is **held**: its clock is not read, not reset, not deleted. Holding
+  matters in both directions. The old code deleted the entry on every absence, outside
+  the tenure test, so it re-armed after each flap **and** would have silenced a genuine
+  enablement that landed during an offline window — the device would have returned
+  succeeding and never re-accrued thirty minutes of failure. It cried wolf and would
+  have stayed silent for the wolf.
+- **A second, unguarded doorbell is gone.** The `failedSns.length === 0` branch fired
+  for *every* long-tenured SN at once and then cleared the map, with no per-device check.
+  `/device/list` has no length validation, so an empty or short vendor response would
+  have named all four 1006-blocked accessories as restored in one push — a telemetry
+  blackout rendered as good news. Both sites are now one call.
+
+### The same inference had disarmed the telemetry-blind CRITICAL
+
+Fifteen lines below the doorbell, in the same function: `failedSns.some(isShp2)`. An
+SHP2 that goes cloud-offline is never fetched, so it never appears in `failedSns`, so
+the poll counted as OK and `notePollOk()` ran. `assessBlind`'s other input counts
+devices carrying a projection regardless of `online`, and `setDeviceList` deliberately
+**preserves** `projection` across the offline transition — so the detector saw
+`hasDevices=true, pollFresh=true` and returned `{blind: false}` for the entire
+SHP2-dark window. The alarm system stopped watching the alarm path and reported itself
+healthy.
+
+`pollHealthVerdict()` distinguishes asked-and-failed from never-asked. It fails open
+only at bootstrap, before any SHP2 is known; thereafter **every** known SHP2 must have
+been asked and answered, because a partially-dark two-panel fleet is partial blindness.
+
+This is the suspected mechanism behind the recorded "SHP2 cloud-offline → floor gap with
+no compensating alarm". That remains a code-reading inference — confirm it by sampling
+`/api/health` during the next cloud-offline episode and checking whether `blind` stays
+`false`.
+
+### The notification no longer asserts what it cannot know
+
+The old body claimed EcoFlow's enablement had landed and that the panel would begin
+projecting the device automatically. The first is an inference from one poll. The second
+is true only for classes with a tailored projection — `projectByProduct` has branches
+for Delta Pro Ultra and Smart Home Panel 2 and nothing else, and **zero** server-side
+consumers read a `generic` projection, so an accessory contributes no alarms, energy
+totals or HA entities even when its data does flow.
+
+The recovery set is also filtered by device class now. A DPU Core or the SHP2 recovering
+from a DNS `EAI_AGAIN` or a cloud 5xx would have pushed a false vendor-entitlement claim
+about a core alarm-path device; the prose hedge "if these are the accessory devices" was
+doing work the code never did. Core recoveries log and do not push.
+
+The log line always said enablement *"may have landed"*. The push dropped both hedges.
+The cautious sentence went to the log and the confident one went to the phone; that is
+now the other way round.
+
+### Also
+
+- `EcoFlow API error … (trace )` — `eagleEyeTraceId ?? 'n/a'` never fired because the
+  vendor returns an empty string, which is not nullish. Now `||`.
+- The source comment naming these accessories called them Delta 2 Plus / River 2 Plus.
+  They are 3 Plus. It is the comment an investigator greps for.
+
+`scripts/mutate-poll-recovery-attribution.mjs` — 15 mutants, 15 killed. Three of them
+leave both pure functions correct while making the real `tick()` inert; they survived
+the first run and were closed with source pins rather than accepted.
+
 ## 1.137.0
 
 ### The discovery table can no longer lie about what HA will do with it
