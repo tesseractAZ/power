@@ -1,3 +1,58 @@
+## 1.141.0
+
+### The Now-tab Power Sankey has sensors to draw from
+
+HA's Energy dashboard renders a live Power Sankey from `stat_rate` on each
+`device_consumption` entry. All three `energy_sources` already carried one; all
+twelve per-circuit devices carried none, so the Sankey had nothing to draw and
+did not appear. `planCircuitDiscovery` now publishes a power sensor alongside
+each existing lifetime-energy sensor.
+
+**Twelve, not six.** The plan called for the six PRIMARY channels only, on the
+reasoning that a split-phase pair is named from its primary. That premise does
+not survive contact with `stat_rate`, which is a field **on** a
+`device_consumption` entry — and there are twelve of those. Six sensors would
+fill six entries and silently drop half the panel from the Sankey (the L2 legs
+were 4,308 W of 8,346 W at a sampled tick), and putting a pair total on the
+primary would make one entity mean two things: the pair's watts against its own
+L1-only energy statistic.
+
+The watts already existed end to end, so no projection or recorder change was
+needed.
+
+- Entity ids are pinned with `object_id`. The existing energy entity_ids were
+  minted from the SHP2's user-editable circuit name and are already incoherent as
+  a result — `…_east_wing_energy` beside `…_circuit_3_energy`. HA's energy prefs
+  wire by string, so a rename must not be able to move them.
+- A missing reading publishes `null`, never 0. On a `measurement` sensor a zero
+  is compiled into HA's mean statistic as a positive claim that the circuit drew
+  nothing, which is indistinguishable from a genuinely idle circuit. A genuine
+  measured zero passes through unchanged.
+- The discovery signature now covers the power name too. v1.128.0 changed a
+  template around an unchanged display name, the signature did not move, and
+  twelve entities kept stale names while eighty-four others were renamed — a
+  second entity per channel widens that obligation.
+- A departed channel clears **both** config topics. Missing one would strand a
+  retained config on the broker with nothing left to remove it.
+
+**The dynamic configs are now audited.** `auditDiscoveryTables` had only ever
+been called with the static `SENSORS`/`BINARY_SENSORS` tables, so the twelve
+per-circuit configs built at runtime were never checked against it — the same
+filtered-subset shape as the defect family in v1.140.0, applied to the audit
+itself. The generated configs are now routed through it in the suite.
+
+**One operator step remains, HA-side:** add
+`"stat_rate": "sensor.ecoflow_circuit_<ch>_power"` to each of the twelve
+`device_consumption` entries. `stat_consumption` is untouched and the Energy tab
+is unaffected.
+
+Circuit 1 will publish a permanent **0 W**. That is the unresolved ch1 CT
+question — 0.147 kWh lifetime against ch3's 66.6 kWh on a pairing that should be
+comparable — which telemetry cannot settle and a physical check at the panel can.
+Publishing pair sums instead would have hidden it.
+
+`scripts/mutate-discovery-invariants.mjs` — 23 mutants, 23 killed.
+
 ## 1.140.0
 
 ### Four detectors that read silence as good news

@@ -771,30 +771,102 @@ export function planCircuitDiscovery(
   // published — the template, a suffix, the display name — necessarily changes
   // the signature.
   const entityName = new Map(circuits.map((c) => [c.ch, `${display.get(c.ch)} Energy`]));
-  const sig = circuits.map((c) => `${c.ch}:${entityName.get(c.ch) ?? ''}`).join('|');
+  // v1.141.0 — the POWER complement, for HA's Now-tab Power Sankey.
+  //
+  // TWELVE, not six. The "primaries only" idea comes from a NAMING problem that
+  // v1.65.0 already solved by labelling legs "X L1"/"X L2" while deliberately
+  // keeping twelve entities — and it does not transfer here, because `stat_rate`
+  // is a field ON an existing `device_consumption` entry. There are twelve
+  // entries; six sensors would fill six of them and silently drop half the panel
+  // from the Sankey. Putting a pair total on the primary is worse still: that
+  // entity would then mean two different things, showing the pair's watts
+  // against its own L1-only energy statistic.
+  const powerName = new Map(circuits.map((c) => [c.ch, `${display.get(c.ch)} Power`]));
+  // The signature must cover EVERY published string, not just the energy name —
+  // v1.128.0 changed a template around an unchanged display name, the signature
+  // did not move, and twelve entities kept their old names while 84 others were
+  // renamed. Adding a second entity per channel widens that obligation.
+  const sig = circuits
+    .map((c) => `${c.ch}:${entityName.get(c.ch) ?? ''}:${powerName.get(c.ch) ?? ''}`)
+    .join('|');
   const current = new Set(circuits.map((c) => c.ch));
+  // BOTH config topics for a departed channel. Miss one and an orphaned retained
+  // config sits on the broker forever with nothing left to remove it.
   const clear = prevChannels
     .filter((ch) => !current.has(ch))
-    .map((ch) => `${prefix}/sensor/ecoflow_circuit_${ch}_lifetime_kwh/config`);
-  const publish = circuits.map((c) => {
-    const uniqueId = `ecoflow_circuit_${c.ch}_lifetime_kwh`;
-    return {
-      topic: `${prefix}/sensor/${uniqueId}/config`,
-      cfg: {
-        unique_id: uniqueId,
-        name: entityName.get(c.ch),
-        state_topic: STATE_TOPIC,
-        ...AVAILABILITY_BASE,
-        device_class: 'energy',
-        state_class: 'total_increasing',
-        unit_of_measurement: 'kWh',
-        icon: 'mdi:transmission-tower',
-        value_template: `{{ value_json.circuit_${c.ch}_lifetime_kwh }}`,
-        device: DEVICE_INFO,
-      } as Record<string, unknown>,
-    };
+    .flatMap((ch) => [
+      `${prefix}/sensor/ecoflow_circuit_${ch}_lifetime_kwh/config`,
+      `${prefix}/sensor/ecoflow_circuit_${ch}_watts/config`,
+    ]);
+  const publish = circuits.flatMap((c) => {
+    const energyId = `ecoflow_circuit_${c.ch}_lifetime_kwh`;
+    const powerId = `ecoflow_circuit_${c.ch}_watts`;
+    return [
+      {
+        topic: `${prefix}/sensor/${energyId}/config`,
+        cfg: {
+          unique_id: energyId,
+          name: entityName.get(c.ch),
+          state_topic: STATE_TOPIC,
+          ...AVAILABILITY_BASE,
+          device_class: 'energy',
+          state_class: 'total_increasing',
+          unit_of_measurement: 'kWh',
+          icon: 'mdi:transmission-tower',
+          value_template: `{{ value_json.circuit_${c.ch}_lifetime_kwh }}`,
+          device: DEVICE_INFO,
+        } as Record<string, unknown>,
+      },
+      {
+        topic: `${prefix}/sensor/${powerId}/config`,
+        cfg: {
+          unique_id: powerId,
+          // v1.141.0 — object_id pins the entity_id to something rename-proof.
+          // The existing energy entity_ids were minted from the SHP2's
+          // user-editable circuit name and are already incoherent as a result
+          // (…_east_wing_energy beside …_circuit_3_energy). HA's energy prefs
+          // wire these BY STRING, so a rename must not move them.
+          object_id: `ecoflow_circuit_${c.ch}_power`,
+          name: powerName.get(c.ch),
+          state_topic: STATE_TOPIC,
+          ...AVAILABILITY_BASE,
+          device_class: 'power',
+          state_class: 'measurement',
+          unit_of_measurement: 'W',
+          expire_after: EXPIRE_AFTER_S,
+          icon: 'mdi:flash',
+          value_template: `{{ value_json.circuit_${c.ch}_watts }}`,
+          device: DEVICE_INFO,
+        } as Record<string, unknown>,
+      },
+    ];
   });
   return { sig, publish, clear };
+}
+
+/**
+ * v1.141.0 — per-circuit instantaneous watts for the state payload.
+ *
+ * Enumerated from the SAME channel set the discovery configs use, so the two
+ * cannot disagree through the documented startup race (a broker connect that
+ * beats the first poll once published 0 of 12 configs).
+ *
+ * A missing reading is `null`, NEVER 0. On a `measurement` sensor a zero is
+ * compiled into HA's mean statistic as a positive claim that the circuit drew
+ * nothing — indistinguishable from a genuinely idle circuit. `circuitLifetimeFields`
+ * already set this precedent. A genuine measured 0 is passed through unchanged.
+ */
+export function circuitPowerFields(
+  circuits: ReadonlyArray<{ ch: number; watts?: number | null }>,
+  lifetimeKeys: Iterable<string>,
+): Record<string, number | null> {
+  const out: Record<string, number | null> = {};
+  const byCh = new Map(circuits.map((c) => [c.ch, c]));
+  for (const ch of circuitChannels(circuits, lifetimeKeys)) {
+    const w = byCh.get(ch)?.watts;
+    out[`circuit_${ch}_watts`] = typeof w === 'number' && Number.isFinite(w) ? Math.round(w) : null;
+  }
+  return out;
 }
 
 /**
@@ -821,20 +893,32 @@ export function planCircuitDiscovery(
  * re-trigger the warning; the persisted accumulator keys (available immediately on boot)
  * cover it until the first snapshot arrives.
  */
-export function circuitLifetimeFields(
+/**
+ * v1.141.0 — the channel set, extracted so the energy and power field builders
+ * enumerate from ONE source. Two independent enumerations would drift, and the
+ * drift would be invisible: HA simply shows `unknown` for whichever entity the
+ * other builder forgot.
+ */
+export function circuitChannels(
   circuits: ReadonlyArray<{ ch: number }>,
   lifetimeKeys: Iterable<string>,
-  lifetimeKwh: (k: string) => number | null,
-): Record<string, number | null> {
+): number[] {
   const channels = new Set<number>();
   for (const c of circuits) channels.add(c.ch);
   for (const k of lifetimeKeys) {
     const m = /^circuit_(\d+)_wh$/.exec(k);
     if (m) channels.add(Number(m[1]));
   }
+  return [...channels].sort((a, b) => a - b);
+}
+
+export function circuitLifetimeFields(
+  circuits: ReadonlyArray<{ ch: number }>,
+  lifetimeKeys: Iterable<string>,
+  lifetimeKwh: (k: string) => number | null,
+): Record<string, number | null> {
   return Object.fromEntries(
-    [...channels]
-      .sort((a, b) => a - b)
+    circuitChannels(circuits, lifetimeKeys)
       .map((ch) => [`circuit_${ch}_lifetime_kwh`, lifetimeKwh(`circuit_${ch}_wh`)]),
   );
 }
@@ -1150,6 +1234,7 @@ export async function startMqttDiscovery(
       // snapshot loads, matching the prior run's retained sensors (fixes the recurring
       // "circuit_N_lifetime_kwh" HA template warning, incl. the startup race Copilot flagged).
       ...circuitLifetimeFields(shp2 ? shp2.projection.circuits : [], recorder.listLifetimeKeys(), lifetimeKwh),
+      ...circuitPowerFields(shp2 ? shp2.projection.circuits : [], recorder.listLifetimeKeys()),
       carbon_kg_avoided_7d: carbon.totalKgAvoided,
       carbon_lifetime_kg_avoided: carbon.lifetimeKgAvoided,
       carbon_lifetime_miles_not_driven: carbon.lifetimeMilesNotDriven,
@@ -1258,7 +1343,7 @@ export async function startMqttDiscovery(
     }
     circuitDiscoverySig = plan.sig;
     publishedCircuitChannels = circuits.map((c) => c.ch);
-    log(`mqtt-discovery: published ${plan.publish.length} per-circuit lifetime sensors`);
+    log(`mqtt-discovery: published ${plan.publish.length} per-circuit sensor configs (energy + power)`);
   };
 
   const publishState = async () => {

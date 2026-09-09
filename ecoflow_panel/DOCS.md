@@ -918,6 +918,45 @@ alarm keys on this (`STALE_MS = 3 min` in `alerts.ts`), so several guards protec
 logs at **warn**. Every 10 min a bounded **fleet-status** line dumps per-SN
 `ON/<count>msg/<age>s` (or `OFF` / `API-online/no-MQTT`).
 
+##### Per-circuit POWER sensors (v1.141.0)
+
+`planCircuitDiscovery` publishes **two** configs per channel: the existing
+`ecoflow_circuit_<ch>_lifetime_kwh` (energy) and `ecoflow_circuit_<ch>_watts`
+(power, `device_class: power`, `state_class: measurement`, `W`). The watts
+already existed end to end — `loadInfo.hall1Watt[i-1]` → `Shp2Circuit.watts`,
+recorded as `ch<ch>_w` — so no projection or recorder change was needed.
+
+**Twelve, not six.** The "primaries only" idea comes from a *naming* problem
+v1.65.0 already solved (legs labelled "X L1"/"X L2" while keeping twelve
+entities), and it does not transfer: `stat_rate` is a field **on** a
+`device_consumption` entry, of which there are twelve. Six sensors would fill six
+entries and silently drop half the panel from the Sankey, and putting a pair
+total on the primary would make that entity mean two things at once.
+
+- `object_id` pins each entity_id rename-proof. The energy entity_ids were minted
+  from the SHP2's user-editable circuit name and are already incoherent as a
+  result (`…_east_wing_energy` beside `…_circuit_3_energy`); HA's energy prefs
+  wire by string, so a rename must not move them.
+- A missing reading is `null`, **never 0** — on a `measurement` sensor a zero is
+  compiled into HA's mean as a positive claim the circuit drew nothing. A genuine
+  measured 0 passes through.
+- `circuitChannels` is shared by both field builders so they cannot drift; a
+  drift shows only as a permanent `unknown` on whichever entity was forgotten.
+- `clear` emits **both** config topics for a departed channel.
+- The dynamic configs are now routed through `auditDiscoveryTables` in the test
+  suite. They never had been — the audit only ever saw the static tables, which
+  is the same filtered-subset shape as the defect family above.
+
+**Operator step, HA-side:** add `"stat_rate": "sensor.ecoflow_circuit_<ch>_power"`
+to each of the twelve `device_consumption` entries in the energy prefs.
+`stat_consumption` is untouched and the Energy tab is unaffected. All three
+`energy_sources` already carry `stat_rate`; the twelve devices carry none, and
+that is the whole gap.
+
+> Circuit 1 will publish a permanent **0 W** — the unresolved ch1 CT question
+> (0.147 kWh lifetime against ch3's 66.6 kWh on a pairing that should be
+> comparable), settleable only physically. Publishing pair sums would hide it.
+
 ##### Attempted vs failed — the three-state rule (v1.138.0)
 
 `refreshAll()` returns `{ attemptedSns, failedSns }`, **not** a bare failure list.
