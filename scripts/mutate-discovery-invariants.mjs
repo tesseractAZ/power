@@ -103,6 +103,49 @@ const MUTANTS = [
     to: '    waivers[unique_id] != null && /* MUTANT */',
     why: 'Waiving the currency rule would also hide a genuine device_class/unit error on the same sensor.',
   },
+  // ── B6: the dynamic per-circuit configs ────────────────────────────────────
+  {
+    id: 'xviii. ★ B6: an absent watts reading publishes 0 instead of null',
+    file: DISC,
+    find: "    out[`circuit_${ch}_watts`] = typeof w === 'number' && Number.isFinite(w) ? Math.round(w) : null;",
+    to: "    out[`circuit_${ch}_watts`] = typeof w === 'number' && Number.isFinite(w) ? Math.round(w) : 0; /* MUTANT */",
+    why: 'On a measurement sensor a 0 is compiled into HA\'s mean as a positive claim that the circuit drew nothing — indistinguishable from a genuinely idle one.',
+  },
+  {
+    id: 'xix. B6: the signature drops the power name',
+    file: DISC,
+    find: "    .map((c) => `${c.ch}:${entityName.get(c.ch) ?? ''}:${powerName.get(c.ch) ?? ''}`)",
+    to: "    .map((c) => `${c.ch}:${entityName.get(c.ch) ?? ''}`) /* MUTANT */",
+    why: 'v1.128.0 exactly: a published string changes, the signature does not move, and twelve entities keep stale names while every other entity is renamed.',
+  },
+  {
+    id: 'xx. B6: a departed channel clears only its energy topic',
+    file: DISC,
+    find: "    .flatMap((ch) => [\n      `${prefix}/sensor/ecoflow_circuit_${ch}_lifetime_kwh/config`,\n      `${prefix}/sensor/ecoflow_circuit_${ch}_watts/config`,\n    ]);",
+    to: "    .map((ch) => `${prefix}/sensor/ecoflow_circuit_${ch}_lifetime_kwh/config`); /* MUTANT */",
+    why: 'An orphaned retained power config sits on the broker forever with nothing left to remove it.',
+  },
+  {
+    id: 'xxi. B6: the power sensor is declared total_increasing',
+    file: DISC,
+    find: "          device_class: 'power',\n          state_class: 'measurement',\n          unit_of_measurement: 'W',",
+    to: "          device_class: 'power',\n          state_class: 'total_increasing',\n          unit_of_measurement: 'W', /* MUTANT */",
+    why: 'HA refuses device_class power with an accumulating state_class — the entity never appears, and only the new dynamic-config audit catches it.',
+  },
+  {
+    id: 'xxii. B6: object_id is dropped, so entity_id follows the editable name',
+    file: DISC,
+    find: "          object_id: `ecoflow_circuit_${c.ch}_power`,",
+    to: '          /* MUTANT */',
+    why: 'HA energy prefs wire stat_rate BY STRING; an entity_id minted from the SHP2\'s user-editable circuit name breaks the Sankey on the next rename.',
+  },
+  {
+    id: 'xxiii. B6: the two field builders enumerate independently',
+    file: DISC,
+    find: '  for (const ch of circuitChannels(circuits, lifetimeKeys)) {',
+    to: '  for (const ch of circuits.map((c) => c.ch)) { /* MUTANT */',
+    why: 'Power and energy would drift on accumulator-only channels, and the drift is invisible — HA just shows `unknown` for whichever entity was forgotten.',
+  },
   // ── B5: the connect sequence ───────────────────────────────────────────────
   {
     id: 'xi. ★ discovery is re-latched to the first connect (THE B5 DEFECT)',

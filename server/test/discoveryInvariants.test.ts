@@ -11,6 +11,9 @@ import {
   type SensorConfig,
   type ConnectLatch,
   type ConnectEffects,
+  planCircuitDiscovery,
+  circuitPowerFields,
+  circuitChannels,
 } from '../src/mqttDiscovery.js';
 
 /**
@@ -251,4 +254,83 @@ test('B5: the live connect handler invalidates the circuit sig — and only that
     !/publishedCircuitChannels\s*=/.test(call),
     'the connect handler must not assign publishedCircuitChannels — it is the orphan ledger, not a latch',
   );
+});
+
+// ── B6: the DYNAMIC per-circuit configs ──────────────────────────────────────
+/**
+ * v1.141.0 — `auditDiscoveryTables` has only ever been called with the STATIC
+ * SENSORS/BINARY_SENSORS tables. The twelve per-circuit configs are built at
+ * runtime by `planCircuitDiscovery` and were never checked — the same
+ * filtered-subset shape as the defect family this release closes, applied to the
+ * audit itself.
+ */
+test('★ B6: the generated per-circuit configs satisfy the same invariants', () => {
+  const plan = planCircuitDiscovery('homeassistant', [], [
+    { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
+    { ch: 3, name: null, linkCh: 1, linkMark: true },
+    { ch: 7, name: 'Well Pump' },
+  ]);
+  const cfgs = plan.publish.map((p) => p.cfg as unknown as SensorConfig);
+  const violations = auditDiscoveryTables(cfgs, [], {});
+  assert.deepEqual(
+    violations, [],
+    `dynamic circuit config violations:\n${violations.map((v) => `  ${v.unique_id} [${v.rule}] ${v.detail}`).join('\n')}`,
+  );
+  assert.equal(cfgs.length, 6, 'two configs per channel — energy and power');
+});
+
+test('B6: each channel gets a power sensor HA will accept for the Power Sankey', () => {
+  const plan = planCircuitDiscovery('homeassistant', [], [{ ch: 1, name: 'East Wing' }]);
+  const power = plan.publish.find((p) => p.cfg.unique_id === 'ecoflow_circuit_1_watts');
+  assert.ok(power, 'a power config is published for the channel');
+  assert.equal(power!.cfg.device_class, 'power');
+  assert.equal(power!.cfg.state_class, 'measurement');
+  assert.equal(power!.cfg.unit_of_measurement, 'W');
+  assert.equal(power!.cfg.value_template, '{{ value_json.circuit_1_watts }}');
+  // The energy entity_ids were minted from the SHP2's user-editable circuit name
+  // and are already incoherent as a result. HA's energy prefs wire by STRING, so
+  // the new ones are pinned rename-proof.
+  assert.equal(power!.cfg.object_id, 'ecoflow_circuit_1_power');
+});
+
+test('B6: the signature moves when only the POWER name changes', () => {
+  // v1.128.0: a template changed around an unchanged display name, the signature
+  // did not move, and twelve entities kept their old names while 84 were renamed.
+  // A second entity per channel widens that obligation.
+  const a = planCircuitDiscovery('homeassistant', [], [{ ch: 1, name: 'East Wing' }]);
+  const b = planCircuitDiscovery('homeassistant', [], [{ ch: 1, name: 'West Wing' }]);
+  assert.notEqual(a.sig, b.sig);
+  for (const p of b.publish) {
+    assert.ok(
+      b.sig.includes(String(p.cfg.name)),
+      `the signature must contain every published name, including ${JSON.stringify(p.cfg.name)}`,
+    );
+  }
+});
+
+test('★ B6: an absent watts reading is null, NEVER 0', () => {
+  // On a `measurement` sensor a 0 is compiled into HA's mean statistic as a
+  // positive claim that the circuit drew nothing — indistinguishable from a
+  // genuinely idle circuit.
+  const f = circuitPowerFields([{ ch: 1, watts: null }, { ch: 3 }, { ch: 7, watts: 412.6 }], []);
+  assert.equal(f.circuit_1_watts, null, 'an explicit null stays null');
+  assert.equal(f.circuit_3_watts, null, 'a missing field is null, not 0');
+  assert.equal(f.circuit_7_watts, 413, 'a real reading is rounded');
+});
+
+test('B6: a genuine measured zero is passed through, not suppressed', () => {
+  // ch1 reads a true 0 W live (the unresolved CT question). Publishing null
+  // there would hide a real measurement.
+  assert.equal(circuitPowerFields([{ ch: 1, watts: 0 }], []).circuit_1_watts, 0);
+});
+
+test('B6: power and energy fields enumerate the SAME channels', () => {
+  // Two independent enumerations would drift, and the drift would be invisible —
+  // HA just shows `unknown` for whichever entity the other builder forgot.
+  const circuits = [{ ch: 1, watts: 10 }, { ch: 7, watts: 20 }];
+  const keys = ['circuit_3_wh', 'circuit_1_wh'];
+  const power = Object.keys(circuitPowerFields(circuits, keys)).map((k) => k.match(/\d+/)![0]);
+  const energy = circuitChannels(circuits, keys).map(String);
+  assert.deepEqual(power, energy);
+  assert.deepEqual(energy, ['1', '3', '7'], 'accumulator-only channels are included too');
 });
