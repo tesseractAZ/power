@@ -821,12 +821,20 @@ export function planCircuitDiscovery(
         topic: `${prefix}/sensor/${powerId}/config`,
         cfg: {
           unique_id: powerId,
-          // v1.141.0 — object_id pins the entity_id to something rename-proof.
-          // The existing energy entity_ids were minted from the SHP2's
-          // user-editable circuit name and are already incoherent as a result
-          // (…_east_wing_energy beside …_circuit_3_energy). HA's energy prefs
-          // wire these BY STRING, so a rename must not move them.
-          object_id: `ecoflow_circuit_${c.ch}_power`,
+          // v1.141.1 — an `object_id: ecoflow_circuit_<ch>_power` was published
+          // here in v1.141.0 to pin the entity_id rename-proof. It did NOT take
+          // effect: HA minted `sensor.ecoflow_panel_east_wing_l1_power` — device
+          // slug plus the slugified NAME — so the key was inert and the doc
+          // claim about it was false. Removed rather than left in place, since
+          // config that looks load-bearing and is not is worse than none.
+          //
+          // The goal is met anyway, by HA itself: an entity_id is minted ONCE at
+          // first discovery and persisted against the `unique_id`, so a later
+          // rename moves only the friendly name. The proof is in this very
+          // fleet — the energy entity_ids still read `…_circuit_3_energy` from
+          // before v1.65.0's pair-aware naming, while the power entities minted
+          // today read `…_east_wing_l2_power`. Same channel, same rename, one
+          // entity_id frozen and one fresh.
           name: powerName.get(c.ch),
           state_topic: STATE_TOPIC,
           ...AVAILABILITY_BASE,
