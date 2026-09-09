@@ -1,3 +1,29 @@
+## 1.141.1
+
+### Correction: the `object_id` in v1.141.0 was inert, and its rationale was wrong
+
+v1.141.0 published `object_id: ecoflow_circuit_<ch>_power` on each per-circuit
+power sensor and said it pinned the entity_id rename-proof. Live, HA minted
+`sensor.ecoflow_panel_east_wing_l1_power` — device slug plus the slugified
+**name** — so the key did nothing and the claim was false. Removed: config that
+looks load-bearing and is not is worse than no config at all.
+
+The goal is met regardless, by HA itself. An entity_id is minted **once** at
+first discovery and persisted against the `unique_id`, so a later rename moves
+only the friendly name — which matters because energy prefs wire `stat_rate` by
+string. This fleet demonstrates it directly: the energy entity_ids still read
+`…_circuit_3_energy`, frozen from before v1.65.0's pair-aware naming, while the
+power entity minted today for that same channel reads `…_east_wing_l2_power`.
+
+### Verified live
+
+All twelve power sensors are publishing, and their **sum is 5,127 W against
+`panel_load` 5,126 W** — one watt of rounding across twelve channels. The twelve
+`device_consumption` entries now carry `stat_rate`, mapped by channel through
+`unique_id` rather than by name, so the Now-tab Power Sankey has a complete set
+to draw from. East Wing L1 (ch1) reads **0 W**, as predicted for the unreconciled
+CT — a physical check at the panel is still the only thing that can settle it.
+
 ## 1.141.0
 
 ### The Now-tab Power Sankey has sensors to draw from
