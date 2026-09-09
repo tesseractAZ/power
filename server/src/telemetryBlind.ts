@@ -155,6 +155,27 @@ export function notePollFailed(message: string): void {
   consecutiveFailures += 1;
   lastError = message;
 }
+/**
+ * v1.140.0 — the poll-health verdict, recorded so it can be AUDITED.
+ *
+ * S1 (a cloud-offline SHP2 counting as a healthy poll) was fixed on code reading
+ * alone: the detector shipped five weeks after the last confirmed SHP2-dark
+ * window, and the verdict was never stored anywhere, so no amount of history
+ * could show whether it had actually manifested. That is a poor position to
+ * argue a life-safety fix from.
+ *
+ * The value already exists — pollHealthVerdict computes it every 60 s. Recording
+ * it puts months of HA recorder history behind the NEXT dark window, and lets
+ * the v1.138.0/v1.140.0 fixes' own firing be checked rather than assumed.
+ */
+let lastPollHealth: { ok: boolean; reason: string | null } = { ok: true, reason: null };
+export function notePollHealth(ok: boolean, reason: string | null): void {
+  lastPollHealth = { ok, reason };
+}
+export function pollHealth(): { ok: boolean; reason: string | null } {
+  return lastPollHealth;
+}
+
 export function pollState(): { lastPollOkMs: number | null; consecutiveFailures: number; lastError: string | null } {
   return { lastPollOkMs, consecutiveFailures, lastError };
 }

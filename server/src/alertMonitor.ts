@@ -781,15 +781,66 @@ export function bootSeedNotified(p: { alert: Pick<Alert, 'id'>; firstRun: boolea
  * A record whose alert is genuinely still active appears in `currentIds` and is left alone.
  * Pure + exported so this boot-only branch is unit-testable.
  */
+/**
+ * v1.140.0 — how long a held orphan may stay held before it is dropped silently.
+ * Overridable so an operator can shorten it; never used to RESOLVE.
+ */
+export const ORPHAN_HOLD_MAX_MS = Number(process.env.ALERT_ORPHAN_HOLD_MAX_MS ?? 6 * 60 * 60 * 1000);
+
+/**
+ * v1.140.0 — S2: an orphan on an UNEVALUABLE device is held, not resolved.
+ *
+ * THE DEFECT THIS REPLACES: this sweep retired every persisted id absent from
+ * (currentIds ∪ trackedIds) and pushed "Resolved: … (condition cleared while the
+ * add-on was restarting)". But `computeAlerts` skips offline DPUs wholesale
+ * (`if (!isDpuEvaluable(d)) continue;`), skips the whole SHP2 block, and the
+ * learned peer family filters on `d.online` too. So a Core merely cloud-dark at
+ * boot contributes ZERO alerts, and every standing fault on it — `dpu-err-*`,
+ * `vdiff-crit-*`, thermal — was classified as an orphan, FALSELY RESOLVED with a
+ * phone push, and its HA card dismissed. Live population at the time of writing:
+ * two CRITICALs plus six warnings on Core 4 alone.
+ *
+ * The steady-state falling edge already gets this right, via
+ * `fallingEdgeFrozenByEvidence` — "an alert vanishing because its source device
+ * went absent/stale is UNEVALUABLE, not recovered." Two implementations of one
+ * decision, one guarded and one not. This is the same doctrine, applied here.
+ *
+ * Three things make the hold safe rather than a garbage collector that never
+ * collects, and the ORDER of the checks is load-bearing:
+ *
+ *   - A record that was never PUSHED (`sent:false` — spares, `annunciate:false`,
+ *     auto-downgraded) cannot produce a false all-clear, so it is dropped before
+ *     the evidence test is even consulted. Holding those would strand exactly
+ *     the noisy families this sweep exists to clean up.
+ *   - The hold has a DEADLINE. Several devices are permanently unevaluable by
+ *     this gate — an RMA'd Core (`setDeviceList` never deletes, so it sits at
+ *     `online:false` for the process lifetime), a designated bench spare whose
+ *     offline state is by design, and the 1006 accessories which report
+ *     `online:true` with `lastUpdated:0`. Without a deadline their cards would
+ *     linger forever.
+ *   - Hold expiry DROPS, never resolves. There is no positive evidence to
+ *     resolve on, which is the v1.75.0 msg-rate-floor doctrine exactly.
+ */
 export function orphanedNotifiedIds(p: {
   persisted: Map<string, NotifyRecord>;
   currentIds: Set<string>;
   trackedIds: Set<string>;
   notifyResolved: boolean;
   minSeverity: Severity;
-}): { resolve: string[]; drop: string[] } {
+  nowMs: number;
+  /** Absolute epoch past which a held id is DROPPED (not resolved). */
+  holdUntilMs: number;
+  /**
+   * REQUIRED — deliberately no default. True means the source device is
+   * absent or stale, so this id's disappearance is UNEVALUABLE, not a recovery.
+   * Making it required is the forcing function: a new call site cannot silently
+   * inherit the old unguarded behaviour.
+   */
+  unevaluable: (id: string, rec: NotifyRecord) => boolean;
+}): { resolve: string[]; drop: string[]; hold: string[] } {
   const resolve: string[] = [];
   const drop: string[] = [];
+  const hold: string[] = [];
   for (const [id, rec] of p.persisted) {
     if (p.currentIds.has(id) || p.trackedIds.has(id)) continue; // still active — not an orphan
     // v1.75.0 — a msg-rate-floor orphan is DROPPED, never resolve-pushed. The
@@ -807,9 +858,18 @@ export function orphanedNotifiedIds(p: {
       p.notifyResolved,
       p.minSeverity,
     );
-    (owed ? resolve : drop).push(id);
+    // A never-pushed record cannot produce a false all-clear — drop it before
+    // the evidence test, or the sweep stops collecting for the noisiest families.
+    if (!owed) { drop.push(id); continue; }
+    if (p.unevaluable(id, rec)) {
+      // Held while the source cannot be observed; dropped SILENTLY once the
+      // deadline passes. Never resolved — there is no evidence to resolve on.
+      (p.nowMs >= p.holdUntilMs ? drop : hold).push(id);
+      continue;
+    }
+    resolve.push(id);
   }
-  return { resolve, drop };
+  return { resolve, drop, hold };
 }
 
 export function shouldSendResolve(
@@ -1130,6 +1190,15 @@ export interface NotifyRecord {
    *  "Resolved:". Absent on pre-v1.3.0 records; the HA channel ignores the title on a
    *  dismiss anyway, so a legacy record still retires its card correctly. */
   title?: string;
+  /**
+   * v1.140.0 — the alert's source device SN, persisted so the boot orphan sweep
+   * can ask whether that device is evaluable. `fallingEdgeFrozenByEvidence`
+   * falls back to scanning the id, which returns null for `shp2-src-err-<slot>`,
+   * `shp2-src-hw-<slot>`, `shp2-below-reserve`, `shp2-near-reserve` and
+   * `backup-soc-<pct>` — the alarm data source's OWN alerts, and the same
+   * SN-less hole v1.78.0 closed once for the live path. Absent on older records.
+   */
+  sourceSn?: string;
 }
 
 export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string, NotifyRecord> {
@@ -1142,13 +1211,14 @@ export function loadNotifiedState(path: string, nowMs = Date.now()): Map<string,
       if (typeof v === 'number' && v > cutoff) {
         out.set(id, { ts: v, sent: true }); // legacy shape (pre-v0.80)
       } else if (v !== null && typeof v === 'object') {
-        const r = v as { ts?: unknown; sent?: unknown; sev?: unknown; title?: unknown };
+        const r = v as { ts?: unknown; sent?: unknown; sev?: unknown; title?: unknown; sourceSn?: unknown };
         if (typeof r.ts === 'number' && r.ts > cutoff) {
           out.set(id, {
             ts: r.ts,
             sent: r.sent === true,
             sev: r.sev === 'critical' || r.sev === 'warning' || r.sev === 'info' ? r.sev : undefined,
             ...(typeof r.title === 'string' ? { title: r.title } : {}),
+            ...(typeof r.sourceSn === 'string' ? { sourceSn: r.sourceSn } : {}),
           });
         }
       }
@@ -1242,6 +1312,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   /** v1.3.0 — boot-time orphan reconcile (see orphanedNotifiedIds); runs once, after warm-up. */
   const bootMs = Date.now();
   let orphanSweepDone = false;
+  /** v1.140.0 — quiet-hours hold is now reachable every tick; log it once per window. */
+  let quietHoldLogged = false;
+  /** v1.140.0 — orphan ids already announced as held, so each logs once. */
+  const heldOrphanLogged = new Set<string>();
   let lastDigestHour = -1;
   /** v1.95.0 — consecutive ticks a DPU has been absent from a non-empty SHP2 roster. */
   const offPanelStreak = new Map<string, number>();
@@ -2364,7 +2438,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           // v0.15.21 — record the push durably so a restart can't repeat it.
           // v0.80.0 — the record carries delivered-vs-suppressed + the severity,
           // so a restart rehydrates pushSent/notifiedSeverity faithfully.
-          persistedNotified.set(a.id, { ts: now, sent: outcome === 'sent', sev: a.severity, title: a.title });
+          persistedNotified.set(a.id, { ts: now, sent: outcome === 'sent', sev: a.severity, title: a.title, sourceSn: a.sourceSn });
           persistNotified();
         }
       }
@@ -2536,16 +2610,44 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // it would leave firstRun true, so the NEXT tick would re-run boot seeding
       // and suppress genuine pushes. Deferring must not skip it.
       if (QUIET_WINDOW != null && inQuietWindow(nowDate, QUIET_WINDOW)) {
-        log('notify: orphan resolve sweep held — quiet hours (will run when the window opens)');
+        // v1.140.0 — the sweep no longer latches unconditionally (held orphans
+        // keep it open), so this branch can now be reached on EVERY tick. Log it
+        // once per window or it emits ~1080 lines per quiet period into the same
+        // log ring that is the evidence source for questions like this one.
+        if (!quietHoldLogged) {
+          quietHoldLogged = true;
+          log('notify: orphan resolve sweep held — quiet hours (will run when the window opens)');
+        }
       } else {
-      orphanSweepDone = true;
-      const { resolve, drop } = orphanedNotifiedIds({
+      quietHoldLogged = false;
+      const { resolve, drop, hold } = orphanedNotifiedIds({
         persisted: persistedNotified,
         currentIds,
         trackedIds: new Set(tracked.keys()),
         notifyResolved: cfg.notifyResolved,
         minSeverity: cfg.minSeverity,
+        nowMs: now,
+        holdUntilMs: bootMs + LEARNED_RESOLVE_GRACE_MS + ORPHAN_HOLD_MAX_MS,
+        // v1.140.0 — S2: the same evidence gate the steady-state falling edge
+        // uses. An id whose source device is absent or stale did not "clear" —
+        // it became unobservable.
+        unevaluable: (id, rec) => fallingEdgeFrozenByEvidence({
+          id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now, sourceSn: rec.sourceSn,
+        }),
       });
+      // Re-run while anything is held; latching here would strand those records
+      // and the fix would be invisible after the first tick.
+      orphanSweepDone = hold.length === 0;
+      for (const id of hold) {
+        // One line per NEWLY held id. Without it the fix cannot be live-verified
+        // — the v0.33 dead-`M`-key lesson.
+        if (heldOrphanLogged.has(id)) continue;
+        heldOrphanLogged.add(id);
+        const r = persistedNotified.get(id);
+        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${r?.sourceSn ?? 'source'} offline/stale; not a recovery)`);
+      }
+      for (const id of resolve) heldOrphanLogged.delete(id);
+      for (const id of drop) heldOrphanLogged.delete(id);
       for (const id of resolve) {
         const rec = persistedNotified.get(id)!;
         // Forget the record FIRST, mirroring the v0.80.0 ordering: a failed resolve must
@@ -2567,7 +2669,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       for (const id of drop) persistedNotified.delete(id);
       if (resolve.length || drop.length) {
         persistNotified();
-        log(`notify: boot reconcile — resolved ${resolve.length}, dropped ${drop.length} orphaned record(s)`);
+        log(`notify: boot reconcile — resolved ${resolve.length}, dropped ${drop.length}, held ${hold.length} orphaned record(s)`);
       }
       }
     }
