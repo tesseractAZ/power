@@ -201,14 +201,26 @@ for (const relPath of MQTT_SOURCE_FILES) {
 
 const PREFIX = 'homeassistant';
 
+/**
+ * v1.141.0 — `publish` now carries TWO configs per channel (energy + power), so
+ * these assertions select by kind rather than by index. Indexing into a mixed
+ * list would silently assert about the wrong entity the next time the order or
+ * the count changes.
+ */
+const energyCfgs = (plan: { publish: { cfg: Record<string, unknown> }[] }) =>
+  plan.publish.filter((p) => String(p.cfg.unique_id).endsWith('_lifetime_kwh'));
+const powerCfgs = (plan: { publish: { cfg: Record<string, unknown> }[] }) =>
+  plan.publish.filter((p) => String(p.cfg.unique_id).endsWith('_watts'));
+
 test('planCircuitDiscovery: fresh set publishes one well-formed config per circuit, clears none', () => {
   const plan = planCircuitDiscovery(PREFIX, [], [
     { ch: 1, name: 'Kitchen' },
     { ch: 2, name: 'EVSE' },
   ]);
   assert.equal(plan.clear.length, 0, 'nothing to clear on a fresh publish');
-  assert.equal(plan.publish.length, 2, 'one config per circuit');
-  const first = plan.publish[0];
+  assert.equal(energyCfgs(plan).length, 2, 'one energy config per circuit');
+  assert.equal(powerCfgs(plan).length, 2, 'and one power config per circuit');
+  const first = energyCfgs(plan)[0];
   assert.equal(first.topic, 'homeassistant/sensor/ecoflow_circuit_1_lifetime_kwh/config');
   assert.equal(first.cfg.unique_id, 'ecoflow_circuit_1_lifetime_kwh');
   assert.equal(first.cfg.name, 'Kitchen Energy');
@@ -225,7 +237,7 @@ test('planCircuitDiscovery: fresh set publishes one well-formed config per circu
 
 test('planCircuitDiscovery: unnamed circuit falls back to "Circuit N"', () => {
   const plan = planCircuitDiscovery(PREFIX, [], [{ ch: 7 }]);
-  assert.equal(plan.publish[0].cfg.name, 'Circuit 7 Energy');
+  assert.equal(energyCfgs(plan)[0].cfg.name, 'Circuit 7 Energy');
 });
 
 test('planCircuitDiscovery: identical circuit set → identical signature (caller no-ops, no churn)', () => {
@@ -240,7 +252,7 @@ test('planCircuitDiscovery: a renamed circuit changes the signature (re-publishe
   const before = planCircuitDiscovery(PREFIX, [], [{ ch: 1, name: 'Old Name' }]);
   const after = planCircuitDiscovery(PREFIX, [1], [{ ch: 1, name: 'New Name' }]);
   assert.notEqual(before.sig, after.sig, 'a rename must re-assert the config');
-  assert.equal(after.publish[0].cfg.name, 'New Name Energy');
+  assert.equal(energyCfgs(after)[0].cfg.name, 'New Name Energy');
 });
 
 test('planCircuitDiscovery: a removed circuit is cleared and the signature changes', () => {
@@ -248,8 +260,11 @@ test('planCircuitDiscovery: a removed circuit is cleared and the signature chang
     { ch: 1, name: 'A' },
     { ch: 2, name: 'B' },
   ]);
-  assert.deepEqual(plan.clear, ['homeassistant/sensor/ecoflow_circuit_3_lifetime_kwh/config']);
-  assert.equal(plan.publish.length, 2, 'remaining circuits still published');
+  assert.deepEqual(plan.clear, [
+    'homeassistant/sensor/ecoflow_circuit_3_lifetime_kwh/config',
+    'homeassistant/sensor/ecoflow_circuit_3_watts/config',
+  ], 'BOTH topics — miss one and an orphaned retained config sits on the broker forever');
+  assert.equal(energyCfgs(plan).length, 2, 'remaining circuits still published');
   const prev = planCircuitDiscovery(PREFIX, [], [
     { ch: 1, name: 'A' }, { ch: 2, name: 'B' }, { ch: 3, name: 'C' },
   ]);
@@ -265,7 +280,7 @@ test('planCircuitDiscovery: a split-phase secondary is named from its PAIR, not 
     { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
     { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
   ]);
-  const byCh = Object.fromEntries(plan.publish.map((p, i) => [i === 0 ? 1 : 3, p.cfg.name]));
+  const byCh = Object.fromEntries(energyCfgs(plan).map((p, i) => [i === 0 ? 1 : 3, p.cfg.name]));
   assert.equal(byCh[1], 'East Wing L1 Energy');
   assert.equal(byCh[3], 'East Wing L2 Energy', 'secondary inherits the primary name');
 });
@@ -276,8 +291,8 @@ test('planCircuitDiscovery: leg suffix follows CHANNEL ORDER, not array order', 
     { ch: 8, name: 'Circuit 8', linkCh: 6, linkMark: true },
     { ch: 6, name: 'West Air conditioner', linkCh: 8, linkMark: true },
   ]);
-  assert.equal(plan.publish[0].cfg.name, 'West Air conditioner L2 Energy', 'ch8 is the higher leg');
-  assert.equal(plan.publish[1].cfg.name, 'West Air conditioner L1 Energy', 'ch6 is the primary');
+  assert.equal(energyCfgs(plan)[0].cfg.name, 'West Air conditioner L2 Energy', 'ch8 is the higher leg');
+  assert.equal(energyCfgs(plan)[1].cfg.name, 'West Air conditioner L1 Energy', 'ch6 is the primary');
 });
 
 test('planCircuitDiscovery: an UNPAIRED circuit keeps its own name with no leg suffix', () => {
@@ -285,8 +300,8 @@ test('planCircuitDiscovery: an UNPAIRED circuit keeps its own name with no leg s
     { ch: 5, name: 'Well Pump' },
     { ch: 9, name: 'Shed', linkCh: 11, linkMark: false }, // linkCh set but not marked → not a pair
   ]);
-  assert.equal(plan.publish[0].cfg.name, 'Well Pump Energy');
-  assert.equal(plan.publish[1].cfg.name, 'Shed Energy', 'linkMark false ⇒ not split-phase');
+  assert.equal(energyCfgs(plan)[0].cfg.name, 'Well Pump Energy');
+  assert.equal(energyCfgs(plan)[1].cfg.name, 'Shed Energy', 'linkMark false ⇒ not split-phase');
 });
 
 test('planCircuitDiscovery: an unnamed PRIMARY still yields a stable pair label', () => {
@@ -294,8 +309,8 @@ test('planCircuitDiscovery: an unnamed PRIMARY still yields a stable pair label'
     { ch: 2, linkCh: 4, linkMark: true },
     { ch: 4, name: 'Circuit 4', linkCh: 2, linkMark: true },
   ]);
-  assert.equal(plan.publish[0].cfg.name, 'Circuit 2 L1 Energy');
-  assert.equal(plan.publish[1].cfg.name, 'Circuit 2 L2 Energy');
+  assert.equal(energyCfgs(plan)[0].cfg.name, 'Circuit 2 L1 Energy');
+  assert.equal(energyCfgs(plan)[1].cfg.name, 'Circuit 2 L2 Energy');
 });
 
 test('planCircuitDiscovery: the latch key is built from the DERIVED name, so the leg rename actually republishes', () => {
@@ -325,8 +340,8 @@ test('planCircuitDiscovery: renaming the PRIMARY relabels BOTH legs and moves th
     { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
   ]);
   assert.notEqual(before.sig, after.sig);
-  assert.equal(after.publish[0].cfg.name, 'Guest Wing L1 Energy');
-  assert.equal(after.publish[1].cfg.name, 'Guest Wing L2 Energy', 'secondary follows the rename');
+  assert.equal(energyCfgs(after)[0].cfg.name, 'Guest Wing L1 Energy');
+  assert.equal(energyCfgs(after)[1].cfg.name, 'Guest Wing L2 Energy', 'secondary follows the rename');
 });
 
 test('planCircuitDiscovery: leg naming does NOT touch unique_id or value_template (entity_id + statistics survive)', () => {
@@ -334,7 +349,7 @@ test('planCircuitDiscovery: leg naming does NOT touch unique_id or value_templat
     { ch: 1, name: 'East Wing', linkCh: 3, linkMark: true },
     { ch: 3, name: 'Circuit 3', linkCh: 1, linkMark: true },
   ]);
-  const secondary = plan.publish[1];
+  const secondary = energyCfgs(plan)[1];
   assert.equal(secondary.cfg.unique_id, 'ecoflow_circuit_3_lifetime_kwh', 'unique_id stays keyed to the CHANNEL');
   assert.equal(secondary.topic, 'homeassistant/sensor/ecoflow_circuit_3_lifetime_kwh/config');
   assert.equal(secondary.cfg.value_template, '{{ value_json.circuit_3_lifetime_kwh }}');
@@ -346,8 +361,10 @@ test('planCircuitDiscovery: empty circuit list publishes nothing and clears all 
   assert.equal(plan.publish.length, 0);
   assert.deepEqual(plan.clear, [
     'homeassistant/sensor/ecoflow_circuit_4_lifetime_kwh/config',
+    'homeassistant/sensor/ecoflow_circuit_4_watts/config',
     'homeassistant/sensor/ecoflow_circuit_5_lifetime_kwh/config',
-  ]);
+    'homeassistant/sensor/ecoflow_circuit_5_watts/config',
+  ], 'both topics per departed channel');
 });
 
 /**
