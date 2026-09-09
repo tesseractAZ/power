@@ -84,7 +84,7 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
       const u2 = noteTimestampRejection(dateHeader, Date.now(), rttMs);
       if (u2.adopted) onClockOffsetAdopted?.(u2.offsetMs, b2);
     }
-    throw new Error(`EcoFlow API error ${parsed.code}: ${parsed.message} (trace ${parsed.eagleEyeTraceId ?? 'n/a'})`);
+    throw new Error(`EcoFlow API error ${parsed.code}: ${parsed.message} (trace ${parsed.eagleEyeTraceId || 'n/a'})`);
   }
   return parsed.data;
 }

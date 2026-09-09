@@ -2110,15 +2110,49 @@ app.get('/ws', {
 const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m),
   // v1.88.0 — the EcoFlow-enablement doorbell: a device whose quota fetch had
   // been failing >= 30 min (the persistent 1006 class named in the submitted
-  // API ticket) just started answering. Tell the operator — this is the
-  // signal that EcoFlow's internal processing landed.
+  // API ticket) just started answering.
+  //
+  // v1.138.0 — this callback now only ever receives devices that were ACTUALLY
+  // POLLED and did not throw (see longFailureRecoveries), so "quota data
+  // arrived" is a fact rather than an inference. Two things still needed fixing
+  // in the message itself:
+  //
+  //   D4 — the recovery set was not filtered by device class, so a DPU Core or
+  //   the SHP2 recovering from a DNS EAI_AGAIN or a cloud 5xx would push a
+  //   false VENDOR-ENTITLEMENT claim about a core alarm-path device. The prose
+  //   hedge "if these are the accessory devices" was doing work the code never
+  //   did. Core devices now get a log line and no push at all — their recovery
+  //   is already covered by the telemetry-blind detector.
+  //
+  //   The body asserted "EcoFlow's enablement has landed" and that the panel
+  //   "will begin projecting them automatically". The first is an inference
+  //   from one poll; the second is true only for device classes with a tailored
+  //   projection, which is none of the ticketed accessories — projectByProduct
+  //   has branches for 'delta pro ultra' and 'smart home panel' and nothing
+  //   else, and zero server-side consumers read a 'generic' projection. The
+  //   speculation belongs in the log; the push gets only what was observed.
   (sns) => {
-    const names = sns.map((sn) => (store.get().devices as any)[sn]?.deviceName ?? sn).join(', ');
-    app.log.info(`poll: LONG-FAILING device fetch recovered — ${names}. If these are the 1006-blocked accessories, EcoFlow's enablement may have landed; check /api/debug/raw for real quota data.`);
+    const devices = store.get().devices as any;
+    const nameOf = (sn: string) => devices[sn]?.deviceName ?? sn;
+    const isCore = (sn: string) => {
+      const k = devices[sn]?.projection?.kind;
+      return k === 'dpu' || k === 'shp2';
+    };
+    const core = sns.filter(isCore);
+    const accessories = sns.filter((sn) => !isCore(sn));
+
+    if (core.length) {
+      // Not an entitlement event — a transport failure that ended.
+      app.log.info(`poll: core device fetch recovered after a long failure — ${core.map(nameOf).join(', ')}. Transport/cloud recovery, NOT an API-access change; no push sent.`);
+    }
+    if (!accessories.length) return;
+
+    const names = accessories.map(nameOf).join(', ');
+    app.log.info(`poll: LONG-FAILING accessory fetch recovered — ${names}. Quota data was received this poll. This MAY be the API-access enablement landing, or a transient success; check /api/debug/raw and whether it persists.`);
     void sendNotification(loadNotifyConfig(), {
       severity: 'info', dedupId: 'ecoflow_data_restored',
-      title: 'EcoFlow data restored',
-      body: `Quota data is flowing again for: ${names}. If these are the accessory devices from the API-access ticket, EcoFlow's enablement has landed — the panel will begin projecting them automatically where supported.`,
+      title: 'EcoFlow accessory data received',
+      body: `Quota data arrived this poll for: ${names}, after a sustained run of failures. This may be the API-access enablement landing, or a one-off success — it is not confirmed either way. Note the panel has tailored projections only for Delta Pro Ultra and Smart Home Panel 2, so an accessory contributes no alarms, energy totals or HA entities even when its data flows.`,
     }).catch(() => { /* best-effort informational push */ });
   });
 
