@@ -420,17 +420,39 @@ function guessProductFromName(name: string): string {
 // debug breadcrumb below cannot become poll-cadence log spam.
 const quotaErrLogged = new Set<string>();
 
-export async function refreshAll(store: SnapshotStore, log: (m: string) => void = () => {}): Promise<string[]> {
+/**
+ * v1.138.0 — what one poll ATTEMPTED, not just what failed.
+ *
+ * THE DEFECT THIS EXISTS FOR: `refreshAll` used to return only `failedSns`, and
+ * two downstream detectors read absence from that array as evidence of success.
+ * It is not. `failedSns` can only ever contain devices this poll actually ASKED
+ * — the fetch set is `list.filter((d) => d.online === 1)` — so a device that
+ * goes cloud-offline is absent for the same reason a healthy one is.
+ *
+ * Returning the attempt set makes the third state expressible: a device that was
+ * never asked is neither recovered nor failing, it is UNEVALUABLE. That is the
+ * doctrine `fallingEdgeFrozenByEvidence` already states for the alert falling
+ * edge (`alertMonitor.ts`); these two call sites never got it.
+ */
+export interface RefreshResult {
+  /** SNs this poll actually asked (online === 1 at list time). */
+  attemptedSns: string[];
+  /** Of those, the SNs whose quota fetch threw. Always a subset of attemptedSns. */
+  failedSns: string[];
+}
+
+export async function refreshAll(store: SnapshotStore, log: (m: string) => void = () => {}): Promise<RefreshResult> {
   store.markDeviceListAttempt();
   const list = await ecoflow.listDevices();
   store.setDeviceList(list);
   // v1.79.0 — the tick's poll line must not say a bare "ok" when a device
   // fetch inside it timed out (four 10.4-10.5 s polls logged "ok" across two
   // audits with the failing device unnamed).
+  const online = list.filter((d) => d.online === 1);
+  const attemptedSns = online.map((d) => d.sn);
   const failedSns: string[] = [];
   await Promise.all(
-    list
-      .filter((d) => d.online === 1)
+    online
       .map(async (d) => {
         try {
           const quota = await ecoflow.getQuotaAll(d.sn);
@@ -450,7 +472,7 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
         }
       }),
   );
-  return failedSns;
+  return { attemptedSns, failedSns };
 }
 
 /** Flatten nested object/array into a flat key map using dot/bracket notation. */
@@ -487,7 +509,7 @@ const POLL_DEBUG = /^(debug|trace)$/i.test(config.logLevel);
  * THE DEFECT THIS REPLACES: all three log branches were gated on
  * `failedSns.length === 0`. That guard was written for a fleet where fetch
  * failures are exceptional. On this fleet they are not: four accessory devices
- * (EVSE, PowerInsight, BACC Delta 2 Plus, SEC River 2 Plus) reject /quota/all on
+ * (EVSE, PowerInsight, BACC Delta 3 Plus, SEC River 3 Plus) reject /quota/all on
  * EVERY poll — the branch immediately above says so in as many words — so the
  * failure set is never empty and the SLOW_POLL_MS latency detector could never
  * fire. The one 10,488 ms excursion in the 49 h audit window (21x the ~490 ms
@@ -503,6 +525,110 @@ const POLL_DEBUG = /^(debug|trace)$/i.test(config.logLevel);
 export function nextPollDelayMs(intervalMs: number, tookMs: number): number {
   if (!Number.isFinite(tookMs) || tookMs < 0) return intervalMs;
   return Math.max(0, intervalMs - tookMs);
+}
+
+/** v1.138.0 — a failure must persist this long before a recovery is newsworthy. */
+export const LONG_FAILURE_TENURE_MS = 30 * 60_000;
+
+/**
+ * v1.138.0 — which long-failing devices genuinely RECOVERED this poll.
+ *
+ * THE DEFECT THIS REPLACES (observed live, 2026-09-08 15:52:31 MST): the
+ * detector asked `if (!failedSns.includes(sn))` and treated a true as "this
+ * device succeeded". `BACC - Delta 3 Plus` had been 1006-blocked for well over
+ * the tenure gate when EcoFlow's cloud reported it OFFLINE; it dropped out of
+ * the fetch set, vanished from `failedSns`, and 302 ms later — same poll tick,
+ * same `/device/list` payload — the operator's phone said "EcoFlow data
+ * restored — quota data is flowing again". Nothing had been restored. The
+ * device's `lastUpdated` was 0 then and is 0 now: no quota fetch has EVER
+ * succeeded for that SN.
+ *
+ * Absence from a failure list has three causes and only one of them is success:
+ *   1. the fetch succeeded                      → a real recovery
+ *   2. the device went offline, so was not asked → UNEVALUABLE
+ *   3. it fell out of /device/list entirely      → UNEVALUABLE
+ *
+ * So a recovery now requires POSITIVE evidence — `attempted && !failed`. An SN
+ * that was not attempted is HELD: its clock is neither read as a recovery, nor
+ * reset, nor deleted.
+ *
+ * Holding is not cosmetic. The old code deleted the entry on every absence,
+ * outside the tenure test, which made the bug bidirectional: had EcoFlow's real
+ * enablement landed during an offline window, the device would have come back
+ * succeeding, never re-accumulated 30 minutes of failure, and the true doorbell
+ * would never have rung. It cried wolf AND would have stayed silent for the wolf.
+ *
+ * Pure apart from the deliberate in-place mutation of `tenureMs`, which is the
+ * caller's long-lived map. Returns the SNs to announce.
+ */
+export function longFailureRecoveries(o: {
+  nowMs: number;
+  /** sn -> first-failed-at ms. MUTATED IN PLACE (entries started, held, or retired). */
+  tenureMs: Map<string, number>;
+  attemptedSns: readonly string[];
+  failedSns: readonly string[];
+  minTenureMs?: number;
+}): string[] {
+  const minTenure = o.minTenureMs ?? LONG_FAILURE_TENURE_MS;
+  const attempted = new Set(o.attemptedSns);
+  const failed = new Set(o.failedSns);
+
+  // Start the clock for a device we have not seen fail before.
+  for (const sn of o.failedSns) if (!o.tenureMs.has(sn)) o.tenureMs.set(sn, o.nowMs);
+
+  const recovered: string[] = [];
+  for (const [sn, since] of [...o.tenureMs]) {
+    if (failed.has(sn)) continue;      // still failing — clock runs on
+    if (!attempted.has(sn)) continue;  // ★ NEVER ASKED — hold, do not judge
+    // Attempted this poll and did not throw: quota data demonstrably arrived.
+    if (o.nowMs - since >= minTenure) recovered.push(sn);
+    o.tenureMs.delete(sn);
+  }
+  return recovered;
+}
+
+/**
+ * v1.138.0 — is this poll evidence that the alarm path can still see? (S1)
+ *
+ * THE DEFECT THIS REPLACES: `const shp2Failed = failedSns.some(isShp2)` — the
+ * same absence-means-success read, applied to the single most important device
+ * in the system. An SHP2 that goes cloud-offline is never fetched, so it is
+ * never in `failedSns`, so `shp2Failed` was false and the poll counted as OK.
+ * `assessBlind`'s other input counts devices carrying a projection regardless of
+ * `online`, and `setDeviceList` deliberately PRESERVES `projection` across the
+ * offline transition — so the telemetry-blind CRITICAL saw `hasDevices=true,
+ * pollFresh=true` and returned `{blind: false}` for the whole SHP2-dark window.
+ *
+ * The v1.86.0 comment above the old line states the intent exactly — "the
+ * telemetry-blind detector must not count a poll whose ALARM-PATH device (the
+ * SHP2) failed as OK" — and closed the FAILED case while leaving NEVER-ASKED
+ * open. This is the suspected mechanism behind the recorded "SHP2 cloud-offline
+ * → floor gap with no compensating alarm"; confirm by sampling /api/health
+ * during the next cloud-offline episode.
+ *
+ * Fail-open ONLY at bootstrap: before the first quota response there is no
+ * projection, so no SHP2 is known and blindness cannot be asserted. Once ANY
+ * SHP2 is known, every one of them must have been asked and answered — a
+ * partially-dark multi-panel fleet is partial blindness, and v1.129.0 exists
+ * because this fleet can have two panels.
+ */
+export function pollHealthVerdict(o: {
+  /** Every SN currently projected as an SHP2, online or not. */
+  knownShp2Sns: readonly string[];
+  attemptedSns: readonly string[];
+  failedSns: readonly string[];
+}): { ok: true } | { ok: false; reason: 'shp2-fetch-failed' | 'shp2-not-polled'; sns: string[] } {
+  if (o.knownShp2Sns.length === 0) return { ok: true }; // bootstrap: nothing known to be dark
+  const failed = new Set(o.failedSns);
+  const attempted = new Set(o.attemptedSns);
+
+  const bad = o.knownShp2Sns.filter((sn) => failed.has(sn));
+  if (bad.length) return { ok: false, reason: 'shp2-fetch-failed', sns: bad };
+
+  const unasked = o.knownShp2Sns.filter((sn) => !attempted.has(sn));
+  if (unasked.length) return { ok: false, reason: 'shp2-not-polled', sns: unasked };
+
+  return { ok: true };
 }
 
 export function pollLogLines(o: {
@@ -559,8 +685,18 @@ export function startPollLoop(
     if (stopped) return;
     const t0 = Date.now();
     try {
-      const failedSns = await refreshAll(store, log);
+      const { attemptedSns, failedSns } = await refreshAll(store, log);
       const tookMs = Date.now() - t0;
+      // v1.138.0 — ONE attribution call for the whole tick, replacing the two
+      // separate doorbell sites below. The old `else` branch (failedSns empty)
+      // fired for EVERY long-tenured SN at once and then .clear()'d the map with
+      // no per-device check at all — so an empty or short /device/list would
+      // have announced all four 1006-blocked accessories as restored
+      // simultaneously: a telemetry blackout rendered as good news.
+      const recoveredLong = longFailureRecoveries({
+        nowMs: Date.now(), tenureMs: failureFirstSeenMs, attemptedSns, failedSns,
+      });
+      if (recoveredLong.length) onLongFailureRecovered?.(recoveredLong);
       // v1.79.0 — a poll with per-device fetch failures is not a bare "ok":
       // name the devices at warn so the 10 s connect-timeout ceiling stops
       // hiding inside "poll ok in 10486ms (slow)".
@@ -571,17 +707,6 @@ export function startPollLoop(
         // A stable set logs once at warn (and once per hour at info as a
         // heartbeat); a CHANGED set — a new device failing, or one recovering —
         // always logs at warn immediately.
-        // v1.88.0 — tenure bookkeeping + long-failure recovery detection.
-        const nowTick = Date.now();
-        for (const sn of failedSns) if (!failureFirstSeenMs.has(sn)) failureFirstSeenMs.set(sn, nowTick);
-        const recoveredLong: string[] = [];
-        for (const [sn, since] of failureFirstSeenMs) {
-          if (!failedSns.includes(sn)) {
-            if (nowTick - since >= 30 * 60_000) recoveredLong.push(sn);
-            failureFirstSeenMs.delete(sn);
-          }
-        }
-        if (recoveredLong.length) onLongFailureRecovered?.(recoveredLong);
         const setKey = [...failedSns].sort().join(',');
         if (setKey !== lastFailedSetKey) {
           lastFailedSetKey = setKey;
@@ -595,13 +720,6 @@ export function startPollLoop(
         if (lastFailedSetKey !== '') {
           lastFailedSetKey = '';
           log(`poll: all device fetches recovered`);
-          // v1.88.0 — full recovery: any long-tenured failures just ended.
-          const nowTick = Date.now();
-          const recoveredLong = [...failureFirstSeenMs.entries()]
-            .filter(([, since]) => nowTick - since >= 30 * 60_000)
-            .map(([sn]) => sn);
-          failureFirstSeenMs.clear();
-          if (recoveredLong.length) onLongFailureRecovered?.(recoveredLong);
         }
       }
       for (const line of pollLogLines({
@@ -612,12 +730,21 @@ export function startPollLoop(
       // ALARM-PATH device (the SHP2) failed as OK: notePollOk previously ran
       // unconditionally, so an SHP2 fetch failure was invisible to the blind
       // clock. Accessory-only failures still count OK (pool data arrived).
-      const shp2Failed = failedSns.some((sn) => {
-        const d = store.get().devices[sn];
-        return (d as any)?.projection?.kind === 'shp2';
-      });
-      if (shp2Failed) {
-        notePollFailed(`SHP2 quota fetch failed (${failedSns.join(', ')})`);
+      // v1.138.0 — S1: `failedSns.some(isShp2)` could not see an SHP2 that was
+      // never ASKED. Cloud-offline meant absent-from-failures meant "poll OK",
+      // so the telemetry-blind CRITICAL stayed disarmed for the entire dark
+      // window. pollHealthVerdict distinguishes asked-and-failed from never-asked.
+      const devicesNow = store.get().devices;
+      const knownShp2Sns = Object.keys(devicesNow).filter(
+        (sn) => (devicesNow[sn] as any)?.projection?.kind === 'shp2',
+      );
+      const health = pollHealthVerdict({ knownShp2Sns, attemptedSns, failedSns });
+      if (!health.ok) {
+        notePollFailed(
+          health.reason === 'shp2-fetch-failed'
+            ? `SHP2 quota fetch failed (${health.sns.join(', ')})`
+            : `SHP2 not polled — cloud-offline, so this poll is NOT evidence the alarm path can see (${health.sns.join(', ')})`,
+        );
       } else {
         notePollOk(Date.now()); // v1.69.0 — feeds the telemetry-blind detector
       }
