@@ -287,10 +287,12 @@ test('B6: each channel gets a power sensor HA will accept for the Power Sankey',
   assert.equal(power!.cfg.state_class, 'measurement');
   assert.equal(power!.cfg.unit_of_measurement, 'W');
   assert.equal(power!.cfg.value_template, '{{ value_json.circuit_1_watts }}');
-  // The energy entity_ids were minted from the SHP2's user-editable circuit name
-  // and are already incoherent as a result. HA's energy prefs wire by STRING, so
-  // the new ones are pinned rename-proof.
-  assert.equal(power!.cfg.object_id, 'ecoflow_circuit_1_power');
+  // v1.141.1 — an object_id was published here and proved INERT (HA minted
+  // sensor.ecoflow_panel_east_wing_l1_power from the name). It is gone; what
+  // must stay stable is the unique_id, because HA persists an entity_id against
+  // it at first discovery and the energy prefs wire stat_rate BY STRING.
+  assert.equal(power!.cfg.object_id, undefined, 'no inert object_id');
+  assert.equal(power!.cfg.unique_id, 'ecoflow_circuit_1_watts', 'the unique_id is the stable identity');
 });
 
 test('B6: the signature moves when only the POWER name changes', () => {

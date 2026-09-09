@@ -133,11 +133,11 @@ const MUTANTS = [
     why: 'HA refuses device_class power with an accumulating state_class — the entity never appears, and only the new dynamic-config audit catches it.',
   },
   {
-    id: 'xxii. B6: object_id is dropped, so entity_id follows the editable name',
+    id: 'xxii. B6: the power sensor unique_id collides with the energy one',
     file: DISC,
-    find: "          object_id: `ecoflow_circuit_${c.ch}_power`,",
-    to: '          /* MUTANT */',
-    why: 'HA energy prefs wire stat_rate BY STRING; an entity_id minted from the SHP2\'s user-editable circuit name breaks the Sankey on the next rename.',
+    find: '    const powerId = `ecoflow_circuit_${c.ch}_watts`;',
+    to: '    const powerId = `ecoflow_circuit_${c.ch}_lifetime_kwh`; /* MUTANT */',
+    why: 'HA persists an entity_id against the unique_id and the energy prefs wire stat_rate BY STRING — a collision silently drops one of the two entities and takes its Sankey leg with it.',
   },
   {
     id: 'xxiii. B6: the two field builders enumerate independently',

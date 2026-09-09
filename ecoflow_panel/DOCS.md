@@ -933,10 +933,15 @@ entities), and it does not transfer: `stat_rate` is a field **on** a
 entries and silently drop half the panel from the Sankey, and putting a pair
 total on the primary would make that entity mean two things at once.
 
-- `object_id` pins each entity_id rename-proof. The energy entity_ids were minted
-  from the SHP2's user-editable circuit name and are already incoherent as a
-  result (`…_east_wing_energy` beside `…_circuit_3_energy`); HA's energy prefs
-  wire by string, so a rename must not move them.
+- **Entity ids are stable across renames — but not because of `object_id`.**
+  v1.141.0 published one and it was inert: HA minted
+  `sensor.ecoflow_panel_east_wing_l1_power` (device slug + slugified name), so
+  the key was removed in v1.141.1. Stability comes from HA persisting an
+  entity_id against its `unique_id` at first discovery, which matters because the
+  energy prefs wire `stat_rate` **by string**. The proof is in this fleet: the
+  energy entity_ids still read `…_circuit_3_energy` from before v1.65.0's
+  pair-aware naming, while the power entity minted for the same channel reads
+  `…_east_wing_l2_power`.
 - A missing reading is `null`, **never 0** — on a `measurement` sensor a zero is
   compiled into HA's mean as a positive claim the circuit drew nothing. A genuine
   measured 0 passes through.
