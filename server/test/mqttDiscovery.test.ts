@@ -207,9 +207,10 @@ const PREFIX = 'homeassistant';
  * list would silently assert about the wrong entity the next time the order or
  * the count changes.
  */
-const energyCfgs = (plan: { publish: { cfg: Record<string, unknown> }[] }) =>
+type CircuitCfg = { topic: string; cfg: Record<string, unknown> };
+const energyCfgs = (plan: { publish: CircuitCfg[] }) =>
   plan.publish.filter((p) => String(p.cfg.unique_id).endsWith('_lifetime_kwh'));
-const powerCfgs = (plan: { publish: { cfg: Record<string, unknown> }[] }) =>
+const powerCfgs = (plan: { publish: CircuitCfg[] }) =>
   plan.publish.filter((p) => String(p.cfg.unique_id).endsWith('_watts'));
 
 test('planCircuitDiscovery: fresh set publishes one well-formed config per circuit, clears none', () => {
