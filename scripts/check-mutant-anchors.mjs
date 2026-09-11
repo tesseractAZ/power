@@ -31,14 +31,27 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = join(ROOT, 'scripts');
 const SERVER = join(ROOT, 'server');
 
-/** Source files a harness may target, resolved once. */
+/**
+ * Source files a harness may target, resolved once.
+ *
+ * v1.146.0 — keyed on an ABSOLUTE path, and resolved against either base. This
+ * checker previously understood only `resolve(SERVER, '...')`, so a harness
+ * targeting anything outside `server/` was invisible to it: not "0 anchors", but
+ * silently uncounted. `mutate-web-parity.mjs` targets three files under `web/`,
+ * and the checker reported 5 of its 6 anchors unresolvable while the harness
+ * itself ran them all cleanly.
+ *
+ * That is this project's own recurring defect applied to its meta-tooling — a
+ * guard that cannot see part of the domain it claims to cover reads exactly like
+ * a guard finding nothing wrong.
+ */
 const targetCache = new Map();
-const readTarget = (rel) => {
-  if (!targetCache.has(rel)) {
-    try { targetCache.set(rel, readFileSync(join(SERVER, rel), 'utf8')); }
-    catch { targetCache.set(rel, null); }
+const readTarget = (abs) => {
+  if (!targetCache.has(abs)) {
+    try { targetCache.set(abs, readFileSync(abs, 'utf8')); }
+    catch { targetCache.set(abs, null); }
   }
-  return targetCache.get(rel);
+  return targetCache.get(abs);
 };
 
 let checked = 0, bad = 0;
@@ -46,9 +59,29 @@ const harnesses = readdirSync(SCRIPTS).filter((f) => /^mutate-.*\.mjs$/.test(f))
 
 for (const h of harnesses) {
   const src = readFileSync(join(SCRIPTS, h), 'utf8');
-  // Every `resolve(SERVER, 'src/...')` in the harness is a candidate target.
-  const targets = [...src.matchAll(/resolve\(SERVER,\s*'([^']+)'\)/g)].map((m) => m[1]);
-  if (targets.length === 0) { console.log(`  skip   ${h} (no SERVER target)`); continue; }
+  // Every `resolve(SERVER, '...')` OR `resolve(REPO|ROOT, '...')` is a candidate
+  // target. Both bases are in use; missing one makes whole harnesses invisible.
+  const targets = [
+    ...[...src.matchAll(/resolve\(SERVER,\s*'([^']+)'\)/g)].map((m) => join(SERVER, m[1])),
+    // `.filter` because every harness also writes `const SERVER = resolve(REPO,
+    // 'server')` — a BASE definition, not a target. Require a path separator and
+    // a source extension so a base can never be mistaken for a file.
+    ...[...src.matchAll(/resolve\((?:REPO|ROOT),\s*'([^']+)'\)/g)]
+      .map((m) => m[1])
+      .filter((rel) => rel.includes('/') && /\.(ts|tsx|mjs|js)$/.test(rel))
+      .map((rel) => join(ROOT, rel)),
+  ];
+  if (targets.length === 0) { console.log(`  skip   ${h} (no resolvable target)`); continue; }
+  const unreadable = targets.filter((t) => readTarget(t) == null);
+  if (unreadable.length) {
+    // A target path that does not exist would otherwise present as "every anchor
+    // in this harness is dead", sending the reader after the anchors instead of
+    // the path.
+    console.log(`  DEAD   ${h} — ${unreadable.length} target file(s) unreadable:`);
+    for (const u of unreadable) console.log(`           ${u.replace(ROOT + '/', '')}`);
+    bad += unreadable.length;
+    continue;
+  }
 
   // Each mutant's `find:` literal must appear EXACTLY ONCE in one of them —
   // the same condition the harness itself enforces before mutating.

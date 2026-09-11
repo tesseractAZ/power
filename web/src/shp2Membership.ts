@@ -15,15 +15,26 @@
 import type { DeviceSnapshot, Shp2Projection } from './types';
 
 export function shp2ConnectedDpuSns(devices: Record<string, DeviceSnapshot>): Set<string> {
-  const list = Object.values(devices);
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2');
-  if (!shp2 || shp2.projection?.kind !== 'shp2') return new Set();
-  const proj = shp2.projection as Shp2Projection;
-  return new Set(
-    proj.sources
-      .filter((s) => s.isConnected && s.sn)
-      .map((s) => s.sn as string),
-  );
+  // v1.146.0 — UNION ACROSS EVERY PANEL, matching the server since v1.129.0.
+  //
+  // This mirror had drifted three server revisions behind while its own header
+  // demanded lock-step. The single `find` took the FIRST panel only, so with a
+  // second SHP2 present every DPU wired to it fell out of the connected set and
+  // `isShp2Connected` excluded it — silently dropping that half of the plant from
+  // EnergyFlow's fleet totals and ThermalPanel. v1.129.0 shipped exactly this
+  // one-line repair server-side and called it "the largest lever on the
+  // second-SHP2 problem".
+  //
+  // `?? []` because a partial /quota can return the backup SoC while omitting the
+  // pd303_mc sources subtree; the server guards the same way.
+  const out = new Set<string>();
+  for (const d of Object.values(devices)) {
+    if (d.projection?.kind !== 'shp2') continue;
+    for (const s of (d.projection as Shp2Projection).sources ?? []) {
+      if (s.isConnected && s.sn) out.add(s.sn);
+    }
+  }
+  return out;
 }
 
 export function isShp2Connected(sn: string, connected: Set<string>): boolean {

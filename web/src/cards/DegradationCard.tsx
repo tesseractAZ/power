@@ -99,8 +99,15 @@ export function DegradationCard() {
     null,
   );
   const medianFade = median(projecting.map((p) => p.fadePctPerYear ?? 0));
-  const capNow = sumDefined(deg.packs.map((p) => p.currentCapacityKwh));
-  const capDesign = sumDefined(deg.packs.map((p) => p.designCapacityKwh));
+  // v1.146.0 — PAIR-GATED. `sumDefined` filters each side independently, so a
+  // pack reporting a design capacity but not a current one landed in the
+  // denominator alone and the fleet read as degraded when it was merely partly
+  // unreported. A ratio needs the same population on both sides.
+  const capPairs = deg.packs.filter(
+    (p) => p.currentCapacityKwh != null && p.designCapacityKwh != null,
+  );
+  const capNow = sumDefined(capPairs.map((p) => p.currentCapacityKwh));
+  const capDesign = sumDefined(capPairs.map((p) => p.designCapacityKwh));
   const capPct = capNow != null && capDesign != null && capDesign > 0 ? (capNow / capDesign) * 100 : null;
   const outliers = projecting.filter((p) => p.peerOutlier);
 
