@@ -108,11 +108,35 @@ jobs:
 
       # v1.58.0 — the suite previously ran ONLY in images.yml, post-tag, so a
       # behavioural regression reached main green and was caught (if at all) after
-      # the release was cut. This is a life-safety alarm path; the 1,757 tests take
-      # ~10 s and now gate the pull request.
+      # the release was cut. This is a life-safety alarm path; the suite takes
+      # ~10 s and now gates the pull request.
+      #
+      # The pass count is captured here rather than recounted later: it is the one
+      # README claim that cannot be derived statically (a scan of test()/it()
+      # registrations undercounts the loop-generated ones), so the job that
+      # actually ran the suite is the only honest source for it.
       - name: npm test
+        id: tests
         working-directory: server
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee /tmp/test-output.txt
+          count=$(grep -oE '^[^0-9]*pass ([0-9]+)' /tmp/test-output.txt | grep -oE '[0-9]+' | tail -1)
+          if [ -z "$count" ]; then
+            echo "::error::could not parse a 'pass N' line from the test output" >&2
+            exit 1
+          fi
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "parsed pass count: $count"
+
+      # v1.149.0 — every counted claim in README.md had silently rotted (tests,
+      # harnesses, anchors, DOCS.md length, the workflow roster, and a paragraph
+      # asserting GitHub's alert endpoints return empty — true when written, false
+      # once the repository went public). None of them failed anything, because a
+      # number in prose has no mechanism holding it to the tree. This is that
+      # mechanism. It has no skip path: a claim it cannot evaluate is a failure.
+      - name: README claims still match the tree
+        run: node scripts/check-doc-claims.mjs --tests ${{ steps.tests.outputs.count }}
 
   no-secrets:
     name: No personal data in the tree

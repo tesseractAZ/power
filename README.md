@@ -18,7 +18,7 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
 92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
 time-of-use rate.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~9,100
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~9,960
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
@@ -187,12 +187,12 @@ Every configuration option is documented in
 | `ecoflow_panel/` | Add-on manifest (`config.yaml`), `DOCS.md`, `CHANGELOG.md` (+ archive), AppArmor profile |
 | `scripts/` | Docs builder (`build-docs-docx.py`), device probes |
 | `docs/` | `PERFORMANCE.md` (measured-accuracy record), `NIGHT_CHARGE_ARBITRAGE_DESIGN.md` (binding design of record for the device-write path), `ble-probe-runbook.md` |
-| `.github/workflows/` | `ci.yml` (type-check ×2, Dockerfile smoke, docs `.docx`+`.pdf`) · `tag-release.yml` (tags a `Release …` merge) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch). CodeQL runs as GitHub default setup, no workflow file. |
+| `.github/workflows/` | `ci.yml` (type-check ×2, Dockerfile smoke, docs `.docx`+`.pdf`) · `tag-release.yml` (tags a `Release …` merge) · `images.yml` (tests, multi-arch GHCR publish, GitHub Release) · `release.yml` (manual dispatch) · `codeql.yml` (CodeQL analysis). |
 
 ## Development
 
 ```bash
-cd server && npm install && npm test     # ~2,380 tests
+cd server && npm install && npm test     # 2,562 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -238,7 +238,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **18 harnesses** (`scripts/mutate-*.mjs`) holding **100+
+regression. There are **30 harnesses** (`scripts/mutate-*.mjs`) holding **203
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that
@@ -246,12 +246,20 @@ reason — a harness whose anchors have drifted does not fail, it stops running,
 an aborted harness reads identically to a clean one.
 
 Dependency advisories are gated by `scripts/check-npm-audit.mjs`, which fails on
-**high or critical in the production tree** and reports the rest. It exists because
-GitHub's own alerting is unavailable here — `/dependabot/alerts` and
-`/code-scanning/alerts` both return empty on a private personal repository — so the
-only security signal otherwise arriving is a routine version bump that happens to
-carry a fix. Waivers must carry a reason **and an expiry date**, and an expired
-waiver fails the build. The script **self-tests its own policy before auditing**,
+**high or critical in the production tree** and reports the rest. Waivers must carry a
+reason **and an expiry date**, and an expired waiver fails the build.
+
+*This paragraph used to justify the script by saying GitHub's own alerting was
+unavailable — that `/dependabot/alerts` and `/code-scanning/alerts` both returned empty
+on a private personal repository. That was true when it was written and is **false now**:
+the repository is public, and both endpoints return real data (Dependabot has raised and
+closed 33 advisories; CodeQL has 75 alerts, all dismissed or fixed; as of v1.149.0 every
+one of the three alert surfaces is at zero open). Nothing failed when it stopped being
+true, because a claim in prose about an external system has no mechanism holding it
+honest — the same shape as the defects catalogued below. The script's real justification
+was never the outage and survives it: **GitHub alerts notify, they do not block a merge.**
+The script fails the build, enforces waiver expiry, and runs on every PR rather than on
+GitHub's own schedule.* The script **self-tests its own policy before auditing**,
 because a clean `npm audit` is indistinguishable from a broken gate unless the gate
 has been shown to fire.
 

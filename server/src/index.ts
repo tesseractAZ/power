@@ -3198,7 +3198,7 @@ interface NightPlanExtras {
   pvP10Kwh: number; pvP50Kwh: number; pvP90Kwh: number;
   loadP10Kwh: number; loadP50Kwh: number; loadP90Kwh: number;
   evP90SessionKwh: number | null; evSessionCount: number | null;
-  bandSigmaCal: number;
+  bandSigmaCal: number | null;
   calScoredDays: number;
   forecastBasis: string;
   weatherCovered: number;
@@ -3528,7 +3528,11 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     // one column that cannot be reconstructed after the fact.
     evP90SessionKwh: ev?.p90SessionKwh ?? null,
     evSessionCount: ev?.sessionCount ?? null,
-    bandSigmaCal: prob?.bandSigmaCal ?? 1,
+    // v1.149.0 — was `?? 1`. A missing probabilistic forecast is not a
+    // calibration factor of 1; writing one filed "no forecast" as "calibration
+    // neutral" in a durable ledger column, indistinguishable after the fact from
+    // a genuine saturated reading. Null over fabrication, as everywhere else.
+    bandSigmaCal: prob?.bandSigmaCal ?? null,
     calScoredDays,
     forecastBasis: confidenceTier,
     weatherCovered: dayAhead?.hasWeather ? 1 : 0,
