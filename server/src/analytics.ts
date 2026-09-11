@@ -37,6 +37,9 @@ import { coherentRunwayPair } from './nightChargeAdvisor.js';
 // v1.88.0 — pv-bias exclusion dedupe (see the exclusion log site).
 const pvBiasExclusionLogged = new Set<string>();
 /** Test seam. */
+/** v1.145.0 — dedupe key for the solar-fit line. */
+let lastSolarFitKey = '';
+
 export function resetPvBiasExclusionLogForTesting(): void { pvBiasExclusionLogged.clear(); }
 const Z_INFO = 3.5;
 const Z_WARN = 5;
@@ -1629,7 +1632,14 @@ async function computeDayForecastUncached(
   // recorded PV anyway).
   const fleetFit = fullCoverageFleetPv(homeCorePvMaps);
   if (fleetFit.usedFullCoverageOnly && fleetFit.fullHours < fleetFit.unionHours) {
-    log(`solar-model: fitted on ${fleetFit.fullHours}/${fleetFit.unionHours} full-coverage hours (F11 gate — partial-fleet hours excluded)`);
+    // v1.145.0 — on CHANGE. 109 emissions in 53 h with 54 of them exact
+    // consecutive repeats: the fit only moves when the hour count does, and
+    // re-stating an unchanged ratio costs forensic reach on a ~53 h ring.
+    const fitKey = `${fleetFit.fullHours}/${fleetFit.unionHours}`;
+    if (fitKey !== lastSolarFitKey) {
+      lastSolarFitKey = fitKey;
+      log(`solar-model: fitted on ${fleetFit.fullHours}/${fleetFit.unionHours} full-coverage hours (F11 gate — partial-fleet hours excluded)`);
+    }
   } else if (!fleetFit.usedFullCoverageOnly && homeCorePvMaps.length > 1) {
     log(`solar-model: only ${fleetFit.fullHours} full-coverage hours (<${SOLAR_FIT_MIN_FULL_COVERAGE_HOURS}) — falling back to the ungated fit`);
   }

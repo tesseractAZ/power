@@ -223,6 +223,7 @@ export class SnapshotStore extends EventEmitter {
   setDeviceList(devices: DeviceListItem[]) {
     const now = Date.now();
     this.lastDeviceListSuccessAt = now;
+    const seenThisList = new Set<string>();
     for (const d of devices) {
       const existing = this.snap.devices[d.sn];
       const newOnline = d.online === 1;
@@ -235,6 +236,7 @@ export class SnapshotStore extends EventEmitter {
       } else if (existing == null) {
         this.logger(`device-list: ${deviceAliases[d.sn] ?? d.deviceName ?? d.sn} (${d.sn}) first sight, ${newOnline ? 'online' : 'offline'}`);
       }
+      seenThisList.add(d.sn);
       // Local alias wins; else resolve a real display name from the cloud
       // deviceName, falling back to the product type when the cloud name is just
       // the bare serial (v0.75.0 — resolveDeviceName), then the raw serial.
@@ -272,9 +274,24 @@ export class SnapshotStore extends EventEmitter {
         this.snap.devices[d.sn].onlineChangedVia = 'device-list';
       }
     }
+    // v1.145.0 — a device that DISAPPEARS from /device/list keeps its last `online`
+    // value forever with nothing logged, so "it says online but has been gone for
+    // hours" is indistinguishable from a healthy device. Deliberately a BREADCRUMB
+    // ONLY: marking an absent device offline would invert a cloud-side list glitch
+    // into a device alarm, which is the wrong direction on a life-safety system.
+    // Logged once per disappearance, not per poll.
+    for (const [sn, d] of Object.entries(this.snap.devices)) {
+      if (seenThisList.has(sn)) { this.absentFromList.delete(sn); continue; }
+      if (this.absentFromList.has(sn)) continue;
+      this.absentFromList.add(sn);
+      this.logger(`device-list: ${d.deviceName} (${sn}) ABSENT from /device/list (last known ${d.online ? 'online' : 'offline'}) — state is now frozen, not refreshed`);
+    }
     this.snap.generatedAt = now;
     this.emit('change', this.snap);
   }
+
+  /** v1.145.0 — SNs already reported absent, so each disappearance logs once. */
+  private absentFromList = new Set<string>();
 
   /** Mark that a /device/list poll attempt happened, regardless of outcome. */
   markDeviceListAttempt() {
@@ -718,6 +735,50 @@ export function pollHealthVerdict(o: {
   return { ok: true };
 }
 
+/** v1.145.0 — how often the fleet-status dump re-states an unchanged fleet at INFO. */
+export const STATUS_ANCHOR_MS = 60 * 60_000;
+
+/**
+ * v1.145.0 — the standing-failure heartbeat was HOURLY: 48 lines in 53 h about a
+ * PERMANENT, owner-settled product-class limit (error 1006 on four accessories,
+ * see v1.139.0). Daily is enough to prove the set is still what we think it is.
+ */
+export const PERSISTING_FAILURE_HEARTBEAT_MS = 24 * 60 * 60_000;
+
+/**
+ * v1.145.0 — the fleet-status dump is a CHANGE log, not a heartbeat.
+ *
+ * MEASURED over 53.1 h: 314 emissions and — once the per-device message counters
+ * and the device-list age are normalised away — exactly **ONE distinct body**.
+ * At ~1.1 KB each that is over a fifth of the whole log, and essentially all of
+ * it is invariant text. On a ring that reaches only ~53 h, bytes are forensic
+ * reach: this one line was costing hours of history to say nothing.
+ *
+ * Its charter — "which device stopped reporting and when, one grep away" — is now
+ * better served by `msg-rate-floor`, which named 25 collapses with their rates and
+ * learned baselines in the same window. And the dump cannot actually answer "when"
+ * across a restart anyway, because its cumulative counters reset with the process.
+ *
+ * So: INFO when the state vector CHANGES, plus one hourly anchor so an operator
+ * can still see the fleet is being polled at all. The 10-minute cadence stays, at
+ * DEBUG. Against the observed window this is roughly 6 INFO lines instead of 314.
+ *
+ * The signature deliberately EXCLUDES the message counters and the list age — they
+ * move every tick and would make every dump a "change", which is the trap this
+ * replaces. What survives is per-device ON / OFF / API-online-no-MQTT, which is
+ * the thing the dump exists to report.
+ */
+export function statusDumpLevel(o: {
+  signature: string;
+  prevSignature: string | null;
+  nowMs: number;
+  lastInfoMs: number;
+  anchorMs?: number;
+}): 'info' | 'debug' {
+  if (o.prevSignature == null || o.signature !== o.prevSignature) return 'info';
+  return o.nowMs - o.lastInfoMs >= (o.anchorMs ?? STATUS_ANCHOR_MS) ? 'info' : 'debug';
+}
+
 export function pollLogLines(o: {
   tookMs: number;
   failedCount: number;
@@ -764,10 +825,17 @@ export function startPollLoop(
   intervalMs: number,
   log: (msg: string) => void,
   warn: (msg: string) => void = log,
-  /** v1.88.0 — fired when a device that had been failing its quota fetch for a
-   *  LONG time (>= 30 min; i.e. the persistent 1006 class, not a one-poll blip)
-   *  starts answering. The EcoFlow ticket asking for exactly this enablement is
-   *  in their queue — this is the "it landed" doorbell. */
+  /**
+   * v1.145.0 — the DEBUG channel. The 10-minute fleet-status dump emitted 314
+   * lines carrying exactly ONE distinct state vector in a 53 h window; it now
+   * goes out at INFO only when that vector changes, and here otherwise. Defaults
+   * to `log` so an existing caller keeps its current behaviour.
+   *
+   * (The v1.88.0 enablement-doorbell callback that used to occupy this slot was
+   * deleted in v1.139.0 — error 1006 is a product-class limit, so it could only
+   * ever fire falsely. Its doc comment outlived it by five releases.)
+   */
+  debug: (msg: string) => void = log,
 ): () => void {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
@@ -797,9 +865,9 @@ export function startPollLoop(
           lastFailedSetKey = setKey;
           lastFailedSetLoggedMs = Date.now();
           warn(`poll completed in ${tookMs}ms with ${failedSns.length} device fetch failure(s): ${failedSns.join(', ')} — serving from cache/presence`);
-        } else if (Date.now() - lastFailedSetLoggedMs >= 60 * 60_000) {
+        } else if (Date.now() - lastFailedSetLoggedMs >= PERSISTING_FAILURE_HEARTBEAT_MS) {
           lastFailedSetLoggedMs = Date.now();
-          log(`poll: ${failedSns.length} device fetch failure(s) persisting (${failedSns.join(', ')}) — hourly heartbeat, set unchanged`);
+          log(`poll: ${failedSns.length} device fetch failure(s) persisting (${failedSns.join(', ')}) — daily heartbeat, set unchanged`);
         }
       } else {
         if (lastFailedSetKey !== '') {
@@ -857,6 +925,9 @@ export function startPollLoop(
   // "which device stopped reporting and when" question is one log-grep
   // away. Runs every 10 min; bounded output (one log line covers the fleet).
   const STATUS_DUMP_INTERVAL_MS = 10 * 60 * 1000;
+  /** v1.145.0 — the last fleet state vector emitted at INFO, and when. */
+  let lastStatusSignature: string | null = null;
+  let lastStatusInfoMs = 0;
   const dumpTimer = setInterval(() => {
     if (stopped) return;
     try {
@@ -886,7 +957,15 @@ export function startPollLoop(
       const sinceList = store.lastDeviceListSuccessAt > 0
         ? `${Math.round((now - store.lastDeviceListSuccessAt) / 1000)}s ago`
         : 'never';
-      log(`fleet-status [device-list last success ${sinceList}]: ${parts.join(' · ')}`);
+      // The signature is the STATE vector only — no counters, no list age. Those
+      // move every tick and would make every dump a "change".
+      const signature = parts.map((x) => x.replace(/ON\/\d+msg\/(\d+s|∞)/, 'ON')).join('|');
+      const level = statusDumpLevel({
+        signature, prevSignature: lastStatusSignature, nowMs: now, lastInfoMs: lastStatusInfoMs,
+      });
+      const line = `fleet-status [device-list last success ${sinceList}]: ${parts.join(' · ')}`;
+      if (level === 'info') { lastStatusInfoMs = now; log(line); } else { debug(line); }
+      lastStatusSignature = signature;
     } catch (e: any) {
       log(`fleet-status dump failed: ${e?.message ?? e}`);
     }

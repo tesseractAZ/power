@@ -71,7 +71,12 @@ export function EnergyFlow({ devices, grid }: Props) {
     (s, d) => s + d.projection.packs.reduce((p, pk) => p + ((pk.outputWatts ?? 0) - (pk.inputWatts ?? 0)), 0),
     0,
   ); // > 0 = discharging
-  const soc = dpus.length === 0 ? null : dpus.reduce((s, d) => s + (d.projection.soc ?? 0), 0) / dpus.length;
+  // v1.145.0 — average only the packs that REPORTED. `?? 0` counted a silent
+  // DPU as a 0% pack and dragged the fleet mean down: four Cores at 80% with one
+  // silent read as 64%, which is a number no pack holds. ThermalPanel's
+  // SummaryStrip fixed exactly this and says so in a comment.
+  const socVals = dpus.map((d) => d.projection.soc).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
   const load = shp2?.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0) ?? acOut;
 
   // ── v0.36.0 — 3-state grid supply model ─────────────────────────────────
