@@ -8,9 +8,9 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
-import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPORT_DIR } from './dbExport.js';
+import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPORT_DIR, publishedSnapshotStatus } from './dbExport.js';
 import { createAuth, isAllowedOrigin } from './auth.js';
-import { SnapshotStore, startPollLoop } from './snapshot.js';
+import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
 import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
@@ -141,7 +141,7 @@ import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, rateFloorSampleSet, DEFAULT_RATE_FLOOR_CONFIG, type RateFloorPersisted } from './messageRateFloor.js';
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
 import { evaluateSelfHeal, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
-import { assessBlind, pollState } from './telemetryBlind.js';
+import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
 // them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
@@ -609,6 +609,19 @@ app.get('/api/health', async (_req, reply) => {
     blindReason: blind.reason,
     blindForMs: blind.blindForMs,
     pollErrorKind: blind.errorKind,
+    // v1.144.0 — `telemetryBlind`'s own docstring frames the whole feature around
+    // /api/health having reported healthy while the add-on held zero telemetry,
+    // and says guard 1 "makes /api/health honest". v1.140.0 computed the poll
+    // verdict and published it to MQTT but never added it here — and this is the
+    // surface a watchdog polls. During a panel-dark window SHORTER than the 5-min
+    // staleness threshold, which is the shape of every such window in the record,
+    // `blind` is still false and this endpoint returns a clean bill of health.
+    pollHealth: pollHealth(),
+    // v1.144.0 — and whether the cloud is replaying a body at us (v1.142.0).
+    shp2ContentFrozenMs: (() => {
+      const p2 = Object.values(store.get().devices).find((d: any) => d?.projection?.kind === 'shp2') as any;
+      return p2?.contentStaleSinceMs != null ? Date.now() - p2.contentStaleSinceMs : 0;
+    })(),
     vitalsLevel: currentAssessment()?.level ?? null,
     heartbeat: heartbeatStatus(),
     generatedAt: store.get().generatedAt,
@@ -2139,6 +2152,21 @@ sampleHostTemp();
 startVitals(resolve(process.cwd(), config.dbPath, '..'));
 tickAssess();
 startHeartbeat((m) => app.log.info(m));
+// v1.144.0 — name the published DB snapshot once at boot. A 1.72 GB export sat
+// in /share for four days riding along in every nightly HA backup, and nothing
+// outside the web UI ever mentioned it. Not swept on a timer: that file is the
+// only recorder history reaching past the ~52 h log ring and it has already been
+// used for a real investigation — surface it, let the owner decide.
+(() => {
+  const snap = publishedSnapshotStatus();
+  if (!snap || !snap.exists) return;
+  const gb = (snap.bytes / 1e9).toFixed(2);
+  const days = snap.ageMs / 86_400_000;
+  app.log.info(
+    `db-export: published snapshot is ${gb} GB, ${days < 1 ? '<1' : Math.round(days)}d old`
+    + `${days >= 2 ? ' — it is included in every HA backup; refresh or remove it if that is not wanted' : ''}`,
+  );
+})();
 
 const restTrackerTick = setInterval(() => {
   // v1.43.0 alarm-first QoS: under critical host pressure, discretionary
@@ -2865,8 +2893,19 @@ const rateFloorTick = setInterval(() => {
     // v1.121.0 — the SHP2 alone satisfies the quorum (see evaluateSelfHeal): it is
     // the alarm chain's single-point-critical input, so a wedge confined to it must
     // be able to start the heal clock. Dwell/cooldown/budget are unchanged.
-    const shp2SnNow = findShp2(devices)?.sn ?? null;
-    const alarmCriticalStarved = shp2SnNow != null && collapses.some((c) => c.sn === shp2SnNow);
+    // v1.144.0 — resolve the alarm-path panel by IDENTITY, not by projection.
+    // `findShp2` requires `projection.kind === 'shp2'`, which only exists after a
+    // SUCCESSFUL quota fetch — so on a restart while the panel is cloud-dark it
+    // returns undefined and this exception is disarmed. That matters more here
+    // than almost anywhere: replaying the quorum gate against the observed
+    // 52.5 h window without this exception yields ZERO of the six heals that
+    // actually fired. It is the only route by which self-heal reaches the SHP2 at
+    // all, and "restart while the panel is dark" is exactly when a human would
+    // restart the add-on. Same identity-not-projection rule v1.140.0 established
+    // for pollHealthVerdict, and it also stops `findShp2` pinning the
+    // lowest-serial panel when a second one is present.
+    const alarmPathSns = new Set(alarmPathShp2Sns(devices));
+    const alarmCriticalStarved = alarmPathSns.size > 0 && collapses.some((c) => alarmPathSns.has(c.sn));
     const healVerdict = evaluateSelfHeal(
       now, collapses.length, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },
     );
@@ -3250,6 +3289,24 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
       );
     }
   }
+  // v1.144.0 — the SILENT case. The "calibrated ×N" line above only ever fires
+  // on a measured result, so a learner selecting ZERO eligible rows says nothing
+  // at all and its 1.000 reads as "measured, no bias". It is not: the eligibility
+  // filter requires `!(cushion_shortfall === 1)` and that flag is 1 on every
+  // ledger row, so the sample set is empty and the floor is returned. Say so
+  // once, on change, with the reason — delivered/planned has run 1.44-1.55x on
+  // every actuated-and-scored night while this reported no bias.
+  if (buyDebiasCal.basis !== 'measured') {
+    const key = `unmeasured:${buyDebiasCal.samples}`;
+    if (key !== lastLoggedBuyDebiasKey) {
+      lastLoggedBuyDebiasKey = key;
+      app.log.info(
+        `night-charge: announced-buy calibration UNMEASURED (${buyDebiasCal.samples} eligible night(s)) — `
+        + `the announcement carries no learned correction. Eligibility excludes rows with cushion_shortfall=1; `
+        + `see /api/night-charge buyDebiasBasis.`,
+      );
+    }
+  }
   if (loadBandCal.basis === 'measured' && loadBandCal.factor > loadBandFloor) {
     // v1.108.0 — this evaluation runs every 30 min; the calibration only moves
     // when the night ledger grows. Log on CHANGE, not on every look (the 08-24
@@ -3408,6 +3465,8 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh,
     buyDebiasFactor: buyDebiasCal.factor,
+    buyDebiasBasis: buyDebiasCal.basis,
+    buyDebiasSamples: buyDebiasCal.samples,
   };
 
   const inputs = buildNightChargeInputs(deps);
@@ -3838,6 +3897,10 @@ function scoreNightRow(
     // the de-bias must never feed on its own output), so factor 1 here.
     buyKwhDebiased: y.buy_kwh ?? null,
     buyDebiasFactor: 1,
+    // The scorer does not read the basis; a reconstructed plan reports it
+    // honestly as unmeasured rather than implying a null result.
+    buyDebiasBasis: 'default' as const,
+    buyDebiasSamples: 0,
     targetSocPct: y.target_soc_pct ?? null,
     // The ledger freezes the PREDICTION (target_soc_pct) because that is what
     // the scorer grades — soc_min_err/buy_err only detect an under-buy when

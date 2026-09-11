@@ -726,9 +726,19 @@ export function pollLogLines(o: {
   pollDebug: boolean;
 }): string[] {
   const lines: string[] = [];
-  if (o.failedCount === 0 && o.lastPollFailed) {
+  // v1.144.0 — UNGATED from the failure set, finishing what v1.120.0 started for
+  // the slow-poll line. On this fleet four accessory devices fail /quota/all on
+  // every poll by design, so `failedCount === 0` is never true and BOTH of these
+  // branches were dead: `grep -c 'poll ok in'` returned 0 across a 52.5 h log
+  // that was running at debug level. Two costs. There is no way to obtain a poll
+  // DURATION distribution below the slow threshold even with debug on. And after
+  // the one total poll failure in that window there was no line anywhere saying
+  // polling had recovered — an operator grepping after `poll failed` found
+  // nothing. Recovery and duration are properties of the POLL; neither depends
+  // on whether an accessory answered.
+  if (o.lastPollFailed) {
     lines.push(`poll ok in ${o.tookMs}ms (recovered)`);
-  } else if (o.failedCount === 0 && o.pollDebug) {
+  } else if (o.pollDebug) {
     lines.push(`poll ok in ${o.tookMs}ms`);
   }
   // Unconditional on the failure set — that is the whole point of the fix.
