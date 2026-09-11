@@ -1,8 +1,9 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * v1.31.0 — band-calibration INTEGRITY (audit follow-ups to the v1.30.0
@@ -160,4 +161,126 @@ test('v1.31.0 — recordForecastArchive: hour-snapped, idempotent, change-detect
     [{ ts: BASE, value: 70_000 }, { ts: BASE + 2 * HOUR, value: 80_000 }],
   );
   rec.close();
+});
+
+/* ── 6. v1.149.0 — bandSigmaCal's FIVE states are distinguishable ──────
+ *
+ * `bandSigmaCal = 1` is what the field reads when the calibration is ACTIVE and
+ * saturated, when it never ENGAGED, and when the ratio lands exactly on 1 — and
+ * at index.ts's old `?? 1` fallback, when there was no forecast at all. The
+ * 2026-09-06 PERFORMANCE.md snapshot read 0.50 and asserted "still above its 0.4
+ * floor — data-driven, not floor-pinned", checking the floor ambiguity only.
+ * Five days later the field read 1 with realized error at 0.657: `saturated` —
+ * the band is too NARROW and `Math.min(1, …)` cannot widen it. Indistinguishable
+ * from the v1.23.0 defect in which the calibration sat pinned at 1 having never
+ * run.
+ *
+ * These tests pin the basis to the CAUSE, not to the number, so a refactor that
+ * keeps `bandSigmaCal` correct while collapsing the states is killed.
+ */
+
+test('v1.149.0 — a WIDE band (realized ≪ produced) reports basis "shrunk", cal < 1', async () => {
+  // The shrink window on this fixture is measured, not assumed: 8% error clamps
+  // to the 0.4 FLOOR (the v1.31.0 test at the top of this file says so), ~50%+
+  // saturates, and ~30% lands interior at cal ≈ 0.61. Picking 8% here — the
+  // first guess — produced a test that asserted 'shrunk' against a genuinely
+  // floor-pinned tree: the fixture was wrong, not the code.
+  resetForecastCachesForTesting();
+  const days = Array.from({ length: 20 }, () => day(100, 130));
+  const r = await computeProbabilisticForecast(forecast24(), skillReport(days));
+  assert.equal(r.bandSigmaCalBasis, 'shrunk');
+  assert.ok(r.bandSigmaCal != null && r.bandSigmaCal < 1, `expected <1, got ${r.bandSigmaCal}`);
+  assert.ok(r.bandSigmaCal! > 0.4, 'shrunk must be strictly above the floor');
+});
+
+test('v1.149.0 — a band too NARROW saturates at 1 and says so ("saturated"), not a benign 1', async () => {
+  // Realized daily error ≈ 65% of prediction — far wider than the produced
+  // half-width, so the ratio exceeds 1 and clamps. This is TODAY's live state
+  // (realizedDailyErrHalfFrac 0.657, coverage 72%), and the whole point of the
+  // field: the number is 1, the meaning is "I have found the band too narrow
+  // and I am not allowed to widen it."
+  resetForecastCachesForTesting();
+  const days = Array.from({ length: 20 }, () => day(100, 165));
+  const r = await computeProbabilisticForecast(forecast24(), skillReport(days));
+  assert.equal(r.bandSigmaCal, 1, 'the published factor is still 1');
+  assert.equal(r.bandSigmaCalBasis, 'saturated', 'but it is NOT the neutral 1');
+});
+
+test('v1.149.0 — NO skill report ⇒ "uncalibrated", also at a published 1', async () => {
+  resetForecastCachesForTesting();
+  const r = await computeProbabilisticForecast(forecast24(), null);
+  assert.equal(r.bandSigmaCal, 1);
+  assert.equal(r.bandSigmaCalBasis, 'uncalibrated');
+  // The v1.23.0 defect's signature: identical number, opposite meaning to
+  // 'saturated'. If these two ever compare equal, the field has stopped working.
+  assert.notEqual(r.bandSigmaCalBasis, 'saturated');
+});
+
+test('v1.149.0 — a benign window pinned at the 0.4 floor reports "floor-pinned"', async () => {
+  // Near-perfect forecasts: the ratio drives below PV_BAND_CAL_FLOOR and clamps
+  // UP. Distinct from 'shrunk' because the floor, not the data, set the value.
+  resetForecastCachesForTesting();
+  const days = Array.from({ length: 20 }, () => day(100, 100.05));
+  const r = await computeProbabilisticForecast(forecast24(), skillReport(days));
+  assert.equal(r.bandSigmaCalBasis, 'floor-pinned');
+  assert.equal(r.bandSigmaCal, 0.4);
+});
+
+test('v1.149.0 — an operator override reports "operator-override", never a data basis', async () => {
+  const prev = process.env.PV_BAND_SIGMA_CAL;
+  process.env.PV_BAND_SIGMA_CAL = '0.7';
+  try {
+    // Days that would otherwise saturate: the override must win AND be labelled,
+    // so a hand-set factor is never read back as a measurement.
+    resetForecastCachesForTesting();
+    const days = Array.from({ length: 20 }, () => day(100, 165));
+    const r = await computeProbabilisticForecast(forecast24(), skillReport(days));
+    assert.equal(r.bandSigmaCal, 0.7);
+    assert.equal(r.bandSigmaCalBasis, 'operator-override');
+  } finally {
+    if (prev == null) delete process.env.PV_BAND_SIGMA_CAL;
+    else process.env.PV_BAND_SIGMA_CAL = prev;
+  }
+});
+
+test('v1.149.0 — the saturation boundary is 1, not "comfortably above 1"', async () => {
+  // Boundary pin. The 65% fixture above sits far enough past 1 that moving the
+  // threshold to 1.5 left it still reading 'saturated' — the mutation harness
+  // caught that as a survivor. This day set lands in the (1, 1.5) gap: already
+  // clamped, already under-covering, and a threshold that tolerated it would
+  // report a band the calibrator cannot fix as a healthy shrink.
+  resetForecastCachesForTesting();
+  const days = Array.from({ length: 20 }, () => day(100, 150));
+  const r = await computeProbabilisticForecast(forecast24(), skillReport(days));
+  assert.equal(r.bandSigmaCal, 1);
+  assert.equal(r.bandSigmaCalBasis, 'saturated');
+});
+
+/* SOURCE PIN — the ledger's missing-forecast value.
+ *
+ * `bandSigmaCal` for a ledger row is assembled inside `recomputeNightChargePlan`,
+ * a long async closure over module singletons with no injection seam, so this
+ * follows the repo's convention for un-reachable call sites (cf. the refreshAll
+ * pin in pollHealthAttribution.test.ts).
+ *
+ * It matters because the column is DURABLE: writing 1 for "there was no
+ * probabilistic forecast" files that night, permanently, as "calibration
+ * neutral" — and every later reduction over the ledger, the readiness gate
+ * included, reads it as a measurement that was taken. */
+test('★ SOURCE PIN: a missing probabilistic forecast writes NULL to the ledger, never 1', () => {
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(__dir, '../src/index.ts'), 'utf8');
+  // Bound the search on the assignment itself rather than a fixed character
+  // window — a window big enough today stops reaching the code as the comment
+  // above it grows.
+  assert.match(
+    src,
+    /bandSigmaCal: prob\?\.bandSigmaCal \?\? null,/,
+    'the ledger must record null when there is no forecast to calibrate against',
+  );
+  assert.doesNotMatch(
+    src,
+    /bandSigmaCal: prob\?\.bandSigmaCal \?\? 1,/,
+    '`?? 1` fabricates a neutral calibration factor for a night that had no forecast',
+  );
 });

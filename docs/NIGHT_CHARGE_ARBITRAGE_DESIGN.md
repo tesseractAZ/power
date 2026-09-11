@@ -1,6 +1,15 @@
 # Night-Charge TOU Arbitrage — Design & As-Built
 
-_Originated 2026-07-17 as a design plan (12-agent design dive + 4-agent APS-EV/EcoFlow verification), implemented v1.36.0–v1.51.0, amended 2026-07-31. **Rewritten 2026-09-06 against the shipped system at v1.133.1.**_
+_Originated 2026-07-17 as a design plan (12-agent design dive + 4-agent APS-EV/EcoFlow verification), implemented v1.36.0–v1.51.0, amended 2026-07-31. **Rewritten 2026-09-06 against the shipped system at v1.133.1; amended 2026-09-11 for v1.148.0–v1.149.0** (see §I6 and the note below).
+
+> **2026-09-11 — the basis gate is CLOSED on the live plant, and this is what that looks like.** `bandCoverageFrac` is **0.72** against the `BASIS_MIN_BAND_COVERAGE = 0.78` threshold, so I6 is binding and the advisor is returning a null plan every night. Three of the four basis conditions pass; the miss is six points on one. v1.148.0 added **`basisBlockedBy`**, which names *which* condition closed — “forecast/telemetry basis incomplete” was four conditions wearing one coat, and reconstructing which one had bitten took an hour of live probing. The rationale now reads `PV band coverage 72% < 78% (forecast present, tier=forecast, calDays 29/14)`, and that string reaches the 21:30 notification and the spoken broadcast, not just the API.
+>
+> Two consequences are worth stating here rather than only in `PERFORMANCE.md` §2, because they are design-level:
+>
+> 1. **The band calibrator is shrink-only** (`Math.min(1, Math.max(PV_BAND_CAL_FLOOR, realized/produced))`). It can narrow a band that proves too wide; it cannot widen one that proves too narrow. When realized error overtakes the produced half-width — the current state — the calibrator saturates at 1 and has no remaining authority. I6 is therefore not self-clearing through calibration: coverage recovers when the *forecast* improves, not when the calibrator reacts.
+> 2. **I13's evidence supply runs through I6.** Readiness graduates on scored actuated nights, and a null plan actuates nothing. With I6 binding, the learning ledger stops advancing entirely — so a basis-gate closure is not merely “no buy tonight”, it is a pause on the mechanism that would ever earn `auto`. This coupling was not called out in the original design and is recorded now.
+>
+> v1.149.0 additionally publishes **`bandSigmaCalBasis`**, because a saturated calibrator and one that never engaged both published `bandSigmaCal = 1`.
 
 **This document previously described a plan. It now describes what runs.** The 2026-08-01 revision had accumulated two "superseded" section headers over sections left otherwise intact, and eighty-two releases had landed on top of it — including the entire supervised write path, EV contention, readback verification on both the apply and revert legs, the cushion re-scope, and cost mode, none of which appeared anywhere in it. §6 in particular still described the write path as "dormant, toggle-ready, deferred" while it had been live and actuating nightly for five weeks. A reader trusting that section would have concluded the system never touches the hardware.
 
@@ -263,7 +272,7 @@ The v1 gate this replaced failed for a structural reason worth preserving: its e
 | **I3** | `targetSoc` ≤ ceiling AND ≤ `fullKwh − P90 morning PV headroom`; buy capped by feasibility and headroom | Binding, plus the `[10,50]` write envelope (§1.2) |
 | **I4** | Write precondition requires grid present; any outage signal → hard NO-WRITE | Binding — and the grid-loss **abort** (§4.5) extends it mid-window |
 | **I5** | SHP2 offline / stale telemetry → advisory null, NO-WRITE | Binding |
-| **I6** | Forecast collapse / climatology-only / low coverage → null + NO-WRITE | Binding. Basis gate is `bandCoverageFrac ≥ 0.78` |
+| **I6** | Forecast collapse / climatology-only / low coverage → null + NO-WRITE | Binding. Basis gate is `bandCoverageFrac ≥ BASIS_MIN_BAND_COVERAGE = 0.78` (`nightChargeAdvisor.ts:74`). **Currently CLOSED on the live plant** at 0.72 — see the 2026-09-11 note at the top. `basisBlockedBy` (v1.148.0) names which of the four conditions failed. |
 | **I7** | EV clamped at `EV_MAX_LOAD_W`; sized from de-duplicated load | Binding |
 | **I8** | 16:00–19:00 M-F is an absolute blackout for any import-inducing action | Binding |
 | **I9** | Idempotency: one plan row per local date; restart-persistent latch | Binding |

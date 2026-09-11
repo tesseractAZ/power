@@ -1155,7 +1155,13 @@ Two properties are load-bearing and easy to lose:
   collecting for exactly the noisiest families it exists to clean up.
 
 `sensor.ecoflow_panel_poll_health` publishes the poll verdict (`ok`, or
-`shp2-fetch-failed` / `shp2-not-polled`). It exists because the SHP2 half of this
+`shp2-fetch-failed` / `shp2-not-polled` / `shp2-content-frozen`). The three are
+ordered by how hard the evidence is — a failed fetch is the plainest fact, a
+never-asked device the next, and a frozen payload the weakest inference — so the
+verdict always names the strongest evidence available and `shp2-content-frozen`
+(v1.148.0) is reported only when the panel answered, answered `200 OK`, and
+returned a body byte-identical to the last one for longer than the shadow
+witness tolerates. It exists because the SHP2 half of this
 had to be argued from code reading: the value was computed every 60 s and stored
 nowhere, so no amount of history could show whether it had ever manifested.
 
@@ -8791,7 +8797,11 @@ Seasons: `APS_SUMMER_MONTHS = [5,6,7,8,9,10]` (May–Oct); the rest is winter. T
 
 **Confidence tier**: `forecast` when the whole horizon (through `nextRecharge`) is inside the real-weather horizon; `climatology` when there is no weather-backed day-ahead forecast at all *or* the charge window itself lies past the weather horizon; `mixed` when only part of the horizon runs past it (the weekend carry beyond the ~4-day forecast).
 
-**`basisComplete`** = `forecastPresent && confidenceTier !== 'climatology' && calScoredDays ≥ 14 && bandCoverageFrac ≥ 0.9` — the probabilistic band must have ≥ `NIGHT_MIN_CAL_DAYS = 14` scored calibration days *and* realized in-band coverage ≥ 90% before the advisor will size anything on it. `false` forces the null plan.
+**`basisComplete`** = `forecastPresent && confidenceTier !== 'climatology' && calScoredDays ≥ 14 && bandCoverageFrac ≥ BASIS_MIN_BAND_COVERAGE` — the probabilistic band must have ≥ `NIGHT_MIN_CAL_DAYS = 14` scored calibration days *and* realized in-band coverage ≥ **78%** (`BASIS_MIN_BAND_COVERAGE = 0.78`, `nightChargeAdvisor.ts:74`) before the advisor will size anything on it. `false` forces the null plan.
+
+> **This line read `≥ 0.9` / “≥ 90%” until v1.149.0, and that was wrong by twelve points.** The error is recorded rather than silently corrected because of how it survived: `docs/PERFORMANCE.md` identified and corrected the identical claim on 2026-09-06 — in its own text, about its own prior snapshot — and this file, the normative reference the correction was measured against, was never touched. A correction applied to one document is not applied to the codebase. The threshold is now read from the named constant in both places so the two cannot drift apart again.
+
+**`basisBlockedBy`** (v1.148.0) names *which* of the four conditions failed, because “forecast/telemetry basis incomplete” is four conditions wearing one coat and the null-plan rationale previously printed only the coat. It is evaluated in the same order as the gate — no forecast → climatology tier → too few calibration days → band coverage — and the coverage branch additionally prints the three quantities that *passed*, so a reader can tell a six-point miss from a collapsed forecast: `PV band coverage 72% < 78% (forecast present, tier=forecast, calDays 29/14)`. It is an advisor **input**, not a plan field: it reaches the operator through the rationale string (and therefore the 21:30 notification and the spoken broadcast), and `plan.basisBlockedBy` is correctly absent from `/api/night-charge/status`.
 
 Finally the horizon is trimmed to `[floor(now to hour), nextRecharge)`.
 

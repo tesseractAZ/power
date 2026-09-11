@@ -440,7 +440,7 @@ export interface NightLedgerRow {
   min_proj_soc_pct: number; // from the SIMULATED plan trajectory (design §3.3)
   min_proj_soc_ts_ms: number;
   pool_full_kwh: number;
-  band_sigma_cal: number;
+  band_sigma_cal: number | null;
   cal_scored_days: number;
   forecast_basis: string;
   weather_covered: number; // 0/1
