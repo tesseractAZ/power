@@ -990,6 +990,40 @@ restored" to the operator's phone 302 ms after the device went OFFLINE. A detect
 can only fire falsely is worse than none on a life-safety system: it teaches the operator
 to discount the push. A source pin in `pollHealthAttribution.test.ts` keeps it deleted.
 
+##### The web membership mirror is CHECKED, not promised (v1.146.0)
+
+`web/src/shp2Membership.ts` is a hand-maintained literal copy of the server
+module — a deliberate choice, because the React UI and the Lit HACS cards have
+different module graphs. Its header has demanded lock-step since v0.9.75.
+
+**That demand failed three times.** When found it was three server revisions
+behind: a single `find` where the server had unioned across every panel since
+v1.129.0, so with a second SHP2 present every DPU wired to it fell out of the
+connected set and was dropped from `EnergyFlow`'s fleet totals and `ThermalPanel`.
+
+A comment is not a mechanism. Both files export pure functions and the web
+module's only import is `import type`, which is erased at runtime — so
+`server/test/webServerMembershipParity.test.ts` imports **both real
+implementations** and runs them side by side over shared fixtures. Drift now
+fails the build. The suite also pins the VALUE, not just the agreement: a parity
+test alone would pass if both sides were broken identically.
+
+**When editing either file, edit both.** The parity test will tell you if you did
+not.
+
+##### A ratio needs the same population on both sides (v1.146.0)
+
+Two fleet roll-ups filtered numerator and denominator **independently**, so a
+pack reporting its design capacity but not its current one landed in the
+denominator alone and the UI rendered degradation that did not exist:
+
+- `ThermalPanel.tsx` — `if (fullCapMah != null) fullMah += …` beside
+  `if (designCapMah != null) designMah += …`
+- `DegradationCard.tsx` — `sumDefined` over the unfiltered pack list, twice
+
+Both are pair-gated now. The server's per-pack degradation already gated this way;
+only the roll-ups did not.
+
 ##### Log forensics — the ring IS the incident window (v1.145.0)
 
 The add-on log ring reaches roughly **53 hours**. Bytes spent restating unchanged
