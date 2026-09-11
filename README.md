@@ -32,6 +32,29 @@ time-of-use rate.
 
 ---
 
+## Screenshots
+
+Live captures from the reference deployment. **Device serial numbers are masked to
+their product-family prefix and circuit names are replaced by their shed-order index**
+(`Circuit 1`…`Circuit 6`); everything else — telemetry, charts, layout, alert text — is
+exactly what the app renders.
+
+| | |
+|---|---|
+| [**Dashboard**](docs/screenshots/dashboard.png) — off-grid runway, energy-flow sankey, the SHP2 and every DPU Core with per-pack state, 24 h forecast, and the clustered-incident digest | [**Solar**](docs/screenshots/solar.png) — per-Core PV, the GHI→PV response model against its clear-sky ceiling, and weather-normalised soiling |
+| [**Battery**](docs/screenshots/battery.png) — per-pack state-of-health, end-of-life projection, internal-resistance trend and cell-spread | [**Strategy**](docs/screenshots/strategy.png) — tonight's night-charge plan, EV-window prediction, load-shed order and the TOU charge schedule |
+| [**Alerts**](docs/screenshots/alerts.png) — the alert console: standing conditions, severity, source engine and cleared history | |
+
+[![Dashboard](docs/screenshots/dashboard.png)](docs/screenshots/dashboard.png)
+
+> The Strategy capture above is the live plant on 2026-09-11 reading
+> *"No plan tonight — forecast/telemetry basis incomplete; nothing will be charged."*
+> That is not a placeholder: PV band coverage sat at 72% against the advisor's 78%
+> basis gate, so the engine declined to size a buy. See
+> [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) §2.
+
+---
+
 ## What it does — at a glance
 
 **Telemetry & history**
