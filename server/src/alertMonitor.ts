@@ -1435,7 +1435,22 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   const clearedLogPath =
     process.env.CLEARED_LOG_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'cleared-alerts.json');
   for (const c of loadClearedLog(clearedLogPath, CLEARED_LOG_MAX)) clearedLog.push(c);
-  if (clearedLog.length > 0) log(`alerts: rehydrated ${clearedLog.length} cleared-alert record(s) from ${clearedLogPath}`);
+  if (clearedLog.length > 0) {
+    // v1.144.0 — SAY HOW FAR BACK IT REACHES. The ledger rehydrated at exactly
+    // 1500 on all ten boots of a 52.5 h window, which is CLEARED_LOG_MAX — i.e.
+    // it is saturated and silently dropping its oldest rows. At the measured
+    // ~90 clears/day that is roughly 17 days of forensic reach, not the 30 the
+    // surrounding code talks in, and "exactly the cap" is only recognisable as
+    // saturation if you happen to know the cap. The oldest retained record's age
+    // makes it observable instead of inferred.
+    const oldest = clearedLog.reduce<number | null>(
+      (acc, c) => (Number.isFinite(c.clearedAt) ? (acc == null || c.clearedAt < acc ? c.clearedAt : acc) : acc),
+      null,
+    );
+    const reach = oldest != null ? ` — oldest retained ${(Date.now() - oldest) / 86_400_000 < 1 ? '<1' : Math.round((Date.now() - oldest) / 86_400_000)}d old` : '';
+    const saturated = clearedLog.length >= CLEARED_LOG_MAX ? ` [AT CAP ${CLEARED_LOG_MAX} — older records are being dropped]` : '';
+    log(`alerts: rehydrated ${clearedLog.length} cleared-alert record(s) from ${clearedLogPath}${reach}${saturated}`);
+  }
   const persistClearedLog = () => saveClearedLog(clearedLogPath, clearedLog, CLEARED_LOG_MAX);
 
   const QUIET_WINDOW = parseQuietHours(process.env.NOTIFY_QUIET_HOURS ?? '22-06');

@@ -87,6 +87,35 @@ export function resolveExportPaths(dir: string, name: string): { target: string;
  *  rather than racing it onto the same temp path. */
 let inFlight: Promise<DbExportResult> | null = null;
 
+/**
+ * v1.144.0 — describe the published snapshot, for a once-at-boot log line.
+ *
+ * A 1.72 GB export sat in `/share/ecoflow-panel/` for four days and rode along
+ * in every nightly HA backup, because nothing ever mentions it once it has been
+ * written. The web button shows its size and age to whoever opens that page; the
+ * log — which is what an operator greps when a backup grows — said nothing.
+ *
+ * Deliberately NOT a TTL sweep. That snapshot has real forensic value: it is the
+ * only copy of recorder history reaching past the ~52 h log ring, and it was used
+ * during this very audit to reconstruct a Core's sample history. Deleting it on a
+ * timer would remove an investigation resource to save disk that is not scarce
+ * (835 GB free). Surface it and let the owner decide.
+ */
+export function publishedSnapshotStatus(dir: string = DEFAULT_EXPORT_DIR): {
+  exists: boolean;
+  bytes: number;
+  ageMs: number;
+} | null {
+  try {
+    const target = `${dir}/ecoflow-snapshot.db`;
+    if (!existsSync(target)) return { exists: false, bytes: 0, ageMs: 0 };
+    const st = statSync(target);
+    return { exists: true, bytes: st.size, ageMs: Date.now() - st.mtimeMs };
+  } catch {
+    return null; // never let a status read break a boot
+  }
+}
+
 export function exportInProgress(): boolean {
   return inFlight != null;
 }

@@ -31,6 +31,41 @@ import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { config } from './config.js';
 
+/**
+ * v1.144.0 — F7 was investigated and DELIBERATELY NOT CHANGED. Recorded here so
+ * the next reader of a 133-minute starvation log does not "fix" it.
+ *
+ * OBSERVED 2026-09-08: Core 2 collapsed to 1.00 msg/min (baseline ~62) at
+ * 14:27:32 and recovered 16:40:32 — 133 minutes — with NO heal, because
+ * `starvedCount` was 1, Core 2 is not the alarm-path panel, and the quorum of 2
+ * was never met. The heal budget was not the blocker (4 of 6, cooldown expired).
+ *
+ * Three reasons to leave it:
+ *
+ *  1. The cost is far smaller than the duration suggests. REST /quota/all
+ *     refreshed Core 2 every 60 s throughout; its last-message age stayed 7-35 s
+ *     against a 180 s staleness threshold; HA history across the window shows
+ *     fleet_devices_online = 10, cloud_wedged_devices = 0, telemetry_gaps_24h = 0.
+ *     Real resolution loss is ~1 s -> ~20 s against a 60 s REST floor. The
+ *     operator was notified at both edges.
+ *
+ *  2. There is no evidence a rebuild would have cured it. Every ~60 s heal
+ *     restoration in the record cured a MULTI-device session wedge. A wedge
+ *     confined to one device while three others stream normally on the same
+ *     session is evidence the session is healthy.
+ *
+ *  3. ★ The budget is SHARED with the alarm-critical exception, and that
+ *     exception reached 5 of 6 in the rolling 24 h on 2026-09-09 05:37. Every one
+ *     of the six heals in that window was reachable ONLY through it — replaying
+ *     the quorum gate without it yields zero. Solo-Core heals drawing on the same
+ *     budget could have starved the 04:31:23 SHP2 heal. A quorum of 2 is not
+ *     timidity here; it is what protects the one device that matters.
+ *
+ * If it is ever pursued: a long dwell (60+ min) for a solo non-alarm-path device,
+ * gated behind explicit budget RESERVATION for the alarm path (e.g. solo heals
+ * only while healTimesMs.length <= 3). Do not simply lower the quorum.
+ */
+
 export interface SelfHealConfig {
   /** Devices simultaneously in a fired rate-collapse before the fleet counts as starved.
    *  2 = a single flaky device can never trigger a session rebuild. */

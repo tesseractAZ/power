@@ -104,7 +104,12 @@ export async function startMqtt(
   const clientId = `ecoflow-panel-${createHash('sha1').update(config.accessKey).digest('hex').slice(0, 12)}`;
   const protocol = (cert.protocol || 'mqtts').toLowerCase();
   const url = `${protocol}://${cert.url}:${cert.port}`;
-  log(`mqtt: connecting to ${url} as ${username} (client_id=${clientId})`);
+  // v1.144.0 — the certificate account IS the broker username, logged verbatim
+  // at INFO on every connect (16 identical lines in one 52.5 h window). The
+  // password is correctly never logged; this is the other half of the same
+  // credential, and add-on logs get pasted into vendor tickets. Enough prefix to
+  // correlate two sessions, not enough to reuse.
+  log(`mqtt: connecting to ${url} as ${username.slice(0, 9)}… (client_id=${clientId})`);
 
   const client = mqtt.connect(url, {
     username,
