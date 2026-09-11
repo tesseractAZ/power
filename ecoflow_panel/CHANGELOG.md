@@ -1,3 +1,72 @@
+## 1.142.0
+
+### The cloud can serve a stale shadow, and every gate we had keys on the fetch
+
+On two consecutive nights the SHP2's `gridWatt` — the grid-presence alarm input —
+held **one value for 16.0 minutes and 14.5 minutes** while the 60-second REST poll
+returned 200 OK sixteen times in a row. Both windows sat inside an armed
+night-charge window with 4–7 kW flowing through the panel. Every gating surface
+read green: zero fetch failures, `poll_health: ok`, `/api/health blind: false`.
+
+Nothing in this add-on was wrong. `setDeviceQuota` replaces the raw map wholesale
+and re-projects unconditionally; there is no cache, no ETag and no short-circuit
+anywhere in the REST client. EcoFlow's cloud served a replayed body for a device
+whose own session had stalled, and we had no way to notice.
+
+This is the **third variant of one family**. v1.86.0 closed *asked and failed*.
+v1.138.0 closed *never asked*. This is *asked, answered 200 OK, and handed a stale
+body* — which neither gate can see, because both key on the fetch, and
+`lastUpdated` is bumped whether or not the payload moved.
+
+**Why the witness is a vector.** The obvious rule — "this value has not changed in
+N polls" — was measured against this plant and fails: `grid_power_home`
+legitimately holds 0 W for 12.5+ hours on a sunny day, because solar covers the
+house. A detector built on it could only ever fire falsely, which is exactly what
+the v1.139.0 doorbell deletion exists to prevent. The panel's twelve per-circuit
+watt readings are a different instrument: over **1,558 sampled minutes of live
+history the full twelve-channel vector never held identical for even one minute**.
+Twelve independent analog measurements holding byte-identical is not something a
+live panel does.
+
+`computeHomeGridWatts` and `computeShp2GridConnected` now treat a shadowed panel
+exactly as v0.88.0 already treats an offline one — contribute no measured flow,
+assert no presence. That comment named the consequence in as many words: a
+frozen-high `gridWatt` keeps `importLive` true, which keeps `backstopping` true,
+which **silently mutes a real at-floor outage** that begins inside the window. It
+guarded the offline door; this is the same freeze arriving through the online one.
+
+Staleness requires **both** a repeat count and an elapsed duration, so neither a
+retry storm nor a single long gap can assert a shadow. An unmeasurable poll — a
+partial payload, a device with no circuit vector yet — **resets** the state rather
+than accumulating toward stale: absence of a witness is not evidence of a freeze.
+
+`sensor.ecoflow_panel_shp2_payload_frozen` publishes the held duration, so the next
+episode leaves evidence in HA's own history instead of an inference.
+
+### A bare online-flip no longer vouches for the projection
+
+`setDeviceOnline` bumps `lastUpdated` on a `/status` OFFLINE→ONLINE transition that
+carries no telemetry and never touches the projection. v0.97.0 made exactly this
+separation for `setDeviceError` and documented why, directly below it; v1.3.0 made
+it again for `setMqttMessage`. `setDeviceOnline` was the third path and was never
+given the same treatment, so v1.140.0's `shp2ReadbackFresh` — which keyed on
+`lastUpdated` — could be satisfied by a flip against a sample nobody had refreshed.
+
+The exposure is not one poll: the freeze case is precisely one where no REST poll is
+coming, because `refreshAll` only fetches devices the cloud list reports online. The
+gate would have stayed true for the full 300 s and been renewed by every further
+flip. Control readbacks now key on `lastQuotaAtMs`, which only a real quota write
+advances. The `lastUpdated` bump stays — the 3-minute *Telemetry stale* alarm keys
+on it, and a 6-second flip must not raise a self-clearing stale alert.
+
+### Also
+
+`scripts/mutate-cloud-shadow.mjs` — 13 mutants, 13 killed. The first run reported
+13/13 against a **red** tree, where every mutant dies for free; the two failures
+were mine (sixteen store writes inside one millisecond, which the duration guard
+correctly refused) and the number meant nothing until they were fixed. Recorded
+because a harness run is only evidence if the baseline was green.
+
 ## 1.141.1
 
 ### Correction: the `object_id` in v1.141.0 was inert, and its rationale was wrong

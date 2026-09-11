@@ -5,6 +5,7 @@ import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import { shp2Panels } from './shp2Membership.js';
+import { shp2ContentWitness, advanceContentFreshness, isContentStale } from './shp2Shadow.js';
 import type { Alert } from './alerts.js';
 import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
 import { config } from './config.js';
@@ -31,6 +32,24 @@ export interface DeviceSnapshot {
   lastError?: string;
   lastErrorAt?: number; // v0.97.0 — ms epoch of the last poll FAILURE (distinct
   // from lastUpdated so a REST error can't reset the staleness clock).
+  /**
+   * v1.142.0 — ms epoch of the last actual QUOTA WRITE. Distinct from
+   * `lastUpdated`, which `setDeviceOnline` also bumps on a bare /status flip
+   * carrying no telemetry at all. v0.97.0 made exactly this separation for
+   * `setDeviceError` and said why; `setDeviceOnline` was never given the same
+   * treatment, so a CONTROL READBACK gated on `lastUpdated` could be satisfied
+   * by an OFFLINE→ONLINE flip against a projection nobody had refreshed.
+   * `lastUpdated` keeps its meaning (the 'Telemetry stale' alarm keys on it and
+   * a 6 s flip must not raise a self-clearing stale alert); readbacks use this.
+   */
+  lastQuotaAtMs?: number;
+  /**
+   * v1.142.0 — when this device's payload STOPPED MOVING, or null/absent if it
+   * is moving. Set only for the SHP2, from the twelve-channel watt witness. See
+   * shp2Shadow.ts: a 200 OK carrying a replayed body is invisible to every
+   * fetch-keyed gate.
+   */
+  contentStaleSinceMs?: number | null;
   projection?: Projection;
   raw?: Record<string, unknown>; // included only if SNAPSHOT_INCLUDE_RAW=1
   // v0.37.0 — the SHP2 device carries its own grid backstop + off_grid flag for
@@ -319,12 +338,33 @@ export class SnapshotStore extends EventEmitter {
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? raw : undefined;
-    cur.lastUpdated = Date.now();
+    // v1.142.0 — via the injectable clock (line ~116), matching the grace-hold and
+    // err-onset trackers in this file. In production this IS Date.now.
+    const nowQ = this.now();
+    cur.lastUpdated = nowQ;
+    cur.lastQuotaAtMs = nowQ;
+    // v1.142.0 — did the CONTENT move, or did the cloud replay a shadow?
+    const witness = shp2ContentWitness(cur.projection);
+    const fresh = advanceContentFreshness(this.contentFreshness.get(sn), witness, nowQ);
+    if (fresh) this.contentFreshness.set(sn, fresh); else this.contentFreshness.delete(sn);
+    const stale = isContentStale(fresh, nowQ);
+    const wasStale = cur.contentStaleSinceMs != null;
+    cur.contentStaleSinceMs = stale ? (fresh?.firstSeenMs ?? nowQ) : null;
+    if (stale !== wasStale) {
+      this.logger(
+        stale
+          ? `shp2-shadow: ${cur.deviceName} (${sn}) payload has not moved across ${fresh?.repeats} polls (${Math.round((nowQ - (fresh?.firstSeenMs ?? nowQ)) / 1000)}s) — the cloud is serving a STALE SHADOW; grid readings are being treated as UNKNOWN`
+          : `shp2-shadow: ${cur.deviceName} (${sn}) payload is moving again`,
+      );
+    }
     cur.lastError = undefined;
     this.lastSourceBySn.set(sn, source);
     this.snap.generatedAt = Date.now();
     this.emit('change', this.snap, sn);
   }
+
+  /** v1.142.0 — per-SN content-freshness state for the cloud-shadow detector. */
+  private contentFreshness = new Map<string, import('./shp2Shadow.js').ContentFreshness>();
 
   /** Merge a delta (partial) quota into the cached raw and re-project. */
   mergeDeviceQuota(sn: string, partial: Record<string, unknown>, source: 'rest' | 'mqtt' = 'mqtt') {
@@ -360,6 +400,11 @@ export class SnapshotStore extends EventEmitter {
     const cur = this.snap.devices[sn];
     if (!cur || cur.online === online) return;
     cur.online = online;
+    // v1.142.0 — this bump is DELIBERATE and stays: `lastUpdated` feeds the 3-min
+    // 'Telemetry stale' alarm, and a 6 s /status flip must not raise a
+    // self-clearing stale alert. What it must NOT do is vouch for the PROJECTION,
+    // which this path never refreshes — so `lastQuotaAtMs` is untouched and every
+    // control readback keys on that instead.
     cur.lastUpdated = Date.now();
     this.snap.generatedAt = Date.now();
     this.logger(`mqtt-status: ${cur.deviceName} (${sn}) → ${online ? 'ONLINE' : 'OFFLINE'} (via /status topic)`);

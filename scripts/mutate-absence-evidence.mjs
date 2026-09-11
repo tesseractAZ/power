@@ -65,8 +65,10 @@ const MUTANTS = [
   {
     id: 'iv. R3: staleness stops mattering',
     file: MEMB,
-    find: '  return nowMs - lu <= staleMs;',
-    to: '  return true; /* MUTANT */',
+    // v1.142.0 — repointed: the readback is now keyed on lastQuotaAtMs and the
+    // early-return shape changed. The property is identical.
+    find: '  if (nowMs - lu > staleMs) return false;',
+    to: '  /* MUTANT */',
     why: 'An online-but-wedged panel keeps serving its last sample; strict-equality readback verdicts are then manufactured from it.',
   },
   {
