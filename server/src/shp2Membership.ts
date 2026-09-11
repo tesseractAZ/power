@@ -133,14 +133,23 @@ export const SHP2_READBACK_STALE_MS = 300_000;
  * own comment promises.
  */
 export function shp2ReadbackFresh(
-  d: { online?: boolean; lastUpdated?: number } | undefined | null,
+  d: { online?: boolean; lastQuotaAtMs?: number; contentStaleSinceMs?: number | null } | undefined | null,
   nowMs: number,
   staleMs: number = SHP2_READBACK_STALE_MS,
 ): boolean {
   if (!d || d.online !== true) return false;
-  const lu = d.lastUpdated;
+  // v1.142.0 — keyed on lastQuotaAtMs, NOT lastUpdated. `setDeviceOnline` bumps
+  // lastUpdated on a bare /status flip that carries no telemetry and never
+  // touches the projection, so an OFFLINE→ONLINE flip used to make this return
+  // true against a sample nobody had refreshed — and the freeze scenario is
+  // exactly one where no REST poll is coming, because refreshAll only fetches
+  // devices the cloud list reports online.
+  const lu = d.lastQuotaAtMs;
   if (typeof lu !== 'number' || !Number.isFinite(lu) || lu <= 0) return false;
-  return nowMs - lu <= staleMs;
+  if (nowMs - lu > staleMs) return false;
+  // v1.142.0 — and a payload the cloud is replaying is not a reading, however
+  // recently it arrived (shp2Shadow.ts).
+  return d.contentStaleSinceMs == null;
 }
 
 export function shp2Panels(devices: Record<string, DeviceSnapshot>): {

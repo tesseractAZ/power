@@ -240,6 +240,10 @@ export const SENSORS: SensorConfig[] = [
   // rather than an inference. S1 had to be argued from code reading because this
   // value was computed every 60 s and stored nowhere. No unit: it is an enum.
   { unique_id: 'ecoflow_poll_health', name: 'Poll Health', icon: 'mdi:radar', entity_category: 'diagnostic', value_template: '{{ value_json.poll_health }}' },
+  // v1.142.0 — how long the SHP2's payload has been byte-identical. 0 = moving.
+  // The cloud-shadow freeze was invisible from outside the add-on; this is the
+  // instrument that makes the next one observable in HA's own history.
+  { unique_id: 'ecoflow_shp2_content_frozen_s', name: 'SHP2 Payload Frozen', state_class: 'measurement', unit_of_measurement: 's', icon: 'mdi:content-duplicate', entity_category: 'diagnostic', value_template: '{{ value_json.shp2_content_frozen_s }}' },
   // v0.83.0 — system data-gap / unplanned-outage TRACKING (24 h). Recorded
   // telemetry blackouts (restart-spanning gaps ≥ 5 min — power loss, add-on stop,
   // or deploy — and in-process MQTT stalls > 15 min). A binary "system outage in
@@ -1272,6 +1276,9 @@ export async function startMqttDiscovery(
       ecoflow_cloud_wedge_count: countCloudWedges(devices),
       // 'ok' or the reason the alarm path could not be observed this poll.
       poll_health: (() => { const h = pollHealth(); return h.ok ? 'ok' : h.reason ?? 'not-ok'; })(),
+      shp2_content_frozen_s: shp2?.contentStaleSinceMs != null
+        ? Math.round((Date.now() - shp2.contentStaleSinceMs) / 1000)
+        : 0,
       // v0.83.0 — system data-gap / unplanned-outage tracking (24 h). Mirrors the
       // /api/ha-state tiles so the MQTT diagnostic sensors have data.
       // v1.14.0 — single-sourced with /api/ha-state (alerts.ts systemOutageFields).
