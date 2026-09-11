@@ -990,6 +990,60 @@ restored" to the operator's phone 302 ms after the device went OFFLINE. A detect
 can only fire falsely is worse than none on a life-safety system: it teaches the operator
 to discount the push. A source pin in `pollHealthAttribution.test.ts` keeps it deleted.
 
+##### Cloud shadows and the sticky clocks (v1.142.0 / v1.143.0)
+
+A fourth reading of the same family, and the one no fetch-keyed gate can see:
+**the call succeeds and the CONTENT is replayed.**
+
+| state | closed by | keyed on |
+|---|---|---|
+| asked and **failed** | v1.86.0 | the fetch |
+| **never asked** | v1.138.0 | the fetch |
+| asked, answered 200 OK, **stale body** | v1.142.0 | the **content** |
+
+`shp2ContentWitness` fingerprints the twelve per-circuit watts plus the
+whole-panel scalars. The vector is the point: `grid_power_home` alone legitimately
+holds 0 W for 12.5+ hours on a sunny day, while over 1,558 sampled minutes the
+full twelve-channel vector never held identical for even one minute. Staleness
+requires **both** a repeat count and an elapsed duration; an unmeasurable poll
+resets rather than accumulating. `computeHomeGridWatts` and
+`computeShp2GridConnected` then treat a shadowed panel exactly as v0.88.0 already
+treats an offline one. `sensor.ecoflow_panel_shp2_payload_frozen` publishes the
+held duration.
+
+**Three clocks, three meanings — do not collapse them:**
+
+| field | advanced by | used for |
+|---|---|---|
+| `lastUpdated` | any evidence of life, incl. a bare `/status` flip | the 3-min *Telemetry stale* alarm |
+| `lastQuotaAtMs` | a real quota write only | **control readbacks** |
+| `lastErrorAt` | a poll failure only | so an error cannot reset the staleness clock |
+
+`setDeviceOnline` deliberately bumps `lastUpdated` (a 6 s flip must not raise a
+self-clearing stale alert) and deliberately does **not** bump `lastQuotaAtMs` (it
+never touches the projection). That is the third path into the defect v0.97.0 and
+v1.3.0 each fixed elsewhere.
+
+> ★ `setDeviceList` rebuilds every device object from an explicit literal on each
+> 60 s poll and silently drops any field not named there. Every sticky clock must
+> be listed in it. `lastErrorAt` was lost that way from v0.97.0 until v1.143.0 —
+> masked, because the next `setDeviceQuota` re-derives most of them microseconds
+> later, but **not** when the quota fetch then fails, which is exactly when a
+> frozen projection matters. There is a mutant per field.
+
+##### Push dwells are a per-family table (v1.143.0)
+
+`pushDebounceMsFor` holds the exceptions. A family that repairs itself within a
+known window should not page inside it — the alert still appears on screen
+immediately; only the push waits. `msg-rate-floor-` waits 20 minutes, which is
+`sessionSelfHeal`'s own starvation trigger, on the measurement that 42 of 50
+pushes in one 52.5 h window were that family with a 9-minute median duration.
+v0.38.0 set the precedent for the load-anomaly family at 72% of pushes.
+
+The prefix must stay **exact**: leaking a 20-minute hold-down onto a neighbouring
+family would delay a real page, a worse defect than the one it fixes. Pinned by a
+boundary test and a mutant.
+
 ##### The evidence doctrine (v1.140.0)
 
 Four detectors read absence from a filtered collection as evidence of success.
