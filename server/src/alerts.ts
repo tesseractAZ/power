@@ -1239,10 +1239,22 @@ export function computeAlerts(
           // v1.17.0 review — "at or below", never "at/below": these strings
           // reach Piper on the critical audible path and verbalizeForTts has
           // no generic slash rule (espeak speaks '/' literally).
-          title: onGrid ? 'Backup at reserve — on grid' : 'Backup at or below reserve',
-          detail: onGrid
-            ? `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
-            : `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor.`,
+          // v1.144.0 — SAY WHY IT IS LIT. When our own night-charge write is
+          // holding the reserve up, "at or under the 50% reserve floor" is the
+          // charge window's normal filling state, not a fault — and it stays lit
+          // for hours: measured median 7.4 h, longest 11.3 h across 45 rises.
+          // The severity discriminator (v1.113.0, above) already keeps it off
+          // the phone; the TEXT still read like a problem to anyone glancing at
+          // the panel. An operator should not have to know the actuator's
+          // posture to interpret the alert it caused.
+          title: arbitrageRaised && onGrid
+            ? 'Backup filling to arbitrage reserve'
+            : onGrid ? 'Backup at reserve — on grid' : 'Backup at or below reserve',
+          detail: arbitrageRaised && onGrid
+            ? `Backup pool ${sp.backupBatPercent}% is under the ${reserve}% floor because the night-charge plan raised it — this is the charge window filling, not a shortfall. It clears when the plan reverts the floor.`
+            : onGrid
+              ? `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+              : `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor.`,
         });
       } else if (sp.backupBatPercent < reserve + 10) {
         // v0.43.0 — grid-aware, mirroring shp2-below-reserve above: while the grid

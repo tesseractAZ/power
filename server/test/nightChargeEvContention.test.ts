@@ -345,6 +345,8 @@ function mkPlan(overrides: Partial<NightChargePlan> = {}): NightChargePlan {
     chargeTonight: true,
     buyKwhDebiased: null,
     buyDebiasFactor: 1,
+    buyDebiasBasis: 'default',
+    buyDebiasSamples: 0,
     buyKwh: 36,
     targetSocPct: 66.4,
     requiredExtraKwh: 100,

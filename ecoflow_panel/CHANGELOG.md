@@ -1,3 +1,94 @@
+## 1.144.0
+
+### F7–F12: making inferred state observable, and two deliberate non-changes
+
+The last six items of the 2026-09-09 log audit. Most are small; what they share
+is that each makes something **observable that was previously inferred**, and the
+failure mode of an observability fix is silent by construction — nothing breaks,
+the line simply stops appearing, and the next auditor is back to guessing.
+
+**Self-heal's alarm-critical exception now resolves the panel by IDENTITY.** It
+used `findShp2`, which requires a hydrated `projection` — and a projection exists
+only after a *successful* quota fetch. So on a restart while the panel is
+cloud-dark it returned undefined and the exception was disarmed, which is exactly
+when a human would be restarting the add-on. That matters more here than almost
+anywhere: replaying the quorum gate against the observed 52.5-hour window
+*without* this exception yields **zero of the six heals that actually fired**. It
+is the only route self-heal has to the SHP2. Same rule v1.140.0 established for
+`pollHealthVerdict`, and it also stops `findShp2` pinning the lowest-serial panel
+when a second one is present.
+
+**Poll recovery and duration are properties of the poll.** Both were still gated
+on an empty failure set — and four accessory devices fail `/quota/all` on every
+poll by design, so `grep -c 'poll ok in'` returned **0** across a 52.5-hour log
+that was running at debug level. Two costs: no poll-duration distribution below
+the slow threshold is obtainable at all, and after the single total poll failure
+in that window there was no line anywhere saying polling had recovered. v1.120.0
+ungated the slow-poll line for precisely this reason and left these two behind.
+
+**`/api/health` now carries the poll verdict** and the cloud-shadow duration.
+`telemetryBlind`'s own docstring frames the whole feature around this endpoint
+having reported healthy while the add-on held zero telemetry, and says guard 1
+"makes /api/health honest" — but v1.140.0 published the verdict only to MQTT.
+During a panel-dark window shorter than the five-minute staleness threshold,
+which is the shape of every such window in the record, a watchdog polling this
+endpoint still got a clean bill of health.
+
+**The buy de-bias now reports its basis.** A factor of `1.000` read as "measured,
+and there is no bias" when it actually means "could not measure": the learner's
+eligibility filter requires `!(cushion_shortfall === 1)` and that flag is 1 on
+every ledger row, so it selects zero rows and returns the floor. The "calibrated
+×N" line only ever fires on a measured result, so a learner that can never
+measure said nothing at all — while delivered/planned ran **1.44–1.55×** on every
+actuated-and-scored night. This does not unpin the flag (that is set from a
+grid-blind whole-house island trough and v1.125.0's re-scope did not clear it);
+it ends the silence.
+
+**Housekeeping.** The cleared-alert ledger rehydrated at exactly 1500 on all ten
+boots — which is the cap, recognisable as saturation only if you happen to know
+it — so it now states the oldest retained record's age and says plainly when it
+is dropping rows. The published DB snapshot is named once at boot with its size
+and age: 1.72 GB sat in `/share` for four days riding along in every nightly
+backup with nothing outside the web UI ever mentioning it. The broker username is
+truncated in the connect log; the password was correctly never logged, and this
+is the other half of the same credential in a file that gets pasted into vendor
+tickets. And `shp2-below-reserve` now says **why** it is lit when the night-charge
+plan itself raised the floor — measured median 7.4 h, longest 11.3 h across 45
+rises, reading like a fault throughout a fill the add-on commanded.
+
+### Two items were investigated and deliberately NOT changed
+
+Both are pinned in source and by test, so they are not quietly reversed from the
+same evidence that prompted them.
+
+**F7 — the self-heal quorum of 2 stays.** A lone non-alarm-path device cannot
+trigger a session rebuild; Core 2 ran 133 minutes at ~3 msg/min with budget free.
+Three reasons to leave it. REST refreshed Core 2 every 60 s throughout, so real
+resolution loss was ~1 s → ~20 s and the operator was notified at both edges.
+Every ~60 s heal restoration in the record cured a *multi*-device wedge — a wedge
+confined to one device while three others stream normally is evidence the session
+is healthy. And the budget is **shared** with the alarm-critical exception, which
+reached 5 of 6 on 2026-09-09: solo-Core heals could have starved the SHP2 heal
+that fired at 04:31:23.
+
+**F12.4 — `vdiff-crit` was reported as having a 0 ms debounce. It does not.**
+`pushDebounceMsFor` gives the family `SETTLE_PUSH_DEBOUNCE_MS`, and the 0 ms
+branch applies only to *escalations* — `isAlertEscalation` requires a prior
+notified severity of lower rank, and `vdiff-warn` is a different id, so there is
+no escalation path within the family at all. Live telemetry: rise 77, short
+clears **1**, median == longest == 9.0 min. The two 8-minute transients that
+reached the phone had legitimately cleared a five-minute gate, on a pack with a
+confirmed defect. Raising it further would delay a genuine critical.
+
+### Also
+
+`scripts/mutate-audit-f7-f12.mjs` — 13 mutants, 13 killed. Three survived the
+first run, all for the same reason: the assertions were source scans matching
+text the mutant left in place while killing the branch that used it. The reserve
+alert is now driven through `computeAlerts` instead of grepped, and the other two
+pin the condition rather than the message. **The run before that reported 13/13
+against a red tree** — the trap recorded one release ago, hit again.
+
 ## 1.143.0
 
 ### 84% of every phone push was one family that repairs itself

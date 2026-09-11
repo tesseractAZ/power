@@ -135,6 +135,8 @@ export interface NightChargeInputs {
    *  chargeTonight thresholds on the raw figure so learned data never flips the
    *  decision, only the disclosure. Default 1 (no calibration). */
   buyDebiasFactor?: number;
+  buyDebiasBasis?: 'measured' | 'default';
+  buyDebiasSamples?: number;
 
   // ── The cheap charge window tonight (resolved upstream via tariff.rateAt) ──
   window: { startMs: number; endMs: number } | null;
@@ -224,6 +226,25 @@ export interface NightChargePlan {
   buyKwhDebiased: number | null;
   /** The factor applied above (1 = uncalibrated). */
   buyDebiasFactor: number;
+  /**
+   * v1.144.0 — WHY the factor is what it is. `1.000` currently reads as
+   * "measured, and there is no bias" when it actually means "could not measure".
+   * The learner's eligibility filter requires `!(cushion_shortfall === 1)`, and
+   * that flag is 1 on EVERY ledger row — so it selects zero rows, falls below
+   * minSamples, and returns the floor. The "announced buy calibrated" line has
+   * never once been emitted, while delivered/planned has run 1.44-1.55x on every
+   * actuated-and-scored night.
+   *
+   * This does not fix the pin — `cushionShortfall` is set from a grid-blind
+   * whole-house island trough (`minProjSocPct = 0`, `requiredExtraKwh` = the
+   * entire pool), so no cushion size including zero clears it while the current
+   * floor stands, and v1.125.0's re-scope did not unpin it. What it fixes is the
+   * silence: an operator reading 1.000 should be able to tell an absent
+   * measurement from a null result. `underBuyMeasurable` already does exactly
+   * this for its sibling; this was the remaining asymmetry.
+   */
+  buyDebiasBasis: 'measured' | 'default';
+  buyDebiasSamples: number;
   /** PREDICTION: the pack SoC % the window is expected to actually REACH by its
    *  close, given every cap — including the v1.60.0 EV-contention derate. This
    *  is the number the ledger scores (a systematic gap between this and the
@@ -359,6 +380,8 @@ function nullPlan(
     basisComplete,
     buyKwhDebiased: null,
     buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
+    buyDebiasBasis: inputs.buyDebiasBasis ?? 'default',
+    buyDebiasSamples: inputs.buyDebiasSamples ?? 0,
     objective: 'none',
     chargeTonight: false,
     buyKwh: null,
@@ -750,6 +773,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       buyKwh: 0,
       buyKwhDebiased: 0,
       buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
+      buyDebiasBasis: inputs.buyDebiasBasis ?? 'default',
+      buyDebiasSamples: inputs.buyDebiasSamples ?? 0,
       requiredExtraKwh: 0,
       targetSocPct: round1((packAtWindowEnd_noBuy / fullKwh) * 100),
       // A hold night asks for nothing: the trough already holds the line, no
@@ -1004,6 +1029,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     buyKwh: round2(buyKwh),
     buyKwhDebiased,
     buyDebiasFactor,
+    buyDebiasBasis: inputs.buyDebiasBasis ?? 'default',
+    buyDebiasSamples: inputs.buyDebiasSamples ?? 0,
     targetSocPct,
     setpointSocPct,
     requiredExtraKwh: round2(requiredExtraKwh),
@@ -1228,6 +1255,8 @@ export interface NightChargeInputDeps {
   minBuyKwh: number;
   /** v1.112.0 — learned buy de-bias, forwarded verbatim to the inputs. */
   buyDebiasFactor?: number;
+  buyDebiasBasis?: 'measured' | 'default';
+  buyDebiasSamples?: number;
 }
 
 /**
