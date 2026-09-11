@@ -400,7 +400,12 @@ export class TuiSession {
       // v0.9.50 — read from the timer-refreshed cache instead of calling the
       // now-async computeDegradation inline. Empty placeholder until the
       // first refresh lands (a few seconds after server start).
-      degradation: d.degradation() ?? { generatedAt: Date.now(), eolSoh: 80, packs: [] },
+      // v1.146.0 — `generatedAt: 0`, not `Date.now()`. The placeholder stands in
+      // for a report that does not exist yet, and stamping it with the current
+      // time made an ABSENT report indistinguishable from one computed this
+      // instant. Inert today — no Plant screen reads `data.degradation` — which
+      // is exactly why it would have been believed the first time something did.
+      degradation: d.degradation() ?? { generatedAt: 0, eolSoh: 80, packs: [] },
       serverStartedAt: d.serverStartedAt,
     }, { recorder: d.recorder });
   }

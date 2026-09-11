@@ -456,8 +456,15 @@ function SummaryStrip({
       if (pk.soc != null) { socSum += pk.soc; socN++; }
       const soh = pk.actSoh ?? pk.soh;
       if (soh != null) { sohSum += soh; sohN++; }
-      if (pk.fullCapMah != null) fullMah += pk.fullCapMah;
-      if (pk.designCapMah != null) designMah += pk.designCapMah;
+      // v1.146.0 — PAIR-GATED. These were two independent filters, so a pack that
+      // reported its design capacity but not its current one inflated the
+      // denominator alone and the pool rendered degradation that did not exist.
+      // A ratio is only meaningful over the same population on both sides; the
+      // server's per-pack degradation does gate this way, the fleet roll-ups did not.
+      if (pk.fullCapMah != null && pk.designCapMah != null) {
+        fullMah += pk.fullCapMah;
+        designMah += pk.designCapMah;
+      }
       if (pk.balanceState != null && pk.balanceState !== 0) balancing += countSetBits(pk.balanceState);
       const t = pk.maxCellTemp ?? pk.temp;
       if (t != null && (!hottest || t > hottest.c)) hottest = { c: t, tag: `${d.deviceName} P${pk.num}` };

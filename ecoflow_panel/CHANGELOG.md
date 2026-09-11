@@ -1,3 +1,70 @@
+## 1.146.0
+
+### A lock-step comment that had failed three times is now a test
+
+`web/src/shp2Membership.ts` is a hand-maintained literal copy of the server
+module — a deliberate choice, since the React UI and the Lit HACS cards have
+different module graphs. Its own header has said *"if the contract changes,
+update both files in lock-step"* since v0.9.75.
+
+It was **three server revisions behind**. The server has unioned across every
+panel since v1.129.0 — one line that release called *"the largest lever on the
+second-SHP2 problem"* — while the mirror still took the first panel via a single
+`find`. With a second SHP2 present, every DPU wired to it fell out of the
+connected set, so `isShp2Connected` excluded it and **half the plant silently
+vanished from `EnergyFlow`'s fleet totals and `ThermalPanel`** — on the screens a
+human actually reads.
+
+The mirror now unions. More usefully, a comment demanding lock-step has been
+replaced by something that enforces it: both files export pure functions, and the
+web module's only import is `import type`, which is erased at runtime — so a
+server test imports **both real implementations** and runs them side by side over
+shared fixtures, including the two-panel case that exposed the drift. The suite
+also pins the resulting VALUE, because a parity test alone would pass if both
+sides were broken in the same way.
+
+### A ratio needs the same population on both sides
+
+Two fleet roll-ups filtered numerator and denominator independently:
+
+- `ThermalPanel.tsx` accumulated `fullMah` and `designMah` under separate
+  `!= null` guards.
+- `DegradationCard.tsx` called `sumDefined` over the unfiltered pack list twice.
+
+Either way a pack reporting its design capacity but not its current one landed in
+the denominator alone, and the UI rendered degradation that did not exist. Both
+are pair-gated now. The server's per-pack degradation already gated this way; only
+the roll-ups did not.
+
+### Also
+
+An absent degradation report was handed to the TUI as
+`{ generatedAt: Date.now(), … }` — stamping a report that does not exist with the
+current time, making it indistinguishable from one computed that instant. Now `0`.
+Inert today, because no Plant screen reads `data.degradation`, which is precisely
+why it would have been believed the first time one did.
+
+`scripts/mutate-web-parity.mjs` — 7 mutants, 7 killed, including one that drifts
+the mirror straight back to the single `find`.
+
+### The anchor checker could not see outside `server/`
+
+Found while adding that harness. `check-mutant-anchors.mjs` — the CI gate that
+catches mutants whose source anchor has moved — resolved only
+`resolve(SERVER, '…')`. Any harness targeting a file elsewhere was **silently
+uncounted**: it reported 5 of the new harness's 6 anchors unresolvable while the
+harness itself ran all 7 cleanly.
+
+That is this project's own recurring defect applied to its meta-tooling. A guard
+that cannot see part of the domain it claims to cover reads exactly like a guard
+finding nothing wrong — and this one is the guard for every other guard.
+
+It now resolves both bases, and an unreadable TARGET PATH is reported as such
+rather than presenting as "every anchor in this harness is dead", which would send
+the reader after the anchors instead of the path. Coverage went from 183 anchors
+across 26 harnesses to **189 across 27** — the difference is what it had been
+skipping.
+
 ## 1.145.0
 
 ### The log ring is the incident window, and a fifth of it said nothing
