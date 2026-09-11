@@ -1,3 +1,105 @@
+## 1.148.0
+
+### The night-charge engine declined to plan, and said nothing about why
+
+On 2026-09-10 the plan came back null and the backup pool sat at its **16% reserve
+floor from 22:36 to 07:50** — 9 h 13 m one grid failure from empty, carrying about
+14.7 kWh of a 92.16 kWh pool, recovering on morning solar. Eight hourly
+*"AT RESERVE FLOOR"* runway lines went by.
+
+The reason appeared **nowhere**: not in the log, not on the plan object, not in
+the evening advisory, not on the dashboard. `basisComplete` is a four-way AND and
+reports one boolean. Three of its gates passed; PV band coverage missed by six
+points, 72% against a 78% floor. Reconstructing that took an hour of live probing
+against a system that already knew the answer.
+
+`basisBlockedBy` now names the failing gate, and it reaches the 21:30 notification
+and the spoken advisory — which is where an operator actually meets the decision,
+not an API field. The floor is a named constant, unchanged at 0.78: naming a
+threshold must not move it, and the write gate in `nightChargeGate` accepts
+realized coverage in [0.78, 0.92], so hand-widening here would silently move that
+too. A mutant pins the value.
+
+★ **This gate can latch.** `bandCal` is shrink-only, so once realized error
+exceeds the published band it pins at 1.0, the threshold collapses to the raw
+band, and coverage is mathematically forced under 80%. It recovers only if the raw
+sigma inputs grow or the weather eases. That is a deliberate fail-safe, not a bug
+— but it makes a miss a **state**, not a blip, and the code now says so. Whether a
+six-point coverage miss is worth a night at the reserve floor is a policy question
+and remains yours.
+
+### Two holes in v1.142.0's own cloud-shadow fix
+
+**A shadow moved no gate.** v1.142.0 taught the *consumers* to distrust a replayed
+payload — `computeHomeGridWatts` and `computeShp2GridConnected` both treat one as
+offline — and left every *gate* untouched. Measured across both live firings:
+`poll_health` stayed `ok`, `/api/health` returned `blind:false`, and `notePollOk`
+ran on every shadowed poll so the blind clock never aged. The diagnostic sensor
+moved to 240 and no verdict moved at all. `pollHealthVerdict` now has a third
+reason, `shp2-content-frozen`, ordered **last** so that a fetch which actually
+failed or never happened names itself rather than being described as frozen.
+
+**The latch was in-memory, so every restart disarmed the fail-safe.** Re-arming
+costs five consecutive identical payloads *and* four minutes. Measured: a freshly
+booted process published `grid_power_home = 7618 W` beside
+`shp2_payload_frozen = 0` — 7,618 being the exact value the previous process had
+already declared a stale shadow two minutes earlier. Roughly 60–90 seconds of a
+7.6 kW ghost on the alarm path, and in `resolveGridBackstop` `importLive` is the
+one backstop term exempt from both `poolDischargingAtFloor` and `floorWithoutFlow`,
+so a frozen positive reading disables the guards that would catch it. This is the
+v1.140.0 restart door, one file over.
+
+The witness is now persisted — and **`firstSeenMs` is re-stamped at rehydrate**.
+Carrying it would let the duration half of the test be satisfied by history, so a
+single matching poll after any gap would latch stale immediately. That fails safe,
+but it is a nuisance-alarm path: at the reserve floor it removes backstopping and
+can escalate a benign grid-up low-SoC to critical. Only the witness string is
+written; the clock and count restart by design, and a mutant pins each.
+
+### Correction: the log-hygiene campaign cost reach rather than buying it
+
+v1.143.0 and v1.145.0 claimed forensic reach. **Measured, they cost it:** volume
++52% (12,961 → 19,699 bytes/h), reach ×0.65, and the default `ha apps logs`
+100-line buffer now spans 44 minutes instead of 68.
+
+The level demotions bought **zero bytes**. `LOG_LEVEL=debug` is the standing
+option on this install, pino writes every level to stdout, and the ring captures
+stdout — emission rate and per-line size were unchanged to three significant
+figures. **Level is not emission.** I recorded that `LOG_LEVEL=debug` was standing
+in the v1.144.0 notes and then shipped two releases whose byte claim required it
+to be false. The INFO-channel win was real and is unaffected: fleet-status still
+collapses 98 ticks to 16 hourly anchors with zero false changes.
+
+The actual regression was v1.144.0's own poll-duration ungating — correct in
+itself, then emitted 60 times an hour: **1,058 lines in 16.4 h, 32.5% of all log
+bytes and 88.3% of INFO lines.** It is now a periodic distribution
+(`p50/p95/max` per 30 polls, ~one line per 30 min) instead of a line per poll.
+`(recovered)` and `poll slow:` are untouched — they are per-event signals an
+operator greps for, and both obvious shortcuts are traps: a blanket demote
+silences `poll slow:`, and `startsWith('poll ok in')` also matches `(recovered)`.
+
+The remaining large stream is the recorder heartbeat at 59.4/h. Not touched here:
+the same lesson applies, so it needs an emission-count change rather than another
+demotion, and that deserves its own release.
+
+### Also
+
+- The `UNMEASURED` calibration line told the operator to look at a route that
+  returns **404**. It now names the real path and field.
+- `/api/health` resolved the panel with a raw `find()` rather than `findShp2()`,
+  which v1.129.0 pinned to the lowest SN precisely so every singleton path is
+  consistently wrong in the same way. The equivalent in `mqttDiscovery` is
+  annotated rather than half-fixed — that whole block wants one pass.
+- The HA broker reconnect was **30 s** against the broker's own ~10 s recovery.
+  When Mosquitto auto-updated 7.1.0 → 7.1.1, all 115 entities were unavailable for
+  30.03 s while a non-ecoflow client on the same broker recovered in 10.14 s —
+  19.9 s of that was this knob. Now 5 s, matching the sibling client.
+
+`scripts/mutate-audit-round2.mjs` — 13 mutants, 13 killed. One survived the first
+run: my tests asserted the persistence methods *existed* without checking anything
+called them. Replaced with a test that drives two `SnapshotStore` instances across
+a simulated restart and asserts the re-stamp.
+
 ## 1.147.0
 
 ### The last three vanish-on-empty sections

@@ -62,6 +62,17 @@ const HOUR_MS = 3_600_000;
  *  P10 (pessimistic-low) band; load is the P90 (pessimistic-high) band with any
  *  committed-EV block already folded in upstream and de-duplicated against the
  *  base curve (design §2.3). Both in WATTS, ts hour-aligned. */
+/**
+ * v1.148.0 — the coverage floor, named. See the v1.48.0 note below for why 0.78.
+ *
+ * ★ This gate can LATCH. `bandCal` is shrink-only, so once realized error exceeds
+ * the published band it pins at 1.0, the threshold collapses to the raw band, and
+ * coverage is mathematically forced under 80%. It recovers only if the raw sigma
+ * inputs grow or the weather eases. That is a deliberate fail-safe, not a bug —
+ * but it means a miss here is a STATE, not a blip, and must be reported as one.
+ */
+export const BASIS_MIN_BAND_COVERAGE = 0.78;
+
 export interface NightChargeHour {
   ts: number;
   pvP10W: number;
@@ -154,6 +165,12 @@ export interface NightChargeInputs {
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
   /** calScoredDays ≥ N_MIN AND band coverage ≥ 0.78 (nominal 80% band, matching the write gate's floor) AND forecast present. */
   basisComplete: boolean;
+  /**
+   * v1.148.0 — WHICH of the four basis gates failed, or null when complete.
+   * `basisComplete: false` alone cost an hour of live probing to explain, after a
+   * night the plant spent at its reserve floor.
+   */
+  basisBlockedBy?: string | null;
 
   /** Below this buy, treat the night as "hold" (no meaningful charge). kWh. */
   minBuyKwh: number;
@@ -214,6 +231,12 @@ export interface NightChargePlan {
   generatedAt: number;
   /** false ⇒ every numeric field is null and chargeTonight is false. */
   basisComplete: boolean;
+  /**
+   * v1.148.0 — WHICH of the four basis gates failed, or null when complete.
+   * `basisComplete: false` alone cost an hour of live probing to explain, after a
+   * night the plant spent at its reserve floor.
+   */
+  basisBlockedBy?: string | null;
   objective: NightChargeObjective;
   /** The single owner-facing decision. NEVER null (defaults false). */
   chargeTonight: boolean;
@@ -452,7 +475,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
 
   // ── Gates (fail-safe → null over a fabricated number) ──
   // I11 SoC coherence; I6 basis; I5 SHP2/state; and structural preconditions.
-  if (!basisComplete) return nullPlan(inputs, false, 'No plan — forecast/telemetry basis incomplete; nothing will be charged.');
+  if (!basisComplete) {
+    // v1.148.0 — name it here too: this string reaches the 21:30 notification and
+    // the spoken advisory, which is where an operator actually meets the decision.
+    const why = inputs.basisBlockedBy ? ` (${inputs.basisBlockedBy})` : '';
+    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`);
+  }
   if (!socCoherent) return nullPlan(inputs, false, 'No plan — SoC telemetry incoherent (% vs remaining/full mismatch).');
   if (inputs.confidenceTier === 'climatology') return nullPlan(inputs, false, 'No plan — horizon is climatology-only (no real forecast); will not size a buy on a guessed sky.');
   // v1.132.0 — basisComplete TRUE here: the forecast/telemetry basis is fine,
@@ -1457,10 +1485,31 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     forecastPresent &&
     confidenceTier !== 'climatology' &&
     calScoredDays >= minCalScoredDays &&
-    bandCoverageFrac >= 0.78;
+    bandCoverageFrac >= BASIS_MIN_BAND_COVERAGE;
+  // v1.148.0 — SAY WHICH GATE FAILED.
+  //
+  // On 2026-09-10 this returned false, the plan was null, and the backup pool sat
+  // at its 16% reserve floor from 22:36 to 07:50 — 9 h 13 m one grid failure from
+  // empty, recovering on morning solar. The reason appeared NOWHERE: not in the
+  // log, not on the plan, not in the evening advisory, not on the dashboard.
+  // Three of the four gates passed; band coverage missed by six points (72% vs
+  // 78%). Reconstructing that took an hour of live probing.
+  //
+  // "forecast/telemetry basis incomplete" is four conditions wearing one coat.
+  const basisBlockedBy: string | null = basisComplete
+    ? null
+    : !forecastPresent
+      ? 'no PV forecast available'
+      : confidenceTier === 'climatology'
+        ? 'forecast is climatology-tier (no site-specific history yet)'
+        : calScoredDays < minCalScoredDays
+          ? `only ${calScoredDays} scored calibration day(s), need ${minCalScoredDays}`
+          : `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
+            + ` (forecast present, tier=${confidenceTier}, calDays ${calScoredDays}/${minCalScoredDays})`;
 
   return {
     nowMs,
+    basisBlockedBy,
     fullKwh,
     socNowPct,
     reserveFloorPct,

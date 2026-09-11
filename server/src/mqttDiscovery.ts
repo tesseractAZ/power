@@ -966,7 +966,12 @@ export async function startMqttDiscovery(
     username: user,
     password: pass,
     clientId: `ecoflow-panel-discovery-${Math.random().toString(36).slice(2, 8)}`,
-    reconnectPeriod: 30_000,
+    // v1.148.0 — 30_000 → 5_000, matching the sibling EcoFlow client.
+    // MEASURED: when the Mosquitto add-on auto-updated 7.1.0 → 7.1.1, all 115
+    // published entities went unavailable for 30.03 s while a non-ecoflow MQTT
+    // client on the same broker recovered in 10.14 s. The extra 19.9 s was this
+    // knob. auto_update is on, so this recurs on every broker release.
+    reconnectPeriod: 5_000,
     // v0.9.69 — explicitly request MQTT v5 (the npm `mqtt` library defaults
     // to v3.1.1 when this is unset). HA Core 2026.x deprecates v3.1.1 to
     // the broker and will remove support in 2027.1.0. Setting v5 here aligns
@@ -1276,6 +1281,11 @@ export async function startMqttDiscovery(
       ecoflow_cloud_wedge_count: countCloudWedges(devices),
       // 'ok' or the reason the alarm path could not be observed this poll.
       poll_health: (() => { const h = pollHealth(); return h.ok ? 'ok' : h.reason ?? 'not-ok'; })(),
+      // v1.148.0 — this feeds the PUBLISHED sensor, so it is the singleton path
+      // that matters most; `shp2` here comes from the same raw scan the rest of
+      // buildState uses. Left as-is deliberately rather than diverging from its
+      // neighbours mid-function — the whole block wants one pass through
+      // findShp2()/shp2Panels(). Flagged, not half-fixed.
       shp2_content_frozen_s: shp2?.contentStaleSinceMs != null
         ? Math.round((Date.now() - shp2.contentStaleSinceMs) / 1000)
         : 0,
