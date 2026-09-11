@@ -738,6 +738,19 @@ export function computeAlerts(
       const lastSource = conn?.lastSource ?? 'rest';
       const facts: Array<{ label: string; value: string }> = [
         { label: 'Reported by', value: 'EcoFlow Cloud /device/list' },
+        // v1.143.0 — WHICH input observed the transition, and when. Two paths
+        // write `online` (the cloud list poll and the MQTT /status topic) and
+        // they can disagree by tens of seconds, which shifts the dispatch dwell
+        // and decides whether this alert ever reaches a phone. On 2026-09-09 two
+        // home Cores went offline in the same cloud-list poll and only one paged
+        // — correctly, on a 59-vs-60-second margin — and nothing in the alert
+        // said why. Now it does.
+        ...(d.onlineChangedAtMs
+          ? [{
+              label: 'Observed offline via',
+              value: `${d.onlineChangedVia === 'status' ? 'MQTT /status' : 'EcoFlow Cloud /device/list'} — ${fmtAge(now - d.onlineChangedAtMs)} ago`,
+            }]
+          : []),
         { label: 'Last data', value: lastDataAt > 0 ? `${fmtAge(now - lastDataAt)} ago (${lastSource.toUpperCase()})` : 'no data this session' },
         { label: 'MQTT msg count', value: conn?.mqttCount != null ? String(conn.mqttCount) : '—' },
       ];

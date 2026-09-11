@@ -575,7 +575,7 @@ setClockOffsetLogger((offsetMs, previousMs) => {
   );
 });
 
-const recorder = createRecorder(store, (m) => app.log.info(m));
+const recorder = createRecorder(store, (m) => app.log.info(m), (m) => app.log.debug(m));
 // v0.10.0 — analytics worker. Every heavy history scan (the cache-warmer's
 // reports + each /api/* analytics endpoint) runs on the worker's event loop
 // against a read-only connection to the same WAL DB. The main thread keeps

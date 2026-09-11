@@ -70,7 +70,8 @@ import { syncAlertOnsets, getAlertOnset } from './alertOnset.js';
  */
 
 const EVAL_INTERVAL_MS = Number(process.env.ALERT_EVAL_MS ?? 20_000);
-const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
+/** v1.143.0 — exported so pushDebounceMsFor’s per-family table is testable. */
+export const DEBOUNCE_MS = Number(process.env.ALERT_DEBOUNCE_MS ?? 60_000);
 
 /** v1.88.0 — BMS-SETTLE families flap open→resolve on minutes-scale boundary
  *  churn at deep discharge (25 of one audit window's 50 pushes; three ~5-min
@@ -130,7 +131,41 @@ export function shouldDemoteAnnunciation(
 }
 
 export const SETTLE_PUSH_DEBOUNCE_MS = 5 * 60_000;
+/**
+ * v1.143.0 — the starvation family gets a push dwell aligned with self-heal.
+ *
+ * MEASURED over 52.5 h: 50 pushes reached the phone and **42 of them (84%) were
+ * `msg-rate-floor`** — 25 rise/resolve episodes of which **23 lasted under 30
+ * minutes, median 9.0 min, shortest 15 seconds**. Every one self-cleared with no
+ * operator action available. Live telemetry agrees: riseCount 183,
+ * medianDurationMs 685,623 (11.4 min), shortClearsCount 51.
+ *
+ * This is the shape v0.38.0 already fixed once, for the per-circuit load-anomaly
+ * family — its comment reads "this one family fired/resolved 116x — 72% of all
+ * immediate notifications — burying genuinely-actionable alerts." Same remedy:
+ * the alert appears ON SCREEN immediately as it always did; only the PUSH waits
+ * until the condition has outlived the add-on's own repair attempt.
+ *
+ * 20 minutes is not arbitrary — it is `sessionSelfHeal`'s own starvation trigger.
+ * Below it the system is still trying to fix itself and the operator has nothing
+ * to do; above it, the repair has been attempted and failed, which is exactly
+ * when a human should hear about it. Against the observed window this suppresses
+ * 15 of 21 rise pushes and their matching resolves — 30 of 42 — while still
+ * paging for every episode that outlived the heal, including the 133-minute one.
+ *
+ * It also subsumes most of the same-tick duplication: four devices starving in
+ * one tick produced four cards on four occasions, and under this dwell none of
+ * those four bursts would page unless they persisted.
+ *
+ * The resolve needs no dwell of its own: a resolve only pushes when the rise was
+ * notified, so a suppressed rise is silently followed by a suppressed resolve.
+ */
+export const MSG_RATE_PUSH_DEBOUNCE_MS = Number(
+  process.env.MSG_RATE_PUSH_DEBOUNCE_MS ?? 20 * 60_000,
+);
+
 export function pushDebounceMsFor(id: string, defaultMs: number = DEBOUNCE_MS): number {
+  if (id.startsWith('msg-rate-floor-')) return Math.max(defaultMs, MSG_RATE_PUSH_DEBOUNCE_MS);
   return /^(vdiff-crit-|peer-voldiff-|peer-soc-|soc-low-|dpu-imbalance-)/.test(id)
     ? Math.max(defaultMs, SETTLE_PUSH_DEBOUNCE_MS)
     : defaultMs;
@@ -1316,6 +1351,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   let quietHoldLogged = false;
   /** v1.140.0 — orphan ids already announced as held, so each logs once. */
   const heldOrphanLogged = new Set<string>();
+  /** v1.143.0 — the boot reconcile outcome is logged once, run or no-op. */
+  let orphanReconcileLogged = false;
   let lastDigestHour = -1;
   /** v1.95.0 — consecutive ticks a DPU has been absent from a non-empty SHP2 roster. */
   const offPanelStreak = new Map<string, number>();
@@ -2667,9 +2704,17 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         }
       }
       for (const id of drop) persistedNotified.delete(id);
-      if (resolve.length || drop.length) {
-        persistNotified();
-        log(`notify: boot reconcile — resolved ${resolve.length}, dropped ${drop.length}, held ${hold.length} orphaned record(s)`);
+      if (resolve.length || drop.length) persistNotified();
+      // v1.143.0 — log the outcome UNCONDITIONALLY, once. Previously this line
+      // was guarded on there being something to retire, so a clean sweep and a
+      // sweep that never ran were byte-identical in the log: zero occurrences of
+      // "boot reconcile" across ten boots, which told an auditor nothing about
+      // whether v1.140.0's evidence gate was reaching production at all. A guard
+      // whose correct operation is indistinguishable from its absence cannot be
+      // verified, and this codebase has shipped that mistake before.
+      if (!orphanReconcileLogged) {
+        orphanReconcileLogged = true;
+        log(`notify: boot reconcile — ${persistedNotified.size} persisted record(s): resolved ${resolve.length}, dropped ${drop.length}, held ${hold.length}`);
       }
       }
     }

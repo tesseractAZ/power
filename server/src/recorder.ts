@@ -588,7 +588,23 @@ export function resolveRetentionDays(raw: string | undefined): number {
   return Math.min(3650, Math.max(7, Math.round(n)));
 }
 
-export function createRecorder(store: SnapshotStore, log: (m: string) => void): Recorder {
+/**
+ * v1.143.0 — `log` is the INFO logger, so `RECORDER_DEBUG` decided only WHETHER
+ * to emit, never at what LEVEL. All 3,103 heartbeats in a 52 h window carried
+ * `"level":30` — the same level as `battery-soc-alarm: crossed 20% (low)` — so
+ * pino's own filter could never separate them, and the demotion v0.76.0
+ * documents never actually happened on this fleet, where `LOG_LEVEL=debug` is
+ * the standing configured value. `ha apps logs` returns 100 lines; 76 of them
+ * were heartbeats, cutting the operator's default incident window from ~5 hours
+ * to ~75 minutes with a real SoC alarm sitting in the noise.
+ *
+ * `debug` defaults to `log` so an existing caller keeps its current behaviour.
+ */
+export function createRecorder(
+  store: SnapshotStore,
+  log: (m: string) => void,
+  debug: (m: string) => void = log,
+): Recorder {
   const dbPath = resolve(process.cwd(), config.dbPath);
   mkdirSync(dirname(dbPath), { recursive: true });
   log(`recorder: opening ${dbPath}`);
@@ -918,7 +934,7 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
     }
   } catch (e: any) {
     // Diagnostic-only: swallow and continue startup (debug-gated breadcrumb).
-    if (RECORDER_DEBUG) log(`recorder: restart-spanning gap check skipped (${e?.message ?? e})`);
+    debug(`recorder: restart-spanning gap check skipped (${e?.message ?? e})`);
   }
 
   // v0.50.0 — persist the per-key emit high-water across restarts. The micro-dip
@@ -1026,8 +1042,11 @@ export function createRecorder(store: SnapshotStore, log: (m: string) => void): 
       // state (it fires whenever ANY sample lands, ~7687 lines over 52h). Demote
       // routine activity to debug; an actual telemetry GAP / record failure /
       // BMS anomaly is logged separately above & below and keeps its own level.
-      if (recordedSamplesSinceTick > 0 && RECORDER_DEBUG) {
-        log(`recorder: ${recordedSamplesSinceTick} samples in last ${Math.round((tickNowMs - lastSampleLogAt) / 1000)}s (peak burst ${recordedSamplesPeak})`);
+      // v1.143.0 — emitted through the DEBUG channel, so pino's level filter does
+      // the work and the RECORDER_DEBUG conditional is no longer load-bearing.
+      // Kept as a cheap short-circuit only.
+      if (recordedSamplesSinceTick > 0) {
+        debug(`recorder: ${recordedSamplesSinceTick} samples in last ${Math.round((tickNowMs - lastSampleLogAt) / 1000)}s (peak burst ${recordedSamplesPeak})`);
       }
       recordedSamplesSinceTick = 0;
       recordedSamplesPeak = 0;

@@ -44,6 +44,17 @@ export interface DeviceSnapshot {
    */
   lastQuotaAtMs?: number;
   /**
+   * v1.143.0 — when this device's `online` flag last CHANGED, and which input
+   * observed it. Two independent paths write `online` — the cloud
+   * `/device/list` poll and the MQTT `/status` topic — and they can disagree by
+   * tens of seconds. On 2026-09-09 Core 5's /status saw OFFLINE 24 s before the
+   * cloud list did, so its dispatch dwell started 24 s earlier and it paged;
+   * Core 1, offline for 59 s against a 60 s debounce, did not. The dwell was
+   * working correctly, but nothing recorded WHY one paged and the other did not.
+   */
+  onlineChangedAtMs?: number;
+  onlineChangedVia?: 'device-list' | 'status';
+  /**
    * v1.142.0 — when this device's payload STOPPED MOVING, or null/absent if it
    * is moving. Set only for the SHP2, from the twelve-channel watt witness. See
    * shp2Shadow.ts: a 200 OK carrying a replayed body is invisible to every
@@ -239,7 +250,27 @@ export class SnapshotStore extends EventEmitter {
         lastError: existing?.lastError,
         projection: existing?.projection,
         raw: existing?.raw,
+        // v1.143.0 — CARRY THE STICKY CLOCKS FORWARD. This literal rebuilds the
+        // device object on EVERY /device/list poll, i.e. every 60 s, and silently
+        // dropped every field not named here. `lastErrorAt` has been lost that way
+        // since v0.97.0 added it — the field whose entire purpose was to stop a
+        // REST error resetting the staleness clock. v1.142.0's `lastQuotaAtMs` and
+        // `contentStaleSinceMs` would have gone the same way: usually masked,
+        // because setDeviceQuota re-derives them microseconds later in the same
+        // poll, but NOT when the quota fetch then fails — which is exactly the
+        // state in which a frozen projection matters most.
+        lastErrorAt: existing?.lastErrorAt,
+        lastQuotaAtMs: existing?.lastQuotaAtMs,
+        contentStaleSinceMs: existing?.contentStaleSinceMs,
+        onlineChangedAtMs: existing?.onlineChangedAtMs,
+        onlineChangedVia: existing?.onlineChangedVia,
       };
+      // The transition stamp must land on the REBUILT object, not the one this
+      // literal just replaced.
+      if (existing != null && existing.online !== newOnline) {
+        this.snap.devices[d.sn].onlineChangedAtMs = now;
+        this.snap.devices[d.sn].onlineChangedVia = 'device-list';
+      }
     }
     this.snap.generatedAt = now;
     this.emit('change', this.snap);
@@ -400,6 +431,8 @@ export class SnapshotStore extends EventEmitter {
     const cur = this.snap.devices[sn];
     if (!cur || cur.online === online) return;
     cur.online = online;
+    cur.onlineChangedAtMs = Date.now();
+    cur.onlineChangedVia = 'status';
     // v1.142.0 — this bump is DELIBERATE and stays: `lastUpdated` feeds the 3-min
     // 'Telemetry stale' alarm, and a 6 s /status flip must not raise a
     // self-clearing stale alert. What it must NOT do is vouch for the PROJECTION,
