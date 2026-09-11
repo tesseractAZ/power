@@ -128,7 +128,11 @@ function fmtKw(w: number): string {
  *  `mpptProducing()` in alerts.ts so the screen and the alarm engine agree: red only when
  *  the alarm engine would raise it, grey "stby" when it is benign idle. */
 function errCell(code: number | null | undefined, watts: number | null | undefined, amps: number | null | undefined): string {
-  if ((code ?? 0) === 0) return c.green('OK');
+  // v1.145.0 — `?? 0` collapsed "no error" and "no reading" into one green OK.
+  // An MPPT that stopped reporting its error register rendered exactly like one
+  // reporting zero. Absence gets the same grey the benign-idle case already uses.
+  if (code == null) return c.grey('—');
+  if (code === 0) return c.green('OK');
   const hex = (code ?? 0).toString(16).toUpperCase();
   const producing = watts != null && watts > 20 && (amps == null || amps > 0.3);
   return producing ? c.red(hex) : c.grey('stby');

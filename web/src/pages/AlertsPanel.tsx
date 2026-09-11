@@ -213,7 +213,10 @@ function LearnedAlertsView({ alerts }: { alerts: Alert[] }) {
             title="Anomalies"
             subtitle="Unusual right now — peer comparison & self-baseline"
             items={anomalies}
-            empty="No anomalies — every pack is tracking its siblings and its own baseline."
+            // v1.145.0 — the anomaly list is computed from ONLINE DPUs only, so
+            // "every pack" overclaimed whenever one was dark: silence about a pack
+            // nobody looked at read as a clean bill of health for it.
+            empty="No anomalies among the packs currently reporting."
           />
           <LearnedSection
             title="Forecasts"

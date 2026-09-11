@@ -1,3 +1,78 @@
+## 1.145.0
+
+### The log ring is the incident window, and a fifth of it said nothing
+
+The add-on log reaches roughly **53 hours**. Bytes spent restating unchanged state
+are hours of history not available during an incident — and that is not a
+hypothetical here: an SHP2 question in this project could not be settled because
+the window had already rolled past it.
+
+Measured over 53.1 h: the 10-minute `fleet-status` dump emitted **314 lines
+carrying exactly one distinct body** once the per-device message counters and the
+device-list age are normalised away. Over a fifth of the whole log. Its charter —
+*"which device stopped reporting and when, one grep away"* — is better served now
+by `msg-rate-floor`, which named 25 collapses with their rates and learned
+baselines in the same window; and the dump cannot answer "when" across a restart
+anyway, because its counters reset with the process.
+
+It now emits at INFO when the fleet state **changes**, plus one hourly anchor so
+an operator can still see polling is happening at all. The cadence stays, at
+debug. Roughly 6 INFO lines instead of 314.
+
+The signature deliberately **excludes** the message counters and the list age.
+Those move every tick, so including them would make every dump a "change" and
+silently restore the old behaviour while still looking correct. There is a mutant
+for exactly that.
+
+Also: `solar-model` emitted 109 lines with **54 exact consecutive repeats** and now
+emits on change; the standing-failure heartbeat went hourly → daily, since it
+reports a permanent, owner-settled product-class limit.
+
+**Not done, deliberately:** Node's `ExperimentalWarning` for `node:sqlite` is 42
+non-JSON lines and could be silenced with `--no-warnings=ExperimentalWarning`.
+That would hide every *future* experimental-API warning to save under 1% of the
+log. The `startswith('{')` guard that log aggregation needs is documented instead.
+
+### A device that disappears from the device list
+
+It kept its last `online` value forever with nothing logged, so "says online but
+has been gone for hours" was indistinguishable from a healthy device. There is now
+one breadcrumb per disappearance naming it.
+
+Deliberately **only** a breadcrumb. Marking an absent device offline would invert
+a cloud-side list glitch into a device alarm, which is the wrong direction on a
+life-safety system. Its state stays frozen and the log says so.
+
+### Absence on the render surface
+
+The same doctrine as the evidence gates of v1.138.0–v1.144.0, one layer out. A
+screen that paints an unknown **green** is making a claim the data does not
+support, on the layer a human actually reads.
+
+- **A pack that reported nothing rendered `NORMAL`.** Every fault term in the TUI
+  generator screen is `x != null && <test>`, so an all-null pack scored false on
+  all three and came out green. It now renders `NO DATA`.
+- **An absent MPPT error code rendered green `OK`.** `(code ?? 0) === 0` collapsed
+  *no error* and *no reading* into the same cell.
+- **The BUS screen showed no staleness at all** — `deviceQuality` was computed and
+  never rendered. It was the only Plant screen without one, while its liveness tick
+  reads `snap.generatedAt`, which advances whether or not the SHP2 answered.
+- **A silent DPU was averaged in as a 0% pack.** Four Cores at 80% with one silent
+  read as 64% — a number no pack holds.
+- A `—` tile painted `text-ok`, and an empty-state that claimed "every pack" from a
+  list computed over online DPUs only.
+
+### Also
+
+The MQTT `resubscribe: true` dependency is now pinned explicitly. This app's own
+re-subscribe loop is dead code on a reconnect — the `subscribed` set is never
+cleared on close — so correctness rests entirely on mqtt.js re-issuing the
+subscriptions by **default**. A default is not a contract, and the symptom of a
+flip would be a silently one-way connection on the alarm path with the connect log
+still reading healthy.
+
+`scripts/mutate-log-reach.mjs` — 12 mutants, 12 killed.
+
 ## 1.144.0
 
 ### F7–F12: making inferred state observable, and two deliberate non-changes

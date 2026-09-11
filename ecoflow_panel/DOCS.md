@@ -990,6 +990,57 @@ restored" to the operator's phone 302 ms after the device went OFFLINE. A detect
 can only fire falsely is worse than none on a life-safety system: it teaches the operator
 to discount the push. A source pin in `pollHealthAttribution.test.ts` keeps it deleted.
 
+##### Log forensics — the ring IS the incident window (v1.145.0)
+
+The add-on log ring reaches roughly **53 hours**. Bytes spent restating unchanged
+state are hours of history not available during an incident, and that is not
+hypothetical: an SHP2 question in this project could not be settled because the
+window had already rolled past it.
+
+| line | was | now |
+|---|---|---|
+| `fleet-status` 10-min dump | 314 lines / 53 h carrying **one distinct body** | INFO on state **change** + one hourly anchor; the cadence stays at DEBUG |
+| `recorder: N samples in last …` | debug-*gated*, info-*emitted* (v1.143.0) | a real debug channel |
+| `solar-model: fitted on N/M` | 109 lines, 54 exact consecutive repeats | emitted on change |
+| `poll: N device fetch failure(s) persisting` | hourly | daily — it reports a permanent, owner-settled limit |
+
+`statusDumpLevel`'s signature deliberately **excludes** the per-device message
+counters and the device-list age. Those move every tick, so including them would
+make every dump a "change" and silently restore the every-tick behaviour while
+still looking correct. There is a mutant for exactly that.
+
+> **Parsing the log:** 216 of ~4,900 lines are non-JSON (s6/bashio container
+> banners and Node's `ExperimentalWarning` for `node:sqlite`). Guard every
+> aggregation with `startswith('{')`. The warnings are deliberately **not**
+> suppressed — `--no-warnings=ExperimentalWarning` would hide every future
+> experimental-API warning to save under 1% of lines.
+
+**A device that disappears from `/device/list`** now leaves one breadcrumb naming
+it, once per disappearance. It is deliberately *only* a breadcrumb: marking an
+absent device offline would invert a cloud-side list glitch into a device alarm,
+which is the wrong direction here. Its `online` value stays frozen, and the log
+says so.
+
+##### Absence on the render surface (v1.145.0)
+
+The same doctrine as the evidence gates above, one layer out — a screen that
+paints an unknown **green** is making a claim the data does not support, on the
+layer a human actually reads.
+
+- `gen.ts` — every fault term is `x != null && <test>`, so a pack that reported
+  **nothing** scored false on all of them and rendered `NORMAL`. It now renders
+  `NO DATA` in grey.
+- `pv.ts` — `(code ?? 0) === 0` collapsed *no error* and *no reading* into one
+  green `OK`. Absence now gets the grey the benign-idle case already used.
+- `bus.ts` — `deviceQuality` was computed and never rendered, leaving BUS the only
+  Plant screen with no staleness indication, while its liveness tick reads
+  `snap.generatedAt`, which advances whether or not the SHP2 answered.
+- `EnergyFlow.tsx` — `(soc ?? 0)` averaged a silent DPU in as a 0% pack: four
+  Cores at 80% with one silent read as 64%, a number no pack holds.
+- `ThermalPanel.tsx` — a `—` tile painted `text-ok`.
+- `AlertsPanel.tsx` — "every pack is tracking its siblings" computed from online
+  DPUs only, so it overclaimed whenever one was dark.
+
 ##### Cloud shadows and the sticky clocks (v1.142.0 / v1.143.0)
 
 A fourth reading of the same family, and the one no fetch-keyed gate can see:

@@ -120,6 +120,15 @@ export async function startMqtt(
     reconnectPeriod: 5000,
     keepalive: 30,
     rejectUnauthorized: true,
+    // v1.145.0 — PINNED, not inherited. This app's own re-subscribe loop is dead
+    // code on a reconnect: the `subscribed` set is never cleared on close, so
+    // after a session rebuild every SN already looks subscribed and the loop
+    // no-ops. Correctness therefore rests entirely on mqtt.js re-issuing the
+    // subscriptions itself, which it does — by DEFAULT. A default is not a
+    // contract: a future major could flip it and the only symptom would be a
+    // silently one-way connection on the alarm path, with the connect log still
+    // reading healthy. State the dependency where it is depended on.
+    resubscribe: true,
   });
 
   // EcoFlow's ACL rejects wildcard subscribes ("+/quota"). We must subscribe per-SN.

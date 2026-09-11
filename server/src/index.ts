@@ -2134,7 +2134,7 @@ app.get('/ws', {
 //
 // See the tombstone above `pollHealthVerdict` in snapshot.ts for what survives
 // and why (the attempt set and the S1 telemetry-blind fix are unrelated to this).
-const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m));
+const stopPoll = startPollLoop(store, POLL_INTERVAL_MS, (m) => app.log.info(m), (m) => app.log.warn(m), (m) => app.log.debug(m));
 
 /* v1.2.0 — feed the per-pack rest tracker. `analyzePackLfp` needs to know when a pack
  * last moved current before it will trust pack voltage as a rested OCV; nothing was
