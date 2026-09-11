@@ -44,10 +44,13 @@ const MUTANTS = [
     why: 'Four accessories fail every poll by design, so the branch is dead and an operator grepping after "poll failed" finds no recovery line at all.',
   },
   {
-    id: 'ii. the debug duration line is re-gated the same way',
+    id: 'ii. the duration summary is re-gated on an empty failure set',
     file: SNAP,
-    find: '  } else if (o.pollDebug) {\n    lines.push(`poll ok in ${o.tookMs}ms`);',
-    to: '  } else if (o.failedCount === 0 && o.pollDebug) {\n    lines.push(`poll ok in ${o.tookMs}ms`); /* MUTANT */',
+    // v1.148.0 — repointed: the per-poll line became a periodic summary (it was
+    // 32.5% of all log bytes). The property is identical — four accessories fail
+    // every poll by design, so re-adding that guard makes the branch dead code.
+    find: '  } else if (o.pollDebug && o.summaryDue) {',
+    to: '  } else if (o.failedCount === 0 && o.pollDebug && o.summaryDue) { /* MUTANT */',
     why: 'There would be no way to obtain a poll-duration distribution below the slow threshold even with debug on.',
   },
   // ── F8 ─────────────────────────────────────────────────────────────────────

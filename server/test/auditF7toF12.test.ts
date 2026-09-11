@@ -32,10 +32,23 @@ test('★ F9: a RECOVERY is logged even while the standing accessory set still f
     'after a total poll failure an operator greps for recovery and must find it');
 });
 
-test('★ F9: the duration line is obtainable at debug with accessories failing', () => {
-  const lines = pollLogLines({ tookMs: 420, failedCount: 4, lastPollFailed: false, slowMs: 5000, pollDebug: true });
-  assert.deepEqual(lines, ['poll ok in 420ms'],
-    'otherwise there is no poll-duration distribution below the slow threshold at all');
+test('★ F9: a duration distribution is obtainable at debug with accessories failing', () => {
+  // v1.148.0 — still obtainable, now as a periodic summary rather than a line per
+  // poll. The F9 intent is unchanged: before v1.144.0 there was NO way to see poll
+  // durations below the slow threshold, because the branch was gated on an empty
+  // failure set that four accessories make impossible. What changed is the cost.
+  assert.deepEqual(
+    pollLogLines({ tookMs: 420, failedCount: 4, lastPollFailed: false, slowMs: 5000, pollDebug: true }),
+    [], 'a routine poll mid-window is silent — this was 88% of INFO lines',
+  );
+  assert.deepEqual(
+    pollLogLines({
+      tookMs: 420, failedCount: 4, lastPollFailed: false, slowMs: 5000, pollDebug: true,
+      summaryDue: true, summaryCount: 30, summaryP50Ms: 528, summaryP95Ms: 770, summaryMaxMs: 2015,
+    }),
+    ['poll duration over last 30 poll(s): p50 528ms p95 770ms max 2015ms'],
+    'the distribution still reaches the log, once per window',
+  );
 });
 
 test('F9: a healthy quiet poll still says nothing without debug', () => {

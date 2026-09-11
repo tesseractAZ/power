@@ -913,7 +913,7 @@ alarm keys on this (`STALE_MS = 3 min` in `alerts.ts`), so several guards protec
 
 `refreshAll()` = `markDeviceListAttempt()` → `listDevices()` → `setDeviceList()` →
 `getQuotaAll()` for each **online** device (in parallel; per-device errors captured via
-`setDeviceError`). Routine "poll ok" lines are demoted to debug; only **recovery**
+`setDeviceError`). Routine poll success is reported as a PERIODIC DISTRIBUTION (p50/p95/max per POLL_SUMMARY_EVERY polls, v1.148.0 — it was a line per poll and became 32.5% of all log bytes; demoting it would buy nothing because LOG_LEVEL=debug is standing and the ring captures stdout at every level); only **recovery**
 (failure→ok) and **slow** (`>= SLOW_POLL_MS = 5000`) polls stay at INFO; a failed poll
 logs at **warn**. Every 10 min a bounded **fleet-status** line dumps per-SN
 `ON/<count>msg/<age>s` (or `OFF` / `API-online/no-MQTT`).

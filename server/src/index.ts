@@ -618,8 +618,12 @@ app.get('/api/health', async (_req, reply) => {
     // `blind` is still false and this endpoint returns a clean bill of health.
     pollHealth: pollHealth(),
     // v1.144.0 — and whether the cloud is replaying a body at us (v1.142.0).
+    // v1.148.0 — via findShp2(), not a raw find(). v1.129.0 pinned that helper to
+    // the lowest SN precisely so every singleton path is consistently wrong in the
+    // same way rather than each picking a different panel. With a second SHP2 the
+    // raw find could report a different panel from the one the alarm path reads.
     shp2ContentFrozenMs: (() => {
-      const p2 = Object.values(store.get().devices).find((d: any) => d?.projection?.kind === 'shp2') as any;
+      const p2 = findShp2(store.get().devices) as { contentStaleSinceMs?: number | null } | undefined;
       return p2?.contentStaleSinceMs != null ? Date.now() - p2.contentStaleSinceMs : 0;
     })(),
     vitalsLevel: currentAssessment()?.level ?? null,
@@ -3303,7 +3307,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
       app.log.info(
         `night-charge: announced-buy calibration UNMEASURED (${buyDebiasCal.samples} eligible night(s)) — `
         + `the announcement carries no learned correction. Eligibility excludes rows with cushion_shortfall=1; `
-        + `see /api/night-charge buyDebiasBasis.`,
+        + `see /api/night-charge/status → plan.buyDebiasBasis.`,
       );
     }
   }

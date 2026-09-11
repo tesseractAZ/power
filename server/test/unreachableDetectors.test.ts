@@ -38,9 +38,20 @@ test('the recovery and debug lines keep their original failure-set semantics', (
     pollLogLines({ tookMs: 400, failedCount: 0, lastPollFailed: true, slowMs: 5_000, pollDebug: false }),
     ['poll ok in 400ms (recovered)'],
   );
+  // v1.148.0 — the per-poll success line is now a PERIODIC SUMMARY. It emitted
+  // 1,058 lines in 16.4 h (32.5% of all log bytes) and demoting it would have
+  // bought nothing: LOG_LEVEL=debug is standing, pino writes every level to
+  // stdout, and the ring captures stdout. Level is not emission.
   assert.deepEqual(
     pollLogLines({ tookMs: 400, failedCount: 0, lastPollFailed: false, slowMs: 5_000, pollDebug: true }),
-    ['poll ok in 400ms'],
+    [], 'a routine poll mid-window says nothing',
+  );
+  assert.deepEqual(
+    pollLogLines({
+      tookMs: 400, failedCount: 0, lastPollFailed: false, slowMs: 5_000, pollDebug: true,
+      summaryDue: true, summaryCount: 30, summaryP50Ms: 509, summaryP95Ms: 770, summaryMaxMs: 2015,
+    }),
+    ['poll duration over last 30 poll(s): p50 509ms p95 770ms max 2015ms'],
   );
   // A poll that is BOTH a recovery and slow reports both facts.
   const both = pollLogLines({ tookMs: 9_000, failedCount: 0, lastPollFailed: true, slowMs: 5_000, pollDebug: false });
