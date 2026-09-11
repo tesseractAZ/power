@@ -150,7 +150,18 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
   // never fabricates grid presence from a stale sample. A genuinely online SHP2 with
   // bursty MQTT self-corrects on its next message, so this only suppresses the
   // frozen-offline case — it strictly HARDENS the alarm, never weakens it.
-  if (!shp2 || !shp2.online) return 0;
+  // v1.142.0 — the same freeze, arriving through a different door. The v0.88.0
+  // guard above catches a panel that went cloud-OFFLINE. A CLOUD SHADOW is a
+  // panel that is still `online: true`, still answering every REST poll with
+  // 200 OK, and still serving the identical body — observed live for 16.0 min
+  // and 14.5 min on consecutive nights, inside armed charge windows with 4-7 kW
+  // flowing. The projection freezes in exactly the same way and the consequence
+  // is exactly the one v0.88.0 names: a frozen-high gridWatt keeps
+  // importLive=true → backstopping=true → silently MUTES a real at-floor outage
+  // that begins during the window. Treat it the same way: contribute no measured
+  // flow, fabricate no presence. See shp2Shadow.ts for why the witness is the
+  // twelve-channel watt vector and not this scalar.
+  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return 0;
   const w = shp2.projection.gridWatt ?? null;
   return w != null && Number.isFinite(w) && w > 0 ? w : 0;
 }
@@ -174,7 +185,10 @@ export function computeShp2GridConnected(devices: Record<string, DeviceSnapshot>
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
-  if (!shp2 || !shp2.online) return null;
+  // v1.142.0 — a shadowed panel's gridSta froze with everything else; a stale "1"
+  // must never assert presence into an outage, whether the panel went offline or
+  // the cloud simply stopped updating it.
+  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return null;
   return shp2.projection.gridConnected ?? null;
 }
 
