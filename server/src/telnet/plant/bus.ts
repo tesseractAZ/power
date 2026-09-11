@@ -26,7 +26,15 @@ export function renderBus(view: PlantView, data: PlantData): string[] {
   /* ── bus header ───────────────────────────────────────────────── */
   // v1.47.2 — liveness tick (see alm.ts): a static bus screen must still
   // visibly breathe so a wedged link can't impersonate a healthy quiet one.
-  out.push(divider(`MAIN BUS — SHP2 ${shp2.sn}  ·  ${shp2.deviceName}  ·  ${new Date(data.snap.generatedAt ?? Date.now()).toTimeString().slice(0, 8)}`, W));
+  // v1.145.0 — RENDER the quality. `qual` was computed here and never used
+  // (strict:true catches unused imports, not unused locals), which left BUS the
+  // only Plant screen with no staleness indication at all. Worse, the liveness
+  // tick below uses `snap.generatedAt` — which advances whether or not the SHP2
+  // actually answered — so the screen was certifying a liveness it could not
+  // claim. Every number under this header comes from the SHP2 projection; if
+  // that projection is stale the header must say so.
+  const qualTag = qual === 'good' ? '' : `  ·  ${qual === 'stale' ? c.yellow('STALE') : c.red('NO DATA')}`;
+  out.push(divider(`MAIN BUS — SHP2 ${shp2.sn}  ·  ${shp2.deviceName}  ·  ${new Date(data.snap.generatedAt ?? Date.now()).toTimeString().slice(0, 8)}${qualTag}`, W));
   const totalLoad = p.circuits.reduce((s, ch) => s + (ch.watts ?? 0), 0);
   const reserveSoc = p.backupReserveSoc ?? 0;
   const poolSoc = p.backupBatPercent ?? 0;

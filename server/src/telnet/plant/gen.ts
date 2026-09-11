@@ -181,8 +181,13 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
     const tooCold = pk.minCellTemp != null && (pk.minCellTemp * 9 / 5 + 32) <= 41;
     const lowSoc = pk.soc != null && pk.soc < 20;
     const faulted = tooHot || lowSoc || tooCold;
-    const stateName = faulted ? 'WARN' : 'NORMAL';
-    const stateCol = faulted ? c.yellow : c.green;
+    // v1.145.0 — a pack that reported NOTHING is not NORMAL. Every term above is
+    // `x != null && <test>`, so an all-null pack scores false on all three and
+    // rendered green. Absence is not evidence of health: it gets its own neutral
+    // state, the same way `deviceQuality` already fails to 'bad' on no data.
+    const reported = pk.temp != null || pk.minCellTemp != null || pk.soc != null;
+    const stateName = !reported ? 'NO DATA' : faulted ? 'WARN' : 'NORMAL';
+    const stateCol = !reported ? c.grey : faulted ? c.yellow : c.green;
     const row = '  ' + [
       padEnd((sel ? c.invert(c.whiteB(` ${i + 1} `)) : ` ${i + 1} `), 4),
       padStart(fmtPctRaw(pk.soc), 7),

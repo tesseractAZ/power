@@ -522,7 +522,10 @@ function SummaryStrip({
           label="Worst cell spread"
           value={worstSpread ? `${worstSpread.mv} mV` : '—'}
           sub={worstSpread?.tag}
-          accent={worstSpread && worstSpread.mv > 20 ? 'text-warn' : 'text-ok'}
+          // v1.145.0 — when there is no reading the value is '—' and this painted it
+          // text-ok, i.e. GREEN. The tile beside it already gets the same absence
+          // right with a neutral accent. A dash is not an all-clear.
+          accent={!worstSpread ? 'text-muted' : worstSpread.mv > 20 ? 'text-warn' : 'text-ok'}
         />
         <Tile label="Cells balancing" value={String(balancing)} accent={balancing > 0 ? 'text-accent' : 'text-muted'} />
       </div>
