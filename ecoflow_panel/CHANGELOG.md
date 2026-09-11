@@ -1,3 +1,104 @@
+## 1.149.0
+
+### Six documented claims had quietly stopped being true
+
+A documentation freshness pass, which turned up two correctness defects in the
+normative reference and one in an engine.
+
+**`DOCS.md` stated the night-charge basis gate as `bandCoverageFrac ≥ 0.9`. It is
+`0.78`.** Wrong by twelve points, in the file that is the reference for the value.
+The way it survived is the finding: `docs/PERFORMANCE.md` **identified and corrected
+this exact error on 2026-09-06** — in its own text, about its own prior snapshot —
+and nobody touched `DOCS.md`, which the correction had been measured against. A
+correction applied to one document is not applied to the codebase. Both places now
+read the named constant (`BASIS_MIN_BAND_COVERAGE`, `nightChargeAdvisor.ts:74`).
+
+`DOCS.md` also listed two of `poll_health`'s three verdict reasons; v1.148.0's
+`shp2-content-frozen` was missing. `basisBlockedBy` was undocumented.
+
+### `bandSigmaCal = 1` meant five different things
+
+The band calibrator is **shrink-only** — `Math.min(1, Math.max(PV_BAND_CAL_FLOOR,
+realized / produced))`. It can narrow a band that proves too wide; it has no
+authority to widen one that proves too narrow. So a published `1` is emitted when
+the calibration is **active and saturated** (band too narrow, nothing more it can
+do), when it **never engaged** for want of scored days — the real v1.23.0 defect,
+which sat pinned at exactly 1 in production — when the ratio lands on 1, when an
+operator override happens to be 1, and, in the durable ledger column, when there
+was **no probabilistic forecast at all** and the code wrote `?? 1`.
+
+States one and two are opposites. They published the same number.
+
+This was not found by reading code. It was found by refreshing a table: the live
+value had moved from 0.50 to 1 while realized error went 0.256 → 0.657 and band
+coverage fell 84% → 72%, closing the advisor's basis gate. **The engine is
+currently producing no night-charge plan at all** for that reason. Five days
+earlier `PERFORMANCE.md` had inspected this same field and pronounced it healthy —
+it checked whether the value was pinned at the *floor*, and never considered the
+ceiling.
+
+- **`bandSigmaCalBasis`** now publishes which of the five states produced the
+  number (`operator-override` / `shrunk` / `floor-pinned` / `saturated` /
+  `uncalibrated`) — the same companion-field shape as `strikesMeasurable` and
+  `underBuyMeasurable`.
+- **The ledger writes `null`, not `1`,** when there is no forecast to calibrate
+  against. Filing "no forecast" as "calibration neutral" in a durable column is
+  unrecoverable after the fact.
+- `scripts/mutate-band-cal-basis.mjs` — **7/7 mutants killed**, including one that
+  collapses `saturated` back into `uncalibrated` and one that restores the `?? 1`.
+
+### A mechanism for the README, because a number in prose holds nothing
+
+Every counted claim in `README.md` had drifted: **~2,380 tests** against 2,562,
+**18 harnesses** against 30, **100+ anchors** against 203, **~9,100** DOCS.md lines
+against 9,960, and *"CodeQL runs as GitHub default setup, no workflow file"* beside
+a committed `codeql.yml`. None of them failed anything.
+
+The worst was a whole paragraph explaining that `scripts/check-npm-audit.mjs`
+exists because GitHub's alerting returns empty on a private personal repository.
+That was **true when written**. The repository is public now, both endpoints return
+real data, and nothing re-checked the claim when the world changed under it. The
+script's real justification survives the correction and is now stated instead:
+**GitHub alerts notify, they do not block a merge.**
+
+`scripts/check-doc-claims.mjs` runs in CI and fails on any of these drifting. It
+has **no skip path** — a claim it cannot evaluate is a failure, because a doc
+checker that quietly waives what it cannot compute is one more instance of the
+defect it exists to catch. The test count is passed in from the job that actually
+ran the suite; without it the script runs the suite rather than waive the claim.
+
+### `docs/PERFORMANCE.md` refreshed against the live v1.148.0 deployment
+
+Data-as-of **2026-09-11 08:56 MST**. Beyond the band-calibration inversion above:
+
+- **The load over-forecast signature resolved on its own.** The prior snapshot
+  recorded 19–39 kWh of one-directional over-forecast on five consecutive nights
+  and **declined to fit a correction to it**. The current sample alternates sign at
+  a fraction of the magnitude (`loadMae` 0.178 → 0.149). Had the transient been
+  corrected blindly, the correction would now push an unbiased forecast in the
+  **unsafe** direction.
+- **`strikesMeasurable` went 0 → 1**, so `activeStrikes: 0` is now a real zero
+  rather than an inability to count — the first item in that family to resolve,
+  and it resolved by the measurement becoming possible.
+- **Two band-coverage numbers now disagree and both are correct** (72% on the
+  probabilistic route, 83.3% on the readiness gate) because they reduce different
+  populations. The operational result inverts the prior snapshot: the readiness
+  gate's band criterion came *inside* its target in the same window the advisor's
+  basis gate *closed*.
+- **The readiness gate now has two independent blockers.** The under-buy criterion
+  is still structurally unreachable, and no further nights can accrue because the
+  advisor is not planning.
+- Delivery exceeds the sized buy by **48–55% on every actuated night** (~+10 kWh)
+  against a criterion requiring bias in [0, 5] kWh — formally unmeasured, because
+  those nights are exempted by a *different* criterion's exemption.
+- The Core 3 voltage cluster has left the head of the 7-day subject list; the head
+  is now the `msg-rate-floor` telemetry family across three DPUs.
+
+`docs/NIGHT_CHARGE_ARBITRAGE_DESIGN.md` amended for v1.148.0–v1.149.0, including a
+design-level consequence not in the original: **I13's evidence supply runs through
+I6**, so a basis-gate closure is not "no buy tonight", it is a pause on the
+mechanism that would ever earn `auto`.
+
 ## 1.148.0
 
 ### The night-charge engine declined to plan, and said nothing about why

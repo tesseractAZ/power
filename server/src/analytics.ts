@@ -7686,6 +7686,23 @@ export interface ProbabilisticForecast {
   // days). realizedDailyErrHalfFrac is the measured ~80%-coverage daily
   // half-width (null until enough scored days exist).
   bandSigmaCal?: number;
+  /** v1.149.0 — which of the five states produced `bandSigmaCal`, because the
+   *  published number alone cannot say. `1` is the value when the calibration is
+   *  ACTIVE and saturated, when it is INERT for want of scored days, when the
+   *  ratio lands exactly at 1, and (at index.ts's `?? 1` fallback) when there is
+   *  no probabilistic forecast at all — four distinct states, one reading.
+   *
+   *  This was not hypothetical. The 2026-09-06 PERFORMANCE.md snapshot read 0.50
+   *  and checked only the FLOOR ambiguity ("still above its 0.4 floor —
+   *  data-driven, not floor-pinned"); five days later the same field read 1 with
+   *  realized error at 0.657, which is the `saturated` state — the band is too
+   *  NARROW and the calibrator, being `Math.min(1, …)`, has no authority to widen
+   *  it. Nothing distinguished that from the v1.23.0 defect in which the
+   *  calibration never engaged and sat pinned at exactly the same 1.
+   *
+   *  Same shape as `strikesMeasurable` / `underBuyMeasurable`: a companion field
+   *  whose job is to say whether the number beside it carries information. */
+  bandSigmaCalBasis?: PvBandCalBasis;
   realizedDailyErrHalfFrac?: number | null;
   // v1.31.0 — continuous-coverage diagnostics: scored calibration days, and the
   // share whose realized daily |error| fell inside the current band's daily
@@ -7719,6 +7736,17 @@ const Z10 = 1.282;
  * Recommend-only-MPC + display band; NOT an alarm input. */
 const PV_BAND_CAL_MIN_DAYS = 14;
 const PV_BAND_CAL_FLOOR = 0.4;   // never shrink below 40% of the raw band width
+
+/** v1.149.0 — the five states behind `bandSigmaCal`. See the field's doc comment.
+ *  `saturated` is the one that matters operationally: the calibration is working,
+ *  it has found the band too narrow, and `Math.min(1, …)` means it cannot act on
+ *  that finding. It is NOT a benign 1. */
+export type PvBandCalBasis =
+  | 'operator-override'  // PV_BAND_SIGMA_CAL set; the ratio was not consulted
+  | 'shrunk'             // engaged, ratio in (floor, 1) — actively narrowing a wide band
+  | 'floor-pinned'       // engaged, clamped UP to PV_BAND_CAL_FLOOR
+  | 'saturated'          // engaged, ratio >= 1, clamped DOWN to 1: band too narrow, no authority to widen
+  | 'uncalibrated';      // could not engage (no realized/produced half-width)
 /** v1.30.0 — skill-report window (calendar days) fed to the band calibration.
  *  The ≥PV_BAND_CAL_MIN_DAYS gate counts SCORED days (weather-covered, non-null
  *  errorPct), but the skill window bounds CALENDAR days — at the live fleet's
@@ -8001,12 +8029,19 @@ export async function computeProbabilisticForecast(
   const realizedHalfFrac = skill ? pvBandRealizedHalfFrac(skill.days, calBias) : null;
   const envCal = parsePvBandSigmaCal(process.env.PV_BAND_SIGMA_CAL);
   let bandCal = 1;
+  let bandCalBasis: PvBandCalBasis = 'uncalibrated';
   if (envCal != null) {
     bandCal = envCal;
+    bandCalBasis = 'operator-override';
   } else if (realizedHalfFrac != null && producedHalfFrac != null && producedHalfFrac > 0) {
     // Shrink-only + floored: the raw band is the safe conservative default, and
     // the floor caps how far a benign window can tighten it.
-    bandCal = Math.min(1, Math.max(PV_BAND_CAL_FLOOR, realizedHalfFrac / producedHalfFrac));
+    const ratio = realizedHalfFrac / producedHalfFrac;
+    bandCal = Math.min(1, Math.max(PV_BAND_CAL_FLOOR, ratio));
+    // Record which clamp bit, if either. `saturated` is the informative one:
+    // realized error has met or exceeded the produced half-width, so the band
+    // wants to be WIDER and this calibrator can only ever shrink.
+    bandCalBasis = ratio >= 1 ? 'saturated' : ratio <= PV_BAND_CAL_FLOOR ? 'floor-pinned' : 'shrunk';
   }
   for (let hIdx = 0; hIdx < forecast.hours.length; hIdx++) {
     const h = forecast.hours[hIdx];
@@ -8100,6 +8135,7 @@ export async function computeProbabilisticForecast(
     pFullCharge,
     uncertaintyKwhStdev: Math.round(stdevAccum * 100) / 100, // already kWh (Σ per-hour sigmaNetKwh)
     bandSigmaCal: Math.round(bandCal * 100) / 100,
+    bandSigmaCalBasis: bandCalBasis,
     realizedDailyErrHalfFrac: realizedHalfFrac != null ? Math.round(realizedHalfFrac * 1000) / 1000 : null,
     // v1.31.0 — continuous-coverage diagnostics (audit follow-up): the count of
     // scored calibration days, and the share of them whose realized daily error
