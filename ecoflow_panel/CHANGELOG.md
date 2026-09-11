@@ -1,3 +1,88 @@
+## 1.143.0
+
+### 84% of every phone push was one family that repairs itself
+
+Over 52.5 hours the operator received 50 pushes. **42 of them were
+`msg-rate-floor`** — 25 rise/resolve episodes, of which **23 lasted under 30
+minutes, median 9.0 minutes, shortest 15 seconds**. Every one self-cleared with
+no operator action available. Live telemetry agrees: riseCount 183, median
+duration 11.4 min, 51 short clears.
+
+This is the shape v0.38.0 already fixed once, for the per-circuit load-anomaly
+family, whose comment reads *"this one family fired/resolved 116× — 72% of all
+immediate notifications — burying genuinely-actionable alerts."* Same remedy, and
+the same table: the alert still appears **on screen immediately**; only the PUSH
+now waits.
+
+20 minutes is not arbitrary — it is `sessionSelfHeal`'s own starvation trigger.
+Below it the add-on is still trying to repair itself and there is nothing for a
+human to do; above it the repair has been attempted and failed, which is exactly
+when someone should hear about it. Against the observed window this suppresses 15
+of 21 rise pushes and their matching resolves — **30 of 42** — while still paging
+for every episode that outlived the heal, including a 133-minute one. It also
+absorbs most of the same-tick duplication: four devices starving in one tick
+produced four cards on four separate occasions, and none of those bursts would
+page unless they persisted.
+
+The resolve needs no dwell of its own: a resolve only pushes when the rise was
+notified, so a suppressed rise is silently followed by a suppressed resolve.
+
+### A guard whose correct operation looked exactly like its absence
+
+v1.140.0's boot orphan sweep produced **zero log lines across ten boots** —
+because its summary was guarded on there being something to retire. A clean
+sweep and a sweep that never ran were byte-identical, so there was no way to show
+the evidence gate was reaching production at all. The outcome is now logged once
+per boot unconditionally, and states how many records it examined: zero
+retirements over zero records is healthy, zero over forty is a detector that has
+stopped working.
+
+### The recorder heartbeat was debug-gated but info-emitted
+
+`RECORDER_DEBUG` decided *whether* to emit; `log()` is the INFO logger. So all
+3,103 heartbeats in the window carried `level: 30` — the same level as
+`battery-soc-alarm: crossed 20% (low)` — and pino's own filter could never
+separate them. The demotion v0.76.0 documents never actually happened on this
+install, where `LOG_LEVEL=debug` is the standing configured value. `ha apps logs`
+returns 100 lines and **76 of them were heartbeats**, cutting the operator's
+default incident window from roughly five hours to seventy-five minutes, with a
+real SoC alarm sitting in the noise. It now goes out on a real debug channel.
+
+### Why one home Core paged and its twin did not
+
+On 2026-09-09 at 14:40:23 a single `/device/list` poll reported Core 1 and Core 5
+both offline. Core 5 pushed; Core 1 produced nothing. That looked like a silent
+miss on a load-bearing Core.
+
+It was not. Core 5's MQTT `/status` had seen OFFLINE at **14:39:59**, 24 seconds
+earlier, so its dispatch dwell clock started 24 seconds sooner. Core 1's ran from
+14:40:23 to 14:41:22 — **59 seconds against a 60-second debounce**. The dwell
+worked exactly as designed, on a one-second margin.
+
+What was missing is that nothing recorded *which* of the two inputs started the
+clock, so neither an operator nor an auditor could tell why. The offline alert now
+carries an **Observed offline via** fact naming the path and the age.
+
+### The 60-second rebuild was dropping sticky clocks
+
+Found while wiring the above. `setDeviceList` rebuilds each device object from an
+explicit literal on **every poll**, and silently drops any field not named in it.
+`lastErrorAt` has been lost that way since v0.97.0 introduced it — the field whose
+entire purpose was to stop a REST error resetting the staleness clock — and
+v1.142.0's `lastQuotaAtMs` and `contentStaleSinceMs` would have gone the same way.
+
+Usually masked, because `setDeviceQuota` re-derives the quota clocks microseconds
+later in the same poll. **Not** masked when the quota fetch then fails — which is
+precisely the state in which a frozen projection matters most. All five sticky
+fields are now carried forward, and a mutant for each is in the harness.
+
+### Also
+
+`scripts/mutate-push-dwell.mjs` — 12 mutants, 12 killed. One survived the first
+run: widening the family prefix from `msg-rate-floor-` to `msg-rate` leaked a
+20-minute hold-down onto neighbouring ids with nothing to catch it, which would be
+a worse defect than the one being fixed. Closed with an explicit boundary test.
+
 ## 1.142.0
 
 ### The cloud can serve a stale shadow, and every gate we had keys on the fetch
