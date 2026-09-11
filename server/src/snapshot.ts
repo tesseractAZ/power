@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
@@ -392,10 +392,12 @@ export class SnapshotStore extends EventEmitter {
     cur.lastUpdated = nowQ;
     cur.lastQuotaAtMs = nowQ;
     // v1.142.0 — did the CONTENT move, or did the cloud replay a shadow?
+    if (this.contentFreshnessPath == null) this.loadContentFreshness(nowQ);
     const witness = shp2ContentWitness(cur.projection);
     const fresh = advanceContentFreshness(this.contentFreshness.get(sn), witness, nowQ);
     if (fresh) this.contentFreshness.set(sn, fresh); else this.contentFreshness.delete(sn);
     const stale = isContentStale(fresh, nowQ);
+    if (witness != null && fresh?.repeats === 1) this.saveContentFreshness(); // witness changed
     const wasStale = cur.contentStaleSinceMs != null;
     cur.contentStaleSinceMs = stale ? (fresh?.firstSeenMs ?? nowQ) : null;
     if (stale !== wasStale) {
@@ -411,8 +413,56 @@ export class SnapshotStore extends EventEmitter {
     this.emit('change', this.snap, sn);
   }
 
-  /** v1.142.0 — per-SN content-freshness state for the cloud-shadow detector. */
+  /**
+   * v1.142.0 — per-SN content-freshness state for the cloud-shadow detector.
+   *
+   * v1.148.0 — PERSISTED. The map was in-memory only, so every process start
+   * disarmed the fail-safe until 5 consecutive identical payloads AND 4 minutes
+   * had re-accumulated. Measured: a freshly booted process published
+   * `grid_power_home = 7618 W` alongside `shp2_payload_frozen = 0` — 7,618 being
+   * the exact value the PREVIOUS process had already declared a stale shadow
+   * ~2 minutes earlier. ~60-90 s of a 7.6 kW ghost on the alarm path, and in
+   * `resolveGridBackstop` `importLive` is the one backstop term exempt from both
+   * `poolDischargingAtFloor` and `floorWithoutFlow`, so a frozen positive reading
+   * disables the very guards that would catch it. This is the v1.140.0 restart
+   * door, one file over.
+   *
+   * ★ `firstSeenMs` is RE-STAMPED at rehydrate, deliberately. Carrying the
+   * original across downtime would let the duration half of the AND be satisfied
+   * by history, so one matching poll after a long gap would latch stale
+   * immediately. That fails safe, but it is a nuisance-alarm path: at the reserve
+   * floor it removes backstopping and can escalate a benign grid-up low-SoC to
+   * critical. The repeat count is likewise reset — what survives a restart is
+   * WHICH witness we last saw, not how long we had been seeing it.
+   */
   private contentFreshness = new Map<string, import('./shp2Shadow.js').ContentFreshness>();
+  private contentFreshnessPath: string | null = null;
+
+  /** v1.148.0 — load the shadow witness written by the previous process. */
+  private loadContentFreshness(nowMs: number): void {
+    const path = this.contentFreshnessPath
+      ?? (process.env.SHADOW_WITNESS_PATH ?? resolve(process.cwd(), config.dbPath, '..', 'shadow-witness.json'));
+    this.contentFreshnessPath = path;
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, { witness?: unknown }>;
+      for (const [sn, v] of Object.entries(raw ?? {})) {
+        if (v && typeof v.witness === 'string' && v.witness.length > 0) {
+          // Witness only. Clock and count restart — see the note above.
+          this.contentFreshness.set(sn, { witness: v.witness, firstSeenMs: nowMs, repeats: 1 });
+        }
+      }
+    } catch { /* absent or corrupt → start cold, which is the pre-v1.148.0 behaviour */ }
+  }
+
+  /** v1.148.0 — best-effort; losing it costs one re-arm window, never correctness. */
+  private saveContentFreshness(): void {
+    if (!this.contentFreshnessPath) return;
+    try {
+      const out: Record<string, { witness: string }> = {};
+      for (const [sn, f] of this.contentFreshness) out[sn] = { witness: f.witness };
+      writeFileSync(this.contentFreshnessPath, JSON.stringify(out));
+    } catch { /* best effort */ }
+  }
 
   /** Merge a delta (partial) quota into the cached raw and re-project. */
   mergeDeviceQuota(sn: string, partial: Record<string, unknown>, source: 'rest' | 'mqtt' = 'mqtt') {
@@ -721,7 +771,22 @@ export function pollHealthVerdict(o: {
   knownShp2Sns: readonly string[];
   attemptedSns: readonly string[];
   failedSns: readonly string[];
-}): { ok: true } | { ok: false; reason: 'shp2-fetch-failed' | 'shp2-not-polled'; sns: string[] } {
+  /**
+   * v1.148.0 — SNs whose payload the cloud is REPLAYING (contentStaleSinceMs set).
+   *
+   * v1.142.0 taught the CONSUMERS to distrust a shadow — computeHomeGridWatts and
+   * computeShp2GridConnected both treat one as offline — and left every GATE
+   * untouched. Measured consequence: across both live shadow firings `poll_health`
+   * stayed 'ok', /api/health returned blind:false, and `notePollOk` ran on every
+   * shadowed poll so the blind clock never aged. The diagnostic sensor moved to
+   * 240 and no verdict moved at all.
+   *
+   * This is the fourth member of the family: asked-and-FAILED (v1.86.0), never
+   * ASKED (v1.138.0), the restart door (v1.140.0), and now asked-answered-and-
+   * REPLAYED.
+   */
+  contentFrozenSns?: readonly string[];
+}): { ok: true } | { ok: false; reason: 'shp2-fetch-failed' | 'shp2-not-polled' | 'shp2-content-frozen'; sns: string[] } {
   if (o.knownShp2Sns.length === 0) return { ok: true }; // bootstrap: nothing known to be dark
   const failed = new Set(o.failedSns);
   const attempted = new Set(o.attemptedSns);
@@ -732,11 +797,21 @@ export function pollHealthVerdict(o: {
   const unasked = o.knownShp2Sns.filter((sn) => !attempted.has(sn));
   if (unasked.length) return { ok: false, reason: 'shp2-not-polled', sns: unasked };
 
+  // Asked, answered 200 OK, and handed a body the cloud is replaying. Ordered
+  // LAST because the two above are harder evidence — a fetch that failed or never
+  // happened should name itself rather than be described as frozen.
+  const frozen = new Set(o.contentFrozenSns ?? []);
+  const stale = o.knownShp2Sns.filter((sn) => frozen.has(sn));
+  if (stale.length) return { ok: false, reason: 'shp2-content-frozen', sns: stale };
+
   return { ok: true };
 }
 
 /** v1.145.0 — how often the fleet-status dump re-states an unchanged fleet at INFO. */
 export const STATUS_ANCHOR_MS = 60 * 60_000;
+
+/** v1.148.0 — polls per duration summary. 30 at a 60 s cadence = one line/30 min. */
+export const POLL_SUMMARY_EVERY = Number(process.env.POLL_SUMMARY_EVERY ?? 30);
 
 /**
  * v1.145.0 — the standing-failure heartbeat was HOURLY: 48 lines in 53 h about a
@@ -785,6 +860,12 @@ export function pollLogLines(o: {
   lastPollFailed: boolean;
   slowMs: number;
   pollDebug: boolean;
+  /** v1.148.0 — true on the tick that closes a summary window. */
+  summaryDue?: boolean;
+  summaryCount?: number;
+  summaryP50Ms?: number;
+  summaryP95Ms?: number;
+  summaryMaxMs?: number;
 }): string[] {
   const lines: string[] = [];
   // v1.144.0 — UNGATED from the failure set, finishing what v1.120.0 started for
@@ -799,8 +880,25 @@ export function pollLogLines(o: {
   // on whether an accessory answered.
   if (o.lastPollFailed) {
     lines.push(`poll ok in ${o.tookMs}ms (recovered)`);
-  } else if (o.pollDebug) {
-    lines.push(`poll ok in ${o.tookMs}ms`);
+  } else if (o.pollDebug && o.summaryDue) {
+    // v1.148.0 — a PERIODIC SUMMARY, not a line per poll.
+    //
+    // v1.144.0 ungated this correctly (four accessories fail every poll by
+    // design, so the old `failedCount === 0` guard made it dead code) and then
+    // emitted it 60 times an hour: 1,058 lines in 16.4 h, 32.5% of ALL log bytes
+    // and 88.3% of INFO lines. Net effect of the three-release hygiene campaign
+    // was +52% volume and forensic reach x0.65 — the opposite of its claim.
+    //
+    // Demoting it to debug would buy NOTHING: LOG_LEVEL=debug is the standing
+    // option on this install, pino writes every level to stdout, and the ring
+    // captures stdout. Level is not emission. The only lever that moves bytes is
+    // emitting fewer lines, so the distribution is reported once per window
+    // instead of once per poll. `(recovered)` and `poll slow:` still carry the
+    // incident signal per-event, which is what an operator greps for.
+    lines.push(
+      `poll duration over last ${o.summaryCount} poll(s): p50 ${o.summaryP50Ms}ms `
+      + `p95 ${o.summaryP95Ms}ms max ${o.summaryMaxMs}ms`,
+    );
   }
   // Unconditional on the failure set — that is the whole point of the fix.
   if (o.tookMs >= o.slowMs) {
@@ -875,8 +973,24 @@ export function startPollLoop(
           log(`poll: all device fetches recovered`);
         }
       }
+      // v1.148.0 — accumulate durations; report once per window.
+      pollDurations.push(tookMs);
+      const summaryDue = pollDurations.length >= POLL_SUMMARY_EVERY;
+      let summary: { count: number; p50: number; p95: number; max: number } | null = null;
+      if (summaryDue) {
+        const sorted = [...pollDurations].sort((a, b) => a - b);
+        summary = {
+          count: sorted.length,
+          p50: sorted[Math.floor(sorted.length * 0.5)],
+          p95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
+          max: sorted[sorted.length - 1],
+        };
+        pollDurations.length = 0;
+      }
       for (const line of pollLogLines({
         tookMs, failedCount: failedSns.length, lastPollFailed, slowMs: SLOW_POLL_MS, pollDebug: POLL_DEBUG,
+        summaryDue, summaryCount: summary?.count, summaryP50Ms: summary?.p50,
+        summaryP95Ms: summary?.p95, summaryMaxMs: summary?.max,
       })) log(line);
       lastPollFailed = false;
       // v1.86.0 — the telemetry-blind detector must not count a poll whose
@@ -890,13 +1004,18 @@ export function startPollLoop(
       const devicesNow = store.get().devices;
       const health = pollHealthVerdict({
         knownShp2Sns: alarmPathShp2Sns(devicesNow), attemptedSns, failedSns,
+        contentFrozenSns: Object.keys(devicesNow).filter(
+          (sn) => (devicesNow[sn] as { contentStaleSinceMs?: number | null })?.contentStaleSinceMs != null,
+        ),
       });
       notePollHealth(health.ok, health.ok ? null : health.reason);
       if (!health.ok) {
         notePollFailed(
           health.reason === 'shp2-fetch-failed'
             ? `SHP2 quota fetch failed (${health.sns.join(', ')})`
-            : `SHP2 not polled — cloud-offline, so this poll is NOT evidence the alarm path can see (${health.sns.join(', ')})`,
+            : health.reason === 'shp2-content-frozen'
+              ? `SHP2 payload is a REPLAYED SHADOW — the fetch succeeded but the content is not moving (${health.sns.join(', ')})`
+              : `SHP2 not polled — cloud-offline, so this poll is NOT evidence the alarm path can see (${health.sns.join(', ')})`,
         );
       } else {
         notePollOk(Date.now()); // v1.69.0 — feeds the telemetry-blind detector
@@ -926,6 +1045,8 @@ export function startPollLoop(
   // away. Runs every 10 min; bounded output (one log line covers the fleet).
   const STATUS_DUMP_INTERVAL_MS = 10 * 60 * 1000;
   /** v1.145.0 — the last fleet state vector emitted at INFO, and when. */
+  /** v1.148.0 — poll durations awaiting their periodic summary. */
+  const pollDurations: number[] = [];
   let lastStatusSignature: string | null = null;
   let lastStatusInfoMs = 0;
   const dumpTimer = setInterval(() => {
