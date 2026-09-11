@@ -1,3 +1,40 @@
+## 1.147.0
+
+### The last three vanish-on-empty sections
+
+v1.131.1 rejected this pattern in `AdvancedInsightsCard` and said exactly why:
+*"a blank row reads as a healthy one. This detector published nothing for its
+entire life and looked fine doing it."* Three sections still took the vanish path
+— charge-curve fingerprint drift, internal-resistance trend, and the
+ambient-coupled thermal forecast. A detector that **cannot** produce a value
+looked identical to one that was never enabled, on the screen a human reads.
+
+**The reason is not invented.** Two of the three reports already publish a
+per-item `status` computed server-side, and `insufficient-cadence` carries an
+explicit comment saying it exists *"so the UI stops showing a perpetual spinner
+for a measurement that can't complete"*. The UI was discarding the exact field
+that had been added for it — and hiding the section outright is worse than the
+spinner it was meant to replace: the measurement cannot complete **and** nothing
+says so.
+
+Each section now renders whenever its report exists, and states which empty it is:
+
+| section | now says |
+|---|---|
+| charge-curve | building the baseline vs no matching SoC checkpoints yet |
+| internal resistance | **will not converge at the current poll cadence** vs still accumulating |
+| ambient thermal | no temperature pairs recorded vs no fit converged |
+
+The ambient report publishes no `status`, so its reason is derived from what it
+does carry — samples and fit quality. The empty states are `text-muted`: an
+absence renders neutral, never the healthy colour.
+
+`scripts/mutate-insights-empty.mjs` — 6 mutants, 6 killed. Two survived the first
+run, both the same weakness this project keeps hitting: assertions that matched
+text the mutant left in place while killing the branch that used it. One now pins
+the live ternary rather than the literal; the other checks the empty-state div
+itself rather than "text-muted appears somewhere in the section".
+
 ## 1.146.0
 
 ### A lock-step comment that had failed three times is now a test

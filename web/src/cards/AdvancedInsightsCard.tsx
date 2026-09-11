@@ -423,8 +423,22 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
         </Section>
       )}
 
-      {show('charge-curve') && charge && charge.packs.some((p) => p.meanDriftMv != null) && (
+      {show('charge-curve') && charge && (
         <Section title="Charge-curve fingerprint drift" subtitle="V at SoC checkpoints, recent vs baseline">
+          {/* v1.147.0 — this section used to VANISH when no pack had a drift figure,
+              which is the pattern v1.131.1 rejected three sections up: a detector that
+              published nothing for its entire life looked exactly like one that was
+              never enabled. The server already computes a per-pack `status` saying
+              WHY — surface it rather than discarding it. */}
+          {!charge.packs.some((p) => p.meanDriftMv != null) && (
+            <div className="text-xs text-muted">
+              {charge.packs.length === 0
+                ? 'No packs reporting — nothing to fingerprint yet.'
+                : charge.packs.some((p) => p.status === 'baseline')
+                  ? 'Building the baseline — a drift figure needs repeat charge sessions at the same SoC checkpoints.'
+                  : 'No charge sessions recorded at matching SoC checkpoints yet.'}
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {charge.packs.filter((p) => p.meanDriftMv != null).slice(0, 10).map((p) => (
               <div key={`${p.sn}-${p.packNum}`} className="bg-panel2/50 border border-line rounded-md p-2 text-xs">
@@ -446,8 +460,21 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
         </Section>
       )}
 
-      {show('internal-resistance') && ir && ir.devices.some((d) => d.recentMilliohms != null) && (
+      {show('internal-resistance') && ir && (
         <Section title="Internal resistance trend" subtitle="dV/dI from snapshots — per Core (bus-level)">
+          {/* v1.147.0 — `insufficient-cadence` is documented server-side as the HONEST
+              TERMINAL state, added "so the UI stops showing a perpetual spinner for a
+              measurement that can't complete". Hiding the whole section was worse than
+              the spinner: it cannot complete AND nothing says so. */}
+          {!ir.devices.some((d) => d.recentMilliohms != null) && (
+            <div className="text-xs text-muted">
+              {ir.devices.some((d) => d.status === 'insufficient-cadence')
+                ? 'Cannot be measured at the current poll cadence — there is raw V/A history but it yields no clean dV/dI pairs. This will not converge without faster sampling.'
+                : ir.devices.some((d) => d.status === 'learning')
+                  ? 'Accumulating dV/dI pairs — needs more before a resistance is published.'
+                  : 'No usable V/A history yet.'}
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {ir.devices.filter((d) => d.recentMilliohms != null).map((d) => (
               <div key={d.sn} className="bg-panel2/50 border border-line rounded-md p-2 text-xs flex items-baseline gap-2">
@@ -499,7 +526,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
         </Section>
       )}
 
-      {show('ambient-thermal') && ambient && ambient.packs.some((p) => p.predictedPeak24hC != null) && (
+      {show('ambient-thermal') && ambient && (
         <Section
           title="Ambient-coupled thermal forecast"
           subtitle="Predicted pack-temp peaks in next 24 h"
@@ -518,6 +545,21 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
             title: 'Pack-temperature peak forecast fitted from ambient temperature + load; R² is the fit quality.',
           }}
         >
+          {/* v1.147.0 — the third vanish-on-empty section. Unlike its two siblings
+              this report publishes no `status`, so the reason is derived from what
+              it does carry: a fit needs samples AND a usable r². Saying which of
+              those is missing is the difference between "not computed yet" and
+              "this will not converge", and the operator cannot tell them apart
+              from an absent panel. */}
+          {!ambient.packs.some((p) => p.predictedPeak24hC != null) && (
+            <div className="text-xs text-muted">
+              {ambient.packs.length === 0
+                ? 'No packs reporting — nothing to fit.'
+                : ambient.packs.every((p) => (p.samples ?? 0) === 0)
+                  ? 'No ambient/pack-temperature pairs recorded yet — the fit needs history across a temperature range.'
+                  : 'Samples are accumulating but no fit has converged yet; a forecast needs a usable ambient-to-pack correlation.'}
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {ambient.packs.filter((p) => p.predictedPeak24hC != null).slice(0, 10).map((p) => {
               const tF = p.predictedPeak24hC != null ? Math.round(p.predictedPeak24hC * 1.8 + 32) : null;
