@@ -111,14 +111,43 @@ test('F4: a device that never changes state carries no stamp', () => {
 const src = (f: string) =>
   readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/', f), 'utf8');
 
-test('★ F5: the recorder heartbeat goes out on the DEBUG channel', () => {
+test('★ F5: the recorder heartbeat goes out on the DEBUG channel — as a PERIODIC SUMMARY', () => {
   // It was debug-GATED but info-EMITTED, so all 3,103 heartbeats in a 52 h window
   // carried level 30 — the same level as `battery-soc-alarm: crossed 20% (low)`.
   // pino's filter could never separate them, and `ha apps logs` returns 100 lines
-  // of which 76 were heartbeats.
+  // of which 76 were heartbeats. v1.143.0 moved it to the debug channel.
+  //
+  // v1.150.0 — THE DEMOTION BOUGHT NOTHING, and this assertion is widened to say
+  // why rather than being relaxed. `LOG_LEVEL=debug` is standing on the
+  // deployment and pino writes every level to stdout, which the ring captures:
+  // 1,274 of these lines sat in the live ring at `"level":20`. The line was
+  // 3,084 of 5,965 ring lines (51.8%) and, once v1.148.0's poll fix landed,
+  // 67.0% of what remained — costing roughly half the visible incident window.
+  //
+  // Level is not emission. The channel assertion is KEPT (it is still correct and
+  // still worth pinning) and an emission-COUNT assertion is added beside it, so a
+  // future refactor cannot quietly restore a per-minute line on the debug channel
+  // and satisfy this test the way the old one-line version would have.
   const rec = src('recorder.ts');
-  assert.match(rec, /debug\(`recorder: \$\{recordedSamplesSinceTick\} samples in last/,
+  assert.match(rec, /debug\(\s*`recorder: \$\{recordedSamplesTotal\} samples over \$\{mins\} min`/,
     'the sample heartbeat must use the debug channel, not the info logger');
+  assert.doesNotMatch(rec, /debug\(`recorder: \$\{recordedSamplesSinceTick\} samples in last/,
+    'the PER-MINUTE line must be gone — demoting it again is not a fix, it was already at debug');
+  assert.match(rec, /const SAMPLE_SUMMARY_EVERY = (\d+);/,
+    'the emission count must be a NAMED constant so the cadence is inspectable');
+  const every = Number(rec.match(/const SAMPLE_SUMMARY_EVERY = (\d+);/)![1]);
+  assert.ok(every >= 10, `summary cadence ${every} must be a real reduction on ~60/h, not a token one`);
+  // Pin the COMPARISON, not just the constant. A mutation that leaves
+  // SAMPLE_SUMMARY_EVERY = 30 in place and changes the gate to `>= 1` restores
+  // the per-minute line while every constant-valued assertion above still
+  // passes — the mutation harness found exactly that survivor. The live branch
+  // is what emits, so the live branch is what must be asserted.
+  assert.match(rec, /if \(recordedSamplesWindows >= SAMPLE_SUMMARY_EVERY\) \{/,
+    'the emission gate must compare against the NAMED constant, not an inline literal');
+  // A quiet stretch must remain distinguishable from the summary not firing —
+  // otherwise the fix reintroduces "absence is not success" at a lower rate.
+  assert.match(rec, /min with activity/,
+    'the summary must report how many windows had activity, so a total of 0 is legible');
   assert.ok(!/RECORDER_DEBUG\) \{\s*\n\s*log\(`recorder: \$\{recordedSamplesSinceTick\}/.test(rec),
     'and must not be re-gated on RECORDER_DEBUG through the info logger');
   assert.match(src('index.ts'), /createRecorder\(store, \(m\) => app\.log\.info\(m\), \(m\) => app\.log\.debug\(m\)\)/,

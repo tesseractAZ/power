@@ -80,10 +80,15 @@ const MUTANTS = [
   },
   // ── F5: the level, not the gate ────────────────────────────────────────────
   {
+    // v1.150.0 — REPOINTED, not deleted. The heartbeat became a periodic
+    // distribution (the per-minute line was 51.8% of the ring even AT debug,
+    // because LOG_LEVEL=debug is standing), so the old anchor text no longer
+    // exists. The property this mutant protects — that the line is emitted on
+    // the debug channel and not the info logger — did not go away with it.
     id: 'vii. ★ the recorder heartbeat returns to the INFO logger',
     file: REC,
-    find: '        debug(`recorder: ${recordedSamplesSinceTick} samples in last',
-    to: '        log(`recorder: ${recordedSamplesSinceTick} samples in last', // eslint-disable-line -- MUTANT
+    find: '        debug(\n          `recorder: ${recordedSamplesTotal} samples over ${mins} min`',
+    to: '        log(\n          `recorder: ${recordedSamplesTotal} samples over ${mins} min`', // eslint-disable-line -- MUTANT
     why: 'It was debug-GATED but info-EMITTED, so all 3,103 heartbeats carried level 30 and pino could never filter them. 76 of the operator’s 100 default log lines were this one line.',
   },
   {
