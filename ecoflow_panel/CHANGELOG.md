@@ -1,3 +1,79 @@
+## 1.152.0
+
+### Two of the three defects in this release are mine, from this morning
+
+A log audit over the 48 h ring — six independent lenses, every finding put to an
+adversarial verifier, 24 of 38 refuted — found that two features shipped hours
+earlier did not do what their own log lines claimed.
+
+**The v1.151.0 boot pre-warm was inert and logged success anyway.** It fired
+`analytics.report('equipmentHealth')` immediately after `listen`, and completed in
+**578 ms and 694 ms** on the two boots — against its own comment claiming a
+**9,007 ms** cold scan. The request is posted before the store's first `change`
+event, so the worker still held its initial `devices: {}`; `allDpus({})` returned
+`[]`, both loops were skipped, and `if (dpus.length > 0)` declined to cache. It
+warmed nothing, cached nothing, and emitted *"equipment-health pre-warmed"*.
+
+A false-success line in the audit log — the exact defect class this codebase keeps
+finding — shipped by the release that was fixing one.
+
+It is **deleted rather than repaired**, because the machinery already existed and
+was not checked for: `equipmentHealth` is in `WARM_REPORTS` and the worker's own
+`firstWarm` polls every 500 ms and warms as soon as `hasDevices()` is true —
+correctly gated on a non-empty snapshot, which is precisely what the pre-warm got
+wrong. There was never a first-visitor stall to fix. A second warmer would only
+duplicate it and reintroduce the race.
+
+**The v1.150.0 per-device gap sweep was blind to the case it was built for.**
+`lastInsertBySn` was created empty at every boot and written only by an in-process
+insert from that SN, so a device **already dark when the process starts** never
+entered the Map the sweep iterates.
+
+That is not a corner case. The nine-day Core 2 blackout that motivated the sweep
+spans restarts by definition, and this add-on booted **eleven times** in the 48 h
+window the audit examined. Unseeded, the detector covered only a blackout that
+both begins mid-run *and* persists 6 h inside that same process — the narrower,
+less dangerous case. It also could never EXTEND a recorded gap across a restart,
+so a nine-day blackout would have been ledgered as a ~6 h one.
+
+- The clocks are now **seeded from `SELECT sn, MAX(ts) FROM samples GROUP BY sn`**
+  at boot — the per-SN form of the fleet probe already in the same file, and the
+  same repair v1.131.0 applied to the sibling msg-rate-floor detector. Synthetic
+  SNs and bench spares are excluded (off-cadence, or dark by design), and a failed
+  seed **says so**: an unseeded sweep is indistinguishable from a working one.
+
+### Every boot blocks the whole add-on for 9.3–30.2 seconds
+
+Measured on all **eleven** boots in the ring (max 30.151 s). `createRecorder` is a
+non-async function with no `await`, so the event loop cannot yield: for that whole
+window there is **no HTTP listener, no MQTT ingest, no poll and no alarm
+evaluation**. It is 92.5–97.8% of the time from *"serving built UI"* to *"API
+listening"*, and nothing is logged inside it.
+
+The leading suspect is the boot-path `ANALYZE samples`, whose justifying comment is
+stale on both counts it rests on — *"a single index"* (`samples` now carries two)
+and *"single-digit ms even at millions of rows"* (the database is ~1.72 GB under
+1825-day retention).
+
+**That is a hypothesis, so this release measures instead of deleting.** Per-phase
+timings (`open`, `schema+migrations`, `analyze`) now emit one line per boot. If
+`analyze` dominates, the stale comment is the defect and ANALYZE becomes
+conditional — it is a planner-stats refresh, not a correctness requirement. If
+`open` dominates it is WAL recovery or cache warm-up and ANALYZE is innocent.
+Deleting a query that keeps the planner honest on a table this size, on a
+life-safety system, on a guess, is not a trade worth making.
+
+*What the audit also established, and is NOT a defect: a threshold crossed inside
+the blind window is announced LATE, not lost — `batterySocAlarm` persists its
+armed state and tests crossings by LEVEL, verified across the ring's longest
+outage.*
+
+`scripts/mutate-dark-core.mjs` — **12/12**. Two survived the first run, both
+because an assertion matched text the mutant left in place: one kept the "seeding
+FAILED" string while never emitting it, the other dropped the exclusion from the
+SQL while leaving `.all(...restartGapExcludedSns)` on the next line. Both are now
+pinned to the live call and the live WHERE clause.
+
 ## 1.151.0
 
 ### One report was re-deriving two months of history every ten minutes

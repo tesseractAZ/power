@@ -169,3 +169,83 @@ test('v1.150.0 — the per-device threshold is far above a routine reconnect and
   assert.ok(hours >= 1, `per-device threshold ${hours}h must be well above a routine reconnect`);
   assert.ok(hours <= 24, `per-device threshold ${hours}h must be well below the 9-day blackout it exists to catch`);
 });
+
+/* ── v1.152.0 — what the log audit found in v1.150.0 itself ──────────── */
+
+test('★ v1.152.0 — per-device gap clocks are SEEDED from persisted samples at boot', () => {
+  // THE DEFECT THE AUDIT FOUND IN v1.150.0. `lastInsertBySn` was created empty on
+  // every start and written only by an in-process insert from that SN. A device
+  // that is ALREADY DARK when the process starts never writes, so it never entered
+  // the Map the sweep iterates — and the sweep was therefore blind to exactly the
+  // case it was built for.
+  //
+  // This is not a corner case: the nine-day Core 2 blackout spans restarts by
+  // definition, and the add-on booted ELEVEN times in the 48 h window the audit
+  // examined. Unseeded, the detector covered only a blackout that both begins
+  // mid-run AND persists 6 h inside that same process.
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(__dir, '../src/recorder.ts'), 'utf8');
+
+  const i = src.indexOf('seed the PER-DEVICE clocks');
+  assert.ok(i > 0, 'the seeding block must be present');
+  const block = src.slice(i, i + 1200);
+
+  assert.match(block, /SELECT sn, MAX\(ts\) AS maxTs FROM samples/,
+    'the seed must read per-SN MAX(ts) — the per-SN form of the fleet probe already in this file');
+  assert.match(block, /GROUP BY sn/);
+  assert.match(block, /lastInsertBySn\.set\(r\.sn, Number\(r\.maxTs\)\)/,
+    'each SN must land in the Map the sweep iterates, or seeding is decorative');
+  // Pin the WHERE CLAUSE, not the identifier: a mutant that drops the exclusion
+  // from the SQL leaves `.all(...restartGapExcludedSns)` on the next line, so
+  // merely matching the name passes against a query that sweeps everything.
+  assert.match(block, /FROM samples WHERE sn NOT IN \(\$\{restartGapExcludedSns/,
+    'synthetic SNs and bench spares must be excluded IN THE QUERY — they are off-cadence or dark BY DESIGN');
+  // A silent seeding failure would restore v1.150.0 blindness with no trace. Pin
+  // the log CALL, not the message text — a mutant that keeps the string but never
+  // emits it satisfies a bare text match while being exactly as silent.
+  assert.match(block, /\blog\(`recorder: per-device gap clock seeding FAILED/,
+    'a failed seed must SAY so — an unseeded sweep looks identical to a working one');
+});
+
+test('★ v1.152.0 — the inert boot pre-warm is GONE, not merely gated', () => {
+  // v1.151.0 fired analytics.report('equipmentHealth') right after listen. The
+  // audit measured it completing in 578 ms and 694 ms against its own comment
+  // claiming a 9,007 ms cold scan: the request was posted before the store's first
+  // 'change', so the worker still held `devices: {}`, allDpus({}) returned [], and
+  // `if (dpus.length > 0)` declined to cache. It warmed nothing and logged success.
+  //
+  // Deleted rather than repaired because the machinery already existed and was not
+  // checked for — `equipmentHealth` is in WARM_REPORTS and the worker's firstWarm
+  // polls until hasDevices() is true. A second warmer here would duplicate it and
+  // reintroduce the same race.
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const idx = readFileSync(resolve(__dir, '../src/index.ts'), 'utf8');
+  assert.doesNotMatch(idx, /void analytics\.report\('equipmentHealth'\)/,
+    'the boot pre-warm call must be gone');
+  assert.doesNotMatch(idx, /log\.info\(`analytics: equipment-health pre-warmed/,
+    'and with it the unconditional success line');
+
+  // The machinery it duplicated must still be there, or removing it regresses warmth.
+  const reports = readFileSync(resolve(__dir, '../src/reports.ts'), 'utf8');
+  assert.match(reports, /'equipmentHealth',/, 'equipmentHealth must remain in WARM_REPORTS');
+  const worker = readFileSync(resolve(__dir, '../src/analyticsWorker.ts'), 'utf8');
+  assert.match(worker, /if \(hasDevices\(\)\) \{ clearInterval\(firstWarm\); void warm\(\); \}/,
+    'the worker firstWarm must still gate on a NON-EMPTY snapshot — the thing the pre-warm got wrong');
+});
+
+test('★ v1.152.0 — the boot window is instrumented per phase', () => {
+  // The audit measured 9.3–30.2 s of fully blocked boot (no HTTP, MQTT, poll or
+  // alarm evaluation) with NOTHING logged inside it. ANALYZE is the leading
+  // suspect — its justifying comment is stale on both counts ("a single index";
+  // "single-digit ms") — but that is a hypothesis, so measure before deleting a
+  // query that keeps the planner honest on a 1.72 GB table.
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(__dir, '../src/recorder.ts'), 'utf8');
+  assert.match(src, /recorder: boot phases — \$\{tOpen\}, \$\{tSchema\}, \$\{tAnalyze\}/,
+    'all three phases must be reported, or the measurement cannot attribute the cost');
+  // The phases must be captured at the right places to be attributable at all.
+  assert.match(src, /const db = new DatabaseSync\(dbPath\);\s*\n\s*const tOpen = phase\('open'\);/,
+    'open must be timed around the DatabaseSync constructor');
+  assert.match(src, /const tAnalyze = phase\('analyze'\);/,
+    'analyze must be timed separately from schema+migrations');
+});
