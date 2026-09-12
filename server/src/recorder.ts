@@ -620,7 +620,27 @@ export function createRecorder(
   const dbPath = resolve(process.cwd(), config.dbPath);
   mkdirSync(dirname(dbPath), { recursive: true });
   log(`recorder: opening ${dbPath}`);
+  // v1.152.0 — INSTRUMENT THE BOOT WINDOW.
+  //
+  // A log audit measured 9.3-30.2 s between "opening" and "samples retention" on
+  // ALL ELEVEN boots in a 48 h ring (max 30.151 s). Nothing is logged inside it,
+  // and `createRecorder` is a non-async function with no await, so the event loop
+  // cannot yield: for that whole window there is no HTTP listener, no MQTT ingest,
+  // no poll and no alarm evaluation. It is 92.5-97.8% of the time from "serving
+  // built UI" to "API listening".
+  //
+  // The leading suspect is the ANALYZE below, whose own justifying comment is
+  // stale on both counts it rests on ("a single index" — `samples` now carries
+  // two; "single-digit ms even at millions of rows" — the database is ~1.72 GB
+  // under a 1825-day retention). But that is a HYPOTHESIS, and the honest first
+  // move on a life-safety system is to measure rather than to delete a query
+  // whose purpose is keeping the planner on a table this size. These timings make
+  // the next decision evidence-based; they cost one line per boot.
+  const bootT0 = Date.now();
+  let phaseT = bootT0;
+  const phase = (name: string) => { const d = Date.now() - phaseT; phaseT = Date.now(); return `${name} ${d}ms`; };
   const db = new DatabaseSync(dbPath);
+  const tOpen = phase('open');
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -779,11 +799,19 @@ export function createRecorder(
   // samples skew (e.g. one metric having 50× the rows of another). ANALYZE
   // on every startup is cheap on a single index — single-digit ms even at
   // millions of rows — and lets the planner keep pace with growth.
+  const tSchema = phase('schema+migrations');
   try {
     db.exec(`ANALYZE samples;`);
   } catch (e: any) {
     log(`recorder: ANALYZE skipped (${e?.message ?? e})`);
   }
+  const tAnalyze = phase('analyze');
+  // One line, once per boot. If `analyze` dominates, the stale comment above is
+  // the defect and the fix is to make ANALYZE conditional (it is a planner-stats
+  // refresh, not a correctness requirement). If `open` dominates it is WAL
+  // recovery or page-cache warm-up and ANALYZE is innocent. Either way the next
+  // change is made against a measurement instead of a guess.
+  log(`recorder: boot phases — ${tOpen}, ${tSchema}, ${tAnalyze} (total ${Date.now() - bootT0}ms, db ${dbPath})`);
 
   const insert = db.prepare(`INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)`);
 
@@ -816,7 +844,28 @@ export function createRecorder(
    *  would be pure noise. 6 h is far below the nine-day blackout this exists to
    *  catch and far above a routine reconnect. */
   const PER_DEVICE_GAP_THRESHOLD_MS = 6 * 60 * 60 * 1000;
-  /** Last insert per SN, for the per-device sweep. */
+  /** Last insert per SN, for the per-device sweep.
+   *
+   *  v1.152.0 — SEEDED FROM THE DATABASE AT BOOT. In v1.150.0 this Map was created
+   *  empty on every start and written only by an in-process insert from that SN,
+   *  which made the sweep blind to the exact case it was built for: a device that
+   *  is ALREADY DARK when the process starts never writes, so it never entered the
+   *  Map, so the sweep never considered it.
+   *
+   *  That is not a corner case here. The nine-day Core 2 blackout that motivated
+   *  the sweep spans restarts by definition, and this add-on booted ELEVEN times
+   *  in the 48 h window that audit examined. Without seeding, the detector covered
+   *  only a blackout that both begins mid-run AND persists 6 h inside that same
+   *  process — the narrower, less dangerous case.
+   *
+   *  Seeding also repairs the second half: a recorded gap could never be EXTENDED
+   *  across a restart (the SN could not re-enter the Map, so the dedupe/extend path
+   *  never advanced `endMs`), which would have ledgered a nine-day blackout as a
+   *  ~6 h one.
+   *
+   *  The pattern is the repo's own: the restart-spanning FLEET probe below already
+   *  reads `MAX(ts)` from `samples`, and v1.131.0 fixed the sibling msg-rate-floor
+   *  detector the same way. This is the per-SN form of that query. */
   const lastInsertBySn = new Map<string, number>();
   /** SNs whose gap is already recorded — cleared when the SN writes again, so
    *  one blackout yields ONE record rather than one per batch for its duration. */
@@ -950,6 +999,24 @@ export function createRecorder(
     // mask a pre-crash telemetry stall this detector exists to ledger.
     // v1.121.0 — roster-aware bench set (the static literal is stale since 08-20).
     const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, NIGHT_CHARGE_SN, ...benchSpareSns()];
+    // v1.152.0 — seed the PER-DEVICE clocks from the same table, so a blackout that
+    // straddles this restart is visible on the first post-boot insert instead of
+    // being erased by it. Same exclusion list: a synthetic SN is off-cadence by
+    // design and must not be swept, and a bench spare is dark by design.
+    try {
+      const perSn = db.prepare(
+        `SELECT sn, MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')}) GROUP BY sn`,
+      ).all(...restartGapExcludedSns) as Array<{ sn: string; maxTs: number | bigint | null }>;
+      for (const r of perSn) {
+        if (r.maxTs == null) continue;
+        lastInsertBySn.set(r.sn, Number(r.maxTs));
+      }
+      if (perSn.length) log(`recorder: seeded per-device gap clocks for ${perSn.length} SN(s) from persisted samples`);
+    } catch (e: any) {
+      // Never let seeding break boot — an unseeded sweep is the v1.150.0 behaviour,
+      // which is degraded but not broken. Say so rather than failing silently.
+      log(`recorder: per-device gap clock seeding FAILED (${e?.message ?? e}) — a blackout spanning this restart will not be detected`);
+    }
     const row = db.prepare(
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;

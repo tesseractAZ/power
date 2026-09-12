@@ -5891,24 +5891,25 @@ app.log.info(
   + ` — node ${process.version}, pid ${process.pid}`,
 );
 
-// v1.151.0 — BOOT PRE-WARM for the one expensive analytics report.
+// v1.152.0 — the v1.151.0 boot pre-warm was REMOVED, not repaired.
 //
-// `equipmentHealth` measured 9,007 ms cold against 14 ms warm on the live Pi;
-// every other analytics endpoint measured 10–25 ms. Because the analytics worker
-// is single-threaded, that cold computation is a head-of-line block: six
-// concurrent requests were observed completing together at ~20.2 s, and the
-// affected endpoints are exactly the ones the dashboard fetches on load. So the
-// stall lands on the FIRST person to open the UI after every restart — and this
-// add-on restarts on every deploy and on the host's daily maintenance bounce.
+// It fired `analytics.report('equipmentHealth')` immediately after `listen`, and
+// a log audit measured it completing in 578 ms and 694 ms on two boots — against
+// its own comment claiming a 9,007 ms cold scan. It was inert: the request is
+// posted before the store's first 'change' event, so the worker still held its
+// initial `devices: {}` (analyticsWorker.ts), `allDpus({})` returned [], both
+// loops were skipped, and `if (dpus.length > 0)` declined to cache. It warmed
+// nothing, cached nothing, and logged "equipment-health pre-warmed" anyway.
 //
-// Fire-and-forget AFTER listen, so it never delays the port coming up and a
-// failure can never take the process down with it. v1.151.0 also makes the
-// underlying query incremental, so this is the only time the full 60-day scan
-// runs in a process's life.
-void analytics.report('equipmentHealth').then(
-  () => app.log.info('analytics: equipment-health pre-warmed (the cold 60-day MPPT/standby scan)'),
-  (e: unknown) => app.log.warn(`analytics: equipment-health pre-warm failed (${(e as Error)?.message ?? e}) — the first UI request will pay the cold cost`),
-);
+// That is a false-success line in the audit log — the exact defect class this
+// codebase keeps finding, shipped by the release that was fixing one.
+//
+// It is deleted rather than gated because the machinery ALREADY EXISTED and was
+// not checked for: `equipmentHealth` is in WARM_REPORTS (reports.ts) and the
+// worker's own `firstWarm` (analyticsWorker.ts) polls every 500 ms and warms as
+// soon as `hasDevices()` is true — correctly gated on a non-empty snapshot,
+// which is precisely what the pre-warm got wrong. Re-adding a second warmer
+// here would duplicate it and reintroduce the race.
 
 // v0.60.0 — survive a transient DNS/network bounce (the daily CoreDNS/AppArmor
 // maintenance window crashed the add-on with exit 255) but re-raise a genuinely
