@@ -5113,6 +5113,7 @@ export function coreCoverageByDay(
     let covered = true;
     let worstSn: string | null = null;
     let worstFrac: number | null = null;
+    let evaluated = 0;
     const dayEnd = dayStart + 86_400_000;
     for (const [sn, present] of presentBySn) {
       // v1.94.0 — a core that had not JOINED the fleet yet on this day cannot
@@ -5123,11 +5124,24 @@ export function coreCoverageByDay(
         const joined = firstInWindowMs.get(sn);
         if (joined == null || joined >= dayEnd) continue;
       }
+      evaluated++;
       const hit = daylight.reduce((n, he) => n + (present.has(he) ? 1 : 0), 0);
       const frac = hit / daylight.length;
       if (worstFrac == null || frac < worstFrac) { worstFrac = frac; worstSn = sn; }
       if (frac < minFrac) covered = false;
     }
+    // v1.150.0 — a day on which EVERY core was skipped reported `covered: true`.
+    //
+    // `covered` starts true and the only write to false is inside the loop, which
+    // the skipBeforeJoin `continue` bypasses. So when every SN is skipped the
+    // loop body never runs, nothing sets covered=false, and a day with full
+    // daylight and NOT ONE reporting core was published as covered — with
+    // worstSn/worstFrac null, so the row carried no hint either.
+    //
+    // This is the same defect class as the gate it sits in: absence read as
+    // success. A day nobody measured is not a covered day, it is an unevaluable
+    // one, and the distinction is the whole point of the gate.
+    if (presentBySn.size > 0 && evaluated === 0) covered = false;
     out.set(dayStart, { covered, daylightHours: daylight.length, worstSn, worstFrac });
   }
   return out;

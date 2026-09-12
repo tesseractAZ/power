@@ -58,6 +58,18 @@ export interface TelemetryGap {
    * anchor matches a clean-shutdown marker: the stop was DELIBERATE (add-on
    * update/restart/deploy), not a power loss. Optional + additive. */
   graceful?: boolean;
+  /** v1.150.0 — the SN that went silent, when the gap is PER-DEVICE rather than
+   *  fleet-wide. Absent on a fleet gap, which is the original v0.30.0 shape.
+   *
+   *  Why this exists: the fleet detector sets `sawHomeInsert` on ANY non-bench
+   *  home SN (see `record()`), so ONE surviving core resets the clock for the
+   *  whole fleet and a single-core blackout is invisible to it BY CONSTRUCTION.
+   *  Core 2 (Y711ZAB59GBC0482) recorded ZERO samples of EVERY metric from
+   *  2026-08-11 to 2026-08-19 — nine days, a third of the wired fleet — and the
+   *  detector produced no record and no alert, because Cores 1 and 3 kept
+   *  writing. The silence was found six weeks later, by reading a forecast
+   *  table, only because it had corrupted the night-charge basis gate. */
+  sn?: string;
 }
 
 /**
@@ -798,6 +810,17 @@ export function createRecorder(
   // durable marker (NOT synthetic samples — those would corrupt the
   // byte-identical history + energy integration). Surfaced at /api/telemetry-gaps.
   const GAP_THRESHOLD_MS = 3 * MAX_INTERVAL_MS;   // 15 min — comfortably above the 5-min heartbeat
+  /** v1.150.0 — per-device silence threshold. Deliberately MUCH longer than the
+   *  fleet's 15 min: a single core drops its cloud session and returns routinely
+   *  (the documented WiFi-loss/MQTT-wedge behaviour), and a 15-min per-core bar
+   *  would be pure noise. 6 h is far below the nine-day blackout this exists to
+   *  catch and far above a routine reconnect. */
+  const PER_DEVICE_GAP_THRESHOLD_MS = 6 * 60 * 60 * 1000;
+  /** Last insert per SN, for the per-device sweep. */
+  const lastInsertBySn = new Map<string, number>();
+  /** SNs whose gap is already recorded — cleared when the SN writes again, so
+   *  one blackout yields ONE record rather than one per batch for its duration. */
+  const perDeviceGapOpen = new Set<string>();
   // v1.13.0 (review F10 + F22) — the RESTART path uses a tighter floor: a restart
   // that lost even one full heartbeat interval of coverage is real, operator-
   // relevant dark time the 15-min in-process threshold hid. In-process stalls keep
@@ -840,16 +863,21 @@ export function createRecorder(
     } catch { return []; }
   })();
 
-  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean }) {
+  function recordTelemetryGap(startMs: number, endMs: number, opts?: { restartSpanning?: boolean; graceful?: boolean; sn?: string }) {
     // v0.80.0 — an ONGOING blackout re-detects at EVERY boot with the same
     // startMs (no home sample landed in between), e.g. consecutive restarts
     // inside one multi-hour power outage. Extend the existing record in place
     // instead of appending an overlapping duplicate, so the sidecar counts one
     // outage exactly once (with its true, growing duration). In-process gaps
     // can't collide this way (lastHomeInsertTs advances past each one).
-    const prior = opts?.restartSpanning
-      ? telemetryGapsLog.find((g) => g.restartSpanning === true && g.startMs === startMs)
-      : undefined;
+    const prior = opts?.sn
+      // v1.150.0 — a per-device gap dedupes on (sn, startMs). Without this it
+      // would share the fleet record's identity and a device blackout could
+      // silently extend an unrelated restart-spanning gap.
+      ? telemetryGapsLog.find((g) => g.sn === opts.sn && g.startMs === startMs)
+      : opts?.restartSpanning
+        ? telemetryGapsLog.find((g) => g.restartSpanning === true && g.startMs === startMs)
+        : undefined;
     const gap: TelemetryGap = prior ?? { startMs, endMs, durationMs: endMs - startMs, detectedAt: endMs };
     if (prior) {
       prior.endMs = endMs;
@@ -858,6 +886,7 @@ export function createRecorder(
     } else {
       if (opts?.restartSpanning) gap.restartSpanning = true;
       if (opts?.graceful) gap.graceful = true;
+      if (opts?.sn) gap.sn = opts.sn;
       telemetryGapsLog.push(gap);
     }
     if (telemetryGapsLog.length > GAPS_MAX) telemetryGapsLog.splice(0, telemetryGapsLog.length - GAPS_MAX);
@@ -871,7 +900,12 @@ export function createRecorder(
     // Both variants share the "TELEMETRY GAP — no home-device samples for N min"
     // stem so log scanners bucket them together; only the tail distinguishes a
     // restart-spanning blackout (v0.80.0) from an in-process stall (v0.30.0).
-    if (opts?.restartSpanning) {
+    if (opts?.sn) {
+      // v1.150.0 — a SINGLE device went dark while the rest of the fleet kept
+      // writing. Named separately because the fleet stem would be a lie: home
+      // samples were arriving the whole time, just not from this SN.
+      log(`recorder: ⚠ DEVICE TELEMETRY GAP — ${opts.sn} wrote no samples for ${mins} min (${range}) while other home devices kept reporting; anything summed over the fleet in that window UNDER-COUNTS`);
+    } else if (opts?.restartSpanning) {
       const cause = opts?.graceful ? 'a deliberate add-on stop/update' : 'host down or add-on stopped';
       log(`recorder: ⚠ TELEMETRY GAP — no home-device samples for ${mins} min (${range}) spanning a restart (${cause}); history in that window is unrecoverable`);
     } else {
@@ -989,12 +1023,36 @@ export function createRecorder(
         last.set(`${s.sn}|${s.metric}`, { ts: now, value: s.value });
         written++;
         if (!isBenchSpareSn(s.sn)) sawHomeInsert = true;
+        // v1.150.0 — per-SN clock for the staleness sweep above. Stamped for
+        // every SN including synthetics; the sweep filters what it reports.
+        lastInsertBySn.set(s.sn, now);
+        perDeviceGapOpen.delete(s.sn);   // it is writing again — re-arm
       }
       db.prepare('COMMIT').run();
     } catch (e) {
       db.prepare('ROLLBACK').run();
       throw e;
     }
+    // v1.150.0 — PER-DEVICE staleness sweep, before the fleet heartbeat below.
+    //
+    // The fleet detector cannot see a single-core blackout: it resets on any
+    // surviving home write. So sweep every home SN we have ever seen and record
+    // a per-device gap for any that has been silent past the threshold, whether
+    // or not IT wrote in this batch. A dark core writes nothing, so an
+    // insert-triggered check on its OWN inserts would never fire — the sweep has
+    // to be driven by SOMEONE ELSE'S write, which is exactly what makes the
+    // fleet clock useless here and this loop necessary.
+    if (sawHomeInsert) {
+      for (const [sn, lastMs] of lastInsertBySn) {
+        if (isBenchSpareSn(sn)) continue;            // a bench spare is dark BY DESIGN
+        if (perDeviceGapOpen.has(sn)) continue;      // already recorded; do not re-report every batch
+        if (detectTelemetryGap(lastMs, now, PER_DEVICE_GAP_THRESHOLD_MS)) {
+          recordTelemetryGap(lastMs, now, { sn });
+          perDeviceGapOpen.add(sn);
+        }
+      }
+    }
+
     // v0.30.0 — fleet telemetry-gap heartbeat. A home-device write just landed;
     // if the previous home write was long ago, telemetry was silent in between.
     if (sawHomeInsert) {
@@ -1039,20 +1097,53 @@ export function createRecorder(
     const tickNowMs = Date.now();
     if (tickNowMs - lastSampleLogAt >= 60_000) {
       // v0.76.0 — this once-per-minute heartbeat carries no signal in steady
-      // state (it fires whenever ANY sample lands, ~7687 lines over 52h). Demote
-      // routine activity to debug; an actual telemetry GAP / record failure /
-      // BMS anomaly is logged separately above & below and keeps its own level.
-      // v1.143.0 — emitted through the DEBUG channel, so pino's level filter does
-      // the work and the RECORDER_DEBUG conditional is no longer load-bearing.
-      // Kept as a cheap short-circuit only.
-      if (recordedSamplesSinceTick > 0) {
-        debug(`recorder: ${recordedSamplesSinceTick} samples in last ${Math.round((tickNowMs - lastSampleLogAt) / 1000)}s (peak burst ${recordedSamplesPeak})`);
+      // state. v1.143.0 demoted it to the DEBUG channel to cut volume.
+      //
+      // v1.150.0 — THE DEMOTION BOUGHT NOTHING, MEASURED. `LOG_LEVEL=debug` is
+      // standing on this deployment and pino writes every level to stdout, which
+      // the ring captures: 1,274 of these lines sit in the live ring at
+      // `"level":20` right now. The line was 3,084 of 5,965 ring lines (51.8%)
+      // and 426 KB of 938 KB (45.7%) — and with v1.148.0's poll-summary fix live,
+      // it became 67.0% of what remains, the single largest source on the box.
+      //
+      // The cost is the incident window itself: the default 100-line log view
+      // spans a median of 46.3 minutes with this line, and 81.0 minutes without.
+      // It was consuming roughly half the operator's visible history.
+      //
+      // Level is not emission. The fix is the shape v1.148.0 already proved on
+      // the poll line: accumulate, and emit ONE distribution per N windows.
+      recordedSamplesWindows++;
+      recordedSamplesTotal += recordedSamplesSinceTick;
+      recordedSamplesWindowPeak = Math.max(recordedSamplesWindowPeak, recordedSamplesPeak);
+      if (recordedSamplesSinceTick > 0) recordedSamplesActiveWindows++;
+      if (recordedSamplesWindows >= SAMPLE_SUMMARY_EVERY) {
+        const mins = recordedSamplesWindows;
+        debug(
+          `recorder: ${recordedSamplesTotal} samples over ${mins} min`
+          + ` (mean ${Math.round(recordedSamplesTotal / mins)}/min, peak burst ${recordedSamplesWindowPeak},`
+          + ` ${recordedSamplesActiveWindows}/${mins} min with activity)`,
+        );
+        recordedSamplesWindows = 0;
+        recordedSamplesTotal = 0;
+        recordedSamplesWindowPeak = 0;
+        recordedSamplesActiveWindows = 0;
       }
       recordedSamplesSinceTick = 0;
       recordedSamplesPeak = 0;
       lastSampleLogAt = tickNowMs;
     }
   }
+  /** v1.150.0 — one summary per 30 one-minute windows: ~2/h instead of ~59.4/h,
+   *  a 30x cut on the largest single log source. 30 min is well inside the ring's
+   *  ~52 h reach, so the distribution is still fine-grained enough to locate a
+   *  recording stall, while an ACTUAL stall keeps its own separate line (the
+   *  `activeWindows` term below reports quiet minutes explicitly, so a total of 0
+   *  is distinguishable from the summary not having been emitted). */
+  const SAMPLE_SUMMARY_EVERY = 30;
+  let recordedSamplesWindows = 0;
+  let recordedSamplesTotal = 0;
+  let recordedSamplesWindowPeak = 0;
+  let recordedSamplesActiveWindows = 0;
   // v0.9.74 — sample-write log throttling state. See recordSamples() above.
   let recordedSamplesSinceTick = 0;
   let recordedSamplesPeak = 0;

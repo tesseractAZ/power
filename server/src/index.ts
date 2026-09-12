@@ -3640,6 +3640,14 @@ function integrateWh(pts: Array<{ ts: number; value: number }>, positiveOnly: bo
 }
 
 /** Fraction of [startMs, endMs) covered by samples, by 5-min buckets present. */
+/** v1.150.0 — minimum PER-CORE PV coverage required before a fleet PV sum may be
+ *  written to the DURABLE night-charge ledger. Mirrors the long-standing
+ *  `GRID_HOME_MIN_COVERAGE = 0.9` precedent (analytics.ts) rather than inventing
+ *  a second convention: both answer "did we actually measure enough of this
+ *  window to publish a total?", and 0.9 is the value this codebase already
+ *  decided that question with. Applied to the WORST core, never the mean. */
+export const PV_LEDGER_MIN_CORE_COVERAGE = 0.9;
+
 function coverageFrac(pts: Array<{ ts: number; value: number }>, startMs: number, endMs: number): number {
   const span = endMs - startMs;
   if (span <= 0) return 0;
@@ -3798,12 +3806,41 @@ function scoreNightRow(
   // Actual PV = summed pv_total over the SHP2-connected home DPUs (the same
   // basis the forecast PV is built from); actual load = SHP2 panel_load. Both
   // over the forecast horizon [issue, +24 h].
+  //
+  // v1.150.0 — PER-CORE COVERAGE GATE. This sum previously had none at all, and
+  // it is the more dangerous of the two ungated PV sums in this codebase: its
+  // output is written PERMANENTLY into the never-pruned night-charge ledger as
+  // `actual_pv_kwh`, feeding `pv_err_frac` / `pv_in_band` (readiness band
+  // coverage) and, through `buy_err_kwh`, the HARD under-buy safety criterion.
+  // A transient skill-report error ages out of a 30-day window; a bad ledger row
+  // is durable safety evidence and does not.
+  //
+  // The failure it admits is not hypothetical. Core 2 recorded ZERO samples of
+  // every metric for nine days (2026-08-11..08-19) while Cores 1 and 3 kept
+  // writing. Summing `pv_total` over the roster during such a window silently
+  // yields a fraction of true production — measured at 32% of the vendor's own
+  // daily figure — with nothing in the number saying so.
+  //
+  // Null over a deflated total, the same rule the rest of this file follows.
   const homeSns = shp2ConnectedDpuSns(store.get().devices);
   let actualPvKwh: number | null = null;
+  let actualPvCoverage: number | null = null;
   if (homeSns.size) {
     let pvWh = 0;
-    for (const sn of homeSns) pvWh += integrateWh(recorder.query(sn, 'pv_total', fcSpanStart, fcSpanEnd), true);
-    actualPvKwh = round2(pvWh / 1000);
+    let worstCov = 1;
+    for (const sn of homeSns) {
+      const pts = recorder.query(sn, 'pv_total', fcSpanStart, fcSpanEnd);
+      pvWh += integrateWh(pts, true);
+      // Per-core, not fleet-averaged: one dark core in three averages to a
+      // healthy-looking 0.67 while the total is a third short. The MINIMUM is
+      // the only summary that cannot hide a single dark member.
+      worstCov = Math.min(worstCov, coverageFrac(pts, fcSpanStart, fcSpanEnd));
+    }
+    actualPvCoverage = round2(worstCov);
+    actualPvKwh = worstCov >= PV_LEDGER_MIN_CORE_COVERAGE ? round2(pvWh / 1000) : null;
+    if (actualPvKwh == null) {
+      app.log.warn(`night-charge ledger: actual_pv_kwh WITHHELD — worst per-core PV coverage ${worstCov.toFixed(2)} < ${PV_LEDGER_MIN_CORE_COVERAGE} over the scored span; a fleet sum across a dark core under-counts and this column is durable`);
+    }
   }
   const actualLoadKwh = loadPts.length ? round2(integrateWh(loadPts, false) / 1000) : null;
 
