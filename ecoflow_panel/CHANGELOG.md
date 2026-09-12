@@ -1,3 +1,102 @@
+## 1.150.0
+
+### A third of the fleet went dark for nine days and nothing said so
+
+Core 2 (`Y711ZAB59GBC0482`) recorded **zero samples of every metric from
+2026-08-11 to 2026-08-19**. No log line, no alert, no telemetry-gap record.
+
+The gap detector sets `sawHomeInsert` on **any** non-bench home SN, so Cores 1
+and 3 writing normally reset the fleet clock on every batch. A single-core
+blackout is invisible to it *by construction* — and a dark core writes nothing,
+so a check driven by its own inserts could never fire either.
+
+It surfaced six weeks later, from a forecast table, only as a second-order
+effect: fleet PV sums taken across that window returned **32%** of true
+production (measured against the SHP2's own daily register), the phantom
+"forecast misses" saturated the PV band calibrator, and the **night-charge basis
+gate closed**. The system's own answer to "is telemetry healthy?" was yes
+throughout.
+
+- **A per-device staleness sweep**, driven by *any* home write rather than the
+  silent device's own. 6 h threshold — far above a routine cloud-session drop,
+  far below nine days. One record per blackout, not one per batch. Bench spares
+  exempt (they are dark by design). The gap record carries the `sn` and a
+  distinct log stem: the fleet wording would be a lie, since home samples were
+  arriving the whole time.
+
+### The durable ledger could write a deflated PV total, permanently
+
+`index.ts`'s night-charge ledger summed `pv_total` over the roster with **no
+coverage gate at all**. Its output is written into the never-pruned ledger as
+`actual_pv_kwh`, feeding `pv_err_frac` / `pv_in_band` (readiness band coverage)
+and, through `buy_err_kwh`, the **HARD under-buy safety criterion**.
+
+A skill-report error ages out of a 30-day window. A bad ledger row is durable
+safety evidence and does not.
+
+- Gated on `PV_LEDGER_MIN_CORE_COVERAGE = 0.9`, mirroring the existing
+  `GRID_HOME_MIN_COVERAGE` precedent rather than inventing a second convention.
+- Reduced with **MIN across cores, never a mean** — one dark core in three
+  averages to a healthy-looking 0.67 while the total is a third short.
+- Below the floor the column records **null**, and says so in the log.
+
+### A day nobody measured was reported as covered
+
+`coreCoverageByDay` initialises `covered = true` and the only write to `false`
+lives inside the loop body that `skipBeforeJoin`'s `continue` bypasses. When
+every core was skipped, the loop never ran, nothing set it false, and a day with
+full daylight and **not one evaluated core** was published as covered — with
+`worstSn`/`worstFrac` null, so the row carried no hint either.
+
+Absence read as success, inside the gate that exists to catch exactly that.
+
+### The recorder heartbeat was half the incident window
+
+`recorder: N samples in last 60s` fired **59.34 times/hour**: 3,084 of 5,965
+lines in the live ring (51.8%) and 426 KB of 938 KB (45.7%). With v1.148.0's
+poll-summary fix live it became **67.0% of everything that remained** — the
+single largest log source on the deployment.
+
+v1.143.0 demoted it to the debug channel. **That bought nothing, measured:**
+`LOG_LEVEL=debug` is standing and pino writes every level to stdout, which the
+ring captures — 1,274 of those lines sit in the ring at `"level":20` right now.
+The default 100-line log view spanned a median of **46.3 minutes** with this
+line and **81.0 minutes** without it.
+
+Level is not emission. Now one distribution per 30 windows (~2/h instead of
+~59.4/h), reporting mean, peak burst, and how many windows had activity — so a
+total of zero stays distinguishable from the summary not having fired.
+
+### Held back deliberately, and why
+
+- **The retroactive membership filter is NOT fixed here.** `computeForecastSkill`
+  resolves the roster once at report time and applies it to 30 days of history,
+  so Core 3 — a home-pool core through 08-19 with 18.2–22.8 kWh/day **sitting in
+  the recorder** — is excluded from those days purely because it is on the bench
+  today. Correcting it nulls the eight bad days, which reopens the basis gate
+  *and* narrows the published band **3.5×** in one step. The artifact ages out of
+  the 30-day window on its own; the fix belongs after that, measured against a
+  clean baseline rather than layered on top of a live distortion.
+- **Robustifying the band quantile was tested and rejected.** Against the live 29
+  errors: median → 66%, 20% trimmed mean → 66%, median+MAD → 69%, P80-of-clean
+  → 66% — every one *worse* than the current 72%. Coverage counts errors under
+  `producedHalfFrac × bandCal`; the quantile only sets `bandCal`, and a smaller
+  quantile floor-pins it at 0.4 and collapses the threshold. The intuitive fix is
+  a regression in a life-safety gate.
+- **`chronicNoiseSilenced` (Rule 3) is left inert on purpose.** Its numerator
+  counts long **clears**, not long **active** time, so a genuinely standing
+  chronic alert scores 0.0 and the longer it stands the further it is from
+  firing. Repairing it makes an alarm-**suppression** rule fire more, which is
+  the unsafe direction — an owner decision, not a maintenance one.
+
+`scripts/mutate-dark-core.mjs` — **9/9 mutants killed**, including one that
+deletes the sweep, one that averages per-core coverage instead of minimising it,
+and one that restores the per-minute heartbeat by changing the comparison while
+leaving the constant intact (which survived the first run and forced the test to
+pin the live branch rather than the constant). `mutate-push-dwell.mjs`'s
+heartbeat anchor was **repointed, not deleted** — the property it protects
+outlived the line it was written against.
+
 ## 1.149.0
 
 ### Six documented claims had quietly stopped being true
