@@ -95,6 +95,27 @@ const MUTANTS = [
     why: 'One dark core in three averages to a healthy-looking 0.67 while the total is a third short — the exact arithmetic that let this episode through.',
   },
   {
+    id: 'x. ★ the per-device gap clocks stop being seeded at boot (the v1.150.0 blindness)',
+    file: RECORDER,
+    find: '        lastInsertBySn.set(r.sn, Number(r.maxTs));',
+    to: '        /* MUTANT */',
+    why: 'Restores the shipped defect: a device already dark at boot never enters the Map the sweep iterates, so a blackout spanning a restart is invisible — and this add-on booted ELEVEN times in 48 h.',
+  },
+  {
+    id: 'xi. ★ a failed seed becomes silent',
+    file: RECORDER,
+    find: "      log(`recorder: per-device gap clock seeding FAILED",
+    to: "      void 0; (() => `recorder: per-device gap clock seeding FAILED", // eslint-disable-line -- MUTANT
+    why: 'An unseeded sweep looks EXACTLY like a working one; without the line, v1.150.0 blindness returns with no trace at all.',
+  },
+  {
+    id: 'xii. the seed stops excluding synthetic SNs and bench spares',
+    file: RECORDER,
+    find: '        `SELECT sn, MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => \'?\').join(\',\')}) GROUP BY sn`,',
+    to: '        `SELECT sn, MAX(ts) AS maxTs FROM samples GROUP BY sn`, /* MUTANT */',
+    why: 'Bench spares are dark BY DESIGN and synthetic SNs are off-cadence; sweeping them raises a permanent false gap that buries the real signal.',
+  },
+  {
     id: 'ix. the recorder heartbeat returns to a line per minute',
     file: RECORDER,
     find: '      if (recordedSamplesWindows >= SAMPLE_SUMMARY_EVERY) {',
