@@ -6278,13 +6278,89 @@ let equipmentHealthCache: { ts: number; value: EquipmentHealth } | null = null;
 // queryMulti additionally cuts 3 SQL round-trips per string to 1.
 const EQ_HEALTH_BUCKET_SEC = 300; // 5 min — see note above
 
+/* ── v1.151.0 — the 60-day series cache, with incremental top-up ──────────
+ *
+ * MEASURED PROBLEM. `computeEquipmentHealth` pulled a SIXTY-DAY window of three
+ * metrics per MPPT string per DPU, plus two more per DPU for inverter standby —
+ * 40 metric-series of 60 days each — and `MPPT_EFF_TTL_MS` is 10 minutes, so it
+ * re-derived two months of history every ten minutes, forever. Cold cost measured
+ * on the live Pi: **9,007 ms**; warm: 14 ms. Every other analytics endpoint
+ * measured 10–25 ms. It was the only expensive report in the set.
+ *
+ * The analytics worker is single-threaded, so while those 9 s run, every other
+ * report queues behind it: six concurrent requests were observed completing
+ * together at ~20.2 s. That is NOT a CPU-contention problem — the host is a
+ * 4-core Pi measured at load average 0.22 with 98.8% idle — so adding threads
+ * would buy nothing but SQLite connections, duplicated heap and cache-coherence
+ * surface. The work itself was the defect.
+ *
+ * WHY INCREMENTAL IS SAFE HERE. `queryMulti`'s bucketing is
+ * `CAST((ts / bucketMs) AS INTEGER) * bucketMs`, i.e. aligned to ABSOLUTE epoch
+ * boundaries. A given bucket therefore carries the same `bucket_ts` whenever it
+ * is computed, and only the TRAILING bucket can still gain samples. So a cached
+ * series can be topped up by re-fetching from one bucket before the last fetch
+ * and splicing — the result is byte-identical to a full 60-day re-query, which
+ * is what lets this be a pure performance change.
+ *
+ * The baseline is deliberately NOT re-derived as a time slice: callers take the
+ * earliest 30% of SAMPLES (`Math.floor(series.length * 0.3)`), which is not a
+ * time range when the series has gaps. Caching the whole series and letting the
+ * existing arithmetic run over it unchanged preserves that exactly. */
+interface EqSeriesEntry { toMs: number; byMetric: Map<string, Array<{ ts: number; value: number }>>; }
+const eqSeriesCache = new Map<string, EqSeriesEntry>();
+
+/** Drop-in for `recorder.queryMulti` over the equipment-health window, serving
+ *  the bulk of the 60-day span from memory and querying only the new tail. */
+export function eqQueryMulti(
+  recorder: Recorder,
+  sn: string,
+  metrics: string[],
+  sinceMs: number,
+  nowMs: number,
+): Map<string, Array<{ ts: number; value: number }>> {
+  const bucketMs = EQ_HEALTH_BUCKET_SEC * 1000;
+  const key = `${sn}|${metrics.join(',')}`;
+  const cached = eqSeriesCache.get(key);
+  // Usable only if it overlaps the window we now want; otherwise fall back to a
+  // full query rather than stitching across a hole.
+  if (cached && cached.toMs > sinceMs && cached.toMs <= nowMs) {
+    // Re-fetch from one bucket BEFORE the last fetch so the previously-partial
+    // trailing bucket is replaced by its completed value, never double-counted.
+    const from = Math.floor(cached.toMs / bucketMs) * bucketMs - bucketMs;
+    const tail = recorder.queryMulti(sn, metrics, from, nowMs, EQ_HEALTH_BUCKET_SEC);
+    const out = new Map<string, Array<{ ts: number; value: number }>>();
+    for (const m of metrics) {
+      const kept = (cached.byMetric.get(m) ?? []).filter((p) => p.ts >= sinceMs && p.ts < from);
+      out.set(m, kept.concat(tail.get(m) ?? []));
+    }
+    eqSeriesCache.set(key, { toMs: nowMs, byMetric: out });
+    return out;
+  }
+  const full = recorder.queryMulti(sn, metrics, sinceMs, nowMs, EQ_HEALTH_BUCKET_SEC);
+  eqSeriesCache.set(key, { toMs: nowMs, byMetric: full });
+  return full;
+}
+
+/** Exported so the boot pre-warm and tests can force a cold path. */
+export function resetEquipmentHealthCaches(): void {
+  eqSeriesCache.clear();
+  equipmentHealthCache = null;
+}
+
+/** Expire only the RESULT cache, leaving the series cache warm — exactly what
+ *  the 10-minute `MPPT_EFF_TTL_MS` expiry does in production. Needed so a test
+ *  can observe that a recompute reads tails rather than re-scanning 60 days. */
+export function resetEquipmentHealthCachesResultOnly(): void {
+  equipmentHealthCache = null;
+}
+
 function ratioSeries(
   recorder: Recorder,
   sn: string,
   watts: string, volts: string, amps: string,
   since: number, now: number,
 ): Array<{ ts: number; eff: number }> {
-  const byMetric = recorder.queryMulti(sn, [watts, volts, amps], since, now, EQ_HEALTH_BUCKET_SEC);
+  const byMetric = eqQueryMulti(recorder, sn, [watts, volts, amps], since, now);
   const wPts = byMetric.get(watts) ?? [];
   if (wPts.length === 0) return [];
   const vPts = byMetric.get(volts) ?? [];
@@ -6376,7 +6452,7 @@ export function computeEquipmentHealth(
   for (const d of dpus) {
     const baselineSince = now - BASELINE_MS;
     // queryMulti — one SQL call for both ac_out + pv_total per DPU.
-    const byMetric = recorder.queryMulti(d.sn, ['ac_out', 'pv_total'], baselineSince, now, EQ_HEALTH_BUCKET_SEC);
+    const byMetric = eqQueryMulti(recorder, d.sn, ['ac_out', 'pv_total'], baselineSince, now);
     const aoPts = byMetric.get('ac_out') ?? [];
     const pvPts = byMetric.get('pv_total') ?? [];
     if (aoPts.length === 0) {

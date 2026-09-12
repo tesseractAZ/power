@@ -1,3 +1,66 @@
+## 1.151.0
+
+### One report was re-deriving two months of history every ten minutes
+
+Measured on the live deployment, not inferred: `/api/equipment-health` cost
+**9,007 ms cold** against **14 ms warm**. Every other analytics endpoint measured
+**10–25 ms**. It was the only expensive report in the set.
+
+`computeEquipmentHealth` pulled a **sixty-day** window of three metrics per MPPT
+string per DPU, plus two more per DPU for inverter standby — **40 metric-series
+of 60 days each** — and `MPPT_EFF_TTL_MS` is **10 minutes**. So it re-scanned two
+months of samples every ten minutes, forever. The query was already indexed
+(`idx_samples_sn_metric_ts`) and already bucketed at 5 minutes; it was simply
+enormous. A 60-day *baseline* is by definition slow-moving, and re-deriving it at
+a 10-minute cadence was the defect.
+
+Because the analytics worker is single-threaded, that cost is a **head-of-line
+block**: six concurrent requests were observed completing together at ~20.2 s,
+and the affected endpoints are exactly the ones the dashboard fetches on load.
+
+**This is not a threading problem, and the measurement says so.** The host is a
+4-core Pi at **load average 0.22** with **98.8% idle**. Threads address
+contention; there was none. The five other requests in that burst were not
+computing for 20 seconds — they were *waiting* on one slow one. Adding worker
+threads would have bought a second SQLite connection per thread against a 1.72 GB
+database, duplicated heap on a host already at 3.7 GB used, and cross-thread cache
+coherence — new failure surface on a life-safety system, to route around a single
+bad query instead of fixing it.
+
+- **The 60-day series is now cached and topped up incrementally.** Only the new
+  tail is queried per recompute — measured in test at a **>100× reduction** in
+  queried span.
+- **Boot pre-warm.** The cold cost used to land on whoever opened the UI first
+  after a restart, which is every deploy and the host's daily maintenance bounce.
+  Fire-and-forget after `listen`, so it never delays the port or takes the process
+  down.
+
+### Why incremental is safe here
+
+`queryMulti` buckets on `CAST((ts / bucketMs) AS INTEGER) * bucketMs` — aligned
+to **absolute epoch boundaries**. A given bucket therefore carries the same
+`bucket_ts` whenever it is computed, and only the **trailing** bucket can still
+gain samples. Re-fetching from one bucket before the last fetch and splicing is
+byte-identical to a full re-query, which is what makes this a pure performance
+change rather than a behaviour change.
+
+The baseline is deliberately **not** re-expressed as a time slice: callers take
+the earliest 30% of *samples* (`Math.floor(series.length * 0.3)`), which is not a
+time range once the series has gaps. Caching the whole series and letting the
+existing arithmetic run over it unchanged preserves that exactly.
+
+`scripts/mutate-eq-health-cache.mjs` — **7/7 killed**. Three survived the first
+run and each exposed a real gap: a mutant that never refreshes the cache (invisible
+until a *third* call), one that drops the metric list from the cache key (invisible
+until two different metric sets hit one device), and one that makes
+`computeEquipmentHealth` bypass the helper entirely (invisible while the tests only
+called the helper directly — a helper being correct proves nothing if the
+production call site does not use it).
+
+A caching bug here would not crash. It would produce a slightly wrong efficiency
+baseline feeding an MPPT **drift** figure whose whole purpose is detecting slow
+degradation — reading as exactly the thing the report exists to find.
+
 ## 1.150.0
 
 ### A third of the fleet went dark for nine days and nothing said so
