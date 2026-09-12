@@ -1,3 +1,43 @@
+## 1.153.0
+
+### The boot freeze was 99.99% one SQL statement
+
+v1.152.0 instrumented the boot window rather than guessing at it. The live Pi
+answered on the first boot:
+
+```
+recorder: boot phases — open 0ms, schema+migrations 1ms, analyze 9725ms (total 9726ms)
+```
+
+**9,725 ms of 9,726 ms.** `open` was 0 ms and the entire schema + nine migration
+probes took 1 ms. Every add-on boot spent ten seconds inside one `ANALYZE samples`
+— and `createRecorder` is a non-async function with no `await`, so for that whole
+window there is no HTTP listener, no MQTT ingest, no poll and no alarm evaluation.
+
+The statement's own justifying comment claimed it was *"cheap on a single index —
+single-digit ms even at millions of rows"*. It was wrong on both counts it rested
+on: `samples` carries **two** indexes now, and the database is ~1.72 GB under an
+1825-day retention. A full ANALYZE reads every index entry, so the cost scales with
+the table — it was always going to get worse.
+
+- **`PRAGMA analysis_limit=400`**, SQLite's own mechanism, now caps how many rows
+  ANALYZE samples per index. Stats stay good enough for plan selection — which is
+  all they were ever for — and the scan stops being proportional to table size, so
+  this cannot quietly return as the database grows.
+- The per-phase instrumentation **stays**. It is how this was found, and it is how
+  a regression would be.
+
+Deliberately not done: **deleting** ANALYZE (the planner genuinely needs statistics
+on a table this skewed), or **deferring** it off the boot path (it would still block
+for ~10 s, just during live operation instead — strictly worse on an alarm path).
+
+`scripts/mutate-dark-core.mjs` — **14/14**. One mutant survived the first run and
+the fault was the MUTANT, not the test: it claimed to move the bound after ANALYZE
+but its replacement left the pragma textually before it, so it never tested the
+ordering it was named for. Corrected to mutate the ANALYZE site, and the test now
+also rejects a trailing `analysis_limit` — which would be inert while making the
+code read as if the ordering were satisfied.
+
 ## 1.152.0
 
 ### Two of the three defects in this release are mine, from this morning

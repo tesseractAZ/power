@@ -249,3 +249,31 @@ test('★ v1.152.0 — the boot window is instrumented per phase', () => {
   assert.match(src, /const tAnalyze = phase\('analyze'\);/,
     'analyze must be timed separately from schema+migrations');
 });
+
+test('★ v1.153.0 — the boot ANALYZE is BOUNDED, and the bound precedes it', () => {
+  // v1.152.0's instrumentation measured the boot window on the live Pi:
+  //   "recorder: boot phases — open 0ms, schema+migrations 1ms, analyze 9725ms"
+  // 99.99% of a window during which the add-on has no HTTP listener, no MQTT
+  // ingest, no poll and no alarm evaluation. PRAGMA analysis_limit caps the rows
+  // ANALYZE samples per index, so the cost stops scaling with table size.
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(__dir, '../src/recorder.ts'), 'utf8');
+
+  const lim = src.indexOf('PRAGMA analysis_limit=400;');
+  const ana = src.indexOf('ANALYZE samples;');
+  assert.ok(lim > 0, 'the analysis limit must be set');
+  assert.ok(ana > 0, 'ANALYZE must still run — the planner needs stats on a skewed table this size');
+  // Ordering is the whole mechanism: the pragma is per-connection and must be set
+  // BEFORE ANALYZE, or the scan is unbounded again with nothing to show for it.
+  assert.ok(lim < ana, 'PRAGMA analysis_limit must PRECEDE ANALYZE in the same connection');
+  // And nothing may re-run the pragma AFTER the ANALYZE: a trailing copy is inert
+  // (the bound applies to a later ANALYZE, not an earlier one) while making the
+  // code read as if the ordering were satisfied.
+  assert.doesNotMatch(src.slice(ana), /PRAGMA analysis_limit/,
+    'no analysis_limit may appear after ANALYZE — it would be inert and misleading');
+
+  // The instrumentation that produced the measurement must survive, or the next
+  // regression is invisible again.
+  assert.match(src, /recorder: boot phases — \$\{tOpen\}, \$\{tSchema\}, \$\{tAnalyze\}/,
+    'keep the per-phase timing — it is how this was found and how a regression would be');
+});
