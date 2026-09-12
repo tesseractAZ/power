@@ -796,10 +796,34 @@ export function createRecorder(
   // v0.9.29 — refresh query-planner statistics. Without this, after a fresh
   // install (samples table empty when ANALYZE last ran), SQLite assumes the
   // composite index is uniform and may pick a less-efficient plan once
-  // samples skew (e.g. one metric having 50× the rows of another). ANALYZE
-  // on every startup is cheap on a single index — single-digit ms even at
-  // millions of rows — and lets the planner keep pace with growth.
+  // samples skew (e.g. one metric having 50× the rows of another).
+  //
+  // v1.153.0 — BOUNDED. The original comment claimed this was "cheap on a single
+  // index — single-digit ms even at millions of rows". v1.152.0's instrumentation
+  // measured it on the live Pi:
+  //
+  //     recorder: boot phases — open 0ms, schema+migrations 1ms, analyze 9725ms
+  //
+  // 9,725 ms of a 9,726 ms window: 99.99% of a boot that blocks the whole add-on
+  // (no HTTP listener, no MQTT ingest, no poll, no alarm evaluation — createRecorder
+  // is non-async and cannot yield). The comment was wrong on both counts it rested
+  // on: `samples` carries TWO indexes now, and the database is ~1.72 GB under an
+  // 1825-day retention. A full ANALYZE reads every index entry.
+  //
+  // `PRAGMA analysis_limit` is SQLite's own answer: it caps how many rows ANALYZE
+  // samples per index, turning a full scan into a bounded estimate. 400 is the
+  // value SQLite's documentation recommends. The stats stay good enough for plan
+  // selection — which is all they were ever for — and the scan stops being
+  // proportional to table size, so this does not silently return as the DB grows.
+  //
+  // Deliberately NOT done: deleting ANALYZE (the planner genuinely needs stats on a
+  // skewed table this size), or deferring it off the boot path (it would still block
+  // for ~10 s, just during live operation instead — strictly worse on an alarm path).
   const tSchema = phase('schema+migrations');
+  try {
+    // Must precede ANALYZE in the same connection; a no-op on builds without it.
+    db.exec(`PRAGMA analysis_limit=400;`);
+  } catch { /* older SQLite — fall through to the full ANALYZE below */ }
   try {
     db.exec(`ANALYZE samples;`);
   } catch (e: any) {
