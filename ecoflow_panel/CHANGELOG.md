@@ -127,6 +127,27 @@ still reporting. The title is spoken aloud, and the Cause fact read "unknown".
 A forecast irradiance defect found in the same log review ships separately and
 staged, because re-scoring history can reopen the night-charge basis gate.
 
+### Verification
+
+- **2,614 tests** (1.153.0 had 2,579). Both tsconfigs are clean; the doc-claims, secrets
+  and add-on config gates pass. 375 mutant anchors resolve across 33 harnesses, now
+  counted across every quote style.
+- Mutation harnesses, every one run against code identical to what ships:
+  - `mutate-dark-core.mjs` — **32/32** (was 14/14)
+  - `mutate-blind-shadow.mjs` — **25/25** (new)
+  - `mutate-cloud-shadow.mjs` — **13/13**
+  - `mutate-telemetry-blind.mjs` — **9/9**
+  - `mutate-poll-health-attribution.mjs` — **8/8**
+  - `mutate-audit-round2.mjs` — **13/13**
+  - `mutate-push-dwell.mjs` — **12/12**
+  - `mutate-ledger-legibility.mjs` — **8/8** — including the anchor dead since 1.148.0, repointed
+  - `mutate-roster-fallback.mjs` — **4/4**
+- Three adversarial review rounds (15, 12 and 6 agents) confirmed ten distinct defects in
+  this release's own changes. Nine are fixed here. The tenth — per-device gap records
+  rendered as fleet "Telemetry gap" warnings and counted in fleet outage totals, a
+  1.150.0 leftover — ships separately with a dedicated per-device alert, because simply
+  filtering them would silence the only push a dark Core currently produces.
+
 ## 1.153.0
 
 ### The boot freeze was 99.99% one SQL statement
