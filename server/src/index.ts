@@ -1133,7 +1133,7 @@ app.get('/api/weather/ensemble', async () => {
   // (cached or fresh) fetch is cheap and never duplicates rows.
   if (recorder && w.hours.length > 0) {
     try {
-      recorder.recordWeatherGhi(weatherGhiRows(w));
+      recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });
     } catch (e: any) {
       app.log.warn(`weather: GHI persistence failed (${e?.message ?? e}) — live forecast unaffected`);
     }
@@ -2213,7 +2213,7 @@ const ghiPersistTick = setInterval(() => {
     try {
       const w = await getWeather((m) => app.log.debug(m));
       if (recorder && w && w.hours.length > 0) {
-        recorder.recordWeatherGhi(weatherGhiRows(w));
+        recorder.recordWeatherGhi(weatherGhiRows(w), { fetchedAtMs: w.fetchedAt });
         app.log.debug(`weather: periodic GHI persistence (${w.hours.length} hours)`);
       }
       // v1.31.0 — archive the ISSUED next-24h PV forecast alongside the GHI

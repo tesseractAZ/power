@@ -1975,7 +1975,7 @@ directions.
 | Input | Source | Notes |
 |---|---|---|
 | `pvByEpoch` | recorder `pv_total` / `pv_high` / `pv_low` bucketed to hour-epochs | `Map<hourEpoch, meanWatts>`, hour-epoch = `floor(ts/3_600_000)` |
-| `ghiByEpoch` | Open-Meteo `shortwave_radiation` + recorder-persisted `ghi_wm2` | `Map<hourEpoch, W/m²>` |
+| `ghiByEpoch` | Open-Meteo `shortwave_radiation` + recorder-persisted `ghi_wm2` (first-write forecast irradiance; realized is captured separately and not read yet) | `Map<hourEpoch, W/m²>` |
 
 PV is pre-averaged into 5-min SQL buckets (`HOUR_CURVE_BUCKET_SEC = 300`) then
 into hourly means before pairing — a ~30× rowcount reduction with no material
@@ -2104,7 +2104,7 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
 |---|---|
 | Home DPU `pv_total` / `pv_high` / `pv_low` | recorder, 30-day window, home-connected DPUs only (`shp2ConnectedDpuSns`) |
 | SHP2 `panel_load` | recorder, weekday/weekend split via `hourCurveByWeekday` |
-| GHI / cloud | `getWeather()` (live) + recorder `ghi_wm2` / `cloud_pct` backfill |
+| GHI / cloud | `getWeather()` (live) + recorder `ghi_wm2` / `cloud_pct` backfill (first-write forecast values, not realized) |
 | Backup pool | `shp2.projection.backupFullCapWh` / `backupRemainWh` / `backupReserveSoc` |
 | EV load | `computeEvWindowPrediction` → `evLoadByHour` (expected-value watts) |
 | Recent load | recorder `panel_load` over `FORECAST_RECENT_LOAD_WINDOW_MS` (3 h) |
@@ -2445,10 +2445,7 @@ v1.23.0 to v1.30.0). Shrink-only, floored at 0.4.
 
 **Honest label:** the floor binds in practice (realized/produced ≈ 0.1–0.2 <
 0.4), so this band targets "**≥ 80% coverage, deliberately conservative**" — not
-"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the
-calibrator's errors come from a *current-model hindcast against realized GHI*,
-so they (a) are rewritten when the model re-learns, (b) omit the
-weather-forecast component of true day-ahead error, (c) apply `pvBiasFactor` as
+"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the calibrator's errors come from a *current-model hindcast against stored `ghi_wm2`*, so they (a) are rewritten when the model re-learns, (b) — **corrected VNEXT; this used to say they omit the weather-forecast component** — include a multi-day weather-forecast component, because stored `ghi_wm2` is first-write ~3–4-day-lead forecast irradiance rather than realized (see the weather source section), (c) apply `pvBiasFactor` as
 a plain daily multiply while publication re-clamps per-hour at the physical
 ceiling — under an *under-prediction* regime (`pvBiasFactor > 1`, ceiling
 pinned) the calibrator's basis sits above the published series and its errors
@@ -2609,7 +2606,7 @@ DayRollup = { date, pvKwh, loadKwh, minProjectedSoc|null, minProjectedSocTs|null
 
 ```
 https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}
-  &hourly=cloud_cover,shortwave_radiation,temperature_2m&forecast_days=2&past_days=7
+  &hourly=cloud_cover,shortwave_radiation,temperature_2m&forecast_days=4&past_days=7
 ```
 
 `past_days=7` (v0.13.1) so one fetch backfills a week of irradiance into the
@@ -2617,6 +2614,22 @@ recorder (`recordWeatherGhi` on `/api/weather/ensemble`), unblocking
 forecast-skill days 4–7 and the soiling estimator beyond the in-memory window.
 Local-zone ISO times are converted to true UTC epoch via `utc_offset_seconds`.
 On fetch failure it returns the stale cache ("better than nothing").
+
+**The stored `ghi_wm2` series is FORECAST irradiance, not realized.**
+`recordWeatherGhi` keeps the first value ever written for an hour, and the first
+fetch that contains an hour sees it roughly 3–4 days ahead (`forecast_days=4`);
+the later `past_days` value never replaces it. Every recorder-backed consumer that
+treats `ghi_wm2` as history — the forecast-skill hindcast and through it the PV band
+calibration, solar-model training for days older than the live cache, soiling, the
+backtest — is reading forecast irradiance (measured 2026-09-11: 3,180 W/m² stored
+vs 5,296 realized over hours 8–15). VNEXT captures **realized** irradiance separately
+as `weather/ghi_wm2_realized`: only hours whose whole interval had ended at the
+fetch's `fetchedAt`, every hour stored explicitly (no same-as-previous collapse),
+revised in place by later fetches. **Nothing reads it yet** — a test pins that —
+because switching the calibration basis moves the night-charge basis gate and the
+P10 band that sizes a supervised reserve write, so it ships as its own reviewed
+change. `past_days=7` is the capture horizon: an hour not captured within about
+seven UTC days cannot be recovered from this endpoint.
 
 `WeatherHour = { ts, cloudCoverPct, radiationWm2, tempC, ensembleSources?, ensembleDisagreementPct? }`.
 

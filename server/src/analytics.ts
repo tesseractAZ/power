@@ -7872,11 +7872,19 @@ export function parsePvBandSigmaCal(raw: string | undefined): number | null {
  *      anti-conservative under under-prediction bias.
  *  Day gating is unchanged: weather-covered, non-null errorPct (nulls mark
  *  coverage-gap days), plus adjPred > 0.5 kWh (a near-zero prediction can't
- *  be scored as a fraction of itself). NOTE the hindcast basis still uses
- *  REALIZED GHI, so these errors omit the weather-forecast component of true
- *  day-ahead error — the PV_BAND_CAL_FLOOR covers that gap until the
- *  forecast-archive series (recorder SN 'forecast') matures enough to score
- *  genuinely out-of-sample. Pure + exported for tests. */
+ *  be scored as a fraction of itself).
+ *
+ *  VNEXT CORRECTION — this note used to say the hindcast basis is REALIZED GHI and
+ *  so omits the weather-forecast component of day-ahead error. It is not realized:
+ *  recorder `ghi_wm2` keeps the FIRST value written for each hour, which is the
+ *  ~3-4-day-lead forecast, and buildGhiByEpoch lets it beat the live cache. These
+ *  errors therefore INCLUDE a multi-day weather-forecast component, which widens the
+ *  band and makes the basis gate harder to pass than the design intended. Realized
+ *  irradiance is now captured separately and deliberately NOT read here: switching
+ *  this basis moves the basis gate and the P10 band that sizes a supervised reserve
+ *  write, so it is its own reviewed change. The forecast-archive series (recorder SN
+ *  'forecast') remains the route to genuinely out-of-sample scoring. Pure + exported
+ *  for tests. */
 export function pvBandScoredErrs(
   days: ForecastSkillReport['days'],
   biasFactor: number | null = 1,
