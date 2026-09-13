@@ -749,7 +749,8 @@ export function createRecorder(
     -- this, every hourly prune scans the entire table while holding SQLite's
     -- write lock, serializing against the near-continuous insert() writes from
     -- live telemetry recording. Additive: does not change/replace the existing
-    -- composite index used by query()/queryMulti(); ANALYZE below covers both.
+    -- composite index used by query()/queryMulti(). Planner statistics for both:
+    -- see the PRAGMA optimize block below.
     CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples (ts);
     CREATE TABLE IF NOT EXISTS lifetime_totals (
       metric_key TEXT PRIMARY KEY,
@@ -884,31 +885,68 @@ export function createRecorder(
   // per-device seed, which blocked a further 5,807 ms unmeasured. ANALYZE was 9,725 of
   // ~15,533 ms, or 62.6%: still the largest phase, and the whole add-on is blocked for
   // all of it (no HTTP listener, no MQTT ingest, no poll, no alarm evaluation —
-  // createRecorder is non-async and cannot yield). Bounded as below, ANALYZE took
-  // 3,415 ms on the next boot. The original comment was wrong on both counts it rested
-  // on: `samples` carries TWO indexes now, and the database is ~1.72 GB under an
-  // 1825-day retention. A full ANALYZE reads every index entry.
+  // createRecorder is non-async and cannot yield). The original comment was wrong on
+  // both counts it rested on: `samples` carries TWO indexes now, and the database is
+  // ~1.72 GB under an 1825-day retention.
   //
-  // `PRAGMA analysis_limit` is SQLite's own answer: it caps how many rows ANALYZE
-  // samples per index, turning a full scan into a bounded estimate. 400 is the
-  // value SQLite's documentation recommends. The stats stay good enough for plan
-  // selection — which is all they were ever for — and the scan stops being
-  // proportional to table size, so this does not silently return as the DB grows.
+  // v1.156.0 CORRECTION — THE BOUND NEVER BOUNDED THE BOOT. v1.153.0 set
+  // `PRAGMA analysis_limit=400` before `ANALYZE samples` and cited "3,415 ms on the
+  // next boot" as proof. That boot was a restart 13 min after another. The next boot
+  // after an image pull (v1.154.0) measured `analyze 10785ms` with the bound in place —
+  // more than the unbounded 9,725 ms. The pragma was applied (the add-on's node links
+  // Alpine's SQLite 3.48.0, which has it); it bounds the wrong cost:
+  //   - ANALYZE first takes an EXACT entry count of each index (OP_Count with P3=0 —
+  //     analyze.c passes OptimizationDisabled(db, SQLITE_Stat4), false by default), and
+  //     an exact count visits every page of the b-tree. analysis_limit bounds only the
+  //     entry scan that follows. Counted by the pager on a synthetic 4 M-row database
+  //     with this schema and the live shape (8 SNs, ~5 rows per ts): the bounded
+  //     ANALYZE of the composite index missed 46,411 pages (the index has 46,396); both
+  //     indexes bounded 61,182, unbounded 122,328. VM steps fell from 75.2 M to 13.6 k.
+  //     The CPU went; the page reads only halved.
+  //   - The bound also made the stats WRONG. Sampling ~400 entries recorded 401 rows per
+  //     SN there (truly 500,000), so every boot since v1.153.0 wrote truncated
+  //     composite-index stats.
+  // The Pi measurements (cold vs warm, bounded vs not) are in CHANGELOG 1.156.0.
   //
-  // Deliberately NOT done: deleting ANALYZE (the planner genuinely needs stats on a
-  // skewed table this size), or deferring it off the boot path (it would still block
-  // for ~10 s, just during live operation instead — strictly worse on an alarm path).
+  // What the stats change here: no plan. Every statement that reads `samples` has
+  // equality on (sn, metric), a range on ts alone or an INDEXED BY, and plans the same
+  // with no stats, full stats or truncated ones (bootPlannerStats.test.ts pins each).
+  //
+  // So stats are refreshed only where an index has NONE — a fresh install, or an index
+  // a migration just created (whose CREATE INDEX already cost more than this ANALYZE).
+  // That is `PRAGMA optimize` with mask 0x02 and WITHOUT 0x10000, run at open: it skips
+  // a table whose indexes all have sqlite_stat1 rows, however stale. 0x10000 would add
+  // SQLite's 10x size check; this table grows ~360 k rows a day, so that would fire
+  // near 160 M rows as a full ANALYZE of roughly ten times today's index on the boot
+  // path, for plans the stats do not change. Debug bit 0x01 makes SQLite LIST the
+  // statements instead of running them: the recorder runs exactly those, sets no
+  // bound, and logs what completed. Listing is not always read-only — pragma.c opens
+  // a write transaction once two tables qualify — so a failure names the step it
+  // failed in, and is never reported as "planned no ANALYZE".
+  //
+  // Deliberately NOT done: moving ANALYZE to a worker. It is one statement that opens a
+  // write transaction for its whole run (analyze.c sqlite3BeginWriteOperation), so the
+  // main thread's inserts would wait on it instead.
   const tSchema = phase('schema+migrations');
+  const sqliteVersion = String((db.prepare(`SELECT sqlite_version() AS v`).get() as { v: unknown }).v);
+  const statsPlanned: string[] = [];
+  const statsRan: string[] = [];
+  let statsStep = 'planning';
+  let statsFailure = '';
   try {
-    // Must precede ANALYZE in the same connection; a no-op on builds without it.
-    db.exec(`PRAGMA analysis_limit=400;`);
-  } catch { /* older SQLite — fall through to the full ANALYZE below */ }
-  try {
-    db.exec(`ANALYZE samples;`);
+    for (const row of db.prepare(`PRAGMA optimize=0x03`).all() as Array<Record<string, unknown>>) {
+      statsPlanned.push(String(Object.values(row)[0]));
+    }
+    statsStep = 'running';
+    for (const sql of statsPlanned) {
+      db.exec(sql);
+      statsRan.push(sql);
+    }
   } catch (e: any) {
-    log(`recorder: ANALYZE skipped (${e?.message ?? e})`);
+    statsFailure = `refresh FAILED while ${statsStep} (${e?.message ?? e}), `;
   }
   const tAnalyze = phase('analyze');
+  log(`recorder: planner stats — SQLite ${sqliteVersion}, ${statsFailure}${statsFailure === '' && statsPlanned.length === 0 ? 'PRAGMA optimize planned no ANALYZE' : `ran ${statsRan.length}/${statsPlanned.length}`}${statsRan.length > 0 ? `: ${statsRan.join('; ')}` : ''}`);
   // (v1.154.0 — the boot-phases line is emitted at the END of createRecorder.)
 
   const insert = db.prepare(`INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)`);
