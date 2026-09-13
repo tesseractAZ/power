@@ -273,6 +273,7 @@ test('systemOutageFields — exact field names + values served to /api/ha-state 
     system_outage_total_minutes_24h: 11,
     system_outage_last_ended: now - 9 * MIN,
     system_outage_last_duration_minutes: 11,
+    system_device_gap_count_24h: 0,
   });
   const clean = systemOutageFields([], now);
   assert.equal(clean.system_outage_active_24h, false);

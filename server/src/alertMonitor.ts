@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
@@ -978,6 +978,11 @@ export function alertSourceSn(id: string, deviceSns: readonly string[]): string 
  *  fresh evidence would hold them through the very condition they describe —
  *  their clear is already computed from the signal that would gate here. */
 export function isEvidenceExemptFamily(id: string): boolean {
+  // v1.155.0 — a per-device gap alert names the DARK device in its id, so the gate would
+  // judge it by the very silence it reports and hold the tracked entry for as long as
+  // the device stays dark. A fleet outage id carries no SN and was never gated; this
+  // keeps the two event lifecycles the same.
+  if (isDeviceGapAlertId(id)) return true;
   return id.startsWith('offline-') || id.startsWith('msg-rate-floor-') || id.startsWith('zombie-');
 }
 
@@ -2093,7 +2098,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable
       // gaps sidecar, so a gap detected AT BOOT (spanning the very restart that
       // caused it) still fires after the process comes back.
-      ...outageAlerts(recorder.telemetryGaps(), Date.now(), OUTAGE_ALERT_OPTS),
+      // v1.155.0 — the device map names a per-device gap's SN ("Core 2").
+      ...outageAlerts(recorder.telemetryGaps(), Date.now(), OUTAGE_ALERT_OPTS, (sn) => snap.devices[sn]?.deviceName),
       // v0.84.0 — audible-delivery self-alert. When audible broadcasting is
       // enabled but the broadcast monitor has CONFIRMED no reachable speaker
       // (Music Assistant down → its media_players go unavailable), surface it as

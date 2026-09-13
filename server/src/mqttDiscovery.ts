@@ -257,6 +257,10 @@ export const SENSORS: SensorConfig[] = [
   // stayed up) is not read as a power event (add-on/host was down across the gap).
   { unique_id: 'ecoflow_system_power_outage_count_24h', name: 'Power Outages 24h', state_class: 'measurement', icon: 'mdi:power-plug-off', entity_category: 'diagnostic', value_template: '{{ value_json.system_power_outage_count_24h }}' },
   { unique_id: 'ecoflow_system_telemetry_gap_count_24h', name: 'Telemetry Gaps 24h', state_class: 'measurement', icon: 'mdi:cloud-off-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_telemetry_gap_count_24h }}' },
+  // v1.155.0 — per-device telemetry gaps: one device silent past the per-device
+  // threshold while the rest of the fleet kept reporting. Not an outage, so it is kept
+  // out of every outage tile above and counted here instead.
+  { unique_id: 'ecoflow_system_device_gap_count_24h', name: 'Device Telemetry Gaps 24h', state_class: 'measurement', icon: 'mdi:access-point-network-off', entity_category: 'diagnostic', value_template: '{{ value_json.system_device_gap_count_24h }}' },
   { unique_id: 'ecoflow_system_outage_minutes_24h', name: 'System Outage Minutes 24h', state_class: 'measurement', unit_of_measurement: 'min', icon: 'mdi:timer-alert-outline', entity_category: 'diagnostic', value_template: '{{ value_json.system_outage_total_minutes_24h }}' },
   // v0.84.0 — audible-delivery health. `audible_status` is reachable / UNREACHABLE
   // / disabled / unknown so an operator can alert on a dead audible channel (MA
