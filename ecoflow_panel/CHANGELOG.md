@@ -79,13 +79,13 @@ still reporting. The title is spoken aloud, and the Cause fact read "unknown".
   *Panel is not answering — grid presence unconfirmed*, or *Panel is offline to the
   cloud — grid presence unconfirmed* — states how many other devices are reporting,
   and says no alarm that depends on the panel can be trusted. "Current" means online,
-  a DPU or SHP2 projection, and a quota write within the five-minute stale bound; a bare online flip does not count, and neither does a replaying device or a bench spare.
+  a DPU or SHP2 projection, and a quota write within the five-minute stale bound; a bare online flip does not count, and neither does a replaying device or a Core outside the home pool.
 - With nothing else current, the original text is used, because it is then true.
 - The Cause fact names the verdict either way.
 - Id, severity and priority are identical, so escalation and audibility are
   unchanged. Only the words differ.
 
-### Found by this release's adversarial review
+### Found by this release's adversarial reviews
 
 - **An intervening short boot defeated the outage guard.** The fleet anchor is the
   newest home sample from any device, so a boot of a few minutes in which the others
@@ -102,19 +102,27 @@ still reporting. The title is spoken aloud, and the Cause fact read "unknown".
   statements are exported as `SEED_SQL`, and each one's `EXPLAIN QUERY PLAN` must be an
   index SEARCH; a `SELECT DISTINCT` mutant dies on it.
 - **"Other devices reporting" counted things that are not sight.** A second, shadowed
-  SHP2 stamps its quota clock on every replayed poll, and a bench spare reports
-  normally while powering nothing in the house. Neither counts now.
+  SHP2 stamps its quota clock on every replayed poll, and a Core outside the home pool (on the bench or off-panel) reports normally while powering nothing in the house. Neither counts now, and pool membership is roster-aware — the `SPARE_DPU_SNS` literal names a wired Core and not the bench unit.
 - **The panel wording made a promise it could not keep.** It called the condition "not
   a total loss of telemetry", and a push cannot be withdrawn if the episode then
   becomes one. The clause is gone; the count of devices still reporting stays.
 - **The frozen body reappearing between refreshes now starts the count over.** Refresh
   B, frozen A again, refresh C no longer releases the latch while the cloud is still
   replaying A. A live panel never reproduces its frozen twelve-channel vector.
-- **The CI anchor checker read single-quoted anchors only.** 110 of 359 — every anchor
-  containing a single quote — were never checked, and one (`mutate-ledger-legibility`
+- **The CI anchor checker read single-quoted anchors only.** 110 of 359 — every anchor not written as a single-quoted literal — were never checked, and one (`mutate-ledger-legibility`
   vi) had been dead since 1.148.0 while CI reported every anchor resolving. All three
   quote styles are checked now, the dead anchor is repointed, and the README states the
   full count.
+
+- **Post-boot silence was never ledgered.** A boot that waited hours for its first
+  home write (DNS or cloud down after a power cut) recorded nothing, because the fleet
+  detector ignores a zero anchor — and the next boot charged that window to any device
+  still on its seeded clock. It is now a fleet gap, measured on the monotonic clock.
+- **A panel payload with no readable circuit is no witness.** The projection always
+  emits twelve circuit slots, so the "no circuits, fail open" rule could never fire,
+  and a body without the per-circuit array latched on three low-entropy scalars. With
+  the new reset such a latch could hold a spoken critical indefinitely. It now fails
+  open as documented.
 
 A forecast irradiance defect found in the same log review ships separately and
 staged, because re-scoring history can reopen the night-charge basis gate.

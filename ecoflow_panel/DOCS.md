@@ -1864,7 +1864,7 @@ watchdog and any uptime probe see it.
 poll also routes here: `notePollFailed` carries `{cause, sns}`, bound to that
 failure and cleared by any other. When the failure is a panel verdict and at least
 one other device is still current (`blindAlertContext`: online, a dpu/shp2
-projection, a quota write inside the stale bound, not itself replaying, not a bench spare), the alert names the panel
+projection, a quota write inside the stale bound, not itself replaying, not a Core outside the home pool), the alert names the panel
 condition — e.g. *"Panel data is stale — grid presence unknown"*, with the count of
 devices still reporting — instead of claiming the add-on sees nothing. With nothing
 else current the original text is used, because it is then true. Id, severity and

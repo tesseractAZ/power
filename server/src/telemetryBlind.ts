@@ -255,7 +255,7 @@ export interface BlindAlertContext {
  * "Current" means a quota write within `staleMs` from an online device, using the
  * quota clock where one exists: a bare online/offline flip bumps `lastUpdated`
  * without carrying any telemetry. A device whose payload is being replayed, and a
- * bench spare, never count.
+ * Core outside the home pool (bench or off-panel), never count.
  */
 export function blindAlertContext(
   devices: Record<string, {
@@ -268,7 +268,7 @@ export function blindAlertContext(
   } | undefined>,
   failure: PollFailure | null,
   nowMs: number,
-  opts: { staleMs?: number; isBenchSpare?: (sn: string) => boolean } = {},
+  opts: { staleMs?: number; isOutsideHomePool?: (sn: string) => boolean } = {},
 ): BlindAlertContext {
   const staleMs = opts.staleMs ?? DEFAULT_BLIND_CONFIG.staleMs;
   const affected = new Set(failure?.sns ?? []);
@@ -283,8 +283,9 @@ export function blindAlertContext(
     // second, shadowed panel would otherwise vouch for sight the system already
     // treats as UNKNOWN.
     if (d.contentStaleSinceMs != null) continue;
-    // Bench hardware reporting normally is not sight of anything that powers the house.
-    if (opts.isBenchSpare?.(sn)) continue;
+    // A Core on the bench or off-panel reporting normally is not sight of anything that
+    // powers the house. Roster-aware in the caller: the SPARE_DPU_SNS literal is stale.
+    if (kind === 'dpu' && opts.isOutsideHomePool?.(sn)) continue;
     const at = d.lastQuotaAtMs ?? d.lastUpdated ?? 0;
     if (at > 0 && nowMs - at < staleMs) otherReportingCount++;
   }

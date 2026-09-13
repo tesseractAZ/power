@@ -47,6 +47,11 @@ test('a non-SHP2, or a payload with no circuits, yields NO witness — fail open
   assert.equal(shp2ContentWitness({ kind: 'dpu', circuits: [{ ch: 1, watts: 5 }] }), null);
   assert.equal(shp2ContentWitness({ kind: 'shp2', circuits: [] }), null);
   assert.equal(shp2ContentWitness({ kind: 'shp2' }), null);
+  // v1.154.0 re-review — the projection always emits twelve slots, so "no circuits" never
+  // happens for a real SHP2; twelve unreadable ones is the same absence of a witness.
+  assert.equal(shp2ContentWitness(chans(Array(12).fill(null))), null, 'twelve unreadable circuits are no witness');
+  assert.notEqual(shp2ContentWitness(chans([null, null, 5, null, null, null, null, null, null, null, null, null])), null,
+    'one readable circuit is enough to form one');
   assert.equal(shp2ContentWitness(undefined), null);
 });
 

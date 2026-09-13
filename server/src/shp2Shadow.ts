@@ -72,6 +72,11 @@ export function shp2ContentWitness(projection: unknown): string | null {
   const circuits = p.circuits;
   // No circuit vector means no high-entropy witness. Fail open.
   if (!Array.isArray(circuits) || circuits.length === 0) return null;
+  // v1.154.0 re-review — twelve circuits that are ALL unreadable are no witness either.
+  // The projection always emits twelve slots, with null watts when the body lacks the
+  // per-circuit array, so the check above can never fire for an SHP2; what would remain
+  // is the three low-entropy scalars this detector exists NOT to trust.
+  if (!circuits.some((c) => c.watts != null)) return null;
   const legs = circuits
     .slice()
     .sort((a, b) => (a.ch ?? 0) - (b.ch ?? 0))

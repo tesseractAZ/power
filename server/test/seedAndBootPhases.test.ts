@@ -185,6 +185,32 @@ test('★ an intervening short boot does not charge a silent device with the out
   }
 });
 
+test('★ a long POST-BOOT silence is ledgered once, so the next boot does not charge it to a silent device', (t) => {
+  // v1.154.0 re-review. A boot that waits hours for its first home write (DNS or cloud
+  // down after a power cut) used to ledger nothing: the fleet detector ignores a zero
+  // anchor. The next boot's outage guard then charged the whole wait to CORE_B.
+  const T = Date.now();
+  seedDb([[T - 8 * H, 'CORE_A', 'soc', 50], [T - 8 * H, 'CORE_B', 'soc', 51]]);
+  const c = clocks(t, T - 7 * H - 10 * M);  // boot 1, fifty minutes after the last sample
+  const first = boot();
+  c.wall += 7 * H; c.mono += 7 * H;         // seven hours with no home write
+  first.rec.insertSnapshot(dpu('CORE_A'));  // CORE_A is back; CORE_B's fetch still fails
+  c.wall += M; c.mono += M;
+  first.rec.insertSnapshot(dpu('CORE_A'));
+  const postBoot = first.rec.telemetryGaps().filter((g) => g.sn == null && !g.restartSpanning);
+  assert.equal(postBoot.length, 1, `the post-boot silence is ledgered exactly once, got ${postBoot.length}`);
+  assert.ok(Math.abs(postBoot[0].durationMs - 7 * H) < M, `about seven hours, got ${postBoot[0].durationMs} ms`);
+  first.rec.close();
+  c.wall += 5 * M; c.mono += 5 * M;         // a routine restart
+  const second = boot();
+  try {
+    second.rec.insertSnapshot(dpu('CORE_A'));
+    assert.deepEqual(deviceGaps(second.rec, 'CORE_B'), [], 'CORE_B was observed silent for minutes, not seven hours');
+  } finally {
+    second.rec.close();
+  }
+});
+
 test("a device's OWN earlier per-device gap is not discounted — only fleet-dark windows are", (t) => {
   const T = Date.now();
   seedDb([[T - M, 'CORE_A', 'soc', 50], [T - 12 * H, 'CORE_B', 'soc', 51]]);
@@ -336,6 +362,6 @@ test('★ the boot-phases line is the LAST statement before createRecorder retur
   // reports. Position is the property, so position is what is pinned.
   const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/recorder.ts'), 'utf8');
   assert.equal(src.split("phase('rest')").length - 1, 1, 'exactly one rest phase');
-  assert.match(src, /\n  const tRest = phase\('rest'\);\n  log\(`recorder: boot phases — [^\n]*\);\n\n  return \{\n    insertSnapshot: /,
+  assert.match(src, /\n  const tRest = phase\('rest'\);\n  log\(`recorder: boot phases — [^\n]*\(total \$\{Math\.round\(performance\.now\(\) - bootT0\)\}ms, db \$\{dbPath\}\)`\);\n\n  return \{\n    insertSnapshot: /,
     'nothing may run between the boot-phases line and the returned API');
 });

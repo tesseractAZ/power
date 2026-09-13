@@ -37,6 +37,7 @@ const SHADOW = resolve(SERVER, 'src/shp2Shadow.ts');
 const SNAP = resolve(SERVER, 'src/snapshot.ts');
 const BLIND = resolve(SERVER, 'src/telemetryBlind.ts');
 const MONITOR = resolve(SERVER, 'src/alertMonitor.ts');
+const MEMBERSHIP = resolve(SERVER, 'src/shp2Membership.ts');
 
 const SUBSET = [
   'test/shp2Shadow.test.ts',
@@ -178,7 +179,7 @@ const MUTANTS = [
   {
     id: 'xix. ★★ the alert monitor renders without context',
     file: MONITOR,
-    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isBenchSpare: isBenchSpareSn }));',
+    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));',
     to: '        return telemetryBlindAlerts(verdict, blindNowMs); /* MUTANT */',
     why: 'Without the device map the panel wording is unreachable in production.',
   },
@@ -198,18 +199,32 @@ const MUTANTS = [
     why: 'A replayed body stamps its quota clock every poll, so a frozen panel vouches for sight the system already treats as UNKNOWN.',
   },
   {
-    id: 'xxii. a bench spare counts as another device reporting',
+    id: 'xxii. a Core outside the home pool counts as another device reporting',
     file: BLIND,
-    find: '    if (opts.isBenchSpare?.(sn)) continue;',
+    find: "    if (kind === 'dpu' && opts.isOutsideHomePool?.(sn)) continue;",
     to: '    /* MUTANT */',
     why: 'Bench hardware on another circuit turns a dark home fleet into "1 other device is still reporting".',
   },
   {
-    id: 'xxiii. the alert monitor stops passing the bench-spare predicate',
+    id: 'xxiii. the alert monitor stops passing the pool predicate',
     file: MONITOR,
-    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isBenchSpare: isBenchSpareSn }));',
+    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));',
     to: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs)); /* MUTANT */',
     why: 'The exclusion is correct in the pure function and absent in production.',
+  },
+  {
+    id: 'xxiv. ★ the pool predicate ignores the published roster (the stale literal decides)',
+    file: MEMBERSHIP,
+    find: '  return !isHomePoolDpu(sn, devices, rosterOf());',
+    to: '  return !isHomePoolDpu(sn, devices); /* MUTANT */',
+    why: 'With the panel dark the literal decides: the real bench Core 3 counts as sight of the house and wired Core 5 does not.',
+  },
+  {
+    id: 'xxv. ★ twelve unreadable circuits form a witness',
+    file: SHADOW,
+    find: '  if (!circuits.some((c) => c.watts != null)) return null;',
+    to: '  /* MUTANT */',
+    why: 'A body without the per-circuit array latches on three low-entropy scalars, and with the reset a quiet panel can hold a spoken critical indefinitely.',
   },
 ];
 

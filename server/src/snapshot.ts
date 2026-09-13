@@ -418,6 +418,10 @@ export class SnapshotStore extends EventEmitter {
       this.logger(
         `shp2-shadow: ${cur.deviceName} (${sn}) payload moved (${latch.moved.length}/${SHP2_SHADOW_CLEAR_DISTINCT}) — holding the stale latch until the movement is sustained`,
       );
+    } else if (latch && prevLatch && latch.moved.length < prevLatch.moved.length && latch.frozenWitness === prevLatch.frozenWitness) {
+      this.logger(
+        `shp2-shadow: ${cur.deviceName} (${sn}) the frozen payload reappeared — movement count reset (0/${SHP2_SHADOW_CLEAR_DISTINCT}); the cloud is still replaying it`,
+      );
     }
     cur.lastError = undefined;
     this.lastSourceBySn.set(sn, source);

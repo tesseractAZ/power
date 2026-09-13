@@ -1304,6 +1304,17 @@ export function createRecorder(
         }
         lastHomeInsertTs = now;
       } else {
+        // v1.154.0 re-review — the POST-BOOT silence. `lastHomeInsertTs` starts at 0 and
+        // detectTelemetryGap ignores a zero anchor, so a boot that waited hours for its
+        // first home write (DNS or cloud down after a power cut) ledgered nothing — and
+        // the NEXT boot's outage guard charged that window to any device still on its
+        // seeded clock. Measured on the monotonic clock and anchored to now, so an NTP
+        // step during the wait can neither lengthen it nor misplace its end. The defer
+        // branch above is left alone: there the wall clock is not yet trustworthy.
+        const sinceBootMs = performance.now() - bootMonoMs;
+        if (lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS) {
+          recordTelemetryGap(now - Math.round(sinceBootMs), now);
+        }
         if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
           recordTelemetryGap(lastHomeInsertTs, now);
         }

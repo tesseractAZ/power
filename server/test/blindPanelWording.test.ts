@@ -7,6 +7,7 @@ import {
   assessBlind, telemetryBlindAlerts, blindAlertContext, notePollFailed, notePollOk, pollState,
   TELEMETRY_BLIND_ALERT_ID, type BlindConfig, type PollFailure,
 } from '../src/telemetryBlind.js';
+import { SPARE_DPU_SNS, setLastKnownHomeRoster, resetLastKnownHomeRoster, isOutsideHomePool } from '../src/shp2Membership.js';
 
 /**
  * v1.154.0 — the telemetry-blind CRITICAL, rendered for what actually happened.
@@ -123,7 +124,7 @@ test('★ the failure is bound to the failure that set lastError — a thrown po
   assert.equal(pollState().lastFailure, null, 'a healthy poll clears it');
 });
 
-test('★ "other devices reporting" excludes the named panel, replays, bench spares and anything not current', () => {
+test('★ "other devices reporting" excludes the named panel, replays, Cores outside the home pool and anything not current', () => {
   const ctx = blindAlertContext({
     'SHP2-1': { deviceName: 'Smart Home Panel 2', online: true, lastQuotaAtMs: NOW, projection: { kind: 'shp2' } },
     'DPU-1': { online: true, lastQuotaAtMs: NOW - 10_000, projection: { kind: 'dpu' } },                       // counts
@@ -134,8 +135,10 @@ test('★ "other devices reporting" excludes the named panel, replays, bench spa
     'DPU-5': { online: true, projection: null },
     'SHP2-2': { online: true, lastQuotaAtMs: NOW, contentStaleSinceMs: NOW - 10 * MIN, projection: { kind: 'shp2' } }, // a replay, not a report
     'BENCH': { online: true, lastQuotaAtMs: NOW, projection: { kind: 'dpu' } },                                         // bench hardware
-  }, FROZEN, NOW, { staleMs: CFG.staleMs, isBenchSpare: (sn) => sn === 'BENCH' });
-  assert.deepEqual(ctx, { affectedNames: ['Smart Home Panel 2'], otherReportingCount: 1 });
+    'SHP2-3': { online: true, lastQuotaAtMs: NOW, projection: { kind: 'shp2' } },                                        // a panel is never 'outside the pool'
+  }, FROZEN, NOW, { staleMs: CFG.staleMs, isOutsideHomePool: (sn) => sn === 'BENCH' || sn === 'SHP2-3' });
+  assert.deepEqual(ctx, { affectedNames: ['Smart Home Panel 2'], otherReportingCount: 2 },
+    'DPU-1 and the healthy second panel; the pool predicate applies to Cores only');
 });
 
 test('★ BRIDGE: the poll loop hands its verdict to notePollFailed, and the alert monitor renders with context', () => {
@@ -150,6 +153,22 @@ test('★ BRIDGE: the poll loop hands its verdict to notePollFailed, and the ale
   assert.match(call, /\{ cause: health\.reason, sns: health\.sns \},\s*$/, 'the verdict must travel with the failure');
 
   const mon = readFileSync(resolve(__dir, '../src/alertMonitor.ts'), 'utf8');
-  assert.match(mon, /return telemetryBlindAlerts\(verdict, blindNowMs, blindAlertContext\(blindDevices, verdict\.failure, blindNowMs, \{ isBenchSpare: isBenchSpareSn \}\)\);/,
-    'the live alert must be rendered with the failure, the device map and the bench-spare predicate');
+  assert.match(mon, /return telemetryBlindAlerts\(verdict, blindNowMs, blindAlertContext\(blindDevices, verdict\.failure, blindNowMs, \{ isOutsideHomePool: \(sn\) => isOutsideHomePool\(sn, blindDevices\) \}\)\);/,
+    'the live alert must be rendered with the failure, the device map and the roster-aware pool predicate');
+});
+
+test('★ "outside the home pool" is roster-aware — the bench Core is out, a wired Core in the stale literal is in', () => {
+  // The SPARE_DPU_SNS literal has been inverted since the 2026-08-20 swap: it names a
+  // wired Core and not the bench unit. isBenchSpareSn can only REMOVE spare status from
+  // it, so it could never exclude the real bench Core.
+  const [literalSpare] = [...SPARE_DPU_SNS];
+  assert.ok(literalSpare, 'precondition: the literal names at least one SN');
+  try {
+    setLastKnownHomeRoster(new Set(['CORE_1', literalSpare]));  // no SHP2 in the map, so the published roster decides
+    assert.equal(isOutsideHomePool('CORE_3_BENCH', {}), true, 'a Core the roster does not name powers nothing in the house');
+    assert.equal(isOutsideHomePool(literalSpare, {}), false, 'a wired Core still named in the stale literal is home');
+    assert.equal(isOutsideHomePool('CORE_1', {}), false);
+  } finally {
+    resetLastKnownHomeRoster();
+  }
 });

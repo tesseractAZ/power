@@ -93,8 +93,7 @@ for (const h of harnesses) {
   // that here.) One regex, each escape consumed exactly once, left to right.
   const unescape = (lit) => lit.replace(/\\(.)/gs, (_, c) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
   // v1.154.0 — ALL THREE QUOTE STYLES. This matched single-quoted literals only, so
-  // every anchor containing a single quote (written double-quoted or as a backtick
-  // literal) went unchecked: 110 of 359. One of them, mutate-ledger-legibility vi,
+  // every anchor NOT written as a single-quoted literal went unchecked: 110 of 359. One of them, mutate-ledger-legibility vi,
   // had been dead since v1.148.0 while this checker reported every anchor resolving.
   // A backtick literal with `${` interpolation cannot be resolved statically, so it
   // FAILS the run instead of being skipped.
