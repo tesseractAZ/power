@@ -117,7 +117,7 @@ const MUTANTS = [
   {
     id: 'xii. ★ the store stops tracking the witness',
     file: SNAP,
-    find: '    cur.contentStaleSinceMs = stale ? (fresh?.firstSeenMs ?? nowQ) : null;',
+    find: '    cur.contentStaleSinceMs = latch ? latch.sinceMs : null;',
     to: '    cur.contentStaleSinceMs = null; /* MUTANT */',
     why: 'Every pure function stays correct and the detector never fires — the wire-it-to-the-production-bridge failure this project has shipped before.',
   },

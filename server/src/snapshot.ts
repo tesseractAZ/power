@@ -5,7 +5,7 @@ import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import { shp2Panels } from './shp2Membership.js';
-import { shp2ContentWitness, advanceContentFreshness, isContentStale } from './shp2Shadow.js';
+import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
 import type { Alert } from './alerts.js';
 import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
 import { config } from './config.js';
@@ -399,12 +399,24 @@ export class SnapshotStore extends EventEmitter {
     const stale = isContentStale(fresh, nowQ);
     if (witness != null && fresh?.repeats === 1) this.saveContentFreshness(); // witness changed
     const wasStale = cur.contentStaleSinceMs != null;
-    cur.contentStaleSinceMs = stale ? (fresh?.firstSeenMs ?? nowQ) : null;
-    if (stale !== wasStale) {
+    // v1.154.0 — the RELEASE goes through a latch with hysteresis (shp2Shadow.ts,
+    // advanceShadowLatch). The latch side is still exactly `stale` above.
+    const prevLatch = this.shadowLatch.get(sn);
+    const latch = advanceShadowLatch(prevLatch, fresh, stale);
+    if (latch) this.shadowLatch.set(sn, latch); else this.shadowLatch.delete(sn);
+    const latched = latch != null;
+    cur.contentStaleSinceMs = latch ? latch.sinceMs : null;
+    if (latched !== wasStale) {
       this.logger(
-        stale
+        latched
           ? `shp2-shadow: ${cur.deviceName} (${sn}) payload has not moved across ${fresh?.repeats} polls (${Math.round((nowQ - (fresh?.firstSeenMs ?? nowQ)) / 1000)}s) — the cloud is serving a STALE SHADOW; grid readings are being treated as UNKNOWN`
-          : `shp2-shadow: ${cur.deviceName} (${sn}) payload is moving again`,
+          : witness == null
+            ? `shp2-shadow: ${cur.deviceName} (${sn}) payload is unmeasurable — releasing the stale latch (no witness is not evidence of a shadow)`
+            : `shp2-shadow: ${cur.deviceName} (${sn}) payload is moving again (${SHP2_SHADOW_CLEAR_DISTINCT} distinct new readings)`,
+      );
+    } else if (latch && prevLatch && latch.moved.length > prevLatch.moved.length) {
+      this.logger(
+        `shp2-shadow: ${cur.deviceName} (${sn}) payload moved (${latch.moved.length}/${SHP2_SHADOW_CLEAR_DISTINCT}) — holding the stale latch until the movement is sustained`,
       );
     }
     cur.lastError = undefined;
@@ -436,6 +448,14 @@ export class SnapshotStore extends EventEmitter {
    * WHICH witness we last saw, not how long we had been seeing it.
    */
   private contentFreshness = new Map<string, import('./shp2Shadow.js').ContentFreshness>();
+  /**
+   * v1.154.0 — the release-side hysteresis state, per SN. Held HERE, beside the
+   * freshness map, and deliberately not on DeviceSnapshot: setDeviceList rebuilds
+   * that object from a literal every 60 s and drops any field it does not name.
+   * `contentStaleSinceMs` is the published view of this latch. Not persisted: a
+   * restart already re-arms the latch side from scratch (see the note below).
+   */
+  private shadowLatch = new Map<string, import('./shp2Shadow.js').ShadowLatch>();
   private contentFreshnessPath: string | null = null;
 
   /** v1.148.0 — load the shadow witness written by the previous process. */
@@ -1016,6 +1036,9 @@ export function startPollLoop(
             : health.reason === 'shp2-content-frozen'
               ? `SHP2 payload is a REPLAYED SHADOW — the fetch succeeded but the content is not moving (${health.sns.join(', ')})`
               : `SHP2 not polled — cloud-offline, so this poll is NOT evidence the alarm path can see (${health.sns.join(', ')})`,
+          // v1.154.0 — carry the verdict itself, so the telemetry-blind alert can say
+          // WHICH blind this is rather than "no telemetry" while the Cores stream.
+          { cause: health.reason, sns: health.sns },
         );
       } else {
         notePollOk(Date.now()); // v1.69.0 — feeds the telemetry-blind detector

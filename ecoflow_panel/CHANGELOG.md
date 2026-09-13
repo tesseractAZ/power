@@ -1,3 +1,95 @@
+## 1.154.0
+
+### Correction to 1.153.0
+
+The 1.153.0 entry below says the boot freeze "was 99.99% one SQL statement". It
+was not. The per-phase line it quoted was emitted straight after `ANALYZE`, and the
+1.152.0 per-device seed ran after it: another **5,807 ms** on that boot, found from
+log timestamps because the instrumentation never covered it. ANALYZE was 9,725 of
+~15,533 ms — **62.6%**. It was still the largest phase, and the bound 1.153.0 shipped
+(`PRAGMA analysis_limit=400`, 3,415 ms on the next boot) stands. The blocked window on
+1.153.0 was therefore about 9.25 s, not the 3.4 s its line reported. That entry is
+left as written; the source comment and the test that repeated the figure are
+corrected in place.
+
+### The per-device gap seed, rewritten
+
+1.152.0 seeded the per-device gap clocks from `samples` so that a blackout spanning a
+restart would be seen. Its own boot output showed three defects.
+
+- **5.8 s per boot, unmeasured.** `SELECT sn, MAX(ts) … GROUP BY sn` visits every
+  entry of the composite index (5,807 and 5,834 ms on the live Pi) and ran after the
+  boot-phases line. The seed is now an exact index skip-scan: step through distinct
+  SNs, then each SN's distinct metrics, taking `MAX(ts)` per series. Every statement
+  is a single index SEARCH, so the cost follows the number of series, not rows.
+- **Core 5 was skipped.** The seed excluded `benchSpareSns()`, evaluated before
+  `index.ts` had published the roster, so the stale `SPARE_DPU_SNS` literal decided —
+  and it still names Core 5, a wired home Core. Only synthetic SNs are skipped now;
+  bench spares are seeded and filtered at sweep time by `isBenchSpareSn`, which by
+  then reads the live roster. The roster publish in `index.ts` also moved above
+  `createRecorder`, so the restart probe's fleet anchor no longer drops Core 5.
+- **Every device would read as dark after an outage over 6 h.** A seeded clock is the
+  device's last sample, so the first sweep after a long add-on outage would have
+  measured the outage itself. A device still on its seeded clock is now charged only
+  with dark time the add-on could observe (`seededDeviceDarkMs`): how far its last
+  sample trails the fleet's newest before the outage, plus monotonic time since this
+  process's first home write. A Core already dark for nine days still carries its
+  nine days; the outage belongs to the restart-spanning fleet gap. An NTP step cannot
+  manufacture dark time, and a boot clock still behind the seed cannot write a gap
+  that ends before it starts.
+
+### Boot timing covers the whole call
+
+The boot-phases line is emitted at the **end** of `createRecorder`, on the monotonic
+clock, with `setup`, `seed`, `restart-probe` and `rest` as phases of their own. A test
+asserts that the line follows the seed and that the phases sum to the total.
+`index.ts` also logs `createRecorder returned after N ms`, timed from outside; if the
+two disagree, part of the call is outside the instrumentation again.
+
+### The SHP2 shadow latch holds until the panel is really moving
+
+On 2026-09-12 the cloud-shadow detector latched and released four times in 87
+minutes (04:10–04:20, 04:24–04:30, 05:17–05:28, 05:32–05:37). The latch side is
+deliberately slow — five identical payloads and four minutes — but the release side
+let go on the first payload that differed. Each gap between windows is exactly the
+four-minute re-arm: one refreshed body, then the same replay. For those minutes the
+alarm path read the panel's grid value as live.
+
+Once latched, the panel must now show two distinct new witnesses
+(`SHP2_SHADOW_CLEAR_DISTINCT`) before it reads live again. A live panel produces a new
+twelve-channel vector on essentially every poll, so a genuine recovery costs about
+one extra poll. One refreshed body followed by the same replay, or a cloud alternating
+between two cached bodies, stays one latch with its original onset. The latch side is
+unchanged and an unmeasurable poll still releases. The state lives in the store
+beside the freshness map, not on the device object `setDeviceList` rebuilds every
+60 s.
+
+### "Alarm system is blind" is no longer said while the Cores are reporting
+
+A replayed panel payload has routed into the telemetry-blind CRITICAL since 1.148.0,
+as a failed or never-asked panel fetch already did. All three rendered the text
+written for the 2026-08-04 outage — the add-on "has received no telemetry" and
+"cannot see battery state, grid presence or any device fault" — while the Cores were
+still reporting. The title is spoken aloud, and the Cause fact read "unknown".
+
+- `notePollFailed` now carries the panel verdict (`{cause, sns}`), bound to that
+  failure: a thrown poll clears it, so a total outage is never described as one stale
+  panel.
+- When the failure is a panel verdict and at least one other device is still current,
+  the alert names the condition — *Panel data is stale — grid presence unknown*,
+  *Panel is not answering — grid presence unconfirmed*, or *Panel is offline to the
+  cloud — grid presence unconfirmed* — states how many other devices are reporting,
+  and says no alarm that depends on the panel can be trusted. "Current" means online,
+  a DPU or SHP2 projection, and a quota write within the five-minute stale bound; a
+  bare online flip does not count.
+- With nothing else current, the original text is used, because it is then true.
+- The Cause fact names the verdict either way.
+- Id, severity and priority are identical, so escalation and audibility are
+  unchanged. Only the words differ.
+
+A forecast irradiance defect found in the same log review ships separately and
+staged, because re-scoring history can reopen the night-charge basis gate.
+
 ## 1.153.0
 
 ### The boot freeze was 99.99% one SQL statement

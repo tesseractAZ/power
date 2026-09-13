@@ -35,7 +35,7 @@ const RECORDER = resolve(SERVER, 'src/recorder.ts');
 const ANALYTICS = resolve(SERVER, 'src/analytics.ts');
 const INDEX = resolve(SERVER, 'src/index.ts');
 
-const SUBSET = ['test/darkCoreCoverage.test.ts', 'test/pushDwellAndObservability.test.ts'];
+const SUBSET = ['test/darkCoreCoverage.test.ts', 'test/seedAndBootPhases.test.ts', 'test/pushDwellAndObservability.test.ts'];
 
 const MUTANTS = [
   {
@@ -48,8 +48,8 @@ const MUTANTS = [
   {
     id: 'ii. ★ the sweep reports a gap but never names the SN',
     file: RECORDER,
-    find: '          recordTelemetryGap(lastMs, now, { sn });',
-    to: '          recordTelemetryGap(lastMs, now); /* MUTANT */',
+    find: '          recordTelemetryGap(lastMs, Math.max(now, lastMs + darkMs), { sn });',
+    to: '          recordTelemetryGap(lastMs, Math.max(now, lastMs + darkMs)); /* MUTANT */',
     why: 'A per-device blackout would be filed as a FLEET gap — claiming no home device reported, while home samples were arriving the whole time.',
   },
   {
@@ -115,23 +115,79 @@ const MUTANTS = [
   {
     id: 'x. ★ the per-device gap clocks stop being seeded at boot (the v1.150.0 blindness)',
     file: RECORDER,
-    find: '        lastInsertBySn.set(r.sn, Number(r.maxTs));',
+    find: '      lastInsertBySn.set(sn, lastTs);',
     to: '        /* MUTANT */',
     why: 'Restores the shipped defect: a device already dark at boot never enters the Map the sweep iterates, so a blackout spanning a restart is invisible — and this add-on booted ELEVEN times in 48 h.',
   },
   {
     id: 'xi. ★ a failed seed becomes silent',
     file: RECORDER,
-    find: "      log(`recorder: per-device gap clock seeding FAILED",
-    to: "      void 0; (() => `recorder: per-device gap clock seeding FAILED", // eslint-disable-line -- MUTANT
+    find: "    log(`recorder: per-device gap clock seeding FAILED",
+    to: "    void 0; (() => `recorder: per-device gap clock seeding FAILED", // eslint-disable-line -- MUTANT
     why: 'An unseeded sweep looks EXACTLY like a working one; without the line, v1.150.0 blindness returns with no trace at all.',
   },
   {
-    id: 'xii. the seed stops excluding synthetic SNs and bench spares',
+    id: 'xii. ★ synthetic SNs are seeded (and so swept)',
     file: RECORDER,
-    find: '        `SELECT sn, MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => \'?\').join(\',\')}) GROUP BY sn`,',
-    to: '        `SELECT sn, MAX(ts) AS maxTs FROM samples GROUP BY sn`, /* MUTANT */',
-    why: 'Bench spares are dark BY DESIGN and synthetic SNs are off-cadence; sweeping them raises a permanent false gap that buries the real signal.',
+    find: '      if (SYNTHETIC_SNS.has(sn)) continue;            // off-cadence by design; never swept',
+    to: '      /* MUTANT */',
+    why: 'The forecast archive and night-charge overlay write off-cadence by design; seeded, each is ledgered as a dark device after 6 h.',
+  },
+  {
+    id: 'xv. ★★ the seed skips the stale bench list again (Core 5 dropped)',
+    file: RECORDER,
+    find: '      lastInsertBySn.set(sn, lastTs);',
+    to: '      if (benchSpareSns().includes(sn)) continue; lastInsertBySn.set(sn, lastTs); /* MUTANT */',
+    why: 'THE v1.152.0 DEFECT: before the roster is published, benchSpareSns() is the stale SPARE_DPU_SNS literal, which excluded Core 5 — a wired home Core whose blackout across a restart then goes unrecorded.',
+  },
+  {
+    id: 'xvi. ★★ the outage guard is removed (every device dark after a >6 h outage)',
+    file: RECORDER,
+    find: '        const darkMs = seededNotYetWritten.has(sn)',
+    to: '        const darkMs = false /* MUTANT */ && seededNotYetWritten.has(sn)',
+    why: 'After any add-on outage over 6 h every device is ledgered as a per-device blackout on the first sweep — the fleet was dark, not the devices.',
+  },
+  {
+    id: 'xvii. the pre-outage term measures to the wall clock instead of the fleet anchor',
+    file: RECORDER,
+    find: '  const beforeOutage = fleetAnchorMs == null ? 0 : Math.max(0, fleetAnchorMs - seedMs);',
+    to: '  const beforeOutage = Math.max(0, Date.now() - seedMs); /* MUTANT */',
+    why: "Charges the add-on's own downtime to every device again: the guard in name only.",
+  },
+  {
+    id: 'xviii. ★ a write does not move a device off its seeded clock',
+    file: RECORDER,
+    find: '        seededNotYetWritten.delete(s.sn); // v1.154.0 — its clock is in-process now, not seeded',
+    to: '        /* MUTANT */',
+    why: "A device that reported after boot and then went quiet is measured from the process's first home write instead of its own — a false gap for a device silent under 6 h.",
+  },
+  {
+    id: 'xix. the post-boot clock restarts on every batch',
+    file: RECORDER,
+    find: '      if (firstHomeInsertMono < 0) firstHomeInsertMono = performance.now();',
+    to: '      firstHomeInsertMono = performance.now(); /* MUTANT */',
+    why: 'A device dark since boot accrues no in-process dark time, so a blackout that begins at a restart is never recorded.',
+  },
+  {
+    id: 'xx. the seed takes one metric per SN instead of the newest across all',
+    file: RECORDER,
+    find: '        if (ts > lastTs) lastTs = ts;',
+    to: '        if (lastTs === 0) lastTs = ts; /* MUTANT */',
+    why: 'A device is seeded from an old, rarely written metric and filed as dark while its other series are current.',
+  },
+  {
+    id: 'xxi. a clock-skewed boot writes a gap that ends before it starts',
+    file: RECORDER,
+    find: '          recordTelemetryGap(lastMs, Math.max(now, lastMs + darkMs), { sn });',
+    to: '          recordTelemetryGap(lastMs, now, { sn }); /* MUTANT */',
+    why: 'On an RTC-less Pi booting behind its newest sample, the ledger gains a negative-duration record.',
+  },
+  {
+    id: 'xxii. ★ the boot-phases line is emitted before the seed again',
+    file: RECORDER,
+    find: '  // (v1.154.0 — the boot-phases line is emitted at the END of createRecorder.)',
+    to: '  log(`recorder: boot phases — ${tOpen}, ${tSchema}, ${tAnalyze} (total 0ms)`); /* MUTANT */',
+    why: 'THE v1.153.0 ERROR: a per-phase line that stops short of the seed turned a 62.6% phase into "99.99%".',
   },
   {
     id: 'ix. the recorder heartbeat returns to a line per minute',

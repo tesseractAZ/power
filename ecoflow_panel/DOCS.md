@@ -328,6 +328,24 @@ resume after a silence, persists a durable marker (not synthetic samples) to
 - RTC-less-Pi hardening: if the boot clock is behind the newest persisted sample
   (before NTP steps), the boot check is deferred and resolved in-process using
   monotonic `performance.now()` (`bootMonoMs`, `RESTART_GAP_SETTLE_MS = 10 min`).
+- **Per-device silence (v1.150.0, seed reworked v1.154.0).** One dark device is
+  invisible to the fleet clock, because any surviving device resets it. A sweep run
+  on every home write records a gap for any SN silent past
+  `PER_DEVICE_GAP_THRESHOLD_MS` (6 h), once per blackout (`perDeviceGapOpen`),
+  logged as `DEVICE TELEMETRY GAP`. The per-SN clocks are seeded at boot so a
+  blackout spanning a restart is still seen. The seed is an exact index skip-scan
+  (distinct SN → distinct metric → `MAX(ts)`, every statement an index SEARCH) that
+  skips only the synthetic SNs; bench spares are filtered at sweep time against the
+  live roster. A device still on its seeded clock is charged only with dark time the
+  add-on could observe (`seededDeviceDarkMs`): how far its last sample trails the
+  fleet's newest before the outage, plus monotonic time since this process's first
+  home write. The outage itself is the restart-spanning fleet gap, not every
+  device's.
+- **Boot phases.** `createRecorder` blocks the whole add-on (no HTTP listener, MQTT
+  ingest, poll or alarm evaluation), so it ends with one line on the monotonic clock:
+  `open`, `schema+migrations`, `analyze` (bounded by `PRAGMA analysis_limit=400`),
+  `setup`, `seed`, `restart-probe`, `rest` and `total`. `index.ts` also logs the
+  call's duration from outside; the two should agree.
 
 ---
 
@@ -1091,7 +1109,10 @@ whole-panel scalars. The vector is the point: `grid_power_home` alone legitimate
 holds 0 W for 12.5+ hours on a sunny day, while over 1,558 sampled minutes the
 full twelve-channel vector never held identical for even one minute. Staleness
 requires **both** a repeat count and an elapsed duration; an unmeasurable poll
-resets rather than accumulating. `computeHomeGridWatts` and
+resets rather than accumulating. Release has hysteresis (v1.154.0): once latched,
+the panel must show `SHP2_SHADOW_CLEAR_DISTINCT` (2) distinct new witnesses before it
+reads live again (`advanceShadowLatch`), so one refreshed body followed by the same
+replay stays one latch with its original onset. `computeHomeGridWatts` and
 `computeShp2GridConnected` then treat a shadowed panel exactly as v0.88.0 already
 treats an offline one. `sensor.ecoflow_panel_shp2_payload_frozen` publishes the
 held duration.
@@ -1840,6 +1861,16 @@ hardware, clock skew, not credentials) from `network` from `other`; sustained
 auth-shaped failure recommends a client rebuild, cooldown-limited.
 `/api/health` returns `ok:false` **and HTTP 503** while blind, so the HA
 watchdog and any uptime probe see it.
+
+**Panel verdicts (v1.154.0).** A failed, never-asked or replayed alarm-path SHP2
+poll also routes here: `notePollFailed` carries `{cause, sns}`, bound to that
+failure and cleared by any other. When the failure is a panel verdict and at least
+one other device is still current (`blindAlertContext`: online, a dpu/shp2
+projection, a quota write inside the stale bound), the alert names the panel
+condition — e.g. *"Panel data is stale — grid presence unknown"*, with the count of
+devices still reporting — instead of claiming the add-on sees nothing. With nothing
+else current the original text is used, because it is then true. Id, severity and
+priority are identical either way, and the Cause fact names the verdict.
 
 ### 2.16 Cloud-session self-heal (`server/src/sessionSelfHeal.ts`) — v1.76.0
 
