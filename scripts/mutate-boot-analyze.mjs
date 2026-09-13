@@ -28,7 +28,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -121,7 +121,12 @@ const MUTANTS = [
   },
 ];
 
-const TSC = resolve(SERVER, 'node_modules/.bin/tsc');
+// Built with join() on purpose. check-mutant-anchors.mjs treats a path.resolve call on
+// SERVER with a single string literal as a mutant TARGET file, and CI's checkout has no
+// node_modules: written that way, this line marked the whole harness DEAD in CI while it
+// resolved locally. (Keep the construct itself out of this comment too — the checker
+// scans comments.)
+const TSC = join(SERVER, 'node_modules', '.bin', 'tsc');
 function typecheck() {
   execFileSync(TSC, ['--noEmit', '-p', 'tsconfig.json'], { cwd: SERVER, stdio: 'pipe' });
 }
