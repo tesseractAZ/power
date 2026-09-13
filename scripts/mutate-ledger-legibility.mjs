@@ -75,8 +75,11 @@ const MUTANTS = [
   {
     id: 'vi. a REAL basis failure stops reporting incomplete',
     file: ADVISOR,
-    find: "  if (!basisComplete) return nullPlan(inputs, false, 'No plan — forecast/telemetry basis incomplete; nothing will be charged.');",
-    to: "  if (!basisComplete) return nullPlan(inputs, true, 'No plan — forecast/telemetry basis incomplete; nothing will be charged.'); /* MUTANT */",
+    // v1.154.0 — repointed. v1.148.0 turned this line into a template literal carrying
+    // the gate name; the double-quoted anchor has matched nothing since, invisibly,
+    // because check-mutant-anchors.mjs read single-quoted anchors only.
+    find: "    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`);",
+    to: "    return nullPlan(inputs, true, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`); /* MUTANT */",
     why: 'The windowless-night distinction is only worth having if a genuine basis failure still reads as one.',
   },
   {

@@ -493,6 +493,17 @@ export function isHomePoolDpu(
   return !SPARE_DPU_SNS.has(sn);
 }
 
+/**
+ * v1.154.0 — "does this DPU power nothing in the house right now?" for callers that
+ * hold only the device map. isHomePoolDpu uses a remembered roster only when one is
+ * PASSED, and isBenchSpareSn can only remove spare status from the SPARE_DPU_SNS
+ * literal — which names Core 5 (wired) and not Core 3 (the actual bench unit). This
+ * resolves live SHP2 roster → published last-known roster → literal, in that order.
+ */
+export function isOutsideHomePool(sn: string, devices: Record<string, DeviceSnapshot>): boolean {
+  return !isHomePoolDpu(sn, devices, rosterOf());
+}
+
 export function homeFleetMeanSoc(
   devices: Record<string, DeviceSnapshot>,
   lastKnownRoster?: ReadonlySet<string> | null,

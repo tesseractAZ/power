@@ -82,6 +82,77 @@ export function detectTelemetryGap(lastInsertMs: number, nowMs: number, threshol
 }
 
 /**
+ * v1.154.0 — how long a SEEDED device has been dark, NOT counting time the add-on
+ * itself was down. PURE.
+ *
+ * A seeded clock is the device's newest persisted sample. Measured as now − seed,
+ * any add-on outage longer than the 6 h per-device threshold files EVERY device as
+ * a blackout on the first sweep after boot. The fleet was dark, not the device, and
+ * the restart-spanning FLEET gap already records that.
+ *
+ * So a device that has not written since boot is charged only with dark time the
+ * add-on could have observed:
+ *  - before the outage: how far its last sample trails the fleet's newest home
+ *    sample (`fleetAnchorMs`, the restart probe's MAX(ts)). A Core already dark for
+ *    nine days carries its nine days straight through;
+ *  - after it: time since this process's first home-device write, on the MONOTONIC
+ *    clock, so an NTP step on an RTC-less Pi cannot manufacture it.
+ * The outage between those two instants belongs to no single device.
+ *
+ * v1.154.0 review — and so does EVERY fleet-dark window between the seed and the
+ * anchor, not only the last one. The anchor is the newest home sample from ANY
+ * device, so a short intervening boot in which the others wrote moves it past an
+ * earlier outage the silent device had no part in. `fleetDarkWindows` are the gap
+ * ledger's FLEET records (restart-spanning and in-process — never a per-device
+ * record, which is the device's own darkness); their union is subtracted.
+ */
+export function seededDeviceDarkMs(
+  seedMs: number,
+  fleetAnchorMs: number | null,
+  sinceFirstHomeInsertMs: number,
+  fleetDarkWindows: ReadonlyArray<{ startMs: number; endMs: number }> = [],
+): number {
+  const span = fleetAnchorMs == null ? 0 : Math.max(0, fleetAnchorMs - seedMs);
+  const beforeOutage = fleetAnchorMs == null ? 0 : Math.max(0, span - fleetDarkOverlapMs(fleetDarkWindows, seedMs, fleetAnchorMs));
+  return beforeOutage + Math.max(0, sinceFirstHomeInsertMs);
+}
+
+/** v1.154.0 review — length of the UNION of `windows`, clipped to [fromMs, toMs]. PURE. */
+export function fleetDarkOverlapMs(windows: ReadonlyArray<{ startMs: number; endMs: number }>, fromMs: number, toMs: number): number {
+  const clipped = windows
+    .map((w) => [Math.max(fromMs, w.startMs), Math.min(toMs, w.endMs)] as [number, number])
+    .filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e > s)
+    .sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let curStart = 0;
+  let curEnd = -Infinity;
+  for (const [s, e] of clipped) {
+    if (s > curEnd) {
+      if (curEnd > -Infinity) total += curEnd - curStart;
+      curStart = s;
+      curEnd = e;
+    } else if (e > curEnd) {
+      curEnd = e;
+    }
+  }
+  if (curEnd > -Infinity) total += curEnd - curStart;
+  return total;
+}
+
+/**
+ * v1.154.0 review — the per-device seed's statements, exported so that their query
+ * PLANS can be asserted (each one an index SEARCH), not merely their text. A text pin
+ * on `INDEXED BY` was satisfied by a constant that no statement had to use.
+ */
+export const SEED_SQL = {
+  firstSn: 'SELECT MIN(sn) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts',
+  nextSn: 'SELECT MIN(sn) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn > ?',
+  firstMetric: 'SELECT MIN(metric) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn = ?',
+  nextMetric: 'SELECT MIN(metric) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn = ? AND metric > ?',
+  maxTsOf: 'SELECT MAX(ts) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn = ? AND metric = ?',
+} as const;
+
+/**
  * v1.13.0 (review F10 + F22) — decide what the BOOT-time restart-gap check should
  * do, as a pure function so the (subtle) clock-skew branch is unit-testable.
  *
@@ -636,9 +707,13 @@ export function createRecorder(
   // move on a life-safety system is to measure rather than to delete a query
   // whose purpose is keeping the planner on a table this size. These timings make
   // the next decision evidence-based; they cost one line per boot.
-  const bootT0 = Date.now();
+  //
+  // v1.154.0 — on the monotonic clock (an NTP step mid-boot must not appear as a
+  // phase), with the seed and restart probe as phases of their own, and the line
+  // emitted at the END of createRecorder. See the note there.
+  const bootT0 = performance.now();
   let phaseT = bootT0;
-  const phase = (name: string) => { const d = Date.now() - phaseT; phaseT = Date.now(); return `${name} ${d}ms`; };
+  const phase = (name: string) => { const t = performance.now(); const d = Math.round(t - phaseT); phaseT = t; return `${name} ${d}ms`; };
   const db = new DatabaseSync(dbPath);
   const tOpen = phase('open');
   db.exec(`
@@ -804,9 +879,13 @@ export function createRecorder(
   //
   //     recorder: boot phases — open 0ms, schema+migrations 1ms, analyze 9725ms
   //
-  // 9,725 ms of a 9,726 ms window: 99.99% of a boot that blocks the whole add-on
-  // (no HTTP listener, no MQTT ingest, no poll, no alarm evaluation — createRecorder
-  // is non-async and cannot yield). The comment was wrong on both counts it rested
+  // v1.154.0 CORRECTION. v1.153.0 called that "99.99% of the boot". It was 99.99% of
+  // the window that line measured, and the line was emitted BEFORE v1.152.0's
+  // per-device seed, which blocked a further 5,807 ms unmeasured. ANALYZE was 9,725 of
+  // ~15,533 ms, or 62.6%: still the largest phase, and the whole add-on is blocked for
+  // all of it (no HTTP listener, no MQTT ingest, no poll, no alarm evaluation —
+  // createRecorder is non-async and cannot yield). Bounded as below, ANALYZE took
+  // 3,415 ms on the next boot. The original comment was wrong on both counts it rested
   // on: `samples` carries TWO indexes now, and the database is ~1.72 GB under an
   // 1825-day retention. A full ANALYZE reads every index entry.
   //
@@ -830,12 +909,7 @@ export function createRecorder(
     log(`recorder: ANALYZE skipped (${e?.message ?? e})`);
   }
   const tAnalyze = phase('analyze');
-  // One line, once per boot. If `analyze` dominates, the stale comment above is
-  // the defect and the fix is to make ANALYZE conditional (it is a planner-stats
-  // refresh, not a correctness requirement). If `open` dominates it is WAL
-  // recovery or page-cache warm-up and ANALYZE is innocent. Either way the next
-  // change is made against a measurement instead of a guess.
-  log(`recorder: boot phases — ${tOpen}, ${tSchema}, ${tAnalyze} (total ${Date.now() - bootT0}ms, db ${dbPath})`);
+  // (v1.154.0 — the boot-phases line is emitted at the END of createRecorder.)
 
   const insert = db.prepare(`INSERT INTO samples (ts, sn, metric, value) VALUES (?, ?, ?, ?)`);
 
@@ -889,11 +963,23 @@ export function createRecorder(
    *
    *  The pattern is the repo's own: the restart-spanning FLEET probe below already
    *  reads `MAX(ts)` from `samples`, and v1.131.0 fixed the sibling msg-rate-floor
-   *  detector the same way. This is the per-SN form of that query. */
+   *  detector the same way. This is the per-SN form of that query.
+   *
+   *  v1.154.0 — the seed is an index skip-scan, includes bench spares (filtered at
+   *  SWEEP time against the live roster), and a seeded device is never charged with
+   *  the add-on's own downtime. See the seed block and seededDeviceDarkMs. */
   const lastInsertBySn = new Map<string, number>();
   /** SNs whose gap is already recorded — cleared when the SN writes again, so
    *  one blackout yields ONE record rather than one per batch for its duration. */
   const perDeviceGapOpen = new Set<string>();
+  /** v1.154.0 — SNs whose clock is still the SEEDED one (no write since boot). */
+  const seededNotYetWritten = new Set<string>();
+  /** v1.154.0 — the restart probe's MAX(ts) over home SNs; seededDeviceDarkMs's reference. */
+  let bootFleetAnchorMs: number | null = null;
+  /** v1.154.0 — monotonic instant of this process's first home-device write; -1 until then. */
+  let firstHomeInsertMono = -1;
+  /** v1.154.0 — SNs written by the recorder's own ticks, never by a device feed. */
+  const SYNTHETIC_SNS: ReadonlySet<string> = new Set([WEATHER_SN, FORECAST_SN, NIGHT_CHARGE_SN]);
   // v1.13.0 (review F10 + F22) — the RESTART path uses a tighter floor: a restart
   // that lost even one full heartbeat interval of coverage is real, operator-
   // relevant dark time the 15-min in-process threshold hid. In-process stalls keep
@@ -1000,6 +1086,56 @@ export function createRecorder(
   // excluded for the v0.30.0 reason (a bench unit must not mask a home-feed stall).
   // Fail-open: this is a diagnostic; it must never block startup.
   //
+  // v1.154.0 — SEED THE PER-DEVICE CLOCKS, rewritten. v1.152.0's version had three
+  // defects, all visible in its own boot output:
+  //
+  //  1. COST. `SELECT sn, MAX(ts) … GROUP BY sn` visits every entry of the composite
+  //     index: 5,807 and 5,834 ms of blocked boot on the live Pi, emitted after the
+  //     boot-phases line so the instrumentation never saw it. This is an exact
+  //     skip-scan instead — step through distinct SNs, then each SN's distinct
+  //     metrics, taking MAX(ts) per pair. Every statement is one index SEARCH, so the
+  //     cost follows the number of (sn, metric) series, not the number of rows.
+  //  2. MEMBERSHIP. It excluded benchSpareSns(), evaluated before index.ts had
+  //     published the roster, so the stale SPARE_DPU_SNS literal decided — and it
+  //     excluded Core 5, a wired home Core. Only SYNTHETIC SNs are skipped now; bench
+  //     spares are seeded and filtered at sweep time by isBenchSpareSn, which by then
+  //     reads the live roster.
+  //  3. OUTAGES. A seeded clock is the device's last sample, so after any add-on
+  //     outage over 6 h every device looked dark. See seededDeviceDarkMs.
+  const tSetup = phase('setup');
+  try {
+    type One = { v: string | number | bigint | null } | undefined;
+    const firstSn = db.prepare(SEED_SQL.firstSn);
+    const nextSn = db.prepare(SEED_SQL.nextSn);
+    const firstMetric = db.prepare(SEED_SQL.firstMetric);
+    const nextMetric = db.prepare(SEED_SQL.nextMetric);
+    const maxTsOf = db.prepare(SEED_SQL.maxTsOf);
+    // A runaway guard only: far above any real device set, so a corrupt index
+    // cannot turn the seed back into an unbounded boot stall.
+    const SEED_MAX_SERIES = 50_000;
+    let seeded = 0;
+    let series = 0;
+    for (let sn = (firstSn.get() as One)?.v as string | null; sn != null; sn = (nextSn.get(sn) as One)?.v as string | null) {
+      if (SYNTHETIC_SNS.has(sn)) continue;            // off-cadence by design; never swept
+      let lastTs = 0;
+      for (let metric = (firstMetric.get(sn) as One)?.v as string | null; metric != null; metric = (nextMetric.get(sn, metric) as One)?.v as string | null) {
+        if (++series > SEED_MAX_SERIES) throw new Error(`more than ${SEED_MAX_SERIES} (sn, metric) series`);
+        const ts = Number((maxTsOf.get(sn, metric) as One)?.v ?? 0);
+        if (ts > lastTs) lastTs = ts;
+      }
+      if (lastTs <= 0) continue;                      // a corrupt ts=0 row must not seed a decades-long gap
+      lastInsertBySn.set(sn, lastTs);
+      seededNotYetWritten.add(sn);
+      seeded++;
+    }
+    log(`recorder: seeded per-device gap clocks for ${seeded} SN(s) from persisted samples (${series} series)`);
+  } catch (e: any) {
+    // Never let seeding break boot — an unseeded sweep is the v1.150.0 behaviour,
+    // which is degraded but not broken. Say so rather than failing silently.
+    log(`recorder: per-device gap clock seeding FAILED (${e?.message ?? e}) — a blackout spanning this restart will not be detected`);
+  }
+  const tSeed = phase('seed');
+
   // v1.13.0 (review F10 + F22) — two fixes to the decision, both in classifyRestartGap:
   //  (1) use RESTART_GAP_FLOOR_MS (5 min), not GAP_THRESHOLD_MS (15 min) — an
   //      11-min deploy blackout and a restart-erased 16-min stall previously fell
@@ -1023,28 +1159,11 @@ export function createRecorder(
     // mask a pre-crash telemetry stall this detector exists to ledger.
     // v1.121.0 — roster-aware bench set (the static literal is stale since 08-20).
     const restartGapExcludedSns = [WEATHER_SN, FORECAST_SN, NIGHT_CHARGE_SN, ...benchSpareSns()];
-    // v1.152.0 — seed the PER-DEVICE clocks from the same table, so a blackout that
-    // straddles this restart is visible on the first post-boot insert instead of
-    // being erased by it. Same exclusion list: a synthetic SN is off-cadence by
-    // design and must not be swept, and a bench spare is dark by design.
-    try {
-      const perSn = db.prepare(
-        `SELECT sn, MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')}) GROUP BY sn`,
-      ).all(...restartGapExcludedSns) as Array<{ sn: string; maxTs: number | bigint | null }>;
-      for (const r of perSn) {
-        if (r.maxTs == null) continue;
-        lastInsertBySn.set(r.sn, Number(r.maxTs));
-      }
-      if (perSn.length) log(`recorder: seeded per-device gap clocks for ${perSn.length} SN(s) from persisted samples`);
-    } catch (e: any) {
-      // Never let seeding break boot — an unseeded sweep is the v1.150.0 behaviour,
-      // which is degraded but not broken. Say so rather than failing silently.
-      log(`recorder: per-device gap clock seeding FAILED (${e?.message ?? e}) — a blackout spanning this restart will not be detected`);
-    }
     const row = db.prepare(
       `SELECT MAX(ts) AS maxTs FROM samples WHERE sn NOT IN (${restartGapExcludedSns.map(() => '?').join(',')})`,
     ).get(...restartGapExcludedSns) as { maxTs: number | bigint | null } | undefined;
     const maxTs = row?.maxTs == null ? null : Number(row.maxTs);
+    bootFleetAnchorMs = maxTs;
     // v1.14.0 — a clean-shutdown marker within a heartbeat of the pre-boot anchor
     // means the preceding stop was deliberate (deploy/update), not a power loss.
     const markerTs = readCleanShutdownMarker();
@@ -1061,6 +1180,7 @@ export function createRecorder(
     // Diagnostic-only: swallow and continue startup (debug-gated breadcrumb).
     debug(`recorder: restart-spanning gap check skipped (${e?.message ?? e})`);
   }
+  const tProbe = phase('restart-probe');
 
   // v0.50.0 — persist the per-key emit high-water across restarts. The micro-dip
   // clamp (clampLifetimeDip) keys on lifetimeEmitHighWater, an in-memory Map that
@@ -1118,6 +1238,7 @@ export function createRecorder(
         // every SN including synthetics; the sweep filters what it reports.
         lastInsertBySn.set(s.sn, now);
         perDeviceGapOpen.delete(s.sn);   // it is writing again — re-arm
+        seededNotYetWritten.delete(s.sn); // v1.154.0 — its clock is in-process now, not seeded
       }
       db.prepare('COMMIT').run();
     } catch (e) {
@@ -1134,11 +1255,21 @@ export function createRecorder(
     // to be driven by SOMEONE ELSE'S write, which is exactly what makes the
     // fleet clock useless here and this loop necessary.
     if (sawHomeInsert) {
+      if (firstHomeInsertMono < 0) firstHomeInsertMono = performance.now();
+      // v1.154.0 review — the windows in which NO home device could report.
+      const fleetDark = telemetryGapsLog.filter((g) => g.sn == null);
       for (const [sn, lastMs] of lastInsertBySn) {
         if (isBenchSpareSn(sn)) continue;            // a bench spare is dark BY DESIGN
         if (perDeviceGapOpen.has(sn)) continue;      // already recorded; do not re-report every batch
-        if (detectTelemetryGap(lastMs, now, PER_DEVICE_GAP_THRESHOLD_MS)) {
-          recordTelemetryGap(lastMs, now, { sn });
+        // v1.154.0 — a device still on its SEEDED clock is not charged with the
+        // add-on's own downtime; one that has written since boot is measured as before.
+        const darkMs = seededNotYetWritten.has(sn)
+          ? seededDeviceDarkMs(lastMs, bootFleetAnchorMs, performance.now() - firstHomeInsertMono, fleetDark)
+          : now - lastMs;
+        if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) {
+          // endMs is clamped so a boot clock still BEHIND the seed (RTC-less Pi before
+          // NTP — the restart probe's `defer` case) cannot write a gap ending before it starts.
+          recordTelemetryGap(lastMs, Math.max(now, lastMs + darkMs), { sn });
           perDeviceGapOpen.add(sn);
         }
       }
@@ -1147,6 +1278,19 @@ export function createRecorder(
     // v0.30.0 — fleet telemetry-gap heartbeat. A home-device write just landed;
     // if the previous home write was long ago, telemetry was silent in between.
     if (sawHomeInsert) {
+      // v1.154.0 re-review — the POST-BOOT silence. `lastHomeInsertTs` starts at 0 and
+      // detectTelemetryGap ignores a zero anchor, so a boot that waited hours for its
+      // first home write (DNS or cloud down after a power cut) ledgered nothing — and
+      // the NEXT boot's outage guard charged that window to any device still on its
+      // seeded clock. Measured on the monotonic clock and anchored to now, so an NTP
+      // step during the wait can neither lengthen it nor misplace its end.
+      //
+      // Decided BEFORE either branch writes lastHomeInsertTs, and applied on BOTH. On the
+      // defer (clock-behind) path, past 15 min of uptime the deferred restart gap can no
+      // longer be held (its settle budget is 10 min), and the record it writes ends at
+      // (now − uptime) — exactly where this window begins.
+      const sinceBootMs = performance.now() - bootMonoMs;
+      const postBootSilence = lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS;
       if (pendingRestartGap) {
         // v1.14.0 (review of F10b's defer) — the v1.13.0 resolution fired on the
         // first insert whose wall clock crossed the anchor, but a skewed clock
@@ -1178,6 +1322,7 @@ export function createRecorder(
         }
         lastHomeInsertTs = now;
       }
+      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now);
     }
     // v0.9.74 — silence per-tick chatter. The previous "wrote N samples"
     // line fired every 10 s under normal load (~44 lines/min, ~88 % of
@@ -2659,6 +2804,14 @@ export function createRecorder(
       { ...c, id: 1 } as Record<string, unknown>,
     );
   };
+
+  // v1.152.0 / v1.154.0 — ONE line per boot, emitted HERE so every statement
+  // createRecorder runs is inside it. v1.152.0 emitted it straight after ANALYZE,
+  // before a 5.8 s seed, and v1.153.0's "99.99%" was then a claim about a window that
+  // left out the second-largest phase. `rest` is whatever no named phase covers — if
+  // it grows, name what grew. index.ts also times the call from outside.
+  const tRest = phase('rest');
+  log(`recorder: boot phases — ${tOpen}, ${tSchema}, ${tAnalyze}, ${tSetup}, ${tSeed}, ${tProbe}, ${tRest} (total ${Math.round(performance.now() - bootT0)}ms, db ${dbPath})`);
 
   return {
     insertSnapshot: (snap) => record(extract(snap)),

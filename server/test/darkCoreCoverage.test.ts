@@ -143,10 +143,12 @@ test('★ SOURCE PIN: the recorder sweeps for per-device silence, not just fleet
   // here and this loop is necessary.
   const i = src.indexOf('for (const [sn, lastMs] of lastInsertBySn)');
   assert.ok(i > 0, 'the per-device staleness sweep must be present');
-  const sweep = src.slice(i, i + 700);
+  const sweep = src.slice(i, i + 1400);
   assert.match(sweep, /if \(isBenchSpareSn\(sn\)\) continue;/, 'a bench spare is dark by design and must be exempt');
-  assert.match(sweep, /detectTelemetryGap\(lastMs, now, PER_DEVICE_GAP_THRESHOLD_MS\)/);
-  assert.match(sweep, /recordTelemetryGap\(lastMs, now, \{ sn \}\)/, 'the record must name the silent SN');
+  // v1.154.0 — the threshold applies to darkMs, which leaves out the add-on's own
+  // downtime for a device still on its seeded clock (driven in seedAndBootPhases.test.ts).
+  assert.match(sweep, /if \(darkMs > PER_DEVICE_GAP_THRESHOLD_MS\)/);
+  assert.match(sweep, /recordTelemetryGap\(lastMs, Math\.max\(now, lastMs \+ darkMs\), \{ sn \}\)/, 'the record must name the silent SN');
   assert.match(sweep, /perDeviceGapOpen\.add\(sn\)/, 'one blackout must yield ONE record, not one per batch');
 
   // And the gap record must carry the SN, or a per-device gap is
@@ -186,20 +188,20 @@ test('★ v1.152.0 — per-device gap clocks are SEEDED from persisted samples a
   const __dir = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(resolve(__dir, '../src/recorder.ts'), 'utf8');
 
-  const i = src.indexOf('seed the PER-DEVICE clocks');
-  assert.ok(i > 0, 'the seeding block must be present');
-  const block = src.slice(i, i + 1200);
-
-  assert.match(block, /SELECT sn, MAX\(ts\) AS maxTs FROM samples/,
-    'the seed must read per-SN MAX(ts) — the per-SN form of the fleet probe already in this file');
-  assert.match(block, /GROUP BY sn/);
-  assert.match(block, /lastInsertBySn\.set\(r\.sn, Number\(r\.maxTs\)\)/,
-    'each SN must land in the Map the sweep iterates, or seeding is decorative');
-  // Pin the WHERE CLAUSE, not the identifier: a mutant that drops the exclusion
-  // from the SQL leaves `.all(...restartGapExcludedSns)` on the next line, so
-  // merely matching the name passes against a query that sweeps everything.
-  assert.match(block, /FROM samples WHERE sn NOT IN \(\$\{restartGapExcludedSns/,
-    'synthetic SNs and bench spares must be excluded IN THE QUERY — they are off-cadence or dark BY DESIGN');
+  // v1.154.0 — what this test used to pin (a GROUP BY scan whose query excluded bench
+  // spares) was itself three defects: 5.8 s of unmeasured boot, Core 5 excluded by a
+  // stale literal, and a false gap for every device after a >6 h outage. The BEHAVIOUR
+  // is now driven end to end in seedAndBootPhases.test.ts. What stays here is what a
+  // behavioural test cannot reach without a seam: the scan shape, and a loud failure.
+  const i = src.indexOf("const tSetup = phase('setup');");
+  const j = src.indexOf("const tSeed = phase('seed');", i);
+  assert.ok(i > 0 && j > i, 'the seed must sit between its own phase marks');
+  const block = src.slice(i, j);
+  assert.doesNotMatch(block, /GROUP BY/, 'a GROUP BY over samples visits every index entry — 5.8 s per boot on the live Pi');
+  // v1.154.0 review — the statements live in SEED_SQL, whose query PLANS
+  // seedAndBootPhases.test.ts asserts. Here: the seed prepares those five and nothing else.
+  assert.equal((block.match(/db\.prepare\(SEED_SQL\.\w+\)/g) ?? []).length, 5, 'the seed must prepare the five SEED_SQL statements');
+  assert.equal((block.match(/db\.prepare\(/g) ?? []).length, 5, 'and no other statement');
   // A silent seeding failure would restore v1.150.0 blindness with no trace. Pin
   // the log CALL, not the message text — a mutant that keeps the string but never
   // emits it satisfies a bare text match while being exactly as silent.
@@ -253,9 +255,11 @@ test('★ v1.152.0 — the boot window is instrumented per phase', () => {
 test('★ v1.153.0 — the boot ANALYZE is BOUNDED, and the bound precedes it', () => {
   // v1.152.0's instrumentation measured the boot window on the live Pi:
   //   "recorder: boot phases — open 0ms, schema+migrations 1ms, analyze 9725ms"
-  // 99.99% of a window during which the add-on has no HTTP listener, no MQTT
-  // ingest, no poll and no alarm evaluation. PRAGMA analysis_limit caps the rows
-  // ANALYZE samples per index, so the cost stops scaling with table size.
+  // v1.154.0 CORRECTION: that line was emitted before a 5,807 ms seed, so ANALYZE was
+  // 62.6% of the blocked boot — not the 99.99% first written here. Still the largest
+  // phase of a window with no HTTP listener, no MQTT ingest, no poll and no alarm
+  // evaluation. PRAGMA analysis_limit caps the rows ANALYZE samples per index, so the
+  // cost stops scaling with table size (ANALYZE took 3,415 ms on the next boot).
   const __dir = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(resolve(__dir, '../src/recorder.ts'), 'utf8');
 
