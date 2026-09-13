@@ -72,6 +72,11 @@ export function shp2ContentWitness(projection: unknown): string | null {
   const circuits = p.circuits;
   // No circuit vector means no high-entropy witness. Fail open.
   if (!Array.isArray(circuits) || circuits.length === 0) return null;
+  // v1.154.0 re-review — twelve circuits that are ALL unreadable are no witness either.
+  // The projection always emits twelve slots, with null watts when the body lacks the
+  // per-circuit array, so the check above can never fire for an SHP2; what would remain
+  // is the three low-entropy scalars this detector exists NOT to trust.
+  if (!circuits.some((c) => c.watts != null)) return null;
   const legs = circuits
     .slice()
     .sort((a, b) => (a.ch ?? 0) - (b.ch ?? 0))
@@ -109,4 +114,61 @@ export function isContentStale(
 ): boolean {
   if (!f) return false;
   return f.repeats >= minRepeats && nowMs - f.firstSeenMs >= minMs;
+}
+
+/**
+ * v1.154.0 — distinct NEW witnesses a latched shadow must show before it clears.
+ *
+ * THE OBSERVED DEFECT (2026-09-12, pre-dawn): the detector latched and released
+ * four times in 87 minutes — 04:10–04:20, 04:24–04:30, 05:17–05:28, 05:32–05:37.
+ * The latch side is deliberately slow (5 identical payloads AND 4 minutes); the
+ * release side let go on the FIRST payload that differed. Each gap between windows
+ * is exactly the 4-minute re-arm time, which is what one refreshed body that the
+ * cloud then replayed looks like. For those minutes the alarm path read the
+ * panel's grid reading as live.
+ *
+ * Two distinct new witnesses is sustained movement. A live panel produces a new
+ * twelve-channel vector on essentially every poll (1,558 sampled minutes, never
+ * one repeat), so a genuine recovery pays about one extra poll. A cloud that
+ * serves one refreshed body and then replays it — or alternates between two cached
+ * bodies — never reaches it.
+ */
+export const SHP2_SHADOW_CLEAR_DISTINCT = 2;
+
+export interface ShadowLatch {
+  /** When the content stopped moving: first sighting of the witness that latched. */
+  sinceMs: number;
+  /** The witness most recently observed stale while latched. */
+  frozenWitness: string;
+  /** Distinct witnesses since the latch, a re-latch, or the frozen body's last reappearance; none equal to it. */
+  moved: string[];
+}
+
+/**
+ * Fold one poll into the latch. The LATCH side is exactly `isContentStale`,
+ * unchanged; only the RELEASE side gains hysteresis.
+ *
+ * An unmeasurable poll (no witness) still releases, just as it resets freshness:
+ * a partial payload is not evidence of a shadow, and holding a latch on no evidence
+ * would turn a degraded response into a standing critical.
+ */
+export function advanceShadowLatch(
+  prev: ShadowLatch | undefined,
+  fresh: ContentFreshness | undefined,
+  stale: boolean,
+  minDistinct: number = SHP2_SHADOW_CLEAR_DISTINCT,
+): ShadowLatch | undefined {
+  if (stale && fresh) {
+    // Latch, or re-latch on a newly frozen body. The onset survives a re-latch:
+    // the panel has not been continuously live since it first froze.
+    return { sinceMs: prev?.sinceMs ?? fresh.firstSeenMs, frozenWitness: fresh.witness, moved: [] };
+  }
+  if (!prev) return undefined;
+  if (!fresh) return undefined;
+  // v1.154.0 review — the frozen body AGAIN is evidence the shadow persists, so the
+  // count starts over. A live panel never reproduces its frozen twelve-channel vector.
+  if (fresh.witness === prev.frozenWitness) return prev.moved.length > 0 ? { ...prev, moved: [] } : prev;
+  if (prev.moved.includes(fresh.witness)) return prev;
+  const moved = [...prev.moved, fresh.witness];
+  return moved.length >= minDistinct ? undefined : { ...prev, moved };
 }

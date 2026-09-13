@@ -9,8 +9,8 @@ import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { resolve as resolvePath } from 'node:path';
-import { assessBlind, telemetryBlindAlerts, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
-import { benchSpareSns, shp2ConnectedDpuSns, isExpectedOfflineSpare,
+import { assessBlind, telemetryBlindAlerts, blindAlertContext, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
+import { benchSpareSns, isOutsideHomePool, shp2ConnectedDpuSns, isExpectedOfflineSpare,
   aggregateFleetFlow, findShp2, shp2Panels } from './shp2Membership.js';
 // v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
@@ -2111,17 +2111,21 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       ...rateFloorAlerts(getRateFloorCollapses()),
       // v1.69.0 — "the add-on can see nothing" is itself an alarm condition, and the
       // only one where silence is the dangerous outcome rather than the safe one.
-      ...telemetryBlindAlerts(
-        assessBlind({
-          nowMs: Date.now(),
+      ...(() => {
+        const blindNowMs = Date.now();
+        const blindDevices = store.get().devices;
+        const verdict = assessBlind({
+          nowMs: blindNowMs,
           bootMs: PROCESS_BOOT_MS,
-          projectedDeviceCount: Object.values(store.get().devices)
+          projectedDeviceCount: Object.values(blindDevices)
             .filter((d: any) => d?.projection?.kind === 'dpu' || d?.projection?.kind === 'shp2').length,
           ...pollState(),
           lastHealAtMs: null, // heal is driven in index.ts; the alert only reports
-        }),
-        Date.now(),
-      ),
+        });
+        // v1.154.0 — which panel the failure names and who is still reporting, so a
+        // stale panel is not announced as "the alarm system is blind".
+        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));
+      })(),
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
     // into the SHP2) is online for diagnostics but must NEVER chime/push. v0.16.4

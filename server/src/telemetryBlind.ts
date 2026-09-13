@@ -84,6 +84,8 @@ export interface BlindInputs {
   lastError: string | null;
   /** When we last rebuilt the client because of this, or null. */
   lastHealAtMs: number | null;
+  /** v1.154.0 — what the most recent failure was, when it was an alarm-path panel verdict. */
+  lastFailure?: PollFailure | null;
 }
 
 export interface BlindVerdict {
@@ -97,11 +99,13 @@ export interface BlindVerdict {
   errorKind: PollErrorKind;
   /** True when the caller should rebuild the EcoFlow client now. */
   shouldSelfHeal: boolean;
+  /** v1.154.0 — the panel verdict behind the most recent failure, or null. */
+  failure: PollFailure | null;
 }
 
 export function assessBlind(i: BlindInputs, cfg: BlindConfig = DEFAULT_BLIND_CONFIG): BlindVerdict {
   const errorKind = classifyPollError(i.lastError);
-  const idle: BlindVerdict = { blind: false, reason: null, blindForMs: 0, errorKind, shouldSelfHeal: false };
+  const idle: BlindVerdict = { blind: false, reason: null, blindForMs: 0, errorKind, shouldSelfHeal: false, failure: null };
 
   // Healthy: we have devices AND a recent successful poll. Both matter — a stale
   // projection left over from before the outage still populates the devices map,
@@ -116,7 +120,7 @@ export function assessBlind(i: BlindInputs, cfg: BlindConfig = DEFAULT_BLIND_CON
   if (i.lastPollOkMs == null) {
     if (sinceBoot < cfg.bootGraceMs) return idle;
     return {
-      blind: true, reason: 'never', blindForMs: sinceBoot, errorKind,
+      blind: true, reason: 'never', blindForMs: sinceBoot, errorKind, failure: i.lastFailure ?? null,
       shouldSelfHeal: shouldHeal(i, cfg, errorKind),
     };
   }
@@ -124,7 +128,7 @@ export function assessBlind(i: BlindInputs, cfg: BlindConfig = DEFAULT_BLIND_CON
   // Had data, lost it.
   if (sincePollOk != null && sincePollOk >= cfg.staleMs) {
     return {
-      blind: true, reason: 'stale', blindForMs: sincePollOk, errorKind,
+      blind: true, reason: 'stale', blindForMs: sincePollOk, errorKind, failure: i.lastFailure ?? null,
       shouldSelfHeal: shouldHeal(i, cfg, errorKind),
     };
   }
@@ -145,15 +149,28 @@ function shouldHeal(i: BlindInputs, cfg: BlindConfig, kind: PollErrorKind): bool
 let lastPollOkMs: number | null = null;
 let consecutiveFailures = 0;
 let lastError: string | null = null;
+let lastFailure: PollFailure | null = null;
+
+/**
+ * v1.154.0 — the alarm-path panel verdicts that route through `notePollFailed`.
+ * Declared here rather than imported from snapshot.ts, which imports this module.
+ */
+export type PollFailureCause = 'shp2-fetch-failed' | 'shp2-not-polled' | 'shp2-content-frozen';
+export interface PollFailure { cause: PollFailureCause; sns: string[] }
 
 export function notePollOk(nowMs: number): void {
   lastPollOkMs = nowMs;
   consecutiveFailures = 0;
   lastError = null;
+  lastFailure = null;
 }
-export function notePollFailed(message: string): void {
+export function notePollFailed(message: string, failure: PollFailure | null = null): void {
   consecutiveFailures += 1;
   lastError = message;
+  // Bound to THIS failure, exactly like `lastError`. A thrown poll passes no
+  // failure and so clears it: carrying a panel verdict forward from an earlier
+  // tick would let a total outage be described as one stale panel.
+  lastFailure = failure;
 }
 /**
  * v1.140.0 — the poll-health verdict, recorded so it can be AUDITED.
@@ -176,8 +193,8 @@ export function pollHealth(): { ok: boolean; reason: string | null } {
   return lastPollHealth;
 }
 
-export function pollState(): { lastPollOkMs: number | null; consecutiveFailures: number; lastError: string | null } {
-  return { lastPollOkMs, consecutiveFailures, lastError };
+export function pollState(): { lastPollOkMs: number | null; consecutiveFailures: number; lastError: string | null; lastFailure: PollFailure | null } {
+  return { lastPollOkMs, consecutiveFailures, lastError, lastFailure };
 }
 
 /* ─── the alert ───────────────────────────────────────────────────────────── */
@@ -190,9 +207,97 @@ export const TELEMETRY_BLIND_ALERT_ID = 'telemetry-blind';
  * other alarm is silently unable to fire. It is the one condition where a quiet
  * system is the most dangerous system.
  */
-export function telemetryBlindAlerts(v: BlindVerdict, nowMs: number): Alert[] {
+/**
+ * v1.154.0 — THE PANEL VARIANT. Since v1.148.0 a replayed SHP2 payload has routed
+ * into this alert (pollHealthVerdict → notePollFailed), as a failed and a
+ * never-asked panel fetch already did. All three rendered the
+ * text written for the 2026-08-04 outage: the add-on "has received no telemetry"
+ * and "cannot see battery state, grid presence or any device fault". With the
+ * Cores still streaming that was false, it was spoken aloud, and the Cause fact
+ * read "unknown" although the verdict naming the cause had just been computed.
+ *
+ * The panel wording is used only when the failure IS a panel verdict AND at least
+ * one other device is still current. With nothing else reporting, the original
+ * text is the accurate one and is kept. Severity, id and priority are identical
+ * in both branches, so escalation and audibility do not change.
+ */
+const PANEL_FAILURE_TEXT: Record<PollFailureCause, { title: string; clause: string; grid: string; cause: string }> = {
+  'shp2-content-frozen': {
+    title: 'Panel data is stale — grid presence unknown',
+    clause: "the fetch succeeds, but the EcoFlow cloud is replaying a stale copy of the panel's data",
+    grid: 'Grid presence from the panel is being treated as UNKNOWN.',
+    cause: 'cloud replaying a stale copy of the panel',
+  },
+  'shp2-fetch-failed': {
+    title: 'Panel is not answering — grid presence unconfirmed',
+    clause: 'fetching the panel is failing',
+    grid: 'Grid presence cannot be confirmed from the panel.',
+    cause: 'panel fetch failing',
+  },
+  'shp2-not-polled': {
+    title: 'Panel is offline to the cloud — grid presence unconfirmed',
+    clause: 'the EcoFlow cloud reports the panel offline, so it is not being polled',
+    grid: 'Grid presence cannot be confirmed from the panel.',
+    cause: 'cloud reports the panel offline',
+  },
+};
+
+export interface BlindAlertContext {
+  /** Display names of the SNs the failure names. */
+  affectedNames: string[];
+  /** Devices other than those whose telemetry is still current. */
+  otherReportingCount: number;
+}
+
+/**
+ * v1.154.0 — who the failure names and who is still reporting. PURE.
+ *
+ * "Current" means a quota write within `staleMs` from an online device, using the
+ * quota clock where one exists: a bare online/offline flip bumps `lastUpdated`
+ * without carrying any telemetry. A device whose payload is being replayed, and a
+ * Core outside the home pool (bench or off-panel), never count.
+ */
+export function blindAlertContext(
+  devices: Record<string, {
+    deviceName?: string;
+    online?: boolean;
+    lastUpdated?: number;
+    lastQuotaAtMs?: number | null;
+    contentStaleSinceMs?: number | null;
+    projection?: { kind?: string } | null;
+  } | undefined>,
+  failure: PollFailure | null,
+  nowMs: number,
+  opts: { staleMs?: number; isOutsideHomePool?: (sn: string) => boolean } = {},
+): BlindAlertContext {
+  const staleMs = opts.staleMs ?? DEFAULT_BLIND_CONFIG.staleMs;
+  const affected = new Set(failure?.sns ?? []);
+  const affectedNames = [...affected].map((sn) => devices[sn]?.deviceName ?? sn);
+  let otherReportingCount = 0;
+  for (const [sn, d] of Object.entries(devices)) {
+    if (!d || affected.has(sn)) continue;
+    const kind = d.projection?.kind;
+    if (kind !== 'dpu' && kind !== 'shp2') continue;
+    if (d.online === false) continue;
+    // v1.154.0 review — a replayed body stamps the quota clock on every poll, so a
+    // second, shadowed panel would otherwise vouch for sight the system already
+    // treats as UNKNOWN.
+    if (d.contentStaleSinceMs != null) continue;
+    // A Core on the bench or off-panel reporting normally is not sight of anything that
+    // powers the house. Roster-aware in the caller: the SPARE_DPU_SNS literal is stale.
+    if (kind === 'dpu' && opts.isOutsideHomePool?.(sn)) continue;
+    const at = d.lastQuotaAtMs ?? d.lastUpdated ?? 0;
+    if (at > 0 && nowMs - at < staleMs) otherReportingCount++;
+  }
+  return { affectedNames, otherReportingCount };
+}
+
+export function telemetryBlindAlerts(v: BlindVerdict, nowMs: number, ctx?: BlindAlertContext): Alert[] {
   if (!v.blind) return [];
   const mins = Math.max(1, Math.round(v.blindForMs / 60_000));
+  const panel = v.failure != null && ctx != null && ctx.otherReportingCount > 0
+    ? PANEL_FAILURE_TEXT[v.failure.cause]
+    : null;
   const authHint = v.errorKind === 'auth'
     ? ' The cloud is reachable and REJECTING our requests, which on this hardware is almost always a clock problem: '
       + 'EcoFlow signs each request with a timestamp, the Pi has no battery-backed clock, and after a power cut it '
@@ -203,20 +308,32 @@ export function telemetryBlindAlerts(v: BlindVerdict, nowMs: number): Alert[] {
   const reasonText = v.reason === 'never'
     ? `has NEVER received telemetry since it started ${mins} minute${mins === 1 ? '' : 's'} ago`
     : `has received no telemetry for ${mins} minute${mins === 1 ? '' : 's'}`;
+  const others = ctx?.otherReportingCount ?? 0;
+  const panelName = ctx?.affectedNames.length ? ctx.affectedNames.join(', ') : 'the Smart Home Panel';
   return [{
     id: TELEMETRY_BLIND_ALERT_ID,
     severity: 'critical' as const,
     category: 'Connectivity' as const,
     device: 'Power add-on',
     priority: 'critical' as const,
-    title: 'Alarm system is blind — no telemetry',
-    detail:
-      `The Power add-on ${reasonText}, so it currently cannot see battery state, grid presence or any device fault. `
-      + `Every other alarm in this system depends on that data, so they cannot fire while this is true — a quiet `
-      + `system right now does NOT mean a safe one.${authHint}`,
+    title: panel ? panel.title : 'Alarm system is blind — no telemetry',
+    detail: panel
+      ? `The alarm path has had no current data from ${panelName} for ${mins} minute${mins === 1 ? '' : 's'}: `
+        + `${panel.clause}. ${panel.grid} Its other readings, including the backup reserve level, are not current either. `
+        + `${others} other device${others === 1 ? ' is' : 's are'} still reporting, but no alarm that depends on the `
+        + `panel can be trusted while this is true.`
+      : `The Power add-on ${reasonText}, so it currently cannot see battery state, grid presence or any device fault. `
+        + `Every other alarm in this system depends on that data, so they cannot fire while this is true — a quiet `
+        + `system right now does NOT mean a safe one.${authHint}`,
     facts: [
-      { label: 'Blind for', value: `${mins} min` },
-      { label: 'Cause', value: v.errorKind === 'auth' ? 'cloud rejecting our requests (check host clock)' : v.errorKind === 'network' ? 'cloud unreachable' : 'unknown' },
+      { label: panel ? 'No current panel data for' : 'Blind for', value: `${mins} min` },
+      {
+        label: 'Cause',
+        value: v.failure != null
+          ? PANEL_FAILURE_TEXT[v.failure.cause].cause
+          : v.errorKind === 'auth' ? 'cloud rejecting our requests (check host clock)' : v.errorKind === 'network' ? 'cloud unreachable' : 'unknown',
+      },
+      ...(panel ? [{ label: 'Other devices reporting', value: String(others) }] : []),
       { label: 'Since', value: new Date(nowMs - v.blindForMs).toISOString() },
     ],
   }];

@@ -6,6 +6,8 @@ import {
   isContentStale,
   SHP2_SHADOW_MIN_REPEATS,
   SHP2_SHADOW_MIN_MS,
+  advanceShadowLatch,
+  SHP2_SHADOW_CLEAR_DISTINCT,
 } from '../src/shp2Shadow.js';
 import { computeHomeGridWatts, computeShp2GridConnected } from '../src/gridState.js';
 
@@ -45,6 +47,11 @@ test('a non-SHP2, or a payload with no circuits, yields NO witness — fail open
   assert.equal(shp2ContentWitness({ kind: 'dpu', circuits: [{ ch: 1, watts: 5 }] }), null);
   assert.equal(shp2ContentWitness({ kind: 'shp2', circuits: [] }), null);
   assert.equal(shp2ContentWitness({ kind: 'shp2' }), null);
+  // v1.154.0 re-review — the projection always emits twelve slots, so "no circuits" never
+  // happens for a real SHP2; twelve unreadable ones is the same absence of a witness.
+  assert.equal(shp2ContentWitness(chans(Array(12).fill(null))), null, 'twelve unreadable circuits are no witness');
+  assert.notEqual(shp2ContentWitness(chans([null, null, 5, null, null, null, null, null, null, null, null, null])), null,
+    'one readable circuit is enough to form one');
   assert.equal(shp2ContentWitness(undefined), null);
 });
 
@@ -117,4 +124,71 @@ test('a healthy panel is completely unaffected', () => {
 test('the offline guard still works on its own', () => {
   assert.equal(computeHomeGridWatts(fleet({ online: false })), 0);
   assert.equal(computeShp2GridConnected(fleet({ online: false })), null);
+});
+
+// ── v1.154.0: release-side hysteresis ─────────────────────────────────────────
+// 2026-09-12, pre-dawn: latched and released four times in 87 minutes (04:10–04:20,
+// 04:24–04:30, 05:17–05:28, 05:32–05:37). Each gap is exactly the 4-minute re-arm —
+// one refreshed body, which the cloud then replayed.
+const staleF = (witness: string, firstSeenMs: number) => ({ witness, firstSeenMs, repeats: SHP2_SHADOW_MIN_REPEATS });
+const movedF = (witness: string, at: number) => ({ witness, firstSeenMs: at, repeats: 1 });
+
+test('★ v1.154.0 — a latched shadow does NOT release on the first payload that moves', () => {
+  let l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  assert.deepEqual(l, { sinceMs: 0, frozenWitness: 'A', moved: [] });
+  l = advanceShadowLatch(l, movedF('B', 600_000), false);
+  assert.ok(l, 'one new body is not sustained movement');
+  assert.deepEqual(l!.moved, ['B']);
+  l = advanceShadowLatch(l, movedF('C', 660_000), false);
+  assert.equal(l, undefined, `${SHP2_SHADOW_CLEAR_DISTINCT} distinct new bodies release it`);
+});
+
+test('★ THE 09-12 PATTERN: one refreshed body that the cloud then replays stays ONE latch with its onset', () => {
+  let l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  l = advanceShadowLatch(l, movedF('B', 600_000), false);
+  for (let i = 2; i < SHP2_SHADOW_MIN_REPEATS; i++) {
+    l = advanceShadowLatch(l, { witness: 'B', firstSeenMs: 600_000, repeats: i }, false);
+    assert.ok(l, `repeat ${i} of the refreshed body must not release`);
+  }
+  l = advanceShadowLatch(l, staleF('B', 600_000), true);
+  assert.deepEqual(l, { sinceMs: 0, frozenWitness: 'B', moved: [] },
+    're-latched on the new frozen body, with the onset kept from the FIRST freeze');
+});
+
+test('★ a cloud alternating between two cached bodies never releases', () => {
+  let l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  for (const [i, w] of ['B', 'A', 'B', 'A', 'B'].entries()) {
+    l = advanceShadowLatch(l, movedF(w, 600_000 + i * 60_000), false);
+    assert.ok(l, `poll ${i} (${w}) must not release a two-body alternation`);
+  }
+});
+
+test('a refreshed body repeating is not new movement', () => {
+  let l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  l = advanceShadowLatch(l, movedF('B', 600_000), false);
+  l = advanceShadowLatch(l, { witness: 'B', firstSeenMs: 600_000, repeats: 2 }, false);
+  assert.deepEqual(l, { sinceMs: 0, frozenWitness: 'A', moved: ['B'] });
+});
+
+test('★ v1.154.0 review — the frozen body reappearing between refreshes starts the count over', () => {
+  // Refresh B, frozen A again, refresh C: two refreshes that never ran back to back,
+  // while the cloud is demonstrably still replaying A. That is not sustained movement.
+  let l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  l = advanceShadowLatch(l, movedF('B', 600_000), false);
+  l = advanceShadowLatch(l, movedF('A', 660_000), false);
+  assert.deepEqual(l, { sinceMs: 0, frozenWitness: 'A', moved: [] }, 'the frozen body again resets the count');
+  l = advanceShadowLatch(l, movedF('C', 720_000), false);
+  assert.ok(l, 'B, A, C must not release');
+  l = advanceShadowLatch(l, movedF('D', 780_000), false);
+  assert.equal(l, undefined, 'C then D is sustained movement');
+});
+
+test('an unmeasurable poll releases the latch — no witness is not evidence of a shadow', () => {
+  const l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  assert.equal(advanceShadowLatch(l, undefined, false), undefined);
+});
+
+test('the LATCH side is unchanged — nothing latches before isContentStale says so', () => {
+  assert.equal(advanceShadowLatch(undefined, { witness: 'A', firstSeenMs: 0, repeats: SHP2_SHADOW_MIN_REPEATS - 1 }, false), undefined);
+  assert.equal(advanceShadowLatch(undefined, undefined, false), undefined);
 });

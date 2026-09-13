@@ -575,7 +575,48 @@ setClockOffsetLogger((offsetMs, previousMs) => {
   );
 });
 
+// v1.154.0 — the last-known roster is published BEFORE createRecorder. It used to be
+// published further down this file, so the recorder's boot-time restart probe resolved
+// benchSpareSns() against the stale SPARE_DPU_SNS literal and dropped Core 5, a wired home
+// Core, from the fleet anchor. Everything this block uses is an import.
+const MEMBERSHIP_HISTORY_PATH = resolve(process.cwd(), config.dbPath, '..', 'membership-history.json');
+
+// v1.117.0 — LAST-KNOWN SHP2 ROSTER. The connected-source roster is durable
+// state, but it is re-derived from the live SHP2 projection every tick, so it
+// reads EMPTY for the first tick after a boot (projection not yet hydrated) and
+// for any SHP2 cloud-blind window. Membership consumers then fell through to the
+// static SPARE_DPU_SNS literal, which has been stale since the 08-20 swap — and
+// on 2026-08-29 that admitted the off-panel Core 3 into the pool mean, whose
+// phantom 75% re-armed the SoC ladder and replayed a 30% rung to the speakers on
+// both deploys. Seed from the persisted membership fingerprint (a sorted,
+// comma-joined SN list) so the roster is known from the very first tick, and
+// refresh it whenever the live roster is non-empty.
+let lastKnownRoster: Set<string> = (() => {
+  try {
+    const h = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
+    const fp = h.entries.length ? h.entries[h.entries.length - 1].fp : '';
+    return new Set(fp ? fp.split(',').filter(Boolean) : []);
+  } catch {
+    return new Set<string>();
+  }
+})();
+// Seed the shared publisher from the persisted fingerprint so the roster is known
+// from the very first tick, before any live projection has hydrated.
+setLastKnownHomeRoster(lastKnownRoster);
+export function noteLiveRoster(roster: ReadonlySet<string>): void {
+  if (roster.size > 0) lastKnownRoster = new Set(roster);
+  // v1.121.0 — publish it to the membership module so the OTHER consumers of the
+  // stale SPARE_DPU_SNS literal (the offline-spare mute and homeCoreCoverage's
+  // SHP2-blind fallback) share the same durable answer isHomePoolDpu already had.
+  setLastKnownHomeRoster(lastKnownRoster);
+}
+
+// v1.154.0 — timed from OUTSIDE as well as inside. v1.152.0's per-phase line was emitted
+// before a 5.8 s seed and so covered about 63% of the call. If this number and the recorder's
+// own `total` disagree, part of createRecorder is outside its instrumentation again.
+const recorderCallT0 = performance.now();
 const recorder = createRecorder(store, (m) => app.log.info(m), (m) => app.log.debug(m));
+app.log.info(`recorder: createRecorder returned after ${Math.round(performance.now() - recorderCallT0)}ms`);
 // v0.10.0 — analytics worker. Every heavy history scan (the cache-warmer's
 // reports + each /api/* analytics endpoint) runs on the worker's event loop
 // against a read-only connection to the same WAL DB. The main thread keeps
@@ -724,38 +765,6 @@ app.get<{ Querystring: { sn?: string; ch?: string; pair?: string; days?: string 
  * predating the membership record is `unknown`, which we also refuse rather
  * than assume clean.
  */
-const MEMBERSHIP_HISTORY_PATH = resolve(process.cwd(), config.dbPath, '..', 'membership-history.json');
-
-// v1.117.0 — LAST-KNOWN SHP2 ROSTER. The connected-source roster is durable
-// state, but it is re-derived from the live SHP2 projection every tick, so it
-// reads EMPTY for the first tick after a boot (projection not yet hydrated) and
-// for any SHP2 cloud-blind window. Membership consumers then fell through to the
-// static SPARE_DPU_SNS literal, which has been stale since the 08-20 swap — and
-// on 2026-08-29 that admitted the off-panel Core 3 into the pool mean, whose
-// phantom 75% re-armed the SoC ladder and replayed a 30% rung to the speakers on
-// both deploys. Seed from the persisted membership fingerprint (a sorted,
-// comma-joined SN list) so the roster is known from the very first tick, and
-// refresh it whenever the live roster is non-empty.
-let lastKnownRoster: Set<string> = (() => {
-  try {
-    const h = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);
-    const fp = h.entries.length ? h.entries[h.entries.length - 1].fp : '';
-    return new Set(fp ? fp.split(',').filter(Boolean) : []);
-  } catch {
-    return new Set<string>();
-  }
-})();
-// Seed the shared publisher from the persisted fingerprint so the roster is known
-// from the very first tick, before any live projection has hydrated.
-setLastKnownHomeRoster(lastKnownRoster);
-export function noteLiveRoster(roster: ReadonlySet<string>): void {
-  if (roster.size > 0) lastKnownRoster = new Set(roster);
-  // v1.121.0 — publish it to the membership module so the OTHER consumers of the
-  // stale SPARE_DPU_SNS literal (the offline-spare mute and homeCoreCoverage's
-  // SHP2-blind fallback) share the same durable answer isHomePoolDpu already had.
-  setLastKnownHomeRoster(lastKnownRoster);
-}
-
 function membershipStableOnDay(day: string): boolean {
   try {
     const h = loadMembershipHistory(MEMBERSHIP_HISTORY_PATH);

@@ -144,17 +144,39 @@ test('a MOVING panel is never marked stale, however many polls land', () => {
   assert.equal(dev().contentStaleSinceMs, null, 'one moving leg is enough; the grid scalar alone is not the witness');
 });
 
-test('a stale panel CLEARS as soon as the content moves again', () => {
+test('★ v1.154.0 — a stale panel holds through ONE moved payload and clears on SUSTAINED movement', () => {
+  // Until v1.153.0 this released on the first payload that differed. On 2026-09-12 that
+  // gave four latch/release cycles in 87 minutes, each gap exactly the 4-minute re-arm.
   const store = new SnapshotStore();
   let t = 1_000_000;
   store.setClock(() => t);
   store.setDeviceList([shp2Item('SHP2-1')]);
   const dev = () => store.get().devices['SHP2-1'];
   for (let i = 0; i < 16; i++) { store.setDeviceQuota('SHP2-1', shp2Raw(LIVE_W, 3914)); t += 60_000; }
-  assert.ok(dev().contentStaleSinceMs != null);
+  const onset = dev().contentStaleSinceMs;
+  assert.equal(onset, 1_000_000, 'latched, from the first sighting of the frozen body');
   const moved = LIVE_W.slice(); moved[5] = 71;
-  store.setDeviceQuota('SHP2-1', shp2Raw(moved, 3914));
-  assert.equal(dev().contentStaleSinceMs, null, 'the guard must release itself without an add-on restart');
+  store.setDeviceQuota('SHP2-1', shp2Raw(moved, 3914)); t += 60_000;
+  assert.equal(dev().contentStaleSinceMs, onset, 'one moved payload must not release the guard');
+  const movedAgain = LIVE_W.slice(); movedAgain[5] = 72;
+  store.setDeviceQuota('SHP2-1', shp2Raw(movedAgain, 3914));
+  assert.equal(dev().contentStaleSinceMs, null, 'sustained movement releases it without an add-on restart');
+});
+
+test('★ THE 09-12 PATTERN through the store: a refreshed body that the cloud then replays never reads live', () => {
+  const store = new SnapshotStore();
+  let t = 1_000_000;
+  store.setClock(() => t);
+  store.setDeviceList([shp2Item('SHP2-1')]);
+  const dev = () => store.get().devices['SHP2-1'];
+  for (let i = 0; i < 11; i++) { store.setDeviceQuota('SHP2-1', shp2Raw(LIVE_W, 3914)); t += 60_000; }
+  const onset = dev().contentStaleSinceMs;
+  assert.ok(onset != null, 'precondition: latched');
+  const refreshed = LIVE_W.slice(); refreshed[8] = 513;
+  for (let i = 0; i < 7; i++) {
+    store.setDeviceQuota('SHP2-1', shp2Raw(refreshed, 3914)); t += 60_000;
+    assert.equal(dev().contentStaleSinceMs, onset, `poll ${i} of the refreshed-then-frozen body must stay latched, onset intact`);
+  }
 });
 
 test('a DPU is never content-tracked — the witness is SHP2-only', () => {
