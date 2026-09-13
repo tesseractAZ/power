@@ -1,3 +1,73 @@
+## 1.155.0
+
+### A dark Core was announced as a broker stall
+
+Since 1.150.0 the recorder's gap ledger has held two kinds of record: a **fleet** gap
+(no home device wrote — an MQTT/broker stall, or a restart the alarm was dark across)
+and a **per-device** gap (one SN silent past the per-device threshold while the rest of
+the fleet kept writing). The alert layer never looked at the difference. A per-device
+record carries no `restartSpanning`, so `outageAlerts` rendered it through the
+in-process fleet branch — "Telemetry gap — no data for N min … No home-device samples
+reached the recorder … an MQTT/broker stall; writes have since resumed". Every clause
+was false for it: other devices were writing, nothing was wrong with the broker, and
+the record is written at detection, while the device is still dark. The recorder's own
+log line (`DEVICE TELEMETRY GAP — <sn> … while other home devices kept reporting`) had
+it right; only the push was wrong.
+
+A per-device gap now renders as its own alert:
+
+- **Title** `Device telemetry gap — no data for N min`; **device** the store's display
+  name, or the serial when the device map has none. As on every device-scoped alert, the
+  push appends the device to the title (`… — Core 2`) and the alerts panel shows it
+  beside the title.
+- **Detail** names the device and serial, says the other home devices kept reporting,
+  and says the gap is measured to detection, so the device may still be silent. Fleet
+  sums over that window under-count.
+- **Id** `system-outage-device-<SN>-<startMs>[-<tier>]`. Every SN written in one batch
+  shares that batch's timestamp as its last sample, and so does the fleet clock, so the
+  fleet id `system-outage-<startMs>` could not tell them apart. The `system-outage-`
+  prefix is kept on purpose: the lifecycle is still the outage event's (no "Resolved:"
+  push, not boot-seeded, never audible), and `familyOf` rolls these up as
+  `system-outage-device`, apart from fleet outages.
+- The falling-edge evidence gate exempts the id. It names the dark SN, so the gate would
+  otherwise judge the alert by the very silence it reports.
+- Outage alerts sort by the gap's start. Sorted by id, every `system-outage-device-` id
+  came before every fleet id.
+
+Fleet-gap titles, detail and ids are unchanged. Because the id changed, a per-device gap
+detected in the 24 h before the update, already pushed under the fleet wording, is
+dispatched once more under its new id (outage events are not boot-seeded), through the
+normal push gates.
+
+### …and counted as a fleet outage
+
+`outageTracking` counted every record in the ledger, so a per-device gap — hours long by
+construction — added its whole silence to `system_outage_total_minutes_24h`, counted in
+`system_outage_count_24h` and `system_telemetry_gap_count_24h`, set
+`system_outage_last_ended` / `_last_duration_minutes`, and turned
+`system_outage_active_24h` on. Those fields now count fleet records only.
+
+Per-device gaps get a count of their own: `system_device_gap_count_24h` on
+`/api/ha-state` and the MQTT state topic, with a diagnostic sensor **Device Telemetry
+Gaps 24h**. It counts blackouts detected in the last 24 h, not devices dark right now: a
+per-device record ends at detection.
+
+`/api/telemetry-gaps` had the same blind spot in its two rollups: `longest_gap_min` was
+taken over every record, so one multi-day single-Core record read as a multi-day fleet
+blackout. `longest_gap_min` now covers fleet records only, and the endpoint adds
+`fleet_gap_count`, `device_gap_count` and `longest_device_gap_min`. `count` is still
+every record, matching the `gaps` array it sits beside, and each record's `sn` still
+tells the two kinds apart.
+
+### Verification
+
+- `test/deviceGapAlerts.test.ts` drives `outageAlerts`, `outageTracking` and
+  `systemOutageFields` with per-device records in the recorder's own shape, and pins the
+  rendered title, push title, detail, facts, ids, ordering, event lifecycle, evidence
+  gate, counters, `/api/telemetry-gaps` rollups and the discovery sensor.
+- `scripts/mutate-device-gap-alerts.mjs`: 20 anchor-asserted mutants, all 20
+  killed on a green tree.
+
 ## 1.154.0
 
 ### Correction to 1.153.0
