@@ -1278,6 +1278,19 @@ export function createRecorder(
     // v0.30.0 — fleet telemetry-gap heartbeat. A home-device write just landed;
     // if the previous home write was long ago, telemetry was silent in between.
     if (sawHomeInsert) {
+      // v1.154.0 re-review — the POST-BOOT silence. `lastHomeInsertTs` starts at 0 and
+      // detectTelemetryGap ignores a zero anchor, so a boot that waited hours for its
+      // first home write (DNS or cloud down after a power cut) ledgered nothing — and
+      // the NEXT boot's outage guard charged that window to any device still on its
+      // seeded clock. Measured on the monotonic clock and anchored to now, so an NTP
+      // step during the wait can neither lengthen it nor misplace its end.
+      //
+      // Decided BEFORE either branch writes lastHomeInsertTs, and applied on BOTH. On the
+      // defer (clock-behind) path, past 15 min of uptime the deferred restart gap can no
+      // longer be held (its settle budget is 10 min), and the record it writes ends at
+      // (now − uptime) — exactly where this window begins.
+      const sinceBootMs = performance.now() - bootMonoMs;
+      const postBootSilence = lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS;
       if (pendingRestartGap) {
         // v1.14.0 (review of F10b's defer) — the v1.13.0 resolution fired on the
         // first insert whose wall clock crossed the anchor, but a skewed clock
@@ -1304,22 +1317,12 @@ export function createRecorder(
         }
         lastHomeInsertTs = now;
       } else {
-        // v1.154.0 re-review — the POST-BOOT silence. `lastHomeInsertTs` starts at 0 and
-        // detectTelemetryGap ignores a zero anchor, so a boot that waited hours for its
-        // first home write (DNS or cloud down after a power cut) ledgered nothing — and
-        // the NEXT boot's outage guard charged that window to any device still on its
-        // seeded clock. Measured on the monotonic clock and anchored to now, so an NTP
-        // step during the wait can neither lengthen it nor misplace its end. The defer
-        // branch above is left alone: there the wall clock is not yet trustworthy.
-        const sinceBootMs = performance.now() - bootMonoMs;
-        if (lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS) {
-          recordTelemetryGap(now - Math.round(sinceBootMs), now);
-        }
         if (detectTelemetryGap(lastHomeInsertTs, now, GAP_THRESHOLD_MS)) {
           recordTelemetryGap(lastHomeInsertTs, now);
         }
         lastHomeInsertTs = now;
       }
+      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now);
     }
     // v0.9.74 — silence per-tick chatter. The previous "wrote N samples"
     // line fired every 10 s under normal load (~44 lines/min, ~88 % of

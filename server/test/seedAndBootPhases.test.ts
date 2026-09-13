@@ -211,6 +211,35 @@ test('★ a long POST-BOOT silence is ledgered once, so the next boot does not c
   }
 });
 
+test('★ a clock-behind (defer) boot ledgers its post-boot silence too', (t) => {
+  // v1.154.0 final review. The RTC-less Pi boots with its clock BEHIND the newest
+  // sample, so the restart probe defers. Seven hours pass with no home write while NTP
+  // steps the clock. The deferred restart gap resolves on the first write and ends at
+  // (now − uptime); the post-boot silence must be ledgered from there, or the next boot
+  // charges it to CORE_B exactly as on the non-defer path.
+  const T = Date.now();
+  seedDb([[T - 8 * H, 'CORE_A', 'soc', 50], [T - 8 * H, 'CORE_B', 'soc', 51]]);
+  const c = clocks(t, T - 9 * H);            // boot clock an hour BEHIND the newest sample → defer
+  const first = boot();
+  c.wall = T - 10 * M; c.mono += 7 * H;      // NTP has stepped; seven real hours have passed
+  first.rec.insertSnapshot(dpu('CORE_A'));
+  const gaps = first.rec.telemetryGaps().filter((g) => g.sn == null);
+  const restart = gaps.filter((g) => g.restartSpanning);
+  const postBoot = gaps.filter((g) => !g.restartSpanning);
+  assert.equal(restart.length, 1, 'precondition: the deferred restart gap resolved');
+  assert.equal(postBoot.length, 1, `the post-boot silence is ledgered on the defer path, got ${postBoot.length}`);
+  assert.ok(Math.abs(postBoot[0].startMs - restart[0].endMs) < M, 'and it begins where the restart gap ends');
+  first.rec.close();
+  c.wall += 5 * M; c.mono += 5 * M;
+  const second = boot();
+  try {
+    second.rec.insertSnapshot(dpu('CORE_A'));
+    assert.deepEqual(deviceGaps(second.rec, 'CORE_B'), [], 'CORE_B was observed silent for minutes, not seven hours');
+  } finally {
+    second.rec.close();
+  }
+});
+
 test("a device's OWN earlier per-device gap is not discounted — only fleet-dark windows are", (t) => {
   const T = Date.now();
   seedDb([[T - M, 'CORE_A', 'soc', 50], [T - 12 * H, 'CORE_B', 'soc', 51]]);

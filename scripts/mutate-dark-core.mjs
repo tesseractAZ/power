@@ -241,16 +241,23 @@ const MUTANTS = [
   {
     id: 'xxx. ★ the post-boot silence is not ledgered',
     file: RECORDER,
-    find: '        if (lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS) {',
-    to: '        if (false /* MUTANT */ && lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS) {',
+    find: '      const postBootSilence = lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS;',
+    to: '      const postBootSilence = false; /* MUTANT */',
     why: 'A boot that waited hours for its first home write leaves no fleet window, and the next boot files a silent device as dark for the whole wait.',
   },
   {
     id: 'xxxi. the post-boot silence is re-ledgered on every batch',
     file: RECORDER,
-    find: '        if (lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS) {',
-    to: '        if (sinceBootMs > GAP_THRESHOLD_MS) { /* MUTANT */',
+    find: '      const postBootSilence = lastHomeInsertTs === 0 && sinceBootMs > GAP_THRESHOLD_MS;',
+    to: '      const postBootSilence = sinceBootMs > GAP_THRESHOLD_MS; /* MUTANT */',
     why: 'Every insert after fifteen minutes of uptime appends another [boot, now] fleet gap: the 50-entry ring fills with one fake outage.',
+  },
+  {
+    id: 'xxxii. ★ the post-boot silence is ledgered on the non-defer path only',
+    file: RECORDER,
+    find: '      if (postBootSilence) recordTelemetryGap(now - Math.round(sinceBootMs), now);',
+    to: '      if (postBootSilence && !restartGapAnchorMs) recordTelemetryGap(now - Math.round(sinceBootMs), now); /* MUTANT: non-defer boots only */',
+    why: 'The round-2 shape: an RTC-less boot whose clock starts behind the newest sample waits hours for its first write, and the next boot files a silent device as dark for the wait.',
   },
   {
     id: 'ix. the recorder heartbeat returns to a line per minute',

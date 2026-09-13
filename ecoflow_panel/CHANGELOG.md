@@ -117,7 +117,7 @@ still reporting. The title is spoken aloud, and the Cause fact read "unknown".
 - **Post-boot silence was never ledgered.** A boot that waited hours for its first
   home write (DNS or cloud down after a power cut) recorded nothing, because the fleet
   detector ignores a zero anchor — and the next boot charged that window to any device
-  still on its seeded clock. It is now a fleet gap, measured on the monotonic clock.
+  still on its seeded clock. It is now a fleet gap on both boot paths — including a clock-behind boot, whose deferred restart gap ends exactly where this window begins — measured on the monotonic clock.
 - **A panel payload with no readable circuit is no witness.** The projection always
   emits twelve circuit slots, so the "no circuits, fail open" rule could never fire,
   and a body without the per-circuit array latched on three low-entropy scalars. With
