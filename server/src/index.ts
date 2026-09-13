@@ -39,7 +39,7 @@ import { fetchVendorDay, loadVendorEnergyState, saveVendorEnergyState, driftPct,
 import { exportVendorStatistics } from './haStatistics.js';
 import { buildWarrantyBundle, renderWarrantyMarkdown, renderWarrantyCsv, loadClearedRecords } from './warrantyExport.js';
 import { startAlertMonitor } from './alertMonitor.js';
-import { systemOutageFields } from './alerts.js';
+import { systemOutageFields, telemetryGapLedgerSummary } from './alerts.js';
 import { isConfigured, reachesAPhone, getLastPushFailures } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
 import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
@@ -1034,8 +1034,9 @@ app.get('/api/telemetry-gaps', async (req, reply) => {
   const gaps = recorder.telemetryGaps();
   return cached(req, reply, {
     generated_at: Date.now(),
-    count: gaps.length,
-    longest_gap_min: Math.round(gaps.reduce((m, g) => Math.max(m, g.durationMs), 0) / 60_000),
+    // v1.155.0 — rollups split by kind (alerts.ts telemetryGapLedgerSummary): folded
+    // into longest_gap_min, one multi-day single-Core record read as a fleet blackout.
+    ...telemetryGapLedgerSummary(gaps),
     gaps,
   }, 30);
 });

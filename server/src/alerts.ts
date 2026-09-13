@@ -1483,6 +1483,36 @@ export function isOutageEventFamily(alert: Pick<Alert, 'id'>): boolean {
   return alert.id.startsWith('system-outage-');
 }
 
+/** v1.155.0 — a gap-ledger record as the alert layer reads it (recorder.ts
+ *  `TelemetryGap`). `sn` is set only on a PER-DEVICE gap (v1.150.0): one device silent
+ *  while the rest of the fleet kept writing. Every other record is a FLEET gap. */
+export type TelemetryGapRecord = {
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  detectedAt: number;
+  restartSpanning?: boolean;
+  graceful?: boolean;
+  sn?: string;
+};
+
+/** v1.155.0 — id for a PER-DEVICE gap alert. It stays inside the `system-outage-`
+ *  prefix so the event lifecycle is the fleet one (no "Resolved:" push, not
+ *  boot-seeded, never audible), and it carries the SN because the fleet id cannot
+ *  tell these apart: devices written in the same batch share a startMs with each other
+ *  AND with the fleet clock, so `system-outage-<startMs>` would collide and one alert
+ *  would silently stand in for another. familyOf() stops at the SN's first uppercase
+ *  token, so every variant rolls up as `system-outage-device`. */
+export function deviceGapAlertId(sn: string, startMs: number, durationMs = 0): string {
+  const tier = outageDurationTier(durationMs);
+  return tier === 0 ? `system-outage-device-${sn}-${startMs}` : `system-outage-device-${sn}-${startMs}-${tier}`;
+}
+
+/** v1.155.0 — true for a per-device gap alert id (see deviceGapAlertId). */
+export function isDeviceGapAlertId(id: string): boolean {
+  return id.startsWith('system-outage-device-');
+}
+
 export interface OutageAlertOptions {
   /** Only surface gaps DETECTED within this window; older ones have aged off. */
   recentWindowMs: number;
@@ -1526,18 +1556,46 @@ export function resolveOutageAlertOptions(env: Record<string, string | undefined
 const fmtClock = (ms: number): string =>
   new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
+/** v1.155.0 — the alert for a PER-DEVICE gap record. `device` carries the name, as on
+ *  every device-scoped alert: notifyLocator appends it to the push title and the alerts
+ *  panel shows it beside the title, so the title does not repeat it. */
+function deviceGapAlert(g: TelemetryGapRecord, sn: string, mins: number, name: string | null | undefined): Alert {
+  const label = name != null && name.trim() !== '' ? name : sn;
+  const who = label === sn ? sn : `${label} (${sn})`;
+  return {
+    id: deviceGapAlertId(sn, g.startMs, g.durationMs),
+    severity: 'warning',
+    category: 'Connectivity',
+    device: label,
+    priority: 'medium',
+    title: `Device telemetry gap — no data for ${mins} min`,
+    detail: `${who} wrote no samples for ${mins} min (${fmtClock(g.startMs)} → ${fmtClock(g.endMs)}) while other home devices kept reporting — one device went dark, not the whole feed. The gap is measured to when it was detected, so the device may still be silent. Anything summed across the fleet in that window (production, load, forecast inputs) under-counts.`,
+    facts: [
+      { label: 'Device', value: who },
+      { label: 'Duration', value: `${mins} min` },
+      { label: 'Started', value: fmtClock(g.startMs) },
+      { label: 'Detected', value: fmtClock(g.endMs) },
+      { label: 'Type', value: 'per-device (other home devices kept reporting)' },
+    ],
+  };
+}
+
 /**
  * Build operator alerts from the recorder's recorded telemetry gaps. Pure +
  * exported so the recency / duration / dedup / restart-vs-stall wording is
  * unit-testable. One Alert per qualifying gap, newest first.
  */
 export function outageAlerts(
-  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean }>,
+  gaps: TelemetryGapRecord[],
   nowMs: number,
   opts: OutageAlertOptions,
+  /** v1.155.0 — display name for a per-device gap's SN (the store's device map).
+   *  Omitted or unresolved, the alert names the device by its serial. */
+  deviceName?: (sn: string) => string | null | undefined,
 ): Alert[] {
   if (!opts.enabled) return [];
   const out: Alert[] = [];
+  const startOf = new Map<string, number>();
   for (const g of gaps) {
     if (!Number.isFinite(g.startMs) || !Number.isFinite(g.durationMs)) continue;
     // v1.13.0 (F10) — a restart-spanning gap (the alarm was genuinely DOWN) clears
@@ -1549,6 +1607,18 @@ export function outageAlerts(
     if (g.durationMs < floorMs) continue;                           // too short to bother the operator
     if (nowMs - g.detectedAt > opts.recentWindowMs) continue;        // aged out → drops from the list (no resolve push)
     const mins = Math.max(1, Math.round(g.durationMs / 60_000));
+    // v1.155.0 — a PER-DEVICE gap (the record names an SN) is ONE device silent while
+    // the rest of the fleet kept writing. It used to fall through to the fleet
+    // in-process text below — "No home-device samples reached the recorder … an
+    // MQTT/broker stall; writes have since resumed" — false on every clause: other
+    // devices were writing, the broker was fine, and the record is written at
+    // DETECTION, while the device is still dark.
+    if (g.sn) {
+      const alert = deviceGapAlert(g, g.sn, mins, deviceName?.(g.sn));
+      startOf.set(alert.id, g.startMs);
+      out.push(alert);
+      continue;
+    }
     const restart = g.restartSpanning === true;
     // v1.14.0 — a restart gap whose pre-boot anchor matched the clean-shutdown
     // marker was a DELIBERATE stop (deploy/update/restart). Still worth a record
@@ -1556,11 +1626,13 @@ export function outageAlerts(
     // "get a UPS" remediation — at this project's release cadence that push
     // would otherwise fire on every deploy and poison the power-outage trend.
     const graceful = restart && g.graceful === true;
+    const fleetId = outageAlertId(g.startMs, g.durationMs);
+    startOf.set(fleetId, g.startMs);
     out.push({
       // v1.14.0 (F10b) — id carries the duration TIER so an in-place-extended
       // blackout re-notifies with its true magnitude instead of the operator's
       // last word staying "dark 6 min" on a 3-hour outage.
-      id: outageAlertId(g.startMs, g.durationMs),
+      id: fleetId,
       severity: 'warning',
       category: 'Connectivity',
       device: 'System',
@@ -1586,7 +1658,10 @@ export function outageAlerts(
     });
   }
   // Newest gap first so the most recent outage sorts to the top of its severity band.
-  return out.sort((a, b) => b.id.localeCompare(a.id));
+  // v1.155.0 — by the gap's START, not the id string: every `system-outage-device-`
+  // id sorts above every digit-led fleet id, so ordering by id put a day-old device
+  // gap above a fresh power outage.
+  return out.sort((a, b) => (startOf.get(b.id) ?? 0) - (startOf.get(a.id) ?? 0) || b.id.localeCompare(a.id));
 }
 
 /**
@@ -1595,11 +1670,16 @@ export function outageAlerts(
  * firmware fix reduce the count?) at a glance, independent of the transient alerts.
  */
 export function outageTracking(
-  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean }>,
+  gaps: TelemetryGapRecord[],
   nowMs: number,
   windowMs: number,
 ): { count: number; powerOutageCount: number; gracefulRestartCount: number; telemetryGapCount: number; totalMinutes: number; lastEndedMs: number | null; lastDurationMinutes: number | null } {
-  const recent = gaps.filter((g) => Number.isFinite(g.endMs) && nowMs - g.endMs <= windowMs);
+  // v1.155.0 — FLEET records only. A per-device gap (`sn` set) is one device silent
+  // while the others kept writing: the feed and the alarm path were up. Counted here,
+  // one dark Core added its whole silence (hours, by construction) to the outage
+  // minutes, counted as a telemetry gap and turned system_outage_active_24h on. It is
+  // counted apart, in deviceGapCount.
+  const recent = gaps.filter((g) => !g.sn && Number.isFinite(g.endMs) && nowMs - g.endMs <= windowMs);
   const totalMs = recent.reduce((s, g) => s + Math.max(0, g.durationMs), 0);
   const last = recent.reduce<null | { endMs: number; durationMs: number }>(
     (acc, g) => (acc == null || g.endMs > acc.endMs ? { endMs: g.endMs, durationMs: g.durationMs } : acc),
@@ -1627,12 +1707,40 @@ export function outageTracking(
   };
 }
 
+/** v1.155.0 — per-device gaps in the window, counted APART from fleet outages (see
+ *  outageTracking). A per-device record ends at DETECTION, so this counts blackouts
+ *  noticed in the window, not devices that are dark right now. */
+export function deviceGapCount(gaps: TelemetryGapRecord[], nowMs: number, windowMs: number): number {
+  return gaps.filter((g) => !!g.sn && Number.isFinite(g.endMs) && nowMs - g.endMs <= windowMs).length;
+}
+
+/** v1.155.0 — the rollups /api/telemetry-gaps serves beside the raw ledger, split by
+ *  kind. `count` is every record (both kinds, so it matches the array it sits beside).
+ *  `longest_gap_min` is FLEET records only: it is read as the size of the worst
+ *  blackout, and a multi-day single-Core record folded into it read as a multi-day
+ *  fleet outage. Per-device records get their own count and longest. */
+export function telemetryGapLedgerSummary(gaps: TelemetryGapRecord[]): {
+  count: number; fleet_gap_count: number; longest_gap_min: number; device_gap_count: number; longest_device_gap_min: number;
+} {
+  const longestMin = (records: TelemetryGapRecord[]): number =>
+    Math.round(records.reduce((m, g) => Math.max(m, g.durationMs), 0) / 60_000);
+  const fleet = gaps.filter((g) => !g.sn);
+  const device = gaps.filter((g) => !!g.sn);
+  return {
+    count: gaps.length,
+    fleet_gap_count: fleet.length,
+    longest_gap_min: longestMin(fleet),
+    device_gap_count: device.length,
+    longest_device_gap_min: longestMin(device),
+  };
+}
+
 /** v1.14.0 (review — the recorder→tracking→HA payload hop was untested, and
  *  index.ts + mqttDiscovery.ts each hand-rolled the same field mapping) — the
  *  single source for the `system_outage_*` fields served at /api/ha-state and
  *  published to the MQTT state topic. */
 export function systemOutageFields(
-  gaps: Array<{ startMs: number; endMs: number; durationMs: number; detectedAt: number; restartSpanning?: boolean; graceful?: boolean }>,
+  gaps: TelemetryGapRecord[],
   nowMs: number,
 ): Record<string, number | boolean | null> {
   const t = outageTracking(gaps, nowMs, 24 * 3_600_000);
@@ -1651,5 +1759,9 @@ export function systemOutageFields(
     system_outage_total_minutes_24h: t.totalMinutes,
     system_outage_last_ended: t.lastEndedMs, // epoch ms, null if none in 24 h
     system_outage_last_duration_minutes: t.lastDurationMinutes,
+    // v1.155.0 — one device silent while the others kept reporting. Not an outage, so
+    // it is in none of the fields above; published so a single-device blackout shows
+    // up in HA at all.
+    system_device_gap_count_24h: deviceGapCount(gaps, nowMs, 24 * 3_600_000),
   };
 }

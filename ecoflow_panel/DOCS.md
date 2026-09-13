@@ -1503,7 +1503,8 @@ ecoflow_panel/availability                  (online/offline; LWT = offline)
   `learned_warning_count`, plus per-ISA-priority `alert_{high,medium,low}_count`.
 - **Diagnostics** (`entity_category: 'diagnostic'`): `ecoflow_cloud_wedge_count`,
   `system_outage_24h` + count/minutes + `system_power_outage_count_24h` /
-  `system_telemetry_gap_count_24h`, `audible_channel_status` /
+  `system_telemetry_gap_count_24h`, `system_device_gap_count_24h` (per-device gaps, not
+  outages), `audible_channel_status` /
   `audible_speakers_reachable`, `shp2_grid_sta`, `backup_reserve_percent`,
   `solar_backup_reserve_percent`, `backup_reserve_enabled`, and the raw SHP2 mode-code
   sensors (`smart_backup_mode_code` / `backup_mode_code` / `overload_mode_code` — exposed
@@ -5308,6 +5309,7 @@ The recorder persists telemetry blackouts (host power loss / add-on stop / MQTT 
 - `isOutageEventFamily()` (id starts `system-outage-`) → **never** sends a "Resolved:" (`shouldSendResolve` returns false) and is NOT firstRun-boot-seeded (`bootSeedNotified`), so a restart-spanning outage fires on the boot that follows it.
 - `resolveOutageAlertOptions(env)` (NaN-safe via `envNum`): `SYSTEM_OUTAGE_ALERT_ENABLED` (default true), `SYSTEM_OUTAGE_RECENT_WINDOW_H` (24), `SYSTEM_OUTAGE_MIN_MINUTES` (15), `SYSTEM_OUTAGE_RESTART_MIN_MINUTES` (5 — lower floor for restart-spanning gaps).
 - `outageTracking()` / `systemOutageFields()` feed HA `system_outage_*` sensors, splitting count into `powerOutageCount` (host down) vs `gracefulRestartCount` (deploys) vs `telemetryGapCount` (cloud stall) so a deploy doesn't poison the power-loss trend.
+- **Per-device gaps (v1.155.0).** A ledger record carrying `sn` is ONE device silent past the per-device threshold while the rest of the fleet kept writing. It renders as its own alert: title `Device telemetry gap — no data for N min`, `device` = the store's display name (else the SN, so the push title reads `… — Core 2`), and a detail that names the device, says the other home devices kept reporting, and says the gap is measured to detection (the device may still be dark). Its id is `deviceGapAlertId(sn, startMs, durationMs)` = `system-outage-device-<SN>-<startMs>[-<tier>]`: the prefix keeps the outage EVENT lifecycle above, the SN keeps apart devices written in the same batch (and the fleet gap sharing their startMs), `familyOf` rolls them up as `system-outage-device`, and `isEvidenceExemptFamily` exempts them because the id names the dark device. Outage alerts sort by gap start. Per-device records are EXCLUDED from `outageTracking` and every `system_outage_*` field and counted apart by `deviceGapCount()` → `system_device_gap_count_24h` (HA **Device Telemetry Gaps 24h**). `/api/telemetry-gaps` serves `telemetryGapLedgerSummary()` beside the raw ledger: `count` (every record), `fleet_gap_count`, `longest_gap_min` (fleet records only), `device_gap_count`, `longest_device_gap_min`.
 
 ---
 
@@ -9175,7 +9177,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 | Backup-pool grace-hold + slew guard | `backupPoolWithGraceHold` holds last-good pool through transient nulls; slew-limits implausible jumps (§2) | SHP2 `backupIncreInfo.*` (aggregate `backup{Remain,FullCap}Wh`, `backupBatPercent`) | Runway, SoC alarm, HA `backup_pool` sensors | measured-and-active |
 | SQLite recorder | `record(extract(snap))` with dedupe/heartbeat, retention, WAL; read-only worker twin `readRecorder.ts` byte-parity-tested (§1.4) | All projected metrics | Every history-driven engine | measured-and-active |
 | Lifetime accumulators | `rollupLifetime()` monotonic Wh counters; micro-dip clamp `clampLifetimeDip` (§1.4.6, §7.2). The steady-state RTE clamp this row used to name was removed in v0.45.0 — `charge == discharge` is NOT an invariant (see §1.4.6) | `pv_total`, `panel_load`, `ac_in`, `grid_home_w`, pack in/out | `/api/lifetime-energy`, HA Energy Dashboard `*_lifetime_kwh` | measured-and-active |
-| Telemetry-gap detection | Recorder gap scan → outage/gap events (§1.4.7) | Sample timestamps | `/api/telemetry-gaps`, `outageAlerts()`, HA `system_outage_*` / `system_telemetry_gap_count_24h` | measured-and-active |
+| Telemetry-gap detection | Recorder gap scan → outage/gap events (§1.4.7) | Sample timestamps | `/api/telemetry-gaps`, `outageAlerts()`, HA `system_outage_*` / `system_telemetry_gap_count_24h` / `system_device_gap_count_24h` | measured-and-active |
 | Trapezoidal integration | `integrateWh` gap-aware trapezoid; shared day-boundary endpoint (§1.5, §7.0.1) | Any W-metric series | selfConsumption, RTE, tariff, carbon, totals, circuit history | measured-and-active |
 | Analytics worker + report registry | Worker thread, `BUILDERS` registry, coalesce + TTL cache, `WARM_REPORTS` self-warm (§1.6, §1.8) | — (infrastructure) | All `/api/<report>` routes, MQTT state, TUI | measured-and-active |
 | `lastUpdated` freshness contract | SHP2 MQTT chatter must not touch the freshness clock; REST owns non-DPU freshness (§1.7) | Message arrival times | Staleness alerts, grace-holds | measured-and-active |
@@ -9276,7 +9278,7 @@ Diagnostic endpoints with a documented validation role (e.g. the forecast backte
 |---|---|---|---|---|
 | Alert taxonomy + ISA priority | `Alert` shape; ISA-18.2/IEC 62682 priority derivation (§8.1) | — | Everything alert-adjacent | measured-and-active |
 | Threshold alerts | `computeAlerts()` temp/SoC/offline/reserve bands incl. LFP top-of-charge relaxation (§8.2) | Projections, connectivity, grid | Monitor → notify/audible/sensors/UI | measured-and-active |
-| Outage events | `outageAlerts()` power-loss vs telemetry-gap events (§8.2.3) | Gap detection | Monitor, HA outage sensors | measured-and-active |
+| Outage events | `outageAlerts()` power-loss vs telemetry-gap vs per-device-gap events (§8.2.3) | Gap detection | Monitor, HA outage sensors | measured-and-active |
 | Peer-comparison learned alerts | Robust median+MAD cross-fleet outliers (§8.3.1) | Fleet projections | Monitor | measured-and-active |
 | Self-baseline alerts | Per-device baseline drift (§8.3.2) | Recorder history | Monitor | measured-and-active |
 | Degradation/runtime forecast alerts | Trailing-3h runtime + SoH-decline with `SOH_FORECAST_*` gates (§8.3.3) | Degradation, forecast | Monitor | measured-and-active |
