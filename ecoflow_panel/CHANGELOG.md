@@ -1,3 +1,111 @@
+## 1.156.0
+
+### Correction to 1.153.0 and 1.154.0
+
+The 1.153.0 entry says `PRAGMA analysis_limit=400` bounded the boot `ANALYZE`, citing
+"ANALYZE took 3,415 ms on the next boot", and the 1.154.0 correction says that bound
+"stands". It does not. The 3,415 ms boot was a restart 13 minutes after another. The
+next two boots, each after an image pull, spent **10,785 ms** (1.154.0) and
+**12,374 ms** (1.155.0) in the bounded ANALYZE — 99.7% and 99.8% of their
+`createRecorder` calls (10,817 and 12,403 ms) — against 9,725 ms for the unbounded one
+on 1.152.0. Both entries are left as written; the source comment, the test and
+`DOCS.md`, which repeated the claim, are corrected in place.
+
+### What the bound did, measured
+
+**Was the pragma applied?** Yes. The add-on image installs Alpine's `nodejs 22.22.2`,
+which links the system `libsqlite3` (`sqlite-libs 3.48.0`) rather than a bundled copy;
+`analysis_limit` has existed since SQLite 3.32. The live database's own `sqlite_stat1`,
+read from a `/api/db-export` snapshot taken after the 1.155.0 boot, holds
+`17548271 401 401 1` for the composite index and `17548271 7` for `idx_samples_ts`:
+statistics only a sampling bound writes. SQLite ignores an unknown pragma without an
+error, so the old `try/catch` could never have told "applied" from "unsupported".
+
+**What does it bound?** The entry scan, and nothing else. ANALYZE opens each index with
+an exact entry count (`OP_Count` with P3 = 0; P3 is nonzero only when the STAT4
+optimization is disabled), and an exact count visits every page of the b-tree. On a copy
+of the live database on the Pi (1.72 GB, 15.8 M rows), counted by SQLite's pager:
+
+| `ANALYZE samples` | page reads | VM steps | cold | warm |
+|---|---|---|---|---|
+| unbounded | 469,666 | 296.5 M | 5,497 ms | 4,931 ms |
+| `analysis_limit=400` | 234,851 | 13.6 k | 1,265 ms | 777 ms |
+
+234,851 is every page of both indexes. The bound removed the CPU and halved the reads.
+It also wrote wrong statistics — `15788340 401 401 1` for the composite index, against
+`15788340 1973543 27651 1` unbounded: about 400 rows per SN where there are 2 million.
+
+**Why 1.3 s on the copy and 11–12 s live?** Page order. The copy is freshly vacuumed: 97%
+of its index pages follow one another on disk in b-tree order. Reading exactly that page
+set, cold, on the same Pi:
+
+| order | cold read | per page |
+|---|---|---|
+| b-tree order (the copy's layout) | 1,245 ms | 5.3 µs |
+| the same 234,835 pages, shuffled | 11,920 ms | 50.8 µs |
+
+The live boots sit at the shuffled figure. The live file's layout cannot be measured from
+outside (`/data` is private to the add-on, and the export vacuums), but the composite index
+takes its inserts at 568 series' right edges at once, so its leaf pages are allocated
+interleaved across the file, and walking it in key order is random I/O. The 3,415 ms boot
+followed, by 13 minutes, a boot whose ANALYZE had just read the same pages into the page
+cache.
+
+So the bound was applied, and the cost it was meant to bound was never the scan: it is a
+read of every index page, and the page cache and the file's layout decide whether that
+takes one second or twelve.
+
+### Statistics are refreshed only where there are none
+
+The boot now runs `PRAGMA optimize=0x03`. Mask `0x02` without `0x10000` selects only a
+table with an index that has no `sqlite_stat1` row — a fresh install, or an index a
+migration has just created. Debug bit `0x01` makes SQLite return those `ANALYZE`
+statements instead of running them. The recorder runs exactly those, with no sampling
+bound, and logs one line:
+
+```
+recorder: planner stats — SQLite 3.48.0, PRAGMA optimize planned no ANALYZE
+recorder: planner stats — SQLite 3.48.0, ran 2/2: ANALYZE "main"."night_charge_ledger"; ANALYZE "main"."lifetime_totals"
+recorder: planner stats — SQLite 3.48.0, refresh FAILED while running (database is locked), ran 0/1
+```
+
+- **Stale statistics are left alone, because they change no plan.** Every statement that
+  reads `samples` has equality on `(sn, metric)`, a range on `ts` alone, or an
+  `INDEXED BY`. Each plans identically with no statistics, full statistics, the truncated
+  ones and the live database's own row counts — in the tests, and on the copy of the live
+  database. A new test counts the `FROM samples` statements in the source, so a new query
+  fails until its plan has been checked.
+- **Why not SQLite's usual `0x10002`.** `0x10000` adds a 10× size check. `samples` grows
+  about 360 k rows a day, so near 160 M rows that check would fire as a full ANALYZE of
+  ten times today's indexes, on the boot path, for plans the statistics do not change.
+  With statistics present, `PRAGMA optimize` read 2–7 pages on the copy, cold.
+- **A failure is reported as one.** Listing can itself need the write lock: SQLite opens a
+  write transaction once two tables qualify. The first draft caught that error with nothing
+  listed and logged "planned no ANALYZE". The line now names the step that failed and never
+  names an ANALYZE that did not complete, and a failed refresh never fails the boot.
+- **Not moved to a worker.** ANALYZE is one statement that holds a write transaction for
+  its whole run; a concurrent insert gets `database is locked`.
+
+On the live Pi the first 1.156.0 boot should analyze `lifetime_totals` and
+`night_charge_ledger` — the only indexed tables that never had statistics, because only
+`samples` was ever analyzed — and every later boot should plan no ANALYZE. The truncated
+`samples` statistics written since 1.153.0 are kept.
+
+### Verification
+
+- `test/bootPlannerStats.test.ts` boots real recorders against a real database: missing
+  statistics are analyzed in full (2,500 rows per SN, not 401); 100×-stale statistics are
+  left exactly as found; an ANALYZE that meets a held write lock, and a listing that does,
+  are each reported as failures while the boot completes; the line names the linked
+  SQLite; every `FROM samples` statement is listed and plans identically across five
+  statistics states; a position pin keeps the refresh inside the `analyze` phase.
+- `test/darkCoreCoverage.test.ts`: the 1.153.0 test, corrected, now forbids the sampling
+  bound and an unconditional ANALYZE on the boot path.
+- `scripts/mutate-boot-analyze.mjs`: 11 anchor-asserted mutants, each typechecked, all 11
+  killed on a green tree. The three that restore the old cost are also killed with the
+  source pins skipped. `mutate-dark-core.mjs` xiii and xiv (the bound, and its order
+  before ANALYZE) are retired: the property they pinned was the wrong one.
+
 ## 1.155.0
 
 ### A dark Core was announced as a broker stall

@@ -94,24 +94,11 @@ const MUTANTS = [
     to: '      worstCov = (worstCov + coverageFrac(pts, fcSpanStart, fcSpanEnd)) / 2; /* MUTANT */',
     why: 'One dark core in three averages to a healthy-looking 0.67 while the total is a third short — the exact arithmetic that let this episode through.',
   },
-  {
-    id: 'xiii. ★ the ANALYZE bound is removed (the 9,725 ms boot freeze returns)',
-    file: RECORDER,
-    find: '    db.exec(`PRAGMA analysis_limit=400;`);',
-    to: '    /* MUTANT */',
-    why: 'Restores a MEASURED 9,725 ms of a 9,726 ms boot window during which the add-on has no HTTP listener, no MQTT ingest, no poll and no alarm evaluation.',
-  },
-  {
-    // The bound must land AFTER ANALYZE for this mutant to mean anything. The
-    // first draft replaced the try-block in place, which left the pragma
-    // textually BEFORE ANALYZE — it survived because it never actually tested
-    // the ordering it was named for. Mutate the ANALYZE site instead.
-    id: 'xiv. the bound is set AFTER analyze, so it does nothing',
-    file: RECORDER,
-    find: '    db.exec(`ANALYZE samples;`);',
-    to: '    db.exec(`ANALYZE samples;`); db.exec(`PRAGMA analysis_limit=400;`); /* MUTANT */',
-    why: 'The pragma is per-connection and binds only a LATER ANALYZE; running it afterwards is inert and the scan is unbounded again, while the code still reads as fixed.',
-  },
+  // xiii / xiv RETIRED in v1.156.0. They pinned `PRAGMA analysis_limit=400` ahead of
+  // `ANALYZE samples` — a mechanism that was applied and bounded the wrong cost (an
+  // exact count still reads every index page; the next boot after an image pull spent
+  // 10,785 ms in it). The boot now runs only the ANALYZE `PRAGMA optimize=0x03` lists;
+  // its mutants live in scripts/mutate-boot-analyze.mjs.
   {
     id: 'x. ★ the per-device gap clocks stop being seeded at boot (the v1.150.0 blindness)',
     file: RECORDER,

@@ -252,29 +252,29 @@ test('★ v1.152.0 — the boot window is instrumented per phase', () => {
     'analyze must be timed separately from schema+migrations');
 });
 
-test('★ v1.153.0 — the boot ANALYZE is BOUNDED, and the bound precedes it', () => {
+test('★ v1.153.0, CORRECTED in v1.156.0 — no sampling bound and no unconditional ANALYZE on the boot path', () => {
   // v1.152.0's instrumentation measured the boot window on the live Pi:
   //   "recorder: boot phases — open 0ms, schema+migrations 1ms, analyze 9725ms"
   // v1.154.0 CORRECTION: that line was emitted before a 5,807 ms seed, so ANALYZE was
   // 62.6% of the blocked boot — not the 99.99% first written here. Still the largest
   // phase of a window with no HTTP listener, no MQTT ingest, no poll and no alarm
-  // evaluation. PRAGMA analysis_limit caps the rows ANALYZE samples per index, so the
-  // cost stops scaling with table size (ANALYZE took 3,415 ms on the next boot).
+  // evaluation.
+  // v1.156.0 CORRECTION: this test used to pin `PRAGMA analysis_limit=400` ahead of
+  // `ANALYZE samples`, on the strength of "ANALYZE took 3,415 ms on the next boot". That
+  // was a restart 13 min after another. The next boot after an image pull measured
+  // `analyze 10785ms` with the bound in place: ANALYZE takes an exact count of each
+  // index before the bounded scan, and the count reads every page. The bound cut the
+  // CPU, not the page reads, and it truncated the stats. The replacement is DRIVEN in
+  // bootPlannerStats.test.ts; this keeps the retired mechanism from returning.
   const __dir = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(resolve(__dir, '../src/recorder.ts'), 'utf8');
 
-  const lim = src.indexOf('PRAGMA analysis_limit=400;');
-  const ana = src.indexOf('ANALYZE samples;');
-  assert.ok(lim > 0, 'the analysis limit must be set');
-  assert.ok(ana > 0, 'ANALYZE must still run — the planner needs stats on a skewed table this size');
-  // Ordering is the whole mechanism: the pragma is per-connection and must be set
-  // BEFORE ANALYZE, or the scan is unbounded again with nothing to show for it.
-  assert.ok(lim < ana, 'PRAGMA analysis_limit must PRECEDE ANALYZE in the same connection');
-  // And nothing may re-run the pragma AFTER the ANALYZE: a trailing copy is inert
-  // (the bound applies to a later ANALYZE, not an earlier one) while making the
-  // code read as if the ordering were satisfied.
-  assert.doesNotMatch(src.slice(ana), /PRAGMA analysis_limit/,
-    'no analysis_limit may appear after ANALYZE — it would be inert and misleading');
+  // SOURCE assertions, labelled as such. They match the call construct, not the words,
+  // so the comment that records this history cannot trip them.
+  assert.doesNotMatch(src, /db\.exec\(`\s*PRAGMA analysis_limit/,
+    'the sampling bound must not return — it bounds CPU, not the page reads, and truncates the stats');
+  assert.doesNotMatch(src, /db\.exec\(`\s*ANALYZE samples/,
+    'no unconditional ANALYZE on the boot path — it reads every samples index page on every boot');
 
   // The instrumentation that produced the measurement must survive, or the next
   // regression is invisible again.
