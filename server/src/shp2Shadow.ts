@@ -118,14 +118,14 @@ export function isContentStale(
  * four times in 87 minutes — 04:10–04:20, 04:24–04:30, 05:17–05:28, 05:32–05:37.
  * The latch side is deliberately slow (5 identical payloads AND 4 minutes); the
  * release side let go on the FIRST payload that differed. Each gap between windows
- * is exactly the 4-minute re-arm time, which is what one refreshed body followed by
- * the same replay again looks like. For those minutes the alarm path read the
+ * is exactly the 4-minute re-arm time, which is what one refreshed body that the
+ * cloud then replayed looks like. For those minutes the alarm path read the
  * panel's grid reading as live.
  *
  * Two distinct new witnesses is sustained movement. A live panel produces a new
  * twelve-channel vector on essentially every poll (1,558 sampled minutes, never
- * one repeat), so a genuine recovery pays about one extra poll. A cloud that serves
- * one refreshed body and resumes replaying — or alternates between two cached
+ * one repeat), so a genuine recovery pays about one extra poll. A cloud that
+ * serves one refreshed body and then replays it — or alternates between two cached
  * bodies — never reaches it.
  */
 export const SHP2_SHADOW_CLEAR_DISTINCT = 2;
@@ -135,7 +135,7 @@ export interface ShadowLatch {
   sinceMs: number;
   /** The witness most recently observed stale while latched. */
   frozenWitness: string;
-  /** Distinct witnesses seen since the latch (or last re-latch), none equal to frozenWitness. */
+  /** Distinct witnesses since the latch, a re-latch, or the frozen body's last reappearance; none equal to it. */
   moved: string[];
 }
 
@@ -160,7 +160,10 @@ export function advanceShadowLatch(
   }
   if (!prev) return undefined;
   if (!fresh) return undefined;
-  if (fresh.witness === prev.frozenWitness || prev.moved.includes(fresh.witness)) return prev;
+  // v1.154.0 review — the frozen body AGAIN is evidence the shadow persists, so the
+  // count starts over. A live panel never reproduces its frozen twelve-channel vector.
+  if (fresh.witness === prev.frozenWitness) return prev.moved.length > 0 ? { ...prev, moved: [] } : prev;
+  if (prev.moved.includes(fresh.witness)) return prev;
   const moved = [...prev.moved, fresh.witness];
   return moved.length >= minDistinct ? undefined : { ...prev, moved };
 }

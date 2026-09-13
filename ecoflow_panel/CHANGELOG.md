@@ -7,7 +7,7 @@ was not. The per-phase line it quoted was emitted straight after `ANALYZE`, and 
 1.152.0 per-device seed ran after it: another **5,807 ms** on that boot, found from
 log timestamps because the instrumentation never covered it. ANALYZE was 9,725 of
 ~15,533 ms — **62.6%**. It was still the largest phase, and the bound 1.153.0 shipped
-(`PRAGMA analysis_limit=400`, 3,415 ms on the next boot) stands. The blocked window on
+(`PRAGMA analysis_limit=400`; ANALYZE took 3,415 ms on the next boot) stands. The blocked window on
 1.153.0 was therefore about 9.25 s, not the 3.4 s its line reported. That entry is
 left as written; the source comment and the test that repeated the figure are
 corrected in place.
@@ -41,8 +41,7 @@ restart would be seen. Its own boot output showed three defects.
 ### Boot timing covers the whole call
 
 The boot-phases line is emitted at the **end** of `createRecorder`, on the monotonic
-clock, with `setup`, `seed`, `restart-probe` and `rest` as phases of their own. A test
-asserts that the line follows the seed and that the phases sum to the total.
+clock, with `setup`, `seed`, `restart-probe` and `rest` as phases of their own. Tests pin that it is the only boot-phases line, that it follows the seed, and that it is the last statement before `createRecorder` returns.
 `index.ts` also logs `createRecorder returned after N ms`, timed from outside; if the
 two disagree, part of the call is outside the instrumentation again.
 
@@ -52,13 +51,13 @@ On 2026-09-12 the cloud-shadow detector latched and released four times in 87
 minutes (04:10–04:20, 04:24–04:30, 05:17–05:28, 05:32–05:37). The latch side is
 deliberately slow — five identical payloads and four minutes — but the release side
 let go on the first payload that differed. Each gap between windows is exactly the
-four-minute re-arm: one refreshed body, then the same replay. For those minutes the
+four-minute re-arm: one refreshed body, which the cloud then replayed. For those minutes the
 alarm path read the panel's grid value as live.
 
 Once latched, the panel must now show two distinct new witnesses
 (`SHP2_SHADOW_CLEAR_DISTINCT`) before it reads live again. A live panel produces a new
 twelve-channel vector on essentially every poll, so a genuine recovery costs about
-one extra poll. One refreshed body followed by the same replay, or a cloud alternating
+one extra poll. One refreshed body that the cloud then replays, or a cloud alternating
 between two cached bodies, stays one latch with its original onset. The latch side is
 unchanged and an unmeasurable poll still releases. The state lives in the store
 beside the freshness map, not on the device object `setDeviceList` rebuilds every
@@ -80,12 +79,42 @@ still reporting. The title is spoken aloud, and the Cause fact read "unknown".
   *Panel is not answering — grid presence unconfirmed*, or *Panel is offline to the
   cloud — grid presence unconfirmed* — states how many other devices are reporting,
   and says no alarm that depends on the panel can be trusted. "Current" means online,
-  a DPU or SHP2 projection, and a quota write within the five-minute stale bound; a
-  bare online flip does not count.
+  a DPU or SHP2 projection, and a quota write within the five-minute stale bound; a bare online flip does not count, and neither does a replaying device or a bench spare.
 - With nothing else current, the original text is used, because it is then true.
 - The Cause fact names the verdict either way.
 - Id, severity and priority are identical, so escalation and audibility are
   unchanged. Only the words differ.
+
+### Found by this release's adversarial review
+
+- **An intervening short boot defeated the outage guard.** The fleet anchor is the
+  newest home sample from any device, so a boot of a few minutes in which the others
+  wrote — and a failing panel did not — moved it past the earlier outage, and the
+  next boot charged that whole outage to the silent device. Every fleet-dark window in
+  the gap ledger between a device's last sample and the anchor (restart-spanning and
+  in-process; never the device's own per-device records) is now subtracted, as a
+  union (`fleetDarkOverlapMs`).
+- **The boot-phases test could not see work after the line.** The phases are chained
+  from one clock, so they always sum to the total the line reports, and checking that
+  proved nothing. The tests now pin the line's position instead, with mutants for a
+  duplicate line and for work after it.
+- **The seed's cost had no test.** Its text pin was satisfied by a constant. The
+  statements are exported as `SEED_SQL`, and each one's `EXPLAIN QUERY PLAN` must be an
+  index SEARCH; a `SELECT DISTINCT` mutant dies on it.
+- **"Other devices reporting" counted things that are not sight.** A second, shadowed
+  SHP2 stamps its quota clock on every replayed poll, and a bench spare reports
+  normally while powering nothing in the house. Neither counts now.
+- **The panel wording made a promise it could not keep.** It called the condition "not
+  a total loss of telemetry", and a push cannot be withdrawn if the episode then
+  becomes one. The clause is gone; the count of devices still reporting stays.
+- **The frozen body reappearing between refreshes now starts the count over.** Refresh
+  B, frozen A again, refresh C no longer releases the latch while the cloud is still
+  replaying A. A live panel never reproduces its frozen twelve-channel vector.
+- **The CI anchor checker read single-quoted anchors only.** 110 of 359 — every anchor
+  containing a single quote — were never checked, and one (`mutate-ledger-legibility`
+  vi) had been dead since 1.148.0 while CI reported every anchor resolving. All three
+  quote styles are checked now, the dead anchor is repointed, and the README states the
+  full count.
 
 A forecast irradiance defect found in the same log review ships separately and
 staged, because re-scoring history can reopen the night-charge basis gate.

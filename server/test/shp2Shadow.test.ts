@@ -124,7 +124,7 @@ test('the offline guard still works on its own', () => {
 // ── v1.154.0: release-side hysteresis ─────────────────────────────────────────
 // 2026-09-12, pre-dawn: latched and released four times in 87 minutes (04:10–04:20,
 // 04:24–04:30, 05:17–05:28, 05:32–05:37). Each gap is exactly the 4-minute re-arm —
-// one refreshed body, then the same replay again.
+// one refreshed body, which the cloud then replayed.
 const staleF = (witness: string, firstSeenMs: number) => ({ witness, firstSeenMs, repeats: SHP2_SHADOW_MIN_REPEATS });
 const movedF = (witness: string, at: number) => ({ witness, firstSeenMs: at, repeats: 1 });
 
@@ -138,7 +138,7 @@ test('★ v1.154.0 — a latched shadow does NOT release on the first payload th
   assert.equal(l, undefined, `${SHP2_SHADOW_CLEAR_DISTINCT} distinct new bodies release it`);
 });
 
-test('★ THE 09-12 PATTERN: one refreshed body, then the same replay again, stays ONE latch with its onset', () => {
+test('★ THE 09-12 PATTERN: one refreshed body that the cloud then replays stays ONE latch with its onset', () => {
   let l = advanceShadowLatch(undefined, staleF('A', 0), true);
   l = advanceShadowLatch(l, movedF('B', 600_000), false);
   for (let i = 2; i < SHP2_SHADOW_MIN_REPEATS; i++) {
@@ -156,6 +156,26 @@ test('★ a cloud alternating between two cached bodies never releases', () => {
     l = advanceShadowLatch(l, movedF(w, 600_000 + i * 60_000), false);
     assert.ok(l, `poll ${i} (${w}) must not release a two-body alternation`);
   }
+});
+
+test('a refreshed body repeating is not new movement', () => {
+  let l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  l = advanceShadowLatch(l, movedF('B', 600_000), false);
+  l = advanceShadowLatch(l, { witness: 'B', firstSeenMs: 600_000, repeats: 2 }, false);
+  assert.deepEqual(l, { sinceMs: 0, frozenWitness: 'A', moved: ['B'] });
+});
+
+test('★ v1.154.0 review — the frozen body reappearing between refreshes starts the count over', () => {
+  // Refresh B, frozen A again, refresh C: two refreshes that never ran back to back,
+  // while the cloud is demonstrably still replaying A. That is not sustained movement.
+  let l = advanceShadowLatch(undefined, staleF('A', 0), true);
+  l = advanceShadowLatch(l, movedF('B', 600_000), false);
+  l = advanceShadowLatch(l, movedF('A', 660_000), false);
+  assert.deepEqual(l, { sinceMs: 0, frozenWitness: 'A', moved: [] }, 'the frozen body again resets the count');
+  l = advanceShadowLatch(l, movedF('C', 720_000), false);
+  assert.ok(l, 'B, A, C must not release');
+  l = advanceShadowLatch(l, movedF('D', 780_000), false);
+  assert.equal(l, undefined, 'C then D is sustained movement');
 });
 
 test('an unmeasurable poll releases the latch — no witness is not evidence of a shadow', () => {

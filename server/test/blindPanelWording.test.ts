@@ -43,7 +43,7 @@ const causeOf = (a: { facts?: Array<{ label: string; value: string }> }) => a.fa
 test('★ a replayed panel with the Cores still reporting is NOT announced as "the alarm system is blind"', () => {
   const v = blindVerdict(FROZEN);
   assert.equal(v.blind, true, 'precondition: the verdict is blind');
-  const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(fleet(), v.failure, NOW, CFG.staleMs));
+  const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(fleet(), v.failure, NOW, { staleMs: CFG.staleMs }));
   // Escalation is unchanged: same id, same severity, same priority.
   assert.equal(a.id, TELEMETRY_BLIND_ALERT_ID);
   assert.equal(a.severity, 'critical');
@@ -55,8 +55,7 @@ test('★ a replayed panel with the Cores still reporting is NOT announced as "t
     'The alarm path has had no current data from Smart Home Panel 2 for 7 minutes: the fetch succeeds, but the '
     + "EcoFlow cloud is replaying a stale copy of the panel's data. Grid presence from the panel is being treated as "
     + 'UNKNOWN. Its other readings, including the backup reserve level, are not current either. 2 other devices are '
-    + 'still reporting, so this is not a total loss of telemetry — but no alarm that depends on the panel can be '
-    + 'trusted while this is true.',
+    + 'still reporting, but no alarm that depends on the panel can be trusted while this is true.',
   );
   assert.deepEqual(a.facts, [
     { label: 'No current panel data for', value: '7 min' },
@@ -72,7 +71,7 @@ test('with NOTHING else current, the original text stands — it is then true', 
   const devices = fleet();
   devices['DPU-1'].lastQuotaAtMs = NOW - 6 * MIN;   // lastUpdated is fresh, but only from a status flip
   devices['DPU-2'].online = false;
-  const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(devices, v.failure, NOW, CFG.staleMs));
+  const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(devices, v.failure, NOW, { staleMs: CFG.staleMs }));
   assert.equal(a.title, 'Alarm system is blind — no telemetry');
   assert.match(a.detail, /has received no telemetry for 7 minutes/);
   assert.equal(a.severity, 'critical');
@@ -91,7 +90,7 @@ test('★ a failure that is NOT a panel verdict keeps the original wording and C
   // A thrown poll carries no panel verdict. Other devices may still look current for a
   // few minutes from their last quota — that must not dress an auth outage up as a panel fault.
   const v = blindVerdict(null, 'EcoFlow API error 8521: signature is wrong');
-  const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(fleet(), v.failure, NOW, CFG.staleMs));
+  const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(fleet(), v.failure, NOW, { staleMs: CFG.staleMs }));
   assert.equal(a.title, 'Alarm system is blind — no telemetry');
   assert.match(a.detail, /clock/i);
   assert.equal(causeOf(a), 'cloud rejecting our requests (check host clock)');
@@ -105,7 +104,7 @@ test('every panel cause renders its own title and Cause fact, all at the same se
   };
   for (const [cause, [title, causeFact]] of Object.entries(expected) as Array<[PollFailure['cause'], [string, string]]>) {
     const v = blindVerdict({ cause, sns: ['SHP2-1'] });
-    const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(fleet(), v.failure, NOW, CFG.staleMs));
+    const [a] = telemetryBlindAlerts(v, NOW, blindAlertContext(fleet(), v.failure, NOW, { staleMs: CFG.staleMs }));
     assert.equal(a.title, title, cause);
     assert.equal(a.severity, 'critical', cause);
     assert.equal(a.priority, 'critical', cause);
@@ -124,7 +123,7 @@ test('★ the failure is bound to the failure that set lastError — a thrown po
   assert.equal(pollState().lastFailure, null, 'a healthy poll clears it');
 });
 
-test('★ "other devices reporting" excludes the named panel and anything not current', () => {
+test('★ "other devices reporting" excludes the named panel, replays, bench spares and anything not current', () => {
   const ctx = blindAlertContext({
     'SHP2-1': { deviceName: 'Smart Home Panel 2', online: true, lastQuotaAtMs: NOW, projection: { kind: 'shp2' } },
     'DPU-1': { online: true, lastQuotaAtMs: NOW - 10_000, projection: { kind: 'dpu' } },                       // counts
@@ -133,7 +132,9 @@ test('★ "other devices reporting" excludes the named panel and anything not cu
     'SMALL': { online: true, lastQuotaAtMs: NOW, projection: { kind: 'generic' } },                            // not an alarm source
     'DPU-4': { online: true, lastUpdated: NOW, lastQuotaAtMs: NOW - 30 * MIN, projection: { kind: 'dpu' } },   // a flip, no telemetry
     'DPU-5': { online: true, projection: null },
-  }, FROZEN, NOW, CFG.staleMs);
+    'SHP2-2': { online: true, lastQuotaAtMs: NOW, contentStaleSinceMs: NOW - 10 * MIN, projection: { kind: 'shp2' } }, // a replay, not a report
+    'BENCH': { online: true, lastQuotaAtMs: NOW, projection: { kind: 'dpu' } },                                         // bench hardware
+  }, FROZEN, NOW, { staleMs: CFG.staleMs, isBenchSpare: (sn) => sn === 'BENCH' });
   assert.deepEqual(ctx, { affectedNames: ['Smart Home Panel 2'], otherReportingCount: 1 });
 });
 
@@ -149,6 +150,6 @@ test('★ BRIDGE: the poll loop hands its verdict to notePollFailed, and the ale
   assert.match(call, /\{ cause: health\.reason, sns: health\.sns \},\s*$/, 'the verdict must travel with the failure');
 
   const mon = readFileSync(resolve(__dir, '../src/alertMonitor.ts'), 'utf8');
-  assert.match(mon, /return telemetryBlindAlerts\(verdict, blindNowMs, blindAlertContext\(blindDevices, verdict\.failure, blindNowMs\)\);/,
-    'the live alert must be rendered with the failure and the device map');
+  assert.match(mon, /return telemetryBlindAlerts\(verdict, blindNowMs, blindAlertContext\(blindDevices, verdict\.failure, blindNowMs, \{ isBenchSpare: isBenchSpareSn \}\)\);/,
+    'the live alert must be rendered with the failure, the device map and the bench-spare predicate');
 });

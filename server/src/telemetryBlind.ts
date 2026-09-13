@@ -254,7 +254,8 @@ export interface BlindAlertContext {
  *
  * "Current" means a quota write within `staleMs` from an online device, using the
  * quota clock where one exists: a bare online/offline flip bumps `lastUpdated`
- * without carrying any telemetry.
+ * without carrying any telemetry. A device whose payload is being replayed, and a
+ * bench spare, never count.
  */
 export function blindAlertContext(
   devices: Record<string, {
@@ -262,12 +263,14 @@ export function blindAlertContext(
     online?: boolean;
     lastUpdated?: number;
     lastQuotaAtMs?: number | null;
+    contentStaleSinceMs?: number | null;
     projection?: { kind?: string } | null;
   } | undefined>,
   failure: PollFailure | null,
   nowMs: number,
-  staleMs: number = DEFAULT_BLIND_CONFIG.staleMs,
+  opts: { staleMs?: number; isBenchSpare?: (sn: string) => boolean } = {},
 ): BlindAlertContext {
+  const staleMs = opts.staleMs ?? DEFAULT_BLIND_CONFIG.staleMs;
   const affected = new Set(failure?.sns ?? []);
   const affectedNames = [...affected].map((sn) => devices[sn]?.deviceName ?? sn);
   let otherReportingCount = 0;
@@ -276,6 +279,12 @@ export function blindAlertContext(
     const kind = d.projection?.kind;
     if (kind !== 'dpu' && kind !== 'shp2') continue;
     if (d.online === false) continue;
+    // v1.154.0 review — a replayed body stamps the quota clock on every poll, so a
+    // second, shadowed panel would otherwise vouch for sight the system already
+    // treats as UNKNOWN.
+    if (d.contentStaleSinceMs != null) continue;
+    // Bench hardware reporting normally is not sight of anything that powers the house.
+    if (opts.isBenchSpare?.(sn)) continue;
     const at = d.lastQuotaAtMs ?? d.lastUpdated ?? 0;
     if (at > 0 && nowMs - at < staleMs) otherReportingCount++;
   }
@@ -310,8 +319,8 @@ export function telemetryBlindAlerts(v: BlindVerdict, nowMs: number, ctx?: Blind
     detail: panel
       ? `The alarm path has had no current data from ${panelName} for ${mins} minute${mins === 1 ? '' : 's'}: `
         + `${panel.clause}. ${panel.grid} Its other readings, including the backup reserve level, are not current either. `
-        + `${others} other device${others === 1 ? ' is' : 's are'} still reporting, so this is not a total loss of `
-        + `telemetry — but no alarm that depends on the panel can be trusted while this is true.`
+        + `${others} other device${others === 1 ? ' is' : 's are'} still reporting, but no alarm that depends on the `
+        + `panel can be trusted while this is true.`
       : `The Power add-on ${reasonText}, so it currently cannot see battery state, grid presence or any device fault. `
         + `Every other alarm in this system depends on that data, so they cannot fire while this is true — a quiet `
         + `system right now does NOT mean a safe one.${authHint}`,

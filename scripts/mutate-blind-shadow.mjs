@@ -6,7 +6,7 @@
  * 1. THE SHADOW LATCH RELEASED ON ONE MOVED PAYLOAD. On 2026-09-12 the SHP2 cloud
  *    shadow latched and released four times in 87 minutes (04:10–04:20, 04:24–04:30,
  *    05:17–05:28, 05:32–05:37). Each gap was exactly the 4-minute re-arm: one
- *    refreshed body, then the same replay again. For those minutes the alarm path
+ *    refreshed body, which the cloud then replayed. For those minutes the alarm path
  *    read the panel's grid reading as live.
  *
  * 2. "THE ALARM SYSTEM IS BLIND" WHILE THE CORES STREAMED. A replayed, failed or
@@ -57,15 +57,15 @@ const MUTANTS = [
   {
     id: 'ii. ★ a repeated moved body counts as new movement',
     file: SHADOW,
-    find: '  if (fresh.witness === prev.frozenWitness || prev.moved.includes(fresh.witness)) return prev;',
-    to: '  if (fresh.witness === prev.frozenWitness) return prev; /* MUTANT */',
+    find: '  if (prev.moved.includes(fresh.witness)) return prev;',
+    to: '  /* MUTANT */',
     why: 'A cloud alternating between two cached bodies reaches the release count from one of them seen twice.',
   },
   {
     id: 'iii. the frozen body itself counts as movement',
     file: SHADOW,
-    find: '  if (fresh.witness === prev.frozenWitness || prev.moved.includes(fresh.witness)) return prev;',
-    to: '  if (prev.moved.includes(fresh.witness)) return prev; /* MUTANT */',
+    find: '  if (fresh.witness === prev.frozenWitness) return prev.moved.length > 0 ? { ...prev, moved: [] } : prev;',
+    to: '  /* MUTANT */',
     why: 'Replay A, one refresh B, replay A again — and the release count is met by the replay.',
   },
   {
@@ -102,7 +102,7 @@ const MUTANTS = [
     file: BLIND,
     find: '  const panel = v.failure != null && ctx != null && ctx.otherReportingCount > 0',
     to: '  const panel = v.failure != null && ctx != null && ctx.otherReportingCount >= 0 /* MUTANT */',
-    why: 'The reverse lie: with every device dark the alert says "0 other devices are still reporting, so this is not a total loss of telemetry".',
+    why: 'The reverse lie: with every device dark the alert still uses the panel wording and says "0 other devices are still reporting".',
   },
   {
     id: 'ix. the panel wording is used for a failure that is not a panel verdict',
@@ -178,9 +178,38 @@ const MUTANTS = [
   {
     id: 'xix. ★★ the alert monitor renders without context',
     file: MONITOR,
-    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs));',
+    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isBenchSpare: isBenchSpareSn }));',
     to: '        return telemetryBlindAlerts(verdict, blindNowMs); /* MUTANT */',
     why: 'Without the device map the panel wording is unreachable in production.',
+  },
+  // ── v1.154.0 review ────────────────────────────────────────────────────────
+  {
+    id: 'xx. ★ the frozen body reappearing does not restart the count',
+    file: SHADOW,
+    find: '  if (fresh.witness === prev.frozenWitness) return prev.moved.length > 0 ? { ...prev, moved: [] } : prev;',
+    to: '  if (fresh.witness === prev.frozenWitness) return prev; /* MUTANT */',
+    why: 'Refresh B, frozen A again, refresh C releases the guard while the cloud is demonstrably still replaying A.',
+  },
+  {
+    id: 'xxi. ★ a second, shadowed panel counts as another device reporting',
+    file: BLIND,
+    find: '    if (d.contentStaleSinceMs != null) continue;',
+    to: '    /* MUTANT */',
+    why: 'A replayed body stamps its quota clock every poll, so a frozen panel vouches for sight the system already treats as UNKNOWN.',
+  },
+  {
+    id: 'xxii. a bench spare counts as another device reporting',
+    file: BLIND,
+    find: '    if (opts.isBenchSpare?.(sn)) continue;',
+    to: '    /* MUTANT */',
+    why: 'Bench hardware on another circuit turns a dark home fleet into "1 other device is still reporting".',
+  },
+  {
+    id: 'xxiii. the alert monitor stops passing the bench-spare predicate',
+    file: MONITOR,
+    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isBenchSpare: isBenchSpareSn }));',
+    to: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs)); /* MUTANT */',
+    why: 'The exclusion is correct in the pure function and absent in production.',
   },
 ];
 

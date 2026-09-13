@@ -92,7 +92,20 @@ for (const h of harnesses) {
   // then report a LIVE harness as dead. (CodeQL js/double-escaping caught exactly
   // that here.) One regex, each escape consumed exactly once, left to right.
   const unescape = (lit) => lit.replace(/\\(.)/gs, (_, c) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
-  const finds = [...src.matchAll(/\n\s*find:\s*'((?:[^'\\]|\\.)*)'/g)].map((m) => unescape(m[1]));
+  // v1.154.0 — ALL THREE QUOTE STYLES. This matched single-quoted literals only, so
+  // every anchor containing a single quote (written double-quoted or as a backtick
+  // literal) went unchecked: 110 of 359. One of them, mutate-ledger-legibility vi,
+  // had been dead since v1.148.0 while this checker reported every anchor resolving.
+  // A backtick literal with `${` interpolation cannot be resolved statically, so it
+  // FAILS the run instead of being skipped.
+  const lits = [...src.matchAll(/\n\s*find:\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g)].map((m) => m[1]);
+  const interpolated = lits.filter((l) => l[0] === '`' && l.includes('${'));
+  if (interpolated.length) {
+    checked += interpolated.length;
+    bad += interpolated.length;
+    console.log(`  DEAD   ${h} — ${interpolated.length} interpolated backtick anchor(s) cannot be checked statically`);
+  }
+  const finds = lits.filter((l) => !interpolated.includes(l)).map((l) => unescape(l.slice(1, -1)));
   if (finds.length === 0) { console.log(`  skip   ${h} (no literal find: anchors)`); continue; }
 
   const misses = [];

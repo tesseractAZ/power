@@ -198,7 +198,10 @@ test('★ v1.152.0 — per-device gap clocks are SEEDED from persisted samples a
   assert.ok(i > 0 && j > i, 'the seed must sit between its own phase marks');
   const block = src.slice(i, j);
   assert.doesNotMatch(block, /GROUP BY/, 'a GROUP BY over samples visits every index entry — 5.8 s per boot on the live Pi');
-  assert.match(block, /INDEXED BY idx_samples_sn_metric_ts/, 'every seed statement must be an index SEARCH');
+  // v1.154.0 review — the statements live in SEED_SQL, whose query PLANS
+  // seedAndBootPhases.test.ts asserts. Here: the seed prepares those five and nothing else.
+  assert.equal((block.match(/db\.prepare\(SEED_SQL\.\w+\)/g) ?? []).length, 5, 'the seed must prepare the five SEED_SQL statements');
+  assert.equal((block.match(/db\.prepare\(/g) ?? []).length, 5, 'and no other statement');
   // A silent seeding failure would restore v1.150.0 blindness with no trace. Pin
   // the log CALL, not the message text — a mutant that keeps the string but never
   // emits it satisfies a bare text match while being exactly as silent.
@@ -256,7 +259,7 @@ test('★ v1.153.0 — the boot ANALYZE is BOUNDED, and the bound precedes it', 
   // 62.6% of the blocked boot — not the 99.99% first written here. Still the largest
   // phase of a window with no HTTP listener, no MQTT ingest, no poll and no alarm
   // evaluation. PRAGMA analysis_limit caps the rows ANALYZE samples per index, so the
-  // cost stops scaling with table size (3,415 ms on the next boot).
+  // cost stops scaling with table size (ANALYZE took 3,415 ms on the next boot).
   const __dir = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(resolve(__dir, '../src/recorder.ts'), 'utf8');
 

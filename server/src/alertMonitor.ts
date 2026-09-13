@@ -10,7 +10,7 @@ import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
 import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, blindAlertContext, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
-import { benchSpareSns, shp2ConnectedDpuSns, isExpectedOfflineSpare,
+import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, isExpectedOfflineSpare,
   aggregateFleetFlow, findShp2, shp2Panels } from './shp2Membership.js';
 // v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
@@ -2124,7 +2124,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         });
         // v1.154.0 — which panel the failure names and who is still reporting, so a
         // stale panel is not announced as "the alarm system is blind".
-        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs));
+        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isBenchSpare: isBenchSpareSn }));
       })(),
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired

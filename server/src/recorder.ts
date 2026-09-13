@@ -98,11 +98,59 @@ export function detectTelemetryGap(lastInsertMs: number, nowMs: number, threshol
  *  - after it: time since this process's first home-device write, on the MONOTONIC
  *    clock, so an NTP step on an RTC-less Pi cannot manufacture it.
  * The outage between those two instants belongs to no single device.
+ *
+ * v1.154.0 review — and so does EVERY fleet-dark window between the seed and the
+ * anchor, not only the last one. The anchor is the newest home sample from ANY
+ * device, so a short intervening boot in which the others wrote moves it past an
+ * earlier outage the silent device had no part in. `fleetDarkWindows` are the gap
+ * ledger's FLEET records (restart-spanning and in-process — never a per-device
+ * record, which is the device's own darkness); their union is subtracted.
  */
-export function seededDeviceDarkMs(seedMs: number, fleetAnchorMs: number | null, sinceFirstHomeInsertMs: number): number {
-  const beforeOutage = fleetAnchorMs == null ? 0 : Math.max(0, fleetAnchorMs - seedMs);
+export function seededDeviceDarkMs(
+  seedMs: number,
+  fleetAnchorMs: number | null,
+  sinceFirstHomeInsertMs: number,
+  fleetDarkWindows: ReadonlyArray<{ startMs: number; endMs: number }> = [],
+): number {
+  const span = fleetAnchorMs == null ? 0 : Math.max(0, fleetAnchorMs - seedMs);
+  const beforeOutage = fleetAnchorMs == null ? 0 : Math.max(0, span - fleetDarkOverlapMs(fleetDarkWindows, seedMs, fleetAnchorMs));
   return beforeOutage + Math.max(0, sinceFirstHomeInsertMs);
 }
+
+/** v1.154.0 review — length of the UNION of `windows`, clipped to [fromMs, toMs]. PURE. */
+export function fleetDarkOverlapMs(windows: ReadonlyArray<{ startMs: number; endMs: number }>, fromMs: number, toMs: number): number {
+  const clipped = windows
+    .map((w) => [Math.max(fromMs, w.startMs), Math.min(toMs, w.endMs)] as [number, number])
+    .filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e > s)
+    .sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let curStart = 0;
+  let curEnd = -Infinity;
+  for (const [s, e] of clipped) {
+    if (s > curEnd) {
+      if (curEnd > -Infinity) total += curEnd - curStart;
+      curStart = s;
+      curEnd = e;
+    } else if (e > curEnd) {
+      curEnd = e;
+    }
+  }
+  if (curEnd > -Infinity) total += curEnd - curStart;
+  return total;
+}
+
+/**
+ * v1.154.0 review — the per-device seed's statements, exported so that their query
+ * PLANS can be asserted (each one an index SEARCH), not merely their text. A text pin
+ * on `INDEXED BY` was satisfied by a constant that no statement had to use.
+ */
+export const SEED_SQL = {
+  firstSn: 'SELECT MIN(sn) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts',
+  nextSn: 'SELECT MIN(sn) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn > ?',
+  firstMetric: 'SELECT MIN(metric) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn = ?',
+  nextMetric: 'SELECT MIN(metric) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn = ? AND metric > ?',
+  maxTsOf: 'SELECT MAX(ts) AS v FROM samples INDEXED BY idx_samples_sn_metric_ts WHERE sn = ? AND metric = ?',
+} as const;
 
 /**
  * v1.13.0 (review F10 + F22) — decide what the BOOT-time restart-gap check should
@@ -836,8 +884,8 @@ export function createRecorder(
   // per-device seed, which blocked a further 5,807 ms unmeasured. ANALYZE was 9,725 of
   // ~15,533 ms, or 62.6%: still the largest phase, and the whole add-on is blocked for
   // all of it (no HTTP listener, no MQTT ingest, no poll, no alarm evaluation —
-  // createRecorder is non-async and cannot yield). Bounded as below, the next boot
-  // measured 3,415 ms. The original comment was wrong on both counts it rested
+  // createRecorder is non-async and cannot yield). Bounded as below, ANALYZE took
+  // 3,415 ms on the next boot. The original comment was wrong on both counts it rested
   // on: `samples` carries TWO indexes now, and the database is ~1.72 GB under an
   // 1825-day retention. A full ANALYZE reads every index entry.
   //
@@ -1057,12 +1105,11 @@ export function createRecorder(
   const tSetup = phase('setup');
   try {
     type One = { v: string | number | bigint | null } | undefined;
-    const IDX = 'INDEXED BY idx_samples_sn_metric_ts';
-    const firstSn = db.prepare(`SELECT MIN(sn) AS v FROM samples ${IDX}`);
-    const nextSn = db.prepare(`SELECT MIN(sn) AS v FROM samples ${IDX} WHERE sn > ?`);
-    const firstMetric = db.prepare(`SELECT MIN(metric) AS v FROM samples ${IDX} WHERE sn = ?`);
-    const nextMetric = db.prepare(`SELECT MIN(metric) AS v FROM samples ${IDX} WHERE sn = ? AND metric > ?`);
-    const maxTsOf = db.prepare(`SELECT MAX(ts) AS v FROM samples ${IDX} WHERE sn = ? AND metric = ?`);
+    const firstSn = db.prepare(SEED_SQL.firstSn);
+    const nextSn = db.prepare(SEED_SQL.nextSn);
+    const firstMetric = db.prepare(SEED_SQL.firstMetric);
+    const nextMetric = db.prepare(SEED_SQL.nextMetric);
+    const maxTsOf = db.prepare(SEED_SQL.maxTsOf);
     // A runaway guard only: far above any real device set, so a corrupt index
     // cannot turn the seed back into an unbounded boot stall.
     const SEED_MAX_SERIES = 50_000;
@@ -1209,13 +1256,15 @@ export function createRecorder(
     // fleet clock useless here and this loop necessary.
     if (sawHomeInsert) {
       if (firstHomeInsertMono < 0) firstHomeInsertMono = performance.now();
+      // v1.154.0 review — the windows in which NO home device could report.
+      const fleetDark = telemetryGapsLog.filter((g) => g.sn == null);
       for (const [sn, lastMs] of lastInsertBySn) {
         if (isBenchSpareSn(sn)) continue;            // a bench spare is dark BY DESIGN
         if (perDeviceGapOpen.has(sn)) continue;      // already recorded; do not re-report every batch
         // v1.154.0 — a device still on its SEEDED clock is not charged with the
         // add-on's own downtime; one that has written since boot is measured as before.
         const darkMs = seededNotYetWritten.has(sn)
-          ? seededDeviceDarkMs(lastMs, bootFleetAnchorMs, performance.now() - firstHomeInsertMono)
+          ? seededDeviceDarkMs(lastMs, bootFleetAnchorMs, performance.now() - firstHomeInsertMono, fleetDark)
           : now - lastMs;
         if (darkMs > PER_DEVICE_GAP_THRESHOLD_MS) {
           // endMs is clamped so a boot clock still BEHIND the seed (RTC-less Pi before

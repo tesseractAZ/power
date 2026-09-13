@@ -163,7 +163,7 @@ test('★ v1.154.0 — a stale panel holds through ONE moved payload and clears 
   assert.equal(dev().contentStaleSinceMs, null, 'sustained movement releases it without an add-on restart');
 });
 
-test('★ THE 09-12 PATTERN through the store: a refreshed body followed by the same replay never reads live', () => {
+test('★ THE 09-12 PATTERN through the store: a refreshed body that the cloud then replays never reads live', () => {
   const store = new SnapshotStore();
   let t = 1_000_000;
   store.setClock(() => t);

@@ -338,8 +338,7 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   skips only the synthetic SNs; bench spares are filtered at sweep time against the
   live roster. A device still on its seeded clock is charged only with dark time the
   add-on could observe (`seededDeviceDarkMs`): how far its last sample trails the
-  fleet's newest before the outage, plus monotonic time since this process's first
-  home write. The outage itself is the restart-spanning fleet gap, not every
+  fleet's newest before the outage, plus monotonic time since this process's first home write, less every fleet-dark window already in the gap ledger between those two points (so an intervening short boot cannot charge a silent device with an earlier outage). The outage itself is the restart-spanning fleet gap, not every
   device's.
 - **Boot phases.** `createRecorder` blocks the whole add-on (no HTTP listener, MQTT
   ingest, poll or alarm evaluation), so it ends with one line on the monotonic clock:
@@ -1111,8 +1110,7 @@ full twelve-channel vector never held identical for even one minute. Staleness
 requires **both** a repeat count and an elapsed duration; an unmeasurable poll
 resets rather than accumulating. Release has hysteresis (v1.154.0): once latched,
 the panel must show `SHP2_SHADOW_CLEAR_DISTINCT` (2) distinct new witnesses before it
-reads live again (`advanceShadowLatch`), so one refreshed body followed by the same
-replay stays one latch with its original onset. `computeHomeGridWatts` and
+reads live again (`advanceShadowLatch`), so one refreshed body that the cloud then replays stays one latch with its original onset; the frozen body reappearing starts the count over. `computeHomeGridWatts` and
 `computeShp2GridConnected` then treat a shadowed panel exactly as v0.88.0 already
 treats an offline one. `sensor.ecoflow_panel_shp2_payload_frozen` publishes the
 held duration.
@@ -1866,7 +1864,7 @@ watchdog and any uptime probe see it.
 poll also routes here: `notePollFailed` carries `{cause, sns}`, bound to that
 failure and cleared by any other. When the failure is a panel verdict and at least
 one other device is still current (`blindAlertContext`: online, a dpu/shp2
-projection, a quota write inside the stale bound), the alert names the panel
+projection, a quota write inside the stale bound, not itself replaying, not a bench spare), the alert names the panel
 condition — e.g. *"Panel data is stale — grid presence unknown"*, with the count of
 devices still reporting — instead of claiming the add-on sees nothing. With nothing
 else current the original text is used, because it is then true. Id, severity and
