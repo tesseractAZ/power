@@ -1,3 +1,99 @@
+## 1.156.0
+
+### The provider's past-hour irradiance is now recorded — and nothing reads it yet
+
+The recorder's irradiance history, `weather/ghi_wm2`, is not realized irradiance.
+`recordWeatherGhi` keeps the **first** value ever written for an hour, and the first
+weather fetch that contains an hour sees it roughly three to four days ahead
+(`forecast_days=4`). The later `past_days` value is Open-Meteo's own estimate once
+the hour is over, and it never replaces the first value.
+
+For 2026-09-11, the stored hours 8–15 sum to 3,180 W/m² against 5,296 in the
+past-hour values. That ratio is consistent with the forecast-skill hindcast's −40%
+"miss" having been the weather forecast's, not the solar model's.
+
+Recorder-backed readers of `ghi_wm2` therefore see forecast irradiance:
+
+- the forecast-skill hindcast, and through it the PV band calibration and the
+  night-charge basis gate;
+- for days older than the live weather cache:
+  - solar-model training;
+  - the PV bias correction (the hours of its oldest local day before the cache's first
+    UTC midnight, which is the local evening here);
+  - soiling (its p90 baseline, and its recent pool of clear days whenever a cloudy week
+    pushes that pool back past the cache);
+- the backtest.
+
+**This release changes none of them.** Correcting `ghi_wm2` in place would
+re-score the 30-day band calibration within the hour. That would move the basis
+gate and the P10 band that sizes a supervised reserve write, with no review point.
+Instead:
+
+- **Past-hour GHI is captured as a separate series, `weather/ghi_wm2_realized`.**
+  - "Realized" means the provider's estimate after the hour, not a measurement.
+  - It holds only hours whose whole interval had ended at the fetch's
+    `fetchedAt`, which is correct whichever way the provider labels its hourly
+    means.
+  - Every hour is stored explicitly, with no same-as-previous collapse, and a
+    later fetch revises an hour in place.
+- **A value the provider did not send is never captured.** `weather.ts` turned a
+  missing radiation value into 0 before the recorder saw it, so one gappy response
+  would have overwritten a week of captured hours with zeros.
+  - The parser, now a pure `openMeteoHours()`, flags the hour as
+    `radiationMissing`. The extraction is otherwise exact: a null body still fails the
+    fetch and keeps the stale cache, and consumers receive the same values.
+  - The capture skips flagged hours.
+  - Existing consumers still receive the stand-in 0, exactly as before.
+- **Nothing reads it.** A test using the TypeScript parser fails if any file
+  outside the recorder references the series, or if anything in the recorder
+  other than the capture itself does. The switch has to ship as its own reviewed
+  change.
+  - The first version of this test stripped comments with a regex, which a `/*`
+    inside a `//` comment turned into a blind spot of about 118 lines of
+    `index.ts`.
+- **The mutation harness restores the tree on Ctrl+C, SIGTERM and SIGHUP**, and refuses to
+  start over a leftover mutant. Node's default is to die at once and skip `finally`, which
+  could leave the basis-switch mutant in place.
+- **It lives under the existing synthetic SN `weather`.** A new SN would be
+  seeded into the per-device gap clocks at boot and raise a false "Device
+  telemetry gap" six hours later.
+- **`past_days=7` sets the capture deadline.** No timezone is requested, so days
+  are UTC days, and an hour not captured within about seven of them cannot be
+  recovered from this endpoint.
+- **Unchanged:** `ghi_wm2` keeps its first-write behaviour, now pinned by value.
+  The forecast archive, which shares the existence statements, keeps its
+  insert-once semantics.
+
+### Corrections
+
+- **The band calibrator's error basis.** Its documentation said the hindcast
+  scored against realized GHI, and so omitted the weather-forecast part of
+  day-ahead error. In fact its errors *include* a multi-day forecast component.
+  - The effect is not one-directional: it raises the per-day errors and also
+    widens the band through `skillFrac`.
+  - The source comment (`pvBandScoredErrs`) and DOCS are corrected in place.
+- **The weather fetch horizon.** DOCS showed `forecast_days=2`; it has been `4`
+  since 1.35.0.
+- **Timestamps.** DOCS said Open-Meteo returns local-zone times; with no timezone
+  requested it returns GMT.
+
+### What the switch will have to reckon with (not done here)
+
+- **The gate is closed for a different reason.** It stands at 72%, mostly because
+  of the seven 08-13..08-19 days, when Core 2 was dark and actuals were about a
+  third of prediction.
+  - Estimated from an offline reproduction of the calibration, not measured:
+    re-scoring on past-hour irradiance alone gives about 76%, still below 78%.
+  - By the same arithmetic, those days leaving the 30-day window reopen the gate
+    around the 09-14 plan, whether or not this change ships.
+- **Opening the gate is the real consequence.** Crossing 78% turns "nothing will
+  be charged" into a sized buy, and in supervised mode that means a reserve write.
+- **The direction of any single effect depends on the calibrator's regime.**
+  While coverage is below 80% the band calibration is saturated, and lower errors
+  also lower the coverage threshold.
+- **The captured history starts now.** Days before this release was deployed stay
+  first-write until they age out of the window.
+
 ## 1.155.0
 
 ### A dark Core was announced as a broker stall
