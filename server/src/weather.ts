@@ -20,6 +20,10 @@ export interface WeatherHour {
   ts: number;                    // UTC epoch ms
   cloudCoverPct: number;         // 0-100 (ensemble median when 2 sources)
   radiationWm2: number;          // shortwave (GHI), W/m² — from Open-Meteo
+  /** v1.156.0 — the provider sent no radiation for this hour (null, or a short array).
+   *  radiationWm2 is then a stand-in 0, kept for every existing consumer; the
+   *  realized-irradiance capture skips the hour instead of recording that 0. */
+  radiationMissing?: boolean;
   tempC: number;
   // v0.9.2 — ensemble metadata
   ensembleSources?: number;      // 1 if Open-Meteo only, 2 if NWS also available
@@ -34,6 +38,42 @@ export interface WeatherForecast {
   // v0.9.2 ensemble summary
   ensembleSourcesCount?: number;     // 1 or 2
   ensembleAvgDisagreement?: number;  // mean |diff| across overlapping hours
+}
+
+/**
+ * v1.156.0 — Open-Meteo hourly JSON → WeatherHour[]. PURE and exported, so the path from
+ * the provider's JSON to the recorder can be tested without the network.
+ *
+ * A missing radiation value keeps its historical stand-in 0 for every existing
+ * consumer, and is FLAGGED. Without the flag the stand-in is indistinguishable from a
+ * real zero, and the realized-irradiance capture — where a later fetch revises an
+ * hour — would let one gappy response zero out a week of captured readings.
+ *
+ * No timezone is requested, so Open-Meteo returns GMT times (utc_offset_seconds = 0)
+ * and forecast_days / past_days count UTC days; the offset is still applied in case
+ * one is ever sent.
+ */
+export function openMeteoHours(j: any): WeatherHour[] {
+  // Top-level access is deliberately NOT optional: a null body must still throw inside
+  // getWeather's try, so the stale cache keeps serving exactly as before the extraction.
+  const offsetMs = (j.utc_offset_seconds ?? 0) * 1000;
+  const time: string[] = j.hourly?.time ?? [];
+  const cc: number[] = j.hourly?.cloud_cover ?? [];
+  const sw: Array<number | null | undefined> = j.hourly?.shortwave_radiation ?? [];
+  const tp: number[] = j.hourly?.temperature_2m ?? [];
+  return time.map((iso, i) => {
+    const rad = sw[i];
+    const missing = rad == null || !Number.isFinite(rad);
+    return {
+      ts: Date.parse(`${iso}:00Z`) - offsetMs,
+      cloudCoverPct: cc[i] ?? 0,
+      // Exactly the pre-extraction value (`sw[i] ?? 0`) for every consumer; only the flag is new.
+      radiationWm2: (rad ?? 0) as number,
+      ...(missing ? { radiationMissing: true } : {}),
+      tempC: tp[i] ?? 0,
+      ensembleSources: 1, // overridden by the NWS ensemble below when available
+    };
+  });
 }
 
 let cache: WeatherForecast | null = null;
@@ -97,19 +137,7 @@ async function fetchWeatherUncached(log: (m: string) => void): Promise<WeatherFo
     const res = await request(url);
     if (res.statusCode >= 300) throw new Error(`HTTP ${res.statusCode}`);
     const j = (await res.body.json()) as any;
-    const offsetMs = (j.utc_offset_seconds ?? 0) * 1000;
-    const time: string[] = j.hourly?.time ?? [];
-    const cc: number[] = j.hourly?.cloud_cover ?? [];
-    const sw: number[] = j.hourly?.shortwave_radiation ?? [];
-    const tp: number[] = j.hourly?.temperature_2m ?? [];
-    const hours: WeatherHour[] = time.map((iso, i) => ({
-      // Open-Meteo returns local-zone ISO strings; convert to true UTC epoch.
-      ts: Date.parse(`${iso}:00Z`) - offsetMs,
-      cloudCoverPct: cc[i] ?? 0,
-      radiationWm2: sw[i] ?? 0,
-      tempC: tp[i] ?? 0,
-      ensembleSources: 1, // overridden by getEnsembleWeather if NWS is also available
-    }));
+    const hours: WeatherHour[] = openMeteoHours(j);
     // v0.9.2 — fold in NWS cloud cover when available (US-only, opt-in via
     // NWS_ENABLED=1). The ensemble enriches each hour's `cloudCoverPct`
     // toward the mean of the two sources AND reports per-hour disagreement

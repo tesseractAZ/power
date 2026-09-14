@@ -248,6 +248,9 @@ const NIGHT_CHARGE_SN = 'night_charge';
 const FORECAST_PV_NEXT24_METRIC = 'pv_next24_wh';
 const WEATHER_GHI_METRIC = 'ghi_wm2';     // global horizontal irradiance, W/m²
 const WEATHER_CLOUD_METRIC = 'cloud_pct'; // cloud cover, %
+/** v1.156.0 — REALIZED irradiance, captured beside the first-write `ghi_wm2` (see
+ *  recordWeatherGhi). Written only: nothing reads it until the basis is switched. */
+const WEATHER_GHI_REALIZED_METRIC = 'ghi_wm2_realized';
 
 /* ─── Lifetime-energy persistence (v0.7.6) ─────────────────────────────────
  * HA's Energy Dashboard expects monotonically-increasing kWh counters
@@ -391,7 +394,10 @@ export interface Recorder {
    * (forecast-skill, soiling, solar-model training) read it back via
    * query("weather", "ghi_wm2"|"cloud_pct", since, until). */
   recordWeatherGhi: (
-    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null }>,
+    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
+    /** v1.156.0 — when the fetch time is known, every hour that ENDED by then is also
+     *  captured as realized irradiance (`ghi_wm2_realized`, the latest value wins). */
+    opts?: { fetchedAtMs?: number },
   ) => void;
   /** v1.31.0 — archive the issued next-24h PV forecast (Wh) for out-of-sample scoring. */
   recordForecastArchive: (pvNext24Wh: number, issuedAtMs: number) => void;
@@ -2637,10 +2643,45 @@ export function createRecorder(
   const weatherPrevStmt = db.prepare(
     `SELECT value FROM samples WHERE sn = ? AND metric = ? AND ts < ? ORDER BY ts DESC LIMIT 1`,
   );
+  // v1.156.0 — REALIZED capture, stage 1 of correcting the irradiance basis.
+  //
+  // `ghi_wm2` is NOT realized irradiance. The idempotency skip below keeps the FIRST
+  // value ever written for an hour, and the first fetch that contains an hour sees it
+  // as a forecast ~3-4 days out (forecast_days=4), so the later past_days value — the
+  // provider's own estimate once the hour is over — never replaces it. On 2026-09-11
+  // the stored hours 8-15 summed 3,180 W/m² against 5,296 in the past-hour values, a
+  // ratio consistent with the −40% forecast-skill "miss" being the weather forecast's.
+  //
+  // Correcting `ghi_wm2` in place would re-score the 30-day band calibration within
+  // the hour. That moves the night-charge basis gate and the P10 band that sizes a
+  // supervised reserve write, with no review point. So this stage only WRITES a
+  // separate series, and nothing reads it (a test pins that). It lives under the
+  // synthetic SN "weather" on purpose: a new SN would be seeded into the per-device
+  // gap clocks at boot and raise a false "device telemetry gap" six hours later.
+  //
+  // Unlike `ghi_wm2`, the realized value WINS (a later fetch revises it in place,
+  // because past_days values can still move), and every hour is stored explicitly —
+  // no same-as-previous collapse, so a missing hour never silently reads as the hour
+  // before or as clear sky. An hour counts as realized only once its whole interval
+  // had ended at fetch time, which holds whichever way the provider labels its
+  // hourly means.
+  //
+  // A value the provider did not send (flagged radiationMissing at parse time, where it
+  // becomes a stand-in 0 for the existing consumers) is never captured and never used to
+  // revise a captured hour: one gappy response must not zero out a week of readings.
+  // "Realized" means Open-Meteo's past-hour estimate, not a measurement.
+  const weatherRealizedGetStmt = db.prepare(
+    `SELECT rowid AS id, value FROM samples WHERE sn = ? AND metric = ? AND ts = ? LIMIT 1`,
+  );
+  const weatherRealizedUpdateStmt = db.prepare(`UPDATE samples SET value = ? WHERE rowid = ?`);
   const recordWeatherGhi = (
-    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null }>,
+    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
+    opts?: { fetchedAtMs?: number },
   ) => {
     if (!hours || hours.length === 0) return;
+    const fetchedAtMs = opts?.fetchedAtMs != null && Number.isFinite(opts.fetchedAtMs) ? opts.fetchedAtMs : null;
+    let realizedInserted = 0;
+    let realizedRevised = 0;
     // Write chronologically so the "previous stored value" change-detection
     // sees the just-written earlier hour within the same batch.
     const sorted = [...hours].sort((a, b) => a.epochMs - b.epochMs);
@@ -2668,6 +2709,21 @@ export function createRecorder(
           insert.run(ts, WEATHER_SN, metric, value);
           written++;
         }
+        if (fetchedAtMs != null && ts + 3_600_000 <= fetchedAtMs) {
+          const realizedGhi = h.radiationWm2;
+          if (realizedGhi != null && Number.isFinite(realizedGhi) && h.radiationMissing !== true) {
+            const row = weatherRealizedGetStmt.get(WEATHER_SN, WEATHER_GHI_REALIZED_METRIC, ts) as
+              | { id: number | bigint; value: number }
+              | undefined;
+            if (row == null) {
+              insert.run(ts, WEATHER_SN, WEATHER_GHI_REALIZED_METRIC, realizedGhi);
+              realizedInserted++;
+            } else if (Math.abs(row.value - realizedGhi) >= VALUE_EPSILON) {
+              weatherRealizedUpdateStmt.run(realizedGhi, row.id);
+              realizedRevised++;
+            }
+          }
+        }
       }
       db.prepare('COMMIT').run();
     } catch (e) {
@@ -2675,6 +2731,9 @@ export function createRecorder(
       throw e;
     }
     if (written > 0) log(`recorder: v0.13.1 persisted ${written} weather GHI/cloud rows`);
+    if (realizedInserted > 0 || realizedRevised > 0) {
+      debug(`recorder: realized GHI captured — ${realizedInserted} new, ${realizedRevised} revised hour(s)`);
+    }
   };
 
   // ─── Day-ahead forecast archive (v1.31.0) ────────────────────────────────
