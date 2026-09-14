@@ -23,10 +23,14 @@
  *   the full-suite fallback is baselined (once, lazily) before it may count a kill.
  * ★ A test run that could not START (spawn or buffer failure) aborts — it is never
  *   counted as a kill.
- * ★ Mutates the working tree in place, restoring in a finally block AND on SIGINT, SIGTERM
- *   and SIGHUP (Node's default is to die at once, skipping `finally`). It refuses to start
- *   if a target already carries a mutant marker. Do not run git add/commit/checkout while
- *   it is running.
+ * ★ Mutates the working tree in place and restores it in a finally block. Interruption is
+ *   covered two ways, as measured: a terminal Ctrl+C also reaches the running test child,
+ *   whose signal-killed run is rethrown straight into `finally`; a signal sent to this
+ *   process alone cannot interrupt a synchronous child run, so the SIGINT/SIGTERM/SIGHUP
+ *   handlers exist to stop Node dying mid-mutant (its default, which skips `finally`) —
+ *   the current run then completes and the tree is restored. It refuses to start if a
+ *   target already carries a mutant marker. Do not run git add/commit/checkout while it
+ *   is running.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
