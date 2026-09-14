@@ -23,8 +23,10 @@
  *   the full-suite fallback is baselined (once, lazily) before it may count a kill.
  * ★ A test run that could not START (spawn or buffer failure) aborts — it is never
  *   counted as a kill.
- * ★ Mutates the working tree in place, restoring in a finally block. Do not run
- *   git add/commit/checkout while it is running.
+ * ★ Mutates the working tree in place, restoring in a finally block AND on SIGINT, SIGTERM
+ *   and SIGHUP (Node's default is to die at once, skipping `finally`). It refuses to start
+ *   if a target already carries a mutant marker. Do not run git add/commit/checkout while
+ *   it is running.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -155,7 +157,9 @@ function passes(cmd, args) {
     execFileSync(cmd, args, { cwd: SERVER, stdio: 'ignore' });
     return true;
   } catch (e) {
-    if (typeof e?.status === 'number') return false;
+    // A numeric exit with no signal is a test failure. A signal-killed run (e.g. Ctrl+C
+    // reaching the child) or a spawn failure is NOT, and must never be counted as a kill.
+    if (typeof e?.status === 'number' && e?.signal == null) return false;
     throw e;
   }
 }
@@ -165,6 +169,20 @@ const fullPasses = () => passes('npm', ['test', '--silent']);
 const originals = new Map();
 for (const m of MUTANTS) if (!originals.has(m.file)) originals.set(m.file, readFileSync(m.file, 'utf8'));
 const restoreAll = () => { for (const [f, s] of originals) writeFileSync(f, s); };
+
+for (const [f, s] of originals) {
+  if (s.includes('/* MUTANT')) {
+    console.error(`\nABORT: ${f} already contains a mutant marker — an earlier run was interrupted or another harness is running. Restore it first.`);
+    process.exit(2);
+  }
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    restoreAll();
+    console.error(`\ninterrupted (${sig}) — tree restored, run not counted`);
+    process.exit(130);
+  });
+}
 
 for (const m of MUTANTS) {
   const hits = originals.get(m.file).split(m.find).length - 1;

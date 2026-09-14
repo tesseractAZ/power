@@ -54,18 +54,21 @@ export interface WeatherForecast {
  * one is ever sent.
  */
 export function openMeteoHours(j: any): WeatherHour[] {
-  const offsetMs = (j?.utc_offset_seconds ?? 0) * 1000;
-  const time: string[] = j?.hourly?.time ?? [];
-  const cc: number[] = j?.hourly?.cloud_cover ?? [];
-  const sw: Array<number | null | undefined> = j?.hourly?.shortwave_radiation ?? [];
-  const tp: number[] = j?.hourly?.temperature_2m ?? [];
+  // Top-level access is deliberately NOT optional: a null body must still throw inside
+  // getWeather's try, so the stale cache keeps serving exactly as before the extraction.
+  const offsetMs = (j.utc_offset_seconds ?? 0) * 1000;
+  const time: string[] = j.hourly?.time ?? [];
+  const cc: number[] = j.hourly?.cloud_cover ?? [];
+  const sw: Array<number | null | undefined> = j.hourly?.shortwave_radiation ?? [];
+  const tp: number[] = j.hourly?.temperature_2m ?? [];
   return time.map((iso, i) => {
     const rad = sw[i];
     const missing = rad == null || !Number.isFinite(rad);
     return {
       ts: Date.parse(`${iso}:00Z`) - offsetMs,
       cloudCoverPct: cc[i] ?? 0,
-      radiationWm2: missing ? 0 : (rad as number),
+      // Exactly the pre-extraction value (`sw[i] ?? 0`) for every consumer; only the flag is new.
+      radiationWm2: (rad ?? 0) as number,
       ...(missing ? { radiationMissing: true } : {}),
       tempC: tp[i] ?? 0,
       ensembleSources: 1, // overridden by the NWS ensemble below when available

@@ -2621,9 +2621,7 @@ fetch that contains an hour sees it roughly 3–4 days ahead (`forecast_days=4`)
 the later `past_days` value never replaces it. Recorder-backed readers therefore
 see forecast irradiance: the forecast-skill hindcast (and through it the PV band
 calibration and the night-charge basis gate); for days older than the live cache,
-solar-model training, the PV bias correction (its oldest day during local evening
-hours, because cache days are UTC days) and soiling (whose recent window sits on the
-cache and whose baseline mostly on the recorder); and the backtest. Measured
+solar-model training, the PV bias correction (the hours of its oldest local day that fall before the cache's first UTC midnight — in the local evening for installs west of UTC, e.g. from 17:00 MST) and soiling (its recent pool is the last five well-covered clear days, usually inside the cache but reaching recorder days in a cloudy week, and its p90 baseline sits mostly on the recorder); and the backtest. Measured
 2026-09-11: 3,180 W/m² stored vs 5,296 in the provider's past-hour values over hours
 8–15. VNEXT captures the past-hour values separately as `weather/ghi_wm2_realized`
 — "realized" meaning Open-Meteo's own estimate after the hour, not a measurement:
@@ -2637,7 +2635,7 @@ supervised reserve write, so it ships as its own reviewed change. `past_days=7` 
 the capture horizon: an hour not captured within about seven UTC days cannot be
 recovered from this endpoint.
 
-`WeatherHour = { ts, cloudCoverPct, radiationWm2, tempC, ensembleSources?, ensembleDisagreementPct? }`.
+`WeatherHour = { ts, cloudCoverPct, radiationWm2, radiationMissing?, tempC, ensembleSources?, ensembleDisagreementPct? }`. When `radiationMissing` is true the provider sent no value for the hour and `radiationWm2` is a stand-in 0, not darkness.
 
 Lat/lon default to Phoenix: `FORECAST_LAT = 33.4484`, `FORECAST_LON = -112.074`
 (env `FORECAST_LAT` / `FORECAST_LON`).

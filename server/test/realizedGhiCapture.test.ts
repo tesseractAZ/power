@@ -172,6 +172,13 @@ test('the forecast archive keeps its own insert-once semantics (it shares statem
   });
 });
 
+test('the extraction is exact for consumers: a null body still throws, and a non-finite number passes through flagged', () => {
+  assert.throws(() => openMeteoHours(null), TypeError, "getWeather's catch must still treat a null body as a failed fetch and keep its stale cache");
+  const [h] = openMeteoHours({ utc_offset_seconds: 0, hourly: { time: ['2026-09-11T18:00'], shortwave_radiation: [Number.POSITIVE_INFINITY] } });
+  assert.equal(h.radiationWm2, Number.POSITIVE_INFINITY, 'consumers receive exactly what `sw[i] ?? 0` gave them before');
+  assert.equal(h.radiationMissing, true, 'but the capture never records it');
+});
+
 /* ── the stage-1 invariant ──────────────────────────────────────────── */
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
