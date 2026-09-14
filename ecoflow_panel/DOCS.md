@@ -2445,7 +2445,7 @@ v1.23.0 to v1.30.0). Shrink-only, floored at 0.4.
 
 **Honest label:** the floor binds in practice (realized/produced ≈ 0.1–0.2 <
 0.4), so this band targets "**≥ 80% coverage, deliberately conservative**" — not
-"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the calibrator's errors come from a *current-model hindcast against stored `ghi_wm2`*, so they (a) are rewritten when the model re-learns, (b) — **corrected VNEXT; this used to say they omit the weather-forecast component** — include a multi-day weather-forecast component, because stored `ghi_wm2` is first-write ~3–4-day-lead forecast irradiance rather than realized (see the weather source section), (c) apply `pvBiasFactor` as
+"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the calibrator's errors come from a *current-model hindcast against stored `ghi_wm2`*, so they (a) are rewritten when the model re-learns, (b) — **corrected v1.156.0; this used to say they omit the weather-forecast component** — include a multi-day weather-forecast component, because stored `ghi_wm2` is first-write ~3–4-day-lead forecast irradiance rather than realized (see the weather source section), (c) apply `pvBiasFactor` as
 a plain daily multiply while publication re-clamps per-hour at the physical
 ceiling — under an *under-prediction* regime (`pvBiasFactor > 1`, ceiling
 pinned) the calibrator's basis sits above the published series and its errors
@@ -2623,7 +2623,7 @@ see forecast irradiance: the forecast-skill hindcast (and through it the PV band
 calibration and the night-charge basis gate); for days older than the live cache,
 solar-model training, the PV bias correction (the hours of its oldest local day that fall before the cache's first UTC midnight — in the local evening for installs west of UTC, e.g. from 17:00 MST) and soiling (its recent pool is the last five well-covered clear days, usually inside the cache but reaching recorder days in a cloudy week, and its p90 baseline sits mostly on the recorder); and the backtest. Measured
 2026-09-11: 3,180 W/m² stored vs 5,296 in the provider's past-hour values over hours
-8–15. VNEXT captures the past-hour values separately as `weather/ghi_wm2_realized`
+8–15. v1.156.0 captures the past-hour values separately as `weather/ghi_wm2_realized`
 — "realized" meaning Open-Meteo's own estimate after the hour, not a measurement:
 only hours whose whole interval had ended at the fetch's `fetchedAt`, every hour
 stored explicitly (no same-as-previous collapse), revised in place by later fetches,

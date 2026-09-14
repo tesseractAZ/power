@@ -7874,7 +7874,7 @@ export function parsePvBandSigmaCal(raw: string | undefined): number | null {
  *  coverage-gap days), plus adjPred > 0.5 kWh (a near-zero prediction can't
  *  be scored as a fraction of itself).
  *
- *  VNEXT CORRECTION — this note used to say the hindcast basis is REALIZED GHI and
+ *  v1.156.0 CORRECTION — this note used to say the hindcast basis is REALIZED GHI and
  *  so omits the weather-forecast component of day-ahead error. It is not realized:
  *  recorder `ghi_wm2` keeps the FIRST value written for each hour, which is the
  *  ~3-4-day-lead forecast, and buildGhiByEpoch lets it beat the live cache. These

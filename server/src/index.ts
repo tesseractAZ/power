@@ -1119,7 +1119,7 @@ function weatherGhiRows(w: WeatherForecast): Array<{ epochMs: number; radiationW
     epochMs: h.ts,
     radiationWm2: h.radiationWm2,
     cloudCoverPct: h.cloudCoverPct,
-    // VNEXT — a stand-in 0 for a value the provider did not send must never become a realized reading.
+    // v1.156.0 — a stand-in 0 for a value the provider did not send must never become a realized reading.
     radiationMissing: h.radiationMissing === true,
   }));
 }

@@ -20,7 +20,7 @@ export interface WeatherHour {
   ts: number;                    // UTC epoch ms
   cloudCoverPct: number;         // 0-100 (ensemble median when 2 sources)
   radiationWm2: number;          // shortwave (GHI), W/m² — from Open-Meteo
-  /** VNEXT — the provider sent no radiation for this hour (null, or a short array).
+  /** v1.156.0 — the provider sent no radiation for this hour (null, or a short array).
    *  radiationWm2 is then a stand-in 0, kept for every existing consumer; the
    *  realized-irradiance capture skips the hour instead of recording that 0. */
   radiationMissing?: boolean;
@@ -41,7 +41,7 @@ export interface WeatherForecast {
 }
 
 /**
- * VNEXT — Open-Meteo hourly JSON → WeatherHour[]. PURE and exported, so the path from
+ * v1.156.0 — Open-Meteo hourly JSON → WeatherHour[]. PURE and exported, so the path from
  * the provider's JSON to the recorder can be tested without the network.
  *
  * A missing radiation value keeps its historical stand-in 0 for every existing

@@ -248,7 +248,7 @@ const NIGHT_CHARGE_SN = 'night_charge';
 const FORECAST_PV_NEXT24_METRIC = 'pv_next24_wh';
 const WEATHER_GHI_METRIC = 'ghi_wm2';     // global horizontal irradiance, W/m²
 const WEATHER_CLOUD_METRIC = 'cloud_pct'; // cloud cover, %
-/** VNEXT — REALIZED irradiance, captured beside the first-write `ghi_wm2` (see
+/** v1.156.0 — REALIZED irradiance, captured beside the first-write `ghi_wm2` (see
  *  recordWeatherGhi). Written only: nothing reads it until the basis is switched. */
 const WEATHER_GHI_REALIZED_METRIC = 'ghi_wm2_realized';
 
@@ -395,7 +395,7 @@ export interface Recorder {
    * query("weather", "ghi_wm2"|"cloud_pct", since, until). */
   recordWeatherGhi: (
     hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
-    /** VNEXT — when the fetch time is known, every hour that ENDED by then is also
+    /** v1.156.0 — when the fetch time is known, every hour that ENDED by then is also
      *  captured as realized irradiance (`ghi_wm2_realized`, the latest value wins). */
     opts?: { fetchedAtMs?: number },
   ) => void;
@@ -2643,7 +2643,7 @@ export function createRecorder(
   const weatherPrevStmt = db.prepare(
     `SELECT value FROM samples WHERE sn = ? AND metric = ? AND ts < ? ORDER BY ts DESC LIMIT 1`,
   );
-  // VNEXT — REALIZED capture, stage 1 of correcting the irradiance basis.
+  // v1.156.0 — REALIZED capture, stage 1 of correcting the irradiance basis.
   //
   // `ghi_wm2` is NOT realized irradiance. The idempotency skip below keeps the FIRST
   // value ever written for an hour, and the first fetch that contains an hour sees it
