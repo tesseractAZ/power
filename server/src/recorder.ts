@@ -394,7 +394,7 @@ export interface Recorder {
    * (forecast-skill, soiling, solar-model training) read it back via
    * query("weather", "ghi_wm2"|"cloud_pct", since, until). */
   recordWeatherGhi: (
-    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null }>,
+    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
     /** VNEXT — when the fetch time is known, every hour that ENDED by then is also
      *  captured as realized irradiance (`ghi_wm2_realized`, the latest value wins). */
     opts?: { fetchedAtMs?: number },
@@ -2648,9 +2648,9 @@ export function createRecorder(
   // `ghi_wm2` is NOT realized irradiance. The idempotency skip below keeps the FIRST
   // value ever written for an hour, and the first fetch that contains an hour sees it
   // as a forecast ~3-4 days out (forecast_days=4), so the later past_days value — the
-  // one describing what actually happened — never replaces it. On 2026-09-11 the
-  // stored hours 8-15 summed 3,180 W/m² against 5,296 realized: a −40% forecast-skill
-  // "miss" that belonged to the weather forecast, not the solar model.
+  // provider's own estimate once the hour is over — never replaces it. On 2026-09-11
+  // the stored hours 8-15 summed 3,180 W/m² against 5,296 in the past-hour values, a
+  // ratio consistent with the −40% forecast-skill "miss" being the weather forecast's.
   //
   // Correcting `ghi_wm2` in place would re-score the 30-day band calibration within
   // the hour. That moves the night-charge basis gate and the P10 band that sizes a
@@ -2665,12 +2665,17 @@ export function createRecorder(
   // before or as clear sky. An hour counts as realized only once its whole interval
   // had ended at fetch time, which holds whichever way the provider labels its
   // hourly means.
+  //
+  // A value the provider did not send (flagged radiationMissing at parse time, where it
+  // becomes a stand-in 0 for the existing consumers) is never captured and never used to
+  // revise a captured hour: one gappy response must not zero out a week of readings.
+  // "Realized" means Open-Meteo's past-hour estimate, not a measurement.
   const weatherRealizedGetStmt = db.prepare(
     `SELECT rowid AS id, value FROM samples WHERE sn = ? AND metric = ? AND ts = ? LIMIT 1`,
   );
   const weatherRealizedUpdateStmt = db.prepare(`UPDATE samples SET value = ? WHERE rowid = ?`);
   const recordWeatherGhi = (
-    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null }>,
+    hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
     opts?: { fetchedAtMs?: number },
   ) => {
     if (!hours || hours.length === 0) return;
@@ -2706,7 +2711,7 @@ export function createRecorder(
         }
         if (fetchedAtMs != null && ts + 3_600_000 <= fetchedAtMs) {
           const realizedGhi = h.radiationWm2;
-          if (realizedGhi != null && Number.isFinite(realizedGhi)) {
+          if (realizedGhi != null && Number.isFinite(realizedGhi) && h.radiationMissing !== true) {
             const row = weatherRealizedGetStmt.get(WEATHER_SN, WEATHER_GHI_REALIZED_METRIC, ts) as
               | { id: number | bigint; value: number }
               | undefined;

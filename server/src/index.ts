@@ -1114,11 +1114,13 @@ app.get('/api/nws-alerts', async (req, reply) =>
 // high inter-source disagreement.
 // v0.13.3 — map weather hours to recorder GHI rows. Pure helper shared by the
 // /api/weather/ensemble handler and the periodic persistence tick (below).
-function weatherGhiRows(w: WeatherForecast): Array<{ epochMs: number; radiationWm2: number; cloudCoverPct: number }> {
+function weatherGhiRows(w: WeatherForecast): Array<{ epochMs: number; radiationWm2: number; cloudCoverPct: number; radiationMissing: boolean }> {
   return w.hours.map((h) => ({
     epochMs: h.ts,
     radiationWm2: h.radiationWm2,
     cloudCoverPct: h.cloudCoverPct,
+    // VNEXT — a stand-in 0 for a value the provider did not send must never become a realized reading.
+    radiationMissing: h.radiationMissing === true,
   }));
 }
 

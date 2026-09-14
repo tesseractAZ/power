@@ -7878,8 +7878,9 @@ export function parsePvBandSigmaCal(raw: string | undefined): number | null {
  *  so omits the weather-forecast component of day-ahead error. It is not realized:
  *  recorder `ghi_wm2` keeps the FIRST value written for each hour, which is the
  *  ~3-4-day-lead forecast, and buildGhiByEpoch lets it beat the live cache. These
- *  errors therefore INCLUDE a multi-day weather-forecast component, which widens the
- *  band and makes the basis gate harder to pass than the design intended. Realized
+ *  errors therefore INCLUDE a multi-day weather-forecast component. It moves both the
+ *  per-day errors and the band width (through skillFrac), so its net effect on the
+ *  basis gate depends on the calibrator's regime rather than one direction. Realized
  *  irradiance is now captured separately and deliberately NOT read here: switching
  *  this basis moves the basis gate and the P10 band that sizes a supervised reserve
  *  write, so it is its own reviewed change. The forecast-archive series (recorder SN

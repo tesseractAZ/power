@@ -2612,24 +2612,30 @@ https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}
 `past_days=7` (v0.13.1) so one fetch backfills a week of irradiance into the
 recorder (`recordWeatherGhi` on `/api/weather/ensemble`), unblocking
 forecast-skill days 4–7 and the soiling estimator beyond the in-memory window.
-Local-zone ISO times are converted to true UTC epoch via `utc_offset_seconds`.
+No timezone is requested, so Open-Meteo returns GMT times (`utc_offset_seconds` = 0) and `forecast_days` / `past_days` count UTC days; the offset is still applied if one is ever sent.
 On fetch failure it returns the stale cache ("better than nothing").
 
-**The stored `ghi_wm2` series is FORECAST irradiance, not realized.**
+**The stored `ghi_wm2` series is forecast irradiance, not the provider's past-hour estimate.**
 `recordWeatherGhi` keeps the first value ever written for an hour, and the first
 fetch that contains an hour sees it roughly 3–4 days ahead (`forecast_days=4`);
-the later `past_days` value never replaces it. Every recorder-backed consumer that
-treats `ghi_wm2` as history — the forecast-skill hindcast and through it the PV band
-calibration, solar-model training for days older than the live cache, soiling, the
-backtest — is reading forecast irradiance (measured 2026-09-11: 3,180 W/m² stored
-vs 5,296 realized over hours 8–15). VNEXT captures **realized** irradiance separately
-as `weather/ghi_wm2_realized`: only hours whose whole interval had ended at the
-fetch's `fetchedAt`, every hour stored explicitly (no same-as-previous collapse),
-revised in place by later fetches. **Nothing reads it yet** — a test pins that —
-because switching the calibration basis moves the night-charge basis gate and the
-P10 band that sizes a supervised reserve write, so it ships as its own reviewed
-change. `past_days=7` is the capture horizon: an hour not captured within about
-seven UTC days cannot be recovered from this endpoint.
+the later `past_days` value never replaces it. Recorder-backed readers therefore
+see forecast irradiance: the forecast-skill hindcast (and through it the PV band
+calibration and the night-charge basis gate); for days older than the live cache,
+solar-model training, the PV bias correction (its oldest day during local evening
+hours, because cache days are UTC days) and soiling (whose recent window sits on the
+cache and whose baseline mostly on the recorder); and the backtest. Measured
+2026-09-11: 3,180 W/m² stored vs 5,296 in the provider's past-hour values over hours
+8–15. VNEXT captures the past-hour values separately as `weather/ghi_wm2_realized`
+— "realized" meaning Open-Meteo's own estimate after the hour, not a measurement:
+only hours whose whole interval had ended at the fetch's `fetchedAt`, every hour
+stored explicitly (no same-as-previous collapse), revised in place by later fetches,
+and never from a value the provider did not send (flagged `radiationMissing` at
+parse time; the stand-in 0 still reaches the existing consumers exactly as before).
+**Nothing reads it yet** — a parser-based test pins that — because switching the
+calibration basis moves the night-charge basis gate and the P10 band that sizes a
+supervised reserve write, so it ships as its own reviewed change. `past_days=7` is
+the capture horizon: an hour not captured within about seven UTC days cannot be
+recovered from this endpoint.
 
 `WeatherHour = { ts, cloudCoverPct, radiationWm2, tempC, ensembleSources?, ensembleDisagreementPct? }`.
 

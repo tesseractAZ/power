@@ -5,15 +5,16 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import ts from 'typescript';
 
 /**
- * Stage 1 of correcting the irradiance basis: capture REALIZED GHI, feed nothing.
+ * Stage 1 of correcting the irradiance basis: capture the provider's PAST-HOUR GHI,
+ * feed nothing.
  *
  * `weather/ghi_wm2` is not realized irradiance. recordWeatherGhi keeps the FIRST value
  * ever written for an hour, and the first fetch containing an hour sees it ~3-4 days
- * ahead, so the later past_days value never replaces it. On 2026-09-11 the stored
- * hours 8-15 summed 3,180 W/m² against 5,296 realized — a −40% "forecast miss" that
- * was the weather forecast's.
+ * ahead, so the later past_days value never replaces it. On 2026-09-11 the stored hours
+ * 8-15 summed 3,180 W/m² against 5,296 in the provider's past-hour values.
  *
  * Correcting `ghi_wm2` in place would re-score the band calibration within the hour and
  * move the night-charge basis gate and the P10 band that sizes a supervised reserve
@@ -26,10 +27,12 @@ process.env.DB_PATH = join(tmp, 'ecoflow.db');
 
 const { createRecorder } = await import('../src/recorder.js');
 const { SnapshotStore } = await import('../src/snapshot.js');
+const { openMeteoHours } = await import('../src/weather.js');
 
 const H = 3_600_000;
 const BASE = 1_789_000_000_000 - (1_789_000_000_000 % H);
-const hr = (k: number, ghi: number | null, cloud: number | null = 10) =>
+type Row = { epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean };
+const hr = (k: number, ghi: number | null, cloud: number | null = 10): Row =>
   ({ epochMs: BASE + k * H, radiationWm2: ghi, cloudCoverPct: cloud });
 
 type Rec = ReturnType<typeof createRecorder>;
@@ -58,7 +61,7 @@ test('★ only hours that had ENDED at fetch time are captured as realized', () 
   });
 });
 
-test('the boundary is the hour\'s END — an hour still in progress at the fetch is not realized', () => {
+test("the boundary is the hour's END — an hour still in progress at the fetch is not realized", () => {
   fresh((rec) => {
     rec.recordWeatherGhi([hr(0, 100), hr(1, 200), hr(2, 300)], { fetchedAtMs: BASE + 3 * H - 1 });
     assert.deepEqual(series(rec, 'ghi_wm2_realized'), [[0, 100], [1, 200]],
@@ -104,10 +107,59 @@ test('no fetch time, no realized capture — a caller that cannot say when the v
   });
 });
 
-test('an unreadable radiation value is skipped, never stored as 0', () => {
+test('a null or non-finite radiation value handed straight to the recorder is skipped', () => {
   fresh((rec) => {
     rec.recordWeatherGhi([hr(0, null), hr(1, Number.NaN), hr(2, 300)], { fetchedAtMs: BASE + 5 * H });
     assert.deepEqual(series(rec, 'ghi_wm2_realized'), [[2, 300]]);
+  });
+});
+
+/* ── a value the provider did not send ─────────────────────────────── */
+
+test('★ a missing provider radiation value is FLAGGED at parse time; its stand-in 0 is kept for existing consumers', () => {
+  const hours = openMeteoHours({
+    utc_offset_seconds: 0,
+    hourly: {
+      time: ['2026-09-11T18:00', '2026-09-11T19:00', '2026-09-11T20:00'],
+      shortwave_radiation: [850, null],
+      cloud_cover: [10, 20, 30],
+      temperature_2m: [30, 31, 32],
+    },
+  });
+  assert.deepEqual(hours.map((h) => [h.radiationWm2, h.radiationMissing === true]), [[850, false], [0, true], [0, true]],
+    'a null and a short array both flag the hour; radiationWm2 stays the historical stand-in 0');
+  assert.equal(hours[0].radiationMissing, undefined, 'a real value carries no flag at all');
+  assert.equal(hours[0].ts, Date.UTC(2026, 8, 11, 18), 'no timezone is requested, so the times are GMT');
+});
+
+test('a response with no radiation array at all flags every hour', () => {
+  const hours = openMeteoHours({ utc_offset_seconds: 0, hourly: { time: ['2026-09-11T18:00', '2026-09-11T19:00'] } });
+  assert.deepEqual(hours.map((h) => h.radiationMissing === true), [true, true]);
+});
+
+test('★ a missing provider value never captures, and never revises a captured hour down to its stand-in 0', () => {
+  fresh((rec) => {
+    rec.recordWeatherGhi([hr(0, 850), hr(1, 700)], { fetchedAtMs: BASE + 3 * H });
+    rec.recordWeatherGhi([{ ...hr(0, 0), radiationMissing: true }, hr(1, 700), { ...hr(2, 0), radiationMissing: true }],
+      { fetchedAtMs: BASE + 4 * H });
+    assert.deepEqual(series(rec, 'ghi_wm2_realized'), [[0, 850], [1, 700]],
+      'hour 0 keeps its reading and hour 2 is not captured as a 0');
+    assert.deepEqual(series(rec, 'ghi_wm2'), [[0, 850], [1, 700], [2, 0]],
+      'the first-write series still receives the stand-in 0, exactly as before');
+  });
+});
+
+test('the flag survives the whole path: provider JSON → parse → rows → recorder', () => {
+  fresh((rec) => {
+    const t = (k: number) => new Date(BASE + k * H).toISOString().slice(0, 16);
+    const json = (rad: Array<number | null>) =>
+      ({ utc_offset_seconds: 0, hourly: { time: [t(0), t(1)], shortwave_radiation: rad, cloud_cover: [0, 0], temperature_2m: [0, 0] } });
+    // Mirrors index.ts weatherGhiRows, whose flag mapping the BRIDGE test pins by source.
+    const rows = (hs: ReturnType<typeof openMeteoHours>) =>
+      hs.map((h) => ({ epochMs: h.ts, radiationWm2: h.radiationWm2, cloudCoverPct: h.cloudCoverPct, radiationMissing: h.radiationMissing === true }));
+    rec.recordWeatherGhi(rows(openMeteoHours(json([850, 700]))), { fetchedAtMs: BASE + 3 * H });
+    rec.recordWeatherGhi(rows(openMeteoHours(json([null, 720]))), { fetchedAtMs: BASE + 3 * H });
+    assert.deepEqual(series(rec, 'ghi_wm2_realized'), [[0, 850], [1, 720]]);
   });
 });
 
@@ -123,28 +175,83 @@ test('the forecast archive keeps its own insert-once semantics (it shares statem
 /* ── the stage-1 invariant ──────────────────────────────────────────── */
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+const METRIC = 'ghi_wm2_realized';
+const CONSTANT = 'WEATHER_GHI_REALIZED_METRIC';
+
 function tsFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((f) => {
     const p = join(dir, f);
     return statSync(p).isDirectory() ? tsFiles(p) : p.endsWith('.ts') ? [p] : [];
   });
 }
-const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+/** References found by the TypeScript PARSER, so comments, regex literals and strings are
+ *  told apart correctly (a regex comment-stripper hid ~118 lines of index.ts behind a
+ *  `/*` inside a `//` comment). */
+function realizedRefs(fileName: string, text: string): ts.Node[] {
+  const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const hits: ts.Node[] = [];
+  const visit = (n: ts.Node): void => {
+    const literal = ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)
+      || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n);
+    if (literal && (n as ts.LiteralLikeNode).text.includes(METRIC)) hits.push(n);
+    else if (ts.isIdentifier(n) && n.text === CONSTANT) hits.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
+test('the reference finder sees code the old regex could not, and ignores comments', () => {
+  const seen = (src: string) => realizedRefs('probe.ts', src).length;
+  assert.equal(seen("// served at /audio/*. comment\nconst a = q('weather', 'ghi_wm2_realized');\n/* ok */"), 1,
+    'code after a `/*` inside a line comment is still code');
+  assert.equal(seen("const re = /\\/\\*[\\s\\S]*?\\*\\//g;\nconst b = `x ${re} ghi_wm2_realized`;"), 1,
+    'a regex literal containing comment markers does not hide the next line');
+  assert.equal(seen("// 'ghi_wm2_realized' named in prose\n/* WEATHER_GHI_REALIZED_METRIC */"), 0,
+    'prose in comments may still name it');
+});
 
 test('★★ STAGE 1 INVARIANT: no code outside the recorder reads the realized series', () => {
   // A source scan, used deliberately and as a last resort: the property is an ABSENCE
   // across the whole server — no calibrator, trainer, planner or report may consume
   // realized GHI until the basis switch ships as its own reviewed change. A consumer
   // added quietly would re-score the band calibration and move the night-charge basis
-  // gate with no review point. Comments are stripped so prose may still name it.
+  // gate with no review point.
   const readers = tsFiles(SRC)
-    .filter((p) => /ghi_wm2_realized|WEATHER_GHI_REALIZED_METRIC/.test(code(readFileSync(p, 'utf8'))))
+    .filter((p) => realizedRefs(p, readFileSync(p, 'utf8')).length > 0)
     .map((p) => relative(SRC, p))
     .sort();
   assert.deepEqual(readers, ['recorder.ts'], `realized GHI must be written only, got references in: ${readers.join(', ')}`);
 });
 
-test('★ BRIDGE: both GHI writers pass the fetch time', () => {
+test('★ inside the recorder, the realized metric is used only by the capture itself', () => {
+  // The allowlist above covers the whole recorder, so a new accessor there would expose
+  // the series to any caller while the scan still passed.
+  const file = join(SRC, 'recorder.ts');
+  const text = readFileSync(file, 'utf8');
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const found: { span: [number, number] | null } = { span: null };
+  const find = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'recordWeatherGhi') found.span = [n.getStart(sf), n.getEnd()];
+    else ts.forEachChild(n, find);
+  };
+  find(sf);
+  assert.ok(found.span, 'recordWeatherGhi must still be a declared function in the recorder');
+  const [from, to] = found.span;
+  const outside = realizedRefs(file, text).filter((n) => {
+    const at = n.getStart(sf);
+    if (at >= from && at < to) return false;
+    const decl = n.parent;
+    return !(decl && ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name) && decl.name.text === CONSTANT);
+  });
+  assert.deepEqual(outside.map((n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1), [],
+    'only the constant declaration and recordWeatherGhi may reference the realized metric');
+  assert.ok(realizedRefs(file, text).filter((n) => n.getStart(sf) >= from && n.getStart(sf) < to).length >= 2,
+    'positive control: the capture itself does reference it');
+});
+
+test('★ BRIDGE: both GHI writers pass the fetch time, and the rows carry the missing-value flag', () => {
   // Both call sites sit in index.ts closures with no injection seam. Without the fetch
   // time the recorder captures nothing, and every test above still passes.
   const idx = readFileSync(join(SRC, 'index.ts'), 'utf8');
@@ -152,4 +259,5 @@ test('★ BRIDGE: both GHI writers pass the fetch time', () => {
     'the ensemble handler and the 45-min persistence tick must both pass w.fetchedAt');
   assert.equal(idx.split('recorder.recordWeatherGhi(weatherGhiRows(w));').length - 1, 0,
     'no call site may drop the fetch time');
+  assert.match(idx, /radiationMissing: h\.radiationMissing === true,/, 'weatherGhiRows must carry the provider-missing flag');
 });
