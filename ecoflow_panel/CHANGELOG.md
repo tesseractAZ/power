@@ -1,3 +1,66 @@
+## 1.157.0
+
+### An idle Core's held rate collapse no longer spends the self-heal budget
+
+On the night of 2026-09-13 the cloud-session self-heal rebuilt a healthy MQTT session
+four times, then stood down, and the alarm-path panel's genuine wedges the next evening
+each ran on the last heal in the budget.
+
+- **21:31** — the rate collapses of three Cores surfaced while the packs were discharging.
+  Surfacing requires the device to be moving power and starved right now.
+- **21:35** — a heal restored the session.
+- **~21:37** — the packs reached the reserve and went electrically idle, inside the
+  five-minute recovery dwell. An idle Core reports about 4.7 msg/min, under the tracker's
+  absolute 10 msg/min recovery bar, and `decideCollapseSurfacing` holds a surfaced
+  collapse through idleness (the v1.111.0 anti-flap rule). The three collapses stayed
+  surfaced until the Cores' rates recovered (logged 07:04–07:29).
+- **22:35, 23:35, 00:35, 01:35** — the rate-floor tick handed `evaluateSelfHeal`
+  `collapses.length`, so the held, idle Cores kept a three-device quorum. Each heal rebuilt
+  a healthy session and changed nothing.
+- **02:35** — the rolling cap stood the healer down.
+- **09-14 19:59 and 21:42** — the panel's own starvations (both announced as "[Critical]
+  Panel data is stale — grid presence unknown", at 19:43 and 21:26) were each healed as
+  heal 6 of 6. A wedge with no slot left would have had no rebuild at all.
+
+**The fix: `selfHealQuorum` decides who votes.** A surfaced collapse counts toward the heal
+quorum when its device is the alarm-path panel, by identity, or when it is not electrically
+idle on this tick. Idleness is the same `isElectricallyIdle` reading the entry gate already
+uses, collected per tick in the rate-floor loop. The tick passes the quorum count to
+`evaluateSelfHeal` instead of `collapses.length`.
+
+- **Unchanged:** the alert set and its 20-minute push dwell, the latch,
+  `decideCollapseSurfacing`, the dwell, cooldown and rolling budget, and the panel
+  exception.
+- **Visible:** the heal warn line names its members (`[counted: …]`), and its "N devices
+  starved" counts those members, not every surfaced collapse. A device leaving the quorum as
+  idle logs one info line per edge (`idleExclusionEdges`).
+- **Replayed minute by minute** through the real decision functions, the 09-13 night now
+  heals once (21:35, four devices) and never stands down. A panel-only wedge with idle
+  Cores and a wedge on two Cores that are moving power both still heal on schedule.
+- **Accepted trade-off, pinned by a test:** a Core that reads idle for a single tick during
+  an active wedge restarts the dwell when that tick drops the count below the quorum. If
+  that is ever observed, debounce the idle reading.
+
+**Proof.** 11 tests in `selfHealIdleQuorum.test.ts`, including:
+
+- a replay of the pre-fix wiring that, from device timelines scripted from the log,
+  reproduces the logged heal times to the minute (21:35, 22:35, 23:35, 00:35 and 01:35;
+  stand-down at 02:35);
+- the once-per-edge exclusion log;
+- a source pin on the production wiring, including the panel-exception argument.
+
+`scripts/mutate-heal-idle-quorum.mjs` holds 17 mutants.
+
+### Corrections
+
+- **DOCS §2.16** said the v1.108.0 idleness gate meant "the nightly all-idle vendor window
+  no longer consumes self-heal budget". That held only for collapses that never surfaced;
+  since v1.111.0 a collapse that surfaced while its device was active is held through
+  idleness.
+- **`alertMonitor.ts`** said the 20-minute push dwell pages only after "the repair has been
+  attempted and failed". A collapse held on a Core that went idle after a heal that worked
+  still pages; whether it should is left for a separate decision, so the push is unchanged.
+
 ## 1.156.0
 
 ### The provider's past-hour irradiance is now recorded — and nothing reads it yet
