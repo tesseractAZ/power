@@ -140,7 +140,7 @@ import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, rateFloorSampleSet, DEFAULT_RATE_FLOOR_CONFIG, type RateFloorPersisted } from './messageRateFloor.js';
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
-import { evaluateSelfHeal, selfHealQuorum, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
+import { evaluateSelfHeal, selfHealQuorum, idleExclusionEdges, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
@@ -2932,16 +2932,11 @@ const rateFloorTick = setInterval(() => {
     // v1.157.0 — the heal QUORUM is not the alert set (see selfHealQuorum). A held collapse
     // on a device that has gone electrically idle keeps its alert but loses its heal vote;
     // the alarm-path panel always counts. On 2026-09-13 three idle Cores held at reserve
-    // spent four heals on a healthy session and left the panel none.
+    // spent four heals on a healthy session, so the panel's genuine wedges the next
+    // evening each ran on the last slot.
     const healQuorum = selfHealQuorum(collapses, idleSurfacedSns, alarmPathSns);
-    for (const m of healQuorum.idleExcluded) {
-      if (!healIdleExcluded.has(m.sn)) {
-        healIdleExcluded.add(m.sn);
-        app.log.info(`self-heal: ${m.deviceName} no longer counts toward the heal quorum — electrically idle, so its held rate collapse is not a session fault; the alert stays until the rate recovers`);
-      }
-    }
-    for (const sn of healIdleExcluded) {
-      if (!healQuorum.idleExcluded.some((m) => m.sn === sn)) healIdleExcluded.delete(sn);
+    for (const m of idleExclusionEdges(healIdleExcluded, healQuorum.idleExcluded)) {
+      app.log.info(`self-heal: ${m.deviceName} no longer counts toward the heal quorum — it is electrically idle, so its held rate collapse no longer votes for a session rebuild; the alert stays until the rate recovers`);
     }
     const healVerdict = evaluateSelfHeal(
       now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },

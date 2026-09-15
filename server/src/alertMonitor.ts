@@ -156,7 +156,8 @@ export const SETTLE_PUSH_DEBOUNCE_MS = 5 * 60_000;
  * v1.157.0 caveat: the premise fails for a collapse held on a Core that went idle AFTER
  * a heal that worked. On 2026-09-13 the 21:35 rebuild restored the session, the packs
  * reached reserve two minutes later, and three "barely reporting" pushes went out at
- * 21:51 and stood until 07:04-07:29, because an idle Core cannot clear the recovery bar.
+ * 21:51 and stood until their rates recovered (logged 07:04-07:29): an idle Core cannot
+ * clear the recovery bar.
  * Self-heal no longer counts such a device (selfHealQuorum); whether its alert should
  * still push is a separate decision, so the push is unchanged here.
  *

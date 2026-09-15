@@ -68,7 +68,7 @@ import { config } from './config.js';
 
 export interface SelfHealConfig {
   /** Devices simultaneously in a surfaced rate-collapse that `selfHealQuorum` counts
-   *  (moving power this tick, or the alarm-path panel) before the fleet counts as starved.
+   *  (not electrically idle this tick, or the alarm-path panel) before the fleet counts as starved.
    *  2 = a single flaky device can never trigger a session rebuild. */
   minStarvedDevices: number;
   /** How long the fleet must stay starved before healing. Above transients
@@ -171,15 +171,16 @@ export interface SelfHealVerdict {
  * anti-flap rule), and an idle Core reports ~4.7 msg/min, under the tracker's absolute
  * 10 msg/min recovery bar, so its latch cannot clear while it idles. On 2026-09-13 three
  * Cores surfaced at 21:31 while discharging, the 21:35 heal restored the session, and
- * 108 s later the packs reached reserve and went idle inside the recovery dwell. Their
+ * about two minutes later the packs reached reserve and went idle inside the recovery
+ * dwell. Their
  * held collapses kept a three-device quorum all night: heals at 22:35, 23:35, 00:35 and
  * 01:35 rebuilt a healthy session and changed nothing, the cap stood the healer down at
  * 02:35, and the panel's genuine wedges the next evening each ran on the last slot.
  *
  * A surfaced device counts when it is the alarm-path panel (by IDENTITY, never
  * idle-filtered, whatever its projection reads) or when it is NOT electrically idle on
- * this tick. Entry already required activity, so a counted Core was moving power both
- * when it starved and when the heal is decided. Only the QUORUM changes: the alert set,
+ * this tick. Entry already required activity, so a counted Core was not idle both when
+ * it starved and when the heal is decided (a missing power reading counts as not idle). Only the QUORUM changes: the alert set,
  * its push dwell, the latch and every guard in `evaluateSelfHeal` are untouched.
  *
  * Pure: the caller passes this tick's idle set, built from the same `isElectricallyIdle`
@@ -207,6 +208,25 @@ export function selfHealQuorum(
     else idleExcluded.push(member);
   }
   return { count: counted.length, counted, idleExcluded };
+}
+
+/**
+ * v1.157.0 — which idle exclusions are NEW on this tick, so the caller logs each once.
+ *
+ * `logged` is the caller's persistent set. A device joins it the first tick it is
+ * excluded and leaves it as soon as it is not (it votes again, recovers, or drops out of
+ * the surfaced set), so a later exclusion is reported again. Pure apart from `logged`.
+ */
+export function idleExclusionEdges(logged: Set<string>, excluded: readonly HealQuorumMember[]): HealQuorumMember[] {
+  const current = new Set(excluded.map((m) => m.sn));
+  for (const sn of [...logged]) if (!current.has(sn)) logged.delete(sn);
+  const fresh: HealQuorumMember[] = [];
+  for (const m of excluded) {
+    if (logged.has(m.sn)) continue;
+    logged.add(m.sn);
+    fresh.push(m);
+  }
+  return fresh;
 }
 
 /**

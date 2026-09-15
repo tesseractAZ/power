@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  selfHealQuorum, evaluateSelfHeal, freshSelfHealState,
+  selfHealQuorum, idleExclusionEdges, evaluateSelfHeal, freshSelfHealState,
   type SelfHealConfig, type SelfHealState,
 } from '../src/sessionSelfHeal.js';
 import { decideCollapseSurfacing, isElectricallyIdle } from '../src/messageRateFloor.js';
@@ -202,14 +202,31 @@ test('pinned trade-off: a counted Core that reads idle for one tick restarts the
   assert.match(r.reasons[10], /only 1 device\(s\) starved/);
 });
 
+test('★ an idle exclusion is reported once per edge, and re-arms when the device stops being excluded', () => {
+  const logged = new Set<string>();
+  const A = member('CORE-A', 'Core A');
+  const B = member('CORE-B', 'Core B');
+  const edges = (excluded: { sn: string; deviceName: string }[]) => names(idleExclusionEdges(logged, excluded));
+  assert.deepEqual(edges([A]), ['Core A'], 'first idle tick: reported');
+  assert.deepEqual(edges([A]), [], 'still idle: not reported again');
+  assert.deepEqual(edges([A]), [], 'a held night must not write a line per tick');
+  assert.deepEqual(edges([]), [], 'votes again, recovers or drops out: nothing to report');
+  assert.equal(logged.size, 0, 're-armed');
+  assert.deepEqual(edges([A]), ['Core A'], 'idle again: reported again');
+  assert.deepEqual(edges([A, B]), ['Core B'], 'a second device is its own edge');
+  assert.deepEqual(edges([B]), [], 'Core A leaves the exclusion');
+  assert.deepEqual(edges([A, B]), ['Core A'], 'and its return is a new edge');
+});
+
 // ── the production wiring, which the pure tests above cannot reach ───────────
 
 test('★★★ index.ts feeds the quorum count to evaluateSelfHeal and leaves the alert set whole', () => {
   // A comment is not a mechanism: match against code lines only.
   const code = src('index.ts').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
-  assert.match(code, /evaluateSelfHeal\(\s*now,\s*healQuorum\.count,\s*selfHealState,/,
-    'the heal decision receives the quorum count');
+  assert.match(code,
+    /evaluateSelfHeal\(\s*now,\s*healQuorum\.count,\s*selfHealState,\s*DEFAULT_SELF_HEAL_CONFIG,\s*\{\s*alarmCriticalStarved\s*\},?\s*\)/,
+    'the heal decision receives the quorum count AND the alarm-path exception, its only route to a panel-only wedge');
   assert.ok(!/evaluateSelfHeal\(\s*now,\s*collapses\.length/.test(code),
     'never every surfaced collapse');
   assert.ok(code.includes('    const healQuorum = selfHealQuorum(collapses, idleSurfacedSns, alarmPathSns);'));
@@ -236,12 +253,12 @@ test('★★★ index.ts feeds the quorum count to evaluateSelfHeal and leaves t
   const edgeSet = code.indexOf('const healIdleExcluded = new Set<string>();');
   assert.ok(edgeSet > 0 && edgeSet < tick);
 
-  // The exclusion logs once per edge and re-arms when the device stops being excluded.
-  const loop = code.indexOf('    for (const m of healQuorum.idleExcluded) {');
-  const guard = code.indexOf('      if (!healIdleExcluded.has(m.sn)) {', loop);
-  const line = code.indexOf('no longer counts toward the heal quorum', loop);
-  assert.ok(loop > 0 && guard > loop && line > guard, 'the info line sits behind the edge guard');
-  assert.ok(code.includes('      if (!healQuorum.idleExcluded.some((m) => m.sn === sn)) healIdleExcluded.delete(sn);'));
+  // The exclusion is logged at INFO and only for the edges idleExclusionEdges returns
+  // (its once-per-edge behaviour is tested above, not here).
+  assert.match(code,
+    /for \(const m of idleExclusionEdges\(healIdleExcluded, healQuorum\.idleExcluded\)\) \{\n\s*app\.log\.info\(`self-heal: \$\{m\.deviceName\} no longer counts toward the heal quorum/);
+  assert.equal(code.split('no longer counts toward the heal quorum').length - 1, 1,
+    'no second, unguarded copy of the line');
 
   // Every heal names who voted for it.
   assert.ok(code.includes(
