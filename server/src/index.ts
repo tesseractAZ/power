@@ -140,7 +140,7 @@ import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, rateFloorSampleSet, DEFAULT_RATE_FLOOR_CONFIG, type RateFloorPersisted } from './messageRateFloor.js';
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
-import { evaluateSelfHeal, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
+import { evaluateSelfHeal, selfHealQuorum, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
 import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
@@ -2680,6 +2680,9 @@ if (selfHealState.healTimesMs.length > 0) {
   app.log.info(`self-heal: restored ${selfHealState.healTimesMs.length} heal(s) still inside the rolling 24h budget`);
 }
 let selfHealCapLogged = false; // v1.90.0 — one stand-down line per capped episode
+// v1.157.0 — devices currently excluded from the heal quorum as idle, so the exclusion
+// logs once per edge rather than every tick.
+const healIdleExcluded = new Set<string>();
 
 // v1.81.0 — event-loop lag observability (08-05 queue #8). The 08-05 review
 // found 3.5-9.7s stalls freezing all in-flight API requests — and alarm
@@ -2819,6 +2822,9 @@ const rateFloorTick = setInterval(() => {
     // so the set is stable across ticks (dedup) and empties on recovery. The WARN
     // log is preserved below exactly as before.
     const collapses: RateFloorCollapse[] = [];
+    // v1.157.0 — surfaced devices that are electrically idle THIS tick. Feeds the
+    // self-heal quorum only (selfHealQuorum); `collapses`, the alert set, is never filtered.
+    const idleSurfacedSns = new Set<string>();
     // v1.131.0 — ITERATE THE ROSTER, NOT THE OBSERVATION MAP.
     //
     // `mqttMsgCountBySn` gains an entry only inside the MQTT ingest path, so a
@@ -2860,6 +2866,7 @@ const rateFloorTick = setInterval(() => {
       if (dec.surfaced) {
         surfacedCollapses.add(sn);
         collapses.push({ sn, deviceName: name, rate: r.rate, baseline: r.baseline });
+        if (idle) idleSurfacedSns.add(sn);
       } else if (!r.collapsing) {
         surfacedCollapses.delete(sn);
       }
@@ -2897,8 +2904,8 @@ const rateFloorTick = setInterval(() => {
     }
     setRateFloorCollapses(collapses);
 
-    // v1.76.0 — SESSION SELF-HEAL. When the fleet has been starved (≥2 devices in
-    // a fired rate-collapse) for the dwell, rebuild our MQTT session: stop, null
+    // v1.76.0 — SESSION SELF-HEAL. When the fleet has been starved (≥2 surfaced
+    // rate-collapses that selfHealQuorum counts — v1.157.0) for the dwell, rebuild our MQTT session: stop, null
     // the handle, and let startMqttWithRetry re-fetch the certificate and connect
     // fresh. Read-path only — REST polling (the alarm data path) is untouched, and
     // a failed rebuild falls back to the existing retry backoff. Cooldown + daily
@@ -2922,8 +2929,22 @@ const rateFloorTick = setInterval(() => {
     // lowest-serial panel when a second one is present.
     const alarmPathSns = new Set(alarmPathShp2Sns(devices));
     const alarmCriticalStarved = alarmPathSns.size > 0 && collapses.some((c) => alarmPathSns.has(c.sn));
+    // v1.157.0 — the heal QUORUM is not the alert set (see selfHealQuorum). A held collapse
+    // on a device that has gone electrically idle keeps its alert but loses its heal vote;
+    // the alarm-path panel always counts. On 2026-09-13 three idle Cores held at reserve
+    // spent four heals on a healthy session and left the panel none.
+    const healQuorum = selfHealQuorum(collapses, idleSurfacedSns, alarmPathSns);
+    for (const m of healQuorum.idleExcluded) {
+      if (!healIdleExcluded.has(m.sn)) {
+        healIdleExcluded.add(m.sn);
+        app.log.info(`self-heal: ${m.deviceName} no longer counts toward the heal quorum — electrically idle, so its held rate collapse is not a session fault; the alert stays until the rate recovers`);
+      }
+    }
+    for (const sn of healIdleExcluded) {
+      if (!healQuorum.idleExcluded.some((m) => m.sn === sn)) healIdleExcluded.delete(sn);
+    }
     const healVerdict = evaluateSelfHeal(
-      now, collapses.length, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },
+      now, healQuorum.count, selfHealState, DEFAULT_SELF_HEAL_CONFIG, { alarmCriticalStarved },
     );
     // v1.78.0 — the daily-cap stand-down was computed and DISCARDED: on 08-14
     // the cap emptied at 04:44 with recovery 27 min later, and nothing in the
@@ -2940,7 +2961,7 @@ const rateFloorTick = setInterval(() => {
     }
     if (healVerdict.heal) {
       saveSelfHealState(selfHealState); // persist the budget BEFORE the rebuild
-      app.log.warn(`self-heal: ${healVerdict.reason}`);
+      app.log.warn(`self-heal: ${healVerdict.reason} [counted: ${healQuorum.counted.map((m) => m.deviceName).join(', ')}]`);
       try { stopMqtt?.(); } catch (e: any) {
         app.log.warn(`self-heal: old MQTT stop threw (continuing): ${e?.message ?? e}`);
       }

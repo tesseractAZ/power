@@ -1873,7 +1873,7 @@ priority are identical either way, and the Cause fact names the verdict.
 
 ### 2.16 Cloud-session self-heal (`server/src/sessionSelfHeal.ts`) — v1.76.0
 
-**v1.108.0 — electrical-idleness gate.** EcoFlow devices message in proportion to electrical activity, so an idle device's collapsed rate is explained by idleness, not a wedged session: the 08-24 audit found the detector repeatedly flagging an off-panel spare parked at its charge cap (2–4 msg/min against a baseline learned while panel-wired) and burning the nightly self-heal budget on an all-idle fleet. The tick now skips SURFACING (push + warn) for a device whose `|totalInWatts| + |totalOutWatts| < 30 W` (`isElectricallyIdle`, messageRateFloor.ts) while still SAMPLING it, so learned baselines stay honest. Nulls fail toward monitored — the SHP2's projection has no such fields and is therefore never idle-suppressed; a discharging (islanded) Core is never idle; a wedge on hardware moving real power still surfaces. Side effect, intended: the nightly all-idle vendor window no longer consumes self-heal budget.
+**v1.108.0 — electrical-idleness gate.** EcoFlow devices message in proportion to electrical activity, so an idle device's collapsed rate is explained by idleness, not a wedged session: the 08-24 audit found the detector repeatedly flagging an off-panel spare parked at its charge cap (2–4 msg/min against a baseline learned while panel-wired) and burning the nightly self-heal budget on an all-idle fleet. The tick now skips SURFACING (push + warn) for a device whose `|totalInWatts| + |totalOutWatts| < 30 W` (`isElectricallyIdle`, messageRateFloor.ts) while still SAMPLING it, so learned baselines stay honest. Nulls fail toward monitored — the SHP2's projection has no such fields and is therefore never idle-suppressed; a discharging (islanded) Core is never idle; a wedge on hardware moving real power still surfaces. Side effect, intended: the nightly all-idle vendor window no longer consumes self-heal budget. **Correction (v1.157.0):** that held only for collapses that never surfaced. Since v1.111.0 a collapse that surfaced while its device was active is HELD through idleness, and an idle Core cannot clear the 10 msg/min recovery bar, so on 2026-09-13 three Cores held at reserve spent four heals on a healthy session (see v1.157.0 below).
 
 **v1.111.0 — idleness gates ENTRY, never eviction.** The v1.108.0 gate was
 stateless per tick, so a brief idle spell mid-collapse EVICTED the standing
@@ -1897,10 +1897,28 @@ nulls fail toward starved): an episode that has already rebounded closes
 silently via the recovery dwell, a still-starved active device (the SHP2-crawl
 case) surfaces exactly as before, and holding is untouched. Harness 17/17.
 
-When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a fired message-rate collapse
+**v1.157.0 — an idle device's held collapse no longer votes for a heal.** The heal
+quorum is decided by `selfHealQuorum` (sessionSelfHeal.ts), not by the size of the alert
+set: a surfaced collapse counts when its device is the alarm-path panel (by identity,
+whatever its projection reads) or is not electrically idle on this tick — the same
+`isElectricallyIdle` reading the entry gate uses. The alert set, its push dwell, the
+latch, the dwell, cooldown and rolling budget, and the panel exception (§12m) are
+unchanged. On 2026-09-13 the collapses of three Cores surfaced at 21:31 while they
+discharged; the 21:35 heal restored the session; the packs reached reserve at 21:37,
+inside the recovery dwell, and the held collapses kept a three-device quorum that spent
+heals at 22:35, 23:35, 00:35 and 01:35 before the cap stood the healer down at 02:35.
+Replayed under the new rule that night heals once. The heal warn line now lists its
+members (`[counted: …]`), and a device leaving the quorum as idle logs one info line per
+edge. Accepted trade-off, pinned by a test: a Core that reads idle for a single tick
+during an active wedge restarts the dwell. Harness `scripts/mutate-heal-idle-quorum.mjs`.
+
+When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a surfaced message-rate collapse that
+`selfHealQuorum` counts (moving power this tick, or the alarm-path panel, which alone
+also satisfies the quorum — §12m)
 for `SELF_HEAL_AFTER_MS` (20 min), the add-on rebuilds its own MQTT session:
 stop, certificate re-fetch, fresh connect. Guards, each mutation-proven
-load-bearing (`scripts/mutate-session-self-heal.mjs`, 8/8): the multi-device
+load-bearing (`scripts/mutate-session-self-heal.mjs`, 8/8; the quorum membership rule in
+`scripts/mutate-heal-idle-quorum.mjs`): the multi-device
 threshold, the dwell, a 60-min cooldown, a 6-heal cap over a **rolling 24 h
 window persisted to `/data/self-heal-budget.json`** (v1.93.0 — it was previously
 process-local, so the cap was really "6 per process lifetime"; with this add-on's
@@ -9793,6 +9811,10 @@ The SHP2 now satisfies the quorum on its own. Everything else is untouched — t
 apply, so this cannot thrash; it only lets the clock start. In the four fleet-wide
 episodes observed in the audit window the SHP2 fired ~16 minutes before the Cores
 reached quorum, and that head start was discarded.
+
+v1.157.0 keeps this exception exactly: when idle Cores are excluded from the quorum
+(`selfHealQuorum`), the panel still counts by identity, so a panel-only wedge heals on
+the same schedule.
 
 ### 12n. The announce path (v1.122.0)
 

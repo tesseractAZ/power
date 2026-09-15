@@ -153,6 +153,13 @@ export const SETTLE_PUSH_DEBOUNCE_MS = 5 * 60_000;
  * 15 of 21 rise pushes and their matching resolves — 30 of 42 — while still
  * paging for every episode that outlived the heal, including the 133-minute one.
  *
+ * v1.157.0 caveat: the premise fails for a collapse held on a Core that went idle AFTER
+ * a heal that worked. On 2026-09-13 the 21:35 rebuild restored the session, the packs
+ * reached reserve two minutes later, and three "barely reporting" pushes went out at
+ * 21:51 and stood until 07:04-07:29, because an idle Core cannot clear the recovery bar.
+ * Self-heal no longer counts such a device (selfHealQuorum); whether its alert should
+ * still push is a separate decision, so the push is unchanged here.
+ *
  * It also subsumes most of the same-tick duplication: four devices starving in
  * one tick produced four cards on four occasions, and under this dwell none of
  * those four bursts would page unless they persisted.
