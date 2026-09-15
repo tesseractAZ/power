@@ -2594,7 +2594,7 @@ function analysePack(
 
   // v0.32.0 — the SECOND recalibration-artifact shape sohStepDominated misses: a
   // shallow multi-step decline whose net observed signal is below the BMS SoH
-  // quantization-noise floor. Live: device Y711FAB59J234000 packs 2 & 3 read
+  // quantization-noise floor. Live: device Y711XXX00X000014 packs 2 & 3 read
   // 98.6 % / 98.8 % SoH but moved only ~0.3–0.5 pt across the 27-day window (SoH
   // smeared over 5 quantized values), which OLS fit as a confident 12–16 %/yr fade
   // → a false "replace in ~1.2 yr" on two near-new packs. A fleet this new (all

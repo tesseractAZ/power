@@ -80,7 +80,7 @@ export function classifyDeviceLink(cloudOnline: boolean, reachable: Reachability
 /**
  * Parse ECOFLOW_DEVICE_REACHABILITY — a JSON object string mapping device SN to
  * the HA binary_sensor entity_id that pings that device's LAN IP, e.g.
- *   {"GBC0314...":"binary_sensor.core1_lan","GBC0482...":"binary_sensor.core2_lan"}
+ *   {"XXX0015...":"binary_sensor.core1_lan","XXX0002...":"binary_sensor.core2_lan"}
  *
  * Tolerant by design: an empty/unset/malformed value, or a non-object / wrong
  * value-type JSON, yields {} (the feature simply stays dormant). Only string→

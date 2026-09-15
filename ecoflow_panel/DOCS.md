@@ -1336,8 +1336,8 @@ the home bus. Every fleet aggregation must exclude spares.
 - **`isShp2Connected(sn, connected)`** → **fallback semantics**: when `connected` is
   empty (no SHP2 observed / DPU-only setup) returns **true for every SN** (so a
   no-SHP2 user's tiles aren't zeroed). Otherwise membership is exact.
-- **`SPARE_DPU_SNS`** = explicit allowlist:
-  `Y711ZABA9H3T0489` (Core 4), `Y711ZAB59G9P0090` (Core 5). This is the **safety
+- **`SPARE_DPU_SNS`** = explicit allowlist of the bench-spare DPU serials (Core 4,
+  Core 5). This is the **safety
   floor**: a home core (1/2/3) can never be in this set, so it can never have its real
   offline alarm muted, even if it faults out of the SHP2's `isConnected` list. A spare's
   offline state is the *expected* steady state → its connectivity alert is
@@ -1366,8 +1366,7 @@ the home bus. Every fleet aggregation must exclude spares.
   the raw `fleetBatteryNet` feeds the ±50 W charge/discharge timer gates). Guarded with
   `?? []` on `sources`/`packs`/`circuits` so a partial projection can't throw.
 
-Roster reference (from memory / topic files): Core 1/2/3 home =
-`GBC0314…`/`GBC0482…`/`J234000…`; Core 4/5 spares as above.
+Roster at the time of writing: Core 1/2/3 home; Core 4/5 bench spares as above.
 
 ---
 
@@ -3252,17 +3251,17 @@ siblings — the exact thing worth flagging.
   "metric": "pack_soh_pct",
   "packs": [
     {
-      "packKey": "GBC0314:1", "dpuKey": "GBC0314",
+      "packKey": "XXX0015:1", "dpuKey": "XXX0015",
       "rawValue": 98.0, "rawSigma": 3.0,
       "posteriorMean": 97.4, "posteriorSigma": 1.2,
       "shrinkageToDpu": 0.31
     }
   ],
-  "dpuMeans": { "GBC0314": 97.6, "GBC0482": 98.1 },
+  "dpuMeans": { "XXX0015": 97.6, "XXX0002": 98.1 },
   "fleetMean": 97.8,
   "sigmaWithinDpu": 1.1,
   "sigmaWithinFleet": 0.4,
-  "outlierPackKeys": [ "GBC0482:4" ]
+  "outlierPackKeys": [ "XXX0002:4" ]
 }
 ```
 
@@ -5608,7 +5607,7 @@ Stale ids are pruned each cycle. Served at **`/api/repair-issues`** (cached), as
 **WHAT.** The safety machinery that decides which DPUs count as home fleet and which are expected-offline bench spares, so a spare's offline state is muted while a real home Core's is NEVER muted.
 
 - `shp2ConnectedDpuSns(devices)` — set of DPU SNs the SHP2 reports as connected sources (`s.isConnected && s.sn`). Empty when no SHP2 observed → `isShp2Connected` returns true for every SN (DPU-only fallback; don't zero the dashboard).
-- **`SPARE_DPU_SNS`** — the explicit allowlist SAFETY FLOOR: `Y711ZABA9H3T0489` (Core 4), `Y711ZAB59G9P0090` (Core 5). A home Core (1/2/3) is NEVER in this set, so even a faulted/unplugged home Core — which drops out of the SHP2's connected sources — still annunciates its genuine offline alarm. This is the "zombie gate": membership is by explicit SN, not by dynamic `isConnected` (which would mute a faulted core).
+- **`SPARE_DPU_SNS`** — the explicit allowlist SAFETY FLOOR of bench-spare DPU serials (Core 4, Core 5). A home Core (1/2/3) is NEVER in this set, so even a faulted/unplugged home Core — which drops out of the SHP2's connected sources — still annunciates its genuine offline alarm. This is the "zombie gate": membership is by explicit SN, not by dynamic `isConnected` (which would mute a faulted core).
 - `isExpectedOfflineSpare(sn, connected)` — `SPARE_DPU_SNS.has(sn) && !connected.has(sn)`. The positive connected-source check RE-ARMS a spare the instant it is wired into an SHP2. Overloaded to accept a pre-computed Set (hot loop) or the raw devices Record.
 - The monitor applies a central spare gate each tick: any alert whose id contains a muted spare's SN gets `annunciate: false` stamped (idempotent with the per-emitter gate in `alerts.ts`).
 - Supporting helpers: `isSourceDpuStale` (observability-only `dpuStale` flag), `homeCoreCoverage` (`{connected, reporting, complete}` — can we see the whole pool?), `homeFleetMeanSoc` (mean SoC of reporting home Cores — the reserve-alarm-blind fallback ladder), `aggregateFleetFlow` (SHP2-membership-filtered fleet power totals).
@@ -6799,7 +6798,7 @@ Rules (order matters — longest token first):
 - singularize the realistic `1 <time>s` cases (`in 1 hours` → `1 hour`);
 - collapse whitespace runs, tidy space-before-punctuation.
 
-Unit rules are number-anchored so device SNs (`GBC0314`), error codes, and prose
+Unit rules are number-anchored so device SNs (`XXX0015`), error codes, and prose
 ("a breaker") are never corrupted. en_US only.
 
 #### 8.3 Spanish second pass

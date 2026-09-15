@@ -22,9 +22,9 @@ import type { Alert } from '../src/alerts.js';
  * so a bench pack that is overheating still pages.
  */
 
-const CORE1 = 'Y711ZAB59GBC0314';
-const CORE5 = 'Y711ZAB59G9P0090';
-const BENCH = 'Y711FAB59J234000';
+const CORE1 = 'Y711XXX00XXX0015';
+const CORE5 = 'Y711XXX00X0X0003';
+const BENCH = 'Y711XXX00X000014';
 
 const dpu = (sn: string): DeviceSnapshot => ({
   sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: true, lastUpdated: 1,
@@ -71,11 +71,11 @@ test('off-panel — an EMPTY roster demotes nobody (panel unreadable ⇒ trust n
 
 test('off-panel — only DPUs are considered (the SHP2 is never demoted by its own roster)', () => {
   const streak = new Map<string, number>();
-  const shp2 = { sn: 'HD31ZASAHH120432', deviceName: 'SHP2', productName: 'Smart Home Panel 2',
+  const shp2 = { sn: 'HD31XXXXXX000019', deviceName: 'SHP2', productName: 'Smart Home Panel 2',
     online: true, lastUpdated: 1, projection: { kind: 'shp2' } as any } as DeviceSnapshot;
   const devs = devices(dpu(CORE1), shp2);
   for (let i = 0; i < OFF_PANEL_DEMOTE_TICKS + 1; i++) advanceOffPanelStreaks(devs, new Set([CORE1]), streak);
-  assert.equal(streak.has('HD31ZASAHH120432'), false);
+  assert.equal(streak.has('HD31XXXXXX000019'), false);
 });
 
 test('demotion — a critical THERMAL alert is never demoted, even on off-panel hardware', () => {

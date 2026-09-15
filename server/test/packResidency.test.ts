@@ -17,7 +17,7 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * "this condition continues" from "this is different hardware".
  */
 
-const SN = 'Y711ZABA9H3T0489';
+const SN = 'Y711XXXX0X0X0004';
 
 function deviceWith(packSn: string): Record<string, DeviceSnapshot> {
   const bad = new Array(32).fill(3125); bad[30] = 3019;   // 106 mV deviant cell

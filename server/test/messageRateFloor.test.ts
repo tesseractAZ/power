@@ -414,7 +414,7 @@ test('isFlatProfile — a zeroed profile is not "flat" (guards against div-by-ze
 
 test('rate floor — a FLAT device fires on the short dwell (the SHP2 blind spot)', () => {
   const t = new RateFloorTracker({ ...CFG, minHourSamples: 1, flatnessMinMatureHours: 2 });
-  const SN = 'HD31ZASAHH120432';
+  const SN = 'HD31XXXXXX000019';
   const base = new Date(2026, 7, 21, 6, 0, 0).getTime();
   const MIN = 60_000;
   // Learn a flat ~30 msg/min profile across enough hours to mature the buckets.
@@ -430,7 +430,7 @@ test('rate floor — a FLAT device fires on the short dwell (the SHP2 blind spot
 
 test('rate floor — a DIURNAL device still gets the long dwell (no new false positives)', () => {
   const t = new RateFloorTracker({ ...CFG, minHourSamples: 1, flatnessMinMatureHours: 2 });
-  const SN = 'Y711ZAB59GBC0314';
+  const SN = 'Y711XXX00XXX0015';
   const MIN = 60_000;
   // Teach a swinging profile: alternating fast/slow hours -> cv well above 0.15.
   let count = 0, ts = new Date(2026, 7, 21, 0, 0, 0).getTime();

@@ -14,7 +14,7 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * that used to live (identically) in both files; we assert the helper matches it.
  */
 
-const SPARE_SN = [...SPARE_DPU_SNS][0]; // Core 4 — Y711ZABA9H3T0489
+const SPARE_SN = [...SPARE_DPU_SNS][0]; // Core 4 — Y711XXXX0X0X0004
 
 function dpu(
   sn: string,

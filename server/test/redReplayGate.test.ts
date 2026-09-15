@@ -55,9 +55,9 @@ const T0 = 1_800_000_000_000; // fixed epoch — no wall-clock dependence anywhe
 /* ─── the fixtures, shaped exactly as alerts.ts emits them ──────────────── */
 
 /** The standing Core 3 fault: id constant across codes, 5xx ⇒ battery band. */
-const STANDING = { id: 'dpu-err-GBC0314', title: 'Battery protection fault', fault: 'err533' };
+const STANDING = { id: 'dpu-err-XXX0015', title: 'Battery protection fault', fault: 'err533' };
 /** THE SAME SOURCE, a genuinely different fault: same id, other band, other code. */
-const OTHER_CODE = { id: 'dpu-err-GBC0314', title: 'Inverter error code', fault: 'err307' };
+const OTHER_CODE = { id: 'dpu-err-XXX0015', title: 'Inverter error code', fault: 'err307' };
 /** A different device entirely. */
 const THERMAL = { id: 'thermal-runaway-core1', title: 'Pack over-temperature', fault: undefined };
 
@@ -162,7 +162,7 @@ test('★ BLOCKER 1 (A2) — the fingerprint IGNORES drifting fields: detail, fa
 test('★ BLOCKER 1 — END TO END through computeAlerts: dpu-err code change ⇒ same id, DIFFERENT fingerprint', () => {
   const dpu = (sysErrCode: number, soc: number, batVol: number): Record<string, DeviceSnapshot> => ({
     'DPU-1': {
-      sn: 'GBC0314', deviceName: 'Core 3', productName: 'Delta Pro Ultra',
+      sn: 'XXX0015', deviceName: 'Core 3', productName: 'Delta Pro Ultra',
       online: true, lastUpdated: T0,
       projection: {
         kind: 'dpu', soc, packs: [],
@@ -178,7 +178,7 @@ test('★ BLOCKER 1 — END TO END through computeAlerts: dpu-err code change �
     } as DeviceSnapshot,
   });
   const errOf = (code: number, soc: number, batVol: number): Alert =>
-    computeAlerts(dpu(code, soc, batVol)).find((a) => a.id === 'dpu-err-GBC0314')!;
+    computeAlerts(dpu(code, soc, batVol)).find((a) => a.id === 'dpu-err-XXX0015')!;
 
   const a533 = errOf(533, 95, 53);
   const a307 = errOf(307, 95, 53);
@@ -225,7 +225,7 @@ test('★ BLOCKER 1 — END TO END: shp2-src-err carries the code even though it
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 const VOICED_A: Alert = {
-  id: 'dpu-err-GBC0314', severity: 'critical', category: 'Battery', device: 'Core 3',
+  id: 'dpu-err-XXX0015', severity: 'critical', category: 'Battery', device: 'Core 3',
   title: 'Battery protection fault', fault: 'err533', coreNum: 3, packNum: 1,
   detail: 'Core 3 reports system error code 533 (battery/BMS protection band).',
 };
@@ -811,16 +811,16 @@ test('redReplayGate — v1.78.0 supersedes the v1.64.0 30-minute stopwatch', () 
 test('★ a MISWIRED gate (handed bare alert IDS) degrades to a NO-OP, never to a mute', () => {
   // The exact defect this module exists to prevent, one word away at the call
   // site. Bare ids are not fingerprints, so sameness can never be proven.
-  assert.equal(isFingerprint('dpu-err-GBC0314'), false, 'a bare id is not a fingerprint');
+  assert.equal(isFingerprint('dpu-err-XXX0015'), false, 'a bare id is not a fingerprint');
   assert.equal(isFingerprint(FP_STANDING), true);
   assert.equal(isFingerprint(alertFingerprint({ id: 'x', title: 'y' })), true, 'an absent fault code still yields 3 fields');
   // Both guards are load-bearing and are checked independently.
   assert.equal(
     isRedReplaySuppressed({
       observed: 'red',
-      voicedFingerprint: 'dpu-err-GBC0314',            // ← an ID, not a fingerprint
-      activeFingerprints: ['dpu-err-GBC0314'],
-      persisted: announced({ voiced: 'dpu-err-GBC0314', active: ['dpu-err-GBC0314'] }),
+      voicedFingerprint: 'dpu-err-XXX0015',            // ← an ID, not a fingerprint
+      activeFingerprints: ['dpu-err-XXX0015'],
+      persisted: announced({ voiced: 'dpu-err-XXX0015', active: ['dpu-err-XXX0015'] }),
       msSinceBoot: 90_000, nowMs: T0 + 60_000, windowMs: WIN, minGapMs: GAP,
     }),
     false,
@@ -829,9 +829,9 @@ test('★ a MISWIRED gate (handed bare alert IDS) degrades to a NO-OP, never to 
   assert.equal(
     isRedReplaySuppressed({
       observed: 'red',
-      voicedFingerprint: 'dpu-err-GBC0314',            // ← only the VOICED one is an id
+      voicedFingerprint: 'dpu-err-XXX0015',            // ← only the VOICED one is an id
       activeFingerprints: [FP_STANDING],               //    the active list is well-formed
-      persisted: announced({ voiced: 'dpu-err-GBC0314', active: ['dpu-err-GBC0314', FP_STANDING] }),
+      persisted: announced({ voiced: 'dpu-err-XXX0015', active: ['dpu-err-XXX0015', FP_STANDING] }),
       msSinceBoot: 90_000, nowMs: T0 + 60_000, windowMs: WIN, minGapMs: GAP,
     }),
     false,
@@ -841,8 +841,8 @@ test('★ a MISWIRED gate (handed bare alert IDS) degrades to a NO-OP, never to 
     isRedReplaySuppressed({
       observed: 'red',
       voicedFingerprint: FP_STANDING,                  // valid, and it matches
-      activeFingerprints: ['dpu-err-GBC0314'],         // ← only the ACTIVE list is ids
-      persisted: announced({ voiced: FP_STANDING, active: [FP_STANDING, 'dpu-err-GBC0314'] }),
+      activeFingerprints: ['dpu-err-XXX0015'],         // ← only the ACTIVE list is ids
+      persisted: announced({ voiced: FP_STANDING, active: [FP_STANDING, 'dpu-err-XXX0015'] }),
       msSinceBoot: 90_000, nowMs: T0 + 60_000, windowMs: WIN, minGapMs: GAP,
     }),
     false,
@@ -850,20 +850,20 @@ test('★ a MISWIRED gate (handed bare alert IDS) degrades to a NO-OP, never to 
   );
   // ...and such a record cannot even be persisted and re-read.
   assert.equal(parseRedAnnounceState({
-    lastRedAnnouncedAtMs: T0, voicedFingerprint: 'dpu-err-GBC0314', activeFingerprints: ['dpu-err-GBC0314'], lastPlayedLevel: 'red',
+    lastRedAnnouncedAtMs: T0, voicedFingerprint: 'dpu-err-XXX0015', activeFingerprints: ['dpu-err-XXX0015'], lastPlayedLevel: 'red',
   }), null);
 });
 
 test('★ state written by the earlier bare-id draft does NOT parse (migration fails open)', () => {
   assert.equal(
-    parseRedAnnounceState({ lastRedAnnouncedAtMs: T0, criticalIds: ['dpu-err-GBC0314'] }),
+    parseRedAnnounceState({ lastRedAnnouncedAtMs: T0, criticalIds: ['dpu-err-XXX0015'] }),
     null,
     'the first restart after the upgrade announces, then records the new shape',
   );
 });
 
 test('redReplayGate — describeFingerprint renders a log-safe, human-readable form', () => {
-  assert.equal(describeFingerprint(FP_STANDING), 'dpu-err-GBC0314 / Battery protection fault / err533');
+  assert.equal(describeFingerprint(FP_STANDING), 'dpu-err-XXX0015 / Battery protection fault / err533');
   assert.equal(describeFingerprint(FP_THERMAL), 'thermal-runaway-core1 / Pack over-temperature');
 });
 
@@ -910,7 +910,7 @@ test('conditionFromAlerts — no criticals → empty criticalIds (a yellow/green
 
 test('★ conditionFromAlerts — criticalFingerprints separate what criticalIds CANNOT', () => {
   const at = (title: string, fault: string) => conditionFromAlerts([
-    { id: 'dpu-err-GBC0314', severity: 'critical', category: 'Battery', device: 'Core 3', title, fault, detail: 'd' },
+    { id: 'dpu-err-XXX0015', severity: 'critical', category: 'Battery', device: 'Core 3', title, fault, detail: 'd' },
   ] as any);
   const a = at('Battery protection fault', 'err533');
   const b = at('Inverter error code', 'err307');
@@ -936,7 +936,7 @@ test('the 27.5-second-margin case: an identical fault suppresses at ANY gap', ()
   // 2026-08-13: restart 2 escaped a full 56.7s klaxon by 27.5s of image-pull
   // luck (29m32s vs the old 30m bar). And the 08-15 reboot at a 44h gap
   // replayed it in full. Identity now decides; elapsed time does not.
-  const fp = alertFingerprint({ id: 'dpu-err-Y711FAB59J234000', title: 'Battery protection fault', fault: 'err533' });
+  const fp = alertFingerprint({ id: 'dpu-err-Y711XXX00X000014', title: 'Battery protection fault', fault: 'err533' });
   for (const gapMs of [29.5 * 60_000, 31 * 60_000, 44 * 3_600_000, 21 * 24 * 3_600_000]) {
     assert.equal(isRedReplaySuppressed({
       observed: 'red', voicedFingerprint: fp, activeFingerprints: [fp],

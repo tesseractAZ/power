@@ -23,8 +23,8 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * confirmed diagnosis must not un-confirm because charging paused.
  */
 
-const PACK_SN = 'Y712ZABA4H350037';
-const DEV_SN = 'Y711ZABA9H3T0489';
+const PACK_SN = 'Y712XXXX0X000008';
+const DEV_SN = 'Y711XXXX0X0X0004';
 
 const rec = (over: Record<string, unknown> = {}) => ({
   packSn: PACK_SN, deviceSn: DEV_SN, deviceName: 'Core 4', packNum: 1,
@@ -104,7 +104,7 @@ test('★ a pack MOVED to another chassis is judged by where it was LAST SEEN', 
   // pack to another Core). Keying on rec.deviceSn would mean a pack confirmed
   // in Core A, moved to Core B, with Core A gone, could NEVER retire.
   confirmDefectivePack(rec(), 1_000);   // confirmed in CORE (== rec().deviceSn)
-  const CORE_B = 'Y711ZABA9H3T9999';
+  const CORE_B = 'Y711XXXX0X0X0007';
   markPackPresent(PACK_SN, 10_000, CORE_B);   // then moved to CORE_B
 
   // While CORE_B keeps reporting it, the clock refreshes and it is kept.
@@ -191,7 +191,7 @@ test('retire clock arms at first sighting after a restart, not at epoch', () => 
 });
 
 test('markPackPresent is a no-op for unconfirmed SNs (healthy fleet never accumulates)', () => {
-  markPackPresent('Y712ZABA4H350028', 1_000, 'Y711ZABA9H3T0489');
+  markPackPresent('Y712XXXX0X000018', 1_000, 'Y711XXXX0X0X0004');
   assert.equal(listConfirmedRecords().length, 0);
 });
 

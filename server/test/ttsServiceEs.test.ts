@@ -11,7 +11,7 @@ import type { RunwayAlarmInput } from '../src/runwayAlarm.js';
  * families fall back to the English title; numbers interpolate correctly). */
 
 const mkAlert = (o: Partial<Alert> & { id: string; severity: Alert['severity']; category: Alert['category'] }): Alert =>
-  ({ device: 'GBC0314', title: '', detail: '', ...o } as Alert);
+  ({ device: 'XXX0015', title: '', detail: '', ...o } as Alert);
 
 const runway = (o: Partial<RunwayAlarmInput>): RunwayAlarmInput =>
   ({ generatedAt: 0, hoursToReserve: null, hoursToEmpty: null, unavailable: null, ...o });
@@ -37,7 +37,7 @@ test('buildAlertMessageEs — green is the Spanish all-clear', () => {
 
 test('buildAlertMessageEs — known family: Spanish framing + Spanish title + Spanish location/ack/repeat', () => {
   const a = mkAlert({
-    id: 'soh-crit-GBC0314-2', severity: 'critical', category: 'Battery', priority: 'critical',
+    id: 'soh-crit-XXX0015-2', severity: 'critical', category: 'Battery', priority: 'critical',
     title: 'Pack health critical', detail: 'Pack S O H is 68 percent, below 70 percent floor.',
     coreNum: 3, packNum: 2,
   });

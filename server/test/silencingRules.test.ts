@@ -98,8 +98,8 @@ test('v0.80.0 — the exemption set matches familyOf() of the real alert ids', (
   // Pin the derivation so an alert-id rename can't silently orphan the exemption.
   assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('backup-soc-20')));
   assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('shp2-below-reserve')));
-  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('soc-low-Y711ZAB59GBC0314-3')));
-  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('forecast-runtime-HD31ZASAHH120432')));
+  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('soc-low-Y711XXX00XXX0015-3')));
+  assert.ok(ENERGY_STATE_FAMILIES.has(familyOf('forecast-runtime-HD31XXXXXX000019')));
 });
 
 test('v0.80.0 — non-exempt families still demote exactly as before (regression guard)', () => {

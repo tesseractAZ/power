@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 /**
  * v1.150.0 — the dark-core cluster.
  *
- * THE EPISODE. Core 2 (Y711ZAB59GBC0482) recorded ZERO samples of EVERY metric
+ * THE EPISODE. Core 2 (Y711XXX00XXX0002) recorded ZERO samples of EVERY metric
  * from 2026-08-11 to 2026-08-19 — nine days, a third of the wired fleet. Nothing
  * alerted, nothing logged, and no telemetry-gap record was written, because the
  * fleet gap detector sets `sawHomeInsert` on ANY non-bench home SN: Cores 1 and 3

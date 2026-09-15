@@ -23,7 +23,7 @@ import { SnapshotStore } from '../src/snapshot.js';
  * v0.38.0 fixed this exact shape once already for the load-anomaly family.
  */
 test('★ F2: the starvation family waits for the self-heal window before paging', () => {
-  assert.equal(pushDebounceMsFor('msg-rate-floor-Y711ZAB59GBC0314'), MSG_RATE_PUSH_DEBOUNCE_MS);
+  assert.equal(pushDebounceMsFor('msg-rate-floor-Y711XXX00XXX0015'), MSG_RATE_PUSH_DEBOUNCE_MS);
   assert.equal(MSG_RATE_PUSH_DEBOUNCE_MS, 20 * 60_000,
     'aligned with sessionSelfHeal’s own starvation trigger — below it the system is still trying to fix itself');
 });

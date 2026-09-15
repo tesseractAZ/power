@@ -103,8 +103,8 @@ test('verbalize — bare unit letters in prose are NOT expanded', () => {
 });
 
 test('verbalize — device serials and error codes are untouched', () => {
-  assert.equal(verbalizeForTts('Core GBC0314 fault'), 'Core GBC0314 fault');
-  assert.equal(verbalizeForTts('spare ZABA9H3T0489'), 'spare ZABA9H3T0489');
+  assert.equal(verbalizeForTts('Core XXX0015 fault'), 'Core XXX0015 fault');
+  assert.equal(verbalizeForTts('spare XXXX0X0X0004'), 'spare XXXX0X0X0004');
 });
 
 /* ─── idempotency: the renderer applies this a second time ───────── */
