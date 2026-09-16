@@ -48,6 +48,29 @@ export function getRateFloorCollapses(): RateFloorCollapse[] {
 /** Reset to the empty state (used by tests). */
 export function resetRateFloorCollapses(): void {
   current = [];
+  idleHeld = [];
+}
+
+/**
+ * v1.158.0 — the subset of the published collapses that are HELD on an electrically
+ * idle device that is not the alarm-path panel (exactly `selfHealQuorum`'s idleExcluded).
+ *
+ * A surfaced collapse is held through idleness by design (v1.111.0 anti-flap), and an idle
+ * pack at ~4.7 msg/min can never clear the 10 msg/min recovery bar — so on 2026-09-13 three
+ * such cards pushed at 21:51 and stood until 07:04-07:29, telling the operator to check the
+ * cloud session and power on three packs whose session had been healthy since 21:41. The
+ * CARD is unchanged (the episode is the same episode); only the PUSH dwell is held, and it
+ * is re-earned once the device is active again — see pushDwellStart in alertMonitor.ts.
+ */
+let idleHeld: string[] = [];
+
+export function setRateFloorIdleHeld(sns: readonly string[]): void {
+  idleHeld = [...sns];
+}
+
+/** Alert ids (not SNs) currently push-held as idle. */
+export function rateFloorIdleHeldIds(): ReadonlySet<string> {
+  return new Set(idleHeld.map(rateFloorAlertId));
 }
 
 /** Stable id prefix — one alert per device, dedup + resolve keyed on it. */

@@ -388,6 +388,12 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
   const curHour = new Date().getHours();
   const windowHours = new Set([(curHour + 23) % 24, curHour, (curHour + 1) % 24]);
 
+  // v1.79.0 — suppress baseline anomalies on a starved feed (spot values minutes old against
+  // a healthy-cadence baseline). v1.158.0 NOTE, deliberately UNCHANGED: this reads the raw
+  // collapse set, so a collapse held on an idle pack also holds this family for the life of the
+  // hold (9h30m on 2026-09-13/14). Filtering it to the quorum's active set would resume raises
+  // on a pack whose feed really is low-cadence; that needs evidence the raises are meaningful
+  // there, not a same-day change to a life-safety alert path.
   const starvedSnsForBaseline = new Set(getRateFloorCollapses().map((c) => c.sn)); // v1.79.0
   for (const t of buildBaselineTargets(devices)) {
     if (t.live == null || !Number.isFinite(t.live)) continue;
