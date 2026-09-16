@@ -74,7 +74,10 @@ const MUTANTS = [
   },
   {
     id: 'x. ★ a worsening band handoff resolves again ("Resolved: Backup pool low" mid-drawdown)',
-    find: "  if (!id.startsWith('backup-soc-')) return null;",
+    // v1.158.0 — repointed: the guard now also admits `forecast-runtime-`, which stops
+    // being produced AT the floor. The property is the same: no handoff detection ⇒ the
+    // falling edge reads a worsening transition as a recovery and pushes a false all-clear.
+    find: "  if (!id.startsWith('backup-soc-') && !id.startsWith('forecast-runtime-')) return null;",
     to: '  return null; /* MUTANT */',
     why: 'The 08-16 19:22 false all-clear: the band vanishing INTO the active shp2 pair pushed "Resolved" while the pool drained 20->15->10 with no further pool push before the critical crossing.',
   },

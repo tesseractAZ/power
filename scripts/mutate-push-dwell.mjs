@@ -31,9 +31,57 @@ const SNAP = resolve(SERVER, 'src/snapshot.ts');
 const REC = resolve(SERVER, 'src/recorder.ts');
 const IDX = resolve(SERVER, 'src/index.ts');
 
-const SUBSET = ['test/pushDwellAndObservability.test.ts', 'test/orphanedNotified.test.ts'];
+const SUBSET = [
+  'test/pushDwellAndObservability.test.ts',
+  'test/orphanedNotified.test.ts',
+  'test/rateFloorIdlePush.test.ts',
+  'test/alertResolveEvidence.test.ts',
+];
 
 const MUTANTS = [
+  // ── v1.158.0: the idle-held push hold, the settle family, the floor handoff ──
+  {
+    id: 'A. ★★★ an idle-held collapse pages again (the dwell stops being re-based)',
+    file: MON,
+    find: '  return idleHeld ? nowMs : (prev.dwellFrom ?? prev.firstSeen);',
+    to: '  return prev.dwellFrom ?? prev.firstSeen; /* MUTANT */',
+    why: 'The 2026-09-13 shape returns: three cards page at 21:51 against a session healthy since 21:41 and stand until the packs wake.',
+  },
+  {
+    id: 'B. ★★ the dispatch measures the dwell from firstSeen again',
+    file: MON,
+    find: '        debounceElapsed: now - existing.dwellFrom >= escDebounceMs,',
+    to: '        debounceElapsed: now - existing.firstSeen >= escDebounceMs, /* MUTANT */',
+    why: 'pushDwellStart is computed and ignored, so the hold is inert in production while every pure test still passes.',
+  },
+  {
+    id: 'C. ★★ the tick stops publishing the idle-held set',
+    file: IDX,
+    find: '    setRateFloorIdleHeld(healQuorum.idleExcluded.map((m) => m.sn));',
+    to: '    /* MUTANT: idle-held set never published */',
+    why: 'Nothing is ever held: the registry stays empty and the hold can never engage.',
+  },
+  {
+    id: 'D. ★ the hold is published for every collapse, not just the idle ones',
+    file: IDX,
+    find: '    setRateFloorIdleHeld(healQuorum.idleExcluded.map((m) => m.sn));',
+    to: '    setRateFloorIdleHeld(collapses.map((c) => c.sn)); /* MUTANT */',
+    why: 'A genuine wedge on an ACTIVE pack — and the alarm-path panel, which identity keeps out of idleExcluded — would never page.',
+  },
+  {
+    id: 'E. ★ the cell-imbalance WARNING tier loses its settle dwell again',
+    file: MON,
+    find: '  return /^(vdiff-crit-|vdiff-warn-|peer-voldiff-|peer-soc-|soc-low-|dpu-imbalance-)/.test(id)',
+    to: '  return /^(vdiff-crit-|peer-voldiff-|peer-soc-|soc-low-|dpu-imbalance-)/.test(id) /* MUTANT */',
+    why: 'Three-minute settling excursions page again, while the resolve side keeps dwelling — the asymmetry that produced 3 of 20 pushes.',
+  },
+  {
+    id: 'F. ★★ the runtime projection resolves at the floor again (false all-clear)',
+    file: MON,
+    find: "  if (!id.startsWith('backup-soc-') && !id.startsWith('forecast-runtime-')) return null;",
+    to: "  if (!id.startsWith('backup-soc-')) return null; /* MUTANT */",
+    why: 'The phone reads \'Resolved: Projected runtime ~0h 12m to reserve\' at the exact moment the pool reaches the floor and stays there.',
+  },
   // ── F2: the push dwell ─────────────────────────────────────────────────────
   {
     id: 'i. ★★★ the starvation family loses its push dwell',

@@ -1,3 +1,48 @@
+## 1.158.0
+
+### Three notification fixes from the 09-13..15 log audit
+
+A six-lens audit of the log ring (15 agents, every finding adversarially verified) confirmed
+four issues. Three are fixed here; the fourth is recorded.
+
+**1. A held collapse on an idle pack no longer pages.** v1.157.0 stopped such a collapse from
+spending the self-heal budget and deliberately left the notification. The consequence, measured:
+on 2026-09-13 the 21:35 session rebuild worked — the panel was back at 31 msg/min by 21:41 —
+and three `[Medium] Device barely reporting` cards pushed anyway at 21:51, each telling the
+operator to check the cloud session and power on a pack whose session was healthy. They stood
+9 h 13 m to 9 h 38 m, clearing only when the packs woke at 07:04-07:29.
+
+- The rate-floor tick publishes the quorum's own `idleExcluded` set (`setRateFloorIdleHeld`):
+  surfaced, electrically idle this tick, and not the alarm-path panel.
+- `pushDwellStart` re-bases the 20-minute dwell while an alert's device is in that set, so the
+  dwell is re-earned once the device is **active and still starved**. Gating the rising edge on
+  idleness alone would only have moved the push to the first active tick, because the dwell is
+  measured from when the alert was first seen.
+- The card, the latch, the resolve path and the alarm-path panel are unchanged. A collapse that
+  never idles still pages at exactly 20 minutes.
+
+**2. The cell-imbalance WARNING tier gets the settle dwell it already had on the way out.**
+`vdiff-warn-` was on the resolve-side dwell list and not the push-side one, so three of twenty
+pushes in the window were ~3-minute settling excursions. Real home-pool episodes ran 12-37
+minutes, so the 5-minute hold costs under 5 minutes of notice. `ems-volt-` is deliberately NOT
+added: its single occurrence in the window is unattributed, and a dwell would hide it.
+
+**3. The runtime projection hands off at the floor instead of pushing a false all-clear.**
+`forecast-runtime-<SN>` stops being produced the moment the pool touches the reserve floor
+(analytics gates it on `cur > reserve`), while `shp2-below-reserve` raises on `<= reserve` —
+complements on the same field. The falling edge read that vanish as a recovery: on 2026-09-13
+the pool reached the floor at 21:42 and stayed there until 07:55, yet the phone read
+*"Resolved: Projected runtime ~0h 12m to reserve"* at 21:47. It now joins `backup-soc-`'s
+ownership handoff: the entry retires with no resolve push while the successor is active.
+
+### Recorded, not changed
+
+**The learned-baseline alert family stays suppressed for the life of a held collapse.**
+`analytics.ts`'s `starvedSnsForBaseline` reads the raw collapse set, so the 09-13 hold also
+blocked that family on three packs for 9 h 30 m. Filtering it to the quorum's active set would
+resume raises on a pack whose feed genuinely is low-cadence; that is an owner decision backed by
+evidence, not a same-day change to an alert path. The consumer is now named in DOCS §2.16.
+
 ## 1.157.0
 
 ### An idle Core's held rate collapse no longer spends the self-heal budget

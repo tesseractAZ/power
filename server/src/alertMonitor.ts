@@ -7,7 +7,7 @@ import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
 import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
-import { rateFloorAlerts, getRateFloorCollapses } from './messageRateFloorAlert.js';
+import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds } from './messageRateFloorAlert.js';
 import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, blindAlertContext, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { benchSpareSns, isOutsideHomePool, shp2ConnectedDpuSns, isExpectedOfflineSpare,
@@ -172,9 +172,35 @@ export const MSG_RATE_PUSH_DEBOUNCE_MS = Number(
   process.env.MSG_RATE_PUSH_DEBOUNCE_MS ?? 20 * 60_000,
 );
 
+/**
+ * v1.158.0 — WHEN the push dwell starts, which is not always when the alert was first seen.
+ *
+ * The dwell's premise is "after 20 minutes the repair has been attempted and failed". That is
+ * false while a rate collapse is HELD on an electrically idle, non-alarm-path device: the
+ * session may be healthy (2026-09-13, heal at 21:35, panel back at 21:41) and the card only
+ * persists because an idle pack cannot reach the 10 msg/min recovery bar. Gating the rising
+ * edge on idleness ALONE would merely move the push to the first active tick, because the
+ * dwell is measured from firstSeen — so the clock is re-based for as long as the device stays
+ * idle, and the 20 minutes are then re-earned against a device that is active AND still
+ * starved. firstSeen is left alone: it owns the on-screen duration and the cleared record.
+ * Pure + exported so the re-basing is unit-tested rather than inferred from the tick.
+ */
+export function pushDwellStart(
+  prev: { firstSeen: number; dwellFrom?: number },
+  idleHeld: boolean,
+  nowMs: number,
+): number {
+  return idleHeld ? nowMs : (prev.dwellFrom ?? prev.firstSeen);
+}
+
 export function pushDebounceMsFor(id: string, defaultMs: number = DEBOUNCE_MS): number {
   if (id.startsWith('msg-rate-floor-')) return Math.max(defaultMs, MSG_RATE_PUSH_DEBOUNCE_MS);
-  return /^(vdiff-crit-|peer-voldiff-|peer-soc-|soc-low-|dpu-imbalance-)/.test(id)
+  // v1.158.0 — `vdiff-warn-` joins its own family: the RESOLVE side already dwells on
+  // /^(vdiff-(warn|crit)|peer-voldiff)-/ (isCellImbalanceResolveDwellFamily) while the PUSH
+  // side held only the crit tier, so three of twenty pushes in the 09-13..15 window were
+  // ~3-minute settling excursions ([High] = severity warning, i.e. vdiff-warn-). Real
+  // home-pool episodes in that window ran 12-37 min, so the hold costs < 5 min of notice.
+  return /^(vdiff-crit-|vdiff-warn-|peer-voldiff-|peer-soc-|soc-low-|dpu-imbalance-)/.test(id)
     ? Math.max(defaultMs, SETTLE_PUSH_DEBOUNCE_MS)
     : defaultMs;
 }
@@ -395,6 +421,9 @@ interface TrackedAlert {
    *  refreshed every tick; this is what the permanent cleared record must carry,
    *  because it is the body that belongs to `firstSeen`. */
   openingAlert?: Alert;
+  /** v1.158.0 — when the PUSH dwell started (pushDwellStart). Defaults to firstSeen;
+   *  re-based while a rate collapse is held on an idle, non-alarm-path device. */
+  dwellFrom?: number;
   firstSeen: number;
   notified: boolean;
   /** v0.23.0 — severity at which this alert was last dispatched to the push
@@ -1054,8 +1083,14 @@ export function fallingEdgeFrozenByEvidence(p: {
  * no resolve push. A genuine recovery (soc back above the band with the pair
  * gone) still resolves — the successor is absent then, so this returns null.
  */
+/* v1.158.0 — `forecast-runtime-<SN>` belongs here too. Its producer stops at the floor by
+ * construction: analytics.ts gates the projection on `cur > reserve`, while alerts.ts raises
+ * shp2-below-reserve on `backupBatPercent <= reserve` — complements on the same field, so the
+ * successor is present the instant this id vanishes. Observed 2026-09-13: "Backup at reserve"
+ * pushed 21:42:40 and the pool stayed at the floor until 07:55, yet 21:47:43 pushed
+ * "Resolved: Projected runtime ~0h 12m to reserve" — a false all-clear at the worst moment. */
 export function resolveHandoffOwner(id: string, currentIds: ReadonlySet<string>): string | null {
-  if (!id.startsWith('backup-soc-')) return null;
+  if (!id.startsWith('backup-soc-') && !id.startsWith('forecast-runtime-')) return null;
   if (currentIds.has('shp2-below-reserve')) return 'shp2-below-reserve';
   if (currentIds.has('shp2-near-reserve')) return 'shp2-near-reserve';
   return null;
@@ -2439,6 +2474,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // so isAlertEscalation() (pure, tested) sees the queued severity too.
       const escalated = isAlertEscalation(existing, a.severity);
       const escDebounceMs = escalated && a.severity === 'critical' ? 0 : pushDebounceMsFor(a.id, debounceMs); // v1.88.0 settle-family hold-down
+      // v1.158.0 — a rate collapse held on an idle, non-alarm-path device does not run its
+      // push dwell (the card still stands); the dwell is re-earned when the device is active.
+      const idleHeldPush = a.id.startsWith('msg-rate-floor-') && rateFloorIdleHeldIds().has(a.id);
+      existing.dwellFrom = pushDwellStart(existing, idleHeldPush, now);
       // Quiet hours: warning/info is always queued for the morning digest.
       // v0.23.0 — critical breaks through ONLY when CRITICAL_BREAKS_QUIET_HOURS
       // is opted in; default OFF ⇒ critical is also queued (surfaces at the
@@ -2451,7 +2490,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         alreadyNotified: existing.notified,
         alreadyQueued: existing.queued === true,
         escalated,
-        debounceElapsed: now - existing.firstSeen >= escDebounceMs,
+        debounceElapsed: now - existing.dwellFrom >= escDebounceMs,
         inQuiet: quiet,
         breaksThrough,
       });

@@ -176,12 +176,25 @@ test('handoff detection is scoped to the band family only', () => {
   assert.equal(resolveHandoffOwner(`dpu-err-${SN}`, new Set(['shp2-below-reserve'])), null);
 });
 
+/* v1.158.0 — the runtime projection stops AT the floor (analytics gates on `cur > reserve`)
+ * while shp2-below-reserve raises on `<= reserve`: complements on the same field, so its
+ * vanish is a handoff, never a recovery. 2026-09-13 pushed "Resolved: Projected runtime
+ * ~0h 12m to reserve" at 21:47:43 while the pool sat at the floor until 07:55. */
+test('★ the runtime projection hands off at the floor instead of pushing a false all-clear', () => {
+  assert.equal(resolveHandoffOwner(`forecast-runtime-${SN}`, new Set(['shp2-below-reserve'])), 'shp2-below-reserve');
+  assert.equal(resolveHandoffOwner(`forecast-runtime-${SN}`, new Set(['shp2-near-reserve'])), 'shp2-near-reserve');
+  assert.equal(resolveHandoffOwner(`forecast-runtime-${SN}`, new Set()), null, 'a genuine recovery still resolves');
+  assert.equal(resolveHandoffOwner(`forecast-soc-dip-${SN}`, new Set(['shp2-below-reserve'])), null, 'scoped to the two families');
+});
+
 /* ═══ v1.88.0 — settle-family push debounce + auto-tuned resolve suppression ═ */
 
 import { pushDebounceMsFor, SETTLE_PUSH_DEBOUNCE_MS, shouldSendResolve } from '../src/alertMonitor.js';
 
 test('settle families hold their PUSH 5 minutes; everything else keeps the default', () => {
-  for (const id of ['vdiff-crit-SN-1', 'peer-voldiff-SN-2', 'peer-soc-SN-1', 'soc-low-SN-3', 'dpu-imbalance-SN']) {
+  // v1.158.0 — vdiff-warn- joined the push side; the resolve side (isCellImbalanceResolveDwellFamily)
+  // has always covered it, and the two disagreeing cost three settling-flap pushes on 09-14.
+  for (const id of ['vdiff-crit-SN-1', 'vdiff-warn-SN-1', 'peer-voldiff-SN-2', 'peer-soc-SN-1', 'soc-low-SN-3', 'dpu-imbalance-SN']) {
     assert.equal(pushDebounceMsFor(id, 60_000), SETTLE_PUSH_DEBOUNCE_MS, id);
   }
   assert.equal(pushDebounceMsFor('dpu-err-SN', 60_000), 60_000, 'a battery-protection fault is not settling noise');
