@@ -1,3 +1,34 @@
+## 1.159.0
+
+### A failing announcement no longer retries forever
+
+On 2026-09-15 the panel's cloud payload froze at 20:40, the critical went audible at 20:44,
+and `music_assistant.play_announcement` then returned HTTP 500 ("Server got itself in
+trouble") on every attempt for ten minutes. The log shows the same line three times —
+`deferred retry 1/3` at 20:47:12, 20:50:16 and 20:53:20 — for a single condition.
+
+**The budget could not count.** The deferred-retry timer cleared `retryLevel` before
+re-running the broadcast, and `scheduleBroadcastRetry` only sees a pending slot while that is
+set. Every failure therefore started from attempt 0, re-armed at 1, and could never reach the
+give-up rung: the announcement was re-attempted roughly every 30 s plus call time for as long
+as the service kept failing.
+
+- The slot now survives the timer firing, so the ladder is **1 → 2 → 3 → give up**.
+- `releaseRetrySlotIfIdle()` clears it whenever a broadcast ends with no retry armed, so a
+  stale level cannot make later milder deferrals "keep-pending" against a retry that no
+  longer exists.
+- Precedence is unchanged: a milder deferral never supersedes a pending severe retry, and a
+  more severe condition still gets a fresh budget.
+
+**Why it is more than noise.** This file's own single-flight comment records that overlapping
+`play_announcement` calls are what wedge Music Assistant into exactly these HTTP 500s, so an
+uncountable retry can sustain the failure it is retrying.
+
+**Not a duplicate-suppression change.** The SIP re-announce seen at 20:53:26 was a genuine
+red → yellow transition, not a replay; `skipSip` behaviour is untouched.
+
+5 tests and a new committed harness (`scripts/mutate-broadcast-retry.mjs`, 5 mutants).
+
 ## 1.158.0
 
 ### Three notification fixes from the 09-13..15 log audit

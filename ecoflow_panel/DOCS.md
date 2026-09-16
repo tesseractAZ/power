@@ -6401,6 +6401,18 @@ completion). A retry:
 - passes `skipSip = true` — the SIP target already got the audio on the first dispatch, so it isn't replayed on the cordless at +30/+90/+180 s;
 - resets `retryAttempt` to 0 on any verified success.
 
+**v1.159.0 — the budget now COUNTS.** The timer callback used to clear `retryLevel` before
+re-running the broadcast, and `scheduleBroadcastRetry` only sees a pending slot while that
+is set — so every failure started a fresh budget and the ladder logged `1/3` forever. On
+2026-09-15, with `music_assistant.play_announcement` returning HTTP 500 for ten minutes, the
+log shows `deferred retry 1/3` at 20:47:12, 20:50:16 and 20:53:20 for ONE condition. The slot
+now survives the fire (so the ladder is 1 → 2 → 3 → give up) and is released by
+`releaseRetrySlotIfIdle()` whenever a broadcast ends with no retry armed, so a stale level
+cannot make later milder deferrals "keep-pending" against a retry that no longer exists.
+This matters beyond the noise: the single-flight note below records that overlapping
+`play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
+sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
+
 ---
 
 ### 3. The audible dispatch: MA + SIP (`broadcast.ts`)
