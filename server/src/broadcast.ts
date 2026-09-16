@@ -762,6 +762,18 @@ export function startBroadcastMonitor(
   // we re-fire SIP — for an ALARM channel a rare duplicate beats silence.
   let lastSipDispatchOk = true;
   const RETRY_DELAYS_MS = [30_000, 90_000, 180_000];
+  /**
+   * v1.159.0 — release the deferred-retry slot when no retry is armed.
+   *
+   * The slot now outlives the timer (see the setTimeout below), so it must be cleared when
+   * a broadcast ends without arming a new retry — a verified delivery, an unverified one,
+   * or a give-up. Otherwise a stale `retryLevel` would make every later lower-level
+   * deferral "keep-pending" against a retry that does not exist, and no retry would ever
+   * be armed again.
+   */
+  const releaseRetrySlotIfIdle = () => {
+    if (retryTimer == null) { retryAttempt = 0; retryLevel = null; }
+  };
   const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string) => {
     const pending = retryTimer != null && retryLevel != null
       ? { level: retryLevel, attempt: retryAttempt }
@@ -788,7 +800,13 @@ export function startBroadcastMonitor(
     log(`broadcast: ${reason} — deferred retry ${retryAttempt}/${RETRY_DELAYS_MS.length} in ${Math.round(delay / 1000)}s`);
     retryTimer = setTimeout(() => {
       retryTimer = null;
-      retryLevel = null;
+      // v1.159.0 — do NOT clear retryLevel here. scheduleBroadcastRetry only sees a pending
+      // slot while `retryLevel != null`, so clearing it at fire time made every subsequent
+      // failure start from attempt 0: the budget never counted past 1 and the retry could
+      // never give up. Observed 2026-09-15 20:47:12 / 20:50:16 / 20:53:20 — three
+      // consecutive "deferred retry 1/3" for one condition while music_assistant
+      // .play_announcement returned HTTP 500, each cycle re-announcing. The slot is
+      // released by releaseRetrySlotIfIdle() when a broadcast ends with no retry pending.
       if (stopped) return;
       // v0.18.0 — a deferred retry is an AUTOMATIC condition-transition
       // broadcast, so it must honour the same enable gate as tick(). With
@@ -1488,6 +1506,7 @@ export function startBroadcastMonitor(
     lastBroadcastAt = Date.now(); lastLevel = level;
     lastOutcome = errors.length === 0 ? 'success' : 'partial';
     lastErrors = errors;
+    releaseRetrySlotIfIdle();
     persistStatus();
     return { ok: errors.length === 0, errors, verified: errors.length === 0 && !deliveryUnverified };
   };
