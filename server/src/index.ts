@@ -145,7 +145,7 @@ import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
 // them into real push alerts (mirrors broadcastHealth's set/get + pure-builder split).
-import { setRateFloorCollapses, type RateFloorCollapse } from './messageRateFloorAlert.js';
+import { setRateFloorCollapses, setRateFloorIdleHeld, type RateFloorCollapse } from './messageRateFloorAlert.js';
 import { getShedCandidates, initShedRegistry } from './loadShedRegistry.js';
 import * as haStateCache from './haStateCache.js';
 // v1.38.0 (night-charge WS4 integration) — wire the ADVISORY TOU-arbitrage
@@ -2935,6 +2935,10 @@ const rateFloorTick = setInterval(() => {
     // spent four heals on a healthy session, so the panel's genuine wedges the next
     // evening each ran on the last slot.
     const healQuorum = selfHealQuorum(collapses, idleSurfacedSns, alarmPathSns);
+    // v1.158.0 — the same set gates the PUSH dwell (the card is unchanged): a collapse held
+    // on an idle, non-alarm-path device pushed at 21:51 on 2026-09-13 against a session that
+    // had been healthy since 21:41. The alarm-path panel is never in idleExcluded, by identity.
+    setRateFloorIdleHeld(healQuorum.idleExcluded.map((m) => m.sn));
     for (const m of idleExclusionEdges(healIdleExcluded, healQuorum.idleExcluded)) {
       app.log.info(`self-heal: ${m.deviceName} no longer counts toward the heal quorum — it is electrically idle, so its held rate collapse no longer votes for a session rebuild; the alert stays until the rate recovers`);
     }

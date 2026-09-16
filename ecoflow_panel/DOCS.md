@@ -1915,6 +1915,22 @@ Accepted trade-off, pinned by a test: a Core that reads idle for a single tick d
 active wedge restarts the dwell when that tick drops the count below the quorum. Harness
 `scripts/mutate-heal-idle-quorum.mjs` (17/17).
 
+**v1.158.0 — the same set now also holds the PUSH.** v1.157.0 removed the heal vote for a
+held-idle device and left the notification, which is how three `[Medium] Device barely
+reporting` cards pushed at 21:51 on 2026-09-13 — twenty minutes after a collapse that the
+21:35 rebuild had already fixed (the panel was back at 31 msg/min by 21:41) — and stood until
+the packs woke at 07:04-07:29, telling the operator to check the cloud session and power on
+three healthy packs. The rate-floor tick publishes `selfHealQuorum`'s own `idleExcluded` set
+(`setRateFloorIdleHeld`), and `pushDwellStart` re-bases the 20-minute dwell for as long as an
+alert's device is in it, so the dwell is re-earned once the device is ACTIVE and still
+starved. The CARD is unchanged (same episode, same on-screen alert), the alarm-path panel is
+never held (identity), and a collapse that never idles pages at 20 minutes exactly as before.
+★ Deliberately UNCHANGED: `analytics.ts`'s `starvedSnsForBaseline` still reads the raw
+collapse set, so a held-idle collapse also suppresses the learned-baseline alert family for
+the life of the hold (9 h 30 m on 2026-09-13/14). Filtering it would resume raises on a pack
+whose feed genuinely is low-cadence; that needs evidence those raises are meaningful there.
+Harness: `scripts/mutate-push-dwell.mjs`.
+
 When ≥ `SELF_HEAL_MIN_DEVICES` (2) devices sit in a surfaced message-rate collapse that
 `selfHealQuorum` counts (not electrically idle this tick, or the alarm-path panel, which
 alone also satisfies the quorum — §12m)
@@ -5484,6 +5500,14 @@ An alert absent this tick is a candidate for "Resolved:". Several family-specifi
 | `isCellImbalanceResolveDwellFamily` (`vdiff-(warn|crit)-`, `peer-voldiff-`) | `VDIFF_RESOLVE_DWELL_MS` (3 min) | `VDIFF_RESOLVE_DWELL_MS` |
 | `isForecastDipResolveDwellFamily` (`forecast-soc-dip`) | `FORECAST_DIP_RESOLVE_DWELL_MS` (90 min) | `FORECAST_DIP_RESOLVE_DWELL_MS` |
 
+The PUSH side has its own hold-downs in `pushDebounceMsFor`: the settle families
+`vdiff-crit-`, **`vdiff-warn-` (v1.158.0)**, `peer-voldiff-`, `peer-soc-`, `soc-low-` and
+`dpu-imbalance-` wait `SETTLE_PUSH_DEBOUNCE_MS` (5 min), and `msg-rate-floor-` waits
+`MSG_RATE_PUSH_DEBOUNCE_MS` (20 min). v1.158.0 closed a push/resolve asymmetry: the warning
+tier of the cell-imbalance family dwelled on the way OUT but not on the way IN, so three of
+twenty pushes in the 09-13..15 window were ~3-minute settling excursions. Real home-pool
+episodes there ran 12-37 min, so the hold costs under 5 minutes of notice.
+
 Dwells are resolve-ONLY — they can never delay a fire, an escalation, or the audible alarm. If the alert reappears mid-dwell the rising-edge path clears `clearedSince`.
 
 Once the dwell passes: the notify-state record is deleted FIRST (so a failed resolve can't strand a record that eats a future re-fire), then `shouldSendResolve(t, notifyResolved, minSeverity)` gates the "Resolved:" push on `pushSent === true` (a REAL delivered fire, NOT boot-seeded `notified`), `annunciate !== false`, `notifyResolved`, and qualifying on the severity the fire was notified at. Outage events never resolve. Clears with `duration ≥ DEBOUNCE_MS` are recorded to `clearedLog` (at peak severity). `recordClear()` updates telemetry regardless of duration.
@@ -5699,6 +5723,13 @@ data freshness (`deviceEvidencePositive` = fresh **and** not currently offline);
   dedup transferring the story on a *worsening* transition, not a recovery: the
   tracked entry retires with **no resolve push** and one log line. A genuine band
   recovery (successor absent) resolves unchanged.
+  **v1.158.0 — `forecast-runtime-<SN>` joins the same rule.** Its producer stops AT the
+  floor by construction (analytics gates the projection on `cur > reserve`, while
+  `shp2-below-reserve` raises on `<= reserve`: complements on the same field), so its
+  vanish is always a handoff. On 2026-09-13 the pool reached the floor at 21:42 and stayed
+  there until 07:55, yet the phone read *"Resolved: Projected runtime ≈0h 12m to reserve"*
+  at 21:47 — a false all-clear during an active drawdown, the same class the band family's
+  handoff was built for.
 - **Resolves respect quiet hours** — a resolve owed inside `NOTIFY_QUIET_HOURS`
   holds (the tracked entry retries each tick) and delivers when the window opens.
   Fires were already gated; resolves were not, and landed at 00:02/00:53.
