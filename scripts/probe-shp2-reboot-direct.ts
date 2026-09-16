@@ -11,7 +11,7 @@
  *     <sn> <comma-separated 1-based candidate indices>
  *
  * Example — try only the safest two:
- *   ... probe-shp2-reboot-direct.ts HD31ZASAHH120432 1,10
+ *   ... probe-shp2-reboot-direct.ts HD31XXXXXX000019 1,10
  *
  * Candidates (same as scripts/probe-shp2-reboot.sh, kept in sync):
  *   1: { cmdCode: "PD303_APP_SET", params: {} }                    SAFE-ish (no params)
@@ -44,7 +44,7 @@ const CANDIDATES: Record<number, { label: string; body: Record<string, unknown> 
 async function main() {
   const [sn, idxList] = process.argv.slice(2);
   if (!sn || !idxList) {
-    console.error('usage: probe-shp2-reboot-direct.ts <sn> <indices>  e.g.  HD31ZASAHH120432 1,10');
+    console.error('usage: probe-shp2-reboot-direct.ts <sn> <indices>  e.g.  HD31XXXXXX000019 1,10');
     process.exit(2);
   }
   const indices = idxList.split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && CANDIDATES[n]);

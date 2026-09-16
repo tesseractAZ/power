@@ -64,7 +64,7 @@ export interface TelemetryGap {
    *  Why this exists: the fleet detector sets `sawHomeInsert` on ANY non-bench
    *  home SN (see `record()`), so ONE surviving core resets the clock for the
    *  whole fleet and a single-core blackout is invisible to it BY CONSTRUCTION.
-   *  Core 2 (Y711ZAB59GBC0482) recorded ZERO samples of EVERY metric from
+   *  Core 2 (Y711XXX00XXX0002) recorded ZERO samples of EVERY metric from
    *  2026-08-11 to 2026-08-19 — nine days, a third of the wired fleet — and the
    *  detector produced no record and no alert, because Cores 1 and 3 kept
    *  writing. The silence was found six weeks later, by reading a forecast

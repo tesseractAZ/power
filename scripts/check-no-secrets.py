@@ -13,6 +13,8 @@ This is the SECOND leak of personal data into this public repository.
     for 258 of the next 422 commits before v1.54.0 removed it.
   * Separately v0.72.0 / v0.91.0 / v1.47.3 published five real LAN addresses on
     the two home subnets, in DOCS.md, translations/en.yaml and a test fixture.
+  * Device serial numbers belong to the same class: a realistic fixture or doc
+    example copied from the hardware in front of you.
 
 A history rewrite fixes the past exactly once. Without an automated gate the
 same thing happens a third time, because the leak is never deliberate — it is
@@ -26,6 +28,8 @@ Flagged:
   * 192.168.5.x / 192.168.6.x — the two REAL home subnets.
   * The known personal email addresses.
   * The VoIP DID in any separator format, and voip.ms credential shapes.
+  * EcoFlow device serial SHAPES that are not placeholders (see SERIAL_SHAPE).
+    This rule also scans this file, which holds no real serial.
 
 Deliberately NOT flagged, because they are legitimate and appear at HEAD today:
   * 172.30.32.0/23 — the Home Assistant Supervisor hassio-network. Public,
@@ -78,6 +82,73 @@ PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "a VoIP.ms sub-account identifier (<account>_<subaccount>)"),
 ]
 
+# EcoFlow device serials. A serial is 16 uppercase alphanumerics: a public
+# 4-character model code (Y711, HD31, ...) and a 12-character identifier that
+# names one physical unit.
+#
+# The rule is SHAPE-based and lists no real serial, on purpose: a detector in a
+# public repo must not contain what it guards. The concrete values, their
+# lowercase entity-id forms and their partial tails are checked by a private
+# pre-push gate that is not part of this repository.
+#
+# Placeholders keep the model code and the letter/digit shape, with every letter
+# as X and every digit as 0 except a two-digit index, e.g. Y711XXX00XXX0015. The
+# older TEST... and DEADBEEF... fixture forms are accepted too.
+SERIAL_SHAPE = re.compile(r"(?<![A-Za-z0-9])[A-Z0-9]{16}(?![A-Za-z0-9])")
+PLACEHOLDER_TAIL = re.compile(r"[X0]{10}[0-9]{2}")
+
+# OPEN: these runtime sites still hold device serials, because replacing them
+# changes live behaviour (the bench-spare alarm mute, a shipped device alias, an
+# API default). They wait on an owner decision. Each count is pinned EXACTLY: a
+# new serial in the file fails, and so does fixing the site without deleting its
+# entry here.
+SERIAL_EXEMPT_COUNTS: dict[str, int] = {
+    "server/device-aliases.json": 1,
+    "server/src/index.ts": 1,
+    "server/src/shp2Membership.ts": 2,
+}
+
+
+def is_serial_shaped(tok: str) -> bool:
+    return any(c.isalpha() for c in tok) and any(c.isdigit() for c in tok)
+
+
+def is_placeholder_serial(tok: str) -> bool:
+    return bool(PLACEHOLDER_TAIL.fullmatch(tok[4:])) or tok.startswith(("TEST", "DEADBEEF"))
+
+
+def serial_self_test() -> None:
+    """A detector that cannot fire reports "clean" forever, so prove it fires first."""
+    synthetic = "Y711ABC12" "DEF3456"  # split so this file does not match itself
+    ok = (
+        [m.group(0) for m in SERIAL_SHAPE.finditer(f"id={synthetic};")] == [synthetic]
+        and is_serial_shaped(synthetic)
+        and not is_placeholder_serial(synthetic)
+        and is_placeholder_serial("Y711XXX00XXX0015")
+        and not SERIAL_SHAPE.search(synthetic + "7")
+    )
+    if not ok:
+        raise SystemExit("check-no-secrets: serial detector self-test FAILED; refusing to report clean")
+
+
+def serial_problems(found: dict[str, list[tuple[int, str]]]) -> list[str]:
+    out: list[str] = []
+    for rel in sorted(set(found) | set(SERIAL_EXEMPT_COUNTS)):
+        hits = found.get(rel, [])
+        pinned = SERIAL_EXEMPT_COUNTS.get(rel, 0)
+        if len(hits) == pinned:
+            continue
+        if len(hits) < pinned:
+            out.append(f"  {rel}: {len(hits)} serial-shaped token(s) where SERIAL_EXEMPT_COUNTS pins "
+                       f"{pinned}; the site changed, so update or delete its entry")
+            continue
+        # Never echo the token: the model code is public, the rest identifies a unit.
+        for lineno, model in hits:
+            out.append(f"  {rel}:{lineno}: serial-shaped token (model code {model}); "
+                       f"use a placeholder such as {model}XXX00XXX0001")
+    return out
+
+
 # This file necessarily contains the patterns it hunts for.
 SELF = Path(__file__).name
 
@@ -91,20 +162,32 @@ def main() -> int:
     problems: list[str] = []
     scanned = 0
 
+    serial_self_test()
+    serials: dict[str, list[tuple[int, str]]] = {}
+
     for rel in tracked_files():
-        if Path(rel).name == SELF:
-            continue
         path = ROOT / rel
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue  # binary or unreadable — nothing to match
         scanned += 1
-        for lineno, line in enumerate(text.splitlines(), 1):
+        is_self = Path(rel).name == SELF
+        # split("\n"), not splitlines(): splitlines() also breaks on U+2028 and
+        # form feeds, which shifts reported line numbers away from the editor's.
+        for lineno, line in enumerate(text.split("\n"), 1):
+            for m in SERIAL_SHAPE.finditer(line):
+                tok = m.group(0)
+                if is_serial_shaped(tok) and not is_placeholder_serial(tok):
+                    serials.setdefault(rel, []).append((lineno, tok[:4]))
+            if is_self:
+                continue
             for pat, why in PATTERNS:
                 m = pat.search(line)
                 if m:
                     problems.append(f"  {rel}:{lineno}: {m.group(0)!r} — {why}")
+
+    problems.extend(serial_problems(serials))
 
     if problems:
         print("check-no-secrets: FAILED — personal data must not reach a public repo",
@@ -115,7 +198,9 @@ def main() -> int:
               "skip, and do NOT disable this check.", file=sys.stderr)
         return 1
 
-    print(f"check-no-secrets: OK — {scanned} tracked text files clean")
+    pinned = sum(SERIAL_EXEMPT_COUNTS.values())
+    print(f"check-no-secrets: OK — {scanned} tracked text files clean "
+          f"({pinned} serial-shaped token(s) pinned in {len(SERIAL_EXEMPT_COUNTS)} file(s), pending removal)")
     return 0
 
 

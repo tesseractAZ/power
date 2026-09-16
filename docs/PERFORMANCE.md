@@ -32,27 +32,27 @@ The design goal (DOCS.md §8, §10) is a steep annunciation pyramid: a wide base
 
 | Cleared (MST) | Subject | Duration |
 |---|---|---|
-| 2026-09-05 10:08 | `dpu-err-Y711ZABA9H3T0489` — the Core 4 inverter error carrying the migrated defective pack (§4) | 3.3 min |
+| 2026-09-05 10:08 | `dpu-err-Y711XXXX0X0X0004` — the Core 4 inverter error carrying the migrated defective pack (§4) | 3.3 min |
 
 This is the same event the prior snapshot recorded; it falls inside both seven-day windows. No new critical has cleared since.
 
-**Top subjects in the window** — 97 rises collapse onto 30 subjects, and **the head has changed completely**. The prior window was led by the Core 3 pack-1 voltage cluster (`peer-voldiff-…J234000-1` ×13, `vdiff-warn-…J234000-1` ×13, `dpu-imbalance-…J234000` ×8); **none of those three appears in this window's head at all**. The head is now the telemetry-rate family, spread across three separate DPUs:
+**Top subjects in the window** — 97 rises collapse onto 30 subjects, and **the head has changed completely**. The prior window was led by the Core 3 pack-1 voltage cluster (`peer-voldiff-…X000014-1` ×13, `vdiff-warn-…X000014-1` ×13, `dpu-imbalance-…X000014` ×8); **none of those three appears in this window's head at all**. The head is now the telemetry-rate family, spread across three separate DPUs:
 
 | Count | Subject |
 |---|---|
-| 9 | `msg-rate-floor-HD31ZASAHH120432` |
-| 8 | `baseline-mppt_hv_temp-…J234000` (Core 3) |
-| 7 | `msg-rate-floor-…GBC0314` (Core 1) |
-| 6 | `baseline-mppt_lv_temp-…GBC0314` (Core 1) |
+| 9 | `msg-rate-floor-HD31XXXXXX000019` |
+| 8 | `baseline-mppt_hv_temp-…X000014` (Core 3) |
+| 7 | `msg-rate-floor-…XXX0015` (Core 1) |
+| 6 | `baseline-mppt_lv_temp-…XXX0015` (Core 1) |
 | 6 | `shp2-below-reserve` |
-| 6 | `msg-rate-floor-…G9P0090` |
-| 5 | `vdiff-warn-…H3T0489-4` (Core 4, pack **4**) |
-| 5 | `baseline-mppt_lv_temp-…J234000` (Core 3) |
+| 6 | `msg-rate-floor-…X0X0003` |
+| 5 | `vdiff-warn-…X0X0004-4` (Core 4, pack **4**) |
+| 5 | `baseline-mppt_lv_temp-…X000014` (Core 3) |
 
 Two things are worth stating precisely, because both invite a wrong reading:
 
 - **`msg-rate-floor` on three DPUs (22 of 97 rises) is the single largest family.** It is a telemetry-cadence signal, not a battery one — which is also why the Connectivity category rose (20 → 31) while Battery fell (60 → 34). The category shift is largely this one family moving to the head, not a fleet-wide change in battery behaviour.
-- **`vdiff-warn-…H3T0489-4` is Core 4 pack _4_ — not the confirmed defective pack**, which is Core 4 pack **1** (§4). Adjacent serial, adjacent chassis, different slot. The confirmed defect's own subject is absent from this window's head.
+- **`vdiff-warn-…X0X0004-4` is Core 4 pack _4_ — not the confirmed defective pack**, which is Core 4 pack **1** (§4). Adjacent serial, adjacent chassis, different slot. The confirmed defect's own subject is absent from this window's head.
 
 **Broadcast path**, live at time of writing: `enabled`, `targetCount` **3** (2 Music Assistant + 1 SIP cordless — the SIP leg became visible on this route only in v1.131.0; before that it reported 2 of 3), `audibleReachable: true`, last delivery `yellow`/`success`, `stormSuppressedCount` 0.
 
@@ -220,12 +220,12 @@ asking whether it had.*
 
 ## 4. Fleet health summary
 
-**The Core 3 Pack 1 episode resolved into a confirmed pack defect, and it moved.** The 2026-08-20 physical swap relocated pack `Y712ZABA4H350037` from Core 3 to **Core 4**, and the fault followed the pack. That is the discriminating evidence: the chassis is clean, the pack is defective. `/api/defective-packs` as of 2026-09-11 — **byte-identical to the prior reading**:
+**The Core 3 Pack 1 episode resolved into a confirmed pack defect, and it moved.** The 2026-08-20 physical swap relocated pack `Y712XXXX0X000008` from Core 3 to **Core 4**, and the fault followed the pack. That is the discriminating evidence: the chassis is clean, the pack is defective. `/api/defective-packs` as of 2026-09-11 — **byte-identical to the prior reading**:
 
 | Field | Value |
 |---|---|
-| `packSn` | `Y712ZABA4H350037` |
-| Host now | **Core 4** (`Y711ZABA9H3T0489`) — was Core 3 before the 2026-08-20 swap |
+| `packSn` | `Y712XXXX0X000008` |
+| Host now | **Core 4** (`Y711XXXX0X0X0004`) — was Core 3 before the 2026-08-20 swap |
 | `socPct` vs `siblingMedianSocPct` | **1%** vs **86%** |
 | `packAbsW` vs `siblingMedianAbsW` | **1 W** vs **350 W** |
 | `deviantCell` | **31** |
@@ -234,9 +234,9 @@ asking whether it had.*
 
 The signature is unchanged from the July trace — SoC pinned near zero while siblings cycle, one deviant cell, spread latched — but it is now attached to a serial number rather than a chassis position. `confirmedAtMs` is identical across both snapshots, which is the expected reading for a latched confirmation and the one that would have shown a spurious re-confirmation had one occurred.
 
-**Update — the Core 3 voltage cluster has left the head of the subject list.** The prior snapshot recorded the Core 3 chassis, holding a *different* pack since the swap, producing the head of the 7-day list (`peer-voldiff-…J234000-1` ×13, `vdiff-warn-…J234000-1` ×13, `dpu-imbalance-…J234000` ×8) and correctly called it a separate condition rather than the migrated defect. **None of those three subjects appears in the current window's head at all** (§1). Core 3 is still represented — by `baseline-mppt_hv_temp` ×8 and `baseline-mppt_lv_temp` ×5, which are thermal-baseline subjects, not voltage ones.
+**Update — the Core 3 voltage cluster has left the head of the subject list.** The prior snapshot recorded the Core 3 chassis, holding a *different* pack since the swap, producing the head of the 7-day list (`peer-voldiff-…X000014-1` ×13, `vdiff-warn-…X000014-1` ×13, `dpu-imbalance-…X000014` ×8) and correctly called it a separate condition rather than the migrated defect. **None of those three subjects appears in the current window's head at all** (§1). Core 3 is still represented — by `baseline-mppt_hv_temp` ×8 and `baseline-mppt_lv_temp` ×5, which are thermal-baseline subjects, not voltage ones.
 
-Whether the voltage cluster resolved or merely fell below the window's head is **not established**: the 7-day window is a head-of-list ranking, not a presence test, and this document does not have the per-subject trend series that would settle it. It is recorded because the prior snapshot made a specific claim about that chassis which is no longer supported by the current measurement. The alert surface for the confirmed defect itself remains live: `dpu-err-Y711ZABA9H3T0489` cleared a **critical** on 2026-09-05 (3.3 min, §1).
+Whether the voltage cluster resolved or merely fell below the window's head is **not established**: the 7-day window is a head-of-list ranking, not a presence test, and this document does not have the per-subject trend series that would settle it. It is recorded because the prior snapshot made a specific claim about that chassis which is no longer supported by the current measurement. The alert surface for the confirmed defect itself remains live: `dpu-err-Y711XXXX0X0X0004` cleared a **critical** on 2026-09-05 (3.3 min, §1).
 
 **Warranty status:** the vendor's own diagnosis names two candidate causes — a short circuit **or** a voltage-sampling module fault. Both are pack-side. Error 533 titles as "Inverter error" but the 5xx family is battery/BMS; it has stood since 2026-07-20. A claim bundle is exportable via `/api/warranty-export`.
 
@@ -366,7 +366,7 @@ Conditions below read as gaps by design. They are listed so an `unknown`/null re
 - **★ `bandSigmaCal = 1` was ambiguous across five states** — *new, found and fixed 2026-09-11*. The published shrink multiplier read `1` whether the calibration was **saturated** (active, band too narrow, `Math.min(1, …)` forbidding a widen), **uncalibrated** (never engaged — the v1.23.0 production defect), exactly 1 by coincidence, an operator override of 1, or — in the durable ledger column — simply absent, via an `?? 1` fallback. The prior snapshot inspected this field and checked only the *floor* ambiguity. v1.149.0 publishes `bandSigmaCalBasis` beside it and writes `null` rather than `1` for a missing forecast; `scripts/mutate-band-cal-basis.mjs` holds it with 7 mutants. Full account in §2.
 - **Delivery over-shoot is real but formally unmeasured** — *new, 2026-09-11*. Every actuated night in the current sample delivered **48–55% more** than the sized buy (~+10 kWh), against a readiness criterion requiring delivery bias in [0, 5] kWh. `buyBiasKwh` nonetheless reads `null`, because all fifteen nights are exempted from the sizing judgement as disclosed cushion shortfalls. One criterion's exemption is suppressing another criterion's measurement. Six nights is not a distribution and no conclusion is drawn — this is recorded so that if the cushion exemption ever lifts, the over-shoot is already on the record as the first thing to examine.
 - **The load over-forecast signature resolved on its own** — *closed 2026-09-11*. The prior snapshot recorded 19–39 kWh of one-directional load over-forecast on five consecutive nights and declined to fit a correction to it. The current sample alternates sign at a fraction of the magnitude and the aggregate bias improved without intervention (§2). Had a bias factor been fitted to the transient, it would now be pushing an unbiased forecast in the **unsafe** direction. Listed as a closed item rather than deleted, because the value was in the restraint.
-- **★★★ A third of the fleet went dark for nine days and nothing said so** — *new, 2026-09-11; partially fixed v1.150.0*. Core 2 (`Y711ZAB59GBC0482`) recorded **zero samples of every metric from 2026-08-11 to 2026-08-19**. No log line, no alert, no telemetry-gap record. The gap detector sets `sawHomeInsert` on **any** non-bench home SN, so Cores 1 and 3 writing normally reset the fleet clock on every batch and a single-core blackout was invisible to it *by construction*. It surfaced six weeks later only as a second-order effect — fleet PV sums across that window returned **32%** of true production, and the resulting phantom forecast misses closed the night-charge basis gate. v1.150.0 adds a per-device staleness sweep (6 h threshold, one record per blackout, bench spares exempt). **What is still open:** nothing reconciles a dark window against the vendor's own daily totals, which *did* show the disagreement the whole time — `driftSolarPct` read **+47%** through the episode and has **zero consumers** anywhere in the codebase.
+- **★★★ A third of the fleet went dark for nine days and nothing said so** — *new, 2026-09-11; partially fixed v1.150.0*. Core 2 (`Y711XXX00XXX0002`) recorded **zero samples of every metric from 2026-08-11 to 2026-08-19**. No log line, no alert, no telemetry-gap record. The gap detector sets `sawHomeInsert` on **any** non-bench home SN, so Cores 1 and 3 writing normally reset the fleet clock on every batch and a single-core blackout was invisible to it *by construction*. It surfaced six weeks later only as a second-order effect — fleet PV sums across that window returned **32%** of true production, and the resulting phantom forecast misses closed the night-charge basis gate. v1.150.0 adds a per-device staleness sweep (6 h threshold, one record per blackout, bench spares exempt). **What is still open:** nothing reconciles a dark window against the vendor's own daily totals, which *did* show the disagreement the whole time — `driftSolarPct` read **+47%** through the episode and has **zero consumers** anywhere in the codebase.
 - **★ The forecast-skill scorer applies TODAY's fleet membership to 30 days of history** — *new, 2026-09-11, DELIBERATELY NOT YET FIXED*. `computeForecastSkill` resolves the roster once at report time (`analytics.ts:5251`) and applies it retroactively to every hindcast day. Core 3 was a home-pool core through 2026-08-19 with **18.2–22.8 kWh/day sitting in the recorder**, and is excluded from those days purely because it is on the bench *today*. The coverage gate that should have caught the result was disarmed by v1.94.0's `skipBeforeJoin`, which infers *"had not joined yet"* from *"has no recorder rows yet"* — **the identical signal a blackout produces**. This is the same membership-change defect family as the v1.92.0–v1.100.0 cluster, in a new place. It is not fixed in v1.150.0 for a stated reason: correcting it nulls the eight bad days, which reopens the basis gate *and* narrows the published band **3.5×** (`producedHalfFrac` 0.5549 → 0.3998) in one step. The condition self-clears as the block ages out of the 30-day window; the fix belongs after that, measured against a clean baseline, not on top of a live artifact.
 - **★ Robustifying the band quantile would make the gate WORSE, measured** — *new, 2026-09-11*. The obvious response to eight outlier days is a trimmed or median-based estimator. Tested against the live 29 errors with the exact `producedHalfFrac` 0.5549: median → **66%**, 20% trimmed mean → **66%**, median+1.282·MAD → **69%**, P80-of-clean-days → **66%** — every one *below* the current 72%. Coverage does not read the quantile; it counts errors under `producedHalfFrac × bandCal`, and the quantile only sets `bandCal`. A **high** quantile saturates `bandCal` at 1, which makes the threshold as wide as it can be; a smaller quantile floor-pins `bandCal` at 0.4 and collapses the threshold, ejecting two legitimate days. Recorded because the intuition is strong and wrong, and acting on it would have been a regression in a life-safety gate.
 - **★ The basis gate is effectively a SATURATION detector, not a coverage test** — *new, 2026-09-11*. Derived and verified: in the `shrunk` regime the threshold equals `realizedHalfFrac = errs[k-1]`, and in `floor-pinned` it exceeds it, so coverage ≥ `k/n` = `ceil(0.8(n+1))/n`, which is **83–86% for every n in [14,30]** — always above the 0.78 bar. The gate can therefore fail **only** when `bandSigmaCalBasis == 'saturated'`. The coverage percentage is downstream of that flag rather than an independent measure of forecast quality, which is what v1.149.0's `bandSigmaCalBasis` makes visible.

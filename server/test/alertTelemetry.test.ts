@@ -14,7 +14,7 @@ const { appendTelemetryEvent, readRecentTelemetry, readAllTelemetry } =
 test('appendTelemetryEvent + readAll — round-trips one event', () => {
   appendTelemetryEvent({
     familyKey: 'pack-hot',
-    alertId: 'pack-hot-Y711ZAB59GBC0314-3',
+    alertId: 'pack-hot-Y711XXX00XXX0015-3',
     event: 'rise',
     ts: Date.now(),
   });
@@ -29,7 +29,7 @@ test('appendTelemetryEvent + readAll — round-trips one event', () => {
 test('appendTelemetryEvent — persists durationMs on shortClear / longActive', () => {
   appendTelemetryEvent({
     familyKey: 'pack-hot',
-    alertId: 'pack-hot-Y711ZAB59GBC0314-3',
+    alertId: 'pack-hot-Y711XXX00XXX0015-3',
     event: 'shortClear',
     ts: Date.now(),
     durationMs: 5 * 60 * 1000,

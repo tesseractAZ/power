@@ -20,10 +20,10 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * hardcoded list every time the panel goes quiet.
  */
 
-const CORE1 = 'Y711ZAB59GBC0314';   // home pool
-const CORE2 = 'Y711ZAB59GBC0482';   // home pool
-const CORE5 = 'Y711ZAB59G9P0090';   // home pool (took slot 3 on 08-20)
-const CORE3 = 'Y711FAB59J234000';   // OFF-PANEL since 08-20, NOT in SPARE_DPU_SNS
+const CORE1 = 'Y711XXX00XXX0015';   // home pool
+const CORE2 = 'Y711XXX00XXX0002';   // home pool
+const CORE5 = 'Y711XXX00X0X0003';   // home pool (took slot 3 on 08-20)
+const CORE3 = 'Y711XXX00X000014';   // OFF-PANEL since 08-20, NOT in SPARE_DPU_SNS
 const LAST_KNOWN = new Set([CORE1, CORE2, CORE5]);
 
 const dpu = (sn: string, soc: number, online = true): DeviceSnapshot => ({

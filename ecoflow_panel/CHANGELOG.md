@@ -605,7 +605,7 @@ degradation — reading as exactly the thing the report exists to find.
 
 ### A third of the fleet went dark for nine days and nothing said so
 
-Core 2 (`Y711ZAB59GBC0482`) recorded **zero samples of every metric from
+Core 2 (`Y711XXX00XXX0002`) recorded **zero samples of every metric from
 2026-08-11 to 2026-08-19**. No log line, no alert, no telemetry-gap record.
 
 The gap detector sets `sawHomeInsert` on **any** non-bench home SN, so Cores 1

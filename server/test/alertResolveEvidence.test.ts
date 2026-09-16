@@ -12,14 +12,14 @@ import {
  * with fresh telemetry. Absence of data is absence of data.
  */
 
-const SN = 'Y711FAB59J234000';
-const ROSTER = [SN, 'Y711ZAB59GBC0314', 'Y711ZAB59GBC0482'] as const;
+const SN = 'Y711XXX00X000014';
+const ROSTER = [SN, 'Y711XXX00XXX0015', 'Y711XXX00XXX0002'] as const;
 const NOW = 1_786_000_000_000;
 
 test('alertSourceSn: ids carry their subject SN; system alerts carry none', () => {
   assert.equal(alertSourceSn(`dpu-err-${SN}`, ROSTER), SN);
   assert.equal(alertSourceSn(`vdiff-crit-${SN}-1`, ROSTER), SN);
-  assert.equal(alertSourceSn(`soc-low-Y711ZAB59GBC0314-4`, ROSTER), 'Y711ZAB59GBC0314');
+  assert.equal(alertSourceSn(`soc-low-Y711XXX00XXX0015-4`, ROSTER), 'Y711XXX00XXX0015');
   assert.equal(alertSourceSn('telemetry-blind', ROSTER), null);
   assert.equal(alertSourceSn('peak-grid-draw', ROSTER), null);
   assert.equal(alertSourceSn('shp2-near-reserve', ROSTER), null);
@@ -118,7 +118,7 @@ test('online:true with fresh data resolves normally; missing flag stays neutral'
 
 /* ─── v1.78.0 — explicit sourceSn closes the SN-less-id hole ──────────────── */
 
-const SHP2SN = 'HD31ZASAHH120432';
+const SHP2SN = 'HD31XXXXXX000019';
 
 test('THE MOTIVATING CASE: shp2-src-err-3 with sourceSn freezes on an offline-but-fresh SHP2', () => {
   // v1.77.0 shipped to close the 04:17 false "Resolved: Energy source error"

@@ -10,7 +10,7 @@ import { sohSignalBelowFloor } from '../src/analytics.js';
 const HOUR = 3_600_000;
 const series = (vals: number[]) => vals.map((value, i) => ({ ts: i * HOUR, value }));
 
-test('sohSignalBelowFloor — TRUE for the live Y711FAB59J234000 pack 2 shape (98.6% SoH, ~0.5pt net drop over 5 quantized values)', () => {
+test('sohSignalBelowFloor — TRUE for the live Y711XXX00X000014 pack 2 shape (98.6% SoH, ~0.5pt net drop over 5 quantized values)', () => {
   const vals = [
     ...Array(40).fill(99.14),
     ...Array(15).fill(98.72),

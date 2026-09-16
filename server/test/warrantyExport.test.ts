@@ -11,7 +11,7 @@ import { buildWarrantyBundle, renderWarrantyMarkdown, renderWarrantyCsv } from '
  * renders carry every number the RMA thread needs.
  */
 
-const SN = 'Y711FAB59J234000';
+const SN = 'Y711XXX00X000014';
 
 function device() {
   return {
@@ -54,7 +54,7 @@ test('history: admitted by id-contains-SN OR sourceSn, other devices excluded, n
 
 test('markdown render carries the numbers the RMA thread needs', () => {
   const md = renderWarrantyMarkdown(buildWarrantyBundle(device(), CLEARED as any, '2026-08-19T12:00:00Z'));
-  assert.match(md, /Core 3 \(Y711FAB59J234000\)/);
+  assert.match(md, /Core 3 \(Y711XXX00X000014\)/);
   assert.match(md, /Device error code: \*\*533\*\*/);
   assert.match(md, /\| 1 \| PACK1SN \| 4 \| 99 \|/);
   assert.match(md, /cells 1–4: 3300, 3298, 3202, 3305/);
@@ -79,9 +79,9 @@ test('csv render: one row per cell, only packs with a real grid', () => {
  * backwards — the claim is about the pack.
  * ═══════════════════════════════════════════════════════════════════════ */
 
-const OLD_CHASSIS = 'Y711FAB59J234000';
-const NEW_CHASSIS = 'Y711ZABA9H3T0489';
-const MOVER = 'Y712ZABA4H350037';
+const OLD_CHASSIS = 'Y711XXX00X000014';
+const NEW_CHASSIS = 'Y711XXXX0X0X0004';
+const MOVER = 'Y712XXXX0X000008';
 
 function movedDevice() {
   return {
@@ -90,7 +90,7 @@ function movedDevice() {
       kind: 'dpu', soc: 47, errCode: 0,
       packs: [
         { num: 1, packSn: MOVER, soc: 1, actSoh: 98, maxVolDiffMv: 130, cellVoltagesMv: [3019, 3149, 3125, 3125] },
-        { num: 2, packSn: 'Y712ZABA4H350028', soc: 60, actSoh: 97, maxVolDiffMv: 4 },
+        { num: 2, packSn: 'Y712XXXX0X000018', soc: 60, actSoh: 97, maxVolDiffMv: 4 },
       ],
     },
   };
@@ -103,7 +103,7 @@ const HISTORY_UNDER_OLD_CHASSIS = [
   { alert: { id: `soc-low-${OLD_CHASSIS}-1`, severity: 'warning', title: 'Pack nearly empty', sourcePackSn: MOVER },
     raisedAt: Date.UTC(2026, 7, 1, 8), clearedAt: Date.UTC(2026, 7, 1, 9), durationMs: 3_600_000 },
   // A DIFFERENT pack that stayed behind in the old chassis — must not follow.
-  { alert: { id: `vdiff-warn-${OLD_CHASSIS}-3`, severity: 'warning', title: 'Cell imbalance', sourcePackSn: 'Y712ZA1A4H4P0111' },
+  { alert: { id: `vdiff-warn-${OLD_CHASSIS}-3`, severity: 'warning', title: 'Cell imbalance', sourcePackSn: 'Y712XX0X0X0X0006' },
     raisedAt: Date.UTC(2026, 7, 2, 8), clearedAt: Date.UTC(2026, 7, 2, 9), durationMs: 3_600_000 },
 ];
 
@@ -118,7 +118,7 @@ test('v1.102.0 — a pack that changed chassis brings its history with it', () =
 test('v1.102.0 — ?packSn= narrows the bundle to ONE pack wherever it has lived', () => {
   const withSibling = [
     ...HISTORY_UNDER_OLD_CHASSIS,
-    { alert: { id: `vdiff-warn-${NEW_CHASSIS}-2`, severity: 'warning', title: 'Sibling noise', sourcePackSn: 'Y712ZABA4H350028' },
+    { alert: { id: `vdiff-warn-${NEW_CHASSIS}-2`, severity: 'warning', title: 'Sibling noise', sourcePackSn: 'Y712XXXX0X000018' },
       raisedAt: 1, clearedAt: 2, durationMs: 1 },
   ];
   const all = buildWarrantyBundle(movedDevice(), withSibling as any, '2026-08-22T12:00:00Z');

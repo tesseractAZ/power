@@ -31,18 +31,18 @@ test('isSocResolveDwellFamily — matches the soc-low pack family only', () => {
   assert.equal(isSocResolveDwellFamily({ id: 'soc-low-HD31ZAS-1' }), true);
   assert.equal(isSocResolveDwellFamily({ id: 'soc-low-R3PLUS123-2' }), true);
   // Other families keep immediate resolve — not in scope.
-  assert.equal(isSocResolveDwellFamily({ id: 'dpu-err-GBC0314' }), false);
+  assert.equal(isSocResolveDwellFamily({ id: 'dpu-err-XXX0015' }), false);
   assert.equal(isSocResolveDwellFamily({ id: 'baseline-ch1_w-SN' }), false);
   assert.equal(isSocResolveDwellFamily({ id: 'cell-imbalance-SN-3' }), false);
   assert.equal(isSocResolveDwellFamily({ id: 'shp2-below-reserve' }), false);
 });
 
 test('v0.77.0 — isCellImbalanceResolveDwellFamily matches the vdiff warn/crit family only', () => {
-  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-warn-Y711FAB59J234000-1' }), true);
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-warn-Y711XXX00X000014-1' }), true);
   assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-crit-HD31ZAS-2' }), true);
   // Not the soc-low family (that has its own dwell) and not other families.
   assert.equal(isCellImbalanceResolveDwellFamily({ id: 'soc-low-HD31ZAS-1' }), false);
-  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'dpu-err-GBC0314' }), false);
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'dpu-err-XXX0015' }), false);
   assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-something-else' }), false);
   // The two dwell families are disjoint (each gets its own resolve-dwell block).
   assert.equal(
@@ -78,13 +78,13 @@ test('notifyLocator — system-wide alerts get an empty locator (clean titles)',
 
 test('notifyDedupId — uses the SN-bearing alert id, so distinct packs are distinct', () => {
   const p1 = notifyDedupId({ id: 'soc-low-HD31ZAS-1' });
-  const p2 = notifyDedupId({ id: 'soc-low-G9P0090-1' });
+  const p2 = notifyDedupId({ id: 'soc-low-X0X0003-1' });
   const p3 = notifyDedupId({ id: 'soc-low-R3PLUS-1' });
   assert.equal(new Set([p1, p2, p3]).size, 3);
 });
 
 test('haNotificationId — three packs map to THREE distinct HA cards (was one)', () => {
-  const ids = ['soc-low-HD31ZAS-1', 'soc-low-G9P0090-1', 'soc-low-R3PLUS-1'].map((id) =>
+  const ids = ['soc-low-HD31ZAS-1', 'soc-low-X0X0003-1', 'soc-low-R3PLUS-1'].map((id) =>
     haNotificationId(notifyDedupId({ id }), 'warning'),
   );
   assert.equal(new Set(ids).size, 3, 'each pack must get its own card');

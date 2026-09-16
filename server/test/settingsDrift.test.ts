@@ -16,7 +16,7 @@ import {
  * ═════════════════════════════════════════════════════════════════════════ */
 
 const shp2 = (over: Record<string, unknown> = {}): SurfaceDevice => ({
-  sn: 'HD31ZASAHH120432', label: 'Smart Home Panel 2', kind: 'shp2',
+  sn: 'HD31XXXXXX000019', label: 'Smart Home Panel 2', kind: 'shp2',
   raw: {
     ch1ForceCharge: 'FORCE_CHARGE_OFF', ch2ForceCharge: 'FORCE_CHARGE_OFF',
     ch3ForceCharge: 'FORCE_CHARGE_OFF', smartBackupMode: 2, backupReserveSoc: 10,
@@ -38,7 +38,7 @@ const dpu = (sn: string, label: string, over: Record<string, unknown> = {}): Sur
 });
 
 test('extraction: SHP2 flat-first with pd303_mc fallback; DPU prefixed keys', () => {
-  const flat = extractSettingsSurface([shp2(), dpu('Y711ZAB59GBC0314', 'Core 1')]);
+  const flat = extractSettingsSurface([shp2(), dpu('Y711XXX00XXX0015', 'Core 1')]);
   assert.equal(flat['Smart Home Panel 2 · ch1ForceCharge'], 'FORCE_CHARGE_OFF');
   assert.equal(flat['Core 1 · sysWordMode'], 0);
   // fallback: flat key absent, prefixed present
@@ -76,7 +76,7 @@ test('a one-tick transient that reverts never announces', () => {
 
 test('OFFLINE IS NOT DRIFT: a device disappearing (Core 2) announces nothing; its return re-baselines silently', () => {
   const state = freshDriftState();
-  const both = [shp2(), dpu('Y711ZAB59GBC0482', 'Core 2')];
+  const both = [shp2(), dpu('Y711XXX00XXX0002', 'Core 2')];
   evaluateDrift(state, extractSettingsSurface(both));
   // Core 2 drops off — its keys vanish from the surface
   const gone = evaluateDrift(state, extractSettingsSurface([shp2()]));
@@ -85,7 +85,7 @@ test('OFFLINE IS NOT DRIFT: a device disappearing (Core 2) announces nothing; it
   // it returns with a DIFFERENT sysBackupSoc than before it left — still silent:
   // the both-sides rule diffs against the retained baseline… which kept the old
   // value, so this IS a diffable change and must confirm normally.
-  const returned = [shp2(), dpu('Y711ZAB59GBC0482', 'Core 2', { 'hs_yj751_pd_app_set_info_addr.sysBackupSoc': 30 })];
+  const returned = [shp2(), dpu('Y711XXX00XXX0002', 'Core 2', { 'hs_yj751_pd_app_set_info_addr.sysBackupSoc': 30 })];
   evaluateDrift(state, extractSettingsSurface(returned));
   const confirmed = evaluateDrift(state, extractSettingsSurface(returned));
   assert.deepEqual(confirmed.confirmedChanges, [{ key: 'Core 2 · sysBackupSoc', from: 50, to: 30 }],

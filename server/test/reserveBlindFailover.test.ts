@@ -24,7 +24,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeAlerts, type Alert } from '../src/alerts.js';
-import { homeFleetMeanSoc, isHomePoolDpu, shp2ConnectedDpuSns } from '../src/shp2Membership.js';
+import { SPARE_DPU_SNS, homeFleetMeanSoc, isHomePoolDpu, shp2ConnectedDpuSns } from '../src/shp2Membership.js';
 import { applySilencingRules, ENERGY_STATE_FAMILIES, type AlertActionStats } from '../src/alertMonitor.js';
 import { familyOf } from '../src/alertOutcomes.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
@@ -58,7 +58,7 @@ function dpu(sn: string, soc: number, online = true): DeviceSnapshot {
 
 function shp2(opts: { pool: number | null; online?: boolean; lastUpdated?: number }): DeviceSnapshot {
   return {
-    sn: 'HD31ZASAHH120432', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
+    sn: 'HD31XXXXXX000019', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
     online: opts.online ?? true, lastUpdated: opts.lastUpdated ?? now,
     projection: { kind: 'shp2', backupBatPercent: opts.pool, backupReserveSoc: 15, sources: [], pairedCircuits: [] } as any,
   } as DeviceSnapshot;
@@ -79,10 +79,10 @@ function conn(backupPoolUnknownSinceMs: number | null) {
 
 const blind = (a: Alert[]) => a.find((x) => x.id === 'reserve-alarm-blind');
 
-// Home Cores (real SNs); Core 4 is a designated bench spare.
-const CORE1 = 'Y711ZAB59GBC0314';
-const CORE2 = 'Y711ZAB59GBC0482';
-const SPARE4 = 'Y711ZABA9H3T0489';
+// Home Cores (placeholder SNs); Core 4 is a designated bench spare.
+const CORE1 = 'Y711XXX00XXX0015';
+const CORE2 = 'Y711XXX00XXX0002';
+const [SPARE4] = [...SPARE_DPU_SNS] as [string]; // read from the literal rather than restated here
 
 /* ── F3(a): homeFleetMeanSoc ───────────────────────────────────────────── */
 
@@ -91,7 +91,7 @@ test('homeFleetMeanSoc — mean of ONLINE home Cores; spares and offline Cores e
     dpu(CORE1, 40),
     dpu(CORE2, 60),
     dpu(SPARE4, 100),        // spare: excluded even though online
-    dpu('Y711FAB59J234000', 90, false), // offline home Core: excluded (stale soc)
+    dpu('Y711XXX00X000014', 90, false), // offline home Core: excluded (stale soc)
   );
   assert.equal(homeFleetMeanSoc(d), 50);
 });
@@ -253,13 +253,13 @@ test('re-derive — a latch whose conditions STILL hold is unchanged (rules are 
  * literal — the case the pre-existing suite could never reach (`sources: []`).
  * ═══════════════════════════════════════════════════════════════════════ */
 
-const CORE3 = 'Y711FAB59J234000';   // home Core pre-swap; BENCH after
-const CORE5 = 'Y711ZAB59G9P0090';   // in SPARE_DPU_SNS; a LIVE pool member after
+const CORE3 = 'Y711XXX00X000014';   // home Core pre-swap; BENCH after
+const CORE5 = [...SPARE_DPU_SNS][1] as string;   // in SPARE_DPU_SNS; a LIVE pool member after (read from the literal)
 
 /** SHP2 whose roster names the three DPUs actually wired to the panel. */
 function shp2WithRoster(pool: number | null, snsConnected: string[]): DeviceSnapshot {
   return {
-    sn: 'HD31ZASAHH120432', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
+    sn: 'HD31XXXXXX000019', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
     online: true, lastUpdated: now,
     projection: {
       kind: 'shp2', backupBatPercent: pool, backupReserveSoc: 15, pairedCircuits: [],

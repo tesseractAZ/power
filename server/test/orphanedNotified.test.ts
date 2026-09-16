@@ -128,7 +128,7 @@ test('★ the SN-less exemplar: an SHP2 source alert is held too', () => {
   // for shp2-src-err-<slot> — the alarm data source's OWN alerts, and the SN-less
   // hole v1.78.0 closed once for the live path. The persisted sourceSn is what
   // closes it here.
-  const persisted = new Map([['shp2-src-err-3', rec({ sev: 'critical', sourceSn: 'HD31ZAB1ZH8Z0018' })]]);
+  const persisted = new Map([['shp2-src-err-3', rec({ sev: 'critical', sourceSn: 'HD31XXX0XX0X0010' })]]);
   const { resolve, hold } = sweep({ persisted, unevaluableIds: ['shp2-src-err-3'] });
   assert.deepEqual(hold, ['shp2-src-err-3']);
   assert.deepEqual(resolve, []);

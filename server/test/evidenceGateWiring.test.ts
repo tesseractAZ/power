@@ -22,8 +22,8 @@ import { saveNotifiedState, loadNotifiedState, type NotifyRecord } from '../src/
  * production source literal omitted it. These pin the wiring.
  */
 
-const CORE = 'Y711ZABA9H3T0489';
-const PACK = 'Y712ZABA4H350037';
+const CORE = 'Y711XXXX0X0X0004';
+const PACK = 'Y712XXXX0X000008';
 
 const packFull = (num: number, soc: number, inW: number, cells: number[]) => ({
   num, soc, soh: 100, actSoh: 100, inputWatts: inW, outputWatts: 0, cycles: 100,

@@ -23,7 +23,7 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * =================================================================== */
 
 const [CORE4, CORE5] = [...SPARE_DPU_SNS]; // the two designated bench spares
-const HOME_CORE_2 = 'Y711ZAB59GBC0482';    // a real home core SN (NOT a spare)
+const HOME_CORE_2 = 'Y711XXX00XXX0002';    // a real home core SN (NOT a spare)
 const now = Date.now();
 const STALE_AGE = 5 * 60 * 1000;           // > STALE_MS (3 min)
 

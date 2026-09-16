@@ -12,7 +12,7 @@ CI runs all of the following; the boxes are for what you checked *before* pushin
 - [ ] `cd server && npm test` — the full suite (2,300+ tests)
 - [ ] `server/` type-checks, **both projects**: `./node_modules/.bin/tsc --noEmit -p tsconfig.json` and `-p tsconfig.test.json`
 - [ ] `web/` type-checks: `cd web && ./node_modules/.bin/tsc --noEmit -p tsconfig.json`
-- [ ] `python3 scripts/check-no-secrets.py` — no home IPs, DIDs, VoIP credentials or personal email in tracked files
+- [ ] `python3 scripts/check-no-secrets.py` — no home IPs, DIDs, VoIP credentials, personal email or device serials in tracked files
 - [ ] If `config.yaml` options/schema changed: `python3 scripts/validate-addon-config.py` — **every option needs `en` AND `es`** entries and a `config.yaml` default
 - [ ] `node scripts/check-mutant-anchors.mjs` — all mutation-harness anchors still resolve
 - [ ] `node scripts/check-npm-audit.mjs` — no high/critical advisories in the production dependency tree, no expired waivers

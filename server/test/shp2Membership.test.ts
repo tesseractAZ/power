@@ -95,14 +95,14 @@ test('isShp2Connected — populated Set acts as allow-list', () => {
 
 test('isShp2Connected — the operator scenario: 3-of-5 cores connected', () => {
   const devices = shp2Snapshot([
-    { slot: 1, sn: 'Y711ZAB59GBC0314', isConnected: true },  // Core 1
-    { slot: 2, sn: 'Y711ZAB59GBC0482', isConnected: true },  // Core 2
-    { slot: 3, sn: 'Y711FAB59J234000', isConnected: true },  // Core 3
+    { slot: 1, sn: 'Y711XXX00XXX0015', isConnected: true },  // Core 1
+    { slot: 2, sn: 'Y711XXX00XXX0002', isConnected: true },  // Core 2
+    { slot: 3, sn: 'Y711XXX00X000014', isConnected: true },  // Core 3
   ]);
   const connected = shp2ConnectedDpuSns(devices);
-  assert.equal(isShp2Connected('Y711ZAB59GBC0314', connected), true);  // Core 1
-  assert.equal(isShp2Connected('Y711ZAB59GBC0482', connected), true);  // Core 2
-  assert.equal(isShp2Connected('Y711FAB59J234000', connected), true);  // Core 3
-  assert.equal(isShp2Connected('Y711ZABA9H3T0489', connected), false); // Core 4 (spare)
-  assert.equal(isShp2Connected('Y711ZAB59G9P0090', connected), false); // Core 5 (spare)
+  assert.equal(isShp2Connected('Y711XXX00XXX0015', connected), true);  // Core 1
+  assert.equal(isShp2Connected('Y711XXX00XXX0002', connected), true);  // Core 2
+  assert.equal(isShp2Connected('Y711XXX00X000014', connected), true);  // Core 3
+  assert.equal(isShp2Connected('Y711XXXX0X0X0004', connected), false); // Core 4 (spare)
+  assert.equal(isShp2Connected('Y711XXX00X0X0003', connected), false); // Core 5 (spare)
 });

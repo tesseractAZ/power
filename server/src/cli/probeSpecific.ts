@@ -5,6 +5,10 @@ import { ecoflow } from '../ecoflow/rest.js';
  * EcoFlow product families. Reports which keys returned values vs which were
  * silently empty — letting us discover the actual schema for devices that
  * block /quota/all.
+ *
+ * Usage: npm run probe-specific -- <sn>:<product> [<sn>:<product> ...]
+ * where <product> is one of the COMMON_KEYS families below. Serials come from
+ * the command line, never from this file: the repository is public.
  */
 
 const COMMON_KEYS: Record<string, string[]> = {
@@ -58,12 +62,14 @@ async function probe(sn: string, productGuess: string) {
 }
 
 async function main() {
-  const tests: Array<{ sn: string; product: string }> = [
-    { sn: 'P351ZA1APH6G0413', product: 'delta_3_plus' },
-    { sn: 'P351ZAH4PGCU0216', product: 'delta_3_plus' },
-    { sn: 'R631ZABAWH1S0633', product: 'river_3_plus' },
-    { sn: 'HT31ZAB51G760667', product: 'powerinsight' },
-  ];
+  const tests = process.argv.slice(2).map((arg) => {
+    const i = arg.lastIndexOf(':');
+    return { sn: i > 0 ? arg.slice(0, i) : '', product: i > 0 ? arg.slice(i + 1) : '' };
+  });
+  if (!tests.length || tests.some((t) => !t.sn || !COMMON_KEYS[t.product])) {
+    console.error(`usage: probe-specific <sn>:<product> [...]  (products: ${Object.keys(COMMON_KEYS).join(', ')})`);
+    process.exit(2);
+  }
   for (const t of tests) {
     console.log(`\n=== ${t.sn} (${t.product}) ===`);
     await probe(t.sn, t.product);

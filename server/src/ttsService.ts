@@ -162,7 +162,7 @@ function numberWord(n: number): string {
  *    function as a whole round-trips. Any new time-unit rule must keep that
  *    singularize list in sync.)
  *  • Unit-expansion rules are NUMBER-ANCHORED ((\d…)\s*UNIT\b) so prose
- *    ("a breaker"), device SNs (GBC0314), and error codes are never corrupted by
+ *    ("a breaker"), device SNs (XXX0015), and error codes are never corrupted by
  *    a unit rule — only a unit token abutting a number is expanded. Longest token
  *    first (kWh before Wh before W; rate slashes before the bare-% rule). The
  *    relational-symbol rules (< > ≥ ≤ ~ ≈) are intentionally un-anchored and fire

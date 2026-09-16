@@ -88,9 +88,9 @@ test('an UNREADABLE current counts as movement — silence is not evidence of st
 });
 
 test('rest history is keyed on the pack HARDWARE serial, so renumbering keeps it', () => {
-  assert.equal(packRestKey('DPU1', { packSn: 'Y712ZABA4H350037', num: 1 }), 'pack:Y712ZABA4H350037');
+  assert.equal(packRestKey('DPU1', { packSn: 'Y712XXXX0X000008', num: 1 }), 'pack:Y712XXXX0X000008');
   // Same physical pack moved to slot 3 → same key → 20 min of observed rest survives.
-  assert.equal(packRestKey('DPU2', { packSn: 'Y712ZABA4H350037', num: 3 }), 'pack:Y712ZABA4H350037');
+  assert.equal(packRestKey('DPU2', { packSn: 'Y712XXXX0X000008', num: 3 }), 'pack:Y712XXXX0X000008');
   // No BMS serial → fall back to slot identity rather than collide every pack on one key.
   assert.equal(packRestKey('DPU1', { packSn: null, num: 2 }), 'slot:DPU1:2');
   assert.notEqual(packRestKey('DPU1', { num: 2 }), packRestKey('DPU2', { num: 2 }));

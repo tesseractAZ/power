@@ -19,16 +19,18 @@ import {
  * The literal still says the spares are Core 4 + Core 5.
  */
 
-const CORE1 = 'Y711ZAB59GBC0314';
-const CORE2 = 'Y711ZAB59GBC0482';
-const CORE3 = 'Y711FAB59J234000';   // bench since 08-20
-const CORE4 = 'Y711ZABA9H3T0489';   // genuine bench spare (holds the RMA pack)
-const CORE5 = 'Y711ZAB59G9P0090';   // LIVE pool member, slot 3
+const CORE1 = 'Y711XXX00XXX0015';
+const CORE2 = 'Y711XXX00XXX0002';
+const CORE3 = 'Y711XXX00X000014';   // bench since 08-20
+// Core 4 = genuine bench spare (holds the RMA pack); Core 5 = LIVE pool member, slot 3.
+// Both are read from the literal rather than restated here.
+const [CORE4, CORE5] = [...SPARE_DPU_SNS] as [string, string];
 const LIVE_ROSTER = new Set([CORE1, CORE2, CORE5]);
 
 beforeEach(() => resetLastKnownHomeRoster());
 
 test('precondition: the literal really is inverted', () => {
+  assert.equal(SPARE_DPU_SNS.size, 2, 'the literal names exactly Core 4 and Core 5');
   assert.ok(SPARE_DPU_SNS.has(CORE5), 'the literal calls the live pool member a spare');
   assert.ok(!SPARE_DPU_SNS.has(CORE3), 'and does not name the actual bench unit');
 });

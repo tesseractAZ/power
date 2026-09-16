@@ -8,29 +8,29 @@ import { resolveDeviceName } from '../src/snapshot.js';
 // back to the product type ONLY when the cloud name is missing or is just the SN.
 
 test('real name is kept verbatim', () => {
-  assert.equal(resolveDeviceName('Core 1', 'DELTA Pro Ultra', 'GBC0314'), 'Core 1');
+  assert.equal(resolveDeviceName('Core 1', 'DELTA Pro Ultra', 'XXX0015'), 'Core 1');
 });
 
 test('bare-SN deviceName falls back to productName (live WAVE 2 case)', () => {
-  // KT21ZAH4HG160047 has deviceName == its own SN but productName == "WAVE 2".
+  // KT21XXX0XX000011 has deviceName == its own SN but productName == "WAVE 2".
   assert.equal(
-    resolveDeviceName('KT21ZAH4HG160047', 'WAVE 2', 'KT21ZAH4HG160047'),
+    resolveDeviceName('KT21XXX0XX000011', 'WAVE 2', 'KT21XXX0XX000011'),
     'WAVE 2',
   );
 });
 
 test('missing name falls back to productName', () => {
-  assert.equal(resolveDeviceName(undefined, 'WAVE 2', 'KT21ZAH4HG160047'), 'WAVE 2');
-  assert.equal(resolveDeviceName(null, 'WAVE 2', 'KT21ZAH4HG160047'), 'WAVE 2');
-  assert.equal(resolveDeviceName('', 'WAVE 2', 'KT21ZAH4HG160047'), 'WAVE 2');
+  assert.equal(resolveDeviceName(undefined, 'WAVE 2', 'KT21XXX0XX000011'), 'WAVE 2');
+  assert.equal(resolveDeviceName(null, 'WAVE 2', 'KT21XXX0XX000011'), 'WAVE 2');
+  assert.equal(resolveDeviceName('', 'WAVE 2', 'KT21XXX0XX000011'), 'WAVE 2');
 });
 
 test('neither a real name nor a product → falls back to the SN', () => {
-  assert.equal(resolveDeviceName('KT21ZAH4HG160047', undefined, 'KT21ZAH4HG160047'), 'KT21ZAH4HG160047');
-  assert.equal(resolveDeviceName('', '', 'KT21ZAH4HG160047'), 'KT21ZAH4HG160047');
-  assert.equal(resolveDeviceName(null, null, 'KT21ZAH4HG160047'), 'KT21ZAH4HG160047');
+  assert.equal(resolveDeviceName('KT21XXX0XX000011', undefined, 'KT21XXX0XX000011'), 'KT21XXX0XX000011');
+  assert.equal(resolveDeviceName('', '', 'KT21XXX0XX000011'), 'KT21XXX0XX000011');
+  assert.equal(resolveDeviceName(null, null, 'KT21XXX0XX000011'), 'KT21XXX0XX000011');
 });
 
 test('whitespace-padded name that equals the SN is treated as bare-SN', () => {
-  assert.equal(resolveDeviceName('  KT21ZAH4HG160047  ', 'WAVE 2', 'KT21ZAH4HG160047'), 'WAVE 2');
+  assert.equal(resolveDeviceName('  KT21XXX0XX000011  ', 'WAVE 2', 'KT21XXX0XX000011'), 'WAVE 2');
 });

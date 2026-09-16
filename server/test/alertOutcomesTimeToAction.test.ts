@@ -32,7 +32,7 @@ test('persistent family (offline) → medianTimeToActionMs is null', () => {
   const firedAt = 1_700_000_000_000;
   appendAlertOutcome({
     ts: firedAt + 9 * DAY_MS,
-    alertId: 'offline-Y711ZAB59GBC0314',
+    alertId: 'offline-Y711XXX00XXX0015',
     alertFiredAt: firedAt,
     outcome: 'ack',
     source: {},
@@ -70,7 +70,7 @@ test('transient family (soc-low) → keeps a real median time-to-action', () => 
   const tta = 10 * 60 * 1000;
   appendAlertOutcome({
     ts: firedAt + tta,
-    alertId: 'soc-low-Y711ZABA9H3T0489-2',
+    alertId: 'soc-low-Y711XXXX0X0X0004-2',
     alertFiredAt: firedAt,
     outcome: 'ack',
     source: {},

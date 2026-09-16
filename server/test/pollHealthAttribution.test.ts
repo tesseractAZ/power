@@ -24,10 +24,10 @@ import { pollHealthVerdict, alarmPathShp2Sns } from '../src/snapshot.js';
  * running and the telemetry-blind CRITICAL disarmed for the entire dark window.
  */
 
-const SHP2 = 'HD31ZAB1ZH8Z0018';
-const SHP2B = 'HD31ZAB1ZH8Z9999';
-const BACC = 'P351ZA1APH6G0413';
-const PWRI = 'HT31ZAB51G760667';
+const SHP2 = 'HD31XXX0XX0X0010';
+const SHP2B = 'HD31XXX0XX0X0013';
+const BACC = 'P351XX0XXX0X0017';
+const PWRI = 'HT31XXX00X000009';
 
 test('★ S1: an SHP2 that was never polled is NOT a healthy poll', () => {
   // THE DEFECT: `failedSns.some(isShp2)` was false for a cloud-offline SHP2, so

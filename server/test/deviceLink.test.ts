@@ -81,10 +81,10 @@ test('parser: empty / whitespace string → {} (dormant)', () => {
 });
 
 test('parser: valid JSON object → trimmed SN→entity map; hasReachabilityConfig true', () => {
-  withEnv('{"GBC0314":"binary_sensor.core1_lan"," GBC0482 ":" binary_sensor.core2_lan "}', () => {
+  withEnv('{"XXX0015":"binary_sensor.core1_lan"," XXX0002 ":" binary_sensor.core2_lan "}', () => {
     assert.deepEqual(deviceReachabilityEntities(), {
-      GBC0314: 'binary_sensor.core1_lan',
-      GBC0482: 'binary_sensor.core2_lan',
+      XXX0015: 'binary_sensor.core1_lan',
+      XXX0002: 'binary_sensor.core2_lan',
     });
     assert.equal(hasReachabilityConfig(), true);
   });
@@ -95,7 +95,7 @@ test('parser: malformed JSON → {} (dormant, no throw)', () => {
     assert.deepEqual(deviceReachabilityEntities(), {});
     assert.equal(hasReachabilityConfig(), false);
   });
-  withEnv('GBC0314=binary_sensor.core1_lan', () => assert.deepEqual(deviceReachabilityEntities(), {}));
+  withEnv('XXX0015=binary_sensor.core1_lan', () => assert.deepEqual(deviceReachabilityEntities(), {}));
 });
 
 test('parser: non-object JSON (array / number / string / null) → {}', () => {
@@ -106,10 +106,10 @@ test('parser: non-object JSON (array / number / string / null) → {}', () => {
 });
 
 test('parser: drops entries with non-string or empty values (no poisoning)', () => {
-  withEnv('{"GBC0314":"binary_sensor.core1_lan","BAD1":null,"BAD2":123,"BAD3":"","GBC0482":"binary_sensor.core2_lan"}', () => {
+  withEnv('{"XXX0015":"binary_sensor.core1_lan","BAD1":null,"BAD2":123,"BAD3":"","XXX0002":"binary_sensor.core2_lan"}', () => {
     assert.deepEqual(deviceReachabilityEntities(), {
-      GBC0314: 'binary_sensor.core1_lan',
-      GBC0482: 'binary_sensor.core2_lan',
+      XXX0015: 'binary_sensor.core1_lan',
+      XXX0002: 'binary_sensor.core2_lan',
     });
   });
 });
