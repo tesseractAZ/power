@@ -2,11 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { packLatchSignature, packCellForensics, isNeverMutedAlert, DEFECTIVE_PACK_MIN_DEVIANT_MV, computeAlerts } from '../src/alerts.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
+import { SPARE_DPU_SNS } from '../src/shp2Membership.js';
 
 /**
  * v1.101.0 — the standing "pack confirmed defective" alert.
  *
- * MOTIVATING INCIDENT (2026-08-20). The defective warranty pack (Y712ZABA4H350037:
+ * MOTIVATING INCIDENT (2026-08-20). The defective warranty pack (Y712XXXX0X000008:
  * frozen coulomb counter, 1% SoC against siblings at 44-63%, dead cell #31) moved
  * onto a bench chassis, where every alert it raised was demoted to
  * annunciate:false — while its healthy 29-cycle replacement, on a panel-wired
@@ -76,8 +77,8 @@ test('the live defective pack clears the deviant-cell bar comfortably', () => {
 });
 
 test('the defective-pack alert is never muted, by id, on either demotion path', () => {
-  assert.equal(isNeverMutedAlert({ id: 'pack-defective-Y711ZABA9H3T0489-1', severity: 'warning', category: 'Battery' }), true);
-  assert.equal(isNeverMutedAlert({ id: 'vdiff-crit-Y711ZABA9H3T0489-1', severity: 'critical', category: 'Battery' }), false);
+  assert.equal(isNeverMutedAlert({ id: 'pack-defective-Y711XXXX0X0X0004-1', severity: 'warning', category: 'Battery' }), true);
+  assert.equal(isNeverMutedAlert({ id: 'vdiff-crit-Y711XXXX0X0X0004-1', severity: 'critical', category: 'Battery' }), false);
   assert.equal(isNeverMutedAlert({ id: 'temp-cell-X-1-critical', severity: 'critical', category: 'Thermal' }), true);
   assert.equal(isNeverMutedAlert({ id: 'temp-cell-X-1-warning', severity: 'warning', category: 'Thermal' }), false);
 });
@@ -90,7 +91,8 @@ test('the defective-pack alert is never muted, by id, on either demotion path', 
  * tests close that gap end to end.
  * ─────────────────────────────────────────────────────────────────────── */
 
-const BENCH_SN = 'Y711ZABA9H3T0489';   // in SPARE_DPU_SNS — the bench chassis
+const [BENCH_SN] = [...SPARE_DPU_SNS] as [string];   // Core 4, in SPARE_DPU_SNS — the bench chassis
+// Read from the literal rather than restated here.
 
 function fleet(packs: any[], sn = BENCH_SN): Record<string, DeviceSnapshot> {
   return {

@@ -555,7 +555,7 @@ export class SnapshotStore extends EventEmitter {
  * v0.75.0 — resolve a human-readable display name for a device. EcoFlow's
  * `/device/list` returns `deviceName === sn` when the owner never set a friendly
  * name, so the raw serial leaks into the UI and the recurring "<SN> is flagged
- * offline" info-alert (live example: KT21ZAH4HG160047, deviceName == its SN,
+ * offline" info-alert (live example: KT21XXX0XX000011, deviceName == its SN,
  * productName == "WAVE 2"). Conservatively override ONLY when the cloud name is
  * missing or is exactly the SN: prefer the cloud `deviceName` (a real name), then
  * the `productName`, then fall back to the SN. Trim before comparing so a padded

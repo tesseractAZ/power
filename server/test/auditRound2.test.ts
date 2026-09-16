@@ -22,7 +22,7 @@ const src = (f: string) =>
  * /api/health returned blind:false, and notePollOk ran on every shadowed poll so
  * the blind clock never aged. The sensor moved to 240; no verdict moved at all.
  */
-const SHP2 = 'HD31ZAB1ZH8Z0018';
+const SHP2 = 'HD31XXX0XX0X0010';
 
 test('★ a REPLAYED payload makes the poll not-ok', () => {
   const v = pollHealthVerdict({

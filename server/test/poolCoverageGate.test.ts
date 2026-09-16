@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { homeCoreCoverage } from '../src/shp2Membership.js';
+import { SPARE_DPU_SNS, homeCoreCoverage } from '../src/shp2Membership.js';
 import { resolveGridBackstop } from '../src/gridState.js';
 
 /* ===================================================================
@@ -16,7 +16,8 @@ import { resolveGridBackstop } from '../src/gridState.js';
  * roster resolves toward "discharging" — the direction that keeps the alarm audible.
  * =================================================================== */
 
-const SPARE_CORE_4 = 'Y711ZABA9H3T0489';
+const [SPARE_CORE_4] = [...SPARE_DPU_SNS] as [string];
+// Read from the literal rather than restated here.
 
 function dpu(sn: string, online: boolean, packNetW = 0): any {
   return {

@@ -8,7 +8,7 @@ import { haNotifyCall, haNotificationId, type NotifyMessage } from '../src/notif
  * A "Resolved:" send used to re-create the same card, so a cleared condition sat in
  * HA's notification section forever. Observed live on the running system:
  *
- *   id      ecoflow_panel_baseline_pair6_w_hd31zasahh120432
+ *   id      ecoflow_panel_baseline_pair6_w_hd31xxxxxx000019
  *   title   "EcoFlow · Resolved: West Air conditioner load unusual for the hour"
  *   message "... (condition cleared)"
  *
@@ -20,7 +20,7 @@ const msg = (over: Partial<NotifyMessage>): NotifyMessage =>
   ({ title: 't', body: 'b', severity: 'warning', ...over }) as NotifyMessage;
 
 test('a RESOLVE with a dedupId dismisses the exact card it fired on', () => {
-  const fireId = 'baseline-pair6_w-HD31ZASAHH120432';
+  const fireId = 'baseline-pair6_w-HD31XXXXXX000019';
   const fire = haNotifyCall(msg({ severity: 'warning', dedupId: fireId }));
   const resolve = haNotifyCall(msg({ severity: 'resolved', dedupId: fireId }));
 
@@ -28,7 +28,7 @@ test('a RESOLVE with a dedupId dismisses the exact card it fired on', () => {
   assert.equal(resolve.service, 'dismiss');
   // The id must match exactly, or we'd dismiss nothing (or worse, the wrong card).
   assert.equal(resolve.notificationId, fire.notificationId);
-  assert.equal(fire.notificationId, 'ecoflow_panel_baseline_pair6_w_hd31zasahh120432');
+  assert.equal(fire.notificationId, 'ecoflow_panel_baseline_pair6_w_hd31xxxxxx000019');
 });
 
 test('an ACTIVE alert of any severity still creates/updates its card', () => {
@@ -52,6 +52,6 @@ test('distinct subjects keep distinct cards (v0.74.0 behaviour preserved)', () =
 });
 
 test('the dismiss id is severity-independent, so any tier resolves its own card', () => {
-  const id = 'dpu-pvh-err-Y711FAB59J234000';
+  const id = 'dpu-pvh-err-Y711XXX00X000014';
   assert.equal(haNotificationId(id, 'critical'), haNotificationId(id, 'resolved'));
 });

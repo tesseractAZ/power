@@ -13,27 +13,27 @@ const { appendAlertOutcome, tailAlertOutcomes, computeFamilyStats, familyOf } =
   await import('../src/alertOutcomes.js');
 
 test('familyOf — strips trailing device serial', () => {
-  assert.equal(familyOf('pack-hot-Y711ZAB59GBC0314-3'), 'pack-hot');
-  assert.equal(familyOf('cell-imbalance-Y711ZABA9H3T0489'), 'cell-imbalance');
+  assert.equal(familyOf('pack-hot-Y711XXX00XXX0015-3'), 'pack-hot');
+  assert.equal(familyOf('cell-imbalance-Y711XXXX0X0X0004'), 'cell-imbalance');
   // Lowercase suffix should NOT be stripped — only ALL-CAPS serial-looking blocks.
   assert.equal(familyOf('simple-id'), 'simple-id');
   // v0.26.0 — MPPT temp alerts now carry the lowercase channel slug BEFORE the SN
   // (mppt-<hv|lv>-temp-<SN>-<sev>) so each string rolls up to its own family
   // instead of collapsing every device+string+severity into a bare 'mppt'.
-  assert.equal(familyOf('mppt-hv-temp-Y711ZAB59G9P0090-info'), 'mppt-hv-temp');
-  assert.equal(familyOf('mppt-lv-temp-Y711ZAB59GBC0314-critical'), 'mppt-lv-temp');
+  assert.equal(familyOf('mppt-hv-temp-Y711XXX00X0X0003-info'), 'mppt-hv-temp');
+  assert.equal(familyOf('mppt-lv-temp-Y711XXX00XXX0015-critical'), 'mppt-lv-temp');
 });
 
 test('appendAlertOutcome + tail — round-trips a single entry', () => {
   appendAlertOutcome({
     ts: 1_700_000_000_000,
-    alertId: 'pack-hot-Y711ZAB59GBC0314-3',
+    alertId: 'pack-hot-Y711XXX00XXX0015-3',
     outcome: 'ack',
     source: { ip: '127.0.0.1', ua: 'test' },
   });
   const recent = tailAlertOutcomes(10);
   assert.equal(recent.length, 1);
-  assert.equal(recent[0].alertId, 'pack-hot-Y711ZAB59GBC0314-3');
+  assert.equal(recent[0].alertId, 'pack-hot-Y711XXX00XXX0015-3');
   assert.equal(recent[0].outcome, 'ack');
 });
 

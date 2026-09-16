@@ -376,7 +376,7 @@ test('getDayForecast — a designated bench SPARE is NEVER in the SHP2 connected
   // basis. Here the SHP2 lists only home Core A; a spare SN present in the device map
   // (bench-charging, reporting PV) must NOT inflate either the reporting OR the display
   // basis — both must reflect Core A alone.
-  const SPARE_SN = 'Y711ZABA9H3T0489'; // Core 4 (SPARE_DPU_SNS)
+  const SPARE_SN = 'Y711XXXX0X0X0004'; // Core 4 (SPARE_DPU_SNS)
   const rec = guardRecorder({ A: 1000, [SPARE_SN]: 9000 }, 4000);
   setWeatherCacheForTesting(cloudyWeather(50));
   try {

@@ -21,7 +21,7 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  * a fact the actuator records and persists.
  */
 
-const SHP2 = 'HD31ZASAHH120432';
+const SHP2 = 'HD31XXXXXX000019';
 const fleet = (poolPct: number, reservePct: number): Record<string, DeviceSnapshot> => ({
   [SHP2]: {
     sn: SHP2, deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',

@@ -139,7 +139,7 @@ test('F28 — a hold must not leak across the SN boundary (same pack number on t
 /* ── peer-voldiff joins the resolve-dwell family ─────────────────── */
 
 test('F28 — isCellImbalanceResolveDwellFamily now matches peer-voldiff per-pack ids', () => {
-  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'peer-voldiff-Y711FAB59J234000-3' }), true);
+  assert.equal(isCellImbalanceResolveDwellFamily({ id: 'peer-voldiff-Y711XXX00X000014-3' }), true);
   // The pre-existing members are unchanged.
   assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-warn-DPU-1-1' }), true);
   assert.equal(isCellImbalanceResolveDwellFamily({ id: 'vdiff-crit-DPU-1-1' }), true);

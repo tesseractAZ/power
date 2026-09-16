@@ -16,7 +16,7 @@ import { projectShp2 } from '../src/ecoflow/project.js';
  *   able to make the tile disagree with the alarm.
  */
 
-// The exact live SHP2 timeScale.sta bitmap (HD31ZASAHH120432, 18 single-byte
+// The exact live SHP2 timeScale.sta bitmap (HD31XXXXXX000019, 18 single-byte
 // base64 entries → 144 slots @ 10-min). Two active runs: bytes 8-10 = 0xff (24
 // contiguous slots, 640–880) and byte 11 = 0x03 (two slots, 940–960).
 const LIVE_STA = [
@@ -35,7 +35,7 @@ function quotaWith(extra: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 test('v0.89.0 — gridSta (pd303_mc.masterIncreInfo.gridSta) parses raw + VALUE-1-ONLY gridConnected', () => {
-  // Grid OK (live captured value on HD31ZASAHH120432: gridSta=1, gridVol=123).
+  // Grid OK (live captured value on HD31XXXXXX000019: gridSta=1, gridVol=123).
   let p = projectShp2(quotaWith({ 'pd303_mc.masterIncreInfo.gridSta': 1 }));
   assert.equal(p.gridSta, 1);
   assert.equal(p.gridConnected, true, 'gridSta=1 → connected');

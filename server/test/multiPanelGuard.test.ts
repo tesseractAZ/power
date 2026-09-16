@@ -30,10 +30,10 @@ import type { DeviceSnapshot } from '../src/snapshot.js';
  *                   which the demotion streaks are accumulating).
  */
 
-const CORE1 = 'Y711ZAB59GBC0314';
-const CORE5 = 'Y711ZAB59G9P0090';
-const PANEL_A = 'HW51ZAS4HF3X0001';
-const PANEL_B = 'HW51ZAS4HF3X0002';
+const CORE1 = 'Y711XXX00XXX0015';
+const CORE5 = 'Y711XXX00X0X0003';
+const PANEL_A = 'HW51XXX0XX0X0005';
+const PANEL_B = 'HW51XXX0XX0X0016';
 
 const dpu = (sn: string): DeviceSnapshot => ({
   sn, deviceName: sn, productName: 'DELTA Pro Ultra', online: true, lastUpdated: 1,

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { isSourceDpuStale, SPARE_DPU_SNS } from '../src/shp2Membership.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
-const HOME = 'Y711ZAB59GBC0314'; // Core 1 (a real home core, not a spare)
+const HOME = 'Y711XXX00XXX0015'; // Core 1 (a real home core, not a spare)
 const SPARE = [...SPARE_DPU_SNS][0]; // Core 4
 
 function dev(sn: string, online: boolean): DeviceSnapshot {
