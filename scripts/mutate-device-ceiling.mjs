@@ -63,6 +63,29 @@ const MUTANTS = [
     to: 'export const RESERVE_WRITE_MAX_PCT = 50; /* MUTANT */',
     why: 'ARB_COST_MAX_SOC_PCT=90 goes back to being inert: the engine asks for a 100% setpoint and silently writes 50, which is the state the owner instructed be changed.',
   },
+  // v1.162.0 — the envelope guards must move TOGETHER. v1.161.0 raised the ceiling but left
+  // four bare [10,50] pairs behind; the apply guard and `restorable` are the dangerous two.
+  {
+    id: 'v. ★★★ `restorable` keeps the old ceiling while the apply guard moves (STRANDS the reserve)',
+    file: ACT,
+    find: '      state.priorReservePct >= RESERVE_WRITE_MIN_PCT &&\n      state.priorReservePct <= RESERVE_WRITE_MAX_PCT;',
+    to: '      state.priorReservePct >= 10 && state.priorReservePct <= 50; /* MUTANT */',
+    why: 'The apply raises FROM a 60% floor, captures priorReservePct 60, and then the revert refuses it forever: the panel holds a raised reserve indefinitely, the house runs on grid every day, and the ledger records a clean completed night. This is the expensive end state the module exists to prevent.',
+  },
+  {
+    id: 'vi. ★★ the apply sanity bound keeps the old ceiling',
+    file: ACT,
+    find: '  if (cur == null || !Number.isInteger(cur)\n      || cur < RESERVE_WRITE_MIN_PCT || cur > RESERVE_WRITE_MAX_PCT) return { kind: \'none\' };',
+    to: '  if (cur == null || !Number.isInteger(cur) || cur < 10 || cur > 50) return { kind: \'none\' }; /* MUTANT */',
+    why: 'A reserve sitting anywhere above 50 makes the nightly apply return {kind:"none"} SILENTLY — no log, no alert, no buy — and the operator has no way to see why the night did nothing.',
+  },
+  {
+    id: 'vii. ★★ the adoption baseline keeps the old ceiling',
+    file: ACT,
+    find: '    state.attemptBaselinePct >= RESERVE_WRITE_MIN_PCT &&\n    state.attemptBaselinePct <= RESERVE_WRITE_MAX_PCT',
+    to: '    state.attemptBaselinePct >= 10 && state.attemptBaselinePct <= 50 /* MUTANT */',
+    why: 'A lost-confirmation write from a baseline above 50 is never adopted, so a reserve the device DID raise is orphaned — the revert target is lost with it.',
+  },
 ];
 
 function passes(cmd, args) {

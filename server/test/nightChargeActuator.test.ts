@@ -426,3 +426,99 @@ test('a partial actuation survives a restart (requestedPct round-trips)', () => 
   assert.equal(back.requestedPct, 90, 'and the intent survives for the ledger');
   assert.equal(coerceActuationState({ day: '2026-09-16' }).requestedPct, null);
 });
+
+/* ══ v1.162.0 — the envelope has ONE definition, and the guards move together ══ */
+
+/**
+ * v1.161.0 raised RESERVE_WRITE_MAX_PCT to 90 but swept only clampReserveTarget and
+ * setBackupReserveSoc's range check. FOUR more copies of the bare [10,50] pair survived:
+ * the apply sanity bound on the live reserve, the lost-confirmation adoption baseline,
+ * `restorable` on the revert path, and the refresh-cloud bound in ecoflow/commands.ts.
+ *
+ * ★★★ The apply guard and `restorable` are load-bearing AS A PAIR. While both read 50 the
+ * system was still sound — the apply refused a current reserve above 50, so a baseline above
+ * 50 could never be captured, so `restorable` never had to judge one. Raising ONE of the two
+ * opens the end state this module exists to prevent: apply at 60, capture priorReservePct 60,
+ * and `restorable` is false forever — the reserve never comes back down. These tests pin the
+ * pairing, not the literals.
+ */
+
+const envBase = (over: Partial<NightActuationState> = {}): NightActuationState => ({
+  ...emptyActuationState(),
+  day: '2026-09-16', targetPct: 90, buyKwh: 40,
+  windowStartMs: 1_000_000, windowEndMs: 1_000_000 + 6 * 3_600_000,
+  ...over,
+});
+// mode/writeReady are REQUIRED on ActuationTickOpts — omitting them let these tests
+// pass for the wrong reason (undefined !== 'advisory'), which tsconfig.test.json caught.
+const tick = (
+  currentReservePct: number | null,
+  over: Partial<ActuationTickOpts> = {},
+): ActuationTickOpts => ({
+  currentReservePct, gridPresent: true, socCoherent: true, vitalsRed: false,
+  mode: 'auto', writeReady: true,
+  ...over,
+});
+
+test('★★★ a raised reserve is ALWAYS restorable inside the envelope (else it strands)', () => {
+  // priorReservePct 60 is only reachable because v1.161.0 raised the ceiling. If the
+  // revert refuses it, the panel holds a raised reserve indefinitely.
+  const st = envBase({ appliedAtMs: 1_000_000, priorReservePct: 60, targetPct: 90 });
+  const d = decideActuation(st, 1_000_000 + 6 * 3_600_000 + REVERT_LAG_MS + 1, tick(90));
+  assert.equal(d.kind, 'revert', 'a 60% baseline MUST still revert — 60 is inside [10,90]');
+  assert.equal(d.restorePct, 60);
+
+  // Outside the envelope it correctly refuses to guess a revert target.
+  const bad = envBase({ appliedAtMs: 1_000_000, priorReservePct: 95, targetPct: 90 });
+  const db = decideActuation(bad, 1_000_000 + 6 * 3_600_000 + REVERT_LAG_MS + 1, tick(90));
+  assert.notEqual(db.kind, 'revert', '95 is outside the envelope — never guess a restore target');
+});
+
+test('★★★ the apply guard and `restorable` read the SAME envelope', () => {
+  // The invariant: any current reserve the APPLY will act on must also be one the
+  // REVERT will restore. Walk the whole integer range and assert they agree.
+  for (let cur = 0; cur <= 100; cur++) {
+    const applyOk = decideActuation(
+      envBase({ announcedAtMs: 1, targetPct: 95 }),
+      1_000_000, tick(cur),
+    ).kind === 'apply';
+    const revertOk = decideActuation(
+      envBase({ appliedAtMs: 1_000_000, priorReservePct: cur, targetPct: 95 }),
+      1_000_000 + 6 * 3_600_000 + REVERT_LAG_MS + 1, tick(95),
+    ).kind === 'revert';
+    if (applyOk) {
+      assert.ok(revertOk,
+        `a reserve of ${cur}% can be raised FROM but not restored TO — it would strand`);
+    }
+  }
+});
+
+test('★★★ the apply ACTS on a live reserve in the widened band (51..90)', () => {
+  // The negative cases below are not enough: a guard narrowed back to [10,50] still
+  // refuses everything they test. This is the case that only passes at the new ceiling.
+  const st = envBase({ announcedAtMs: 1, targetPct: 90 });
+  assert.equal(decideActuation(st, 1_000_000, tick(60)).kind, 'apply',
+    'a 60% floor is inside [10,90] — the nightly apply must still raise from it');
+  assert.equal(decideActuation(st, 1_000_000, tick(51)).kind, 'apply');
+  assert.equal(decideActuation(st, 1_000_000, tick(89)).kind, 'apply');
+});
+
+test('★★ a lost confirmation is adopted from a baseline in the widened band', () => {
+  // Same trap: with the bound back at 50 a 60% baseline is never adopted, so a reserve
+  // the device really did raise is orphaned and its revert target lost with it.
+  const st = envBase({
+    applyAttemptedAtMs: 900_000, appliedAtMs: null, revertedAtMs: null,
+    attemptBaselinePct: 60, targetPct: 90,
+  });
+  const d = decideActuation(st, 1_000_000, tick(90));
+  assert.equal(d.kind, 'adopt', 'the device reads the target — the write landed');
+  assert.equal(d.priorPct, 60, 'and 60 is the revert target');
+});
+
+test('the apply refuses a live reserve outside the envelope', () => {
+  const st = envBase({ announcedAtMs: 1, targetPct: 90 });
+  assert.equal(decideActuation(st, 1_000_000, tick(16)).kind, 'apply', 'in-envelope proceeds');
+  assert.equal(decideActuation(st, 1_000_000, tick(RESERVE_WRITE_MAX_PCT + 1)).kind, 'none');
+  assert.equal(decideActuation(st, 1_000_000, tick(9)).kind, 'none');
+  assert.equal(decideActuation(st, 1_000_000, tick(null)).kind, 'none');
+});

@@ -1,3 +1,32 @@
+## 1.162.0
+
+### The reserve write envelope really does have one definition now
+
+1.161.0 raised `RESERVE_WRITE_MAX_PCT` to 90 and updated `clampReserveTarget` and
+`setBackupReserveSoc`'s range check — the two sites the v1.133.1 note named. **Four more copies
+of the bare `[10, 50]` pair survived it**, found by an adversarial review of the release:
+
+| site | what it gates |
+|---|---|
+| `nightChargeActuator.ts` apply guard | the live reserve the nightly write is allowed to raise FROM |
+| `nightChargeActuator.ts` `restorable` | the baseline the revert is allowed to restore TO |
+| `nightChargeActuator.ts` adoption | the baseline a lost-confirmation write may be adopted from |
+| `ecoflow/commands.ts` refresh-cloud | the current reserve the cloud-presence refresh re-sends |
+
+**The apply guard and `restorable` are load-bearing as a pair.** While both read 50 the system
+was still sound: the apply refused a current reserve above 50, so a baseline above 50 could
+never be captured, so `restorable` never had to judge one. Raising **one** of the two opens the
+end state this module exists to prevent — apply at 60, capture `priorReservePct` 60, and
+`restorable` is false *forever*: the panel holds a raised reserve indefinitely, the house runs
+on grid every day, and the ledger records a clean completed night. All four now read the
+shared constants, and the suite pins the **pairing** rather than the literals: a range walk
+asserts that every reserve the apply will act on is one the revert will restore.
+
+Also fixed: `/api/reserve-floor` rejected an out-of-range `pct` with a message that still named
+`[10,50]`, and the stale `[10, 50]` prose in the actuator's safety-posture header.
+
+5 tests and 3 new mutants (7 in `scripts/mutate-device-ceiling.mjs`).
+
 ## 1.161.0
 
 ### The night-charge write ceiling is 90%, raised from 50%
