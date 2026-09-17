@@ -68,16 +68,16 @@ test('resolveNightChargeMode: unknown/absent fail closed to advisory', () => {
   assert.equal(resolveNightChargeMode(null), 'advisory');
 });
 
-test('clampReserveTarget: rounds and clamps to the [10, 90] write envelope', () => {
+test('clampReserveTarget: rounds and clamps to the [10, 50] write envelope', () => {
   assert.equal(clampReserveTarget(43.2), 43);
   assert.equal(clampReserveTarget(3), 10);
   assert.equal(clampReserveTarget(49.6), 50);
-  // v1.161.0 — the ceiling moved 50 → 90 on the owner's instruction, so an ask
-  // that used to be truncated to 50 is now delivered in full.
-  assert.equal(clampReserveTarget(80), 80, 'no longer truncated to 50');
-  assert.equal(clampReserveTarget(90), 90);
-  assert.equal(clampReserveTarget(100), 90, 'and the new ceiling still binds');
-  assert.equal(RESERVE_WRITE_MAX_PCT, 90, 'the envelope consumers import');
+  // v1.164.0 — back to 50, and this time it is the DEVICE's limit with evidence:
+  // 2026-09-16 wrote 90, the cloud accepted it, the SHP2 settled at 50.
+  assert.equal(clampReserveTarget(80), 50, 'the panel will not hold more than 50');
+  assert.equal(clampReserveTarget(90), 50);
+  assert.equal(clampReserveTarget(100), 50);
+  assert.equal(RESERVE_WRITE_MAX_PCT, 50, 'the envelope consumers import');
 });
 
 // ── Arming ──────────────────────────────────────────────────────────────────
@@ -461,16 +461,16 @@ const tick = (
 });
 
 test('★★★ a raised reserve is ALWAYS restorable inside the envelope (else it strands)', () => {
-  // priorReservePct 60 is only reachable because v1.161.0 raised the ceiling. If the
-  // revert refuses it, the panel holds a raised reserve indefinitely.
-  const st = envBase({ appliedAtMs: 1_000_000, priorReservePct: 60, targetPct: 90 });
-  const d = decideActuation(st, 1_000_000 + 6 * 3_600_000 + REVERT_LAG_MS + 1, tick(90));
-  assert.equal(d.kind, 'revert', 'a 60% baseline MUST still revert — 60 is inside [10,90]');
-  assert.equal(d.restorePct, 60);
+  // Any baseline the apply can capture, the revert must be able to restore. If it
+  // refuses one, the panel holds a raised reserve indefinitely.
+  const st = envBase({ appliedAtMs: 1_000_000, priorReservePct: 40, targetPct: 50 });
+  const d = decideActuation(st, 1_000_000 + 6 * 3_600_000 + REVERT_LAG_MS + 1, tick(50));
+  assert.equal(d.kind, 'revert', 'a 40% baseline MUST revert — 40 is inside [10,50]');
+  assert.equal(d.restorePct, 40);
 
   // Outside the envelope it correctly refuses to guess a revert target.
-  const bad = envBase({ appliedAtMs: 1_000_000, priorReservePct: 95, targetPct: 90 });
-  const db = decideActuation(bad, 1_000_000 + 6 * 3_600_000 + REVERT_LAG_MS + 1, tick(90));
+  const bad = envBase({ appliedAtMs: 1_000_000, priorReservePct: 95, targetPct: 50 });
+  const db = decideActuation(bad, 1_000_000 + 6 * 3_600_000 + REVERT_LAG_MS + 1, tick(50));
   assert.notEqual(db.kind, 'revert', '95 is outside the envelope — never guess a restore target');
 });
 
@@ -493,26 +493,26 @@ test('★★★ the apply guard and `restorable` read the SAME envelope', () => 
   }
 });
 
-test('★★★ the apply ACTS on a live reserve in the widened band (51..90)', () => {
-  // The negative cases below are not enough: a guard narrowed back to [10,50] still
-  // refuses everything they test. This is the case that only passes at the new ceiling.
-  const st = envBase({ announcedAtMs: 1, targetPct: 90 });
-  assert.equal(decideActuation(st, 1_000_000, tick(60)).kind, 'apply',
-    'a 60% floor is inside [10,90] — the nightly apply must still raise from it');
-  assert.equal(decideActuation(st, 1_000_000, tick(51)).kind, 'apply');
-  assert.equal(decideActuation(st, 1_000_000, tick(89)).kind, 'apply');
+test('★★★ the apply ACTS across the whole envelope, not just near the floor', () => {
+  // The negative cases below are not enough on their own: a guard NARROWED to, say,
+  // [10,20] still refuses everything they test. These are the cases that catch that.
+  const st = envBase({ announcedAtMs: 1, targetPct: 50 });
+  assert.equal(decideActuation(st, 1_000_000, tick(11)).kind, 'apply');
+  assert.equal(decideActuation(st, 1_000_000, tick(40)).kind, 'apply',
+    'a 40% floor is inside [10,50] — the nightly apply must still raise from it');
+  assert.equal(decideActuation(st, 1_000_000, tick(49)).kind, 'apply');
 });
 
-test('★★ a lost confirmation is adopted from a baseline in the widened band', () => {
-  // Same trap: with the bound back at 50 a 60% baseline is never adopted, so a reserve
-  // the device really did raise is orphaned and its revert target lost with it.
+test('★★ a lost confirmation is adopted from a baseline anywhere in the envelope', () => {
+  // Same trap in the other direction: a bound narrowed below the real floor orphans a
+  // reserve the device really did raise, and its revert target is lost with it.
   const st = envBase({
     applyAttemptedAtMs: 900_000, appliedAtMs: null, revertedAtMs: null,
-    attemptBaselinePct: 60, targetPct: 90,
+    attemptBaselinePct: 40, targetPct: 50,
   });
-  const d = decideActuation(st, 1_000_000, tick(90));
+  const d = decideActuation(st, 1_000_000, tick(50));
   assert.equal(d.kind, 'adopt', 'the device reads the target — the write landed');
-  assert.equal(d.priorPct, 60, 'and 60 is the revert target');
+  assert.equal(d.priorPct, 40, 'and 40 is the revert target');
 });
 
 test('the apply refuses a live reserve outside the envelope', () => {

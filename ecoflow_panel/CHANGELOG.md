@@ -1,3 +1,47 @@
+## 1.164.0
+
+### The write ceiling is 50 again — and this time the device said so
+
+v1.161.0 raised `RESERVE_WRITE_MAX_PCT` from 50 to 90 on the owner's instruction. The old bound
+called itself *the device's documented `[10, 50]` range* in four places and **cited no document**,
+so the honest thing was to ask the hardware. The night of **2026-09-16** answered:
+
+```
+21:31:40  ARMED — reserve -> 90% ... announced via HA notify + audible
+22:55:45  SUPERVISED WRITE APPLIED — backupReserveSoc 16% -> 90%
+22:57:45  settings-drift: EXTERNAL change — backupReserveSoc 16 -> 50
+23:01:45  applyVerified, targetPct 50, requestedPct 90, applyRetries 0
+```
+
+The cloud accepted the 90 without error; the SHP2 moved 16 → **50** and stopped. The bound was
+right all along — it simply had no evidence behind it. It has evidence now, recorded at the
+constant, and should not be raised again without new evidence from the device.
+
+**`deviceCeilingPct` is why that night cost two log lines instead of a page.** Introduced in
+v1.161.0 for exactly this uncertainty, it recognised 16 < 50 < 90 as a real partial actuation,
+adopted 50 as the target, kept 90 as `requestedPct`, and stamped the apply verified with **0
+retries**. Without it the night would have burned both retries, ended on `applyFailed`, pushed
+*"write NEVER TOOK EFFECT — tonight's buy is forfeited"* and corrected the ledger to
+`actuated:0` — while the panel held 50 and charged. It stays: it still guards the general case
+of an owner moving the reserve while a write is in flight.
+
+Asking for more than the panel accepts also cost two false notifications, both fixed by this
+release because the ask never exceeds 50 again:
+
+- the 21:30 announcement promised a reserve the panel will not hold — the v1.133.1 over-promise,
+  reintroduced by v1.161.0;
+- `settingsDrift` matched only the exact requested value, so it read **our own clamped write** as
+  an external change and pushed *"Reserve floor changed externally: 16% → 50%"*.
+
+**Charging above 50% is a different mechanism.** `backupReserveSoc` is a floor and this is its
+ceiling. The vendor's path to a fuller battery is force-charge (`ch{n}ForceCharge` +
+`foceChargeHight`, documented range 80-100) — a separate command with its own on-peak hazard,
+not reachable by widening this constant.
+
+The harness mutants that pin the guards were re-aimed: with the constant back at 50, mutating a
+guard to the literal `50` is a no-op that cannot be killed. They now mutate to a value inside the
+envelope, which is what proves each guard tracks the **constant** rather than a number.
+
 ## 1.163.0
 
 ### Correction to 1.153.0 and 1.154.0

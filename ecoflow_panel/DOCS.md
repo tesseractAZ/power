@@ -1655,7 +1655,7 @@ the "cloud says offline, LAN says online" wedge.
 
 - **Rate limit:** `REFRESH_COOLDOWN_MS = 30 s` per (action, sn); returns
   `rate-limited` + remaining ms when hot.
-- **Sanity bound:** `backupReserveSoc` must be an integer in **[10, 90]** (v1.161.0; 50 before) or the write is
+- **Sanity bound:** `backupReserveSoc` must be an integer in **[10, 50]** (raised to 90 in v1.161.0, returned to 50 in v1.164.0 when the device proved the limit) or the write is
   refused (`no-reserve-soc`) rather than pushing a garbage value.
 - Endpoint: **`POST /api/device/refresh-cloud/:sn`** (`preHandler: requireWriteAuth`).
   404 unknown sn; 409 `no-snapshot` when no current reserve is available; 429 rate-limited;

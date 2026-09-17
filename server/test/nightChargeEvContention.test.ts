@@ -469,11 +469,10 @@ test('setpoint — the contended night asks for the requirement, predicts the ar
   // v1.133.1 — the sentence announces the value the DEVICE is told and discloses
   // the requirement beside it. This test's subject is unchanged: the setpoint
   // tracks the REQUIREMENT, not the contention-derated arrival.
-  // v1.161.0 — with the envelope raised to 90 this 75% requirement is DELIVERABLE,
-  // so the written value IS the requirement and the truncation clause is gone.
-  assert.match(p.rationale, /reserve is set to 75%/, 'announces what is actually written');
-  assert.doesNotMatch(p.rationale, /only accepts a backup reserve up to/,
-    'nothing was truncated — the disclosure would be noise');
+  // v1.164.0 — the envelope is 50 again (device-proven), so a 75% requirement is
+  // truncated and the announcement must say so rather than promise 75.
+  assert.match(p.rationale, /reserve is set to 50%/, 'announces what is actually written');
+  assert.match(p.rationale, /the resilience requirement asks for 75%/, 'and still discloses the ask');
   assert.match(p.rationale, /only expected to reach ~66\.4%/);
 });
 
@@ -513,10 +512,8 @@ test('consumer (actuator) — the bounded write arms from the SETPOINT, not the 
   assert.equal(armed!.targetPct, 41, 'clampReserveTarget(41.2) — the requirement, NOT the derated 31.4');
   assert.notEqual(armed!.targetPct, clampReserveTarget(p.targetSocPct!), 'writing the prediction is the regression');
   // The write envelope is untouched by any of this — only its ceiling moved.
-  const deep = armFromPlan(emptyActuationState(), '2026-08-03', mkPlan({ setpointSocPct: 88, window: { startMs: B + HOUR, endMs: B + 7 * HOUR } }), B, 10);
-  assert.equal(deep!.targetPct, 88, 'v1.161.0 — an 88% ask is now delivered, not truncated to 50');
-  const huge = armFromPlan(emptyActuationState(), '2026-08-03', mkPlan({ setpointSocPct: 120, window: { startMs: B + HOUR, endMs: B + 7 * HOUR } }), B, 10);
-  assert.equal(huge!.targetPct, 90, 'the device bound still clamps the ask');
+  const huge = armFromPlan(emptyActuationState(), '2026-08-03', mkPlan({ setpointSocPct: 88, window: { startMs: B + HOUR, endMs: B + 7 * HOUR } }), B, 10);
+  assert.equal(huge!.targetPct, 50, 'the device bound still clamps the ask');
   // A plan with no setpoint cannot arm at all (fail-closed, unchanged).
   assert.equal(armFromPlan(emptyActuationState(), '2026-08-03', mkPlan({ setpointSocPct: null }), B, 10), null);
 });
@@ -528,8 +525,7 @@ test('consumer (HA/MQTT) — the write entity carries the ask, a separate entity
   assert.equal(f.night_charge_expected_soc_percent, 31.4, 'the prediction keeps its own entity');
   // Out-of-range asks are published inside the device bound, so an automation
   // is never handed a value backupReserveSoc cannot take.
-  assert.equal(nightChargeStateFields(mkPlan({ setpointSocPct: 88, generatedAt: B }), B).night_charge_target_soc_percent, 88);
-  assert.equal(nightChargeStateFields(mkPlan({ setpointSocPct: 120, generatedAt: B }), B).night_charge_target_soc_percent, 90);
+  assert.equal(nightChargeStateFields(mkPlan({ setpointSocPct: 88, generatedAt: B }), B).night_charge_target_soc_percent, 50);
   // Stale / null plans still emit BOTH keys as null (never a missing key).
   const stale = nightChargeStateFields(p, B + 13 * HOUR);
   assert.equal(stale.night_charge_target_soc_percent, null);
