@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /**
- * mutate-device-ceiling.mjs — committed harness for the v1.161.0 raised write
- * envelope and the partial-actuation adoption (server/src/nightChargeActuator.ts).
+ * mutate-device-ceiling.mjs — committed harness for the reserve write envelope and
+ * the partial-actuation adoption (server/src/nightChargeActuator.ts).
  *
- * WHY COMMITTED: raising RESERVE_WRITE_MAX_PCT from 50 to 90 (owner's
- * instruction, 2026-09-16) made a new outcome reachable — the SHP2 accepts the
- * write, raises its reserve, and settles BELOW what was asked. Whether the panel
- * enforces a ceiling of its own is UNVERIFIED: the old bound described itself as
- * the device's documented limit in four places and cited no document, and no
- * vendor source on disk mentions backupReserveSoc at all.
+ * WHY COMMITTED: v1.161.0 raised RESERVE_WRITE_MAX_PCT from 50 to 90 on the owner's
+ * instruction, because the old bound called itself the device's documented limit in
+ * four places and cited no document. ★★★ The night of 2026-09-16 SETTLED it: the
+ * write went out as 90, the cloud accepted it without error, and the SHP2 moved
+ * 16 -> 50 and stopped. The bound was right; it just had no evidence. v1.164.0 put
+ * it back at 50, and mutant iv now guards the proven value in the other direction.
+ *
+ * The outcome v1.161.0 made reachable is REAL and still guarded: the panel takes the
+ * write, raises its reserve, and settles BELOW what was asked.
  *
  * `deviceCeilingPct` is what makes that question safe to leave open. Without it
  * a short readback is indistinguishable from the 2026-08-16 phantom (a write the
@@ -57,34 +60,34 @@ const MUTANTS = [
     why: 'A device that took the write in full would be adopted as a partial actuation and rewrite its own target — the plain applyVerified path would never be reached.',
   },
   {
-    id: 'iv. ★★ the owner-chosen ceiling is reverted to 50',
+    id: 'iv. ★★ the envelope is widened past what the device accepts',
     file: ACT,
-    find: 'export const RESERVE_WRITE_MAX_PCT = 90;',
-    to: 'export const RESERVE_WRITE_MAX_PCT = 50; /* MUTANT */',
-    why: 'ARB_COST_MAX_SOC_PCT=90 goes back to being inert: the engine asks for a 100% setpoint and silently writes 50, which is the state the owner instructed be changed.',
+    find: 'export const RESERVE_WRITE_MAX_PCT = 50;',
+    to: 'export const RESERVE_WRITE_MAX_PCT = 90; /* MUTANT */',
+    why: 'Proven live on 2026-09-16: the SHP2 takes a 90 write and settles at 50. Asking for more buys nothing and costs two false notifications a night — the 21:30 announcement promises a reserve the panel will not hold, and settingsDrift reads our own clamped write as an EXTERNAL change.',
   },
   // v1.162.0 — the envelope guards must move TOGETHER. v1.161.0 raised the ceiling but left
   // four bare [10,50] pairs behind; the apply guard and `restorable` are the dangerous two.
   {
-    id: 'v. ★★★ `restorable` keeps the old ceiling while the apply guard moves (STRANDS the reserve)',
+    id: 'v. ★★★ `restorable` stops tracking the envelope constant (STRANDS the reserve)',
     file: ACT,
     find: '      state.priorReservePct >= RESERVE_WRITE_MIN_PCT &&\n      state.priorReservePct <= RESERVE_WRITE_MAX_PCT;',
-    to: '      state.priorReservePct >= 10 && state.priorReservePct <= 50; /* MUTANT */',
-    why: 'The apply raises FROM a 60% floor, captures priorReservePct 60, and then the revert refuses it forever: the panel holds a raised reserve indefinitely, the house runs on grid every day, and the ledger records a clean completed night. This is the expensive end state the module exists to prevent.',
+    to: '      state.priorReservePct >= 10 && state.priorReservePct <= 30; /* MUTANT */',
+    why: 'The apply raises FROM a 40% floor, captures priorReservePct 40, and then the revert refuses it forever: the panel holds a raised reserve indefinitely, the house runs on grid every day, and the ledger records a clean completed night. This is the expensive end state the module exists to prevent.',
   },
   {
-    id: 'vi. ★★ the apply sanity bound keeps the old ceiling',
+    id: 'vi. ★★ the apply sanity bound stops tracking the envelope constant',
     file: ACT,
     find: '  if (cur == null || !Number.isInteger(cur)\n      || cur < RESERVE_WRITE_MIN_PCT || cur > RESERVE_WRITE_MAX_PCT) return { kind: \'none\' };',
-    to: '  if (cur == null || !Number.isInteger(cur) || cur < 10 || cur > 50) return { kind: \'none\' }; /* MUTANT */',
-    why: 'A reserve sitting anywhere above 50 makes the nightly apply return {kind:"none"} SILENTLY — no log, no alert, no buy — and the operator has no way to see why the night did nothing.',
+    to: '  if (cur == null || !Number.isInteger(cur) || cur < 10 || cur > 30) return { kind: \'none\' }; /* MUTANT */',
+    why: 'A reserve sitting anywhere above the mutated bound makes the nightly apply return {kind:"none"} SILENTLY — no log, no alert, no buy — and the operator has no way to see why the night did nothing.',
   },
   {
-    id: 'vii. ★★ the adoption baseline keeps the old ceiling',
+    id: 'vii. ★★ the adoption baseline stops tracking the envelope constant',
     file: ACT,
     find: '    state.attemptBaselinePct >= RESERVE_WRITE_MIN_PCT &&\n    state.attemptBaselinePct <= RESERVE_WRITE_MAX_PCT',
-    to: '    state.attemptBaselinePct >= 10 && state.attemptBaselinePct <= 50 /* MUTANT */',
-    why: 'A lost-confirmation write from a baseline above 50 is never adopted, so a reserve the device DID raise is orphaned — the revert target is lost with it.',
+    to: '    state.attemptBaselinePct >= 10 && state.attemptBaselinePct <= 30 /* MUTANT */',
+    why: 'A lost-confirmation write from a baseline above the mutated bound is never adopted, so a reserve the device DID raise is orphaned — the revert target is lost with it.',
   },
 ];
 

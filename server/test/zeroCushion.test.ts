@@ -183,19 +183,20 @@ test('THE MEASURED DEFECT: the plan announced 100% while the panel was told the 
   // Live 2026-09-06: setpointSocPct 100, actuation targetPct 50. The sentence
   // went into the 21:30 notification AND the spoken broadcast, describing an
   // internal quantity as though it were the instruction.
-  // v1.161.0 — the envelope top moved 50 → 90, so the scenario is deepened to
-  // keep the REQUIREMENT above it: the subject of this test is that the
-  // announcement states what the device is told, whatever the ceiling is.
+  // v1.161.0 deepened this scenario (cushionPct 40 → 70) to keep the REQUIREMENT
+  // above a raised ceiling; v1.164.0 put the ceiling back at 50 and the scenario is
+  // left as-is, because the subject is unchanged: the announcement states what the
+  // device is TOLD, whatever the ceiling happens to be.
   const p = computeNightChargePlan(baseInputs({
     socNowPct: 20, reserveFloorPct: 10, cushionPct: 70, chargeCapKw: 1,
     horizon: mkHorizon(B, 24, 0, 1500),
   }));
   assert.equal(p.chargeTonight, true, 'premise: this night buys');
   assert.equal(p.setpointSocPct, 100, 'premise: the requirement exceeds the write envelope');
-  assert.match(p.rationale, /The reserve is set to 90%/, 'announces the WRITTEN value');
+  assert.match(p.rationale, /The reserve is set to 50%/, 'announces the WRITTEN value');
   assert.doesNotMatch(p.rationale, /The reserve is set to 100%/, 'never the un-clamped setpoint');
   assert.match(p.rationale, /the resilience requirement asks for 100%/, 'the real ask is still disclosed');
-  assert.match(p.rationale, /only accepts a backup reserve up to 90%/, 'and why it was truncated');
+  assert.match(p.rationale, /only accepts a backup reserve up to 50%/, 'and why it was truncated');
 });
 
 test('an untruncated setpoint reads exactly as before', () => {

@@ -194,22 +194,38 @@ export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = f
  * reserve figure to an operator must reconcile against these. There is now ONE
  * definition: `ecoflow/commands.ts` imports these rather than repeating them.
  *
- * ★★★ v1.161.0 — THE MAXIMUM IS 90, RAISED FROM 50 ON THE OWNER'S INSTRUCTION
- * (2026-09-16). `ARB_COST_MAX_SOC_PCT` has been set to 90 in the live options
- * all along, and the 50 here is what made every legal value above 50 inert:
- * the engine asked for `setpointSocPct: 100` on 2026-09-16 and wrote 50.
+ * ★★★ v1.164.0 — THE MAXIMUM IS 50, AND IT IS THE DEVICE'S, PROVEN.
  *
- * ★★ The old `50` described itself as the device's own documented limit, in
- * four places, WITHOUT citing a document — and no vendor source on disk
- * mentions `backupReserveSoc` at all. It is therefore UNVERIFIED whether the
- * SHP2 accepts a reserve above 50. The actuator no longer needs that answer in
- * advance: `deviceCeilingPct` below treats a device that takes the write but
- * stops short as a successful partial actuation, so a hardware limit costs one
- * log line instead of a false "buy forfeited" page. The first raised night
- * settles the question from the readback. See DOCS.md §8b.
+ * v1.161.0 raised this to 90 on the owner's instruction (`ARB_COST_MAX_SOC_PCT` had been
+ * set to 90 all along and was inert above 50). The night of 2026-09-16 settled it against
+ * the hardware:
+ *
+ *   21:31:40  ARMED — reserve -> 90% ... announced via HA notify + audible
+ *   22:55:45  SUPERVISED WRITE APPLIED — backupReserveSoc 16% -> 90%
+ *   22:57:45  settings-drift: EXTERNAL change — backupReserveSoc 16 -> 50
+ *   23:01:45  applyVerified, targetPct 50, requestedPct 90, applyRetries 0
+ *
+ * The cloud ACCEPTED the 90 without error; the SHP2 moved 16 -> 50 and stopped. So the
+ * old "[10, 50]" comment was RIGHT — it simply never carried the evidence, which is why
+ * it was raised. It carries it now. Do not raise this again without new evidence from the
+ * device; asking for more than 50 buys nothing and costs two false notifications:
+ *   - the 21:30 announcement promises a reserve the panel will not hold (the v1.133.1
+ *     over-promise, reintroduced by v1.161.0 and removed again here), and
+ *   - settingsDrift reads our own clamped write as an EXTERNAL change and pushes
+ *     "Reserve floor changed externally: 16% -> 50%" (observed 22:57:45).
+ *
+ * ★ `deviceCeilingPct` (v1.161.0) STAYS. It is why that night cost two log lines instead
+ * of a false "tonight's buy is forfeited" page with the ledger corrected to actuated:0 —
+ * it adopted the 50 as a real partial actuation, 0 retries. It still guards the general
+ * case: an owner who moves the reserve slider while a write is in flight.
+ *
+ * ★★ CHARGING ABOVE 50% IS A DIFFERENT MECHANISM. backupReserveSoc is a floor, and this
+ * is its ceiling. The vendor's path to a fuller battery is force-charge
+ * (`ch{n}ForceCharge` + `foceChargeHight`, documented range 80-100) — a separate command
+ * with its own on-peak hazard. It is NOT reachable by widening this constant.
  */
 export const RESERVE_WRITE_MIN_PCT = 10;
-export const RESERVE_WRITE_MAX_PCT = 90;
+export const RESERVE_WRITE_MAX_PCT = 50;
 
 export function clampReserveTarget(targetSocPct: number): number {
   return Math.min(RESERVE_WRITE_MAX_PCT, Math.max(RESERVE_WRITE_MIN_PCT, Math.round(targetSocPct)));
