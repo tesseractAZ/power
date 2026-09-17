@@ -1633,7 +1633,7 @@ mobile app's private MQTT protobuf channel, `cmdFunc=12`).
 The supervised night-charge actuator's single write primitive: set
 `backupReserveSoc` on the SHP2 via the same documented `PD303_APP_SET` shape
 the cloud-presence refresh round-trips, with a changed value. The target is
-VALIDATED (not silently clamped) into the device's documented [10, 50] range,
+VALIDATED (not silently clamped) into the [10, 90] write envelope,
 audit-logged under action `night-charge-reserve`, and paced by a 5-minute
 per-SN cooldown. Only the night-charge actuator calls it (§15.8b) — there is
 no direct HTTP surface for arbitrary reserve writes.
@@ -1647,7 +1647,7 @@ the "cloud says offline, LAN says online" wedge.
 
 - **Rate limit:** `REFRESH_COOLDOWN_MS = 30 s` per (action, sn); returns
   `rate-limited` + remaining ms when hot.
-- **Sanity bound:** `backupReserveSoc` must be an integer in **[10, 50]** or the write is
+- **Sanity bound:** `backupReserveSoc` must be an integer in **[10, 90]** (v1.161.0; 50 before) or the write is
   refused (`no-reserve-soc`) rather than pushing a garbage value.
 - Endpoint: **`POST /api/device/refresh-cloud/:sn`** (`preHandler: requireWriteAuth`).
   404 unknown sn; 409 `no-snapshot` when no current reserve is available; 429 rate-limited;
@@ -6412,6 +6412,17 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.161.0 — the write ceiling is 90%, raised from 50% on the owner's instruction (2026-09-16).**
+`ARB_COST_MAX_SOC_PCT` has been set to **90** in the live options all along; the 50 in
+`RESERVE_WRITE_MAX_PCT` is what made every value the option's `int(50,100)` schema allows above 50
+inert. On 2026-09-16 the engine asked for `setpointSocPct: 100` and wrote 50. ★★ The old bound
+described itself as *the device's documented [10, 50] range* in four places **without citing a
+document**, and no vendor source on disk mentions `backupReserveSoc` at all — so whether the SHP2
+enforces a ceiling of its own is **unverified**. The actuator no longer needs that answer in
+advance: see *Device-ceiling adoption* above, which turns a hardware limit into one log line
+instead of a false forfeiture page, and makes the first raised night settle the question from the
+readback.
+
 **v1.160.0 — the slot is released on every exit.** v1.159.0 released it only at the
 completion tail, but the broadcast routine returns early in six places before it can arm
 anything: not supervised, no MA targets, the two storm gates, and the two render failures.
@@ -8820,7 +8831,7 @@ The subsystem spans six modules, all shipped incrementally (v1.36.0 tariff → v
 
 The binding safety invariants, enforced structurally rather than by convention:
 
-- **The alarm spine never consumes engine state.** The engine reads the same `projection.backupReserveSoc` the reserve-floor alarm (§5) defends — the *same field*, never a divergent copy — and produces **no** state the floor/runway/SoC alarms consume. In `advisory` mode (the default) nothing is ever written; in `supervised`/`auto` the actuator's one bounded write raises that reserve for the charge-window span and auto-restores it (§8b), while the floor alarms keep their own independent protection throughout — a bug here can mis-recommend or mis-charge within the [10, 50] clamp; it cannot mis-alarm.
+- **The alarm spine never consumes engine state.** The engine reads the same `projection.backupReserveSoc` the reserve-floor alarm (§5) defends — the *same field*, never a divergent copy — and produces **no** state the floor/runway/SoC alarms consume. In `advisory` mode (the default) nothing is ever written; in `supervised`/`auto` the actuator's one bounded write raises that reserve for the charge-window span and auto-restores it (§8b), while the floor alarms keep their own independent protection throughout — a bug here can mis-recommend or mis-charge within the [10, 90] clamp; it cannot mis-alarm.
 - **Under-buy is a safety miss, not a cost miss.** The outage cushion is an explicit resilience requirement; a confidently under-sized buy leaves the home at the floor with no cushion when an outage hits. Sizing therefore uses **worst-case inputs**: P10 (pessimistic-low) PV and P90 (pessimistic-high) load, with committed EV load placed as a worst-case block.
 - **The over-buy ceiling is the deliberate asymmetry.** The floor is sized with P10 PV (never under-buy); the "don't clip tomorrow morning's PV" ceiling is sized with **P90** PV (never over-buy into clipping). Where the two collide on a genuinely tight day, **resilience wins**: the buy is kept, the clip is accepted, and `bindingCap='overBuy'` is surfaced.
 - **Emit null over a fabricated number.** An incomplete, incoherent, thin, or climatology-only basis yields a *null plan* (`chargeTonight=false`, every numeric field `null`) — never a best-effort small number the operator might trust as cushion. The same discipline runs through the tariff (`ratesConfirmed=false` ⇒ every `$` output null), the scorer (zero telemetry samples ⇒ `null`, not a "measured" `0`), and the gate (null readiness ⇒ `write_ready` strictly `false`).
@@ -9077,7 +9088,7 @@ When `NIGHT_CHARGE_MODE` is `supervised` (or `auto`), each charge night runs one
 **The nightly flow:**
 
 1. **Announce + arm (~21:30, inside the evening job).** When the recorded plan is a charge with a complete basis, a resolved window, and a positive buy, the actuation candidate is computed **from the announced plan** — a fresher recompute never silently substitutes a different buy, because the owner's cancel window runs against the announced numbers. The evening notification names the write, the clamped target, and the cancel deadline; the audible broadcast channel announces the same (no phone-push dependency). The armed state **persists only after at least one announcement channel confirms delivery** (`NOTIFY_CHANNEL` other than `none`, or a successful audible announce) — a write the owner never heard about cannot fire; an undelivered night stays advisory and logs at error level. Arming is refused while a prior night is unresolved (applied-unreverted, or an unconfirmed attempt not provably un-applied — a raised reserve is never orphaned or buried).
-2. **Apply (window open − 5 min, tolerance +30 min).** The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline BEFORE the device call. One write raises `backupReserveSoc` to `min(round(targetSocPct), 50)` — validated (not silently clamped) into the device's documented `[10, 50]` range by `setBackupReserveSoc` (`ecoflow/commands.ts`), the same documented `PD303_APP_SET` shape the cloud-presence refresh has round-tripped since v0.9.10, audit-logged under `night-charge-reserve` with a 5-min retry cooldown. Every apply guard fails closed: advisory mode, a cancelled night, a red alert condition, an incoherent SoC read (I11), an unknown/out-of-range current reserve, a missed window, or a target at/below the current reserve ⇒ no write. The row is stamped `actuated=1` at write time. **Lost-confirmation adoption:** when an attempted write reports failure but the live reserve later reads back exactly the attempted target (≠ the attempt baseline), the write is proven applied — the actuator adopts it (applied state stamped from the attempt baseline) and the normal auto-revert takes over.
+2. **Apply (window open − 5 min, tolerance +30 min).** The attempt is a **write-ahead intent**: the state file records the attempt and its pre-write baseline BEFORE the device call. One write raises `backupReserveSoc` to `min(round(targetSocPct), 90)` — validated (not silently clamped) into the `[10, 90]` write envelope by `setBackupReserveSoc` (`ecoflow/commands.ts`), which imports the bound from `nightChargeActuator.ts` so there is exactly one definition, the same documented `PD303_APP_SET` shape the cloud-presence refresh has round-tripped since v0.9.10, audit-logged under `night-charge-reserve` with a 5-min retry cooldown. Every apply guard fails closed: advisory mode, a cancelled night, a red alert condition, an incoherent SoC read (I11), an unknown/out-of-range current reserve, a missed window, or a target at/below the current reserve ⇒ no write. The row is stamped `actuated=1` at write time. **Lost-confirmation adoption:** when an attempted write reports failure but the live reserve later reads back exactly the attempted target (≠ the attempt baseline), the write is proven applied — the actuator adopts it (applied state stamped from the attempt baseline) and the normal auto-revert takes over. **Device-ceiling adoption (v1.161.0):** when the reserve reads back *between* the attempt baseline and the target and still does after `APPLY_VERIFY_AFTER_MS`, the panel took the write but settled short — of its own accord, or because the owner moved the slider. That is a real partial actuation, so `deviceCeilingPct` adopts the achieved value AS `targetPct` (the original ask is preserved in `requestedPct`) and stamps the apply verified. Without it a short readback is indistinguishable from the 2026-08-16 phantom: both retries burn and the night ends on `applyFailed`, which pages "tonight's buy is forfeited" and corrects the ledger to `actuated:0` — while the reserve is genuinely raised and the buy is genuinely happening. A reserve that did **not** move still takes the phantom path, unchanged.
 3. **Revert (window close + 5 min, or immediately on a post-apply cancel).** The prior reserve value is restored. The revert path is mode-independent — it runs even if the owner flips the option back to advisory mid-night — and refuses an invalid restore value. After `REVERT_ESCALATE_AFTER = 3` consecutive CLOUD-REJECTED writes it annunciates a critical (audible + HA notification) once and keeps retrying; the floor/runway/SoC alarm spine is fully independent throughout. A successful revert sends a morning summary notification.
 
    **v1.131.0 — revert readback.** The revert stamped `revertedAtMs` the moment the cloud
@@ -9149,7 +9160,7 @@ The planner sizes a buy against one of two objectives, selected by `ARB_OBJECTIV
 
 Three properties an operator needs before setting these:
 
-1. **`ARB_COST_MAX_SOC_PCT` is not deliverable above 50.** The actuator's only write is the
+1. **`ARB_COST_MAX_SOC_PCT` is deliverable to 90 from v1.161.0** (it was capped at 50 before, which made every value the option's `int(50,100)` schema allowed above 50 inert). The actuator's only write is the
    panel's backup-reserve setpoint, and both `clampReserveTarget` (`nightChargeActuator.ts`,
    `Math.min(50, Math.max(10, …))`) and `setBackupReserveSoc`'s own range check
    (`ecoflow/commands.ts`) cap it at 50. The option's schema is `int(50,100)` — its minimum

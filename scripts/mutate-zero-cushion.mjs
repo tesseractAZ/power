@@ -82,9 +82,9 @@ const MUTANTS = [
   {
     id: 'ix. the write envelope constant is widened',
     file: ACTUATOR,
-    find: 'export const RESERVE_WRITE_MAX_PCT = 50;',
+    find: 'export const RESERVE_WRITE_MAX_PCT = 90;',
     to: 'export const RESERVE_WRITE_MAX_PCT = 100; /* MUTANT */',
-    why: 'Every announced reserve would exceed what the device accepts, and clampReserveTarget would stop clamping.',
+    why: 'The announced reserve would exceed the envelope every consumer reports against, and clampReserveTarget would stop clamping at the owner-chosen ceiling.',
   },
   {
     id: 'vi. a disabled cushion reports a non-zero kWh',
