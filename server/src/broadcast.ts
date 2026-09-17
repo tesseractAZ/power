@@ -770,6 +770,11 @@ export function startBroadcastMonitor(
    * or a give-up. Otherwise a stale `retryLevel` would make every later lower-level
    * deferral "keep-pending" against a retry that does not exist, and no retry would ever
    * be armed again.
+   *
+   * v1.160.0 — called from runBroadcastInner's `finally`, so it covers the early exits
+   * (storm gates, no targets, not supervised, render failure) as well as the completion
+   * tail. A fired retry that is absorbed by the same-level storm gate used to leave the
+   * slot held forever.
    */
   const releaseRetrySlotIfIdle = () => {
     if (retryTimer == null) { retryAttempt = 0; retryLevel = null; }
@@ -1215,7 +1220,7 @@ export function startBroadcastMonitor(
   /**
    * Single broadcast: render → one MA call. No staggering, no settles.
    */
-  const runBroadcastInner = async (
+  const runBroadcastAttempt = async (
     level: ConditionLevel,
     // v1.59.0 — the severity RUNG picks the tone; `level` stays the private
     // annunciation-policy axis every suppression gate already speaks. Passing
@@ -1509,6 +1514,42 @@ export function startBroadcastMonitor(
     releaseRetrySlotIfIdle();
     persistStatus();
     return { ok: errors.length === 0, errors, verified: errors.length === 0 && !deliveryUnverified };
+  };
+
+  /**
+   * v1.160.0 — the retry slot is released on EVERY exit, not just the completion tail.
+   *
+   * runBroadcastAttempt returns early in six places before it can arm anything: not
+   * supervised, no MA targets, the two storm gates, and the two render failures. A
+   * DEFERRED RETRY that fires into one of those left the slot HELD WITH NO TIMER —
+   * `retryLevel` set, `retryTimer` null — because v1.159.0 released it only at the
+   * completion tail. The same-level storm gate is the likely one: the retry replays
+   * the same rung ~30 s later, which is exactly what SAME_LEVEL_GAP_MS absorbs.
+   *
+   * A phantom slot is worse than the defect it came from. Every later milder deferral
+   * logs "keeping the pending <level> retry" against a retry that does not exist, so
+   * nothing is ever retried again, and the next same-level failure can reach "giving
+   * up after 3" having made zero attempts.
+   *
+   * The tail call is KEPT (it releases before the status is persisted, so a persisted
+   * snapshot never shows a phantom slot) and this one is idempotent:
+   * releaseRetrySlotIfIdle() is a no-op whenever a timer is armed, and
+   * scheduleBroadcastRetry() runs INSIDE the attempt, so a retry armed by this
+   * broadcast is always already armed by the time either call runs.
+   */
+  const runBroadcastInner = async (
+    level: ConditionLevel,
+    rung: AlarmRung,
+    message: string | null,
+    messageEs: string | null,
+    bypassStormGate: boolean,
+    skipSip = false,
+  ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
+    try {
+      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);
+    } finally {
+      releaseRetrySlotIfIdle();
+    }
   };
 
   // v0.15.22 — single-flight: every broadcast (runway alarm, SoC alarm, alert

@@ -11,6 +11,11 @@
  * file's own single-flight comment records that overlapping play_announcement calls are what
  * wedges MA into those 500s, so an unbounded retry can sustain the failure it is retrying.
  *
+ * v1.160.0 added the release-on-every-exit wrapper (mutants vi/vii): v1.159.0 released the
+ * slot only at the completion tail, so a retry that fired into an early return — most
+ * plausibly the same-level storm gate, since a retry replays the same rung ~30 s later —
+ * left it held with no timer armed and no retry could ever be scheduled again.
+ *
  *   node scripts/mutate-broadcast-retry.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -62,6 +67,25 @@ const MUTANTS = [
     find: '  const attempt = pending && RETRY_LEVEL_RANK[incoming] > RETRY_LEVEL_RANK[pending.level]\n    ? 0\n    : pending?.attempt ?? 0;',
     to: '  const attempt = pending?.attempt ?? 0; /* MUTANT */',
     why: 'Three yellow deferrals exhaust the budget and the next red gets "giving up" without a single attempt — the v1.122.0 defect, restored.',
+  },
+  // v1.160.0 — these two revert the release-on-every-exit wrapper. The slot machinery is a
+  // closure inside makeBroadcaster (no seam to call runBroadcastInner from a test without a
+  // live HA client), so the mechanism that kills them is an anchor-asserted SOURCE PIN.
+  // That is the point of running them: the pin is only worth having if it fails on the
+  // exact shapes the regression would take.
+  {
+    id: 'vi. ★★★ only the completion tail releases the slot again (the v1.159.0 leak)',
+    file: BC,
+    find: '    try {\n      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n    } finally {\n      releaseRetrySlotIfIdle();\n    }',
+    to: '    return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip); /* MUTANT */',
+    why: 'A deferred retry absorbed by the same-level storm gate leaves the slot held with no timer: every later milder deferral keeps-pending against a retry that does not exist, and the next same-level failure gives up having made zero attempts.',
+  },
+  {
+    id: 'vii. ★★ the slot is released on the way IN instead of on the way out',
+    file: BC,
+    find: '    try {\n      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n    } finally {\n      releaseRetrySlotIfIdle();\n    }',
+    to: '    releaseRetrySlotIfIdle();\n    return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip); /* MUTANT */',
+    why: 'The fired retry loses its own budget before it re-runs — attempt restarts at 1 forever, which is exactly the v1.159.0 defect.',
   },
 ];
 

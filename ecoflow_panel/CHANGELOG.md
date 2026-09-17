@@ -1,3 +1,35 @@
+## 1.160.0
+
+### A deferred retry absorbed by a storm gate no longer strands the retry slot
+
+Follow-up to 1.159.0, from a review of the log ring since that release. 1.159.0 made the
+deferred-retry budget count by keeping the slot across the timer firing, and released it with
+`releaseRetrySlotIfIdle()` when a broadcast ended with no retry armed — but that release sat
+only at the **completion tail**, and the broadcast routine returns early in six places before
+it can arm anything: not supervised, no Music Assistant targets, the two storm gates, and the
+two render failures.
+
+**The leak.** A retry replays the same rung about 30 s later, which is exactly the window
+`SAME_LEVEL_GAP_MS` suppresses — so a fired retry meeting the same-level storm gate returned
+early and left the slot **held with no timer armed**. A phantom slot is worse than the defect
+it came from:
+
+- every later milder deferral logs `keeping the pending <level> retry` against a retry that
+  does not exist, so nothing is ever retried again;
+- the next same-level failure can reach `giving up after 3` having made **zero** attempts.
+
+**The fix.** `runBroadcastInner` is now a thin wrapper that calls the gated routine inside
+`try { … } finally { releaseRetrySlotIfIdle(); }`. Every exit releases an idle slot, including
+a throw and any exit added later. The call is idempotent — a no-op whenever a timer is armed —
+and `scheduleBroadcastRetry` runs *inside* the routine, so a retry armed by this broadcast is
+always already armed by the time either release runs. The tail call is kept: it releases before
+the status is persisted, so a persisted snapshot never shows a phantom slot.
+
+Releasing on the way **in** would strip a fired retry of its own budget — the 1.159.0 defect
+restored — so the harness mutates the wrapper into that shape too and requires it to die.
+
+2 tests (7 in the file) and 2 new mutants (7 in `scripts/mutate-broadcast-retry.mjs`).
+
 ## 1.159.0
 
 ### A failing announcement no longer retries forever
