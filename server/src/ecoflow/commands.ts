@@ -1,6 +1,11 @@
 import { timingSafeEqual } from 'node:crypto';
 import { ecoflow } from './rest.js';
 import { appendWriteLog, type WriteOutcome } from '../writeLog.js';
+// v1.161.0 — the write envelope has ONE definition. This range check used to
+// repeat the bound as a pair of literals, which is how it and clampReserveTarget
+// could have drifted apart; nightChargeActuator.ts is a dependency-free leaf
+// module, so importing it here costs nothing and cannot cycle.
+import { RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT } from '../nightChargeActuator.js';
 
 /**
  * High-level write helpers.
@@ -172,11 +177,13 @@ export interface ReserveWriteRequest extends Omit<CommandRequest, 'body'> {
  * the standard write log under action 'night-charge-reserve'.
  */
 export async function setBackupReserveSoc(req: ReserveWriteRequest): Promise<CommandResult> {
-  if (!Number.isInteger(req.targetPct) || req.targetPct < 10 || req.targetPct > 50) {
+  if (!Number.isInteger(req.targetPct)
+      || req.targetPct < RESERVE_WRITE_MIN_PCT
+      || req.targetPct > RESERVE_WRITE_MAX_PCT) {
     return {
       outcome: 'failure',
       code: 'reserve-out-of-range',
-      message: `Refused: backupReserveSoc ${req.targetPct} outside the documented [10, 50] range.`,
+      message: `Refused: backupReserveSoc ${req.targetPct} outside the [${RESERVE_WRITE_MIN_PCT}, ${RESERVE_WRITE_MAX_PCT}] write envelope.`,
       durationMs: 0,
     };
   }

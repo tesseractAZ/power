@@ -1,3 +1,44 @@
+## 1.161.0
+
+### The night-charge write ceiling is 90%, raised from 50%
+
+**Owner instruction (2026-09-16).** `ARB_COST_MAX_SOC_PCT` has been set to **90** in the live
+options all along, and `ARB_OBJECTIVE` is `cost` — but the actuator's write envelope was capped at
+50, which made every value the option's own `int(50,100)` schema allows above 50 **inert**. The
+engine asked for `setpointSocPct: 100` on the evening of 2026-09-16 and wrote 50, exactly as it had
+been doing. The ceiling is now 90, so the configured target is deliverable.
+
+`clampReserveTarget` and `setBackupReserveSoc`'s range check now share **one** definition of the
+envelope (`ecoflow/commands.ts` imports it), closing the two-literal drift the v1.133.1 note called
+out.
+
+### A panel that grants less than it was asked is no longer a "forfeited buy"
+
+Raising the ceiling makes a new outcome reachable: the SHP2 accepts the write, raises its reserve,
+and settles **below** the target. That matters because the old bound called itself *the device's
+documented [10, 50] range* in four places **without citing a document**, and no vendor source on
+disk mentions `backupReserveSoc` at all — whether the panel enforces a ceiling of its own is
+genuinely **unverified**.
+
+Before this release a short readback was indistinguishable from the 2026-08-16 phantom (a write the
+cloud acknowledged and the device ignored): both retries burn, the night ends on `applyFailed`, and
+the operator is paged that **"tonight's buy is forfeited"** with the ledger corrected to
+`actuated:0` — while the reserve is genuinely raised and the charge is genuinely running. A false
+forfeiture is the worst of both worlds.
+
+- A reading strictly between the attempt baseline and the target, still standing after the verify
+  dwell, is now adopted as the actuation the device was willing to grant: `targetPct` becomes the
+  achieved value (so the arbitrage posture, the revert-settling predicate and the revert readback
+  all keep comparing against what the panel actually holds) and `requestedPct` preserves the ask.
+- A reserve that did **not** move still takes the phantom path, unchanged. That distinction is one
+  comparison wide, so the harness mutates both bounds and requires each to die.
+- The log line names the achieved value and says that a repeat at the same number identifies the
+  panel's real limit.
+
+The revert is untouched: the prior floor is restored at window close either way.
+
+4 tests and a new committed harness (`scripts/mutate-device-ceiling.mjs`, 4 mutants).
+
 ## 1.160.0
 
 ### A deferred retry absorbed by a storm gate no longer strands the retry slot

@@ -183,19 +183,67 @@ export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = f
 /**
  * v1.133.1 — the device's backup-reserve write envelope, named.
  *
- * The panel accepts a backup reserve only in [10, 50]. That bound was a bare
- * `50` inside clampReserveTarget and a second literal inside
- * setBackupReserveSoc's range check, so nothing in the codebase said out loud
- * that it is the ceiling on everything the night-charge engine can achieve —
- * which is how `ARB_COST_MAX_SOC_PCT`, schema `int(50,100)`, came to ship with a
- * minimum equal to this maximum (see DOCS.md §8b). Anything that reports a
- * reserve figure to an operator must reconcile against these.
+ * The bound was a bare `50` inside clampReserveTarget and a second literal
+ * inside setBackupReserveSoc's range check, so nothing in the codebase said out
+ * loud that it is the ceiling on everything the night-charge engine can achieve
+ * — which is how `ARB_COST_MAX_SOC_PCT`, schema `int(50,100)`, came to ship with
+ * a minimum equal to this maximum (see DOCS.md §8b). Anything that reports a
+ * reserve figure to an operator must reconcile against these. There is now ONE
+ * definition: `ecoflow/commands.ts` imports these rather than repeating them.
+ *
+ * ★★★ v1.161.0 — THE MAXIMUM IS 90, RAISED FROM 50 ON THE OWNER'S INSTRUCTION
+ * (2026-09-16). `ARB_COST_MAX_SOC_PCT` has been set to 90 in the live options
+ * all along, and the 50 here is what made every legal value above 50 inert:
+ * the engine asked for `setpointSocPct: 100` on 2026-09-16 and wrote 50.
+ *
+ * ★★ The old `50` described itself as the device's own documented limit, in
+ * four places, WITHOUT citing a document — and no vendor source on disk
+ * mentions `backupReserveSoc` at all. It is therefore UNVERIFIED whether the
+ * SHP2 accepts a reserve above 50. The actuator no longer needs that answer in
+ * advance: `deviceCeilingPct` below treats a device that takes the write but
+ * stops short as a successful partial actuation, so a hardware limit costs one
+ * log line instead of a false "buy forfeited" page. The first raised night
+ * settles the question from the readback. See DOCS.md §8b.
  */
 export const RESERVE_WRITE_MIN_PCT = 10;
-export const RESERVE_WRITE_MAX_PCT = 50;
+export const RESERVE_WRITE_MAX_PCT = 90;
 
 export function clampReserveTarget(targetSocPct: number): number {
   return Math.min(RESERVE_WRITE_MAX_PCT, Math.max(RESERVE_WRITE_MIN_PCT, Math.round(targetSocPct)));
+}
+
+/**
+ * v1.161.0 — THE DEVICE TOOK THE WRITE BUT STOPPED SHORT.
+ *
+ * Raising the envelope to 90 (above) made a new outcome reachable: the SHP2
+ * accepts the command, moves its reserve UP, and settles somewhere below what
+ * was asked — either because the panel enforces a ceiling of its own, or
+ * because the owner moved the slider during the window.
+ *
+ * Without this, that outcome is read as the 2026-08-16 phantom: strict equality
+ * against `targetPct` never holds, the apply is re-issued twice, and the night
+ * ends on `applyFailed` — which logs "write NEVER TOOK EFFECT ... tonight's buy
+ * is forfeited", pushes it, and corrects the ledger to `actuated:0`, all while
+ * the panel is holding a raised reserve and charging. A false forfeiture is the
+ * worst of both worlds: the operator is paged about a buy that IS happening,
+ * and the record says it did not.
+ *
+ * So a reading strictly between the attempt-time baseline and the target, still
+ * standing after APPLY_VERIFY_AFTER_MS, is treated as the actuation the device
+ * was willing to grant. The phantom case is untouched: a device that never
+ * moved still reads the baseline, which this deliberately does NOT accept.
+ *
+ * Returns the achieved percentage, or null when this is not that situation.
+ */
+export function deviceCeilingPct(
+  state: Pick<NightActuationState, 'targetPct' | 'attemptBaselinePct'>,
+  liveReservePct: number | null,
+): number | null {
+  const { targetPct, attemptBaselinePct } = state;
+  if (targetPct == null || attemptBaselinePct == null || liveReservePct == null) return null;
+  if (liveReservePct <= attemptBaselinePct) return null; // never moved — the phantom write
+  if (liveReservePct >= targetPct) return null;          // took it in full (or overshot)
+  return liveReservePct;
 }
 
 /** Apply window: the write may fire from 5 min before the plan's charge
@@ -279,6 +327,13 @@ export interface NightActuationState {
   /** v1.131.0 - the revert-READBACK-failure escalation already fired (once per
    *  night). Distinct from revertEscalated, which counts cloud rejections. */
   revertReadbackEscalated: boolean;
+  /** v1.161.0 - what the apply ASKED for, when the device granted something
+   *  lower. Null whenever the device took the write in full. `targetPct` is
+   *  rewritten to what the panel actually holds (see applyCeiling), so every
+   *  downstream equality — readback verification, the arbitrage posture, the
+   *  revert-settling predicate — keeps comparing against the live truth; this
+   *  field is what preserves the intent for the ledger and the operator. */
+  requestedPct: number | null;
   lastError: string | null;
 }
 
@@ -291,6 +346,7 @@ export function emptyActuationState(): NightActuationState {
     applyVerifiedAtMs: null, applyRetries: 0, applyLastAttemptMs: null, applyEscalated: false,
     revertAttempts: 0, revertEscalated: false,
     revertVerifiedAtMs: null, revertRetries: 0, revertLastAttemptMs: null, revertReadbackEscalated: false,
+    requestedPct: null,
     lastError: null,
   };
 }
@@ -331,6 +387,7 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     revertRetries: num(o.revertRetries) ?? 0,
     revertLastAttemptMs: num(o.revertLastAttemptMs),
     revertReadbackEscalated: o.revertReadbackEscalated === true,
+    requestedPct: num(o.requestedPct),
     lastError: str(o.lastError),
   };
 }
@@ -407,6 +464,11 @@ export type ActuationAction =
   | { kind: 'applyVerified' }
   /** v1.79.0 - cloud ACK'd, device never took it; re-issue the write. */
   | { kind: 'retryApply'; targetPct: number }
+  /** v1.161.0 - the device raised the reserve but settled BELOW the target (its
+   *  own ceiling, or an owner adjustment). A real, partial actuation: adopt the
+   *  achieved value as the target so the night proceeds and reverts normally,
+   *  instead of being scored a phantom and paged as a forfeited buy. */
+  | { kind: 'applyCeiling'; achievedPct: number }
   /** v1.79.0 - retries exhausted, device still reads the old reserve: warn the
    *  operator once and correct the ledger (actuated:0). The night then closes
    *  through the normal revert path (a no-op restore). */
@@ -517,6 +579,12 @@ export function decideActuation(
       if (opts.currentReservePct === state.targetPct) return { kind: 'applyVerified' };
       const attemptedAt = state.applyLastAttemptMs ?? state.appliedAtMs;
       if (opts.currentReservePct != null && nowMs - attemptedAt >= APPLY_VERIFY_AFTER_MS) {
+        // v1.161.0 — the device moved, but not all the way. Adopt it BEFORE the
+        // retry ladder: re-issuing a write the panel has already answered cannot
+        // change the answer, and the ladder's end state pages a forfeited buy
+        // against a reserve that is genuinely raised.
+        const achieved = deviceCeilingPct(state, opts.currentReservePct);
+        if (achieved != null) return { kind: 'applyCeiling', achievedPct: achieved };
         if (state.applyRetries < APPLY_MAX_RETRIES &&
             (state.windowEndMs == null || nowMs < state.windowEndMs - APPLY_VERIFY_AFTER_MS)) {
           return { kind: 'retryApply', targetPct: state.targetPct };
