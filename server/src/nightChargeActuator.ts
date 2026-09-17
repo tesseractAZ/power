@@ -10,7 +10,9 @@
  *
  * ★★ SAFETY POSTURE (binding):
  *  - ONE bounded write per night: raise `backupReserveSoc` to
- *    min(setpointSocPct, 50), never above the device's own [10, 50] clamp,
+ *    min(setpointSocPct, RESERVE_WRITE_MAX_PCT), never outside the write
+ *    envelope [RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT] (v1.162.0: the
+ *    envelope has ONE definition and every guard reads it),
  *    never touching any other field. The write is armed ONLY from the plan
  *    that was ANNOUNCED at the evening job (the owner's cancel window ran
  *    against those exact numbers) — a fresher recompute never silently
@@ -34,7 +36,8 @@ export function resolveNightChargeMode(raw: string | undefined | null): NightCha
 }
 
 /** The device clamp for backupReserveSoc plus the supervised ceiling: the
- *  write never raises the reserve above 50% regardless of the plan target. */
+ *  write never raises the reserve above RESERVE_WRITE_MAX_PCT regardless of the
+ *  plan target. */
 /**
  * v1.113.0 — is the SHP2's reserve CURRENTLY raised by our own night-charge
  * write? PURE.
@@ -405,7 +408,7 @@ export interface ArmablePlan {
    *  arrival would cap the charge at a guess — on a night the predicted EV
    *  session never plugs in, the full rate was there all along and we would
    *  still have stopped short. Ask for the requirement; let physics decide how
-   *  far it gets. Still clamped to [10,50] below. */
+   *  far it gets. Still clamped to the write envelope below. */
   setpointSocPct: number | null;
   window: { startMs: number; endMs: number } | null;
 }
@@ -545,7 +548,8 @@ export function decideActuation(
     opts.currentReservePct === state.targetPct &&
     state.targetPct !== state.attemptBaselinePct &&
     Number.isInteger(state.attemptBaselinePct) &&
-    state.attemptBaselinePct >= 10 && state.attemptBaselinePct <= 50
+    state.attemptBaselinePct >= RESERVE_WRITE_MIN_PCT &&
+    state.attemptBaselinePct <= RESERVE_WRITE_MAX_PCT
   ) {
     return { kind: 'adopt', priorPct: state.attemptBaselinePct };
   }
@@ -553,9 +557,16 @@ export function decideActuation(
   // ── REVERT (checked next — always allowed, mode-independent: a raised
   // reserve must come back down even if the owner flipped to advisory). ──
   if (state.appliedAtMs != null && state.revertedAtMs == null) {
+    // ★★★ v1.162.0 — this MUST track the same envelope as the apply guard below.
+    // It was a bare [10,50] pair while the apply guard was too, which is the only
+    // reason v1.161.0 was survivable: the apply refused a baseline above 50, so no
+    // such baseline could ever be captured. Raising ONE of the two would open the
+    // expensive end state this module exists to prevent — apply at 60, capture 60,
+    // and then `restorable` is false FOREVER, so the reserve never comes back down.
     const restorable = state.priorReservePct != null &&
       Number.isInteger(state.priorReservePct) &&
-      state.priorReservePct >= 10 && state.priorReservePct <= 50;
+      state.priorReservePct >= RESERVE_WRITE_MIN_PCT &&
+      state.priorReservePct <= RESERVE_WRITE_MAX_PCT;
     // v1.79.0 — GRID-LOSS ABORT: with the grid gone the buy cannot happen and
     // the raised reserve only manufactures a false AT-RESERVE-FLOOR posture on
     // top of a real outage. Restore the true floor now. gridPresent === null
@@ -638,7 +649,10 @@ export function decideActuation(
   if (opts.vitalsRed) return { kind: 'none' }; // never actuate during an active critical
   if (!opts.socCoherent) return { kind: 'none' };
   const cur = opts.currentReservePct;
-  if (cur == null || !Number.isInteger(cur) || cur < 10 || cur > 50) return { kind: 'none' };
+  // v1.162.0 — the envelope constants, not a third copy of the bound. An out-of-
+  // envelope reading is garbage or outside interference; fail closed either way.
+  if (cur == null || !Number.isInteger(cur)
+      || cur < RESERVE_WRITE_MIN_PCT || cur > RESERVE_WRITE_MAX_PCT) return { kind: 'none' };
   if (state.targetPct <= cur) return { kind: 'none' }; // nothing to raise
   return { kind: 'apply', targetPct: state.targetPct };
 }

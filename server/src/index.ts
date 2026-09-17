@@ -192,6 +192,8 @@ import {
   isReserveArbitrageRaised,
   setReserveArbitrageRaised,
   clampReserveTarget,
+  RESERVE_WRITE_MIN_PCT,
+  RESERVE_WRITE_MAX_PCT,
   ownerReserveFloorPct,
   isRevertSettling,
   nightChargeSpokenNotice,
@@ -5605,7 +5607,10 @@ app.post<{ Querystring: { pct?: string } }>(
     const targetPct = clampReserveTarget(raw);
     if (targetPct !== raw) {
       reply.code(400);
-      return { ok: false, error: `pct ${raw} outside the supported [10,50] reserve envelope` };
+      return {
+        ok: false,
+        error: `pct ${raw} outside the supported [${RESERVE_WRITE_MIN_PCT},${RESERVE_WRITE_MAX_PCT}] reserve envelope`,
+      };
     }
     if (isReserveArbitrageRaised(nightActuationMem)) {
       reply.code(409);

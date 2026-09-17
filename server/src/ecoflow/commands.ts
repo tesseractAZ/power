@@ -140,10 +140,13 @@ export async function refreshShp2CloudPresence(req: RefreshCloudRequest): Promis
       rateLimited: true,
     };
   }
-  // Sanity bound — backupReserveSoc is documented to live in [10, 50].
-  // If the snapshot is stale/missing we'd rather fail loudly than write
-  // a garbage value back to the panel.
-  if (!Number.isInteger(req.currentReserveSoc) || req.currentReserveSoc < 10 || req.currentReserveSoc > 50) {
+  // Sanity bound — the reserve write envelope (v1.162.0: shared constants, not a
+  // third copy of the pair). If the snapshot is stale/missing we'd rather fail
+  // loudly than write a garbage value back to the panel. NOTE this re-sends the
+  // CURRENT value, so an out-of-envelope reading must refuse rather than echo.
+  if (!Number.isInteger(req.currentReserveSoc)
+      || req.currentReserveSoc < RESERVE_WRITE_MIN_PCT
+      || req.currentReserveSoc > RESERVE_WRITE_MAX_PCT) {
     return {
       outcome: 'failure',
       code: 'no-reserve-soc',
@@ -166,7 +169,7 @@ export const NIGHT_RESERVE_COOLDOWN_MS = 5 * 60 * 1000;
 
 export interface ReserveWriteRequest extends Omit<CommandRequest, 'body'> {
   /** New backupReserveSoc. VALIDATED (not silently clamped): integer in the
-   *  device's documented [10, 50] range, else the write is refused. */
+   *  [RESERVE_WRITE_MIN_PCT, RESERVE_WRITE_MAX_PCT] envelope, else refused. */
   targetPct: number;
 }
 
