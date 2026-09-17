@@ -7,8 +7,8 @@ import { setBackupReserveSoc } from '../src/ecoflow/commands.js';
  *    actuator's supervised night, not by unit tests). ── */
 
 test('setBackupReserveSoc refuses out-of-range and non-integer targets without any API call', async () => {
-  // v1.161.0 — the envelope is [10, 90]; 51 is now a LEGAL target, 91 is not.
-  for (const bad of [9, 91, 37.8, Number.NaN, -10]) {
+  // v1.164.0 — the envelope is [10, 50], PROVEN against the device on 2026-09-16.
+  for (const bad of [9, 51, 37.8, Number.NaN, -10]) {
     const r = await setBackupReserveSoc({ sn: 'TESTSN', targetPct: bad, source: {} });
     assert.equal(r.outcome, 'failure');
     assert.equal(r.code, 'reserve-out-of-range');
