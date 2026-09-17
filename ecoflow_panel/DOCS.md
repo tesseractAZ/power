@@ -224,8 +224,15 @@ ts < ?` seek instead of full-scanning under the write lock.
 
 **Pragmas** (write connection): `journal_mode = WAL`, `synchronous = NORMAL`,
 `cache_size = -32768` (32 MB), `mmap_size = 268435456` (256 MB),
-`temp_store = MEMORY`. `ANALYZE samples` runs on every startup (cheap; keeps the
-planner current as row skew grows).
+`temp_store = MEMORY`. **Planner statistics:** at startup `PRAGMA optimize=0x03` lists
+the `ANALYZE` a table needs because one of its indexes has no `sqlite_stat1` row (a
+fresh install, or an index a migration just created). The recorder runs exactly those,
+with no sampling bound, and logs `recorder: planner stats — SQLite <version>, …`. A
+table whose indexes all have statistics is not re-analyzed at boot, however stale:
+every statement that reads `samples` plans the same with no, full or truncated
+statistics (`test/bootPlannerStats.test.ts`). An `ANALYZE` of `samples` costs a read of
+every index page (~917 MB in a 2026-09-07 snapshot of the live database), bounded or
+not.
 
 #### 4.3 Write path — `record(extract(snap))`
 
@@ -342,7 +349,8 @@ resume after a silence, persists a durable marker (not synthetic samples) to
   device's.
 - **Boot phases.** `createRecorder` blocks the whole add-on (no HTTP listener, MQTT
   ingest, poll or alarm evaluation), so it ends with one line on the monotonic clock:
-  `open`, `schema+migrations`, `analyze` (bounded by `PRAGMA analysis_limit=400`),
+  `open`, `schema+migrations`, `analyze` (the planner-statistics refresh — normally no
+  `ANALYZE` at all; see **Planner statistics** above),
   `setup`, `seed`, `restart-probe`, `rest` and `total`. `index.ts` also logs the
   call's duration from outside; the two should agree.
 
