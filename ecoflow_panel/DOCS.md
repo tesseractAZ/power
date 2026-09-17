@@ -6412,6 +6412,21 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.160.0 — the slot is released on every exit.** v1.159.0 released it only at the
+completion tail, but the broadcast routine returns early in six places before it can arm
+anything: not supervised, no MA targets, the two storm gates, and the two render failures.
+A fired retry that met one of those — most plausibly the **same-level storm gate**, since a
+retry replays the same rung ~30 s later, which is exactly what `SAME_LEVEL_GAP_MS` absorbs —
+left the slot held with **no timer armed**. That phantom slot is worse than the defect it
+came from: every later milder deferral logs "keeping the pending <level> retry" against a
+retry that does not exist, and the next same-level failure can reach "giving up after 3"
+having made zero attempts. `runBroadcastInner` is now a wrapper that calls the gated routine
+inside `try { … } finally { releaseRetrySlotIfIdle(); }`, so every exit — including a throw —
+releases an idle slot. The call is idempotent (a no-op while a timer is armed) and
+`scheduleBroadcastRetry` runs *inside* the routine, so a retry this broadcast armed is always
+already armed when the release runs. Releasing on the way **in** would be the v1.159.0 defect
+restored, and is pinned against.
+
 ---
 
 ### 3. The audible dispatch: MA + SIP (`broadcast.ts`)

@@ -85,3 +85,59 @@ test('★★★ the timer keeps the slot, and a broadcast with no retry pending 
   assert.ok(tail.indexOf('releaseRetrySlotIfIdle();') < tail.indexOf('persistStatus();'),
     'released before the status is persisted');
 });
+
+/**
+ * v1.160.0 — v1.159.0 released the slot only at the completion tail, and the broadcast
+ * routine returns early in six places before it can arm anything (not supervised, no MA
+ * targets, the two storm gates, the two render failures). A fired retry absorbed by the
+ * same-level storm gate — the likely case, since a retry replays the same rung ~30 s
+ * later — therefore left the slot HELD WITH NO TIMER. The tests below pin the consequence
+ * of such a phantom slot and the structure that now prevents one.
+ */
+
+test('★★★ a phantom slot (level held, no timer) blocks every later retry', () => {
+  // What a leaked slot looks like to scheduleBroadcastRetry: retryLevel set, retryTimer null.
+  const phantom = { level: 'red' as const, attempt: 3 };
+
+  const milder = retrySlotDecision(phantom, 'yellow', MAX);
+  assert.equal(milder.action, 'keep-pending',
+    'every later milder deferral defers to a retry that does not exist — nothing is retried again');
+
+  const same = retrySlotDecision(phantom, 'red', MAX);
+  assert.equal(same.action, 'give-up',
+    'and the next same-level failure "gives up after 3" having made zero attempts');
+});
+
+test('★★★ every exit of the broadcast routine releases an idle retry slot', () => {
+  const code = src('broadcast.ts').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+
+  // The gated routine is the ATTEMPT; the exported name is a wrapper around it.
+  const attempt = code.indexOf('  const runBroadcastAttempt = async (');
+  assert.ok(attempt > 0, 'the broadcast attempt is located');
+  assert.equal(code.split('runBroadcastAttempt(').length - 1, 1,
+    'the attempt is reachable only through the wrapper below');
+
+  // The live scenario: a fired retry meets the same-level storm gate and returns
+  // BEFORE any scheduleBroadcastRetry call could re-arm the slot.
+  const stormExit = code.indexOf("return { ok: false, errors: ['suppressed: same-or-lower level within gap'] };", attempt);
+  assert.ok(stormExit > attempt, 'the same-level storm gate still returns early');
+  assert.ok(stormExit < code.indexOf('scheduleBroadcastRetry(', attempt),
+    'and it exits before anything can arm a retry — so only a finally can release the slot');
+
+  assert.ok(code.includes(
+    '    try {\n'
+    + '      return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);\n'
+    + '    } finally {\n'
+    + '      releaseRetrySlotIfIdle();\n'
+    + '    }\n'
+    + '  };'),
+    'the wrapper releases an idle slot on EVERY exit, including a throw — not only at the tail');
+
+  // Releasing on the way IN would wipe the budget of the retry that is re-running,
+  // which is the v1.159.0 defect restored.
+  const wrapper = code.indexOf('  const runBroadcastInner = async (');
+  assert.ok(wrapper > attempt);
+  const prologue = code.slice(wrapper, code.indexOf('    try {', wrapper));
+  assert.ok(!prologue.includes('releaseRetrySlotIfIdle();'),
+    'the slot must not be released before the attempt runs — a fired retry would lose its budget');
+});
