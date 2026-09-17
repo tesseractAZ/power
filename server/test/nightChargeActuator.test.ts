@@ -16,6 +16,8 @@ import {
   type ActuationTickOpts,
   APPLY_VERIFY_AFTER_MS,
   APPLY_MAX_RETRIES,
+  RESERVE_WRITE_MAX_PCT,
+  deviceCeilingPct,
 } from '../src/nightChargeActuator.js';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -66,11 +68,16 @@ test('resolveNightChargeMode: unknown/absent fail closed to advisory', () => {
   assert.equal(resolveNightChargeMode(null), 'advisory');
 });
 
-test('clampReserveTarget: rounds and clamps to the device [10, 50] range', () => {
+test('clampReserveTarget: rounds and clamps to the [10, 90] write envelope', () => {
   assert.equal(clampReserveTarget(43.2), 43);
-  assert.equal(clampReserveTarget(80), 50);
   assert.equal(clampReserveTarget(3), 10);
   assert.equal(clampReserveTarget(49.6), 50);
+  // v1.161.0 — the ceiling moved 50 → 90 on the owner's instruction, so an ask
+  // that used to be truncated to 50 is now delivered in full.
+  assert.equal(clampReserveTarget(80), 80, 'no longer truncated to 50');
+  assert.equal(clampReserveTarget(90), 90);
+  assert.equal(clampReserveTarget(100), 90, 'and the new ceiling still binds');
+  assert.equal(RESERVE_WRITE_MAX_PCT, 90, 'the envelope consumers import');
 });
 
 // ── Arming ──────────────────────────────────────────────────────────────────
@@ -354,4 +361,68 @@ test('grid-loss abort still beats the readback machinery (order: abort > due-rev
 test('window-close revert unchanged (no abort flag on the normal path)', () => {
   const a = decideActuation(ackedState(), WINDOW.endMs + 5 * 60_000 + 1, opts({}));
   assert.deepEqual(a, { kind: 'revert', restorePct: 10 });
+});
+
+/* ══ v1.161.0 — the raised envelope and the device's own ceiling ══════════ */
+
+/**
+ * Raising RESERVE_WRITE_MAX_PCT from 50 to 90 (owner's instruction, 2026-09-16)
+ * made a new outcome reachable: the panel accepts the write, moves its reserve
+ * UP, and settles BELOW what was asked. Before v1.161.0 that read exactly like
+ * the 2026-08-16 phantom — the write the cloud ACK'd and the device ignored —
+ * so it would have burned both retries and then logged "write NEVER TOOK
+ * EFFECT ... tonight's buy is forfeited", pushed it, and corrected the ledger
+ * to actuated:0, all while the panel was holding a raised reserve and charging.
+ *
+ * Whether the SHP2 actually enforces a ceiling is UNVERIFIED — the old bound
+ * called itself "documented" in four places and cited no document. These tests
+ * are what make that question safe to leave open.
+ */
+
+test('★★★ a device that settles BELOW the target is a partial actuation, not a phantom', () => {
+  const st = { targetPct: 90, attemptBaselinePct: 16 };
+  assert.equal(deviceCeilingPct(st, 50), 50, 'the panel moved 16 → 50: real, just short');
+  assert.equal(deviceCeilingPct(st, 89), 89);
+  assert.equal(deviceCeilingPct(st, 17), 17, 'even one point of movement is movement');
+});
+
+test('★★★ a device that never moved is still the phantom, and must NOT be adopted', () => {
+  const st = { targetPct: 90, attemptBaselinePct: 16 };
+  assert.equal(deviceCeilingPct(st, 16), null, 'the 2026-08-16 case: unchanged reserve');
+  assert.equal(deviceCeilingPct(st, 15), null, 'moved the WRONG way — not an actuation');
+  assert.equal(deviceCeilingPct(st, 90), null, 'took it in full — the plain verified path');
+  assert.equal(deviceCeilingPct(st, 95), null, 'at or above target is not a ceiling');
+  assert.equal(deviceCeilingPct(st, null), null, 'a starved reading decides nothing');
+  assert.equal(deviceCeilingPct({ targetPct: null, attemptBaselinePct: 16 }, 50), null);
+  assert.equal(deviceCeilingPct({ targetPct: 90, attemptBaselinePct: null }, 50), null);
+});
+
+test('★★★ the ceiling is adopted BEFORE the retry ladder can page a forfeited buy', () => {
+  const base: NightActuationState = {
+    ...emptyActuationState(),
+    day: '2026-09-16', targetPct: 90, buyKwh: 40,
+    windowStartMs: 1_000_000, windowEndMs: 1_000_000 + 6 * 3_600_000,
+    applyAttemptedAtMs: 900_000, attemptBaselinePct: 16,
+    appliedAtMs: 900_000, priorReservePct: 16, applyLastAttemptMs: 900_000,
+  };
+  const opts = (currentReservePct: number | null): ActuationTickOpts =>
+    ({ currentReservePct, gridPresent: true } as ActuationTickOpts);
+  const after = 900_000 + APPLY_VERIFY_AFTER_MS + 1;
+
+  const clamped = decideActuation(base, after, opts(50));
+  assert.equal(clamped.kind, 'applyCeiling', 'not retryApply — re-asking cannot change the answer');
+  assert.equal((clamped as { achievedPct: number }).achievedPct, 50);
+
+  // The phantom keeps its ladder, untouched.
+  assert.equal(decideActuation(base, after, opts(16)).kind, 'retryApply');
+  // And a full take is still the plain verified path.
+  assert.equal(decideActuation(base, after, opts(90)).kind, 'applyVerified');
+});
+
+test('a partial actuation survives a restart (requestedPct round-trips)', () => {
+  const st = { ...emptyActuationState(), day: '2026-09-16', targetPct: 50, requestedPct: 90 };
+  const back = coerceActuationState(JSON.parse(JSON.stringify(st)));
+  assert.equal(back.targetPct, 50, 'the target is what the device HOLDS');
+  assert.equal(back.requestedPct, 90, 'and the intent survives for the ledger');
+  assert.equal(coerceActuationState({ day: '2026-09-16' }).requestedPct, null);
 });

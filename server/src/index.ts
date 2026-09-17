@@ -4835,6 +4835,26 @@ async function runNightActuationTickInner(): Promise<void> {
     return;
   }
 
+  if (action.kind === 'applyCeiling') {
+    // v1.161.0 — the panel raised the reserve but settled below what we asked.
+    // Adopt the achieved value AS the target: every downstream equality (the
+    // arbitrage posture, isRevertSettling, the revert readback) then compares
+    // against what the device actually holds, and the night closes normally.
+    // `requestedPct` keeps the intent for the ledger and for the operator.
+    const requested = state.targetPct;
+    persistNightActuation({
+      ...state,
+      targetPct: action.achievedPct,
+      requestedPct: state.requestedPct ?? requested,
+      applyVerifiedAtMs: nowMs,
+      lastError: null,
+    });
+    app.log.warn(
+      `night-charge: device CEILING — asked backupReserveSoc ${requested}%, the panel settled at ${action.achievedPct}% (baseline was ${state.attemptBaselinePct ?? '?'}%). Treating it as applied: the reserve IS raised and tonight's buy is real, just smaller than planned. Reverts to ${state.priorReservePct ?? '?'}% after the window. If this repeats at the same value, that value is the SHP2's own limit and RESERVE_WRITE_MAX_PCT should be set to it.`,
+    );
+    return;
+  }
+
   if (action.kind === 'retryApply') {
     const blockedRetry = multiPanelWriteBlock();
     if (blockedRetry) { app.log.warn(`night-charge: APPLY RETRY refused — ${blockedRetry}`); return; }

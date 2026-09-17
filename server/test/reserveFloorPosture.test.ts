@@ -90,10 +90,11 @@ test('inclusive floor comparison survives (v1.17.0 F14): pool EXACTLY at the flo
 // ── v1.114.0: the owner reserve-floor guard (pure parts) ────────────────────
 import { clampReserveTarget } from '../src/nightChargeActuator.js';
 
-test('owner floor: the [10,50] envelope is the device clamp, unchanged', () => {
-  assert.equal(clampReserveTarget(20), 20, 'the new owner floor is inside the envelope');
+test('owner floor: the [10,90] envelope still clamps, ceiling raised in v1.161.0', () => {
+  assert.equal(clampReserveTarget(20), 20, 'the owner floor is inside the envelope');
   assert.equal(clampReserveTarget(9), 10);
-  assert.equal(clampReserveTarget(60), 50);
+  assert.equal(clampReserveTarget(60), 60, 'v1.161.0 — 60 is now deliverable');
+  assert.equal(clampReserveTarget(100), 90);
 });
 
 test('owner floor: a mid-window change must be refused — the revert would undo it', () => {
