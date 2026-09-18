@@ -1,3 +1,85 @@
+## 1.165.0
+
+### Overnight charging continues past the 50% reserve, to the night's ceiling
+
+**Why.** The panel caps the backup reserve at 50% (proven in 1.164.0). On 2026-09-16 it
+charged 16% → 49% by 01:00 at ~15 kW into the pack — then sat **flat at 49% from 01:00 to
+05:00**. Four hours of the cheapest window unused, because the reserve had reached its ceiling.
+
+**What.** On a night whose reserve write is applied **and readback-verified**, the add-on now
+switches the panel's per-channel **force-charge** (`ch{n}ForceCharge`, the app's *Charge Now*)
+ON for the rest of the window and OFF when it closes. The panel's own force-charge limit
+(`foceChargeHight`) is synced to the night's ceiling first, and the **device** stops the charge.
+
+**The ceiling** is the announced plan's economic ceiling: `ARB_COST_MAX_SOC_PCT` (90) or the
+room tomorrow morning's P90 solar needs, **whichever is lower** — a pack too full to take the
+morning sun curtails it, and that wasted kWh costs the full price of the grid kWh in its place.
+The panel cannot force-charge below 80, so a night whose ceiling is under 80 stays reserve-only.
+It is captured at arming, like the reserve target: a fresher recompute never substitutes.
+The planner and the force-charge now share **one** definition of that ceiling (`costCeilingKwh`).
+
+**Why not stop at the ceiling in software.** With the reserve at 50%, switching force-charge
+OFF at 90% lets the panel serve the house from the pack, draining it back toward 50% for the rest
+of the window — forfeiting exactly the hours this recovers. Force-charge ON holds the house on
+grid; the device ceiling ends the charge; and switching OFF never waits on a fresh SoC reading.
+
+**No new option.** It runs when `NIGHT_CHARGE_MODE` is supervised/auto, `ARB_OBJECTIVE` is
+`cost`, and `ARB_COST_MAX_SOC_PCT` is above 50. **Kill switch: set `ARB_COST_MAX_SOC_PCT` to 50.**
+Its description is rewritten — it used to say, correctly at the time, that values above 50 were
+advisory-only, and that charge power capped a night near 60% (2026-09-16 ran at ~15 kW).
+
+### Rails — force-charge is the control behind the 2026-08-04 on-peak buy
+
+- **OFF is unconditional**: window end, a cancelled night, the reserve revert, grid loss (the
+  resolver **or** the panel's own `gridSta=0`), the feature being disabled mid-night, or a 7-hour
+  hard backstop. It is mode- and enable-independent, and time-based — a stale readback still
+  switches it off.
+- **Write-ahead**: the slots are persisted before the ON writes, so a lost confirmation can never
+  orphan a force-charge. A record whose slot list is unreadable switches off — and verifies — all three.
+- **Readback-verified OFF**, re-issued, then a critical push. The verify grace (6 min) outlasts the
+  per-slot write cooldown (5 min) — shorter, and every retry comes back rate-limited.
+  Verification **keeps running after the escalation**, so the record resolves the moment the slots
+  read OFF.
+- **Arming refuses to bury** a night whose force-charge never verified OFF (arming returns a fresh
+  record, which would erase the only one that knows to switch it off) — and says so in the log.
+- **ON is narrow**: grid known present, a live slot readback, never before the overnight rate
+  starts, never within 20 min of the window end, and **never when a slot is already on** — an
+  operator's Charge Now is theirs.
+- **Settings-drift** treats our own `ch{n}ForceCharge` / `foceChargeHight` moves as own-writes
+  (else two false *"changed externally"* pushes a night); an operator's Charge Now is still reported.
+- The 21:30 announcement says so, and drops the *"only expected to reach"* clause on those nights.
+- The v1.84.0 Charge Now responder **pushes** on an on-peak grid draw with force-charge ON. It
+  only switches it off in `CHARGE_NOW_RESPONSE=supervised`; live it is advisory — a signal, not a
+  backstop.
+
+### Four defects fixed before this ever ran, from a 28-agent adversarial review
+
+- **The OFF stopped trying.** The first cut gave up writing after two re-issues (~18 min). A
+  command path failing 05:00–05:18 would have left force-charge ON through the weekday into the
+  16:00 on-peak — 2026-08-04 rebuilt. Now the OFF is re-issued **every 15 minutes for as long as
+  it reads ON**; the escalation is **spoken** (like a stuck reserve), and only an OFF the cloud
+  *accepted* counts against the readback budget.
+- **The master switch removed the only timer.** The actuation tick exists only while
+  `NIGHT_CHARGE_ADVISOR_ENABLED` is on, and any option change restarts the add-on — so the most
+  obvious "turn this off" mid-night left force-charge ON with nothing to stop it. A separate
+  safety tick now outlives that switch; it is inert unless a force-charge of ours is in flight,
+  and it can only switch OFF.
+- **ON could fire on an unverified ceiling**, filling to the panel's live 100% — past the owner's
+  90 and the solar headroom. ON now waits until the panel **reads** the night's ceiling (one
+  retry, else reserve-only), and the panel's own ceiling is **restored** afterwards — otherwise a
+  later storm-prep Charge Now would silently stop at 90. An unrestored original is carried into
+  the next night, so the restore always returns the owner's value.
+- **Islanded was read as connected.** Grid-connected is `gridSta === 1` **only**; the first cut
+  switched off on `=== 0` and would have missed `2` — the outage case itself.
+
+**Not established — the outage question.** No vendor text says how a slot with force-charge ON
+behaves when the grid fails, and it has never happened on this plant. The evidence against harm
+is inference (islanding is a panel-level transfer; a grid charge has no source without a grid;
+this button has been used by hand with the same exposure). One attended test settles it: Charge
+Now ON for one slot, open the main breaker, confirm backed-up loads stay up and the pack discharges.
+
+32 tests and a new committed harness (`scripts/mutate-force-charge.mjs`, 24 mutants).
+
 ## 1.164.0
 
 ### The write ceiling is 50 again — and this time the device said so

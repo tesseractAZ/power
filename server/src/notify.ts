@@ -347,7 +347,13 @@ export function buildNightChargeMessage(
   /** v1.50.0 — set when tonight's supervised write is ARMED: the notification
    *  then names the bounded write and its cancel deadline instead of the
    *  advisory-only tail. null/omitted = advisory posture, unchanged. */
-  supervised?: { cancelDeadlineText: string; targetPct: number } | null,
+  supervised?: {
+    cancelDeadlineText: string;
+    targetPct: number;
+    /** v1.165.0 — set when force-charge will ride tonight's window: the panel's
+     *  force-charge ceiling it will charge toward. null/omitted = reserve only. */
+    forceChargeCeilingPct?: number | null;
+  } | null,
 ): NotifyMessage {
   const base = { severity: 'info' as const, dedupId: 'night_charge_plan' };
 
@@ -404,13 +410,21 @@ export function buildNightChargeMessage(
   // they agree, rather than inventing a distinction that does not exist
   // tonight. Only "expect BELOW the ask" is worth a clause — the reverse is
   // just the [10,50] write bound, which the sentence already states.
+  // v1.165.0 — on a force-charge night the reserve is NOT where charging stops, so
+  // "only expected to reach ~X" would be an under-statement of what the panel does.
+  const forceCeiling = supervised?.forceChargeCeilingPct ?? null;
   const expectNote =
-    supervised && plan.targetSocPct != null && plan.targetSocPct < supervised.targetPct - 0.5
+    supervised && forceCeiling == null && plan.targetSocPct != null && plan.targetSocPct < supervised.targetPct - 0.5
       ? ` The pack is only expected to reach ~${pct(plan.targetSocPct)} — the reserve is the ask, not a forecast.`
       : '';
   const tail = supervised
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes).${expectNote} `
+      + (forceCeiling != null
+        ? `Once that is verified it switches the panel's force-charge ON for the rest of the window, so `
+          + `charging continues past the reserve toward ~${forceCeiling}% (the panel's own ceiling), and switches it `
+          + 'OFF when the window closes. '
+        : '')
       + 'Cancel from the night-charge card on the panel before then.'
     : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
       + 'night_charge_recommended (charge_tonight) entity, gated on night_charge_write_ready '
