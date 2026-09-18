@@ -6,6 +6,8 @@ import {
   FORCE_CHARGE_OFF_MAX_RETRIES, FORCE_CHARGE_OFF_PERSIST_EVERY_MS, FORCE_CHARGE_CEILING_VERIFY_AFTER_MS,
   FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS, FORCE_CHARGE_PLAN_RATE_KW, FORCE_CHARGE_JIT_BUFFER_MS,
   forceChargeStartAtMs, type ForceChargeOpts,
+  panelHoldsTarget, forceChargeOffDeadlineMs, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
+  FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, FORCE_CHARGE_CEILING_MIN_PCT,
 } from '../src/nightForceCharge.js';
 import {
   emptyActuationState, coerceActuationState, armFromPlan, RESERVE_WRITE_MAX_PCT,
@@ -196,14 +198,14 @@ test('★★ arming captures the plan\'s ceiling — a fresher recompute never s
 
 test('★★ ONE definition of the economic ceiling — the planner and the force-charge share it', () => {
   // min(maxSoc, full - P90 morning surplus); a present forecast can only LOWER it.
-  assert.deepEqual(costCeilingKwh({ fullKwh: 100, morningPvSurplusP90Kwh: 25, maxSocPct: 90 }),
+  assert.deepEqual(costCeilingKwh({ fullKwh: 100, morningPvSurplusKwh: 25, maxSocPct: 90 }),
     { ceilingKwh: 75, basis: 'pv-headroom' });
-  assert.deepEqual(costCeilingKwh({ fullKwh: 100, morningPvSurplusP90Kwh: 5, maxSocPct: 90 }),
+  assert.deepEqual(costCeilingKwh({ fullKwh: 100, morningPvSurplusKwh: 5, maxSocPct: 90 }),
     { ceilingKwh: 90, basis: 'max-soc' });
-  assert.deepEqual(costCeilingKwh({ fullKwh: 100, morningPvSurplusP90Kwh: null, maxSocPct: 90 }),
+  assert.deepEqual(costCeilingKwh({ fullKwh: 100, morningPvSurplusKwh: null, maxSocPct: 90 }),
     { ceilingKwh: 90, basis: 'max-soc' }, 'no forecast never means "fill to 100"');
   // costModeTargetKwh is the same ceiling floored by reserve and resilience.
-  const t = costModeTargetKwh({ fullKwh: 100, reserveKwh: 16, morningPvSurplusP90Kwh: 25, maxSocPct: 90, resilienceTargetKwh: 40 });
+  const t = costModeTargetKwh({ fullKwh: 100, reserveKwh: 16, morningPvSurplusKwh: 25, maxSocPct: 90, resilienceTargetKwh: 40 });
   assert.equal(t.targetKwh, 75);
   assert.equal(t.ceilingBasis, 'pv-headroom');
 });
@@ -277,7 +279,9 @@ test('★★★ after the escalation the OFF KEEPS being re-issued — escalatio
   // Review finding: the first cut stopped writing after two re-issues (~18 min in). A
   // command path failing 05:00-05:18 then left force-charge ON through the weekday into
   // the 16:00 on-peak — the 2026-08-04 incident, rebuilt.
-  const late = WIN_END + 10 * FORCE_CHARGE_OFF_VERIFY_AFTER_MS;
+  // v1.168.0 — kept inside the wall-clock deadline (window end + 60 min), so this pins
+  // the RETRY-BUDGET escalation; the deadline has its own tests below.
+  const late = WIN_END + 5 * FORCE_CHARGE_OFF_VERIFY_AFTER_MS;
   const exhausted = offNight({ forceChargeOffRetries: FORCE_CHARGE_OFF_MAX_RETRIES });
   assert.deepEqual(decideForceCharge(exhausted, late, opts({ slotsOn: [1] })), { kind: 'offFailed', slots: [1] });
   const escalated = { ...exhausted, forceChargeOffEscalated: true, forceChargeOffLastAttemptMs: late };
@@ -435,6 +439,97 @@ test('the 21:30 announcement names the force-charge and its TARGET, and drops th
   assert.match(plain.body, /only expected to reach ~43.5%/);
 });
 
+/* ══ v1.168.0 — COAST ON GRID at 80+ (owner, 2026-09-17) ═══════════════════ */
+
+test('★★★ coast: at 80+ the target does NOT switch it off — the panel holds the pack and the window end does', () => {
+  const n = forcedNight({ forceChargeCeilingPct: 90 });
+  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 90 })).kind, 'none',
+    'at the target, force-charge stays ON: the panel\'s 90% ceiling holds the pack and the house runs on grid');
+  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 95 })).kind, 'none');
+  assert.deepEqual(decideForceCharge(n, WIN_END, opts({ poolSocPct: 90 })), { kind: 'off', slots: [1, 2, 3], reason: 'windowEnd' },
+    'the window close still switches it off — the coast ends with the cheap rate');
+  // Every other OFF reason is untouched by the coast.
+  assert.equal((decideForceCharge(n, MID, opts({ poolSocPct: 90, gridPresent: false })) as any).reason, 'gridLoss');
+  assert.equal((decideForceCharge(n, MID, opts({ poolSocPct: 90, enabled: false })) as any).reason, 'disabled');
+  assert.equal((decideForceCharge(forcedNight({ forceChargeCeilingPct: 90, cancelled: true }), MID, opts()) as any).reason, 'cancelled');
+});
+
+test('★★ coast retires the rounding miss: an 85.3 target is held by the panel\'s 85, not chased by a whole-number SoC', () => {
+  const n = forcedNight({ forceChargeCeilingPct: 85.3 });
+  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 85 })).kind, 'none');
+  assert.equal(decideForceCharge(n, WIN_END, opts({ poolSocPct: 85 })).kind, 'off');
+});
+
+test('★★ the coast boundary is the panel\'s own 80% minimum ceiling', () => {
+  assert.equal(FORCE_CHARGE_CEILING_MIN_PCT, 80);
+  assert.equal(panelHoldsTarget(80), true, 'the panel can be set to 80 and holds there');
+  assert.equal(panelHoldsTarget(79.9), false, 'below 80 its minimum ceiling would overfill');
+  assert.equal(decideForceCharge(forcedNight({ forceChargeCeilingPct: 80 }), MID, opts({ poolSocPct: 80 })).kind, 'none');
+  assert.deepEqual(decideForceCharge(forcedNight({ forceChargeCeilingPct: 79.9 }), MID, opts({ poolSocPct: 80 })),
+    { kind: 'off', slots: [1, 2, 3], reason: 'target' }, 'below 80 the software stop is the only stop — unchanged');
+});
+
+test('the 21:30 announcement says the panel HOLDS an 80+ target on grid until the window closes', () => {
+  const m = buildNightChargeMessage(chargePlan(), 'charge', {
+    cancelDeadlineText: 'at 10:55 PM', targetPct: 50, forceChargeTargetPct: 90,
+  });
+  assert.match(m.body, /force-charge ON to reach ~90%; the panel holds it there and the house runs on grid until the window closes, when it switches OFF/);
+  assert.doesNotMatch(m.body, /OFF when it gets there/, 'at 80+ it does not switch off at the target');
+});
+
+/* ══ v1.168.0 — the WALL-CLOCK deadline ═══════════════════════════════════ */
+
+test('★★★ the deadline is the LATER of first-OFF + 30 min and window-end + 60 min', () => {
+  assert.equal(FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS, 30 * 60_000);
+  assert.equal(FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, 60 * 60_000);
+  assert.equal(forceChargeOffDeadlineMs(verifiedNight()), null, 'nothing of ours in flight — no deadline');
+  assert.equal(forceChargeOffDeadlineMs(forcedNight()), WIN_END + H, 'ON, no OFF yet: window end + 60 min');
+  assert.equal(forceChargeOffDeadlineMs(forcedNight({ forceChargeOffAtMs: MID })), WIN_END + H,
+    'a 03:00 target OFF slow to verify does not wake the house before 06:00 — ON inside the cheap window costs nothing extra');
+  assert.equal(forceChargeOffDeadlineMs(forcedNight({ forceChargeOffAtMs: WIN_END + 45 * 60_000 })), WIN_END + 75 * 60_000,
+    'an OFF sent late still gets its 30 minutes');
+  assert.equal(forceChargeOffDeadlineMs(forcedNight({ windowEndMs: null })), WIN_START + 2 * 60_000 + H,
+    'no window: judged from the ON');
+  assert.equal(forceChargeOffDeadlineMs(forcedNight({ forceChargeOffAtMs: WIN_END, forceChargeOffVerifiedAtMs: WIN_END + 60_000 })), null,
+    'verified OFF — nothing to chase');
+});
+
+test('★★★ a STALE readback can no longer hold the alarm off forever — past the deadline it escalates, UNCONFIRMED', () => {
+  const n = offNight(); // OFF sent at 05:00, never verified
+  assert.equal(decideForceCharge(n, WIN_END + H - 1, opts({ slotsOn: null })).kind, 'none', 'before the deadline, it waits as before');
+  assert.deepEqual(decideForceCharge(n, WIN_END + H, opts({ slotsOn: null })),
+    { kind: 'offFailed', slots: [1, 2, 3], deadline: true, unconfirmed: true },
+    'the v1.167.0 loop returned "none" here for as long as the panel stayed stale — into the on-peak');
+});
+
+test('★★★ an OFF the cloud keeps refusing is bounded by the deadline (non-ACK retries never counted)', () => {
+  // forceChargeOffRetries stays 0 because index.ts counts only ACCEPTED re-issues — the
+  // retry-budget escalation can never be reached. The clock can.
+  const n = offNight({ forceChargeOffLastAttemptMs: WIN_END + 55 * 60_000, forceChargeOffRetries: 0 });
+  assert.deepEqual(decideForceCharge(n, WIN_END + H, opts({ slotsOn: [2] })),
+    { kind: 'offFailed', slots: [2], deadline: true, unconfirmed: false }, 'still reads ON: names the slot seen ON');
+});
+
+test('★★ past the deadline, slots reading OFF are VERIFIED, not escalated', () => {
+  assert.equal(decideForceCharge(offNight(), WIN_END + 2 * H, opts({ slotsOn: [] })).kind, 'offVerified');
+});
+
+test('★★ an OFF never sent (the tick could not run) escalates at window end + 60 min', () => {
+  const n = forcedNight();
+  assert.deepEqual(decideForceCharge(n, WIN_END + H, opts({ slotsOn: null })),
+    { kind: 'offFailed', slots: [1, 2, 3], deadline: true, unconfirmed: true });
+  // Once escalated, the deadline hands over: the OFF is still sent.
+  assert.deepEqual(decideForceCharge({ ...n, forceChargeOffEscalated: true }, WIN_END + H, opts({ slotsOn: null })),
+    { kind: 'off', slots: [1, 2, 3], reason: 'windowEnd' });
+});
+
+test('★★ the deadline pages ONCE — the escalated flag hands over to the 15-min re-issue', () => {
+  const esc = offNight({ forceChargeOffEscalated: true, forceChargeOffLastAttemptMs: WIN_END + H });
+  assert.equal(decideForceCharge(esc, WIN_END + H + 60_000, opts({ slotsOn: null })).kind, 'none', 'no second page');
+  assert.deepEqual(decideForceCharge(esc, WIN_END + H + FORCE_CHARGE_OFF_PERSIST_EVERY_MS, opts({ slotsOn: [1] })),
+    { kind: 'offRetry', slots: [1] });
+});
+
 /* ══ integration pins (index.ts has no seam a unit test can drive) ════════ */
 
 import { readFileSync } from 'node:fs';
@@ -533,4 +628,29 @@ test('★★ the 21:30 ARMED line states tonight\'s force-charge decision up fro
   assert.ok(INDEX.includes('cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}'));
   const note = INDEX.slice(INDEX.indexOf('function forceChargeArmNote('), INDEX.indexOf('async function runForceChargeTick('));
   assert.ok(note.includes('which reaches it alone') && note.includes('ELIGIBLE — just in time'), 'both outcomes are named');
+});
+
+test('★★★ v1.168.0 — with the panel MISSING from the device list, the deadline still runs and still alarms', () => {
+  // Before: `if (!shp2) return;` — a panel dropped from the list skipped the whole tick,
+  // so nothing could escalate a force-charge of ours left ON.
+  const fn = INDEX.indexOf('async function runForceChargeTick(');
+  const noPanel = INDEX.indexOf('if (!shp2) {', fn);
+  const firstRead = INDEX.indexOf('shp2.projection', fn);
+  assert.ok(fn > 0 && noPanel > fn && noPanel < firstRead, 'the no-panel branch comes before any read of the panel');
+  const branch = INDEX.slice(noPanel, INDEX.indexOf('return;\n  }', noPanel));
+  assert.ok(branch.includes('decideForceCharge(state, nowMs,'), 'it still asks the decision (only the deadline can answer)');
+  assert.ok(branch.includes("if (blind.kind === 'offFailed') await escalateForceChargeStuck(state, blind);"),
+    'and escalates what it answers — and nothing else: there is no panel to write to');
+  assert.ok(branch.includes('slotsOn: null'), 'with every input unknown');
+});
+
+test('★★★ v1.168.0 — every stuck/unconfirmed path goes through ONE escalation, which says "could not confirm" when blind', () => {
+  const fn = INDEX.indexOf('async function escalateForceChargeStuck(');
+  assert.ok(fn > 0);
+  const body = INDEX.slice(fn, INDEX.indexOf('async function runNightActuationTickInner(', fn));
+  assert.ok(body.includes('forceChargeOffEscalated: true'), 'pages once, then the 15-min re-issue takes over');
+  assert.ok(body.includes('could not confirm that the panel'), 'a blind escalation never claims the panel "still reads ON"');
+  assert.ok(body.includes('broadcast.announce(') && body.includes('sendNotification('), 'audible AND pushed');
+  const tick = INDEX.slice(INDEX.indexOf('async function runForceChargeTick('), fn);
+  assert.ok(tick.includes('await escalateForceChargeStuck(state, action);'), 'the retry-budget escalation uses it too');
 });

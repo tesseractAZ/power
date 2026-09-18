@@ -35,8 +35,19 @@
  * software stop ends it and the panel's 80 caps a stop that fails. The panel's original
  * ceiling is restored afterwards.
  *
+ * ★★ v1.168.0 — COAST ON GRID (owner, 2026-09-17). A target of 80+ is one the panel
+ * enforces AND HOLDS: with Charge Now still ON at its ceiling the pack sits there and the
+ * house runs on grid. So for those targets there is no software stop at the target —
+ * force-charge stays ON until the window closes, and the pack does not give any of it
+ * back before the cheap rate ends. Below 80 the panel cannot hold the target (its
+ * minimum ceiling is 80), so the software stop still ends it there. Dropping the
+ * software stop at 80+ also retires a rounding miss: an 85.3 target synced an 85
+ * ceiling, and a whole-number pool reading never reached 85.3.
+ *
  * ★ That force-charge ON keeps the house on grid is INFERRED from the 2026-08-04 incident
- * (it bought grid for hours), not vendor-documented.
+ * (it bought grid for hours), not vendor-documented. The owner confirmed (2026-09-17) that
+ * 07-23 and 07-28 — the two nights the pack held above 50% on grid — were his manual
+ * Charge Now; that is the evidence the coast rests on.
  *
  * ★★★ OUTAGE — NOT ESTABLISHED EITHER WAY. No vendor text says how a slot with
  * ch{n}ForceCharge ON behaves when the grid fails, and no outage has ever overlapped
@@ -71,6 +82,12 @@
  *  - The OFF side outlives NIGHT_CHARGE_ADVISOR_ENABLED=false (a separate safety tick
  *    in index.ts), keeps re-issuing OFF every 15 min after the escalation, and
  *    escalates audibly.
+ *  - ★★★ v1.168.0 — a WALL-CLOCK DEADLINE (forceChargeOffDeadlineMs). Every other
+ *    escalation needs a live readback or an accepted OFF: a panel whose readback stays
+ *    stale, or a cloud that keeps rejecting the OFF, left the verify loop waiting
+ *    forever in silence. The deadline needs only the clock — past it, a force-charge
+ *    of ours not verified OFF escalates audibly, and index.ts runs it even when the
+ *    panel is missing from the device list.
  */
 
 import { RESERVE_WRITE_MAX_PCT, type NightActuationState } from './nightChargeActuator.js';
@@ -106,6 +123,13 @@ export const FORCE_CHARGE_OFF_PERSIST_EVERY_MS = 15 * 60_000;
 export const FORCE_CHARGE_CEILING_VERIFY_AFTER_MS = 6 * 60_000;
 export const FORCE_CHARGE_CEILING_SYNC_RETRIES = 1;
 export const FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS = 2;
+/** v1.168.0 — the wall-clock deadline: this long after the first OFF, or this long after
+ *  the window closes, whichever is LATER. The later of the two keeps a 3 a.m. target OFF
+ *  that is merely slow to verify from waking the house — force-charge left on inside the
+ *  cheap window costs nothing extra — while one still on an hour into the morning is
+ *  buying at the off-peak rate and heading for the on-peak one. */
+export const FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS = 30 * 60_000;
+export const FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS = 60 * 60_000;
 
 export type ForceChargeOffReason =
   | 'windowEnd' | 'cancelled' | 'reverted' | 'gridLoss' | 'disabled' | 'maxRun' | 'target';
@@ -150,7 +174,10 @@ export type ForceChargeAction =
   | { kind: 'off'; slots: number[]; reason: ForceChargeOffReason }
   | { kind: 'offVerified' }
   | { kind: 'offRetry'; slots: number[] }
-  | { kind: 'offFailed'; slots: number[] };
+  /** `deadline` — v1.168.0: raised by the wall-clock deadline, not the retry budget.
+   *  `unconfirmed` — no live readback, so the slots are the ones we switched on, not
+   *  ones seen ON: the alarm must say "could not confirm", never "still reads ON". */
+  | { kind: 'offFailed'; slots: number[]; deadline?: boolean; unconfirmed?: boolean };
 
 /**
  * The feature gate. Wired to options the owner ALREADY set rather than a new one:
@@ -183,6 +210,24 @@ export function forceChargeInFlight(s: NightActuationState): boolean {
   return s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null;
 }
 
+/** v1.168.0 — true when the panel's own ceiling can hold the target: 80 or above, the
+ *  panel stops there and keeps the house on grid (the coast). Below 80 its minimum
+ *  ceiling would overfill, so the software stop is the stop. */
+export function panelHoldsTarget(targetPct: number): boolean {
+  return targetPct >= FORCE_CHARGE_CEILING_MIN_PCT;
+}
+
+/** v1.168.0 — when a force-charge of ours that has not verified OFF must escalate,
+ *  whatever the readback says: the LATER of (first OFF + 30 min) and (window end +
+ *  60 min). A missing window counts from the ON — it stops at once (offReason), so it
+ *  is judged from its OFF. Null when nothing of ours is in flight. */
+export function forceChargeOffDeadlineMs(s: NightActuationState): number | null {
+  if (!forceChargeInFlight(s)) return null;
+  const fromOff = s.forceChargeOffAtMs != null ? s.forceChargeOffAtMs + FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS : null;
+  const fromWindow = (s.windowEndMs ?? s.forceChargeOnAtMs!) + FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS;
+  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;
+}
+
 function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): ForceChargeOffReason | null {
   if (s.cancelled) return 'cancelled';
   if (s.revertedAtMs != null) return 'reverted';
@@ -193,7 +238,12 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return 'maxRun';
   // v1.167.0 — the owner's "until the desired percentage is reached". A stale or
   // incoherent SoC never ends it early; the window end and the panel's ceiling still do.
-  if (o.poolSocPct != null && s.forceChargeCeilingPct != null && o.poolSocPct >= s.forceChargeCeilingPct) return 'target';
+  // v1.168.0 — only BELOW 80: at 80+ the panel holds the target itself and the house
+  // coasts on grid until the window end turns it off.
+  if (
+    o.poolSocPct != null && s.forceChargeCeilingPct != null
+    && !panelHoldsTarget(s.forceChargeCeilingPct) && o.poolSocPct >= s.forceChargeCeilingPct
+  ) return 'target';
   return null;
 }
 
@@ -205,6 +255,18 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   // An ON is stamped but the slot list is gone (coerced away on a restart): switch
   // off and verify ALL three. An empty list must never verify as "nothing on".
   const ours = s.forceChargeSlots != null && s.forceChargeSlots.length > 0 ? s.forceChargeSlots : [1, 2, 3];
+
+  // ── 0. WALL-CLOCK DEADLINE (v1.168.0). Ahead of every readback wait below: a readback
+  // that never comes back, or an OFF the cloud keeps refusing, must not hold the alarm
+  // off forever. Once — the escalated flag hands over to the 15-min persistence. A live
+  // readback showing all our slots OFF falls through to be verified, not escalated. ──
+  if (!s.forceChargeOffEscalated) {
+    const deadline = forceChargeOffDeadlineMs(s);
+    if (deadline != null && nowMs >= deadline) {
+      const stillOn = o.slotsOn == null ? ours : ours.filter((n) => o.slotsOn!.includes(n));
+      if (stillOn.length > 0) return { kind: 'offFailed', slots: stillOn, deadline: true, unconfirmed: o.slotsOn == null };
+    }
+  }
 
   // ── 1. OFF VERIFICATION. Checked first, and NOT stopped by an escalation: the
   // record must resolve the moment the slots read OFF, or it wedges arming. ──
