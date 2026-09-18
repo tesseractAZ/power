@@ -252,7 +252,7 @@ const MUTANTS = [
   {
     id: 'xxxii. ★★★ the wall-clock deadline is removed',
     file: FC,
-    find: '  if (!s.forceChargeOffEscalated) {\n    const deadline = forceChargeOffDeadlineMs(s);',
+    find: '  if (s.forceChargeOffDeadlinePagedAtMs == null) {\n    const deadline = forceChargeOffDeadlineMs(s);',
     to: '  if (false) { /* MUTANT */\n    const deadline = forceChargeOffDeadlineMs(s);',
     why: 'A stale readback or a cloud that keeps refusing the OFF leaves force-charge on into the on-peak in silence — the verify loop waits forever.',
   },
@@ -287,7 +287,7 @@ const MUTANTS = [
   {
     id: 'xxxvii. ★★ the deadline pages every tick',
     file: FC,
-    find: '  if (!s.forceChargeOffEscalated) {\n    const deadline = forceChargeOffDeadlineMs(s);',
+    find: '  if (s.forceChargeOffDeadlinePagedAtMs == null) {\n    const deadline = forceChargeOffDeadlineMs(s);',
     to: '  if (true) { /* MUTANT */\n    const deadline = forceChargeOffDeadlineMs(s);',
     why: 'Once past the deadline every minute re-pages audibly, and the OFF is never re-sent (the page wins the tick).',
   },
@@ -360,6 +360,42 @@ const MUTANTS = [
     find: '    morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead,',
     to: '    /* MUTANT */',
     why: 'The live planner keeps the P90 ceiling and no Thursday rule while every unit test passes.',
+  },
+  // ── v1.168.0 review fixes.
+  {
+    id: 'xlviii. ★★★ the deadline is keyed on the retry-budget escalation again',
+    file: FC,
+    find: '  if (s.forceChargeOffDeadlinePagedAtMs == null) {\n    const deadline = forceChargeOffDeadlineMs(s);',
+    to: '  if (!s.forceChargeOffEscalated) { /* MUTANT */\n    const deadline = forceChargeOffDeadlineMs(s);',
+    why: 'A 03:48 escalation silenced by quiet hours disarms the 06:00 page — Charge Now stays on into the on-peak with nothing ever audible.',
+  },
+  {
+    id: 'xlix. ★★ escalated and blind, the OFF is never re-sent',
+    file: FC,
+    find: '      return s.forceChargeOffEscalated && since >= FORCE_CHARGE_OFF_PERSIST_EVERY_MS',
+    to: '      return false && since >= FORCE_CHARGE_OFF_PERSIST_EVERY_MS /* MUTANT */',
+    why: 'A stale readback plus one rejected 05:00 OFF sends exactly one OFF all day.',
+  },
+  {
+    id: 'l. ★★ the deadline page is never recorded',
+    file: IDX,
+    find: '    forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,',
+    to: '    /* MUTANT */',
+    why: 'The deadline re-pages audibly on every tick once it has passed.',
+  },
+  {
+    id: 'li. ★★ a restart forgets the deadline already paged',
+    file: ACT,
+    find: '    forceChargeOffDeadlinePagedAtMs: num(o.forceChargeOffDeadlinePagedAtMs),',
+    to: '    forceChargeOffDeadlinePagedAtMs: null, /* MUTANT */',
+    why: 'Every restart after 06:00 pages the house again for the same stuck force-charge.',
+  },
+  {
+    id: 'lii. ★ the ARMED line promises a software stop on a coast night',
+    file: IDX,
+    find: '  if (panelHoldsTarget(c)) {',
+    to: '  if (false) { /* MUTANT */',
+    why: 'The 21:30 journal line says force-charge stops at 90% while it stays on to 05:00 — an audit reads the coast as a failed stop.',
   },
   {
     id: 'xxvi. ★★ the "why not" line fires outside a live night',

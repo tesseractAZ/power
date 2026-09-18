@@ -174,7 +174,8 @@ export type ForceChargeAction =
   | { kind: 'on'; slots: number[] }
   | { kind: 'off'; slots: number[]; reason: ForceChargeOffReason }
   | { kind: 'offVerified' }
-  | { kind: 'offRetry'; slots: number[] }
+  /** `unconfirmed` — v1.168.0: re-sent with NO live readback (after the escalation). */
+  | { kind: 'offRetry'; slots: number[]; unconfirmed?: boolean }
   /** `deadline` — v1.168.0: raised by the wall-clock deadline, not the retry budget.
    *  `unconfirmed` — no live readback, so the slots are the ones we switched on, not
    *  ones seen ON: the alarm must say "could not confirm", never "still reads ON". */
@@ -259,9 +260,11 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
 
   // ── 0. WALL-CLOCK DEADLINE (v1.168.0). Ahead of every readback wait below: a readback
   // that never comes back, or an OFF the cloud keeps refusing, must not hold the alarm
-  // off forever. Once — the escalated flag hands over to the 15-min persistence. A live
-  // readback showing all our slots OFF falls through to be verified, not escalated. ──
-  if (!s.forceChargeOffEscalated) {
+  // off forever. It pages ONCE, on its own record — NOT on forceChargeOffEscalated: an
+  // earlier retry-budget escalation may have landed in quiet hours and been silent, and
+  // must not disarm this one (review, 2026-09-17). A live readback showing all our slots
+  // OFF falls through to be verified, not escalated. ──
+  if (s.forceChargeOffDeadlinePagedAtMs == null) {
     const deadline = forceChargeOffDeadlineMs(s);
     if (deadline != null && nowMs >= deadline) {
       const stillOn = o.slotsOn == null ? ours : ours.filter((n) => o.slotsOn!.includes(n));
@@ -272,10 +275,17 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   // ── 1. OFF VERIFICATION. Checked first, and NOT stopped by an escalation: the
   // record must resolve the moment the slots read OFF, or it wedges arming. ──
   if (s.forceChargeOnAtMs != null && s.forceChargeOffAtMs != null && s.forceChargeOffVerifiedAtMs == null) {
-    if (o.slotsOn == null) return { kind: 'none' }; // no live readback — wait
+    const since = nowMs - (s.forceChargeOffLastAttemptMs ?? s.forceChargeOffAtMs);
+    if (o.slotsOn == null) {
+      // No live readback. Before the escalation, wait for one. After it, keep re-sending
+      // the OFF blind on the persistence cadence (v1.168.0, review): an OFF is idempotent,
+      // and a stale readback plus one rejected 05:00 OFF otherwise left it on all day.
+      return s.forceChargeOffEscalated && since >= FORCE_CHARGE_OFF_PERSIST_EVERY_MS
+        ? { kind: 'offRetry', slots: ours, unconfirmed: true }
+        : { kind: 'none' };
+    }
     const stillOn = ours.filter((n) => o.slotsOn!.includes(n));
     if (stillOn.length === 0) return { kind: 'offVerified' };
-    const since = nowMs - (s.forceChargeOffLastAttemptMs ?? s.forceChargeOffAtMs);
     if (s.forceChargeOffEscalated) {
       // Escalated: keep switching it off, slowly, for as long as it reads ON. An OFF
       // is idempotent and can never make anything worse.

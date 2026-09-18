@@ -33,7 +33,11 @@ An 8-week replay (house ~114 kWh/day against ~55 kWh/day of solar) answered it:
   left the verify loop waiting in silence. Now a force-charge of ours not verified off by
   **the later of first-OFF + 30 min and window-end + 60 min** escalates audibly and by push, once;
   with no readback the words say it **could not be confirmed** off rather than that it "still
-  reads ON". It runs even when the panel has dropped out of the device list.
+  reads ON". It runs even when the panel has dropped out of the device list. It pages on its
+  **own record**: an earlier retry-budget escalation that landed in quiet hours (push only) no
+  longer disarms it, and a silenced announcement is now logged. Once escalated, the OFF is
+  re-sent every 15 minutes even with no readback (it is idempotent) — before, a stale readback
+  plus one rejected 05:00 OFF sent a single OFF all day.
 
 **Exposure, stated plainly.** Coasting lengthens how long Charge Now is on for 80%+ targets —
 on a Thursday about 4-6 h instead of ~1 h. Outage behaviour with Charge Now on is still **not
@@ -42,7 +46,12 @@ established** (no vendor text; never happened here). The attended daylight break
 Deferred to a following release: a separate cap for 100% on cloudy Fridays (needs a new option),
 the planning horizon past Friday's 1-hour window, and the APS holiday list (currently empty).
 
-18 new mutants (`mutate-force-charge.mjs`, 47/47; xxv repointed at the reshaped stop); 22 new tests.
+Known, next release: when the pack is already high at 21:30, the planner's early "hold" answer
+returns before cost mode is asked, so the Thursday rule cannot raise it (the pre-existing
+"cost mode may never be asked" gap); a ceiling restore after a night whose force-charge never
+started still reads as an external settings change.
+
+23 new mutants (`mutate-force-charge.mjs`, 52/52; xxv repointed at the reshaped stop); 27 new tests.
 
 ## 1.167.0
 

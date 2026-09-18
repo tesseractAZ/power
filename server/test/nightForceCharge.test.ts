@@ -288,7 +288,10 @@ test('★★★ after the escalation the OFF KEEPS being re-issued — escalatio
   assert.equal(decideForceCharge(escalated, late + 60_000, opts({ slotsOn: [1] })).kind, 'none', 'no second page, no spam');
   assert.deepEqual(decideForceCharge(escalated, late + FORCE_CHARGE_OFF_PERSIST_EVERY_MS, opts({ slotsOn: [1] })),
     { kind: 'offRetry', slots: [1] }, 'still re-issuing OFF, every 15 min, for as long as it reads ON');
-  assert.deepEqual(decideForceCharge(escalated, late + 12 * H, opts({ slotsOn: [1] })),
+  // v1.168.0 — past the wall-clock deadline it pages once more (its own record), then
+  // the re-issue carries on.
+  const paged = { ...escalated, forceChargeOffDeadlinePagedAtMs: WIN_END + H };
+  assert.deepEqual(decideForceCharge(paged, late + 12 * H, opts({ slotsOn: [1] })),
     { kind: 'offRetry', slots: [1] }, '…including hours later, into the afternoon');
   assert.equal(decideForceCharge(escalated, late + 60_000, opts({ slotsOn: [] })).kind, 'offVerified',
     'fixed from the app — the record must resolve itself, or it wedges every later night');
@@ -473,7 +476,7 @@ test('the 21:30 announcement says the panel HOLDS an 80+ target on grid until th
   const m = buildNightChargeMessage(chargePlan(), 'charge', {
     cancelDeadlineText: 'at 10:55 PM', targetPct: 50, forceChargeTargetPct: 90,
   });
-  assert.match(m.body, /force-charge ON to reach ~90%; the panel holds it there and the house runs on grid until the window closes, when it switches OFF/);
+  assert.match(m.body, /force-charge ON, just in time to reach ~90% by the window close \(from the start of the window if the pack needs all of it\); the panel holds it there and the house runs on grid until the window closes, when it switches OFF/);
   assert.doesNotMatch(m.body, /OFF when it gets there/, 'at 80+ it does not switch off at the target');
 });
 
@@ -518,16 +521,52 @@ test('★★ an OFF never sent (the tick could not run) escalates at window end 
   const n = forcedNight();
   assert.deepEqual(decideForceCharge(n, WIN_END + H, opts({ slotsOn: null })),
     { kind: 'offFailed', slots: [1, 2, 3], deadline: true, unconfirmed: true });
-  // Once escalated, the deadline hands over: the OFF is still sent.
-  assert.deepEqual(decideForceCharge({ ...n, forceChargeOffEscalated: true }, WIN_END + H, opts({ slotsOn: null })),
+  // Once the deadline has paged, it hands over: the OFF is still sent.
+  assert.deepEqual(decideForceCharge({ ...n, forceChargeOffEscalated: true, forceChargeOffDeadlinePagedAtMs: WIN_END + H }, WIN_END + H, opts({ slotsOn: null })),
     { kind: 'off', slots: [1, 2, 3], reason: 'windowEnd' });
 });
 
-test('★★ the deadline pages ONCE — the escalated flag hands over to the 15-min re-issue', () => {
-  const esc = offNight({ forceChargeOffEscalated: true, forceChargeOffLastAttemptMs: WIN_END + H });
+test('★★ the deadline pages ONCE — its own record hands over to the 15-min re-issue', () => {
+  const esc = offNight({
+    forceChargeOffEscalated: true, forceChargeOffDeadlinePagedAtMs: WIN_END + H, forceChargeOffLastAttemptMs: WIN_END + H,
+  });
   assert.equal(decideForceCharge(esc, WIN_END + H + 60_000, opts({ slotsOn: null })).kind, 'none', 'no second page');
+  assert.equal(decideForceCharge(esc, WIN_END + H + 60_000, opts({ slotsOn: [1] })).kind, 'none', 'no second page');
   assert.deepEqual(decideForceCharge(esc, WIN_END + H + FORCE_CHARGE_OFF_PERSIST_EVERY_MS, opts({ slotsOn: [1] })),
     { kind: 'offRetry', slots: [1] });
+});
+
+test('★★★ an EARLIER escalation (possibly silent in quiet hours) does not disarm the deadline\'s page', () => {
+  // Review 2026-09-17: a sub-80 target OFF at 03:30 that never takes escalates on the
+  // retry budget at ~03:48 — inside BROADCAST_QUIET_HOURS, so push-only. Keyed on
+  // forceChargeOffEscalated, the deadline was then skipped, and nothing was ever audible.
+  const n = forcedNight({
+    forceChargeCeilingPct: 75, forceChargeOffAtMs: MID, forceChargeOffLastAttemptMs: MID + 18 * 60_000,
+    forceChargeOffReason: 'target', forceChargeOffRetries: FORCE_CHARGE_OFF_MAX_RETRIES, forceChargeOffEscalated: true,
+  });
+  assert.equal(decideForceCharge(n, WIN_END + H - 1, opts({ slotsOn: [1] })).kind, 'offRetry', 'the 15-min re-issue runs meanwhile');
+  assert.deepEqual(decideForceCharge(n, WIN_END + H, opts({ slotsOn: [1] })),
+    { kind: 'offFailed', slots: [1], deadline: true, unconfirmed: false }, 'the morning page still comes, at 06:00');
+});
+
+test('★★ escalated and BLIND: the OFF keeps being re-sent every 15 min (it is idempotent)', () => {
+  // Review 2026-09-17: a stale readback plus one rejected 05:00 OFF sent exactly one OFF all
+  // day — section 1 waited for a readback that never came.
+  const esc = offNight({
+    forceChargeOffEscalated: true, forceChargeOffDeadlinePagedAtMs: WIN_END + H, forceChargeOffLastAttemptMs: WIN_END + H,
+  });
+  assert.equal(decideForceCharge(esc, WIN_END + H + FORCE_CHARGE_OFF_PERSIST_EVERY_MS - 1, opts({ slotsOn: null })).kind, 'none');
+  assert.deepEqual(decideForceCharge(esc, WIN_END + H + FORCE_CHARGE_OFF_PERSIST_EVERY_MS, opts({ slotsOn: null })),
+    { kind: 'offRetry', slots: [1, 2, 3], unconfirmed: true });
+  // Before the escalation, blind still means wait.
+  assert.equal(decideForceCharge(offNight(), WIN_END + 30 * 60_000, opts({ slotsOn: null })).kind, 'none');
+});
+
+test('the deadline\'s page record survives a restart (coerced like every force-charge field)', () => {
+  const back = coerceActuationState(JSON.parse(JSON.stringify(offNight({ forceChargeOffDeadlinePagedAtMs: WIN_END + H }))));
+  assert.equal(back.forceChargeOffDeadlinePagedAtMs, WIN_END + H);
+  assert.equal(coerceActuationState(JSON.parse(JSON.stringify(offNight()))).forceChargeOffDeadlinePagedAtMs, null);
+  assert.equal(emptyActuationState().forceChargeOffDeadlinePagedAtMs, null);
 });
 
 /* ══ integration pins (index.ts has no seam a unit test can drive) ════════ */
@@ -653,4 +692,20 @@ test('★★★ v1.168.0 — every stuck/unconfirmed path goes through ONE escal
   assert.ok(body.includes('broadcast.announce(') && body.includes('sendNotification('), 'audible AND pushed');
   const tick = INDEX.slice(INDEX.indexOf('async function runForceChargeTick('), fn);
   assert.ok(tick.includes('await escalateForceChargeStuck(state, action);'), 'the retry-budget escalation uses it too');
+});
+
+test('★★ v1.168.0 — the deadline records its own page, and a silenced announcement is logged', () => {
+  const fn = INDEX.indexOf('async function escalateForceChargeStuck(');
+  const body = INDEX.slice(fn, INDEX.indexOf('async function runNightActuationTickInner(', fn));
+  assert.ok(body.includes('forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,'));
+  assert.ok(body.includes("if (heard && heard.ok === false) {"), 'a quiet-hours suppression is visible in the log');
+});
+
+test('★ v1.168.0 — the 21:30 ARMED line says an 80+ target is held by the panel, not stopped in software', () => {
+  const fn = INDEX.indexOf('function forceChargeArmNote(');
+  const body = INDEX.slice(fn, INDEX.indexOf('\n}\n', fn));
+  const coast = body.indexOf('if (panelHoldsTarget(c)) {');
+  const soft = body.indexOf('(software stop;');
+  assert.ok(coast > 0 && soft > coast, 'the coast branch comes first');
+  assert.ok(body.includes('holds it, the house coasting on grid until the window-end OFF'));
 });

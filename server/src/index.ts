@@ -4852,6 +4852,10 @@ function forceChargeArmNote(armed: NightActuationState): string {
   if (c <= RESERVE_WRITE_MAX_PCT) {
     return `Force-charge: none tonight — the ${c}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve, which reaches it alone.`;
   }
+  // v1.168.0 — at 80+ the panel's ceiling IS the stop and holds the pack (the coast).
+  if (panelHoldsTarget(c)) {
+    return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); the panel's ${desiredForceChargeCeilingPct(c)}% ceiling stops it there and holds it, the house coasting on grid until the window-end OFF.`;
+  }
   return `Force-charge: ELIGIBLE — just in time near the end of the window, to ~${c}% (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`;
 }
 
@@ -4995,7 +4999,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     if (isRetry && acked > 0) {
       persistNightActuation({ ...nightActuationMem, forceChargeOffRetries: nightActuationMem.forceChargeOffRetries + 1 });
     }
-    if (isRetry) {
+    if (isRetry && action.kind === 'offRetry' && action.unconfirmed) {
+      app.log.warn(`night-charge: force-charge NOT CONFIRMED OFF (no live panel readback) — re-sending OFF to slots ${action.slots.join(',')} every 15 min until a readback shows it off: ${results.join(', ')}`);
+    } else if (isRetry) {
       app.log.warn(`night-charge: force-charge still reads ON (slots ${action.slots.join(',')}) — re-issuing OFF${nightActuationMem.forceChargeOffEscalated ? ' (escalated; re-issued every 15 min until it reads OFF)' : ` (retry ${nightActuationMem.forceChargeOffRetries})`}: ${results.join(', ')}`);
     } else {
       app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason === 'target' ? `reached the ${state.forceChargeCeilingPct}% target` : action.reason}) — ${results.join(', ')}; verifying by readback.`);
@@ -5025,7 +5031,12 @@ async function escalateForceChargeStuck(
   state: NightActuationState,
   action: Extract<ForceChargeAction, { kind: 'offFailed' }>,
 ): Promise<void> {
-  persistNightActuation({ ...nightActuationMem, forceChargeOffEscalated: true });
+  persistNightActuation({
+    ...nightActuationMem,
+    forceChargeOffEscalated: true,
+    // The deadline pages once, on its own record (see nightForceCharge.ts section 0).
+    forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,
+  });
   const unconfirmed = action.unconfirmed === true;
   const why = action.deadline
     ? (unconfirmed
@@ -5034,7 +5045,7 @@ async function escalateForceChargeStuck(
     : `still read FORCE_CHARGE_ON after ${state.forceChargeOffRetries} re-issues`;
   app.log.error(`night-charge: force-charge ${unconfirmed ? 'NOT CONFIRMED OFF' : 'NEVER SWITCHED OFF'} — slots ${action.slots.join(',')} ${why}. While it is on the panel keeps buying grid power, including on-peak. Re-issuing OFF every 15 min while a readback shows it on.`);
   try {
-    await broadcast.announce(
+    const heard = await broadcast.announce(
       'critical',
       unconfirmed
         ? 'Critical. The night charge system could not confirm that the panel\'s charge now setting is off. '
@@ -5051,6 +5062,11 @@ async function escalateForceChargeStuck(
           + 'La casa seguirá comprando energía de la red, incluso en horario punta, hasta que se desactive. '
           + 'Desactive Cargar ahora en la aplicación EcoFlow.',
     );
+    // A quiet-hours suppression is not a failure, but it must be VISIBLE: the push still
+    // goes, and the wall-clock deadline keeps its own page for the morning.
+    if (heard && heard.ok === false) {
+      app.log.warn(`night-charge: force-charge escalation was NOT spoken (${heard.error ?? 'refused'}) — push only${action.deadline ? '' : '; the wall-clock deadline will page again'}.`);
+    }
   } catch (e: any) {
     app.log.warn(`night-charge: force-charge escalation announce failed (${e?.message ?? e})`);
   }

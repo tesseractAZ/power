@@ -6433,7 +6433,9 @@ on grid, so the software `target` OFF applies only below 80 (`panelHoldsTarget`)
 stays on until the window-end OFF. (4) `forceChargeOffDeadlineMs` — the later of first-OFF
 + 30 min and window-end + 60 min: a force-charge of ours not verified off by then escalates once
 (audible + push) whatever the readback or ACK state, saying "could not confirm" when there is no
-readback; `runForceChargeTick` runs it even with the panel missing from the device list.
+readback; `runForceChargeTick` runs it even with the panel missing from the device list. It
+pages on its own record (`forceChargeOffDeadlinePagedAtMs`), so a quiet-hours-silenced earlier
+escalation cannot disarm it; once escalated, the OFF is re-sent blind every 15 min.
 
 **v1.167.0 — force-charge runs to the target, just in time** (owner design 2026-09-17). Any
 target above the 50% reserve is reachable: force-charge stops the moment the pool reaches the
