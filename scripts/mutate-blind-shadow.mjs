@@ -179,8 +179,8 @@ const MUTANTS = [
   {
     id: 'xix. ★★ the alert monitor renders without context',
     file: MONITOR,
-    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));',
-    to: '        return telemetryBlindAlerts(verdict, blindNowMs); /* MUTANT */',
+    find: '        const blindAlerts = telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));',
+    to: '        const blindAlerts = telemetryBlindAlerts(verdict, blindNowMs); /* MUTANT */',
     why: 'Without the device map the panel wording is unreachable in production.',
   },
   // ── v1.154.0 review ────────────────────────────────────────────────────────
@@ -208,8 +208,8 @@ const MUTANTS = [
   {
     id: 'xxiii. the alert monitor stops passing the pool predicate',
     file: MONITOR,
-    find: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));',
-    to: '        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs)); /* MUTANT */',
+    find: '        const blindAlerts = telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));',
+    to: '        const blindAlerts = telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs)); /* MUTANT */',
     why: 'The exclusion is correct in the pure function and absent in production.',
   },
   {

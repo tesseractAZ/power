@@ -10,6 +10,7 @@ import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds } from './messageRateFloorAlert.js';
 import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, blindAlertContext, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
+import { blindRemediationStep } from './blindRemediation.js';
 import { benchSpareSns, isOutsideHomePool, shp2ConnectedDpuSns, isExpectedOfflineSpare,
   aggregateFleetFlow, findShp2, shp2Panels } from './shp2Membership.js';
 // v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
@@ -119,6 +120,33 @@ export function advanceOffPanelStreaks(
  * pack that is overheating must page regardless of where it is wired.
  * Pure; exported for tests.
  */
+/**
+ * v1.166.0 — "CHOSE NOT TO" MUST NEVER READ LIKE "BROKE". A CRITICAL held
+ * non-annunciating BY POLICY (a bench spare, an off-panel Core) is shown on-screen
+ * but never spoken or pushed, and until now that silence left no trace — the same
+ * gap the night force-charge had. Returns the alerts newly in that state, once per
+ * episode. The telemetry-blind hold is excluded: it logs its own phases
+ * (blindRemediation.ts). PURE — prunes `logged` to the current set, so an alert that
+ * leaves and returns is announced again.
+ */
+export function silentCriticalEdges<T extends { id: string; severity: string; annunciate?: boolean }>(
+  logged: Set<string>,
+  alerts: readonly T[],
+): T[] {
+  const current = alerts.filter((a) =>
+    a.severity === 'critical' && a.annunciate === false && a.id !== TELEMETRY_BLIND_ALERT_ID);
+  const ids = new Set(current.map((a) => a.id));
+  for (const id of [...logged]) if (!ids.has(id)) logged.delete(id);
+  const fresh: T[] = [];
+  for (const a of current) {
+    if (logged.has(a.id)) continue;
+    logged.add(a.id);
+    fresh.push(a);
+  }
+  return fresh;
+}
+const silentCriticalLogged = new Set<string>();
+
 export function shouldDemoteAnnunciation(
   alert: Pick<Alert, 'id' | 'severity' | 'category' | 'annunciate'>,
   mutedSns: readonly string[],
@@ -2173,7 +2201,15 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         });
         // v1.154.0 — which panel the failure names and who is still reporting, so a
         // stale panel is not announced as "the alarm system is blind".
-        return telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));
+        const blindAlerts = telemetryBlindAlerts(verdict, blindNowMs, blindAlertContext(blindDevices, verdict.failure, blindNowMs, { isOutsideHomePool: (sn) => isOutsideHomePool(sn, blindDevices) }));
+        // v1.166.0 — REMEDIATE FIRST, ALARM ONLY IF IT FAILS (blindRemediation.ts). In
+        // THIS tick, so the hold can never lag the alert: a first tick that escaped the
+        // hold would speak. Held = non-annunciating (no voice, no push), still on-screen.
+        const remediation = blindRemediationStep(
+          blindNowMs, blindAlerts.some((a) => a.id === TELEMETRY_BLIND_ALERT_ID), log,
+        );
+        if (remediation.hold) for (const a of blindAlerts) a.annunciate = false;
+        return blindAlerts;
       })(),
     ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
@@ -2216,6 +2252,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       const multiPanel = shp2Panels(snap.devices).sns.length > 1;
       const muted = multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
       for (const a of alerts) if (shouldDemoteAnnunciation(a, muted)) a.annunciate = false;
+    }
+    // v1.166.0 — a CRITICAL held silent by policy must say so, or it reads as broken.
+    for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) {
+      log(`alerts: "${a.title}" is CRITICAL but held non-annunciating by policy (bench spare or off-panel Core) — on-screen only, never spoken or pushed`);
     }
     store.setAlerts(alerts);
     currentIncidents = buildIncidents(alerts);

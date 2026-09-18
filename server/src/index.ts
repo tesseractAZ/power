@@ -144,7 +144,8 @@ import { installProcessGuards } from './processGuard.js';
 import { createLoadShedAdvisor } from './loadShedAdvisor.js';
 import { RateFloorTracker, isElectricallyIdle, decideCollapseSurfacing, rateFloorSampleSet, DEFAULT_RATE_FLOOR_CONFIG, type RateFloorPersisted } from './messageRateFloor.js';
 import { listConfirmedRecords, clearConfirmedPack } from './defectivePackLatch.js';
-import { evaluateSelfHeal, selfHealQuorum, idleExclusionEdges, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG } from './sessionSelfHeal.js';
+import { evaluateSelfHeal, selfHealQuorum, idleExclusionEdges, loadSelfHealState, saveSelfHealState, DEFAULT_SELF_HEAL_CONFIG, canRemediateNow, recordRemediationHeal, HEAL_BUDGET_WINDOW_MS } from './sessionSelfHeal.js';
+import { setBlindRemediationHooks } from './blindRemediation.js';
 import { assessBlind, pollState, pollHealth } from './telemetryBlind.js';
 import { setClockOffsetLogger } from './ecoflow/rest.js';
 // v0.93.0 (audit #1 phase-2) — publish rate-floor collapses so alertMonitor turns
@@ -2686,6 +2687,34 @@ if (selfHealState.healTimesMs.length > 0) {
   app.log.info(`self-heal: restored ${selfHealState.healTimesMs.length} heal(s) still inside the rolling 24h budget`);
 }
 let selfHealCapLogged = false; // v1.90.0 — one stand-down line per capped episode
+
+/**
+ * v1.166.0 — ONE implementation of the EcoFlow MQTT session rebuild, shared by the
+ * rate-floor healer below and the telemetry-blind remediation (blindRemediation.ts).
+ * The caller books the heal against the shared budget and persists it FIRST.
+ */
+function rebuildMqttSession(): void {
+  try { stopMqtt?.(); } catch (e: any) {
+    app.log.warn(`self-heal: old MQTT stop threw (continuing): ${e?.message ?? e}`);
+  }
+  stopMqtt = null;
+  void startMqttWithRetry();
+}
+
+// v1.166.0 — REMEDIATE FIRST, ALARM ONLY IF IT FAILS (owner decision, 2026-09-17).
+// The alert engine calls these in the same tick it builds the telemetry-blind alert.
+// The budget is the SHARED rolling-24h one; the gap is the blind path's own 15 min.
+setBlindRemediationHooks({
+  canHeal: () => canRemediateNow(selfHealState, Date.now()),
+  heal: (reason) => {
+    const now = Date.now();
+    selfHealState.healTimesMs = selfHealState.healTimesMs.filter((t) => now - t < HEAL_BUDGET_WINDOW_MS);
+    recordRemediationHeal(selfHealState, now);
+    saveSelfHealState(selfHealState); // persist the budget BEFORE the rebuild
+    app.log.warn(`self-heal: ${reason} — rebuilding the EcoFlow MQTT session now (heal ${selfHealState.healTimesMs.length}/${DEFAULT_SELF_HEAL_CONFIG.maxPerDay} in the rolling 24h)`);
+    rebuildMqttSession();
+  },
+});
 // v1.157.0 — devices currently excluded from the heal quorum as idle, so the exclusion
 // logs once per edge rather than every tick.
 const healIdleExcluded = new Set<string>();
@@ -2967,11 +2996,7 @@ const rateFloorTick = setInterval(() => {
     if (healVerdict.heal) {
       saveSelfHealState(selfHealState); // persist the budget BEFORE the rebuild
       app.log.warn(`self-heal: ${healVerdict.reason} [counted: ${healQuorum.counted.map((m) => m.deviceName).join(', ')}]`);
-      try { stopMqtt?.(); } catch (e: any) {
-        app.log.warn(`self-heal: old MQTT stop threw (continuing): ${e?.message ?? e}`);
-      }
-      stopMqtt = null;
-      void startMqttWithRetry();
+      rebuildMqttSession();
     }
 
     // Persist learned baselines every ~10 min. Cheap (a few hundred bytes) and
@@ -4275,7 +4300,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       if (haNotifyDelivered || audibleDelivered) {
         persistNightActuation(armedCandidate);
         app.log.info(
-          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.buyKwhDebiased ?? plan?.buyKwh ?? '?'} kWh); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment.`,
+          `night-charge: supervised write ARMED for ${today} — reserve → ${armedCandidate.targetPct}% at ${new Date(armedCandidate.windowStartMs! - APPLY_LEAD_MS).toISOString()} (buy ~${plan?.buyKwhDebiased ?? plan?.buyKwh ?? '?'} kWh); announced via ${[haNotifyDelivered ? 'HA notify' : null, audibleDelivered ? 'audible' : null].filter(Boolean).join(' + ')}; cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}`,
         );
       } else {
         app.log.error(
@@ -4798,6 +4823,20 @@ async function runNightActuationTick(): Promise<void> {
   }
 }
 
+/** v1.166.0 — reasons already logged for the current night (one line per reason). */
+let forceChargeWhyLogged: { day: string | null; reasons: Set<string> } = { day: null, reasons: new Set() };
+
+/** v1.166.0 — tonight's force-charge decision, stated on the 21:30 ARMED line. */
+function forceChargeArmNote(armed: NightActuationState): string {
+  if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';
+  const c = armed.forceChargeCeilingPct;
+  if (c == null) return 'Force-charge: none tonight (no economic ceiling announced) — reserve-only.';
+  if (c < FORCE_CHARGE_CEILING_MIN_PCT) {
+    return `Force-charge: none tonight — ceiling ${c}% is under the panel's ${FORCE_CHARGE_CEILING_MIN_PCT}% minimum (morning solar needs the room) — reserve-only, by design.`;
+  }
+  return `Force-charge: ELIGIBLE — after the reserve verifies it switches on to ~${desiredForceChargeCeilingPct(c)}% until the window closes.`;
+}
+
 /**
  * v1.165.0 — the night force-charge step (see nightForceCharge.ts for the rails).
  * `forceDisabled` is the master-switch safety tick: it can only ever switch OFF.
@@ -4835,7 +4874,21 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     socCoherent,
     ceilingReadbackPct: typeof sp?.forceChargeCeilingSoc === 'number' ? sp.forceChargeCeilingSoc : null,
   });
-  if (action.kind === 'none') return;
+  if (action.kind === 'none') {
+    // v1.166.0 — "chose not to" must never read like "broke". While a night is live
+    // (reserve applied, not reverted, force-charge not started), say WHY the start
+    // is declined — each distinct reason once per night.
+    const live = state.appliedAtMs != null && state.revertedAtMs == null && !state.cancelled
+      && state.forceChargeOnAtMs == null;
+    if (live && action.why) {
+      if (forceChargeWhyLogged.day !== state.day) forceChargeWhyLogged = { day: state.day, reasons: new Set() };
+      if (!forceChargeWhyLogged.reasons.has(action.why)) {
+        forceChargeWhyLogged.reasons.add(action.why);
+        app.log.info(`night-charge: force-charge NOT starting for ${state.day} — ${action.why}.`);
+      }
+    }
+    return;
+  }
 
   if (action.kind === 'syncCeiling') {
     const blocked = multiPanelWriteBlock();

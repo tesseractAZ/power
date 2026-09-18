@@ -66,8 +66,9 @@ const MUTANTS = [
   },
   {
     id: 'viii. ★ heals never recorded (the cap counts nothing — unbounded rebuilds)',
-    find: '  state.healTimesMs.push(nowMs);',
-    to: '  /* MUTANT */',
+    // v1.166.0 — scoped to evaluateSelfHeal: recordRemediationHeal has the same line.
+    find: '  // the cooldown before the next attempt — the rebuild deserves time to work.\n  state.lastHealMs = nowMs;\n  state.healTimesMs.push(nowMs);',
+    to: '  // the cooldown before the next attempt — the rebuild deserves time to work.\n  state.lastHealMs = nowMs;\n  /* MUTANT */',
     why: 'Every cap check sees an empty window; the 6-per-24h promise is a no-op.',
   },
   {
