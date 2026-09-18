@@ -4,7 +4,8 @@ import {
   decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
   FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_MAX_RUN_MS, FORCE_CHARGE_OFF_VERIFY_AFTER_MS,
   FORCE_CHARGE_OFF_MAX_RETRIES, FORCE_CHARGE_OFF_PERSIST_EVERY_MS, FORCE_CHARGE_CEILING_VERIFY_AFTER_MS,
-  FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS, type ForceChargeOpts,
+  FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS, FORCE_CHARGE_PLAN_RATE_KW, FORCE_CHARGE_JIT_BUFFER_MS,
+  forceChargeStartAtMs, type ForceChargeOpts,
 } from '../src/nightForceCharge.js';
 import {
   emptyActuationState, coerceActuationState, armFromPlan, RESERVE_WRITE_MAX_PCT,
@@ -52,6 +53,10 @@ const opts = (over: Partial<ForceChargeOpts> = {}): ForceChargeOpts => ({
   enabled: true, gridPresent: true, gridStaLost: false,
   slotsOn: [], connectedSlots: [1, 2, 3], vitalsRed: false, socCoherent: true,
   ceilingReadbackPct: 90, // the panel already reads the fixture night's 90% ceiling
+  // v1.167.0 — a pool far enough below the 90% target that the just-in-time start is
+  // already due at MID (64 kWh needed ⇒ a ~6.7 h lead in a 6 h window). The JIT timing
+  // itself is exercised below with a realistic 50% pool.
+  poolSocPct: 20, fullKwh: 92,
   ...over,
 });
 const MID = WIN_START + 2 * H;
@@ -121,16 +126,63 @@ test('ON respects every other guard, and happens at most once a night', () => {
   assert.equal(decideForceCharge(done, MID + 2 * 60_000, opts()).kind, 'none');
 });
 
-test('★★★ the night fills to the ANNOUNCED economic ceiling — below the panel\'s 80% minimum it stays reserve-only', () => {
-  // Tonight's ceiling is min(owner 90%, full minus tomorrow's P90 morning solar). The
-  // panel cannot force-charge to less than 80, so a lower ceiling would overfill past
-  // the solar headroom — the curtailment ARB_COST_MAX_SOC_PCT exists to prevent.
+test('★★★ v1.167.0 — ANY target above the reserve is reachable; the panel\'s 80% minimum no longer matters', () => {
+  // Owner design (2026-09-17): "run forcecharge until the desired percentage is reached,
+  // then revert." v1.165.0 refused every target under the panel's 80% force-charge minimum —
+  // which was every sunny night, 2026-09-17's 64.3% included.
   assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: 90 }), MID, opts()).kind, 'on');
-  assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: 80 }), MID, opts({ ceilingReadbackPct: 80 })).kind, 'on');
-  assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: 79.9 }), MID, opts()).kind, 'none');
+  assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: 64.3 }), MID, opts({ ceilingReadbackPct: 80 })).kind, 'on',
+    'the 2026-09-17 night: now force-charged, with the panel\'s 80 as a backstop');
+  assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: 50 }), MID, opts()).kind, 'none',
+    'at the reserve there is nothing to add');
   assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: null }), MID, opts()).kind, 'none',
     'no announced ceiling (resilience mode, or a pre-1.165 record) never starts');
   assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: Number.NaN }), MID, opts()).kind, 'none');
+});
+
+test('★★★ JUST IN TIME: it starts late enough to arrive AT the target as the window closes', () => {
+  // A realistic night: the reserve has carried the pack to 50% and holds the house on grid.
+  // Starting at 23:00 would reach 64.3% by ~02:00 and let the house draw it back toward 50
+  // (≈57% by 05:00). Starting late leaves nothing to drain.
+  const n = verifiedNight({ forceChargeCeilingPct: 64.3 });
+  const o = opts({ ceilingReadbackPct: 80, poolSocPct: 50, fullKwh: 92.16 });
+  const startAt = forceChargeStartAtMs(WIN_END, 64.3, 50, 92.16);
+  // 13.18 kWh at the planned 10 kW = 79 min, + the 15 min buffer ⇒ ~94 min before 05:00.
+  assert.equal(Math.round((WIN_END - startAt) / 60_000), 94);
+  assert.equal(decideForceCharge(n, MID, o).kind, 'none', 'at 01:00 it holds off — hours early would drain');
+  assert.match((decideForceCharge(n, MID, o) as { why?: string }).why ?? '', /^just in time/);
+  assert.equal(decideForceCharge(n, startAt - 1, o).kind, 'none');
+  assert.equal(decideForceCharge(n, startAt, o).kind, 'on', '…and starts at the last responsible moment');
+});
+
+test('the start moves with the pool, and the plan rate is deliberately below the measured ~15 kW', () => {
+  assert.equal(FORCE_CHARGE_PLAN_RATE_KW, 10, 'an EV sharing the grid input slows the pack — plan below the measured peak');
+  assert.equal(FORCE_CHARGE_JIT_BUFFER_MS, 15 * 60_000);
+  const lead = (soc: number) => WIN_END - forceChargeStartAtMs(WIN_END, 80, soc, 100);
+  assert.ok(lead(50) > lead(70), 'a fuller pack starts later');
+  assert.equal(lead(80), FORCE_CHARGE_JIT_BUFFER_MS, 'nothing needed ⇒ only the buffer');
+});
+
+test('★★ the "why" while waiting is STABLE — a reason that changed every tick would log every tick', () => {
+  const n = verifiedNight({ forceChargeCeilingPct: 64.3 });
+  const w = (soc: number) => (decideForceCharge(n, MID, opts({ ceilingReadbackPct: 80, poolSocPct: soc, fullKwh: 92.16 })) as { why?: string }).why;
+  assert.equal(w(50), w(51), 'the computed start moves with the SoC; the logged reason must not');
+});
+
+test('★★ the panel\'s ceiling is synced as soon as the night is live — hours BEFORE the start', () => {
+  // Its readback takes minutes; waiting for the start moment to sync would delay the ON.
+  const n = verifiedNight({ forceChargeCeilingPct: 64.3 });
+  const d = decideForceCharge(n, WIN_START + 60_000, opts({ ceilingReadbackPct: 100, poolSocPct: 30, fullKwh: 92.16 }));
+  assert.deepEqual(d, { kind: 'syncCeiling', pct: 80, prior: 100 },
+    'at 23:01 — the start is hours away; below 80 the panel\'s 80 is the BACKSTOP for a failed software stop');
+});
+
+test('★★ below-target guards: at or past the target, or with no live pool reading, it does not start', () => {
+  const n = verifiedNight({ forceChargeCeilingPct: 64.3 });
+  const why = (o: ForceChargeOpts) => (decideForceCharge(n, WIN_END - 60 * 60_000, o) as { why?: string }).why ?? '';
+  assert.match(why(opts({ ceilingReadbackPct: 80, poolSocPct: 64.3 })), /already at tonight's 64\.3% target/);
+  assert.match(why(opts({ ceilingReadbackPct: 80, poolSocPct: null })), /no live pool reading/);
+  assert.match(why(opts({ ceilingReadbackPct: 80, fullKwh: null })), /no live pool reading/);
 });
 
 test('★★ arming captures the plan\'s ceiling — a fresher recompute never substitutes', () => {
@@ -173,6 +225,15 @@ test('★★★ OFF on every other stop condition', () => {
   assert.equal(r(forcedNight(), opts({ gridStaLost: true })), 'gridLoss',
     'the panel\'s own gridSta=0 is an independent grid-loss signal');
   assert.equal(r(forcedNight({ windowEndMs: null })), 'windowEnd', 'a missing window cannot say when to stop');
+});
+
+test('★★★ v1.167.0 — OFF the moment the pack REACHES the target', () => {
+  const n = forcedNight({ forceChargeCeilingPct: 64.3 });
+  assert.deepEqual(decideForceCharge(n, MID, opts({ poolSocPct: 64.3 })), { kind: 'off', slots: [1, 2, 3], reason: 'target' });
+  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 64.2 })).kind, 'none', 'still short: keep charging');
+  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: null })).kind, 'none',
+    'an unknown SoC never ends it early — the window end and the panel\'s ceiling still do');
+  assert.equal((decideForceCharge(n, WIN_END, opts({ poolSocPct: null })) as { reason?: string }).reason, 'windowEnd');
 });
 
 test('★★★ OFF is ENABLE-INDEPENDENT — disabling mid-night stops a force-charge we started', () => {
@@ -360,13 +421,12 @@ const chargePlan = (over: Partial<NightChargePlan> = {}): NightChargePlan => ({
   reserveFloorPct: 10, cushionPct: 15, rationale: 'x', ...over,
 } as NightChargePlan);
 
-test('the 21:30 announcement names the force-charge and its ceiling, and drops the under-statement', () => {
+test('the 21:30 announcement names the force-charge and its TARGET, and drops the under-statement', () => {
   const m = buildNightChargeMessage(chargePlan(), 'charge', {
-    cancelDeadlineText: 'at 10:55 PM', targetPct: 50, forceChargeCeilingPct: 90,
+    cancelDeadlineText: 'at 10:55 PM', targetPct: 50, forceChargeTargetPct: 64.3,
   });
-  assert.match(m.body, /switches the panel's force-charge ON for the rest of the window/);
-  assert.match(m.body, /toward ~90%/);
-  assert.match(m.body, /OFF when the window closes/);
+  assert.match(m.body, /near the end of the window, it switches the panel's force-charge ON just long enough to reach ~64\.3%/);
+  assert.match(m.body, /OFF when it gets there/);
   assert.doesNotMatch(m.body, /only expected to reach/,
     'on a force-charge night the reserve is not where charging stops');
 
@@ -450,9 +510,7 @@ test('★★ the escalation is audible, and its text no longer promises retries 
 
 test('★★★ every declined START says WHY — a reserve-only night is a decision, not a fault', () => {
   const why = (n: NightActuationState, o = opts()) => (decideForceCharge(n, MID, o) as { why?: string }).why ?? '';
-  assert.match(why(verifiedNight({ forceChargeCeilingPct: 64.3 })),
-    /ceiling 64\.3% is under the panel's 80% force-charge minimum.*reserve-only night, by design/,
-    'the live 2026-09-17 case: the morning solar needs the room');
+  assert.match(why(verifiedNight({ forceChargeCeilingPct: 48 })), /48% target is at or below the 50% reserve — the reserve alone reaches it/);
   assert.match(why(verifiedNight({ forceChargeCeilingPct: null })), /no economic ceiling was announced/);
   assert.match(why(verifiedNight(), opts({ enabled: false })), /^disabled/);
   assert.match(why(verifiedNight(), opts({ slotsOn: [2] })), /Charge Now is already ON for slot\(s\) 2 — that is the operator's/);
@@ -474,5 +532,5 @@ test('★★ the "why not" line fires only while a night is LIVE, once per reaso
 test('★★ the 21:30 ARMED line states tonight\'s force-charge decision up front', () => {
   assert.ok(INDEX.includes('cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}'));
   const note = INDEX.slice(INDEX.indexOf('function forceChargeArmNote('), INDEX.indexOf('async function runForceChargeTick('));
-  assert.ok(note.includes('reserve-only, by design') && note.includes('ELIGIBLE'), 'both outcomes are named');
+  assert.ok(note.includes('which reaches it alone') && note.includes('ELIGIBLE — just in time'), 'both outcomes are named');
 });
