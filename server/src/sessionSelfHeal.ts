@@ -230,6 +230,37 @@ export function idleExclusionEdges(logged: Set<string>, excluded: readonly HealQ
 }
 
 /**
+ * v1.166.0 — the telemetry-blind remediation's own minimum gap between rebuilds.
+ * Deliberately shorter than the rate-floor healer's 60-min cooldown: the blind alarm
+ * is the critical path, and the owner's rule is "alarm only after remediation has
+ * failed" — so a fresh blind episode gets a remedy unless one ran under this long
+ * ago, which means the last remedy did not HOLD (and that is a failure: alarm now).
+ * The rolling-24h budget is SHARED with the rate-floor healer, so the two paths
+ * together can never exceed `maxPerDay` rebuilds.
+ */
+export const BLIND_REMEDIATION_MIN_GAP_MS = 15 * 60_000;
+
+/** PURE. May a telemetry-blind remediation run now? Budget + minimum gap. */
+export function canRemediateNow(
+  state: Pick<SelfHealState, 'lastHealMs' | 'healTimesMs'>,
+  nowMs: number,
+  cfg: Pick<SelfHealConfig, 'maxPerDay'> = DEFAULT_SELF_HEAL_CONFIG,
+): boolean {
+  const inWindow = state.healTimesMs.filter((t) => nowMs - t < HEAL_BUDGET_WINDOW_MS).length;
+  if (inWindow >= cfg.maxPerDay) return false;
+  if (state.lastHealMs != null && nowMs - state.lastHealMs < BLIND_REMEDIATION_MIN_GAP_MS) return false;
+  return true;
+}
+
+/** Book a telemetry-blind remediation against the SHARED heal budget and cooldown,
+ *  exactly as evaluateSelfHeal books its own. MUTATES `state`. */
+export function recordRemediationHeal(state: SelfHealState, nowMs: number): void {
+  state.lastHealMs = nowMs;
+  state.healTimesMs.push(nowMs);
+  state.starvedSinceMs = null;
+}
+
+/**
  * One evaluation tick. MUTATES `state` (onset tracking, day rollover, and — when
  * healing — the cooldown/day counters), so the caller only acts on `heal`.
  */

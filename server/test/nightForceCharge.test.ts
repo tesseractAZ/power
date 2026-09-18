@@ -445,3 +445,34 @@ test('★★ the escalation is audible, and its text no longer promises retries 
     || body.indexOf("broadcast.announce(", fail) > fail, 'spoken critical, like a stuck reserve');
   assert.ok(body.includes('keeps sending OFF every 15 minutes'), 'the push states what actually happens');
 });
+
+/* ══ v1.166.0 — "chose not to" must never read like "broke" ═══════════════ */
+
+test('★★★ every declined START says WHY — a reserve-only night is a decision, not a fault', () => {
+  const why = (n: NightActuationState, o = opts()) => (decideForceCharge(n, MID, o) as { why?: string }).why ?? '';
+  assert.match(why(verifiedNight({ forceChargeCeilingPct: 64.3 })),
+    /ceiling 64\.3% is under the panel's 80% force-charge minimum.*reserve-only night, by design/,
+    'the live 2026-09-17 case: the morning solar needs the room');
+  assert.match(why(verifiedNight({ forceChargeCeilingPct: null })), /no economic ceiling was announced/);
+  assert.match(why(verifiedNight(), opts({ enabled: false })), /^disabled/);
+  assert.match(why(verifiedNight(), opts({ slotsOn: [2] })), /Charge Now is already ON for slot\(s\) 2 — that is the operator's/);
+  assert.match(why(verifiedNight(), opts({ gridPresent: null })), /grid presence is unknown/);
+  assert.match(why(verifiedNight(), opts({ gridStaLost: true })), /gridSta ≠ 1/);
+  assert.match(why(verifiedNight({ applyVerifiedAtMs: null })), /waiting for the reserve write to be verified/);
+  assert.match(why(verifiedNight(), opts({ ceilingReadbackPct: null })), /no live readback of the panel's force-charge ceiling/);
+});
+
+test('★★ the "why not" line fires only while a night is LIVE, once per reason', () => {
+  const fn = INDEX.indexOf('async function runForceChargeTick(');
+  const body = INDEX.slice(fn, INDEX.indexOf("if (action.kind === 'syncCeiling')", fn));
+  assert.ok(body.includes('const live = state.appliedAtMs != null && state.revertedAtMs == null && !state.cancelled'),
+    'never logged during the day, or after the night is reverted — only while a decision is being made');
+  assert.ok(body.includes('if (!forceChargeWhyLogged.reasons.has(action.why)) {'), 'one line per distinct reason');
+  assert.ok(body.includes('force-charge NOT starting for'));
+});
+
+test('★★ the 21:30 ARMED line states tonight\'s force-charge decision up front', () => {
+  assert.ok(INDEX.includes('cancellable until the write moment. ${forceChargeArmNote(armedCandidate)}'));
+  const note = INDEX.slice(INDEX.indexOf('function forceChargeArmNote('), INDEX.indexOf('async function runForceChargeTick('));
+  assert.ok(note.includes('reserve-only, by design') && note.includes('ELIGIBLE'), 'both outcomes are named');
+});

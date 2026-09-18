@@ -113,7 +113,9 @@ export interface ForceChargeOpts {
 }
 
 export type ForceChargeAction =
-  | { kind: 'none' }
+  /** `why` — v1.166.0: set whenever the START is declined, so "chose not to" is
+   *  distinguishable from "broke" in the log. Absent on the OFF/verify waits. */
+  | { kind: 'none'; why?: string }
   /** Write foceChargeHight; `prior` is the panel's own value, kept for the restore. */
   | { kind: 'syncCeiling'; pct: number; prior: number | null }
   /** Put the panel's own ceiling back once tonight is done with it. */
@@ -219,37 +221,46 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
 
   // ── 4. ON. At most once per night, and only riding a VERIFIED reserve write. ──
   if (s.forceChargeOnAtMs != null) return { kind: 'none' };
-  if (!o.enabled) return { kind: 'none' };
+  if (!o.enabled) return { kind: 'none', why: 'disabled (NIGHT_CHARGE_MODE advisory, ARB_OBJECTIVE not cost, or ARB_COST_MAX_SOC_PCT at or below the 50% reserve)' };
   // The announced plan's economic ceiling — min(owner max-SoC, full minus tomorrow's
   // P90 morning solar). Below the panel's force-charge minimum (80) the device would
   // overfill past the solar headroom — the waste ARB_COST_MAX_SOC_PCT exists to
   // prevent — so that night stays reserve-only. Unknown ceiling: never start.
   if (s.forceChargeCeilingPct == null || !(s.forceChargeCeilingPct >= FORCE_CHARGE_CEILING_MIN_PCT)) {
-    return { kind: 'none' };
+    return {
+      kind: 'none',
+      why: s.forceChargeCeilingPct == null
+        ? 'no economic ceiling was announced for this night (resilience mode, or armed before v1.165.0) — reserve-only night'
+        : `tonight's ceiling ${s.forceChargeCeilingPct}% is under the panel's ${FORCE_CHARGE_CEILING_MIN_PCT}% force-charge minimum (morning solar needs the room) — reserve-only night, by design`,
+    };
   }
-  if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: 'none' };
-  if (s.cancelled || s.revertedAtMs != null) return { kind: 'none' };
-  if (s.windowStartMs == null || s.windowEndMs == null) return { kind: 'none' };
-  if (nowMs < s.windowStartMs || nowMs >= s.windowEndMs - FORCE_CHARGE_MIN_RUN_MS) return { kind: 'none' };
-  if (o.vitalsRed || !o.socCoherent) return { kind: 'none' };
-  if (o.gridPresent !== true || o.gridStaLost) return { kind: 'none' }; // unknown grid never starts a grid charge
-  if (o.slotsOn == null) return { kind: 'none' };     // need a live readback to start
-  if (o.slotsOn.length > 0) return { kind: 'none' };  // someone else's Charge Now — never take ownership
+  if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: 'none', why: 'waiting for the reserve write to be verified by readback' };
+  if (s.cancelled || s.revertedAtMs != null) return { kind: 'none', why: s.cancelled ? 'the night was cancelled' : 'the reserve has already been reverted' };
+  if (s.windowStartMs == null || s.windowEndMs == null) return { kind: 'none', why: 'the night has no charge window' };
+  if (nowMs < s.windowStartMs) return { kind: 'none', why: 'the overnight window has not opened yet' };
+  if (nowMs >= s.windowEndMs - FORCE_CHARGE_MIN_RUN_MS) return { kind: 'none', why: `under ${Math.round(FORCE_CHARGE_MIN_RUN_MS / 60_000)} min of window left — not worth starting` };
+  if (o.vitalsRed) return { kind: 'none', why: 'host vitals are critical — no new device writes' };
+  if (!o.socCoherent) return { kind: 'none', why: 'the pool SoC reading is incoherent' };
+  if (o.gridPresent !== true || o.gridStaLost) { // unknown grid never starts a grid charge
+    return { kind: 'none', why: o.gridStaLost ? 'the panel reports the grid is not connected (gridSta ≠ 1)' : `grid presence is ${o.gridPresent === false ? 'ABSENT' : 'unknown'}` };
+  }
+  if (o.slotsOn == null) return { kind: 'none', why: 'no live slot readback from the panel' }; // need a live readback to start
+  if (o.slotsOn.length > 0) return { kind: 'none', why: `Charge Now is already ON for slot(s) ${o.slotsOn.join(', ')} — that is the operator's, never taken over` }; // someone else's Charge Now — never take ownership
   const slots = o.connectedSlots.filter((n) => Number.isInteger(n) && n >= 1 && n <= 3);
-  if (slots.length === 0) return { kind: 'none' };
+  if (slots.length === 0) return { kind: 'none', why: 'no battery slots are connected' };
   // The panel must READ the night's ceiling before ON. Issuing ON in the same tick as
   // an unverified ceiling write fills to whatever the panel holds (100 live) — past
   // the owner's ceiling and past the solar headroom the <80 gate exists to protect.
   const desired = desiredForceChargeCeilingPct(s.forceChargeCeilingPct);
-  if (o.ceilingReadbackPct == null) return { kind: 'none' };
+  if (o.ceilingReadbackPct == null) return { kind: 'none', why: 'no live readback of the panel\'s force-charge ceiling' };
   if (o.ceilingReadbackPct !== desired) {
     // The first capture of the panel's own value is kept (and carried across nights
     // by armFromPlan while unrestored), so the restore always returns the ORIGINAL.
     const prior = s.forceChargeCeilingPriorPct ?? o.ceilingReadbackPct;
     if (s.forceChargeCeilingAttemptedAtMs == null) return { kind: 'syncCeiling', pct: desired, prior };
-    if (nowMs - s.forceChargeCeilingAttemptedAtMs < FORCE_CHARGE_CEILING_VERIFY_AFTER_MS) return { kind: 'none' };
+    if (nowMs - s.forceChargeCeilingAttemptedAtMs < FORCE_CHARGE_CEILING_VERIFY_AFTER_MS) return { kind: 'none', why: `waiting for the panel's ceiling to read ${desired}% (reads ${o.ceilingReadbackPct}%)` };
     if (s.forceChargeCeilingSyncRetries < FORCE_CHARGE_CEILING_SYNC_RETRIES) return { kind: 'syncCeiling', pct: desired, prior };
-    return { kind: 'none' }; // the panel will not take the ceiling: reserve-only tonight
+    return { kind: 'none', why: `the panel would not take the ${desired}% ceiling (still reads ${o.ceilingReadbackPct}%) — reserve-only tonight rather than overfill` };
   }
   return { kind: 'on', slots };
 }

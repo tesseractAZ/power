@@ -1,3 +1,64 @@
+## 1.166.0
+
+### The stale-data alarm remediates first, and sounds only if that fails
+
+**Owner decision (2026-09-17):** *"Sound the stale data alarm only after the retry has been
+initiated and failed … I want it to alarm, however only after immediate remediation has failed."*
+This settles the question left open in 1.154.0 about the telemetry-blind alarm speaking at 4–5 min.
+
+**The incident that decided it** — 2026-09-17, during the on-peak window:
+
+| time | event |
+|---|---|
+| 16:27:48 | the EcoFlow cloud replays a stale SHP2 shadow; message rate 34 → 0/min |
+| 16:31:48 | telemetry-blind **CRITICAL**, spoken aloud at 16:32 |
+| 16:47:48 | self-heal rebuilds the MQTT session — after its **20-minute** dwell |
+| 16:49:48 | data moving again; the alarm resolves |
+
+The order was backwards: the alarm spoke at ~4 minutes, and the remedy that fixed it in two
+minutes did not start until 20. Weather and NWS fetches succeeded in the same second the panel
+froze — the Pi was fine; the cloud session was wedged.
+
+**Now:** when the telemetry-blind alert first goes active, the MQTT session rebuild fires
+**immediately**, and the alert is held non-annunciating — no voice, no push; still on-screen and
+in `/api/health` — for at most **5 minutes**. Telemetry back inside that window: it clears having
+never sounded. Still blind at the deadline: the remediation **failed**, and the alarm fires exactly
+as before.
+
+- The hold has a **hard deadline** from the remediation; it cannot be extended or re-armed within
+  an episode, and a remedy that never reports back cannot hold it.
+- **No remediation available ⇒ alarm immediately.** The rebuild shares self-heal's rolling-24h
+  budget (six), and needs 15 min since the last heal — a heal under 15 min ago means the last
+  remedy did not hold, which is a failure. A remedy that cannot even start also sounds at once.
+- It fails toward **sounding**: with no remedy registered, nothing is ever held.
+- Only the telemetry-blind alert is gated. Every other alarm is untouched.
+- **The cost, stated plainly:** the hold does not look at the cause. A genuine blind condition a
+  rebuild cannot fix (internet down, clock-skew auth failure, panel offline) now alarms **up to 5
+  minutes later** than before — about 10 min after the last good poll instead of about 5. That is
+  inside the owner's rule, and it also debounces a blip that clears within the window.
+- **"All clear" is never spoken while blind.** The pre-merge review found the hold's
+  `annunciate=false` made the v1.17.0 all-clear speech gate stop seeing the blind alert, so a
+  warning clearing during the hold could have announced *"All clear. All stations report normal."*
+  while the system was blind. The gate (`allClearSpeechBlocked`) now counts the held alert.
+- Every phase is logged: *remediating first*, *restored — the alarm never sounded*, *did not
+  restore — releasing the alarm*, *no remediation available — alarming now*.
+
+The rate-floor healer and this remediation now share **one** `rebuildMqttSession()`.
+
+### "Chose not to" is never silent
+
+- **Night force-charge** now says why it declined to start, once per reason per night, while a
+  night is live — e.g. *"tonight's ceiling 64.3% is under the panel's 80% force-charge minimum
+  (morning solar needs the room) — reserve-only night, by design."* The reasons come from the
+  decision function itself, so they cannot drift from the logic. The 21:30 ARMED line states
+  tonight's force-charge decision up front.
+- **A critical held silent by policy** (a bench spare, an off-panel Core) now logs once per
+  episode that it is on-screen only — until now that silence left no trace.
+
+14 + 3 new tests, a new committed harness (`scripts/mutate-blind-remediation.mjs`, 14 mutants),
+and 2 new mutants in `mutate-force-charge.mjs`. Seven existing anchors were repointed to the
+reshaped lines (none deleted).
+
 ## 1.165.0
 
 ### Overnight charging continues past the 50% reserve, to the night's ceiling

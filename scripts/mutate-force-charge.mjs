@@ -47,21 +47,21 @@ const MUTANTS = [
   {
     id: 'iii. ★★★ ON starts on an UNKNOWN grid',
     file: FC,
-    find: '  if (o.gridPresent !== true || o.gridStaLost) return { kind: \'none\' }; // unknown grid never starts a grid charge',
-    to: '  if (o.gridPresent === false) return { kind: \'none\' }; /* MUTANT */',
+    find: '  if (o.gridPresent !== true || o.gridStaLost) { // unknown grid never starts a grid charge',
+    to: '  if (o.gridPresent === false) { /* MUTANT */',
     why: 'A grid charge is started with no evidence the grid is there — and the panel\'s own gridSta=0 veto is ignored.',
   },
   {
     id: 'iv. ★★ ON takes ownership of an operator\'s Charge Now',
     file: FC,
-    find: '  if (o.slotsOn.length > 0) return { kind: \'none\' };  // someone else\'s Charge Now — never take ownership',
+    find: '  if (o.slotsOn.length > 0) return { kind: \'none\', why: `Charge Now is already ON for slot(s) ${o.slotsOn.join(\', \')} — that is the operator\'s, never taken over` }; // someone else\'s Charge Now — never take ownership',
     to: '  /* MUTANT */',
     why: 'The add-on adopts a force-charge the owner switched on deliberately, then switches it OFF at 05:00 behind his back.',
   },
   {
     id: 'v. ★★ ON rides an UNVERIFIED reserve write',
     file: FC,
-    find: '  if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: \'none\' };',
+    find: '  if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: \'none\', why: \'waiting for the reserve write to be verified by readback\' };',
     to: '  if (s.appliedAtMs == null) return { kind: \'none\' }; /* MUTANT */',
     why: 'Force-charge starts on the night the write path is least proven to be working (the 2026-08-16 phantom shape).',
   },
@@ -96,8 +96,8 @@ const MUTANTS = [
   {
     id: 'x. ★★ ON before the overnight window opens',
     file: FC,
-    find: '  if (nowMs < s.windowStartMs || nowMs >= s.windowEndMs - FORCE_CHARGE_MIN_RUN_MS) return { kind: \'none\' };',
-    to: '  if (nowMs >= s.windowEndMs - FORCE_CHARGE_MIN_RUN_MS) return { kind: \'none\' }; /* MUTANT */',
+    find: '  if (nowMs < s.windowStartMs) return { kind: \'none\', why: \'the overnight window has not opened yet\' };',
+    to: '  /* MUTANT */',
     why: 'Force-charge starts at the 22:55 apply, before the overnight rate begins at 23:00.',
   },
   {
@@ -198,6 +198,21 @@ const MUTANTS = [
     find: '    if (isRetry && acked > 0) {',
     to: '    if (isRetry) { /* MUTANT */',
     why: 'OFF writes that never reached the panel escalate a force-charge as "ignoring us", and burn the retries a real readback failure needs.',
+  },
+  // ── v1.166.0 — "chose not to" vs "broke" ──
+  {
+    id: 'xxv. ★★ a reserve-only night stops saying why',
+    file: FC,
+    find: "        : `tonight's ceiling ${s.forceChargeCeilingPct}% is under the panel's ${FORCE_CHARGE_CEILING_MIN_PCT}% force-charge minimum (morning solar needs the room) — reserve-only night, by design`,",
+    to: "        : undefined, /* MUTANT */",
+    why: 'The most common night leaves no trace, and a silent reserve-only night is indistinguishable from a broken force-charge.',
+  },
+  {
+    id: 'xxvi. ★★ the "why not" line fires outside a live night',
+    file: IDX,
+    find: '    const live = state.appliedAtMs != null && state.revertedAtMs == null && !state.cancelled',
+    to: '    const live = true /* MUTANT */',
+    why: 'Every daytime tick against last night\'s reverted record logs a refusal — the log fills with non-decisions.',
   },
 ];
 

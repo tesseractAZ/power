@@ -153,8 +153,14 @@ test('★ BRIDGE: the poll loop hands its verdict to notePollFailed, and the ale
   assert.match(call, /\{ cause: health\.reason, sns: health\.sns \},\s*$/, 'the verdict must travel with the failure');
 
   const mon = readFileSync(resolve(__dir, '../src/alertMonitor.ts'), 'utf8');
-  assert.match(mon, /return telemetryBlindAlerts\(verdict, blindNowMs, blindAlertContext\(blindDevices, verdict\.failure, blindNowMs, \{ isOutsideHomePool: \(sn\) => isOutsideHomePool\(sn, blindDevices\) \}\)\);/,
+  // v1.166.0 — the render is now assigned so the remediation gate can hold it in the
+  // SAME tick (blindRemediation.ts); the argument list this pin guards is unchanged.
+  assert.match(mon, /const blindAlerts = telemetryBlindAlerts\(verdict, blindNowMs, blindAlertContext\(blindDevices, verdict\.failure, blindNowMs, \{ isOutsideHomePool: \(sn\) => isOutsideHomePool\(sn, blindDevices\) \}\)\);/,
     'the live alert must be rendered with the failure, the device map and the roster-aware pool predicate');
+  const render = mon.indexOf('const blindAlerts = telemetryBlindAlerts(');
+  const gate = mon.slice(render, mon.indexOf('return blindAlerts;', render));
+  assert.ok(gate.includes('blindRemediationStep(') && gate.includes('if (remediation.hold) for (const a of blindAlerts) a.annunciate = false;'),
+    'and it passes through the remediate-first gate before it is returned');
 });
 
 test('★ "outside the home pool" is roster-aware — the bench Core is out, a wired Core in the stale literal is in', () => {
