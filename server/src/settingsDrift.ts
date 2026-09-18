@@ -173,6 +173,10 @@ export interface ActuatorContext {
    *  when no such write is inside its grace window. The caller applies the
    *  grace (this module stays clock-free). */
   ownerFloorPct?: number | null;
+  /** v1.165.0 — true while a night-charge force-charge of ours is on or its OFF
+   *  is unverified (plus the caller's grace after it resolves). Its ch{n}ForceCharge
+   *  and foceChargeHight movements are this add-on's own writes. */
+  forceChargeActive?: boolean;
 }
 
 /**
@@ -182,6 +186,14 @@ export interface ActuatorContext {
  * investigation's other side) — is 'external'.
  */
 export function classifyChange(c: SettingChange, act: ActuatorContext): 'own-write' | 'external' {
+  // v1.165.0 — the night force-charge moves ch{n}ForceCharge twice a night and may
+  // sync foceChargeHight once. Without this each night would push two false
+  // "changed externally" alerts — the class of false push that 2026-09-16 produced
+  // for the reserve. Outside a force-charge they stay EXTERNAL: an operator's
+  // Charge Now is exactly what this watchdog exists to report.
+  if (/ · (ch[123]ForceCharge|foceChargeHight)$/.test(c.key)) {
+    return act.forceChargeActive === true ? 'own-write' : 'external';
+  }
   if (!c.key.endsWith(' · backupReserveSoc')) return 'external';
   // v1.115.0 — the owner's own reserve-floor write echoes back through the
   // settings surface a poll or two later. It is OURS, and it happens with no

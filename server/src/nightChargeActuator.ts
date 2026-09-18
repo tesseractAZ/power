@@ -353,6 +353,31 @@ export interface NightActuationState {
    *  revert-settling predicate — keeps comparing against the live truth; this
    *  field is what preserves the intent for the ledger and the operator. */
   requestedPct: number | null;
+  /** v1.165.0 — FORCE-CHARGE (nightForceCharge.ts). All null/0/false on a night
+   *  that never force-charged. `forceChargeOnAtMs` + `forceChargeSlots` are a
+   *  WRITE-AHEAD intent: persisted BEFORE the ON writes, so a lost confirmation
+   *  can never orphan a force-charge — the OFF covers every slot attempted. */
+  forceChargeOnAtMs: number | null;
+  forceChargeSlots: number[] | null;
+  forceChargeOffAtMs: number | null;
+  forceChargeOffReason: string | null;
+  forceChargeOffLastAttemptMs: number | null;
+  forceChargeOffRetries: number;
+  forceChargeOffVerifiedAtMs: number | null;
+  forceChargeOffEscalated: boolean;
+  /** Last foceChargeHight sync attempt (ON waits for it to read back). */
+  forceChargeCeilingAttemptedAtMs: number | null;
+  forceChargeCeilingSyncRetries: number;
+  /** The panel's OWN ceiling before our first sync — restored once tonight is done.
+   *  Carried into the next night by armFromPlan while still unrestored, so a failed
+   *  restore can never make our value look like the owner's. */
+  forceChargeCeilingPriorPct: number | null;
+  forceChargeCeilingRestoredAtMs: number | null;
+  forceChargeCeilingRestoreAttempts: number;
+  forceChargeCeilingRestoreLastAttemptMs: number | null;
+  /** The ANNOUNCED plan's economic ceiling, captured at arming — like targetPct, a
+   *  fresher recompute never silently substitutes a different buy. */
+  forceChargeCeilingPct: number | null;
   lastError: string | null;
 }
 
@@ -366,6 +391,13 @@ export function emptyActuationState(): NightActuationState {
     revertAttempts: 0, revertEscalated: false,
     revertVerifiedAtMs: null, revertRetries: 0, revertLastAttemptMs: null, revertReadbackEscalated: false,
     requestedPct: null,
+    forceChargeOnAtMs: null, forceChargeSlots: null, forceChargeOffAtMs: null,
+    forceChargeOffReason: null, forceChargeOffLastAttemptMs: null, forceChargeOffRetries: 0,
+    forceChargeOffVerifiedAtMs: null, forceChargeOffEscalated: false,
+    forceChargeCeilingAttemptedAtMs: null, forceChargeCeilingPct: null,
+    forceChargeCeilingSyncRetries: 0, forceChargeCeilingPriorPct: null,
+    forceChargeCeilingRestoredAtMs: null, forceChargeCeilingRestoreAttempts: 0,
+    forceChargeCeilingRestoreLastAttemptMs: null,
     lastError: null,
   };
 }
@@ -407,6 +439,26 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     revertLastAttemptMs: num(o.revertLastAttemptMs),
     revertReadbackEscalated: o.revertReadbackEscalated === true,
     requestedPct: num(o.requestedPct),
+    forceChargeOnAtMs: num(o.forceChargeOnAtMs),
+    // Slots are 1-3 integers; anything else is dropped, never guessed. A record
+    // whose slots are unreadable but whose ON is stamped still OFFs every slot —
+    // see the integrator's fallback to all three.
+    forceChargeSlots: Array.isArray(o.forceChargeSlots)
+      ? o.forceChargeSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 3)
+      : null,
+    forceChargeOffAtMs: num(o.forceChargeOffAtMs),
+    forceChargeOffReason: str(o.forceChargeOffReason),
+    forceChargeOffLastAttemptMs: num(o.forceChargeOffLastAttemptMs),
+    forceChargeOffRetries: num(o.forceChargeOffRetries) ?? 0,
+    forceChargeOffVerifiedAtMs: num(o.forceChargeOffVerifiedAtMs),
+    forceChargeOffEscalated: o.forceChargeOffEscalated === true,
+    forceChargeCeilingAttemptedAtMs: num(o.forceChargeCeilingAttemptedAtMs),
+    forceChargeCeilingPct: num(o.forceChargeCeilingPct),
+    forceChargeCeilingSyncRetries: num(o.forceChargeCeilingSyncRetries) ?? 0,
+    forceChargeCeilingPriorPct: num(o.forceChargeCeilingPriorPct),
+    forceChargeCeilingRestoredAtMs: num(o.forceChargeCeilingRestoredAtMs),
+    forceChargeCeilingRestoreAttempts: num(o.forceChargeCeilingRestoreAttempts) ?? 0,
+    forceChargeCeilingRestoreLastAttemptMs: num(o.forceChargeCeilingRestoreLastAttemptMs),
     lastError: str(o.lastError),
   };
 }
@@ -416,6 +468,9 @@ export interface ArmablePlan {
   chargeTonight: boolean;
   basisComplete: boolean;
   buyKwh: number | null;
+  /** v1.165.0 — the plan's economic ceiling (% of pool); the night force-charge
+   *  fills to this and never past it. Optional: absent in resilience mode. */
+  costCeilingSocPct?: number | null;
   /** v1.60.0 — the WRITE SETPOINT: the pack SoC % that meets floor+cushion.
    *  ★ Deliberately NOT `targetSocPct`, which since v1.60.0 is the
    *  contention-DERATED prediction of what the window will actually reach.
@@ -450,6 +505,11 @@ export function armFromPlan(
   liveReservePct: number | null,
 ): NightActuationState | null {
   if (prev.appliedAtMs != null && prev.revertedAtMs == null) return null; // unresolved night
+  // v1.165.0 — a force-charge that was switched ON and never verified OFF is an
+  // unresolved night too. Arming returns a FRESH record, so re-arming here would
+  // bury the only record that knows to switch it off. Verification keeps running
+  // after an escalation, so this clears itself once the slots read OFF.
+  if (prev.forceChargeOnAtMs != null && prev.forceChargeOffVerifiedAtMs == null) return null;
   if (
     prev.applyAttemptedAtMs != null && prev.appliedAtMs == null && prev.revertedAtMs == null &&
     !(liveReservePct != null && prev.attemptBaselinePct != null && liveReservePct === prev.attemptBaselinePct)
@@ -468,6 +528,14 @@ export function armFromPlan(
     buyKwh: plan.buyKwh,
     windowStartMs: plan.window.startMs,
     windowEndMs: plan.window.endMs,
+    forceChargeCeilingPct:
+      typeof plan.costCeilingSocPct === 'number' && Number.isFinite(plan.costCeilingSocPct)
+        ? plan.costCeilingSocPct : null,
+    // An unrestored original survives the fresh record, so tonight's restore still
+    // returns the OWNER's ceiling, never a value we left behind.
+    forceChargeCeilingPriorPct:
+      prev.forceChargeCeilingPriorPct != null && prev.forceChargeCeilingRestoredAtMs == null
+        ? prev.forceChargeCeilingPriorPct : null,
   };
 }
 

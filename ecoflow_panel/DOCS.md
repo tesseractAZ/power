@@ -6420,6 +6420,21 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.165.0 — force-charge continues past the reserve.** The reserve cannot exceed 50% (the
+device's own limit, v1.164.0), and on 2026-09-16 the panel reached 49% by 01:00 and sat flat
+until 05:00. On a night whose reserve write is applied **and** readback-verified,
+`nightForceCharge.ts` switches `ch{n}ForceCharge` ON for the connected slots and holds it until
+the window closes; the panel's `foceChargeHight` is synced first to the night's **economic
+ceiling** — `min(ARB_COST_MAX_SOC_PCT, full − P90 morning-solar surplus)`, captured at arming
+(`forceChargeCeilingPct`) from the same `costCeilingKwh` the planner uses — and the device ends
+the charge. A ceiling below the panel's 80% force-charge minimum leaves the night reserve-only.
+It does **not** stop at the ceiling in software: with the reserve at 50%, that would let the pack
+serve the house back down toward 50% for the rest of the window. OFF fires on window end, cancel,
+revert, grid loss (resolver or `gridSta=0`), disable, or a 7 h backstop; it is write-ahead,
+readback-verified (6 min grace, above the 5 min per-slot cooldown), re-issued, escalated, and keeps
+verifying after escalation. `armFromPlan` refuses to bury an unverified force-charge.
+Kill switch: `ARB_COST_MAX_SOC_PCT` ≤ 50. Harness: `scripts/mutate-force-charge.mjs`.
+
 **v1.161.0 — the write ceiling is 90%, raised from 50% on the owner's instruction (2026-09-16).**
 `ARB_COST_MAX_SOC_PCT` has been set to **90** in the live options all along; the 50 in
 `RESERVE_WRITE_MAX_PCT` is what made every value the option's `int(50,100)` schema allows above 50

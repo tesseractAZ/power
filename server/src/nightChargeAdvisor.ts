@@ -333,6 +333,9 @@ export interface NightChargePlan {
   cushionBasis?: CushionBasis;
   /** v1.127.0 — which ceiling bound the cost-mode target. */
   costCeilingBasis?: 'pv-headroom' | 'max-soc' | null;
+  /** v1.165.0 — the economic ceiling itself, % of pool (null in resilience mode).
+   *  The night force-charge fills to this, never past it. */
+  costCeilingSocPct?: number | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
   cushionOutageHours?: number;
   rationale: string;
@@ -913,6 +916,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // is still a hard minimum.
   const costMode = inputs.objectiveMode === 'cost';
   let costCeilingBasis: 'pv-headroom' | 'max-soc' | null = null;
+  let costCeilingSocPct: number | null = null;
   let effLiftKwh = liftKwh;
   let effTargetPackKwh = targetPackKwh;
   if (costMode) {
@@ -924,6 +928,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       resilienceTargetKwh: targetPackKwh,
     });
     costCeilingBasis = ct.ceilingBasis;
+    // v1.165.0 — exposed for the force-charge ceiling (see costCeilingKwh).
+    if (fullKwh > 0) {
+      costCeilingSocPct = round1((costCeilingKwh({
+        fullKwh, morningPvSurplusP90Kwh, maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
+      }).ceilingKwh / fullKwh) * 100);
+    }
     // Convert the desired pack level back into a lift, then re-apply the SAME
     // physical caps the resilience path uses. `packAtWindowEndWith` is monotone
     // in lift and already clamps to [0, full], so bisecting is exact.
@@ -1077,6 +1087,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     cushionKwh: round2(cushionKwh),
     /** v1.127.0 — which ceiling bound the cost-mode target (null in resilience mode). */
     costCeilingBasis,
+    costCeilingSocPct,
     // v1.125.0 — how the cushion was derived, so a reader can tell a bounded
     // islanded-outage requirement from the legacy flat band at a glance.
     cushionBasis,
@@ -1838,6 +1849,27 @@ export function parsePersistedIslandedLoad(raw: unknown): { kw: number; atMs: nu
 
 export const DEFAULT_COST_MAX_SOC_PCT = 90;
 
+/**
+ * v1.165.0 — the economic ceiling alone: how full it is worth filling the pack
+ * tonight, BEFORE the resilience floor and the physical charge caps. The same
+ * `min(maxSoc, full - morning P90 solar surplus)` costModeTargetKwh applies — one
+ * definition, so the force-charge ceiling can never drift from the planner's.
+ */
+export function costCeilingKwh(o: {
+  fullKwh: number;
+  morningPvSurplusP90Kwh: number | null | undefined;
+  maxSocPct: number;
+}): { ceilingKwh: number; basis: 'pv-headroom' | 'max-soc' } {
+  const { fullKwh, morningPvSurplusP90Kwh, maxSocPct } = o;
+  const socCap = (fullKwh * Math.max(0, Math.min(100, maxSocPct))) / 100;
+  const pvCap = morningPvSurplusP90Kwh != null && Number.isFinite(morningPvSurplusP90Kwh)
+    ? fullKwh - Math.max(0, morningPvSurplusP90Kwh)
+    : null;
+  const ceilingKwh = pvCap != null ? Math.min(socCap, pvCap) : socCap;
+  const basis: 'pv-headroom' | 'max-soc' = pvCap != null && pvCap <= socCap ? 'pv-headroom' : 'max-soc';
+  return { ceilingKwh, basis };
+}
+
 export function costModeTargetKwh(o: {
   fullKwh: number;
   reserveKwh: number;
@@ -1847,12 +1879,7 @@ export function costModeTargetKwh(o: {
   resilienceTargetKwh: number;
 }): { targetKwh: number; ceilingBasis: 'pv-headroom' | 'max-soc' } {
   const { fullKwh, reserveKwh, morningPvSurplusP90Kwh, maxSocPct, resilienceTargetKwh } = o;
-  const socCap = (fullKwh * Math.max(0, Math.min(100, maxSocPct))) / 100;
-  const pvCap = morningPvSurplusP90Kwh != null && Number.isFinite(morningPvSurplusP90Kwh)
-    ? fullKwh - Math.max(0, morningPvSurplusP90Kwh)
-    : null;
-  const ceiling = pvCap != null ? Math.min(socCap, pvCap) : socCap;
-  const basis: 'pv-headroom' | 'max-soc' = pvCap != null && pvCap <= socCap ? 'pv-headroom' : 'max-soc';
+  const { ceilingKwh: ceiling, basis } = costCeilingKwh({ fullKwh, morningPvSurplusP90Kwh, maxSocPct });
   // Never below the reserve floor, and never below what resilience would have asked.
   const targetKwh = Math.max(reserveKwh, resilienceTargetKwh, Math.min(ceiling, fullKwh));
   return { targetKwh: round2(targetKwh), ceilingBasis: basis };

@@ -246,6 +246,40 @@ export async function setChannelForceCharge(req: ForceChargeWriteRequest): Promi
   });
 }
 
+export const FORCE_CHARGE_CEILING_COOLDOWN_MS = 5 * 60 * 1000;
+
+/**
+ * v1.165.0 — sync the SHP2's force-charge ceiling (`foceChargeHight`, sic — the
+ * vendor's spelling, read from the same key in the quota). The panel's documented
+ * range is [80, 100]; anything else is refused before the API is called. Same
+ * PD303_APP_SET shape as backupReserveSoc and ch{n}ForceCharge. Best-effort by
+ * design: the caller force-charges whatever this returns, so a rejection costs
+ * only the difference between the owner's ceiling and the panel's current one.
+ */
+export async function setForceChargeCeiling(
+  req: Omit<CommandRequest, 'body'> & { pct: number },
+): Promise<CommandResult> {
+  if (!Number.isInteger(req.pct) || req.pct < 80 || req.pct > 100) {
+    return {
+      outcome: 'failure', code: 'ceiling-out-of-range',
+      message: `Refused: foceChargeHight ${req.pct} outside the documented [80, 100].`, durationMs: 0,
+    };
+  }
+  if (!checkAndReserve('force-charge-ceiling', req.sn, { cooldownMs: FORCE_CHARGE_CEILING_COOLDOWN_MS })) {
+    const remaining = cooldownRemainingMs('force-charge-ceiling', req.sn, FORCE_CHARGE_CEILING_COOLDOWN_MS);
+    return {
+      outcome: 'failure', code: 'rate-limited',
+      message: `Wait ${Math.round(remaining / 1000)}s before another force-charge ceiling write.`,
+      durationMs: 0, rateLimited: true,
+    };
+  }
+  return runCommand('force-charge-ceiling', {
+    sn: req.sn,
+    source: req.source,
+    body: { cmdCode: 'PD303_APP_SET', params: { foceChargeHight: req.pct } },
+  });
+}
+
 /* ─── Debug: arbitrary command (admin-only) ──────────────────────────── */
 
 /**
