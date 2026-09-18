@@ -6420,6 +6420,16 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.166.0 — the telemetry-blind alarm remediates first** (owner decision 2026-09-17). When the
+`telemetry-blind` alert first goes active, `blindRemediation.ts` fires the MQTT session rebuild
+immediately and holds the alert non-annunciating (no voice, no push; still on-screen and in
+`/api/health`) for at most 5 min. Telemetry back ⇒ it clears never having sounded; still blind at
+the deadline ⇒ the alarm fires as before. No remediation available (the shared 6/rolling-24h heal
+budget spent, or a heal under 15 min ago — the last remedy did not hold) ⇒ it sounds immediately;
+with no remedy registered nothing is held. Only this alert is gated. The force-charge now logs why
+it declines to start, and a critical held silent by policy logs once per episode.
+Harness: `scripts/mutate-blind-remediation.mjs`.
+
 **v1.165.0 — force-charge continues past the reserve.** The reserve cannot exceed 50% (the
 device's own limit, v1.164.0), and on 2026-09-16 the panel reached 49% by 01:00 and sat flat
 until 05:00. On a night whose reserve write is applied **and** readback-verified,

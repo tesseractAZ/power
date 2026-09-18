@@ -69,6 +69,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { SnapshotStore } from './snapshot.js';
 import type { Alert } from './alerts.js';
+import { TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { config } from './config.js';
 import { callHaService, isSupervised, probeService, getEntityState, getAllStates } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
@@ -77,6 +78,22 @@ import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
 import { setBroadcastHealth } from './broadcastHealth.js';
+
+/**
+ * v1.166.0 — the all-clear SPEECH gate (v1.17.0), extracted so it can be tested.
+ * Never speak "All clear" while a critical is active. A critical muted by POLICY (a
+ * bench spare) still does not block it, as before — but the telemetry-blind alert
+ * held by the remediate-first gate (blindRemediation.ts) DOES: held is not cleared,
+ * and "All clear. All stations report normal." spoken while the system is BLIND is the
+ * worst sentence these speakers could say. Found by the v1.166.0 pre-merge review: the
+ * hold's annunciate=false made this gate stop seeing the blind alert.
+ */
+export function allClearSpeechBlocked(
+  alerts: ReadonlyArray<Pick<Alert, 'id' | 'severity' | 'annunciate'>>,
+): boolean {
+  return alerts.some((a) =>
+    a.severity === 'critical' && (a.annunciate !== false || a.id === TELEMETRY_BLIND_ALERT_ID));
+}
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate + per-priority preview.
 // A priority turned off on the Alert Settings page must never trigger the
 // chime/broadcast, so we filter silenced-priority alerts out before deriving
@@ -1815,7 +1832,7 @@ export function startBroadcastMonitor(
     // contradiction on the same speakers. The ambient LEVEL still adopts green
     // (v0.23.0 counting design unchanged; state committed above — no retry);
     // only the green ANNOUNCEMENT is gated.
-    if (level === 'green' && alerts.some((a) => a.severity === 'critical' && a.annunciate !== false)) {
+    if (level === 'green' && allClearSpeechBlocked(alerts)) {
       log('broadcast: green adopted silently — a critical alert is still active (all-clear speech gated)');
       return;
     }
