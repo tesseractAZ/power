@@ -28,7 +28,11 @@ import {
   decideChargeNowResponse, freshResponderState, resolveChargeNowMode,
 } from './chargeNowResponder.js';
 import { getLastPeakDrawObservation } from './peakGridDraw.js';
-import { setChannelForceCharge } from './ecoflow/commands.js';
+import { setChannelForceCharge, setForceChargeCeiling } from './ecoflow/commands.js';
+import {
+  decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
+  FORCE_CHARGE_CEILING_MIN_PCT,
+} from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
   loadConfirmedSurface, saveConfirmedSurface, renderDriftPush,
@@ -3029,6 +3033,17 @@ const NIGHT_CHARGE_PLANSNAP_PATH =
 // 'advisory' (resolveNightChargeMode); 'supervised'/'auto' arm the bounded
 // nightly reserve write below.
 const NIGHT_CHARGE_MODE = resolveNightChargeMode(process.env.NIGHT_CHARGE_MODE);
+// v1.165.0 — force-charge gate inputs (nightForceCharge.ts). The same options the
+// planner reads; the kill switch is ARB_COST_MAX_SOC_PCT <= RESERVE_WRITE_MAX_PCT.
+const FORCE_CHARGE_OBJECTIVE =
+  (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const;
+const FORCE_CHARGE_COST_MAX_SOC_PCT = Number(process.env.ARB_COST_MAX_SOC_PCT ?? DEFAULT_COST_MAX_SOC_PCT);
+const forceChargeOn = (): boolean => forceChargeEnabled({
+  mode: NIGHT_CHARGE_MODE,
+  objective: FORCE_CHARGE_OBJECTIVE,
+  costMaxSocPct: FORCE_CHARGE_COST_MAX_SOC_PCT,
+  reserveWriteMaxPct: RESERVE_WRITE_MAX_PCT,
+});
 // Restart-persistent per-night actuation record — a raised reserve MUST be
 // findable (and revertable) across an add-on restart mid-window.
 const NIGHT_CHARGE_ACTUATION_PATH =
@@ -4157,7 +4172,10 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // computed here but PERSISTED only after at least one announcement
     // channel confirms delivery — a write the owner never heard about must
     // never fire. Arming is refused while a prior night is unresolved.
-    let supervisedCtx: { cancelDeadlineText: string; cancelDeadlineTextEs: string; targetPct: number } | null = null;
+    let supervisedCtx: {
+      cancelDeadlineText: string; cancelDeadlineTextEs: string; targetPct: number;
+      forceChargeCeilingPct?: number | null;
+    } | null = null;
     let armedCandidate: NightActuationState | null = null;
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
       armedCandidate = armFromPlan(nightActuationMem, today, plan, nowMs, plan.reserveFloorPct);
@@ -4193,7 +4211,18 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           cancelDeadlineText: fmtDeadlineSpoken(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           cancelDeadlineTextEs: fmtDeadlineSpokenEs(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
+          // v1.165.0 — say so when force-charge will ride this window.
+          forceChargeCeilingPct:
+            forceChargeOn() && armedCandidate.forceChargeCeilingPct != null
+              && armedCandidate.forceChargeCeilingPct >= FORCE_CHARGE_CEILING_MIN_PCT
+              ? desiredForceChargeCeilingPct(armedCandidate.forceChargeCeilingPct) : null,
         };
+      } else if (
+        nightActuationMem.forceChargeOnAtMs != null && nightActuationMem.forceChargeOffVerifiedAtMs == null
+      ) {
+        // v1.165.0 — armFromPlan refuses to bury an unverified force-charge. Say
+        // so: a silent refusal reads as "the evening job did nothing".
+        app.log.warn(`night-charge: supervised arming refused — the ${nightActuationMem.day} force-charge was switched ON and its OFF has not verified (slots ${(nightActuationMem.forceChargeSlots ?? []).join(',') || 'unknown'}). Arming resumes once the panel reads force-charge OFF.`);
       } else if (
         (nightActuationMem.appliedAtMs != null || nightActuationMem.applyAttemptedAtMs != null) &&
         nightActuationMem.revertedAtMs == null
@@ -4485,7 +4514,14 @@ function runSettingsDriftTick(): void {
         ownerFloorWrite != null && nowMs - ownerFloorWrite.atMs <= OWNER_FLOOR_WRITE_GRACE_MS
           ? ownerFloorWrite.pct
           : null;
-      const ctx = { targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct };
+      // v1.165.0 — our own force-charge ON/OFF (and the ceiling sync) are not
+      // "external". Same 15-minute tail as the reserve: the slots read back OFF a
+      // poll or two after the write.
+      const forceChargeActive =
+        forceChargeInFlight(act) ||
+        (act.forceChargeOffVerifiedAtMs != null && nowMs - act.forceChargeOffVerifiedAtMs < 15 * 60_000) ||
+        (act.forceChargeCeilingAttemptedAtMs != null && nowMs - act.forceChargeCeilingAttemptedAtMs < 15 * 60_000);
+      const ctx = { targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive };
       for (const c of evaln.confirmedChanges) {
         if (classifyChange(c, ctx) === 'own-write') {
           app.log.info(`settings-drift: ${c.key} ${c.from} → ${c.to} (this add-on's night-charge write — not announced)`);
@@ -4749,8 +4785,175 @@ async function runNightActuationTick(): Promise<void> {
     await runNightActuationTickInner();
   } catch (e: any) {
     app.log.warn(`night-charge: actuation tick failed (${e?.message ?? e})`);
+  }
+  // v1.165.0 — the force-charge step runs AFTER the reserve step (whose tick returns
+  // early on 'none' for most of the window) and re-reads state fresh. Its own
+  // try/catch: a force-charge failure must never break the reserve path.
+  try {
+    await runForceChargeTick();
+  } catch (e: any) {
+    app.log.warn(`night-charge: force-charge tick failed (${e?.message ?? e})`);
   } finally {
     nightActuationInFlight = false;
+  }
+}
+
+/**
+ * v1.165.0 — the night force-charge step (see nightForceCharge.ts for the rails).
+ * `forceDisabled` is the master-switch safety tick: it can only ever switch OFF.
+ */
+async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promise<void> {
+  const state = nightActuationMem;
+  if (state.day == null) return;
+  const nowMs = Date.now();
+  const shp2 = findShp2(store.get().devices);
+  if (!shp2) return;
+  // Same R3 rule as the reserve readback: a frozen projection never decides. The
+  // OFF triggers are time/cancel/grid based, so a stale readback still switches OFF
+  // at window end — only the START and the VERIFY wait for a live reading.
+  const sp: any = shp2.projection?.kind === 'shp2' && shp2ReadbackFresh(shp2, nowMs) ? shp2.projection : null;
+  const sources: any[] | null = Array.isArray(sp?.sources) ? sp.sources : null;
+  const slotsOn = sources == null ? null
+    : sources.filter((c) => c?.forceCharge === 'FORCE_CHARGE_ON').map((c) => Number(c.slot)).filter(Number.isInteger);
+  const connectedSlots = (sources ?? [])
+    .filter((c) => c?.hwConnect === true).map((c) => Number(c.slot)).filter(Number.isInteger);
+  const fullWh: number | null = sp?.backupFullCapWh ?? null;
+  const socNowPct: number | null = sp?.backupBatPercent ?? null;
+  const remainWh: number | null = sp?.backupRemainWh ?? null;
+  const socCoherent =
+    fullWh != null && fullWh > 0 && socNowPct != null && remainWh != null &&
+    Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
+  const gridNow = liveGridBackstop(store.get().devices);
+  const action = decideForceCharge(state, nowMs, {
+    enabled: !opts.forceDisabled && forceChargeOn(),
+    gridPresent: typeof gridNow.present === 'boolean' ? gridNow.present : null,
+    // Connected is gridSta === 1 ONLY (DOCS "Grid presence"): 2 is islanded, 0 absent.
+    gridStaLost: sp != null && typeof sp.gridSta === 'number' && sp.gridSta !== 1,
+    slotsOn,
+    connectedSlots,
+    vitalsRed: currentAssessment()?.level === 'crit',
+    socCoherent,
+    ceilingReadbackPct: typeof sp?.forceChargeCeilingSoc === 'number' ? sp.forceChargeCeilingSoc : null,
+  });
+  if (action.kind === 'none') return;
+
+  if (action.kind === 'syncCeiling') {
+    const blocked = multiPanelWriteBlock();
+    if (blocked) { app.log.warn(`night-charge: force-charge ceiling sync refused — ${blocked}`); return; }
+    const retry = state.forceChargeCeilingAttemptedAtMs != null;
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeCeilingAttemptedAtMs: nowMs,
+      forceChargeCeilingSyncRetries: retry ? nightActuationMem.forceChargeCeilingSyncRetries + 1 : 0,
+      forceChargeCeilingPriorPct: nightActuationMem.forceChargeCeilingPriorPct ?? action.prior,
+    });
+    const rc = await setForceChargeCeiling({ sn: shp2.sn, pct: action.pct, source: { ua: 'night-force-charge' } });
+    app.log.info(`night-charge: force-charge ceiling → ${action.pct}% (panel's own was ${action.prior ?? '?'}%, restored after the night)${retry ? ' — retry' : ''}: ${rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`}. Force-charge waits for it to read back.`);
+    return;
+  }
+
+  if (action.kind === 'restoreCeiling') {
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeCeilingRestoreAttempts: nightActuationMem.forceChargeCeilingRestoreAttempts + 1,
+      forceChargeCeilingRestoreLastAttemptMs: nowMs,
+    });
+    const rc = await setForceChargeCeiling({ sn: shp2.sn, pct: action.pct, source: { ua: 'night-force-charge' } });
+    const how = rc.outcome === 'success' ? 'ACK' : `${rc.code}: ${rc.message}`;
+    if (action.lastAttempt) {
+      app.log.warn(`night-charge: restoring the panel's force-charge ceiling to ${action.pct}% — LAST attempt (${how}). If it does not read back, a manual Charge Now will stop short; set the Charge Now limit back to ${action.pct}% in the EcoFlow app.`);
+    } else {
+      app.log.info(`night-charge: restoring the panel's force-charge ceiling to ${action.pct}% (${how}).`);
+    }
+    return;
+  }
+
+  if (action.kind === 'ceilingRestored') {
+    persistNightActuation({ ...nightActuationMem, forceChargeCeilingRestoredAtMs: nowMs });
+    app.log.info(`night-charge: the panel's own force-charge ceiling is back at ${state.forceChargeCeilingPriorPct}% (readback).`);
+    return;
+  }
+
+  if (action.kind === 'on') {
+    const blocked = multiPanelWriteBlock();
+    if (blocked) { app.log.warn(`night-charge: force-charge ON refused — ${blocked}`); return; }
+    // WRITE-AHEAD: persist the intent BEFORE the writes. A lost confirmation can
+    // then never orphan a force-charge — the OFF covers every slot attempted.
+    persistNightActuation({ ...nightActuationMem, forceChargeOnAtMs: nowMs, forceChargeSlots: action.slots });
+    const results: string[] = [];
+    for (const slot of action.slots) {
+      const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge' } });
+      results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
+    }
+    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; runs until the window closes (${new Date(state.windowEndMs!).toISOString()}), stopping at the panel's ${state.forceChargeCeilingPct == null ? '' : `${desiredForceChargeCeilingPct(state.forceChargeCeilingPct)}% `}ceiling. Switched OFF on window end, cancel, revert, grid loss or disable.`);
+    return;
+  }
+
+  if (action.kind === 'off' || action.kind === 'offRetry') {
+    const isRetry = action.kind === 'offRetry';
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeOffAtMs: nightActuationMem.forceChargeOffAtMs ?? nowMs,
+      forceChargeOffLastAttemptMs: nowMs,
+      forceChargeOffReason: isRetry ? nightActuationMem.forceChargeOffReason : action.reason,
+    });
+    const results: string[] = [];
+    let acked = 0;
+    for (const slot of action.slots) {
+      const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: false, source: { ua: 'night-force-charge' } });
+      if (r.outcome === 'success') acked++;
+      results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
+    }
+    // Only a write the cloud ACCEPTED is evidence the panel is ignoring us. A rejected
+    // or rate-limited OFF never reached it, so it must not spend the readback budget.
+    if (isRetry && acked > 0) {
+      persistNightActuation({ ...nightActuationMem, forceChargeOffRetries: nightActuationMem.forceChargeOffRetries + 1 });
+    }
+    if (isRetry) {
+      app.log.warn(`night-charge: force-charge still reads ON (slots ${action.slots.join(',')}) — re-issuing OFF${nightActuationMem.forceChargeOffEscalated ? ' (escalated; re-issued every 15 min until it reads OFF)' : ` (retry ${nightActuationMem.forceChargeOffRetries})`}: ${results.join(', ')}`);
+    } else {
+      app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason}) — ${results.join(', ')}; verifying by readback.`);
+    }
+    return;
+  }
+
+  if (action.kind === 'offVerified') {
+    persistNightActuation({ ...nightActuationMem, forceChargeOffVerifiedAtMs: nowMs });
+    app.log.info(`night-charge: force-charge OFF VERIFIED by device readback for ${state.day}${state.forceChargeOffEscalated ? ' (after the escalation — resolved)' : ''}.`);
+    return;
+  }
+
+  // action.kind === 'offFailed' — OFF re-issued and the panel still reads ON. It costs
+  // money every on-peak hour it persists, so it escalates like a stuck reserve does —
+  // audibly — and the OFF keeps being re-issued every 15 min until it reads OFF.
+  persistNightActuation({ ...nightActuationMem, forceChargeOffEscalated: true });
+  app.log.error(`night-charge: force-charge NEVER SWITCHED OFF — slots ${action.slots.join(',')} still read FORCE_CHARGE_ON after ${state.forceChargeOffRetries} re-issues. The panel keeps buying grid power, including on-peak, until it is off. Re-issuing OFF every 15 min.`);
+  try {
+    await broadcast.announce(
+      'critical',
+      'Critical. The night charge system could not switch off the panel\'s charge now setting. '
+      + 'The house will keep buying grid power, including at the peak rate, until it is switched off. '
+      + 'Turn off Charge Now in the EcoFlow app.',
+      'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo desactivar la carga forzada del panel. '
+      + 'La casa seguirá comprando energía de la red, incluso en horario punta, hasta que se desactive. '
+      + 'Desactive Cargar ahora en la aplicación EcoFlow.',
+    );
+  } catch (e: any) {
+    app.log.warn(`night-charge: force-charge escalation announce failed (${e?.message ?? e})`);
+  }
+  try {
+    await sendNotification(loadNotifyConfig(), {
+      severity: 'critical',
+      dedupId: 'night_charge_force_charge_stuck',
+      title: 'Night-charge: force-charge stuck ON',
+      body:
+        `The night-charge for ${state.day} switched force-charge ("Charge Now") ON and the panel has not switched off: `
+        + `slot(s) ${action.slots.join(', ')} still read ON after ${state.forceChargeOffRetries} accepted OFF commands. `
+        + 'While it stays on the panel buys grid power instead of using the battery — including at the on-peak rate. '
+        + 'Turn Charge Now off in the EcoFlow app. The add-on keeps sending OFF every 15 minutes and clears this once it reads off.',
+    });
+  } catch (e: any) {
+    app.log.warn(`night-charge: force-charge escalation notify failed (${e?.message ?? e})`);
   }
 }
 
@@ -5119,6 +5322,22 @@ if (nightChargeEnabled) {
   const nightActuationTick = setInterval(() => { void runNightActuationTick(); }, 60 * 1000);
   nightActuationTick.unref();
 }
+
+// v1.165.0 — the force-charge OFF side must OUTLIVE the master switch. The actuation
+// tick above only exists while NIGHT_CHARGE_ADVISOR_ENABLED is on, and changing any
+// option restarts the add-on — so an owner who flips that switch mid-night (the most
+// obvious "turn this off") would otherwise leave force-charge ON with nothing left to
+// switch it off. This tick does nothing unless a force-charge of ours is in flight,
+// and then it can only ever switch it OFF (forceDisabled).
+const forceChargeSafetyTick = setInterval(() => {
+  if (nightChargeEnabled) return; // the normal tick owns it
+  if (!forceChargeInFlight(nightActuationMem) || nightActuationInFlight) return;
+  nightActuationInFlight = true;
+  runForceChargeTick({ forceDisabled: true })
+    .catch((e: any) => app.log.warn(`night-charge: force-charge safety tick failed (${e?.message ?? e})`))
+    .finally(() => { nightActuationInFlight = false; });
+}, 60 * 1000);
+forceChargeSafetyTick.unref();
 
 // v1.91.0 — these four engines are independent of night charge and must run
 // even when NIGHT_CHARGE_ENABLED is off. They had accreted inside the block
