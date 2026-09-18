@@ -11,7 +11,8 @@
  *
  * WHAT (v1.167.0 — CHARGE TO TARGET, JUST IN TIME; owner design, 2026-09-17). The
  * target is the announced plan's economic ceiling — min(ARB_COST_MAX_SOC_PCT, full minus
- * tomorrow's P90 morning solar). On a night whose reserve write is APPLIED AND VERIFIED,
+ * tomorrow's P50 morning solar; v1.168.0), or ARB_COST_MAX_SOC_PCT alone before a long gap
+ * (the Thursday rule, nightChargeAdvisor.ts longGapAhead). On a night whose reserve write is APPLIED AND VERIFIED,
  * force-charge switches ON only in the LAST STRETCH of the window — late enough that the
  * pack arrives at the target as the window closes — and OFF the moment it gets there
  * (or at the window close). The owner's words: "run forcecharge until the desired
@@ -55,8 +56,8 @@
  * panel-level EPS transfer (gridSta=2), a grid charge has no source once the grid is
  * gone, and the owner has used this same button by hand with the same exposure since
  * before v1.84.0. The software grid-loss OFF is best-effort (a cloud write). v1.167.0's
- * just-in-time start shrinks the nightly exposure from ~6 h to ~1 h; it does NOT settle
- * the question. Settle it with one attended test: Charge Now ON for one slot, open the
+ * just-in-time start shrinks the nightly exposure from ~6 h to ~1 h; v1.168.0's coast
+ * lengthens it again for 80+ targets (a Thursday: ~4-6 h). Neither settles the question. Settle it with one attended test: Charge Now ON for one slot, open the
  * main breaker, confirm the backed-up loads stay up and the pack discharges.
  *
  * ★★★ SAFETY RAILS (each pinned by nightForceCharge.test.ts + the committed harness):
