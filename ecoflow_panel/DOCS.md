@@ -6420,6 +6420,23 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.168.0 — the Thursday rule, the median surplus, coast on grid, and an OFF deadline**
+(owner 2026-09-17). (1) When tonight is a full-length cheap window (≥ 3 h) and the next
+full-length one opens more than 24 h after it closes (`longGapAhead`, from the tariff calendar;
+shorter windows are stepped over by `nextFullCheapWindow`), cost mode sets the morning-solar
+headroom aside and fills to `ARB_COST_MAX_SOC_PCT` — Thursday nights, before Friday's 1-hour
+window and the all-off-peak weekend. (2) The cost ceiling leaves room for the **P50** morning
+surplus (`morningPvSurplusP50Kwh`; the P90 stands in when it is unknown, and still drives the
+resilience over-buy flag). The plan reports `longGapAhead` and `costCeilingSurplusKwh`.
+(3) For targets ≥ 80 the panel's own `foceChargeHight` holds the pack at the target with the house
+on grid, so the software `target` OFF applies only below 80 (`panelHoldsTarget`); force-charge
+stays on until the window-end OFF. (4) `forceChargeOffDeadlineMs` — the later of first-OFF
++ 30 min and window-end + 60 min: a force-charge of ours not verified off by then escalates once
+(audible + push) whatever the readback or ACK state, saying "could not confirm" when there is no
+readback; `runForceChargeTick` runs it even with the panel missing from the device list. It
+pages on its own record (`forceChargeOffDeadlinePagedAtMs`), so a quiet-hours-silenced earlier
+escalation cannot disarm it; once escalated, the OFF is re-sent blind every 15 min.
+
 **v1.167.0 — force-charge runs to the target, just in time** (owner design 2026-09-17). Any
 target above the 50% reserve is reachable: force-charge stops the moment the pool reaches the
 announced target (`forceChargeCeilingPct`), and the panel's `foceChargeHight` — synced to

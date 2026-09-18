@@ -31,7 +31,8 @@ import { getLastPeakDrawObservation } from './peakGridDraw.js';
 import { setChannelForceCharge, setForceChargeCeiling } from './ecoflow/commands.js';
 import {
   decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
-  FORCE_CHARGE_CEILING_MIN_PCT,
+  FORCE_CHARGE_CEILING_MIN_PCT, panelHoldsTarget, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
+  FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, type ForceChargeAction,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
@@ -164,7 +165,7 @@ import {
   nightChargeStateFields,
   buildNightChargeInputs,
   computeNightChargePlan,
-  resolveCheapWindow,
+  resolveCheapWindow, nextFullCheapWindow, longGapAhead,
   scoreNightOutcome,
   nightWindowBounds,
   medianFilter3,
@@ -3477,6 +3478,10 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   // the probabilistic p90W (best case) — the deliberate asymmetry so we never
   // over-buy into morning-PV clipping. null when the band doesn't cover it.
   let morningSurplusKwh = 0;
+  // v1.168.0 — the MEDIAN surplus, over the same hours: what the cost ceiling leaves
+  // room for. Null unless every covered hour carries a finite p50W.
+  let morningSurplusP50Kwh = 0;
+  let morningP50Complete = true;
   let morningHasData = false;
   const morningEndMs = windowEndMs + 14 * HOUR_MS;
   if (window) {
@@ -3486,9 +3491,21 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
       if (!fh) continue;
       morningHasData = true;
       morningSurplusKwh += Math.max(0, pb.p90W - fh.forecastLoadW) / 1000;
+      if (typeof pb.p50W === 'number' && Number.isFinite(pb.p50W)) {
+        morningSurplusP50Kwh += Math.max(0, pb.p50W - fh.forecastLoadW) / 1000;
+      } else {
+        morningP50Complete = false;
+      }
     }
   }
   const morningPvSurplusP90Kwh = morningHasData ? round2(morningSurplusKwh) : null;
+  const morningPvSurplusP50Kwh = morningHasData && morningP50Complete ? round2(morningSurplusP50Kwh) : null;
+  // v1.168.0 — the Thursday rule, from the tariff calendar: tonight is a full window and
+  // the next full one is more than a day after it (short windows stepped over).
+  const nightLongGapAhead = longGapAhead(
+    window,
+    window ? nextFullCheapWindow(periodIdAt, window.endMs, NIGHT_CHEAP_PERIOD_ID) : null,
+  );
 
   // Committed-EV worst case: next predicted session start (>= now-hour), the p90
   // session energy, and the observed session count (tail-sufficiency).
@@ -3542,6 +3559,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh,
+    morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead,
     buyDebiasFactor: buyDebiasCal.factor,
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,
@@ -4834,6 +4852,10 @@ function forceChargeArmNote(armed: NightActuationState): string {
   if (c <= RESERVE_WRITE_MAX_PCT) {
     return `Force-charge: none tonight — the ${c}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve, which reaches it alone.`;
   }
+  // v1.168.0 — at 80+ the panel's ceiling IS the stop and holds the pack (the coast).
+  if (panelHoldsTarget(c)) {
+    return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); the panel's ${desiredForceChargeCeilingPct(c)}% ceiling stops it there and holds it, the house coasting on grid until the window-end OFF.`;
+  }
   return `Force-charge: ELIGIBLE — just in time near the end of the window, to ~${c}% (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`;
 }
 
@@ -4846,7 +4868,17 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   if (state.day == null) return;
   const nowMs = Date.now();
   const shp2 = findShp2(store.get().devices);
-  if (!shp2) return;
+  if (!shp2) {
+    // v1.168.0 — no panel to write to, but the wall-clock deadline needs none: a
+    // force-charge of ours that cannot be switched off or confirmed must still alarm.
+    // Every input is "unknown", so only the deadline escalation can come back.
+    const blind = decideForceCharge(state, nowMs, {
+      enabled: false, gridPresent: null, gridStaLost: false, slotsOn: null, connectedSlots: [],
+      vitalsRed: false, socCoherent: false, ceilingReadbackPct: null, poolSocPct: null, fullKwh: null,
+    });
+    if (blind.kind === 'offFailed') await escalateForceChargeStuck(state, blind);
+    return;
+  }
   // Same R3 rule as the reserve readback: a frozen projection never decides. The
   // OFF triggers are time/cancel/grid based, so a stale readback still switches OFF
   // at window end — only the START and the VERIFY wait for a live reading.
@@ -4942,7 +4974,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge' } });
       results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
     }
-    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}) — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable.`);
+    const holds = panelHoldsTarget(state.forceChargeCeilingPct!);
+    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}) — ${holds ? `the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling stops it there and holds it, the house coasting on grid until the window closes` : `stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop`}. Also OFF on window end, cancel, revert, grid loss or disable.`);
     return;
   }
 
@@ -4966,7 +4999,9 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     if (isRetry && acked > 0) {
       persistNightActuation({ ...nightActuationMem, forceChargeOffRetries: nightActuationMem.forceChargeOffRetries + 1 });
     }
-    if (isRetry) {
+    if (isRetry && action.kind === 'offRetry' && action.unconfirmed) {
+      app.log.warn(`night-charge: force-charge NOT CONFIRMED OFF (no live panel readback) — re-sending OFF to slots ${action.slots.join(',')} every 15 min until a readback shows it off: ${results.join(', ')}`);
+    } else if (isRetry) {
       app.log.warn(`night-charge: force-charge still reads ON (slots ${action.slots.join(',')}) — re-issuing OFF${nightActuationMem.forceChargeOffEscalated ? ' (escalated; re-issued every 15 min until it reads OFF)' : ` (retry ${nightActuationMem.forceChargeOffRetries})`}: ${results.join(', ')}`);
     } else {
       app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason === 'target' ? `reached the ${state.forceChargeCeilingPct}% target` : action.reason}) — ${results.join(', ')}; verifying by readback.`);
@@ -4980,21 +5015,58 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     return;
   }
 
-  // action.kind === 'offFailed' — OFF re-issued and the panel still reads ON. It costs
-  // money every on-peak hour it persists, so it escalates like a stuck reserve does —
-  // audibly — and the OFF keeps being re-issued every 15 min until it reads OFF.
-  persistNightActuation({ ...nightActuationMem, forceChargeOffEscalated: true });
-  app.log.error(`night-charge: force-charge NEVER SWITCHED OFF — slots ${action.slots.join(',')} still read FORCE_CHARGE_ON after ${state.forceChargeOffRetries} re-issues. The panel keeps buying grid power, including on-peak, until it is off. Re-issuing OFF every 15 min.`);
+  // action.kind === 'offFailed' — OFF re-issued and the panel still reads ON, or (v1.168.0)
+  // the wall-clock deadline passed with nothing verified OFF.
+  await escalateForceChargeStuck(state, action);
+}
+
+/**
+ * The force-charge-stuck escalation. It costs money every on-peak hour it persists, so
+ * it escalates like a stuck reserve does — audibly — and the OFF keeps being re-issued
+ * every 15 min until it reads OFF. v1.168.0: also raised by the wall-clock deadline,
+ * where there may be NO live readback — then the words say the OFF could not be
+ * CONFIRMED, never that the panel "still reads ON".
+ */
+async function escalateForceChargeStuck(
+  state: NightActuationState,
+  action: Extract<ForceChargeAction, { kind: 'offFailed' }>,
+): Promise<void> {
+  persistNightActuation({
+    ...nightActuationMem,
+    forceChargeOffEscalated: true,
+    // The deadline pages once, on its own record (see nightForceCharge.ts section 0).
+    forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,
+  });
+  const unconfirmed = action.unconfirmed === true;
+  const why = action.deadline
+    ? (unconfirmed
+      ? `not confirmed OFF by the deadline (window end + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS / 60_000)} min, or first OFF + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS / 60_000)} min) and there is NO live panel readback to show it off`
+      : `still read FORCE_CHARGE_ON at the deadline (window end + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS / 60_000)} min, or first OFF + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS / 60_000)} min)`)
+    : `still read FORCE_CHARGE_ON after ${state.forceChargeOffRetries} re-issues`;
+  app.log.error(`night-charge: force-charge ${unconfirmed ? 'NOT CONFIRMED OFF' : 'NEVER SWITCHED OFF'} — slots ${action.slots.join(',')} ${why}. While it is on the panel keeps buying grid power, including on-peak. Re-issuing OFF every 15 min while a readback shows it on.`);
   try {
-    await broadcast.announce(
+    const heard = await broadcast.announce(
       'critical',
-      'Critical. The night charge system could not switch off the panel\'s charge now setting. '
-      + 'The house will keep buying grid power, including at the peak rate, until it is switched off. '
-      + 'Turn off Charge Now in the EcoFlow app.',
-      'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo desactivar la carga forzada del panel. '
-      + 'La casa seguirá comprando energía de la red, incluso en horario punta, hasta que se desactive. '
-      + 'Desactive Cargar ahora en la aplicación EcoFlow.',
+      unconfirmed
+        ? 'Critical. The night charge system could not confirm that the panel\'s charge now setting is off. '
+          + 'If it is still on, the house will keep buying grid power, including at the peak rate. '
+          + 'Check Charge Now in the EcoFlow app.'
+        : 'Critical. The night charge system could not switch off the panel\'s charge now setting. '
+          + 'The house will keep buying grid power, including at the peak rate, until it is switched off. '
+          + 'Turn off Charge Now in the EcoFlow app.',
+      unconfirmed
+        ? 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo confirmar que la carga forzada del panel esté desactivada. '
+          + 'Si sigue activa, la casa seguirá comprando energía de la red, incluso en horario punta. '
+          + 'Revise Cargar ahora en la aplicación EcoFlow.'
+        : 'Alarma crítica. Alarma crítica. El sistema de carga nocturna no pudo desactivar la carga forzada del panel. '
+          + 'La casa seguirá comprando energía de la red, incluso en horario punta, hasta que se desactive. '
+          + 'Desactive Cargar ahora en la aplicación EcoFlow.',
     );
+    // A quiet-hours suppression is not a failure, but it must be VISIBLE: the push still
+    // goes, and the wall-clock deadline keeps its own page for the morning.
+    if (heard && heard.ok === false) {
+      app.log.warn(`night-charge: force-charge escalation was NOT spoken (${heard.error ?? 'refused'}) — push only${action.deadline ? '' : '; the wall-clock deadline will page again'}.`);
+    }
   } catch (e: any) {
     app.log.warn(`night-charge: force-charge escalation announce failed (${e?.message ?? e})`);
   }
@@ -5002,12 +5074,16 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     await sendNotification(loadNotifyConfig(), {
       severity: 'critical',
       dedupId: 'night_charge_force_charge_stuck',
-      title: 'Night-charge: force-charge stuck ON',
+      title: unconfirmed ? 'Night-charge: force-charge not confirmed OFF' : 'Night-charge: force-charge stuck ON',
       body:
-        `The night-charge for ${state.day} switched force-charge ("Charge Now") ON and the panel has not switched off: `
-        + `slot(s) ${action.slots.join(', ')} still read ON after ${state.forceChargeOffRetries} accepted OFF commands. `
+        `The night-charge for ${state.day} switched force-charge ("Charge Now") ON and `
+        + (unconfirmed
+          ? `has not been able to confirm it off: slot(s) ${action.slots.join(', ')} were ours, and the panel's readback is unavailable. `
+          : action.deadline
+            ? `the panel has not switched off: slot(s) ${action.slots.join(', ')} still read ON past the deadline. `
+            : `the panel has not switched off: slot(s) ${action.slots.join(', ')} still read ON after ${state.forceChargeOffRetries} accepted OFF commands. `)
         + 'While it stays on the panel buys grid power instead of using the battery — including at the on-peak rate. '
-        + 'Turn Charge Now off in the EcoFlow app. The add-on keeps sending OFF every 15 minutes and clears this once it reads off.',
+        + 'Check Charge Now in the EcoFlow app and turn it off. The add-on keeps sending OFF every 15 minutes while a readback shows it on.',
     });
   } catch (e: any) {
     app.log.warn(`night-charge: force-charge escalation notify failed (${e?.message ?? e})`);
