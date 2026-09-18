@@ -1,3 +1,52 @@
+## 1.167.0
+
+### Force-charge runs to the night's target — just in time — then stops
+
+**Owner design (2026-09-17):** *"Since the value doesn't allow a setting in between, why not have
+the app run force-charge until the desired percentage is reached, then revert to relevant
+settings. So if needed charge amount equates to 64 percent, app would engage force-charge long
+enough to hit the desired percentage, then disengage."*
+
+1.165.0 refused every night whose target sat under the panel's 80% force-charge minimum —
+which is every sunny night. 2026-09-17's target was 64.3%, so it stayed reserve-only.
+
+**Now any target above the 50% reserve is reachable.** Force-charge switches on, and switches off
+the moment the pool **reaches the target** (a software stop). The panel's own force-charge ceiling
+becomes a **backstop**: synced to `clamp(target, 80, 100)` as soon as the night is live — hours
+before the start, so its readback never delays it — and restored afterwards.
+
+**It starts late, on purpose.** Once force-charge is off, only the 50% reserve holds the pack up,
+so a pack that reaches 64% at 02:00 is drawn back toward 50% by the house over the three hours
+left (≈57% at 05:00). But the reserve already charges the pack to ~50% and then **holds the house
+on grid** — 2026-09-16 sat flat at 49% from 01:00 to 05:00. So force-charge only has to add the
+last stretch, and it starts just late enough to arrive at the target as the window closes:
+
+| | force-charge on | reaches 64% | at 05:00 |
+|---|---|---|---|
+| start at the window open | 23:01 | ~01:55 | ≈57% (drained) |
+| **just in time** | ~03:26 | ~05:00 | **≈64%** |
+
+The start is recomputed every tick from the live pool: the kWh still needed ÷ a **planned 10 kW**
++ a 15-minute buffer. 10 kW is deliberately below the ~15 kW measured on 2026-09-16, because an EV
+charging at the same time shares the grid input: faster than planned arrives a little early and
+drains a few minutes; slower arrives a little short. It never ends below the reserve.
+
+- A stale or incoherent SoC never starts it and never stops it early — the window end, the
+  panel's backstop ceiling and every v1.165.0 OFF rail still apply.
+- A target at or below the reserve does not force-charge: the reserve alone reaches it.
+- The "why not starting" reason stays stable while it waits (a reason carrying the moving start
+  time would log every tick); the 21:30 ARMED line and the announcement name the target.
+- The `ARB_COST_MAX_SOC_PCT` description is rewritten for the new behaviour.
+
+**Still not established — outage behaviour with force-charge ON.** No vendor text covers it and it
+has never happened on this plant. Just-in-time shrinks the nightly exposure from ~6 h to ~1 h; it
+does not answer the question. One attended daylight test settles it: Charge Now ON for one slot,
+open the main breaker, confirm backed-up loads stay up and the pack discharges.
+
+Two v1.165.0 mutants that pinned the retired "under 80% ⇒ reserve-only" rule are **replaced**, not
+repointed — the property they protected was withdrawn by the owner. Five new mutants
+(`mutate-force-charge.mjs`, 29/29); 6 new tests.
+
 ## 1.166.0
 
 ### The stale-data alarm remediates first, and sounds only if that fails

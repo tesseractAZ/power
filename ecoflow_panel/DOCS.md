@@ -6420,6 +6420,18 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.167.0 — force-charge runs to the target, just in time** (owner design 2026-09-17). Any
+target above the 50% reserve is reachable: force-charge stops the moment the pool reaches the
+announced target (`forceChargeCeilingPct`), and the panel's `foceChargeHight` — synced to
+`clamp(target, 80, 100)` when the night goes live and restored afterwards — is only a backstop.
+It starts late: `forceChargeStartAtMs` = window end − (kWh still needed ÷ 10 kW planned + 15 min),
+recomputed each tick from the live pool, because a pack filled early is drawn back toward the 50%
+reserve by the house once force-charge is off, while the reserve itself holds the house on grid
+until the start. Unknown SoC never starts it or stops it early; the v1.165.0 OFF rails all apply.
+★ Outage behaviour with force-charge ON remains **unestablished** (no vendor text, never happened
+here); just-in-time shrinks the nightly exposure to ~1 h but does not settle it — see the
+attended breaker test in the module header.
+
 **v1.166.0 — the telemetry-blind alarm remediates first** (owner decision 2026-09-17). When the
 `telemetry-blind` alert first goes active, `blindRemediation.ts` fires the MQTT session rebuild
 immediately and holds the alert non-annunciating (no voice, no push; still on-screen and in
