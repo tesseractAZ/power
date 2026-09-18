@@ -1,3 +1,58 @@
+## 1.168.0
+
+### Thursdays fill to 90%, every night plans for the median sun, and a coast on grid at 80%+
+
+**Owner (2026-09-17):** *"Since the charge window is so short tomorrow night, why not charge to 100
+percent on Thursdays and coast on grid power until end of super off-peak overnight window"* — then,
+after the measurement below, *"proceed with the change tonight."*
+
+An 8-week replay (house ~114 kWh/day against ~55 kWh/day of solar) answered it:
+
+- **The Thursday rule.** On a night that is itself a full-length cheap window and whose next
+  full-length window is **more than a day away**, cost mode sets the morning-solar headroom aside
+  and fills to `ARB_COST_MAX_SOC_PCT` (90). Thursday qualifies: Friday's overnight rate is only
+  23:00-24:00, Saturday and Sunday are all off-peak, and the next full window opens Monday 00:00.
+  ~90% beat the solar-headroom ceiling by ~$1/week; 100% beat 90% in only 2 of 8 weeks, both by
+  ≤ $0.20, both on cloudy Fridays. The rule reads the **tariff calendar**, not the weekday name —
+  windows shorter than 3 h are stepped over, and Friday's own 1-hour window never qualifies.
+- **The median, not the P90.** Every night's economic ceiling left room for the P90 (best-case)
+  morning solar surplus. That was too cautious every night: 2026-09-17 planned for 32.6 kWh
+  against measured Friday surpluses of 7.7-24.2 kWh (median ~16), and the pack never passed 80%
+  in 27 days. The cost ceiling now leaves room for the **P50** surplus (the P90 stands in when the
+  median is unknown). The P90 still drives the resilience over-buy flag.
+- **Coast on grid at 80%+.** A target of 80% or more is one the panel's own force-charge ceiling
+  can **hold**: with Charge Now still on at that ceiling, the pack sits there and the house runs on
+  grid. So for those targets force-charge no longer switches off at the target; it stays on until
+  the window closes, and the pack gives none of it back before the cheap rate ends. The owner
+  confirmed the evidence: 07-23 and 07-28, the only nights the pack held above 50% on grid, were
+  his manual Charge Now. Below 80% the software stop still ends it at the target. This also
+  retires a rounding miss (an 85.3% target synced an 85 ceiling that a whole-number SoC reading
+  never reached).
+- **A wall-clock deadline on the switch-off.** Every earlier escalation needed a live readback or
+  an accepted OFF — a panel whose readback stayed stale, or a cloud that kept refusing the OFF,
+  left the verify loop waiting in silence. Now a force-charge of ours not verified off by
+  **the later of first-OFF + 30 min and window-end + 60 min** escalates audibly and by push, once;
+  with no readback the words say it **could not be confirmed** off rather than that it "still
+  reads ON". It runs even when the panel has dropped out of the device list. It pages on its
+  **own record**: an earlier retry-budget escalation that landed in quiet hours (push only) no
+  longer disarms it, and a silenced announcement is now logged. Once escalated, the OFF is
+  re-sent every 15 minutes even with no readback (it is idempotent) — before, a stale readback
+  plus one rejected 05:00 OFF sent a single OFF all day.
+
+**Exposure, stated plainly.** Coasting lengthens how long Charge Now is on for 80%+ targets —
+on a Thursday about 4-6 h instead of ~1 h. Outage behaviour with Charge Now on is still **not
+established** (no vendor text; never happened here). The attended daylight breaker test settles it.
+
+Deferred to a following release: a separate cap for 100% on cloudy Fridays (needs a new option),
+the planning horizon past Friday's 1-hour window, and the APS holiday list (currently empty).
+
+Known, next release: when the pack is already high at 21:30, the planner's early "hold" answer
+returns before cost mode is asked, so the Thursday rule cannot raise it (the pre-existing
+"cost mode may never be asked" gap); a ceiling restore after a night whose force-charge never
+started still reads as an external settings change.
+
+23 new mutants (`mutate-force-charge.mjs`, 52/52; xxv repointed at the reshaped stop); 27 new tests.
+
 ## 1.167.0
 
 ### Force-charge runs to the night's target — just in time — then stops

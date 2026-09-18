@@ -160,6 +160,16 @@ export interface NightChargeInputs {
   /** P90 (high) next-morning PV surplus, kWh — the over-buy ceiling headroom so
    *  a too-full pack doesn't clip morning PV. null ⇒ ceiling not applied. */
   morningPvSurplusP90Kwh: number | null;
+  /** v1.168.0 — the MEDIAN (P50) next-morning PV surplus, kWh: what the COST ceiling
+   *  leaves room for (the P90 above stays the resilience over-buy flag). Measured
+   *  2026-09-17: the P90 planned for 32.6 kWh against Friday surpluses of 7.7-24.2 kWh
+   *  (median ~16), and the pack never passed 80% in 27 days — too cautious every
+   *  night. null/absent ⇒ the P90 stands in. */
+  morningPvSurplusP50Kwh?: number | null;
+  /** v1.168.0 — THE THURSDAY RULE: the next full-length cheap window is more than a
+   *  day away (see longGapAhead). Cost mode then fills to the owner's SoC ceiling
+   *  and sets the morning-solar headroom aside. */
+  longGapAhead?: boolean;
 
   // ── Basis quality (gates) ──
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
@@ -336,6 +346,11 @@ export interface NightChargePlan {
   /** v1.165.0 — the economic ceiling itself, % of pool (null in resilience mode).
    *  The night force-charge fills to this, never past it. */
   costCeilingSocPct?: number | null;
+  /** v1.168.0 — the Thursday rule applied: the solar headroom was set aside. */
+  longGapAhead?: boolean;
+  /** v1.168.0 — the morning surplus the cost ceiling left room for (P50, else P90;
+   *  null when set aside or unknown). */
+  costCeilingSurplusKwh?: number | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
   cushionOutageHours?: number;
   rationale: string;
@@ -919,11 +934,18 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   let costCeilingSocPct: number | null = null;
   let effLiftKwh = liftKwh;
   let effTargetPackKwh = targetPackKwh;
+  // v1.168.0 — the cost ceiling leaves room for the MEDIAN morning surplus (the P90
+  // stands in when the median is unknown), and none at all before a long gap: with
+  // no full cheap window for days, the owner's SoC ceiling is the ceiling.
+  const longGap = inputs.longGapAhead === true;
+  const costSurplusKwh: number | null = longGap ? null
+    : (inputs.morningPvSurplusP50Kwh != null && Number.isFinite(inputs.morningPvSurplusP50Kwh)
+      ? inputs.morningPvSurplusP50Kwh : morningPvSurplusP90Kwh);
   if (costMode) {
     const ct = costModeTargetKwh({
       fullKwh,
       reserveKwh,
-      morningPvSurplusP90Kwh,
+      morningPvSurplusKwh: costSurplusKwh,
       maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
       resilienceTargetKwh: targetPackKwh,
     });
@@ -931,7 +953,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     // v1.165.0 — exposed for the force-charge ceiling (see costCeilingKwh).
     if (fullKwh > 0) {
       costCeilingSocPct = round1((costCeilingKwh({
-        fullKwh, morningPvSurplusP90Kwh, maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
+        fullKwh, morningPvSurplusKwh: costSurplusKwh, maxSocPct: inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT,
       }).ceilingKwh / fullKwh) * 100);
     }
     // Convert the desired pack level back into a lift, then re-apply the SAME
@@ -1056,7 +1078,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? ' (no full-length cheap window for more than a day after this one, so the morning-solar headroom is set aside)' : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -1088,6 +1110,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     /** v1.127.0 — which ceiling bound the cost-mode target (null in resilience mode). */
     costCeilingBasis,
     costCeilingSocPct,
+    longGapAhead: costMode ? longGap : undefined,
+    costCeilingSurplusKwh: costMode ? (costSurplusKwh != null ? round2(costSurplusKwh) : null) : undefined,
     // v1.125.0 — how the cushion was derived, so a reader can tell a bounded
     // islanded-outage requirement from the legacy flat band at a glance.
     cushionBasis,
@@ -1291,6 +1315,9 @@ export interface NightChargeInputDeps {
   bandCoverageFrac: number;
 
   morningPvSurplusP90Kwh: number | null;
+  /** v1.168.0 — forwarded verbatim (see NightChargeInputs). */
+  morningPvSurplusP50Kwh?: number | null;
+  longGapAhead?: boolean;
   minBuyKwh: number;
   /** v1.112.0 — learned buy de-bias, forwarded verbatim to the inputs. */
   buyDebiasFactor?: number;
@@ -1342,6 +1369,50 @@ export function resolveCheapWindow(
   return null;
 }
 
+/** v1.168.0 — a cheap window shorter than this is not a recharge: Friday's 23:00-24:00
+ *  (Saturday 00:00-05:00 is weekend off-peak) buys ~15 kWh at most. */
+export const FULL_CHEAP_WINDOW_MIN_MS = 3 * HOUR_MS;
+/** v1.168.0 — a gap to the next full window longer than this is a "long gap". A
+ *  weekday gap is 18 h (05:00 → 23:00); Thursday's is 67 h (Fri 05:00 → Mon 00:00). */
+export const LONG_GAP_MS = 24 * HOUR_MS;
+
+/** v1.168.0 — the next cheap window of at least FULL_CHEAP_WINDOW_MIN_MS starting at or
+ *  after `fromMs` (short windows are stepped over), or null if none starts within
+ *  `scanHours`. */
+export function nextFullCheapWindow(
+  periodIdAt: (tsMs: number) => string,
+  fromMs: number,
+  cheapPeriodId: string,
+  scanHours = 120,
+): { startMs: number; endMs: number } | null {
+  const limitMs = fromMs + scanHours * HOUR_MS;
+  let from = fromMs;
+  for (let i = 0; i < 16 && from < limitMs; i++) {
+    const w = resolveCheapWindow(periodIdAt, from, cheapPeriodId, Math.max(1, Math.ceil((limitMs - from) / HOUR_MS)));
+    if (!w || w.startMs >= limitMs) return null;
+    if (w.endMs - w.startMs >= FULL_CHEAP_WINDOW_MIN_MS) return w;
+    from = w.endMs;
+  }
+  return null;
+}
+
+/**
+ * v1.168.0 — THE THURSDAY RULE, keyed off the tariff calendar rather than a weekday
+ * name (a holiday makes its own long gap). True when tonight is itself a full-length
+ * window AND the next full-length one opens more than LONG_GAP_MS after tonight's
+ * closes — or none opens within the scan at all. Friday's 1-hour window is never one:
+ * it is not a full window. Measured 2026-09-17 (8 weeks replayed): filling to ~90% on
+ * these nights beats the solar-headroom ceiling by ~$1/week.
+ */
+export function longGapAhead(
+  tonight: { startMs: number; endMs: number } | null,
+  nextFull: { startMs: number; endMs: number } | null,
+): boolean {
+  if (!tonight || tonight.endMs - tonight.startMs < FULL_CHEAP_WINDOW_MIN_MS) return false;
+  if (!nextFull) return true;
+  return nextFull.startMs - tonight.endMs > LONG_GAP_MS;
+}
+
 /**
  * Assemble a NightChargeInputs from injected forecast pieces. PURE. The
  * conservative-worst-case rules (§2.3) live here so they are provable:
@@ -1367,6 +1438,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh, buyDebiasFactor,
+    morningPvSurplusP50Kwh, longGapAhead,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -1539,6 +1611,8 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     window,
     horizon: trimmed,
     morningPvSurplusP90Kwh,
+    morningPvSurplusP50Kwh,
+    longGapAhead,
     buyDebiasFactor,
     confidenceTier,
     basisComplete,
@@ -1857,13 +1931,13 @@ export const DEFAULT_COST_MAX_SOC_PCT = 90;
  */
 export function costCeilingKwh(o: {
   fullKwh: number;
-  morningPvSurplusP90Kwh: number | null | undefined;
+  morningPvSurplusKwh: number | null | undefined;
   maxSocPct: number;
 }): { ceilingKwh: number; basis: 'pv-headroom' | 'max-soc' } {
-  const { fullKwh, morningPvSurplusP90Kwh, maxSocPct } = o;
+  const { fullKwh, morningPvSurplusKwh, maxSocPct } = o;
   const socCap = (fullKwh * Math.max(0, Math.min(100, maxSocPct))) / 100;
-  const pvCap = morningPvSurplusP90Kwh != null && Number.isFinite(morningPvSurplusP90Kwh)
-    ? fullKwh - Math.max(0, morningPvSurplusP90Kwh)
+  const pvCap = morningPvSurplusKwh != null && Number.isFinite(morningPvSurplusKwh)
+    ? fullKwh - Math.max(0, morningPvSurplusKwh)
     : null;
   const ceilingKwh = pvCap != null ? Math.min(socCap, pvCap) : socCap;
   const basis: 'pv-headroom' | 'max-soc' = pvCap != null && pvCap <= socCap ? 'pv-headroom' : 'max-soc';
@@ -1873,13 +1947,13 @@ export function costCeilingKwh(o: {
 export function costModeTargetKwh(o: {
   fullKwh: number;
   reserveKwh: number;
-  morningPvSurplusP90Kwh: number | null | undefined;
+  morningPvSurplusKwh: number | null | undefined;
   maxSocPct: number;
   /** The resilience target, so cost mode can never sit BELOW it. */
   resilienceTargetKwh: number;
 }): { targetKwh: number; ceilingBasis: 'pv-headroom' | 'max-soc' } {
-  const { fullKwh, reserveKwh, morningPvSurplusP90Kwh, maxSocPct, resilienceTargetKwh } = o;
-  const { ceilingKwh: ceiling, basis } = costCeilingKwh({ fullKwh, morningPvSurplusP90Kwh, maxSocPct });
+  const { fullKwh, reserveKwh, morningPvSurplusKwh, maxSocPct, resilienceTargetKwh } = o;
+  const { ceilingKwh: ceiling, basis } = costCeilingKwh({ fullKwh, morningPvSurplusKwh, maxSocPct });
   // Never below the reserve floor, and never below what resilience would have asked.
   const targetKwh = Math.max(reserveKwh, resilienceTargetKwh, Math.min(ceiling, fullKwh));
   return { targetKwh: round2(targetKwh), ceilingBasis: basis };

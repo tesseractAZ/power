@@ -26,8 +26,10 @@ const FC = resolve(SERVER, 'src/nightForceCharge.ts');
 const ACT = resolve(SERVER, 'src/nightChargeActuator.ts');
 const IDX = resolve(SERVER, 'src/index.ts');
 const DRIFT = resolve(SERVER, 'src/settingsDrift.ts');
+const NCA = resolve(SERVER, 'src/nightChargeAdvisor.ts');
+const NOTIFY = resolve(SERVER, 'src/notify.ts');
 
-const SUBSET = ['test/nightForceCharge.test.ts'];
+const SUBSET = ['test/nightForceCharge.test.ts', 'test/longGapCeiling.test.ts'];
 
 const MUTANTS = [
   {
@@ -137,7 +139,7 @@ const MUTANTS = [
   },
   {
     id: 'xvii. ★★ the economic ceiling ignores the morning solar forecast',
-    file: resolve(SERVER, 'src/nightChargeAdvisor.ts'),
+    file: NCA,
     find: '  const ceilingKwh = pvCap != null ? Math.min(socCap, pvCap) : socCap;',
     to: '  const ceilingKwh = socCap; /* MUTANT */',
     why: 'The planner and the force-charge both fill to the raw owner ceiling on a sunny morning, curtailing solar the forecast saw coming.',
@@ -205,8 +207,9 @@ const MUTANTS = [
   {
     id: 'xxv. ★★★ it does not stop at the target',
     file: FC,
-    find: '  if (o.poolSocPct != null && s.forceChargeCeilingPct != null && o.poolSocPct >= s.forceChargeCeilingPct) return \'target\';',
-    to: '  /* MUTANT */',
+    // v1.168.0 — repointed: the stop now applies only below the panel's 80% minimum.
+    find: '    && !panelHoldsTarget(s.forceChargeCeilingPct) && o.poolSocPct >= s.forceChargeCeilingPct',
+    to: '    && false /* MUTANT */',
     why: 'Below 80 the charge runs on to the panel\'s 80 backstop — past the owner\'s target and past the morning-solar headroom.',
   },
   {
@@ -229,6 +232,170 @@ const MUTANTS = [
     find: "    return { kind: 'none', why: `just in time — holding off so the pack reaches ${target}% as the window closes, not hours early (which would let the house draw it back toward the reserve)` };",
     to: "    return { kind: 'none', why: `just in time — starting at ${forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh)}` }; /* MUTANT */",
     why: 'The logged reason includes a start time that moves with the SoC, so the once-per-reason log writes a line every minute of the night.',
+  },
+  // ── v1.168.0 — coast on grid at 80+, the wall-clock OFF deadline, the Thursday rule
+  // and the median surplus.
+  {
+    id: 'xxx. ★★ no coast: an 80+ target is switched off at the target',
+    file: FC,
+    find: '    && !panelHoldsTarget(s.forceChargeCeilingPct) && o.poolSocPct >= s.forceChargeCeilingPct',
+    to: '    && o.poolSocPct >= s.forceChargeCeilingPct /* MUTANT */',
+    why: 'Force-charge stops at 90% at ~03:30 and the house draws the pack back toward the 50% reserve until 05:00 — the coast the owner asked for, gone; and an 85.3 target never stops (the rounding miss).',
+  },
+  {
+    id: 'xxxi. ★ the coast boundary moves off the panel\'s 80% minimum',
+    file: FC,
+    find: '  return targetPct >= FORCE_CHARGE_CEILING_MIN_PCT;',
+    to: '  return targetPct > FORCE_CHARGE_CEILING_MIN_PCT; /* MUTANT */',
+    why: 'An exact 80 target — one the panel can hold — is switched off early and drained back toward the reserve.',
+  },
+  {
+    id: 'xxxii. ★★★ the wall-clock deadline is removed',
+    file: FC,
+    find: '  if (s.forceChargeOffDeadlinePagedAtMs == null) {\n    const deadline = forceChargeOffDeadlineMs(s);',
+    to: '  if (false) { /* MUTANT */\n    const deadline = forceChargeOffDeadlineMs(s);',
+    why: 'A stale readback or a cloud that keeps refusing the OFF leaves force-charge on into the on-peak in silence — the verify loop waits forever.',
+  },
+  {
+    id: 'xxxiii. ★★ the deadline takes the EARLIER bound',
+    file: FC,
+    find: '  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
+    to: '  return fromOff != null ? Math.min(fromOff, fromWindow) : fromWindow; /* MUTANT */',
+    why: 'A 03:00 target OFF slow to verify pages the house at 03:30 over a force-charge that costs nothing extra inside the cheap window.',
+  },
+  {
+    id: 'xxxiv. ★★★ the deadline only counts from an OFF that was sent',
+    file: FC,
+    find: '  return fromOff != null ? Math.max(fromOff, fromWindow) : fromWindow;',
+    to: '  return fromOff; /* MUTANT */',
+    why: 'A tick that never ran at 05:00 never sends the OFF, so the deadline never starts — the one case it exists for.',
+  },
+  {
+    id: 'xxxv. ★★ past the deadline, slots reading OFF are escalated instead of verified',
+    file: FC,
+    find: "      if (stillOn.length > 0) return { kind: 'offFailed', slots: stillOn, deadline: true, unconfirmed: o.slotsOn == null };",
+    to: "      return { kind: 'offFailed', slots: ours, deadline: true, unconfirmed: o.slotsOn == null }; /* MUTANT */",
+    why: 'A force-charge the owner switched off from the app pages as stuck — and the record never resolves.',
+  },
+  {
+    id: 'xxxvi. ★★ a blind escalation claims the panel still reads ON',
+    file: FC,
+    find: 'deadline: true, unconfirmed: o.slotsOn == null };',
+    to: 'deadline: true, unconfirmed: false }; /* MUTANT */',
+    why: 'With no readback at all the alarm says the panel "still reads ON" — a statement nothing measured.',
+  },
+  {
+    id: 'xxxvii. ★★ the deadline pages every tick',
+    file: FC,
+    find: '  if (s.forceChargeOffDeadlinePagedAtMs == null) {\n    const deadline = forceChargeOffDeadlineMs(s);',
+    to: '  if (true) { /* MUTANT */\n    const deadline = forceChargeOffDeadlineMs(s);',
+    why: 'Once past the deadline every minute re-pages audibly, and the OFF is never re-sent (the page wins the tick).',
+  },
+  {
+    id: 'xxxviii. ★★★ a panel missing from the device list skips the deadline',
+    file: IDX,
+    find: "    if (blind.kind === 'offFailed') await escalateForceChargeStuck(state, blind);",
+    to: '    /* MUTANT */',
+    why: 'A panel dropped from the list is exactly when nothing else can see a force-charge left on — the v1.167.0 early return, rebuilt.',
+  },
+  {
+    id: 'xxxix. ★ the blind escalation speaks the "could not switch off" words',
+    file: IDX,
+    find: "        ? 'Critical. The night charge system could not confirm that the panel\\'s charge now setting is off. '",
+    to: "        ? 'Critical. The night charge system could not switch off the panel\\'s charge now setting. ' /* MUTANT */",
+    why: 'The house is told the switch-off failed when all that is known is that nothing can be read.',
+  },
+  {
+    id: 'xl. ★ the announcement promises an OFF at the target on a coast night',
+    file: NOTIFY,
+    find: '        ? (forceCeiling >= FORCE_CHARGE_CEILING_MIN_PCT',
+    to: '        ? (false /* MUTANT */',
+    why: 'The 21:30 notice says force-charge stops at 90% while it actually stays on until 05:00.',
+  },
+  {
+    id: 'xli. ★★★ the Thursday rule is removed',
+    file: NCA,
+    find: '  const costSurplusKwh: number | null = longGap ? null',
+    to: '  const costSurplusKwh: number | null = false ? null /* MUTANT */',
+    why: 'Thursday fills only to the solar headroom and the weekend starts short — ~$1/week the measurement found.',
+  },
+  {
+    id: 'xlii. ★★★ the cost ceiling goes back to the P90 surplus',
+    file: NCA,
+    find: '      ? inputs.morningPvSurplusP50Kwh : morningPvSurplusP90Kwh);',
+    to: '      ? morningPvSurplusP90Kwh : morningPvSurplusP90Kwh); /* MUTANT */',
+    why: 'Every night leaves room for a best-case morning that the measured median never reached — the pack never passed 80% in 27 days.',
+  },
+  {
+    id: 'xliii. ★★ Friday\'s 1-hour window counts as a long-gap night',
+    file: NCA,
+    find: '  if (!tonight || tonight.endMs - tonight.startMs < FULL_CHEAP_WINDOW_MIN_MS) return false;',
+    to: '  if (!tonight) return false; /* MUTANT */',
+    why: 'Friday 23:00-24:00 is sized to 90% as if it were a full night — a rule that was never measured.',
+  },
+  {
+    id: 'xliv. ★★★ short windows are not stepped over',
+    file: NCA,
+    find: '    if (w.endMs - w.startMs >= FULL_CHEAP_WINDOW_MIN_MS) return w;',
+    to: '    return w; /* MUTANT */',
+    why: 'Friday\'s 1-hour window reads as Thursday\'s next recharge, so the Thursday rule never fires.',
+  },
+  {
+    id: 'xlv. ★ exactly a day counts as a long gap',
+    file: NCA,
+    find: '  return nextFull.startMs - tonight.endMs > LONG_GAP_MS;',
+    to: '  return nextFull.startMs - tonight.endMs >= LONG_GAP_MS; /* MUTANT */',
+    why: 'The threshold is "more than a day"; a boundary drift re-scopes the rule silently.',
+  },
+  {
+    id: 'xlvi. ★★★ the planner inputs drop the median and the long gap',
+    file: NCA,
+    find: '    morningPvSurplusP50Kwh,\n    longGapAhead,\n    buyDebiasFactor,',
+    to: '    buyDebiasFactor, /* MUTANT */',
+    why: 'Both are computed and never reach the sizing — the v1.125.0 field-copy trap, rebuilt.',
+  },
+  {
+    id: 'xlvii. ★★★ index.ts computes both and never passes them',
+    file: IDX,
+    find: '    morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead,',
+    to: '    /* MUTANT */',
+    why: 'The live planner keeps the P90 ceiling and no Thursday rule while every unit test passes.',
+  },
+  // ── v1.168.0 review fixes.
+  {
+    id: 'xlviii. ★★★ the deadline is keyed on the retry-budget escalation again',
+    file: FC,
+    find: '  if (s.forceChargeOffDeadlinePagedAtMs == null) {\n    const deadline = forceChargeOffDeadlineMs(s);',
+    to: '  if (!s.forceChargeOffEscalated) { /* MUTANT */\n    const deadline = forceChargeOffDeadlineMs(s);',
+    why: 'A 03:48 escalation silenced by quiet hours disarms the 06:00 page — Charge Now stays on into the on-peak with nothing ever audible.',
+  },
+  {
+    id: 'xlix. ★★ escalated and blind, the OFF is never re-sent',
+    file: FC,
+    find: '      return s.forceChargeOffEscalated && since >= FORCE_CHARGE_OFF_PERSIST_EVERY_MS',
+    to: '      return false && since >= FORCE_CHARGE_OFF_PERSIST_EVERY_MS /* MUTANT */',
+    why: 'A stale readback plus one rejected 05:00 OFF sends exactly one OFF all day.',
+  },
+  {
+    id: 'l. ★★ the deadline page is never recorded',
+    file: IDX,
+    find: '    forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,',
+    to: '    /* MUTANT */',
+    why: 'The deadline re-pages audibly on every tick once it has passed.',
+  },
+  {
+    id: 'li. ★★ a restart forgets the deadline already paged',
+    file: ACT,
+    find: '    forceChargeOffDeadlinePagedAtMs: num(o.forceChargeOffDeadlinePagedAtMs),',
+    to: '    forceChargeOffDeadlinePagedAtMs: null, /* MUTANT */',
+    why: 'Every restart after 06:00 pages the house again for the same stuck force-charge.',
+  },
+  {
+    id: 'lii. ★ the ARMED line promises a software stop on a coast night',
+    file: IDX,
+    find: '  if (panelHoldsTarget(c)) {',
+    to: '  if (false) { /* MUTANT */',
+    why: 'The 21:30 journal line says force-charge stops at 90% while it stays on to 05:00 — an audit reads the coast as a failed stop.',
   },
   {
     id: 'xxvi. ★★ the "why not" line fires outside a live night',

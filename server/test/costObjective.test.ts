@@ -24,7 +24,7 @@ const RESERVE = POOL * 0.16;
 
 test('THE CEILING IS SUNLIGHT: a known morning surplus caps the fill', () => {
   const r = costModeTargetKwh({
-    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusP90Kwh: 30,
+    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusKwh: 30,
     maxSocPct: 90, resilienceTargetKwh: 20,
   });
   assert.equal(r.ceilingBasis, 'pv-headroom');
@@ -33,7 +33,7 @@ test('THE CEILING IS SUNLIGHT: a known morning surplus caps the fill', () => {
 
 test('with NO forecast the SoC cap holds the line — never "fill because we could not see"', () => {
   const r = costModeTargetKwh({
-    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusP90Kwh: null,
+    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusKwh: null,
     maxSocPct: 90, resilienceTargetKwh: 20,
   });
   assert.equal(r.ceilingBasis, 'max-soc');
@@ -44,7 +44,7 @@ test('with NO forecast the SoC cap holds the line — never "fill because we cou
 test('a present forecast can only LOWER the ceiling, never raise it', () => {
   // A tiny surplus would imply a ceiling above the SoC cap; the cap must win.
   const r = costModeTargetKwh({
-    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusP90Kwh: 1,
+    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusKwh: 1,
     maxSocPct: 90, resilienceTargetKwh: 20,
   });
   assert.ok(r.targetKwh <= POOL * 0.9 + 0.02, `got ${r.targetKwh}, above the SoC cap`);
@@ -58,7 +58,7 @@ test('★ COST MODE CAN NEVER BUY LESS THAN RESILIENCE — the safety invariant'
   for (const resilience of [0, 10, 30, 50, 70, 85, POOL, POOL * 2]) {
     for (const surplus of [null, 0, 5, 30, 60, 200]) {
       const r = costModeTargetKwh({
-        fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusP90Kwh: surplus,
+        fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusKwh: surplus,
         maxSocPct: 90, resilienceTargetKwh: resilience,
       });
       assert.ok(r.targetKwh >= resilience - 1e-6,
@@ -70,7 +70,7 @@ test('★ COST MODE CAN NEVER BUY LESS THAN RESILIENCE — the safety invariant'
 
 test('an absurd surplus cannot drive the target below the reserve floor', () => {
   const r = costModeTargetKwh({
-    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusP90Kwh: 1000,
+    fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusKwh: 1000,
     maxSocPct: 90, resilienceTargetKwh: 0,
   });
   assert.ok(r.targetKwh >= RESERVE - 1e-6, `got ${r.targetKwh}, below the ${RESERVE.toFixed(1)} kWh floor`);
@@ -79,7 +79,7 @@ test('an absurd surplus cannot drive the target below the reserve floor', () => 
 test('the SoC cap is clamped to a sane range', () => {
   for (const pct of [-50, 0, 150, 1e9]) {
     const r = costModeTargetKwh({
-      fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusP90Kwh: null,
+      fullKwh: POOL, reserveKwh: RESERVE, morningPvSurplusKwh: null,
       maxSocPct: pct, resilienceTargetKwh: 0,
     });
     assert.ok(r.targetKwh >= RESERVE - 1e-6 && r.targetKwh <= POOL + 1e-6, `pct ${pct} -> ${r.targetKwh}`);
