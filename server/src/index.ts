@@ -4199,7 +4199,7 @@ async function runNightChargeEveningJobInner(): Promise<void> {
     // never fire. Arming is refused while a prior night is unresolved.
     let supervisedCtx: {
       cancelDeadlineText: string; cancelDeadlineTextEs: string; targetPct: number;
-      forceChargeCeilingPct?: number | null;
+      forceChargeTargetPct?: number | null;
     } | null = null;
     let armedCandidate: NightActuationState | null = null;
     if (NIGHT_CHARGE_MODE !== 'advisory' && shape === 'charge' && plan) {
@@ -4237,10 +4237,10 @@ async function runNightChargeEveningJobInner(): Promise<void> {
           cancelDeadlineTextEs: fmtDeadlineSpokenEs(armedCandidate.windowStartMs! - APPLY_LEAD_MS, nowMs),
           targetPct: armedCandidate.targetPct!,
           // v1.165.0 — say so when force-charge will ride this window.
-          forceChargeCeilingPct:
+          forceChargeTargetPct:
             forceChargeOn() && armedCandidate.forceChargeCeilingPct != null
-              && armedCandidate.forceChargeCeilingPct >= FORCE_CHARGE_CEILING_MIN_PCT
-              ? desiredForceChargeCeilingPct(armedCandidate.forceChargeCeilingPct) : null,
+              && armedCandidate.forceChargeCeilingPct > RESERVE_WRITE_MAX_PCT
+              ? armedCandidate.forceChargeCeilingPct : null,
         };
       } else if (
         nightActuationMem.forceChargeOnAtMs != null && nightActuationMem.forceChargeOffVerifiedAtMs == null
@@ -4831,10 +4831,10 @@ function forceChargeArmNote(armed: NightActuationState): string {
   if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';
   const c = armed.forceChargeCeilingPct;
   if (c == null) return 'Force-charge: none tonight (no economic ceiling announced) — reserve-only.';
-  if (c < FORCE_CHARGE_CEILING_MIN_PCT) {
-    return `Force-charge: none tonight — ceiling ${c}% is under the panel's ${FORCE_CHARGE_CEILING_MIN_PCT}% minimum (morning solar needs the room) — reserve-only, by design.`;
+  if (c <= RESERVE_WRITE_MAX_PCT) {
+    return `Force-charge: none tonight — the ${c}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve, which reaches it alone.`;
   }
-  return `Force-charge: ELIGIBLE — after the reserve verifies it switches on to ~${desiredForceChargeCeilingPct(c)}% until the window closes.`;
+  return `Force-charge: ELIGIBLE — just in time near the end of the window, to ~${c}% (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`;
 }
 
 /**
@@ -4873,6 +4873,10 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     vitalsRed: currentAssessment()?.level === 'crit',
     socCoherent,
     ceilingReadbackPct: typeof sp?.forceChargeCeilingSoc === 'number' ? sp.forceChargeCeilingSoc : null,
+    // v1.167.0 — times the just-in-time start and ends the charge at the target. Only a
+    // fresh, coherent reading: an unknown SoC never starts one and never stops one early.
+    poolSocPct: socCoherent ? socNowPct : null,
+    fullKwh: fullWh != null && fullWh > 0 ? fullWh / 1000 : null,
   });
   if (action.kind === 'none') {
     // v1.166.0 — "chose not to" must never read like "broke". While a night is live
@@ -4938,7 +4942,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge' } });
       results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
     }
-    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; runs until the window closes (${new Date(state.windowEndMs!).toISOString()}), stopping at the panel's ${state.forceChargeCeilingPct == null ? '' : `${desiredForceChargeCeilingPct(state.forceChargeCeilingPct)}% `}ceiling. Switched OFF on window end, cancel, revert, grid loss or disable.`);
+    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}) — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable.`);
     return;
   }
 
@@ -4965,7 +4969,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     if (isRetry) {
       app.log.warn(`night-charge: force-charge still reads ON (slots ${action.slots.join(',')}) — re-issuing OFF${nightActuationMem.forceChargeOffEscalated ? ' (escalated; re-issued every 15 min until it reads OFF)' : ` (retry ${nightActuationMem.forceChargeOffRetries})`}: ${results.join(', ')}`);
     } else {
-      app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason}) — ${results.join(', ')}; verifying by readback.`);
+      app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason === 'target' ? `reached the ${state.forceChargeCeilingPct}% target` : action.reason}) — ${results.join(', ')}; verifying by readback.`);
     }
     return;
   }

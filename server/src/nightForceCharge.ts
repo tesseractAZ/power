@@ -9,31 +9,44 @@
  * the EcoFlow app's "Charge Now"), bounded by the panel's own force-charge ceiling
  * `foceChargeHight` (documented 80-100).
  *
- * WHAT. On a night whose reserve write was APPLIED AND VERIFIED, switch force-charge
- * ON for the connected slots and leave it on until the window closes. The panel's
- * own ceiling stops the charge; before the first ON of a night that ceiling is synced
- * to the ANNOUNCED plan's economic ceiling — min(ARB_COST_MAX_SOC_PCT, full minus
- * tomorrow's P90 morning solar) — best-effort. A ceiling under the panel's 80%
- * minimum leaves the night reserve-only: forcing would overfill past the solar
- * headroom, which is the waste ARB_COST_MAX_SOC_PCT exists to prevent.
+ * WHAT (v1.167.0 — CHARGE TO TARGET, JUST IN TIME; owner design, 2026-09-17). The
+ * target is the announced plan's economic ceiling — min(ARB_COST_MAX_SOC_PCT, full minus
+ * tomorrow's P90 morning solar). On a night whose reserve write is APPLIED AND VERIFIED,
+ * force-charge switches ON only in the LAST STRETCH of the window — late enough that the
+ * pack arrives at the target as the window closes — and OFF the moment it gets there
+ * (or at the window close). The owner's words: "run forcecharge until the desired
+ * percentage is reached, then revert." Any target above the 50% reserve works; the
+ * panel's own 80% force-charge minimum no longer matters.
  *
- * ★★ WHY NOT STOP AT THE CEILING IN SOFTWARE. With the reserve at 50%, switching
- * force-charge OFF at 90% lets the panel serve the house from the pack, draining it
- * back toward 50% for the rest of the window — forfeiting exactly the hours this
- * exists to recover (on 2026-09-16 the reserve held the house on grid at a flat 49%
- * from 01:00 to 05:00). The DEVICE ceiling ends the charge instead, and turning OFF
- * never depends on a fresh SoC reading. ★ That force-charge ON keeps the house on
- * grid is INFERRED from the 2026-08-04 incident (it bought grid for hours), not
- * vendor-documented.
+ * ★★ WHY "JUST IN TIME". Once force-charge is OFF the only thing holding the pack up is
+ * the 50% reserve, so a pack that reaches 64% at 02:00 is drawn back toward 50% by the
+ * house for the three hours left (≈57% at 05:00). But the reserve already charges the
+ * pack to ~50% and then HOLDS THE HOUSE ON GRID (2026-09-16: flat at 49% from 01:00 to
+ * 05:00). So force-charge only has to add the last stretch, and starting it late means
+ * there is nothing left to drain. The start is computed every tick from the live pool:
+ * needed kWh ÷ FORCE_CHARGE_PLAN_RATE_KW + a buffer. The plan rate is deliberately below
+ * the ~15 kW measured on 2026-09-16 (an EV sharing the grid input slows the pack): faster
+ * than planned arrives a little early and drains a few minutes; slower arrives a little
+ * short. It never ends below the reserve.
+ *
+ * THE PANEL'S CEILING becomes a BACKSTOP. `foceChargeHight` (documented 80-100) is synced
+ * to clamp(target, 80, 100) as soon as the night is live — hours before the start, so its
+ * readback never delays it. A target of 80+ is stopped by the device itself; below 80 the
+ * software stop ends it and the panel's 80 caps a stop that fails. The panel's original
+ * ceiling is restored afterwards.
+ *
+ * ★ That force-charge ON keeps the house on grid is INFERRED from the 2026-08-04 incident
+ * (it bought grid for hours), not vendor-documented.
  *
  * ★★★ OUTAGE — NOT ESTABLISHED EITHER WAY. No vendor text says how a slot with
  * ch{n}ForceCharge ON behaves when the grid fails, and no outage has ever overlapped
  * Charge Now on this plant. What argues against harm is inference: islanding is a
  * panel-level EPS transfer (gridSta=2), a grid charge has no source once the grid is
  * gone, and the owner has used this same button by hand with the same exposure since
- * before v1.84.0. The software grid-loss OFF is best-effort (a cloud write). Settle it
- * with one attended test: Charge Now ON for one slot, open the main breaker, confirm the
- * backed-up loads stay up and the pack discharges.
+ * before v1.84.0. The software grid-loss OFF is best-effort (a cloud write). v1.167.0's
+ * just-in-time start shrinks the nightly exposure from ~6 h to ~1 h; it does NOT settle
+ * the question. Settle it with one attended test: Charge Now ON for one slot, open the
+ * main breaker, confirm the backed-up loads stay up and the pack discharges.
  *
  * ★★★ SAFETY RAILS (each pinned by nightForceCharge.test.ts + the committed harness):
  *  - ON only rides a night whose reserve write was applied AND readback-verified, so
@@ -60,7 +73,7 @@
  *    escalates audibly.
  */
 
-import type { NightActuationState } from './nightChargeActuator.js';
+import { RESERVE_WRITE_MAX_PCT, type NightActuationState } from './nightChargeActuator.js';
 
 /** The panel's documented force-charge ceiling range (`foceChargeHight`). */
 export const FORCE_CHARGE_CEILING_MIN_PCT = 80;
@@ -68,6 +81,13 @@ export const FORCE_CHARGE_CEILING_MAX_PCT = 100;
 /** Don't START a force-charge this close to the window end — it would buy
  *  nothing and cost two writes. */
 export const FORCE_CHARGE_MIN_RUN_MS = 20 * 60_000;
+/** v1.167.0 — the rate the just-in-time start PLANS with. Deliberately below the ~15 kW
+ *  into the pack measured on 2026-09-16, because an EV charging at the same time shares
+ *  the grid input: faster than planned arrives early and drains a few minutes, slower
+ *  arrives short. */
+export const FORCE_CHARGE_PLAN_RATE_KW = 10;
+/** v1.167.0 — added to the computed lead: readback latency, the ramp, the first tick. */
+export const FORCE_CHARGE_JIT_BUFFER_MS = 15 * 60_000;
 /** Hard backstop: no force-charge of ours may outlive this, whatever the window says. */
 export const FORCE_CHARGE_MAX_RUN_MS = 7 * 3_600_000;
 /** Readback grace after an OFF write before it counts as not-taken. ★ It MUST
@@ -88,7 +108,7 @@ export const FORCE_CHARGE_CEILING_SYNC_RETRIES = 1;
 export const FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS = 2;
 
 export type ForceChargeOffReason =
-  | 'windowEnd' | 'cancelled' | 'reverted' | 'gridLoss' | 'disabled' | 'maxRun';
+  | 'windowEnd' | 'cancelled' | 'reverted' | 'gridLoss' | 'disabled' | 'maxRun' | 'target';
 
 export interface ForceChargeOpts {
   /** Feature gate — see forceChargeEnabled. Gates ONLY the start. */
@@ -110,6 +130,11 @@ export interface ForceChargeOpts {
   vitalsRed: boolean;
   /** Live SoC coherence verdict (I11). */
   socCoherent: boolean;
+  /** v1.167.0 — live pool SoC (null unless fresh AND coherent): times the start and
+   *  ends the charge at the target. Unknown never starts one; it never stops one early. */
+  poolSocPct: number | null;
+  /** v1.167.0 — live pool size (kWh), for the kWh the target still needs. */
+  fullKwh: number | null;
 }
 
 export type ForceChargeAction =
@@ -145,9 +170,9 @@ export function forceChargeEnabled(i: {
     && i.costMaxSocPct > i.reserveWriteMaxPct;
 }
 
-/** The ceiling to sync onto the panel: the night's economic ceiling, clamped into
- *  the device's documented range. (A ceiling below 80 never reaches here — the
- *  start is refused; the clamp is a backstop, not a policy.) */
+/** The ceiling to sync onto the panel: the night's target clamped into the device's
+ *  documented range. v1.167.0: below 80 the panel's 80 is a BACKSTOP — the software
+ *  stop ends the charge at the target, and the panel caps a stop that fails. */
 export function desiredForceChargeCeilingPct(costMaxSocPct: number): number {
   return Math.min(FORCE_CHARGE_CEILING_MAX_PCT,
     Math.max(FORCE_CHARGE_CEILING_MIN_PCT, Math.round(costMaxSocPct)));
@@ -166,6 +191,9 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (o.gridPresent === false || o.gridStaLost) return 'gridLoss';
   if (!o.enabled) return 'disabled';
   if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return 'maxRun';
+  // v1.167.0 — the owner's "until the desired percentage is reached". A stale or
+  // incoherent SoC never ends it early; the window end and the panel's ceiling still do.
+  if (o.poolSocPct != null && s.forceChargeCeilingPct != null && o.poolSocPct >= s.forceChargeCeilingPct) return 'target';
   return null;
 }
 
@@ -222,17 +250,15 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   // ── 4. ON. At most once per night, and only riding a VERIFIED reserve write. ──
   if (s.forceChargeOnAtMs != null) return { kind: 'none' };
   if (!o.enabled) return { kind: 'none', why: 'disabled (NIGHT_CHARGE_MODE advisory, ARB_OBJECTIVE not cost, or ARB_COST_MAX_SOC_PCT at or below the 50% reserve)' };
-  // The announced plan's economic ceiling — min(owner max-SoC, full minus tomorrow's
-  // P90 morning solar). Below the panel's force-charge minimum (80) the device would
-  // overfill past the solar headroom — the waste ARB_COST_MAX_SOC_PCT exists to
-  // prevent — so that night stays reserve-only. Unknown ceiling: never start.
-  if (s.forceChargeCeilingPct == null || !(s.forceChargeCeilingPct >= FORCE_CHARGE_CEILING_MIN_PCT)) {
-    return {
-      kind: 'none',
-      why: s.forceChargeCeilingPct == null
-        ? 'no economic ceiling was announced for this night (resilience mode, or armed before v1.165.0) — reserve-only night'
-        : `tonight's ceiling ${s.forceChargeCeilingPct}% is under the panel's ${FORCE_CHARGE_CEILING_MIN_PCT}% force-charge minimum (morning solar needs the room) — reserve-only night, by design`,
-    };
+  // v1.167.0 — the target is the announced plan's economic ceiling. Anything above the
+  // reserve is reachable: the software stop ends it at the target, whatever the panel's
+  // 80% force-charge minimum. At or below the reserve there is nothing to add.
+  const target = s.forceChargeCeilingPct;
+  if (target == null || !Number.isFinite(target)) {
+    return { kind: 'none', why: 'no economic ceiling was announced for this night (resilience mode, or armed before v1.165.0) — reserve-only night' };
+  }
+  if (target <= RESERVE_WRITE_MAX_PCT) {
+    return { kind: 'none', why: `tonight's ${target}% target is at or below the ${RESERVE_WRITE_MAX_PCT}% reserve — the reserve alone reaches it` };
   }
   if (s.appliedAtMs == null || s.applyVerifiedAtMs == null) return { kind: 'none', why: 'waiting for the reserve write to be verified by readback' };
   if (s.cancelled || s.revertedAtMs != null) return { kind: 'none', why: s.cancelled ? 'the night was cancelled' : 'the reserve has already been reverted' };
@@ -248,10 +274,10 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   if (o.slotsOn.length > 0) return { kind: 'none', why: `Charge Now is already ON for slot(s) ${o.slotsOn.join(', ')} — that is the operator's, never taken over` }; // someone else's Charge Now — never take ownership
   const slots = o.connectedSlots.filter((n) => Number.isInteger(n) && n >= 1 && n <= 3);
   if (slots.length === 0) return { kind: 'none', why: 'no battery slots are connected' };
-  // The panel must READ the night's ceiling before ON. Issuing ON in the same tick as
-  // an unverified ceiling write fills to whatever the panel holds (100 live) — past
-  // the owner's ceiling and past the solar headroom the <80 gate exists to protect.
-  const desired = desiredForceChargeCeilingPct(s.forceChargeCeilingPct);
+  // The panel must READ its backstop ceiling before ON. Issuing ON in the same tick as an
+  // unverified ceiling write leaves a failed software stop to fill to whatever the panel
+  // holds (100 live) — past the owner's ceiling and past the solar headroom.
+  const desired = desiredForceChargeCeilingPct(target);
   if (o.ceilingReadbackPct == null) return { kind: 'none', why: 'no live readback of the panel\'s force-charge ceiling' };
   if (o.ceilingReadbackPct !== desired) {
     // The first capture of the panel's own value is kept (and carried across nights
@@ -262,5 +288,28 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     if (s.forceChargeCeilingSyncRetries < FORCE_CHARGE_CEILING_SYNC_RETRIES) return { kind: 'syncCeiling', pct: desired, prior };
     return { kind: 'none', why: `the panel would not take the ${desired}% ceiling (still reads ${o.ceilingReadbackPct}%) — reserve-only tonight rather than overfill` };
   }
+  // v1.167.0 — JUST IN TIME. The ceiling above is synced the moment the night is live,
+  // hours before this, so its readback never delays the start.
+  if (o.poolSocPct == null || o.fullKwh == null || !(o.fullKwh > 0)) {
+    return { kind: 'none', why: 'no live pool reading to time the start from' };
+  }
+  if (o.poolSocPct >= target) return { kind: 'none', why: `the pack is already at tonight's ${target}% target` };
+  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh)) { // window checked above
+    // A STABLE reason: the computed start moves with the SoC, and a reason that changes
+    // every tick would log every tick.
+    return { kind: 'none', why: `just in time — holding off so the pack reaches ${target}% as the window closes, not hours early (which would let the house draw it back toward the reserve)` };
+  }
   return { kind: 'on', slots };
+}
+
+/**
+ * v1.167.0 — PURE. When force-charge should switch on to reach `targetPct` as the window
+ * closes: the kWh still needed at the PLANNED rate, plus the buffer, before the end.
+ */
+export function forceChargeStartAtMs(
+  windowEndMs: number, targetPct: number, poolSocPct: number, fullKwh: number,
+): number {
+  const neededKwh = Math.max(0, ((targetPct - poolSocPct) / 100) * fullKwh);
+  const leadMs = (neededKwh / FORCE_CHARGE_PLAN_RATE_KW) * 3_600_000 + FORCE_CHARGE_JIT_BUFFER_MS;
+  return windowEndMs - leadMs;
 }

@@ -129,13 +129,6 @@ const MUTANTS = [
     why: 'The watchdog built after 2026-08-04 stops reporting the exact change it exists to catch.',
   },
   {
-    id: 'xv. ★★★ a ceiling below the panel minimum still force-charges (curtails morning solar)',
-    file: FC,
-    find: '  if (s.forceChargeCeilingPct == null || !(s.forceChargeCeilingPct >= FORCE_CHARGE_CEILING_MIN_PCT)) {',
-    to: '  if (s.forceChargeCeilingPct == null) { /* MUTANT */',
-    why: 'A night whose solar headroom is 70% is force-charged to the panel minimum of 80 — the pack is too full to take the morning sun, and the curtailed kWh costs the full price of the grid kWh sitting in its place.',
-  },
-  {
     id: 'xvi. ★★ arming stops capturing the announced ceiling',
     file: ACT,
     find: '        ? plan.costCeilingSocPct : null,',
@@ -200,12 +193,42 @@ const MUTANTS = [
     why: 'OFF writes that never reached the panel escalate a force-charge as "ignoring us", and burn the retries a real readback failure needs.',
   },
   // ── v1.166.0 — "chose not to" vs "broke" ──
+  // ── v1.167.0 — charge to target, just in time. These replace xv/xxv, which pinned the
+  // v1.165.0 "under the panel's 80% minimum ⇒ reserve-only" rule the owner retired.
   {
-    id: 'xxv. ★★ a reserve-only night stops saying why',
+    id: 'xv. ★★★ just-in-time is removed (starts at the window open, then the house drains it)',
     file: FC,
-    find: "        : `tonight's ceiling ${s.forceChargeCeilingPct}% is under the panel's ${FORCE_CHARGE_CEILING_MIN_PCT}% force-charge minimum (morning solar needs the room) — reserve-only night, by design`,",
-    to: "        : undefined, /* MUTANT */",
-    why: 'The most common night leaves no trace, and a silent reserve-only night is indistinguishable from a broken force-charge.',
+    find: '  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh)) { // window checked above',
+    to: '  if (false) { /* MUTANT */',
+    why: 'Force-charge reaches the target at ~02:00 and the house draws the pack back toward the 50% reserve for three hours — ~57% at dawn instead of 64%.',
+  },
+  {
+    id: 'xxv. ★★★ it does not stop at the target',
+    file: FC,
+    find: '  if (o.poolSocPct != null && s.forceChargeCeilingPct != null && o.poolSocPct >= s.forceChargeCeilingPct) return \'target\';',
+    to: '  /* MUTANT */',
+    why: 'Below 80 the charge runs on to the panel\'s 80 backstop — past the owner\'s target and past the morning-solar headroom.',
+  },
+  {
+    id: 'xxvii. ★★ a target at or below the reserve still force-charges',
+    file: FC,
+    find: '  if (target <= RESERVE_WRITE_MAX_PCT) {',
+    to: '  if (false) { /* MUTANT */',
+    why: 'A night the reserve alone covers still switches force-charge on — two writes and an on-peak hazard for nothing.',
+  },
+  {
+    id: 'xxviii. ★★ the plan rate is raised to the measured peak (starts too late)',
+    file: FC,
+    find: 'export const FORCE_CHARGE_PLAN_RATE_KW = 10;',
+    to: 'export const FORCE_CHARGE_PLAN_RATE_KW = 40; /* MUTANT */',
+    why: 'The start is timed for a rate the pack does not reach with an EV on the grid input, so the night ends short of the target.',
+  },
+  {
+    id: 'xxix. ★★ the waiting reason changes every tick',
+    file: FC,
+    find: "    return { kind: 'none', why: `just in time — holding off so the pack reaches ${target}% as the window closes, not hours early (which would let the house draw it back toward the reserve)` };",
+    to: "    return { kind: 'none', why: `just in time — starting at ${forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh)}` }; /* MUTANT */",
+    why: 'The logged reason includes a start time that moves with the SoC, so the once-per-reason log writes a line every minute of the night.',
   },
   {
     id: 'xxvi. ★★ the "why not" line fires outside a live night',
