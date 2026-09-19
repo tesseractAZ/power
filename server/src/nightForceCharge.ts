@@ -52,6 +52,8 @@
  * (it bought grid for hours), not vendor-documented. The owner confirmed (2026-09-17) that
  * 07-23 and 07-28 — the two nights the pack held above 50% on grid — were his manual
  * Charge Now; that is the evidence the coast rested on.
+ * ★★★ v1.170.0 — THE COAST IS RETIRED (owner, 2026-09-18): the software stop applies at
+ * every target again (forceChargeStopPct), so force-charge is on only as long as it charges.
  * ★★★ MEASURED 2026-09-18 — THE COAST DID NOT HOLD. The pack reached the 90% ceiling at
  * 03:30; grid import then fell to 0 W and the house ran from the pack, 90% → 86% by 05:00,
  * with Charge Now still ON. At its ceiling the panel stops importing; it does NOT keep the
@@ -124,6 +126,13 @@ export const FORCE_CHARGE_PLAN_RATE_KW = 10;
  *  the cap from producing a zero or negative rate — the start must then come NOW (the
  *  pack gets almost nothing), never fall back to a faster fixed rate that starts late. */
 export const FORCE_CHARGE_MIN_RATE_KW = 1;
+/** v1.170.0 — the least each connected Core has been SEEN to take into its pack: on
+ *  2026-09-18 three took ~17.8 kW at the grid (≈ 5.5 kW each after the charge leg) while
+ *  the grid cap, not the Cores, was the limit. So a Core's own input limit is at least
+ *  this — never measured higher. With fewer Cores connected (one out for a pack swap) the
+ *  live rate is bounded by slots × this, so the start comes earlier rather than the night
+ *  ending short. With all three it never binds (17 × 0.927 = 15.8 < 16.5). */
+export const FORCE_CHARGE_PROVEN_KW_PER_SLOT = 5.5;
 /** v1.167.0 — added to the computed lead: readback latency, the ramp, the first tick. */
 export const FORCE_CHARGE_JIT_BUFFER_MS = 15 * 60_000;
 /** Hard backstop: no force-charge of ours may outlive this, whatever the window says. */
@@ -240,13 +249,14 @@ export function forceChargeInFlight(s: NightActuationState): boolean {
   return s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null;
 }
 
-/** v1.168.0 — true when the panel's own ceiling can STOP the charge at the target: 80 or
- *  above, force-charge is left on and the panel stops there. Below 80 its minimum ceiling
- *  would overfill, so the software stop is the stop. ★ Measured 2026-09-18: at the ceiling
- *  the panel stops importing and the house draws the pack (90 → 86% by 05:00) — it does
- *  NOT hold the house on grid. Restoring the software stop at 80+ is the owner's call. */
-export function panelHoldsTarget(targetPct: number): boolean {
-  return targetPct >= FORCE_CHARGE_CEILING_MIN_PCT;
+/** v1.170.0 — where the software stop ends it: the target, or the panel's own (whole-
+ *  number) ceiling when that is lower — an 85.3 target syncs an 85 ceiling, and a whole-
+ *  number pool reading never reaches 85.3, so it stops at 85. Below 80 the ceiling is 80
+ *  and the target itself is the stop. (v1.168.0's coast skipped this stop at 80+; measured
+ *  2026-09-18 it held nothing — at the ceiling the house drew the pack 90 → 86% by 05:00 —
+ *  and the owner retired it.) */
+export function forceChargeStopPct(targetPct: number): number {
+  return Math.min(targetPct, desiredForceChargeCeilingPct(targetPct));
 }
 
 /** v1.168.0 — when a force-charge of ours that has not verified OFF must escalate,
@@ -270,12 +280,10 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return 'maxRun';
   // v1.167.0 — the owner's "until the desired percentage is reached". A stale or
   // incoherent SoC never ends it early; the window end and the panel's ceiling still do.
-  // v1.168.0 — only BELOW 80: at 80+ the panel's ceiling stops it and force-charge stays
-  // on until the window end (measured 2026-09-18: the house then draws the pack, it is
-  // not held on grid — see panelHoldsTarget).
+  // v1.170.0 — at EVERY target again (the 80+ coast is retired), against forceChargeStopPct.
   if (
     o.poolSocPct != null && s.forceChargeCeilingPct != null
-    && !panelHoldsTarget(s.forceChargeCeilingPct) && o.poolSocPct >= s.forceChargeCeilingPct
+    && o.poolSocPct >= forceChargeStopPct(s.forceChargeCeilingPct)
   ) return 'target';
   return null;
 }
@@ -397,7 +405,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   if (o.poolSocPct == null || o.fullKwh == null || !(o.fullKwh > 0)) {
     return { kind: 'none', why: 'no live pool reading to time the start from' };
   }
-  if (o.poolSocPct >= target) return { kind: 'none', why: `the pack is already at tonight's ${target}% target` };
+  if (o.poolSocPct >= forceChargeStopPct(target)) return { kind: 'none', why: `the pack is already at tonight's ${target}% target` };
   if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above
     // A STABLE reason: the computed start moves with the SoC, and a reason that changes
     // every tick would log every tick.
@@ -450,9 +458,15 @@ export function shp2HouseLoadKw(sp: { circuits?: unknown } | null | undefined): 
  */
 export function forceChargeRateKw(i: {
   gridCapKw: number | null; houseLoadKw: number | null; legEff: number;
+  /** v1.170.0 — connected battery slots; bounds the rate at slots × the proven per-Core rate. */
+  slotCount?: number | null;
 }): number | null {
   if (i.gridCapKw == null || !Number.isFinite(i.gridCapKw) || !(i.gridCapKw > 0)) return null;
   if (i.houseLoadKw == null || !Number.isFinite(i.houseLoadKw)) return null;
   if (!Number.isFinite(i.legEff) || !(i.legEff > 0)) return null;
-  return Math.max(FORCE_CHARGE_MIN_RATE_KW, (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff);
+  let rate = (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff;
+  if (i.slotCount != null && Number.isInteger(i.slotCount) && i.slotCount > 0) {
+    rate = Math.min(rate, i.slotCount * FORCE_CHARGE_PROVEN_KW_PER_SLOT);
+  }
+  return Math.max(FORCE_CHARGE_MIN_RATE_KW, rate);
 }
