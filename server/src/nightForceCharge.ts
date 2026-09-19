@@ -25,10 +25,13 @@
  * pack to ~50% and then HOLDS THE HOUSE ON GRID (2026-09-16: flat at 49% from 01:00 to
  * 05:00). So force-charge only has to add the last stretch, and starting it late means
  * there is nothing left to drain. The start is computed every tick from the live pool:
- * needed kWh ÷ FORCE_CHARGE_PLAN_RATE_KW + a buffer. The plan rate is deliberately below
- * the ~15 kW measured on 2026-09-16 (an EV sharing the grid input slows the pack): faster
- * than planned arrives a little early and drains a few minutes; slower arrives a little
- * short. It never ends below the reserve.
+ * needed kWh ÷ the charge rate + a buffer. v1.169.0: the rate is LIVE — the panel caps
+ * its total grid import and the house shares the cap, so the pack gets
+ * (ARB_GRID_INPUT_CAP_KW − live house load) × the charge-leg efficiency (forceChargeRateKw;
+ * FORCE_CHARGE_PLAN_RATE_KW only when that is unknown). v1.167.0's fixed 10 kW against the
+ * 14.6 kW the pack actually took on 2026-09-18 arrived at 90% at 03:30, 1.5 h early.
+ * Faster than planned arrives a little early and drains a few minutes; slower (an EV that
+ * starts after the switch-on) arrives a little short. It never ends below the reserve.
  *
  * THE PANEL'S CEILING becomes a BACKSTOP. `foceChargeHight` (documented 80-100) is synced
  * to clamp(target, 80, 100) as soon as the night is live — hours before the start, so its
@@ -39,8 +42,8 @@
  * ★★ v1.168.0 — COAST ON GRID (owner, 2026-09-17). A target of 80+ is one the panel
  * enforces AND HOLDS: with Charge Now still ON at its ceiling the pack sits there and the
  * house runs on grid. So for those targets there is no software stop at the target —
- * force-charge stays ON until the window closes, and the pack does not give any of it
- * back before the cheap rate ends. Below 80 the panel cannot hold the target (its
+ * force-charge stays ON until the window closes. (That premise did NOT hold — see the
+ * 2026-09-18 measurement below.) Below 80 the panel cannot hold the target (its
  * minimum ceiling is 80), so the software stop still ends it there. Dropping the
  * software stop at 80+ also retires a rounding miss: an 85.3 target synced an 85
  * ceiling, and a whole-number pool reading never reached 85.3.
@@ -48,7 +51,13 @@
  * ★ That force-charge ON keeps the house on grid is INFERRED from the 2026-08-04 incident
  * (it bought grid for hours), not vendor-documented. The owner confirmed (2026-09-17) that
  * 07-23 and 07-28 — the two nights the pack held above 50% on grid — were his manual
- * Charge Now; that is the evidence the coast rests on.
+ * Charge Now; that is the evidence the coast rested on.
+ * ★★★ MEASURED 2026-09-18 — THE COAST DID NOT HOLD. The pack reached the 90% ceiling at
+ * 03:30; grid import then fell to 0 W and the house ran from the pack, 90% → 86% by 05:00,
+ * with Charge Now still ON. At its ceiling the panel stops importing; it does NOT keep the
+ * house on grid. So the coast gives back what a stop at the target would, and only adds
+ * Charge Now time. Whether to restore the stop at the target for 80+ is the owner's call;
+ * the live charge rate (v1.169.0) shrinks the early arrival either way.
  *
  * ★★★ OUTAGE — NOT ESTABLISHED EITHER WAY. No vendor text says how a slot with
  * ch{n}ForceCharge ON behaves when the grid fails, and no outage has ever overlapped
@@ -102,8 +111,19 @@ export const FORCE_CHARGE_MIN_RUN_MS = 20 * 60_000;
 /** v1.167.0 — the rate the just-in-time start PLANS with. Deliberately below the ~15 kW
  *  into the pack measured on 2026-09-16, because an EV charging at the same time shares
  *  the grid input: faster than planned arrives early and drains a few minutes, slower
- *  arrives short. */
+ *  arrives short. v1.169.0: only the FALLBACK, when the live rate (forceChargeRateKw) is
+ *  unknown — no fresh panel reading of the house load, or no grid cap configured. */
 export const FORCE_CHARGE_PLAN_RATE_KW = 10;
+/** v1.169.0 — the charge rate is NOT a fixed figure: the panel caps its total GRID IMPORT
+ *  and the house draws from the same cap, so the pack gets what the house leaves.
+ *  Measured 2026-09-18 01:10-03:25: grid pinned at 19.0-19.1 kW while the house moved
+ *  1.3-4.0 kW, and the pack took (19.1 − house) × ~0.93 (13.8-17.0 kW); 2026-08-02, with
+ *  the EV drawing (panel load 14.0 kW), the pack took ~2.8 kW = (17 − 14) × 0.927. The
+ *  start is timed from forceChargeRateKw with ARB_GRID_INPUT_CAP_KW (17, the conservative
+ *  coexistence figure) and the LIVE house load; this floor keeps a house drawing past
+ *  the cap from producing a zero or negative rate — the start must then come NOW (the
+ *  pack gets almost nothing), never fall back to a faster fixed rate that starts late. */
+export const FORCE_CHARGE_MIN_RATE_KW = 1;
 /** v1.167.0 — added to the computed lead: readback latency, the ramp, the first tick. */
 export const FORCE_CHARGE_JIT_BUFFER_MS = 15 * 60_000;
 /** Hard backstop: no force-charge of ours may outlive this, whatever the window says. */
@@ -160,6 +180,14 @@ export interface ForceChargeOpts {
   poolSocPct: number | null;
   /** v1.167.0 — live pool size (kWh), for the kWh the target still needs. */
   fullKwh: number | null;
+  /** v1.169.0 — the charge rate into the pack the start is timed with (forceChargeRateKw:
+   *  the grid-import cap less the live house load). Absent/null ⇒ FORCE_CHARGE_PLAN_RATE_KW. */
+  chargeRateKw?: number | null;
+  /** v1.169.0 — pack kWh the EV will DISPLACE in the rest of tonight's window: the planner's
+   *  predicted (P90) EV energy inside the window × the charge leg. The EV draws from the
+   *  same grid cap, so every grid kWh it takes is a kWh the pack does not get. A reading
+   *  taken before the car plugs in cannot see it; this does. Absent/null ⇒ 0. */
+  evDisplacedKwh?: number | null;
 }
 
 export type ForceChargeAction =
@@ -212,9 +240,11 @@ export function forceChargeInFlight(s: NightActuationState): boolean {
   return s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null;
 }
 
-/** v1.168.0 — true when the panel's own ceiling can hold the target: 80 or above, the
- *  panel stops there and keeps the house on grid (the coast). Below 80 its minimum
- *  ceiling would overfill, so the software stop is the stop. */
+/** v1.168.0 — true when the panel's own ceiling can STOP the charge at the target: 80 or
+ *  above, force-charge is left on and the panel stops there. Below 80 its minimum ceiling
+ *  would overfill, so the software stop is the stop. ★ Measured 2026-09-18: at the ceiling
+ *  the panel stops importing and the house draws the pack (90 → 86% by 05:00) — it does
+ *  NOT hold the house on grid. Restoring the software stop at 80+ is the owner's call. */
 export function panelHoldsTarget(targetPct: number): boolean {
   return targetPct >= FORCE_CHARGE_CEILING_MIN_PCT;
 }
@@ -240,8 +270,9 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return 'maxRun';
   // v1.167.0 — the owner's "until the desired percentage is reached". A stale or
   // incoherent SoC never ends it early; the window end and the panel's ceiling still do.
-  // v1.168.0 — only BELOW 80: at 80+ the panel holds the target itself and the house
-  // coasts on grid until the window end turns it off.
+  // v1.168.0 — only BELOW 80: at 80+ the panel's ceiling stops it and force-charge stays
+  // on until the window end (measured 2026-09-18: the house then draws the pack, it is
+  // not held on grid — see panelHoldsTarget).
   if (
     o.poolSocPct != null && s.forceChargeCeilingPct != null
     && !panelHoldsTarget(s.forceChargeCeilingPct) && o.poolSocPct >= s.forceChargeCeilingPct
@@ -367,7 +398,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
     return { kind: 'none', why: 'no live pool reading to time the start from' };
   }
   if (o.poolSocPct >= target) return { kind: 'none', why: `the pack is already at tonight's ${target}% target` };
-  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh)) { // window checked above
+  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh, o.chargeRateKw, o.evDisplacedKwh)) { // window checked above
     // A STABLE reason: the computed start moves with the SoC, and a reason that changes
     // every tick would log every tick.
     return { kind: 'none', why: `just in time — holding off so the pack reaches ${target}% as the window closes, not hours early (which would let the house draw it back toward the reserve)` };
@@ -377,12 +408,51 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
 
 /**
  * v1.167.0 — PURE. When force-charge should switch on to reach `targetPct` as the window
- * closes: the kWh still needed at the PLANNED rate, plus the buffer, before the end.
+ * closes: the kWh still needed at the charge rate, plus the buffer, before the end.
+ * v1.169.0 — the rate is the live one (forceChargeRateKw); unknown ⇒ the fixed plan rate.
  */
 export function forceChargeStartAtMs(
   windowEndMs: number, targetPct: number, poolSocPct: number, fullKwh: number,
+  rateKw?: number | null, evDisplacedKwh?: number | null,
 ): number {
-  const neededKwh = Math.max(0, ((targetPct - poolSocPct) / 100) * fullKwh);
-  const leadMs = (neededKwh / FORCE_CHARGE_PLAN_RATE_KW) * 3_600_000 + FORCE_CHARGE_JIT_BUFFER_MS;
+  // Unknown ⇒ the fixed plan rate. A known rate under the floor is FLOORED (start sooner),
+  // never replaced by the faster fixed rate (which would start later and end short).
+  const rate = rateKw != null && Number.isFinite(rateKw)
+    ? Math.max(FORCE_CHARGE_MIN_RATE_KW, rateKw) : FORCE_CHARGE_PLAN_RATE_KW;
+  const evKwh = evDisplacedKwh != null && Number.isFinite(evDisplacedKwh) ? Math.max(0, evDisplacedKwh) : 0;
+  const neededKwh = Math.max(0, ((targetPct - poolSocPct) / 100) * fullKwh) + evKwh;
+  const leadMs = (neededKwh / rate) * 3_600_000 + FORCE_CHARGE_JIT_BUFFER_MS;
   return windowEndMs - leadMs;
+}
+
+/**
+ * v1.169.0 — PURE. The live house load at the panel (kW): the sum of the SHP2 circuits'
+ * watts, the same quantity the recorder stores as `panel_load` (it includes the EV
+ * charger). Null unless at least one circuit reports a finite number.
+ */
+export function shp2HouseLoadKw(sp: { circuits?: unknown } | null | undefined): number | null {
+  const circuits = Array.isArray(sp?.circuits) ? (sp!.circuits as any[]) : null;
+  if (!circuits) return null;
+  let w = 0;
+  let any = false;
+  for (const c of circuits) {
+    if (typeof c?.watts === 'number' && Number.isFinite(c.watts)) { w += c.watts; any = true; }
+  }
+  return any ? w / 1000 : null;
+}
+
+/**
+ * v1.169.0 — PURE. The charge rate into the pack while force-charging: the panel's grid-
+ * import cap less the house's own draw, through the charge leg (legEff ≈ 0.927). Floored
+ * at FORCE_CHARGE_MIN_RATE_KW; null when the cap or the live house load is unknown (the
+ * caller then falls back to FORCE_CHARGE_PLAN_RATE_KW). Recomputed every tick until the
+ * start, so the start follows the house's actual usage.
+ */
+export function forceChargeRateKw(i: {
+  gridCapKw: number | null; houseLoadKw: number | null; legEff: number;
+}): number | null {
+  if (i.gridCapKw == null || !Number.isFinite(i.gridCapKw) || !(i.gridCapKw > 0)) return null;
+  if (i.houseLoadKw == null || !Number.isFinite(i.houseLoadKw)) return null;
+  if (!Number.isFinite(i.legEff) || !(i.legEff > 0)) return null;
+  return Math.max(FORCE_CHARGE_MIN_RATE_KW, (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff);
 }

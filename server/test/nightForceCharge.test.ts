@@ -5,7 +5,7 @@ import {
   FORCE_CHARGE_MIN_RUN_MS, FORCE_CHARGE_MAX_RUN_MS, FORCE_CHARGE_OFF_VERIFY_AFTER_MS,
   FORCE_CHARGE_OFF_MAX_RETRIES, FORCE_CHARGE_OFF_PERSIST_EVERY_MS, FORCE_CHARGE_CEILING_VERIFY_AFTER_MS,
   FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS, FORCE_CHARGE_PLAN_RATE_KW, FORCE_CHARGE_JIT_BUFFER_MS,
-  forceChargeStartAtMs, type ForceChargeOpts,
+  forceChargeStartAtMs, type ForceChargeOpts, forceChargeRateKw, FORCE_CHARGE_MIN_RATE_KW, shp2HouseLoadKw,
   panelHoldsTarget, forceChargeOffDeadlineMs, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, FORCE_CHARGE_CEILING_MIN_PCT,
 } from '../src/nightForceCharge.js';
@@ -472,11 +472,14 @@ test('★★ the coast boundary is the panel\'s own 80% minimum ceiling', () => 
     { kind: 'off', slots: [1, 2, 3], reason: 'target' }, 'below 80 the software stop is the only stop — unchanged');
 });
 
-test('the 21:30 announcement says the panel HOLDS an 80+ target on grid until the window closes', () => {
+test('the 21:30 announcement says the panel STOPS an 80+ target and force-charge ends at the window close', () => {
   const m = buildNightChargeMessage(chargePlan(), 'charge', {
     cancelDeadlineText: 'at 10:55 PM', targetPct: 50, forceChargeTargetPct: 90,
   });
-  assert.match(m.body, /force-charge ON, just in time to reach ~90% by the window close \(from the start of the window if the pack needs all of it\); the panel holds it there and the house runs on grid until the window closes, when it switches OFF/);
+  assert.match(m.body, /force-charge ON, just in time to reach ~90% by the window close \(from the start of the window if the pack needs all of it\); the panel stops it there, and force-charge switches OFF when the window closes/);
+  // v1.169.0 — measured 2026-09-18: at its ceiling the panel stopped importing and the house
+  // drew the pack 90 → 86%. The notice must not promise the house stays on grid.
+  assert.doesNotMatch(m.body, /runs on grid/);
   assert.doesNotMatch(m.body, /OFF when it gets there/, 'at 80+ it does not switch off at the target');
 });
 
@@ -701,11 +704,105 @@ test('★★ v1.168.0 — the deadline records its own page, and a silenced anno
   assert.ok(body.includes("if (heard && heard.ok === false) {"), 'a quiet-hours suppression is visible in the log');
 });
 
-test('★ v1.168.0 — the 21:30 ARMED line says an 80+ target is held by the panel, not stopped in software', () => {
+test('★ v1.168.0 — the 21:30 ARMED line says an 80+ target is stopped by the panel, not in software', () => {
   const fn = INDEX.indexOf('function forceChargeArmNote(');
   const body = INDEX.slice(fn, INDEX.indexOf('\n}\n', fn));
   const coast = body.indexOf('if (panelHoldsTarget(c)) {');
   const soft = body.indexOf('(software stop;');
   assert.ok(coast > 0 && soft > coast, 'the coast branch comes first');
-  assert.ok(body.includes('holds it, the house coasting on grid until the window-end OFF'));
+  assert.ok(body.includes('ceiling stops it there, and Charge Now stays on until the window-end OFF'));
+  assert.ok(!body.includes('coasting on grid'), 'v1.169.0 — measured: the house does not stay on grid at the ceiling');
+});
+
+/* ══ v1.169.0 — the LIVE charge rate: the grid-import cap less the house ═══ */
+
+const LEG = Math.sqrt(0.86);
+
+test('★★★ the pack gets what the house leaves under the grid-import cap — both measured regimes', () => {
+  // 2026-09-18: grid pinned at 19.1 kW, house ~2.5 kW ⇒ the formula gives 15.4; the pack
+  // took ~15.2 kW (SoC-derived, whole-percent steps).
+  assert.ok(Math.abs(forceChargeRateKw({ gridCapKw: 19.1, houseLoadKw: 2.5, legEff: LEG })! - 15.4) < 0.1);
+  // With the configured 17 kW coexistence cap the same night times at 13.4 — below the
+  // measured rate, so the pack arrives a little EARLY, never short.
+  const conf = forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG })!;
+  assert.ok(conf > 13.3 && conf < 13.5 && conf < 15.2);
+  // 2026-08-02: the EV drew, panel load 14.0 kW, the pack took ~2.8 kW.
+  assert.ok(Math.abs(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 14, legEff: LEG })! - 2.8) < 0.05);
+});
+
+test('★★★ a house drawing past the cap still yields a positive rate — the start is NOT pushed past the window end', () => {
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 20, legEff: LEG }), FORCE_CHARGE_MIN_RATE_KW);
+  const n = verifiedNight({ forceChargeCeilingPct: 90 });
+  const rate = forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 20, legEff: LEG });
+  assert.deepEqual(decideForceCharge(n, MID, opts({ poolSocPct: 50, chargeRateKw: rate })), { kind: 'on', slots: [1, 2, 3] },
+    'a heavy house means START NOW, not never');
+});
+
+test('★★ unknown cap, house load or efficiency ⇒ null (the fixed 10 kW fallback times it)', () => {
+  assert.equal(forceChargeRateKw({ gridCapKw: null, houseLoadKw: 2, legEff: LEG }), null);
+  assert.equal(forceChargeRateKw({ gridCapKw: 0, houseLoadKw: 2, legEff: LEG }), null);
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: null, legEff: LEG }), null);
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: Number.NaN, legEff: LEG }), null);
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2, legEff: 0 }), null);
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: -3, legEff: LEG }), 17 * LEG, 'a negative load reads as none');
+  const end = WIN_END;
+  assert.equal(forceChargeStartAtMs(end, 90, 50, 92.16, null), forceChargeStartAtMs(end, 90, 50, 92.16));
+  assert.equal(forceChargeStartAtMs(end, 90, 50, 92.16, 0.5), forceChargeStartAtMs(end, 90, 50, 92.16, FORCE_CHARGE_MIN_RATE_KW),
+    'a known rate under the floor is FLOORED (start sooner) — never swapped for the faster fixed rate (start later, end short)');
+});
+
+test('★★★ the JIT start follows the live rate: 2026-09-18 replayed', () => {
+  // 50% at 00:58, target 90, 92.16 kWh: at the fixed 10 kW it started 00:58 and arrived
+  // 03:30 — 1.5 h early. At the live 13.4 kW it starts ~02:00; the pack (really ~14.6 kW)
+  // then arrives ~04:31 — about 30 min early rather than 90 (the 17 kW cap is conservative).
+  const fixed = forceChargeStartAtMs(WIN_END, 90, 50, 92.16);
+  const live = forceChargeStartAtMs(WIN_END, 90, 50, 92.16, forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG }));
+  assert.ok(live - fixed > 55 * 60_000 && live - fixed < 65 * 60_000, `later by ${(live - fixed) / 60_000} min`);
+  // and decideForceCharge uses it: at the fixed-rate start it now holds off.
+  const n = verifiedNight({ forceChargeCeilingPct: 90 });
+  const rate = forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG });
+  assert.equal(decideForceCharge(n, fixed + 60_000, opts({ poolSocPct: 50, fullKwh: 92.16, chargeRateKw: rate })).kind, 'none');
+  assert.equal(decideForceCharge(n, live, opts({ poolSocPct: 50, fullKwh: 92.16, chargeRateKw: rate })).kind, 'on');
+  // A heavier house (EV) moves it EARLIER.
+  const ev = forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 14, legEff: LEG });
+  assert.equal(decideForceCharge(n, fixed + 60_000, opts({ poolSocPct: 50, fullKwh: 92.16, chargeRateKw: ev })).kind, 'on');
+});
+
+test('★★★ index.ts times the start with the live rate, from ONE grid-cap reader shared with the planner', () => {
+  const fn = INDEX.indexOf('async function runForceChargeTick(');
+  const body = INDEX.slice(fn, INDEX.indexOf('async function escalateForceChargeStuck(', fn));
+  assert.ok(body.includes('const gridCapKw = gridInputCapKwFromEnv();'));
+  assert.ok(body.includes('const houseLoadKw = shp2HouseLoadKw(sp);'), 'the LIVE house load, from a fresh panel reading only');
+  assert.ok(body.includes('gridCapKw, houseLoadKw, legEff: Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY),'));
+  assert.ok(body.includes('    chargeRateKw,\n    evDisplacedKwh,\n  });'), 'both reach the decision');
+  assert.ok(INDEX.includes('const gridInputCapKw = gridInputCapKwFromEnv();'), 'the planner reads the same cap');
+  // The EV energy comes only from a plan for THIS window, through the charge leg.
+  assert.ok(body.includes('fcPlan?.window != null && fcPlan.window.endMs === state.windowEndMs'));
+  assert.ok(body.includes('? fcPlan.evContention.windowEvKwh * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY)'));
+});
+
+test('★★★ the house load is the circuits summed and converted W → kW (the recorder\'s panel_load)', () => {
+  assert.equal(shp2HouseLoadKw({ circuits: [{ watts: 1500 }, { watts: 1000 }, { watts: null }, {}] }), 2.5);
+  assert.equal(shp2HouseLoadKw({ circuits: [{ watts: 11500 }, { watts: 2500 }] }), 14, 'the EV charger is a circuit');
+  assert.equal(shp2HouseLoadKw({ circuits: [{ watts: null }] }), null, 'no circuit reports a number');
+  assert.equal(shp2HouseLoadKw({ circuits: [] }), null);
+  assert.equal(shp2HouseLoadKw({}), null);
+  assert.equal(shp2HouseLoadKw(null), null, 'no fresh panel reading');
+  assert.equal(shp2HouseLoadKw({ circuits: [{ watts: Number.NaN }, { watts: 800 }] }), 0.8);
+});
+
+test('★★★ an EV predicted LATER in the window moves the start EARLIER (review F1, 2026-09-18)', () => {
+  // The live reading at 01:00 cannot see a car that plugs in at 02:00; the planner's P90 EV
+  // energy inside the window can. Every grid kWh it takes is ~0.93 kWh the pack does not get.
+  const rate = forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG });
+  const noEv = forceChargeStartAtMs(WIN_END, 90, 50, 92.16, rate);
+  const ev = forceChargeStartAtMs(WIN_END, 90, 50, 92.16, rate, 20 * LEG); // a 20 kWh session
+  assert.ok(Math.abs((noEv - ev) - (20 * LEG / rate!) * H) < 1, 'earlier by exactly the displaced kWh at the rate');
+  assert.equal(forceChargeStartAtMs(WIN_END, 90, 50, 92.16, rate, null), noEv, 'no prediction ⇒ no change');
+  assert.equal(forceChargeStartAtMs(WIN_END, 90, 50, 92.16, rate, -5), noEv, 'a negative figure is ignored');
+  const n = verifiedNight({ forceChargeCeilingPct: 90 });
+  const between = noEv - 30 * 60_000;
+  assert.equal(decideForceCharge(n, between, opts({ poolSocPct: 50, fullKwh: 92.16, chargeRateKw: rate })).kind, 'none');
+  assert.equal(decideForceCharge(n, between, opts({ poolSocPct: 50, fullKwh: 92.16, chargeRateKw: rate, evDisplacedKwh: 20 * LEG })).kind, 'on',
+    'with the EV budgeted, the same moment is already late enough to start');
 });
