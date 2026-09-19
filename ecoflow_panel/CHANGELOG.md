@@ -32,6 +32,12 @@ every grid kWh the car will take is ~0.93 kWh the pack will not get, and the sta
 that much. Only a plan for the same window counts. A car already charging is counted twice (live
 load and forecast), which errs toward starting early — the safe side.
 
+**Planner fix found on the way:** a mid-window recompute gave the partial hour's remainder to the
+LAST window hour instead of the current one, so at 02:55 an EV predicted for 04:00-05:00 counted
+~1/12 of its energy (and the deliverable-lift estimate carried the same skew). Each window hour now
+counts its own remaining fraction (`windowHourAvailH`). Plans made before the window — the 21:30
+arming plan — are unchanged.
+
 Not modelled: a DPU's own input limit. On 2026-09-18 the grid cap bound (~5.9 kW per DPU across
 three), so no single DPU's limit has been measured; with a Core offline the rate could be
 over-stated and the night end short.
@@ -42,7 +48,7 @@ stops importing at its limit; it does **not** keep the house on grid. The announ
 line, the option help and the module notes no longer say it does. Behaviour is unchanged — whether
 to switch off at the target for 80%+ again is the owner's call.
 
-10 new mutants (`mutate-force-charge.mjs`, 62/62; xv repointed); 7 new tests.
+11 new mutants (`mutate-force-charge.mjs`, 63/63; xv repointed); 9 new tests.
 
 ## 1.168.0
 

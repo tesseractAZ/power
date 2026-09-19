@@ -470,6 +470,13 @@ const MUTANTS = [
     why: 'A near-zero known rate is swapped for 10 kW — the start comes late and the night ends short.',
   },
   {
+    id: 'lxiii. ★★★ mid-window, the partial hour goes back to the LAST window hour',
+    file: NCA,
+    find: '  const a = Math.max(hourTs, fromMs);',
+    to: '  const a = hourTs; /* MUTANT */',
+    why: 'An EV predicted for the final hour counts ~1/12 of its energy at a 02:55 recompute — the start comes late and the night ends short.',
+  },
+  {
     id: 'xxvi. ★★ the "why not" line fires outside a live night',
     file: IDX,
     find: '    const live = state.appliedAtMs != null && state.revertedAtMs == null && !state.cancelled',
