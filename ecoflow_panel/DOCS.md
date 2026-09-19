@@ -6420,6 +6420,11 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.170.0 — the 80+ coast is retired** (owner, 2026-09-18). The software stop applies at every
+target again, at `forceChargeStopPct` = min(target, the synced whole-number ceiling). The live rate
+is also bounded by connected slots × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` (5.5 kW, the least each Core
+has been seen to take).
+
 **v1.169.0 — the force-charge start follows the live charge rate.** The panel caps its total
 grid import (measured pinned at 19.0-19.1 kW) and the house shares it, so `forceChargeRateKw` =
 max(1, (`ARB_GRID_INPUT_CAP_KW` − live house load) × √RTE), with the house load summed from the

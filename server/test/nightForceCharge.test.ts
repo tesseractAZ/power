@@ -6,7 +6,8 @@ import {
   FORCE_CHARGE_OFF_MAX_RETRIES, FORCE_CHARGE_OFF_PERSIST_EVERY_MS, FORCE_CHARGE_CEILING_VERIFY_AFTER_MS,
   FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS, FORCE_CHARGE_PLAN_RATE_KW, FORCE_CHARGE_JIT_BUFFER_MS,
   forceChargeStartAtMs, type ForceChargeOpts, forceChargeRateKw, FORCE_CHARGE_MIN_RATE_KW, shp2HouseLoadKw,
-  panelHoldsTarget, forceChargeOffDeadlineMs, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
+  FORCE_CHARGE_PROVEN_KW_PER_SLOT,
+  forceChargeStopPct, forceChargeOffDeadlineMs, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, FORCE_CHARGE_CEILING_MIN_PCT,
 } from '../src/nightForceCharge.js';
 import {
@@ -442,45 +443,37 @@ test('the 21:30 announcement names the force-charge and its TARGET, and drops th
   assert.match(plain.body, /only expected to reach ~43.5%/);
 });
 
-/* ══ v1.168.0 — COAST ON GRID at 80+ (owner, 2026-09-17) ═══════════════════ */
+/* ══ v1.170.0 — the software stop at EVERY target (the 80+ coast is retired) ══ */
 
-test('★★★ coast: at 80+ the target does NOT switch it off — the panel holds the pack and the window end does', () => {
+test('★★★ an 80+ target is switched OFF when the pool reaches it — the coast is retired', () => {
+  // Measured 2026-09-18: at the 90% ceiling grid import fell to 0 and the house drew the
+  // pack 90 → 86% by 05:00 with Charge Now still on. The owner retired the coast.
   const n = forcedNight({ forceChargeCeilingPct: 90 });
-  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 90 })).kind, 'none',
-    'at the target, force-charge stays ON: the panel\'s 90% ceiling holds the pack and the house runs on grid');
-  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 95 })).kind, 'none');
-  assert.deepEqual(decideForceCharge(n, WIN_END, opts({ poolSocPct: 90 })), { kind: 'off', slots: [1, 2, 3], reason: 'windowEnd' },
-    'the window close still switches it off — the coast ends with the cheap rate');
-  // Every other OFF reason is untouched by the coast.
-  assert.equal((decideForceCharge(n, MID, opts({ poolSocPct: 90, gridPresent: false })) as any).reason, 'gridLoss');
-  assert.equal((decideForceCharge(n, MID, opts({ poolSocPct: 90, enabled: false })) as any).reason, 'disabled');
-  assert.equal((decideForceCharge(forcedNight({ forceChargeCeilingPct: 90, cancelled: true }), MID, opts()) as any).reason, 'cancelled');
+  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 89 })).kind, 'none');
+  assert.deepEqual(decideForceCharge(n, MID, opts({ poolSocPct: 90 })), { kind: 'off', slots: [1, 2, 3], reason: 'target' });
+  assert.deepEqual(decideForceCharge(forcedNight({ forceChargeCeilingPct: 100 }), MID, opts({ poolSocPct: 100 })),
+    { kind: 'off', slots: [1, 2, 3], reason: 'target' });
 });
 
-test('★★ coast retires the rounding miss: an 85.3 target is held by the panel\'s 85, not chased by a whole-number SoC', () => {
-  const n = forcedNight({ forceChargeCeilingPct: 85.3 });
-  assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 85 })).kind, 'none');
-  assert.equal(decideForceCharge(n, WIN_END, opts({ poolSocPct: 85 })).kind, 'off');
+test('★★★ the rounding miss stays fixed: the stop is the panel\'s whole-number ceiling when lower', () => {
+  assert.equal(forceChargeStopPct(85.3), 85, 'synced ceiling 85 — a whole-number reading never reaches 85.3');
+  assert.equal(forceChargeStopPct(85.6), 85.6, 'ceiling 86 — the reading 86 passes 85.6');
+  assert.equal(forceChargeStopPct(64.6), 64.6, 'below 80 the target is the stop');
+  assert.equal(forceChargeStopPct(79.6), 79.6);
+  assert.equal(forceChargeStopPct(99.6), 99.6);
+  assert.deepEqual(decideForceCharge(forcedNight({ forceChargeCeilingPct: 85.3 }), MID, opts({ poolSocPct: 85 })),
+    { kind: 'off', slots: [1, 2, 3], reason: 'target' });
+  // …and a pack already at the stop is not switched on at all.
+  assert.equal((decideForceCharge(verifiedNight({ forceChargeCeilingPct: 85.3 }), MID, opts({ poolSocPct: 85, ceilingReadbackPct: 85 })) as any).why,
+    "the pack is already at tonight's 85.3% target");
 });
 
-test('★★ the coast boundary is the panel\'s own 80% minimum ceiling', () => {
-  assert.equal(FORCE_CHARGE_CEILING_MIN_PCT, 80);
-  assert.equal(panelHoldsTarget(80), true, 'the panel can be set to 80 and holds there');
-  assert.equal(panelHoldsTarget(79.9), false, 'below 80 its minimum ceiling would overfill');
-  assert.equal(decideForceCharge(forcedNight({ forceChargeCeilingPct: 80 }), MID, opts({ poolSocPct: 80 })).kind, 'none');
-  assert.deepEqual(decideForceCharge(forcedNight({ forceChargeCeilingPct: 79.9 }), MID, opts({ poolSocPct: 80 })),
-    { kind: 'off', slots: [1, 2, 3], reason: 'target' }, 'below 80 the software stop is the only stop — unchanged');
-});
-
-test('the 21:30 announcement says the panel STOPS an 80+ target and force-charge ends at the window close', () => {
+test('the 21:30 announcement says OFF at the target for an 80+ night too', () => {
   const m = buildNightChargeMessage(chargePlan(), 'charge', {
     cancelDeadlineText: 'at 10:55 PM', targetPct: 50, forceChargeTargetPct: 90,
   });
-  assert.match(m.body, /force-charge ON, just in time to reach ~90% by the window close \(from the start of the window if the pack needs all of it\); the panel stops it there, and force-charge switches OFF when the window closes/);
-  // v1.169.0 — measured 2026-09-18: at its ceiling the panel stopped importing and the house
-  // drew the pack 90 → 86%. The notice must not promise the house stays on grid.
-  assert.doesNotMatch(m.body, /runs on grid/);
-  assert.doesNotMatch(m.body, /OFF when it gets there/, 'at 80+ it does not switch off at the target');
+  assert.match(m.body, /just long enough to reach ~90%, and OFF when it gets there/);
+  assert.doesNotMatch(m.body, /runs on grid|stays on until/);
 });
 
 /* ══ v1.168.0 — the WALL-CLOCK deadline ═══════════════════════════════════ */
@@ -704,14 +697,11 @@ test('★★ v1.168.0 — the deadline records its own page, and a silenced anno
   assert.ok(body.includes("if (heard && heard.ok === false) {"), 'a quiet-hours suppression is visible in the log');
 });
 
-test('★ v1.168.0 — the 21:30 ARMED line says an 80+ target is stopped by the panel, not in software', () => {
+test('★ v1.170.0 — the 21:30 ARMED line says OFF at the target, for every target', () => {
   const fn = INDEX.indexOf('function forceChargeArmNote(');
   const body = INDEX.slice(fn, INDEX.indexOf('\n}\n', fn));
-  const coast = body.indexOf('if (panelHoldsTarget(c)) {');
-  const soft = body.indexOf('(software stop;');
-  assert.ok(coast > 0 && soft > coast, 'the coast branch comes first');
-  assert.ok(body.includes('ceiling stops it there, and Charge Now stays on until the window-end OFF'));
-  assert.ok(!body.includes('coasting on grid'), 'v1.169.0 — measured: the house does not stay on grid at the ceiling');
+  assert.ok(body.includes('OFF when it gets there (software stop; panel ceiling'));
+  assert.ok(!body.includes('panelHoldsTarget') && !body.includes('coasting on grid') && !body.includes('stays on until'));
 });
 
 /* ══ v1.169.0 — the LIVE charge rate: the grid-import cap less the house ═══ */
@@ -805,4 +795,18 @@ test('★★★ an EV predicted LATER in the window moves the start EARLIER (rev
   assert.equal(decideForceCharge(n, between, opts({ poolSocPct: 50, fullKwh: 92.16, chargeRateKw: rate })).kind, 'none');
   assert.equal(decideForceCharge(n, between, opts({ poolSocPct: 50, fullKwh: 92.16, chargeRateKw: rate, evDisplacedKwh: 20 * LEG })).kind, 'on',
     'with the EV budgeted, the same moment is already late enough to start');
+});
+
+test('★★★ v1.170.0 — with a Core out, the rate is bounded by what each connected Core is PROVEN to take', () => {
+  assert.equal(FORCE_CHARGE_PROVEN_KW_PER_SLOT, 5.5, '2026-09-18: ~17.8 kW at the grid over three Cores × the charge leg');
+  const three = forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 0, legEff: LEG, slotCount: 3 })!;
+  assert.equal(three, 17 * LEG, 'all three connected: the bound (16.5) never binds');
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG, slotCount: 1 }), 5.5,
+    'one Core: 5.5, not 13.4 — the start comes earlier instead of the night ending short');
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG, slotCount: 2 }), 11);
+  assert.equal(forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG, slotCount: 0 }),
+    forceChargeRateKw({ gridCapKw: 17, houseLoadKw: 2.5, legEff: LEG }), 'no count ⇒ no bound (ON needs a slot anyway)');
+  const fn = INDEX.indexOf('async function runForceChargeTick(');
+  const body = INDEX.slice(fn, INDEX.indexOf('async function escalateForceChargeStuck(', fn));
+  assert.ok(body.includes('slotCount: connectedSlots.filter((n) => n >= 1 && n <= 3).length,'), 'index.ts passes the connected count');
 });

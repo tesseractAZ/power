@@ -207,10 +207,10 @@ const MUTANTS = [
   {
     id: 'xxv. ★★★ it does not stop at the target',
     file: FC,
-    // v1.168.0 — repointed: the stop now applies only below the panel's 80% minimum.
-    find: '    && !panelHoldsTarget(s.forceChargeCeilingPct) && o.poolSocPct >= s.forceChargeCeilingPct',
+    // v1.170.0 — repointed: the stop applies at every target again (forceChargeStopPct).
+    find: '    && o.poolSocPct >= forceChargeStopPct(s.forceChargeCeilingPct)',
     to: '    && false /* MUTANT */',
-    why: 'Below 80 the charge runs on to the panel\'s 80 backstop — past the owner\'s target and past the morning-solar headroom.',
+    why: 'Force-charge runs on to the panel\'s backstop ceiling — past the owner\'s target and past the morning-solar headroom.',
   },
   {
     id: 'xxvii. ★★ a target at or below the reserve still force-charges',
@@ -236,18 +236,21 @@ const MUTANTS = [
   // ── v1.168.0 — coast on grid at 80+, the wall-clock OFF deadline, the Thursday rule
   // and the median surplus.
   {
-    id: 'xxx. ★★ no coast: an 80+ target is switched off at the target',
+    // v1.170.0 — REPLACES the v1.168.0 coast mutant: the owner retired the coast (measured
+    // 2026-09-18, the panel did not hold the house on grid at its ceiling).
+    id: 'xxx. ★★★ the coast returns: an 80+ target is left on past the target',
     file: FC,
-    find: '    && !panelHoldsTarget(s.forceChargeCeilingPct) && o.poolSocPct >= s.forceChargeCeilingPct',
-    to: '    && o.poolSocPct >= s.forceChargeCeilingPct /* MUTANT */',
-    why: 'Force-charge stops at 90% at ~03:30 and the house draws the pack back toward the 50% reserve until 05:00 — the coast the owner asked for, gone; and an 85.3 target never stops (the rounding miss).',
+    find: '    && o.poolSocPct >= forceChargeStopPct(s.forceChargeCeilingPct)',
+    to: '    && s.forceChargeCeilingPct < 80 && o.poolSocPct >= forceChargeStopPct(s.forceChargeCeilingPct) /* MUTANT */',
+    why: 'Charge Now stays on from ~03:30 to 05:00 while the house draws the pack back — hours of exposure for nothing.',
   },
   {
-    id: 'xxxi. ★ the coast boundary moves off the panel\'s 80% minimum',
+    // v1.170.0 — REPLACES the coast-boundary mutant (property retired).
+    id: 'xxxi. ★★ the stop chases an 85.3 target the whole-number SoC never reaches',
     file: FC,
-    find: '  return targetPct >= FORCE_CHARGE_CEILING_MIN_PCT;',
-    to: '  return targetPct > FORCE_CHARGE_CEILING_MIN_PCT; /* MUTANT */',
-    why: 'An exact 80 target — one the panel can hold — is switched off early and drained back toward the reserve.',
+    find: '  return Math.min(targetPct, desiredForceChargeCeilingPct(targetPct));',
+    to: '  return targetPct; /* MUTANT */',
+    why: 'The panel stops at its 85 ceiling, the pool reads 85, the stop wants 85.3 — Charge Now stays on to 05:00.',
   },
   {
     id: 'xxxii. ★★★ the wall-clock deadline is removed',
@@ -306,11 +309,12 @@ const MUTANTS = [
     why: 'The house is told the switch-off failed when all that is known is that nothing can be read.',
   },
   {
-    id: 'xl. ★ the announcement promises an OFF at the target on a coast night',
+    // v1.170.0 — REPLACES the coast-wording mutant (property retired).
+    id: 'xl. ★ the announcement says an 80+ night stays on to the window close',
     file: NOTIFY,
-    find: '        ? (forceCeiling >= FORCE_CHARGE_CEILING_MIN_PCT',
-    to: '        ? (false /* MUTANT */',
-    why: 'The 21:30 notice says force-charge stops at 90% while it actually stays on until 05:00.',
+    find: "          + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). `",
+    to: "          + `reach ~${pct(forceCeiling)}; it stays on until the window closes. ` /* MUTANT */",
+    why: 'The 21:30 notice describes the retired coast.',
   },
   {
     id: 'xli. ★★★ the Thursday rule is removed',
@@ -391,25 +395,26 @@ const MUTANTS = [
     why: 'Every restart after 06:00 pages the house again for the same stuck force-charge.',
   },
   {
-    id: 'lii. ★ the ARMED line promises a software stop on a coast night',
+    // v1.170.0 — REPLACES the coast ARMED-line mutant (property retired).
+    id: 'lii. ★ the ARMED line says Charge Now stays on to the window end',
     file: IDX,
-    find: '  if (panelHoldsTarget(c)) {',
-    to: '  if (false) { /* MUTANT */',
-    why: 'The 21:30 journal line says force-charge stops at 90% while it stays on to 05:00 — an audit reads the coast as a failed stop.',
+    find: 'OFF when it gets there (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`;',
+    to: 'Charge Now stays on until the window-end OFF.`; /* MUTANT */',
+    why: 'The journal describes the retired coast; an audit reads the target OFF as a surprise.',
   },
   // ── v1.169.0 — the live charge rate (grid-import cap less the house).
   {
     id: 'liii. ★★★ the rate ignores the house load',
     file: FC,
-    find: '  return Math.max(FORCE_CHARGE_MIN_RATE_KW, (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff);',
-    to: '  return Math.max(FORCE_CHARGE_MIN_RATE_KW, i.gridCapKw * i.legEff); /* MUTANT */',
+    find: '  let rate = (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff;',
+    to: '  let rate = i.gridCapKw * i.legEff; /* MUTANT */',
     why: 'An EV drawing 11.5 kW is invisible to the timing: the start comes hours late and the night ends far short of the target.',
   },
   {
     id: 'liv. ★★★ a house past the cap yields a rate under the floor',
     file: FC,
-    find: '  return Math.max(FORCE_CHARGE_MIN_RATE_KW, (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff);',
-    to: '  return (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff; /* MUTANT */',
+    find: '  return Math.max(FORCE_CHARGE_MIN_RATE_KW, rate);',
+    to: '  return rate; /* MUTANT */',
     why: 'A heavy house produces a zero or negative rate — the start is pushed past the window end, or falls back to the fixed 10 kW it cannot reach.',
   },
   {
@@ -475,6 +480,28 @@ const MUTANTS = [
     find: '  const a = Math.max(hourTs, fromMs);',
     to: '  const a = hourTs; /* MUTANT */',
     why: 'An EV predicted for the final hour counts ~1/12 of its energy at a 02:55 recompute — the start comes late and the night ends short.',
+  },
+  // ── v1.170.0 — the stop threshold at the start, and the per-Core rate bound.
+  {
+    id: 'lxiv. ★★ the start compares against the raw target, not the stop',
+    file: FC,
+    find: '  if (o.poolSocPct >= forceChargeStopPct(target)) return',
+    to: '  if (o.poolSocPct >= target) return /* MUTANT */',
+    why: 'A pack already at the panel\'s 85 ceiling for an 85.3 target is switched on anyway, then off at once — two writes for nothing.',
+  },
+  {
+    id: 'lxv. ★★★ a Core out does not bound the rate',
+    file: FC,
+    find: '    rate = Math.min(rate, i.slotCount * FORCE_CHARGE_PROVEN_KW_PER_SLOT);',
+    to: '    rate = rate; /* MUTANT */',
+    why: 'With one Core connected the start is timed for three — the night ends far short of the target.',
+  },
+  {
+    id: 'lxvi. ★★ index.ts never passes the connected count',
+    file: IDX,
+    find: '    slotCount: connectedSlots.filter((n) => n >= 1 && n <= 3).length,',
+    to: '    /* MUTANT */',
+    why: 'The bound exists and never runs.',
   },
   {
     id: 'xxvi. ★★ the "why not" line fires outside a live night',
