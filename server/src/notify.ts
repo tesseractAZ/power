@@ -2,7 +2,6 @@ import { request } from 'undici';
 import { callHaService } from './haService.js';
 import type { Severity } from './alerts.js';
 import type { NightChargePlan } from './nightChargeAdvisor.js';
-import { FORCE_CHARGE_CEILING_MIN_PCT } from './nightForceCharge.js';
 
 /**
  * v1.120.0 — NOTIFY HTTP BUDGETS.
@@ -422,14 +421,9 @@ export function buildNightChargeMessage(
     ? `SUPERVISED: ${supervised.cancelDeadlineText} the add-on raises the backup reserve to `
       + `${supervised.targetPct}% (bounded write; auto-restores after the charge window closes).${expectNote} `
       + (forceCeiling != null
-        ? (forceCeiling >= FORCE_CHARGE_CEILING_MIN_PCT
-          // v1.168.0 — at 80+ the panel's own ceiling holds the pack there and the house
-          // coasts on grid, so force-charge stays on until the window closes.
-          ? `Then it switches the panel's force-charge ON, just in time to reach ~${pct(forceCeiling)} by the window close `
-            + `(from the start of the window if the pack needs all of it); the panel stops it there, and force-charge `
-            + `switches OFF when the window closes. `
-          : `Then, near the end of the window, it switches the panel's force-charge ON just long enough to `
-            + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). `)
+        // v1.170.0 — one wording for every target: the 80+ coast is retired.
+        ? `Then, near the end of the window, it switches the panel's force-charge ON just long enough to `
+          + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). `
         : '')
       + 'Cancel from the night-charge card on the panel before then.'
     : 'Advisory only — the add-on will NOT charge. Wire your HA automation to the '
