@@ -6420,6 +6420,15 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.169.0 — the force-charge start follows the live charge rate.** The panel caps its total
+grid import (measured pinned at 19.0-19.1 kW) and the house shares it, so `forceChargeRateKw` =
+max(1, (`ARB_GRID_INPUT_CAP_KW` − live house load) × √RTE), with the house load summed from the
+SHP2 circuits (`shp2HouseLoadKw`, = `panel_load`); `forceChargeStartAtMs` takes it, falling back
+to the fixed 10 kW when unknown. The cap has one reader (`gridInputCapKwFromEnv`) shared with the
+planner. Measured 2026-09-18: at an 80+ ceiling the panel stops importing and the house draws the
+pack (90 → 86% by 05:00) — the "coast on grid" of v1.168.0 did not hold; wording corrected,
+behaviour unchanged.
+
 **v1.168.0 — the Thursday rule, the median surplus, coast on grid, and an OFF deadline**
 (owner 2026-09-17). (1) When tonight is a full-length cheap window (≥ 3 h) and the next
 full-length one opens more than 24 h after it closes (`longGapAhead`, from the tariff calendar;

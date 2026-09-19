@@ -1,3 +1,38 @@
+## 1.169.0
+
+### Force-charge times its start from the live charge rate — what the house leaves under the grid cap
+
+**Owner (2026-09-18):** *"the max rate is actually higher and variable based upon home usage during
+the charge period."* Confirmed from the panel's own readings:
+
+| 2026-09-18 | grid | house | grid − house | into the pack |
+|---|---|---|---|---|
+| 01:10 | 19.1 kW | 1.3 kW | 17.8 kW | 17.0 kW |
+| 01:40 | 19.1 kW | 4.0 kW | 15.1 kW | 13.8 kW |
+| 02:10 | 19.1 kW | 1.8 kW | 17.3 kW | 16.3 kW |
+
+Grid import sat **pinned at 19.0-19.1 kW** on both measured nights while the house moved; the pack
+took what the house left, through the ~0.93 charge leg. On 2026-08-02, with the EV drawing (panel
+load 14.0 kW), the pack took ~2.8 kW.
+
+1.167.0 timed the switch-on at a fixed 10 kW. On 2026-09-18 the pack actually took ~14.6 kW, so
+it reached 90% at **03:30** — 1.5 h early. The start now uses
+**(`ARB_GRID_INPUT_CAP_KW` − live house load) × charge-leg efficiency**, recomputed every minute
+until it switches on, so it follows the house's actual usage. The house load is the sum of the
+panel's circuits (the same `panel_load` the recorder keeps; it includes the EV charger). With the
+configured 17 kW that night times at ~13.4 kW — a little under the real rate, so the pack arrives
+slightly early rather than short; the EV night times at 2.8 kW, matching what was measured. A
+house drawing past the cap is floored at 1 kW (start now, never "never"); no live reading falls
+back to the fixed 10 kW. Planner and force-charge now read the cap from one place.
+
+**Measured, and corrected in the words:** at the 90% ceiling on 2026-09-18 grid import fell to
+**0 W** and the house ran from the pack, 90% → 86% by 05:00, with Charge Now still on. The panel
+stops importing at its limit; it does **not** keep the house on grid. The announcement, the 21:30
+line, the option help and the module notes no longer say it does. Behaviour is unchanged — whether
+to switch off at the target for 80%+ again is the owner's call.
+
+5 new mutants (`mutate-force-charge.mjs`, 57/57; xv repointed); 5 new tests.
+
 ## 1.168.0
 
 ### Thursdays fill to 90%, every night plans for the median sun, and a coast on grid at 80%+
