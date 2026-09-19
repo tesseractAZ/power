@@ -1,3 +1,26 @@
+## 1.170.0
+
+### The 80%+ coast is retired — force-charge stops at the target, whatever the target
+
+**Owner (2026-09-18):** agreed to both recommendations after the first 90% night.
+
+- **Stop at the target, at every target.** v1.168.0 left Charge Now on past an 80%+ target on the
+  premise that the panel would then hold the pack there with the house on grid. Measured on
+  2026-09-18 it did not: at the 90% ceiling grid import fell to 0 W and the house drew the pack
+  90% → 86% by 05:00. So the coast only added Charge Now time. The software stop now applies at
+  every target again. It stops at the panel's whole-number ceiling when that is lower than the
+  target (an 85.3% target syncs an 85 ceiling, and a whole-number SoC reading never reaches 85.3),
+  so the old rounding miss stays fixed. The announcement, the 21:30 line and the option help say
+  so.
+- **A Core out no longer over-states the charge rate.** The live rate is now also bounded by
+  connected Cores × 5.5 kW — the least each Core has been seen to take into its pack (2026-09-18:
+  ~17.8 kW at the grid over three, with the grid cap the binding limit). With all three connected
+  it never binds; with one out for a pack swap, the start comes earlier instead of the night
+  ending short.
+
+Five coast mutants are **replaced**, not repointed — the owner retired the property they
+protected; two repointed; three new (`mutate-force-charge.mjs`, 66/66).
+
 ## 1.169.0
 
 ### Force-charge times its start from the live charge rate — what the house leaves under the grid cap
