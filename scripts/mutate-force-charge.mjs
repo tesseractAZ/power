@@ -200,7 +200,7 @@ const MUTANTS = [
   {
     id: 'xv. ★★★ just-in-time is removed (starts at the window open, then the house drains it)',
     file: FC,
-    find: '  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh)) { // window checked above',
+    find: '  if (nowMs < forceChargeStartAtMs(s.windowEndMs!, target, o.poolSocPct, o.fullKwh, o.chargeRateKw)) { // window checked above',
     to: '  if (false) { /* MUTANT */',
     why: 'Force-charge reaches the target at ~02:00 and the house draws the pack back toward the 50% reserve for three hours — ~57% at dawn instead of 64%.',
   },
@@ -396,6 +396,42 @@ const MUTANTS = [
     find: '  if (panelHoldsTarget(c)) {',
     to: '  if (false) { /* MUTANT */',
     why: 'The 21:30 journal line says force-charge stops at 90% while it stays on to 05:00 — an audit reads the coast as a failed stop.',
+  },
+  // ── v1.169.0 — the live charge rate (grid-import cap less the house).
+  {
+    id: 'liii. ★★★ the rate ignores the house load',
+    file: FC,
+    find: '  return Math.max(FORCE_CHARGE_MIN_RATE_KW, (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff);',
+    to: '  return Math.max(FORCE_CHARGE_MIN_RATE_KW, i.gridCapKw * i.legEff); /* MUTANT */',
+    why: 'An EV drawing 11.5 kW is invisible to the timing: the start comes hours late and the night ends far short of the target.',
+  },
+  {
+    id: 'liv. ★★★ a house past the cap yields a rate under the floor',
+    file: FC,
+    find: '  return Math.max(FORCE_CHARGE_MIN_RATE_KW, (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff);',
+    to: '  return (i.gridCapKw - Math.max(0, i.houseLoadKw)) * i.legEff; /* MUTANT */',
+    why: 'A heavy house produces a zero or negative rate — the start is pushed past the window end, or falls back to the fixed 10 kW it cannot reach.',
+  },
+  {
+    id: 'lv. ★★★ the start ignores the live rate',
+    file: FC,
+    find: '  const rate = rateKw != null && Number.isFinite(rateKw) && rateKw >= FORCE_CHARGE_MIN_RATE_KW',
+    to: '  const rate = false && rateKw != null && Number.isFinite(rateKw) && rateKw >= FORCE_CHARGE_MIN_RATE_KW /* MUTANT */',
+    why: 'The fixed 10 kW times every night — 2026-09-18 arrived at 90% at 03:30, 1.5 h early.',
+  },
+  {
+    id: 'lvi. ★★★ index.ts computes the rate and never passes it',
+    file: IDX,
+    find: '    chargeRateKw,\n  });',
+    to: '  }); /* MUTANT */',
+    why: 'Every unit test passes while the live add-on keeps the fixed 10 kW.',
+  },
+  {
+    id: 'lvii. ★★ the house load is not read from the panel',
+    file: IDX,
+    find: '    houseLoadKw: shp2HouseLoadKw(sp),',
+    to: '    houseLoadKw: 0, /* MUTANT */',
+    why: 'The timing assumes an empty house — an EV night starts hours late.',
   },
   {
     id: 'xxvi. ★★ the "why not" line fires outside a live night',

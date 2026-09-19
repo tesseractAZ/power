@@ -33,6 +33,7 @@ import {
   decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
   FORCE_CHARGE_CEILING_MIN_PCT, panelHoldsTarget, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, type ForceChargeAction,
+  forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
@@ -3338,8 +3339,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   // ~19 kW; the lower coexistence figure is used deliberately, because
   // UNDER-stating the envelope under-states the buy we can deliver, which is the
   // safe (honest-shortfall) direction. Set ≤0 to disable contention modelling.
-  const gridInputCapKwRaw = Number(process.env.ARB_GRID_INPUT_CAP_KW ?? 17);
-  const gridInputCapKw = Number.isFinite(gridInputCapKwRaw) && gridInputCapKwRaw > 0 ? gridInputCapKwRaw : null;
+  const gridInputCapKw = gridInputCapKwFromEnv();
   // v1.106.0 — the load band is calibrated from realized error, floored at the
   // historical hand-set 1.15 so it can only widen. Only loadP90W feeds sizing,
   // and a wider P90 buys more — the safe direction for an asymmetric under-buy
@@ -4845,6 +4845,28 @@ async function runNightActuationTick(): Promise<void> {
 let forceChargeWhyLogged: { day: string | null; reasons: Set<string> } = { day: null, reasons: new Set() };
 
 /** v1.166.0 — tonight's force-charge decision, stated on the 21:30 ARMED line. */
+/** The shared grid-input envelope (ARB_GRID_INPUT_CAP_KW; see the planner's note on why
+ *  17 kW): ≤0 or unparseable ⇒ null (contention not modelled). One reader for the planner
+ *  and — v1.169.0 — the force-charge start, so the two can never disagree. */
+function gridInputCapKwFromEnv(): number | null {
+  const raw = Number(process.env.ARB_GRID_INPUT_CAP_KW ?? 17);
+  return Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
+/** v1.169.0 — the live house load at the panel (kW): the sum of the SHP2 circuits, the same
+ *  quantity the recorder stores as `panel_load` (it includes the EV charger). Null unless at
+ *  least one circuit reports a number. */
+function shp2HouseLoadKw(sp: any): number | null {
+  const circuits: any[] | null = Array.isArray(sp?.circuits) ? sp.circuits : null;
+  if (!circuits) return null;
+  let w = 0;
+  let any = false;
+  for (const c of circuits) {
+    if (typeof c?.watts === 'number' && Number.isFinite(c.watts)) { w += c.watts; any = true; }
+  }
+  return any ? w / 1000 : null;
+}
+
 function forceChargeArmNote(armed: NightActuationState): string {
   if (!forceChargeOn()) return 'Force-charge: off (disabled by options).';
   const c = armed.forceChargeCeilingPct;
@@ -4854,7 +4876,7 @@ function forceChargeArmNote(armed: NightActuationState): string {
   }
   // v1.168.0 — at 80+ the panel's ceiling IS the stop and holds the pack (the coast).
   if (panelHoldsTarget(c)) {
-    return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); the panel's ${desiredForceChargeCeilingPct(c)}% ceiling stops it there and holds it, the house coasting on grid until the window-end OFF.`;
+    return `Force-charge: ELIGIBLE — just in time to reach ~${c}% by the window close (from the open, if the pack needs the whole window); the panel's ${desiredForceChargeCeilingPct(c)}% ceiling stops it there, and Charge Now stays on until the window-end OFF.`;
   }
   return `Force-charge: ELIGIBLE — just in time near the end of the window, to ~${c}% (software stop; panel ceiling ${desiredForceChargeCeilingPct(c)}% as backstop).`;
 }
@@ -4895,6 +4917,13 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     fullWh != null && fullWh > 0 && socNowPct != null && remainWh != null &&
     Math.abs((remainWh / fullWh) * 100 - socNowPct) <= 8;
   const gridNow = liveGridBackstop(store.get().devices);
+  // v1.169.0 — the charge rate the start is timed with: the grid-import cap less the live
+  // house load, through the charge leg. The house shares the cap, so this moves with usage.
+  const chargeRateKw = forceChargeRateKw({
+    gridCapKw: gridInputCapKwFromEnv(),
+    houseLoadKw: shp2HouseLoadKw(sp),
+    legEff: Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY),
+  });
   const action = decideForceCharge(state, nowMs, {
     enabled: !opts.forceDisabled && forceChargeOn(),
     gridPresent: typeof gridNow.present === 'boolean' ? gridNow.present : null,
@@ -4909,6 +4938,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // fresh, coherent reading: an unknown SoC never starts one and never stops one early.
     poolSocPct: socCoherent ? socNowPct : null,
     fullKwh: fullWh != null && fullWh > 0 ? fullWh / 1000 : null,
+    chargeRateKw,
   });
   if (action.kind === 'none') {
     // v1.166.0 — "chose not to" must never read like "broke". While a night is live
@@ -4975,7 +5005,10 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
     }
     const holds = panelHoldsTarget(state.forceChargeCeilingPct!);
-    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}) — ${holds ? `the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling stops it there and holds it, the house coasting on grid until the window closes` : `stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop`}. Also OFF on window end, cancel, revert, grid loss or disable.`);
+    const rateNote = chargeRateKw != null
+      ? `timed at ~${chargeRateKw.toFixed(1)} kW (grid cap ${gridInputCapKwFromEnv()} kW less the house's ${shp2HouseLoadKw(sp)?.toFixed(1)} kW, through the charge leg)`
+      : `timed at the fixed ${FORCE_CHARGE_PLAN_RATE_KW} kW fallback (no live house load)`;
+    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — ${holds ? `the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling stops it there; Charge Now stays on until the window closes` : `stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop`}. Also OFF on window end, cancel, revert, grid loss or disable.`);
     return;
   }
 
