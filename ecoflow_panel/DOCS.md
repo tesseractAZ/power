@@ -6424,8 +6424,10 @@ sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs
 grid import (measured pinned at 19.0-19.1 kW) and the house shares it, so `forceChargeRateKw` =
 max(1, (`ARB_GRID_INPUT_CAP_KW` − live house load) × √RTE), with the house load summed from the
 SHP2 circuits (`shp2HouseLoadKw`, = `panel_load`); `forceChargeStartAtMs` takes it, falling back
-to the fixed 10 kW when unknown. The cap has one reader (`gridInputCapKwFromEnv`) shared with the
-planner. Measured 2026-09-18: at an 80+ ceiling the panel stops importing and the house draws the
+to the fixed 10 kW when unknown; a known rate under 1 kW is floored, never replaced by the faster
+fixed rate. The start also budgets the planner's P90 EV energy for the rest of the same window
+(`evDisplacedKwh` = `evContention.windowEvKwh` × √RTE), which a pre-switch-on reading cannot see.
+The cap has one reader (`gridInputCapKwFromEnv`) shared with the planner. Measured 2026-09-18: at an 80+ ceiling the panel stops importing and the house draws the
 pack (90 → 86% by 05:00) — the "coast on grid" of v1.168.0 did not hold; wording corrected,
 behaviour unchanged.
 

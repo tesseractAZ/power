@@ -25,13 +25,24 @@ slightly early rather than short; the EV night times at 2.8 kW, matching what wa
 house drawing past the cap is floored at 1 kW (start now, never "never"); no live reading falls
 back to the fixed 10 kW. Planner and force-charge now read the cap from one place.
 
+**Usage DURING the charge, not just before it.** A reading taken before the switch-on cannot see
+a car that plugs in afterwards, and an EV cuts the pack's rate about five-fold (~15 → ~2.8 kW). So
+the start also budgets the planner's predicted (P90) EV energy for the rest of tonight's window:
+every grid kWh the car will take is ~0.93 kWh the pack will not get, and the start moves earlier by
+that much. Only a plan for the same window counts. A car already charging is counted twice (live
+load and forecast), which errs toward starting early — the safe side.
+
+Not modelled: a DPU's own input limit. On 2026-09-18 the grid cap bound (~5.9 kW per DPU across
+three), so no single DPU's limit has been measured; with a Core offline the rate could be
+over-stated and the night end short.
+
 **Measured, and corrected in the words:** at the 90% ceiling on 2026-09-18 grid import fell to
 **0 W** and the house ran from the pack, 90% → 86% by 05:00, with Charge Now still on. The panel
 stops importing at its limit; it does **not** keep the house on grid. The announcement, the 21:30
 line, the option help and the module notes no longer say it does. Behaviour is unchanged — whether
 to switch off at the target for 80%+ again is the owner's call.
 
-5 new mutants (`mutate-force-charge.mjs`, 57/57; xv repointed); 5 new tests.
+10 new mutants (`mutate-force-charge.mjs`, 62/62; xv repointed); 7 new tests.
 
 ## 1.168.0
 
