@@ -150,3 +150,31 @@ test('★★★ index.ts computes the median surplus and the long gap, and hands
   assert.ok(INDEX.includes('morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead,'),
     'both reach the planner deps — an input computed and never passed is the v1.125.0 trap');
 });
+
+/* ══ v1.169.0 — each window hour's OWN remaining fraction (review, 2026-09-18) ══ */
+
+import { windowHourAvailH } from '../src/nightChargeAdvisor.js';
+
+test('★★★ mid-window, the partial hour is the CURRENT one — the final hour counts in full', () => {
+  const W0 = Date.UTC(2026, 8, 18, 6, 0); // 23:00 MST
+  const WEND = W0 + 6 * H;               // 05:00
+  const now = W0 + 3 * H + 55 * 60_000;   // 02:55
+  const hours = [3, 4, 5].map((k) => W0 + k * H); // 02:00, 03:00, 04:00
+  const w = hours.map((t) => windowHourAvailH(t, now, WEND));
+  assert.ok(Math.abs(w[0] - 5 / 60) < 1e-9, '02:00-03:00: only 5 min left');
+  assert.equal(w[1], 1);
+  assert.equal(w[2], 1, 'the 04:00-05:00 hour — where an EV may be predicted — counts in FULL (was 5/60)');
+  // Before the window every hour is whole: the 21:30 plan is unchanged.
+  for (let k = 0; k < 6; k++) assert.equal(windowHourAvailH(W0 + k * H, W0, WEND), 1);
+  // Hours outside the window, or already past, count nothing.
+  assert.equal(windowHourAvailH(WEND, W0, WEND), 0);
+  assert.equal(windowHourAvailH(W0 + H, W0 + 3 * H, WEND), 0);
+  // A window ending mid-hour counts only its share.
+  assert.equal(windowHourAvailH(W0, W0, W0 + 30 * 60_000), 0.5);
+});
+
+test('★★ the planner weights window hours with windowHourAvailH (no running countdown)', () => {
+  const SRC = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/nightChargeAdvisor.ts'), 'utf8');
+  assert.ok(SRC.includes('availH: windowHourAvailH(h.ts, effChargeStartMs, windowEnd)'));
+  assert.ok(!SRC.includes('let hoursLeft = remainingWindowHours;'));
+});

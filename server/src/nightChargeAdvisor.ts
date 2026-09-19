@@ -680,13 +680,13 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // Per-hour {rate, wall-clock availability}. availH carries the mid-window
   // partial hour the flat model used to fold into `chargeHours`.
   const windowRates: Array<{ hour: NightChargeHour; rateKw: number; availH: number }> = [];
-  {
-    let hoursLeft = remainingWindowHours;
-    for (const h of windowHrs) {
-      const availH = Math.max(0, Math.min(1, hoursLeft));
-      hoursLeft -= 1;
-      windowRates.push({ hour: h, rateKw: chargeRateKwAt(h), availH });
-    }
+  // v1.169.0 — each hour gets its OWN remaining fraction (windowHourAvailH). The old
+  // running countdown gave the current hour a full 1 and the partial remainder to the
+  // LAST hour, so a mid-window recompute under-counted the final hour — e.g. at 02:55 an
+  // EV predicted for 04:00-05:00 counted ~1/12 of its energy (review, 2026-09-18). Before
+  // the window every hour is whole, so the 21:30 arming plan is unchanged.
+  for (const h of windowHrs) {
+    windowRates.push({ hour: h, rateKw: chargeRateKwAt(h), availH: windowHourAvailH(h.ts, effChargeStartMs, windowEnd) });
   }
 
   // The deliverable-lift ceiling is now the SUM of the per-hour contended rates,
@@ -1331,6 +1331,14 @@ export interface NightChargeInputDeps {
  * aligned bounds. Returns null if no cheap hour is found within `scanHours`.
  * PURE — the resolver (rateAt-backed) is injected, resolved in Phoenix upstream.
  */
+/** v1.169.0 — PURE. The fraction of the window hour starting at `hourTs` that is still
+ *  ahead: from max(hour start, `fromMs`) to min(hour end, `windowEndMs`), clamped to [0, 1]. */
+export function windowHourAvailH(hourTs: number, fromMs: number, windowEndMs: number): number {
+  const a = Math.max(hourTs, fromMs);
+  const b = Math.min(hourTs + HOUR_MS, windowEndMs);
+  return Math.max(0, Math.min(1, (b - a) / HOUR_MS));
+}
+
 export function resolveCheapWindow(
   periodIdAt: (tsMs: number) => string,
   fromMs: number,

@@ -426,8 +426,8 @@ export function buildNightChargeMessage(
           // v1.168.0 — at 80+ the panel's own ceiling holds the pack there and the house
           // coasts on grid, so force-charge stays on until the window closes.
           ? `Then it switches the panel's force-charge ON, just in time to reach ~${pct(forceCeiling)} by the window close `
-            + `(from the start of the window if the pack needs all of it); the panel holds it there and the house runs `
-            + `on grid until the window closes, when it switches OFF. `
+            + `(from the start of the window if the pack needs all of it); the panel stops it there, and force-charge `
+            + `switches OFF when the window closes. `
           : `Then, near the end of the window, it switches the panel's force-charge ON just long enough to `
             + `reach ~${pct(forceCeiling)}, and OFF when it gets there (or when the window closes). `)
         : '')
