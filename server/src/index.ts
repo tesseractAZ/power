@@ -33,7 +33,8 @@ import {
   decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
   FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, type ForceChargeAction,
-  forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw,
+  forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw, FORCE_CHARGE_MIN_RATE_KW,
+  FORCE_CHARGE_PROVEN_KW_PER_SLOT,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
@@ -4999,8 +5000,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge' } });
       results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
     }
+    const slotsNow = connectedSlots.filter((n) => n >= 1 && n <= 3).length;
+    const unboundedKw = gridCapKw != null ? (gridCapKw - Math.max(0, houseLoadKw ?? 0)) * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY) : null;
     const rateNote = (chargeRateKw != null
-      ? `timed at ~${chargeRateKw.toFixed(1)} kW (grid cap ${gridCapKw} kW less the house's ${Math.max(0, houseLoadKw ?? 0).toFixed(1)} kW, through the charge leg, floored at 1 kW)`
+      ? (unboundedKw != null && chargeRateKw < unboundedKw - 1e-9 && chargeRateKw > FORCE_CHARGE_MIN_RATE_KW
+        ? `timed at ~${chargeRateKw.toFixed(1)} kW (bounded by ${slotsNow} connected Core(s) × ${FORCE_CHARGE_PROVEN_KW_PER_SLOT} kW)`
+        : `timed at ~${chargeRateKw.toFixed(1)} kW (grid cap ${gridCapKw} kW less the house's ${Math.max(0, houseLoadKw ?? 0).toFixed(1)} kW, through the charge leg, floored at 1 kW)`)
       : `timed at the fixed ${FORCE_CHARGE_PLAN_RATE_KW} kW fallback (${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`)
       + (evDisplacedKwh != null && evDisplacedKwh > 0 ? `, plus ~${evDisplacedKwh.toFixed(1)} kWh the predicted EV will take` : '');
     app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable.`);

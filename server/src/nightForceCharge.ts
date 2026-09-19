@@ -35,9 +35,9 @@
  *
  * THE PANEL'S CEILING becomes a BACKSTOP. `foceChargeHight` (documented 80-100) is synced
  * to clamp(target, 80, 100) as soon as the night is live — hours before the start, so its
- * readback never delays it. A target of 80+ is stopped by the device itself; below 80 the
- * software stop ends it and the panel's 80 caps a stop that fails. The panel's original
- * ceiling is restored afterwards.
+ * readback never delays it. The software stop ends it at every target (forceChargeStopPct);
+ * the ceiling only catches a stop that fails (at 80+ it is the target itself, below 80 it
+ * is 80). The panel's original ceiling is restored afterwards.
  *
  * ★★ v1.168.0 — COAST ON GRID (owner, 2026-09-17). A target of 80+ is one the panel
  * enforces AND HOLDS: with Charge Now still ON at its ceiling the pack sits there and the
@@ -58,8 +58,13 @@
  * 03:30; grid import then fell to 0 W and the house ran from the pack, 90% → 86% by 05:00,
  * with Charge Now still ON. At its ceiling the panel stops importing; it does NOT keep the
  * house on grid. So the coast gives back what a stop at the target would, and only adds
- * Charge Now time. Whether to restore the stop at the target for 80+ is the owner's call;
- * the live charge rate (v1.169.0) shrinks the early arrival either way.
+ * Charge Now time — the owner restored the stop at every target (v1.170.0, above), and the
+ * live charge rate (v1.169.0) shrinks the early arrival.
+ * ★ Not yet measured at a non-90 ceiling: that the whole-number pool reading REACHES the
+ * synced ceiling when the pack tops out (09-18 read 90 at the 90 ceiling). If a pack parks
+ * one below, the stop never fires and the window-end OFF (and the deadline) end it.
+ * ★ Known, safe-side: with a Core out AND an EV predicted, the EV allowance is counted in
+ * full though the per-Core bound already absorbs part of it — the start comes early.
  *
  * ★★★ OUTAGE — NOT ESTABLISHED EITHER WAY. No vendor text says how a slot with
  * ch{n}ForceCharge ON behaves when the grid fails, and no outage has ever overlapped

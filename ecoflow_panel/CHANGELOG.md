@@ -18,8 +18,13 @@
   it never binds; with one out for a pack swap, the start comes earlier instead of the night
   ending short.
 
-Five coast mutants are **replaced**, not repointed — the owner retired the property they
-protected; two repointed; three new (`mutate-force-charge.mjs`, 66/66).
+Four coast mutants are **replaced**, not repointed — the owner retired the property they
+protected; three repointed; three new (`mutate-force-charge.mjs`, 66/66).
+
+Known, safe-side: with a Core out *and* an EV predicted, the EV allowance is counted in full
+although the per-Core bound already absorbs part of it, so the start comes early. Not yet
+measured: that the pool reading reaches the synced ceiling at a ceiling other than 90 — if a pack
+parks one below, the window-end OFF ends it.
 
 ## 1.169.0
 
