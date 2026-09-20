@@ -6420,6 +6420,13 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.171.1 — the 2026-09-20 audit fixes.** (1) `cancelStalePriorArm` (index.ts): every
+non-charge evening decision cancels a prior night's never-applied arm whose window has not
+opened — the Sat→Sun shared-window case wrote against tonight's own HOLD. (2) `ecoflow/rest.ts`
+rejects a code-0 reply with a null payload by name, and `snapshot.ts setDeviceQuota` refuses an
+empty raw quota, which together stop a vendor empty-success from emptying `packs` and resolving
+every pack alert. (3) `alertMonitor.ts` holds a failed push for the morning digest.
+
 **v1.171.0 — the hourly charge-curve scan is bucketed** (`CHARGE_CURVE_BUCKET_SEC` = 60,
 analytics.ts). Unbucketed it stalled the single analytics worker 16-20 s per hour and doubled
 alarm latency for every condition that worker serves; the 200-day window is unchanged and the

@@ -380,6 +380,13 @@ export class SnapshotStore extends EventEmitter {
   setDeviceQuota(sn: string, raw: Record<string, unknown>, source: 'rest' | 'mqtt' = 'rest') {
     const cur = this.snap.devices[sn];
     if (!cur) return;
+    // v1.171.1 — an EMPTY payload must never replace a good one. On 2026-09-20 09:06 an
+    // EcoFlow "success with no data" reply wiped the raw quota for every Core at once;
+    // within one 20 s alert tick every pack alert evaluated against `packs: []` and
+    // RESOLVED — the owner was pushed a false "Resolved: Pack confirmed defective" for
+    // the warranty pack and re-paged 100 s later. Keeping the last good quota makes the
+    // empty answer a no-op, which is what a device that reported nothing means.
+    if (raw == null || Object.keys(raw).length === 0) return;
     this.rawBySn.set(sn, raw);
     cur.projection = projectByProduct(cur.productName, raw);
     this.applyBackupPoolGraceHold(sn, cur.projection);

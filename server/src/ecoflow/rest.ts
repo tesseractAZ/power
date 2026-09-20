@@ -86,6 +86,14 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
     }
     throw new Error(`EcoFlow API error ${parsed.code}: ${parsed.message} (trace ${parsed.eagleEyeTraceId || 'n/a'})`);
   }
+  // v1.171.1 — a code-0 reply with NO payload is the vendor answering "success" with
+  // nothing (seen 2026-09-20 09:06 across all five Cores at once, under latency). Left
+  // unchecked it returned undefined and surfaced as a TypeError naming a BMS field deep
+  // inside the projector — indistinguishable from a device fault — and, worse, it was
+  // cached as the device's raw quota (see snapshot.ts setDeviceQuota).
+  if (parsed.data == null) {
+    throw new Error(`EcoFlow API returned success (code 0) with no data payload for ${path}`);
+  }
   return parsed.data;
 }
 
