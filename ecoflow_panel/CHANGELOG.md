@@ -1,3 +1,34 @@
+## 1.171.1
+
+### The other four findings of the 2026-09-20 log audit
+
+**A prior night's ARM could fire against tonight's own decision.** Saturday has no cheap window
+of its own, so its evening job arms for the Monday 00:00–05:00 window. The supersede lived inside
+the "tonight produced an armable plan" branch, so if Sunday then decided to HOLD — or had an
+incomplete basis — Saturday's arm still applied at Sunday 23:55: a reserve write, and a
+force-charge riding it, against the engine's fresh decision not to charge. Every non-charge
+decision now **cancels** a prior night's arm (ledger-stamped), and only one that is safe to
+cancel: never applied, never attempted, window not yet open, no unverified force-charge, no
+unrestored panel ceiling. A night that reaches NO decision (the 23:00 cutoff) still cancels
+nothing — it now names the pending arm and when it will write.
+
+**An EcoFlow "success with no data" wiped every Core's quota and pushed a false all-clear.** On
+2026-09-20 at 09:06 the vendor answered code 0 with no payload for all five Cores at once. The
+empty answer was cached as their raw quota, so within one 20 s alert tick every pack alert
+evaluated against `packs: []` and RESOLVED — including the warranty pack's "Pack confirmed
+defective", which is exempt from every mute. The owner was pushed a false resolve and re-paged
+100 s later. Now: the REST client rejects a code-0 reply with no payload as its own named error
+(it used to surface as a TypeError naming a BMS field, reading like five device faults), and the
+snapshot store refuses to replace a good quota with an empty one.
+
+**A failed push was lost outright.** The dispatcher retries on the next tick only while the alert
+is still active, so a short-lived alert whose one attempt failed reached the owner on no channel
+at all — 2026-09-19 15:00, "[High] Telemetry stale", lost to an HA timeout. A failed push is now
+also held for the morning digest; a later successful dispatch clears the hold, so it is never
+reported twice.
+
+New harness `scripts/mutate-audit-fixes-0920.mjs` (6/6); 5 new tests.
+
 ## 1.171.0
 
 ### The hourly pack scan no longer stalls the analytics worker

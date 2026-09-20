@@ -4124,6 +4124,39 @@ async function runNightChargeEveningJob(): Promise<void> {
   }
 }
 
+/**
+ * v1.171.1 — CANCEL a prior night's ARM that tonight's plan did not supersede.
+ *
+ * The supersede/stamp block below lives inside `if (armedCandidate)`, so it only runs when
+ * TONIGHT produces an armable plan. Saturday has no window of its own and arms for the
+ * Monday 00:00–05:00 window; if Sunday's job then decides to HOLD (or has an incomplete
+ * basis), nothing touched the record and Saturday's arm still applied at Sunday 23:55 —
+ * a reserve write, and a force-charge riding it, against the engine's own fresh decision
+ * not to charge. Only a never-applied arm whose window has not yet opened is cleared: an
+ * applied or attempted write is unresolved and belongs to the revert path, an unverified
+ * force-charge belongs to its OFF path, and an unrestored panel ceiling still needs its
+ * restore. Returns true when it cleared one.
+ */
+function cancelStalePriorArm(today: string, nowMs: number, reason: string): boolean {
+  const s = nightActuationMem;
+  if (s.day == null || s.day === today) return false;
+  if (s.targetPct == null || s.windowStartMs == null || nowMs >= s.windowStartMs) return false;
+  if (s.appliedAtMs != null || s.applyAttemptedAtMs != null) return false;
+  if (s.forceChargeOnAtMs != null && s.forceChargeOffVerifiedAtMs == null) return false;
+  if (s.forceChargeCeilingPriorPct != null && s.forceChargeCeilingRestoredAtMs == null) return false;
+  const stale = s.day;
+  app.log.warn(`night-charge: CANCELLING the prior ARM for ${stale} (target ${s.targetPct}%, buy ~${s.buyKwh ?? '—'} kWh${s.forceChargeCeilingPct != null ? `, force-charge to ${s.forceChargeCeilingPct}%` : ''}) — ${reason}. Without this it would have written at ${new Date(s.windowStartMs - APPLY_LEAD_MS).toISOString()} against tonight's decision.`);
+  try {
+    recorder.recordNightOutcome(stale, {
+      arm_disposition: `cancelled by the ${today} plan — ${reason}`,
+    });
+  } catch (e: any) {
+    app.log.warn(`night-charge: cancel stamp failed for ${stale} (${e?.message ?? e})`);
+  }
+  persistNightActuation(emptyActuationState());
+  return true;
+}
+
 async function runNightChargeEveningJobInner(): Promise<void> {
   const nowMs = Date.now();
   const today = localParts(nowMs, 'America/Phoenix').ymd;
@@ -4136,6 +4169,14 @@ async function runNightChargeEveningJobInner(): Promise<void> {
   if (nowMin < fireMin) return; // too early
   if (nowMin >= cutoffMin) {
     app.log.warn(`night-charge: evening job missed today's ${NIGHT_CHARGE_NOTIFY_HOUR}:${String(NIGHT_CHARGE_NOTIFY_MINUTE).padStart(2, '0')}–23:00 window; skipping the notify + latching (a late plan is worse than none).`);
+    // v1.171.1 — no decision was reached tonight, so a prior arm is NOT cancelled (its
+    // plan is the only one there is). Name it, because it will write on its own.
+    if (nightActuationMem.day != null && nightActuationMem.day !== today
+        && nightActuationMem.appliedAtMs == null && nightActuationMem.applyAttemptedAtMs == null
+        && nightActuationMem.targetPct != null && nightActuationMem.windowStartMs != null
+        && nowMs < nightActuationMem.windowStartMs) {
+      app.log.warn(`night-charge: the ARM for ${nightActuationMem.day} (target ${nightActuationMem.targetPct}%) is still pending and WILL write at ${new Date(nightActuationMem.windowStartMs - APPLY_LEAD_MS).toISOString()} — tonight's job never reached a decision to supersede or cancel it. Cancel from the panel if that is not wanted.`);
+    }
     // v1.40.0: the NOTIFY is skipped, but the LEDGER ROW need not be lost — if
     // a pre-window plan snapshot from today exists and no row was recorded,
     // record it now with its honest original issued_at (plan.generatedAt).
@@ -4204,10 +4245,19 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       plan == null || !plan.basisComplete ? 'insufficient_basis' : (plan.chargeTonight ? 'charge' : 'hold');
     const notifyOnHold = process.env.NIGHT_CHARGE_NOTIFY_ON_HOLD !== 'false';
     if (shape === 'hold' && !notifyOnHold) {
+      // v1.171.1 — the decision still counts: a prior arm must not outlive it.
+      cancelStalePriorArm(today, nowMs, 'tonight the engine decided to HOLD (no buy needed)');
       // Suppressed by owner config; still latch so we don't retry all night.
       writeNightChargeLatch({ lastNotifyDay: today });
       app.log.info('night-charge: hold plan — notification suppressed (NIGHT_CHARGE_NOTIFY_ON_HOLD=false); latched.');
       return;
+    }
+    // v1.171.1 — tonight reached a decision NOT to charge: cancel a prior night's arm it
+    // would otherwise leave standing (see cancelStalePriorArm).
+    if (shape !== 'charge') {
+      cancelStalePriorArm(today, nowMs, shape === 'hold'
+        ? 'tonight the engine decided to HOLD (no buy needed)'
+        : 'tonight the engine had no usable plan (incomplete basis)');
     }
     // v1.50.0 — supervised arming: when the owner enabled a write mode and
     // tonight's plan is a charge, the bounded write arms FROM THE ANNOUNCED
