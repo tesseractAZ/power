@@ -6420,6 +6420,11 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.171.0 — the hourly charge-curve scan is bucketed** (`CHARGE_CURVE_BUCKET_SEC` = 60,
+analytics.ts). Unbucketed it stalled the single analytics worker 16-20 s per hour and doubled
+alarm latency for every condition that worker serves; the 200-day window is unchanged and the
+report is identical (checkpoints ±1.5%, medians, a >100 W charge gate).
+
 **v1.170.0 — the 80+ coast is retired** (owner, 2026-09-18). The software stop applies at every
 target again, at `forceChargeStopPct` = min(target, the synced whole-number ceiling). The live rate
 is also bounded by connected slots × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` (5.5 kW, the least each Core

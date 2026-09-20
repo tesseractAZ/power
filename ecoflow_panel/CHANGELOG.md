@@ -1,3 +1,22 @@
+## 1.171.0
+
+### The hourly pack scan no longer stalls the analytics worker
+
+Log audit (2026-09-20): `computeChargeCurveFingerprint` read **every raw sample** of three
+metrics, per pack, per Core, over a 200-day window, and pinned the single analytics worker for
+**16-20 s every hour**. An alert-monitor tick that landed inside the stall waited it out, and the
+next tick was dropped by the re-entrancy guard — so alarm latency for the conditions that worker
+serves (forecast, runway, baseline, curtailment) doubled to ~40 s.
+
+The scan now asks the recorder to bucket at **60 s**. That costs the report nothing: SoC is
+matched to checkpoints at ±1.5%, the voltages behind each checkpoint are reduced to a median, and
+the "is it charging" gate is a coarse >100 W. The bucketing happens in SQLite on shared boundaries
+for all three metrics, so the snap-to-nearest join now lines up exactly instead of approximately.
+The 200-day window is unchanged.
+
+New harness `scripts/mutate-charge-curve-bucket.mjs` (2/2) — dropping the bucket, or widening it
+past the checkpoint tolerance, is otherwise invisible in every report the scan produces.
+
 ## 1.170.0
 
 ### The 80%+ coast is retired — force-charge stops at the target, whatever the target
