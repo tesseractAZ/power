@@ -4488,6 +4488,15 @@ export function computeEvWindowPrediction(
 
 const CHARGE_CURVE_TTL_MS = 60 * 60 * 1000;
 const CHARGE_CURVE_HISTORY_MS = 200 * 24 * 60 * 60 * 1000;
+/** v1.171.0 — bucket the 200-day pack scan. UNBUCKETED it read every raw sample of three
+ *  metrics for every pack of every Core (log 2026-09-19/20: the single analytics worker was
+ *  pinned 16-20 s every hour, so an alert tick landing inside the stall waited it out and
+ *  the next one was dropped by the re-entrancy guard — alarm latency doubled to ~40 s).
+ *  60 s costs the report nothing: SoC is matched to checkpoints at ±1.5%, voltages are
+ *  reduced to a median per checkpoint, and the charge gate is a coarse >100 W. The SQL
+ *  buckets on shared boundaries for all three metrics, so the snap-to-nearest join lines
+ *  up exactly instead of approximately. */
+const CHARGE_CURVE_BUCKET_SEC = 60;
 const CHARGE_CHECKPOINTS = [40, 60, 80, 95];
 const CHARGE_CHECKPOINT_TOLERANCE_PCT = 1.5; // record V whenever SoC is within ±this of a checkpoint
 const CHARGE_BASELINE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000; // first 14 days = baseline
@@ -4532,6 +4541,7 @@ export function computeChargeCurveFingerprint(
       // v0.20.0 — one round-trip instead of three (same ts-ASC per-metric rows).
       const byMetric = recorder.queryMulti(
         d.sn, [`pack${pk.num}_soc`, `pack${pk.num}_vol_max_mv`, `pack${pk.num}_in`], since, now,
+        CHARGE_CURVE_BUCKET_SEC,
       );
       const socPts = byMetric.get(`pack${pk.num}_soc`) ?? [];
       const vMaxPts = byMetric.get(`pack${pk.num}_vol_max_mv`) ?? [];
