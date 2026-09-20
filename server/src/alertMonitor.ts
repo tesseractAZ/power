@@ -2574,6 +2574,19 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         //     silently swallow the retry of a CRITICAL break-through push.
         existing.queued = false;
         const outcome = await dispatch(a, 'new');
+        if (outcome === 'failed') {
+          // v1.171.1 — the next tick retries only while the alert is STILL ACTIVE. A
+          // short-lived alert whose one attempt failed reached the owner on no channel at
+          // all (2026-09-19 15:00: "[High] Telemetry stale" lost to an HA Headers Timeout,
+          // never retried, never digested). Hold it for the morning digest as well, so
+          // delivery no longer depends on the condition outliving the failure. A later
+          // successful dispatch clears `queued` above, so it is never reported twice.
+          existing.queued = true;
+          const heldAt = quietQueue.findIndex((q) => q.id === a.id);
+          if (heldAt >= 0) quietQueue[heldAt] = a; else quietQueue.push(a);
+          persistDigestState();
+          log(`notify: held "${a.title}" for the morning digest — its push failed and the condition may clear before a retry`);
+        }
         if (outcome !== 'failed') {
           existing.notified = true;
           existing.notifiedSeverity = a.severity;
