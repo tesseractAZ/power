@@ -54,9 +54,9 @@ test('★★ the 23:00 cutoff does NOT cancel — it names the arm that will wri
 /* ══ 2-3. an EcoFlow "success with no data" is named, and never cached ═════ */
 
 test('★★★ a code-0 reply with no payload throws its own named error', () => {
-  assert.ok(REST.includes('if (parsed.data == null) {'), 'the payload is checked');
+  assert.ok(REST.includes("if (method !== 'PUT' && parsed.data == null) {"), 'the payload is checked — on READS only');
   assert.ok(REST.includes('EcoFlow API returned success (code 0) with no data payload for ${path}'));
-  const check = REST.indexOf('if (parsed.data == null) {');
+  const check = REST.indexOf("if (method !== 'PUT' && parsed.data == null) {");
   assert.ok(check < REST.indexOf('return parsed.data;'), 'checked before it is returned');
 });
 
@@ -82,4 +82,13 @@ test('★★★ a failed push is held for the morning digest, not dropped', () =
   // The retry contract is unchanged: nothing advances on failure.
   const success = block.slice(block.indexOf("if (outcome !== 'failed') {"));
   assert.ok(success.includes('existing.notified = true;') && success.includes('persistNotified();'));
+});
+
+test('★★★ v1.171.2 — a WRITE answering success with no data is a SUCCESS (the false revert CRITICAL)', () => {
+  // 2026-09-21 05:05: the reserve revert reached the panel (it read 16%) but v1.171.1's
+  // payload check threw on the PUT's legitimately empty reply — 15 "failures", an
+  // escalation, and a spoken CRITICAL that the reserve was stuck at 50%.
+  const put = REST.indexOf("call<unknown>('PUT', '/iot-open/sign/device/quota'");
+  assert.ok(put > 0, 'writes go through call() as PUT');
+  assert.ok(REST.includes("method !== 'PUT'"), 'the empty-payload rejection exempts writes');
 });

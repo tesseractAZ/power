@@ -1,3 +1,24 @@
+## 1.171.2
+
+### Fix: v1.171.1 reported every panel WRITE as failed
+
+v1.171.1 made the EcoFlow client reject a code-0 ("success") reply that carries no data — right
+for reads, where an empty payload had wiped every Core's cached quota. But it applied the check to
+**every** call, and a **write** (PUT) legitimately answers success with no data. So every panel
+write after that release was reported as failed although it took effect.
+
+2026-09-21: the 05:05 reserve revert reached the panel — it read 16% — yet was counted as 15
+failures, escalated, and **spoke a false CRITICAL** ("reserve stuck at 50 percent") with a critical
+push. Left alone, the unresolved revert would also have refused tonight's arming.
+
+The check now applies to reads only. The revert keeps retrying every few minutes, so the first
+retry after this deploy is acknowledged and the night closes normally.
+
+The force-charge that night was otherwise correct: ON at 00:05 (timed from the live rate), OFF at
+**the 84.5% target** at 04:39, readback-verified at 04:40, the panel's ceiling restored at 04:42.
+
+`mutate-audit-fixes-0920.mjs` 7/7 (one mutant repointed, one added); 1 new test.
+
 ## 1.171.1
 
 ### The other four findings of the 2026-09-20 log audit
