@@ -91,7 +91,11 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
   // unchecked it returned undefined and surfaced as a TypeError naming a BMS field deep
   // inside the projector — indistinguishable from a device fault — and, worse, it was
   // cached as the device's raw quota (see snapshot.ts setDeviceQuota).
-  if (parsed.data == null) {
+  // ★★★ v1.171.2 — READS ONLY. A WRITE (PUT) legitimately answers code 0 with no data:
+  // v1.171.1 applied this to every call, so every panel write since was reported as
+  // FAILED although it took effect — the 2026-09-21 05:05 reserve revert reached the
+  // panel (it read 16%) yet failed 15 times, escalated, and spoke a false CRITICAL.
+  if (method !== 'PUT' && parsed.data == null) {
     throw new Error(`EcoFlow API returned success (code 0) with no data payload for ${path}`);
   }
   return parsed.data;

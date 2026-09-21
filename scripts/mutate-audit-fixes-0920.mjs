@@ -51,7 +51,7 @@ const MUTANTS = [
   {
     id: 'iv. ★★★ a code-0 reply with no payload is passed through',
     file: REST,
-    find: '  if (parsed.data == null) {',
+    find: "  if (method !== 'PUT' && parsed.data == null) {",
     to: '  if (false) { /* MUTANT */',
     why: 'undefined reaches the projector as a TypeError naming a BMS field — a vendor empty-success reads as five Cores failing at once.',
   },
@@ -68,6 +68,13 @@ const MUTANTS = [
     find: "        if (outcome === 'failed') {",
     to: "        if (false) { /* MUTANT */",
     why: 'A short-lived High alert whose one push attempt fails reaches the owner on no channel at all — overnight the phone is the only channel.',
+  },
+  {
+    id: 'vii. \u2605\u2605\u2605 a WRITE with no data is treated as a failure again',
+    file: REST,
+    find: "  if (method !== 'PUT' && parsed.data == null) {",
+    to: '  if (parsed.data == null) { /* MUTANT */',
+    why: 'Every panel write is reported FAILED although it took effect \u2014 the 2026-09-21 false "reserve stuck at 50%" CRITICAL, and tomorrow\u2019s arming refused behind it.',
   },
 ];
 
