@@ -1,3 +1,52 @@
+## 1.173.0
+
+### The open list of 2026-09-21: cost mode is asked on high-pack nights, per-pack state follows the battery, the charge cap follows the connected Cores, and stale-data warnings stop speaking
+
+**Owner (2026-09-21):** *"Please address 1-8. For 12, the charge cap is variable based upon home
+load. Perhaps set at 16 kW for now or think of a better approach."*
+
+- **Cost mode is asked on a high-pack night.** When the pack at window close already cleared
+  floor + cushion, the planner returned HOLD before cost mode ran — so the Thursday rule (and every
+  cost ceiling) could never raise a night that started high. Cost mode now continues with a
+  resilience lift of zero and holds only when the cost target is not worth a buy. A replayed
+  Thursday at 70% buys ~27 kWh toward 90% instead of holding.
+- **Per-pack alert state follows the BATTERY, not the slot.** Alert ids stay (chassis, slot) —
+  they are persisted and user-visible — but when a different pack occupies a slot (Core 4,
+  2026-09-20: pack 1 pulled, the rest renumbered 1–4) the retired episode's notify record is
+  forgotten (its first push was being swallowed), its onset restarts (its cleared record spanned
+  two batteries), the vdiff warn-hold no longer carries over, and the learned families
+  (baseline, forecast-SoH, forecast-imbalance) now carry the serial so the check can see them.
+  Pushes and the digest name the battery by a 6-character serial tail. The confirmed-defective
+  latch was already keyed by serial. A real serial tail in a public test fixture was replaced.
+- **The planner no longer plans on a stale panel.** It reads the panel through the same freshness
+  gate as the actuator; a stale reading at 21:30 DEFERS the evening job (retrying inside the
+  catch-up window) instead of latching an "incomplete basis" night.
+- **A deadline page silenced by quiet hours is re-spoken** every 30 min until heard (Friday's
+  deadline lands at Sat 01:00); the push is not repeated.
+- **Blind (no-readback) Charge Now OFF re-sends stop 12 h after the first OFF.**
+- **The panel ceiling RESTORE is an own-write** — no false "Setting changed" push after a night
+  whose force-charge never started.
+- **The solar record is the TRUE realized series for training, soiling and skill reporting**
+  (GHI stage 2). The probabilistic band calibrator stays on the first-write series — switching it
+  would cut weekend-carry widening ~40%, an owner decision.
+- **Smaller:** the poll-slow line names failures outside the standing 1006 accessory set; the
+  escalation text matches the re-send behaviour; the ledger records which surplus basis and
+  whether the long-gap rule set the cost ceiling; with a Core out, a predicted EV only displaces
+  what the per-Core bound's slack cannot absorb.
+- **12 — the charge cap is AUTO.** `ARB_CHARGE_CAP_KW` = 0 (the new default) derives the planner's
+  grid-side cap from the connected Cores × 5.5 kW into the pack (≈ 5.9 kW each at the grid,
+  ≈ 17.8 kW for three); the home load comes off separately through the grid-input envelope
+  (17 kW). The fixed 7.2 kW under-stated the ~15 kW the pack actually takes, so every plan
+  announced a lower target than the night reached. A Core out lowers it on its own; > 0 is an
+  owner override. The planner and the force-charge start now use one model.
+- **The "Telemetry stale" warning no longer speaks** — it spoke a yellow ~20 s after every
+  restart (a device reads stale until its first fresh reading) and at stale episodes. Push and
+  card kept; the telemetry-blind CRITICAL stays the audible, remediation-first path (v1.172.1
+  did the same for the message-rate collapse warning).
+
+Harnesses: new `mutate-pack-identity.mjs` (5/5); `mutate-realized-ghi.mjs` extended (25/25);
+`mutate-blind-remediation.mjs` 16/16; `mutate-force-charge.mjs` 66/66.
+
 ## 1.172.1
 
 ### The message-rate collapse warning no longer speaks

@@ -42,8 +42,8 @@ const MUTANTS = [
   {
     id: 'v1.173.0 ★★★ the rate-collapse warning speaks again at the onset',
     file: BC,
-    find: "      !a.id.startsWith('msg-rate-floor-'),",
-    to: '      true, /* MUTANT */',
+    find: "      !a.id.startsWith('msg-rate-floor-') &&",
+    to: '      true && /* MUTANT */',
     why: 'Every cloud stale-shadow episode speaks a yellow ~4 min before the remediation even starts — against the owner’s remediate-first rule.',
   },
   {

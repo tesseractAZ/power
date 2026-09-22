@@ -6446,6 +6446,19 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.173.0 — the 2026-09-21 open list.** Cost mode continues past the planner's early
+resilience HOLD (holding only when the cost target is not worth a buy). Per-pack alert state follows
+the pack serial: `detectPackResidencyChanges` retires an episode whose `sourcePackSn` changed,
+forgets its notify record and restarts its onset (`restampAlertOnset`); the vdiff warn-hold is
+keyed to the serial; learned per-pack families stamp `sourcePackSn`; `notifyLocator` adds a
+6-character serial tail. The planner reads the panel through `shp2ReadbackFresh` and a stale
+reading defers the evening job. `ARB_CHARGE_CAP_KW` = 0 is AUTO (`planChargeCapKw`: connected
+Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadline page is re-spoken
+(`forceChargeOffDeadlineMutedAtMs`, bounded); blind OFF re-sends stop after
+`FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
+the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
+condition (push and card kept).
+
 **v1.172.0 — ghost pack slots are hidden** (`packPresence.ts`, applied after every DPU projection
 in `snapshot.ts`). The cached raw quota never forgets a `hs_yj751_bms_slave_addr.N.*` slot, so a
 removed or renumbered pack lingered at its last readings. A slot frozen ≥ 10 min behind every kept
