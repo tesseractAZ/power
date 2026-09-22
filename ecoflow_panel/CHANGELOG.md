@@ -1,3 +1,43 @@
+## 1.176.0
+
+### The dashboard says how old its data is — and stops saying "live" over stale data
+
+- **The LIVE pill needs fresh readings, not just an open link.** It was the WebSocket's state
+  alone, and a socket stays open while the server has nothing new to send: it read LIVE, green,
+  through the 2026-09-22 03:17–03:28 EcoFlow cloud outage. It now reads **live** only when every
+  home reading — the panel and each online Core wired to it — is under three minutes old (the
+  alarm engine's own "Telemetry stale" threshold), and **stale** otherwise.
+- **"updated N ago" is the age of the oldest reading, and keeps counting.** It printed the
+  snapshot's `generatedAt`, which the server bumps on every poll FAILURE — the harder the cloud
+  failed, the fresher the header looked — and it only re-rendered when a new snapshot arrived.
+  It now reads a new server clock, `lastTelemetryAtMs`, moved only when telemetry content lands
+  (not by a `/status` online flip, a failed poll or an empty payload), and ticks every 5 s.
+- **A panel replaying a stale cloud copy is stale.** The EcoFlow cloud can answer the panel's
+  poll with 200 OK and a replayed body; the server flags it and raises "Panel data is stale"
+  (21 episodes 2026-09-13..21), but every replay refreshed the panel's clock. Its reading time
+  is now capped at when the replay began. A panel that has not reported since a restart counts
+  as never reported, found by identity even before its first projection arrives.
+- **Ages are measured on the server's clock.** Every reading time is server-stamped, so
+  comparing them with the browser's clock made the pill wrong by any skew between the viewing
+  device and the host (this host has no RTC and boots on a baked-in date until NTP). Each
+  WebSocket frame now carries the server's time at send, and the browser measures ages against
+  it, taking the least-delayed frame so a backlog shows as age rather than skew.
+- **Runway, Today and Curtailment say when their figures are old.** Each kept its last payload
+  indefinitely when refreshes failed — Runway set an error flag nothing read after its first
+  success, Today returned silently — with nothing on screen to say so. They now show "stale · as
+  of <time>" (naming the day when it is not today) once they have missed their polls. The Today
+  card and the Solar tab's Today tile drop a payload whose day is over instead of showing
+  yesterday's totals under "since 12:00 AM"; `/api/summary/today` now returns `dayEndMs`, exact
+  across daylight-saving changes.
+- **Two pages no longer take the dashboard down on a server error.** The Solar tab and the
+  circuit popup stored an HTTP 500 body as data, and the render then threw — the whole dashboard
+  fell to its error screen, e.g. when the Solar tab polled during an add-on restart. A failed
+  Solar history request now keeps the last good chart instead of blanking the day. The Insights
+  sections no longer render an error body as their payload.
+
+Pure logic in `web/src/freshness.ts`, run by the server suite; new harness
+`scripts/mutate-dashboard-freshness.mjs` (23 anchor-asserted mutants).
+
 ## 1.175.0
 
 ### The Energy flow card draws the grid where it goes, and a silent panel is no longer a 0 W house

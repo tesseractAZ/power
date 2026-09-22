@@ -162,8 +162,8 @@ const MUTANTS = [
   {
     id: 'xix. \u2605\u2605\u2605 the /device/list rebuild drops the telemetry clock',
     file: SNAP,
-    find: '        lastTelemetryAtMs: existing?.lastTelemetryAtMs, // v1.176.0 \u2014 same trap, same carry\n',
-    to: '        /* MUTANT */\n',
+    find: '        lastTelemetryAtMs: existing?.lastTelemetryAtMs,',
+    to: '        /* MUTANT */',
     why: 'Every 60 s the clock resets to undefined; between polls every device reads as never having reported.',
   },
   {
