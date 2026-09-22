@@ -7994,9 +7994,9 @@ export function parsePvBandSigmaCal(raw: string | undefined): number | null {
  *
  *  v1.173.0 (GHI stage 2) — model/display consumers (solar-model training, soiling
  *  decomposition, /api/forecast-skill, /api/confidence, the forecast-bias repair card,
- *  the alarm-model backtest) now score on realized irradiance, but this calibrator still
- *  receives the skill computed with ghiBasis = 'first-write' (reports.ts passes it
- *  explicitly, and it is the default). Its errors keep a ~3-4-day-lead weather-forecast
+ *  the alarm-model backtest) now score on realized irradiance. ★ v1.173.1 — so does this
+ *  calibrator (owner decision 2026-09-21: reports.ts passes ghiBasis = 'realized'; the
+ *  function default stays 'first-write'). The text below records why it was a decision. Its errors keep a ~3-4-day-lead weather-forecast
  *  component, which is ALSO what realizedDailyErrHalfFrac feeds into the night-charge
  *  multi-day widening (nightChargeAdvisor.ts: widen = max(0, realizedDailyErrHalfFrac) ×
  *  √(days ahead)); a realized-only basis would remove that component and under-widen

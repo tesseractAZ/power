@@ -33,6 +33,20 @@ const SUBSET = ['test/blindRemediation.test.ts', 'test/blindPanelWording.test.ts
 
 const MUTANTS = [
   {
+    id: 'v1.173.1 ★★ the boot yellow confirmation never holds',
+    file: BC,
+    find: '  return yellowSinceMs == null || nowMs - yellowSinceMs < BOOT_YELLOW_CONFIRM_MS;',
+    to: '  return false; /* MUTANT */',
+    why: 'Every restart speaks a yellow ~20-60 s after boot for a transient that clears on its own.',
+  },
+  {
+    id: 'v1.173.1 ★★ the monitor skips the boot yellow confirmation',
+    file: BC,
+    find: "    if (holdBootYellow(level === 'yellow' && transitioned, Date.now() - bootMs, warmupYellowSinceMs, Date.now())) {",
+    to: '    if (false) { /* MUTANT */',
+    why: 'The hold exists and never runs — the restart announcements come back.',
+  },
+  {
     id: 'v1.173.0 ★★ the Telemetry stale warning speaks again',
     file: BC,
     find: "      !a.id.startsWith('stale-'),",

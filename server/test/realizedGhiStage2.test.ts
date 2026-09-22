@@ -237,10 +237,11 @@ function builderSkillBasis(builder: string): string[] {
   return bases;
 }
 
-test("★★★ the band calibrator's skill is passed 'first-write' EXPLICITLY (switching it is an owner decision)", () => {
+test("★★★ v1.173.1 — the band calibrator's skill is passed 'realized' EXPLICITLY (owner decision 2026-09-21)", () => {
   // It sets skillFrac, bandSigmaCal, bandRealizedCoveragePct (the night-charge basis gate)
-  // and realizedDailyErrHalfFrac (the multi-day widening that sizes the buy).
-  assert.deepEqual(builderSkillBasis('probabilisticForecast'), ['first-write']);
+  // and realizedDailyErrHalfFrac (the multi-day widening that sizes the buy). The owner chose
+  // "the more accurate data"; a silent revert to first-write must fail here.
+  assert.deepEqual(builderSkillBasis('probabilisticForecast'), ['realized']);
 });
 
 test("the display skill report (/api/forecast-skill, /api/confidence, the repair card) scores 'realized'", () => {

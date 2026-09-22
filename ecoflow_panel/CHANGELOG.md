@@ -1,3 +1,25 @@
+## 1.173.1
+
+### The band calibrator uses the more accurate solar data, and a restart no longer speaks a yellow
+
+**Owner (2026-09-21):** *"switch to the more accurate data."* The probabilistic band calibrator
+(skillFrac, bandSigmaCal, the night-charge basis gate, and `realizedDailyErrHalfFrac` — the
+multi-day widening that sizes the buy) now scores on the **realized** irradiance series, like every
+other consumer since v1.173.0. Its errors stop carrying a ~3-4-day-lead weather-forecast component
+that is not the day-ahead band's own error. Expect the multi-day widening to narrow (~40% on the
+2026-09 window), so weekend and Thursday carries buy somewhat less. Hours with no realized capture
+fall back to the first-write value.
+
+**Owner report (2026-09-21):** *"lots of announcements."* Every restart spoke a yellow ~20-60 s
+after boot — five that day. Startup transients do it: an off-panel Core's standing warnings are
+muted only once its off-panel streak rebuilds (it restarts at zero), and learned alerts re-warm.
+The restart-continuation gate only suppressed a yellow at or below the pre-restart level. Inside
+the 10-minute warm-up window a fresh yellow must now persist **2 minutes** before it is spoken; a
+genuine standing warning is delayed by at most that. Red is untouched.
+
+`mutate-blind-remediation.mjs` 18/18 (two added); `mutate-realized-ghi.mjs` 25/25 (xv REPLACED —
+the owner took the decision it guarded; it now catches a silent revert); 2 new tests.
+
 ## 1.173.0
 
 ### The open list of 2026-09-21: cost mode is asked on high-pack nights, per-pack state follows the battery, the charge cap follows the connected Cores, and stale-data warnings stop speaking
