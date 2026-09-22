@@ -11,11 +11,12 @@ import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
  *
  * Every edge carries the flow it is drawn as, measured at the meter that sees it:
  *   Solar → Batteries   pv            — PV into the Cores
- *   Grid  → Batteries   gridToCoresW  — the Cores' own AC input (grid charging them)
+ *   Grid  → Batteries   gridToCoresW  — the home Cores' own AC input (grid charging them)
  *   Grid  → Loads       gridToHouseW  — the grid serving the house through the panel
- *   Batteries → Loads   coresToHouseW — the Cores' delivery, measured at the panel
- * and the Loads NODE is the house total the panel measured. Both edges into Loads are
- * panel-side figures, so they sum to the node by construction. The Solar and Batteries
+ *   Batteries → Loads   coresToHouseW — the Cores' delivery, never more than their inverters report
+ * and the Loads NODE is the house total the panel measured. With one source feeding the
+ * house its edge equals the node exactly; with both, each edge is bounded by its own meter
+ * and they sum to the node within the meters' disagreement. The Solar and Batteries
  * nodes are NOT balanced against them: PV is metered on the DC side and the house on the
  * AC side, and the MPPT, charger and inverter losses between them are not drawn.
  */
@@ -25,6 +26,9 @@ import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 export const FLOW_EDGE_MIN_W = 5;
 
 export type GridFlowState = 'active' | 'standby' | 'off';
+/** ok = reporting; silent = no channel watts in the payload; frozen = offline or replaying a
+ *  cloud shadow; absent = no SHP2 observed (cold boot). */
+export type PanelState = 'ok' | 'silent' | 'frozen' | 'absent';
 
 export interface EnergyFlowModel {
   /** Home DPUs drawn in the Batteries node (SHP2-connected; every online DPU on a cold boot). */
@@ -36,12 +40,14 @@ export interface EnergyFlowModel {
   /** > 0 = discharging, from per-pack flow. */
   batNet: number;
   soc: number | null;
-  /** The house total (SHP2 circuits), or NULL when a present panel reported no channel. */
+  /** The house total (SHP2 circuits), or NULL when the panel is silent or frozen. */
   load: number | null;
+  /** Why `load` is what it is. */
+  panelState: PanelState;
   /** Energized CIRCUITS (split-phase pairs count once), not channels. */
   liveCircuits: number;
   gridState: GridFlowState;
-  /** The metered total at the SHP2 main (or the Cores' import when the main is silent). */
+  /** The Grid node: the metered total at the main, never less than its own edges. */
   gridSupplyW: number;
   gridToCoresW: number;
   gridToHouseW: number;
@@ -84,21 +90,34 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   const socVals = dpus.map((d) => d.projection.soc).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
   const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
 
-  // v1.175.0 — the house load, and NULL when the panel did not report it.
+  // v1.175.0 — the house load, and NULL when the panel's figure cannot be trusted.
   //
   // ★ The old expression was `circuits.reduce((s, c) => s + (c.watts ?? 0), 0) ?? acOut`.
   // The projection ALWAYS builds twelve channel entries (project.ts loops 1..12) and sets
   // `watts: null` for any the payload omitted, so the array is never absent, `??` never
   // fired, and a panel that reported no channel watts summed to a confident 0 — "the house
-  // is drawing 0 W" — rendered identically to a real reading. Only a total absence of the
-  // SHP2 (cold boot) falls back to the Cores' AC output; a present-but-silent panel is null.
+  // is drawing 0 W" — rendered identically to a real reading.
+  // ★ A panel that is OFFLINE or replaying a cloud shadow (contentStaleSinceMs) keeps its
+  // last projection, so its channels still sum to a plausible house load — FROZEN. The
+  // server already refuses to count such a panel's grid reading (gridState.ts
+  // computeHomeGridWatts returns 0), so pairing the frozen load with that zeroed grid drew
+  // the whole house flowing out of idle batteries: the exact picture this release removes.
+  // Frozen is treated like silent. Only a total absence of the SHP2 (cold boot) falls back
+  // to the Cores' AC output.
   const circuits = shp2?.projection.circuits ?? [];
   const measured = circuits.filter((c) => c.watts != null);
-  const load: number | null = measured.length > 0
+  const panelState: PanelState = !shp2
+    ? 'absent'
+    : !shp2.online || shp2.contentStaleSinceMs != null
+      ? 'frozen'
+      : measured.length === 0
+        ? 'silent'
+        : 'ok';
+  const load: number | null = panelState === 'ok'
     ? measured.reduce((s, c) => s + (c.watts as number), 0)
-    : shp2
-      ? null
-      : acOut;
+    : panelState === 'absent'
+      ? acOut
+      : null;
 
   // v1.175.0 — COUNT CIRCUITS, NOT LEGS. `circuits` is twelve channels; a split-phase 240 V
   // circuit occupies two, and the projection pairs them in `pairedCircuits` (the SHP2 card
@@ -110,45 +129,67 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     ? groups.filter((g) => (g.watts ?? 0) > 1).length
     : circuits.filter((c) => (c.watts ?? 0) > 1).length;
 
-  // ── v0.36.0 — 3-state grid supply model ──────────────────────────────────
-  // homeGridWatts is the SHP2 main; importWatts is the Cores' AC input (grid charging
-  // them). When the snapshot predates the field, fall back to the legacy acIn signal.
+  // ── the grid ─────────────────────────────────────────────────────────────
+  // homeGridWatts is the TOTAL metered at the SHP2 main: the panel's node balance is
+  // load = grid + Core AC output, and during a charge the main also carries the Cores' AC
+  // input. The card used to draw that whole total as ONE edge into the Batteries, with the
+  // only edge into Loads coming out of the Batteries — so a grid carrying the house was
+  // drawn as the house running on battery (live 2026-09-22 03:30: grid 1901 W, house
+  // 1904 W, Core AC output 0 W, packs +16 W).
+  //
+  // v1.175.0 — the Cores' grid draw is `acIn` over the SAME Cores drawn in the Batteries
+  // node, not the server's importWatts, which also counts a source slot whose Core is not
+  // connected (gridState.ts sums every `sources` SN; the membership here admits only
+  // isConnected). Drawing a non-member's draw into this node would move watts off the
+  // grid → house edge onto a phantom Cores → house one.
   const homeGridW = grid?.homeGridWatts ?? 0;
-  const gridImportW = grid?.importWatts ?? acIn;
-  const gridSupplyW = homeGridW > 0 ? homeGridW : gridImportW;
-
-  // v1.175.0 — WHERE the grid goes. homeGridWatts is the TOTAL at the main: the panel's
-  // node balance is load = grid + Core AC output, and during a force charge the main also
-  // carries the Cores' AC input. The card drew that whole total as ONE edge into the
-  // Batteries, and the only edge into Loads came out of the Batteries — so a grid carrying
-  // the house was drawn as the house running on battery. Live 2026-09-22 03:30: grid
-  // 1901 W, house 1904 W, Core AC output 0 W, packs +16 W — the card showed 1.9 kW into a
-  // battery nothing was charging and 1.9 kW out of inverters producing 0 W.
-  // Grid → Batteries now carries only the Cores' AC input, and grid → Loads the rest,
-  // capped at the house load it points at: the main and the Core meters disagree by ~1 kW
-  // under a 16 kW charge (04:05: main 19053 W, Core input 15969 W, house 1996 W). The node
-  // keeps the metered total; the edge never claims more than the house drew.
-  const gridToCoresW = gridImportW;
-  const gridToHouseRaw = Math.max(0, homeGridW - gridImportW);
-  const gridToHouseW = load != null ? Math.min(gridToHouseRaw, load) : gridToHouseRaw;
-  // v1.175.0 — the Cores' share of the house, on the SAME meter as the Loads node. The
-  // panel has two sources — the grid and the Cores — so what it measured beyond the grid
-  // is what the Cores delivered to it. The edge used to be Math.max(load, acOut): acOut
-  // is the Cores' own inverter meter, which reads tens of watts off the panel (live
-  // 14427 W vs 14356 W; the reported screenshot showed 1925 W into a "1.89 kW" box, and
-  // ~30% of overnight 5-min buckets disagreed), so the arrow and the box it points at
-  // never agreed. Measured on the panel side, the two edges into Loads sum to the node.
-  // A residual under the edge floor is meter disagreement, not delivery (03:30: 1904.4 W
-  // house − 1900.6 W grid = 3.8 W while the Cores output 0 W), so it draws as nothing.
-  // A silent panel has no residual to take; the Cores' own meter stands in.
-  const coresResidual = load != null ? Math.max(0, load - gridToHouseW) : acOut;
-  const coresToHouseW = coresResidual < FLOW_EDGE_MIN_W ? 0 : coresResidual;
-
-  // State resolution. With `grid` present, trust its present/declared flags; otherwise
-  // derive from the legacy acIn threshold (matches the old offGrid<5).
-  const gridActive = grid ? homeGridW > 0 || gridImportW >= FLOW_EDGE_MIN_W : acIn >= FLOW_EDGE_MIN_W;
+  const gridToCoresW = acIn;
+  const gridActive = grid ? homeGridW > 0 || acIn >= FLOW_EDGE_MIN_W : acIn >= FLOW_EDGE_MIN_W;
   const gridPresent = grid ? grid.present || grid.declared : acIn >= FLOW_EDGE_MIN_W;
   const gridState: GridFlowState = gridActive ? 'active' : gridPresent ? 'standby' : 'off';
+
+  // ── who feeds the house ───────────────────────────────────────────────────
+  // The house has two sources, the grid and the Cores. The Cores are delivering only when
+  // their own inverters say so (acOut). That is the gate the first cut lacked: it took the
+  // Cores' share as the panel's remainder (house − grid share), and the panel, the main and
+  // the Core meters do not update at the same instant — at a charge ramp (03:42:52-03:43:25:
+  // main 3406 W, Core input climbing 3608 → 16275 W, house 3410 W, Core output 0 W) the
+  // remainder was the whole house, drawn flowing out of charging Cores whose inverters
+  // produced nothing. Replayed against the recorded night, the remainder put a phantom
+  // Cores → house edge on screen in more than half the charging samples.
+  //   · Cores not delivering, grid active → the grid is the house's only source: grid →
+  //     Loads is the house load (exact, whatever the main reads at that instant).
+  //   · Cores delivering, grid not feeding the house → the Cores are the only source: their
+  //     edge is the house load, so the arrow equals the box it points at (the reported view
+  //     had 1925 W into a "1.89 kW" box: the Cores' meter against the panel's).
+  //   · both → the grid's share is main − the Cores' own draw, capped at the house; the
+  //     Cores' is the remainder, capped at what their inverters report.
+  const coresDelivering = acOut >= FLOW_EDGE_MIN_W;
+  let gridToHouseW: number;
+  let coresToHouseW: number;
+  if (load == null) {
+    gridToHouseW = Math.max(0, homeGridW - acIn);
+    coresToHouseW = coresDelivering ? acOut : 0;
+  } else if (!coresDelivering) {
+    gridToHouseW = gridState === 'active' ? load : 0;
+    coresToHouseW = 0;
+  } else {
+    const gridShare = Math.min(Math.max(0, homeGridW - acIn), load);
+    if (gridShare < FLOW_EDGE_MIN_W) {
+      gridToHouseW = 0;
+      coresToHouseW = load;
+    } else {
+      gridToHouseW = gridShare;
+      coresToHouseW = Math.min(load - gridShare, acOut);
+    }
+  }
+  if (coresToHouseW < FLOW_EDGE_MIN_W) coresToHouseW = 0;
+  if (gridToHouseW < FLOW_EDGE_MIN_W) gridToHouseW = 0;
+
+  // The Grid node: the metered total at the main, but never less than what leaves it. The
+  // main updates on the panel's cadence and the Cores' input on theirs; at a charge ramp the
+  // main still read 3.41 kW while 16.3 kW was already drawn into the Cores.
+  const gridSupplyW = Math.max(homeGridW, gridToCoresW + gridToHouseW);
 
   return {
     dpuCount: dpus.length,
@@ -158,6 +199,7 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
     batNet,
     soc,
     load,
+    panelState,
     liveCircuits,
     gridState,
     gridSupplyW,

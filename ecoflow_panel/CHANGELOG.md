@@ -11,25 +11,40 @@
   the Cores' own AC input only (grid charging them) and a separate grid → Loads edge, routed below
   the battery node, for the rest, capped at the house load. During a force charge both appear
   (04:05: 15,969 W into the Cores, 1,996 W to the house); the grid node keeps the metered total.
-- **The arrow into Loads matches the Loads box.** The edge was `Math.max(load, acOut)`: the Cores'
-  inverter meter against the panel's own total, two meters that differ by tens of watts (the
-  reported view showed 1925 W into a "1.89 kW" box; live 14,427 W into "14.36 kW"; about 30% of
-  overnight 5-minute buckets disagreed). The Cores' share is now taken on the panel side — the
-  house total less the grid's share — so the two edges into Loads sum to the box. A residual
-  under 5 W is meter disagreement and is not drawn.
+- **Each edge into Loads is bounded by its own meter, and a sole source equals the box.** The
+  Batteries → Loads edge was `Math.max(load, acOut)`: the Cores' inverter meter against the panel's
+  own total, two meters that differ by tens of watts (the reported view showed 1925 W into a
+  "1.89 kW" box; live 14,427 W into "14.36 kW"; about 30% of overnight 5-minute buckets
+  disagreed). The Cores now count as delivering only when their inverters report output. When
+  they are the house's only source, their edge is the house total, so the arrow equals the box;
+  when the Cores are idle and the grid is active, the grid → Loads edge is the house total; with
+  both, the grid's share is the main less the Cores' own draw and the Cores' share is the
+  remainder, never more than their inverters report. The panel, the main and the Cores' meters do
+  not update at the same instant — at the 03:43 charge ramp the main still read 3.41 kW while
+  16.3 kW was already flowing into the Cores — so the Grid node is never shown smaller than the
+  edges leaving it.
 - **Circuits are counted as circuits.** The subtitle counted energized channels, so a six-circuit
   split-phase panel read "9 circuits" (and could read 12) beside an SHP2 card that says
   "Circuits (6)". It now counts the panel's paired circuits.
+- **A panel that is offline or replaying a cloud shadow is not read as live.** The server already
+  zeroes such a panel's grid reading; its channels still held the frozen house load, which would
+  have drawn a grid-fed house flowing out of idle batteries. The Loads node reads "—" with "panel
+  data stale", and the Cores' grid draw is counted over the same Cores the Batteries node shows
+  (the server's import figure also counts a source slot whose Core is not connected).
 - **A panel that reports no channel watts reads "—", and records nothing.** The SHP2 projection
   always carries twelve channel entries, with `watts: null` for any the payload omitted. The card
   summed them to 0 W, and the recorder started its `panel_load` sum at 0 and stored that as a
   measured "house drew 0 W" — a row the Today tiles integrate and the night-charge load model and
   band calibration learn from. The card now shows "—" with "panel not reporting", and the
-  recorder writes no row, so the gap is a coverage gap every consumer already handles.
+  recorder writes no row, so the gap is a coverage gap every consumer already handles. The
+  runway's last-resort fallback re-used its own previous recent load, which each compute wrote
+  back, so with no rows it would carry a pre-silence load (an EV charging) forward indefinitely;
+  the carry now lasts only while a real reading is under two hours old.
 
 The card's numbers now come from a pure module, `web/src/cards/energyFlowModel.ts`, which the
-server test suite imports and runs against the recorded 03:30, 04:05 and midday scenes. New harness
-`scripts/mutate-energy-flow.mjs` (9 anchor-asserted mutants). The Solar and Batteries nodes are
+server test suite imports and runs against recorded scenes from 2026-09-22 (the 03:30 backstop, the
+03:43 charge ramp, the 04:05 and 04:35 steady charge, midday solar). New harness
+`scripts/mutate-energy-flow.mjs` (13 anchor-asserted mutants). The Solar and Batteries nodes are
 not balanced against the house: PV is metered on the DC side and the house on the AC side, and the
 MPPT, charger and inverter losses between them are not drawn.
 

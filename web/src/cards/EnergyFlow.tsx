@@ -37,7 +37,7 @@ export function EnergyFlow({ devices, grid }: Props) {
   // v1.175.0 — every number on this card comes from energyFlowModel (pure, and run by the
   // test suite); this component only lays them out.
   const {
-    dpuCount, spareCount, pv, acOut, batNet, soc, load, liveCircuits,
+    dpuCount, spareCount, pv, batNet, soc, load, panelState, liveCircuits,
     gridState, gridSupplyW, gridToCoresW, gridToHouseW, coresToHouseW,
   } = energyFlowModel(devices, grid);
 
@@ -102,11 +102,11 @@ export function EnergyFlow({ devices, grid }: Props) {
         {(gridState === 'standby' || (gridState === 'active' && gridToCoresW < FLOW_EDGE_MIN_W && gridToHouseW < FLOW_EDGE_MIN_W)) && (
           <StandbyLink from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} color={HUES.grid} />
         )}
-        {/* Batteries → Loads: the Cores' delivery, measured at the panel (see
-            coresToHouseW). v1.175.0 — was Math.max(load, acOut), two meters on opposite
-            sides of the panel, so the arrow and the box it points at disagreed, and a
-            grid-fed house was drawn flowing out of idle packs. The Loads NODE is the house
-            total; this edge and grid → Loads are its two panel-side parts. */}
+        {/* Batteries → Loads: the Cores' delivery to the house (see coresToHouseW) — the
+            house total when they are its only source, never more than their inverters
+            report. v1.175.0 — was Math.max(load, acOut), two meters on opposite sides of
+            the panel, so the arrow and the box it points at disagreed, and a grid-fed house
+            was drawn flowing out of idle packs. */}
         <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={coresToHouseW} color={HUES.soc} period={period(coresToHouseW)} strokeW={strokeW(coresToHouseW)} label="cores-to-house" />
 
         {/* Solar node */}
@@ -134,11 +134,11 @@ export function EnergyFlow({ devices, grid }: Props) {
           accent={socAccent(soc)}
         />
         {/* Loads node */}
-        {/* v1.175.0 — a panel that reported no channel watts reads "—", not "0 W". */}
+        {/* v1.175.0 — a panel that is silent or frozen (offline / cloud shadow) reads "—", not a number. */}
         <Node
           {...Loads}
           title="Loads"
-          subtitle={load == null ? 'panel not reporting' : `${liveCircuits} circuit${liveCircuits === 1 ? '' : 's'}`}
+          subtitle={load == null ? (panelState === 'frozen' ? 'panel data stale' : 'panel not reporting') : `${liveCircuits} circuit${liveCircuits === 1 ? '' : 's'}`}
           value={load == null ? '—' : fmtW(load)}
           icon="⌂"
           accent={HUES.soc}
