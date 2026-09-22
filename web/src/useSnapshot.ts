@@ -3,6 +3,7 @@ import type { FleetSnapshot } from './types';
 import { wsUrl } from './api';
 
 import type { ConnState } from './freshness';
+import { nextClockOffset } from './freshness';
 export type { ConnState };
 
 /**
@@ -20,6 +21,8 @@ export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState
   useEffect(() => {
     let stopped = false;
     let ws: WebSocket | null = null;
+    /** Least browser-minus-server sample on the current socket (see onmessage). */
+    let minOffset: number | null = null;
     let reconnectTimer: number | null = null;
 
     const connect = () => {
@@ -32,6 +35,7 @@ export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState
       ws.onopen = () => {
         setConn('open');
         retryRef.current = 0;
+        minOffset = null;
       };
       ws.onmessage = (ev) => {
         try {
@@ -39,7 +43,12 @@ export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState
           if (m.type === 'snapshot') {
             setSnapshot(m.data);
             if (typeof m.serverNowMs === 'number' && Number.isFinite(m.serverNowMs)) {
-              setClockOffsetMs(Date.now() - m.serverNowMs);
+              // The minimum sample since the socket opened (nextClockOffset); reset on reconnect.
+              const next = nextClockOffset(minOffset, Date.now() - m.serverNowMs);
+              if (next !== minOffset) {
+                minOffset = next;
+                setClockOffsetMs(next);
+              }
             }
           }
         } catch {

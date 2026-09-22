@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  linkState, oldestHomeTelemetryAt, homeDevices, pollStale, dayWindowExpired, readingAt, isPanel, staleAsOf,
+  linkState, oldestHomeTelemetryAt, homeDevices, pollStale, dayWindowExpired, readingAt, isPanel, staleAsOf, nextClockOffset,
   TELEMETRY_STALE_MS, POLL_STALE_MISSES,
 } from '../../web/src/freshness.js';
 
@@ -27,9 +27,13 @@ type Any = any;
 const NOW = Date.UTC(2026, 8, 22, 10, 25); // 03:25 local, mid-outage
 const S = 1000, MIN = 60_000;
 
-const dpu = (sn: string, lastUpdated: number, online = true): Any => ({ sn, deviceName: sn, online, lastUpdated, projection: { kind: 'dpu' } });
-const shp2 = (lastUpdated: number, sources: string[]): Any => ({
-  sn: 'SHP2', deviceName: 'SHP2', online: true, lastUpdated,
+// Fixtures stamp BOTH clocks with the reading time; tests that need them to differ set
+// lastTelemetryAtMs explicitly. (readingAt reads only lastTelemetryAtMs.)
+const dpu = (sn: string, at: number, online = true): Any => ({
+  sn, deviceName: sn, online, lastUpdated: at, ...(at > 0 ? { lastTelemetryAtMs: at } : {}), projection: { kind: 'dpu' },
+});
+const shp2 = (at: number, sources: string[]): Any => ({
+  sn: 'SHP2', deviceName: 'SHP2', online: true, lastUpdated: at, ...(at > 0 ? { lastTelemetryAtMs: at } : {}),
   projection: { kind: 'shp2', sources: sources.map((sn, i) => ({ slot: i + 1, sn, isConnected: true })) },
 });
 const other = (sn: string, lastUpdated: number): Any => ({ sn, deviceName: sn, online: false, lastUpdated, projection: { kind: 'other' } });
@@ -209,14 +213,38 @@ test('the server stamps its clock on every frame at SEND time, and the day end o
   assert.ok(idx.includes('return `{"type":"snapshot","serverNowMs":${Date.now()},"data":${wsDataStr}}`;'),
     'the stamp is per send, not cached with the body');
   assert.ok(idx.includes('dayEndMs: end.getTime()'), '/api/summary/today carries the day end');
-  assert.ok(web('useSnapshot.ts').includes('setClockOffsetMs(Date.now() - m.serverNowMs);'));
+  const hook = web('useSnapshot.ts');
+  assert.ok(hook.includes('nextClockOffset(minOffset, Date.now() - m.serverNowMs)') && hook.includes('minOffset = null;'), 'min offset per socket, reset on reconnect');
 });
 
 test('other pages no longer store an HTTP error body as data (each crashed the whole dashboard)', () => {
   const solar = web('pages/SolarPanel.tsx');
-  assert.ok(solar.includes('if (sumR.ok) {') && solar.includes('r.ok ? ((await r.json())'), 'Solar tab');
+  assert.ok(solar.includes('if (sumR.ok) {') && solar.includes('if (!r.ok) throw new Error(`history'), 'Solar tab: a failed series keeps the last good chart');
+  assert.ok(solar.includes('dayWindowExpired(summaryState,'), 'Solar tab: an expired day is not "Today"');
   const modal = web('components/CircuitModal.tsx');
   assert.ok(modal.includes('const j2 = r2.ok ?') && modal.includes('if (j2 && Array.isArray(j2.days)) setHistory(j2);'), 'circuit modal');
   const curt = web('cards/CurtailmentCard.tsx');
   assert.ok(curt.includes("usePolled<CurtailmentReport>('api/curtailment', CURTAILMENT_POLL_MS)") && curt.includes('<StaleNote'), 'curtailment marks stale');
+});
+
+/* ══ v1.176.0 re-review ════════════════════════════════════════════════════ */
+
+test('★★★ after a restart, a panel whose /status flips but has sent no telemetry is STALE, not LIVE', () => {
+  // setDeviceOnline stamped lastUpdated 30 s ago; no quota has landed since boot. A
+  // `lastTelemetryAtMs ?? lastUpdated` fallback read that flip as a fresh reading.
+  const panel: Any = { sn: 'SHP2', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2', online: true, lastUpdated: NOW - 30 * S };
+  const d = devs(panel, dpu('C1', NOW), dpu('C2', NOW), dpu('C5', NOW));
+  assert.equal(readingAt(panel), 0, 'no telemetry since boot');
+  assert.equal(linkState('open', d, NOW), 'stale');
+});
+
+test('★★ the clock offset is the MINIMUM sample: a growing transport backlog shows as age, not skew', () => {
+  // Skew 2 s; frames arrive with a lag growing from 0.1 s to 180 s.
+  let off: number | null = null;
+  for (const lag of [100, 400, 5_000, 60_000, 180_000]) off = nextClockOffset(off, 2_000 + lag);
+  assert.equal(off, 2_100, 'the least-delayed frame sets the offset; the backlog is not absorbed');
+  // A later, less-delayed frame lowers it (a better estimate).
+  assert.equal(nextClockOffset(off, 2_010), 2_010);
+  // A fresh socket starts over (reconnect).
+  assert.equal(nextClockOffset(null, -45_000), -45_000, 'a slow viewer clock is a negative offset');
 });

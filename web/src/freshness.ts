@@ -59,14 +59,18 @@ export function homeDevices(devices: Record<string, DeviceSnapshot>): DeviceSnap
 
 /** When this device's figures on screen were last TRUE, on the server clock.
  *  - `lastTelemetryAtMs`: bumped only when telemetry content lands (not by a /status flip,
- *    not by a failed poll). `lastUpdated` stands in for a server that predates it.
+ *    not by a failed poll). Absent = no content since the add-on started. There is NO
+ *    fallback to `lastUpdated`: after a restart, a panel whose quota keeps failing while its
+ *    /status topic flips gets `lastUpdated` stamped by each flip, and a fallback read that as
+ *    a fresh reading — LIVE over a panel with blank figures. The web bundle ships in the same
+ *    image as the server, so there is no older server to fall back for.
  *  - A panel replaying a cloud shadow (`contentStaleSinceMs`) keeps answering every poll
  *    with 200 OK and a replayed body, so its telemetry clock stays fresh while its figures
  *    are frozen — the server raises "Panel data is stale" for exactly this (21 episodes
  *    2026-09-13..21, 2-18 min each). Its figures are as old as the shadow.
  *  0 = never reported. */
 export function readingAt(d: DeviceSnapshot): number {
-  const t = d.lastTelemetryAtMs ?? d.lastUpdated ?? 0;
+  const t = d.lastTelemetryAtMs ?? 0;
   if (!(t > 0)) return 0;
   return d.contentStaleSinceMs != null ? Math.min(t, d.contentStaleSinceMs) : t;
 }
@@ -128,4 +132,13 @@ export function staleAsOf(lastOkAt: number | null, nowMs: number): string | null
   const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   if (d.toDateString() === new Date(nowMs).toDateString()) return time;
   return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+}
+
+/** The browser-minus-server clock offset after one more frame: the MINIMUM sample since the
+ *  socket opened (NTP-style). A sample is skew + that frame's transport delay; a client
+ *  falling behind a backlog of queued frames sees the delay grow, and taking the latest
+ *  sample absorbed the growing lag as "skew" — the header kept reading ~20 s while the
+ *  figures on screen were minutes old. The minimum is skew plus the least delay seen. */
+export function nextClockOffset(prevMin: number | null, sample: number): number {
+  return prevMin == null || sample < prevMin ? sample : prevMin;
 }

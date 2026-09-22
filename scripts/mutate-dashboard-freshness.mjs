@@ -118,10 +118,10 @@ const MUTANTS = [
     why: 'Every replayed 200 OK refreshes the panel\u2019s clock: LIVE through a "Panel data is stale" CRITICAL, with frozen Loads and backup figures on screen.',
   },
   {
-    id: 'xiii. \u2605\u2605 lastUpdated (bumped by a /status flip) drives the age again',
+    id: 'xiii. \u2605\u2605 a missing telemetry clock falls back to lastUpdated (bumped by a /status flip)',
     file: FRESH,
-    find: '  const t = d.lastTelemetryAtMs ?? d.lastUpdated ?? 0;',
-    to: '  const t = d.lastUpdated ?? 0; /* MUTANT */',
+    find: '  const t = d.lastTelemetryAtMs ?? 0;',
+    to: '  const t = d.lastTelemetryAtMs ?? d.lastUpdated ?? 0; /* MUTANT */',
     why: 'A device going OFFLINE reads "updated 0s ago" and holds LIVE three more minutes; a flapping /status holds it indefinitely.',
   },
   {
@@ -172,6 +172,27 @@ const MUTANTS = [
     find: '        if (sumR.ok) {',
     to: '        if (true) { /* MUTANT */',
     why: 'A 500 during an add-on restart makes `summary.fleet.pvWh` throw, and the whole dashboard falls to the error screen.',
+  },
+  {
+    id: 'xxi. \u2605\u2605 the clock offset follows the latest frame, absorbing a transport backlog',
+    file: FRESH,
+    find: '  return prevMin == null || sample < prevMin ? sample : prevMin;',
+    to: '  return sample; /* MUTANT */',
+    why: 'A viewer falling behind a frame backlog reads "updated 20s ago" and LIVE while the figures on screen are minutes old.',
+  },
+  {
+    id: 'xxii. \u2605\u2605 a failed Solar history series is stored as an empty day',
+    file: SOLAR,
+    find: '            if (!r.ok) throw new Error(`history ${d.sn} HTTP ${r.status}`);',
+    to: '            if (!r.ok) { next[d.sn] = []; return; } /* MUTANT */',
+    why: 'One failed request blanks the day\u2019s production chart, or sums an understated "Peak today" from the Cores that answered.',
+  },
+  {
+    id: 'xxiii. \u2605 the Solar tab\u2019s Today tile keeps a finished day\u2019s total',
+    file: SOLAR,
+    find: '    && dayWindowExpired(summaryState, summaryState.untilMs + (Date.now() - summaryAt))',
+    to: '    && false /* MUTANT */',
+    why: 'When the refresh fails across midnight, yesterday\u2019s production is shown as today\u2019s.',
   },
 ];
 
