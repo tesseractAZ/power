@@ -125,8 +125,14 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
           hourCount: j.hourCount,
         })],
       ];
+      // v1.176.0 — a non-OK response is a failure, not data. `r.json()` on an HTTP 500
+      // parses the error body, and the setter then rendered `{ error: ... }` as if it were
+      // the section's payload. A failed refresh now keeps the last good section.
       for (const [url, setter] of endpoints) {
-        fetch(apiUrl(url)).then((r) => r.json()).then(setter).catch(() => {});
+        fetch(apiUrl(url))
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${url} HTTP ${r.status}`))))
+          .then(setter)
+          .catch(() => {});
       }
     };
     fetchAll();

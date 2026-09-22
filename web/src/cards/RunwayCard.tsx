@@ -1,6 +1,10 @@
-import { memo, useEffect, useState } from 'react';
+import { memo } from 'react';
 import type { RunwayProjection } from '../types';
-import { apiUrl } from '../api';
+import { usePolled, useNow } from '../usePolled';
+import { pollStale } from '../freshness';
+import { StaleNote } from '../components/StaleNote';
+
+const RUNWAY_POLL_MS = 60_000;
 
 /**
  * Live off-grid runway — single most actionable number during a storm.
@@ -10,32 +14,12 @@ import { apiUrl } from '../api';
 // v0.22.0 — zero-prop card: memo makes it immune to App's ~1 Hz snapshot
 // re-renders; its data refreshes on its own 60 s poll.
 export const RunwayCard = memo(function RunwayCard() {
-  const [runway, setRunway] = useState<RunwayProjection | null>(null);
-  const [err, setErr] = useState(false);
-
-  useEffect(() => {
-    let live = true;
-    const load = async () => {
-      try {
-        const r = await fetch(apiUrl('api/runway'));
-        if (!live) return;
-        if (r.ok) {
-          setRunway(await r.json());
-          setErr(false);
-        } else {
-          setErr(true);
-        }
-      } catch {
-        if (live) setErr(true);
-      }
-    };
-    load();
-    const t = window.setInterval(load, 60_000);
-    return () => {
-      live = false;
-      window.clearInterval(t);
-    };
-  }, []);
+  // v1.176.0 — usePolled: a failed refresh keeps the last projection but the card now says
+  // how old it is. It used to set an error flag that was only read before the FIRST
+  // success, so a runway computed hours ago rendered exactly like a live one.
+  const { data: runway, lastOkAt, failing: err } = usePolled<RunwayProjection>('api/runway', RUNWAY_POLL_MS);
+  const now = useNow(15_000);
+  const stale = runway != null && pollStale(lastOkAt, now, RUNWAY_POLL_MS);
 
   if (!runway) {
     return (
@@ -91,9 +75,13 @@ export const RunwayCard = memo(function RunwayCard() {
     <div className="card">
       <div className="card-title flex items-center justify-between">
         <span>Off-grid runway</span>
-        <span className="text-xs text-muted normal-case tracking-normal">
-          last-hour load + next-{runway.horizonHours}h forecast PV
-        </span>
+        {stale ? (
+          <StaleNote lastOkAt={lastOkAt} nowMs={now} />
+        ) : (
+          <span className="text-xs text-muted normal-case tracking-normal">
+            last-hour load + next-{runway.horizonHours}h forecast PV
+          </span>
+        )}
       </div>
 
       {below ? (
