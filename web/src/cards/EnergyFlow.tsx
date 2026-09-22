@@ -1,6 +1,6 @@
-import type { DeviceSnapshot, DpuProjection, GridBackstop, Shp2Projection } from '../types';
+import type { DeviceSnapshot, GridBackstop } from '../types';
 import { fmtPct, fmtW } from '../format';
-import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
+import { energyFlowModel, FLOW_EDGE_MIN_W } from './energyFlowModel';
 import { HUES, UI } from '../theme';
 
 /**
@@ -34,80 +34,12 @@ interface Props {
 }
 
 export function EnergyFlow({ devices, grid }: Props) {
-  const list = Object.values(devices);
-  const allDpus = list.filter((d) => d.projection?.kind === 'dpu' && d.online) as Array<DeviceSnapshot & { projection: DpuProjection }>;
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
-
-  // v0.9.77 — the headline diagram is the HOME energy flow. Spare DPUs
-  // (Cores 4 & 5 — currently bench-charging or sitting idle until the
-  // second SHP2 lands) are not part of the home's PV / battery / SoC
-  // story, even when they're online. Filter them out via the same
-  // SHP2-membership helper the analytics engines + MQTT discovery use
-  // (server-side: server/src/shp2Membership.ts). The diagram now
-  // mirrors what the HA Energy Dashboard and lifetime counters show.
-  // When the SHP2 hasn't been observed yet (cold boot), fall back to
-  // every online DPU so the diagram isn't empty.
-  const connected = shp2ConnectedDpuSns(devices);
-  const dpus = connected.size > 0 ? allDpus.filter((d) => isShp2Connected(d.sn, connected)) : allDpus;
-
-  const pv = dpus.reduce((s, d) => s + (d.projection.pvTotalWatts ?? 0), 0);
-  // acIn is computed from the same connected set (the SHP2's sources
-  // ARE the home-connected DPUs by definition), so the previous
-  // sourceSns calculation is now redundant — kept as a defensive
-  // fallback for the cold-boot path above.
-  const sourceSns = new Set(
-    (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
-  );
-  const gridDpus = sourceSns.size > 0 ? dpus.filter((d) => sourceSns.has(d.sn)) : dpus;
-  const acIn = gridDpus.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
-  const acOut = dpus.reduce((s, d) => s + (d.projection.acOutWatts ?? 0), 0);
-  // v0.46.0 — battery net from PER-PACK flow, not DPU throughput, mirroring the
-  // server's fleet_battery_net_watts (server/src/index.ts:1108). total_in/out are
-  // DPU THROUGHPUT (PV+grid in / AC out), NOT battery-cell flow — using
-  // `totalOut − totalIn` overstated the charge/discharge magnitude. Pack out =
-  // discharge, pack in = charge; net positive = discharging. Same `dpus` set the
-  // battery node already iterates (home-connected DPUs, or all online on cold boot).
-  const batNet = dpus.reduce(
-    (s, d) => s + d.projection.packs.reduce((p, pk) => p + ((pk.outputWatts ?? 0) - (pk.inputWatts ?? 0)), 0),
-    0,
-  ); // > 0 = discharging
-  // v1.145.0 — average only the packs that REPORTED. `?? 0` counted a silent
-  // DPU as a 0% pack and dragged the fleet mean down: four Cores at 80% with one
-  // silent read as 64%, which is a number no pack holds. ThermalPanel's
-  // SummaryStrip fixed exactly this and says so in a comment.
-  const socVals = dpus.map((d) => d.projection.soc).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-  const soc = socVals.length === 0 ? null : socVals.reduce((a, b) => a + b, 0) / socVals.length;
-  const load = shp2?.projection.circuits.reduce((s, c) => s + (c.watts ?? 0), 0) ?? acOut;
-
-  // ── v0.36.0 — 3-state grid supply model ─────────────────────────────────
-  // The SHP2 is the grid interconnect; the grid is a BACKSTOP, tapped
-  // automatically at the reserve floor / for rebalancing. The OLD diagram only
-  // knew off-grid vs DPU-acIn import and was blind to the home-grid backstop
-  // (the SHP2 carrying the home directly through the panel without charging the
-  // DPUs). `snapshot.grid.homeGridWatts` exposes that path now.
-  //
-  // homeGridWatts (SHP2 main) is the authoritative live "grid → home" flow;
-  // importWatts (DPU ac_in) is grid charging the DPUs. Either > 0 ⇒ grid ACTIVE.
-  // When the snapshot predates the field, fall back to the legacy acIn signal so
-  // the card still renders a sensible (import-only) view.
-  const homeGridW = grid?.homeGridWatts ?? 0;
-  const gridImportW = grid?.importWatts ?? acIn;
-  // The kW figure to show on the grid→home flow when active: prefer the SHP2
-  // main-line measurement (the home backstop), else the DPU-charging import.
-  const gridSupplyW = homeGridW > 0 ? homeGridW : gridImportW;
-
-  // State resolution. With `grid` present, trust its present/declared flags;
-  // otherwise derive from the legacy acIn threshold (matches the old offGrid<5).
-  const gridActive = grid
-    ? homeGridW > 0 || gridImportW >= 5
-    : acIn >= 5;
-  const gridPresent = grid ? grid.present || grid.declared : acIn >= 5;
-  // (1) ACTIVE/BACKSTOPPING, (2) AVAILABLE/STANDBY, (3) OFF-GRID (islanded).
-  const gridState: 'active' | 'standby' | 'off' = gridActive
-    ? 'active'
-    : gridPresent
-      ? 'standby'
-      : 'off';
+  // v1.175.0 — every number on this card comes from energyFlowModel (pure, and run by the
+  // test suite); this component only lays them out.
+  const {
+    dpuCount, spareCount, pv, acOut, batNet, soc, load, liveCircuits,
+    gridState, gridSupplyW, gridToCoresW, gridToHouseW, coresToHouseW,
+  } = energyFlowModel(devices, grid);
 
   // SVG geometry
   const W = 720;
@@ -156,13 +88,26 @@ export function EnergyFlow({ devices, grid }: Props) {
             (2) STANDBY: a faint, un-animated connector — grid is there but the
                 battery/PV is covering, so it is NOT a live source.
             (3) OFF-GRID: omit the flow entirely (islanded). */}
-        {gridState === 'active' ? (
-          <FlowLine from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} watts={gridSupplyW} color={HUES.grid} period={period(gridSupplyW)} strokeW={strokeW(gridSupplyW)} label="grid" />
-        ) : gridState === 'standby' ? (
+        {/* v1.175.0 — the grid draws to its real destinations (see gridToHouseW):
+            grid → Batteries only for the Cores' own AC input, grid → Loads for the
+            house, routed BELOW the battery node so it cannot read as passing through
+            it. An active grid with neither edge above the floor keeps the standby
+            connector rather than an unlabelled line into the battery. */}
+        {gridState === 'active' && gridToCoresW >= FLOW_EDGE_MIN_W && (
+          <FlowLine from={[Grid.x + Grid.w, Grid.y + Grid.h / 2 - 12]} to={[Battery.x, Battery.y + Battery.h / 2 + 14]} watts={gridToCoresW} color={HUES.grid} period={period(gridToCoresW)} strokeW={strokeW(gridToCoresW)} label="grid-to-cores" />
+        )}
+        {gridState === 'active' && gridToHouseW >= FLOW_EDGE_MIN_W && (
+          <FlowLine from={[Grid.x + Grid.w, Grid.y + Grid.h / 2 + 12]} to={[Loads.x, Loads.y + Loads.h - 18]} watts={gridToHouseW} color={HUES.grid} period={period(gridToHouseW)} strokeW={strokeW(gridToHouseW)} bow={45} label="grid-to-house" />
+        )}
+        {(gridState === 'standby' || (gridState === 'active' && gridToCoresW < FLOW_EDGE_MIN_W && gridToHouseW < FLOW_EDGE_MIN_W)) && (
           <StandbyLink from={[Grid.x + Grid.w, Grid.y + Grid.h / 2]} to={[Battery.x, Battery.y + Battery.h / 2]} color={HUES.grid} />
-        ) : null}
-        {/* Battery → Loads (use load if available, fallback acOut) */}
-        <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={Math.max(load, acOut)} color={HUES.soc} period={period(Math.max(load, acOut))} strokeW={strokeW(Math.max(load, acOut))} label="load" />
+        )}
+        {/* Batteries → Loads: the Cores' delivery, measured at the panel (see
+            coresToHouseW). v1.175.0 — was Math.max(load, acOut), two meters on opposite
+            sides of the panel, so the arrow and the box it points at disagreed, and a
+            grid-fed house was drawn flowing out of idle packs. The Loads NODE is the house
+            total; this edge and grid → Loads are its two panel-side parts. */}
+        <FlowLine from={[Battery.x + Battery.w, Battery.y + Battery.h / 2]} to={[Loads.x, Loads.y + Loads.h / 2]} watts={coresToHouseW} color={HUES.soc} period={period(coresToHouseW)} strokeW={strokeW(coresToHouseW)} label="cores-to-house" />
 
         {/* Solar node */}
         <Node {...Solar} title="Solar" subtitle="42 panels" value={fmtW(pv)} icon="☀" accent={HUES.solar} />
@@ -182,14 +127,23 @@ export function EnergyFlow({ devices, grid }: Props) {
         {/* Battery node (big) */}
         <Node
           {...Battery}
-          title={`Batteries (${dpus.length} DPU${connected.size > 0 && allDpus.length > dpus.length ? `, +${allDpus.length - dpus.length} spare` : ''})`}
+          title={`Batteries (${dpuCount} DPU${spareCount > 0 ? `, +${spareCount} spare` : ''})`}
           subtitle={batNet > 5 ? `▼ ${fmtW(batNet)} discharging` : batNet < -5 ? `▲ ${fmtW(-batNet)} charging` : 'idle'}
           value={fmtPct(soc, 1)}
           big
           accent={socAccent(soc)}
         />
         {/* Loads node */}
-        <Node {...Loads} title="Loads" subtitle={`${shp2?.projection.circuits.filter((c) => (c.watts ?? 0) > 1).length ?? 0} circuits`} value={fmtW(load)} icon="⌂" accent={HUES.soc} />
+        {/* v1.175.0 — a panel that reported no channel watts reads "—", not "0 W". */}
+        <Node
+          {...Loads}
+          title="Loads"
+          subtitle={load == null ? 'panel not reporting' : `${liveCircuits} circuit${liveCircuits === 1 ? '' : 's'}`}
+          value={load == null ? '—' : fmtW(load)}
+          icon="⌂"
+          accent={HUES.soc}
+          dim={load == null}
+        />
       </svg>
     </div>
   );
@@ -279,6 +233,7 @@ function FlowLine({
   period,
   strokeW,
   label,
+  bow = 0,
 }: {
   from: [number, number];
   to: [number, number];
@@ -286,16 +241,24 @@ function FlowLine({
   color: string;
   period: number;
   strokeW: number;
+  /** Identifies the edge (data-flow attribute for tests and inspection); not rendered. */
   label: string;
+  /** v1.175.0 — push both control points down by this many px, so an edge can route
+   *  BELOW a node instead of through it (grid → Loads passes under the battery). */
+  bow?: number;
 }) {
   const [x1, y1] = from;
   const [x2, y2] = to;
-  // Smooth bezier (control points at horizontal midpoint)
+  // Smooth bezier (control points at horizontal midpoint, optionally bowed downward)
   const cx = (x1 + x2) / 2;
-  const d = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+  const cy1 = y1 + bow;
+  const cy2 = y2 + bow;
+  const d = `M ${x1} ${y1} C ${cx} ${cy1}, ${cx} ${cy2}, ${x2} ${y2}`;
+  // The curve's true midpoint (t = 0.5 of a cubic bezier); equals (y1+y2)/2 when bow = 0.
+  const midY = (y1 + 3 * cy1 + 3 * cy2 + y2) / 8;
   const active = period > 0;
   return (
-    <g>
+    <g data-flow={label}>
       {/* Base line */}
       <path d={d} fill="none" stroke={color} strokeOpacity={0.35} strokeWidth={strokeW} />
       {/* Animated dashes */}
@@ -315,7 +278,7 @@ function FlowLine({
       {watts >= 1 && (
         <text
           x={(x1 + x2) / 2}
-          y={(y1 + y2) / 2 - 11}
+          y={midY - 11}
           textAnchor="middle"
           fill={color}
           fontSize="12"

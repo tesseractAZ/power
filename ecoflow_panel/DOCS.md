@@ -6463,6 +6463,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
 
+**v1.175.0 — the Energy flow card and `panel_load`.** The card draws the grid to its destinations (`gridToCoresW` into the Batteries, `gridToHouseW` into Loads) instead of drawing the whole main-line total into the Batteries with the only Loads edge leaving them; the Batteries → Loads edge is panel-side (`coresToHouseW`) instead of `Math.max(load, acOut)`; the Loads subtitle counts paired circuits. A panel with every channel `watts: null` reads "—" on the card, and the recorder's `panel_load` sum starts at null, so no row is written instead of a fabricated 0 W. Harness: `scripts/mutate-energy-flow.mjs` (9 mutants).
+
 **v1.174.0 — two transients stop speaking.** The MPPT string error codes are debounced (see the
 alert catalogue above). `vdiff-warn-*` and `peer-voldiff-*` are held off the spoken condition until
 the spread has stood for `IMBALANCE_SPEAK_HOLD_MS` (10 min) — `heldForImbalanceConfirm` filters the
@@ -7337,7 +7339,7 @@ Note the id/label mismatch: the **Battery** tab uses internal id `thermal` (hist
 Rendered inline in `App.tsx`. Top-to-bottom:
 
 - **RunwayCard** (`cards/RunwayCard.tsx`) — reserve-runway headline, fetches `/api/runway`.
-- **EnergyFlow** (`cards/EnergyFlow.tsx`) — animated SVG power-flow diagram (PV → battery/grid → loads); reads `snapshot.devices` + `snapshot.grid`, no fetch.
+- **EnergyFlow** (`cards/EnergyFlow.tsx`) — animated SVG power-flow diagram; reads `snapshot.devices` + `snapshot.grid`, no fetch. Since **v1.175.0** every number comes from the pure `cards/energyFlowModel.ts` (run by `server/test/energyFlowModel.test.ts`). Edges, each measured where it is seen: Solar → Batteries `pv`; Grid → Batteries `gridToCoresW` = the Cores' AC input (`grid.importWatts`); Grid → Loads `gridToHouseW` = `max(0, homeGridWatts − importWatts)` capped at the house load, drawn below the battery node; Batteries → Loads `coresToHouseW` = house load − `gridToHouseW` (panel-side, so the two edges into Loads sum to the Loads node; under 5 W it is meter disagreement and is not drawn; with no panel figure it falls back to the Cores' `acOut`). `homeGridWatts` is the TOTAL at the SHP2 main — the panel's node balance is load = grid + Core output, and during a charge the main also carries the Cores' input — so it is never drawn as a single edge. The Loads node is the SHP2 channel sum, NULL ("—", "panel not reporting") when a present panel reported no channel, and the subtitle counts `pairedCircuits`, not channels. The Solar and Batteries nodes are not balanced against the house: PV is DC-side, the house AC-side, and conversion losses are not drawn.
 - **TodaySummary** (`cards/TodaySummary.tsx`) — today's energy totals from `/api/summary/today`.
 - **Shp2Card** — the SHP2 backup pool card (backup %, panel load, sources).
 - **DpuCard** per Delta Pro Ultra — with a `viaShp2` fallback so a cloud-offline DPU still shows the state the SHP2 reports over its wired link (battery %, contributed watts, AC-open, temp, errors).

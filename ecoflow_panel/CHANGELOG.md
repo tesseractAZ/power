@@ -1,3 +1,38 @@
+## 1.175.0
+
+### The Energy flow card draws the grid where it goes, and a silent panel is no longer a 0 W house
+
+- **Grid power is drawn to its real destination.** The SHP2's grid reading is the total at the
+  main, and the card drew all of it as one edge into the Batteries; the only edge into Loads came
+  out of the Batteries. A grid carrying the house was therefore drawn as the house running on
+  battery. At 03:30 on 2026-09-22 the grid supplied 1901 W of a 1904 W house while the home Cores
+  output 0 W and their packs moved 16 W — the card showed 1.9 kW flowing into batteries nothing was
+  charging and back out of inverters producing nothing. The card now draws grid → Batteries for
+  the Cores' own AC input only (grid charging them) and a separate grid → Loads edge, routed below
+  the battery node, for the rest, capped at the house load. During a force charge both appear
+  (04:05: 15,969 W into the Cores, 1,996 W to the house); the grid node keeps the metered total.
+- **The arrow into Loads matches the Loads box.** The edge was `Math.max(load, acOut)`: the Cores'
+  inverter meter against the panel's own total, two meters that differ by tens of watts (the
+  reported view showed 1925 W into a "1.89 kW" box; live 14,427 W into "14.36 kW"; about 30% of
+  overnight 5-minute buckets disagreed). The Cores' share is now taken on the panel side — the
+  house total less the grid's share — so the two edges into Loads sum to the box. A residual
+  under 5 W is meter disagreement and is not drawn.
+- **Circuits are counted as circuits.** The subtitle counted energized channels, so a six-circuit
+  split-phase panel read "9 circuits" (and could read 12) beside an SHP2 card that says
+  "Circuits (6)". It now counts the panel's paired circuits.
+- **A panel that reports no channel watts reads "—", and records nothing.** The SHP2 projection
+  always carries twelve channel entries, with `watts: null` for any the payload omitted. The card
+  summed them to 0 W, and the recorder started its `panel_load` sum at 0 and stored that as a
+  measured "house drew 0 W" — a row the Today tiles integrate and the night-charge load model and
+  band calibration learn from. The card now shows "—" with "panel not reporting", and the
+  recorder writes no row, so the gap is a coverage gap every consumer already handles.
+
+The card's numbers now come from a pure module, `web/src/cards/energyFlowModel.ts`, which the
+server test suite imports and runs against the recorded 03:30, 04:05 and midday scenes. New harness
+`scripts/mutate-energy-flow.mjs` (9 anchor-asserted mutants). The Solar and Batteries nodes are
+not balanced against the house: PV is metered on the DC side and the house on the AC side, and the
+MPPT, charger and inverter losses between them are not drawn.
+
 ## 1.174.0
 
 ### Two transient conditions no longer speak: a sunrise solar code, and a brief cell-spread excursion
