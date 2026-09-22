@@ -2019,7 +2019,7 @@ directions.
 | Input | Source | Notes |
 |---|---|---|
 | `pvByEpoch` | recorder `pv_total` / `pv_high` / `pv_low` bucketed to hour-epochs | `Map<hourEpoch, meanWatts>`, hour-epoch = `floor(ts/3_600_000)` |
-| `ghiByEpoch` | Open-Meteo `shortwave_radiation` + recorder-persisted `ghi_wm2` (first-write forecast irradiance; realized is captured separately and not read yet) | `Map<hourEpoch, W/m²>` |
+| `ghiByEpoch` | Open-Meteo `shortwave_radiation` + recorder-persisted GHI, realized-first: `ghi_wm2_realized` where captured, else the first-write forecast `ghi_wm2`, hour by hour (v1.173.0) | `Map<hourEpoch, W/m²>` |
 
 PV is pre-averaged into 5-min SQL buckets (`HOUR_CURVE_BUCKET_SEC = 300`) then
 into hourly means before pairing — a ~30× rowcount reduction with no material
@@ -2148,7 +2148,7 @@ battery SoC%. This is the object every downstream forecast/alarm consumer reads.
 |---|---|
 | Home DPU `pv_total` / `pv_high` / `pv_low` | recorder, 30-day window, home-connected DPUs only (`shp2ConnectedDpuSns`) |
 | SHP2 `panel_load` | recorder, weekday/weekend split via `hourCurveByWeekday` |
-| GHI / cloud | `getWeather()` (live) + recorder `ghi_wm2` / `cloud_pct` backfill (first-write forecast values, not realized) |
+| GHI / cloud | `getWeather()` (live) + recorder backfill: GHI realized-first (`ghi_wm2_realized`, else first-write `ghi_wm2`, v1.173.0); `cloud_pct` is still the first-write forecast |
 | Backup pool | `shp2.projection.backupFullCapWh` / `backupRemainWh` / `backupReserveSoc` |
 | EV load | `computeEvWindowPrediction` → `evLoadByHour` (expected-value watts) |
 | Recent load | recorder `panel_load` over `FORECAST_RECENT_LOAD_WINDOW_MS` (3 h) |
@@ -2381,13 +2381,38 @@ biasFactor = totalActual / totalPredicted  (Σactual/Σpredicted; null if totalP
 
 Actuals are scoped to **SHP2-connected home DPUs only** (v0.21.0), matching the
 predictor's training set. Cached `FORECAST_SKILL_TTL_MS = 1 h`, keyed by
-`windowDays`.
+`${windowDays}:${ghiBasis}`.
+
+**Irradiance basis (v1.173.0, GHI stage 2).** `ghi(h)` depends on the `ghiBasis`
+argument. `'first-write'` is the default and matches the pre-v1.173.0 behaviour exactly:
+recorder `ghi_wm2` (the first value written for each hour, a ~3–4-day-lead forecast)
+wins over the live cache (`buildGhiByEpoch`). `'realized'` scores the model against
+what the sun actually did. The precedence is `ghi_wm2_realized` > live cache >
+`ghi_wm2` (`buildRealizedGhiByEpoch`). The cache ranks above `ghi_wm2` so that the
+hours a restart leaves uncaptured use the provider's past-hour estimate, not the
+forecast. A persisted realized row ranks above the cache so that a restart cannot
+re-score a past day. A realized 0 removes the hour. The display report
+(`/api/forecast-skill`, `/api/confidence`, the forecast-bias repair card) passes
+`'realized'`. The PV band calibrator (`probabilisticForecast`) passes `'first-write'`
+explicitly: its skill sets `skillFrac`, `bandSigmaCal`, `bandRealizedCoveragePct`
+(the night-charge basis gate) and `realizedDailyErrHalfFrac` (the multi-day P10/P90
+widening that sizes a buy). A realized basis would cut that widening by about 40% on
+the 2026-09 window. It would also remove the weather-forecast error from a band that
+wraps a day-ahead forecast. Choosing a lead-matched calibrator basis is an owner
+decision. The cache key includes the basis because `/api/confidence` and the
+calibrator both use the 30-day window. Other readers of the stored series now take it
+realized-first, falling back to `ghi_wm2` hour by hour where no realized row exists:
+solar-model training, the soiling decomposition and the alarm-model backtest.
+Realized capture began 2026-09-06 17:00 MST, and `past_days=7` cannot backfill
+earlier hours. Windows longer than about 15 days therefore mix the two bases until
+the older hours age out. `cloud_pct` remains first-write. Every reader goes through
+`queryRealizedGhi`, and a parser-based test pins the exact set of its callers.
 
 #### Output (`ForecastSkillReport`)
 
 ```ts
 { generatedAt, days: ForecastSkillDay[], meanAbsErrorKwh, meanAbsErrorPct,
-  biasFactor, windowDays }
+  biasFactor, windowDays, ghiBasis? }   // ghiBasis: 'first-write' | 'realized'
 ForecastSkillDay = { date, predictedKwh, actualKwh, errorKwh, errorPct|null,
                      weatherCovered, coverageGap? }
 ```
@@ -2489,7 +2514,7 @@ v1.23.0 to v1.30.0). Shrink-only, floored at 0.4.
 
 **Honest label:** the floor binds in practice (realized/produced ≈ 0.1–0.2 <
 0.4), so this band targets "**≥ 80% coverage, deliberately conservative**" — not
-"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the calibrator's errors come from a *current-model hindcast against stored `ghi_wm2`*, so they (a) are rewritten when the model re-learns, (b) — **corrected v1.156.0; this used to say they omit the weather-forecast component** — include a multi-day weather-forecast component, because stored `ghi_wm2` is first-write ~3–4-day-lead forecast irradiance rather than realized (see the weather source section), (c) apply `pvBiasFactor` as
+"= 80%". Known gaps the floor is insurance for (v1.31.0 review): the calibrator's errors come from a *current-model hindcast against stored `ghi_wm2`*, so they (a) are rewritten when the model re-learns, (b) — **corrected v1.156.0; this used to say they omit the weather-forecast component** — include a multi-day weather-forecast component, because stored `ghi_wm2` is first-write ~3–4-day-lead forecast irradiance rather than realized (see the weather source section) — and v1.173.0 deliberately keeps the calibrator on that basis (see §4), (c) apply `pvBiasFactor` as
 a plain daily multiply while publication re-clamps per-hour at the physical
 ceiling — under an *under-prediction* regime (`pvBiasFactor > 1`, ceiling
 pinned) the calibrator's basis sits above the published series and its errors
@@ -2662,8 +2687,8 @@ On fetch failure it returns the stale cache ("better than nothing").
 **The stored `ghi_wm2` series is forecast irradiance, not the provider's past-hour estimate.**
 `recordWeatherGhi` keeps the first value ever written for an hour, and the first
 fetch that contains an hour sees it roughly 3–4 days ahead (`forecast_days=4`);
-the later `past_days` value never replaces it. Recorder-backed readers therefore
-see forecast irradiance: the forecast-skill hindcast (and through it the PV band
+the later `past_days` value never replaces it. Before v1.173.0, recorder-backed readers
+therefore saw forecast irradiance: the forecast-skill hindcast (and through it the PV band
 calibration and the night-charge basis gate); for days older than the live cache,
 solar-model training, the PV bias correction (the hours of its oldest local day that fall before the cache's first UTC midnight — in the local evening for installs west of UTC, e.g. from 17:00 MST) and soiling (its recent pool is the last five well-covered clear days, usually inside the cache but reaching recorder days in a cloudy week, and its p90 baseline sits mostly on the recorder); and the backtest. Measured
 2026-09-11: 3,180 W/m² stored vs 5,296 in the provider's past-hour values over hours
@@ -2673,9 +2698,10 @@ only hours whose whole interval had ended at the fetch's `fetchedAt`, every hour
 stored explicitly (no same-as-previous collapse), revised in place by later fetches,
 and never from a value the provider did not send (flagged `radiationMissing` at
 parse time; the stand-in 0 still reaches the existing consumers exactly as before).
-**Nothing reads it yet** — a parser-based test pins that — because switching the
-calibration basis moves the night-charge basis gate and the P10 band that sizes a
-supervised reserve write, so it ships as its own reviewed change. `past_days=7` is
+Stage 1 read nothing from it. Stage 2 (v1.173.0) switches training, soiling, the
+display skill report and the backtest to it, realized-first. The band calibrator stays
+on `ghi_wm2`, because switching its basis moves the night-charge basis gate and the
+P10 band that sizes a supervised reserve write (see §4, Irradiance basis). `past_days=7` is
 the capture horizon: an hour not captured within about seven UTC days cannot be
 recovered from this endpoint.
 
@@ -4166,7 +4192,7 @@ Fleet soiling = **median** of each home Core's own `dropPct` (only Cores with a 
 For each DPU it emits `SoilingPerDevice { sn, device, coreNum, dropPct, cleanDays, recentCoeff, baselineCoeff }` from `computeSoiling`.
 
 #### F29 multi-week weather backfill
-The decomposition window (`since = now − 60 d`, a query ceiling only) seeds weather from the **recorder-persisted** series first — `recorder.query('weather', 'ghi_wm2'/'cloud_pct', since, now, 3600)` via `mergeRecorderWeather` — then lets the live `getWeather()` cache overwrite its freshest hours. Before F29 the baseline was paired only with `getWeather()`'s 7-day cache, so the soiling baseline **slid forward with the dirt it exists to measure** (reported 0.9–1.6% while the truth was ~10–12%). Now the weather spans the same window as the PV it's compared against (bounded by the configured samples retention — default 30 days — or the 60-day query ceiling, whichever is smaller). Bails only if neither source produced any weather.
+The decomposition window (`since = now − 60 d`, a query ceiling only) seeds weather from the **recorder-persisted** series first — `recorder.query('weather', 'ghi_wm2'/'cloud_pct', since, now, 3600)`, GHI realized-first via `preferRealizedGhiRows` since v1.173.0, through `mergeRecorderWeather` — then lets the live `getWeather()` cache overwrite its freshest hours. Before F29 the baseline was paired only with `getWeather()`'s 7-day cache, so the soiling baseline **slid forward with the dirt it exists to measure** (reported 0.9–1.6% while the truth was ~10–12%). Now the weather spans the same window as the PV it's compared against (bounded by the configured samples retention — default 30 days — or the 60-day query ceiling, whichever is smaller). Bails only if neither source produced any weather.
 
 #### Per-hour shape (fleet, home-connected only)
 Sums home-Core `pv_total` per hour-epoch (`fleetPvE`). Filter: `cloudCoverPct ≤ 25` and `radiationWm2 ≥ PERHOUR_MIN_GHI_WM2 (400)` — a raised floor (v1.24.0) because at dawn/dusk the pv/GHI ratio is geometry-dominated (sun angle/tilt), not soiling (hour 18 once read an impossible 67.3% drop). Split by hour-of-day into `baseline` (older than 7 d) and `recent` (last 7 d). Need ≥3 baseline + ≥2 recent. `base = p90 of baseline` (`sorted[floor(0.9×(n−1))]`, not all-time max), `rec = median(recent)`, `dropPct = ((base−rec)/base)×100`.
@@ -6419,6 +6445,19 @@ cannot make later milder deferrals "keep-pending" against a retry that no longer
 This matters beyond the noise: the single-flight note below records that overlapping
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
+
+**v1.173.0 — the 2026-09-21 open list.** Cost mode continues past the planner's early
+resilience HOLD (holding only when the cost target is not worth a buy). Per-pack alert state follows
+the pack serial: `detectPackResidencyChanges` retires an episode whose `sourcePackSn` changed,
+forgets its notify record and restarts its onset (`restampAlertOnset`); the vdiff warn-hold is
+keyed to the serial; learned per-pack families stamp `sourcePackSn`; `notifyLocator` adds a
+6-character serial tail. The planner reads the panel through `shp2ReadbackFresh` and a stale
+reading defers the evening job. `ARB_CHARGE_CAP_KW` = 0 is AUTO (`planChargeCapKw`: connected
+Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadline page is re-spoken
+(`forceChargeOffDeadlineMutedAtMs`, bounded); blind OFF re-sends stop after
+`FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
+the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
+condition (push and card kept).
 
 **v1.172.0 — ghost pack slots are hidden** (`packPresence.ts`, applied after every DPU projection
 in `snapshot.ts`). The cached raw quota never forgets a `hs_yj751_bms_slave_addr.N.*` slot, so a
@@ -9318,7 +9357,7 @@ Add-on options (`config.yaml` → env):
 | `NIGHT_CHARGE_MODE` | `advisory` | list(advisory\|supervised\|auto) | Write posture (v1.50.0). `advisory` never writes; `supervised` runs the announced, cancellable, bounded, auto-reverting reserve write per charge night (§8b); `auto` is honored only after gate graduation and operates as supervised until then. Unknown values fail closed to `advisory`. |
 | `ARB_OUTAGE_CUSHION_PCT` | `15` | int 0–40 | Cushion % above the reserve floor the trough must hold; never changes the independent floor alarm |
 | `ARB_MIN_BUY_KWH` | `1` | float 0–50 | Below this recommended buy, the night is a "hold" |
-| `ARB_CHARGE_CAP_KW` | `7.2` | float 0–50 | Grid-charge power ceiling used by the feasibility cap (the live `chChargeWatt`); sizing only, no device is ever set |
+| `ARB_CHARGE_CAP_KW` | `0` | float 0–50 | Grid-side charge-power ceiling for the feasibility cap. `0` = AUTO (v1.173.0): connected Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE (~5.9 kW per Core); > 0 is a fixed override. Home load comes off separately via `ARB_GRID_INPUT_CAP_KW`. Sizing only, no device is ever set |
 | `ARB_LOAD_P90_FACTOR` | `1.15` | float 1–2 | Pessimistic-high load multiplier on the day-ahead forecast |
 | `NIGHT_CHARGE_NOTIFY_HOUR` / `_MINUTE` | `21` / `30` | runtime-clamped int 0–**22** / 0–59 | Evening-job fire time; hour is clamped to ≤ 22 because the catch-up window is `[fire, 23:00)` — hour 23 made it the empty set (v1.39.0) |
 | `NIGHT_CHARGE_NOTIFY_ON_HOLD` | `true` | bool | Send the nightly advisory even on hold nights (consistent "the job ran" confirmation) |
@@ -9334,7 +9373,7 @@ Env-only knobs (not in the options form): `NIGHT_CHARGE_LATCH_PATH` (latch file 
 - **Basis-completeness gate.** No plan is sized unless the probabilistic band exists, the confidence tier is not climatology, `calScoredDays ≥ 14`, *and* realized band coverage ≥ 0.9. On a young install (or after a forecast-model reset) the advisor publishes the explicit `insufficient_basis` shape nightly — this is by design, not a fault.
 - **SHP2 offline / missing battery fields** ⇒ `recomputeNightChargePlan` returns null and the holder keeps the prior plan until the 12 h staleness guard nulls the surfaces and the ~25 h `expire_after` flips the HA entities to `unavailable`. The scorer likewise cannot source actuals while the SHP2 projection is absent; affected nights land as MNAR exclusions, which the gate's expected-nights denominator counts against readiness.
 - **Weekend tariff boundary (open question).** The model's per-instant weekday gating makes Friday's window Fri 23:00–24:00 only (Sat 00:00–05:00 is weekend off-peak) with the next window opening Mon 00:00 — a ~48 h carry sized against a 1-hour charge window (charge-power capped, `cushionShortfall` honestly flagged) on a mostly `mixed`-tier basis that never enters gate eligibility. Whether real APS billing extends Friday's overnight into Saturday morning can only be settled from a bill; if it does, the correction belongs in `tariff.ts` weekday gating. Rates are null until confirmed, so no `$` output depends on the answer.
-- **Hardware charge envelope is an open datum.** `ARB_CHARGE_CAP_KW` reflects the observed `chChargeWatt` (7.2 kW), not a verified hardware spec; the feasibility cap is only as accurate as this knob.
+- **Hardware charge envelope.** Measured 2026-09-16/18: grid import pins at ~19.1 kW and the pack takes (19.1 − house) × ~0.93, up to ~17 kW across three Cores. Since v1.173.0 `ARB_CHARGE_CAP_KW` = 0 derives the cap from the connected Cores; the old 7.2 kW (`chChargeWatt`) under-stated every plan.
 - **Write posture is mode-gated and fail-closed.** In `advisory` (the default) the add-on performs no night-charge writes; `supervised` performs exactly one announced, cancellable, bounded, auto-reverting reserve write per charge night (§8b), and `auto` is demoted to supervised until the gate graduates (§8). On non-actuated nights the realized-need counterfactual is defensible only on clean (near-zero-import) nights, so grid-propped nights are excluded from scoring rather than fabricated; actuated nights score from the measured delivered charge instead.
 - **A ledger row with no stored window** is unscoreable, and **v1.132.0 distinguishes the two reasons**: a *pre-v1.39.0* row predates the window columns (a data-vintage problem), while a current-`algo_version` row with no window simply had **no cheap window to resolve that night** — normal on a tariff day that offers none, e.g. Saturday on this plan. Both capture as `scored=0`, now with different `score_notes`; calling the second a "pre-v1.39.0 row" sent readers hunting a migration bug that was not there. Nights whose raw telemetry has aged past the configured samples retention (default 30 days) capture honestly unscored rather than staying open forever.
 - **The calibration learner is not yet live.** `night_charge_calibration` (seasonal cushion, buy de-bias, EV-tail inflation) exists as schema + API only; the cushion remains the static `ARB_OUTAGE_CUSHION_PCT` until the learner ships as its own increment.

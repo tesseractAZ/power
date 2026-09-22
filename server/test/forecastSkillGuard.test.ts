@@ -82,7 +82,11 @@ test('buildGhiByEpoch — recorder series backfills hours the 3-day cache lost',
   assert.equal(map.size, 3);
 });
 
-test('buildGhiByEpoch — recorder overwrites cache for the same hour (recorder is source of truth)', () => {
+test('buildGhiByEpoch (first-write basis, band calibrator) — first-write row wins over the cache, unchanged by stage 2', () => {
+  // v1.173.0 (GHI stage 2) — buildGhiByEpoch now backs ONLY the 'first-write' skill basis the
+  // PV band calibrator scores on, so this pin guards the preserved basis. The flipped order
+  // (realized > cache > first-write) lives in buildRealizedGhiByEpoch; see
+  // realizedGhiStage2.test.ts.
   const epoch = he(Date.UTC(2026, 5, 2, 12, 0, 0));
   const map = buildGhiByEpoch([ghiRow(epoch, 650)], [wh(epoch, 600)]);
   assert.equal(map.get(epoch), 650, 'persisted value wins over stale cache');

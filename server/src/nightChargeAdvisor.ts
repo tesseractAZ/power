@@ -351,6 +351,10 @@ export interface NightChargePlan {
   /** v1.168.0 — the morning surplus the cost ceiling left room for (P50, else P90;
    *  null when set aside or unknown). */
   costCeilingSurplusKwh?: number | null;
+  /** v1.174.0 — WHICH surplus that was: 'p50', the 'p90' stand-in, or 'none' (set aside
+   *  by the long-gap rule, or no surplus known — `longGapAhead` tells them apart).
+   *  null/absent in resilience mode. */
+  costCeilingSurplusBasis?: 'p50' | 'p90' | 'none' | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
   cushionOutageHours?: number;
   rationale: string;
@@ -804,12 +808,19 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // just not what the cushion is sized against any more.
   const baselineMinSocPct = round1((houseTroughAtLift(0).minKwh / fullKwh) * 100);
 
-  // No shortfall projected → HOLD (no buy). Honest "you don't need to charge".
-  if (baselineTrough.minKwh >= targetFloorKwh - 1e-9) {
-    return {
-      ...nullPlan(inputs, true, cushionBasis === 'legacy-pct'
-        ? `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}; no charge needed.${preWindowNote}`
-        : `Hold — the pack at window close (${round1((packAtWindowEnd_noBuy / fullKwh) * 100)}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`),
+  // v1.174.0 — hoisted from the cost block below: the HOLD must know the objective.
+  const costMode = inputs.objectiveMode === 'cost';
+  // No shortfall projected → resilience needs no buy tonight.
+  const baselineHolds = baselineTrough.minKwh >= targetFloorKwh - 1e-9;
+  const noBuyPct = round1((packAtWindowEnd_noBuy / fullKwh) * 100);
+  /** v1.174.0 — the HOLD plan (nothing bought, nothing armed), shared by the resilience
+   *  early return and the cost-mode hold after the cost block. `cost` carries the
+   *  ceiling a cost-mode hold was measured against, so the ledger shows it was asked. */
+  const holdPlan = (
+    rationale: string,
+    cost?: Pick<NightChargePlan, 'costCeilingBasis' | 'costCeilingSocPct' | 'longGapAhead' | 'costCeilingSurplusKwh' | 'costCeilingSurplusBasis'>,
+  ): NightChargePlan => ({
+      ...nullPlan(inputs, true, rationale),
       objective: 'none',
       // v1.125.0 — the hold path returns nullPlan(), which has no cushion scope;
       // carry the applied cushion here too or a HOLD night reports none.
@@ -834,7 +845,16 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       // Nothing was bought, but the contention basis is still a fact about
       // tonight's window and the owner-facing surfaces may show it.
       evContention,
-    };
+      ...(cost ?? {}),
+  });
+  // ★ v1.174.0 — COST MODE IS ASKED BEFORE IT HOLDS. This early return used to run in
+  // BOTH modes, ahead of the cost block, so a high-pack night (Thursday's 90% long-gap
+  // ceiling included) never bought toward the cost ceiling. Resilience keeps it; cost
+  // mode falls through, and holds below only if the cost target is not worth a buy.
+  if (baselineHolds && !costMode) {
+    return holdPlan(cushionBasis === 'legacy-pct'
+      ? `Hold — projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}; no charge needed.${preWindowNote}`
+      : `Hold — the pack at window close (${noBuyPct}%) already covers ${cushionDesc}; no charge needed. For reference, a whole-house island would trough at ~${baselineMinSocPct}%, which is not what the cushion is sized against.${preWindowNote}`);
   }
 
   // Feasibility bounds on the lift.
@@ -853,9 +873,13 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // packAtWindowEndWith keep any over-wide domain honest; pack(L) is monotone,
   // so the bisection stays exact.
   const hiLift = Math.max(chargePowerLiftKwh, poolHeadroomLiftKwh);
-  const meetable = troughAtLift(hiLift).minKwh >= targetFloorKwh - 1e-9;
+  // v1.174.0 — only a COST-mode night reaches here with baselineHolds: resilience needs
+  // no lift at all, so skip the bisection (it would return ~1e-13, not 0).
+  const meetable = baselineHolds || troughAtLift(hiLift).minKwh >= targetFloorKwh - 1e-9;
   let requiredExtraKwh: number;
-  if (!meetable) {
+  if (baselineHolds) {
+    requiredExtraKwh = 0;
+  } else if (!meetable) {
     // Even max effort can't hold the line — report the legacy full-pack proxy;
     // cushionShortfall (from the re-simulated trough below) tells the truth.
     requiredExtraKwh = poolHeadroomLiftKwh;
@@ -929,8 +953,11 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // Everything downstream is unchanged: the charge-power and pool-headroom caps
   // still bind, the cushion is still computed and disclosed, and the reserve floor
   // is still a hard minimum.
-  const costMode = inputs.objectiveMode === 'cost';
   let costCeilingBasis: 'pv-headroom' | 'max-soc' | null = null;
+  /** v1.174.0 — the cost target (pack kWh at window close) and whether the charge rate,
+   *  not the ceiling, bounded the buy toward it. Read by the cost-mode hold below. */
+  let costTargetKwh: number | null = null;
+  let costCapBound = false;
   let costCeilingSocPct: number | null = null;
   let effLiftKwh = liftKwh;
   let effTargetPackKwh = targetPackKwh;
@@ -941,6 +968,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const costSurplusKwh: number | null = longGap ? null
     : (inputs.morningPvSurplusP50Kwh != null && Number.isFinite(inputs.morningPvSurplusP50Kwh)
       ? inputs.morningPvSurplusP50Kwh : morningPvSurplusP90Kwh);
+  // v1.174.0 — the same choice, named for the ledger (costSurplusKwh alone cannot say
+  // whether a 16 kWh headroom was the median or the P90 standing in).
+  const costSurplusBasis: 'p50' | 'p90' | 'none' = longGap ? 'none'
+    : inputs.morningPvSurplusP50Kwh != null && Number.isFinite(inputs.morningPvSurplusP50Kwh) ? 'p50'
+      : morningPvSurplusP90Kwh != null && Number.isFinite(morningPvSurplusP90Kwh) ? 'p90'
+        : 'none';
   if (costMode) {
     const ct = costModeTargetKwh({
       fullKwh,
@@ -950,6 +983,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       resilienceTargetKwh: targetPackKwh,
     });
     costCeilingBasis = ct.ceilingBasis;
+    costTargetKwh = ct.targetKwh;
     // v1.165.0 — exposed for the force-charge ceiling (see costCeilingKwh).
     if (fullKwh > 0) {
       costCeilingSocPct = round1((costCeilingKwh({
@@ -966,6 +1000,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       if (packAtWindowEndWith(mid) >= ct.targetKwh) hi = mid; else lo = mid;
     }
     const wanted = Math.min(hi, chargePowerLiftKwh);
+    costCapBound = chargePowerLiftKwh < hi - 1e-6;
     if (wanted > effLiftKwh) {
       effLiftKwh = wanted;
       effTargetPackKwh = packAtWindowEndWith(effLiftKwh);
@@ -978,6 +1013,32 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const buyKwh = effLiftKwh / legEff; // meter sees more than the pack stores
   const targetSocPct = round1((effTargetPackKwh / fullKwh) * 100);
   const chargeTonight = buyKwh >= minBuyKwh;
+
+  // v1.174.0 — the cost-mode HOLD. Reached only in cost mode (resilience returned above):
+  // floor+cushion already holds with no buy AND the cost target is not worth a buy —
+  // either the pack already sits at/above tonight's ceiling, or what the window can
+  // deliver toward it is under the minimum buy. Same HOLD shape as resilience (nothing
+  // armed), plus the ceiling it was measured against.
+  // `round2(buyKwh) > 0` as well as chargeTonight: with ARB_MIN_BUY_KWH=0 a ~1e-13 lift
+  // (target at/below the no-buy pack) would otherwise announce "Buy ~0 kWh".
+  if (baselineHolds && !(chargeTonight && round2(buyKwh) > 0)) {
+    const atCeiling = costTargetKwh == null || costTargetKwh <= packAtWindowEnd_noBuy + 1e-6;
+    const coverText = cushionBasis === 'legacy-pct'
+      ? `the projected overnight trough (${baselineMinSocPct}%) stays at/above ${cushionDesc}`
+      : `the pack at window close (${noBuyPct}%) already covers ${cushionDesc}`;
+    return holdPlan(
+      `Hold — ${coverText}, and ${atCeiling
+        ? `it already sits at or above tonight's ${costCeilingSocPct ?? '—'}% cost ceiling`
+        : `this window can deliver only ~${round1(buyKwh)} kWh toward tonight's ${costCeilingSocPct ?? '—'}% cost ceiling${buyKwh < minBuyKwh ? ` — under the ${round1(minBuyKwh)} kWh minimum buy` : ''}${costCapBound ? ' (the charge-rate ceiling over this window binds it)' : ''}`}; no charge needed.${preWindowNote}`,
+      {
+        costCeilingBasis,
+        costCeilingSocPct,
+        longGapAhead: longGap,
+        costCeilingSurplusKwh: costSurplusKwh != null ? round2(costSurplusKwh) : null,
+        costCeilingSurplusBasis: costSurplusBasis,
+      },
+    );
+  }
 
   // ── v1.60.0 — THE WRITE SETPOINT (see NightChargePlan.setpointSocPct) ──
   // The pack level at window close whose post-window trough holds floor+cushion
@@ -996,7 +1057,12 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const troughFromPack = (p: number): number =>
     simulate(p, fullKwh, postHours, dischargeEff, windowEnd, windowEnd).minPackKwh;
   let requiredPackAtWindowEndKwh: number;
-  if (troughFromPack(fullKwh) < targetFloorKwh - 1e-9) {
+  if (baselineHolds) {
+    // v1.174.0 — an economic-only night (cost mode; floor+cushion holds with no buy): the
+    // ask is the COST TARGET. The whole-house trough below would demand ~100% (clamped to
+    // a 50% write) — above a sub-50% ceiling, and labelled a resilience need there is not.
+    requiredPackAtWindowEndKwh = Math.max(packAtWindowEnd_noBuy, costTargetKwh ?? packAtWindowEnd_noBuy);
+  } else if (troughFromPack(fullKwh) < targetFloorKwh - 1e-9) {
     requiredPackAtWindowEndKwh = fullKwh; // even a full pack cannot hold the line — ask for all of it
   } else {
     let lo = 0;
@@ -1045,8 +1111,9 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // what the window is expected to REACH.
   const writtenPct = clampReserveTarget(setpointSocPct);
   const truncated = setpointSocPct > writtenPct + 0.05;
+  const askName = baselineHolds ? "tonight's cost target" : 'the resilience requirement';
   const setpointNote = setpointSocPct > targetSocPct + 0.05
-    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — the resilience requirement asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ' (the resilience requirement)'}, and the window is only expected to reach ~${targetSocPct}%.`
+    ? ` The reserve is set to ${writtenPct}%${truncated ? ` — ${askName} asks for ${setpointSocPct}%, but the panel only accepts a backup reserve up to ${RESERVE_WRITE_MAX_PCT}%` : ` (${askName})`}, and the window is only expected to reach ~${targetSocPct}%.`
     : '';
 
   // v1.112.0 — the ANNOUNCED buy carries the learned de-bias; the raw figure
@@ -1078,7 +1145,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? ' (no full-length cheap window for more than a day after this one, so the morning-solar headroom is set aside)' : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? ' (no full-length cheap window for more than a day after this one, so the morning-solar headroom is set aside)' : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -1112,6 +1179,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     costCeilingSocPct,
     longGapAhead: costMode ? longGap : undefined,
     costCeilingSurplusKwh: costMode ? (costSurplusKwh != null ? round2(costSurplusKwh) : null) : undefined,
+    costCeilingSurplusBasis: costMode ? costSurplusBasis : undefined,
     // v1.125.0 — how the cushion was derived, so a reader can tell a bounded
     // islanded-outage requirement from the legacy flat band at a glance.
     cushionBasis,
@@ -1930,6 +1998,13 @@ export function parsePersistedIslandedLoad(raw: unknown): { kw: number; atMs: nu
 }
 
 export const DEFAULT_COST_MAX_SOC_PCT = 90;
+
+/** v1.174.0 — minute-of-day (America/Phoenix) until which the evening job DEFERS a plan
+ *  while the panel reading is stale. 22:30: an hour past the 21:30 fire (the longest
+ *  stale latch measured was 22 min, 2026-09-14), and 25 min before a 23:00 window's
+ *  22:55 write, so the owner keeps a cancel window. After it the plan is sized on the
+ *  last reading and says so — staleness alone never costs the night. */
+export const NIGHT_PLAN_STALE_DEFER_UNTIL_MIN = 22 * 60 + 30;
 
 /**
  * v1.165.0 — the economic ceiling alone: how full it is worth filling the pack

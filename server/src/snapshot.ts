@@ -651,6 +651,9 @@ export interface RefreshResult {
   attemptedSns: string[];
   /** Of those, the SNs whose quota fetch threw. Always a subset of attemptedSns. */
   failedSns: string[];
+  /** v1.173.0 — of those, the ones that failed with the settled product-class API error 1006
+   *  (the standing accessory set). Anything else in failedSns is a NEW failure. */
+  standingFailedSns?: string[];
 }
 
 export async function refreshAll(store: SnapshotStore, log: (m: string) => void = () => {}): Promise<RefreshResult> {
@@ -663,6 +666,7 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
   const online = list.filter((d) => d.online === 1);
   const attemptedSns = online.map((d) => d.sn);
   const failedSns: string[] = [];
+  const standingFailedSns: string[] = [];
   await Promise.all(
     online
       .map(async (d) => {
@@ -673,6 +677,7 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
           const msg = String(e?.message ?? e);
           store.setDeviceError(d.sn, msg);
           failedSns.push(d.sn);
+          if (/EcoFlow API error 1006\b/.test(msg)) standingFailedSns.push(d.sn);
           // v1.40.0: debug-log once per device per session — persistent quota
           // failures (e.g. API code 1006, a PRODUCT-CLASS limitation on
           // some device classes) previously surfaced ONLY in the snapshot,
@@ -684,7 +689,7 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
         }
       }),
   );
-  return { attemptedSns, failedSns };
+  return { attemptedSns, failedSns, standingFailedSns };
 }
 
 /** Flatten nested object/array into a flat key map using dot/bracket notation. */
@@ -923,6 +928,8 @@ export function statusDumpLevel(o: {
 export function pollLogLines(o: {
   tookMs: number;
   failedCount: number;
+  /** v1.173.0 — how many of the failures are the standing 1006 accessory set. */
+  standingFailedCount?: number;
   lastPollFailed: boolean;
   slowMs: number;
   pollDebug: boolean;
@@ -970,7 +977,13 @@ export function pollLogLines(o: {
   if (o.tookMs >= o.slowMs) {
     lines.push(
       `poll slow: ${o.tookMs}ms`
-      + (o.failedCount > 0 ? ` (${o.failedCount} device fetch failure(s) — the standing accessory set)` : ''),
+      // v1.173.0 — only say "the standing accessory set" when it IS (2026-09-20 09:06 five
+      // Cores failed at once and the line blamed the accessories).
+      + (o.failedCount > 0
+        ? (o.standingFailedCount != null && o.standingFailedCount >= o.failedCount
+          ? ` (${o.failedCount} device fetch failure(s) — the standing accessory set)`
+          : ` (${o.failedCount} device fetch failure(s) — ${o.failedCount - (o.standingFailedCount ?? 0)} OUTSIDE the standing 1006 accessory set)`)
+        : ''),
     );
   }
   return lines;
@@ -1012,7 +1025,7 @@ export function startPollLoop(
     if (stopped) return;
     const t0 = Date.now();
     try {
-      const { attemptedSns, failedSns } = await refreshAll(store, log);
+      const { attemptedSns, failedSns, standingFailedSns } = await refreshAll(store, log);
       const tookMs = Date.now() - t0;
       // v1.79.0 — a poll with per-device fetch failures is not a bare "ok":
       // name the devices at warn so the 10 s connect-timeout ceiling stops
@@ -1054,7 +1067,8 @@ export function startPollLoop(
         pollDurations.length = 0;
       }
       for (const line of pollLogLines({
-        tookMs, failedCount: failedSns.length, lastPollFailed, slowMs: SLOW_POLL_MS, pollDebug: POLL_DEBUG,
+        tookMs, failedCount: failedSns.length, standingFailedCount: standingFailedSns?.length ?? 0,
+        lastPollFailed, slowMs: SLOW_POLL_MS, pollDebug: POLL_DEBUG,
         summaryDue, summaryCount: summary?.count, summaryP50Ms: summary?.p50,
         summaryP95Ms: summary?.p95, summaryMaxMs: summary?.max,
       })) log(line);

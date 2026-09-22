@@ -8,8 +8,10 @@ import { DatabaseSync } from 'node:sqlite';
 import ts from 'typescript';
 
 /**
- * Stage 1 of correcting the irradiance basis: capture the provider's PAST-HOUR GHI,
- * feed nothing.
+ * Stage 1 of correcting the irradiance basis: capture the provider's PAST-HOUR GHI.
+ * (Stage 2, v1.173.0: the model/display consumers read it — through ONE audited reader — and
+ * the PV band calibrator still does not. The stage-2 invariants at the end of this file pin
+ * exactly who reads it.)
  *
  * `weather/ghi_wm2` is not realized irradiance. recordWeatherGhi keeps the FIRST value
  * ever written for an hour, and the first fetch containing an hour sees it ~3-4 days
@@ -179,7 +181,7 @@ test('the extraction is exact for consumers: a null body still throws, and a non
   assert.equal(h.radiationMissing, true, 'but the capture never records it');
 });
 
-/* ── the stage-1 invariant ──────────────────────────────────────────── */
+/* ── who may read the realized series (stage 1 → stage 2) ──────────── */
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
 const METRIC = 'ghi_wm2_realized';
@@ -219,17 +221,97 @@ test('the reference finder sees code the old regex could not, and ignores commen
     'prose in comments may still name it');
 });
 
-test('★★ STAGE 1 INVARIANT: no code outside the recorder reads the realized series', () => {
-  // A source scan, used deliberately and as a last resort: the property is an ABSENCE
-  // across the whole server — no calibrator, trainer, planner or report may consume
-  // realized GHI until the basis switch ships as its own reviewed change. A consumer
-  // added quietly would re-score the band calibration and move the night-charge basis
-  // gate with no review point.
+/** Nearest enclosing named function for a node: a function declaration, or a function held by a
+ *  named variable / property / method. `<module>` when there is none. */
+function enclosingFunctionName(n: ts.Node): string {
+  for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+    if (ts.isFunctionDeclaration(p) && p.name) return p.name.text;
+    if (ts.isMethodDeclaration(p) && ts.isIdentifier(p.name)) return `method ${p.name.text}`;
+    if ((ts.isArrowFunction(p) || ts.isFunctionExpression(p)) && p.parent) {
+      const holder = p.parent;
+      if (ts.isVariableDeclaration(holder) && ts.isIdentifier(holder.name)) return `const ${holder.name.text}`;
+      if (ts.isPropertyAssignment(holder) && ts.isIdentifier(holder.name)) return `property ${holder.name.text}`;
+    }
+  }
+  return '<module>';
+}
+
+const READER = 'queryRealizedGhi';
+const parsed = (p: string) => ts.createSourceFile(p, readFileSync(p, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+/** Every identifier named `queryRealizedGhi` across src, classified by how it is used. */
+function readerUses(): Array<{ file: string; kind: 'declaration' | 'import' | 'call' | 'other'; fn: string; node: ts.Node; sf: ts.SourceFile }> {
+  const out: Array<{ file: string; kind: 'declaration' | 'import' | 'call' | 'other'; fn: string; node: ts.Node; sf: ts.SourceFile }> = [];
+  for (const p of tsFiles(SRC)) {
+    const sf = parsed(p);
+    const visit = (n: ts.Node): void => {
+      if (ts.isIdentifier(n) && n.text === READER) {
+        const parent = n.parent;
+        const kind = ts.isFunctionDeclaration(parent) && parent.name === n ? 'declaration'
+          : ts.isImportSpecifier(parent) ? 'import'
+          : ts.isCallExpression(parent) && parent.expression === n ? 'call'
+          : 'other';
+        out.push({ file: relative(SRC, p), kind, fn: enclosingFunctionName(n), node: kind === 'call' ? parent : n, sf });
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  return out;
+}
+
+test('★★ STAGE 2 INVARIANT: only analytics.ts and the recorder name the realized series', () => {
+  // A source scan, used deliberately and as a last resort: the property is an ABSENCE across
+  // the whole server — no calibrator, trainer, planner or report may read realized GHI except
+  // through the one audited reader. A consumer added quietly could re-score the band
+  // calibration and move the night-charge basis gate with no review point.
   const readers = tsFiles(SRC)
     .filter((p) => realizedRefs(p, readFileSync(p, 'utf8')).length > 0)
     .map((p) => relative(SRC, p))
     .sort();
-  assert.deepEqual(readers, ['recorder.ts'], `realized GHI must be written only, got references in: ${readers.join(', ')}`);
+  assert.deepEqual(readers, ['analytics.ts', 'recorder.ts'], `realized GHI referenced in: ${readers.join(', ')}`);
+});
+
+test('★★ inside analytics.ts the realized metric is named ONLY by queryRealizedGhi', () => {
+  const file = join(SRC, 'analytics.ts');
+  const text = readFileSync(file, 'utf8');
+  const sf = parsed(file);
+  const refs = realizedRefs(file, text);
+  assert.ok(refs.length >= 1, 'positive control: the reader does name it');
+  const outside = refs.filter((n) => {
+    for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+      if (ts.isFunctionDeclaration(p) && p.name?.text === READER) return false;
+    }
+    return true;
+  });
+  assert.deepEqual(outside.map((n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1), [],
+    'any other reference bypasses the audited reader');
+});
+
+test('★★★ the realized series has EXACTLY the reviewed readers — and the band calibrator is not one', () => {
+  const uses = readerUses();
+  assert.deepEqual(uses.filter((u) => u.kind === 'other').map((u) => `${u.file}:${u.fn}`), [],
+    'queryRealizedGhi may only be declared, imported or called directly (no alias, no re-export, no property access)');
+  assert.deepEqual(uses.filter((u) => u.kind === 'declaration').map((u) => u.file), ['analytics.ts']);
+  const callers = [...new Set(uses.filter((u) => u.kind === 'call').map((u) => u.fn))].sort();
+  // Exact equality: a removed reader (a consumer silently back on the forecast) fails, and so
+  // does an added one (a new consumer, above all the calibrator) until someone reviews it.
+  assert.deepEqual(callers, ['alarmModelPredictor', 'computeDayForecastUncached', 'computeForecastSkill', 'computeSoilingDecomposition']);
+  assert.ok(!callers.includes('computeProbabilisticForecast'), 'the band calibrator never reads realized GHI itself');
+});
+
+test("★★★ inside computeForecastSkill the realized read sits ONLY in the `ghiBasis === 'realized'` branch", () => {
+  const calls = readerUses().filter((u) => u.kind === 'call' && u.fn === 'computeForecastSkill');
+  assert.equal(calls.length, 1, 'one realized read in the skill hindcast');
+  const { node, sf } = calls[0];
+  let cond: ts.ConditionalExpression | null = null;
+  let child: ts.Node = node;
+  for (let p: ts.Node | undefined = node.parent; p; child = p, p = p.parent) {
+    if (ts.isConditionalExpression(p)) { cond = p; break; }
+  }
+  assert.ok(cond, 'the read must be selected by a conditional on the basis');
+  assert.equal(cond!.condition.getText(sf), "ghiBasis === 'realized'");
+  assert.equal(child, cond!.whenTrue, "the read is the 'realized' arm, never the first-write (calibrator) arm");
 });
 
 test('★ inside the recorder, the realized metric is used only by the capture itself', () => {

@@ -127,6 +127,22 @@ export function getAlertOnset(id: string): number | undefined {
 /** Test-only: reset the in-process cache and the loaded path so tests can
  *  point ALERT_ONSET_PATH at a fresh temp file per test without cross-test
  *  bleed through the module-level cache. */
+/**
+ * v1.173.0 — start a NEW onset for an id whose SUBJECT was replaced under it (the pack
+ * residency check in alertMonitor). syncAlertOnsets cannot see that case: the id never
+ * leaves the active set, so the new pack's episode would inherit the old pack's onset.
+ * Call AFTER retireTrackedAlert (which reads the old onset for the closed record).
+ */
+export function restampAlertOnset(id: string, nowMs: number = Date.now()): void {
+  try {
+    const state = ensureLoaded();
+    state.set(id, nowMs);
+    saveAlertOnsets(ONSET_PATH, state);
+  } catch {
+    /* best effort — never disturb the alarm loop */
+  }
+}
+
 export function resetAlertOnsetCacheForTests(): void {
   cache = null;
 }

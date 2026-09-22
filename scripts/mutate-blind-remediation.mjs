@@ -33,10 +33,17 @@ const SUBSET = ['test/blindRemediation.test.ts', 'test/blindPanelWording.test.ts
 
 const MUTANTS = [
   {
+    id: 'v1.173.0 ★★ the Telemetry stale warning speaks again',
+    file: BC,
+    find: "      !a.id.startsWith('stale-'),",
+    to: '      true, /* MUTANT */',
+    why: 'A yellow is spoken ~20 s after every restart, and at every stale episode — before the remediation runs.',
+  },
+  {
     id: 'v1.173.0 ★★★ the rate-collapse warning speaks again at the onset',
     file: BC,
-    find: "      !a.id.startsWith('msg-rate-floor-'),",
-    to: '      true, /* MUTANT */',
+    find: "      !a.id.startsWith('msg-rate-floor-') &&",
+    to: '      true && /* MUTANT */',
     why: 'Every cloud stale-shadow episode speaks a yellow ~4 min before the remediation even starts — against the owner’s remediate-first rule.',
   },
   {

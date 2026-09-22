@@ -249,7 +249,8 @@ const FORECAST_PV_NEXT24_METRIC = 'pv_next24_wh';
 const WEATHER_GHI_METRIC = 'ghi_wm2';     // global horizontal irradiance, W/m²
 const WEATHER_CLOUD_METRIC = 'cloud_pct'; // cloud cover, %
 /** v1.156.0 — REALIZED irradiance, captured beside the first-write `ghi_wm2` (see
- *  recordWeatherGhi). Written only: nothing reads it until the basis is switched. */
+ *  recordWeatherGhi). v1.173.0 (GHI stage 2): read ONLY via analytics.queryRealizedGhi by the
+ *  model/display consumers; the PV band calibrator still scores against `ghi_wm2` (tests pin both). */
 const WEATHER_GHI_REALIZED_METRIC = 'ghi_wm2_realized';
 
 /* ─── Lifetime-energy persistence (v0.7.6) ─────────────────────────────────
@@ -390,9 +391,12 @@ export interface Recorder {
   /** v0.13.1 — persist hourly weather irradiance (GHI) + cloud cover under
    * the pseudo-device SN "weather" so the historical series survives beyond
    * the 2h in-memory weather cache / 7-day fetch window. Change-detected and
-   * idempotent: re-writing an already-stored hour is a no-op. Consumers
-   * (forecast-skill, soiling, solar-model training) read it back via
-   * query("weather", "ghi_wm2"|"cloud_pct", since, until). */
+   * idempotent: re-writing an already-stored hour is a no-op. Consumers read it back via
+   * query("weather", "ghi_wm2"|"cloud_pct"|"ghi_wm2_realized", since, until).
+   * v1.173.0 (GHI stage 2): solar-model training, the soiling decomposition, the
+   * display forecast-skill report and the alarm-model backtest read `ghi_wm2_realized`
+   * first (through analytics.queryRealizedGhi) and fall back to `ghi_wm2` hour by hour;
+   * the PV band calibrator's forecast-skill hindcast reads `ghi_wm2` only. */
   recordWeatherGhi: (
     hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
     /** v1.156.0 — when the fetch time is known, every hour that ENDED by then is also
@@ -582,6 +586,17 @@ export interface NightLedgerRow {
    *  contribution. This is the field that discriminates, and it was computed but
    *  never persisted, leaving cost mode unauditable from the ledger. */
   cost_ceiling_basis: string | null;
+  /** v1.174.0 — 'p50' | 'p90' | 'none': which morning surplus the cost ceiling left room
+   *  for ('none' = set aside by the long-gap rule, or unknown). NULL in resilience mode
+   *  and on rows written before v1.174.0. */
+  cost_surplus_basis: string | null;
+  /** v1.174.0 — 0/1: the long-gap (Thursday) rule set the ceiling to the SoC cap. NULL
+   *  in resilience mode and before v1.174.0. */
+  cost_long_gap: number | null;
+  /** v1.174.0 — the economic ceiling itself, % of pool (the force-charge target). */
+  cost_ceiling_soc_pct: number | null;
+  /** v1.174.0 — age of the panel reading the plan was sized on, seconds. */
+  panel_sample_age_s: number | null;
 
   // ── SCORE (NULL until scored) ──
   pv_err_frac: number | null;
@@ -649,6 +664,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'soc_min_err_pct', 'realized_cost_cents', 'counterfactual_cost_cents',
   'realized_savings_cents', 'demand_charge_savings_cents',
   'would_have_peak_imported',
+  // v1.174.0 — the cost ceiling's provenance, and the panel's age at plan time.
+  'cost_surplus_basis', 'cost_long_gap', 'cost_ceiling_soc_pct', 'panel_sample_age_s',
   'arm_disposition', 'cost_ceiling_basis',
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
@@ -869,6 +886,8 @@ export function createRecorder(
     // v1.132.0 — the two fields that make a null `actuated` and a
     // `cost_arbitrage` label legible after the fact.
     'arm_disposition TEXT', 'cost_ceiling_basis TEXT',
+    // v1.174.0 — see NightLedgerRow.
+    'cost_surplus_basis TEXT', 'cost_long_gap INTEGER', 'cost_ceiling_soc_pct REAL', 'panel_sample_age_s REAL',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);
@@ -2693,10 +2712,13 @@ export function createRecorder(
   //
   // Correcting `ghi_wm2` in place would re-score the 30-day band calibration within
   // the hour. That moves the night-charge basis gate and the P10 band that sizes a
-  // supervised reserve write, with no review point. So this stage only WRITES a
-  // separate series, and nothing reads it (a test pins that). It lives under the
-  // synthetic SN "weather" on purpose: a new SN would be seeded into the per-device
-  // gap clocks at boot and raise a false "device telemetry gap" six hours later.
+  // supervised reserve write, with no review point. So stage 1 WRITES a separate
+  // series and leaves `ghi_wm2` exactly as it was. v1.173.0 (GHI stage 2): the
+  // model/display consumers now read it through analytics.queryRealizedGhi, while the
+  // band calibrator stays on `ghi_wm2` (realizedGhiCapture.test.ts pins the exact set of
+  // readers). It lives under the synthetic SN "weather" on purpose: a new SN would be
+  // seeded into the per-device gap clocks at boot and raise a false "device telemetry
+  // gap" six hours later.
   //
   // Unlike `ghi_wm2`, the realized value WINS (a later fetch revises it in place,
   // because past_days values can still move), and every hour is stored explicitly —

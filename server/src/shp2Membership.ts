@@ -152,6 +152,36 @@ export function shp2ReadbackFresh(
   return d.contentStaleSinceMs == null;
 }
 
+/**
+ * v1.174.0 — PURE. What the night-charge PLANNER does with the panel reading it has
+ * (log audit 2026-09-15, open 4: the 09-14 plan was sized + armed at 21:30 on a payload
+ * latched stale 21:22-21:44; the actuator and force-charge ticks already gate on
+ * shp2ReadbackFresh, the planner did not).
+ *
+ * A stale reading is NOT an incomplete basis: stale-shadow episodes run 2-6 min, 2-4
+ * times a day, and the value is usually still right. So `use` is false only while the
+ * caller can still wait (`allowStale` false); once it cannot, the stale reading is used
+ * and `fresh:false` + `ageMs` travel with the plan. Never fail-closed on staleness alone
+ * (owner, 2026-09-15: that would have killed a real 32.55 kWh night on correct data).
+ *
+ * `ageMs` is how old the CONTENT is: from `contentStaleSinceMs` (when the payload stopped
+ * moving) when the cloud is replaying, else from the last quota.
+ */
+export function nightPlanPanelVerdict(
+  d: { online?: boolean; lastQuotaAtMs?: number; contentStaleSinceMs?: number | null } | undefined | null,
+  nowMs: number,
+  allowStale: boolean,
+): { use: boolean; fresh: boolean; ageMs: number | null; why: 'fresh' | 'offline' | 'replay' | 'no-quota' } {
+  const fresh = shp2ReadbackFresh(d, nowMs);
+  const since = d?.contentStaleSinceMs ?? d?.lastQuotaAtMs ?? null;
+  const ageMs = typeof since === 'number' && Number.isFinite(since) && since > 0 ? Math.max(0, nowMs - since) : null;
+  const why = fresh ? 'fresh'
+    : d?.online !== true ? 'offline'
+      : d?.contentStaleSinceMs != null ? 'replay'
+        : 'no-quota';
+  return { use: fresh || allowStale, fresh, ageMs, why };
+}
+
 export function shp2Panels(devices: Record<string, DeviceSnapshot>): {
   sns: string[];
   primarySn: string | undefined;

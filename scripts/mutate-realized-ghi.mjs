@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * mutate-realized-ghi.mjs — committed mutation harness for stage 1 of correcting the
+ * mutate-realized-ghi.mjs — committed mutation harness for stages 1 and 2 of correcting the
  * irradiance basis.
  *
  * WHY COMMITTED: `weather/ghi_wm2` has never been realized irradiance. recordWeatherGhi
@@ -11,10 +11,19 @@
  *
  * The obvious fix (let the later value win in `ghi_wm2`) re-scores the 30-day calibration
  * within the hour and moves the gate and the P10 band that size a SUPERVISED reserve
- * write, with no review point. Stage 1 therefore captures the past-hour values as a
- * separate series that nothing reads. Both halves are easy to undo by accident: a
- * refactor that stops capturing (or captures a provider gap as 0) spoils data past_days
- * can never return, and one that starts reading it moves a real write. Each mutant below
+ * write, with no review point. Stage 1 (v1.156.0) therefore captures the past-hour values
+ * as a separate series, `ghi_wm2_realized`. Stage 2 (v1.173.0) switches the MODEL/DISPLAY
+ * consumers to it through one audited reader (analytics.queryRealizedGhi): solar-model
+ * training, the soiling decomposition, the display forecast-skill report and the
+ * alarm-model backtest, each realized-first with a per-hour first-write fallback. The band
+ * calibrator deliberately stays on `ghi_wm2` — its skill is passed 'first-write' explicitly,
+ * that is also the default, and the skill cache is keyed by basis — because switching it is
+ * an owner decision (a realized basis cuts the night-charge multi-day widening ~40%).
+ *
+ * Every half is easy to undo by accident: a refactor that stops capturing (or captures a
+ * provider gap as 0) spoils data past_days can never return; one that lets the calibrator
+ * read the realized series moves a real write; one that quietly drops a consumer back onto
+ * the forecast undoes stage 2 with every test of the capture still green. Each mutant below
  * restores one of those.
  *
  *   node scripts/mutate-realized-ghi.mjs
@@ -43,11 +52,13 @@ const RECORDER = resolve(SERVER, 'src/recorder.ts');
 const INDEX = resolve(SERVER, 'src/index.ts');
 const ANALYTICS = resolve(SERVER, 'src/analytics.ts');
 const WEATHER = resolve(SERVER, 'src/weather.ts');
+const REPORTS = resolve(SERVER, 'src/reports.ts');
 
 const SUBSET = [
   'test/realizedGhiCapture.test.ts',
   'test/recorderWeatherGhi.test.ts',
   'test/forecastSkillGuard.test.ts',
+  'test/realizedGhiStage2.test.ts',
 ];
 
 const MUTANTS = [
@@ -138,13 +149,13 @@ const MUTANTS = [
     to: '    try {\n      recorder.recordWeatherGhi(weatherGhiRows(w)); /* MUTANT */',
     why: 'One of the two production writers silently captures nothing.',
   },
-  // ── the stage-1 invariant ──────────────────────────────────────────────────
+  // ── the calibrator stays first-write: branch, explicit argument, cache key ──
   {
     id: 'xiii. ★★★ the calibrator starts reading past-hour GHI (the basis switch, unreviewed)',
     file: ANALYTICS,
     find: "  const ghiRows = recorder.query('weather', 'ghi_wm2', windowStart, now, 3600);",
     to: "  const ghiRows = recorder.query('weather', 'ghi_wm2_realized', windowStart, now, 3600); /* MUTANT */",
-    why: 'The forecast-skill hindcast re-scores on past-hour irradiance, which moves bandRealizedCoveragePct, the basis gate and the P10 band that sizes a supervised write.',
+    why: "The FIRST-WRITE branch of the skill hindcast — the one the band calibrator scores on — reads past-hour irradiance: bandRealizedCoveragePct, the basis gate and realizedDailyErrHalfFrac (the multi-day widening that sizes the buy) re-score with no review.",
   },
   {
     id: 'xiv. ★★ a recorder accessor exposes the series to any caller',
@@ -152,6 +163,85 @@ const MUTANTS = [
     find: '    recordWeatherGhi,\n    recordForecastArchive,',
     to: '    recordWeatherGhi,\n    realizedGhiRows: (s: number, u: number) => [WEATHER_SN, WEATHER_GHI_REALIZED_METRIC, s, u], /* MUTANT */\n    recordForecastArchive,',
     why: 'The source scan allowlists the whole recorder, so an accessor there hands the series to the calibrator without any file outside the recorder naming it.',
+  },
+  {
+    id: 'xv. ★★★ the probabilistic band builder passes the realized basis to the calibrator',
+    file: REPORTS,
+    find: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'first-write',",
+    to: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'realized', /* MUTANT */",
+    why: 'The owner decision is taken by a one-word edit: realizedDailyErrHalfFrac drops ~40% and Thursday/weekend carries buy less, with every hindcast test still green.',
+  },
+  {
+    id: 'xvi. ★★★ the skill cache is keyed by window only',
+    file: ANALYTICS,
+    find: '  const cacheKey = `${windowDays}:${ghiBasis}`;',
+    to: '  const cacheKey = `${windowDays}`; /* MUTANT */',
+    why: "/api/confidence's 30-day realized report and the calibrator's 30-day first-write report share one slot: whichever computes first is served to the other for the 1 h TTL — the unreviewed switch by cache.",
+  },
+  // ── the realized-basis merge and each switched consumer ────────────────────
+  {
+    id: 'xvii. ★★ after a restart, uncaptured hours are scored on the forecast (cache layer dropped)',
+    file: ANALYTICS,
+    find: '  for (const wh of cacheHours) if (wh.radiationWm2 > 0) out.set(Math.floor(wh.ts / 3_600_000), wh.radiationWm2);\n',
+    to: '  /* MUTANT: cache layer dropped */\n',
+    why: "ghiPersistTick first runs at boot+45 min and captures only up to the cache's fetch time, so the newest hours fall through to the ~3-4-day-lead forecast after every restart.",
+  },
+  {
+    id: 'xviii. ★★ the soiling decomposition reads the forecast again',
+    file: ANALYTICS,
+    find: "    preferRealizedGhiRows(\n      recorder.query('weather', 'ghi_wm2', since, now, 3600),\n      queryRealizedGhi(recorder, since, now),\n    ),\n    recorder.query('weather', 'cloud_pct', since, now, 3600),\n  );\n  const weather = await getWeather();",
+    to: "    recorder.query('weather', 'ghi_wm2', since, now, 3600), /* MUTANT */\n    recorder.query('weather', 'cloud_pct', since, now, 3600),\n  );\n  const weather = await getWeather();",
+    why: 'A day whose first-write forecast was too dark reads as a phantom clean baseline (pv/GHI high), inflating dropPct and the wash-panels card.',
+  },
+  {
+    id: 'xix. ★★ solar-model training reads the forecast again',
+    file: ANALYTICS,
+    find: "    preferRealizedGhiRows(\n      recorder.query('weather', 'ghi_wm2', since, now, 3600),\n      queryRealizedGhi(recorder, since, now),\n    ),\n    recorder.query('weather', 'cloud_pct', since, now, 3600),\n  );\n  if (weather)",
+    to: "    recorder.query('weather', 'ghi_wm2', since, now, 3600), /* MUTANT */\n    recorder.query('weather', 'cloud_pct', since, now, 3600),\n  );\n  if (weather)",
+    why: 'Training days 8-30 pair actual PV with a ~3-4-day-lead forecast again (09-11: 0.67x the past-hour sum), skewing the alarm-facing coefficients.',
+  },
+  // ── further pins ───────────────────────────────────────────────────────────
+  {
+    id: 'xx. ★★ the default basis becomes realized',
+    file: ANALYTICS,
+    find: "  ghiBasis: ForecastSkillGhiBasis = 'first-write',",
+    to: "  ghiBasis: ForecastSkillGhiBasis = 'realized', /* MUTANT */",
+    why: 'Any caller that drops or never passes the argument — the calibrator after a refactor — silently switches basis. The default must be the status quo.',
+  },
+  {
+    id: 'xxi. ★ realized readings only fill gaps instead of winning',
+    file: ANALYTICS,
+    find: '    if (row.value > 0) out.set(he, row.value); else out.delete(he);',
+    to: '    if (!out.has(he)) { if (row.value > 0) out.set(he, row.value); } /* MUTANT */',
+    why: "The 'realized' skill report keeps scoring every hour that has a forecast row on the forecast — the stage-2 switch does nothing while claiming the basis.",
+  },
+  {
+    id: 'xxii. a realized dark hour no longer removes a forecast value',
+    file: ANALYTICS,
+    find: '    if (row.value > 0) out.set(he, row.value); else out.delete(he);',
+    to: '    if (row.value > 0) out.set(he, row.value); /* MUTANT: realized 0 ignored */',
+    why: 'An hour the provider says was dark keeps the forecast (or cache) value, inflating the hindcast prediction.',
+  },
+  {
+    id: 'xxiii. a non-finite or negative realized value replaces the forecast row',
+    file: ANALYTICS,
+    find: '    if (Number.isFinite(r.value) && r.value >= 0) byHour.set(Math.floor(r.ts / 3_600_000), r);',
+    to: '    byHour.set(Math.floor(r.ts / 3_600_000), r); /* MUTANT: guard dropped */',
+    why: 'A NaN reaches the solar-model fit and the soiling ratio, poisoning every coefficient it touches.',
+  },
+  {
+    id: 'xxiv. the display skill report scores the forecast again',
+    file: REPORTS,
+    find: "    return computeForecastSkill(devicesOf(ctx), ctx.recorder, fc, a.days ?? 7, 'realized');",
+    to: "    return computeForecastSkill(devicesOf(ctx), ctx.recorder, fc, a.days ?? 7, 'first-write'); /* MUTANT */",
+    why: '/api/forecast-skill, /api/confidence and the forecast-bias repair card report weather-forecast error as model error (7-day MAE ~5.8 → ~8.6 kWh).',
+  },
+  {
+    id: 'xxv. the alarm-model backtest reads the forecast again',
+    file: REPORTS,
+    find: "  for (const r of preferRealizedGhiRows(\n    recorder.query('weather', 'ghi_wm2', windowStart, nowMs, 3600),\n    queryRealizedGhi(recorder, windowStart, nowMs),\n  )) ghiByHe.set(",
+    to: "  for (const r of recorder.query('weather', 'ghi_wm2', windowStart, nowMs, 3600) /* MUTANT */) ghiByHe.set(",
+    why: '/api/backtest/forecast scores the alarm model against forecast irradiance again, so its r² describes the weather forecast, not the model.',
   },
 ];
 

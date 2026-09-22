@@ -138,6 +138,25 @@ export const FORCE_CHARGE_MIN_RATE_KW = 1;
  *  live rate is bounded by slots × this, so the start comes earlier rather than the night
  *  ending short. With all three it never binds (17 × 0.927 = 15.8 < 16.5). */
 export const FORCE_CHARGE_PROVEN_KW_PER_SLOT = 5.5;
+/** v1.173.0 — the pre-v1.173 fixed grid-side charge cap, kept only as the fallback when the
+ *  connected-Core count is unknown (the historical `chChargeWatt` reading). */
+export const LEGACY_CHARGE_CAP_KW = 7.2;
+
+/**
+ * v1.173.0 — PURE. The planner's GRID-side charge cap. `ARB_CHARGE_CAP_KW` > 0 is an owner
+ * override; 0 (the new default) is AUTO: connected Cores × what each is proven to take into
+ * its pack, back through the charge leg — the same model the force-charge start uses, so
+ * the plan and the charge can no longer disagree. The home load is NOT subtracted here:
+ * the planner already takes min(this, ARB_GRID_INPUT_CAP_KW − the hour's load). The fixed
+ * 7.2 kW under-stated the ~15 kW the pack actually takes (2026-09-16/18), so every plan
+ * announced a lower target than the night reached. Unknown Core count ⇒ the legacy 7.2.
+ */
+export function planChargeCapKw(optionKw: number, connectedSlots: number | null, legEff: number): number {
+  if (Number.isFinite(optionKw) && optionKw > 0) return optionKw;
+  if (connectedSlots == null || !Number.isInteger(connectedSlots) || connectedSlots < 1) return LEGACY_CHARGE_CAP_KW;
+  if (!Number.isFinite(legEff) || !(legEff > 0)) return LEGACY_CHARGE_CAP_KW;
+  return (Math.min(3, connectedSlots) * FORCE_CHARGE_PROVEN_KW_PER_SLOT) / legEff;
+}
 /** v1.167.0 — added to the computed lead: readback latency, the ramp, the first tick. */
 export const FORCE_CHARGE_JIT_BUFFER_MS = 15 * 60_000;
 /** Hard backstop: no force-charge of ours may outlive this, whatever the window says. */
@@ -165,6 +184,14 @@ export const FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS = 2;
  *  buying at the off-peak rate and heading for the on-peak one. */
 export const FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS = 30 * 60_000;
 export const FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS = 60 * 60_000;
+/** v1.173.0 — blind (no-readback) OFF re-sends stop this long after the first OFF. Beyond it
+ *  a panel still dark for half a day is more likely to be carrying an OWNER's manual Charge
+ *  Now than ours, and a blind OFF would switch that off. The escalation has already paged. */
+export const FORCE_CHARGE_BLIND_RESEND_MAX_MS = 12 * 3_600_000;
+/** v1.173.0 — a deadline page silenced by broadcast quiet hours is re-spoken this often
+ *  (audible only — the push already went) until it is heard, at most this many times. */
+export const FORCE_CHARGE_DEADLINE_REPAGE_MS = 30 * 60_000;
+export const FORCE_CHARGE_DEADLINE_REPAGE_MAX = 16;
 
 export type ForceChargeOffReason =
   | 'windowEnd' | 'cancelled' | 'reverted' | 'gridLoss' | 'disabled' | 'maxRun' | 'target';
@@ -221,7 +248,8 @@ export type ForceChargeAction =
   /** `deadline` — v1.168.0: raised by the wall-clock deadline, not the retry budget.
    *  `unconfirmed` — no live readback, so the slots are the ones we switched on, not
    *  ones seen ON: the alarm must say "could not confirm", never "still reads ON". */
-  | { kind: 'offFailed'; slots: number[]; deadline?: boolean; unconfirmed?: boolean };
+  /** `repage` — v1.173.0: re-speak a deadline page quiet hours silenced (audible only). */
+  | { kind: 'offFailed'; slots: number[]; deadline?: boolean; unconfirmed?: boolean; repage?: boolean };
 
 /**
  * The feature gate. Wired to options the owner ALREADY set rather than a new one:
@@ -314,6 +342,17 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
       const stillOn = o.slotsOn == null ? ours : ours.filter((n) => o.slotsOn!.includes(n));
       if (stillOn.length > 0) return { kind: 'offFailed', slots: stillOn, deadline: true, unconfirmed: o.slotsOn == null };
     }
+  } else if (
+    // v1.173.0 — the deadline paged INSIDE broadcast quiet hours (Friday's 1-hour window puts
+    // it at Sat 01:00) and was not spoken. Re-speak it every 30 min until it is heard.
+    forceChargeInFlight(s) && s.forceChargeOffDeadlineMutedAtMs != null
+    && nowMs - s.forceChargeOffDeadlineMutedAtMs >= FORCE_CHARGE_DEADLINE_REPAGE_MS
+    && s.forceChargeOffDeadlineRepages < FORCE_CHARGE_DEADLINE_REPAGE_MAX
+  ) {
+    const stillOn = o.slotsOn == null ? ours : ours.filter((n) => o.slotsOn!.includes(n));
+    if (stillOn.length > 0) {
+      return { kind: 'offFailed', slots: stillOn, deadline: true, unconfirmed: o.slotsOn == null, repage: true };
+    }
   }
 
   // ── 1. OFF VERIFICATION. Checked first, and NOT stopped by an escalation: the
@@ -325,6 +364,7 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
       // the OFF blind on the persistence cadence (v1.168.0, review): an OFF is idempotent,
       // and a stale readback plus one rejected 05:00 OFF otherwise left it on all day.
       return s.forceChargeOffEscalated && since >= FORCE_CHARGE_OFF_PERSIST_EVERY_MS
+        && nowMs - s.forceChargeOffAtMs < FORCE_CHARGE_BLIND_RESEND_MAX_MS
         ? { kind: 'offRetry', slots: ours, unconfirmed: true }
         : { kind: 'none' };
     }
@@ -436,6 +476,30 @@ export function forceChargeStartAtMs(
   const neededKwh = Math.max(0, ((targetPct - poolSocPct) / 100) * fullKwh) + evKwh;
   const leadMs = (neededKwh / rate) * 3_600_000 + FORCE_CHARGE_JIT_BUFFER_MS;
   return windowEndMs - leadMs;
+}
+
+/**
+ * v1.173.0 — PURE. The pack kWh a predicted EV session will DISPLACE in the rest of the
+ * window. The EV draws from the grid cap, so with the cap binding every grid kWh it takes
+ * is ~legEff kWh the pack does not get. But when the per-Core bound is what limits the
+ * rate (a Core out), there is SLACK under the cap — (unbounded rate − bounded rate) — that
+ * the EV consumes first: the pack loses only max(0, EV kW × legEff − slack) per hour. With
+ * the session's hours taken as energy ÷ its peak power, the displaced energy is
+ * evKwh × max(0, legEff − slack ÷ peakEvKw). No slack (all Cores in) ⇒ evKwh × legEff, as
+ * v1.169.0. The v1.170.0 review measured the old full count starting ~2.5 h early with one
+ * Core out and an EV predicted.
+ */
+export function evDisplacedPackKwh(i: {
+  evKwh: number | null; peakEvKw: number | null; rateKw: number | null;
+  unboundedRateKw: number | null; legEff: number;
+}): number | null {
+  if (i.evKwh == null || !Number.isFinite(i.evKwh)) return null;
+  const ev = Math.max(0, i.evKwh);
+  const slack = i.rateKw != null && i.unboundedRateKw != null && Number.isFinite(i.rateKw) && Number.isFinite(i.unboundedRateKw)
+    ? Math.max(0, i.unboundedRateKw - i.rateKw) : 0;
+  const factor = slack > 0 && i.peakEvKw != null && i.peakEvKw > 0
+    ? Math.max(0, i.legEff - slack / i.peakEvKw) : i.legEff;
+  return ev * factor;
 }
 
 /**

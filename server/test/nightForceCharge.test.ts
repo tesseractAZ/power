@@ -768,7 +768,8 @@ test('★★★ index.ts times the start with the live rate, from ONE grid-cap r
   assert.ok(INDEX.includes('const gridInputCapKw = gridInputCapKwFromEnv();'), 'the planner reads the same cap');
   // The EV energy comes only from a plan for THIS window, through the charge leg.
   assert.ok(body.includes('fcPlan?.window != null && fcPlan.window.endMs === state.windowEndMs'));
-  assert.ok(body.includes('? fcPlan.evContention.windowEvKwh * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY)'));
+  assert.ok(body.includes('? evDisplacedPackKwh({') && body.includes('evKwh: fcPlan.evContention.windowEvKwh,'),
+    'v1.173.0 — through evDisplacedPackKwh (the per-Core slack is taken off first)');
 });
 
 test('★★★ the house load is the circuits summed and converted W → kW (the recorder\'s panel_load)', () => {
