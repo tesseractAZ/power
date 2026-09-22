@@ -1516,10 +1516,17 @@ export function createRecorder(
         push('backup_reserve', shp.backupReserveSoc);
         push('backup_remain_min', shp.backupDischargeTimeMin);
         push('backup_charge_min', shp.backupChargeTimeMin);
-        let panelLoad = 0;
+        // v1.175.0 — NULL when no channel reported, so no row is written. The
+        // projection always carries twelve channel entries with `watts: null` for any the
+        // payload omitted; starting this sum at 0 turned a panel that reported nothing
+        // into a recorded "house drew 0 W" sample. That row is indistinguishable from a
+        // real zero to every consumer of the series: the Today tiles' PANEL LOAD
+        // integral, the night-charge load model and its band calibration, and the grid
+        // KPI coverage gate that compares grid_home_w coverage against panel_load's.
+        let panelLoad: number | null = null;
         for (const c of shp.circuits) {
           if (c.watts == null) continue;
-          panelLoad += c.watts;
+          panelLoad = (panelLoad ?? 0) + c.watts;
           push(`ch${c.ch}_w`, c.watts);
         }
         push('panel_load', panelLoad);

@@ -3000,6 +3000,16 @@ export interface RunwayProjection {
 }
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
+/** v1.175.0 — when the runway's recent load was last backed by a REAL panel reading (a
+ *  recorded panel_load row or a live channel sum). The last-resort fallback below re-uses the
+ *  previous compute's recentLoadWatts, and each compute writes that value back, so without
+ *  an age it carried itself forward indefinitely. A panel that reports no channel watts now
+ *  writes no panel_load row (the recorder used to store 0), which is what makes that path
+ *  reachable: a load captured just before the silence (an EV charging at 14 kW, say) would
+ *  keep shortening the projected runway long after the EV stopped. */
+let runwayLoadMeasuredAtMs: number | null = null;
+/** How long a carried-forward recent load stays usable after the last real reading. */
+const RUNWAY_LOAD_CARRY_MAX_MS = 2 * 60 * 60 * 1000;
 
 // v0.60.0 — asymmetric hysteresis on the to-EMPTY → 999 sentinel transition only.
 // A finite empty-crossing sits at the far edge of the 24h horizon, so minute-to-
@@ -3036,7 +3046,7 @@ export function applyEmptyHysteresis(
  *  production computeRunway runs in the analytics WORKER thread, which holds its own
  *  module copy of runwayEmptyState/runwayCache; this main-thread reset does not touch
  *  it (a worker respawn would reset the worker's copy, harmlessly releasing any hold). */
-export function resetRunwayCache(): void { runwayCache = null; runwayEmptyState.streak = 0; runwayEmptyState.lastFinite = null; }
+export function resetRunwayCache(): void { runwayCache = null; runwayLoadMeasuredAtMs = null; runwayEmptyState.streak = 0; runwayEmptyState.lastFinite = null; }
 
 const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjection> = {}): RunwayProjection => ({
   generatedAt: now,
@@ -3104,6 +3114,7 @@ export function computeRunway(
   // setup that's just the EVSE on Core 4, which only runs occasionally.)
   const loadPts = recorder.query(shp2.sn, 'panel_load', now - RUNWAY_LOAD_WINDOW_MS, now);
   let loadAvgWatts: number;
+  if (loadPts.length > 0) runwayLoadMeasuredAtMs = Math.max(runwayLoadMeasuredAtMs ?? 0, loadPts[loadPts.length - 1].ts);
   if (loadPts.length >= 2) {
     loadAvgWatts = loadPts.reduce((s, p) => s + p.value, 0) / loadPts.length;
   } else {
@@ -3116,10 +3127,13 @@ export function computeRunway(
     // immediately), a single recent recorded sample, or the last good
     // recentLoadWatts — so the sensors stay numeric. Only give up if none exists.
     const liveLoadWatts = (shp2.projection.circuits ?? []).reduce((s, c) => s + (c.watts ?? 0), 0);
+    if (liveLoadWatts > 0) runwayLoadMeasuredAtMs = now;
+    // v1.175.0 — the carried-forward value only while a real reading is recent enough.
+    const carryOk = runwayLoadMeasuredAtMs != null && now - runwayLoadMeasuredAtMs <= RUNWAY_LOAD_CARRY_MAX_MS;
     const fallback =
       liveLoadWatts > 0 ? liveLoadWatts
         : loadPts.length === 1 ? loadPts[0].value
-          : (runwayCache?.value.recentLoadWatts ?? 0) > 0 ? runwayCache!.value.recentLoadWatts
+          : carryOk && (runwayCache?.value.recentLoadWatts ?? 0) > 0 ? runwayCache!.value.recentLoadWatts
             : null;
     if (fallback == null || !Number.isFinite(fallback) || fallback <= 0) {
       return emptyRunway(now, 'panel-load history insufficient — wait a few minutes', {

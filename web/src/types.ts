@@ -177,6 +177,10 @@ export interface DeviceSnapshot {
   lastUpdated: number;
   lastError?: string;
   projection?: Projection;
+  /** v1.175.0 — mirrored from the server (snapshot.ts): ms epoch since which a panel that is
+   *  still answering has been replaying an identical payload (a cloud shadow), else null.
+   *  Its figures are frozen while this is set; the server already zeroes its grid reading. */
+  contentStaleSinceMs?: number | null;
   // v0.37.0 — the SHP2 device carries its own grid backstop + off_grid flag,
   // attached server-side by snapshotForClient(). GridBackstop is defined below.
   grid?: GridBackstop;
