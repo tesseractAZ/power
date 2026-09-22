@@ -198,7 +198,8 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         // (which clear within a cycle or two) never reach the user. The
         // baseline dpu-imbalance/vdiff families are untouched — this gate
         // lives only on the peer-outlier path.
-        const hitKey = `${metric.key}-${d.sn}-${pk.num}`;
+        // v1.173.0 — a different pack in the slot re-earns its 3 consecutive cycles.
+        const hitKey = `${metric.key}-${d.sn}-${pk.num}-${pk.packSn ?? ''}`;
         seenHits.add(hitKey);
         const gate = bumpPeerHit(hitKey);
         if (!gate.emit) continue;
@@ -221,6 +222,7 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
           device: d.deviceName,
           coreNum: dpuNum(d.deviceName),
           packNum: pk.num,
+          ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}), // v1.173.0 — lets the residency check see a new pack under this id
           title: `${cap(metric.label)} — peer outlier`,
           detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).`,
           facts: [
@@ -275,6 +277,8 @@ interface BaselineTarget {
   category: Alert['category'];
   coreNum: number | null;            // Core (DPU) number when applicable
   packNum: number | null;            // pack number when pack-scoped
+  /** v1.173.0 — the physical pack (pack targets only), stamped on the alert as sourcePackSn. */
+  packSn?: string | null;
   live: number | null;               // current value, in DISPLAY units
   floor: number;                     // min deviation worth flagging (display units)
   transform: (raw: number) => number; // history raw value → display units
@@ -300,8 +304,8 @@ function buildBaselineTargets(devices: Record<string, DeviceSnapshot>): Baseline
       mppt('mppt_hv_temp', 'HV MPPT temperature', p.mpptHvTemp);
       mppt('mppt_lv_temp', 'LV MPPT temperature', p.mpptLvTemp);
       for (const pk of p.packs) {
-        targets.push({ sn: d.sn, metric: `pack${pk.num}_temp`, device: d.deviceName, label: 'cell temperature', category: 'Thermal', coreNum: core, packNum: pk.num, live: pk.temp == null ? null : cToF(pk.temp), floor: 9, transform: cToF, fmt: tempFmt });
-        targets.push({ sn: d.sn, metric: `pack${pk.num}_board`, device: d.deviceName, label: 'BMS board temperature', category: 'Thermal', coreNum: core, packNum: pk.num, live: pk.hwBoardTemp == null ? null : cToF(pk.hwBoardTemp), floor: 11, transform: cToF, fmt: tempFmt });
+        targets.push({ sn: d.sn, metric: `pack${pk.num}_temp`, device: d.deviceName, label: 'cell temperature', category: 'Thermal', coreNum: core, packNum: pk.num, packSn: pk.packSn, live: pk.temp == null ? null : cToF(pk.temp), floor: 9, transform: cToF, fmt: tempFmt });
+        targets.push({ sn: d.sn, metric: `pack${pk.num}_board`, device: d.deviceName, label: 'BMS board temperature', category: 'Thermal', coreNum: core, packNum: pk.num, packSn: pk.packSn, live: pk.hwBoardTemp == null ? null : cToF(pk.hwBoardTemp), floor: 11, transform: cToF, fmt: tempFmt });
       }
     } else if (d.projection.kind === 'shp2') {
       const sp = d.projection as Shp2Projection;
@@ -502,6 +506,7 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
       device: t.device,
       coreNum: t.coreNum,
       packNum: t.packNum,
+      ...(t.packSn ? { sourcePackSn: t.packSn } : {}),
       title: `${cap(t.label)} unusual for the hour`,
       detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(dispAbsDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).${regimeNote}`,
       facts: [
@@ -756,6 +761,8 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
                 device: d.deviceName,
                 coreNum: subject.coreNum,
                 packNum: subject.packNum,
+                // v1.173.0 — the physical pack, so the v1.102.0 residency check can see a renumber.
+                ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}),
                 title: 'State of health declining',
                 detail: `${tag} SoH ${curSoh.toFixed(1)}% declining ~${(-sohPerDay * 30.4).toFixed(2)}%/month — projected to reach 85% in about ${months} month(s). (R² ${fit.r2.toFixed(2)}, ${(span / 86_400_000).toFixed(0)} days of data.)`,
                 facts: [
@@ -789,6 +796,8 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
                 device: d.deviceName,
                 coreNum: subject.coreNum,
                 packNum: subject.packNum,
+                // v1.173.0 — the physical pack, so the v1.102.0 residency check can see a renumber.
+                ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}),
                 title: 'Cell imbalance trending up',
                 detail: `${tag} cell spread ${pk.maxVolDiffMv} mV rising ~${mvPerWeek.toFixed(1)} mV/week — projected to reach 50 mV in about ${Math.round(weeksTo50)} week(s). (R² ${fit.r2.toFixed(2)}, ${(span / 86_400_000).toFixed(0)} days of data.)`,
                 facts: [

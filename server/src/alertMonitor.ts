@@ -4,7 +4,7 @@ import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
 import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
-import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity } from './alerts.js';
+import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, packSnTail } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds } from './messageRateFloorAlert.js';
@@ -52,7 +52,7 @@ import * as haStateCache from './haStateCache.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
 // v1.x — restart-persistent per-alert onset (first-seen) timestamps for the
 // ALM screen; see alertOnset.ts.
-import { syncAlertOnsets, getAlertOnset } from './alertOnset.js';
+import { syncAlertOnsets, getAlertOnset, restampAlertOnset } from './alertOnset.js';
 
 /**
  * Watches the fleet, attaches computed alerts to the snapshot, and pushes a
@@ -360,7 +360,7 @@ export function isForecastDipResolveDwellFamily(alert: Pick<Alert, 'id'>): boole
  * Returns '' for system-wide alerts (device 'System'/'EcoFlow Cloud' with no
  * Core scope) so their titles stay clean. Pure + exported for tests.
  */
-export function notifyLocator(alert: Pick<Alert, 'device' | 'coreNum' | 'packNum'>): string {
+export function notifyLocator(alert: Pick<Alert, 'device' | 'coreNum' | 'packNum' | 'sourcePackSn'>): string {
   const parts: string[] = [];
   const dev = alert.device?.trim();
   if (dev && dev !== 'System' && dev !== 'EcoFlow Cloud') {
@@ -368,9 +368,14 @@ export function notifyLocator(alert: Pick<Alert, 'device' | 'coreNum' | 'packNum
   } else if (alert.coreNum != null) {
     parts.push(`Core ${alert.coreNum}`);
   }
-  if (alert.packNum != null) parts.push(`pack ${alert.packNum}`);
+  // v1.173.0 — the slot is an address; the serial tail names the BATTERY (slot 1 held a
+  // different pack after the 2026-09-20 renumber). Push/digest title only — never spoken.
+  if (alert.packNum != null) {
+    parts.push(alert.sourcePackSn ? `pack ${alert.packNum} (SN ${packSnTail(alert.sourcePackSn)})` : `pack ${alert.packNum}`);
+  }
   return parts.join(' ');
 }
+
 
 /**
  * v0.74.0 — stable per-subject notification identity. The alert `id` already
@@ -1122,6 +1127,24 @@ export function resolveHandoffOwner(id: string, currentIds: ReadonlySet<string>)
   if (currentIds.has('shp2-below-reserve')) return 'shp2-below-reserve';
   if (currentIds.has('shp2-near-reserve')) return 'shp2-near-reserve';
   return null;
+}
+
+/**
+ * v1.173.0 — PURE. The live ids whose PHYSICAL pack changed since the last tick (the v1.102.0
+ * residency check, extracted so the renumber scenario is unit-testable). A missing serial on
+ * either side is never evidence: no change is reported.
+ */
+export function detectPackResidencyChanges(
+  alerts: ReadonlyArray<Pick<Alert, 'id' | 'sourcePackSn'>>,
+  tracked: ReadonlyMap<string, { alert: Pick<Alert, 'sourcePackSn'> }>,
+): Array<{ id: string; from: string; to: string }> {
+  const out: Array<{ id: string; from: string; to: string }> = [];
+  for (const a of alerts) {
+    const before = tracked.get(a.id)?.alert.sourcePackSn;
+    const after = a.sourcePackSn;
+    if (before != null && after != null && before !== after) out.push({ id: a.id, from: before, to: after });
+  }
+  return out;
 }
 
 /** v0.76.0 — has this alert ESCALATED above the severity it was last ACTED ON
@@ -2347,15 +2370,19 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // real clear uses (so the old episode closes with an honest duration and
     // lands in the cleared log) and let the rising-edge loop below open a fresh
     // one for the new hardware.
-    for (const a of alerts) {
-      const t = tracked.get(a.id);
-      if (t == null) continue;
-      const before = t.alert.sourcePackSn;
-      const after = a.sourcePackSn;
-      if (before != null && after != null && before !== after) {
-        packResidencyChanges.push({ id: a.id, from: before, to: after });
-        retireTrackedAlert(a.id, t, now);
-      }
+    // v1.173.0 — the retired episode's notify record and onset belong to the OLD pack. Left in
+    // place, the rising edge below re-tracked the new pack's alert as "already notified" (its
+    // first push was swallowed — critical-to-critical included, no escalation) and inherited the
+    // old onset (its cleared record spanned two batteries). A card the old episode put on the
+    // operator's screen is still owed a dismissal, so the delivered-push flag carries over.
+    packResidencyChanges.push(...detectPackResidencyChanges(alerts, tracked));
+    const packReplaced = new Map<string, { pushSent: boolean }>();
+    for (const c of packResidencyChanges) {
+      const t = tracked.get(c.id)!;
+      packReplaced.set(c.id, { pushSent: t.pushSent === true });
+      retireTrackedAlert(c.id, t, now); // reads the OLD onset — must precede the restamp
+      if (persistedNotified.delete(c.id)) persistNotified();
+      restampAlertOnset(c.id, now);
     }
     // v1.x (r25) — the restart-persistent onset sidecar is synced AFTER the
     // falling-edge/dwell loop below (see the syncAlertOnsets call there) so it
@@ -2453,7 +2480,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
           // dedupe, but its rehydration must not owe a "Resolved:"). A
           // firstRun-only seed suppresses the fire push but must not enable an
           // all-clear for a push that never went out.
-          pushSent: rec?.sent === true,
+          // v1.173.0 — a pack-replaced id owes the OLD card its dismissal even if the new
+          // pack's episode never pushes (shouldSendResolve gates on pushSent, not notified).
+          pushSent: rec?.sent === true || packReplaced.get(a.id)?.pushSent === true,
         });
         continue;
       }

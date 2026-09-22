@@ -99,7 +99,7 @@ test('★★★ a repeated packSn marks the older slot as a renumbered ghost —
   for (let m = 0; m <= 30; m++) {
     const packs = [1, 2, 3, 4, 5].map((n) => {
       const p = n === 5 ? pk(5, 55, 3328) : pk(n, 70, 3330 + (m % 7));
-      p.packSn = n === 4 || n === 5 ? 'SN-3Q0383' : `SN-${n}`;
+      p.packSn = n === 4 || n === 5 ? 'SN-DUP-4' : `SN-${n}`;
       return p;
     });
     r = prunePhantomPacks(packs, null, hist, m * M);
