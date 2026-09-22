@@ -1008,7 +1008,7 @@ functions taking `attemptedSns` explicitly:
 **`longFailureRecoveries(...)` was REMOVED in v1.139.0.** It announced the moment a
 1006-blocked accessory started answering — the "EcoFlow enablement doorbell". The premise
 was false: **API error 1006 is a product-class limit, not a grantable account
-permission** (settled by the owner 2026-09-08; EcoFlow is not expected to extend API
+permission** (settled 2026-09-08; EcoFlow is not expected to extend API
 coverage to these device classes). The condition it watched for cannot occur, so every
 firing it could produce was necessarily false — and it did fire, pushing "EcoFlow data
 restored" to the operator's phone 302 ms after the device went OFFLINE. A detector that
@@ -1061,7 +1061,7 @@ window had already rolled past it.
 | `fleet-status` 10-min dump | 314 lines / 53 h carrying **one distinct body** | INFO on state **change** + one hourly anchor; the cadence stays at DEBUG |
 | `recorder: N samples in last …` | debug-*gated*, info-*emitted* (v1.143.0) | a real debug channel |
 | `solar-model: fitted on N/M` | 109 lines, 54 exact consecutive repeats | emitted on change |
-| `poll: N device fetch failure(s) persisting` | hourly | daily — it reports a permanent, owner-settled limit |
+| `poll: N device fetch failure(s) persisting` | hourly | daily — it reports a permanent, settled limit |
 
 `statusDumpLevel`'s signature deliberately **excludes** the per-device message
 counters and the device-list age. Those move every tick, so including them would
@@ -2068,7 +2068,7 @@ conditioned slope could otherwise win, and below any productive mid-morning
 slot. `peakGateMinGhiWm2` is published in the model so frontend mirrors gate on
 the same threshold rather than hardcoding 300.
 
-> **No Bayesian recursive update.** The prompt asked whether one exists — it does
+> **No Bayesian recursive update.** The natural question is whether one exists — it does
 > not. The model is a plain batched OLS refit over the trailing 30-day window on
 > each forecast build. There is no per-observation Kalman/Bayes state.
 
@@ -2398,7 +2398,7 @@ explicitly: its skill sets `skillFrac`, `bandSigmaCal`, `bandRealizedCoveragePct
 (the night-charge basis gate) and `realizedDailyErrHalfFrac` (the multi-day P10/P90
 widening that sizes a buy). A realized basis would cut that widening by about 40% on
 the 2026-09 window. It would also remove the weather-forecast error from a band that
-wraps a day-ahead forecast. Choosing a lead-matched calibrator basis is an owner
+wraps a day-ahead forecast. Choosing a lead-matched calibrator basis is a policy
 decision. The cache key includes the basis because `/api/confidence` and the
 calibrator both use the 30-day window. Other readers of the stored series now take it
 realized-first, falling back to `ghi_wm2` hour by hour where no realized row exists:
@@ -6447,7 +6447,7 @@ This matters beyond the noise: the single-flight note below records that overlap
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
 **v1.173.1 — calibrator on realized GHI; boot yellow confirmation.** reports.ts passes
-`ghiBasis = 'realized'` to the band calibrator's skill (owner decision); `holdBootYellow` holds a
+`ghiBasis = 'realized'` to the band calibrator's skill (a policy decision); `holdBootYellow` holds a
 fresh warm-up-window yellow for `BOOT_YELLOW_CONFIRM_MS` (2 min) before it is spoken.
 
 **v1.173.0 — the 2026-09-21 open list.** Cost mode continues past the planner's early
@@ -6481,7 +6481,7 @@ analytics.ts). Unbucketed it stalled the single analytics worker 16-20 s per hou
 alarm latency for every condition that worker serves; the 200-day window is unchanged and the
 report is identical (checkpoints ±1.5%, medians, a >100 W charge gate).
 
-**v1.170.0 — the 80+ coast is retired** (owner, 2026-09-18). The software stop applies at every
+**v1.170.0 — the 80+ coast is retired** (2026-09-18). The software stop applies at every
 target again, at `forceChargeStopPct` = min(target, the synced whole-number ceiling). The live rate
 is also bounded by connected slots × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` (5.5 kW, the least each Core
 has been seen to take).
@@ -6498,7 +6498,7 @@ pack (90 → 86% by 05:00) — the "coast on grid" of v1.168.0 did not hold; wor
 behaviour unchanged.
 
 **v1.168.0 — the Thursday rule, the median surplus, coast on grid, and an OFF deadline**
-(owner 2026-09-17). (1) When tonight is a full-length cheap window (≥ 3 h) and the next
+(2026-09-17). (1) When tonight is a full-length cheap window (≥ 3 h) and the next
 full-length one opens more than 24 h after it closes (`longGapAhead`, from the tariff calendar;
 shorter windows are stepped over by `nextFullCheapWindow`), cost mode sets the morning-solar
 headroom aside and fills to `ARB_COST_MAX_SOC_PCT` — Thursday nights, before Friday's 1-hour
@@ -6514,7 +6514,7 @@ readback; `runForceChargeTick` runs it even with the panel missing from the devi
 pages on its own record (`forceChargeOffDeadlinePagedAtMs`), so a quiet-hours-silenced earlier
 escalation cannot disarm it; once escalated, the OFF is re-sent blind every 15 min.
 
-**v1.167.0 — force-charge runs to the target, just in time** (owner design 2026-09-17). Any
+**v1.167.0 — force-charge runs to the target, just in time** (design 2026-09-17). Any
 target above the 50% reserve is reachable: force-charge stops the moment the pool reaches the
 announced target (`forceChargeCeilingPct`), and the panel's `foceChargeHight` — synced to
 `clamp(target, 80, 100)` when the night goes live and restored afterwards — is only a backstop.
@@ -6526,7 +6526,7 @@ until the start. Unknown SoC never starts it or stops it early; the v1.165.0 OFF
 here); just-in-time shrinks the nightly exposure to ~1 h but does not settle it — see the
 attended breaker test in the module header.
 
-**v1.166.0 — the telemetry-blind alarm remediates first** (owner decision 2026-09-17). When the
+**v1.166.0 — the telemetry-blind alarm remediates first** (policy decision 2026-09-17). When the
 `telemetry-blind` alert first goes active, `blindRemediation.ts` fires the MQTT session rebuild
 immediately and holds the alert non-annunciating (no voice, no push; still on-screen and in
 `/api/health`) for at most 5 min. Telemetry back ⇒ it clears never having sounded; still blind at
@@ -6551,7 +6551,7 @@ readback-verified (6 min grace, above the 5 min per-slot cooldown), re-issued, e
 verifying after escalation. `armFromPlan` refuses to bury an unverified force-charge.
 Kill switch: `ARB_COST_MAX_SOC_PCT` ≤ 50. Harness: `scripts/mutate-force-charge.mjs`.
 
-**v1.161.0 — the write ceiling is 90%, raised from 50% on the owner's instruction (2026-09-16).**
+**v1.161.0 — the write ceiling is 90%, raised from 50% (2026-09-16).**
 `ARB_COST_MAX_SOC_PCT` has been set to **90** in the live options all along; the 50 in
 `RESERVE_WRITE_MAX_PCT` is what made every value the option's `int(50,100)` schema allows above 50
 inert. On 2026-09-16 the engine asked for `setpointSocPct: 100` and wrote 50. ★★ The old bound
@@ -9199,7 +9199,7 @@ A pure reduction over the ledger (no I/O, `nowMs` injected) into one of three st
 | `buy_err_kwh` basis | **v1.105.0 (algo v3)** — the PLANNER-SIZING basis: `buy_err = planBuy − (planBuy + netMiss/legEff) = −netMiss/legEff`, where `netMiss = (forecastPv − actualPv) + (actualLoad − forecastLoad)`. It answers exactly one question — *did the planner size the buy correctly?* — and contains no delivered term, no trough and no reserve setpoint. The prior definition was `planBuy − (delivered + troughDeficit)`, the difference of two questions: it counted the actuator's by-design over-delivery (29-41 kWh against 21-22 kWh plans) as under-buy, and anchored on a 16 h post-window trough that is really the reverted `backupReserveSoc` (a fixed −14.9 kWh at a 10 % trough). Across four live nights that was −62.13 kWh of residual, 52 % over-delivery / 48 % trough, producing a 56 % under-buy rate no forecast change could move. Actuated and advisory nights share the basis — one column, one meaning. Delivery quality is a separate question. |
 | Under-buy rate | With ≥ `MIN_NIGHTS_TO_JUDGE_UNDERBUY = 5` actuated nights: fraction of `buy_err_kwh < −UNDERBUY_DEADBAND_KWH` (0.5, **v1.105.0** — an untoleranced `< 0` scored a −0.01 kWh rounding residual as a life-safety miss) must be ≤ `MAX_UNDERBUY_RATE = 0.10` (under-buy is the asymmetric safety miss). Below 5 nights this is still LEARNING, not BLOCKED. **v1.104.0** — the pool EXCLUDES nights whose plan disclosed a cushion shortfall (`cushion_shortfall`), matching the exemption the strike rule already applies ("disclosed — physics, not fault"): a plan that declared up front it could not meet the cushion, because charge and pool caps prevent it, is not evidence that the engine under-bought. `underBuyExcluded` reports how many were dropped. Removing bad evidence leaves NO evidence, so the rate becomes null and the state falls to LEARNING — fail-closed, never READY. ★Known limitation, NOT fixed: `buy_err_kwh` is a hybrid residual that adds the actuator's own delivered energy back into "realized need" and anchors its counterfactual on a trough that is really the reverted reserve setpoint, so actuator over-delivery is indistinguishable from planner under-sizing. Redefining it requires choosing which question it answers and bumping `CURRENT_ALGO_VERSION`, invalidating every existing row. |
 
-**Graduation criteria** (owner-approved 2026-07-31) — *any* unmet or uncomputable metric ⇒ fail-closed `LEARNING` (design I13; missing/thin/young data is never null-as-ready):
+**Graduation criteria** (adopted 2026-07-31) — *any* unmet or uncomputable metric ⇒ fail-closed `LEARNING` (design I13; missing/thin/young data is never null-as-ready):
 
 | Metric | Threshold | Constant |
 |---|---|---|
@@ -9320,7 +9320,7 @@ Three properties an operator needs before setting these:
    comfortable-hold case is rare, so moving the objective check earlier would address a
    population that is close to empty (see `docs/PERFORMANCE.md` §3).
 
-**Owner cancel:** `POST /api/night-charge/cancel` (write-auth; surfaced as a button on the `NightChargeCard`). Before the apply moment it disarms; after a successful apply it triggers an immediate revert on the next actuator tick.
+**Manual cancel:** `POST /api/night-charge/cancel` (write-auth; surfaced as a button on the `NightChargeCard`). Before the apply moment it disarms; after a successful apply it triggers an immediate revert on the next actuator tick.
 
 **`auto` semantics:** `effectiveActuationMode(mode, writeReady)` is the binding enforcement point — `auto` is structurally demoted to `supervised` while the readiness gate has not graduated, and any future auto-only relaxation (e.g. dropping the evening cancel checkpoint) must branch on the demoted mode, never the raw config value. `advisory` remains the default; enabling a write mode is an explicit owner action in the add-on configuration.
 
@@ -10108,7 +10108,7 @@ the pool holds 92.16 kWh while the worst-case day drains 128-152 kWh, so the cus
 cannot be met from any starting SoC. `underBuyRate: null` and `activeStrikes: 0` are
 therefore not a clean bill of health; they are **unmeasured**. The gate now publishes
 `underBuyMeasurable` / `strikesMeasurable` beside them and says so in the blocking
-line. **No criterion was loosened** — re-scoping the cushion is an owner policy
+line. **No criterion was loosened** — re-scoping the cushion is an open policy
 decision, and until it is made, fail-closed with an honest label is the correct
 posture.
 

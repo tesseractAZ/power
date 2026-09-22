@@ -518,7 +518,8 @@ test('★★ the monitor applies it before the red hold and re-presents a persis
   const y = src.indexOf('if (holdBootYellow(level === \'yellow\' && transitioned, Date.now() - bootMs, warmupYellowSinceMs, Date.now())) {');
   const r = src.indexOf('if (holdBootRed(level === \'red\' && (transitioned || newCrit)');
   assert.ok(y > 0 && r > y, 'yellow hold precedes the red hold');
-  assert.ok(src.includes("if (level !== 'yellow') warmupYellowSinceMs = null;"), 'a cleared yellow restarts the confirmation');
+  assert.ok(src.includes("if (level !== 'yellow') { warmupYellowSinceMs = null; warmupYellowLogged = false; }"), 'a cleared yellow restarts the confirmation');
+  assert.ok(src.includes('if (!warmupYellowLogged) {'), 'v1.173.2 — the held line is written once per episode, not every tick');
   const block = src.slice(y, r);
   assert.ok(block.includes('return;') && !block.includes('adoptLevel('), 'held without adopting the level — it re-presents next tick');
 });
