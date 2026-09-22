@@ -1,6 +1,10 @@
-import { memo, useEffect, useState } from 'react';
+import { memo } from 'react';
 import type { CurtailmentReport } from '../types';
-import { apiUrl } from '../api';
+import { usePolled, useNow } from '../usePolled';
+import { pollStale } from '../freshness';
+import { StaleNote } from '../components/StaleNote';
+
+const CURTAILMENT_POLL_MS = 60_000;
 import { HUES, UI } from '../theme';
 
 /**
@@ -20,32 +24,12 @@ import { HUES, UI } from '../theme';
 // v0.22.0 — zero-prop card: memo makes it immune to App's ~1 Hz snapshot
 // re-renders; it re-polls on its own 60 s timer (matches server cache TTL).
 export const CurtailmentCard = memo(function CurtailmentCard() {
-  const [r, setR] = useState<CurtailmentReport | null>(null);
-  const [err, setErr] = useState(false);
-
-  useEffect(() => {
-    let live = true;
-    const load = async () => {
-      try {
-        const res = await fetch(apiUrl('api/curtailment'));
-        if (!live) return;
-        if (res.ok) {
-          setR(await res.json());
-          setErr(false);
-        } else {
-          setErr(true);
-        }
-      } catch {
-        if (live) setErr(true);
-      }
-    };
-    load();
-    const t = window.setInterval(load, 60_000);
-    return () => {
-      live = false;
-      window.clearInterval(t);
-    };
-  }, []);
+  // v1.176.0 — usePolled, like Runway: the error flag used to be read only before the FIRST
+  // success, so a worker that kept failing left "curtailing now" and "rejected right now"
+  // on screen indefinitely, looking current.
+  const { data: r, lastOkAt, failing: err } = usePolled<CurtailmentReport>('api/curtailment', CURTAILMENT_POLL_MS);
+  const now = useNow(15_000);
+  const stale = r != null && pollStale(lastOkAt, now, CURTAILMENT_POLL_MS);
 
   if (!r) {
     return (
@@ -64,9 +48,13 @@ export const CurtailmentCard = memo(function CurtailmentCard() {
         <span title="When SoC ≈ 100% and home load is below PV, the DPUs throttle their MPPTs to match load. Anything more would have been rejected at the panels — that's curtailment.">
           Solar curtailment
         </span>
-        <span className={`badge ${headerColor} normal-case tracking-normal text-xs`}>
-          {headerLabel}
-        </span>
+        {stale ? (
+          <StaleNote lastOkAt={lastOkAt} nowMs={now} />
+        ) : (
+          <span className={`badge ${headerColor} normal-case tracking-normal text-xs`}>
+            {headerLabel}
+          </span>
+        )}
       </div>
 
       {r.active ? (

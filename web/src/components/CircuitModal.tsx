@@ -74,15 +74,24 @@ export function CircuitModal({
     let cancelled = false;
     const load = async () => {
       const since = Date.now() - 24 * 60 * 60 * 1000;
-      const [r1, r2] = await Promise.all([
-        fetch(apiUrl(`api/history?sn=${sn}&metric=${seriesMetric}&since=${since}&bucket=60`)),
-        fetch(apiUrl(`api/circuit/history?sn=${sn}&${histQuery}&days=${HISTORY_DAYS}`)),
-      ]);
-      const j1 = (await r1.json()) as { points: Point[] };
-      const j2 = (await r2.json()) as CircuitHistory;
+      // v1.176.0 — non-OK responses and network errors keep the last good data instead of
+      // storing an error body: `history.days.length` / `points.length` on a 500 body threw
+      // and took the whole dashboard to the error screen (no boundary below the top level).
+      let r1: Response, r2: Response;
+      try {
+        [r1, r2] = await Promise.all([
+          fetch(apiUrl(`api/history?sn=${sn}&metric=${seriesMetric}&since=${since}&bucket=60`)),
+          fetch(apiUrl(`api/circuit/history?sn=${sn}&${histQuery}&days=${HISTORY_DAYS}`)),
+        ]);
+      } catch {
+        return;
+      }
+      const j1 = r1.ok ? ((await r1.json().catch(() => null)) as { points?: Point[] } | null) : null;
+      const j2 = r2.ok ? ((await r2.json().catch(() => null)) as CircuitHistory | null) : null;
       if (cancelled) return;
+      if (j2 && Array.isArray(j2.days)) setHistory(j2);
+      if (!j1 || !Array.isArray(j1.points)) return;
       setPoints(j1.points);
-      setHistory(j2);
 
       // Compute today's Wh via the same trapezoidal idea client-side. The
       // server's /api/circuit/history also returns today's kWh, but this

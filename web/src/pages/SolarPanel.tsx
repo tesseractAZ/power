@@ -29,6 +29,7 @@ import { ForecastDetail } from '../cards/ForecastDetail';
 import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 import { SectionHeader } from '../components/sections';
 import { apiUrl } from '../api';
+import { dayWindowExpired } from '../freshness';
 import { CHART, HUES } from '../theme';
 
 const DPU_COLORS = [HUES.battery, HUES.soc, HUES.solar, HUES.violet];
@@ -43,6 +44,10 @@ interface SummaryResp {
     // server during dev falls back to `coverage` instead of breaking.
     pvCoverage?: number;
   };
+  sinceMs?: number;
+  untilMs?: number;
+  /** v1.176.0 — the local midnight that ends this payload's day (server clock). */
+  dayEndMs?: number;
 }
 
 interface Point {
@@ -101,7 +106,16 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
   const pvHighNow = onlineDpus.reduce((s, d) => s + (d.projection.pvHighWatts ?? 0), 0);
   const pvLowNow = onlineDpus.reduce((s, d) => s + (d.projection.pvLowWatts ?? 0), 0);
 
-  const [summary, setSummary] = useState<SummaryResp | null>(null);
+  const [summaryState, setSummary] = useState<SummaryResp | null>(null);
+  const [summaryAt, setSummaryAt] = useState<number | null>(null);
+  // v1.176.0 — a summary from a finished day is not "Today": when the refresh keeps failing
+  // across midnight the last payload is yesterday's total. The same rule as the dashboard's
+  // Today card; server "now" is estimated from the payload's own untilMs plus the time
+  // elapsed here (this page re-renders with every snapshot).
+  const summary = summaryState && summaryAt != null && summaryState.untilMs != null
+    && dayWindowExpired(summaryState, summaryState.untilMs + (Date.now() - summaryAt))
+    ? null
+    : summaryState;
   const [peakToday, setPeakToday] = useState<{ value: number; ts: number } | null>(null);
   const [pvSeries, setPvSeries] = useState<Record<string, Point[]>>({});
 
@@ -110,9 +124,18 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
     const load = async () => {
       try {
         // Summary for today's kWh
+        // v1.176.0 — a non-OK response is a failure, not a summary. `json()` on a 500 parsed
+        // the error body into `summary`, and the render's `summary.fleet.pvWh` threw — taking
+        // the whole dashboard to the error screen (the only boundary is the top-level one),
+        // e.g. when this tab polled during an add-on restart's cold analytics worker.
         const sumR = await fetch(apiUrl('api/summary/today'));
-        const sumJ = (await sumR.json()) as SummaryResp;
-        if (!cancelled) setSummary(sumJ);
+        if (sumR.ok) {
+          const sumJ = (await sumR.json()) as SummaryResp;
+          if (!cancelled && sumJ?.fleet) {
+            setSummary(sumJ);
+            setSummaryAt(Date.now());
+          }
+        }
 
         // 24h PV per DPU
         const dayStart = new Date();
@@ -124,7 +147,12 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
         await Promise.all(
           onlineDpus.map(async (d) => {
             const r = await fetch(apiUrl(`api/history?sn=${d.sn}&metric=pv_total&since=${since}&bucket=60`));
-            const j = (await r.json()) as { points: Point[] };
+            // v1.176.0 — a failed series throws, so the whole refresh is skipped and the last
+            // good chart and "Peak today" stay. Storing [] for it blanked the day's chart (or
+            // summed an understated peak from the Cores that answered) until the next poll.
+            if (!r.ok) throw new Error(`history ${d.sn} HTTP ${r.status}`);
+            const j = (await r.json()) as { points?: Point[] };
+            if (!Array.isArray(j?.points)) throw new Error(`history ${d.sn}: no points`);
             next[d.sn] = j.points;
           }),
         );

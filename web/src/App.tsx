@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useSnapshot } from './useSnapshot';
+import { linkState, oldestHomeTelemetryAt } from './freshness';
+import { useNow } from './usePolled';
 import { EnergyFlow } from './cards/EnergyFlow';
 import { TodaySummary } from './cards/TodaySummary';
 import { RunwayCard } from './cards/RunwayCard';
@@ -63,7 +65,14 @@ export default function App() {
 }
 
 function NormalApp() {
-  const { snapshot, conn } = useSnapshot();
+  const { snapshot, conn, clockOffsetMs } = useSnapshot();
+  // v1.176.0 — the header's age and the LIVE pill read the per-device telemetry clocks
+  // (freshness.ts), and a ticking clock keeps them moving when nothing new arrives.
+  const now = useNow(5_000);
+  // Every reading time is server-stamped, so "now" is taken on the server's clock too.
+  const serverNow = now - clockOffsetMs;
+  const oldestReading = snapshot ? oldestHomeTelemetryAt(snapshot.devices) : null;
+  const link = linkState(conn, snapshot?.devices ?? null, serverNow);
   const [tab, setTab] = useState<
     'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts'
   >('dashboard');
@@ -168,8 +177,11 @@ function NormalApp() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Power</h1>
           <div className="text-xs text-muted">
-            {snapshot ? `${devices.length} devices · ${devices.filter((d) => d.online).length} online` : 'Loading…'} ·
-            updated {fmtRel(snapshot?.generatedAt ?? null)}
+            {snapshot ? `${devices.length} devices · ${devices.filter((d) => d.online).length} online` : 'Loading…'}
+            {' · '}
+            <span title="Age of the oldest reading from the panel and its online Cores. Neither a failed poll nor a replayed cloud copy of the panel refreshes it.">
+              updated {fmtRel(oldestReading, serverNow)}
+            </span>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -221,11 +233,14 @@ function NormalApp() {
               )}
             </button>
           </div>
+          {/* v1.176.0 — LIVE needs an open link AND fresh readings: the socket stays open
+              while the server has nothing new to send, so readyState alone kept this green
+              through the 2026-09-22 03:17-03:28 cloud outage. */}
           <span
-            className={`badge ${conn === 'open' ? 'badge-ok' : conn === 'connecting' ? 'badge-warn' : 'badge-bad'}`}
-            title="Live data link to the server (WebSocket). LIVE = real-time telemetry is streaming; LINKING = (re)connecting; OFFLINE = no link, readings may be stale."
+            className={`badge ${link === 'live' ? 'badge-ok' : link === 'offline' ? 'badge-bad' : 'badge-warn'}`}
+            title="LIVE = linked to the server and every panel/Core reading is under 3 minutes old. STALE = linked, but a reading is older than that (the EcoFlow cloud or a device has gone quiet) — figures on screen may be out of date. LINKING = (re)connecting. OFFLINE = no link to the server."
           >
-            {conn === 'open' ? 'live' : conn === 'connecting' ? 'linking' : 'offline'}
+            {link}
           </span>
           {/* v0.9.11 — theme picker (Default / High Contrast). */}
           <ThemeToggle />

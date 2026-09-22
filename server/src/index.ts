@@ -735,7 +735,14 @@ app.get<{ Querystring: { sn?: string; metric?: string; since?: string; until?: s
 app.get<{ Querystring: { since?: string; until?: string } }>('/api/summary/today', async (req, reply) => {
   const since = req.query.since ? Number(req.query.since) : startOfLocalDayMs();
   const until = req.query.until ? Number(req.query.until) : Date.now();
-  return cached(req, reply, await analytics.report('totals', { sinceMs: since, untilMs: until }), 30);
+  // v1.176.0 — `dayEndMs`: the local midnight that ENDS the day this payload covers, so the
+  // Today card can tell a payload from a finished day without assuming a day is 24 h (a
+  // daylight-saving fall-back day is 25). setDate(+1) walks the calendar in local time.
+  const end = new Date(since);
+  end.setDate(end.getDate() + 1);
+  end.setHours(0, 0, 0, 0);
+  const totals = await analytics.report('totals', { sinceMs: since, untilMs: until });
+  return cached(req, reply, { ...(totals as object), dayEndMs: end.getTime() }, 30);
 });
 
 /**
@@ -2113,13 +2120,23 @@ app.get('/api/alerts/outcomes/stats', async (req, reply) =>
 // on frameSeq yields byte-identical frames per emit with one JSON.stringify
 // instead of one-per-client. (store.get() === the emitted `snap`.)
 let wsFrameSeq = -1;
-let wsFrameStr = '';
+let wsDataStr = '';
+/**
+ * v1.176.0 — every frame carries `serverNowMs`, stamped at SEND time, so the dashboard can
+ * measure data age on the server's clock. The header age and LIVE pill compare
+ * server-stamped telemetry clocks against "now"; using the browser's clock for "now" made
+ * them wrong by the skew between the two — a viewing tablet a few minutes fast read STALE
+ * forever, and this RTC-less host boots on a baked-in date until NTP corrects it. The
+ * snapshot body stays cached per emit (one JSON.stringify per emit, shared by every
+ * client); only the stamp is per send, because the connect-time send can hand a new client
+ * a body cached minutes ago.
+ */
 function snapshotFrame(): string {
   if (store.frameSeq !== wsFrameSeq) {
-    wsFrameStr = JSON.stringify({ type: 'snapshot', data: snapshotForClient() });
+    wsDataStr = JSON.stringify(snapshotForClient());
     wsFrameSeq = store.frameSeq;
   }
-  return wsFrameStr;
+  return `{"type":"snapshot","serverNowMs":${Date.now()},"data":${wsDataStr}}`;
 }
 app.get('/ws', {
   websocket: true,
