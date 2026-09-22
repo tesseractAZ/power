@@ -110,6 +110,11 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
   // the next 24 h" figures differ by exactly this amount plus the runway's recent-load blend,
   // and neither said so (live: 96.3 kWh here vs 93-94 kWh on the Dashboard).
   const evWh = fc.hours.reduce((s, h) => s + (h.predictedEvLoadW ?? 0), 0);
+  // The projected low can only include EV load predicted at or before it: later load cannot
+  // lower an earlier minimum.
+  const evBeforeLowWh = fc.minProjectedSocTs == null
+    ? 0
+    : fc.hours.filter((h) => h.ts <= (fc.minProjectedSocTs as number)).reduce((s, h) => s + (h.predictedEvLoadW ?? 0), 0);
   const runtimeNote =
     fc.minProjectedSoc == null
       ? 'Battery SoC projection unavailable — not enough history yet.'
@@ -152,7 +157,7 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
         <Tile
           label="Projected low SoC"
           value={fc.minProjectedSoc != null ? `${fc.minProjectedSoc}%` : '—'}
-          sub={fc.minProjectedSocTs != null ? `at ${tsHour(fc.minProjectedSocTs)}${evWh > 0 ? ' · incl. predicted EV' : ''}` : undefined}
+          sub={fc.minProjectedSocTs != null ? `at ${tsHour(fc.minProjectedSocTs)}${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}` : undefined}
         />
         <Tile label="History depth" value={`${fc.historyDays} days`} sub={`reserve floor ${fc.reserveSoc}%`} />
       </div>

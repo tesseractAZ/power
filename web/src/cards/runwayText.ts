@@ -19,8 +19,10 @@ export function holdsLabel(r: Pick<RunwayProjection, 'troughKwh' | 'troughAtMs' 
   return `lowest ≈ ${r.troughKwh.toFixed(1)} kWh${r.troughAtMs != null ? ` around ${fmtClock(r.troughAtMs)}` : ''}${above}`;
 }
 
-/** v1.177.0 — a trough within 15% of full above the reserve floor is shown amber, not green:
- *  the floor holds, but only just, and a heavier evening than modelled would cross it. */
+/** v1.177.0 — a trough within 15% of full above the reserve floor is shown NEUTRAL, not green:
+ *  the floor holds, but only just, and a heavier evening than modelled would cross it. Neutral
+ *  (not amber) keeps the card's ladder monotonic: a reserve crossing 12-24 h out is neutral,
+ *  and a projection that crosses nothing cannot be shown as more alarming than one that does. */
 export const TROUGH_TIGHT_FRAC = 0.15;
 export function troughTight(r: Pick<RunwayProjection, 'troughKwh' | 'backupReserveKwh' | 'backupFullKwh'>): boolean {
   if (r.troughKwh == null || r.backupReserveKwh == null || r.backupFullKwh == null || r.backupFullKwh <= 0) return false;
@@ -43,4 +45,19 @@ function fmtClock(ms: number): string {
   const d = new Date(ms);
   const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()];
   return `${wd} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+/**
+ * v1.177.0 — the grid note under the headline, or null for none. The "islanded projections,
+ * not a live countdown" note is shown ONLY when the server's resolver says the grid is
+ * backstopping (the same condition HA's runway_projection_islanded_only and the runway
+ * alarm's audible gate use). A grid that is merely reported present is not enough: at the
+ * reserve floor the resolver distrusts a declared grid, or a panel "Grid OK" while the pool
+ * keeps discharging (present true, backstopping false) — the projection is then the live
+ * countdown and the alarms speak critical, so the card must not say otherwise. Within the
+ * note, "carrying the load" needs grid power actually flowing (importLive).
+ */
+export function gridNote(grid: RunwayProjection['grid']): string | null {
+  if (grid?.backstopping !== true) return null;
+  return `${grid.importLive === true ? 'grid is carrying the load' : 'grid available as a backstop'} — these are islanded (grid-loss) projections, not a live countdown`;
 }

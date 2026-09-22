@@ -3,7 +3,7 @@ import type { RunwayProjection } from '../types';
 import { usePolled, useNow } from '../usePolled';
 import { pollStale } from '../freshness';
 import { StaleNote } from '../components/StaleNote';
-import { holdsLabel, troughTight, recentLoadCaption } from './runwayText';
+import { holdsLabel, troughTight, recentLoadCaption, gridNote } from './runwayText';
 
 const RUNWAY_POLL_MS = 60_000;
 
@@ -44,13 +44,8 @@ export const RunwayCard = memo(function RunwayCard() {
   // the modelled solar recharge. Lead with the present state and re-label the
   // projection, rather than printing a number that contradicts the pool.
   const below = runway.belowReserveFloor === true;
-  // v1.177.0 — "carrying the load" only when grid power is actually FLOWING. `backstopping`
-  // is grid PRESENCE (gridState.ts): it was true with 0 W imported while solar carried the
-  // house, and the card said "grid is carrying the load" beside an Energy flow card reading
-  // GRID STANDBY. Present-but-idle is a backstop; islanded gets no note, because then these
-  // projections ARE the live countdown.
-  const gridFlowing = runway.grid?.importLive === true;
-  const gridAvailable = runway.grid?.present === true || runway.grid?.backstopping === true;
+  // v1.177.0 — see gridNote: shown only while the resolver says the grid is backstopping.
+  const note = gridNote(runway.grid);
   const headlineHours = below
     ? null
     : (runway.hoursToReserve ?? runway.hoursToEmpty);
@@ -65,7 +60,7 @@ export const RunwayCard = memo(function RunwayCard() {
         : holdsLabel(runway);
   const headlineColor =
     headlineHours == null
-      ? (troughTight(runway) ? 'text-warn' : 'text-ok')
+      ? (troughTight(runway) ? 'text-ink' : 'text-ok')
       : headlineHours < 4
         ? 'text-bad'
         : headlineHours < 12
@@ -121,11 +116,7 @@ export const RunwayCard = memo(function RunwayCard() {
       {/* v1.52.0 — every projection on this card is ISLANDED ("if the grid
           vanished now"). While the grid is backstopping, say so, so the times
           below are never read as an imminent real-world depletion. */}
-      {(gridFlowing || gridAvailable) && (
-        <div className="text-xs text-muted mb-3 -mt-1">
-          {gridFlowing ? 'grid is carrying the load' : 'grid available as a backstop'} — these are islanded (grid-loss) projections, not a live countdown
-        </div>
-      )}
+      {note && <div className="text-xs text-muted mb-3 -mt-1">{note}</div>}
 
       {/* v0.46.0 — surface the server's loadModelDegraded caveat: when the load
           forecast curve is degenerate (post-restart) the whole horizon falls back
@@ -153,8 +144,8 @@ export const RunwayCard = memo(function RunwayCard() {
         <Stat
           label={`${runway.horizonHours}h forecast PV`}
           value={`${runway.forecastPvUsedKwh.toFixed(1)} kWh`}
-          sub={`vs ${runway.loadHorizonKwh.toFixed(1)} kWh load, no EV`}
-          title="Modelled load for the projection: the day-of-week curve WITHOUT predicted EV charging (the alarm path is evidence-based — a car that is really charging shows up in the recent load), with the last hour's load blended into the first 4 hours. The Solar tab's forecast load includes predicted EV charging."
+          sub={`vs ${runway.loadHorizonKwh.toFixed(1)} kWh load, no predicted EV`}
+          title="Modelled load for the projection: the day-of-week load curve (which already averages in past EV charging) WITHOUT the predicted-EV layer (the alarm path is evidence-based — a car that is really charging shows up in the recent load), with the last hour's load blended into the first 4 hours. The Solar tab's forecast load adds the predicted-EV layer."
         />
       </div>
 

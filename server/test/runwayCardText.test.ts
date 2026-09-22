@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { holdsLabel, troughTight, recentLoadCaption, TROUGH_TIGHT_FRAC } from '../../web/src/cards/runwayText.js';
+import { holdsLabel, troughTight, recentLoadCaption, gridNote, TROUGH_TIGHT_FRAC } from '../../web/src/cards/runwayText.js';
+import { resolveGridBackstop } from '../src/gridState.js';
 
 const FULL = 92.16, RESERVE = 14.75;
 const r = (troughKwh: number | null, backupRemainingKwh = 78.03, troughAtMs: number | null = Date.UTC(2026, 8, 23, 13, 0)) =>
@@ -37,7 +38,7 @@ test('an older payload without a trough says only what the server tested', () =>
   assert.equal(holdsLabel(r(null)), 'the reserve floor is not reached within the projection horizon');
 });
 
-test('★★ a trough within 15% of full above the floor is amber, not green', () => {
+test('★★ a trough within 15% of full above the floor is flagged tight (rendered neutral, not green)', () => {
   assert.equal(TROUGH_TIGHT_FRAC, 0.15);
   assert.equal(troughTight(r(26.0)), true, '11.3 kWh margin < 13.8 kWh (15% of 92.16)');
   assert.equal(troughTight(r(40.0)), false);
@@ -56,11 +57,27 @@ test('★ the recent-load caption names its basis', () => {
 const here = dirname(fileURLToPath(import.meta.url));
 const src = (f: string) => readFileSync(resolve(here, f), 'utf8');
 
-test('★★★ "grid is carrying the load" only when grid power is flowing (importLive), not on presence', () => {
-  const card = src('../../web/src/cards/RunwayCard.tsx');
-  assert.ok(card.includes("const gridFlowing = runway.grid?.importLive === true;"));
-  assert.ok(card.includes("{gridFlowing ? 'grid is carrying the load' : 'grid available as a backstop'}"));
-  assert.ok(!card.includes('gridBackstopping &&'), 'backstopping (presence) no longer drives the claim');
+test('★★★ the grid note follows the resolver: backstopping → note; flowing → "carrying the load"', () => {
+  assert.match(gridNote({ present: true, backstopping: true, importLive: true })!, /^grid is carrying the load — /);
+  assert.match(gridNote({ present: true, backstopping: true, importLive: false })!, /^grid available as a backstop — /,
+    'backstopping with 0 W imported is a backstop, not the grid carrying the house');
+  assert.equal(gridNote({ present: false, backstopping: false, importLive: false }), null, 'islanded: the projection is the live countdown');
+  assert.equal(gridNote(null), null);
+});
+
+test('★★★ at the reserve floor, a grid the resolver DISTRUSTS gets no "not a live countdown" note (real resolver)', () => {
+  // A declared grid (GRID_AVAILABLE) with no measured flow, pool at the floor: the resolver
+  // rules it NOT backstopping — the runway alarm is critical and HA's
+  // runway_projection_islanded_only is OFF. The first cut of this release keyed the note on
+  // `present`, and told the operator to discount the countdown in exactly this state.
+  const g = resolveGridBackstop({ devices: {}, gridEntity: null, gridEntityConfigured: false, gridAvailableFallback: true, atReserveFloor: true } as any);
+  assert.equal(g.present, true, 'the grid is reported present…');
+  assert.equal(g.backstopping, false, '…and the resolver has ruled it is not backstopping');
+  assert.equal(gridNote(g), null);
+  // Away from the floor the same declaration is a backstop, and the note is shown.
+  const ok = resolveGridBackstop({ devices: {}, gridEntity: null, gridEntityConfigured: false, gridAvailableFallback: true, atReserveFloor: false } as any);
+  assert.equal(ok.backstopping, true);
+  assert.match(gridNote(ok)!, /grid available as a backstop/);
 });
 
 test('the card renders the model it runs: header, headline, captions, one-decimal capacity', () => {
@@ -68,15 +85,17 @@ test('the card renders the model it runs: header, headline, captions, one-decima
   assert.ok(card.includes("{runway.loadModelDegraded ? 'last-hour load' : 'typical load'} + next-{runway.horizonHours}h forecast PV"));
   assert.ok(card.includes('reserve holds {runway.horizonHours} h') && !card.includes('no dip in'));
   assert.ok(card.includes(': holdsLabel(runway);'));
-  assert.ok(card.includes("? (troughTight(runway) ? 'text-warn' : 'text-ok')"));
+  assert.ok(card.includes("? (troughTight(runway) ? 'text-ink' : 'text-ok')"), 'tight is neutral — never more alarming than a real crossing');
+  assert.ok(card.includes('const note = gridNote(runway.grid);') && card.includes('{note && '), 'the grid note comes from gridNote');
   assert.ok(card.includes('sub={recentLoadCaption(runway.recentLoadBasis)}'));
   assert.ok(card.includes('`of ${runway.backupFullKwh.toFixed(1)} full`'));
-  assert.ok(card.includes('kWh load, no EV`'), 'the runway load says it excludes predicted EV');
+  assert.ok(card.includes('kWh load, no predicted EV`'), 'the runway load says it excludes the PREDICTED-EV layer (the curve itself averages past EV charging)');
 });
 
 test('the Solar tab says its forecast load includes predicted EV charging', () => {
   const fd = src('../../web/src/cards/ForecastDetail.tsx');
   assert.ok(fd.includes("sub={evWh > 0 ? `incl. ${kwh(evWh)} predicted EV` : 'no EV charging predicted'}"));
+  assert.ok(fd.includes("${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}"), 'the low-SoC note counts only EV load at or before the low');
 });
 
 test('★★ the display PV sum carries the same bias correction and ceiling as the alarm series', () => {

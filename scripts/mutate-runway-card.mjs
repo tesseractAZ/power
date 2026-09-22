@@ -27,7 +27,7 @@ const TEXT = resolve(REPO, 'web/src/cards/runwayText.ts');
 const CARD = resolve(REPO, 'web/src/cards/RunwayCard.tsx');
 const FD = resolve(REPO, 'web/src/cards/ForecastDetail.tsx');
 
-const SUBSET = ['test/runwayTrough.test.ts', 'test/runwayCardText.test.ts'];
+const SUBSET = ['test/runwayTrough.test.ts', 'test/runwayCardText.test.ts', 'test/displayPvContract.test.ts'];
 
 const MUTANTS = [
   {
@@ -52,11 +52,46 @@ const MUTANTS = [
     why: 'An instantaneous reading, or a value carried forward from an earlier compute, is captioned as a measured average.',
   },
   {
-    id: 'iv. \u2605\u2605\u2605 grid PRESENCE is shown as the grid carrying the load',
-    file: CARD,
-    find: '  const gridFlowing = runway.grid?.importLive === true;',
-    to: '  const gridFlowing = runway.grid?.backstopping === true; /* MUTANT */',
+    id: 'iv. \u2605\u2605\u2605 the "not a live countdown" note shows for a grid the resolver distrusts',
+    file: TEXT,
+    find: '  if (grid?.backstopping !== true) return null;',
+    to: '  if (grid?.present !== true && grid?.backstopping !== true) return null; /* MUTANT */',
+    why: 'At the reserve floor, with a declared grid the resolver has ruled NOT backstopping and the alarm critical, the card tells the operator to discount the countdown.',
+  },
+  {
+    id: 'iv-b. \u2605\u2605 backstopping (presence) is shown as the grid carrying the load',
+    file: TEXT,
+    find: "  return `${grid.importLive === true ? 'grid is carrying the load'",
+    to: "  return `${grid.backstopping === true /* MUTANT */ ? 'grid is carrying the load'",
     why: '"grid is carrying the load" at 0 W imported, beside an Energy flow card reading GRID STANDBY.',
+  },
+  {
+    id: 'iv-c. \u2605 a tight trough is coloured more alarming than a real crossing',
+    file: CARD,
+    find: "      ? (troughTight(runway) ? 'text-ink' : 'text-ok')",
+    to: "      ? (troughTight(runway) ? 'text-warn' : 'text-ok') /* MUTANT */",
+    why: 'A projection that crosses nothing reads amber while a reserve crossing 14 h out reads neutral.',
+  },
+  {
+    id: 'iv-d. \u2605 the trough time is the end of the hour, not the empty crossing',
+    file: AN,
+    find: '      troughH = stateKwh === 0 && hoursToEmpty != null ? hoursToEmpty : h + 1;',
+    to: '      troughH = h + 1; /* MUTANT */',
+    why: 'The payload says the pool bottoms out up to an hour after its own emptyAtMs.',
+  },
+  {
+    id: 'iv-e. \u2605\u2605 the display model is refit even with no Core missing',
+    file: AN,
+    find: '  const restoredSolarModel = missingConnectedSns.length === 0',
+    to: '  const restoredSolarModel = false /* MUTANT */',
+    why: 'After any partial-fleet day the display model is fit on ungated hours: Home Assistant and the dashboard disagree on a fully reporting fleet.',
+  },
+  {
+    id: 'iv-f. \u2605 the low-SoC note counts EV load predicted after the low',
+    file: FD,
+    find: "${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}",
+    to: "${evWh > 0 /* MUTANT */ ? ' · incl. predicted EV' : ''}",
+    why: 'A dawn low is labelled as including an EV session predicted for the afternoon.',
   },
   {
     id: 'v. \u2605\u2605\u2605 "forecast PV keeps up" whenever the floor is not crossed',

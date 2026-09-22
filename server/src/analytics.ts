@@ -1680,7 +1680,14 @@ async function computeDayForecastUncached(
     const pvE = pvHourlyByEpoch(recorder, sn, 'pv_total', since, now);
     for (const [he, pv] of pvE) restoredFleetPvByEpoch.set(he, (restoredFleetPvByEpoch.get(he) ?? 0) + pv);
   }
-  const restoredSolarModel = buildSolarResponse(restoredFleetPvByEpoch, ghiByEpoch);
+  // v1.177.0 — with no missing SNs the restored model IS the alarm model. The comment above
+  // promised an identical refit, but the refit used the UNGATED map while solarModel is fit on
+  // the F11 full-coverage hours (fleetFit.map): after any partial-fleet day in the window the
+  // two diverged (reproduced: 79.4 vs 76.7 kWh next-24 h on a fully reporting fleet), and Home
+  // Assistant (display) disagreed with the dashboard (alarm) on the same forecast.
+  const restoredSolarModel = missingConnectedSns.length === 0
+    ? solarModel
+    : buildSolarResponse(restoredFleetPvByEpoch, ghiByEpoch);
 
   // v0.93.0 (audit #3) — ALARM-FACING PV bias correction. Hindcast the reporting-only
   // `solarModel` against the last 7 days of actual home-Core PV (same home DPUs that
@@ -3287,7 +3294,9 @@ export function computeRunway(
     stateKwh = Math.max(0, Math.min(backupFullKwh, nextState));
     if (stateKwh < troughKwh) {
       troughKwh = stateKwh;
-      troughH = h + 1;
+      // An empty pool reaches its minimum at the fractional crossing inside this hour, the
+      // same instant emptyAtMs reports — not at the hour's end, up to an hour later.
+      troughH = stateKwh === 0 && hoursToEmpty != null ? hoursToEmpty : h + 1;
     }
   }
 

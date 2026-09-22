@@ -75,6 +75,12 @@ test('the trough never goes below zero and never exceeds capacity (the sim clamp
   assert.ok(r.hoursToEmpty != null);
 });
 
+test('★ an emptying pool reaches its minimum at the empty crossing, not at the end of that hour', () => {
+  resetRunwayCache();
+  const r = computeRunway(shp2(10_000), rec(hourRows(6000)), forecast(6, 0));
+  assert.equal(r.troughAtMs, r.emptyAtMs, 'the same instant the payload reports as empty');
+});
+
 test('the crossing detectors are unchanged by the trough tracking (reporting only)', () => {
   resetRunwayCache();
   const r = computeRunway(shp2(30_000), rec(hourRows(3000)), forecast(3, 0));
