@@ -263,6 +263,8 @@ export interface ForecastHour {
   ghiWm2: number | null;
   projectedSocPct: number | null;
   modelled: boolean;
+  /** Predicted EV-charging load folded into forecastLoadW for this hour (absent when none). */
+  predictedEvLoadW?: number;
 }
 
 export interface HourResponse {
@@ -437,7 +439,14 @@ export interface RunwayProjection {
   belowReserveFloor?: boolean | null;
   /** v1.52.0 — live grid context, so the card can qualify an ISLANDED
    *  projection instead of presenting it as unconditional fact. */
-  grid?: { present?: boolean; backstopping?: boolean } | null;
+  grid?: { present?: boolean; backstopping?: boolean; importLive?: boolean } | null;
+  /** v1.177.0 — the islanded pool's lowest point inside the horizon, and when. */
+  troughKwh?: number | null;
+  troughAtMs?: number | null;
+  /** v1.177.0 — the pool at the end of the horizon. */
+  endKwh?: number | null;
+  /** v1.177.0 — what recentLoadWatts is (see server RunwayProjection). */
+  recentLoadBasis?: 'hour-mean' | 'live' | 'single-sample' | 'carried' | null;
 }
 
 export interface RoundTripDay {

@@ -1,3 +1,41 @@
+## 1.177.0
+
+### The Runway card says what its projection shows
+
+- **"No dip in 24 h — forecast PV keeps up with load" is gone.** It was printed whenever the
+  islanded pool did not cross the reserve floor inside 24 hours — the only condition the
+  projection tested. On 2026-09-22 it sat above a projection that fell from 78 to 26 kWh, with
+  solar covering 57% of the modelled load. The projection now reports its lowest point and when
+  it happens, and the headline reads "reserve holds 24 h" labelled with that lowest point and its
+  margin over the floor ("lowest ≈ 26.0 kWh around Wed 6:00 AM, 11.3 kWh above the reserve
+  floor"). "Forecast PV keeps up with the load" appears only when the pool never falls below where
+  it is now. A lowest point within 15% of full above the floor is shown amber rather than green.
+- **"Grid is carrying the load" only when it is.** The note was driven by grid presence, so it
+  read "grid is carrying the load" with 0 W imported while solar carried the house, beside an
+  Energy flow card reading GRID STANDBY. It now says so only when grid power is flowing, reads
+  "grid available as a backstop" when the grid is present but idle, and is omitted when islanded,
+  because the projection is then the live countdown.
+- **The header names the load model in use.** "Last-hour load + next-24h forecast PV" described
+  only the degraded fallback. The projection normally runs the day-of-week load curve (without
+  predicted EV charging) with the last hour's load blended into the first four hours — live, 2.2×
+  the last hour alone. The header reads "typical load" normally and "last-hour load" in the
+  fallback.
+- **"Recent load" is captioned by what it is.** Every fallback — a live reading after a restart,
+  a single recorded sample, a value carried forward from the previous compute — was labelled
+  "1-hour average". The caption now follows the projection's `recentLoadBasis`.
+- **The two forecast-load figures say why they differ.** The Dashboard's runway load excludes
+  predicted EV charging (the alarm path is evidence-based); the Solar tab's forecast load
+  includes it (live: 93–94 vs 96.3 kWh). Each now says which, and the Solar tab's projected low
+  SoC notes when it includes predicted EV charging.
+- **Home Assistant and the Dashboard agree on the next-24 h solar forecast.** The value published
+  to Home Assistant skipped the learned bias correction applied to the Dashboard's figure, so the
+  two differed by exactly that factor on a fully reporting fleet (51.4 vs 52.9 kWh). Both now
+  carry it, with the same per-hour physical ceiling. The runway and its alarms are unaffected:
+  they never read the display figure.
+- "of 92 full" keeps the tile's own decimal ("of 92.2 full").
+
+New harness `scripts/mutate-runway-card.mjs` (10 anchor-asserted mutants).
+
 ## 1.176.0
 
 ### The dashboard says how old its data is — and stops saying "live" over stale data
