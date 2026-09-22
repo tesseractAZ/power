@@ -130,8 +130,8 @@ test('ON respects every other guard, and happens at most once a night', () => {
 });
 
 test('★★★ v1.167.0 — ANY target above the reserve is reachable; the panel\'s 80% minimum no longer matters', () => {
-  // Owner design (2026-09-17): "run forcecharge until the desired percentage is reached,
-  // then revert." v1.165.0 refused every target under the panel's 80% force-charge minimum —
+  // Design (2026-09-17): force-charge runs until the desired percentage is reached, then
+  // reverts. v1.165.0 refused every target under the panel's 80% force-charge minimum —
   // which was every sunny night, 2026-09-17's 64.3% included.
   assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: 90 }), MID, opts()).kind, 'on');
   assert.equal(decideForceCharge(verifiedNight({ forceChargeCeilingPct: 64.3 }), MID, opts({ ceilingReadbackPct: 80 })).kind, 'on',
@@ -324,7 +324,7 @@ test('★★★ ON waits until the panel READS the night\'s ceiling — never on
 });
 
 test('★★★ the panel\'s own ceiling is RESTORED once tonight is done with it', () => {
-  // Review finding: without this, the owner's storm-prep Charge Now silently stops at
+  // Review finding: without this, an operator's storm-prep Charge Now silently stops at
   // tonight's 90 instead of the panel's 100 — forever, and nothing says so.
   const done = offNight({ forceChargeOffVerifiedAtMs: WIN_END + 60_000, forceChargeCeilingPriorPct: 100 });
   const t = WIN_END + 2 * 60_000;
@@ -447,7 +447,7 @@ test('the 21:30 announcement names the force-charge and its TARGET, and drops th
 
 test('★★★ an 80+ target is switched OFF when the pool reaches it — the coast is retired', () => {
   // Measured 2026-09-18: at the 90% ceiling grid import fell to 0 and the house drew the
-  // pack 90 → 86% by 05:00 with Charge Now still on. The owner retired the coast.
+  // pack 90 → 86% by 05:00 with Charge Now still on. v1.170.0 retired the coast.
   const n = forcedNight({ forceChargeCeilingPct: 90 });
   assert.equal(decideForceCharge(n, MID, opts({ poolSocPct: 89 })).kind, 'none');
   assert.deepEqual(decideForceCharge(n, MID, opts({ poolSocPct: 90 })), { kind: 'off', slots: [1, 2, 3], reason: 'target' });

@@ -10,7 +10,7 @@
  * math alone — dependency-injected, zero I/O — keeps this increment provable
  * entirely by unit tests with ZERO live surface, exactly as tariff.ts shipped.
  *
- * WHY this exists (owner requirement): on a day a shortfall is anticipated, buy
+ * WHY this exists (requirement): on a day a shortfall is anticipated, buy
  * the RIGHT amount of grid energy in the cheap overnight window (APS R-EV
  * 11pm–5am Mon–Fri) so the home (a) never imports at the 4–7pm peak and (b)
  * keeps an OUTAGE CUSHION above the reserve floor. Framed as much a RESILIENCE
@@ -21,13 +21,13 @@
  *    spine. It reads the same `backupReserveSoc` the floor alarm defends; it
  *    never produces state those alarms depend on.
  *  - UNDER-BUY IS A SAFETY MISS, not a cost miss: the outage cushion is the
- *    owner's explicit resilience requirement, so a confident under-sized buy
+ *    explicit resilience requirement, so a confident under-sized buy
  *    leaves the home at the floor with no cushion when an outage hits.
  *    Therefore sizing uses WORST-CASE inputs — P10 (low) PV and P90 (high)
  *    load, with committed-EV load placed as a worst-case block upstream.
  *  - EMIT NULL over a fabricated number: any incomplete / incoherent / thin /
  *    climatology-only basis yields a null plan (chargeTonight=false, no buy),
- *    never a best-effort small number the owner might trust as cushion.
+ *    never a best-effort small number that could be mistaken for cushion.
  *  - CONTENDED CHARGE RATE (v1.60.0): the charger and the house share ONE grid
  *    input, so an overnight EV session takes its draw straight out of the buy.
  *    Modelling it can only LOWER the deliverable lift — the plan under-promises
@@ -101,7 +101,7 @@ export interface NightChargeInputs {
   /** The reserve floor % the SHP2 defends and the floor alarm reads
    *  (backupReserveSoc). The SAME field, never a divergent copy. */
   reserveFloorPct: number;
-  /** Outage cushion % ABOVE the floor (owner default 15; later learned). */
+  /** Outage cushion % ABOVE the floor (configured default 15; later learned). */
   cushionPct: number;
   /** v1.125.0 — observed ISLANDED load (the SHP2's backup circuits), kW. When the
    *  grid drops this is what actually runs; the whole-house figure is not. Null

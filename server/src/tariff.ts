@@ -18,15 +18,15 @@
  * Seasons (APS billing cycles): SUMMER = May–Oct, WINTER = Nov–Apr.
  * R-EV carries NO demand charge (confirmed) — `demand` stays inert here.
  *
- * ★ DOW SEMANTICS (load-bearing, and an owner-confirmable edge): a period's
+ * ★ DOW SEMANTICS (load-bearing, and a bill-confirmable edge): a period's
  * `weekdays` gate is evaluated against EACH INSTANT'S OWN local day-of-week,
  * NOT the day the window "started". So the wrap-around OVERNIGHT window resolves
  * literally: Fri 23:00 is overnight (Fri is Mon–Fri) but Sat 00:00–05:00 is
  * OFF-PEAK (Saturday is a weekend) — consistent with "off-peak = all weekends".
  * Likewise Sun 23:00 is off-peak while Mon 00:00–05:00 is overnight. This is the
  * defensible default; whether APS treats Fri-night→Sat-morning or
- * Sun-night→Mon-morning as a single overnight block is flagged for Eric to
- * confirm before the advisor sizes a Friday→Monday carry on it. Rates are null
+ * Sun-night→Mon-morning as a single overnight block is an open question to
+ * confirm from the utility bill before the advisor sizes a Friday→Monday carry on it. Rates are null
  * until confirmed, so no $ output depends on this yet.
  *
  * ★ Every local field is resolved in an EXPLICIT IANA timezone via
@@ -37,7 +37,7 @@
 
 export type Season = 'summer' | 'winter';
 
-/** Per-season cents/kWh. `null` means "not yet confirmed from the owner's bill". */
+/** Per-season cents/kWh. `null` means "not yet confirmed from the utility bill". */
 export interface SeasonalCents {
   summer: number | null;
   winter: number | null;

@@ -99,7 +99,7 @@ let inFlight: Promise<DbExportResult> | null = null;
  * only copy of recorder history reaching past the ~52 h log ring, and it was used
  * during this very audit to reconstruct a Core's sample history. Deleting it on a
  * timer would remove an investigation resource to save disk that is not scarce
- * (835 GB free). Surface it and let the owner decide.
+ * (835 GB free). Surface it and leave the decision open.
  */
 export function publishedSnapshotStatus(dir: string = DEFAULT_EXPORT_DIR): {
   exists: boolean;

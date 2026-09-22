@@ -122,7 +122,7 @@ test('★ BRIDGE: the live tick passes the real attempt set to pollHealthVerdict
 /**
  * v1.139.0 removed the v1.88.0 enablement doorbell outright. The premise it
  * rested on is false: API error 1006 is a PRODUCT-CLASS limit, not a grantable
- * account permission — settled by the owner on 2026-09-08, and consistent with
+ * account permission — settled 2026-09-08, and consistent with
  * the vendor scoping the denial to the device ("current DEVICE is not allowed")
  * while the same credentials read every DPU and the SHP2 fine.
  *

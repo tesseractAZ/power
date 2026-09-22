@@ -16,11 +16,11 @@ import { TELEMETRY_BLIND_ALERT_ID } from '../src/telemetryBlind.js';
 import { allClearSpeechBlocked } from '../src/broadcast.js';
 
 /**
- * v1.166.0 — REMEDIATE FIRST, ALARM ONLY IF IT FAILS (owner decision, 2026-09-17).
+ * v1.166.0 — REMEDIATE FIRST, ALARM ONLY IF IT FAILS (policy set 2026-09-17).
  *
  * 2026-09-17, on-peak: the EcoFlow cloud replayed a stale SHP2 shadow at 16:27:48, the
  * telemetry-blind CRITICAL spoke at 16:32, and the MQTT rebuild that fixed it in two
- * minutes did not start until 16:47:48 — the healer's 20-minute dwell. The owner's rule:
+ * minutes did not start until 16:47:48 — the healer's 20-minute dwell. Policy:
  * the alarm sounds only once an IMMEDIATE remediation has been tried and has failed.
  */
 
@@ -209,7 +209,7 @@ test('★★ the all-clear gate is the extracted predicate, in the speech path',
 
 test('★★ the hold deadline and the minimum gap are PINNED — "at most 5 minutes" is a promise', () => {
   // Review finding: nothing pinned these; VERIFY at 50 min or GAP at 0 passed the suite.
-  assert.equal(BLIND_REMEDIATION_VERIFY_MS, 5 * 60_000, 'the owner is told the alarm is held at most 5 min');
+  assert.equal(BLIND_REMEDIATION_VERIFY_MS, 5 * 60_000, 'the documented bound: the alarm is held at most 5 min');
   assert.equal(BLIND_REMEDIATION_MIN_GAP_MS, 15 * 60_000);
   const s = decideBlindRemediation(freshBlindRemediationState(), T0, { blindActive: true, healAvailable: true }).next;
   assert.equal(decideBlindRemediation(s, T0 + 5 * M - 1, { blindActive: true, healAvailable: true }).hold, true);

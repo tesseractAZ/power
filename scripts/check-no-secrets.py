@@ -99,7 +99,7 @@ PLACEHOLDER_TAIL = re.compile(r"[X0]{10}[0-9]{2}")
 
 # OPEN: these runtime sites still hold device serials, because replacing them
 # changes live behaviour (the bench-spare alarm mute, a shipped device alias, an
-# API default). They wait on an owner decision. Each count is pinned EXACTLY: a
+# API default). They await a policy decision. Each count is pinned EXACTLY: a
 # new serial in the file fails, and so does fixing the site without deleting its
 # entry here.
 SERIAL_EXEMPT_COUNTS: dict[str, int] = {

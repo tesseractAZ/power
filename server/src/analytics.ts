@@ -5020,7 +5020,7 @@ export function dayHasGhiCoverage(ghiByEpoch: Map<number, number>, dayStartMs: n
  *    forecast) winning over the live cache: the pre-stage-2 basis, byte-identical, and the
  *    DEFAULT. The PV band calibrator (skillFrac, bandSigmaCal, bandRealizedCoveragePct → the
  *    night-charge basis gate, realizedDailyErrHalfFrac → the night-charge multi-day widening)
- *    stays on it until an owner decision; an omitted argument can never move the gate.
+ *    stays on it until a policy decision; an omitted argument can never move the gate.
  *  'realized' — `ghi_wm2_realized` > live cache > `ghi_wm2`, for MODEL-skill display. */
 export type ForecastSkillGhiBasis = 'first-write' | 'realized';
 
@@ -7995,14 +7995,14 @@ export function parsePvBandSigmaCal(raw: string | undefined): number | null {
  *  v1.173.0 (GHI stage 2) — model/display consumers (solar-model training, soiling
  *  decomposition, /api/forecast-skill, /api/confidence, the forecast-bias repair card,
  *  the alarm-model backtest) now score on realized irradiance. ★ v1.173.1 — so does this
- *  calibrator (owner decision 2026-09-21: reports.ts passes ghiBasis = 'realized'; the
+ *  calibrator (policy decision 2026-09-21: reports.ts passes ghiBasis = 'realized'; the
  *  function default stays 'first-write'). The text below records why it was a decision. Its errors keep a ~3-4-day-lead weather-forecast
  *  component, which is ALSO what realizedDailyErrHalfFrac feeds into the night-charge
  *  multi-day widening (nightChargeAdvisor.ts: widen = max(0, realizedDailyErrHalfFrac) ×
  *  √(days ahead)); a realized-only basis would remove that component and under-widen
  *  (~40% narrower on the 2026-09 window). Neither basis is lead-matched to a day-ahead
  *  band, and choosing one (the forecast-archive series, recorder SN 'forecast', or a
- *  day-ahead GHI capture) is an owner decision, not a refactor. Pure + exported for tests. */
+ *  day-ahead GHI capture) is a policy decision, not a refactor. Pure + exported for tests. */
 export function pvBandScoredErrs(
   days: ForecastSkillReport['days'],
   biasFactor: number | null = 1,

@@ -118,7 +118,7 @@ Pure `computeNightChargePlan(inputs)` → module holder → `nightChargeStateFie
 - **`resilience`** — buy exactly enough that the post-window trough holds reserve + cushion. The buy is a *requirement*; anything beyond it is waste.
 - **`cost`** (live) — the resilience answer becomes a **floor**, not a target. `costModeTargetKwh` raises the target toward `min(ARB_COST_MAX_SOC_PCT % of pool, pool − morning-PV-surplus P90)` and records which bound it in the ledger's `cost_ceiling_basis` (`'max-soc'` | `'pv-headroom'`). It is bounded below by the resilience target, so **the safety margin can never shrink when the objective changes**; the only direction cost mode moves a buy is up. Every physical cap downstream is re-applied unchanged.
 
-★ **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" means *fill further*, on the premise that overnight energy is the cheapest the day offers — **not** that the planner optimises against the rate table. §2's tariff model informs the *window*, not the *target*. This is a known gap, not a subtlety: the owner asked on 2026-09-06 for cost mode to genuinely optimise against the rate table, and that work is not yet built.
+★ **Cost mode is rate-blind.** `costModeTargetKwh` reads no tariff. "Cost" means *fill further*, on the premise that overnight energy is the cheapest the day offers — **not** that the planner optimises against the rate table. §2's tariff model informs the *window*, not the *target*. This is a known gap, not a subtlety: cost mode that genuinely optimises against the rate table has been an open requirement since 2026-09-06 and is not yet built.
 
 ★ **The cost question is only asked on nights that need a buy.** The no-shortfall hold returns before `objectiveMode` is read — the objective is consulted ~120 lines later — so on a night whose projected trough already clears floor + cushion, `ARB_OBJECTIVE` has no effect at all. Measured over the trailing seven ledger rows: **one** row held, and it held because a one-hour Friday window could not serve the requirement, not because the night was comfortable. Reordering the check was investigated on 2026-09-06 and **deliberately not shipped** — the addressable population is close to empty, on-peak import measured 0 on every scored night, and the per-night ceiling is 8.09 kWh (the gap between the 41.2% hold bar and the 50% write clamp).
 
@@ -255,7 +255,7 @@ Evidence is scored **actuated** nights. Graduation to `auto` requires: ≥ 21 sc
 
 > *"under-buy rate UNREACHABLE, not merely thin — all 11 of 11 actuated night(s) disclosed a cushion shortfall and are therefore exempt from the sizing judgement. The cushion requirement is not satisfiable on this plant (the worst-case day drains more than the pool holds), so the flag is a constant and more nights will not change this."*
 
-**Accruing more nights will not graduate `auto`.** `cushion_shortfall` reads 1 on every ledger row in the sample. This is an owner decision — re-scope the cushion — not a data-accrual wait.
+**Accruing more nights will not graduate `auto`.** `cushion_shortfall` reads 1 on every ledger row in the sample. This is a policy decision — re-scope the cushion — not a data-accrual wait.
 
 Note also that `activeStrikes: 0` sits alongside `strikesMeasurable: 0`. The strike detector is not reporting an absence of faults; it is reporting an **inability to count**. Any zero in `readiness.metrics` whose companion `*Measurable` field is also zero carries no information.
 

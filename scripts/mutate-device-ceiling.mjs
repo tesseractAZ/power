@@ -3,8 +3,8 @@
  * mutate-device-ceiling.mjs — committed harness for the reserve write envelope and
  * the partial-actuation adoption (server/src/nightChargeActuator.ts).
  *
- * WHY COMMITTED: v1.161.0 raised RESERVE_WRITE_MAX_PCT from 50 to 90 on the owner's
- * instruction, because the old bound called itself the device's documented limit in
+ * WHY COMMITTED: v1.161.0 raised RESERVE_WRITE_MAX_PCT from 50 to 90 to match the configured
+ * 90% ceiling, because the old bound called itself the device's documented limit in
  * four places and cited no document. ★★★ The night of 2026-09-16 SETTLED it: the
  * write went out as 90, the cloud accepted it without error, and the SHP2 moved
  * 16 -> 50 and stopped. The bound was right; it just had no evidence. v1.164.0 put

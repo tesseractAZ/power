@@ -2151,7 +2151,7 @@ app.get('/ws', {
 // the long-failure-recovered callback it was wired to. It watched for the 1006-blocked
 // accessories to start answering `/quota/all`, on the theory that 1006 was a
 // grantable account permission an API-access request could lift. It is not: 1006
-// is a PRODUCT-CLASS limit, settled by the owner on 2026-09-08 — EcoFlow is not
+// is a PRODUCT-CLASS limit (settled 2026-09-08) — EcoFlow is not
 // expected to extend API coverage to these device classes.
 //
 // So the condition it watched for cannot occur, and every firing it ever
@@ -2183,7 +2183,7 @@ startHeartbeat((m) => app.log.info(m));
 // in /share for four days riding along in every nightly HA backup, and nothing
 // outside the web UI ever mentioned it. Not swept on a timer: that file is the
 // only recorder history reaching past the ~52 h log ring and it has already been
-// used for a real investigation — surface it, let the owner decide.
+// used for a real investigation — surface it and leave the deletion decision open.
 (() => {
   const snap = publishedSnapshotStatus();
   if (!snap || !snap.exists) return;
@@ -2705,7 +2705,7 @@ function rebuildMqttSession(): void {
   void startMqttWithRetry();
 }
 
-// v1.166.0 — REMEDIATE FIRST, ALARM ONLY IF IT FAILS (owner decision, 2026-09-17).
+// v1.166.0 — REMEDIATE FIRST, ALARM ONLY IF IT FAILS (policy set 2026-09-17).
 // The alert engine calls these in the same tick it builds the telemetry-blind alert.
 // The budget is the SHARED rolling-24h one; the gap is the blind path's own 15 min.
 setBlindRemediationHooks({
@@ -4641,8 +4641,8 @@ function runSettingsDriftTick(): void {
         ((act.appliedAtMs != null && act.revertedAtMs == null) ||
          (act.announcedAtMs != null && act.appliedAtMs == null && act.cancelled !== true) ||
          (act.revertedAtMs != null && nowMs - act.revertedAtMs < 15 * 60_000));
-      // v1.115.0 — the owner's OWN /api/reserve-floor write was being reported
-      // back to him as an EXTERNAL change at warn level ~3 min later (the
+      // v1.115.0 — an owner-floor write through /api/reserve-floor was being
+      // reported back as an EXTERNAL change at warn level ~3 min later (the
       // add-on flagging its own write as third-party tampering). Own-write
       // attribution covered the night-charge path only. The grace window is
       // supplied here so classifyChange stays clock-free.
@@ -6095,7 +6095,7 @@ app.put<{ Body: { assignments?: Partial<Record<AnnouncementLevel, ChimeAssignmen
  */
 /**
  * v1.114.0 — OWNER RESERVE FLOOR. The panel could raise `backupReserveSoc` for
- * night-charge arbitrage but the owner had no way to set his OWN floor through
+ * night-charge arbitrage but there was no way to set the owner floor itself through
  * it, so a buffer change meant the vendor app and a settings-drift line after
  * the fact. Same audited helper the nightly actuator uses (clamped, readback is
  * observed on the next poll, written to the write log).

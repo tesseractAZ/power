@@ -1,3 +1,16 @@
+## 1.173.3
+
+### Source comments, test descriptions and design docs in the spec register
+
+Source comments, test descriptions, mutation-harness notes and the design documents under
+`docs/` carried quoted request text and personal attributions for decisions. Each is restated as
+a plain policy or requirement — for example, the stale-data alarm's rule now reads "Policy: the
+stale-data alarm sounds only after the immediate remediation has failed." One runtime string
+changes with it: the write-readiness gate's blocking text now says re-scoping the cushion is "a
+policy decision" (PERFORMANCE.md quotes it and is updated to match). No behaviour, identifier,
+threshold or mutation anchor changes; "owner" is kept where it names the user-configured reserve
+floor (`ownerReserveFloorPct`) and the manual-cancel control.
+
 ## 1.173.2
 
 ### Release notes in the spec register; one log line per held boot yellow

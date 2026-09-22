@@ -16,9 +16,9 @@
  * consumers to it through one audited reader (analytics.queryRealizedGhi): solar-model
  * training, the soiling decomposition, the display forecast-skill report and the
  * alarm-model backtest, each realized-first with a per-hour first-write fallback. The band
- * calibrator joined them in v1.173.1 by owner decision (its skill is passed 'realized'); before that it stayed on `ghi_wm2` —
+ * calibrator joined them in v1.173.1 by policy decision (its skill is passed 'realized'); before that it stayed on `ghi_wm2` —
  * that is also the default, and the skill cache is keyed by basis — because switching it is
- * an owner decision (a realized basis cuts the night-charge multi-day widening ~40%).
+ * a policy decision (a realized basis cuts the night-charge multi-day widening ~40%).
  *
  * Every half is easy to undo by accident: a refactor that stops capturing (or captures a
  * provider gap as 0) spoils data past_days can never return; one that lets the calibrator
@@ -165,13 +165,13 @@ const MUTANTS = [
     why: 'The source scan allowlists the whole recorder, so an accessor there hands the series to the calibrator without any file outside the recorder naming it.',
   },
   {
-    // v1.173.1 — REPLACED (the owner took the decision this mutant guarded): the calibrator
-    // is on the realized basis by owner decision; the regression is now a silent revert.
+    // v1.173.1 — REPLACED (the policy decision this mutant guarded has been made): the
+    // calibrator is on the realized basis by policy; the regression is now a silent revert.
     id: 'xv. ★★★ the calibrator silently reverts to the first-write basis',
     file: REPORTS,
     find: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'realized',",
     to: "      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'first-write', /* MUTANT */",
-    why: 'The owner chose the more accurate data (2026-09-21); a one-word edit would put the band back on a 3-4-day-lead forecast error with every hindcast test still green.',
+    why: 'Policy (2026-09-21): the calibrator uses the more accurate data; a one-word edit would put the band back on a 3-4-day-lead forecast error with every hindcast test still green.',
   },
   {
     id: 'xvi. ★★★ the skill cache is keyed by window only',

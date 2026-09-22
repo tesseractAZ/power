@@ -5,9 +5,9 @@
  * sessionSelfHeal.ts, the gate in alertMonitor.ts and the hooks in index.ts).
  *
  * WHY COMMITTED: this gates the telemetry-blind CRITICAL — the alarm that says the
- * system cannot see. Owner decision (2026-09-17): sound it only once an immediate
+ * system cannot see. Policy (2026-09-17): sound it only once an immediate
  * remediation has been tried and has failed. Each rail below is one comparison wide,
- * and each failure mode is either a false alarm the owner asked to be rid of, or —
+ * and each failure mode is either a false alarm the policy exists to eliminate, or —
  * worse — a genuine blind alarm that never sounds. Each mutant must die by a named
  * assertion.
  *
@@ -58,7 +58,7 @@ const MUTANTS = [
     file: BC,
     find: "      !a.id.startsWith('msg-rate-floor-') &&",
     to: '      true && /* MUTANT */',
-    why: 'Every cloud stale-shadow episode speaks a yellow ~4 min before the remediation even starts — against the owner’s remediate-first rule.',
+    why: 'Every cloud stale-shadow episode speaks a yellow ~4 min before the remediation even starts — against the remediate-first policy.',
   },
   {
     id: 'i. ★★★ the hold never expires (a blind alarm that never sounds)',
@@ -93,7 +93,7 @@ const MUTANTS = [
     file: MON,
     find: '        if (remediation.hold) for (const a of blindAlerts) a.annunciate = false;',
     to: '        /* MUTANT */',
-    why: 'The remediation runs but the alarm still speaks at once — the owner\'s rule is not in force at all.',
+    why: 'The remediation runs but the alarm still speaks at once — the remediate-first policy is not in force at all.',
   },
   {
     id: 'vi. ★★★ with no remedy registered it holds (fails toward SILENCE)',
@@ -150,7 +150,7 @@ const MUTANTS = [
     file: BR,
     find: 'export const BLIND_REMEDIATION_VERIFY_MS = 5 * 60_000;',
     to: 'export const BLIND_REMEDIATION_VERIFY_MS = 50 * 60_000; /* MUTANT */',
-    why: 'A genuine blind alarm is silenced for 50 minutes — the owner was promised at most 5.',
+    why: 'A genuine blind alarm is silenced for 50 minutes — the documented bound is at most 5.',
   },
   {
     id: 'xiv. ★★ the minimum gap drops to zero',

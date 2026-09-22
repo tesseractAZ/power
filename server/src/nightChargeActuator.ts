@@ -196,7 +196,7 @@ export function resetReserveArbitrageRaised(): void { reserveArbitrageRaised = f
  *
  * ★★★ v1.164.0 — THE MAXIMUM IS 50, AND IT IS THE DEVICE'S, PROVEN.
  *
- * v1.161.0 raised this to 90 on the owner's instruction (`ARB_COST_MAX_SOC_PCT` had been
+ * v1.161.0 raised this to 90 to match the configuration (`ARB_COST_MAX_SOC_PCT` had been
  * set to 90 all along and was inert above 50). The night of 2026-09-16 settled it against
  * the hardware:
  *

@@ -37,7 +37,7 @@ const MUTANTS = [
     file: FC,
     find: '  if (s.forceChargeOnAtMs != null && s.forceChargeOffAtMs == null) {\n    const reason = offReason(s, nowMs, o);',
     to: '  if (s.forceChargeOnAtMs != null && s.forceChargeOffAtMs == null && o.enabled) { /* MUTANT */\n    const reason = offReason(s, nowMs, o);',
-    why: 'An owner who disables the feature mid-night strands a force-charge already running — the switch-off path must never depend on the switch-on gate.',
+    why: 'Disabling the feature mid-night strands a force-charge already running — the switch-off path must never depend on the switch-on gate.',
   },
   {
     id: 'ii. ★★★ the window end no longer switches it off',
@@ -58,7 +58,7 @@ const MUTANTS = [
     file: FC,
     find: '  if (o.slotsOn.length > 0) return { kind: \'none\', why: `Charge Now is already ON for slot(s) ${o.slotsOn.join(\', \')} — that is the operator\'s, never taken over` }; // someone else\'s Charge Now — never take ownership',
     to: '  /* MUTANT */',
-    why: 'The add-on adopts a force-charge the owner switched on deliberately, then switches it OFF at 05:00 behind his back.',
+    why: 'The add-on adopts a force-charge an operator switched on deliberately, then switches it OFF at 05:00 with no notice to the operator.',
   },
   {
     id: 'v. ★★ ON rides an UNVERIFIED reserve write',
@@ -196,7 +196,7 @@ const MUTANTS = [
   },
   // ── v1.166.0 — "chose not to" vs "broke" ──
   // ── v1.167.0 — charge to target, just in time. These replace xv/xxv, which pinned the
-  // v1.165.0 "under the panel's 80% minimum ⇒ reserve-only" rule the owner retired.
+  // v1.165.0 "under the panel's 80% minimum ⇒ reserve-only" rule that v1.167.0 retired.
   {
     id: 'xv. ★★★ just-in-time is removed (starts at the window open, then the house drains it)',
     file: FC,
@@ -236,7 +236,7 @@ const MUTANTS = [
   // ── v1.168.0 — coast on grid at 80+, the wall-clock OFF deadline, the Thursday rule
   // and the median surplus.
   {
-    // v1.170.0 — REPLACES the v1.168.0 coast mutant: the owner retired the coast (measured
+    // v1.170.0 — REPLACES the v1.168.0 coast mutant: the coast is retired (measured
     // 2026-09-18, the panel did not hold the house on grid at its ceiling).
     id: 'xxx. ★★★ the coast returns: an 80+ target is left on past the target',
     file: FC,
@@ -278,7 +278,7 @@ const MUTANTS = [
     file: FC,
     find: "      if (stillOn.length > 0) return { kind: 'offFailed', slots: stillOn, deadline: true, unconfirmed: o.slotsOn == null };",
     to: "      return { kind: 'offFailed', slots: ours, deadline: true, unconfirmed: o.slotsOn == null }; /* MUTANT */",
-    why: 'A force-charge the owner switched off from the app pages as stuck — and the record never resolves.',
+    why: 'A force-charge switched off by hand from the app pages as stuck — and the record never resolves.',
   },
   {
     id: 'xxxvi. ★★ a blind escalation claims the panel still reads ON',
