@@ -183,11 +183,11 @@ const BUILDERS: Record<string, Builder> = {
     // weather/telemetry coverage (live: 9/14). One window serves BOTH skillFrac
     // and the calibration so the shrink ratio is measured on the same sample
     // the sigma was built from.
-    // v1.173.0 (GHI stage 2) kept this on the first-write basis pending an owner decision:
+    // v1.173.0 (GHI stage 2) kept this on the first-write basis pending a policy decision:
     // this skill sets skillFrac, bandSigmaCal, bandRealizedCoveragePct (the night-charge
     // basis gate) and realizedDailyErrHalfFrac (the multi-day P10/P90 widening that sizes
-    // the buy). ★ v1.173.1 — OWNER DECISION (2026-09-21): "switch to the more accurate
-    // data". The calibrator now scores on REALIZED irradiance: the band stops carrying a
+    // the buy). ★ v1.173.1 (2026-09-21) — policy: the calibrator uses the more accurate
+    // data. It now scores on REALIZED irradiance: the band stops carrying a
     // ~3-4-day-lead weather-forecast error that is not the day-ahead band's own error, and
     // the multi-day widening narrows accordingly (~40% on the 2026-09 window) — weekend
     // carries buy somewhat less. Hours with no realized capture fall back to first-write.

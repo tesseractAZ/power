@@ -9,14 +9,14 @@
  * the EcoFlow app's "Charge Now"), bounded by the panel's own force-charge ceiling
  * `foceChargeHight` (documented 80-100).
  *
- * WHAT (v1.167.0 — CHARGE TO TARGET, JUST IN TIME; owner design, 2026-09-17). The
+ * WHAT (v1.167.0 — CHARGE TO TARGET, JUST IN TIME; design of 2026-09-17). The
  * target is the announced plan's economic ceiling — min(ARB_COST_MAX_SOC_PCT, full minus
  * tomorrow's P50 morning solar; v1.168.0), or ARB_COST_MAX_SOC_PCT alone before a long gap
  * (the Thursday rule, nightChargeAdvisor.ts longGapAhead). On a night whose reserve write is APPLIED AND VERIFIED,
  * force-charge switches ON only in the LAST STRETCH of the window — late enough that the
  * pack arrives at the target as the window closes — and OFF the moment it gets there
- * (or at the window close). The owner's words: "run forcecharge until the desired
- * percentage is reached, then revert." Any target above the 50% reserve works; the
+ * (or at the window close). Requirement: force-charge runs until the desired
+ * percentage is reached, then reverts. Any target above the 50% reserve works; the
  * panel's own 80% force-charge minimum no longer matters.
  *
  * ★★ WHY "JUST IN TIME". Once force-charge is OFF the only thing holding the pack up is
@@ -39,7 +39,7 @@
  * the ceiling only catches a stop that fails (at 80+ it is the target itself, below 80 it
  * is 80). The panel's original ceiling is restored afterwards.
  *
- * ★★ v1.168.0 — COAST ON GRID (owner, 2026-09-17). A target of 80+ is one the panel
+ * ★★ v1.168.0 — COAST ON GRID (2026-09-17). A target of 80+ is one the panel
  * enforces AND HOLDS: with Charge Now still ON at its ceiling the pack sits there and the
  * house runs on grid. So for those targets there is no software stop at the target —
  * force-charge stays ON until the window closes. (That premise did NOT hold — see the
@@ -49,16 +49,16 @@
  * ceiling, and a whole-number pool reading never reached 85.3.
  *
  * ★ That force-charge ON keeps the house on grid is INFERRED from the 2026-08-04 incident
- * (it bought grid for hours), not vendor-documented. The owner confirmed (2026-09-17) that
- * 07-23 and 07-28 — the two nights the pack held above 50% on grid — were his manual
- * Charge Now; that is the evidence the coast rested on.
- * ★★★ v1.170.0 — THE COAST IS RETIRED (owner, 2026-09-18): the software stop applies at
+ * (it bought grid for hours), not vendor-documented. 07-23 and 07-28 — the two nights the
+ * pack held above 50% on grid — were confirmed (2026-09-17) as manual Charge Now sessions;
+ * that is the evidence the coast rested on.
+ * ★★★ v1.170.0 — THE COAST IS RETIRED (2026-09-18): the software stop applies at
  * every target again (forceChargeStopPct), so force-charge is on only as long as it charges.
  * ★★★ MEASURED 2026-09-18 — THE COAST DID NOT HOLD. The pack reached the 90% ceiling at
  * 03:30; grid import then fell to 0 W and the house ran from the pack, 90% → 86% by 05:00,
  * with Charge Now still ON. At its ceiling the panel stops importing; it does NOT keep the
  * house on grid. So the coast gives back what a stop at the target would, and only adds
- * Charge Now time — the owner restored the stop at every target (v1.170.0, above), and the
+ * Charge Now time — v1.170.0 restored the stop at every target (above), and the
  * live charge rate (v1.169.0) shrinks the early arrival.
  * ★ Not yet measured at a non-90 ceiling: that the whole-number pool reading REACHES the
  * synced ceiling when the pack tops out (09-18 read 90 at the 90 ceiling). If a pack parks
@@ -70,7 +70,7 @@
  * ch{n}ForceCharge ON behaves when the grid fails, and no outage has ever overlapped
  * Charge Now on this plant. What argues against harm is inference: islanding is a
  * panel-level EPS transfer (gridSta=2), a grid charge has no source once the grid is
- * gone, and the owner has used this same button by hand with the same exposure since
+ * gone, and this same button has been used by hand with the same exposure since
  * before v1.84.0. The software grid-loss OFF is best-effort (a cloud write). v1.167.0's
  * just-in-time start shrinks the nightly exposure from ~6 h to ~1 h; v1.168.0's coast
  * lengthens it again for 80+ targets (a Thursday: ~4-6 h). Neither settles the question. Settle it with one attended test: Charge Now ON for one slot, open the
@@ -85,7 +85,7 @@
  *  - WRITE-AHEAD: the slots are persisted BEFORE the ON writes, so a lost
  *    confirmation can never orphan a force-charge — the OFF covers every attempt.
  *  - OFF is MODE-INDEPENDENT and ENABLE-INDEPENDENT (a force-charge we started must
- *    stop even if the owner disables the feature mid-night), and fires on: window
+ *    stop even if the feature is disabled mid-night), and fires on: window
  *    end, a cancelled night, the reserve revert, grid loss (either signal), the
  *    feature being disabled, or MAX_RUN elapsing (a corrupted window can never
  *    hold it on).
@@ -185,7 +185,7 @@ export const FORCE_CHARGE_CEILING_RESTORE_ATTEMPTS = 2;
 export const FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS = 30 * 60_000;
 export const FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS = 60 * 60_000;
 /** v1.173.0 — blind (no-readback) OFF re-sends stop this long after the first OFF. Beyond it
- *  a panel still dark for half a day is more likely to be carrying an OWNER's manual Charge
+ *  a panel still dark for half a day is more likely to be carrying an operator's manual Charge
  *  Now than ours, and a blind OFF would switch that off. The escalation has already paged. */
 export const FORCE_CHARGE_BLIND_RESEND_MAX_MS = 12 * 3_600_000;
 /** v1.173.0 — a deadline page silenced by broadcast quiet hours is re-spoken this often
@@ -287,7 +287,7 @@ export function forceChargeInFlight(s: NightActuationState): boolean {
  *  number pool reading never reaches 85.3, so it stops at 85. Below 80 the ceiling is 80
  *  and the target itself is the stop. (v1.168.0's coast skipped this stop at 80+; measured
  *  2026-09-18 it held nothing — at the ceiling the house drew the pack 90 → 86% by 05:00 —
- *  and the owner retired it.) */
+ *  and v1.170.0 retired it.) */
 export function forceChargeStopPct(targetPct: number): number {
   return Math.min(targetPct, desiredForceChargeCeilingPct(targetPct));
 }
@@ -311,7 +311,7 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   if (o.gridPresent === false || o.gridStaLost) return 'gridLoss';
   if (!o.enabled) return 'disabled';
   if (s.forceChargeOnAtMs != null && nowMs - s.forceChargeOnAtMs >= FORCE_CHARGE_MAX_RUN_MS) return 'maxRun';
-  // v1.167.0 — the owner's "until the desired percentage is reached". A stale or
+  // v1.167.0 — stop once the desired percentage is reached. A stale or
   // incoherent SoC never ends it early; the window end and the panel's ceiling still do.
   // v1.170.0 — at EVERY target again (the 80+ coast is retired), against forceChargeStopPct.
   if (

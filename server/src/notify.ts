@@ -339,7 +339,7 @@ export async function dispatchMobilePush(
  * ★ SAFETY: this is a READ-ONLY advisory. The message NEVER implies the add-on
  *   will act, and it NEVER fabricates a number — a null plan or a null field
  *   renders as an em-dash and (for a null/insufficient plan) the insufficient
- *   shape, never a guessed cushion the owner might trust. Pure + null-safe.
+ *   shape, never a guessed cushion a reader might trust. Pure + null-safe.
  */
 export function buildNightChargeMessage(
   plan: NightChargePlan | null,

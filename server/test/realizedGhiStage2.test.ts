@@ -28,7 +28,7 @@ import { makeRecorderStub } from './helpers/recorderStub.js';
  * REALIZED series (`weather/ghi_wm2_realized`, captured since stage 1) where it exists, and
  * keep the first-write `ghi_wm2` hour by hour where it does not. The PV band calibrator does
  * NOT switch: its basis moves the night-charge basis gate and the multi-day P10/P90 widening
- * that sizes a buy, so that is an owner decision. These tests pin both halves — what moved,
+ * that sizes a buy, so that is a policy decision. These tests pin both halves — what moved,
  * and that the calibrator (and the default) did not.
  */
 
@@ -237,10 +237,11 @@ function builderSkillBasis(builder: string): string[] {
   return bases;
 }
 
-test("★★★ v1.173.1 — the band calibrator's skill is passed 'realized' EXPLICITLY (owner decision 2026-09-21)", () => {
+test("★★★ v1.173.1 — the band calibrator's skill is passed 'realized' EXPLICITLY (policy decision 2026-09-21)", () => {
   // It sets skillFrac, bandSigmaCal, bandRealizedCoveragePct (the night-charge basis gate)
-  // and realizedDailyErrHalfFrac (the multi-day widening that sizes the buy). The owner chose
-  // "the more accurate data"; a silent revert to first-write must fail here.
+  // and realizedDailyErrHalfFrac (the multi-day widening that sizes the buy). Policy
+  // (2026-09-21): the calibrator uses the more accurate data; a silent revert to first-write
+  // must fail here.
   assert.deepEqual(builderSkillBasis('probabilisticForecast'), ['realized']);
 });
 

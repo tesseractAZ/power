@@ -366,7 +366,7 @@ test('window-close revert unchanged (no abort flag on the normal path)', () => {
 /* ══ v1.161.0 — the raised envelope and the device's own ceiling ══════════ */
 
 /**
- * Raising RESERVE_WRITE_MAX_PCT from 50 to 90 (owner's instruction, 2026-09-16)
+ * Raising RESERVE_WRITE_MAX_PCT from 50 to 90 (configured 2026-09-16)
  * made a new outcome reachable: the panel accepts the write, moves its reserve
  * UP, and settles BELOW what was asked. Before v1.161.0 that read exactly like
  * the 2026-08-16 phantom — the write the cloud ACK'd and the device ignored —
