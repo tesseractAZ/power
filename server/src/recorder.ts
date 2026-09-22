@@ -249,7 +249,8 @@ const FORECAST_PV_NEXT24_METRIC = 'pv_next24_wh';
 const WEATHER_GHI_METRIC = 'ghi_wm2';     // global horizontal irradiance, W/m²
 const WEATHER_CLOUD_METRIC = 'cloud_pct'; // cloud cover, %
 /** v1.156.0 — REALIZED irradiance, captured beside the first-write `ghi_wm2` (see
- *  recordWeatherGhi). Written only: nothing reads it until the basis is switched. */
+ *  recordWeatherGhi). v1.173.0 (GHI stage 2): read ONLY via analytics.queryRealizedGhi by the
+ *  model/display consumers; the PV band calibrator still scores against `ghi_wm2` (tests pin both). */
 const WEATHER_GHI_REALIZED_METRIC = 'ghi_wm2_realized';
 
 /* ─── Lifetime-energy persistence (v0.7.6) ─────────────────────────────────
@@ -390,9 +391,12 @@ export interface Recorder {
   /** v0.13.1 — persist hourly weather irradiance (GHI) + cloud cover under
    * the pseudo-device SN "weather" so the historical series survives beyond
    * the 2h in-memory weather cache / 7-day fetch window. Change-detected and
-   * idempotent: re-writing an already-stored hour is a no-op. Consumers
-   * (forecast-skill, soiling, solar-model training) read it back via
-   * query("weather", "ghi_wm2"|"cloud_pct", since, until). */
+   * idempotent: re-writing an already-stored hour is a no-op. Consumers read it back via
+   * query("weather", "ghi_wm2"|"cloud_pct"|"ghi_wm2_realized", since, until).
+   * v1.173.0 (GHI stage 2): solar-model training, the soiling decomposition, the
+   * display forecast-skill report and the alarm-model backtest read `ghi_wm2_realized`
+   * first (through analytics.queryRealizedGhi) and fall back to `ghi_wm2` hour by hour;
+   * the PV band calibrator's forecast-skill hindcast reads `ghi_wm2` only. */
   recordWeatherGhi: (
     hours: Array<{ epochMs: number; radiationWm2: number | null; cloudCoverPct: number | null; radiationMissing?: boolean }>,
     /** v1.156.0 — when the fetch time is known, every hour that ENDED by then is also
@@ -2708,10 +2712,13 @@ export function createRecorder(
   //
   // Correcting `ghi_wm2` in place would re-score the 30-day band calibration within
   // the hour. That moves the night-charge basis gate and the P10 band that sizes a
-  // supervised reserve write, with no review point. So this stage only WRITES a
-  // separate series, and nothing reads it (a test pins that). It lives under the
-  // synthetic SN "weather" on purpose: a new SN would be seeded into the per-device
-  // gap clocks at boot and raise a false "device telemetry gap" six hours later.
+  // supervised reserve write, with no review point. So stage 1 WRITES a separate
+  // series and leaves `ghi_wm2` exactly as it was. v1.173.0 (GHI stage 2): the
+  // model/display consumers now read it through analytics.queryRealizedGhi, while the
+  // band calibrator stays on `ghi_wm2` (realizedGhiCapture.test.ts pins the exact set of
+  // readers). It lives under the synthetic SN "weather" on purpose: a new SN would be
+  // seeded into the per-device gap clocks at boot and raise a false "device telemetry
+  // gap" six hours later.
   //
   // Unlike `ghi_wm2`, the realized value WINS (a later fetch revises it in place,
   // because past_days values can still move), and every hour is stored explicitly —

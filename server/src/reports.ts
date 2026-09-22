@@ -30,6 +30,8 @@ import {
   computeBayesianSolarModel,
   diurnalBaselinePredictor,
   forecastHourPvW,
+  preferRealizedGhiRows,
+  queryRealizedGhi,
 } from './analytics.js';
 import { computeTotals, circuitHistoryByDay } from './aggregator.js';
 import { backtestPvForecast } from './backtest.js';
@@ -53,7 +55,13 @@ function alarmModelPredictor(
   const windowStart = nowMs - hoursBack * 3_600_000;
   const ghiByHe = new Map<number, number>();
   const cloudByHe = new Map<number, number>();
-  for (const r of recorder.query('weather', 'ghi_wm2', windowStart, nowMs, 3600)) ghiByHe.set(Math.floor(r.ts / 3_600_000), r.value);
+  // v1.173.0 (GHI stage 2) — realized-first: this scores the MODEL, and `ghi_wm2` is a
+  // ~3-4-day-lead forecast. cloud_pct stays first-write (it only feeds forecastHourPvW's
+  // null-coeff night fallback, and no realized cloud capture exists).
+  for (const r of preferRealizedGhiRows(
+    recorder.query('weather', 'ghi_wm2', windowStart, nowMs, 3600),
+    queryRealizedGhi(recorder, windowStart, nowMs),
+  )) ghiByHe.set(Math.floor(r.ts / 3_600_000), r.value);
   for (const r of recorder.query('weather', 'cloud_pct', windowStart, nowMs, 3600)) cloudByHe.set(Math.floor(r.ts / 3_600_000), r.value);
   const bias = fc.pvBiasFactor ?? 1;
   const curve = fc.typicalPvCurveWhPerHour ?? [];
@@ -161,7 +169,9 @@ const BUILDERS: Record<string, Builder> = {
   internalResistance: (ctx) => computeInternalResistance(devicesOf(ctx), ctx.recorder),
   forecastSkill: async (ctx, a) => {
     const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
-    return computeForecastSkill(devicesOf(ctx), ctx.recorder, fc, a.days ?? 7);
+    // v1.173.0 (GHI stage 2) — display/diagnostic skill (/api/forecast-skill, /api/confidence,
+    // the forecast-bias repair card) scores the MODEL against realized irradiance.
+    return computeForecastSkill(devicesOf(ctx), ctx.recorder, fc, a.days ?? 7, 'realized');
   },
   ambientThermal: (ctx) => computeAmbientThermalForecast(devicesOf(ctx), ctx.recorder),
   probabilisticForecast: async (ctx) => {
@@ -173,8 +183,12 @@ const BUILDERS: Record<string, Builder> = {
     // weather/telemetry coverage (live: 9/14). One window serves BOTH skillFrac
     // and the calibration so the shrink ratio is measured on the same sample
     // the sigma was built from.
+    // v1.173.0 (GHI stage 2) — EXPLICITLY the first-write basis: this skill sets skillFrac,
+    // bandSigmaCal, bandRealizedCoveragePct (the night-charge basis gate) and
+    // realizedDailyErrHalfFrac (the multi-day P10/P90 widening that sizes the buy).
+    // Switching it is an owner decision, not a refactor.
     const skill = await computeForecastSkill(
-      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS,
+      devicesOf(ctx), ctx.recorder, fc, PV_BAND_CAL_WINDOW_DAYS, 'first-write',
     );
     return computeProbabilisticForecast(fc, skill);
   },
