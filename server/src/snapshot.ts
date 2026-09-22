@@ -6,6 +6,7 @@ import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import { shp2Panels } from './shp2Membership.js';
 import { prunePhantomPacks, freshPackSlotHistory, type PackSlotHistory } from './packPresence.js';
+import { mpptProducing } from './mppt.js';
 import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
 import type { Alert } from './alerts.js';
 import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
@@ -124,6 +125,13 @@ export class SnapshotStore extends EventEmitter {
   /** v1.14.0 — per-SHP2-slot source-error onset (key `<sn>:<slot>`), mirroring
    *  dpuErrOnsetBySn for the shp2-src-err CRITICAL debounce. */
   private shp2SrcErrOnsetBySlot: Map<string, { count: number; sinceMs: number }> = new Map();
+  /** v1.174.0 — per-DPU MPPT string error onset, keyed `<sn>:hv` / `<sn>:lv`. The clock
+   *  runs ONLY while the code is non-zero AND the string is producing — the exact
+   *  condition alerts.ts fires on — so a benign standby code that stands all night at
+   *  0 W never banks debounce time, and the sunrise ramp that carries it into real watts
+   *  starts the clock from zero. Reset on a code change (a different code is a different
+   *  fault), on clear, and when the string stops producing. */
+  private mpptErrOnsetByKey: Map<string, { code: number; sinceMs: number }> = new Map();
   // v1.8.0 (review F3) — ms epoch when the PUBLISHED pool % went null (i.e. after
   // the grace hold already absorbed reconnect blips). Feeds the reserve-blind
   // compensating alert so it keys off a SUSTAINED blind window, not a flicker.
@@ -409,6 +417,34 @@ export class SnapshotStore extends EventEmitter {
     return new Map(this.shp2SrcErrOnsetBySlot);
   }
 
+  /** v1.174.0 — update the per-string MPPT error onsets from the freshly applied
+   *  projection, mirroring trackDpuErrOnset. Two false audible warnings on 2026-09-22
+   *  (06:58 and 07:33, ~60 s each) and one on 2026-08-30 came from a benign standby code
+   *  riding the sunrise ramp at 407 W / 1.38 A: real watts and real amps, so the
+   *  producing test could not reject it. The alarm now also needs the code to STAND, and
+   *  this is its clock. */
+  private trackMpptErrOnsets(sn: string, proj: Projection | undefined): void {
+    if (!proj || proj.kind !== 'dpu') return;
+    const channels: Array<['hv' | 'lv', number, number | null, number | null]> = [
+      ['hv', proj.pvHighErrCode ?? 0, proj.pvHighWatts, proj.pvHighAmps],
+      ['lv', proj.pvLowErrCode ?? 0, proj.pvLowWatts, proj.pvLowAmps],
+    ];
+    for (const [channel, code, watts, amps] of channels) {
+      const key = `${sn}:${channel}`;
+      // ★ Both halves of the alarm condition gate the clock. Dropping the entry when the
+      // string stops producing is what keeps an all-night standby code from ageing past
+      // the window before the sun comes up.
+      if (code === 0 || !mpptProducing(watts, amps)) { this.mpptErrOnsetByKey.delete(key); continue; }
+      const prev = this.mpptErrOnsetByKey.get(key);
+      if (!prev || prev.code !== code) this.mpptErrOnsetByKey.set(key, { code, sinceMs: this.now() });
+    }
+  }
+
+  /** v1.174.0 — per-string MPPT error onsets, for the dpu-pvh-err / dpu-pvl-err debounce. */
+  mpptErrOnsets(): Map<string, { code: number; sinceMs: number }> {
+    return new Map(this.mpptErrOnsetByKey);
+  }
+
   /** Replace the full raw quota for a device (called after a REST refresh). */
   setDeviceQuota(sn: string, raw: Record<string, unknown>, source: 'rest' | 'mqtt' = 'rest') {
     const cur = this.snap.devices[sn];
@@ -426,6 +462,7 @@ export class SnapshotStore extends EventEmitter {
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);
+    this.trackMpptErrOnsets(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? raw : undefined;
     // v1.142.0 — via the injectable clock (line ~116), matching the grace-hold and
     // err-onset trackers in this file. In production this IS Date.now.
@@ -552,6 +589,7 @@ export class SnapshotStore extends EventEmitter {
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);
+    this.trackMpptErrOnsets(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? merged : undefined;
     cur.lastUpdated = Date.now();
     cur.lastError = undefined;

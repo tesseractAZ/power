@@ -22,6 +22,7 @@ export function resetVdiffWarnHoldForTesting(): void {
 }
 import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc, shp2Panels, findShp2 } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
+import { mpptProducing } from './mppt.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
 import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
@@ -278,44 +279,33 @@ export interface Alert {
 
 const cToF = (c: number) => c * 1.8 + 32;
 
-/*
- * MPPT idle/shed guard (v0.9.80, watt-based since v0.9.81). During
- * curtailment AND at sunset the DPU sheds/winds-down a string: the input
- * shows voltage but ~0 W, and EcoFlow reports a non-zero *standby* status
- * in hvPvErrCode / lvPvErrCode that is NOT a fault. Live proof: at sunset
- * ALL cores reported HV err=457 / LV err=177 simultaneously (a real fault
- * can't be identical across independent units), with strings at 0 W — one
- * HV string drew a 0.275 A shutdown trickle (above the old 0.1 A floor) and
- * slipped through. A string is only meaningfully "producing" — so a code is
- * a real error worth flagging — when it's making real WATTS. Below the floor
- * it's idle/shedding/shutting-down and any code is benign standby.
- */
-const MPPT_WATT_FLOOR = 20;   // W — below this the string isn't meaningfully producing
-/** A — just above the 0.275 A sunset shutdown trickle observed on Core 2 (v0.9.81 note). */
-const MPPT_AMP_FLOOR = 0.3;
-
 /**
- * v1.0.1 — a string counts as PRODUCING only when it makes real watts AND actually
- * draws current. The two documented false-positive modes are complementary, and each
- * single-signal guard let the other through:
- *
- *   v0.9.80 amp floor  → a 0 W / 0.275 A sunset shutdown trickle slipped past it.
- *   v0.9.81 watt floor → a dusk HV reading of 55 W while amps read 0.0 A slips past it.
- *                        (Observed live: Core 3, code 457, 294 V, 0.0 A, 55 W — the alert
- *                        text literally read "producing 55 W (294 V, 0.0 A)". EcoFlow's
- *                        watt and amp fields disagree during the ramp-down, so neither
- *                        alone is trustworthy.) All three home Cores reported the SAME
- *                        code 457 at that instant — and a real fault cannot be identical
- *                        across independent units, confirming benign standby.
- *
- * Requiring BOTH signals rejects both modes. `amps == null` (device doesn't report
- * current) falls back to the watt test alone rather than silently suppressing.
+ * v1.174.0 — is this string's error code still inside its debounce window? True while the
+ * SAME code has been standing-and-producing for less than MPPT_ERR_DEBOUNCE_MS, i.e. the
+ * alarm must wait. An absent onset map (older callers, unit tests) returns false: fire
+ * now, exactly as before this guard existed. An absent ENTRY also returns false — the
+ * store only drops the entry when the code clears or the string stops producing, so
+ * "no entry while the alert condition holds" means the clock has not been fed yet this
+ * tick, and a real standing fault must not wait on bookkeeping.
  */
-const mpptProducing = (watts: number | null, amps: number | null): boolean => {
-  if (watts == null || watts <= MPPT_WATT_FLOOR) return false;
-  if (amps == null) return true;
-  return amps > MPPT_AMP_FLOOR;
-};
+function mpptErrDebounced(
+  connectivity: ConnectivityContext | undefined,
+  sn: string,
+  channel: 'hv' | 'lv',
+  code: number,
+  now: number,
+): boolean {
+  const onset = connectivity?.mpptErrOnsetByKey?.get(`${sn}:${channel}`);
+  return onset != null && onset.code === code && (now - onset.sinceMs) < MPPT_ERR_DEBOUNCE_MS;
+}
+
+
+/*
+ * The MPPT idle/shed guard (v0.9.80 → v1.0.1) now lives in mppt.ts, shared with the
+ * snapshot store's debounce clock so both read one definition. v1.174.0 — a producing
+ * string is necessary but no longer sufficient: the code must also STAND. See the
+ * dpu-pvh-err / dpu-pvl-err pushes below and MPPT_ERR_DEBOUNCE_MS.
+ */
 
 /*
  * Thresholds. EcoFlow's API does NOT expose cell-imbalance or temperature alarm
@@ -432,6 +422,14 @@ export interface ConnectivityContext {
    *  shared 3-min debounce — a 60-s transient device-reported error fired a
    *  full audible red broadcast + HA critical push at 05:35 on 2026-07-12. */
   shp2SrcErrOnsetBySlot?: Map<string, { count: number; sinceMs: number }>;
+  /** v1.174.0 (live 06:58 + 07:33 sunrise blips) — per-DPU MPPT string error onset,
+   *  keyed `<sn>:hv` / `<sn>:lv` (SnapshotStore.mpptErrOnsets). The dpu-pvh-err /
+   *  dpu-pvl-err WARNING is held until the SAME non-zero code has stood, while the
+   *  string was producing, for MPPT_ERR_DEBOUNCE_MS. The sunrise ramp reports a
+   *  benign standby code on a string that IS producing (407 W / 1.38 A), which the
+   *  producing test alone cannot reject — it was derived from sunset, where a
+   *  shedding string makes no watts. */
+  mpptErrOnsetByKey?: Map<string, { code: number; sinceMs: number }>;
 }
 
 /** Format an age in ms as the most natural short human string. */
@@ -461,6 +459,12 @@ const RESERVE_BLIND_CRITICAL_MS = 60 * 60 * 1000;
 // with margin while a genuine fault (which persists indefinitely) is delayed only
 // one alarm-eval cycle past the window.
 const DPU_ERR_DEBOUNCE_MS = 3 * 60 * 1000;
+/** v1.174.0 — the same 3-minute window for the MPPT string error codes (dpu-pvh-err /
+ *  dpu-pvl-err). Both observed sunrise false alarms lasted ~60 s, as did the 2026-08-30
+ *  one; a string genuinely faulting while producing still reports its code three minutes
+ *  later, so the warning is delayed, never lost. Shares the DPU window deliberately —
+ *  one debounce period for device-reported error codes, not a second tunable. */
+const MPPT_ERR_DEBOUNCE_MS = DPU_ERR_DEBOUNCE_MS;
 
 /* v1.45.0 — host-pressure crit dwell. The vitals assessment escalates
  * instantly (correct for QoS), but the RED ANNUNCIATION requires the crit to
@@ -913,10 +917,18 @@ export function computeAlerts(
     // is only a real error if the string is drawing current.
     // v1.0.1 — `mpptProducing` now needs BOTH watts and current (see its docstring): a
     // dusk ramp-down reports real-looking watts with ~0 A, which is standby, not a fault.
-    if ((p.pvHighErrCode ?? 0) !== 0 && mpptProducing(p.pvHighWatts, p.pvHighAmps)) {
+    // v1.174.0 — …and it must have STOOD. The onset clock (snapshot.ts) only runs while
+    // the code is non-zero AND the string is producing, so it is re-baselined by the
+    // sunset/standby path rather than accumulating overnight; a code that appears at the
+    // sunrise ramp and clears one tick later never reaches the window. No context (older
+    // callers/tests) fires immediately — the pre-v1.174.0 behaviour, so no real fault is
+    // silently lost by a missing map.
+    if ((p.pvHighErrCode ?? 0) !== 0 && mpptProducing(p.pvHighWatts, p.pvHighAmps)
+        && !mpptErrDebounced(connectivity, d.sn, 'hv', p.pvHighErrCode ?? 0, now)) {
       out.push({ id: `dpu-pvh-err-${d.sn}`, severity: 'warning', category: 'Solar', device: d.deviceName, title: 'HV MPPT error code', detail: `${d.deviceName} HV solar input reports error code ${p.pvHighErrCode} while producing ${p.pvHighWatts?.toFixed(0)} W (${p.pvHighVolts?.toFixed(0)} V, ${p.pvHighAmps?.toFixed(2)} A).` });
     }
-    if ((p.pvLowErrCode ?? 0) !== 0 && mpptProducing(p.pvLowWatts, p.pvLowAmps)) {
+    if ((p.pvLowErrCode ?? 0) !== 0 && mpptProducing(p.pvLowWatts, p.pvLowAmps)
+        && !mpptErrDebounced(connectivity, d.sn, 'lv', p.pvLowErrCode ?? 0, now)) {
       out.push({ id: `dpu-pvl-err-${d.sn}`, severity: 'warning', category: 'Solar', device: d.deviceName, title: 'LV MPPT error code', detail: `${d.deviceName} LV solar input reports error code ${p.pvLowErrCode} while producing ${p.pvLowWatts?.toFixed(0)} W (${p.pvLowVolts?.toFixed(0)} V, ${p.pvLowAmps?.toFixed(2)} A).` });
     }
 

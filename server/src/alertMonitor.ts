@@ -2106,6 +2106,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       dpuErrOnsetBySn,
       // v1.14.0 — per-slot SHP2 source-error onsets for the shp2-src-err debounce.
       shp2SrcErrOnsetBySlot: store.shp2SrcErrOnsets(),
+      // v1.174.0 — per-string MPPT error onsets for the dpu-pvh-err / dpu-pvl-err debounce.
+      mpptErrOnsetByKey: store.mpptErrOnsets(),
     };
 
     // v0.10.0 — baseline + forecast alert signals are recorder-backed; fetch

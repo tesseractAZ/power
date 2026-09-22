@@ -1,3 +1,38 @@
+## 1.174.0
+
+### Two transient conditions no longer speak: a sunrise solar code, and a brief cell-spread excursion
+
+- **The MPPT string error code must now stand for three minutes.** Error code 457 is the benign
+  standby status a Delta Pro Ultra reports on a shedding string; the existing guard rejected it by
+  requiring the string to be producing, a rule derived entirely from sunset, where a shedding
+  string makes no watts. At sunrise the same code rides a string that IS producing: on 2026-09-22
+  one home Core reported HV code 457 at 407 W / 301 V / 1.38 A for about 60 seconds at 06:58 and
+  again at 07:33, and both were announced over the house before clearing on the next tick (an
+  identical 60-second blip on 2026-08-30 at 06:43). `dpu-pvh-err` / `dpu-pvl-err` now also require
+  the SAME code to stand for `MPPT_ERR_DEBOUNCE_MS` (three minutes, the window the inverter error
+  code and the SHP2 source error already use). A string genuinely faulting while producing still
+  alarms — three minutes later.
+
+  The clock behind that window (`SnapshotStore.trackMpptErrOnsets`, keyed `<sn>:hv` / `<sn>:lv`)
+  advances only while the code is non-zero AND the string is producing, which is the exact
+  condition the alarm fires on. A code standing overnight on a dark string therefore banks no
+  time, and the sunrise ramp that carries it into real watts starts the window from zero. The
+  producing test itself moves to `server/src/mppt.ts` so the alarm engine and the clock read one
+  definition.
+
+- **A cell-imbalance warning waits ten minutes before it is spoken.** The cell-spread warning fires
+  at 24 mV and holds at 20 mV, close enough to normal working spread that packs cross it and settle
+  back within minutes: a six-minute excursion at 21:14 on 2026-09-21 was announced, as were
+  episodes through the night. Nothing in the first minutes is actionable. `vdiff-warn-*` and the
+  `peer-voldiff-*` report of the same event now stay off the audible path until the spread has
+  stood for `IMBALANCE_SPEAK_HOLD_MS`; the card, the push and the digest are unchanged, and the
+  CRITICAL imbalance still speaks immediately. Age is read from the restart-persistent onset
+  sidecar, so the hold is not reset by the roughly daily host restart.
+
+New harness `scripts/mutate-alarm-transients.mjs` (12 anchor-asserted mutants) covers both guards,
+including the two ways each could ship inert: a debounce clock that counts a dark string, and a
+speak hold that is exported, tested and never wired into the tick.
+
 ## 1.173.3
 
 ### Source comments, test descriptions and design docs in the spec register
