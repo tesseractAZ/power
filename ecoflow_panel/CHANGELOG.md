@@ -11,26 +11,30 @@
   the Cores' own AC input only (grid charging them) and a separate grid → Loads edge, routed below
   the battery node, for the rest, capped at the house load. During a force charge both appear
   (04:05: 15,969 W into the Cores, 1,996 W to the house); the grid node keeps the metered total.
-- **Each edge into Loads is bounded by its own meter, and a sole source equals the box.** The
-  Batteries → Loads edge was `Math.max(load, acOut)`: the Cores' inverter meter against the panel's
-  own total, two meters that differ by tens of watts (the reported view showed 1925 W into a
-  "1.89 kW" box; live 14,427 W into "14.36 kW"; about 30% of overnight 5-minute buckets
-  disagreed). The Cores now count as delivering only when their inverters report output. When
-  they are the house's only source, their edge is the house total, so the arrow equals the box;
-  when the Cores are idle and the grid is active, the grid → Loads edge is the house total; with
-  both, the grid's share is the main less the Cores' own draw and the Cores' share is the
-  remainder, never more than their inverters report. The panel, the main and the Cores' meters do
-  not update at the same instant — at the 03:43 charge ramp the main still read 3.41 kW while
-  16.3 kW was already flowing into the Cores — so the Grid node is never shown smaller than the
-  edges leaving it.
-- **Circuits are counted as circuits.** The subtitle counted energized channels, so a six-circuit
-  split-phase panel read "9 circuits" (and could read 12) beside an SHP2 card that says
-  "Circuits (6)". It now counts the panel's paired circuits.
+- **The arrows into Loads sum to the Loads box, attributed from the fresher meter.** The
+  Batteries → Loads edge was `Math.max(load, acOut)`: the Cores' inverter meter against the
+  panel's own total, two meters that differ by tens of watts (the reported view showed 1925 W
+  into a "1.89 kW" box; live 14,427 W into "14.36 kW"; about 30% of overnight 5-minute buckets
+  disagreed). The panel reports in one frame every ~60 s and the Cores every ~10 s, so every
+  transition — a charge ramp, a charge ending, the Cores handing the house to the grid — has up
+  to a minute in which they disagree. The Cores now count as delivering only when their
+  inverters report output. When they are the house's only source, their edge is the house total;
+  when they are idle, the grid carries the whole house (including in the minute after they stop,
+  before the panel's next frame shows the main rising); with both, the Cores' share comes from
+  their own meter and the grid takes the rest, so the two edges always sum to the box. The Grid
+  node shows the main meter unless the faster meters show it is a frame behind (it read 3.41 kW
+  beside a 16.3 kW charge at a ramp, and 18.4 kW beside a 2.1 kW flow as a charge ended).
+  Replayed over 190.5 h of recorded meter history (150,466 instants), the card now draws no
+  flow out of Cores whose inverters report nothing, never loses the Cores' delivery, never shows
+  the house with nothing feeding it, and never shows a Grid node its edges contradict; the first
+  cut of this change had drawn phantom battery output for 593 minutes of that history.
 - **A panel that is offline or replaying a cloud shadow is not read as live.** The server already
   zeroes such a panel's grid reading; its channels still held the frozen house load, which would
   have drawn a grid-fed house flowing out of idle batteries. The Loads node reads "—" with "panel
   data stale", and the Cores' grid draw is counted over the same Cores the Batteries node shows
-  (the server's import figure also counts a source slot whose Core is not connected).
+  (the server's import figure also counts a source slot whose Core is not connected). With no
+  connection table yet (cold boot) the server's fail-safe import figure is used, so a bench
+  spare's wall charge is not drawn as live grid.
 - **A panel that reports no channel watts reads "—", and records nothing.** The SHP2 projection
   always carries twelve channel entries, with `watts: null` for any the payload omitted. The card
   summed them to 0 W, and the recorder started its `panel_load` sum at 0 and stored that as a
@@ -44,7 +48,7 @@
 The card's numbers now come from a pure module, `web/src/cards/energyFlowModel.ts`, which the
 server test suite imports and runs against recorded scenes from 2026-09-22 (the 03:30 backstop, the
 03:43 charge ramp, the 04:05 and 04:35 steady charge, midday solar). New harness
-`scripts/mutate-energy-flow.mjs` (13 anchor-asserted mutants). The Solar and Batteries nodes are
+`scripts/mutate-energy-flow.mjs` (15 anchor-asserted mutants). The Solar and Batteries nodes are
 not balanced against the house: PV is metered on the DC side and the house on the AC side, and the
 MPPT, charger and inverter losses between them are not drawn.
 

@@ -14,9 +14,9 @@ import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
  *   Grid  → Batteries   gridToCoresW  — the home Cores' own AC input (grid charging them)
  *   Grid  → Loads       gridToHouseW  — the grid serving the house through the panel
  *   Batteries → Loads   coresToHouseW — the Cores' delivery, never more than their inverters report
- * and the Loads NODE is the house total the panel measured. With one source feeding the
- * house its edge equals the node exactly; with both, each edge is bounded by its own meter
- * and they sum to the node within the meters' disagreement. The Solar and Batteries
+ * and the Loads NODE is the house total the panel measured. The two edges into Loads always
+ * sum to the node: the Cores' share is taken from their own (faster) meter and the grid
+ * takes the rest of the house. The Solar and Batteries
  * nodes are NOT balanced against them: PV is metered on the DC side and the house on the
  * AC side, and the MPPT, charger and inverter losses between them are not drawn.
  */
@@ -47,7 +47,7 @@ export interface EnergyFlowModel {
   /** Energized CIRCUITS (split-phase pairs count once), not channels. */
   liveCircuits: number;
   gridState: GridFlowState;
-  /** The Grid node: the metered total at the main, never less than its own edges. */
+  /** The Grid node: the main meter, or the sum of its edges when the main is evidently stale. */
   gridSupplyW: number;
   gridToCoresW: number;
   gridToHouseW: number;
@@ -137,59 +137,72 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // drawn as the house running on battery (live 2026-09-22 03:30: grid 1901 W, house
   // 1904 W, Core AC output 0 W, packs +16 W).
   //
-  // v1.175.0 — the Cores' grid draw is `acIn` over the SAME Cores drawn in the Batteries
-  // node, not the server's importWatts, which also counts a source slot whose Core is not
-  // connected (gridState.ts sums every `sources` SN; the membership here admits only
-  // isConnected). Drawing a non-member's draw into this node would move watts off the
-  // grid → house edge onto a phantom Cores → house one.
+  // ★ TWO CADENCES. The panel's figures (main, house, channels) arrive in one REST frame
+  // every ~60 s; the Cores' AC input and output stream every ~10 s. Every transition —
+  // a charge ramp, a charge ending, the Cores handing the house to the grid — therefore has
+  // up to a minute in which the two disagree. Replayed over 190 h of recorded history, a
+  // rule that trusted the panel's frame drew phantom battery output at charge ramps and lost
+  // the Cores' real delivery when a charge ended. The rules below attribute from the
+  // FRESHER meter first and let the panel's total absorb the rest.
   const homeGridW = grid?.homeGridWatts ?? 0;
-  const gridToCoresW = acIn;
-  const gridActive = grid ? homeGridW > 0 || acIn >= FLOW_EDGE_MIN_W : acIn >= FLOW_EDGE_MIN_W;
+  // The Cores' grid draw, over the same Cores drawn in the Batteries node. With a connection
+  // table that is their own acIn (the server's importWatts also counts a source slot whose
+  // Core is not connected). WITHOUT one (cold boot, or a partial quota missing the sources
+  // subtree) every online DPU stands in for the node — bench spares included — so their
+  // acIn would include a spare's wall charge; the server's importWatts fails safe to 0 in
+  // exactly that state, and is used instead. No snapshot `grid` at all is the legacy path.
+  const coresAcIn = connected.size > 0 ? acIn : grid ? (grid.importWatts ?? 0) : acIn;
+  const coresDelivering = acOut >= FLOW_EDGE_MIN_W;
   const gridPresent = grid ? grid.present || grid.declared : acIn >= FLOW_EDGE_MIN_W;
+  // The house is evidently on the grid when the Cores (fresh meter) deliver nothing while
+  // the panel shows the house drawing: the grid is the only other source. This covers the
+  // up-to-60 s after the Cores stop, before the panel's next frame shows the main rising
+  // (recorded 09-21 22:55:37-22:56:27: house 5137 W, Cores 0 W, main still 0).
+  const houseOnGrid = gridPresent && !coresDelivering && load != null && load >= FLOW_EDGE_MIN_W;
+  const gridActive = grid
+    ? homeGridW > 0 || coresAcIn >= FLOW_EDGE_MIN_W || houseOnGrid
+    : acIn >= FLOW_EDGE_MIN_W;
   const gridState: GridFlowState = gridActive ? 'active' : gridPresent ? 'standby' : 'off';
+  const gridToCoresW = coresAcIn;
 
   // ── who feeds the house ───────────────────────────────────────────────────
-  // The house has two sources, the grid and the Cores. The Cores are delivering only when
-  // their own inverters say so (acOut). That is the gate the first cut lacked: it took the
-  // Cores' share as the panel's remainder (house − grid share), and the panel, the main and
-  // the Core meters do not update at the same instant — at a charge ramp (03:42:52-03:43:25:
-  // main 3406 W, Core input climbing 3608 → 16275 W, house 3410 W, Core output 0 W) the
-  // remainder was the whole house, drawn flowing out of charging Cores whose inverters
-  // produced nothing. Replayed against the recorded night, the remainder put a phantom
-  // Cores → house edge on screen in more than half the charging samples.
-  //   · Cores not delivering, grid active → the grid is the house's only source: grid →
-  //     Loads is the house load (exact, whatever the main reads at that instant).
-  //   · Cores delivering, grid not feeding the house → the Cores are the only source: their
-  //     edge is the house load, so the arrow equals the box it points at (the reported view
-  //     had 1925 W into a "1.89 kW" box: the Cores' meter against the panel's).
-  //   · both → the grid's share is main − the Cores' own draw, capped at the house; the
-  //     Cores' is the remainder, capped at what their inverters report.
-  const coresDelivering = acOut >= FLOW_EDGE_MIN_W;
+  //   · Cores idle (their inverters report < 5 W) and grid active → the grid carries the
+  //     whole house: grid → Loads is the house load.
+  //   · Cores delivering, grid not active → the Cores are the only source: their edge IS the
+  //     house load, so the arrow equals the box (the reported view had 1925 W into a
+  //     "1.89 kW" box — the Cores' inverter meter against the panel's).
+  //   · both → the Cores' share comes from their own fresh meter (capped at the house), and
+  //     the grid takes the rest. When a charge ends the panel's frame still shows the main
+  //     carrying everything for up to a minute (09-22 04:53:41: main 3331 W, house 3335 W,
+  //     Cores already outputting 3298 W); the fresh meter keeps their delivery on screen.
+  //   · a silent or frozen panel (load null) → each edge from its own meter.
   let gridToHouseW: number;
   let coresToHouseW: number;
   if (load == null) {
-    gridToHouseW = Math.max(0, homeGridW - acIn);
+    gridToHouseW = Math.max(0, homeGridW - coresAcIn);
     coresToHouseW = coresDelivering ? acOut : 0;
   } else if (!coresDelivering) {
     gridToHouseW = gridState === 'active' ? load : 0;
     coresToHouseW = 0;
+  } else if (gridState !== 'active') {
+    gridToHouseW = 0;
+    coresToHouseW = load;
   } else {
-    const gridShare = Math.min(Math.max(0, homeGridW - acIn), load);
-    if (gridShare < FLOW_EDGE_MIN_W) {
-      gridToHouseW = 0;
-      coresToHouseW = load;
-    } else {
-      gridToHouseW = gridShare;
-      coresToHouseW = Math.min(load - gridShare, acOut);
-    }
+    coresToHouseW = Math.min(acOut, load);
+    gridToHouseW = load - coresToHouseW;
   }
   if (coresToHouseW < FLOW_EDGE_MIN_W) coresToHouseW = 0;
   if (gridToHouseW < FLOW_EDGE_MIN_W) gridToHouseW = 0;
 
-  // The Grid node: the metered total at the main, but never less than what leaves it. The
-  // main updates on the panel's cadence and the Cores' input on theirs; at a charge ramp the
-  // main still read 3.41 kW while 16.3 kW was already drawn into the Cores.
-  const gridSupplyW = Math.max(homeGridW, gridToCoresW + gridToHouseW);
+  // The Grid node: the main meter, unless the fresher meters show it is evidently stale.
+  // The main and the Cores' meters normally agree to within a few percent (steady 16 kW
+  // charge: main 19053 W vs 17965 W drawn — the node keeps the main). At a transition the
+  // main can be a whole frame behind: 3.41 kW beside a 16.3 kW grid → Cores edge at a charge
+  // ramp, 18.4 kW beside a 2.1 kW house edge when a charge had just ended. Beyond the meters'
+  // tolerance the node shows what its edges carry, so it never contradicts them.
+  const gridEdgesW = gridToCoresW + gridToHouseW;
+  const meterToleranceW = Math.max(500, 0.1 * Math.max(homeGridW, gridEdgesW));
+  const gridSupplyW = homeGridW > 0 && Math.abs(homeGridW - gridEdgesW) <= meterToleranceW ? homeGridW : gridEdgesW;
 
   return {
     dpuCount: dpus.length,

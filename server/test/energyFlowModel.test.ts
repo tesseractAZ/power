@@ -105,12 +105,12 @@ test('★★★ a panel that reported no channel watts reads NULL, not a confide
   assert.equal(m.coresToHouseW, 900, 'with no panel figure the arrow falls back to the Cores\u2019 own meter');
 });
 
-test('★★ with grid AND Cores feeding the house, each edge is bounded by its own meter', () => {
+test('★★ with grid AND Cores feeding the house, the Cores’ fresh meter claims their share and the grid the rest', () => {
   // Evening: the grid tops up a house the Cores are partly carrying.
   const m = energyFlowModel(devs(core('C1', { acOut: 400 }), core('C2', { acOut: 400 }), core('C5', { acOut: 400 }), panel(HOME, legs(2600))), grid(1350, 0));
-  assert.equal(m.gridToHouseW, 1350);
-  assert.equal(m.coresToHouseW, 1200, 'the remainder is 1250 W, but never more than the Cores\u2019 inverters report');
-  assert.ok(Math.abs(m.gridToHouseW + m.coresToHouseW - (m.load as number)) <= 50, 'with two sources the edges sum to the box within meter disagreement');
+  assert.equal(m.coresToHouseW, 1200, 'what the Cores’ inverters report');
+  assert.equal(m.gridToHouseW, 1400, 'the rest of the house');
+  assert.equal(m.gridToHouseW + m.coresToHouseW, m.load, 'the arrows into Loads always sum to the box');
 });
 
 test('with NO panel at all (cold boot) the Cores’ AC output stands in for the house', () => {
@@ -259,13 +259,63 @@ test('★ a Core in a DISCONNECTED source slot is not counted in the grid draw o
   assert.equal(m.coresToHouseW, 0);
 });
 
-test('an idling inverter’s few watts beside a grid-fed house are meter noise, not drawn as delivery', () => {
-  // Grid carries 1900 W of a 1903 W house; the Cores’ inverters idle at 50 W. The remainder
-  // (3 W) is below the edge floor: no Batteries → Loads edge.
+test('a grid remainder under the edge floor is meter disagreement, not drawn', () => {
+  // The Cores carry 1900 W of a 1903 W house while a stale main still reads grid.
   const m = energyFlowModel(
-    devs(core('C1', { acOut: 20 }), core('C2', { acOut: 15 }), core('C5', { acOut: 15 }), panel(HOME, legs(1903))),
+    devs(core('C1', { acOut: 700 }), core('C2', { acOut: 600 }), core('C5', { acOut: 600 }), panel(HOME, legs(1903))),
     grid(1900, 0),
   );
-  assert.equal(m.gridToHouseW, 1900);
-  assert.equal(m.coresToHouseW, 0);
+  assert.equal(m.coresToHouseW, 1900);
+  assert.equal(m.gridToHouseW, 0, 'the 3 W remainder is not a grid flow');
+});
+
+/* ══ v1.175.0 re-review: two cadences (panel ~60 s, Cores ~10 s) ═════════ */
+
+test('★★★ a charge ends: the Cores’ real delivery stays on screen while the panel frame is a minute behind', () => {
+  // 09-22 04:53:41: the panel frame (main 3331 W, house 3335 W) predates the hand-over;
+  // the Cores already output 3298 W. The previous rule showed 0 W out of the Batteries.
+  const m = energyFlowModel(
+    devs(core('C1', { acOut: 1100 }), core('C2', { acOut: 1100 }), core('C5', { acOut: 1098 }), panel(HOME, legs(3335))),
+    grid(3331, 0),
+  );
+  assert.equal(m.coresToHouseW, 3298);
+  assert.equal(m.gridToHouseW + m.coresToHouseW, m.load);
+});
+
+test('★★ a charge ends: the Grid node does not keep a stale 18.4 kW beside a 2.1 kW flow', () => {
+  // 09-21 04:39:48: main still 18439 W (frame), Core input already 0, house 2141 W, Cores
+  // delivering 2158 W. Every fresh meter says the grid now carries nothing.
+  const m = energyFlowModel(
+    devs(core('C1', { acOut: 720 }), core('C2', { acOut: 719 }), core('C5', { acOut: 719 }), panel(HOME, legs(2141))),
+    grid(18439, 0),
+  );
+  assert.equal(m.coresToHouseW, m.load);
+  assert.ok(m.gridSupplyW <= m.gridToCoresW + m.gridToHouseW + 500, `the node follows its edges when the main is evidently stale (got ${m.gridSupplyW})`);
+});
+
+test('★★ the Cores hand the house to the grid: the grid carries it before the panel’s next frame shows it', () => {
+  // 09-21 22:55:37: house 5137 W, Cores output 0 W, main still 0 W (frame from 22:55:27).
+  const m = energyFlowModel(devs(core('C1'), core('C2'), core('C5'), panel(HOME, legs(5137))), grid(0, 0));
+  assert.equal(m.gridState, 'active', 'the Cores deliver nothing and the house draws 5 kW: it is on the grid');
+  assert.equal(m.gridToHouseW, m.load);
+});
+
+test('the Grid node keeps the MAIN when the meters agree within tolerance (steady charge)', () => {
+  const m = energyFlowModel(
+    devs(core('C1', { acIn: 5323 }), core('C2', { acIn: 5323 }), core('C5', { acIn: 5323 }), panel(HOME, legs(1996))),
+    grid(19053, 15969),
+  );
+  assert.equal(m.gridSupplyW, 19053, 'a ~1 kW main-vs-Core disagreement at 19 kW is meter tolerance, not staleness');
+});
+
+test('★★ cold boot with no connection table: a bench spare’s wall charge is not drawn as live grid', () => {
+  // The panel is listed but has no sources yet, so every online DPU (bench spare included)
+  // stands in for the node. The server’s importWatts fails safe to 0 here; the model uses it.
+  const p = panel([], legs(4000));
+  const m = energyFlowModel(
+    devs(core('C1', { acOut: 2000 }), core('C2', { acOut: 2000 }), core('BENCH', { acIn: 1800 }), p),
+    { present: true, declared: true, backstopping: true, homeGridWatts: 0, importWatts: 0 } as Any,
+  );
+  assert.equal(m.gridToCoresW, 0);
+  assert.equal(m.gridState, 'standby');
 });
