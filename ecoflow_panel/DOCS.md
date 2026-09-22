@@ -6420,6 +6420,12 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.172.0 — ghost pack slots are hidden** (`packPresence.ts`, applied after every DPU projection
+in `snapshot.ts`). The cached raw quota never forgets a `hs_yj751_bms_slave_addr.N.*` slot, so a
+removed or renumbered pack lingered at its last readings. A slot frozen ≥ 10 min behind every kept
+pack is hidden when the Core's `bpNum` is below the slot count, or when it repeats another slot's
+`packSn`.
+
 **v1.171.1 — the 2026-09-20 audit fixes.** (1) `cancelStalePriorArm` (index.ts): every
 non-charge evening decision cancels a prior night's never-applied arm whose window has not
 opened — the Sat→Sun shared-window case wrote against tonight's own HOLD. (2) `ecoflow/rest.ts`

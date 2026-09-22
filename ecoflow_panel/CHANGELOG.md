@@ -1,3 +1,31 @@
+## 1.172.0
+
+### A removed pack no longer lingers as a ghost
+
+**Owner report (2026-09-21):** *"one of the batteries has been physically removed but all 25 are
+still showing active and reporting."* The defective Core 4 pack 1 was pulled for warranty on
+2026-09-20 around 12:10. The Core renumbered the four remaining packs as slots 1–4 and reported
+**4 packs** — but the Fleet pack matrix kept showing 25, with Core 4 "pack 5" at a frozen 55% /
+84 °F. Slot 5 still held the last readings of the pack that now reports as slot 4 (**the same pack
+serial in both slots**): its voltage last moved at 12:10, its SoC at 13:01, its temperature not
+once in 36 hours. The recorder kept writing it, a predicted-SoH alert and the Core's imbalance
+warning kept reading it.
+
+**Why:** a Core's pack list is built from every slot 1–5 that has any value in the cached raw
+quota, and that cache only ever gains or overwrites values — nothing removes a slot whose pack is
+gone.
+
+**Now** a slot whose readings have **stopped changing** is hidden when either the Core's own pack
+count says there are fewer packs than slots, or it repeats another slot's pack serial (a renumbered
+pack's old address). Every live pack's voltage or temperature moves within minutes, even at rest.
+
+- Nothing is hidden without evidence: the count rule needs a positive count from the Core (a
+  missing or transient 0 hides nothing), and a slot must be frozen at least 10 minutes behind
+  every pack kept — so after a restart nothing hides until the live packs move.
+- A hidden pack that starts reporting again is shown again. One log line per hide and per return.
+
+New `server/src/packPresence.ts`; harness `scripts/mutate-pack-presence.mjs` (6/6); 10 new tests.
+
 ## 1.171.2
 
 ### Fix: v1.171.1 reported every panel WRITE as failed
