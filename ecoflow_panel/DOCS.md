@@ -5349,7 +5349,7 @@ Battery/voltage/health thresholds:
 **Per-DPU (Core), for online DPUs:**
 
 - `dpu-err-<SN>` (critical, Battery) — `sysErrCode != 0`, **debounced** by `DPU_ERR_DEBOUNCE_MS`: suppressed until the SAME code has stood 3 min (cloud-reconnect blips 20–160 s are dropped). No onset context ⇒ fires immediately (never silently loses a real fault).
-- `dpu-pvh-err-<SN>` / `dpu-pvl-err-<SN>` (warning, Solar) — HV/LV MPPT error code AND the string is actually producing per `mpptProducing(watts, amps)` (needs BOTH watts > 20 W and, if reported, amps > 0.3 A). Rejects sunset/dusk standby codes that are identical across independent cores.
+- `dpu-pvh-err-<SN>` / `dpu-pvl-err-<SN>` (warning, Solar) — HV/LV MPPT error code AND the string is actually producing per `mpptProducing(watts, amps)` (`server/src/mppt.ts` since v1.174.0; needs BOTH watts > 20 W and, if reported, amps > 0.3 A) AND, since **v1.174.0**, the SAME code has stood for `MPPT_ERR_DEBOUNCE_MS` (3 min, shared with the inverter-error and SHP2-source-error windows). The producing test rejects sunset/dusk standby codes that are identical across independent cores; the debounce rejects the SUNRISE case the producing test cannot see, where the same standby code rides a ramping string that is genuinely producing (2026-09-22: 407 W / 301 V / 1.38 A, ~60 s, twice). The window is measured by `SnapshotStore.trackMpptErrOnsets` (keyed `<sn>:hv` / `<sn>:lv`), whose clock advances only while the code is non-zero AND the string is producing — so a code standing overnight on a dark string banks no time, and no onset context at all (older callers, unit tests) fires immediately.
 - `mppt-hv-temp-<SN>` / `mppt-lv-temp-<SN>` — `MPPT_TEMP` band. Channel slug precedes SN so `familyOf` yields per-channel families.
 - `ems-volt-<SN>` (warning, Battery) — pack voltage outside EcoFlow's `emsParaVol` parallel-operation window.
 - `dpu-imbalance-<SN>` (warning) — SoC spread across the DPU's packs ≥ `PACK_IMBALANCE_WARN_PCT` (15%).
@@ -6462,6 +6462,14 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 `FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
+
+**v1.174.0 — two transients stop speaking.** The MPPT string error codes are debounced (see the
+alert catalogue above). `vdiff-warn-*` and `peer-voldiff-*` are held off the spoken condition until
+the spread has stood for `IMBALANCE_SPEAK_HOLD_MS` (10 min) — `heldForImbalanceConfirm` filters the
+array that feeds both `conditionFromAlerts` and `messageFor`, reading age from the
+restart-persistent onset sidecar (`getAlertOnset`) so a daily restart does not reset the hold. The
+filter is severity-scoped: the `vdiff-crit-` CRITICAL is never held, and cards, pushes and the
+digest are untouched. Harness: `scripts/mutate-alarm-transients.mjs` (12 mutants).
 
 **v1.172.0 — ghost pack slots are hidden** (`packPresence.ts`, applied after every DPU projection
 in `snapshot.ts`). The cached raw quota never forgets a `hs_yj751_bms_slave_addr.N.*` slot, so a
