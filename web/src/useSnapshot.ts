@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { FleetSnapshot } from './types';
 import { wsUrl } from './api';
 
-export type ConnState = 'connecting' | 'open' | 'closed';
+import type { ConnState } from './freshness';
+export type { ConnState };
 
 export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState } {
   const [snapshot, setSnapshot] = useState<FleetSnapshot | null>(null);
