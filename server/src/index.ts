@@ -33,7 +33,8 @@ import {
   decideForceCharge, forceChargeEnabled, desiredForceChargeCeilingPct, forceChargeInFlight,
   FORCE_CHARGE_CEILING_MIN_PCT, FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS,
   FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS, type ForceChargeAction,
-  forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw, FORCE_CHARGE_MIN_RATE_KW,
+  forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw, FORCE_CHARGE_MIN_RATE_KW, planChargeCapKw,
+  evDisplacedPackKwh,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
 } from './nightForceCharge.js';
 import {
@@ -3331,7 +3332,11 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
   const objectiveMode = (process.env.ARB_OBJECTIVE ?? 'resilience').toLowerCase() === 'cost' ? 'cost' as const : 'resilience' as const;
   const costMaxSocPct = Number(process.env.ARB_COST_MAX_SOC_PCT ?? DEFAULT_COST_MAX_SOC_PCT);
   const islandedLoadSafety = Number(process.env.ARB_ISLANDED_LOAD_SAFETY ?? DEFAULT_ISLANDED_LOAD_SAFETY);
-  const chargeCapKw = Number(process.env.ARB_CHARGE_CAP_KW ?? 7.2);
+  // v1.173.0 — 0 (default) = AUTO: connected Cores × the proven per-Core rate (planChargeCapKw).
+  const planConnectedSlots = Array.isArray(sp.sources)
+    ? sp.sources.filter((c: any) => c?.hwConnect === true && Number.isInteger(Number(c?.slot))).length
+    : null;
+  const chargeCapKw = planChargeCapKw(Number(process.env.ARB_CHARGE_CAP_KW ?? 0), planConnectedSlots, legEff);
   // v1.60.0 — the SHARED grid-input envelope the charger and the house both draw
   // from. Default 17 kW is the COEXISTENCE figure measured on 2026-08-02→03: at
   // 03:00 `panel_load` held 14.0 kW (EVSE ~11.5 kW + ~2.5 kW baseline) while the
@@ -4614,7 +4619,10 @@ function runSettingsDriftTick(): void {
       const forceChargeActive =
         forceChargeInFlight(act) ||
         (act.forceChargeOffVerifiedAtMs != null && nowMs - act.forceChargeOffVerifiedAtMs < 15 * 60_000) ||
-        (act.forceChargeCeilingAttemptedAtMs != null && nowMs - act.forceChargeCeilingAttemptedAtMs < 15 * 60_000);
+        (act.forceChargeCeilingAttemptedAtMs != null && nowMs - act.forceChargeCeilingAttemptedAtMs < 15 * 60_000) ||
+        // v1.173.0 — and the RESTORE: on a night whose force-charge never started, the 05:00
+        // restore of the panel's own ceiling was pushed as an external "Setting changed".
+        (act.forceChargeCeilingRestoreLastAttemptMs != null && nowMs - act.forceChargeCeilingRestoreLastAttemptMs < 15 * 60_000);
       const ctx = { targetPct: act.targetPct, priorReservePct: act.priorReservePct, nightActive, ownerFloorPct, forceChargeActive };
       for (const c of evaln.confirmedChanges) {
         if (classifyChange(c, ctx) === 'own-write') {
@@ -4964,10 +4972,20 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
   // a plan for this same window counts; an EV already charging is counted twice (live load
   // and forecast), which errs toward starting early — the safe direction.
   const fcPlan = getLatestNightChargePlan();
+  // v1.173.0 — through evDisplacedPackKwh: with a Core out, the EV first eats the slack the
+  // per-Core bound leaves under the cap, so only the rest displaces pack charge.
+  const fcLeg = Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY);
   const evDisplacedKwh =
     fcPlan?.window != null && fcPlan.window.endMs === state.windowEndMs
       && typeof fcPlan.evContention?.windowEvKwh === 'number' && Number.isFinite(fcPlan.evContention.windowEvKwh)
-      ? fcPlan.evContention.windowEvKwh * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY)
+      ? evDisplacedPackKwh({
+        evKwh: fcPlan.evContention.windowEvKwh,
+        peakEvKw: typeof fcPlan.evContention.peakEvKw === 'number' ? fcPlan.evContention.peakEvKw : null,
+        rateKw: chargeRateKw,
+        unboundedRateKw: gridCapKw != null && houseLoadKw != null
+          ? Math.max(FORCE_CHARGE_MIN_RATE_KW, (gridCapKw - Math.max(0, houseLoadKw)) * fcLeg) : null,
+        legEff: fcLeg,
+      })
       : null;
   const action = decideForceCharge(state, nowMs, {
     enabled: !opts.forceDisabled && forceChargeOn(),
@@ -5114,19 +5132,30 @@ async function escalateForceChargeStuck(
   state: NightActuationState,
   action: Extract<ForceChargeAction, { kind: 'offFailed' }>,
 ): Promise<void> {
-  persistNightActuation({
-    ...nightActuationMem,
-    forceChargeOffEscalated: true,
-    // The deadline pages once, on its own record (see nightForceCharge.ts section 0).
-    forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,
-  });
+  const repage = action.repage === true;
+  if (repage) {
+    // v1.173.0 — a deadline page that quiet hours silenced: speak it again (no second push).
+    // Booked as muted until the announce says it was heard.
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeOffDeadlineRepages: nightActuationMem.forceChargeOffDeadlineRepages + 1,
+      forceChargeOffDeadlineMutedAtMs: Date.now(),
+    });
+  } else {
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeOffEscalated: true,
+      // The deadline pages once, on its own record (see nightForceCharge.ts section 0).
+      forceChargeOffDeadlinePagedAtMs: action.deadline ? Date.now() : nightActuationMem.forceChargeOffDeadlinePagedAtMs,
+    });
+  }
   const unconfirmed = action.unconfirmed === true;
   const why = action.deadline
     ? (unconfirmed
       ? `not confirmed OFF by the deadline (window end + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS / 60_000)} min, or first OFF + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS / 60_000)} min) and there is NO live panel readback to show it off`
       : `still read FORCE_CHARGE_ON at the deadline (window end + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_WINDOW_MS / 60_000)} min, or first OFF + ${Math.round(FORCE_CHARGE_OFF_DEADLINE_AFTER_OFF_MS / 60_000)} min)`)
     : `still read FORCE_CHARGE_ON after ${state.forceChargeOffRetries} re-issues`;
-  app.log.error(`night-charge: force-charge ${unconfirmed ? 'NOT CONFIRMED OFF' : 'NEVER SWITCHED OFF'} — slots ${action.slots.join(',')} ${why}. While it is on the panel keeps buying grid power, including on-peak. Re-issuing OFF every 15 min while a readback shows it on.`);
+  app.log.error(`night-charge: ${repage ? 'RE-SPEAKING (quiet hours silenced it) — ' : ''}force-charge ${unconfirmed ? 'NOT CONFIRMED OFF' : 'NEVER SWITCHED OFF'} — slots ${action.slots.join(',')} ${why}. While it is on the panel keeps buying grid power, including on-peak. Re-issuing OFF every 15 min until it reads off (blind, with no readback, for up to 12 h).`);
   try {
     const heard = await broadcast.announce(
       'critical',
@@ -5148,11 +5177,20 @@ async function escalateForceChargeStuck(
     // A quiet-hours suppression is not a failure, but it must be VISIBLE: the push still
     // goes, and the wall-clock deadline keeps its own page for the morning.
     if (heard && heard.ok === false) {
-      app.log.warn(`night-charge: force-charge escalation was NOT spoken (${heard.error ?? 'refused'}) — push only${action.deadline ? '' : '; the wall-clock deadline will page again'}.`);
+      app.log.warn(`night-charge: force-charge escalation was NOT spoken (${heard.error ?? 'refused'}) — push only${action.deadline ? '; the deadline page will be re-spoken every 30 min until it is heard' : '; the wall-clock deadline will page again'}.`);
+    }
+    // v1.173.0 — a deadline page records whether it was HEARD, so a quiet-hours mute is
+    // re-spoken once quiet hours end (Friday's deadline lands at Sat 01:00).
+    if (action.deadline) {
+      persistNightActuation({
+        ...nightActuationMem,
+        forceChargeOffDeadlineMutedAtMs: heard && heard.ok === false ? Date.now() : null,
+      });
     }
   } catch (e: any) {
     app.log.warn(`night-charge: force-charge escalation announce failed (${e?.message ?? e})`);
   }
+  if (repage) return; // the push already went with the first page
   try {
     await sendNotification(loadNotifyConfig(), {
       severity: 'critical',
@@ -5166,7 +5204,7 @@ async function escalateForceChargeStuck(
             ? `the panel has not switched off: slot(s) ${action.slots.join(', ')} still read ON past the deadline. `
             : `the panel has not switched off: slot(s) ${action.slots.join(', ')} still read ON after ${state.forceChargeOffRetries} accepted OFF commands. `)
         + 'While it stays on the panel buys grid power instead of using the battery — including at the on-peak rate. '
-        + 'Check Charge Now in the EcoFlow app and turn it off. The add-on keeps sending OFF every 15 minutes while a readback shows it on.',
+        + 'Check Charge Now in the EcoFlow app and turn it off. The add-on keeps sending OFF every 15 minutes until it reads off (with no readback, for up to 12 hours).',
     });
   } catch (e: any) {
     app.log.warn(`night-charge: force-charge escalation notify failed (${e?.message ?? e})`);
