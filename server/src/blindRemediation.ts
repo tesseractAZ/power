@@ -1,10 +1,10 @@
 /**
  * blindRemediation.ts — v1.166.0. REMEDIATE FIRST, ALARM ONLY IF IT FAILS.
  *
- * Owner decision (2026-09-17): "Sound the stale data alarm only after the retry has
- * been initiated and failed … I want it to alarm, however only after immediate
- * remediation has failed." That settles the open question from v1.154.0 about the
- * telemetry-blind alarm speaking at 4-5 minutes.
+ * Policy (2026-09-17): the stale-data alarm sounds only after the retry has been
+ * initiated and has failed. It still alarms, but only once the immediate remediation
+ * has failed. That settles the open question from v1.154.0 about the telemetry-blind
+ * alarm speaking at 4-5 minutes.
  *
  * THE INCIDENT THAT DECIDED IT (2026-09-17, during on-peak):
  *   16:27:48  the EcoFlow cloud replays a stale SHP2 shadow; message rate 34 -> 0/min
@@ -35,8 +35,8 @@
  *    condition an MQTT rebuild cannot fix (the internet down, a clock-skew auth failure,
  *    the panel offline) alarms up to the verify window LATER than before — about 10 min
  *    after the last good poll instead of about 5 (TELEMETRY_BLIND_STALE_MS 5 min + this
- *    5 min). That is inside the owner's rule ("only after immediate remediation has
- *    failed"), and it is also a debounce for a blip that clears in the window. Scoping
+ *    5 min). That is within the policy (alarm only after the immediate remediation has
+ *    failed), and it is also a debounce for a blip that clears in the window. Scoping
  *    the hold to rebuild-fixable causes is a possible refinement, not done here.
  *  - The all-clear SPEECH gate (broadcast.ts allClearSpeechBlocked) still counts the
  *    held alert: held is not cleared, so "All clear" is never spoken while blind.

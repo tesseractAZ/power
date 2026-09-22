@@ -228,8 +228,8 @@ export function computeNightChargeReadiness(
   // ── MNAR exclusion diagnostic (§3.5): expected nights vs captured-and-scored
   // nights over the current-algo era (trailing 120 d, latest COMPLETE plan date
   // = Phoenix date of now−45 h). Published as a diagnostic so a growing hole in
-  // the record is visible; the v2 graduation criteria are the five owner-
-  // approved ones (2026-07-31), which do not include it. ──
+  // the record is visible; the v2 graduation criteria are the five approved
+  // ones (2026-07-31), which do not include it. ──
   let exclusionFrac: number | null = null;
   {
     const scoredRows = withOutcome.filter((r) => truthy(r.scored));
@@ -381,7 +381,7 @@ export function computeNightChargeReadiness(
     // left for a reader to infer from a null.
     //
     // This deliberately does NOT loosen any criterion: re-scoping the cushion is
-    // an owner policy decision, and until it is made, fail-closed with an honest
+    // a policy decision, and until it is made, fail-closed with an honest
     // label is the correct posture.
     underBuyMeasurable: actuatedNights > 0 && underBuyPool.length > 0 ? 1 : 0,
     strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)) ? 1 : 0,
@@ -422,7 +422,7 @@ export function computeNightChargeReadiness(
     return { state: 'BLOCKED', writeReady: false, blocking: hard, scoredDays: actuatedNights, effectiveN: round(effectiveN, 2), metrics };
   }
 
-  // ── Graduation criteria (owner-approved 2026-07-31). Any unmet →
+  // ── Graduation criteria (approved 2026-07-31). Any unmet →
   // fail-closed to LEARNING (§5.3, I13). ──
   const blocking: string[] = [];
 
@@ -435,7 +435,7 @@ export function computeNightChargeReadiness(
         ? `under-buy rate UNREACHABLE, not merely thin — all ${underBuyExcluded} of ${actuatedNights} actuated night(s) `
           + 'disclosed a cushion shortfall and are therefore exempt from the sizing judgement (§5.1). The cushion '
           + 'requirement is not satisfiable on this plant (the worst-case day drains more than the pool holds), so '
-          + 'the flag is a constant and more nights will not change this. Re-scoping the cushion is an owner decision; '
+          + 'the flag is a constant and more nights will not change this. Re-scoping the cushion is a policy decision; '
           + 'until then this criterion cannot be met and the gate stays closed.'
         : underBuyExcluded > 0
           ? `under-buy rate uncomputable — all ${underBuyExcluded} actuated night(s) disclosed a cushion shortfall, so none is evidence about sizing (§5.1).`

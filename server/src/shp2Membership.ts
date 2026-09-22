@@ -162,7 +162,7 @@ export function shp2ReadbackFresh(
  * times a day, and the value is usually still right. So `use` is false only while the
  * caller can still wait (`allowStale` false); once it cannot, the stale reading is used
  * and `fresh:false` + `ageMs` travel with the plan. Never fail-closed on staleness alone
- * (owner, 2026-09-15: that would have killed a real 32.55 kWh night on correct data).
+ * (2026-09-15: that would have killed a real 32.55 kWh night on correct data).
  *
  * `ageMs` is how old the CONTENT is: from `contentStaleSinceMs` (when the payload stopped
  * moving) when the cloud is replaying, else from the last quota.

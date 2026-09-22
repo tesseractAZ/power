@@ -232,8 +232,8 @@ export function idleExclusionEdges(logged: Set<string>, excluded: readonly HealQ
 /**
  * v1.166.0 — the telemetry-blind remediation's own minimum gap between rebuilds.
  * Deliberately shorter than the rate-floor healer's 60-min cooldown: the blind alarm
- * is the critical path, and the owner's rule is "alarm only after remediation has
- * failed" — so a fresh blind episode gets a remedy unless one ran under this long
+ * is the critical path, and the policy is to alarm only after remediation has
+ * failed — so a fresh blind episode gets a remedy unless one ran under this long
  * ago, which means the last remedy did not HOLD (and that is a failure: alarm now).
  * The rolling-24h budget is SHARED with the rate-floor healer, so the two paths
  * together can never exceed `maxPerDay` rebuilds.
