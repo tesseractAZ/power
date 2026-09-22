@@ -177,6 +177,9 @@ export interface DeviceSnapshot {
   lastUpdated: number;
   lastError?: string;
   projection?: Projection;
+  /** v1.176.0 — server clock: when telemetry CONTENT last landed (REST quota or MQTT delta).
+   *  Not bumped by a /status online flip or a failed poll. */
+  lastTelemetryAtMs?: number;
   /** v1.175.0 — mirrored from the server (snapshot.ts): ms epoch since which a panel that is
    *  still answering has been replaying an identical payload (a cloud shadow), else null.
    *  Its figures are frozen while this is set; the server already zeroes its grid reading. */

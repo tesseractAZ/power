@@ -46,6 +46,17 @@ export interface DeviceSnapshot {
    */
   lastQuotaAtMs?: number;
   /**
+   * v1.176.0 — when TELEMETRY CONTENT last landed for this device: a REST quota
+   * (setDeviceQuota) or an MQTT delta (mergeDeviceQuota), and nothing else. The
+   * dashboard's header age and LIVE pill read it. Neither existing clock fits:
+   * `lastUpdated` is also bumped by a /status online-flag flip (deliberately — see
+   * setDeviceOnline), so a device going OFFLINE read "0 s old"; `lastQuotaAtMs` is
+   * REST-only, so a Core streaming MQTT every second read up to a poll-interval old.
+   * A REST 200 that replays a stale body still bumps this — the SHP2's cloud shadow
+   * is flagged separately by `contentStaleSinceMs`, which the dashboard also reads.
+   */
+  lastTelemetryAtMs?: number;
+  /**
    * v1.143.0 — when this device's `online` flag last CHANGED, and which input
    * observed it. Two independent paths write `online` — the cloud
    * `/device/list` poll and the MQTT `/status` topic — and they can disagree by
@@ -304,6 +315,7 @@ export class SnapshotStore extends EventEmitter {
         // state in which a frozen projection matters most.
         lastErrorAt: existing?.lastErrorAt,
         lastQuotaAtMs: existing?.lastQuotaAtMs,
+        lastTelemetryAtMs: existing?.lastTelemetryAtMs, // v1.176.0 — same trap, same carry
         contentStaleSinceMs: existing?.contentStaleSinceMs,
         onlineChangedAtMs: existing?.onlineChangedAtMs,
         onlineChangedVia: existing?.onlineChangedVia,
@@ -469,6 +481,7 @@ export class SnapshotStore extends EventEmitter {
     const nowQ = this.now();
     cur.lastUpdated = nowQ;
     cur.lastQuotaAtMs = nowQ;
+    cur.lastTelemetryAtMs = nowQ;
     // v1.142.0 — did the CONTENT move, or did the cloud replay a shadow?
     if (this.contentFreshnessPath == null) this.loadContentFreshness(nowQ);
     const witness = shp2ContentWitness(cur.projection);
@@ -592,6 +605,7 @@ export class SnapshotStore extends EventEmitter {
     this.trackMpptErrOnsets(sn, cur.projection);
     cur.raw = INCLUDE_RAW ? merged : undefined;
     cur.lastUpdated = Date.now();
+    cur.lastTelemetryAtMs = cur.lastUpdated; // v1.176.0 — content landed
     cur.lastError = undefined;
     this.lastSourceBySn.set(sn, source);
     this.snap.generatedAt = Date.now();

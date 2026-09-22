@@ -17,6 +17,8 @@ interface IntegrationResult {
 interface SummaryResp {
   sinceMs: number;
   untilMs: number;
+  /** v1.176.0 — the local midnight that ends this payload's day (server clock). */
+  dayEndMs?: number;
   fleet: {
     pvWh: number;
     acOutWh: number;
@@ -37,7 +39,11 @@ export const TodaySummary = memo(function TodaySummary() {
   // missed its polls, and dropped outright once the day it covers is over.
   const polled = usePolled<SummaryResp>('api/summary/today', TODAY_POLL_MS);
   const now = useNow(15_000);
-  const data = polled.data && !dayWindowExpired(polled.data.sinceMs, now) ? polled.data : null;
+  // The day boundary is a server-clock time; the payload's own `untilMs` (server "now" when
+  // it was computed) plus the time elapsed here since it arrived estimates the server's now
+  // without trusting the browser's clock.
+  const serverNow = polled.data && polled.lastOkAt != null ? polled.data.untilMs + (now - polled.lastOkAt) : now;
+  const data = polled.data && !dayWindowExpired(polled.data, serverNow) ? polled.data : null;
   const stale = polled.data != null && pollStale(polled.lastOkAt, now, TODAY_POLL_MS);
 
   const coverage = data?.fleet.coverage ?? 0;
@@ -46,7 +52,7 @@ export const TodaySummary = memo(function TodaySummary() {
       <div className="card-title flex items-center justify-between">
         <span>Today</span>
         {stale ? (
-          <StaleNote lastOkAt={polled.lastOkAt} />
+          <StaleNote lastOkAt={polled.lastOkAt} nowMs={now} />
         ) : (
           <span className="text-[10px] text-muted normal-case tracking-normal">
             {data ? `${(coverage * 100).toFixed(0)}% measured · since ${new Date(data.sinceMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '—'}

@@ -65,12 +65,14 @@ export default function App() {
 }
 
 function NormalApp() {
-  const { snapshot, conn } = useSnapshot();
+  const { snapshot, conn, clockOffsetMs } = useSnapshot();
   // v1.176.0 — the header's age and the LIVE pill read the per-device telemetry clocks
   // (freshness.ts), and a ticking clock keeps them moving when nothing new arrives.
   const now = useNow(5_000);
+  // Every reading time is server-stamped, so "now" is taken on the server's clock too.
+  const serverNow = now - clockOffsetMs;
   const oldestReading = snapshot ? oldestHomeTelemetryAt(snapshot.devices) : null;
-  const link = linkState(conn, snapshot?.devices ?? null, now);
+  const link = linkState(conn, snapshot?.devices ?? null, serverNow);
   const [tab, setTab] = useState<
     'dashboard' | 'solar' | 'thermal' | 'strategy' | 'alerts'
   >('dashboard');
@@ -175,9 +177,10 @@ function NormalApp() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Power</h1>
           <div className="text-xs text-muted">
-            {snapshot ? `${devices.length} devices · ${devices.filter((d) => d.online).length} online` : 'Loading…'} ·
-            <span title="Age of the oldest reading from the panel and its Cores. A failed poll does not refresh it.">
-              updated {fmtRel(oldestReading, now)}
+            {snapshot ? `${devices.length} devices · ${devices.filter((d) => d.online).length} online` : 'Loading…'}
+            {' · '}
+            <span title="Age of the oldest reading from the panel and its online Cores. Neither a failed poll nor a replayed cloud copy of the panel refreshes it.">
+              updated {fmtRel(oldestReading, serverNow)}
             </span>
           </div>
         </div>

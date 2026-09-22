@@ -29,31 +29,56 @@ export const POLL_STALE_MISSES = 2.5;
 export type ConnState = 'connecting' | 'open' | 'closed';
 export type LinkState = 'live' | 'stale' | 'linking' | 'offline';
 
-/** The devices whose readings the dashboard's headline figures are made of: every SHP2 and
- *  the Cores wired to one. Bench spares and accessory devices (a doorbell, a car charger,
- *  a generator) are excluded — their silence is expected and must not paint the whole
- *  dashboard stale. On a cold boot with no SHP2 observed, every online DPU stands in, the
- *  same fallback the Energy flow card uses. */
+/** Is this device a Smart Home Panel? By PROJECTION when there is one, else by IDENTITY
+ *  (productName). After a restart while the panel is dark, it is listed by /device/list but
+ *  has no projection yet — a projection-keyed test dropped it from the home set, and the
+ *  pill then read LIVE on the Cores alone while the panel had no reading at all (the same
+ *  restart door the server closed in v1.140.0 by keying panels on identity). */
+export function isPanel(d: DeviceSnapshot): boolean {
+  if (d.projection?.kind === 'shp2') return true;
+  if (d.projection) return false;
+  return /smart\s*home\s*panel/i.test(d.productName ?? '');
+}
+
+/** The devices whose readings the dashboard's headline figures are made of: every panel
+ *  (by identity), and the Cores wired to one that are ONLINE. An offline Core is out of
+ *  every headline figure (the Energy flow card counts online Cores only) and has its own
+ *  alarm; letting its frozen clock drive the pill turned it amber for the whole outage —
+ *  days, for a Core that has been dark that long — and trained the operator to ignore it.
+ *  Bench spares and accessory devices are excluded. On a cold boot with no connection table
+ *  observed, every online DPU stands in, the same fallback the Energy flow card uses. */
 export function homeDevices(devices: Record<string, DeviceSnapshot>): DeviceSnapshot[] {
   const list = Object.values(devices);
   const connected = shp2ConnectedDpuSns(devices);
   return list.filter((d) => {
-    const kind = d.projection?.kind;
-    if (kind === 'shp2') return true;
-    if (kind !== 'dpu') return false;
-    return connected.size > 0 ? isShp2Connected(d.sn, connected) : d.online;
+    if (isPanel(d)) return true;
+    if (d.projection?.kind !== 'dpu' || !d.online) return false;
+    return connected.size > 0 ? isShp2Connected(d.sn, connected) : true;
   });
 }
 
-/** The OLDEST home reading — the device whose data on screen is most out of date. Null when
- *  no home device has ever reported (lastUpdated 0). A device that never reported counts as
- *  infinitely old: it is on screen as blanks, not as fresh data. */
+/** When this device's figures on screen were last TRUE, on the server clock.
+ *  - `lastTelemetryAtMs`: bumped only when telemetry content lands (not by a /status flip,
+ *    not by a failed poll). `lastUpdated` stands in for a server that predates it.
+ *  - A panel replaying a cloud shadow (`contentStaleSinceMs`) keeps answering every poll
+ *    with 200 OK and a replayed body, so its telemetry clock stays fresh while its figures
+ *    are frozen — the server raises "Panel data is stale" for exactly this (21 episodes
+ *    2026-09-13..21, 2-18 min each). Its figures are as old as the shadow.
+ *  0 = never reported. */
+export function readingAt(d: DeviceSnapshot): number {
+  const t = d.lastTelemetryAtMs ?? d.lastUpdated ?? 0;
+  if (!(t > 0)) return 0;
+  return d.contentStaleSinceMs != null ? Math.min(t, d.contentStaleSinceMs) : t;
+}
+
+/** The OLDEST home reading — the device whose figures on screen are most out of date. Null
+ *  when a home device has never reported: it is on screen as blanks, not as fresh data. */
 export function oldestHomeTelemetryAt(devices: Record<string, DeviceSnapshot>): number | null {
   const home = homeDevices(devices);
   if (home.length === 0) return null;
   let oldest = Infinity;
   for (const d of home) {
-    const t = d.lastUpdated ?? 0;
+    const t = readingAt(d);
     if (!(t > 0)) return null;
     if (t < oldest) oldest = t;
   }
@@ -61,13 +86,15 @@ export function oldestHomeTelemetryAt(devices: Record<string, DeviceSnapshot>): 
 }
 
 /** What the header pill says. An open socket is necessary for LIVE, not sufficient: the
- *  oldest home reading must also be inside TELEMETRY_STALE_MS. */
-export function linkState(conn: ConnState, devices: Record<string, DeviceSnapshot> | null, nowMs: number): LinkState {
+ *  oldest home reading must also be inside TELEMETRY_STALE_MS. `serverNowMs` is "now" on the
+ *  SERVER's clock (browser now − the offset useSnapshot measures), because every reading
+ *  time it is compared against is server-stamped. */
+export function linkState(conn: ConnState, devices: Record<string, DeviceSnapshot> | null, serverNowMs: number): LinkState {
   if (conn === 'closed') return 'offline';
   if (conn === 'connecting') return 'linking';
   if (!devices) return 'linking';
   const oldest = oldestHomeTelemetryAt(devices);
-  if (oldest == null || nowMs - oldest > TELEMETRY_STALE_MS) return 'stale';
+  if (oldest == null || serverNowMs - oldest > TELEMETRY_STALE_MS) return 'stale';
   return 'live';
 }
 
@@ -77,9 +104,28 @@ export function pollStale(lastOkAt: number | null, nowMs: number, intervalMs: nu
   return lastOkAt == null || nowMs - lastOkAt > POLL_STALE_MISSES * intervalMs;
 }
 
-/** A day-window payload (Today's `sinceMs` is the local midnight that opened its day) whose
- *  day is over. Rendering it would present yesterday's totals under "since 12:00 AM" — the
- *  label reads identically for either midnight. */
-export function dayWindowExpired(sinceMs: number | null | undefined, nowMs: number): boolean {
-  return sinceMs != null && nowMs - sinceMs >= 24 * 3_600_000;
+/** A day-window payload whose day is over. Rendering it would present yesterday's totals
+ *  under "since 12:00 AM" — the label reads identically for either midnight. The server
+ *  sends `dayEndMs` (the local midnight that ends the payload's day), which is exact across
+ *  daylight-saving changes; a fixed 24 h blanked a fall-back day's last hour (25 h day).
+ *  Without it (an older server) the payload's `sinceMs` + 24 h is the estimate. Both are
+ *  server-clock times, so `serverNowMs` must be too. */
+export function dayWindowExpired(
+  win: { sinceMs?: number | null; dayEndMs?: number | null } | null | undefined,
+  serverNowMs: number,
+): boolean {
+  if (!win) return false;
+  if (win.dayEndMs != null) return serverNowMs >= win.dayEndMs;
+  return win.sinceMs != null && serverNowMs - win.sinceMs >= 24 * 3_600_000;
+}
+
+/** The "as of" text for a stale polled card. A time of day alone reads as TODAY — "as of
+ *  3:00 PM" at 4 PM looked an hour old when it could be 25 — so anything not from today
+ *  names its day. Both arguments are the browser's clock (the fetch completed here). */
+export function staleAsOf(lastOkAt: number | null, nowMs: number): string | null {
+  if (lastOkAt == null) return null;
+  const d = new Date(lastOkAt);
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (d.toDateString() === new Date(nowMs).toDateString()) return time;
+  return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
 }

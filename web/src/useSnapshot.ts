@@ -5,9 +5,16 @@ import { wsUrl } from './api';
 import type { ConnState } from './freshness';
 export type { ConnState };
 
-export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState } {
+/**
+ * `clockOffsetMs` (v1.176.0) = browser clock − server clock, measured on each frame from
+ * the server's send-time stamp. Data ages are computed on the server's clock (browser now −
+ * offset) because every telemetry timestamp is server-stamped; comparing them with the
+ * browser's own clock made the header and LIVE pill wrong by the skew between the two.
+ */
+export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState; clockOffsetMs: number } {
   const [snapshot, setSnapshot] = useState<FleetSnapshot | null>(null);
   const [conn, setConn] = useState<ConnState>('connecting');
+  const [clockOffsetMs, setClockOffsetMs] = useState(0);
   const retryRef = useRef(0);
 
   useEffect(() => {
@@ -29,7 +36,12 @@ export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState
       ws.onmessage = (ev) => {
         try {
           const m = JSON.parse(ev.data);
-          if (m.type === 'snapshot') setSnapshot(m.data);
+          if (m.type === 'snapshot') {
+            setSnapshot(m.data);
+            if (typeof m.serverNowMs === 'number' && Number.isFinite(m.serverNowMs)) {
+              setClockOffsetMs(Date.now() - m.serverNowMs);
+            }
+          }
         } catch {
           /* ignore */
         }
@@ -51,5 +63,5 @@ export function useSnapshot(): { snapshot: FleetSnapshot | null; conn: ConnState
     };
   }, []);
 
-  return { snapshot, conn };
+  return { snapshot, conn, clockOffsetMs };
 }

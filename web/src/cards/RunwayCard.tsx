@@ -76,7 +76,7 @@ export const RunwayCard = memo(function RunwayCard() {
       <div className="card-title flex items-center justify-between">
         <span>Off-grid runway</span>
         {stale ? (
-          <StaleNote lastOkAt={lastOkAt} />
+          <StaleNote lastOkAt={lastOkAt} nowMs={now} />
         ) : (
           <span className="text-xs text-muted normal-case tracking-normal">
             last-hour load + next-{runway.horizonHours}h forecast PV

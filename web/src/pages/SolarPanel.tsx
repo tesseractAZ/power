@@ -110,9 +110,15 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
     const load = async () => {
       try {
         // Summary for today's kWh
+        // v1.176.0 — a non-OK response is a failure, not a summary. `json()` on a 500 parsed
+        // the error body into `summary`, and the render's `summary.fleet.pvWh` threw — taking
+        // the whole dashboard to the error screen (the only boundary is the top-level one),
+        // e.g. when this tab polled during an add-on restart's cold analytics worker.
         const sumR = await fetch(apiUrl('api/summary/today'));
-        const sumJ = (await sumR.json()) as SummaryResp;
-        if (!cancelled) setSummary(sumJ);
+        if (sumR.ok) {
+          const sumJ = (await sumR.json()) as SummaryResp;
+          if (!cancelled && sumJ?.fleet) setSummary(sumJ);
+        }
 
         // 24h PV per DPU
         const dayStart = new Date();
@@ -124,8 +130,8 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
         await Promise.all(
           onlineDpus.map(async (d) => {
             const r = await fetch(apiUrl(`api/history?sn=${d.sn}&metric=pv_total&since=${since}&bucket=60`));
-            const j = (await r.json()) as { points: Point[] };
-            next[d.sn] = j.points;
+            const j = r.ok ? ((await r.json()) as { points?: Point[] }) : null;
+            next[d.sn] = Array.isArray(j?.points) ? j!.points! : [];
           }),
         );
         // Compute fleet peak by summing across DPUs at each timestamp (best effort)
