@@ -52,7 +52,7 @@ defaults merged in — they were defaults, never stored user data.
   window. Now deadline-compensated.
 - **Readiness publishes `underBuyMeasurable` / `strikesMeasurable`** and says "UNREACHABLE, not
   merely thin". `cushion_shortfall` is pinned true by arithmetic, so `activeStrikes: 0` meant
-  *cannot count*, not *no faults*. **No criterion was loosened** — that was an owner decision,
+  *cannot count*, not *no faults*. **No criterion was loosened** — that was a policy decision,
   taken later in v1.125.0.
 
 ## v1.122.0 — the announce path
@@ -263,8 +263,8 @@ announcement beats six duplicates of a storm warning.
 while the audio played each time. The Music Assistant path treated each
 timeout as a miss, so it retried: 2 in-call attempts x 3 deferred rounds =
 ~6 announcements of the same alert into the house, during the storm the
-alert was warning about. The log read "failed" throughout; the operator
-reported "lots of announcements playing".
+alert was warning about. The log read "failed" throughout, while the
+repeated announcements were plainly audible in the house.
 
 v1.48.3 had already learned this on the SIP path — a duplicate arriving
 mid-call made the cordless RING instead of auto-answering — and fixed it by
@@ -402,10 +402,10 @@ an unusually small buy. It now prints start→end and duration.
 
 Harness `mutate-reserve-posture.mjs` extended to 8/8.
 
-## v1.114.0 — the owner can set his own reserve floor
+## v1.114.0 — the owner reserve floor can be set from the panel
 
-The panel could raise `backupReserveSoc` for night-charge arbitrage, but the
-owner had no way to set his OWN floor through it — a buffer change meant the
+The panel could raise `backupReserveSoc` for night-charge arbitrage, but it
+offered no way to set the owner reserve floor itself — a buffer change meant the
 vendor app and a settings-drift line after the fact.
 
 `POST /api/reserve-floor?pct=N` (write-auth, rate-limited) uses the same
@@ -420,7 +420,7 @@ the OLD floor hours later. Retry after the revert, or cancel the night first.
 
 ### Raising the floor would have made the alarm quieter
 
-The owner raised the SHP2 reserve floor from 10% to 20% for more outage
+The SHP2 reserve floor was raised from 10% to 20% for more outage
 buffer. The below-reserve alert decided "genuine floor breach" (warning +
 one [Medium] push per episode) versus "night-charge is filling the pool"
 (silent info) with `reserve <= 15` — a proxy that holds only while the
@@ -788,7 +788,7 @@ indistinguishable from planner under-sizing, and it anchors its counterfactual o
 a trough that is really the reverted reserve setpoint. Redefining it means
 choosing which question it answers ("did the planner size right?" vs "did the
 night end safe?") and bumping `CURRENT_ALGO_VERSION`, which invalidates every
-existing row and resets the evidence clock to zero. That is an owner decision,
+existing row and resets the evidence clock to zero. That is a policy decision,
 not a bug fix.
 
 Tests 2065 pass.
@@ -883,7 +883,7 @@ remained, and it was the worse one. When the defective warranty pack moved onto 
 bench chassis, every alert it raised was demoted to `annunciate:false` — so the
 one battery in the fleet that is actually broken became the only one the operator
 was never paged about, while its healthy 29-cycle replacement, on a panel-wired
-chassis, pushed [High] cell-imbalance to his phone. Alarm loudness had become
+chassis, pushed [High] cell-imbalance to the phone. Alarm loudness had become
 inversely correlated with physical severity.
 
 A new standing alert, `pack-defective-<sn>-<pack>`, fires on an unambiguous
@@ -1076,7 +1076,7 @@ and flatness must be EARNED — thin evidence always gets the conservative dwell
 The detector's stated purpose is catching a device "barely reporting while still
 appearing FRESH". It had no offline gate, so when a Core was physically
 unplugged it told the operator to "check the EcoFlow cloud session / power" for
-hardware he had just disconnected himself. It still samples offline devices (so
+hardware that had just been disconnected by hand. It still samples offline devices (so
 baselines stay honest) but no longer surfaces a collapse for them — the
 offline/stale alert owns that case.
 
@@ -1904,7 +1904,7 @@ Closes #279, #280, #281, #284, #285, #286.
 ## v1.71.0 — correcting v1.70.0: the cause was per-unit "Charge Now", not the panel
 
 v1.70.0 attributed the on-peak grid draw to `smartBackupMode: 2` on the Smart Home
-Panel. **That was wrong.** The operator identified the real cause: **"Charge Now",
+Panel. **That was wrong.** The real cause is **"Charge Now",
 a PER-DPU setting** in the EcoFlow app, enabled on individual Delta Pro Ultra units.
 
 The evidence is unambiguous. When Charge Now was switched off:
@@ -1961,8 +1961,8 @@ the house load had fallen to 2.6 kW and the import had *risen* to 16.6 kW:
 ```
 
 At the confirmed on-peak rate of 44.4 c/kWh that is **$7.19/hour**, for energy the
-overnight window buys at 17c or less. Nothing in the system noticed. The operator did,
-by reading the numbers.
+overnight window buys at 17c or less. Nothing in the system noticed; it was caught
+by reading the numbers by hand.
 
 **Cause.** `smartBackupMode: 2` on the SHP2 — outage-readiness top-up — after the panel
 reset. Neither knob this add-on can write was involved: `backupReserveSoc` was already
@@ -2004,7 +2004,7 @@ onset (which leaves every unit test green while the alert can never fire in prod
 
 ## v1.69.0 — the alarm system went blind for 22 minutes and reported healthy
 
-Eric powered the house down to reset the SHP2. The Pi has no battery-backed RTC, so it
+The house was powered down to reset the SHP2. The Pi has no battery-backed RTC, so it
 booted with a stale clock, and DNS was still coming up (`EAI_AGAIN` at 16:20) so
 systemd-timesyncd could not sync. The clock sat **170 seconds behind**.
 
@@ -2024,7 +2024,7 @@ battery. Meanwhile:
 ```
 
 Nothing alerted. It resolved only when NTP eventually caught up, and surfaced only
-because the operator asked for a log review.
+in a manual log review.
 
 ### Signing no longer trusts the local clock
 
@@ -4048,8 +4048,8 @@ trajectory holds `reserveFloor + outageCushion` from window-close through the
 next recharge.
 
 **Accuracy & safety posture (binding):**
-- **Under-buy is a SAFETY miss, not a cost miss** — the outage cushion is the
-  owner's explicit resilience requirement. Sizing uses **worst-case inputs**:
+- **Under-buy is a SAFETY miss, not a cost miss** — the outage cushion is an
+  explicit resilience requirement. Sizing uses **worst-case inputs**:
   P10 (low) PV and P90 (high) load. The over-buy *ceiling* uses P90 (high) PV —
   the deliberate asymmetry so we never under-buy the floor yet never over-buy
   into next-morning clipping.
@@ -4748,7 +4748,7 @@ factors, and heuristic scores drop slightly as the saturated ceNorm contribution
 A genuinely degrading pack remains covered by SoH fade, cell-imbalance, internal-R, and the
 absolute thermal engines.
 
-**Boundary-point counter fetch (operator-directed perf fix).** The CE estimator's full-window
+**Boundary-point counter fetch (targeted perf fix).** The CE estimator's full-window
 self-validation initially materialized the raw 30-day counter window (~28k rows per pack,
 ~150 ms of Pi event-loop stall per pack per degradation pass) even though the pure function
 reads only the first/last point of the window and of the 7-day tail. A new
@@ -4773,7 +4773,7 @@ worktree mutation testing), all confirmed findings fixed before ship:**
 - *Hydration recency* — duplicate alertIds are the norm in the per-rise file, and a plain
   Map.set left keys at FIRST-appearance position, so boot trim would have evicted the hottest
   recurring alerts first; hydration now delete-before-sets (recency = last appearance).
-- *Boundary-fetch perf* (operator-directed, above) and the stale PERSISTENT_FAMILIES rationale
+- *Boundary-fetch perf* (above) and the stale PERSISTENT_FAMILIES rationale
   in alertOutcomes were confirmed by the review as already fixed/documented in this branch.
 - *Mutation testing 6/10 killed initially* — the four survivors all have killing tests now: the
   sanity gate proven load-bearing ALONE (a fixture where consistency passes but the long-window
@@ -5375,7 +5375,7 @@ including a 07-10 event where all four home devices went dark within 15 minutes.
 - **Critical bypass at the dispatch gate** — a critical alert can never be suppressed by a family
   latch, regardless of what severity tripped it.
 
-F1 (quiet-hours critical break-through + mobile push channel) is deliberately deferred per operator
+F1 (quiet-hours critical break-through + mobile push channel) is deliberately deferred as a policy
 decision.
 
 ## v1.7.2 — AppArmor #3, the safe way: WRITE-immutability on code/binary/lib dirs (no read-denial risk)
@@ -5464,7 +5464,7 @@ New optional `HOST_POWER_ENTITY` config (point it at `binary_sensor.rpi_power_st
 alarm engine ingests that sensor through the same warm HA-state cache the grid-presence feature uses
 and raises a `warning` alarm (`host-power-undervoltage`) whenever the host reports under-voltage — an
 early warning to fix a marginal supply or a sagging power circuit while the alarm is still up. This
-directly hardens the operator's standing #1 concern (the Pi's power circuit). Dormant by default; an
+directly hardens the top standing concern (the Pi's power circuit). Dormant by default; an
 unset or stale reading is treated as unknown and never manufactures an alarm.
 
 New `hostPower.ts` module (mirrors `gridState.ts`) + `hostPower.test.ts` pinning the on/off/unknown
@@ -5888,7 +5888,7 @@ Captured live: `Core 3 HV solar input reports error code 457 while producing 55 
 
 ## 0.98.0 — 2026-07-09
 
-**Grid-backstop re-escalation guard revived (re-audit #1), operator-chosen floor-scoped design.** `tsc` clean; suite **1179** (rewritten gridState safety fixtures + 3 new cases). The change is inert on the current live state (grid-tied, pool idle) and only affects the declared-grid-at-the-reserve-floor case.
+**Grid-backstop re-escalation guard revived (re-audit #1), with a floor-scoped design.** `tsc` clean; suite **1179** (rewritten gridState safety fixtures + 3 new cases). The change is inert on the current live state (grid-tied, pool idle) and only affects the declared-grid-at-the-reserve-floor case.
 
 **[Fixed] (#1, critical — alarm) The re-escalation guard that distrusts a merely-declared grid was permanently dead; it is now live and floor-scoped.** `gridState.resolveGridBackstop` derived `poolDischarging` from `chargeWattPower < -POOL_DISCHARGE_WATTS`, but `chargeWattPower` is the non-negative configured AC charge-rate LIMIT (~7.2 kW even while idle) and never goes negative — so the guard never fired, and a declared-but-not-carrying grid (a stale `GRID_PRESENCE_ENTITY` / `GRID_AVAILABLE` toggle) could downgrade a real off-grid emergency at the reserve floor. It now reads the **live per-pack net** (`aggregateFleetFlow(devices).fleetBatteryNet > POOL_DISCHARGE_WATTS`, POSITIVE = discharging — the same authoritative signal behind the `fleet_battery_net_watts` sensor and the TUI header) and its effect is **floor-scoped**: it only distrusts a declared/gridSta grid **at/near the reserve floor**, where a present grid must have transferred and the pool must stop draining (true for both grid-priority and self-consumption SHP2 modes). Away from the floor a discharging pool is normal battery cycling and no longer withholds the backstop — so a self-consumption home does not nuisance-escalate every evening. The grid-presence entity flipping off remains the immediate primary defence. This matches the module header's own documented intent (the code had been applying the guard everywhere).
 
@@ -6010,11 +6010,11 @@ Server-only; no config/endpoint change. `tsc` clean; full suite **1123** green.
 
 ## 0.88.0 — 2026-07-06
 
-From an aggressive whole-system log sweep (every add-on + Core + Supervisor + host, 30-agent workflow) driven by real telemetry — and an operator correction that the SHP2 **does** pull from grid at night (floor-managed to ~10% to prevent aging).
+From an aggressive whole-system log sweep (every add-on + Core + Supervisor + host, 30-agent workflow) driven by real telemetry — and a correction that the SHP2 **does** pull from grid at night (floor-managed to ~10% to prevent aging).
 
 **[Fixed] Grid-backstop safety hardening — a cloud-offline SHP2's frozen grid reading can no longer mute a real outage.** `computeHomeGridWatts` (the SHP2 `wattInfo.gridWatt` path, the authoritative whole-home grid-import measurement) read the projection value with **no online/freshness gate**. When the SHP2 goes cloud-offline its last `gridWatt` freezes in the projection — and the SHP2 legitimately pulls **7–8 kW** to carry the home at the reserve floor (confirmed live: 318/322 non-zero samples, peak 8053 W, +46 kWh overnight, pool recovered 11%→45%). An unguarded frozen-high value would keep `importLive`/`backstopping` true and **silently mute a real at-floor outage that began during the offline window**. Now mirrors the `d.online` scoping the DPU `ac_in` path (`computeGridImportWatts`) already applies: an **offline** SHP2 contributes **zero** measured grid flow and never fabricates grid presence from a stale sample. A genuinely online SHP2 with bursty MQTT self-corrects on its next message, so this only suppresses the frozen-offline case — it **strictly hardens** the alarm, never weakens it. New unit test drives the end-to-end path (offline SHP2 at the floor → not backstopping → outage stays audible).
 
-**Sweep results:** the Power add-on log was clean (100/100 INFO, zero errors/crashes/MQTT-drops). Other add-ons/host healthy — only benign/infra items (Scrypted RTSP-teardown EPIPE, a Piper restart, a Switchboard AMI reconnect loop, hourly host DHCP→timesyncd, a Supervisor update-check timeout). **Deferred (operator decision):** the rare between-burst false "backup-pool projected" critical at the floor — the fix trades detection latency for suppression and the adversarial verifier confirmed the naive latch would mute a real outage, so it is surfaced as a tradeoff rather than shipped. Server-only; no config/data/endpoint change. `tsc` clean; suite **1114** green.
+**Sweep results:** the Power add-on log was clean (100/100 INFO, zero errors/crashes/MQTT-drops). Other add-ons/host healthy — only benign/infra items (Scrypted RTSP-teardown EPIPE, a Piper restart, a Switchboard AMI reconnect loop, hourly host DHCP→timesyncd, a Supervisor update-check timeout). **Deferred (policy decision):** the rare between-burst false "backup-pool projected" critical at the floor — the fix trades detection latency for suppression and the adversarial verifier confirmed the naive latch would mute a real outage, so it is surfaced as a tradeoff rather than shipped. Server-only; no config/data/endpoint change. `tsc` clean; suite **1114** green.
 
 ## 0.87.0 — 2026-07-06
 
@@ -6024,7 +6024,7 @@ Two grid-aware alarm fixes from an exhaustive, adversarially-verified live log r
 
 **[Fixed] Boot phantom-critical grace — a false RED no longer annunciates ~30s after a restart.** As telemetry populates over the first ticks after a restart, a transient per-device critical can appear on a single 10s tick then clear; because a RED is (correctly) never treated as a restart-continuation, that phantom would speak a false "critical" aloud on every restart (observed live: "condition transition → red (new crit)" ~30s post-boot with `critical_alerts=0` immediately after). New pure, tested `holdBootRed()`: within the post-boot warm-up window a fresh RED is **held one tick to confirm** — a genuine standing critical re-presents next tick and fires (≤10s late), a one-tick phantom clears and is never spoken. **Safety-preserved:** a real critical is only ever *delayed by at most one tick* and never suppressed; outside the warm-up window a RED fires immediately, unchanged.
 
-Server-only; no config, data, or endpoint changes. `tsc` clean; full server suite **1113** green (+8: posture grid-aware + boot-RED grace). The operator's separate question — the audible "Backup pool at 20 percent" *medium* caution firing on a grid-tied home — is **working as intended** (only the ≤10% high/critical tiers grid-downgrade; 20/15% mediums are informational and stay audible by design) and was left unchanged at the operator's request.
+Server-only; no config, data, or endpoint changes. `tsc` clean; full server suite **1113** green (+8: posture grid-aware + boot-RED grace). A separate question — the audible "Backup pool at 20 percent" *medium* caution firing on a grid-tied home — is **working as intended** (only the ≤10% high/critical tiers grid-downgrade; 20/15% mediums are informational and stay audible by design) and was left unchanged as a policy decision.
 
 ## 0.86.1 — 2026-07-06
 
@@ -6166,7 +6166,7 @@ This is **display-only** — no alarm, forecast, or HA `total_increasing` counte
 
 ## 0.76.0 — 2026-06-30
 
-**[Fixed/Tested] Log-review hardening bundle** — from a 10-lens multi-agent review of ~52h of add-on + HA host/core/supervisor logs + live state (28 confirmed findings), adversarially reviewed (verdict: alarm-safe; the one must-fix it found was fixed + tested). The operator chose to keep overnight quiet-hours silence, so the focus is durability + correctness of the existing channels, not changing alarm policy.
+**[Fixed/Tested] Log-review hardening bundle** — from a 10-lens multi-agent review of ~52h of add-on + HA host/core/supervisor logs + live state (28 confirmed findings), adversarially reviewed (verdict: alarm-safe; the one must-fix it found was fixed + tested). Overnight quiet-hours silence is kept by policy, so the focus is durability + correctness of the existing channels, not changing alarm policy.
 
 **Alarm-path fixes (adversarially reviewed):**
 - **A quiet-hours-queued alert no longer silently drops across a restart.** It used to be marked notified+persisted at *queue* time, but the in-memory digest queue doesn't survive a restart — so the host's daily clock-jump reboot could permanently swallow a held overnight alert. Now notified+persist is **deferred until the alert actually dispatches or the digest sends**, with an in-memory `queued` flag preventing re-queue churn; a restart re-evaluates and re-queues instead of dropping. An escalation of a held alert (warning→critical) is still detected (`notifiedSeverity` is recorded at queue time), so a genuine overnight critical still breaks through under `CRITICAL_BREAKS_QUIET_HOURS=true`.
@@ -6184,7 +6184,7 @@ This is **display-only** — no alarm, forecast, or HA `total_increasing` counte
 - **Unnamed devices read by product type.** A device whose EcoFlow cloud name is just its bare serial now falls back to its `productName` (new pure `resolveDeviceName`, applied *after* the local alias override) — so the WAVE 2 portable AC reads **"WAVE 2"** instead of "KT21XXX0XX000011" in its recurring offline alert.
 - **Forecast-basis caveat badge.** While home Cores are cloud-offline the day-ahead forecast runs on a degraded basis; the forecast card now shows a calm **"Forecast basis: N of M home Cores reporting"** badge when coverage is partial (display-only, via the existing tested coverage helper — no forecast number changed).
 
-**[Tests]** +11 (`batterySocAlarm` collapse + per-band-callback + an **end-to-end grid-drop re-escalation regression test** mirroring the review's harness; `resolveDeviceName`). Suite 943→954; server + web `tsc` clean. Audible annunciation remains **off** per operator decision — these changes affect the audible path's *content* only when it is enabled; the on-screen + HA-push alarm path is unaffected.
+**[Tests]** +11 (`batterySocAlarm` collapse + per-band-callback + an **end-to-end grid-drop re-escalation regression test** mirroring the review's harness; `resolveDeviceName`). Suite 943→954; server + web `tsc` clean. Audible annunciation remains **off** by policy decision — these changes affect the audible path's *content* only when it is enabled; the on-screen + HA-push alarm path is unaffected.
 
 ## 0.74.0 — 2026-06-26
 
@@ -6512,7 +6512,7 @@ No alert **severity, gating, annunciation, or alarm behavior changed** — wordi
 
 ## 0.44.0 — 2026-06-21
 
-**Deferred audit follow-ups + grid-import dashboard fix — Alerts provenance, energy-reporting correctness, Solar PV coverage, HA Energy grid wiring.** Picks up the tracked follow-ups from the v0.42.0/v0.43.0 audits, plus a live-diagnosed HA Energy Dashboard grid-import fix (operator report: Grid total = 0 kWh). Two of the prescribed energy fixes landed as specified; one ("lifetime charge==discharge: split by sign") was investigated and found to rest on an incorrect root-cause hypothesis — the honest finding is documented below rather than a fabricated change.
+**Deferred audit follow-ups + grid-import dashboard fix — Alerts provenance, energy-reporting correctness, Solar PV coverage, HA Energy grid wiring.** Picks up the tracked follow-ups from the v0.42.0/v0.43.0 audits, plus a live-diagnosed HA Energy Dashboard grid-import fix (symptom: Grid total = 0 kWh). Two of the prescribed energy fixes landed as specified; one ("lifetime charge==discharge: split by sign") was investigated and found to rest on an incorrect root-cause hypothesis — the honest finding is documented below rather than a fabricated change.
 
 ### Alerts page
 - **[MED] Reserve-band alerts now carry an explicit ISA priority instead of overloading `source`.** `socAlertSeverity` had been returning `source:'learned'` purely so the web `priorityOf` would map the Medium tier — but `source:'learned'` *also* routes an alert off the operational Alerts page onto Predictive (`App.tsx` `source !== 'learned'`) and mislabels it "learned" in the cleared-history log. Measured backup-pool reserve crossings (`backup-soc-NN`) are real threshold events and were being misrouted/mislabeled. Added an explicit `priority?: 'critical'|'high'|'medium'|'low'` field to the `Alert` interface (server + web); `socAlertSeverity` now returns `{severity, source:'threshold', priority}`; `priorityOf` reads `priority` first and falls back to the legacy severity+source heuristic. `source:'learned'` is once again reserved for genuine forecasts. Reserve bands now show on the Alerts page with correct provenance and still reach ISA Medium.
@@ -6780,7 +6780,7 @@ Fixes extremely quiet alert audio after the ecobee thermostats were re-paired fr
 
 - **The broadcast now pins each target's standing (device) volume from config before every announcement.** Root cause: re-provisioning the ecobees' AirPlay-2 receivers through HA (instead of Apple Home) reset their **standing volume to ~0.2 (20%)**. RAOP/AirPlay speakers — ecobees especially — handle Music Assistant's `announce_volume` set→play→restore unreliably and fall back to that standing volume, so alerts played at ~20% no matter what `announce_volume` said. `play_announcement` is now preceded by a `media_player.volume_set` to `announceVolume/100` on the targets (best-effort — a failure never blocks the alert; skipped when announce-volume is the `'standing'`/`'off'` escape hatch). This makes `BROADCAST_VOLUME` authoritative on these speakers.
 - **Consistency with the v0.15.8 "single source of truth" invariant:** this is *not* a competing volume source — the pre-announce `volume_set` carries the **same** `announceVolume` value that is sent as `announce_volume` (one value, two knobs), so there's no conflict. New `announceVolumeLevel()` helper + unit test pin the 0..100 → 0..1 mapping and the null escape-hatch.
-- Operator note: the live broadcast volume was raised 0.65 → **0.9** (your confirmed level); adjust anytime from the Alert Console slider.
+- Deployment note: the live broadcast volume was raised 0.65 → **0.9**; adjust anytime from the Alert Console slider.
 
 583/583 server tests pass (1 new). `tsc` clean. Pure broadcast-path change — no other behaviour affected.
 
@@ -7119,7 +7119,7 @@ Broadcast: advisory alarms are now **yellow** (not green), announce config is vi
 
 Broadcast: announcement plays at **`BROADCAST_VOLUME`** + a silence gap between repeats.
 
-Two operator-requested tweaks to the ecobee announcement:
+Two tweaks to the ecobee announcement:
 
 - **The announcement now sets the speakers to `BROADCAST_VOLUME` by default.** `BROADCAST_ANNOUNCE_VOLUME` now defaults to **empty**, which means "use `BROADCAST_VOLUME × 100`" — so with `BROADCAST_VOLUME: 1` the ecobees are set to 100% for the announcement. (Previously the default was `"off"`, which played at each speaker's standing volume.) The `"off"`/`"none"`/`"standing"` sentinel is still available for anyone who prefers to skip Music Assistant's volume set/restore. **If you previously had `BROADCAST_ANNOUNCE_VOLUME` set to `off`, clear it (or set it to `100`) to get the new behavior.**
 - **`BROADCAST_REPEAT_GAP_MS` (default 1500 ms)** inserts a silence gap *between* the repeated passes, so you hear the message conclude, a pause, then it repeat — instead of the two passes running together. Only applies when `BROADCAST_REPEAT > 1`; folded into the render cache key (`RENDER_VERSION` 3→4).
@@ -8420,8 +8420,8 @@ stale-snapshot race.
 ### 1. `analytics.ts` `computeDegradation` — peer baseline filter
 
 Per-pack fade analysis (Pass 1) still runs for every pack including
-spares — the operator still wants visibility into spare hardware's calendar
-fade. What changes: the fleet-median rate that defines the "peer
+spares — visibility into spare hardware's calendar fade is still
+required. What changes: the fleet-median rate that defines the "peer
 group" baseline (used to flag outliers via robust median + MAD
 modified z-score) now uses only SHP2-connected packs. Spare-core
 fade rates (often abnormal because they sit at storage SoC for
@@ -8823,8 +8823,8 @@ already open.
 
 ## 0.9.68 — 2026-05-27
 
-**Entity-duplication audit and dedup defenses.** the operator reported 61
-ecoflow entities in HA, ~half of them duplicates of the same metric.
+**Entity-duplication audit and dedup defenses.** HA showed 61
+ecoflow entities, ~half of them duplicates of the same metric.
 Investigated end-to-end across HA's registry + this codebase.
 
 ### Real root cause (not a code bug — a configuration overlap)
@@ -8982,7 +8982,7 @@ agents; one tag and one CI run keeps the release cadence sane.
 
 ### A. Hard "no Cloud TTS, ever" mode (the v0.9.65 work)
 
-For off-grid setups: the operator explicitly does not want TTS to ever hit
+For off-grid setups, an explicit requirement: TTS must never hit
 HA Cloud. Two complementary user controls now enforce that:
 
 **New option `BROADCAST_TTS_REQUIRE_LOCAL: bool` (default `false`).**
@@ -10278,7 +10278,7 @@ per process lifetime.
 
 ### Parallel track: HACS Lit-port PR1 — scaffolding
 
-User wants a multi-week Lit rewrite of the React PWA, distributed as
+Planned: a multi-week Lit rewrite of the React PWA, distributed as
 HACS cards. PR1 lays the foundation under `lovelace/`:
 
 - `package.json` + `tsconfig.json` + `rollup.config.mjs` (Lit 3 +
@@ -10416,7 +10416,7 @@ Same change applied to the workflow's logging strings so the
 ### Action needed (still one-time)
 
 1. CodeNotary account at https://www.codenotary.io with
-   **<your-email>** — done per the operator.
+   **<your-email>** — done.
 2. **GitHub repo secrets** at
    https://github.com/tesseractAZ/ecoflow-panel/settings/secrets/actions:
    - `CN_USER` = `<your-email>`
@@ -10592,7 +10592,7 @@ self-contained.
 work after MA's klaxon because MA-managed speakers stay bound to MA's
 session — `tts.speak` couldn't acquire them no matter how long we
 waited or whether we called `media_player.media_stop` first (MA just
-re-grabs them). The operator chose the right path: keep MA, route the TTS
+re-grabs them). The chosen path: keep MA, route the TTS
 through MA's own announcement service.
 
 ### The pipeline now
@@ -10727,13 +10727,10 @@ the existing default / b5 / starfleet blocks.
 OpusBridge: 30.83 kB JS (8.26 kB gzipped). Lazy-loaded — only ships
 when the user selects Opus. Default/B5 users pay zero cost.
 
-### Acknowledgement
+### Design brief
 
-> "In Project Genesis, look at all that has been done in every aspect
-> of the project, and imagine a completely new web GUI taking in the
-> totality of the project and what's relevant to the user."
-
-You bet.
+A completely new web GUI built from everything done across every aspect
+of the project, scoped to what is relevant to the user.
 
 ## 0.9.39 — 2026-05-26
 
@@ -10970,8 +10967,8 @@ fixed every screen that didn't pass.
 **Elevated permissions + Piper auto-setup.** v0.9.32 surfaced that
 Piper-add-on-running ≠ Piper-TTS-visible: the Wyoming Protocol
 integration also has to be added in HA Settings → Devices & Services
-to bridge the add-on to a `tts.piper` entity. The operator green-lit
-elevating permissions so we can do that step (and similar future
+to bridge the add-on to a `tts.piper` entity. Permissions are
+elevated so we can do that step (and similar future
 plumbing) automatically.
 
 ### Permission bump (requires user re-approval in HA)
@@ -11024,11 +11021,11 @@ bridging it.
 
 ### Tests
 
-159 pass (was 120). The operator added more in parallel.
+159 pass (was 120). More were added in parallel.
 
 ## 0.9.32 — 2026-05-25
 
-**TTS diagnostic + better entity match.** the operator installed Piper after
+**TTS diagnostic + better entity match.** Piper was installed after
 v0.9.31 but it didn't appear in `availableEngines` — only `tts.cloud_say`
 showed up. The likely cause is the Wyoming Protocol integration hadn't
 been added in HA, so no `tts.*` entity was published. We can't tell that
@@ -11069,8 +11066,8 @@ catch.
 ### Notes on installing more local TTS engines
 
 The add-on cannot install other HA add-ons programmatically — that
-requires `hassio_api: true` + admin role, which we don't have. The operator
-asked about other options; recommended in priority order for an
+requires `hassio_api: true` + admin role, which we don't have. Other
+options, recommended in priority order for an
 off-grid alert system:
 
 1. **Piper (Wyoming)** — already installed; if not yet visible, add
@@ -11177,8 +11174,8 @@ hear what the alert is instead of guessing from the klaxon tone.
 - `BROADCAST_TTS_SERVICE` still honored when set; empty → auto-pick.
 - **Rich message synthesis from Alert struct**: Severity prefix +
   category + Core/pack location + title + 1-sentence detail + ack tag.
-  Critical alerts get a 2-second repeat — empirical fix for "the
-  operator was mid-conversation when the klaxon hit and missed it."
+  Critical alerts get a 2-second repeat — empirical fix for an
+  alert missed because the listener was mid-conversation when the klaxon hit.
 - TTS-friendly normalization: `%` → " percent", `SoC` → "state of
   charge", `MPPT` → "M P P T", `HV` → "high voltage", etc.
 - `cache: true` on every TTS call — same message replays instantly.
@@ -11592,8 +11589,8 @@ the entire bridge when the user clicked SCIENCE.
 ## 0.9.23 — 2026-05-25
 
 **Music Assistant broadcast path.** Detailed log analysis of v0.9.22's
-first real broadcast revealed the cause of the inter-speaker delay
-the user reported: nearly all configured `media_player` entities are
+first real broadcast revealed the cause of the reported inter-speaker
+delay: nearly all configured `media_player` entities are
 **proxied through Music Assistant** (visible in the discover output
 — "Music Assistant Queue" source on family-room soundbar, garage,
 both thermostats, and HomePod). Music Assistant intercepts every
@@ -12830,7 +12827,7 @@ deferred follow-up list.
 
 - **README roadmap refresh.** Reflects everything shipped through
   v0.9.3, plus an explicit **Held until requested** section listing
-  the write-side controls you've deferred and a **Genuinely
+  the deferred write-side controls and a **Genuinely
   deferred (research-grade)** section explaining what's blocked on
   multi-week effort or missing data.
 
@@ -13117,7 +13114,7 @@ EVSE, Strategy, Predictive). All non-Dashboard pages converted to
 "Big push" release — full HA-native integration surface + predictive
 engine v2 (uncertainty-aware, multi-day, counterfactual, dispatch).
 13 features in one release. Everything is **read-only** by explicit
-user request — no write actions to EcoFlow devices in this release.
+requirement — no write actions to EcoFlow devices in this release.
 
 ### Features — HA integration
 
@@ -13267,7 +13264,7 @@ not a code spelunk.
   `setDeviceOnline` (in `snapshot.ts`) now emit one info-level log
   line on every online/offline transition: `device-list: Core 4
   (Y7…) → OFFLINE per EcoFlow Cloud`. First-sight inaugural state
-  is also logged. Diagnosed from the user's 10k-line log audit
+  is also logged. Diagnosed from a 10k-line log audit
   where zero such lines existed and the cause had to be inferred.
 - **Periodic fleet-status dump.** Every 10 min, one log line summarising
   every device's online state + MQTT msg-count + age since last data:

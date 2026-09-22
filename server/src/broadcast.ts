@@ -1732,6 +1732,8 @@ export function startBroadcastMonitor(
   let warmupRedSeen = false;
   /** v1.173.1 — when the current fresh boot-window yellow was first seen (holdBootYellow). */
   let warmupYellowSinceMs: number | null = null;
+  /** v1.173.2 — the held-yellow log line has been written for this episode. */
+  let warmupYellowLogged = false;
   const tick = async () => {
     if (stopped) return;
     cfg = loadBroadcastConfig();
@@ -1799,7 +1801,7 @@ export function startBroadcastMonitor(
     // (phantom cleared or genuine de-escalation), so a later red in the warm-up
     // window is re-confirmed across a tick rather than fast-tracked.
     if (level !== 'red') warmupRedSeen = false;
-    if (level !== 'yellow') warmupYellowSinceMs = null;
+    if (level !== 'yellow') { warmupYellowSinceMs = null; warmupYellowLogged = false; }
     // v0.58.0 — within the post-restart warm-up window, a condition that was
     // already active (and successfully broadcast) before the restart re-appears as
     // a "rise" once the analytics/learned alerts re-warm. Don't re-speak it aloud;
@@ -1826,7 +1828,11 @@ export function startBroadcastMonitor(
       warmupYellowSinceMs = Date.now();
     }
     if (holdBootYellow(level === 'yellow' && transitioned, Date.now() - bootMs, warmupYellowSinceMs, Date.now())) {
-      log(`broadcast: yellow held for boot confirmation (${Math.round(BOOT_YELLOW_CONFIRM_MS / 1000)} s) — startup transients clear on their own`);
+      // v1.173.2 — one line per held episode, not one per 10 s tick.
+      if (!warmupYellowLogged) {
+        warmupYellowLogged = true;
+        log(`broadcast: yellow held for boot confirmation (up to ${Math.round(BOOT_YELLOW_CONFIRM_MS / 1000)} s) — startup transients clear on their own`);
+      }
       return;
     }
     if (holdBootRed(level === 'red' && (transitioned || newCrit), Date.now() - bootMs, warmupRedSeen)) {
