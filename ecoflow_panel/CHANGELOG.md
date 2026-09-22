@@ -1,8 +1,21 @@
+## 1.173.2
+
+### Release notes in the spec register; one log line per held boot yellow
+
+- **Release notes no longer quote or attribute requests.** CHANGELOG.md, CHANGELOG-ARCHIVE.md
+  and the release paragraphs in DOCS.md carried quoted request text and "Owner (date):" style
+  labels. Each is rewritten as a plain statement of the problem, the measurement and the change;
+  every version, number, identifier and requirement is kept. Quotations of log lines, UI text and
+  announcement text are unchanged.
+- **The boot-yellow hold logs once per episode.** v1.173.1 wrote "yellow held for boot
+  confirmation" on every 10-second tick while a startup yellow waited out its confirmation window
+  (eight identical lines on the first restart). It now writes one line per held episode.
+
 ## 1.173.1
 
 ### The band calibrator uses the more accurate solar data, and a restart no longer speaks a yellow
 
-**Owner (2026-09-21):** *"switch to the more accurate data."* The probabilistic band calibrator
+The probabilistic band calibrator
 (skillFrac, bandSigmaCal, the night-charge basis gate, and `realizedDailyErrHalfFrac` — the
 multi-day widening that sizes the buy) now scores on the **realized** irradiance series, like every
 other consumer since v1.173.0. Its errors stop carrying a ~3-4-day-lead weather-forecast component
@@ -10,7 +23,7 @@ that is not the day-ahead band's own error. Expect the multi-day widening to nar
 2026-09 window), so weekend and Thursday carries buy somewhat less. Hours with no realized capture
 fall back to the first-write value.
 
-**Owner report (2026-09-21):** *"lots of announcements."* Every restart spoke a yellow ~20-60 s
+Reported 2026-09-21: every restart spoke a yellow ~20-60 s
 after boot — five that day. Startup transients do it: an off-panel Core's standing warnings are
 muted only once its off-panel streak rebuilds (it restarts at zero), and learned alerts re-warm.
 The restart-continuation gate only suppressed a yellow at or below the pre-restart level. Inside
@@ -18,14 +31,14 @@ the 10-minute warm-up window a fresh yellow must now persist **2 minutes** befor
 genuine standing warning is delayed by at most that. Red is untouched.
 
 `mutate-blind-remediation.mjs` 18/18 (two added); `mutate-realized-ghi.mjs` 25/25 (xv REPLACED —
-the owner took the decision it guarded; it now catches a silent revert); 2 new tests.
+the decision it guarded has now been taken; it now catches a silent revert); 2 new tests.
 
 ## 1.173.0
 
 ### The open list of 2026-09-21: cost mode is asked on high-pack nights, per-pack state follows the battery, the charge cap follows the connected Cores, and stale-data warnings stop speaking
 
-**Owner (2026-09-21):** *"Please address 1-8. For 12, the charge cap is variable based upon home
-load. Perhaps set at 16 kW for now or think of a better approach."*
+Scope: items 1–8 of the open list, plus item 12 — the charge cap varies with home load, so it
+needed either a fixed interim value (16 kW) or a better model (the AUTO cap below).
 
 - **Cost mode is asked on a high-pack night.** When the pack at window close already cleared
   floor + cushion, the planner returned HOLD before cost mode ran — so the Thursday rule (and every
@@ -50,7 +63,7 @@ load. Perhaps set at 16 kW for now or think of a better approach."*
   whose force-charge never started.
 - **The solar record is the TRUE realized series for training, soiling and skill reporting**
   (GHI stage 2). The probabilistic band calibrator stays on the first-write series — switching it
-  would cut weekend-carry widening ~40%, an owner decision.
+  would cut weekend-carry widening ~40%, a policy decision left open here.
 - **Smaller:** the poll-slow line names failures outside the standing 1006 accessory set; the
   escalation text matches the re-send behaviour; the ledger records which surplus basis and
   whether the long-gap rule set the cost ceiling; with a Core out, a predicted EV only displaces
@@ -59,8 +72,8 @@ load. Perhaps set at 16 kW for now or think of a better approach."*
   grid-side cap from the connected Cores × 5.5 kW into the pack (≈ 5.9 kW each at the grid,
   ≈ 17.8 kW for three); the home load comes off separately through the grid-input envelope
   (17 kW). The fixed 7.2 kW under-stated the ~15 kW the pack actually takes, so every plan
-  announced a lower target than the night reached. A Core out lowers it on its own; > 0 is an
-  owner override. The planner and the force-charge start now use one model.
+  announced a lower target than the night reached. A Core out lowers it on its own; > 0 is a
+  manual override. The planner and the force-charge start now use one model.
 - **The "Telemetry stale" warning no longer speaks** — it spoke a yellow ~20 s after every
   restart (a device reads stale until its first fresh reading) and at stale episodes. Push and
   card kept; the telemetry-blind CRITICAL stays the audible, remediation-first path (v1.172.1
@@ -73,14 +86,14 @@ Harnesses: new `mutate-pack-identity.mjs` (5/5); `mutate-realized-ghi.mjs` exten
 
 ### The message-rate collapse warning no longer speaks
 
-**Owner report (2026-09-21 18:13):** *"an audible alarm just fired but I don't see it in HA
-cards."* A cloud stale-shadow episode (the Smart Home Panel 2's message rate fell to 0) raised the
+Reported 2026-09-21 18:13: an audible alarm fired with no matching HA card. A cloud stale-shadow
+episode (the Smart Home Panel 2's message rate fell to 0) raised the
 `msg-rate-floor` warning at its ONSET, and the broadcast spoke it as a yellow — about four minutes
 before the telemetry-blind alarm starts the MQTT rebuild that has repaired every such episode in
 ~2 minutes. There was no HA card because warning pushes settle for five minutes, and the condition
 was usually gone by then.
 
-That broke the owner's standing rule (2026-09-17): a stale-data alarm sounds only after the
+That broke the standing policy (2026-09-17): a stale-data alarm sounds only after the
 immediate remediation has failed. The rate-collapse warning is now excluded from the spoken
 condition, exactly like the audible-unreachable self-alert. It keeps its push and its card. The
 telemetry-blind CRITICAL remains the audible path for a panel that stops reporting, and it still
@@ -92,8 +105,8 @@ remediates first and sounds only if that fails.
 
 ### A removed pack no longer lingers as a ghost
 
-**Owner report (2026-09-21):** *"one of the batteries has been physically removed but all 25 are
-still showing active and reporting."* The defective Core 4 pack 1 was pulled for warranty on
+Reported 2026-09-21: with one battery physically removed, all 25 packs still showed as active and
+reporting. The defective Core 4 pack 1 was pulled for warranty on
 2026-09-20 around 12:10. The Core renumbered the four remaining packs as slots 1–4 and reported
 **4 packs** — but the Fleet pack matrix kept showing 25, with Core 4 "pack 5" at a frozen 55% /
 84 °F. Slot 5 still held the last readings of the pack that now reports as slot 4 (**the same pack
@@ -155,13 +168,13 @@ nothing — it now names the pending arm and when it will write.
 2026-09-20 at 09:06 the vendor answered code 0 with no payload for all five Cores at once. The
 empty answer was cached as their raw quota, so within one 20 s alert tick every pack alert
 evaluated against `packs: []` and RESOLVED — including the warranty pack's "Pack confirmed
-defective", which is exempt from every mute. The owner was pushed a false resolve and re-paged
+defective", which is exempt from every mute. The operator was pushed a false resolve and re-paged
 100 s later. Now: the REST client rejects a code-0 reply with no payload as its own named error
 (it used to surface as a TypeError naming a BMS field, reading like five device faults), and the
 snapshot store refuses to replace a good quota with an empty one.
 
 **A failed push was lost outright.** The dispatcher retries on the next tick only while the alert
-is still active, so a short-lived alert whose one attempt failed reached the owner on no channel
+is still active, so a short-lived alert whose one attempt failed reached the operator on no channel
 at all — 2026-09-19 15:00, "[High] Telemetry stale", lost to an HA timeout. A failed push is now
 also held for the morning digest; a later successful dispatch clears the hold, so it is never
 reported twice.
@@ -191,7 +204,7 @@ past the checkpoint tolerance, is otherwise invisible in every report the scan p
 
 ### The 80%+ coast is retired — force-charge stops at the target, whatever the target
 
-**Owner (2026-09-18):** agreed to both recommendations after the first 90% night.
+Both recommendations from the first 90% night (2026-09-18) are adopted.
 
 - **Stop at the target, at every target.** v1.168.0 left Charge Now on past an 80%+ target on the
   premise that the panel would then hold the pack there with the house on grid. Measured on
@@ -207,8 +220,8 @@ past the checkpoint tolerance, is otherwise invisible in every report the scan p
   it never binds; with one out for a pack swap, the start comes earlier instead of the night
   ending short.
 
-Four coast mutants are **replaced**, not repointed — the owner retired the property they
-protected; three repointed; three new (`mutate-force-charge.mjs`, 66/66).
+Four coast mutants are **replaced**, not repointed — the property they protected was
+retired; three repointed; three new (`mutate-force-charge.mjs`, 66/66).
 
 Known, safe-side: with a Core out *and* an EV predicted, the EV allowance is counted in full
 although the per-Core bound already absorbs part of it, so the start comes early. Not yet
@@ -219,8 +232,8 @@ parks one below, the window-end OFF ends it.
 
 ### Force-charge times its start from the live charge rate — what the house leaves under the grid cap
 
-**Owner (2026-09-18):** *"the max rate is actually higher and variable based upon home usage during
-the charge period."* Confirmed from the panel's own readings:
+The maximum charge rate is higher than the fixed planning figure, and it varies with home usage
+during the charge period. Confirmed from the panel's own readings:
 
 | 2026-09-18 | grid | house | grid − house | into the pack |
 |---|---|---|---|---|
@@ -263,7 +276,7 @@ over-stated and the night end short.
 **0 W** and the house ran from the pack, 90% → 86% by 05:00, with Charge Now still on. The panel
 stops importing at its limit; it does **not** keep the house on grid. The announcement, the 21:30
 line, the option help and the module notes no longer say it does. Behaviour is unchanged — whether
-to switch off at the target for 80%+ again is the owner's call.
+to switch off at the target for 80%+ again is left as a policy decision.
 
 11 new mutants (`mutate-force-charge.mjs`, 63/63; xv repointed); 9 new tests.
 
@@ -271,9 +284,9 @@ to switch off at the target for 80%+ again is the owner's call.
 
 ### Thursdays fill to 90%, every night plans for the median sun, and a coast on grid at 80%+
 
-**Owner (2026-09-17):** *"Since the charge window is so short tomorrow night, why not charge to 100
-percent on Thursdays and coast on grid power until end of super off-peak overnight window"* — then,
-after the measurement below, *"proceed with the change tonight."*
+Question (2026-09-17, a Thursday): with the next night's charge window so short, should Thursdays
+charge to 100% and coast on grid power until the super off-peak overnight window ends? After the
+measurement below, the change went live the same night.
 
 An 8-week replay (house ~114 kWh/day against ~55 kWh/day of solar) answered it:
 
@@ -292,9 +305,9 @@ An 8-week replay (house ~114 kWh/day against ~55 kWh/day of solar) answered it:
 - **Coast on grid at 80%+.** A target of 80% or more is one the panel's own force-charge ceiling
   can **hold**: with Charge Now still on at that ceiling, the pack sits there and the house runs on
   grid. So for those targets force-charge no longer switches off at the target; it stays on until
-  the window closes, and the pack gives none of it back before the cheap rate ends. The owner
-  confirmed the evidence: 07-23 and 07-28, the only nights the pack held above 50% on grid, were
-  his manual Charge Now. Below 80% the software stop still ends it at the target. This also
+  the window closes, and the pack gives none of it back before the cheap rate ends. The evidence:
+  07-23 and 07-28, the only nights the pack held above 50% on grid, were both manual Charge Now
+  sessions. Below 80% the software stop still ends it at the target. This also
   retires a rounding miss (an 85.3% target synced an 85 ceiling that a whole-number SoC reading
   never reached).
 - **A wall-clock deadline on the switch-off.** Every earlier escalation needed a live readback or
@@ -326,10 +339,10 @@ started still reads as an external settings change.
 
 ### Force-charge runs to the night's target — just in time — then stops
 
-**Owner design (2026-09-17):** *"Since the value doesn't allow a setting in between, why not have
-the app run force-charge until the desired percentage is reached, then revert to relevant
-settings. So if needed charge amount equates to 64 percent, app would engage force-charge long
-enough to hit the desired percentage, then disengage."*
+Design (2026-09-17): the panel offers no setting between the 50% reserve and its 80% force-charge
+minimum, so the add-on runs force-charge until the pack reaches the night's target, then disengages
+and reverts to the prior settings. A night that needs 64% gets exactly enough force-charge time to
+reach 64%.
 
 1.165.0 refused every night whose target sat under the panel's 80% force-charge minimum —
 which is every sunny night. 2026-09-17's target was 64.3%, so it stayed reserve-only.
@@ -368,15 +381,15 @@ does not answer the question. One attended daylight test settles it: Charge Now 
 open the main breaker, confirm backed-up loads stay up and the pack discharges.
 
 Two v1.165.0 mutants that pinned the retired "under 80% ⇒ reserve-only" rule are **replaced**, not
-repointed — the property they protected was withdrawn by the owner. Five new mutants
+repointed — the property they protected was withdrawn. Five new mutants
 (`mutate-force-charge.mjs`, 29/29); 6 new tests.
 
 ## 1.166.0
 
 ### The stale-data alarm remediates first, and sounds only if that fails
 
-**Owner decision (2026-09-17):** *"Sound the stale data alarm only after the retry has been
-initiated and failed … I want it to alarm, however only after immediate remediation has failed."*
+Policy (2026-09-17): the stale-data alarm still sounds, but only after the retry has been initiated
+and the immediate remediation has failed.
 This settles the question left open in 1.154.0 about the telemetry-blind alarm speaking at 4–5 min.
 
 **The incident that decided it** — 2026-09-17, during the on-peak window:
@@ -408,7 +421,7 @@ as before.
 - **The cost, stated plainly:** the hold does not look at the cause. A genuine blind condition a
   rebuild cannot fix (internet down, clock-skew auth failure, panel offline) now alarms **up to 5
   minutes later** than before — about 10 min after the last good poll instead of about 5. That is
-  inside the owner's rule, and it also debounces a blip that clears within the window.
+  inside the policy above, and it also debounces a blip that clears within the window.
 - **"All clear" is never spoken while blind.** The pre-merge review found the hold's
   `annunciate=false` made the v1.17.0 all-clear speech gate stop seeing the blind alert, so a
   warning clearing during the hold could have announced *"All clear. All stations report normal."*
@@ -498,11 +511,11 @@ advisory-only, and that charge power capped a night near 60% (2026-09-16 ran at 
   obvious "turn this off" mid-night left force-charge ON with nothing to stop it. A separate
   safety tick now outlives that switch; it is inert unless a force-charge of ours is in flight,
   and it can only switch OFF.
-- **ON could fire on an unverified ceiling**, filling to the panel's live 100% — past the owner's
+- **ON could fire on an unverified ceiling**, filling to the panel's live 100% — past the configured
   90 and the solar headroom. ON now waits until the panel **reads** the night's ceiling (one
   retry, else reserve-only), and the panel's own ceiling is **restored** afterwards — otherwise a
   later storm-prep Charge Now would silently stop at 90. An unrestored original is carried into
-  the next night, so the restore always returns the owner's value.
+  the next night, so the restore always returns the operator's own setting.
 - **Islanded was read as connected.** Grid-connected is `gridSta === 1` **only**; the first cut
   switched off on `=== 0` and would have missed `2` — the outage case itself.
 
@@ -518,7 +531,8 @@ Now ON for one slot, open the main breaker, confirm backed-up loads stay up and 
 
 ### The write ceiling is 50 again — and this time the device said so
 
-v1.161.0 raised `RESERVE_WRITE_MAX_PCT` from 50 to 90 on the owner's instruction. The old bound
+v1.161.0 raised `RESERVE_WRITE_MAX_PCT` from 50 to 90 so the configured 90% target could be
+written. The old bound
 called itself *the device's documented `[10, 50]` range* in four places and **cited no document**,
 so the honest thing was to ask the hardware. The night of **2026-09-16** answered:
 
@@ -539,7 +553,7 @@ adopted 50 as the target, kept 90 as `requestedPct`, and stamped the apply verif
 retries**. Without it the night would have burned both retries, ended on `applyFailed`, pushed
 *"write NEVER TOOK EFFECT — tonight's buy is forfeited"* and corrected the ledger to
 `actuated:0` — while the panel held 50 and charged. It stays: it still guards the general case
-of an owner moving the reserve while a write is in flight.
+of an operator moving the reserve while a write is in flight.
 
 Asking for more than the panel accepts also cost two false notifications, both fixed by this
 release because the ask never exceeds 50 again:
@@ -699,7 +713,7 @@ Also fixed: `/api/reserve-floor` rejected an out-of-range `pct` with a message t
 
 ### The night-charge write ceiling is 90%, raised from 50%
 
-**Owner instruction (2026-09-16).** `ARB_COST_MAX_SOC_PCT` has been set to **90** in the live
+`ARB_COST_MAX_SOC_PCT` has been set to **90** in the live
 options all along, and `ARB_OBJECTIVE` is `cost` — but the actuator's write envelope was capped at
 50, which made every value the option's own `int(50,100)` schema allows above 50 **inert**. The
 engine asked for `setpointSocPct: 100` on the evening of 2026-09-16 and wrote 50, exactly as it had
@@ -841,7 +855,7 @@ ownership handoff: the entry retires with no resolve push while the successor is
 **The learned-baseline alert family stays suppressed for the life of a held collapse.**
 `analytics.ts`'s `starvedSnsForBaseline` reads the raw collapse set, so the 09-13 hold also
 blocked that family on three packs for 9 h 30 m. Filtering it to the quorum's active set would
-resume raises on a pack whose feed genuinely is low-cadence; that is an owner decision backed by
+resume raises on a pack whose feed genuinely is low-cadence; that is a policy decision to be backed by
 evidence, not a same-day change to an alert path. The consumer is now named in DOCS §2.16.
 
 ## 1.157.0
@@ -1491,7 +1505,7 @@ total of zero stays distinguishable from the summary not having fired.
   counts long **clears**, not long **active** time, so a genuinely standing
   chronic alert scores 0.0 and the longer it stands the further it is from
   firing. Repairing it makes an alarm-**suppression** rule fire more, which is
-  the unsafe direction — an owner decision, not a maintenance one.
+  the unsafe direction — a policy decision, not a maintenance one.
 
 `scripts/mutate-dark-core.mjs` — **9/9 mutants killed**, including one that
 deletes the sweep, one that averages per-core coverage instead of minimising it,
@@ -1836,7 +1850,7 @@ for exactly that.
 
 Also: `solar-model` emitted 109 lines with **54 exact consecutive repeats** and now
 emits on change; the standing-failure heartbeat went hourly → daily, since it
-reports a permanent, owner-settled product-class limit.
+reports a permanent, settled product-class limit.
 
 **Not done, deliberately:** Node's `ExperimentalWarning` for `node:sqlite` is 42
 non-JSON lines and could be silenced with `--no-warnings=ExperimentalWarning`.
@@ -2308,8 +2322,8 @@ v1.88.0 added a detector to announce the moment the four 1006-blocked accessorie
 v1.138.0 fixed it firing falsely. This removes it, because the premise it rested on is
 false.
 
-**API error 1006 is a product-class limit, not a grantable account permission.** The
-owner settled this on 2026-09-08: EcoFlow is not expected to extend API coverage to
+**API error 1006 is a product-class limit, not a grantable account permission.**
+Settled on 2026-09-08: EcoFlow is not expected to extend API coverage to
 these device classes. The vendor's own wording scopes the denial to the device — *"current
 **device** is not allowed to get device info"* — and the same credentials read every
 Delta Pro Ultra and the SHP2 without trouble.
@@ -2574,7 +2588,7 @@ result reports what actually landed — bytes written and elapsed time from the
 response body, not an assumption drawn from the HTTP status.
 
 No scheduling. A periodic export would write ~1.7 GB on a cadence nobody asked
-for, and the honest fix for "I was reading stale data" is to make the staleness
+for, and the honest fix for a stale read is to make the staleness
 visible, not to hide it behind a timer.
 
 ## v1.134.0 — the Energy page can finally show money
@@ -2736,7 +2750,7 @@ while dropping the disclosure — a true figure that hides the shortfall.
 
 Setting `ARB_OUTAGE_CUSHION_HOURS` to `0` did not disable the outage cushion. The
 guard folded `outageHours <= 0` into the same branch as *"no islanded-load
-measurement available"*, so an owner asking for no cushion silently received the
+measurement available"*, so an operator asking for no cushion silently received the
 **legacy flat band instead** — 15% of pool, 13.8 kWh on this plant. The option was
 accepted, `validate-addon-config` passed, and the decision did not take effect.
 
@@ -2768,7 +2782,7 @@ standard moved underneath it.
 A v1.125.x test had pinned the old behaviour deliberately (`assert.equal(at(0),
 LEGACY, 'zero hours falls back rather than yielding a zero cushion by accident')`).
 That reasoning was defensible when nobody had asked for a zero cushion; it is now
-superseded by an explicit owner decision, so the assertion was updated rather than
+superseded by an explicit configuration decision, so the assertion was updated rather than
 the fix weakened — and the guard it was really protecting, that a *malformed* value
 stays conservative, is now pinned separately against negative and non-finite hours.
 
@@ -2975,7 +2989,7 @@ state, because the panel holds the raised value as its floor and buys grid at on
 instead of discharging the pack the plan had just paid overnight rates to fill.
 A reverted night now verifies against the device, retries twice, then escalates once
 with a critical announce and a critical push naming the manual fix. A reading that is
-*neither* the restore target nor the raised target is treated as the owner moving
+*neither* the restore target nor the raised target is treated as the operator moving
 their own floor: the actuator falls through rather than overwriting it.
 
 **The message-rate collapse detector never sampled a silent device.** It iterated the
@@ -3052,7 +3066,7 @@ and accelerates auto-silencing. `alertOnset.ts` exists precisely to persist true
 `retireTrackedAlert` simply predates it.
 
 **A quiet-hours hold spanning a restart was silently dropped.** With
-`CRITICAL_BREAKS_QUIET_HOURS` off — the owner's accepted posture — the 06:00 digest is
+`CRITICAL_BREAKS_QUIET_HOURS` off — the accepted live posture — the 06:00 digest is
 the *only* delivery for anything firing between 23:00 and 05:00, criticals included.
 v1.86.0 persists the queue and its comment asserts rehydration is sufficient; v0.97.0's
 `pending` filter keys on an in-memory `queued` flag that rehydration does not restore,
