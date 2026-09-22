@@ -198,7 +198,8 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
         // (which clear within a cycle or two) never reach the user. The
         // baseline dpu-imbalance/vdiff families are untouched — this gate
         // lives only on the peer-outlier path.
-        const hitKey = `${metric.key}-${d.sn}-${pk.num}`;
+        // v1.173.0 — a different pack in the slot re-earns its 3 consecutive cycles.
+        const hitKey = `${metric.key}-${d.sn}-${pk.num}-${pk.packSn ?? ''}`;
         seenHits.add(hitKey);
         const gate = bumpPeerHit(hitKey);
         if (!gate.emit) continue;
@@ -221,6 +222,7 @@ export function computeLearnedAlerts(devices: Record<string, DeviceSnapshot>): A
           device: d.deviceName,
           coreNum: dpuNum(d.deviceName),
           packNum: pk.num,
+          ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}), // v1.173.0 — lets the residency check see a new pack under this id
           title: `${cap(metric.label)} — peer outlier`,
           detail: `${d.deviceName} Pack ${pk.num} ${metric.label} is ${metric.fmt(v)}, ${metric.fmt(absDev)} ${dir} the sibling-pack median of ${metric.fmt(med)} (peer z-score ${z.toFixed(1)}).`,
           facts: [
@@ -275,6 +277,8 @@ interface BaselineTarget {
   category: Alert['category'];
   coreNum: number | null;            // Core (DPU) number when applicable
   packNum: number | null;            // pack number when pack-scoped
+  /** v1.173.0 — the physical pack (pack targets only), stamped on the alert as sourcePackSn. */
+  packSn?: string | null;
   live: number | null;               // current value, in DISPLAY units
   floor: number;                     // min deviation worth flagging (display units)
   transform: (raw: number) => number; // history raw value → display units
@@ -300,8 +304,8 @@ function buildBaselineTargets(devices: Record<string, DeviceSnapshot>): Baseline
       mppt('mppt_hv_temp', 'HV MPPT temperature', p.mpptHvTemp);
       mppt('mppt_lv_temp', 'LV MPPT temperature', p.mpptLvTemp);
       for (const pk of p.packs) {
-        targets.push({ sn: d.sn, metric: `pack${pk.num}_temp`, device: d.deviceName, label: 'cell temperature', category: 'Thermal', coreNum: core, packNum: pk.num, live: pk.temp == null ? null : cToF(pk.temp), floor: 9, transform: cToF, fmt: tempFmt });
-        targets.push({ sn: d.sn, metric: `pack${pk.num}_board`, device: d.deviceName, label: 'BMS board temperature', category: 'Thermal', coreNum: core, packNum: pk.num, live: pk.hwBoardTemp == null ? null : cToF(pk.hwBoardTemp), floor: 11, transform: cToF, fmt: tempFmt });
+        targets.push({ sn: d.sn, metric: `pack${pk.num}_temp`, device: d.deviceName, label: 'cell temperature', category: 'Thermal', coreNum: core, packNum: pk.num, packSn: pk.packSn, live: pk.temp == null ? null : cToF(pk.temp), floor: 9, transform: cToF, fmt: tempFmt });
+        targets.push({ sn: d.sn, metric: `pack${pk.num}_board`, device: d.deviceName, label: 'BMS board temperature', category: 'Thermal', coreNum: core, packNum: pk.num, packSn: pk.packSn, live: pk.hwBoardTemp == null ? null : cToF(pk.hwBoardTemp), floor: 11, transform: cToF, fmt: tempFmt });
       }
     } else if (d.projection.kind === 'shp2') {
       const sp = d.projection as Shp2Projection;
@@ -502,6 +506,7 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
       device: t.device,
       coreNum: t.coreNum,
       packNum: t.packNum,
+      ...(t.packSn ? { sourcePackSn: t.packSn } : {}),
       title: `${cap(t.label)} unusual for the hour`,
       detail: `${subj} ${t.label} is ${t.fmt(t.live)} — ${t.fmt(dispAbsDev)} ${dir} its typical ${t.fmt(med)} for this hour (baseline: ${spanDays} days of history, ${bucket.length} samples; z ${z.toFixed(1)}).${regimeNote}`,
       facts: [
@@ -756,6 +761,8 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
                 device: d.deviceName,
                 coreNum: subject.coreNum,
                 packNum: subject.packNum,
+                // v1.173.0 — the physical pack, so the v1.102.0 residency check can see a renumber.
+                ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}),
                 title: 'State of health declining',
                 detail: `${tag} SoH ${curSoh.toFixed(1)}% declining ~${(-sohPerDay * 30.4).toFixed(2)}%/month — projected to reach 85% in about ${months} month(s). (R² ${fit.r2.toFixed(2)}, ${(span / 86_400_000).toFixed(0)} days of data.)`,
                 facts: [
@@ -789,6 +796,8 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
                 device: d.deviceName,
                 coreNum: subject.coreNum,
                 packNum: subject.packNum,
+                // v1.173.0 — the physical pack, so the v1.102.0 residency check can see a renumber.
+                ...(pk.packSn ? { sourcePackSn: pk.packSn } : {}),
                 title: 'Cell imbalance trending up',
                 detail: `${tag} cell spread ${pk.maxVolDiffMv} mV rising ~${mvPerWeek.toFixed(1)} mV/week — projected to reach 50 mV in about ${Math.round(weeksTo50)} week(s). (R² ${fit.r2.toFixed(2)}, ${(span / 86_400_000).toFixed(0)} days of data.)`,
                 facts: [
@@ -1581,9 +1590,15 @@ async function computeDayForecastUncached(
   // silently dropped from the fit. Seed from the recorder-persisted ghi_wm2 /
   // cloud_pct series first (whole window), then let the live cache OVERWRITE
   // recent hours (it's the freshest, with tempC + ensemble metadata).
+  // v1.173.0 (GHI stage 2) — the recorder layer is REALIZED-first: `ghi_wm2` is the
+  // first-write ~3-4-day-lead forecast, so training days 8-30 paired actual PV with a
+  // forecast (09-11: 0.67x the past-hour sum). Cache precedence is unchanged.
   mergeRecorderWeather(
     wxByHour, ghiByEpoch,
-    recorder.query('weather', 'ghi_wm2', since, now, 3600),
+    preferRealizedGhiRows(
+      recorder.query('weather', 'ghi_wm2', since, now, 3600),
+      queryRealizedGhi(recorder, since, now),
+    ),
     recorder.query('weather', 'cloud_pct', since, now, 3600),
   );
   if (weather)
@@ -3718,9 +3733,15 @@ export async function computeSoilingDecomposition(
   // baseline vs the recent-7-day window.
   const wxByHour = new Map<number, WeatherHour>();
   const ghiByEpoch = new Map<number, number>();
+  // v1.173.0 (GHI stage 2) — realized-first recorder layer (see preferRealizedGhiRows): a
+  // first-write day forecast too dark made pv/GHI read high and inflated the p90 clean baseline.
+  // cloud_pct stays first-write (no realized cloud capture exists).
   mergeRecorderWeather(
     wxByHour, ghiByEpoch,
-    recorder.query('weather', 'ghi_wm2', since, now, 3600),
+    preferRealizedGhiRows(
+      recorder.query('weather', 'ghi_wm2', since, now, 3600),
+      queryRealizedGhi(recorder, since, now),
+    ),
     recorder.query('weather', 'cloud_pct', since, now, 3600),
   );
   const weather = await getWeather();
@@ -4912,13 +4933,18 @@ export interface ForecastSkillReport {
   meanAbsErrorPct: number | null;
   biasFactor: number | null;       // sum(actual) / sum(predicted), or null if predicted ≈ 0
   windowDays: number;
+  /** v1.173.0 (GHI stage 2) — the irradiance basis this report was scored on. */
+  ghiBasis?: ForecastSkillGhiBasis;
 }
 
 // v1.20.0 (review fix) — keyed by windowDays: /api/confidence computes
 // forecastDayR2 over 30 days while the UI/probabilistic paths stay on the
 // 7-day default; a single slot would silently serve whichever window computed
 // first for up to the TTL.
-const forecastSkillCache = new Map<number, { ts: number; value: ForecastSkillReport }>();
+// v1.173.0 (GHI stage 2) — AND by basis (`${windowDays}:${ghiBasis}`): the 30-day window is
+// shared by /api/confidence ('realized') and the band calibrator ('first-write'); one slot per
+// window would hand the calibrator the realized score for up to the TTL — an unreviewed switch.
+const forecastSkillCache = new Map<string, { ts: number; value: ForecastSkillReport }>();
 
 /**
  * v0.13.1 — durable GHI lookup keyed by hour-epoch (ms/3.6e6).
@@ -4987,6 +5013,64 @@ export function dayHasGhiCoverage(ghiByEpoch: Map<number, number>, dayStartMs: n
   const startEpoch = Math.floor(dayStartMs / 3_600_000);
   for (let h = 0; h < 24; h++) if (ghiByEpoch.has(startEpoch + h)) return true;
   return false;
+}
+
+/** v1.173.0 (GHI stage 2) — which irradiance a forecast-skill hindcast scores against.
+ *  'first-write' — recorder `ghi_wm2` (the FIRST value written per hour = a ~3-4-day-lead
+ *    forecast) winning over the live cache: the pre-stage-2 basis, byte-identical, and the
+ *    DEFAULT. The PV band calibrator (skillFrac, bandSigmaCal, bandRealizedCoveragePct → the
+ *    night-charge basis gate, realizedDailyErrHalfFrac → the night-charge multi-day widening)
+ *    stays on it until an owner decision; an omitted argument can never move the gate.
+ *  'realized' — `ghi_wm2_realized` > live cache > `ghi_wm2`, for MODEL-skill display. */
+export type ForecastSkillGhiBasis = 'first-write' | 'realized';
+
+/** v1.173.0 (GHI stage 2) — the ONE reader of the realized series outside the recorder
+ *  (realizedGhiCapture.test.ts pins this function and the exact set of its callers). The
+ *  metric is a literal here because analytics.ts only type-imports recorder.ts: a value import
+ *  of the recorder's constant would pull the recorder module into the analytics worker. */
+export function queryRealizedGhi(recorder: Recorder, sinceMs: number, untilMs: number): Array<{ ts: number; value: number }> {
+  return recorder.query('weather', 'ghi_wm2_realized', sinceMs, untilMs, 3600);
+}
+
+/** v1.173.0 (GHI stage 2) — recorder GHI rows with every hour that has a realized reading
+ *  replaced by it. Hours without one (before capture began 2026-09-06 17:00 MST — past_days=7
+ *  cannot backfill —, capture gaps, future hours) keep their `ghi_wm2` row, so no consumer loses
+ *  coverage it had. A non-finite or negative realized value is ignored. One row per hour,
+ *  ascending by ts. Pure + exported. */
+export function preferRealizedGhiRows(
+  firstWriteRows: ReadonlyArray<{ ts: number; value: number }>,
+  realizedRows: ReadonlyArray<{ ts: number; value: number }>,
+): Array<{ ts: number; value: number }> {
+  const byHour = new Map<number, { ts: number; value: number }>();
+  for (const r of firstWriteRows) byHour.set(Math.floor(r.ts / 3_600_000), r);
+  for (const r of realizedRows) {
+    if (Number.isFinite(r.value) && r.value >= 0) byHour.set(Math.floor(r.ts / 3_600_000), r);
+  }
+  return [...byHour.values()].sort((a, b) => a.ts - b.ts);
+}
+
+/** v1.173.0 (GHI stage 2) — buildGhiByEpoch for the 'realized' basis. Precedence: realized row >
+ *  live cache > first-write row. The cache beats `ghi_wm2` because its past hours ARE the
+ *  provider's past-hour estimate — that is what covers the hours a restart leaves uncaptured
+ *  (ghiPersistTick first runs at boot+45 min, and captures only up to the cache's fetch time). A
+ *  realized row beats the cache because it is persisted and shared, while each thread's cache is
+ *  refetched on restart: a restart must not change what a scored day was scored against. A
+ *  realized 0 is an explicit dark hour and removes any value below it; zeros never count as
+ *  coverage (the same rule as buildGhiByEpoch). Pure + exported. */
+export function buildRealizedGhiByEpoch(
+  firstWriteRows: ReadonlyArray<{ ts: number; value: number }>,
+  realizedRows: ReadonlyArray<{ ts: number; value: number }>,
+  cacheHours: WeatherHour[],
+): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const row of firstWriteRows) if (row.value > 0) out.set(Math.floor(row.ts / 3_600_000), row.value);
+  for (const wh of cacheHours) if (wh.radiationWm2 > 0) out.set(Math.floor(wh.ts / 3_600_000), wh.radiationWm2);
+  for (const row of realizedRows) {
+    if (!Number.isFinite(row.value) || row.value < 0) continue;
+    const he = Math.floor(row.ts / 3_600_000);
+    if (row.value > 0) out.set(he, row.value); else out.delete(he);
+  }
+  return out;
 }
 
 /**
@@ -5261,13 +5345,15 @@ export async function computeForecastSkill(
   recorder: Recorder,
   forecast: DayForecast | null,
   windowDays = 7,
+  ghiBasis: ForecastSkillGhiBasis = 'first-write',
 ): Promise<ForecastSkillReport> {
-  const skillHit = forecastSkillCache.get(windowDays);
+  const cacheKey = `${windowDays}:${ghiBasis}`;
+  const skillHit = forecastSkillCache.get(cacheKey);
   if (skillHit && Date.now() - skillHit.ts < FORECAST_SKILL_TTL_MS) return skillHit.value;
   const now = Date.now();
   const emptyVal = (): ForecastSkillReport => ({
     generatedAt: now, days: [], meanAbsErrorKwh: null, meanAbsErrorPct: null,
-    biasFactor: null, windowDays,
+    biasFactor: null, windowDays, ghiBasis,
   });
   if (!forecast) return emptyVal();
   const weather = await getWeather();
@@ -5292,9 +5378,16 @@ export async function computeForecastSkill(
   // so days 4-7 had ZERO irradiance and hindcast to predKwh=0 → a phantom
   // errorPct=-100%. The recorder persists ghi_wm2 under SN "weather" over the
   // whole window, so days >3 ago now have real GHI to hindcast against.
+  // v1.173.0 (GHI stage 2) — that "recorder first, cache as fallback" order now holds only
+  // for the 'first-write' basis (see ForecastSkillGhiBasis): `ghi_wm2` is the first-write
+  // ~3-4-day-lead forecast, not realized irradiance. 'first-write' is byte-identical to
+  // before and is what the band calibrator scores on; only callers that opt in with
+  // 'realized' score against realized > cache > first-write (buildRealizedGhiByEpoch).
   const windowStart = todayStart - windowDays * 86_400_000;
   const ghiRows = recorder.query('weather', 'ghi_wm2', windowStart, now, 3600);
-  const ghiByEpoch = buildGhiByEpoch(ghiRows, weather.hours);
+  const ghiByEpoch = ghiBasis === 'realized'
+    ? buildRealizedGhiByEpoch(ghiRows, queryRealizedGhi(recorder, windowStart, now), weather.hours)
+    : buildGhiByEpoch(ghiRows, weather.hours);
 
   // v0.21.0 — fetch each DPU's full pv_total series ONCE for the whole hindcast
   // window, then slice each hour in memory (was one SQLite query per hour per
@@ -5382,8 +5475,9 @@ export async function computeForecastSkill(
     meanAbsErrorPct: mae != null && meanActual > 0.5 ? Math.round((mae / meanActual) * 1000) / 10 : null,
     biasFactor: totalPred > 0.5 ? round2(totalAct / totalPred) : null,
     windowDays,
+    ghiBasis,
   };
-  if (dpus.length > 0) forecastSkillCache.set(windowDays, { ts: now, value });
+  if (dpus.length > 0) forecastSkillCache.set(cacheKey, { ts: now, value });
   return value;
 }
 
@@ -7896,12 +7990,19 @@ export function parsePvBandSigmaCal(raw: string | undefined): number | null {
  *  ~3-4-day-lead forecast, and buildGhiByEpoch lets it beat the live cache. These
  *  errors therefore INCLUDE a multi-day weather-forecast component. It moves both the
  *  per-day errors and the band width (through skillFrac), so its net effect on the
- *  basis gate depends on the calibrator's regime rather than one direction. Realized
- *  irradiance is now captured separately and deliberately NOT read here: switching
- *  this basis moves the basis gate and the P10 band that sizes a supervised reserve
- *  write, so it is its own reviewed change. The forecast-archive series (recorder SN
- *  'forecast') remains the route to genuinely out-of-sample scoring. Pure + exported
- *  for tests. */
+ *  basis gate depends on the calibrator's regime rather than one direction.
+ *
+ *  v1.173.0 (GHI stage 2) — model/display consumers (solar-model training, soiling
+ *  decomposition, /api/forecast-skill, /api/confidence, the forecast-bias repair card,
+ *  the alarm-model backtest) now score on realized irradiance, but this calibrator still
+ *  receives the skill computed with ghiBasis = 'first-write' (reports.ts passes it
+ *  explicitly, and it is the default). Its errors keep a ~3-4-day-lead weather-forecast
+ *  component, which is ALSO what realizedDailyErrHalfFrac feeds into the night-charge
+ *  multi-day widening (nightChargeAdvisor.ts: widen = max(0, realizedDailyErrHalfFrac) ×
+ *  √(days ahead)); a realized-only basis would remove that component and under-widen
+ *  (~40% narrower on the 2026-09 window). Neither basis is lead-matched to a day-ahead
+ *  band, and choosing one (the forecast-archive series, recorder SN 'forecast', or a
+ *  day-ahead GHI capture) is an owner decision, not a refactor. Pure + exported for tests. */
 export function pvBandScoredErrs(
   days: ForecastSkillReport['days'],
   biasFactor: number | null = 1,

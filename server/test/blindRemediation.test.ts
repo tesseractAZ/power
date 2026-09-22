@@ -230,3 +230,13 @@ test('★★★ a message-rate collapse warning does not raise the spoken condit
   const other = { id: 'soc-low-X-1', severity: 'warning', title: 'x', category: 'Battery' } as any;
   assert.equal(conditionFromAlerts([rate, other]).level, 'yellow', 'every other warning still counts');
 });
+
+test('★★★ the "Telemetry stale" warning does not speak either — it pushes, the blind alarm speaks', () => {
+  // 2026-09-21 18:23:31: ~20 s after a restart a device read stale until its first fresh
+  // reading, and the yellow was SPOKEN — once per deploy.
+  const stale = { id: 'stale-SHP2', severity: 'warning', title: 'Telemetry stale', category: 'Connectivity' } as any;
+  assert.equal(conditionFromAlerts([stale]).level, 'green');
+  assert.equal(stale.annunciate, undefined, 'push and card still go');
+  const other = { id: 'soc-low-X-1', severity: 'warning', title: 'x', category: 'Battery' } as any;
+  assert.equal(conditionFromAlerts([stale, other]).level, 'yellow');
+});

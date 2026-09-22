@@ -14,7 +14,9 @@ export function resetOnScreenSocBandForTesting(): void {
  * >= VOL_DIFF_WARN_MV). Keyed `${sn}-${packNum}`. Same single-call-site module
  * singleton as the SoC band above; pruned each cycle so a pack that goes
  * missing (device offline, vdiff reading null) must re-earn the rise. */
-const heldVdiffWarnKeys = new Set<string>();
+// v1.173.0 — value = the packSn that EARNED the hold (null when unknown). A hold is a fact
+// about a pack, not a slot: a different pack in the slot must earn its own rise.
+const heldVdiffWarnKeys = new Map<string, string | null>();
 export function resetVdiffWarnHoldForTesting(): void {
   heldVdiffWarnKeys.clear();
 }
@@ -127,6 +129,14 @@ export interface PackLatchSignature {
  *  threshold: below this the "deviant" cell is just the most-deviant of a
  *  healthy set. */
 export const DEFECTIVE_PACK_MIN_DEVIANT_MV = 50;
+
+/** v1.173.0 — characters of a pack serial shown to the operator. MEASURED 2026-09-21: two
+ *  Core 4 packs share their last 4 characters; 5 is the minimum unique across the 24-pack
+ *  fleet; 6 keeps a margin. */
+export const PACK_SN_TAIL_CHARS = 6;
+export function packSnTail(packSn: string): string {
+  return `…${packSn.slice(-PACK_SN_TAIL_CHARS)}`;
+}
 
 export function isNeverMutedAlert(
   a: Pick<Alert, 'id' | 'severity' | 'category'>,
@@ -1009,10 +1019,14 @@ export function computeAlerts(
         // short-clearing — no longer fire at all.
         const vdiffKey = `${d.sn}-${pk.num}`;
         seenVdiffKeys.add(vdiffKey);
+        // v1.173.0 — drop a hold earned by a DIFFERENT pack (swap / 2026-09-20 renumber). A
+        // missing serial is never evidence of a change.
+        const heldBy = heldVdiffWarnKeys.get(vdiffKey);
+        if (heldBy != null && pk.packSn && heldBy !== pk.packSn) heldVdiffWarnKeys.delete(vdiffKey);
         const warnActive =
           pk.maxVolDiffMv >= VOL_DIFF_WARN_RISE_MV ||
           (heldVdiffWarnKeys.has(vdiffKey) && pk.maxVolDiffMv >= VOL_DIFF_WARN_MV);
-        if (warnActive) heldVdiffWarnKeys.add(vdiffKey);
+        if (warnActive) heldVdiffWarnKeys.set(vdiffKey, pk.packSn ?? heldVdiffWarnKeys.get(vdiffKey) ?? null);
         else heldVdiffWarnKeys.delete(vdiffKey);
         // v1.41.0 — cell forensics: the alert carries WHICH cell deviates and by
         // how much vs the pack median and sibling packs (facts), and the critical's
@@ -1080,6 +1094,9 @@ export function computeAlerts(
         }
       }
       const dConfirmed = pk.packSn ? getConfirmedRecord(pk.packSn) : null;
+      // v1.173.0 — the latched diagnosis names the PHYSICAL pack on the web card too. Appended
+      // LAST: the TTS reads only the first ~200 chars (shortenDetail), so it is never spoken.
+      const snNote = pk.packSn ? ` Pack serial ${packSnTail(pk.packSn)}.` : '';
       if (defectiveLegsLive) {
         const dl = dLatch; const dfx = dFx;
         out.push({
@@ -1093,7 +1110,7 @@ export function computeAlerts(
             + `exchanging ${dl.packAbsW} W while its siblings move ${dl.siblingMedianAbsW} W. Deviant cell #${dfx.deviantCell} `
             + `sits ${dfx.deltaMv > 0 ? '+' : ''}${dfx.deltaMv} mV from the pack median. The pack cannot recover on its own — `
             + `it is below the parallel-operation window, so it accepts no charge, so it cannot climb back into the window. `
-            + `Capture evidence with /api/warranty-export.`,
+            + `Capture evidence with /api/warranty-export.${snNote}`,
           annunciate: true,
         });
       } else if (dConfirmed) {
@@ -1114,7 +1131,7 @@ export function computeAlerts(
             + `${dConfirmed.packAbsW} W while its siblings moved ${dConfirmed.siblingMedianAbsW} W; deviant cell `
             + `#${dConfirmed.deviantCell} at ${dConfirmed.deltaMv > 0 ? '+' : ''}${dConfirmed.deltaMv} mV from the pack median. `
             + `The bank is currently quiescent, so the live signature cannot re-verify — the diagnosis is latched until the `
-            + `pack is removed or explicitly cleared (POST /api/defective-packs/clear). Capture evidence with /api/warranty-export.`,
+            + `pack is removed or explicitly cleared (POST /api/defective-packs/clear). Capture evidence with /api/warranty-export.${snNote}`,
           annunciate: true,
         });
       }
@@ -1182,7 +1199,7 @@ export function computeAlerts(
   // cycle (device offline / vdiff null) loses its hold: the episode must
   // re-earn the >= VOL_DIFF_WARN_RISE_MV rise when data returns, mirroring the
   // peer-hit prune philosophy (a lapsed condition re-earns its gate).
-  for (const k of heldVdiffWarnKeys) {
+  for (const k of [...heldVdiffWarnKeys.keys()]) {
     if (!seenVdiffKeys.has(k)) heldVdiffWarnKeys.delete(k);
   }
   // v1.108.0 — retire defective-pack confirmations whose pack has left the fleet.

@@ -369,6 +369,11 @@ export interface NightActuationState {
    *  apart from forceChargeOffEscalated: an earlier retry-budget escalation can land in
    *  quiet hours and be silent, and it must not disarm the deadline's own page. */
   forceChargeOffDeadlinePagedAtMs: number | null;
+  /** v1.173.0 — when a deadline page was last SILENCED by broadcast quiet hours; null = heard
+   *  (or never paged). Drives the audible re-page once quiet hours end. */
+  forceChargeOffDeadlineMutedAtMs: number | null;
+  /** v1.173.0 — audible re-pages spent on a muted deadline (bounded). */
+  forceChargeOffDeadlineRepages: number;
   /** Last foceChargeHight sync attempt (ON waits for it to read back). */
   forceChargeCeilingAttemptedAtMs: number | null;
   forceChargeCeilingSyncRetries: number;
@@ -398,6 +403,7 @@ export function emptyActuationState(): NightActuationState {
     forceChargeOnAtMs: null, forceChargeSlots: null, forceChargeOffAtMs: null,
     forceChargeOffReason: null, forceChargeOffLastAttemptMs: null, forceChargeOffRetries: 0,
     forceChargeOffVerifiedAtMs: null, forceChargeOffEscalated: false, forceChargeOffDeadlinePagedAtMs: null,
+    forceChargeOffDeadlineMutedAtMs: null, forceChargeOffDeadlineRepages: 0,
     forceChargeCeilingAttemptedAtMs: null, forceChargeCeilingPct: null,
     forceChargeCeilingSyncRetries: 0, forceChargeCeilingPriorPct: null,
     forceChargeCeilingRestoredAtMs: null, forceChargeCeilingRestoreAttempts: 0,
@@ -457,6 +463,8 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeOffVerifiedAtMs: num(o.forceChargeOffVerifiedAtMs),
     forceChargeOffEscalated: o.forceChargeOffEscalated === true,
     forceChargeOffDeadlinePagedAtMs: num(o.forceChargeOffDeadlinePagedAtMs),
+    forceChargeOffDeadlineMutedAtMs: num(o.forceChargeOffDeadlineMutedAtMs),
+    forceChargeOffDeadlineRepages: num(o.forceChargeOffDeadlineRepages) ?? 0,
     forceChargeCeilingAttemptedAtMs: num(o.forceChargeCeilingAttemptedAtMs),
     forceChargeCeilingPct: num(o.forceChargeCeilingPct),
     forceChargeCeilingSyncRetries: num(o.forceChargeCeilingSyncRetries) ?? 0,
