@@ -1,3 +1,22 @@
+## 1.172.1
+
+### The message-rate collapse warning no longer speaks
+
+**Owner report (2026-09-21 18:13):** *"an audible alarm just fired but I don't see it in HA
+cards."* A cloud stale-shadow episode (the Smart Home Panel 2's message rate fell to 0) raised the
+`msg-rate-floor` warning at its ONSET, and the broadcast spoke it as a yellow — about four minutes
+before the telemetry-blind alarm starts the MQTT rebuild that has repaired every such episode in
+~2 minutes. There was no HA card because warning pushes settle for five minutes, and the condition
+was usually gone by then.
+
+That broke the owner's standing rule (2026-09-17): a stale-data alarm sounds only after the
+immediate remediation has failed. The rate-collapse warning is now excluded from the spoken
+condition, exactly like the audible-unreachable self-alert. It keeps its push and its card. The
+telemetry-blind CRITICAL remains the audible path for a panel that stops reporting, and it still
+remediates first and sounds only if that fails.
+
+`mutate-blind-remediation.mjs` 15/15 (one mutant added); 1 new test.
+
 ## 1.172.0
 
 ### A removed pack no longer lingers as a ghost
