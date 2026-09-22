@@ -109,6 +109,7 @@ import {
   priorityAnnouncementPrefix,
 } from './alertPriority.js';
 import { isPriorityEnabled } from './alertSettings.js';
+import { getAlertOnset } from './alertOnset.js';
 // v1.64.0 — the identity-aware post-restart RED replay gate. It is a SEPARATE
 // module from isRestartContinuation on purpose: that one is level-only and must
 // stay that way (see its comment), this one is handed alert FINGERPRINTS.
@@ -477,6 +478,42 @@ export function isRestartContinuation(
  * BOOT_YELLOW_CONFIRM_MS before it is spoken; a genuine standing warning is delayed by at
  * most that. RED is untouched (holdBootRed, one tick). Pure + exported for tests.
  */
+/**
+ * v1.174.0 — CELL-IMBALANCE SPEAK HOLD. A cell-voltage spread warning is a slow, physical
+ * condition, and its threshold sits close enough to normal working spread that packs cross
+ * it for a few minutes and settle back: on 2026-09-21 a 6-minute excursion at 21:14 spoke a
+ * yellow over the house, and the overnight record is full of 2-30 minute episodes. Nothing
+ * about the first minute of an imbalance is actionable — the operator cannot act faster
+ * than the pack rebalances — so the audible now waits until the spread has STOOD.
+ *
+ * ★ Scope, deliberately narrow (a guard in this shared chokepoint feeds BOTH the condition
+ * level and the spoken message): warnings only, and only the two ids that describe the same
+ * cell-spread event. The CRITICAL (`vdiff-crit-`) is untouched and still speaks at once.
+ * The card and the push are untouched — this filter exists only on the audible path.
+ *
+ * Age comes from the restart-persistent onset sidecar, so a hold survives a restart rather
+ * than resetting the clock (this host restarts roughly daily, and a 10-minute hold that
+ * restarts with the process would never expire). An UNKNOWN onset holds: alertMonitor
+ * stamps every active id once per 20 s tick, so the unknown state is bounded to one tick —
+ * and an id whose onset was never recorded is, by that same sync, one that has only just
+ * appeared.
+ */
+export const IMBALANCE_SPEAK_HOLD_MS = 10 * 60_000;
+/** The id prefixes the hold applies to — one physical event, reported twice (the pack's own
+ *  spread, and the same pack as a peer outlier; both fired within 40 s at 21:14). */
+export const IMBALANCE_SPEAK_HOLD_PREFIXES = ['vdiff-warn-', 'peer-voldiff-'] as const;
+export function heldForImbalanceConfirm(
+  alert: Pick<Alert, 'id' | 'severity'>,
+  nowMs: number,
+  onsetMs: number | undefined,
+  holdMs = IMBALANCE_SPEAK_HOLD_MS,
+): boolean {
+  if (alert.severity !== 'warning') return false;
+  if (!IMBALANCE_SPEAK_HOLD_PREFIXES.some((prefix) => alert.id.startsWith(prefix))) return false;
+  if (onsetMs == null) return true;
+  return nowMs - onsetMs < holdMs;
+}
+
 export const BOOT_YELLOW_CONFIRM_MS = 2 * 60_000;
 export function holdBootYellow(
   wouldFireYellow: boolean,
@@ -1742,7 +1779,14 @@ export function startBroadcastMonitor(
     // raises the condition level (and thus never triggers a chime/broadcast).
     // The alerts stay in snapshot.alerts and remain visible in the UI — we only
     // gate the audible annunciation here.
-    const alerts = ((store.get().alerts ?? []) as Alert[]).filter((a) => isPriorityEnabled(priorityOf(a)));
+    // v1.174.0 — and drop a cell-imbalance warning that has not yet stood for its hold
+    // (heldForImbalanceConfirm). Dropping it HERE, from the array that feeds both
+    // conditionFromAlerts and messageFor, is what keeps a 6-minute excursion from both
+    // raising the condition and being voiced; it stays on the card and in the push.
+    const tickNow = Date.now();
+    const alerts = ((store.get().alerts ?? []) as Alert[])
+      .filter((a) => isPriorityEnabled(priorityOf(a)))
+      .filter((a) => !heldForImbalanceConfirm(a, tickNow, getAlertOnset(a.id)));
     const { level, crit, rung, criticalIds, criticalFingerprints } = conditionFromAlerts(alerts);
     // v1.64.0 — the fingerprint of the ONE critical this tick would actually SAY
     // OUT LOUD. buildAlertMessage voices pickPrimaryAlert's choice and nothing
