@@ -360,7 +360,11 @@ export function conditionFromAlerts(
       // stale-shadow episode (2026-09-21 18:13, the rebuild then restoring it in ~2 min). It
       // keeps its push and card (annunciate stays unset — annunciate:false would drop the
       // push too); the telemetry-blind CRITICAL remains the audible, remediation-first path.
-      !a.id.startsWith('msg-rate-floor-'),
+      !a.id.startsWith('msg-rate-floor-') &&
+      // v1.173.0 — and the "Telemetry stale" warning, for the same rule. It spoke a yellow
+      // ~20 s after every restart (2026-09-21 18:23:31, five deploys that day: a device reads
+      // stale until its first fresh reading lands) and at stale episodes. Push + card kept.
+      !a.id.startsWith('stale-'),
   );
   const criticals = counted.filter((a) => a.severity === 'critical');
   const crit = criticals.length;
