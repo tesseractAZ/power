@@ -33,6 +33,13 @@ const SUBSET = ['test/blindRemediation.test.ts', 'test/blindPanelWording.test.ts
 
 const MUTANTS = [
   {
+    id: 'v1.173.0 ★★★ the rate-collapse warning speaks again at the onset',
+    file: BC,
+    find: "      !a.id.startsWith('msg-rate-floor-'),",
+    to: '      true, /* MUTANT */',
+    why: 'Every cloud stale-shadow episode speaks a yellow ~4 min before the remediation even starts — against the owner’s remediate-first rule.',
+  },
+  {
     id: 'i. ★★★ the hold never expires (a blind alarm that never sounds)',
     file: BR,
     find: '  if (s.remediatedAtMs != null && nowMs - s.remediatedAtMs < BLIND_REMEDIATION_VERIFY_MS) {',

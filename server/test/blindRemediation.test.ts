@@ -216,3 +216,17 @@ test('★★ the hold deadline and the minimum gap are PINNED — "at most 5 min
   assert.equal(decideBlindRemediation(s, T0 + 5 * M, { blindActive: true, healAvailable: true }).hold, false,
     'released at exactly 5 minutes, by the literal clock');
 });
+
+/* ══ v1.173.0 — the rate-collapse warning never SPEAKS (remediate first) ══ */
+
+import { conditionFromAlerts } from '../src/broadcast.js';
+
+test('★★★ a message-rate collapse warning does not raise the spoken condition — it pushes, the blind alarm speaks', () => {
+  // 2026-09-21 18:13: a cloud stale-shadow episode; msg-rate-floor fired at the onset and was
+  // SPOKEN as a yellow ~4 min before the telemetry-blind alarm could even start the rebuild.
+  const rate = { id: 'msg-rate-floor-SHP2', severity: 'warning', title: 'Device barely reporting (rate collapse)', category: 'Connectivity' } as any;
+  assert.equal(conditionFromAlerts([rate]).level, 'green', 'no yellow from the rate-collapse warning alone');
+  assert.equal(rate.annunciate, undefined, 'annunciate stays unset, so its push and card still go');
+  const other = { id: 'soc-low-X-1', severity: 'warning', title: 'x', category: 'Battery' } as any;
+  assert.equal(conditionFromAlerts([rate, other]).level, 'yellow', 'every other warning still counts');
+});

@@ -352,7 +352,15 @@ export function conditionFromAlerts(
       // raise the audible condition: it would try to chime over the very
       // channel it reports broken, fail, and churn deferred retries. Exclude it
       // by id here — same intent as the system-outage exclusion above.
-      !a.id.startsWith('system-audible'),
+      !a.id.startsWith('system-audible') &&
+      // v1.173.0 — the message-rate collapse warning is a STALE-DATA alarm, and the owner's
+      // rule (2026-09-17) is that a stale-data alarm sounds only after the immediate
+      // remediation has failed. It fires at the ONSET of a collapse, ~4 min before the
+      // telemetry-blind alarm starts that remediation, so it spoke a yellow on every cloud
+      // stale-shadow episode (2026-09-21 18:13, the rebuild then restoring it in ~2 min). It
+      // keeps its push and card (annunciate stays unset — annunciate:false would drop the
+      // push too); the telemetry-blind CRITICAL remains the audible, remediation-first path.
+      !a.id.startsWith('msg-rate-floor-'),
   );
   const criticals = counted.filter((a) => a.severity === 'critical');
   const crit = criticals.length;
