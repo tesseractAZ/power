@@ -5,6 +5,7 @@ import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
 import { shp2Panels } from './shp2Membership.js';
+import { prunePhantomPacks, freshPackSlotHistory, type PackSlotHistory } from './packPresence.js';
 import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
 import type { Alert } from './alerts.js';
 import { notePollOk, notePollFailed, notePollHealth } from './telemetryBlind.js';
@@ -87,6 +88,10 @@ export class SnapshotStore extends EventEmitter {
   private snap: FleetSnapshot = { generatedAt: 0, devices: {} };
   // REST quota cache (hs_yj751_* / pd303_mc.* schema). Populated by REST polling.
   private rawBySn: Map<string, Record<string, unknown>> = new Map();
+  /** v1.172.0 — per-Core pack-slot change history (see packPresence.ts). */
+  private packHist: Map<string, PackSlotHistory> = new Map();
+  /** v1.172.0 — slots already reported hidden, so the log line fires once per removal. */
+  private packHiddenLogged: Set<string> = new Set();
   // MQTT message cache. Different schema from REST (cmdId-routed, bpInfo[].* etc.)
   // Keyed by sn, then by cmdId, value is the flattened param. Plus a "last" alias
   // mapping recent cmdId data into a flat lookup.
@@ -141,6 +146,34 @@ export class SnapshotStore extends EventEmitter {
   override emit(event: string | symbol, ...args: any[]): boolean {
     if (event === 'change') this.frameSeq++;
     return super.emit(event, ...args);
+  }
+
+  /**
+   * v1.172.0 — hide a ghost pack slot. The cached raw quota never forgets a slot, so when
+   * Core 4's defective pack 1 was pulled (2026-09-20) and the Core renumbered the rest as
+   * 1-4, slot 5 kept the old readings of the pack now at slot 4. The Core's own pack count,
+   * a repeated packSn, and "its readings stopped changing" identify it.
+   */
+  private hidePhantomPacks(sn: string, cur: any): void {
+    const proj = cur?.projection;
+    if (!proj || proj.kind !== 'dpu' || !Array.isArray(proj.packs)) return;
+    let hist = this.packHist.get(sn);
+    if (!hist) { hist = freshPackSlotHistory(); this.packHist.set(sn, hist); }
+    const r = prunePhantomPacks(proj.packs, proj.packCount ?? null, hist, this.now());
+    const hiddenNow = new Set(r.dropped.map((d) => `${sn}:${d.num}`));
+    for (const d of r.dropped) {
+      const k = `${sn}:${d.num}`;
+      if (this.packHiddenLogged.has(k)) continue;
+      this.packHiddenLogged.add(k);
+      this.logger(`packs: ${cur.deviceName ?? sn} reports ${proj.packCount ?? '?'} pack(s); slot ${d.num} has readings frozen since ${new Date(d.frozenSinceMs).toISOString()} (a removed or renumbered pack's old slot) — hiding it`);
+    }
+    for (const k of [...this.packHiddenLogged]) {
+      if (k.startsWith(`${sn}:`) && !hiddenNow.has(k)) {
+        this.packHiddenLogged.delete(k);
+        this.logger(`packs: ${cur.deviceName ?? sn} slot ${k.split(':')[1]} is reporting again — shown`);
+      }
+    }
+    proj.packs = r.packs;
   }
 
   setLogger(log: (msg: string) => void) {
@@ -389,6 +422,7 @@ export class SnapshotStore extends EventEmitter {
     if (raw == null || Object.keys(raw).length === 0) return;
     this.rawBySn.set(sn, raw);
     cur.projection = projectByProduct(cur.productName, raw);
+    this.hidePhantomPacks(sn, cur);
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);
@@ -514,6 +548,7 @@ export class SnapshotStore extends EventEmitter {
     Object.assign(merged, partial);
     this.rawBySn.set(sn, merged);
     cur.projection = projectByProduct(cur.productName, merged);
+    this.hidePhantomPacks(sn, cur);
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);
