@@ -582,6 +582,17 @@ export interface NightLedgerRow {
    *  contribution. This is the field that discriminates, and it was computed but
    *  never persisted, leaving cost mode unauditable from the ledger. */
   cost_ceiling_basis: string | null;
+  /** v1.174.0 — 'p50' | 'p90' | 'none': which morning surplus the cost ceiling left room
+   *  for ('none' = set aside by the long-gap rule, or unknown). NULL in resilience mode
+   *  and on rows written before v1.174.0. */
+  cost_surplus_basis: string | null;
+  /** v1.174.0 — 0/1: the long-gap (Thursday) rule set the ceiling to the SoC cap. NULL
+   *  in resilience mode and before v1.174.0. */
+  cost_long_gap: number | null;
+  /** v1.174.0 — the economic ceiling itself, % of pool (the force-charge target). */
+  cost_ceiling_soc_pct: number | null;
+  /** v1.174.0 — age of the panel reading the plan was sized on, seconds. */
+  panel_sample_age_s: number | null;
 
   // ── SCORE (NULL until scored) ──
   pv_err_frac: number | null;
@@ -649,6 +660,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'soc_min_err_pct', 'realized_cost_cents', 'counterfactual_cost_cents',
   'realized_savings_cents', 'demand_charge_savings_cents',
   'would_have_peak_imported',
+  // v1.174.0 — the cost ceiling's provenance, and the panel's age at plan time.
+  'cost_surplus_basis', 'cost_long_gap', 'cost_ceiling_soc_pct', 'panel_sample_age_s',
   'arm_disposition', 'cost_ceiling_basis',
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
@@ -869,6 +882,8 @@ export function createRecorder(
     // v1.132.0 — the two fields that make a null `actuated` and a
     // `cost_arbitrage` label legible after the fact.
     'arm_disposition TEXT', 'cost_ceiling_basis TEXT',
+    // v1.174.0 — see NightLedgerRow.
+    'cost_surplus_basis TEXT', 'cost_long_gap INTEGER', 'cost_ceiling_soc_pct REAL', 'panel_sample_age_s REAL',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);

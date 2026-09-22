@@ -392,6 +392,11 @@ export function buildNightChargeMessage(
   const overBuyNote = plan.bindingCap === 'overBuy'
     ? ' NOTE: the buy exceeds tomorrow morning’s PV headroom; a small clip is accepted to hold resilience.'
     : '';
+  // v1.174.0 — an ECONOMIC-ONLY buy (cost mode on a night resilience needed nothing): say
+  // so, or "without it … ~X%; with it, ~X%" reads as a buy that changes nothing.
+  const economicNote = plan.objective === 'cost_arbitrage' && plan.requiredExtraKwh === 0
+    ? ' Resilience needs no buy tonight — the pack already covers the outage cushion; this buy is economic (cost mode).'
+    : '';
   // v1.60.0 — EV contention. The car and the charger share one grid input, so a
   // predicted overnight session comes straight out of the buy. Two shapes, and
   // the second is deliberately a WARNING: a missing EVSE prediction must never
@@ -436,7 +441,7 @@ export function buildNightChargeMessage(
       `Buy ~${kwh(plan.buyKwh)} of grid energy overnight → target ${pct(plan.targetSocPct)} pool SoC. `
       + `Without it, tomorrow’s projected low SoC falls to ~${pct(plan.baselineMinSocPct)}; `
       + `with it, ~${pct(plan.minProjSocPct)} (the floor+cushion line is ${floorCushion}%). `
-      + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${evNote} `
+      + `Confidence: ${plan.confidenceTier}.${shortfallNote}${overBuyNote}${economicNote}${evNote} `
       + tail,
   };
 }

@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, homeFleetMeanSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -214,7 +214,7 @@ import {
   type NightActuationState,
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
-import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad } from './nightChargeAdvisor.js';
+import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -3281,6 +3281,8 @@ interface NightPlanExtras {
   forecastBasis: string;
   weatherCovered: number;
   tariffSnapshot: string;
+  /** v1.174.0 — how old the panel reading the plan was sized on, seconds (null = unknown). */
+  panelSampleAgeS: number | null;
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
@@ -3293,10 +3295,18 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
  * missing battery fields, I5). Direct orchestration (NOT createNightChargeAdvisor.
  * update() — buildInputs there is synchronous, but we need awaited analytics).
  */
-async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | null> {
+async function recomputeNightChargePlan(
+  opts: { allowStalePanel?: boolean } = {},
+): Promise<{ plan: NightChargePlan; extras: NightPlanExtras } | 'panelStale' | null> {
   const nowMs = Date.now();
   const shp2 = findShp2(store.get().devices);
   if (!shp2 || shp2.projection?.kind !== 'shp2') return null; // I5 — advisory null
+  // v1.174.0 — the R3 freshness gate the actuator and force-charge ticks already apply.
+  // A stale panel is NOT an incomplete basis: 'panelStale' tells the caller to retry
+  // (the 30-min tick keeps the previous plan; the evening job defers without latching).
+  // Only the evening job's last resort passes allowStalePanel — see nightPlanPanelVerdict.
+  const panel = nightPlanPanelVerdict(shp2, nowMs, opts.allowStalePanel === true);
+  if (!panel.use) return 'panelStale';
   const sp: any = shp2.projection;
 
   const fullWh: number | null = sp.backupFullCapWh ?? null;
@@ -3573,6 +3583,10 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
 
   const inputs = buildNightChargeInputs(deps);
   const plan = computeNightChargePlan(inputs);
+  // v1.174.0 — the evening job's last resort: sized on a stale reading, and it says so.
+  if (!panel.fresh) {
+    plan.rationale += ` NOTE: sized on a panel reading ${panel.ageMs != null ? `~${Math.round(panel.ageMs / 60_000)} min old` : 'of unknown age'} (${panel.why}) — it did not recover before the deferral deadline. The reserve write and force-charge still wait for a live readback.`;
+  }
   setLatestNightChargePlan(plan);
 
   // Ledger diagnostics computed over the authoritative 24 h band (where the
@@ -3635,6 +3649,7 @@ async function recomputeNightChargePlan(): Promise<{ plan: NightChargePlan; extr
     forecastBasis: confidenceTier,
     weatherCovered: dayAhead?.hasWeather ? 1 : 0,
     tariffSnapshot,
+    panelSampleAgeS: panel.ageMs != null ? Math.round(panel.ageMs / 1000) : null,
   };
 
   // v1.40.0: persist the freshest PRE-WINDOW plan to disk. The evening job's
@@ -3683,6 +3698,13 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // 'cost_arbitrage' row can carry zero cost-mode contribution. Persisting the
     // ceiling basis is what makes that answerable from the ledger.
     cost_ceiling_basis: plan.costCeilingBasis ?? null,
+    // v1.174.0 — WHICH surplus set the ceiling and whether the long-gap rule did, plus the
+    // ceiling itself: cost_ceiling_basis alone cannot say why a ceiling was 90 vs 83.
+    cost_surplus_basis: plan.costCeilingSurplusBasis ?? null,
+    cost_long_gap: plan.longGapAhead == null ? null : (plan.longGapAhead ? 1 : 0),
+    cost_ceiling_soc_pct: plan.costCeilingSocPct ?? null,
+    // v1.174.0 — `?? null`: a plan snapshot persisted before the upgrade has no such field.
+    panel_sample_age_s: extras.panelSampleAgeS ?? null,
     pv_p10_kwh: extras.pvP10Kwh,
     pv_p50_kwh: extras.pvP50Kwh,
     pv_p90_kwh: extras.pvP90Kwh,
@@ -4115,6 +4137,8 @@ function scoreNightRow(
  * AFTER a successful send. Guarded end-to-end; a plan pushed after charging
  * should begin is worse than none, so past 23:00 it log-and-latches.
  */
+/** v1.174.0 — the stale-panel deferral logs once per night, not once a minute. */
+let nightPlanStaleDeferLoggedDay: string | null = null;
 let nightEveningJobInFlight = false; // v1.39.0: re-entrancy guard — a run slower
 // than the 60 s tick (analytics reports + a weather fetch, latch written only
 // after the awaited send) let overlapping runs each pass the latch check and
@@ -4213,7 +4237,20 @@ async function runNightChargeEveningJobInner(): Promise<void> {
 
   try {
     // (a) recompute fresh; (b) record the plan row (when a plan was produced).
-    const fresh = await recomputeNightChargePlan();
+    // v1.174.0 — a STALE panel DEFERS: no latch, no notification, no cancel of a prior
+    // arm — the 60 s tick retries. From NIGHT_PLAN_STALE_DEFER_UNTIL_MIN the plan is
+    // sized on the last reading instead (disclosed on the plan), so staleness alone
+    // never costs the night. Only a genuinely missing basis (null) reaches
+    // 'insufficient_basis' below.
+    const result = await recomputeNightChargePlan({ allowStalePanel: nowMin >= NIGHT_PLAN_STALE_DEFER_UNTIL_MIN });
+    if (result === 'panelStale') {
+      if (nightPlanStaleDeferLoggedDay !== today) {
+        nightPlanStaleDeferLoggedDay = today;
+        app.log.info(`night-charge: evening plan DEFERRED for ${today} — the panel reading is stale; retrying every minute until ${Math.floor(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN / 60)}:${String(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN % 60).padStart(2, '0')}, then planning on the last reading (disclosed).`);
+      }
+      return;
+    }
+    const fresh = result;
     if (fresh) {
       recordNightPlanRow(today, fresh.plan, fresh.extras);
       // v1.39.0: refresh the status route's in-memory mirror immediately — the
