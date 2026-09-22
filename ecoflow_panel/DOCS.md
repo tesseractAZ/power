@@ -6446,6 +6446,10 @@ This matters beyond the noise: the single-flight note below records that overlap
 `play_announcement` calls are what wedge MA into those 500s, so an uncountable retry can
 sustain the failure it is retrying. Harness: `scripts/mutate-broadcast-retry.mjs`.
 
+**v1.173.1 — calibrator on realized GHI; boot yellow confirmation.** reports.ts passes
+`ghiBasis = 'realized'` to the band calibrator's skill (owner decision); `holdBootYellow` holds a
+fresh warm-up-window yellow for `BOOT_YELLOW_CONFIRM_MS` (2 min) before it is spoken.
+
 **v1.173.0 — the 2026-09-21 open list.** Cost mode continues past the planner's early
 resilience HOLD (holding only when the cost target is not worth a buy). Per-pack alert state follows
 the pack serial: `detectPackResidencyChanges` retires an episode whose `sourcePackSn` changed,

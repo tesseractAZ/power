@@ -466,6 +466,29 @@ export function isRestartContinuation(
  * fire immediately. A genuine standing critical is therefore delayed by at most one
  * tick and NEVER suppressed. Pure + exported for tests.
  */
+/**
+ * v1.173.1 — boot YELLOW confirmation. After a restart several warnings are transiently
+ * wrong for a minute or two: an off-panel Core's standing warnings are muted only once its
+ * off-panel streak rebuilds (it restarts at zero), a device reads stale until its first
+ * fresh reading, learned alerts re-warm. isRestartContinuation only suppresses a yellow at
+ * or below the pre-restart level, so each of the five restarts on 2026-09-21 spoke a fresh
+ * yellow ~20-60 s after boot (18:23:31, 19:04:09 — Core 3's forecast-imbalance before its
+ * off-panel mute). Inside the warm-up window a fresh yellow must now PERSIST for
+ * BOOT_YELLOW_CONFIRM_MS before it is spoken; a genuine standing warning is delayed by at
+ * most that. RED is untouched (holdBootRed, one tick). Pure + exported for tests.
+ */
+export const BOOT_YELLOW_CONFIRM_MS = 2 * 60_000;
+export function holdBootYellow(
+  wouldFireYellow: boolean,
+  msSinceBoot: number,
+  yellowSinceMs: number | null,
+  nowMs: number,
+  windowMs = BROADCAST_BOOT_WARMUP_MS,
+): boolean {
+  if (!wouldFireYellow || msSinceBoot >= windowMs) return false;
+  return yellowSinceMs == null || nowMs - yellowSinceMs < BOOT_YELLOW_CONFIRM_MS;
+}
+
 export function holdBootRed(
   wouldFireRed: boolean,
   msSinceBoot: number,
@@ -1707,6 +1730,8 @@ export function startBroadcastMonitor(
   // red is held for confirmation within the warm-up window; cleared whenever the
   // level is not red, so a later red re-confirms rather than fast-tracks.
   let warmupRedSeen = false;
+  /** v1.173.1 — when the current fresh boot-window yellow was first seen (holdBootYellow). */
+  let warmupYellowSinceMs: number | null = null;
   const tick = async () => {
     if (stopped) return;
     cfg = loadBroadcastConfig();
@@ -1774,6 +1799,7 @@ export function startBroadcastMonitor(
     // (phantom cleared or genuine de-escalation), so a later red in the warm-up
     // window is re-confirmed across a tick rather than fast-tracked.
     if (level !== 'red') warmupRedSeen = false;
+    if (level !== 'yellow') warmupYellowSinceMs = null;
     // v0.58.0 — within the post-restart warm-up window, a condition that was
     // already active (and successfully broadcast) before the restart re-appears as
     // a "rise" once the analytics/learned alerts re-warm. Don't re-speak it aloud;
@@ -1792,6 +1818,17 @@ export function startBroadcastMonitor(
     // the next 10s tick and fires then; a one-tick phantom clears and is never
     // spoken. Outside the window (or once confirmed) holdBootRed returns false and
     // red fires immediately — never suppressed, delayed by ≤ one tick.
+    // v1.173.1 — a fresh YELLOW inside the warm-up window must persist BOOT_YELLOW_CONFIRM_MS
+    // before it is spoken (boot transients: off-panel mute lag, stale-until-first-read).
+    // prevLevel is not advanced, so a persisting yellow re-presents each tick and fires once
+    // confirmed; one that clears is never spoken.
+    if (level === 'yellow' && transitioned && Date.now() - bootMs < BROADCAST_BOOT_WARMUP_MS && warmupYellowSinceMs == null) {
+      warmupYellowSinceMs = Date.now();
+    }
+    if (holdBootYellow(level === 'yellow' && transitioned, Date.now() - bootMs, warmupYellowSinceMs, Date.now())) {
+      log(`broadcast: yellow held for boot confirmation (${Math.round(BOOT_YELLOW_CONFIRM_MS / 1000)} s) — startup transients clear on their own`);
+      return;
+    }
     if (holdBootRed(level === 'red' && (transitioned || newCrit), Date.now() - bootMs, warmupRedSeen)) {
       warmupRedSeen = true;
       log(`broadcast: red held one tick for boot confirmation (warm-up phantom guard)`);

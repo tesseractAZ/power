@@ -495,3 +495,30 @@ test('holdBootRed — the phantom→clear→genuine sequence: held, then (latch 
   assert.equal(holdBootRed(true, 40_000, false, WIN), true);   // C: genuine, latch reset → held
   assert.equal(holdBootRed(true, 50_000, true, WIN), false);   // D: persists → fires
 });
+
+/* ══ v1.173.1 — a fresh boot-window YELLOW must persist before it is spoken ══ */
+
+import { holdBootYellow, BOOT_YELLOW_CONFIRM_MS } from '../src/broadcast.js';
+
+test('★★★ boot yellow: held until it persists 2 min inside the warm-up window; RED path untouched', () => {
+  const M = 60_000;
+  assert.equal(BOOT_YELLOW_CONFIRM_MS, 2 * M);
+  // 2026-09-21 19:04:09 — ~20 s after a restart Core 3's standing warning was not yet muted
+  // (its off-panel streak restarts at zero) and a yellow was spoken; 18:23:31 likewise.
+  const t0 = 1_000_000;
+  assert.equal(holdBootYellow(true, 20_000, t0, t0), true, 'first sight: held');
+  assert.equal(holdBootYellow(true, 20_000 + M, t0, t0 + M), true, 'still inside the confirmation');
+  assert.equal(holdBootYellow(true, 20_000 + 2 * M, t0, t0 + 2 * M), false, 'persisted 2 min: spoken');
+  assert.equal(holdBootYellow(true, 11 * M, null, t0), false, 'outside the 10-min warm-up window: immediate');
+  assert.equal(holdBootYellow(false, 20_000, t0, t0), false, 'nothing to hold');
+});
+
+test('★★ the monitor applies it before the red hold and re-presents a persisting yellow', () => {
+  const src = readFileSync(new URL('../src/broadcast.ts', import.meta.url), 'utf8');
+  const y = src.indexOf('if (holdBootYellow(level === \'yellow\' && transitioned, Date.now() - bootMs, warmupYellowSinceMs, Date.now())) {');
+  const r = src.indexOf('if (holdBootRed(level === \'red\' && (transitioned || newCrit)');
+  assert.ok(y > 0 && r > y, 'yellow hold precedes the red hold');
+  assert.ok(src.includes("if (level !== 'yellow') warmupYellowSinceMs = null;"), 'a cleared yellow restarts the confirmation');
+  const block = src.slice(y, r);
+  assert.ok(block.includes('return;') && !block.includes('adoptLevel('), 'held without adopting the level — it re-presents next tick');
+});
