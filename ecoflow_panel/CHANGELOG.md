@@ -1,3 +1,23 @@
+## 1.179.0
+
+### A stale "Grid OK" from the panel no longer counts as the grid being there
+
+- The panel's own grid flag counted as grid presence whenever the panel was online, however old
+  the reading. Two ways left an old "Grid OK" standing through an outage: the panel dropping off
+  the cloud and coming back before its next reading (the reconnect notice arrives first and
+  carries no data), and the panel's readings failing to download while it stayed listed online
+  — indefinitely. Either way the add-on believed the grid was there when it was not: the runway
+  alarm's spoken warning was held back, battery-level announcements said the house was drawing
+  from grid power, `off_grid` read OFF and `shp2_grid_connected` read ON. The flag now counts
+  only when the reading is fresh — downloaded in the last five minutes, from a panel that is
+  online and not replaying old data — the same test the overnight charging controls already
+  use. Readings arrive about once a minute, so normal operation, including the gaps between the
+  panel's charging bursts, is unchanged, and a reconnect of a few seconds does not discard a
+  reading that is still fresh. `shp2_grid_connected` reads unknown while the reading is stale.
+  The v1.178.0 rule that a "no grid" reading overrides a grid declared present is unaffected.
+
+New harness `scripts/mutate-presence-fresh-readback.mjs` (5 anchor-asserted mutants).
+
 ## 1.178.1
 
 ### Battery net and panel load no longer publish 0 at a restart

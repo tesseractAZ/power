@@ -38,6 +38,8 @@ function shp2(
     sn: 'SHP2',
     online,
     productName: 'Smart Home Panel 2',
+    // v1.179.0 — a fresh readback (the last REST quota 20 s ago): the presence term needs one.
+    lastQuotaAtMs: Date.now() - 20_000,
     // v0.98.0 — circuits: [] so aggregateFleetFlow's panelLoad loop (now reached via the
     // live poolDischarging path) doesn't crash; panelLoad is unused by resolveGridBackstop.
     projection: { kind: 'shp2', chargeWattPower, gridWatt, gridConnected, circuits: [], sources: sourceSns.map((sn, i) => ({ slot: i + 1, sn })) },
@@ -258,6 +260,10 @@ test('computeShp2GridConnected: online passes gridConnected through; offline ⇒
   assert.equal(computeShp2GridConnected(fleet(shp2([null], 0, 0, null, true))), null);
   assert.equal(computeShp2GridConnected(fleet(shp2([null], 0, 8000, true, false))), null, 'OFFLINE SHP2: frozen gridSta must not assert presence');
   assert.equal(computeShp2GridConnected(fleet(dpu('A', 600))), null, 'no SHP2 device → null');
+  // v1.179.0 — online is not enough: the reading must be a fresh readback.
+  const stale = { ...shp2([null], 0, 0, true, true), lastQuotaAtMs: Date.now() - 6 * 60_000 };
+  assert.equal(computeShp2GridConnected(fleet(stale)), null, 'a "1" the panel has not refreshed for 6 min asserts nothing');
+  assert.equal(computeShp2GridConnected(fleet({ ...stale, lastQuotaAtMs: undefined })), null, 'no quota ever landed');
 });
 
 test('v0.89.0 #1 — gridSta=Grid OK in a burst gap at the floor (pool NOT discharging) → backstopping (the core false-critical fix)', () => {

@@ -29,6 +29,7 @@ function dpu(sn: string, online: boolean, packNetW = 0): any {
 function shp2(connectedSns: string[], gridConnected: boolean | null = true, online = true): any {
   return {
     sn: 'SHP2', online, productName: 'Smart Home Panel 2',
+    lastQuotaAtMs: Date.now() - 20_000, // v1.179.0 — a fresh readback
     projection: {
       kind: 'shp2', chargeWattPower: 0, gridWatt: 0, gridConnected, circuits: [],
       sources: connectedSns.map((sn, i) => ({ slot: i + 1, sn, isConnected: true })),

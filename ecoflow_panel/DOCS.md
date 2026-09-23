@@ -1300,9 +1300,9 @@ suppressed the 2026-06-21 `50→2%` false SoC-alarm cascade off a transient `0.0
 `gridConnected` is **VALUE-1-ONLY**: true iff `gridSta === 1`. Unlike `gridWatt`
 (`wattInfo.gridWatt`, which reads 0 in the gaps between the SHP2's ~8 kW charge bursts),
 `gridSta` is the master controller's live line-sensing flag — present even when not
-momentarily drawing. It feeds `gridState.computeShp2GridConnected` as an additive,
-online-gated backstop (true), and since v1.178.0 its last value vetoes a declared grid
-(false) — see the Grid backstop resolver, 4.2.
+momentarily drawing. It feeds `gridState.computeShp2GridConnected` as an additive
+backstop (true) — only from a fresh readback since v1.179.0 — and since v1.178.0 its last
+value vetoes a declared grid (false); see the Grid backstop resolver, 4.2.
 
 #### Grace-hold + slew guard (`backupPoolWithGraceHold`)
 
@@ -3808,7 +3808,7 @@ The resolver was built (v0.23.0) on the premise that the SHP2 cloud telemetry ex
 | --- | --- | --- |
 | DPU AC-in import | `computeGridImportWatts` | `GRID_IMPORT_WATTS` = 5 W; scoped **strictly** to SHP2 source SNs; **0 if source identity unknown** (a wall-charging spare must not masquerade as house grid) |
 | SHP2 main-line grid | `computeHomeGridWatts` (`wattInfo.gridWatt`) | `HOME_GRID_IMPORT_WATTS` = 25 W; **0 if SHP2 offline** (frozen sample must not fabricate presence) |
-| SHP2 own grid flag | `computeShp2GridConnected` (`pd303_mc.masterIncreInfo.gridSta`, value-1-only) | true=Grid OK / false=islanded / null=unknown; **null if SHP2 offline**; burst-gap immune |
+| SHP2 own grid flag | `computeShp2GridConnected` (`pd303_mc.masterIncreInfo.gridSta`, value-1-only) | true=Grid OK / false=islanded / null=unknown; **null unless a fresh readback** (`shp2ReadbackFresh`: online, a REST quota within `SHP2_READBACK_STALE_MS` = 5 min, not shadowed — v1.179.0; online-and-unshadowed only before); burst-gap immune |
 | HA entity | `interpretGridEntity(GRID_PRESENCE_ENTITY)` | on/true/home/…→present; numeric voltage >50→present; unavailable/unknown→null |
 | Standing declaration | `GRID_AVAILABLE=true` | Coarse fallback when no entity configured |
 
@@ -3843,11 +3843,27 @@ down), a wall-clock age on an unrefreshed reading, and a 6 s `/status` blip. Eac
 `off_grid`, dropped `load_shed_recommended` (so automations could restore shed loads) and
 re-gated the runway audible. The cost of stickiness is a stale "no grid" if the grid returns
 while the panel is dark: an early alarm, the accepted direction. A field the panel never
-reported (no reply ever carried `gridSta`) vetoes nothing. The presence term is unchanged: a stale "1"
-still asserts nothing. The resolver's reason names the code the panel reported and says when
+reported (no reply ever carried `gridSta`) vetoes nothing. The presence term is the opposite: a stale "1"
+asserts nothing (see Presence freshness, below). The resolver's reason names the code the panel reported and says when
 it is a last reading — panel offline, data replayed, or the latest reply without `gridSta` ("grid
 declared present but the SHP2 reports grid not detected (gridSta=0) (last reading; panel
 offline) — not backstopping").
+
+**Presence freshness (v1.179.0).** `computeShp2GridConnected` returned the panel's flag
+whenever the panel was online and not shadowed, with no look at the reading's age, so a stale
+"Grid OK" asserted presence — the missed-alarm direction — on two paths: an OFFLINE→ONLINE
+`/status` flip re-exposes the pre-offline sample before any quota lands (`setDeviceOnline`
+never touches the projection or `lastQuotaAtMs`), and a quota fetch that keeps failing with
+the panel still listed online left it standing indefinitely. Either made `present` and
+`gridStaBackstop` true with no grid: the runway audible gated, SoC crossings spoken as
+"drawing from grid power", `off_grid` OFF, `shp2_grid_connected` ON. The flag now needs
+`shp2ReadbackFresh` — the same shared gate (and window) the night-charge readbacks use.
+Quotas arrive every ~60 s, so the burst-gap behaviour is untouched. A 6 s `/status` blip does
+not drop a reading that is still fresh: dropping it would remove the gridSta backstop at the
+floor between charge bursts, the false critical this term exists to close. Residual: a panel
+dark for less than the window across the onset of an outage can assert its pre-outage "1"
+until the next poll (≤ ~60 s), still subject to the at-floor pool-discharge guard. The
+declared-grid veto is unaffected: it reads the last reading, however stale.
 
 #### 4.3 The `backstopping` decision (stricter than `present`)
 
@@ -6521,6 +6537,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 `FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
+
+**v1.179.0 — a stale "Grid OK" asserts nothing.** `computeShp2GridConnected` (the resolver's presence term and the `shp2_grid_connected` sensor) requires `shp2ReadbackFresh` — online, a REST quota within `SHP2_READBACK_STALE_MS`, not shadowed — instead of online-and-unshadowed alone (Grid backstop resolver, "Presence freshness"). `resolveGridBackstop` takes an optional `nowMs`. The declared-grid veto still reads the last reading. Harness: `scripts/mutate-presence-fresh-readback.mjs` (5 mutants); `mutate-cloud-shadow.mjs` ix repointed at the new gate.
 
 **v1.178.1 — sums and readiness read the same moment.** Both publishers (`buildState`, `/api/ha-state`) now take `aggregateFleetFlow(snap.devices)` after the reports' `await Promise.all`, with no await between it and `publishReadiness`. `snap` is the store's live object: taken before the await, the sums were computed before the first poll while readiness — evaluated after it — saw projected devices, so `fleet_battery_net_watts` and `panel_load_watts` still published a boot-time 0 at the v1.178.0 deploy. Pinned by a source-order test; harness `scripts/mutate-grid-veto-boot-zero.mjs` (32 mutants).
 

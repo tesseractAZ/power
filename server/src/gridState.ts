@@ -30,7 +30,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { aggregateFleetFlow, homeCoreCoverage } from './shp2Membership.js';
+import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh } from './shp2Membership.js';
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
@@ -82,9 +82,10 @@ export interface GridBackstop {
   /** v0.36.0 — SHP2 main-line grid power into the home (W) (wattInfo.gridWatt). */
   homeGridWatts: number;
   /** v0.89.0 — the SHP2's OWN direct grid-presence flag (pd303_mc.masterIncreInfo.gridSta,
-   *  VALUE-1-ONLY, online-gated): true=Grid OK, false=islanded/out-of-spec, null=unknown.
-   *  Online-gated; true is an additive backstop signal. The v1.178.0 declared-grid veto reads
-   *  the panel's LAST reading instead (projection.gridConnected), not this gated value. */
+   *  VALUE-1-ONLY): true=Grid OK, false=islanded/out-of-spec, null=unknown — including any
+   *  reading that is not a fresh readback (v1.179.0). True is an additive backstop signal.
+   *  The v1.178.0 declared-grid veto reads the panel's LAST reading instead
+   *  (projection.gridConnected), not this gated value. */
   shp2GridConnected: boolean | null;
   /** Human-readable reason, for status payloads / logs / alert detail. */
   reason: string;
@@ -176,6 +177,18 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
  * computeHomeGridWatts:
  *   - An OFFLINE SHP2 ⇒ null (its last gridSta FROZE; a stale "1" must never assert
  *     presence into an outage that begins during the offline window).
+ *   - v1.179.0 — any reading that is not a FRESH READBACK ⇒ null (shp2ReadbackFresh:
+ *     online, a REST quota within SHP2_READBACK_STALE_MS, not shadowed). `online` alone
+ *     let a stale "1" through twice: an OFFLINE→ONLINE /status flip re-exposes the
+ *     pre-offline sample before any quota lands (setDeviceOnline never touches the
+ *     projection or lastQuotaAtMs), and a quota fetch that keeps failing with the panel
+ *     still listed online left it asserting presence indefinitely. Quotas arrive every
+ *     ~60 s, so the 5-min window leaves the burst-gap behaviour below untouched, and a
+ *     6 s /status blip does not drop a reading that is still fresh (dropping it would
+ *     remove the gridSta backstop at the floor between charge bursts — the false
+ *     critical this term exists to close). Residual: a panel dark for LESS than the
+ *     window, across the onset of an outage, can assert its pre-outage "1" until the next
+ *     poll (≤ ~60 s), still subject to the at-floor pool-discharge guard.
  *   - Field absent/unknown ⇒ null.
  * This is the panel's live line-sensing flag: it stays true through the zero-watt gaps
  * between the SHP2's 8 kW charge bursts (the exact false-critical this closes), and
@@ -187,14 +200,19 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
  * this online-gated value), so changing what projectShp2 maps to false changes when a
  * declaration is trusted in an outage.
  */
-export function computeShp2GridConnected(devices: Record<string, DeviceSnapshot>): boolean | null {
+export function computeShp2GridConnected(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number = Date.now(),
+): boolean | null {
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
   // v1.142.0 — a shadowed panel's gridSta froze with everything else; a stale "1"
   // must never assert presence into an outage, whether the panel went offline or
-  // the cloud simply stopped updating it.
-  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return null;
+  // the cloud simply stopped updating it. v1.179.0 — nor one the panel has not
+  // refreshed: shp2ReadbackFresh subsumes the online + shadow checks and adds the
+  // quota age.
+  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return null;
   return shp2.projection.gridConnected ?? null;
 }
 
@@ -238,6 +256,9 @@ export interface GridBackstopInput {
    *  flow-less declaration remains a valid backstop (grid available, not yet
    *  needed). Resolved from the SHP2 SoC vs backupReserveSoc in liveGridBackstop. */
   atReserveFloor?: boolean;
+  /** v1.179.0 — clock for the presence term's readback-freshness gate (defaults to
+   *  Date.now(); tests pin it). */
+  nowMs?: number;
 }
 
 /** Pure resolver — unit-testable; no env / cache reads. */
@@ -260,7 +281,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // NOT folded into importLive (which would unconditionally bypass
   // the poolDischarging guard); it gets its own term below that is still subject to
   // poolDischarging, so a wedged/stale "connected" can't mute a net-discharging outage.
-  const shp2GridConnected = computeShp2GridConnected(input.devices);
+  const shp2GridConnected = computeShp2GridConnected(input.devices, input.nowMs ?? Date.now());
 
   // Declared presence: a configured entity is authoritative (unknown ⇒ NOT
   // declared, the safe default); otherwise fall back to GRID_AVAILABLE.
