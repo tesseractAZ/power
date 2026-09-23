@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from 'react';
+import { actuationBannerVisible, reserveWriteLabel, revertUnconfirmed } from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -75,9 +76,14 @@ interface NightActuation {
   revertAttempts: number;
   lastError: string | null;
   cancelDeadlineMs: number | null;
+  revertVerifiedAtMs?: number | null;
+  revertRetries?: number;
+  revertReadbackEscalated?: boolean;
 }
 
 interface NightChargeStatus {
+  /** v1.182.0 — the panel's reserve maximum (RESERVE_WRITE_MAX_PCT). */
+  reserveWriteMaxPct?: number;
   enabled: boolean;
   mode: 'advisory' | 'supervised' | 'auto';
   window: { startMs: number; endMs: number } | null;
@@ -282,9 +288,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
           // cap prevented delivering the requirement), never as a silent swap.
           sub={
             [
-              plan.setpointSocPct != null && plan.targetSocPct != null && plan.setpointSocPct > plan.targetSocPct + 0.5
-                ? `reserve set to ${plan.setpointSocPct.toFixed(0)}%`
-                : null,
+              // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
+              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
             ]
               .filter(Boolean)
@@ -309,7 +314,7 @@ function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode'];
   const [busy, setBusy] = useState(false);
   const [localCancelled, setLocalCancelled] = useState(false);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
-  if (mode === 'advisory' || !actuation || actuation.day == null) return null;
+  if (mode === 'advisory' || !actuation || !actuationBannerVisible(actuation, Date.now())) return null;
 
   const cancelled = actuation.cancelled || localCancelled;
   const deadline = phoenixHHMM(actuation.cancelDeadlineMs);
@@ -329,7 +334,10 @@ function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode'];
 
   let text: string;
   let showCancel = false;
-  if (actuation.revertedAtMs != null) {
+  if (revertUnconfirmed(actuation)) {
+    // v1.182.0 — the cloud ACKed the restore but the panel has not confirmed it: not "Completed".
+    text = `Restore not confirmed — the panel has not reported the reserve back at ${actuation.priorReservePct ?? '—'}%.`;
+  } else if (actuation.revertedAtMs != null) {
     text = `Completed — reserve restored to ${actuation.priorReservePct ?? '—'}%.`;
   } else if (cancelled) {
     text = actuation.appliedAtMs != null
@@ -345,7 +353,7 @@ function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode'];
 
   return (
     <div className="flex items-center justify-between gap-3 bg-panel2 border border-line rounded-md p-2 mb-3 text-xs">
-      <span className={actuation.revertedAtMs != null || cancelled ? 'text-muted' : 'text-warn'}>{text}</span>
+      <span className={(actuation.revertedAtMs != null && !revertUnconfirmed(actuation)) || cancelled ? 'text-muted' : 'text-warn'}>{text}</span>
       <span className="flex items-center gap-2">
         {cancelErr && <span className="text-crit">{cancelErr}</span>}
         {showCancel && (

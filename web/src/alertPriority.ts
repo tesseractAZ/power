@@ -90,6 +90,19 @@ export function priorityCounts(alerts: Alert[]): Record<AlarmPriority, number> {
   return out;
 }
 
+/**
+ * v1.182.0 — the Alerts nav badge. It counted THRESHOLD alerts only, so a learned alert that
+ * reached CRITICAL (explicit priority, or severity critical) could never show on it. Threshold
+ * Critical/High/Medium count as before; a CRITICAL of any source now counts and colours it.
+ */
+export function alertBadge(alerts: Alert[]): { count: number; tone: 'critical' | 'high' | 'medium' | null } {
+  const threshold = priorityCounts(alerts.filter((a) => a.source !== 'learned'));
+  const learnedCritical = alerts.filter((a) => a.source === 'learned' && priorityOf(a) === 'critical').length;
+  const count = threshold.critical + threshold.high + threshold.medium + learnedCritical;
+  const tone = threshold.critical + learnedCritical > 0 ? 'critical' : threshold.high > 0 ? 'high' : threshold.medium > 0 ? 'medium' : null;
+  return { count, tone };
+}
+
 /** Sort comparator: most-severe first. */
 export function comparePriority(a: AlarmPriority, b: AlarmPriority): number {
   return PRIORITY_META[a].rank - PRIORITY_META[b].rank;

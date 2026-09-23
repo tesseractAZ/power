@@ -5691,6 +5691,8 @@ app.get('/api/night-charge/status', async () => {
   return {
     enabled: nightChargeEnabled,
     mode: NIGHT_CHARGE_MODE,
+    // v1.182.0 — the panel's reserve maximum, so the card shows what will actually be written.
+    reserveWriteMaxPct: RESERVE_WRITE_MAX_PCT,
     window: plan?.window ?? null,
     reserveFloorPercent: sp?.backupReserveSoc ?? null,
     confidence: plan?.confidenceTier ?? null,
