@@ -7,7 +7,7 @@ import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.j
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
 import { getWeather, type WeatherHour, type WeatherForecast } from './weather.js';
-import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, nwsEventWindow, type NwsAlert } from './nws.js';
@@ -909,6 +909,16 @@ export interface DayForecast {
    *  operator-visible; the runway/projected-SoC numbers should be read with
    *  appropriate skepticism when this is true. */
   structurallyIncomplete?: boolean;
+  /** v1.178.0 — true when the published (display) basis has NO PV history to project from:
+   *  neither a projected home Core nor a connected-but-unprojected one has recorded pv_total
+   *  (before the first poll, or a cold recorder). The PV figures are then a
+   *  model-less 0, not a forecast: at every restart the first forecast is built ~1 s after
+   *  boot, before any Core has reported, and its 0 kWh was published to Home Assistant as
+   *  a real value for ~75 s (a fabricated dip in the sensor history). Publishers send null
+   *  (HA "unknown") while this is set. Narrower than structurallyIncomplete, which is also
+   *  set by a cold load curve or a missing SoC basis while the PV forecast is perfectly
+   *  good. */
+  pvForecastUnavailable?: boolean;
   reserveSoc: number;
   hours: ForecastHour[];
   forecastPvWhNext24: number;
@@ -1554,9 +1564,11 @@ async function computeDayForecastUncached(
   const presentHomeSns = new Set(homeDpus.map((d) => d.sn));
   const missingConnectedSns = [...connected].filter((sn) => !presentHomeSns.has(sn));
   const restoredPvCurve = pvCurve.slice();
+  let restoredPvSpan = pvSpan;
   for (const sn of missingConnectedSns) {
-    const { curve } = hourCurve(recorder, sn, 'pv_total', since, now);
+    const { curve, spanMs } = hourCurve(recorder, sn, 'pv_total', since, now);
     for (let h = 0; h < 24; h++) restoredPvCurve[h] += curve[h];
+    restoredPvSpan = Math.max(restoredPvSpan, spanMs);
   }
   // v0.6.0 — separate weekday vs weekend load curves. EV charging,
   // dishwasher, laundry, and home-office HVAC duty all run on visibly
@@ -1971,6 +1983,10 @@ async function computeDayForecastUncached(
   // diagnostic "forecast basis incomplete" sensor (the flag drove only the cache
   // TTL before). Set before caching so the cached value carries it too.
   value.structurallyIncomplete = structurallyIncomplete;
+  // On the PUBLISHED basis: the display figures are built on the restored curve, which
+  // re-adds each connected-but-unprojected Core's own recorded PV — real figures even when
+  // no home Core is projected (all wedged cloud-offline at a restart).
+  value.pvForecastUnavailable = restoredPvSpan === 0;
   // Cache whenever ≥1 DPU is present (so a totally-empty fleet still doesn't latch),
   // tagging the entry incomplete so the TTL fast-path uses the short negative-cache
   // window. A complete forecast overwrites it with incomplete:false + full TTL.
@@ -6961,6 +6977,12 @@ export interface CurtailmentReport {
   hourlyHistogram: Array<{ hour: number; avgSurplusW: number; samples: number }>;
   /** Loads we suggest to absorb the surplus. */
   opportunisticLoads: OpportunisticLoad[];
+  /** v1.178.0 — the hour walks had what they need: home Cores, the panel, weather and a
+   *  solar posterior. Without weather (the worker's in-memory cache is empty after every
+   *  restart until the first Open-Meteo fetch succeeds) every hour samples null and the
+   *  kWh totals are a model-less 0 — on the total_increasing pv_curtailment_kwh_today a
+   *  meter reset to Home Assistant. Publishers send null while this is false. */
+  basisComplete: boolean;
 }
 
 const CURTAIL_TTL_MS = 5 * 60 * 1000;         // v0.9.82 — 5 min (was 1). The 7-day history walk is the cost; the alert monitor reads this cache, 5-min freshness is fine and halves its recompute frequency.
@@ -7104,6 +7126,7 @@ export async function computeCurtailment(
     opportunisticLoads: DEFAULT_OPPORTUNISTIC_LOADS.map((o) => ({
       ...o, fitsInSurplus: false, haServiceHint: null,
     })),
+    basisComplete: false,
   };
 
   const dpus = allDpus(devices);
@@ -7240,7 +7263,10 @@ export async function computeCurtailment(
     recent7dHoursCount: recent7dHours.length,
     hourlyHistogram,
     opportunisticLoads,
+    basisComplete: weather != null && bayes.hourly.length > 0,
   };
+  // An incomplete report is cached for the same TTL: its figures publish as null, and a
+  // shorter TTL would only retry a failing weather fetch more often.
   curtailmentCache = { ts: now, value: report };
   return report;
 }
@@ -7563,6 +7589,9 @@ export interface CarbonReport {
   lifetimePvKwh: number;
   lifetimeKgAvoided: number;
   lifetimeMilesNotDriven: number;
+  /** v1.178.0 — the rolling window ran with both a DPU and the panel projected. False on a
+   *  boot-partial snapshot, whose window figures are a model-less 0; publishers send null. */
+  basisComplete?: boolean;
 }
 
 let carbonCache: { ts: number; value: CarbonReport } | null = null;
@@ -7622,6 +7651,7 @@ export function computeCarbonReport(
   const fleetComplete =
     deviceList.some((d) => d.projection?.kind === 'dpu') &&
     deviceList.some((d) => d.projection?.kind === 'shp2');
+  value.basisComplete = fleetComplete;
   if (fleetComplete) carbonCache = { ts: Date.now(), value };
   return value;
 }
@@ -7788,6 +7818,8 @@ export interface TariffReport {
   // Today running
   todayGridImportCostDollars: number;
   todaySolarLoadValueDollars: number;
+  /** v1.178.0 — computed with both DPUs and the panel projected (see computeTariffReport). */
+  basisComplete?: boolean;
 }
 
 let tariffCache: { ts: number; value: TariffReport } | null = null;
@@ -7902,6 +7934,10 @@ export function computeTariffReport(
   // v0.15.13 — `&&`, not `||`: tariff needs PV (DPUs) and load (SHP2); a
   // boot-partial snapshot with only one of them computes a misleading figure
   // (observed: net_savings −$4.36 from grid-import cost with no solar value).
+  // v1.178.0 — publish the same gate on the value: a boot-partial tariff is a model-less 0.
+  // A DPU-only install (no panel listed at all, by projection or product name) prices ac_in
+  // and is complete without one; a panel listed but not yet projected is the boot race.
+  value.basisComplete = dpus.length > 0 && (shp2 != null || shp2Panels(devices).sns.length === 0);
   if (dpus.length > 0 && shp2 != null) tariffCache = { ts: now, value };
   return value;
 }

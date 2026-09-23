@@ -68,6 +68,15 @@ export interface DeviceSnapshot {
   onlineChangedAtMs?: number;
   onlineChangedVia?: 'device-list' | 'status';
   /**
+   * v1.178.0 — the SHP2's last grid reading that actually CARRIED gridSta
+   * (projection.gridConnected non-null), written only by setDeviceQuota. The declared-grid
+   * veto falls back to it when the current projection has none: a non-empty REST reply that
+   * omits the pd303_mc subtree (a known reply shape) re-projects gridConnected as null, and
+   * the veto must not lift on a reply that said nothing about the grid. In memory only — a
+   * restart forgets it.
+   */
+  lastGridReading?: { connected: boolean; sta: number | null; atMs: number };
+  /**
    * v1.142.0 — when this device's payload STOPPED MOVING, or null/absent if it
    * is moving. Set only for the SHP2, from the twelve-channel watt witness. See
    * shp2Shadow.ts: a 200 OK carrying a replayed body is invisible to every
@@ -319,6 +328,7 @@ export class SnapshotStore extends EventEmitter {
         contentStaleSinceMs: existing?.contentStaleSinceMs,
         onlineChangedAtMs: existing?.onlineChangedAtMs,
         onlineChangedVia: existing?.onlineChangedVia,
+        lastGridReading: existing?.lastGridReading, // v1.178.0 — same trap, same carry
       };
       // The transition stamp must land on the REBUILT object, not the one this
       // literal just replaced.
@@ -482,6 +492,9 @@ export class SnapshotStore extends EventEmitter {
     cur.lastUpdated = nowQ;
     cur.lastQuotaAtMs = nowQ;
     cur.lastTelemetryAtMs = nowQ;
+    if (cur.projection?.kind === 'shp2' && cur.projection.gridConnected != null) {
+      cur.lastGridReading = { connected: cur.projection.gridConnected, sta: cur.projection.gridSta ?? null, atMs: nowQ };
+    }
     // v1.142.0 — did the CONTENT move, or did the cloud replay a shadow?
     if (this.contentFreshnessPath == null) this.loadContentFreshness(nowQ);
     const witness = shp2ContentWitness(cur.projection);

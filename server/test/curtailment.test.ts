@@ -12,6 +12,7 @@ import {
   type WeatherForecast,
 } from '../src/weather.js';
 import type { Recorder } from '../src/recorder.js';
+import { publishReadiness, type ReadinessInputs } from '../src/publishReadiness.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
 
@@ -353,6 +354,58 @@ test('curtailment — inactive when no SHP2 in snapshot (DPU-only setup)', async
   assert.equal(r.active, false);
   assert.equal(r.inactiveReason, 'no-shp2');
 });
+
+test('★★★ v1.178.0 — weather-cold (the worker after a restart): basisComplete false, so the kWh totals publish null, not a reset to 0', async () => {
+  withFreshState();
+  // The worker's in-memory weather cache is empty after every restart; the first Open-Meteo
+  // fetch failing leaves getWeather() null, the posterior empty, and every hour sampling null.
+  setWeatherCacheForTesting(null);
+  const devices = buildDevices({ dpuSocPct: 99, dpuPvWatts: 2000, shp2LoadWatts: 1800 });
+  const r = await computeCurtailment(devices, emptyRecorder());
+  assert.equal(r.todayKwh, 0, '(the model-less 0 that read as a meter reset)');
+  assert.equal(r.basisComplete, false);
+  assert.equal(publishReadiness({ ...warmReadinessInputs(), curtailment: r }).curtailment, false);
+});
+
+test('v1.178.0 — a pinned posterior without weather is still incomplete (the hour walks need both)', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(null);
+  setBayesianModelForTesting(mockBayes(10));
+  const r = await computeCurtailment(buildDevices({ dpuSocPct: 99, dpuPvWatts: 2000, shp2LoadWatts: 1800 }), emptyRecorder());
+  assert.equal(r.basisComplete, false);
+});
+
+test('v1.178.0 — weather without a posterior (no paired history yet) is incomplete too', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(syntheticWeatherNow(700));
+  const r = await computeCurtailment(buildDevices({ dpuSocPct: 99, dpuPvWatts: 2000, shp2LoadWatts: 1800 }), emptyRecorder());
+  assert.equal(r.basisComplete, false);
+});
+
+test('v1.178.0 — weather + posterior: basisComplete true and readiness publishes the report', async () => {
+  withFreshState();
+  setWeatherCacheForTesting(syntheticWeatherNow(700));
+  setBayesianModelForTesting(mockBayes(10));
+  const r = await computeCurtailment(buildDevices({ dpuSocPct: 99, dpuPvWatts: 2000, shp2LoadWatts: 1800 }), emptyRecorder());
+  assert.equal(r.basisComplete, true);
+  assert.equal(publishReadiness({ ...warmReadinessInputs(), curtailment: r }).curtailment, true);
+});
+
+test('v1.178.0 — the early returns (no home Cores, no panel) are incomplete', async () => {
+  withFreshState();
+  assert.equal((await computeCurtailment({}, emptyRecorder())).basisComplete, false);
+  const devices = buildDevices({ dpuSocPct: 99, dpuPvWatts: 2000, shp2LoadWatts: 1800 });
+  delete devices['SHP2-1'];
+  resetForecastCachesForTesting();
+  assert.equal((await computeCurtailment(devices, emptyRecorder())).basisComplete, false);
+});
+
+function warmReadinessInputs(): ReadinessInputs {
+  return {
+    devices: {}, alerts: [], speakerLastProbeAt: 1, forecast: null, clipping: null,
+    curtailment: null, carbon: null, tariff: null,
+  };
+}
 
 test('cleanup — clear test seams', () => {
   clearWeatherTestOverride();
