@@ -683,7 +683,10 @@ export function housePoolFallbackSoc(
   devices: Record<string, DeviceSnapshot>,
   lastKnownRoster?: ReadonlySet<string> | null,
 ): number | null {
-  if (shp2Panels(devices).sns.length <= 1) return homeFleetMeanSoc(devices, lastKnownRoster);
+  // v1.185.0 (review) — a MISSING house pin is never the one-panel case: the panel left on the
+  // account is another pool (a replacement, or the garage panel after the house panel dropped off).
+  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);
+  if (shp2Panels(devices).sns.length <= 1 && !missingPin) return homeFleetMeanSoc(devices, lastKnownRoster);
   // v1.185.0 (review) — two panels: ONLY the house pool's own Cores, even while the house panel has
   // no projection (restart while dark: its persisted roster). Never the union — that would be the
   // other pool's Cores, holding the house ladder above rungs its own pool has crossed. No roster

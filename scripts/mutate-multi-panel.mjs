@@ -123,7 +123,7 @@ const MUTANTS = [
   {
     id: 'xiv. ★★ the house blind fallback averages both pools',
     file: MEMB,
-    find: '  if (shp2Panels(devices).sns.length <= 1) return homeFleetMeanSoc(devices, lastKnownRoster);',
+    find: '  if (shp2Panels(devices).sns.length <= 1 && !missingPin) return homeFleetMeanSoc(devices, lastKnownRoster);',
     to: '  return homeFleetMeanSoc(devices, lastKnownRoster); /* MUTANT */',
     why: 'A full garage bank holds the house ladder above its critical rungs while the house pool empties.',
   },
@@ -204,6 +204,13 @@ const MUTANTS = [
     find: '  return house ? panelMeanSoc(devices, house) : null;',
     to: '  return house ? panelMeanSoc(devices, house) : homeFleetMeanSoc(devices, lastKnownRoster); /* MUTANT */',
     why: 'The house ladder is fed the garage pool: none of the house rungs can fire.',
+  },
+  {
+    id: 'r5-b. ★★★ a missing house pin is taken for the one-panel case',
+    file: MEMB,
+    find: '  const missingPin = Object.values(devices).some((d) => d.housePanelMissing != null);',
+    to: '  const missingPin = false; /* MUTANT */',
+    why: 'The house panel drops off the account and the house ladder is fed the one pool left: the garage.',
   },
   {
     id: 'r6. ★★★ a dark panel forgets its Cores (no persisted roster)',
