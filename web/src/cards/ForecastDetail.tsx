@@ -105,6 +105,16 @@ export function ForecastDetail() {
 
 function ForecastCard({ fc }: { fc: DayForecast }) {
   const loadWh = fc.hours.reduce((s, h) => s + h.forecastLoadW, 0);
+  // v1.177.0 — say what this load includes. It carries the predicted EV-charging layer; the
+  // Dashboard's runway strips it (the alarm path is evidence-based), so the two "load over
+  // the next 24 h" figures differ by exactly this amount plus the runway's recent-load blend,
+  // and neither said so (live: 96.3 kWh here vs 93-94 kWh on the Dashboard).
+  const evWh = fc.hours.reduce((s, h) => s + (h.predictedEvLoadW ?? 0), 0);
+  // The projected low can only include EV load predicted at or before it: later load cannot
+  // lower an earlier minimum.
+  const evBeforeLowWh = fc.minProjectedSocTs == null
+    ? 0
+    : fc.hours.filter((h) => h.ts <= (fc.minProjectedSocTs as number)).reduce((s, h) => s + (h.predictedEvLoadW ?? 0), 0);
   const runtimeNote =
     fc.minProjectedSoc == null
       ? 'Battery SoC projection unavailable — not enough history yet.'
@@ -142,12 +152,12 @@ function ForecastCard({ fc }: { fc: DayForecast }) {
       />
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3">
         <Tile label="Solar next 24 h" value={kwh(fc.forecastPvWhNext24)} accent="text-accent" />
-        <Tile label="Forecast load 24 h" value={kwh(loadWh)} accent="text-warn" />
+        <Tile label="Forecast load 24 h" value={kwh(loadWh)} accent="text-warn" sub={evWh > 0 ? `incl. ${kwh(evWh)} predicted EV` : 'no EV charging predicted'} />
         <Tile label="Typical solar / day" value={kwh(fc.typicalPvWhPerDay)} />
         <Tile
           label="Projected low SoC"
           value={fc.minProjectedSoc != null ? `${fc.minProjectedSoc}%` : '—'}
-          sub={fc.minProjectedSocTs != null ? `at ${tsHour(fc.minProjectedSocTs)}` : undefined}
+          sub={fc.minProjectedSocTs != null ? `at ${tsHour(fc.minProjectedSocTs)}${evBeforeLowWh > 0 ? ' · incl. predicted EV' : ''}` : undefined}
         />
         <Tile label="History depth" value={`${fc.historyDays} days`} sub={`reserve floor ${fc.reserveSoc}%`} />
       </div>

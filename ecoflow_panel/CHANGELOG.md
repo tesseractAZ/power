@@ -1,3 +1,51 @@
+## 1.177.0
+
+### The Runway card says what its projection shows
+
+- **"No dip in 24 h — forecast PV keeps up with load" is gone.** It was printed whenever the
+  islanded pool did not cross the reserve floor inside 24 hours — the only condition the
+  projection tested. On 2026-09-22 it sat above a projection that fell from 78 to 26 kWh, with
+  solar covering 57% of the modelled load. The projection now reports its lowest point and when
+  it happens, and the headline reads "reserve holds 24 h" labelled with that lowest point and its
+  margin over the floor ("lowest ≈ 26.0 kWh around Wed 6:00 AM, 11.3 kWh above the reserve
+  floor"). "Forecast PV keeps up with the load" appears only when the pool never falls below where
+  it is now. A lowest point within 15% of full above the floor is shown neutral rather than green
+  (never more alarming than a reserve crossing 12–24 hours out, which is also neutral).
+- **"Grid is carrying the load" only when it is.** The note read "grid is carrying the load"
+  whenever the grid was backstopping, including with 0 W imported while solar carried the house,
+  beside an Energy flow card reading GRID STANDBY. It now says so only when grid power is flowing
+  and reads "grid available as a backstop" otherwise. The note — "these are islanded projections,
+  not a live countdown" — is still shown only while the grid resolver says the grid is
+  backstopping: a grid that is merely reported present at the reserve floor (a declared grid with
+  no measured flow, or a panel reporting "Grid OK" while the pool keeps discharging) is exactly the
+  state in which the projection is the live countdown and the alarms speak critical, and the card
+  says nothing to the contrary.
+- **The header names the load model in use.** "Last-hour load + next-24h forecast PV" described
+  only the degraded fallback. The projection normally runs the day-of-week load curve (without
+  predicted EV charging) with the last hour's load blended into the first four hours — live, 2.2×
+  the last hour alone. The header reads "typical load" normally and "last-hour load" in the
+  fallback.
+- **"Recent load" is captioned by what it is.** Every fallback — a live reading after a restart,
+  a single recorded sample, a value carried forward from the previous compute — was labelled
+  "1-hour average". The caption now follows the projection's `recentLoadBasis`.
+- **The two forecast-load figures say why they differ.** The Dashboard's runway load leaves out
+  the predicted-EV layer (the alarm path is evidence-based; past EV charging is still averaged
+  into the typical load curve, and a car charging now shows in the recent load); the Solar tab's
+  forecast load adds it (live: 93–94 vs 96.3 kWh). Each now says which, and the Solar tab's
+  projected low SoC notes when EV load predicted before that low is included.
+- **Home Assistant and the Dashboard agree on the next-24 h solar forecast.** With every Core
+  reporting the two are meant to be one number, and had drifted apart twice: the value published
+  to Home Assistant skipped the learned bias correction (51.4 vs 52.9 kWh live, exactly the
+  factor), and its solar model was refit on hours the Dashboard's model excludes after any
+  partial-fleet day (79.4 vs 76.7 kWh reproduced). With no Core missing the published figure now
+  uses the Dashboard's model and correction. The runway and its alarms are unaffected: they never
+  read the display figure.
+- The projection's lowest point is timestamped at the empty crossing when the pool empties,
+  matching `emptyAtMs` instead of the end of that hour.
+- "of 92 full" keeps the tile's own decimal ("of 92.2 full").
+
+New harness `scripts/mutate-runway-card.mjs` (15 anchor-asserted mutants).
+
 ## 1.176.0
 
 ### The dashboard says how old its data is — and stops saying "live" over stale data

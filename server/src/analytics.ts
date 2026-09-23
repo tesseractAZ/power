@@ -1680,7 +1680,14 @@ async function computeDayForecastUncached(
     const pvE = pvHourlyByEpoch(recorder, sn, 'pv_total', since, now);
     for (const [he, pv] of pvE) restoredFleetPvByEpoch.set(he, (restoredFleetPvByEpoch.get(he) ?? 0) + pv);
   }
-  const restoredSolarModel = buildSolarResponse(restoredFleetPvByEpoch, ghiByEpoch);
+  // v1.177.0 — with no missing SNs the restored model IS the alarm model. The comment above
+  // promised an identical refit, but the refit used the UNGATED map while solarModel is fit on
+  // the F11 full-coverage hours (fleetFit.map): after any partial-fleet day in the window the
+  // two diverged (reproduced: 79.4 vs 76.7 kWh next-24 h on a fully reporting fleet), and Home
+  // Assistant (display) disagreed with the dashboard (alarm) on the same forecast.
+  const restoredSolarModel = missingConnectedSns.length === 0
+    ? solarModel
+    : buildSolarResponse(restoredFleetPvByEpoch, ghiByEpoch);
 
   // v0.93.0 (audit #3) — ALARM-FACING PV bias correction. Hindcast the reporting-only
   // `solarModel` against the last 7 days of actual home-Core PV (same home DPUs that
@@ -1839,7 +1846,8 @@ async function computeDayForecastUncached(
     // v0.93.0 (audit #3) — pvSum, the projected-SoC sim, and forecastPvW all consume
     // the BIAS-CORRECTED pvAlarm (never the raw pv), so the alarm-facing reporting
     // next-24h, the projected-SoC slope, and the per-hour series stay mutually
-    // consistent and conservative. The DISPLAY basis (restoredPvSum below) stays raw.
+    // consistent and conservative. v1.177.0 — the DISPLAY basis (restoredPvSum below)
+    // applies the same correction, so the two agree whenever every Core is reporting.
     pvSum += pvAlarm;
     let socPct: number | null = null;
     if (fullWh && fullWh > 0 && socWh != null) {
@@ -1882,8 +1890,17 @@ async function computeDayForecastUncached(
     const wx = wxByHour.get(Math.floor(ts / 3_600_000)) ?? null;
     const cloud = wx ? wx.cloudCoverPct : null;
     const ghi = wx ? wx.radiationWm2 : null;
-    const { pv } = forecastHourPvW(restoredSolarModel.hourly[clock], ghi, cloud, restoredPvCurve[clock], clearnessHist);
-    restoredPvSum += pv;
+    // v1.177.0 — the SAME bias correction and ceiling as the alarm series (above). The
+    // v0.78.0 contract is that with every Core reporting this sum EQUALS pvSum; v0.93.0
+    // bias-corrected pvSum and left this one raw, so the dashboard (forecastPvWhNext24:
+    // 52.9 kWh) and the value published to Home Assistant (this one: 51.4 kWh) disagreed by
+    // exactly pvBiasFactor (1.028) on a fully reporting fleet. The factor is the model's
+    // measured hindcast bias, so the corrected figure is the better display estimate too.
+    // Display only: computeRunway never reads this sum (runwayPvBasisGuard).
+    const restoredResp = restoredSolarModel.hourly[clock];
+    const { pv, modelled } = forecastHourPvW(restoredResp, ghi, cloud, restoredPvCurve[clock], clearnessHist);
+    const restoredCeil = modelled ? restoredResp.observedMaxPvW * 1.05 : null;
+    restoredPvSum += restoredCeil != null ? Math.min(pv * pvBiasFactor, restoredCeil) : pv * pvBiasFactor;
   }
 
   const value: DayForecast = {
@@ -2997,6 +3014,20 @@ export interface RunwayProjection {
   /** v0.15.21 — true when the forecast load curve was implausibly empty and the
    *  whole horizon ran on the observed load instead (post-boot worker race). */
   loadModelDegraded: boolean;
+  /** v1.177.0 — the LOWEST the islanded pool reaches inside the horizon, and when (null on
+   *  an unavailable projection). A projection that never crosses the reserve floor still
+   *  says how close it comes: the card used to print "no dip in 24 h — forecast PV keeps up
+   *  with load" over a pool projected to fall 78 → 26 kWh. Reporting only; the crossing
+   *  detectors and the alarm are unchanged. */
+  troughKwh: number | null;
+  troughAtMs: number | null;
+  /** v1.177.0 — the pool at the end of the horizon (null on an unavailable projection). */
+  endKwh: number | null;
+  /** v1.177.0 — what `recentLoadWatts` is: the mean of the last hour's panel_load rows
+   *  (the normal case), or, when fewer than two exist, the live channel sum, a single
+   *  recorded row, or the previous compute's value carried forward. The card captioned
+   *  every one of them "1-hour average". */
+  recentLoadBasis: 'hour-mean' | 'live' | 'single-sample' | 'carried' | null;
 }
 
 let runwayCache: { ts: number; value: RunwayProjection } | null = null;
@@ -3063,6 +3094,10 @@ const emptyRunway = (now: number, reason: string, extra: Partial<RunwayProjectio
   horizonHours: 0,
   unavailable: reason,
   loadModelDegraded: false,
+  troughKwh: null,
+  troughAtMs: null,
+  endKwh: null,
+  recentLoadBasis: null,
   ...extra,
 });
 
@@ -3114,6 +3149,7 @@ export function computeRunway(
   // setup that's just the EVSE on Core 4, which only runs occasionally.)
   const loadPts = recorder.query(shp2.sn, 'panel_load', now - RUNWAY_LOAD_WINDOW_MS, now);
   let loadAvgWatts: number;
+  let recentLoadBasis: RunwayProjection['recentLoadBasis'] = 'hour-mean';
   if (loadPts.length > 0) runwayLoadMeasuredAtMs = Math.max(runwayLoadMeasuredAtMs ?? 0, loadPts[loadPts.length - 1].ts);
   if (loadPts.length >= 2) {
     loadAvgWatts = loadPts.reduce((s, p) => s + p.value, 0) / loadPts.length;
@@ -3143,6 +3179,7 @@ export function computeRunway(
       });
     }
     loadAvgWatts = fallback;
+    recentLoadBasis = liveLoadWatts > 0 ? 'live' : loadPts.length === 1 ? 'single-sample' : 'carried';
   }
 
   // ★★ ALARM-SAFETY INVARIANT (v0.78.0) — DO NOT VIOLATE. The runway depletion sim
@@ -3218,6 +3255,10 @@ export function computeRunway(
   }
 
   let stateKwh = backupRemainingKwh;
+  // v1.177.0 — the trajectory's lowest point (reporting only). Starts at the pool NOW: a
+  // pool that only rises has its minimum at the start.
+  let troughKwh = backupRemainingKwh;
+  let troughH = 0;
   let hoursToReserve: number | null = null;
   let hoursToEmpty: number | null = null;
   let totalForecastPv = 0;
@@ -3251,6 +3292,12 @@ export function computeRunway(
     // PV-surplus stretch banked phantom above-capacity energy that then extended
     // the later drain — optimistic. The clamp can only SHORTEN runway.
     stateKwh = Math.max(0, Math.min(backupFullKwh, nextState));
+    if (stateKwh < troughKwh) {
+      troughKwh = stateKwh;
+      // An empty pool reaches its minimum at the fractional crossing inside this hour, the
+      // same instant emptyAtMs reports — not at the hour's end, up to an hour later.
+      troughH = stateKwh === 0 && hoursToEmpty != null ? hoursToEmpty : h + 1;
+    }
   }
 
   // v0.60.0 — asymmetric hysteresis (this point is only reached on a HEALTHY
@@ -3288,6 +3335,10 @@ export function computeRunway(
     runwayPairClamped: coherent.clamped || undefined,
     unavailable: null,
     loadModelDegraded,
+    troughKwh: round2(troughKwh),
+    troughAtMs: Math.round(now + troughH * 3_600_000),
+    endKwh: round2(stateKwh),
+    recentLoadBasis,
   };
   runwayCache = { ts: now, value };
   return value;
