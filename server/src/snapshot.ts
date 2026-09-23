@@ -86,6 +86,12 @@ export interface DeviceSnapshot {
    */
   lastGridReading?: { connected: boolean; sta: number | null; atMs: number };
   /**
+   * v1.184.0 — the operator cleared a stuck "no grid" (POST /api/grid-veto/clear): the
+   * declared-grid veto ignores any reading taken at or before this time. The panel's NEXT reading
+   * counts again — if the grid is still out, the veto returns on it.
+   */
+  gridVetoClearedAtMs?: number;
+  /**
    * v1.142.0 — when this device's payload STOPPED MOVING, or null/absent if it
    * is moving. Set only for the SHP2, from the twelve-channel watt witness. See
    * shp2Shadow.ts: a 200 OK carrying a replayed body is invisible to every
@@ -359,6 +365,7 @@ export class SnapshotStore extends EventEmitter {
         onlineChangedAtMs: existing?.onlineChangedAtMs,
         onlineChangedVia: existing?.onlineChangedVia,
         lastGridReading: existing?.lastGridReading, // v1.178.0 — same trap, same carry
+        gridVetoClearedAtMs: existing?.gridVetoClearedAtMs, // v1.184.0 — same trap, same carry
         // v1.180.0 — on FIRST sight (a restart), the panel's persisted not-OK reading, so the
         // declared-grid veto survives a restart while the panel is dark (no quota is fetched for
         // a device listed offline, so nothing else would ever restore it).
@@ -711,6 +718,29 @@ export class SnapshotStore extends EventEmitter {
         this.logger(`grid-reading: could not save the panel's grid reading (${(e as Error)?.message ?? e}) — retrying on each panel reading`);
       }
     }
+  }
+
+  /**
+   * v1.184.0 — the operator's "the grid is back" for a veto held on a reading the panel is not
+   * refreshing: stamps gridVetoClearedAtMs on every panel device (projected or listed) and forgets
+   * the persisted readings. Returns how many panels it stamped.
+   */
+  clearGridVeto(nowMs: number = this.now()): number {
+    let n = 0;
+    for (const d of Object.values(this.snap.devices)) {
+      if (d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel')) {
+        d.gridVetoClearedAtMs = nowMs;
+        n++;
+      }
+    }
+    if (this.persistedGridReadings.size > 0) {
+      this.persistedGridReadings.clear();
+      this.unseenPersistedGrid.clear();
+      this.writeGridReadings();
+    }
+    this.snap.generatedAt = nowMs;
+    this.emit('change', this.snap);
+    return n;
   }
 
   private persistedGridAbsentLogged = false;

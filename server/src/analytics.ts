@@ -1,7 +1,6 @@
 import type { DeviceSnapshot } from './snapshot.js';
 import { rateAt, apsREvModelFromEnv } from './tariff.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
-import { getRateFloorCollapses } from './messageRateFloorAlert.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
@@ -382,6 +381,19 @@ export function regimeShiftDays(
 }
 
 /** Phase 2 learned alerts: per-sensor self-baseline. Cached ~5 min. */
+/**
+ * v1.184.0 — the v1.79.0 starved-feed rule, on the MAIN thread where the message-rate-floor state
+ * lives: drop a `baseline-*` anomaly whose device's feed has collapsed — its spot values are
+ * minutes old against a healthy-cadence baseline — EXCEPT a collapse held only because the device
+ * is electrically idle (v1.158.0 idle-held: its session is healthy, idle packs just report slowly),
+ * which must not blind anomaly detection on that Core for the whole idle night. Pure.
+ */
+export function applyStarvedFeedFilter(alerts: Alert[], collapsedSns: readonly string[], idleHeldSns: ReadonlySet<string>): Alert[] {
+  const starved = new Set(collapsedSns.filter((sn) => !idleHeldSns.has(sn)));
+  if (starved.size === 0) return alerts;
+  return alerts.filter((a) => !(a.id.startsWith('baseline-') && a.sourceSn != null && starved.has(a.sourceSn)));
+}
+
 export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, recorder: Recorder): Alert[] {
   if (baselineCache && Date.now() - baselineCache.ts < BASELINE_TTL_MS) {
     return baselineCache.alerts;
@@ -397,7 +409,6 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
   // hold (9h30m on 2026-09-13/14). Filtering it to the quorum's active set would resume raises
   // on a pack whose feed really is low-cadence; that needs evidence the raises are meaningful
   // there, not a same-day change to a life-safety alert path.
-  const starvedSnsForBaseline = new Set(getRateFloorCollapses().map((c) => c.sn)); // v1.79.0
   for (const t of buildBaselineTargets(devices)) {
     if (t.live == null || !Number.isFinite(t.live)) continue;
     const pts = recorder.query(t.sn, t.metric, now - BASELINE_HISTORY_MS, now);
@@ -476,11 +487,10 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
     // figures the reader sees, not from the unrounded absDev, so the three
     // numbers always add up. Detection (the floor gate above and z-score) still
     // uses the full-precision absDev/med — only display changes here.
-    // v1.79.0 — no anomaly raises from a starved feed: on 2026-08-16 07:01 the
-    // MPPT-temp family fired off devices in msg-rate collapse (minutes-old
-    // spot values against a healthy-cadence baseline). Detection state is
-    // untouched; the raise resumes when the feed recovers.
-    if (starvedSnsForBaseline.has(t.sn)) continue;
+    // v1.79.0 — no anomaly raises from a starved feed (2026-08-16 07:01: the MPPT-temp family
+    // fired off devices in msg-rate collapse). v1.184.0 — applied by the alert monitor on the MAIN
+    // thread (applyStarvedFeedFilter): this runs in the analytics worker, where the rate-floor
+    // collapse state is never set, so the check here was always empty and the guard never fired.
     const dispLive = Math.round(t.live);
     const dispMed = Math.round(med);
     const dispAbsDev = Math.abs(dispLive - dispMed);
@@ -498,6 +508,7 @@ export function computeBaselineAlerts(devices: Record<string, DeviceSnapshot>, r
       : '';
     out.push({
       id: `baseline-${t.metric}-${t.sn}`,
+      sourceSn: t.sn, // v1.184.0 — for the main-thread starved-feed filter
       severity,
       ...(regime ? { annunciate: false } : {}),
       category: t.category,

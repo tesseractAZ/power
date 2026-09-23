@@ -221,6 +221,7 @@ import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
 import type { NightLedgerRow } from './recorder.js';
+import { logMethodHook } from './logHooks.js';
 
 // REST polling cadence. MQTT now delivers per-cmdId fresh data, but we keep a
 // 60s REST poll as a baseline for fields that MQTT doesn't emit and as recovery
@@ -238,14 +239,8 @@ const app = Fastify({
   disableRequestLogging: true,
   logger: {
     level: config.logLevel,
-    hooks: {
-      logMethod(args: unknown[], method: (...a: unknown[]) => void) {
-        for (const a of args) {
-          if (typeof a === 'string' && a.includes('stream closed prematurely')) return;
-        }
-        method.apply(this, args as never);
-      },
-    },
+    // v1.184.0 — logHooks.ts: also demotes a client hang-up ("premature close") to debug.
+    hooks: { logMethod: logMethodHook as never },
   },
 });
 app.addHook('onResponse', (req, reply, done) => {
@@ -5731,6 +5726,20 @@ app.post('/api/night-charge/cancel', { preHandler: requireWriteAuth }, async (_r
     `night-charge: owner CANCELLED tonight's supervised write (${s.day})${s.appliedAtMs != null ? ' — the applied write reverts within a minute' : ''}.`,
   );
   return { ok: true, actuation: nightActuationMem };
+});
+
+// v1.184.0 — the operator's "the grid is back" for a declared-grid veto held on a panel reading
+// the panel is not refreshing (DOCS "Grid backstop resolver" 4.2). Refused while the panel is
+// freshly reporting no grid: that is the measurement, and its next poll would veto again.
+app.post('/api/grid-veto/clear', { preHandler: requireWriteAuth }, async (_req, reply) => {
+  const g = liveGridBackstop(store.get().devices);
+  if (!g.vetoClearable) {
+    reply.code(409);
+    return { ok: false, error: g.declared ? 'no grid veto is in force' : 'the panel is reporting no grid now — nothing stale to clear' };
+  }
+  const panels = store.clearGridVeto();
+  app.log.info(`grid-veto: operator CLEARED the saved "no grid" reading (${panels} panel(s)); was: ${g.reason}. The panel's next reading counts again.`);
+  return { ok: true, grid: liveGridBackstop(store.get().devices) };
 });
 
 // Diagnostics: the analytics worker is the cache warmer now (self-warming

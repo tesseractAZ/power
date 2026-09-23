@@ -7,6 +7,7 @@ import { LazySparkline as Sparkline } from '../charts/LazySparkline';
 import { RefreshCloudButton } from '../components/RefreshCloudButton';
 import { HUES, UI } from '../theme';
 import type { DpuViaShp2 } from './DpuCard';
+import { apiUrl } from '../api';
 
 // v0.36.0 — the SHP2 IS the grid interconnect: grid is a BACKSTOP it taps
 // automatically when the backup pool hits its reserve floor (or for rebalancing).
@@ -47,6 +48,36 @@ function resolveGridStatus(
     return { state: 'standby', reason: grid.reason };
   }
   return { state: 'unknown' };
+}
+
+/**
+ * v1.184.0 — shown while a declared grid is vetoed by a panel reading the panel is not refreshing
+ * (offline, replaying, stale, or from before a restart). The operator — who can see whether the
+ * lights on the grid side are on — can clear it; the panel's next reading counts again.
+ */
+function GridVetoClear({ grid }: { grid: GridBackstop | undefined }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | string>('idle');
+  if (!grid?.vetoClearable && state !== 'done') return null;
+  if (state === 'done') return <div className="mt-1 text-[10px]" style={{ color: UI.muted }}>Cleared — the panel's next reading counts.</div>;
+  const clear = async () => {
+    if (!window.confirm('Only if you know the grid is back: clear the saved "no grid" reading? The panel\'s next reading will count again.')) return;
+    setState('busy');
+    try {
+      const r = await fetch(apiUrl('api/grid-veto/clear'), { method: 'POST' });
+      setState(r.ok ? 'done' : `clear failed (HTTP ${r.status})`);
+    } catch {
+      setState('clear failed — network error');
+    }
+  };
+  return (
+    <div className="mt-1 flex items-center gap-2 text-[10px]" style={{ color: UI.muted }}>
+      <span>Off-grid from the panel's last reading, which it is not refreshing.</span>
+      <button onClick={clear} disabled={state === 'busy'} className="ml-auto px-2 py-0.5 rounded border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50">
+        Grid is back — clear
+      </button>
+      {state !== 'idle' && state !== 'busy' ? <span style={{ color: UI.bad }}>{state}</span> : null}
+    </div>
+  );
 }
 
 function GridStatusLine({ d }: { d: DeviceSnapshot }) {
@@ -190,6 +221,7 @@ export const Shp2Card = memo(function Shp2Card({
       {/* v0.36.0 — grid interconnect status: the SHP2 connects the grid and taps
           it as a backstop when the backup pool needs it. ACTIVE / STANDBY / ISLANDED. */}
       <GridStatusLine d={d} />
+      <GridVetoClear grid={d.grid} />
 
       {!p ? (
         <div className="text-sm text-muted">No telemetry yet.</div>

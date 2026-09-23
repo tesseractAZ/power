@@ -7,7 +7,7 @@ import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
 import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, packSnTail } from './alerts.js';
 import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
-import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds } from './messageRateFloorAlert.js';
+import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
 import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, blindAlertContext, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { blindRemediationStep } from './blindRemediation.js';
@@ -23,6 +23,7 @@ import {
   computeBaselineAlerts,
   computeForecastAlerts,
   applyRuntimeGrid,
+  applyStarvedFeedFilter,
   computeCurtailmentAlerts,
   getDayForecast,
   forecastDayAlerts,
@@ -2186,7 +2187,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       ...computeAlerts(snap.devices, connectivity, grid),
       ...computeLearnedAlerts(snap.devices),
       ...peakGridDrawAlerts(peakDraw, Date.now()),
-      ...baselineAlerts,
+      // v1.184.0 — the starved-feed rule, with the MAIN thread's rate-floor state (idle-held exempt).
+      ...applyStarvedFeedFilter(baselineAlerts, getRateFloorCollapses().map((c) => c.sn), rateFloorIdleHeldSns()),
       // v1.181.0 — the runtime alert's grid rule, with the MAIN thread's live resolver.
       ...applyRuntimeGrid(forecastAlerts, grid.backstopping === true),
       ...forecastDay,
