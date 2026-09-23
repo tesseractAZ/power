@@ -1,4 +1,5 @@
 import type { DeviceSnapshot, Shp2ChargeWindow, Shp2PairedCircuit, Shp2Projection } from '../types';
+import { strategyExclusion } from '../cards/cardText';
 import { fmtPct, fmtW } from '../format';
 // v0.85.0 — the dissolved Predictive tab's strategy-relevant sections relocate
 // here: EV-charging window prediction + NWS active alerts (storm-prep). Both
@@ -195,23 +196,25 @@ function PriorityRow({
   // today). Keep it in the ranked list but clearly mark it — it is NOT an active
   // shed participant despite carrying a loadPriority. Mirrors the telnet screen.
   const disabled = circuit.loadIsEnable === false;
+  // v1.183.0 — loadIsEnable is the LOAD-STRATEGY flag, not the relay (cardText.strategyExclusion).
+  const exclusion = strategyExclusion(circuit.loadIsEnable, circuit.watts);
   return (
-    <div className={`flex items-center gap-3 bg-panel2/50 border border-line rounded-lg p-2 ${disabled ? 'opacity-50' : ''}`}>
+    <div className={`flex items-center gap-3 bg-panel2/50 border border-line rounded-lg p-2 ${disabled && !active ? 'opacity-50' : ''}`}>
       <div className={`text-lg font-bold tabular-nums w-8 text-center ${tierColor}`}>
         {rank ?? '—'}
       </div>
       <div className="flex-1 min-w-0">
         <div className="text-sm font-medium truncate flex items-center gap-2">
-          <span className={disabled ? 'line-through' : ''}>{circuit.name}</span>
-          {disabled && (
-            <span className="badge badge-muted text-[9px] uppercase tracking-wider shrink-0">disabled</span>
+          <span>{circuit.name}</span>
+          {exclusion && (
+            <span className="badge badge-muted text-[9px] uppercase tracking-wider shrink-0">{exclusion.badge}</span>
           )}
         </div>
         <div className="text-[10px] text-muted">
           {circuit.isSplitPhase ? `ch${circuit.primaryCh}+${circuit.secondaryCh} · 240V` : `ch${circuit.primaryCh}`}
           {' · '}{circuit.breakerAmps ?? '—'}A
           {' · raw priority '}{circuit.loadPriority ?? '—'}
-          {disabled && ' · turned off in the SHP2'}
+          {exclusion && ` · ${exclusion.note}`}
         </div>
       </div>
       <div className="text-right">

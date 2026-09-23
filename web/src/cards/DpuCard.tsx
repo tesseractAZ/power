@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import { remainSuffix } from './cardText';
 import type { DeviceSnapshot, DpuProjection, Shp2EnergySource } from '../types';
 import { fmtMins, fmtPct, fmtTemp, fmtW, socColor } from '../format';
 // v0.22.0 — LazySparkline keeps recharts off the dashboard's first-paint path.
@@ -50,7 +51,7 @@ export const DpuCard = memo(function DpuCard({
       <div className="mb-3">
         <div className="flex items-baseline justify-between">
           <span className="text-3xl font-bold tabular-nums">{fmtPct(headlineSoc, headlineSocDigits)}</span>
-          <span className="text-xs text-muted">{remainTimeMin != null ? `${fmtMins(remainTimeMin)} remain` : '—'}</span>
+          <span className="text-xs text-muted">{remainTimeMin != null ? `${fmtMins(remainTimeMin)} ${remainSuffix(p?.batAmp)}` : '—'}</span>
         </div>
         <div className="bar mt-2">
           <div className={socColor(headlineSoc)} style={{ width: `${headlineSoc ?? 0}%` }} />

@@ -94,7 +94,7 @@ def('forecast load|forecast load 24 h|typical solar / day', 'Projected household
 def('forecast pv', 'Projected PV output for this hour.');
 def('projected low soc', 'The lowest the battery is forecast to reach over the next 24 hours.');
 def('cloud cover', 'Forecast cloud cover — what derates the solar prediction each hour.');
-def('outlook', 'At-a-glance battery comfort vs the reserve floor: Comfortable, Watch or Tight.');
+def('outlook', 'At-a-glance battery comfort vs the reserve floor: Comfortable, Watch or Tight — or "—" while there is no projection yet.');
 def('history depth', 'Days of recorded data behind the forecast and learned models — they sharpen as it grows.');
 def('confidence', 'How trustworthy the learned model is, based on how many samples it has.');
 def('z-score|peer z-score', 'Modified z-score — how many robust deviations a reading sits from normal. Higher = more anomalous; ≥ 3.5 flags, ≥ 5 warns.');

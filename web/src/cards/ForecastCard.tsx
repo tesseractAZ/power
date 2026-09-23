@@ -1,4 +1,6 @@
 import { memo, useEffect, useState } from 'react';
+import { outlookOf } from './cardText';
+import { kwTick } from '../charts/axisFormat';
 import {
   ComposedChart,
   Area,
@@ -15,6 +17,9 @@ import type { DayForecast } from '../types';
 import { fmtPct, fmtW } from '../format';
 import { apiUrl } from '../api';
 import { CHART, HUES, UI } from '../theme';
+
+// v1.183.0 — outlook tone → text colour (a neutral tone gets none).
+const TONE_CLASS = { bad: 'text-bad', warn: 'text-warn', ok: 'text-ok', muted: undefined } as const;
 
 /**
  * Day-ahead forecast card: cloud-aware solar prediction, typical-day load, and
@@ -79,26 +84,16 @@ export const ForecastCard = memo(function ForecastCard() {
             <Tile
               label="Projected low SoC"
               value={fc!.minProjectedSoc != null ? fmtPct(fc!.minProjectedSoc, 0) : '—'}
-              accent={fc!.minProjectedSoc != null && fc!.minProjectedSoc < fc!.reserveSoc ? 'text-bad' : 'text-ok'}
+              accent={fc!.minProjectedSoc == null ? undefined : fc!.minProjectedSoc < fc!.reserveSoc ? 'text-bad' : 'text-ok'}
               sub={fc!.minProjectedSocTs ? `at ${new Date(fc!.minProjectedSocTs).toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : ''}
             />
             <Tile label="Reserve floor" value={fmtPct(fc!.reserveSoc, 0)} sub="SHP2 backup reserve" />
             <Tile
               label="Outlook"
-              value={
-                fc!.minProjectedSoc != null && fc!.minProjectedSoc < fc!.reserveSoc
-                  ? 'Tight'
-                  : fc!.minProjectedSoc != null && fc!.minProjectedSoc < fc!.reserveSoc + 15
-                  ? 'Watch'
-                  : 'Comfortable'
-              }
-              accent={
-                fc!.minProjectedSoc != null && fc!.minProjectedSoc < fc!.reserveSoc
-                  ? 'text-bad'
-                  : fc!.minProjectedSoc != null && fc!.minProjectedSoc < fc!.reserveSoc + 15
-                  ? 'text-warn'
-                  : 'text-ok'
-              }
+              // v1.183.0 — no projection is not "Comfortable" (cardText.outlookOf).
+              value={outlookOf(fc!.minProjectedSoc, fc!.reserveSoc).label}
+              accent={TONE_CLASS[outlookOf(fc!.minProjectedSoc, fc!.reserveSoc).tone]}
+              sub={fc!.minProjectedSoc == null ? 'no projection yet' : undefined}
             />
           </div>
 
@@ -121,7 +116,7 @@ export const ForecastCard = memo(function ForecastCard() {
                   tick={{ fill: CHART.axis, fontSize: 10 }}
                   tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: 'numeric' })}
                 />
-                <YAxis yAxisId="w" tick={{ fill: CHART.axis, fontSize: 10 }} width={52} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
+                <YAxis yAxisId="w" tick={{ fill: CHART.axis, fontSize: 10 }} width={52} tickFormatter={kwTick} label={{ value: 'kW', angle: -90, position: 'insideLeft', fill: CHART.axis, fontSize: 10 }} />
                 <YAxis yAxisId="soc" orientation="right" domain={[0, 100]} tick={{ fill: CHART.axis, fontSize: 10 }} width={38} unit="%" />
                 <Tooltip
                   contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12 }}
