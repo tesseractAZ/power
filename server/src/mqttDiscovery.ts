@@ -7,7 +7,7 @@ import type { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics } from './analyticsClient.js';
 import type { Shp2Projection } from './ecoflow/project.js';
-import { aggregateFleetFlow } from './shp2Membership.js';
+import { aggregateFleetFlow, findShp2 } from './shp2Membership.js';
 import { kwh1, makeLifetimeKwh, makeAlertCounter, soonestProjecting } from './haPayloadFmt.js';
 import { rateAt, apsREvModelFromEnv } from './tariff.js';
 import {
@@ -1018,7 +1018,7 @@ export async function startMqttDiscovery(
       }
     }
     // Per-circuit lifetime sensors — same legacy double-prefix scheme.
-    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    const shp2 = findShp2(store.get().devices);
     if (shp2 && shp2.projection?.kind === 'shp2') {
       for (const c of (shp2.projection as Shp2Projection).circuits ?? []) {
         for (const legacy of legacyUniqueIdsFor(`ecoflow_circuit_${c.ch}_lifetime_kwh`)) {
@@ -1131,7 +1131,7 @@ export async function startMqttDiscovery(
   const buildState = async (snap: FleetSnapshot): Promise<Record<string, unknown>> => {
     const devices = Object.values(snap.devices);
     type Shp2Dev = typeof devices[number] & { projection: Shp2Projection };
-    const shp2 = (devices as Shp2Dev[]).find((d) => d.projection?.kind === 'shp2');
+    const shp2 = findShp2(snap.devices) as Shp2Dev | undefined; // v1.185.0 — the house panel
 
     const analytics = getAnalytics();
     const [fc, deg, runway, rte, clipping, sc, carbon, tariff, curtailment] = await Promise.all([
@@ -1378,7 +1378,7 @@ export async function startMqttDiscovery(
   let publishedCircuitChannels: number[] = [];
   const publishCircuitDiscovery = () => {
     if (!client.connected) return;
-    const shp2 = Object.values(store.get().devices).find((d) => d.projection?.kind === 'shp2');
+    const shp2 = findShp2(store.get().devices);
     if (!shp2 || shp2.projection?.kind !== 'shp2') return; // no projection yet — retry next tick
     const circuits = (shp2.projection as Shp2Projection).circuits ?? [];
     const plan = planCircuitDiscovery(prefix, publishedCircuitChannels, circuits);

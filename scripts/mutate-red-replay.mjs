@@ -133,8 +133,8 @@ const MUTANTS = [
   {
     id: 'x-e. ★ BLOCKER 1: alerts.ts stops threading the shp2-src-err code out',
     file: ALERTS,
-    find: "title: 'Energy source error', fault: `err${n}`,",
-    to: "title: 'Energy source error',",
+    find: "sourceSn: shp2.sn, title: 'Energy source error', fault: `err${n}`,",
+    to: "sourceSn: shp2.sn, title: 'Energy source error',",
     why: 'That title is a CONSTANT — without the code, every slot error code collides into one identity.',
   },
   {

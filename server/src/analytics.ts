@@ -5,7 +5,7 @@ import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.j
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
 import { getWeather, type WeatherHour, type WeatherForecast } from './weather.js';
-import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
 import { getNwsAlerts, isNwsEnabled, nwsEventWindow, type NwsAlert } from './nws.js';
@@ -623,9 +623,9 @@ export function applyRuntimeGrid(alerts: Alert[], gridBackstopping: boolean): Al
 
 export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, recorder: Recorder, forecast?: DayForecast): Alert[] {
   const list = Object.values(devices);
-  const shp2 = list.find((d) => d.online && d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  // v1.185.0 — the HOUSE panel, and only while it is online (unchanged gate).
+  const housePanel = findShp2(devices);
+  const shp2 = housePanel?.online ? housePanel : undefined;
   // v0.41.0 — the runtime depletion alert is gated on whether the diurnal day-forecast
   // ALSO projects reaching the reserve floor, so the emitted alert set now depends on
   // `forecast`. The time-based cache therefore has to key on that gate too: without it, a
@@ -1547,9 +1547,7 @@ async function computeDayForecastUncached(
   const now = Date.now();
   const since = now - TYPICAL_HISTORY_MS;
   const list = Object.values(devices);
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findShp2(devices);
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
@@ -3182,9 +3180,7 @@ export function computeRunway(
 ): RunwayProjection {
   if (runwayCache && Date.now() - runwayCache.ts < RUNWAY_TTL_MS) return runwayCache.value;
   const now = Date.now();
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findShp2(devices);
   if (!shp2 || shp2.projection.backupRemainWh == null || shp2.projection.backupFullCapWh == null) {
     return emptyRunway(now, 'SHP2 backup-pool capacity not yet reported');
   }
@@ -4254,6 +4250,13 @@ function extractEvSessions(points: Array<{ ts: number; value: number }>): EvSess
   return out;
 }
 
+
+/** v1.185.0 — the panels whose circuits the EV detectors scan: the house panel, then the rest. */
+function evScanPanels(devices: Record<string, DeviceSnapshot>): Array<DeviceSnapshot & { projection: Shp2Projection }> {
+  const house = findShp2(devices);
+  return [...(house ? [house] : []), ...secondaryShp2s(devices)];
+}
+
 /** v1.15.0 — the (1 h-cached) pattern-mining half of the EV prediction. The
  *  live-session overlay lives in computeEvWindowPrediction so an active charge
  *  is never hidden behind this cache. */
@@ -4267,10 +4270,9 @@ function computeMinedEvWindowPrediction(
 
   const sessions: Array<EvSessionRaw & { sn: string; circuit: number }> = [];
   let earliestSampleTs: number | null = null;
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
-  if (shp2) {
+  // v1.185.0 — EVERY panel's circuits, house panel first: the EV charger is planned for the
+  // second panel, where a house-only scan would never see a session.
+  for (const shp2 of evScanPanels(devices)) {
     for (const pc of shp2.projection.pairedCircuits) {
       const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, since, now);
       // v1.99.0 — how far back the recorder actually goes, so the recurrence
@@ -4508,11 +4510,8 @@ export function detectLiveEvSession(
   typicalSessionKwh: number | null,
   p90SessionKwh: number | null = null,
 ): LiveEvSession | null {
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
-  if (!shp2) return null;
-  for (const pc of shp2.projection.pairedCircuits) {
+  // v1.185.0 — every panel, house panel first (see computeMinedEvWindowPrediction).
+  for (const shp2 of evScanPanels(devices)) for (const pc of shp2.projection.pairedCircuits) {
     const pts = recorder.query(shp2.sn, `pair${pc.primaryCh}_w`, nowMs - EV_LIVE_LOOKBACK_MS, nowMs) ?? [];
     if (pts.length === 0) continue;
     const last = pts[pts.length - 1];
@@ -6021,9 +6020,7 @@ export function computeSelfConsumption(
   const now = Date.now();
   const since = now - windowDays * 86_400_000;
   const list = Object.values(devices);
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findShp2(devices);
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
@@ -7177,9 +7174,7 @@ export async function computeCurtailment(
   const connected = shp2ConnectedDpuSns(devices);
   const homeDpus = homeConnectedDpus(dpus, connected);
   if (homeDpus.length === 0) return empty;
-  const shp2 = Object.values(devices).find(
-    (d) => d.projection?.kind === 'shp2',
-  ) as (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
+  const shp2 = findShp2(devices);
   if (!shp2) {
     curtailmentCache = { ts: now, value: { ...empty, inactiveReason: 'no-shp2' } };
     return curtailmentCache.value;
@@ -7878,9 +7873,7 @@ export function computeTariffReport(
   const todayStart = startOfLocalDayMs();
 
   const dpus = allDpus(devices);
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findShp2(devices);
 
   // v0.9.29 — prefetch each metric ONCE for the full 7-day window at 60 s
   // bucketing; then call integrateWh hourly off the cached array. Was
@@ -8625,9 +8618,7 @@ export async function computeMultiDayForecast(
   const wxByHour = new Map<number, WeatherHour>();
   for (const wh of weather.hours) wxByHour.set(Math.floor(wh.ts / 3_600_000), wh);
 
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findShp2(devices);
   const fullWh = shp2?.projection.backupFullCapWh ?? null;
   let socWh = shp2?.projection.backupRemainWh ?? null;
 
@@ -8878,9 +8869,7 @@ export function computeDispatchPlan(
     generatedAt: now, horizon: 0, hours: [], estimatedSavingsDollars: 0, targetPrePeakSocPct: 80,
   });
   if (!forecast) return empty();
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findShp2(devices);
   const fullKwh = shp2?.projection.backupFullCapWh != null ? shp2.projection.backupFullCapWh / 1000 : null;
   let socKwh = shp2?.projection.backupRemainWh != null ? shp2.projection.backupRemainWh / 1000 : null;
   const reservePct = shp2?.projection.backupReserveSoc ?? 15;

@@ -17,6 +17,8 @@ import { ThemeToggle } from './components/ThemeToggle';
 import { SectionHeader } from './components/sections';
 import { installGlossaryTooltips } from './glossary';
 import { GridVetoClear } from './components/GridVetoClear';
+import { HousePanelPin } from './components/HousePanelPin';
+import { findHousePanel, allPanels } from './shp2Membership';
 
 // v0.8.1 — route-level code splitting. Each non-default page becomes its own
 // chunk; recharts (~540 kB) is vendor-chunked separately via the Vite config.
@@ -101,7 +103,9 @@ function NormalApp() {
   const badge = useMemo(() => alertBadge(alerts), [alerts]);
   const alertBadgeCount = badge.count;
 
-  const shp2 = useMemo(() => sorted.find((d) => d.projection?.kind === 'shp2'), [sorted]);
+  // v1.185.0 — the HOUSE panel (the server's pin), then every other panel with a card of its own.
+  const shp2 = useMemo(() => (snapshot ? findHousePanel(snapshot.devices) : undefined), [snapshot]);
+  const otherPanels = useMemo(() => (snapshot ? allPanels(snapshot.devices).filter((p) => p !== shp2) : []), [snapshot, shp2]);
   const dpus = useMemo(
     () => sorted.filter((d) => d.productName.toLowerCase().includes('delta pro ultra')),
     [sorted],
@@ -146,9 +150,9 @@ function NormalApp() {
   const others = useMemo(
     () =>
       sorted
-        .filter((d) => d !== shp2 && !dpuSet.has(d))
+        .filter((d) => d !== shp2 && !otherPanels.includes(d as never) && !dpuSet.has(d))
         .sort((a, b) => Number(b.online) - Number(a.online)),
-    [sorted, shp2, dpuSet],
+    [sorted, shp2, otherPanels, dpuSet],
   );
 
   // Build a DPU-SN → SHP2-derived data map so we can fall back when a DPU's own
@@ -158,19 +162,21 @@ function NormalApp() {
   // non-snapshot re-renders — that is what lets the memo'd DpuCard actually skip.
   const dpuViaShp2 = useMemo(() => {
     const m = new Map<string, DpuViaShp2>();
-    if (shp2?.projection?.kind === 'shp2') {
-      const sp = shp2.projection as Shp2Projection;
+    // v1.185.0 — every panel's slots, so a Core on the second panel keeps its fallback too.
+    for (const panel of [shp2, ...otherPanels]) {
+      if (panel?.projection?.kind !== 'shp2') continue;
+      const sp = panel.projection as Shp2Projection;
       sp.sources.forEach((source, i) => {
         if (!source.sn) return;
         const w = sp.sourceWatts[i];
         // chWatt is reported as negative when the source is contributing power to SHP2.
         // Flip sign so positive = discharging (consistent with the rest of the UI).
         const liveWatts = typeof w === 'number' ? -w : null;
-        m.set(source.sn, { source, liveWatts, shp2Sn: shp2.sn });
+        m.set(source.sn, { source, liveWatts, shp2Sn: panel.sn });
       });
     }
     return m;
-  }, [shp2]);
+  }, [shp2, otherPanels]);
 
   return (
     <div className="min-h-full p-4 md:p-6 max-w-[1800px] mx-auto">
@@ -261,6 +267,7 @@ function NormalApp() {
         <>
         {/* v1.184.0 — the stuck-"no grid" clear, from the TOP-LEVEL grid (works with no panel card). */}
         {snapshot && <GridVetoClear grid={snapshot.grid} />}
+        {snapshot && <HousePanelPin state={snapshot.housePanel} />}
         {snapshot && <RunwayCard />}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start mt-4">
           {snapshot && <EnergyFlow devices={snapshot.devices} grid={snapshot.grid} />}
@@ -269,6 +276,7 @@ function NormalApp() {
           {/* OVERVIEW REORDER — the SHP2 card and the active/online DPU cards sit
               directly under the Today summary section. */}
           {shp2 && <Shp2Card d={shp2 as DeviceSnapshot & { projection?: Shp2Projection }} />}
+          {otherPanels.map((p) => <Shp2Card key={p.sn} d={p as DeviceSnapshot & { projection?: Shp2Projection }} />)}
           {dpus.map((d) => (
             <DpuCard key={d.sn} d={d as DeviceSnapshot & { projection?: DpuProjection }} viaShp2={dpuViaShp2.get(d.sn)} />
           ))}

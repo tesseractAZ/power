@@ -5,7 +5,7 @@ import { config } from './config.js';
 import { SnapshotStore, FleetSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection, GenericProjection } from './ecoflow/project.js';
 import { integrateWh } from './aggregator.js';
-import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns } from './shp2Membership.js';
+import { benchSpareSns, isBenchSpareSn, shp2ConnectedDpuSns, findShp2 } from './shp2Membership.js';
 import { loadMembershipHistory, saveMembershipHistory, recordMembership } from './membershipHistory.js';
 // v1.38.0 (WS2) — Phoenix calendar-date resolution for the night-charge ledger
 // read cutoff. tariff.ts is a pure, import-free module (no circular dependency);
@@ -1784,7 +1784,7 @@ export function createRecorder(
   /** Resolve the active list of lifetime keys (fixed fleet keys + dynamic per-circuit). */
   const allLifetimeKeys = (snap: FleetSnapshot): string[] => {
     const keys: string[] = [...LIFETIME_KEYS];
-    const shp2 = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2');
+    const shp2 = findShp2(snap.devices); // v1.185.0 — the house panel
     if (shp2 && shp2.projection?.kind === 'shp2') {
       for (const c of (shp2.projection as Shp2Projection).circuits ?? []) {
         keys.push(`circuit_${c.ch}_wh`);

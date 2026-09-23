@@ -29,22 +29,23 @@ const MUTANTS = [
   {
     id: 'i. \u2605\u2605 the operator clear is ignored',
     file: GRID,
-    find: '  const readingCleared = clearedAtMs != null && (readingAtMs == null || readingAtMs <= clearedAtMs);',
-    to: '  const readingCleared = false; /* MUTANT */',
+    // v1.185.0 — the clear is now read per panel (panelVetoes).
+    find: '  return !(clearedAtMs != null && (readingAtMs == null || readingAtMs <= clearedAtMs));',
+    to: '  return true; /* MUTANT */',
     why: 'The owner knows the grid is back and the button does nothing: "no grid" stays until the panel reports.',
   },
   {
     id: 'ii. \u2605\u2605\u2605 the clear outlives the panel\u2019s NEXT reading',
     file: GRID,
-    find: '  const readingCleared = clearedAtMs != null && (readingAtMs == null || readingAtMs <= clearedAtMs);',
-    to: '  const readingCleared = clearedAtMs != null; /* MUTANT */',
+    find: '  return !(clearedAtMs != null && (readingAtMs == null || readingAtMs <= clearedAtMs));',
+    to: '  return !(clearedAtMs != null); /* MUTANT */',
     why: 'One click silences the veto for good: a later real outage with the toggle ON reads "grid present".',
   },
   {
     id: 'iii. \u2605\u2605\u2605 a panel freshly reporting no grid is clearable',
     file: GRID,
-    find: '  const vetoClearable = declaredRaw && gridMeasuredAbsent && panelFresh !== true;',
-    to: '  const vetoClearable = declaredRaw && gridMeasuredAbsent; /* MUTANT */',
+    find: "    && vetoers.every((p) => !(p.projection?.kind === 'shp2' && shp2ReadbackFresh(p, nowMs)));",
+    to: '    && true; /* MUTANT */',
     why: 'The button is offered against the live measurement of an outage.',
   },
   {

@@ -25,6 +25,7 @@ import { dirname, resolve } from 'node:path';
 import { config } from './config.js';
 import type { Alert } from './alerts.js';
 import type { FleetSnapshot, DeviceSnapshot } from './snapshot.js';
+import { findShp2 } from './shp2Membership.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Recorder } from './recorder.js';
 import { getAnalytics, type AnalyticsClient } from './analyticsClient.js';
@@ -253,7 +254,9 @@ export function extractFeatures(alert: Alert, snap: FleetSnapshot): Record<strin
 
   // SHP2 / circuit alerts — circuit loads + bus state
   if (alert.category === 'SHP2') {
-    const shp2 = devices.find((d) => d.projection?.kind === 'shp2');
+    // v1.185.0 — the alert's own panel when it names one, else the house panel.
+    const shp2 = devices.find((d) => d.projection?.kind === 'shp2' && d.sn === alert.sourceSn)
+      ?? findShp2(Object.fromEntries(devices.map((d) => [d.sn, d])));
     if (shp2?.projection?.kind === 'shp2') {
       const p = shp2.projection as Shp2Projection;
       if (p.backupBatPercent != null) common['pool_soc'] = p.backupBatPercent;

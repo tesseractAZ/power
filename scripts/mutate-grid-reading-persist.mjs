@@ -38,8 +38,9 @@ const MUTANTS = [
   {
     id: 'ii. \u2605\u2605\u2605 the veto only looks at a PROJECTED panel',
     file: GRID,
-    find: '  const vetoPanel = panel ?? identityShp2(input.devices);',
-    to: '  const vetoPanel = panel; /* MUTANT */',
+    // v1.185.0 — the identity census now feeds every panel to the veto.
+    find: "    .filter((d) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel'))",
+    to: "    .filter((d) => d.projection?.kind === 'shp2') /* MUTANT */",
     why: 'The rehydrated reading sits on a panel with no projection; the veto never sees it.',
   },
   {
@@ -108,7 +109,7 @@ const MUTANTS = [
   {
     id: 'x. \u2605\u2605\u2605 the resolver ignores the persisted reading when no panel device exists',
     file: GRID,
-    find: '  const persistedAbsent = !vetoPanel ? input.persistedGridAbsent ?? null : null;',
+    find: '  const persistedAbsent = idPanels.length === 0 ? input.persistedGridAbsent ?? null : null;',
     to: '  const persistedAbsent = null; /* MUTANT */',
     why: 'The store has the reading; the veto never sees it through an internet-down restart.',
   },

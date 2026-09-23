@@ -131,31 +131,46 @@ export function classifyRunway(p: RunwayAlarmInput, grid?: GridContext): AlarmPr
   return null;
 }
 
+/**
+ * v1.185.0 — how a runway alarm names its pool and its basis. The house panel's alarm passes
+ * nothing (its words are unchanged). A SECONDARY panel's runway is measured at its current drain
+ * (panelRunway.ts), not simulated against the forecast, and says so.
+ */
+export interface RunwayWording {
+  poolName?: string;
+  basis?: 'forecast' | 'drain';
+}
+const poolEn = (o?: RunwayWording): string => (o?.poolName ? `${o.poolName} backup pool` : 'Backup pool');
+const poolEs = (o?: RunwayWording, cap = true): string => `${cap ? 'La' : 'la'} reserva de respaldo${o?.poolName ? ` de ${o.poolName}` : ''}`;
+const drain = (o?: RunwayWording): boolean => o?.basis === 'drain';
+
 /** The spoken message for a projection at a given priority. */
-export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority, grid?: GridContext): string {
+export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority, grid?: GridContext, o?: RunwayWording): string {
   const he = p.hoursToEmpty;
   const hr = p.hoursToReserve;
   // v0.23.0 — at the floor WITH the grid backstopping, the pool reaching reserve
   // just transfers to mains; speak a calm advisory, not the shed/generator call.
   if (belowReserveFloor(p) && grid?.backstopping) {
-    return 'Advisory. Backup pool reached the reserve floor. Now drawing from grid power; no action needed.';
+    return `Advisory. ${poolEn(o)} reached the reserve floor. Now drawing from grid power; no action needed.`;
   }
   // v0.15.18 — at/below the reserve floor the "projected in N hours" framing is
   // wrong (it already happened); speak the actual condition and the actions.
   if (priority === 'critical' && belowReserveFloor(p)) {
-    return 'Critical alarm. Critical alarm. Backup pool is at the reserve floor. Non-backup circuits may lose power. Shed load or start the generator.';
+    return `Critical alarm. Critical alarm. ${poolEn(o)} is at the reserve floor. Non-backup circuits may lose power. Shed load or start the generator.`;
   }
   if (priority === 'critical' && he != null) {
-    return `Critical alarm. Critical alarm. Backup pool projected empty in about ${Math.max(1, Math.round(he))} hours before solar recovers. Shed load immediately.`;
+    return `Critical alarm. Critical alarm. ${poolEn(o)} projected empty in about ${Math.max(1, Math.round(he))} hours ${drain(o) ? 'at the current drain' : 'before solar recovers'}. Shed load immediately.`;
   }
   if (priority === 'high' && he != null) {
-    return `High priority alarm. Backup pool projected to deplete in about ${Math.max(1, Math.round(he))} hours before solar recovers. Reduce load now.`;
+    return `High priority alarm. ${poolEn(o)} projected to deplete in about ${Math.max(1, Math.round(he))} hours ${drain(o) ? 'at the current drain' : 'before solar recovers'}. Reduce load now.`;
   }
   const h = hr != null ? Math.max(1, Math.round(hr)) : null;
   // v0.15.16 — the alert type leads so the listener hears the severity before
   // the detail (the critical/high paths above already announce it first).
   const prefix = priorityAnnouncementPrefix(priority);
-  return `${prefix} Backup pool projected to reach reserve in about ${h} hours at the forecast load. Reduce consumption to preserve reserve until solar generates more.`;
+  return drain(o)
+    ? `${prefix} ${poolEn(o)} projected to reach reserve in about ${h} hours at the current drain. Reduce consumption to preserve reserve.`
+    : `${prefix} ${poolEn(o)} projected to reach reserve in about ${h} hours at the forecast load. Reduce consumption to preserve reserve until solar generates more.`;
 }
 
 /** v0.62.0 — Spanish "N hora(s)" with correct singular/plural. */
@@ -166,24 +181,26 @@ function horasEs(n: number | null): string {
 
 /** v0.62.0 — Spanish (Latin American) counterpart of runwayAlarmMessage for the
  *  bilingual second pass. Same projection inputs → same numbers, in Spanish. */
-export function runwayAlarmMessageEs(p: RunwayAlarmInput, priority: AlarmPriority, grid?: GridContext): string {
+export function runwayAlarmMessageEs(p: RunwayAlarmInput, priority: AlarmPriority, grid?: GridContext, o?: RunwayWording): string {
   const he = p.hoursToEmpty;
   const hr = p.hoursToReserve;
   if (belowReserveFloor(p) && grid?.backstopping) {
-    return 'Aviso. La reserva de respaldo alcanzó el nivel mínimo de reserva. Ahora se está tomando energía de la red; no se requiere acción.';
+    return `Aviso. ${poolEs(o)} alcanzó el nivel mínimo de reserva. Ahora se está tomando energía de la red; no se requiere acción.`;
   }
   if (priority === 'critical' && belowReserveFloor(p)) {
-    return 'Alarma crítica. Alarma crítica. La reserva de respaldo está en el nivel mínimo de reserva. Los circuitos sin respaldo pueden quedarse sin energía. Reduzca la carga o encienda el generador.';
+    return `Alarma crítica. Alarma crítica. ${poolEs(o)} está en el nivel mínimo de reserva. Los circuitos sin respaldo pueden quedarse sin energía. Reduzca la carga o encienda el generador.`;
   }
   if (priority === 'critical' && he != null) {
-    return `Alarma crítica. Alarma crítica. Se proyecta que la reserva de respaldo se agote en aproximadamente ${horasEs(Math.max(1, Math.round(he)))} antes de que el sol se recupere. Reduzca la carga de inmediato.`;
+    return `Alarma crítica. Alarma crítica. Se proyecta que ${poolEs(o, false)} se agote en aproximadamente ${horasEs(Math.max(1, Math.round(he)))} ${drain(o) ? 'al consumo actual' : 'antes de que el sol se recupere'}. Reduzca la carga de inmediato.`;
   }
   if (priority === 'high' && he != null) {
-    return `Alarma de alta prioridad. Se proyecta que la reserva de respaldo se agote en aproximadamente ${horasEs(Math.max(1, Math.round(he)))} antes de que el sol se recupere. Reduzca la carga ahora.`;
+    return `Alarma de alta prioridad. Se proyecta que ${poolEs(o, false)} se agote en aproximadamente ${horasEs(Math.max(1, Math.round(he)))} ${drain(o) ? 'al consumo actual' : 'antes de que el sol se recupere'}. Reduzca la carga ahora.`;
   }
   const h = hr != null ? Math.max(1, Math.round(hr)) : null;
   const prefix = priorityAnnouncementPrefixEs(priority);
-  return `${prefix} Se proyecta que la reserva de respaldo alcance el nivel mínimo de reserva en aproximadamente ${horasEs(h)} con la carga prevista. Reduzca el consumo para preservar la reserva hasta que el sol genere más.`;
+  return drain(o)
+    ? `${prefix} Se proyecta que ${poolEs(o, false)} alcance el nivel mínimo de reserva en aproximadamente ${horasEs(h)} al consumo actual. Reduzca el consumo para preservar la reserva.`
+    : `${prefix} Se proyecta que ${poolEs(o, false)} alcance el nivel mínimo de reserva en aproximadamente ${horasEs(h)} con la carga prevista. Reduzca el consumo para preservar la reserva hasta que el sol genere más.`;
 }
 
 interface PersistState {
@@ -229,6 +246,13 @@ export interface RunwayAlarmOptions {
   deescalateHoldMs?: number;
   /** Optional logger. */
   log?: (msg: string) => void;
+  /** v1.185.0 — a secondary panel's pool name and runway basis (default: the house wording). */
+  wording?: RunwayWording;
+}
+
+/** v1.185.0 — a SECONDARY panel's runway-alarm state, beside the house alarm's. */
+export function runwayAlarmStatePathFor(sn: string): string {
+  return STATE_PATH.replace(/\.json$/, '') + `-${sn.replace(/[^A-Za-z0-9]/g, '')}.json`;
 }
 
 function loadState(path: string): PersistState | null {
@@ -299,7 +323,7 @@ export function createRunwayAlarm(opts: RunwayAlarmOptions): RunwayAlarm {
         ].filter(Boolean);
         log(`runway-alarm: ${desired} — ${figs.join(' / ') || 'no horizon figures'}`);
         try {
-          opts.onTrigger(desired, runwayAlarmMessage(p, desired, grid), runwayAlarmMessageEs(p, desired, grid));
+          opts.onTrigger(desired, runwayAlarmMessage(p, desired, grid, opts.wording), runwayAlarmMessageEs(p, desired, grid, opts.wording));
         } catch (e: any) {
           log(`runway-alarm: onTrigger error: ${e?.message ?? e}`);
         }

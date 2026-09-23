@@ -3,6 +3,7 @@ import type { DeviceSnapshot } from './snapshot.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import type { EvWindowPrediction } from './analytics.js';
 import type { NwsAlert } from './nws.js';
+import { findShp2 } from './shp2Membership.js';
 
 /**
  * RFC5545 iCalendar (.ics) feed for HA's `generic_ics_calendar`,
@@ -113,9 +114,7 @@ export function buildCalendarIcs(src: CalendarSources): string {
   }
 
   // SHP2 TOU charge windows.
-  const shp2 = Object.values(src.devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findShp2(src.devices); // v1.185.0 — the house panel's schedule
   if (shp2 && shp2.projection.strategy?.timeTask?.windows) {
     const tt = shp2.projection.strategy.timeTask;
     for (const w of tt.windows) {

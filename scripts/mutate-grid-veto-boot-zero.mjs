@@ -42,8 +42,9 @@ const MUTANTS = [
   {
     id: 'ii. \u2605\u2605 a field the panel never reported vetoes the declaration',
     file: GRID,
-    find: '  const gridMeasuredAbsent = ((panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !readingCleared)\n    || persistedAbsent != null;',
-    to: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) !== true; /* MUTANT */',
+    // v1.185.0 — the veto is now per panel (panelVetoes), read across every panel.
+    find: '  if (reading !== false) return false;',
+    to: '  if (reading === true) return false; /* MUTANT */',
     why: 'Every panel cloud blip withdraws the backstop: nuisance runway alarms and off_grid flapping with the grid perfectly fine.',
   },
   {
@@ -56,29 +57,29 @@ const MUTANTS = [
   {
     id: 'iii-b. \u2605\u2605\u2605 the veto reads the ONLINE-GATED value: a cloud shadow or a cloud-offline panel lifts it mid-outage',
     file: GRID,
-    find: '  const gridMeasuredAbsent = ((panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !readingCleared)\n    || persistedAbsent != null;',
+    find: '  const gridMeasuredAbsent = vetoers.length > 0 || persistedAbsent != null;',
     to: '  const gridMeasuredAbsent = shp2GridConnected === false; /* MUTANT */',
     why: 'A cloud-replay shadow (2-4 a day) or an outage that also takes the ISP down republishes "grid present": off_grid falls, load_shed_recommended drops, the runway audible is re-gated.',
   },
   {
     id: 'iii-d. \u2605\u2605\u2605 the veto lapses on wall-clock AGE (the cloud going quiet mid-outage)',
     file: GRID,
-    find: '  const gridMeasuredAbsent = ((panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !readingCleared)\n    || persistedAbsent != null;',
-    to: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && Date.now() - (panel?.lastQuotaAtMs ?? 0) <= 300_000; /* MUTANT */',
+    find: '  if (reading !== false) return false;',
+    to: '  if (reading !== false || Date.now() - (p.lastQuotaAtMs ?? 0) > 300_000) return false; /* MUTANT */',
     why: 'Five minutes into an outage whose uplink also fails, the resolver republishes "grid present" and the runway audible is gated silent again.',
   },
   {
     id: 'iii-e. \u2605\u2605 the veto is set aside after an online transition (a 6 s /status blip lifts it for a poll)',
     file: GRID,
-    find: '  const gridMeasuredAbsent = ((panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !readingCleared)\n    || persistedAbsent != null;',
-    to: "  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !(typeof panel?.onlineChangedAtMs === 'number' && panel.onlineChangedAtMs > (panel?.lastQuotaAtMs ?? 0)); /* MUTANT */",
+    find: '  if (reading !== false) return false;',
+    to: "  if (reading !== false || (typeof p.onlineChangedAtMs === 'number' && p.onlineChangedAtMs > (p.lastQuotaAtMs ?? 0))) return false; /* MUTANT */",
     why: 'Each blip mid-outage draws a false off_grid edge and can re-arm and repeat the runway announcement.',
   },
   {
     id: 'iii-f. \u2605\u2605 the veto ignores the last reply that carried gridSta (a partial reply lifts it)',
     file: GRID,
-    find: '  const gridMeasuredAbsent = ((panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !readingCleared)\n    || persistedAbsent != null;',
-    to: '  const gridMeasuredAbsent = panel?.projection.gridConnected === false; /* MUTANT */',
+    find: '  const reading = fromProjection ? proj!.gridConnected : p.lastGridReading?.connected;',
+    to: '  const reading = proj?.gridConnected; /* MUTANT */',
     why: 'A /quota/all reply without the pd303_mc subtree re-projects gridConnected as null: "grid present" for a poll, mid-outage.',
   },
   {
@@ -168,7 +169,7 @@ const MUTANTS = [
   {
     id: 'vii-d. \u2605 a panel listed but not projected is taken for a DPU-only install',
     file: READY,
-    find: '  const membershipKnown = !!panel || shp2Panels(asSnapshots).sns.length === 0;',
+    find: "  const membershipKnown = shp2Panels(asSnapshots).sns.every((sn) => asSnapshots[sn]?.projection?.kind === 'shp2');",
     to: '  const membershipKnown = true; /* MUTANT */',
     why: 'A restart with the panel cloud-offline publishes a bench spare\u2019s figures as the home fleet.',
   },
