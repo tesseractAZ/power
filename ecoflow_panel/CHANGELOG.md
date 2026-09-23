@@ -1,3 +1,29 @@
+## 1.182.0
+
+### Dashboard figures cover the home, and the night-charge card says what will happen
+
+- **Today's "% measured" covers the home.** It averaged every recorded series on every device —
+  bench Cores were 38% of them — so it read "100% measured" even while a home figure was missing.
+  It now counts only the series behind the Today figures (the home Cores and the panel's load,
+  with a Core that has gone dark counting as unmeasured), and the Panel load tile reads "not
+  measured today" instead of 0 Wh when the panel recorded no load.
+- **The Battery page's fleet figures cover home packs.** "Fleet capacity" summed every pack the
+  add-on could see — 147 kWh, with 9 of 24 packs on bench spares that cannot power the house —
+  and bench packs set the near-new health range and filled the charge-curve and thermal lists.
+  Those now cover home packs only, and the capacity tile says how many bench packs it left out.
+  The pack table still lists every pack.
+- **The Alerts badge shows a learned critical alarm.** It counted threshold alarms only, so a
+  learned alarm that reached critical never appeared on it.
+- **The Energy flow card says when spares are not yet identified.** Until the panel reports which
+  Cores are wired to it, every online Core — bench spares included — is drawn as a home battery;
+  the title now says so instead of dropping its "+N spare" note.
+- **The night-charge card shows the reserve that will actually be set.** It printed the full
+  requirement ("reserve set to 94%") although the panel caps its reserve at 50%; it now shows 50%
+  and the requirement beside it. Last night's actuation banner ("Completed — reserve restored")
+  no longer stays up all day: it clears six hours after the reserve is restored.
+
+New harness `scripts/mutate-dashboard-audit-four.mjs` (8 anchor-asserted mutants).
+
 ## 1.181.0
 
 ### A Core replaying old data proves nothing; the runtime alert sees the grid as it is now

@@ -383,3 +383,25 @@ test('v1.87.0 — with every connected member measured, coverage is unchanged (n
   const r = computeTotals(oneDpuStore(), rec, since, until);
   assert.ok(r.fleet.pvCoverage > 0.98, `pvCoverage ${r.fleet.pvCoverage} stays ~1.0 when all members report`);
 });
+
+/* ─── v1.182.0 — Today's "% measured" covers the home, and a silent panel is "not measured" ── */
+
+test('★★ computeTotals — homeCoverage excludes a bench Core; panelLoadCoverage is 0 when the panel wrote no load', () => {
+  const since = startOfLocalDayMs() - ONE_HOUR;
+  const until = startOfLocalDayMs();
+  const full = evenSamples(since, until, FIVE_MIN, 1000);
+  // Home Core C1 (one pack) fully covered. The bench Core has a second pack whose series are
+  // EMPTY (0 coverage) — it must dilute the all-device mean but not the home one. The panel
+  // wrote no panel_load rows at all (v1.175.0: a silent panel writes none).
+  const rec = mockRecorder({ pv_total: full, ac_out: full, total_in: full, total_out: full, pack1_in: full, pack1_out: full });
+  const devices: Record<string, DeviceSnapshot> = {
+    P: { sn: 'P', deviceName: 'Panel', online: true, projection: { kind: 'shp2', circuits: [], sources: [{ slot: 1, sn: 'C1', isConnected: true }] } } as any,
+    C1: { sn: 'C1', deviceName: 'Core 1', online: true, projection: { kind: 'dpu', soc: 80, packs: [{ num: 1, soc: 80 }] } } as any,
+    SPARE: { sn: 'SPARE', deviceName: 'Spare', online: true, projection: { kind: 'dpu', soc: 50, packs: [{ num: 1, soc: 50 }, { num: 2, soc: 50 }] } } as any,
+  };
+  const r = computeTotals({ get: () => ({ devices }) } as unknown as SnapshotStore, rec, since, until);
+  assert.equal(r.fleet.panelLoadCoverage, 0, 'the Panel load tile reads "not measured", not 0 Wh');
+  // Home series: C1's six (~1.0) + the panel's panel_load (0) → 6/7.
+  assert.ok(Math.abs(r.fleet.homeCoverage - 6 / 7) < 0.03, `homeCoverage ${r.fleet.homeCoverage}`);
+  assert.ok(r.fleet.coverage < r.fleet.homeCoverage, `the bench Core's empty pack dilutes only the all-device mean (${r.fleet.coverage})`);
+});

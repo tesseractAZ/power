@@ -106,7 +106,7 @@ test('★ the pool degradation ratio is PAIR-GATED', () => {
 
 test('★ the fleet capacity ratio is PAIR-GATED', () => {
   const s = webSrc('cards/DegradationCard.tsx');
-  assert.match(s, /const capPairs = deg\.packs\.filter\(/);
+  assert.match(s, /const capPairs = homeDegPacks\.filter\(/);
   assert.match(s, /sumDefined\(capPairs\.map\(\(p\) => p\.currentCapacityKwh\)\)/);
   assert.match(s, /sumDefined\(capPairs\.map\(\(p\) => p\.designCapacityKwh\)\)/);
   assert.ok(

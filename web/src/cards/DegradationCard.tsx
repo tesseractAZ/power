@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { homePacks, benchNote } from './batteryScope';
 import type { FleetDegradation, PackDegradation, DegradeStatus, RoundTripEfficiency } from '../types';
 import { apiUrl } from '../api';
 import { PredictiveBadge } from '../components/PredictiveBadge';
@@ -103,7 +104,9 @@ export function DegradationCard() {
   // pack reporting a design capacity but not a current one landed in the
   // denominator alone and the fleet read as degraded when it was merely partly
   // unreported. A ratio needs the same population on both sides.
-  const capPairs = deg.packs.filter(
+  // v1.182.0 — fleet figures cover HOME packs only (batteryScope.ts); the table lists every pack.
+  const { home: homeDegPacks, benchCount } = homePacks(deg.packs);
+  const capPairs = homeDegPacks.filter(
     (p) => p.currentCapacityKwh != null && p.designCapacityKwh != null,
   );
   const capNow = sumDefined(capPairs.map((p) => p.currentCapacityKwh));
@@ -116,7 +119,7 @@ export function DegradationCard() {
   // the `projecting` status (so medianFade/eolDate are unavailable). When a real trend
   // exists (any pack projecting), the banner is suppressed and the tables stand alone.
   const noFirmTrend = deg.packs.length > 0 && projecting.length === 0;
-  const sohValues = deg.packs.map((p) => p.currentSoh).filter((s): s is number => s != null);
+  const sohValues = homeDegPacks.map((p) => p.currentSoh).filter((s): s is number => s != null);
   const sohRange =
     sohValues.length > 0
       ? sohValues.length === 1 || Math.min(...sohValues) === Math.max(...sohValues)
@@ -189,7 +192,7 @@ export function DegradationCard() {
           value={capPct != null ? `${capPct.toFixed(1)}%` : '—'}
           sub={
             capNow != null && capDesign != null
-              ? `${capNow.toFixed(1)} / ${capDesign.toFixed(1)} kWh of design`
+              ? `${capNow.toFixed(1)} / ${capDesign.toFixed(1)} kWh of design${benchNote(benchCount) ? ` · ${benchNote(benchCount)}` : ''}`
               : 'capacity not reported'
           }
           accent={capPct != null ? (capPct < 90 ? 'text-warn' : 'text-ok') : undefined}

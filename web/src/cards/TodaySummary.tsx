@@ -25,6 +25,9 @@ interface SummaryResp {
     panelLoadWh: number;
     batteryNetWh: number;
     coverage: number;
+    /** v1.182.0 — home series only (see aggregator.ts); absent from older servers. */
+    homeCoverage?: number;
+    panelLoadCoverage?: number;
   };
 }
 
@@ -46,7 +49,9 @@ export const TodaySummary = memo(function TodaySummary() {
   const data = polled.data && !dayWindowExpired(polled.data, serverNow) ? polled.data : null;
   const stale = polled.data != null && pollStale(polled.lastOkAt, now, TODAY_POLL_MS);
 
-  const coverage = data?.fleet.coverage ?? 0;
+  // v1.182.0 — the series behind THESE figures (home Cores + the panel), not every device's.
+  const coverage = data?.fleet.homeCoverage ?? data?.fleet.coverage ?? 0;
+  const panelUnmeasured = data?.fleet.panelLoadCoverage === 0;
   return (
     <div className="card col-span-full">
       <div className="card-title flex items-center justify-between">
@@ -63,7 +68,7 @@ export const TodaySummary = memo(function TodaySummary() {
         <Tile label="Solar produced" value={fmtWh(data?.fleet.pvWh)} accent="text-warn" />
         <Tile label="AC output" value={fmtWh(data?.fleet.acOutWh)} accent="text-ok" />
         <Tile label="Batteries (net)" value={fmtWh(data?.fleet.batteryNetWh)} accent={data && data.fleet.batteryNetWh > 0 ? 'text-bad' : 'text-ok'} sub={data ? (data.fleet.batteryNetWh > 0 ? 'discharged' : 'charged') : ''} />
-        <Tile label="Panel load" value={fmtWh(data?.fleet.panelLoadWh)} accent="text-accent" />
+        <Tile label="Panel load" value={panelUnmeasured ? '—' : fmtWh(data?.fleet.panelLoadWh)} accent="text-accent" sub={panelUnmeasured ? 'not measured today' : undefined} />
       </div>
     </div>
   );

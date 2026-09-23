@@ -35,6 +35,9 @@ export interface EnergyFlowModel {
   dpuCount: number;
   /** Online DPUs NOT in the home set (bench spares). */
   spareCount: number;
+  /** v1.182.0 — a panel is present but its source list is not known, so every online DPU is
+   *  drawn as home — bench spares included — and spareCount cannot say how many. */
+  membershipUnknown: boolean;
   pv: number;
   acOut: number;
   /** > 0 = discharging, from per-pack flow. */
@@ -210,6 +213,8 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   return {
     dpuCount: dpus.length,
     spareCount: connected.size > 0 ? allDpus.length - dpus.length : 0,
+    membershipUnknown: connected.size === 0
+      && list.some((d) => (d.productName ?? '').toLowerCase().includes('smart home panel')),
     pv,
     acOut,
     batNet,

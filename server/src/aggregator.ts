@@ -42,6 +42,13 @@ export interface FleetEnergyTotals {
     batteryDischargeWh: number;
     coverage: number;     // 0..1 fraction of window covered (averaged across active metrics)
     pvCoverage: number;   // 0..1 fraction of window covered, PV metric (`pv_total`) ONLY — for the Solar-page "% measured" tile
+    /** v1.182.0 — 0..1, the series behind the Today figures ONLY: home Cores (SHP2-connected, a
+     *  dark one counting 0) and the panel's load. `coverage` averages every series on every
+     *  device — bench Cores were 38% of them — so the Today card read "100% measured". */
+    homeCoverage: number;
+    /** v1.182.0 — 0..1 coverage of the panel's `panel_load` alone (0 with no panel): the Today
+     *  card's Panel load tile reads "not measured" at 0 instead of a confident 0 Wh. */
+    panelLoadCoverage: number;
   };
 }
 
@@ -252,8 +259,9 @@ export function computeTotals(
 ): FleetEnergyTotals {
   const snap = store.get();
   const devices: EnergyTotals[] = [];
-  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, batteryChargeWh: 0, batteryDischargeWh: 0, coverage: 0, pvCoverage: 0 };
+  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, batteryChargeWh: 0, batteryDischargeWh: 0, coverage: 0, pvCoverage: 0, homeCoverage: 0, panelLoadCoverage: 0 };
   const coverageAccum: number[] = [];
+  const homeCoverageAccum: number[] = []; // v1.182.0
   // v0.44.0 — PV-only coverage for the Solar-page "% measured" tile. The fleet
   // PV rollup is keyed on the per-DPU `pv_total` series of SHP2-CONNECTED DPUs
   // only (see the isShp2Connected block below), so this accumulates pv_total
@@ -335,12 +343,18 @@ export function computeTotals(
       }
     } else if (p.kind === 'shp2') {
       fleet.panelLoadWh += ingest('panel_load');
+      const pl = metrics['panel_load'];
+      fleet.panelLoadCoverage = pl && pl.totalMs > 0 ? pl.coverageMs / pl.totalMs : 0; // v1.182.0
     } else {
       ingest('out_watts');
       ingest('in_watts');
       ingest('pv_watts');
     }
 
+    // v1.182.0 — home coverage: only the devices behind the Today figures.
+    if (p.kind === 'shp2' || (p.kind === 'dpu' && isShp2Connected(d.sn, connected))) {
+      for (const r of Object.values(metrics)) if (r.totalMs > 0) homeCoverageAccum.push(r.coverageMs / r.totalMs);
+    }
     devices.push({
       sn: d.sn,
       deviceName: d.deviceName,
@@ -362,6 +376,7 @@ export function computeTotals(
     if (!pvAccumulatedSns.has(sn)) {
 
       pvCoverageAccum.push(0);
+      homeCoverageAccum.push(0); // v1.182.0 — a dark home Core is unmeasured home capacity
 
       coverageAccum.push(0);
 
@@ -374,5 +389,6 @@ export function computeTotals(
   fleet.pvCoverage = pvCoverageAccum.length === 0
     ? fleet.coverage
     : pvCoverageAccum.reduce((s, v) => s + v, 0) / pvCoverageAccum.length;
+  fleet.homeCoverage = homeCoverageAccum.length === 0 ? 0 : homeCoverageAccum.reduce((s, v) => s + v, 0) / homeCoverageAccum.length;
   return { sinceMs, untilMs, membershipBasis: [...connected].sort().join(','), devices, fleet };
 }

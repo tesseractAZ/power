@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from 'react';
+import { actuationBannerVisible, reserveWriteLabel } from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -78,6 +79,8 @@ interface NightActuation {
 }
 
 interface NightChargeStatus {
+  /** v1.182.0 — the panel's reserve maximum (RESERVE_WRITE_MAX_PCT). */
+  reserveWriteMaxPct?: number;
   enabled: boolean;
   mode: 'advisory' | 'supervised' | 'auto';
   window: { startMs: number; endMs: number } | null;
@@ -282,9 +285,8 @@ export const NightChargeCard = memo(function NightChargeCard() {
           // cap prevented delivering the requirement), never as a silent swap.
           sub={
             [
-              plan.setpointSocPct != null && plan.targetSocPct != null && plan.setpointSocPct > plan.targetSocPct + 0.5
-                ? `reserve set to ${plan.setpointSocPct.toFixed(0)}%`
-                : null,
+              // v1.182.0 — what will actually be WRITTEN (clamped to the panel's maximum).
+              reserveWriteLabel(plan.setpointSocPct, plan.targetSocPct, status.reserveWriteMaxPct ?? null),
               plan.bindingCap ? `cap: ${BINDING_CAP_LABEL[plan.bindingCap] ?? plan.bindingCap}` : null,
             ]
               .filter(Boolean)
@@ -309,7 +311,7 @@ function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode'];
   const [busy, setBusy] = useState(false);
   const [localCancelled, setLocalCancelled] = useState(false);
   const [cancelErr, setCancelErr] = useState<string | null>(null);
-  if (mode === 'advisory' || !actuation || actuation.day == null) return null;
+  if (mode === 'advisory' || !actuation || !actuationBannerVisible(actuation, Date.now())) return null;
 
   const cancelled = actuation.cancelled || localCancelled;
   const deadline = phoenixHHMM(actuation.cancelDeadlineMs);
