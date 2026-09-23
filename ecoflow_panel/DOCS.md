@@ -3813,7 +3813,7 @@ Derived flags:
 ```
 importLive = importWatts ≥ 5 OR homeGridWatts ≥ 25          # positive, unambiguous
 declaredRaw = entity configured ? (entityPresent === true) : gridAvailableFallback
-declared    = declaredRaw AND NOT (panel.projection.gridConnected === false)   # v1.178.0 veto: the LAST reading
+declared    = declaredRaw AND NOT ((panel.projection.gridConnected ?? panel.lastGridReading.connected) === false)   # v1.178.0 veto: the LAST reading
 present     = importLive OR declared OR shp2GridConnected===true
 ```
 
@@ -3825,21 +3825,26 @@ resolver `backstopping` until the pool neared the floor: the runway audible was 
 `runway_projection_islanded_only` read ON and `off_grid` OFF — the hours of warning in which
 to shed load or start a generator were lost.
 
-The veto reads the panel's **last** reading (`projection.gridConnected`), not the
-online-gated `shp2GridConnected`, and clears on evidence, never on silence: a newer reading of
-Grid OK, or measured flow (`importLive`, which proves the grid regardless of `gridSta`).
-Offline, cloud-shadowed (`contentStaleSinceMs`), unrefreshed and just-reconnected panels all
-keep vetoing on their last not-OK reading. Every way of lifting the veto on silence that was
+The veto reads the panel's **last** reading (`projection.gridConnected`, falling back to
+`lastGridReading` — the last REST reply that carried `gridSta` — when the latest reply omitted
+the `pd303_mc` subtree), not the online-gated `shp2GridConnected`, and clears on evidence,
+never on silence: only a newer reading of Grid OK. Measured flow (`importLive`) proves the grid
+regardless of `gridSta` while it flows, but does not clear the veto. Offline, cloud-shadowed
+(`contentStaleSinceMs`), unrefreshed and just-reconnected panels, and replies without
+`gridSta`, all keep vetoing on the last not-OK reading. The reading is held in memory: an
+add-on restart while the panel is dark forgets it, and until the panel reports again the
+declaration stands, as it did before v1.178.0. Every way of lifting the veto on silence that was
 tried republished "grid present" in the middle of an outage: a cloud-replay shadow latch (2–4
 a day on this plant, up to 16 min), a cloud-offline panel (an outage that also takes the ISP
 down), a wall-clock age on an unrefreshed reading, and a 6 s `/status` blip. Each one dropped
 `off_grid`, dropped `load_shed_recommended` (so automations could restore shed loads) and
 re-gated the runway audible. The cost of stickiness is a stale "no grid" if the grid returns
 while the panel is dark: an early alarm, the accepted direction. A field the panel never
-reported (`gridConnected` null) vetoes nothing. The presence term is unchanged: a stale "1"
+reported (no reply ever carried `gridSta`) vetoes nothing. The presence term is unchanged: a stale "1"
 still asserts nothing. The resolver's reason names the code the panel reported and says when
-it is a last reading ("grid declared present but the SHP2 reports grid not detected
-(gridSta=0) (last reading; panel offline) — not backstopping").
+it is a last reading — panel offline, data replayed, or the latest reply without `gridSta` ("grid
+declared present but the SHP2 reports grid not detected (gridSta=0) (last reading; panel
+offline) — not backstopping").
 
 #### 4.3 The `backstopping` decision (stricter than `present`)
 
@@ -6514,7 +6519,7 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
 
-**v1.178.0 — a measured "no grid" outranks a declared grid; boot placeholders are null.** `resolveGridBackstop` vetoes a declaration (`input_boolean.grid_available` or `GRID_AVAILABLE`) when the panel's last reading is any `gridSta` other than 1 (`declared = declaredRaw && panel.projection.gridConnected !== false`), at any SoC, until a newer reading says Grid OK or grid flow is measured; before, away from the reserve floor a toggle left ON kept the grid backstopping through an outage and the runway audible gated silent (Grid backstop resolver, 4.2). Both state publishers pass their payload through `publishReadiness.ts`, which nulls each field group until its own input exists ("Publish readiness" in the honest-null summary); The veto is not lifted by silence (offline, cloud-shadowed, unrefreshed or just-reconnected panels): each such lift republished "grid present" mid-outage. `getDayForecast` sets `pvForecastUnavailable` (no PV history on the published display basis), and the curtailment, carbon and tariff reports carry `basisComplete`; `pv_curtailment_active`'s template renders null as unknown. Harness: `scripts/mutate-grid-veto-boot-zero.mjs` (26 mutants).
+**v1.178.0 — a measured "no grid" outranks a declared grid; boot placeholders are null.** `resolveGridBackstop` vetoes a declaration (`input_boolean.grid_available` or `GRID_AVAILABLE`) when the panel's last reading is any `gridSta` other than 1 (`declared = declaredRaw && panel.projection.gridConnected !== false`), at any SoC, until a newer reading says Grid OK or grid flow is measured; before, away from the reserve floor a toggle left ON kept the grid backstopping through an outage and the runway audible gated silent (Grid backstop resolver, 4.2). Both state publishers pass their payload through `publishReadiness.ts`, which nulls each field group until its own input exists ("Publish readiness" in the honest-null summary). The veto is not lifted by silence (offline, cloud-shadowed, unrefreshed or just-reconnected panels, or a reply without `gridSta` — `DeviceSnapshot.lastGridReading`): each such lift republished "grid present" mid-outage. `getDayForecast` sets `pvForecastUnavailable` (no PV history on the published display basis), and the curtailment, carbon and tariff reports carry `basisComplete`; `pv_curtailment_active`'s template renders null as unknown. Harness: `scripts/mutate-grid-veto-boot-zero.mjs` (29 mutants).
 
 **v1.177.0 — the Runway card says what it computes.** `computeRunway` publishes `troughKwh`/`troughAtMs`/`endKwh` (the islanded trajectory's minimum and end, reporting only — the crossing detectors and the alarm are unchanged) and `recentLoadBasis` (`hour-mean` | `live` | `single-sample` | `carried`). The card's wording follows (see RunwayCard below). `getDayForecast`'s display next-24 h PV (`forecastPvWhNext24Display`, published to Home Assistant) now applies `pvBiasFactor` and the same per-hour ceiling as the alarm series, and with no missing Core `restoredSolarModel` IS `solarModel` — restoring the v0.78.0 contract that the display figure equals `forecastPvWhNext24` when every Core reports (v0.93.0 had bias-corrected only the alarm series, and the F11 full-coverage gate fits `solarModel` on hours the ungated display refit included). `troughAtMs` is the empty crossing when the pool empties. Harness: `scripts/mutate-runway-card.mjs` (15 mutants).
 

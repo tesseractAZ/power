@@ -11,15 +11,17 @@
   to shed load or start a generator had passed. An online panel reporting `gridSta` 0 ("grid not
   detected") or 2 (out of spec, islanded onto the batteries) now vetoes the declaration at any
   state of charge, and the resolver's reason names the code the panel reported. The veto holds
-  on the panel's last reading until a newer one says Grid OK or grid power is measured flowing:
-  a panel that goes quiet — cloud-offline, replaying stale data, not refreshing, or briefly
-  reconnecting — does not turn an announced outage back into "grid present". Each of those,
+  on the panel's last reading until a newer one says Grid OK (grid power measured flowing still
+  counts as the grid while it flows): a panel that goes quiet — cloud-offline, replaying stale
+  data, not refreshing, briefly reconnecting, or sending a reply without its grid status — does
+  not turn an announced outage back into "grid present". Each of those,
   if allowed to lift the veto, dropped `off_grid` and `load_shed_recommended` mid-outage and
   gated the runway warning again. If the grid returns while the panel is dark, "no grid"
   persists until the panel reports: an early alarm, not a missed one. A panel that has never
-  reported `gridSta` vetoes nothing. In three weeks of recorded history (2026-09-01 to 09-22)
-  the panel never reported 0 or 2 while the grid was up, and a false reading would sound an
-  alarm early rather than silence one.
+  reported `gridSta` vetoes nothing, and the reading is kept in memory only: after an add-on
+  restart with the panel dark, the declaration stands again until the panel reports. In three
+  weeks of recorded history (2026-09-01 to 09-22) the panel never reported 0 or 2 while the
+  grid was up, and a false reading would sound an alarm early rather than silence one.
 - **No more model-less zeros in Home Assistant after a restart.** The first state publish runs
   on broker connect, about a second before the first device poll, and the next one about 75 s
   later. Everything computed in between came out 0 and was published as a reading: across the
@@ -41,7 +43,7 @@
   counters, which come from persisted totals, are unaffected.
 - The console's plant PV view shows "—" for the next-24 h forecast while it has no basis.
 
-New harness `scripts/mutate-grid-veto-boot-zero.mjs` (26 anchor-asserted mutants).
+New harness `scripts/mutate-grid-veto-boot-zero.mjs` (29 anchor-asserted mutants).
 
 ## 1.177.0
 

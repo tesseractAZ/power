@@ -27,6 +27,7 @@ const READY = resolve(SERVER, 'src/publishReadiness.ts');
 const AN = resolve(SERVER, 'src/analytics.ts');
 const IDX = resolve(SERVER, 'src/index.ts');
 const MQTT = resolve(SERVER, 'src/mqttDiscovery.ts');
+const SNAP = resolve(SERVER, 'src/snapshot.ts');
 
 const SUBSET = ['test/gridMeasuredAbsentVeto.test.ts', 'test/publishReadiness.test.ts', 'test/curtailment.test.ts'];
 
@@ -41,8 +42,8 @@ const MUTANTS = [
   {
     id: 'ii. \u2605\u2605 a field the panel never reported vetoes the declaration',
     file: GRID,
-    find: '  const gridMeasuredAbsent = panel?.projection.gridConnected === false;',
-    to: '  const gridMeasuredAbsent = panel?.projection.gridConnected !== true; /* MUTANT */',
+    find: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false;',
+    to: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) !== true; /* MUTANT */',
     why: 'Every panel cloud blip withdraws the backstop: nuisance runway alarms and off_grid flapping with the grid perfectly fine.',
   },
   {
@@ -55,23 +56,44 @@ const MUTANTS = [
   {
     id: 'iii-b. \u2605\u2605\u2605 the veto reads the ONLINE-GATED value: a cloud shadow or a cloud-offline panel lifts it mid-outage',
     file: GRID,
-    find: '  const gridMeasuredAbsent = panel?.projection.gridConnected === false;',
+    find: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false;',
     to: '  const gridMeasuredAbsent = shp2GridConnected === false; /* MUTANT */',
     why: 'A cloud-replay shadow (2-4 a day) or an outage that also takes the ISP down republishes "grid present": off_grid falls, load_shed_recommended drops, the runway audible is re-gated.',
   },
   {
     id: 'iii-d. \u2605\u2605\u2605 the veto lapses on wall-clock AGE (the cloud going quiet mid-outage)',
     file: GRID,
-    find: '  const gridMeasuredAbsent = panel?.projection.gridConnected === false;',
-    to: '  const gridMeasuredAbsent = panel?.projection.gridConnected === false && Date.now() - (panel?.lastQuotaAtMs ?? 0) <= 300_000; /* MUTANT */',
+    find: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false;',
+    to: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false && Date.now() - (panel?.lastQuotaAtMs ?? 0) <= 300_000; /* MUTANT */',
     why: 'Five minutes into an outage whose uplink also fails, the resolver republishes "grid present" and the runway audible is gated silent again.',
   },
   {
     id: 'iii-e. \u2605\u2605 the veto is set aside after an online transition (a 6 s /status blip lifts it for a poll)',
     file: GRID,
-    find: '  const gridMeasuredAbsent = panel?.projection.gridConnected === false;',
-    to: "  const gridMeasuredAbsent = panel?.projection.gridConnected === false && !(typeof panel?.onlineChangedAtMs === 'number' && panel.onlineChangedAtMs > (panel?.lastQuotaAtMs ?? 0)); /* MUTANT */",
+    find: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false;',
+    to: "  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false && !(typeof panel?.onlineChangedAtMs === 'number' && panel.onlineChangedAtMs > (panel?.lastQuotaAtMs ?? 0)); /* MUTANT */",
     why: 'Each blip mid-outage draws a false off_grid edge and can re-arm and repeat the runway announcement.',
+  },
+  {
+    id: 'iii-f. \u2605\u2605 the veto ignores the last reply that carried gridSta (a partial reply lifts it)',
+    file: GRID,
+    find: '  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false;',
+    to: '  const gridMeasuredAbsent = panel?.projection.gridConnected === false; /* MUTANT */',
+    why: 'A /quota/all reply without the pd303_mc subtree re-projects gridConnected as null: "grid present" for a poll, mid-outage.',
+  },
+  {
+    id: 'iii-g. \u2605\u2605 the /device/list rebuild drops the last grid reading (the sticky-clock trap)',
+    file: SNAP,
+    find: '        lastGridReading: existing?.lastGridReading, // v1.178.0 — same trap, same carry',
+    to: '        /* MUTANT */',
+    why: 'Every 60 s rebuild forgets the reading the veto falls back to.',
+  },
+  {
+    id: 'iii-h. \u2605 the latch takes a reply that carried no gridSta',
+    file: SNAP,
+    find: "    if (cur.projection?.kind === 'shp2' && cur.projection.gridConnected != null) {",
+    to: "    if (cur.projection?.kind === 'shp2') { /* MUTANT */",
+    why: 'A partial reply overwrites the last real reading with null.',
   },
   {
     id: 'iii-c. the reason says gridSta=0 for a code the panel never sent',

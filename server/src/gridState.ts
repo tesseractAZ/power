@@ -73,7 +73,9 @@ export interface GridBackstop {
   backstopping: boolean;
   /** Live grid import detected — positive, unambiguous proof grid is energized. */
   importLive: boolean;
-  /** Declared present via the HA entity or GRID_AVAILABLE (not via live import). */
+  /** Declared present via the HA entity or GRID_AVAILABLE (not via live import) — AFTER the
+   *  v1.178.0 measured-absent veto: false while the panel's last reading is not Grid OK, even
+   *  with the toggle ON. */
   declared: boolean;
   /** The grid import (W) observed on SHP2-bound cores (DPU ac_in path). */
   importWatts: number;
@@ -272,8 +274,11 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // v1.178.0 — the panel's reading of NO grid vetoes a DECLARED-only grid, everywhere.
   // The veto keys on the panel's LAST reading (projection.gridConnected: false for any gridSta
   // other than 1 — VALUE-1-ONLY: 0 = grid not detected, 2 = out of spec → the panel islands
-  // onto the batteries; an undocumented code is not "Grid OK" either). It clears on EVIDENCE,
-  // never on silence: a newer reading of 1, or measured flow (importLive). It is deliberately
+  // onto the batteries; an undocumented code is not "Grid OK" either), falling back to the
+  // last reply that carried gridSta (lastGridReading) when the latest one omitted it. It
+  // clears on EVIDENCE, never on silence: only a newer reading of 1. Measured flow
+  // (importLive) proves the grid regardless while it flows, but does not clear it. A restart
+  // forgets the reading (in memory only). It is deliberately
   // NOT gated on online / shadow / age the way the presence term is (computeShp2GridConnected:
   // a stale "1" must never assert presence). Each of those lifts proved to republish "grid
   // present" mid-outage — a cloud-replay shadow latch (2-4 a day here, up to 16 min), a
@@ -291,7 +296,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // The failure mode of a false 0 is an early alarm, never a missed one; in three weeks of
   // recorded gridSta (2026-09-01..22) no 0 or 2 appeared while the grid was up.
   const panel = projectedShp2(input.devices);
-  const gridMeasuredAbsent = panel?.projection.gridConnected === false;
+  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false;
   const declared = declaredRaw && !gridMeasuredAbsent;
 
   const present = importLive || declared || shp2GridConnected === true;
@@ -377,14 +382,17 @@ function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot
 
 /** v1.178.0 — the panel's own words for a not-Grid-OK reading, for the resolver's reason.
  *  Names the code it actually reported, so the reason never says 0 for another value, and
- *  says "last reading" when the veto is holding on a reading the panel is not refreshing. */
+ *  marks it "last reading" when the panel is offline, replaying, or its latest reply carried
+ *  no gridSta. (A panel whose polls are failing while it stays listed online is not marked.) */
 function shp2GridStaText(panel: (DeviceSnapshot & { projection: Shp2Projection }) | undefined): string {
-  const sta = panel?.projection.gridSta ?? null;
+  const fromReply = panel?.projection.gridConnected != null;
+  const sta = (fromReply ? panel?.projection.gridSta : panel?.lastGridReading?.sta) ?? null;
   const what = sta === 0 ? 'grid not detected (gridSta=0)'
     : sta === 2 ? 'grid out of spec (gridSta=2, islanded)'
       : `grid status not OK (gridSta=${sta})`;
   const silent = !panel?.online ? 'panel offline'
-    : panel.contentStaleSinceMs != null ? 'panel data replayed' : null;
+    : panel.contentStaleSinceMs != null ? 'panel data replayed'
+      : !fromReply ? 'latest reply omitted gridSta' : null;
   return silent ? `${what} (last reading; ${silent})` : what;
 }
 

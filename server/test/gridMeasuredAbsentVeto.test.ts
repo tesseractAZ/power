@@ -152,6 +152,38 @@ test('★★★ end to end through the real SnapshotStore: an outage survives a 
   }
 });
 
+test('★★ a REST reply without gridSta (the pd303_mc subtree omitted) does not lift the veto; a setDeviceList rebuild keeps the reading', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'veto-partial-'));
+  const prevPath = process.env.SHADOW_WITNESS_PATH;
+  process.env.SHADOW_WITNESS_PATH = join(dir, 'shadow-witness.json');
+  try {
+    const store = new SnapshotStore();
+    let t = 5_000_000;
+    store.setClock(() => t);
+    const item = { sn: 'SHP2-1', deviceName: 'SHP2-1', productName: 'Smart Home Panel 2', online: 1 } as never;
+    store.setDeviceList([item]);
+    const body = (k: number): Record<string, unknown> => ({
+      'wattInfo.gridWatt': 0, 'loadInfo.hall1Watt': [k, 134, 104, 302, 341, 70, 287, 70, 512, 88, 240, 60],
+    });
+    const r = () => resolveGridBackstop({ devices: store.get().devices, gridEntity: entity('on'), gridEntityConfigured: true, gridAvailableFallback: false, atReserveFloor: false });
+    store.setDeviceQuota('SHP2-1', { ...body(1), 'pd303_mc.masterIncreInfo.gridSta': 0 });
+    assert.equal(r().backstopping, false, 'the outage is announced');
+    t += 60_000;
+    store.setDeviceQuota('SHP2-1', body(2)); // non-empty, no gridSta
+    assert.equal(store.get().devices['SHP2-1'].projection?.kind === 'shp2' && (store.get().devices['SHP2-1'].projection as Any).gridConnected, null, '(the projection itself has no reading)');
+    assert.equal(r().backstopping, false, 'a reply that said nothing about the grid does not lift the veto');
+    assert.match(r().reason, /gridSta=0\) \(last reading; latest reply omitted gridSta\)/);
+    store.setDeviceList([item]); // the 60 s /device/list rebuild
+    assert.equal(r().backstopping, false, 'the reading survives the rebuild');
+    t += 60_000;
+    store.setDeviceQuota('SHP2-1', { ...body(3), 'pd303_mc.masterIncreInfo.gridSta': 1 });
+    assert.equal(r().backstopping, true, 'a Grid OK reading clears it');
+  } finally {
+    if (prevPath == null) delete process.env.SHADOW_WITNESS_PATH; else process.env.SHADOW_WITNESS_PATH = prevPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the real projection maps an undocumented gridSta to false (the veto depends on it)', () => {
   assert.equal(projectShp2({ 'pd303_mc.masterIncreInfo.gridSta': 3 } as Any).gridConnected, false);
   assert.equal(projectShp2({ 'pd303_mc.masterIncreInfo.gridSta': 1 } as Any).gridConnected, true);
