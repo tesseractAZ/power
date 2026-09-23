@@ -474,7 +474,8 @@ export interface Shp2Projection {
   /** v0.89.0 — the ALARM-facing grid-present signal derived from gridSta. VALUE-1-ONLY:
    *  true IFF gridSta === 1 (Grid OK). 0 (gone) and 2 (energized-but-out-of-spec → the
    *  SHP2 islands onto battery, NOT a safe backstop) → false; null → null. Consumed by
-   *  gridState.computeShp2GridConnected as an additive, online-gated backstop signal. */
+   *  gridState.computeShp2GridConnected as an additive, online-gated backstop signal (true),
+   *  and — its LAST value, not online-gated — by the v1.178.0 declared-grid veto (false). */
   gridConnected: boolean | null;
   strategy: Shp2Strategy;
 }
@@ -676,8 +677,10 @@ export function projectShp2(q: Quota): Shp2Projection {
       const s = num(q, 'pd303_mc.masterIncreInfo.gridSta');
       // v0.89.0 VALUE-1-ONLY. 1 = Grid OK → connected. 2 = grid energized but OUT OF
       // SPEC → the SHP2 islands onto EPS (running off battery) → NOT a safe backstop →
-      // treat as NOT connected for the alarm. 0 = grid gone. null/other = unknown
-      // (never fabricate presence).
+      // treat as NOT connected for the alarm. 0 = grid gone. null = unknown. Any OTHER
+      // code is not "Grid OK" and maps to false (never fabricate presence) — and since
+      // v1.178.0 false vetoes a declared grid (gridState.ts), so mapping other codes to
+      // null would let an undocumented status silence the outage alarm again.
       return s == null ? null : s === 1 ? true : false;
     })(),
     strategy: projectShp2Strategy(q),
