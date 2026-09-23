@@ -1,3 +1,17 @@
+## 1.178.1
+
+### Battery net and panel load no longer publish 0 at a restart
+
+- 1.178.0 stopped model-less zeros reaching Home Assistant after a restart, and at its own
+  deploy fifteen of the governed sensors did go to unknown and back. Two did not: `Battery Net`
+  and `Panel Load` still went X → 0 → X. Both publishers added up the fleet flows before waiting
+  on the analytics reports, and judged whether those sums were ready after waiting. The first
+  device poll lands during that wait, so readiness saw real devices and passed sums that had been
+  taken before any device had reported. The sums are now taken after the wait, from the same
+  device state readiness judges, so the two cannot disagree. They are also a few seconds fresher.
+
+Harness `scripts/mutate-grid-veto-boot-zero.mjs`: three mutants added (32).
+
 ## 1.178.0
 
 ### A measured "no grid" outranks a declared grid; boot placeholders are published as unknown

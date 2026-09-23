@@ -165,6 +165,28 @@ test('★★ both publishers pass their payload through withholdUnready(publishR
   for (const f of [mqtt, rest]) assert.ok(f.includes('speakerLastProbeAt: getBroadcastHealth().lastProbeAt'));
 });
 
+test('★★★ v1.178.1 — both publishers take the fleet sums AFTER the reports\' await, with no await before readiness', () => {
+  // `snap` is the store's live object and publishReadiness judges it after the await. At the
+  // v1.178.0 deploy the sums were taken BEFORE it: the first poll landed during the await,
+  // readiness saw projected devices, and the pre-poll 0 W sums went out as readings
+  // (battery net and panel load X → 0 → X). Sums and readiness must read the same moment.
+  for (const [file, open] of [
+    ['mqttDiscovery.ts', 'const buildState = async'],
+    ['index.ts', "app.get('/api/ha-state'"],
+  ] as const) {
+    const f = src(file);
+    const start = f.indexOf(open);
+    assert.ok(start > 0, `${file}: ${open}`);
+    const readiness = f.indexOf('publishReadiness({', start);
+    const body = f.slice(start, readiness);
+    const reportsAwait = body.indexOf('await Promise.all([');
+    const firstSums = body.indexOf('aggregateFleetFlow(snap.devices)');
+    assert.ok(reportsAwait > 0 && firstSums > 0, `${file}: both found`);
+    assert.ok(firstSums > reportsAwait, `${file}: the fleet sums are taken after the reports' await`);
+    assert.doesNotMatch(body.slice(firstSums), /\bawait\b/, `${file}: no await between the sums and publishReadiness`);
+  }
+});
+
 test('★★ every governed key exists in at least one publisher — a typo would silently guard nothing', () => {
   const both = src('mqttDiscovery.ts') + src('index.ts');
   for (const [flag, keys] of Object.entries(READINESS_FIELDS)) {

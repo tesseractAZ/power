@@ -1515,15 +1515,6 @@ app.get('/api/ha-state', async (req, reply) => {
   const devices = Object.values(snap.devices);
   const shp2 = findShp2(snap.devices);
 
-  // v0.9.74 — only SHP2-bound DPUs count toward fleet totals. Spare cores
-  // (here, the operator's Cores 4 + 5) inflate every "fleet PV / battery net /
-  // total in / total out" reading because their energy can't actually
-  // reach the home power bus. The previous code summed all 5 cores and
-  // overstated the home's available capacity by ~40%.
-  // v0.52.0 — the per-pack fleet flow loop is shared with mqttDiscovery's
-  // buildState via aggregateFleetFlow (raw, un-rounded sums; rounded at emission).
-  const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
-
   // Cached projections (internally cached ~30min — cheap to call per-request).
   const [fc, deg, runway, rte, clipping, curtailment, selfCons, carbon, tariff] = await Promise.all([
     analytics.report('forecast'),
@@ -1536,6 +1527,16 @@ app.get('/api/ha-state', async (req, reply) => {
     analytics.report('carbon'),
     analytics.report('tariff'),
   ]);
+  // v0.9.74 — only SHP2-bound DPUs count toward fleet totals. Spare cores
+  // (here, the operator's Cores 4 + 5) inflate every "fleet PV / battery net /
+  // total in / total out" reading because their energy can't actually
+  // reach the home power bus. The previous code summed all 5 cores and
+  // overstated the home's available capacity by ~40%.
+  // v0.52.0 — the per-pack fleet flow loop is shared with mqttDiscovery's
+  // buildState via aggregateFleetFlow (raw, un-rounded sums; rounded at emission).
+  // v1.178.1 — AFTER the reports' await, from the same live device map publishReadiness
+  // judges below (see buildState): sums taken before it were a boot-time sum over nothing.
+  const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
 
   // v1.125.1 — cache the REPRESENTATIVE islanded load for the outage cushion.
   //

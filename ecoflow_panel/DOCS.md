@@ -1834,9 +1834,12 @@ are cached (~30 min) on the worker.
   binary sensor governed, `pv_curtailment_active`, renders null as `"None"` (unknown) rather
   than `"OFF"`, so a restart draws no on→off edge. `pv_curtailment_charge_ceiling_pct` is
   not governed: it is the Cores' live `chgMaxSoc`, null when unknown, never a model-less 0.
-  The fleet flows need an online projected Core the panel lists as a source (any Core on a
-  DPU-only install — no panel listed at all): a bench spare's projection alone does not make
-  a fleet sum real, and a panel listed but not yet projected leaves membership unknown.
+  The fleet sums are taken after the reports' await, from the same live device map readiness
+  judges (v1.178.1): taken before it, a boot-time sum over nothing passed a readiness verdict
+  made after the first poll. The fleet flows need an online projected Core the panel lists as
+  a source (any Core on a DPU-only install — no panel listed at all): a bench spare's
+  projection alone does not make a fleet sum real, and a panel listed but not yet projected
+  leaves membership unknown.
   The first state publish runs on broker connect, ~0.8 s before the first poll, and the
   next one ~75 s later, so each of these used to publish X → 0 → X at every restart; on
   the `total_increasing` `pv_curtailment_kwh_today` the dip reads as a meter reset and Home
@@ -6518,6 +6521,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 `FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
+
+**v1.178.1 — sums and readiness read the same moment.** Both publishers (`buildState`, `/api/ha-state`) now take `aggregateFleetFlow(snap.devices)` after the reports' `await Promise.all`, with no await between it and `publishReadiness`. `snap` is the store's live object: taken before the await, the sums were computed before the first poll while readiness — evaluated after it — saw projected devices, so `fleet_battery_net_watts` and `panel_load_watts` still published a boot-time 0 at the v1.178.0 deploy. Pinned by a source-order test; harness `scripts/mutate-grid-veto-boot-zero.mjs` (32 mutants).
 
 **v1.178.0 — a measured "no grid" outranks a declared grid; boot placeholders are null.** `resolveGridBackstop` vetoes a declaration (`input_boolean.grid_available` or `GRID_AVAILABLE`) when the panel's last reading is any `gridSta` other than 1 (`declared = declaredRaw && panel.projection.gridConnected !== false`), at any SoC, until a newer reading says Grid OK or grid flow is measured; before, away from the reserve floor a toggle left ON kept the grid backstopping through an outage and the runway audible gated silent (Grid backstop resolver, 4.2). Both state publishers pass their payload through `publishReadiness.ts`, which nulls each field group until its own input exists ("Publish readiness" in the honest-null summary). The veto is not lifted by silence (offline, cloud-shadowed, unrefreshed or just-reconnected panels, or a reply without `gridSta` — `DeviceSnapshot.lastGridReading`): each such lift republished "grid present" mid-outage. `getDayForecast` sets `pvForecastUnavailable` (no PV history on the published display basis), and the curtailment, carbon and tariff reports carry `basisComplete`; `pv_curtailment_active`'s template renders null as unknown. Harness: `scripts/mutate-grid-veto-boot-zero.mjs` (29 mutants).
 
