@@ -909,6 +909,15 @@ export interface DayForecast {
    *  operator-visible; the runway/projected-SoC numbers should be read with
    *  appropriate skepticism when this is true. */
   structurallyIncomplete?: boolean;
+  /** v1.178.0 — true when there is NO home-Core PV history to project from (no home Core with
+   *  a projection yet, or their pv_total recorder span is empty). The PV figures are then a
+   *  model-less 0, not a forecast: at every restart the first forecast is built ~1 s after
+   *  boot, before any Core has reported, and its 0 kWh was published to Home Assistant as
+   *  a real value for ~75 s (a fabricated dip in the sensor history). Publishers send null
+   *  (HA "unknown") while this is set. Narrower than structurallyIncomplete, which is also
+   *  set by a cold load curve or a missing SoC basis while the PV forecast is perfectly
+   *  good. */
+  pvForecastUnavailable?: boolean;
   reserveSoc: number;
   hours: ForecastHour[];
   forecastPvWhNext24: number;
@@ -1971,6 +1980,7 @@ async function computeDayForecastUncached(
   // diagnostic "forecast basis incomplete" sensor (the flag drove only the cache
   // TTL before). Set before caching so the cached value carries it too.
   value.structurallyIncomplete = structurallyIncomplete;
+  value.pvForecastUnavailable = homeDpus.length === 0 || pvSpan === 0;
   // Cache whenever ≥1 DPU is present (so a totally-empty fleet still doesn't latch),
   // tagging the entry incomplete so the TTL fast-path uses the short negative-cache
   // window. A complete forecast overwrites it with incomplete:false + full TTL.
@@ -7563,6 +7573,9 @@ export interface CarbonReport {
   lifetimePvKwh: number;
   lifetimeKgAvoided: number;
   lifetimeMilesNotDriven: number;
+  /** v1.178.0 — the rolling window ran with both a DPU and the panel projected. False on a
+   *  boot-partial snapshot, whose window figures are a model-less 0; publishers send null. */
+  basisComplete?: boolean;
 }
 
 let carbonCache: { ts: number; value: CarbonReport } | null = null;
@@ -7622,6 +7635,7 @@ export function computeCarbonReport(
   const fleetComplete =
     deviceList.some((d) => d.projection?.kind === 'dpu') &&
     deviceList.some((d) => d.projection?.kind === 'shp2');
+  value.basisComplete = fleetComplete;
   if (fleetComplete) carbonCache = { ts: Date.now(), value };
   return value;
 }
@@ -7788,6 +7802,8 @@ export interface TariffReport {
   // Today running
   todayGridImportCostDollars: number;
   todaySolarLoadValueDollars: number;
+  /** v1.178.0 — computed with both DPUs and the panel projected (see computeTariffReport). */
+  basisComplete?: boolean;
 }
 
 let tariffCache: { ts: number; value: TariffReport } | null = null;
@@ -7902,7 +7918,9 @@ export function computeTariffReport(
   // v0.15.13 — `&&`, not `||`: tariff needs PV (DPUs) and load (SHP2); a
   // boot-partial snapshot with only one of them computes a misleading figure
   // (observed: net_savings −$4.36 from grid-import cost with no solar value).
-  if (dpus.length > 0 && shp2 != null) tariffCache = { ts: now, value };
+  // v1.178.0 — publish the same gate on the value: a boot-partial tariff is a model-less 0.
+  value.basisComplete = dpus.length > 0 && shp2 != null;
+  if (value.basisComplete) tariffCache = { ts: now, value };
   return value;
 }
 

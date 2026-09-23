@@ -40,6 +40,7 @@ import { liveGridBackstop } from './gridState.js';
 import { countCloudWedges } from './deviceLink.js';
 import { systemOutageFields } from './alerts.js';
 import { getBroadcastHealth } from './broadcastHealth.js';
+import { publishReadiness, withholdUnready } from './publishReadiness.js';
 import { pollHealth } from './telemetryBlind.js';
 
 /**
@@ -1182,7 +1183,9 @@ export async function startMqttDiscovery(
       gridBackstopping: liveGridBackstop(snap.devices).backstopping,
       nowMs: Date.now(),
     });
-    return {
+    // v1.178.0 — every field whose data does not exist yet publishes null, not a model-less 0
+    // (publishReadiness.ts). The connect-time publish runs before the first poll lands.
+    const state: Record<string, unknown> = {
       lighting_posture: posture.posture,
       lighting_posture_reason: posture.reason,
       fleet_pv_watts: Math.round(fleetPv),
@@ -1347,6 +1350,16 @@ export async function startMqttDiscovery(
         };
       })(),
     };
+    return withholdUnready(state, publishReadiness({
+      devices: snap.devices,
+      alerts: snap.alerts,
+      speakerLastProbeAt: getBroadcastHealth().lastProbeAt,
+      forecast: fc,
+      clipping,
+      curtailment,
+      carbon,
+      tariff,
+    }));
   };
 
   // v0.15.1 — Per-SHP2-circuit discovery, decoupled from the one-shot connect.

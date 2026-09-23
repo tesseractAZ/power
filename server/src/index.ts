@@ -131,6 +131,8 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs } from './batterySocAlarm.js';
 import { createRunwayAlarm, shouldGateRunwayAudible } from './runwayAlarm.js';
 import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
+import { getBroadcastHealth } from './broadcastHealth.js';
+import { publishReadiness, withholdUnready } from './publishReadiness.js';
 import { hostPowerEntityId } from './hostPower.js';
 import { sampleHostTemp, liveHostTemp } from './hostThermal.js';
 import { startVitals, tickAssess, liveVitals, currentAssessment, degradedMode } from './selfVitals.js';
@@ -1774,6 +1776,18 @@ app.get('/api/ha-state', async (req, reply) => {
   // v0.9.14 — 25 s cache: the underlying computes refresh every 4 min via the
   // cache warmer, but HA polls this every 30 s. ETag + 25 s max-age means most
   // HA polls return 304 with no body — saves ~3 KB JSON per HA entity-poll cycle.
+  // v1.178.0 — the same readiness rule as the MQTT publisher (publishReadiness.ts): a field
+  // whose data does not exist yet is null, not a model-less 0.
+  withholdUnready(payload as Record<string, unknown>, publishReadiness({
+    devices: snap.devices,
+    alerts: snap.alerts,
+    speakerLastProbeAt: getBroadcastHealth().lastProbeAt,
+    forecast: fc,
+    clipping,
+    curtailment,
+    carbon,
+    tariff,
+  }));
   return cached(req, reply, payload, 25);
 });
 

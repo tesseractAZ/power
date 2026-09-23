@@ -389,9 +389,10 @@ test('mqtt-discovery: every value_json key a sensor references is emitted by bui
   const referenced = [...new Set([...src.matchAll(/value_json\.([a-z0-9_]+)/g)].map((m) => m[1]))]
     .filter((k) => !k.startsWith('circuit_'));
 
-  // Emitted keys: property names inside buildState()'s return literal …
+  // Emitted keys: property names inside buildState()'s state literal (v1.178.0: the literal
+  // is bound to `state` and returned through withholdUnready, which only nulls values) …
   const bsStart = src.indexOf('const buildState');
-  const retStart = src.indexOf('return {', bsStart);
+  const retStart = src.indexOf('const state: Record<string, unknown> = {', bsStart);
   const retEnd = src.indexOf('\n    };', retStart);
   assert.ok(bsStart >= 0 && retStart > bsStart && retEnd > retStart, 'could not locate buildState return block');
   const emitted = new Set(

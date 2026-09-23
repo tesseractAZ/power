@@ -1816,6 +1816,20 @@ are cached (~30 min) on the worker.
 - **Honest nulls everywhere:** null numeric fields emit `null` → HA `unknown`, never a
   fabricated 0/OFF; `gridSta` null stays null; `backup_reserve_enabled` reads `unknown`
   when the strategy object is absent.
+- **Publish readiness (v1.178.0, `publishReadiness.ts`):** a figure computed before the data
+  behind it exists is null, not 0. Both state publishers (MQTT `buildState` and the REST
+  twin `/api/ha-state`) pass their payload through `withholdUnready(publishReadiness(...))`,
+  which nulls each group of fields whose own input is missing: fleet flows until an online
+  Core has a projection; `panel_load_watts` until the panel reports a channel; the nine
+  alarm counts until the monitor has evaluated once; `audible_usable_speakers` until the
+  first speaker probe; the forecast PV pair while `pvForecastUnavailable`; the clipping
+  trio while the array peak is 0; the curtailment five while the report has no home Cores
+  or no panel; CO2 7 d and the tariff three while their report's `basisComplete` is false.
+  The first state publish runs on broker connect, ~0.8 s before the first poll, and the
+  next one ~75 s later, so each of these used to publish X → 0 → X at every restart; on
+  the `total_increasing` `pv_curtailment_kwh_today` the dip reads as a meter reset and Home
+  Assistant counts the day's curtailment again. Lifetime counters come from the recorder's
+  persisted accumulators and are not governed.
 - **Write surface is intentionally tiny**, rate-limited, allow-listed, sanity-bounded,
   and fully audit-logged.
 
@@ -3786,9 +3800,22 @@ The SHP2 cloud telemetry exposes **no** grid-presence field (no line voltage, no
 Derived flags:
 ```
 importLive = importWatts ≥ 5 OR homeGridWatts ≥ 25          # positive, unambiguous
-declared   = entity configured ? (entityPresent === true) : gridAvailableFallback
-present    = importLive OR declared OR shp2GridConnected===true
+declaredRaw = entity configured ? (entityPresent === true) : gridAvailableFallback
+declared    = declaredRaw AND shp2GridConnected !== false     # v1.178.0 measured-absent veto
+present     = importLive OR declared OR shp2GridConnected===true
 ```
+
+**Measured-absent veto (v1.178.0).** A declaration is an operator's statement; `gridSta` 0
+("grid not detected") or 2 (out of spec — the panel islands onto the batteries) from an
+online, non-shadowed panel is a measurement, and it now outranks the declaration everywhere,
+not only at the reserve floor. Before, a toggle left ON through a surprise outage kept the
+resolver `backstopping` until the pool neared the floor: the runway audible was gated silent,
+`runway_projection_islanded_only` read ON and `off_grid` OFF — the hours of warning in which
+to shed load or start a generator were lost. `shp2GridConnected` is null when the panel is
+offline, cloud-shadowed (`contentStaleSinceMs`) or reports no `gridSta`, and null vetoes
+nothing. Measured flow (`importLive`) still proves the grid regardless of `gridSta`. The
+resolver's reason names the panel's reading ("grid declared present but the SHP2 reports grid
+not detected (gridSta=0) — not backstopping").
 
 #### 4.3 The `backstopping` decision (stricter than `present`)
 
@@ -6462,6 +6489,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 `FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
+
+**v1.178.0 — a measured "no grid" outranks a declared grid; boot placeholders are null.** `resolveGridBackstop` vetoes a declaration (`input_boolean.grid_available` or `GRID_AVAILABLE`) when an online, non-shadowed panel reports `gridSta` 0 or 2 (`declared = declaredRaw && shp2GridConnected !== false`), at any SoC; before, away from the reserve floor a toggle left ON kept the grid backstopping through an outage and the runway audible gated silent (Grid backstop resolver, 4.2). Both state publishers pass their payload through `publishReadiness.ts`, which nulls each field group until its own input exists ("Publish readiness" in the honest-null summary); `getDayForecast` sets `pvForecastUnavailable` (no home Core projected, or an empty PV span), and the carbon and tariff reports carry `basisComplete`. Harness: `scripts/mutate-grid-veto-boot-zero.mjs` (13 mutants).
 
 **v1.177.0 — the Runway card says what it computes.** `computeRunway` publishes `troughKwh`/`troughAtMs`/`endKwh` (the islanded trajectory's minimum and end, reporting only — the crossing detectors and the alarm are unchanged) and `recentLoadBasis` (`hour-mean` | `live` | `single-sample` | `carried`). The card's wording follows (see RunwayCard below). `getDayForecast`'s display next-24 h PV (`forecastPvWhNext24Display`, published to Home Assistant) now applies `pvBiasFactor` and the same per-hour ceiling as the alarm series, and with no missing Core `restoredSolarModel` IS `solarModel` — restoring the v0.78.0 contract that the display figure equals `forecastPvWhNext24` when every Core reports (v0.93.0 had bias-corrected only the alarm series, and the F11 full-coverage gate fits `solarModel` on hours the ungated display refit included). `troughAtMs` is the empty crossing when the pool empties. Harness: `scripts/mutate-runway-card.mjs` (15 mutants).
 

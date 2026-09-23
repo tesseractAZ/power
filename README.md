@@ -18,7 +18,7 @@ Panel 2**, three home **Delta Pro Ultra** battery/inverter Cores (5 packs each =
 92 kWh usable), a **42-panel / ~16.8 kW** array, and an EVSE — on the APS R-EV
 time-of-use rate.
 
-> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~9,960
+> 📖 **Full reference:** [`ecoflow_panel/DOCS.md`](ecoflow_panel/DOCS.md) (~10,295
 > lines) documents **every** feature and engine — what each does, the exact
 > algorithm and math it computes, how data traces through the pipeline, its
 > endpoints/sensors, config knobs, and edge-case guards. This README is the tour;
@@ -215,7 +215,7 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 2,954 tests
+cd server && npm install && npm test     # 2,973 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -261,7 +261,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **49 harnesses** (`scripts/mutate-*.mjs`) holding **635
+regression. There are **50 harnesses** (`scripts/mutate-*.mjs`) holding **648
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

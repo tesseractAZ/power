@@ -1,3 +1,40 @@
+## 1.178.0
+
+### A measured "no grid" outranks a declared grid; boot placeholders are published as unknown
+
+- **The panel's "grid not detected" now overrides a grid declared present.** With
+  `input_boolean.grid_available` (or `GRID_AVAILABLE`) ON, the grid resolver trusted that
+  declaration over the panel's own reading everywhere except at the reserve floor. In an outage
+  with the toggle left ON the grid kept "backstopping": the runway alarm's spoken warning stayed
+  gated silent, `runway_projection_islanded_only` read ON, `off_grid` read OFF and the Runway card
+  said "not a live countdown" — until the pool neared the floor, by which time the hours in which
+  to shed load or start a generator had passed. An online panel reporting `gridSta` 0 ("grid not
+  detected") or 2 (out of spec, islanded onto the batteries) now vetoes the declaration at any
+  state of charge, and the resolver's reason names the reading. An offline or cloud-shadowed
+  panel, or one that reports no `gridSta`, vetoes nothing; measured grid flow still proves the
+  grid regardless. In three weeks of recorded history (2026-09-01 to 09-22) the panel never
+  reported 0 or 2 while the grid was up, and a false reading would sound an alarm early rather
+  than silence one.
+- **No more model-less zeros in Home Assistant after a restart.** The first state publish runs
+  on broker connect, about a second before the first device poll, and the next one about 75 s
+  later. Everything computed in between came out 0 and was published as a reading: across the
+  day's four restarts, 16 sensors went X → 0 → X each time — fleet PV and battery net, panel
+  load, five alarm counts, the usable-speaker count, CO2 avoided (7 d), tariff today and
+  7 d, curtailment (7 d), array peak and the next-24 h PV forecast. Measurement sensors took a
+  false minimum of 0 into every restart hour, and the Energy dashboard's solar and battery rates
+  dropped to 0. `pv_curtailment_kwh_today` is `total_increasing`, so its dip (5.44 → 0 →
+  5.44 kWh) read as a meter reset and the day's curtailment was counted again — 8 times since
+  09-01. Each group of fields now publishes null (`unknown`) until its own input exists: fleet
+  flows until an online Core is projected, panel load until the panel reports a channel, alarm
+  counts once the monitor has run, the speaker count after the first probe, the forecast when
+  there is PV history to project from, and the clipping, curtailment, carbon and tariff figures
+  when their report ran on a real basis. Both the MQTT publisher and `/api/ha-state` apply the
+  same rule. Genuine zeros — no PV at night, no active alarms — publish as before. Lifetime
+  counters, which come from persisted totals, are unaffected.
+- The console's plant PV view shows "—" for the next-24 h forecast while it has no basis.
+
+New harness `scripts/mutate-grid-veto-boot-zero.mjs` (13 anchor-asserted mutants).
+
 ## 1.177.0
 
 ### The Runway card says what its projection shows
