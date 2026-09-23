@@ -34,6 +34,16 @@ export function setClockOffsetLogger(fn: (offsetMs: number, previousMs: number) 
   onClockOffsetAdopted = fn;
 }
 
+/**
+ * v1.179.0 — an explicit per-request bound. undici's own headersTimeout / bodyTimeout default to
+ * 300 s — exactly SHP2_READBACK_STALE_MS, the window in which the grid resolver still trusts a
+ * panel reading — and startPollLoop awaits refreshAll over every device, so ONE hung request
+ * held the whole poll for 300 s and aged the panel's reading out of the window (the add-on log
+ * shows a 540 s /device/list gap). A timeout here is an ordinary poll failure, retried on the
+ * next cycle, so the ~60 s cadence the window assumes holds.
+ */
+export const ECOFLOW_REST_TIMEOUT_MS = 30_000;
+
 async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Record<string, unknown>): Promise<T> {
   const headers = signRequest({
     accessKey: config.accessKey,
@@ -50,7 +60,10 @@ async function call<T>(method: 'GET' | 'POST' | 'PUT', path: string, params?: Re
   const reqHeaders: Record<string, string> = { ...headers };
   if (method !== 'GET') reqHeaders['Content-Type'] = 'application/json;charset=UTF-8';
   const reqStartedMs = Date.now(); // v1.81.0 — RTT for the clock-sample gate
-  const res = await request(url, { method, headers: reqHeaders, body });
+  const res = await request(url, {
+    method, headers: reqHeaders, body,
+    headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS,
+  });
   // v1.69.0 — learn the server clock from EVERY response, including error responses.
   // The 8521 "signature is wrong" rejection carries a Date header too, so the very
   // first rejection teaches us the offset and the NEXT request signs correctly. That

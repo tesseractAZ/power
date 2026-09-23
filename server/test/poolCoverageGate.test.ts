@@ -21,7 +21,7 @@ const [SPARE_CORE_4] = [...SPARE_DPU_SNS] as [string];
 
 function dpu(sn: string, online: boolean, packNetW = 0): any {
   return {
-    sn, online, productName: 'Delta Pro Ultra',
+    sn, online, productName: 'Delta Pro Ultra', lastTelemetryAtMs: Date.now() - 10_000, // v1.179.0
     projection: { kind: 'dpu', acInWatts: 0, packs: [{ inputWatts: packNetW < 0 ? -packNetW : 0, outputWatts: packNetW > 0 ? packNetW : 0 }] },
   };
 }

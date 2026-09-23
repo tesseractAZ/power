@@ -1,6 +1,6 @@
 ## 1.179.0
 
-### A stale "Grid OK" from the panel no longer counts as the grid being there
+### Old readings from the panel and the Cores no longer count as the grid being there
 
 - The panel's own grid flag counted as grid presence whenever the panel was online, however old
   the reading. Two ways left an old "Grid OK" standing through an outage: the panel dropping off
@@ -8,15 +8,26 @@
   carries no data), and the panel's readings failing to download while it stayed listed online
   — indefinitely. Either way the add-on believed the grid was there when it was not: the runway
   alarm's spoken warning was held back, battery-level announcements said the house was drawing
-  from grid power, `off_grid` read OFF and `shp2_grid_connected` read ON. The flag now counts
-  only when the reading is fresh — downloaded in the last five minutes, from a panel that is
-  online and not replaying old data — the same test the overnight charging controls already
-  use. Readings arrive about once a minute, so normal operation, including the gaps between the
-  panel's charging bursts, is unchanged, and a reconnect of a few seconds does not discard a
-  reading that is still fresh. `shp2_grid_connected` reads unknown while the reading is stale.
-  The v1.178.0 rule that a "no grid" reading overrides a grid declared present is unaffected.
+  from grid power, `off_grid` read OFF and `shp2_grid_connected` read ON. The same was true,
+  and worse, of the measured grid power: a panel reading frozen mid-charge (7–8 kW at the
+  reserve floor) counted as grid flowing, which overrides even the checks made at the floor,
+  and a Core whose data had stopped kept its last grid draw. All three now count only while
+  fresh — downloaded in the last five minutes, from a device that is online and not replaying
+  old data — the same test the overnight charging controls already use. Readings arrive about
+  once a minute, so normal operation, including the gaps between the panel's charging bursts,
+  is unchanged, and a reconnect of a few seconds does not discard a reading that is still fresh.
+  A reading from before an outage can still count until the next successful download, at most
+  five minutes after the last good one. `shp2_grid_connected` reads unknown while stale. The
+  other direction is accepted deliberately: if the cloud is unreachable for more than five
+  minutes while the batteries sit at the reserve floor and the grid is charging them, the floor
+  alarm speaks, because nothing can vouch for the grid.
+- When nothing can be heard at all, the overnight charging no longer treats that as the grid
+  being lost: it holds rather than ending the night's buy or switching force-charge off.
+- Requests to the EcoFlow cloud now give up after 30 seconds. They had no limit short of five
+  minutes, so one stuck request could stall every device's update for that long.
+- The v1.178.0 rule that a "no grid" reading overrides a grid declared present is unaffected.
 
-New harness `scripts/mutate-presence-fresh-readback.mjs` (5 anchor-asserted mutants).
+New harness `scripts/mutate-presence-fresh-readback.mjs` (11 anchor-asserted mutants).
 
 ## 1.178.1
 

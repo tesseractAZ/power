@@ -20,13 +20,16 @@ import { join } from 'node:path';
 import { SnapshotStore } from '../src/snapshot.js';
 import { resolveGridBackstop, computeShp2GridConnected } from '../src/gridState.js';
 import { SHP2_READBACK_STALE_MS } from '../src/shp2Membership.js';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 type Any = any;
 const MIN = 60_000;
 
-const quota = (gridSta: number, k = 1): Record<string, unknown> => ({
+const quota = (gridSta: number, k = 1, gridWatt = 0): Record<string, unknown> => ({
   'pd303_mc.masterIncreInfo.gridSta': gridSta,
-  'wattInfo.gridWatt': 0,
+  'wattInfo.gridWatt': gridWatt,
   'loadInfo.hall1Watt': [k, 134, 104, 302, 341, 70, 287, 70, 512, 88, 240, 60],
 });
 
@@ -136,4 +139,125 @@ test('★★ the v1.178.0 declared-grid veto is unchanged: it still reads the LA
     assert.equal(g.declared, false, 'veto: the last reading still says no grid');
     assert.equal(g.backstopping, false);
   });
+});
+
+/* ── the flow terms: a frozen gridWatt / Core ac_in is the same stale reading ─────────────── */
+
+test('★★★ path 1 with the panel carrying the home from grid: a frozen 7.8 kW gridWatt proves nothing either', () => {
+  // gridWatt comes only from the REST quota, like gridSta, and it freezes with it. As importLive
+  // it is exempt from BOTH floor guards, so the stale sample muted an at-floor outage outright.
+  withStore((store, at) => {
+    at(Date.now() - 12 * MIN);
+    store.setDeviceQuota('SHP2-1', quota(1, 1, 7800));
+    store.setDeviceOnline('SHP2-1', false);
+    store.setDeviceOnline('SHP2-1', true);
+    const g = resolve(store.get().devices, { atReserveFloor: true });
+    assert.equal(g.homeGridWatts, 0, 'no measured flow from a reading the panel has not refreshed');
+    assert.equal(g.importLive, false);
+    assert.equal(g.present, false);
+    assert.equal(g.backstopping, false, 'the at-floor alarm is not muted');
+  });
+});
+
+test('★★★ path 2 with a frozen 7.8 kW gridWatt: the failing quota lapses the flow term at the window too', () => {
+  withStore((store, at) => {
+    at(Date.now() - 6 * MIN);
+    store.setDeviceQuota('SHP2-1', quota(1, 1, 7800));
+    store.setDeviceError('SHP2-1', 'quota fetch failed');
+    const g = resolve(store.get().devices, { atReserveFloor: true });
+    assert.equal(g.homeGridWatts, 0);
+    assert.equal(g.backstopping, false);
+  });
+});
+
+test('a fresh 7.8 kW gridWatt still proves the grid (unchanged)', () => {
+  withStore((store, at) => {
+    at(Date.now() - 1 * MIN);
+    store.setDeviceQuota('SHP2-1', quota(1, 1, 7800));
+    const g = resolve(store.get().devices, { atReserveFloor: true });
+    assert.equal(g.homeGridWatts, 7800);
+    assert.equal(g.importLive, true);
+  });
+});
+
+/** A Core wired to the panel (slot 1), its content clock `agoMs` old, drawing `acIn` W. */
+function coreFleet(agoMs: number, acIn: number): Any {
+  const now = Date.now();
+  return {
+    SHP2: {
+      sn: 'SHP2', online: true, productName: 'Smart Home Panel 2', lastQuotaAtMs: now - 20_000,
+      projection: { kind: 'shp2', gridWatt: 0, gridConnected: null, circuits: [], sources: [{ slot: 1, sn: 'C1', isConnected: true }] },
+    },
+    C1: {
+      sn: 'C1', online: true, productName: 'Delta Pro Ultra', lastTelemetryAtMs: now - agoMs,
+      projection: { kind: 'dpu', acInWatts: acIn, packs: [{ inputWatts: 0, outputWatts: 0 }] },
+    },
+  };
+}
+
+test('★★ a Core left listed online with its telemetry stopped: its frozen ac_in proves nothing', () => {
+  assert.equal(resolve(coreFleet(6 * MIN, 3000)).importWatts, 0, '6 min old');
+  assert.equal(resolve(coreFleet(20_000, 3000)).importWatts, 3000, 'fresh: unchanged');
+  const noClock = coreFleet(20_000, 3000);
+  delete noClock.C1.lastTelemetryAtMs;
+  assert.equal(resolve(noClock).importWatts, 0, 'no content ever landed');
+});
+
+/* ── presenceUnknown: "nothing can be heard" is not "the grid is gone" ──────────────────── */
+
+test('★★ presenceUnknown: true only when presence is false for lack of any evidence', () => {
+  withStore((store, at) => {
+    at(Date.now() - 12 * MIN);
+    store.setDeviceQuota('SHP2-1', quota(1));
+    const g = resolve(store.get().devices);
+    assert.equal(g.present, false);
+    assert.equal(g.presenceUnknown, true, 'a stale panel and no declaration: unknown, not absent');
+  });
+  withStore((store) => {
+    store.setDeviceQuota('SHP2-1', quota(0));
+    const g = resolve(store.get().devices);
+    assert.equal(g.present, false);
+    assert.equal(g.presenceUnknown, false, 'a fresh "grid not detected" is evidence of absence');
+  });
+  withStore((store, at) => {
+    at(Date.now() - 40 * MIN);
+    store.setDeviceQuota('SHP2-1', quota(0));
+    const g = resolveGridBackstop({
+      devices: store.get().devices,
+      gridEntity: { entity_id: 'input_boolean.grid_available', state: 'on', last_updated: new Date().toISOString() } as Any,
+      gridEntityConfigured: true, gridAvailableFallback: false, atReserveFloor: false,
+    });
+    assert.equal(g.presenceUnknown, false, "the veto's last reading is evidence, however stale");
+  });
+  withStore((store, at) => {
+    at(Date.now() - 12 * MIN);
+    store.setDeviceQuota('SHP2-1', quota(1));
+    const g = resolveGridBackstop({
+      devices: store.get().devices,
+      gridEntity: { entity_id: 'input_boolean.grid_available', state: 'off', last_updated: new Date().toISOString() } as Any,
+      gridEntityConfigured: true, gridAvailableFallback: false, atReserveFloor: false,
+    });
+    assert.equal(g.presenceUnknown, false, 'a usable grid entity reading off is evidence');
+  });
+  const present = resolve(coreFleet(20_000, 3000));
+  assert.equal(present.present, true);
+  assert.equal(present.presenceUnknown, false, 'present is never unknown');
+});
+
+const here = dirname(fileURLToPath(import.meta.url));
+const src = (f: string) => readFileSync(resolvePath(here, '../src/', f), 'utf8');
+
+test('★★ both night-charge deciders get a tri-state: null (never act) when presence is only unknown', () => {
+  const idx = src('index.ts');
+  const sites = idx.match(/gridPresent: [^\n]+,/g) ?? [];
+  const wired = sites.filter((l) => !l.includes('gridPresent: null'));
+  assert.equal(wired.length, 2, `decideActuation + decideForceCharge: ${JSON.stringify(sites)}`);
+  for (const l of wired) assert.equal(l.trim(), 'gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,');
+});
+
+test('the EcoFlow REST request carries an explicit bound well inside the readback window', () => {
+  const rest = src('ecoflow/rest.ts');
+  const ms = Number(/export const ECOFLOW_REST_TIMEOUT_MS = ([\d_]+);/.exec(rest)?.[1]?.replace(/_/g, ''));
+  assert.ok(ms > 0 && ms * 4 <= SHP2_READBACK_STALE_MS, `${ms} ms`);
+  assert.match(rest, /headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS/);
 });

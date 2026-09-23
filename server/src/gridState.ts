@@ -30,7 +30,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh } from './shp2Membership.js';
+import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh, SHP2_READBACK_STALE_MS } from './shp2Membership.js';
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
@@ -89,6 +89,12 @@ export interface GridBackstop {
   shp2GridConnected: boolean | null;
   /** Human-readable reason, for status payloads / logs / alert detail. */
   reason: string;
+  /** v1.179.0 — `present` is false only because nothing can be heard (every source unknown
+   *  or stale), not because anything reports the grid absent. Consumers that must never act
+   *  on "unknown" (the night-charge abort, force-charge's grid-loss OFF) read this to pass
+   *  null instead of false. Evidence of absence: the panel's last reading not Grid OK (the
+   *  declared-grid veto), a fresh not-OK panel reading, or a usable grid entity reading off. */
+  presenceUnknown: boolean;
 }
 
 /**
@@ -105,7 +111,10 @@ export interface GridBackstop {
  * emergency. With no source identity we therefore report 0 import — the resolver
  * then treats the grid as NOT live unless separately declared.
  */
-export function computeGridImportWatts(devices: Record<string, DeviceSnapshot>): number {
+export function computeGridImportWatts(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number = Date.now(),
+): number {
   const list = Object.values(devices);
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
@@ -119,9 +128,19 @@ export function computeGridImportWatts(devices: Record<string, DeviceSnapshot>):
   // No SHP2 source identity → cannot attribute import to the house grid path →
   // fail safe to 0 (never let an unscoped DPU sum silence a floor emergency).
   if (sourceSns.size === 0) return 0;
+  // v1.179.0 — and only a Core whose content is FRESH (lastTelemetryAtMs: REST quota or MQTT
+  // delta, not a /status flip) within the same readback window as the panel. A Core left
+  // listed online while its telemetry stopped would otherwise keep a frozen acIn ≥ 5 W
+  // asserting importLive — exempt from both floor guards — through an outage.
   return dpus
-    .filter((d) => d.online && sourceSns.has(d.sn))
+    .filter((d) => d.online && sourceSns.has(d.sn) && coreContentFresh(d, nowMs))
     .reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
+}
+
+/** v1.179.0 — a Core's content clock is within the shared readback window. */
+function coreContentFresh(d: DeviceSnapshot, nowMs: number): boolean {
+  const t = d.lastTelemetryAtMs;
+  return typeof t === 'number' && Number.isFinite(t) && t > 0 && nowMs - t <= SHP2_READBACK_STALE_MS;
 }
 
 /**
@@ -140,7 +159,10 @@ export function computeGridImportWatts(devices: Record<string, DeviceSnapshot>):
  * Only POSITIVE flow counts (gridWatt ≥ 0 by construction; a non-positive or
  * non-finite reading contributes nothing — never fabricates grid presence).
  */
-export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): number {
+export function computeHomeGridWatts(
+  devices: Record<string, DeviceSnapshot>,
+  nowMs: number = Date.now(),
+): number {
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
@@ -165,7 +187,11 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
   // that begins during the window. Treat it the same way: contribute no measured
   // flow, fabricate no presence. See shp2Shadow.ts for why the witness is the
   // twelve-channel watt vector and not this scalar.
-  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return 0;
+  // v1.179.0 — and a THIRD door: a panel still `online` whose readings stopped refreshing (a
+  // quota fetch failing with the panel still listed, or an OFFLINE→ONLINE /status flip before
+  // any quota). gridWatt freezes exactly when gridSta does — both come only from the REST
+  // quota — so it takes the same gate as computeShp2GridConnected: shp2ReadbackFresh.
+  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return 0;
   const w = shp2.projection.gridWatt ?? null;
   return w != null && Number.isFinite(w) && w > 0 ? w : 0;
 }
@@ -186,9 +212,12 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
  *     ~60 s, so the 5-min window leaves the burst-gap behaviour below untouched, and a
  *     6 s /status blip does not drop a reading that is still fresh (dropping it would
  *     remove the gridSta backstop at the floor between charge bursts — the false
- *     critical this term exists to close). Residual: a panel dark for LESS than the
- *     window, across the onset of an outage, can assert its pre-outage "1" until the next
- *     poll (≤ ~60 s), still subject to the at-floor pool-discharge guard.
+ *     critical this term exists to close). Residual: a pre-outage "1" can still assert
+ *     presence until the next SUCCESSFUL quota, at most SHP2_READBACK_STALE_MS after the last
+ *     good one — whether the panel went dark or its polls began failing as the outage began —
+ *     still subject to the at-floor pool-discharge guard. The flow terms (gridWatt, Core
+ *     ac_in) take the same window, and presenceUnknown lets the night-charge deciders tell
+ *     "nothing can be heard" from "the grid is gone".
  *   - Field absent/unknown ⇒ null.
  * This is the panel's live line-sensing flag: it stays true through the zero-watt gaps
  * between the SHP2's 8 kW charge bursts (the exact false-critical this closes), and
@@ -263,8 +292,9 @@ export interface GridBackstopInput {
 
 /** Pure resolver — unit-testable; no env / cache reads. */
 export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
-  const importWatts = computeGridImportWatts(input.devices);
-  const homeGridWatts = computeHomeGridWatts(input.devices);
+  const nowMs = input.nowMs ?? Date.now();
+  const importWatts = computeGridImportWatts(input.devices, nowMs);
+  const homeGridWatts = computeHomeGridWatts(input.devices, nowMs);
   // Grid flow is proven LIVE by EITHER measured path: DPU ac_in (grid charging the
   // SHP2-bound DPUs) or the SHP2 main gridWatt (grid serving home loads directly).
   // Either at/above its threshold is positive, unambiguous proof the grid is
@@ -281,7 +311,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // NOT folded into importLive (which would unconditionally bypass
   // the poolDischarging guard); it gets its own term below that is still subject to
   // poolDischarging, so a wedged/stale "connected" can't mute a net-discharging outage.
-  const shp2GridConnected = computeShp2GridConnected(input.devices, input.nowMs ?? Date.now());
+  const shp2GridConnected = computeShp2GridConnected(input.devices, nowMs);
 
   // Declared presence: a configured entity is authoritative (unknown ⇒ NOT
   // declared, the safe default); otherwise fall back to GRID_AVAILABLE.
@@ -392,7 +422,9 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
             ? 'grid entity reports not present (or unknown)'
             : 'off-grid (no grid declared, no import)';
 
-  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason };
+  const absenceEvidence = gridMeasuredAbsent || shp2GridConnected === false || (entityUsable && entityPresent === false);
+  const presenceUnknown = !present && !absenceEvidence;
+  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason, presenceUnknown };
 }
 
 function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {

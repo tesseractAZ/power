@@ -3806,8 +3806,8 @@ The resolver was built (v0.23.0) on the premise that the SHP2 cloud telemetry ex
 
 | Signal | Function | Threshold |
 | --- | --- | --- |
-| DPU AC-in import | `computeGridImportWatts` | `GRID_IMPORT_WATTS` = 5 W; scoped **strictly** to SHP2 source SNs; **0 if source identity unknown** (a wall-charging spare must not masquerade as house grid) |
-| SHP2 main-line grid | `computeHomeGridWatts` (`wattInfo.gridWatt`) | `HOME_GRID_IMPORT_WATTS` = 25 W; **0 if SHP2 offline** (frozen sample must not fabricate presence) |
+| DPU AC-in import | `computeGridImportWatts` | `GRID_IMPORT_WATTS` = 5 W; scoped **strictly** to SHP2 source SNs; **0 if source identity unknown** (a wall-charging spare must not masquerade as house grid); only Cores whose content clock (`lastTelemetryAtMs`) is within `SHP2_READBACK_STALE_MS` (v1.179.0) |
+| SHP2 main-line grid | `computeHomeGridWatts` (`wattInfo.gridWatt`) | `HOME_GRID_IMPORT_WATTS` = 25 W; **0 unless a fresh readback** (`shp2ReadbackFresh`, v1.179.0; offline/shadowed only before — a frozen sample must not fabricate presence) |
 | SHP2 own grid flag | `computeShp2GridConnected` (`pd303_mc.masterIncreInfo.gridSta`, value-1-only) | true=Grid OK / false=islanded / null=unknown; **null unless a fresh readback** (`shp2ReadbackFresh`: online, a REST quota within `SHP2_READBACK_STALE_MS` = 5 min, not shadowed — v1.179.0; online-and-unshadowed only before); burst-gap immune |
 | HA entity | `interpretGridEntity(GRID_PRESENCE_ENTITY)` | on/true/home/…→present; numeric voltage >50→present; unavailable/unknown→null |
 | Standing declaration | `GRID_AVAILABLE=true` | Coarse fallback when no entity configured |
@@ -3858,12 +3858,29 @@ the panel still listed online left it standing indefinitely. Either made `presen
 `gridStaBackstop` true with no grid: the runway audible gated, SoC crossings spoken as
 "drawing from grid power", `off_grid` OFF, `shp2_grid_connected` ON. The flag now needs
 `shp2ReadbackFresh` — the same shared gate (and window) the night-charge readbacks use.
-Quotas arrive every ~60 s, so the burst-gap behaviour is untouched. A 6 s `/status` blip does
-not drop a reading that is still fresh: dropping it would remove the gridSta backstop at the
-floor between charge bursts, the false critical this term exists to close. Residual: a panel
-dark for less than the window across the onset of an outage can assert its pre-outage "1"
-until the next poll (≤ ~60 s), still subject to the at-floor pool-discharge guard. The
-declared-grid veto is unaffected: it reads the last reading, however stale.
+The measured-flow terms had the same hole and a stronger effect, since `importLive` is exempt
+from both floor guards: a `gridWatt` frozen mid-charge (7–8 kW at the floor) muted an at-floor
+outage outright. `computeHomeGridWatts` takes the same gate, and `computeGridImportWatts`
+counts a Core only while its content clock (`lastTelemetryAtMs`, REST or MQTT) is within the
+same window. Quotas arrive every ~60 s, so the burst-gap behaviour is untouched. The window
+assumes that cadence holds, and undici's default request timeouts (300 s, equal to the window)
+let one hung request hold the serial poll loop past it: the EcoFlow REST call now carries
+`ECOFLOW_REST_TIMEOUT_MS` = 30 s, so a hang is an ordinary poll failure. A 6 s `/status` blip
+does not drop a reading that is still fresh: dropping it would remove the gridSta backstop at
+the floor between charge bursts, the false critical this term exists to close. Residual: a
+pre-outage "1" can still assert presence until the next successful quota, at most
+`SHP2_READBACK_STALE_MS` after the last good one, whether the panel went dark or its polls
+began failing as the outage began; the at-floor pool-discharge guard still applies. The cost
+runs the other way on a healthy grid: a REST outage of more than 5 minutes at the floor during
+a grid charge withdraws the gridSta backstop, and the floor alarm speaks, because nothing can
+vouch for the grid. The declared-grid veto is unaffected: it reads the last reading, however
+stale.
+
+`presenceUnknown` (v1.179.0) is true when `present` is false only because nothing can be
+heard — no veto reading, no fresh not-OK reading, no usable entity reading off. The
+night-charge actuator and force-charge receive `gridPresent: null` then, not false: both treat
+null as "do nothing", so a stale panel no longer ends a night's buy or switches force-charge
+OFF on no evidence.
 
 #### 4.3 The `backstopping` decision (stricter than `present`)
 
@@ -6538,7 +6555,7 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
 
-**v1.179.0 — a stale "Grid OK" asserts nothing.** `computeShp2GridConnected` (the resolver's presence term and the `shp2_grid_connected` sensor) requires `shp2ReadbackFresh` — online, a REST quota within `SHP2_READBACK_STALE_MS`, not shadowed — instead of online-and-unshadowed alone (Grid backstop resolver, "Presence freshness"). `resolveGridBackstop` takes an optional `nowMs`. The declared-grid veto still reads the last reading. Harness: `scripts/mutate-presence-fresh-readback.mjs` (5 mutants); `mutate-cloud-shadow.mjs` ix repointed at the new gate.
+**v1.179.0 — a stale "Grid OK" asserts nothing, and neither does a stale grid flow.** `computeShp2GridConnected` (the resolver's presence term and the `shp2_grid_connected` sensor) and `computeHomeGridWatts` (`gridWatt`) require `shp2ReadbackFresh` — online, a REST quota within `SHP2_READBACK_STALE_MS`, not shadowed — instead of online-and-unshadowed alone; `computeGridImportWatts` counts a Core only while its `lastTelemetryAtMs` is within the same window (Grid backstop resolver, "Presence freshness"). `GridBackstop.presenceUnknown` separates "nothing can be heard" from evidence of absence, and the night-charge and force-charge deciders get `gridPresent: null` in that case. The EcoFlow REST call carries `ECOFLOW_REST_TIMEOUT_MS` (30 s) so one hung request cannot hold the poll past the window. `resolveGridBackstop` takes an optional `nowMs`. The declared-grid veto still reads the last reading. Harness: `scripts/mutate-presence-fresh-readback.mjs` (11 mutants); `mutate-cloud-shadow.mjs` viii and ix repointed at the new gate.
 
 **v1.178.1 — sums and readiness read the same moment.** Both publishers (`buildState`, `/api/ha-state`) now take `aggregateFleetFlow(snap.devices)` after the reports' `await Promise.all`, with no await between it and `publishReadiness`. `snap` is the store's live object: taken before the await, the sums were computed before the first poll while readiness — evaluated after it — saw projected devices, so `fleet_battery_net_watts` and `panel_load_watts` still published a boot-time 0 at the v1.178.0 deploy. Pinned by a source-order test; harness `scripts/mutate-grid-veto-boot-zero.mjs` (32 mutants).
 

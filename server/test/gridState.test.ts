@@ -25,7 +25,8 @@ import {
 // to prove it is IGNORED by the guard.
 function dpu(sn: string, acInWatts: number, online = true, packNetW = 0): any {
   const packs = [{ inputWatts: packNetW < 0 ? -packNetW : 0, outputWatts: packNetW > 0 ? packNetW : 0 }];
-  return { sn, online, productName: 'Delta Pro Ultra', projection: { kind: 'dpu', acInWatts, packs } };
+  // v1.179.0 — a fresh content clock: stale Core telemetry contributes no measured import.
+  return { sn, online, productName: 'Delta Pro Ultra', lastTelemetryAtMs: Date.now() - 10_000, projection: { kind: 'dpu', acInWatts, packs } };
 }
 function shp2(
   sourceSns: (string | null)[],
