@@ -245,6 +245,9 @@ export interface GridBackstop {
   importWatts: number;
   homeGridWatts: number;
   reason: string;
+  /** v1.179.0 — false: the panel's reading is not a fresh readback (the server zeroes its grid
+   *  figures); null: no panel. Optional for payloads from older servers. */
+  panelFresh?: boolean | null;
 }
 
 export interface FleetSnapshot {

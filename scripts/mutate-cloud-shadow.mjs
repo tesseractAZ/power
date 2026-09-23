@@ -87,15 +87,17 @@ const MUTANTS = [
   {
     id: 'viii. ★★★ a shadowed panel still contributes grid flow',
     file: GRID,
-    find: '  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return 0;',
-    to: '  if (!shp2 || !shp2.online) return 0; /* MUTANT */',
+    // v1.179.0 — the shadow check now lives inside shp2ReadbackFresh; the mutant strips it there.
+    find: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return 0;',
+    to: '  if (!shp2 || !shp2ReadbackFresh({ ...shp2, contentStaleSinceMs: null }, nowMs)) return 0; /* MUTANT */',
     why: 'THE DEFECT: a frozen-high gridWatt keeps importLive=true → backstopping=true → silently MUTES a real at-floor outage beginning inside the window. v0.88.0 names this consequence in as many words.',
   },
   {
     id: 'ix. ★ a shadowed panel still asserts grid PRESENCE',
     file: GRID,
-    find: '  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return null;',
-    to: '  if (!shp2 || !shp2.online) return null; /* MUTANT */',
+    // v1.179.0 — the shadow check now lives inside shp2ReadbackFresh; the mutant strips it there.
+    find: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return null;',
+    to: '  if (!shp2 || !shp2ReadbackFresh({ ...shp2, contentStaleSinceMs: null }, nowMs)) return null; /* MUTANT */',
     why: 'A stale "grid connected = 1" replayed by the cloud would assert presence into an outage.',
   },
   // ── the readback clock (F6) ────────────────────────────────────────────────

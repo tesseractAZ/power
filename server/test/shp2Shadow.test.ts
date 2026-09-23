@@ -101,7 +101,7 @@ test('★ THE INCIDENT: sixteen identical 60 s polls read as stale', () => {
 const fleet = (over: Record<string, unknown>) => ({
   SHP2: {
     sn: 'SHP2', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
-    online: true, lastUpdated: Date.now(),
+    online: true, lastUpdated: Date.now(), lastQuotaAtMs: Date.now() - 20_000,
     projection: { kind: 'shp2', gridWatt: 7800, gridConnected: true },
     ...over,
   },

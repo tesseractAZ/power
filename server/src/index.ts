@@ -5058,7 +5058,8 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
       : null;
   const action = decideForceCharge(state, nowMs, {
     enabled: !opts.forceDisabled && forceChargeOn(),
-    gridPresent: typeof gridNow.present === 'boolean' ? gridNow.present : null,
+    // v1.179.0 — tri-state: null when presence is false only because nothing can be heard.
+    gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,
     // Connected is gridSta === 1 ONLY (DOCS "Grid presence"): 2 is islanded, 0 absent.
     gridStaLost: sp != null && typeof sp.gridSta === 'number' && sp.gridSta !== 1,
     slotsOn,
@@ -5315,7 +5316,9 @@ async function runNightActuationTickInner(): Promise<void> {
     currentReservePct,
     socCoherent,
     vitalsRed: currentAssessment()?.level === 'crit',
-    gridPresent: typeof gridNow.present === 'boolean' ? gridNow.present : null,
+    // v1.179.0 — tri-state: null when presence is false only because nothing can be heard
+    // (decideActuation never aborts on null).
+    gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,
   });
   if (action.kind === 'none' || !shp2) return;
 
