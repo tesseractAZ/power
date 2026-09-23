@@ -130,7 +130,7 @@ import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from '.
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs } from './batterySocAlarm.js';
 import { createRunwayAlarm, shouldGateRunwayAudible } from './runwayAlarm.js';
-import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
+import { liveGridBackstop, gridPresenceEntityId, setPersistedGridAbsentSource } from './gridState.js';
 import { getBroadcastHealth } from './broadcastHealth.js';
 import { publishReadiness, withholdUnready } from './publishReadiness.js';
 import { hostPowerEntityId } from './hostPower.js';
@@ -530,6 +530,9 @@ await app.register(fastifyStatic, {
 });
 
 const store = new SnapshotStore();
+// v1.180.0 — the resolver's declared-grid veto survives a restart made while the cloud is
+// unreachable (no /device/list, so no panel device to carry the persisted reading).
+setPersistedGridAbsentSource(() => store.persistedGridAbsent());
 /** v0.36.0 — snapshot the dashboard/TUI consume, augmented with the live grid backstop. */
 function snapshotForClient(): FleetSnapshot {
   const s = store.get();
