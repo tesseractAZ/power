@@ -165,10 +165,28 @@ test('★★★ a restart with the CLOUD unreachable (no /device/list ever succe
     assert.equal(g.backstopping, false);
     assert.equal(g.presenceUnknown, false);
     assert.match(g.reason, /\(last reading from before a restart; the device list is unreachable\)/);
-    // The first successful list hands over to the per-device reading (a panel removed from the
-    // account cannot leave a veto behind).
+    // An EMPTY list, or one without the panel, is a cloud-side glitch — not evidence: the veto stays.
     b.setDeviceList([]);
-    assert.equal(b.persistedGridAbsent(), null);
+    assert.equal(b.persistedGridAbsent()?.sta, 0, 'an empty list keeps it');
+    b.setDeviceList([{ sn: 'CORE-1', deviceName: 'Core', productName: 'Delta Pro Ultra', online: 1 } as never]);
+    assert.equal(b.persistedGridAbsent()?.sta, 0, 'a list without the panel keeps it');
+    // The panel's own listing hands the reading to its device, where the veto keeps reading it.
+    b.setDeviceList(listed(0));
+    assert.equal(b.persistedGridAbsent(), null, 'handed over');
+    assert.equal(b.get().devices[SN].lastGridReading?.connected, false);
+    assert.equal(toggleOn(b.get().devices).backstopping, false, 'and the veto still holds, now through the device');
+  });
+});
+
+test('★★ a DIFFERENT panel listed is evidence the old one was replaced: its saved reading is pruned', () => {
+  withPaths((file) => {
+    const a = new SnapshotStore();
+    a.setDeviceList(listed(1));
+    a.setDeviceQuota(SN, quota(0)); // the mains cut to swap the panel
+    a.setDeviceList([{ sn: 'SHP2-NEW', deviceName: 'New panel', productName: 'Smart Home Panel 2', online: 1 } as never]);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8'))[SN], undefined, 'the old panel\'s entry is gone from the file');
+    const b = new SnapshotStore(); // a later restart while the cloud is unreachable
+    assert.equal(b.persistedGridAbsent(), null, 'nothing stale vetoes the toggle');
   });
 });
 

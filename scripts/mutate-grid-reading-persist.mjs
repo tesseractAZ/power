@@ -85,11 +85,25 @@ const MUTANTS = [
     why: 'An outage that also takes the internet down, plus a restart: the saved reading is never read and "grid present" returns.',
   },
   {
-    id: 'ix. \u2605\u2605 the no-list reading outlives the first successful device list',
+    id: 'ix. \u2605\u2605\u2605 ANY successful list ends the persisted veto (an empty or partial list is a glitch, not evidence)',
     file: SNAP,
-    find: '    if (this.lastDeviceListSuccessAt > 0) return null;',
+    find: '    const sn = [...this.unseenPersistedGrid].find((s) => this.persistedGridReadings.get(s)?.connected === false);',
+    to: '    if (this.lastDeviceListSuccessAt > 0) return null; /* MUTANT */\n    const sn = [...this.unseenPersistedGrid].find((s) => this.persistedGridReadings.get(s)?.connected === false);',
+    why: 'A first list that comes back empty or without the panel republishes "grid present" mid-outage.',
+  },
+  {
+    id: 'ix-b. \u2605\u2605 the panel\u2019s own listing does not hand the reading over',
+    file: SNAP,
+    find: '    for (const sn of seenThisList) this.unseenPersistedGrid.delete(sn);',
     to: '    /* MUTANT */',
-    why: 'A panel since removed from the account leaves a veto behind that nothing can ever clear.',
+    why: 'The no-list path keeps serving a reading the panel\u2019s device now carries and may since have cleared.',
+  },
+  {
+    id: 'ix-c. \u2605 a replaced panel\u2019s saved reading is never pruned',
+    file: SNAP,
+    find: '    if (listedPanels.length > 0) {',
+    to: '    if (false) { /* MUTANT */',
+    why: 'Months later, a restart during an internet-only outage vetoes a healthy grid on the old panel\u2019s reading.',
   },
   {
     id: 'x. \u2605\u2605\u2605 the resolver ignores the persisted reading when no panel device exists',

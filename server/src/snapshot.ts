@@ -369,6 +369,27 @@ export class SnapshotStore extends EventEmitter {
       this.absentFromList.add(sn);
       this.logger(`device-list: ${d.deviceName} (${sn}) ABSENT from /device/list (last known ${d.online ? 'online' : 'offline'}) — state is now frozen, not refreshed`);
     }
+    // v1.180.0 — hand the persisted grid readings over PER SERIAL, on evidence. A persisted
+    // serial listed here has been rehydrated onto its device (above) and stops being served by
+    // persistedGridAbsent(). An empty or partial list is NOT evidence (v1.145.0 above: a
+    // cloud-side list glitch), so it leaves the others standing. A DIFFERENT panel listed is
+    // evidence the persisted one was replaced or removed: its entry is pruned, so a stale
+    // reading cannot veto a later restart made while the cloud is unreachable.
+    for (const sn of seenThisList) this.unseenPersistedGrid.delete(sn);
+    const listedPanels = devices
+      .filter((d) => (d.productName ?? this.snap.devices[d.sn]?.productName ?? '').toLowerCase().includes('smart home panel'))
+      .map((d) => d.sn);
+    if (listedPanels.length > 0) {
+      let pruned = false;
+      for (const sn of [...this.persistedGridReadings.keys()]) {
+        if (listedPanels.includes(sn)) continue;
+        this.persistedGridReadings.delete(sn);
+        this.unseenPersistedGrid.delete(sn);
+        pruned = true;
+        this.logger(`grid-reading: dropped the saved grid reading of panel ${sn} — no longer on the account (a different panel is listed)`);
+      }
+      if (pruned) this.writeGridReadings();
+    }
     this.snap.generatedAt = now;
     this.emit('change', this.snap);
   }
@@ -608,6 +629,8 @@ export class SnapshotStore extends EventEmitter {
    */
   private gridReadingPath: string | null = null;
   private persistedGridReadings = new Map<string, { connected: boolean; sta: number | null; atMs: number }>();
+  /** v1.180.0 — persisted serials not yet seen in any /device/list this process. */
+  private unseenPersistedGrid = new Set<string>();
 
   private loadGridReadings(): void {
     // Production (the add-on, SUPERVISOR_TOKEN set) persists next to the DB; elsewhere only an
@@ -621,6 +644,7 @@ export class SnapshotStore extends EventEmitter {
       for (const [sn, v] of Object.entries(raw ?? {})) {
         if (v && v.connected === false && typeof v.atMs === 'number' && Number.isFinite(v.atMs)) {
           this.persistedGridReadings.set(sn, { connected: false, sta: typeof v.sta === 'number' ? v.sta : null, atMs: v.atMs });
+          this.unseenPersistedGrid.add(sn);
         }
       }
     } catch { /* absent or corrupt → start cold */ }
@@ -659,15 +683,17 @@ export class SnapshotStore extends EventEmitter {
   private persistedGridAbsentLogged = false;
 
   /**
-   * v1.180.0 — a persisted NOT-OK reading for the grid resolver while NO /device/list has
-   * succeeded in this process: the cloud has been unreachable since the restart, so there is no
-   * panel device to carry lastGridReading (refreshAll throws before setDeviceList). After the
-   * first successful list the per-device reading governs, so a panel since removed from the
-   * account cannot leave a veto behind. Wired in index.ts via setPersistedGridAbsentSource.
+   * v1.180.0 — a persisted NOT-OK reading for the grid resolver while its panel has NOT yet
+   * appeared in any /device/list this process: the cloud unreachable since the restart
+   * (refreshAll throws before setDeviceList), or lists that come back empty or without the panel
+   * (a cloud-side glitch, not evidence). Once the panel is listed, the reading lives on its
+   * device (lastGridReading) instead; a different panel listed prunes it (setDeviceList). The
+   * resolver uses this only when the device map has no panel at all. Wired in index.ts via
+   * setPersistedGridAbsentSource.
    */
   persistedGridAbsent(): { sta: number | null; atMs: number } | null {
-    if (this.lastDeviceListSuccessAt > 0) return null;
-    const r = [...this.persistedGridReadings.values()].find((v) => v.connected === false);
+    const sn = [...this.unseenPersistedGrid].find((s) => this.persistedGridReadings.get(s)?.connected === false);
+    const r = sn != null ? this.persistedGridReadings.get(sn) : undefined;
     if (!r) return null;
     if (!this.persistedGridAbsentLogged) {
       this.persistedGridAbsentLogged = true;
