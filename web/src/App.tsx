@@ -16,6 +16,7 @@ import { SERIES_PALETTE } from './theme';
 import { ThemeToggle } from './components/ThemeToggle';
 import { SectionHeader } from './components/sections';
 import { installGlossaryTooltips } from './glossary';
+import { GridVetoClear } from './components/GridVetoClear';
 
 // v0.8.1 — route-level code splitting. Each non-default page becomes its own
 // chunk; recharts (~540 kB) is vendor-chunked separately via the Vite config.
@@ -258,6 +259,8 @@ function NormalApp() {
         </Suspense>
       ) : (
         <>
+        {/* v1.184.0 — the stuck-"no grid" clear, from the TOP-LEVEL grid (works with no panel card). */}
+        {snapshot && <GridVetoClear grid={snapshot.grid} />}
         {snapshot && <RunwayCard />}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start mt-4">
           {snapshot && <EnergyFlow devices={snapshot.devices} grid={snapshot.grid} />}

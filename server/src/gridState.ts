@@ -100,6 +100,9 @@ export interface GridBackstop {
    *  false, homeGridWatts and shp2GridConnected are already zeroed/unknown, so the dashboard
    *  treats the panel's figures as frozen from this — never from a client-side clock. */
   panelFresh: boolean | null;
+  /** v1.184.0 — a declared grid is vetoed by a panel reading that is not being refreshed: the
+   *  operator may clear it (POST /api/grid-veto/clear) once they know the grid is back. */
+  vetoClearable: boolean;
 }
 
 /**
@@ -379,7 +382,13 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // ...and with NO panel device at all (the cloud unreachable since a restart), the reading the
   // store persisted before it.
   const persistedAbsent = !vetoPanel ? input.persistedGridAbsent ?? null : null;
-  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false
+  // v1.184.0 — a reading taken at or before the operator's clear (gridVetoClearedAtMs) no longer
+  // vetoes; the panel's next reading does.
+  const fromProjection = panel?.projection.gridConnected != null;
+  const readingAtMs = fromProjection ? panel?.lastQuotaAtMs : vetoPanel?.lastGridReading?.atMs;
+  const clearedAtMs = vetoPanel?.gridVetoClearedAtMs;
+  const readingCleared = clearedAtMs != null && (readingAtMs == null || readingAtMs <= clearedAtMs);
+  const gridMeasuredAbsent = ((panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !readingCleared)
     || persistedAbsent != null;
   const declared = declaredRaw && !gridMeasuredAbsent;
 
@@ -458,7 +467,11 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   const absenceEvidence = gridMeasuredAbsent || shp2GridConnected === false || (entityUsable && entityPresent === false);
   const presenceUnknown = !present && !absenceEvidence;
   const panelFresh = panel ? shp2ReadbackFresh(panel, nowMs) : null;
-  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason, presenceUnknown, panelFresh };
+  // v1.184.0 — offered only while the veto rests on a reading the panel is NOT refreshing (dark,
+  // replaying, stale, or restored from before a restart). A panel freshly reporting no grid is not
+  // clearable: its next poll would veto again, and it is the measurement.
+  const vetoClearable = declaredRaw && gridMeasuredAbsent && panelFresh !== true;
+  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason, presenceUnknown, panelFresh, vetoClearable };
 }
 
 /** v1.180.0 — the panel by product identity (the shp2Panels test), projected or not. */

@@ -68,6 +68,11 @@ export function setRateFloorIdleHeld(sns: readonly string[]): void {
   idleHeld = [...sns];
 }
 
+/** v1.184.0 — SNs currently held as idle (the starved-feed filter exempts them). */
+export function rateFloorIdleHeldSns(): ReadonlySet<string> {
+  return new Set(idleHeld);
+}
+
 /** Alert ids (not SNs) currently push-held as idle. */
 export function rateFloorIdleHeldIds(): ReadonlySet<string> {
   return new Set(idleHeld.map(rateFloorAlertId));
