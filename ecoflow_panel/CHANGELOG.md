@@ -9,14 +9,15 @@
 - **A circuit outside the load strategy is not "turned off".** The Strategy tab struck through any
   circuit the panel lists with load control off and called it "turned off in the SHP2", even while
   it was drawing power. That setting only says whether the panel sheds the circuit by priority. The
-  tab now says "not in the SHP2's load strategy", shows the power it is drawing, and no longer
-  strikes it through.
+  tab now says "not in the SHP2's load strategy", shows the power it is drawing, no longer
+  strikes it through, and lists it after the shed order without a rank or tier.
 - **Units and format.** The Core cards' countdown now says "to full" while charging and "to empty"
-  while discharging, instead of "remain" for both. The Forecast chart's power axis is labelled in kW
-  with distinct ticks (1.5 and 2 no longer both read "2"). The trend charts show their unit as the
+  while discharging, instead of "remain" for both; the Thermal page's pack readout and the console
+  tag follow the same rule. The Forecast chart's power axis is labelled in kW with ticks shown
+  exactly (1.95 no longer rounds to "1.9", and 1.5 and 2 no longer both read "2"). The trend charts show their unit as the
   axis label instead of on every tick, where it wrapped onto a stray line.
 
-New harness `scripts/mutate-audit-last-three.mjs` (6 anchor-asserted mutants).
+New harness `scripts/mutate-audit-last-three.mjs` (8 anchor-asserted mutants).
 
 ## 1.182.0
 

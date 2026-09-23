@@ -12,12 +12,13 @@ export function trimDecimals(v: number, d = 1): string {
   return String(Number(v.toFixed(d)));
 }
 
-/** 950 → "950", 1500 → "1.5k", 12345 → "12.3k", -2000 → "-2k". */
+/** 950 → "950", 1500 → "1.5k", 1950 → "1.95k", -2000 → "-2k". Two decimals, trimmed: recharts
+ *  steps in multiples of 50 W (650, 1300, 1950 …), which one decimal still rounded unevenly. */
 export function compactTick(v: number): string {
-  return Math.abs(v) >= 1000 ? `${trimDecimals(v / 1000)}k` : trimDecimals(v);
+  return Math.abs(v) >= 1000 ? `${trimDecimals(v / 1000, 2)}k` : trimDecimals(v);
 }
 
-/** A watt value shown on a kW axis: 1500 → "1.5", 2000 → "2", 250 → "0.3". */
+/** A watt value shown on a kW axis: 1500 → "1.5", 2000 → "2", 650 → "0.65", 1950 → "1.95". */
 export function kwTick(watts: number): string {
-  return trimDecimals(watts / 1000);
+  return trimDecimals(watts / 1000, 2);
 }

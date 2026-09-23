@@ -28,6 +28,14 @@ export function remainSuffix(batAmp: number | null | undefined): string {
   return 'remaining';
 }
 
+/** The same rule for a pack readout labelled on its own (Thermal page): "To full" while its input
+ *  exceeds its output, "To empty" while its output does, else "Remaining". */
+export function packCountdownLabel(inputWatts: number | null | undefined, outputWatts: number | null | undefined): string {
+  const net = (inputWatts ?? 0) - (outputWatts ?? 0);
+  if (inputWatts == null && outputWatts == null) return 'Remaining';
+  return net > 5 ? 'To full' : net < -5 ? 'To empty' : 'Remaining';
+}
+
 /**
  * The Strategy tab's note for a circuit the SHP2 lists with `loadIsEnable: false`. That flag is
  * from the panel's LoadStrategyCfg — whether the circuit takes part in its load-priority strategy —

@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { outlookOf, remainSuffix, strategyExclusion } from '../../web/src/cards/cardText.js';
+import { outlookOf, remainSuffix, strategyExclusion, packCountdownLabel } from '../../web/src/cards/cardText.js';
 import { compactTick, kwTick, trimDecimals } from '../../web/src/charts/axisFormat.js';
 
 const web = (f: string) => readFileSync(new URL(`../../web/src/${f}`, import.meta.url), 'utf8');
@@ -32,6 +32,9 @@ test('★★ Strategy: loadIsEnable=false is "not in the load strategy", never "
   const panel = web('pages/StrategyPanel.tsx');
   assert.doesNotMatch(panel, /line-through/);
   assert.doesNotMatch(panel, /turned off in the SHP2/);
+  // Not a shed candidate: not ranked among the participants, and no tier.
+  assert.match(panel, /\.filter\(\(c\) => c\.loadPriority != null && c\.loadIsEnable !== false\)/);
+  assert.match(panel, /\{exclusion \? '—' : tier\}/);
 });
 
 test('★ DPU countdown: "to full" while charging, "to empty" while discharging (batAmp sign)', () => {
@@ -40,6 +43,12 @@ test('★ DPU countdown: "to full" while charging, "to empty" while discharging 
   assert.equal(remainSuffix(0.2), 'remaining');
   assert.equal(remainSuffix(null), 'remaining');
   assert.match(web('cards/DpuCard.tsx'), /\$\{remainSuffix\(p\?\.batAmp\)\}/);
+  // The same countdown elsewhere: the Thermal page's pack readout and the telnet tag.
+  assert.equal(packCountdownLabel(900, 0), 'To full');
+  assert.equal(packCountdownLabel(0, 700), 'To empty');
+  assert.equal(packCountdownLabel(null, null), 'Remaining');
+  assert.match(web('pages/ThermalPanel.tsx'), /label=\{packCountdownLabel\(pk\.inputWatts, pk\.outputWatts\)\}/);
+  assert.match(readFileSync(new URL('../src/telnet/plant/gen.ts', import.meta.url), 'utf8'), /\$\{\(p\.batAmp \?\? 0\) > 0\.5 \? 'TTF' : 'RUN'\}\.MIN/);
 });
 
 test('★ axis ticks: compact, distinct, unit on the axis label not every tick', () => {
@@ -48,7 +57,10 @@ test('★ axis ticks: compact, distinct, unit on the axis label not every tick',
   assert.equal(kwTick(2000), '2');
   assert.notEqual(kwTick(1500), kwTick(2000), 'neighbouring ticks no longer round to the same label');
   assert.equal(compactTick(950), '950');
-  assert.equal(compactTick(12_345), '12.3k');
+  assert.equal(compactTick(1950), '1.95k', 'recharts steps in 50 W multiples: two decimals render them exactly');
+  assert.equal(compactTick(12_500), '12.5k');
+  assert.equal(kwTick(650), '0.65');
+  assert.equal(kwTick(1950), '1.95');
   assert.equal(compactTick(-2000), '-2k');
   const trend = web('charts/TrendChart.tsx');
   assert.doesNotMatch(trend, /unit=\{unit \? ` \$\{unit\}` : ''\}/, 'no per-tick unit (it wrapped onto a stray line)');

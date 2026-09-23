@@ -19,6 +19,8 @@ const SERVER = resolve(REPO, 'server');
 const TEXT = resolve(REPO, 'web/src/cards/cardText.ts');
 const AXIS = resolve(REPO, 'web/src/charts/axisFormat.ts');
 const TREND = resolve(REPO, 'web/src/charts/TrendChart.tsx');
+const STRAT = resolve(REPO, 'web/src/pages/StrategyPanel.tsx');
+const GEN = resolve(SERVER, 'src/telnet/plant/gen.ts');
 
 const SUBSET = ['test/auditLastThree.test.ts'];
 
@@ -47,15 +49,15 @@ const MUTANTS = [
   {
     id: 'iv. \u2605 compact ticks round to whole thousands again',
     file: AXIS,
-    find: '  return Math.abs(v) >= 1000 ? `${trimDecimals(v / 1000)}k` : trimDecimals(v);',
-    to: '  return Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : trimDecimals(v); /* MUTANT */',
+    find: '  return Math.abs(v) >= 1000 ? `${trimDecimals(v / 1000, 2)}k` : trimDecimals(v);',
+    to: '  return Math.abs(v) >= 1000 ? `${trimDecimals(v / 1000)}k` : trimDecimals(v); /* MUTANT */',
     why: 'Neighbouring ticks print the same label: an uneven-looking axis.',
   },
   {
     id: 'v. \u2605 the kW axis rounds to whole kW again',
     file: AXIS,
-    find: '  return trimDecimals(watts / 1000);',
-    to: '  return (watts / 1000).toFixed(0); /* MUTANT */',
+    find: '  return trimDecimals(watts / 1000, 2);',
+    to: '  return trimDecimals(watts / 1000); /* MUTANT */',
     why: '1.5 and 2 kW both read "2".',
   },
   {
@@ -64,6 +66,20 @@ const MUTANTS = [
     find: '<YAxis yAxisId="left" tick={{ fill: CHART.axis, fontSize: 10 }} width={48} tickFormatter={compactTick} label={unit ?',
     to: '<YAxis yAxisId="left" tick={{ fill: CHART.axis, fontSize: 10 }} width={48} unit={unit ? ` ${unit}` : \'\'} /* MUTANT */ label={unit ?',
     why: '"10000 W" overflows the 48 px axis and the unit wraps onto a stray line.',
+  },
+  {
+    id: 'vii. \u2605 a circuit outside the load strategy is ranked and tiered again',
+    file: STRAT,
+    find: '    .filter((c) => c.loadPriority != null && c.loadIsEnable !== false)',
+    to: '    .filter((c) => c.loadPriority != null) /* MUTANT */',
+    why: 'It reads "first to shed" beside "not in the SHP2\u2019s load strategy", and shifts every other tier.',
+  },
+  {
+    id: 'viii. \u2605 the telnet console tags a charge countdown as runtime',
+    file: GEN,
+    find: "    tag: `GEN.${idx + 1}.${(p.batAmp ?? 0) > 0.5 ? 'TTF' : 'RUN'}.MIN`,",
+    to: '    tag: `GEN.${idx + 1}.RUN.MIN`, /* MUTANT */',
+    why: 'Time-to-full reads as remaining runtime on the operator console.',
   },
 ];
 

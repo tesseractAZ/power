@@ -48,9 +48,12 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
   // the OPPOSITE polarity of server/src/loadShedRegistry.ts's internal HA shed-list
   // convention (priority 1 = shed-FIRST). They are DIFFERENT priority systems — do
   // NOT flip this sort to "match" loadShedRegistry; the direction here is correct.
+  // v1.183.0 — rank only circuits IN the load strategy; one listed with loadIsEnable=false is
+  // shown after them, unranked and untiered (it is not a shed candidate at all).
   const ranked = [...p.pairedCircuits]
-    .filter((c) => c.loadPriority != null)
+    .filter((c) => c.loadPriority != null && c.loadIsEnable !== false)
     .sort((a, b) => (a.loadPriority ?? 999) - (b.loadPriority ?? 999));
+  const outsideStrategy = p.pairedCircuits.filter((c) => c.loadPriority != null && c.loadIsEnable === false);
   const unranked = p.pairedCircuits.filter((c) => c.loadPriority == null);
 
   return (
@@ -166,6 +169,9 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
           {ranked.map((c, i) => (
             <PriorityRow key={c.primaryCh} circuit={c} rank={i + 1} total={ranked.length} />
           ))}
+          {outsideStrategy.map((c) => (
+            <PriorityRow key={c.primaryCh} circuit={c} rank={null} total={ranked.length} />
+          ))}
           {unranked.map((c) => (
             <PriorityRow key={c.primaryCh} circuit={c} rank={null} total={ranked.length} />
           ))}
@@ -219,7 +225,7 @@ function PriorityRow({
       </div>
       <div className="text-right">
         <div className={`text-sm tabular-nums ${active ? 'text-ok' : 'text-muted'}`}>{fmtW(circuit.watts)}</div>
-        <div className={`text-[10px] uppercase tracking-wider ${tierColor}`}>{tier}</div>
+        <div className={`text-[10px] uppercase tracking-wider ${exclusion ? 'text-muted' : tierColor}`}>{exclusion ? '—' : tier}</div>
       </div>
     </div>
   );
