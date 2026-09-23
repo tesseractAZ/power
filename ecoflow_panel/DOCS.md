@@ -3834,9 +3834,8 @@ the `pd303_mc` subtree), not the online-gated `shp2GridConnected`, and clears on
 never on silence: only a newer reading of Grid OK. Measured flow (`importLive`) proves the grid
 regardless of `gridSta` while it flows, but does not clear the veto. Offline, cloud-shadowed
 (`contentStaleSinceMs`), unrefreshed and just-reconnected panels, and replies without
-`gridSta`, all keep vetoing on the last not-OK reading. The reading is held in memory: an
-add-on restart while the panel is dark forgets it, and until the panel reports again the
-declaration stands, as it did before v1.178.0. Every way of lifting the veto on silence that was
+`gridSta`, all keep vetoing on the last not-OK reading — across an add-on restart too
+(v1.180.0, "Surviving a restart" below). Every way of lifting the veto on silence that was
 tried republished "grid present" in the middle of an outage: a cloud-replay shadow latch (2–4
 a day on this plant, up to 16 min), a cloud-offline panel (an outage that also takes the ISP
 down), a wall-clock age on an unrefreshed reading, and a 6 s `/status` blip. Each one dropped
@@ -3892,6 +3891,23 @@ OFF on no evidence.
 panel). The Energy flow card treats `panelFresh === false` as frozen, like an offline or
 shadowed panel: the server has already zeroed that panel's grid reading, and a client-side clock
 would reintroduce skew.
+
+**Surviving a restart (v1.180.0).** The last not-OK reading is persisted per panel serial to
+`grid-reading.json` next to the database (`GRID_READING_PATH` overrides; off by default outside
+the add-on, so test processes never share a file). It is written only when the reading changes,
+deleted the moment the panel reports Grid OK, and never holds a Grid OK reading. On first sight
+after a restart, `setDeviceList` puts it back on the panel as `lastGridReading`. That matters
+exactly when the panel is dark: a panel listed offline is never polled, so it has no projection
+and nothing else would restore the reading, and the resolver finds such a panel by product
+identity for the veto. Before v1.180.0 an outage with the toggle ON, a cloud-dark panel and a
+restart (watchdog, host reboot, update) brought "grid present" back for as long as the panel
+stayed dark. The persisted reading has no age limit, because the veto clears on evidence, not
+silence. The cost is a stale "no grid" after a long dark period in which the grid returned; it
+clears on the panel's first report. The reason says "(last reading; panel offline since before
+a restart)". A persisted reading never feeds presence, which still needs a fresh readback.
+With nothing persisted, the grid-state fields at boot follow the declaration as before: with no
+evidence against it, the operator's statement is the best information, and withholding it would
+leave `off_grid` unknown for the whole of a long cloud outage.
 
 #### 4.3 The `backstopping` decision (stricter than `present`)
 
@@ -6565,6 +6581,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 `FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
+
+**v1.180.0 — the declared-grid veto survives a restart.** `SnapshotStore` persists the SHP2's last not-OK grid reading per serial (`grid-reading.json`, `GRID_READING_PATH`; written on change, deleted on Grid OK, production-only by default) and rehydrates it as `lastGridReading` on first sight; `resolveGridBackstop` finds an unprojected panel by identity for the veto (Grid backstop resolver, "Surviving a restart"). Harness: `scripts/mutate-grid-reading-persist.mjs` (6 mutants); `mutate-grid-veto-boot-zero.mjs` veto anchors repointed.
 
 **v1.179.0 — a stale "Grid OK" asserts nothing, and neither does a stale grid flow.** `computeShp2GridConnected` (the resolver's presence term and the `shp2_grid_connected` sensor) and `computeHomeGridWatts` (`gridWatt`) require `shp2ReadbackFresh` — online, a REST quota within `SHP2_READBACK_STALE_MS`, not shadowed — instead of online-and-unshadowed alone; `computeGridImportWatts` counts a Core only while its `lastTelemetryAtMs` is within the same window (Grid backstop resolver, "Presence freshness"). `GridBackstop.presenceUnknown` separates "nothing can be heard" from evidence of absence, and the night-charge and force-charge deciders get `gridPresent: null` in that case. EcoFlow REST reads carry `ECOFLOW_REST_TIMEOUT_MS` (30 s) so a hung read cannot hold the poll past the window; writes keep undici's defaults. `GridBackstop.panelFresh` publishes the panel verdict, and the Energy flow card treats a stale panel as frozen. `resolveGridBackstop` takes an optional `nowMs`. The declared-grid veto still reads the last reading. Harness: `scripts/mutate-presence-fresh-readback.mjs` (13 mutants); `mutate-cloud-shadow.mjs` viii and ix repointed at the new gate.
 

@@ -1,3 +1,22 @@
+## 1.180.0
+
+### An announced outage survives an add-on restart
+
+- 1.178.0 made the panel's "no grid" reading override a grid declared present and hold until
+  the panel reports Grid OK again, but the reading lived only in the running add-on. If the
+  add-on restarted during an outage while the panel was off the cloud (an outage that also takes
+  the internet down), the new process never saw a reading: a panel listed offline is never
+  polled. The declaration then stood again. The runway alarm's spoken warning was held back,
+  `off_grid` read OFF and battery-level announcements said the house was drawing from grid
+  power, for as long as the panel stayed dark. The last "no grid" reading is now saved to a small
+  file next to the database and restored after a restart, and the resolver finds the panel even
+  before it has sent anything. The file is written only when the reading changes and is cleared
+  the moment the panel reports Grid OK, so a "Grid OK" is never saved. The trade-off: if the grid
+  returned while the panel was dark, "no grid" persists until the panel reports. That is an early
+  alarm, not a missed one.
+
+New harness `scripts/mutate-grid-reading-persist.mjs` (6 anchor-asserted mutants).
+
 ## 1.179.0
 
 ### Old readings from the panel and the Cores no longer count as the grid being there

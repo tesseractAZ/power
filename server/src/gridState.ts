@@ -335,8 +335,9 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // onto the batteries; an undocumented code is not "Grid OK" either), falling back to the
   // last reply that carried gridSta (lastGridReading) when the latest one omitted it. It
   // clears on EVIDENCE, never on silence: only a newer reading of 1. Measured flow
-  // (importLive) proves the grid regardless while it flows, but does not clear it. A restart
-  // forgets the reading (in memory only). It is deliberately
+  // (importLive) proves the grid regardless while it flows, but does not clear it. A not-OK
+  // reading survives a restart (v1.180.0: persisted by snapshot.ts and rehydrated on first
+  // sight; the panel is then found by identity, having no projection). It is deliberately
   // NOT gated on online / shadow / age the way the presence term is (computeShp2GridConnected:
   // a stale "1" must never assert presence). Each of those lifts proved to republish "grid
   // present" mid-outage — a cloud-replay shadow latch (2-4 a day here, up to 16 min), a
@@ -354,7 +355,10 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // The failure mode of a false 0 is an early alarm, never a missed one; in three weeks of
   // recorded gridSta (2026-09-01..22) no 0 or 2 appeared while the grid was up.
   const panel = projectedShp2(input.devices);
-  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? panel?.lastGridReading?.connected) === false;
+  // v1.180.0 — a panel with NO projection (dark since a restart) is found by identity, so the
+  // reading persisted across the restart (snapshot.ts grid-reading.json) still vetoes.
+  const vetoPanel = panel ?? identityShp2(input.devices);
+  const gridMeasuredAbsent = (panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false;
   const declared = declaredRaw && !gridMeasuredAbsent;
 
   const present = importLive || declared || shp2GridConnected === true;
@@ -416,7 +420,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
           ? 'SHP2 gridSta=Grid OK but backup pool still discharging at the reserve floor — not backstopping'
           : `SHP2 gridSta=Grid OK but only ${poolCoverage.reporting}/${poolCoverage.connected} home Cores are reporting at the reserve floor — pool drain unobservable, not backstopping`
         : declaredRaw && gridMeasuredAbsent
-          ? `grid declared present but the SHP2 reports ${shp2GridStaText(panel)} — not backstopping`
+          ? `grid declared present but the SHP2 reports ${shp2GridStaText(vetoPanel)} — not backstopping`
           : declared
           ? floorWithoutFlow
             ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
@@ -435,6 +439,11 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason, presenceUnknown, panelFresh };
 }
 
+/** v1.180.0 — the panel by product identity (the shp2Panels test), projected or not. */
+function identityShp2(devices: Record<string, DeviceSnapshot>): DeviceSnapshot | undefined {
+  return Object.values(devices).find((d) => (d.productName ?? '').toLowerCase().includes('smart home panel'));
+}
+
 function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {
   return Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
@@ -445,15 +454,17 @@ function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot
  *  Names the code it actually reported, so the reason never says 0 for another value, and
  *  marks it "last reading" when the panel is offline, replaying, or its latest reply carried
  *  no gridSta. (A panel whose polls are failing while it stays listed online is not marked.) */
-function shp2GridStaText(panel: (DeviceSnapshot & { projection: Shp2Projection }) | undefined): string {
-  const fromReply = panel?.projection.gridConnected != null;
-  const sta = (fromReply ? panel?.projection.gridSta : panel?.lastGridReading?.sta) ?? null;
+function shp2GridStaText(panel: DeviceSnapshot | undefined): string {
+  const proj = panel?.projection?.kind === 'shp2' ? (panel.projection as Shp2Projection) : undefined;
+  const fromReply = proj?.gridConnected != null;
+  const sta = (fromReply ? proj?.gridSta : panel?.lastGridReading?.sta) ?? null;
   const what = sta === 0 ? 'grid not detected (gridSta=0)'
     : sta === 2 ? 'grid out of spec (gridSta=2, islanded)'
       : `grid status not OK (gridSta=${sta})`;
-  const silent = !panel?.online ? 'panel offline'
+  const silent = !panel?.online ? (proj ? 'panel offline' : 'panel offline since before a restart')
     : panel.contentStaleSinceMs != null ? 'panel data replayed'
-      : !fromReply ? 'latest reply omitted gridSta' : null;
+      : !proj ? 'no reading since a restart'
+        : !fromReply ? 'latest reply omitted gridSta' : null;
   return silent ? `${what} (last reading; ${silent})` : what;
 }
 
