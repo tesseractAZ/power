@@ -316,6 +316,20 @@ function clamp01(n: number): number {
 
 export type ConditionLevel = 'green' | 'yellow' | 'red';
 
+/**
+ * v1.185.1 — the levels POST /api/broadcast/test accepts, and its default. The route validated
+ * against CHIME_LEVELS, which v1.59.0 turned into the five alarm RUNGS (critical…clear): from then
+ * on every documented call — `red`, `yellow`, `green`, and the empty body that defaults to `red` —
+ * was refused with 400, and a rung name slipped through only to be spoken as "All clear". The test
+ * broadcast is a CONDITION-level test (its own "This is only a test." message per level), so it is
+ * validated against the condition levels.
+ */
+export const BROADCAST_TEST_LEVELS: readonly ConditionLevel[] = ['red', 'yellow', 'green'];
+export function parseBroadcastTestLevel(raw: unknown): ConditionLevel | null {
+  const level = raw ?? 'red';
+  return typeof level === 'string' && (BROADCAST_TEST_LEVELS as readonly string[]).includes(level) ? (level as ConditionLevel) : null;
+}
+
 export function conditionFromAlerts(
   alerts: Alert[],
 ): { level: ConditionLevel; crit: number; warn: number; rung: AlarmRung; criticalIds: string[]; criticalFingerprints: string[] } {

@@ -51,7 +51,7 @@ import { systemOutageFields, telemetryGapLedgerSummary } from './alerts.js';
 import { isConfigured, reachesAPhone, getLastPushFailures } from './notify.js';
 // v0.9.18 — ship-wide audible broadcast to HomePod/Sonos via HA media_player.
 import { generateAudioAssets, BUILTIN_TONES } from './audioAssets.js';
-import { startBroadcastMonitor } from './broadcast.js';
+import { startBroadcastMonitor, parseBroadcastTestLevel } from './broadcast.js';
 import { getAllStates, getEntityState } from './haService.js';
 // v0.9.33 — Supervisor add-on + Core config-flow helpers
 import {
@@ -6049,8 +6049,9 @@ app.post<{ Body: { level?: 'red' | 'yellow' | 'green' } }>(
   '/api/broadcast/test',
   { preHandler: requireWriteAuth },
   async (req, reply) => {
-    const level = req.body?.level ?? 'red';
-    if (!(CHIME_LEVELS as readonly string[]).includes(level)) {
+    // v1.185.1 — the CONDITION levels (red/yellow/green), not the chime rungs (see broadcast.ts).
+    const level = parseBroadcastTestLevel(req.body?.level);
+    if (level == null) {
       reply.code(400);
       return { ok: false, error: 'level must be red, yellow, or green' };
     }
