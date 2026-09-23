@@ -684,10 +684,11 @@ export class SnapshotStore extends EventEmitter {
   private noteDpuContent(sn: string, cur: DeviceSnapshot, nowMs: number): void {
     const w = dpuContentWitness(cur.projection);
     if (w == null) return;
-    if (this.dpuWitness.get(sn) !== w) {
-      this.dpuWitness.set(sn, w);
-      cur.contentChangedAtMs = nowMs;
-    }
+    const prev = this.dpuWitness.get(sn);
+    this.dpuWitness.set(sn, w);
+    // First sight only SEEDS the witness: after a restart the first body may itself be a replay,
+    // so the clock starts at the first real CHANGE (seconds for a Core streaming MQTT).
+    if (prev != null && prev !== w) cur.contentChangedAtMs = nowMs;
   }
 
   private gridReadingDirty = false;

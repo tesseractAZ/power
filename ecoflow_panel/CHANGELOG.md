@@ -12,7 +12,7 @@
   and kept that verdict for up to 10 minutes. It is now applied on every alarm evaluation with the
   same grid verdict the other alarms use.
 
-New harness `scripts/mutate-core-replay-runtime-grid.mjs` (6 anchor-asserted mutants).
+New harness `scripts/mutate-core-replay-runtime-grid.mjs` (7 anchor-asserted mutants).
 
 ## 1.180.0
 

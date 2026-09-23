@@ -29,10 +29,13 @@ test('★★ a Core REST body replayed identically does not move its content clo
   s.setClock(() => t);
   s.setDeviceList([{ sn: 'C1', deviceName: 'Core 1', productName: 'Delta Pro Ultra', online: 1 } as never]);
   s.setDeviceQuota('C1', { 'hs_yj751_pd_appshow_addr.soc': 80 });
+  assert.equal(s.get().devices.C1.contentChangedAtMs, undefined, 'first sight only seeds: after a restart it may itself be a replay');
+  t += MIN;
+  s.setDeviceQuota('C1', { 'hs_yj751_pd_appshow_addr.soc': 79 }); // real content
   const first = s.get().devices.C1.contentChangedAtMs;
-  assert.equal(first, t);
+  assert.equal(first, t, 'the first CHANGE starts the clock');
   t += 10 * MIN;
-  s.setDeviceQuota('C1', { 'hs_yj751_pd_appshow_addr.soc': 80 }); // the same body, replayed
+  s.setDeviceQuota('C1', { 'hs_yj751_pd_appshow_addr.soc': 79 }); // the same body, replayed
   assert.equal(s.get().devices.C1.lastTelemetryAtMs, t, '(the arrival clock moves)');
   assert.equal(s.get().devices.C1.contentChangedAtMs, first, 'the content clock does not');
   s.setDeviceList([{ sn: 'C1', deviceName: 'Core 1', productName: 'Delta Pro Ultra', online: 1 } as never]);

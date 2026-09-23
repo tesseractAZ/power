@@ -42,9 +42,16 @@ const MUTANTS = [
   {
     id: 'iii. \u2605\u2605 the content clock moves on every arrival (no witness comparison)',
     file: SNAP,
-    find: '    if (this.dpuWitness.get(sn) !== w) {',
-    to: '    if (true) { /* MUTANT */',
+    find: '    if (prev != null && prev !== w) cur.contentChangedAtMs = nowMs;',
+    to: '    cur.contentChangedAtMs = nowMs; /* MUTANT */',
     why: 'The content-change clock degenerates to the arrival clock: replay-blind again.',
+  },
+  {
+    id: 'iii-b. \u2605 first sight after a restart counts as a change',
+    file: SNAP,
+    find: '    if (prev != null && prev !== w) cur.contentChangedAtMs = nowMs;',
+    to: '    if (prev !== w) cur.contentChangedAtMs = nowMs; /* MUTANT */',
+    why: 'The first replayed Core body after a restart counts as fresh grid flow for up to 5 minutes.',
   },
   {
     id: 'iv. \u2605\u2605 the /device/list rebuild drops the content clock (the sticky-clock trap)',
