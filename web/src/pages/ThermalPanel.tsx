@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { DeviceSnapshot, DpuPack, DpuProjection, Shp2Projection } from '../types';
 import { cToF, fmtPct, fmtW, fmtWh, fmtMins } from '../format';
 import { sortDevices } from '../sort';
-import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
+import { shp2ConnectedDpuSns, isShp2Connected, findHousePanel } from '../shp2Membership';
 // v0.85.0 — the dissolved Predictive tab's battery sections relocate here:
 // degradation / EOL projection + round-trip efficiency (DegradationCard), plus
 // the thermal-events / charge-curve / internal-resistance / ambient-thermal
@@ -197,9 +197,7 @@ export function ThermalPanel({ devices }: { devices: Record<string, DeviceSnapsh
   const dpus = list.filter((d) => d.productName?.toLowerCase().includes('delta pro ultra')) as Array<
     DeviceSnapshot & { projection?: DpuProjection }
   >;
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  const shp2 = findHousePanel(devices); // v1.185.0 — the house panel
 
   const [metric, setMetric] = useState<MetricKey>('temp');
   const [selected, setSelected] = useState<{ sn: string; num: number } | null>(null);

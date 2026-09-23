@@ -1,5 +1,5 @@
 import type { DeviceSnapshot, DpuProjection, GridBackstop, Shp2Projection } from '../types';
-import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
+import { shp2ConnectedDpuSns, isShp2Connected, allPanels } from '../shp2Membership';
 
 /**
  * v1.175.0 — the Energy flow card's numbers, as a pure function of the snapshot.
@@ -64,7 +64,10 @@ type Shp2 = DeviceSnapshot & { projection: Shp2Projection };
 export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: GridBackstop): EnergyFlowModel {
   const list = Object.values(devices);
   const allDpus = list.filter((d) => d.projection?.kind === 'dpu' && d.online) as Dpu[];
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as Shp2 | undefined;
+  // v1.185.0 — EVERY panel, house panel first. The Cores, PV, battery and grid figures already
+  // span every panel (union roster; the server sums each panel's grid), so the load does too.
+  const panels = allPanels(devices) as Shp2[];
+  const shp2: Shp2 | undefined = panels[0];
 
   // v0.9.77 — the headline diagram is the HOME energy flow. Bench spares are not part of
   // the home's PV / battery / SoC story, even when they're online; filter them out via
@@ -78,7 +81,7 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // acIn from the SHP2's sources (by definition the home-connected DPUs) — kept as a
   // defensive fallback for the cold-boot path above.
   const sourceSns = new Set(
-    (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
+    panels.flatMap((p) => p.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
   const gridDpus = sourceSns.size > 0 ? dpus.filter((d) => sourceSns.has(d.sn)) : dpus;
   const acIn = gridDpus.reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
@@ -110,11 +113,12 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // ★ v1.179.0 — a THIRD way to be frozen: online and unshadowed, but its readings stopped
   // refreshing (a failing quota fetch). The server now zeroes that panel's grid reading too,
   // and says so in `grid.panelFresh`; the card keys on the server's verdict, not a client clock.
-  const circuits = shp2?.projection.circuits ?? [];
+  // v1.185.0 — any panel frozen freezes the load: a sum that is half live, half frozen is neither.
+  const circuits = panels.flatMap((p) => p.projection.circuits ?? []);
   const measured = circuits.filter((c) => c.watts != null);
   const panelState: PanelState = !shp2
     ? 'absent'
-    : !shp2.online || shp2.contentStaleSinceMs != null || grid?.panelFresh === false
+    : panels.some((p) => !p.online || p.contentStaleSinceMs != null) || grid?.panelFresh === false
       ? 'frozen'
       : measured.length === 0
         ? 'silent'
@@ -130,7 +134,7 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // on the same page renders that list as "Circuits (6)"). Counting energized channels
   // read "9 circuits" on a six-circuit panel and could reach twelve. Raw channels are the
   // fallback only when the payload carried no pairing.
-  const groups = shp2?.projection.pairedCircuits ?? [];
+  const groups = panels.flatMap((p) => p.projection.pairedCircuits ?? []);
   const liveCircuits = groups.length > 0
     ? groups.filter((g) => (g.watts ?? 0) > 1).length
     : circuits.filter((c) => (c.watts ?? 0) > 1).length;

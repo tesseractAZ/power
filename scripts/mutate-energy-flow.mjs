@@ -48,7 +48,7 @@ const MUTANTS = [
   {
     id: 'iii. \u2605\u2605\u2605 a frozen (offline / cloud-shadow) panel is read as live',
     file: MODEL,
-    find: '    : !shp2.online || shp2.contentStaleSinceMs != null',
+    find: '    : panels.some((p) => !p.online || p.contentStaleSinceMs != null)',
     to: '    : false /* MUTANT */',
     why: 'The server zeroes a shadowed panel\u2019s grid reading; pairing that with the frozen house load draws a grid-fed house out of idle batteries.',
   },

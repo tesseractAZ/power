@@ -183,7 +183,13 @@ test('★★ a DIFFERENT panel listed is evidence the old one was replaced: its 
     const a = new SnapshotStore();
     a.setDeviceList(listed(1));
     a.setDeviceQuota(SN, quota(0)); // the mains cut to swap the panel
-    a.setDeviceList([{ sn: 'SHP2-NEW', deviceName: 'New panel', productName: 'Smart Home Panel 2', online: 1 } as never]);
+    const NEW = [{ sn: 'SHP2-NEW', deviceName: 'New panel', productName: 'Smart Home Panel 2', online: 1 } as never];
+    a.setDeviceList(NEW);
+    a.setDeviceList(NEW);
+    // v1.185.0 — two panels are supported, so one or two lists naming only another panel are not
+    // evidence (a partial list is a known cloud glitch); three in a row are.
+    assert.equal(JSON.parse(readFileSync(file, 'utf8'))[SN]?.sta, 0, 'kept through two lists without it');
+    a.setDeviceList(NEW);
     assert.equal(JSON.parse(readFileSync(file, 'utf8'))[SN], undefined, 'the old panel\'s entry is gone from the file');
     const b = new SnapshotStore(); // a later restart while the cloud is unreachable
     assert.equal(b.persistedGridAbsent(), null, 'nothing stale vetoes the toggle');

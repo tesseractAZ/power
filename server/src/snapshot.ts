@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold, type DpuProjection } from './ecoflow/project.js';
-import { shp2Panels } from './shp2Membership.js';
+import { shp2Panels, resolveHousePanel } from './shp2Membership.js';
 import { prunePhantomPacks, freshPackSlotHistory, type PackSlotHistory } from './packPresence.js';
 import { mpptProducing } from './mppt.js';
 import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
@@ -92,6 +92,26 @@ export interface DeviceSnapshot {
    */
   gridVetoClearedAtMs?: number;
   /**
+   * v1.185.0 — this panel is the HOUSE panel (resolveHousePanel; findShp2 returns it). Set by
+   * the store on exactly one panel after every /device/list, never carried: it is recomputed
+   * from the persisted pin each time the literal below is rebuilt.
+   */
+  housePanel?: boolean;
+  /**
+   * v1.185.0 — set on EVERY panel while the pinned house panel is MISSING from the account (absent
+   * from PANEL_ABSENT_LISTS consecutive device lists, or never listed since a restart): the pinned
+   * serial. findShp2 then returns nothing — no panel is retargeted — until the house panel returns
+   * or an operator pins another (POST /api/house-panel).
+   */
+  housePanelMissing?: string;
+  /**
+   * v1.185.0 — this panel's last known connected-source roster (Core serials), persisted with the
+   * pin (house-panel.json) and restored on first sight, so a panel dark since a restart (no
+   * projection, no sources[]) still names its own Cores: its pool's fallback SoC and its grid
+   * verdict are read from them, never from the other panel's.
+   */
+  lastRoster?: string[];
+  /**
    * v1.142.0 — when this device's payload STOPPED MOVING, or null/absent if it
    * is moving. Set only for the SHP2, from the twelve-channel watt witness. See
    * shp2Shadow.ts: a 200 OK carrying a replayed body is invisible to every
@@ -116,9 +136,15 @@ export interface FleetSnapshot {
   // since gridState.ts already imports DeviceSnapshot from here).
   grid?: import('./gridState.js').GridBackstop;
   off_grid?: boolean;
+  /** v1.185.0 — the house panel and whether one must be pinned (the /api/snapshot enrichment). */
+  housePanel?: { sn: string | null; state: 'pinned' | 'missing' | 'ambiguous' | 'none'; ambiguous: boolean; missing: string | null; panels: Array<{ sn: string; name: string }> };
 }
 
 const INCLUDE_RAW = process.env.SNAPSHOT_INCLUDE_RAW === '1';
+/** v1.185.0 — consecutive device lists a panel must be absent from before it is off the account. */
+export const PANEL_ABSENT_LISTS = 3;
+/** v1.185.0 — consecutive device lists a lone panel must stand alone before the FIRST pin. */
+export const FIRST_PIN_LISTS = 2;
 
 /**
  * v1.181.0 — a Core's content fingerprint: the fields that move with every real reading (power
@@ -318,6 +344,7 @@ export class SnapshotStore extends EventEmitter {
   setDeviceList(devices: DeviceListItem[]) {
     const now = Date.now();
     if (this.gridReadingPath == null) this.loadGridReadings(); // v1.180.0 — before first sight
+    if (this.housePanelPath == null) this.loadHousePanel(); // v1.185.0 — the rosters, before first sight
     this.lastDeviceListSuccessAt = now;
     const seenThisList = new Set<string>();
     for (const d of devices) {
@@ -366,6 +393,7 @@ export class SnapshotStore extends EventEmitter {
         onlineChangedVia: existing?.onlineChangedVia,
         lastGridReading: existing?.lastGridReading, // v1.178.0 — same trap, same carry
         gridVetoClearedAtMs: existing?.gridVetoClearedAtMs, // v1.184.0 — same trap, same carry
+        lastRoster: existing?.lastRoster ?? this.panelRosters.get(d.sn), // v1.185.0 — carried; restored on first sight
         // v1.180.0 — on FIRST sight (a restart), the panel's persisted not-OK reading, so the
         // declared-grid veto survives a restart while the panel is dark (no quota is fetched for
         // a device listed offline, so nothing else would ever restore it).
@@ -391,7 +419,10 @@ export class SnapshotStore extends EventEmitter {
     // into a device alarm, which is the wrong direction on a life-safety system.
     // Logged once per disappearance, not per poll.
     for (const [sn, d] of Object.entries(this.snap.devices)) {
-      if (seenThisList.has(sn)) { this.absentFromList.delete(sn); continue; }
+      if (seenThisList.has(sn)) { this.absentFromList.delete(sn); this.listAbsences.delete(sn); continue; }
+      // v1.185.0 — counted, for the house-panel census (a panel absent from PANEL_ABSENT_LISTS lists
+      // in a row is no longer "on the account"; one glitched list is not evidence).
+      this.listAbsences.set(sn, (this.listAbsences.get(sn) ?? 0) + 1);
       if (this.absentFromList.has(sn)) continue;
       this.absentFromList.add(sn);
       this.logger(`device-list: ${d.deviceName} (${sn}) ABSENT from /device/list (last known ${d.online ? 'online' : 'offline'}) — state is now frozen, not refreshed`);
@@ -409,7 +440,13 @@ export class SnapshotStore extends EventEmitter {
     if (listedPanels.length > 0) {
       let pruned = false;
       for (const sn of [...this.persistedGridReadings.keys()]) {
-        if (listedPanels.includes(sn)) continue;
+        if (listedPanels.includes(sn)) { this.persistedGridMisses.delete(sn); continue; }
+        // v1.185.0 — with two panels supported, one list naming only the other panel is not evidence
+        // this one is gone (a partial list is a known cloud glitch): PANEL_ABSENT_LISTS in a row are.
+        const misses = (this.persistedGridMisses.get(sn) ?? 0) + 1;
+        this.persistedGridMisses.set(sn, misses);
+        if (misses < PANEL_ABSENT_LISTS) continue;
+        this.persistedGridMisses.delete(sn);
         this.persistedGridReadings.delete(sn);
         this.unseenPersistedGrid.delete(sn);
         pruned = true;
@@ -417,12 +454,136 @@ export class SnapshotStore extends EventEmitter {
       }
       if (pruned) this.writeGridReadings();
     }
+    for (const sn of seenThisList) if (!this.firstListedAtBySn.has(sn)) this.firstListedAtBySn.set(sn, now);
+    this.applyHousePanel(true);
     this.snap.generatedAt = now;
     this.emit('change', this.snap);
   }
 
+  // v1.185.0 — the house-panel pin (shp2Membership.resolveHousePanel) and every panel's last roster.
+  // Persisted together (house-panel.json) next to the DB in production, nowhere elsewhere
+  // (HOUSE_PANEL_PATH overrides).
+  private housePanelPath: string | null = null;
+  private housePanelPin: string | null = null;
+  private housePanelStatus: 'pinned' | 'missing' | 'ambiguous' | 'none' = 'none';
+  private housePanelDirty = false;
+  private panelRosters = new Map<string, string[]>();
+  /** The lone panel a first pin is waiting on, and for how many consecutive lists it has been alone. */
+  private pinCandidate: string | null = null;
+  private pinCandidateLists = 0;
+
+  private loadHousePanel(): void {
+    this.housePanelPath = process.env.HOUSE_PANEL_PATH
+      ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'house-panel.json') : '');
+    if (!this.housePanelPath) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.housePanelPath, 'utf8')) as { sn?: unknown; rosters?: unknown };
+      if (typeof raw.sn === 'string' && raw.sn.length > 0) this.housePanelPin = raw.sn;
+      if (raw.rosters && typeof raw.rosters === 'object') {
+        for (const [sn, v] of Object.entries(raw.rosters as Record<string, unknown>)) {
+          if (Array.isArray(v) && v.every((x) => typeof x === 'string') && v.length > 0) this.panelRosters.set(sn, v as string[]);
+        }
+      }
+    } catch {
+      /* absent or unreadable: a lone panel pins again; two stand ambiguous until an operator pins */
+    }
+  }
+
+  /** Atomic, like writeGridReadings; a failure retries on every later device list. */
+  private writeHousePanel(): void {
+    const path = this.housePanelPath;
+    if (!path) return;
+    try {
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ sn: this.housePanelPin, rosters: Object.fromEntries(this.panelRosters) }));
+      renameSync(tmp, path);
+      if (this.housePanelDirty) this.logger('house-panel: pin saved');
+      this.housePanelDirty = false;
+    } catch (e) {
+      if (!this.housePanelDirty) this.logger(`house-panel: could not save the pin (${(e as Error)?.message ?? e}) — retrying on each device list`);
+      this.housePanelDirty = true;
+    }
+  }
+
+  /** v1.185.0 — the panels ON THE ACCOUNT: the identity census, less any absent from
+   *  PANEL_ABSENT_LISTS consecutive device lists (the device map never forgets a device). */
+  private accountPanels(): string[] {
+    return shp2Panels(this.snap.devices).sns.filter((sn) => (this.listAbsences.get(sn) ?? 0) < PANEL_ABSENT_LISTS);
+  }
+
+  /** Stamp `housePanel` on the resolved panel and on no other, and `housePanelMissing` on every
+   *  panel while the pinned one is gone. Recomputed after every device list, because
+   *  setDeviceList rebuilds each device from a literal. The pin itself never moves here once set:
+   *  only pinHousePanel moves it. */
+  private applyHousePanel(fromList: boolean): void {
+    if (this.housePanelPath == null) this.loadHousePanel();
+    const census = this.accountPanels();
+    if (fromList) {
+      const alone = census.length === 1 ? census[0] : null;
+      this.pinCandidateLists = alone != null && alone === this.pinCandidate ? this.pinCandidateLists + 1 : alone != null ? 1 : 0;
+      this.pinCandidate = alone;
+    }
+    const r = resolveHousePanel(census, this.housePanelPin, this.pinCandidateLists >= FIRST_PIN_LISTS);
+    if (r.pin !== this.housePanelPin) {
+      this.logger(`house-panel: pinned ${this.snap.devices[r.pin!]?.deviceName ?? r.pin} (${r.pin}) — night charge writes only to this panel`);
+      this.housePanelPin = r.pin;
+      this.writeHousePanel();
+    } else if (this.housePanelDirty) {
+      this.writeHousePanel();
+    }
+    if (r.state !== this.housePanelStatus) {
+      if (r.state === 'missing') this.logger(`house-panel: the pinned house panel (${r.pin}) is not on the account — night-charge writes paused, nothing retargeted; pin a panel (POST /api/house-panel) if it was replaced`);
+      else if (r.state === 'ambiguous') this.logger(`house-panel: ${census.length} smart panels and none pinned as the house panel — supervised writes refused until one is pinned (POST /api/house-panel)`);
+      else if (r.state === 'pinned' && this.housePanelStatus !== 'none') this.logger(`house-panel: resolved (${r.sn})`);
+    }
+    this.housePanelStatus = r.state;
+    const isPanel = (d: DeviceSnapshot) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel');
+    for (const d of Object.values(this.snap.devices)) {
+      if (d.sn === r.sn) d.housePanel = true;
+      else if (d.housePanel != null) delete d.housePanel;
+      if (r.state === 'missing' && isPanel(d)) d.housePanelMissing = r.pin!;
+      else if (d.housePanelMissing != null) delete d.housePanelMissing;
+    }
+  }
+
+  /** v1.185.0 — the operator's pin (POST /api/house-panel). Only a panel on the account. */
+  pinHousePanel(sn: string): boolean {
+    if (!this.accountPanels().includes(sn)) return false;
+    if (this.housePanelPath == null) this.loadHousePanel();
+    const from = this.housePanelPin;
+    this.housePanelPin = sn;
+    if (from !== sn) {
+      this.logger(`house-panel: operator pinned ${this.snap.devices[sn]?.deviceName ?? sn} (${sn})${from ? ` (was ${from})` : ''}`);
+      this.writeHousePanel();
+    }
+    this.applyHousePanel(false);
+    this.snap.generatedAt = this.now();
+    this.emit('change', this.snap);
+    return true;
+  }
+
+  /** v1.185.0 — for /api/house-panel and the UI. */
+  housePanelState(): { sn: string | null; state: 'pinned' | 'missing' | 'ambiguous' | 'none'; ambiguous: boolean; missing: string | null; panels: Array<{ sn: string; name: string }> } {
+    const panels = this.accountPanels().map((sn) => ({ sn, name: this.snap.devices[sn]?.deviceName ?? sn }));
+    const house = Object.values(this.snap.devices).find((d) => d.housePanel === true);
+    return {
+      sn: house?.sn ?? null,
+      state: this.housePanelStatus,
+      ambiguous: this.housePanelStatus === 'ambiguous',
+      missing: this.housePanelStatus === 'missing' ? this.housePanelPin : null,
+      panels,
+    };
+  }
+
   /** v1.145.0 — SNs already reported absent, so each disappearance logs once. */
   private absentFromList = new Set<string>();
+  /** v1.185.0 — consecutive successful device lists each device in the map was absent from. */
+  private listAbsences = new Map<string, number>();
+  /** v1.185.0 — consecutive panel-naming lists a persisted grid reading's panel was absent from. */
+  private persistedGridMisses = new Map<string, number>();
+  /** v1.185.0 — when each serial was first listed in this process (a panel dark since a restart). */
+  private firstListedAtBySn = new Map<string, number>();
+  firstListedAt(sn: string): number | null { return this.firstListedAtBySn.get(sn) ?? null; }
 
   /** Mark that a /device/list poll attempt happened, regardless of outcome. */
   markDeviceListAttempt() {
@@ -569,6 +730,18 @@ export class SnapshotStore extends EventEmitter {
         this.persistGridReading(sn, cur.lastGridReading);
       } else if (this.gridReadingDirty) {
         this.writeGridReadings(); // a failed save retries on each panel reading until it lands
+      }
+    }
+    // v1.185.0 — the panel's roster, remembered (and persisted on change) for when it goes dark.
+    if (cur.projection?.kind === 'shp2') {
+      const roster = (cur.projection.sources ?? []).filter((x) => x.isConnected && x.sn).map((x) => x.sn as string).sort();
+      if (roster.length > 0) {
+        cur.lastRoster = roster;
+        if (this.panelRosters.get(sn)?.join(',') !== roster.join(',')) {
+          if (this.housePanelPath == null) this.loadHousePanel();
+          this.panelRosters.set(sn, roster);
+          this.writeHousePanel();
+        }
       }
     }
     // v1.142.0 — did the CONTENT move, or did the cloud replay a shadow?
