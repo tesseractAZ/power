@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { compactTick } from './axisFormat';
 import {
   AreaChart,
   Area,
@@ -149,14 +150,16 @@ export function TrendChart({
               tick={{ fill: CHART.axis, fontSize: 10 }}
               tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             />
-            <YAxis yAxisId="left" tick={{ fill: CHART.axis, fontSize: 10 }} width={48} unit={unit ? ` ${unit}` : ''} />
+            {/* v1.183.0 — compact ticks, unit as the axis label (a per-tick unit wrapped onto a stray line). */}
+            <YAxis yAxisId="left" tick={{ fill: CHART.axis, fontSize: 10 }} width={48} tickFormatter={compactTick} label={unit ? { value: unit, angle: -90, position: 'insideLeft', fill: CHART.axis, fontSize: 10 } : undefined} />
             {hasRight && (
               <YAxis
                 yAxisId="right"
                 orientation="right"
                 tick={{ fill: CHART.axis, fontSize: 10 }}
                 width={44}
-                unit={rightUnit ? ` ${rightUnit}` : ''}
+                tickFormatter={compactTick}
+                label={rightUnit ? { value: rightUnit, angle: 90, position: 'insideRight', fill: CHART.axis, fontSize: 10 } : undefined}
               />
             )}
             <Tooltip

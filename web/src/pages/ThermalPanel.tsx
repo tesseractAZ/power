@@ -11,6 +11,7 @@ import { shp2ConnectedDpuSns, isShp2Connected } from '../shp2Membership';
 import { DegradationCard } from '../cards/DegradationCard';
 import { AdvancedInsightsCard } from '../cards/AdvancedInsightsCard';
 import { SectionHeader } from '../components/sections';
+import { packCountdownLabel } from '../cards/cardText';
 
 // DPU pack capacity is reported in single-string mAh. Each pack is 32S1P (~104 V
 // nominal — 32 series LFP cells at ~3.2 V whose mV sum to packVoltageMv), so
@@ -555,7 +556,8 @@ function PackDetail({ pk }: { pk: DpuPack }) {
         <SectionLabel>Vitals</SectionLabel>
         <ReadoutGrid>
           <Readout label="SoC" value={pk.soc != null ? `${Math.round(pk.soc)}%` : '—'} cls={socCellClass(pk.soc)} />
-          <Readout label="Runtime" value={fmtMins(pk.remainTimeMin)} cls={BAND.info} />
+          {/* v1.183.0 — the vendor countdown is time-to-FULL while charging: label it by direction. */}
+          <Readout label={packCountdownLabel(pk.inputWatts, pk.outputWatts)} value={fmtMins(pk.remainTimeMin)} cls={BAND.info} />
           <Readout
             label="Input"
             value={fmtW(pk.inputWatts)}
