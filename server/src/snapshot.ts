@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
@@ -72,8 +72,10 @@ export interface DeviceSnapshot {
    * (projection.gridConnected non-null), written only by setDeviceQuota. The declared-grid
    * veto falls back to it when the current projection has none: a non-empty REST reply that
    * omits the pd303_mc subtree (a known reply shape) re-projects gridConnected as null, and
-   * the veto must not lift on a reply that said nothing about the grid. In memory only — a
-   * restart forgets it.
+   * the veto must not lift on a reply that said nothing about the grid. v1.180.0 — a NOT-OK
+   * reading is persisted (grid-reading.json) and
+   * rehydrated here when setDeviceList first sees the panel after a restart; a Grid OK
+   * reading is never persisted and never rehydrated.
    */
   lastGridReading?: { connected: boolean; sta: number | null; atMs: number };
   /**
@@ -106,6 +108,13 @@ export interface FleetSnapshot {
 const INCLUDE_RAW = process.env.SNAPSHOT_INCLUDE_RAW === '1';
 
 export class SnapshotStore extends EventEmitter {
+  constructor() {
+    super();
+    // v1.180.0 — at construction, not first sight: a restart with the cloud unreachable never
+    // reaches setDeviceList (refreshAll throws at listDevices), and that is the outage case.
+    this.loadGridReadings();
+  }
+
   private snap: FleetSnapshot = { generatedAt: 0, devices: {} };
   // REST quota cache (hs_yj751_* / pd303_mc.* schema). Populated by REST polling.
   private rawBySn: Map<string, Record<string, unknown>> = new Map();
@@ -283,6 +292,7 @@ export class SnapshotStore extends EventEmitter {
 
   setDeviceList(devices: DeviceListItem[]) {
     const now = Date.now();
+    if (this.gridReadingPath == null) this.loadGridReadings(); // v1.180.0 — before first sight
     this.lastDeviceListSuccessAt = now;
     const seenThisList = new Set<string>();
     for (const d of devices) {
@@ -329,7 +339,17 @@ export class SnapshotStore extends EventEmitter {
         onlineChangedAtMs: existing?.onlineChangedAtMs,
         onlineChangedVia: existing?.onlineChangedVia,
         lastGridReading: existing?.lastGridReading, // v1.178.0 — same trap, same carry
+        // v1.180.0 — on FIRST sight (a restart), the panel's persisted not-OK reading, so the
+        // declared-grid veto survives a restart while the panel is dark (no quota is fetched for
+        // a device listed offline, so nothing else would ever restore it).
+        ...(existing == null && this.persistedGridReadings.has(d.sn)
+          ? { lastGridReading: this.persistedGridReadings.get(d.sn) }
+          : {}),
       };
+      if (existing == null && this.persistedGridReadings.has(d.sn)) {
+        const r = this.persistedGridReadings.get(d.sn)!;
+        this.logger(`grid-reading: ${this.snap.devices[d.sn].deviceName} restored its last grid reading from before the restart (gridSta=${r.sta}, ${new Date(r.atMs).toISOString()}) — a grid declared present stays vetoed until the panel reports Grid OK`);
+      }
       // The transition stamp must land on the REBUILT object, not the one this
       // literal just replaced.
       if (existing != null && existing.online !== newOnline) {
@@ -348,6 +368,27 @@ export class SnapshotStore extends EventEmitter {
       if (this.absentFromList.has(sn)) continue;
       this.absentFromList.add(sn);
       this.logger(`device-list: ${d.deviceName} (${sn}) ABSENT from /device/list (last known ${d.online ? 'online' : 'offline'}) — state is now frozen, not refreshed`);
+    }
+    // v1.180.0 — hand the persisted grid readings over PER SERIAL, on evidence. A persisted
+    // serial listed here has been rehydrated onto its device (above) and stops being served by
+    // persistedGridAbsent(). An empty or partial list is NOT evidence (v1.145.0 above: a
+    // cloud-side list glitch), so it leaves the others standing. A DIFFERENT panel listed is
+    // evidence the persisted one was replaced or removed: its entry is pruned, so a stale
+    // reading cannot veto a later restart made while the cloud is unreachable.
+    for (const sn of seenThisList) this.unseenPersistedGrid.delete(sn);
+    const listedPanels = devices
+      .filter((d) => (d.productName ?? this.snap.devices[d.sn]?.productName ?? '').toLowerCase().includes('smart home panel'))
+      .map((d) => d.sn);
+    if (listedPanels.length > 0) {
+      let pruned = false;
+      for (const sn of [...this.persistedGridReadings.keys()]) {
+        if (listedPanels.includes(sn)) continue;
+        this.persistedGridReadings.delete(sn);
+        this.unseenPersistedGrid.delete(sn);
+        pruned = true;
+        this.logger(`grid-reading: dropped the saved grid reading of panel ${sn} — no longer on the account (a different panel is listed)`);
+      }
+      if (pruned) this.writeGridReadings();
     }
     this.snap.generatedAt = now;
     this.emit('change', this.snap);
@@ -493,7 +534,14 @@ export class SnapshotStore extends EventEmitter {
     cur.lastQuotaAtMs = nowQ;
     cur.lastTelemetryAtMs = nowQ;
     if (cur.projection?.kind === 'shp2' && cur.projection.gridConnected != null) {
+      const prev = cur.lastGridReading;
       cur.lastGridReading = { connected: cur.projection.gridConnected, sta: cur.projection.gridSta ?? null, atMs: nowQ };
+      // v1.180.0 — persisted only when it CHANGES (not every 60 s poll).
+      if (prev?.connected !== cur.lastGridReading.connected || prev?.sta !== cur.lastGridReading.sta) {
+        this.persistGridReading(sn, cur.lastGridReading);
+      } else if (this.gridReadingDirty) {
+        this.writeGridReadings(); // a failed save retries on each panel reading until it lands
+      }
     }
     // v1.142.0 — did the CONTENT move, or did the cloud replay a shadow?
     if (this.contentFreshnessPath == null) this.loadContentFreshness(nowQ);
@@ -565,6 +613,94 @@ export class SnapshotStore extends EventEmitter {
    */
   private shadowLatch = new Map<string, import('./shp2Shadow.js').ShadowLatch>();
   private contentFreshnessPath: string | null = null;
+
+  /**
+   * v1.180.0 — the SHP2's last NOT-OK grid reading per SN, persisted so the declared-grid veto
+   * (gridState.ts) survives a restart. Without it, an outage with `input_boolean.grid_available`
+   * ON, a panel gone cloud-dark (an outage that also takes the ISP down) and an add-on restart
+   * (watchdog, host reboot, update) left the veto with no input: refreshAll fetches quota only
+   * for devices listed online, so the panel stayed unprojected and "grid present" came back for
+   * as long as it stayed dark. Only `connected: false` is kept: a Grid OK reading deletes the
+   * entry (the veto clears on evidence) and is never rehydrated (presence needs a fresh
+   * readback; a persisted "1" must assert nothing). No age limit — the veto clears on evidence,
+   * not silence; the cost is a stale "no grid" after a long dark period until the panel
+   * reports. Best-effort like the shadow witness: absent or corrupt starts cold (the pre-v1.180
+   * behaviour).
+   */
+  private gridReadingPath: string | null = null;
+  private persistedGridReadings = new Map<string, { connected: boolean; sta: number | null; atMs: number }>();
+  /** v1.180.0 — persisted serials not yet seen in any /device/list this process. */
+  private unseenPersistedGrid = new Set<string>();
+
+  private loadGridReadings(): void {
+    // Production (the add-on, SUPERVISOR_TOKEN set) persists next to the DB; elsewhere only an
+    // explicit GRID_READING_PATH does — a shared default file would let one test process's
+    // reading rehydrate into another's store ('' = disabled).
+    this.gridReadingPath = process.env.GRID_READING_PATH
+      ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'grid-reading.json') : '');
+    if (!this.gridReadingPath) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.gridReadingPath, 'utf8')) as Record<string, { connected?: unknown; sta?: unknown; atMs?: unknown }>;
+      for (const [sn, v] of Object.entries(raw ?? {})) {
+        if (v && v.connected === false && typeof v.atMs === 'number' && Number.isFinite(v.atMs)) {
+          this.persistedGridReadings.set(sn, { connected: false, sta: typeof v.sta === 'number' ? v.sta : null, atMs: v.atMs });
+          this.unseenPersistedGrid.add(sn);
+        }
+      }
+    } catch { /* absent or corrupt → start cold */ }
+  }
+
+  private persistGridReading(sn: string, r: { connected: boolean; sta: number | null; atMs: number }): void {
+    if (this.gridReadingPath == null) this.loadGridReadings();
+    if (!this.gridReadingPath) return; // persistence disabled (see loadGridReadings)
+    if (r.connected === false) this.persistedGridReadings.set(sn, { ...r });
+    else if (!this.persistedGridReadings.delete(sn)) return; // Grid OK and nothing persisted: no write
+    this.writeGridReadings();
+  }
+
+  private gridReadingDirty = false;
+  private gridReadingWriteWarned = false;
+
+  /** Atomic (temp + rename, so a crash mid-write cannot corrupt the file); a failure is logged
+   *  once and retried on every later panel reading (setDeviceQuota), not dropped. */
+  private writeGridReadings(): void {
+    const path = this.gridReadingPath;
+    if (!path) return;
+    try {
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.persistedGridReadings)));
+      renameSync(tmp, path);
+      this.gridReadingDirty = false;
+    } catch (e) {
+      this.gridReadingDirty = true;
+      if (!this.gridReadingWriteWarned) {
+        this.gridReadingWriteWarned = true;
+        this.logger(`grid-reading: could not save the panel's grid reading (${(e as Error)?.message ?? e}) — retrying on each panel reading`);
+      }
+    }
+  }
+
+  private persistedGridAbsentLogged = false;
+
+  /**
+   * v1.180.0 — a persisted NOT-OK reading for the grid resolver while its panel has NOT yet
+   * appeared in any /device/list this process: the cloud unreachable since the restart
+   * (refreshAll throws before setDeviceList), or lists that come back empty or without the panel
+   * (a cloud-side glitch, not evidence). Once the panel is listed, the reading lives on its
+   * device (lastGridReading) instead; a different panel listed prunes it (setDeviceList). The
+   * resolver uses this only when the device map has no panel at all. Wired in index.ts via
+   * setPersistedGridAbsentSource.
+   */
+  persistedGridAbsent(): { sta: number | null; atMs: number } | null {
+    const sn = [...this.unseenPersistedGrid].find((s) => this.persistedGridReadings.get(s)?.connected === false);
+    const r = sn != null ? this.persistedGridReadings.get(sn) : undefined;
+    if (!r) return null;
+    if (!this.persistedGridAbsentLogged) {
+      this.persistedGridAbsentLogged = true;
+      this.logger(`grid-reading: the device list is unreachable since the restart; the panel's last grid reading from before it (gridSta=${r.sta}, ${new Date(r.atMs).toISOString()}) keeps a grid declared present vetoed`);
+    }
+    return { sta: r.sta, atMs: r.atMs };
+  }
 
   /** v1.148.0 — load the shadow witness written by the previous process. */
   private loadContentFreshness(nowMs: number): void {
