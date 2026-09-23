@@ -1133,13 +1133,6 @@ export async function startMqttDiscovery(
     type Shp2Dev = typeof devices[number] & { projection: Shp2Projection };
     const shp2 = (devices as Shp2Dev[]).find((d) => d.projection?.kind === 'shp2');
 
-    // v0.9.74 — match /api/ha-state: spare cores (not in SHP2 sources)
-    // can't deliver energy to the home, so they don't count toward
-    // fleet PV / total-in / total-out / battery-net or grid-import.
-    // v0.52.0 — the loop that derived these is now aggregateFleetFlow, shared
-    // VERBATIM with /api/ha-state (raw sums; each surface rounds at emission).
-    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
-
     const analytics = getAnalytics();
     const [fc, deg, runway, rte, clipping, sc, carbon, tariff, curtailment] = await Promise.all([
       analytics.report('forecast'),
@@ -1157,6 +1150,17 @@ export async function startMqttDiscovery(
       // pv_curtailment_active signal for opportunistic/deferrable loads).
       analytics.report('curtailment'),
     ]);
+    // v0.9.74 — match /api/ha-state: spare cores (not in SHP2 sources)
+    // can't deliver energy to the home, so they don't count toward
+    // fleet PV / total-in / total-out / battery-net or grid-import.
+    // v0.52.0 — the loop that derived these is now aggregateFleetFlow, shared
+    // VERBATIM with /api/ha-state (raw sums; each surface rounds at emission).
+    // v1.178.1 — taken AFTER the reports' await, never before it. `snap` is the store's live
+    // object, and publishReadiness (below) judges it after the await: at boot the first poll
+    // lands DURING that multi-second await, so sums taken before it were a sum over nothing
+    // (0 W) that readiness then passed as ready — battery net and panel load still went
+    // X → 0 → X at the v1.178.0 deploy. Sums and readiness must see the same device map.
+    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
     const lifetime = recorder.getLifetimeTotals();
     const lifetimeKwh = makeLifetimeKwh(lifetime);
     const { projecting, soonest } = soonestProjecting((deg as import('./analytics.js').FleetDegradation).packs);

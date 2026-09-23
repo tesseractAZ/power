@@ -222,6 +222,27 @@ const MUTANTS = [
     why: 'Every home Core wedged at a restart: their own recorded PV makes a real display forecast, and it reads unknown for as long as the wedge.',
   },
   {
+    id: 'xi-c. \u2605\u2605\u2605 the MQTT publisher takes the fleet sums BEFORE the reports\u2019 await (the boot race)',
+    file: MQTT,
+    find: '    const analytics = getAnalytics();',
+    to: '    const earlyFlow = aggregateFleetFlow(snap.devices); void earlyFlow; /* MUTANT */\n    const analytics = getAnalytics();',
+    why: 'The first poll lands during the await: readiness passes the pre-poll 0 W sums as readings (battery net, panel load X \u2192 0 \u2192 X at every restart).',
+  },
+  {
+    id: 'xi-d. \u2605\u2605 the REST twin takes the fleet sums before the reports\u2019 await',
+    file: IDX,
+    find: '  // Cached projections (internally cached ~30min — cheap to call per-request).',
+    to: '  const earlyFlow = aggregateFleetFlow(snap.devices); void earlyFlow; /* MUTANT */',
+    why: 'Same race on /api/ha-state.',
+  },
+  {
+    id: 'xi-e. \u2605 an await between the sums and the readiness verdict reopens the race',
+    file: MQTT,
+    find: '    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);',
+    to: '    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices); await Promise.resolve(); /* MUTANT */',
+    why: 'Anything that yields between the two lets a poll land between the sums and the verdict.',
+  },
+  {
     id: 'xii. \u2605\u2605 the REST twin is not passed through the readiness rule',
     file: IDX,
     find: '  withholdUnready(payload as Record<string, unknown>, publishReadiness({',
