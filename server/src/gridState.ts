@@ -81,8 +81,8 @@ export interface GridBackstop {
   homeGridWatts: number;
   /** v0.89.0 — the SHP2's OWN direct grid-presence flag (pd303_mc.masterIncreInfo.gridSta,
    *  VALUE-1-ONLY, online-gated): true=Grid OK, false=islanded/out-of-spec, null=unknown.
-   *  True is an additive backstop signal; false (a reading taken since the panel's latest
-   *  online transition) vetoes a declared grid (v1.178.0). */
+   *  Online-gated; true is an additive backstop signal. The v1.178.0 declared-grid veto reads
+   *  the panel's LAST reading instead (projection.gridConnected), not this gated value. */
   shp2GridConnected: boolean | null;
   /** Human-readable reason, for status payloads / logs / alert detail. */
   reason: string;
@@ -180,9 +180,10 @@ export function computeHomeGridWatts(devices: Record<string, DeviceSnapshot>): n
  * drops to 0/2 the instant the utility is lost or goes out-of-spec (the SHP2 must
  * island in ms). TRUE is used additively (a positive present-signal), never a sole mute
  * gate, and — in resolveGridBackstop — is still SUBJECT to the pool-discharge guard so a
- * wedged/stale "connected" can't mute a net-discharging at-floor outage. Since v1.178.0
- * FALSE is also used: it vetoes a DECLARED grid (resolveGridBackstop, measured-absent veto),
- * so changing what maps to false changes when a declaration is trusted in an outage.
+ * wedged/stale "connected" can't mute a net-discharging at-floor outage. The v1.178.0
+ * declared-grid veto reads the projection's gridConnected directly (the LAST reading, not
+ * this online-gated value), so changing what projectShp2 maps to false changes when a
+ * declaration is trusted in an outage.
  */
 export function computeShp2GridConnected(devices: Record<string, DeviceSnapshot>): boolean | null {
   const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
@@ -252,7 +253,8 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // it stays true through the zero-watt gaps between the SHP2's 8 kW charge bursts while
   // measured import momentarily reads 0, closing the between-burst false at-floor
   // critical. As a presence signal it is ADDITIVE — a real outage drops gridSta
-  // (→ false/null) and this term vanishes (false then vetoes a declaration, below). It is
+  // (→ false/null) and this term vanishes (the declared-grid veto below reads the last
+  // reading itself). It is
   // NOT folded into importLive (which would unconditionally bypass
   // the poolDischarging guard); it gets its own term below that is still subject to
   // poolDischarging, so a wedged/stale "connected" can't mute a net-discharging outage.
@@ -267,17 +269,19 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   const declaredRaw = input.gridEntityConfigured
     ? entityPresent === true
     : input.gridAvailableFallback;
-  // v1.178.0 — a LIVE panel reading of NO grid vetoes a DECLARED-only grid, everywhere.
-  // shp2GridConnected is false when an online, non-shadowed panel reports any gridSta other
-  // than 1 (VALUE-1-ONLY: 0 = grid not detected, 2 = out of spec → the panel islands onto
-  // the batteries; an undocumented code is not "Grid OK" either); offline, shadowed or absent
-  // readings are null and veto nothing. One more case is set aside: a reading taken BEFORE the
-  // panel's latest online transition (onlineChangedAtMs > lastQuotaAtMs) — an OFFLINE→ONLINE
-  // flip re-exposes the pre-outage sample until the next quota lands, and the grid may be back.
-  // Deliberately NOT a wall-clock age: a 0 that simply stops being refreshed (the cloud or the
-  // uplink failing mid-outage, panel still marked online) must keep vetoing — lifting it after
-  // N minutes would republish "grid present" and re-gate the runway audible in the very outage
-  // it announced. The declaration — a
+  // v1.178.0 — the panel's reading of NO grid vetoes a DECLARED-only grid, everywhere.
+  // The veto keys on the panel's LAST reading (projection.gridConnected: false for any gridSta
+  // other than 1 — VALUE-1-ONLY: 0 = grid not detected, 2 = out of spec → the panel islands
+  // onto the batteries; an undocumented code is not "Grid OK" either). It clears on EVIDENCE,
+  // never on silence: a newer reading of 1, or measured flow (importLive). It is deliberately
+  // NOT gated on online / shadow / age the way the presence term is (computeShp2GridConnected:
+  // a stale "1" must never assert presence). Each of those lifts proved to republish "grid
+  // present" mid-outage — a cloud-replay shadow latch (2-4 a day here, up to 16 min), a
+  // cloud-offline panel (an outage that also takes the ISP down), a 6 s /status blip — with
+  // off_grid falling, load_shed_recommended dropping so automations restore shed loads, and
+  // the runway audible re-gated. The cost of stickiness is a stale "no grid" if the grid
+  // returns while the panel is dark: an early alarm, the accepted direction. A field the
+  // panel never reported (gridConnected null) vetoes nothing. The declaration — a
   // hand-flipped `input_boolean.grid_available`, or the static GRID_AVAILABLE — was trusted
   // over that measurement away from the reserve floor, so in a surprise outage with the
   // toggle still ON the grid kept "backstopping": the runway audible stayed gated silent,
@@ -287,7 +291,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // The failure mode of a false 0 is an early alarm, never a missed one; in three weeks of
   // recorded gridSta (2026-09-01..22) no 0 or 2 appeared while the grid was up.
   const panel = projectedShp2(input.devices);
-  const gridMeasuredAbsent = shp2GridConnected === false && !readingPredatesOnline(panel);
+  const gridMeasuredAbsent = panel?.projection.gridConnected === false;
   const declared = declaredRaw && !gridMeasuredAbsent;
 
   const present = importLive || declared || shp2GridConnected === true;
@@ -365,15 +369,6 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason };
 }
 
-/** v1.178.0 — the panel's projection was sampled before its latest online transition: an
- *  OFFLINE→ONLINE flip (MQTT /status or /device/list) re-exposed it and no quota has landed
- *  since. Both transition sources stamp onlineChangedAtMs; setDeviceQuota stamps lastQuotaAtMs
- *  in the same step that replaces the projection. */
-function readingPredatesOnline(panel: DeviceSnapshot | undefined): boolean {
-  const changed = panel?.onlineChangedAtMs;
-  return typeof changed === 'number' && changed > (panel?.lastQuotaAtMs ?? 0);
-}
-
 function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {
   return Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
@@ -381,12 +376,16 @@ function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot
 }
 
 /** v1.178.0 — the panel's own words for a not-Grid-OK reading, for the resolver's reason.
- *  Names the code it actually reported, so the reason never says 0 for another value. */
+ *  Names the code it actually reported, so the reason never says 0 for another value, and
+ *  says "last reading" when the veto is holding on a reading the panel is not refreshing. */
 function shp2GridStaText(panel: (DeviceSnapshot & { projection: Shp2Projection }) | undefined): string {
   const sta = panel?.projection.gridSta ?? null;
-  if (sta === 0) return 'grid not detected (gridSta=0)';
-  if (sta === 2) return 'grid out of spec (gridSta=2, islanded)';
-  return `grid status not OK (gridSta=${sta})`;
+  const what = sta === 0 ? 'grid not detected (gridSta=0)'
+    : sta === 2 ? 'grid out of spec (gridSta=2, islanded)'
+      : `grid status not OK (gridSta=${sta})`;
+  const silent = !panel?.online ? 'panel offline'
+    : panel.contentStaleSinceMs != null ? 'panel data replayed' : null;
+  return silent ? `${what} (last reading; ${silent})` : what;
 }
 
 /** Live wrapper: reads GRID_PRESENCE_ENTITY / GRID_AVAILABLE from env and the

@@ -109,6 +109,17 @@ test('★★ a bench spare alone does not make the fleet flows real: every home 
   assert.equal(publishReadiness(i).flow, true);
 });
 
+test('★ a panel LISTED but not projected (boot race, or cloud-offline at a restart) is not a DPU-only install: flows wait', () => {
+  const i = warmInputs();
+  i.devices = {
+    P: { sn: 'P', productName: 'Smart Home Panel 2', online: false } as Any,
+    SPARE: { sn: 'SPARE', online: true, projection: { kind: 'dpu' } },
+  };
+  assert.equal(publishReadiness(i).flow, false, 'membership unknown: the spare may be all there is');
+  delete (i.devices as Any).P;
+  assert.equal(publishReadiness(i).flow, true, 'no panel listed at all: a DPU-only install');
+});
+
 test('the charge ceiling is not governed: a live device setting, null when unknown, needs no weather', () => {
   const out = withholdUnready({ pv_curtailment_charge_ceiling_pct: 90 }, publishReadiness(bootInputs()));
   assert.equal(out.pv_curtailment_charge_ceiling_pct, 90);

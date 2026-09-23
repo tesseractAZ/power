@@ -21,12 +21,15 @@
  */
 
 import type { DeviceSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels } from './shp2Membership.js';
 
 export interface PublishReadiness {
   /** An online home Core — one the panel lists as a source, or any Core on a DPU-only
    *  install — has a projection: fleet flows are sums over real readings. The same
-   *  membership aggregateFleetFlow sums over, so a bench spare alone does not count. */
+   *  membership aggregateFleetFlow sums over, so a bench spare alone does not count. A panel
+   *  listed but not yet projected (the boot race, or a panel cloud-offline at a restart) is
+   *  not a DPU-only install: membership is unknown, so the flows wait for it (the same line
+   *  the tariff report's basisComplete draws). */
   flow: boolean;
   /** The panel has a projection with at least one reported channel. */
   panel: boolean;
@@ -86,9 +89,11 @@ export interface ReadinessInputs {
 export function publishReadiness(i: ReadinessInputs): PublishReadiness {
   const devs = Object.values(i.devices);
   const panel = devs.find((d) => d.projection?.kind === 'shp2');
-  const connected = shp2ConnectedDpuSns(i.devices as unknown as Record<string, DeviceSnapshot>);
+  const asSnapshots = i.devices as unknown as Record<string, DeviceSnapshot>;
+  const connected = shp2ConnectedDpuSns(asSnapshots);
+  const membershipKnown = !!panel || shp2Panels(asSnapshots).sns.length === 0;
   return {
-    flow: Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),
+    flow: membershipKnown && Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),
     panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null),
     alerts: i.alerts !== undefined,
     speakers: i.speakerLastProbeAt != null,

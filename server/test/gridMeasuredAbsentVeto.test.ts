@@ -15,6 +15,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveGridBackstop } from '../src/gridState.js';
 import { projectShp2 } from '../src/ecoflow/project.js';
+import { SnapshotStore } from '../src/snapshot.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { shouldGateRunwayAudible, classifyRunway } from '../src/runwayAlarm.js';
 import { gridNote } from '../../web/src/cards/runwayText.js';
 
@@ -75,16 +79,32 @@ test('measured flow still proves the grid regardless of gridSta (importLive wins
   assert.equal(g.present, true);
 });
 
-test('★★ an UNKNOWN reading vetoes nothing: offline panel, cloud-shadowed panel, or no gridSta field', () => {
-  for (const [name, d] of [
-    ['offline', devices(0, { online: false })],
-    ['shadowed', devices(0, { shadowed: true })],
-    ['no field', devices(null)],
+test('a field the panel never reported vetoes nothing: the declaration stands', () => {
+  const g = resolve(devices(null));
+  assert.equal(g.backstopping, true);
+  assert.equal(g.declared, true);
+});
+
+test('★★★ the veto clears on EVIDENCE, not silence: an offline or cloud-replayed panel whose last reading was not Grid OK keeps vetoing', () => {
+  // A cloud-replay shadow (2-4 a day here) or a cloud-offline panel (an outage that also takes
+  // the ISP down) must not republish "grid present" mid-outage.
+  for (const [name, d, re] of [
+    ['offline', devices(0, { online: false }), /last reading; panel offline/],
+    ['shadowed', devices(0, { shadowed: true }), /last reading; panel data replayed/],
   ] as const) {
     const g = resolve(d);
-    assert.equal(g.backstopping, true, `${name}: the declaration stands when the panel cannot be heard`);
-    assert.equal(g.declared, true, name);
+    assert.equal(g.backstopping, false, name);
+    assert.equal(g.present, false, `${name}: off_grid stays ON`);
+    assert.equal(g.declared, false, name);
+    assert.match(g.reason, re);
   }
+});
+
+test('an offline panel whose last reading was Grid OK: the veto needs a not-OK reading, so the declaration stands', () => {
+  const g = resolve(devices(1, { online: false }));
+  assert.equal(g.declared, true);
+  assert.equal(g.backstopping, true);
+  assert.equal(g.shp2GridConnected, null, 'the presence term stays online-gated: a stale 1 asserts nothing');
 });
 
 test('★★★ a 0 that merely stops being refreshed KEEPS vetoing: the cloud or uplink failing mid-outage must not republish "grid present"', () => {
@@ -97,14 +117,39 @@ test('★★★ a 0 that merely stops being refreshed KEEPS vetoing: the cloud o
   }
 });
 
-test('★★ a reading taken BEFORE the panel\'s latest return online vetoes nothing until a quota lands', () => {
-  // setDeviceOnline / setDeviceList flip `online` and stamp onlineChangedAtMs without touching
-  // the projection: the pre-outage 0 is re-exposed, and the grid may well be back.
-  const g = resolve(devices(0, { quotaAgoMs: 40 * 60_000, onlineChangedAgoMs: 30_000 }));
-  assert.equal(g.backstopping, true);
-  assert.equal(g.declared, true);
-  // ...and the first quota after the flip that still says 0 applies the veto.
-  assert.equal(resolve(devices(0, { quotaAgoMs: 5_000, onlineChangedAgoMs: 30_000 })).backstopping, false);
+test('★★★ end to end through the real SnapshotStore: an outage survives a /status blip and a cloud-replay shadow; only a Grid OK reading clears it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'veto-'));
+  const prevPath = process.env.SHADOW_WITNESS_PATH;
+  process.env.SHADOW_WITNESS_PATH = join(dir, 'shadow-witness.json');
+  try {
+    const store = new SnapshotStore();
+    let t = 1_000_000;
+    store.setClock(() => t);
+    store.setDeviceList([{ sn: 'SHP2-1', deviceName: 'SHP2-1', productName: 'Smart Home Panel 2', online: 1 } as never]);
+    const quota = (gridSta: number, k: number): Record<string, unknown> => ({
+      'pd303_mc.masterIncreInfo.gridSta': gridSta, 'wattInfo.gridWatt': 0,
+      'loadInfo.hall1Watt': [k, 134, 104, 302, 341, 70, 287, 70, 512, 88, 240, 60],
+    });
+    const r = () => resolveGridBackstop({ devices: store.get().devices, gridEntity: entity('on'), gridEntityConfigured: true, gridAvailableFallback: false, atReserveFloor: false });
+
+    store.setDeviceQuota('SHP2-1', quota(0, 1));
+    assert.equal(r().backstopping, false, 'the outage is announced');
+    store.setDeviceOnline('SHP2-1', false);
+    assert.equal(r().backstopping, false, '/status OFFLINE');
+    store.setDeviceOnline('SHP2-1', true);
+    assert.equal(r().backstopping, false, '/status ONLINE again, before any quota');
+    for (let i = 0; i < 16; i++) { t += 60_000; store.setDeviceQuota('SHP2-1', quota(0, 1)); }
+    assert.ok(store.get().devices['SHP2-1'].contentStaleSinceMs != null, 'the cloud-replay shadow latched');
+    assert.equal(r().backstopping, false, 'shadow latched: still no grid');
+    // The grid returns and the panel says so: that reading, and only that, clears the veto.
+    t += 60_000;
+    store.setDeviceQuota('SHP2-1', quota(1, 2));
+    assert.equal(r().declared, true);
+    assert.equal(r().backstopping, true);
+  } finally {
+    if (prevPath == null) delete process.env.SHADOW_WITNESS_PATH; else process.env.SHADOW_WITNESS_PATH = prevPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the real projection maps an undocumented gridSta to false (the veto depends on it)', () => {
