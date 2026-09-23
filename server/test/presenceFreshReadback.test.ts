@@ -255,9 +255,24 @@ test('★★ both night-charge deciders get a tri-state: null (never act) when p
   for (const l of wired) assert.equal(l.trim(), 'gridPresent: gridNow.present ? true : gridNow.presenceUnknown ? null : false,');
 });
 
-test('the EcoFlow REST request carries an explicit bound well inside the readback window', () => {
+test('the EcoFlow REST READS carry an explicit bound well inside the readback window; WRITES keep the default', () => {
   const rest = src('ecoflow/rest.ts');
   const ms = Number(/export const ECOFLOW_REST_TIMEOUT_MS = ([\d_]+);/.exec(rest)?.[1]?.replace(/_/g, ''));
   assert.ok(ms > 0 && ms * 4 <= SHP2_READBACK_STALE_MS, `${ms} ms`);
-  assert.match(rest, /headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS/);
+  // A write whose reply is merely slow may have landed: failing it re-sends it, and a reserve
+  // revert re-sent three times escalates to a spoken "reserve stuck" CRITICAL.
+  assert.match(rest, /\.\.\.\(method === 'PUT' \? \{\} : \{ headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS \}\)/);
+  assert.match(rest, /sendCommand[\s\S]{0,400}call<unknown>\('PUT'/, 'commands go out as PUT');
+});
+
+test('the resolver publishes the panel verdict the dashboard keys on (panelFresh)', () => {
+  withStore((store, at) => {
+    at(Date.now() - 6 * MIN);
+    store.setDeviceQuota('SHP2-1', quota(1));
+    assert.equal(resolve(store.get().devices).panelFresh, false);
+    at(Date.now());
+    store.setDeviceQuota('SHP2-1', quota(1, 2));
+    assert.equal(resolve(store.get().devices).panelFresh, true);
+  });
+  assert.equal(resolve({}).panelFresh, null, 'no panel');
 });

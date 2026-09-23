@@ -95,6 +95,11 @@ export interface GridBackstop {
    *  null instead of false. Evidence of absence: the panel's last reading not Grid OK (the
    *  declared-grid veto), a fresh not-OK panel reading, or a usable grid entity reading off. */
   presenceUnknown: boolean;
+  /** v1.179.0 — the server's verdict on the panel's reading: shp2ReadbackFresh (online, a REST
+   *  quota within SHP2_READBACK_STALE_MS, not shadowed); null with no projected panel. When
+   *  false, homeGridWatts and shp2GridConnected are already zeroed/unknown, so the dashboard
+   *  treats the panel's figures as frozen from this — never from a client-side clock. */
+  panelFresh: boolean | null;
 }
 
 /**
@@ -131,7 +136,9 @@ export function computeGridImportWatts(
   // v1.179.0 — and only a Core whose content is FRESH (lastTelemetryAtMs: REST quota or MQTT
   // delta, not a /status flip) within the same readback window as the panel. A Core left
   // listed online while its telemetry stopped would otherwise keep a frozen acIn ≥ 5 W
-  // asserting importLive — exempt from both floor guards — through an outage.
+  // asserting importLive — exempt from both floor guards — through an outage. NOT replay-proof:
+  // a REST 200 replaying a cached Core body still bumps lastTelemetryAtMs (only the SHP2 has a
+  // content witness, shp2Shadow.ts), so a cloud replaying a Core's pre-outage acIn still passes.
   return dpus
     .filter((d) => d.online && sourceSns.has(d.sn) && coreContentFresh(d, nowMs))
     .reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
@@ -424,7 +431,8 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
 
   const absenceEvidence = gridMeasuredAbsent || shp2GridConnected === false || (entityUsable && entityPresent === false);
   const presenceUnknown = !present && !absenceEvidence;
-  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason, presenceUnknown };
+  const panelFresh = panel ? shp2ReadbackFresh(panel, nowMs) : null;
+  return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason, presenceUnknown, panelFresh };
 }
 
 function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {

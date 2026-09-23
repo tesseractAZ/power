@@ -104,11 +104,14 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // the whole house flowing out of idle batteries: the exact picture this release removes.
   // Frozen is treated like silent. Only a total absence of the SHP2 (cold boot) falls back
   // to the Cores' AC output.
+  // ★ v1.179.0 — a THIRD way to be frozen: online and unshadowed, but its readings stopped
+  // refreshing (a failing quota fetch). The server now zeroes that panel's grid reading too,
+  // and says so in `grid.panelFresh`; the card keys on the server's verdict, not a client clock.
   const circuits = shp2?.projection.circuits ?? [];
   const measured = circuits.filter((c) => c.watts != null);
   const panelState: PanelState = !shp2
     ? 'absent'
-    : !shp2.online || shp2.contentStaleSinceMs != null
+    : !shp2.online || shp2.contentStaleSinceMs != null || grid?.panelFresh === false
       ? 'frozen'
       : measured.length === 0
         ? 'silent'

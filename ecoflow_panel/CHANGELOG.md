@@ -23,11 +23,15 @@
   alarm speaks, because nothing can vouch for the grid.
 - When nothing can be heard at all, the overnight charging no longer treats that as the grid
   being lost: it holds rather than ending the night's buy or switching force-charge off.
-- Requests to the EcoFlow cloud now give up after 30 seconds. They had no limit short of five
-  minutes, so one stuck request could stall every device's update for that long.
+- Reads from the EcoFlow cloud now give up after 30 seconds. They had no limit short of five
+  minutes — as long as the freshness window — so a single stuck read could have stalled every
+  device's update past it. Commands keep the longer limit: a slow reply can still mean the
+  command arrived, and treating it as failed would send it again.
+- The Energy flow card shows the house load as not reporting while the panel's readings have
+  stopped, instead of drawing its last load next to a grid reading the add-on no longer trusts.
 - The v1.178.0 rule that a "no grid" reading overrides a grid declared present is unaffected.
 
-New harness `scripts/mutate-presence-fresh-readback.mjs` (11 anchor-asserted mutants).
+New harness `scripts/mutate-presence-fresh-readback.mjs` (13 anchor-asserted mutants).
 
 ## 1.178.1
 

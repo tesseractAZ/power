@@ -23,10 +23,11 @@ const SERVER = resolve(REPO, 'server');
 const GRID = resolve(SERVER, 'src/gridState.ts');
 const IDX = resolve(SERVER, 'src/index.ts');
 const REST = resolve(SERVER, 'src/ecoflow/rest.ts');
+const CARD = resolve(REPO, 'web/src/cards/energyFlowModel.ts');
 
 const SUBSET = [
   'test/presenceFreshReadback.test.ts', 'test/gridState.test.ts', 'test/shp2Shadow.test.ts',
-  'test/gridMeasuredAbsentVeto.test.ts', 'test/poolCoverageGate.test.ts',
+  'test/gridMeasuredAbsentVeto.test.ts', 'test/poolCoverageGate.test.ts', 'test/energyFlowModel.test.ts',
 ];
 
 const MUTANTS = [
@@ -103,9 +104,23 @@ const MUTANTS = [
   {
     id: 'xi. \u2605\u2605 the REST request is unbounded again (undici\u2019s 300 s = the readback window)',
     file: REST,
-    find: '    headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS,',
+    find: "    ...(method === 'PUT' ? {} : { headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS }),",
     to: '    /* MUTANT */',
-    why: 'One hung request holds the serial poll for 300 s and ages the panel\u2019s reading out of the window: presence lapses on a healthy grid.',
+    why: 'One hung read holds the serial poll for 300 s and ages the panel\u2019s reading out of the window: presence lapses on a healthy grid.',
+  },
+  {
+    id: 'xii. \u2605\u2605 WRITES are bounded at 30 s too',
+    file: REST,
+    find: "    ...(method === 'PUT' ? {} : { headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS }),",
+    to: '    headersTimeout: ECOFLOW_REST_TIMEOUT_MS, bodyTimeout: ECOFLOW_REST_TIMEOUT_MS, /* MUTANT */',
+    why: 'A slow-but-delivered reserve revert fails, is re-sent three times, and escalates to a spoken "reserve stuck" CRITICAL while the panel already reads the restored value.',
+  },
+  {
+    id: 'xiii. \u2605 the energy-flow card ignores the server\u2019s panelFresh verdict',
+    file: CARD,
+    find: "    : !shp2.online || shp2.contentStaleSinceMs != null || grid?.panelFresh === false",
+    to: "    : !shp2.online || shp2.contentStaleSinceMs != null /* MUTANT */",
+    why: 'A panel whose polls are failing draws its frozen house load next to the server-zeroed grid: 1.9 kW flowing from nowhere.',
   },
 ];
 
