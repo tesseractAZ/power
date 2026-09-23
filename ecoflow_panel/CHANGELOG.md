@@ -9,13 +9,15 @@
   polled. The declaration then stood again. The runway alarm's spoken warning was held back,
   `off_grid` read OFF and battery-level announcements said the house was drawing from grid
   power, for as long as the panel stayed dark. The last "no grid" reading is now saved to a small
-  file next to the database and restored after a restart, and the resolver finds the panel even
-  before it has sent anything. The file is written only when the reading changes and is cleared
-  the moment the panel reports Grid OK, so a "Grid OK" is never saved. The trade-off: if the grid
-  returned while the panel was dark, "no grid" persists until the panel reports. That is an early
-  alarm, not a missed one.
+  file next to the database and read back as the add-on starts. It applies whether or not the
+  add-on can reach the EcoFlow cloud after the restart: the resolver finds the panel before it
+  has sent anything, or, while the add-on has no device list at all, uses the saved reading
+  directly. The file is written only when the reading changes and is cleared the moment the panel
+  reports Grid OK, so a "Grid OK" is never saved. The trade-off: if the grid returned while the
+  panel was dark, "no grid" persists until the panel reports. That is an early alarm, not a missed
+  one; deleting `/data/grid-reading.json` and restarting the add-on clears it by hand.
 
-New harness `scripts/mutate-grid-reading-persist.mjs` (6 anchor-asserted mutants).
+New harness `scripts/mutate-grid-reading-persist.mjs` (13 anchor-asserted mutants).
 
 ## 1.179.0
 

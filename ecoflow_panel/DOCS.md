@@ -3895,16 +3895,28 @@ would reintroduce skew.
 **Surviving a restart (v1.180.0).** The last not-OK reading is persisted per panel serial to
 `grid-reading.json` next to the database (`GRID_READING_PATH` overrides; off by default outside
 the add-on, so test processes never share a file). It is written only when the reading changes,
-deleted the moment the panel reports Grid OK, and never holds a Grid OK reading. On first sight
-after a restart, `setDeviceList` puts it back on the panel as `lastGridReading`. That matters
-exactly when the panel is dark: a panel listed offline is never polled, so it has no projection
-and nothing else would restore the reading, and the resolver finds such a panel by product
-identity for the veto. Before v1.180.0 an outage with the toggle ON, a cloud-dark panel and a
-restart (watchdog, host reboot, update) brought "grid present" back for as long as the panel
-stayed dark. The persisted reading has no age limit, because the veto clears on evidence, not
-silence. The cost is a stale "no grid" after a long dark period in which the grid returned; it
-clears on the panel's first report. The reason says "(last reading; panel offline since before
-a restart)". A persisted reading never feeds presence, which still needs a fresh readback.
+deleted the moment the panel reports Grid OK, and never holds a Grid OK reading. The write is
+atomic (temp file + rename); a failed write is logged once and retried on every later panel
+reading. The store loads the file when it is constructed. Two restart cases then keep the veto:
+- **The cloud is reachable but the panel is dark.** On first sight `setDeviceList` puts the
+  reading back on the panel as `lastGridReading`, logged once. A panel listed offline is never
+  polled, so it has no projection and nothing else would restore the reading; the resolver
+  finds such a panel by product identity.
+- **The cloud itself is unreachable** (an outage that also takes the internet down). No
+  `/device/list` succeeds, `setDeviceList` never runs and there is no panel device at all.
+  `SnapshotStore.persistedGridAbsent()` hands the reading to `liveGridBackstop`
+  (`GridBackstopInput.persistedGridAbsent`, registered in `index.ts`). It stops at the first
+  successful list, after which the per-device reading governs, so a panel since removed from
+  the account cannot leave a veto behind.
+
+Before v1.180.0 an outage with the toggle ON, a cloud-dark panel and a restart (watchdog, host
+reboot, update) brought "grid present" back for as long as the panel stayed dark. The persisted
+reading has no age limit, because the veto clears on evidence, not silence. The cost is a stale
+"no grid" after a long dark period in which the grid returned. It clears on the panel's first
+report; while the panel stays dark, deleting `/data/grid-reading.json` and restarting the add-on
+clears it by hand. The reason marks it "(last reading from before a restart; panel offline)",
+"(…; nothing since)" or "(…; the device list is unreachable)". A persisted reading never feeds
+presence, which still needs a fresh readback.
 With nothing persisted, the grid-state fields at boot follow the declaration as before: with no
 evidence against it, the operator's statement is the best information, and withholding it would
 leave `off_grid` unknown for the whole of a long cloud outage.
@@ -6582,7 +6594,7 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
 
-**v1.180.0 — the declared-grid veto survives a restart.** `SnapshotStore` persists the SHP2's last not-OK grid reading per serial (`grid-reading.json`, `GRID_READING_PATH`; written on change, deleted on Grid OK, production-only by default) and rehydrates it as `lastGridReading` on first sight; `resolveGridBackstop` finds an unprojected panel by identity for the veto (Grid backstop resolver, "Surviving a restart"). Harness: `scripts/mutate-grid-reading-persist.mjs` (6 mutants); `mutate-grid-veto-boot-zero.mjs` veto anchors repointed.
+**v1.180.0 — the declared-grid veto survives a restart.** `SnapshotStore` persists the SHP2's last not-OK grid reading per serial (`grid-reading.json`, `GRID_READING_PATH`; written on change, deleted on Grid OK, production-only by default) and rehydrates it as `lastGridReading` on first sight; `resolveGridBackstop` finds an unprojected panel by identity for the veto (Grid backstop resolver, "Surviving a restart"). The store loads the file at construction, and while no `/device/list` has succeeded it hands the reading to the resolver directly (`persistedGridAbsent`), so a restart made while the cloud is unreachable keeps the veto too. Harness: `scripts/mutate-grid-reading-persist.mjs` (13 mutants); `mutate-grid-veto-boot-zero.mjs` veto anchors repointed.
 
 **v1.179.0 — a stale "Grid OK" asserts nothing, and neither does a stale grid flow.** `computeShp2GridConnected` (the resolver's presence term and the `shp2_grid_connected` sensor) and `computeHomeGridWatts` (`gridWatt`) require `shp2ReadbackFresh` — online, a REST quota within `SHP2_READBACK_STALE_MS`, not shadowed — instead of online-and-unshadowed alone; `computeGridImportWatts` counts a Core only while its `lastTelemetryAtMs` is within the same window (Grid backstop resolver, "Presence freshness"). `GridBackstop.presenceUnknown` separates "nothing can be heard" from evidence of absence, and the night-charge and force-charge deciders get `gridPresent: null` in that case. EcoFlow REST reads carry `ECOFLOW_REST_TIMEOUT_MS` (30 s) so a hung read cannot hold the poll past the window; writes keep undici's defaults. `GridBackstop.panelFresh` publishes the panel verdict, and the Energy flow card treats a stale panel as frozen. `resolveGridBackstop` takes an optional `nowMs`. The declared-grid veto still reads the last reading. Harness: `scripts/mutate-presence-fresh-readback.mjs` (13 mutants); `mutate-cloud-shadow.mjs` viii and ix repointed at the new gate.
 

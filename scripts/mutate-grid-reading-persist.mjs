@@ -23,8 +23,9 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = resolve(REPO, 'server');
 const SNAP = resolve(SERVER, 'src/snapshot.ts');
 const GRID = resolve(SERVER, 'src/gridState.ts');
+const IDX = resolve(SERVER, 'src/index.ts');
 
-const SUBSET = ['test/gridReadingPersist.test.ts', 'test/gridMeasuredAbsentVeto.test.ts', 'test/presenceFreshReadback.test.ts'];
+const SUBSET = ['test/gridReadingPersist.test.ts', 'test/gridMeasuredAbsentVeto.test.ts', 'test/presenceFreshReadback.test.ts', 'test/gridState.test.ts'];
 
 const MUTANTS = [
   {
@@ -68,6 +69,55 @@ const MUTANTS = [
     find: "      ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'grid-reading.json') : '');",
     to: "      ?? resolve(process.cwd(), config.dbPath, '..', 'grid-reading.json'); /* MUTANT */",
     why: 'One test process\u2019s reading rehydrates into another\u2019s store: order-dependent vetoes in unrelated tests.',
+  },
+  {
+    id: 'vii. \u2605\u2605\u2605 persistence is OFF in production too (the path defaults to disabled)',
+    file: SNAP,
+    find: "      ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'grid-reading.json') : '');",
+    to: "      ?? ''; /* MUTANT */",
+    why: 'The add-on never saves a reading: the whole release is inert exactly where it matters, and every other test still passes.',
+  },
+  {
+    id: 'viii. \u2605\u2605\u2605 the file is loaded on first sight only (the internet-down restart never gets there)',
+    file: SNAP,
+    find: '    // reaches setDeviceList (refreshAll throws at listDevices), and that is the outage case.\n    this.loadGridReadings();',
+    to: '    // reaches setDeviceList (refreshAll throws at listDevices), and that is the outage case. /* MUTANT */',
+    why: 'An outage that also takes the internet down, plus a restart: the saved reading is never read and "grid present" returns.',
+  },
+  {
+    id: 'ix. \u2605\u2605 the no-list reading outlives the first successful device list',
+    file: SNAP,
+    find: '    if (this.lastDeviceListSuccessAt > 0) return null;',
+    to: '    /* MUTANT */',
+    why: 'A panel since removed from the account leaves a veto behind that nothing can ever clear.',
+  },
+  {
+    id: 'x. \u2605\u2605\u2605 the resolver ignores the persisted reading when no panel device exists',
+    file: GRID,
+    find: '  const persistedAbsent = !vetoPanel ? input.persistedGridAbsent ?? null : null;',
+    to: '  const persistedAbsent = null; /* MUTANT */',
+    why: 'The store has the reading; the veto never sees it through an internet-down restart.',
+  },
+  {
+    id: 'xi. \u2605\u2605 the live wrapper does not pass the persisted reading',
+    file: GRID,
+    find: '    persistedGridAbsent: persistedGridAbsentSource?.() ?? null,',
+    to: '    /* MUTANT */',
+    why: 'Every production caller goes through liveGridBackstop: the input exists and is never filled.',
+  },
+  {
+    id: 'xii. \u2605\u2605 index.ts never registers the store as the source',
+    file: IDX,
+    find: 'setPersistedGridAbsentSource(() => store.persistedGridAbsent());',
+    to: '/* MUTANT */',
+    why: 'The wiring exists, is tested, and the running add-on never connects it.',
+  },
+  {
+    id: 'xiii. \u2605 a failed save is never retried',
+    file: SNAP,
+    find: '      } else if (this.gridReadingDirty) {',
+    to: '      } else if (false) { /* MUTANT */',
+    why: 'One transient write error leaves the file out of step with the panel until the next change.',
   },
 ];
 
