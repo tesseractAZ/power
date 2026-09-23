@@ -27,7 +27,7 @@ interface SummaryResp {
     coverage: number;
     /** v1.182.0 — home series only (see aggregator.ts); absent from older servers. */
     homeCoverage?: number;
-    panelLoadCoverage?: number;
+    panelLoadCoverage?: number | null;
   };
 }
 

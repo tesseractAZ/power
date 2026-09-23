@@ -4,9 +4,10 @@
 
 - **Today's "% measured" covers the home.** It averaged every recorded series on every device —
   bench Cores were 38% of them — so it read "100% measured" even while a home figure was missing.
-  It now counts only the series behind the Today figures (the home Cores and the panel's load,
-  with a Core that has gone dark counting as unmeasured), and the Panel load tile reads "not
-  measured today" instead of 0 Wh when the panel recorded no load.
+  It now counts only the devices behind the Today figures (the home Cores and the panel), each
+  weighing the same, with a Core that has gone dark counting as unmeasured — one dark Core of
+  three reads 75%, not 97% — and the Panel load tile reads "not measured today" instead of 0 Wh
+  when the panel recorded no load.
 - **The Battery page's fleet figures cover home packs.** "Fleet capacity" summed every pack the
   add-on could see — 147 kWh, with 9 of 24 packs on bench spares that cannot power the house —
   and bench packs set the near-new health range and filled the charge-curve and thermal lists.
@@ -20,9 +21,10 @@
 - **The night-charge card shows the reserve that will actually be set.** It printed the full
   requirement ("reserve set to 94%") although the panel caps its reserve at 50%; it now shows 50%
   and the requirement beside it. Last night's actuation banner ("Completed — reserve restored")
-  no longer stays up all day: it clears six hours after the reserve is restored.
+  no longer stays up all day: it clears six hours after the panel confirms the restore. A restore
+  the panel has not confirmed is no longer called "Completed", and stays up until it is.
 
-New harness `scripts/mutate-dashboard-audit-four.mjs` (8 anchor-asserted mutants).
+New harness `scripts/mutate-dashboard-audit-four.mjs` (10 anchor-asserted mutants).
 
 ## 1.181.0
 

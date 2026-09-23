@@ -4,7 +4,7 @@
  * spares that cannot power the house — the near-new SoH range was set by bench packs, and bench
  * packs dominated the charge-curve drift and thermal top-8 lists. `home` comes from the server
  * (tagHomePacks); a payload from an older server has none, and then every pack counts as before.
- * Pure (run by server/test/batteryScope.test.ts).
+ * Pure (run by server/test/dashboardAuditFour.test.ts).
  */
 
 export interface ScopedPack { home?: boolean }

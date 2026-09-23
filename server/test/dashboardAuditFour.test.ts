@@ -80,6 +80,8 @@ test('★★ the reserve shown is what will be WRITTEN: clamped to the panel\'s 
   assert.equal(reserveWriteLabel(45, 40, 50), 'reserve set to 45%');
   assert.equal(reserveWriteLabel(40, 40, 50), null, 'no divergence, nothing to say');
   assert.equal(reserveWriteLabel(null, 40, 50), null);
+  assert.equal(reserveWriteLabel(50.5, 45, 50), "reserve set to 50% (the panel's maximum; 51% needed)", 'the write is Math.round, clamped');
+  assert.equal(reserveWriteLabel(49.6, 45, 50), 'reserve set to 50%');
   assert.match(src('index.ts'), /reserveWriteMaxPct: RESERVE_WRITE_MAX_PCT,/);
 });
 
@@ -93,6 +95,11 @@ test('★★ the actuation banner belongs to its night: gone 6 h after the rever
   assert.equal(actuationBannerVisible({ ...base, appliedAtMs: null, revertedAtMs: null, windowEndMs: now + H }, now), true, 'armed for tonight');
   assert.equal(actuationBannerVisible({ ...base, appliedAtMs: null, revertedAtMs: null, cancelled: true, windowEndMs: now + H }, now), true, 'cancelled tonight');
   assert.equal(actuationBannerVisible(null, now), false);
+  // A restore the cloud ACKed but the panel never confirmed (retrying / escalated) stays up.
+  assert.equal(actuationBannerVisible({ ...base, revertedAtMs: now - 11 * H, revertVerifiedAtMs: null, revertReadbackEscalated: true }, now), true);
+  assert.equal(actuationBannerVisible({ ...base, revertedAtMs: now - 11 * H, revertVerifiedAtMs: null, revertRetries: 1 }, now), true);
+  // The 6 h clock runs from the CONFIRMED restore when there is one.
+  assert.equal(actuationBannerVisible({ ...base, revertedAtMs: now - 11 * H, revertVerifiedAtMs: now - 2 * H }, now), true);
 });
 
 test('the Today card reads the HOME coverage and marks a silent panel "not measured"', () => {

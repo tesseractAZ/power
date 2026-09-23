@@ -1,6 +1,6 @@
 /**
  * v1.182.0 — pure text/visibility rules for the night-charge card (run by
- * server/test/nightChargeCardText.test.ts; no browser imports).
+ * server/test/dashboardAuditFour.test.ts; no browser imports).
  */
 
 export interface BannerActuation {
@@ -10,6 +10,17 @@ export interface BannerActuation {
   cancelled: boolean;
   windowEndMs: number | null;
   cancelDeadlineMs: number | null;
+  /** The revert CONFIRMED by readback (revertedAtMs is the cloud's ACK only). */
+  revertVerifiedAtMs?: number | null;
+  revertRetries?: number;
+  revertReadbackEscalated?: boolean;
+}
+
+/** A restore the cloud acknowledged but the panel has not confirmed, and the actuator is retrying
+ *  or has escalated: still actionable, never "Completed", never hidden. */
+export function revertUnconfirmed(a: BannerActuation | null): boolean {
+  return !!a && a.revertedAtMs != null && a.revertVerifiedAtMs == null
+    && (a.revertReadbackEscalated === true || (a.revertRetries ?? 0) > 0);
 }
 
 /** A completed night's banner stays up this long after the revert, then clears. */
@@ -23,7 +34,8 @@ export const COMPLETED_BANNER_MS = 6 * 3_600_000;
  */
 export function actuationBannerVisible(a: BannerActuation | null, nowMs: number): boolean {
   if (!a || a.day == null) return false;
-  if (a.revertedAtMs != null) return nowMs - a.revertedAtMs < COMPLETED_BANNER_MS;
+  if (revertUnconfirmed(a)) return true;
+  if (a.revertedAtMs != null) return nowMs - (a.revertVerifiedAtMs ?? a.revertedAtMs) < COMPLETED_BANNER_MS;
   const windowOver = a.windowEndMs != null ? nowMs > a.windowEndMs + 3_600_000 : false;
   if (a.appliedAtMs == null && windowOver) return false;
   if (a.cancelled && a.appliedAtMs == null) {
@@ -41,7 +53,8 @@ export function actuationBannerVisible(a: BannerActuation | null, nowMs: number)
 export function reserveWriteLabel(setpointPct: number | null, predictedPct: number | null, maxPct: number | null): string | null {
   if (setpointPct == null) return null;
   const cap = maxPct != null && maxPct > 0 ? maxPct : null;
-  if (cap != null && setpointPct > cap + 0.5) return `reserve set to ${cap}% (the panel's maximum; ${setpointPct.toFixed(0)}% needed)`;
-  if (predictedPct != null && setpointPct > predictedPct + 0.5) return `reserve set to ${setpointPct.toFixed(0)}%`;
+  const rounded = Math.round(setpointPct); // the actuator writes Math.round, clamped (clampReserveTarget)
+  if (cap != null && rounded > cap) return `reserve set to ${cap}% (the panel's maximum; ${rounded}% needed)`;
+  if (predictedPct != null && setpointPct > predictedPct + 0.5) return `reserve set to ${rounded}%`;
   return null;
 }

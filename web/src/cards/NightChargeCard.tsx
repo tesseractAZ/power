@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from 'react';
-import { actuationBannerVisible, reserveWriteLabel } from './nightChargeText';
+import { actuationBannerVisible, reserveWriteLabel, revertUnconfirmed } from './nightChargeText';
 import { apiUrl } from '../api';
 
 /**
@@ -76,6 +76,9 @@ interface NightActuation {
   revertAttempts: number;
   lastError: string | null;
   cancelDeadlineMs: number | null;
+  revertVerifiedAtMs?: number | null;
+  revertRetries?: number;
+  revertReadbackEscalated?: boolean;
 }
 
 interface NightChargeStatus {
@@ -331,7 +334,10 @@ function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode'];
 
   let text: string;
   let showCancel = false;
-  if (actuation.revertedAtMs != null) {
+  if (revertUnconfirmed(actuation)) {
+    // v1.182.0 — the cloud ACKed the restore but the panel has not confirmed it: not "Completed".
+    text = `Restore not confirmed — the panel has not reported the reserve back at ${actuation.priorReservePct ?? '—'}%.`;
+  } else if (actuation.revertedAtMs != null) {
     text = `Completed — reserve restored to ${actuation.priorReservePct ?? '—'}%.`;
   } else if (cancelled) {
     text = actuation.appliedAtMs != null
@@ -347,7 +353,7 @@ function ActuationBanner({ mode, actuation }: { mode: NightChargeStatus['mode'];
 
   return (
     <div className="flex items-center justify-between gap-3 bg-panel2 border border-line rounded-md p-2 mb-3 text-xs">
-      <span className={actuation.revertedAtMs != null || cancelled ? 'text-muted' : 'text-warn'}>{text}</span>
+      <span className={(actuation.revertedAtMs != null && !revertUnconfirmed(actuation)) || cancelled ? 'text-muted' : 'text-warn'}>{text}</span>
       <span className="flex items-center gap-2">
         {cancelErr && <span className="text-crit">{cancelErr}</span>}
         {showCancel && (

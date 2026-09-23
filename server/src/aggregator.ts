@@ -42,13 +42,15 @@ export interface FleetEnergyTotals {
     batteryDischargeWh: number;
     coverage: number;     // 0..1 fraction of window covered (averaged across active metrics)
     pvCoverage: number;   // 0..1 fraction of window covered, PV metric (`pv_total`) ONLY — for the Solar-page "% measured" tile
-    /** v1.182.0 — 0..1, the series behind the Today figures ONLY: home Cores (SHP2-connected, a
-     *  dark one counting 0) and the panel's load. `coverage` averages every series on every
-     *  device — bench Cores were 38% of them — so the Today card read "100% measured". */
+    /** v1.182.0 — 0..1, the devices behind the Today figures ONLY — home Cores (SHP2-connected,
+     *  a dark one counting 0) and the panel — averaged PER DEVICE (each its own series' mean), so
+     *  a dark Core weighs as one of the home's devices rather than one series against ~14.
+     *  `coverage` averages every series on every device — bench Cores were 38% of them — so the
+     *  Today card read "100% measured". */
     homeCoverage: number;
-    /** v1.182.0 — 0..1 coverage of the panel's `panel_load` alone (0 with no panel): the Today
-     *  card's Panel load tile reads "not measured" at 0 instead of a confident 0 Wh. */
-    panelLoadCoverage: number;
+    /** v1.182.0 — 0..1 coverage of the panels' `panel_load` (the lowest across panels); null with
+     *  no panel. At 0 the Today card's Panel load tile reads "not measured" instead of 0 Wh. */
+    panelLoadCoverage: number | null;
   };
 }
 
@@ -259,7 +261,7 @@ export function computeTotals(
 ): FleetEnergyTotals {
   const snap = store.get();
   const devices: EnergyTotals[] = [];
-  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, batteryChargeWh: 0, batteryDischargeWh: 0, coverage: 0, pvCoverage: 0, homeCoverage: 0, panelLoadCoverage: 0 };
+  const fleet = { pvWh: 0, acOutWh: 0, panelLoadWh: 0, batteryNetWh: 0, batteryChargeWh: 0, batteryDischargeWh: 0, coverage: 0, pvCoverage: 0, homeCoverage: 0, panelLoadCoverage: null as number | null };
   const coverageAccum: number[] = [];
   const homeCoverageAccum: number[] = []; // v1.182.0
   // v0.44.0 — PV-only coverage for the Solar-page "% measured" tile. The fleet
@@ -344,7 +346,8 @@ export function computeTotals(
     } else if (p.kind === 'shp2') {
       fleet.panelLoadWh += ingest('panel_load');
       const pl = metrics['panel_load'];
-      fleet.panelLoadCoverage = pl && pl.totalMs > 0 ? pl.coverageMs / pl.totalMs : 0; // v1.182.0
+      const plCov = pl && pl.totalMs > 0 ? pl.coverageMs / pl.totalMs : 0; // v1.182.0
+      fleet.panelLoadCoverage = fleet.panelLoadCoverage == null ? plCov : Math.min(fleet.panelLoadCoverage, plCov);
     } else {
       ingest('out_watts');
       ingest('in_watts');
@@ -353,7 +356,8 @@ export function computeTotals(
 
     // v1.182.0 — home coverage: only the devices behind the Today figures.
     if (p.kind === 'shp2' || (p.kind === 'dpu' && isShp2Connected(d.sn, connected))) {
-      for (const r of Object.values(metrics)) if (r.totalMs > 0) homeCoverageAccum.push(r.coverageMs / r.totalMs);
+      const own = Object.values(metrics).filter((r) => r.totalMs > 0).map((r) => r.coverageMs / r.totalMs);
+      if (own.length > 0) homeCoverageAccum.push(own.reduce((s, v) => s + v, 0) / own.length); // one value per device
     }
     devices.push({
       sn: d.sn,

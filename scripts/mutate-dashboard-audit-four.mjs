@@ -35,10 +35,17 @@ const MUTANTS = [
     why: 'Today reads "100% measured" off bench series while a home figure is missing.',
   },
   {
+    id: 'i-b. \u2605\u2605 home coverage weighs per SERIES again (a dark Core is 1 series against ~14)',
+    file: AGG,
+    find: '      if (own.length > 0) homeCoverageAccum.push(own.reduce((s, v) => s + v, 0) / own.length); // one value per device',
+    to: '      homeCoverageAccum.push(...own); /* MUTANT */',
+    why: 'A third of the home dark still reads "97% measured".',
+  },
+  {
     id: 'ii. \u2605\u2605 a silent panel reads as measured',
     file: AGG,
-    find: "      fleet.panelLoadCoverage = pl && pl.totalMs > 0 ? pl.coverageMs / pl.totalMs : 0; // v1.182.0",
-    to: '      fleet.panelLoadCoverage = 1; /* MUTANT */',
+    find: "      const plCov = pl && pl.totalMs > 0 ? pl.coverageMs / pl.totalMs : 0; // v1.182.0",
+    to: '      const plCov = 1; /* MUTANT */',
     why: 'Panel load shows a confident 0 Wh beside "100% measured".',
   },
   {
@@ -72,16 +79,23 @@ const MUTANTS = [
   {
     id: 'vii. \u2605\u2605 the card advertises the unclamped reserve',
     file: NIGHT,
-    find: '  if (cap != null && setpointPct > cap + 0.5) return',
-    to: '  if (false && cap != null && setpointPct > cap + 0.5) return /* MUTANT */',
+    find: '  if (cap != null && rounded > cap) return',
+    to: '  if (false && cap != null && rounded > cap) return /* MUTANT */',
     why: '"Reserve set to 94%" while the panel will sit at 50.',
   },
   {
     id: 'viii. \u2605 last night\u2019s completed banner stays up all day',
     file: NIGHT,
-    find: '  if (a.revertedAtMs != null) return nowMs - a.revertedAtMs < COMPLETED_BANNER_MS;',
+    find: '  if (a.revertedAtMs != null) return nowMs - (a.revertVerifiedAtMs ?? a.revertedAtMs) < COMPLETED_BANNER_MS;',
     to: '  if (a.revertedAtMs != null) return true; /* MUTANT */',
     why: '"Completed \u2014 reserve restored" at 4 PM reads as something happening now.',
+  },
+  {
+    id: 'viii-b. \u2605\u2605 an unconfirmed restore is hidden like a completed one',
+    file: NIGHT,
+    find: '  if (revertUnconfirmed(a)) return true;',
+    to: '  /* MUTANT */',
+    why: 'The reserve is still raised, the actuator is escalating, and the card goes quiet six hours after the cloud\u2019s ACK.',
   },
 ];
 
