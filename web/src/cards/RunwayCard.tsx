@@ -3,13 +3,15 @@ import type { RunwayProjection } from '../types';
 import { usePolled, useNow } from '../usePolled';
 import { pollStale } from '../freshness';
 import { StaleNote } from '../components/StaleNote';
+import { holdsLabel, troughTight, recentLoadCaption, gridNote } from './runwayText';
 
 const RUNWAY_POLL_MS = 60_000;
 
 /**
  * Live off-grid runway — single most actionable number during a storm.
- * Projects the backup pool hour-by-hour from the last-hour load and the
- * next-24-hour forecast PV, surfacing hours-to-reserve and hours-to-empty.
+ * Projects the islanded backup pool hour-by-hour from the day-of-week load curve (predicted
+ * EV charging excluded, the last hour's load blended into the first 4 hours) and the
+ * next-24-hour forecast PV, surfacing hours-to-reserve, hours-to-empty and the lowest point.
  */
 // v0.22.0 — zero-prop card: memo makes it immune to App's ~1 Hz snapshot
 // re-renders; its data refreshes on its own 60 s poll.
@@ -42,7 +44,8 @@ export const RunwayCard = memo(function RunwayCard() {
   // the modelled solar recharge. Lead with the present state and re-label the
   // projection, rather than printing a number that contradicts the pool.
   const below = runway.belowReserveFloor === true;
-  const gridBackstopping = runway.grid?.backstopping === true;
+  // v1.177.0 — see gridNote: shown only while the resolver says the grid is backstopping.
+  const note = gridNote(runway.grid);
   const headlineHours = below
     ? null
     : (runway.hoursToReserve ?? runway.hoursToEmpty);
@@ -54,10 +57,10 @@ export const RunwayCard = memo(function RunwayCard() {
       ? 'until the backup pool reaches the reserve floor'
       : runway.hoursToEmpty != null
         ? 'until the backup pool is empty'
-        : 'within the projection horizon — forecast PV keeps up with load';
+        : holdsLabel(runway);
   const headlineColor =
     headlineHours == null
-      ? 'text-ok'
+      ? (troughTight(runway) ? 'text-ink' : 'text-ok')
       : headlineHours < 4
         ? 'text-bad'
         : headlineHours < 12
@@ -78,8 +81,14 @@ export const RunwayCard = memo(function RunwayCard() {
         {stale ? (
           <StaleNote lastOkAt={lastOkAt} nowMs={now} />
         ) : (
-          <span className="text-xs text-muted normal-case tracking-normal">
-            last-hour load + next-{runway.horizonHours}h forecast PV
+          // v1.177.0 — name the load model actually used. The flat last-hour load drives the
+          // whole horizon only in the degraded fallback; normally it is the day-of-week curve
+          // (2.2× the last hour, live) with the last hour blended into the first 4 hours.
+          <span
+            className="text-xs text-muted normal-case tracking-normal"
+            title="Load: the day-of-week load curve without predicted EV charging, with the last hour's load blended into the first 4 hours. PV: the next-24 h forecast. Islanded: as if the grid vanished now."
+          >
+            {runway.loadModelDegraded ? 'last-hour load' : 'typical load'} + next-{runway.horizonHours}h forecast PV
           </span>
         )}
       </div>
@@ -99,7 +108,7 @@ export const RunwayCard = memo(function RunwayCard() {
         </div>
       ) : (
         <div className="flex items-baseline gap-4 mb-3 flex-wrap">
-          <div className="text-2xl font-bold tabular-nums text-ok">no dip in {runway.horizonHours} h</div>
+          <div className={`text-2xl font-bold tabular-nums ${headlineColor}`}>reserve holds {runway.horizonHours} h</div>
           <div className="text-sm text-muted">{headlineLabel}</div>
         </div>
       )}
@@ -107,11 +116,7 @@ export const RunwayCard = memo(function RunwayCard() {
       {/* v1.52.0 — every projection on this card is ISLANDED ("if the grid
           vanished now"). While the grid is backstopping, say so, so the times
           below are never read as an imminent real-world depletion. */}
-      {gridBackstopping && (
-        <div className="text-xs text-muted mb-3 -mt-1">
-          grid is carrying the load — these are islanded (grid-loss) projections, not a live countdown
-        </div>
-      )}
+      {note && <div className="text-xs text-muted mb-3 -mt-1">{note}</div>}
 
       {/* v0.46.0 — surface the server's loadModelDegraded caveat: when the load
           forecast curve is degenerate (post-restart) the whole horizon falls back
@@ -125,7 +130,7 @@ export const RunwayCard = memo(function RunwayCard() {
         <Stat
           label="Backup now"
           value={runway.backupRemainingKwh != null ? `${runway.backupRemainingKwh.toFixed(1)} kWh` : '—'}
-          sub={runway.backupFullKwh != null ? `of ${runway.backupFullKwh.toFixed(0)} full` : undefined}
+          sub={runway.backupFullKwh != null ? `of ${runway.backupFullKwh.toFixed(1)} full` : undefined}
         />
         <Stat
           label="Reserve floor"
@@ -134,12 +139,13 @@ export const RunwayCard = memo(function RunwayCard() {
         <Stat
           label="Recent load"
           value={`${(runway.recentLoadWatts / 1000).toFixed(2)} kW`}
-          sub="1-hour average"
+          sub={recentLoadCaption(runway.recentLoadBasis)}
         />
         <Stat
           label={`${runway.horizonHours}h forecast PV`}
           value={`${runway.forecastPvUsedKwh.toFixed(1)} kWh`}
-          sub={`vs ${runway.loadHorizonKwh.toFixed(1)} kWh load`}
+          sub={`vs ${runway.loadHorizonKwh.toFixed(1)} kWh load, no predicted EV`}
+          title="Modelled load for the projection: the day-of-week load curve (which already averages in past EV charging) WITHOUT the predicted-EV layer (the alarm path is evidence-based — a car that is really charging shows up in the recent load), with the last hour's load blended into the first 4 hours. The Solar tab's forecast load adds the predicted-EV layer."
         />
       </div>
 
@@ -164,12 +170,13 @@ export const RunwayCard = memo(function RunwayCard() {
   );
 });
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function Stat({ label, value, sub, title }: { label: string; value: string; sub?: string; title?: string }) {
   return (
-    <div className="bg-panel2 border border-line rounded-md p-2">
+    <div className="bg-panel2 border border-line rounded-md p-2" title={title}>
       <div className="text-[10px] uppercase tracking-widest text-muted">{label}</div>
       <div className="text-base font-semibold tabular-nums mt-0.5">{value}</div>
       {sub && <div className="text-[10px] text-muted mt-0.5 truncate">{sub}</div>}
     </div>
   );
 }
+
