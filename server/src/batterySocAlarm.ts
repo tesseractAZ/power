@@ -101,24 +101,25 @@ const BASELINE_PERSIST_THROTTLE_MS = 5 * 60 * 1000;
 /** The spoken message for a crossing, e.g. "Medium priority alarm. Backup pool at 20 percent."
  *  v0.15.16 — the alert type leads so the listener hears the severity before
  *  the detail (matches buildAlertMessage and the runway critical/high paths). */
-export function socAlarmMessage(t: SocThreshold): string {
+export function socAlarmMessage(t: SocThreshold, poolName?: string): string {
   const prefix = priorityAnnouncementPrefix(t.priority);
   const tail = t.priority === 'critical' ? ' Restore charge immediately.' : '';
-  return `${prefix} Backup pool at ${t.pct} percent.${tail}`;
+  // v1.185.0 — a SECONDARY panel's ladder names its pool; the house ladder passes nothing.
+  return `${prefix} ${poolName ? `${poolName} backup pool` : 'Backup pool'} at ${t.pct} percent.${tail}`;
 }
 
 /** v0.62.0 — Spanish (Latin American) counterpart of socAlarmMessage for the
  *  bilingual second pass. Numbers are interpolated from the same threshold. */
-export function socAlarmMessageEs(t: SocThreshold): string {
+export function socAlarmMessageEs(t: SocThreshold, poolName?: string): string {
   const prefix = priorityAnnouncementPrefixEs(t.priority);
   const tail = t.priority === 'critical' ? ' Restablezca la carga de inmediato.' : '';
-  return `${prefix} Reserva de respaldo al ${t.pct} por ciento.${tail}`;
+  return `${prefix} Reserva de respaldo${poolName ? ` de ${poolName}` : ''} al ${t.pct} por ciento.${tail}`;
 }
 
 /** v0.62.0 — Spanish counterpart of the grid-backstopped SoC advisory
  *  ("drawing from grid power, no action needed"). */
-export function socAlarmAdvisoryEs(pct: number): string {
-  return `Aviso. Reserva de respaldo al ${pct} por ciento. Ahora se está tomando energía de la red; no se requiere acción.`;
+export function socAlarmAdvisoryEs(pct: number, poolName?: string): string {
+  return `Aviso. Reserva de respaldo${poolName ? ` de ${poolName}` : ''} al ${pct} por ciento. Ahora se está tomando energía de la red; no se requiere acción.`;
 }
 
 /**
@@ -213,6 +214,11 @@ interface PersistState {
 
 const STATE_PATH = process.env.BATTERY_SOC_ALARM_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'battery-soc-alarm.json');
+
+/** v1.185.0 — a SECONDARY panel's ladder state, beside the house ladder's (`-<serial>.json`). */
+export function socAlarmStatePathFor(sn: string): string {
+  return STATE_PATH.replace(/\.json$/, '') + `-${sn.replace(/[^A-Za-z0-9]/g, '')}.json`;
+}
 
 export interface BatterySocAlarm {
   /** Feed the latest backup-pool SoC (%). Fires onCross for each downward crossing.

@@ -35,8 +35,9 @@ const MUTANTS = [
   {
     id: 'ii. \u2605\u2605\u2605 a fresh panel "no grid" does not zero Core import',
     file: GRID,
-    find: '  const importWatts = panelSaysNoGrid ? 0 : computeGridImportWatts(input.devices, nowMs);',
-    to: '  const importWatts = computeGridImportWatts(input.devices, nowMs); /* MUTANT */',
+    // v1.185.0 — applied per panel inside computeGridImportWatts.
+    find: "    if (shp2ReadbackFresh(p, nowMs) && p.projection.gridConnected === false) continue;",
+    to: '    /* MUTANT */',
     why: 'A replayed or stray Core outvotes the panel\u2019s own fresh "grid not detected".',
   },
   {

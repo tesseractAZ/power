@@ -21,7 +21,7 @@
  */
 
 import type { DeviceSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2 } from './shp2Membership.js';
 
 export interface PublishReadiness {
   /** An online home Core — one the panel lists as a source, or any Core on a DPU-only
@@ -88,10 +88,12 @@ export interface ReadinessInputs {
 
 export function publishReadiness(i: ReadinessInputs): PublishReadiness {
   const devs = Object.values(i.devices);
-  const panel = devs.find((d) => d.projection?.kind === 'shp2');
   const asSnapshots = i.devices as unknown as Record<string, DeviceSnapshot>;
+  // v1.185.0 — the house panel; and the union roster is known only once EVERY panel on the account
+  // has a projection (a second panel's Cores are missing from it until then). One panel: identical.
+  const panel = findShp2(asSnapshots);
   const connected = shp2ConnectedDpuSns(asSnapshots);
-  const membershipKnown = !!panel || shp2Panels(asSnapshots).sns.length === 0;
+  const membershipKnown = shp2Panels(asSnapshots).sns.every((sn) => asSnapshots[sn]?.projection?.kind === 'shp2');
   return {
     flow: membershipKnown && Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),
     panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null),

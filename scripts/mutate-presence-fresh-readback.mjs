@@ -34,22 +34,23 @@ const MUTANTS = [
   {
     id: 'i. \u2605\u2605\u2605 presence is gated on online + shadow only again (no look at the reading\u2019s age)',
     file: GRID,
-    find: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return null;',
-    to: '  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return null; /* MUTANT */',
+    // v1.185.0 — the gate now runs per panel, across every panel.
+    find: '    if (!shp2ReadbackFresh(panel, nowMs)) continue;',
+    to: '    if (!panel.online || panel.contentStaleSinceMs != null) continue; /* MUTANT */',
     why: 'A /status flip re-exposes the pre-offline "Grid OK", and a failing quota leaves it standing indefinitely: the runway audible is gated through an outage.',
   },
   {
     id: 'ii. \u2605\u2605\u2605 presence is not gated at all',
     file: GRID,
-    find: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return null;',
-    to: '  if (!shp2) return null; /* MUTANT */',
+    find: '    if (!shp2ReadbackFresh(panel, nowMs)) continue;',
+    to: '    /* MUTANT */',
     why: 'An offline or cloud-replayed panel\u2019s frozen "Grid OK" asserts presence into an outage.',
   },
   {
     id: 'iii. \u2605\u2605 a private, looser readback window (1 h) instead of the shared SHP2_READBACK_STALE_MS',
     file: GRID,
-    find: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return null;',
-    to: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs, 3_600_000)) return null; /* MUTANT */',
+    find: '    if (!shp2ReadbackFresh(panel, nowMs)) continue;',
+    to: '    if (!shp2ReadbackFresh(panel, nowMs, 3_600_000)) continue; /* MUTANT */',
     why: 'A failing quota keeps a stale "1" asserting presence for an hour; the control readbacks and the alarm drift apart.',
   },
   {
@@ -62,15 +63,15 @@ const MUTANTS = [
   {
     id: 'v. \u2605 a 6 s /status blip drops a reading that is still fresh',
     file: GRID,
-    find: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return null;',
-    to: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs) || (shp2.onlineChangedAtMs ?? 0) > (shp2.lastQuotaAtMs ?? 0)) return null; /* MUTANT */',
+    find: '    if (!shp2ReadbackFresh(panel, nowMs)) continue;',
+    to: '    if (!shp2ReadbackFresh(panel, nowMs) || (panel.onlineChangedAtMs ?? 0) > (panel.lastQuotaAtMs ?? 0)) continue; /* MUTANT */',
     why: 'Every blip at the floor removes the gridSta backstop between charge bursts for a poll: the false at-floor critical v0.89.0 closed, spoken during the nightly force-charge.',
   },
   {
     id: 'vi. \u2605\u2605\u2605 the panel\u2019s frozen gridWatt proves the grid again (online + shadow gate only)',
     file: GRID,
-    find: '  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return 0;',
-    to: '  if (!shp2 || !shp2.online || shp2.contentStaleSinceMs != null) return 0; /* MUTANT */',
+    find: '    if (!shp2ReadbackFresh(shp2, nowMs)) continue;',
+    to: '    if (!shp2.online || shp2.contentStaleSinceMs != null) continue; /* MUTANT */',
     why: 'A 7.8 kW sample frozen mid-charge keeps importLive true \u2014 exempt from both floor guards \u2014 and mutes an at-floor outage outright.',
   },
   {
@@ -118,8 +119,8 @@ const MUTANTS = [
   {
     id: 'xiii. \u2605 the energy-flow card ignores the server\u2019s panelFresh verdict',
     file: CARD,
-    find: "    : !shp2.online || shp2.contentStaleSinceMs != null || grid?.panelFresh === false",
-    to: "    : !shp2.online || shp2.contentStaleSinceMs != null /* MUTANT */",
+    find: "    : panels.some((p) => !p.online || p.contentStaleSinceMs != null) || grid?.panelFresh === false",
+    to: "    : panels.some((p) => !p.online || p.contentStaleSinceMs != null) /* MUTANT */",
     why: 'A panel whose polls are failing draws its frozen house load next to the server-zeroed grid: 1.9 kW flowing from nowhere.',
   },
 ];

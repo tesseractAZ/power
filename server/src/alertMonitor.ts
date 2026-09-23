@@ -12,7 +12,7 @@ import { resolve as resolvePath } from 'node:path';
 import { assessBlind, telemetryBlindAlerts, blindAlertContext, pollState, TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { blindRemediationStep } from './blindRemediation.js';
 import { benchSpareSns, isOutsideHomePool, shp2ConnectedDpuSns, isExpectedOfflineSpare,
-  aggregateFleetFlow, findShp2, shp2Panels } from './shp2Membership.js';
+  aggregateFleetFlow, findShp2, shp2Panels, allShp2s } from './shp2Membership.js';
 // v1.70.0 — on-peak grid-to-battery detection. Reads the SAME tariff model as
 // index.ts (apsREvModelFromEnv) so the two engines cannot disagree about when
 // on-peak starts, and the SAME fleet flow aggregation the dashboard shows.
@@ -1127,9 +1127,25 @@ export function fallingEdgeFrozenByEvidence(p: {
  * "Resolved: Projected runtime ~0h 12m to reserve" — a false all-clear at the worst moment. */
 export function resolveHandoffOwner(id: string, currentIds: ReadonlySet<string>): string | null {
   if (!id.startsWith('backup-soc-') && !id.startsWith('forecast-runtime-')) return null;
-  if (currentIds.has('shp2-below-reserve')) return 'shp2-below-reserve';
-  if (currentIds.has('shp2-near-reserve')) return 'shp2-near-reserve';
+  // v1.185.0 — a SECONDARY panel's band (`backup-soc-<pct>-<serial>`) hands off to that panel's
+  // own pair (`shp2-below-reserve-<serial>`), never to the house panel's.
+  const m = /^backup-soc-\d+(-[A-Za-z0-9]+)$/.exec(id);
+  const sfx = m ? m[1] : '';
+  if (currentIds.has(`shp2-below-reserve${sfx}`)) return `shp2-below-reserve${sfx}`;
+  if (currentIds.has(`shp2-near-reserve${sfx}`)) return `shp2-near-reserve${sfx}`;
   return null;
+}
+
+/** v1.185.0 — two or more panels, and the union roster cannot yet be trusted (see the disarm in
+ *  the snapshot loop). */
+export function multiPanelRosterUnsound(devices: Record<string, DeviceSnapshot>): boolean {
+  const census = shp2Panels(devices).sns;
+  if (census.length <= 1) return false;
+  return census.some((sn) => {
+    const d = devices[sn];
+    if (d?.projection?.kind !== 'shp2') return true;
+    return !(d.projection.sources ?? []).some((x) => x.isConnected && !!x.sn);
+  });
 }
 
 /**
@@ -2093,7 +2109,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // v1.8.0 (review F3) — the SHP2's pool-unknown onset (post-grace-hold), for
     // the reserve-alarm-blind compensating alert. One SHP2 per home; find it in
     // the snapshot and read the store's tracked onset for that SN.
-    const shp2Sn = Object.values(snap.devices).find((d) => d.projection?.kind === 'shp2')?.sn;
+    // v1.185.0 — and every other panel's, keyed by serial, for its own reserve-blind alert.
+    const shp2Sn = findShp2(snap.devices)?.sn;
+    const backupPoolUnknownSinceBySn = new Map<string, number | null>();
+    for (const p of allShp2s(snap.devices)) backupPoolUnknownSinceBySn.set(p.sn, store.backupPoolUnknownSince(p.sn));
     // v1.11.0 (review F8) — per-DPU inverter-error onset for the dpu-err debounce.
     const dpuErrOnsetBySn = new Map<string, { code: number; sinceMs: number }>();
     for (const d of Object.values(snap.devices)) {
@@ -2106,6 +2125,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       lastDeviceListSuccessAt: store.lastDeviceListSuccessAt,
       perDevice,
       backupPoolUnknownSinceMs: shp2Sn ? store.backupPoolUnknownSince(shp2Sn) : null,
+      backupPoolUnknownSinceBySn,
       dpuErrOnsetBySn,
       // v1.14.0 — per-slot SHP2 source-error onsets for the shp2-src-err debounce.
       shp2SrcErrOnsetBySlot: store.shp2SrcErrOnsets(),
@@ -2279,7 +2299,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // Streaks still advance (so the moment the census returns to one panel the
       // hysteresis is already warm), and the guard alert itself is exempt via
       // isNeverMutedAlert regardless.
-      const multiPanel = shp2Panels(snap.devices).sns.length > 1;
+      // v1.185.0 — narrowed to the window in which the union roster is actually unsound: some
+      // panel on the account has no projection yet, or lists no connected source (a reply that
+      // omitted its sources subtree). Both hide that panel's Cores from the union, which is the
+      // WIRING-reason absence above. Once every panel reports its roster, a Core on neither is
+      // genuinely off-panel, and the second panel's Cores re-arm on first sighting. One panel:
+      // never disarmed, as before.
+      const multiPanel = multiPanelRosterUnsound(snap.devices);
       const muted = multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
       for (const a of alerts) if (shouldDemoteAnnunciation(a, muted)) a.annunciate = false;
     }

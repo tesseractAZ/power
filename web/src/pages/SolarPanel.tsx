@@ -10,6 +10,7 @@ import {
   Legend,
 } from 'recharts';
 import type { DeviceSnapshot, DpuProjection, Shp2Projection } from '../types';
+import { allPanels } from '../shp2Membership';
 
 // Array configuration: each equipped DPU has a 10-panel high-voltage string and
 // a 4-panel low-voltage string; all panels are 400 W. Spare DPUs have no array.
@@ -61,11 +62,9 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
   const onlineDpus = dpus.filter((d) => d.online && d.projection);
 
   // DPUs with a solar array = the SHP2-bound Cores; the spares have none.
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2');
+  // v1.185.0 — the Cores on EVERY panel.
   const arraySns = new Set<string>(
-    shp2?.projection?.kind === 'shp2'
-      ? (shp2.projection as Shp2Projection).sources.map((s) => s.sn).filter((sn): sn is string => !!sn)
-      : [],
+    allPanels(devices).flatMap((p) => (p.projection as Shp2Projection).sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
   );
   // v0.43.0 — array TOPOLOGY (panel + HV/LV channel counts) is driven by the equipped
   // SHP2-bound Cores, NOT live connectivity: a cloud-offline-but-wired Core (e.g. Core 1)
@@ -97,7 +96,7 @@ export function SolarPanel({ devices }: { devices: Record<string, DeviceSnapshot
         'This is the failure mode from the v0.9.74 audit; may indicate a stale snapshot or SHP2 went briefly offline.',
       );
     }
-  } else if (shp2) {
+  } else if (arraySns.size > 0) {
     (window as unknown as { __seenShp2?: boolean }).__seenShp2 = true;
   }
 

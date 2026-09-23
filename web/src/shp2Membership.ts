@@ -41,3 +41,32 @@ export function isShp2Connected(sn: string, connected: Set<string>): boolean {
   if (connected.size === 0) return true;
   return connected.has(sn);
 }
+
+type Panel = DeviceSnapshot & { projection: Shp2Projection };
+
+/**
+ * v1.185.0 — the HOUSE panel, mirroring the server's findShp2: the panel the server flagged
+ * `housePanel` (resolveHousePanel), or nothing while that panel has no projection; with none
+ * flagged, the lowest serial. Before this every card took the FIRST panel in the map, so a second
+ * panel could quietly become the one the dashboard called "the" backup pool.
+ */
+export function findHousePanel(devices: Record<string, DeviceSnapshot>): Panel | undefined {
+  let best: Panel | undefined;
+  let flagged: DeviceSnapshot | undefined;
+  for (const d of Object.values(devices)) {
+    if (d.housePanel === true) flagged = d;
+    if (d.projection?.kind !== 'shp2') continue;
+    if (!best || d.sn < best.sn) best = d as Panel;
+  }
+  if (flagged) return flagged.projection?.kind === 'shp2' ? (flagged as Panel) : undefined;
+  return best;
+}
+
+/** v1.185.0 — every projected panel, the house panel first, then by serial. */
+export function allPanels(devices: Record<string, DeviceSnapshot>): Panel[] {
+  const house = findHousePanel(devices);
+  const rest = Object.values(devices)
+    .filter((d): d is Panel => d.projection?.kind === 'shp2' && d !== house)
+    .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
+  return house ? [house, ...rest] : rest;
+}

@@ -174,6 +174,8 @@ export interface DeviceSnapshot {
   deviceName: string;
   productName: string;
   online: boolean;
+  /** v1.185.0 — the pinned HOUSE panel (server resolveHousePanel); set on exactly one panel. */
+  housePanel?: boolean;
   lastUpdated: number;
   lastError?: string;
   projection?: Projection;
@@ -258,6 +260,8 @@ export interface FleetSnapshot {
   alerts?: Alert[];
   grid?: GridBackstop;
   off_grid?: boolean;
+  /** v1.185.0 — which panel is the house panel, and whether one must be pinned. */
+  housePanel?: { sn: string | null; ambiguous: boolean; panels: Array<{ sn: string; name: string }> };
 }
 
 export interface ForecastHour {

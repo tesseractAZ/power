@@ -1,4 +1,5 @@
 import type { DeviceSnapshot, Shp2ChargeWindow, Shp2PairedCircuit, Shp2Projection } from '../types';
+import { findHousePanel } from '../shp2Membership';
 import { strategyExclusion } from '../cards/cardText';
 import { fmtPct, fmtW } from '../format';
 // v0.85.0 — the dissolved Predictive tab's strategy-relevant sections relocate
@@ -25,7 +26,8 @@ export function StrategyPanel({ devices }: { devices: Record<string, DeviceSnaps
   // Require online: a cloud-offline SHP2 carries STALE strategy config, and this
   // card presents it as authoritative ("…needs the Smart Home Panel online"). An
   // offline SHP2 must fall through to the not-available message.
-  const shp2 = Object.values(devices).find((d) => d.online && d.projection?.kind === 'shp2');
+  const house = findHousePanel(devices); // v1.185.0 — the house panel's strategy (the panel night charge drives)
+  const shp2 = house?.online ? house : undefined;
   const p = shp2?.projection?.kind === 'shp2' ? (shp2.projection as Shp2Projection) : null;
 
   // EV-window + NWS storm-prep predictions — independent of SHP2 availability.

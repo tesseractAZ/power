@@ -11,6 +11,7 @@
 import type { DeviceSnapshot } from '../../snapshot.js';
 import type { DpuProjection, Shp2Projection } from '../../ecoflow/project.js';
 import type { PlantData } from './types.js';
+import { findShp2 } from '../../shp2Membership.js';
 import type { AlarmState, Quality, TagRow } from './scada.js';
 
 type DpuDev = DeviceSnapshot & { projection: DpuProjection };
@@ -24,7 +25,7 @@ export function getDpus(data: PlantData): DpuDev[] {
     .sort((a, b) => dpuNum(a.deviceName) - dpuNum(b.deviceName));
 }
 export function getShp2(data: PlantData): Shp2Dev | undefined {
-  return Object.values(data.snap.devices).find((d) => d.projection?.kind === 'shp2') as Shp2Dev | undefined;
+  return findShp2(data.snap.devices) as Shp2Dev | undefined; // v1.185.0 — the house panel
 }
 function dpuNum(name: string): number {
   const m = name.match(/(\d+)/);

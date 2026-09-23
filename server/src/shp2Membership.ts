@@ -376,19 +376,85 @@ export function isSourceDpuStale(
 export function findShp2(
   devices: Record<string, DeviceSnapshot>,
 ): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {
-  // v1.129.0 — lowest SN wins rather than first-in-map. With one panel this is
-  // that panel, unchanged. With two, first-in-map meant the panel whose backup
-  // pool, reserve floor and grid numbers the whole app reports could change
-  // between restarts with no indication; pinning it makes the singleton paths at
-  // least CONSISTENTLY wrong, which is diagnosable. Single pass — no allocation
-  // on a hot path.
+  // v1.185.0 — THE HOUSE PANEL. The store stamps `housePanel` on exactly one panel
+  // (resolveHousePanel, persisted in house-panel.json), and the flag travels with the
+  // device into the analytics worker and the web client. A flagged panel with no
+  // projection yet resolves to NOTHING rather than to the other panel: before this, a
+  // second panel with a lower serial would have become the target of every singleton
+  // path — the SoC ladder, the HA backup sensors and the night-charge reserve and
+  // force-charge writes — the moment it was energised.
+  // v1.129.0 — lowest SN wins rather than first-in-map (no panel flagged: no pin yet,
+  // or two panels and the house panel not identified). Single pass — no allocation on a
+  // hot path.
   let best: (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
+  let flagged: DeviceSnapshot | undefined;
   for (const d of Object.values(devices)) {
+    if (d.housePanel === true) flagged = d;
     if (d.projection?.kind !== 'shp2') continue;
     const cand = d as DeviceSnapshot & { projection: Shp2Projection };
     if (!best || (cand.sn ?? '') < (best.sn ?? '')) best = cand;
   }
+  if (flagged) return flagged.projection?.kind === 'shp2' ? flagged as DeviceSnapshot & { projection: Shp2Projection } : undefined;
   return best;
+}
+
+/**
+ * v1.185.0 — PURE. Which panel is the HOUSE panel: the one night charge writes to and
+ * whose numbers the singleton surfaces (HA backup sensors, the dashboard pool, the
+ * forecast runway) describe.
+ *
+ * - The pin wins while its panel is on the account (`census`: shp2Panels, identity-wide).
+ * - Exactly one panel: that panel, pinned on first sight or RE-pinned when the pinned
+ *   serial is gone (a replaced panel). Today's single-panel plant pins on its first boot,
+ *   so a second panel energised later can never take the role.
+ * - Two or more panels and none pinned among them: AMBIGUOUS. Nothing is flagged, the
+ *   singleton paths fall back to the lowest serial for display, and supervised writes
+ *   are refused until an operator pins one (POST /api/house-panel).
+ * - No panel known: nothing flagged, the pin is kept.
+ */
+export function resolveHousePanel(
+  census: readonly string[],
+  pinnedSn: string | null,
+): { sn: string | null; pin: string | null; ambiguous: boolean } {
+  if (census.length === 0) return { sn: null, pin: pinnedSn, ambiguous: false };
+  if (pinnedSn != null && census.includes(pinnedSn)) return { sn: pinnedSn, pin: pinnedSn, ambiguous: false };
+  if (census.length === 1) return { sn: census[0], pin: census[0], ambiguous: false };
+  return { sn: null, pin: pinnedSn, ambiguous: true };
+}
+
+/**
+ * v1.185.0 — every PROJECTED panel other than the house panel, sorted by serial. These
+ * carry their own SoC ladder, reserve alerts and runway (index.ts / alerts.ts); their
+ * alert ids end in `-<serial>` so familyOf() rolls them up with the house panel's.
+ */
+export function secondaryShp2s(
+  devices: Record<string, DeviceSnapshot>,
+): Array<DeviceSnapshot & { projection: Shp2Projection }> {
+  const house = findShp2(devices);
+  return allShp2s(devices)
+    .filter((p) => p !== house)
+    .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
+}
+
+/**
+ * v1.185.0 — a secondary panel's SHP2-blind fallback SoC (homeFleetMeanSoc for ONE pool):
+ * the mean SoC of the Cores this panel lists as connected sources that are still reporting.
+ * Null when the panel lists none or none is reporting — a dark panel's sources[] is kept
+ * verbatim by setDeviceList, so its last roster still names its Cores.
+ */
+export function panelMeanSoc(
+  devices: Record<string, DeviceSnapshot>,
+  panel: DeviceSnapshot & { projection: Shp2Projection },
+): number | null {
+  const socs: number[] = [];
+  for (const src of panel.projection.sources ?? []) {
+    if (!src.isConnected || !src.sn) continue;
+    const d = devices[src.sn];
+    if (!d || !d.online || d.projection?.kind !== 'dpu') continue;
+    const s = d.projection.soc;
+    if (s != null && Number.isFinite(s)) socs.push(s);
+  }
+  return socs.length ? socs.reduce((a, b) => a + b, 0) / socs.length : null;
 }
 
 /**
@@ -562,6 +628,21 @@ export function homeFleetMeanSoc(
   return socs.reduce((a, b) => a + b, 0) / socs.length;
 }
 
+/**
+ * v1.185.0 — the HOUSE pool's SHP2-blind fallback SoC. With one panel this is homeFleetMeanSoc,
+ * unchanged (its roster fallbacks cover a panel with no projection). With a second panel the
+ * plant-wide mean would average the other pool's Cores into the house figure, so it is the house
+ * panel's own Cores instead (panelMeanSoc).
+ */
+export function housePoolFallbackSoc(
+  devices: Record<string, DeviceSnapshot>,
+  lastKnownRoster?: ReadonlySet<string> | null,
+): number | null {
+  const house = findShp2(devices);
+  if (house && secondaryShp2s(devices).length > 0) return panelMeanSoc(devices, house);
+  return homeFleetMeanSoc(devices, lastKnownRoster);
+}
+
 export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   fleetPv: number;
   fleetIn: number;
@@ -571,7 +652,6 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   panelLoad: number;
 } {
   const dpus = onlineDpus(devices);
-  const shp2 = findShp2(devices);
   const connected = shp2ConnectedDpuSns(devices);
   const gridDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
 
@@ -592,7 +672,10 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   // omits the circuit subtree). aggregateFleetFlow is now also reached from the grid-backstop
   // resolver, so it must not throw on an incomplete projection — a missing circuits array just
   // means panelLoad 0, never a crash.
-  if (shp2) for (const c of shp2.projection.circuits ?? []) panelLoad += c.watts ?? 0;
+  // v1.185.0 — EVERY panel's circuits. The flows above already sum the Cores of every panel
+  // (v1.129.0's union roster); a load from one panel beside them paired a whole-plant supply
+  // with half a house. One panel: identical.
+  for (const p of allShp2s(devices)) for (const c of p.projection.circuits ?? []) panelLoad += c.watts ?? 0;
 
   return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad };
 }

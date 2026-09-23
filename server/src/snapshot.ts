@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
 import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold, type DpuProjection } from './ecoflow/project.js';
-import { shp2Panels } from './shp2Membership.js';
+import { shp2Panels, resolveHousePanel } from './shp2Membership.js';
 import { prunePhantomPacks, freshPackSlotHistory, type PackSlotHistory } from './packPresence.js';
 import { mpptProducing } from './mppt.js';
 import { shp2ContentWitness, advanceContentFreshness, isContentStale, advanceShadowLatch, SHP2_SHADOW_CLEAR_DISTINCT } from './shp2Shadow.js';
@@ -92,6 +92,12 @@ export interface DeviceSnapshot {
    */
   gridVetoClearedAtMs?: number;
   /**
+   * v1.185.0 — this panel is the HOUSE panel (resolveHousePanel; findShp2 returns it). Set by
+   * the store on exactly one panel after every /device/list, never carried: it is recomputed
+   * from the persisted pin each time the literal below is rebuilt.
+   */
+  housePanel?: boolean;
+  /**
    * v1.142.0 — when this device's payload STOPPED MOVING, or null/absent if it
    * is moving. Set only for the SHP2, from the twelve-channel watt witness. See
    * shp2Shadow.ts: a 200 OK carrying a replayed body is invisible to every
@@ -116,6 +122,8 @@ export interface FleetSnapshot {
   // since gridState.ts already imports DeviceSnapshot from here).
   grid?: import('./gridState.js').GridBackstop;
   off_grid?: boolean;
+  /** v1.185.0 — the house panel and whether one must be pinned (the /api/snapshot enrichment). */
+  housePanel?: { sn: string | null; ambiguous: boolean; panels: Array<{ sn: string; name: string }> };
 }
 
 const INCLUDE_RAW = process.env.SNAPSHOT_INCLUDE_RAW === '1';
@@ -417,8 +425,92 @@ export class SnapshotStore extends EventEmitter {
       }
       if (pruned) this.writeGridReadings();
     }
+    this.applyHousePanel();
     this.snap.generatedAt = now;
     this.emit('change', this.snap);
+  }
+
+  // v1.185.0 — the house-panel pin (shp2Membership.resolveHousePanel). Persisted like the grid
+  // readings: next to the DB in production, nowhere elsewhere (HOUSE_PANEL_PATH overrides).
+  private housePanelPath: string | null = null;
+  private housePanelPin: string | null = null;
+  private housePanelAmbiguous = false;
+  private housePanelDirty = false;
+
+  private loadHousePanel(): void {
+    this.housePanelPath = process.env.HOUSE_PANEL_PATH
+      ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'house-panel.json') : '');
+    if (!this.housePanelPath) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.housePanelPath, 'utf8')) as { sn?: unknown };
+      if (typeof raw.sn === 'string' && raw.sn.length > 0) this.housePanelPin = raw.sn;
+    } catch {
+      /* absent or unreadable: the census pins again (one panel), or it stands ambiguous (two) */
+    }
+  }
+
+  /** Atomic, like writeGridReadings; a failure retries on every later device list. */
+  private writeHousePanel(): void {
+    const path = this.housePanelPath;
+    if (!path) return;
+    try {
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ sn: this.housePanelPin }));
+      renameSync(tmp, path);
+      if (this.housePanelDirty) this.logger('house-panel: pin saved');
+      this.housePanelDirty = false;
+    } catch (e) {
+      if (!this.housePanelDirty) this.logger(`house-panel: could not save the pin (${(e as Error)?.message ?? e}) — retrying on each device list`);
+      this.housePanelDirty = true;
+    }
+  }
+
+  /** Stamp `housePanel` on the resolved panel and on no other. Recomputed after every device
+   *  list, because setDeviceList rebuilds each device from a literal. */
+  private applyHousePanel(): void {
+    if (this.housePanelPath == null) this.loadHousePanel();
+    const r = resolveHousePanel(shp2Panels(this.snap.devices).sns, this.housePanelPin);
+    if (r.pin !== this.housePanelPin) {
+      const name = r.pin ? this.snap.devices[r.pin]?.deviceName ?? r.pin : 'none';
+      this.logger(`house-panel: ${this.housePanelPin ? `re-pinned from ${this.housePanelPin} (no longer on the account) to` : 'pinned'} ${name} (${r.pin}) — night charge writes only to this panel`);
+      this.housePanelPin = r.pin;
+      this.writeHousePanel();
+    } else if (this.housePanelDirty) {
+      this.writeHousePanel();
+    }
+    if (r.ambiguous !== this.housePanelAmbiguous) {
+      this.logger(r.ambiguous
+        ? `house-panel: ${shp2Panels(this.snap.devices).sns.length} smart panels and none pinned as the house panel — supervised writes refused until one is pinned (POST /api/house-panel)`
+        : 'house-panel: resolved');
+    }
+    this.housePanelAmbiguous = r.ambiguous;
+    for (const d of Object.values(this.snap.devices)) {
+      if (d.sn === r.sn) d.housePanel = true;
+      else if (d.housePanel != null) delete d.housePanel;
+    }
+  }
+
+  /** v1.185.0 — the operator's pin (POST /api/house-panel). Only a panel on the account. */
+  pinHousePanel(sn: string): boolean {
+    if (!shp2Panels(this.snap.devices).sns.includes(sn)) return false;
+    if (this.housePanelPath == null) this.loadHousePanel();
+    const from = this.housePanelPin;
+    this.housePanelPin = sn;
+    if (from !== sn) {
+      this.logger(`house-panel: operator pinned ${this.snap.devices[sn]?.deviceName ?? sn} (${sn})${from ? ` (was ${from})` : ''}`);
+      this.writeHousePanel();
+    }
+    this.applyHousePanel();
+    this.snap.generatedAt = this.now();
+    this.emit('change', this.snap);
+    return true;
+  }
+
+  /** v1.185.0 — for /api/house-panel and the UI. */
+  housePanelState(): { sn: string | null; ambiguous: boolean; panels: Array<{ sn: string; name: string }> } {
+    const panels = shp2Panels(this.snap.devices).sns.map((sn) => ({ sn, name: this.snap.devices[sn]?.deviceName ?? sn }));
+    const house = Object.values(this.snap.devices).find((d) => d.housePanel === true);
+    return { sn: house?.sn ?? null, ambiguous: this.housePanelAmbiguous, panels };
   }
 
   /** v1.145.0 — SNs already reported absent, so each disappearance logs once. */

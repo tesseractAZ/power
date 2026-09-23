@@ -6,8 +6,11 @@ import { activeSocBandWithHysteresis, socAlertSeverity } from './batterySocAlarm
  * alert's re-arm hysteresis. computeAlerts has exactly one production call site
  * (alertMonitor's snapshot loop), so a module singleton is safe; tests reset it. */
 let heldSocBandPct: number | null = null;
+/* v1.185.0 — the same held band for each SECONDARY panel, keyed by serial. */
+const heldSocBandBySn = new Map<string, number | null>();
 export function resetOnScreenSocBandForTesting(): void {
   heldSocBandPct = null;
+  heldSocBandBySn.clear();
 }
 /* v1.21.0 (engine-review F28) — packs currently HELD in the vdiff warning by the
  * rise-side hysteresis (fired at >= VOL_DIFF_WARN_RISE_MV, holding while still
@@ -20,7 +23,7 @@ const heldVdiffWarnKeys = new Map<string, string | null>();
 export function resetVdiffWarnHoldForTesting(): void {
   heldVdiffWarnKeys.clear();
 }
-import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, homeFleetMeanSoc, shp2Panels, findShp2 } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isExpectedOfflineSpare as isExpectedOfflineSpareShared, housePoolFallbackSoc, shp2Panels, findShp2, secondaryShp2s, panelMeanSoc } from './shp2Membership.js';
 import { liveHostPower } from './hostPower.js';
 import { mpptProducing } from './mppt.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
@@ -411,6 +414,9 @@ export interface ConnectivityContext {
    *  null (post-grace-hold; SnapshotStore.backupPoolUnknownSince), or null while
    *  readable. Drives the reserve-alarm-blind compensating alert. */
   backupPoolUnknownSinceMs?: number | null;
+  /** v1.185.0 — the same onset for EVERY panel, keyed by serial (a secondary panel's own
+   *  reserve-alarm-blind alert reads its entry). */
+  backupPoolUnknownSinceBySn?: Map<string, number | null>;
   /** v1.11.0 (review F8) — per-DPU inverter-error onset (SnapshotStore.dpuErrOnset),
    *  keyed by SN. The `dpu-err` CRITICAL is held until the SAME nonzero code has
    *  stood for DPU_ERR_DEBOUNCE_MS, so a cloud-reconnect blip (nonzero for
@@ -554,8 +560,11 @@ export function computeAlerts(
   // appears rather than needing anyone to be watching; and detected on product
   // identity as well as projection, so it is already standing during the
   // pre-hydration window in which the demotion streaks are accumulating.
+  // v1.185.0 — a second panel is SUPPORTED now (each panel carries its own reserve, SoC and
+  // runway alarms; night charge writes only to the pinned house panel). What remains unsafe is a
+  // plant with two panels and NO house panel pinned, so this stands only in that state.
   const panels = shp2Panels(devices);
-  if (panels.sns.length > 1) {
+  if (panels.sns.length > 1 && !list.some((d) => d.housePanel === true)) {
     const primary = panels.primarySn;
     const primaryPanel = primary ? devices[primary] : undefined;
     const primarySources = new Set(
@@ -574,24 +583,23 @@ export function computeAlerts(
       priority: 'critical',
       device: 'System',
       sourceSn: primary,
-      title: 'Second smart panel detected',
+      title: 'Two smart panels, house panel not identified',
       detail:
-        'Two Smart Home Panels are present on this account. This monitor was built ' +
-        'for one. Every backup pool, reserve floor, runway and grid number below ' +
-        'describes ONE panel, and battery Cores wired to the other panel are treated ' +
-        'as off-panel hardware.',
+        'Two Smart Home Panels are present on this account and none is pinned as the ' +
+        'house panel. Night charge writes only to the house panel, so its supervised ' +
+        'writes are refused until one is pinned. Each panel still carries its own ' +
+        'backup pool, reserve and runway alarms.',
       facts: [
         // Serials live in facts, never in the spoken title/detail — verbalizeForTts
         // should never have to read one aloud.
         { label: 'Panels', value: panels.sns.join(', ') },
-        { label: 'Numbers describe', value: primary ?? 'unknown' },
+        { label: 'Dashboard shows', value: primary ?? 'unknown' },
         { label: 'Cores not on that panel', value: strandedDpus.length ? strandedDpus.join(', ') : 'none' },
         { label: 'Hydrated projections', value: `${panels.projectedCount} of ${panels.sns.length}` },
+        { label: 'To resolve', value: 'pin the house panel on the dashboard (POST /api/house-panel)' },
         {
           label: 'While this stands',
-          value:
-            'annunciation demotion and bench-spare muting are disabled, and supervised ' +
-            'reserve / Charge-Now writes are blocked (revert still allowed)',
+          value: 'supervised reserve / Charge-Now writes are blocked (revert still allowed)',
         },
       ],
     });
@@ -1375,7 +1383,7 @@ export function computeAlerts(
     if (blindSinceMs != null && blindMs >= RESERVE_BLIND_AFTER_MS) {
       const offGrid = grid?.backstopping !== true;
       const critical = offGrid && blindMs >= RESERVE_BLIND_CRITICAL_MS;
-      const fallbackSoc = homeFleetMeanSoc(devices);
+      const fallbackSoc = housePoolFallbackSoc(devices); // v1.185.0 — this pool's own Cores on a two-panel plant
       const fallbackTxt = fallbackSoc != null
         ? `The SoC alarm ladder is running on the Core-fleet fallback (mean ${fallbackSoc.toFixed(0)}% across reporting Cores).`
         : 'No home Core is reporting either — the SoC alarm ladder is fully dark.';
@@ -1402,9 +1410,8 @@ export function computeAlerts(
   // separately via broadcast.announce (batterySocAlarm + index.ts); the id MUST
   // start with 'backup-soc' so broadcast.ts excludes it from its own chime and
   // the dedicated announce stays the sole SoC audible.
-  const socShp2 = list.find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+  // v1.185.0 — the HOUSE panel (first-in-map before); every other panel: secondaryPanelAlerts.
+  const socShp2 = shp2;
   const soc = socShp2?.projection.backupBatPercent ?? null;
   // v1.17.0 (engine-review F15) — hysteresis: track the held band across calls
   // so SoC chattering on a boundary (40↔41 every sample) doesn't toggle the
@@ -1463,7 +1470,125 @@ export function computeAlerts(
     });
   }
 
+  for (const panel of secondaryShp2s(devices)) secondaryPanelAlerts(out, panel, devices, connectivity, grid, now);
+
   return out.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.category.localeCompare(b.category));
+}
+
+/**
+ * v1.185.0 — a SECONDARY panel's own pool alerts: the house panel's reserve pair, source and
+ * circuit faults, reserve-blind and SoC band (computeAlerts above), for one more panel. Ids take a
+ * `-<serial>` suffix — familyOf() stops at the serial, so every family, never-muted and
+ * energy-state rule applies unchanged — and titles lead with the panel's name so two pools can
+ * be told apart on screen and in a push. The house panel's code above is deliberately left as it
+ * was: one panel stays byte-identical.
+ *
+ * Differences from the house panel, both deliberate: no arbitrage posture (night charge never
+ * writes a secondary panel's reserve, so under-reserve here is never "the plan filling"), and the
+ * blind fallback is this pool's own Cores (panelMeanSoc), not the plant.
+ */
+function secondaryPanelAlerts(
+  out: Alert[],
+  panel: DeviceSnapshot & { projection: Shp2Projection },
+  devices: Record<string, DeviceSnapshot>,
+  connectivity: ConnectivityContext | undefined,
+  grid: { present?: boolean; backstopping: boolean; reason?: string } | undefined,
+  now: number,
+): void {
+  const sfx = `-${panel.sn}`;
+  const name = panel.deviceName;
+  const sp = panel.projection;
+  const onGrid = grid?.backstopping === true;
+  const reserve = sp.backupReserveSoc ?? 15;
+  if (panel.online && sp.backupBatPercent != null) {
+    if (sp.backupBatPercent <= reserve) {
+      out.push({
+        id: `shp2-below-reserve${sfx}`,
+        severity: onGrid ? 'warning' : 'critical',
+        ...(onGrid ? { priority: 'medium' as const } : {}),
+        category: 'SHP2', device: name, sourceSn: panel.sn,
+        title: onGrid ? `${name}: backup at reserve — on grid` : `${name}: backup at or below reserve`,
+        detail: onGrid
+          ? `${name} backup pool ${sp.backupBatPercent}% is at or under its ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+          : `${name} backup pool ${sp.backupBatPercent}% is at or under its ${reserve}% reserve floor.`,
+      });
+    } else if (sp.backupBatPercent < reserve + 10) {
+      out.push({
+        id: `shp2-near-reserve${sfx}`,
+        severity: onGrid ? 'info' : 'warning',
+        category: 'SHP2', device: name, sourceSn: panel.sn,
+        title: `${name}: backup approaching reserve`,
+        detail: onGrid
+          ? `${name} backup pool ${sp.backupBatPercent}% is close to its ${reserve}% reserve floor — grid is backstopping, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+          : `${name} backup pool ${sp.backupBatPercent}% is close to its ${reserve}% reserve floor.`,
+      });
+    }
+  }
+  if (panel.online) {
+    for (const s of sp.sources ?? []) {
+      const tag = `${name} slot ${s.slot}`;
+      if ((s.errorCodeNum ?? 0) !== 0) {
+        const n = s.errorCodeNum!;
+        const onset = connectivity?.shp2SrcErrOnsetBySlot?.get(`${panel.sn}:${s.slot}`);
+        const debounced = onset != null && onset.count === n && (now - onset.sinceMs) < DPU_ERR_DEBOUNCE_MS;
+        if (!debounced) {
+          out.push({ id: `shp2-src-err-${s.slot}${sfx}`, severity: 'critical', category: 'SHP2', device: name, sourceSn: panel.sn, title: 'Energy source error', fault: `err${n}`, detail: `${tag} reports error code ${n}${n >= 500 && n < 600 ? ' (battery/BMS protection band)' : ''}.` });
+        }
+      }
+      if (s.isConnected && !s.hwConnect) {
+        out.push({ id: `shp2-src-hw-${s.slot}${sfx}`, severity: 'warning', category: 'SHP2', device: name, sourceSn: panel.sn, title: 'Source link issue', detail: `${tag} shows connected but no hardware link.` });
+      }
+    }
+    for (const pc of sp.pairedCircuits ?? []) {
+      if (pc.watts == null || pc.breakerAmps == null) continue;
+      const capacity = pc.breakerAmps * (pc.isSplitPhase ? 240 : 120);
+      if (pc.watts >= capacity * CIRCUIT_BREAKER_WARN_FRAC) {
+        out.push({ id: `circuit-overload-${pc.primaryCh}${sfx}`, severity: 'warning', category: 'SHP2', device: name, title: 'Circuit near breaker limit', detail: `${name}: ${pc.name} drawing ${Math.round(pc.watts)} W — over ${Math.round(CIRCUIT_BREAKER_WARN_FRAC * 100)}% of its ${pc.breakerAmps} A breaker.` });
+      }
+    }
+  }
+  // Reserve-alarm-blind, for this pool.
+  const poolNull = sp.backupBatPercent == null;
+  const blindSinceMs = poolNull
+    ? connectivity?.backupPoolUnknownSinceBySn?.get(panel.sn) ?? panel.lastUpdated ?? null
+    : !panel.online ? panel.lastUpdated ?? null : null;
+  const blindMs = blindSinceMs != null ? now - blindSinceMs : 0;
+  if (blindSinceMs != null && blindMs >= RESERVE_BLIND_AFTER_MS) {
+    const critical = !onGrid && blindMs >= RESERVE_BLIND_CRITICAL_MS;
+    const fallbackSoc = panelMeanSoc(devices, panel);
+    out.push({
+      id: `reserve-alarm-blind${sfx}`,
+      severity: critical ? 'critical' : 'warning',
+      category: 'Connectivity', device: name, sourceSn: panel.sn,
+      title: critical ? `${name}: reserve alarm blind — off-grid` : `${name}: reserve alarm blind`,
+      detail: `${name} backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — its reserve and runway alarms cannot see the pool. ${fallbackSoc != null ? `Its SoC alarm ladder is running on its own Cores (mean ${fallbackSoc.toFixed(0)}%).` : 'None of its Cores is reporting either — its SoC alarm ladder is dark.'}${onGrid ? ' Grid is backstopping the home, so a low pool would transfer to mains.' : ''} If this persists, power-cycle the panel's network connection.`,
+      facts: [
+        { label: 'Blind for', value: fmtAge(blindMs) },
+        { label: 'Fallback ladder', value: fallbackSoc != null ? `${fallbackSoc.toFixed(0)}% (this panel's Cores)` : 'unavailable' },
+        { label: 'Escalates', value: onGrid ? 'suppressed while grid backstops' : `critical after ${fmtAge(RESERVE_BLIND_CRITICAL_MS)} blind` },
+      ],
+    });
+  }
+  // SoC band, with the same hysteresis and the same hand-off to the reserve pair.
+  const soc = sp.backupBatPercent ?? null;
+  const band = activeSocBandWithHysteresis(soc, heldSocBandBySn.get(panel.sn) ?? null);
+  heldSocBandBySn.set(panel.sn, band?.pct ?? null);
+  const covered = panel.online === true && soc != null && soc < reserve + 10;
+  if (band !== null && soc != null && !covered) {
+    const onGridEmergency = onGrid && (band.priority === 'critical' || band.priority === 'high');
+    const { severity, source, priority } = socAlertSeverity(onGridEmergency ? 'low' : band.priority);
+    const heldAbove = Math.round(soc) > band.pct;
+    const heldNote = heldAbove ? ` (holding the ${band.pct}% band until above ${band.pct + 2}%)` : '';
+    out.push({
+      id: `backup-soc-${band.pct}${sfx}`,
+      severity, source, priority,
+      category: 'Battery', device: `${name} backup pool`, sourceSn: panel.sn,
+      title: `${name}: backup pool low — ${Math.round(soc)}%`,
+      detail: onGridEmergency
+        ? `${name} backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% threshold — drawing from grid power, no action needed.${heldNote}`
+        : `${name} backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% ${band.priority}-priority threshold.${heldNote}`,
+    });
+  }
 }
 
 /* ── v0.83.0 — SYSTEM DATA-GAP / UNPLANNED-OUTAGE ALERTING ──────────────────

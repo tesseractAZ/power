@@ -30,7 +30,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh, SHP2_READBACK_STALE_MS } from './shp2Membership.js';
+import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh, SHP2_READBACK_STALE_MS, allShp2s, findShp2 } from './shp2Membership.js';
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
@@ -127,12 +127,14 @@ export function computeGridImportWatts(
   const dpus = list.filter((d) => d.projection?.kind === 'dpu') as Array<
     DeviceSnapshot & { projection: DpuProjection }
   >;
-  const shp2 = list.find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
-  const sourceSns = new Set(
-    (shp2?.projection.sources ?? []).map((s) => s.sn).filter((sn): sn is string => !!sn),
-  );
+  // v1.185.0 — the sources of EVERY panel, less those of a panel whose FRESH reading says no
+  // grid (v1.181.0: its Cores draw ac_in through it, so that cannot be grid — formerly applied
+  // by the resolver to the one panel it read). One panel: identical.
+  const sourceSns = new Set<string>();
+  for (const p of allShp2s(devices)) {
+    if (shp2ReadbackFresh(p, nowMs) && p.projection.gridConnected === false) continue;
+    for (const s of p.projection.sources ?? []) if (s.sn) sourceSns.add(s.sn);
+  }
   // No SHP2 source identity → cannot attribute import to the house grid path →
   // fail safe to 0 (never let an unscoped DPU sum silence a floor emergency).
   if (sourceSns.size === 0) return 0;
@@ -175,9 +177,6 @@ export function computeHomeGridWatts(
   devices: Record<string, DeviceSnapshot>,
   nowMs: number = Date.now(),
 ): number {
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
   // v0.88.0 — FAIL-SAFE on an OFFLINE SHP2. `gridWatt` is the SHP2's OWN cloud-MQTT
   // reading; when the SHP2 goes cloud-offline its last value FREEZES in the
   // projection. An unguarded frozen-high gridWatt (e.g. the 7–8 kW it pulls to
@@ -203,9 +202,15 @@ export function computeHomeGridWatts(
   // quota fetch failing with the panel still listed, or an OFFLINE→ONLINE /status flip before
   // any quota). gridWatt freezes exactly when gridSta does — both come only from the REST
   // quota — so it takes the same gate as computeShp2GridConnected: shp2ReadbackFresh.
-  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return 0;
-  const w = shp2.projection.gridWatt ?? null;
-  return w != null && Number.isFinite(w) && w > 0 ? w : 0;
+  // v1.185.0 — SUMMED over every panel that passes the gate: each panel meters its own
+  // main line, so the plant's grid draw is their total. One panel: identical.
+  let total = 0;
+  for (const shp2 of allShp2s(devices)) {
+    if (!shp2ReadbackFresh(shp2, nowMs)) continue;
+    const w = shp2.projection.gridWatt ?? null;
+    if (w != null && Number.isFinite(w) && w > 0) total += w;
+  }
+  return total;
 }
 
 /**
@@ -245,16 +250,22 @@ export function computeShp2GridConnected(
   devices: Record<string, DeviceSnapshot>,
   nowMs: number = Date.now(),
 ): boolean | null {
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
   // v1.142.0 — a shadowed panel's gridSta froze with everything else; a stale "1"
   // must never assert presence into an outage, whether the panel went offline or
   // the cloud simply stopped updating it. v1.179.0 — nor one the panel has not
   // refreshed: shp2ReadbackFresh subsumes the online + shadow checks and adds the
   // quota age.
-  if (!shp2 || !shp2ReadbackFresh(shp2, nowMs)) return null;
-  return shp2.projection.gridConnected ?? null;
+  // v1.185.0 — across EVERY panel, fail-loud: any fresh panel reading not-OK ⇒ false; Grid OK
+  // only when every fresh panel that reports gridSta says so; nothing fresh ⇒ null. A dark
+  // panel adds nothing here (its last reading still vetoes a declaration — resolveGridBackstop).
+  let sawOk = false;
+  for (const panel of allShp2s(devices)) {
+    if (!shp2ReadbackFresh(panel, nowMs)) continue;
+    const c = panel.projection.gridConnected ?? null;
+    if (c === false) return false;
+    if (c === true) sawOk = true;
+  }
+  return sawOk ? true : null;
 }
 
 /**
@@ -320,8 +331,8 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // grid: they draw it through the panel. Without this a Core the cloud keeps replaying (its
   // own session lost while the panel's is live) held importLive — exempt from both floor
   // guards — against the panel's own fresh "grid not detected".
-  const panelSaysNoGrid = computeShp2GridConnected(input.devices, nowMs) === false;
-  const importWatts = panelSaysNoGrid ? 0 : computeGridImportWatts(input.devices, nowMs);
+  // v1.185.0 — applied per panel inside computeGridImportWatts (its sources are dropped).
+  const importWatts = computeGridImportWatts(input.devices, nowMs);
   const homeGridWatts = computeHomeGridWatts(input.devices, nowMs);
   // Grid flow is proven LIVE by EITHER measured path: DPU ac_in (grid charging the
   // SHP2-bound DPUs) or the SHP2 main gridWatt (grid serving home loads directly).
@@ -375,21 +386,18 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // start the generator, lost. Measured flow (importLive) still proves the grid regardless.
   // The failure mode of a false 0 is an early alarm, never a missed one; in three weeks of
   // recorded gridSta (2026-09-01..22) no 0 or 2 appeared while the grid was up.
-  const panel = projectedShp2(input.devices);
+  // v1.185.0 — EVERY panel, by identity: any panel's last not-OK reading vetoes. The panel the
+  // dashboard describes (the house panel) supplies panelFresh below.
+  const panel = findShp2(input.devices);
   // v1.180.0 — a panel with NO projection (dark since a restart) is found by identity, so the
   // reading persisted across the restart (snapshot.ts grid-reading.json) still vetoes.
-  const vetoPanel = panel ?? identityShp2(input.devices);
+  const idPanels = identityShp2s(input.devices);
+  const vetoers = idPanels.filter((p) => panelVetoes(p));
+  const vetoPanel = vetoers[0];
   // ...and with NO panel device at all (the cloud unreachable since a restart), the reading the
   // store persisted before it.
-  const persistedAbsent = !vetoPanel ? input.persistedGridAbsent ?? null : null;
-  // v1.184.0 — a reading taken at or before the operator's clear (gridVetoClearedAtMs) no longer
-  // vetoes; the panel's next reading does.
-  const fromProjection = panel?.projection.gridConnected != null;
-  const readingAtMs = fromProjection ? panel?.lastQuotaAtMs : vetoPanel?.lastGridReading?.atMs;
-  const clearedAtMs = vetoPanel?.gridVetoClearedAtMs;
-  const readingCleared = clearedAtMs != null && (readingAtMs == null || readingAtMs <= clearedAtMs);
-  const gridMeasuredAbsent = ((panel?.projection.gridConnected ?? vetoPanel?.lastGridReading?.connected) === false && !readingCleared)
-    || persistedAbsent != null;
+  const persistedAbsent = idPanels.length === 0 ? input.persistedGridAbsent ?? null : null;
+  const gridMeasuredAbsent = vetoers.length > 0 || persistedAbsent != null;
   const declared = declaredRaw && !gridMeasuredAbsent;
 
   const present = importLive || declared || shp2GridConnected === true;
@@ -451,7 +459,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
           ? 'SHP2 gridSta=Grid OK but backup pool still discharging at the reserve floor — not backstopping'
           : `SHP2 gridSta=Grid OK but only ${poolCoverage.reporting}/${poolCoverage.connected} home Cores are reporting at the reserve floor — pool drain unobservable, not backstopping`
         : declaredRaw && gridMeasuredAbsent
-          ? `grid declared present but the SHP2 reports ${vetoPanel ? shp2GridStaText(vetoPanel) : `${gridStaWords(persistedAbsent?.sta ?? null)} (last reading from before a restart; the device list is unreachable)`} — not backstopping`
+          ? `grid declared present but the SHP2 reports ${vetoPanel ? `${idPanels.length > 1 ? `${vetoPanel.deviceName}: ` : ''}${shp2GridStaText(vetoPanel)}` : `${gridStaWords(persistedAbsent?.sta ?? null)} (last reading from before a restart; the device list is unreachable)`} — not backstopping`
           : declared
           ? floorWithoutFlow
             ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
@@ -469,20 +477,32 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   const panelFresh = panel ? shp2ReadbackFresh(panel, nowMs) : null;
   // v1.184.0 — offered only while the veto rests on a reading the panel is NOT refreshing (dark,
   // replaying, stale, or restored from before a restart). A panel freshly reporting no grid is not
-  // clearable: its next poll would veto again, and it is the measurement.
-  const vetoClearable = declaredRaw && gridMeasuredAbsent && panelFresh !== true;
+  // clearable: its next poll would veto again, and it is the measurement. v1.185.0 — every
+  // vetoing panel must be one that is not refreshing.
+  const vetoClearable = declaredRaw && gridMeasuredAbsent
+    && vetoers.every((p) => !(p.projection?.kind === 'shp2' && shp2ReadbackFresh(p, nowMs)));
   return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason, presenceUnknown, panelFresh, vetoClearable };
 }
 
-/** v1.180.0 — the panel by product identity (the shp2Panels test), projected or not. */
-function identityShp2(devices: Record<string, DeviceSnapshot>): DeviceSnapshot | undefined {
-  return Object.values(devices).find((d) => (d.productName ?? '').toLowerCase().includes('smart home panel'));
+/** v1.180.0 — the panels by identity (the shp2Panels test: projected, or named a smart home
+ *  panel), projected or not. v1.185.0 — all of them, sorted by serial. */
+function identityShp2s(devices: Record<string, DeviceSnapshot>): DeviceSnapshot[] {
+  return Object.values(devices)
+    .filter((d) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel'))
+    .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
 }
 
-function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {
-  return Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
+/** v1.178.0 — does this panel's LAST reading veto a declared grid? The current projection's
+ *  gridConnected, else the last reply that carried gridSta (lastGridReading); v1.184.0 — not
+ *  a reading taken at or before the operator's clear (gridVetoClearedAtMs). */
+function panelVetoes(p: DeviceSnapshot): boolean {
+  const proj = p.projection?.kind === 'shp2' ? (p.projection as Shp2Projection) : undefined;
+  const fromProjection = proj?.gridConnected != null;
+  const reading = fromProjection ? proj!.gridConnected : p.lastGridReading?.connected;
+  if (reading !== false) return false;
+  const readingAtMs = fromProjection ? p.lastQuotaAtMs : p.lastGridReading?.atMs;
+  const clearedAtMs = p.gridVetoClearedAtMs;
+  return !(clearedAtMs != null && (readingAtMs == null || readingAtMs <= clearedAtMs));
 }
 
 /** v1.178.0 — the panel's own words for a not-Grid-OK reading, for the resolver's reason.
@@ -547,17 +567,18 @@ export function liveGridBackstop(devices: Record<string, DeviceSnapshot>): GridB
   // grid flow yet. v1.74.0 makes the slack configurable (GRID_FLOOR_SLACK_PCT)
   // so the operator can trade earlier warning against fewer grid-up dim events.
   // At the observed evening drain (~7%/h) each 1% of slack is ~9 min of pre-arm.
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
-    | (DeviceSnapshot & { projection: Shp2Projection })
-    | undefined;
-  const backupFullCapWh = shp2?.projection.backupFullCapWh ?? null;
-  const backupRemainWh = shp2?.projection.backupRemainWh ?? null;
-  const socPct =
-    backupFullCapWh != null && backupFullCapWh > 0 && backupRemainWh != null
-      ? (backupRemainWh / backupFullCapWh) * 100
-      : null;
-  const reserveSoc = shp2?.projection.backupReserveSoc ?? null;
-  const atReserveFloor = socPct != null && reserveSoc != null && socPct <= reserveSoc + floorSlackPct();
+  // v1.185.0 — ANY panel at its own floor: the stricter resolver (a flow-less declaration and a
+  // discharging pool are distrusted) is the fail-loud direction. One panel: identical.
+  const atReserveFloor = allShp2s(devices).some((shp2) => {
+    const backupFullCapWh = shp2.projection.backupFullCapWh ?? null;
+    const backupRemainWh = shp2.projection.backupRemainWh ?? null;
+    const socPct =
+      backupFullCapWh != null && backupFullCapWh > 0 && backupRemainWh != null
+        ? (backupRemainWh / backupFullCapWh) * 100
+        : null;
+    const reserveSoc = shp2.projection.backupReserveSoc ?? null;
+    return socPct != null && reserveSoc != null && socPct <= reserveSoc + floorSlackPct();
+  });
   return resolveGridBackstop({
     devices,
     persistedGridAbsent: persistedGridAbsentSource?.() ?? null,
