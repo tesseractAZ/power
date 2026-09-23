@@ -676,8 +676,10 @@ export function projectShp2(q: Quota): Shp2Projection {
       const s = num(q, 'pd303_mc.masterIncreInfo.gridSta');
       // v0.89.0 VALUE-1-ONLY. 1 = Grid OK → connected. 2 = grid energized but OUT OF
       // SPEC → the SHP2 islands onto EPS (running off battery) → NOT a safe backstop →
-      // treat as NOT connected for the alarm. 0 = grid gone. null/other = unknown
-      // (never fabricate presence).
+      // treat as NOT connected for the alarm. 0 = grid gone. null = unknown. Any OTHER
+      // code is not "Grid OK" and maps to false (never fabricate presence) — and since
+      // v1.178.0 false vetoes a declared grid (gridState.ts), so mapping other codes to
+      // null would let an undocumented status silence the outage alarm again.
       return s == null ? null : s === 1 ? true : false;
     })(),
     strategy: projectShp2Strategy(q),

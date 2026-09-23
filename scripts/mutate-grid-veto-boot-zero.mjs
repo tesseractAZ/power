@@ -41,8 +41,8 @@ const MUTANTS = [
   {
     id: 'ii. \u2605\u2605 an UNKNOWN panel reading (offline / shadowed / absent) vetoes the declaration',
     file: GRID,
-    find: '  const gridMeasuredAbsent = shp2GridConnected === false && shp2ReadbackFresh(',
-    to: '  const gridMeasuredAbsent = shp2GridConnected !== true && shp2ReadbackFresh( /* MUTANT */',
+    find: '  const gridMeasuredAbsent = shp2GridConnected === false && !readingPredatesOnline(panel);',
+    to: '  const gridMeasuredAbsent = shp2GridConnected !== true && !readingPredatesOnline(panel); /* MUTANT */',
     why: 'Every panel cloud blip withdraws the backstop: nuisance runway alarms and off_grid flapping with the grid perfectly fine.',
   },
   {
@@ -53,11 +53,18 @@ const MUTANTS = [
     why: 'The resolver\u2019s reason says the grid entity is off when the toggle is ON and the panel measured no grid \u2014 misdirecting the investigation.',
   },
   {
-    id: 'iii-b. \u2605\u2605 the veto acts on a STALE readback (an OFFLINE\u2192ONLINE flip re-exposes a pre-outage 0)',
+    id: 'iii-b. \u2605\u2605 the veto acts on a reading re-exposed by an OFFLINE\u2192ONLINE flip',
     file: GRID,
-    find: '  const gridMeasuredAbsent = shp2GridConnected === false && shp2ReadbackFresh(panel, input.nowMs ?? Date.now());',
+    find: '  const gridMeasuredAbsent = shp2GridConnected === false && !readingPredatesOnline(panel);',
     to: '  const gridMeasuredAbsent = shp2GridConnected === false; /* MUTANT */',
-    why: 'The grid is back, the toggle is ON, and a sample nobody refreshed withdraws the backstop: off_grid ON, runway and SoC audibles, a night-charge gridLossAbort.',
+    why: 'The grid is back, the toggle is ON, and a pre-outage sample nobody refreshed withdraws the backstop: off_grid ON, runway and SoC audibles, a night-charge gridLossAbort.',
+  },
+  {
+    id: 'iii-d. \u2605\u2605\u2605 the veto lapses on wall-clock AGE (the cloud going quiet mid-outage)',
+    file: GRID,
+    find: '  return typeof changed === \'number\' && changed > (panel?.lastQuotaAtMs ?? 0);',
+    to: '  return Date.now() - (panel?.lastQuotaAtMs ?? 0) > 300_000; /* MUTANT */',
+    why: 'Five minutes into an outage whose uplink also fails, the resolver republishes "grid present" and the runway audible is gated silent again \u2014 the failure this release exists to close.',
   },
   {
     id: 'iii-c. the reason says gridSta=0 for a code the panel never sent',
@@ -118,9 +125,23 @@ const MUTANTS = [
   {
     id: 'vii. \u2605\u2605 fleet flows publish before any Core is projected',
     file: READY,
-    find: "    flow: devs.some((d) => d.online && d.projection?.kind === 'dpu'),",
+    find: "    flow: Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),",
     to: '    flow: devs.length > 0, /* MUTANT */',
     why: 'Fleet PV and battery net read 0 W at boot \u2014 the Energy dashboard\u2019s solar and battery rates notch to zero.',
+  },
+  {
+    id: 'vii-b. \u2605 a bench spare alone makes the fleet flows "real"',
+    file: READY,
+    find: "    flow: Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),",
+    to: "    flow: Object.entries(i.devices).some(([, d]) => d.online && d.projection?.kind === 'dpu'), /* MUTANT */",
+    why: 'Every home Core wedged, a spare online: aggregateFleetFlow sums over nothing and 0 W publishes as a reading.',
+  },
+  {
+    id: 'vii-c. the live charge ceiling is withheld with the weather-gated curtailment figures',
+    file: READY,
+    find: "    'pv_curtailment_kwh_7d',\n",
+    to: "    'pv_curtailment_kwh_7d', 'pv_curtailment_charge_ceiling_pct', /* MUTANT */\n",
+    why: 'The Cores\u2019 own chgMaxSoc reads unknown for as long as Open-Meteo is down.',
   },
   {
     id: 'viii. \u2605\u2605 a silent panel publishes 0 W house load',

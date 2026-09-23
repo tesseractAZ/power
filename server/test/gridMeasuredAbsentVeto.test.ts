@@ -14,6 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveGridBackstop } from '../src/gridState.js';
+import { projectShp2 } from '../src/ecoflow/project.js';
 import { shouldGateRunwayAudible, classifyRunway } from '../src/runwayAlarm.js';
 import { gridNote } from '../../web/src/cards/runwayText.js';
 
@@ -21,11 +22,12 @@ type Any = any;
 const entity = (state: string): Any => ({ entity_id: 'input_boolean.grid_available', state, last_updated: new Date().toISOString() });
 
 /** An online, fresh panel reporting `gridSta`, no grid flow, the pool discharging. */
-function devices(gridSta: number | null, opts: { online?: boolean; shadowed?: boolean; gridWatt?: number; quotaAgoMs?: number } = {}): Any {
+function devices(gridSta: number | null, opts: { online?: boolean; shadowed?: boolean; gridWatt?: number; quotaAgoMs?: number; onlineChangedAgoMs?: number } = {}): Any {
   return {
     SHP2: {
       sn: 'SHP2', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
       online: opts.online ?? true, lastUpdated: Date.now(), lastQuotaAtMs: Date.now() - (opts.quotaAgoMs ?? 20_000),
+      onlineChangedAtMs: opts.onlineChangedAgoMs == null ? undefined : Date.now() - opts.onlineChangedAgoMs,
       contentStaleSinceMs: opts.shadowed ? Date.now() - 6 * 60_000 : null,
       projection: {
         kind: 'shp2', gridSta, gridConnected: gridSta == null ? null : gridSta === 1,
@@ -85,14 +87,30 @@ test('★★ an UNKNOWN reading vetoes nothing: offline panel, cloud-shadowed pa
   }
 });
 
-test('★★ a STALE readback vetoes nothing: an OFFLINE→ONLINE /status flip re-exposes a pre-outage 0 no quota has refreshed', () => {
-  // setDeviceOnline flips `online` without touching the projection or lastQuotaAtMs; the grid
-  // may well be back. Until a fresh REST quota confirms the panel's reading, the declaration stands.
-  const g = resolve(devices(0, { quotaAgoMs: 6 * 60_000 }));
+test('★★★ a 0 that merely stops being refreshed KEEPS vetoing: the cloud or uplink failing mid-outage must not republish "grid present"', () => {
+  // The outage is announced, then REST goes quiet; nothing marks the panel offline, the
+  // reading just ages. Lifting the veto on age would re-gate the runway audible in the outage.
+  for (const quotaAgoMs of [6 * 60_000, 60 * 60_000]) {
+    const g = resolve(devices(0, { quotaAgoMs, onlineChangedAgoMs: 3 * 3_600_000 }));
+    assert.equal(g.backstopping, false, `${quotaAgoMs / 60_000} min old, no online transition since`);
+    assert.equal(g.present, false);
+  }
+});
+
+test('★★ a reading taken BEFORE the panel\'s latest return online vetoes nothing until a quota lands', () => {
+  // setDeviceOnline / setDeviceList flip `online` and stamp onlineChangedAtMs without touching
+  // the projection: the pre-outage 0 is re-exposed, and the grid may well be back.
+  const g = resolve(devices(0, { quotaAgoMs: 40 * 60_000, onlineChangedAgoMs: 30_000 }));
   assert.equal(g.backstopping, true);
   assert.equal(g.declared, true);
-  // ...and the first fresh quota that still says 0 applies the veto.
-  assert.equal(resolve(devices(0, { quotaAgoMs: 1_000 })).backstopping, false);
+  // ...and the first quota after the flip that still says 0 applies the veto.
+  assert.equal(resolve(devices(0, { quotaAgoMs: 5_000, onlineChangedAgoMs: 30_000 })).backstopping, false);
+});
+
+test('the real projection maps an undocumented gridSta to false (the veto depends on it)', () => {
+  assert.equal(projectShp2({ 'pd303_mc.masterIncreInfo.gridSta': 3 } as Any).gridConnected, false);
+  assert.equal(projectShp2({ 'pd303_mc.masterIncreInfo.gridSta': 1 } as Any).gridConnected, true);
+  assert.equal(projectShp2({} as Any).gridConnected, null);
 });
 
 test('an undocumented gridSta code is not "Grid OK" (VALUE-1-ONLY) and the reason names the code it reported', () => {

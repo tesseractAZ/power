@@ -1824,13 +1824,16 @@ are cached (~30 min) on the worker.
   alarm counts until the monitor has evaluated once; `audible_usable_speakers` until the
   first speaker probe; the forecast PV pair while `pvForecastUnavailable` (no PV history on
   the published display basis, which re-adds connected-but-unprojected Cores' own records);
-  the clipping trio while the array peak is 0; the curtailment five, CO2 7 d and the tariff
+  the clipping trio while the array peak is 0; the curtailment four, CO2 7 d and the tariff
   three while their report's `basisComplete` is false (curtailment: home Cores, the panel,
   weather and a solar posterior — the analytics worker's weather cache is empty after every
   restart until the first Open-Meteo fetch succeeds; tariff: a DPU-only install with no
   panel listed at all is complete, a panel listed but not yet projected is not). The one
   binary sensor governed, `pv_curtailment_active`, renders null as `"None"` (unknown) rather
-  than `"OFF"`, so a restart draws no on→off edge.
+  than `"OFF"`, so a restart draws no on→off edge. `pv_curtailment_charge_ceiling_pct` is
+  not governed: it is the Cores' live `chgMaxSoc`, null when unknown, never a model-less 0.
+  The fleet flows need an online projected Core the panel lists as a source (any Core on a
+  DPU-only install): a bench spare's projection alone does not make a fleet sum real.
   The first state publish runs on broker connect, ~0.8 s before the first poll, and the
   next one ~75 s later, so each of these used to publish X → 0 → X at every restart; on
   the `total_increasing` `pv_curtailment_kwh_today` the dip reads as a meter reset and Home
@@ -3791,7 +3794,7 @@ The ladder reads only the SHP2 backup-pool %, which nulls when the SHP2 goes clo
 
 #### 4.1 What it does + why
 
-The SHP2 cloud telemetry exposes **no** grid-presence field (no line voltage, no transfer/bypass state, no on-grid/island flag). The only on-device grid signal was grid *import* watts, and that reads zero whenever PV/battery covers the load even when the mains are live. So "is the grid energized, even if unused" must come from an operator-provided HA entity, corroborated by live import. `resolveGridBackstop` answers one question for the floor/runway/SoC alarms: **is the grid backstopping the home right now**, such that the pool reaching its reserve floor merely transfers to mains (non-event) rather than risking a local outage (emergency)?
+The resolver was built (v0.23.0) on the premise that the SHP2 cloud telemetry exposes no grid-presence field, leaving grid *import* watts — zero whenever PV/battery covers the load even when the mains are live — and an operator-provided HA entity, corroborated by live import. v0.89.0 found the panel's own flag (`pd303_mc.masterIncreInfo.gridSta`, value-1-only): additive when it reads Grid OK, and since v1.178.0 a veto on a declared grid when it does not (4.2). `resolveGridBackstop` answers one question for the floor/runway/SoC alarms: **is the grid backstopping the home right now**, such that the pool reaching its reserve floor merely transfers to mains (non-event) rather than risking a local outage (emergency)?
 
 #### 4.2 Signals combined (`resolveGridBackstop`)
 
@@ -3807,7 +3810,7 @@ Derived flags:
 ```
 importLive = importWatts ≥ 5 OR homeGridWatts ≥ 25          # positive, unambiguous
 declaredRaw = entity configured ? (entityPresent === true) : gridAvailableFallback
-declared    = declaredRaw AND NOT (shp2GridConnected===false AND shp2ReadbackFresh(panel))   # v1.178.0 veto
+declared    = declaredRaw AND NOT (shp2GridConnected===false AND NOT readingPredatesOnline(panel))   # v1.178.0 veto
 present     = importLive OR declared OR shp2GridConnected===true
 ```
 
@@ -3820,10 +3823,13 @@ resolver `backstopping` until the pool neared the floor: the runway audible was 
 `runway_projection_islanded_only` read ON and `off_grid` OFF — the hours of warning in which
 to shed load or start a generator were lost. `shp2GridConnected` is null when the panel is
 offline, cloud-shadowed (`contentStaleSinceMs`) or reports no `gridSta`, and null vetoes
-nothing. The reading must also be a fresh readback (`shp2ReadbackFresh`: online, a REST quota
-within `SHP2_READBACK_STALE_MS` = 5 min, not shadowed): a bare `/status` OFFLINE→ONLINE flip
-re-exposes the pre-outage sample, and a stale 0 must not withdraw a declaration the grid's
-return has made true again. Measured flow (`importLive`) still proves the grid regardless of
+nothing. One more case is set aside: a reading taken before the panel's latest online
+transition (`onlineChangedAtMs > lastQuotaAtMs`) — an OFFLINE→ONLINE flip re-exposes the
+pre-outage sample until the next quota lands, and the grid may be back. This is deliberately
+not a wall-clock age: a 0 that simply stops being refreshed (the cloud or the uplink failing
+mid-outage, the panel still marked online) keeps vetoing, because lifting the veto after N
+minutes would republish "grid present" and re-gate the runway audible inside the outage it
+had announced. Measured flow (`importLive`) still proves the grid regardless of
 `gridSta`. The resolver's reason names the code the panel reported ("grid declared present
 but the SHP2 reports grid not detected (gridSta=0) — not backstopping").
 
@@ -6500,7 +6506,7 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
 
-**v1.178.0 — a measured "no grid" outranks a declared grid; boot placeholders are null.** `resolveGridBackstop` vetoes a declaration (`input_boolean.grid_available` or `GRID_AVAILABLE`) when an online, non-shadowed panel reports `gridSta` 0 or 2 (`declared = declaredRaw && shp2GridConnected !== false`), at any SoC; before, away from the reserve floor a toggle left ON kept the grid backstopping through an outage and the runway audible gated silent (Grid backstop resolver, 4.2). Both state publishers pass their payload through `publishReadiness.ts`, which nulls each field group until its own input exists ("Publish readiness" in the honest-null summary); The veto needs a fresh readback (`shp2ReadbackFresh`), so a panel's OFFLINE→ONLINE flip cannot re-expose a pre-outage 0. `getDayForecast` sets `pvForecastUnavailable` (no PV history on the published display basis), and the curtailment, carbon and tariff reports carry `basisComplete`; `pv_curtailment_active`'s template renders null as unknown. Harness: `scripts/mutate-grid-veto-boot-zero.mjs` (21 mutants).
+**v1.178.0 — a measured "no grid" outranks a declared grid; boot placeholders are null.** `resolveGridBackstop` vetoes a declaration (`input_boolean.grid_available` or `GRID_AVAILABLE`) when an online, non-shadowed panel reports any `gridSta` other than 1 (`declared = declaredRaw && !(shp2GridConnected === false && !readingPredatesOnline(panel))`), at any SoC; before, away from the reserve floor a toggle left ON kept the grid backstopping through an outage and the runway audible gated silent (Grid backstop resolver, 4.2). Both state publishers pass their payload through `publishReadiness.ts`, which nulls each field group until its own input exists ("Publish readiness" in the honest-null summary); A reading older than the panel's latest online transition does not veto (an OFFLINE→ONLINE flip re-exposes the pre-outage sample); a reading that merely stops being refreshed still does. `getDayForecast` sets `pvForecastUnavailable` (no PV history on the published display basis), and the curtailment, carbon and tariff reports carry `basisComplete`; `pv_curtailment_active`'s template renders null as unknown. Harness: `scripts/mutate-grid-veto-boot-zero.mjs` (24 mutants).
 
 **v1.177.0 — the Runway card says what it computes.** `computeRunway` publishes `troughKwh`/`troughAtMs`/`endKwh` (the islanded trajectory's minimum and end, reporting only — the crossing detectors and the alarm are unchanged) and `recentLoadBasis` (`hour-mean` | `live` | `single-sample` | `carried`). The card's wording follows (see RunwayCard below). `getDayForecast`'s display next-24 h PV (`forecastPvWhNext24Display`, published to Home Assistant) now applies `pvBiasFactor` and the same per-hour ceiling as the alarm series, and with no missing Core `restoredSolarModel` IS `solarModel` — restoring the v0.78.0 contract that the display figure equals `forecastPvWhNext24` when every Core reports (v0.93.0 had bias-corrected only the alarm series, and the F11 full-coverage gate fits `solarModel` on hours the ungated display refit included). `troughAtMs` is the empty crossing when the pool empties. Harness: `scripts/mutate-runway-card.mjs` (15 mutants).
 

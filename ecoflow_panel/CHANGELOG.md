@@ -10,9 +10,11 @@
   said "not a live countdown" — until the pool neared the floor, by which time the hours in which
   to shed load or start a generator had passed. An online panel reporting `gridSta` 0 ("grid not
   detected") or 2 (out of spec, islanded onto the batteries) now vetoes the declaration at any
-  state of charge, and the resolver's reason names the code the panel reported. The reading must
-  be fresh — a REST reading from the last five minutes — so a panel that comes back online
-  cannot re-expose the reading it had before it went dark. An offline or cloud-shadowed panel,
+  state of charge, and the resolver's reason names the code the panel reported. A reading taken
+  before the panel's latest return online does not count — a panel coming back online would
+  otherwise re-expose the reading it had before it went dark — but a reading that simply stops
+  being refreshed during an outage keeps counting, so a cloud or internet failure in the middle
+  of an outage cannot turn it back into "grid present". An offline or cloud-shadowed panel,
   or one that reports no `gridSta`, vetoes nothing; measured grid flow still proves the grid
   regardless. In three weeks of recorded history (2026-09-01 to 09-22) the panel never
   reported 0 or 2 while the grid was up, and a false reading would sound an alarm early rather
@@ -38,7 +40,7 @@
   counters, which come from persisted totals, are unaffected.
 - The console's plant PV view shows "—" for the next-24 h forecast while it has no basis.
 
-New harness `scripts/mutate-grid-veto-boot-zero.mjs` (21 anchor-asserted mutants).
+New harness `scripts/mutate-grid-veto-boot-zero.mjs` (24 anchor-asserted mutants).
 
 ## 1.177.0
 

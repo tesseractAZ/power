@@ -20,8 +20,13 @@
  * the moment the monitor has run, even while the analytics worker is still cold.
  */
 
+import type { DeviceSnapshot } from './snapshot.js';
+import { shp2ConnectedDpuSns, isShp2Connected } from './shp2Membership.js';
+
 export interface PublishReadiness {
-  /** A home Core has a projection: fleet flows are sums over real readings. */
+  /** An online home Core — one the panel lists as a source, or any Core on a DPU-only
+   *  install — has a projection: fleet flows are sums over real readings. The same
+   *  membership aggregateFleetFlow sums over, so a bench spare alone does not count. */
   flow: boolean;
   /** The panel has a projection with at least one reported channel. */
   panel: boolean;
@@ -57,13 +62,15 @@ export const READINESS_FIELDS: { readonly [K in keyof PublishReadiness]: readonl
   clipping: ['pv_clipped_kwh_today', 'pv_array_peak_watts', 'pv_hours_at_peak_today'],
   curtailment: [
     'pv_curtailment_active', 'pv_curtailment_surplus_watts', 'pv_curtailment_kwh_today',
-    'pv_curtailment_kwh_7d', 'pv_curtailment_charge_ceiling_pct',
+    'pv_curtailment_kwh_7d',
+    // Not pv_curtailment_charge_ceiling_pct: the Cores' live chgMaxSoc, null when unknown
+    // (the empty report included), never a model-less 0 — and needs no weather.
   ],
   carbon: ['carbon_kg_avoided_7d'],
   tariff: ['tariff_today_grid_cost_dollars', 'tariff_today_solar_value_dollars', 'tariff_net_savings_7d_dollars'],
 };
 
-type Projected = { online?: boolean; projection?: { kind?: string; circuits?: Array<{ watts?: number | null }> } };
+type Projected = { sn?: string; online?: boolean; projection?: { kind?: string; circuits?: Array<{ watts?: number | null }> } };
 
 export interface ReadinessInputs {
   devices: Record<string, Projected>;
@@ -79,8 +86,9 @@ export interface ReadinessInputs {
 export function publishReadiness(i: ReadinessInputs): PublishReadiness {
   const devs = Object.values(i.devices);
   const panel = devs.find((d) => d.projection?.kind === 'shp2');
+  const connected = shp2ConnectedDpuSns(i.devices as unknown as Record<string, DeviceSnapshot>);
   return {
-    flow: devs.some((d) => d.online && d.projection?.kind === 'dpu'),
+    flow: Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),
     panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null),
     alerts: i.alerts !== undefined,
     speakers: i.speakerLastProbeAt != null,

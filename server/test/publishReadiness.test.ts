@@ -100,6 +100,20 @@ test('panel load needs a projected panel with at least one REPORTED channel (a s
   assert.equal(publishReadiness(i).panel, false);
 });
 
+test('★★ a bench spare alone does not make the fleet flows real: every home Core wedged, the spare online', () => {
+  const i = warmInputs();
+  (i.devices.SHP2 as Any).projection.sources = [{ slot: 1, sn: 'A', isConnected: true }];
+  i.devices = { SHP2: i.devices.SHP2, A: { online: false }, SPARE: { online: true, projection: { kind: 'dpu' } } } as Any;
+  assert.equal(publishReadiness(i).flow, false, 'aggregateFleetFlow sums over nothing: not a reading');
+  (i.devices as Any).A = { online: true, projection: { kind: 'dpu' } };
+  assert.equal(publishReadiness(i).flow, true);
+});
+
+test('the charge ceiling is not governed: a live device setting, null when unknown, needs no weather', () => {
+  const out = withholdUnready({ pv_curtailment_charge_ceiling_pct: 90 }, publishReadiness(bootInputs()));
+  assert.equal(out.pv_curtailment_charge_ceiling_pct, 90);
+});
+
 test('the flow group needs an ONLINE projected Core', () => {
   const i = warmInputs();
   (i.devices.C1 as Any).online = false;
