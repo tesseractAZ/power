@@ -189,7 +189,7 @@ function coreFleet(agoMs: number, acIn: number): Any {
       projection: { kind: 'shp2', gridWatt: 0, gridConnected: null, circuits: [], sources: [{ slot: 1, sn: 'C1', isConnected: true }] },
     },
     C1: {
-      sn: 'C1', online: true, productName: 'Delta Pro Ultra', lastTelemetryAtMs: now - agoMs,
+      sn: 'C1', online: true, productName: 'Delta Pro Ultra', lastTelemetryAtMs: now - agoMs, contentChangedAtMs: now - agoMs,
       projection: { kind: 'dpu', acInWatts: acIn, packs: [{ inputWatts: 0, outputWatts: 0 }] },
     },
   };
@@ -199,7 +199,7 @@ test('★★ a Core left listed online with its telemetry stopped: its frozen ac
   assert.equal(resolve(coreFleet(6 * MIN, 3000)).importWatts, 0, '6 min old');
   assert.equal(resolve(coreFleet(20_000, 3000)).importWatts, 3000, 'fresh: unchanged');
   const noClock = coreFleet(20_000, 3000);
-  delete noClock.C1.lastTelemetryAtMs;
+  delete noClock.C1.contentChangedAtMs; // v1.181.0 — the gate's clock
   assert.equal(resolve(noClock).importWatts, 0, 'no content ever landed');
 });
 

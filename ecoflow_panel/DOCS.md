@@ -3860,9 +3860,11 @@ the panel still listed online left it standing indefinitely. Either made `presen
 The measured-flow terms had the same hole and a stronger effect, since `importLive` is exempt
 from both floor guards: a `gridWatt` frozen mid-charge (7–8 kW at the floor) muted an at-floor
 outage outright. `computeHomeGridWatts` takes the same gate, and `computeGridImportWatts`
-counts a Core only while its content clock (`lastTelemetryAtMs`, REST or MQTT) is within the
-same window — a stopped Core, not a replayed one: a REST 200 replaying a cached Core body still
-advances `lastTelemetryAtMs`, and only the panel has a content witness (`shp2Shadow.ts`).
+counts a Core only while its content is fresh within the same window. Since v1.181.0 that is
+the content-CHANGE clock `contentChangedAtMs` (moved only when `dpuContentWitness` — power and
+pack flows, SoC, battery volts/amps — differs), because a REST 200 replaying a cached Core body
+still advances `lastTelemetryAtMs`; and a fresh panel reading of no grid zeroes Core import
+outright, since the Cores draw grid only through the panel.
 Quotas arrive every ~60 s, so the burst-gap behaviour is untouched. The window assumes that
 cadence holds, and undici's default request timeouts (300 s, equal to the window) would let a
 single hung read hold the serial poll loop past it — a risk, not an observed incident (the one
@@ -5573,7 +5575,7 @@ Learned alerts carry `source: 'learned'` (→ ISA Medium at warning severity). R
 
 **WHAT.** Regression-based projections. Cached ~10 min (`FORECAST_TTL_MS`), keyed also on the depletion gate boolean.
 
-- **`forecast-runtime-<SN>`** (SHP2) — linear regression of `backup_pct` over the trailing `RUNTIME_TRAIL_MS` (3 h). Fires only when slope `pctPerHour < -0.05`, `cur > reserve`, AND the diurnal day-ahead forecast ALSO confirms depletion (`diurnalConfirmsDepletion` = `forecast.minProjectedSoc < forecast.reserveSoc`). The displayed time-to-reserve is **bounded** by the diurnal forecast's own first reserve-crossing hour (the flat trailing extrapolation ignores dawn recovery and can read ~4× the authoritative runway). Severity: `<6 h` warning, `≤18 h` info; grid-backstopping downgrades warning→info. Facts include decline rate, implied draw, R², reserve floor, ETA.
+- **`forecast-runtime-<SN>`** (SHP2) — linear regression of `backup_pct` over the trailing `RUNTIME_TRAIL_MS` (3 h). Fires only when slope `pctPerHour < -0.05`, `cur > reserve`, AND the diurnal day-ahead forecast ALSO confirms depletion (`diurnalConfirmsDepletion` = `forecast.minProjectedSoc < forecast.reserveSoc`). The displayed time-to-reserve is **bounded** by the diurnal forecast's own first reserve-crossing hour (the flat trailing extrapolation ignores dawn recovery and can read ~4× the authoritative runway). Severity: `<6 h` warning, `≤18 h` info; grid-backstopping downgrades warning→info. Facts include decline rate, implied draw, R², reserve floor, ETA. **v1.181.0:** the grid downgrade is applied by the alert monitor on the main thread (`applyRuntimeGrid`, with the live resolver), not in the analytics worker that computes the alert: the worker never refreshes the HA grid entity, has no persisted-reading source, and caches the alert for `FORECAST_TTL_MS` (10 min).
 - **`forecast-soh-<SN>-<pk>`** (info, Battery) — SoH decline → projected months to 85%. Uses its OWN tighter gates: `SOH_FORECAST_HISTORY_MS` (120 d), `SOH_DEGRADE_MIN_SPAN_MS` (45 d), `SOH_DEGRADE_MIN_R2` (0.5), plus `sohStepDominated`/`sohSignalBelowFloor` guards and a `MAX_SOH_FADE_PCT_PER_YEAR` (10%/yr) ceiling — so it fires only on an abnormal ~6–10 %/yr decline, never on normal 2–3 %/yr aging (which would be alarm fatigue and is backstopped by the SoH threshold alarm).
 - **`forecast-imbalance-<SN>-<pk>`** (warning, Battery) — cell-spread rising → projected weeks to 50 mV. Shared gates: `DEGRADE_MIN_SPAN_MS` (5 d), `DEGRADE_MIN_R2` (0.25); fires when `mvPerWeek > 0.5` and current spread < 50 mV and `0 < weeksTo50 < 52`.
 
@@ -6598,6 +6600,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 `FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
+
+**v1.181.0 — a replayed Core proves no grid flow; the runtime alert's grid rule runs on the main thread.** `DeviceSnapshot.contentChangedAtMs` (set by `SnapshotStore` from `dpuContentWitness`, carried through `setDeviceList`) replaces `lastTelemetryAtMs` in the Core-import freshness gate, and `resolveGridBackstop` zeroes Core import while the panel freshly reports no grid. `computeForecastAlerts` (analytics worker) no longer resolves the grid; `alertMonitor` applies `applyRuntimeGrid` with its live verdict. Harness: `scripts/mutate-core-replay-runtime-grid.mjs` (6 mutants).
 
 **v1.180.0 — the declared-grid veto survives a restart.** `SnapshotStore` persists the SHP2's last not-OK grid reading per serial (`grid-reading.json`, `GRID_READING_PATH`; written on change, deleted on Grid OK, production-only by default) and rehydrates it as `lastGridReading` on first sight; `resolveGridBackstop` finds an unprojected panel by identity for the veto (Grid backstop resolver, "Surviving a restart"). The store loads the file at construction, and until the panel's own serial appears in a `/device/list` it hands the reading to the resolver directly (`persistedGridAbsent`), so a restart made while the cloud is unreachable (or while lists come back without the panel) keeps the veto too; a different panel listed prunes a replaced one's entry. Harness: `scripts/mutate-grid-reading-persist.mjs` (15 mutants); `mutate-grid-veto-boot-zero.mjs` veto anchors repointed.
 

@@ -2,7 +2,6 @@ import type { DeviceSnapshot } from './snapshot.js';
 import { rateAt, apsREvModelFromEnv } from './tariff.js';
 import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import { getRateFloorCollapses } from './messageRateFloorAlert.js';
-import { liveGridBackstop } from './gridState.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
@@ -594,6 +593,19 @@ let forecastCache: { ts: number; alerts: Alert[]; depletionGate: boolean } | nul
 export function resetForecastAlertsCache(): void { forecastCache = null; }
 
 /** Phase 3 learned alerts: runtime forecast + degradation projections. Cached ~10 min. */
+/** v1.181.0 — the grid rule for `forecast-runtime-*`, applied on the MAIN thread with the live
+ *  resolver: while the grid is backstopping, a warning becomes info and the detail says why.
+ *  Pure; returns new objects (the worker's cached alerts are never mutated). */
+export const RUNTIME_GRID_NOTE = ' The grid is backstopping the home now, so this is informational — it applies only if you island.';
+export function applyRuntimeGrid(alerts: Alert[], gridBackstopping: boolean): Alert[] {
+  if (!gridBackstopping) return alerts;
+  return alerts.map((a) => !a.id.startsWith('forecast-runtime-') ? a : {
+    ...a,
+    severity: a.severity === 'warning' ? 'info' : a.severity,
+    detail: `${a.detail ?? ''}${RUNTIME_GRID_NOTE}`,
+  });
+}
+
 export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, recorder: Recorder, forecast?: DayForecast): Alert[] {
   const list = Object.values(devices);
   const shp2 = list.find((d) => d.online && d.projection?.kind === 'shp2') as
@@ -673,13 +685,12 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
         let severity: 'warning' | 'info' | null = null;
         if (hoursToReserve < 6) severity = 'warning';
         else if (hoursToReserve <= 18) severity = 'info';
-        // v0.95.0 (re-audit #3) — grid-aware, matching forecast-soc-dip and the runway
-        // audible gate: while the grid is backstopping the home, a projected runtime to
-        // the reserve floor is INFORMATIONAL ("if islanded"), never a warning — the SHP2
-        // just transfers to mains at the floor. This was the only reserve/runtime alert
-        // still keyed on hours-only; its siblings already downgrade on grid.
-        const gridBackstopping = liveGridBackstop(devices).backstopping === true;
-        if (severity === 'warning' && gridBackstopping) severity = 'info';
+        // v0.95.0 (re-audit #3) — grid-aware: while the grid is backstopping, a projected
+        // runtime to the reserve floor is INFORMATIONAL. v1.181.0 — applied by the alert
+        // monitor on the MAIN thread (applyRuntimeGrid), not here: this runs in the analytics
+        // worker, whose HA state cache is never refreshed and which has no persisted-reading
+        // source, and its result is cached FORECAST_TTL_MS — the grid verdict baked in here
+        // was the worker's (wrong) view and up to 10 min old.
         if (severity) {
           // v0.26.0 — derive hrs+mins from ONE rounding so a fractional hour
           // ≥ 59.5/60 carries into the hour instead of rendering "14h 60m"
@@ -694,7 +705,7 @@ export function computeForecastAlerts(devices: Record<string, DeviceSnapshot>, r
             source: 'learned',
             device: shp2.deviceName,
             title: `Projected runtime ≈ ${hrs}h ${mins}m to reserve`,
-            detail: `Backup pool ${cur}% draining ${(-pctPerHour).toFixed(1)}%/h (3h average) — projected to reach the ${reserve}% reserve floor in about ${hrs}h ${mins}m. ${bounded ? 'Capped at the daily-cycle solar/load forecast’s reserve crossing (the trailing 3h rate alone would read longer but ignores dawn recovery / evening rolloff).' : 'Forecast assumes current load continues; daily-cycle modelling comes with solar/load forecasting.'}${gridBackstopping ? ' The grid is backstopping the home now, so this is informational — it applies only if you island.' : ''}`,
+            detail: `Backup pool ${cur}% draining ${(-pctPerHour).toFixed(1)}%/h (3h average) — projected to reach the ${reserve}% reserve floor in about ${hrs}h ${mins}m. ${bounded ? 'Capped at the daily-cycle solar/load forecast’s reserve crossing (the trailing 3h rate alone would read longer but ignores dawn recovery / evening rolloff).' : 'Forecast assumes current load continues; daily-cycle modelling comes with solar/load forecasting.'}`,
             facts: [
               { label: 'Backup pool now', value: `${cur}%` },
               { label: 'Decline rate', value: `${(-pctPerHour).toFixed(2)} %/h` },
