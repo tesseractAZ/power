@@ -245,6 +245,19 @@ test('an OFFLINE panel is frozen too', () => {
   assert.equal(m.coresToHouseW, 700, 'with no panel figure the Cores’ own meter stands in');
 });
 
+test('★★ v1.179.0 — online and unshadowed but NOT a fresh readback (the server says panelFresh:false) is frozen too', () => {
+  // A quota fetch failing with the panel still listed online: the server now zeroes its grid
+  // reading, so pairing the frozen channels with that zero would draw the house out of nothing.
+  const p = panel(HOME, legs(1904.4));
+  const g = { ...grid(0, 0), present: false, declared: false, backstopping: false, panelFresh: false };
+  const m = energyFlowModel(devs(core('C1'), core('C2'), core('C5'), p), g);
+  assert.equal(m.panelState, 'frozen');
+  assert.equal(m.load, null);
+  // ...and a fresh verdict (or an older server that sends no verdict) changes nothing.
+  assert.equal(energyFlowModel(devs(core('C1'), core('C2'), core('C5'), p), { ...grid(0, 0), panelFresh: true }).panelState, 'ok');
+  assert.equal(energyFlowModel(devs(core('C1'), core('C2'), core('C5'), p), grid(0, 0)).panelState, 'ok');
+});
+
 test('★ a Core in a DISCONNECTED source slot is not counted in the grid draw of the Batteries node', () => {
   // Server importWatts sums every source SN; the node contains only isConnected ones. A
   // non-member charging at 1500 W must not be subtracted from the main as if it were a home Core.

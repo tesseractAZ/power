@@ -1300,9 +1300,9 @@ suppressed the 2026-06-21 `50→2%` false SoC-alarm cascade off a transient `0.0
 `gridConnected` is **VALUE-1-ONLY**: true iff `gridSta === 1`. Unlike `gridWatt`
 (`wattInfo.gridWatt`, which reads 0 in the gaps between the SHP2's ~8 kW charge bursts),
 `gridSta` is the master controller's live line-sensing flag — present even when not
-momentarily drawing. It feeds `gridState.computeShp2GridConnected` as an additive,
-online-gated backstop (true), and since v1.178.0 its last value vetoes a declared grid
-(false) — see the Grid backstop resolver, 4.2.
+momentarily drawing. It feeds `gridState.computeShp2GridConnected` as an additive
+backstop (true) — only from a fresh readback since v1.179.0 — and since v1.178.0 its last
+value vetoes a declared grid (false); see the Grid backstop resolver, 4.2.
 
 #### Grace-hold + slew guard (`backupPoolWithGraceHold`)
 
@@ -3806,9 +3806,9 @@ The resolver was built (v0.23.0) on the premise that the SHP2 cloud telemetry ex
 
 | Signal | Function | Threshold |
 | --- | --- | --- |
-| DPU AC-in import | `computeGridImportWatts` | `GRID_IMPORT_WATTS` = 5 W; scoped **strictly** to SHP2 source SNs; **0 if source identity unknown** (a wall-charging spare must not masquerade as house grid) |
-| SHP2 main-line grid | `computeHomeGridWatts` (`wattInfo.gridWatt`) | `HOME_GRID_IMPORT_WATTS` = 25 W; **0 if SHP2 offline** (frozen sample must not fabricate presence) |
-| SHP2 own grid flag | `computeShp2GridConnected` (`pd303_mc.masterIncreInfo.gridSta`, value-1-only) | true=Grid OK / false=islanded / null=unknown; **null if SHP2 offline**; burst-gap immune |
+| DPU AC-in import | `computeGridImportWatts` | `GRID_IMPORT_WATTS` = 5 W; scoped **strictly** to SHP2 source SNs; **0 if source identity unknown** (a wall-charging spare must not masquerade as house grid); only Cores whose content clock (`lastTelemetryAtMs`) is within `SHP2_READBACK_STALE_MS` (v1.179.0) |
+| SHP2 main-line grid | `computeHomeGridWatts` (`wattInfo.gridWatt`) | `HOME_GRID_IMPORT_WATTS` = 25 W; **0 unless a fresh readback** (`shp2ReadbackFresh`, v1.179.0; offline/shadowed only before — a frozen sample must not fabricate presence) |
+| SHP2 own grid flag | `computeShp2GridConnected` (`pd303_mc.masterIncreInfo.gridSta`, value-1-only) | true=Grid OK / false=islanded / null=unknown; **null unless a fresh readback** (`shp2ReadbackFresh`: online, a REST quota within `SHP2_READBACK_STALE_MS` = 5 min, not shadowed — v1.179.0; online-and-unshadowed only before); burst-gap immune |
 | HA entity | `interpretGridEntity(GRID_PRESENCE_ENTITY)` | on/true/home/…→present; numeric voltage >50→present; unavailable/unknown→null |
 | Standing declaration | `GRID_AVAILABLE=true` | Coarse fallback when no entity configured |
 
@@ -3843,11 +3843,55 @@ down), a wall-clock age on an unrefreshed reading, and a 6 s `/status` blip. Eac
 `off_grid`, dropped `load_shed_recommended` (so automations could restore shed loads) and
 re-gated the runway audible. The cost of stickiness is a stale "no grid" if the grid returns
 while the panel is dark: an early alarm, the accepted direction. A field the panel never
-reported (no reply ever carried `gridSta`) vetoes nothing. The presence term is unchanged: a stale "1"
-still asserts nothing. The resolver's reason names the code the panel reported and says when
+reported (no reply ever carried `gridSta`) vetoes nothing. The presence term is the opposite: a stale "1"
+asserts nothing (see Presence freshness, below). The resolver's reason names the code the panel reported and says when
 it is a last reading — panel offline, data replayed, or the latest reply without `gridSta` ("grid
 declared present but the SHP2 reports grid not detected (gridSta=0) (last reading; panel
 offline) — not backstopping").
+
+**Presence freshness (v1.179.0).** `computeShp2GridConnected` returned the panel's flag
+whenever the panel was online and not shadowed, with no look at the reading's age, so a stale
+"Grid OK" asserted presence — the missed-alarm direction — on two paths: an OFFLINE→ONLINE
+`/status` flip re-exposes the pre-offline sample before any quota lands (`setDeviceOnline`
+never touches the projection or `lastQuotaAtMs`), and a quota fetch that keeps failing with
+the panel still listed online left it standing indefinitely. Either made `present` and
+`gridStaBackstop` true with no grid: the runway audible gated, SoC crossings spoken as
+"drawing from grid power", `off_grid` OFF, `shp2_grid_connected` ON. The flag now needs
+`shp2ReadbackFresh` — the same shared gate (and window) the night-charge readbacks use.
+The measured-flow terms had the same hole and a stronger effect, since `importLive` is exempt
+from both floor guards: a `gridWatt` frozen mid-charge (7–8 kW at the floor) muted an at-floor
+outage outright. `computeHomeGridWatts` takes the same gate, and `computeGridImportWatts`
+counts a Core only while its content clock (`lastTelemetryAtMs`, REST or MQTT) is within the
+same window — a stopped Core, not a replayed one: a REST 200 replaying a cached Core body still
+advances `lastTelemetryAtMs`, and only the panel has a content witness (`shp2Shadow.ts`).
+Quotas arrive every ~60 s, so the burst-gap behaviour is untouched. The window assumes that
+cadence holds, and undici's default request timeouts (300 s, equal to the window) would let a
+single hung read hold the serial poll loop past it — a risk, not an observed incident (the one
+540 s `/device/list` gap in the log was a connect-timeout outage on the normal cadence). EcoFlow
+READS now carry `ECOFLOW_REST_TIMEOUT_MS` = 30 s, so a hang is an ordinary poll failure.
+WRITES (`PUT`, `sendCommand`) keep undici's defaults: a slow reply may still mean the command
+landed, and a reserve revert failed at 30 s and re-sent three times would escalate to a spoken
+"reserve stuck" critical with the panel already restored. A 6 s `/status` blip
+does not drop a reading that is still fresh: dropping it would remove the gridSta backstop at
+the floor between charge bursts, the false critical this term exists to close. Residual: a
+pre-outage "1" can still assert presence until the next successful quota, at most
+`SHP2_READBACK_STALE_MS` after the last good one, whether the panel went dark or its polls
+began failing as the outage began; the at-floor pool-discharge guard still applies. The cost
+runs the other way on a healthy grid: a REST outage of more than 5 minutes at the floor during
+a grid charge withdraws the gridSta backstop, and the floor alarm speaks, because nothing can
+vouch for the grid. The declared-grid veto is unaffected: it reads the last reading, however
+stale.
+
+`presenceUnknown` (v1.179.0) is true when `present` is false only because nothing can be
+heard — no veto reading, no fresh not-OK reading, no usable entity reading off. The
+night-charge actuator and force-charge receive `gridPresent: null` then, not false: both treat
+null as "do nothing", so a stale panel no longer ends a night's buy or switches force-charge
+OFF on no evidence.
+
+`panelFresh` (v1.179.0) is the server's `shp2ReadbackFresh` verdict on the panel (null with no
+panel). The Energy flow card treats `panelFresh === false` as frozen, like an offline or
+shadowed panel: the server has already zeroed that panel's grid reading, and a client-side clock
+would reintroduce skew.
 
 #### 4.3 The `backstopping` decision (stricter than `present`)
 
@@ -6522,6 +6566,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
 
+**v1.179.0 — a stale "Grid OK" asserts nothing, and neither does a stale grid flow.** `computeShp2GridConnected` (the resolver's presence term and the `shp2_grid_connected` sensor) and `computeHomeGridWatts` (`gridWatt`) require `shp2ReadbackFresh` — online, a REST quota within `SHP2_READBACK_STALE_MS`, not shadowed — instead of online-and-unshadowed alone; `computeGridImportWatts` counts a Core only while its `lastTelemetryAtMs` is within the same window (Grid backstop resolver, "Presence freshness"). `GridBackstop.presenceUnknown` separates "nothing can be heard" from evidence of absence, and the night-charge and force-charge deciders get `gridPresent: null` in that case. EcoFlow REST reads carry `ECOFLOW_REST_TIMEOUT_MS` (30 s) so a hung read cannot hold the poll past the window; writes keep undici's defaults. `GridBackstop.panelFresh` publishes the panel verdict, and the Energy flow card treats a stale panel as frozen. `resolveGridBackstop` takes an optional `nowMs`. The declared-grid veto still reads the last reading. Harness: `scripts/mutate-presence-fresh-readback.mjs` (13 mutants); `mutate-cloud-shadow.mjs` viii and ix repointed at the new gate.
+
 **v1.178.1 — sums and readiness read the same moment.** Both publishers (`buildState`, `/api/ha-state`) now take `aggregateFleetFlow(snap.devices)` after the reports' `await Promise.all`, with no await between it and `publishReadiness`. `snap` is the store's live object: taken before the await, the sums were computed before the first poll while readiness — evaluated after it — saw projected devices, so `fleet_battery_net_watts` and `panel_load_watts` still published a boot-time 0 at the v1.178.0 deploy. Pinned by a source-order test; harness `scripts/mutate-grid-veto-boot-zero.mjs` (32 mutants).
 
 **v1.178.0 — a measured "no grid" outranks a declared grid; boot placeholders are null.** `resolveGridBackstop` vetoes a declaration (`input_boolean.grid_available` or `GRID_AVAILABLE`) when the panel's last reading is any `gridSta` other than 1 (`declared = declaredRaw && panel.projection.gridConnected !== false`), at any SoC, until a newer reading says Grid OK or grid flow is measured; before, away from the reserve floor a toggle left ON kept the grid backstopping through an outage and the runway audible gated silent (Grid backstop resolver, 4.2). Both state publishers pass their payload through `publishReadiness.ts`, which nulls each field group until its own input exists ("Publish readiness" in the honest-null summary). The veto is not lifted by silence (offline, cloud-shadowed, unrefreshed or just-reconnected panels, or a reply without `gridSta` — `DeviceSnapshot.lastGridReading`): each such lift republished "grid present" mid-outage. `getDayForecast` sets `pvForecastUnavailable` (no PV history on the published display basis), and the curtailment, carbon and tariff reports carry `basisComplete`; `pv_curtailment_active`'s template renders null as unknown. Harness: `scripts/mutate-grid-veto-boot-zero.mjs` (29 mutants).
@@ -7407,7 +7453,7 @@ Note the id/label mismatch: the **Battery** tab uses internal id `thermal` (hist
 Rendered inline in `App.tsx`. Top-to-bottom:
 
 - **RunwayCard** (`cards/RunwayCard.tsx`) — reserve-runway headline, fetches `/api/runway` through `usePolled` (v1.176.0): a failed refresh keeps the last projection, and once it has missed 2.5 polls (`pollStale`) the header shows a `StaleNote` ("stale · as of <time>", naming the day when it is not today). `CurtailmentCard` follows the same pattern. Since **v1.177.0** its wording comes from the pure `cards/runwayText.ts` (run by `server/test/runwayCardText.test.ts`): with no reserve crossing in the horizon the headline is "reserve holds N h", labelled with the projection's lowest point (`troughKwh`/`troughAtMs`) and its margin over the floor — "forecast PV keeps up with the load" only when the pool never falls below its current level — and neutral (not green) when that margin is under `TROUGH_TIGHT_FRAC` (15%) of full. The grid note (`gridNote`) is shown only while `grid.backstopping` — the resolver's verdict, which HA's `runway_projection_islanded_only` and the runway alarm's audible gate also use; a grid merely reported `present` at the reserve floor, which the resolver distrusts, gets no "not a live countdown" note — and says "grid is carrying the load" only when `grid.importLive`, else "grid available as a backstop". The header names the load model in use ("typical load", or "last-hour load" when `loadModelDegraded`); "Recent load" is captioned by `recentLoadBasis`; the PV tile's load says it excludes predicted EV (the Solar tab's forecast load says it includes it).
-- **EnergyFlow** (`cards/EnergyFlow.tsx`) — animated SVG power-flow diagram; reads `snapshot.devices` + `snapshot.grid`, no fetch. Since **v1.175.0** every number comes from the pure `cards/energyFlowModel.ts` (run by `server/test/energyFlowModel.test.ts`). Two cadences drive it: the panel's figures (`homeGridWatts`, house load, channels) arrive in one frame every ~60 s; the Cores' `acIn`/`acOut` every ~10 s. Attribution uses the fresher meter first. Edges: Solar → Batteries `pv`; Grid → Batteries `gridToCoresW` = the Cores' draw (`acIn` over the Cores drawn in the Batteries node when the connection table exists; `grid.importWatts`, which fails safe to 0, when it does not — so a bench spare's wall charge is never drawn as grid); Grid → Loads `gridToHouseW`, drawn below the battery node; Batteries → Loads `coresToHouseW`. The Cores deliver only when their inverters report `acOut` ≥ 5 W. Cores idle → the grid carries the whole house (`gridState` is also active when the Cores deliver nothing while the house draws and the grid is present: the minute before the panel's next frame shows the main rising). Cores the only source → their edge is the house load. Both → `coresToHouseW = min(acOut, load)`, `gridToHouseW = load − coresToHouseW`. The two edges into Loads always sum to the node; edges under 5 W are not drawn. The Grid node shows `homeGridWatts` unless it differs from the sum of its edges by more than max(500 W, 10%) — then the main is a frame behind and the node shows its edges. The Loads node is the SHP2 channel sum, NULL ("—") when the panel is silent (every channel `watts: null`: "panel not reporting") or frozen (offline, or `contentStaleSinceMs` set: "panel data stale" — the server already zeroes such a panel's grid reading); the subtitle counts `pairedCircuits`, not channels. The Solar and Batteries nodes are not balanced against the house: PV is DC-side, the house AC-side, and conversion losses are not drawn.
+- **EnergyFlow** (`cards/EnergyFlow.tsx`) — animated SVG power-flow diagram; reads `snapshot.devices` + `snapshot.grid`, no fetch. Since **v1.175.0** every number comes from the pure `cards/energyFlowModel.ts` (run by `server/test/energyFlowModel.test.ts`). Two cadences drive it: the panel's figures (`homeGridWatts`, house load, channels) arrive in one frame every ~60 s; the Cores' `acIn`/`acOut` every ~10 s. Attribution uses the fresher meter first. Edges: Solar → Batteries `pv`; Grid → Batteries `gridToCoresW` = the Cores' draw (`acIn` over the Cores drawn in the Batteries node when the connection table exists; `grid.importWatts`, which fails safe to 0, when it does not — so a bench spare's wall charge is never drawn as grid); Grid → Loads `gridToHouseW`, drawn below the battery node; Batteries → Loads `coresToHouseW`. The Cores deliver only when their inverters report `acOut` ≥ 5 W. Cores idle → the grid carries the whole house (`gridState` is also active when the Cores deliver nothing while the house draws and the grid is present: the minute before the panel's next frame shows the main rising). Cores the only source → their edge is the house load. Both → `coresToHouseW = min(acOut, load)`, `gridToHouseW = load − coresToHouseW`. The two edges into Loads always sum to the node; edges under 5 W are not drawn. The Grid node shows `homeGridWatts` unless it differs from the sum of its edges by more than max(500 W, 10%) — then the main is a frame behind and the node shows its edges. The Loads node is the SHP2 channel sum, NULL ("—") when the panel is silent (every channel `watts: null`: "panel not reporting") or frozen (offline, `contentStaleSinceMs` set, or — since v1.179.0 — `grid.panelFresh === false`: "panel data stale" — the server already zeroes such a panel's grid reading); the subtitle counts `pairedCircuits`, not channels. The Solar and Batteries nodes are not balanced against the house: PV is DC-side, the house AC-side, and conversion losses are not drawn.
 - **TodaySummary** (`cards/TodaySummary.tsx`) — today's energy totals from `/api/summary/today` through `usePolled`. The response carries `dayEndMs` (v1.176.0: the local midnight that ends its day, from `setDate(+1)`, exact across daylight-saving changes); a payload whose day is over is dropped rather than shown under "since 12:00 AM" (`dayWindowExpired`, server-clock now estimated as `untilMs` + time since it arrived). The Solar tab's Today tile applies the same rule.
 - **Shp2Card** — the SHP2 backup pool card (backup %, panel load, sources).
 - **DpuCard** per Delta Pro Ultra — with a `viaShp2` fallback so a cloud-offline DPU still shows the state the SHP2 reports over its wired link (battery %, contributed watts, AC-open, temp, errors).
