@@ -468,3 +468,11 @@ test('★★ REVIEW: the HOUSE pool\'s alarms read the house panel\'s own verdic
   const a = computeAlerts(d, undefined, { present: true, backstopping: true }, (sn) => livePoolGridBackstop(d, sn));
   assert.equal(a.find((x) => x.id === 'shp2-below-reserve')?.severity, 'critical', 'the garage import does not carry the house pool');
 });
+
+test('★★ REVIEW: with the pinned house panel missing from the map entirely, the house fallback is null — never the other pool', () => {
+  const d = plant();
+  delete d.ZHOUSE;
+  d.AGARAGE.housePanelMissing = 'ZHOUSE';
+  assert.equal(homeFleetMeanSoc(d), 30, '(the union mean would be the garage pool)');
+  assert.equal(housePoolFallbackSoc(d), null);
+});
