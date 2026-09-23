@@ -1,3 +1,17 @@
+## 1.185.1
+
+### The speaker test works again
+
+- **`POST /api/broadcast/test` refused every call since v1.59.0.** It checked the requested level
+  against the list of alarm tones, which v1.59.0 changed from red / yellow / green to the five
+  alarm rungs (critical … clear). From then on `red`, `yellow`, `green` — and a request with no body,
+  which means `red` — were all turned away with "level must be red, yellow, or green", and a rung
+  name got through only to be announced as "All clear". It checks red / yellow / green again, so the
+  test broadcast ("Test broadcast. This is only a test.") plays on the speakers. The dashboard's
+  per-priority preview was never affected.
+
+New harness `scripts/mutate-broadcast-test-level.mjs`.
+
 ## 1.185.0
 
 ### Two smart panels, supported
