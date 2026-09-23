@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sanitizeDisplayName } from './logSanitize.js';
 import { ecoflow, DeviceListItem } from './ecoflow/rest.js';
-import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold } from './ecoflow/project.js';
+import { projectByProduct, Projection, backupPoolWithGraceHold, type BackupPoolHold, type DpuProjection } from './ecoflow/project.js';
 import { shp2Panels } from './shp2Membership.js';
 import { prunePhantomPacks, freshPackSlotHistory, type PackSlotHistory } from './packPresence.js';
 import { mpptProducing } from './mppt.js';
@@ -57,6 +57,13 @@ export interface DeviceSnapshot {
    */
   lastTelemetryAtMs?: number;
   /**
+   * v1.181.0 — when a Core's (DPU) telemetry CONTENT last changed (dpuContentWitness), not
+   * merely arrived. A REST 200 replaying a cached Core body still bumps lastTelemetryAtMs; the
+   * grid resolver's Core-import freshness gate reads this instead, so a replayed acIn stops
+   * counting as grid flow. Only the SHP2 has a latch for the same problem (shp2Shadow.ts).
+   */
+  contentChangedAtMs?: number;
+  /**
    * v1.143.0 — when this device's `online` flag last CHANGED, and which input
    * observed it. Two independent paths write `online` — the cloud
    * `/device/list` poll and the MQTT `/status` topic — and they can disagree by
@@ -106,6 +113,18 @@ export interface FleetSnapshot {
 }
 
 const INCLUDE_RAW = process.env.SNAPSHOT_INCLUDE_RAW === '1';
+
+/**
+ * v1.181.0 — a Core's content fingerprint: the fields that move with every real reading (power
+ * flows, pack flows and SoC, battery volts/amps). Identical across polls = the same body again.
+ * Null for anything that is not a projected Core.
+ */
+export function dpuContentWitness(p: Projection | undefined): string | null {
+  if (!p || p.kind !== 'dpu') return null;
+  const d = p as DpuProjection;
+  const packs = (d.packs ?? []).map((k) => `${k.soc ?? ''}/${k.inputWatts ?? ''}/${k.outputWatts ?? ''}`).join(',');
+  return [d.acInWatts, d.acOutWatts, d.pvTotalWatts, d.soc, d.batVol, d.batAmp, packs].map((v) => v ?? '').join('|');
+}
 
 export class SnapshotStore extends EventEmitter {
   constructor() {
@@ -335,6 +354,7 @@ export class SnapshotStore extends EventEmitter {
         lastErrorAt: existing?.lastErrorAt,
         lastQuotaAtMs: existing?.lastQuotaAtMs,
         lastTelemetryAtMs: existing?.lastTelemetryAtMs, // v1.176.0 — same trap, same carry
+        contentChangedAtMs: existing?.contentChangedAtMs, // v1.181.0 — same trap, same carry
         contentStaleSinceMs: existing?.contentStaleSinceMs,
         onlineChangedAtMs: existing?.onlineChangedAtMs,
         onlineChangedVia: existing?.onlineChangedVia,
@@ -533,6 +553,7 @@ export class SnapshotStore extends EventEmitter {
     cur.lastUpdated = nowQ;
     cur.lastQuotaAtMs = nowQ;
     cur.lastTelemetryAtMs = nowQ;
+    this.noteDpuContent(sn, cur, nowQ); // v1.181.0
     if (cur.projection?.kind === 'shp2' && cur.projection.gridConnected != null) {
       const prev = cur.lastGridReading;
       cur.lastGridReading = { connected: cur.projection.gridConnected, sta: cur.projection.gridSta ?? null, atMs: nowQ };
@@ -658,6 +679,18 @@ export class SnapshotStore extends EventEmitter {
     this.writeGridReadings();
   }
 
+  /** v1.181.0 — the last content witness per Core; contentChangedAtMs moves only when it does. */
+  private dpuWitness = new Map<string, string>();
+  private noteDpuContent(sn: string, cur: DeviceSnapshot, nowMs: number): void {
+    const w = dpuContentWitness(cur.projection);
+    if (w == null) return;
+    const prev = this.dpuWitness.get(sn);
+    this.dpuWitness.set(sn, w);
+    // First sight only SEEDS the witness: after a restart the first body may itself be a replay,
+    // so the clock starts at the first real CHANGE (seconds for a Core streaming MQTT).
+    if (prev != null && prev !== w) cur.contentChangedAtMs = nowMs;
+  }
+
   private gridReadingDirty = false;
   private gridReadingWriteWarned = false;
 
@@ -755,6 +788,7 @@ export class SnapshotStore extends EventEmitter {
     cur.raw = INCLUDE_RAW ? merged : undefined;
     cur.lastUpdated = Date.now();
     cur.lastTelemetryAtMs = cur.lastUpdated; // v1.176.0 — content landed
+    this.noteDpuContent(sn, cur, cur.lastUpdated); // v1.181.0
     cur.lastError = undefined;
     this.lastSourceBySn.set(sn, source);
     this.snap.generatedAt = Date.now();

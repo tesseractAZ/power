@@ -133,12 +133,12 @@ export function computeGridImportWatts(
   // No SHP2 source identity → cannot attribute import to the house grid path →
   // fail safe to 0 (never let an unscoped DPU sum silence a floor emergency).
   if (sourceSns.size === 0) return 0;
-  // v1.179.0 — and only a Core whose content is FRESH (lastTelemetryAtMs: REST quota or MQTT
-  // delta, not a /status flip) within the same readback window as the panel. A Core left
+  // v1.179.0 — and only a Core whose content is FRESH within the same readback window as the
+  // panel (v1.181.0: content that CHANGED — contentChangedAtMs — not merely arrived). A Core left
   // listed online while its telemetry stopped would otherwise keep a frozen acIn ≥ 5 W
-  // asserting importLive — exempt from both floor guards — through an outage. NOT replay-proof:
-  // a REST 200 replaying a cached Core body still bumps lastTelemetryAtMs (only the SHP2 has a
-  // content witness, shp2Shadow.ts), so a cloud replaying a Core's pre-outage acIn still passes.
+  // asserting importLive — exempt from both floor guards — through an outage. A cloud REPLAYING
+  // a Core's cached body is covered too (v1.181.0): the gate reads contentChangedAtMs, which an
+  // identical body does not move (snapshot.ts dpuContentWitness).
   return dpus
     .filter((d) => d.online && sourceSns.has(d.sn) && coreContentFresh(d, nowMs))
     .reduce((s, d) => s + (d.projection.acInWatts ?? 0), 0);
@@ -146,7 +146,9 @@ export function computeGridImportWatts(
 
 /** v1.179.0 — a Core's content clock is within the shared readback window. */
 function coreContentFresh(d: DeviceSnapshot, nowMs: number): boolean {
-  const t = d.lastTelemetryAtMs;
+  // v1.181.0 — the content-CHANGE clock, not the arrival clock: a REST 200 replaying a cached
+  // Core body bumps lastTelemetryAtMs every poll, and a replayed acIn is not grid flow.
+  const t = d.contentChangedAtMs;
   return typeof t === 'number' && Number.isFinite(t) && t > 0 && nowMs - t <= SHP2_READBACK_STALE_MS;
 }
 
@@ -311,7 +313,12 @@ export function setPersistedGridAbsentSource(fn: (() => { sta: number | null; at
 /** Pure resolver — unit-testable; no env / cache reads. */
 export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   const nowMs = input.nowMs ?? Date.now();
-  const importWatts = computeGridImportWatts(input.devices, nowMs);
+  // v1.181.0 — a FRESH panel reading of no grid (gridSta ≠ 1) means the Cores' ac_in cannot be
+  // grid: they draw it through the panel. Without this a Core the cloud keeps replaying (its
+  // own session lost while the panel's is live) held importLive — exempt from both floor
+  // guards — against the panel's own fresh "grid not detected".
+  const panelSaysNoGrid = computeShp2GridConnected(input.devices, nowMs) === false;
+  const importWatts = panelSaysNoGrid ? 0 : computeGridImportWatts(input.devices, nowMs);
   const homeGridWatts = computeHomeGridWatts(input.devices, nowMs);
   // Grid flow is proven LIVE by EITHER measured path: DPU ac_in (grid charging the
   // SHP2-bound DPUs) or the SHP2 main gridWatt (grid serving home loads directly).
