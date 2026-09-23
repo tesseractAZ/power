@@ -102,8 +102,10 @@ export function renderGen(view: PlantView, data: PlantData): string[] {
     quality: qual,
     flags,
   }, W));
+  // v1.183.0 — the vendor countdown is time-to-FULL while charging (batAmp > 0): tag it TTF,
+  // not RUN, so a charge countdown never reads as runtime.
   out.push(renderTagRow({
-    tag: `GEN.${idx + 1}.RUN.MIN`,
+    tag: `GEN.${idx + 1}.${(p.batAmp ?? 0) > 0.5 ? 'TTF' : 'RUN'}.MIN`,
     value: p.remainTimeMin != null ? String(Math.round(p.remainTimeMin)) : '—',
     unit: 'min',
     state: 'normal',
