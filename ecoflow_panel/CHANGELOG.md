@@ -1,3 +1,19 @@
+## 1.181.0
+
+### A Core replaying old data proves nothing; the runtime alert sees the grid as it is now
+
+- A Core whose data the EcoFlow cloud keeps serving unchanged — its own connection lost while the
+  panel's still works — kept its last grid draw counting as grid power flowing, which overrides
+  even the checks made at the reserve floor. Readings arriving is no longer enough: a Core's grid
+  draw counts only while its data is actually changing, and not at all while the panel itself
+  freshly reports no grid (the Cores draw grid only through the panel).
+- The "Projected runtime to reserve" alert decided whether the grid was backstopping the home in
+  the add-on's analytics worker, which never sees the grid toggle or the saved "no grid" reading,
+  and kept that verdict for up to 10 minutes. It is now applied on every alarm evaluation with the
+  same grid verdict the other alarms use.
+
+New harness `scripts/mutate-core-replay-runtime-grid.mjs` (7 anchor-asserted mutants).
+
 ## 1.180.0
 
 ### An announced outage survives an add-on restart

@@ -22,6 +22,7 @@ import {
   computeLearnedAlerts,
   computeBaselineAlerts,
   computeForecastAlerts,
+  applyRuntimeGrid,
   computeCurtailmentAlerts,
   getDayForecast,
   forecastDayAlerts,
@@ -2186,7 +2187,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       ...computeLearnedAlerts(snap.devices),
       ...peakGridDrawAlerts(peakDraw, Date.now()),
       ...baselineAlerts,
-      ...forecastAlerts,
+      // v1.181.0 — the runtime alert's grid rule, with the MAIN thread's live resolver.
+      ...applyRuntimeGrid(forecastAlerts, grid.backstopping === true),
       ...forecastDay,
       ...stormPrep,
       ...curtailment,
