@@ -730,6 +730,9 @@ export class SnapshotStore extends EventEmitter {
     for (const d of Object.values(this.snap.devices)) {
       if (d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel')) {
         d.gridVetoClearedAtMs = nowMs;
+        // Reset the latch too: otherwise the panel's next "no grid" MATCHES it, counts as no
+        // change, and is never saved again — a restart while the panel is dark would then lose it.
+        d.lastGridReading = undefined;
         n++;
       }
     }

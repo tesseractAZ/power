@@ -21,6 +21,7 @@ const SNAP = resolve(SERVER, 'src/snapshot.ts');
 const AN = resolve(SERVER, 'src/analytics.ts');
 const MON = resolve(SERVER, 'src/alertMonitor.ts');
 const HOOKS = resolve(SERVER, 'src/logHooks.ts');
+const APP = resolve(REPO, 'web/src/App.tsx');
 
 const SUBSET = ['test/threeSmallGaps.test.ts', 'test/gridMeasuredAbsentVeto.test.ts', 'test/gridReadingPersist.test.ts'];
 
@@ -63,8 +64,8 @@ const MUTANTS = [
   {
     id: 'vi. \u2605\u2605 the starved-feed guard exempts nobody (idle-held Cores blinded all night)',
     file: AN,
-    find: '  const starved = new Set(collapsedSns.filter((sn) => !idleHeldSns.has(sn)));',
-    to: '  const starved = new Set(collapsedSns); /* MUTANT */',
+    find: '  return new Set(collapsedSns.filter((sn) => !idleHeldSns.has(sn)));',
+    to: '  return new Set(collapsedSns); /* MUTANT */',
     why: 'A Core held idle with a healthy session loses anomaly detection for the whole idle night.',
   },
   {
@@ -80,6 +81,27 @@ const MUTANTS = [
     find: '  if (level >= 50 && isClientHangup(args)) {',
     to: '  if (false) { /* MUTANT */',
     why: 'Error-level noise buries the real errors in the log ring.',
+  },
+  {
+    id: 'ix. \u2605\u2605\u2605 the clear keeps the latch: the panel\u2019s next "no grid" is never saved again',
+    file: SNAP,
+    find: '        d.lastGridReading = undefined;',
+    to: '        /* MUTANT */',
+    why: 'A mistaken click mid-outage, then a restart with the panel dark: the veto is lost and "grid present" returns.',
+  },
+  {
+    id: 'x. \u2605\u2605 a starved Core\u2019s raised anomaly RESOLVES (a false "Resolved:" push)',
+    file: MON,
+    find: "      if (id.startsWith('baseline-') && t.alert.sourceSn != null",
+    to: "      if (false && id.startsWith('baseline-') && t.alert.sourceSn != null /* MUTANT */",
+    why: 'A collapsing feed pushes "Resolved: Pack temperature unusual" for a pack whose state is unknown.',
+  },
+  {
+    id: 'xi. \u2605\u2605 the clear control is not rendered from the top-level grid',
+    file: APP,
+    find: '        {snapshot && <GridVetoClear grid={snapshot.grid} />}',
+    to: '        {/* MUTANT */}',
+    why: 'In the restart cases it exists for there is no panel card, and nothing offers the clear.',
   },
 ];
 

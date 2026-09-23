@@ -5,21 +5,23 @@
 - **Clearing a stuck "no grid".** When the panel's last reading said "no grid" and the panel then
   went quiet — offline, replaying old data, or not yet heard from since a restart — "no grid"
   stayed until the panel reported again, and the only way out was deleting a file on the Pi. The
-  Power panel card now shows "Grid is back — clear" in exactly that situation. After a
+  dashboard now shows "Grid is back — clear" in exactly that situation — including after a restart
+  while the panel is dark or the cloud is unreachable. After a
   confirmation it sets that reading aside and forgets the saved copy; the panel's next reading
-  counts again, so if the grid is in fact still out, the alarm returns with it. It is not offered
-  while the panel is actively reporting no grid.
+  counts again, so if the grid is in fact still out, the alarm returns with it (and is saved again
+  for the next restart). It is not offered while the panel is actively reporting no grid.
 - **The starved-feed anomaly guard now runs.** Since v1.79.0 the learned anomaly alerts were meant
   to stay quiet for a Core whose data feed had collapsed (its readings are minutes old — the
   2026-08-16 false temperature alarms). That check ran inside the add-on's analytics worker, which
   is never told about collapsed feeds, so it never did anything. It now runs where that
   information lives. A Core whose feed is merely slow because it is idle — its connection is
-  healthy — is exempt, so anomaly detection is not switched off for it all night.
+  healthy — is exempt, so anomaly detection is not switched off for it all night. An anomaly
+  already raised is held, not reported "Resolved", while its Core's feed is starved.
 - **Quieter log.** A browser or Home Assistant closing a connection before a response finished was
   logged as a server error ("premature close") — most of the error lines in the log. It is now
   logged at debug level.
 
-New harness `scripts/mutate-three-small-gaps.mjs` (8 anchor-asserted mutants).
+New harness `scripts/mutate-three-small-gaps.mjs` (11 anchor-asserted mutants).
 
 ## 1.183.0
 

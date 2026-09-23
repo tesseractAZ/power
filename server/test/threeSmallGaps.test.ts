@@ -14,7 +14,7 @@ import { Writable } from 'node:stream';
 import pino from 'pino';
 import { SnapshotStore } from '../src/snapshot.js';
 import { resolveGridBackstop } from '../src/gridState.js';
-import { applyStarvedFeedFilter } from '../src/analytics.js';
+import { applyStarvedFeedFilter, starvedFeedSns } from '../src/analytics.js';
 import { isClientHangup, logMethodHook } from '../src/logHooks.js';
 
 type Any = any;
@@ -85,9 +85,52 @@ test('the endpoint refuses when nothing is clearable, and is write-auth guarded;
   const idx = src('index.ts');
   assert.match(idx, /app\.post\('\/api\/grid-veto\/clear', \{ preHandler: requireWriteAuth \}/);
   assert.match(idx, /if \(!g\.vetoClearable\) \{\s*reply\.code\(409\);/);
-  const card = readFileSync(new URL('../../web/src/cards/Shp2Card.tsx', import.meta.url), 'utf8');
-  assert.match(card, /if \(!grid\?\.vetoClearable && state !== 'done'\) return null;/);
-  assert.match(card, /window\.confirm\(/);
+  // Rendered from the snapshot's TOP-LEVEL grid (the panel card only exists for a projected panel).
+  const ctl = readFileSync(new URL('../../web/src/components/GridVetoClear.tsx', import.meta.url), 'utf8');
+  assert.match(ctl, /const clearable = grid\?\.vetoClearable === true;/);
+  assert.match(ctl, /window\.confirm\(/);
+  assert.match(ctl, /if \(clearable && state === 'done'\) setState\('idle'\)/, 'a later episode offers it again');
+  const app = readFileSync(new URL('../../web/src/App.tsx', import.meta.url), 'utf8');
+  assert.match(app, /<GridVetoClear grid=\{snapshot\.grid\} \/>/);
+});
+
+test('★★★ a clear during a REAL outage: the panel\'s next "no grid" is saved again, so a later restart keeps the veto', () => {
+  withPaths((file) => {
+    const s = new SnapshotStore();
+    let t = Date.now() - 30 * 60_000;
+    s.setClock(() => t);
+    s.setDeviceList(listed(1));
+    s.setDeviceQuota(SN, quota(0));
+    s.setDeviceOnline(SN, false);
+    t = Date.now() - 20 * 60_000;
+    s.clearGridVeto(); // a mistaken (or premature) click mid-outage
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), {});
+    s.setDeviceOnline(SN, true);
+    t = Date.now() - 10 * 60_000;
+    s.setDeviceQuota(SN, quota(0, 2)); // the grid is in fact still out
+    assert.equal(toggleOn(s.get().devices).declared, false, 'the next reading re-vetoes');
+    assert.equal(JSON.parse(readFileSync(file, 'utf8'))[SN]?.connected, false, 'and it is saved again');
+    const b = new SnapshotStore(); // a restart with the panel dark
+    b.setDeviceList(listed(0));
+    assert.equal(toggleOn(b.get().devices).declared, false, 'the veto survives the restart');
+  });
+});
+
+test('★★ with NO device list at all (cloud unreachable since a restart), the persisted veto is clearable too', () => {
+  withPaths(() => {
+    const a = new SnapshotStore();
+    a.setDeviceList(listed(1));
+    a.setDeviceQuota(SN, quota(0));
+    const b = new SnapshotStore();
+    const g = resolveGridBackstop({
+      devices: b.get().devices, persistedGridAbsent: b.persistedGridAbsent(),
+      gridEntity: { entity_id: 'input_boolean.grid_available', state: 'on', last_updated: new Date().toISOString() } as Any,
+      gridEntityConfigured: true, gridAvailableFallback: false,
+    });
+    assert.equal(g.vetoClearable, true);
+    b.clearGridVeto();
+    assert.equal(b.persistedGridAbsent(), null);
+  });
 });
 
 /* ── 2. The starved-feed guard, on the main thread ──────────────────────────────────── */
@@ -99,12 +142,15 @@ test('★★★ the starved-feed guard: drops a starved Core\'s anomalies, keeps
   assert.deepEqual(out.map((x) => x.id), ['baseline-mppt_hv_temp-C2', 'baseline-mppt_hv_temp-C3', 'forecast-runtime-P'],
     'C1 starved: dropped; C2 idle-held (healthy, slow): kept; C3 fine: kept');
   assert.equal(applyStarvedFeedFilter([a('C1')], [], new Set()).length, 1);
+  assert.deepEqual([...starvedFeedSns(['C1', 'C2'], new Set(['C2']))], ['C1']);
 });
 
 test('★★ wiring: the worker no longer reads the (never-set) rate-floor state; the monitor applies it', () => {
   assert.doesNotMatch(src('analytics.ts'), /getRateFloorCollapses/, 'the analytics worker never receives it');
   assert.match(src('analytics.ts'), /sourceSn: t\.sn, \/\/ v1\.184\.0/);
   assert.match(src('alertMonitor.ts'), /\.\.\.applyStarvedFeedFilter\(baselineAlerts, getRateFloorCollapses\(\)\.map\(\(c\) => c\.sn\), rateFloorIdleHeldSns\(\)\),/);
+  // An anomaly already raised is FROZEN, not resolved, while its Core's feed is starved.
+  assert.match(src('alertMonitor.ts'), /if \(id\.startsWith\('baseline-'\) && t\.alert\.sourceSn != null\s*&& starvedFeedSns\(/);
 });
 
 /* ── 3. A client hang-up is not a server error ──────────────────────────────────────── */

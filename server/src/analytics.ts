@@ -388,8 +388,12 @@ export function regimeShiftDays(
  * is electrically idle (v1.158.0 idle-held: its session is healthy, idle packs just report slowly),
  * which must not blind anomaly detection on that Core for the whole idle night. Pure.
  */
+export function starvedFeedSns(collapsedSns: readonly string[], idleHeldSns: ReadonlySet<string>): Set<string> {
+  return new Set(collapsedSns.filter((sn) => !idleHeldSns.has(sn)));
+}
+
 export function applyStarvedFeedFilter(alerts: Alert[], collapsedSns: readonly string[], idleHeldSns: ReadonlySet<string>): Alert[] {
-  const starved = new Set(collapsedSns.filter((sn) => !idleHeldSns.has(sn)));
+  const starved = starvedFeedSns(collapsedSns, idleHeldSns);
   if (starved.size === 0) return alerts;
   return alerts.filter((a) => !(a.id.startsWith('baseline-') && a.sourceSn != null && starved.has(a.sourceSn)));
 }

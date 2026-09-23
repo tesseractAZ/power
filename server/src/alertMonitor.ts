@@ -24,6 +24,7 @@ import {
   computeForecastAlerts,
   applyRuntimeGrid,
   applyStarvedFeedFilter,
+  starvedFeedSns,
   computeCurtailmentAlerts,
   getDayForecast,
   forecastDayAlerts,
@@ -2663,6 +2664,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // rationale. Freezing also resets any resolve-dwell already accrued —
       // blindness must not count toward a clear.
       if (fallingEdgeFrozenByEvidence({ id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now, sourceSn: t.alert.sourceSn })) {
+        t.clearedSince = undefined;
+        continue;
+      }
+      // v1.184.0 — a baseline anomaly the starved-feed filter removed this tick is UNEVALUABLE, not
+      // recovered: without this freeze a Core's feed collapsing pushed "Resolved:" for an anomaly
+      // whose state is simply unknown (and re-raised it when the feed returned).
+      if (id.startsWith('baseline-') && t.alert.sourceSn != null
+        && starvedFeedSns(getRateFloorCollapses().map((c) => c.sn), rateFloorIdleHeldSns()).has(t.alert.sourceSn)) {
         t.clearedSince = undefined;
         continue;
       }
