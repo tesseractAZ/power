@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { homePacks } from './batteryScope';
 import type {
   SelfConsumption,
   FleetThermalEvents,
@@ -250,7 +251,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
       {show('thermal-events') && thermal && thermal.packs.length > 0 && (
         <Section title="Thermal events — cumulative" subtitle="Hard-life score, normalised per year">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {thermal.packs
+            {homePacks(thermal.packs).home
               .slice()
               .sort((a, b) => b.hardLifeScore - a.hardLifeScore)
               .slice(0, 8)
@@ -446,7 +447,7 @@ export function AdvancedInsightsCard({ sections }: { sections?: SectionKey[] } =
             </div>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {charge.packs.filter((p) => p.meanDriftMv != null).slice(0, 10).map((p) => (
+            {homePacks(charge.packs).home.filter((p) => p.meanDriftMv != null).slice(0, 10).map((p) => (
               <div key={`${p.sn}-${p.packNum}`} className="bg-panel2/50 border border-line rounded-md p-2 text-xs">
                 <div className="font-semibold flex items-baseline gap-2">
                   <span>Core {p.coreNum} · Pack {p.packNum}</span>

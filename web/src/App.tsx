@@ -9,7 +9,7 @@ import { DpuCard, type DpuViaShp2 } from './cards/DpuCard';
 import type { DeviceSnapshot, DpuProjection, GenericProjection, Shp2Projection } from './types';
 import { Shp2Card } from './cards/Shp2Card';
 import { SmallDeviceCard } from './cards/SmallDeviceCard';
-import { priorityCounts } from './alertPriority';
+import { alertBadge } from './alertPriority';
 import { sortDevices } from './sort';
 import { fmtRel } from './format';
 import { SERIES_PALETTE } from './theme';
@@ -96,9 +96,9 @@ function NormalApp() {
   // v0.54.0 — derive the Alerts badge + pill colour from the ISA priority of the
   // threshold alerts, so a real measured-threshold Medium (P3, e.g. a reserve
   // band) is reflected the same way the Alerts page counts it as "actionable".
-  const thresholdPriority = useMemo(() => priorityCounts(thresholdAlerts), [thresholdAlerts]);
-  const alertBadgeCount =
-    thresholdPriority.critical + thresholdPriority.high + thresholdPriority.medium;
+  // v1.182.0 — alertBadge: a learned CRITICAL counts and colours the badge too.
+  const badge = useMemo(() => alertBadge(alerts), [alerts]);
+  const alertBadgeCount = badge.count;
 
   const shp2 = useMemo(() => sorted.find((d) => d.projection?.kind === 'shp2'), [sorted]);
   const dpus = useMemo(
@@ -221,9 +221,9 @@ function NormalApp() {
               {alertBadgeCount > 0 && (
                 <span
                   className={`text-[10px] font-semibold rounded-full px-1.5 py-px ${
-                    thresholdPriority.critical > 0
+                    badge.tone === 'critical'
                       ? 'bg-bad/25 text-bad'
-                      : thresholdPriority.high > 0
+                      : badge.tone === 'high'
                         ? 'bg-high/25 text-high'
                         : 'bg-warn/25 text-warn'
                   }`}

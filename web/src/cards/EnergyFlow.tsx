@@ -37,7 +37,7 @@ export function EnergyFlow({ devices, grid }: Props) {
   // v1.175.0 — every number on this card comes from energyFlowModel (pure, and run by the
   // test suite); this component only lays them out.
   const {
-    dpuCount, spareCount, pv, batNet, soc, load, panelState, liveCircuits,
+    dpuCount, spareCount, membershipUnknown, pv, batNet, soc, load, panelState, liveCircuits,
     gridState, gridSupplyW, gridToCoresW, gridToHouseW, coresToHouseW,
   } = energyFlowModel(devices, grid);
 
@@ -127,7 +127,7 @@ export function EnergyFlow({ devices, grid }: Props) {
         {/* Battery node (big) */}
         <Node
           {...Battery}
-          title={`Batteries (${dpuCount} DPU${spareCount > 0 ? `, +${spareCount} spare` : ''})`}
+          title={`Batteries (${dpuCount} DPU${spareCount > 0 ? `, +${spareCount} spare` : membershipUnknown ? ', spares not yet identified' : ''})`}
           subtitle={batNet > 5 ? `▼ ${fmtW(batNet)} discharging` : batNet < -5 ? `▲ ${fmtW(-batNet)} charging` : 'idle'}
           value={fmtPct(soc, 1)}
           big

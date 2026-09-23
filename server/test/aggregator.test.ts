@@ -383,3 +383,49 @@ test('v1.87.0 — with every connected member measured, coverage is unchanged (n
   const r = computeTotals(oneDpuStore(), rec, since, until);
   assert.ok(r.fleet.pvCoverage > 0.98, `pvCoverage ${r.fleet.pvCoverage} stays ~1.0 when all members report`);
 });
+
+/* ─── v1.182.0 — Today's "% measured" covers the home, and a silent panel is "not measured" ── */
+
+test('★★ computeTotals — homeCoverage excludes a bench Core; panelLoadCoverage is 0 when the panel wrote no load', () => {
+  const since = startOfLocalDayMs() - ONE_HOUR;
+  const until = startOfLocalDayMs();
+  const full = evenSamples(since, until, FIVE_MIN, 1000);
+  // Home Core C1 (one pack) fully covered. The bench Core has a second pack whose series are
+  // EMPTY (0 coverage) — it must dilute the all-device mean but not the home one. The panel
+  // wrote no panel_load rows at all (v1.175.0: a silent panel writes none).
+  const rec = mockRecorder({ pv_total: full, ac_out: full, total_in: full, total_out: full, pack1_in: full, pack1_out: full });
+  const devices: Record<string, DeviceSnapshot> = {
+    P: { sn: 'P', deviceName: 'Panel', online: true, projection: { kind: 'shp2', circuits: [], sources: [{ slot: 1, sn: 'C1', isConnected: true }] } } as any,
+    C1: { sn: 'C1', deviceName: 'Core 1', online: true, projection: { kind: 'dpu', soc: 80, packs: [{ num: 1, soc: 80 }] } } as any,
+    SPARE: { sn: 'SPARE', deviceName: 'Spare', online: true, projection: { kind: 'dpu', soc: 50, packs: [{ num: 1, soc: 50 }, { num: 2, soc: 50 }] } } as any,
+  };
+  const r = computeTotals({ get: () => ({ devices }) } as unknown as SnapshotStore, rec, since, until);
+  assert.equal(r.fleet.panelLoadCoverage, 0, 'the Panel load tile reads "not measured", not 0 Wh');
+  // Per DEVICE: C1 (its six series, ~1.0) and the panel (panel_load, 0) → 0.5.
+  assert.ok(Math.abs(r.fleet.homeCoverage - 0.5) < 0.03, `homeCoverage ${r.fleet.homeCoverage}`);
+  // (The bench Core, if counted, would add its own mean of 0.75 and read ~0.58: 0.5 proves it is not.)
+});
+
+test('★★ computeTotals — a DARK home Core weighs as one of the home\'s devices, not one series against ~14', () => {
+  const since = startOfLocalDayMs() - ONE_HOUR;
+  const until = startOfLocalDayMs();
+  const full = evenSamples(since, until, FIVE_MIN, 1000);
+  const series: Record<string, Array<{ ts: number; value: number }>> = { pv_total: full, ac_out: full, total_in: full, total_out: full, panel_load: full };
+  for (let k = 1; k <= 5; k++) { series[`pack${k}_in`] = full; series[`pack${k}_out`] = full; }
+  const rec = mockRecorder(series);
+  const packs = [1, 2, 3, 4, 5].map((num) => ({ num, soc: 80 }));
+  const core = (sn: string): any => ({ sn, deviceName: sn, online: true, projection: { kind: 'dpu', soc: 80, packs } });
+  const devices: Record<string, DeviceSnapshot> = {
+    P: { sn: 'P', deviceName: 'Panel', online: true, projection: { kind: 'shp2', circuits: [], sources: ['C1', 'C2', 'C3'].map((sn, i) => ({ slot: i + 1, sn, isConnected: true })) } } as any,
+    C1: core('C1'), C2: core('C2'), // C3 is wired to the panel but cloud-dark: no projection
+  };
+  const r = computeTotals({ get: () => ({ devices }) } as unknown as SnapshotStore, rec, since, until);
+  assert.ok(Math.abs(r.fleet.homeCoverage - 0.75) < 0.03, `3 of 4 home devices measured: ${r.fleet.homeCoverage}`);
+  assert.ok(r.fleet.panelLoadCoverage! > 0.98);
+});
+
+test('computeTotals — no panel at all: panelLoadCoverage is null (a DPU-only install is not "not measured")', () => {
+  const since = startOfLocalDayMs() - ONE_HOUR;
+  const r = computeTotals(oneDpuStore(), mockRecorder({}), since, startOfLocalDayMs());
+  assert.equal(r.fleet.panelLoadCoverage, null);
+});

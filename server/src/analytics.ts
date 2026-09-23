@@ -2230,6 +2230,8 @@ export interface PackDegradation {
   // Fleet context
   peerFadeRatio: number | null;         // this pack's fade ÷ fleet median fade
   peerOutlier: boolean;                 // fading abnormally fast for its peer group
+  /** v1.182.0 — the pack's Core is wired to the panel (a home pack), not a bench spare. */
+  home?: boolean;
   // Arrhenius temperature-corrected fade (v0.5.0)
   avgPackTempC: number | null;          // pack temp avg across the SoH window
   arrheniusFactor: number | null;       // 2^((avgTemp − 25)/10) — fade-acceleration factor
@@ -2890,6 +2892,17 @@ let degradationCache: { ts: number; value: FleetDegradation } | null = null;
  *  handlers) running on the same turn. A `setImmediate` yield per pack lets
  *  those interleave, which is what the cache-warmer's `Promise.all` design
  *  actually wanted in the first place. */
+/**
+ * v1.182.0 — tag each pack with whether its Core is wired to the panel (the same membership the
+ * degradation peer baseline uses). The Battery page summed every pack it could see — 147 kWh
+ * "fleet capacity" with 9 of 24 packs on bench spares — and bench packs set the SoH range and
+ * dominated the charge-curve and thermal lists. The UI scopes those figures to home packs.
+ */
+export function tagHomePacks<T extends { sn: string }>(packs: T[], devices: Record<string, DeviceSnapshot>): Array<T & { home: boolean }> {
+  const connected = shp2ConnectedDpuSns(devices);
+  return packs.map((p) => ({ ...p, home: isShp2Connected(p.sn, connected) }));
+}
+
 export async function computeDegradation(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
@@ -2975,7 +2988,7 @@ export async function computeDegradation(
     return (a.coreNum ?? 999) - (b.coreNum ?? 999) || a.packNum - b.packNum;
   });
 
-  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, packs };
+  const value: FleetDegradation = { generatedAt: now, eolSoh: EOL_SOH, packs: tagHomePacks(packs, devices) };
   if (dpus.length > 0) degradationCache = { ts: now, value };
   return value;
 }
@@ -4616,6 +4629,8 @@ const CHARGE_BASELINE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000; // first 14 days = b
 
 export interface ChargeCurvePack {
   sn: string;
+  /** v1.182.0 — a home pack (its Core is wired to the panel), not a bench spare. */
+  home?: boolean;
   device: string;
   coreNum: number | null;
   packNum: number;
@@ -4732,7 +4747,7 @@ export function computeChargeCurveFingerprint(
       });
     }
   }
-  const value: ChargeCurveReport = { generatedAt: now, packs };
+  const value: ChargeCurveReport = { generatedAt: now, packs: tagHomePacks(packs, devices) };
   if (dpus.length > 0) chargeCurveCache = { ts: now, value };
   return value;
 }
@@ -6205,6 +6220,8 @@ const THERMAL_HYSTERESIS_C = 1.5; // must fall back this far before re-arming
 const THERMAL_SAMPLE_GAP_CAP_MS = 15 * 60 * 1000; // 15 min = 3 × 5-min heartbeat
 
 export interface ThermalEventCounts {
+  /** v1.182.0 — a home pack (its Core is wired to the panel), not a bench spare. */
+  home?: boolean;
   sn: string;
   device: string;
   coreNum: number | null;
@@ -6296,7 +6313,7 @@ export function computeThermalEvents(
       });
     }
   }
-  const value: FleetThermalEvents = { generatedAt: now, packs };
+  const value: FleetThermalEvents = { generatedAt: now, packs: tagHomePacks(packs, devices) };
   if (dpus.length > 0) thermalEventsCache = { ts: now, value };
   return value;
 }

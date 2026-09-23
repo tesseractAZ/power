@@ -331,6 +331,8 @@ export interface DayForecast {
 export type DegradeStatus = 'projecting' | 'stable' | 'learning' | 'no-data';
 
 export interface PackDegradation {
+  /** v1.182.0 — a home pack (its Core is wired to the panel), not a bench spare. */
+  home?: boolean;
   sn: string;
   device: string;
   coreNum: number | null;
@@ -526,6 +528,8 @@ export interface SelfConsumption {
 }
 
 export interface ThermalEventCounts {
+  /** v1.182.0 — a home pack (its Core is wired to the panel), not a bench spare. */
+  home?: boolean;
   sn: string;
   device: string;
   coreNum: number | null;
@@ -646,6 +650,8 @@ export interface EvWindowPrediction {
 }
 
 export interface ChargeCurvePack {
+  /** v1.182.0 — a home pack (its Core is wired to the panel), not a bench spare. */
+  home?: boolean;
   sn: string;
   device: string;
   coreNum: number | null;
