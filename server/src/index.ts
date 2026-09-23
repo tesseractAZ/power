@@ -12,7 +12,7 @@ import { exportDatabase, describeExistingExport, exportInProgress, DEFAULT_EXPOR
 import { createAuth, isAllowedOrigin } from './auth.js';
 import { SnapshotStore, startPollLoop, alarmPathShp2Sns } from './snapshot.js';
 import type { FleetSnapshot } from './snapshot.js';
-import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, housePoolFallbackSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, panelMeanSoc } from './shp2Membership.js';
+import { shp2ConnectedDpuSns, isShp2Connected, isSourceDpuStale, aggregateFleetFlow, findShp2, onlineDpus, housePoolFallbackSoc, isHomePoolDpu, setLastKnownHomeRoster, shp2Panels, shp2ReadbackFresh, nightPlanPanelVerdict, secondaryShp2s, secondaryPanels, panelMeanSoc, houseSnOf } from './shp2Membership.js';
 import { loadMembershipHistory, membershipVerdict } from './membershipHistory.js';
 import {
   loadReconnectWatchState, saveReconnectWatchState, evaluateReconnectWatch,
@@ -132,7 +132,7 @@ import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvi
 import { createRunwayAlarm, shouldGateRunwayAudible, runwayAlarmStatePathFor } from './runwayAlarm.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { panelPoolNetWatts, noteDrainSample, panelDrainRunway, type DrainSample, type PanelRunway } from './panelRunway.js';
-import { liveGridBackstop, gridPresenceEntityId, setPersistedGridAbsentSource } from './gridState.js';
+import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId, setPersistedGridAbsentSource, type GridBackstop } from './gridState.js';
 import { getBroadcastHealth } from './broadcastHealth.js';
 import { publishReadiness, withholdUnready } from './publishReadiness.js';
 import { hostPowerEntityId } from './hostPower.js';
@@ -2474,12 +2474,15 @@ const batterySocAlarm = createBatterySocAlarm({
 // v1.185.0 — one SoC ladder per SECONDARY panel, created on first sight: its own persisted arming
 // state (battery-soc-alarm-<serial>.json), its own grid-downgrade record, and words that name
 // its pool. The rules are the house ladder's above, read against the same tick's grid.
-const panelLadders = new Map<string, { update: (soc: number | null, name: string) => void }>();
-function panelSocLadder(sn: string): { update: (soc: number | null, name: string) => void } {
+type PoolGrid = { backstopping: boolean };
+const panelLadders = new Map<string, { update: (soc: number | null, name: string, grid: PoolGrid) => void }>();
+function panelSocLadder(sn: string): { update: (soc: number | null, name: string, grid: PoolGrid) => void } {
   const have = panelLadders.get(sn);
   if (have) return have;
   const downgraded = new Map<number, AlarmPriority>();
   let name = sn;
+  // v1.185.0 (review) — THIS pool's grid verdict (livePoolGridBackstop), set before each update.
+  let poolGrid: PoolGrid = { backstopping: false };
   const say = (priority: AlarmPriority, en: string, es: string, what: string) => {
     void broadcast.announce(priority, en, es).then(
       (a) => { if (!a.ok) app.log.info(`soc-alarm [${name}]: ${what} audible suppressed (${a.error ?? 'unknown'}) — push/on-screen unaffected`); },
@@ -2489,7 +2492,7 @@ function panelSocLadder(sn: string): { update: (soc: number | null, name: string
   const alarm = createBatterySocAlarm({
     statePath: socAlarmStatePathFor(sn),
     onCross: (t, isPrimary) => {
-      const { priority, onGrid } = socGridCrossDecision(t, socGridForTick.backstopping);
+      const { priority, onGrid } = socGridCrossDecision(t, poolGrid.backstopping);
       if (onGrid) downgraded.set(t.pct, t.priority);
       else downgraded.delete(t.pct);
       if (!isPrimary || !isPriorityEnabled(priority)) return;
@@ -2503,10 +2506,11 @@ function panelSocLadder(sn: string): { update: (soc: number | null, name: string
     log: (m) => app.log.info(`${m} [${name}]`),
   });
   const ladder = {
-    update: (soc: number | null, n: string) => {
+    update: (soc: number | null, n: string, grid: PoolGrid) => {
       name = n;
+      poolGrid = grid;
       alarm.update(soc);
-      for (const { pct, priority } of reEscalateGridDrop(downgraded, soc, socGridForTick.backstopping, isPriorityEnabled)) {
+      for (const { pct, priority } of reEscalateGridDrop(downgraded, soc, poolGrid.backstopping, isPriorityEnabled)) {
         say(priority, socAlarmMessage({ pct, priority }, name), socAlarmMessageEs({ pct, priority }, name), 'grid-drop re-escalation');
       }
     },
@@ -2543,11 +2547,15 @@ store.on('change', (snap: FleetSnapshot) => {
         /* cold/stale cache ⇒ resolves to off-grid (safe) */
       }
     }
-    socGridForTick = liveGridBackstop(snap.devices);
+    // v1.185.0 (review) — the HOUSE pool's own verdict on a multi-panel plant; one panel: identical
+    // (livePoolGridBackstop returns liveGridBackstop there).
+    socGridForTick = livePoolGridBackstop(snap.devices, houseSnOf(snap.devices));
     batterySocAlarm.update(soc); // fires onCross synchronously, reading socGridForTick
-    // v1.185.0 — every OTHER panel's pool on its own ladder, read against the same grid.
-    for (const p of secondaryShp2s(snap.devices)) {
-      panelSocLadder(p.sn).update(p.projection.backupBatPercent ?? panelMeanSoc(snap.devices, p), p.deviceName);
+    // v1.185.0 — every OTHER panel's pool on its own ladder, against its own panel's grid — including
+    // a panel with no projection (dark since a restart): its own Cores, from its persisted roster.
+    for (const p of secondaryPanels(snap.devices)) {
+      const own = p.projection?.kind === 'shp2' ? p.projection.backupBatPercent : null;
+      panelSocLadder(p.sn).update(own ?? panelMeanSoc(snap.devices, p), p.deviceName, livePoolGridBackstop(snap.devices, p.sn));
     }
     // Re-escalate a previously grid-downgraded crossing if the grid is no longer
     // backstopping while the pool is still at/below that threshold — closes the
@@ -2599,6 +2607,7 @@ let runwayGridForTick = liveGridBackstop({});
 const panelDrainSamples = new Map<string, DrainSample[]>();
 const lastPanelRunways = new Map<string, PanelRunway>();
 const panelRunwayAlarms = new Map<string, ReturnType<typeof createRunwayAlarm>>();
+const panelRunwayGrid = new Map<string, GridBackstop>();
 function panelRunwayAlarm(sn: string, name: string): ReturnType<typeof createRunwayAlarm> {
   const have = panelRunwayAlarms.get(sn);
   if (have) return have;
@@ -2607,7 +2616,7 @@ function panelRunwayAlarm(sn: string, name: string): ReturnType<typeof createRun
     wording: { poolName: name, basis: 'drain' },
     onTrigger: (priority, message, messageEs) => {
       if (!isPriorityEnabled(priority)) return;
-      if (shouldGateRunwayAudible(runwayGridForTick)) {
+      if (shouldGateRunwayAudible(panelRunwayGrid.get(sn))) {
         app.log.info(`runway-alarm [${name}]: audible suppressed — grid backstopping (push/on-screen unaffected)`);
         return;
       }
@@ -2654,22 +2663,32 @@ if (runwayAlarmEnabled) {
             /* best effort — a cold/stale cache resolves to NOT present (safe) */
           }
         }
+        // v1.185.0 (review) — every OTHER panel's runway FIRST, on the main thread and in its own try:
+        // it needs nothing from the analytics worker, whose timeouts must not silence it.
+        try {
+          const devs = store.get().devices;
+          const nowMs = Date.now();
+          for (const p of secondaryShp2s(devs)) {
+            const samples = noteDrainSample(panelDrainSamples.get(p.sn) ?? [], panelPoolNetWatts(devs, p).netW, nowMs);
+            panelDrainSamples.set(p.sn, samples);
+            const pr = panelDrainRunway(p, samples, nowMs);
+            lastPanelRunways.set(p.sn, pr);
+            const g = livePoolGridBackstop(devs, p.sn);
+            panelRunwayGrid.set(p.sn, g);
+            // An unavailable figure (measuring, a Core dark, a stale panel) HOLDS the alarm's state: a
+            // blip must not re-arm it into a re-announcement ten minutes later.
+            if (pr.unavailable == null) panelRunwayAlarm(p.sn, p.deviceName).update(pr, g);
+          }
+        } catch (e: any) {
+          app.log.warn(`runway-alarm: secondary panels skipped (${e?.message ?? e})`);
+        }
         const r = await analytics.report('runway');
         // v0.93.0 (audit #8) — assign the tick's grid backstop synchronously BEFORE
         // update() so onTrigger's audible gate reads exactly the grid state this
         // classification used (no stale-cache divergence). Mirrors socGridForTick.
-        runwayGridForTick = liveGridBackstop(store.get().devices);
+        // v1.185.0 (review) — the house pool's own verdict on a multi-panel plant (one panel: identical).
+        runwayGridForTick = livePoolGridBackstop(store.get().devices, houseSnOf(store.get().devices));
         runwayAlarm.update(r, runwayGridForTick);
-        // v1.185.0 — every other panel's runway, at its measured drain (panelRunway.ts).
-        const devs = store.get().devices;
-        const nowMs = Date.now();
-        for (const p of secondaryShp2s(devs)) {
-          const samples = noteDrainSample(panelDrainSamples.get(p.sn) ?? [], panelPoolNetWatts(devs, p).netW, nowMs);
-          panelDrainSamples.set(p.sn, samples);
-          const pr = panelDrainRunway(p, samples, nowMs);
-          lastPanelRunways.set(p.sn, pr);
-          panelRunwayAlarm(p.sn, p.deviceName).update(pr, runwayGridForTick);
-        }
       } catch (e: any) {
         app.log.debug(`runway-alarm: poll skipped (${e?.message ?? e})`);
       }
@@ -4620,6 +4639,9 @@ function repairPrematureNightOutcomes(): void {
 function multiPanelWriteBlock(): string | null {
   const devices = store.get().devices;
   const panels = shp2Panels(devices);
+  // v1.185.0 (review) — a MISSING pin blocks at any panel count (a lone replacement panel included).
+  const missing = Object.values(devices).find((d) => d.housePanelMissing != null)?.housePanelMissing;
+  if (missing) return `the pinned house panel (${missing}) is not on the account — supervised writes are blocked; nothing is retargeted (pin a panel: POST /api/house-panel)`;
   if (panels.sns.length <= 1) return null;
   // v1.185.0 — PHASE 4: the target is pinned. Every supervised write resolves its panel through
   // findShp2, which returns only the pinned house panel (the pin is persisted, so a retry or
@@ -5863,7 +5885,10 @@ app.post<{ Body: { sn?: unknown } }>('/api/house-panel', { preHandler: requireWr
   if (st.sn != null && st.sn !== sn) {
     const house = findShp2(store.get().devices);
     const forcing = (house?.projection.sources ?? []).some((c) => c?.forceCharge === 'FORCE_CHARGE_ON');
+    const m = nightActuationMem;
     const busy = getReserveArbitrageRaised() ? 'the night-charge plan is holding the house panel\'s reserve raised'
+      : m.applyAttemptedAtMs != null && m.appliedAtMs == null && m.revertedAtMs == null ? 'a night-charge reserve write is unconfirmed'
+      : m.forceChargeCeilingPriorPct != null && m.forceChargeCeilingRestoredAtMs == null ? 'the house panel\'s force-charge ceiling is still to be restored'
       : nightActuationInFlight ? 'a night-charge write is in flight'
         : chargeNowState.pendingVerify ? 'a Charge Now write is awaiting readback'
           : forcing ? 'a house-panel slot is force-charging'

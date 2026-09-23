@@ -11,7 +11,7 @@ import { UI } from '../theme';
 export function HousePanelPin({ state }: { state: FleetSnapshot['housePanel'] }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  if (!state?.ambiguous) return null;
+  if (!state?.ambiguous && !state?.missing) return null;
   const pin = async (sn: string, name: string) => {
     if (!window.confirm(`Pin ${name} as the house panel? Night charge will write its reserve and force-charge to this panel only.`)) return;
     setBusy(true);
@@ -32,7 +32,9 @@ export function HousePanelPin({ state }: { state: FleetSnapshot['housePanel'] })
   return (
     <div className="card col-span-full flex flex-wrap items-center gap-3 text-sm">
       <span style={{ color: UI.muted }}>
-        Two smart panels and none pinned as the house panel — night-charge writes are paused until one is chosen.
+        {state.missing
+          ? `The pinned house panel (${state.missing}) is not on the account — night-charge writes are paused until it returns or another panel is chosen.`
+          : 'Two smart panels and none pinned as the house panel — night-charge writes are paused until one is chosen.'}
       </span>
       {state.panels.map((p) => (
         <button key={p.sn} onClick={() => pin(p.sn, p.name)} disabled={busy} className="shrink-0 px-2 py-1 rounded border border-line bg-panel hover:bg-panel2 text-ink disabled:opacity-50">

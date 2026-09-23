@@ -386,40 +386,90 @@ export function findShp2(
   // v1.129.0 — lowest SN wins rather than first-in-map (no panel flagged: no pin yet,
   // or two panels and the house panel not identified). Single pass — no allocation on a
   // hot path.
+  // v1.185.0 (review) — and while the pinned panel is MISSING from the account
+  // (`housePanelMissing` on every panel), nothing: a partial device list after a restart must never
+  // hand the role — and the pending revert — to the other panel.
   let best: (DeviceSnapshot & { projection: Shp2Projection }) | undefined;
   let flagged: DeviceSnapshot | undefined;
+  let missing = false;
   for (const d of Object.values(devices)) {
     if (d.housePanel === true) flagged = d;
+    if (d.housePanelMissing != null) missing = true;
     if (d.projection?.kind !== 'shp2') continue;
     const cand = d as DeviceSnapshot & { projection: Shp2Projection };
     if (!best || (cand.sn ?? '') < (best.sn ?? '')) best = cand;
   }
   if (flagged) return flagged.projection?.kind === 'shp2' ? flagged as DeviceSnapshot & { projection: Shp2Projection } : undefined;
+  if (missing) return undefined;
   return best;
 }
 
 /**
- * v1.185.0 — PURE. Which panel is the HOUSE panel: the one night charge writes to and
- * whose numbers the singleton surfaces (HA backup sensors, the dashboard pool, the
- * forecast runway) describe.
+ * v1.185.0 — PURE. Which panel is the HOUSE panel: the one night charge writes to and whose
+ * numbers the singleton surfaces (HA backup sensors, the dashboard pool, the forecast runway)
+ * describe. `census` is the panels ON THE ACCOUNT (SnapshotStore.accountPanels: the identity
+ * census less any panel absent from several consecutive device lists).
  *
- * - The pin wins while its panel is on the account (`census`: shp2Panels, identity-wide).
- * - Exactly one panel: that panel, pinned on first sight or RE-pinned when the pinned
- *   serial is gone (a replaced panel). Today's single-panel plant pins on its first boot,
- *   so a second panel energised later can never take the role.
- * - Two or more panels and none pinned among them: AMBIGUOUS. Nothing is flagged, the
- *   singleton paths fall back to the lowest serial for display, and supervised writes
- *   are refused until an operator pins one (POST /api/house-panel).
- * - No panel known: nothing flagged, the pin is kept.
+ * - A pin, once set, never moves here — only an operator moves it (POST /api/house-panel, refused
+ *   while a supervised write is outstanding). Its panel on the account: `pinned`. Not on the
+ *   account: `missing` — nothing is retargeted, supervised writes pause, and an alert asks for a
+ *   pin. (v1.185.0 review: an automatic re-pin from a restart's partial first list moved the role,
+ *   and the pending revert, to the other panel for good.)
+ * - No pin and exactly one panel, standing alone on consecutive lists (`singleStable`): pin it.
+ *   Today's one-panel plant pins on its first boot, so a panel energised later never takes the
+ *   role. Not yet stable: `none` (the legacy lowest-serial fallback, which is that one panel).
+ * - No pin and two or more: `ambiguous` — supervised writes refused until an operator pins one.
  */
 export function resolveHousePanel(
   census: readonly string[],
   pinnedSn: string | null,
-): { sn: string | null; pin: string | null; ambiguous: boolean } {
-  if (census.length === 0) return { sn: null, pin: pinnedSn, ambiguous: false };
-  if (pinnedSn != null && census.includes(pinnedSn)) return { sn: pinnedSn, pin: pinnedSn, ambiguous: false };
-  if (census.length === 1) return { sn: census[0], pin: census[0], ambiguous: false };
-  return { sn: null, pin: pinnedSn, ambiguous: true };
+  singleStable = true,
+): { sn: string | null; pin: string | null; state: 'pinned' | 'missing' | 'ambiguous' | 'none' } {
+  if (census.length === 0) return { sn: null, pin: pinnedSn, state: 'none' };
+  if (pinnedSn != null) {
+    return census.includes(pinnedSn)
+      ? { sn: pinnedSn, pin: pinnedSn, state: 'pinned' }
+      : { sn: null, pin: pinnedSn, state: 'missing' };
+  }
+  if (census.length === 1) return singleStable ? { sn: census[0], pin: census[0], state: 'pinned' } : { sn: null, pin: null, state: 'none' };
+  return { sn: null, pin: null, state: 'ambiguous' };
+}
+
+/** v1.185.0 — the serial the house role belongs to: the flagged panel, else the MISSING pinned
+ *  serial, else (no pin, or ambiguous) the lowest-serial projected panel findShp2 falls back to. */
+export function houseSnOf(devices: Record<string, DeviceSnapshot>): string | undefined {
+  let missing: string | undefined;
+  for (const d of Object.values(devices)) {
+    if (d.housePanel === true) return d.sn;
+    if (d.housePanelMissing != null) missing = d.housePanelMissing;
+  }
+  return missing ?? findShp2(devices)?.sn;
+}
+
+/** v1.185.0 — every panel by identity (projected or not), sorted by serial. */
+function identityPanels(devices: Record<string, DeviceSnapshot>): DeviceSnapshot[] {
+  return Object.values(devices)
+    .filter((d) => d.projection?.kind === 'shp2' || (d.productName ?? '').toLowerCase().includes('smart home panel'))
+    .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
+}
+
+/**
+ * v1.185.0 — every panel OTHER than the house panel, projected or not (a panel dark since a restart
+ * has no projection but still has a pool to watch: its SoC ladder runs on its own Cores and its
+ * reserve-blind alert stands). Sorted by serial.
+ */
+export function secondaryPanels(devices: Record<string, DeviceSnapshot>): DeviceSnapshot[] {
+  const house = houseSnOf(devices);
+  return identityPanels(devices).filter((p) => p.sn !== house);
+}
+
+/** v1.185.0 — a panel's Cores: its live connected sources, else the roster it last reported
+ *  (DeviceSnapshot.lastRoster, persisted across restarts). */
+export function panelRoster(panel: DeviceSnapshot): string[] {
+  const live = panel.projection?.kind === 'shp2'
+    ? ((panel.projection as Shp2Projection).sources ?? []).filter((x) => x.isConnected && x.sn).map((x) => x.sn as string)
+    : [];
+  return live.length > 0 ? live : [...(panel.lastRoster ?? [])];
 }
 
 /**
@@ -430,26 +480,21 @@ export function resolveHousePanel(
 export function secondaryShp2s(
   devices: Record<string, DeviceSnapshot>,
 ): Array<DeviceSnapshot & { projection: Shp2Projection }> {
-  const house = findShp2(devices);
-  return allShp2s(devices)
-    .filter((p) => p !== house)
-    .sort((a, b) => (a.sn < b.sn ? -1 : a.sn > b.sn ? 1 : 0));
+  return secondaryPanels(devices).filter((p) => p.projection?.kind === 'shp2') as Array<DeviceSnapshot & { projection: Shp2Projection }>;
 }
 
 /**
- * v1.185.0 — a secondary panel's SHP2-blind fallback SoC (homeFleetMeanSoc for ONE pool):
- * the mean SoC of the Cores this panel lists as connected sources that are still reporting.
- * Null when the panel lists none or none is reporting — a dark panel's sources[] is kept
- * verbatim by setDeviceList, so its last roster still names its Cores.
+ * v1.185.0 — ONE pool's SHP2-blind fallback SoC (homeFleetMeanSoc for one panel): the mean SoC of
+ * this panel's Cores (panelRoster: live sources, else the persisted last roster) that are still
+ * reporting. Null when no roster is known or none of its Cores is reporting.
  */
 export function panelMeanSoc(
   devices: Record<string, DeviceSnapshot>,
-  panel: DeviceSnapshot & { projection: Shp2Projection },
+  panel: DeviceSnapshot,
 ): number | null {
   const socs: number[] = [];
-  for (const src of panel.projection.sources ?? []) {
-    if (!src.isConnected || !src.sn) continue;
-    const d = devices[src.sn];
+  for (const sn of panelRoster(panel)) {
+    const d = devices[sn];
     if (!d || !d.online || d.projection?.kind !== 'dpu') continue;
     const s = d.projection.soc;
     if (s != null && Number.isFinite(s)) socs.push(s);
@@ -638,9 +683,14 @@ export function housePoolFallbackSoc(
   devices: Record<string, DeviceSnapshot>,
   lastKnownRoster?: ReadonlySet<string> | null,
 ): number | null {
-  const house = findShp2(devices);
-  if (house && secondaryShp2s(devices).length > 0) return panelMeanSoc(devices, house);
-  return homeFleetMeanSoc(devices, lastKnownRoster);
+  if (shp2Panels(devices).sns.length <= 1) return homeFleetMeanSoc(devices, lastKnownRoster);
+  // v1.185.0 (review) — two panels: ONLY the house pool's own Cores, even while the house panel has
+  // no projection (restart while dark: its persisted roster). Never the union — that would be the
+  // other pool's Cores, holding the house ladder above rungs its own pool has crossed. No roster
+  // known: null, and reserve-blind is the signal.
+  const sn = houseSnOf(devices);
+  const house = sn ? devices[sn] : undefined;
+  return house ? panelMeanSoc(devices, house) : null;
 }
 
 export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {

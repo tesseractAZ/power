@@ -53,12 +53,15 @@ type Panel = DeviceSnapshot & { projection: Shp2Projection };
 export function findHousePanel(devices: Record<string, DeviceSnapshot>): Panel | undefined {
   let best: Panel | undefined;
   let flagged: DeviceSnapshot | undefined;
+  let missing = false;
   for (const d of Object.values(devices)) {
     if (d.housePanel === true) flagged = d;
+    if (d.housePanelMissing != null) missing = true;
     if (d.projection?.kind !== 'shp2') continue;
     if (!best || d.sn < best.sn) best = d as Panel;
   }
   if (flagged) return flagged.projection?.kind === 'shp2' ? (flagged as Panel) : undefined;
+  if (missing) return undefined; // the pinned house panel is off the account: nothing stands in for it
   return best;
 }
 

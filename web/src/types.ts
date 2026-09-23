@@ -176,6 +176,10 @@ export interface DeviceSnapshot {
   online: boolean;
   /** v1.185.0 — the pinned HOUSE panel (server resolveHousePanel); set on exactly one panel. */
   housePanel?: boolean;
+  /** v1.185.0 — set on every panel while the pinned house panel is missing from the account. */
+  housePanelMissing?: string;
+  /** v1.185.0 — the panel's last known Core roster. */
+  lastRoster?: string[];
   lastUpdated: number;
   lastError?: string;
   projection?: Projection;
@@ -261,7 +265,7 @@ export interface FleetSnapshot {
   grid?: GridBackstop;
   off_grid?: boolean;
   /** v1.185.0 — which panel is the house panel, and whether one must be pinned. */
-  housePanel?: { sn: string | null; ambiguous: boolean; panels: Array<{ sn: string; name: string }> };
+  housePanel?: { sn: string | null; state?: 'pinned' | 'missing' | 'ambiguous' | 'none'; ambiguous: boolean; missing?: string | null; panels: Array<{ sn: string; name: string }> };
 }
 
 export interface ForecastHour {

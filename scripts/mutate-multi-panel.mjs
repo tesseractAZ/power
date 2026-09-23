@@ -24,8 +24,9 @@ const ALERTS = resolve(SERVER, 'src/alerts.ts');
 const MON = resolve(SERVER, 'src/alertMonitor.ts');
 const RUNWAY = resolve(SERVER, 'src/panelRunway.ts');
 const WORDS = resolve(SERVER, 'src/runwayAlarm.ts');
+const WEB = resolve(REPO, 'web/src/shp2Membership.ts');
 
-const SUBSET = ['test/multiPanel.test.ts'];
+const SUBSET = ['test/multiPanel.test.ts', 'test/gridReadingPersist.test.ts'];
 
 const MUTANTS = [
   {
@@ -45,14 +46,14 @@ const MUTANTS = [
   {
     id: 'iii. ★★★ a pinned panel is not honoured when a second one is on the account',
     file: MEMB,
-    find: '  if (pinnedSn != null && census.includes(pinnedSn)) return { sn: pinnedSn, pin: pinnedSn, ambiguous: false };',
-    to: '  /* MUTANT */',
+    find: "      ? { sn: pinnedSn, pin: pinnedSn, state: 'pinned' }",
+    to: "      ? { sn: null, pin: pinnedSn, state: 'ambiguous' } /* MUTANT */",
     why: 'The day panel #2 is energised the plant turns ambiguous and every supervised write stops.',
   },
   {
     id: 'iv. ★★ a single panel is never pinned',
     file: MEMB,
-    find: '  if (census.length === 1) return { sn: census[0], pin: census[0], ambiguous: false };',
+    find: "  if (census.length === 1) return singleStable ? { sn: census[0], pin: census[0], state: 'pinned' } : { sn: null, pin: null, state: 'none' };",
     to: '  /* MUTANT */',
     why: 'Nothing is flagged: the pin that is supposed to predate panel #2 never exists.',
   },
@@ -87,7 +88,7 @@ const MUTANTS = [
   {
     id: 'ix. ★★★ a second panel raises no pool alarms of its own',
     file: ALERTS,
-    find: '  for (const panel of secondaryShp2s(devices)) secondaryPanelAlerts(out, panel, devices, connectivity, grid, now);',
+    find: '  for (const panel of secondaryPanels(devices)) secondaryPanelAlerts(out, panel, devices, connectivity, poolGrid ? poolGrid(panel.sn) : grid, now);',
     to: '  /* MUTANT */',
     why: 'The garage pool reaches its floor off-grid in silence.',
   },
@@ -101,8 +102,8 @@ const MUTANTS = [
   {
     id: 'xi. ★★ the ambiguity alert stands on a pinned plant',
     file: ALERTS,
-    find: '  if (panels.sns.length > 1 && !list.some((d) => d.housePanel === true)) {',
-    to: '  if (panels.sns.length > 1) { /* MUTANT */',
+    find: '  if (missingPin || (panels.sns.length > 1 && !list.some((d) => d.housePanel === true))) {',
+    to: '  if (missingPin || panels.sns.length > 1) { /* MUTANT */',
     why: 'A supported two-panel plant carries a permanent critical.',
   },
   {
@@ -122,8 +123,8 @@ const MUTANTS = [
   {
     id: 'xiv. ★★ the house blind fallback averages both pools',
     file: MEMB,
-    find: '  if (house && secondaryShp2s(devices).length > 0) return panelMeanSoc(devices, house);',
-    to: '  /* MUTANT */',
+    find: '  if (shp2Panels(devices).sns.length <= 1) return homeFleetMeanSoc(devices, lastKnownRoster);',
+    to: '  return homeFleetMeanSoc(devices, lastKnownRoster); /* MUTANT */',
     why: 'A full garage bank holds the house ladder above its critical rungs while the house pool empties.',
   },
   {
@@ -167,6 +168,98 @@ const MUTANTS = [
     find: "    return atFloor ? { ...base, ...floor, unavailable: null, hoursToReserve: 0 } : { ...base, ...floor, unavailable: 'measuring the drain' };",
     to: "    return { ...base, ...floor, unavailable: 'measuring the drain' }; /* MUTANT */",
     why: 'The garage pool reaches its floor off-grid in the first ten minutes after a restart, or with one Core dark, and the at-floor alarm stays silent.',
+  },
+  // ── v1.185.0 review ──
+  {
+    id: 'r1. ★★★ a missing house panel hands the role to the other panel',
+    file: MEMB,
+    find: "  if (flagged) return flagged.projection?.kind === 'shp2' ? flagged as DeviceSnapshot & { projection: Shp2Projection } : undefined;\n  if (missing) return undefined;",
+    to: "  if (flagged) return flagged.projection?.kind === 'shp2' ? flagged as DeviceSnapshot & { projection: Shp2Projection } : undefined;\n  /* MUTANT */",
+    why: 'A restart whose first list omits the house panel sends the pending revert and force-charge OFF to the garage panel.',
+  },
+  {
+    id: 'r2. ★★★ the pin moves by itself when its panel is not listed (the old auto re-pin)',
+    file: MEMB,
+    find: "      : { sn: null, pin: pinnedSn, state: 'missing' };",
+    to: "      : census.length === 1 ? { sn: census[0], pin: census[0], state: 'pinned' } : { sn: null, pin: pinnedSn, state: 'missing' }; /* MUTANT */",
+    why: 'One partial list after a restart re-pins the garage panel for good.',
+  },
+  {
+    id: 'r3. ★★ the first pin is taken from a single list',
+    file: SNAP,
+    find: '    const r = resolveHousePanel(census, this.housePanelPin, this.pinCandidateLists >= FIRST_PIN_LISTS);',
+    to: '    const r = resolveHousePanel(census, this.housePanelPin, true); /* MUTANT */',
+    why: 'A fresh two-panel install pins whichever panel a partial first list happened to name.',
+  },
+  {
+    id: 'r4. ★★ one glitched list takes a panel off the account',
+    file: SNAP,
+    find: '    return shp2Panels(this.snap.devices).sns.filter((sn) => (this.listAbsences.get(sn) ?? 0) < PANEL_ABSENT_LISTS);',
+    to: '    return shp2Panels(this.snap.devices).sns; /* MUTANT */',
+    why: 'A replaced panel stays pinned forever (the device map never forgets it), and the two-panel alert never fires.',
+  },
+  {
+    id: 'r5. ★★★ the house fallback falls back to the union when its roster is unknown',
+    file: MEMB,
+    find: '  return house ? panelMeanSoc(devices, house) : null;',
+    to: '  return house ? panelMeanSoc(devices, house) : homeFleetMeanSoc(devices, lastKnownRoster); /* MUTANT */',
+    why: 'The house ladder is fed the garage pool: none of the house rungs can fire.',
+  },
+  {
+    id: 'r6. ★★★ a dark panel forgets its Cores (no persisted roster)',
+    file: MEMB,
+    find: '  return live.length > 0 ? live : [...(panel.lastRoster ?? [])];',
+    to: '  return live; /* MUTANT */',
+    why: 'After a restart while a panel is dark its pool has no fallback SoC and its verdict no Cores.',
+  },
+  {
+    id: 'r7. ★★ the roster is not restored on first sight',
+    file: SNAP,
+    find: '        lastRoster: existing?.lastRoster ?? this.panelRosters.get(d.sn), // v1.185.0 — carried; restored on first sight',
+    to: '        lastRoster: existing?.lastRoster, /* MUTANT */',
+    why: 'The persisted roster is never read back: the dark-since-restart fallback is dead.',
+  },
+  {
+    id: 'r8. ★★★ one panel\u2019s import backstops the whole plant',
+    file: GRID,
+    find: '    if (!pool.backstopping) {',
+    to: '    if (false) { /* MUTANT */',
+    why: 'The house panel importing silences the garage pool\u2019s at-floor alarms while its own panel reports no grid.',
+  },
+  {
+    id: 'r9. ★★★ a pool\u2019s verdict is the plant\u2019s',
+    file: GRID,
+    find: '  return liveGridBackstopOver(panelScopedDevices(devices, panel));',
+    to: '  return liveGridBackstop(devices); /* MUTANT */',
+    why: 'Every pool alarm is judged against the other panel\u2019s grid.',
+  },
+  {
+    id: 'r10. ★★ the house pool alarms read the plant verdict',
+    file: ALERTS,
+    find: '  const housePoolGrid = shp2 && poolGrid ? poolGrid(shp2.sn) : grid;',
+    to: '  const housePoolGrid = grid; /* MUTANT */',
+    why: 'The garage import carries the house pool\u2019s at-floor critical down to "on grid".',
+  },
+  {
+    id: 'r11. ★★ a dark second panel raises no reserve-blind alert',
+    file: ALERTS,
+    find: '    pushReserveBlind(out, panel, devices, grid, since, now, sfx);',
+    to: '    /* MUTANT */',
+    why: 'A second pool dark since a restart is unmonitored with nothing on screen.',
+  },
+  {
+    id: 'r12. ★ one list without a panel prunes its saved "no grid"',
+    file: SNAP,
+    find: '        if (misses < PANEL_ABSENT_LISTS) continue;',
+    to: '        /* MUTANT */',
+    why: 'A partial list forgets the islanded panel\u2019s reading; after the next restart its veto is gone.',
+  },
+  {
+    id: 'r13. ★★ the web mirror stands the other panel in for a missing house panel',
+    file: WEB,
+    find: '  if (missing) return undefined; // the pinned house panel is off the account: nothing stands in for it',
+    to: '  /* MUTANT */',
+    why: 'The dashboard calls the garage pool "the" backup pool while the house panel is missing.',
   },
   {
     id: 'xx. ★ the drain runway claims the forecast',

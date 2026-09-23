@@ -30,7 +30,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh, SHP2_READBACK_STALE_MS, allShp2s, findShp2 } from './shp2Membership.js';
+import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh, SHP2_READBACK_STALE_MS, allShp2s, findShp2, shp2Panels, panelRoster } from './shp2Membership.js';
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
@@ -550,7 +550,46 @@ export function floorSlackPct(): number {
   return Math.min(10, Math.max(0, n));
 }
 
+/**
+ * v1.185.0 (review) — the live verdict. One panel: exactly the resolver over the device map, as
+ * before. Two or more: the PLANT verdict (presence, the veto, the summed flows — fail-loud across
+ * panels) backstops only when EVERY pool is backstopped by its own panel (livePoolGridBackstop).
+ * Without that, one panel's live import proved "grid" for a pool whose own panel freshly reported
+ * no grid, and a pool charging from PV on one panel hid the other pool discharging at its floor.
+ */
 export function liveGridBackstop(devices: Record<string, DeviceSnapshot>): GridBackstop {
+  const panels = shp2Panels(devices).sns;
+  const plant = liveGridBackstopOver(devices);
+  if (panels.length <= 1 || !plant.backstopping) return plant;
+  for (const sn of panels) {
+    const pool = liveGridBackstopOver(panelScopedDevices(devices, devices[sn]));
+    if (!pool.backstopping) {
+      return { ...plant, backstopping: false, reason: `${devices[sn]?.deviceName ?? sn}: ${pool.reason}` };
+    }
+  }
+  return plant;
+}
+
+/**
+ * v1.185.0 (review) — the verdict ONE pool's alarms are judged against: its panel's own grid
+ * reading, main-line flow, Cores' ac_in, veto, floor and discharge. One panel (or an unknown
+ * serial): the plant verdict, unchanged.
+ */
+export function livePoolGridBackstop(devices: Record<string, DeviceSnapshot>, panelSn: string | undefined): GridBackstop {
+  const panel = panelSn ? devices[panelSn] : undefined;
+  if (!panel || shp2Panels(devices).sns.length <= 1) return liveGridBackstop(devices);
+  return liveGridBackstopOver(panelScopedDevices(devices, panel));
+}
+
+/** v1.185.0 — one panel and the Cores it lists (live sources, else its persisted roster). */
+export function panelScopedDevices(devices: Record<string, DeviceSnapshot>, panel: DeviceSnapshot | undefined): Record<string, DeviceSnapshot> {
+  if (!panel) return {};
+  const out: Record<string, DeviceSnapshot> = { [panel.sn]: panel };
+  for (const sn of panelRoster(panel)) if (devices[sn]) out[sn] = devices[sn];
+  return out;
+}
+
+function liveGridBackstopOver(devices: Record<string, DeviceSnapshot>): GridBackstop {
   const entityId = gridPresenceEntityId();
   // v0.23.0 — getCacheAgeMs reports the age since the last SUCCESSFUL HA fetch
   // (a failed refresh does not advance it), so it's the right staleness signal:

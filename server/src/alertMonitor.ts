@@ -52,7 +52,7 @@ import { getAnalytics } from './analyticsClient.js';
 import { isPriorityEnabled } from './alertSettings.js';
 import { priorityOf, priorityMeta, notifyBracketPriority } from './alertPriority.js';
 import * as haStateCache from './haStateCache.js';
-import { liveGridBackstop, gridPresenceEntityId } from './gridState.js';
+import { liveGridBackstop, livePoolGridBackstop, gridPresenceEntityId } from './gridState.js';
 // v1.x — restart-persistent per-alert onset (first-seen) timestamps for the
 // ALM screen; see alertOnset.ts.
 import { syncAlertOnsets, getAlertOnset, restampAlertOnset } from './alertOnset.js';
@@ -2126,6 +2126,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       perDevice,
       backupPoolUnknownSinceMs: shp2Sn ? store.backupPoolUnknownSince(shp2Sn) : null,
       backupPoolUnknownSinceBySn,
+      panelFirstListedBySn: new Map(shp2Panels(snap.devices).sns.map((sn) => [sn, store.firstListedAt(sn)] as const)),
       dpuErrOnsetBySn,
       // v1.14.0 — per-slot SHP2 source-error onsets for the shp2-src-err debounce.
       shp2SrcErrOnsetBySlot: store.shp2SrcErrOnsets(),
@@ -2205,7 +2206,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     setLastPeakDrawObservation({ verdict: peakDraw, forceChargeSlots: fcSlots, atMs: Date.now() });
 
     const alerts = [
-      ...computeAlerts(snap.devices, connectivity, grid),
+      // v1.185.0 — each pool's own verdict, on a multi-panel plant only (one panel: `grid`, unchanged).
+      ...computeAlerts(snap.devices, connectivity, grid,
+        shp2Panels(snap.devices).sns.length > 1 ? (sn: string) => livePoolGridBackstop(snap.devices, sn) : undefined),
       ...computeLearnedAlerts(snap.devices),
       ...peakGridDrawAlerts(peakDraw, Date.now()),
       // v1.184.0 — the starved-feed rule, with the MAIN thread's rate-floor state (idle-held exempt).

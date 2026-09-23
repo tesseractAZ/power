@@ -12,13 +12,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  resolveHousePanel, findShp2, secondaryShp2s, panelMeanSoc, housePoolFallbackSoc, homeFleetMeanSoc, aggregateFleetFlow,
+  resolveHousePanel, findShp2, secondaryShp2s, secondaryPanels, panelMeanSoc, housePoolFallbackSoc, homeFleetMeanSoc, aggregateFleetFlow,
 } from '../src/shp2Membership.js';
-import { resolveGridBackstop, computeShp2GridConnected, computeHomeGridWatts, computeGridImportWatts } from '../src/gridState.js';
+import { resolveGridBackstop, computeShp2GridConnected, computeHomeGridWatts, computeGridImportWatts, liveGridBackstop, livePoolGridBackstop } from '../src/gridState.js';
 import { SnapshotStore } from '../src/snapshot.js';
 import { computeAlerts, resetOnScreenSocBandForTesting } from '../src/alerts.js';
 import { resolveHandoffOwner, multiPanelRosterUnsound } from '../src/alertMonitor.js';
@@ -66,16 +66,17 @@ function plant(o: {
 
 // ── the pin ─────────────────────────────────────────────────────────────────
 
-test('resolveHousePanel: one panel pins itself; a second one never takes the role', () => {
-  assert.deepEqual(resolveHousePanel(['ZHOUSE'], null), { sn: 'ZHOUSE', pin: 'ZHOUSE', ambiguous: false });
-  assert.deepEqual(resolveHousePanel(['AGARAGE', 'ZHOUSE'], 'ZHOUSE'), { sn: 'ZHOUSE', pin: 'ZHOUSE', ambiguous: false });
+test('resolveHousePanel: one stable panel pins itself; a second one never takes the role', () => {
+  assert.deepEqual(resolveHousePanel(['ZHOUSE'], null), { sn: 'ZHOUSE', pin: 'ZHOUSE', state: 'pinned' });
+  assert.deepEqual(resolveHousePanel(['ZHOUSE'], null, false), { sn: null, pin: null, state: 'none' }, 'not yet stable: no first pin');
+  assert.deepEqual(resolveHousePanel(['AGARAGE', 'ZHOUSE'], 'ZHOUSE'), { sn: 'ZHOUSE', pin: 'ZHOUSE', state: 'pinned' });
 });
 
-test('resolveHousePanel: a replaced panel (one on the account, pin gone) re-pins; two with no pin is AMBIGUOUS', () => {
-  assert.deepEqual(resolveHousePanel(['NEWPANEL'], 'OLDPANEL'), { sn: 'NEWPANEL', pin: 'NEWPANEL', ambiguous: false });
-  assert.deepEqual(resolveHousePanel(['AGARAGE', 'ZHOUSE'], null), { sn: null, pin: null, ambiguous: true });
-  assert.deepEqual(resolveHousePanel(['AGARAGE', 'ZHOUSE'], 'GONE'), { sn: null, pin: 'GONE', ambiguous: true });
-  assert.deepEqual(resolveHousePanel([], 'ZHOUSE'), { sn: null, pin: 'ZHOUSE', ambiguous: false }, 'no panel known: the pin is kept');
+test('★★★ resolveHousePanel: a pin NEVER moves by itself — its panel off the account is MISSING, not replaced', () => {
+  assert.deepEqual(resolveHousePanel(['AGARAGE'], 'ZHOUSE'), { sn: null, pin: 'ZHOUSE', state: 'missing' });
+  assert.deepEqual(resolveHousePanel(['NEWPANEL'], 'OLDPANEL'), { sn: null, pin: 'OLDPANEL', state: 'missing' });
+  assert.deepEqual(resolveHousePanel(['AGARAGE', 'ZHOUSE'], null), { sn: null, pin: null, state: 'ambiguous' });
+  assert.deepEqual(resolveHousePanel([], 'ZHOUSE'), { sn: null, pin: 'ZHOUSE', state: 'none' }, 'no panel known: the pin is kept');
 });
 
 test('★★★ findShp2 returns the PINNED panel, not the lower serial — the night-charge target cannot move', () => {
@@ -108,8 +109,10 @@ test('★★ the store pins the first panel it sees, persists it, and a lower-se
     const s = new SnapshotStore();
     s.setLogger(() => {});
     s.setDeviceList([{ sn: 'ZHOUSE', deviceName: 'House Panel', productName: 'Smart Home Panel 2', online: 1 } as Any]);
+    assert.equal(s.get().devices.ZHOUSE.housePanel, undefined, 'one list is not yet a stable census');
+    s.setDeviceList([{ sn: 'ZHOUSE', deviceName: 'House Panel', productName: 'Smart Home Panel 2', online: 1 } as Any]);
     assert.equal(s.get().devices.ZHOUSE.housePanel, true);
-    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { sn: 'ZHOUSE' });
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).sn, 'ZHOUSE');
     s.setDeviceList([
       { sn: 'ZHOUSE', deviceName: 'House Panel', productName: 'Smart Home Panel 2', online: 1 } as Any,
       { sn: 'AGARAGE', deviceName: 'Garage Panel', productName: 'Smart Home Panel 2', online: 1 } as Any,
@@ -158,6 +161,7 @@ test('★★ two panels at first sight with no pin: ambiguous, nothing flagged, 
 test('without a path or SUPERVISOR_TOKEN the pin is in memory only (no file written)', () => {
   const s = new SnapshotStore();
   s.setLogger(() => {});
+  s.setDeviceList([{ sn: 'ZHOUSE', deviceName: 'House Panel', productName: 'Smart Home Panel 2', online: 1 } as Any]);
   s.setDeviceList([{ sn: 'ZHOUSE', deviceName: 'House Panel', productName: 'Smart Home Panel 2', online: 1 } as Any]);
   assert.equal(s.get().devices.ZHOUSE.housePanel, true);
   assert.equal(existsSync(join(process.cwd(), 'data', 'house-panel.json')), false);
@@ -335,4 +339,132 @@ test('★★ a pool at its floor raises the at-floor alarm before any drain is m
   assert.equal(r.unavailable, null);
   assert.equal(classifyRunway(r, { present: false, backstopping: false }), 'critical');
   assert.equal(panelDrainRunway(plant().AGARAGE, [], NOW).unavailable, 'measuring the drain', 'above the floor it waits');
+});
+
+// ── review (v1.185.0) ───────────────────────────────────────────────────────
+
+const HOUSE = { sn: 'ZHOUSE', deviceName: 'House Panel', productName: 'Smart Home Panel 2', online: 1 } as Any;
+const GARAGE = { sn: 'AGARAGE', deviceName: 'Garage Panel', productName: 'Smart Home Panel 2', online: 1 } as Any;
+function withPin(fn: (path: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'house-panel-'));
+  const path = join(dir, 'house-panel.json');
+  const prev = process.env.HOUSE_PANEL_PATH;
+  process.env.HOUSE_PANEL_PATH = path;
+  try { fn(path); } finally {
+    if (prev === undefined) delete process.env.HOUSE_PANEL_PATH; else process.env.HOUSE_PANEL_PATH = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('★★★ REVIEW: a restart whose first list omits the house panel does NOT re-pin — it is missing, and nothing is retargeted', () => {
+  withPin((path) => {
+    writeFileSync(path, JSON.stringify({ sn: 'ZHOUSE' }));
+    const s = new SnapshotStore();
+    s.setLogger(() => {});
+    s.setDeviceList([GARAGE]);
+    const d = s.get().devices;
+    assert.equal(d.AGARAGE.housePanel, undefined);
+    assert.equal(d.AGARAGE.housePanelMissing, 'ZHOUSE');
+    d.AGARAGE.projection = plant().AGARAGE.projection;
+    assert.equal(findShp2(d), undefined, 'no write target while the house panel is missing');
+    assert.equal(findHousePanel(d as Any), undefined);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).sn, 'ZHOUSE', 'the pin is untouched');
+    s.setDeviceList([GARAGE, HOUSE]);
+    assert.equal(s.get().devices.ZHOUSE.housePanel, true, 'the house panel returns to its role');
+    assert.equal(s.get().devices.AGARAGE.housePanelMissing, undefined);
+  });
+});
+
+test('★★ REVIEW: a pinned panel gone from the account (replaced while running) is missing after three lists, not one', () => {
+  withPin(() => {
+    const s = new SnapshotStore();
+    s.setLogger(() => {});
+    s.setDeviceList([HOUSE]); s.setDeviceList([HOUSE]);
+    assert.equal(s.get().devices.ZHOUSE.housePanel, true);
+    const NEW = { ...HOUSE, sn: 'NEWPANEL', deviceName: 'New Panel' };
+    s.setDeviceList([NEW]); s.setDeviceList([NEW]);
+    assert.equal(s.get().devices.ZHOUSE.housePanel, true, 'two glitched lists are not evidence');
+    s.setDeviceList([NEW]);
+    assert.equal(s.housePanelState().state, 'missing');
+    assert.equal(s.housePanelState().missing, 'ZHOUSE');
+    assert.ok(s.housePanelState().panels.every((p) => p.sn !== 'ZHOUSE'), 'the prompt offers only panels on the account');
+    assert.equal(s.pinHousePanel('NEWPANEL'), true);
+    assert.equal(s.get().devices.NEWPANEL.housePanel, true);
+  });
+});
+
+test('★★ REVIEW: every panel\'s roster is persisted and restored on first sight after a restart', () => {
+  withPin((path) => {
+    writeFileSync(path, JSON.stringify({ sn: 'ZHOUSE', rosters: { ZHOUSE: ['C1'], AGARAGE: ['C2'] } }));
+    const s = new SnapshotStore();
+    s.setLogger(() => {});
+    s.setDeviceList([HOUSE, GARAGE]);
+    assert.deepEqual(s.get().devices.ZHOUSE.lastRoster, ['C1']);
+    assert.deepEqual(s.get().devices.AGARAGE.lastRoster, ['C2']);
+    s.setDeviceQuota('AGARAGE', {
+      'pd303_mc.backupIncreInfo.Energy1Info.devInfo.modelInfo.sn': 'C9', 'pd303_mc.backupIncreInfo.Energy1Info.isConnect': 1,
+      'loadInfo.hall1Watt': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    });
+    assert.deepEqual(s.get().devices.AGARAGE.lastRoster, ['C9']);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).rosters.AGARAGE, ['C9']);
+  });
+});
+
+test('★★★ REVIEW: the house ladder\'s fallback reads ITS OWN Cores while the house panel has no projection — never the other pool', () => {
+  const d = plant();
+  delete d.ZHOUSE.projection;
+  d.ZHOUSE.lastRoster = ['C1'];
+  d.C1.projection.soc = 12;
+  d.C2.projection.soc = 75;
+  assert.equal(housePoolFallbackSoc(d), 12);
+  delete d.ZHOUSE.lastRoster;
+  assert.equal(housePoolFallbackSoc(d), null, 'no roster known: null (reserve-blind is the signal), not the garage mean');
+});
+
+test('★★★ REVIEW: one panel importing does not backstop a pool whose OWN panel reports no grid', () => {
+  const d = plant({ garageSta: 0, houseGridW: 2000, garageSoc: 14 });
+  assert.equal(livePoolGridBackstop(d, 'AGARAGE').backstopping, false);
+  assert.equal(livePoolGridBackstop(d, 'ZHOUSE').backstopping, true, 'the house pool is carried by its own panel');
+  const plantG = liveGridBackstop(d);
+  assert.equal(plantG.backstopping, false, 'the plant backstops only when every pool is backstopped');
+  assert.match(plantG.reason, /^Garage Panel: /);
+  resetOnScreenSocBandForTesting();
+  const a = computeAlerts(d, undefined, { present: true, backstopping: true }, (sn) => livePoolGridBackstop(d, sn));
+  assert.equal(a.find((x) => x.id === 'shp2-below-reserve-AGARAGE')?.severity, 'critical');
+});
+
+test('★★ REVIEW: a pool charging from PV on one panel does not hide the other pool discharging at its floor', () => {
+  const d = plant({ garageSoc: 15 });
+  d.C1.projection.packs = [{ num: 1, outputWatts: 0, inputWatts: 2000 }];
+  d.C2.projection.packs = [{ num: 1, outputWatts: 1500, inputWatts: 0 }];
+  assert.equal(livePoolGridBackstop(d, 'AGARAGE').backstopping, false);
+  assert.equal(liveGridBackstop(d).backstopping, false);
+});
+
+test('★★ REVIEW: a second panel with NO projection is still watched — its roster, its ladder input, its reserve-blind alert', () => {
+  const d = plant();
+  delete d.AGARAGE.projection;
+  d.AGARAGE.lastRoster = ['C2'];
+  assert.deepEqual(secondaryPanels(d).map((p) => p.sn), ['AGARAGE']);
+  assert.equal(panelMeanSoc(d, d.AGARAGE), 30);
+  const conn: Any = { lastDeviceListAttemptAt: NOW, lastDeviceListSuccessAt: NOW, perDevice: new Map(), panelFirstListedBySn: new Map([['AGARAGE', NOW - 20 * 60_000]]) };
+  const blind = computeAlerts(d, conn, { present: false, backstopping: false }).find((x) => x.id === 'reserve-alarm-blind-AGARAGE');
+  assert.ok(blind);
+  assert.match(blind!.detail, /mean 30%/);
+});
+
+test('REVIEW: a missing pin raises the house-panel alert even with one panel on the account', () => {
+  const d = plant();
+  delete d.ZHOUSE;
+  d.AGARAGE.housePanelMissing = 'ZHOUSE';
+  const m = computeAlerts(d, undefined, { present: true, backstopping: true }).find((x) => x.id === 'shp2-multi-panel');
+  assert.ok(m);
+  assert.equal(m!.title, 'House panel not on the account');
+});
+
+test('★★ REVIEW: the HOUSE pool\'s alarms read the house panel\'s own verdict, not the plant\'s', () => {
+  const d = plant({ houseSta: 0, garageGridW: 2000, houseSoc: 15 });
+  resetOnScreenSocBandForTesting();
+  const a = computeAlerts(d, undefined, { present: true, backstopping: true }, (sn) => livePoolGridBackstop(d, sn));
+  assert.equal(a.find((x) => x.id === 'shp2-below-reserve')?.severity, 'critical', 'the garage import does not carry the house pool');
 });
