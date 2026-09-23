@@ -10,9 +10,11 @@
   said "not a live countdown" — until the pool neared the floor, by which time the hours in which
   to shed load or start a generator had passed. An online panel reporting `gridSta` 0 ("grid not
   detected") or 2 (out of spec, islanded onto the batteries) now vetoes the declaration at any
-  state of charge, and the resolver's reason names the reading. An offline or cloud-shadowed
-  panel, or one that reports no `gridSta`, vetoes nothing; measured grid flow still proves the
-  grid regardless. In three weeks of recorded history (2026-09-01 to 09-22) the panel never
+  state of charge, and the resolver's reason names the code the panel reported. The reading must
+  be fresh — a REST reading from the last five minutes — so a panel that comes back online
+  cannot re-expose the reading it had before it went dark. An offline or cloud-shadowed panel,
+  or one that reports no `gridSta`, vetoes nothing; measured grid flow still proves the grid
+  regardless. In three weeks of recorded history (2026-09-01 to 09-22) the panel never
   reported 0 or 2 while the grid was up, and a false reading would sound an alarm early rather
   than silence one.
 - **No more model-less zeros in Home Assistant after a restart.** The first state publish runs
@@ -28,12 +30,15 @@
   flows until an online Core is projected, panel load until the panel reports a channel, alarm
   counts once the monitor has run, the speaker count after the first probe, the forecast when
   there is PV history to project from, and the clipping, curtailment, carbon and tariff figures
-  when their report ran on a real basis. Both the MQTT publisher and `/api/ha-state` apply the
-  same rule. Genuine zeros — no PV at night, no active alarms — publish as before. Lifetime
+  when their report ran on a real basis — for curtailment that includes weather, which is
+  missing after a restart until the first forecast fetch succeeds and would otherwise have
+  produced the same 0 by another path. Both the MQTT publisher and `/api/ha-state` apply the
+  same rule, and the "PV Curtailment Active" binary sensor reads unknown rather than off while
+  withheld. A DPU-only install (no panel) keeps publishing its grid cost. Genuine zeros — no PV at night, no active alarms — publish as before. Lifetime
   counters, which come from persisted totals, are unaffected.
 - The console's plant PV view shows "—" for the next-24 h forecast while it has no basis.
 
-New harness `scripts/mutate-grid-veto-boot-zero.mjs` (13 anchor-asserted mutants).
+New harness `scripts/mutate-grid-veto-boot-zero.mjs` (21 anchor-asserted mutants).
 
 ## 1.177.0
 

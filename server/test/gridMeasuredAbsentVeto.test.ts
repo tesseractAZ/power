@@ -21,11 +21,11 @@ type Any = any;
 const entity = (state: string): Any => ({ entity_id: 'input_boolean.grid_available', state, last_updated: new Date().toISOString() });
 
 /** An online, fresh panel reporting `gridSta`, no grid flow, the pool discharging. */
-function devices(gridSta: number | null, opts: { online?: boolean; shadowed?: boolean; gridWatt?: number } = {}): Any {
+function devices(gridSta: number | null, opts: { online?: boolean; shadowed?: boolean; gridWatt?: number; quotaAgoMs?: number } = {}): Any {
   return {
     SHP2: {
       sn: 'SHP2', deviceName: 'Smart Home Panel 2', productName: 'Smart Home Panel 2',
-      online: opts.online ?? true, lastUpdated: Date.now(),
+      online: opts.online ?? true, lastUpdated: Date.now(), lastQuotaAtMs: Date.now() - (opts.quotaAgoMs ?? 20_000),
       contentStaleSinceMs: opts.shadowed ? Date.now() - 6 * 60_000 : null,
       projection: {
         kind: 'shp2', gridSta, gridConnected: gridSta == null ? null : gridSta === 1,
@@ -83,6 +83,23 @@ test('★★ an UNKNOWN reading vetoes nothing: offline panel, cloud-shadowed pa
     assert.equal(g.backstopping, true, `${name}: the declaration stands when the panel cannot be heard`);
     assert.equal(g.declared, true, name);
   }
+});
+
+test('★★ a STALE readback vetoes nothing: an OFFLINE→ONLINE /status flip re-exposes a pre-outage 0 no quota has refreshed', () => {
+  // setDeviceOnline flips `online` without touching the projection or lastQuotaAtMs; the grid
+  // may well be back. Until a fresh REST quota confirms the panel's reading, the declaration stands.
+  const g = resolve(devices(0, { quotaAgoMs: 6 * 60_000 }));
+  assert.equal(g.backstopping, true);
+  assert.equal(g.declared, true);
+  // ...and the first fresh quota that still says 0 applies the veto.
+  assert.equal(resolve(devices(0, { quotaAgoMs: 1_000 })).backstopping, false);
+});
+
+test('an undocumented gridSta code is not "Grid OK" (VALUE-1-ONLY) and the reason names the code it reported', () => {
+  const g = resolve(devices(3));
+  assert.equal(g.backstopping, false);
+  assert.match(g.reason, /gridSta=3/);
+  assert.doesNotMatch(g.reason, /gridSta=0/);
 });
 
 test('Grid OK (gridSta 1) with the toggle ON is unchanged: backstopping', () => {

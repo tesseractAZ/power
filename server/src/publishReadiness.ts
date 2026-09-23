@@ -33,7 +33,7 @@ export interface PublishReadiness {
   forecastPv: boolean;
   /** The clipping report ran on a real solar model (array peak > 0). */
   clipping: boolean;
-  /** The curtailment report ran with home Cores and a panel. */
+  /** The curtailment report ran with home Cores, the panel, weather and a solar posterior. */
   curtailment: boolean;
   /** The carbon report's rolling window ran with Cores and a panel. */
   carbon: boolean;
@@ -71,7 +71,7 @@ export interface ReadinessInputs {
   speakerLastProbeAt: number | null | undefined;
   forecast: { pvForecastUnavailable?: boolean } | null | undefined;
   clipping: { arrayPeakW?: number | null } | null | undefined;
-  curtailment: { inactiveReason?: string | null } | null | undefined;
+  curtailment: { basisComplete?: boolean } | null | undefined;
   carbon: { basisComplete?: boolean } | null | undefined;
   tariff: { basisComplete?: boolean } | null | undefined;
 }
@@ -86,7 +86,7 @@ export function publishReadiness(i: ReadinessInputs): PublishReadiness {
     speakers: i.speakerLastProbeAt != null,
     forecastPv: !!i.forecast && i.forecast.pvForecastUnavailable !== true,
     clipping: (i.clipping?.arrayPeakW ?? 0) > 0,
-    curtailment: !!i.curtailment && i.curtailment.inactiveReason !== 'no-home-dpus' && i.curtailment.inactiveReason !== 'no-shp2',
+    curtailment: !!i.curtailment && i.curtailment.basisComplete === true,
     carbon: !!i.carbon && i.carbon.basisComplete !== false,
     tariff: !!i.tariff && i.tariff.basisComplete !== false,
   };

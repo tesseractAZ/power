@@ -28,7 +28,7 @@ const AN = resolve(SERVER, 'src/analytics.ts');
 const IDX = resolve(SERVER, 'src/index.ts');
 const MQTT = resolve(SERVER, 'src/mqttDiscovery.ts');
 
-const SUBSET = ['test/gridMeasuredAbsentVeto.test.ts', 'test/publishReadiness.test.ts'];
+const SUBSET = ['test/gridMeasuredAbsentVeto.test.ts', 'test/publishReadiness.test.ts', 'test/curtailment.test.ts'];
 
 const MUTANTS = [
   {
@@ -41,8 +41,8 @@ const MUTANTS = [
   {
     id: 'ii. \u2605\u2605 an UNKNOWN panel reading (offline / shadowed / absent) vetoes the declaration',
     file: GRID,
-    find: '  const gridMeasuredAbsent = shp2GridConnected === false;',
-    to: '  const gridMeasuredAbsent = shp2GridConnected !== true; /* MUTANT */',
+    find: '  const gridMeasuredAbsent = shp2GridConnected === false && shp2ReadbackFresh(',
+    to: '  const gridMeasuredAbsent = shp2GridConnected !== true && shp2ReadbackFresh( /* MUTANT */',
     why: 'Every panel cloud blip withdraws the backstop: nuisance runway alarms and off_grid flapping with the grid perfectly fine.',
   },
   {
@@ -51,6 +51,20 @@ const MUTANTS = [
     find: '        : declaredRaw && gridMeasuredAbsent',
     to: '        : false /* MUTANT */',
     why: 'The resolver\u2019s reason says the grid entity is off when the toggle is ON and the panel measured no grid \u2014 misdirecting the investigation.',
+  },
+  {
+    id: 'iii-b. \u2605\u2605 the veto acts on a STALE readback (an OFFLINE\u2192ONLINE flip re-exposes a pre-outage 0)',
+    file: GRID,
+    find: '  const gridMeasuredAbsent = shp2GridConnected === false && shp2ReadbackFresh(panel, input.nowMs ?? Date.now());',
+    to: '  const gridMeasuredAbsent = shp2GridConnected === false; /* MUTANT */',
+    why: 'The grid is back, the toggle is ON, and a sample nobody refreshed withdraws the backstop: off_grid ON, runway and SoC audibles, a night-charge gridLossAbort.',
+  },
+  {
+    id: 'iii-c. the reason says gridSta=0 for a code the panel never sent',
+    file: GRID,
+    find: '  return `grid status not OK (gridSta=${sta})`;',
+    to: "  return 'grid not detected (gridSta=0)'; /* MUTANT */",
+    why: 'The reason contradicts the shp2_grid_status sensor beside it.',
   },
   {
     id: 'iv. \u2605\u2605\u2605 withholdUnready withholds nothing',
@@ -69,9 +83,37 @@ const MUTANTS = [
   {
     id: 'vi. \u2605\u2605\u2605 the curtailment counters publish from the empty report',
     file: READY,
-    find: "    curtailment: !!i.curtailment && i.curtailment.inactiveReason !== 'no-home-dpus' && i.curtailment.inactiveReason !== 'no-shp2',",
+    find: '    curtailment: !!i.curtailment && i.curtailment.basisComplete === true,',
     to: '    curtailment: !!i.curtailment, /* MUTANT */',
     why: 'pv_curtailment_kwh_today (total_increasing) dips to 0 at boot: Home Assistant books a reset and counts the day again.',
+  },
+  {
+    id: 'vi-b. \u2605\u2605\u2605 a weather-cold curtailment report claims a complete basis',
+    file: AN,
+    find: '    basisComplete: weather != null && bayes.hourly.length > 0,',
+    to: '    basisComplete: true, /* MUTANT */',
+    why: 'The first Open-Meteo fetch after a restart fails: every hour samples null, 0 kWh publishes, and the reset the release removed comes back by another path.',
+  },
+  {
+    id: 'vi-c. \u2605 weather alone is taken as a basis (no posterior yet)',
+    file: AN,
+    find: '    basisComplete: weather != null && bayes.hourly.length > 0,',
+    to: '    basisComplete: weather != null, /* MUTANT */',
+    why: 'With no paired history every hour still samples null: the same model-less 0.',
+  },
+  {
+    id: 'vi-d. \u2605\u2605 the early-return (no home Cores / no panel) report claims a complete basis',
+    file: AN,
+    find: '    basisComplete: false,\n  };',
+    to: '    basisComplete: true, /* MUTANT */\n  };',
+    why: 'The boot publish (before the first poll) returns the empty report: its 0 kWh is published as a reading.',
+  },
+  {
+    id: 'vi-e. \u2605\u2605 the binary curtailment sensor renders a withheld null as OFF',
+    file: MQTT,
+    find: `value_template: '{{ "None" if value_json.pv_curtailment_active is none else ("ON" if value_json.pv_curtailment_active else "OFF") }}' },`,
+    to: `value_template: '{{ "ON" if value_json.pv_curtailment_active else "OFF" }}' }, /* MUTANT */`,
+    why: 'An on\u2192off edge at every restart while curtailing: automations that return loads when curtailment ends fire on a restart.',
   },
   {
     id: 'vii. \u2605\u2605 fleet flows publish before any Core is projected',
@@ -97,16 +139,30 @@ const MUTANTS = [
   {
     id: 'x. \u2605 the tariff report claims completeness on a partial snapshot',
     file: AN,
-    find: '  value.basisComplete = dpus.length > 0 && shp2 != null;',
+    find: '  value.basisComplete = dpus.length > 0 && (shp2 != null || shp2Panels(devices).sns.length === 0);',
     to: '  value.basisComplete = true; /* MUTANT */',
-    why: 'Boot-partial grid cost / solar value / net savings publish as real figures and are cached for the full TTL.',
+    why: 'Boot-partial grid cost / solar value / net savings publish as real figures.',
+  },
+  {
+    id: 'x-b. \u2605 a DPU-only install is never a complete tariff basis',
+    file: AN,
+    find: '  value.basisComplete = dpus.length > 0 && (shp2 != null || shp2Panels(devices).sns.length === 0);',
+    to: '  value.basisComplete = dpus.length > 0 && shp2 != null; /* MUTANT */',
+    why: 'With no panel at all the ac_in grid cost is real, and would read unknown forever.',
   },
   {
     id: 'xi. \u2605\u2605 the forecast never flags a model-less PV forecast',
     file: AN,
-    find: '  value.pvForecastUnavailable = homeDpus.length === 0 || pvSpan === 0;',
+    find: '  value.pvForecastUnavailable = restoredPvSpan === 0;',
     to: '  value.pvForecastUnavailable = false; /* MUTANT */',
     why: 'The boot forecast\u2019s 0 kWh is published to Home Assistant as a forecast, at every restart.',
+  },
+  {
+    id: 'xi-b. \u2605 the flag judges the REPORTING basis, not the published one',
+    file: AN,
+    find: '  value.pvForecastUnavailable = restoredPvSpan === 0;',
+    to: '  value.pvForecastUnavailable = homeDpus.length === 0 || pvSpan === 0; /* MUTANT */',
+    why: 'Every home Core wedged at a restart: their own recorded PV makes a real display forecast, and it reads unknown for as long as the wedge.',
   },
   {
     id: 'xii. \u2605\u2605 the REST twin is not passed through the readiness rule',

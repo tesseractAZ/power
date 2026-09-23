@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { publishReadiness, withholdUnready, READINESS_FIELDS, type ReadinessInputs } from '../src/publishReadiness.js';
-import { computeCarbonReport, computeTariffReport } from '../src/analytics.js';
+import { computeCarbonReport, computeTariffReport, resetTariffCache } from '../src/analytics.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 
 type Any = any;
@@ -27,7 +27,7 @@ const bootInputs = (): ReadinessInputs => ({
   speakerLastProbeAt: null,
   forecast: { pvForecastUnavailable: true },
   clipping: { arrayPeakW: 0 },
-  curtailment: { inactiveReason: 'no-home-dpus' },
+  curtailment: { basisComplete: false },
   carbon: { basisComplete: false },
   tariff: { basisComplete: false },
 });
@@ -41,7 +41,7 @@ const warmInputs = (): ReadinessInputs => ({
   speakerLastProbeAt: Date.now(),
   forecast: { pvForecastUnavailable: false },
   clipping: { arrayPeakW: 9707 },
-  curtailment: { inactiveReason: null },
+  curtailment: { basisComplete: true },
   carbon: { basisComplete: true },
   tariff: { basisComplete: true },
 });
@@ -116,6 +116,17 @@ test('★★ carbon and tariff report basisComplete=false on a boot-partial snap
   assert.equal(computeTariffReport(listed, emptyRec).basisComplete, false);
 });
 
+test('★★ a DPU-only install (no panel listed at all) prices ac_in and publishes its tariff; a panel LISTED but unprojected is the boot race', () => {
+  const core: Any = { sn: 'C1', deviceName: 'Core', productName: 'Delta Pro Ultra', online: true, lastUpdated: Date.now(),
+    projection: { kind: 'dpu', soc: 50, acInWatts: 0, packs: [] } };
+  resetTariffCache();
+  assert.equal(computeTariffReport({ C1: core }, emptyRec).basisComplete, true, 'DPU-only: complete without a panel');
+  resetTariffCache();
+  const listedPanel: Any = { sn: 'P', deviceName: 'Panel', productName: 'Smart Home Panel 2', online: true, lastUpdated: 0 };
+  assert.equal(computeTariffReport({ C1: core, P: listedPanel }, emptyRec).basisComplete, false, 'panel listed, not yet projected');
+  resetTariffCache();
+});
+
 /* ── wiring and key integrity ────────────────────────────────────────────── */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -136,6 +147,21 @@ test('★★ every governed key exists in at least one publisher — a typo woul
   }
 });
 
+test('★★ a withheld BINARY sensor renders "None" (HA unknown), not "OFF" — a falsy-null template would fabricate an off edge', async () => {
+  // HA 2026.9 mqtt/binary_sensor.py: payload == PAYLOAD_NONE ("None") → is_on = None (unknown).
+  // `{{ "ON" if value_json.x else "OFF" }}` renders null as "OFF": an on→off edge at every restart.
+  const { BINARY_SENSORS } = await import('../src/mqttDiscovery.js');
+  const governed = new Set(Object.values(READINESS_FIELDS).flat());
+  let checked = 0;
+  for (const b of BINARY_SENSORS) {
+    const key = /value_json\.(\w+)/.exec(b.value_template)?.[1];
+    if (!key || !governed.has(key)) continue;
+    checked++;
+    assert.match(b.value_template, new RegExp(`"None" if value_json\\.${key} is none`), `${b.unique_id}: null must render "None"`);
+  }
+  assert.ok(checked >= 1, 'pv_curtailment_active is governed and checked');
+});
+
 test('★★ the forecast flags a model-less PV forecast: no projected home Core means pvForecastUnavailable', async () => {
   const { getDayForecast, resetForecastCachesForTesting } = await import('../src/analytics.js');
   resetForecastCachesForTesting();
@@ -143,5 +169,34 @@ test('★★ the forecast flags a model-less PV forecast: no projected home Core
   const fc = await getDayForecast(listed, emptyRec, () => {});
   assert.equal(fc.pvForecastUnavailable, true, 'the boot forecast is not a forecast');
   assert.equal(fc.forecastPvWhNext24, 0, '(and this is the 0 that used to be published)');
+  resetForecastCachesForTesting();
+});
+
+test('★★ the flag follows the PUBLISHED basis: every home Core wedged at a restart, their own recorded PV still makes a real display forecast', async () => {
+  const { getDayForecast, resetForecastCachesForTesting } = await import('../src/analytics.js');
+  const HOUR = 3_600_000;
+  const now = Date.now();
+  const series = (w: number) => Array.from({ length: 48 }, (_, k) => ({ ts: now - (48 - k) * HOUR, value: w }));
+  // The panel is projected and names A and B as connected sources; neither Core is projected
+  // (cloud-offline when the add-on started, so no quota was fetched). A bench spare is.
+  const devices: Any = {
+    SHP2: { sn: 'SHP2', deviceName: 'SHP2', online: true, lastUpdated: now,
+      projection: { kind: 'shp2', backupBatPercent: 60, backupFullCapWh: 100_000, backupRemainWh: 60_000, backupReserveSoc: 15,
+        circuits: [{ ch: 1, watts: 900 }], pairedCircuits: [], sources: [{ slot: 1, sn: 'A', isConnected: true }, { slot: 2, sn: 'B', isConnected: true }], sourceWatts: [] } },
+    A: { sn: 'A', deviceName: 'Core A', online: false, lastUpdated: 0 },
+    B: { sn: 'B', deviceName: 'Core B', online: false, lastUpdated: 0 },
+    SPARE: { sn: 'SPARE', deviceName: 'Spare', online: true, lastUpdated: now, projection: { kind: 'dpu', soc: 50, pvTotalWatts: 0, packs: [] } },
+  };
+  const withHistory = makeRecorderStub({
+    query: (sn: string, metric: string) => (metric === 'pv_total' && sn === 'A' ? series(1500) : metric === 'panel_load' ? series(900) : []),
+    queryMulti: (_sn: string, metrics: string[]) => new Map(metrics.map((m) => [m, []])),
+    listMetrics: () => [],
+  } as Any);
+  resetForecastCachesForTesting();
+  const fc = await getDayForecast(devices, withHistory, () => {});
+  assert.equal(fc.pvForecastUnavailable, false, 'Core A\'s own recorded PV is the published basis');
+  resetForecastCachesForTesting();
+  const cold = makeRecorderStub({ query: () => [], queryMulti: () => new Map(), listMetrics: () => [] } as Any);
+  assert.equal((await getDayForecast(devices, cold, () => {})).pvForecastUnavailable, true, 'no history anywhere: model-less');
   resetForecastCachesForTesting();
 });

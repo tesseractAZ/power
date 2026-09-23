@@ -30,7 +30,7 @@
 
 import type { DeviceSnapshot } from './snapshot.js';
 import type { DpuProjection, Shp2Projection } from './ecoflow/project.js';
-import { aggregateFleetFlow, homeCoreCoverage } from './shp2Membership.js';
+import { aggregateFleetFlow, homeCoreCoverage, shp2ReadbackFresh } from './shp2Membership.js';
 import type { CachedEntity } from './haStateCache.js';
 import * as haStateCache from './haStateCache.js';
 import type { AlarmPriority } from './alertPriority.js';
@@ -232,6 +232,9 @@ export interface GridBackstopInput {
    *  flow-less declaration remains a valid backstop (grid available, not yet
    *  needed). Resolved from the SHP2 SoC vs backupReserveSoc in liveGridBackstop. */
   atReserveFloor?: boolean;
+  /** v1.178.0 — clock for the measured-absent veto's readback-freshness gate (defaults to
+   *  Date.now(); tests pin it). */
+  nowMs?: number;
 }
 
 /** Pure resolver — unit-testable; no env / cache reads. */
@@ -264,9 +267,13 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
     ? entityPresent === true
     : input.gridAvailableFallback;
   // v1.178.0 — a LIVE panel reading of NO grid vetoes a DECLARED-only grid, everywhere.
-  // shp2GridConnected is false only when an ONLINE, non-shadowed panel reports gridSta 0
-  // (grid voltage not detected) or 2 (out of spec → the panel islands onto the batteries);
-  // offline, shadowed or absent readings are null and veto nothing. The declaration — a
+  // shp2GridConnected is false when an online, non-shadowed panel reports any gridSta other
+  // than 1 (VALUE-1-ONLY: 0 = grid not detected, 2 = out of spec → the panel islands onto
+  // the batteries; an undocumented code is not "Grid OK" either); offline, shadowed or absent
+  // readings are null and veto nothing. The veto also requires a FRESH readback
+  // (shp2ReadbackFresh: a REST quota within SHP2_READBACK_STALE_MS): a bare /status
+  // OFFLINE→ONLINE flip re-exposes the pre-outage sample nobody refreshed, and a stale 0
+  // must not withdraw a declaration the grid's return has since made true. The declaration — a
   // hand-flipped `input_boolean.grid_available`, or the static GRID_AVAILABLE — was trusted
   // over that measurement away from the reserve floor, so in a surprise outage with the
   // toggle still ON the grid kept "backstopping": the runway audible stayed gated silent,
@@ -275,7 +282,8 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   // start the generator, lost. Measured flow (importLive) still proves the grid regardless.
   // The failure mode of a false 0 is an early alarm, never a missed one; in three weeks of
   // recorded gridSta (2026-09-01..22) no 0 or 2 appeared while the grid was up.
-  const gridMeasuredAbsent = shp2GridConnected === false;
+  const panel = projectedShp2(input.devices);
+  const gridMeasuredAbsent = shp2GridConnected === false && shp2ReadbackFresh(panel, input.nowMs ?? Date.now());
   const declared = declaredRaw && !gridMeasuredAbsent;
 
   const present = importLive || declared || shp2GridConnected === true;
@@ -337,7 +345,7 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
           ? 'SHP2 gridSta=Grid OK but backup pool still discharging at the reserve floor — not backstopping'
           : `SHP2 gridSta=Grid OK but only ${poolCoverage.reporting}/${poolCoverage.connected} home Cores are reporting at the reserve floor — pool drain unobservable, not backstopping`
         : declaredRaw && gridMeasuredAbsent
-          ? `grid declared present but the SHP2 reports ${input.devices && shp2GridStaText(input.devices)} — not backstopping`
+          ? `grid declared present but the SHP2 reports ${shp2GridStaText(panel)} — not backstopping`
           : declared
           ? floorWithoutFlow
             ? 'grid declared present but no measured grid flow at the reserve floor — not backstopping'
@@ -353,13 +361,19 @@ export function resolveGridBackstop(input: GridBackstopInput): GridBackstop {
   return { present, backstopping, importLive, declared, importWatts, homeGridWatts, shp2GridConnected, reason };
 }
 
-/** v1.178.0 — the panel's own words for a no-grid reading, for the resolver's reason. */
-function shp2GridStaText(devices: Record<string, DeviceSnapshot>): string {
-  const shp2 = Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
+function projectedShp2(devices: Record<string, DeviceSnapshot>): (DeviceSnapshot & { projection: Shp2Projection }) | undefined {
+  return Object.values(devices).find((d) => d.projection?.kind === 'shp2') as
     | (DeviceSnapshot & { projection: Shp2Projection })
     | undefined;
-  const sta = shp2?.projection.gridSta ?? null;
-  return sta === 2 ? 'grid out of spec (gridSta=2, islanded)' : 'grid not detected (gridSta=0)';
+}
+
+/** v1.178.0 — the panel's own words for a not-Grid-OK reading, for the resolver's reason.
+ *  Names the code it actually reported, so the reason never says 0 for another value. */
+function shp2GridStaText(panel: (DeviceSnapshot & { projection: Shp2Projection }) | undefined): string {
+  const sta = panel?.projection.gridSta ?? null;
+  if (sta === 0) return 'grid not detected (gridSta=0)';
+  if (sta === 2) return 'grid out of spec (gridSta=2, islanded)';
+  return `grid status not OK (gridSta=${sta})`;
 }
 
 /** Live wrapper: reads GRID_PRESENCE_ENTITY / GRID_AVAILABLE from env and the
