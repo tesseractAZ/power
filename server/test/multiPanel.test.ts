@@ -321,3 +321,18 @@ test('beyond the 24 h horizon the figure is dropped (no hourly "low" for a slow 
   assert.equal(r.hoursToReserve, null);
   assert.equal(classifyRunway(r, { present: false, backstopping: false }), null);
 });
+
+test('★★★ one of the panel\'s Cores not reporting: no drain at all, never the smaller sum', () => {
+  const d = plant();
+  d.AGARAGE.projection.sources.push({ slot: 2, sn: 'C3', isConnected: true, hwConnect: true, errorCodeNum: 0 });
+  d.C3 = { ...d.C2, sn: 'C3', online: false };
+  assert.deepEqual(panelPoolNetWatts(d, d.AGARAGE), { netW: null, reporting: 1, connected: 2 });
+});
+
+test('★★ a pool at its floor raises the at-floor alarm before any drain is measured', () => {
+  const d = plant({ garageSoc: 10 });
+  const r = panelDrainRunway(d.AGARAGE, [], NOW);
+  assert.equal(r.unavailable, null);
+  assert.equal(classifyRunway(r, { present: false, backstopping: false }), 'critical');
+  assert.equal(panelDrainRunway(plant().AGARAGE, [], NOW).unavailable, 'measuring the drain', 'above the floor it waits');
+});

@@ -1378,6 +1378,47 @@ the home bus. Every fleet aggregation must exclude spares.
 
 Roster at the time of writing: Core 1/2/3 home; Core 4/5 bench spares as above.
 
+#### Two panels (v1.185.0)
+
+A second SHP2 is supported. Its model:
+
+- **The house panel is pinned.** `resolveHousePanel(census, pin)` (pure): the pin wins while its
+  serial is in the identity census (`shp2Panels`); a census of exactly one pins that panel (first
+  sight, or a replaced panel); two or more with no pin among them is `ambiguous`. `SnapshotStore`
+  persists the pin (`house-panel.json` beside the DB in production; `HOUSE_PANEL_PATH`
+  overrides; in memory elsewhere) and stamps `DeviceSnapshot.housePanel` on exactly one panel
+  after every `/device/list` (recomputed, not carried — the literal rebuild drops it). The flag
+  travels with the device into the analytics worker and the web client.
+- **`findShp2(devices)`** returns the flagged panel, or **undefined while that panel has no
+  projection** (never the other panel); with nothing flagged, the lowest serial (unchanged). Every
+  former inline `find(kind === 'shp2')` (analytics, MQTT discovery, recorder, calendar,
+  publish readiness, feature snapshot, telnet, web) now resolves through it or its web mirror
+  `findHousePanel`. **`secondaryShp2s`** lists every other projected panel by serial.
+- **Writes.** `multiPanelWriteBlock` refuses supervised apply writes only while two panels stand
+  with none flagged; every write targets `findShp2`. `POST /api/house-panel {sn}` (write-auth)
+  pins a panel on the account and refuses to MOVE an existing pin while the arbitrage reserve is
+  raised, a night-charge write is in flight, a Charge Now write awaits readback, or a house slot
+  is force-charging. The dashboard's `HousePanelPin` prompt appears only while ambiguous.
+- **Alarms per panel.** `alerts.secondaryPanelAlerts` gives each secondary panel the house
+  panel's reserve pair, source and circuit faults, reserve-blind and SoC band, with ids suffixed
+  `-<serial>` (`familyOf` stops at the serial, so every family rule applies) and titles led by
+  the panel's name; no arbitrage posture (night charge never writes it). `resolveHandoffOwner`
+  hands `backup-soc-<pct>-<serial>` to that panel's own pair. index.ts runs a SoC ladder per
+  secondary panel (`battery-soc-alarm-<serial>.json`, `socAlarmMessage(t, poolName)`) and a
+  runway alarm per panel (`runway-alarm-<serial>.json`, `RunwayWording { poolName, basis: 'drain' }`).
+- **The secondary runway** (`panelRunway.ts`) is the pool's energy against its measured drain:
+  the net pack flow of the panel's connected Cores (`panelPoolNetWatts`, null unless EVERY one
+  reports), sampled each 2-min runway tick, averaged over 30 min once the window spans 10 min; a
+  null reading clears the window. Unavailable on a stale panel reading; no depletion under 50 W or
+  beyond 24 h; a pool at or under its reserve reads at the floor whatever the drain.
+- **Fallback SoC.** `housePoolFallbackSoc` = `homeFleetMeanSoc` with one panel; with more, the
+  house panel's own Cores (`panelMeanSoc`). Secondary ladders fall back to their own Cores.
+- **Plant totals.** `aggregateFleetFlow.panelLoad` sums every panel's circuits (the flows were
+  already the union roster); the web flow model does the same and freezes the load if any panel
+  is frozen. `publishReadiness.flow` waits until every panel in the census has a projection.
+- **Muting.** `multiPanelRosterUnsound`: bench-spare / off-panel demotion is disarmed only while
+  some panel in a multi-panel census lacks a projection or lists no connected source.
+
 ---
 
 ### Cloud-wedge vs. real-outage classification (`deviceLink.ts`)
@@ -6600,6 +6641,8 @@ Cores × `FORCE_CHARGE_PROVEN_KW_PER_SLOT` ÷ √RTE). A quiet-hours-muted deadl
 `FORCE_CHARGE_BLIND_RESEND_MAX_MS`; the ceiling restore is an own-write; `evDisplacedPackKwh` takes
 the per-Core slack off an EV allowance. `stale-*` joins `msg-rate-floor-*` outside the spoken
 condition (push and card kept).
+
+**v1.185.0 — two smart panels, supported.** The house panel is pinned (`resolveHousePanel`, persisted `house-panel.json`, `DeviceSnapshot.housePanel`) and `findShp2` returns only it — undefined while it has no projection — so a lower-serial second panel can no longer become the target of the SoC ladder, HA backup sensors or night-charge writes; every inline `find(kind === 'shp2')` resolves through it (web: `findHousePanel`). `multiPanelWriteBlock` stands only while two panels have none pinned; `GET/POST /api/house-panel` reports the pools and pins a panel (write-auth, refused mid-actuation). The grid resolver reads every panel: presence is Grid OK only if every fresh panel agrees and false if any fresh panel reports not-OK; `gridWatt` is summed over fresh panels; a panel freshly reporting no grid drops its own Cores' ac_in; the declared-grid veto is any panel's last not-OK reading (`panelVetoes`), clearable only when no vetoing panel is fresh; `atReserveFloor` is any panel's. Each secondary panel carries `-<serial>` reserve, source, circuit, reserve-blind and SoC-band alerts (`secondaryPanelAlerts`), its own spoken SoC ladder and a drain-measured runway alarm (`panelRunway.ts`, "at the current drain"). `housePoolFallbackSoc` keeps the house ladder's blind fallback on the house panel's own Cores; `panelLoad` and the web flow model sum every panel; bench-spare muting is disarmed only while a panel's roster is missing (`multiPanelRosterUnsound`). One panel: unchanged. Harness: `scripts/mutate-multi-panel.mjs`; nine harnesses repointed.
 
 **v1.184.0 — three small gaps.** (1) `POST /api/grid-veto/clear` (write-auth) and the dashboard's "Grid is back — clear" (`components/GridVetoClear.tsx`, driven by the snapshot's top-level `grid`, so it also appears with no projected panel): offered only while `GridBackstop.vetoClearable` (a declared grid vetoed by a reading the panel is not refreshing: `panelFresh !== true`); it stamps `DeviceSnapshot.gridVetoClearedAtMs` on the panel(s) (carried through `setDeviceList`), resets their `lastGridReading` (so the next not-OK reading is persisted again) and forgets the persisted readings. The veto ignores readings taken at or before the stamp — the panel's next reading counts again. (2) The v1.79.0 starved-feed rule for `baseline-*` anomalies never ran: `computeBaselineAlerts` runs in the analytics worker, where the message-rate-floor collapse state is never set. `alertMonitor` now applies `applyStarvedFeedFilter` on the main thread (by the alert's new `sourceSn`), exempting idle-held Cores (`rateFloorIdleHeldSns`); a `baseline-*` entry already raised is frozen on the falling edge, not resolved, while its Core is in `starvedFeedSns`. (3) `server/src/logHooks.ts`: the Fastify logger's `logMethod` hook demotes an end-of-stream "premature close" (a client hang-up) from error to debug. Harness: `scripts/mutate-three-small-gaps.mjs` (11 mutants).
 

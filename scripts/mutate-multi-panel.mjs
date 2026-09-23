@@ -162,6 +162,13 @@ const MUTANTS = [
     why: 'A slow evening drain announces a hundred-hour "low" every hour.',
   },
   {
+    id: 'xix-b. ★★ a pool at its floor waits for a drain measurement',
+    file: RUNWAY,
+    find: "    return atFloor ? { ...base, ...floor, unavailable: null, hoursToReserve: 0 } : { ...base, ...floor, unavailable: 'measuring the drain' };",
+    to: "    return { ...base, ...floor, unavailable: 'measuring the drain' }; /* MUTANT */",
+    why: 'The garage pool reaches its floor off-grid in the first ten minutes after a restart, or with one Core dark, and the at-floor alarm stays silent.',
+  },
+  {
     id: 'xx. ★ the drain runway claims the forecast',
     file: WORDS,
     find: 'const drain = (o?: RunwayWording): boolean => o?.basis === \'drain\';',

@@ -17,6 +17,8 @@
  *   remaining energy is frozen, and a frozen pool cannot count down.
  * - Charging, or a drain under DRAIN_FLOOR_W, projects no depletion — nulls, which the
  *   classifier reads as "nothing to announce", exactly like the house runway's no-depletion case.
+ * - A pool already at or under its reserve reads AT THE FLOOR whether or not a drain has been
+ *   measured, so the at-floor alarm never waits on the window.
  * - Beyond PANEL_RUNWAY_HORIZON_H the figure is dropped, matching the house runway's horizon,
  *   so a slow evening drain does not announce a thirty-hour "low" every hour.
  */
@@ -81,7 +83,10 @@ export function panelDrainRunway(
   const floor = { backupRemainingKwh: remainWh / 1000, backupReserveKwh: reserveWh / 1000 };
   const recent = samples.filter((x) => nowMs - x.tMs <= PANEL_DRAIN_WINDOW_MS);
   if (recent.length < 2 || recent[recent.length - 1].tMs - recent[0].tMs < PANEL_DRAIN_MIN_SPAN_MS) {
-    return { ...base, ...floor, unavailable: 'measuring the drain' };
+    // A pool already AT its floor needs no drain to say so: the at-floor alarm does not wait for a
+    // measurement window (or for a Core that went dark and cleared it).
+    const atFloor = remainWh <= reserveWh;
+    return atFloor ? { ...base, ...floor, unavailable: null, hoursToReserve: 0 } : { ...base, ...floor, unavailable: 'measuring the drain' };
   }
   const drainW = recent.reduce((a, x) => a + x.netW, 0) / recent.length;
   if (!(drainW > DRAIN_FLOOR_W)) return { ...base, ...floor, drainW, unavailable: null };

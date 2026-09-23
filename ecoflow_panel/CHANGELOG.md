@@ -1,3 +1,41 @@
+## 1.185.0
+
+### Two smart panels, supported
+
+- **The house panel is pinned.** The app described ONE smart panel — chosen by lowest serial in
+  some places and simply the first one listed in about forty others. A second panel with a lower
+  serial would have become the target of the SoC alarms, Home Assistant's backup sensors and the
+  night-charge reserve and Charge Now writes the moment it came online. The panel on the account
+  today is now recorded as the house panel on first start (saved beside the database,
+  `house-panel.json`), and every question about "the panel" — the dashboard's pool, the HA backup
+  sensors, the forecast runway and every night-charge write — resolves to it. A panel added later
+  never takes over. If two panels are ever present with none recorded (a fresh install), a banner
+  asks which is the house panel, and supervised writes wait until one is chosen; reverts are never
+  blocked.
+- **Night charge writes only to the house panel.** The second panel's reserve and force-charge
+  settings are never touched. The blanket write block that stood whenever two panels were present
+  is retired: the target no longer depends on which panel is listed first. Moving the pin is
+  refused while a night-charge or Charge Now write could still be outstanding on the old panel.
+- **Every other panel has its own alarms, named by panel.** Its own spoken SoC ladder ("Garage
+  Panel backup pool at 30 percent"), at-reserve and approaching-reserve alerts, source and circuit
+  faults, a reserve-blind alert, and a runway. The forecast models only the house panel, so that
+  runway is measured at the pool's own drain over the last half hour and says so ("at the current
+  drain"). It withholds a figure while any of that panel's Cores is not reporting or the panel's
+  reading is stale, and it says nothing beyond 24 hours. A pool already at its floor raises the
+  at-floor alarm whether or not the drain has been measured yet. If the house panel goes dark, its
+  fallback SoC now comes from its own Cores rather than an average with the other pool.
+- **The grid is read from every panel, failing loud.** Any panel reporting no grid now vetoes a
+  grid declared present; "Grid OK" needs every panel with a fresh reading to agree; grid power is
+  the sum of every panel's main line, and home load is every panel's circuits. The dashboard shows
+  a card for each panel, and EV detection scans every panel's circuits (the EV charger is planned
+  for the second panel).
+- **Bench-spare muting** pauses only while a panel's list of connected Cores is missing (not yet
+  loaded, or left out of a partial reply), instead of whenever two panels exist.
+
+`GET /api/house-panel` reports the house panel and each panel's pool, reserve and drain runway;
+`POST /api/house-panel {"sn": …}` pins one (write-auth). Nothing changes on a one-panel plant. New
+harness `scripts/mutate-multi-panel.mjs`; nine existing harnesses repointed at the per-panel code.
+
 ## 1.184.0
 
 ### A button for a stuck "no grid", an anomaly guard that finally runs, and a quieter log
