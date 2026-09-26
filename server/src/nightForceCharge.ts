@@ -428,7 +428,7 @@ function verifyForceChargeOn(
 /** v1.186.0 — the ON-verify verdict /api/night-charge/status serves beside forceChargeOnAtMs:
  *  null = no force-charge tonight; 'unverified' = ON issued, no live readback has proven it
  *  yet (stays so if the night ends that way). */
-export function forceChargeOnVerifyStatus(
+export function forceChargeOnReadbackStatus(
   s: NightActuationState,
 ): 'verified' | 'failed' | 'unverified' | null {
   if (s.forceChargeOnAtMs == null) return null;

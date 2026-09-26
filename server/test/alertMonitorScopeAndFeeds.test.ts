@@ -17,7 +17,7 @@
  * The integration tests at the bottom drive the real monitor (startAlertMonitor) with an
  * injected analytics client, so a hung worker is a promise that never settles.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +26,12 @@ import type { Alert } from '../src/alerts.js';
 import type { AlertActionStats } from '../src/alertMonitor.js';
 import type { TelemetryEntry } from '../src/alertTelemetry.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
+
+// v1.186.0 — these tests await work whose only pending timer is the monitor's unref'd feed budget
+// (a deliberately hung worker). Node 22's runner then ends the event loop mid-test and cancels the
+// rest of the file; one referenced interval keeps the loop alive for the file's lifetime.
+const keepAlive = setInterval(() => {}, 1_000);
+after(() => clearInterval(keepAlive));
 
 // Every app module reads its sidecar paths (DB_PATH-relative) and these knobs at import,
 // so they are set first and every app import below is dynamic.

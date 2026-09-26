@@ -36,7 +36,7 @@ import {
   forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw, FORCE_CHARGE_MIN_RATE_KW, planChargeCapKw,
   evDisplacedPackKwh,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
-  FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnVerifyStatus,
+  FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnReadbackStatus,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
@@ -5936,7 +5936,7 @@ app.get('/api/night-charge/status', async () => {
         nightActuationMem.windowStartMs != null ? nightActuationMem.windowStartMs - APPLY_LEAD_MS : null,
       // v1.186.0 — beside forceChargeOnAtMs (and forceChargeOnVerifiedAtMs /
       // forceChargeOnFailedAtMs, spread above): did the ON actually take?
-      forceChargeOnVerify: forceChargeOnVerifyStatus(nightActuationMem),
+      forceChargeOnVerify: forceChargeOnReadbackStatus(nightActuationMem),
     },
     // In-memory cache refreshed by the recompute tick / evening job — the route
     // must NOT read the ledger (DB/filesystem) inline (CWE-770).

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  decideForceCharge, forceChargeOnVerifyStatus, forceChargeOffDeadlineMs,
+  decideForceCharge, forceChargeOnReadbackStatus, forceChargeOffDeadlineMs,
   FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, type ForceChargeOpts,
 } from '../src/nightForceCharge.js';
 import {
@@ -223,11 +223,11 @@ test('★★★ the ON-verify record survives a restart — no second re-issue, 
 });
 
 test('the status verdict served beside forceChargeOnAtMs', () => {
-  assert.equal(forceChargeOnVerifyStatus(emptyActuationState()), null, 'no force-charge tonight');
-  assert.equal(forceChargeOnVerifyStatus(onNight()), 'unverified');
-  assert.equal(forceChargeOnVerifyStatus(onNight({ forceChargeOnFailedAtMs: DUE })), 'failed');
-  assert.equal(forceChargeOnVerifyStatus(onNight({ forceChargeOnVerifiedAtMs: DUE })), 'verified');
-  assert.equal(forceChargeOnVerifyStatus(onNight({ forceChargeOnFailedAtMs: DUE, forceChargeOnVerifiedAtMs: DUE + MIN })),
+  assert.equal(forceChargeOnReadbackStatus(emptyActuationState()), null, 'no force-charge tonight');
+  assert.equal(forceChargeOnReadbackStatus(onNight()), 'unverified');
+  assert.equal(forceChargeOnReadbackStatus(onNight({ forceChargeOnFailedAtMs: DUE })), 'failed');
+  assert.equal(forceChargeOnReadbackStatus(onNight({ forceChargeOnVerifiedAtMs: DUE })), 'verified');
+  assert.equal(forceChargeOnReadbackStatus(onNight({ forceChargeOnFailedAtMs: DUE, forceChargeOnVerifiedAtMs: DUE + MIN })),
     'verified', 'a late apply wins');
 });
 
@@ -286,5 +286,5 @@ test('★★★ index.ts: the failure is persisted once, logged as a warning and
 test('★★ index.ts: /api/night-charge/status serves the verdict beside forceChargeOnAtMs', () => {
   const route = INDEX.slice(INDEX.indexOf("app.get('/api/night-charge/status'"), INDEX.indexOf("app.post('/api/night-charge/cancel'"));
   assert.ok(route.includes('...nightActuationMem,'), 'forceChargeOnVerifiedAtMs / forceChargeOnFailedAtMs are spread');
-  assert.ok(route.includes('forceChargeOnVerify: forceChargeOnVerifyStatus(nightActuationMem),'));
+  assert.ok(route.includes('forceChargeOnVerify: forceChargeOnReadbackStatus(nightActuationMem),'));
 });
