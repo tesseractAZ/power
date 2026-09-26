@@ -147,8 +147,8 @@ const BUILDERS: Record<string, Builder> = {
     const fc = await getDayForecast(devicesOf(ctx), ctx.recorder, ctx.log);
     return computeClipping(devicesOf(ctx), ctx.recorder, fc);
   },
-  curtailment: (ctx) => computeCurtailment(devicesOf(ctx), ctx.recorder),
-  curtailmentAlerts: (ctx) => computeCurtailmentAlerts(devicesOf(ctx), ctx.recorder),
+  curtailment: (ctx) => computeCurtailment(devicesOf(ctx), ctx.recorder, ctx.log),
+  curtailmentAlerts: (ctx) => computeCurtailmentAlerts(devicesOf(ctx), ctx.recorder, ctx.log),
   baselineAlerts: (ctx) => computeBaselineAlerts(devicesOf(ctx), ctx.recorder),
   forecastAlerts: async (ctx) => {
     // v0.41.0 — pass the depletion-aware day forecast so computeForecastAlerts can gate
