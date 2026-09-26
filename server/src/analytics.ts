@@ -14,6 +14,9 @@ import { cToF, dpuNum, cap, median, mad, robustZ, linregress, mean, round1, roun
 import { allDpus, homeConnectedDpus } from './analytics/fleet.js';
 import { singleFlight } from './singleFlight.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
+import {
+  curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
+} from './curtailmentFreeze.js';
 
 /**
  * Learned alerting — phase 1: peer-comparison anomaly detection.
@@ -6997,11 +7000,15 @@ export async function computeClipping(
  *     the per-hour posterior to have ≥3 samples before trusting it.
  *
  * Lifetime kWh: this version computes today's kWh by walking today's
- * past hours with weather data, and 7-day kWh by walking the past 7
- * daylight hours of each day. Open-Meteo retains 3 days of history in
- * the past_days=3 query (see weather.ts), so days 1-3 are weather-
- * verified and days 4-7 fall back to the heuristic (SoC ≥ 96% AND PV
- * matched to load AND solar should be high for this hour of day).
+ * past hours with weather data, and 7-day kWh by walking the hours of
+ * each of the past 7 local days. The worker's weather cache spans
+ * Open-Meteo's past_days=7 (UTC days, see weather.ts), so an hour is
+ * weather-verified wherever the cache holds it with daylight GHI; an
+ * hour it does not hold falls back to the heuristic (SoC in the taper
+ * band AND PV matched to load). v1.186.1 — a finished day is walked
+ * only until it SETTLES (curtailmentFreeze.ts); from then on its frozen
+ * total is used, so the 7-day figure no longer moves with every
+ * re-learn of the posterior or refresh of the weather cache.
  *
  * Opportunistic loads: the report includes a static list of loads the
  * user could activate to absorb surplus. v0.9.77 ships an informational
@@ -7071,11 +7078,16 @@ export interface CurtailmentReport {
   /** Today's curtailment so far (per hour walked + total kWh). */
   todayKwh: number;
   todayHours: CurtailmentHour[];
-  /** Past 7 days of curtailment (weather-verified where possible). */
+  /** Past 7 days of curtailment (weather-verified where possible). v1.186.1 — each finished
+   *  day that has settled is its FROZEN total (curtailmentFreeze.ts); only unsettled days are
+   *  re-estimated, so between midnights the figure moves only while a day's inputs settle. */
   recent7dKwh: number;
   recent7dHoursCount: number;
-  /** Hour-of-day histogram across the past 7 days — useful for siting
-   *  opportunistic loads (run pool pump from 10-14 if that's the cluster). */
+  /** v1.186.1 — how many of the 7 days were read frozen (the rest were estimated live). */
+  recent7dSettledDays: number;
+  /** Hour-of-day histogram across the past 7 days + today — useful for siting
+   *  opportunistic loads (run pool pump from 10-14 if that's the cluster). Settled days
+   *  contribute their frozen hours. */
   hourlyHistogram: Array<{ hour: number; avgSurplusW: number; samples: number }>;
   /** Loads we suggest to absorb the surplus. */
   opportunisticLoads: OpportunisticLoad[];
@@ -7205,15 +7217,22 @@ function predictExpectedPv(
   return { w: post.posteriorMean * ghiWm2, samples: post.samples };
 }
 
-/** Estimate kWh lost to SoC-saturation curtailment. Cached 1 min. */
+/** Estimate kWh lost to SoC-saturation curtailment. Cached CURTAIL_TTL_MS (5 min). */
 export async function computeCurtailment(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
+  /** v1.186.1 — reports a failed save of the frozen days (curtailmentFreeze.ts). */
+  log: (m: string) => void = () => {},
+  // v1.186.1 — injectable clock for the live state, the local-day walk and which finished days
+  // have settled, as computeClipping's. Tests pass a deterministic time so the midnight slide
+  // and the settle lag never depend on the wall clock. The cache-TTL freshness check and the
+  // cache `ts` stay on the REAL clock.
+  nowMs: number = Date.now(),
 ): Promise<CurtailmentReport> {
   if (curtailmentCache && Date.now() - curtailmentCache.ts < CURTAIL_TTL_MS) {
     return curtailmentCache.value;
   }
-  const now = Date.now();
+  const now = nowMs;
   const empty: CurtailmentReport = {
     generatedAt: now,
     active: false,
@@ -7224,6 +7243,7 @@ export async function computeCurtailment(
     todayHours: [],
     recent7dKwh: 0,
     recent7dHoursCount: 0,
+    recent7dSettledDays: 0,
     hourlyHistogram: [],
     opportunisticLoads: DEFAULT_OPPORTUNISTIC_LOADS.map((o) => ({
       ...o, fitsInSurplus: false, haServiceHint: null,
@@ -7238,7 +7258,7 @@ export async function computeCurtailment(
   if (homeDpus.length === 0) return empty;
   const shp2 = findShp2(devices);
   if (!shp2) {
-    curtailmentCache = { ts: now, value: { ...empty, inactiveReason: 'no-shp2' } };
+    curtailmentCache = { ts: Date.now(), value: { ...empty, inactiveReason: 'no-shp2' } };
     return curtailmentCache.value;
   }
 
@@ -7283,8 +7303,8 @@ export async function computeCurtailment(
     }
   }
 
-  // 2) Today's per-hour walk using weather data + Bayesian model.
-  const todayStart = startOfLocalDayMs();
+  // 2) Today's per-hour walk using weather data + Bayesian model. Today is always live.
+  const todayStart = startOfLocalDayMs(new Date(now));
   const todayHours: CurtailmentHour[] = [];
   let todayKwh = 0;
   for (let h = 0; h < 24; h++) {
@@ -7300,14 +7320,31 @@ export async function computeCurtailment(
     }
   }
 
-  // 3) Past 7-day walk. Days within Open-Meteo's past_days window are
-  // weather-verified; older days use the heuristic-only path inside
+  // 3) Past 7-day walk. Hours the weather cache holds with daylight GHI are
+  // weather-verified; the rest use the heuristic-only path inside
   // sampleCurtailmentHour (signaled by weatherVerified=false).
-  const recent7dHours: CurtailmentHour[] = [];
+  // v1.186.1 — a finished day that has SETTLED (curtailmentFreeze.ts: weather fetched
+  // ≥ CURTAIL_SETTLE_LAG_MS after the day ended, every hour of it covered, a posterior
+  // present) is read from the frozen store; it is walked only while unsettled, and frozen the
+  // first time a walk finds it settled. Re-walking a settled day read the same past hours
+  // through today's posterior and weather cache, so the total moved with no new curtailment.
+  const recent7dHours: Array<{ hour: number; surplusW: number }> = [];
   let recent7dKwh = 0;
+  let recent7dSettledDays = 0;
   const ONE_DAY = 24 * 3_600_000;
+  const hasPosterior = bayes.hourly.length > 0;
+  pruneFrozenCurtailmentDays(todayStart - CURTAIL_HISTORY_DAYS * ONE_DAY);
   for (let d = 1; d <= CURTAIL_HISTORY_DAYS; d++) {
     const dayStart = todayStart - d * ONE_DAY;
+    const frozenDay = frozenCurtailmentDay(dayStart);
+    if (frozenDay) {
+      recent7dHours.push(...frozenDay.hours);
+      recent7dKwh += frozenDay.kwh;
+      recent7dSettledDays++;
+      continue;
+    }
+    const dayHours: CurtailmentHour[] = [];
+    let dayKwh = 0;
     for (let h = 0; h < 24; h++) {
       const hourStart = dayStart + h * 3_600_000;
       const hourEnd = hourStart + 3_600_000;
@@ -7315,11 +7352,23 @@ export async function computeCurtailment(
         homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h, chargeCeiling,
       );
       if (sample) {
-        recent7dHours.push(sample);
-        recent7dKwh += sample.curtailedKwh;
+        dayHours.push(sample);
+        dayKwh += sample.curtailedKwh;
       }
     }
+    recent7dHours.push(...dayHours);
+    recent7dKwh += dayKwh;
+    if (weather && curtailmentDaySettled(weather, hasPosterior, dayStart)) {
+      freezeCurtailmentDay({
+        dayStartMs: dayStart,
+        kwh: dayKwh,
+        hours: dayHours.map((s) => ({ hour: s.hour, surplusW: s.surplusW })),
+        frozenAtMs: now,
+        weatherFetchedAtMs: weather.fetchedAt,
+      });
+    }
   }
+  persistFrozenCurtailmentDays(log);
 
   // 4) Hour-of-day histogram across the past 7 days + today.
   const histAccum = Array.from({ length: 24 }, () => ({ sumW: 0, n: 0 }));
@@ -7361,13 +7410,14 @@ export async function computeCurtailment(
     todayHours,
     recent7dKwh: Math.round(recent7dKwh * 100) / 100,
     recent7dHoursCount: recent7dHours.length,
+    recent7dSettledDays,
     hourlyHistogram,
     opportunisticLoads,
     basisComplete: weather != null && bayes.hourly.length > 0,
   };
   // An incomplete report is cached for the same TTL: its figures publish as null, and a
   // shorter TTL would only retry a failing weather fetch more often.
-  curtailmentCache = { ts: now, value: report };
+  curtailmentCache = { ts: Date.now(), value: report };
   return report;
 }
 
@@ -7512,9 +7562,10 @@ async function sampleCurtailmentHour(
 export async function computeCurtailmentAlerts(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
+  log: (m: string) => void = () => {},
 ): Promise<{ id: string; severity: 'info'; category: 'Solar'; device: string; title: string; detail: string; source: 'learned'; facts: Array<{ label: string; value: string }> }[]> {
   try {
-    const r = await computeCurtailment(devices, recorder);
+    const r = await computeCurtailment(devices, recorder, log);
     if (!r.active) return [];
     const fits = r.opportunisticLoads.filter((o) => o.fitsInSurplus);
     const fitsLine = fits.length === 0
