@@ -1,3 +1,27 @@
+## 1.186.1
+
+### The 7-day curtailment figure stops rewriting history
+
+- **Finished days keep their figure.** "PV Curtailed 7d" in Home Assistant, and "Past 7d lost" on
+  the dashboard's Solar curtailment card, re-estimated every hour of the last seven days on every
+  refresh, each time through the solar model as it had just re-learned and the weather as it had
+  just been re-fetched. So a week in which nothing new happened still changed from one refresh to
+  the next: on 2026-09-25 the same seven finished days read 12.6, then 10.5, then 16.09 kWh. Each
+  finished day is now estimated until its inputs have settled, then kept. A day counts as settled
+  once the weather in hand was fetched at least 12 hours after the day ended (by then none of its
+  hours is a forecast, and the weather service has finished revising them), every hour of the day
+  is covered by a reading the service actually sent, and the solar model exists. If the weather
+  fetch has been failing, the old weather is still a forecast for the days after it, and those
+  days stay live until a fresh fetch arrives. Between midnights the 7-day figure now moves only
+  while yesterday is still settling; at local midnight it changes once, as the oldest day drops out
+  and the day just ended comes in. Today's figure stays live, and the hour-of-day chart on the card
+  reads the kept days too.
+- **Kept across restarts.** The kept days are saved beside the database (`curtailment-days.json`)
+  and trimmed as the window moves, so a restart does not re-estimate the week. The Home Assistant
+  entities keep their names and ids.
+
+New harness `scripts/mutate-curtail-freeze.mjs`.
+
 ## 1.186.0
 
 ### Fixes from a production log review, and room for the sun on long-gap nights
