@@ -67,7 +67,18 @@ export interface TelemetryEntry {
   ts: number;
   /** For shortClear / longActive: how long the alert was alive before it cleared / hit the long threshold. */
   durationMs?: number;
+  /**
+   * v1.186.0 — the auto-tune scope the event was counted in. Written on every event from
+   * v1.186.0 on, where only ANNUNCIATING alerts (ones that can push) are recorded at all.
+   * Lines written before it carry no scope: they pooled bench-spare, off-panel and muted
+   * home-Core alerts with the ones that push, and the replay does not trust them
+   * (alertMonitor.replayTelemetryEvents).
+   */
+  scope?: typeof TELEMETRY_SCOPE_ANNUNCIATING;
 }
+
+/** v1.186.0 — the only scope written; see TelemetryEntry.scope. */
+export const TELEMETRY_SCOPE_ANNUNCIATING = 'annunciating' as const;
 
 const PATH = process.env.ALERT_TELEMETRY_PATH
   ?? resolve(process.cwd(), config.dbPath, '..', 'alert-telemetry.jsonl');

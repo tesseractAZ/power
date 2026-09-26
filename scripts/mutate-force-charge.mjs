@@ -319,8 +319,8 @@ const MUTANTS = [
   {
     id: 'xli. ★★★ the Thursday rule is removed',
     file: NCA,
-    find: '  const costSurplusKwh: number | null = longGap ? null',
-    to: '  const costSurplusKwh: number | null = false ? null /* MUTANT */',
+    find: '  const costSurplusKwh: number | null = longGap ? (longGapP10Known ? Math.max(0, longGapP10Kwh) : null)',
+    to: '  const costSurplusKwh: number | null = false ? (longGapP10Known ? Math.max(0, longGapP10Kwh) : null) /* MUTANT */',
     why: 'Thursday fills only to the solar headroom and the weekend starts short — ~$1/week the measurement found.',
   },
   {
@@ -354,7 +354,7 @@ const MUTANTS = [
   {
     id: 'xlvi. ★★★ the planner inputs drop the median and the long gap',
     file: NCA,
-    find: '    morningPvSurplusP50Kwh,\n    longGapAhead,\n    buyDebiasFactor,',
+    find: '    morningPvSurplusP50Kwh,\n    longGapAhead,\n    prePeakPvSurplusP10Kwh,\n    buyDebiasFactor,',
     to: '    buyDebiasFactor, /* MUTANT */',
     why: 'Both are computed and never reach the sizing — the v1.125.0 field-copy trap, rebuilt.',
   },

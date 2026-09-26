@@ -11,8 +11,9 @@
  *
  * WHAT (v1.167.0 — CHARGE TO TARGET, JUST IN TIME; design of 2026-09-17). The
  * target is the announced plan's economic ceiling — min(ARB_COST_MAX_SOC_PCT, full minus
- * tomorrow's P50 morning solar; v1.168.0), or ARB_COST_MAX_SOC_PCT alone before a long gap
- * (the Thursday rule, nightChargeAdvisor.ts longGapAhead). On a night whose reserve write is APPLIED AND VERIFIED,
+ * tomorrow's P50 morning solar; v1.168.0), or before a long gap (the Thursday rule,
+ * nightChargeAdvisor.ts longGapAhead) min(ARB_COST_MAX_SOC_PCT, full minus the P10 solar
+ * surplus before the evening on-peak; v1.186.0). On a night whose reserve write is APPLIED AND VERIFIED,
  * force-charge switches ON only in the LAST STRETCH of the window — late enough that the
  * pack arrives at the target as the window closes — and OFF the moment it gets there
  * (or at the window close). Requirement: force-charge runs until the desired
@@ -105,6 +106,17 @@
  *    forever in silence. The deadline needs only the clock — past it, a force-charge
  *    of ours not verified OFF escalates audibly, and index.ts runs it even when the
  *    panel is missing from the device list.
+ *  - ★★ v1.186.0 — ON is readback-verified too (section 2b). Before it, only the reserve,
+ *    the OFF and the ceiling were: an ON the cloud rejected, or accepted while the panel
+ *    ignored it (the 2026-08-16 phantom-write class, seen on backupReserveSoc), bought
+ *    nothing above the reserve, the software stop never fired, and 05:00 logged a clean
+ *    "OFF VERIFIED". Now every slot we switched ON must READ FORCE_CHARGE_ON on a live
+ *    readback (a slot whose Core already sits at the panel's ceiling is exempt — the panel
+ *    switches that one off itself); otherwise ON is re-issued once, then a warning is
+ *    logged and pushed. It sits strictly AFTER the OFF triggers, re-issues nothing inside
+ *    FORCE_CHARGE_ON_RETRY_CUTOFF_MS of the window end, and an OFF is never held by the
+ *    per-slot cooldown an ON took, so it cannot delay the window-end OFF or the deadline;
+ *    it decides nothing on a stale readback.
  */
 
 import { RESERVE_WRITE_MAX_PCT, type NightActuationState } from './nightChargeActuator.js';
@@ -168,6 +180,19 @@ export const FORCE_CHARGE_MAX_RUN_MS = 7 * 3_600_000;
  *  panel, and escalating a force-charge that was merely slow to read back. */
 export const FORCE_CHARGE_OFF_VERIFY_AFTER_MS = 6 * 60_000;
 export const FORCE_CHARGE_OFF_MAX_RETRIES = 2;
+/** v1.186.0 — readback grace after an ON write before a slot still reading OFF counts as
+ *  not-taken. Same 6 min as the OFF grace, for the same reason: it MUST exceed the 5-min
+ *  per-slot cooldown, or the one re-issue comes back rate-limited and is spent on a write
+ *  that never reached the panel. (2026-09-23: the drift watch saw OFF→ON ~3 min after the ON.) */
+export const FORCE_CHARGE_ON_VERIFY_AFTER_MS = 6 * 60_000;
+/** v1.186.0 — ON is re-issued ONCE; still not applied after that ⇒ the warning. */
+export const FORCE_CHARGE_ON_MAX_RETRIES = 1;
+/** v1.186.0 — no ON re-issue this close to the window end: the warning instead. It is the
+ *  start's own "not worth starting" margin, and it MUST be at least the per-slot write
+ *  cooldown (5 min, ecoflow/commands.ts) plus FORCE_CHARGE_ON_VERIFY_AFTER_MS, so a re-issue
+ *  can never sit in front of the window-end OFF on the same slot, and its PUT (undici's
+ *  300 s default) can never hold the actuation lock across the window end. */
+export const FORCE_CHARGE_ON_RETRY_CUTOFF_MS = FORCE_CHARGE_MIN_RUN_MS;
 /** After the escalation the OFF keeps being re-issued on this cadence for as long
  *  as a live readback shows one of our slots ON. Escalation changes how LOUDLY we
  *  report, never WHETHER we keep switching it off — the 2026-08-04 buy ran for hours. */
@@ -229,6 +254,10 @@ export interface ForceChargeOpts {
    *  same grid cap, so every grid kWh it takes is a kWh the pack does not get. A reading
    *  taken before the car plugs in cannot see it; this does. Absent/null ⇒ 0. */
   evDisplacedKwh?: number | null;
+  /** v1.186.0 — each slot's live Core SoC (Shp2EnergySource.batteryPercentage), keyed by
+   *  slot, from the SAME fresh readback as slotsOn. The ON verify exempts a slot whose Core
+   *  already sits at the panel's ceiling. Absent/null/missing slot ⇒ no exemption. */
+  slotSocPct?: Readonly<Record<number, number | null>> | null;
 }
 
 export type ForceChargeAction =
@@ -241,6 +270,15 @@ export type ForceChargeAction =
   | { kind: 'restoreCeiling'; pct: number; lastAttempt: boolean }
   | { kind: 'ceilingRestored' }
   | { kind: 'on'; slots: number[] }
+  /** v1.186.0 — a live readback shows every slot of ours ON; `atCeiling` = the slots
+   *  exempted because their Core already sits at the panel's ceiling. */
+  | { kind: 'onVerified'; atCeiling: number[] }
+  /** v1.186.0 — slots still reading OFF past the ON grace: re-issue ON to them, once. */
+  | { kind: 'onRetry'; slots: number[] }
+  /** v1.186.0 — still not ON after the re-issue: warn + push (once; the record keeps
+   *  watching, and a late apply still stamps onVerified). `noRetry` — the re-issue was
+   *  skipped because the window end was too close (FORCE_CHARGE_ON_RETRY_CUTOFF_MS). */
+  | { kind: 'onFailed'; slots: number[]; noRetry?: boolean }
   | { kind: 'off'; slots: number[]; reason: ForceChargeOffReason }
   | { kind: 'offVerified' }
   /** `unconfirmed` — v1.168.0: re-sent with NO live readback (after the escalation). */
@@ -321,6 +359,84 @@ function offReason(s: NightActuationState, nowMs: number, o: ForceChargeOpts): F
   return null;
 }
 
+/** v1.186.0 — the ceiling at which the panel switches a slot's force-charge off by
+ *  itself: tonight's synced ceiling, or the live readback when that is LOWER (a ceiling
+ *  lowered in the app mid-night stops a Core sooner). Null when neither is known. */
+function panelStopCeilingPct(s: NightActuationState, o: ForceChargeOpts): number | null {
+  const synced = s.forceChargeCeilingPct != null && Number.isFinite(s.forceChargeCeilingPct)
+    ? desiredForceChargeCeilingPct(s.forceChargeCeilingPct) : null;
+  // v1.186.0 — a readback outside the panel's documented [80, 100] range (a reconnect 0, a
+  // stray low value) is not a ceiling: it would exempt every slot and stamp a false ON
+  // VERIFIED. Such a reading is ignored and the synced ceiling stands.
+  const rb = o.ceilingReadbackPct;
+  if (rb == null || !Number.isFinite(rb) || rb < FORCE_CHARGE_CEILING_MIN_PCT || rb > FORCE_CHARGE_CEILING_MAX_PCT) return synced;
+  return synced == null ? rb : Math.min(synced, rb);
+}
+
+/**
+ * v1.186.0 — section 2b: is the ON we issued actually applied? One check shortly after
+ * the ON (and one after the re-issue), NOT a watch over the whole run: the panel switches
+ * each slot OFF by itself as its Core reaches the ceiling (2026-09-23: ch1 at 04:19, ch3 at
+ * 04:30, before the software stop at 04:35), so a slot reading OFF later is not a failure.
+ *  - Stale readback (slotsOn null) ⇒ wait. Absence is not evidence either way.
+ *  - Every slot of ours reads ON, or its Core already sits at the panel's ceiling ⇒ verified.
+ *    Success needs no grace (a reading taken after the write that shows ON is proof), and
+ *    it is stamped even after the warning — a late apply resolves the record.
+ *  - Past FORCE_CHARGE_ON_VERIFY_AFTER_MS from the last attempt: re-issue ON to the slots
+ *    still OFF, once — under the start's own grid and vitals gates, since it is a new grid-
+ *    charge write — then warn. The warning is once per night (forceChargeOnFailedAtMs).
+ * A REJECTED ON write (cloud error, timeout, rate limit) lands here the same way: its slot
+ * never reads ON.
+ */
+function verifyForceChargeOn(
+  s: NightActuationState, nowMs: number, o: ForceChargeOpts, ours: number[],
+): ForceChargeAction {
+  if (s.forceChargeOnVerifiedAtMs != null) return { kind: 'none' };
+  if (o.slotsOn == null) return { kind: 'none' };
+  const ceiling = panelStopCeilingPct(s, o);
+  const atCeiling = (n: number): boolean => {
+    const soc = o.slotSocPct?.[n];
+    return ceiling != null && typeof soc === 'number' && Number.isFinite(soc) && soc >= ceiling;
+  };
+  const notOn = ours.filter((n) => !o.slotsOn!.includes(n) && !atCeiling(n));
+  // v1.186.0 — an all-exempt verdict needs at least one slot of ours actually reading ON:
+  // with none ON, "every Core at the ceiling" is far likelier a bad reading than a finished
+  // charge (ON only starts below the stop), and a false verdict is permanent and silent.
+  const anyOn = ours.some((n) => o.slotsOn!.includes(n));
+  if (notOn.length === 0 && anyOn) {
+    return { kind: 'onVerified', atCeiling: ours.filter((n) => !o.slotsOn!.includes(n)) };
+  }
+  const pending = notOn.length > 0 ? notOn : ours;
+  if (s.forceChargeOnFailedAtMs != null) return { kind: 'none' };
+  const since = nowMs - (s.forceChargeOnLastAttemptMs ?? s.forceChargeOnAtMs!);
+  if (since < FORCE_CHARGE_ON_VERIFY_AFTER_MS) return { kind: 'none' };
+  if (s.forceChargeOnRetries < FORCE_CHARGE_ON_MAX_RETRIES) {
+    // v1.186.0 — too close to the window end for a re-issue: it would share the per-slot
+    // cooldown with the window-end OFF (which then came back rate-limited and the slot kept
+    // grid-charging past the close). Warn instead — the forfeit is reported, never silent.
+    if (s.windowEndMs == null || nowMs >= s.windowEndMs - FORCE_CHARGE_ON_RETRY_CUTOFF_MS) {
+      return { kind: 'onFailed', slots: pending, noRetry: true };
+    }
+    // The re-issue starts a grid charge on those slots: the grid must be KNOWN present and
+    // the host healthy, exactly as for the start. Otherwise wait — it is not yet a failure.
+    if (o.gridPresent !== true || o.vitalsRed) return { kind: 'none' };
+    return { kind: 'onRetry', slots: pending };
+  }
+  return { kind: 'onFailed', slots: pending };
+}
+
+/** v1.186.0 — the ON-verify verdict /api/night-charge/status serves beside forceChargeOnAtMs:
+ *  null = no force-charge tonight; 'unverified' = ON issued, no live readback has proven it
+ *  yet (stays so if the night ends that way). */
+export function forceChargeOnReadbackStatus(
+  s: NightActuationState,
+): 'verified' | 'failed' | 'unverified' | null {
+  if (s.forceChargeOnAtMs == null) return null;
+  if (s.forceChargeOnVerifiedAtMs != null) return 'verified';
+  if (s.forceChargeOnFailedAtMs != null) return 'failed';
+  return 'unverified';
+}
+
 /**
  * The per-tick decision. Pure: the integrator executes the action through the
  * audited write helper and persists the observed outcome.
@@ -383,7 +499,12 @@ export function decideForceCharge(s: NightActuationState, nowMs: number, o: Forc
   // ── 2. OFF. Once ON, ALWAYS allowed — independent of mode and of `enabled`. ──
   if (s.forceChargeOnAtMs != null && s.forceChargeOffAtMs == null) {
     const reason = offReason(s, nowMs, o);
-    return reason ? { kind: 'off', slots: ours, reason } : { kind: 'none' };
+    if (reason) return { kind: 'off', slots: ours, reason };
+    // ── 2b. ON VERIFICATION (v1.186.0). Only when no OFF is due, and no re-issue inside
+    // FORCE_CHARGE_ON_RETRY_CUTOFF_MS of the window end; an OFF is also never held by the
+    // per-slot cooldown an ON took (ecoflow/commands.ts), so a re-issue cannot delay the
+    // window-end, target or grid-loss OFF. ──
+    return verifyForceChargeOn(s, nowMs, o, ours);
   }
 
   // ── 3. RESTORE the panel's own force-charge ceiling once tonight is done with it.

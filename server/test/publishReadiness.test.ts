@@ -38,6 +38,7 @@ const warmInputs = (): ReadinessInputs => ({
     C1: { online: true, projection: { kind: 'dpu' } },
   },
   alerts: [],
+  alertsComplete: true,
   speakerLastProbeAt: Date.now(),
   forecast: { pvForecastUnavailable: false },
   clipping: { arrayPeakW: 9707 },
@@ -83,15 +84,31 @@ test('once warm nothing is withheld — including legitimate zeros (PV at night,
   assert.equal(out.alert_critical_count, 0, 'a real "no criticals" is published');
 });
 
-test('★★ each group is independent: alarm counts publish the moment the monitor has run, even with a cold worker', () => {
+test('★★ each group is independent: alarm counts publish once the monitor\'s set is complete, whatever the carbon report', () => {
   const i = bootInputs();
   i.alerts = [];
+  i.alertsComplete = true;
   const r = publishReadiness(i);
   assert.equal(r.alerts, true);
   assert.equal(r.carbon, false);
   const out = withholdUnready({ alert_high_count: 0, carbon_kg_avoided_7d: 0 }, r);
   assert.equal(out.alert_high_count, 0);
   assert.equal(out.carbon_kg_avoided_7d, null);
+});
+
+test('★★★ v1.186.0 — an alert set that is merely SET is not ready: the first publish carries only the live alarms', () => {
+  // The monitor publishes its live alarms before any worker feed has delivered. Counts taken
+  // from that set went learned_warning 1 → 0 → 1 across a restart; they wait for a complete set.
+  const i = bootInputs();
+  i.alerts = [];
+  assert.equal(publishReadiness(i).alerts, false, 'absence of the completeness flag is not completeness');
+  i.alertsComplete = false;
+  assert.equal(publishReadiness(i).alerts, false);
+  assert.equal(withholdUnready({ alert_critical_count: 0, learned_warning_count: 0 }, publishReadiness(i)).learned_warning_count, null);
+  i.alertsComplete = true;
+  assert.equal(publishReadiness(i).alerts, true);
+  i.alerts = undefined;
+  assert.equal(publishReadiness(i).alerts, false, 'and never without a set');
 });
 
 test('panel load needs a projected panel with at least one REPORTED channel (a silent panel is not 0 W)', () => {
@@ -163,6 +180,8 @@ test('★★ both publishers pass their payload through withholdUnready(publishR
   const rest = src('index.ts');
   assert.ok(/withholdUnready\(payload as Record<string, unknown>, publishReadiness\(\{/.test(rest), '/api/ha-state');
   for (const f of [mqtt, rest]) assert.ok(f.includes('speakerLastProbeAt: getBroadcastHealth().lastProbeAt'));
+  // v1.186.0 — and both hand it the completeness latch, or the counts would never publish.
+  for (const f of [mqtt, rest]) assert.ok(f.includes('alertsComplete: snap.alertsComplete'));
 });
 
 test('★★★ v1.178.1 — both publishers take the fleet sums AFTER the reports\' await, with no await before readiness', () => {
@@ -170,16 +189,18 @@ test('★★★ v1.178.1 — both publishers take the fleet sums AFTER the repor
   // v1.178.0 deploy the sums were taken BEFORE it: the first poll landed during the await,
   // readiness saw projected devices, and the pre-poll 0 W sums went out as readings
   // (battery net and panel load X → 0 → X). Sums and readiness must read the same moment.
-  for (const [file, open] of [
-    ['mqttDiscovery.ts', 'const buildState = async'],
-    ['index.ts', "app.get('/api/ha-state'"],
+  // v1.186.0 — the MQTT publisher's reports await is settleStateReports (each report settles on
+  // its own); the REST twin still awaits Promise.all. The ordering rule is the same for both.
+  for (const [file, open, reportsAwaitText] of [
+    ['mqttDiscovery.ts', 'const buildState = async', 'await settleStateReports('],
+    ['index.ts', "app.get('/api/ha-state'", 'await Promise.all(['],
   ] as const) {
     const f = src(file);
     const start = f.indexOf(open);
     assert.ok(start > 0, `${file}: ${open}`);
     const readiness = f.indexOf('publishReadiness({', start);
     const body = f.slice(start, readiness);
-    const reportsAwait = body.indexOf('await Promise.all([');
+    const reportsAwait = body.indexOf(reportsAwaitText);
     const firstSums = body.indexOf('aggregateFleetFlow(snap.devices)');
     assert.ok(reportsAwait > 0 && firstSums > 0, `${file}: both found`);
     assert.ok(firstSums > reportsAwait, `${file}: the fleet sums are taken after the reports' await`);

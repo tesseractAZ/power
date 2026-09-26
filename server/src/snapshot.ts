@@ -131,6 +131,10 @@ export interface FleetSnapshot {
   generatedAt: number;
   devices: Record<string, DeviceSnapshot>;
   alerts?: Alert[]; // computed fleet-wide alerts (set by the alert monitor)
+  /** v1.186.0 — the alert set is COMPLETE enough to count: the monitor has evaluated a hydrated
+   *  store with every worker/NWS feed delivered, or its bound passed (publishReadiness 'alerts').
+   *  Never set in the analytics worker. */
+  alertsComplete?: boolean;
   // v0.36.0 — the live grid backstop the dashboard/TUI consume. Inline-imported
   // so no top-level import is added (avoids a snapshot.ts ↔ gridState.ts cycle,
   // since gridState.ts already imports DeviceSnapshot from here).
@@ -187,6 +191,13 @@ export class SnapshotStore extends EventEmitter {
   // can't trust whatever `online` flag is currently being shown.
   public lastDeviceListAttemptAt = 0;
   public lastDeviceListSuccessAt = 0;
+  /**
+   * v1.186.0 — when the FIRST poll cycle settled: the device list landed and every device it
+   * listed online was asked for its quota (answered or failed). 0 until then. The store is
+   * HYDRATED from that moment; before it, a device map may hold a list with no projections,
+   * or nothing at all. The alert monitor's first evaluation waits on it (bounded).
+   */
+  public firstPollSettledAt = 0;
   // Optional: a logger the store can use to record per-SN state transitions.
   // Wired by `startPollLoop` so tests / call sites that build a store directly
   // get silent no-op behavior by default. (The MQTT entry point also wires it.)
@@ -280,6 +291,18 @@ export class SnapshotStore extends EventEmitter {
   /** Attach computed alerts to the snapshot (called by the alert monitor). */
   setAlerts(alerts: Alert[]) {
     this.snap.alerts = alerts;
+  }
+
+  /** v1.186.0 — the alert set is complete enough to publish as counts (see FleetSnapshot). A latch. */
+  markAlertsComplete() {
+    this.snap.alertsComplete = true;
+  }
+
+  /** v1.186.0 — the first poll cycle settled (see firstPollSettledAt). Once; emits 'hydrated'. */
+  markFirstPollSettled() {
+    if (this.firstPollSettledAt > 0) return;
+    this.firstPollSettledAt = Date.now();
+    this.emit('hydrated', this.snap);
   }
 
   /** Returns the MQTT cmdId→param map for a device. */
@@ -1130,6 +1153,8 @@ export async function refreshAll(store: SnapshotStore, log: (m: string) => void 
         }
       }),
   );
+  // v1.186.0 — every listed-online device has now been asked (answered or failed): hydrated.
+  store.markFirstPollSettled();
   return { attemptedSns, failedSns, standingFailedSns };
 }
 

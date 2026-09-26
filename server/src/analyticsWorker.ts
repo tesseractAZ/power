@@ -1,7 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { createReadRecorder } from './readRecorder.js';
 import { setOwnerReserveFloorPct } from './nightChargeActuator.js';
-import { buildReport, WARM_REPORTS } from './reports.js';
+import { buildReport, warmReports } from './reports.js';
 import type { FleetSnapshot } from './snapshot.js';
 
 /**
@@ -46,6 +46,8 @@ port.on('message', async (msg: any) => {
         setOwnerReserveFloorPct(msg.pct ?? null);
         return;
       case 'report': {
+        // v1.186.0 — buildReport single-flights by name + args: a request (or the client's
+        // retry after a timeout) whose report is already computing joins that computation.
         const result = await buildReport(msg.name, ctx(), msg.args ?? {});
         port.postMessage({ kind: 'result', id: msg.id, ok: true, result });
         return;
@@ -81,10 +83,12 @@ const warm = async () => {
   if (warming || !hasDevices()) return;
   warming = true;
   try {
-    for (const name of WARM_REPORTS) {
-      try { await buildReport(name, ctx()); }
-      catch (e: any) { log(`analytics-worker: warm ${name} failed: ${e?.message ?? e}`); }
-    }
+    // v1.186.0 — warmReports yields a macrotask turn between reports, so queued requests
+    // (the alarm path's included) are answered between them instead of after the whole pass.
+    await warmReports(
+      (name) => buildReport(name, ctx()),
+      (name, e: any) => log(`analytics-worker: warm ${name} failed: ${e?.message ?? e}`),
+    );
   } finally {
     warming = false;
   }

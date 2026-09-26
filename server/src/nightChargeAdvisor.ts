@@ -170,6 +170,11 @@ export interface NightChargeInputs {
    *  day away (see longGapAhead). Cost mode then fills to the owner's SoC ceiling
    *  and sets the morning-solar headroom aside. */
   longGapAhead?: boolean;
+  /** v1.186.0 — the PESSIMISTIC (P10, low-PV) surplus from window close to the evening
+   *  on-peak start (pessimisticPrePeakSurplus). Read ONLY on a long-gap night: the ceiling
+   *  becomes min(costMaxSocPct, full − this) instead of costMaxSocPct alone. null/absent ⇒
+   *  the headroom stays set aside (the v1.168.0 full buy). */
+  prePeakPvSurplusP10Kwh?: number | null;
 
   // ── Basis quality (gates) ──
   confidenceTier: 'forecast' | 'mixed' | 'climatology';
@@ -321,6 +326,23 @@ export interface NightChargePlan {
   minProjSocTsMs: number | null;
   /** The no-buy baseline trough (what WOULD happen without the recommendation). */
   baselineMinSocPct: number | null;
+  /** v1.186.0 — the trough the CUSHION TEST was judged on, % of pool, under the
+   *  resilience lift: the whole-house forward trough on the `legacy-pct` basis, the
+   *  pack at window close (outage onset) on `islanded-outage` / `disabled`.
+   *  `cushionShortfall` is exactly this figure against `cushionLineSocPct`, and the
+   *  scorer grades the plan-trajectory verdict on it.
+   *
+   *  ★ NOT `minProjSocPct`. Since v1.125.0 that field is the whole-house DISCLOSURE
+   *  trough, which sits at ~0% on a plant whose pool is smaller than a day of
+   *  whole-house load — so grading on it scored every night whose plan held the
+   *  cushion as an engine-fault strike, and held the readiness gate BLOCKED.
+   *  null/absent on a null plan and on plans issued before v1.186.0. */
+  cushionTroughSocPct?: number | null;
+  /** v1.186.0 — the line that trough was tested against, % of pool: the reserve
+   *  floor plus the cushion AS APPLIED (cushionKwh). Not reserveFloorPct +
+   *  cushionPct — cushionPct is the legacy flat band, which is the applied cushion
+   *  only on the `legacy-pct` basis. */
+  cushionLineSocPct?: number | null;
 
   /** v1.39.0 (§4 honesty): the plan-projected pack SoC % ENTERING the charge
    *  window (the carry from now to window open). Freezes into the ledger's
@@ -353,8 +375,9 @@ export interface NightChargePlan {
   costCeilingSurplusKwh?: number | null;
   /** v1.174.0 — WHICH surplus that was: 'p50', the 'p90' stand-in, or 'none' (set aside
    *  by the long-gap rule, or no surplus known — `longGapAhead` tells them apart).
+   *  v1.186.0 — 'p10': a long-gap night that kept the pessimistic pre-peak surplus.
    *  null/absent in resilience mode. */
-  costCeilingSurplusBasis?: 'p50' | 'p90' | 'none' | null;
+  costCeilingSurplusBasis?: 'p10' | 'p50' | 'p90' | 'none' | null;
   /** v1.125.0 — the outage this cushion is sized to survive, hours. */
   cushionOutageHours?: number;
   rationale: string;
@@ -840,6 +863,10 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
       minProjSocPct: baselineMinSocPct,
       minProjSocTsMs: houseTroughAtLift(0).minTs,   // v1.125.0 — matches the disclosed house trough
       baselineMinSocPct,
+      // v1.186.0 — nothing is bought, so the trough the cushion test judged is the
+      // no-buy one (baselineHolds is that test passing).
+      cushionTroughSocPct: round2((baselineTrough.minKwh / fullKwh) * 100),
+      cushionLineSocPct: round2((targetFloorKwh / fullKwh) * 100),
       projSocAtWindowStartPct,
       preWindowMinSocPct,
       // Nothing was bought, but the contention basis is still a fact about
@@ -912,6 +939,10 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   const houseWithBuy = houseTroughAtLift(liftKwh);
   const minProjSocPct = round1((houseWithBuy.minKwh / fullKwh) * 100);
   const cushionShortfall = minProjKwh < targetFloorKwh - 1e-6;
+  // v1.186.0 — the trough and the line the test above used, carried to the ledger so
+  // the scorer grades the plan on what it was SIZED against (see NightChargePlan).
+  const cushionTroughSocPct = round2((minProjKwh / fullKwh) * 100);
+  const cushionLineSocPct = round2((targetFloorKwh / fullKwh) * 100);
   if (cushionShortfall && bindingCap === 'requirement') {
     // A clamp (saturation / below-empty), not a linear cap, is the limiter;
     // attribute to the tighter physical bound so the flag is never 'requirement'.
@@ -965,12 +996,17 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
   // stands in when the median is unknown), and none at all before a long gap: with
   // no full cheap window for days, the owner's SoC ceiling is the ceiling.
   const longGap = inputs.longGapAhead === true;
-  const costSurplusKwh: number | null = longGap ? null
+  // v1.186.0 — before a long gap the ceiling keeps the PESSIMISTIC (P10) pre-peak surplus
+  // instead of none: a sunny forecast leaves room for the sun, a cloudy one (P10 surplus
+  // ~0) still fills to costMaxSocPct, and an unknown P10 keeps the full v1.168.0 buy.
+  const longGapP10Kwh = inputs.prePeakPvSurplusP10Kwh;
+  const longGapP10Known = longGapP10Kwh != null && Number.isFinite(longGapP10Kwh);
+  const costSurplusKwh: number | null = longGap ? (longGapP10Known ? Math.max(0, longGapP10Kwh) : null)
     : (inputs.morningPvSurplusP50Kwh != null && Number.isFinite(inputs.morningPvSurplusP50Kwh)
       ? inputs.morningPvSurplusP50Kwh : morningPvSurplusP90Kwh);
   // v1.174.0 — the same choice, named for the ledger (costSurplusKwh alone cannot say
   // whether a 16 kWh headroom was the median or the P90 standing in).
-  const costSurplusBasis: 'p50' | 'p90' | 'none' = longGap ? 'none'
+  const costSurplusBasis: 'p10' | 'p50' | 'p90' | 'none' = longGap ? (longGapP10Known ? 'p10' : 'none')
     : inputs.morningPvSurplusP50Kwh != null && Number.isFinite(inputs.morningPvSurplusP50Kwh) ? 'p50'
       : morningPvSurplusP90Kwh != null && Number.isFinite(morningPvSurplusP90Kwh) ? 'p90'
         : 'none';
@@ -1141,11 +1177,16 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     : bindingCap === 'chargePower' ? ' because the charge-rate ceiling over this window binds it'
     : bindingCap === 'poolHeadroom' ? ' because available pool headroom binds it'
     : '';
+  // v1.186.0 — a long-gap night either keeps the pessimistic pre-peak surplus or, with no
+  // P10 known, sets the headroom aside; the rationale says which.
+  const longGapNote = costSurplusBasis === 'p10'
+    ? ` (no full-length cheap window for more than a day after this one, so only the pessimistic (P10) solar surplus before the evening peak, ~${round1(costSurplusKwh ?? 0)} kWh, is left as headroom)`
+    : ' (no full-length cheap window for more than a day after this one, so the morning-solar headroom is set aside)';
   const holdReason = starved
     ? `this window can deliver only ~${round1(buyKwh)} kWh, under the ${round1(minBuyKwh)} kWh minimum-buy threshold${holdCapName} — against a requirement of ${meetable ? `~${round1(requiredExtraKwh)} kWh` : 'more than the pool can hold'}. The window cannot serve the need; this is not a night with little worth buying.`
     : `the buy this window would make (~${round1(buyKwh)} kWh) is under the ${round1(minBuyKwh)} kWh minimum-buy threshold — the projected need is genuinely small.`;
   const rationale = chargeTonight
-    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? ' (no full-length cheap window for more than a day after this one, so the morning-solar headroom is set aside)' : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
+    ? `Buy ~${round1(buyKwhDebiased)} kWh overnight${calNote} → target ${targetSocPct}% by ${fmtLocalHint(windowEnd)}.${setpointNote} ${costMode ? `Objective: COST — buying cheap overnight energy to displace dearer grid energy later, up to the ${costCeilingBasis === 'pv-headroom' ? 'morning-solar headroom' : `${inputs.costMaxSocPct ?? DEFAULT_COST_MAX_SOC_PCT}% state-of-charge ceiling`}${longGap ? longGapNote : ''}. ` : ''}The cushion is ${cushionDesc}; without the buy a whole-house island would trough at ~${baselineMinSocPct}%.${baselineHolds ? ` Resilience needs no buy tonight — the pack at window close (${noBuyPct}%) already covers the cushion; this buy is economic only.` : ''}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${bindingCap === 'overBuy' ? ' NOTE: buy exceeds morning-PV headroom; a small clip is accepted to hold resilience.' : ''}${evNote}${preWindowNote}`
     : `Hold — ${holdReason}${cushionShortfall ? ' NOTE: charge/pool caps prevent fully meeting the cushion — residual risk remains.' : ''}${evNote}${preWindowNote}`;
 
   return {
@@ -1167,6 +1208,8 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     minProjSocPct,
     minProjSocTsMs: houseWithBuy.minTs,   // v1.125.0 — matches the disclosed house trough
     baselineMinSocPct,
+    cushionTroughSocPct,
+    cushionLineSocPct,
     projSocAtWindowStartPct,
     preWindowMinSocPct,
     confidenceTier: inputs.confidenceTier,
@@ -1386,6 +1429,8 @@ export interface NightChargeInputDeps {
   /** v1.168.0 — forwarded verbatim (see NightChargeInputs). */
   morningPvSurplusP50Kwh?: number | null;
   longGapAhead?: boolean;
+  /** v1.186.0 — forwarded verbatim (see NightChargeInputs). */
+  prePeakPvSurplusP10Kwh?: number | null;
   minBuyKwh: number;
   /** v1.112.0 — learned buy de-bias, forwarded verbatim to the inputs. */
   buyDebiasFactor?: number;
@@ -1489,6 +1534,46 @@ export function longGapAhead(
   return nextFull.startMs - tonight.endMs > LONG_GAP_MS;
 }
 
+/** v1.186.0 — how far past tonight's window close the pre-peak surplus may reach when
+ *  no on-peak hour starts first (the same span the P50/P90 morning surplus covers). */
+export const PRE_PEAK_SURPLUS_MAX_HOURS = 14;
+
+/**
+ * v1.186.0 — the PESSIMISTIC solar headroom kept on a long-gap night: the sum of
+ * max(0, P10 PV − forecast load) over [windowEnd, the first on-peak hour after it), capped
+ * at PRE_PEAK_SURPLUS_MAX_HOURS. P10 is the LOW-PV quantile (analytics.ts ForecastBand:
+ * "10th-percentile PV (worst case, cloudy)"); the surplus stops at the evening on-peak
+ * start, so the sun has refilled the pack before the dearest hours whenever the day
+ * delivers at least its P10 — the evening peak stays covered. Measured 2026-09-24→25: with
+ * the headroom set aside the long-gap buy reached 90% overnight, the pool was full before
+ * 11:00 and the Cores curtailed 12.27 kWh of PV that day.
+ *
+ * `untilMs` is always the bound used. `kwh` is null (⇒ the headroom stays set aside and
+ * the full long-gap buy stands) when no hour in the span is covered or any covered hour
+ * carries a non-finite P10 or load: absence of a pessimistic forecast is not evidence of sun.
+ */
+export function pessimisticPrePeakSurplus(o: {
+  hours: ReadonlyArray<{ ts: number; p10W: number; loadW: number }>;
+  windowEndMs: number;
+  isOnPeakAt: (tsMs: number) => boolean;
+  maxHours?: number;
+}): { kwh: number | null; untilMs: number } {
+  const capMs = o.windowEndMs + (o.maxHours ?? PRE_PEAK_SURPLUS_MAX_HOURS) * HOUR_MS;
+  let untilMs = capMs;
+  for (let t = o.windowEndMs; t < capMs; t += HOUR_MS) {
+    if (o.isOnPeakAt(t)) { untilMs = t; break; }
+  }
+  let kwh = 0;
+  let covered = false;
+  for (const h of o.hours) {
+    if (h.ts < o.windowEndMs || h.ts >= untilMs) continue;
+    if (!Number.isFinite(h.p10W) || !Number.isFinite(h.loadW)) return { kwh: null, untilMs };
+    covered = true;
+    kwh += Math.max(0, h.p10W - h.loadW) / 1000;
+  }
+  return { kwh: covered ? round2(kwh) : null, untilMs };
+}
+
 /**
  * Assemble a NightChargeInputs from injected forecast pieces. PURE. The
  * conservative-worst-case rules (§2.3) live here so they are provable:
@@ -1514,7 +1599,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh, buyDebiasFactor,
-    morningPvSurplusP50Kwh, longGapAhead,
+    morningPvSurplusP50Kwh, longGapAhead, prePeakPvSurplusP10Kwh,
     // v1.125.0 — the islanded-outage cushion inputs. Destructuring here is not
     // decoration: NightChargeInputs is built field-by-field below, so a field
     // added to the deps interface and to the inputs interface but NOT copied
@@ -1689,6 +1774,7 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
     morningPvSurplusP90Kwh,
     morningPvSurplusP50Kwh,
     longGapAhead,
+    prePeakPvSurplusP10Kwh,
     buyDebiasFactor,
     confidenceTier,
     basisComplete,
@@ -2145,10 +2231,22 @@ export interface NightOutcomeScore {
   /** plan minProjSoc − actual min SoC, %-points (+ = plan optimistic vs reality). */
   socMinErrPct: number | null;
   /** Would the PLAN's own trajectory (buy applied) have breached floor+cushion?
-   *  Evaluated on the plan trajectory (§3.3), never on baseline telemetry. null
-   *  when the plan produced no trajectory (incomplete basis / hold). */
+   *  Evaluated on the plan trajectory (§3.3), never on baseline telemetry.
+   *  v1.186.0 — graded on the trough the plan was SIZED against
+   *  (cushionTroughSocPct vs cushionLineSocPct). null when the plan produced no
+   *  trajectory, or did not record that trough (a plan issued before v1.186.0):
+   *  unknown, never "held". */
   planTrajFloorBreached: boolean | null;
 }
+
+/**
+ * v1.186.0 — a sizing trough this far (%-points of pool) under its line is rounding,
+ * not a trajectory fault: both figures are persisted at 0.01 %, while
+ * `cushionShortfall` tests the unrounded kWh with a 1e-6 tolerance. 0.05 %-pt is
+ * ~46 Wh on a 92 kWh pool, and reproduces the half-step of the round1
+ * `minProjSocPct` the verdict used to be graded on.
+ */
+export const PLAN_TRAJ_BREACH_TOLERANCE_PCT = 0.05;
 
 /**
  * Score a plan against its measured outcome (design §3.1). PURE. The floor-breach
@@ -2177,12 +2275,26 @@ export function scoreNightOutcome(
       : null;
 
   // §3.3: the safety verdict is the plan trajectory (buy applied) dipping below
-  // floor+cushion, i.e. the module's own minProjSocPct vs the floor+cushion line.
-  const targetFloorPct = plan ? plan.reserveFloorPct + plan.cushionPct : null;
+  // floor+cushion.
+  //
+  // v1.186.0 — graded on the trough the plan was SIZED against, not minProjSocPct.
+  // v1.125.0 split the two: minProjSocPct became the whole-house DISCLOSURE trough
+  // (~0% on this plant every night) while the cushion test moved to the islanded
+  // outage onset, and this line kept grading the disclosure figure against the
+  // legacy flat band. Every night whose plan held the cushion was then stored as
+  // plan_traj_floor_breached=1 and counted as an engine-fault strike, so the
+  // readiness gate could never leave BLOCKED. On the `legacy-pct` basis the sizing
+  // trough IS the whole-house trough and the line IS floor + cushionPct, so that
+  // basis grades exactly as before.
+  //
+  // A plan that did not record its sizing trough is UNKNOWN (null) — neither a
+  // strike nor a clean verdict.
+  const trough = plan?.cushionTroughSocPct ?? null;
+  const line = plan?.cushionLineSocPct ?? null;
   const planTrajFloorBreached =
-    plan == null || plan.minProjSocPct == null || targetFloorPct == null
+    trough == null || line == null || !Number.isFinite(trough) || !Number.isFinite(line)
       ? null
-      : plan.minProjSocPct < targetFloorPct - 1e-9;
+      : trough < line - PLAN_TRAJ_BREACH_TOLERANCE_PCT;
 
   return {
     pvErrFrac: signedFrac(actuals.actualPvKwh, actuals.forecastPvKwh),
