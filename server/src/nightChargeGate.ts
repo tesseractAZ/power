@@ -23,6 +23,8 @@
  *    fail-closed) AND either the plan's own simulated trajectory breached
  *    (§3.3) or an actuated night's REALIZED outcome breached. A plan that
  *    honestly disclosed `cushionShortfall` is physics, not fault — exempt.
+ *    v1.186.0: the trajectory half counts only where it was graded on the
+ *    trough the plan was SIZED against (see the strike rule below).
  *  - Strikes live in a rolling 45-day window and are additionally cleared by
  *    14 consecutive strike-free actuated nights — escapable by demonstrated
  *    performance, never by waiting alone within the window.
@@ -37,6 +39,7 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { NightLedgerRow } from './recorder.js';
+import { PLAN_TRAJ_BREACH_TOLERANCE_PCT } from './nightChargeAdvisor.js';
 
 const DAY_MS = 86_400_000;
 
@@ -334,14 +337,56 @@ export function computeNightChargeReadiness(
   // (forecast-tier plans only, §3.3) or an actuated night's REALIZED outcome
   // breached floor+cushion (any tier — a delivered buy that still breached is
   // fault evidence regardless of the forecast basis). ──
+  //
+  // v1.186.0 — a trajectory verdict counts only when it was graded on the trough
+  // the plan was SIZED against. From v1.125.0 to v1.185.x the scorer graded the
+  // whole-house DISCLOSURE trough (`min_proj_soc_pct`, ~0% on this plant every
+  // night) against the legacy flat band, so every night whose plan held the cushion
+  // was stored as breached: four such rows (actual minimum SoC 60-74%, cushion never
+  // breached) held the gate hard-BLOCKED and hid the graduation criteria it was
+  // actually failing.
+  //  - `cushion_trough_soc_pct` present: graded by the v1.186.0 scorer on the sizing
+  //    trough — counts.
+  //  - `cushion_shortfall` NULL (pre-v1.50.0): no plan-time verdict to weigh against
+  //    the flag — counts, fail-closed as before.
+  //  - otherwise (explicit `cushion_shortfall` = 0, no sizing trough): SET ASIDE. The
+  //    stored flag is not evidence about the sizing trough, and the one piece of
+  //    evidence the row does carry about it is the plan's own `cushion_shortfall` =
+  //    0, computed from that trough at plan time — on the legacy basis from the very
+  //    figure the flag was graded on, so the pair could not disagree there.
+  // The REALIZED half is untouched and still judges every actuated night, set aside
+  // or not. Set-aside flags are counted in `trajStrikesSetAside`, never dropped
+  // silently.
+  const trajGradedOnSizingTrough = (r: NightLedgerRow): boolean =>
+    asNum(r.cushion_trough_soc_pct) != null || r.cushion_shortfall == null;
+  const trajFlagged = (r: NightLedgerRow): boolean =>
+    r.confidence_tier === 'forecast' && truthy(r.plan_traj_floor_breached);
+  // v1.186.0 — where the row carries BOTH sizing columns, the verdict is DERIVED from them
+  // (the scorer's own rule), never read from the stored flag: the flag says only what some
+  // scorer version wrote. A row planned under v1.186.0 but captured by reverted pre-v1.186
+  // code carries the trough and line AND a disclosure-trough flag of 1 — trusting that flag
+  // brought the phantom engine-fault BLOCK back. Otherwise the stored flag, as before.
+  const trajBreached = (r: NightLedgerRow): boolean => {
+    if (r.confidence_tier !== 'forecast') return false;
+    const trough = asNum(r.cushion_trough_soc_pct);
+    const line = asNum(r.cushion_line_soc_pct);
+    if (trough != null && line != null) return trough < line - PLAN_TRAJ_BREACH_TOLERANCE_PCT;
+    return truthy(r.plan_traj_floor_breached);
+  };
   const strikeRows = currentAlgo.filter((r) => {
     if (truthy(r.cushion_shortfall)) return false; // disclosed — physics, not fault
-    const trajStrike = r.confidence_tier === 'forecast' && truthy(r.plan_traj_floor_breached);
+    const trajStrike = trajBreached(r) && trajGradedOnSizingTrough(r);
     const realizedStrike = truthy(r.actuated) && truthy(r.cushion_breached);
     return trajStrike || realizedStrike;
   });
   const strikeWindowStart = phoenixYmd(nowMs - STRIKE_WINDOW_DAYS * DAY_MS);
   const windowStrikes = strikeRows.filter((r) => String(r.plan_date) >= strikeWindowStart);
+  /** v1.186.0 — in-window trajectory flags set aside as graded on the disclosure trough. */
+  // v1.186.0 — a stored flag the sizing columns overrule is set aside too, and counted.
+  const trajStrikesSetAside = currentAlgo.filter((r) =>
+    !truthy(r.cushion_shortfall) && trajFlagged(r) && !(trajBreached(r) && trajGradedOnSizingTrough(r))
+    && String(r.plan_date) >= strikeWindowStart,
+  ).length;
   // Demonstrated-performance escape: actuated nights AFTER the newest in-window
   // strike are strike-free by construction (the newest strike is the max
   // strike date); ≥ STRIKE_CLEAR_STREAK of them clears the window.
@@ -385,6 +430,7 @@ export function computeNightChargeReadiness(
     // label is the correct posture.
     underBuyMeasurable: actuatedNights > 0 && underBuyPool.length > 0 ? 1 : 0,
     strikesMeasurable: currentAlgo.length > 0 && currentAlgo.some((r) => !truthy(r.cushion_shortfall)) ? 1 : 0,
+    trajStrikesSetAside, // v1.186.0 — see the strike rule
     buyBiasKwh: buyBiasKwh != null ? round(buyBiasKwh) : null,
     pvMae: pvMae != null ? round(pvMae) : null,
     pvBias: pvBias != null ? round(pvBias) : null,

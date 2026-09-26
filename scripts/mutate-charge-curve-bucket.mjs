@@ -27,8 +27,9 @@ const MUTANTS = [
   {
     id: 'i. \u2605\u2605\u2605 the pack scan reads raw samples again',
     file: AN,
-    find: '        CHARGE_CURVE_BUCKET_SEC,\n      );',
-    to: '      );',
+    // v1.186.0 — the scan moved into readChargeCurveRows (week-long slices); same mutant.
+    find: '    const slice = recorder.queryMulti(sn, metrics, lo, hi, CHARGE_CURVE_BUCKET_SEC);',
+    to: '    const slice = recorder.queryMulti(sn, metrics, lo, hi); /* MUTANT */',
     why: 'The single analytics worker is pinned 16-20 s every hour; an alert tick landing inside waits it out and the next is dropped \u2014 alarm latency doubles to ~40 s.',
   },
   {

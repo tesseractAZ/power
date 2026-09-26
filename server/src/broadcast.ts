@@ -73,7 +73,7 @@ import { TELEMETRY_BLIND_ALERT_ID } from './telemetryBlind.js';
 import { config } from './config.js';
 import { callHaService, isSupervised, probeService, getEntityState, getAllStates } from './haService.js';
 import { parseQuietHours, inQuietWindow } from './alertMonitor.js';
-import { renderAnnouncement, pruneRenderCache, prewarmTerminatorCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel } from './audioRenderer.js';
+import { renderAnnouncement, pruneRenderCache, prewarmTerminatorCache, END_OF_MESSAGE_PHRASE, END_OF_MESSAGE_GAP_MS, type AnnouncementLevel, type RenderOptions } from './audioRenderer.js';
 import { resolveChime } from './chimeConfig.js';
 import { buildAlertMessage, buildAlertMessageEs, priorityAnnouncementPrefixEs } from './ttsService.js';
 import { getBroadcastRuntimeConfig, onBroadcastRuntimeConfigChange } from './broadcastRuntimeConfig.js';
@@ -466,6 +466,84 @@ export function isRestartContinuation(
 }
 
 /**
+ * v1.186.0 — WHO asked for a broadcast. One single-flight pipeline carries three kinds, and
+ * only one of them describes the house:
+ *   condition — a condition transition from the tick (and its deferred/spoken retries);
+ *   dedicated — announce(): the SoC ladder, the runway alarm, the night-charge and Charge Now
+ *               notices. Real audio, but not the condition (their ids are excluded from it);
+ *   test      — POST /api/broadcast/test. "This is only a test."
+ * Until v1.186.0 every kind wrote the same bookkeeping: a verified red test armed the
+ * same-level storm gate, so a real red inside the next ~2 min was refused with no retry, and
+ * the 21:30 night-charge consent notice became the next boot's restart baseline (yellow while
+ * the house was green), so a genuine new yellow after that restart was filed as a duplicate.
+ */
+export type BroadcastKind = 'condition' | 'dedicated' | 'test';
+
+/**
+ * v1.186.0 — the restart baseline, from the persisted CONDITION record (never from the
+ * last-broadcast summary, which also carries tests and dedicated announcements).
+ *
+ * The record is written by the tick on EVERY adoption of a condition level — spoken or
+ * silent (quiet hours, the all-clear speech gate, a storm-gated transition) — with `spoken`
+ * true only once a condition broadcast of that level was VERIFIED delivered, or the level was
+ * adopted as a continuation of one heard before a restart. A level the household never heard
+ * gives no baseline, so a restart re-speaks it (v0.58.0: "a failed/never-played pre-restart
+ * broadcast must still re-fire"). A record without the fields (written before v1.186.0) also
+ * gives none: its only level is the contaminated last-broadcast one. Pure + exported for tests.
+ */
+export function conditionBootBaseline(
+  rec: { conditionLevel?: unknown; conditionSpoken?: unknown } | null | undefined,
+): ConditionLevel | null {
+  if (rec == null) return null;
+  const l = rec.conditionLevel;
+  if (l !== 'green' && l !== 'yellow' && l !== 'red') return null;
+  return rec.conditionSpoken === true ? l : null;
+}
+
+/**
+ * v1.186.0 — which configured Music Assistant targets can take an announcement right now, and
+ * why the others cannot. Usable is exactly the pre-v1.186.0 rule (a state was read and it is not
+ * `unavailable`). A null read is NOT usable: it means "not found", or a read that failed — and a
+ * read that failed is no evidence the speaker is back. Pure + exported for tests.
+ */
+export function classifyAudibleTargets(
+  targets: readonly string[],
+  states: ReadonlyArray<{ state: string } | null | undefined>,
+): { usable: string[]; unusable: string[] } {
+  const usable: string[] = [];
+  const unusable: string[] = [];
+  targets.forEach((t, i) => {
+    const s = states[i];
+    if (s == null) unusable.push(`${t} (not found or unreadable)`);
+    else if (s.state === 'unavailable') unusable.push(`${t} (unavailable)`);
+    else usable.push(t);
+  });
+  return { usable, unusable };
+}
+
+/**
+ * v1.186.0 — the DEGRADED audible channel: fewer usable Music Assistant targets than are
+ * configured. The unreachable alarm (v0.84.0) fires only at ZERO usable, so a speaker that went
+ * `unavailable` (one of two was dark for ~27 h on 2026-09-23/24) raised nothing while every
+ * broadcast logged "2 MA … → ok". Same debounce style as the unreachable streak — `confirm`
+ * consecutive short probes before it is raised, so a restart blip is silent — and it clears on
+ * the first probe that reads every target usable (a failed read never counts as usable, so
+ * absence cannot clear it). Zero usable counts too, so the degraded alert stands while the
+ * unreachable streak builds; the alert builder hands over to the unreachable alert once that is
+ * confirmed. Pure + exported for tests.
+ */
+export function audibleDegradedStep(
+  prevStreak: number,
+  configured: number,
+  usable: number,
+  confirm: number,
+): { streak: number; degraded: boolean } {
+  if (configured === 0 || usable >= configured) return { streak: 0, degraded: false };
+  const streak = prevStreak + 1;
+  return { streak, degraded: streak >= confirm };
+}
+
+/**
  * v0.87.0 — boot phantom-critical grace. During the post-boot warm-up window,
  * telemetry populates over the first ticks and a transient per-device critical can
  * appear on ONE 10s tick then clear as real values arrive. Because a RED is
@@ -625,6 +703,21 @@ export interface BroadcastStatus {
   audibleReachable: boolean | null;
   audibleUsableTargets: number;
   audibleReason: string | null;
+  /** v1.186.0 — the denominator for audibleUsableTargets: configured Music Assistant targets
+   *  only (`targetCount` also counts the SIP targets, which the probe does not read). */
+  audibleConfiguredTargets: number;
+  /** v1.186.0 — CONFIRMED (debounced) fewer usable MA targets than configured, and which. */
+  audibleDegraded: boolean;
+  audibleUnusableTargets: string[];
+  /** v1.186.0 — what the last broadcast was: a condition transition, a dedicated announcement,
+   *  an operator test or a settings-page preview. lastLevel/lastOutcome describe it. */
+  lastBroadcastKind: BroadcastKind | 'preview' | null;
+  /** v1.186.0 — the persisted CONDITION record the next boot's restart baseline is read from
+   *  (conditionBootBaseline), and the baseline this boot used. */
+  conditionLevel: ConditionLevel | null;
+  conditionSpoken: boolean;
+  conditionAt: number | null;
+  bootBaselineLevel: ConditionLevel | null;
   /** v0.9.70 — diagnostic from the most recent render. */
   lastRender: {
     filename: string | null;
@@ -652,6 +745,10 @@ export interface BroadcastMonitorOpts {
   cacheDir: string;
   /** URL path the speakers fetch combined WAVs from. Joined with audioBase. */
   cacheUrlPath: string;
+  /** v1.186.0 — test seams: the Wyoming renderer (audioRenderer's own injectable, v1.47.4) and
+   *  the condition-tick period. Production passes neither. */
+  renderTts?: RenderOptions['renderTts'];
+  tickMs?: number;
 }
 
 /** v1.48.3 — true when EVERY per-target SIP dispatch failure is timeout-classed.
@@ -776,6 +873,14 @@ export function startBroadcastMonitor(
   let lastRender: BroadcastStatus['lastRender'] = {
     filename: null, sizeBytes: null, ttsRenderMs: null, fromCache: null, error: null,
   };
+  // v1.186.0 — see BroadcastStatus.lastBroadcastKind.
+  let lastBroadcastKind: BroadcastStatus['lastBroadcastKind'] = null;
+  // v1.186.0 — the CONDITION record (conditionBootBaseline). Written only by the tick's
+  // adoptLevel and by a verified condition delivery; tests and dedicated announcements never
+  // touch it, so it describes the house rather than whatever played last.
+  let conditionLevel: ConditionLevel | null = null;
+  let conditionSpoken = false;
+  let conditionAt: number | null = null;
 
   // v0.15.18 — the last-broadcast summary survives restarts. Before this,
   // every deploy blanked lastBroadcastAt/lastOutcome/lastSpokenMessage, so
@@ -786,14 +891,20 @@ export function startBroadcastMonitor(
     try {
       writeFileSync(
         STATUS_PATH,
-        JSON.stringify({ lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender }),
+        JSON.stringify({
+          lastBroadcastAt, lastLevel, lastOutcome, lastErrors, lastSpokenMessage, lastRender,
+          lastBroadcastKind, conditionLevel, conditionSpoken, conditionAt, // v1.186.0
+        }),
       );
     } catch { /* best-effort */ }
   };
+  let persistedCondition: { conditionLevel?: unknown; conditionSpoken?: unknown } | null = null;
   try {
     const s = JSON.parse(readFileSync(STATUS_PATH, 'utf8')) as Partial<{
       lastBroadcastAt: number; lastLevel: ConditionLevel; lastOutcome: BroadcastStatus['lastOutcome'];
       lastErrors: string[]; lastSpokenMessage: string; lastRender: BroadcastStatus['lastRender'];
+      lastBroadcastKind: BroadcastStatus['lastBroadcastKind'];
+      conditionLevel: unknown; conditionSpoken: unknown; conditionAt: unknown;
     }>;
     lastBroadcastAt = s.lastBroadcastAt ?? null;
     lastLevel = s.lastLevel ?? null;
@@ -801,13 +912,21 @@ export function startBroadcastMonitor(
     lastErrors = Array.isArray(s.lastErrors) ? s.lastErrors : [];
     lastSpokenMessage = s.lastSpokenMessage ?? null;
     if (s.lastRender) lastRender = s.lastRender;
+    lastBroadcastKind = s.lastBroadcastKind ?? null;
+    persistedCondition = s;
+    const cl = s.conditionLevel;
+    conditionLevel = cl === 'green' || cl === 'yellow' || cl === 'red' ? cl : null;
+    conditionSpoken = s.conditionSpoken === true;
+    conditionAt = typeof s.conditionAt === 'number' ? s.conditionAt : null;
   } catch { /* first boot / no prior state */ }
   // v0.58.0 — restart-continuation baseline (used only to suppress a re-spoken
   // YELLOW/GREEN advisory; criticals are never suppressed — see isRestartContinuation).
   // Only adopt the persisted level when the last broadcast actually SUCCEEDED (the
   // operator heard it); a failed/never-played pre-restart broadcast must still re-fire.
+  // v1.186.0 — read from the CONDITION record, not from lastLevel/lastOutcome: those also
+  // carry tests and dedicated announcements (see conditionBootBaseline).
   const bootMs = Date.now();
-  const bootBaselineLevel: ConditionLevel | null = lastOutcome === 'success' ? lastLevel : null;
+  const bootBaselineLevel: ConditionLevel | null = conditionBootBaseline(persistedCondition);
   // v1.64.0 — identity-aware RED replay gate (see redReplayGate.ts). Constructed
   // here so the state read happens once, at boot: that read IS the restart
   // boundary. Note it is deliberately NOT keyed off bootBaselineLevel/lastOutcome
@@ -828,10 +947,20 @@ export function startBroadcastMonitor(
    * telemetry has not populated yet — that is not an all-clear, and wiping the
    * state on it would turn this whole gate into a no-op on every boot.
    */
-  const adoptLevel = (l: ConditionLevel, c: number): void => {
+  const adoptLevel = (l: ConditionLevel, c: number, heard = false): void => {
     prevLevel = l;
     prevCrit = c;
     if (clearsRedReplayEvidence(l)) redReplayGate.noteConditionGreen();
+    // v1.186.0 — every adoption refreshes the condition record, SILENT ones included (quiet
+    // hours, the all-clear speech gate, a storm-gated or disabled transition): the next boot's
+    // baseline must describe the house, and a green adopted in silence must not leave an older
+    // yellow standing as the baseline. `heard` is true only for a continuation of a level the
+    // household already heard (restart continuation, red replay); a transition starts unheard
+    // and a VERIFIED condition delivery of it marks it heard (runBroadcastAttempt).
+    conditionLevel = l;
+    conditionSpoken = heard;
+    conditionAt = Date.now();
+    persistStatus();
   };
 
   // v0.15.18 — single-slot deferred retry for broadcasts that could not be
@@ -882,7 +1011,15 @@ export function startBroadcastMonitor(
   const releaseRetrySlotIfIdle = () => {
     if (retryTimer == null) { retryAttempt = 0; retryLevel = null; }
   };
-  const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string) => {
+  const scheduleBroadcastRetry = (level: ConditionLevel, rung: AlarmRung, message: string | null, messageEs: string | null, reason: string, kind: BroadcastKind) => {
+    // v1.186.0 — a TEST never takes the single deferred-retry slot. A failed test that armed a
+    // retry superseded any milder real alarm's pending retry (yellow lost to "This is only a
+    // test"), and its replay ran as an ordinary broadcast. The operator who asked for the test
+    // has the failure in the HTTP response.
+    if (kind === 'test') {
+      log(`broadcast: TEST ${level} not retried (${reason}) — the deferred-retry slot is kept for real alarms`);
+      return;
+    }
     const pending = retryTimer != null && retryLevel != null
       ? { level: retryLevel, attempt: retryAttempt }
       : retryLevel != null ? { level: retryLevel, attempt: retryAttempt } : null;
@@ -934,7 +1071,8 @@ export function startBroadcastMonitor(
       // dispatch, so re-firing it would replay the identical alarm on the cordless.
       // v1.32.0 — but ONLY skip when the first SIP dispatch actually DELIVERED
       // (lastSipDispatchOk); a failed SIP dispatch is retried alongside MA.
-      void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk);
+      // v1.186.0 — the retry keeps the kind it was armed for (condition or dedicated).
+      void runBroadcast(level, rung, message, false, messageEs, lastSipDispatchOk, kind);
     }, delay);
     (retryTimer as { unref?: () => void }).unref?.();
   };
@@ -951,11 +1089,19 @@ export function startBroadcastMonitor(
   //     (at most one non-escalating voice alarm per gap).
   // Gates key off the last VERIFIED playback, so failed/unverified dispatches
   // never block their own retries. Test/preview paths bypass (deliberate).
+  // v1.186.0 — and they never ARM them: a test's verified delivery is not evidence that
+  // anything real was said. The same-level gap is armed by CONDITION deliveries only
+  // (lastConditionPlayed*); a dedicated announcement (SoC ladder, runway, night-charge notice)
+  // arms the identical-message gate but no longer the same-level gap. The condition level
+  // excludes every id those announcers own, so a same-level gap armed by one of them could only
+  // ever silence a DIFFERENT alarm — with no retry, since the tick has already adopted it.
   const SAME_LEVEL_GAP_MS = 2 * 60 * 1000;
   const SAME_MESSAGE_GAP_MS = 10 * 60 * 1000;
   let lastPlayedAt = 0;
   let lastPlayedLevel: ConditionLevel | null = null;
   let lastPlayedMessage: string | null = null;
+  let lastConditionPlayedAt = 0;
+  let lastConditionPlayedLevel: ConditionLevel | null = null;
   let stormSuppressedCount = 0;
 
   const supervised = isSupervised();
@@ -1029,6 +1175,10 @@ export function startBroadcastMonitor(
   let audibleUsableTargets = 0;
   let audibleReason: string | null = null;
   let unreachableStreak = 0;
+  // v1.186.0 — the degraded channel (audibleDegradedStep): usable < configured, debounced.
+  let degradedStreak = 0;
+  let audibleDegraded = false;
+  let audibleUnusable: string[] = [];
   // Re-entrancy guard: the zero-target broadcast path fires computeAudibleHealth(
   // true) fire-and-forget, which can overlap the periodic interval (or a second
   // failed broadcast) while the prior call is parked on the getEntityState await.
@@ -1056,10 +1206,13 @@ export function startBroadcastMonitor(
         reachable: audibleReachable,
         reason: audibleReason,
         lastProbeAt: nowMs,
+        degraded: audibleDegraded, // v1.186.0
+        unusableTargets: [...audibleUnusable],
       });
       // Audible not applicable (disabled or unsupervised) → unknown, never alarms.
       if (!supervised || !cfg.enabled) {
         unreachableStreak = 0; audibleReachable = null; audibleUsableTargets = 0; audibleReason = null;
+        degradedStreak = 0; audibleDegraded = false; audibleUnusable = [];
         publish();
         return;
       }
@@ -1068,11 +1221,23 @@ export function startBroadcastMonitor(
       if (cfg.targets.length === 0) {
         unreachableStreak = AUDIBLE_UNREACHABLE_CONFIRM; audibleReachable = false; audibleUsableTargets = 0;
         audibleReason = 'no speakers configured (BROADCAST_TARGETS empty)';
+        degradedStreak = 0; audibleDegraded = false; audibleUnusable = [];
         publish();
         return;
       }
       const states = await Promise.all(cfg.targets.map((t) => getEntityState(t).catch(() => null)));
-      const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
+      // v1.186.0 — classified per target, so the degraded alert can NAME what is missing.
+      const probed = classifyAudibleTargets(cfg.targets, states);
+      const usable = probed.usable.length;
+      const degraded = audibleDegradedStep(degradedStreak, cfg.targets.length, usable, AUDIBLE_UNREACHABLE_CONFIRM);
+      if (degraded.degraded && !audibleDegraded) {
+        log(`broadcast: audible channel DEGRADED — ${usable} of ${cfg.targets.length} Music Assistant target(s) usable; not reachable: ${probed.unusable.join(', ')}`);
+      } else if (!degraded.degraded && audibleDegraded) {
+        log(`broadcast: audible channel restored — all ${cfg.targets.length} Music Assistant target(s) usable`);
+      }
+      degradedStreak = degraded.streak;
+      audibleDegraded = degraded.degraded;
+      audibleUnusable = probed.unusable;
       // Two distinct not-usable signatures, worth distinguishing for triage:
       //   • entity present but state==='unavailable' → the integration is loaded
       //     and the speaker/player itself is offline;
@@ -1320,6 +1485,9 @@ export function startBroadcastMonitor(
     return { attempted: cfg.sipTargets.length, ok: okCount, errors: errs };
   };
 
+  // v1.186.0 — the BroadcastKind of the attempt about to run (set by runBroadcastInner).
+  let attemptKind: BroadcastKind = 'dedicated';
+
   /**
    * Single broadcast: render → one MA call. No staggering, no settles.
    */
@@ -1334,6 +1502,10 @@ export function startBroadcastMonitor(
     bypassStormGate: boolean,
     skipSip = false, // v1.25.0 — true on a deferred MA retry: SIP already got the first dispatch.
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
+    // v1.186.0 — captured at entry: runBroadcastInner sets it immediately before this call, and
+    // the single-flight chain lets no other attempt start until this one settles.
+    const kind = attemptKind;
+    const tag = kind === 'test' ? 'TEST ' : '';
     if (!supervised) return { ok: false, errors: ['not supervised'] };
     // v1.25.0 — at least one Music Assistant target is required (SIP targets are an
     // ADD-ON channel, not a standalone one): it keeps the audible-health self-alert +
@@ -1355,9 +1527,13 @@ export function startBroadcastMonitor(
           log(`broadcast: ${level} suppressed — identical message played ${Math.round(since / 1000)}s ago (storm gate)`);
           return { ok: false, errors: ['suppressed: identical message within gap'] };
         }
-        if (since < SAME_LEVEL_GAP_MS) {
+        // v1.186.0 — the same-level gap runs from the last CONDITION delivery (see the gate
+        // constants). An escalation over EITHER reference still plays, so no broadcast is
+        // refused here that the pre-v1.186.0 gate would have let through.
+        const sinceCondition = Date.now() - lastConditionPlayedAt;
+        if (lastConditionPlayedAt > 0 && sinceCondition < SAME_LEVEL_GAP_MS && !isLevelEscalation(lastConditionPlayedLevel, level)) {
           stormSuppressedCount += 1;
-          log(`broadcast: ${level} suppressed — last ${lastPlayedLevel} played ${Math.round(since / 1000)}s ago (storm gate)`);
+          log(`broadcast: ${level} suppressed — last ${lastConditionPlayedLevel} condition broadcast played ${Math.round(sinceCondition / 1000)}s ago (storm gate)`);
           return { ok: false, errors: ['suppressed: same-or-lower level within gap'] };
         }
       }
@@ -1422,6 +1598,7 @@ export function startBroadcastMonitor(
       endOfMessagePhraseEs: cfg.endOfMessagePhraseEs, // v0.67.0 — Spanish terminator rides the Spanish pass
       endOfMessageGapMs: cfg.endOfMessageGapMs,
       log,
+      renderTts: opts.renderTts, // v1.186.0 — test seam; undefined in production (Wyoming)
     });
     lastRender = {
       filename: r.filename ?? null,
@@ -1541,18 +1718,26 @@ export function startBroadcastMonitor(
     // 20-34 ms). Verify at least one target is registered and available
     // before dispatching; otherwise defer and retry.
     const states = await Promise.all(cfg.targets.map((t) => getEntityState(t)));
-    const usable = states.filter((s) => s != null && s.state !== 'unavailable').length;
+    // v1.186.0 — per target, so a partial channel is named instead of reported as the
+    // configured count. HA skips an unavailable entity in the list and the call still succeeds,
+    // so "→ ok" alone never showed that one room heard nothing.
+    const preflight = classifyAudibleTargets(cfg.targets, states);
+    const usable = preflight.usable.length;
     if (usable === 0) {
       errors.push('all broadcast targets unavailable (HA/MA restarting?)');
-      scheduleBroadcastRetry(level, rung, message, messageEs, 'all broadcast targets unavailable');
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'all broadcast targets unavailable', kind);
       lastBroadcastAt = Date.now(); lastLevel = level; lastOutcome = 'failure'; lastErrors = errors;
+      lastBroadcastKind = kind;
       persistStatus();
       // v0.84.0 — a real broadcast that found ZERO reachable speakers is strong
       // evidence the audible channel is down; freshen the health probe now so the
       // operator self-alert doesn't wait for the next periodic tick to confirm.
       computeAudibleHealth(true).catch(onProbeError);
-      log(`broadcast: ${level} deferred — ${errors[0]}`);
+      log(`broadcast: ${tag}${level} deferred — ${errors[0]}`);
       return { ok: false, errors };
+    }
+    if (preflight.unusable.length > 0) {
+      log(`broadcast: ${tag}${level} — only ${usable} of ${cfg.targets.length} Music Assistant target(s) usable; will not reach ${preflight.unusable.join(', ')}`);
     }
 
     // 3. Single MA play_announcement to every MA target (the SIP side-channel was
@@ -1560,7 +1745,7 @@ export function startBroadcastMonitor(
     const call = await playAnnounce(url, rr.sizeBytes);
     if (!call.ok) {
       errors.push(`music_assistant.play_announcement: ${call.error}`);
-      scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries');
+      scheduleBroadcastRetry(level, rung, message, messageEs, 'play_announcement failed after in-call retries', kind);
     } else if (!call.verified) {
       // Dispatched, outcome unknown. No retry (v1.118.1) and no verification credit.
       deliveryUnverified = true;
@@ -1575,15 +1760,30 @@ export function startBroadcastMonitor(
     // and re-dispatch rather than report a success no one heard.
     if (call.ok && dt < 2000) {
       errors.push(`unverified: completed in ${dt}ms — too fast for real playback`);
-      scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`);
+      scheduleBroadcastRetry(level, rung, message, messageEs, `suspiciously fast completion (${dt}ms)`, kind);
     }
     if (call.ok && errors.length === 0) {
-      retryAttempt = 0; // verified success resets the deferred-retry budget
-      // v0.15.22 — storm gates key off VERIFIED playback only, so a failed or
-      // unverified dispatch never blocks its own deferred retries.
-      lastPlayedAt = Date.now();
-      lastPlayedLevel = level;
-      lastPlayedMessage = message;
+      // v1.186.0 — a TEST feeds none of the real-alarm bookkeeping below. It bypassed the storm
+      // gates and must not arm them (a real red inside ~2 min of a red test was refused, with no
+      // retry), it does not reset a real alarm's retry budget, and "This is only a test" carries
+      // nobody's pending announcement.
+      if (kind !== 'test') {
+        retryAttempt = 0; // verified success resets the deferred-retry budget
+        // v0.15.22 — storm gates key off VERIFIED playback only, so a failed or
+        // unverified dispatch never blocks its own deferred retries.
+        lastPlayedAt = Date.now();
+        lastPlayedLevel = level;
+        lastPlayedMessage = message;
+      }
+      // v1.186.0 — only a CONDITION delivery arms the same-level gap (see the gate constants).
+      if (kind === 'condition') {
+        lastConditionPlayedAt = Date.now();
+        lastConditionPlayedLevel = level;
+      }
+      // v1.186.0 — and only a verified condition delivery of the level the tick currently holds
+      // marks the condition record heard (the restart baseline). A timed-out dispatch is
+      // "delivery UNKNOWN" and earns no credit, as for the red replay gate.
+      if (kind === 'condition' && !deliveryUnverified && conditionLevel === level) conditionSpoken = true;
       // v1.88.0 — SINGLE-FLIGHT the two red retry paths. On 2026-08-19 15:02
       // a degraded boot (Piper DNS down + HA 502) armed BOTH the deferred-
       // target retry (30s) and the spoken-render retry (90s); the deferred one
@@ -1595,23 +1795,29 @@ export function startBroadcastMonitor(
       // satisfied by ANY verified spoken delivery at its level — the condition
       // speech re-derives at fire time, so exact text equality would never
       // match. A dedicated-message pending must match its stored text.
+      // v1.186.0 — "ANY verified spoken delivery at its level" meant any KIND too: a SoC-ladder
+      // red satisfied a render-failed condition red's retry, and the condition's speech was
+      // never delivered. A condition-type pending is satisfied by a condition delivery only.
       if (
         pendingSpokenRetry != null &&
         pendingSpokenRetry.level === level &&
-        (pendingSpokenRetry.message === undefined ||
-          (pendingSpokenRetry.message ?? null) === (message ?? null))
+        (pendingSpokenRetry.message === undefined
+          ? kind === 'condition'
+          : (pendingSpokenRetry.message ?? null) === (message ?? null))
       ) {
         pendingSpokenRetry = null;
         log('broadcast: pending spoken retry cancelled — this verified delivery already carried the announcement');
       }
     }
     const renderTag = rr.fromCache ? 'cached' : `rendered+${rr.ttsRenderMs ?? 0}ms`;
+    // v1.186.0 — the MA tally is what was USABLE at dispatch, not the configured count.
+    const maTally = `${usable}/${cfg.targets.length} MA usable${preflight.unusable.length ? ` (not reached: ${preflight.unusable.join(', ')})` : ''}`;
     if (errors.length === 0) {
-      log(`broadcast: ${level} → ok in ${dt}ms (${cfg.targets.length} MA${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${rr.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
+      log(`broadcast: ${tag}${level} → ok in ${dt}ms (${maTally}${cfg.sipTargets.length ? ` + ${cfg.sipTargets.length} SIP` : ''} target(s), ${renderTag}, ${rr.sizeBytes ?? '?'} bytes${message ? ', +tts' : ''})`);
     } else {
-      log(`broadcast: ${level} → ${errors.length} error(s) in ${dt}ms: ${errors.join('; ')}`);
+      log(`broadcast: ${tag}${level} → ${errors.length} error(s) in ${dt}ms (${maTally}): ${errors.join('; ')}`);
     }
-    lastBroadcastAt = Date.now(); lastLevel = level;
+    lastBroadcastAt = Date.now(); lastLevel = level; lastBroadcastKind = kind;
     lastOutcome = errors.length === 0 ? 'success' : 'partial';
     lastErrors = errors;
     releaseRetrySlotIfIdle();
@@ -1647,7 +1853,9 @@ export function startBroadcastMonitor(
     messageEs: string | null,
     bypassStormGate: boolean,
     skipSip = false,
+    kind: BroadcastKind = 'dedicated',
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
+    attemptKind = kind; // v1.186.0 — read once, at entry, by the attempt below
     try {
       return await runBroadcastAttempt(level, rung, message, messageEs, bypassStormGate, skipSip);
     } finally {
@@ -1713,9 +1921,13 @@ export function startBroadcastMonitor(
     bypassStormGate = false,
     messageEs: string | null = null,
     skipSip = false, // v1.25.0 — forwarded to runBroadcastInner; set by deferred MA retries.
+    // v1.186.0 — the default is the kind that arms the least: announce() (a dedicated
+    // announcement) passes nothing, and a caller that forgets to say what it is must not be
+    // able to arm the condition gates or mark the condition record heard.
+    kind: BroadcastKind = 'dedicated',
   ): Promise<{ ok: boolean; errors: string[]; verified?: boolean }> => {
     realAudibleInFlight++;
-    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip);
+    const run = () => runBroadcastInner(level, rung, message, messageEs, bypassStormGate, skipSip, kind);
     const p = broadcastChain.then(run, run);
     broadcastChain = p.catch(() => undefined);
     void p.then(() => { realAudibleInFlight--; }, () => { realAudibleInFlight--; });
@@ -1785,6 +1997,8 @@ export function startBroadcastMonitor(
   let warmupYellowSinceMs: number | null = null;
   /** v1.173.2 — the held-yellow log line has been written for this episode. */
   let warmupYellowLogged = false;
+  /** v1.186.0 — the post-warm-up condition-record reconciliation has run (once per boot). */
+  let conditionReconciled = false;
   const tick = async () => {
     if (stopped) return;
     cfg = loadBroadcastConfig();
@@ -1812,9 +2026,34 @@ export function startBroadcastMonitor(
       firstTick = false;
       // ★ NOT adoptLevel(): a boot-time green is almost always "the alert store
       // has not populated yet", not an all-clear. See adoptLevel's docstring.
-      prevLevel = level;
-      prevCrit = crit;
-      return;
+      if (level === 'green') {
+        prevLevel = level;
+        prevCrit = crit;
+        return;
+      }
+      // v1.186.0 — a NON-green first tick is a condition standing at boot, and is never joined
+      // silently: it is treated as a transition from green, on THIS tick, through the boot gates
+      // below (restart continuation with the heard baseline, the boot yellow hold, holdBootRed,
+      // the red replay gate). Joining it made every later tick read "no transition", so a
+      // condition unheard before the restart was never spoken (nor pushed: the alert monitor
+      // seeds tick-1 alerts), and the next boot repeated it.
+      prevLevel = 'green';
+      prevCrit = 0;
+      log(`broadcast: ${level} standing at the first tick — routed through the boot gates, not joined silently`);
+    }
+    // v1.186.0 — the first tick joins the current level SILENTLY and does not write the
+    // condition record (an unpopulated store reads green). Once the warm-up window has passed,
+    // prevLevel is the settled condition: if nothing since boot has refreshed the record, bring
+    // it in line, unheard. Otherwise a condition that cleared while the add-on was down would
+    // leave its old level standing as the baseline for every later restart.
+    if (!conditionReconciled && Date.now() - bootMs >= BROADCAST_BOOT_WARMUP_MS) {
+      conditionReconciled = true;
+      if (prevLevel != null && conditionLevel !== prevLevel) {
+        conditionLevel = prevLevel;
+        conditionSpoken = false;
+        conditionAt = Date.now();
+        persistStatus();
+      }
     }
     // v1.45.0 — due spoken retry (see pendingSpokenRetry). Runs only when no
     // transition work is in flight; re-checks that the condition level is
@@ -1841,9 +2080,10 @@ export function startBroadcastMonitor(
           log(`broadcast: spoken retry after render failure → ${want}${stored ? ' (dedicated-path message replay)' : ''}`);
           const message = stored ? stored.message : messageFor(level, alerts);
           const messageEs = stored ? stored.messageEs : messageEsFor(level, alerts);
-          const result = await runBroadcast(want, wantRung, message, true, messageEs);
+          // v1.186.0 — a dedicated-path replay stays dedicated; a condition retry is condition.
+          const result = await runBroadcast(want, wantRung, message, true, messageEs, false, stored ? 'dedicated' : 'condition');
           lastBroadcastAt = Date.now();
-          lastLevel = level;
+          lastLevel = level; lastBroadcastKind = stored ? 'dedicated' : 'condition';
           lastOutcome = result.ok ? 'success' : 'partial';
           lastErrors = result.errors;
         } finally {
@@ -1867,7 +2107,7 @@ export function startBroadcastMonitor(
     // (e.g. yellow→red across the restart) still passes through and broadcasts.
     if (transitioned && isRestartContinuation(bootBaselineLevel, level, Date.now() - bootMs)) {
       log(`broadcast: ${level} matches pre-restart advisory — suppressing duplicate (restart continuation)`);
-      adoptLevel(level, crit);
+      adoptLevel(level, crit, true); // v1.186.0 — heard before the restart (the baseline says so)
       return;
     }
     if (!transitioned && !newCrit) return;
@@ -1911,7 +2151,7 @@ export function startBroadcastMonitor(
     // immediately at any age. See redReplayGate.ts.
     if (redReplayGate.shouldSuppress({ observed: level, voicedFingerprint, activeFingerprints: criticalFingerprints, msSinceBoot: Date.now() - bootMs, nowMs: Date.now() })) {
       log(`broadcast: red suppressed — this standing fault was already announced, and nothing about it has changed (${voicedFingerprint ? describeFingerprint(voicedFingerprint) : '?'}; active: ${criticalIds.join(', ')})`);
-      adoptLevel(level, crit);
+      adoptLevel(level, crit, true); // v1.186.0 — a verified announcement of it is on record
       return;
     }
     // v0.97.0 (re-audit #2) — check in-flight BEFORE committing prevLevel/prevCrit.
@@ -1964,9 +2204,9 @@ export function startBroadcastMonitor(
       pendingSpokenRetry = null; // a fresh transition supersedes any queued retry
       const message = messageFor(level, alerts);
       const messageEs = messageEsFor(level, alerts); // v0.62.0 — Spanish second pass
-      const result = await runBroadcast(level, rung, message, false, messageEs);
+      const result = await runBroadcast(level, rung, message, false, messageEs, false, 'condition');
       lastBroadcastAt = Date.now();
-      lastLevel = level;
+      lastLevel = level; lastBroadcastKind = 'condition';
       lastOutcome = result.ok ? 'success' : 'partial';
       lastErrors = result.errors;
       // v1.64.0 — record WHICH critical was actually SPOKEN and WHEN, so the next
@@ -2020,7 +2260,7 @@ export function startBroadcastMonitor(
     }
   };
 
-  const tickInterval = setInterval(() => { tick().catch((e) => log(`broadcast: tick failed: ${e?.message ?? e}`)); }, 10_000);
+  const tickInterval = setInterval(() => { tick().catch((e) => log(`broadcast: tick failed: ${e?.message ?? e}`)); }, opts.tickMs ?? 10_000);
   const pruneInterval = setInterval(() => { void prune(); }, 60 * 60 * 1000);
   tickInterval.unref();
   pruneInterval.unref();
@@ -2055,9 +2295,11 @@ export function startBroadcastMonitor(
       // bypassStormGate — a test is operator-initiated and must always play.
       // v1.59.0 — a test auditions the rung a real alarm of that condition would use.
       const testRung: AlarmRung = level === 'red' ? 'critical' : level === 'yellow' ? 'medium' : 'clear';
-      const r = await runBroadcast(level, testRung, message, true, messageEs);
+      // v1.186.0 — kind 'test': it plays through every gate and arms none of them, takes no
+      // retry slot, and is never the restart baseline (see BroadcastKind).
+      const r = await runBroadcast(level, testRung, message, true, messageEs, false, 'test');
       lastBroadcastAt = Date.now();
-      lastLevel = level;
+      lastLevel = level; lastBroadcastKind = 'test';
       lastOutcome = r.ok ? 'success' : 'partial';
       lastErrors = r.errors;
       return {
@@ -2152,7 +2394,7 @@ export function startBroadcastMonitor(
       const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
       const call = await playAnnounce(url, r.sizeBytes);
       lastBroadcastAt = Date.now();
-      lastLevel = level;
+      lastLevel = level; lastBroadcastKind = 'preview';
       if (!call.ok) {
         const err = `music_assistant.play_announcement: ${call.error}`;
         lastOutcome = 'partial';
@@ -2211,7 +2453,7 @@ export function startBroadcastMonitor(
         const level = klaxonLevelForPriority(priority);
         const r = await runBroadcast(level, priority, message, opts?.consentNotice === true, messageEs);
         lastBroadcastAt = Date.now();
-        lastLevel = level;
+        lastLevel = level; lastBroadcastKind = 'dedicated';
         lastOutcome = r.ok ? 'success' : 'partial';
         lastErrors = r.errors;
         // v1.48.0 — dedicated-path alarms (SoC ladder / runway) earn the same
@@ -2255,6 +2497,16 @@ export function startBroadcastMonitor(
       audibleReachable,
       audibleUsableTargets,
       audibleReason,
+      // v1.186.0 — additive: the MA denominator, the degraded channel, the broadcast kind and
+      // the condition record the next boot's baseline comes from.
+      audibleConfiguredTargets: cfg.targets.length,
+      audibleDegraded,
+      audibleUnusableTargets: [...audibleUnusable],
+      lastBroadcastKind,
+      conditionLevel,
+      conditionSpoken,
+      conditionAt,
+      bootBaselineLevel,
       lastRender: { ...lastRender },
     }),
     stop: () => {

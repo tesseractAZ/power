@@ -252,10 +252,87 @@ export function isReportName(name: string): name is ReportName {
   return Object.prototype.hasOwnProperty.call(BUILDERS, name);
 }
 
+/**
+ * v1.186.0 — worker-side single-flight, keyed by report name + args.
+ *
+ * Log 2026-09-23: 'report:degradation' timed out after 6 of 7 boots. The builders check their
+ * TTL cache on entry and fill it only at the end, and nothing serialised the worker's async
+ * message handler, so the self-warm loop's cold 'degradation', the HA publish's request and
+ * the analytics client's retry after a 30 s timeout each ran their own full scan on the one
+ * worker thread — the retry started a third copy while the worker was at its busiest.
+ *
+ * A caller whose key is already in flight now joins that computation and receives its result.
+ * The key is EXACT (sorted keys, numbers untruncated — unlike the client's cache key): a join
+ * must return precisely what was asked for. The slot clears when the flight settles, success
+ * or failure, so a rejection is never cached. A flight older than FLIGHT_MAX_JOIN_MS is presumed
+ * wedged and is not joined: the longest builder runs ~20 s, and a hung promise must not
+ * silence an alarm-path report (forecast, runway, the alert reports) for the life of the
+ * process — before v1.186.0 every request computed independently, and that stays the fallback.
+ */
+export const FLIGHT_MAX_JOIN_MS = 5 * 60_000;
+
+export const buildFlightKey = (name: string, args: ReportArgs): string => {
+  const keys = Object.keys(args ?? {}).sort();
+  if (keys.length === 0) return name;
+  const canon: Record<string, unknown> = {};
+  for (const k of keys) canon[k] = (args as Record<string, unknown>)[k];
+  return name + ' ' + JSON.stringify(canon);
+};
+
+export interface KeyedFlights {
+  run<T>(key: string, fn: () => T | Promise<T>): Promise<T>;
+  size(): number;
+}
+
+export function keyedSingleFlight(maxJoinMs: number = FLIGHT_MAX_JOIN_MS, now: () => number = Date.now): KeyedFlights {
+  const flights = new Map<string, { p: Promise<unknown>; startedMs: number }>();
+  return {
+    run<T>(key: string, fn: () => T | Promise<T>): Promise<T> {
+      const t = now();
+      const flying = flights.get(key);
+      if (flying && t - flying.startedMs < maxJoinMs) return flying.p as Promise<T>;
+      // The builder starts on a microtask AFTER the slot is registered, so a builder that
+      // throws synchronously still settles through the same finally and frees its slot.
+      const p: Promise<T> = Promise.resolve()
+        .then(fn)
+        .finally(() => { if (flights.get(key)?.p === p) flights.delete(key); });
+      flights.set(key, { p, startedMs: t });
+      return p;
+    },
+    size: () => flights.size,
+  };
+}
+
+const reportFlights = keyedSingleFlight();
+
 export async function buildReport(name: string, ctx: ReportCtx, args: ReportArgs = {}): Promise<unknown> {
   const b = BUILDERS[name];
   if (!b) throw new Error(`unknown report '${name}'`);
-  return await b(ctx, args);
+  return reportFlights.run(buildFlightKey(name, args), () => b(ctx, args));
+}
+
+/** v1.186.0 — give queued macrotasks (the worker's 'message' events) a turn. Awaiting a
+ *  synchronous builder only resumes as a microtask, which never lets a message in. */
+export const yieldTurn = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+
+/**
+ * v1.186.0 — one self-warm pass over `names`, yielding a macrotask turn after every report.
+ *
+ * The pass awaited 22 builders back to back, and for the synchronous ones `await` resumes as a
+ * microtask: when several TTLs expired in the same 4-min cycle they ran as one uninterrupted
+ * block, and the alarm path's requests (forecast, runway, curtailmentAlerts, baselineAlerts,
+ * forecastAlerts) queued behind all of them. A failing report is logged and the pass goes on.
+ */
+export async function warmReports(
+  build: (name: ReportName) => unknown,
+  onError: (name: ReportName, e: unknown) => void,
+  names: readonly ReportName[] = WARM_REPORTS,
+): Promise<void> {
+  for (const name of names) {
+    try { await build(name); }
+    catch (e) { onError(name, e); }
+    await yieldTurn();
+  }
 }
 
 /**

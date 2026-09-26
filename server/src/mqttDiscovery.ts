@@ -104,6 +104,63 @@ const EXPIRE_AFTER_S = 120;
 // `charge_tonight=ON` from a dead advisor instead of the honest 'unavailable'.
 const NIGHT_CHARGE_EXPIRE_AFTER_S = 90_000;
 
+/**
+ * v1.186.0 — the HA state publish no longer waits on its slowest report.
+ *
+ * buildState awaited Promise.all over nine analytics reports, so one slow or failed report
+ * (degradation — an end-of-life projection with no safety role) withheld the WHOLE payload:
+ * off_grid, backup_pool_percent, runway, the alarm counts, the binary sensors. Log 2026-09-23
+ * 13:00:22: two 30 s cycles after a restart were dropped that way. Each report now settles on
+ * its own:
+ *   - its answer, when it arrives within STATE_REPORT_WAIT_MS;
+ *   - otherwise its last good answer, but only while that answer is at most
+ *     STATE_REPORT_LAST_GOOD_MAX_AGE_MS old. MQTT `expire_after` resets on every message
+ *     RECEIPT, and Home Assistant cannot tell a republished value from a fresh one (an identical
+ *     state write is invisible to it), so a last-good value republished without a bound would
+ *     keep a dead report looking alive forever. The bound is the live sensors' own
+ *     expire_after: no report value is held longer than HA would have held a silent publisher's;
+ *   - otherwise null ("unknown" in HA). A report never computed stays null.
+ * A report that answers after the deadline still refreshes its last-good for the next cycle.
+ */
+export const STATE_REPORT_WAIT_MS = 5_000;
+export const STATE_REPORT_LAST_GOOD_MAX_AGE_MS = EXPIRE_AFTER_S * 1000;
+
+export interface LastGoodReport { value: unknown; atMs: number }
+
+export async function settleStateReports<N extends string>(
+  names: readonly N[],
+  fetchReport: (name: N) => Promise<unknown>,
+  lastGood: Map<string, LastGoodReport>,
+  opts: {
+    waitMs?: number;
+    maxAgeMs?: number;
+    now?: () => number;
+    onError?: (name: N, e: unknown) => void;
+  } = {},
+): Promise<Record<N, any>> {
+  const waitMs = opts.waitMs ?? STATE_REPORT_WAIT_MS;
+  const maxAgeMs = opts.maxAgeMs ?? STATE_REPORT_LAST_GOOD_MAX_AGE_MS;
+  const now = opts.now ?? Date.now;
+  const PENDING = Symbol('pending');
+  const out = {} as Record<N, any>;
+  await Promise.all(names.map(async (name) => {
+    let fetched: Promise<unknown>;
+    try { fetched = fetchReport(name); } catch (e) { fetched = Promise.reject(e); }
+    const answer = fetched.then(
+      (value) => { lastGood.set(name, { value, atMs: now() }); return { ok: true as const, value }; },
+      (e: unknown) => { opts.onError?.(name, e); return { ok: false as const }; },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<typeof PENDING>((r) => { timer = setTimeout(() => r(PENDING), waitMs); });
+    const r = await Promise.race([answer, deadline]);
+    clearTimeout(timer);
+    if (r !== PENDING && r.ok) { out[name] = r.value; return; }
+    const lg = lastGood.get(name);
+    out[name] = lg && now() - lg.atMs <= maxAgeMs ? lg.value : null;
+  }));
+  return out;
+}
+
 // v0.11.0 — per-priority alarm on/off switch topics. Each ISA priority gets a
 // dedicated state + command topic under the same `ecoflow_panel` base prefix
 // the other entities use. The switch object/unique id is `ecoflow_alerts_<p>`.
@@ -665,11 +722,13 @@ export const BINARY_SENSORS: BinarySensorConfig[] = [
   // v0.69.0 — ON when a SHP2-wired home core's own telemetry is missing from the
   // self-consumption integral (cloud-offline / projection-less), so solar_fraction /
   // direct-use undercount. Diagnostic: discount those KPIs while this reads ON.
-  { unique_id: 'ecoflow_self_consumption_coverage_partial', name: 'Self-Consumption Coverage Partial', icon: 'mdi:gauge-low', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.self_consumption_coverage_partial else "OFF" }}' },
+  // v1.186.0 — null (the report did not answer this cycle) renders "None" (HA unknown), not OFF.
+  { unique_id: 'ecoflow_self_consumption_coverage_partial', name: 'Self-Consumption Coverage Partial', icon: 'mdi:gauge-low', entity_category: 'diagnostic', value_template: '{{ "None" if value_json.self_consumption_coverage_partial is none else ("ON" if value_json.self_consumption_coverage_partial else "OFF") }}' },
   // v0.77.0 — forecast built on an incomplete basis (cold history / no SoC basis while the SHP2 or home Cores are cloud-offline).
   // No device_class (matches the coverage_partial sibling): a plain diagnostic on/off, not a HA "problem" indicator that would sit
   // persistently red during a Core cloud-wedge. The point is operator-visibility of a degraded forecast basis, not an alarm.
-  { unique_id: 'ecoflow_forecast_basis_incomplete', name: 'Forecast Basis Incomplete', icon: 'mdi:cloud-question', entity_category: 'diagnostic', value_template: '{{ "ON" if value_json.forecast_structurally_incomplete else "OFF" }}' },
+  // v1.186.0 — null (no forecast this cycle) renders "None" (HA unknown): OFF would claim a complete basis.
+  { unique_id: 'ecoflow_forecast_basis_incomplete', name: 'Forecast Basis Incomplete', icon: 'mdi:cloud-question', entity_category: 'diagnostic', value_template: '{{ "None" if value_json.forecast_structurally_incomplete is none else ("ON" if value_json.forecast_structurally_incomplete else "OFF") }}' },
 ];
 
 /**
@@ -943,6 +1002,8 @@ export function circuitLifetimeFields(
 export interface MqttDiscoveryHandle {
   stop: () => void;
   client: MqttClient | null;
+  /** v1.186.0 — the state-payload builder the publish loop uses (absent when disabled). */
+  buildState?: (snap: FleetSnapshot) => Promise<Record<string, unknown>>;
 }
 
 export function isMqttDiscoveryEnabled(): boolean {
@@ -1128,28 +1189,42 @@ export async function startMqttDiscovery(
     }
   };
 
+  // v1.186.0 — per-report last good answer for buildState (see settleStateReports), and the
+  // last error logged per report: a report failing every cycle logs once, not every 30 s.
+  const stateReportLastGood = new Map<string, LastGoodReport>();
+  const stateReportErrLogged = new Map<string, string>();
+  const logStateReportError = (name: string, e: unknown) => {
+    const msg = (e as { message?: string } | null)?.message ?? String(e);
+    if (stateReportErrLogged.get(name) === msg) return;
+    stateReportErrLogged.set(name, msg);
+    log(`mqtt-discovery: report '${name}' failed for the state publish — ${msg}; its fields publish last-good (≤${EXPIRE_AFTER_S} s) or null`);
+  };
+
   const buildState = async (snap: FleetSnapshot): Promise<Record<string, unknown>> => {
     const devices = Object.values(snap.devices);
     type Shp2Dev = typeof devices[number] & { projection: Shp2Projection };
     const shp2 = findShp2(snap.devices) as Shp2Dev | undefined; // v1.185.0 — the house panel
 
     const analytics = getAnalytics();
-    const [fc, deg, runway, rte, clipping, sc, carbon, tariff, curtailment] = await Promise.all([
-      analytics.report('forecast'),
-      analytics.report('degradation'),
-      analytics.report('runway'),
-      analytics.report('roundTripEfficiency'),
-      analytics.report('clipping'),
-      analytics.report('selfConsumption'),
-      analytics.report('carbon'),
-      analytics.report('tariff'),
-      // v0.15.3 — the curtailment report was never fetched here, so the five
-      // pv_curtailment_* sensors (added v0.9.77) referenced value_json keys that
-      // buildState never emitted → permanent "unknown" + a template warning every
-      // publish. Wiring it lights them up (and gives HA automations a real
-      // pv_curtailment_active signal for opportunistic/deferrable loads).
-      analytics.report('curtailment'),
-    ]);
+    // v1.186.0 — each report settles on its own (settleStateReports): its answer, else its
+    // bounded last-good, else null. A slow or failed report nulls only its own fields; the
+    // snapshot, alarm and readiness fields publish on the 30 s cadence regardless.
+    const reports = await settleStateReports(
+      [
+        'forecast', 'degradation', 'runway', 'roundTripEfficiency', 'clipping',
+        'selfConsumption', 'carbon', 'tariff',
+        // v0.15.3 — the curtailment report was never fetched here, so the five
+        // pv_curtailment_* sensors (added v0.9.77) referenced value_json keys that
+        // buildState never emitted → permanent "unknown" + a template warning every
+        // publish. Wiring it lights them up (and gives HA automations a real
+        // pv_curtailment_active signal for opportunistic/deferrable loads).
+        'curtailment',
+      ] as const,
+      (name) => analytics.report(name).then((v) => { stateReportErrLogged.delete(name); return v; }),
+      stateReportLastGood,
+      { onError: logStateReportError },
+    );
+    const { forecast: fc, degradation: deg, runway, roundTripEfficiency: rte, clipping, selfConsumption: sc, carbon, tariff, curtailment } = reports;
     // v0.9.74 — match /api/ha-state: spare cores (not in SHP2 sources)
     // can't deliver energy to the home, so they don't count toward
     // fleet PV / total-in / total-out / battery-net or grid-import.
@@ -1163,7 +1238,10 @@ export async function startMqttDiscovery(
     const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
     const lifetime = recorder.getLifetimeTotals();
     const lifetimeKwh = makeLifetimeKwh(lifetime);
-    const { projecting, soonest } = soonestProjecting((deg as import('./analytics.js').FleetDegradation).packs);
+    // v1.186.0 — any report below may be null (settleStateReports); its fields publish null.
+    const { projecting, soonest } = deg
+      ? soonestProjecting((deg as import('./analytics.js').FleetDegradation).packs)
+      : { projecting: null, soonest: null };
 
     const alerts = snap.alerts ?? [];
     const cnt = makeAlertCounter(alerts);
@@ -1174,24 +1252,29 @@ export async function startMqttDiscovery(
     // automations key on (heartbeat pulse, dimmer ceilings, exterior policy).
     // Escalations apply immediately; de-escalations hold 15 min (hysteresis
     // lives in the shared tracker).
-    const posture = lightingPostureTracker.update({
-      belowReserveFloor: belowReserveFloor(runway as Parameters<typeof belowReserveFloor>[0]),
-      hoursToReserve: (runway as { hoursToReserve: number | null }).hoursToReserve,
-      dawnMinSocPct: fc.minProjectedSoc,
-      reservePct: shp2?.projection.backupReserveSoc ?? null,
-      curtailmentActive: !!(curtailment as { active?: boolean }).active,
-      // v0.87.0 — feed the same grid-backstop signal the alarm engines use so the
-      // posture stops escalating to red/amber on a grid-tied evening (the runway
-      // projection it keys on is islanded-only). Same resolver as off_grid /
-      // runway_projection_islanded_only above.
-      gridBackstopping: liveGridBackstop(snap.devices).backstopping,
-      nowMs: Date.now(),
-    });
+    // v1.186.0 — only from the reports it reads. Without runway, forecast and curtailment the
+    // tracker is not advanced and the posture publishes null: a posture computed from missing
+    // reports would read "no crossing, no dip, no surplus" — a calm posture nothing measured.
+    const posture = runway && fc && curtailment
+      ? lightingPostureTracker.update({
+        belowReserveFloor: belowReserveFloor(runway as Parameters<typeof belowReserveFloor>[0]),
+        hoursToReserve: (runway as { hoursToReserve: number | null }).hoursToReserve,
+        dawnMinSocPct: fc.minProjectedSoc,
+        reservePct: shp2?.projection.backupReserveSoc ?? null,
+        curtailmentActive: !!(curtailment as { active?: boolean }).active,
+        // v0.87.0 — feed the same grid-backstop signal the alarm engines use so the
+        // posture stops escalating to red/amber on a grid-tied evening (the runway
+        // projection it keys on is islanded-only). Same resolver as off_grid /
+        // runway_projection_islanded_only above.
+        gridBackstopping: liveGridBackstop(snap.devices).backstopping,
+        nowMs: Date.now(),
+      })
+      : null;
     // v1.178.0 — every field whose data does not exist yet publishes null, not a model-less 0
     // (publishReadiness.ts). The connect-time publish runs before the first poll lands.
     const state: Record<string, unknown> = {
-      lighting_posture: posture.posture,
-      lighting_posture_reason: posture.reason,
+      lighting_posture: posture?.posture ?? null,
+      lighting_posture_reason: posture?.reason ?? null,
       fleet_pv_watts: Math.round(fleetPv),
       panel_load_watts: Math.round(panelLoad),
       ac_import_watts: Math.round(acIn),
@@ -1221,32 +1304,33 @@ export async function startMqttDiscovery(
       backup_remaining_kwh: kwh1(shp2?.projection.backupRemainWh),
       backup_full_capacity_kwh: kwh1(shp2?.projection.backupFullCapWh),
       // v0.78.0 — RESTORED display basis, byte-identical to /api/ha-state (see index.ts).
-      forecast_pv_next_24h_kwh: Math.round((fc.forecastPvWhNext24Display ?? fc.forecastPvWhNext24) / 100) / 10,
-      projected_low_soc_percent: fc.minProjectedSoc,
-      forecast_structurally_incomplete: fc.structurallyIncomplete ?? false, // v0.77.0 — diagnostic basis flag
-      soiling_drop_percent: fc.soiling?.dropPct ?? null,
+      forecast_pv_next_24h_kwh: fc ? Math.round((fc.forecastPvWhNext24Display ?? fc.forecastPvWhNext24) / 100) / 10 : null,
+      projected_low_soc_percent: fc ? fc.minProjectedSoc : null,
+      forecast_structurally_incomplete: fc ? fc.structurallyIncomplete ?? false : null, // v0.77.0 — diagnostic basis flag
+      soiling_drop_percent: fc?.soiling?.dropPct ?? null,
       degradation_soonest_eol_years: soonest?.yearsToEol ?? null,
-      degradation_peer_outliers: projecting.filter((p) => p.peerOutlier).length,
+      degradation_peer_outliers: projecting ? projecting.filter((p) => p.peerOutlier).length : null,
       // v0.15.11 — sentinel (not bare null) when net-charging, so the MQTT
       // sensors don't read HA 'unknown' (which must mean data-loss only).
-      runway_to_reserve_hours: runwayHoursForPublish(runway.hoursToReserve, runway.unavailable),
-      runway_to_empty_hours: runwayHoursForPublish(runway.hoursToEmpty, runway.unavailable),
+      // v1.186.0 — no runway report this cycle IS data loss: null, never the 999 "no depletion".
+      runway_to_reserve_hours: runway ? runwayHoursForPublish(runway.hoursToReserve, runway.unavailable) : null,
+      runway_to_empty_hours: runway ? runwayHoursForPublish(runway.hoursToEmpty, runway.unavailable) : null,
       // v0.59.0 — runway/dip projections assume islanded; true when the grid is
       // actively backstopping → a low reading is informational, not actionable.
       runway_projection_islanded_only: liveGridBackstop(snap.devices).backstopping,
       projected_low_soc_islanded_only: liveGridBackstop(snap.devices).backstopping,
-      round_trip_efficiency_percent: rte.efficiencyPct,
-      pv_clipped_kwh_today: clipping.todayKwh,
-      pv_array_peak_watts: clipping.arrayPeakW,
+      round_trip_efficiency_percent: rte ? rte.efficiencyPct : null,
+      pv_clipped_kwh_today: clipping ? clipping.todayKwh : null,
+      pv_array_peak_watts: clipping ? clipping.arrayPeakW : null,
       // v0.15.3 — curtailment (batteries full → PV throttled). Previously absent.
-      pv_curtailment_active: !!curtailment.active,
-      pv_curtailment_surplus_watts: Math.round(curtailment.currentSurplusW ?? 0),
-      pv_curtailment_kwh_today: curtailment.todayKwh ?? null,
-      pv_curtailment_kwh_7d: curtailment.recent7dKwh ?? null,
-      pv_curtailment_charge_ceiling_pct: curtailment.current?.chargeCeilingPct ?? null,
-      solar_fraction_of_load_percent: sc.solarFractionOfLoadPct,
-      direct_use_ratio_percent: sc.directUseRatioPct,
-      self_consumption_coverage_partial: sc.homeDpusCoveragePartial,
+      pv_curtailment_active: curtailment ? !!curtailment.active : null,
+      pv_curtailment_surplus_watts: curtailment ? Math.round(curtailment.currentSurplusW ?? 0) : null,
+      pv_curtailment_kwh_today: curtailment?.todayKwh ?? null,
+      pv_curtailment_kwh_7d: curtailment?.recent7dKwh ?? null,
+      pv_curtailment_charge_ceiling_pct: curtailment?.current?.chargeCeilingPct ?? null,
+      solar_fraction_of_load_percent: sc ? sc.solarFractionOfLoadPct : null,
+      direct_use_ratio_percent: sc ? sc.directUseRatioPct : null,
+      self_consumption_coverage_partial: sc ? sc.homeDpusCoveragePartial : null,
       pv_lifetime_kwh: lifetimeKwh('fleet_pv_wh'),
       load_lifetime_kwh: lifetimeKwh('fleet_load_wh'),
       grid_import_lifetime_kwh: lifetimeKwh('fleet_grid_import_wh'),
@@ -1263,12 +1347,12 @@ export async function startMqttDiscovery(
       // "circuit_N_lifetime_kwh" HA template warning, incl. the startup race Copilot flagged).
       ...circuitLifetimeFields(shp2 ? shp2.projection.circuits : [], recorder.listLifetimeKeys(), lifetimeKwh),
       ...circuitPowerFields(shp2 ? shp2.projection.circuits : [], recorder.listLifetimeKeys()),
-      carbon_kg_avoided_7d: carbon.totalKgAvoided,
-      carbon_lifetime_kg_avoided: carbon.lifetimeKgAvoided,
-      carbon_lifetime_miles_not_driven: carbon.lifetimeMilesNotDriven,
-      tariff_today_grid_cost_dollars: tariff.todayGridImportCostDollars,
-      tariff_today_solar_value_dollars: tariff.todaySolarLoadValueDollars,
-      tariff_net_savings_7d_dollars: tariff.netSavingsDollars,
+      carbon_kg_avoided_7d: carbon ? carbon.totalKgAvoided : null,
+      carbon_lifetime_kg_avoided: carbon ? carbon.lifetimeKgAvoided : null,
+      carbon_lifetime_miles_not_driven: carbon ? carbon.lifetimeMilesNotDriven : null,
+      tariff_today_grid_cost_dollars: tariff ? tariff.todayGridImportCostDollars : null,
+      tariff_today_solar_value_dollars: tariff ? tariff.todaySolarLoadValueDollars : null,
+      tariff_net_savings_7d_dollars: tariff ? tariff.netSavingsDollars : null,
       // v1.134.0 — dollars per kWh, in force right now. NULL (never a fallback
       // rate) when the tariff is unconfirmed or the matched period has no season
       // rate: a silent off-peak default would reintroduce exactly the mispricing
@@ -1357,6 +1441,7 @@ export async function startMqttDiscovery(
     return withholdUnready(state, publishReadiness({
       devices: snap.devices,
       alerts: snap.alerts,
+      alertsComplete: snap.alertsComplete, // v1.186.0
       speakerLastProbeAt: getBroadcastHealth().lastProbeAt,
       forecast: fc,
       clipping,
@@ -1482,5 +1567,6 @@ export async function startMqttDiscovery(
       client.end(true);
     },
     client,
+    buildState,
   };
 }

@@ -89,7 +89,20 @@ function ensureLoaded(): Map<string, number> {
  * catches everything so a disk/permission failure can never propagate into
  * the alarm evaluation loop.
  */
-export function syncAlertOnsets(activeIds: Iterable<string>, nowMs: number = Date.now()): void {
+export function syncAlertOnsets(
+  activeIds: Iterable<string>,
+  nowMs: number = Date.now(),
+  /**
+   * v1.186.0 — false while part of the alert set is UNKNOWN rather than absent: an alert
+   * feed from the analytics worker has not delivered since boot, so an id it owns is
+   * missing because nobody has computed it yet. Pruning then would drop the true onset
+   * of a condition that predates the restart, and its first delivery would read as a
+   * brand-new rise. New ids are still stamped.
+   * v1.186.0 — or a per-id predicate: only the absent ids it returns true for are pruned (the
+   * monitor scopes the wait to the ids a cold feed owns, and live ids to a hydrated store).
+   */
+  opts: { prune?: boolean | ((id: string) => boolean) } = {},
+): void {
   try {
     const state = ensureLoaded();
     const active = new Set(activeIds);
@@ -100,8 +113,8 @@ export function syncAlertOnsets(activeIds: Iterable<string>, nowMs: number = Dat
         changed = true;
       }
     }
-    for (const id of [...state.keys()]) {
-      if (!active.has(id)) {
+    if (opts.prune !== false) for (const id of [...state.keys()]) {
+      if (!active.has(id) && (typeof opts.prune !== 'function' || opts.prune(id))) {
         state.delete(id);
         changed = true;
       }

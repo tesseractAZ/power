@@ -49,8 +49,13 @@ const verifiedNight = (over: Partial<NightActuationState> = {}): NightActuationS
   forceChargeCeilingPct: 90, // the announced plan's economic ceiling
   ...over,
 });
+// v1.186.0 — a force-charge whose ON a readback already PROVED: these tests pin the OFF
+// side, and an unverified ON with every slot reading OFF is now re-issued (forceChargeOn.test.ts).
 const forcedNight = (over: Partial<NightActuationState> = {}): NightActuationState =>
-  verifiedNight({ forceChargeOnAtMs: WIN_START + 2 * 60_000, forceChargeSlots: [1, 2, 3], ...over });
+  verifiedNight({
+    forceChargeOnAtMs: WIN_START + 2 * 60_000, forceChargeSlots: [1, 2, 3],
+    forceChargeOnVerifiedAtMs: WIN_START + 5 * 60_000, ...over,
+  });
 
 const opts = (over: Partial<ForceChargeOpts> = {}): ForceChargeOpts => ({
   enabled: true, gridPresent: true, gridStaLost: false,

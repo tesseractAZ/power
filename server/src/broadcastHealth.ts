@@ -40,6 +40,13 @@ export interface BroadcastHealth {
   reason: string | null;
   /** Epoch ms of the last probe (null before the first). */
   lastProbeAt: number | null;
+  /**
+   * v1.186.0 — CONFIRMED (debounced like `reachable`) fewer usable targets than configured.
+   * Optional so a snapshot without it reads as "not degraded"; only `true` raises the alert.
+   */
+  degraded?: boolean;
+  /** v1.186.0 — the configured targets not usable at the last probe, each with its reason. */
+  unusableTargets?: string[];
 }
 
 const UNKNOWN: BroadcastHealth = {
@@ -107,6 +114,49 @@ export function broadcastHealthAlert(h: BroadcastHealth, _nowMs: number): Alert 
     device: 'System',
     title: 'Audible alarm channel unreachable',
     detail,
+    priority: 'medium',
+  };
+}
+
+/** v1.186.0 — stable id for the DEGRADED audible channel (some, not all, speakers usable). The
+ *  shared `system-audible` prefix keeps it out of the audible condition (conditionFromAlerts). */
+export const AUDIBLE_DEGRADED_ALERT_ID = 'system-audible-degraded';
+
+/**
+ * v1.186.0 — the partial-channel alert. The unreachable alert above fires only when NO speaker is
+ * usable, so a speaker that dropped out of Home Assistant (one of two was `unavailable` for ~27 h
+ * on 2026-09-23/24) raised nothing, and every broadcast still logged "→ ok". A room without its
+ * speaker hears no audible alarm, so this is a WARNING push (priority medium, like its sibling:
+ * operator-actionable, never breaks through quiet hours) that NAMES the missing speakers.
+ *
+ * Returns null unless the monitor has CONFIRMED the degraded state (`degraded === true`, debounced
+ * like `reachable`, so a restart blip is silent), and while audible is disabled/unsupervised. It
+ * also yields to the unreachable alert: once `reachable === false` is confirmed that alert owns
+ * the dead channel — one alert, not two. A standing condition; it resolves when every speaker is
+ * usable again.
+ */
+export function broadcastDegradedAlert(h: BroadcastHealth, _nowMs: number): Alert | null {
+  if (!h.enabled || !h.supervised) return null;
+  if (h.reachable === false) return null;
+  if (h.degraded !== true) return null;
+  const missing = h.unusableTargets ?? [];
+  const names = missing.length > 0 ? missing.join(', ') : 'unknown';
+  // v1.186.0 — ZERO usable while the unreachable alert is still confirming (its streak runs
+  // behind this one when the last speaker drops after the others): nothing can play, so the
+  // card must not say the "remaining speaker(s) still work". Once reachable === false is
+  // confirmed the unreachable alert takes over (a handoff, alertMonitor resolveHandoffOwner).
+  const none = h.usableTargets === 0;
+  return {
+    id: AUDIBLE_DEGRADED_ALERT_ID,
+    severity: 'warning',
+    category: 'Connectivity',
+    device: 'System',
+    title: 'Audible alarm channel degraded',
+    detail: none
+      ? `No configured speaker (0 of ${h.targetCount}) can play audible alarms right now — not reachable: ${names}. `
+        + 'Audible alarms will NOT play until a speaker returns (confirming whether the whole channel is down); push alerts still work.'
+      : `Only ${h.usableTargets} of ${h.targetCount} configured speaker(s) can play audible alarms — not reachable: ${names}. `
+        + 'Audible alarms will not play on the missing speaker(s) until they return; the remaining speaker(s) and push alerts still work.',
     priority: 'medium',
   };
 }

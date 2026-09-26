@@ -231,8 +231,16 @@ export async function setChannelForceCharge(req: ForceChargeWriteRequest): Promi
     };
   }
   const action = `charge-now-ch${req.slot}`;
-  if (!checkAndReserve(action, req.sn, { cooldownMs: FORCE_CHARGE_COOLDOWN_MS })) {
-    const remaining = cooldownRemainingMs(action, req.sn, FORCE_CHARGE_COOLDOWN_MS);
+  // v1.186.0 — an ON never takes the cooldown an OFF needs. The night force-charge's ON
+  // re-issue made ON-then-OFF inside 5 min possible: the window-end, target or grid-loss OFF
+  // came back rate-limited and the slot kept grid-charging until the OFF verify re-sent it
+  // 6+ min later. An OFF is idempotent and always safe, so it is limited only by earlier
+  // OFFs; an allowed OFF still reserves the slot's shared key, so an ON after it waits.
+  const key = req.on ? action : `${action}-off`;
+  const allowed = checkAndReserve(key, req.sn, { cooldownMs: FORCE_CHARGE_COOLDOWN_MS });
+  if (allowed && !req.on) rateLimitState.set(`${action}|${req.sn}`, Date.now());
+  if (!allowed) {
+    const remaining = cooldownRemainingMs(key, req.sn, FORCE_CHARGE_COOLDOWN_MS);
     return {
       outcome: 'failure', code: 'rate-limited',
       message: `Wait ${Math.round(remaining / 1000)}s before another force-charge write on slot ${req.slot}.`,

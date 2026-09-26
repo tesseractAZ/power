@@ -359,6 +359,21 @@ export interface NightActuationState {
    *  can never orphan a force-charge — the OFF covers every slot attempted. */
   forceChargeOnAtMs: number | null;
   forceChargeSlots: number[] | null;
+  /** v1.186.0 — when a LIVE readback first showed every slot of ours FORCE_CHARGE_ON (a
+   *  slot whose Core already sits at the panel's ceiling is exempt: the panel switches
+   *  that one off itself). null on a force-charged night = the ON is cloud-ACK'd, or
+   *  merely attempted, and not yet proven — the reserve's applyVerifiedAtMs, for ON. */
+  forceChargeOnVerifiedAtMs: number | null;
+  /** v1.186.0 — the most recent ON attempt (initial or re-issue); the ON readback grace
+   *  is measured from here so the re-issue gets its own window. null ⇒ forceChargeOnAtMs. */
+  forceChargeOnLastAttemptMs: number | null;
+  /** v1.186.0 — ON re-issues spent (cap FORCE_CHARGE_ON_MAX_RETRIES). Counted whether or
+   *  not the cloud accepted the re-issue, so a cloud that keeps refusing still ends in
+   *  the warning instead of retrying in silence. */
+  forceChargeOnRetries: number;
+  /** v1.186.0 — the FAILURE marker: when the "tonight's buy above the reserve did not
+   *  take effect" warning went (once per night). A restart must not repeat it. */
+  forceChargeOnFailedAtMs: number | null;
   forceChargeOffAtMs: number | null;
   forceChargeOffReason: string | null;
   forceChargeOffLastAttemptMs: number | null;
@@ -400,7 +415,10 @@ export function emptyActuationState(): NightActuationState {
     revertAttempts: 0, revertEscalated: false,
     revertVerifiedAtMs: null, revertRetries: 0, revertLastAttemptMs: null, revertReadbackEscalated: false,
     requestedPct: null,
-    forceChargeOnAtMs: null, forceChargeSlots: null, forceChargeOffAtMs: null,
+    forceChargeOnAtMs: null, forceChargeSlots: null,
+    forceChargeOnVerifiedAtMs: null, forceChargeOnLastAttemptMs: null, forceChargeOnRetries: 0,
+    forceChargeOnFailedAtMs: null,
+    forceChargeOffAtMs: null,
     forceChargeOffReason: null, forceChargeOffLastAttemptMs: null, forceChargeOffRetries: 0,
     forceChargeOffVerifiedAtMs: null, forceChargeOffEscalated: false, forceChargeOffDeadlinePagedAtMs: null,
     forceChargeOffDeadlineMutedAtMs: null, forceChargeOffDeadlineRepages: 0,
@@ -456,6 +474,12 @@ export function coerceActuationState(raw: unknown): NightActuationState {
     forceChargeSlots: Array.isArray(o.forceChargeSlots)
       ? o.forceChargeSlots.filter((n): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 3)
       : null,
+    // v1.186.0 — the ON-verify record resumes across a restart: no second warning, no
+    // second re-issue, and a verified ON is not re-judged.
+    forceChargeOnVerifiedAtMs: num(o.forceChargeOnVerifiedAtMs),
+    forceChargeOnLastAttemptMs: num(o.forceChargeOnLastAttemptMs),
+    forceChargeOnRetries: num(o.forceChargeOnRetries) ?? 0,
+    forceChargeOnFailedAtMs: num(o.forceChargeOnFailedAtMs),
     forceChargeOffAtMs: num(o.forceChargeOffAtMs),
     forceChargeOffReason: str(o.forceChargeOffReason),
     forceChargeOffLastAttemptMs: num(o.forceChargeOffLastAttemptMs),

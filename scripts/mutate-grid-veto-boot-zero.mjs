@@ -113,7 +113,7 @@ const MUTANTS = [
   {
     id: 'v. \u2605\u2605 alarm counts publish before the monitor has run',
     file: READY,
-    find: '    alerts: i.alerts !== undefined,',
+    find: '    alerts: i.alerts !== undefined && i.alertsComplete === true,',
     to: '    alerts: true, /* MUTANT */',
     why: 'A fake "all clear" (0 alarms) for ~75 s after every restart, for any automation keyed on the counts.',
   },
