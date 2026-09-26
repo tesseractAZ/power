@@ -316,6 +316,12 @@ export function extractFeatures(alert: Alert, snap: FleetSnapshot): Record<strin
  * blocking the alert dispatch — a missing LR feature vector just
  * means the SGD update is skipped (same fallback path that was used
  * pre-v0.9.59).
+ *
+ * v1.186.0 — swallowing errors never covered LATENCY: the steady-state
+ * "hash lookup" is false while the worker is cold, and each report may take
+ * 30 s plus a 30 s retry. alertMonitor therefore calls this DETACHED, after
+ * the tick's dispatches (captureFeaturesDetached); a caller on an alarm path
+ * must not await it.
  */
 export async function captureLrFeatures(
   alert: Alert,

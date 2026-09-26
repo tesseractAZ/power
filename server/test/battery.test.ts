@@ -629,17 +629,18 @@ test('computeInternalResistance — empty / no-row inputs do not crash; cache is
  * computeChargeCurveFingerprint — drift detection.
  * =================================================================== */
 
-test('computeChargeCurveFingerprint — empty fleet returns no packs', () => {
+// v1.186.0 — computeChargeCurveFingerprint is async (a sliced, yielding scan): awaited.
+test('computeChargeCurveFingerprint — empty fleet returns no packs', async () => {
   const rec = mockRecorder({});
-  const report = computeChargeCurveFingerprint({}, rec);
+  const report = await computeChargeCurveFingerprint({}, rec);
   assert.equal(report.packs.length, 0);
 });
 
-test('computeChargeCurveFingerprint — insufficient SoC/voltage history → no-data', () => {
+test('computeChargeCurveFingerprint — insufficient SoC/voltage history → no-data', async () => {
   const sn = 'SN-CC-EMPTY';
   const rec = mockRecorder({});
   const devices = { [sn]: buildDpu(sn, [1]) };
-  const report = computeChargeCurveFingerprint(devices, rec);
+  const report = await computeChargeCurveFingerprint(devices, rec);
   // Cache could be warm from a prior test in the same process; we only
   // assert when the new SN shows up.
   const ours = report.packs.find((p) => p.sn === sn);

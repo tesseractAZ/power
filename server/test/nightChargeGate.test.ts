@@ -181,8 +181,15 @@ test('under-buy on a sub-judgeable sample (<5 nights) → LEARNING, not BLOCKED'
 
 // ── Engine-fault strikes (v2 semantics) ─────────────────────────────────────
 
+/** v1.186.0 — a trajectory verdict counts only when the row carries the trough the
+ *  plan was SIZED against (the v1.186.0 scorer); an explicit cushion_shortfall = 0
+ *  row without it is the pre-v1.186.0 disclosure-trough artifact and is set aside
+ *  (readinessGate.test.ts). The strike fixtures below therefore carry a sizing
+ *  trough under its line. */
+const SIZED_BREACH = { cushion_trough_soc_pct: 20, cushion_line_soc_pct: 34 };
+
 test('trajectory breach with claimed hold → BLOCKED', () => {
-  const rows = [...actuatedLedger(25), makeRow({ plan_date: dateAgo(5), plan_traj_floor_breached: 1, actuated: 0, scored: 0 })];
+  const rows = [...actuatedLedger(25), makeRow({ plan_date: dateAgo(5), plan_traj_floor_breached: 1, actuated: 0, scored: 0, ...SIZED_BREACH })];
   const r = computeNightChargeReadiness(rows, NOW);
   assert.equal(r.state, 'BLOCKED');
   assert.ok(r.blocking.some((b) => b.includes('engine-fault')));
@@ -216,7 +223,7 @@ test('actuated night with a REALIZED cushion breach (claimed hold) → strike, a
 });
 
 test('strike older than the 45-day window is inactive', () => {
-  const rows = [...actuatedLedger(25), makeRow({ plan_date: dateAgo(60), plan_traj_floor_breached: 1, actuated: 0, scored: 0 })];
+  const rows = [...actuatedLedger(25), makeRow({ plan_date: dateAgo(60), plan_traj_floor_breached: 1, actuated: 0, scored: 0, ...SIZED_BREACH })];
   const r = computeNightChargeReadiness(rows, NOW);
   assert.equal(r.state, 'READY_TO_CONSIDER_WRITES');
   assert.equal(r.metrics.activeStrikes, 0);
@@ -227,7 +234,7 @@ test('in-window strike clears after ≥14 consecutive strike-free actuated night
   // strike-free actuated nights after it.
   const rows = [
     ...actuatedLedger(40),
-    makeRow({ plan_date: dateAgo(20), plan_traj_floor_breached: 1, actuated: 0, scored: 0 }),
+    makeRow({ plan_date: dateAgo(20), plan_traj_floor_breached: 1, actuated: 0, scored: 0, ...SIZED_BREACH }),
   ];
   const r = computeNightChargeReadiness(rows, NOW);
   assert.equal(r.metrics.activeStrikes, 0);
@@ -239,7 +246,7 @@ test('13 strike-free actuated nights do NOT clear the strike', () => {
   // Strike 14 days ago; nights on days 40..1 → 13 nights strictly after it.
   const rows = [
     ...actuatedLedger(40),
-    makeRow({ plan_date: dateAgo(14), plan_traj_floor_breached: 1, actuated: 0, scored: 0 }),
+    makeRow({ plan_date: dateAgo(14), plan_traj_floor_breached: 1, actuated: 0, scored: 0, ...SIZED_BREACH }),
   ];
   const r = computeNightChargeReadiness(rows, NOW);
   assert.equal(r.state, 'BLOCKED');

@@ -4637,6 +4637,17 @@ const CHARGE_CURVE_HISTORY_MS = 200 * 24 * 60 * 60 * 1000;
  *  buckets on shared boundaries for all three metrics, so the snap-to-nearest join lines
  *  up exactly instead of approximately. */
 const CHARGE_CURVE_BUCKET_SEC = 60;
+/** v1.186.0 — the scan is read in time slices with a macrotask yield between them. The 60 s
+ *  bucket above changed nothing measurable: it is a SQL GROUP BY, so SQLite still reads every
+ *  raw row through (sn, metric, ts) plus a table lookup for `value`, and only the rows handed
+ *  to JS shrank (~39% on a live pack). Log 2026-09-23/24: the recompute still pinned the worker
+ *  17-19 s per hour, the same 16-20 s v1.171.0 measured before it. No index is added (a boot
+ *  migration on the production DB is its own hazard); instead each query covers at most one
+ *  week of one pack, and the worker answers its queued requests between slices.
+ *  Every slice boundary is a multiple of the bucket, so no 60 s bucket straddles two queries:
+ *  each bucket averages exactly the rows it averaged in one 200-day query, and the output is
+ *  identical (test/analyticsWorker.test.ts proves it against a real SQLite file). */
+const CHARGE_CURVE_SLICE_MS = 7 * 24 * 60 * 60 * 1000;
 const CHARGE_CHECKPOINTS = [40, 60, 80, 95];
 const CHARGE_CHECKPOINT_TOLERANCE_PCT = 1.5; // record V whenever SoC is within ±this of a checkpoint
 const CHARGE_BASELINE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000; // first 14 days = baseline
@@ -4668,10 +4679,64 @@ export interface ChargeCurveReport {
 
 let chargeCurveCache: { ts: number; value: ChargeCurveReport } | null = null;
 
-export function computeChargeCurveFingerprint(
+/** Test-only seam: force the next computeChargeCurveFingerprint to recompute. */
+export function resetChargeCurveCacheForTesting(): void { chargeCurveCache = null; }
+
+/**
+ * v1.186.0 — the inclusive [lo, hi] ranges the pack scan reads, in order, covering
+ * [sinceMs, untilMs] with no gap and no overlap (ts is an INTEGER column). Every interior
+ * boundary is a multiple of the slice, which is a whole number of buckets, so each 60 s bucket
+ * falls inside exactly one range. `sliceMs = Infinity` gives the single pre-v1.186.0 range.
+ */
+export function chargeCurveSlices(
+  sinceMs: number,
+  untilMs: number,
+  sliceMs: number = CHARGE_CURVE_SLICE_MS,
+): Array<[number, number]> {
+  const bucketMs = CHARGE_CURVE_BUCKET_SEC * 1000;
+  const span = Math.max(1, Math.round(sliceMs / bucketMs)) * bucketMs;
+  const out: Array<[number, number]> = [];
+  let lo = sinceMs;
+  while (lo <= untilMs) {
+    const hi = Math.min((Math.floor(lo / span) + 1) * span - 1, untilMs);
+    out.push([lo, hi]);
+    lo = hi + 1;
+  }
+  return out;
+}
+
+/**
+ * v1.186.0 — one pack's bucketed soc / vol_max_mv / pack_in rows over [sinceMs, untilMs], read
+ * slice by slice with a macrotask yield after each query. Concatenated, the rows are the rows
+ * one queryMulti over the whole window returns (same buckets, same averages, same order).
+ */
+export async function readChargeCurveRows(
+  recorder: Recorder,
+  sn: string,
+  packNum: number,
+  sinceMs: number,
+  untilMs: number,
+  sliceMs: number = CHARGE_CURVE_SLICE_MS,
+): Promise<Map<string, Array<{ ts: number; value: number }>>> {
+  const metrics = [`pack${packNum}_soc`, `pack${packNum}_vol_max_mv`, `pack${packNum}_in`];
+  const out = new Map<string, Array<{ ts: number; value: number }>>(metrics.map((m) => [m, []]));
+  for (const [lo, hi] of chargeCurveSlices(sinceMs, untilMs, sliceMs)) {
+    // v0.20.0 — one round-trip for the three metrics (same ts-ASC per-metric rows).
+    const slice = recorder.queryMulti(sn, metrics, lo, hi, CHARGE_CURVE_BUCKET_SEC);
+    for (const m of metrics) {
+      const dst = out.get(m)!;
+      for (const r of slice.get(m) ?? []) dst.push(r);
+    }
+    await new Promise<void>((r) => setImmediate(r));
+  }
+  return out;
+}
+
+export async function computeChargeCurveFingerprint(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
-): ChargeCurveReport {
+  opts: { sliceMs?: number } = {},
+): Promise<ChargeCurveReport> {
   if (chargeCurveCache && Date.now() - chargeCurveCache.ts < CHARGE_CURVE_TTL_MS) return chargeCurveCache.value;
   const now = Date.now();
   const since = now - CHARGE_CURVE_HISTORY_MS;
@@ -4680,11 +4745,8 @@ export function computeChargeCurveFingerprint(
   const packs: ChargeCurvePack[] = [];
   for (const d of dpus) {
     for (const pk of d.projection.packs) {
-      // v0.20.0 — one round-trip instead of three (same ts-ASC per-metric rows).
-      const byMetric = recorder.queryMulti(
-        d.sn, [`pack${pk.num}_soc`, `pack${pk.num}_vol_max_mv`, `pack${pk.num}_in`], since, now,
-        CHARGE_CURVE_BUCKET_SEC,
-      );
+      // v1.186.0 — sliced, yielding read (readChargeCurveRows); was one 200-day queryMulti.
+      const byMetric = await readChargeCurveRows(recorder, d.sn, pk.num, since, now, opts.sliceMs);
       const socPts = byMetric.get(`pack${pk.num}_soc`) ?? [];
       const vMaxPts = byMetric.get(`pack${pk.num}_vol_max_mv`) ?? [];
       const inPts = byMetric.get(`pack${pk.num}_in`) ?? [];

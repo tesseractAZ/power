@@ -3,9 +3,9 @@ import { resolve } from 'node:path';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { loadVendorEnergyState, vendorDigestLine, latestVendorDay, prevYmd } from './energyHistory.js';
 import { config } from './config.js';
-import { SnapshotStore, type DeviceSnapshot } from './snapshot.js';
+import { SnapshotStore, type DeviceSnapshot, type FleetSnapshot } from './snapshot.js';
 import { computeAlerts, outageAlerts, resolveOutageAlertOptions, envNum, isOutageEventFamily, isDeviceGapAlertId, isNeverMutedAlert, SEVERITY_ORDER, type Alert, type Severity, packSnTail } from './alerts.js';
-import { broadcastHealthAlert, getBroadcastHealth } from './broadcastHealth.js';
+import { broadcastHealthAlert, broadcastDegradedAlert, getBroadcastHealth } from './broadcastHealth.js';
 // v0.93.0 (audit #1 phase-2) — message-rate-floor collapses → real push alerts.
 import { rateFloorAlerts, getRateFloorCollapses, rateFloorIdleHeldIds, rateFloorIdleHeldSns } from './messageRateFloorAlert.js';
 import { resolve as resolvePath } from 'node:path';
@@ -29,6 +29,7 @@ import {
   getDayForecast,
   forecastDayAlerts,
   stormPrepAlerts,
+  type DayForecast,
 } from './analytics.js';
 import { loadNotifyConfig, sendNotification, isConfigured, type NotifyConfig } from './notify.js';
 // v0.9.25 — feedback-loop snapshot capture at first fire.
@@ -42,9 +43,9 @@ import { familyOf } from './alertOutcomes.js';
 // v0.9.59 — persist telemetry events so rise/short-clear/long-active
 // counts survive restarts. Without this the auto-silencing rules can
 // effectively never fire on a panel that gets occasional restarts.
-import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, type FamilyMeta } from './alertTelemetry.js';
+import { appendTelemetryEvent, readRecentTelemetry, loadFamilyMeta, upsertFamilyMeta, TELEMETRY_SCOPE_ANNUNCIATING, type FamilyMeta, type TelemetryEntry } from './alertTelemetry.js';
 import type { Recorder } from './recorder.js';
-import { getAnalytics } from './analyticsClient.js';
+import { getAnalytics, type AnalyticsClient } from './analyticsClient.js';
 // v0.11.0 — ISA-18.2 / IEC 62682 annunciation gate. The internal severity
 // union is unchanged; priority is DERIVED from (severity, source). Disabling
 // a priority on the Alert Settings page silences its notification here (the
@@ -472,6 +473,10 @@ interface TrackedAlert {
   notifiedEffectiveSeverity?: Severity;
   /** v1.130.0 — this hold was restored from disk, not queued by this process. */
   queuedRehydrated?: boolean;
+  /** v1.186.0 — how this episode sits in the auto-tune rollup (autoTuneClearCounts):
+   *  'rise' = its rise was counted; 'retrack' = re-tracked at boot while annunciating;
+   *  undefined = muted as it rose, so neither end is counted. */
+  rollupScope?: RollupScope;
   /** v1.14.0 (review of F19) — the MOST SEVERE severity this alert reached while
    *  active. The cleared-alert record previously carried the FINAL tick's
    *  severity, so shp2-below-reserve (critical during a grid outage, info once
@@ -693,7 +698,17 @@ export const ENERGY_STATE_FAMILIES: ReadonlySet<string> = new Set([
   'reserve-alarm-blind', // v1.8.0 F3 compensating alert — must never be eaten by its own monitor
 ]);
 
-export function applySilencingRules(t: AlertActionStats): void {
+/** v1.186.0 — one rule that fired, and what it does to a push. */
+export interface SilencingRuleHit {
+  rule: string;
+  effect: 'silence' | 'demote';
+}
+
+/* v1.186.0 — returns the rules that fired, so a suppressed or demoted push can say WHICH
+ * rule did it (the flags alone cannot: Rule 4 sets the same flag as Rule 1 or Rule 2).
+ * Existing callers ignore the return value; the flag mutation is unchanged. */
+export function applySilencingRules(t: AlertActionStats): SilencingRuleHit[] {
+  const hits: SilencingRuleHit[] = [];
   // v1.8.0 (review F2) — RE-DERIVE the flags from the current counters + the
   // family's CURRENT exemplar severity on every evaluation, instead of one-way
   // latching. The old set-once flags were severity-blind: once 'offline' latched
@@ -710,7 +725,7 @@ export function applySilencingRules(t: AlertActionStats): void {
   t.warningDemotedToInfo = false;
   t.chronicNoiseSilenced = false;
   // v0.80.0 — energy-state families always annunciate at their true severity.
-  if (ENERGY_STATE_FAMILIES.has(t.familyKey)) return;
+  if (ENERGY_STATE_FAMILIES.has(t.familyKey)) return hits;
   const DOWNGRADE_MIN_RISES = 5;                  // need ≥ 5 rises before info-tier silencing
   const DOWNGRADE_SHORT_FRAC = 0.7;               // ≥ 70% of rises clear within SHORT_CLEAR_MS
   // v0.9.3 — extended self-tuning rules
@@ -739,6 +754,7 @@ export function applySilencingRules(t: AlertActionStats): void {
     t.shortClearsCount / t.riseCount >= DOWNGRADE_SHORT_FRAC
   ) {
     t.downgradedSilenced = true;
+    hits.push({ rule: 'Rule 1 (info churn)', effect: 'silence' });
   }
   // Rule 2 (v0.9.3): warning-severity alerts that mostly short-clear → demote to info
   // (still surface in the UI; just stop firing notifications at warning priority).
@@ -748,6 +764,7 @@ export function applySilencingRules(t: AlertActionStats): void {
     t.shortClearsCount / t.riseCount >= DEMOTE_WARN_SHORT_FRAC
   ) {
     t.warningDemotedToInfo = true;
+    hits.push({ rule: 'Rule 2 (warning short-clears)', effect: 'demote' });
   }
   // Rule 3 (v0.9.3): chronic-noise — alert persists a long time but the user
   // never actually acts on it. The condition exists but the user has accepted
@@ -760,6 +777,7 @@ export function applySilencingRules(t: AlertActionStats): void {
     t.neverClearedCount / t.riseCount >= CHRONIC_NOISE_NEVER_CLEAR_FRAC
   ) {
     t.chronicNoiseSilenced = true;
+    hits.push({ rule: 'Rule 3 (chronic noise)', effect: 'silence' });
   }
   // Rule 4 (v0.30.0): high-volume churn that the band rules miss. A family
   // firing very often whose alerts almost always self-clear is transient noise
@@ -773,7 +791,431 @@ export function applySilencingRules(t: AlertActionStats): void {
   ) {
     if (t.severity === 'warning') t.warningDemotedToInfo = true;
     else t.downgradedSilenced = true;
+    hits.push({ rule: 'Rule 4 (high-volume churn)', effect: t.severity === 'warning' ? 'demote' : 'silence' });
   }
+  return hits;
+}
+
+/** v1.186.0 — the rollup numbers a rule reads, for the log line that names it. */
+export function autoTuneBasis(t: Pick<AlertActionStats, 'riseCount' | 'shortClearsCount' | 'neverClearedCount'>): string {
+  const pct = (n: number) => (t.riseCount > 0 ? `${Math.round((100 * n) / t.riseCount)}%` : '—');
+  return `${t.riseCount} rises, ${t.shortClearsCount} short-clears (${pct(t.shortClearsCount)}), ${t.neverClearedCount} long-active (${pct(t.neverClearedCount)})`;
+}
+
+/**
+ * v1.186.0 — what the auto-tune does to ONE push, judged at the right severity.
+ *
+ * The family flags are derived at the family's exemplar severity — the last member that
+ * rose or cleared. Dispatch used to read those flags for every member, so an INFO rise
+ * (or an info bench-spare clear) set the family to info, Rule 1/Rule 4 then latched
+ * `downgradedSilenced`, and a later WARNING member was dropped with no log line. On
+ * 2026-09-23 a home Core's peer-voldiff opened at info (z 3.5), escalated to warning, and
+ * was never pushed. The same gap v1.8.0 described for criticals, still open for warnings.
+ *
+ * The rules are re-run at the MORE severe of the alert's own severity and the exemplar's.
+ * Rated at the exemplar's tier (the alert is no more severe) this is exactly the old
+ * flag read. Rated higher it can only lift: every warning-tier rule needs at least the
+ * evidence its info-tier counterpart needs (Rule 2 ⊂ Rule 1; Rules 3 and 4 do not read
+ * the tier), so no push is ever suppressed or demoted that the old read let through.
+ * Critical is never gated. Pure + exported for tests.
+ */
+export interface AutoTuneVerdict {
+  action: 'pass' | 'suppress' | 'demote';
+  /** The rule(s) behind a suppress/demote, e.g. "Rule 4 (high-volume churn)". */
+  rule: string | null;
+  /** The rollup counts that rule read (autoTuneBasis). */
+  basis: string | null;
+  /** The severity the rules were evaluated at. */
+  ratedAt: Severity | null;
+}
+export function autoTuneDispatchVerdict(
+  t: AlertActionStats | undefined,
+  alert: Pick<Alert, 'severity'>,
+  kind: 'new' | 'resolved',
+): AutoTuneVerdict {
+  const pass: AutoTuneVerdict = { action: 'pass', rule: null, basis: null, ratedAt: null };
+  if (!t || alert.severity === 'critical') return pass;
+  const ratedAt = moreSevere(alert.severity, t.severity);
+  const probe: AlertActionStats = { ...t, severity: ratedAt };
+  const hits = applySilencingRules(probe);
+  const silencing = hits.filter((h) => h.effect === 'silence');
+  if (silencing.length > 0) {
+    return { action: 'suppress', rule: silencing.map((h) => h.rule).join(' + '), basis: autoTuneBasis(probe), ratedAt };
+  }
+  // v0.9.3 — the warning→info demotion applies to a new fire only, never to a resolve.
+  const demoting = hits.filter((h) => h.effect === 'demote');
+  if (demoting.length > 0 && alert.severity === 'warning' && kind === 'new') {
+    return { action: 'demote', rule: demoting.map((h) => h.rule).join(' + '), basis: autoTuneBasis(probe), ratedAt };
+  }
+  return pass;
+}
+
+/**
+ * v1.186.0 — AUTO-TUNE SCOPE: only alerts that can push may feed the rollups that decide
+ * whether a push is demoted or silenced.
+ *
+ * familyOf() stops at the serial, so every device's pack alerts share one rollup. A
+ * non-annunciating alert — a bench spare, an off-panel Core, a home pack muted while it
+ * balances, a blind alarm held for remediation — never pushes, yet its rises and clears
+ * were counted beside the home Cores'. vdiff-warn held 265 rises in its 30-day window; the
+ * home Cores' own records came to 66, far under Rule 4's 150-rise floor, so the bench
+ * spare's volume alone demoted every home-Core cell-imbalance push to "[Low]" (09-23
+ * 06:24:43 and 07:08:25). v1.8.0 fixed this class for offline/stale only, by renaming the
+ * spares' ids; the pack-level families (vdiff-warn, peer-voldiff, peer-soh) never split.
+ *
+ * Decided per EPISODE, and recorded on the tracked entry as `rollupScope`:
+ *   - 'rise'    — the alert annunciated as it rose in THIS process and its rise was
+ *                 counted, so its clear is counted too (the pair stays balanced).
+ *   - 'retrack' — it annunciated when re-tracked at boot. Its rise was counted by a
+ *                 previous process under a scope nobody recorded, so its clear counts only
+ *                 if it still annunciates on its last present tick. An off-panel Core is
+ *                 demoted three ticks AFTER boot (OFF_PANEL_DEMOTE_TICKS), so its standing
+ *                 alerts re-track as annunciating; without this they would land a clear in
+ *                 the home family on every restart.
+ *   - undefined — muted as it rose: neither its rise nor its clear is counted.
+ * Pure + exported for tests.
+ */
+export type RollupScope = 'rise' | 'retrack';
+export function autoTuneCounts(alert: Pick<Alert, 'annunciate'>): boolean {
+  return alert.annunciate !== false;
+}
+export function autoTuneClearCounts(t: { rollupScope?: RollupScope; alert: Pick<Alert, 'annunciate'> }): boolean {
+  if (t.rollupScope === 'rise') return true;
+  return t.rollupScope === 'retrack' && t.alert.annunciate !== false;
+}
+
+/**
+ * v1.186.0 — rebuild the family rollups from the persisted telemetry log.
+ *
+ * Moved out of the monitor closure (unchanged in what it counts) so the scope rule is
+ * testable, plus ONE change: a line without `scope` is not replayed unless asked.
+ *
+ * WHY RESET RATHER THAN REBUILD. Those lines were written before v1.186.0, when every
+ * alert fed the rollups. Rebuilding "from annunciating-only evidence" would need to know
+ * which of them came from an alert that could push, and the log cannot say: it never
+ * recorded `annunciate`; a home pack muted while it balances has the same id as the same
+ * pack when it pushes; and the roster at the time of each event (which decides off-panel)
+ * was never persisted. A classifier keyed on today's bench-spare list would miss every
+ * off-panel Core and every muted home pack, and would re-import most of the pollution.
+ * So those lines are simply not trusted, and every verdict is re-earned from scoped
+ * events. The direction is the fail-loud one: the reset can only LIFT a demotion or a
+ * silence (nothing is counted that was not counted before), and criticals were never
+ * gated. A family that is genuinely noisy on the home Cores re-latches from its own
+ * evidence — Rule 2 after 10 rises, Rule 4 after 150. Nothing on disk is rewritten: the
+ * legacy lines age out of the 30-day window on their own.
+ * Pure + exported for tests.
+ */
+export interface TelemetryReplay {
+  rollups: Map<string, AlertActionStats>;
+  replayed: number;
+  /** Pre-v1.186.0 lines not replayed, and the families they belonged to. */
+  legacySkipped: number;
+  legacyFamilies: Set<string>;
+}
+export function replayTelemetryEvents(
+  events: readonly TelemetryEntry[],
+  familyMeta: Record<string, FamilyMeta>,
+  opts: { includeLegacy?: boolean } = {},
+): TelemetryReplay {
+  const rollups = new Map<string, AlertActionStats>();
+  // Families whose exemplar id came from the sidecar — pinned, because it is
+  // the id that matches the sidecar title. Everything else tracks the last event.
+  const exemplarFromSidecar = new Set<string>();
+  const legacyFamilies = new Set<string>();
+  let replayed = 0;
+  let legacySkipped = 0;
+  for (const e of events) {
+    // Defensive shape check — guards against schema drift.
+    if (!e.familyKey || !e.alertId || !e.event) continue;
+    if (e.scope !== TELEMETRY_SCOPE_ANNUNCIATING && opts.includeLegacy !== true) {
+      legacySkipped++;
+      legacyFamilies.add(e.familyKey);
+      continue;
+    }
+    let t = rollups.get(e.familyKey);
+    if (!t) {
+      // v0.31.0 — prefer the persisted sidecar metadata so the rollup boots
+      // with the family's true title/severity/category; the old
+      // familyKey/'info'/'Battery' placeholders are only the fallback for a
+      // family the sidecar has never seen (e.g. first boot after upgrade).
+      // Real severity here also keeps the post-replay batch silencing pass
+      // from running against a wrong 'info' default.
+      const meta = familyMeta[e.familyKey];
+      const exemplar = replaySeedExemplar(meta, e.alertId, e.familyKey);
+      if (exemplar.pinned) exemplarFromSidecar.add(e.familyKey);
+      t = {
+        familyKey: e.familyKey,
+        alertId: exemplar.alertId,
+        title: exemplar.title,
+        severity: (meta?.severity as Severity) ?? 'info',
+        category: (meta?.category as Alert['category']) ?? ('Battery' as Alert['category']),
+        riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
+        downgradedSilenced: false, warningDemotedToInfo: false, chronicNoiseSilenced: false,
+        neverClearedCount: 0, lastSeenAt: null,
+      };
+      rollups.set(e.familyKey, t);
+    }
+    switch (e.event) {
+      case 'rise':
+        t.riseCount++;
+        break;
+      case 'shortClear':
+        t.shortClearsCount++;
+        if (e.durationMs != null) {
+          t.medianDurationMs = t.medianDurationMs === 0 ? e.durationMs : Math.round((t.medianDurationMs + e.durationMs) / 2);
+          if (e.durationMs > t.longestDurationMs) t.longestDurationMs = e.durationMs;
+        }
+        break;
+      case 'longActive':
+        t.neverClearedCount++;
+        if (e.durationMs != null) {
+          t.medianDurationMs = t.medianDurationMs === 0 ? e.durationMs : Math.round((t.medianDurationMs + e.durationMs) / 2);
+          if (e.durationMs > t.longestDurationMs) t.longestDurationMs = e.durationMs;
+        }
+        break;
+    }
+    if (!exemplarFromSidecar.has(e.familyKey)) t.alertId = e.alertId;
+    t.lastSeenAt = e.ts;
+    replayed++;
+  }
+  // Re-evaluate silencing on every family after replay finishes —
+  // single pass is fine since each evaluate is O(1).
+  for (const t of rollups.values()) applySilencingRules(t);
+  return { rollups, replayed, legacySkipped, legacyFamilies };
+}
+
+/**
+ * v1.186.0 — the families whose auto-tune verdict the scope reset LIFTS, described for the
+ * boot log so the change is observable (vdiff-warn and peer-voldiff are expected there on
+ * the first v1.186.0 boot). Pure + exported for tests.
+ */
+export function liftedAutoTuneVerdicts(
+  before: ReadonlyMap<string, AlertActionStats>,
+  after: ReadonlyMap<string, AlertActionStats>,
+): string[] {
+  const out: string[] = [];
+  for (const [fam, b] of before) {
+    const a = after.get(fam);
+    const lifted = [
+      b.warningDemotedToInfo && !a?.warningDemotedToInfo ? 'warning→info demotion' : null,
+      b.downgradedSilenced && !a?.downgradedSilenced ? 'push silence' : null,
+      b.chronicNoiseSilenced && !a?.chronicNoiseSilenced ? 'chronic-noise silence' : null,
+    ].filter((x): x is string => x != null);
+    if (lifted.length > 0) {
+      out.push(`${fam} (${lifted.join(', ')}; was ${autoTuneBasis(b)}; scoped ${a ? autoTuneBasis(a) : 'no events yet'})`);
+    }
+  }
+  return out.sort();
+}
+
+/* ─── v1.186.0 — ALARMS DO NOT WAIT ON THE ANALYTICS WORKER ─────────────────────
+ * evaluateInner awaited report('forecast'), the NWS storm-prep fetch,
+ * report('curtailmentAlerts') and report('baselineAlerts'/'forecastAlerts') IN SEQUENCE,
+ * and only then ran computeAlerts and store.setAlerts. Each worker request may take 30 s
+ * plus a 30 s retry (analyticsClient.ts), all on ONE worker that also serves dashboards
+ * and a 22-report warm loop. At the 09-23 11:28 boot the curtailment request timed out and
+ * the alert store stayed EMPTY for 63 s — offline, blind, reserve and thermal alarms
+ * included — and the broadcast (which reads store.get().alerts) could not speak. A failed
+ * report also read as "no alerts" ([] in the catch), so a tracked forecast-runtime alert
+ * fell and pushed "Resolved:" on nothing but a worker hiccup.
+ *
+ * Now each worker-served input is a LastGoodFeed: every tick asks for a fresh value and
+ * waits at most ALERT_FEED_BUDGET_MS for it (all feeds concurrently); a feed that misses
+ * its budget or fails CARRIES its last good value forward, so its alerts are held, never
+ * cleared. The request keeps running and lands for the next tick. A feed that has not
+ * delivered since boot has no value: its alerts are UNKNOWN, and the paths that would read
+ * absence as recovery (the onset prune, the boot orphan sweep) wait for it. */
+
+/** v1.186.0 — how long one tick waits for the worker before carrying the last good value. */
+export const ALERT_FEED_BUDGET_MS = envNum(process.env.ALERT_FEED_BUDGET_MS, 2_500, 0);
+
+/**
+ * v1.186.0 — the id families each worker/NWS feed emits (the inputs of workerDerived). While a
+ * feed has not delivered since boot, an id in ITS families is unknown rather than absent: the
+ * onset prune and the boot orphan sweep wait for that feed, and for nothing else. A live-snapshot
+ * id (offline, vdiff, reserve, blind, …) is computed every tick, so its absence is evidence and
+ * goes through the ordinary paths. Keyed by LastGoodFeed name; a test pins every id literal each
+ * producer emits (analytics.ts) to its feed's families, so a new family cannot slip past.
+ */
+export const ALERT_FEED_ID_PREFIXES: Readonly<Record<string, readonly string[]>> = {
+  forecast: ['forecast-soc-dip', 'forecast-low-solar', 'soiling-pv'],
+  'storm-prep': ['storm-'],
+  curtailmentAlerts: ['pv-curtailment-'],
+  baselineAlerts: ['baseline-'],
+  forecastAlerts: ['forecast-runtime-', 'forecast-soh-', 'forecast-imbalance-'],
+};
+
+/** v1.186.0 — the feed (LastGoodFeed name) whose families own `id`, or null for a live-snapshot id. */
+export function alertFeedOwning(id: string): string | null {
+  for (const [feed, prefixes] of Object.entries(ALERT_FEED_ID_PREFIXES)) {
+    if (prefixes.some((p) => id.startsWith(p))) return feed;
+  }
+  return null;
+}
+
+/**
+ * v1.186.0 — how long the FIRST evaluation waits for a hydrated store (SnapshotStore
+ * firstPollSettledAt: the device list landed and every listed-online device was asked for its
+ * quota). startAlertMonitor runs 0.4-0.6 s before the first poll settles (all seven 09-23
+ * boots), so an unconditional first pass saw no projections — or no device list at all — and
+ * its boot seeding (firstRun), boot re-track and first publish all stood on that empty map:
+ * standing alarms rose as phantom rises on tick 2, a "cloud session stale" was published from
+ * a list still in flight, and the broadcast's first tick read a partial set. Past this bound
+ * (a cloud outage at boot) the monitor evaluates on what exists, so the offline and
+ * telemetry-blind alarms are never held back by the wait.
+ */
+export const BOOT_HYDRATION_MAX_MS = envNum(process.env.ALERT_BOOT_HYDRATION_MAX_MS, 30_000, 0);
+
+/**
+ * v1.186.0 — the latest the alarm-count sensors wait for a COMPLETE alert set (a pass on a
+ * hydrated store with every feed delivered) before publishing what exists. A feed that never
+ * delivers (a wedged worker, an NWS outage) must not leave the counts unknown for good.
+ */
+export const ALERT_COUNTS_READY_MAX_MS = 90_000;
+
+export interface AlertFeedRead<T> {
+  /** A private copy of the freshest value this feed has (null: never delivered). */
+  value: T | null;
+  /** A value landed since the previous read (this read's fetch or one still in flight then). */
+  fresh: boolean;
+  /** True on exactly one read: the first that returns a value. */
+  firstDelivery: boolean;
+  ageMs: number | null;
+  /** Why the value is carried rather than fresh (budget or failure), else null. */
+  error: string | null;
+}
+export interface LastGoodFeed<T> {
+  readonly name: string;
+  /** Start (or join the in-flight) fetch and wait at most budgetMs. Never rejects. */
+  read(start: () => Promise<T>, budgetMs: number): Promise<AlertFeedRead<T>>;
+  /** A private copy of the last good value without waiting (null: never delivered). */
+  peek(): T | null;
+  /** Has this feed ever delivered a value? */
+  warm(): boolean;
+  status(): { name: string; warm: boolean; ageMs: number | null; carrying: boolean; lastError: string | null };
+}
+
+/**
+ * v1.186.0 — a worker-served alert input that never blocks the tick and never reads a
+ * timeout as "nothing to report". Pure over its `start`/`now` inputs; exported for tests.
+ *
+ * - At most ONE request is in flight: a tick that finds the previous one still running
+ *   joins it instead of queueing another behind a stalled worker.
+ * - Every returned value is a structured clone. alertMonitor stamps `annunciate` on the
+ *   alert objects it receives (spare / off-panel / blind hold); a carried value must come
+ *   back unstamped, or a Core re-armed on the roster would stay muted.
+ * - Logs only on transitions: cold, first value, carrying, fresh again.
+ */
+export function createLastGoodFeed<T>(
+  name: string,
+  log: (m: string) => void = () => {},
+  now: () => number = Date.now,
+): LastGoodFeed<T> {
+  let last: { value: T; atMs: number } | null = null;
+  let inflight: Promise<boolean> | null = null;
+  let landedSinceRead = false;
+  let delivered = false;
+  let carrying = false;
+  let carriedPasses = 0;
+  let coldLogged = false;
+  let lastError: string | null = null;
+  const clone = (v: T): T => {
+    try { return structuredClone(v); } catch { return v; }
+  };
+  // `start` runs on a later microtask, so a synchronous throw (an uninitialised analytics
+  // singleton) becomes a rejection and the slot is released only after the caller has
+  // stored this very promise in it.
+  const startFetch = (start: () => Promise<T>): Promise<boolean> => {
+    const p: Promise<boolean> = Promise.resolve()
+      .then(start)
+      .then(
+        (v) => {
+          last = { value: v, atMs: now() };
+          landedSinceRead = true;
+          lastError = null;
+          return true;
+        },
+        (e: any) => {
+          lastError = e?.message ?? String(e);
+          return false;
+        },
+      )
+      .finally(() => { if (inflight === p) inflight = null; });
+    return p;
+  };
+  return {
+    name,
+    async read(start, budgetMs) {
+      const mine = inflight ?? (inflight = startFetch(start));
+      let timer: NodeJS.Timeout | undefined;
+      const outcome = await Promise.race([
+        mine.then((ok) => (ok ? 'landed' as const : 'failed' as const)),
+        new Promise<'budget'>((res) => {
+          timer = setTimeout(() => res('budget'), budgetMs);
+          (timer as any).unref?.();
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      const fresh = landedSinceRead;
+      landedSinceRead = false;
+      const firstDelivery = last != null && !delivered;
+      if (last != null) delivered = true;
+      const error = fresh ? null
+        : outcome === 'budget' ? `still running after its ${budgetMs} ms budget`
+        : `failed — ${lastError ?? 'unknown error'}`;
+      const ageMs = last != null ? now() - last.atMs : null;
+      if (firstDelivery && coldLogged) {
+        log(`alert-feed: ${name} delivered its first value — its alerts join the alarm set`);
+      }
+      if (!fresh && last == null && !coldLogged) {
+        coldLogged = true;
+        log(`alert-feed: ${name} has no value yet (${error}) — its alerts are UNKNOWN this pass, not cleared`);
+      } else if (!fresh && last != null) {
+        if (!carrying) {
+          carrying = true;
+          carriedPasses = 0;
+          log(`alert-feed: ${name} ${error} — carrying its last good value (${Math.round((ageMs ?? 0) / 1000)} s old); its alerts are held, not cleared`);
+        }
+        carriedPasses++;
+      } else if (fresh && carrying) {
+        carrying = false;
+        log(`alert-feed: ${name} fresh again after ${carriedPasses} pass(es) on its last good value`);
+      }
+      return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error };
+    },
+    peek: () => (last != null ? clone(last.value) : null),
+    warm: () => last != null,
+    status: () => ({
+      name,
+      warm: last != null,
+      ageMs: last != null ? now() - last.atMs : null,
+      carrying,
+      lastError,
+    }),
+  };
+}
+
+/**
+ * v1.186.0 — the boot re-track rule, extended to an alert feed's FIRST delivery.
+ *
+ * `firstRun` seeds every alert present on the first tick as already notified, and
+ * isBootRetrack keeps a condition that predates the restart from counting as a rise. A
+ * worker-served alert used to reach that first tick because the tick WAITED for the
+ * worker (14-63 s after each 09-23 boot). It no longer waits, so such an alert typically
+ * first appears on a later tick. Its feed's first delivery is its first run: an alert in
+ * it whose persisted onset predates the boot is a re-track (no rise, seeded like any
+ * tick-1 alert). One with no prior onset arose after the restart — a genuine rise, which
+ * pushes normally. Pure + exported for tests.
+ */
+export function bootRetrackDecision(p: {
+  firstRun: boolean;
+  /** This alert belongs to a feed delivering its first value on this tick. */
+  firstFeedDelivery: boolean;
+  priorOnsetMs: number | undefined;
+  bootMs: number;
+}): { retrack: boolean; seedAsBoot: boolean } {
+  const retrack = isBootRetrack({ firstRun: p.firstRun || p.firstFeedDelivery, priorOnsetMs: p.priorOnsetMs, bootMs: p.bootMs });
+  return { retrack, seedAsBoot: p.firstRun || (p.firstFeedDelivery && retrack) };
 }
 
 export interface Incident {
@@ -1126,6 +1568,14 @@ export function fallingEdgeFrozenByEvidence(p: {
  * pushed 21:42:40 and the pool stayed at the floor until 07:55, yet 21:47:43 pushed
  * "Resolved: Projected runtime ~0h 12m to reserve" — a false all-clear at the worst moment. */
 export function resolveHandoffOwner(id: string, currentIds: ReadonlySet<string>): string | null {
+  // v1.186.0 — a DEGRADED audible channel that goes fully dead yields to the unreachable
+  // alert (broadcastDegradedAlert returns null once reachable === false): the condition got
+  // worse, so no "Resolved: Audible alarm channel degraded". A genuine recovery (every
+  // speaker back, no unreachable alert) still resolves. The ids are broadcastHealth.ts's
+  // AUDIBLE_DEGRADED_ALERT_ID / AUDIBLE_UNREACHABLE_ALERT_ID (pinned equal by test/edges.test.ts).
+  if (id === 'system-audible-degraded') {
+    return currentIds.has('system-audible-unreachable') ? 'system-audible-unreachable' : null;
+  }
   if (!id.startsWith('backup-soc-') && !id.startsWith('forecast-runtime-')) return null;
   // v1.185.0 — a SECONDARY panel's band (`backup-soc-<pct>-<serial>`) hands off to that panel's
   // own pair (`shp2-below-reserve-<serial>`), never to the house panel's.
@@ -1295,7 +1745,15 @@ export interface AlertMonitor {
   stop: () => void;
   getConfig: () => NotifyConfig;
   sendTest: () => Promise<void>;
-  stats: () => { tracked: number; sentSinceStart: number; quietQueued: number };
+  stats: () => {
+    tracked: number;
+    sentSinceStart: number;
+    quietQueued: number;
+    /** v1.186.0 — completed evaluate passes since start. */
+    evalPasses: number;
+    /** v1.186.0 — each worker/NWS alert feed: warm, value age, carrying its last good value. */
+    alertFeeds: Array<{ name: string; warm: boolean; ageMs: number | null; carrying: boolean; lastError: string | null }>;
+  };
   /** v1.90.0 (B5) — the CURRENT live alert ids, read-only. The reconnect audit
    *  measures "offline alert resolved" against the real tracked set. */
   activeAlertIds: () => string[];
@@ -1443,8 +1901,30 @@ export function saveClearedLog(path: string, logArr: ClearedAlert[], max: number
 /** v1.69.0 — process start, for the telemetry-blind boot grace. */
 const PROCESS_BOOT_MS = Date.now();
 
-export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log: (m: string) => void, warn: (m: string) => void = log): AlertMonitor {
+/**
+ * v1.186.0 — the monitor's external inputs that tests replace. Production passes none:
+ * the analytics singleton, the NWS storm-prep fetch and the real feature capture.
+ */
+export interface AlertMonitorDeps {
+  analytics?: Pick<AnalyticsClient, 'report'>;
+  stormPrep?: (devices: Record<string, DeviceSnapshot>) => Promise<Alert[]>;
+  captureLrFeatures?: typeof captureLrFeatures;
+  /** A delivery channel standing in for the HA one; supplying it counts as configured. */
+  send?: typeof sendNotification;
+  /** v1.186.0 — overrides BOOT_HYDRATION_MAX_MS. */
+  bootHydrationMaxMs?: number;
+}
+
+export function startAlertMonitor(
+  store: SnapshotStore,
+  recorder: Recorder,
+  log: (m: string) => void,
+  warn: (m: string) => void = log,
+  deps: AlertMonitorDeps = {},
+): AlertMonitor {
   let cfg = loadNotifyConfig();
+  const send = deps.send ?? sendNotification;
+  const channelConfigured = (): boolean => deps.send != null || isConfigured(cfg);
   const tracked = new Map<string, TrackedAlert>();
   const clearedLog: ClearedAlert[] = [];
   const telemetry = new Map<string, AlertActionStats>();
@@ -1632,7 +2112,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     t.riseCount++;
     t.lastSeenAt = ts;
     evaluateSilencingRules(t);
-    appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'rise', ts });
+    // v1.186.0 — only annunciating alerts reach here (autoTuneCounts); the line says so.
+    appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'rise', ts, scope: TELEMETRY_SCOPE_ANNUNCIATING });
   };
 
   /**
@@ -1667,11 +2148,11 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     const { shortClear, longActive } = classifyClearDuration(duration);
     if (shortClear) {
       t.shortClearsCount++;
-      appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'shortClear', ts, durationMs: duration });
+      appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'shortClear', ts, durationMs: duration, scope: TELEMETRY_SCOPE_ANNUNCIATING });
     }
     if (longActive) {
       t.neverClearedCount++;
-      appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'longActive', ts, durationMs: duration });
+      appendTelemetryEvent({ familyKey: t.familyKey, alertId: alert.id, event: 'longActive', ts, durationMs: duration, scope: TELEMETRY_SCOPE_ANNUNCIATING });
     }
     t.lastSeenAt = ts;
     evaluateSilencingRules(t);
@@ -1702,63 +2183,21 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     const events = readRecentTelemetry();
     if (events.length === 0) return;
     const familyMeta = loadFamilyMeta(); // v0.31.0 — real title/severity/category, if the sidecar knows this family
-    // Families whose exemplar id came from the sidecar — pinned, because it is
-    // the id that matches the sidecar title. Everything else tracks the last event.
-    const exemplarFromSidecar = new Set<string>();
-    let n = 0;
-    for (const e of events) {
-      // Defensive shape check — guards against schema drift.
-      if (!e.familyKey || !e.alertId || !e.event) continue;
-      let t = telemetry.get(e.familyKey);
-      if (!t) {
-        // v0.31.0 — prefer the persisted sidecar metadata so the rollup boots
-        // with the family's true title/severity/category; the old
-        // familyKey/'info'/'Battery' placeholders are only the fallback for a
-        // family the sidecar has never seen (e.g. first boot after upgrade).
-        // Real severity here also keeps the post-replay batch silencing pass
-        // from running against a wrong 'info' default.
-        const meta = familyMeta[e.familyKey];
-        const exemplar = replaySeedExemplar(meta, e.alertId, e.familyKey);
-        if (exemplar.pinned) exemplarFromSidecar.add(e.familyKey);
-        t = {
-          familyKey: e.familyKey,
-          alertId: exemplar.alertId,
-          title: exemplar.title,
-          severity: (meta?.severity as Severity) ?? 'info',
-          category: (meta?.category as Alert['category']) ?? ('Battery' as Alert['category']),
-          riseCount: 0, medianDurationMs: 0, longestDurationMs: 0, shortClearsCount: 0,
-          downgradedSilenced: false, warningDemotedToInfo: false, chronicNoiseSilenced: false,
-          neverClearedCount: 0, lastSeenAt: null,
-        };
-        telemetry.set(e.familyKey, t);
-      }
-      switch (e.event) {
-        case 'rise':
-          t.riseCount++;
-          break;
-        case 'shortClear':
-          t.shortClearsCount++;
-          if (e.durationMs != null) {
-            t.medianDurationMs = t.medianDurationMs === 0 ? e.durationMs : Math.round((t.medianDurationMs + e.durationMs) / 2);
-            if (e.durationMs > t.longestDurationMs) t.longestDurationMs = e.durationMs;
-          }
-          break;
-        case 'longActive':
-          t.neverClearedCount++;
-          if (e.durationMs != null) {
-            t.medianDurationMs = t.medianDurationMs === 0 ? e.durationMs : Math.round((t.medianDurationMs + e.durationMs) / 2);
-            if (e.durationMs > t.longestDurationMs) t.longestDurationMs = e.durationMs;
-          }
-          break;
-      }
-      if (!exemplarFromSidecar.has(e.familyKey)) t.alertId = e.alertId;
-      t.lastSeenAt = e.ts;
-      n++;
+    // v1.186.0 — the counting moved to the pure replayTelemetryEvents (unchanged), which
+    // also declines the pre-scope lines; see its comment for why this is a reset.
+    const r = replayTelemetryEvents(events, familyMeta);
+    for (const [k, t] of r.rollups) telemetry.set(k, t);
+    log(`alert-telemetry: replayed ${r.replayed} events across ${telemetry.size} families`);
+    if (r.legacySkipped > 0) {
+      // Say what the reset changed, so it can be verified from the log alone.
+      const lifted = liftedAutoTuneVerdicts(replayTelemetryEvents(events, familyMeta, { includeLegacy: true }).rollups, r.rollups);
+      log(
+        `alert-telemetry: ${r.legacySkipped} pre-v1.186.0 event(s) across ${r.legacyFamilies.size} famil${r.legacyFamilies.size === 1 ? 'y' : 'ies'} not replayed — ` +
+        'they pooled non-annunciating alerts (bench spares, off-panel Cores, muted packs) with the ones that push and cannot be told apart; ' +
+        'auto-tune verdicts are re-earned from annunciating evidence only' +
+        (lifted.length > 0 ? `. Lifted: ${lifted.join('; ')}` : ''),
+      );
     }
-    // Re-evaluate silencing on every family after replay finishes —
-    // single pass is fine since each evaluate is O(1).
-    for (const t of telemetry.values()) evaluateSilencingRules(t);
-    log(`alert-telemetry: replayed ${n} events across ${telemetry.size} families`);
   };
 
   /** v0.80.0 — dispatch outcome. 'sent' = the push was actually delivered;
@@ -1777,8 +2216,16 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
    *  actually saw — a fire delivered as "[Low] … via auto-tune" owes no
    *  "Resolved:" push (the resolve of a demoted-to-info event is pure noise). */
   let lastDispatchEffectiveSeverity: Severity | null = null;
+  /** v1.186.0 — the no-channel suppression is logged once per process, not per alert. */
+  let noChannelLogged = false;
   const dispatch = async (alert: Alert, kind: 'new' | 'resolved'): Promise<'sent' | 'suppressed' | 'failed'> => {
-    if (!isConfigured(cfg)) return 'suppressed';
+    if (!channelConfigured()) {
+      if (!noChannelLogged) {
+        noChannelLogged = true;
+        log(`notify: no push channel is configured (NOTIFY_CHANNEL=${cfg.channel}) — every dispatch is suppressed; alerts stay on-screen`);
+      }
+      return 'suppressed';
+    }
     // v0.9.59 — silencing is now family-keyed so a single noisy condition
     // spread across multiple packs aggregates correctly. The decision
     // still operates per-alert (we silence THIS alert's notification),
@@ -1789,19 +2236,28 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // by a family auto-tune latch. The rules never trip ON a critical exemplar,
     // but a mixed-severity family whose latch was set from info/warning noise
     // used to eat a later critical member right here, unconditionally.
-    if (alert.severity !== 'critical' && (t?.downgradedSilenced || t?.chronicNoiseSilenced)) return 'suppressed';
+    // v1.186.0 — judged at THIS alert's severity (autoTuneDispatchVerdict), so an info
+    // latch no longer eats a warning member, and the suppression is LOGGED with the rule
+    // and the counts behind it. It used to return with no line at all, which made a
+    // warning dropped on 2026-09-23 indistinguishable from one that was never evaluated.
+    const verdict = autoTuneDispatchVerdict(t, alert, kind);
+    const subject = (() => { const l = notifyLocator(alert); return l ? `${alert.title} — ${l}` : alert.title; })();
+    if (verdict.action === 'suppress') {
+      log(`notify: ${kind === 'resolved' ? 'resolve ' : ''}suppressed "${subject}" (${alert.severity}) — auto-tune ${verdict.rule} on family "${t?.familyKey}" rated at ${verdict.ratedAt}: ${verdict.basis}; on-screen only, not pushed`);
+      return 'suppressed';
+    }
     // v0.11.0 — ISA priority annunciation gate. When the operator has turned
     // off this alarm's priority on the Alert Settings page, suppress the push
     // notification (the alert still stays in snapshot.alerts and renders in the
     // UI — we silence the annunciation, never hide an active alarm).
-    if (!isPriorityEnabled(priorityOf(alert))) return 'suppressed';
+    if (!isPriorityEnabled(priorityOf(alert))) {
+      log(`notify: ${kind === 'resolved' ? 'resolve ' : ''}suppressed "${subject}" (${alert.severity}) — its priority (${priorityMeta(priorityOf(alert)).label}) is turned off in Alert Settings; on-screen only, not pushed`);
+      return 'suppressed';
+    }
     // v0.9.3 warning→info demotion — alert still notifies but at info priority
     // (no [CRITICAL] prefix, no DND-bypass payload). The decision applies only
     // to new alerts, not resolved-cleared notifications.
-    const effectiveSeverity: Severity =
-      t?.warningDemotedToInfo && alert.severity === 'warning' && kind === 'new'
-        ? 'info'
-        : alert.severity;
+    const effectiveSeverity: Severity = verdict.action === 'demote' ? 'info' : alert.severity;
     // v0.11.0 — human-facing title carries the ISA priority LABEL in brackets
     // for ALL priorities (e.g. "[Critical] …", "[High] …", "[Medium] …",
     // "[Low] …"), replacing the old critical-only "[CRITICAL] " prefix. This is
@@ -1825,7 +2281,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         ? `Resolved: ${titleBody}`
         : `[${priorityMeta(notifyBracketPriority(alert, effectiveSeverity)).label}] ${titleBody}`;
     try {
-      await sendNotification(cfg, {
+      await send(cfg, {
         title: `EcoFlow · ${title}`,
         body: kind === 'resolved' ? `${alert.detail}\n\n(condition cleared)` : alert.detail,
         severity: kind === 'resolved' ? 'resolved' : effectiveSeverity,
@@ -1836,7 +2292,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       });
       sentSinceStart++;
       lastDispatchEffectiveSeverity = effectiveSeverity; // v1.88.0
-      log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune)` : ''}`);
+      // v1.186.0 — a demoted push names the rule and the counts that demoted it.
+      log(`notify: sent "${title}" via ${cfg.channel}${effectiveSeverity !== alert.severity ? ` (severity ${alert.severity}→${effectiveSeverity} via auto-tune — ${verdict.rule} on family "${t?.familyKey}": ${verdict.basis})` : ''}`);
       return 'sent';
     } catch (e: any) {
       // v0.80.0 — identity + retry intent in the failure line (the old
@@ -1861,7 +2318,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // v0.15.18 — the digest used to vanish without a trace when no channel was
     // configured: 58 queued warnings (incl. 17× cell-imbalance) dropped over
     // 50 h with nothing in the log. Now it says so, loudly, once per digest.
-    if (!isConfigured(cfg)) {
+    if (!channelConfigured()) {
       warn(
         `notify: WARNING — morning digest has ${quietQueue.length} queued alert(s) but no notify ` +
           `channel is configured (NOTIFY_CHANNEL=${cfg.channel}). Set NOTIFY_CHANNEL to ` +
@@ -1982,7 +2439,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         }
         catch { return null; }
       })();
-      await sendNotification(cfg, {
+      await send(cfg, {
         title: `EcoFlow · Morning digest (${pending.length} alert${pending.length === 1 ? '' : 's'}${resolvedLines.length ? ` + ${resolvedLines.length} resolved overnight` : ''})`,
         body: `Held during overnight quiet hours:\n\n${lines.length ? lines.join('\n') : '(none still active)'}\n${
           digestLedgerLine ? `\n${digestLedgerLine}\n` : ''
@@ -2058,10 +2515,109 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
   // during the overlap would recordClear() twice, corrupting the auto-tune
   // telemetry fractions. Skipping a tick while one is in flight is safe: the
   // next interval re-evaluates from the live snapshot.
+  // v1.186.0 — a tick is now bounded by ALERT_FEED_BUDGET_MS on the worker side (plus its
+  // own pushes), so a stalled worker no longer stretches the 20 s cadence and drops ticks.
   let evaluating = false;
+
+  // v1.186.0 — the worker/NWS-served alert inputs, each carrying its last good value
+  // across a slow or failed read (createLastGoodFeed). Resolved lazily: the analytics
+  // singleton is initialised by index.ts before the first tick.
+  const analyticsClient = (): Pick<AnalyticsClient, 'report'> => deps.analytics ?? getAnalytics();
+  const feedForecast = createLastGoodFeed<DayForecast>('forecast', log);
+  const feedStormPrep = createLastGoodFeed<Alert[]>('storm-prep', log);
+  const feedCurtailment = createLastGoodFeed<Alert[]>('curtailmentAlerts', log);
+  const feedBaseline = createLastGoodFeed<Alert[]>('baselineAlerts', log);
+  const feedForecastAlerts = createLastGoodFeed<Alert[]>('forecastAlerts', log);
+  const alertFeeds: ReadonlyArray<LastGoodFeed<unknown>> = [feedForecast, feedStormPrep, feedCurtailment, feedBaseline, feedForecastAlerts];
+  /** v1.186.0 — has every feed delivered since boot? Until then some alerts are UNKNOWN. */
+  const alertFeedsWarm = (): boolean => alertFeeds.every((f) => f.warm());
+  /** v1.186.0 — is `id` owned by a feed that has not delivered since boot (so unknown, not absent)? */
+  const coldFeedOwns = (id: string): boolean => {
+    const owner = alertFeedOwning(id);
+    return owner != null && alertFeeds.some((f) => f.name === owner && !f.warm());
+  };
+  /** v1.186.0 — may the onset of an absent `id` be pruned now (within the warm-up window)? */
+  const onsetPrunable = (id: string): boolean =>
+    alertFeedOwning(id) != null ? !coldFeedOwns(id) : storeHydrated();
+  /** v1.186.0 — the orphan sweep's wait for a cold feed is logged once. */
+  let orphanFeedHoldLogged = false;
+  const captureLr = deps.captureLrFeatures ?? captureLrFeatures;
+  let evalPasses = 0;
+
+  /**
+   * v1.186.0 — the feature snapshot for a NEW alert, off the dispatch path.
+   *
+   * captureLrFeatures awaits four worker reports (degradation, thermalEvents,
+   * internalResistance, chargeCurve). It sat inside the rising-edge loop as an `await`,
+   * so every later alert in the tick — and every push dispatch, which runs in that loop —
+   * waited on it: 47-73 s after six of seven 09-23 boots, 58.5 s at 12:58 for a
+   * degradation report that timed out twice and was then discarded. Its catch said "never
+   * block alert dispatch on snapshot"; that covered exceptions, not latency. It now runs
+   * detached, after the tick's dispatches have been decided; the snapshot is the tick's,
+   * so the vector is the one the alert fired on. Never throws.
+   */
+  const captureFeaturesDetached = async (a: Alert, snapAt: FleetSnapshot, ts: number): Promise<void> => {
+    try {
+      // v0.9.25 — snapshot the feature vector at first fire so future
+      // online-learning code can replay the model inputs that produced
+      // this alert. Failure is silent: missing snapshots only mean the
+      // outcome record won't carry features.
+      //
+      // v0.9.59 — also capture the REAL normalized LR feature vector
+      // for pack-level alerts (was being reconstructed from generic
+      // features at training time, which proxied rTrend off pack
+      // temperature — meaning Phoenix summer would train every pack
+      // as "high risk" from ambient heat). Now stored alongside the
+      // generic features so onlineLR can read them back directly.
+      const features = extractFeatures(a, snapAt);
+      if (!features) return;
+      // captureLrFeatures returns null for non-pack alerts (SHP2,
+      // EVSE, system) — those skip the SGD update anyway, so the
+      // null is correct and not lossy.
+      const lrFeatures = await captureLr(a, snapAt, recorder);
+      captureSnapshot({
+        alertId: a.id,
+        ts,
+        features,
+        category: a.category,
+        severity: a.severity,
+        title: a.title,
+        lrFeatures,
+      }, log);
+    } catch { /* a missing snapshot only means the outcome record carries no features */ }
+  };
+
+  // v1.186.0 — THE BOOT GATE. No evaluation (so no publish, no firstRun seeding, no boot
+  // re-track, no onset prune) until the store is hydrated, or until the bound passes. See
+  // BOOT_HYDRATION_MAX_MS. Opened once; a pass that opened it by the bound is followed by one
+  // late-hydration pass (below) that re-tracks what the first poll brings in.
+  const hydrationMaxMs = deps.bootHydrationMaxMs ?? BOOT_HYDRATION_MAX_MS;
+  let bootGateOpen = false;
+  let hydrationBoundReached = hydrationMaxMs <= 0;
+  /** v1.186.0 — the gate opened on the bound; the first pass after hydration still owes a re-track. */
+  let lateHydrationPending = false;
+  const storeHydrated = (): boolean => store.firstPollSettledAt > 0;
+  const openBootGate = (): boolean => {
+    if (bootGateOpen) return true;
+    if (storeHydrated()) {
+      bootGateOpen = true;
+      log(`alert-monitor: first evaluation on a hydrated store (first poll settled ${Math.max(0, store.firstPollSettledAt - monitorStartMs)} ms after start)`);
+      return true;
+    }
+    if (hydrationBoundReached || Date.now() - monitorStartMs >= hydrationMaxMs) {
+      bootGateOpen = true;
+      lateHydrationPending = true;
+      warn(`alert-monitor: WARNING — no complete poll within ${Math.round(hydrationMaxMs / 1000)} s of start; evaluating on the data that exists (offline and telemetry-blind alarms still fire)`);
+      return true;
+    }
+    return false;
+  };
+  /** v1.186.0 — the alarm-count readiness latch (FleetSnapshot.alertsComplete). */
+  let alertsCompleteMarked = false;
 
   const evaluate = async () => {
     if (evaluating) return;
+    if (!openBootGate()) return;
     evaluating = true;
     try {
       await evaluateInner();
@@ -2072,30 +2628,27 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
 
   const evaluateInner = async () => {
     const snap = store.get();
-    let forecastDay: Alert[] = [];
-    let stormPrep: Alert[] = [];
-    try {
-      const df = await getAnalytics().report('forecast');
-      // v0.59.0 — pass grid presence so a projected dip below reserve reads as
-      // informational ("if islanded") when the grid is backstopping the load.
-      forecastDay = forecastDayAlerts(df, liveGridBackstop(snap.devices));
-    } catch (e: any) {
-      log(`forecast: day-ahead failed — ${e?.message ?? e}`);
-    }
-    try {
-      stormPrep = await stormPrepAlerts(snap.devices);
-    } catch (e: any) {
-      log(`storm-prep: ${e?.message ?? e}`);
-    }
-    // v0.9.77 — SoC-saturation curtailment alert. Returns 0 or 1 entries;
-    // its severity is `info` (not a fault) and its content carries the
-    // "you have X kW of headroom — could absorb with pool pump etc." copy.
-    let curtailment: Alert[] = [];
-    try {
-      curtailment = await getAnalytics().report('curtailmentAlerts');
-    } catch (e: any) {
-      log(`curtailment-alert: ${e?.message ?? e}`);
-    }
+    // v1.186.0 — the first pass on a hydrated store after the gate opened on the bound: the
+    // alerts the first poll brings in re-track like tick-1 alerts (bootRetrackDecision).
+    const lateHydrationPass = lateHydrationPending && !firstRun && storeHydrated();
+    if (lateHydrationPass) lateHydrationPending = false;
+    // v1.186.0 — ask every worker/NWS feed NOW, concurrently, and do not wait on them
+    // until the live alarms below are published. Each read settles within
+    // ALERT_FEED_BUDGET_MS and never rejects: a feed that misses its budget or fails
+    // hands back its LAST GOOD value (see createLastGoodFeed).
+    //   - forecast:          the day-ahead forecast (forecastDayAlerts, below).
+    //   - storm-prep:        the NWS fetch — no timeout of its own, so a wedged socket
+    //                        used to hold every alarm for the undici default.
+    //   - curtailmentAlerts: v0.9.77 SoC-saturation curtailment (0 or 1 info entries).
+    //   - baselineAlerts / forecastAlerts: v0.10.0 recorder-backed signals, from the
+    //                        worker so this 20 s eval never scans SQLite on the main thread.
+    const feedReads = Promise.all([
+      feedForecast.read(() => analyticsClient().report('forecast'), ALERT_FEED_BUDGET_MS),
+      feedStormPrep.read(() => (deps.stormPrep ?? stormPrepAlerts)(snap.devices), ALERT_FEED_BUDGET_MS),
+      feedCurtailment.read(() => analyticsClient().report('curtailmentAlerts'), ALERT_FEED_BUDGET_MS),
+      feedBaseline.read(() => analyticsClient().report('baselineAlerts'), ALERT_FEED_BUDGET_MS),
+      feedForecastAlerts.read(() => analyticsClient().report('forecastAlerts'), ALERT_FEED_BUDGET_MS),
+    ]);
     // v0.7.7 — build the connectivity context the alerts engine uses to
     // enrich offline/stale alerts with last-data timestamps + source.
     const perDevice = new Map<string, { lastMqttAt?: number; lastSource?: 'rest' | 'mqtt'; mqttCount: number }>();
@@ -2133,20 +2686,6 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // v1.174.0 — per-string MPPT error onsets for the dpu-pvh-err / dpu-pvl-err debounce.
       mpptErrOnsetByKey: store.mpptErrOnsets(),
     };
-
-    // v0.10.0 — baseline + forecast alert signals are recorder-backed; fetch
-    // them from the analytics worker so this 20s eval never scans SQLite on
-    // the main thread.
-    let baselineAlerts: Alert[] = [];
-    let forecastAlerts: Alert[] = [];
-    try {
-      [baselineAlerts, forecastAlerts] = await Promise.all([
-        getAnalytics().report('baselineAlerts'),
-        getAnalytics().report('forecastAlerts'),
-      ]);
-    } catch (e: any) {
-      log(`alert-signals: baseline/forecast failed — ${e?.message ?? e}`);
-    }
 
     // v0.23.0 — grid-backstop context for the reserve/floor alerts. Keep the HA
     // state cache warm when a grid-presence entity is configured (TTL-gated +
@@ -2205,19 +2744,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // messageRateFloorAlert.
     setLastPeakDrawObservation({ verdict: peakDraw, forceChargeSlots: fcSlots, atMs: Date.now() });
 
-    const alerts = [
+    // v1.186.0 — the LIVE-SNAPSHOT alarms: everything computed from the snapshot and
+    // main-thread state, none of it from the worker. These publish before any wait. Split
+    // in two only so the assembled list keeps its pre-v1.186.0 order (worker-served alerts
+    // sat between them), which a stable sort then preserves among equal-rank alerts.
+    const liveHead: Alert[] = [
       // v1.185.0 — each pool's own verdict, on a multi-panel plant only (one panel: `grid`, unchanged).
       ...computeAlerts(snap.devices, connectivity, grid,
         shp2Panels(snap.devices).sns.length > 1 ? (sn: string) => livePoolGridBackstop(snap.devices, sn) : undefined),
       ...computeLearnedAlerts(snap.devices),
       ...peakGridDrawAlerts(peakDraw, Date.now()),
-      // v1.184.0 — the starved-feed rule, with the MAIN thread's rate-floor state (idle-held exempt).
-      ...applyStarvedFeedFilter(baselineAlerts, getRateFloorCollapses().map((c) => c.sn), rateFloorIdleHeldSns()),
-      // v1.181.0 — the runtime alert's grid rule, with the MAIN thread's live resolver.
-      ...applyRuntimeGrid(forecastAlerts, grid.backstopping === true),
-      ...forecastDay,
-      ...stormPrep,
-      ...curtailment,
+    ];
+    const liveTail: Alert[] = [
       // v0.83.0 — recorded telemetry blackouts (host power loss / add-on stop /
       // MQTT stall) surfaced as operator push alerts. Reads the recorder's durable
       // gaps sidecar, so a gap detected AT BOOT (spanning the very restart that
@@ -2233,6 +2771,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // excludes its id so it never tries to chime. Null health (unprobed/boot/
       // transient) yields no alert — see broadcastHealthAlert.
       ...(() => { const a = broadcastHealthAlert(getBroadcastHealth(), Date.now()); return a ? [a] : []; })(),
+      // v1.186.0 — and the PARTIAL channel: some, not all, configured speakers usable, named.
+      // Same push path, same exclusion from the audible condition (the system-audible prefix);
+      // it yields to the unreachable alert above once no speaker is usable.
+      ...(() => { const a = broadcastDegradedAlert(getBroadcastHealth(), Date.now()); return a ? [a] : []; })(),
       // v0.93.0 (audit #1 phase-2) — devices whose incoming message RATE has
       // collapsed below their learned baseline while `lastUpdated` stays fresh
       // (the SHP2 ~13 h crawl that defeated the staleness + gap detectors). The
@@ -2264,7 +2806,41 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         if (remediation.hold) for (const a of blindAlerts) a.annunciate = false;
         return blindAlerts;
       })(),
-    ].sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
+    ];
+    // v1.186.0 — the WORKER/NWS-served alerts, from each feed's value — fresh, or carried
+    // from its last good read. A feed with no value yet contributes nothing: its alerts
+    // are unknown, and the paths that would read that as recovery wait (see below).
+    // The main-thread transforms (grid, starved feed) re-apply to a carried value every
+    // tick, so they always judge it against the live state.
+    const workerDerived = (v: {
+      forecast: DayForecast | null;
+      stormPrep: Alert[] | null;
+      curtailment: Alert[] | null;
+      baselineAlerts: Alert[] | null;
+      forecastAlerts: Alert[] | null;
+    }): Alert[] => {
+      const baselineAlerts = v.baselineAlerts ?? [];
+      const forecastAlerts = v.forecastAlerts ?? [];
+      let forecastDay: Alert[] = [];
+      if (v.forecast != null) {
+        try {
+          // v0.59.0 — pass grid presence so a projected dip below reserve reads as
+          // informational ("if islanded") when the grid is backstopping the load.
+          forecastDay = forecastDayAlerts(v.forecast, grid);
+        } catch (e: any) {
+          log(`forecast: day-ahead failed — ${e?.message ?? e}`);
+        }
+      }
+      return [
+        // v1.184.0 — the starved-feed rule, with the MAIN thread's rate-floor state (idle-held exempt).
+        ...applyStarvedFeedFilter(baselineAlerts, getRateFloorCollapses().map((c) => c.sn), rateFloorIdleHeldSns()),
+        // v1.181.0 — the runtime alert's grid rule, with the MAIN thread's live resolver.
+        ...applyRuntimeGrid(forecastAlerts, grid.backstopping === true),
+        ...forecastDay,
+        ...(v.stormPrep ?? []),
+        ...(v.curtailment ?? []),
+      ];
+    };
     // v0.26.0 — central spare gate. A bench spare (in SPARE_DPU_SNS, not wired
     // into the SHP2) is online for diagnostics but must NEVER chime/push. v0.16.4
     // only gated the offline/stale branches; the learned/forecast/baseline emitters
@@ -2273,7 +2849,9 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // an expected-offline-spare SN (idempotent with the per-emitter threshold gate
     // in alerts.ts). Keeps the alert visible in the UI; auto-re-arms the instant the
     // spare is wired into an SHP2 (shp2ConnectedDpuSns then includes it).
-    {
+    // v1.186.0 — the mute list is computed ONCE per tick (advanceOffPanelStreaks advances
+    // its streaks) and stamped on both publishes below.
+    const muted: string[] = (() => {
       const connectedSns = shp2ConnectedDpuSns(snap.devices);
       const mutedSpares = benchSpareSns().filter((sn) => isExpectedOfflineSpare(sn, connectedSns));
       // v1.95.0 — OFF-PANEL demotion. The static allowlist only ever described
@@ -2309,15 +2887,59 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       // genuinely off-panel, and the second panel's Cores re-arm on first sighting. One panel:
       // never disarmed, as before.
       const multiPanel = multiPanelRosterUnsound(snap.devices);
-      const muted = multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
-      for (const a of alerts) if (shouldDemoteAnnunciation(a, muted)) a.annunciate = false;
-    }
+      return multiPanel ? [] : [...new Set([...mutedSpares, ...offPanel])];
+    })();
+    const assemble = (workerAlerts: Alert[]): Alert[] => {
+      const all = [...liveHead, ...workerAlerts, ...liveTail]
+        .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.category.localeCompare(b.category));
+      for (const a of all) if (shouldDemoteAnnunciation(a, muted)) a.annunciate = false;
+      return all;
+    };
+    const publish = (set: Alert[]): void => {
+      store.setAlerts(set);
+      currentIncidents = buildIncidents(set);
+    };
+    // v1.186.0 — PUBLISH FIRST: the live alarms, plus each feed's last good value, before
+    // any wait on the worker. The screen and the broadcast (store.get().alerts) see an
+    // offline, blind, reserve or thermal alarm on the tick it is computed.
+    publish(assemble(workerDerived({
+      forecast: feedForecast.peek(),
+      stormPrep: feedStormPrep.peek(),
+      curtailment: feedCurtailment.peek(),
+      baselineAlerts: feedBaseline.peek(),
+      forecastAlerts: feedForecastAlerts.peek(),
+    })));
+    // Then the worker gets its budget (already running since the top of the tick), and the
+    // tick continues on whatever landed — or on the carried values.
+    const [rForecast, rStormPrep, rCurtailment, rBaseline, rForecastAlerts] = await feedReads;
+    const alerts = assemble(workerDerived({
+      forecast: rForecast.value,
+      stormPrep: rStormPrep.value,
+      curtailment: rCurtailment.value,
+      baselineAlerts: rBaseline.value,
+      forecastAlerts: rForecastAlerts.value,
+    }));
+    // v1.186.0 — the alerts of a feed delivering its FIRST value on a later tick than the
+    // first: their boot re-track happens now (bootRetrackDecision). On the first tick the
+    // global firstRun already covers them.
+    const firstDeliveryIds = new Set<string>(firstRun ? [] : workerDerived({
+      forecast: rForecast.firstDelivery ? rForecast.value : null,
+      stormPrep: rStormPrep.firstDelivery ? rStormPrep.value : null,
+      curtailment: rCurtailment.firstDelivery ? rCurtailment.value : null,
+      baselineAlerts: rBaseline.firstDelivery ? rBaseline.value : null,
+      forecastAlerts: rForecastAlerts.firstDelivery ? rForecastAlerts.value : null,
+    }).map((a) => a.id));
     // v1.166.0 — a CRITICAL held silent by policy must say so, or it reads as broken.
     for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) {
       log(`alerts: "${a.title}" is CRITICAL but held non-annunciating by policy (bench spare or off-panel Core) — on-screen only, never spoken or pushed`);
     }
-    store.setAlerts(alerts);
-    currentIncidents = buildIncidents(alerts);
+    publish(alerts);
+    // v1.186.0 — the counts publish once this set is COMPLETE: a hydrated store with every feed
+    // delivered, or the bound (publishReadiness 'alerts'). A latch: a later cold read carries.
+    if (!alertsCompleteMarked && ((storeHydrated() && alertFeedsWarm()) || Date.now() - monitorStartMs >= ALERT_COUNTS_READY_MAX_MS)) {
+      alertsCompleteMarked = true;
+      store.markAlertsComplete();
+    }
 
     const now = Date.now();
     const nowDate = new Date(now);
@@ -2386,7 +3008,8 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         overnightResolved.set(id, { raisedAt: trueFirstSeen, clearedAt: nowMs });
         persistDigestState(); // v1.86.0
       }
-      recordClear(t.alert, duration, nowMs);
+      // v1.186.0 — only an episode that is in the rollup lands its clear there.
+      if (autoTuneClearCounts(t)) recordClear(t.alert, duration, nowMs);
       tracked.delete(id);
     };
 
@@ -2432,49 +3055,35 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       }
     }
 
+    // v1.186.0 — new alerts whose feature snapshot is taken after this tick's dispatches.
+    const featureCaptures: Alert[] = [];
     // Rising edges + debounce
     for (const a of alerts) {
       const existing = tracked.get(a.id);
       if (!existing) {
-        // v0.9.25 — snapshot the feature vector at first fire so future
-        // online-learning code can replay the model inputs that produced
-        // this alert. Failure is silent: missing snapshots only mean the
-        // outcome record won't carry features.
-        //
-        // v0.9.59 — also capture the REAL normalized LR feature vector
-        // for pack-level alerts (was being reconstructed from generic
-        // features at training time, which proxied rTrend off pack
-        // temperature — meaning Phoenix summer would train every pack
-        // as "high risk" from ambient heat). Now stored alongside the
-        // generic features so onlineLR can read them back directly.
-        try {
-          const features = extractFeatures(a, snap);
-          if (features) {
-            // captureLrFeatures returns null for non-pack alerts (SHP2,
-            // EVSE, system) — those skip the SGD update anyway, so the
-            // null is correct and not lossy.
-            const lrFeatures = await captureLrFeatures(a, snap, recorder);
-            captureSnapshot({
-              alertId: a.id,
-              ts: now,
-              features,
-              category: a.category,
-              severity: a.severity,
-              title: a.title,
-              lrFeatures,
-            }, log);
-          }
-        } catch { /* ignore — never block alert dispatch on snapshot */ }
+        // v1.186.0 — the feature snapshot (v0.9.25/v0.9.59) no longer runs here: it
+        // awaited the worker in the middle of dispatch. See captureFeaturesDetached.
+        featureCaptures.push(a);
         // v0.9.59 — record the rise in the family rollup and persist it.
         // Previously rise counts were only incremented at clear time,
         // which made the chronic-noise rule blind to permanently-active
         // alerts (they never cleared, so never got counted).
         // v1.130.0 — but NOT for an alert that was already standing before this
         // process started: that is a re-track, not a rising edge. See isBootRetrack.
-        if (isBootRetrack({ firstRun, priorOnsetMs: getAlertOnset(a.id), bootMs })) {
+        // v1.186.0 — a worker feed's first delivery is that feed's first run
+        // (bootRetrackDecision), and only an ANNUNCIATING alert feeds the auto-tune
+        // rollups (autoTuneCounts): a bench spare's churn must not demote a home Core's push.
+        const boot = bootRetrackDecision({
+          firstRun, firstFeedDelivery: firstDeliveryIds.has(a.id) || lateHydrationPass, priorOnsetMs: getAlertOnset(a.id), bootMs,
+        });
+        const counts = autoTuneCounts(a);
+        let rollupScope: RollupScope | undefined;
+        if (boot.retrack) {
           log(`alerts: "${a.id}" re-tracked across a restart — not counting a rise (condition predates this process)`);
-        } else {
+          if (counts) rollupScope = 'retrack';
+        } else if (counts) {
           recordRise(a, now);
+          rollupScope = 'rise';
         }
         // v0.15.21 — an alert already pushed (recorded in notify-state.json) must
         // not re-push when it "rises" again here: analytics warm-up re-deriving
@@ -2487,16 +3096,17 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // far from any restart. The suppression ACTION is unchanged.
         const rec = persistedNotified.get(a.id);
         const alreadyNotified = rec != null;
-        if (alreadyNotified && !firstRun) {
+        if (alreadyNotified && !boot.seedAsBoot) {
           log(`notify: "${a.title}" already has a notification on record (notify-state) — suppressing duplicate push`);
         }
         // v0.83.0 — outage EVENTs are NOT firstRun-seeded (see bootSeedNotified),
         // so a restart-spanning outage recorded before the monitor starts still
         // fires its push on the boot that follows it, instead of being swallowed.
-        const seeded = bootSeedNotified({ alert: a, firstRun, alreadyNotified });
+        const seeded = bootSeedNotified({ alert: a, firstRun: boot.seedAsBoot, alreadyNotified });
         tracked.set(a.id, {
           alert: a,
           openingAlert: { ...a },   // v1.123.0 — frozen at raisedAt
+          rollupScope,              // v1.186.0 — whether this episode's clear feeds the auto-tune
           // v1.130.0 — carry the restored hold onto the tracked entry, so the 06:00
           // digest's `pending` filter can see that this alert is still held even
           // though THIS process never queued it. Without it a quiet-hours hold
@@ -2671,6 +3281,10 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       }
     }
 
+    // v1.186.0 — the tick's dispatches are decided; the new alerts' feature snapshots run
+    // detached from here (captureFeaturesDetached) and nothing below waits on them.
+    for (const a of featureCaptures) void captureFeaturesDetached(a, snap, now);
+
     // Morning digest — fires once when the local hour rolls over to DIGEST_HOUR
     if (Number.isInteger(DIGEST_HOUR) && DIGEST_HOUR >= 0 && DIGEST_HOUR <= 23) {
       const h = nowDate.getHours();
@@ -2829,7 +3443,14 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     // so its true first-seen survives a flap instead of being pruned + re-stamped
     // with a later time. The sidecar persists these across a restart so the ALM
     // screen can show the real onset instead of the per-refresh generatedAt stamp.
-    syncAlertOnsets(new Set(tracked.keys()), now);
+    // v1.186.0 — no pruning while a feed is cold: its alerts are unknown, not cleared, and
+    // pruning would erase the pre-restart onset their first delivery re-tracks against.
+    // Bounded by the same warm-up window as the learned grace: a feed that has not
+    // delivered by then is broken, and onsets left unpruned for good would stretch every
+    // later episode of those ids (and read as long-active to the auto-tune).
+    // v1.186.0 — scoped per id: a worker-served id waits for ITS feed; a live-snapshot id is
+    // pruned once the store is hydrated (its absence is then evidence).
+    syncAlertOnsets(new Set(tracked.keys()), now, { prune: now - bootMs >= LEARNED_RESOLVE_GRACE_MS ? true : onsetPrunable });
 
     // v1.3.0 (audit rank 2) — retire notified-records orphaned by a restart. Runs ONCE per
     // boot, and only after the engine is warm, so a cold analytics worker can never look
@@ -2855,6 +3476,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         }
       } else {
       quietHoldLogged = false;
+      // v1.186.0 — "warm" is now EVIDENCE, not only a 10-minute guess. The tick no longer
+      // waits for the worker, so until every alert feed has delivered once, an id it owns
+      // is absent because nobody has computed it, and the sweep would resolve it
+      // ("Resolved: … cleared while the add-on was restarting") on no evidence. Such
+      // orphans are HELD through the same unevaluable leg as an offline source: resolved
+      // once the feeds deliver, dropped silently at the hold deadline, never resolved blind.
+      const feedsCold = !alertFeedsWarm();
+      if (feedsCold && !orphanFeedHoldLogged) {
+        orphanFeedHoldLogged = true;
+        const cold = alertFeeds.filter((f) => !f.warm()).map((f) => f.name).join(', ');
+        log(`notify: orphan resolves held — alert feed(s) ${cold} have not delivered since boot; an alert they own is unknown, not cleared`);
+      }
       const { resolve, drop, hold } = orphanedNotifiedIds({
         persisted: persistedNotified,
         currentIds,
@@ -2866,7 +3499,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         // v1.140.0 — S2: the same evidence gate the steady-state falling edge
         // uses. An id whose source device is absent or stale did not "clear" —
         // it became unobservable.
-        unevaluable: (id, rec) => fallingEdgeFrozenByEvidence({
+        unevaluable: (id, rec) => coldFeedOwns(id) || fallingEdgeFrozenByEvidence({
           id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now, sourceSn: rec.sourceSn,
         }),
       });
@@ -2879,7 +3512,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         if (heldOrphanLogged.has(id)) continue;
         heldOrphanLogged.add(id);
         const r = persistedNotified.get(id);
-        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${r?.sourceSn ?? 'source'} offline/stale; not a recovery)`);
+        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${coldFeedOwns(id) ? 'alert feeds not yet delivered' : `${r?.sourceSn ?? 'source'} offline/stale`}; not a recovery)`);
       }
       for (const id of resolve) heldOrphanLogged.delete(id);
       for (const id of drop) heldOrphanLogged.delete(id);
@@ -2890,7 +3523,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
         persistedNotified.delete(id);
         const title = rec.title ?? id;
         try {
-          await sendNotification(cfg, {
+          await send(cfg, {
             title: `EcoFlow · Resolved: ${title}`,
             body: `${title}\n\n(condition cleared while the add-on was restarting)`,
             severity: 'resolved',
@@ -2918,6 +3551,7 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     }
 
     firstRun = false;
+    evalPasses++; // v1.186.0
   };
 
   // v0.9.59 — hydrate the in-memory telemetry rollup from the persisted
@@ -2935,13 +3569,18 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
     evaluate().catch((e) => warn(`alert-monitor: ${e?.message ?? e}`));
   }, EVAL_INTERVAL_MS);
   timer.unref();
+  // v1.186.0 — the first evaluation runs the moment the store hydrates, or at the bound.
+  const onHydrated = (): void => { evaluate().catch((e) => warn(`alert-monitor: ${e?.message ?? e}`)); };
+  store.once('hydrated', onHydrated);
+  const hydrationTimer = setTimeout(() => { hydrationBoundReached = true; onHydrated(); }, Math.max(0, hydrationMaxMs));
+  hydrationTimer.unref();
 
   return {
-    stop: () => clearInterval(timer),
+    stop: () => { clearInterval(timer); clearTimeout(hydrationTimer); store.off('hydrated', onHydrated); },
     getConfig: () => cfg,
     sendTest: async () => {
       cfg = loadNotifyConfig();
-      await sendNotification(cfg, {
+      await send(cfg, {
         title: 'EcoFlow · Test notification',
         body: 'Notifications are working. This is a test from the EcoFlow panel.',
         severity: 'info',
@@ -2951,7 +3590,13 @@ export function startAlertMonitor(store: SnapshotStore, recorder: Recorder, log:
       });
       sentSinceStart++;
     },
-    stats: () => ({ tracked: tracked.size, sentSinceStart, quietQueued: quietQueue.length }),
+    stats: () => ({
+      tracked: tracked.size,
+      sentSinceStart,
+      quietQueued: quietQueue.length,
+      evalPasses,
+      alertFeeds: alertFeeds.map((f) => f.status()),
+    }),
     activeAlertIds: () => [...tracked.keys()],
     history: () => [...clearedLog],
     incidents: () => [...currentIncidents],

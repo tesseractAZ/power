@@ -55,7 +55,12 @@ test('★ the exemption can only ever SUPPRESS a phantom, never a real rise', ()
 const AM = readFileSync(resolve(import.meta.dirname, '../src/alertMonitor.ts'), 'utf8');
 
 test('recordRise is actually gated on the predicate', () => {
-  assert.match(AM, /if \(isBootRetrack\(\{ firstRun, priorOnsetMs: getAlertOnset\(a\.id\), bootMs \}\)\) \{/);
+  // v1.186.0 — reached through bootRetrackDecision, which wraps isBootRetrack and extends
+  // the first run to an alert feed's first delivery (the tick no longer waits for the
+  // worker, so a worker-served alert can first appear after tick 1).
+  // v1.186.0 — and to the first pass after a late hydration (the boot gate opened on its bound).
+  assert.match(AM, /const boot = bootRetrackDecision\(\{\s*firstRun, firstFeedDelivery: firstDeliveryIds\.has\(a\.id\) \|\| lateHydrationPass, priorOnsetMs: getAlertOnset\(a\.id\), bootMs,\s*\}\);/);
+  assert.match(AM, /if \(boot\.retrack\) \{/);
   assert.match(AM, /re-tracked across a restart — not counting a rise/);
 });
 

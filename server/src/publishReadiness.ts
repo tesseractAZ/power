@@ -16,8 +16,9 @@
  * dip read as a meter reset and the day's curtailment was counted again (8 times since 09-01).
  *
  * Each group names the fields that share one readiness condition; a field is nulled only
- * while its own data is missing, so nothing is held back that is real — alarm counts publish
- * the moment the monitor has run, even while the analytics worker is still cold.
+ * while its own data is missing, so nothing is held back that is real. v1.186.0 — alarm counts
+ * publish once the monitor's set is complete (a hydrated store, every alert feed delivered),
+ * or at its bound (ALERT_COUNTS_READY_MAX_MS) when a feed never delivers.
  */
 
 import type { DeviceSnapshot } from './snapshot.js';
@@ -33,7 +34,10 @@ export interface PublishReadiness {
   flow: boolean;
   /** The panel has a projection with at least one reported channel. */
   panel: boolean;
-  /** The alarm monitor has evaluated at least once (snapshot.alerts set). */
+  /** v1.186.0 — the alarm monitor's set is COMPLETE (snapshot.alertsComplete): a pass on a
+   *  hydrated store with every worker/NWS feed delivered, or its bound passed. `alerts` merely
+   *  set is not enough: the first publish carries only the live alarms, and counts taken from
+   *  it went X → 0 → X across a restart (the v1.178.0 dip this gate exists to remove). */
   alerts: boolean;
   /** The audible-health probe has run at least once. */
   speakers: boolean;
@@ -78,6 +82,8 @@ type Projected = { sn?: string; online?: boolean; projection?: { kind?: string; 
 export interface ReadinessInputs {
   devices: Record<string, Projected>;
   alerts: unknown[] | undefined;
+  /** v1.186.0 — FleetSnapshot.alertsComplete; absent reads as not complete. */
+  alertsComplete?: boolean;
   speakerLastProbeAt: number | null | undefined;
   forecast: { pvForecastUnavailable?: boolean } | null | undefined;
   clipping: { arrayPeakW?: number | null } | null | undefined;
@@ -97,7 +103,7 @@ export function publishReadiness(i: ReadinessInputs): PublishReadiness {
   return {
     flow: membershipKnown && Object.entries(i.devices).some(([sn, d]) => d.online && d.projection?.kind === 'dpu' && isShp2Connected(d.sn ?? sn, connected)),
     panel: !!panel && (panel.projection?.circuits ?? []).some((c) => c.watts != null),
-    alerts: i.alerts !== undefined,
+    alerts: i.alerts !== undefined && i.alertsComplete === true,
     speakers: i.speakerLastProbeAt != null,
     forecastPv: !!i.forecast && i.forecast.pvForecastUnavailable !== true,
     clipping: (i.clipping?.arrayPeakW ?? 0) > 0,

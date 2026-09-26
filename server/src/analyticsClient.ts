@@ -24,6 +24,10 @@ export interface AnalyticsClient {
   listMetrics(sn: string): Promise<string[]>;
   /** Hand the worker the latest snapshot (throttled internally). */
   pushSnapshot(snap: FleetSnapshot): void;
+  /** v1.186.0 — post the latest snapshot NOW, unthrottled (the store just hydrated: the alert
+   *  monitor's first reports follow, and must be computed on every Core the first poll
+   *  projected, not on the partial map of the first quota to land). */
+  flushSnapshot(): void;
   /** v1.119.0 — publish the OWNER reserve floor to the worker. Module-level
    *  publishers do NOT cross a worker boundary: v1.115.0 set one on the main
    *  thread and analytics.ts read it inside the worker, where it was always
@@ -36,6 +40,34 @@ export interface AnalyticsClient {
 const REQUEST_TIMEOUT_MS = 30_000;
 const SNAPSHOT_PUSH_MS = 750;
 const RESPAWN_DELAY_MS = 1_000;
+/** v1.186.0 — how long a report request waits for the worker's first snapshot with projections.
+ *  The first alert evaluation and the connect-time HA publish ran ~0.2-0.8 s after boot,
+ *  before the first poll, against a worker whose device map was empty; their empty results
+ *  were then served from the 20 s cache here. The first poll normally lands within a second;
+ *  past this bound the request goes ahead exactly as before (an honest empty report). */
+const FIRST_SNAPSHOT_WAIT_MS = 5_000;
+
+/** v1.186.0 — the slice of worker_threads.Worker the client uses (a test seam). */
+export interface AnalyticsWorkerLike {
+  on(event: 'message' | 'error' | 'exit', listener: (arg: any) => void): unknown;
+  postMessage(msg: unknown): void;
+  terminate(): unknown;
+}
+
+export interface AnalyticsClientOptions {
+  /** Build the worker. Default: the real analytics worker thread. */
+  spawnWorker?: () => AnalyticsWorkerLike;
+  requestTimeoutMs?: number;
+  firstSnapshotWaitMs?: number;
+}
+
+/** v1.186.0 — a snapshot the worker can compute on: some device carries a PROJECTION. The first
+ *  'change' at boot is the device list, every device without a projection; a gate that opened on
+ *  it let the first alert-feed reports run on that map, return [] (every producer skips a device
+ *  with no projection) and spend each feed's one-shot boot re-track on the empty answer. The same
+ *  test the worker's own report caches use before caching a result. */
+const snapHasProjections = (s: FleetSnapshot | null): boolean =>
+  !!s && Object.values(s.devices ?? {}).some((d) => d?.projection != null);
 
 // v0.90.0 — main-thread coalesce + short TTL cache for report() results. A
 // dashboard poll fans out ~9 concurrent report() calls (/api/ha-state,
@@ -98,8 +130,14 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
-export function createAnalyticsClient(dbPath: string, log: (m: string) => void): AnalyticsClient {
-  let worker: Worker;
+export function createAnalyticsClient(
+  dbPath: string,
+  log: (m: string) => void,
+  opts: AnalyticsClientOptions = {},
+): AnalyticsClient {
+  const requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const firstSnapshotWaitMs = opts.firstSnapshotWaitMs ?? FIRST_SNAPSHOT_WAIT_MS;
+  let worker: AnalyticsWorkerLike;
   let stopped = false;
   let nextId = 1;
   const pending = new Map<number, Pending>();
@@ -109,19 +147,59 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
   let lastSnapshot: FleetSnapshot | null = null;
   let lastOwnerFloor: number | null = null;
   let dirty = false;
+  // v1.186.0 — the CURRENT worker holds a snapshot with devices (reset on every spawn).
+  let workerFed = false;
+  // v1.186.0 — the one boot wait for a first snapshot has been paid (fed, or timed out).
+  let gateOpen = false;
+  let gateTimer: NodeJS.Timeout | null = null;
+  let gateWaiters: Array<() => void> = [];
 
   // Spawn the .mjs bootstrap (loads natively), which registers tsx's loader
   // in the worker thread and then imports the real .ts worker. See
   // analyticsWorkerBootstrap.mjs — `execArgv: ['--import','tsx']` was not
   // enough on the container's tsx version.
   const workerUrl = new URL('./analyticsWorkerBootstrap.mjs', import.meta.url);
+  const spawnWorker = opts.spawnWorker ?? ((): AnalyticsWorkerLike => new Worker(workerUrl, { workerData: { dbPath } }));
+
+  const postSnapshot = () => {
+    if (!lastSnapshot) return;
+    dirty = false;
+    try {
+      worker.postMessage({ kind: 'snapshot', snapshot: lastSnapshot });
+      if (snapHasProjections(lastSnapshot)) workerFed = true;
+    } catch { /* worker mid-respawn; replayed on ready */ }
+  };
+  const openGate = () => {
+    gateOpen = true;
+    if (gateTimer) { clearTimeout(gateTimer); gateTimer = null; }
+    const waiters = gateWaiters;
+    gateWaiters = [];
+    for (const w of waiters) w();
+  };
+  // v1.186.0 — resolves once the worker holds a snapshot with projections. Messages to the worker
+  // are delivered in order, so a snapshot posted here is applied before the request that
+  // follows it. With no devices anywhere yet, waits for the first poll up to
+  // firstSnapshotWaitMs (once per process), then lets the request through unchanged.
+  const awaitFirstSnapshot = (): Promise<void> => {
+    if (workerFed) return Promise.resolve();
+    if (snapHasProjections(lastSnapshot)) { postSnapshot(); return Promise.resolve(); }
+    if (gateOpen) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      gateWaiters.push(resolve);
+      if (!gateTimer) {
+        gateTimer = setTimeout(openGate, firstSnapshotWaitMs);
+        (gateTimer as any).unref?.();
+      }
+    });
+  };
 
   const spawn = () => {
-    worker = new Worker(workerUrl, { workerData: { dbPath } });
+    worker = spawnWorker();
+    workerFed = false;
     worker.on('message', (msg: any) => {
       if (msg?.kind === 'log') { log(msg.message); return; }
       if (msg?.kind === 'ready') {
-        if (lastSnapshot) { try { worker.postMessage({ kind: 'snapshot', snapshot: lastSnapshot }); } catch { /* */ } }
+        if (lastSnapshot) postSnapshot();
         // v1.119.0 — a respawned worker starts with no owner floor; replay it
         // or the runway alarm silently reverts to reading the device value.
         try { worker.postMessage({ kind: 'ownerFloor', pct: lastOwnerFloor }); } catch { /* */ }
@@ -154,40 +232,60 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
 
   spawn();
 
-  const request = <T>(payload: Record<string, unknown>): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-      const id = nextId++;
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error(`analytics request '${payload.kind}${payload.name ? ':' + payload.name : ''}' timed out`));
-      }, REQUEST_TIMEOUT_MS);
-      pending.set(id, { resolve, reject, timer });
-      try {
-        worker.postMessage({ ...payload, id });
-      } catch (e: any) {
-        clearTimeout(timer);
-        pending.delete(id);
-        reject(e instanceof Error ? e : new Error(String(e)));
-      }
-    });
-
   // v0.15.18 — one retry on timeout. Every analytics 500 in the 50 h log
   // window fell inside ~2.5 min of a boot (cold worker, first heavy 7-day
   // scans), and a single retry rides out the warm-up instead of surfacing a
   // transient 500 to dashboards and internal feeds.
+  // v1.186.0 — the retry JOINS the computation it timed out on instead of racing it. The worker
+  // is never told a request was abandoned, so the first attempt is still computing when the
+  // retry lands: the retry carries the identical name + args, which the worker's single-flight
+  // (reports.ts buildReport) joins, and the first attempt stays answerable here — whichever
+  // answer arrives first settles the caller. Before, the first attempt's late answer was
+  // dropped and the retry started a second full scan (log 2026-09-23 12:59: that retry timed
+  // out too, and two HA state publishes were lost with it).
   const requestWithRetry = <T>(payload: Record<string, unknown>): Promise<T> =>
-    request<T>(payload).catch((e: unknown) => {
-      if (e instanceof Error && e.message.includes('timed out') && !stopped) {
-        log(`analytics: '${String(payload.kind)}${payload.name ? ':' + String(payload.name) : ''}' timed out — retrying once`);
-        return request<T>(payload);
-      }
-      throw e;
+    new Promise<T>((resolve, reject) => {
+      if (stopped) { reject(new Error('analytics client stopped')); return; }
+      const label = `${String(payload.kind)}${payload.name ? ':' + String(payload.name) : ''}`;
+      const ids: number[] = [];
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        for (const id of ids) {
+          const p = pending.get(id);
+          if (p) { clearTimeout(p.timer); pending.delete(id); }
+        }
+        fn();
+      };
+      const attempt = (retry: boolean) => {
+        const id = nextId++;
+        ids.push(id);
+        const timer = setTimeout(() => {
+          if (!retry && !stopped) {
+            log(`analytics: '${label}' timed out — retrying once`);
+            attempt(true);
+            return;
+          }
+          settle(() => reject(new Error(`analytics request '${label}' timed out`)));
+        }, requestTimeoutMs);
+        pending.set(id, {
+          resolve: (v) => settle(() => resolve(v)),
+          reject: (e) => settle(() => reject(e)),
+          timer,
+        });
+        try {
+          worker.postMessage({ ...payload, id });
+        } catch (e: any) {
+          settle(() => reject(e instanceof Error ? e : new Error(String(e))));
+        }
+      };
+      attempt(false);
     });
 
   const pushTimer = setInterval(() => {
     if (!dirty || !lastSnapshot) return;
-    dirty = false;
-    try { worker.postMessage({ kind: 'snapshot', snapshot: lastSnapshot }); } catch { /* worker mid-respawn */ }
+    postSnapshot();
   }, SNAPSHOT_PUSH_MS);
   (pushTimer as any).unref?.();
 
@@ -208,7 +306,9 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
       //    promise (starter + coalesced awaiters) clones it, so no caller shares a
       //    mutable ref. Rejections are NOT cached (no negative caching) and free the
       //    coalesce slot so the next call re-tries the worker.
-      const p = requestWithRetry<T>({ kind: 'report', name, args: a })
+      //    v1.186.0 — never ahead of the worker's first snapshot (awaitFirstSnapshot).
+      const p = awaitFirstSnapshot()
+        .then(() => requestWithRetry<T>({ kind: 'report', name, args: a }))
         .then((v) => {
           if (ttl > 0) reportCache.set(key, { value: v, expiresAt: Date.now() + ttl });
           return v;
@@ -220,7 +320,14 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
     query: (sn, metric, sinceMs, untilMs, bucketSec) =>
       requestWithRetry({ kind: 'query', sn, metric, sinceMs, untilMs, bucketSec }),
     listMetrics: (sn) => requestWithRetry({ kind: 'listMetrics', sn }),
-    pushSnapshot: (snap) => { lastSnapshot = snap; dirty = true; },
+    pushSnapshot: (snap) => {
+      lastSnapshot = snap;
+      dirty = true;
+      // v1.186.0 — the first snapshot with projections goes to the worker NOW, not on the next
+      // 750 ms throttle tick, and releases any report waiting on it.
+      if (!workerFed && snapHasProjections(snap)) { postSnapshot(); openGate(); }
+    },
+    flushSnapshot: () => { if (snapHasProjections(lastSnapshot)) { postSnapshot(); openGate(); } },
     pushOwnerFloor: (pct) => {
       if (pct === lastOwnerFloor) return;      // idempotent; changes are rare
       lastOwnerFloor = pct;
@@ -229,6 +336,7 @@ export function createAnalyticsClient(dbPath: string, log: (m: string) => void):
     stop: () => {
       stopped = true;
       clearInterval(pushTimer);
+      openGate();
       for (const [, p] of pending) { clearTimeout(p.timer); p.reject(new Error('analytics client stopped')); }
       pending.clear();
       reportCache.clear();
@@ -251,6 +359,11 @@ export function initAnalyticsClient(dbPath: string, log: (m: string) => void): A
   if (singleton) return singleton;
   singleton = createAnalyticsClient(dbPath, log);
   return singleton;
+}
+
+/** Test-only seam (v1.186.0): install a stand-in client for code that reaches getAnalytics(). */
+export function setAnalyticsClientForTesting(c: AnalyticsClient | null): void {
+  singleton = c;
 }
 
 export function getAnalytics(): AnalyticsClient {

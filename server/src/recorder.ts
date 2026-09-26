@@ -549,6 +549,15 @@ export interface NightLedgerRow {
   // engine-fault strike (physics, not fault). NULL on pre-v1.50.0 rows —
   // treated as NOT disclosed (fail-closed: still strike-eligible).
   cushion_shortfall: number | null;
+  /** v1.186.0 — the trough the plan's CUSHION TEST was judged on and the line it was
+   *  tested against, % of pool (NightChargePlan.cushionTroughSocPct /
+   *  cushionLineSocPct). plan_traj_floor_breached is graded on these. NULL on a null
+   *  plan and on every row written before v1.186.0, whose verdict was graded on
+   *  min_proj_soc_pct — since v1.125.0 the whole-house DISCLOSURE trough, not the
+   *  trough the plan was sized against (the readiness gate sets those verdicts aside;
+   *  see nightChargeGate.ts). */
+  cushion_trough_soc_pct: number | null;
+  cushion_line_soc_pct: number | null;
 
   // ── OUTCOME (NULL until ~21:30 next evening) ──
   outcome_captured_at_ms: number | null;
@@ -588,7 +597,8 @@ export interface NightLedgerRow {
   cost_ceiling_basis: string | null;
   /** v1.174.0 — 'p50' | 'p90' | 'none': which morning surplus the cost ceiling left room
    *  for ('none' = set aside by the long-gap rule, or unknown). NULL in resilience mode
-   *  and on rows written before v1.174.0. */
+   *  and on rows written before v1.174.0. v1.186.0 — 'p10': a long-gap night that kept the
+   *  pessimistic pre-peak surplus as headroom. */
   cost_surplus_basis: string | null;
   /** v1.174.0 — 0/1: the long-gap (Thursday) rule set the ceiling to the SoC cap. NULL
    *  in resilience mode and before v1.174.0. */
@@ -666,6 +676,8 @@ const NIGHT_LEDGER_COLUMNS: readonly (keyof NightLedgerRow)[] = [
   'would_have_peak_imported',
   // v1.174.0 — the cost ceiling's provenance, and the panel's age at plan time.
   'cost_surplus_basis', 'cost_long_gap', 'cost_ceiling_soc_pct', 'panel_sample_age_s',
+  // v1.186.0 — the trough and line the plan-trajectory verdict is graded on.
+  'cushion_trough_soc_pct', 'cushion_line_soc_pct',
   'arm_disposition', 'cost_ceiling_basis',
 ];
 const NIGHT_LEDGER_COLUMN_SET = new Set<string>(NIGHT_LEDGER_COLUMNS as readonly string[]);
@@ -888,6 +900,8 @@ export function createRecorder(
     'arm_disposition TEXT', 'cost_ceiling_basis TEXT',
     // v1.174.0 — see NightLedgerRow.
     'cost_surplus_basis TEXT', 'cost_long_gap INTEGER', 'cost_ceiling_soc_pct REAL', 'panel_sample_age_s REAL',
+    // v1.186.0 — see NightLedgerRow.cushion_trough_soc_pct.
+    'cushion_trough_soc_pct REAL', 'cushion_line_soc_pct REAL',
   ]) {
     try {
       db.exec(`ALTER TABLE night_charge_ledger ADD COLUMN ${col}`);

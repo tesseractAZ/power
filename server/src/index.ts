@@ -36,6 +36,7 @@ import {
   forceChargeRateKw, FORCE_CHARGE_PLAN_RATE_KW, shp2HouseLoadKw, FORCE_CHARGE_MIN_RATE_KW, planChargeCapKw,
   evDisplacedPackKwh,
   FORCE_CHARGE_PROVEN_KW_PER_SLOT,
+  FORCE_CHARGE_ON_VERIFY_AFTER_MS, FORCE_CHARGE_ON_MAX_RETRIES, FORCE_CHARGE_ON_RETRY_CUTOFF_MS, forceChargeOnVerifyStatus,
 } from './nightForceCharge.js';
 import {
   extractSettingsSurface, evaluateDrift, freshDriftState, classifyChange,
@@ -172,7 +173,7 @@ import {
   nightChargeStateFields,
   buildNightChargeInputs,
   computeNightChargePlan,
-  resolveCheapWindow, nextFullCheapWindow, longGapAhead,
+  resolveCheapWindow, nextFullCheapWindow, longGapAhead, pessimisticPrePeakSurplus,
   scoreNightOutcome,
   nightWindowBounds,
   medianFilter3,
@@ -648,6 +649,9 @@ app.log.info(`recorder: createRecorder returned after ${Math.round(performance.n
 // self-warms its report caches, so the old main-thread cache-warmer is gone.
 const analytics = initAnalyticsClient(resolve(process.cwd(), config.dbPath), (m) => app.log.info(m));
 store.on('change', (snap) => analytics.pushSnapshot(snap));
+// v1.186.0 — the first poll settled: the worker gets the hydrated map before the alert monitor's
+// first reports (registered before startAlertMonitor, and a report posts in a later microtask).
+store.on('hydrated', () => analytics.flushSnapshot());
 
 app.get('/api/snapshot', async () => snapshotForClient());
 // v1.69.0 — /api/health used to return a hardcoded `ok: true`. On 2026-08-04 the
@@ -1791,6 +1795,7 @@ app.get('/api/ha-state', async (req, reply) => {
   withholdUnready(payload as Record<string, unknown>, publishReadiness({
     devices: snap.devices,
     alerts: snap.alerts,
+    alertsComplete: snap.alertsComplete, // v1.186.0
     speakerLastProbeAt: getBroadcastHealth().lastProbeAt,
     forecast: fc,
     clipping,
@@ -3665,6 +3670,20 @@ async function recomputeNightChargePlan(
     window,
     window ? nextFullCheapWindow(periodIdAt, window.endMs, NIGHT_CHEAP_PERIOD_ID) : null,
   );
+  // v1.186.0 — the PESSIMISTIC (P10) surplus from window close to the evening on-peak
+  // start: the headroom a long-gap night keeps (null ⇒ set aside, the full buy stands).
+  const prePeakP10Hours: Array<{ ts: number; p10W: number; loadW: number }> = [];
+  for (const pb of prob?.hours ?? []) {
+    const fh = dayAheadByEpoch.get(Math.floor(pb.ts / HOUR_MS));
+    if (fh) prePeakP10Hours.push({ ts: pb.ts, p10W: pb.p10W, loadW: fh.forecastLoadW });
+  }
+  const prePeakPvSurplusP10Kwh = window
+    ? pessimisticPrePeakSurplus({
+      hours: prePeakP10Hours,
+      windowEndMs: window.endMs,
+      isOnPeakAt: (ts) => rateAt(tariffModel, ts).isOnPeak,
+    }).kwh
+    : null;
 
   // Committed-EV worst case: next predicted session start (>= now-hour), the p90
   // session energy, and the observed session count (tail-sufficiency).
@@ -3718,7 +3737,7 @@ async function recomputeNightChargePlan(
     ev, evMaxLoadW,
     confidenceTier, forecastPresent, calScoredDays, minCalScoredDays: NIGHT_MIN_CAL_DAYS, bandCoverageFrac,
     morningPvSurplusP90Kwh, minBuyKwh,
-    morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead,
+    morningPvSurplusP50Kwh, longGapAhead: nightLongGapAhead, prePeakPvSurplusP10Kwh,
     buyDebiasFactor: buyDebiasCal.factor,
     buyDebiasBasis: buyDebiasCal.basis,
     buyDebiasSamples: buyDebiasCal.samples,
@@ -3865,6 +3884,12 @@ function recordNightPlanRow(planDate: string, plan: NightChargePlan, extras: Nig
     // v1.50.0 — the plan-time cushionShortfall disclosure (§5.1 strike
     // exemption: a disclosed shortfall is physics, not engine fault).
     cushion_shortfall: plan.cushionShortfall ? 1 : 0,
+    // v1.186.0 — the trough the cushion test judged and its line: what the scorer
+    // grades plan_traj_floor_breached on. Written UNCONDITIONALLY (null on a null plan)
+    // so a later plan of record can never leave an earlier plan's trough beside its own
+    // cushion_shortfall.
+    cushion_trough_soc_pct: plan.cushionTroughSocPct ?? null,
+    cushion_line_soc_pct: plan.cushionLineSocPct ?? null,
   };
   // Only a plan with a real trajectory records min_proj_soc — a null-basis /
   // insufficient plan leaves it NULL so the scorer recognises "no basis".
@@ -4227,6 +4252,10 @@ function scoreNightRow(
     minProjSocPct: y.min_proj_soc_pct ?? null,
     minProjSocTsMs: y.min_proj_soc_ts_ms ?? null,
     baselineMinSocPct: null,
+    // v1.186.0 — the plan-trajectory verdict is graded on these; a row planned before
+    // v1.186.0 has neither, and its verdict is then null (unknown), not "held".
+    cushionTroughSocPct: y.cushion_trough_soc_pct ?? null,
+    cushionLineSocPct: y.cushion_line_soc_pct ?? null,
     projSocAtWindowStartPct: y.soc_at_window_start_pct ?? null,
     preWindowMinSocPct: null,
     confidenceTier: y.confidence_tier as NightChargePlan['confidenceTier'],
@@ -5140,6 +5169,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     : sources.filter((c) => c?.forceCharge === 'FORCE_CHARGE_ON').map((c) => Number(c.slot)).filter(Number.isInteger);
   const connectedSlots = (sources ?? [])
     .filter((c) => c?.hwConnect === true).map((c) => Number(c.slot)).filter(Number.isInteger);
+  // v1.186.0 — each slot's Core SoC from the SAME fresh readback, for the ON verify's
+  // at-the-ceiling exemption. A stale readback gives none (sources is null).
+  const slotSocPct: Record<number, number | null> | null = sources == null ? null
+    : Object.fromEntries(sources
+      .filter((c) => Number.isInteger(Number(c?.slot)))
+      .map((c) => [Number(c.slot), typeof c?.batteryPercentage === 'number' && Number.isFinite(c.batteryPercentage) ? c.batteryPercentage : null]));
   const fullWh: number | null = sp?.backupFullCapWh ?? null;
   const socNowPct: number | null = sp?.backupBatPercent ?? null;
   const remainWh: number | null = sp?.backupRemainWh ?? null;
@@ -5184,6 +5219,7 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     gridStaLost: sp != null && typeof sp.gridSta === 'number' && sp.gridSta !== 1,
     slotsOn,
     connectedSlots,
+    slotSocPct, // v1.186.0 — the ON verify's at-the-ceiling exemption
     vitalsRed: currentAssessment()?.level === 'crit',
     socCoherent,
     ceilingReadbackPct: typeof sp?.forceChargeCeilingSoc === 'number' ? sp.forceChargeCeilingSoc : null,
@@ -5254,10 +5290,16 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     // then never orphan a force-charge — the OFF covers every slot attempted.
     persistNightActuation({ ...nightActuationMem, forceChargeOnAtMs: nowMs, forceChargeSlots: action.slots });
     const results: string[] = [];
+    let rejected = 0;
     for (const slot of action.slots) {
       const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge' } });
+      if (r.outcome !== 'success') rejected++;
       results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
     }
+    // v1.186.0 — the ON-verify grace runs from when the writes FINISHED, not from the stamp
+    // above: each slot's cooldown starts when its own write goes out, so slow PUTs measured
+    // from the stamp let the one re-issue land inside a later slot's cooldown, rate-limited.
+    persistNightActuation({ ...nightActuationMem, forceChargeOnLastAttemptMs: Date.now() });
     const slotsNow = connectedSlots.filter((n) => n >= 1 && n <= 3).length;
     const unboundedKw = gridCapKw != null ? (gridCapKw - Math.max(0, houseLoadKw ?? 0)) * Math.sqrt(DISPATCH_ROUND_TRIP_EFFICIENCY) : null;
     const rateNote = (chargeRateKw != null
@@ -5266,7 +5308,72 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
         : `timed at ~${chargeRateKw.toFixed(1)} kW (grid cap ${gridCapKw} kW less the house's ${Math.max(0, houseLoadKw ?? 0).toFixed(1)} kW, through the charge leg, floored at 1 kW)`)
       : `timed at the fixed ${FORCE_CHARGE_PLAN_RATE_KW} kW fallback (${gridCapKw == null ? 'no grid-input cap configured' : 'no live house load'})`)
       + (evDisplacedKwh != null && evDisplacedKwh > 0 ? `, plus ~${evDisplacedKwh.toFixed(1)} kWh the predicted EV will take` : '');
-    app.log.info(`night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable.`);
+    // v1.186.0 — a rejected ON is no longer an info-level footnote: it is verified by
+    // readback like an accepted one, re-issued once, then warned about.
+    const onLine = `night-charge: FORCE-CHARGE ON for ${state.day} — ${results.join(', ')}; just in time to reach ${state.forceChargeCeilingPct}% by the window close (${new Date(state.windowEndMs!).toISOString()}), ${rateNote} — stops at the target, with the panel's ${desiredForceChargeCeilingPct(state.forceChargeCeilingPct!)}% ceiling as the backstop. Also OFF on window end, cancel, revert, grid loss or disable. Verifying ON by readback${rejected > 0 ? ` (${rejected} write(s) REJECTED — re-issued once if the slot does not read ON within ${Math.round(FORCE_CHARGE_ON_VERIFY_AFTER_MS / 60_000)} min)` : ''}.`;
+    if (rejected > 0) app.log.warn(onLine); else app.log.info(onLine);
+    return;
+  }
+
+  if (action.kind === 'onVerified') {
+    persistNightActuation({ ...nightActuationMem, forceChargeOnVerifiedAtMs: nowMs });
+    const on = (state.forceChargeSlots ?? []).filter((n) => !action.atCeiling.includes(n));
+    app.log.info(`night-charge: force-charge ON VERIFIED by device readback for ${state.day} — slot(s) ${on.join(',') || 'none'} read FORCE_CHARGE_ON${action.atCeiling.length > 0 ? `; slot(s) ${action.atCeiling.join(',')} already at the panel's ceiling (switched off by the panel itself)` : ''}${state.forceChargeOnFailedAtMs != null ? ' (after the warning — it applied late)' : ''}.`);
+    return;
+  }
+
+  if (action.kind === 'onRetry') {
+    const blocked = multiPanelWriteBlock();
+    if (blocked) { app.log.warn(`night-charge: force-charge ON re-issue refused — ${blocked}`); return; }
+    // Write-ahead, as for the ON: the re-issue is spent BEFORE the writes, whatever the
+    // cloud answers, so a cloud that keeps refusing ends in the warning, not a loop.
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeOnRetries: nightActuationMem.forceChargeOnRetries + 1,
+      forceChargeOnLastAttemptMs: nowMs,
+    });
+    const results: string[] = [];
+    let limited = 0;
+    for (const slot of action.slots) {
+      const r = await setChannelForceCharge({ sn: shp2.sn, slot, on: true, source: { ua: 'night-force-charge-retry' } });
+      if (r.rateLimited === true) limited++;
+      results.push(`ch${slot} ${r.outcome === 'success' ? 'ok' : `${r.code}`}`);
+    }
+    // v1.186.0 — the next grace runs from when these writes FINISHED; a re-issue whose every
+    // write came back rate-limited never reached the panel, so it is handed back (the window-
+    // end cutoff in verifyForceChargeOn still bounds it: past that the warning goes instead).
+    const unspent = limited === action.slots.length;
+    persistNightActuation({
+      ...nightActuationMem,
+      forceChargeOnLastAttemptMs: Date.now(),
+      ...(unspent ? { forceChargeOnRetries: Math.max(0, nightActuationMem.forceChargeOnRetries - 1) } : {}),
+    });
+    if (unspent) results.push('all rate-limited — re-issue not counted');
+    app.log.warn(`night-charge: force-charge ON NOT APPLIED — slot(s) ${action.slots.join(',')} still read FORCE_CHARGE_OFF ${Math.round((nowMs - (state.forceChargeOnLastAttemptMs ?? state.forceChargeOnAtMs ?? nowMs)) / 60_000)}m after the ON; re-issuing ON (retry ${state.forceChargeOnRetries + 1}/${FORCE_CHARGE_ON_MAX_RETRIES}): ${results.join(', ')}.`);
+    return;
+  }
+
+  if (action.kind === 'onFailed') {
+    // v1.186.0 — the buy above the reserve is forfeited on these slots. A cost, not a
+    // safety, matter: the reserve write is verified on its own, and the OFF side (window
+    // end, deadline) runs exactly as before. Once per night — the marker survives a restart.
+    persistNightActuation({ ...nightActuationMem, forceChargeOnFailedAtMs: nowMs });
+    const all = state.forceChargeSlots == null || action.slots.length >= state.forceChargeSlots.length;
+    app.log.warn(`night-charge: force-charge ON NEVER TOOK EFFECT for ${state.day} — slot(s) ${action.slots.join(',')} still read FORCE_CHARGE_OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ` (none sent: under ${Math.round(FORCE_CHARGE_ON_RETRY_CUTOFF_MS / 60_000)} min of the window left, so the window-end OFF is never held behind one)` : ''}, and their Cores do not read at the panel's ceiling. Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve is forfeited${all ? '' : ' on those slot(s)'}; the reserve charge is unaffected, and the OFF at the window close still runs.`);
+    try {
+      await sendNotification(loadNotifyConfig(), {
+        severity: 'warning',
+        dedupId: 'night_charge_force_charge_on_failure',
+        title: 'Night-charge: force-charge did not take effect',
+        body:
+          `The night-charge for ${state.day} switched force-charge ("Charge Now") ON, but the Smart Home Panel 2 `
+          + `still reads slot(s) ${action.slots.join(', ')} OFF after ${state.forceChargeOnRetries} re-issue(s)${action.noRetry ? ' (too close to the window end to re-issue)' : ''}. `
+          + `Tonight's buy above the ${RESERVE_WRITE_MAX_PCT}% reserve (toward ${state.forceChargeCeilingPct ?? '—'}%) will not happen${all ? '' : ' on those slot(s)'}; `
+          + 'the reserve charge is unaffected. No action needed tonight — but if this repeats, check the SHP2 cloud link.',
+      });
+    } catch (e: any) {
+      app.log.warn(`night-charge: force-charge ON-failure notify failed (${e?.message ?? e})`);
+    }
     return;
   }
 
@@ -5295,7 +5402,12 @@ async function runForceChargeTick(opts: { forceDisabled?: boolean } = {}): Promi
     } else if (isRetry) {
       app.log.warn(`night-charge: force-charge still reads ON (slots ${action.slots.join(',')}) — re-issuing OFF${nightActuationMem.forceChargeOffEscalated ? ' (escalated; re-issued every 15 min until it reads OFF)' : ` (retry ${nightActuationMem.forceChargeOffRetries})`}: ${results.join(', ')}`);
     } else {
-      app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason === 'target' ? `reached the ${state.forceChargeCeilingPct}% target` : action.reason}) — ${results.join(', ')}; verifying by readback.`);
+      // v1.186.0 — an OFF over an ON no readback ever proved says so: a clean-looking
+      // "OFF VERIFIED" next is not evidence the night bought anything above the reserve.
+      const onNote = state.forceChargeOnVerifiedAtMs != null ? ''
+        : state.forceChargeOnFailedAtMs != null ? ' (the ON never took effect — see the earlier warning)'
+          : ' (the ON was never verified by readback)';
+      app.log.info(`night-charge: FORCE-CHARGE OFF for ${state.day} (${action.reason === 'target' ? `reached the ${state.forceChargeCeilingPct}% target` : action.reason}) — ${results.join(', ')}; verifying by readback${onNote}.`);
     }
     return;
   }
@@ -5822,6 +5934,9 @@ app.get('/api/night-charge/status', async () => {
       ...nightActuationMem,
       cancelDeadlineMs:
         nightActuationMem.windowStartMs != null ? nightActuationMem.windowStartMs - APPLY_LEAD_MS : null,
+      // v1.186.0 — beside forceChargeOnAtMs (and forceChargeOnVerifiedAtMs /
+      // forceChargeOnFailedAtMs, spread above): did the ON actually take?
+      forceChargeOnVerify: forceChargeOnVerifyStatus(nightActuationMem),
     },
     // In-memory cache refreshed by the recompute tick / evening job — the route
     // must NOT read the ledger (DB/filesystem) inline (CWE-770).

@@ -1,3 +1,59 @@
+## 1.186.0
+
+### Fixes from a production log review, and room for the sun on long-gap nights
+
+- **Room for the sun before a long gap.** The night before a long stretch without a cheap charging
+  window, the plan charged to 90% and set the solar allowance aside entirely. On a sunny day the
+  pack was full before 11:00 and the rest of the day's solar was thrown away — 12.3 kWh on
+  2026-09-25. It now keeps the solar the day would bring even on a poor (P10) forecast, counted up
+  to the evening on-peak: a clearly sunny forecast charges less and leaves the sun room to finish
+  the job; a cloudy one still charges to 90%. Other nights are unchanged.
+
+- **Auto night charge can take effect.** The readiness gate that decides whether `auto` mode may act
+  on its own counted every cost-mode night as an "engine fault": it judged the plan against a
+  whole-house projection kept only for disclosure (always 0% in cost mode) instead of the outage
+  trough the plan is actually sized against. So the gate never left BLOCKED, and `auto` ran as
+  `supervised` every night. Each plan now records the trough and line it was sized against, and the
+  gate scores those. Older nights, which never recorded it, no longer count as faults. A real
+  breach, in the plan or in the night itself, still does. The gate still needs its full evidence
+  before it lets `auto` act (it now reads LEARNING, not BLOCKED).
+- **A bench spare's noise no longer quiets the home Cores.** Auto-tune (which demotes or silences
+  a whole kind of alert that fires too often) counted alerts from Cores that are muted anyway —
+  bench spares and off-panel units. One spare's cell-imbalance chatter demoted every home Core's
+  imbalance push to [Low]. Only alerts that actually annunciate are counted now; verdicts earned
+  by the old counting are lifted on the next start and re-earned only by the home Cores' own record.
+  Every push that auto-tune suppresses or demotes is now logged with the rule and the counts.
+- **Alarms no longer wait on the analytics engine.** (The first pass after a start still waits for
+  the first round of device data — at most 30 s — so an alarm standing across a restart is re-tracked,
+  not raised again, and a condition standing at start-up is announced through the usual start-up
+  checks rather than taken on silently.) The alarm pass used to wait for four analytics
+  reports (and four more for every new pack alert) before it published anything: after each start
+  the first full alarm pass took 63–105 s, and a busy engine delayed every live alarm. Live alarms
+  now publish first. The engine's own alerts are merged within 2.5 s, and a slow answer keeps the
+  last good result rather than clearing anything. The engine also stopped duplicating work (a
+  request that timed out was computed a second time), yields between its background reports, and
+  splits the hourly battery-curve scan that pinned it for ~17 s into short steps. Home Assistant's
+  sensors no longer wait for the slowest report either: each report publishes on its own, and one
+  that is slow shows as unknown instead of holding back every other sensor.
+- **A missing speaker is an alert, not a footnote.** The speaker check alarmed only when no speaker
+  at all could be reached, and every broadcast logged the configured speaker count as if all of
+  them had played — a speaker that had been unavailable for over a day raised nothing. A warning now
+  names any configured speaker that cannot be reached, and each broadcast logs how many were
+  actually usable. Test broadcasts and announcements (like the 21:30 night-charge notice) also no
+  longer change what the alarm remembers about the house's condition, so a test or a notice can no
+  longer mute a real alarm right after it or after the next restart.
+- **Force-charge ON is checked.** The night charge confirmed its reserve write, the force-charge OFF
+  and the ceiling restore by reading the panel back, but not the force-charge ON. An ON the panel
+  ignored would have looked like a clean night that simply bought nothing. The ON is now read back;
+  a slot that did not start is sent ON once more (never close enough to the window end to delay the
+  OFF), and if it still has not started, a push says the night's charge above the reserve did not
+  take effect. A speaker channel that goes from partly to fully down no longer pushes a false
+  "Resolved".
+
+New harnesses `scripts/mutate-readiness-gate.mjs`, `mutate-alert-monitor.mjs`,
+`mutate-analytics-worker.mjs`, `mutate-broadcast.mjs`, `mutate-force-charge-on.mjs` and
+`mutate-long-gap-headroom.mjs`.
+
 ## 1.185.1
 
 ### The speaker test works again
