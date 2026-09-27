@@ -702,13 +702,15 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   fleetOut: number;
   acIn: number;
   fleetBatteryNet: number;
+  /** v1.186.2 — the same sum preferring each pack's `liveFlow` (DISPLAY: sensor + card). */
+  fleetBatteryNetDisplay: number;
   panelLoad: number;
 } {
   const dpus = onlineDpus(devices);
   const connected = shp2ConnectedDpuSns(devices);
   const gridDpus = dpus.filter((d) => isShp2Connected(d.sn, connected));
 
-  let fleetPv = 0, fleetIn = 0, fleetOut = 0, acIn = 0, fleetBatteryNet = 0;
+  let fleetPv = 0, fleetIn = 0, fleetOut = 0, acIn = 0, fleetBatteryNet = 0, fleetBatteryNetDisplay = 0;
   for (const d of gridDpus) {
     fleetPv += d.projection.pvTotalWatts ?? 0;
     fleetIn += d.projection.totalInWatts ?? 0;
@@ -717,7 +719,14 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
     // v0.10.4 — battery net from PER-PACK flow, not DPU throughput.
     // v0.98.0 — `?? []` so a DPU projection without packs[] can't throw (aggregateFleetFlow
     // is now also on the grid-backstop path); a pack-less DPU simply contributes 0 net.
-    for (const pk of d.projection.packs ?? []) fleetBatteryNet += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
+    // v1.186.2 — two sums. `fleetBatteryNet` stays the RAW evidence the at-floor discharge guard
+    // (gridState.ts poolDischargingObserved) reads, deliberately fail-loud. The display sum
+    // prefers the MQTT stream's fresh value over the REST poll's last-non-zero replay.
+    for (const pk of d.projection.packs ?? []) {
+      fleetBatteryNet += (pk.outputWatts ?? 0) - (pk.inputWatts ?? 0);
+      const f = pk.liveFlow ?? pk;
+      fleetBatteryNetDisplay += (f.outputWatts ?? 0) - (f.inputWatts ?? 0);
+    }
   }
 
   let panelLoad = 0;
@@ -730,5 +739,5 @@ export function aggregateFleetFlow(devices: Record<string, DeviceSnapshot>): {
   // with half a house. One panel: identical.
   for (const p of allShp2s(devices)) for (const c of p.projection.circuits ?? []) panelLoad += c.watts ?? 0;
 
-  return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad };
+  return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, fleetBatteryNetDisplay, panelLoad };
 }

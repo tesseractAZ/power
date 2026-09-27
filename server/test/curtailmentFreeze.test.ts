@@ -16,6 +16,7 @@ import {
   curtailmentDaySettled,
   frozenCurtailmentDaysForTesting,
   resetCurtailmentFreezeForTesting,
+  setCurtailmentMembershipHistoryForTesting,
 } from '../src/curtailmentFreeze.js';
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
@@ -124,6 +125,8 @@ function restart(path?: string): void {
   else delete process.env.CURTAILMENT_DAYS_PATH;
   delete process.env.SUPERVISOR_TOKEN; // outside the add-on: memory only unless a path is given
   resetCurtailmentFreezeForTesting();
+  // v1.186.2 — the fixture's one Core, recorded as the panel's membership since before the window.
+  setCurtailmentMembershipHistoryForTesting({ entries: [{ fp: 'DPU-HOME-1', atMs: 0 }] });
 }
 
 const frozenKeys = () => frozenCurtailmentDaysForTesting().map((d) => d.dayStartMs);
@@ -218,7 +221,7 @@ test('★★★ (c) the frozen days survive a restart (JSON sidecar, atomic, nex
   await refresh(at(20, 12), 10);
   assert.equal(existsSync(path), true);
   const onDisk = JSON.parse(readFileSync(path, 'utf8')) as { v: number; days: Array<{ dayStartMs: number; kwh: number; hours: unknown[] }> };
-  assert.equal(onDisk.v, 1);
+  assert.equal(onDisk.v, 2); // v1.186.2 — CURTAIL_FREEZE_SCHEMA
   assert.deepEqual(onDisk.days.map((d) => d.dayStartMs), [13, 14, 15, 16, 17, 18, 19].map(dayStart));
   assert.deepEqual(onDisk.days.map((d) => d.kwh), [10, 15, 5, 10, 15, 5, 10]);
   assert.deepEqual(onDisk.days.map((d) => d.hours.length), [2, 3, 1, 2, 3, 1, 2]);

@@ -59,8 +59,10 @@ function syntheticWeatherNow(radiationWm2: number): WeatherForecast {
     fetchedAt: now,
     lat: 33.45,
     lon: -112.07,
+    // v1.186.2 — the value averaged over the current hour is labelled with the NEXT hour
+    // (Open-Meteo: average of the preceding hour), so the fixture carries that label.
     hours: [{
-      ts: hourEpoch * 3_600_000,
+      ts: (hourEpoch + 1) * 3_600_000,
       cloudCoverPct: 20,
       radiationWm2,
       tempC: 30,

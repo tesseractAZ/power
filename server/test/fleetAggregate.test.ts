@@ -56,7 +56,8 @@ function reimplementInlineLoop(devices: Record<string, DeviceSnapshot>) {
   }
   let panelLoad = 0;
   if (sh) for (const c of sh.projection.circuits) panelLoad += c.watts ?? 0;
-  return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad };
+  // v1.186.2 — no pack here carries liveFlow, so the display sum equals the raw one.
+  return { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad };
 }
 
 test('aggregateFleetFlow: sums online connected DPUs; per-pack net = out − in (positive = discharging)', () => {

@@ -1,3 +1,35 @@
+## 1.186.2
+
+### No phantom battery discharge at the handover to grid, and a more honest curtailment figure
+
+- **Battery net at the handover to grid.** When the batteries reach the reserve floor and the
+  Smart Home Panel hands the house to the grid, the batteries stop. On 2026-09-27 the "Battery
+  Net" sensor and the dashboard's Energy flow card kept showing discharge anyway, alternating
+  every 30 seconds between near zero and up to 2.7 kW ("1.44 kW discharging" beside a grid
+  carrying the whole house). The cause was measured: the once-a-minute cloud poll returns each
+  battery pack's last non-zero reading, so it replayed the pre-handover discharge every minute,
+  while the live stream from each Core reported zero. The displayed figure now uses the live
+  stream's reading when one arrived in the last 2.5 minutes, and the poll's otherwise. A real
+  discharge still shows as soon as the stream reports it. The grid-outage alarm checks still read
+  the raw figures, unchanged.
+- **Curtailment is paired with the right hour of sunlight.** The weather service reports each
+  hour's sunlight as the average over the hour before its timestamp. Curtailment, and the solar
+  model it relies on, read each hour against the previous hour's sunlight, which understated the
+  morning sun and overstated the afternoon's. Each hour is now paired with the sunlight measured
+  during it.
+- **Cloudy hours are no longer counted as curtailment.** When the weather showed a dark or cloudy
+  hour, the estimate still assumed full summer sun for it and counted the gap as lost energy. A
+  measured cloudy hour now counts as nothing lost; the full-sun assumption is kept only for hours
+  with no weather reading at all. Clear-sky curtailment is still detected.
+- **A day is kept only when its battery list is trustworthy.** A finished day's curtailment figure
+  is now kept only if the panel's list of connected batteries was known, matched the recorded
+  list for the whole day, and every battery on it reported that day. Otherwise the day is
+  estimated again on the next refresh rather than kept for a week. Days kept by 1.186.1 were
+  estimated with the old hour pairing and the cloudy-hour assumption, so they are discarded once
+  and estimated again from the recorded history.
+
+New harness `scripts/mutate-v1186-2.mjs`.
+
 ## 1.186.1
 
 ### The 7-day curtailment figure stops rewriting history

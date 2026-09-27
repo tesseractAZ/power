@@ -83,7 +83,9 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   //     throughput, not battery DC flow, and overstated the rate.
   //   • `dpus` (bus voltage, device quality, and the no-SHP2 fallbacks) is likewise gated.
   // Result: the SCADA console can no longer disagree with the HA sensors for one instant.
-  const { fleetPv: pv, fleetBatteryNet: batNet } = aggregateFleetFlow(data.snap.devices);
+  // v1.186.2 — the DISPLAY battery sum, like the HA sensor and the Energy-flow card, so a cloud-poll
+  // replay at a grid handover shows here as it does there (the alarm path keeps the raw sum).
+  const { fleetPv: pv, fleetBatteryNetDisplay: batNet } = aggregateFleetFlow(data.snap.devices);
   const connectedSns = shp2ConnectedDpuSns(data.snap.devices);
   const dpus = getDpus(data).filter((d) => d.online && isShp2Connected(d.sn, connectedSns));
   const acIn = gridAcInWatts(data);

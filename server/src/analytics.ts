@@ -4,7 +4,7 @@ import { getOwnerReserveFloorPct } from './nightChargeActuator.js';
 import type { DpuPack, DpuProjection, Shp2Projection } from './ecoflow/project.js';
 import type { Alert } from './alerts.js';
 import type { Recorder } from './recorder.js';
-import { getWeather, type WeatherHour, type WeatherForecast } from './weather.js';
+import { getWeather, coveringRadiationEpoch, RADIATION_LABEL_LAG_HOURS, type WeatherHour, type WeatherForecast } from './weather.js';
 import { shp2ConnectedDpuSns, isShp2Connected, shp2Panels, findShp2, secondaryShp2s } from './shp2Membership.js';
 import { sliceByTsInclusive } from './backtest.js';
 import { integrateWh, startOfLocalDayMs } from './aggregator.js';
@@ -16,6 +16,7 @@ import { singleFlight } from './singleFlight.js';
 import { coherentRunwayPair } from './nightChargeAdvisor.js';
 import {
   curtailmentDaySettled, frozenCurtailmentDay, freezeCurtailmentDay, pruneFrozenCurtailmentDays, persistFrozenCurtailmentDays,
+  curtailmentMembershipSound, curtailmentMembershipHistory,
 } from './curtailmentFreeze.js';
 
 /**
@@ -7197,7 +7198,8 @@ let curtailmentCache: { ts: number; value: CurtailmentReport } | null = null;
 /** Resolve the GHI at the current local hour from the weather cache. */
 function currentHourGhi(weather: WeatherForecast | null, now: number): number | null {
   if (!weather) return null;
-  const hourEpoch = Math.floor(now / 3_600_000);
+  // v1.186.2 — the value labelled H + 1 is the one averaged over the current hour [H, H + 1).
+  const hourEpoch = coveringRadiationEpoch(Math.floor(now / 3_600_000));
   const wh = weather.hours.find((h) => Math.floor(h.ts / 3_600_000) === hourEpoch);
   return wh ? wh.radiationWm2 : null;
 }
@@ -7345,11 +7347,12 @@ export async function computeCurtailment(
     }
     const dayHours: CurtailmentHour[] = [];
     let dayKwh = 0;
+    const contributed = new Set<string>();
     for (let h = 0; h < 24; h++) {
       const hourStart = dayStart + h * 3_600_000;
       const hourEnd = hourStart + 3_600_000;
       const sample = await sampleCurtailmentHour(
-        homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h, chargeCeiling,
+        homeDpus, shp2, recorder, weather, bayes, hourStart, hourEnd, h, chargeCeiling, contributed,
       );
       if (sample) {
         dayHours.push(sample);
@@ -7358,7 +7361,14 @@ export async function computeCurtailment(
     }
     recent7dHours.push(...dayHours);
     recent7dKwh += dayKwh;
-    if (weather && curtailmentDaySettled(weather, hasPosterior, dayStart)) {
+    // v1.186.2 — and only when the membership the walk used is SOUND for that day: the panel
+    // roster is known, the recorded membership was stable all day and equals it, and every home
+    // Core reported that day. An unsound day stays live and is walked again next refresh.
+    const membershipSound = curtailmentMembershipSound({
+      rosterSns: connected, walkedSns: homeDpus.map((x) => x.sn), contributedSns: contributed,
+      history: curtailmentMembershipHistory(), dayStartMs: dayStart,
+    });
+    if (weather && membershipSound && curtailmentDaySettled(weather, hasPosterior, dayStart)) {
       freezeCurtailmentDay({
         dayStartMs: dayStart,
         kwh: dayKwh,
@@ -7452,6 +7462,7 @@ async function sampleCurtailmentHour(
   hourEnd: number,
   hourOfDay: number,
   currentCeiling: number | null,
+  contributed?: Set<string>,
 ): Promise<CurtailmentHour | null> {
   // v0.24.3 — batch each home DPU's three per-hour metrics (soc, chg_max_soc,
   // pv_total) into ONE recorder.queryMulti instead of three separate query()
@@ -7465,6 +7476,8 @@ async function sampleCurtailmentHour(
   const dpuMetrics = new Map<string, Map<string, Array<{ ts: number; value: number }>>>();
   for (const d of homeDpus) {
     dpuMetrics.set(d.sn, recorder.queryMulti(d.sn, ['soc', 'chg_max_soc', 'pv_total'], hourStart, hourEnd, 60));
+    // v1.186.2 — which home Cores reported this hour, for the freeze's membership check.
+    if (contributed && (dpuMetrics.get(d.sn)?.get('soc')?.length ?? 0) > 0) contributed.add(d.sn);
   }
   const meanInWindow = (sn: string, metric: string): number | null => {
     // Home DPUs are served from the batched map (queryMulti returns an empty
@@ -7503,14 +7516,23 @@ async function sampleCurtailmentHour(
   const loadW = meanInWindow(shp2.sn, 'panel_load') ?? 0;
 
   // Weather-verified path?
+  // v1.186.2 — the hour [H, H + 1) pairs with the value labelled H + 1 (weather.ts
+  // coveringRadiationEpoch: Open-Meteo's radiation is the average of the PRECEDING hour).
   const wh = weather?.hours.find(
-    (h) => Math.floor(h.ts / 3_600_000) === Math.floor(hourStart / 3_600_000),
+    (h) => Math.floor(h.ts / 3_600_000) === coveringRadiationEpoch(Math.floor(hourStart / 3_600_000)),
   );
   let expectedW: number | null = null;
   let weatherVerified = false;
-  if (wh && wh.radiationWm2 >= CURTAIL_MIN_GHI_WM2) {
+  // v1.186.2 — a MEASURED GHI decides the hour. Below the daylight floor it is a dark or cloudy
+  // hour, not a curtailed one: the old fall-through assumed μ × 900 W/m² of sun for it and
+  // reported the gap as lost energy. The μ × 900 heuristic is only for an hour with NO weather.
+  const measured = wh != null && wh.radiationMissing !== true;
+  if (measured) {
+    if (wh.radiationWm2 < CURTAIL_MIN_GHI_WM2) return null;
     const e = predictExpectedPv(bayes, hourOfDay, wh.radiationWm2);
-    if (e) { expectedW = e.w; weatherVerified = true; }
+    if (!e) return null;
+    expectedW = e.w;
+    weatherVerified = true;
   }
   if (expectedW == null) {
     // Heuristic-only: only count when PV ≈ load (panels throttled to match).
@@ -9176,7 +9198,10 @@ export async function computeBayesianSolarModel(
   const weather = await getWeather();
   if (!weather) return empty();
   const wxByHourEpoch = new Map<number, WeatherHour>();
-  for (const wh of weather.hours) wxByHourEpoch.set(Math.floor(wh.ts / 3_600_000), wh);
+  // v1.186.2 — keyed by the recorder hour each value COVERS (label − 1 h: Open-Meteo averages the
+  // preceding hour). The posterior μ feeds curtailment's expected PV, so the fit and the
+  // curtailment walk must pair hours the same way; the OLS comparison below reads this map too.
+  for (const wh of weather.hours) wxByHourEpoch.set(Math.floor(wh.ts / 3_600_000) - RADIATION_LABEL_LAG_HOURS, wh);
 
   // Fleet PV per hour-epoch. v0.9.76 — Bayesian posterior is the
   // home's GHI→PV response; including a spare's bench-charge PV would

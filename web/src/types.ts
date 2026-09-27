@@ -5,6 +5,8 @@ export interface DpuPack {
   actSoh: number | null;
   inputWatts: number | null;
   outputWatts: number | null;
+  /** v1.186.2 — the MQTT stream's fresh in/out (server snapshot.ts); display prefers it. */
+  liveFlow?: { inputWatts: number | null; outputWatts: number | null; atMs: number };
   temp: number | null;
   cycles: number | null;
   remainTimeMin: number | null;
