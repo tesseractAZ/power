@@ -239,8 +239,8 @@ const MUTANTS = [
   {
     id: 'xi-e. \u2605 an await between the sums and the readiness verdict reopens the race',
     file: MQTT,
-    find: '    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);',
-    to: '    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices); await Promise.resolve(); /* MUTANT */',
+    find: '    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);',
+    to: '    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices); await Promise.resolve(); /* MUTANT */',
     why: 'Anything that yields between the two lets a poll land between the sums and the verdict.',
   },
   {

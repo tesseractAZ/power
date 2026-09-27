@@ -1235,7 +1235,8 @@ export async function startMqttDiscovery(
     // lands DURING that multi-second await, so sums taken before it were a sum over nothing
     // (0 W) that readiness then passed as ready — battery net and panel load still went
     // X → 0 → X at the v1.178.0 deploy. Sums and readiness must see the same device map.
-    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
+    // v1.186.2 — the Battery Net sensor publishes the DISPLAY sum (stream-preferred, snapshot.ts).
+    const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
     const lifetime = recorder.getLifetimeTotals();
     const lifetimeKwh = makeLifetimeKwh(lifetime);
     // v1.186.0 — any report below may be null (settleStateReports); its fields publish null.

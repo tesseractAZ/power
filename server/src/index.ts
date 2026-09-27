@@ -1549,7 +1549,8 @@ app.get('/api/ha-state', async (req, reply) => {
   // buildState via aggregateFleetFlow (raw, un-rounded sums; rounded at emission).
   // v1.178.1 — AFTER the reports' await, from the same live device map publishReadiness
   // judges below (see buildState): sums taken before it were a boot-time sum over nothing.
-  const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
+  // v1.186.2 — the published battery net is the DISPLAY sum (stream-preferred, see snapshot.ts).
+  const { fleetPv, fleetIn, fleetOut, acIn, fleetBatteryNetDisplay: fleetBatteryNet, panelLoad } = aggregateFleetFlow(snap.devices);
 
   // v1.125.1 — cache the REPRESENTATIVE islanded load for the outage cushion.
   //
