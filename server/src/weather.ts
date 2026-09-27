@@ -53,6 +53,19 @@ export interface WeatherForecast {
  * and forecast_days / past_days count UTC days; the offset is still applied in case
  * one is ever sent.
  */
+/**
+ * v1.186.2 — Open-Meteo's hourly `shortwave_radiation` is the "average of the preceding hour"
+ * (open-meteo.com/en/docs, hourly variables): the value labelled H covers [H − 1 h, H). The value
+ * that covers the recorder hour starting at hour-epoch `he` is therefore the one labelled he + 1.
+ * Pairing [H, H + 1) with the label H read the previous hour's sunlight: too little in the
+ * morning, too much in the afternoon. `ts` stays the provider's label; consumers that pair a
+ * radiation value with a recorder hour go through this.
+ */
+export const RADIATION_LABEL_LAG_HOURS = 1;
+export function coveringRadiationEpoch(hourEpoch: number): number {
+  return hourEpoch + RADIATION_LABEL_LAG_HOURS;
+}
+
 export function openMeteoHours(j: any): WeatherHour[] {
   // Top-level access is deliberately NOT optional: a null body must still throw inside
   // getWeather's try, so the stale cache keeps serving exactly as before the extraction.

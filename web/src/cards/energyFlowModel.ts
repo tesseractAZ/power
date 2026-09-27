@@ -89,7 +89,8 @@ export function energyFlowModel(devices: Record<string, DeviceSnapshot>, grid?: 
   // v0.46.0 — battery net from PER-PACK flow, not DPU throughput, mirroring the server's
   // fleet_battery_net_watts. Pack out = discharge, pack in = charge; net > 0 = discharging.
   const batNet = dpus.reduce(
-    (s, d) => s + d.projection.packs.reduce((p, pk) => p + ((pk.outputWatts ?? 0) - (pk.inputWatts ?? 0)), 0),
+    // v1.186.2 — prefer the stream's fresh flow over the poll's last-non-zero replay (server snapshot.ts).
+    (s, d) => s + d.projection.packs.reduce((p, pk) => { const f = pk.liveFlow ?? pk; return p + ((f.outputWatts ?? 0) - (f.inputWatts ?? 0)); }, 0),
     0,
   );
   // v1.145.0 — average only the packs that REPORTED; a silent DPU is not a 0% pack.

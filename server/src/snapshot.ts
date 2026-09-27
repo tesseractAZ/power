@@ -145,6 +145,20 @@ export interface FleetSnapshot {
 }
 
 const INCLUDE_RAW = process.env.SNAPSHOT_INCLUDE_RAW === '1';
+
+/**
+ * v1.186.2 — a Core's pack flow fields, and how long an MQTT-delivered value of one outranks the
+ * REST poll's for DISPLAY. Measured 2026-09-27 01:34–01:40 at a handover to the grid: the cloud's
+ * /quota/all (every 60 s, :22) returned each pack's last NON-ZERO in/out — hundreds of watts per
+ * pack from before the handover — while the MQTT stream (per-change deltas plus a full pack burst
+ * every ~60 s) carried the zeros. Battery net therefore swung 2671 → 21 → 1436 → 11 W between the
+ * :22 and :52 publishes while the grid carried the whole house. While the stream is alive the REST
+ * value can only be older than the stream's (the cloud caches what the device published), so the
+ * stream's value is shown; once the stream has been silent for the window the REST value shows
+ * again. 150 s spans two missed full bursts.
+ */
+const PACK_FLOW_KEY_RE = /^hs_yj751_bms_slave_addr\.\d+\.(inputWatts|outputWatts)$/;
+export const STREAM_FLOW_WINDOW_MS = 150_000;
 /** v1.185.0 — consecutive device lists a panel must be absent from before it is off the account. */
 export const PANEL_ABSENT_LISTS = 3;
 /** v1.185.0 — consecutive device lists a lone panel must stand alone before the FIRST pin. */
@@ -182,6 +196,8 @@ export class SnapshotStore extends EventEmitter {
   // mapping recent cmdId data into a flat lookup.
   private mqttByCmd: Map<string, Map<number, Record<string, unknown>>> = new Map();
   private mqttFlatBySn: Map<string, Record<string, unknown>> = new Map();
+  /** v1.186.2 — per Core, each pack flow field as the MQTT stream last delivered it. */
+  private streamPackFlow: Map<string, Map<string, { v: number; atMs: number }>> = new Map();
   public lastSourceBySn: Map<string, 'rest' | 'mqtt'> = new Map();
   public lastMqttAtBySn: Map<string, number> = new Map();
   public mqttMsgCountBySn: Map<string, number> = new Map();
@@ -361,6 +377,42 @@ export class SnapshotStore extends EventEmitter {
       // for Ym", which is exactly the chatter-without-telemetry diagnostic an operator needs.
       this.snap.generatedAt = Date.now();
       if (this.snap.devices[sn]) this.emit('change', this.snap, sn);
+    }
+  }
+
+  /** v1.186.2 — remember each pack flow field an MQTT delta carried, with its arrival time. */
+  private noteStreamPackFlow(sn: string, partial: Record<string, unknown>) {
+    let m = this.streamPackFlow.get(sn);
+    for (const [k, v] of Object.entries(partial)) {
+      if (typeof v !== 'number' || !Number.isFinite(v) || !PACK_FLOW_KEY_RE.test(k)) continue;
+      if (!m) { m = new Map(); this.streamPackFlow.set(sn, m); }
+      m.set(k, { v, atMs: this.now() });
+    }
+  }
+
+  /**
+   * v1.186.2 — set `liveFlow` on each Core pack whose flow the MQTT stream delivered within
+   * STREAM_FLOW_WINDOW_MS. A field the stream has not delivered in the window keeps the polled
+   * value, so a Core whose stream is silent shows exactly what it showed before this release.
+   */
+  private annotateStreamFlow(sn: string, cur: DeviceSnapshot) {
+    const proj = cur.projection;
+    const m = this.streamPackFlow.get(sn);
+    if (proj?.kind !== 'dpu' || !m) return;
+    const now = this.now();
+    const fresh = (k: string) => {
+      const r = m.get(k);
+      return r && now - r.atMs <= STREAM_FLOW_WINDOW_MS ? r : null;
+    };
+    for (const pk of proj.packs ?? []) {
+      const fi = fresh(`hs_yj751_bms_slave_addr.${pk.num}.inputWatts`);
+      const fo = fresh(`hs_yj751_bms_slave_addr.${pk.num}.outputWatts`);
+      if (!fi && !fo) continue;
+      pk.liveFlow = {
+        inputWatts: fi ? fi.v : pk.inputWatts,
+        outputWatts: fo ? fo.v : pk.outputWatts,
+        atMs: Math.max(fi?.atMs ?? 0, fo?.atMs ?? 0),
+      };
     }
   }
 
@@ -733,6 +785,7 @@ export class SnapshotStore extends EventEmitter {
     this.rawBySn.set(sn, raw);
     cur.projection = projectByProduct(cur.productName, raw);
     this.hidePhantomPacks(sn, cur);
+    this.annotateStreamFlow(sn, cur); // v1.186.2 — display-only; the raw fields stay as polled
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);
@@ -1008,8 +1061,10 @@ export class SnapshotStore extends EventEmitter {
     const merged = this.rawBySn.get(sn) ?? {};
     Object.assign(merged, partial);
     this.rawBySn.set(sn, merged);
+    if (source === 'mqtt') this.noteStreamPackFlow(sn, partial);
     cur.projection = projectByProduct(cur.productName, merged);
     this.hidePhantomPacks(sn, cur);
+    this.annotateStreamFlow(sn, cur);
     this.applyBackupPoolGraceHold(sn, cur.projection);
     this.trackDpuErrOnset(sn, cur.projection);
     this.trackShp2SrcErrOnsets(sn, cur.projection);

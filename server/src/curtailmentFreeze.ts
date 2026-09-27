@@ -43,7 +43,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
-import type { WeatherForecast } from './weather.js';
+import { coveringRadiationEpoch, type WeatherForecast } from './weather.js';
+import { loadMembershipHistory, membershipAt, membershipVerdict, type MembershipHistory } from './membershipHistory.js';
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -94,14 +95,62 @@ export function curtailmentDaySettled(
     if (h.radiationMissing !== true && Number.isFinite(h.radiationWm2)) sent.add(Math.floor(h.ts / HOUR_MS));
   }
   // Matched the way sampleCurtailmentHour matches an hour to the cache: by hour epoch.
+  // v1.186.2 — through coveringRadiationEpoch: hour h of the day is covered by the label h + 1,
+  // so the day needs the labels 01:00 through the next midnight.
   for (let h = 0; h < 24; h++) {
-    if (!sent.has(Math.floor((dayStartMs + h * HOUR_MS) / HOUR_MS))) return false;
+    if (!sent.has(coveringRadiationEpoch(Math.floor((dayStartMs + h * HOUR_MS) / HOUR_MS)))) return false;
   }
   return true;
 }
 
 // ── The store ────────────────────────────────────────────────────────────────
 /** null = not resolved yet; '' = persistence disabled (memory only). */
+/**
+ * v1.186.2 — the sidecar's schema. Version 1 days were estimated with the radiation value of
+ * the PRECEDING hour and with cloudy hours scored by the μ × 900 W/m² heuristic; they are
+ * dropped once on load and re-estimated by the walk (the recorder still holds those ≤ 7 days), so
+ * the corrected figures reach the 7-day total now rather than as the old days age out.
+ */
+export const CURTAIL_FREEZE_SCHEMA = 2;
+
+/**
+ * v1.186.2 — whether the membership a walk used is SOUND for the day it would freeze. v1.186.1
+ * froze with whatever the roster said at freeze time, so a momentary roster glitch (a Core
+ * briefly not connected, or no roster at all — every DPU then counts as home) was written into
+ * that day for a week. Sound: the live roster is known; the recorded membership
+ * (membership-history.json) was stable across the whole day and equals it; every roster Core was
+ * walked (projected) and reported at least one hour that day. Anything else is re-evaluated.
+ */
+export function curtailmentMembershipSound(o: {
+  rosterSns: ReadonlySet<string>;
+  walkedSns: readonly string[];
+  contributedSns: ReadonlySet<string>;
+  history: MembershipHistory | null;
+  dayStartMs: number;
+}): boolean {
+  if (o.rosterSns.size === 0 || !o.history) return false;
+  if (membershipVerdict(o.history, o.dayStartMs, o.dayStartMs + DAY_MS) !== 'stable') return false;
+  if (membershipAt(o.history, o.dayStartMs) !== [...o.rosterSns].sort().join(',')) return false;
+  for (const sn of o.rosterSns) {
+    if (!o.walkedSns.includes(sn) || !o.contributedSns.has(sn)) return false;
+  }
+  return true;
+}
+
+let membershipOverride: MembershipHistory | null | undefined;
+/** v1.186.2 — the recorder's membership record (read fresh each walk), or null outside the add-on. */
+export function curtailmentMembershipHistory(): MembershipHistory | null {
+  if (membershipOverride !== undefined) return membershipOverride;
+  const path = process.env.CURTAIL_MEMBERSHIP_HISTORY_PATH
+    ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'membership-history.json') : '');
+  if (!path) return null;
+  try { return loadMembershipHistory(path); } catch { return null; }
+}
+/** test-only — pin the membership record (undefined restores the file). */
+export function setCurtailmentMembershipHistoryForTesting(h: MembershipHistory | null | undefined): void {
+  membershipOverride = h;
+}
+
 let storePath: string | null = null;
 const frozen = new Map<number, FrozenCurtailmentDay>();
 let dirty = false;
@@ -128,7 +177,9 @@ function ensureLoaded(): void {
     ?? (process.env.SUPERVISOR_TOKEN ? resolve(process.cwd(), config.dbPath, '..', 'curtailment-days.json') : '');
   if (!storePath) return;
   try {
-    const raw = JSON.parse(readFileSync(storePath, 'utf8')) as { days?: unknown };
+    const raw = JSON.parse(readFileSync(storePath, 'utf8')) as { v?: unknown; days?: unknown };
+    // v1.186.2 — days from an older schema are dropped (re-estimated) and the file rewritten.
+    if (raw?.v !== CURTAIL_FREEZE_SCHEMA) { dirty = true; return; }
     if (Array.isArray(raw?.days)) {
       for (const d of raw.days) {
         const day = validDay(d);
@@ -166,7 +217,7 @@ export function persistFrozenCurtailmentDays(log: (m: string) => void = () => {}
   if (!dirty || !storePath) return;
   try {
     const days = [...frozen.values()].sort((a, b) => a.dayStartMs - b.dayStartMs);
-    atomicWriteFileSync(storePath, JSON.stringify({ v: 1, days }));
+    atomicWriteFileSync(storePath, JSON.stringify({ v: CURTAIL_FREEZE_SCHEMA, days }));
     dirty = false;
     writeWarned = false;
   } catch (e) {
@@ -188,6 +239,7 @@ export function frozenCurtailmentDaysForTesting(): FrozenCurtailmentDay[] {
 export function resetCurtailmentFreezeForTesting(): void {
   frozen.clear();
   storePath = null;
+  membershipOverride = undefined; // v1.186.2
   dirty = false;
   writeWarned = false;
 }

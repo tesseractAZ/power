@@ -185,6 +185,11 @@ export interface DpuPack {
   actSoh: number | null;        // float SoH (e.g. 98.00781) — more precise than soh integer
   inputWatts: number | null;
   outputWatts: number | null;
+  /** v1.186.2 — this pack's in/out watts as the Core's MQTT stream last delivered them, when
+   *  that reading is at most STREAM_FLOW_WINDOW_MS old (snapshot.ts). DISPLAY ONLY: the cloud
+   *  REST poll replays the last NON-ZERO value of each field, so at a handover to the grid it
+   *  re-injects the pre-handover discharge once a minute. The alarm path keeps the raw fields. */
+  liveFlow?: { inputWatts: number | null; outputWatts: number | null; atMs: number };
   temp: number | null;
   cycles: number | null;
   remainTimeMin: number | null;
