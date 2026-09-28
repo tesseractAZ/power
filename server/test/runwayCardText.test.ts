@@ -57,10 +57,11 @@ test('★ the recent-load caption names its basis', () => {
 const here = dirname(fileURLToPath(import.meta.url));
 const src = (f: string) => readFileSync(resolve(here, f), 'utf8');
 
-test('★★★ the grid note follows the resolver: backstopping → note; flowing → "carrying the load"', () => {
-  assert.match(gridNote({ present: true, backstopping: true, importLive: true })!, /^grid is carrying the load — /);
-  assert.match(gridNote({ present: true, backstopping: true, importLive: false })!, /^grid available as a backstop — /,
-    'backstopping with 0 W imported is a backstop, not the grid carrying the house');
+test('★★★ the grid note follows the resolver: backstopping → note; flowing → "supplying the house"', () => {
+  // v1.186.3 — plain words: "supplying the house" needs measured import; otherwise "available as backup".
+  assert.match(gridNote({ present: true, backstopping: true, importLive: true })!, /^grid is supplying the house — these are outage projections/);
+  assert.match(gridNote({ present: true, backstopping: true, importLive: false })!, /^grid available as backup — these are outage projections/,
+    'backstopping with 0 W imported is a backup, not the grid supplying the house');
   assert.equal(gridNote({ present: false, backstopping: false, importLive: false }), null, 'islanded: the projection is the live countdown');
   assert.equal(gridNote(null), null);
 });
@@ -77,7 +78,7 @@ test('★★★ at the reserve floor, a grid the resolver DISTRUSTS gets no "not
   // Away from the floor the same declaration is a backstop, and the note is shown.
   const ok = resolveGridBackstop({ devices: {}, gridEntity: null, gridEntityConfigured: false, gridAvailableFallback: true, atReserveFloor: false } as any);
   assert.equal(ok.backstopping, true);
-  assert.match(gridNote(ok)!, /grid available as a backstop/);
+  assert.match(gridNote(ok)!, /grid available as backup/);
 });
 
 test('the card renders the model it runs: header, headline, captions, one-decimal capacity', () => {

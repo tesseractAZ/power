@@ -84,7 +84,13 @@ test('rawPosture — gridBackstopping demotes the runway-derived red/amber/conse
   assert.equal(rawPosture(inputs({ gridBackstopping: true, hoursToReserve: 0.8 })).posture, 'normal'); // was red
   assert.equal(rawPosture(inputs({ gridBackstopping: true, hoursToReserve: 9.3, dawnMinSocPct: 12 })).posture, 'normal'); // was amber
   assert.equal(rawPosture(inputs({ gridBackstopping: true, dawnMinSocPct: 20 })).posture, 'normal'); // was conserve
-  assert.match(rawPosture(inputs({ gridBackstopping: true, hoursToReserve: 0.8 })).reason, /grid backstopping/);
+  // v1.186.3 — "backstopping" read as the grid powering the house while it imported 0 W: the
+  // reason says "supplying the house" only with measured import, else "available as backup".
+  assert.equal(rawPosture(inputs({ gridBackstopping: true, hoursToReserve: 0.8 })).reason,
+    'grid available as backup — depletion projection is for an outage only');
+  assert.equal(rawPosture(inputs({ gridBackstopping: true, gridImportLive: true, hoursToReserve: 0.8 })).reason,
+    'grid supplying the house — depletion projection is for an outage only');
+  assert.doesNotMatch(rawPosture(inputs({ gridBackstopping: true })).reason, /backstopping/);
 });
 
 test('rawPosture — gridBackstopping NEVER masks the at/below-floor critical, and still allows surplus', () => {

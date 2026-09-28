@@ -112,13 +112,14 @@ export function EnergyFlow({ devices, grid }: Props) {
         {/* Solar node */}
         <Node {...Solar} title="Solar" subtitle="42 panels" value={fmtW(pv)} icon="☀" accent={HUES.solar} />
         {/* Grid node — 3-state subtitle + value:
-            active → live kW into the home; standby → "standby" backstop;
+            active → live kW into the home; standby → "available as backup"
+            (v1.186.3 — plain words; the old label read as the grid powering the house);
             off → "islanded". The amber/accent treatment is reserved for the
             ACTIVE state so a backstopping grid reads as a live source. */}
         <Node
           {...Grid}
           title="Grid"
-          subtitle={gridState === 'active' ? 'backstopping' : gridState === 'standby' ? 'standby / backstop' : 'islanded'}
+          subtitle={gridState === 'active' ? 'importing' : gridState === 'standby' ? 'available as backup' : 'islanded'}
           value={gridState === 'active' ? fmtW(gridSupplyW) : gridState === 'standby' ? 'available' : 'off'}
           icon="⌁"
           accent={gridState === 'active' ? HUES.battery : HUES.grid}

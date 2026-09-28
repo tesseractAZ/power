@@ -1,3 +1,38 @@
+## 1.186.3
+
+### Honest grid wording, and two boot-time alert fixes
+
+- **"Available as backup" unless grid power is flowing.** Several places said the grid was
+  carrying the house when it was only connected. On 2026-09-25 the Home Assistant sensor
+  "Lighting Posture Reason" read "grid backstopping — depletion projection is islanded-only" all
+  afternoon while the house imported 0 W from the grid (solar and the batteries carried it); the
+  dashboard's Runway card said "grid is carrying the load" and the Energy flow card labelled the
+  grid "backstopping". The wording now says the grid is available as backup, and says it is
+  supplying the house only while measured grid import is flowing. This covers the posture reason,
+  the Runway card note, the Energy flow and panel cards, the reserve and battery-level alerts and
+  forecast notes,
+  the spoken reserve and battery-level advisories (English and Spanish), the load-shed note and
+  the telnet console. Only wording changed: when the grid is treated as a backup, which alarms are
+  downgraded, and the Lighting Posture state are unchanged. No Home Assistant
+  automation in the reference configuration reads the reason text.
+- **Standing alarms no longer rise again after a boot into a cloud outage.** When the EcoFlow cloud
+  was unreachable at start-up, the analytics worker answered from an empty device list. That empty
+  answer counted as its first report, so the record of when each standing alarm began was erased,
+  and when the alarm came back after the cloud returned it counted as a new alarm. A worker report
+  now counts only once it was computed on a complete device list, those start times are kept until
+  then, and an alarm that was already active before the restart is recognised as continuing
+  whenever it first reappears.
+- **No false "Resolved: … offline" during a boot-time cloud outage.** If the cloud stayed
+  unreachable for more than ten minutes after start-up, the add-on sent "Resolved" for devices
+  that had been offline before the restart, although it could see no devices at all. Such an alert
+  is now held until the first complete poll and then judged on what the poll shows. The hold is
+  logged, and if nothing is ever observable it ends at the existing six-hour deadline with a
+  logged warning and no "Resolved" message.
+- **Both boot fixes apply only to alerts computed from device data.** Alerts that do not depend on
+  the EcoFlow device list behave during such an outage exactly as in 1.186.2: an NWS storm warning
+  that has ended is resolved, a new warning is sent, and the add-on's own host alerts (power
+  supply, alarm voice) resolve and are sent as usual.
+
 ## 1.186.2
 
 ### No phantom battery discharge at the handover to grid, and a more honest curtailment figure

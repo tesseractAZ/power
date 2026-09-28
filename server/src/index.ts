@@ -129,7 +129,7 @@ import {
 import type { AnnouncementLevel } from './audioRenderer.js';
 import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from './alertPriority.js';
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
-import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisoryEs, socAlarmStatePathFor } from './batterySocAlarm.js';
+import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisory, socAlarmAdvisoryEs, socAlarmStatePathFor } from './batterySocAlarm.js';
 import { createRunwayAlarm, shouldGateRunwayAudible, runwayAlarmStatePathFor } from './runwayAlarm.js';
 import type { Shp2Projection } from './ecoflow/project.js';
 import { panelPoolNetWatts, noteDrainSample, panelDrainRunway, type DrainSample, type PanelRunway } from './panelRunway.js';
@@ -2464,9 +2464,9 @@ const batterySocAlarm = createBatterySocAlarm({
     if (!isPrimary) return;
     if (!isPriorityEnabled(priority)) return;          // honour the Alert Settings annunciation toggles
     const message = onGrid
-      ? `Advisory. Backup pool at ${t.pct} percent — drawing from grid power, no action needed.`
+      ? socAlarmAdvisory(t.pct, undefined, socGridForTick.importLive) // v1.186.3 — wording by measured import
       : socAlarmMessage(t);
-    const messageEs = onGrid ? socAlarmAdvisoryEs(t.pct) : socAlarmMessageEs(t); // v0.62.0 — Spanish second pass
+    const messageEs = onGrid ? socAlarmAdvisoryEs(t.pct, undefined, socGridForTick.importLive) : socAlarmMessageEs(t); // v0.62.0 — Spanish second pass
     // v1.78.0 — surface the disposition: the 08-12 21:11 SoC-ladder suppression
     // (deepest rung of the day) left NO log line and cost two audits a false
     // timezone theory. Suppressions are config-correct; they must still be seen.
@@ -2480,7 +2480,7 @@ const batterySocAlarm = createBatterySocAlarm({
 // v1.185.0 — one SoC ladder per SECONDARY panel, created on first sight: its own persisted arming
 // state (battery-soc-alarm-<serial>.json), its own grid-downgrade record, and words that name
 // its pool. The rules are the house ladder's above, read against the same tick's grid.
-type PoolGrid = { backstopping: boolean };
+type PoolGrid = { backstopping: boolean; importLive?: boolean }; // v1.186.3 — importLive: wording only
 const panelLadders = new Map<string, { update: (soc: number | null, name: string, grid: PoolGrid) => void }>();
 function panelSocLadder(sn: string): { update: (soc: number | null, name: string, grid: PoolGrid) => void } {
   const have = panelLadders.get(sn);
@@ -2504,8 +2504,8 @@ function panelSocLadder(sn: string): { update: (soc: number | null, name: string
       if (!isPrimary || !isPriorityEnabled(priority)) return;
       say(
         priority,
-        onGrid ? `Advisory. ${name} backup pool at ${t.pct} percent — drawing from grid power, no action needed.` : socAlarmMessage(t, name),
-        onGrid ? socAlarmAdvisoryEs(t.pct, name) : socAlarmMessageEs(t, name),
+        onGrid ? socAlarmAdvisory(t.pct, name, poolGrid.importLive) : socAlarmMessage(t, name), // v1.186.3
+        onGrid ? socAlarmAdvisoryEs(t.pct, name, poolGrid.importLive) : socAlarmMessageEs(t, name),
         'crossing',
       );
     },
@@ -2623,7 +2623,7 @@ function panelRunwayAlarm(sn: string, name: string): ReturnType<typeof createRun
     onTrigger: (priority, message, messageEs) => {
       if (!isPriorityEnabled(priority)) return;
       if (shouldGateRunwayAudible(panelRunwayGrid.get(sn))) {
-        app.log.info(`runway-alarm [${name}]: audible suppressed — grid backstopping (push/on-screen unaffected)`);
+        app.log.info(`runway-alarm [${name}]: audible suppressed — grid available as backup (push/on-screen unaffected)`);
         return;
       }
       void broadcast.announce(priority, message, messageEs).then(
@@ -2645,7 +2645,7 @@ const runwayAlarm = createRunwayAlarm({
     // classifier reach critical. Never suppresses push/on-screen; never fires when
     // off-grid (backstopping=false), so a genuine islanded emergency is unchanged.
     if (shouldGateRunwayAudible(runwayGridForTick)) {
-      app.log.info('runway-alarm: audible suppressed — grid backstopping (push/on-screen unaffected)');
+      app.log.info('runway-alarm: audible suppressed — grid available as backup (push/on-screen unaffected)');
       return;
     }
     void broadcast.announce(priority, message, messageEs).then( // v0.62.0 — Spanish second pass
@@ -5651,7 +5651,7 @@ async function runNightActuationTickInner(): Promise<void> {
           `The supervised reserve write for ${state.day} was accepted by the EcoFlow cloud but the Smart Home Panel 2 `
           + `still reads ${currentReservePct ?? 'unknown'}% (target ${state.targetPct}%) after ${state.applyRetries} re-issues. `
           + `Tonight's planned buy (~${state.buyKwh ?? '—'} kWh) will not happen; the pool stays on its normal floor. `
-          + 'No action needed tonight — the panel is grid-backstopped — but if this repeats, check the SHP2 cloud link.',
+          + 'No action needed tonight — the grid is available as backup — but if this repeats, check the SHP2 cloud link.',
       });
     } catch (e: any) {
       app.log.warn(`night-charge: apply-failure notify failed (${e?.message ?? e})`);

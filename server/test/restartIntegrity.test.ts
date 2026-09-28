@@ -59,7 +59,9 @@ test('recordRise is actually gated on the predicate', () => {
   // the first run to an alert feed's first delivery (the tick no longer waits for the
   // worker, so a worker-served alert can first appear after tick 1).
   // v1.186.0 — and to the first pass after a late hydration (the boot gate opened on its bound).
-  assert.match(AM, /const boot = bootRetrackDecision\(\{\s*firstRun, firstFeedDelivery: firstDeliveryIds\.has\(a\.id\) \|\| lateHydrationPass, priorOnsetMs: getAlertOnset\(a\.id\), bootMs,\s*\}\);/);
+  // v1.186.3 — both generalised to the id's first appearance since boot, on whichever pass, for a
+  // device-derived id; any other id keeps its feed's first delivery (storm-prep).
+  assert.match(AM, /const boot = bootRetrackDecision\(\{\s*firstRun,\s*firstAppearance: isDeviceDerivedAlertId\(a\.id\) \? !seenSinceBoot\.has\(a\.id\) : nonDeviceFirstDeliveryIds\.has\(a\.id\),\s*priorOnsetMs: getAlertOnset\(a\.id\), bootMs,\s*\}\);\s*seenSinceBoot\.add\(a\.id\);/);
   assert.match(AM, /if \(boot\.retrack\) \{/);
   assert.match(AM, /re-tracked across a restart — not counting a rise/);
 });

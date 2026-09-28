@@ -61,10 +61,12 @@ test('projected empty soon: off-grid → critical; backstopping → silent; decl
   assert.equal(classifyRunway(emptySoon, { present: true, backstopping: false }), 'critical');
 });
 
-test('floor message: backstopping → calm "grid power" advisory; off-grid → shed/generator critical', () => {
+test('floor message: backstopping → calm grid advisory; off-grid → shed/generator critical', () => {
+  // v1.186.3 — "grid power" only while grid import is measured; otherwise the grid is backup.
   const adv = runwayAlarmMessage(atFloor, 'low', { present: true, backstopping: true });
-  assert.match(adv, /grid power/i);
+  assert.match(adv, /grid is available as backup/i);
   assert.match(adv, /no action/i);
+  assert.match(runwayAlarmMessage(atFloor, 'low', { present: true, backstopping: true, importLive: true }), /drawing from grid power/i);
   const crit = runwayAlarmMessage(atFloor, 'critical');
   assert.match(crit, /reserve floor/i);
   assert.match(crit, /Shed load|generator/i);

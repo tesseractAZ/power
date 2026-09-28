@@ -64,7 +64,9 @@ test('socAlarmMessageEs — interpolates the percent in Spanish; critical adds t
   assert.equal(socAlarmMessageEs({ pct: 20, priority: 'medium' }),
     'Alarma de prioridad media. Reserva de respaldo al 20 por ciento.');
   assert.match(socAlarmMessageEs({ pct: 2, priority: 'critical' }), /Restablezca la carga de inmediato\./);
-  assert.match(socAlarmAdvisoryEs(40), /Reserva de respaldo al 40 por ciento\. Ahora se está tomando energía de la red; no se requiere acción\./);
+  // v1.186.3 — "tomando energía de la red" only while grid import is measured.
+  assert.match(socAlarmAdvisoryEs(40, undefined, true), /Reserva de respaldo al 40 por ciento\. Ahora se está tomando energía de la red; no se requiere acción\./);
+  assert.match(socAlarmAdvisoryEs(40), /Reserva de respaldo al 40 por ciento\. La red está disponible como respaldo; no se requiere acción\./);
 });
 
 test('runwayAlarmMessageEs — Spanish projection text with correct hour pluralization', () => {

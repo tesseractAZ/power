@@ -8,6 +8,17 @@ import { activeSocBandWithHysteresis, socAlertSeverity } from './batterySocAlarm
 let heldSocBandPct: number | null = null;
 /* v1.185.0 — the same held band for each SECONDARY panel, keyed by serial. */
 const heldSocBandBySn = new Map<string, number | null>();
+
+/**
+ * v1.186.3 — the grid clause of a grid-downgraded pool alert. `backstopping` means the grid
+ * would take over at the reserve floor, not that it is supplying the house: "drawing from grid
+ * power" needs measured grid import (GridBackstop.importLive); otherwise the grid is present
+ * as backup and solar or the batteries are carrying the house.
+ */
+export function gridBackupClause(grid: { importLive?: boolean } | undefined): string {
+  return grid?.importLive === true ? 'drawing from grid power' : 'the grid is available as backup';
+}
+
 export function resetOnScreenSocBandForTesting(): void {
   heldSocBandPct = null;
   heldSocBandBySn.clear();
@@ -512,10 +523,10 @@ export function computeAlerts(
    *  v0.43.0 — also carries `present` (the GridBackstop resolver's grid-availability
    *  signal) so the off-grid alert can use the same source of truth as
    *  binary_sensor.off_grid / /api/ha-state instead of the obsolete acIn<5 heuristic. */
-  grid?: { present?: boolean; backstopping: boolean; reason?: string },
+  grid?: { present?: boolean; backstopping: boolean; reason?: string; importLive?: boolean },
   /** v1.185.0 — each pool's own grid verdict (gridState.livePoolGridBackstop), supplied only on a
    *  multi-panel plant; the pool alarms read it instead of the plant verdict. */
-  poolGrid?: (panelSn: string) => { present?: boolean; backstopping: boolean; reason?: string },
+  poolGrid?: (panelSn: string) => { present?: boolean; backstopping: boolean; reason?: string; importLive?: boolean },
 ): Alert[] {
   const out: Alert[] = [];
   // v1.21.0 (F28) — vdiff keys observed (non-null reading) this cycle; held
@@ -1310,7 +1321,8 @@ export function computeAlerts(
           detail: arbitrageRaised && onGrid
             ? `Backup pool ${sp.backupBatPercent}% is under the ${reserve}% floor because the night-charge plan raised it — this is the charge window filling, not a shortfall. It clears when the plan reverts the floor.`
             : onGrid
-              ? `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+              // v1.186.3 — "drawing from grid power" only while grid import is measured.
+              ? `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor — ${gridBackupClause(grid)}, no action needed (${grid?.reason ?? 'grid present'}).`
               : `Backup pool ${sp.backupBatPercent}% is at or under the ${reserve}% reserve floor.`,
         });
       } else if (sp.backupBatPercent < reserve + 10) {
@@ -1327,7 +1339,7 @@ export function computeAlerts(
           sourceSn: shp2.sn,
           title: 'Backup approaching reserve',
           detail: onGrid
-            ? `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor — grid is backstopping, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+            ? `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor — ${gridBackupClause(grid)}, no action needed (${grid?.reason ?? 'grid present'}).`
             : `Backup pool ${sp.backupBatPercent}% is close to the ${reserve}% reserve floor.`,
         });
       }
@@ -1415,11 +1427,11 @@ export function computeAlerts(
         category: 'Connectivity',
         device: shp2.deviceName,
         title: critical ? 'Reserve alarm blind — off-grid' : 'Reserve alarm blind',
-        detail: `SHP2 backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — the reserve/runway alarms cannot see the pool. ${fallbackTxt}${offGrid ? '' : ' Grid is backstopping the home, so a low pool would transfer to mains.'} If this persists, power-cycle the SHP2 network connection.`,
+        detail: `SHP2 backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — the reserve/runway alarms cannot see the pool. ${fallbackTxt}${offGrid ? '' : ' The grid is available as backup, so a low pool would transfer to mains.'} If this persists, power-cycle the SHP2 network connection.`,
         facts: [
           { label: 'Blind for', value: fmtAge(blindMs) },
           { label: 'Fallback ladder', value: fallbackSoc != null ? `${fallbackSoc.toFixed(0)}% (Core-fleet mean)` : 'unavailable' },
-          { label: 'Escalates', value: offGrid ? `critical after ${fmtAge(RESERVE_BLIND_CRITICAL_MS)} blind` : 'suppressed while grid backstops' },
+          { label: 'Escalates', value: offGrid ? `critical after ${fmtAge(RESERVE_BLIND_CRITICAL_MS)} blind` : 'suppressed while the grid is available as backup' },
         ],
       });
     }
@@ -1489,7 +1501,7 @@ export function computeAlerts(
       ...(socShp2 ? { sourceSn: socShp2.sn } : {}),
       title: `Backup pool low — ${Math.round(soc)}%`,
       detail: onGridEmergency
-        ? `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% threshold — drawing from grid power, no action needed.${heldNote}`
+        ? `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% threshold — ${gridBackupClause(grid)}, no action needed.${heldNote}`
         : `Backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% ${band.priority}-priority threshold.${heldNote}`,
     });
   }
@@ -1516,7 +1528,7 @@ function secondaryPanelAlerts(
   panel: DeviceSnapshot,
   devices: Record<string, DeviceSnapshot>,
   connectivity: ConnectivityContext | undefined,
-  grid: { present?: boolean; backstopping: boolean; reason?: string } | undefined,
+  grid: { present?: boolean; backstopping: boolean; reason?: string; importLive?: boolean } | undefined,
   now: number,
 ): void {
   const sfx = `-${panel.sn}`;
@@ -1540,7 +1552,7 @@ function secondaryPanelAlerts(
         category: 'SHP2', device: name, sourceSn: panel.sn,
         title: onGrid ? `${name}: backup at reserve — on grid` : `${name}: backup at or below reserve`,
         detail: onGrid
-          ? `${name} backup pool ${sp.backupBatPercent}% is at or under its ${reserve}% reserve floor — drawing from grid power, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+          ? `${name} backup pool ${sp.backupBatPercent}% is at or under its ${reserve}% reserve floor — ${gridBackupClause(grid)}, no action needed (${grid?.reason ?? 'grid present'}).`
           : `${name} backup pool ${sp.backupBatPercent}% is at or under its ${reserve}% reserve floor.`,
       });
     } else if (sp.backupBatPercent < reserve + 10) {
@@ -1550,7 +1562,7 @@ function secondaryPanelAlerts(
         category: 'SHP2', device: name, sourceSn: panel.sn,
         title: `${name}: backup approaching reserve`,
         detail: onGrid
-          ? `${name} backup pool ${sp.backupBatPercent}% is close to its ${reserve}% reserve floor — grid is backstopping, no action needed (${grid?.reason ?? 'grid backstopping'}).`
+          ? `${name} backup pool ${sp.backupBatPercent}% is close to its ${reserve}% reserve floor — ${gridBackupClause(grid)}, no action needed (${grid?.reason ?? 'grid present'}).`
           : `${name} backup pool ${sp.backupBatPercent}% is close to its ${reserve}% reserve floor.`,
       });
     }
@@ -1600,7 +1612,7 @@ function secondaryPanelAlerts(
       category: 'Battery', device: `${name} backup pool`, sourceSn: panel.sn,
       title: `${name}: backup pool low — ${Math.round(soc)}%`,
       detail: onGridEmergency
-        ? `${name} backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% threshold — drawing from grid power, no action needed.${heldNote}`
+        ? `${name} backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% threshold — ${gridBackupClause(grid)}, no action needed.${heldNote}`
         : `${name} backup reserve at ${Math.round(soc)}%, ${heldAbove ? 'near' : 'at or below'} the ${band.pct}% ${band.priority}-priority threshold.${heldNote}`,
     });
   }
@@ -1940,7 +1952,7 @@ function pushReserveBlind(
   out: Alert[],
   panel: DeviceSnapshot,
   devices: Record<string, DeviceSnapshot>,
-  grid: { present?: boolean; backstopping: boolean; reason?: string } | undefined,
+  grid: { present?: boolean; backstopping: boolean; reason?: string; importLive?: boolean } | undefined,
   blindSinceMs: number | null,
   now: number,
   sfx: string,
@@ -1956,11 +1968,11 @@ function pushReserveBlind(
       severity: critical ? 'critical' : 'warning',
       category: 'Connectivity', device: name, sourceSn: panel.sn,
       title: critical ? `${name}: reserve alarm blind — off-grid` : `${name}: reserve alarm blind`,
-      detail: `${name} backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — its reserve and runway alarms cannot see the pool. ${fallbackSoc != null ? `Its SoC alarm ladder is running on its own Cores (mean ${fallbackSoc.toFixed(0)}%).` : 'None of its Cores is reporting either — its SoC alarm ladder is dark.'}${onGrid ? ' Grid is backstopping the home, so a low pool would transfer to mains.' : ''} If this persists, power-cycle the panel's network connection.`,
+      detail: `${name} backup-pool telemetry has been unreadable for ${fmtAge(blindMs)} — its reserve and runway alarms cannot see the pool. ${fallbackSoc != null ? `Its SoC alarm ladder is running on its own Cores (mean ${fallbackSoc.toFixed(0)}%).` : 'None of its Cores is reporting either — its SoC alarm ladder is dark.'}${onGrid ? ' The grid is available as backup, so a low pool would transfer to mains.' : ''} If this persists, power-cycle the panel's network connection.`,
       facts: [
         { label: 'Blind for', value: fmtAge(blindMs) },
         { label: 'Fallback ladder', value: fallbackSoc != null ? `${fallbackSoc.toFixed(0)}% (this panel's Cores)` : 'unavailable' },
-        { label: 'Escalates', value: onGrid ? 'suppressed while grid backstops' : `critical after ${fmtAge(RESERVE_BLIND_CRITICAL_MS)} blind` },
+        { label: 'Escalates', value: onGrid ? 'suppressed while the grid is available as backup' : `critical after ${fmtAge(RESERVE_BLIND_CRITICAL_MS)} blind` },
       ],
     });
   }

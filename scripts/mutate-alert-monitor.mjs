@@ -139,8 +139,9 @@ const MUTANTS = [
   {
     id: 'xv. ★★ a feed\'s first delivery is not treated as its first run',
     file: AM,
-    find: 'firstRun, firstFeedDelivery: firstDeliveryIds.has(a.id) || lateHydrationPass, priorOnsetMs',
-    to: 'firstRun, firstFeedDelivery: lateHydrationPass /* MUTANT */, priorOnsetMs',
+    // v1.186.3 — re-pointed: the re-track keys on the id's first appearance since boot.
+    find: 'firstAppearance: isDeviceDerivedAlertId(a.id) ? !seenSinceBoot.has(a.id) : nonDeviceFirstDeliveryIds.has(a.id),',
+    to: 'firstAppearance: false /* MUTANT */,',
     why: 'Every standing worker-served alert counts a rise and re-pushes after each deploy.',
   },
   {
@@ -168,8 +169,9 @@ const MUTANTS = [
   {
     id: 'xix. ★★ the first pass after a late hydration counts standing alarms as rises',
     file: AM,
-    find: 'firstRun, firstFeedDelivery: firstDeliveryIds.has(a.id) || lateHydrationPass, priorOnsetMs',
-    to: 'firstRun, firstFeedDelivery: firstDeliveryIds.has(a.id) /* MUTANT */, priorOnsetMs',
+    // v1.186.3 — re-pointed: a live-snapshot id first seen after a late hydration.
+    find: 'firstAppearance: isDeviceDerivedAlertId(a.id) ? !seenSinceBoot.has(a.id) : nonDeviceFirstDeliveryIds.has(a.id),',
+    to: 'firstAppearance: isDeviceDerivedAlertId(a.id) ? !seenSinceBoot.has(a.id) && alertFeedOwning(a.id) != null /* MUTANT */ : nonDeviceFirstDeliveryIds.has(a.id),',
     why: 'After a boot into a cloud outage, every pre-restart condition the first poll brings in is a phantom rise and a re-push.',
   },
   {
@@ -210,8 +212,9 @@ const MUTANTS = [
   {
     id: 'xxv. ★★ the hydrated map is not flushed to the worker',
     file: AC,
-    find: '    flushSnapshot: () => { if (snapHasProjections(lastSnapshot)) { postSnapshot(); openGate(); } },',
-    to: '    flushSnapshot: () => { /* MUTANT */ },',
+    // v1.186.3 — re-pointed: flushSnapshot also marks the worker's map hydrated.
+    find: '      if (snapHasProjections(lastSnapshot)) { postSnapshot(); openGate(); }',
+    to: '      if (false /* MUTANT */) { postSnapshot(); openGate(); }',
     why: 'The first reports run on the first quota\'s partial map: the other Cores\' standing worker alerts rise later.',
   },
   {
