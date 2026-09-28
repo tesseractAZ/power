@@ -15,13 +15,14 @@
  *
  *   Tone assignment is per RUNG — five values, `clear` included; driven by
  *   `data.levels` (the server's CHIME_LEVELS).
- *   The enable switch and the spoken preview are per PRIORITY — four values;
- *   driven by `ALARM_PRIORITY_ORDER`, `settings.priorityEnabled`, and
- *   `POST /api/alert-preview`, which accepts an `AlarmPriority` only.
+ *   The enable switch is per PRIORITY — four values; driven by
+ *   `ALARM_PRIORITY_ORDER` and `settings.priorityEnabled`.
+ *   The spoken preview is per RUNG (v1.186.4) — `POST /api/alert-preview` takes
+ *   `clear` too, speaking the recovery broadcast's own all-clear words.
  *
- * There is no `priorityEnabled.clear` on the backend and no preview endpoint for
- * it, so the fifth card renders TONE-ONLY and says why on the card. Inventing a
- * dead toggle there would be a lie about what the server can do.
+ * There is no `priorityEnabled.clear` on the backend, so the fifth card has no
+ * enable switch and says why on the card. Inventing a dead toggle there would be
+ * a lie about what the server can do.
  *
  * THREE independent state objects, each bound to its own endpoint and replaced
  * wholesale on its own PUT — never merged, so one section's response can't
@@ -74,6 +75,8 @@ type PreviewTarget = 'browser' | 'speakers';
 interface PreviewResponse {
   ok: boolean; spokenText: string; audioPath?: string; played: 'browser' | 'speakers';
   error?: string; cooldownRemainingMs?: number;
+  /** v1.186.4 — speakers that accepted a speaker preview, and a caveat to show. */
+  delivered?: number; note?: string;
 }
 interface PreviewState { busy: boolean; status?: string; spokenText?: string; error?: string }
 
@@ -202,14 +205,19 @@ function CategoryCard(p: CategoryCardProps) {
             </optgroup>
           )}
         </select>
+        {/* Plays in THIS browser only — the speakers hear a tone through the
+          * Announcement row's "On speakers" button (tone + spoken message). */}
         <button type="button" className="badge badge-muted hover:bg-muted/20 transition-colors"
-          onClick={p.onPreviewTone}>▶ Preview tone</button>
+          title="Plays the tone in this browser only, not on the house speakers"
+          onClick={p.onPreviewTone}>▶ Tone in browser</button>
         {p.toneBusy && <span className="text-[11px] text-muted">saving…</span>}
       </div>
       {p.toneError && <div className="mt-2 text-xs text-bad">{p.toneError}</div>}
 
-      {/* spoken announcement — priorities only (/api/alert-preview takes an AlarmPriority) */}
-      {p.row && (
+      {/* spoken announcement — every rung with a priority row, plus the all-clear
+        * (v1.186.4: /api/alert-preview takes a rung). A degraded priority card
+        * (settings failed to load) still withholds it, as before. */}
+      {(p.row || p.level === 'clear') && (
         <>
           <div className="mt-3 pt-3 border-t border-line flex items-center gap-3 flex-wrap">
             <span className="text-[10px] uppercase tracking-widest text-muted shrink-0">Announcement</span>
@@ -256,7 +264,7 @@ export function AlertConsolePanel() {
   // next to the control that raised them, instead of in the page header.
   const [saveError, setSaveError] = useState<Partial<Record<AlarmPriority, string>>>({});
   const [levelError, setLevelError] = useState<Partial<Record<Level, string>>>({});
-  const [preview, setPreview] = useState<Partial<Record<AlarmPriority, PreviewState>>>({});
+  const [preview, setPreview] = useState<Partial<Record<Level, PreviewState>>>({});
   const [confirmDisableCritical, setConfirmDisableCritical] = useState(false);
 
   const liveRef = useRef(true);
@@ -362,34 +370,39 @@ export function AlertConsolePanel() {
   // browser/speakers toggle was a mode: set it once, forget, then click Preview
   // on some other card and get a house-wide broadcast you did not intend. Each
   // button now names its own destination, so the click and the outcome match.
-  const runPreview = async (row: PriorityRow, target: PreviewTarget) => {
-    setPreview((p) => ({ ...p, [row.id]: { busy: true, status: 'Preparing…' } }));
+  // v1.186.4 — keyed by RUNG, so the all-clear card previews too.
+  const runPreview = async (level: Level, target: PreviewTarget) => {
+    setPreview((p) => ({ ...p, [level]: { busy: true, status: 'Preparing…' } }));
     try {
       const r = await fetch(apiUrl('api/alert-preview'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ priority: row.id, target }),
+        body: JSON.stringify({ priority: level, target }),
       });
       const j = (await r.json()) as PreviewResponse;
       if (!liveRef.current) return;
       if (!j.ok) {
         const cd = typeof j.cooldownRemainingMs === 'number' && j.cooldownRemainingMs > 0
           ? ` (cooldown ${Math.ceil(j.cooldownRemainingMs / 1000)}s)` : '';
-        setPreview((p) => ({ ...p, [row.id]: { busy: false, error: (j.error ?? 'Preview failed') + cd, spokenText: j.spokenText } }));
+        const note = j.note ? ` — ${j.note}` : '';
+        setPreview((p) => ({ ...p, [level]: { busy: false, error: (j.error ?? 'Preview failed') + cd + note, spokenText: j.spokenText } }));
         return;
       }
       if (target === 'browser' && j.audioPath) {
         const a = new Audio(apiUrl(j.audioPath));
-        setPreview((p) => ({ ...p, [row.id]: { busy: false, status: 'Playing…', spokenText: j.spokenText } }));
+        setPreview((p) => ({ ...p, [level]: { busy: false, status: 'Playing…', spokenText: j.spokenText } }));
         a.play().catch(() => {
-          if (liveRef.current) setPreview((p) => ({ ...p, [row.id]: { busy: false, error: 'Browser blocked autoplay — click again', spokenText: j.spokenText } }));
+          if (liveRef.current) setPreview((p) => ({ ...p, [level]: { busy: false, error: 'Browser blocked autoplay — click again', spokenText: j.spokenText } }));
         });
       } else if (target === 'speakers') {
-        setPreview((p) => ({ ...p, [row.id]: { busy: false, status: 'Broadcasting to speakers…', spokenText: j.spokenText } }));
+        // The server answers after the speakers have been handed the audio, so say
+        // how many took it rather than "broadcasting…".
+        const n = typeof j.delivered === 'number' ? `Played on ${j.delivered} speaker${j.delivered === 1 ? '' : 's'}` : 'Played on the speakers';
+        setPreview((p) => ({ ...p, [level]: { busy: false, status: j.note ? `${n} — ${j.note}` : n, spokenText: j.spokenText } }));
       } else {
-        setPreview((p) => ({ ...p, [row.id]: { busy: false, status: 'Ready', spokenText: j.spokenText } }));
+        setPreview((p) => ({ ...p, [level]: { busy: false, status: 'Ready', spokenText: j.spokenText } }));
       }
     } catch (e: any) {
-      if (liveRef.current) setPreview((p) => ({ ...p, [row.id]: { busy: false, error: String(e?.message ?? e) } }));
+      if (liveRef.current) setPreview((p) => ({ ...p, [level]: { busy: false, error: String(e?.message ?? e) } }));
     }
   };
 
@@ -609,7 +622,7 @@ export function AlertConsolePanel() {
         const toneOnlyNote = !row
           ? priority
             ? 'Annunciation settings didn’t load, so the enable switch and spoken preview are hidden. Tone assignment still works.'
-            : 'Recovery has no enable switch — an all-clear is the absence of an alarm, not one you can silence. It has no spoken preview either.'
+            : 'Recovery has no enable switch — an all-clear is the absence of an alarm, not one you can silence.'
           : undefined;
         return (
           <CategoryCard
@@ -626,11 +639,11 @@ export function AlertConsolePanel() {
             toneError={levelError[lvl]}
             toggling={!!priority && savingId === priority}
             saveError={priority ? saveError[priority] : undefined}
-            preview={priority ? preview[priority] : undefined}
+            preview={preview[lvl]}
             onAssign={(v) => void assign(lvl, v)}
             onPreviewTone={() => void previewAssigned(lvl, data.assignments[lvl])}
             onToggle={() => { if (row) toggle(row); }}
-            onPreviewSpoken={(t) => { if (row) void runPreview(row, t); }}
+            onPreviewSpoken={(t) => { if (row || lvl === 'clear') void runPreview(lvl, t); }}
           />
         );
       })}

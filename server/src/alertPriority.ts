@@ -185,6 +185,22 @@ export function priorityAnnouncementPrefix(p: AlarmPriority): string {
 }
 
 /**
+ * v1.186.4 — the spoken all-clear. ONE string for the real recovery broadcast
+ * (ttsService.buildAlertMessage) and the all-clear preview, so the preview says
+ * exactly what a recovery will.
+ */
+export const ALL_CLEAR_MESSAGE = 'All clear. All stations report normal.';
+
+/**
+ * v1.186.4 — what the all-clear PREVIEW says: the recovery words, marked as a
+ * preview. It must not be the real recovery's exact audio: the preview renders
+ * with the same chime and settings, so identical text would be an identical file,
+ * and Switchboard drops identical audio to a room inside its dedupe window, so a
+ * real all-clear shortly after a speaker preview would be skipped on the cordless.
+ */
+export const ALL_CLEAR_PREVIEW_MESSAGE = `${ALL_CLEAR_MESSAGE} This is a preview.`;
+
+/**
  * A representative spoken message used by the "preview announcement" feature
  * on the alert-settings page — lets the operator hear exactly what each
  * priority sounds like (chime + voice) without waiting for a real alarm.
