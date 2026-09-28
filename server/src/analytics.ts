@@ -940,6 +940,11 @@ export interface DayForecast {
    *  operator-visible; the runway/projected-SoC numbers should be read with
    *  appropriate skepticism when this is true. */
   structurallyIncomplete?: boolean;
+  /** v1.186.5 — the SNs (sorted) of the home Cores whose PV the solarModel was fitted on.
+   *  computeForecastSkill scores the model only against the actual PV of the SAME Cores:
+   *  a boot-time map missing a Core fits a partial model that no incompleteness flag
+   *  catches while the SHP2 is present. Absent on hand-built forecasts (no check). */
+  solarModelSns?: string[];
   /** v1.178.0 — true when the published (display) basis has NO PV history to project from:
    *  neither a projected home Core nor a connected-but-unprojected one has recorded pv_total
    *  (before the first poll, or a cold recorder). The PV figures are then a
@@ -1523,14 +1528,38 @@ export function forecastHourPvW(
   return { pv, modelled: false };
 }
 
+/**
+ * v1.186.5 — the home Cores a forecast built from `devices` fits its solar model on
+ * (sorted SNs): projected DPUs listed as connected by any SHP2 (every DPU when none lists
+ * any). ONE definition for DayForecast.solarModelSns, the day-forecast cache check and
+ * computeForecastSkill's actuals, so the three can never disagree on a steady map.
+ */
+export function homeModelSns(devices: Record<string, DeviceSnapshot>): string[] {
+  const connected = shp2ConnectedDpuSns(devices);
+  return Object.values(devices)
+    .filter((d) => d.projection?.kind === 'dpu' && isShp2Connected(d.sn, connected))
+    .map((d) => d.sn)
+    .sort();
+}
+
+/** v1.186.5 — the cached forecast is usable only while its model covers the Cores the
+ *  current map has: a forecast built on a boot-time map that had not yet seen every Core
+ *  is not structurally incomplete while the SHP2 is present, and would otherwise stand
+ *  for its full 30-min TTL (feeding runway, the band and a 22:30 night-charge decision). */
+function dayForecastCacheUsable(devices: Record<string, DeviceSnapshot>, now: number): boolean {
+  if (!dayForecastCache || !dayForecastCacheFresh(now)) return false;
+  const sns = dayForecastCache.value.solarModelSns;
+  return sns == null || sns.join(',') === homeModelSns(devices).join(',');
+}
+
 /** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min. */
 export async function getDayForecast(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
   log: (m: string) => void = () => {},
 ): Promise<DayForecast> {
-  if (dayForecastCache && dayForecastCacheFresh(Date.now())) {
-    return dayForecastCache.value;
+  if (dayForecastCacheUsable(devices, Date.now())) {
+    return dayForecastCache!.value;
   }
   // v0.69.0 — coalesce concurrent cold-cache callers. The 30-min TTL cache above
   // memoizes the value but not the in-flight promise; during a cold boot every
@@ -1546,8 +1575,8 @@ async function computeDayForecastUncached(
   recorder: Recorder,
   log: (m: string) => void,
 ): Promise<DayForecast> {
-  if (dayForecastCache && dayForecastCacheFresh(Date.now())) {
-    return dayForecastCache.value; // a prior flight may have populated it while we queued
+  if (dayForecastCacheUsable(devices, Date.now())) {
+    return dayForecastCache!.value; // a prior flight may have populated it while we queued
   }
   const now = Date.now();
   const since = now - TYPICAL_HISTORY_MS;
@@ -1964,6 +1993,7 @@ async function computeDayForecastUncached(
     minProjectedSoc: minSoc == null ? null : Math.round(minSoc * 10) / 10,
     minProjectedSocTs: minSocTs,
     solarModel,
+    solarModelSns: homeModelSns(devices),
     deviceModels,
     soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour) : null,
     homeDpusConnected: forecastCoverage.homeDpusConnected,
@@ -5132,7 +5162,8 @@ export interface ForecastSkillReport {
 // v1.173.0 (GHI stage 2) — AND by basis (`${windowDays}:${ghiBasis}`): the 30-day window is
 // shared by /api/confidence ('realized') and the band calibrator ('first-write'); one slot per
 // window would hand the calibrator the realized score for up to the TTL — an unreviewed switch.
-const forecastSkillCache = new Map<string, { ts: number; value: ForecastSkillReport }>();
+// v1.186.5 — `forecastTs` is the generatedAt of the DayForecast the entry was scored against.
+const forecastSkillCache = new Map<string, { ts: number; forecastTs: number; value: ForecastSkillReport }>();
 
 /**
  * v0.13.1 — durable GHI lookup keyed by hour-epoch (ms/3.6e6).
@@ -5536,14 +5567,27 @@ export async function computeForecastSkill(
   ghiBasis: ForecastSkillGhiBasis = 'first-write',
 ): Promise<ForecastSkillReport> {
   const cacheKey = `${windowDays}:${ghiBasis}`;
+  // v1.186.5 — a hit is valid only for the forecast it was scored against. The hindcast
+  // pairs THIS forecast's solar model with the actual PV of the current home Cores, so a
+  // skill scored on a forecast fit to a partial device map (a boot before every Core has
+  // reported: 2026-09-27 21:06 restart, model fit on one Core's PV) under-predicts every
+  // day by the missing Cores' share. Keyed by time alone it was served for the full hour:
+  // the 21:30 night-charge plan read "PV band coverage 7%" off it and cancelled an armed
+  // 66 kWh charge, although a re-score at 22:14 read 97%. (A null forecast still reads a
+  // fresh entry, as before.)
   const skillHit = forecastSkillCache.get(cacheKey);
-  if (skillHit && Date.now() - skillHit.ts < FORECAST_SKILL_TTL_MS) return skillHit.value;
+  if (skillHit && Date.now() - skillHit.ts < FORECAST_SKILL_TTL_MS
+      && (forecast == null || skillHit.forecastTs === forecast.generatedAt)) return skillHit.value;
   const now = Date.now();
   const emptyVal = (): ForecastSkillReport => ({
     generatedAt: now, days: [], meanAbsErrorKwh: null, meanAbsErrorPct: null,
     biasFactor: null, windowDays, ghiBasis,
   });
   if (!forecast) return emptyVal();
+  // v1.186.5 — nor is one scored on a structurally incomplete forecast at all (no SoC
+  // basis, cold load or PV history): that forecast lives ~150 s and its model is not the
+  // plant's. The empty value is never cached, so the next call scores the complete one.
+  if (forecast.structurallyIncomplete) return emptyVal();
   const weather = await getWeather();
   if (!weather) return emptyVal();
   // v0.21.0 — scope the actuals to SHP2-connected home DPUs, matching the
@@ -5557,6 +5601,13 @@ export async function computeForecastSkill(
     (d) => d.projection?.kind === 'dpu' && isShp2Connected(d.sn, connected),
   ) as Array<DeviceSnapshot & { projection: DpuProjection }>;
   if (dpus.length === 0) return emptyVal();
+  // v1.186.5 — the model and the actuals must cover the SAME Cores. The forecast's model
+  // was fitted on the home Cores in the map it was built from; `dpus` is the map now. A
+  // mismatch (a boot-time map that had not yet seen every Core) under-predicts every day
+  // by the missing Cores' share, so it is not scored (empty, uncached) until they agree.
+  if (forecast.solarModelSns && forecast.solarModelSns.join(',') !== homeModelSns(devices).join(',')) {
+    return emptyVal();
+  }
 
   // Hindcast: model.coeff[h] × GHI(h) for each past hour → predicted W.
   // Integrate hourly across each past day. Compare with actual hourly PV avg.
@@ -5665,7 +5716,7 @@ export async function computeForecastSkill(
     windowDays,
     ghiBasis,
   };
-  if (dpus.length > 0) forecastSkillCache.set(cacheKey, { ts: now, value });
+  if (dpus.length > 0) forecastSkillCache.set(cacheKey, { ts: now, forecastTs: forecast.generatedAt, value });
   return value;
 }
 
@@ -8191,7 +8242,8 @@ export interface ProbabilisticForecast {
  * Wiring ANY field above into mqttDiscovery, alerts.ts, runwayAlarm.ts, or the
  * broadcast path requires re-auditing the calibration first. */
 
-let probabilisticCache: { ts: number; value: ProbabilisticForecast } | null = null;
+// v1.186.5 — `forecastTs`: the generatedAt of the DayForecast the band was built on.
+let probabilisticCache: { ts: number; forecastTs: number; value: ProbabilisticForecast } | null = null;
 const PROB_TTL_MS = 15 * 60 * 1000;
 
 /** Normal-distribution shortcut: P10 ≈ μ−1.282σ, P90 ≈ μ+1.282σ. */
@@ -8348,7 +8400,10 @@ export async function computeProbabilisticForecast(
   forecast: DayForecast | null,
   skill: ForecastSkillReport | null,
 ): Promise<ProbabilisticForecast> {
-  if (probabilisticCache && Date.now() - probabilisticCache.ts < PROB_TTL_MS) return probabilisticCache.value;
+  // v1.186.5 — like the skill it is calibrated on, the band is reused only for the
+  // forecast it was built on (a null forecast still reads a fresh entry, as before).
+  if (probabilisticCache && Date.now() - probabilisticCache.ts < PROB_TTL_MS
+      && (forecast == null || probabilisticCache.forecastTs === forecast.generatedAt)) return probabilisticCache.value;
   const now = Date.now();
   const empty = (): ProbabilisticForecast => ({
     generatedAt: now, hours: [], pAboveReservePct: null, pFullCharge: null, uncertaintyKwhStdev: 0,
@@ -8643,7 +8698,10 @@ export async function computeProbabilisticForecast(
           )
         : null,
   };
-  probabilisticCache = { ts: now, value };
+  // v1.186.5 — a band built on a structurally incomplete forecast is served but never
+  // cached: its skill was empty (calScoredDays 0), and caching it for PROB_TTL_MS would
+  // fail the night-charge basis gate for 15 minutes after the forecast became complete.
+  if (!forecast.structurallyIncomplete) probabilisticCache = { ts: now, forecastTs: forecast.generatedAt, value };
   return value;
 }
 

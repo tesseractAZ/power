@@ -1,3 +1,27 @@
+## 1.186.5
+
+### Night charge: a restart before 21:30 no longer costs the night
+
+- **The solar-forecast accuracy check is scored on the forecast it is used with.** On
+  2026-09-27 the add-on restarted at 21:06, and for its first minutes it saw only part of the
+  plant. The accuracy check was scored against a solar model fitted to one Core while
+  comparing it with the solar output of all three home Cores, so every past day looked about
+  three times worse than it was. That result was kept for an hour, the 21:30 plan read "PV
+  band coverage 7%", decided there was no usable plan, and cancelled the 66 kWh charge
+  already planned for the night. The same data scored 97% at 22:14. The check is now
+  recomputed whenever the forecast is, and is only scored when the forecast's solar model
+  was fitted on the same Cores whose output it is compared with. A forecast built before
+  every Core was seen is rebuilt as soon as the rest appear, instead of standing for 30
+  minutes.
+- **A start-up gap at 21:30 now waits instead of cancelling the night.** When the plan
+  cannot be made for a reason a restart leaves behind (no forecast or calibration yet,
+  battery readings not yet consistent), it retries every minute until 22:30, like a stale
+  panel reading. The plan, notification and any cancellation of an earlier planned charge
+  happen once the data is complete, or at 22:30 on what is known. A forecast that has
+  genuinely been inaccurate is still reported at 21:30; a few lasting outages that look like
+  a start-up (no weather data since the add-on started, the house panel missing) are
+  reported at 22:30, still before any planned charge would start.
+
 ## 1.186.4
 
 ### Alert Console: the speaker preview reaches the cordless, and the all-clear can be previewed

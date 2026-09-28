@@ -186,6 +186,13 @@ export interface NightChargeInputs {
    * night the plant spent at its reserve floor.
    */
   basisBlockedBy?: string | null;
+  /**
+   * v1.186.5 — the failure is the shape a start-up leaves (no forecast yet, no scored
+   * calibration day, telemetry not yet coherent), so the evening job waits it out
+   * (eveningBasisDefers). A persistent failure — too few calibration days, a band
+   * coverage miss, a climatology tier, bad configuration — is decided at once.
+   */
+  basisTransient?: boolean;
 
   /** Below this buy, treat the night as "hold" (no meaningful charge). kWh. */
   minBuyKwh: number;
@@ -252,6 +259,13 @@ export interface NightChargePlan {
    * night the plant spent at its reserve floor.
    */
   basisBlockedBy?: string | null;
+  /**
+   * v1.186.5 — the failure is the shape a start-up leaves (no forecast yet, no scored
+   * calibration day, telemetry not yet coherent), so the evening job waits it out
+   * (eveningBasisDefers). A persistent failure — too few calibration days, a band
+   * coverage miss, a climatology tier, bad configuration — is decided at once.
+   */
+  basisTransient?: boolean;
   objective: NightChargeObjective;
   /** The single owner-facing decision. NEVER null (defaults false). */
   chargeTonight: boolean;
@@ -442,10 +456,12 @@ function nullPlan(
   inputs: NightChargeInputs,
   basisComplete: boolean,
   rationale: string,
+  basisTransient = false,
 ): NightChargePlan {
   return {
     generatedAt: inputs.nowMs,
     basisComplete,
+    basisTransient,
     buyKwhDebiased: null,
     buyDebiasFactor: inputs.buyDebiasFactor ?? 1,
     buyDebiasBasis: inputs.buyDebiasBasis ?? 'default',
@@ -524,17 +540,17 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     // v1.148.0 — name it here too: this string reaches the 21:30 notification and
     // the spoken advisory, which is where an operator actually meets the decision.
     const why = inputs.basisBlockedBy ? ` (${inputs.basisBlockedBy})` : '';
-    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`);
+    return nullPlan(inputs, false, `No plan — forecast/telemetry basis incomplete${why}; nothing will be charged.`, inputs.basisTransient === true);
   }
-  if (!socCoherent) return nullPlan(inputs, false, 'No plan — SoC telemetry incoherent (% vs remaining/full mismatch).');
+  if (!socCoherent) return nullPlan(inputs, false, 'No plan — SoC telemetry incoherent (% vs remaining/full mismatch).', true);
   if (inputs.confidenceTier === 'climatology') return nullPlan(inputs, false, 'No plan — horizon is climatology-only (no real forecast); will not size a buy on a guessed sky.');
   // v1.132.0 — basisComplete TRUE here: the forecast/telemetry basis is fine,
   // there is simply no cheap window tonight (Saturday has none on this tariff).
   // Reporting basisComplete:false made HA say "basis incomplete" about a healthy
   // basis, and conflated a normal windowless night with a genuine data outage.
   if (!window || !(window.endMs > window.startMs)) return nullPlan(inputs, true, 'No plan — no valid cheap charge window resolved for tonight.');
-  if (!Number.isFinite(fullKwh) || fullKwh <= 0) return nullPlan(inputs, false, 'No plan — pool capacity unavailable.');
-  if (!Number.isFinite(socNowPct)) return nullPlan(inputs, false, 'No plan — current SoC unavailable.');
+  if (!Number.isFinite(fullKwh) || fullKwh <= 0) return nullPlan(inputs, false, 'No plan — pool capacity unavailable.', true);
+  if (!Number.isFinite(socNowPct)) return nullPlan(inputs, false, 'No plan — current SoC unavailable.', true);
   // v1.39.0 review fix: a non-finite floor/cushion made targetFloorKwh NaN,
   // every bisection comparison false, and the buy silently resolved to the FULL
   // pool headroom — a confident max-buy instead of the fail-closed null the
@@ -544,7 +560,7 @@ export function computeNightChargePlan(inputs: NightChargeInputs): NightChargePl
     return nullPlan(inputs, false, 'No plan — reserve floor / outage cushion is not a finite non-negative number.');
   if (!Number.isFinite(legEff) || legEff <= 0 || !Number.isFinite(dischargeEff) || dischargeEff <= 0 || !Number.isFinite(chargeCapKw) || chargeCapKw < 0)
     return nullPlan(inputs, false, 'No plan — efficiency/charge-power configuration is not a finite number.');
-  if (horizon.length === 0) return nullPlan(inputs, false, 'No plan — empty forecast horizon.');
+  if (horizon.length === 0) return nullPlan(inputs, false, 'No plan — empty forecast horizon.', true);
 
   const fullWh = fullKwh * 1000;
   const reserveKwh = (fullKwh * reserveFloorPct) / 100;
@@ -1751,9 +1767,14 @@ export function buildNightChargeInputs(deps: NightChargeInputDeps): NightChargeI
           : `PV band coverage ${Math.round(bandCoverageFrac * 100)}% < ${Math.round(BASIS_MIN_BAND_COVERAGE * 100)}%`
             + ` (forecast present, tier=${confidenceTier}, calDays ${calScoredDays}/${minCalScoredDays})`;
 
+  // v1.186.5 — no forecast, or not ONE scored calibration day: what a start-up leaves
+  // (a skill scored on a partial device map is now empty rather than wrong). 1-13
+  // scored days is a young history and a coverage miss is a real miss: both persistent.
+  const basisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);
   return {
     nowMs,
     basisBlockedBy,
+    basisTransient,
     fullKwh,
     socNowPct,
     reserveFloorPct,
@@ -2091,6 +2112,27 @@ export const DEFAULT_COST_MAX_SOC_PCT = 90;
  *  22:55 write, so the owner keeps a cancel window. After it the plan is sized on the
  *  last reading and says so — staleness alone never costs the night. */
 export const NIGHT_PLAN_STALE_DEFER_UNTIL_MIN = 22 * 60 + 30;
+
+/**
+ * v1.186.5 — the evening job DEFERS an incomplete basis the way it defers a stale panel:
+ * no plan row, no notification, no latch, no cancel of a prior arm; the minute tick
+ * retries until NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, and from then on the night is decided
+ * on what is known. An incomplete basis at 21:30 is usually a start-up transient: on
+ * 2026-09-27 a restart at 21:06 left a calibration built on one Core's PV in the cache,
+ * the plan read "PV band coverage 7%", latched "no plan" and cancelled the armed 66 kWh
+ * weekend-carry charge; the same inputs read 97% by 22:14. `plan` null = inputs
+ * unavailable (no plan was produced), which is equally transient at start-up. Only a
+ * TRANSIENT-shaped failure defers (`basisTransient`); a persistent one is decided at once.
+ */
+export function eveningBasisDefers(
+  plan: { basisComplete: boolean; basisTransient?: boolean } | null,
+  nowMin: number,
+): boolean {
+  // Only a transient-shaped failure waits; a persistent one is announced at 21:30 so the
+  // owner keeps the full evening to act on it.
+  return (plan == null || (!plan.basisComplete && plan.basisTransient === true))
+    && nowMin < NIGHT_PLAN_STALE_DEFER_UNTIL_MIN;
+}
 
 /**
  * v1.165.0 — the economic ceiling alone: how full it is worth filling the pack
