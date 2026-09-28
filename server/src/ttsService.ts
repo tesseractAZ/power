@@ -18,7 +18,7 @@
  */
 
 import type { Alert } from './alerts.js';
-import { priorityOf, priorityAnnouncementPrefix } from './alertPriority.js';
+import { ALL_CLEAR_MESSAGE, priorityOf, priorityAnnouncementPrefix } from './alertPriority.js';
 
 /* ─── message synthesis ──────────────────────────────────────────── */
 
@@ -39,7 +39,7 @@ import { priorityOf, priorityAnnouncementPrefix } from './alertPriority.js';
  */
 export function buildAlertMessage(level: 'red' | 'yellow' | 'green', alerts: Alert[]): string {
   if (level === 'green') {
-    return 'All clear. All stations report normal.';
+    return ALL_CLEAR_MESSAGE;
   }
 
   const isCritical = level === 'red';

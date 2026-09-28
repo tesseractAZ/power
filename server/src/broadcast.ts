@@ -107,6 +107,7 @@ import {
   klaxonLevelForPriority,
   previewMessageFor,
   priorityAnnouncementPrefix,
+  ALL_CLEAR_PREVIEW_MESSAGE,
 } from './alertPriority.js';
 import { isPriorityEnabled } from './alertSettings.js';
 import { getAlertOnset } from './alertOnset.js';
@@ -635,10 +636,12 @@ export interface BroadcastMonitor {
    * v0.11.0 — render (and optionally play) a per-priority preview announcement
    * for the Alert Settings page. `target: 'browser'` renders only and returns
    * the WAV path for the browser to play via apiUrl(audioPath); `target:
-   * 'speakers'` ALSO plays it to the configured Music Assistant targets.
+   * 'speakers'` ALSO plays it to every configured speaker — the Music Assistant
+   * targets AND the SIP cordless (v1.186.4). v1.186.4 — takes a RUNG, so the
+   * all-clear (`clear`) can be auditioned like the four priorities.
    */
   preview: (
-    priority: AlarmPriority,
+    rung: AlarmRung,
     target: 'browser' | 'speakers',
   ) => Promise<{
     ok: boolean;
@@ -647,6 +650,10 @@ export interface BroadcastMonitor {
     played: 'browser' | 'speakers';
     error?: string;
     cooldownRemainingMs?: number;
+    /** v1.186.4 — speakers that accepted the preview (MA targets + SIP). */
+    delivered?: number;
+    /** v1.186.4 — a caveat the operator should see beside the result. */
+    note?: string;
   }>;
   /**
    * v0.12.0 — fire a dedicated, edge-triggered audible announcement for one
@@ -831,6 +838,38 @@ export function announceTimeoutMs(sizeBytes: number | null | undefined): number 
   const playMs = (sizeBytes / WAV_BYTES_PER_SEC) * 1000;
   const budget = playMs + ANNOUNCE_SETUP_MARGIN_MS;
   return Math.min(ANNOUNCE_TIMEOUT_CEILING_MS, Math.max(ANNOUNCE_TIMEOUT_FLOOR_MS, Math.round(budget)));
+}
+
+/**
+ * v1.186.4 — the speaker-preview verdict across BOTH channels. The preview used to
+ * reach the Music Assistant targets only, so it never proved the cordless; it now
+ * plays to both and reports each. A timeout-shaped SIP failure is UNKNOWN delivery
+ * (the call regularly lands after the HTTP response is lost — the v1.48.3 incident
+ * on the runBroadcast SIP path), so it is a caveat, not a failure. Exported for tests.
+ */
+export function previewSpeakerOutcome(
+  ma: { targets: number; call: { ok: boolean; verified?: boolean; error?: string } | null },
+  sip: { attempted: number; ok: number; errors: string[] },
+): { ok: boolean; delivered: number; error?: string; note?: string } {
+  const errors: string[] = [];
+  const notes: string[] = [];
+  let delivered = sip.ok;
+  if (ma.call) {
+    if (ma.call.ok) delivered += ma.targets;
+    else errors.push(`music_assistant.play_announcement: ${ma.call.error}`);
+    // ok without verified (v1.122.0): accepted, but playback was not confirmed —
+    // the count is what was handed the audio, not what was heard.
+    if (ma.call.ok && ma.call.verified === false) notes.push('the Music Assistant speakers did not confirm playback');
+  }
+  if (sip.errors.length > 0) {
+    if (sipTimeoutLike(sip.errors)) notes.push('the cordless did not confirm in time; it usually still rings');
+    else errors.push(`SIP play_media: ${sip.errors.join('; ')}`);
+  }
+  // Switchboard drops identical audio to the same room inside its dedupe window,
+  // and a repeated preview of one rung is the same cached render.
+  if (sip.attempted > 0) notes.push('the cordless skips the same announcement repeated within a few minutes');
+  const note = notes.length ? notes.join('; ') : undefined;
+  return errors.length ? { ok: false, delivered, error: errors.join('; '), note } : { ok: true, delivered, note };
 }
 
 export function sipTimeoutLike(errors: string[]): boolean {
@@ -2312,13 +2351,16 @@ export function startBroadcastMonitor(
     // preview announcement for the Alert Settings page. Uses the SAME
     // renderAnnouncement(...) call as test()/runBroadcast so the audio (chime
     // repeat + TTS) is identical to what a real alarm would sound like.
-    preview: async (priority: AlarmPriority, target: 'browser' | 'speakers') => {
+    // v1.186.4 — takes a RUNG: `clear` auditions the all-clear tone with the
+    // recovery broadcast's words marked as a preview (ALL_CLEAR_PREVIEW_MESSAGE),
+    // at green as conditionFromAlerts plays it.
+    preview: async (rung: AlarmRung, target: 'browser' | 'speakers') => {
       cfg = loadBroadcastConfig();
-      const spokenText = previewMessageFor(priority);
-      const level = klaxonLevelForPriority(priority);
+      const spokenText = rung === 'clear' ? ALL_CLEAR_PREVIEW_MESSAGE : previewMessageFor(rung);
+      const level = rung === 'clear' ? 'green' : klaxonLevelForPriority(rung);
       // v1.59.0 — preview auditions the rung the real alarm will use. `level` is
       // still computed because the surrounding cooldown/policy code speaks it.
-      const previewRung: AlarmRung = priority;
+      const previewRung: AlarmRung = rung;
 
       // Short, preview-only cooldown — independent of test()'s 10s gate.
       const remaining = Math.max(0, lastPreviewAt + PREVIEW_COOLDOWN_MS - Date.now());
@@ -2358,6 +2400,7 @@ export function startBroadcastMonitor(
         endOfMessagePhrase: cfg.endOfMessagePhrase,
         endOfMessagePhraseEs: cfg.endOfMessagePhraseEs, // v0.67.0 — per-language terminator (English-only preview ignores it)
         endOfMessageGapMs: cfg.endOfMessageGapMs,
+        renderTts: opts.renderTts, // v1.186.4 — the same test seam as runBroadcast; undefined in production
         log,
       });
       lastRender = {
@@ -2382,29 +2425,38 @@ export function startBroadcastMonitor(
         return { ok: true, spokenText, audioPath, played: 'browser' };
       }
 
-      // 3. Speakers target → ALSO play to the configured MA targets, exactly
-      //    like test()/runBroadcast.
+      // 3. Speakers target → play to EVERY configured speaker, the MA targets
+      //    AND the SIP cordless: the set a real alarm reaches. v1.186.4 — the
+      //    preview used to call playAnnounce alone, so the cordless never heard it.
       if (!supervised) {
         return { ok: false, spokenText, audioPath, played: 'speakers', error: 'not supervised' };
       }
+      // Refused exactly where a real alarm is (runBroadcastAttempt): with no Music
+      // Assistant target nothing plays, the cordless included, so a preview that
+      // rang the cordless alone would pass a configuration every real alarm fails.
       if (cfg.targets.length === 0) {
         return { ok: false, spokenText, audioPath, played: 'speakers', error: 'no targets configured' };
       }
-      await detectMusicAssistant();
       const url = `${cfg.audioBase}${opts.cacheUrlPath}/${r.filename}`;
-      const call = await playAnnounce(url, r.sizeBytes);
+      // Both channels run together and the preview waits for both, so the result
+      // reports each rather than the Music Assistant half alone. playSipAnnounce
+      // never throws and returns zero tallies when no SIP target is configured.
+      const [call, sip] = await Promise.all([
+        detectMusicAssistant().then(() => playAnnounce(url, r.sizeBytes)),
+        playSipAnnounce(url),
+      ]);
       lastBroadcastAt = Date.now();
       lastLevel = level; lastBroadcastKind = 'preview';
-      if (!call.ok) {
-        const err = `music_assistant.play_announcement: ${call.error}`;
+      const out = previewSpeakerOutcome({ targets: cfg.targets.length, call }, sip);
+      if (!out.ok) {
         lastOutcome = 'partial';
-        lastErrors = [err];
-        return { ok: false, spokenText, audioPath, played: 'speakers', error: err };
+        lastErrors = [out.error ?? 'preview failed'];
+        return { ok: false, spokenText, audioPath, played: 'speakers', error: out.error, delivered: out.delivered, note: out.note };
       }
       lastOutcome = 'success';
       lastErrors = [];
-      log(`broadcast: preview ${priority} (${level}) → played to ${cfg.targets.length} target(s)`);
-      return { ok: true, spokenText, audioPath, played: 'speakers' };
+      log(`broadcast: preview ${rung} (${level}) → played to ${out.delivered} target(s)`);
+      return { ok: true, spokenText, audioPath, played: 'speakers', delivered: out.delivered, note: out.note };
     },
     // v0.12.0 — dedicated audible for one backup-SoC threshold crossing. Maps
     // priority → klaxon level, then reuses runBroadcast() so the render (chime

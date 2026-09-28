@@ -127,7 +127,7 @@ import {
   type ChimeAssignment,
 } from './chimeConfig.js';
 import type { AnnouncementLevel } from './audioRenderer.js';
-import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority } from './alertPriority.js';
+import { ALARM_PRIORITY_ORDER, ALARM_PRIORITY_META, type AlarmPriority, type AlarmRung } from './alertPriority.js';
 // v0.12.0 — backup-pool SoC audible alarm (escalating priority).
 import { createBatterySocAlarm, socAlarmMessage, socAlarmMessageEs, socAlarmAdvisory, socAlarmAdvisoryEs, socAlarmStatePathFor } from './batterySocAlarm.js';
 import { createRunwayAlarm, shouldGateRunwayAudible, runwayAlarmStatePathFor } from './runwayAlarm.js';
@@ -6244,16 +6244,17 @@ app.put<{ Body: { priorityEnabled?: Partial<Record<AlarmPriority, boolean>> } }>
 );
 
 // POST — preview a priority's announcement in the browser or on the speakers.
-const PREVIEW_PRIORITIES: AlarmPriority[] = ['critical', 'high', 'medium', 'low'];
-app.post<{ Body: { priority?: AlarmPriority; target?: 'browser' | 'speakers' } }>(
+// v1.186.4 — every RUNG, the all-clear included (it has a tone, so it gets a preview).
+const PREVIEW_RUNGS: AlarmRung[] = ['critical', 'high', 'medium', 'low', 'clear'];
+app.post<{ Body: { priority?: AlarmRung; target?: 'browser' | 'speakers' } }>(
   '/api/alert-preview',
   { preHandler: requireWriteAuth },
   async (req, reply) => {
     const priority = req.body?.priority;
     const target = req.body?.target;
-    if (!priority || !PREVIEW_PRIORITIES.includes(priority)) {
+    if (!priority || !PREVIEW_RUNGS.includes(priority)) {
       reply.code(400);
-      return { ok: false, error: 'priority must be one of critical, high, medium, low' };
+      return { ok: false, error: 'priority must be one of critical, high, medium, low, clear' };
     }
     if (target !== 'browser' && target !== 'speakers') {
       reply.code(400);
