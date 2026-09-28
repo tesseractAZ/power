@@ -219,7 +219,7 @@ import {
   type NightActuationState,
 } from './nightChargeActuator.js';
 import { buildNightChargeMessage, sendNotification, loadNotifyConfig } from './notify.js';
-import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN } from './nightChargeAdvisor.js';
+import { DEFAULT_OUTAGE_CUSHION_HOURS, DEFAULT_ISLANDED_LOAD_SAFETY, DEFAULT_COST_MAX_SOC_PCT, parsePersistedIslandedLoad, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, eveningBasisDefers } from './nightChargeAdvisor.js';
 import { apsREvModelFromEnv, rateAt, localParts, seasonOf } from './tariff.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 import { readFileSync } from 'node:fs';
@@ -4312,6 +4312,7 @@ function scoreNightRow(
  */
 /** v1.174.0 — the stale-panel deferral logs once per night, not once a minute. */
 let nightPlanStaleDeferLoggedDay: string | null = null;
+let nightPlanBasisDeferLoggedDay: string | null = null; // v1.186.5
 let nightEveningJobInFlight = false; // v1.39.0: re-entrancy guard — a run slower
 // than the 60 s tick (analytics reports + a weather fetch, latch written only
 // after the awaited send) let overlapping runs each pass the latch check and
@@ -4424,6 +4425,15 @@ async function runNightChargeEveningJobInner(): Promise<void> {
       return;
     }
     const fresh = result;
+    // v1.186.5 — an incomplete basis DEFERS (no row, notify, latch or cancel) until
+    // NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, like a stale panel; see eveningBasisDefers.
+    if (eveningBasisDefers(fresh?.plan ?? null, nowMin)) {
+      if (nightPlanBasisDeferLoggedDay !== today) {
+        nightPlanBasisDeferLoggedDay = today;
+        app.log.info(`night-charge: evening plan DEFERRED for ${today} — ${fresh ? `the basis is incomplete (${fresh.plan.rationale})` : 'inputs unavailable'}; retrying every minute until ${Math.floor(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN / 60)}:${String(NIGHT_PLAN_STALE_DEFER_UNTIL_MIN % 60).padStart(2, '0')}, then deciding on what is known.`);
+      }
+      return;
+    }
     if (fresh) {
       recordNightPlanRow(today, fresh.plan, fresh.extras);
       // v1.39.0: refresh the status route's in-memory mirror immediately — the
