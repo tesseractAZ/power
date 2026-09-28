@@ -1528,14 +1528,38 @@ export function forecastHourPvW(
   return { pv, modelled: false };
 }
 
+/**
+ * v1.186.5 — the home Cores a forecast built from `devices` fits its solar model on
+ * (sorted SNs): projected DPUs listed as connected by any SHP2 (every DPU when none lists
+ * any). ONE definition for DayForecast.solarModelSns, the day-forecast cache check and
+ * computeForecastSkill's actuals, so the three can never disagree on a steady map.
+ */
+export function homeModelSns(devices: Record<string, DeviceSnapshot>): string[] {
+  const connected = shp2ConnectedDpuSns(devices);
+  return Object.values(devices)
+    .filter((d) => d.projection?.kind === 'dpu' && isShp2Connected(d.sn, connected))
+    .map((d) => d.sn)
+    .sort();
+}
+
+/** v1.186.5 — the cached forecast is usable only while its model covers the Cores the
+ *  current map has: a forecast built on a boot-time map that had not yet seen every Core
+ *  is not structurally incomplete while the SHP2 is present, and would otherwise stand
+ *  for its full 30-min TTL (feeding runway, the band and a 22:30 night-charge decision). */
+function dayForecastCacheUsable(devices: Record<string, DeviceSnapshot>, now: number): boolean {
+  if (!dayForecastCache || !dayForecastCacheFresh(now)) return false;
+  const sns = dayForecastCache.value.solarModelSns;
+  return sns == null || sns.join(',') === homeModelSns(devices).join(',');
+}
+
 /** Phase 4: equipment-tuned day-ahead PV / load / SoC forecast. Cached ~30 min. */
 export async function getDayForecast(
   devices: Record<string, DeviceSnapshot>,
   recorder: Recorder,
   log: (m: string) => void = () => {},
 ): Promise<DayForecast> {
-  if (dayForecastCache && dayForecastCacheFresh(Date.now())) {
-    return dayForecastCache.value;
+  if (dayForecastCacheUsable(devices, Date.now())) {
+    return dayForecastCache!.value;
   }
   // v0.69.0 — coalesce concurrent cold-cache callers. The 30-min TTL cache above
   // memoizes the value but not the in-flight promise; during a cold boot every
@@ -1551,8 +1575,8 @@ async function computeDayForecastUncached(
   recorder: Recorder,
   log: (m: string) => void,
 ): Promise<DayForecast> {
-  if (dayForecastCache && dayForecastCacheFresh(Date.now())) {
-    return dayForecastCache.value; // a prior flight may have populated it while we queued
+  if (dayForecastCacheUsable(devices, Date.now())) {
+    return dayForecastCache!.value; // a prior flight may have populated it while we queued
   }
   const now = Date.now();
   const since = now - TYPICAL_HISTORY_MS;
@@ -1969,7 +1993,7 @@ async function computeDayForecastUncached(
     minProjectedSoc: minSoc == null ? null : Math.round(minSoc * 10) / 10,
     minProjectedSocTs: minSocTs,
     solarModel,
-    solarModelSns: dpus.filter((d) => isShp2Connected(d.sn, connected)).map((d) => d.sn).sort(),
+    solarModelSns: homeModelSns(devices),
     deviceModels,
     soiling: weather ? fleetSoilingFromDevices(homeCorePvMaps, wxByHour) : null,
     homeDpusConnected: forecastCoverage.homeDpusConnected,
@@ -5581,7 +5605,7 @@ export async function computeForecastSkill(
   // was fitted on the home Cores in the map it was built from; `dpus` is the map now. A
   // mismatch (a boot-time map that had not yet seen every Core) under-predicts every day
   // by the missing Cores' share, so it is not scored (empty, uncached) until they agree.
-  if (forecast.solarModelSns && forecast.solarModelSns.join(',') !== dpus.map((d) => d.sn).sort().join(',')) {
+  if (forecast.solarModelSns && forecast.solarModelSns.join(',') !== homeModelSns(devices).join(',')) {
     return emptyVal();
   }
 

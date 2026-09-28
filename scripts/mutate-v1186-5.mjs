@@ -73,14 +73,14 @@ const MUTANTS = [
   {
     id: 'vii. ★★★ the skill scores a model fitted on other Cores than the actuals',
     file: AN,
-    find: "  if (forecast.solarModelSns && forecast.solarModelSns.join(',') !== dpus.map((d) => d.sn).sort().join(',')) {",
+    find: "  if (forecast.solarModelSns && forecast.solarModelSns.join(',') !== homeModelSns(devices).join(',')) {",
     to: '  if (false /* MUTANT */) {',
     why: 'A boot map with the SHP2 but one Core fits a third-size model the incompleteness flag misses; the plan reads 7% coverage.',
   },
   {
     id: 'viii. ★★★ the forecast does not record the Cores its model was fitted on',
     file: AN,
-    find: '    solarModelSns: dpus.filter((d) => isShp2Connected(d.sn, connected)).map((d) => d.sn).sort(),',
+    find: '    solarModelSns: homeModelSns(devices),',
     to: '    /* MUTANT */',
     why: 'The Core-set check is inert on every real forecast.',
   },
@@ -97,6 +97,20 @@ const MUTANTS = [
     find: '  const basisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);',
     to: '  const basisTransient = !basisComplete && !forecastPresent; /* MUTANT */',
     why: 'An empty skill after a restart (the partial-map case) is decided at 21:30 as "no plan" and cancels a prior arm.',
+  },
+  {
+    id: 'xi. ★★★ a cached forecast fitted on other Cores is served for its TTL',
+    file: AN,
+    find: "  return sns == null || sns.join(',') === homeModelSns(devices).join(',');",
+    to: '  return true; /* MUTANT */',
+    why: 'A restart shortly before a 22:30 decision serves the partial forecast; the skill is empty and the night is cancelled.',
+  },
+  {
+    id: 'xii. ★★ the model Core set includes projected Cores the panel does not list',
+    file: AN,
+    find: "  return Object.values(devices)\n    .filter((d) => d.projection?.kind === 'dpu' && isShp2Connected(d.sn, connected))",
+    to: "  return Object.values(devices)\n    .filter((d) => d.projection?.kind === 'dpu') /* MUTANT */",
+    why: 'A bench Core joins the model set: the fleet model and the scored actuals include PV that never reaches the house.',
   },
 ];
 

@@ -16,6 +16,7 @@ import {
   computeForecastSkill,
   computeProbabilisticForecast,
   getDayForecast,
+  homeModelSns,
   resetForecastCachesForTesting,
   type DayForecast,
   type HourResponse,
@@ -25,7 +26,7 @@ import { setWeatherCacheForTesting, clearWeatherTestOverride } from '../src/weat
 import { startOfLocalDayMs } from '../src/aggregator.js';
 import type { Recorder } from '../src/recorder.js';
 import type { DeviceSnapshot } from '../src/snapshot.js';
-import { eveningBasisDefers, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN } from '../src/nightChargeAdvisor.js';
+import { eveningBasisDefers, NIGHT_PLAN_STALE_DEFER_UNTIL_MIN, computeNightChargePlan, buildNightChargeInputs } from '../src/nightChargeAdvisor.js';
 import { makeRecorderStub } from './helpers/recorderStub.js';
 
 const H = 3_600_000;
@@ -99,18 +100,16 @@ test('★★★ a model fitted on other Cores than the actuals is not scored; th
   assert.equal(await yesterday(forecast(10, t + 1, false, [SN])), 3.0, 'the same Cores ⇒ scored');
 });
 
-test('★★★ a real day forecast records its model Cores, and the skill scores it against the same map', async () => {
-  // The two sides must be built by the same filter: were they not, every real skill would
-  // come back empty and the night-charge basis gate would fail every night.
-  setWeatherCacheForTesting(null);
+const dpu = (sn: string): DeviceSnapshot =>
+  ({ sn, deviceName: sn, online: true, projection: { kind: 'dpu', soc: 80, packs: [] } } as unknown as DeviceSnapshot);
+const panel = (sns: string[]): DeviceSnapshot =>
+  ({ sn: 'SHP2-T', deviceName: 'Smart Home Panel 2', online: true,
+     projection: { kind: 'shp2', sources: sns.map((sn) => ({ sn, isConnected: true })), pairedCircuits: [], circuits: [] } } as unknown as DeviceSnapshot);
+function pvRecorder(): Recorder {
   const now = Date.now();
   const pv: Array<{ ts: number; value: number }> = [];
   for (let d = 1; d <= 20; d++) { const at = new Date(now - d * DAY); at.setHours(12, 0, 0, 0); pv.push({ ts: at.getTime(), value: 6000 }); }
-  const two: Record<string, DeviceSnapshot> = {
-    'DPU-B': { sn: 'DPU-B', deviceName: 'Core 2', online: true, projection: { kind: 'dpu', soc: 80, packs: [] } } as unknown as DeviceSnapshot,
-    'DPU-A': { sn: 'DPU-A', deviceName: 'Core 1', online: true, projection: { kind: 'dpu', soc: 80, packs: [] } } as unknown as DeviceSnapshot,
-  };
-  const r2 = makeRecorderStub({
+  return makeRecorderStub({
     query: (qsn, metric) => {
       if (qsn === 'weather' && (metric === 'ghi_wm2' || metric === 'ghi_wm2_realized')) return pv.map((p) => ({ ts: p.ts, value: 600 }));
       if (qsn.startsWith('DPU-') && metric === 'pv_total') return pv;
@@ -118,13 +117,37 @@ test('★★★ a real day forecast records its model Cores, and the skill score
     },
     queryMulti: (qsn, metrics) => new Map(metrics.map((m) => [m, qsn.startsWith('DPU-') && m === 'pv_total' ? pv : []])),
   });
-  const fc = await getDayForecast(two, r2, () => {});
-  assert.deepEqual(fc.solarModelSns, ['DPU-A', 'DPU-B']);
-  // No SHP2 in this map ⇒ the forecast is (rightly) structurallyIncomplete; clear that
-  // flag so this isolates the Core-set check on the real builder's solarModelSns.
+}
+
+test('★★★ a real forecast and the skill use ONE Core set: the panel\'s connected Cores, not a projected bench Core', async () => {
+  // Were the two sides built by different filters, every real skill would come back empty
+  // and the night-charge basis gate would fail every night.
+  setWeatherCacheForTesting(null);
+  const map: Record<string, DeviceSnapshot> = {
+    'SHP2-T': panel(['DPU-A', 'DPU-B']), 'DPU-B': dpu('DPU-B'), 'DPU-A': dpu('DPU-A'), 'DPU-BENCH': dpu('DPU-BENCH'),
+  };
+  const r2 = pvRecorder();
+  const fc = await getDayForecast(map, r2, () => {});
+  assert.deepEqual(fc.solarModelSns, ['DPU-A', 'DPU-B'], 'the bench Core is not in the model set');
+  assert.deepEqual(homeModelSns(map), ['DPU-A', 'DPU-B']);
   setWeatherCacheForTesting({ fetchedAt: Date.now(), lat: 0, lon: 0, hours: [{ ts: hourStart() + 6 * H, radiationWm2: 0, cloudCoverPct: 0, tempC: 20 }] });
-  const skill = await computeForecastSkill(two, r2, { ...fc, structurallyIncomplete: false }, 7, 'realized');
-  assert.ok(skill.days.length > 0, 'the same map ⇒ the SN check passes and days are scored');
+  // This minimal panel has no pool capacity ⇒ the forecast is (rightly) structurallyIncomplete;
+  // clear that flag so this isolates the Core-set agreement.
+  const skill = await computeForecastSkill(map, r2, { ...fc, structurallyIncomplete: false }, 7, 'realized');
+  assert.ok(skill.days.length > 0, 'the same map ⇒ the Core-set check passes and days are scored');
+});
+
+test('★★★ a cached forecast whose Cores differ from the map is rebuilt, not served for its TTL', async () => {
+  setWeatherCacheForTesting(null);
+  const r2 = pvRecorder();
+  const partial = { 'SHP2-T': panel(['DPU-A', 'DPU-B']), 'DPU-A': dpu('DPU-A') };
+  const full = { ...partial, 'DPU-B': dpu('DPU-B') };
+  const f1 = await getDayForecast(partial, r2, () => {});
+  assert.deepEqual(f1.solarModelSns, ['DPU-A']);
+  assert.equal(await getDayForecast(partial, r2, () => {}), f1, 'same Cores ⇒ the cache still serves');
+  const f2 = await getDayForecast(full, r2, () => {});
+  assert.notEqual(f2, f1, 'a Core joined ⇒ rebuilt');
+  assert.deepEqual(f2.solarModelSns, ['DPU-A', 'DPU-B']);
 });
 
 test('★★ the probabilistic band is reused only for its own forecast, and never cached on an incomplete one', async () => {
@@ -154,10 +177,26 @@ test('★★★ eveningBasisDefers: a transient-shaped gap waits until the defer
   assert.equal(eveningBasisDefers({ basisComplete: true, basisTransient: false }, at(21, 30)), false);
 });
 
-test('★★ basisTransient: no forecast or zero scored days is transient; a young history or a coverage miss is not', () => {
-  const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/nightChargeAdvisor.ts'), 'utf8');
-  assert.ok(src.includes('const basisTransient = !basisComplete && (!forecastPresent || calScoredDays === 0);'));
-  assert.ok(src.includes('nothing will be charged.`, inputs.basisTransient === true);'), 'the basis gate carries it onto the plan');
+test('★★★ basisTransient reaches the plan: a start-up gap is transient, a young history or a coverage miss is not', () => {
+  const EVE = Date.UTC(2026, 8, 18, 4, 30);
+  const overnight = (ms: number): string | null => { const h = new Date(ms).getUTCHours(); return h >= 6 && h < 12 ? 'overnight' : 'other'; };
+  const hz = Array.from({ length: 30 }, (_, i) => ({ ts: EVE + i * H, pvP10W: 0, loadP90W: 1500 }));
+  const plan = (over: Record<string, unknown>) => computeNightChargePlan(buildNightChargeInputs({
+    gridInputCapKw: null, nowMs: EVE, fullKwh: 92.16, socNowPct: 30, reserveFloorPct: 16, cushionPct: 15, socCoherent: true,
+    legEff: 0.927, dischargeEff: 0.94, chargeCapKw: 7.2, periodIdAt: overnight, cheapPeriodId: 'overnight', windowScanHours: 30,
+    bandHours: hz, dayRollups: [], realizedDailyErrHalfFrac: 0.1, nextRechargeMs: null,
+    ev: null, evMaxLoadW: 11520, confidenceTier: 'forecast', forecastPresent: true, calScoredDays: 30, minCalScoredDays: 7, bandCoverageFrac: 0.9,
+    morningPvSurplusP90Kwh: 10, morningPvSurplusP50Kwh: 5, minBuyKwh: 1, buyDebiasFactor: 1,
+    islandedLoadKw: 3, outageCushionHours: 4, islandedLoadSafety: 1.25, objectiveMode: 'cost', costMaxSocPct: 90, longGapAhead: false,
+    ...over,
+  } as never));
+  const shape = (over: Record<string, unknown>) => { const p = plan(over); return [p.basisComplete, p.basisTransient]; };
+  assert.deepEqual(shape({ calScoredDays: 0 }), [false, true], 'zero scored days (an empty skill after a restart)');
+  assert.deepEqual(shape({ forecastPresent: false }), [false, true], 'no forecast yet');
+  assert.deepEqual(shape({ socCoherent: false }), [false, true], 'telemetry not yet coherent');
+  assert.deepEqual(shape({ calScoredDays: 5 }), [false, false], 'a young history is persistent');
+  assert.deepEqual(shape({ bandCoverageFrac: 0.07 }), [false, false], 'a coverage miss is persistent');
+  assert.equal(plan({}).basisComplete, true);
 });
 
 test('★★ the evening job defers BEFORE it records a row, notifies, latches or cancels a prior arm', () => {

@@ -10,14 +10,17 @@
   band coverage 7%", decided there was no usable plan, and cancelled the 66 kWh charge
   already planned for the night. The same data scored 97% at 22:14. The check is now
   recomputed whenever the forecast is, and is only scored when the forecast's solar model
-  was fitted on the same Cores whose output it is compared with, and the forecast was not
-  built before the house panel was seen.
+  was fitted on the same Cores whose output it is compared with. A forecast built before
+  every Core was seen is rebuilt as soon as the rest appear, instead of standing for 30
+  minutes.
 - **A start-up gap at 21:30 now waits instead of cancelling the night.** When the plan
   cannot be made for a reason a restart leaves behind (no forecast or calibration yet,
   battery readings not yet consistent), it retries every minute until 22:30, like a stale
   panel reading. The plan, notification and any cancellation of an earlier planned charge
-  happen once the data is complete, or at 22:30 on what is known. A lasting problem, such as
-  a forecast that has genuinely been inaccurate, is still reported at 21:30.
+  happen once the data is complete, or at 22:30 on what is known. A forecast that has
+  genuinely been inaccurate is still reported at 21:30; a few lasting outages that look like
+  a start-up (no weather data since the add-on started, the house panel missing) are
+  reported at 22:30, still before any planned charge would start.
 
 ## 1.186.4
 
