@@ -1,3 +1,22 @@
+## 1.186.4
+
+### Alert Console: the speaker preview reaches the cordless, and the all-clear can be previewed
+
+- **"On speakers" now plays on the cordless too.** The Alert Console's speaker preview played on
+  the Music Assistant speakers only, so it never tested the cordless phone, which real alarms
+  reach. It now plays on every configured speaker and reports how many took it. If the cordless
+  refuses the call the preview says so; if the cordless does not answer the request in time, or
+  a Music Assistant speaker does not confirm playback, the preview says delivery is unconfirmed. The phone system skips the same
+  announcement repeated within a few minutes, and the preview result says that too.
+- **The all-clear tone can be heard on the speakers before a real recovery.** The All-clear /
+  Recovery card had a tone choice but no speaker preview, so a new all-clear tone could only be
+  heard in the browser. The card now has **▶ In browser** and **▶ On speakers** like the other
+  categories, speaking "All clear. All stations report normal. This is a preview." The added
+  words keep the preview from being the exact recording a real recovery plays, so the phone
+  system's duplicate filter cannot skip a real all-clear that follows a preview.
+- **The per-card tone button says where it plays.** It is now labelled **▶ Tone in browser**: it
+  plays the bare tone in the browser, not on the house speakers.
+
 ## 1.186.3
 
 ### Honest grid wording, and two boot-time alert fixes
