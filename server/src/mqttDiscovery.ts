@@ -1268,6 +1268,7 @@ export async function startMqttDiscovery(
         // projection it keys on is islanded-only). Same resolver as off_grid /
         // runway_projection_islanded_only above.
         gridBackstopping: liveGridBackstop(snap.devices).backstopping,
+        gridImportLive: liveGridBackstop(snap.devices).importLive, // v1.186.3 — wording only
         nowMs: Date.now(),
       })
       : null;

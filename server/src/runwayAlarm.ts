@@ -85,6 +85,8 @@ export interface GridContext {
   present: boolean;
   /** Grid is actively backstopping NOW (carrying the load at the floor). */
   backstopping: boolean;
+  /** v1.186.3 — measured grid import is flowing (GridBackstop.importLive). Wording only. */
+  importLive?: boolean;
 }
 
 /**
@@ -151,7 +153,10 @@ export function runwayAlarmMessage(p: RunwayAlarmInput, priority: AlarmPriority,
   // v0.23.0 — at the floor WITH the grid backstopping, the pool reaching reserve
   // just transfers to mains; speak a calm advisory, not the shed/generator call.
   if (belowReserveFloor(p) && grid?.backstopping) {
-    return `Advisory. ${poolEn(o)} reached the reserve floor. Now drawing from grid power; no action needed.`;
+    // v1.186.3 — "drawing from grid power" only while grid import is measured.
+    return grid.importLive === true
+      ? `Advisory. ${poolEn(o)} reached the reserve floor. Now drawing from grid power; no action needed.`
+      : `Advisory. ${poolEn(o)} reached the reserve floor. The grid is available as backup; no action needed.`;
   }
   // v0.15.18 — at/below the reserve floor the "projected in N hours" framing is
   // wrong (it already happened); speak the actual condition and the actions.
@@ -185,7 +190,9 @@ export function runwayAlarmMessageEs(p: RunwayAlarmInput, priority: AlarmPriorit
   const he = p.hoursToEmpty;
   const hr = p.hoursToReserve;
   if (belowReserveFloor(p) && grid?.backstopping) {
-    return `Aviso. ${poolEs(o)} alcanzó el nivel mínimo de reserva. Ahora se está tomando energía de la red; no se requiere acción.`;
+    return grid.importLive === true
+      ? `Aviso. ${poolEs(o)} alcanzó el nivel mínimo de reserva. Ahora se está tomando energía de la red; no se requiere acción.`
+      : `Aviso. ${poolEs(o)} alcanzó el nivel mínimo de reserva. La red está disponible como respaldo; no se requiere acción.`;
   }
   if (priority === 'critical' && belowReserveFloor(p)) {
     return `Alarma crítica. Alarma crítica. ${poolEs(o)} está en el nivel mínimo de reserva. Los circuitos sin respaldo pueden quedarse sin energía. Reduzca la carga o encienda el generador.`;

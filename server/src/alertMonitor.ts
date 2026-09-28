@@ -1054,6 +1054,44 @@ export function alertFeedOwning(id: string): string | null {
 }
 
 /**
+ * v1.186.3 — the feeds the analytics worker computes on its copy of the DEVICE map. storm-prep
+ * is not one: stormPrepAlerts reads only the NWS feed, so its answer is evidence whether or not
+ * the store has hydrated.
+ */
+export const DEVICE_MAP_ALERT_FEEDS: ReadonlySet<string> = new Set(['forecast', 'curtailmentAlerts', 'baselineAlerts', 'forecastAlerts']);
+
+/**
+ * v1.186.3 — the live-snapshot families computed from the EcoFlow DEVICE map: computeAlerts'
+ * per-device block (offline … soc-low) and per-panel block (shp2 … backup-soc),
+ * computeLearnedAlerts (peer), the on-peak grid-to-battery verdict (peak-grid-draw, from the
+ * panel and Core flows) and the per-device message-rate floor.
+ */
+export const DEVICE_ALERT_ID_PREFIXES: readonly string[] = [
+  'offline-', 'stale-', 'dpu-', 'mppt-', 'ems-volt-', 'soh-', 'vdiff-', 'pack-defective-', 'balancing-', 'temp-', 'soc-low-',
+  'shp2-', 'circuit-overload-', 'reserve-alarm-blind', 'backup-soc-',
+  'peer-', 'peak-grid-draw', 'msg-rate-floor-',
+];
+
+/**
+ * v1.186.3 — is `id` DERIVED FROM DEVICE DATA: a family in DEVICE_ALERT_ID_PREFIXES, or owned by
+ * a DEVICE_MAP_ALERT_FEEDS feed? Only such an id is absent merely because the device list has
+ * not landed, so only such an id gets the unhydrated-store treatment: the orphan hold, the onset
+ * warm-up counted from hydration, and the boot re-track on its first appearance since boot.
+ * Everything else is computed without the device list and behaves as before v1.186.3: storm-*
+ * (NWS), the alarm-host self-alerts (host-*, tts-render-degraded, system-audible-*), the
+ * recorder's gap alerts (system-outage-*), cloud-session-stale, grid-offgrid (the grid
+ * resolver) and telemetry-blind (poll state).
+ * A POSITIVE list, deliberately: an unlisted family falls back to the pre-v1.186.3 behaviour
+ * (resolved or pushed on its own evidence), where a wrongly-held one would withhold a push.
+ * test/bootHydrationEdges pins every id stem the live producers emit to one side.
+ */
+export function isDeviceDerivedAlertId(id: string): boolean {
+  const feed = alertFeedOwning(id);
+  if (feed != null) return DEVICE_MAP_ALERT_FEEDS.has(feed);
+  return DEVICE_ALERT_ID_PREFIXES.some((p) => id.startsWith(p));
+}
+
+/**
  * v1.186.0 — how long the FIRST evaluation waits for a hydrated store (SnapshotStore
  * firstPollSettledAt: the device list landed and every listed-online device was asked for its
  * quota). startAlertMonitor runs 0.4-0.6 s before the first poll settles (all seven 09-23
@@ -1078,7 +1116,8 @@ export interface AlertFeedRead<T> {
   value: T | null;
   /** A value landed since the previous read (this read's fetch or one still in flight then). */
   fresh: boolean;
-  /** True on exactly one read: the first that returns a value. */
+  /** True on exactly one read: the first that returns a value computed on a hydrated store
+   *  (v1.186.3 — a value whose fetch started before the store hydrated does not count). */
   firstDelivery: boolean;
   ageMs: number | null;
   /** Why the value is carried rather than fresh (budget or failure), else null. */
@@ -1090,7 +1129,7 @@ export interface LastGoodFeed<T> {
   read(start: () => Promise<T>, budgetMs: number): Promise<AlertFeedRead<T>>;
   /** A private copy of the last good value without waiting (null: never delivered). */
   peek(): T | null;
-  /** Has this feed ever delivered a value? */
+  /** Has this feed ever delivered a value computed on a hydrated store (v1.186.3)? */
   warm(): boolean;
   status(): { name: string; warm: boolean; ageMs: number | null; carrying: boolean; lastError: string | null };
 }
@@ -1105,16 +1144,26 @@ export interface LastGoodFeed<T> {
  *   alert objects it receives (spare / off-panel / blind hold); a carried value must come
  *   back unstamped, or a Core re-armed on the roster would stay muted.
  * - Logs only on transitions: cold, first value, carrying, fresh again.
+ * - v1.186.3 — `hydrated` says whether the store is hydrated. A value whose fetch STARTED
+ *   before that is carried and returned like any other (it is what exists), but it is not the
+ *   feed's first delivery and does not make the feed warm: after a boot past the hydration
+ *   bound (a cloud outage, a slow first poll) the worker answers from an empty map, and that
+ *   empty answer used to be taken as "these alarms are absent" — the onset prune then erased
+ *   the pre-restart onsets and the standing alarms rose again as new.
  */
 export function createLastGoodFeed<T>(
   name: string,
   log: (m: string) => void = () => {},
   now: () => number = Date.now,
+  hydrated: () => boolean = () => true,
 ): LastGoodFeed<T> {
   let last: { value: T; atMs: number } | null = null;
   let inflight: Promise<boolean> | null = null;
   let landedSinceRead = false;
   let delivered = false;
+  /** v1.186.3 — a value landed from a fetch started on a hydrated store. */
+  let hydratedLanded = false;
+  let unhydratedLogged = false;
   let carrying = false;
   let carriedPasses = 0;
   let coldLogged = false;
@@ -1126,6 +1175,7 @@ export function createLastGoodFeed<T>(
   // singleton) becomes a rejection and the slot is released only after the caller has
   // stored this very promise in it.
   const startFetch = (start: () => Promise<T>): Promise<boolean> => {
+    const startedHydrated = hydrated(); // v1.186.3 — judged when the fetch starts
     const p: Promise<boolean> = Promise.resolve()
       .then(start)
       .then(
@@ -1133,6 +1183,7 @@ export function createLastGoodFeed<T>(
           last = { value: v, atMs: now() };
           landedSinceRead = true;
           lastError = null;
+          if (startedHydrated) hydratedLanded = true;
           return true;
         },
         (e: any) => {
@@ -1158,14 +1209,18 @@ export function createLastGoodFeed<T>(
       if (timer) clearTimeout(timer);
       const fresh = landedSinceRead;
       landedSinceRead = false;
-      const firstDelivery = last != null && !delivered;
-      if (last != null) delivered = true;
+      const firstDelivery = hydratedLanded && !delivered;
+      if (hydratedLanded) delivered = true;
       const error = fresh ? null
         : outcome === 'budget' ? `still running after its ${budgetMs} ms budget`
         : `failed — ${lastError ?? 'unknown error'}`;
       const ageMs = last != null ? now() - last.atMs : null;
-      if (firstDelivery && coldLogged) {
+      if (firstDelivery && (coldLogged || unhydratedLogged)) {
         log(`alert-feed: ${name} delivered its first value — its alerts join the alarm set`);
+      }
+      if (last != null && !hydratedLanded && !unhydratedLogged) {
+        unhydratedLogged = true;
+        log(`alert-feed: ${name} answered before the store was hydrated — its alerts are provisional; its first delivery counts once computed on a hydrated snapshot`);
       }
       if (!fresh && last == null && !coldLogged) {
         coldLogged = true;
@@ -1184,10 +1239,10 @@ export function createLastGoodFeed<T>(
       return { value: last != null ? clone(last.value) : null, fresh, firstDelivery, ageMs, error };
     },
     peek: () => (last != null ? clone(last.value) : null),
-    warm: () => last != null,
+    warm: () => hydratedLanded,
     status: () => ({
       name,
-      warm: last != null,
+      warm: hydratedLanded,
       ageMs: last != null ? now() - last.atMs : null,
       carrying,
       lastError,
@@ -1206,16 +1261,24 @@ export function createLastGoodFeed<T>(
  * it whose persisted onset predates the boot is a re-track (no rise, seeded like any
  * tick-1 alert). One with no prior onset arose after the restart — a genuine rise, which
  * pushes normally. Pure + exported for tests.
+ *
+ * v1.186.3 — keyed on the alert's FIRST APPEARANCE since boot, not on its feed's first
+ * delivery or the one late-hydration pass. Both missed an alert that first reappears on a
+ * later pass (a cold worker past its budget on the first hydrated report; a feed answering
+ * from an empty map after a boot into a cloud outage). A pre-restart onset survives only
+ * while the id's absence is not evidence (the onset prune), so an id first seen since boot
+ * whose onset predates the boot is a condition that never cleared: a re-track.
  */
 export function bootRetrackDecision(p: {
   firstRun: boolean;
-  /** This alert belongs to a feed delivering its first value on this tick. */
-  firstFeedDelivery: boolean;
+  /** v1.186.3 — a DEVICE-derived id (isDeviceDerivedAlertId) appears for the first time since
+   *  boot on this tick; any other id, its feed delivers its first value on this tick. */
+  firstAppearance: boolean;
   priorOnsetMs: number | undefined;
   bootMs: number;
 }): { retrack: boolean; seedAsBoot: boolean } {
-  const retrack = isBootRetrack({ firstRun: p.firstRun || p.firstFeedDelivery, priorOnsetMs: p.priorOnsetMs, bootMs: p.bootMs });
-  return { retrack, seedAsBoot: p.firstRun || (p.firstFeedDelivery && retrack) };
+  const retrack = isBootRetrack({ firstRun: p.firstRun || p.firstAppearance, priorOnsetMs: p.priorOnsetMs, bootMs: p.bootMs });
+  return { retrack, seedAsBoot: p.firstRun || (p.firstAppearance && retrack) };
 }
 
 export interface Incident {
@@ -2523,11 +2586,26 @@ export function startAlertMonitor(
   // across a slow or failed read (createLastGoodFeed). Resolved lazily: the analytics
   // singleton is initialised by index.ts before the first tick.
   const analyticsClient = (): Pick<AnalyticsClient, 'report'> => deps.analytics ?? getAnalytics();
-  const feedForecast = createLastGoodFeed<DayForecast>('forecast', log);
+  // v1.186.3 — a feed's first delivery (and its warmth) counts only for a value computed on a
+  // hydrated store; see createLastGoodFeed.
+  // A worker-served feed also needs the worker to hold the hydrated map (analyticsClient
+  // snapshotHydrated). storm-prep has no hydration gate: it reads only NWS
+  // (DEVICE_MAP_ALERT_FEEDS), so its first answer is its first delivery, as before v1.186.3.
+  const feedHydrated = (): boolean => store.firstPollSettledAt > 0;
+  const workerHydrated = (): boolean => {
+    if (!feedHydrated()) return false;
+    try {
+      const c = analyticsClient() as Partial<AnalyticsClient>;
+      return typeof c.snapshotHydrated === 'function' ? c.snapshotHydrated() : true;
+    } catch { return false; } // no client yet: its report fails anyway
+  };
+  const feedForecast = createLastGoodFeed<DayForecast>('forecast', log, undefined, workerHydrated);
   const feedStormPrep = createLastGoodFeed<Alert[]>('storm-prep', log);
-  const feedCurtailment = createLastGoodFeed<Alert[]>('curtailmentAlerts', log);
-  const feedBaseline = createLastGoodFeed<Alert[]>('baselineAlerts', log);
-  const feedForecastAlerts = createLastGoodFeed<Alert[]>('forecastAlerts', log);
+  const feedCurtailment = createLastGoodFeed<Alert[]>('curtailmentAlerts', log, undefined, workerHydrated);
+  const feedBaseline = createLastGoodFeed<Alert[]>('baselineAlerts', log, undefined, workerHydrated);
+  const feedForecastAlerts = createLastGoodFeed<Alert[]>('forecastAlerts', log, undefined, workerHydrated);
+  /** v1.186.3 — every alert id seen since boot (bootRetrackDecision's first appearance). */
+  const seenSinceBoot = new Set<string>();
   const alertFeeds: ReadonlyArray<LastGoodFeed<unknown>> = [feedForecast, feedStormPrep, feedCurtailment, feedBaseline, feedForecastAlerts];
   /** v1.186.0 — has every feed delivered since boot? Until then some alerts are UNKNOWN. */
   const alertFeedsWarm = (): boolean => alertFeeds.every((f) => f.warm());
@@ -2539,6 +2617,17 @@ export function startAlertMonitor(
   /** v1.186.0 — may the onset of an absent `id` be pruned now (within the warm-up window)? */
   const onsetPrunable = (id: string): boolean =>
     alertFeedOwning(id) != null ? !coldFeedOwns(id) : storeHydrated();
+  /**
+   * v1.186.3 — a live-snapshot orphan is held while the store is unhydrated. Its absence from
+   * an empty device list is not evidence: offline-* is exempt from the source-evidence gate
+   * (fallingEdgeFrozenByEvidence), so a boot into a cloud outage longer than the warm-up window
+   * pushed "Resolved: … offline" while the add-on could see nothing. Once the store hydrates the
+   * orphan is judged on evidence; ORPHAN_HOLD_MAX_MS bounds the hold, and the drop is logged.
+   * Only a DEVICE-derived id (isDeviceDerivedAlertId): an ended storm or a recovered host
+   * self-alert is absent on evidence and resolves as before.
+   */
+  const heldForHydration = (id: string): boolean =>
+    alertFeedOwning(id) == null && isDeviceDerivedAlertId(id) && !storeHydrated();
   /** v1.186.0 — the orphan sweep's wait for a cold feed is logged once. */
   let orphanFeedHoldLogged = false;
   const captureLr = deps.captureLrFeatures ?? captureLrFeatures;
@@ -2589,13 +2678,12 @@ export function startAlertMonitor(
 
   // v1.186.0 — THE BOOT GATE. No evaluation (so no publish, no firstRun seeding, no boot
   // re-track, no onset prune) until the store is hydrated, or until the bound passes. See
-  // BOOT_HYDRATION_MAX_MS. Opened once; a pass that opened it by the bound is followed by one
-  // late-hydration pass (below) that re-tracks what the first poll brings in.
+  // BOOT_HYDRATION_MAX_MS. Opened once. v1.186.3 — what the first poll brings in after a
+  // bound-opened gate re-tracks on its first appearance (bootRetrackDecision), on whichever
+  // pass that is.
   const hydrationMaxMs = deps.bootHydrationMaxMs ?? BOOT_HYDRATION_MAX_MS;
   let bootGateOpen = false;
   let hydrationBoundReached = hydrationMaxMs <= 0;
-  /** v1.186.0 — the gate opened on the bound; the first pass after hydration still owes a re-track. */
-  let lateHydrationPending = false;
   const storeHydrated = (): boolean => store.firstPollSettledAt > 0;
   const openBootGate = (): boolean => {
     if (bootGateOpen) return true;
@@ -2606,7 +2694,6 @@ export function startAlertMonitor(
     }
     if (hydrationBoundReached || Date.now() - monitorStartMs >= hydrationMaxMs) {
       bootGateOpen = true;
-      lateHydrationPending = true;
       warn(`alert-monitor: WARNING — no complete poll within ${Math.round(hydrationMaxMs / 1000)} s of start; evaluating on the data that exists (offline and telemetry-blind alarms still fire)`);
       return true;
     }
@@ -2628,10 +2715,6 @@ export function startAlertMonitor(
 
   const evaluateInner = async () => {
     const snap = store.get();
-    // v1.186.0 — the first pass on a hydrated store after the gate opened on the bound: the
-    // alerts the first poll brings in re-track like tick-1 alerts (bootRetrackDecision).
-    const lateHydrationPass = lateHydrationPending && !firstRun && storeHydrated();
-    if (lateHydrationPass) lateHydrationPending = false;
     // v1.186.0 — ask every worker/NWS feed NOW, concurrently, and do not wait on them
     // until the live alarms below are published. Each read settles within
     // ALERT_FEED_BUDGET_MS and never rejects: a feed that misses its budget or fails
@@ -2919,16 +3002,12 @@ export function startAlertMonitor(
       baselineAlerts: rBaseline.value,
       forecastAlerts: rForecastAlerts.value,
     }));
-    // v1.186.0 — the alerts of a feed delivering its FIRST value on a later tick than the
-    // first: their boot re-track happens now (bootRetrackDecision). On the first tick the
-    // global firstRun already covers them.
-    const firstDeliveryIds = new Set<string>(firstRun ? [] : workerDerived({
-      forecast: rForecast.firstDelivery ? rForecast.value : null,
-      stormPrep: rStormPrep.firstDelivery ? rStormPrep.value : null,
-      curtailment: rCurtailment.firstDelivery ? rCurtailment.value : null,
-      baselineAlerts: rBaseline.firstDelivery ? rBaseline.value : null,
-      forecastAlerts: rForecastAlerts.firstDelivery ? rForecastAlerts.value : null,
-    }).map((a) => a.id));
+    // v1.186.3 — a NON-device id re-tracks on the first run or on its feed's first delivery only
+    // (storm-prep; bootRetrackDecision), as before v1.186.3: an NWS warning issued an hour into
+    // a cloud outage is a new storm, not one that stood across the restart.
+    const nonDeviceFirstDeliveryIds = new Set<string>(
+      firstRun || !rStormPrep.firstDelivery ? [] : (rStormPrep.value ?? []).map((a) => a.id),
+    );
     // v1.166.0 — a CRITICAL held silent by policy must say so, or it reads as broken.
     for (const a of silentCriticalEdges(silentCriticalLogged, alerts)) {
       log(`alerts: "${a.title}" is CRITICAL but held non-annunciating by policy (bench spare or off-panel Core) — on-screen only, never spoken or pushed`);
@@ -3073,9 +3152,14 @@ export function startAlertMonitor(
         // v1.186.0 — a worker feed's first delivery is that feed's first run
         // (bootRetrackDecision), and only an ANNUNCIATING alert feeds the auto-tune
         // rollups (autoTuneCounts): a bench spare's churn must not demote a home Core's push.
+        // v1.186.3 — a device-derived id on its first appearance since boot, whichever pass
+        // that is; any other id on its feed's first delivery.
         const boot = bootRetrackDecision({
-          firstRun, firstFeedDelivery: firstDeliveryIds.has(a.id) || lateHydrationPass, priorOnsetMs: getAlertOnset(a.id), bootMs,
+          firstRun,
+          firstAppearance: isDeviceDerivedAlertId(a.id) ? !seenSinceBoot.has(a.id) : nonDeviceFirstDeliveryIds.has(a.id),
+          priorOnsetMs: getAlertOnset(a.id), bootMs,
         });
+        seenSinceBoot.add(a.id);
         const counts = autoTuneCounts(a);
         let rollupScope: RollupScope | undefined;
         if (boot.retrack) {
@@ -3450,7 +3534,17 @@ export function startAlertMonitor(
     // later episode of those ids (and read as long-active to the auto-tune).
     // v1.186.0 — scoped per id: a worker-served id waits for ITS feed; a live-snapshot id is
     // pruned once the store is hydrated (its absence is then evidence).
-    syncAlertOnsets(new Set(tracked.keys()), now, { prune: now - bootMs >= LEARNED_RESOLVE_GRACE_MS ? true : onsetPrunable });
+    // v1.186.3 — the warm-up bound runs from HYDRATION, not from boot: a boot into a cloud
+    // outage longer than the window used to prune every feed-owned onset at minute 10 while no
+    // feed had computed on a single device, and the pre-restart alarms then rose as new.
+    // Only for a DEVICE-derived id (isDeviceDerivedAlertId); any other id is not waiting on the
+    // device list, so its bound still runs from boot.
+    const hydratedAtMs = storeHydrated() ? Math.max(bootMs, store.firstPollSettledAt) : null;
+    syncAlertOnsets(new Set(tracked.keys()), now, {
+      prune: (id) => onsetPrunable(id) || (isDeviceDerivedAlertId(id)
+        ? hydratedAtMs != null && now - hydratedAtMs >= LEARNED_RESOLVE_GRACE_MS
+        : now - bootMs >= LEARNED_RESOLVE_GRACE_MS),
+    });
 
     // v1.3.0 (audit rank 2) — retire notified-records orphaned by a restart. Runs ONCE per
     // boot, and only after the engine is warm, so a cold analytics worker can never look
@@ -3501,7 +3595,7 @@ export function startAlertMonitor(
         // it became unobservable.
         unevaluable: (id, rec) => coldFeedOwns(id) || fallingEdgeFrozenByEvidence({
           id, deviceSns: deviceSnRoster, devices: snap.devices, nowMs: now, sourceSn: rec.sourceSn,
-        }),
+        }) || heldForHydration(id),
       });
       // Re-run while anything is held; latching here would strand those records
       // and the fix would be invisible after the first tick.
@@ -3512,10 +3606,13 @@ export function startAlertMonitor(
         if (heldOrphanLogged.has(id)) continue;
         heldOrphanLogged.add(id);
         const r = persistedNotified.get(id);
-        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${coldFeedOwns(id) ? 'alert feeds not yet delivered' : `${r?.sourceSn ?? 'source'} offline/stale`}; not a recovery)`);
+        log(`notify: orphan resolve HELD — "${r?.title ?? id}" (${coldFeedOwns(id) ? 'alert feeds not yet delivered' : heldForHydration(id) ? 'no complete poll yet — the device list is empty' : `${r?.sourceSn ?? 'source'} offline/stale`}; not a recovery)`);
       }
       for (const id of resolve) heldOrphanLogged.delete(id);
-      for (const id of drop) heldOrphanLogged.delete(id);
+      for (const id of drop) {
+        // v1.186.3 — a held orphan reaching the hold deadline is dropped, never resolved; say so.
+        if (heldOrphanLogged.delete(id)) warn(`notify: WARNING — orphan resolve DROPPED at the hold deadline — "${persistedNotified.get(id)?.title ?? id}" was never observable; no "Resolved:" sent, its card stands`);
+      }
       for (const id of resolve) {
         const rec = persistedNotified.get(id)!;
         // Forget the record FIRST, mirroring the v0.80.0 ordering: a failed resolve must

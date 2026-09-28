@@ -255,7 +255,7 @@ function buildNote(
   if (band == null) {
     // v0.92.0 — includes the grid-backstopping case: classifyRunway returns null
     // while the grid carries the load at the floor, so no shed is warranted.
-    return 'Runway healthy (or grid backstopping) — no shed recommended.';
+    return 'Runway healthy (or grid available as backup) — no shed recommended.'; // v1.186.3 — wording
   }
   if (recommended.length === 0) {
     return `Runway in ${band} band but nothing actionable (no allowlisted load is currently on with a measurable draw).`;

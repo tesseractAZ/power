@@ -106,10 +106,11 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
   const offGrid = gridState === 'islanded';
 
   /* ── 1. status header ─────────────────────────────────────────────── */
-  // MODE conveys all three states: ISLANDED / GRID BACKSTOP / GRID STANDBY.
+  // MODE conveys all three states: ISLANDED / GRID IMPORT / GRID STANDBY.
+  // v1.186.3 — "GRID IMPORT", not "GRID BACKSTOP": the state is measured grid flow.
   // Islanded reads as a normal operating posture (off-grid plant by design);
   // an active backstop is the noteworthy transfer; standby is nominal-manual.
-  const modeText = gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'GRID BACKSTOP' : 'GRID STANDBY';
+  const modeText = gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'GRID IMPORT' : 'GRID STANDBY';
   const modeState: AlarmState = gridState === 'islanded' ? 'normal' : gridState === 'active' ? 'warn' : 'manual';
   out.push(statusHeader({
     station: 'POWER · SITE 01 · OFF-GRID PLANT',
@@ -235,8 +236,8 @@ export function renderConsole(view: PlantView, data: PlantData): string[] {
       ...fmtW(grid.homeGridWatts),
       state: gridState === 'islanded' ? 'oos' : gridState === 'active' ? 'normal' : 'comm',
       quality: shp2 ? deviceQuality(shp2) : 'bad',
-      // 8-char flags column: BACKSTOP (8) / STANDBY (7) / ISLANDED (8) all fit.
-      flags: gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'BACKSTOP' : 'STANDBY',
+      // 8-char flags column: IMPORT (6) / STANDBY (7) / ISLANDED (8) all fit.
+      flags: gridState === 'islanded' ? 'ISLANDED' : gridState === 'active' ? 'IMPORT' : 'STANDBY',
     }, W),
     renderTagRow({
       tag: 'GRID.AC.P',

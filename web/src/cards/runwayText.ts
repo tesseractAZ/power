@@ -56,8 +56,10 @@ function fmtClock(ms: number): string {
  * keeps discharging (present true, backstopping false) — the projection is then the live
  * countdown and the alarms speak critical, so the card must not say otherwise. Within the
  * note, "carrying the load" needs grid power actually flowing (importLive).
+ * v1.186.3 — plain words: "supplying the house" only while grid import is measured, otherwise
+ * "available as backup"; the times are outage projections.
  */
 export function gridNote(grid: RunwayProjection['grid']): string | null {
   if (grid?.backstopping !== true) return null;
-  return `${grid.importLive === true ? 'grid is carrying the load' : 'grid available as a backstop'} — these are islanded (grid-loss) projections, not a live countdown`;
+  return `${grid.importLive === true ? 'grid is supplying the house' : 'grid available as backup'} — these are outage projections (if the grid goes down), not a live countdown`;
 }

@@ -97,6 +97,10 @@ export interface PostureInputs {
    *  dim/sweep lights while the grid has it. Absent/false = the full escalation
    *  ladder (the islanding-safe default). */
   gridBackstopping?: boolean;
+  /** v1.186.3 — measured grid import is flowing (liveGridBackstop().importLive). Wording only:
+   *  the reason says the grid is supplying the house only then; otherwise it is available as
+   *  backup. */
+  gridImportLive?: boolean;
   /** Clock injection for deterministic tests. */
   nowMs: number;
 }
@@ -124,7 +128,13 @@ export function rawPosture(i: PostureInputs): PostureResult {
     if (i.curtailmentActive) {
       return { posture: 'surplus', reason: 'PV curtailment active — surplus energy available' };
     }
-    return { posture: 'normal', reason: 'grid backstopping — depletion projection is islanded-only' };
+    // v1.186.3 — "backstopping" read as the grid powering the house while it imported 0 W.
+    return {
+      posture: 'normal',
+      reason: i.gridImportLive === true
+        ? 'grid supplying the house — depletion projection is for an outage only'
+        : 'grid available as backup — depletion projection is for an outage only',
+    };
   }
   if (i.hoursToReserve != null && i.hoursToReserve <= RED_HOURS_TO_RESERVE) {
     return { posture: 'red', reason: `reserve crossing in ${i.hoursToReserve.toFixed(1)}h` };

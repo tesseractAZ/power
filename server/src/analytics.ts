@@ -615,7 +615,8 @@ export function resetForecastAlertsCache(): void { forecastCache = null; }
 /** v1.181.0 — the grid rule for `forecast-runtime-*`, applied on the MAIN thread with the live
  *  resolver: while the grid is backstopping, a warning becomes info and the detail says why.
  *  Pure; returns new objects (the worker's cached alerts are never mutated). */
-export const RUNTIME_GRID_NOTE = ' The grid is backstopping the home now, so this is informational — it applies only if you island.';
+// v1.186.3 — "available as backup": `backstopping` does not mean the grid is supplying the house.
+export const RUNTIME_GRID_NOTE = ' The grid is available as backup, so this is informational — it applies only if you island.';
 export function applyRuntimeGrid(alerts: Alert[], gridBackstopping: boolean): Alert[] {
   if (!gridBackstopping) return alerts;
   return alerts.map((a) => !a.id.startsWith('forecast-runtime-') ? a : {
@@ -2023,7 +2024,7 @@ async function computeDayForecastUncached(
 }
 
 /** Forecast-driven alerts derived from a DayForecast. */
-export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolean; reason?: string }): Alert[] {
+export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolean; reason?: string; importLive?: boolean }): Alert[] {
   const out: Alert[] = [];
   // v0.8.0 — counterfactual driver analysis. Decompose the forecast PV
   // shortfall into "how much is cloud cover" vs "how much is everything
@@ -2068,7 +2069,7 @@ export function forecastDayAlerts(df: DayForecast, grid?: { backstopping: boolea
       device: 'System',
       title: 'Projected battery dip below reserve',
       detail: onGrid
-        ? `Forecast has the backup pool dipping to ~${df.minProjectedSoc}% around ${when} (below the ${df.reserveSoc}% reserve) IF islanded — the grid is backstopping the load now (${grid?.reason ?? 'grid present'}), so no action is needed. ${why}`
+        ? `Forecast has the backup pool dipping to ~${df.minProjectedSoc}% around ${when} (below the ${df.reserveSoc}% reserve) IF islanded — ${grid?.importLive === true ? 'the grid is supplying the house now' : 'the grid is available as backup'} (${grid?.reason ?? 'grid present'}), so no action is needed. ${why}`
         : `Forecast has the backup pool reaching ~${df.minProjectedSoc}% around ${when} — below the ${df.reserveSoc}% reserve. ${why}`,
       facts: [
         { label: 'Projected low SoC', value: `${df.minProjectedSoc}%` },

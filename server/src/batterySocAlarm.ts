@@ -118,8 +118,16 @@ export function socAlarmMessageEs(t: SocThreshold, poolName?: string): string {
 
 /** v0.62.0 — Spanish counterpart of the grid-backstopped SoC advisory
  *  ("drawing from grid power, no action needed"). */
-export function socAlarmAdvisoryEs(pct: number, poolName?: string): string {
-  return `Aviso. Reserva de respaldo${poolName ? ` de ${poolName}` : ''} al ${pct} por ciento. Ahora se está tomando energía de la red; no se requiere acción.`;
+export function socAlarmAdvisoryEs(pct: number, poolName?: string, importLive?: boolean): string {
+  // v1.186.3 — "tomando energía de la red" only while grid import is measured.
+  return `Aviso. Reserva de respaldo${poolName ? ` de ${poolName}` : ''} al ${pct} por ciento. ${importLive === true ? 'Ahora se está tomando energía de la red' : 'La red está disponible como respaldo'}; no se requiere acción.`;
+}
+
+/** v1.186.3 — the English grid-downgraded SoC advisory. "Backstopping" means the grid would take
+ *  over at the reserve floor, not that it is supplying the house: "drawing from grid power" needs
+ *  measured grid import. */
+export function socAlarmAdvisory(pct: number, poolName?: string, importLive?: boolean): string {
+  return `Advisory. ${poolName ? `${poolName} backup pool` : 'Backup pool'} at ${pct} percent — ${importLive === true ? 'drawing from grid power' : 'the grid is available as backup'}, no action needed.`;
 }
 
 /**
