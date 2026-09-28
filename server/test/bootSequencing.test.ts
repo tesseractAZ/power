@@ -284,7 +284,10 @@ test('★★ every id a feed producer emits is owned by that feed; no live-snaps
 test('★★ BRIDGE: the onset prune waits only for the cold feed owning an id; a live id waits for hydration', () => {
   // SOURCE PIN, deliberately: the prune runs inside the tick closure.
   const s = SRC('alertMonitor.ts');
-  assert.ok(s.includes('syncAlertOnsets(new Set(tracked.keys()), now, { prune: now - bootMs >= LEARNED_RESOLVE_GRACE_MS ? true : onsetPrunable });'));
+  // v1.186.3 — the warm-up bound runs from hydration for a device-derived id, from boot for any other.
+  assert.ok(s.includes('prune: (id) => onsetPrunable(id) || (isDeviceDerivedAlertId(id)'));
+  assert.ok(s.includes('? hydratedAtMs != null && now - hydratedAtMs >= LEARNED_RESOLVE_GRACE_MS'));
+  assert.ok(s.includes(': now - bootMs >= LEARNED_RESOLVE_GRACE_MS),'));
   assert.ok(s.includes('alertFeedOwning(id) != null ? !coldFeedOwns(id) : storeHydrated();'));
 });
 

@@ -139,8 +139,8 @@ exactly what the app renders.
   (accounting for the DC→AC discharge loss), grid-aware severity, and a battery-
   SoC floor ladder — driving the audible broadcast. Below the reserve floor it
   says so rather than printing a countdown to a crossing already behind it, and
-  while the grid is carrying the load it states plainly that every time shown is
-  an **islanded** grid-loss projection, not a live countdown.
+  while the grid stands by as backup it states plainly that every time shown is
+  an **outage** projection (if the grid goes down), not a live countdown.
 
 **Delivery surfaces**
 - Audible **broadcast** pipeline: per-target volume pinning, a built-in tone
@@ -215,7 +215,7 @@ Every configuration option is documented in
 ## Development
 
 ```bash
-cd server && npm install && npm test     # 3,251 tests
+cd server && npm install && npm test     # 3,267 tests
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.json      # src
 cd server && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json # src + tests
 cd web    && npm install && npm run build
@@ -261,7 +261,7 @@ actuated-night evidence.
 
 Where a guard is subtle enough that a plausible refactor could silently disarm
 it, a **committed mutation harness** proves the tests would catch that exact
-regression. There are **66 harnesses** (`scripts/mutate-*.mjs`) holding **889
+regression. There are **67 harnesses** (`scripts/mutate-*.mjs`) holding **907
 anchor-asserted mutants**; each reverts a guard in the live source and requires the
 suite to kill it. A harness aborts loudly rather than reporting green if an anchor
 stops matching, and `scripts/check-mutant-anchors.mjs` runs in CI for exactly that

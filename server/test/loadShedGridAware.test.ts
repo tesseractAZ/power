@@ -31,7 +31,7 @@ test('#6 grid-blind: while the grid is backstopping, band is null and NOT action
     grid: { present: true, backstopping: true } });
   assert.equal(withGrid.band, null, 'grid backstopping → classifyRunway null → no band');
   assert.equal(withGrid.actionable, false, 'no shed recommended while the grid carries the floor');
-  assert.match(withGrid.note, /grid backstopping/i);
+  assert.match(withGrid.note, /grid available as backup/i); // v1.186.3 — wording
 
   // Same state with NO grid → the depletion is real and a big shed IS actionable.
   const noGrid = computeAdvisory({ ...BASE, runway: RUNWAY, composition: [load(3000)] });

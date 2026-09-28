@@ -59,11 +59,11 @@ const MUTANTS = [
     why: 'At the reserve floor, with a declared grid the resolver has ruled NOT backstopping and the alarm critical, the card tells the operator to discount the countdown.',
   },
   {
-    id: 'iv-b. \u2605\u2605 backstopping (presence) is shown as the grid carrying the load',
+    id: 'iv-b. \u2605\u2605 backstopping (presence) is shown as the grid supplying the house',
     file: TEXT,
-    find: "  return `${grid.importLive === true ? 'grid is carrying the load'",
-    to: "  return `${grid.backstopping === true /* MUTANT */ ? 'grid is carrying the load'",
-    why: '"grid is carrying the load" at 0 W imported, beside an Energy flow card reading GRID STANDBY.',
+    find: "  return `${grid.importLive === true ? 'grid is supplying the house'",
+    to: "  return `${grid.backstopping === true /* MUTANT */ ? 'grid is supplying the house'",
+    why: '"grid is supplying the house" at 0 W imported, beside an Energy flow card reading GRID STANDBY.',
   },
   {
     id: 'iv-c. \u2605 a tight trough is coloured more alarming than a real crossing',

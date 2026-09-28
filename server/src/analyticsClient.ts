@@ -28,6 +28,11 @@ export interface AnalyticsClient {
    *  monitor's first reports follow, and must be computed on every Core the first poll
    *  projected, not on the partial map of the first quota to land). */
   flushSnapshot(): void;
+  /** v1.186.3 — the store has hydrated (flushSnapshot) AND the worker has since been handed a
+   *  snapshot, so a report requested now is computed on the hydrated map. Until then a report
+   *  may be computed on an empty or partial one (the first-snapshot wait lets a request through
+   *  after firstSnapshotWaitMs). Optional so test stubs need not model it (absent ⇒ hydrated). */
+  snapshotHydrated?(): boolean;
   /** v1.119.0 — publish the OWNER reserve floor to the worker. Module-level
    *  publishers do NOT cross a worker boundary: v1.115.0 set one on the main
    *  thread and analytics.ts read it inside the worker, where it was always
@@ -153,6 +158,18 @@ export function createAnalyticsClient(
   let gateOpen = false;
   let gateTimer: NodeJS.Timeout | null = null;
   let gateWaiters: Array<() => void> = [];
+  // v1.186.3 — see snapshotHydrated. A report cached, or still in flight, from before the worker
+  // held the hydrated map must not be served after it: its value was computed on the empty one.
+  let hydrationFlushed = false;
+  let snapshotHydrated = false;
+  let reportGen = 0;
+  const markSnapshotHydrated = () => {
+    if (snapshotHydrated) return;
+    snapshotHydrated = true;
+    reportGen++;
+    reportCache.clear();
+    inflightReport.clear();
+  };
 
   // Spawn the .mjs bootstrap (loads natively), which registers tsx's loader
   // in the worker thread and then imports the real .ts worker. See
@@ -167,6 +184,7 @@ export function createAnalyticsClient(
     try {
       worker.postMessage({ kind: 'snapshot', snapshot: lastSnapshot });
       if (snapHasProjections(lastSnapshot)) workerFed = true;
+      if (hydrationFlushed) markSnapshotHydrated();
     } catch { /* worker mid-respawn; replayed on ready */ }
   };
   const openGate = () => {
@@ -307,13 +325,14 @@ export function createAnalyticsClient(
       //    mutable ref. Rejections are NOT cached (no negative caching) and free the
       //    coalesce slot so the next call re-tries the worker.
       //    v1.186.0 — never ahead of the worker's first snapshot (awaitFirstSnapshot).
+      const gen = reportGen; // v1.186.3 — a value from before the hydrated map is not cached
       const p = awaitFirstSnapshot()
         .then(() => requestWithRetry<T>({ kind: 'report', name, args: a }))
         .then((v) => {
-          if (ttl > 0) reportCache.set(key, { value: v, expiresAt: Date.now() + ttl });
+          if (ttl > 0 && gen === reportGen) reportCache.set(key, { value: v, expiresAt: Date.now() + ttl });
           return v;
         })
-        .finally(() => { inflightReport.delete(key); });
+        .finally(() => { if (inflightReport.get(key) === p) inflightReport.delete(key); });
       inflightReport.set(key, p as Promise<unknown>);
       return p.then((v) => cloneResult(v) as T);
     },
@@ -327,7 +346,14 @@ export function createAnalyticsClient(
       // 750 ms throttle tick, and releases any report waiting on it.
       if (!workerFed && snapHasProjections(snap)) { postSnapshot(); openGate(); }
     },
-    flushSnapshot: () => { if (snapHasProjections(lastSnapshot)) { postSnapshot(); openGate(); } },
+    flushSnapshot: () => {
+      hydrationFlushed = true;
+      if (snapHasProjections(lastSnapshot)) { postSnapshot(); openGate(); }
+      // v1.186.3 — nothing newer to post: the worker already holds the latest map. Otherwise the
+      // next post (the throttle, within 750 ms) marks it.
+      else if (!dirty) markSnapshotHydrated();
+    },
+    snapshotHydrated: () => snapshotHydrated,
     pushOwnerFloor: (pct) => {
       if (pct === lastOwnerFloor) return;      // idempotent; changes are rare
       lastOwnerFloor = pct;

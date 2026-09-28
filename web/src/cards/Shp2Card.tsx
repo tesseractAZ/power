@@ -18,7 +18,7 @@ import type { DpuViaShp2 } from './DpuCard';
 //   (1) ACTIVE   — grid carrying the home right now (homeGridWatts>0, or DPU
 //                  ac_in importWatts>0): show as a live source → "Grid X.X kW → home".
 //   (2) STANDBY  — grid present/declared but not needed (battery/PV covering):
-//                  "Grid: available (backstop)".
+//                  "Grid: available (standby backup)" (v1.186.3 wording).
 //   (3) ISLANDED — grid not present: "Off-grid".
 type GridStatus =
   | { state: 'active'; homeWatts: number; importWatts: number; reason?: string }
@@ -79,12 +79,12 @@ function GridStatusLine({ d }: { d: DeviceSnapshot }) {
         <span style={{ color: UI.muted }}> → home</span>
       </span>
     );
-    detail = status.homeWatts > 0 ? 'backstopping the home now' : 'charging the cores (ac-in)';
+    detail = status.homeWatts > 0 ? 'supplying the home now' : 'charging the cores (ac-in)'; // v1.186.3 — wording
   } else if (status.state === 'standby') {
     dot = HUES.grid;
     label = (
       <span style={{ color: UI.muted }}>
-        Grid: <span className="font-medium" style={{ color: UI.ink }}>available</span> (standby backstop)
+        Grid: <span className="font-medium" style={{ color: UI.ink }}>available</span> (standby backup)
       </span>
     );
     detail = 'connected, not needed — battery/PV covering';

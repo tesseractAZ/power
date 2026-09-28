@@ -300,18 +300,18 @@ test('★ every value is a private copy: a mute stamped on one tick does not per
   assert.equal(f.peek()![0].annunciate, undefined);
 });
 
-test('bootRetrackDecision: a feed\'s first delivery re-tracks only what predates the boot', () => {
+test('bootRetrackDecision: a first appearance since boot re-tracks only what predates the boot', () => {
   const bootMs = 1_000_000;
   // Tick 1: unchanged from isBootRetrack + bootSeedNotified.
-  assert.deepEqual(bootRetrackDecision({ firstRun: true, firstFeedDelivery: false, priorOnsetMs: bootMs - 5, bootMs }), { retrack: true, seedAsBoot: true });
-  assert.deepEqual(bootRetrackDecision({ firstRun: true, firstFeedDelivery: false, priorOnsetMs: undefined, bootMs }), { retrack: false, seedAsBoot: true });
-  // A feed delivering late: a pre-restart condition is a re-track (no rise, no re-push)…
-  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstFeedDelivery: true, priorOnsetMs: bootMs - 5, bootMs }), { retrack: true, seedAsBoot: true });
+  assert.deepEqual(bootRetrackDecision({ firstRun: true, firstAppearance: false, priorOnsetMs: bootMs - 5, bootMs }), { retrack: true, seedAsBoot: true });
+  assert.deepEqual(bootRetrackDecision({ firstRun: true, firstAppearance: false, priorOnsetMs: undefined, bootMs }), { retrack: false, seedAsBoot: true });
+  // v1.186.3 — first seen on a later pass: a pre-restart condition is a re-track (no rise, no re-push)…
+  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstAppearance: true, priorOnsetMs: bootMs - 5, bootMs }), { retrack: true, seedAsBoot: true });
   // …but one that arose after the restart is a genuine rise and pushes normally.
-  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstFeedDelivery: true, priorOnsetMs: undefined, bootMs }), { retrack: false, seedAsBoot: false });
-  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstFeedDelivery: true, priorOnsetMs: bootMs + 5, bootMs }), { retrack: false, seedAsBoot: false });
+  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstAppearance: true, priorOnsetMs: undefined, bootMs }), { retrack: false, seedAsBoot: false });
+  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstAppearance: true, priorOnsetMs: bootMs + 5, bootMs }), { retrack: false, seedAsBoot: false });
   // Steady state.
-  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstFeedDelivery: false, priorOnsetMs: bootMs - 5, bootMs }), { retrack: false, seedAsBoot: false });
+  assert.deepEqual(bootRetrackDecision({ firstRun: false, firstAppearance: false, priorOnsetMs: bootMs - 5, bootMs }), { retrack: false, seedAsBoot: false });
 });
 
 test('syncAlertOnsets({ prune: false }) keeps an absent id\'s onset (unknown is not cleared)', () => {
