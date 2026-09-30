@@ -611,3 +611,132 @@ test('advanceVdiffKnee / vdiffCritMute: charge input is its own, narrower eviden
   assert.equal(advanceVdiffKnee(undefined, obs({ chargeW: 300, spreadMv: 19 }), 0).lastChargeMs, null, 'below the warn line');
   assert.equal(advanceVdiffKnee(undefined, obs({ chargeW: null }), 0).lastChargeMs, null, 'no stream value: no evidence');
 });
+
+/* ── 5. the top-of-charge SESSION bounds both graces (v1.187.0 log review) ───────────── */
+
+/** Two readings alternating every `periodMs` (the BMS publishes cell voltages every ~180 s), on the
+ *  20-second monitor tick. `hi` / `lo` are each a full reading. */
+function alternating(
+  start: number, spanMs: number, periodMs: number,
+  hi: Record<Field, number>, lo: Record<Field, number>,
+  gapAt?: (t: number) => boolean,
+): Array<{ t: number; v: Record<Field, number>; crit?: Alert }> {
+  const out: Array<{ t: number; v: Record<Field, number>; crit?: Alert }> = [];
+  for (let t = 0; t <= spanMs; t += TICK_MS) {
+    const v = Math.floor(t / periodMs) % 2 === 0 ? hi : lo;
+    const gap = gapAt?.(t) ?? false;
+    const crit = tickAt(start + t, v, gap ? { maxVolDiffMv: null } : {});
+    if (!gap) out.push({ t, v, crit });
+  }
+  return out;
+}
+
+test('★★★ REAL FAULT — a spread that follows the charge current (95 / 45 mV on alternate readings, 97%, 600 W) is announced once the SESSION grace lapses', () => {
+  // A high-resistance cell during an afternoon PV charge: the spread tracks the charge current,
+  // and the BMS publishes about every 180 s. Every dip under 50 mV restarted the critical-line
+  // clock, so each crossing earned a fresh 5-minute charging grace: in v1.187.0 as merged, 0 of
+  // the critical ticks over 3 h annunciated. v1.186.5 annunciated every one (no balancing).
+  const PERIOD = 180_000;
+  const ticks = alternating(T0, 3 * 3_600_000, PERIOD,
+    { vd: 95, vmax: 3490, soc: 97, bal: 0, in: 600 }, { vd: 45, vmax: 3440, soc: 97, bal: 0, in: 600 });
+  const crits = ticks.filter((k) => k.crit);
+  assert.ok(crits.length > 200, 'the fixture sits on the critical line for half the ticks');
+  const first = crits.find((k) => k.crit!.annunciate !== false)!;
+  assert.ok(first, 'the fault is announced');
+  // The first critical reading at or past VDIFF_KNEE_RELAX_MS from the session's first crossing:
+  // the grace covers the first reading only; the next 95 mV reading (t = 6 min) speaks.
+  assert.equal(first.t, 2 * PERIOD);
+  assert.ok(first.t <= VDIFF_KNEE_RELAX_MS + PERIOD, 'within one reading of the 5-minute bound');
+  for (const k of crits.filter((x) => x.t < first.t)) {
+    assert.ok(k.t < VDIFF_KNEE_RELAX_MS, `+${k.t / 1000}s: silent only inside the session's first 5 minutes`);
+    assert.equal(k.crit!.mutedBy, 'charging');
+  }
+  for (const k of crits.filter((x) => x.t >= first.t)) {
+    assert.notEqual(k.crit!.annunciate, false, `+${k.t / 1000}s: a later crossing earned a fresh grace`);
+  }
+});
+
+test('★★★ REAL FAULT — the end-of-charge grace is bounded by the session too (100 mV idle / 45 mV balancing on alternate readings)', () => {
+  // Balancing on for the low readings keeps "the last balancing" within 5 minutes of every high
+  // reading, and each dip under 50 mV restarted the 20-minute duration bound: muted indefinitely.
+  const PERIOD = 180_000;
+  const ticks = alternating(T0, 2 * 3_600_000, PERIOD,
+    { vd: 45, vmax: 3440, soc: 99, bal: 1, in: 0 }, { vd: 100, vmax: 3495, soc: 99, bal: 0, in: 0 });
+  const crits = ticks.filter((k) => k.crit);
+  const first = crits.find((k) => k.crit!.annunciate !== false)!;
+  assert.ok(first, 'the fault is announced');
+  const sessionFrom = crits[0].t; // the first crossing: t = 180 s
+  assert.ok(first.t >= sessionFrom + VDIFF_KNEE_MAX_MUTE_MS - PERIOD, 'the end-of-charge grace still applies inside its bound');
+  assert.ok(first.t <= sessionFrom + VDIFF_KNEE_MAX_MUTE_MS + 2 * PERIOD,
+    `+${first.t / 1000}s: later than one reading past VDIFF_KNEE_MAX_MUTE_MS from the session's first crossing`);
+  for (const k of crits.filter((x) => x.t < first.t)) assert.equal(k.crit!.mutedBy, 'end-of-charge');
+  for (const k of crits.filter((x) => x.t >= first.t)) assert.notEqual(k.crit!.annunciate, false, `+${k.t / 1000}s`);
+  assert.match(first.crit!.detail, /Did not relax at the top of charge\./);
+});
+
+test('★★★ a reading gap during a sub-line reading does not re-grant the session grace', () => {
+  // As the 95 / 45 fault, with the reading missed during the second (45 mV) period: no critical
+  // episode is running then, and dropping the state would hand the next crossing a fresh grace.
+  const PERIOD = 180_000;
+  const ticks = alternating(T0, 20 * 60_000, PERIOD,
+    { vd: 95, vmax: 3490, soc: 97, bal: 0, in: 600 }, { vd: 45, vmax: 3440, soc: 97, bal: 0, in: 600 },
+    (t) => t >= PERIOD + 60_000 && t < PERIOD + 120_000);
+  const first = ticks.find((k) => k.crit && k.crit.annunciate !== false)!;
+  assert.equal(first.t, 2 * PERIOD, 'the next crossing speaks, gap or not');
+});
+
+test('★★ a NEW top-of-charge session re-earns its graces (the session ends when the pack reads below 95%)', () => {
+  tickAt(T0, { vd: 95, vmax: 3490, soc: 100, bal: 1, in: 0 });
+  tickAt(T0 + TICK_MS, { vd: 60, vmax: 3450, soc: 90, bal: 0, in: 0 }); // discharged below the top
+  for (let t = T0 + 2 * TICK_MS; t < T0 + 30 * 60_000; t += 60_000) tickAt(t, { vd: 30, vmax: 3440, soc: 92, bal: 0, in: 0 });
+  // Charged back up 30 minutes later: a fresh knee in a fresh session.
+  tickAt(T0 + 30 * 60_000, { vd: 95, vmax: 3490, soc: 99, bal: 1, in: 200 });
+  const a = tickAt(T0 + 31 * 60_000, { vd: 95, vmax: 3485, soc: 100, bal: 0, in: 0 });
+  assert.equal(a!.annunciate, false);
+  assert.equal(a!.mutedBy, 'end-of-charge');
+});
+
+test('★★ …while a SECOND knee in the same session, past the bound, annunciates (fail loud)', () => {
+  tickAt(T0, { vd: 95, vmax: 3490, soc: 100, bal: 1, in: 0 });
+  assert.equal(tickAt(T0 + 60_000, { vd: 95, vmax: 3485, soc: 100, bal: 0, in: 0 })!.mutedBy, 'end-of-charge');
+  // Relaxed and resting at the top for 25 minutes (critSinceMs ends under 50 mV).
+  for (let t = T0 + 2 * 60_000; t < T0 + 25 * 60_000; t += 60_000) tickAt(t, { vd: 30, vmax: 3440, soc: 99, bal: 0, in: 0 });
+  const bal = tickAt(T0 + 25 * 60_000, { vd: 92, vmax: 3490, soc: 99, bal: 1, in: 0 });
+  assert.equal(bal!.mutedBy, 'balancing', 'the balancing mute is not session-bound (its own 20-minute bound applies)');
+  const after = tickAt(T0 + 26 * 60_000, { vd: 92, vmax: 3485, soc: 100, bal: 0, in: 0 });
+  assert.notEqual(after!.annunciate, false, 'no second end-of-charge grace in one session');
+});
+
+test('advanceVdiffKnee: the session clock (graceFromMs) — start, carry, end', () => {
+  const obs = (o: Partial<VdiffKneeObservation>): VdiffKneeObservation =>
+    ({ packSn: 'P', packSoc: 99, spreadMv: 95, balancing: false, chargeW: 600, ...o });
+  // Starts at the first crossing at the top of charge.
+  let s = advanceVdiffKnee(undefined, obs({}), 0);
+  assert.equal(s.graceFromMs, 0);
+  // Survives a dip under 50 mV (which ends the critical-line episode) and the next crossing.
+  s = advanceVdiffKnee(s, obs({ spreadMv: 45 }), 180_000);
+  assert.equal(s.critSinceMs, null);
+  assert.equal(s.graceFromMs, 0);
+  s = advanceVdiffKnee(s, obs({}), 360_000);
+  assert.equal(s.critSinceMs, 360_000);
+  assert.equal(s.graceFromMs, 0, 'the session keeps its first crossing');
+  assert.equal(vdiffCritMute(s, obs({}), 360_000), null, 'charging: past the session bound');
+  // An unknown SoC is not evidence the pack left the top (fail loud)…
+  s = advanceVdiffKnee(s, obs({ packSoc: null, spreadMv: 45 }), 400_000);
+  assert.equal(s.graceFromMs, 0);
+  // …a reading below the top of charge is.
+  s = advanceVdiffKnee(s, obs({ packSoc: 94, spreadMv: 45 }), 420_000);
+  assert.equal(s.graceFromMs, null);
+  // A crossing that BEGAN lower on the plateau (93%) starts the session from that crossing.
+  let p = advanceVdiffKnee(undefined, obs({ packSoc: 93 }), 0);
+  assert.equal(p.critSinceMs, 0);
+  assert.equal(p.graceFromMs, null, 'not yet at the top of charge');
+  assert.equal(vdiffCritMute(p, obs({ packSoc: 93 }), 0), null, 'below the top: no grace at all');
+  p = advanceVdiffKnee(p, obs({ packSoc: 96 }), 180_000);
+  assert.equal(p.graceFromMs, 0, "from the episode's own first crossing, not the tick it reached 95%");
+  assert.equal(vdiffCritMute(p, obs({ packSoc: 96 }), 180_000), 'charging');
+  p = advanceVdiffKnee(p, obs({ packSoc: 96 }), VDIFF_KNEE_RELAX_MS);
+  assert.equal(vdiffCritMute(p, obs({ packSoc: 96 }), VDIFF_KNEE_RELAX_MS), null, '5 minutes from the first crossing');
+  // A hand-built state with no session clock gets no grace.
+  assert.equal(vdiffCritMute({ ...p, graceFromMs: null }, obs({ packSoc: 96 }), 60_000), null);
+});

@@ -42,6 +42,7 @@ import { mpptProducing } from './mppt.js';
 import { getReserveArbitrageRaised } from './nightChargeActuator.js';
 import { confirmDefectivePack, markPackPresent, getConfirmedRecord, retireAbsentPacks } from './defectivePackLatch.js';
 import { liveHostTemp, hostTempLevel, HOST_TEMP_WARN_C, HOST_TEMP_CRIT_C, type HostTempLevel } from './hostThermal.js';
+import { getAlertOnset } from './alertOnset.js';
 import { currentAssessment } from './selfVitals.js';
 import { ttsRenderHealth } from './audioRenderer.js';
 
@@ -413,9 +414,18 @@ const VOL_DIFF_WARN_RISE_MV = 24;
  *      · CHARGE INPUT alone has no benign precedent at the line (charge-only peaks: 84 mV on
  *        09-25 at 551 W, 77 mV on 07-23; the one charge-only reading at or above 90 mV in
  *        history is the 08-22/23 Core 3 pack 4 fault). It holds a critical for at most
- *        VDIFF_KNEE_RELAX_MS measured from the FIRST crossing (critSinceMs), never from the
- *        last charge tick — a steady trickle must not keep refreshing its own mute — and it
- *        counts only as the stream delivered it (vdiffKneeChargeW), never the REST replay;
+ *        VDIFF_KNEE_RELAX_MS measured from the FIRST crossing of the session (graceFromMs),
+ *        never from the last charge tick — a steady trickle must not keep refreshing its own
+ *        mute — and it counts only as the stream delivered it (vdiffKneeChargeW), never the
+ *        REST replay;
+ *  - session (v1.187.0 log review): both graces are measured from the first critical-line
+ *    crossing of the TOP-OF-CHARGE SESSION (graceFromMs) — the charge grace for at most
+ *    VDIFF_KNEE_RELAX_MS, the end-of-charge grace for at most VDIFF_KNEE_MAX_MUTE_MS — not of
+ *    the current crossing. The critical-line clock (critSinceMs) restarts whenever the spread
+ *    falls under 50 mV, so a spread that follows the charge current on isolated BMS readings
+ *    (95 / 45 mV every ~180 s) earned a fresh grace on every crossing and was never announced
+ *    for the whole afternoon. The session ends only when the pack reads below the top of
+ *    charge; a second knee later in the same session therefore annunciates (fail loud);
  *  - fail-to-relax: VDIFF_KNEE_RELAX_MS after the last balancing tick, a spread still at or
  *    above the critical line annunciates;
  *  - duration: VDIFF_KNEE_MAX_MUTE_MS after the spread first reached the critical line, it
@@ -438,7 +448,8 @@ export const VOL_DIFF_KNEE_HARD_MV = 150;
  *  the slow Core 3 packs of 08-22/23 still read 110-134 mV then. */
 export const VDIFF_KNEE_RELAX_MS = 5 * 60_000;
 /** The longest a plateau-critical spread may stay silent at all, measured from the tick it
- *  first reached the critical line. Longest benign run at or above 90 mV: 9 minutes (Core 1
+ *  first reached the critical line — and the longest the end-of-charge grace lasts in one
+ *  top-of-charge session (graceFromMs). Longest benign run at or above 90 mV: 9 minutes (Core 1
  *  pack 1, 2026-09-29 15:31:57 → 15:40:58); twice that. */
 export const VDIFF_KNEE_MAX_MUTE_MS = 20 * 60_000;
 /** Pack charge input that counts as top-of-charge activity. Observed knee charging: 101-1301 W. */
@@ -448,8 +459,8 @@ export const VDIFF_KNEE_CHARGE_W = 50;
  *  (liveFlow), and widening it for the card must not widen this mute. 150 s spans two missed
  *  ~60 s full pack bursts; a stopped pack's 0 W arrives as a per-change delta well inside it. */
 export const VDIFF_KNEE_STREAM_FRESH_MS = 150_000;
-/** How long a pack's critical-line clock (critSinceMs) is carried across a reading gap (the
- *  device offline, a missed poll). Carrying it is the fail-LOUD direction — the duration bound
+/** How long a pack's critical-line clock (critSinceMs) and session grace clock (graceFromMs) are
+ *  carried across a reading gap (the device offline, a missed poll). Carrying it is the fail-LOUD direction — the duration bound
  *  keeps counting — so the cap only keeps a long-gone episode from greeting a returning pack.
  *  The activity evidence is never carried (see computeAlerts' prune). */
 export const VDIFF_KNEE_GAP_CARRY_MS = 60 * 60_000;
@@ -471,6 +482,12 @@ export interface VdiffKneeState {
   /** First tick of the current unbroken run under the plateau critical line (still at or above
    *  VOL_DIFF_CRIT_MV) while critSinceMs stands. */
   belowCritSinceMs: number | null;
+  /** v1.187.0 (log review) — the TOP-OF-CHARGE SESSION's grace clock: the first critical-line
+   *  crossing (the critSinceMs of the episode then running) seen while the pack is at or above
+   *  VOL_DIFF_PLATEAU_QUIET_SOC_PCT. Unlike critSinceMs it survives the spread falling under
+   *  the line, and is cleared only by a reading below the top of charge (a missing SoC does not
+   *  clear it). Carried across a reading gap like critSinceMs. Bounds both graces. */
+  graceFromMs: number | null;
   /** Last tick this pack produced a reading (the VDIFF_KNEE_GAP_CARRY_MS cap). */
   lastSeenMs: number | null;
 }
@@ -518,7 +535,7 @@ export function advanceVdiffKnee(
   const sameHw = prev != null && !(prev.packSn != null && obs.packSn != null && prev.packSn !== obs.packSn);
   const s: VdiffKneeState = sameHw
     ? { ...prev, packSn: obs.packSn ?? prev.packSn, lastSeenMs: nowMs }
-    : { packSn: obs.packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, lastSeenMs: nowMs };
+    : { packSn: obs.packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, graceFromMs: null, lastSeenMs: nowMs };
   const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
   const onPlateau = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_SOC_PCT;
   const kneeSpread = obs.spreadMv >= VOL_DIFF_WARN_MV;
@@ -544,7 +561,33 @@ export function advanceVdiffKnee(
       s.belowCritSinceMs = null;
     }
   }
+  // v1.187.0 (log review) — the session's grace clock (graceFromMs). Started by the first crossing
+  // at the top of charge — from the episode's own first crossing when that began lower on the
+  // plateau — and untouched by the critSinceMs resets above. Only a pack READ below the top of
+  // charge ends the session: an unknown SoC is not evidence it left (fail loud).
+  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) {
+    s.graceFromMs = null;
+  } else if (topOfCharge && obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) {
+    s.graceFromMs ??= s.critSinceMs ?? nowMs;
+  }
   return s;
+}
+
+/**
+ * v1.187.0 (log review) — the knee state a pack STARTS from when it has none (a restart: the state
+ * is in memory). The persisted onset of its `vdiff-crit-<sn>-<pk>` (alertOnset.ts), when present,
+ * seeds both clocks — critSinceMs and the session's graceFromMs — so an auto-update restart
+ * cannot restart the 20-minute bound or re-grant a grace to a critical that was already standing
+ * (a restart at minute 21 bought up to 20 more minutes of balancing silence). An onset is at or
+ * before the true first crossing, so the bound can only come due sooner (fail loud); advanceVdiffKnee
+ * then clears either clock the current reading contradicts. The activity evidence (balancing,
+ * charge input) is never seeded: a mute is re-earned from fresh readings. No onset → undefined
+ * (a fresh state). An onset ahead of the clock is clamped to now.
+ */
+export function vdiffKneeSeed(onsetMs: number | undefined, packSn: string | null, nowMs: number): VdiffKneeState | undefined {
+  if (onsetMs == null || !Number.isFinite(onsetMs)) return undefined;
+  const at = Math.min(onsetMs, nowMs);
+  return { packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null, graceFromMs: at, lastSeenMs: null };
 }
 
 /**
@@ -563,10 +606,16 @@ export function vdiffCritMute(
   if (obs.balancing) return 'balancing';
   const topOfCharge = obs.packSoc != null && obs.packSoc >= VOL_DIFF_PLATEAU_QUIET_SOC_PCT;
   if (!topOfCharge) return null;
-  if (s.lastBalancingMs != null && nowMs - s.lastBalancingMs < VDIFF_KNEE_RELAX_MS) return 'end-of-charge';
-  // Charge input alone: recent, AND inside VDIFF_KNEE_RELAX_MS of the first crossing.
+  // v1.187.0 (log review) — both graces are bounded by the top-of-charge SESSION (graceFromMs),
+  // not by the current crossing: a spread that dips under 50 mV between readings restarts
+  // critSinceMs, and each crossing used to earn a fresh grace.
+  if (s.graceFromMs == null) return null;
+  if (s.lastBalancingMs != null && nowMs - s.lastBalancingMs < VDIFF_KNEE_RELAX_MS
+    && nowMs - s.graceFromMs < VDIFF_KNEE_MAX_MUTE_MS) return 'end-of-charge';
+  // Charge input alone: recent, AND inside VDIFF_KNEE_RELAX_MS of the session's first crossing
+  // (never later than the current episode's: graceFromMs <= critSinceMs).
   if (s.lastChargeMs != null && nowMs - s.lastChargeMs < VDIFF_KNEE_RELAX_MS
-    && s.critSinceMs != null && nowMs - s.critSinceMs < VDIFF_KNEE_RELAX_MS) return 'charging';
+    && nowMs - s.graceFromMs < VDIFF_KNEE_RELAX_MS) return 'charging';
   return null;
 }
 
@@ -1310,7 +1359,10 @@ export function computeAlerts(
           balancing,
           chargeW: vdiffKneeChargeW(pk, now),
         };
-        const knee = advanceVdiffKnee(vdiffKneeByKey.get(vdiffKey), kneeObs, now);
+        // v1.187.0 (log review) — a pack with no state (after a restart) starts from its standing
+        // critical's persisted onset (vdiffKneeSeed), never from a clean clock.
+        const kneePrev = vdiffKneeByKey.get(vdiffKey) ?? vdiffKneeSeed(getAlertOnset(`vdiff-crit-${vdiffKey}`), pk.packSn ?? null, now);
+        const knee = advanceVdiffKnee(kneePrev, kneeObs, now);
         vdiffKneeByKey.set(vdiffKey, knee);
         // v1.41.0 — cell forensics: the alert carries WHICH cell deviates and by
         // how much vs the pack median and sibling packs (facts), and the critical's
@@ -1542,10 +1594,13 @@ export function computeAlerts(
   // bound to the pack serial by advanceVdiffKnee, for VDIFF_KNEE_GAP_CARRY_MS from the last
   // reading: dropping it would restart the duration bound, so an offline blip or a restart
   // every few minutes could keep a balancing-muted fault under VDIFF_KNEE_MAX_MUTE_MS forever.
-  // (A process restart still loses it: in-memory only.)
+  // v1.187.0 (log review) — the session's grace clock (graceFromMs) is carried the same way, even
+  // while no critical-line episode runs: a gap during a sub-line reading must not re-grant a
+  // grace. A process restart loses the state (in memory), and vdiffKneeSeed restores both clocks
+  // from the standing critical's persisted onset.
   for (const [k, st] of [...vdiffKneeByKey]) {
     if (seenVdiffKeys.has(k)) continue;
-    if (st.critSinceMs == null || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);
+    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);
     else vdiffKneeByKey.set(k, { ...st, lastBalancingMs: null, lastChargeMs: null, belowCritSinceMs: null });
   }
   // v1.108.0 — retire defective-pack confirmations whose pack has left the fleet.

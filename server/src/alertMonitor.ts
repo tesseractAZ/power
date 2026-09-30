@@ -1510,7 +1510,7 @@ export function moreSevere(a: Severity, b: Severity): Severity {
  * (`alreadyNotified`) suppresses it, which dedups it across subsequent reboots.
  * Pure + exported so the firstRun path (untestable via the private evaluate loop)
  * is unit-testable. Behaviour is IDENTICAL to the old `firstRun || alreadyNotified`
- * for every non-outage alert.
+ * for every non-outage alert — except a critical (v1.187.0 log review, below).
  */
 /**
  * v1.130.0 — A RESTART IS NOT A RISING EDGE.
@@ -1541,8 +1541,19 @@ export function isBootRetrack(p: {
   return p.firstRun && p.priorOnsetMs != null && p.priorOnsetMs < p.bootMs;
 }
 
-export function bootSeedNotified(p: { alert: Pick<Alert, 'id'>; firstRun: boolean; alreadyNotified: boolean }): boolean {
+/*
+ * v1.187.0 (log review) — A CRITICAL IS NEVER SEEDED WITHOUT A DELIVERY RECORD. The firstRun seed
+ * assumes that a condition standing at boot was announced before the restart. A critical held
+ * silent before the restart — never pushed, so no notify-state record — broke that: a vdiff-crit
+ * inside the end-of-charge or charging grace, re-tracked across an auto-update restart, was seeded
+ * "already notified", and when the grace lapsed decideAlertDispatch returned 'none': the critical
+ * was spoken but never pushed for that episode. A critical that WAS pushed has its record and stays
+ * deduped (alreadyNotified); one that was not pushes once when it annunciates. A duplicate
+ * critical push (a record lost with the sidecar) is the safe direction.
+ */
+export function bootSeedNotified(p: { alert: Pick<Alert, 'id' | 'severity'>; firstRun: boolean; alreadyNotified: boolean }): boolean {
   if (isOutageEventFamily(p.alert)) return p.alreadyNotified;
+  if (p.alert.severity === 'critical') return p.alreadyNotified;
   return p.firstRun || p.alreadyNotified;
 }
 

@@ -7,6 +7,11 @@
  * peer cell-spread outlier's top-of-charge audible gate and its yield to a held critical, and
  * the audible chain (speakableAlerts, the voiced primary, the push gate).
  *
+ * Log review 09-29 (xlvi-lvii): both graces are bounded by the top-of-charge SESSION
+ * (graceFromMs), not by the current crossing; after a restart a pack's clocks start from its
+ * standing critical's persisted onset; and a critical is never boot-seeded without a delivery
+ * record.
+ *
  *   node scripts/mutate-v1187-a.mjs
  *
  * ★ Anchor-asserted; a red subset baseline aborts; restores in a finally block and on
@@ -34,6 +39,7 @@ const SUBSET = [
   'test/imbalanceSpeakHold.test.ts',
   'test/alertVdiffBalancing.test.ts',
   'test/bootHydrationEdges.test.ts',
+  'test/cellSpreadKneeRestart.test.ts',
 ];
 
 const MUTANTS = [
@@ -76,8 +82,8 @@ const MUTANTS = [
   {
     id: 'vi. ★★★ no fail-to-relax exit after balancing (the grace lasts as long as the evidence is remembered)',
     file: AL,
-    find: "  if (s.lastBalancingMs != null && nowMs - s.lastBalancingMs < VDIFF_KNEE_RELAX_MS) return 'end-of-charge';",
-    to: "  if (s.lastBalancingMs != null) return 'end-of-charge'; /* MUTANT */",
+    find: '  if (s.lastBalancingMs != null && nowMs - s.lastBalancingMs < VDIFF_KNEE_RELAX_MS\n    && nowMs - s.graceFromMs < VDIFF_KNEE_MAX_MUTE_MS)',
+    to: '  if (s.lastBalancingMs != null /* MUTANT */\n    && nowMs - s.graceFromMs < VDIFF_KNEE_MAX_MUTE_MS)',
     why: 'A slow-relaxing real imbalance (2026-08-22/23, Core 3) is silent until the duration bound.',
   },
   {
@@ -112,7 +118,7 @@ const MUTANTS = [
   {
     id: 'xi. ★★★ the charge-only grace is not bounded from the FIRST crossing',
     file: AL,
-    find: "    && s.critSinceMs != null && nowMs - s.critSinceMs < VDIFF_KNEE_RELAX_MS) return 'charging';",
+    find: "    && nowMs - s.graceFromMs < VDIFF_KNEE_RELAX_MS) return 'charging';",
     to: "    ) return 'charging'; /* MUTANT */",
     why: 'Each charge tick extends its own mute: the steady-trickle fault is silent until the 20-minute bound.',
   },
@@ -184,8 +190,8 @@ const MUTANTS = [
   {
     id: 'xxi. ★★★ the knee is advanced only on critical readings',
     file: AL,
-    find: '        const knee = advanceVdiffKnee(vdiffKneeByKey.get(vdiffKey), kneeObs, now);',
-    to: '        const knee = pk.maxVolDiffMv >= critMv ? advanceVdiffKnee(vdiffKneeByKey.get(vdiffKey), kneeObs, now) : { packSn: null, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, lastSeenMs: null }; /* MUTANT */',
+    find: '        const knee = advanceVdiffKnee(kneePrev, kneeObs, now);',
+    to: '        const knee = pk.maxVolDiffMv >= critMv ? advanceVdiffKnee(kneePrev, kneeObs, now) : { packSn: null, lastBalancingMs: null, lastChargeMs: null, critSinceMs: null, belowCritSinceMs: null, graceFromMs: null, lastSeenMs: null }; /* MUTANT */',
     why: 'Evidence earned in the warn band is lost; a critical reading that lands after charging stopped (180 s cadence) sounds.',
   },
   {
@@ -206,15 +212,15 @@ const MUTANTS = [
   {
     id: 'xxiv. ★★★ a reading gap drops the critical-line clock',
     file: AL,
-    find: '    if (st.critSinceMs == null || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
     to: '    if (true) vdiffKneeByKey.delete(k); /* MUTANT */',
     why: 'An offline blip every few minutes restarts the 20-minute bound: a balancing-muted fault never speaks.',
   },
   {
     id: 'xxv. ★ no cap on how long a gap carries the clock',
     file: AL,
-    find: '    if (st.critSinceMs == null || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
-    to: '    if (st.critSinceMs == null || st.lastSeenMs == null) vdiffKneeByKey.delete(k); /* MUTANT */',
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
+    to: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null) vdiffKneeByKey.delete(k); /* MUTANT */',
     why: 'A pack back after a day offline is greeted by its old episode: an immediate red on its first balancing tick.',
   },
   /* ── cell overvoltage ─────────────────────────────────────────────────── */
@@ -360,6 +366,92 @@ const MUTANTS = [
     find: "  const reason = a.muteReason ?? (a.mutedBy != null ? CELL_SPREAD_MUTE_TEXT[a.mutedBy] : 'by policy — reason not recorded');",
     to: "  const reason = a.muteReason ?? 'bench spare or off-panel Core'; /* MUTANT */",
     why: 'The log review chases membership for a balancing mute on a home Core (2026-09-29).',
+  },
+  /* ── log review 09-29: the graces are bounded by the top-of-charge SESSION ─── */
+  {
+    id: 'xlvi. ★★★ the end-of-charge grace is bounded by the current crossing only',
+    file: AL,
+    find: "    && nowMs - s.graceFromMs < VDIFF_KNEE_MAX_MUTE_MS) return 'end-of-charge';",
+    to: "    ) return 'end-of-charge'; /* MUTANT */",
+    why: 'A 100 mV reading between balancing 45 mV readings is muted all afternoon: each dip restarts the duration bound.',
+  },
+  {
+    id: 'xlvii. ★★★ the charging grace is bounded by the current crossing (critSinceMs) again',
+    file: AL,
+    find: "    && nowMs - s.graceFromMs < VDIFF_KNEE_RELAX_MS) return 'charging';",
+    to: "    && s.critSinceMs != null && nowMs - s.critSinceMs < VDIFF_KNEE_RELAX_MS) return 'charging'; /* MUTANT */",
+    why: 'A spread that follows the charge current (95 / 45 mV readings) earns a fresh grace on every crossing: 0 of 271 critical ticks announced in 3 h.',
+  },
+  {
+    id: 'xlviii. ★★★ the session ends with the critical-line episode',
+    file: AL,
+    find: '    s.critSinceMs = null;\n    s.belowCritSinceMs = null;\n  } else if (obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) {',
+    to: '    s.critSinceMs = null;\n    s.belowCritSinceMs = null;\n    s.graceFromMs = null; /* MUTANT */\n  } else if (obs.spreadMv >= vdiffCritMvFor(obs.packSoc)) {',
+    why: 'As xlvii: a dip under 50 mV re-grants both graces.',
+  },
+  {
+    id: 'xlix. ★★ an unknown SoC ends the session',
+    file: AL,
+    find: '  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) {\n    s.graceFromMs = null;',
+    to: '  if (obs.packSoc == null || obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) { /* MUTANT */\n    s.graceFromMs = null;',
+    why: 'A reading with no SoC re-grants the graces: missing data opens a mute.',
+  },
+  {
+    id: 'l. ★★ leaving the top of charge does not end the session',
+    file: AL,
+    find: '  if (obs.packSoc != null && obs.packSoc < VOL_DIFF_PLATEAU_QUIET_SOC_PCT) {\n    s.graceFromMs = null;',
+    to: '  if (false) { /* MUTANT */\n    s.graceFromMs = null;',
+    why: 'The next day\'s benign knee (or one after a discharge) is a false red on a session that ended hours ago.',
+  },
+  {
+    id: 'li. ★★ the session starts when the pack reaches the top, not at the episode\'s first crossing',
+    file: AL,
+    find: '    s.graceFromMs ??= s.critSinceMs ?? nowMs;',
+    to: '    s.graceFromMs ??= nowMs; /* MUTANT */',
+    why: 'A crossing at 93% that reaches 95% three minutes later is muted for 8 minutes of charging, not 5.',
+  },
+  {
+    id: 'lii. ★★★ the session never starts',
+    file: AL,
+    find: '    s.graceFromMs ??= s.critSinceMs ?? nowMs;',
+    to: '    /* MUTANT */',
+    why: 'No grace at all: the 09-29 end-of-charge knees sound the critical klaxon again.',
+  },
+  {
+    id: 'liii. ★★★ the session clock is not carried across a reading gap',
+    file: AL,
+    find: '    if ((st.critSinceMs == null && st.graceFromMs == null) || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k);',
+    to: '    if (st.critSinceMs == null || st.lastSeenMs == null || now - st.lastSeenMs > VDIFF_KNEE_GAP_CARRY_MS) vdiffKneeByKey.delete(k); /* MUTANT */',
+    why: 'A missed reading during a sub-line reading hands the next crossing a fresh grace.',
+  },
+  /* ── log review 09-29: across a restart ──────────────────────────────── */
+  {
+    id: 'liv. ★★★ a pack with no state starts from a clean clock (no restart seed)',
+    file: AL,
+    find: '        const kneePrev = vdiffKneeByKey.get(vdiffKey) ?? vdiffKneeSeed(getAlertOnset(`vdiff-crit-${vdiffKey}`), pk.packSn ?? null, now);',
+    to: '        const kneePrev = vdiffKneeByKey.get(vdiffKey); /* MUTANT */',
+    why: 'An auto-update at minute 21 of a balancing-held spread buys 20 more minutes of silence.',
+  },
+  {
+    id: 'lv. ★★ the seed restores the episode clock but not the session',
+    file: AL,
+    find: '  return { packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null, graceFromMs: at, lastSeenMs: null };',
+    to: '  return { packSn, lastBalancingMs: null, lastChargeMs: null, critSinceMs: at, belowCritSinceMs: null, graceFromMs: null, lastSeenMs: null }; /* MUTANT */',
+    why: 'A restart during a sub-line reading of the charge-following fault re-grants its grace.',
+  },
+  {
+    id: 'lvi. ★ an onset ahead of the clock is trusted',
+    file: AL,
+    find: '  const at = Math.min(onsetMs, nowMs);',
+    to: '  const at = onsetMs; /* MUTANT */',
+    why: 'After a clock step backward the bounds count from the future: every grace outlives its window.',
+  },
+  {
+    id: 'lvii. ★★★ a critical is boot-seeded without a delivery record',
+    file: AM,
+    find: "  if (p.alert.severity === 'critical') return p.alreadyNotified;",
+    to: '  /* MUTANT */',
+    why: 'A vdiff-crit held by a grace across an auto-update is spoken when the grace lapses but never pushed.',
   },
 ];
 
